@@ -10,7 +10,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use winwincode_codex::{
-    HelperReleaseManifest, ProductionCodexAdapter, ProductionCodexConfig, ProductionCodexOptions,
+    ExecutionMode, HelperReleaseManifest, ObserverMode, ProductionCodexAdapter,
+    ProductionCodexConfig, ProductionCodexOptions,
 };
 use winwincode_domain::{Instant, Sha256Digest, WorkerId, WorkerInstanceId};
 use winwincode_execution_port::action_enforcement::ActionEnforcementSigningKey;
@@ -19,7 +20,8 @@ use winwincode_execution_port::generated::{
     ModelGatewayRoute, WorkerCapabilityFeature, WorkerCapabilitySet, WorkerCapabilitySetPlatform,
 };
 use winwincode_worker::remote_transport::{RemoteWorkerPort, RemoteWorkerTransportHandle};
-use winwincode_worker::workspace_runtime::JobWorkspaceRuntime;
+use winwincode_worker::validation_artifact::DurableValidationArtifactStore;
+use winwincode_worker::workspace_runtime::{JobWorkspaceRuntime, ObservationModelConfiguration};
 use winwincode_worker::{WorkerConfig, WorkerLifecycleState, WorkerMain};
 
 const WORKER_TOKIO_STACK_BYTES: usize = 16 * 1024 * 1024;
@@ -73,9 +75,20 @@ async fn run_remote() -> Result<(), Box<dyn std::error::Error>> {
         worker_instance_id.clone(),
         Duration::from_secs(15),
     )?;
-    let codex = production_codex(&data_directory, capabilities.clone())?;
+    let execution_mode = configured_execution_mode("WWC_WORKER_EXECUTION_MODE")?;
+    let observer_mode = configured_observer_mode("WWC_WORKER_OBSERVER_MODE")?;
+    let observation_model = configured_observation_model(observer_mode, required)?;
+    let codex = production_codex(
+        &data_directory,
+        capabilities.clone(),
+        execution_mode,
+        observer_mode,
+    )?;
+    let validation_artifacts =
+        DurableValidationArtifactStore::open(data_directory.join("worker-validation-artifacts"))?;
     let workspaces =
-        JobWorkspaceRuntime::open(data_directory.join("worker-workspaces"), &source_directory)?;
+        JobWorkspaceRuntime::open(data_directory.join("worker-workspaces"), &source_directory)?
+            .with_validation_artifact_port(validation_artifacts);
     let config = WorkerConfig {
         worker_id,
         worker_instance_id: worker_instance_id.clone(),
@@ -83,7 +96,11 @@ async fn run_remote() -> Result<(), Box<dyn std::error::Error>> {
         capabilities,
     };
     let mut worker = WorkerMain::new(config, port, codex, workspaces)
+        .with_observer_mode(observer_mode)
         .with_registration_request_namespace(&worker_instance_id, &started_at);
+    if let Some(observation_model) = observation_model {
+        worker = worker.with_observation_model(observation_model);
+    }
 
     while worker.lifecycle() == WorkerLifecycleState::Booting
         || worker.lifecycle() == WorkerLifecycleState::Registering
@@ -156,6 +173,8 @@ where
 fn production_codex(
     data_directory: &std::path::Path,
     capabilities: WorkerCapabilitySet,
+    execution_mode: ExecutionMode,
+    observer_mode: ObserverMode,
 ) -> Result<ProductionCodexAdapter, Box<dyn std::error::Error>> {
     let helper_release_manifest = HelperReleaseManifest::from_file(&PathBuf::from(required(
         "WWC_WORKER_HELPER_RELEASE_MANIFEST",
@@ -179,10 +198,59 @@ fn production_codex(
             version: 1,
             digest: Sha256Digest(required("WWC_WORKER_EXECUTION_ENVELOPE_DIGEST")?),
         },
+        execution_mode,
+        observer_mode,
     };
     Ok(ProductionCodexAdapter::open(
         ProductionCodexConfig::try_new(options)?,
     )?)
+}
+
+fn configured_execution_mode(name: &str) -> Result<ExecutionMode, Box<dyn std::error::Error>> {
+    let value = optional_configuration(name, "react")?;
+    ExecutionMode::from_config(&value)
+        .ok_or_else(|| format!("{name} contains an unsupported execution mode").into())
+}
+
+fn configured_observer_mode(name: &str) -> Result<ObserverMode, Box<dyn std::error::Error>> {
+    let value = optional_configuration(name, "off")?;
+    ObserverMode::from_config(&value)
+        .ok_or_else(|| format!("{name} contains an unsupported observer mode").into())
+}
+
+fn configured_observation_model<Read>(
+    observer_mode: ObserverMode,
+    mut read: Read,
+) -> Result<Option<ObservationModelConfiguration>, Box<dyn std::error::Error>>
+where
+    Read: FnMut(&str) -> Result<String, Box<dyn std::error::Error>>,
+{
+    match observer_mode {
+        ObserverMode::Off => Ok(None),
+        ObserverMode::AmbiguousOnly => ObservationModelConfiguration::try_new(
+            read("WWC_WORKER_OBSERVER_MODEL_PROVIDER_ID")?,
+            read("WWC_WORKER_OBSERVER_MODEL_ID")?,
+            ModelGatewayRoute {
+                capability: read("WWC_WORKER_OBSERVER_MODEL_CAPABILITY")?,
+                route: read("WWC_WORKER_OBSERVER_MODEL_ROUTE")?,
+            },
+        )
+        .map(Some)
+        .map_err(Into::into),
+        ObserverMode::Shadow | ObserverMode::Always => Err(format!(
+            "Observer mode {} is not implemented by this Worker release",
+            observer_mode.as_config()
+        )
+        .into()),
+    }
+}
+
+fn optional_configuration(name: &str, default: &str) -> Result<String, Box<dyn std::error::Error>> {
+    match env::var(name) {
+        Ok(value) if !value.is_empty() => Ok(value),
+        Ok(_) | Err(env::VarError::NotPresent) => Ok(default.to_owned()),
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn worker_capabilities() -> Result<WorkerCapabilitySet, Box<dyn std::error::Error>> {
@@ -254,4 +322,39 @@ fn civil_from_days(days_since_unix_epoch: i64) -> (i64, i64, i64) {
     let month = month_prime + if month_prime < 10 { 3 } else { -9 };
     year += i64::from(month <= 2);
     (year, month, day)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ObserverMode, configured_observation_model};
+
+    #[test]
+    fn observer_modes_have_one_closed_release_configuration() {
+        for (mode, expected_reads, route_expected, error_expected) in [
+            (ObserverMode::Off, 0, false, false),
+            (ObserverMode::AmbiguousOnly, 4, true, false),
+            (ObserverMode::Shadow, 0, false, true),
+            (ObserverMode::Always, 0, false, true),
+        ] {
+            let mut reads = Vec::new();
+            let configured = configured_observation_model(mode, |name| {
+                reads.push(name.to_owned());
+                Ok(match name {
+                    "WWC_WORKER_OBSERVER_MODEL_PROVIDER_ID" => "observer-provider",
+                    "WWC_WORKER_OBSERVER_MODEL_ID" => "observer-model",
+                    "WWC_WORKER_OBSERVER_MODEL_CAPABILITY" => "strict-json",
+                    "WWC_WORKER_OBSERVER_MODEL_ROUTE" => "observer-route",
+                    _ => unreachable!("unexpected Observer environment name"),
+                }
+                .to_owned())
+            });
+            assert_eq!(configured.is_err(), error_expected, "mode={mode:?}");
+            assert_eq!(
+                configured.as_ref().ok().is_some_and(Option::is_some),
+                route_expected,
+                "mode={mode:?}"
+            );
+            assert_eq!(reads.len(), expected_reads, "mode={mode:?}");
+        }
+    }
 }

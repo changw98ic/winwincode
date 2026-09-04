@@ -14,11 +14,12 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use winwincode_api::generated::{
     Actor, ModelRoute, OrganizationScope, OrganizationScopeKind, PageInfo, ProjectScope,
-    ProjectScopeKind, RepositoryScope, Scope, SettingsGetQuery, SettingsGetResultResponse,
+    ProjectScopeKind, Scope, SettingsGetQuery, SettingsGetResultResponse,
     SettingsGetResultResponseQuery, SettingsProjection, SettingsUpdateCommand,
     SettingsUpdateCompletedResponse, SettingsUpdateCompletedResponseCommand,
     SettingsUpdateCompletedResponseOutcome,
 };
+use winwincode_domain::RepositoryScope;
 use winwincode_domain::{ProductSessionId, RequestId, Revision, SchemaVersion, Sha256Digest};
 use winwincode_storage::{
     CommitReceipt, NewOutboxEvent, ProductStateStorage, ReceiptIdentity, ReceiptScopeKey,

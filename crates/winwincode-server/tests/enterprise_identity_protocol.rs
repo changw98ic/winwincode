@@ -651,8 +651,8 @@ fn management_actor() -> Actor {
 }
 
 fn user_actor(user_id: &UserId) -> Actor {
-    Actor::UserActor(winwincode_api::generated::UserActor {
-        kind: winwincode_api::generated::UserActorKind::User,
+    Actor::UserActor(winwincode_domain::UserActor {
+        kind: winwincode_domain::UserActorKind::User,
         id: user_id.clone(),
     })
 }

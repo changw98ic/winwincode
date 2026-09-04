@@ -1,0 +1,26 @@
+[package]
+name = "winwincode-change-batch"
+description = "Deterministic ChangeBatch planning and exact delta contracts"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+codex-apply-patch = { path = "../../third_party/codex/codex-rs/apply-patch" }
+codex-exec-server = { path = "../../third_party/codex/codex-rs/exec-server" }
+codex-utils-path-uri = { path = "../../third_party/codex/codex-rs/utils/path-uri" }
+rustix = { version = "=1.1.4", features = ["fs"] }
+serde_json.workspace = true
+sha2.workspace = true
+tokio = { workspace = true, features = ["macros", "rt"] }
+winwincode-domain.workspace = true
+winwincode-execution-port.workspace = true
+
+[dev-dependencies]
+tempfile = "=3.27.0"
+
+[lints]
+workspace = true

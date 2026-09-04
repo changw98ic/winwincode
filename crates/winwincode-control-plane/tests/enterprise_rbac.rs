@@ -19,8 +19,7 @@ use winwincode_api::generated::{
     EnterpriseRoleUpdateCommand, EnterpriseRoleUpdateCommandCommand, EnterpriseRoleUpdatePayload,
     EnterpriseRoleVersionReference, EnterpriseTeamUpdateCommand,
     EnterpriseTeamUpdateCommandCommand, EnterpriseTeamUpdatePayload, OrganizationScope,
-    OrganizationScopeKind, PageRequest, RepositoryScope, RepositoryScopeKind, Scope,
-    ServiceAccountActor, ServiceAccountActorKind, UserActor, UserActorKind,
+    OrganizationScopeKind, PageRequest, Scope, ServiceAccountActor, ServiceAccountActorKind,
 };
 use winwincode_control_plane::{
     EnterpriseRbacClock, EnterpriseRbacClockError, EnterpriseRbacErrorKind, EnterpriseRbacService,
@@ -31,6 +30,7 @@ use winwincode_domain::{
     OrganizationId, ProjectId, RepositoryId, RequestId, Revision, SchemaVersion, ServiceAccountId,
     Sha256Digest, UserId, WorkspaceId,
 };
+use winwincode_domain::{RepositoryScope, RepositoryScopeKind, UserActor, UserActorKind};
 use winwincode_storage::{
     NewOutboxEvent, ProductStateStorage, ReceiptActorKey, ReceiptIdentity, ReceiptScopeKey,
     SqliteStorage, StateCommit, StorageErrorKind,

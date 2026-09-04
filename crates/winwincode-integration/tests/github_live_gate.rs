@@ -29,7 +29,7 @@ use time::format_description::well_known::Rfc3339;
 use winwincode_api::generated::{
     AcceptanceCriterionInput, Actor, DeliveryCreateCommand, DeliveryCreateCommandCommand,
     DeliveryCreatePayload, DeliverySpecInput, PublicationTarget as ApiPublicationTarget,
-    PublicationTargetProvider, RepositoryScope, RepositoryScopeKind, SystemActor, SystemActorKind,
+    PublicationTargetProvider, SystemActor, SystemActorKind,
 };
 use winwincode_audit::AuditScope;
 use winwincode_domain::{
@@ -37,6 +37,7 @@ use winwincode_domain::{
     GitHubRepositorySlug, OrganizationId, ProductSessionId, ProjectId, PublicationId, RepositoryId,
     RequestId, Revision, SchemaVersion, Sha256Digest, SystemActorId, UserId, WorkspaceId,
 };
+use winwincode_domain::{RepositoryScope, RepositoryScopeKind};
 use winwincode_integration::{
     ConnectorCallError, ConnectorCallErrorKind, ConnectorPort, ConnectorProtocol,
     ConnectorRegistration, GITHUB_CONNECTOR_PROTOCOL, GitHubAppId, GitHubClock,

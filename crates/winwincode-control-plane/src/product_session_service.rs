@@ -18,8 +18,9 @@ use winwincode_api::generated::{
     ControlPlaneWebSocketProductSessionChangedEventTypeValue,
     ControlPlaneWebSocketProductSessionMessageAppendedEvent,
     ControlPlaneWebSocketProductSessionMessageAppendedEventTypeValue, ModelRoute,
-    ProductSessionProjection, RepositoryScope, SessionCloseCommand, SessionCreateCommand,
+    ProductSessionProjection, SessionCloseCommand, SessionCreateCommand,
 };
+use winwincode_domain::RepositoryScope;
 use winwincode_domain::{
     ChatMessageId, ControlPlaneEventId, DeliveryId, DeliveryTaskId, ExecutionJobId, Instant,
     ModelExchangeId, ProductSessionId, ProjectId, RepositoryId, RequestId, Revision, Sha256Digest,

@@ -17,8 +17,7 @@ use winwincode_api::generated::{
     EnterpriseOrganizationUpdatePayload, EnterprisePermission, EnterpriseRoleAssignment,
     EnterpriseRolePermissionRule, EnterpriseRoleUpdateCommand, EnterpriseRoleUpdateCommandCommand,
     EnterpriseRoleUpdatePayload, EnterpriseTeamUpdateCommand, EnterpriseTeamUpdateCommandCommand,
-    EnterpriseTeamUpdatePayload, ModelRoute, OrganizationScope, OrganizationScopeKind,
-    RepositoryScope, RepositoryScopeKind, Scope, UserActor, UserActorKind,
+    EnterpriseTeamUpdatePayload, ModelRoute, OrganizationScope, OrganizationScopeKind, Scope,
 };
 use winwincode_control_plane::{
     CollaborationInboxAudience, CollaborationInboxAuthorityPort, CollaborationInboxClock,
@@ -44,6 +43,7 @@ use winwincode_domain::{
     ProductSessionId, ProjectId, RepositoryId, RequestId, Revision, SchemaVersion, UserId,
     WorkspaceId,
 };
+use winwincode_domain::{RepositoryScope, RepositoryScopeKind, UserActor, UserActorKind};
 use winwincode_storage::{
     PublicEventActor, PublicEventScope, ReceiptIdentity, SqliteStorage, receipt_actor_key,
     receipt_scope_key,

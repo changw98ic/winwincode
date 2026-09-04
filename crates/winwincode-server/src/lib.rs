@@ -10,6 +10,7 @@ mod durable_event_hub;
 mod enterprise_identity_protocol;
 mod enterprise_management;
 mod identity_authenticator;
+mod performance_evaluation;
 mod remote_worker_transport;
 mod runtime;
 mod server;
@@ -39,6 +40,10 @@ pub use enterprise_management::{
     EnterpriseRbacManagementApplication, UnavailableEnterpriseManagementApplication,
 };
 pub use identity_authenticator::EnterpriseRequestAuthenticator;
+pub use performance_evaluation::{
+    ProductionPerformanceEvaluation, ProductionPerformanceEvaluationError,
+    RecordProductionPerformancePair,
+};
 pub use remote_worker_transport::{
     FileRemoteWorkerAuthenticator, ProductionRemoteWorkerExchange, RemoteWorkerExchangePort,
     RemoteWorkerTransportError,

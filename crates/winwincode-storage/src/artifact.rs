@@ -1050,6 +1050,49 @@ impl ArtifactStore {
         })
     }
 
+    /// Reads and re-hashes a complete Artifact already owned by one scope.
+    ///
+    /// This internal-authority form reloads immutable provenance from the
+    /// catalog instead of asking a caller to repeat it. It is intended for
+    /// Control Plane policy references whose public identity contains only an
+    /// Artifact id and digest.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a foreign scope, changed digest, incomplete/deleted metadata,
+    /// missing bytes, or object size/hash corruption.
+    pub fn read_reference_exact(
+        &self,
+        scope_key: &ReceiptScopeKey,
+        artifact_id: &ArtifactId,
+        digest: &Sha256Digest,
+    ) -> Result<ArtifactObject, ArtifactError> {
+        canonical_id(&artifact_id.0, "art_", "artifactId")?;
+        sha256_hex(digest)?;
+        let record = self.load_authorized(scope_key, artifact_id)?;
+        if record.open.digest != *digest {
+            return Err(ArtifactError::new(
+                ArtifactErrorKind::PermissionDenied,
+                "Artifact reference does not match its immutable digest",
+            ));
+        }
+        if !record.complete {
+            return Err(ArtifactError::new(
+                ArtifactErrorKind::Incomplete,
+                "Artifact upload is not complete",
+            ));
+        }
+        let bytes = self
+            .objects_ref()?
+            .read(&record.open.digest)?
+            .ok_or_else(|| ArtifactError::corrupt("Artifact content object is missing"))?;
+        validate_complete_bytes(&record.open.digest, record.open.size_bytes, &bytes)?;
+        Ok(ArtifactObject {
+            metadata: record,
+            bytes,
+        })
+    }
+
     /// Reconstructs the durable write receipt for one complete Artifact.
     ///
     /// This is the receipt-first bridge used by candidate Git retention after
@@ -1662,6 +1705,21 @@ impl FakeArtifactObjectStore {
             .map_err(|_| ArtifactError::adapter("fake object store lock is poisoned"))?
             .objects
             .insert(key, bytes);
+        Ok(())
+    }
+
+    /// Test probe that removes one accepted content-addressed object.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a malformed digest or poisoned test lock.
+    pub fn remove_object(&self, digest: &Sha256Digest) -> Result<(), ArtifactError> {
+        let key = sha256_hex(digest)?.to_owned();
+        self.state
+            .lock()
+            .map_err(|_| ArtifactError::adapter("fake object store lock is poisoned"))?
+            .objects
+            .remove(&key);
         Ok(())
     }
 

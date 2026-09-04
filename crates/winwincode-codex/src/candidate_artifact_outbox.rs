@@ -101,6 +101,53 @@ pub enum CandidateArtifactAckOutcome {
     Accepted(ArtifactReference),
 }
 
+/// Accepted Candidate facts used only by the internal performance authority
+/// projection. The acknowledgement sequence is the durable ACK revision.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct AcceptedCandidateArtifactProjection {
+    pub(crate) artifact: ArtifactReference,
+    pub(crate) ack_revision: u64,
+}
+
+/// Reads the one fully validated accepted Candidate for an exact Job.
+pub(crate) fn read_accepted_candidate_artifact(
+    connection: &rusqlite::Connection,
+    job_id: &winwincode_domain::ExecutionJobId,
+) -> Result<Option<AcceptedCandidateArtifactProjection>, AdapterStoreError> {
+    let mut statement = connection
+        .prepare("SELECT record_json FROM candidate_artifact_upload ORDER BY artifact_id")
+        .map_err(|_| AdapterStoreError::Unavailable)?;
+    let rows = statement
+        .query_map([], |row| row.get::<_, Vec<u8>>(0))
+        .map_err(|_| AdapterStoreError::Unavailable)?;
+    let mut matched = None;
+    for bytes in rows {
+        let bytes = bytes.map_err(|_| AdapterStoreError::Unavailable)?;
+        let record: StoredCandidateArtifact =
+            serde_json::from_slice(&bytes).map_err(|_| AdapterStoreError::Corrupt)?;
+        if serde_json::to_vec(&record).map_err(|_| AdapterStoreError::Corrupt)? != bytes {
+            return Err(AdapterStoreError::Corrupt);
+        }
+        record.validate()?;
+        if record.open_message.lease.job_id != *job_id || record.cancel_requested {
+            continue;
+        }
+        let Some(ack) = &record.final_ack else {
+            continue;
+        };
+        let ack_revision =
+            u64::try_from(ack.ack_sequence.0).map_err(|_| AdapterStoreError::Corrupt)?;
+        let projection = AcceptedCandidateArtifactProjection {
+            artifact: record.reference(),
+            ack_revision,
+        };
+        if matched.replace(projection).is_some() {
+            return Err(AdapterStoreError::Conflict);
+        }
+    }
+    Ok(matched)
+}
+
 /// Candidate Artifact operations over the adapter's one private `SQLite` store.
 #[derive(Clone, Debug)]
 pub(crate) struct CandidateArtifactOutbox {

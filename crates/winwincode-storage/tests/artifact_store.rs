@@ -412,6 +412,11 @@ fn exercise_completed_artifact(name: &str, objects: Box<dyn ArtifactObjectStore>
         .expect_err("both adapters must reject a changed repeat");
     assert_eq!(changed.kind(), ArtifactErrorKind::Conflict);
 
+    let referenced = store
+        .read_reference_exact(&artifact_scope, &artifact_id, &digest)
+        .expect("scope-owned Artifact reference read");
+    assert_eq!(referenced.bytes(), bytes);
+    assert_eq!(referenced.metadata().digest(), &digest);
     let loaded = store
         .read_exact(&ArtifactAccess::new(
             artifact_scope,

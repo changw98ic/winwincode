@@ -11,8 +11,7 @@ use winwincode_api::generated::{
     AcceptanceCriterionInput, Actor, DeliveryAdvanceCommand, DeliveryAdvanceCommandCommand,
     DeliveryAdvancePayload, DeliveryCreateCommand, DeliveryCreateCommandCommand,
     DeliveryCreatePayload, DeliveryGetParameters, DeliveryGetQuery, DeliveryGetQueryQuery,
-    DeliverySpecInput, PageRequest, QueryResultResponse, RepositoryScope, RepositoryScopeKind,
-    UserActor, UserActorKind,
+    DeliverySpecInput, PageRequest, QueryResultResponse,
 };
 use winwincode_control_plane::{
     ControlPlane, ControlPlaneConfig, EventPublishError, EventPublisher,
@@ -23,6 +22,7 @@ use winwincode_domain::{
     DeliveryId, OrganizationId, ProjectId, RepositoryId, RequestId, Revision, SchemaVersion,
     UserId, WorkspaceId,
 };
+use winwincode_domain::{RepositoryScope, RepositoryScopeKind, UserActor, UserActorKind};
 
 static NEXT_ROOT: AtomicU64 = AtomicU64::new(1);
 

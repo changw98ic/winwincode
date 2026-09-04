@@ -40,6 +40,7 @@ use crate::config::{ServerConfig, ServerTls};
 use crate::enterprise_identity_protocol::{
     EnterpriseIdentityProtocolApplication, router as enterprise_identity_router,
 };
+use crate::performance_evaluation::ProductionPerformanceEvaluation;
 use crate::remote_worker_transport::RemoteWorkerExchangePort;
 use crate::transport::{
     ApiError, AuthenticatedPrincipal, ControlPlaneApiPort, RequestAuthenticator,
@@ -115,6 +116,7 @@ pub struct RunningServer {
     handle: Handle<SocketAddr>,
     task: Option<tokio::task::JoinHandle<Result<(), ServerError>>>,
     api: Arc<dyn ControlPlaneApiPort>,
+    performance_evaluation: ProductionPerformanceEvaluation,
 }
 
 impl RunningServer {
@@ -126,6 +128,15 @@ impl RunningServer {
     #[must_use]
     pub fn public_url(&self) -> &str {
         &self.public_url
+    }
+
+    /// Returns the local operator entry for one predeclared performance pair.
+    ///
+    /// The entry is composed from the same trusted Server data directory and
+    /// does not accept Worker database paths or caller-authored assignments.
+    #[must_use]
+    pub const fn performance_evaluation(&self) -> &ProductionPerformanceEvaluation {
+        &self.performance_evaluation
     }
 
     /// Stops accepting new HTTP work and waits for the listener task to drain.
@@ -216,6 +227,7 @@ pub async fn start_server_with_remote_worker(
             "remote Worker exchange requires the Server TLS listener",
         ));
     }
+    let performance_evaluation = ProductionPerformanceEvaluation::from_server_config(&config);
     let config = Arc::new(config);
     let state = ServerState {
         config: Arc::clone(&config),
@@ -251,6 +263,7 @@ pub async fn start_server_with_remote_worker(
         handle,
         task: Some(task),
         api,
+        performance_evaluation,
     })
 }
 

@@ -17,9 +17,9 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use sha2::{Digest as _, Sha256};
 use winwincode_api::generated::{
     Actor, CommandEnvelope, CommandName, CredentialReferenceCreateCommand,
-    CredentialReferenceCreateCommandCommand, CredentialReferenceCreatePayload, ModelRoute,
-    OrganizationScope, OrganizationScopeKind, RepositoryScope, RepositoryScopeKind, Scope,
-    UserActor, UserActorKind,
+    CredentialReferenceCreateCommandCommand, CredentialReferenceCreatePayload,
+    DeliveryAdvanceCommand, DeliveryAdvanceCommandCommand, DeliveryAdvancePayload, ModelRoute,
+    OrganizationScope, OrganizationScopeKind, Scope,
 };
 #[cfg(feature = "test-support")]
 use winwincode_codex::CodexCoreAdapter as _;
@@ -29,18 +29,18 @@ use winwincode_control_plane::delivery_execution::{
 };
 use winwincode_control_plane::{
     ControlPlane, ControlPlaneConfig, CreateProductSessionCommand, CredentialReferenceService,
-    DurableExecutionPortIngress, EventPublishError, EventPublisher, LocalModelPolicyAuthority,
-    LocalModelPolicyAuthorityConfig, LocalSecretStoreAdapter, ModelAdmissionClock,
-    ModelAdmissionClockError, ModelAdmissionLimits, ModelAdmissionPolicyLayer, ModelCapability,
-    ModelExecutionOpenReceipt, ModelExecutionPortReceipt, ModelRequestPoolConfig,
+    DurableExecutionPortIngress, EventPublishError, EventPublisher, LocalDeliveryAdapterConfig,
+    LocalModelPolicyAuthority, LocalModelPolicyAuthorityConfig, LocalSecretStoreAdapter,
+    ModelAdmissionClock, ModelAdmissionClockError, ModelAdmissionLimits, ModelAdmissionPolicyLayer,
+    ModelCapability, ModelExecutionOpenReceipt, ModelExecutionPortReceipt, ModelRequestPoolConfig,
     ModelRoutePolicyDecision, ModelSettingsRequest, ModelSettingsService, ModelSettingsTarget,
     ModelSettingsValues, ModelToolSupport, OutboxEvent, ProductSessionExecutionConfig,
     ProductSessionService, ProviderAdmissionReservationConfig, ProviderCatalogRequest,
     ProviderCatalogService, ProviderDescriptor, ProviderFinishReason, ProviderGatewayOpenReceipt,
     ProviderStreamConverter, ProviderStreamEvent, ProviderTokenUsage, ProviderToolIdentity,
     ProviderToolKind, ResolvedSecret, StandaloneModelExecutionApplication,
-    StandaloneModelExecutionConfig, StandaloneProviderConfig, SubmitChatMessageCommand,
-    local_loopback_retry_policy, product_session_command_context,
+    StandaloneModelExecutionConfig, StandaloneProviderConfig, StructuredOutputSupport,
+    SubmitChatMessageCommand, local_loopback_retry_policy, product_session_command_context,
 };
 use winwincode_delivery::{
     application::stage::{AdvanceStageInput, NewStageIdentities, advance},
@@ -54,12 +54,13 @@ use winwincode_delivery::{
     },
 };
 use winwincode_domain::{
-    ControlPlaneEventId, CredentialReferenceId, DeliveryId, DeliveryTaskId, ExecutionJobId,
-    ExecutionMessageId, ExecutionSequence, FencingToken, Instant, InteractiveInputMode,
-    InteractiveInputValue, LeaseId, OrganizationId, ProductSessionId, ProjectId, RepositoryId,
-    RequestId, Revision, SchemaVersion, Sha256Digest, StageRunId, UserId, WorkerId,
-    WorkerInstanceId, WorkspaceId,
+    ArtifactId, ControlPlaneEventId, CredentialReferenceId, DeliveryId, DeliveryTaskId,
+    ExecutionJobId, ExecutionMessageId, ExecutionSequence, FencingToken, Instant,
+    InteractiveInputMode, InteractiveInputValue, LeaseId, OrganizationId, ProductSessionId,
+    ProjectId, RepositoryId, RequestId, Revision, SchemaVersion, Sha256Digest, StageRunId, UserId,
+    WorkerId, WorkerInstanceId, WorkspaceId,
 };
+use winwincode_domain::{RepositoryScope, RepositoryScopeKind, UserActor, UserActorKind};
 use winwincode_execution_port::{
     action_enforcement::{ActionEnforcementIssuer, ActionEnforcementSigningKey},
     generated::{
@@ -67,14 +68,15 @@ use winwincode_execution_port::{
         ActionEnforcementReceiptMessageKind, ApprovalDecisionMessage,
         ApprovalDecisionMessageDecision, ApprovalDecisionMessageKind, ApprovalDecisionMessageScope,
         ArtifactAckMessage, ArtifactAckMessageKind, ArtifactKind, ArtifactReference,
-        ExecutionEventCategory, ExecutionJob, ExecutionLeaseStamp, ExecutionLimits,
-        ExecutionOutcomeStatus, ExecutionPortMessage, ExecutionScope, ExecutionWorkspace,
-        ExecutionWorkspaceWriteMode, InputRequestMessage, InputResponseMessage,
-        InputResponseMessageKind, InputResponseMessageStatus, JobCancelMessage,
-        JobCancelMessageKind, JobCancelMessageReason, JobDispatchMessage, JobDispatchMessageKind,
-        JobDispatchResultMessageStatus, LeaseWriteStatus, ModelChunkMessage, ModelChunkMessageKind,
-        ModelGatewayRoute, ModelOpenMessage, RuntimeEventMessage, WorkerCapabilityFeature,
-        WorkerCapabilitySet, WorkerCapabilitySetPlatform, WorkerRegistrationResultMessage,
+        ChangeBatchProgressState, ChangeBatchReceiptStatus, ExecutionEventCategory, ExecutionJob,
+        ExecutionLeaseStamp, ExecutionLimits, ExecutionOutcomeStatus, ExecutionPortMessage,
+        ExecutionScope, ExecutionWorkspace, ExecutionWorkspaceWriteMode, InputRequestMessage,
+        InputResponseMessage, InputResponseMessageKind, InputResponseMessageStatus,
+        JobCancelMessage, JobCancelMessageKind, JobCancelMessageReason, JobDispatchMessage,
+        JobDispatchMessageKind, JobDispatchResultMessageStatus, LeaseWriteStatus,
+        ModelChunkMessage, ModelChunkMessageKind, ModelGatewayRoute, ModelOpenMessage,
+        RuntimeEventMessage, WorkerCapabilityFeature, WorkerCapabilitySet,
+        WorkerCapabilitySetPlatform, WorkerRegistrationResultMessage,
         WorkerRegistrationResultMessageKind, WorkerRegistrationResultMessageLeaseRecovery,
         WorkerRegistrationResultMessageStatus,
     },
@@ -86,11 +88,12 @@ use winwincode_storage::{
     ExecutionAdmissionPolicy, ExecutionJobState, ExecutionJobSubmission,
     ExecutionJobTransitionRequest, ExecutionLeaseClaim, ExecutionQueueScope,
     ExecutionRepositoryAccess, ExecutionReservationRequest, ExecutionReservationStart,
-    NewOutboxEvent, ProductStateStorage, StateCommit, WorkerAuthenticationIdentity,
+    NewOutboxEvent, ProductStateStorage, StateCommit, StateMutation, WorkerAuthenticationIdentity,
     WorkerHeartbeatRequest, WorkerPlatform, WorkerPoolId, WorkerRegistrationRequest,
     WorkerSlotAuthority, WorkerSlotOpenRequest, WorkerSlotResourceLimits, WorkerSlotResources,
 };
 use winwincode_storage::{LeaseWriteStatus as StorageLeaseWriteStatus, SqliteStorage};
+use winwincode_worker::validation_artifact::DurableValidationArtifactStore;
 
 static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(1);
 const PROVIDER_ID: &str = "winwincode-loopback";
@@ -98,6 +101,17 @@ const MODEL_ID: &str = "loopback-model";
 const PROVIDER_SECRET: &[u8] = b"native-cutover-provider-secret";
 const FIXTURE_CANDIDATE_REF: &str =
     "git-candidate:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const PERFORMANCE_AB_OUTPUT_ENV: &str = "WINWINCODE_PERFORMANCE_AB_OUTPUT";
+
+type ProductionTestWorker =
+    winwincode_worker::WorkerMain<RecordedPort, winwincode_codex::ProductionCodexAdapter>;
+
+struct PerformanceFixtureArm {
+    baseline_revision: String,
+    evidence: winwincode_codex::performance_evidence::ProductionPerformanceV0Evidence,
+    goal: String,
+    result_content_digest: Sha256Digest,
+}
 
 fn run_on_large_stack(future: impl Future<Output = ()> + Send + 'static) {
     std::thread::Builder::new()
@@ -196,6 +210,17 @@ impl TestDirectory {
             self.sources(),
         )
         .expect("open production Job workspace runtime")
+    }
+
+    fn workspace_runtime_with_validation(
+        &self,
+    ) -> winwincode_worker::workspace_runtime::JobWorkspaceRuntime {
+        let artifacts = DurableValidationArtifactStore::open(
+            self.0.join(".job-workspaces-validation-artifacts"),
+        )
+        .expect("open production validation Artifact store");
+        self.workspace_runtime()
+            .with_validation_artifact_port(artifacts)
     }
 }
 
@@ -372,6 +397,7 @@ fn configure_provider(storage: &mut SqliteStorage, message: &ModelOpenMessage) {
                     context_window_tokens: 128_000,
                     max_output_tokens: 16_000,
                     tool_support: ModelToolSupport::Parallel,
+                    structured_output_support: StructuredOutputSupport::JsonSchemaStrict,
                     reasoning_efforts: vec!["high".to_owned()],
                 }],
             },
@@ -529,6 +555,44 @@ fn seed_pending_delivery_job(
     source: &Delivery,
     pending: &PendingDeliveryExecution,
 ) {
+    seed_delivery_state(&root.data(), source);
+
+    let mut control_plane = ControlPlane::start_local(
+        ControlPlaneConfig::local(root.data()),
+        Box::new(DiscardingPublisher),
+    )
+    .expect("start Delivery execution Control Plane");
+    control_plane
+        .commit_delivery_execution(
+            &CommandEnvelope {
+                actor: actor(),
+                command: CommandName::DeliveryAdvance,
+                expected_revision: Revision(
+                    i64::try_from(source.revision()).expect("Delivery revision fits API"),
+                ),
+                payload: serde_json::json!({"deliveryId": source.id().0}),
+                request_id: pending.request_id().clone(),
+                schema_version: SchemaVersion::WinwincodeV1,
+                scope: Scope::RepositoryScope(repository_scope()),
+            },
+            pending,
+            &mut RecordingDispatcher,
+        )
+        .expect("commit canonical Delivery and ExecutionJob");
+    control_plane
+        .shutdown()
+        .expect("shutdown Delivery execution Control Plane");
+}
+
+fn seed_delivery_state(data: &Path, source: &Delivery) {
+    #[derive(serde::Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct SeedDeliveryCatalogEntry<'scope> {
+        schema_version: u8,
+        repository_scope: &'scope RepositoryScope,
+        delivery_id: &'scope DeliveryId,
+    }
+
     let journal = CapturingJournal::default();
     DeliveryStore::borrowed(&journal)
         .execute(DeliveryCommand::SeedForTest(CreateDelivery {
@@ -564,7 +628,19 @@ fn seed_pending_delivery_job(
         RequestId(id("req", 14)),
     )
     .expect("source Delivery receipt identity");
-    let mut storage = SqliteStorage::open(root.data()).expect("open source Delivery storage");
+    let scope = repository_scope();
+    let catalog = serde_json::to_vec(&SeedDeliveryCatalogEntry {
+        schema_version: 1,
+        repository_scope: &scope,
+        delivery_id: source.id(),
+    })
+    .expect("Delivery catalog entry JSON");
+    let catalog_stream = format!(
+        "delivery-catalog:{:x}:{}",
+        Sha256::digest(serde_json::to_vec(&scope).expect("catalog scope JSON")),
+        source.id().0
+    );
+    let mut storage = SqliteStorage::open(data).expect("open source Delivery storage");
     storage
         .commit(
             &StateCommit::new(
@@ -579,38 +655,15 @@ fn seed_pending_delivery_job(
                     source.encode_json().expect("source Delivery event JSON"),
                 )],
             )
-            .with_journal_publication(publication),
+            .with_journal_publication(publication)
+            .with_state_mutation(
+                StateMutation::new(catalog_stream, 0, catalog).expect("catalog mutation"),
+            ),
         )
         .expect("commit source Delivery");
     Box::new(storage)
         .close()
         .expect("close source Delivery storage");
-
-    let mut control_plane = ControlPlane::start_local(
-        ControlPlaneConfig::local(root.data()),
-        Box::new(DiscardingPublisher),
-    )
-    .expect("start Delivery execution Control Plane");
-    control_plane
-        .commit_delivery_execution(
-            &CommandEnvelope {
-                actor: actor(),
-                command: CommandName::DeliveryAdvance,
-                expected_revision: Revision(
-                    i64::try_from(source.revision()).expect("Delivery revision fits API"),
-                ),
-                payload: serde_json::json!({"deliveryId": source.id().0}),
-                request_id: pending.request_id().clone(),
-                schema_version: SchemaVersion::WinwincodeV1,
-                scope: Scope::RepositoryScope(repository_scope()),
-            },
-            pending,
-            &mut RecordingDispatcher,
-        )
-        .expect("commit canonical Delivery and ExecutionJob");
-    control_plane
-        .shutdown()
-        .expect("shutdown Delivery execution Control Plane");
 }
 
 #[derive(Default)]
@@ -1221,6 +1274,97 @@ fn provider_chunks(
         .collect()
 }
 
+fn retain_terminal_actual_cost(chunks: &mut [ModelChunkMessage], cost_micros: i64) {
+    let terminal = chunks
+        .iter_mut()
+        .find(|chunk| chunk.is_final)
+        .expect("terminal Provider chunk");
+    let payload = terminal.payload.as_mut().expect("terminal payload");
+    let bytes = STANDARD
+        .decode(&payload.data_base64)
+        .expect("decode terminal payload");
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&bytes).expect("decode terminal payload JSON");
+    value
+        .as_object_mut()
+        .expect("terminal payload object")
+        .insert(
+            "actualCostMicros".to_owned(),
+            serde_json::Value::from(cost_micros),
+        );
+    let bytes = serde_json::to_vec(&value).expect("encode cost-bearing terminal payload");
+    "application/json".clone_into(&mut payload.content_type);
+    payload.data_base64 = STANDARD.encode(&bytes);
+    payload.payload_digest = Sha256Digest(format!("sha256:{:x}", Sha256::digest(&bytes)));
+}
+
+fn install_passing_delegated_validation(root: &TestDirectory) {
+    let repository = root.sources().join(id("rep", 1));
+    let _ = root.source_revision();
+    fs::create_dir_all(repository.join(".winwincode"))
+        .expect("create validation configuration directory");
+    fs::write(
+        repository.join(".winwincode/validation.toml"),
+        r#"schemaVersion = 1
+
+[[commands]]
+id = "changed-check"
+phase = "validation"
+language = "rust"
+allowedCompanionPaths = []
+argv = ["/usr/bin/true"]
+workingDirectory = "."
+environment = []
+network = false
+timeoutMillis = 300000
+outputLimitBytes = 1048576
+
+[[commands]]
+id = "python-placeholder"
+phase = "validation"
+language = "python"
+allowedCompanionPaths = []
+argv = ["/usr/bin/true"]
+workingDirectory = "."
+environment = []
+network = false
+timeoutMillis = 300000
+outputLimitBytes = 1048576
+
+[[commands]]
+id = "typescript-placeholder"
+phase = "validation"
+language = "typescript"
+allowedCompanionPaths = []
+argv = ["/usr/bin/true"]
+workingDirectory = "."
+environment = []
+network = false
+timeoutMillis = 300000
+outputLimitBytes = 1048576
+
+[[profiles]]
+name = "changed"
+commandIds = ["changed-check", "python-placeholder", "typescript-placeholder"]
+
+[[profiles]]
+name = "fast"
+commandIds = ["changed-check", "python-placeholder", "typescript-placeholder"]
+
+[[profiles]]
+name = "affected"
+commandIds = ["changed-check", "python-placeholder", "typescript-placeholder"]
+
+[[profiles]]
+name = "final"
+commandIds = ["changed-check", "python-placeholder", "typescript-placeholder"]
+"#,
+    )
+    .expect("write passing validation configuration");
+    git(&repository, &["add", ".winwincode/validation.toml"]);
+    git(&repository, &["commit", "-qm", "validation fixture"]);
+}
+
 fn input_response(request: &InputRequestMessage) -> InputResponseMessage {
     let responded_at = at("2030-01-01T00:00:02.000Z");
     let value = request
@@ -1319,6 +1463,366 @@ fn dispatch(root: &TestDirectory) -> JobDispatchMessage {
     let revision = root.source_revision();
     let job = pending_delivery_execution(&revision).job().clone();
     dispatch_for_job(job.clone(), lease_for_job(&job, "delivery"))
+}
+
+fn production_delegated_dispatch(root: &TestDirectory) -> JobDispatchMessage {
+    production_delivery_dispatch(root, winwincode_codex::ExecutionMode::DelegatedPatch)
+}
+
+fn production_delivery_dispatch(
+    root: &TestDirectory,
+    execution_mode: winwincode_codex::ExecutionMode,
+) -> JobDispatchMessage {
+    let repository = root.sources().join(id("rep", 1));
+    let revision = root.source_revision();
+    let mut snapshot = delivery_before_execution().into_snapshot();
+    snapshot.spec.repository.locator = id("rep", 1);
+    snapshot.spec.base_revision.clone_from(&revision);
+    let source = Delivery::try_from_snapshot(snapshot).expect("production Delivery fixture");
+    let data = root.0.join("delivery-control-plane");
+    seed_delivery_state(&data, &source);
+    let command = DeliveryAdvanceCommand {
+        actor: actor(),
+        command: DeliveryAdvanceCommandCommand::DeliveryAdvance,
+        expected_revision: Revision(
+            i64::try_from(source.revision()).expect("Delivery revision fits API"),
+        ),
+        payload: DeliveryAdvancePayload {
+            delivery_id: source.id().clone(),
+        },
+        request_id: RequestId(id("req", 801)),
+        schema_version: SchemaVersion::WinwincodeV1,
+        scope: repository_scope(),
+    };
+    authorize_evaluation_fixture(
+        &data,
+        &revision,
+        production_delivery_job_id(&command),
+        execution_mode,
+    );
+
+    let adapter = LocalDeliveryAdapterConfig::new(&repository, repository_scope())
+        .with_execution_mode(execution_mode);
+
+    let mut control_plane = ControlPlane::start_local_with_delivery_adapters(
+        ControlPlaneConfig::local(&data),
+        Box::new(DiscardingPublisher),
+        adapter,
+    )
+    .expect("start production Delivery Control Plane");
+    control_plane
+        .delivery_advance(&command)
+        .expect("advance production Delivery into delegated execution");
+    control_plane
+        .shutdown()
+        .expect("shutdown production Delivery Control Plane");
+
+    let payload = rusqlite::Connection::open(data.join("control-plane.sqlite3"))
+        .expect("open production Delivery queue")
+        .query_row(
+            "SELECT dispatch_payload FROM scheduler_execution_jobs ORDER BY rowid DESC LIMIT 1",
+            [],
+            |row| row.get::<_, Vec<u8>>(0),
+        )
+        .expect("read production Delivery dispatch");
+    let job: ExecutionJob =
+        serde_json::from_slice(&payload).expect("decode production Delivery dispatch");
+    assert_eq!(job.execution_profile, "executor");
+    assert_eq!(job.workspace.checkout_revision, revision);
+    assert_eq!(
+        job.workspace.write_mode,
+        match execution_mode {
+            winwincode_codex::ExecutionMode::DelegatedPatch => {
+                ExecutionWorkspaceWriteMode::ReadOnly
+            }
+            winwincode_codex::ExecutionMode::React
+            | winwincode_codex::ExecutionMode::DelegatedPatchShadow => {
+                ExecutionWorkspaceWriteMode::Candidate
+            }
+        },
+        "production Delivery execution mode must seal the matching write authority"
+    );
+    let mut lease = lease_for_job(&job, "delivery");
+    if execution_mode == winwincode_codex::ExecutionMode::DelegatedPatch {
+        lease.fencing_token = FencingToken("2".to_owned());
+    }
+    dispatch_for_job(job, lease)
+}
+
+fn production_delivery_job_id(command: &DeliveryAdvanceCommand) -> ExecutionJobId {
+    const CROCKFORD: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+    let mapped = CommandEnvelope {
+        actor: command.actor.clone(),
+        command: CommandName::DeliveryAdvance,
+        expected_revision: command.expected_revision.clone(),
+        payload: serde_json::to_value(&command.payload).expect("encode Delivery advance payload"),
+        request_id: command.request_id.clone(),
+        schema_version: command.schema_version.clone(),
+        scope: Scope::RepositoryScope(command.scope.clone()),
+    };
+    let mut seed = serde_json::to_vec(&mapped).expect("encode Delivery advance command");
+    seed.extend_from_slice(b"job");
+    let suffix = Sha256::digest(seed)
+        .iter()
+        .take(26)
+        .map(|byte| char::from(CROCKFORD[usize::from(byte & 31)]))
+        .collect::<String>();
+    ExecutionJobId(format!("job_{suffix}"))
+}
+
+fn authorize_evaluation_fixture(
+    data: &Path,
+    base_revision: &str,
+    job_id: ExecutionJobId,
+    execution_mode: winwincode_codex::ExecutionMode,
+) {
+    use winwincode_control_plane::performance_evaluation_projection::DurablePerformanceEvaluationAuthority;
+    use winwincode_control_plane::rollout_evaluation::{
+        CreateEvaluationAssignment, RolloutEvaluationService,
+    };
+    use winwincode_control_plane::rollout_gate::{
+        PutRolloutGatePolicy, RolloutGateMetric, RolloutGatePolicyInput, RolloutGateService,
+        RolloutGateThreshold,
+    };
+    use winwincode_execution_port::performance_evaluation::{
+        EvaluationArmV1, EvaluationAssignmentSpecV1, EvaluationAssignmentV1,
+        EvaluationAttemptPolicyV1, EvaluationObserverV1, EvaluationRetryPlanV1,
+        EvaluationRetryStepV1, EvaluationRouteV1,
+    };
+    use winwincode_execution_port::performance_statistics::{
+        ExpectedPerformancePairV1, PerformanceEstimatorV1, PerformanceStatisticalPlanInputV1,
+    };
+    use winwincode_execution_port::runtime_trace_outbox::ObserverMode;
+
+    let cohort_id = digest('e');
+    let pair_id = digest('3');
+    let case_id = digest('1');
+    let route = EvaluationRouteV1 {
+        provider_id: PROVIDER_ID.to_owned(),
+        model_id: MODEL_ID.to_owned(),
+        route_digest: digest('2'),
+    };
+    let observer = EvaluationObserverV1 {
+        mode: ObserverMode::Off,
+        planned_routes: Vec::new(),
+    };
+    let attempt_policy = EvaluationAttemptPolicyV1 {
+        logical_sample_count: 1,
+        primary: EvaluationRetryPlanV1 {
+            policy_revision: 1,
+            plan_fingerprint: digest('7'),
+            steps: vec![EvaluationRetryStepV1 {
+                route_index: 0,
+                maximum_attempts: 16,
+            }],
+        },
+        observer: None,
+    };
+    let expected_pairs = vec![
+        ExpectedPerformancePairV1 {
+            pair_id: pair_id.clone(),
+            case_id: case_id.clone(),
+            base_revision: base_revision.to_owned(),
+        },
+        ExpectedPerformancePairV1 {
+            pair_id: digest('f'),
+            case_id: digest('4'),
+            base_revision: format!("{base_revision}-second-pair"),
+        },
+    ];
+    let source_release = retain_performance_policy_artifact(
+        data,
+        &job_id,
+        1_160,
+        "performance_source_release",
+        "application/vnd.winwincode.performance-source-release+json",
+        &serde_json::to_vec(&serde_json::json!({
+            "baseRevision": base_revision,
+            "repositoryId": repository_scope().repository_id,
+        }))
+        .expect("encode source-release Artifact"),
+    );
+    let cohort_manifest = retain_performance_policy_artifact(
+        data,
+        &job_id,
+        1_161,
+        "performance_cohort_manifest",
+        "application/vnd.winwincode.performance-cohort-manifest+json",
+        &serde_json::to_vec(&serde_json::json!({
+            "cohortId": cohort_id.clone(),
+            "expectedPairs": expected_pairs.clone(),
+        }))
+        .expect("encode cohort-manifest Artifact"),
+    );
+    let thresholds = [
+        RolloutGateMetric::StrongModelCalls,
+        RolloutGateMetric::TotalTokens,
+        RolloutGateMetric::ModelWaitMillis,
+        RolloutGateMetric::WallClockRuntimeMillis,
+        RolloutGateMetric::SettledCostMicrounits,
+    ]
+    .into_iter()
+    .map(|metric| RolloutGateThreshold::try_new(metric, 0).expect("evaluation threshold"))
+    .collect();
+    let policy = RolloutGatePolicyInput::try_new(PerformanceStatisticalPlanInputV1 {
+        source_release: source_release.clone(),
+        cohort_manifest: cohort_manifest.clone(),
+        cohort_id: cohort_id.clone(),
+        cutoff_at_millis: 1_893_456_500_000,
+        primary_planned_routes: vec![route.clone()],
+        observer: observer.clone(),
+        attempt_policy: attempt_policy.clone(),
+        expected_pairs,
+        minimum_complete_pair_count: 2,
+        estimator: PerformanceEstimatorV1::PairedPercentileBootstrapV1,
+        bootstrap_resamples: 100,
+        confidence_basis_points: 9_500,
+        thresholds,
+    })
+    .expect("paired rollout fixture policy");
+    let mut artifact_authority = DurablePerformanceEvaluationAuthority::open(data)
+        .expect("open performance Artifact authority");
+    artifact_authority
+        .put_policy(PutRolloutGatePolicy {
+            scope: repository_scope(),
+            request_id: RequestId(id("req", 1_160)),
+            expected_revision: 0,
+            policy,
+            occurred_at_millis: 1_893_456_000_000,
+        })
+        .expect("validate Artifacts and retain paired rollout fixture policy");
+    artifact_authority
+        .close()
+        .expect("close performance Artifact authority");
+    let mut storage = SqliteStorage::open(data).expect("open paired rollout fixture storage");
+    let service = RolloutGateService::new(&mut storage);
+    let policy = service
+        .current_policy_reference(&repository_scope())
+        .expect("load paired rollout fixture policy")
+        .expect("active paired rollout fixture policy");
+    let assignment = EvaluationAssignmentV1::try_new(EvaluationAssignmentSpecV1 {
+        repository_scope: repository_scope(),
+        source_release,
+        cohort_manifest,
+        cohort_id,
+        case_id,
+        pair_id,
+        arm: match execution_mode {
+            winwincode_codex::ExecutionMode::DelegatedPatch => EvaluationArmV1::Delegated,
+            winwincode_codex::ExecutionMode::React
+            | winwincode_codex::ExecutionMode::DelegatedPatchShadow => EvaluationArmV1::React,
+        },
+        base_revision: base_revision.to_owned(),
+        job_id,
+        run_id: digest('5'),
+        primary_planned_routes: vec![route],
+        observer,
+        attempt_policy,
+        policy_revision: policy.revision(),
+        policy_digest: policy.digest().clone(),
+        cutoff_at_millis: 1_893_456_500_000,
+    })
+    .expect("build delegated evaluation assignment");
+    RolloutEvaluationService::new(&mut storage)
+        .create_assignment(CreateEvaluationAssignment {
+            scope: repository_scope(),
+            request_id: RequestId(id("req", 1_161)),
+            expected_gate_revision: 1,
+            assignment: assignment.clone(),
+            occurred_at_millis: 1_893_456_000_001,
+        })
+        .expect("retain delegated evaluation assignment");
+}
+
+fn retain_performance_policy_artifact(
+    data: &Path,
+    job_id: &ExecutionJobId,
+    seed: u64,
+    kind: &str,
+    media_type: &str,
+    bytes: &[u8],
+) -> ArtifactReference {
+    use winwincode_domain::WorkerSessionId;
+    use winwincode_storage::{
+        ArtifactChunk, ArtifactMeteringAttribution, ArtifactOpen, ArtifactProvenance,
+        ArtifactRetention, ArtifactStore, LocalArtifactObjectStore, PublicEventScope,
+        receipt_scope_key,
+    };
+
+    let scope = repository_scope();
+    let scope_key = receipt_scope_key(&PublicEventScope::Repository {
+        organization_id: scope.organization_id.clone(),
+        workspace_id: scope.workspace_id.clone(),
+        project_id: scope.project_id.clone(),
+        repository_id: scope.repository_id.clone(),
+    })
+    .expect("encode performance Artifact scope");
+    let artifact_id = ArtifactId(id("art", seed));
+    let digest = Sha256Digest(format!("sha256:{:x}", Sha256::digest(bytes)));
+    let provenance = ArtifactProvenance::execution_job(
+        job_id.clone(),
+        1,
+        LeaseId(id("lse", seed)),
+        FencingToken("1".to_owned()),
+        WorkerId(id("wrk", seed)),
+        WorkerInstanceId(id("wki", seed)),
+        WorkerSessionId(id("wsn", seed)),
+    )
+    .expect("build performance Artifact provenance");
+    let mut artifacts = ArtifactStore::open(
+        data.join("artifact-catalog"),
+        Box::new(
+            LocalArtifactObjectStore::open(data.join("artifacts"))
+                .expect("open performance Artifact objects"),
+        ),
+    )
+    .expect("open performance Artifact catalog");
+    artifacts
+        .open_artifact(ArtifactOpen::new(
+            scope_key.clone(),
+            ExecutionMessageId(id("xmsg", seed)),
+            RequestId(id("req", seed)),
+            artifact_id.clone(),
+            kind,
+            media_type,
+            digest.clone(),
+            u64::try_from(bytes.len()).expect("bounded Artifact bytes"),
+            None,
+            provenance.clone(),
+            ArtifactMeteringAttribution {
+                organization_id: scope.organization_id,
+                workspace_id: scope.workspace_id,
+                project_id: scope.project_id,
+                repository_id: scope.repository_id,
+                delivery_id: None,
+                product_session_id: None,
+                user_id: UserId(id("usr", seed)),
+            },
+            ArtifactRetention::Indefinite,
+            1_893_456_000_000,
+        ))
+        .expect("open performance policy Artifact");
+    artifacts
+        .append_chunk(&ArtifactChunk::new(
+            scope_key,
+            ExecutionMessageId(id("xmsg", seed + 10)),
+            artifact_id.clone(),
+            provenance,
+            1_893_456_000_001,
+            1,
+            media_type,
+            digest.clone(),
+            bytes.to_vec(),
+            true,
+        ))
+        .expect("complete performance policy Artifact");
+    artifacts
+        .close()
+        .expect("close performance Artifact catalog");
+    ArtifactReference {
+        artifact_id,
+        digest,
+    }
 }
 
 fn input_dispatch(root: &TestDirectory) -> JobDispatchMessage {
@@ -1450,6 +1954,13 @@ fn dispatch_for_job(job: ExecutionJob, lease: ExecutionLeaseStamp) -> JobDispatc
 }
 
 fn adapter_config(root: &TestDirectory) -> winwincode_codex::ProductionCodexConfig {
+    adapter_config_with_mode(root, winwincode_codex::ExecutionMode::React)
+}
+
+fn adapter_config_with_mode(
+    root: &TestDirectory,
+    execution_mode: winwincode_codex::ExecutionMode,
+) -> winwincode_codex::ProductionCodexConfig {
     winwincode_codex::ProductionCodexConfig::try_new(winwincode_codex::ProductionCodexOptions {
         data_directory: root.worker(),
         helper_executable: helper_executable(),
@@ -1467,8 +1978,1529 @@ fn adapter_config(root: &TestDirectory) -> winwincode_codex::ProductionCodexConf
             version: 1,
             digest: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
         },
+        execution_mode,
+        observer_mode: winwincode_codex::ObserverMode::Off,
     })
     .expect("validated production Codex configuration")
+}
+
+#[test]
+fn performance_ab_fixture_writes_reproducible_evidence() {
+    run_on_large_stack(async {
+        let react_root = TestDirectory::new("performance-ab-react");
+        let delegated_root = TestDirectory::new("performance-ab-delegated");
+        install_passing_delegated_validation(&react_root);
+        clone_fixture_source(&react_root, &delegated_root);
+
+        let react = run_react_performance_fixture(&react_root).await;
+        let delegated = run_delegated_performance_fixture(&delegated_root).await;
+        assert_eq!(react.baseline_revision, delegated.baseline_revision);
+        assert_eq!(react.goal, delegated.goal);
+        assert_eq!(react.result_content_digest, delegated.result_content_digest);
+        assert_eq!(
+            delegated.evidence.runs[0].execution_mode,
+            winwincode_codex::ExecutionMode::DelegatedPatch
+        );
+
+        let evidence = winwincode_codex::performance_evidence::ProductionPerformanceV0Evidence {
+            runs: react
+                .evidence
+                .runs
+                .into_iter()
+                .chain(delegated.evidence.runs)
+                .collect(),
+            model_calls: react
+                .evidence
+                .model_calls
+                .into_iter()
+                .chain(delegated.evidence.model_calls)
+                .collect(),
+        };
+        let comparison = evidence
+            .summarize()
+            .expect("summarize paired production performance evidence");
+        assert_eq!(comparison.react.sample_count, 1);
+        assert_eq!(comparison.structured.sample_count, 1);
+        assert_eq!(comparison.react.strong_model_call_count, 2);
+        assert_eq!(comparison.structured.strong_model_call_count, 1);
+        assert_eq!(comparison.react.total_tokens, 30);
+        assert_eq!(comparison.structured.total_tokens, 15);
+        assert_eq!(comparison.react.settled_cost_microunits, 94);
+        assert_eq!(comparison.structured.settled_cost_microunits, 47);
+
+        let artifact = serde_json::json!({
+            "comparison": comparison,
+            "evidence": evidence,
+            "kind": "winwincode.performance-ab-fixture.v1",
+            "scenario": {
+                "baselineRevision": react.baseline_revision,
+                "delegatedJobAuthorization": "predeclared_evaluation_assignment",
+                "goal": react.goal,
+                "provider": {
+                    "actualCostMicrounitsPerCall": 47,
+                    "cachedTokensPerCall": 0,
+                    "inputTokensPerCall": 10,
+                    "modelId": MODEL_ID,
+                    "outputTokensPerCall": 5,
+                    "providerId": PROVIDER_ID,
+                },
+                "resultContentDigest": react.result_content_digest,
+                "validationCommandIds": [
+                    "changed-check",
+                    "python-placeholder",
+                    "typescript-placeholder",
+                ],
+            },
+            "schemaVersion": 1,
+            "timingBasis": "accounting_fixture_not_wall_clock_benchmark",
+        });
+        write_optional_performance_fixture(&artifact);
+    });
+}
+
+fn clone_fixture_source(source: &TestDirectory, target: &TestDirectory) {
+    let source_repository = source.sources().join(id("rep", 1));
+    let target_repository = target.sources().join(id("rep", 1));
+    fs::create_dir_all(target.sources()).expect("create paired fixture source root");
+    let status = Command::new("git")
+        .args(["clone", "-q", "--no-hardlinks"])
+        .arg(&source_repository)
+        .arg(&target_repository)
+        .status()
+        .expect("clone exact paired fixture source");
+    assert!(status.success(), "clone exact paired fixture source");
+    assert_eq!(source.source_revision(), target.source_revision());
+}
+
+async fn run_react_performance_fixture(root: &TestDirectory) -> PerformanceFixtureArm {
+    let dispatch = production_delivery_dispatch(root, winwincode_codex::ExecutionMode::React);
+    let port = RecordedPort::default();
+    let adapter = winwincode_codex::ProductionCodexAdapter::open(adapter_config(root))
+        .expect("open paired React production adapter");
+    let mut worker = winwincode_worker::WorkerMain::new(
+        worker_config(),
+        port.clone(),
+        adapter,
+        root.workspace_runtime_with_validation(),
+    );
+    register(&mut worker, &port).await;
+    worker
+        .accept_control(
+            &ExecutionPortMessage::JobDispatchMessage(dispatch.clone()),
+            at("2030-01-01T00:00:00.000Z"),
+        )
+        .await
+        .expect("accept paired React dispatch");
+
+    let first_open = next_model_open(&mut worker, &port, 0).await;
+    setup_model(root, &first_open, &dispatch.job);
+    let mut app = application(root);
+    let first_gateway = opened(
+        app.accept_local(&typed(ExecutionPortMessage::ModelOpenMessage(
+            first_open.clone(),
+        )))
+        .expect("accept paired React patch turn"),
+    );
+    let checkout = detached_checkout(root);
+    let mut patch_chunks = react_patch_chunks(&first_open, &first_gateway, &checkout);
+    retain_terminal_actual_cost(&mut patch_chunks, 47);
+    deliver_model_chunks(&mut worker, patch_chunks).await;
+    approve_and_permit_shell(&mut worker, &port).await;
+
+    let second_open = next_model_open(&mut worker, &port, 1).await;
+    assert_eq!(
+        fs::read_to_string(checkout.join("src/lib.rs")).expect("read paired React checkout"),
+        "pub fn fixture_value() -> u64 { 2 }\n"
+    );
+    let second_gateway = opened(
+        app.accept_local(&typed(ExecutionPortMessage::ModelOpenMessage(
+            second_open.clone(),
+        )))
+        .expect("accept paired React final turn"),
+    );
+    let mut final_chunks = final_response_chunks(&second_open, &second_gateway, 1_120);
+    retain_terminal_actual_cost(&mut final_chunks, 47);
+    deliver_model_chunks(&mut worker, final_chunks).await;
+
+    let result_content_digest = acknowledge_fixture_candidate(root, &mut worker, &port).await;
+    let evidence =
+        winwincode_codex::performance_evidence::export_performance_v0_evidence(&root.worker())
+            .expect("export paired React performance evidence");
+    let arm = winwincode_codex::performance_evidence::export_performance_evaluation_arm(
+        &root.worker(),
+        &evidence.runs[0].run_id,
+        &dispatch.job.job_id,
+    )
+    .expect("project paired React production authority");
+    assert_eq!(arm.measurement().run(), &evidence.runs[0]);
+    assert_eq!(arm.primary_model_calls().len(), 2);
+    assert!(arm.candidate_artifact_ack_revision() > 0);
+    worker
+        .shutdown(at("2030-01-01T00:00:03.000Z"))
+        .await
+        .expect("shutdown paired React worker");
+    PerformanceFixtureArm {
+        baseline_revision: dispatch.job.workspace.checkout_revision,
+        evidence,
+        goal: dispatch.job.goal,
+        result_content_digest,
+    }
+}
+
+async fn run_delegated_performance_fixture(root: &TestDirectory) -> PerformanceFixtureArm {
+    let dispatch =
+        production_delivery_dispatch(root, winwincode_codex::ExecutionMode::DelegatedPatch);
+    let port = RecordedPort::default();
+    let adapter = winwincode_codex::ProductionCodexAdapter::open(adapter_config_with_mode(
+        root,
+        winwincode_codex::ExecutionMode::DelegatedPatch,
+    ))
+    .expect("open paired delegated production adapter");
+    let mut worker = winwincode_worker::WorkerMain::new(
+        worker_config(),
+        port.clone(),
+        adapter,
+        root.workspace_runtime_with_validation(),
+    );
+    register(&mut worker, &port).await;
+    worker
+        .accept_control(
+            &ExecutionPortMessage::JobDispatchMessage(dispatch.clone()),
+            at("2030-01-01T00:00:00.000Z"),
+        )
+        .await
+        .expect("accept paired delegated dispatch");
+
+    let open = next_model_open(&mut worker, &port, 0).await;
+    setup_model(root, &open, &dispatch.job);
+    let mut app = application(root);
+    let gateway = opened(
+        app.accept_local(&typed(ExecutionPortMessage::ModelOpenMessage(open.clone())))
+            .expect("accept paired delegated turn"),
+    );
+    let mut chunks = delegated_patch_chunks(&open, &gateway, &dispatch.job);
+    retain_terminal_actual_cost(&mut chunks, 47);
+    deliver_model_chunks(&mut worker, chunks).await;
+
+    let result_content_digest = acknowledge_fixture_candidate(root, &mut worker, &port).await;
+    let evidence =
+        winwincode_codex::performance_evidence::export_performance_v0_evidence(&root.worker())
+            .expect("export paired delegated performance evidence");
+    let arm = winwincode_codex::performance_evidence::export_performance_evaluation_arm(
+        &root.worker(),
+        &evidence.runs[0].run_id,
+        &dispatch.job.job_id,
+    )
+    .expect("project paired delegated production authority");
+    assert_eq!(arm.measurement().run(), &evidence.runs[0]);
+    assert_eq!(arm.primary_model_calls().len(), 1);
+    assert!(arm.candidate_artifact_ack_revision() > 0);
+    worker
+        .shutdown(at("2030-01-01T00:00:03.000Z"))
+        .await
+        .expect("shutdown paired delegated worker");
+    PerformanceFixtureArm {
+        baseline_revision: dispatch.job.workspace.checkout_revision,
+        evidence,
+        goal: dispatch.job.goal,
+        result_content_digest,
+    }
+}
+
+fn react_patch_chunks(
+    open: &ModelOpenMessage,
+    gateway: &ProviderGatewayOpenReceipt,
+    checkout: &Path,
+) -> Vec<ModelChunkMessage> {
+    let identity = ProviderToolIdentity::try_new(
+        ProviderToolKind::Function,
+        "shell_command".to_owned(),
+        Some("functions".to_owned()),
+    )
+    .expect("canonical paired shell tool");
+    let call_id = "provider-performance-react-patch".to_owned();
+    provider_chunks(
+        open,
+        gateway,
+        [
+            ProviderStreamEvent::ResponseStarted {
+                provider_response_id: "provider-performance-react-response-1".to_owned(),
+            },
+            ProviderStreamEvent::ToolCallStarted {
+                index: 0,
+                provider_call_id: call_id.clone(),
+                identity,
+            },
+            ProviderStreamEvent::ToolCallArgumentsDelta {
+                index: 0,
+                provider_call_id: call_id.clone(),
+                delta: serde_json::json!({
+                    "command": "printf 'pub fn fixture_value() -> u64 { 2 }\\n' > src/lib.rs && /usr/bin/true && /usr/bin/true && /usr/bin/true",
+                    "justification": "apply the paired fixture change",
+                    "sandbox_permissions": "require_escalated",
+                    "workdir": checkout.to_string_lossy(),
+                })
+                .to_string(),
+            },
+            ProviderStreamEvent::ToolCallEnded {
+                index: 0,
+                provider_call_id: call_id,
+            },
+            ProviderStreamEvent::Usage(fixture_provider_usage()),
+            ProviderStreamEvent::Finished(ProviderFinishReason::ToolCalls),
+        ],
+        1_100,
+    )
+}
+
+fn delegated_patch_chunks(
+    open: &ModelOpenMessage,
+    gateway: &ProviderGatewayOpenReceipt,
+    job: &ExecutionJob,
+) -> Vec<ModelChunkMessage> {
+    let final_message = serde_json::json!({
+        "acceptanceCriteriaIds": job.stage_input
+            .as_ref()
+            .and_then(|input| input.task.as_ref())
+            .expect("paired delegated task")
+            .acceptance_criterion_ids,
+        "disposition": "final",
+        "patch": "*** Begin Patch\n*** Update File: src/lib.rs\n@@\n-pub fn fixture_value() -> u64 { 1 }\n+pub fn fixture_value() -> u64 { 2 }\n*** End Patch\n",
+        "schemaVersion": 1,
+        "validationProfile": "changed",
+    })
+    .to_string();
+    provider_chunks(
+        open,
+        gateway,
+        [
+            ProviderStreamEvent::ResponseStarted {
+                provider_response_id: "provider-performance-delegated-response".to_owned(),
+            },
+            ProviderStreamEvent::TextStarted { index: 0 },
+            ProviderStreamEvent::TextDelta {
+                index: 0,
+                delta: final_message,
+            },
+            ProviderStreamEvent::TextEnded { index: 0 },
+            ProviderStreamEvent::Usage(fixture_provider_usage()),
+            ProviderStreamEvent::Finished(ProviderFinishReason::Stop),
+        ],
+        1_140,
+    )
+}
+
+fn final_response_chunks(
+    open: &ModelOpenMessage,
+    gateway: &ProviderGatewayOpenReceipt,
+    message_seed: u64,
+) -> Vec<ModelChunkMessage> {
+    provider_chunks(
+        open,
+        gateway,
+        [
+            ProviderStreamEvent::ResponseStarted {
+                provider_response_id: "provider-performance-react-response-2".to_owned(),
+            },
+            ProviderStreamEvent::TextStarted { index: 0 },
+            ProviderStreamEvent::TextDelta {
+                index: 0,
+                delta: "paired fixture change completed".to_owned(),
+            },
+            ProviderStreamEvent::TextEnded { index: 0 },
+            ProviderStreamEvent::Usage(fixture_provider_usage()),
+            ProviderStreamEvent::Finished(ProviderFinishReason::Stop),
+        ],
+        message_seed,
+    )
+}
+
+const fn fixture_provider_usage() -> ProviderTokenUsage {
+    ProviderTokenUsage {
+        input_tokens: 10,
+        cached_input_tokens: 0,
+        cache_write_input_tokens: 0,
+        output_tokens: 5,
+        reasoning_output_tokens: 0,
+    }
+}
+
+async fn deliver_model_chunks(worker: &mut ProductionTestWorker, chunks: Vec<ModelChunkMessage>) {
+    for chunk in chunks {
+        worker
+            .accept_control(
+                &ExecutionPortMessage::ModelChunkMessage(chunk),
+                at("2030-01-01T00:00:02.000Z"),
+            )
+            .await
+            .expect("deliver paired Provider chunk");
+    }
+}
+
+async fn next_model_open(
+    worker: &mut ProductionTestWorker,
+    port: &RecordedPort,
+    index: usize,
+) -> ModelOpenMessage {
+    poll_until_message(
+        worker,
+        port,
+        &at("2030-01-01T00:00:02.000Z"),
+        |messages| {
+            messages
+                .iter()
+                .filter_map(|message| match message {
+                    ExecutionPortMessage::ModelOpenMessage(open) => Some(open.clone()),
+                    _ => None,
+                })
+                .nth(index)
+        },
+        "paired model request was not delivered",
+    )
+    .await
+}
+
+async fn approve_and_permit_shell(worker: &mut ProductionTestWorker, port: &RecordedPort) {
+    let decided_at = at("2030-01-01T00:00:02.000Z");
+    let approval = poll_until_message(
+        worker,
+        port,
+        &decided_at,
+        |messages| {
+            messages.iter().find_map(|message| match message {
+                ExecutionPortMessage::ApprovalRequestMessage(request) => Some(request.clone()),
+                _ => None,
+            })
+        },
+        "paired shell approval was not delivered",
+    )
+    .await;
+    worker
+        .accept_control(
+            &ExecutionPortMessage::ApprovalDecisionMessage(ApprovalDecisionMessage {
+                approval_id: approval.approval_id,
+                decided_at: decided_at.clone(),
+                decision: ApprovalDecisionMessageDecision::Approved,
+                kind: ApprovalDecisionMessageKind::ApprovalDecision,
+                lease: approval.lease,
+                message_id: ExecutionMessageId(id("xmsg", 1_150)),
+                reason: None,
+                schema_version: SchemaVersion::WinwincodeV1,
+                scope: ApprovalDecisionMessageScope::Once,
+                sent_at: decided_at.clone(),
+                session_identity: approval.session_identity,
+                worker_session_id: approval.worker_session_id,
+            }),
+            decided_at.clone(),
+        )
+        .await
+        .expect("approve paired shell");
+
+    let action = poll_until_message(
+        worker,
+        port,
+        &decided_at,
+        |messages| {
+            messages.iter().find_map(|message| match message {
+                ExecutionPortMessage::ActionEnforcementRequestMessage(request) => {
+                    Some(request.clone())
+                }
+                _ => None,
+            })
+        },
+        "paired shell action request was not delivered",
+    )
+    .await;
+    let mut receipt = ActionEnforcementReceiptMessage {
+        actor: UserActor {
+            id: UserId(id("usr", 9)),
+            kind: UserActorKind::User,
+        },
+        decision: ActionEnforcementDecision::Permit,
+        evaluated_at: decided_at.clone(),
+        evaluation_sha256: digest('e'),
+        job_id: action.job_id,
+        kind: ActionEnforcementReceiptMessageKind::ActionEnforcementReceipt,
+        lease: action.lease,
+        matched_condition_sha256: action.matched_condition_sha256,
+        message_id: ExecutionMessageId(id("xmsg", 1_151)),
+        policy_kind: action.policy_kind,
+        policy_mode: None,
+        policy_version: None,
+        receipt_signature: digest('0'),
+        request_id: action.request_id,
+        resource: action.resource,
+        schema_version: SchemaVersion::WinwincodeV1,
+        scope: repository_scope(),
+        sent_at: decided_at.clone(),
+        session_identity: action.session_identity,
+        subject_sha256: action.subject_sha256,
+        worker_session_id: action.worker_session_id,
+    };
+    ActionEnforcementIssuer::new(action_signing_key())
+        .sign(&mut receipt)
+        .expect("sign paired shell action permit");
+    worker
+        .accept_control(
+            &ExecutionPortMessage::ActionEnforcementReceiptMessage(receipt),
+            decided_at,
+        )
+        .await
+        .expect("accept paired shell action permit");
+}
+
+async fn acknowledge_fixture_candidate(
+    root: &TestDirectory,
+    worker: &mut ProductionTestWorker,
+    port: &RecordedPort,
+) -> Sha256Digest {
+    let open = poll_until_message(
+        worker,
+        port,
+        &at("2030-01-01T00:00:02.000Z"),
+        |messages| {
+            messages.iter().find_map(|message| match message {
+                ExecutionPortMessage::ArtifactOpenMessage(open)
+                    if open.artifact.kind == ArtifactKind::Candidate =>
+                {
+                    Some(open.clone())
+                }
+                _ => None,
+            })
+        },
+        "paired candidate was not delivered",
+    )
+    .await;
+    let active = worker.active_jobs()[0].clone();
+    let candidate = ArtifactReference {
+        artifact_id: open.artifact.artifact_id,
+        digest: open.artifact.digest,
+    };
+    let result_content = fs::read(detached_checkout(root).join("src/lib.rs"))
+        .expect("read paired candidate result content");
+    let result_content_digest =
+        Sha256Digest(format!("sha256:{:x}", Sha256::digest(&result_content)));
+    assert_eq!(
+        result_content, b"pub fn fixture_value() -> u64 { 2 }\n",
+        "paired candidate must contain the exact requested change"
+    );
+    let final_sequence = port
+        .messages()
+        .iter()
+        .filter_map(|message| match message {
+            ExecutionPortMessage::ArtifactChunkMessage(chunk)
+                if chunk.artifact_id == candidate.artifact_id =>
+            {
+                Some(chunk.sequence.0)
+            }
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0);
+    let sequences = if final_sequence == 0 {
+        vec![0]
+    } else {
+        vec![0, final_sequence]
+    };
+    for sequence in sequences {
+        worker
+            .accept_control(
+                &ExecutionPortMessage::ArtifactAckMessage(candidate_ack(
+                    &active, &candidate, sequence,
+                )),
+                at("2030-01-01T00:00:02.000Z"),
+            )
+            .await
+            .expect("acknowledge paired candidate");
+    }
+    let messages = port.messages();
+    let outcome = messages
+        .iter()
+        .find_map(|message| match message {
+            ExecutionPortMessage::JobOutcomeMessage(outcome) => Some(outcome),
+            _ => None,
+        })
+        .expect("paired fixture outcome");
+    assert_eq!(outcome.outcome.status, ExecutionOutcomeStatus::Succeeded);
+    assert_eq!(outcome.outcome.artifacts, vec![candidate]);
+    result_content_digest
+}
+
+fn write_optional_performance_fixture(value: &serde_json::Value) {
+    let Some(output) = std::env::var_os(PERFORMANCE_AB_OUTPUT_ENV) else {
+        return;
+    };
+    let output = PathBuf::from(output);
+    assert!(
+        output.is_absolute(),
+        "{PERFORMANCE_AB_OUTPUT_ENV} must be an absolute path"
+    );
+    if let Some(parent) = output.parent() {
+        fs::create_dir_all(parent).expect("create paired performance output directory");
+    }
+    let mut encoded = serde_json::to_vec_pretty(value).expect("encode paired performance JSON");
+    encoded.push(b'\n');
+    fs::write(output, encoded).expect("write paired performance JSON");
+}
+
+#[test]
+fn delegated_patch_reaches_one_succeeded_candidate_with_or_without_freeze_restart() {
+    run_on_large_stack(async {
+        for (label, restart_after_freeze) in [
+            ("production-delegated-batch-no-fault", false),
+            ("production-delegated-batch-freeze-restart", true),
+        ] {
+            let root = TestDirectory::new(label);
+            install_passing_delegated_validation(&root);
+            let dispatch = production_delegated_dispatch(&root);
+            let port = RecordedPort::default();
+            let adapter = winwincode_codex::ProductionCodexAdapter::open(adapter_config_with_mode(
+                &root,
+                winwincode_codex::ExecutionMode::DelegatedPatch,
+            ))
+            .expect("open delegated production adapter");
+            let mut worker = winwincode_worker::WorkerMain::new(
+                worker_config(),
+                port.clone(),
+                adapter,
+                root.workspace_runtime_with_validation(),
+            );
+            register(&mut worker, &port).await;
+            worker
+                .accept_control(
+                    &ExecutionPortMessage::JobDispatchMessage(dispatch.clone()),
+                    at("2030-01-01T00:00:00.000Z"),
+                )
+                .await
+                .expect("accept delegated dispatch");
+            let open = poll_until_message(
+                &mut worker,
+                &port,
+                &at("2030-01-01T00:00:01.000Z"),
+                |messages| {
+                    messages.iter().find_map(|message| match message {
+                        ExecutionPortMessage::ModelOpenMessage(open) => Some(open.clone()),
+                        _ => None,
+                    })
+                },
+                "delegated model request was not delivered",
+            )
+            .await;
+            let request_bytes = STANDARD
+                .decode(&open.request.data_base64)
+                .expect("decode delegated request");
+            let request: serde_json::Value =
+                serde_json::from_slice(&request_bytes).expect("decode delegated request JSON");
+            let format = &request["request"]["text"]["format"];
+            assert_eq!(format["type"], "json_schema", "{request:#}");
+            assert_eq!(format["strict"], true);
+            assert_eq!(format["schema"]["additionalProperties"], false);
+
+            setup_model(&root, &open, &dispatch.job);
+            let mut app = application(&root);
+            let gateway = opened(
+                app.accept_local(&typed(ExecutionPortMessage::ModelOpenMessage(open.clone())))
+                    .expect("accept delegated ModelOpen"),
+            );
+            let final_message = serde_json::json!({
+            "acceptanceCriteriaIds": dispatch.job.stage_input
+                .as_ref()
+                .and_then(|input| input.task.as_ref())
+                .expect("delegated task")
+                .acceptance_criterion_ids,
+            "disposition": "final",
+            "patch": "*** Begin Patch\n*** Update File: src/lib.rs\n@@\n-pub fn fixture_value() -> u64 { 1 }\n+pub fn fixture_value() -> u64 { 2 }\n*** End Patch\n",
+            "schemaVersion": 1,
+            "validationProfile": "changed"
+        })
+        .to_string();
+            let usage = ProviderTokenUsage {
+                input_tokens: 10,
+                cached_input_tokens: 0,
+                cache_write_input_tokens: 0,
+                output_tokens: 5,
+                reasoning_output_tokens: 0,
+            };
+            let mut initial_chunks = provider_chunks(
+                &open,
+                &gateway,
+                [
+                    ProviderStreamEvent::ResponseStarted {
+                        provider_response_id: "provider-delegated-response".to_owned(),
+                    },
+                    ProviderStreamEvent::TextStarted { index: 0 },
+                    ProviderStreamEvent::TextDelta {
+                        index: 0,
+                        delta: final_message,
+                    },
+                    ProviderStreamEvent::TextEnded { index: 0 },
+                    ProviderStreamEvent::Usage(usage),
+                    ProviderStreamEvent::Finished(ProviderFinishReason::Stop),
+                ],
+                980,
+            );
+            retain_terminal_actual_cost(&mut initial_chunks, 47);
+            for chunk in initial_chunks {
+                worker
+                    .accept_control(
+                        &ExecutionPortMessage::ModelChunkMessage(chunk),
+                        at("2030-01-01T00:00:02.000Z"),
+                    )
+                    .await
+                    .expect("deliver delegated structured output");
+            }
+            assert!(
+                !port.messages().iter().any(|message| matches!(
+                    message,
+                    ExecutionPortMessage::ArtifactOpenMessage(open)
+                        if open.artifact.kind == ArtifactKind::Candidate
+                )),
+                "an unconfirmed ChangeBatch must not produce a Candidate"
+            );
+            assert!(
+                !port
+                    .messages()
+                    .iter()
+                    .any(|message| matches!(message, ExecutionPortMessage::JobOutcomeMessage(_))),
+                "an unconfirmed ChangeBatch must not produce a JobOutcome"
+            );
+            let mut delegated = Vec::new();
+            for _ in 0..400 {
+                worker
+                    .poll_codex(at("2030-01-01T00:00:02.000Z"))
+                    .await
+                    .expect("poll delegated result");
+                delegated = worker.take_delegated_poll_outcomes();
+                if delegated.iter().any(|outcome| {
+                    matches!(
+                        outcome,
+                        winwincode_worker::DelegatedPollOutcome::ChangeBatchProposed(_)
+                    )
+                }) {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            let _expected_intent = delegated
+                .iter()
+                .find_map(|outcome| match outcome {
+                    winwincode_worker::DelegatedPollOutcome::ChangeBatchProposed(event) => {
+                        Some((**event).clone())
+                    }
+                    _ => None,
+                })
+                .expect("delegated proposal was not retained");
+            assert_eq!(
+                delegated
+                    .iter()
+                    .filter(|outcome| matches!(
+                        outcome,
+                        winwincode_worker::DelegatedPollOutcome::ChangeBatchProposed(_)
+                    ))
+                    .count(),
+                1,
+                "the delegated patch must be proposed exactly once"
+            );
+            assert!(delegated.iter().any(|outcome| matches!(
+                outcome,
+                winwincode_worker::DelegatedPollOutcome::ChangeBatchProgress(event)
+                    if event.state == ChangeBatchProgressState::Applied
+            )));
+            assert!(delegated.iter().any(|outcome| matches!(
+                outcome,
+                winwincode_worker::DelegatedPollOutcome::ChangeBatchReceipt(receipt)
+                    if receipt.status == ChangeBatchReceiptStatus::Applied
+                        && receipt.result_revision.is_some()
+                        && receipt.delta_exact
+                        && receipt.delta_digest.is_some()
+            )));
+            assert_eq!(worker.active_jobs().len(), 1);
+            assert_eq!(
+                port.messages()
+                    .iter()
+                    .filter(|message| matches!(message, ExecutionPortMessage::ModelOpenMessage(_)))
+                    .count(),
+                1
+            );
+            assert!(
+                !port
+                    .messages()
+                    .iter()
+                    .any(|message| matches!(message, ExecutionPortMessage::JobOutcomeMessage(_)))
+            );
+            if !port.messages().iter().any(|message| {
+                matches!(
+                    message,
+                    ExecutionPortMessage::ArtifactOpenMessage(open)
+                        if open.artifact.kind == ArtifactKind::Candidate
+                )
+            }) {
+                let _ = poll_until_message(
+                    &mut worker,
+                    &port,
+                    &at("2030-01-01T00:00:02.000Z"),
+                    |messages| {
+                        messages.iter().find_map(|message| match message {
+                            ExecutionPortMessage::ArtifactOpenMessage(open)
+                                if open.artifact.kind == ArtifactKind::Candidate =>
+                            {
+                                Some(open.clone())
+                            }
+                            _ => None,
+                        })
+                    },
+                    "delegated final candidate was not delivered",
+                )
+                .await;
+            }
+
+            let active = worker.active_jobs()[0].clone();
+            let messages = port.messages();
+            let candidate = messages
+                .iter()
+                .find_map(|message| match message {
+                    ExecutionPortMessage::ArtifactOpenMessage(open)
+                        if open.artifact.kind == ArtifactKind::Candidate =>
+                    {
+                        Some(ArtifactReference {
+                            artifact_id: open.artifact.artifact_id.clone(),
+                            digest: open.artifact.digest.clone(),
+                        })
+                    }
+                    _ => None,
+                })
+                .expect("delegated final candidate open");
+            let final_sequence = messages
+                .iter()
+                .filter_map(|message| match message {
+                    ExecutionPortMessage::ArtifactChunkMessage(chunk)
+                        if chunk.artifact_id == candidate.artifact_id =>
+                    {
+                        Some(chunk.sequence.0)
+                    }
+                    _ => None,
+                })
+                .max()
+                .unwrap_or(0);
+            assert_eq!(
+                delegated
+                    .iter()
+                    .filter(|outcome| matches!(
+                        outcome,
+                        winwincode_worker::DelegatedPollOutcome::ChangeBatchProgress(event)
+                            if event.state == ChangeBatchProgressState::Applied
+                    ))
+                    .count(),
+                1,
+                "the delegated patch must be applied exactly once"
+            );
+            assert_eq!(
+                port.messages()
+                    .iter()
+                    .filter(|message| matches!(
+                        message,
+                        ExecutionPortMessage::ArtifactOpenMessage(open)
+                            if open.artifact.kind == ArtifactKind::Candidate
+                    ))
+                    .count(),
+                1,
+                "the accepted ChangeBatch must produce one Candidate"
+            );
+            if !restart_after_freeze {
+                worker
+                    .accept_control(
+                        &ExecutionPortMessage::ArtifactAckMessage(candidate_ack(
+                            &active,
+                            &candidate,
+                            final_sequence,
+                        )),
+                        at("2030-01-01T00:00:02.000Z"),
+                    )
+                    .await
+                    .expect("acknowledge delegated final candidate");
+                let outcomes = port
+                    .messages()
+                    .into_iter()
+                    .filter_map(|message| match message {
+                        ExecutionPortMessage::JobOutcomeMessage(outcome) => Some(outcome),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(outcomes.len(), 1, "the delegated patch must finish once");
+                assert_eq!(
+                    outcomes[0].outcome.status,
+                    ExecutionOutcomeStatus::Succeeded
+                );
+                assert_eq!(outcomes[0].outcome.artifacts, vec![candidate]);
+                assert!(worker.active_jobs().is_empty());
+                continue;
+            }
+            worker.inject_final_freeze_fault(
+                winwincode_worker::WorkerFinalFreezeFault::AfterPersistBeforeOutcome,
+            );
+            assert!(
+                worker
+                    .accept_control(
+                        &ExecutionPortMessage::ArtifactAckMessage(candidate_ack(
+                            &active,
+                            &candidate,
+                            final_sequence,
+                        )),
+                        at("2030-01-01T00:00:02.000Z"),
+                    )
+                    .await
+                    .is_err(),
+                "fault must stop after durable freeze and before JobOutcome"
+            );
+            let frozen_run = stored_run_json(&root);
+            assert!(!frozen_run["finalCandidateFreeze"].is_null());
+            let frozen_candidate: ArtifactReference = serde_json::from_value(
+                frozen_run["finalCandidateFreeze"]["candidateArtifactRef"].clone(),
+            )
+            .expect("decode frozen candidate authority");
+            let frozen_rollout_path = frozen_run["rolloutPath"]
+                .as_str()
+                .expect("frozen run rollout path")
+                .to_owned();
+            let frozen_rollout = fs::read(&frozen_rollout_path).expect("read frozen rollout");
+            let frozen_kernel_session_id = frozen_run["kernelSessionId"].clone();
+            assert_eq!(
+                port.messages()
+                    .iter()
+                    .filter(|message| matches!(message, ExecutionPortMessage::JobOutcomeMessage(_)))
+                    .count(),
+                0
+            );
+            drop(worker);
+            let replay_port = RecordedPort::default();
+            let replay_adapter = winwincode_codex::ProductionCodexAdapter::open(
+                adapter_config_with_mode(&root, winwincode_codex::ExecutionMode::DelegatedPatch),
+            )
+            .expect("reopen delegated production adapter");
+            let mut replay_worker = winwincode_worker::WorkerMain::new(
+                worker_config(),
+                replay_port.clone(),
+                replay_adapter,
+                root.workspace_runtime_with_validation(),
+            );
+            register(&mut replay_worker, &replay_port).await;
+            replay_worker
+                .accept_control(
+                    &ExecutionPortMessage::JobDispatchMessage(dispatch.clone()),
+                    at("2030-01-01T00:00:03.000Z"),
+                )
+                .await
+                .expect("recover delegated dispatch");
+            for _ in 0..40 {
+                replay_worker
+                    .poll_codex(at("2030-01-01T00:00:03.000Z"))
+                    .await
+                    .expect("recover frozen delegated final");
+                if replay_port
+                    .messages()
+                    .iter()
+                    .any(|message| matches!(message, ExecutionPortMessage::JobOutcomeMessage(_)))
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            assert_eq!(
+                replay_port
+                    .messages()
+                    .iter()
+                    .filter(|message| matches!(message, ExecutionPortMessage::ModelOpenMessage(_)))
+                    .count(),
+                0,
+                "frozen restart must not poll Core"
+            );
+            assert_eq!(
+                replay_port
+                    .messages()
+                    .iter()
+                    .filter(|message| matches!(
+                        message,
+                        ExecutionPortMessage::ArtifactOpenMessage(_)
+                    ))
+                    .count(),
+                0,
+                "frozen restart must not upload the candidate again"
+            );
+            assert_eq!(
+                replay_port
+                    .messages()
+                    .iter()
+                    .filter(|message| matches!(message, ExecutionPortMessage::JobOutcomeMessage(_)))
+                    .count(),
+                1,
+                "frozen restart must retain one JobOutcome"
+            );
+            let replay_messages = replay_port.messages();
+            let outcome = replay_messages
+                .iter()
+                .find_map(|message| match message {
+                    ExecutionPortMessage::JobOutcomeMessage(outcome) => Some(outcome),
+                    _ => None,
+                })
+                .expect("recovered frozen JobOutcome");
+            assert_eq!(outcome.outcome.status, ExecutionOutcomeStatus::Succeeded);
+            assert_eq!(outcome.outcome.artifacts, vec![frozen_candidate]);
+            assert_eq!(
+                outcome.outcome.codex_thread_id,
+                Some(active.codex_thread_id)
+            );
+            assert_eq!(outcome.lease, active.lease);
+            assert_eq!(outcome.worker_session_id, active.worker_session_id);
+            assert_eq!(outcome.session_identity, active.session_identity);
+            let recovered_run = stored_run_json(&root);
+            assert_eq!(recovered_run["rolloutPath"], frozen_run["rolloutPath"]);
+            assert_eq!(recovered_run["kernelSessionId"], frozen_kernel_session_id);
+            assert_eq!(
+                fs::read(&frozen_rollout_path).expect("reread frozen rollout"),
+                frozen_rollout,
+                "freeze recovery must not resume or mutate Core rollout"
+            );
+        }
+    });
+}
+
+#[cfg(feature = "test-support")]
+#[test]
+fn delegated_transition_crash_boundaries_restart_exactly_once() {
+    use winwincode_codex::ProductionDelegatedTransitionFault;
+
+    run_on_large_stack(async {
+        for (label, fault) in [
+            (
+                "transition-after-kernel",
+                ProductionDelegatedTransitionFault::AfterKernelBeforeSettlement,
+            ),
+            (
+                "transition-after-intent",
+                ProductionDelegatedTransitionFault::AfterIntentBeforeKernel,
+            ),
+            (
+                "transition-before-intent",
+                ProductionDelegatedTransitionFault::BeforeIntent,
+            ),
+        ] {
+            let root = TestDirectory::new(label);
+            let repository = root.sources().join(id("rep", 1));
+            let _ = root.source_revision();
+            fs::create_dir_all(repository.join(".winwincode"))
+                .expect("create validation configuration directory");
+            fs::write(
+                repository.join(".winwincode/validation.toml"),
+                r#"schemaVersion = 1
+
+[[commands]]
+id = "changed-check"
+phase = "validation"
+language = "rust"
+allowedCompanionPaths = []
+argv = ["/usr/bin/true"]
+workingDirectory = "."
+environment = []
+network = false
+timeoutMillis = 300000
+outputLimitBytes = 1048576
+
+[[commands]]
+id = "python-placeholder"
+phase = "validation"
+language = "python"
+allowedCompanionPaths = []
+argv = ["/usr/bin/true"]
+workingDirectory = "."
+environment = []
+network = false
+timeoutMillis = 300000
+outputLimitBytes = 1048576
+
+[[commands]]
+id = "typescript-placeholder"
+phase = "validation"
+language = "typescript"
+allowedCompanionPaths = []
+argv = ["/usr/bin/true"]
+workingDirectory = "."
+environment = []
+network = false
+timeoutMillis = 300000
+outputLimitBytes = 1048576
+
+[[profiles]]
+name = "changed"
+commandIds = ["changed-check", "python-placeholder", "typescript-placeholder"]
+
+[[profiles]]
+name = "fast"
+commandIds = ["changed-check", "python-placeholder", "typescript-placeholder"]
+
+[[profiles]]
+name = "affected"
+commandIds = ["changed-check", "python-placeholder", "typescript-placeholder"]
+
+[[profiles]]
+name = "final"
+commandIds = ["changed-check", "python-placeholder", "typescript-placeholder"]
+"#,
+            )
+            .expect("write passing validation configuration");
+            git(&repository, &["add", ".winwincode/validation.toml"]);
+            git(&repository, &["commit", "-qm", "validation fixture"]);
+            let mut dispatch = dispatch(&root);
+            dispatch.job.workspace.write_mode = ExecutionWorkspaceWriteMode::ReadOnly;
+            let port = RecordedPort::default();
+            let config =
+                adapter_config_with_mode(&root, winwincode_codex::ExecutionMode::DelegatedPatch)
+                    .with_test_delegated_transition_fault(fault);
+            let adapter = winwincode_codex::ProductionCodexAdapter::open(config)
+                .expect("open faulted delegated adapter");
+            let mut worker = winwincode_worker::WorkerMain::new(
+                worker_config(),
+                port.clone(),
+                adapter,
+                root.workspace_runtime_with_validation(),
+            );
+            register(&mut worker, &port).await;
+            worker
+                .accept_control(
+                    &ExecutionPortMessage::JobDispatchMessage(dispatch.clone()),
+                    at("2030-01-01T00:00:00.000Z"),
+                )
+                .await
+                .expect("accept delegated crash fixture");
+            let open = poll_until_message(
+                &mut worker,
+                &port,
+                &at("2030-01-01T00:00:01.000Z"),
+                |messages| {
+                    messages.iter().find_map(|message| match message {
+                        ExecutionPortMessage::ModelOpenMessage(open) => Some(open.clone()),
+                        _ => None,
+                    })
+                },
+                "initial delegated request was not delivered",
+            )
+            .await;
+            setup_model(&root, &open, &dispatch.job);
+            let mut app = application(&root);
+            let gateway = opened(
+                app.accept_local(&typed(ExecutionPortMessage::ModelOpenMessage(open.clone())))
+                    .expect("accept initial delegated open"),
+            );
+            let final_message = serde_json::json!({
+                "acceptanceCriteriaIds": dispatch.job.stage_input
+                    .as_ref()
+                    .and_then(|input| input.task.as_ref())
+                    .expect("delegated task")
+                    .acceptance_criterion_ids,
+                "disposition": "continue",
+                "patch": "*** Begin Patch\n*** Update File: src/lib.rs\n@@\n-pub fn fixture_value() -> u64 { 1 }\n+pub fn fixture_value() -> u64 { 2 }\n*** End Patch\n",
+                "schemaVersion": 1,
+                "validationProfile": "changed"
+            })
+            .to_string();
+            let usage = ProviderTokenUsage {
+                input_tokens: 10,
+                cached_input_tokens: 0,
+                cache_write_input_tokens: 0,
+                output_tokens: 5,
+                reasoning_output_tokens: 0,
+            };
+            let mut initial_chunks = provider_chunks(
+                &open,
+                &gateway,
+                [
+                    ProviderStreamEvent::ResponseStarted {
+                        provider_response_id: format!("provider-{label}"),
+                    },
+                    ProviderStreamEvent::TextStarted { index: 0 },
+                    ProviderStreamEvent::TextDelta {
+                        index: 0,
+                        delta: final_message,
+                    },
+                    ProviderStreamEvent::TextEnded { index: 0 },
+                    ProviderStreamEvent::Usage(usage),
+                    ProviderStreamEvent::Finished(ProviderFinishReason::Stop),
+                ],
+                980,
+            );
+            retain_terminal_actual_cost(&mut initial_chunks, 47);
+            for chunk in initial_chunks {
+                worker
+                    .accept_control(
+                        &ExecutionPortMessage::ModelChunkMessage(chunk),
+                        at("2030-01-01T00:00:02.000Z"),
+                    )
+                    .await
+                    .expect("deliver initial delegated response");
+            }
+            let mut stopped_at_boundary = false;
+            for _ in 0..400 {
+                if worker
+                    .poll_codex(at("2030-01-01T00:00:02.000Z"))
+                    .await
+                    .is_err()
+                {
+                    stopped_at_boundary = true;
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            assert!(stopped_at_boundary, "fault did not stop at {label}");
+            let before_restart = stored_run_json(&root);
+            let transitions = before_restart["delegatedTransitions"]
+                .as_array()
+                .expect("durable transition array");
+            if fault == ProductionDelegatedTransitionFault::BeforeIntent {
+                assert!(transitions.is_empty());
+                assert!(!before_restart["batchIntent"].is_null());
+                let journal = rusqlite::Connection::open(
+                    root.0
+                        .join(".job-workspaces-change-batches/change-batch.sqlite3"),
+                )
+                .expect("open delegated replay journal");
+                let retained_event = journal
+                    .query_row(
+                        "SELECT proposal_event_json FROM change_batch_execution LIMIT 1",
+                        [],
+                        |row| row.get::<_, Vec<u8>>(0),
+                    )
+                    .expect("read delegated replay event");
+                assert_eq!(
+                    serde_json::from_slice::<serde_json::Value>(&retained_event)
+                        .expect("decode journal event"),
+                    before_restart["batchIntent"]["event"],
+                    "adapter and workspace journals must retain the same proposal"
+                );
+            } else {
+                assert_eq!(transitions.len(), 1);
+                assert!(before_restart["batchIntent"].is_null());
+            }
+            let crash_snapshot = DirectorySnapshot::capture(&root.0);
+            drop(worker);
+            crash_snapshot.restore(&root.0);
+
+            let replay_port = RecordedPort::default();
+            let replay_adapter = winwincode_codex::ProductionCodexAdapter::open(
+                adapter_config_with_mode(&root, winwincode_codex::ExecutionMode::DelegatedPatch),
+            )
+            .expect("reopen delegated transition adapter");
+            let mut replay = winwincode_worker::WorkerMain::new(
+                worker_config(),
+                replay_port.clone(),
+                replay_adapter,
+                root.workspace_runtime_with_validation(),
+            );
+            register(&mut replay, &replay_port).await;
+            replay
+                .accept_control(
+                    &ExecutionPortMessage::JobDispatchMessage(dispatch.clone()),
+                    at("2030-01-01T00:00:03.000Z"),
+                )
+                .await
+                .expect("recover delegated transition dispatch");
+            let mut follow_up = None;
+            for _ in 0..80 {
+                replay
+                    .poll_codex(at("2030-01-01T00:00:03.000Z"))
+                    .await
+                    .unwrap_or_else(|error| {
+                        panic!("delegated transition recovery poll failed for {label}: {error:?}")
+                    });
+                follow_up = replay_port
+                    .messages()
+                    .iter()
+                    .find_map(|message| match message {
+                        ExecutionPortMessage::ModelOpenMessage(open) => Some(open.clone()),
+                        _ => None,
+                    });
+                if follow_up.is_some() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            let recovered_run = stored_run_json(&root);
+            assert!(
+                follow_up.is_some(),
+                "durable delegated transition did not reconcile for {label}: batchIntent={} transitionState={} currentTurn={} opens={}",
+                !recovered_run["batchIntent"].is_null(),
+                recovered_run["delegatedTransitions"][0]["state"],
+                recovered_run["currentTurnId"],
+                replay_port
+                    .messages()
+                    .iter()
+                    .filter(|message| matches!(message, ExecutionPortMessage::ModelOpenMessage(_)))
+                    .count(),
+            );
+            let follow_up_count = replay_port
+                .messages()
+                .iter()
+                .filter(|message| matches!(message, ExecutionPortMessage::ModelOpenMessage(_)))
+                .count();
+            assert_eq!(
+                follow_up_count, 1,
+                "restart must submit the exact turn once"
+            );
+            let after_restart = stored_run_json(&root);
+            let transition_turn_id = after_restart["delegatedTransitions"][0]["turnId"]
+                .as_str()
+                .expect("durable delegated exact turn id");
+            let follow_up = follow_up.expect("recovered exact ModelOpen");
+            let follow_up_payload: serde_json::Value = serde_json::from_slice(
+                &STANDARD
+                    .decode(&follow_up.request.data_base64)
+                    .expect("decode recovered exact ModelOpen"),
+            )
+            .expect("decode recovered exact ModelOpen JSON");
+            assert_eq!(
+                follow_up_payload["turnId"].as_str(),
+                Some(transition_turn_id),
+                "replayed model exchange must belong to the durable exact turn"
+            );
+            let rollout_path = after_restart["rolloutPath"]
+                .as_str()
+                .expect("delegated rollout path");
+            let rollout_items = fs::read_to_string(rollout_path)
+                .expect("read delegated rollout")
+                .lines()
+                .map(|line| {
+                    serde_json::from_str::<serde_json::Value>(line)
+                        .expect("decode delegated rollout line")
+                })
+                .collect::<Vec<_>>();
+            let exact_turn_starts = rollout_items
+                .iter()
+                .filter(|item| {
+                    item["type"] == "event_msg"
+                        && item["payload"]["type"] == "task_started"
+                        && item["payload"]["turn_id"] == transition_turn_id
+                })
+                .count();
+            let expected_turn_starts = usize::from(
+                fault == ProductionDelegatedTransitionFault::AfterKernelBeforeSettlement,
+            ) + 1;
+            assert_eq!(
+                exact_turn_starts, expected_turn_starts,
+                "only AfterKernel recovery may append a second lifecycle start for the same turn"
+            );
+            let exact_user_inputs = rollout_items
+                .iter()
+                .filter(|item| {
+                    item["type"] == "response_item"
+                        && item["payload"]["role"] == "user"
+                        && item["payload"]["internal_chat_message_metadata_passthrough"]["turn_id"]
+                            == transition_turn_id
+                })
+                .count();
+            assert!(
+                exact_user_inputs <= 1,
+                "restart must not duplicate the durable exact turn user input"
+            );
+            if fault != ProductionDelegatedTransitionFault::AfterKernelBeforeSettlement {
+                assert_eq!(
+                    exact_user_inputs, 1,
+                    "a turn first submitted after restart must retain its one user input"
+                );
+            }
+            assert_eq!(
+                after_restart["delegatedTransitions"]
+                    .as_array()
+                    .expect("reconciled transition array")
+                    .len(),
+                1,
+                "restart must retain one transition identity for {label}"
+            );
+            assert!(after_restart["batchIntent"].is_null());
+        }
+    });
+}
+
+#[test]
+fn delegated_invalid_output_gets_one_format_repair_then_becomes_inconclusive() {
+    run_on_large_stack(async {
+        let root = TestDirectory::new("production-delegated-repair");
+        let mut dispatch = dispatch(&root);
+        dispatch.job.workspace.write_mode = ExecutionWorkspaceWriteMode::ReadOnly;
+        let port = RecordedPort::default();
+        let adapter = winwincode_codex::ProductionCodexAdapter::open(adapter_config_with_mode(
+            &root,
+            winwincode_codex::ExecutionMode::DelegatedPatch,
+        ))
+        .expect("open delegated repair adapter");
+        let mut worker = winwincode_worker::WorkerMain::new(
+            worker_config(),
+            port.clone(),
+            adapter,
+            root.workspace_runtime(),
+        );
+        register(&mut worker, &port).await;
+        worker
+            .accept_control(
+                &ExecutionPortMessage::JobDispatchMessage(dispatch.clone()),
+                at("2030-01-01T00:00:00.000Z"),
+            )
+            .await
+            .expect("accept delegated repair dispatch");
+        let first_open = poll_until_message(
+            &mut worker,
+            &port,
+            &at("2030-01-01T00:00:01.000Z"),
+            |messages| {
+                messages.iter().find_map(|message| match message {
+                    ExecutionPortMessage::ModelOpenMessage(open) => Some(open.clone()),
+                    _ => None,
+                })
+            },
+            "delegated repair request was not delivered",
+        )
+        .await;
+        setup_model(&root, &first_open, &dispatch.job);
+        let mut app = application(&root);
+        let first_gateway = opened(
+            app.accept_local(&typed(ExecutionPortMessage::ModelOpenMessage(
+                first_open.clone(),
+            )))
+            .expect("accept first delegated repair ModelOpen"),
+        );
+        let usage = ProviderTokenUsage {
+            input_tokens: 10,
+            cached_input_tokens: 0,
+            cache_write_input_tokens: 0,
+            output_tokens: 5,
+            reasoning_output_tokens: 0,
+        };
+        for chunk in provider_chunks(
+            &first_open,
+            &first_gateway,
+            [
+                ProviderStreamEvent::ResponseStarted {
+                    provider_response_id: "provider-delegated-invalid-1".to_owned(),
+                },
+                ProviderStreamEvent::TextStarted { index: 0 },
+                ProviderStreamEvent::TextDelta {
+                    index: 0,
+                    delta: "not a ChangeBatch proposal".to_owned(),
+                },
+                ProviderStreamEvent::TextEnded { index: 0 },
+                ProviderStreamEvent::Usage(usage),
+                ProviderStreamEvent::Finished(ProviderFinishReason::Stop),
+            ],
+            990,
+        ) {
+            worker
+                .accept_control(
+                    &ExecutionPortMessage::ModelChunkMessage(chunk),
+                    at("2030-01-01T00:00:02.000Z"),
+                )
+                .await
+                .expect("deliver first invalid delegated output");
+        }
+        let repair_open = poll_until_message(
+            &mut worker,
+            &port,
+            &at("2030-01-01T00:00:02.000Z"),
+            |messages| {
+                messages
+                    .iter()
+                    .filter_map(|message| match message {
+                        ExecutionPortMessage::ModelOpenMessage(open) => Some(open.clone()),
+                        _ => None,
+                    })
+                    .nth(1)
+            },
+            "one delegated format-repair request was not delivered",
+        )
+        .await;
+        let first_request: serde_json::Value = serde_json::from_slice(
+            &STANDARD
+                .decode(&first_open.request.data_base64)
+                .expect("decode first delegated repair request"),
+        )
+        .expect("parse first delegated repair request");
+        let repair_request: serde_json::Value = serde_json::from_slice(
+            &STANDARD
+                .decode(&repair_open.request.data_base64)
+                .expect("decode delegated format-repair request"),
+        )
+        .expect("parse delegated format-repair request");
+        assert_eq!(
+            repair_request["request"]["text"]["format"],
+            first_request["request"]["text"]["format"]
+        );
+        let repair_gateway = opened(
+            app.accept_local(&typed(ExecutionPortMessage::ModelOpenMessage(
+                repair_open.clone(),
+            )))
+            .expect("accept delegated format-repair ModelOpen"),
+        );
+        for chunk in provider_chunks(
+            &repair_open,
+            &repair_gateway,
+            [
+                ProviderStreamEvent::ResponseStarted {
+                    provider_response_id: "provider-delegated-invalid-2".to_owned(),
+                },
+                ProviderStreamEvent::TextStarted { index: 0 },
+                ProviderStreamEvent::TextDelta {
+                    index: 0,
+                    delta: "still invalid".to_owned(),
+                },
+                ProviderStreamEvent::TextEnded { index: 0 },
+                ProviderStreamEvent::Usage(ProviderTokenUsage {
+                    input_tokens: 10,
+                    cached_input_tokens: 0,
+                    cache_write_input_tokens: 0,
+                    output_tokens: 5,
+                    reasoning_output_tokens: 0,
+                }),
+                ProviderStreamEvent::Finished(ProviderFinishReason::Stop),
+            ],
+            1_000,
+        ) {
+            worker
+                .accept_control(
+                    &ExecutionPortMessage::ModelChunkMessage(chunk),
+                    at("2030-01-01T00:00:02.000Z"),
+                )
+                .await
+                .expect("deliver second invalid delegated output");
+        }
+        let outcome = poll_until_message(
+            &mut worker,
+            &port,
+            &at("2030-01-01T00:00:02.000Z"),
+            |messages| {
+                messages.iter().find_map(|message| match message {
+                    ExecutionPortMessage::JobOutcomeMessage(outcome) => Some(outcome.clone()),
+                    _ => None,
+                })
+            },
+            "delegated invalid repair did not become inconclusive",
+        )
+        .await;
+        assert_eq!(outcome.outcome.status, ExecutionOutcomeStatus::Failed);
+        assert_eq!(
+            port.messages()
+                .iter()
+                .filter(|message| matches!(message, ExecutionPortMessage::ModelOpenMessage(_)))
+                .count(),
+            2
+        );
+        assert!(worker.take_delegated_poll_outcomes().is_empty());
+        assert!(worker.active_jobs().is_empty());
+        assert_eq!(
+            fs::read_to_string(root.sources().join(id("rep", 1)).join("src/lib.rs"),)
+                .expect("read unchanged delegated source"),
+            "pub fn fixture_value() -> u64 { 1 }\n"
+        );
+        assert!(!port.messages().iter().any(|message| matches!(
+            message,
+            ExecutionPortMessage::ActionEnforcementRequestMessage(_)
+        )));
+    });
 }
 
 async fn register(
@@ -2476,8 +4508,13 @@ fn exact_submission_digest(job: &ExecutionJob) -> Sha256Digest {
     let prompt = winwincode_codex::stage_product::stage_product_prompt(job)
         .expect("build canonical stage prompt");
     let mut digest = Sha256::new();
-    digest.update(b"winwincode.codex-submission.v1\0");
+    digest.update(b"winwincode.codex-submission.v2\0");
+    digest.update((prompt.len() as u64).to_be_bytes());
     digest.update(prompt.as_bytes());
+    let no_schema = serde_json::to_vec(&Option::<serde_json::Value>::None)
+        .expect("serialize absent output schema");
+    digest.update((no_schema.len() as u64).to_be_bytes());
+    digest.update(no_schema);
     Sha256Digest(format!("sha256:{:x}", digest.finalize()))
 }
 
@@ -2778,8 +4815,38 @@ fn production_worker_kernel_gateway_loopback_and_restart_replay_are_exact() {
                 .iter()
                 .filter(|message| matches!(message, ExecutionPortMessage::RuntimeEventMessage(_)))
                 .count(),
-            3
+            4
         );
+        let baseline = first_terminal_facts
+            .iter()
+            .find_map(|message| match message {
+                ExecutionPortMessage::RuntimeEventMessage(event)
+                    if event.event.category == ExecutionEventCategory::Usage =>
+                {
+                    runtime_payload(event)
+                }
+                _ => None,
+            })
+            .expect("terminal performance baseline Usage event");
+        assert_eq!(baseline["fact"]["kind"], "performance_baseline");
+        assert_eq!(baseline["fact"]["report"]["executionMode"], "react");
+        assert_eq!(baseline["fact"]["report"]["observerMode"], "off");
+        assert_eq!(baseline["fact"]["report"]["primaryModelCallCount"], 1);
+        assert_eq!(baseline["fact"]["report"]["primaryModelInputTokens"], 10);
+        assert_eq!(baseline["fact"]["report"]["primaryModelCachedTokens"], 0);
+        assert_eq!(baseline["fact"]["report"]["primaryModelOutputTokens"], 5);
+        assert_eq!(baseline["fact"]["report"]["turnCount"], 1);
+        let first_performance_evidence =
+            winwincode_codex::performance_evidence::export_performance_v0_evidence(&root.worker())
+                .expect("export production performance evidence");
+        assert_eq!(first_performance_evidence.runs.len(), 1);
+        assert_eq!(first_performance_evidence.model_calls.len(), 1);
+        let comparison = first_performance_evidence
+            .summarize()
+            .expect("summarize production performance evidence");
+        assert_eq!(comparison.react.sample_count, 1);
+        assert_eq!(comparison.react.strong_model_call_count, 1);
+        assert_eq!(comparison.react.total_tokens, 15);
         let outcome = first_terminal_facts
             .iter()
             .find_map(|message| match message {
@@ -2833,6 +4900,11 @@ fn production_worker_kernel_gateway_loopback_and_restart_replay_are_exact() {
         assert_eq!(
             unique_terminal_facts(&replay_port.messages()),
             expected_replay
+        );
+        assert_eq!(
+            winwincode_codex::performance_evidence::export_performance_v0_evidence(&root.worker())
+                .expect("re-export production performance evidence after replay"),
+            first_performance_evidence
         );
         replay
             .shutdown(at("2030-01-01T00:00:03.000Z"))
@@ -3065,17 +5137,22 @@ fn production_event_poll_faults_retain_one_terminal_before_restart() {
                     | ExecutionPortMessage::ModelAckMessage(_)
             )));
             let first_facts = unique_terminal_facts(&first_messages);
-            assert_eq!(first_facts.len(), 2);
-            let ExecutionPortMessage::RuntimeEventMessage(stopped) = &first_facts[0] else {
+            assert_eq!(first_facts.len(), 3);
+            let ExecutionPortMessage::RuntimeEventMessage(baseline) = &first_facts[0] else {
+                panic!("durable performance baseline must precede the Stopped trace");
+            };
+            assert_eq!(baseline.event.sequence, ExecutionSequence(1));
+            assert_eq!(baseline.event.category, ExecutionEventCategory::Usage);
+            let ExecutionPortMessage::RuntimeEventMessage(stopped) = &first_facts[1] else {
                 panic!("durable Stopped trace must precede infrastructure Outcome");
             };
-            assert_eq!(stopped.event.sequence, ExecutionSequence(1));
+            assert_eq!(stopped.event.sequence, ExecutionSequence(2));
             assert_eq!(stopped.event.summary, expected_summary);
-            let ExecutionPortMessage::JobOutcomeMessage(outcome) = &first_facts[1] else {
+            let ExecutionPortMessage::JobOutcomeMessage(outcome) = &first_facts[2] else {
                 panic!("durable infrastructure Outcome must follow Stopped trace");
             };
             assert_eq!(outcome.outcome.status, expected_status);
-            assert_eq!(outcome.outcome.last_event_sequence.0, 1);
+            assert_eq!(outcome.outcome.last_event_sequence.0, 2);
             assert_eq!(stored_run_json(&root)["phase"], "outcome_retained");
             first
                 .shutdown(at("2030-01-01T00:00:03.000Z"))
@@ -3162,18 +5239,24 @@ fn pre_start_cancellation_restarts_with_one_exact_stopped_outcome() {
             ExecutionPortMessage::ModelOpenMessage(_) | ExecutionPortMessage::ModelAckMessage(_)
         )));
         let first_facts = unique_terminal_facts(&first_messages);
-        assert_eq!(first_facts.len(), 2);
+        assert_eq!(first_facts.len(), 3);
         assert!(matches!(
             &first_facts[0],
             ExecutionPortMessage::RuntimeEventMessage(event)
                 if event.event.sequence.0 == 1
-                    && event.event.summary == "embedded Codex turn cancelled"
+                    && event.event.category == ExecutionEventCategory::Usage
         ));
         assert!(matches!(
             &first_facts[1],
+            ExecutionPortMessage::RuntimeEventMessage(event)
+                if event.event.sequence.0 == 2
+                    && event.event.summary == "embedded Codex turn cancelled"
+        ));
+        assert!(matches!(
+            &first_facts[2],
             ExecutionPortMessage::JobOutcomeMessage(outcome)
                 if outcome.outcome.status == ExecutionOutcomeStatus::Cancelled
-                    && outcome.outcome.last_event_sequence.0 == 1
+                    && outcome.outcome.last_event_sequence.0 == 2
         ));
         first
             .shutdown(at("2030-01-01T00:00:03.000Z"))

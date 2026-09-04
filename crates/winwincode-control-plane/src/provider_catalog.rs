@@ -11,11 +11,12 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+pub use winwincode_api::generated::StructuredOutputSupport;
 use winwincode_api::generated::{Actor, Scope};
 use winwincode_domain::{CredentialReferenceId, RequestId, Sha256Digest};
 use winwincode_storage::{
-    CommitReceipt, NewOutboxEvent, ProductStateStorage, ReceiptIdentity, StateCommit, StorageError,
-    StorageErrorKind, StoredState,
+    CommitReceipt, NewOutboxEvent, ProductStateStorage, ReceiptActorKey, ReceiptIdentity,
+    StateCommit, StorageError, StorageErrorKind, StoredState,
 };
 
 use crate::credential_leak_gate::{
@@ -23,12 +24,17 @@ use crate::credential_leak_gate::{
 };
 use crate::{receipt_actor_key, receipt_scope_key};
 
-const STATE_SCHEMA: &str = "winwincode.provider-catalog.v1";
+const STATE_SCHEMA: &str = "winwincode.provider-catalog.v2";
+const LEGACY_STATE_SCHEMA_V1: &str = "winwincode.provider-catalog.v1";
 const STREAM_PREFIX: &str = "provider-catalog:";
+const MIGRATION_SCAN_PAGE_SIZE: usize = 256;
+const MIGRATION_REQUEST_ID: &str = "req_00000000000000000000000000";
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
 /// Durable topic emitted once for every accepted catalog version change.
 pub const PROVIDER_CATALOG_VERSION_EVENT_TOPIC: &str = "provider.catalog.version.v1";
+/// Internal durable event emitted by the one-time v1-to-v2 state migration.
+pub const PROVIDER_CATALOG_MIGRATION_EVENT_TOPIC: &str = "provider.catalog.migrated.v2";
 
 /// Stable failure categories for Provider catalog commands and queries.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -184,6 +190,7 @@ pub struct ModelCapability {
     pub context_window_tokens: u64,
     pub max_output_tokens: u64,
     pub tool_support: ModelToolSupport,
+    pub structured_output_support: StructuredOutputSupport,
     /// Empty means reasoning controls are unsupported.
     pub reasoning_efforts: Vec<String>,
 }
@@ -228,6 +235,7 @@ pub struct ModelCapabilityProjection {
     pub context_window_tokens: u64,
     pub max_output_tokens: u64,
     pub tool_support: ModelToolSupport,
+    pub structured_output_support: StructuredOutputSupport,
     pub reasoning_efforts: Vec<String>,
     pub availability: CatalogAvailability,
     pub version: u64,
@@ -320,6 +328,55 @@ struct ProviderCatalogState {
     providers: BTreeMap<String, ProviderRecord>,
 }
 
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct LegacyProviderCatalogStateV1 {
+    schema: String,
+    scope: Scope,
+    catalog_version: u64,
+    providers: BTreeMap<String, LegacyProviderRecordV1>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct LegacyProviderRecordV1 {
+    provider_id: String,
+    display_name: String,
+    adapter_kind: String,
+    credential_reference_id: CredentialReferenceId,
+    availability: CatalogAvailability,
+    version: u64,
+    models: BTreeMap<String, LegacyModelRecordV1>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct LegacyModelRecordV1 {
+    model_id: String,
+    display_name: String,
+    context_window_tokens: u64,
+    max_output_tokens: u64,
+    tool_support: ModelToolSupport,
+    reasoning_efforts: Vec<String>,
+    availability: CatalogAvailability,
+    version: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProviderCatalogMigrationReport {
+    pub migrated_catalogs: u64,
+    pub current_catalogs: u64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ProviderCatalogMigrationEvent<'a> {
+    schema: &'static str,
+    scope: &'a Scope,
+    previous_catalog_version: u64,
+    catalog_version: u64,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ProviderRecord {
@@ -340,6 +397,7 @@ struct ModelRecord {
     context_window_tokens: u64,
     max_output_tokens: u64,
     tool_support: ModelToolSupport,
+    structured_output_support: StructuredOutputSupport,
     reasoning_efforts: Vec<String>,
     availability: CatalogAvailability,
     version: u64,
@@ -583,6 +641,218 @@ impl<'a> ProviderCatalogService<'a> {
     }
 }
 
+/// Migrates every persisted Provider catalog from the retired v1 state shape
+/// to v2 exactly once. Normal catalog reads accept only v2.
+///
+/// # Errors
+///
+/// Rejects malformed legacy/current state, unavailable bounded enumeration,
+/// or any atomic migration commit failure.
+pub fn migrate_provider_catalogs_v1_to_v2(
+    storage: &mut dyn ProductStateStorage,
+) -> Result<ProviderCatalogMigrationReport, ProviderCatalogError> {
+    let Some(upper_bound) = storage.last_state_stream_id(STREAM_PREFIX)? else {
+        return Ok(ProviderCatalogMigrationReport {
+            migrated_catalogs: 0,
+            current_catalogs: 0,
+        });
+    };
+    let mut after = String::new();
+    let mut report = ProviderCatalogMigrationReport {
+        migrated_catalogs: 0,
+        current_catalogs: 0,
+    };
+    loop {
+        let page = storage.scan_state_streams(
+            STREAM_PREFIX,
+            &after,
+            &upper_bound,
+            MIGRATION_SCAN_PAGE_SIZE,
+        )?;
+        if page.is_empty() {
+            break;
+        }
+        for stored in &page {
+            match persisted_state_schema(stored)?.as_str() {
+                STATE_SCHEMA => {
+                    let state: ProviderCatalogState = serde_json::from_slice(&stored.payload)
+                        .map_err(|_| ProviderCatalogError::invalid())?;
+                    decode_state(stored, &state.scope)?;
+                    report.current_catalogs = report
+                        .current_catalogs
+                        .checked_add(1)
+                        .ok_or_else(ProviderCatalogError::invalid)?;
+                }
+                LEGACY_STATE_SCHEMA_V1 => {
+                    migrate_legacy_catalog(storage, stored)?;
+                    report.migrated_catalogs = report
+                        .migrated_catalogs
+                        .checked_add(1)
+                        .ok_or_else(ProviderCatalogError::invalid)?;
+                }
+                _ => return Err(ProviderCatalogError::invalid()),
+            }
+        }
+        let Some(last) = page.last() else {
+            return Err(ProviderCatalogError::invalid());
+        };
+        after.clone_from(&last.stream_id);
+        if after == upper_bound {
+            break;
+        }
+    }
+    Ok(report)
+}
+
+fn persisted_state_schema(stored: &StoredState) -> Result<String, ProviderCatalogError> {
+    CredentialLeakGate::default()
+        .inspect_json_bytes(CredentialOutputBoundary::Persistence, &stored.payload)?;
+    let value: serde_json::Value =
+        serde_json::from_slice(&stored.payload).map_err(|_| ProviderCatalogError::invalid())?;
+    value
+        .as_object()
+        .and_then(|object| object.get("schema"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(ProviderCatalogError::invalid)
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "the one-time migration keeps validation, conversion, and its atomic receipt together"
+)]
+fn migrate_legacy_catalog(
+    storage: &mut dyn ProductStateStorage,
+    stored: &StoredState,
+) -> Result<(), ProviderCatalogError> {
+    let legacy: LegacyProviderCatalogStateV1 =
+        serde_json::from_slice(&stored.payload).map_err(|_| ProviderCatalogError::invalid())?;
+    if legacy.schema != LEGACY_STATE_SCHEMA_V1
+        || legacy.catalog_version != stored.revision
+        || legacy.catalog_version == 0
+        || legacy.catalog_version >= MAX_SAFE_INTEGER
+        || stored.stream_id != catalog_stream_id(&legacy.scope)?
+    {
+        return Err(ProviderCatalogError::invalid());
+    }
+    let catalog_version = next_version(legacy.catalog_version)?;
+    let state = ProviderCatalogState {
+        schema: STATE_SCHEMA.to_owned(),
+        scope: legacy.scope,
+        catalog_version,
+        providers: legacy
+            .providers
+            .into_iter()
+            .map(|(provider_id, provider)| {
+                (
+                    provider_id,
+                    ProviderRecord {
+                        provider_id: provider.provider_id,
+                        display_name: provider.display_name,
+                        adapter_kind: provider.adapter_kind,
+                        credential_reference_id: provider.credential_reference_id,
+                        availability: provider.availability,
+                        version: provider.version,
+                        models: provider
+                            .models
+                            .into_iter()
+                            .map(|(model_id, model)| {
+                                (
+                                    model_id,
+                                    ModelRecord {
+                                        model_id: model.model_id,
+                                        display_name: model.display_name,
+                                        context_window_tokens: model.context_window_tokens,
+                                        max_output_tokens: model.max_output_tokens,
+                                        tool_support: model.tool_support,
+                                        structured_output_support:
+                                            StructuredOutputSupport::Unsupported,
+                                        reasoning_efforts: model.reasoning_efforts,
+                                        availability: model.availability,
+                                        version: model.version,
+                                    },
+                                )
+                            })
+                            .collect(),
+                    },
+                )
+            })
+            .collect(),
+    };
+    let migrated_payload =
+        serde_json::to_vec(&state).map_err(|_| ProviderCatalogError::invalid())?;
+    let migrated_stored = StoredState {
+        stream_id: stored.stream_id.clone(),
+        revision: catalog_version,
+        payload: migrated_payload.clone(),
+    };
+    validate_state(&migrated_stored, &state.scope, &state)?;
+    CredentialLeakGate::default()
+        .inspect_json_bytes(CredentialOutputBoundary::Persistence, &migrated_payload)?;
+
+    let event = ProviderCatalogMigrationEvent {
+        schema: "winwincode.provider-catalog.migration.v2",
+        scope: &state.scope,
+        previous_catalog_version: stored.revision,
+        catalog_version,
+    };
+    let event_payload = serde_json::to_vec(&event).map_err(|_| ProviderCatalogError::invalid())?;
+    let mut digest = Sha256::new();
+    digest.update(b"winwincode.provider-catalog-migration.v2\0");
+    digest.update(stored.stream_id.as_bytes());
+    digest.update([0]);
+    digest.update(&stored.payload);
+    let command_digest = Sha256Digest(format!("sha256:{:x}", digest.finalize()));
+    let actor_key =
+        ReceiptActorKey::from_encoded(b"winwincode.provider-catalog-migration.actor.v2".to_vec())?;
+    let identity = ReceiptIdentity::new(
+        actor_key,
+        receipt_scope_key(&state.scope)?,
+        RequestId(MIGRATION_REQUEST_ID.to_owned()),
+    )?;
+    let mut event_digest = Sha256::new();
+    event_digest.update(b"winwincode.provider-catalog-migration-event.v2\0");
+    event_digest.update(stored.stream_id.as_bytes());
+    event_digest.update(stored.revision.to_be_bytes());
+    let event_id = format!("provider-catalog-migration:{:x}", event_digest.finalize());
+    let expected_identity = identity.clone();
+    let expected_command_digest = command_digest.clone();
+    let expected_event_id = event_id.clone();
+    let receipt = storage.commit(&StateCommit::new(
+        identity,
+        command_digest,
+        stored.stream_id.clone(),
+        stored.revision,
+        migrated_payload,
+        vec![NewOutboxEvent::internal(
+            event_id,
+            PROVIDER_CATALOG_MIGRATION_EVENT_TOPIC,
+            event_payload.clone(),
+        )],
+    ))?;
+    let migration_events = receipt
+        .events
+        .iter()
+        .filter(|event| event.topic == PROVIDER_CATALOG_MIGRATION_EVENT_TOPIC)
+        .collect::<Vec<_>>();
+    let [migration_event] = migration_events.as_slice() else {
+        return Err(ProviderCatalogError::invalid());
+    };
+    if receipt.receipt_identity != expected_identity
+        || receipt.command_digest != expected_command_digest
+        || receipt.stream_id != stored.stream_id
+        || receipt.revision != catalog_version
+        || receipt.events.len() != 1
+        || migration_event.event_id != expected_event_id
+        || migration_event.payload != event_payload
+        || migration_event.projection_cursor.is_some()
+        || migration_event.public_context.is_some()
+    {
+        return Err(ProviderCatalogError::invalid());
+    }
+    Ok(())
+}
+
 fn canonical_descriptor(
     descriptor: &ProviderDescriptor,
 ) -> Result<ProviderDescriptor, ProviderCatalogError> {
@@ -620,6 +890,7 @@ fn canonical_descriptor(
             context_window_tokens: model.context_window_tokens,
             max_output_tokens: model.max_output_tokens,
             tool_support: model.tool_support,
+            structured_output_support: model.structured_output_support.clone(),
             reasoning_efforts: efforts.into_iter().collect(),
         };
         if models
@@ -667,6 +938,7 @@ fn upsert_provider(
                 context_window_tokens: capability.context_window_tokens,
                 max_output_tokens: capability.max_output_tokens,
                 tool_support: capability.tool_support,
+                structured_output_support: capability.structured_output_support,
                 reasoning_efforts: capability.reasoning_efforts,
                 availability: CatalogAvailability::Enabled,
                 version,
@@ -697,6 +969,7 @@ fn same_capability(previous: &ModelRecord, current: &ModelCapability) -> bool {
         && previous.context_window_tokens == current.context_window_tokens
         && previous.max_output_tokens == current.max_output_tokens
         && previous.tool_support == current.tool_support
+        && previous.structured_output_support == current.structured_output_support
         && previous.reasoning_efforts == current.reasoning_efforts
 }
 
@@ -727,6 +1000,7 @@ fn model_projection(model: &ModelRecord) -> ModelCapabilityProjection {
         context_window_tokens: model.context_window_tokens,
         max_output_tokens: model.max_output_tokens,
         tool_support: model.tool_support,
+        structured_output_support: model.structured_output_support.clone(),
         reasoning_efforts: model.reasoning_efforts.clone(),
         availability: model.availability,
         version: model.version,
@@ -831,6 +1105,15 @@ fn decode_state(
         .inspect_json_bytes(CredentialOutputBoundary::Persistence, &stored.payload)?;
     let state: ProviderCatalogState =
         serde_json::from_slice(&stored.payload).map_err(|_| ProviderCatalogError::invalid())?;
+    validate_state(stored, requested_scope, &state)?;
+    Ok(state)
+}
+
+fn validate_state(
+    stored: &StoredState,
+    requested_scope: &Scope,
+    state: &ProviderCatalogState,
+) -> Result<(), ProviderCatalogError> {
     if state.scope != *requested_scope {
         return Err(ProviderCatalogError::scope_denied());
     }
@@ -863,6 +1146,7 @@ fn decode_state(
                     context_window_tokens: model.context_window_tokens,
                     max_output_tokens: model.max_output_tokens,
                     tool_support: model.tool_support,
+                    structured_output_support: model.structured_output_support.clone(),
                     reasoning_efforts: model.reasoning_efforts.clone(),
                 })
                 .collect(),
@@ -875,7 +1159,7 @@ fn decode_state(
             }
         }
     }
-    Ok(state)
+    Ok(())
 }
 
 fn catalog_stream_id(scope: &Scope) -> Result<String, ProviderCatalogError> {

@@ -1,12 +1,17 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { join, resolve } from 'node:path'
 import test from 'node:test'
 
 import {
   STRONGFLOW_ROLE_CONFIGURATION_SCHEMA_VERSION,
   STRONGFLOW_ROLE_IDS,
   STRONGFLOW_ROLE_SESSION_POLICY_SCHEMA_VERSION,
+  RoleExecutionMode,
   StrongFlowRoleConfigurationError,
   createStrongFlowRoleConfiguration,
+  migratePersistedRoleSessionPolicyV1,
+  parseRoleSessionPolicy,
   parseStrongFlowRoleConfiguration,
   strongFlowRoleSessionPolicy,
   strongFlowRoleWorkspaceMode,
@@ -24,6 +29,8 @@ const modelCatalog = Object.freeze([
     reasoningEfforts: Object.freeze(['high']),
   }),
 ])
+
+const root = resolve(import.meta.dirname, '..')
 
 function assignments() {
   return Object.fromEntries(STRONGFLOW_ROLE_IDS.map((roleId, index) => [
@@ -93,6 +100,20 @@ test('creates eight canonical roles with only two candidate writers', () => {
 })
 
 test('creates a minimal Codex role-session policy without a second tool surface', () => {
+  const schema = JSON.parse(readFileSync(
+    join(root, 'schema/winwincode/v1/execution-port.schema.json'),
+    'utf8',
+  ))
+  assert.deepEqual(Object.values(RoleExecutionMode), schema.$defs.RoleExecutionMode.enum)
+  assert.deepEqual(schema.$defs.RoleSessionPolicy.required, [
+    'schemaVersion',
+    'roleId',
+    'workspaceMode',
+    'developerInstructions',
+    'executionMode',
+  ])
+  assert.equal(schema.$defs.RoleSessionPolicy.additionalProperties, false)
+
   for (const roleId of STRONGFLOW_ROLE_IDS) {
     const policy = strongFlowRoleSessionPolicy(roleId)
     assert.deepEqual(Object.keys(policy), [
@@ -100,13 +121,81 @@ test('creates a minimal Codex role-session policy without a second tool surface'
       'roleId',
       'workspaceMode',
       'developerInstructions',
+      'executionMode',
     ])
     assert.equal(policy.schemaVersion, STRONGFLOW_ROLE_SESSION_POLICY_SCHEMA_VERSION)
     assert.equal(policy.roleId, roleId)
     assert.equal(policy.workspaceMode, strongFlowRoleWorkspaceMode(roleId))
+    assert.equal(policy.executionMode, RoleExecutionMode.React)
     assert.ok(policy.developerInstructions.length > 0)
     assert.ok(Object.isFrozen(policy))
   }
+})
+
+test('delegated batch keeps Composer roles read-only while React retains direct writers', () => {
+  for (const roleId of STRONGFLOW_ROLE_IDS) {
+    const react = strongFlowRoleSessionPolicy(roleId, RoleExecutionMode.React)
+    const delegated = strongFlowRoleSessionPolicy(roleId, RoleExecutionMode.DelegatedBatch)
+    const composer = roleId === 'executor' || roleId === 'remediator'
+
+    assert.equal(
+      react.workspaceMode,
+      composer ? 'candidate-write' : strongFlowRoleWorkspaceMode(roleId),
+    )
+    assert.equal(
+      delegated.workspaceMode,
+      composer ? 'candidate-read-only' : react.workspaceMode,
+    )
+    assert.equal(delegated.executionMode, RoleExecutionMode.DelegatedBatch)
+    if (composer) {
+      assert.notEqual(delegated.developerInstructions, react.developerInstructions)
+      assert.match(delegated.developerInstructions, /bounded (?:ChangeBatch|Repair) proposal/u)
+      assert.match(delegated.developerInstructions, /read-only candidate workspace/u)
+      assert.doesNotMatch(delegated.developerInstructions, /^(?:Implement|Apply) only/u)
+    } else {
+      assert.equal(delegated.developerInstructions, react.developerInstructions)
+    }
+  }
+})
+
+test('runtime role-policy parsing accepts only canonical v2 without a legacy read path', () => {
+  const canonical = strongFlowRoleSessionPolicy('executor', RoleExecutionMode.DelegatedBatch)
+  assert.deepEqual(parseRoleSessionPolicy(jsonClone(canonical)), canonical)
+
+  const cases = [
+    { ...canonical, schemaVersion: 1 },
+    { ...canonical, executionMode: 'composer' },
+    { ...canonical, workspaceMode: 'candidate-write' },
+    { ...canonical, unknownField: true },
+  ]
+  for (const value of cases) {
+    assert.throws(
+      () => parseRoleSessionPolicy(value),
+      error => error instanceof StrongFlowRoleConfigurationError,
+    )
+  }
+})
+
+test('the explicit v1 migration writes canonical v2 before replay', () => {
+  const react = strongFlowRoleSessionPolicy('executor', RoleExecutionMode.React)
+  const persistedV1 = {
+    schemaVersion: 1,
+    roleId: react.roleId,
+    workspaceMode: react.workspaceMode,
+    developerInstructions: react.developerInstructions,
+  }
+  const migrated = migratePersistedRoleSessionPolicyV1(jsonClone(persistedV1))
+  assert.deepEqual(migrated, react)
+  assert.deepEqual(parseRoleSessionPolicy(jsonClone(migrated)), react)
+
+  assert.throws(
+    () => migratePersistedRoleSessionPolicyV1(jsonClone(migrated)),
+    expectedRoleError('INVALID_ROLE_POLICY'),
+  )
+  assert.throws(
+    () => migratePersistedRoleSessionPolicyV1({ ...persistedV1, unknownField: true }),
+    expectedRoleError('INVALID_ROLE_POLICY'),
+  )
 })
 
 test('JSON round-trip validates model routes and restores canonical role order', () => {

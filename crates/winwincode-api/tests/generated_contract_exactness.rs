@@ -5,6 +5,7 @@ use winwincode_api::generated::{
     CommandCompletedResponse, ControlPlaneWebSocketSubscribeFrame, DeliveryStageProjection,
     DeliveryStageSessionBindingProjection, QueryRequest, QueryResultResponse,
     RuntimeProjectionSnapshot, SettingsProjection, SolutionReviewProjection, StrongFlowReadCursor,
+    StructuredOutputSupport,
 };
 
 fn http_examples() -> Value {
@@ -69,6 +70,32 @@ fn required_nullable_fields_cannot_be_omitted_from_generated_rust_dtos() {
         .expect("settings object")
         .remove("defaultModelRoute");
     assert!(serde_json::from_value::<SettingsProjection>(missing).is_err());
+}
+
+#[test]
+fn generated_structured_output_support_is_closed_and_round_trips_exactly() {
+    for (value, expected) in [
+        (StructuredOutputSupport::Unsupported, "unsupported"),
+        (
+            StructuredOutputSupport::JsonSchemaStrict,
+            "json_schema_strict",
+        ),
+    ] {
+        let encoded = serde_json::to_value(&value).expect("serialize structured-output support");
+        assert_eq!(encoded, json!(expected));
+        assert_eq!(
+            serde_json::from_value::<StructuredOutputSupport>(encoded)
+                .expect("deserialize structured-output support"),
+            value
+        );
+    }
+    for invalid in [
+        json!("json_schema"),
+        Value::Null,
+        json!({"kind":"unsupported"}),
+    ] {
+        assert!(serde_json::from_value::<StructuredOutputSupport>(invalid).is_err());
+    }
 }
 
 #[test]

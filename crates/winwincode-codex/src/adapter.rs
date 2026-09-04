@@ -4,7 +4,7 @@ use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::fs::OpenOptions;
 use std::io::{Read as _, Write as _};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -17,10 +17,13 @@ use crate::candidate_artifact_outbox::{
     CandidateArtifactUpload, RetainedCandidateArtifact,
 };
 use crate::{
-    ActionRequestTransport, CodexCoreAdapter, CodexPoll, CodexRunKey, CodexThreadStart,
-    CodexTurnCompletion, DurableExecutionDelivery,
+    ActionRequestTransport, CodexCoreAdapter, CodexPoll, CodexThreadStart, CodexTurnCompletion,
+    DelegatedLoopPhase, DelegatedLoopStopFact, DelegatedLoopTransition,
+    DelegatedLoopTransitionOutcome, DelegatedObserverPreflight, DelegatedObserverPreflightOutcome,
+    DelegatedObserverSettlement, DurableExecutionDelivery, delegated_loop_turn_id,
     model_port_client::{ModelChunkDisposition, ModelLeaseAuthority},
 };
+use codex_apply_patch::{Hunk, parse_patch};
 use codex_protocol::approvals::{ApplyPatchApprovalRequestEvent, ExecApprovalRequestEvent};
 use codex_protocol::models::MessagePhase;
 use codex_protocol::protocol::{Event as CodexEvent, EventMsg as CodexEventMsg};
@@ -28,38 +31,48 @@ use codex_protocol::request_user_input::{
     RequestUserInputAnswer, RequestUserInputEvent, RequestUserInputResponse,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 use winwincode_domain::{
     ApprovalId, CodexThreadId, ExecutionEventId, ExecutionMessageId, ExecutionSequence,
     InputRequestId, Instant, InteractiveInputMode, RequestId, SchemaVersion, SessionIdentity,
-    Sha256Digest, WorkerId, WorkerInstanceId,
+    Sha256Digest, WorkerId, WorkerInstanceId, WorkspaceRevision,
 };
 use winwincode_execution_port::{
     action_enforcement::ActionEnforcementSigningKey,
     action_gateway::ExecutionEnvelopeToken,
     capability_adapter::{CapabilityDescriptor, WorkerCapabilityCatalog},
+    change_batch_identity::{derive_change_batch_id, validate_change_batch_identity_derivation},
     generated::{
         ApprovalAction, ApprovalActionCategory, ApprovalDecisionMessage,
         ApprovalDecisionMessageDecision, ApprovalDecisionMessageScope, ApprovalRequestMessage,
-        ApprovalRequestMessageKind, ArtifactAckMessage, ArtifactReference, ExecutionEventCategory,
-        ExecutionJob, ExecutionOutcomeUsage, ExecutionPortMessage, ExecutionScope,
-        InputRequestMessage, InputRequestMessageKind, InputResponseMessage,
-        InputResponseMessageStatus, InteractiveInputChoice, JobOutcomeMessage, ModelChunkMessage,
-        ModelGatewayRoute, RuntimeEventMessage, RuntimeReplayRequestMessage, WorkerCapabilitySet,
+        ApprovalRequestMessageKind, ArtifactAckMessage, ArtifactReference, ChangeBatchIdentity,
+        ChangeBatchProposal, ChangeBatchProposalDisposition, ChangeBatchProposalEvent,
+        ExecutionEventCategory, ExecutionJob, ExecutionOutcomeUsage, ExecutionPortMessage,
+        ExecutionScope, ExecutionWorkspaceWriteMode, FinalCandidateFreezeFact, InputRequestMessage,
+        InputRequestMessageKind, InputResponseMessage, InputResponseMessageStatus,
+        InteractiveInputChoice, JobOutcomeMessage, ModelChunkMessage, ModelGatewayRoute,
+        RepairLoopCounters, RepairLoopStopReason, RoleSessionPolicyRoleId, RuntimeEventMessage,
+        RuntimeReplayRequestMessage, WorkerCapabilitySet,
+    },
+    repair_loop_context::{
+        validate_final_candidate_freeze_fact, validate_repair_loop_budget,
+        validate_repair_loop_context_pack, validate_repair_loop_counters,
     },
     replay::ReplayStore,
     runtime_replay::RuntimeReplayIdentity,
     runtime_trace_outbox::{
-        RuntimeTraceDraft, RuntimeTraceFact, RuntimeTraceIdentity, RuntimeTraceRetention,
-        SecretSafeTraceSummary, WorkerRuntimeTraceOutbox, WorkerRuntimeTraceState,
+        ExecutionMode, ObserverMode, RuntimeTraceDraft, RuntimeTraceFact, RuntimeTraceIdentity,
+        RuntimeTraceRetention, SecretSafeTraceSummary, WorkerRuntimeTraceOutbox,
+        WorkerRuntimeTraceState,
     },
 };
 #[cfg(feature = "test-support")]
 use winwincode_kernel::KernelEvent;
 use winwincode_kernel::{
     ApprovalDecision, ApprovalKind, ApprovalResponse, EventPoll, ExactTurnReconciliation, Kernel,
-    KernelOptions, RoleSessionPolicy, SessionOptions,
+    KernelOptions, RoleExecutionMode, RoleSessionPolicy, SessionOptions, TurnSubmissionOptions,
 };
 
 use crate::action_bridge::{ActionBridgeError, ExecutionPortActionGate};
@@ -68,7 +81,13 @@ use crate::model_bridge::{
     BridgeError, ExecutionPortModelBridge, ModelRunBinding, SharedAuthoritySource,
 };
 use crate::outbox::ExecutionOutbox;
-use crate::stage_product::{role_session_policy, stage_product_job_digest, stage_product_prompt};
+use crate::performance::{
+    PerformanceOperationCompletion, PerformanceOperationKind, duration_millis, elapsed_millis,
+};
+use crate::stage_product::{
+    change_batch_proposal_json_schema, migrate_persisted_role_session_policy_v1,
+    role_session_policy, stage_product_job_digest, stage_product_prompt,
+};
 use crate::stage_runtime_projection::{
     StageCommandEnd, StageRuntimeContext, StageRuntimeProjector, StageRuntimeRetention,
     StageTurnCompletion,
@@ -78,8 +97,11 @@ use crate::store::{
     StoredApprovalOperationState, StoredInputOperation, StoredInputOperationState,
 };
 
+const FORMAT_REPAIR_PROMPT: &str = "Return only one corrected JSON object matching the active ChangeBatchProposal schema. Correct the preceding final answer's formatting or patch syntax. Do not call tools, modify files, broaden scope, or perform implementation work.";
+
 const DEFAULT_EVENT_POLL_MILLIS: u64 = 25;
 const KERNEL_HOME_DIRECTORY: &str = "kernel-home";
+const ROLE_POLICY_V2_MIGRATION: &str = "role-session-policy-v1-to-v2";
 
 /// Unvalidated caller-owned production options.
 pub struct ProductionCodexOptions {
@@ -93,6 +115,8 @@ pub struct ProductionCodexOptions {
     pub discovered_capabilities: Vec<CapabilityDescriptor>,
     pub action_signing_key: ActionEnforcementSigningKey,
     pub execution_envelope: ExecutionEnvelopeToken,
+    pub execution_mode: ExecutionMode,
+    pub observer_mode: ObserverMode,
 }
 
 /// Validated immutable adapter configuration.
@@ -110,11 +134,15 @@ pub struct ProductionCodexConfig {
     discovered_capabilities: Vec<CapabilityDescriptor>,
     action_signing_key: ActionEnforcementSigningKey,
     execution_envelope: ExecutionEnvelopeToken,
+    execution_mode: ExecutionMode,
+    observer_mode: ObserverMode,
     event_poll_timeout: Duration,
     #[cfg(feature = "test-support")]
     event_poll_faults: VecDeque<ProductionEventPollFault>,
     #[cfg(feature = "test-support")]
     submission_faults: VecDeque<ProductionSubmissionFault>,
+    #[cfg(feature = "test-support")]
+    delegated_transition_faults: VecDeque<ProductionDelegatedTransitionFault>,
 }
 
 /// Test-only faults injected at the embedded Kernel event boundary.
@@ -133,6 +161,15 @@ pub enum ProductionEventPollFault {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProductionSubmissionFault {
     AfterIntentBeforeKernel,
+}
+
+/// Test-only crash boundaries around one durable delegated-loop transition.
+#[cfg(feature = "test-support")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProductionDelegatedTransitionFault {
+    BeforeIntent,
+    AfterIntentBeforeKernel,
+    AfterKernelBeforeSettlement,
 }
 
 impl ProductionCodexConfig {
@@ -185,11 +222,15 @@ impl ProductionCodexConfig {
             discovered_capabilities: options.discovered_capabilities,
             action_signing_key: options.action_signing_key,
             execution_envelope: options.execution_envelope,
+            execution_mode: options.execution_mode,
+            observer_mode: options.observer_mode,
             event_poll_timeout: Duration::from_millis(DEFAULT_EVENT_POLL_MILLIS),
             #[cfg(feature = "test-support")]
             event_poll_faults: VecDeque::new(),
             #[cfg(feature = "test-support")]
             submission_faults: VecDeque::new(),
+            #[cfg(feature = "test-support")]
+            delegated_transition_faults: VecDeque::new(),
         })
     }
 
@@ -206,6 +247,17 @@ impl ProductionCodexConfig {
     #[must_use]
     pub fn with_test_submission_fault(mut self, fault: ProductionSubmissionFault) -> Self {
         self.submission_faults.push_back(fault);
+        self
+    }
+
+    /// Stops one delegated transition at an exact durable/Core boundary.
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub fn with_test_delegated_transition_fault(
+        mut self,
+        fault: ProductionDelegatedTransitionFault,
+    ) -> Self {
+        self.delegated_transition_faults.push_back(fault);
         self
     }
 
@@ -226,6 +278,16 @@ impl ProductionCodexConfig {
     pub const fn gateway_route(&self) -> &ModelGatewayRoute {
         &self.gateway_route
     }
+
+    #[must_use]
+    pub const fn execution_mode(&self) -> ExecutionMode {
+        self.execution_mode
+    }
+
+    #[must_use]
+    pub const fn observer_mode(&self) -> ObserverMode {
+        self.observer_mode
+    }
 }
 
 impl fmt::Debug for ProductionCodexConfig {
@@ -235,6 +297,8 @@ impl fmt::Debug for ProductionCodexConfig {
             .field("provider", &self.provider)
             .field("model", &self.model)
             .field("gateway_route", &self.gateway_route)
+            .field("execution_mode", &self.execution_mode)
+            .field("observer_mode", &self.observer_mode)
             .finish_non_exhaustive()
     }
 }
@@ -324,6 +388,7 @@ impl ProductionCodexAdapter {
         )
         .map_err(|_| invalid_configuration())?;
         let store = AdapterStore::open(&config.data_directory).map_err(map_store_error)?;
+        migrate_stored_run_role_policies_v1_to_v2(&store)?;
         let outbox = ExecutionOutbox::open(store.clone()).map_err(map_store_error)?;
         let candidate_artifacts =
             CandidateArtifactOutbox::open(store.clone()).map_err(map_store_error)?;
@@ -686,8 +751,8 @@ impl ProductionCodexAdapter {
             run.record.phase = StoredRunPhase::TerminalTracePending;
             self.persist_run(run_key)?;
         }
-        let trace = self.retain_terminal_trace(run_key, "embedded Codex turn failed")?;
-        Ok(CodexPoll::RuntimeTrace(trace))
+        self.poll_retained_terminal(run_key)?
+            .ok_or_else(unavailable)
     }
 
     fn persist_run(&self, run_key: &str) -> Result<(), ProductionCodexError> {
@@ -710,7 +775,16 @@ impl ProductionCodexAdapter {
             return Ok(None);
         };
         if phase == StoredRunPhase::TerminalTracePending {
-            let trace = self.retain_terminal_trace(run_key, terminal.trace_summary())?;
+            let baseline_retained = self
+                .store
+                .load_performance_projection(run_key)
+                .map_err(map_store_error)?
+                .is_some_and(|projection| projection.retained);
+            let trace = if baseline_retained {
+                self.retain_terminal_trace(run_key, terminal.trace_summary())?
+            } else {
+                self.retain_performance_baseline_trace(run_key)?
+            };
             return Ok(Some(CodexPoll::RuntimeTrace(trace)));
         }
         terminal.into_poll().map(Some)
@@ -787,6 +861,105 @@ impl ProductionCodexAdapter {
         Ok(message)
     }
 
+    fn retain_performance_baseline_trace(
+        &mut self,
+        run_key: &str,
+    ) -> Result<Box<RuntimeEventMessage>, ProductionCodexError> {
+        let projection = if let Some(projection) = self
+            .store
+            .load_performance_projection(run_key)
+            .map_err(map_store_error)?
+        {
+            projection
+        } else {
+            let run = self.runs.get(run_key).ok_or_else(unknown_thread)?;
+            let identity = RuntimeReplayIdentity {
+                lease: run.binding.authority.lease.clone(),
+                worker_session_id: run.binding.authority.worker_session_id.clone(),
+                session_identity: run.binding.authority.session_identity.clone(),
+                codex_thread_id: run.binding.canonical_thread_id.clone(),
+            };
+            let snapshot = ReplayStore::load(&mut self.store, &identity.stream_key())
+                .map_err(map_store_error)?
+                .unwrap_or_default();
+            let sequence = snapshot
+                .highest_sequence
+                .checked_add(1)
+                .ok_or_else(unavailable)?;
+            let total_runtime_ms = terminal_performance_runtime(&self.store, run_key, &run.record)?;
+            let report = self
+                .store
+                .performance_report(run_key, total_runtime_ms)
+                .map_err(map_store_error)?;
+            self.store
+                .reserve_performance_projection(
+                    run_key,
+                    ExecutionEventId(canonical_id(
+                        "xevt",
+                        b"codex-performance-baseline",
+                        run_key,
+                        sequence,
+                    )),
+                    ExecutionSequence(i64::try_from(sequence).map_err(|_| unavailable())?),
+                    report,
+                )
+                .map_err(map_store_error)?
+        };
+        let run = self.runs.get(run_key).ok_or_else(unknown_thread)?;
+        let occurred_at = run.record.last_activity_at.clone();
+        let sequence = u64::try_from(projection.sequence.0).map_err(|_| unavailable())?;
+        let draft = RuntimeTraceDraft {
+            identity: RuntimeTraceIdentity {
+                lease: run.binding.authority.lease.clone(),
+                worker_session_id: run.binding.authority.worker_session_id.clone(),
+                session_identity: run.binding.authority.session_identity.clone(),
+                message_id: ExecutionMessageId(canonical_id(
+                    "xmsg",
+                    b"codex-performance-message",
+                    run_key,
+                    sequence,
+                )),
+                event_id: projection.event_id,
+                sequence: projection.sequence,
+                occurred_at: occurred_at.clone(),
+                sent_at: occurred_at,
+            },
+            category: ExecutionEventCategory::Usage,
+            summary: SecretSafeTraceSummary::new("execution performance baseline recorded")
+                .map_err(|_| unavailable())?,
+            fact: RuntimeTraceFact::PerformanceBaseline {
+                report: projection.report,
+            },
+            artifacts: Vec::new(),
+        };
+        let message = match self
+            .installation
+            .runtime_trace_outbox
+            .retain(&mut self.store, &self.bridge.authority(), draft)
+            .map_err(|_| unavailable())?
+        {
+            RuntimeTraceRetention::Ready {
+                message, duplicate, ..
+            } => {
+                if !duplicate {
+                    self.outbox
+                        .retain(&ExecutionPortMessage::RuntimeEventMessage(
+                            (*message).clone(),
+                        ))
+                        .map_err(map_store_error)?;
+                }
+                message
+            }
+            RuntimeTraceRetention::Gap { .. } | RuntimeTraceRetention::Conflict { .. } => {
+                return Err(unavailable());
+            }
+        };
+        self.store
+            .mark_performance_projection_retained(run_key)
+            .map_err(map_store_error)?;
+        Ok(message)
+    }
+
     async fn poll_infrastructure_terminal(
         &mut self,
         run_key: &str,
@@ -844,6 +1017,7 @@ impl ProductionCodexAdapter {
         }
         self.persist_run(run_key)?;
         self.quiesce_infrastructure_run(run_key, &activity_at).await;
+        let _ = self.retain_performance_baseline_trace(run_key)?;
         let _ = self.retain_terminal_trace(run_key, "embedded Codex infrastructure failure")?;
         Ok(())
     }
@@ -909,8 +1083,17 @@ impl ProductionCodexAdapter {
         event: CodexEvent,
         now: &Instant,
     ) -> Result<CodexPoll, ProductionCodexError> {
+        if self.record_standalone_performance_event(run_key, &event.msg, now)? {
+            return Ok(CodexPoll::Pending);
+        }
         match event.msg {
             CodexEventMsg::TurnStarted(started) => {
+                self.record_performance_start(
+                    run_key,
+                    PerformanceOperationKind::Turn,
+                    &started.turn_id,
+                    now,
+                )?;
                 self.accept_turn_started(run_key, &started.turn_id, now)
             }
             CodexEventMsg::TokenCount(token_count) => {
@@ -984,12 +1167,78 @@ impl ProductionCodexAdapter {
         }
     }
 
+    fn record_standalone_performance_event(
+        &self,
+        run_key: &str,
+        event: &CodexEventMsg,
+        now: &Instant,
+    ) -> Result<bool, ProductionCodexError> {
+        match event {
+            CodexEventMsg::ExecCommandBegin(call) => {
+                if matches!(
+                    call.source,
+                    codex_protocol::protocol::ExecCommandSource::UserShell
+                ) {
+                    Ok(true)
+                } else {
+                    self.record_tool_start(run_key, &call.call_id, now)
+                }
+            }
+            CodexEventMsg::PatchApplyBegin(call) => {
+                self.record_patch_start(run_key, &call.call_id, now)
+            }
+            CodexEventMsg::PatchApplyEnd(call) => self.record_patch_completion(run_key, call, now),
+            CodexEventMsg::McpToolCallBegin(call) => {
+                self.record_tool_start(run_key, &call.call_id, now)
+            }
+            CodexEventMsg::McpToolCallEnd(call) => self.record_tool_completion(
+                run_key,
+                &call.call_id,
+                now,
+                Some(duration_millis(call.duration)),
+            ),
+            CodexEventMsg::WebSearchBegin(call) => {
+                self.record_tool_start(run_key, &call.call_id, now)
+            }
+            CodexEventMsg::WebSearchEnd(call) => {
+                self.record_tool_completion(run_key, &call.call_id, now, None)
+            }
+            CodexEventMsg::ImageGenerationBegin(call) => {
+                self.record_tool_start(run_key, &call.call_id, now)
+            }
+            CodexEventMsg::ImageGenerationEnd(call) => {
+                self.record_tool_completion(run_key, &call.call_id, now, None)
+            }
+            CodexEventMsg::ViewImageToolCall(call) => {
+                self.record_tool_start(run_key, &call.call_id, now)?;
+                self.record_tool_completion(run_key, &call.call_id, now, Some(0))
+            }
+            _ => Ok(false),
+        }
+    }
+
     fn accept_turn_started(
         &mut self,
         run_key: &str,
         turn_id: &str,
         now: &Instant,
     ) -> Result<CodexPoll, ProductionCodexError> {
+        let repair_turn = self.runs.get(run_key).is_some_and(|run| {
+            run.record
+                .format_repair
+                .as_ref()
+                .is_some_and(|repair| repair.turn_id == turn_id)
+        });
+        if repair_turn {
+            let run = self.runs.get_mut(run_key).ok_or_else(unknown_thread)?;
+            run.record.current_turn_id = Some(turn_id.to_owned());
+            run.record.last_activity_at = now.clone();
+            if let Some(repair) = run.record.format_repair.as_mut() {
+                repair.submitted = true;
+            }
+            self.persist_run(run_key)?;
+            return Ok(CodexPoll::Pending);
+        }
         if self
             .runs
             .get(run_key)
@@ -1049,6 +1298,24 @@ impl ProductionCodexAdapter {
             )
         };
         self.persist_run(run_key)?;
+        if self
+            .runs
+            .get(run_key)
+            .is_some_and(|run| is_delegated_composer(&run.record))
+        {
+            self.store
+                .commit_provider_final_model_calls(run_key)
+                .map_err(map_store_error)?;
+            if failed {
+                return self.retain_delegated_inconclusive(run_key, now);
+            }
+            return self.accept_delegated_final_output(
+                run_key,
+                &completed.turn_id,
+                final_message.as_deref(),
+                now,
+            );
+        }
         let Ok(stage) = self.retain_stage_turn_completed(
             run_key,
             &completed.turn_id,
@@ -1078,10 +1345,207 @@ impl ProductionCodexAdapter {
         });
         run.record.phase = StoredRunPhase::TerminalTracePending;
         self.persist_run(run_key)?;
-        let trace = self.retain_terminal_trace(run_key, "embedded Codex turn stopped")?;
-        Ok(stage.map_or(CodexPoll::RuntimeTrace(trace), |stage| {
-            CodexPoll::RuntimeTrace(Box::new(stage))
-        }))
+        if let Some(stage) = stage {
+            Ok(CodexPoll::RuntimeTrace(Box::new(stage)))
+        } else {
+            self.poll_retained_terminal(run_key)?
+                .ok_or_else(unavailable)
+        }
+    }
+
+    fn accept_delegated_final_output(
+        &mut self,
+        run_key: &str,
+        turn_id: &str,
+        final_message: Option<&str>,
+        now: &Instant,
+    ) -> Result<CodexPoll, ProductionCodexError> {
+        let event = {
+            let run = self.runs.get(run_key).ok_or_else(unknown_thread)?;
+            delegated_change_batch_event(&run.record, &run.binding, turn_id, final_message, now)
+        };
+        if let Ok(event) = event {
+            let run = self.runs.get_mut(run_key).ok_or_else(unknown_thread)?;
+            let event = if let Some(existing) = &run.record.batch_intent {
+                if existing.event.identity != event.identity
+                    || existing.event.proposal != event.proposal
+                {
+                    return Err(conflict());
+                }
+                existing.event.clone()
+            } else {
+                run.record.batch_intent = Some(StoredBatchIntent {
+                    event: event.clone(),
+                });
+                event
+            };
+            if let Some(transition) = run
+                .record
+                .delegated_transitions
+                .iter_mut()
+                .find(|transition| transition.turn_id == turn_id)
+            {
+                transition.state = StoredDelegatedTransitionState::Completed;
+            }
+            self.persist_run(run_key)?;
+            self.runs
+                .get_mut(run_key)
+                .ok_or_else(unknown_thread)?
+                .batch_intent_emission = OneShotState::Consumed;
+            Ok(CodexPoll::ChangeBatchProposed(Box::new(event)))
+        } else {
+            let bounded_transition = self.runs.get(run_key).and_then(|run| {
+                run.record
+                    .delegated_transitions
+                    .iter()
+                    .position(|transition| transition.turn_id == turn_id)
+            });
+            if let Some(position) = bounded_transition {
+                let run = self.runs.get_mut(run_key).ok_or_else(unknown_thread)?;
+                run.record.delegated_transitions[position].state =
+                    StoredDelegatedTransitionState::Stopped;
+                run.record.delegated_transitions[position].stop_reason =
+                    Some(RepairLoopStopReason::InfrastructureError);
+                self.persist_run(run_key)?;
+                return self.retain_delegated_inconclusive(run_key, now);
+            }
+            let already_repairing = self
+                .runs
+                .get(run_key)
+                .ok_or_else(unknown_thread)?
+                .record
+                .format_repair
+                .is_some();
+            if already_repairing {
+                self.retain_delegated_inconclusive(run_key, now)
+            } else {
+                let repair_turn_id = canonical_parts_id(
+                    "trn",
+                    b"winwincode.delegated-format-repair.v1",
+                    &[run_key.as_bytes(), turn_id.as_bytes()],
+                );
+                let run = self.runs.get_mut(run_key).ok_or_else(unknown_thread)?;
+                run.record.format_repair = Some(StoredFormatRepair {
+                    turn_id: repair_turn_id,
+                    submitted: false,
+                });
+                self.persist_run(run_key)?;
+                Ok(CodexPoll::Pending)
+            }
+        }
+    }
+
+    fn retain_delegated_inconclusive(
+        &mut self,
+        run_key: &str,
+        now: &Instant,
+    ) -> Result<CodexPoll, ProductionCodexError> {
+        let run = self.runs.get_mut(run_key).ok_or_else(unknown_thread)?;
+        run.record.last_activity_at = now.clone();
+        run.record.terminal = Some(StoredTerminal::DelegatedInconclusive);
+        run.record.phase = StoredRunPhase::TerminalTracePending;
+        self.persist_run(run_key)?;
+        self.poll_retained_terminal(run_key)?
+            .ok_or_else(unavailable)
+    }
+
+    fn poll_batch_intent(
+        &mut self,
+        run_key: &str,
+    ) -> Result<Option<CodexPoll>, ProductionCodexError> {
+        let run = self.runs.get_mut(run_key).ok_or_else(unknown_thread)?;
+        if run.batch_intent_emission == OneShotState::Consumed {
+            return Ok(None);
+        }
+        let Some(intent) = run.record.batch_intent.as_ref() else {
+            return Ok(None);
+        };
+        run.batch_intent_emission = OneShotState::Consumed;
+        Ok(Some(CodexPoll::ChangeBatchProposed(Box::new(
+            intent.event.clone(),
+        ))))
+    }
+
+    async fn reconcile_format_repair(
+        &mut self,
+        run_key: &str,
+        now: &Instant,
+    ) -> Result<Option<CodexPoll>, ProductionCodexError> {
+        let repair = {
+            let run = self.runs.get_mut(run_key).ok_or_else(unknown_thread)?;
+            if run.record.batch_intent.is_some()
+                || run.record.terminal.is_some()
+                || run.record.final_candidate_freeze.is_some()
+                || run.format_repair_reconciliation == OneShotState::Consumed
+            {
+                return Ok(None);
+            }
+            let Some(repair) = run.record.format_repair.clone() else {
+                return Ok(None);
+            };
+            run.format_repair_reconciliation = OneShotState::Consumed;
+            (
+                run.record.kernel_session_id.clone(),
+                repair.turn_id,
+                turn_submission_options(&run.record),
+            )
+        };
+        let reconciliation = self
+            .kernel
+            .reconcile_turn_exact(
+                &repair.0,
+                repair.1.clone(),
+                FORMAT_REPAIR_PROMPT.to_owned(),
+                repair.2,
+            )
+            .await;
+        let Ok(reconciliation) = reconciliation else {
+            return self.retain_delegated_inconclusive(run_key, now).map(Some);
+        };
+        match reconciliation {
+            ExactTurnReconciliation::Started { turn_id, .. } if turn_id == repair.1 => {
+                let run = self.runs.get_mut(run_key).ok_or_else(unknown_thread)?;
+                run.record.current_turn_id = Some(turn_id);
+                run.record.last_activity_at = now.clone();
+                if let Some(stored) = run.record.format_repair.as_mut() {
+                    stored.submitted = true;
+                }
+                self.persist_run(run_key)?;
+                Ok(Some(CodexPoll::Pending))
+            }
+            ExactTurnReconciliation::Completed(terminal) if terminal.turn_id == repair.1 => {
+                {
+                    let run = self.runs.get_mut(run_key).ok_or_else(unknown_thread)?;
+                    run.record.current_turn_id = Some(terminal.turn_id.clone());
+                    run.record
+                        .last_agent_message
+                        .clone_from(&terminal.last_agent_message);
+                    run.record.last_tokens = terminal
+                        .token_usage
+                        .as_ref()
+                        .map_or(0, |usage| usage.last_token_usage.total_tokens.max(0));
+                    run.record.last_runtime_millis = terminal.duration_ms.unwrap_or(0).max(0);
+                    run.record.last_activity_at = now.clone();
+                }
+                self.persist_run(run_key)?;
+                self.store
+                    .commit_provider_final_model_calls(run_key)
+                    .map_err(map_store_error)?;
+                self.accept_delegated_final_output(
+                    run_key,
+                    &terminal.turn_id,
+                    terminal.last_agent_message.as_deref(),
+                    now,
+                )
+                .map(Some)
+            }
+            ExactTurnReconciliation::Started { .. }
+            | ExactTurnReconciliation::Completed(_)
+            | ExactTurnReconciliation::Failed(_)
+            | ExactTurnReconciliation::NotSubmitted { .. } => {
+                self.retain_delegated_inconclusive(run_key, now).map(Some)
+            }
+        }
     }
 
     fn accept_command_end(
@@ -1096,12 +1560,183 @@ impl ProductionCodexAdapter {
         ) {
             return Ok(CodexPoll::Pending);
         }
+        let command_duration = duration_millis(command_end.duration);
+        self.record_performance_completion(
+            run_key,
+            PerformanceOperationKind::Tool,
+            &command_end.call_id,
+            now,
+            Some(command_duration),
+        )?;
+        if validation_command(&command_end.command) {
+            self.record_performance_start(
+                run_key,
+                PerformanceOperationKind::Validation,
+                &command_end.call_id,
+                now,
+            )?;
+            self.record_performance_completion(
+                run_key,
+                PerformanceOperationKind::Validation,
+                &command_end.call_id,
+                now,
+                Some(command_duration),
+            )?;
+        }
         let Ok(stage) = self.retain_stage_command_end(run_key, command_end, now) else {
             return self.retain_stage_failure(run_key, now);
         };
         Ok(stage.map_or(CodexPoll::Pending, |stage| {
             CodexPoll::RuntimeTrace(Box::new(stage))
         }))
+    }
+
+    fn record_performance_start(
+        &self,
+        run_key: &str,
+        kind: PerformanceOperationKind,
+        operation_id: &str,
+        now: &Instant,
+    ) -> Result<(), ProductionCodexError> {
+        self.store
+            .record_performance_start(run_key, kind, operation_id, now)
+            .map_err(map_store_error)
+    }
+
+    fn register_performance_run(
+        &self,
+        run_key: &str,
+        job: &ExecutionJob,
+    ) -> Result<(), ProductionCodexError> {
+        self.store
+            .register_performance_run(
+                run_key,
+                performance_execution_mode(self.config.execution_mode, job),
+                self.config.observer_mode,
+            )
+            .map_err(map_store_error)
+    }
+
+    fn record_tool_start(
+        &self,
+        run_key: &str,
+        operation_id: &str,
+        now: &Instant,
+    ) -> Result<bool, ProductionCodexError> {
+        self.record_performance_start(run_key, PerformanceOperationKind::Tool, operation_id, now)?;
+        Ok(true)
+    }
+
+    fn record_tool_completion(
+        &self,
+        run_key: &str,
+        operation_id: &str,
+        now: &Instant,
+        duration: Option<i64>,
+    ) -> Result<bool, ProductionCodexError> {
+        self.record_performance_completion(
+            run_key,
+            PerformanceOperationKind::Tool,
+            operation_id,
+            now,
+            duration,
+        )?;
+        Ok(true)
+    }
+
+    fn record_patch_start(
+        &self,
+        run_key: &str,
+        operation_id: &str,
+        now: &Instant,
+    ) -> Result<bool, ProductionCodexError> {
+        self.record_tool_start(run_key, operation_id, now)?;
+        self.record_performance_start(run_key, PerformanceOperationKind::Patch, operation_id, now)?;
+        Ok(true)
+    }
+
+    fn record_patch_completion(
+        &self,
+        run_key: &str,
+        patch: &codex_protocol::protocol::PatchApplyEndEvent,
+        now: &Instant,
+    ) -> Result<bool, ProductionCodexError> {
+        self.record_tool_completion(run_key, &patch.call_id, now, None)?;
+        self.record_performance_completion(
+            run_key,
+            PerformanceOperationKind::Patch,
+            &patch.call_id,
+            now,
+            None,
+        )?;
+        if patch.success {
+            self.record_changed_files(run_key, patch.changes.keys())?;
+        }
+        Ok(true)
+    }
+
+    fn record_performance_completion(
+        &self,
+        run_key: &str,
+        kind: PerformanceOperationKind,
+        operation_id: &str,
+        now: &Instant,
+        duration: Option<i64>,
+    ) -> Result<(), ProductionCodexError> {
+        self.store
+            .record_performance_completion(
+                run_key,
+                kind,
+                operation_id,
+                now,
+                PerformanceOperationCompletion {
+                    duration_millis: duration,
+                    ..PerformanceOperationCompletion::default()
+                },
+            )
+            .map_err(map_store_error)
+    }
+
+    fn record_delegated_observer_completion(
+        &self,
+        run_key: &str,
+        batch_id: &str,
+        completed_at: &Instant,
+        usage: Option<&ExecutionOutcomeUsage>,
+    ) -> Result<(), ProductionCodexError> {
+        self.store
+            .record_performance_completion(
+                run_key,
+                PerformanceOperationKind::Observer,
+                batch_id,
+                completed_at,
+                PerformanceOperationCompletion {
+                    duration_millis: None,
+                    input_tokens: usage.map_or(0, |usage| usage.tokens),
+                    actual_cost_microunits: usage.map(|usage| usage.cost_microunits),
+                    ..PerformanceOperationCompletion::default()
+                },
+            )
+            .map_err(map_store_error)
+    }
+
+    fn record_changed_files<'path>(
+        &self,
+        run_key: &str,
+        paths: impl Iterator<Item = &'path PathBuf>,
+    ) -> Result<(), ProductionCodexError> {
+        for path in paths {
+            let mut digest = Sha256::new();
+            digest.update(b"winwincode.performance-file.v1");
+            digest.update(path.to_string_lossy().as_bytes());
+            self.store
+                .record_performance_changed_file(
+                    run_key,
+                    &Sha256Digest(format!("sha256:{:x}", digest.finalize())),
+                )
+                .map_err(map_store_error)?;
+        }
+        Ok(())
     }
 
     fn accept_error(
@@ -1112,13 +1747,20 @@ impl ProductionCodexAdapter {
         self.store
             .commit_provider_final_model_calls(run_key)
             .map_err(map_store_error)?;
+        if self
+            .runs
+            .get(run_key)
+            .is_some_and(|run| is_delegated_composer(&run.record))
+        {
+            return self.retain_delegated_inconclusive(run_key, now);
+        }
         let run = self.runs.get_mut(run_key).ok_or_else(unknown_thread)?;
         run.record.last_activity_at = now.clone();
         run.record.terminal = Some(StoredTerminal::Failed);
         run.record.phase = StoredRunPhase::TerminalTracePending;
         self.persist_run(run_key)?;
-        let trace = self.retain_terminal_trace(run_key, "embedded Codex turn failed")?;
-        Ok(CodexPoll::RuntimeTrace(trace))
+        self.poll_retained_terminal(run_key)?
+            .ok_or_else(unavailable)
     }
 
     fn retain_input_request(
@@ -1277,6 +1919,9 @@ impl ProductionCodexAdapter {
         if record.terminal.is_none() && record.terminal_trace.is_some() {
             return Err(conflict());
         }
+        if let Some(intent) = record.batch_intent.as_ref() {
+            validate_stored_batch_intent(&record, &binding, intent)?;
+        }
         self.store
             .save_run(&run_key, &record)
             .map_err(map_store_error)?;
@@ -1284,7 +1929,10 @@ impl ProductionCodexAdapter {
             .install_binding(binding.clone())
             .map_err(map_bridge_error)?;
         self.action_gate
-            .install_binding(binding.clone())
+            .install_binding(
+                binding.clone(),
+                is_delegated_composer(&record).then_some(record.workspace.as_path()),
+            )
             .map_err(|_| unavailable())?;
         // Core may have emitted an approval event immediately before the
         // process stopped.  The durable operation is the source of truth for
@@ -1318,6 +1966,8 @@ impl ProductionCodexAdapter {
                 replay,
                 kernel_live,
                 recovered,
+                batch_intent_emission: OneShotState::Ready,
+                format_repair_reconciliation: OneShotState::Ready,
             },
         );
         Ok(thread_id)
@@ -1508,7 +2158,10 @@ impl ProductionCodexAdapter {
         workspace: &Path,
         role_policy: Option<RoleSessionPolicy>,
     ) -> Result<bool, ProductionCodexError> {
-        if record.terminal.is_some() {
+        if record.terminal.is_some()
+            || record.final_candidate_freeze.is_some()
+            || record.delegated_stop.is_some()
+        {
             return Ok(false);
         }
         let rollout_path = record.rollout_path.clone().ok_or_else(|| {
@@ -1559,6 +2212,122 @@ impl ProductionCodexAdapter {
             .map_err(map_store_error)?;
         Ok(true)
     }
+
+    #[allow(clippy::too_many_lines)]
+    async fn reconcile_persisted_delegated_turn(
+        &mut self,
+        run_key: &str,
+        turn_id: &str,
+    ) -> Result<DelegatedLoopTransitionOutcome, ProductionCodexError> {
+        let (session_id, prompt, options, counters, observed_at) = {
+            let run = self.runs.get(run_key).ok_or_else(unknown_thread)?;
+            let stored = run
+                .record
+                .delegated_transitions
+                .iter()
+                .find(|stored| stored.turn_id == turn_id)
+                .ok_or_else(conflict)?;
+            (
+                run.record.kernel_session_id.clone(),
+                stored.prompt.clone(),
+                turn_submission_options(&run.record),
+                stored.counters.clone(),
+                stored.transition.observed_at.clone(),
+            )
+        };
+        let reconciliation = self
+            .kernel
+            .reconcile_turn_exact(&session_id, turn_id.to_owned(), prompt, options)
+            .await
+            .map_err(|_| kernel_error())?;
+        #[cfg(feature = "test-support")]
+        if self.config.delegated_transition_faults.front()
+            == Some(&ProductionDelegatedTransitionFault::AfterKernelBeforeSettlement)
+        {
+            self.config.delegated_transition_faults.pop_front();
+            return Err(unavailable());
+        }
+        match reconciliation {
+            ExactTurnReconciliation::Started {
+                turn_id: reconciled,
+                ..
+            } if reconciled == turn_id => {
+                let run = self.runs.get_mut(run_key).ok_or_else(unknown_thread)?;
+                let stored = run
+                    .record
+                    .delegated_transitions
+                    .iter_mut()
+                    .find(|stored| stored.turn_id == turn_id)
+                    .ok_or_else(conflict)?;
+                stored.state = StoredDelegatedTransitionState::Submitted;
+                run.record.current_turn_id = Some(reconciled);
+                run.record.last_activity_at = observed_at;
+                self.persist_run(run_key)?;
+                Ok(DelegatedLoopTransitionOutcome::Submitted {
+                    turn_id: turn_id.to_owned(),
+                    counters,
+                })
+            }
+            ExactTurnReconciliation::Completed(terminal) if terminal.turn_id == turn_id => {
+                let last_tokens = terminal
+                    .token_usage
+                    .as_ref()
+                    .map_or(0, |usage| usage.last_token_usage.total_tokens.max(0));
+                complete_reconciled_turn(
+                    self,
+                    run_key,
+                    turn_id,
+                    terminal.last_agent_message,
+                    last_tokens,
+                    terminal.duration_ms.unwrap_or(0).max(0),
+                )?;
+                let run = self.runs.get_mut(run_key).ok_or_else(unknown_thread)?;
+                let stored = run
+                    .record
+                    .delegated_transitions
+                    .iter_mut()
+                    .find(|stored| stored.turn_id == turn_id)
+                    .ok_or_else(conflict)?;
+                stored.state = StoredDelegatedTransitionState::Completed;
+                self.persist_run(run_key)?;
+                Ok(DelegatedLoopTransitionOutcome::Completed {
+                    turn_id: turn_id.to_owned(),
+                    counters,
+                })
+            }
+            ExactTurnReconciliation::Failed(_) => {
+                let run = self.runs.get_mut(run_key).ok_or_else(unknown_thread)?;
+                let (batch_id, stopped_at) = {
+                    let stored = run
+                        .record
+                        .delegated_transitions
+                        .iter_mut()
+                        .find(|stored| stored.turn_id == turn_id)
+                        .ok_or_else(conflict)?;
+                    stored.state = StoredDelegatedTransitionState::Stopped;
+                    stored.stop_reason = Some(RepairLoopStopReason::InfrastructureError);
+                    (
+                        stored.transition.context.identity.batch_id.clone(),
+                        stored.transition.observed_at.clone(),
+                    )
+                };
+                run.record.delegated_stop = Some(DelegatedLoopStopFact {
+                    batch_id,
+                    reason: RepairLoopStopReason::InfrastructureError,
+                    counters: counters.clone(),
+                    stopped_at,
+                });
+                self.persist_run(run_key)?;
+                Ok(DelegatedLoopTransitionOutcome::Stopped {
+                    reason: RepairLoopStopReason::InfrastructureError,
+                    counters,
+                })
+            }
+            ExactTurnReconciliation::Started { .. }
+            | ExactTurnReconciliation::Completed(_)
+            | ExactTurnReconciliation::NotSubmitted { .. } => Err(conflict()),
+        }
+    }
 }
 
 fn complete_reconciled_turn(
@@ -1569,6 +2338,16 @@ fn complete_reconciled_turn(
     last_tokens: i64,
     last_runtime_millis: i64,
 ) -> Result<(), ProductionCodexError> {
+    if adapter.runs.get(run_key).is_some_and(|run| {
+        is_delegated_composer(&run.record)
+            && run
+                .record
+                .delegated_transitions
+                .last()
+                .is_some_and(|transition| transition.turn_id != turn_id)
+    }) {
+        return Ok(());
+    }
     let activity_at = {
         let run = adapter.runs.get_mut(run_key).ok_or_else(unknown_thread)?;
         run.record.current_turn_id = Some(turn_id.to_owned());
@@ -1577,7 +2356,53 @@ fn complete_reconciled_turn(
         run.record.last_runtime_millis = last_runtime_millis;
         run.record.last_activity_at.clone()
     };
+    adapter.record_performance_start(
+        run_key,
+        PerformanceOperationKind::Turn,
+        turn_id,
+        &activity_at,
+    )?;
+    if adapter.runs.get(run_key).is_some_and(|run| {
+        run.record
+            .delegated_transitions
+            .last()
+            .is_some_and(|stored| {
+                stored.turn_id == turn_id && stored.transition.phase == DelegatedLoopPhase::Repair
+            })
+    }) {
+        adapter.record_performance_completion(
+            run_key,
+            PerformanceOperationKind::Repair,
+            turn_id,
+            &activity_at,
+            None,
+        )?;
+    }
     adapter.persist_run(run_key)?;
+    if adapter
+        .runs
+        .get(run_key)
+        .is_some_and(|run| is_delegated_composer(&run.record))
+    {
+        adapter
+            .store
+            .commit_provider_final_model_calls(run_key)
+            .map_err(map_store_error)?;
+        let poll = adapter.accept_delegated_final_output(
+            run_key,
+            turn_id,
+            final_message.as_deref(),
+            &activity_at,
+        )?;
+        if matches!(poll, CodexPoll::ChangeBatchProposed(_)) {
+            adapter
+                .runs
+                .get_mut(run_key)
+                .ok_or_else(unknown_thread)?
+                .batch_intent_emission = OneShotState::Ready;
+        }
+        return Ok(());
+    }
     let Ok(_stage) = adapter.retain_stage_turn_completed(
         run_key,
         turn_id,
@@ -1641,18 +2466,25 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
             }));
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn ensure_thread(
         &mut self,
         start: CodexThreadStart<'_>,
     ) -> Result<CodexThreadId, Self::Error> {
         validate_start(start)?;
         let job_digest = stage_product_job_digest(start.job).map_err(|_| invalid_job())?;
-        let role_policy = role_session_policy(start.job).map_err(|_| invalid_job())?;
+        let role_policy = sealed_role_session_policy(start.job)?;
         let workspace = canonical_workspace(start.workspace)?;
-        let run_key = run_key_digest(start.run_key)?;
+        let run_key = start
+            .run_key
+            .canonical_digest()
+            .map_err(|_| unavailable())?
+            .0;
+        self.register_performance_run(&run_key, start.job)?;
         if let Some(run) = self.runs.get(&run_key) {
             if run.record.job_digest == job_digest
                 && run.record.workspace == workspace
+                && run.record.workspace_revision == *start.workspace_revision
                 && run.binding.authority.lease == *start.lease
                 && run.binding.authority.worker_session_id == *start.worker_session_id
             {
@@ -1670,15 +2502,28 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
             worker_session_id: start.worker_session_id.clone(),
             session_identity,
         };
-        if let Some(mut record) = self
-            .store
-            .load_run::<StoredRun>(&run_key)
-            .map_err(map_store_error)?
-        {
+        if let Some(mut record) = load_stored_run(&self.store, &run_key)? {
+            let frozen_workspace = record
+                .final_candidate_freeze
+                .as_ref()
+                .is_some_and(|freeze| freeze.result_revision == *start.workspace_revision);
+            let delegated_workspace_advance = is_delegated_composer(&record)
+                && record.terminal.is_none()
+                && record.delegated_stop.is_none()
+                && record.final_candidate_freeze.is_none()
+                && record.delegated_transitions.is_empty()
+                && record.batch_intent.as_ref().is_some_and(|intent| {
+                    intent.event.identity.workspace_revision == record.workspace_revision
+                        && record.workspace_revision != *start.workspace_revision
+                });
             if record.canonical_thread_id != thread_id
                 || record.job != *start.job
                 || record.job_digest != job_digest
                 || record.workspace != workspace
+                || (record.workspace_revision != *start.workspace_revision
+                    && !delegated_workspace_advance
+                    && !frozen_workspace)
+                || record.role_policy != role_policy
             {
                 return Err(conflict());
             }
@@ -1706,29 +2551,22 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
         }
         let session = self
             .kernel
-            .create_session(session_options(&self.config, &workspace, role_policy))
+            .create_session(session_options(
+                &self.config,
+                &workspace,
+                role_policy.clone(),
+            ))
             .await
             .map_err(|_| kernel_error())?;
-        let record = StoredRun {
-            job: start.job.clone(),
-            canonical_thread_id: thread_id.clone(),
+        let record = prepared_stored_run(
+            &start,
+            thread_id.clone(),
             job_digest,
             workspace,
-            kernel_session_id: session.session_id.clone(),
-            rollout_path: session.rollout_path.map(PathBuf::from),
-            submission_id: Uuid::now_v7().to_string(),
-            submission_digest: None,
-            phase: StoredRunPhase::Prepared,
-            last_tokens: 0,
-            last_runtime_millis: 0,
-            last_activity_at: start.lease.issued_at.clone(),
-            terminal: None,
-            terminal_trace: None,
-            terminal_message_id: None,
-            current_turn_id: None,
-            last_agent_message: None,
-            stage_product_sources: Vec::new(),
-        };
+            role_policy,
+            session.session_id.clone(),
+            session.rollout_path.map(PathBuf::from),
+        );
         self.store
             .save_run(&run_key, &record)
             .map_err(map_store_error)?;
@@ -1742,6 +2580,7 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
         self.install_active_run(run_key, record, binding, true, false)
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn submit_turn(
         &mut self,
         thread_id: &CodexThreadId,
@@ -1760,15 +2599,24 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
         if goal != expected_goal {
             return Err(conflict());
         }
-        let submission_digest = submission_input_digest(goal);
-        let (terminal, submission_id) = {
+        let submission_options = {
+            let run = self.runs.get(&run_key).ok_or_else(unknown_thread)?;
+            turn_submission_options(&run.record)
+        };
+        let submission_digest = submission_input_digest(goal, &submission_options)?;
+        let (settled, submission_id) = {
             let run = self.runs.get_mut(&run_key).ok_or_else(unknown_thread)?;
             match &run.record.submission_digest {
                 Some(existing) if existing != &submission_digest => return Err(conflict()),
                 Some(_) => {}
                 None => run.record.submission_digest = Some(submission_digest),
             }
-            if run.record.terminal.is_some() {
+            if run.record.terminal.is_some()
+                || run.record.final_candidate_freeze.is_some()
+                || run.record.delegated_stop.is_some()
+                || run.record.batch_intent.is_some()
+                || run.record.format_repair.is_some()
+            {
                 (true, run.record.submission_id.clone())
             } else {
                 if run.record.phase != StoredRunPhase::Prepared && !run.recovered {
@@ -1781,7 +2629,7 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
             }
         };
         self.persist_run(&run_key)?;
-        if terminal {
+        if settled {
             return Ok(());
         }
         #[cfg(feature = "test-support")]
@@ -1796,7 +2644,12 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
         let session = self.session_for_thread(thread_id)?;
         let reconciliation = self
             .kernel
-            .reconcile_turn_exact(&session, submission_id.clone(), goal.to_owned())
+            .reconcile_turn_exact(
+                &session,
+                submission_id.clone(),
+                goal.to_owned(),
+                submission_options,
+            )
             .await;
         let Ok(submission) = reconciliation else {
             self.retain_submission_failure(&run_key).await?;
@@ -1843,6 +2696,384 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
         Ok(())
     }
 
+    #[allow(clippy::too_many_lines)]
+    async fn reconcile_delegated_transition(
+        &mut self,
+        thread_id: &CodexThreadId,
+        transition: DelegatedLoopTransition,
+    ) -> Result<DelegatedLoopTransitionOutcome, Self::Error> {
+        let run_key = self.run_key_for_thread(thread_id)?.to_owned();
+        let turn_id = delegated_loop_turn_id(&transition);
+        let context_bytes = serde_json::to_vec(&transition.context).map_err(|_| unavailable())?;
+        validate_repair_loop_context_pack(&transition.context, &context_bytes)
+            .map_err(|_| conflict())?;
+        validate_repair_loop_budget(&transition.budget).map_err(|_| conflict())?;
+        validate_repair_loop_counters(&transition.worker_counters).map_err(|_| conflict())?;
+        if transition.context.identity.run_key != run_key
+            || transition.context.latest_receipt.identity != transition.context.identity
+        {
+            return Err(conflict());
+        }
+        match transition.phase {
+            DelegatedLoopPhase::Continue
+                if transition.context.proposal_disposition
+                    != ChangeBatchProposalDisposition::ContinueValue
+                    || transition.context.repair_envelope.is_some() =>
+            {
+                return Err(conflict());
+            }
+            DelegatedLoopPhase::Repair => {
+                let repair = transition
+                    .context
+                    .repair_envelope
+                    .as_ref()
+                    .ok_or_else(conflict)?;
+                if repair.repair_round != transition.repair_round
+                    || repair.identity != transition.context.identity
+                    || repair.observed_revision != transition.context.observed_revision
+                    || transition.context.latest_receipt.delta_digest.as_ref()
+                        != Some(&repair.delta_digest)
+                {
+                    return Err(conflict());
+                }
+            }
+            DelegatedLoopPhase::Continue => {}
+        }
+
+        if let Some(existing) = self
+            .runs
+            .get(&run_key)
+            .ok_or_else(unknown_thread)?
+            .record
+            .delegated_transitions
+            .iter()
+            .find(|stored| stored.turn_id == turn_id)
+        {
+            if existing.transition != transition {
+                return Err(conflict());
+            }
+            return match existing.state {
+                StoredDelegatedTransitionState::Completed => {
+                    Ok(DelegatedLoopTransitionOutcome::Completed {
+                        turn_id,
+                        counters: existing.counters.clone(),
+                    })
+                }
+                StoredDelegatedTransitionState::Stopped => {
+                    Ok(DelegatedLoopTransitionOutcome::Stopped {
+                        reason: existing.stop_reason.clone().ok_or_else(unavailable)?,
+                        counters: existing.counters.clone(),
+                    })
+                }
+                StoredDelegatedTransitionState::Intent
+                | StoredDelegatedTransitionState::Submitted => {
+                    self.reconcile_persisted_delegated_turn(&run_key, &turn_id)
+                        .await
+                }
+            };
+        }
+
+        let (prompt, counters, actual_counters, stop_reason) = {
+            let run = self.runs.get(&run_key).ok_or_else(unknown_thread)?;
+            if !is_delegated_composer(&run.record)
+                || run.record.terminal.is_some()
+                || run.record.final_candidate_freeze.is_some()
+                || run.record.delegated_stop.is_some()
+                || run.record.format_repair.is_some()
+                || run
+                    .record
+                    .batch_intent
+                    .as_ref()
+                    .map(|intent| &intent.event.identity)
+                    != Some(&transition.context.identity)
+                || run
+                    .record
+                    .delegated_transitions
+                    .first()
+                    .is_some_and(|stored| stored.transition.budget != transition.budget)
+            {
+                return Err(conflict());
+            }
+            let totals = self
+                .store
+                .delegated_performance_totals(&run_key)
+                .map_err(map_store_error)?;
+            let loop_elapsed =
+                elapsed_millis(&run.binding.opened_at, &transition.observed_at).unwrap_or(i64::MAX);
+            let previous = run
+                .record
+                .delegated_transitions
+                .last()
+                .map(|stored| &stored.counters);
+            let (actual_counters, counters) = delegated_transition_counters(
+                &transition,
+                previous,
+                totals.primary_model_calls,
+                totals.total_tokens,
+                totals.total_cost_microunits,
+                loop_elapsed,
+            )?;
+            let stop_reason = if totals.cost_complete {
+                delegated_budget_stopped_counters(&transition.budget, &actual_counters, &counters)
+                    .map(|(reason, _)| reason)
+            } else {
+                Some(RepairLoopStopReason::InfrastructureError)
+            };
+            let prompt = serde_json::to_string(&serde_json::json!({
+                "kind": "winwincode.delegated-loop-context.v1",
+                "phase": transition.phase.as_str(),
+                "context": &transition.context,
+            }))
+            .map_err(|_| unavailable())?;
+            (prompt, counters, actual_counters, stop_reason)
+        };
+
+        #[cfg(feature = "test-support")]
+        if self.config.delegated_transition_faults.front()
+            == Some(&ProductionDelegatedTransitionFault::BeforeIntent)
+        {
+            self.config.delegated_transition_faults.pop_front();
+            return Err(unavailable());
+        }
+
+        let stop_fact = stop_reason.as_ref().map(|reason| DelegatedLoopStopFact {
+            batch_id: transition.context.identity.batch_id.clone(),
+            reason: reason.clone(),
+            counters: actual_counters.clone(),
+            stopped_at: transition.observed_at.clone(),
+        });
+        {
+            let run = self.runs.get_mut(&run_key).ok_or_else(unknown_thread)?;
+            run.record.workspace_revision = transition.context.observed_revision.clone();
+            run.record.batch_intent = None;
+            run.batch_intent_emission = OneShotState::Consumed;
+            run.record
+                .delegated_transitions
+                .push(StoredDelegatedTransition {
+                    transition,
+                    turn_id: turn_id.clone(),
+                    prompt,
+                    counters: if stop_reason.is_some() {
+                        actual_counters.clone()
+                    } else {
+                        counters.clone()
+                    },
+                    state: if stop_reason.is_some() {
+                        StoredDelegatedTransitionState::Stopped
+                    } else {
+                        StoredDelegatedTransitionState::Intent
+                    },
+                    stop_reason: stop_reason.clone(),
+                });
+            run.record.delegated_stop = stop_fact;
+        }
+        self.persist_run(&run_key)?;
+
+        #[cfg(feature = "test-support")]
+        if self.config.delegated_transition_faults.front()
+            == Some(&ProductionDelegatedTransitionFault::AfterIntentBeforeKernel)
+        {
+            self.config.delegated_transition_faults.pop_front();
+            return Err(unavailable());
+        }
+
+        if let Some(reason) = stop_reason {
+            return Ok(DelegatedLoopTransitionOutcome::Stopped {
+                reason,
+                counters: actual_counters,
+            });
+        }
+        if self
+            .runs
+            .get(&run_key)
+            .and_then(|run| run.record.delegated_transitions.last())
+            .is_some_and(|stored| stored.transition.phase == DelegatedLoopPhase::Repair)
+        {
+            self.store
+                .record_performance_start(
+                    &run_key,
+                    PerformanceOperationKind::Repair,
+                    &turn_id,
+                    &self
+                        .runs
+                        .get(&run_key)
+                        .ok_or_else(unknown_thread)?
+                        .record
+                        .last_activity_at,
+                )
+                .map_err(map_store_error)?;
+        }
+        self.reconcile_persisted_delegated_turn(&run_key, &turn_id)
+            .await
+    }
+
+    fn preflight_delegated_observer(
+        &mut self,
+        thread_id: &CodexThreadId,
+        preflight: DelegatedObserverPreflight,
+    ) -> Result<DelegatedObserverPreflightOutcome, Self::Error> {
+        let run_key = self.run_key_for_thread(thread_id)?.to_owned();
+        if validate_repair_loop_budget(&preflight.budget).is_err()
+            || validate_repair_loop_counters(&preflight.worker_counters).is_err()
+        {
+            return Ok(DelegatedObserverPreflightOutcome::Stopped {
+                reason: RepairLoopStopReason::InfrastructureError,
+                counters: preflight.worker_counters,
+            });
+        }
+        let run = self.runs.get(&run_key).ok_or_else(unknown_thread)?;
+        if run.record.terminal.is_some()
+            || run.record.final_candidate_freeze.is_some()
+            || run.record.delegated_stop.is_some()
+        {
+            return Err(conflict());
+        }
+        let totals = self
+            .store
+            .delegated_performance_totals(&run_key)
+            .map_err(map_store_error)?;
+        let mut projected = preflight.worker_counters;
+        projected.primary_model_calls = totals.primary_model_calls;
+        projected.total_tokens = totals.total_tokens;
+        projected.total_cost_microunits = totals.total_cost_microunits;
+        projected.elapsed_millis =
+            elapsed_millis(&run.binding.opened_at, &preflight.observed_at).ok_or_else(conflict)?;
+        let mut actual = projected.clone();
+        actual.observer_calls = totals.observer_calls;
+        let reason = if totals.cost_complete {
+            delegated_budget_stop(&preflight.budget, &projected)
+        } else {
+            Some(RepairLoopStopReason::InfrastructureError)
+        };
+        if let Some(reason) = reason {
+            return Ok(DelegatedObserverPreflightOutcome::Stopped {
+                reason,
+                counters: actual,
+            });
+        }
+        self.store
+            .record_performance_start(
+                &run_key,
+                PerformanceOperationKind::Observer,
+                &preflight.batch_id.0,
+                &preflight.observed_at,
+            )
+            .map_err(map_store_error)?;
+        Ok(DelegatedObserverPreflightOutcome::Allowed {
+            counters: projected,
+        })
+    }
+
+    fn retain_delegated_observer_settlement(
+        &mut self,
+        thread_id: &CodexThreadId,
+        settlement: DelegatedObserverSettlement,
+    ) -> Result<(), Self::Error> {
+        let run_key = self.run_key_for_thread(thread_id)?.to_owned();
+        let run = self.runs.get(&run_key).ok_or_else(unknown_thread)?;
+        if !is_delegated_composer(&run.record)
+            || run.record.terminal.is_some()
+            || run.record.final_candidate_freeze.is_some()
+            || run.record.delegated_stop.is_some()
+            || run
+                .record
+                .batch_intent
+                .as_ref()
+                .map(|intent| &intent.event.identity.batch_id)
+                != Some(&settlement.batch_id)
+        {
+            return Err(conflict());
+        }
+        self.record_delegated_observer_completion(
+            &run_key,
+            &settlement.batch_id.0,
+            &settlement.completed_at,
+            settlement.usage.as_ref(),
+        )
+    }
+
+    fn retain_delegated_loop_stop(
+        &mut self,
+        thread_id: &CodexThreadId,
+        fact: &DelegatedLoopStopFact,
+    ) -> Result<DelegatedLoopStopFact, Self::Error> {
+        let run_key = self.run_key_for_thread(thread_id)?.to_owned();
+        let totals = self
+            .store
+            .delegated_performance_totals(&run_key)
+            .map_err(map_store_error)?;
+        // Seal terminal counters only after the latest Primary and Observer
+        // operations have crossed their durable settlement seam.
+        if totals.pending_model_calls > 0 {
+            return Err(conflict());
+        }
+        let run = self.runs.get(&run_key).ok_or_else(unknown_thread)?;
+        if run.record.final_candidate_freeze.is_some() || run.record.terminal.is_some() {
+            return Err(conflict());
+        }
+        if run
+            .record
+            .batch_intent
+            .as_ref()
+            .is_some_and(|intent| intent.event.identity.batch_id != fact.batch_id)
+        {
+            return Err(conflict());
+        }
+        let mut sealed = fact.clone();
+        let last_transition = run.record.delegated_transitions.last();
+        let current_has_transition = last_transition.is_some_and(|transition| {
+            transition.transition.context.identity.batch_id == fact.batch_id
+        });
+        let expected_change_batches = i64::try_from(run.record.delegated_transitions.len())
+            .ok()
+            .and_then(|count| count.checked_add(i64::from(!current_has_transition)))
+            .ok_or_else(conflict)?;
+        if fact.counters.change_batches != expected_change_batches {
+            return Err(conflict());
+        }
+        sealed.counters.change_batches = expected_change_batches;
+        if let Some(transition) = last_transition {
+            sealed.counters.context_pack_bytes = transition.counters.context_pack_bytes;
+            sealed.counters.repair_rounds = transition.counters.repair_rounds;
+        }
+        sealed.counters.primary_model_calls = totals.primary_model_calls;
+        sealed.counters.observer_calls = totals.observer_calls;
+        sealed.counters.total_tokens = totals.total_tokens;
+        sealed.counters.total_cost_microunits = totals.total_cost_microunits;
+        sealed.counters.elapsed_millis =
+            elapsed_millis(&run.binding.opened_at, &sealed.stopped_at).ok_or_else(conflict)?;
+        if !totals.cost_complete || validate_repair_loop_counters(&sealed.counters).is_err() {
+            sealed.reason = RepairLoopStopReason::InfrastructureError;
+        }
+        let retained = {
+            let run = self.runs.get_mut(&run_key).ok_or_else(unknown_thread)?;
+            if let Some(existing) = &run.record.delegated_stop {
+                if existing != &sealed {
+                    return Err(conflict());
+                }
+                existing.clone()
+            } else {
+                run.record.batch_intent = None;
+                run.record.delegated_stop = Some(sealed.clone());
+                sealed
+            }
+        };
+        self.persist_run(&run_key)?;
+        let _ = self.retain_performance_baseline_trace(&run_key)?;
+        Ok(retained)
+    }
+
+    fn delegated_loop_stop(
+        &mut self,
+        thread_id: &CodexThreadId,
+    ) -> Result<Option<DelegatedLoopStopFact>, Self::Error> {
+        let run_key = self.run_key_for_thread(thread_id)?;
+        Ok(self
+            .runs
+            .get(run_key)
+            .and_then(|run| run.record.delegated_stop.clone()))
+    }
+
     async fn poll(
         &mut self,
         thread_id: &CodexThreadId,
@@ -1856,12 +3087,49 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
             .update_now(now)
             .map_err(|_| unavailable())?;
         let run_key = self.run_key_for_thread(thread_id)?.to_owned();
+        if self.runs.get(&run_key).is_some_and(|run| {
+            run.record.final_candidate_freeze.is_some() || run.record.delegated_stop.is_some()
+        }) {
+            return Ok(CodexPoll::Pending);
+        }
         if let Some(message) = self
             .runs
             .get_mut(&run_key)
             .and_then(|run| run.replay.pop_front())
         {
             return Ok(CodexPoll::RuntimeTrace(Box::new(message)));
+        }
+        let pending_delegated_turn = self.runs.get(&run_key).and_then(|run| {
+            run.record
+                .delegated_transitions
+                .last()
+                .filter(|stored| stored.state == StoredDelegatedTransitionState::Intent)
+                .map(|stored| stored.turn_id.clone())
+        });
+        if let Some(turn_id) = pending_delegated_turn {
+            let outcome = self
+                .reconcile_persisted_delegated_turn(&run_key, &turn_id)
+                .await?;
+            if matches!(
+                outcome,
+                DelegatedLoopTransitionOutcome::Submitted { .. }
+                    | DelegatedLoopTransitionOutcome::Stopped { .. }
+            ) {
+                return Ok(CodexPoll::Pending);
+            }
+        }
+        if let Some(intent) = self.poll_batch_intent(&run_key)? {
+            return Ok(intent);
+        }
+        if self
+            .runs
+            .get(&run_key)
+            .is_some_and(|run| run.record.batch_intent.is_some())
+        {
+            return Ok(CodexPoll::Pending);
+        }
+        if let Some(repair) = self.reconcile_format_repair(&run_key, now).await? {
+            return Ok(repair);
         }
         if let Some(terminal) = self.poll_retained_terminal(&run_key)? {
             return Ok(terminal);
@@ -2154,6 +3422,96 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
             .map_err(map_store_error)
     }
 
+    fn retain_final_candidate_freeze(
+        &mut self,
+        thread_id: &CodexThreadId,
+        fact: &FinalCandidateFreezeFact,
+    ) -> Result<FinalCandidateFreezeFact, Self::Error> {
+        let run_key = self.run_key_for_thread(thread_id)?.to_owned();
+        let totals = self
+            .store
+            .delegated_performance_totals(&run_key)
+            .map_err(map_store_error)?;
+        // The latest Observer must settle before its usage can be frozen into
+        // the final cumulative counters.
+        if totals.pending_model_calls > 0 || !totals.cost_complete || totals.primary_model_calls < 1
+        {
+            return Err(conflict());
+        }
+        let run = self.runs.get(&run_key).ok_or_else(unknown_thread)?;
+        if run.record.delegated_stop.is_some() {
+            return Err(conflict());
+        }
+        let opened_at = run.binding.opened_at.clone();
+        let prior_context_bytes = run
+            .record
+            .delegated_transitions
+            .last()
+            .map_or(0, |transition| transition.counters.context_pack_bytes);
+        let change_batches = i64::try_from(run.record.delegated_transitions.len())
+            .ok()
+            .and_then(|count| count.checked_add(1))
+            .ok_or_else(conflict)?;
+        let repair_rounds = i64::try_from(
+            run.record
+                .delegated_transitions
+                .iter()
+                .filter(|transition| transition.transition.phase == DelegatedLoopPhase::Repair)
+                .count(),
+        )
+        .map_err(|_| conflict())?;
+        let mut sealed = fact.clone();
+        sealed.counters.change_batches = change_batches;
+        sealed.counters.context_pack_bytes = prior_context_bytes
+            .checked_add(fact.counters.context_pack_bytes)
+            .ok_or_else(conflict)?;
+        sealed.counters.observer_calls = totals.observer_calls;
+        sealed.counters.primary_model_calls = totals.primary_model_calls;
+        sealed.counters.repair_rounds = repair_rounds;
+        sealed.counters.total_tokens = totals.total_tokens;
+        sealed.counters.total_cost_microunits = totals.total_cost_microunits;
+        sealed.counters.elapsed_millis =
+            elapsed_millis(&opened_at, &sealed.frozen_at).ok_or_else(conflict)?;
+        validate_repair_loop_counters(&sealed.counters).map_err(|_| conflict())?;
+        validate_final_candidate_freeze_fact(&sealed).map_err(|_| conflict())?;
+        let retained = {
+            let run = self.runs.get_mut(&run_key).ok_or_else(unknown_thread)?;
+            if run.record.terminal.is_some()
+                || run
+                    .record
+                    .batch_intent
+                    .as_ref()
+                    .is_some_and(|intent| intent.event.identity != fact.identity)
+            {
+                return Err(conflict());
+            }
+            if let Some(existing) = &run.record.final_candidate_freeze {
+                if existing != &sealed {
+                    return Err(conflict());
+                }
+                existing.clone()
+            } else {
+                run.record.batch_intent = None;
+                run.record.final_candidate_freeze = Some(sealed.clone());
+                sealed
+            }
+        };
+        self.persist_run(&run_key)?;
+        let _ = self.retain_performance_baseline_trace(&run_key)?;
+        Ok(retained)
+    }
+
+    fn final_candidate_freeze(
+        &mut self,
+        thread_id: &CodexThreadId,
+    ) -> Result<Option<FinalCandidateFreezeFact>, Self::Error> {
+        let run_key = self.run_key_for_thread(thread_id)?;
+        Ok(self
+            .runs
+            .get(run_key)
+            .and_then(|run| run.record.final_candidate_freeze.clone()))
+    }
+
     fn begin_candidate_artifact_cancel(
         &mut self,
         authority: &CandidateArtifactAuthority,
@@ -2202,7 +3560,10 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
     ) -> Result<DurableExecutionDelivery, Self::Error> {
         let run_key = self.run_key_for_thread(thread_id)?.to_owned();
         let run = self.runs.get(&run_key).ok_or_else(unknown_thread)?;
-        if run.record.terminal.is_none()
+        let terminal_authorities = usize::from(run.record.terminal.is_some())
+            + usize::from(run.record.final_candidate_freeze.is_some())
+            + usize::from(run.record.delegated_stop.is_some());
+        if terminal_authorities != 1
             || outcome.lease != run.binding.authority.lease
             || outcome.worker_session_id != run.binding.authority.worker_session_id
             || outcome.session_identity != run.binding.authority.session_identity
@@ -2288,6 +3649,7 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
             run.record.phase = StoredRunPhase::TerminalTracePending;
         }
         self.persist_run(&run_key)?;
+        let _ = self.retain_performance_baseline_trace(&run_key)?;
         let _ = self.retain_terminal_trace(&run_key, "embedded Codex turn cancelled")?;
         Ok(())
     }
@@ -2386,15 +3748,109 @@ struct ActiveRun {
     replay: VecDeque<RuntimeEventMessage>,
     kernel_live: bool,
     recovered: bool,
+    batch_intent_emission: OneShotState,
+    format_repair_reconciliation: OneShotState,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OneShotState {
+    Ready,
+    Consumed,
+}
+
+fn prepared_stored_run(
+    start: &CodexThreadStart<'_>,
+    canonical_thread_id: CodexThreadId,
+    job_digest: Sha256Digest,
+    workspace: PathBuf,
+    role_policy: Option<RoleSessionPolicy>,
+    kernel_session_id: String,
+    rollout_path: Option<PathBuf>,
+) -> StoredRun {
+    StoredRun {
+        job: start.job.clone(),
+        workspace_revision: start.workspace_revision.clone(),
+        canonical_thread_id,
+        job_digest,
+        workspace,
+        role_policy,
+        kernel_session_id,
+        rollout_path,
+        submission_id: Uuid::now_v7().to_string(),
+        submission_digest: None,
+        phase: StoredRunPhase::Prepared,
+        last_tokens: 0,
+        last_runtime_millis: 0,
+        last_activity_at: start.lease.issued_at.clone(),
+        terminal: None,
+        terminal_trace: None,
+        current_turn_id: None,
+        last_agent_message: None,
+        stage_product_sources: Vec::new(),
+        batch_intent: None,
+        format_repair: None,
+        delegated_transitions: Vec::new(),
+        final_candidate_freeze: None,
+        delegated_stop: None,
+        terminal_message_id: None,
+    }
+}
+
+fn load_stored_run(
+    store: &AdapterStore,
+    run_key: &str,
+) -> Result<Option<StoredRun>, ProductionCodexError> {
+    store.load_run(run_key).map_err(map_store_error)
+}
+
+/// Consumes the pre-v2 role-policy shape exactly once while the durable store
+/// is opening. After this transaction commits, every runtime load parses only
+/// [`StoredRun`] and therefore only the canonical v2 policy.
+fn migrate_stored_run_role_policies_v1_to_v2(
+    store: &AdapterStore,
+) -> Result<(), ProductionCodexError> {
+    store
+        .migrate_run_records_once(ROLE_POLICY_V2_MIGRATION, |_, bytes| {
+            let mut value: Value =
+                serde_json::from_slice(bytes).map_err(|_| AdapterStoreError::Corrupt)?;
+            let object = value.as_object_mut().ok_or(AdapterStoreError::Corrupt)?;
+            let job: ExecutionJob = serde_json::from_value(
+                object
+                    .get("job")
+                    .cloned()
+                    .ok_or(AdapterStoreError::Corrupt)?,
+            )
+            .map_err(|_| AdapterStoreError::Corrupt)?;
+            let migration =
+                migrate_persisted_role_session_policy_v1(&job, object.get("rolePolicy"))
+                    .map_err(|_| AdapterStoreError::Corrupt)?;
+            if migration.migrated {
+                object.insert(
+                    "rolePolicy".to_owned(),
+                    serde_json::to_value(&migration.policy)
+                        .map_err(|_| AdapterStoreError::Corrupt)?,
+                );
+            }
+            let canonical: StoredRun =
+                serde_json::from_value(value).map_err(|_| AdapterStoreError::Corrupt)?;
+            migration
+                .migrated
+                .then(|| serde_json::to_vec(&canonical).map_err(|_| AdapterStoreError::Corrupt))
+                .transpose()
+        })
+        .map(|_| ())
+        .map_err(map_store_error)
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct StoredRun {
     job: ExecutionJob,
+    workspace_revision: WorkspaceRevision,
     canonical_thread_id: CodexThreadId,
     job_digest: Sha256Digest,
     workspace: PathBuf,
+    role_policy: Option<RoleSessionPolicy>,
     kernel_session_id: String,
     rollout_path: Option<PathBuf>,
     submission_id: String,
@@ -2411,10 +3867,81 @@ struct StoredRun {
     last_agent_message: Option<String>,
     #[serde(default)]
     stage_product_sources: Vec<String>,
+    /// Durable single-writer intent emitted by a delegated Composer instead
+    /// of terminalizing the execution Job.
+    #[serde(default)]
+    batch_intent: Option<StoredBatchIntent>,
+    /// At most one schema-preserving repair turn for malformed delegated
+    /// output. The repair prompt never authorizes workspace side effects.
+    #[serde(default)]
+    format_repair: Option<StoredFormatRepair>,
+    /// Bounded exact-turn intents retained in source-batch order. Retaining
+    /// completed/stopped entries makes a Worker restart an exact replay rather
+    /// than a new Primary Model call.
+    #[serde(default)]
+    delegated_transitions: Vec<StoredDelegatedTransition>,
+    #[serde(default)]
+    final_candidate_freeze: Option<FinalCandidateFreezeFact>,
+    #[serde(default)]
+    delegated_stop: Option<DelegatedLoopStopFact>,
     /// Original terminal `JobOutcome` message id, retained across CP ACK
     /// compaction so exact terminal replay does not allocate a new id.
     #[serde(default)]
     terminal_message_id: Option<ExecutionMessageId>,
+}
+
+fn terminal_performance_runtime(
+    store: &AdapterStore,
+    run_key: &str,
+    run: &StoredRun,
+) -> Result<i64, ProductionCodexError> {
+    Ok(store
+        .performance_total_runtime(run_key, &run.last_activity_at)
+        .map_err(map_store_error)?
+        .max(run.last_runtime_millis)
+        .max(
+            run.final_candidate_freeze
+                .as_ref()
+                .map_or(0, |freeze| freeze.counters.elapsed_millis),
+        )
+        .max(
+            run.delegated_stop
+                .as_ref()
+                .map_or(0, |stop| stop.counters.elapsed_millis),
+        ))
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct StoredBatchIntent {
+    event: ChangeBatchProposalEvent,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct StoredFormatRepair {
+    turn_id: String,
+    submitted: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct StoredDelegatedTransition {
+    transition: DelegatedLoopTransition,
+    turn_id: String,
+    prompt: String,
+    counters: RepairLoopCounters,
+    state: StoredDelegatedTransitionState,
+    stop_reason: Option<RepairLoopStopReason>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum StoredDelegatedTransitionState {
+    Intent,
+    Submitted,
+    Completed,
+    Stopped,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -2446,6 +3973,7 @@ enum StoredTerminal {
         usage: ExecutionOutcomeUsage,
     },
     Failed,
+    DelegatedInconclusive,
     Cancelled,
     InfrastructureFailed,
 }
@@ -2455,6 +3983,7 @@ impl StoredTerminal {
         match self {
             Self::Completed { .. } => "embedded Codex turn stopped",
             Self::Failed => "embedded Codex turn failed",
+            Self::DelegatedInconclusive => "delegated ChangeBatch proposal was inconclusive",
             Self::Cancelled => "embedded Codex turn cancelled",
             Self::InfrastructureFailed => "embedded Codex infrastructure failure",
         }
@@ -2474,6 +4003,10 @@ impl StoredTerminal {
             })),
             Self::Failed => Ok(CodexPoll::Failed(
                 SecretSafeTraceSummary::new("embedded Codex turn failed")
+                    .map_err(|_| unavailable())?,
+            )),
+            Self::DelegatedInconclusive => Ok(CodexPoll::Inconclusive(
+                SecretSafeTraceSummary::new("delegated ChangeBatch proposal was inconclusive")
                     .map_err(|_| unavailable())?,
             )),
             Self::Cancelled => Ok(CodexPoll::Cancelled(
@@ -2496,6 +4029,11 @@ fn validate_start(start: CodexThreadStart<'_>) -> Result<(), ProductionCodexErro
         || start.run_key.fencing_token != start.lease.fencing_token
         || start.run_key.payload_digest != start.job.payload_digest
         || start.worker_session_id.0.is_empty()
+        || serde_json::to_value(start.workspace_revision)
+            .ok()
+            .and_then(|value| serde_json::from_value::<WorkspaceRevision>(value).ok())
+            .as_ref()
+            != Some(start.workspace_revision)
     {
         return Err(ProductionCodexError::new(
             ProductionCodexErrorKind::Authority,
@@ -2536,6 +4074,31 @@ fn session_options(
     }
 }
 
+fn sealed_job_role_execution_mode(job: &ExecutionJob) -> RoleExecutionMode {
+    match (job.execution_profile.as_str(), &job.workspace.write_mode) {
+        ("executor" | "remediator", ExecutionWorkspaceWriteMode::ReadOnly) => {
+            RoleExecutionMode::DelegatedBatch
+        }
+        _ => RoleExecutionMode::React,
+    }
+}
+
+fn performance_execution_mode(configured: ExecutionMode, job: &ExecutionJob) -> ExecutionMode {
+    match sealed_job_role_execution_mode(job) {
+        RoleExecutionMode::DelegatedBatch => ExecutionMode::DelegatedPatch,
+        RoleExecutionMode::React if configured == ExecutionMode::DelegatedPatchShadow => {
+            ExecutionMode::DelegatedPatchShadow
+        }
+        RoleExecutionMode::React => ExecutionMode::React,
+    }
+}
+
+fn sealed_role_session_policy(
+    job: &ExecutionJob,
+) -> Result<Option<RoleSessionPolicy>, ProductionCodexError> {
+    role_session_policy(job, sealed_job_role_execution_mode(job)).map_err(|_| invalid_job())
+}
+
 fn load_runtime_messages(
     store: &mut AdapterStore,
     binding: &ModelRunBinding,
@@ -2558,18 +4121,306 @@ fn load_runtime_messages(
         .collect()
 }
 
-fn run_key_digest(run_key: &CodexRunKey) -> Result<String, ProductionCodexError> {
-    Ok(format!(
-        "sha256:{:x}",
-        Sha256::digest(run_key.canonical_bytes().map_err(|_| unavailable())?)
-    ))
+fn submission_input_digest(
+    input: &str,
+    options: &TurnSubmissionOptions,
+) -> Result<Sha256Digest, ProductionCodexError> {
+    let mut digest = Sha256::new();
+    digest.update(b"winwincode.codex-submission.v2\0");
+    digest.update((input.len() as u64).to_be_bytes());
+    digest.update(input.as_bytes());
+    let schema =
+        serde_json::to_vec(&options.final_output_json_schema).map_err(|_| unavailable())?;
+    digest.update((schema.len() as u64).to_be_bytes());
+    digest.update(schema);
+    Ok(Sha256Digest(format!("sha256:{:x}", digest.finalize())))
 }
 
-fn submission_input_digest(input: &str) -> Sha256Digest {
-    let mut digest = Sha256::new();
-    digest.update(b"winwincode.codex-submission.v1\0");
-    digest.update(input.as_bytes());
-    Sha256Digest(format!("sha256:{:x}", digest.finalize()))
+fn turn_submission_options(record: &StoredRun) -> TurnSubmissionOptions {
+    TurnSubmissionOptions {
+        final_output_json_schema: is_delegated_composer(record)
+            .then(change_batch_proposal_json_schema),
+    }
+}
+
+fn delegated_transition_counters(
+    transition: &DelegatedLoopTransition,
+    previous: Option<&RepairLoopCounters>,
+    durable_primary_model_calls: i64,
+    durable_total_tokens: i64,
+    durable_total_cost_microunits: i64,
+    durable_elapsed_millis: i64,
+) -> Result<(RepairLoopCounters, RepairLoopCounters), ProductionCodexError> {
+    let worker = &transition.worker_counters;
+    let values = [
+        worker.change_batches,
+        worker.context_pack_bytes,
+        worker.elapsed_millis,
+        worker.observer_calls,
+        worker.primary_model_calls,
+        worker.repair_rounds,
+        worker.total_cost_microunits,
+        worker.total_tokens,
+        durable_primary_model_calls,
+        durable_total_tokens,
+        durable_total_cost_microunits,
+        durable_elapsed_millis,
+        transition.context.serialized_byte_count,
+    ];
+    if values.iter().any(|value| *value < 0) {
+        return Err(conflict());
+    }
+    if worker.change_batches > 4
+        || worker.context_pack_bytes > 131_072
+        || worker.observer_calls > 4
+        || worker.primary_model_calls > 8
+        || worker.repair_rounds > 3
+        || worker.total_cost_microunits > 9_007_199_254_740_991
+        || worker.total_tokens > 10_000_000
+        || worker.elapsed_millis > 3_600_000
+    {
+        return Err(conflict());
+    }
+    if let Some(previous) = previous
+        && (worker.change_batches < previous.change_batches
+            || worker.observer_calls < previous.observer_calls
+            || durable_primary_model_calls < previous.primary_model_calls
+            || durable_total_tokens < previous.total_tokens
+            || durable_total_cost_microunits < previous.total_cost_microunits
+            || durable_elapsed_millis < previous.elapsed_millis)
+    {
+        return Err(conflict());
+    }
+    let previous_context_bytes = previous.map_or(0, |value| value.context_pack_bytes);
+    let previous_repair_rounds = previous.map_or(0, |value| value.repair_rounds);
+    let repair_rounds = previous_repair_rounds
+        .checked_add(i64::from(transition.phase == DelegatedLoopPhase::Repair))
+        .ok_or_else(conflict)?;
+    if transition.repair_round != repair_rounds {
+        return Err(conflict());
+    }
+    let actual = RepairLoopCounters {
+        change_batches: worker.change_batches,
+        context_pack_bytes: previous_context_bytes,
+        elapsed_millis: durable_elapsed_millis.max(worker.elapsed_millis),
+        observer_calls: worker.observer_calls,
+        primary_model_calls: durable_primary_model_calls,
+        repair_rounds: previous_repair_rounds,
+        total_cost_microunits: durable_total_cost_microunits,
+        total_tokens: durable_total_tokens,
+    };
+    let projected = RepairLoopCounters {
+        context_pack_bytes: actual
+            .context_pack_bytes
+            .checked_add(transition.context.serialized_byte_count)
+            .ok_or_else(conflict)?,
+        primary_model_calls: actual
+            .primary_model_calls
+            .checked_add(1)
+            .ok_or_else(conflict)?,
+        repair_rounds,
+        ..actual.clone()
+    };
+    Ok((actual, projected))
+}
+
+fn delegated_budget_stop(
+    budget: &winwincode_execution_port::generated::RepairLoopBudget,
+    counters: &RepairLoopCounters,
+) -> Option<RepairLoopStopReason> {
+    if !(1..=4).contains(&budget.max_change_batches)
+        || !(1_024..=131_072).contains(&budget.max_context_pack_bytes)
+        || !(1..=4).contains(&budget.max_observer_calls)
+        || !(1..=8).contains(&budget.max_primary_model_calls)
+        || budget.max_repair_rounds != 3
+        || !(1..=9_007_199_254_740_991).contains(&budget.max_total_cost_microunits)
+        || !(1..=10_000_000).contains(&budget.max_total_tokens)
+        || !(1_000..=3_600_000).contains(&budget.max_wall_time_millis)
+    {
+        return Some(RepairLoopStopReason::InfrastructureError);
+    }
+    if counters.repair_rounds > budget.max_repair_rounds {
+        Some(RepairLoopStopReason::RepairRoundLimitReached)
+    } else if counters.observer_calls > budget.max_observer_calls {
+        Some(RepairLoopStopReason::ObserverCallLimitReached)
+    } else if counters.primary_model_calls > budget.max_primary_model_calls {
+        Some(RepairLoopStopReason::PrimaryModelCallLimitReached)
+    } else if counters.total_tokens >= budget.max_total_tokens {
+        Some(RepairLoopStopReason::TotalTokenLimitReached)
+    } else if counters.total_cost_microunits >= budget.max_total_cost_microunits {
+        Some(RepairLoopStopReason::TotalCostLimitReached)
+    } else if counters.elapsed_millis >= budget.max_wall_time_millis {
+        Some(RepairLoopStopReason::WallTimeLimitReached)
+    } else if counters.change_batches >= budget.max_change_batches {
+        Some(RepairLoopStopReason::ChangeBatchLimitReached)
+    } else if counters.context_pack_bytes > budget.max_context_pack_bytes {
+        Some(RepairLoopStopReason::ContextPackLimitReached)
+    } else {
+        None
+    }
+}
+
+fn delegated_budget_stopped_counters(
+    budget: &winwincode_execution_port::generated::RepairLoopBudget,
+    actual: &RepairLoopCounters,
+    projected: &RepairLoopCounters,
+) -> Option<(RepairLoopStopReason, RepairLoopCounters)> {
+    delegated_budget_stop(budget, projected).map(|reason| (reason, actual.clone()))
+}
+
+fn is_delegated_composer(record: &StoredRun) -> bool {
+    record.role_policy.as_ref().is_some_and(|policy| {
+        policy.execution_mode == RoleExecutionMode::DelegatedBatch
+            && matches!(
+                policy.role_id,
+                RoleSessionPolicyRoleId::Executor | RoleSessionPolicyRoleId::Remediator
+            )
+    })
+}
+
+fn delegated_change_batch_event(
+    record: &StoredRun,
+    binding: &ModelRunBinding,
+    turn_id: &str,
+    final_message: Option<&str>,
+    occurred_at: &Instant,
+) -> Result<ChangeBatchProposalEvent, ProductionCodexError> {
+    let final_message = final_message.ok_or_else(invalid_delegated_output)?;
+    let proposal: ChangeBatchProposal =
+        serde_json::from_str(final_message).map_err(|_| invalid_delegated_output())?;
+    validate_delegated_proposal(&record.job, &proposal)?;
+    validate_delegated_patch(&proposal.patch)?;
+    let patch_digest = Sha256Digest(format!(
+        "sha256:{:x}",
+        Sha256::digest(proposal.patch.as_bytes())
+    ));
+    let batch_id = derive_change_batch_id(&binding.run_key, turn_id, None, &patch_digest)
+        .map_err(|_| invalid_delegated_output())?;
+    let lease = &binding.authority.lease;
+    let event = ChangeBatchProposalEvent {
+        identity: ChangeBatchIdentity {
+            attempt: lease.attempt,
+            batch_id,
+            call_id: None,
+            fencing_token: lease.fencing_token.clone(),
+            job_id: lease.job_id.clone(),
+            lease_id: lease.lease_id.clone(),
+            patch_digest,
+            repository_id: record.job.workspace.repository_id.clone(),
+            run_key: binding.run_key.clone(),
+            session_identity: binding.authority.session_identity.clone(),
+            turn_id: turn_id.to_owned(),
+            workspace_revision: record.workspace_revision.clone(),
+        },
+        occurred_at: occurred_at.clone(),
+        proposal,
+    };
+    validate_change_batch_identity_derivation(&event.identity)
+        .map_err(|_| invalid_delegated_output())?;
+    let bytes = serde_json::to_vec(&event).map_err(|_| invalid_delegated_output())?;
+    serde_json::from_slice(&bytes).map_err(|_| invalid_delegated_output())
+}
+
+fn validate_stored_batch_intent(
+    record: &StoredRun,
+    binding: &ModelRunBinding,
+    intent: &StoredBatchIntent,
+) -> Result<(), ProductionCodexError> {
+    if !is_delegated_composer(record) {
+        return Err(conflict());
+    }
+    validate_change_batch_identity_derivation(&intent.event.identity).map_err(|_| conflict())?;
+    let proposal = serde_json::to_string(&intent.event.proposal).map_err(|_| conflict())?;
+    let expected = delegated_change_batch_event(
+        record,
+        binding,
+        &intent.event.identity.turn_id,
+        Some(&proposal),
+        &intent.event.occurred_at,
+    )?;
+    if expected != intent.event {
+        return Err(conflict());
+    }
+    Ok(())
+}
+
+fn validate_delegated_patch(patch: &str) -> Result<(), ProductionCodexError> {
+    if patch.len() > 524_288 {
+        return Err(invalid_delegated_output());
+    }
+    let parsed = parse_patch(patch).map_err(|_| invalid_delegated_output())?;
+    if parsed.hunks.is_empty() || parsed.hunks.len() > 100 {
+        return Err(invalid_delegated_output());
+    }
+    let mut files = std::collections::HashSet::new();
+    for hunk in &parsed.hunks {
+        match hunk {
+            Hunk::AddFile { path, .. } | Hunk::DeleteFile { path } => {
+                validate_delegated_patch_path(path)?;
+                files.insert(path);
+            }
+            Hunk::UpdateFile {
+                path, move_path, ..
+            } => {
+                validate_delegated_patch_path(path)?;
+                files.insert(path);
+                if let Some(move_path) = move_path {
+                    validate_delegated_patch_path(move_path)?;
+                    files.insert(move_path);
+                }
+            }
+        }
+        if files.len() > 20 {
+            return Err(invalid_delegated_output());
+        }
+    }
+    Ok(())
+}
+
+fn validate_delegated_proposal(
+    job: &ExecutionJob,
+    proposal: &ChangeBatchProposal,
+) -> Result<(), ProductionCodexError> {
+    let expected = job
+        .stage_input
+        .as_ref()
+        .and_then(|input| input.task.as_ref())
+        .map(|task| {
+            task.acceptance_criterion_ids
+                .iter()
+                .map(String::as_str)
+                .collect::<std::collections::HashSet<_>>()
+        })
+        .ok_or_else(invalid_delegated_output)?;
+    let mut observed = std::collections::HashSet::new();
+    if proposal.acceptance_criteria_ids.len() != expected.len()
+        || proposal
+            .acceptance_criteria_ids
+            .iter()
+            .any(|criterion| !expected.contains(criterion.as_str()) || !observed.insert(criterion))
+    {
+        return Err(invalid_delegated_output());
+    }
+    Ok(())
+}
+
+fn validate_delegated_patch_path(path: &Path) -> Result<(), ProductionCodexError> {
+    if path.as_os_str().is_empty()
+        || path.is_absolute()
+        || path
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(invalid_delegated_output());
+    }
+    Ok(())
+}
+
+fn invalid_delegated_output() -> ProductionCodexError {
+    ProductionCodexError::new(
+        ProductionCodexErrorKind::Conflict,
+        "delegated ChangeBatch proposal is invalid",
+    )
 }
 
 fn canonical_workspace(workspace: &Path) -> Result<PathBuf, ProductionCodexError> {
@@ -2633,6 +4484,41 @@ fn verification_evidence_status(
             crate::stage_product::VerificationEvidenceStatus::Declined
         }
     }
+}
+
+fn validation_command(command: &[String]) -> bool {
+    let normalized = command
+        .iter()
+        .map(|part| part.to_ascii_lowercase())
+        .collect::<Vec<_>>()
+        .join(" ");
+    [
+        "cargo test",
+        "cargo nextest",
+        "cargo check",
+        "cargo clippy",
+        "pnpm test",
+        "pnpm typecheck",
+        "pnpm lint",
+        "pnpm build",
+        "pnpm verify",
+        "npm test",
+        "npm run test",
+        "npm run typecheck",
+        "npm run lint",
+        "npm run build",
+        "yarn test",
+        "bun test",
+        "pytest",
+        "python -m pytest",
+        "go test",
+        "dotnet test",
+        "swift test",
+        "gradle test",
+        "mvn test",
+    ]
+    .iter()
+    .any(|needle| normalized.contains(needle))
 }
 
 fn valid_prefixed_id(value: &str, prefix: &str) -> bool {
@@ -3221,12 +5107,242 @@ fn map_bridge_error(_: BridgeError) -> ProductionCodexError {
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_HELPER_BYTES, ProductionCodexErrorKind, bounded_helper_handshake, decode_kernel_event,
-        project_helper, read_helper_bytes, seal_helper, submission_input_digest,
-        terminate_helper_process_group, validate_helper_image, validate_sealed_helper,
+        AdapterStore, ExecutionMode, MAX_HELPER_BYTES, ModelLeaseAuthority, ModelRunBinding,
+        ProductionCodexErrorKind, RoleExecutionMode, StoredRun, StoredRunPhase,
+        TurnSubmissionOptions, bounded_helper_handshake, decode_kernel_event,
+        delegated_budget_stop, delegated_budget_stopped_counters, delegated_change_batch_event,
+        load_stored_run, migrate_stored_run_role_policies_v1_to_v2, performance_execution_mode,
+        project_helper, read_helper_bytes, role_session_policy, seal_helper,
+        sealed_job_role_execution_mode, submission_input_digest, terminate_helper_process_group,
+        turn_submission_options, validate_delegated_patch, validate_delegated_patch_path,
+        validate_helper_image, validate_sealed_helper, validate_stored_batch_intent,
     };
     use crate::helper_release::HelperReleaseManifest;
+    use std::fmt::Write as _;
     use std::path::PathBuf;
+    use winwincode_domain::{
+        ChangeBatchId, CodexThreadId, DeliveryId, DeliveryTaskId, ExecutionJobId, FencingToken,
+        Instant, LeaseId, ProductSessionId, RepositoryId, SchemaVersion, SessionIdentity,
+        Sha256Digest, StageRunId, WorkerId, WorkerInstanceId, WorkerSessionId, WorkspaceRevision,
+    };
+    use winwincode_execution_port::generated::{
+        DeliveryStageAcceptanceCriterionInput, DeliveryStageExecutionScope,
+        DeliveryStageExecutionScopeKind, DeliveryStageInput, DeliveryStageTaskInput, ExecutionJob,
+        ExecutionLeaseStamp, ExecutionLimits, ExecutionScope, ExecutionWorkspace,
+        ExecutionWorkspaceWriteMode, RepairLoopBudget, RepairLoopCounters, RepairLoopStopReason,
+    };
+
+    #[test]
+    fn sealed_workspace_selects_execution_behavior_and_performance_arm() {
+        for (configured, role, write_mode, expected_role, expected_performance) in [
+            (
+                ExecutionMode::React,
+                "executor",
+                ExecutionWorkspaceWriteMode::Candidate,
+                RoleExecutionMode::React,
+                ExecutionMode::React,
+            ),
+            (
+                ExecutionMode::DelegatedPatchShadow,
+                "executor",
+                ExecutionWorkspaceWriteMode::Candidate,
+                RoleExecutionMode::React,
+                ExecutionMode::DelegatedPatchShadow,
+            ),
+            (
+                ExecutionMode::DelegatedPatch,
+                "executor",
+                ExecutionWorkspaceWriteMode::Candidate,
+                RoleExecutionMode::React,
+                ExecutionMode::React,
+            ),
+            (
+                ExecutionMode::React,
+                "executor",
+                ExecutionWorkspaceWriteMode::ReadOnly,
+                RoleExecutionMode::DelegatedBatch,
+                ExecutionMode::DelegatedPatch,
+            ),
+            (
+                ExecutionMode::DelegatedPatch,
+                "remediator",
+                ExecutionWorkspaceWriteMode::ReadOnly,
+                RoleExecutionMode::DelegatedBatch,
+                ExecutionMode::DelegatedPatch,
+            ),
+            (
+                ExecutionMode::DelegatedPatch,
+                "reviewer",
+                ExecutionWorkspaceWriteMode::ReadOnly,
+                RoleExecutionMode::React,
+                ExecutionMode::React,
+            ),
+        ] {
+            let mut job = executor_job();
+            job.execution_profile = role.to_owned();
+            job.workspace.write_mode = write_mode;
+            assert_eq!(sealed_job_role_execution_mode(&job), expected_role);
+            assert_eq!(
+                performance_execution_mode(configured, &job),
+                expected_performance
+            );
+        }
+    }
+
+    fn delegated_budget_fixture() -> RepairLoopBudget {
+        RepairLoopBudget {
+            max_change_batches: 4,
+            max_context_pack_bytes: 131_072,
+            max_observer_calls: 4,
+            max_primary_model_calls: 8,
+            max_repair_rounds: 3,
+            max_total_cost_microunits: 9_007_199_254_740_991,
+            max_total_tokens: 10_000_000,
+            max_wall_time_millis: 3_600_000,
+        }
+    }
+
+    fn delegated_counter_fixture() -> RepairLoopCounters {
+        RepairLoopCounters {
+            change_batches: 1,
+            context_pack_bytes: 1_024,
+            elapsed_millis: 1_000,
+            observer_calls: 1,
+            primary_model_calls: 1,
+            repair_rounds: 0,
+            total_cost_microunits: 1,
+            total_tokens: 1,
+        }
+    }
+
+    #[test]
+    fn delegated_budget_gate_has_one_exact_reason_for_every_bound() {
+        let budget = delegated_budget_fixture();
+        assert_eq!(
+            delegated_budget_stop(&budget, &delegated_counter_fixture()),
+            None
+        );
+        for (field, value, expected) in [
+            ("repair", 4, RepairLoopStopReason::RepairRoundLimitReached),
+            (
+                "observer",
+                5,
+                RepairLoopStopReason::ObserverCallLimitReached,
+            ),
+            (
+                "primary",
+                9,
+                RepairLoopStopReason::PrimaryModelCallLimitReached,
+            ),
+            (
+                "tokens",
+                10_000_000,
+                RepairLoopStopReason::TotalTokenLimitReached,
+            ),
+            (
+                "cost",
+                9_007_199_254_740_991,
+                RepairLoopStopReason::TotalCostLimitReached,
+            ),
+            (
+                "wall",
+                3_600_000,
+                RepairLoopStopReason::WallTimeLimitReached,
+            ),
+            ("batch", 4, RepairLoopStopReason::ChangeBatchLimitReached),
+            (
+                "context",
+                131_073,
+                RepairLoopStopReason::ContextPackLimitReached,
+            ),
+        ] {
+            let mut counters = delegated_counter_fixture();
+            match field {
+                "repair" => counters.repair_rounds = value,
+                "observer" => counters.observer_calls = value,
+                "primary" => counters.primary_model_calls = value,
+                "tokens" => counters.total_tokens = value,
+                "cost" => counters.total_cost_microunits = value,
+                "wall" => counters.elapsed_millis = value,
+                "batch" => counters.change_batches = value,
+                "context" => counters.context_pack_bytes = value,
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                delegated_budget_stop(&budget, &counters),
+                Some(expected),
+                "wrong terminal reason for {field}"
+            );
+        }
+    }
+
+    #[test]
+    fn projected_primary_overflow_stops_with_the_actual_completed_counter() {
+        let budget = delegated_budget_fixture();
+        let mut actual = delegated_counter_fixture();
+        actual.primary_model_calls = 8;
+        let mut projected = actual.clone();
+        projected.primary_model_calls = 9;
+
+        let (reason, stopped) = delegated_budget_stopped_counters(&budget, &actual, &projected)
+            .expect("projected ninth Primary call must stop");
+
+        assert_eq!(reason, RepairLoopStopReason::PrimaryModelCallLimitReached);
+        assert_eq!(stopped.primary_model_calls, 8);
+        assert_eq!(stopped, actual);
+    }
+
+    fn executor_job() -> ExecutionJob {
+        let task_id = DeliveryTaskId("dtk_00000000000000000000000001".to_owned());
+        ExecutionJob {
+            attempt: 1,
+            execution_profile: "executor".to_owned(),
+            goal: "Implement fixture".to_owned(),
+            job_id: ExecutionJobId("job_00000000000000000000000001".to_owned()),
+            limits: ExecutionLimits {
+                deadline_at: Instant("2026-08-28T00:00:00Z".to_owned()),
+                max_artifact_bytes: 1_048_576,
+                max_runtime_seconds: 300,
+            },
+            payload_digest: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
+            scope: ExecutionScope::DeliveryStageExecutionScope(DeliveryStageExecutionScope {
+                delivery_id: DeliveryId("dlv_00000000000000000000000001".to_owned()),
+                delivery_task_id: Some(task_id.clone()),
+                kind: DeliveryStageExecutionScopeKind::DeliveryStage,
+                product_session_id: ProductSessionId("ses_00000000000000000000000001".to_owned()),
+                rework_authorization: None,
+                stage_run_id: StageRunId("run_00000000000000000000000001".to_owned()),
+            }),
+            stage_input: Some(DeliveryStageInput {
+                acceptance_criteria: vec![DeliveryStageAcceptanceCriterionInput {
+                    criterion_id: "criterion-fixture".to_owned(),
+                    description: "The exact fixture behavior is verified.".to_owned(),
+                    required: true,
+                    verification_method: Some("Run the exact fixture check.".to_owned()),
+                }],
+                candidate_ref: None,
+                constraints: vec!["Keep the exact repository boundary.".to_owned()],
+                delivery_spec_id: "spec-fixture".to_owned(),
+                delivery_spec_revision: 2,
+                goal: "Implement fixture".to_owned(),
+                out_of_scope: Vec::new(),
+                schema_version: SchemaVersion::WinwincodeV1,
+                scope: vec!["Fixture source".to_owned()],
+                task: Some(DeliveryStageTaskInput {
+                    acceptance_criterion_ids: vec!["criterion-fixture".to_owned()],
+                    goal: "Implement fixture".to_owned(),
+                    task_id,
+                    title: "Implement fixture".to_owned(),
+                }),
+                title: "Fixture Delivery".to_owned(),
+            }),
+            workspace: ExecutionWorkspace {
+                checkout_revision: "main".to_owned(),
+                repository_id: RepositoryId("repo_00000000000000000000000001".to_owned()),
+                write_mode: ExecutionWorkspaceWriteMode::Candidate,
+            },
+        }
+    }
 
     #[cfg(unix)]
     fn helper_fixture(root: &std::path::Path) -> PathBuf {
@@ -3283,6 +5399,90 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[test]
+    fn startup_migrates_v1_role_policy_once_and_runtime_loads_only_v2() {
+        let root = test_root("role-policy-v1-migration");
+        let store = AdapterStore::open(&root).expect("open migration store");
+        let job = executor_job();
+        let policy = role_session_policy(&job, RoleExecutionMode::React)
+            .expect("build React policy")
+            .expect("Delivery policy");
+        let record = StoredRun {
+            job,
+            workspace_revision: WorkspaceRevision(format!("git-tree:{}", "1".repeat(40))),
+            canonical_thread_id: CodexThreadId("cdx_00000000000000000000000001".to_owned()),
+            job_digest: Sha256Digest(format!("sha256:{}", "b".repeat(64))),
+            workspace: root.join("candidate"),
+            role_policy: Some(policy),
+            kernel_session_id: "kernel-session-fixture".to_owned(),
+            rollout_path: None,
+            submission_id: "submission-fixture".to_owned(),
+            submission_digest: None,
+            phase: StoredRunPhase::Prepared,
+            last_tokens: 0,
+            last_runtime_millis: 0,
+            last_activity_at: Instant("2026-08-28T00:00:00Z".to_owned()),
+            terminal: None,
+            terminal_trace: None,
+            current_turn_id: None,
+            last_agent_message: None,
+            stage_product_sources: Vec::new(),
+            batch_intent: None,
+            format_repair: None,
+            delegated_transitions: Vec::new(),
+            final_candidate_freeze: None,
+            delegated_stop: None,
+            terminal_message_id: None,
+        };
+        let mut legacy = serde_json::to_value(record).expect("encode stored run");
+        let role_policy = legacy
+            .get_mut("rolePolicy")
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("role policy object");
+        role_policy.insert("schemaVersion".to_owned(), serde_json::json!(1));
+        role_policy.remove("executionMode");
+        store
+            .save_run("run-fixture", &legacy)
+            .expect("save legacy record");
+
+        assert!(load_stored_run(&store, "run-fixture").is_err());
+        migrate_stored_run_role_policies_v1_to_v2(&store).expect("run startup migration");
+        let migrated = load_stored_run(&store, "run-fixture")
+            .expect("load canonical stored run")
+            .expect("stored run");
+        let migrated_policy = migrated.role_policy.expect("migrated role policy");
+        assert_eq!(migrated_policy.schema_version, 2);
+        assert_eq!(migrated_policy.execution_mode, RoleExecutionMode::React);
+        let canonical: serde_json::Value = store
+            .load_run("run-fixture")
+            .expect("load migrated JSON")
+            .expect("migrated JSON");
+        assert_eq!(canonical["rolePolicy"]["schemaVersion"], 2);
+        assert_eq!(canonical["rolePolicy"]["executionMode"], "react");
+        drop(store);
+
+        let restarted = AdapterStore::open(&root).expect("reopen migration store");
+        migrate_stored_run_role_policies_v1_to_v2(&restarted)
+            .expect("replay completed startup migration");
+        let replayed = load_stored_run(&restarted, "run-fixture")
+            .expect("replay migrated stored run")
+            .expect("replayed stored run");
+        assert_eq!(replayed.role_policy, Some(migrated_policy));
+        let after_replay: serde_json::Value = restarted
+            .load_run("run-fixture")
+            .expect("reload canonical JSON")
+            .expect("canonical JSON");
+        assert_eq!(after_replay, canonical);
+
+        restarted
+            .save_run("run-fixture", &legacy)
+            .expect("inject obsolete runtime shape");
+        assert!(load_stored_run(&restarted, "run-fixture").is_err());
+        drop(restarted);
+        std::fs::remove_dir_all(root).expect("remove migration fixture");
+    }
+
+    #[cfg(unix)]
     fn process_is_running(process_id: u32) -> bool {
         std::process::Command::new("/bin/kill")
             .args(["-0", "--", &process_id.to_string()])
@@ -3316,10 +5516,291 @@ mod tests {
 
     #[test]
     fn submission_digest_seals_the_exact_input_bytes() {
-        let original = submission_input_digest("exact prompt");
-        assert_eq!(original, submission_input_digest("exact prompt"));
-        assert_ne!(original, submission_input_digest("exact prompt\n"));
-        assert_ne!(original, submission_input_digest("Exact prompt"));
+        let react = TurnSubmissionOptions::default();
+        let delegated = TurnSubmissionOptions {
+            final_output_json_schema: Some(
+                crate::stage_product::change_batch_proposal_json_schema(),
+            ),
+        };
+        let original = submission_input_digest("exact prompt", &react).expect("digest input");
+        assert_eq!(
+            original,
+            submission_input_digest("exact prompt", &react).expect("digest same input")
+        );
+        assert_ne!(
+            original,
+            submission_input_digest("exact prompt\n", &react).expect("digest newline input")
+        );
+        assert_ne!(
+            original,
+            submission_input_digest("Exact prompt", &react).expect("digest changed input")
+        );
+        assert_ne!(
+            original,
+            submission_input_digest("exact prompt", &delegated).expect("digest schema input")
+        );
+        let mut changed_schema = delegated.clone();
+        changed_schema.final_output_json_schema = Some(serde_json::json!({"type": "string"}));
+        assert_ne!(
+            submission_input_digest("exact prompt", &delegated).expect("digest canonical schema"),
+            submission_input_digest("exact prompt", &changed_schema)
+                .expect("digest changed schema")
+        );
+    }
+
+    fn delegated_record_and_binding() -> (StoredRun, ModelRunBinding) {
+        let mut job = executor_job();
+        job.workspace.write_mode = ExecutionWorkspaceWriteMode::ReadOnly;
+        let thread_id = CodexThreadId("cdx_00000000000000000000000001".to_owned());
+        let worker_session_id = WorkerSessionId("wss_00000000000000000000000001".to_owned());
+        let record = StoredRun {
+            role_policy: role_session_policy(&job, RoleExecutionMode::DelegatedBatch)
+                .expect("build delegated policy"),
+            job,
+            workspace_revision: WorkspaceRevision(format!("git-tree:{}", "1".repeat(40))),
+            canonical_thread_id: thread_id.clone(),
+            job_digest: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
+            workspace: PathBuf::from("/tmp/delegated-candidate"),
+            kernel_session_id: "kernel-session-fixture".to_owned(),
+            rollout_path: None,
+            submission_id: "submission-fixture".to_owned(),
+            submission_digest: None,
+            phase: StoredRunPhase::RuntimeStarted,
+            last_tokens: 0,
+            last_runtime_millis: 0,
+            last_activity_at: Instant("2026-08-28T00:00:00Z".to_owned()),
+            terminal: None,
+            terminal_trace: None,
+            current_turn_id: Some("turn-fixture".to_owned()),
+            last_agent_message: None,
+            stage_product_sources: Vec::new(),
+            batch_intent: None,
+            format_repair: None,
+            delegated_transitions: Vec::new(),
+            final_candidate_freeze: None,
+            delegated_stop: None,
+            terminal_message_id: None,
+        };
+        let binding = ModelRunBinding {
+            run_key: format!("sha256:{}", "b".repeat(64)),
+            canonical_thread_id: thread_id.clone(),
+            kernel_session_id: "kernel-session-fixture".to_owned(),
+            authority: ModelLeaseAuthority {
+                lease: ExecutionLeaseStamp {
+                    attempt: 1,
+                    expires_at: Instant("2026-08-28T01:00:00Z".to_owned()),
+                    fencing_token: FencingToken("fence-fixture".to_owned()),
+                    issued_at: Instant("2026-08-28T00:00:00Z".to_owned()),
+                    job_id: record.job.job_id.clone(),
+                    lease_id: LeaseId("lease-fixture".to_owned()),
+                    worker_id: WorkerId("wrk_00000000000000000000000001".to_owned()),
+                    worker_instance_id: WorkerInstanceId(
+                        "wki_00000000000000000000000001".to_owned(),
+                    ),
+                },
+                worker_session_id: worker_session_id.clone(),
+                session_identity: SessionIdentity {
+                    codex_thread_id: thread_id,
+                    product_session_id: ProductSessionId(
+                        "ses_00000000000000000000000001".to_owned(),
+                    ),
+                    stage_run_id: Some(StageRunId("run_00000000000000000000000001".to_owned())),
+                    worker_session_id,
+                },
+            },
+            opened_at: Instant("2026-08-28T00:00:00Z".to_owned()),
+        };
+        (record, binding)
+    }
+
+    #[test]
+    fn delegated_final_output_is_strict_and_has_a_deterministic_batch_identity() {
+        let (mut record, binding) = delegated_record_and_binding();
+        assert!(
+            turn_submission_options(&record)
+                .final_output_json_schema
+                .is_some()
+        );
+        let mut react = record.clone();
+        react
+            .role_policy
+            .as_mut()
+            .expect("executor policy")
+            .execution_mode = RoleExecutionMode::React;
+        assert!(
+            turn_submission_options(&react)
+                .final_output_json_schema
+                .is_none()
+        );
+        let output = serde_json::json!({
+            "acceptanceCriteriaIds": ["criterion-fixture"],
+            "disposition": "final",
+            "patch": "*** Begin Patch\n*** Update File: src/lib.rs\n@@\n-old\n+new\n*** End Patch\n",
+            "schemaVersion": 1,
+            "validationProfile": "changed"
+        });
+        let occurred_at = Instant("2026-08-28T00:05:00Z".to_owned());
+        let first = delegated_change_batch_event(
+            &record,
+            &binding,
+            "turn-fixture",
+            Some(&output.to_string()),
+            &occurred_at,
+        )
+        .expect("accept canonical proposal");
+        let later = delegated_change_batch_event(
+            &record,
+            &binding,
+            "turn-fixture",
+            Some(&output.to_string()),
+            &Instant("2026-08-28T00:06:00Z".to_owned()),
+        )
+        .expect("rebuild canonical proposal");
+        assert_eq!(first.identity, later.identity);
+        assert_eq!(first.proposal, later.proposal);
+        let intent = super::StoredBatchIntent {
+            event: first.clone(),
+        };
+        validate_stored_batch_intent(&record, &binding, &intent)
+            .expect("validate durable batch intent");
+        let mut tampered = intent.clone();
+        tampered.event.identity.batch_id = ChangeBatchId(format!("sha256:{}", "f".repeat(64)));
+        assert!(validate_stored_batch_intent(&record, &binding, &tampered).is_err());
+
+        let durable_root = std::env::temp_dir().join(format!(
+            "winwincode-delegated-intent-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time")
+                .as_nanos()
+        ));
+        let durable_store = AdapterStore::open(&durable_root).expect("open durable intent store");
+        record.batch_intent = Some(intent);
+        durable_store
+            .save_run("delegated-run", &record)
+            .expect("persist one batch intent");
+        let replayed = load_stored_run(&durable_store, "delegated-run")
+            .expect("load batch intent")
+            .expect("stored batch intent");
+        assert_eq!(replayed.batch_intent.expect("replayed intent").event, first);
+        std::fs::remove_dir_all(durable_root).expect("remove durable intent store");
+
+        let mut unknown = output.clone();
+        unknown["unexpected"] = serde_json::json!(true);
+        assert!(
+            delegated_change_batch_event(
+                &record,
+                &binding,
+                "turn-fixture",
+                Some(&unknown.to_string()),
+                &occurred_at,
+            )
+            .is_err()
+        );
+        let mut foreign_criterion = output;
+        foreign_criterion["acceptanceCriteriaIds"] = serde_json::json!(["criterion-foreign"]);
+        assert!(
+            delegated_change_batch_event(
+                &record,
+                &binding,
+                "turn-fixture",
+                Some(&foreign_criterion.to_string()),
+                &occurred_at,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn delegated_proposal_covers_the_exact_task_acceptance_set() {
+        let (mut record, binding) = delegated_record_and_binding();
+        record
+            .job
+            .stage_input
+            .as_mut()
+            .and_then(|input| input.task.as_mut())
+            .expect("delegated task")
+            .acceptance_criterion_ids
+            .push("criterion-second".to_owned());
+        let incomplete = serde_json::json!({
+            "acceptanceCriteriaIds": ["criterion-fixture"],
+            "disposition": "final",
+            "patch": "*** Begin Patch\n*** Update File: src/lib.rs\n@@\n-old\n+new\n*** End Patch\n",
+            "schemaVersion": 1,
+            "validationProfile": "changed"
+        });
+        assert!(
+            delegated_change_batch_event(
+                &record,
+                &binding,
+                "turn-fixture",
+                Some(&incomplete.to_string()),
+                &Instant("2026-08-28T00:05:00Z".to_owned()),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn delegated_patch_paths_stay_below_the_candidate_root() {
+        let multibyte = "é".repeat(262_145);
+        assert!(multibyte.chars().count() <= 524_288);
+        assert!(multibyte.len() > 524_288);
+        assert!(validate_delegated_patch(&multibyte).is_err());
+
+        for path in ["", "/tmp/escape", "../escape", ".", "src/../escape"] {
+            assert!(
+                validate_delegated_patch_path(std::path::Path::new(path)).is_err(),
+                "reject {path:?}"
+            );
+        }
+        for path in ["src/lib.rs", "nested/path/file-name.rs"] {
+            validate_delegated_patch_path(std::path::Path::new(path))
+                .expect("accept normal relative path");
+        }
+
+        let (record, binding) = delegated_record_and_binding();
+        let moved_outside = serde_json::json!({
+            "acceptanceCriteriaIds": ["criterion-fixture"],
+            "disposition": "final",
+            "patch": "*** Begin Patch\n*** Update File: src/lib.rs\n*** Move to: ../escape.rs\n@@\n-old\n+new\n*** End Patch\n",
+            "schemaVersion": 1,
+            "validationProfile": "changed"
+        });
+        assert!(
+            delegated_change_batch_event(
+                &record,
+                &binding,
+                "turn-fixture",
+                Some(&moved_outside.to_string()),
+                &Instant("2026-08-28T00:05:00Z".to_owned()),
+            )
+            .is_err()
+        );
+
+        let patch_with_files = |count: usize| {
+            let mut patch = String::from("*** Begin Patch\n");
+            for index in 0..count {
+                writeln!(patch, "*** Delete File: src/file-{index}.rs")
+                    .expect("write patch fixture");
+            }
+            patch.push_str("*** End Patch\n");
+            patch
+        };
+        validate_delegated_patch(&patch_with_files(20)).expect("accept twenty-file plan");
+        assert!(validate_delegated_patch(&patch_with_files(21)).is_err());
+
+        let patch_with_hunks = |count: usize| {
+            let mut patch = String::from("*** Begin Patch\n");
+            for _ in 0..count {
+                patch.push_str("*** Delete File: src/repeated.rs\n");
+            }
+            patch.push_str("*** End Patch\n");
+            patch
+        };
+        validate_delegated_patch(&patch_with_hunks(100)).expect("accept one hundred hunks");
+        assert!(validate_delegated_patch(&patch_with_hunks(101)).is_err());
     }
 
     #[cfg(unix)]

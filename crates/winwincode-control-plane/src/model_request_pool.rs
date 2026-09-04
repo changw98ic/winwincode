@@ -14,7 +14,8 @@ use std::fmt;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use winwincode_api::generated::{ModelRoute, RepositoryScopeKind};
+use winwincode_api::generated::ModelRoute;
+use winwincode_domain::RepositoryScopeKind;
 use winwincode_domain::{
     CredentialReferenceId, ModelExchangeId, OrganizationId, ProjectId, RequestId,
 };

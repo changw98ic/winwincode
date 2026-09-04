@@ -11,8 +11,9 @@ use std::{
 use winwincode_api::generated::{
     CommandEnvelope, CommandName, PublicationPublishCommand, PublicationPublishCompletedResponse,
     PublicationPublishCompletedResponseCommand, PublicationPublishCompletedResponseOutcome,
-    PublicationTarget as ApiPublicationTarget, PublicationTargetProvider, RepositoryScope, Scope,
+    PublicationTarget as ApiPublicationTarget, PublicationTargetProvider, Scope,
 };
+use winwincode_domain::RepositoryScope;
 use winwincode_domain::{
     CredentialReferenceId, Revision, SchemaVersion, ServiceAccountId, SystemActorId, UserId,
 };
@@ -1035,10 +1036,11 @@ mod tests {
 
     use sha2::{Digest, Sha256};
     use winwincode_api::generated::{
-        Actor, PublicationPublishCommandCommand, PublicationPublishPayload, RepositoryScopeKind,
-        UserActor, UserActorKind,
+        Actor, PublicationPublishCommandCommand, PublicationPublishPayload,
     };
-    use winwincode_domain::{EnterprisePolicyId, Instant, RequestId};
+    use winwincode_domain::{
+        EnterprisePolicyId, Instant, RepositoryScopeKind, RequestId, UserActor, UserActorKind,
+    };
     use winwincode_publication::{
         PublicationOperation, PublicationPortError, PublicationPortMutation,
         PublicationPortObservation, PublicationRequester,

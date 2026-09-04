@@ -91,6 +91,9 @@ impl DeliveryExecutionTransaction for AtomicDeliveryExecutionTransaction<'_, '_>
             ),
         )
         .map_err(port_error)?;
+        commit =
+            crate::rollout_gate::bind_writer_job(commit, pending.job(), pending.rollout_gate())
+                .map_err(port_error)?;
         let request_digest = commit
             .command_digest
             .0
@@ -135,7 +138,14 @@ impl DeliveryExecutionTransaction for AtomicDeliveryExecutionTransaction<'_, '_>
         }
 
         let receipt = self.storage.commit(&commit).map_err(port_error)?;
-        committed_delivery_receipt(self.storage, &receipt, &stream_id)
+        let committed = committed_delivery_receipt(self.storage, &receipt, &stream_id)?;
+        crate::rollout_gate::validate_writer_job_binding(
+            &receipt,
+            &committed.job,
+            pending.rollout_gate(),
+        )
+        .map_err(port_error)?;
+        Ok(committed)
     }
 
     fn mark_job_dispatched(

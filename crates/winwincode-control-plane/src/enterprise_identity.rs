@@ -27,7 +27,7 @@ use winwincode_api::generated::{
     EnterpriseIdentityUpdateCompletedResponseOutcome, EnterpriseIdentityUpdatePayload,
     EnterpriseServiceAccountProjection, EnterpriseServiceAccountProjectionKind,
     EnterpriseServiceAccountRevokePayload, EnterpriseServiceAccountUpsertPayload, PageInfo, Scope,
-    ServiceAccountActor, ServiceAccountActorKind, UserActor, UserActorKind,
+    ServiceAccountActor, ServiceAccountActorKind,
 };
 use winwincode_audit::{
     AuditAction, AuditActor, AuditEvent, AuditEventId, AuditOrigin, AuditRetention, AuditScope,
@@ -37,6 +37,7 @@ use winwincode_domain::{
     ApiTokenId, ExternalIdentityId, Instant, OpaqueCursor, OrganizationId, Revision, SchemaVersion,
     ServiceAccountId, Sha256Digest,
 };
+use winwincode_domain::{UserActor, UserActorKind};
 use winwincode_storage::{
     CommitReceipt, NewOutboxEvent, PendingAuditEvent, ProductStateStorage, StateCommit,
     StateMutation, StateRevisionGuard, StorageError, StorageErrorKind, StoredState,

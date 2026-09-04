@@ -16,8 +16,7 @@ use winwincode_api::generated::{
     EnterpriseOrganizationUpdateCommandCommand, EnterpriseOrganizationUpdatePayload,
     EnterprisePermission, EnterpriseRoleAssignment, EnterpriseRolePermissionRule,
     EnterpriseRoleUpdateCommand, EnterpriseRoleUpdateCommandCommand, EnterpriseRoleUpdatePayload,
-    OrganizationScope, OrganizationScopeKind, QueryRequest, RepositoryScope, RepositoryScopeKind,
-    Scope, UserActor, UserActorKind,
+    OrganizationScope, OrganizationScopeKind, QueryRequest, Scope,
 };
 use winwincode_control_plane::{
     CollaborationActivityRecordRequest, CollaborationService, ControlPlane, ControlPlaneConfig,
@@ -28,6 +27,7 @@ use winwincode_domain::{
     EnterpriseMembershipId, EnterpriseRoleId, EnterpriseRoleVersion, Instant, OrganizationId,
     ProjectId, RepositoryId, RequestId, Revision, SchemaVersion, Sha256Digest, UserId, WorkspaceId,
 };
+use winwincode_domain::{RepositoryScope, RepositoryScopeKind, UserActor, UserActorKind};
 use winwincode_server::{
     AuthenticatedPrincipal, CommandDispatchResponse, CommandFamily, DurableEventHub,
     DurableEventHubConfig, DurableEventPublisher, QueryFamily, StandaloneControlPlaneApplication,

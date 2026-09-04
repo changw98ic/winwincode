@@ -9,9 +9,7 @@ use std::{
     thread,
 };
 
-use winwincode_api::generated::{
-    Actor, RepositoryScope, RepositoryScopeKind, Scope, UserActor, UserActorKind,
-};
+use winwincode_api::generated::{Actor, Scope};
 use winwincode_control_plane::{
     ResponsibilityAssignmentAction, ResponsibilityAssignmentClock,
     ResponsibilityAssignmentClockError, ResponsibilityAssignmentCommand,
@@ -26,6 +24,7 @@ use winwincode_domain::{
     DeliveryId, OrganizationId, ProductSessionId, ProjectId, RepositoryId, RequestId, Sha256Digest,
     UserId, WorkspaceId,
 };
+use winwincode_domain::{RepositoryScope, RepositoryScopeKind, UserActor, UserActorKind};
 use winwincode_storage::{
     NewOutboxEvent, ProductStateStorage, SqliteStorage, StateCommit, StateRevisionGuard,
 };

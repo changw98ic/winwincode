@@ -5,9 +5,7 @@ mod session_binding_fixture {
     use std::sync::{Arc, Mutex};
 
     use sha2::{Digest, Sha256};
-    use winwincode_api::generated::{
-        Actor, CommandEnvelope, CommandName, RepositoryScope, Scope, UserActor,
-    };
+    use winwincode_api::generated::{Actor, CommandEnvelope, CommandName, Scope};
     use winwincode_audit::{AuditEvent, AuditExecutionSubjectKind, AuditScope};
     use winwincode_control_plane::delivery_execution::{
         DeliveryExecutionConfig, DeliveryExecutionPortError, ExecutionJobDispatcher,
@@ -37,6 +35,7 @@ mod session_binding_fixture {
         SessionIdentity, Sha256Digest, StageRunId, UserId, WorkerId, WorkerInstanceId,
         WorkerSessionId, WorkspaceId,
     };
+    use winwincode_domain::{RepositoryScope, UserActor};
     use winwincode_execution_port::generated::{
         ExecutionEventCategory, ExecutionEventRecord, ExecutionJob, ExecutionLeaseStamp,
         ExecutionLimits, ExecutionPortErrorCode, ExecutionScope, ExecutionWorkspace,
@@ -156,7 +155,7 @@ mod session_binding_fixture {
         CommandEnvelope {
             actor: Actor::UserActor(UserActor {
                 id: UserId(canonical_id("usr", seed)),
-                kind: winwincode_api::generated::UserActorKind::User,
+                kind: winwincode_domain::UserActorKind::User,
             }),
             command: CommandName::DeliveryAdvance,
             expected_revision: Revision(1),
@@ -164,7 +163,7 @@ mod session_binding_fixture {
             request_id: RequestId(canonical_id("req", seed)),
             schema_version: SchemaVersion::WinwincodeV1,
             scope: Scope::RepositoryScope(RepositoryScope {
-                kind: winwincode_api::generated::RepositoryScopeKind::Repository,
+                kind: winwincode_domain::RepositoryScopeKind::Repository,
                 organization_id: OrganizationId(canonical_id("org", seed)),
                 workspace_id: WorkspaceId(canonical_id("wsp", seed)),
                 project_id: ProjectId(canonical_id("prj", seed)),
@@ -1457,7 +1456,7 @@ mod session_binding_fixture {
         let command = CommandEnvelope {
             actor: Actor::UserActor(UserActor {
                 id: UserId(canonical_id("usr", seed)),
-                kind: winwincode_api::generated::UserActorKind::User,
+                kind: winwincode_domain::UserActorKind::User,
             }),
             command: CommandName::SessionCancel,
             expected_revision: Revision(0),

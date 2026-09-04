@@ -11,6 +11,10 @@ use crate::model_port_client::{
     ModelCancellationFingerprint, ModelCancellationPhase, ModelChunkFingerprint,
     ModelCursorSnapshot, ModelCursorStore, ModelLeaseAuthority, ModelTerminationReason,
 };
+use crate::performance::{
+    DelegatedPerformanceTotals, PerformanceOperationCompletion, PerformanceOperationKind,
+    StoredPerformanceProjection, elapsed_millis,
+};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest as _, Sha256};
@@ -20,11 +24,13 @@ use winwincode_execution_port::replay::{
 };
 use winwincode_execution_port::{
     generated::{ExecutionPortMessage, ModelChunkMessage},
+    runtime_trace_outbox::{ExecutionMode, ObserverMode, PerformanceBaselineReport},
     typed_replay::frame_from_message,
 };
 
-const DATABASE_FILE: &str = "worker-codex.sqlite3";
+pub(crate) const DATABASE_FILE: &str = "worker-codex.sqlite3";
 const MAX_MODEL_CALL_FRAME_BYTES: usize = 16 * 1024 * 1024;
+const MAX_SAFE_METRIC: i64 = 9_007_199_254_740_991;
 
 /// Durable hand-off state for one Core model call. `ProviderFinal` means the
 /// provider response is complete and replayable, while `CoreCommitted` means
@@ -51,6 +57,9 @@ fn initialize_schema(connection: &Connection) -> Result<(), AdapterStoreError> {
                  CREATE TABLE IF NOT EXISTS codex_run (
                    run_key TEXT PRIMARY KEY NOT NULL,
                    record_json BLOB NOT NULL
+                 );
+                 CREATE TABLE IF NOT EXISTS codex_store_migration (
+                   migration_key TEXT PRIMARY KEY NOT NULL
                  );
                  CREATE TABLE IF NOT EXISTS model_cursor (
                    stream_key TEXT PRIMARY KEY NOT NULL,
@@ -139,6 +148,89 @@ fn initialize_schema(connection: &Connection) -> Result<(), AdapterStoreError> {
                  );",
             )
             .map_err(|_| AdapterStoreError::Unavailable)?;
+    initialize_performance_schema(connection)
+}
+
+fn initialize_performance_schema(connection: &Connection) -> Result<(), AdapterStoreError> {
+    connection
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS performance_run (
+                   run_key TEXT PRIMARY KEY NOT NULL,
+                   execution_mode TEXT NOT NULL CHECK(execution_mode IN (
+                     'react', 'delegated_patch_shadow', 'delegated_patch'
+                   )),
+                   observer_mode TEXT NOT NULL CHECK(observer_mode IN (
+                     'off', 'shadow', 'ambiguous_only', 'always'
+                   ))
+                 );
+                 CREATE TABLE IF NOT EXISTS performance_operation (
+                   run_key TEXT NOT NULL,
+                   operation_kind TEXT NOT NULL CHECK(operation_kind IN (
+                     'primary_model', 'tool', 'patch', 'validation',
+                     'observer', 'repair', 'turn'
+                   )),
+                   operation_id TEXT NOT NULL,
+                   started_at TEXT NOT NULL,
+                   completed_at TEXT,
+                   completed INTEGER NOT NULL CHECK(completed IN (0, 1)),
+                   duration_millis INTEGER NOT NULL DEFAULT 0
+                     CHECK(duration_millis >= 0 AND duration_millis <= 9007199254740991),
+                   input_tokens INTEGER NOT NULL DEFAULT 0
+                     CHECK(input_tokens >= 0 AND input_tokens <= 9007199254740991),
+                   cached_tokens INTEGER NOT NULL DEFAULT 0
+                     CHECK(cached_tokens >= 0 AND cached_tokens <= 9007199254740991),
+                   output_tokens INTEGER NOT NULL DEFAULT 0
+                     CHECK(output_tokens >= 0 AND output_tokens <= 9007199254740991),
+                   actual_cost_microunits INTEGER
+                     CHECK(actual_cost_microunits IS NULL OR (
+                       actual_cost_microunits >= 0 AND
+                       actual_cost_microunits <= 9007199254740991
+                     )),
+                   PRIMARY KEY (run_key, operation_kind, operation_id),
+                   CHECK (
+                     (completed = 0 AND completed_at IS NULL)
+                     OR (completed = 1 AND completed_at IS NOT NULL)
+                   )
+                 );
+                 CREATE TABLE IF NOT EXISTS performance_changed_file (
+                   run_key TEXT NOT NULL,
+                   path_digest TEXT NOT NULL,
+                   PRIMARY KEY (run_key, path_digest)
+                 );
+                 CREATE TABLE IF NOT EXISTS performance_projection (
+                   run_key TEXT PRIMARY KEY NOT NULL,
+                   record_json BLOB NOT NULL
+                 );",
+        )
+        .map_err(|_| AdapterStoreError::Unavailable)?;
+    let has_cost_column = {
+        let mut statement = connection
+            .prepare("PRAGMA table_info(performance_operation)")
+            .map_err(|_| AdapterStoreError::Unavailable)?;
+        let columns = statement
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(|_| AdapterStoreError::Unavailable)?;
+        let mut found = false;
+        for column in columns {
+            if column.map_err(|_| AdapterStoreError::Unavailable)? == "actual_cost_microunits" {
+                found = true;
+                break;
+            }
+        }
+        found
+    };
+    if !has_cost_column {
+        connection
+            .execute_batch(
+                "ALTER TABLE performance_operation
+                 ADD COLUMN actual_cost_microunits INTEGER
+                 CHECK(actual_cost_microunits IS NULL OR (
+                   actual_cost_microunits >= 0 AND
+                   actual_cost_microunits <= 9007199254740991
+                 ));",
+            )
+            .map_err(|_| AdapterStoreError::Unavailable)?;
+    }
     Ok(())
 }
 impl AdapterStore {
@@ -197,6 +289,72 @@ impl AdapterStore {
         Ok(())
     }
 
+    /// Applies one bounded startup migration to every durable run before the
+    /// adapter begins serving work. The marker and all rewritten records are
+    /// committed atomically, so normal run loading never needs a legacy
+    /// fallback path.
+    pub(crate) fn migrate_run_records_once(
+        &self,
+        migration_key: &str,
+        mut migrate: impl FnMut(&str, &[u8]) -> Result<Option<Vec<u8>>, AdapterStoreError>,
+    ) -> Result<bool, AdapterStoreError> {
+        if migration_key.trim().is_empty() || migration_key.len() > 128 {
+            return Err(AdapterStoreError::Conflict);
+        }
+        let mut connection = self.lock()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| AdapterStoreError::Unavailable)?;
+        let already_applied = transaction
+            .query_row(
+                "SELECT 1 FROM codex_store_migration WHERE migration_key = ?1",
+                params![migration_key],
+                |_| Ok(()),
+            )
+            .optional()
+            .map_err(|_| AdapterStoreError::Unavailable)?
+            .is_some();
+        if already_applied {
+            transaction
+                .commit()
+                .map_err(|_| AdapterStoreError::Unavailable)?;
+            return Ok(false);
+        }
+
+        let records = {
+            let mut statement = transaction
+                .prepare("SELECT run_key, record_json FROM codex_run ORDER BY run_key")
+                .map_err(|_| AdapterStoreError::Unavailable)?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+                })
+                .map_err(|_| AdapterStoreError::Unavailable)?;
+            rows.map(|row| row.map_err(|_| AdapterStoreError::Unavailable))
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        for (run_key, record) in records {
+            if let Some(migrated) = migrate(&run_key, &record)? {
+                transaction
+                    .execute(
+                        "UPDATE codex_run SET record_json = ?2 WHERE run_key = ?1",
+                        params![run_key, migrated],
+                    )
+                    .map_err(|_| AdapterStoreError::Unavailable)?;
+            }
+        }
+        transaction
+            .execute(
+                "INSERT INTO codex_store_migration(migration_key) VALUES (?1)",
+                params![migration_key],
+            )
+            .map_err(|_| AdapterStoreError::Unavailable)?;
+        transaction
+            .commit()
+            .map_err(|_| AdapterStoreError::Unavailable)?;
+        Ok(true)
+    }
+
     pub(crate) fn save_run_in_transaction<T: Serialize>(
         transaction: &Transaction<'_>,
         run_key: &str,
@@ -207,6 +365,445 @@ impl AdapterStore {
             .execute(
                 "INSERT INTO codex_run(run_key, record_json) VALUES (?1, ?2)
                  ON CONFLICT(run_key) DO UPDATE SET record_json = excluded.record_json",
+                params![run_key, bytes],
+            )
+            .map_err(|_| AdapterStoreError::Unavailable)?;
+        Ok(())
+    }
+
+    /// Freezes the process feature gates for one exact run. A restart must
+    /// present the same values; changing mode halfway through an attempt is a
+    /// conflict rather than a second measurement cohort.
+    pub(crate) fn register_performance_run(
+        &self,
+        run_key: &str,
+        execution_mode: ExecutionMode,
+        observer_mode: ObserverMode,
+    ) -> Result<(), AdapterStoreError> {
+        if run_key.trim().is_empty() {
+            return Err(AdapterStoreError::Conflict);
+        }
+        let connection = self.lock()?;
+        connection
+            .execute(
+                "INSERT OR IGNORE INTO performance_run(
+                   run_key, execution_mode, observer_mode
+                 ) VALUES (?1, ?2, ?3)",
+                params![
+                    run_key,
+                    execution_mode.as_config(),
+                    observer_mode.as_config()
+                ],
+            )
+            .map_err(|_| AdapterStoreError::Unavailable)?;
+        let existing = connection
+            .query_row(
+                "SELECT execution_mode, observer_mode FROM performance_run WHERE run_key = ?1",
+                params![run_key],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .map_err(|_| AdapterStoreError::Unavailable)?;
+        if existing
+            != (
+                execution_mode.as_config().to_owned(),
+                observer_mode.as_config().to_owned(),
+            )
+        {
+            return Err(AdapterStoreError::Conflict);
+        }
+        Ok(())
+    }
+
+    /// Retains the first observation of one stable operation identity.
+    /// Duplicate Kernel or Provider delivery is an exact no-op.
+    pub(crate) fn record_performance_start(
+        &self,
+        run_key: &str,
+        kind: PerformanceOperationKind,
+        operation_id: &str,
+        started_at: &winwincode_domain::Instant,
+    ) -> Result<(), AdapterStoreError> {
+        validate_performance_identity(run_key, operation_id, started_at)?;
+        self.lock()?
+            .execute(
+                "INSERT OR IGNORE INTO performance_operation(
+                   run_key, operation_kind, operation_id, started_at, completed
+                 ) VALUES (?1, ?2, ?3, ?4, 0)",
+                params![run_key, kind.as_str(), operation_id, started_at.0],
+            )
+            .map_err(|_| AdapterStoreError::Unavailable)?;
+        Ok(())
+    }
+
+    /// Completes one stable operation at most once. A replay leaves the first
+    /// bounded counters and timing values unchanged.
+    pub(crate) fn record_performance_completion(
+        &self,
+        run_key: &str,
+        kind: PerformanceOperationKind,
+        operation_id: &str,
+        completed_at: &winwincode_domain::Instant,
+        completion: PerformanceOperationCompletion,
+    ) -> Result<(), AdapterStoreError> {
+        validate_performance_identity(run_key, operation_id, completed_at)?;
+        for value in [
+            completion.input_tokens,
+            completion.cached_tokens,
+            completion.output_tokens,
+        ] {
+            validate_metric(value)?;
+        }
+        if let Some(duration) = completion.duration_millis {
+            validate_metric(duration)?;
+        }
+        if let Some(cost) = completion.actual_cost_microunits {
+            validate_metric(cost)?;
+        }
+        let mut connection = self.lock()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| AdapterStoreError::Unavailable)?;
+        let existing = transaction
+            .query_row(
+                "SELECT started_at, completed FROM performance_operation
+                 WHERE run_key = ?1 AND operation_kind = ?2 AND operation_id = ?3",
+                params![run_key, kind.as_str(), operation_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .optional()
+            .map_err(|_| AdapterStoreError::Unavailable)?;
+        if existing
+            .as_ref()
+            .is_some_and(|(_, completed)| *completed == 1)
+        {
+            transaction
+                .commit()
+                .map_err(|_| AdapterStoreError::Unavailable)?;
+            return Ok(());
+        }
+        let started_at = existing.map_or_else(
+            || completed_at.clone(),
+            |(started_at, _)| winwincode_domain::Instant(started_at),
+        );
+        let duration_millis = completion
+            .duration_millis
+            .or_else(|| elapsed_millis(&started_at, completed_at))
+            .unwrap_or(0);
+        validate_metric(duration_millis)?;
+        transaction
+            .execute(
+                "INSERT INTO performance_operation(
+                   run_key, operation_kind, operation_id, started_at,
+                   completed_at, completed, duration_millis, input_tokens,
+                   cached_tokens, output_tokens
+                   , actual_cost_microunits
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, ?7, ?8, ?9, ?10)
+                 ON CONFLICT(run_key, operation_kind, operation_id) DO UPDATE SET
+                   completed_at = excluded.completed_at,
+                   completed = 1,
+                   duration_millis = excluded.duration_millis,
+                   input_tokens = excluded.input_tokens,
+                   cached_tokens = excluded.cached_tokens,
+                   output_tokens = excluded.output_tokens,
+                   actual_cost_microunits = excluded.actual_cost_microunits
+                 WHERE performance_operation.completed = 0",
+                params![
+                    run_key,
+                    kind.as_str(),
+                    operation_id,
+                    started_at.0,
+                    completed_at.0,
+                    duration_millis,
+                    completion.input_tokens,
+                    completion.cached_tokens,
+                    completion.output_tokens,
+                    completion.actual_cost_microunits,
+                ],
+            )
+            .map_err(|_| AdapterStoreError::Unavailable)?;
+        transaction
+            .commit()
+            .map_err(|_| AdapterStoreError::Unavailable)
+    }
+
+    /// Reads the only durable budget ledger used before a delegated follow-up
+    /// turn. Primary and Observer usage share the cumulative token and cost
+    /// budgets. Any pending model operation or completed operation without a
+    /// settled charge is reported as incomplete rather than silently counted
+    /// as zero cost.
+    pub(crate) fn delegated_performance_totals(
+        &self,
+        run_key: &str,
+    ) -> Result<DelegatedPerformanceTotals, AdapterStoreError> {
+        let connection = self.lock()?;
+        connection
+            .query_row(
+                "SELECT
+                   COALESCE(SUM(operation_kind = 'primary_model'), 0),
+                   COALESCE(SUM(CASE WHEN operation_kind IN ('primary_model', 'observer')
+                     THEN input_tokens + cached_tokens + output_tokens ELSE 0 END), 0),
+                   COALESCE(SUM(CASE WHEN operation_kind IN ('primary_model', 'observer')
+                     THEN actual_cost_microunits ELSE 0 END), 0),
+                   COALESCE(SUM(CASE WHEN operation_kind = 'primary_model'
+                     THEN duration_millis ELSE 0 END), 0),
+                   COALESCE(SUM(CASE WHEN operation_kind IN ('primary_model', 'observer')
+                     AND actual_cost_microunits IS NULL THEN 1 ELSE 0 END), 0)
+                   , COALESCE(SUM(CASE WHEN operation_kind IN ('primary_model', 'observer')
+                     AND completed = 0 THEN 1 ELSE 0 END), 0)
+                   , COALESCE(SUM(operation_kind = 'observer'), 0)
+                 FROM performance_operation WHERE run_key = ?1",
+                params![run_key],
+                |row| {
+                    let missing_costs = row.get::<_, i64>(4)?;
+                    let pending_model_calls = row.get::<_, i64>(5)?;
+                    Ok(DelegatedPerformanceTotals {
+                        primary_model_calls: row.get(0)?,
+                        total_tokens: row.get(1)?,
+                        total_cost_microunits: row.get(2)?,
+                        elapsed_millis: row.get(3)?,
+                        cost_complete: missing_costs == 0 && pending_model_calls == 0,
+                        pending_model_calls,
+                        observer_calls: row.get(6)?,
+                    })
+                },
+            )
+            .map_err(|_| AdapterStoreError::Unavailable)
+    }
+
+    /// Counts changed files by a private path digest. Raw paths never enter
+    /// the metrics database or public report.
+    pub(crate) fn record_performance_changed_file(
+        &self,
+        run_key: &str,
+        path_digest: &Sha256Digest,
+    ) -> Result<(), AdapterStoreError> {
+        if run_key.trim().is_empty() || !valid_sha256_digest(&path_digest.0) {
+            return Err(AdapterStoreError::Conflict);
+        }
+        self.lock()?
+            .execute(
+                "INSERT OR IGNORE INTO performance_changed_file(run_key, path_digest)
+                 VALUES (?1, ?2)",
+                params![run_key, path_digest.0],
+            )
+            .map_err(|_| AdapterStoreError::Unavailable)?;
+        Ok(())
+    }
+
+    /// Measures the complete durable operation window at terminal time.
+    pub(crate) fn performance_total_runtime(
+        &self,
+        run_key: &str,
+        completed_at: &winwincode_domain::Instant,
+    ) -> Result<i64, AdapterStoreError> {
+        validate_performance_identity(run_key, "terminal-runtime", completed_at)?;
+        let (started_at, last_completed_at) = self
+            .lock()?
+            .query_row(
+                "SELECT MIN(started_at), MAX(completed_at)
+                 FROM performance_operation WHERE run_key = ?1",
+                params![run_key],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                    ))
+                },
+            )
+            .map_err(|_| AdapterStoreError::Unavailable)?;
+        let Some(started_at) = started_at else {
+            return Ok(0);
+        };
+        let started_at = winwincode_domain::Instant(started_at);
+        let mut total =
+            elapsed_millis(&started_at, completed_at).ok_or(AdapterStoreError::Corrupt)?;
+        if let Some(last_completed_at) = last_completed_at {
+            total = total.max(
+                elapsed_millis(&started_at, &winwincode_domain::Instant(last_completed_at))
+                    .ok_or(AdapterStoreError::Corrupt)?,
+            );
+        }
+        validate_metric(total)?;
+        Ok(total)
+    }
+
+    /// Builds the bounded aggregate used by the terminal runtime projection.
+    pub(crate) fn performance_report(
+        &self,
+        run_key: &str,
+        total_runtime_ms: i64,
+    ) -> Result<PerformanceBaselineReport, AdapterStoreError> {
+        validate_metric(total_runtime_ms)?;
+        let connection = self.lock()?;
+        let (execution_mode, observer_mode) = connection
+            .query_row(
+                "SELECT execution_mode, observer_mode FROM performance_run WHERE run_key = ?1",
+                params![run_key],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .map_err(|_| AdapterStoreError::Unavailable)?;
+        let execution_mode =
+            ExecutionMode::from_config(&execution_mode).ok_or(AdapterStoreError::Corrupt)?;
+        let observer_mode =
+            ObserverMode::from_config(&observer_mode).ok_or(AdapterStoreError::Corrupt)?;
+        let totals = connection
+            .query_row(
+                "SELECT
+                   COALESCE(SUM(operation_kind = 'primary_model'), 0),
+                   COALESCE(SUM(CASE WHEN operation_kind = 'primary_model' THEN input_tokens ELSE 0 END), 0),
+                   COALESCE(SUM(CASE WHEN operation_kind = 'primary_model' THEN cached_tokens ELSE 0 END), 0),
+                   COALESCE(SUM(CASE WHEN operation_kind = 'primary_model' THEN output_tokens ELSE 0 END), 0),
+                   COALESCE(SUM(CASE WHEN operation_kind = 'primary_model' THEN duration_millis ELSE 0 END), 0),
+                   COALESCE(SUM(operation_kind = 'tool'), 0),
+                   COALESCE(SUM(operation_kind = 'patch'), 0),
+                   COALESCE(SUM(CASE WHEN operation_kind = 'patch' THEN duration_millis ELSE 0 END), 0),
+                   COALESCE(SUM(CASE WHEN operation_kind = 'validation' THEN duration_millis ELSE 0 END), 0),
+                   COALESCE(SUM(operation_kind = 'observer'), 0),
+                   COALESCE(SUM(CASE WHEN operation_kind = 'observer' THEN duration_millis ELSE 0 END), 0),
+                   COALESCE(SUM(operation_kind = 'repair'), 0),
+                   COALESCE(SUM(operation_kind = 'turn'), 0)
+                 FROM performance_operation WHERE run_key = ?1",
+                params![run_key],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, i64>(5)?,
+                        row.get::<_, i64>(6)?,
+                        row.get::<_, i64>(7)?,
+                        row.get::<_, i64>(8)?,
+                        row.get::<_, i64>(9)?,
+                        row.get::<_, i64>(10)?,
+                        row.get::<_, i64>(11)?,
+                        row.get::<_, i64>(12)?,
+                    ))
+                },
+            )
+            .map_err(|_| AdapterStoreError::Unavailable)?;
+        let files_changed = connection
+            .query_row(
+                "SELECT COUNT(*) FROM performance_changed_file WHERE run_key = ?1",
+                params![run_key],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(|_| AdapterStoreError::Unavailable)?;
+        let report = PerformanceBaselineReport {
+            execution_mode,
+            observer_mode,
+            primary_model_call_count: totals.0,
+            primary_model_input_tokens: totals.1,
+            primary_model_cached_tokens: totals.2,
+            primary_model_output_tokens: totals.3,
+            primary_model_wait_ms: totals.4,
+            tool_call_count: totals.5,
+            patch_call_count: totals.6,
+            patch_apply_ms: totals.7,
+            files_changed,
+            validation_ms: totals.8,
+            observer_call_count: totals.9,
+            observer_wait_ms: totals.10,
+            repair_rounds: totals.11,
+            turn_count: totals.12,
+            total_runtime_ms,
+        };
+        if performance_report_values(&report).any(|value| validate_metric(value).is_err()) {
+            return Err(AdapterStoreError::Corrupt);
+        }
+        Ok(report)
+    }
+
+    /// Reserves the exact terminal aggregate event before its runtime frame is
+    /// appended. Repeating the reservation requires byte-for-byte report
+    /// equality.
+    pub(crate) fn reserve_performance_projection(
+        &self,
+        run_key: &str,
+        event_id: winwincode_domain::ExecutionEventId,
+        sequence: winwincode_domain::ExecutionSequence,
+        report: PerformanceBaselineReport,
+    ) -> Result<StoredPerformanceProjection, AdapterStoreError> {
+        if run_key.trim().is_empty() || sequence.0 <= 0 || sequence.0 > MAX_SAFE_METRIC {
+            return Err(AdapterStoreError::Conflict);
+        }
+        let report_bytes = serde_json::to_vec(&report).map_err(|_| AdapterStoreError::Corrupt)?;
+        let record = StoredPerformanceProjection {
+            event_id,
+            sequence,
+            report,
+            report_digest: Sha256Digest(format!("sha256:{:x}", Sha256::digest(&report_bytes))),
+            retained: false,
+        };
+        if let Some(existing) = self.load_performance_projection(run_key)? {
+            if existing.event_id == record.event_id
+                && existing.sequence == record.sequence
+                && existing.report == record.report
+                && existing.report_digest == record.report_digest
+            {
+                return Ok(existing);
+            }
+            return Err(AdapterStoreError::Conflict);
+        }
+        let bytes = serde_json::to_vec(&record).map_err(|_| AdapterStoreError::Corrupt)?;
+        self.lock()?
+            .execute(
+                "INSERT INTO performance_projection(run_key, record_json) VALUES (?1, ?2)",
+                params![run_key, bytes],
+            )
+            .map_err(|_| AdapterStoreError::Unavailable)?;
+        Ok(record)
+    }
+
+    pub(crate) fn load_performance_projection(
+        &self,
+        run_key: &str,
+    ) -> Result<Option<StoredPerformanceProjection>, AdapterStoreError> {
+        let bytes = self
+            .lock()?
+            .query_row(
+                "SELECT record_json FROM performance_projection WHERE run_key = ?1",
+                params![run_key],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .optional()
+            .map_err(|_| AdapterStoreError::Unavailable)?;
+        let record = bytes
+            .map(|bytes| {
+                serde_json::from_slice::<StoredPerformanceProjection>(&bytes)
+                    .map_err(|_| AdapterStoreError::Corrupt)
+            })
+            .transpose()?;
+        if let Some(record) = &record {
+            let report =
+                serde_json::to_vec(&record.report).map_err(|_| AdapterStoreError::Corrupt)?;
+            let digest = Sha256Digest(format!("sha256:{:x}", Sha256::digest(report)));
+            if record.sequence.0 <= 0
+                || record.sequence.0 > MAX_SAFE_METRIC
+                || record.report_digest != digest
+            {
+                return Err(AdapterStoreError::Corrupt);
+            }
+        }
+        Ok(record)
+    }
+
+    pub(crate) fn mark_performance_projection_retained(
+        &self,
+        run_key: &str,
+    ) -> Result<(), AdapterStoreError> {
+        let mut record = self
+            .load_performance_projection(run_key)?
+            .ok_or(AdapterStoreError::Conflict)?;
+        if record.retained {
+            return Ok(());
+        }
+        record.retained = true;
+        let bytes = serde_json::to_vec(&record).map_err(|_| AdapterStoreError::Corrupt)?;
+        self.lock()?
+            .execute(
+                "UPDATE performance_projection SET record_json = ?2 WHERE run_key = ?1",
                 params![run_key, bytes],
             )
             .map_err(|_| AdapterStoreError::Unavailable)?;
@@ -1215,6 +1812,57 @@ fn validate_model_call_inputs(
     Ok(())
 }
 
+fn validate_performance_identity(
+    run_key: &str,
+    operation_id: &str,
+    observed_at: &winwincode_domain::Instant,
+) -> Result<(), AdapterStoreError> {
+    if run_key.trim().is_empty()
+        || operation_id.trim().is_empty()
+        || operation_id.len() > 512
+        || observed_at.0.trim().is_empty()
+        || observed_at.0.len() > 128
+    {
+        return Err(AdapterStoreError::Conflict);
+    }
+    Ok(())
+}
+
+fn validate_metric(value: i64) -> Result<(), AdapterStoreError> {
+    if (0..=MAX_SAFE_METRIC).contains(&value) {
+        Ok(())
+    } else {
+        Err(AdapterStoreError::Conflict)
+    }
+}
+
+fn valid_sha256_digest(value: &str) -> bool {
+    value.strip_prefix("sha256:").is_some_and(|digest| {
+        digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+    })
+}
+
+fn performance_report_values(report: &PerformanceBaselineReport) -> impl Iterator<Item = i64> {
+    [
+        report.primary_model_call_count,
+        report.primary_model_input_tokens,
+        report.primary_model_cached_tokens,
+        report.primary_model_output_tokens,
+        report.primary_model_wait_ms,
+        report.tool_call_count,
+        report.patch_call_count,
+        report.patch_apply_ms,
+        report.files_changed,
+        report.validation_ms,
+        report.observer_call_count,
+        report.observer_wait_ms,
+        report.repair_rounds,
+        report.turn_count,
+        report.total_runtime_ms,
+    ]
+    .into_iter()
+}
+
 fn ensure_model_call_phase_columns(connection: &Connection) -> Result<(), AdapterStoreError> {
     let mut statement = connection
         .prepare("PRAGMA table_info(model_call_ledger)")
@@ -2067,9 +2715,13 @@ mod tests {
         AdapterStore, AdapterStoreError, DATABASE_FILE, ModelCallPhase, StoredApprovalOperation,
         StoredApprovalOperationKind, StoredApprovalOperationState,
     };
-    use std::path::PathBuf;
-    use winwincode_domain::ModelExchangeId;
+    use crate::performance::{PerformanceOperationCompletion, PerformanceOperationKind};
+    use std::path::{Path, PathBuf};
     use winwincode_domain::Sha256Digest;
+    use winwincode_domain::{ExecutionEventId, ExecutionSequence, Instant, ModelExchangeId};
+    use winwincode_execution_port::runtime_trace_outbox::{
+        ExecutionMode, ObserverMode, PerformanceBaselineReport,
+    };
 
     fn test_root(name: &str) -> PathBuf {
         let unique = std::time::SystemTime::now()
@@ -2080,6 +2732,223 @@ mod tests {
             "winwincode-codex-store-{name}-{}-{unique}",
             std::process::id()
         ))
+    }
+
+    fn record_primary_performance_fixture(
+        store: &AdapterStore,
+        started: &Instant,
+        completed: &Instant,
+    ) {
+        store
+            .register_performance_run("run", ExecutionMode::DelegatedPatch, ObserverMode::Always)
+            .expect("freeze modes");
+        store
+            .save_run(
+                "run",
+                &serde_json::json!({
+                    "lastActivityAt": "2030-01-01T00:00:03.000Z",
+                    "finalCandidateFreeze": {
+                        "counters": { "elapsedMillis": 5_000 }
+                    }
+                }),
+            )
+            .expect("retain run timing");
+        store
+            .claim_model_call(
+                "run",
+                "model-call",
+                &ModelExchangeId("mdl_PERFORMANCEAAAAAAAAAAAAAAA".to_owned()),
+                &Sha256Digest(format!("sha256:{}", "b".repeat(64))),
+            )
+            .expect("claim primary model call");
+        store
+            .record_performance_start(
+                "run",
+                PerformanceOperationKind::PrimaryModel,
+                "model-call",
+                started,
+            )
+            .expect("start model call");
+        store
+            .record_performance_completion(
+                "run",
+                PerformanceOperationKind::PrimaryModel,
+                "model-call",
+                completed,
+                PerformanceOperationCompletion {
+                    duration_millis: Some(800),
+                    input_tokens: 90,
+                    cached_tokens: 10,
+                    output_tokens: 20,
+                    actual_cost_microunits: Some(30),
+                },
+            )
+            .expect("complete model call");
+        store
+            .record_performance_completion(
+                "run",
+                PerformanceOperationKind::PrimaryModel,
+                "model-call",
+                completed,
+                PerformanceOperationCompletion {
+                    duration_millis: Some(9_999),
+                    input_tokens: 9_999,
+                    cached_tokens: 9_999,
+                    output_tokens: 9_999,
+                    actual_cost_microunits: Some(9_999),
+                },
+            )
+            .expect("duplicate completion is ignored");
+        store
+            .mark_model_call_provider_final("run", "model-call")
+            .expect("retain primary Provider final");
+    }
+
+    fn performance_report_fixture(root: &Path) -> PerformanceBaselineReport {
+        let started = Instant("2030-01-01T00:00:00.000Z".to_owned());
+        let completed = Instant("2030-01-01T00:00:01.000Z".to_owned());
+        let store = AdapterStore::open(root).expect("open performance store");
+        record_primary_performance_fixture(&store, &started, &completed);
+        for kind in [
+            PerformanceOperationKind::Tool,
+            PerformanceOperationKind::Patch,
+            PerformanceOperationKind::Validation,
+            PerformanceOperationKind::Observer,
+            PerformanceOperationKind::Repair,
+            PerformanceOperationKind::Turn,
+        ] {
+            store
+                .record_performance_start("run", kind, kind.as_str(), &started)
+                .expect("start aggregate operation");
+        }
+        for kind in [
+            PerformanceOperationKind::Tool,
+            PerformanceOperationKind::Patch,
+            PerformanceOperationKind::Validation,
+            PerformanceOperationKind::Observer,
+            PerformanceOperationKind::Repair,
+        ] {
+            let is_observer = matches!(kind, PerformanceOperationKind::Observer);
+            store
+                .record_performance_completion(
+                    "run",
+                    kind,
+                    kind.as_str(),
+                    &completed,
+                    PerformanceOperationCompletion {
+                        duration_millis: Some(100),
+                        input_tokens: i64::from(is_observer) * 4,
+                        output_tokens: i64::from(is_observer),
+                        actual_cost_microunits: is_observer.then_some(7),
+                        ..PerformanceOperationCompletion::default()
+                    },
+                )
+                .expect("complete aggregate operation");
+        }
+        let path = Sha256Digest(format!("sha256:{}", "a".repeat(64)));
+        store
+            .record_performance_changed_file("run", &path)
+            .expect("record changed file");
+        store
+            .record_performance_changed_file("run", &path)
+            .expect("changed file replay");
+        let delegated = store
+            .delegated_performance_totals("run")
+            .expect("delegated totals");
+        assert_eq!(delegated.primary_model_calls, 1);
+        assert_eq!(delegated.observer_calls, 1);
+        assert_eq!(delegated.total_tokens, 125);
+        assert_eq!(delegated.total_cost_microunits, 37);
+        assert!(delegated.cost_complete);
+        assert_eq!(
+            store
+                .performance_total_runtime("run", &Instant("2030-01-01T00:00:05.000Z".to_owned()),)
+                .expect("whole-run wall time"),
+            5_000
+        );
+        store.performance_report("run", 1_000).expect("report")
+    }
+
+    #[test]
+    fn delegated_observer_charge_is_counted_or_fails_closed() {
+        for (name, actual_cost_microunits, expected_cost, cost_complete) in [
+            ("charged", Some(17), 17, true),
+            ("missing-charge", None, 0, false),
+        ] {
+            let root = test_root(name);
+            let store = AdapterStore::open(&root).expect("open store");
+            let observed_at = Instant("2030-01-01T00:00:01.000Z".to_owned());
+            store
+                .record_performance_completion(
+                    "run",
+                    PerformanceOperationKind::Observer,
+                    "batch",
+                    &observed_at,
+                    PerformanceOperationCompletion {
+                        input_tokens: 7,
+                        output_tokens: 2,
+                        actual_cost_microunits,
+                        ..PerformanceOperationCompletion::default()
+                    },
+                )
+                .expect("retain Observer settlement");
+            store
+                .record_performance_completion(
+                    "run",
+                    PerformanceOperationKind::Observer,
+                    "batch",
+                    &observed_at,
+                    PerformanceOperationCompletion {
+                        input_tokens: 9_999,
+                        output_tokens: 9_999,
+                        actual_cost_microunits: Some(9_999),
+                        ..PerformanceOperationCompletion::default()
+                    },
+                )
+                .expect("Observer settlement replay");
+
+            let totals = store
+                .delegated_performance_totals("run")
+                .expect("read delegated totals");
+            assert_eq!(totals.observer_calls, 1, "{name}");
+            assert_eq!(totals.pending_model_calls, 0, "{name}");
+            assert_eq!(totals.total_tokens, 9, "{name}");
+            assert_eq!(totals.total_cost_microunits, expected_cost, "{name}");
+            assert_eq!(totals.cost_complete, cost_complete, "{name}");
+        }
+
+        for (name, kind, expected_primary, expected_observer) in [
+            (
+                "pending-primary-charge",
+                PerformanceOperationKind::PrimaryModel,
+                1,
+                0,
+            ),
+            (
+                "pending-observer-charge",
+                PerformanceOperationKind::Observer,
+                0,
+                1,
+            ),
+        ] {
+            let root = test_root(name);
+            let store = AdapterStore::open(&root).expect("open store");
+            store
+                .record_performance_start(
+                    "run",
+                    kind,
+                    "operation",
+                    &Instant("2030-01-01T00:00:01.000Z".to_owned()),
+                )
+                .expect("reserve pending model operation");
+            let pending = store
+                .delegated_performance_totals("run")
+                .expect("read pending delegated totals");
+            assert_eq!(pending.primary_model_calls, expected_primary, "{name}");
+            assert_eq!(pending.observer_calls, expected_observer, "{name}");
+            assert_eq!(pending.pending_model_calls, 1, "{name}");
+            assert!(!pending.cost_complete, "{name}");
+        }
     }
 
     #[test]
@@ -2146,6 +3015,69 @@ mod tests {
             );
         }
         std::fs::remove_dir_all(root).expect("remove store fixture");
+    }
+
+    #[test]
+    fn performance_baseline_is_exact_across_duplicate_delivery_and_restart() {
+        let root = test_root("performance-baseline");
+        let report = performance_report_fixture(&root);
+        assert_eq!(report.execution_mode, ExecutionMode::DelegatedPatch);
+        assert_eq!(report.observer_mode, ObserverMode::Always);
+        assert_eq!(report.primary_model_call_count, 1);
+        assert_eq!(report.primary_model_input_tokens, 90);
+        assert_eq!(report.primary_model_cached_tokens, 10);
+        assert_eq!(report.primary_model_output_tokens, 20);
+        assert_eq!(report.primary_model_wait_ms, 800);
+        assert_eq!(report.tool_call_count, 1);
+        assert_eq!(report.patch_call_count, 1);
+        assert_eq!(report.patch_apply_ms, 100);
+        assert_eq!(report.files_changed, 1);
+        assert_eq!(report.validation_ms, 100);
+        assert_eq!(report.observer_call_count, 1);
+        assert_eq!(report.observer_wait_ms, 100);
+        assert_eq!(report.repair_rounds, 1);
+        assert_eq!(report.turn_count, 1);
+        assert_eq!(report.total_runtime_ms, 1_000);
+        {
+            let store = AdapterStore::open(&root).expect("reopen performance store");
+            assert_eq!(
+                store.register_performance_run("run", ExecutionMode::React, ObserverMode::Always,),
+                Err(AdapterStoreError::Conflict)
+            );
+            let projection = store
+                .reserve_performance_projection(
+                    "run",
+                    ExecutionEventId("xevt_AAAAAAAAAAAAAAAAAAAAAAAAAA".to_owned()),
+                    ExecutionSequence(1),
+                    report.clone(),
+                )
+                .expect("reserve report projection");
+            assert!(!projection.retained);
+            store
+                .mark_performance_projection_retained("run")
+                .expect("mark report retained");
+            assert!(
+                store
+                    .load_performance_projection("run")
+                    .expect("load projection")
+                    .expect("projection exists")
+                    .retained
+            );
+        }
+        let evidence = crate::performance_evidence::export_performance_v0_evidence(&root)
+            .expect("export production AdapterStore evidence");
+        assert_eq!(evidence.runs.len(), 1);
+        assert_eq!(evidence.model_calls.len(), 2);
+        let comparison = evidence
+            .summarize()
+            .expect("summarize production AdapterStore evidence");
+        assert_eq!(comparison.structured.sample_count, 1);
+        assert_eq!(comparison.structured.strong_model_call_count, 1);
+        assert_eq!(comparison.structured.observer_model_call_count, 1);
+        assert_eq!(comparison.structured.total_tokens, 125);
+        assert_eq!(comparison.structured.settled_cost_microunits, 37);
+        assert_eq!(comparison.structured.total_runtime_ms, 5_000);
+        std::fs::remove_dir_all(root).expect("remove performance fixture");
     }
 
     #[test]

@@ -400,10 +400,22 @@ impl TemporaryRootLeaseManager {
     pub fn reclaim_expired(&self) -> Result<TemporaryRootReclaimReport, TemporaryRootLeaseError> {
         let mut report = TemporaryRootReclaimReport::default();
         for entry in fs::read_dir(&self.parent).map_err(|_| TemporaryRootLeaseError::io())? {
-            let entry = entry.map_err(|_| TemporaryRootLeaseError::io())?;
-            let file_type = entry
-                .file_type()
-                .map_err(|_| TemporaryRootLeaseError::io())?;
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    report.contested += 1;
+                    continue;
+                }
+                Err(_error) => return Err(TemporaryRootLeaseError::io()),
+            };
+            let file_type = match entry.file_type() {
+                Ok(file_type) => file_type,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    report.contested += 1;
+                    continue;
+                }
+                Err(_error) => return Err(TemporaryRootLeaseError::io()),
+            };
             if !file_type.is_dir() || file_type.is_symlink() {
                 continue;
             }
@@ -509,16 +521,16 @@ impl TemporaryRootLeaseManager {
         expected_lease_bytes: &[u8],
         expected_claim: &ReleaseClaim,
     ) -> Result<bool, TemporaryRootLeaseError> {
-        let lease_bytes = match read_bounded(&quarantine.join(TEMPORARY_ROOT_LEASE_FILE)) {
-            Ok(bytes) => bytes,
-            Err(_error) if !quarantine.exists() => return Ok(false),
-            Err(error) => return Err(error),
+        let Some(lease_bytes) =
+            read_bounded_if_present(&quarantine.join(TEMPORARY_ROOT_LEASE_FILE))?
+        else {
+            return Ok(false);
         };
-        let claim = match read_bounded(&quarantine.join(RELEASE_CLAIM_FILE)) {
-            Ok(bytes) => decode_canonical::<ReleaseClaim>(&bytes)?,
-            Err(_error) if !quarantine.exists() => return Ok(false),
-            Err(error) => return Err(error),
+        let Some(claim_bytes) = read_bounded_if_present(&quarantine.join(RELEASE_CLAIM_FILE))?
+        else {
+            return Ok(false);
         };
+        let claim = decode_canonical::<ReleaseClaim>(&claim_bytes)?;
         if lease_bytes != expected_lease_bytes || claim != *expected_claim {
             return Err(TemporaryRootLeaseError::ownership_lost());
         }
@@ -1076,12 +1088,24 @@ fn read_lease(root: &Path) -> Result<LeaseRecord, TemporaryRootLeaseError> {
 }
 
 fn read_bounded(path: &Path) -> Result<Vec<u8>, TemporaryRootLeaseError> {
-    let metadata = fs::symlink_metadata(path).map_err(|_| TemporaryRootLeaseError::io())?;
+    read_bounded_if_present(path)?.ok_or_else(TemporaryRootLeaseError::io)
+}
+
+fn read_bounded_if_present(path: &Path) -> Result<Option<Vec<u8>>, TemporaryRootLeaseError> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_error) => return Err(TemporaryRootLeaseError::io()),
+    };
     let max_record_bytes = u64::try_from(MAX_RECORD_BYTES).expect("record bound fits u64");
     if !metadata.file_type().is_file() || metadata.len() > max_record_bytes {
         return Err(TemporaryRootLeaseError::corrupt());
     }
-    fs::read(path).map_err(|_| TemporaryRootLeaseError::io())
+    match fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(_error) => Err(TemporaryRootLeaseError::io()),
+    }
 }
 
 fn create_record(path: &Path, bytes: &[u8]) -> Result<(), TemporaryRootLeaseError> {
@@ -1139,7 +1163,10 @@ fn sha256(bytes: &[u8]) -> String {
 mod tests {
     use std::{
         os::unix::fs::PermissionsExt,
-        sync::atomic::{AtomicU64, Ordering},
+        sync::{
+            Barrier,
+            atomic::{AtomicU64, Ordering},
+        },
     };
 
     use super::*;
@@ -1155,6 +1182,48 @@ mod tests {
             let value = self.0.fetch_add(1, Ordering::Relaxed);
             Ok(value.to_be_bytes().repeat(2).try_into().expect("16 bytes"))
         }
+    }
+
+    #[test]
+    fn concurrent_acquire_and_release_tolerates_disappearing_scan_entries() {
+        let parent = std::env::temp_dir().join(format!(
+            "winwincode-lease-concurrency-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("test clock")
+                .as_nanos()
+        ));
+        let runtime: Arc<dyn TemporaryRootLeaseRuntime> = Arc::new(ModeRuntime(AtomicU64::new(1)));
+        let manager = TemporaryRootLeaseManager::open(
+            &parent,
+            TemporaryRootLeaseConfig::try_new(100, 50, 5, TemporaryRootTarget::Aarch64AppleDarwin)
+                .expect("test config"),
+            runtime,
+        )
+        .expect("test manager");
+        let workers = 16;
+        let start = Arc::new(Barrier::new(workers));
+        let tasks = (0..workers)
+            .map(|_| {
+                let manager = manager.clone();
+                let start = Arc::clone(&start);
+                thread::spawn(move || {
+                    start.wait();
+                    for _ in 0..100 {
+                        manager
+                            .acquire()
+                            .expect("concurrent lease acquisition")
+                            .release()
+                            .expect("concurrent lease release");
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        for task in tasks {
+            task.join().expect("concurrent lease worker");
+        }
+        fs::remove_dir_all(parent).expect("concurrency fixture cleanup");
     }
 
     #[test]

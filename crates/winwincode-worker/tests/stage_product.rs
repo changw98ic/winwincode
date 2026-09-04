@@ -17,6 +17,7 @@ use winwincode_execution_port::generated::{
     ExecutionLeaseStamp, ExecutionLimits, ExecutionScope, ExecutionWorkspace,
     ExecutionWorkspaceWriteMode,
 };
+use winwincode_worker::RoleExecutionMode;
 use winwincode_worker::stage_product::{
     CANDIDATE_FILE_NAME, CANDIDATE_MEDIA_TYPE, CandidateProductErrorCode,
     prepare_candidate_artifact,
@@ -94,8 +95,8 @@ fn executor_freezes_real_checkout_into_exact_candidate_artifact() {
     )
     .expect("write candidate change");
 
-    let prepared =
-        prepare_candidate_artifact(&active, &mut workspace).expect("prepare candidate artifact");
+    let prepared = prepare_candidate_artifact(&active, &mut workspace, RoleExecutionMode::React)
+        .expect("prepare candidate artifact");
     let descriptor = prepared.descriptor(ArtifactId("art_stage_product_candidate".to_owned()));
 
     assert_eq!(descriptor.kind, ArtifactKind::Candidate);
@@ -138,6 +139,35 @@ fn executor_freezes_real_checkout_into_exact_candidate_artifact() {
 }
 
 #[test]
+fn delegated_executor_freezes_only_under_its_read_only_composer_policy() {
+    let fixture = Fixture::new();
+    let mut active = active_job(&fixture.repository_id, "delegated-writer", "executor");
+    active.job.workspace.write_mode = ExecutionWorkspaceWriteMode::ReadOnly;
+    let mut workspace = fixture
+        .manager()
+        .create(&active)
+        .expect("create delegated writer workspace");
+    fs::write(
+        workspace
+            .checkout_path("candidate.txt")
+            .expect("candidate path"),
+        b"candidate\n",
+    )
+    .expect("write delegated candidate change");
+
+    let prepared =
+        prepare_candidate_artifact(&active, &mut workspace, RoleExecutionMode::DelegatedBatch)
+            .expect("freeze delegated candidate through the canonical snapshot");
+    assert_ne!(
+        prepared.snapshot().candidate_tree_id,
+        prepared.snapshot().source_tree_id
+    );
+    workspace
+        .close(WorkspaceCloseReason::Completed)
+        .expect("close delegated workspace");
+}
+
+#[test]
 fn non_writer_and_cancelled_jobs_emit_no_candidate() {
     let fixture = Fixture::new();
     let mut reviewer = active_job(&fixture.repository_id, "reviewer", "reviewer");
@@ -153,7 +183,7 @@ fn non_writer_and_cancelled_jobs_emit_no_candidate() {
     )
     .expect("write candidate change");
     assert_eq!(
-        prepare_candidate_artifact(&reviewer, &mut reviewer_workspace)
+        prepare_candidate_artifact(&reviewer, &mut reviewer_workspace, RoleExecutionMode::React)
             .expect_err("reviewer must not produce candidate")
             .code(),
         CandidateProductErrorCode::InvalidRole
@@ -162,7 +192,7 @@ fn non_writer_and_cancelled_jobs_emit_no_candidate() {
     reviewer.job.execution_profile = "executor".to_owned();
     reviewer.lifecycle = ActiveJobLifecycle::Cancelling;
     assert_eq!(
-        prepare_candidate_artifact(&reviewer, &mut reviewer_workspace)
+        prepare_candidate_artifact(&reviewer, &mut reviewer_workspace, RoleExecutionMode::React)
             .expect_err("cancelled executor must not produce candidate")
             .code(),
         CandidateProductErrorCode::InvalidLifecycle
@@ -170,7 +200,7 @@ fn non_writer_and_cancelled_jobs_emit_no_candidate() {
     reviewer.lifecycle = ActiveJobLifecycle::Running;
     reviewer.job.workspace.write_mode = ExecutionWorkspaceWriteMode::ReadOnly;
     assert_eq!(
-        prepare_candidate_artifact(&reviewer, &mut reviewer_workspace)
+        prepare_candidate_artifact(&reviewer, &mut reviewer_workspace, RoleExecutionMode::React)
             .expect_err("read-only executor must not produce candidate")
             .code(),
         CandidateProductErrorCode::InvalidScope
@@ -205,7 +235,7 @@ fn candidate_rejects_workspace_from_another_exact_attempt() {
     .expect("write candidate change");
 
     assert_eq!(
-        prepare_candidate_artifact(&active_b, &mut workspace_a)
+        prepare_candidate_artifact(&active_b, &mut workspace_a, RoleExecutionMode::React)
             .expect_err("foreign workspace must fail")
             .code(),
         CandidateProductErrorCode::AuthorityMismatch

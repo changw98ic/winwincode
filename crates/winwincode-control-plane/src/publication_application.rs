@@ -13,12 +13,13 @@ use winwincode_api::generated::{
     PublicationListResultResponseQuery, PublicationPage, PublicationPageKind,
     PublicationProjection, PublicationProjectionVerdictStatus,
     PublicationResourceKind as ApiPublicationResourceKind, PublicationResourceRef,
-    PublicationTarget as ApiPublicationTarget, PublicationTargetProvider, RepositoryScope, Scope,
+    PublicationTarget as ApiPublicationTarget, PublicationTargetProvider, Scope,
 };
 use winwincode_audit::{
     AuditAction, AuditActor, AuditEvent, AuditEventId, AuditOrigin, AuditRetention, AuditScope,
     AuditState, AuditSubject,
 };
+use winwincode_domain::RepositoryScope;
 use winwincode_domain::{
     GitHubRepositorySlug, OpaqueCursor, PublicationId, Revision, SchemaVersion, Sha256Digest,
     UserId,

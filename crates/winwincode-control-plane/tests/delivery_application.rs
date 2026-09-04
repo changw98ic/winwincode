@@ -6,8 +6,7 @@ use winwincode_api::generated::{
     AcceptanceCriterionInput, Actor, DeliveryCreateCommand, DeliveryCreateCommandCommand,
     DeliveryCreatePayload, DeliveryListParameters, DeliveryListQuery, DeliveryListQueryQuery,
     DeliverySpecInput, DeliveryUpdateSpecCommand, DeliveryUpdateSpecCommandCommand,
-    DeliveryUpdateSpecPayload, PageRequest, RepositoryScope, RepositoryScopeKind, Scope, UserActor,
-    UserActorKind,
+    DeliveryUpdateSpecPayload, PageRequest, Scope,
 };
 use winwincode_control_plane::{
     CollaborationInboxItemId, CollaborationInboxSourcePort, ControlPlane, DeliveryAdvanceAuthority,
@@ -25,6 +24,7 @@ use winwincode_domain::{
     AttentionItemId, DeliveryId, OrganizationId, ProjectId, RepositoryId, RequestId, Revision,
     SchemaVersion, Sha256Digest, UserId, WorkspaceId,
 };
+use winwincode_domain::{RepositoryScope, RepositoryScopeKind, UserActor, UserActorKind};
 use winwincode_storage::{NewOutboxEvent, ProductStateStorage, SqliteStorage, StateCommit};
 
 struct NoopPublisher;

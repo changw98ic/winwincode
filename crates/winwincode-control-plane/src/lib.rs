@@ -52,6 +52,7 @@ mod model_retry_usage;
 pub mod model_settings;
 mod model_stream_flow_control;
 mod observer_decision_service;
+pub mod performance_evaluation_projection;
 mod planning_solution_authority;
 mod product_session_execution_application;
 mod product_session_service;
@@ -76,6 +77,8 @@ mod repository_scheduler;
 mod responsibility_assignment;
 mod responsibility_assignment_authority;
 mod rework_transaction;
+pub mod rollout_evaluation;
+pub mod rollout_gate;
 mod runtime_event_transaction;
 mod session_binding_transaction;
 pub mod session_identity;
@@ -347,11 +350,12 @@ pub use provider_admission::{
 pub use provider_anthropic::ProviderTokenPricing;
 pub use provider_catalog::{
     CatalogAvailability, ModelCapability, ModelCapabilityProjection, ModelCatalogVersion,
-    ModelToolSupport, PROVIDER_CATALOG_VERSION_EVENT_TOPIC, ProviderCatalogChange,
-    ProviderCatalogEntryProjection, ProviderCatalogError, ProviderCatalogErrorKind,
-    ProviderCatalogMutationReceipt, ProviderCatalogProjection, ProviderCatalogRequest,
-    ProviderCatalogService, ProviderCatalogVersionEvent, ProviderDescriptor,
-    ResolvedModelCapability,
+    ModelToolSupport, PROVIDER_CATALOG_MIGRATION_EVENT_TOPIC, PROVIDER_CATALOG_VERSION_EVENT_TOPIC,
+    ProviderCatalogChange, ProviderCatalogEntryProjection, ProviderCatalogError,
+    ProviderCatalogErrorKind, ProviderCatalogMigrationReport, ProviderCatalogMutationReceipt,
+    ProviderCatalogProjection, ProviderCatalogRequest, ProviderCatalogService,
+    ProviderCatalogVersionEvent, ProviderDescriptor, ResolvedModelCapability,
+    StructuredOutputSupport, migrate_provider_catalogs_v1_to_v2,
 };
 pub use provider_enterprise_quota::{
     DurableProviderEnterpriseUsageSource, ProviderEnterpriseQuotaError,
@@ -489,8 +493,7 @@ pub use terminal_outcome_transaction::{
 };
 use winwincode_api::generated::{
     Actor, CommandEnvelope, CommandName, ControlPlaneWebSocketDeliveryChangedEvent,
-    ControlPlaneWebSocketDeliveryChangedEventTypeValue, ControlPlaneWebSocketEventType,
-    RepositoryScope, Scope,
+    ControlPlaneWebSocketDeliveryChangedEventTypeValue, ControlPlaneWebSocketEventType, Scope,
 };
 use winwincode_audit::{
     AuditAction, AuditActor, AuditEvent, AuditEventId, AuditOrigin, AuditRetention, AuditScope,
@@ -498,6 +501,7 @@ use winwincode_audit::{
 };
 use winwincode_delivery::application::{CoordinationError, verdict::SubmitVerdictFacts};
 use winwincode_delivery::domain::Delivery;
+use winwincode_domain::RepositoryScope;
 use winwincode_domain::{
     ControlPlaneEventId, DeliveryId, Instant, RequestId, Revision, Sha256Digest, SystemActorId,
 };
@@ -527,11 +531,12 @@ pub use worker_management::{
 /// seam without exposing production authority constructors.
 #[cfg(feature = "test-support")]
 pub mod test_support {
-    use winwincode_api::generated::{CommandEnvelope, RepositoryScope};
+    use winwincode_api::generated::CommandEnvelope;
     use winwincode_delivery::{
         application::{attention::ResolvedAttentionTransition, stage::StageAdvanceResult},
         domain::{DeliverySourceRef, RepositoryRef},
     };
+    use winwincode_domain::RepositoryScope;
 
     use super::{
         DeliveryCommandFacts, DeliverySpecFacts, StorageError,
@@ -1062,7 +1067,7 @@ impl ControlPlane {
                 )));
             }
         };
-        let storage = match SqliteStorage::open(&data_directory) {
+        let mut storage = match SqliteStorage::open(&data_directory) {
             Ok(storage) => storage,
             Err(error) => {
                 let mut cleanup_failures = Vec::new();
@@ -1081,6 +1086,24 @@ impl ControlPlane {
                 )));
             }
         };
+        if let Err(error) = migrate_provider_catalogs_v1_to_v2(&mut storage) {
+            let mut cleanup_failures = Vec::new();
+            if let Err(close_error) = Box::new(storage).close() {
+                cleanup_failures.push(format!("storage close also failed: {close_error}"));
+            }
+            if let Err(close_error) = publisher.close() {
+                cleanup_failures.push(format!("event publisher close also failed: {close_error}"));
+            }
+            if let Err(release_error) = temporary_root.release() {
+                cleanup_failures.push(format!(
+                    "temporary root release also failed: {release_error}"
+                ));
+            }
+            return Err(StartError::new(format!(
+                "failed to migrate Provider catalog state: {error}{}",
+                cleanup_suffix(&cleanup_failures)
+            )));
+        }
         let audit_store = match AuditStore::open(data_directory.join("audit")) {
             Ok(store) => store,
             Err(error) => {
@@ -2788,7 +2811,7 @@ pub(crate) fn repository_scope_from_receipt_key(
         ));
     };
     Ok(RepositoryScope {
-        kind: winwincode_api::generated::RepositoryScopeKind::Repository,
+        kind: winwincode_domain::RepositoryScopeKind::Repository,
         organization_id,
         workspace_id,
         project_id,

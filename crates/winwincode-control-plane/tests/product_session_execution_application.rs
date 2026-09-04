@@ -9,9 +9,7 @@ use serde_json::{Value, from_value};
 use sha2::{Digest, Sha256};
 use winwincode_api::generated::{
     Actor, CredentialReferenceCreateCommand, CredentialReferenceCreateCommandCommand,
-    CredentialReferenceCreatePayload, ModelRoute, OrganizationId, OrganizationScope,
-    OrganizationScopeKind, ProjectId, RepositoryId, RepositoryScope, RepositoryScopeKind, Scope,
-    UserActor, UserActorKind, WorkspaceId,
+    CredentialReferenceCreatePayload, ModelRoute, OrganizationScope, OrganizationScopeKind, Scope,
 };
 use winwincode_control_plane::{
     ControlPlane, ControlPlaneConfig, CreateProductSessionCommand, CredentialReferenceService,
@@ -27,8 +25,8 @@ use winwincode_control_plane::{
     ProviderAdmissionReservationConfig, ProviderCatalogRequest, ProviderCatalogService,
     ProviderDescriptor, ProviderGatewayIdentityPort, RepositoryExecutionScheduler, ResolvedSecret,
     StandaloneModelExecutionApplication, StandaloneModelExecutionConfig,
-    StandaloneModelExecutionError, StandaloneProviderConfig, SubmitChatMessageCommand,
-    local_loopback_retry_policy,
+    StandaloneModelExecutionError, StandaloneProviderConfig, StructuredOutputSupport,
+    SubmitChatMessageCommand, local_loopback_retry_policy,
 };
 use winwincode_domain::{
     CodexThreadId, ControlPlaneEventId, CredentialReferenceId, ExecutionEventId, ExecutionJobId,
@@ -36,6 +34,10 @@ use winwincode_domain::{
     RequestId, Revision, SchemaVersion, SessionBindingSourceIdentity,
     SessionBindingSourceIdentityKind, SessionIdentity, Sha256Digest, UserId, WorkerId,
     WorkerInstanceId, WorkerSessionId,
+};
+use winwincode_domain::{
+    OrganizationId, ProjectId, RepositoryId, RepositoryScope, RepositoryScopeKind, UserActor,
+    UserActorKind, WorkspaceId,
 };
 use winwincode_execution_port::generated::{
     ExecutionEventCategory, ExecutionEventRecord, ExecutionJob, ExecutionLeaseStamp,
@@ -341,6 +343,7 @@ fn configure_model_provider(fixture: &mut Fixture, seed: u64) {
                     context_window_tokens: 128_000,
                     max_output_tokens: 16_000,
                     tool_support: ModelToolSupport::Parallel,
+                    structured_output_support: StructuredOutputSupport::JsonSchemaStrict,
                     reasoning_efforts: vec!["high".to_owned()],
                 }],
             },

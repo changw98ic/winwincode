@@ -1,23 +1,52 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{path::PathBuf, process::Command};
+use std::{
+    collections::HashMap,
+    fmt::Write as _,
+    path::PathBuf,
+    process::Command,
+    sync::{Arc, Mutex},
+};
 
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+use rusqlite::Connection;
 use sha2::{Digest, Sha256};
 use winwincode_domain::{
-    CodexThreadId, DeliveryId, DeliveryTaskId, ExecutionAckSequence, ExecutionJobId, FencingToken,
-    Instant, LeaseId, ProductSessionId, RepositoryId, RequestId, SchemaVersion, SessionIdentity,
-    Sha256Digest, StageRunId, WorkerId, WorkerInstanceId, WorkerSessionId,
+    ArtifactId, CodexThreadId, DeliveryId, DeliveryTaskId, ExecutionAckSequence, ExecutionJobId,
+    ExecutionMessageId, ExecutionSequence, FencingToken, Instant, LeaseId, ProductSessionId,
+    RepositoryId, RequestId, SchemaVersion, SessionIdentity, Sha256Digest, StageRunId, WorkerId,
+    WorkerInstanceId, WorkerSessionId, WorkspaceRevision,
 };
-use winwincode_execution_port::generated::{
-    DeliveryStageAcceptanceCriterionInput, DeliveryStageExecutionScope,
-    DeliveryStageExecutionScopeKind, DeliveryStageInput, DeliveryStageTaskInput, ExecutionJob,
-    ExecutionJobReplacementAuthority, ExecutionLeaseStamp, ExecutionLimits, ExecutionScope,
-    ExecutionWorkspace, ExecutionWorkspaceWriteMode,
+use winwincode_execution_port::{
+    change_batch_identity::derive_change_batch_id,
+    generated::{
+        AppliedFileOperation, AppliedFileSummary, ArtifactReference, ChangeBatchIdentity,
+        ChangeBatchProgressEvent, ChangeBatchProgressState, ChangeBatchProposal,
+        ChangeBatchProposalDisposition, ChangeBatchProposalEvent, ChangeBatchReceiptStatus,
+        DeliveryStageAcceptanceCriterionInput, DeliveryStageExecutionScope,
+        DeliveryStageExecutionScopeKind, DeliveryStageInput, DeliveryStageTaskInput,
+        EncodedPayload, ExecutionJob, ExecutionJobReplacementAuthority, ExecutionLeaseStamp,
+        ExecutionLimits, ExecutionOutcomeUsage, ExecutionScope, ExecutionWorkspace,
+        ExecutionWorkspaceWriteMode, ModelChunkMessage, ModelChunkMessageKind, ModelGatewayRoute,
+        ModelOpenMessage, ObservationReceipt, ObservationSource, ValidationProfileName,
+    },
+    observation_contract::{derive_observation_output_digest, parse_observation_response_strict},
 };
 use winwincode_worker::{
-    ActiveJob, ActiveJobLifecycle,
-    workspace::WorkspaceCloseReason,
-    workspace_runtime::{JobWorkspaceErrorCode, JobWorkspaceRuntime},
+    ActiveJob, ActiveJobLifecycle, CodexRunKey,
+    change_batch_journal::{
+        ActiveBatchState, ChangeBatchJournal, ObservationChunkRetention, ObservationGateResult,
+    },
+    workspace::{WorkerWorkspace, WorkspaceCloseReason},
+    workspace_runtime::{
+        ChangeBatchExecutionRequest, ChangeBatchExecutionResult, ChangeBatchExecutor,
+        ChangeBatchExecutorFuture, ChangeBatchWorkspaceRecovery, JobWorkspaceError,
+        JobWorkspaceErrorCode, JobWorkspaceRuntime, ObservationModelConfiguration,
+        ValidationArtifactError, ValidationArtifactPort, ValidationArtifactRequest,
+        ValidationArtifactStream, WorkspaceTreeCompareFuture, WorkspaceTreeCompareResult,
+        WorkspaceTreeFuture, WorkspaceTreePort, WorkspaceTreeRestoreFuture,
+        WorkspaceTreeRestoreResult,
+    },
 };
 
 #[cfg(feature = "test-support")]
@@ -64,17 +93,273 @@ impl Fixture {
     }
 
     fn runtime(&self) -> JobWorkspaceRuntime {
-        JobWorkspaceRuntime::open(&self.workspaces, &self.sources).expect("open workspace runtime")
+        JobWorkspaceRuntime::open(&self.workspaces, &self.sources)
+            .expect("open workspace runtime")
+            .with_validation_artifact_port(FixtureValidationArtifacts::default())
     }
 
     fn repository(&self) -> PathBuf {
         self.sources.join("repo_00000000000000000000000001")
     }
+
+    fn install_validation_config_text(&self, configuration: &str) {
+        let repository = self.repository();
+        std::fs::create_dir_all(repository.join(".winwincode"))
+            .expect("validation config directory");
+        std::fs::write(
+            repository.join(".winwincode/validation.toml"),
+            configuration,
+        )
+        .expect("validation config");
+        git(&repository, &["add", ".winwincode/validation.toml"]);
+        git(&repository, &["commit", "-qm", "validation config"]);
+    }
+}
+
+#[derive(Debug, Default)]
+struct FixtureValidationArtifacts {
+    retained: HashMap<String, (Vec<u8>, ArtifactReference)>,
+}
+
+impl ValidationArtifactPort for FixtureValidationArtifacts {
+    fn persist(
+        &mut self,
+        request: ValidationArtifactRequest<'_>,
+    ) -> Result<ArtifactReference, ValidationArtifactError> {
+        let stream = match request.stream {
+            ValidationArtifactStream::Stdout => "stdout",
+            ValidationArtifactStream::Stderr => "stderr",
+        };
+        let key = format!(
+            "{}:{}:{}:{stream}",
+            request.identity.batch_id.0, request.command_ordinal, request.command_id
+        );
+        if let Some((bytes, artifact)) = self.retained.get(&key) {
+            return if bytes == request.bytes {
+                Ok(artifact.clone())
+            } else {
+                Err(ValidationArtifactError)
+            };
+        }
+        let digest = Sha256::digest(request.bytes);
+        let key_digest = format!("{:x}", Sha256::digest(key.as_bytes()));
+        let artifact = ArtifactReference {
+            artifact_id: ArtifactId(format!("art_{}", &key_digest[..26])),
+            digest: Sha256Digest(format!("sha256:{digest:x}")),
+        };
+        self.retained
+            .insert(key, (request.bytes.to_vec(), artifact.clone()));
+        Ok(artifact)
+    }
+}
+
+const VALIDATION_CONFIG: &str = r#"schemaVersion = 1
+
+[[commands]]
+id = "python-format"
+phase = "formatter"
+language = "python"
+allowedCompanionPaths = []
+argv = ["/usr/bin/python3", "-B", "-c", 'from pathlib import Path; p=Path("delegated.txt"); p.write_text(p.read_text().replace("fixture", "formatted"))']
+workingDirectory = "."
+environment = []
+network = false
+timeoutMillis = 300000
+outputLimitBytes = 1048576
+
+[[commands]]
+id = "python-check"
+phase = "validation"
+language = "python"
+allowedCompanionPaths = []
+argv = ["/usr/bin/python3", "-B", "-c", 'from pathlib import Path; assert Path("delegated.txt").read_text() == "formatted\n"']
+workingDirectory = "."
+environment = []
+network = false
+timeoutMillis = 300000
+outputLimitBytes = 1048576
+
+[[commands]]
+id = "rust-check"
+phase = "validation"
+language = "rust"
+allowedCompanionPaths = []
+argv = ["/usr/bin/true"]
+workingDirectory = "."
+environment = []
+network = false
+timeoutMillis = 300000
+outputLimitBytes = 1048576
+
+[[commands]]
+id = "typescript-check"
+phase = "validation"
+language = "typescript"
+allowedCompanionPaths = []
+argv = ["/usr/bin/true"]
+workingDirectory = "."
+environment = []
+network = false
+timeoutMillis = 300000
+outputLimitBytes = 1048576
+
+[[profiles]]
+name = "changed"
+commandIds = ["python-format", "python-check"]
+[[profiles]]
+name = "fast"
+commandIds = ["rust-check"]
+[[profiles]]
+name = "affected"
+commandIds = ["typescript-check"]
+[[profiles]]
+name = "final"
+commandIds = ["rust-check", "typescript-check"]
+"#;
+
+fn baseline_unavailable_validation_config() -> String {
+    let diagnostic_command = r"from pathlib import Path; module='new-module' if Path('second.txt').exists() else 'existing-module'; print(f'delegated.txt(1,1): error TS2307: Cannot find module {module!r}.'); raise SystemExit(1)";
+    VALIDATION_CONFIG.replace(
+        "id = \"python-check\"\nphase = \"validation\"\nlanguage = \"python\"\nallowedCompanionPaths = []\nargv = [\"/usr/bin/python3\", \"-B\", \"-c\", 'from pathlib import Path; assert Path(\"delegated.txt\").read_text() == \"formatted\\n\"']",
+        &format!(
+            "id = \"python-check\"\nphase = \"validation\"\nlanguage = \"typescript\"\ndiagnosticParserVersion = \"typescript_v1\"\nallowedCompanionPaths = []\nargv = [\"/usr/bin/python3\", \"-B\", \"-c\", {diagnostic_command:?}]"
+        ),
+    )
 }
 
 impl Drop for Fixture {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
+#[derive(Debug)]
+struct RecordingRecovery {
+    observed: Arc<Mutex<Vec<(ExecutionJobId, String)>>>,
+}
+
+#[derive(Clone, Debug)]
+struct ScriptedBatchExecutor {
+    calls: Arc<Mutex<Vec<&'static str>>>,
+    execute_result: ChangeBatchExecutionResult,
+    recover_result: ChangeBatchExecutionResult,
+    cancel_result: ChangeBatchExecutionResult,
+}
+
+#[derive(Debug)]
+struct FixedWorkspaceTreePort;
+
+#[derive(Debug)]
+struct UncertainWorkspaceTreePort;
+
+impl WorkspaceTreePort for FixedWorkspaceTreePort {
+    fn compute_tree<'operation>(
+        &'operation mut self,
+        _checkout: &'operation std::path::Path,
+        _state_root: &'operation std::path::Path,
+        _base: &'operation WorkspaceRevision,
+        _files: &'operation [AppliedFileSummary],
+        _delta_digest: &'operation Sha256Digest,
+    ) -> WorkspaceTreeFuture<'operation> {
+        Box::pin(async { Ok(WorkspaceRevision(format!("git-tree:{}", "e".repeat(40)))) })
+    }
+
+    fn compare_tree<'operation>(
+        &'operation mut self,
+        _checkout: &'operation std::path::Path,
+        _state_root: &'operation std::path::Path,
+        _expected: &'operation WorkspaceRevision,
+    ) -> WorkspaceTreeCompareFuture<'operation> {
+        Box::pin(async { Ok(WorkspaceTreeCompareResult::Exact) })
+    }
+
+    fn restore_tree<'operation>(
+        &'operation mut self,
+        _workspace_id: &'operation str,
+        _checkout: &'operation std::path::Path,
+        _state_root: &'operation std::path::Path,
+        _journal_root: &'operation std::path::Path,
+        _expected_current: &'operation WorkspaceRevision,
+        _target: &'operation WorkspaceRevision,
+    ) -> WorkspaceTreeRestoreFuture<'operation> {
+        Box::pin(async { Ok(WorkspaceTreeRestoreResult::AlreadyAtTarget) })
+    }
+}
+
+impl WorkspaceTreePort for UncertainWorkspaceTreePort {
+    fn compute_tree<'operation>(
+        &'operation mut self,
+        _checkout: &'operation std::path::Path,
+        _state_root: &'operation std::path::Path,
+        _base: &'operation WorkspaceRevision,
+        _files: &'operation [AppliedFileSummary],
+        _delta_digest: &'operation Sha256Digest,
+    ) -> WorkspaceTreeFuture<'operation> {
+        Box::pin(async { Ok(WorkspaceRevision(format!("git-tree:{}", "e".repeat(40)))) })
+    }
+
+    fn compare_tree<'operation>(
+        &'operation mut self,
+        _checkout: &'operation std::path::Path,
+        _state_root: &'operation std::path::Path,
+        _expected: &'operation WorkspaceRevision,
+    ) -> WorkspaceTreeCompareFuture<'operation> {
+        Box::pin(async { Ok(WorkspaceTreeCompareResult::Exact) })
+    }
+
+    fn restore_tree<'operation>(
+        &'operation mut self,
+        _workspace_id: &'operation str,
+        _checkout: &'operation std::path::Path,
+        _state_root: &'operation std::path::Path,
+        _journal_root: &'operation std::path::Path,
+        _expected_current: &'operation WorkspaceRevision,
+        _target: &'operation WorkspaceRevision,
+    ) -> WorkspaceTreeRestoreFuture<'operation> {
+        Box::pin(async { Ok(WorkspaceTreeRestoreResult::StateUncertain) })
+    }
+}
+
+impl ChangeBatchExecutor for ScriptedBatchExecutor {
+    fn execute<'operation>(
+        &'operation mut self,
+        _request: ChangeBatchExecutionRequest<'operation>,
+    ) -> ChangeBatchExecutorFuture<'operation> {
+        self.calls.lock().expect("batch calls").push("execute");
+        let result = self.execute_result.clone();
+        Box::pin(async move { Ok(result) })
+    }
+
+    fn recover<'operation>(
+        &'operation mut self,
+        _request: ChangeBatchExecutionRequest<'operation>,
+    ) -> ChangeBatchExecutorFuture<'operation> {
+        self.calls.lock().expect("batch calls").push("recover");
+        let result = self.recover_result.clone();
+        Box::pin(async move { Ok(result) })
+    }
+
+    fn cancel<'operation>(
+        &'operation mut self,
+        _request: ChangeBatchExecutionRequest<'operation>,
+    ) -> ChangeBatchExecutorFuture<'operation> {
+        self.calls.lock().expect("batch calls").push("cancel");
+        let result = self.cancel_result.clone();
+        Box::pin(async move { Ok(result) })
+    }
+}
+
+impl ChangeBatchWorkspaceRecovery for RecordingRecovery {
+    fn recover(
+        &mut self,
+        active: &ActiveJob,
+        workspace: &mut WorkerWorkspace,
+    ) -> Result<(), JobWorkspaceError> {
+        self.observed.lock().expect("recovery observer").push((
+            active.job.job_id.clone(),
+            workspace.resolved_source_commit().to_owned(),
+        ));
+        Ok(())
     }
 }
 
@@ -178,6 +463,141 @@ fn active_job() -> ActiveJob {
     }
 }
 
+fn observation_chunk(
+    open: &ModelOpenMessage,
+    sequence: i64,
+    payload: &serde_json::Value,
+    is_final: bool,
+) -> ModelChunkMessage {
+    let bytes = serde_json::to_vec(payload).expect("Observer chunk payload");
+    ModelChunkMessage {
+        error: None,
+        is_final,
+        kind: ModelChunkMessageKind::ModelChunk,
+        lease: open.lease.clone(),
+        message_id: ExecutionMessageId(format!("xmsg_{sequence:026}")),
+        model_exchange_id: open.model_exchange_id.clone(),
+        payload: Some(EncodedPayload {
+            content_type: "application/json".to_owned(),
+            data_base64: STANDARD.encode(&bytes),
+            payload_digest: Sha256Digest(format!("sha256:{:x}", Sha256::digest(&bytes))),
+        }),
+        schema_version: SchemaVersion::WinwincodeV1,
+        sent_at: open.sent_at.clone(),
+        sequence: ExecutionSequence(sequence),
+        session_identity: open.session_identity.clone(),
+        worker_session_id: open.worker_session_id.clone(),
+    }
+}
+
+fn assert_success_progress(progress: &[ChangeBatchProgressEvent]) {
+    assert_eq!(
+        progress
+            .iter()
+            .map(|event| &event.state)
+            .collect::<Vec<_>>(),
+        [
+            &ChangeBatchProgressState::Proposed,
+            &ChangeBatchProgressState::Authorized,
+            &ChangeBatchProgressState::ApplyStarted,
+            &ChangeBatchProgressState::Applied,
+            &ChangeBatchProgressState::ValidationStarted,
+            &ChangeBatchProgressState::ValidationCompleted,
+            &ChangeBatchProgressState::Accepted,
+        ]
+    );
+}
+
+fn source_revision(fixture: &Fixture) -> WorkspaceRevision {
+    WorkspaceRevision(format!(
+        "git-tree:{}",
+        git_output(&fixture.repository(), &["rev-parse", "HEAD^{tree}"])
+    ))
+}
+
+fn batch_proposal(
+    active: &ActiveJob,
+    workspace_revision: WorkspaceRevision,
+) -> ChangeBatchProposalEvent {
+    let patch = "*** Begin Patch\n*** Add File: delegated.txt\n+fixture\n*** End Patch\n";
+    batch_proposal_with_patch(active, workspace_revision, patch, "turn-fixture")
+}
+
+fn batch_proposal_with_patch(
+    active: &ActiveJob,
+    workspace_revision: WorkspaceRevision,
+    patch: &str,
+    turn_id: &str,
+) -> ChangeBatchProposalEvent {
+    let patch_digest = Sha256Digest(format!("sha256:{:x}", Sha256::digest(patch.as_bytes())));
+    let run_key = CodexRunKey {
+        job_id: active.job.job_id.clone(),
+        attempt: active.job.attempt,
+        fencing_token: active.lease.fencing_token.clone(),
+        payload_digest: active.job.payload_digest.clone(),
+    }
+    .canonical_digest()
+    .expect("canonical batch run key")
+    .0;
+    ChangeBatchProposalEvent {
+        identity: ChangeBatchIdentity {
+            attempt: active.job.attempt,
+            batch_id: derive_change_batch_id(&run_key, turn_id, None, &patch_digest)
+                .expect("canonical batch id"),
+            call_id: None,
+            fencing_token: active.lease.fencing_token.clone(),
+            job_id: active.job.job_id.clone(),
+            lease_id: active.lease.lease_id.clone(),
+            patch_digest,
+            repository_id: active.job.workspace.repository_id.clone(),
+            run_key,
+            session_identity: active.session_identity.clone(),
+            turn_id: turn_id.to_owned(),
+            workspace_revision,
+        },
+        occurred_at: Instant("2026-08-28T00:00:01.000Z".to_owned()),
+        proposal: ChangeBatchProposal {
+            acceptance_criteria_ids: vec!["criterion-fixture".to_owned()],
+            disposition: ChangeBatchProposalDisposition::Final,
+            patch: patch.to_owned(),
+            schema_version: 1,
+            validation_profile: ValidationProfileName::Changed,
+        },
+    }
+}
+
+fn applied_result() -> ChangeBatchExecutionResult {
+    ChangeBatchExecutionResult::Applied {
+        files: vec![AppliedFileSummary {
+            after_sha256: Some(Sha256Digest(format!(
+                "sha256:{:x}",
+                Sha256::digest(b"fixture\n")
+            ))),
+            before_sha256: None,
+            bytes_after: 8,
+            bytes_before: 0,
+            mode_after: Some("644".to_owned()),
+            mode_before: None,
+            move_path: None,
+            operation: AppliedFileOperation::Create,
+            path: "delegated.txt".to_owned(),
+        }],
+        artifact_ref: None,
+    }
+}
+
+fn scripted_executor(
+    calls: &Arc<Mutex<Vec<&'static str>>>,
+    result: ChangeBatchExecutionResult,
+) -> ScriptedBatchExecutor {
+    ScriptedBatchExecutor {
+        calls: Arc::clone(calls),
+        execute_result: result.clone(),
+        recover_result: result.clone(),
+        cancel_result: result,
+    }
+}
+
 fn replacement_successor(predecessor: &ActiveJob) -> ActiveJob {
     let mut successor = predecessor.clone();
     successor.job.attempt = 2;
@@ -212,6 +632,7 @@ fn second_replacement_successor(predecessor: &ActiveJob) -> ActiveJob {
     successor
 }
 
+#[cfg(feature = "test-support")]
 fn second_active_job() -> ActiveJob {
     let mut active = active_job();
     active.job.job_id = ExecutionJobId("job_00000000000000000000000002".to_owned());
@@ -285,7 +706,7 @@ fn crash_recovery_keeps_original_checkout_and_freezes_one_candidate() {
         b"candidate\n"
     );
     let prepared = restarted
-        .prepare_candidate(&active)
+        .prepare_candidate(&active, winwincode_codex::RoleExecutionMode::React)
         .expect("freeze recovered candidate");
     assert_ne!(
         prepared.snapshot().candidate_tree_id,
@@ -312,7 +733,7 @@ fn frozen_candidate_restarts_with_the_same_commit_and_artifact_bytes() {
     std::fs::write(checkout.join("fixture.txt"), b"candidate\n").expect("write candidate change");
 
     let original = first
-        .prepare_candidate(&active)
+        .prepare_candidate(&active, winwincode_codex::RoleExecutionMode::React)
         .expect("freeze original candidate");
     assert_eq!(git_output(&checkout, &["rev-parse", "HEAD"]), source_commit);
     drop(first);
@@ -327,7 +748,7 @@ fn frozen_candidate_restarts_with_the_same_commit_and_artifact_bytes() {
         source_commit
     );
     let replayed = restarted
-        .prepare_candidate(&active)
+        .prepare_candidate(&active, winwincode_codex::RoleExecutionMode::React)
         .expect("freeze the same candidate after restart");
     assert_eq!(replayed, original);
     restarted
@@ -358,7 +779,7 @@ fn sealed_replacement_rotates_authority_and_preserves_the_predecessor_checkout()
         b"candidate\n"
     );
     let prepared = restarted
-        .prepare_candidate(&successor)
+        .prepare_candidate(&successor, winwincode_codex::RoleExecutionMode::React)
         .expect("freeze candidate under successor authority");
     assert_eq!(
         prepared.snapshot().origin_provenance.worker_instance_id,
@@ -380,7 +801,7 @@ fn sealed_replacement_rotates_authority_and_preserves_the_predecessor_checkout()
     );
     assert_eq!(
         replayed
-            .prepare_candidate(&successor)
+            .prepare_candidate(&successor, winwincode_codex::RoleExecutionMode::React)
             .expect("replay successor candidate")
             .snapshot()
             .candidate_commit_id,
@@ -1148,6 +1569,1728 @@ fn duplicate_authority_is_stable_and_foreign_authority_is_rejected() {
 }
 
 #[test]
+fn exact_checkout_runs_change_batch_recovery_before_becoming_active() {
+    let fixture = Fixture::new("change-batch-recovery");
+    let active = active_job();
+    let source_commit = git_output(&fixture.repository(), &["rev-parse", "HEAD^{commit}"]);
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let mut runtime = fixture
+        .runtime()
+        .with_change_batch_recovery(RecordingRecovery {
+            observed: Arc::clone(&observed),
+        });
+    runtime
+        .open_for_job(&active, None)
+        .expect("open checkout after recovery");
+    assert_eq!(
+        *observed.lock().expect("recovery observations"),
+        vec![(active.job.job_id.clone(), source_commit)]
+    );
+    runtime
+        .open_for_job(&active, None)
+        .expect("duplicate open does not rerun recovery");
+    assert_eq!(observed.lock().expect("recovery observations").len(), 1);
+    runtime
+        .close_job(&active.job.job_id, WorkspaceCloseReason::Cancelled)
+        .expect("close recovered checkout");
+}
+
+#[tokio::test]
+async fn production_change_batch_rejects_stale_lease_and_revision_before_any_write() {
+    let fixture = Fixture::new("batch-real-stale-authority");
+    let active = active_job();
+    let proposal = batch_proposal(&active, source_revision(&fixture));
+    let mut runtime = fixture.runtime();
+    let checkout = runtime
+        .open_for_job(&active, None)
+        .expect("open stale authority workspace");
+    let mut stale_lease = active.clone();
+    stale_lease.lease.fencing_token = FencingToken("9".to_owned());
+    assert_eq!(
+        runtime
+            .execute_change_batch(
+                &stale_lease,
+                &proposal,
+                &Instant("2026-08-28T00:00:02.000Z".to_owned()),
+            )
+            .await
+            .expect_err("stale lease rejected")
+            .code(),
+        JobWorkspaceErrorCode::AuthorityMismatch
+    );
+    let mut stale_revision = proposal.clone();
+    stale_revision.identity.workspace_revision =
+        WorkspaceRevision(format!("git-tree:{}", "f".repeat(40)));
+    assert_eq!(
+        runtime
+            .execute_change_batch(
+                &active,
+                &stale_revision,
+                &Instant("2026-08-28T00:00:03.000Z".to_owned()),
+            )
+            .await
+            .expect_err("stale revision rejected")
+            .code(),
+        JobWorkspaceErrorCode::AuthorityMismatch
+    );
+    assert!(!checkout.join("delegated.txt").exists());
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test]
+async fn production_recovery_quarantines_other_state_and_preserves_its_bytes() {
+    let fixture = Fixture::new("batch-real-other-recovery");
+    let active = active_job();
+    let proposal = batch_proposal(&active, source_revision(&fixture));
+    let mut first = fixture.runtime();
+    let checkout = first
+        .open_for_job(&active, None)
+        .expect("open other-state workspace");
+    first
+        .interrupt_change_batch_after_mutation_for_test(
+            &active,
+            &proposal,
+            &Instant("2026-08-28T00:00:02.000Z".to_owned()),
+        )
+        .await
+        .expect("interrupt after apply");
+    std::fs::write(checkout.join("delegated.txt"), b"foreign\n").expect("write other state");
+    drop(first);
+
+    let mut restarted = fixture.runtime();
+    assert_eq!(
+        restarted
+            .open_for_job_recovering(
+                &active,
+                None,
+                &Instant("2026-08-28T00:00:03.000Z".to_owned()),
+            )
+            .await
+            .expect_err("other state stays quarantined")
+            .code(),
+        JobWorkspaceErrorCode::ChangeBatch
+    );
+    assert_eq!(
+        std::fs::read(checkout.join("delegated.txt")).unwrap(),
+        b"foreign\n"
+    );
+    let journal = ChangeBatchJournal::open(fixture.root.join(".workspaces-change-batches"))
+        .expect("open recovery journal");
+    let record = journal
+        .load(&proposal.identity.batch_id)
+        .expect("load quarantined record")
+        .expect("quarantined record exists");
+    assert_eq!(
+        record.receipt.map(|receipt| receipt.status),
+        Some(ChangeBatchReceiptStatus::StateUncertain)
+    );
+    assert_eq!(
+        journal
+            .progress_events(&proposal.identity.batch_id)
+            .expect("load recovery progress")
+            .last()
+            .map(|event| &event.state),
+        Some(&ChangeBatchProgressState::InfrastructureFailed)
+    );
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test]
+async fn production_recovery_terminalizes_full_expected_state_without_rewriting() {
+    let fixture = Fixture::new("batch-real-full-recovery");
+    let active = active_job();
+    let proposal = batch_proposal(&active, source_revision(&fixture));
+    let mut first = fixture.runtime();
+    let checkout = first
+        .open_for_job(&active, None)
+        .expect("open interrupted workspace");
+    let interrupted = first
+        .interrupt_change_batch_after_mutation_for_test(
+            &active,
+            &proposal,
+            &Instant("2026-08-28T00:00:02.000Z".to_owned()),
+        )
+        .await
+        .expect("interrupt after exact apply");
+    assert!(matches!(
+        interrupted,
+        ChangeBatchExecutionResult::Applied { .. }
+    ));
+    assert_eq!(
+        std::fs::read(checkout.join("delegated.txt")).unwrap(),
+        b"fixture\n"
+    );
+    drop(first);
+
+    let mut restarted = fixture.runtime();
+    restarted
+        .open_for_job_recovering(
+            &active,
+            None,
+            &Instant("2026-08-28T00:00:03.000Z".to_owned()),
+        )
+        .await
+        .expect("reconcile full expected state");
+    let replay = restarted
+        .execute_change_batch(
+            &active,
+            &proposal,
+            &Instant("2026-08-28T00:00:04.000Z".to_owned()),
+        )
+        .await
+        .expect("replay recovered receipt");
+    assert!(replay.replayed);
+    assert_eq!(replay.receipt.status, ChangeBatchReceiptStatus::Applied);
+    assert!(replay.receipt.result_revision.is_some());
+    assert_eq!(
+        std::fs::read(checkout.join("delegated.txt")).unwrap(),
+        b"fixture\n"
+    );
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test]
+async fn production_recovery_rolls_back_a_mixed_move_without_overwriting_other_state() {
+    let fixture = Fixture::new("batch-real-move-recovery");
+    std::fs::write(fixture.repository().join("move.txt"), b"move\n").expect("write move fixture");
+    git(&fixture.repository(), &["add", "move.txt"]);
+    git(&fixture.repository(), &["commit", "-qm", "move fixture"]);
+    let active = active_job();
+    let patch = "*** Begin Patch\n*** Update File: move.txt\n*** Move to: moved.txt\n@@\n-move\n+moved\n*** End Patch\n";
+    let proposal =
+        batch_proposal_with_patch(&active, source_revision(&fixture), patch, "turn-mixed-move");
+    let mut first = fixture.runtime();
+    let checkout = first
+        .open_for_job(&active, None)
+        .expect("open mixed move workspace");
+    first
+        .interrupt_change_batch_after_mutation_for_test(
+            &active,
+            &proposal,
+            &Instant("2026-08-28T00:00:02.000Z".to_owned()),
+        )
+        .await
+        .expect("interrupt after move");
+    std::fs::write(checkout.join("move.txt"), b"move\n").expect("create mixed before state");
+    drop(first);
+
+    let mut restarted = fixture.runtime();
+    restarted
+        .open_for_job_recovering(
+            &active,
+            None,
+            &Instant("2026-08-28T00:00:03.000Z".to_owned()),
+        )
+        .await
+        .expect("rollback mixed move");
+    let replay = restarted
+        .execute_change_batch(
+            &active,
+            &proposal,
+            &Instant("2026-08-28T00:00:04.000Z".to_owned()),
+        )
+        .await
+        .expect("replay rollback receipt");
+    assert_eq!(replay.receipt.status, ChangeBatchReceiptStatus::Rejected);
+    assert_eq!(std::fs::read(checkout.join("move.txt")).unwrap(), b"move\n");
+    assert!(!checkout.join("moved.txt").exists());
+    assert_eq!(
+        replay.progress.last().map(|event| &event.state),
+        Some(&ChangeBatchProgressState::RepairRequired)
+    );
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test]
+async fn production_cancel_after_apply_started_reports_the_proven_exact_state() {
+    let fixture = Fixture::new("batch-real-cancel-recovery");
+    let mut active = active_job();
+    let proposal = batch_proposal(&active, source_revision(&fixture));
+    let mut runtime = fixture.runtime();
+    let checkout = runtime
+        .open_for_job(&active, None)
+        .expect("open cancellation recovery workspace");
+    runtime
+        .interrupt_change_batch_after_mutation_for_test(
+            &active,
+            &proposal,
+            &Instant("2026-08-28T00:00:02.000Z".to_owned()),
+        )
+        .await
+        .expect("interrupt after apply");
+    active.lifecycle = ActiveJobLifecycle::Cancelling;
+
+    let recovered = runtime
+        .execute_change_batch(
+            &active,
+            &proposal,
+            &Instant("2026-08-28T00:00:03.000Z".to_owned()),
+        )
+        .await
+        .expect("cancel reconciles durable apply");
+
+    assert_eq!(recovered.receipt.status, ChangeBatchReceiptStatus::Applied);
+    assert!(recovered.receipt.delta_exact);
+    assert_eq!(
+        std::fs::read(checkout.join("delegated.txt")).unwrap(),
+        b"fixture\n"
+    );
+}
+
+#[tokio::test]
+async fn production_change_batch_applies_add_update_delete_and_move_exactly() {
+    let fixture = Fixture::new("batch-real-operations");
+    std::fs::write(fixture.repository().join("delete.txt"), b"delete\n")
+        .expect("write delete fixture");
+    std::fs::write(fixture.repository().join("move.txt"), b"move\n").expect("write move fixture");
+    git(&fixture.repository(), &["add", "delete.txt", "move.txt"]);
+    git(
+        &fixture.repository(),
+        &["commit", "-qm", "operation fixtures"],
+    );
+    let base_revision = source_revision(&fixture);
+    let active = active_job();
+    let patch = "*** Begin Patch\n*** Add File: added.txt\n+added\n*** Update File: fixture.txt\n@@\n-source\n+updated\n*** Delete File: delete.txt\n*** Update File: move.txt\n*** Move to: moved.txt\n@@\n-move\n+moved\n*** End Patch\n";
+    let proposal = batch_proposal_with_patch(
+        &active,
+        source_revision(&fixture),
+        patch,
+        "turn-real-operations",
+    );
+    let mut runtime = fixture.runtime();
+    let checkout = runtime
+        .open_for_job(&active, None)
+        .expect("open real operation workspace");
+
+    let executed = runtime
+        .execute_change_batch(
+            &active,
+            &proposal,
+            &Instant("2026-08-28T00:00:02.000Z".to_owned()),
+        )
+        .await
+        .expect("execute real operation batch");
+
+    assert_eq!(executed.receipt.status, ChangeBatchReceiptStatus::Applied);
+    assert_eq!(executed.receipt.base_revision, base_revision);
+    assert!(executed.receipt.result_revision.is_some());
+    assert!(executed.receipt.delta_exact);
+    assert!(executed.receipt.delta_digest.is_some());
+    assert_eq!(executed.receipt.files.len(), 4);
+    let receipt_json = serde_json::to_string(&executed.receipt).expect("encode exact receipt");
+    assert!(!receipt_json.contains("source\\n"));
+    assert!(!receipt_json.contains("updated\\n"));
+    assert!(!receipt_json.contains("added\\n"));
+    assert_eq!(
+        std::fs::read(checkout.join("added.txt")).unwrap(),
+        b"added\n"
+    );
+    assert_eq!(
+        std::fs::read(checkout.join("fixture.txt")).unwrap(),
+        b"updated\n"
+    );
+    assert!(!checkout.join("delete.txt").exists());
+    assert!(!checkout.join("move.txt").exists());
+    assert_eq!(
+        std::fs::read(checkout.join("moved.txt")).unwrap(),
+        b"moved\n"
+    );
+    assert!(runtime.contains(&active.job.job_id));
+}
+
+#[tokio::test]
+async fn explicit_writer_and_validation_run_inside_one_revision_bound_barrier() {
+    let fixture = Fixture::new("configured-writer-validation");
+    let configuration = VALIDATION_CONFIG
+        .replacen(
+            "allowedCompanionPaths = []",
+            "allowedCompanionPaths = [\"format-count.txt\"]",
+            1,
+        )
+        .replace(
+            "p.write_text(p.read_text().replace(\"fixture\", \"formatted\"))",
+            "p.write_text(p.read_text().replace(\"fixture\", \"formatted\")); c=Path(\"format-count.txt\"); c.write_text(str(int(c.read_text())+1) if c.exists() else \"1\")",
+        );
+    fixture.install_validation_config_text(&configuration);
+    let active = active_job();
+    let mut runtime = fixture.runtime();
+    let checkout = runtime
+        .open_for_job(&active, None)
+        .expect("open configured workspace");
+    let proposal = batch_proposal(&active, source_revision(&fixture));
+    let executed = runtime
+        .execute_change_batch(
+            &active,
+            &proposal,
+            &Instant("2026-08-28T00:00:02.000Z".to_owned()),
+        )
+        .await
+        .expect("execute configured batch");
+
+    assert_eq!(
+        std::fs::read_to_string(checkout.join("delegated.txt")).expect("normalized file"),
+        "formatted\n"
+    );
+    let normalizer = executed
+        .receipt
+        .normalizer
+        .as_ref()
+        .expect("normalizer receipt");
+    assert_eq!(
+        normalizer.status,
+        winwincode_execution_port::generated::NormalizerReceiptStatus::Normalized
+    );
+    assert_ne!(
+        normalizer.base_revision,
+        executed.receipt.result_revision.clone().expect("result")
+    );
+    let validation = executed
+        .receipt
+        .validation
+        .as_ref()
+        .expect("validation receipt");
+    assert_eq!(
+        validation.status,
+        winwincode_execution_port::generated::ValidationReceiptStatus::Passed
+    );
+    assert_eq!(validation.result_revision, executed.receipt.result_revision);
+    assert!(
+        executed.observation_request.is_none(),
+        "deterministic validation pass must not create an Observer model intent"
+    );
+    assert_success_progress(&executed.progress);
+    assert_eq!(
+        std::fs::read_to_string(checkout.join("format-count.txt")).expect("formatter count"),
+        "1"
+    );
+    let first_receipt = executed.receipt;
+    drop(runtime);
+
+    let mut restarted = fixture.runtime();
+    restarted
+        .open_for_job_recovering(
+            &active,
+            None,
+            &Instant("2026-08-28T00:00:03.000Z".to_owned()),
+        )
+        .await
+        .expect("reopen configured checkpoint");
+    let replay = restarted
+        .execute_change_batch(
+            &active,
+            &proposal,
+            &Instant("2026-08-28T00:00:04.000Z".to_owned()),
+        )
+        .await
+        .expect("replay configured checkpoint");
+    assert!(replay.replayed);
+    assert_eq!(replay.receipt, first_receipt);
+    assert_eq!(
+        std::fs::read_to_string(checkout.join("format-count.txt")).expect("replayed count"),
+        "1"
+    );
+}
+
+async fn prepare_terminal_observer_replay_fixture()
+-> (Fixture, ActiveJob, ModelOpenMessage, ModelChunkMessage) {
+    let fixture = Fixture::new("observer-terminal-before-receipt");
+    fixture.install_validation_config_text(&baseline_unavailable_validation_config());
+    let active = active_job();
+    let mut runtime = fixture.runtime();
+    runtime
+        .open_for_job(&active, None)
+        .expect("open terminal replay workspace");
+    let proposal = batch_proposal(&active, source_revision(&fixture));
+    let executed = runtime
+        .execute_change_batch(
+            &active,
+            &proposal,
+            &Instant("2026-08-28T00:00:02.000Z".to_owned()),
+        )
+        .await
+        .expect("retain unresolved validation");
+    let observation = executed
+        .observation_request
+        .expect("retain bounded Observer intent");
+    let model = ObservationModelConfiguration::try_new(
+        "observer-provider",
+        "observer-model",
+        ModelGatewayRoute {
+            capability: "observer-strict-json".to_owned(),
+            route: "enterprise-observer".to_owned(),
+        },
+    )
+    .expect("independent Observer route");
+    let open = runtime
+        .prepare_observation_model_open(
+            &active,
+            &observation,
+            &model,
+            &Instant("2026-08-28T00:00:03.000Z".to_owned()),
+        )
+        .expect("retain Observer open");
+    let response = serde_json::json!({
+        "schemaVersion": 1,
+        "observationId": observation.intent.observation_id.0,
+        "decision": "accept",
+        "reasonCode": "criteria_satisfied",
+        "summary": "The bounded evidence satisfies the requested criterion.",
+        "rootCauses": [],
+        "repairClass": null,
+        "confidenceBps": 9000
+    })
+    .to_string();
+    runtime
+        .accept_observation_model_chunk(
+            &active,
+            &observation_chunk(
+                &open,
+                1,
+                &serde_json::json!({"type": "output_text_delta", "delta": response}),
+                false,
+            ),
+            &Instant("2026-08-28T00:00:04.000Z".to_owned()),
+        )
+        .expect("retain Observer response")
+        .expect("Observer exchange");
+    let completed = observation_chunk(
+        &open,
+        2,
+        &serde_json::json!({
+            "type": "completed",
+            "responseId": "response-observer-terminal-replay",
+            "actualCostMicros": 53,
+            "tokenUsage": {
+                "input_tokens": 80,
+                "cached_input_tokens": 0,
+                "cache_write_input_tokens": 0,
+                "output_tokens": 20,
+                "reasoning_output_tokens": 0,
+                "total_tokens": 100
+            },
+            "endTurn": true
+        }),
+        true,
+    );
+    drop(runtime);
+    (fixture, active, open, completed)
+}
+
+fn retain_terminal_frame_without_receipt(
+    fixture: &Fixture,
+    open: &ModelOpenMessage,
+    completed: &ModelChunkMessage,
+) {
+    let mut interrupted = ChangeBatchJournal::open(fixture.root.join(".workspaces-change-batches"))
+        .expect("open terminal replay journal");
+    let completed_bytes = serde_json::to_vec(&completed).expect("encode terminal Observer frame");
+    interrupted
+        .retain_observation_model_chunk(
+            &open.model_exchange_id,
+            2,
+            &Sha256Digest(format!("sha256:{:x}", Sha256::digest(&completed_bytes))),
+            &[],
+            Some(&ExecutionOutcomeUsage {
+                cost_microunits: 53,
+                runtime_millis: 0,
+                tokens: 100,
+            }),
+            Some("completed"),
+            &Instant("2026-08-28T00:00:05.000Z".to_owned()),
+        )
+        .expect("retain terminal frame without receipt");
+    assert!(
+        interrupted
+            .observation_model_record(&open.model_exchange_id)
+            .expect("load terminal record")
+            .expect("terminal record exists")
+            .receipt
+            .is_none()
+    );
+    drop(interrupted);
+}
+
+#[tokio::test]
+async fn terminal_observer_frame_replays_after_restart_before_receipt_commit() {
+    let (fixture, active, open, completed) = prepare_terminal_observer_replay_fixture().await;
+    retain_terminal_frame_without_receipt(&fixture, &open, &completed);
+
+    let mut restarted = fixture.runtime();
+    restarted
+        .open_for_job_recovering(
+            &active,
+            None,
+            &Instant("2026-08-28T00:00:06.000Z".to_owned()),
+        )
+        .await
+        .expect("reopen terminal frame before receipt");
+    assert_eq!(
+        restarted
+            .pending_observation_model_open(&active)
+            .expect("load pending terminal open"),
+        Some(open.clone())
+    );
+    let recovered = restarted
+        .accept_observation_model_chunk(
+            &active,
+            &completed,
+            &Instant("2026-08-28T00:00:07.000Z".to_owned()),
+        )
+        .expect("replay terminal Observer frame")
+        .expect("Observer exchange");
+    assert_eq!(
+        recovered
+            .completed_progress
+            .iter()
+            .map(|event| &event.state)
+            .collect::<Vec<_>>(),
+        [
+            &ChangeBatchProgressState::ObservationCompleted,
+            &ChangeBatchProgressState::Accepted,
+        ]
+    );
+    assert!(recovered.receipt.is_some());
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn diagnostic_baseline_does_not_blame_history_then_routes_one_new_missing_module() {
+    let fixture = Fixture::new("diagnostic-baseline-routing");
+    let configuration = baseline_unavailable_validation_config();
+    fixture.install_validation_config_text(&configuration);
+    let active = active_job();
+    let mut runtime = fixture.runtime();
+    runtime
+        .open_for_job(&active, None)
+        .expect("open diagnostic workspace");
+    let base = source_revision(&fixture);
+    let first_proposal = batch_proposal(&active, base);
+    let first = runtime
+        .execute_change_batch(
+            &active,
+            &first_proposal,
+            &Instant("2026-08-28T00:00:02.000Z".to_owned()),
+        )
+        .await
+        .expect("validate first diagnostic baseline");
+    assert_eq!(
+        first.progress.last().map(|event| &event.state),
+        Some(&ChangeBatchProgressState::ObservationRequested),
+        "an absent baseline must not blame an existing diagnostic on this batch"
+    );
+    let observation = first
+        .observation_request
+        .clone()
+        .expect("baseline uncertainty retains one bounded Observer intent");
+    assert!(observation.one_shot);
+    assert!(!observation.intent.hard_check_failed);
+    assert!(observation.intent.all_checks_executed);
+    assert_eq!(
+        Some(&observation.intent.result_revision),
+        first.receipt.result_revision.as_ref()
+    );
+    let observer_model = ObservationModelConfiguration::try_new(
+        "observer-provider",
+        "observer-model",
+        ModelGatewayRoute {
+            capability: "observer-strict-json".to_owned(),
+            route: "enterprise-observer".to_owned(),
+        },
+    )
+    .expect("independent Observer route");
+    let opened_at = Instant("2026-08-28T00:00:07.000Z".to_owned());
+    let first_open = runtime
+        .prepare_observation_model_open(&active, &observation, &observer_model, &opened_at)
+        .expect("retain Observer open before provider send");
+    let replay_open = runtime
+        .prepare_observation_model_open(&active, &observation, &observer_model, &opened_at)
+        .expect("replay exact Observer open");
+    assert_eq!(first_open, replay_open);
+    let payload = STANDARD
+        .decode(&first_open.request.data_base64)
+        .expect("decode Observer provider payload");
+    assert_eq!(
+        first_open.request.payload_digest,
+        Sha256Digest(format!("sha256:{:x}", Sha256::digest(&payload))),
+        "provider payload is content-bound"
+    );
+    let payload: serde_json::Value =
+        serde_json::from_slice(&payload).expect("Observer provider payload JSON");
+    assert_eq!(payload["provider"], "observer-provider");
+    assert_eq!(payload["requestId"], first_open.request_id.0);
+    assert_eq!(payload["request"]["tools"], serde_json::json!([]));
+    assert_eq!(payload["request"]["tool_choice"], "none");
+    assert_eq!(
+        payload["request"]["text"]["format"]["strict"],
+        serde_json::json!(true)
+    );
+    let encoded = serde_json::to_string(&payload).expect("bounded Observer payload");
+    assert!(!encoded.contains("*** Begin Patch"));
+    assert!(!encoded.to_ascii_lowercase().contains("credential"));
+    drop(runtime);
+    let mut runtime = fixture.runtime();
+    runtime
+        .open_for_job_recovering(
+            &active,
+            None,
+            &Instant("2026-08-28T00:00:07.500Z".to_owned()),
+        )
+        .await
+        .expect("reopen pending Observer checkpoint");
+    assert_eq!(
+        runtime
+            .pending_observation_model_open(&active)
+            .expect("load pending Observer open"),
+        Some(first_open.clone()),
+        "restart replays the exact retained model open rather than creating a second call"
+    );
+    let validation = first
+        .receipt
+        .validation
+        .as_ref()
+        .expect("validation receipt");
+    assert_eq!(validation.artifact_refs.len(), 2);
+    let result_revision = first.receipt.result_revision.clone().expect("result tree");
+    let created = observation_chunk(
+        &first_open,
+        1,
+        &serde_json::json!({"type": "created"}),
+        false,
+    );
+    let created_result = runtime
+        .accept_observation_model_chunk(
+            &active,
+            &created,
+            &Instant("2026-08-28T00:00:08.000Z".to_owned()),
+        )
+        .expect("retain Observer created frame")
+        .expect("Observer exchange");
+    assert_eq!(
+        created_result.retention,
+        ObservationChunkRetention::Inserted {
+            confirmed_sequence: 1
+        }
+    );
+    let response = serde_json::json!({
+        "schemaVersion": 1,
+        "observationId": observation.intent.observation_id.0,
+        "decision": "accept",
+        "reasonCode": "criteria_satisfied",
+        "summary": "The bounded evidence satisfies the requested criterion.",
+        "rootCauses": [],
+        "repairClass": null,
+        "confidenceBps": 9000
+    })
+    .to_string();
+    let delta = observation_chunk(
+        &first_open,
+        2,
+        &serde_json::json!({"type": "output_text_delta", "delta": response}),
+        false,
+    );
+    let mut stale = active.clone();
+    stale.lease.fencing_token = FencingToken("2".to_owned());
+    let stale_error = runtime
+        .accept_observation_model_chunk(
+            &stale,
+            &delta,
+            &Instant("2026-08-28T00:00:08.050Z".to_owned()),
+        )
+        .expect_err("stale Observer authority");
+    assert_eq!(stale_error.code(), JobWorkspaceErrorCode::AuthorityMismatch);
+    runtime
+        .accept_observation_model_chunk(
+            &active,
+            &delta,
+            &Instant("2026-08-28T00:00:08.100Z".to_owned()),
+        )
+        .expect("retain Observer response")
+        .expect("Observer exchange");
+    let completed_payload = serde_json::json!({
+        "type": "completed",
+        "responseId": "response-observer-fixture",
+        "actualCostMicros": 47,
+        "tokenUsage": {
+            "input_tokens": 80,
+            "cached_input_tokens": 0,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 20,
+            "reasoning_output_tokens": 0,
+            "total_tokens": 100
+        },
+        "endTurn": true
+    });
+    let gap = observation_chunk(&first_open, 4, &completed_payload, true);
+    assert_eq!(
+        runtime
+            .accept_observation_model_chunk(
+                &active,
+                &gap,
+                &Instant("2026-08-28T00:00:08.200Z".to_owned()),
+            )
+            .expect("classify Observer gap")
+            .expect("Observer exchange")
+            .retention,
+        ObservationChunkRetention::Gap {
+            confirmed_sequence: 2
+        }
+    );
+    let completed = observation_chunk(&first_open, 3, &completed_payload, true);
+    drop(runtime);
+    let mut interrupted = ChangeBatchJournal::open(fixture.root.join(".workspaces-change-batches"))
+        .expect("open interrupted Observer journal");
+    let completed_bytes = serde_json::to_vec(&completed).expect("encode terminal Observer frame");
+    assert_eq!(
+        interrupted
+            .retain_observation_model_chunk(
+                &first_open.model_exchange_id,
+                3,
+                &Sha256Digest(format!("sha256:{:x}", Sha256::digest(&completed_bytes))),
+                &[],
+                Some(&ExecutionOutcomeUsage {
+                    cost_microunits: 47,
+                    runtime_millis: 0,
+                    tokens: 100,
+                }),
+                Some("completed"),
+                &Instant("2026-08-28T00:00:08.250Z".to_owned()),
+            )
+            .expect("retain terminal frame before simulated process loss"),
+        ObservationChunkRetention::Inserted {
+            confirmed_sequence: 3
+        }
+    );
+    let interrupted_record = interrupted
+        .observation_model_record(&first_open.model_exchange_id)
+        .expect("load terminal Observer exchange")
+        .expect("terminal Observer exchange exists");
+    let interrupted_response = parse_observation_response_strict(
+        &interrupted_record.response_bytes,
+        &interrupted_record.request.intent,
+    )
+    .expect("parse retained terminal Observer response");
+    let interrupted_receipt = ObservationReceipt {
+        identity: interrupted_record.request.intent.identity.clone(),
+        input_digest: interrupted_record.request.intent.input_digest.clone(),
+        model_usage: interrupted_record.model_usage.clone(),
+        output_digest: derive_observation_output_digest(&interrupted_response)
+            .expect("derive retained Observer output"),
+        profile_digest: interrupted_record.request.intent.profile_digest.clone(),
+        response: interrupted_response,
+        result_revision: interrupted_record.request.intent.result_revision.clone(),
+        source: ObservationSource::Model,
+    };
+    interrupted
+        .retain_observation_receipt(
+            &interrupted_receipt,
+            &Instant("2026-08-28T00:00:08.260Z".to_owned()),
+        )
+        .expect("retain receipt before simulated process loss");
+    let journal_root = fixture.root.join(".workspaces-change-batches");
+    let workspace_id = Connection::open(journal_root.join("change-batch.sqlite3"))
+        .expect("open Observer recovery database")
+        .query_row(
+            "SELECT workspace_id FROM change_batch_workspace_barrier WHERE active_batch_id = ?1",
+            [&observation.intent.identity.batch_id.0],
+            |row| row.get::<_, String>(0),
+        )
+        .expect("load Observer workspace identity");
+    let retained_progress = interrupted
+        .progress_events(&observation.intent.identity.batch_id)
+        .expect("load retained Observer progress");
+    let observation_completed = ChangeBatchProgressEvent {
+        artifact_refs: Vec::new(),
+        identity: observation.intent.identity.clone(),
+        occurred_at: Instant("2026-08-28T00:00:08.265Z".to_owned()),
+        sequence: retained_progress
+            .last()
+            .expect("ObservationRequested progress")
+            .sequence
+            + 1,
+        state: ChangeBatchProgressState::ObservationCompleted,
+        summary: "ChangeBatch bounded observation completed".to_owned(),
+    };
+    interrupted
+        .retain_workspace_progress(
+            &workspace_id,
+            &observation_completed,
+            ActiveBatchState::ObservationPending,
+            ActiveBatchState::ObservationPending,
+        )
+        .expect("retain ObservationCompleted before simulated process loss");
+    drop(interrupted);
+    let mut runtime = fixture.runtime();
+    runtime
+        .open_for_job_recovering(
+            &active,
+            None,
+            &Instant("2026-08-28T00:00:08.275Z".to_owned()),
+        )
+        .await
+        .expect("reopen terminal Observer frame without receipt");
+    assert_eq!(
+        runtime
+            .pending_observation_model_open(&active)
+            .expect("reload terminal Observer exchange"),
+        Some(first_open.clone()),
+        "restart replays a billed terminal exchange until its final route is durable"
+    );
+    let applied = runtime
+        .accept_observation_model_chunk(
+            &active,
+            &completed,
+            &Instant("2026-08-28T00:00:08.300Z".to_owned()),
+        )
+        .expect("complete strict Observer response")
+        .expect("Observer exchange");
+    assert_eq!(
+        applied
+            .completed_progress
+            .iter()
+            .map(|event| &event.state)
+            .collect::<Vec<_>>(),
+        [&ChangeBatchProgressState::Accepted]
+    );
+    assert_eq!(
+        applied.receipt.as_ref().map(|receipt| &receipt.source),
+        Some(&ObservationSource::Model)
+    );
+    assert_eq!(
+        applied
+            .receipt
+            .as_ref()
+            .and_then(|receipt| receipt.model_usage.as_ref())
+            .map(|usage| usage.cost_microunits),
+        Some(47),
+        "the exact settled Observer charge survives terminal replay"
+    );
+    assert!(
+        applied
+            .change_batch_receipt
+            .as_ref()
+            .and_then(|receipt| receipt.observation.as_ref())
+            .is_some()
+    );
+    let replay = runtime
+        .accept_observation_model_chunk(
+            &active,
+            &completed,
+            &Instant("2026-08-28T00:00:08.400Z".to_owned()),
+        )
+        .expect("replay terminal Observer frame")
+        .expect("Observer exchange");
+    assert_eq!(
+        replay.retention,
+        ObservationChunkRetention::Duplicate {
+            confirmed_sequence: 3
+        }
+    );
+    assert!(replay.completed_progress.is_empty());
+    let second = batch_proposal_with_patch(
+        &active,
+        result_revision,
+        "*** Begin Patch\n*** Add File: second.txt\n+second\n*** End Patch\n",
+        "turn-new-diagnostic",
+    );
+    let executed = runtime
+        .execute_change_batch(
+            &active,
+            &second,
+            &Instant("2026-08-28T00:00:10.000Z".to_owned()),
+        )
+        .await
+        .expect("compare new missing-module diagnostic");
+    assert_eq!(
+        executed.progress.last().map(|event| &event.state),
+        Some(&ChangeBatchProgressState::RepairRequired)
+    );
+    assert!(
+        executed.observation_request.is_none(),
+        "a new missing module is a hard Repair decision and must not call the Observer model"
+    );
+}
+
+#[tokio::test]
+async fn failed_parser_command_does_not_skip_the_remaining_profile_snapshot() {
+    let fixture = Fixture::new("diagnostic-complete-profile");
+    let typescript = r"print('delegated.txt(1,1): error TS2307: Cannot find module \'existing\'.'); raise SystemExit(1)";
+    let cargo = r#"print('{"reason":"build-finished","success":true}')"#;
+    let configuration = VALIDATION_CONFIG
+        .replace(
+            "id = \"python-check\"\nphase = \"validation\"\nlanguage = \"python\"\nallowedCompanionPaths = []\nargv = [\"/usr/bin/python3\", \"-B\", \"-c\", 'from pathlib import Path; assert Path(\"delegated.txt\").read_text() == \"formatted\\n\"']",
+            &format!(
+                "id = \"python-check\"\nphase = \"validation\"\nlanguage = \"typescript\"\ndiagnosticParserVersion = \"typescript_v1\"\nallowedCompanionPaths = []\nargv = [\"/usr/bin/python3\", \"-B\", \"-c\", {typescript:?}]"
+            ),
+        )
+        .replace(
+            "id = \"rust-check\"\nphase = \"validation\"\nlanguage = \"rust\"\nallowedCompanionPaths = []\nargv = [\"/usr/bin/true\"]",
+            &format!(
+                "id = \"rust-check\"\nphase = \"validation\"\nlanguage = \"rust\"\ndiagnosticParserVersion = \"cargo_json_v1\"\nallowedCompanionPaths = []\nargv = [\"/usr/bin/python3\", \"-B\", \"-c\", {cargo:?}]"
+            ),
+        )
+        .replace(
+            "commandIds = [\"python-format\", \"python-check\"]",
+            "commandIds = [\"python-format\", \"python-check\", \"rust-check\"]",
+        );
+    fixture.install_validation_config_text(&configuration);
+    let active = active_job();
+    let mut runtime = fixture.runtime();
+    runtime
+        .open_for_job(&active, None)
+        .expect("open complete-profile workspace");
+    let proposal = batch_proposal(&active, source_revision(&fixture));
+    let executed = runtime
+        .execute_change_batch(
+            &active,
+            &proposal,
+            &Instant("2026-08-28T00:00:02.000Z".to_owned()),
+        )
+        .await
+        .expect("retain every parser snapshot");
+    let validation = executed.receipt.validation.expect("validation receipt");
+    assert_eq!(validation.checks.len(), 2);
+    assert_eq!(validation.artifact_refs.len(), 4);
+    assert_eq!(
+        executed.progress.last().map(|event| &event.state),
+        Some(&ChangeBatchProgressState::ObservationRequested)
+    );
+}
+
+#[tokio::test]
+async fn timed_out_parser_profile_persists_infrastructure_instead_of_an_incomplete_snapshot() {
+    let fixture = Fixture::new("diagnostic-timeout-profile");
+    let configuration = VALIDATION_CONFIG
+        .replace(
+            "id = \"python-check\"\nphase = \"validation\"\nlanguage = \"python\"\nallowedCompanionPaths = []\nargv = [\"/usr/bin/python3\", \"-B\", \"-c\", 'from pathlib import Path; assert Path(\"delegated.txt\").read_text() == \"formatted\\n\"']\nworkingDirectory = \".\"\nenvironment = []\nnetwork = false\ntimeoutMillis = 300000",
+            "id = \"python-check\"\nphase = \"validation\"\nlanguage = \"typescript\"\ndiagnosticParserVersion = \"typescript_v1\"\nallowedCompanionPaths = []\nargv = [\"/usr/bin/python3\", \"-B\", \"-c\", \"import time; time.sleep(1)\"]\nworkingDirectory = \".\"\nenvironment = []\nnetwork = false\ntimeoutMillis = 10",
+        )
+        .replace(
+            "id = \"rust-check\"\nphase = \"validation\"\nlanguage = \"rust\"\nallowedCompanionPaths = []\nargv = [\"/usr/bin/true\"]",
+            "id = \"rust-check\"\nphase = \"validation\"\nlanguage = \"rust\"\ndiagnosticParserVersion = \"cargo_json_v1\"\nallowedCompanionPaths = []\nargv = [\"/usr/bin/true\"]",
+        )
+        .replace(
+            "commandIds = [\"python-format\", \"python-check\"]",
+            "commandIds = [\"python-format\", \"python-check\", \"rust-check\"]",
+        );
+    fixture.install_validation_config_text(&configuration);
+    let active = active_job();
+    let mut runtime = fixture.runtime();
+    runtime
+        .open_for_job(&active, None)
+        .expect("open timeout workspace");
+    let proposal = batch_proposal(&active, source_revision(&fixture));
+    let executed = runtime
+        .execute_change_batch(
+            &active,
+            &proposal,
+            &Instant("2026-08-28T00:00:02.000Z".to_owned()),
+        )
+        .await
+        .expect("persist timeout diagnostic decision");
+    let validation = executed.receipt.validation.expect("validation receipt");
+    assert_eq!(
+        validation.status,
+        winwincode_execution_port::generated::ValidationReceiptStatus::InfrastructureError
+    );
+    assert_eq!(validation.checks.len(), 1);
+    assert_eq!(validation.artifact_refs.len(), 2);
+    assert_eq!(
+        executed.progress.last().map(|event| &event.state),
+        Some(&ChangeBatchProgressState::RepairRequired)
+    );
+}
+
+#[tokio::test]
+async fn writer_scope_violation_restores_the_exact_accepted_tree() {
+    let fixture = Fixture::new("writer-scope-rollback");
+    let configuration = VALIDATION_CONFIG.replace(
+        "p.write_text(p.read_text().replace(\"fixture\", \"formatted\"))",
+        "p.write_text(p.read_text().replace(\"fixture\", \"formatted\")); Path(\"foreign.txt\").write_text(\"foreign\")",
+    );
+    fixture.install_validation_config_text(&configuration);
+    let active = active_job();
+    let mut runtime = fixture.runtime();
+    let checkout = runtime
+        .open_for_job(&active, None)
+        .expect("open scope fixture");
+    let proposal = batch_proposal(&active, source_revision(&fixture));
+    let executed = runtime
+        .execute_change_batch(
+            &active,
+            &proposal,
+            &Instant("2026-08-28T00:00:02.000Z".to_owned()),
+        )
+        .await
+        .expect("scope violation is exact terminal fact");
+
+    assert_eq!(executed.receipt.status, ChangeBatchReceiptStatus::Rejected);
+    assert!(!checkout.join("delegated.txt").exists());
+    assert!(!checkout.join("foreign.txt").exists());
+    assert_eq!(
+        executed.progress.last().map(|event| &event.state),
+        Some(&ChangeBatchProgressState::RepairRequired)
+    );
+}
+
+#[tokio::test]
+async fn production_change_batch_applies_one_ten_and_twenty_files() {
+    for count in [1_usize, 10, 20] {
+        let fixture = Fixture::new(&format!("batch-real-{count}-files"));
+        let active = active_job();
+        let mut patch = String::from("*** Begin Patch\n");
+        for index in 0..count {
+            write!(
+                patch,
+                "*** Add File: generated-{index:02}.txt\n+fixture-{index:02}\n"
+            )
+            .expect("write bounded patch fixture");
+        }
+        patch.push_str("*** End Patch\n");
+        let proposal = batch_proposal_with_patch(
+            &active,
+            source_revision(&fixture),
+            &patch,
+            &format!("turn-real-{count}-files"),
+        );
+        let mut runtime = fixture.runtime();
+        let checkout = runtime
+            .open_for_job(&active, None)
+            .expect("open bounded real workspace");
+
+        let executed = runtime
+            .execute_change_batch(
+                &active,
+                &proposal,
+                &Instant("2026-08-28T00:00:02.000Z".to_owned()),
+            )
+            .await
+            .expect("execute bounded real batch");
+
+        assert_eq!(executed.receipt.status, ChangeBatchReceiptStatus::Applied);
+        assert_eq!(executed.receipt.files.len(), count);
+        assert!(executed.receipt.result_revision.is_some());
+        assert!(runtime.contains(&active.job.job_id));
+        for index in 0..count {
+            assert_eq!(
+                std::fs::read(checkout.join(format!("generated-{index:02}.txt"))).unwrap(),
+                format!("fixture-{index:02}\n").as_bytes()
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn change_batch_success_replays_after_restart_without_second_executor_call() {
+    let fixture = Fixture::new("batch-success-replay");
+    let active = active_job();
+    let proposal = batch_proposal(&active, source_revision(&fixture));
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let mut first = fixture
+        .runtime()
+        .with_change_batch_executor(scripted_executor(&calls, applied_result()))
+        .with_workspace_tree_port(FixedWorkspaceTreePort);
+    first
+        .open_for_job(&active, None)
+        .expect("open batch workspace");
+    let executed = first
+        .execute_change_batch(
+            &active,
+            &proposal,
+            &Instant("2026-08-28T00:00:02.000Z".to_owned()),
+        )
+        .await
+        .expect("execute batch");
+    assert!(!executed.replayed);
+    assert_eq!(
+        executed
+            .progress
+            .iter()
+            .map(|event| event.state.clone())
+            .collect::<Vec<_>>(),
+        vec![
+            ChangeBatchProgressState::Proposed,
+            ChangeBatchProgressState::Authorized,
+            ChangeBatchProgressState::ApplyStarted,
+            ChangeBatchProgressState::Applied,
+        ]
+    );
+    assert_eq!(executed.receipt.status, ChangeBatchReceiptStatus::Applied);
+    assert!(executed.receipt.delta_exact);
+    assert!(executed.receipt.delta_digest.is_some());
+    assert_eq!(*calls.lock().expect("batch calls"), vec!["execute"]);
+    drop(first);
+
+    let mut restarted = fixture
+        .runtime()
+        .with_change_batch_executor(scripted_executor(&calls, applied_result()))
+        .with_workspace_tree_port(FixedWorkspaceTreePort);
+    restarted
+        .open_for_job(&active, None)
+        .expect("recover batch workspace");
+    let replay = restarted
+        .execute_change_batch(
+            &active,
+            &proposal,
+            &Instant("2026-08-28T00:00:03.000Z".to_owned()),
+        )
+        .await
+        .expect("replay exact batch");
+    assert!(replay.replayed);
+    assert_eq!(replay.progress, executed.progress);
+    assert_eq!(replay.receipt, executed.receipt);
+    assert_eq!(*calls.lock().expect("batch calls"), vec!["execute"]);
+    restarted
+        .prepare_close_job(
+            &active.job.job_id,
+            WorkspaceCloseReason::Completed,
+            &Instant("2026-08-28T00:00:20.000Z".to_owned()),
+        )
+        .await
+        .expect("close replayed workspace");
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn checkpoint_barrier_rejects_a_second_batch_until_exact_observation_acceptance() {
+    let fixture = Fixture::new("batch-checkpoint-barrier");
+    let active = active_job();
+    let base = source_revision(&fixture);
+    let first_proposal = batch_proposal(&active, base.clone());
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let mut runtime = fixture
+        .runtime()
+        .with_change_batch_executor(scripted_executor(&calls, applied_result()))
+        .with_workspace_tree_port(FixedWorkspaceTreePort);
+    runtime
+        .open_for_job(&active, None)
+        .expect("open checkpoint workspace");
+    let first = runtime
+        .execute_change_batch(
+            &active,
+            &first_proposal,
+            &Instant("2026-08-28T00:00:02.000Z".to_owned()),
+        )
+        .await
+        .expect("checkpoint first batch");
+    let result_revision = first
+        .receipt
+        .result_revision
+        .clone()
+        .expect("exact checkpoint revision");
+    let delta_digest = first
+        .receipt
+        .delta_digest
+        .clone()
+        .expect("exact checkpoint delta");
+    let blocked = batch_proposal_with_patch(
+        &active,
+        base.clone(),
+        "*** Begin Patch\n*** Add File: second.txt\n+second\n*** End Patch\n",
+        "turn-second",
+    );
+    assert_eq!(
+        runtime
+            .execute_change_batch(
+                &active,
+                &blocked,
+                &Instant("2026-08-28T00:00:03.000Z".to_owned()),
+            )
+            .await
+            .expect_err("second batch is blocked")
+            .code(),
+        JobWorkspaceErrorCode::ChangeBatch
+    );
+    assert_eq!(*calls.lock().expect("batch calls"), vec!["execute"]);
+
+    for (sequence, state) in (5_i64..).zip([
+        ChangeBatchProgressState::ValidationStarted,
+        ChangeBatchProgressState::ValidationCompleted,
+        ChangeBatchProgressState::ObservationRequested,
+        ChangeBatchProgressState::ObservationCompleted,
+    ]) {
+        runtime
+            .record_checkpoint_progress(
+                &active,
+                &ChangeBatchProgressEvent {
+                    artifact_refs: Vec::new(),
+                    identity: first_proposal.identity.clone(),
+                    occurred_at: Instant(format!("2026-08-28T00:00:0{sequence}.000Z")),
+                    sequence,
+                    state,
+                    summary: "bounded post-apply progress".to_owned(),
+                },
+            )
+            .expect("record post-apply progress");
+    }
+    let accepted = ChangeBatchProgressEvent {
+        artifact_refs: Vec::new(),
+        identity: first_proposal.identity.clone(),
+        occurred_at: Instant("2026-08-28T00:00:09.000Z".to_owned()),
+        sequence: 9,
+        state: ChangeBatchProgressState::Accepted,
+        summary: "exact observation accepted".to_owned(),
+    };
+    assert_eq!(
+        runtime
+            .accept_observed_checkpoint(&active, &accepted, &base, &delta_digest)
+            .expect("stale observation is a typed result"),
+        ObservationGateResult::Stale
+    );
+    assert_eq!(runtime.accepted_revision(&active.job.job_id).unwrap(), base);
+    assert_eq!(
+        runtime
+            .accept_observed_checkpoint(&active, &accepted, &result_revision, &delta_digest,)
+            .expect("accept exact observation"),
+        ObservationGateResult::Accepted
+    );
+    assert_eq!(
+        runtime.accepted_revision(&active.job.job_id).unwrap(),
+        result_revision
+    );
+    let next = batch_proposal_with_patch(
+        &active,
+        result_revision,
+        "*** Begin Patch\n*** Add File: second.txt\n+second\n*** End Patch\n",
+        "turn-second",
+    );
+    runtime
+        .execute_change_batch(
+            &active,
+            &next,
+            &Instant("2026-08-28T00:00:10.000Z".to_owned()),
+        )
+        .await
+        .expect("accepted checkpoint releases next batch");
+    assert_eq!(
+        *calls.lock().expect("batch calls"),
+        vec!["execute", "execute"]
+    );
+}
+
+#[tokio::test]
+async fn prepare_close_restores_the_accepted_tree_before_removing_the_workspace() {
+    let fixture = Fixture::new("batch-close-restore");
+    let active = active_job();
+    let proposal = batch_proposal(&active, source_revision(&fixture));
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let mut runtime = fixture
+        .runtime()
+        .with_change_batch_executor(scripted_executor(&calls, applied_result()))
+        .with_workspace_tree_port(FixedWorkspaceTreePort);
+    runtime
+        .open_for_job(&active, None)
+        .expect("open close restore workspace");
+    runtime
+        .execute_change_batch(
+            &active,
+            &proposal,
+            &Instant("2026-08-28T00:00:02.000Z".to_owned()),
+        )
+        .await
+        .expect("checkpoint before close");
+    runtime
+        .prepare_close_job(
+            &active.job.job_id,
+            WorkspaceCloseReason::Completed,
+            &Instant("2026-08-28T00:00:20.000Z".to_owned()),
+        )
+        .await
+        .expect("restore accepted tree before close");
+    assert!(!runtime.contains(&active.job.job_id));
+    let journal = ChangeBatchJournal::open(fixture.root.join(".workspaces-change-batches"))
+        .expect("open close journal");
+    assert_eq!(
+        journal
+            .progress_events(&proposal.identity.batch_id)
+            .expect("load close progress")
+            .into_iter()
+            .map(|event| event.state)
+            .collect::<Vec<_>>(),
+        vec![
+            ChangeBatchProgressState::Proposed,
+            ChangeBatchProgressState::Authorized,
+            ChangeBatchProgressState::ApplyStarted,
+            ChangeBatchProgressState::Applied,
+            ChangeBatchProgressState::RollbackStarted,
+            ChangeBatchProgressState::RolledBack,
+            ChangeBatchProgressState::RepairRequired,
+        ]
+    );
+}
+
+#[tokio::test]
+async fn prepare_close_quarantines_an_uncertain_restore_without_deleting_the_workspace() {
+    let fixture = Fixture::new("batch-close-quarantine");
+    let active = active_job();
+    let proposal = batch_proposal(&active, source_revision(&fixture));
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let mut runtime = fixture
+        .runtime()
+        .with_change_batch_executor(scripted_executor(&calls, applied_result()))
+        .with_workspace_tree_port(UncertainWorkspaceTreePort);
+    let checkout = runtime
+        .open_for_job(&active, None)
+        .expect("open uncertain close workspace");
+    let workspace_id = checkout
+        .parent()
+        .and_then(std::path::Path::file_name)
+        .and_then(std::ffi::OsStr::to_str)
+        .expect("workspace id")
+        .to_owned();
+    runtime
+        .execute_change_batch(
+            &active,
+            &proposal,
+            &Instant("2026-08-28T00:00:02.000Z".to_owned()),
+        )
+        .await
+        .expect("checkpoint before uncertain close");
+    assert_eq!(
+        runtime
+            .prepare_close_job(
+                &active.job.job_id,
+                WorkspaceCloseReason::Cancelled,
+                &Instant("2026-08-28T00:00:20.000Z".to_owned()),
+            )
+            .await
+            .expect_err("uncertain restore stays quarantined")
+            .code(),
+        JobWorkspaceErrorCode::ChangeBatch
+    );
+    assert!(runtime.contains(&active.job.job_id));
+    assert!(checkout.exists());
+    let journal = ChangeBatchJournal::open(fixture.root.join(".workspaces-change-batches"))
+        .expect("open quarantine journal");
+    assert_eq!(
+        journal
+            .workspace_barrier(&workspace_id)
+            .expect("read quarantine barrier")
+            .expect("quarantine barrier")
+            .state,
+        ActiveBatchState::Quarantined
+    );
+    assert_eq!(
+        journal
+            .progress_events(&proposal.identity.batch_id)
+            .expect("load quarantine progress")
+            .last()
+            .map(|event| &event.state),
+        Some(&ChangeBatchProgressState::InfrastructureFailed)
+    );
+}
+
+#[tokio::test]
+async fn restart_finishes_a_durable_pending_accepted_tree_restore() {
+    let fixture = Fixture::new("batch-restart-pending-restore");
+    let active = active_job();
+    let proposal = batch_proposal(&active, source_revision(&fixture));
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let mut first = fixture
+        .runtime()
+        .with_change_batch_executor(scripted_executor(&calls, applied_result()))
+        .with_workspace_tree_port(FixedWorkspaceTreePort);
+    let checkout = first
+        .open_for_job(&active, None)
+        .expect("open pending restore workspace");
+    let workspace_id = checkout
+        .parent()
+        .and_then(std::path::Path::file_name)
+        .and_then(std::ffi::OsStr::to_str)
+        .expect("workspace id")
+        .to_owned();
+    first
+        .execute_change_batch(
+            &active,
+            &proposal,
+            &Instant("2026-08-28T00:00:02.000Z".to_owned()),
+        )
+        .await
+        .expect("checkpoint before restore interruption");
+    let mut journal = ChangeBatchJournal::open(fixture.root.join(".workspaces-change-batches"))
+        .expect("open interruption journal");
+    journal
+        .retain_workspace_progress(
+            &workspace_id,
+            &ChangeBatchProgressEvent {
+                artifact_refs: Vec::new(),
+                identity: proposal.identity.clone(),
+                occurred_at: Instant("2026-08-28T00:00:03.000Z".to_owned()),
+                sequence: 5,
+                state: ChangeBatchProgressState::RollbackStarted,
+                summary: "durable pending restore".to_owned(),
+            },
+            ActiveBatchState::Checkpointed,
+            ActiveBatchState::RollbackPending,
+        )
+        .expect("persist restore-pending crash point");
+    drop(journal);
+    drop(first);
+
+    let mut restarted = fixture
+        .runtime()
+        .with_workspace_tree_port(FixedWorkspaceTreePort);
+    restarted
+        .open_for_job_recovering(
+            &active,
+            None,
+            &Instant("2026-08-28T00:00:04.000Z".to_owned()),
+        )
+        .await
+        .expect("finish pending accepted-tree restore");
+    let journal = ChangeBatchJournal::open(fixture.root.join(".workspaces-change-batches"))
+        .expect("open recovered restore journal");
+    assert_eq!(
+        journal
+            .workspace_barrier(&workspace_id)
+            .expect("read recovered barrier")
+            .expect("recovered barrier")
+            .state,
+        ActiveBatchState::RepairRequired
+    );
+    assert_eq!(
+        journal
+            .progress_events(&proposal.identity.batch_id)
+            .expect("read recovered progress")
+            .last()
+            .map(|event| &event.state),
+        Some(&ChangeBatchProgressState::RepairRequired)
+    );
+}
+
+#[tokio::test]
+async fn change_batch_rollback_uncertain_and_cancel_paths_are_ordered() {
+    let rollback_fixture = Fixture::new("batch-rollback");
+    let active = active_job();
+    let proposal = batch_proposal(&active, source_revision(&rollback_fixture));
+    let rollback_calls = Arc::new(Mutex::new(Vec::new()));
+    let rollback = ChangeBatchExecutionResult::RolledBack { artifact_ref: None };
+    let mut runtime = rollback_fixture
+        .runtime()
+        .with_change_batch_executor(scripted_executor(&rollback_calls, rollback))
+        .with_workspace_tree_port(FixedWorkspaceTreePort);
+    runtime
+        .open_for_job(&active, None)
+        .expect("open rollback workspace");
+    let executed = runtime
+        .execute_change_batch(
+            &active,
+            &proposal,
+            &Instant("2026-08-28T00:00:02.000Z".to_owned()),
+        )
+        .await
+        .expect("execute rollback");
+    assert_eq!(
+        executed
+            .progress
+            .iter()
+            .map(|event| event.state.clone())
+            .collect::<Vec<_>>(),
+        vec![
+            ChangeBatchProgressState::Proposed,
+            ChangeBatchProgressState::Authorized,
+            ChangeBatchProgressState::ApplyStarted,
+            ChangeBatchProgressState::RollbackStarted,
+            ChangeBatchProgressState::RolledBack,
+            ChangeBatchProgressState::RepairRequired,
+        ]
+    );
+    assert_eq!(executed.receipt.status, ChangeBatchReceiptStatus::Rejected);
+    assert_eq!(
+        *rollback_calls.lock().expect("rollback calls"),
+        vec!["execute"]
+    );
+
+    let cancel_fixture = Fixture::new("batch-cancel");
+    let mut cancelling = active_job();
+    cancelling.lifecycle = ActiveJobLifecycle::Cancelling;
+    let cancel_proposal = batch_proposal(&cancelling, source_revision(&cancel_fixture));
+    let cancel_calls = Arc::new(Mutex::new(Vec::new()));
+    let mut cancelled = cancel_fixture
+        .runtime()
+        .with_change_batch_executor(scripted_executor(
+            &cancel_calls,
+            ChangeBatchExecutionResult::RolledBack { artifact_ref: None },
+        ))
+        .with_workspace_tree_port(FixedWorkspaceTreePort);
+    cancelled
+        .open_for_job(&cancelling, None)
+        .expect("open cancelling workspace");
+    let cancelled_result = cancelled
+        .execute_change_batch(
+            &cancelling,
+            &cancel_proposal,
+            &Instant("2026-08-28T00:00:02.000Z".to_owned()),
+        )
+        .await
+        .expect("cancel through rollback");
+    assert_eq!(*cancel_calls.lock().expect("cancel calls"), vec!["cancel"]);
+    assert_eq!(
+        cancelled_result
+            .progress
+            .iter()
+            .map(|event| event.state.clone())
+            .collect::<Vec<_>>(),
+        vec![
+            ChangeBatchProgressState::Proposed,
+            ChangeBatchProgressState::Authorized,
+            ChangeBatchProgressState::ApplyStarted,
+            ChangeBatchProgressState::RollbackStarted,
+            ChangeBatchProgressState::RolledBack,
+            ChangeBatchProgressState::RepairRequired,
+        ]
+    );
+}
+
+#[tokio::test]
+async fn change_batch_uncertain_state_is_terminalized_without_an_exact_delta() {
+    let fixture = Fixture::new("batch-uncertain");
+    let active = active_job();
+    let proposal = batch_proposal(&active, source_revision(&fixture));
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let mut runtime = fixture
+        .runtime()
+        .with_change_batch_executor(scripted_executor(
+            &calls,
+            ChangeBatchExecutionResult::StateUncertain {
+                files: Vec::new(),
+                artifact_ref: None,
+            },
+        ))
+        .with_workspace_tree_port(FixedWorkspaceTreePort);
+    runtime
+        .open_for_job(&active, None)
+        .expect("open uncertain workspace");
+    let failed = runtime
+        .execute_change_batch(
+            &active,
+            &proposal,
+            &Instant("2026-08-28T00:00:02.000Z".to_owned()),
+        )
+        .await
+        .expect("executor reports uncertain state");
+    assert_eq!(
+        failed.progress.last().map(|event| &event.state),
+        Some(&ChangeBatchProgressState::InfrastructureFailed)
+    );
+    assert_eq!(
+        failed.receipt.status,
+        ChangeBatchReceiptStatus::StateUncertain
+    );
+    assert!(!failed.receipt.delta_exact);
+}
+
+#[tokio::test]
+async fn exact_partial_result_uses_the_actual_checkpoint_tree_and_quarantines() {
+    let fixture = Fixture::new("batch-exact-partial");
+    let active = active_job();
+    let proposal = batch_proposal(&active, source_revision(&fixture));
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let ChangeBatchExecutionResult::Applied { files, .. } = applied_result() else {
+        unreachable!("applied fixture")
+    };
+    let mut runtime = fixture
+        .runtime()
+        .with_change_batch_executor(scripted_executor(
+            &calls,
+            ChangeBatchExecutionResult::PartiallyApplied {
+                files,
+                artifact_ref: None,
+            },
+        ))
+        .with_workspace_tree_port(FixedWorkspaceTreePort);
+    let checkout = runtime
+        .open_for_job(&active, None)
+        .expect("open exact partial workspace");
+    let workspace_id = checkout
+        .parent()
+        .and_then(std::path::Path::file_name)
+        .and_then(std::ffi::OsStr::to_str)
+        .expect("workspace id")
+        .to_owned();
+    let executed = runtime
+        .execute_change_batch(
+            &active,
+            &proposal,
+            &Instant("2026-08-28T00:00:02.000Z".to_owned()),
+        )
+        .await
+        .expect("retain exact partial result");
+    assert_eq!(
+        executed.receipt.status,
+        ChangeBatchReceiptStatus::PartiallyApplied
+    );
+    assert_eq!(
+        executed.receipt.result_revision,
+        Some(WorkspaceRevision(format!("git-tree:{}", "e".repeat(40))))
+    );
+    assert!(executed.receipt.delta_exact);
+    assert!(executed.receipt.delta_digest.is_some());
+    let journal = ChangeBatchJournal::open(fixture.root.join(".workspaces-change-batches"))
+        .expect("open partial journal");
+    assert_eq!(
+        journal
+            .workspace_barrier(&workspace_id)
+            .expect("read partial barrier")
+            .expect("partial barrier")
+            .state,
+        ActiveBatchState::Quarantined
+    );
+}
+
+#[tokio::test]
+async fn change_batch_changed_intent_and_foreign_authority_never_reinvoke_executor() {
+    let fixture = Fixture::new("batch-conflict");
+    let active = active_job();
+    let proposal = batch_proposal(&active, source_revision(&fixture));
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let mut runtime = fixture
+        .runtime()
+        .with_change_batch_executor(scripted_executor(&calls, applied_result()))
+        .with_workspace_tree_port(FixedWorkspaceTreePort);
+    runtime
+        .open_for_job(&active, None)
+        .expect("open batch workspace");
+    runtime
+        .execute_change_batch(
+            &active,
+            &proposal,
+            &Instant("2026-08-28T00:00:02.000Z".to_owned()),
+        )
+        .await
+        .expect("execute exact intent");
+
+    let mut changed = proposal.clone();
+    changed.occurred_at = Instant("2026-08-28T00:00:09.000Z".to_owned());
+    assert_eq!(
+        runtime
+            .execute_change_batch(
+                &active,
+                &changed,
+                &Instant("2026-08-28T00:00:10.000Z".to_owned()),
+            )
+            .await
+            .expect_err("same batch changed bytes conflict")
+            .code(),
+        JobWorkspaceErrorCode::ChangeBatch
+    );
+    let mut foreign = active.clone();
+    foreign.lease.fencing_token = FencingToken("9".to_owned());
+    assert_eq!(
+        runtime
+            .execute_change_batch(
+                &foreign,
+                &proposal,
+                &Instant("2026-08-28T00:00:10.000Z".to_owned()),
+            )
+            .await
+            .expect_err("foreign authority rejected")
+            .code(),
+        JobWorkspaceErrorCode::AuthorityMismatch
+    );
+    assert_eq!(*calls.lock().expect("batch calls"), vec!["execute"]);
+}
+
+#[test]
 fn unchanged_or_cancelled_writer_produces_no_candidate() {
     let fixture = Fixture::new("fail-closed");
     let mut active = active_job();
@@ -1156,12 +3299,12 @@ fn unchanged_or_cancelled_writer_produces_no_candidate() {
         .open_for_job(&active, None)
         .expect("create unchanged Job checkout");
     let unchanged = runtime
-        .prepare_candidate(&active)
+        .prepare_candidate(&active, winwincode_codex::RoleExecutionMode::React)
         .expect_err("unchanged checkout has no candidate");
     assert_eq!(unchanged.code(), JobWorkspaceErrorCode::Candidate);
     active.lifecycle = ActiveJobLifecycle::Cancelling;
     let cancelling = runtime
-        .prepare_candidate(&active)
+        .prepare_candidate(&active, winwincode_codex::RoleExecutionMode::React)
         .expect_err("cancelling Job has no candidate");
     assert_eq!(cancelling.code(), JobWorkspaceErrorCode::Candidate);
     runtime

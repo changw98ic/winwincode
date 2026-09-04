@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use winwincode_api::generated::{
     Actor, EnterpriseFleetListParameters, EnterpriseFleetListQuery, EnterpriseFleetListQueryQuery,
-    PageRequest, RepositoryScope, RepositoryScopeKind, Scope, SystemActor, SystemActorKind,
+    PageRequest, Scope, SystemActor, SystemActorKind,
 };
 use winwincode_control_plane::{
     WorkerFleetProjectionService, WorkerFleetProjectionServiceErrorKind,
@@ -18,6 +18,7 @@ use winwincode_domain::{
     OpaqueCursor, OrganizationId, ProjectId, RepositoryId, RequestId, Revision, SchemaVersion,
     Sha256Digest, SystemActorId, WorkerId, WorkerInstanceId, WorkspaceId,
 };
+use winwincode_domain::{RepositoryScope, RepositoryScopeKind};
 use winwincode_storage::{
     AuthenticatedWorkerPlacement, EXECUTION_PROTOCOL_VERSION, ExecutionLeaseClaim, SqliteStorage,
     WorkerAuthenticationIdentity, WorkerHeartbeatRequest, WorkerPlatform, WorkerPoolId,

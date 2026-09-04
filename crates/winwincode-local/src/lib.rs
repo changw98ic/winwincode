@@ -20,8 +20,9 @@ use winwincode_worker::composition::{
     AdapterError, EndpointSide, ExecutionPortCore, FrameDirection, LocalWorkerAdapter, TypedFrame,
 };
 use winwincode_worker::{
-    CodexCoreAdapter, WorkerConfig, WorkerError, WorkerExecutionPort, WorkerLifecycleState,
-    WorkerMain, WorkerShutdownReport, workspace_runtime::JobWorkspaceRuntime,
+    CodexCoreAdapter, ObserverMode, WorkerConfig, WorkerError, WorkerExecutionPort,
+    WorkerLifecycleState, WorkerMain, WorkerShutdownReport,
+    workspace_runtime::{JobWorkspaceRuntime, ObservationModelConfiguration},
 };
 
 use winwincode_worker::composition::{ExecutionPortMessage, Instant};
@@ -136,6 +137,8 @@ pub struct LocalLauncherConfig {
     control_plane_started_at_millis: u64,
     control_plane: ControlPlaneInstanceRuntimeConfig,
     trace_capacity: usize,
+    observer_mode: ObserverMode,
+    observation_model: Option<ObservationModelConfiguration>,
 }
 
 impl LocalLauncherConfig {
@@ -168,7 +171,23 @@ impl LocalLauncherConfig {
             control_plane_started_at_millis,
             control_plane,
             trace_capacity,
+            observer_mode: ObserverMode::Off,
+            observation_model: None,
         })
+    }
+
+    /// Selects the Worker Observer policy for this local process.
+    #[must_use]
+    pub const fn with_observer_mode(mut self, mode: ObserverMode) -> Self {
+        self.observer_mode = mode;
+        self
+    }
+
+    /// Installs the independent one-shot Observer route for the local Worker.
+    #[must_use]
+    pub fn with_observation_model(mut self, model: ObservationModelConfiguration) -> Self {
+        self.observation_model = Some(model);
+        self
     }
 
     #[must_use]
@@ -631,8 +650,12 @@ where
         .map_err(|_| LocalLauncherError::worker())?;
         let registration_namespace = worker_config.worker_instance_id.clone();
         let registration_started_at = worker_config.started_at.clone();
-        let worker = WorkerMain::new(worker_config, port, codex, workspaces)
-            .with_registration_request_namespace(&registration_namespace, &registration_started_at);
+        let mut worker = WorkerMain::new(worker_config, port, codex, workspaces)
+            .with_registration_request_namespace(&registration_namespace, &registration_started_at)
+            .with_observer_mode(config.observer_mode);
+        if let Some(observation_model) = config.observation_model.clone() {
+            worker = worker.with_observation_model(observation_model);
+        }
         let mut launcher = Self {
             control_plane_instance: Some(control_plane_instance),
             control_plane,

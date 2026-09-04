@@ -17,7 +17,7 @@ use winwincode_api::generated::{
     PublicationGetQueryQuery, PublicationListParameters, PublicationListQuery,
     PublicationListQueryQuery, PublicationPublishCommand, PublicationPublishCommandCommand,
     PublicationPublishPayload, PublicationTarget as ApiPublicationTarget,
-    PublicationTargetProvider, RepositoryScope, RepositoryScopeKind, UserActor, UserActorKind,
+    PublicationTargetProvider,
 };
 use winwincode_audit::{AuditScope, AuditStore};
 use winwincode_control_plane::{
@@ -27,6 +27,7 @@ use winwincode_domain::{
     OpaqueCursor, OrganizationId, ProjectId, PublicationId, RepositoryId, RequestId, Revision,
     SchemaVersion, UserId, WorkspaceId,
 };
+use winwincode_domain::{RepositoryScope, RepositoryScopeKind, UserActor, UserActorKind};
 use winwincode_publication::{
     PolicyPermission, PublicationOperation, PublicationPolicyEvidence, PublicationPolicyOrigin,
     PublicationPort, PublicationPortError, PublicationPortMutation, PublicationPortObservation,

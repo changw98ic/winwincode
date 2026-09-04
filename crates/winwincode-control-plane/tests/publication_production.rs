@@ -12,8 +12,7 @@ use winwincode_api::generated::{
     CredentialReferenceCreatePayload, CredentialReferenceRevokeCommand,
     CredentialReferenceRevokeCommandCommand, CredentialReferenceRevokePayload,
     PublicationPublishCommand, PublicationPublishCommandCommand, PublicationPublishPayload,
-    PublicationTarget, PublicationTargetProvider, RepositoryScope, RepositoryScopeKind, Scope,
-    UserActor, UserActorKind,
+    PublicationTarget, PublicationTargetProvider, Scope,
 };
 use winwincode_control_plane::{
     ControlPlane, ControlPlaneConfig, CredentialReferenceService, EventPublishError,
@@ -25,6 +24,7 @@ use winwincode_domain::{
     CredentialReferenceId, GitHubRepositorySlug, OrganizationId, ProjectId, RepositoryId,
     RequestId, Revision, SchemaVersion, UserId, WorkspaceId,
 };
+use winwincode_domain::{RepositoryScope, RepositoryScopeKind, UserActor, UserActorKind};
 use winwincode_storage::SqliteStorage;
 
 const SECRET: &[u8] = b"GITHUB_PROVIDER_SECRET";

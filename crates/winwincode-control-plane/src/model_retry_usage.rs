@@ -300,6 +300,7 @@ impl ModelAttemptFailureFact {
             | ProviderGatewayErrorKind::ProviderDisabled
             | ProviderGatewayErrorKind::ModelNotFound
             | ProviderGatewayErrorKind::ModelDisabled
+            | ProviderGatewayErrorKind::StructuredOutputUnsupported
             | ProviderGatewayErrorKind::AdapterNotRegistered
             | ProviderGatewayErrorKind::ExchangeConflict
             | ProviderGatewayErrorKind::ExchangeNotFound
@@ -678,6 +679,150 @@ struct RetryUsageState {
     pending: Option<PendingAttempt>,
     usage: Vec<SettledModelUsage>,
     terminal: bool,
+}
+
+/// One terminal Provider attempt projected for an internal performance join.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct EvaluationRouteAttemptProjection {
+    pub(crate) ordinal: u32,
+    pub(crate) route_index: u32,
+    pub(crate) attempt_on_step: u32,
+    pub(crate) status: EvaluationRouteAttemptStatusProjection,
+    pub(crate) provider_id: String,
+    pub(crate) model_id: String,
+    pub(crate) route_digest: Sha256Digest,
+    pub(crate) model_exchange_id: ModelExchangeId,
+    pub(crate) settled_usage: Option<SettledModelUsage>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum EvaluationRouteAttemptStatusProjection {
+    Failed,
+    Succeeded,
+}
+
+/// One exact step from the frozen retry plan used by a logical model call.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct EvaluationRouteStepProjection {
+    pub(crate) provider_id: String,
+    pub(crate) model_id: String,
+    pub(crate) route_digest: Sha256Digest,
+    pub(crate) maximum_attempts: u64,
+}
+
+/// Durable retry plan, attempt sequence, and settlement snapshot for one
+/// logical model call.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct EvaluationModelRequestProjection {
+    pub(crate) policy_revision: u64,
+    pub(crate) plan_digest: Sha256Digest,
+    pub(crate) state_revision: u64,
+    pub(crate) steps: Vec<EvaluationRouteStepProjection>,
+    pub(crate) attempts: Vec<EvaluationRouteAttemptProjection>,
+}
+
+/// Reads every actual attempt for one logical model request from the durable
+/// retry ledger. Only a successfully terminal request is eligible.
+pub(crate) fn load_evaluation_route_attempts(
+    storage: &dyn ProductStateStorage,
+    request_id: &RequestId,
+) -> Result<EvaluationModelRequestProjection, ModelRetryUsageError> {
+    let stored = storage
+        .load_state(&stream_id(request_id)?)?
+        .ok_or_else(|| {
+            ModelRetryUsageError::new(
+                ModelRetryUsageErrorKind::InvalidState,
+                "performance model request has no retry authority",
+            )
+        })?;
+    let state = decode_unbound_state(&stored)?;
+    let successful_attempt = state.attempts.last().map(|attempt| attempt.attempt);
+    if state.request_id != *request_id
+        || !state.terminal
+        || state.pending.is_some()
+        || state
+            .attempts
+            .last()
+            .is_none_or(|attempt| attempt.status != AttemptStatus::Succeeded)
+        || successful_attempt
+            .is_none_or(|attempt| !state.usage.iter().any(|usage| usage.attempt == attempt))
+    {
+        return Err(ModelRetryUsageError::new(
+            ModelRetryUsageErrorKind::InvalidState,
+            "performance model request is not successfully terminal",
+        ));
+    }
+    let attempts = state
+        .attempts
+        .iter()
+        .map(|attempt| {
+            let step = state
+                .steps
+                .get(attempt.step_index)
+                .ok_or_else(ModelRetryUsageError::corrupt)?;
+            Ok(EvaluationRouteAttemptProjection {
+                ordinal: u32::try_from(attempt.attempt)
+                    .map_err(|_| ModelRetryUsageError::corrupt())?,
+                route_index: u32::try_from(attempt.step_index)
+                    .map_err(|_| ModelRetryUsageError::corrupt())?,
+                attempt_on_step: u32::try_from(attempt.attempt_on_step)
+                    .map_err(|_| ModelRetryUsageError::corrupt())?,
+                status: match attempt.status {
+                    AttemptStatus::Failed => EvaluationRouteAttemptStatusProjection::Failed,
+                    AttemptStatus::Succeeded => EvaluationRouteAttemptStatusProjection::Succeeded,
+                    AttemptStatus::Active | AttemptStatus::Cancelled => {
+                        return Err(ModelRetryUsageError::corrupt());
+                    }
+                },
+                provider_id: step.provider_id.clone(),
+                model_id: step.model_id.clone(),
+                route_digest: Sha256Digest(step.fingerprint.clone()),
+                model_exchange_id: attempt.model_exchange_id.clone(),
+                settled_usage: state
+                    .usage
+                    .iter()
+                    .find(|usage| usage.attempt == attempt.attempt)
+                    .cloned(),
+            })
+        })
+        .collect::<Result<Vec<_>, ModelRetryUsageError>>()?;
+    for (attempt, projected) in state.attempts.iter().zip(&attempts) {
+        let no_charge_allowed = attempt.failure.as_ref().is_some_and(|failure| {
+            matches!(
+                failure.certainty,
+                ModelExecutionCertainty::NotSent
+                    | ModelExecutionCertainty::RejectedBeforeAcceptance
+            )
+        });
+        if (attempt.status == AttemptStatus::Succeeded && projected.settled_usage.is_none())
+            || (attempt.status == AttemptStatus::Failed
+                && !no_charge_allowed
+                && projected.settled_usage.is_none())
+            || (no_charge_allowed && projected.settled_usage.is_some())
+        {
+            return Err(ModelRetryUsageError::new(
+                ModelRetryUsageErrorKind::InvalidState,
+                "performance model attempt settlement is incomplete",
+            ));
+        }
+    }
+    let steps = state
+        .steps
+        .iter()
+        .map(|step| EvaluationRouteStepProjection {
+            provider_id: step.provider_id.clone(),
+            model_id: step.model_id.clone(),
+            route_digest: Sha256Digest(step.fingerprint.clone()),
+            maximum_attempts: step.max_attempts,
+        })
+        .collect();
+    Ok(EvaluationModelRequestProjection {
+        policy_revision: state.policy_revision,
+        plan_digest: Sha256Digest(state.plan_fingerprint),
+        state_revision: state.revision,
+        steps,
+        attempts,
+    })
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

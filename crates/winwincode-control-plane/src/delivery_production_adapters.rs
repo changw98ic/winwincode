@@ -19,7 +19,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use winwincode_api::generated::{
     Actor, CommandName, DeliveryAdvancePayload, DeliveryCreatePayload,
-    DeliveryResolveAttentionPayload, DeliveryUpdateSpecPayload, RepositoryScope, Scope,
+    DeliveryResolveAttentionPayload, DeliveryUpdateSpecPayload, Scope,
 };
 use winwincode_delivery::{
     application::{
@@ -34,12 +34,14 @@ use winwincode_delivery::{
         RepositoryKind, RepositoryRef, SessionBindingId, StageRunStatus,
     },
 };
+use winwincode_domain::RepositoryScope;
 use winwincode_domain::{
     AttentionItemId, ExecutionJobId, ProductSessionId, RequestId, Sha256Digest, StageRunId,
 };
 use winwincode_execution_port::generated::{
     ExecutionJob, ExecutionLimits, ExecutionScope, ExecutionWorkspace, ExecutionWorkspaceWriteMode,
 };
+use winwincode_execution_port::runtime_trace_outbox::ExecutionMode;
 use winwincode_repository_context::{
     CommandPurpose, RepositoryContext, RepositoryContextPort, RepositoryContextQuery,
     RepositoryContextScanner,
@@ -69,6 +71,7 @@ const CROCKFORD_BASE32: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 pub struct LocalDeliveryAdapterConfig {
     repository_root: PathBuf,
     repository_scope: RepositoryScope,
+    execution_mode: ExecutionMode,
     max_rework_attempts: u64,
     max_runtime_seconds: i64,
     max_artifact_bytes: i64,
@@ -80,6 +83,7 @@ impl LocalDeliveryAdapterConfig {
         Self {
             repository_root: repository_root.as_ref().to_path_buf(),
             repository_scope,
+            execution_mode: ExecutionMode::React,
             max_rework_attempts: DEFAULT_MAX_REWORK_ATTEMPTS,
             max_runtime_seconds: DEFAULT_MAX_RUNTIME_SECONDS,
             max_artifact_bytes: DEFAULT_MAX_ARTIFACT_BYTES,
@@ -102,6 +106,13 @@ impl LocalDeliveryAdapterConfig {
     #[must_use]
     pub const fn with_max_rework_attempts(mut self, max_rework_attempts: u64) -> Self {
         self.max_rework_attempts = max_rework_attempts;
+        self
+    }
+
+    /// Selects the process execution strategy used to shape new immutable jobs.
+    #[must_use]
+    pub const fn with_execution_mode(mut self, execution_mode: ExecutionMode) -> Self {
+        self.execution_mode = execution_mode;
         self
     }
 
@@ -316,20 +327,18 @@ impl LocalDeliveryAuthority {
         transition: &StageAdvanceResult,
         terminal_handoff: Option<&crate::terminal_outcome_transaction::DeliveryTerminalHandoff>,
         now_millis: u64,
-    ) -> Result<Option<DeliveryExecutionConfig>, DeliveryAuthorityError> {
+    ) -> Result<
+        (
+            Option<DeliveryExecutionConfig>,
+            Option<crate::rollout_gate::RolloutGateJobSeal>,
+        ),
+        DeliveryAuthorityError,
+    > {
         let StageAdvanceEffect::Dispatch(intent) = &transition.effect else {
-            return Ok(None);
+            return Ok((None, None));
         };
-        let deadline_millis = now_millis
-            .checked_add(
-                u64::try_from(self.config.max_runtime_seconds)
-                    .unwrap_or_default()
-                    .saturating_mul(1_000),
-            )
-            .filter(|value| *value <= MAX_SAFE_INTEGER)
-            .ok_or_else(|| {
-                DeliveryAuthorityError::new("Delivery execution deadline exceeds the range")
-            })?;
+        let deadline_millis =
+            execution_deadline_millis(now_millis, self.config.max_runtime_seconds)?;
         let payload = serde_json::to_vec(&(
             &self.config.repository_scope,
             delivery.id(),
@@ -337,8 +346,8 @@ impl LocalDeliveryAuthority {
             &transition.delivery,
         ))
         .map_err(|error| DeliveryAuthorityError::new(error.to_string()))?;
-        let (candidate_ref, checkout_revision) = match &transition.effect {
-            StageAdvanceEffect::Dispatch(intent) if intent.stage == DeliveryStage::Verifying => {
+        let (candidate_ref, checkout_revision) = match intent.stage {
+            DeliveryStage::Verifying => {
                 let pending_executor =
                     terminal_handoff.filter(|handoff| pending_executor_handoff(delivery, handoff));
                 let candidate = if let Some(handoff) = pending_executor {
@@ -368,7 +377,7 @@ impl LocalDeliveryAuthority {
                     candidate.candidate_commit_id().to_owned(),
                 )
             }
-            StageAdvanceEffect::Dispatch(intent) if intent.stage == DeliveryStage::Reworking => {
+            DeliveryStage::Reworking => {
                 let authorization = intent.rework_authorization().ok_or_else(|| {
                     DeliveryAuthorityError::new(
                         "rework dispatch has no exact sealed candidate authorization",
@@ -384,25 +393,47 @@ impl LocalDeliveryAuthority {
             }
             _ => (None, delivery.snapshot().spec.base_revision.clone()),
         };
-        Ok(Some(DeliveryExecutionConfig {
-            payload_digest: Sha256Digest(format!("sha256:{:x}", Sha256::digest(payload))),
-            candidate_ref,
-            workspace: ExecutionWorkspace {
-                checkout_revision,
-                repository_id: self.config.repository_scope.repository_id.clone(),
-                write_mode: if matches!(intent.role.as_str(), "executor" | "remediator") {
-                    ExecutionWorkspaceWriteMode::Candidate
-                } else {
-                    ExecutionWorkspaceWriteMode::ReadOnly
+        let evaluation_assignment = crate::rollout_evaluation::assignment_digest_for_job(
+            &self.storage,
+            &self.config.repository_scope,
+            &intent.execution_job_id,
+        )
+        .map_err(|_| DeliveryAuthorityError::new("evaluation assignment authority is unavailable"))?;
+        let rollout_gate = crate::rollout_gate::seal_writer_job(
+            &self.storage,
+            &self.config.repository_scope,
+            &crate::rollout_gate::WriterJobSealInput {
+                configured_mode: self.config.execution_mode,
+                role: &intent.role,
+                evaluation_assignment: evaluation_assignment.as_ref(),
+                job_id: &intent.execution_job_id,
+                base_revision: &checkout_revision,
+                now_millis,
+            },
+        )
+        .map_err(|_| DeliveryAuthorityError::new("rollout gate authority is unavailable"))?;
+        let write_mode = rollout_gate.as_ref().map_or(
+            ExecutionWorkspaceWriteMode::ReadOnly,
+            crate::rollout_gate::RolloutGateJobSeal::write_mode,
+        );
+        Ok((
+            Some(DeliveryExecutionConfig {
+                payload_digest: Sha256Digest(format!("sha256:{:x}", Sha256::digest(payload))),
+                candidate_ref,
+                workspace: ExecutionWorkspace {
+                    checkout_revision,
+                    repository_id: self.config.repository_scope.repository_id.clone(),
+                    write_mode,
                 },
-            },
-            limits: ExecutionLimits {
-                deadline_at: crate::instant_from_millis(deadline_millis)
-                    .map_err(|error| storage_authority_error(&error))?,
-                max_artifact_bytes: self.config.max_artifact_bytes,
-                max_runtime_seconds: self.config.max_runtime_seconds,
-            },
-        }))
+                limits: ExecutionLimits {
+                    deadline_at: crate::instant_from_millis(deadline_millis)
+                        .map_err(|error| storage_authority_error(&error))?,
+                    max_artifact_bytes: self.config.max_artifact_bytes,
+                    max_runtime_seconds: self.config.max_runtime_seconds,
+                },
+            }),
+            rollout_gate,
+        ))
     }
 }
 
@@ -573,13 +604,14 @@ impl DeliveryAuthorityPort for LocalDeliveryAuthority {
             advance(delivery, input)
                 .map_err(|error| DeliveryAuthorityError::new(error.to_string()))?
         };
-        let execution =
+        let (execution, rollout_gate) =
             self.execution_config(delivery, &transition, terminal_handoff.as_ref(), now_millis)?;
         Ok(DeliveryAdvanceAuthority {
             repository: delivery.snapshot().spec.repository.clone(),
             source_ref: delivery.snapshot().spec.source_ref.clone(),
             transition,
             execution,
+            rollout_gate,
             terminal_handoff,
         })
     }
@@ -903,6 +935,20 @@ fn validate_config(config: &LocalDeliveryAdapterConfig) -> Result<(), LocalDeliv
     crate::repository_scope_key(&config.repository_scope)
         .map_err(|error| LocalDeliveryAdapterError::new(error.to_string()))?;
     Ok(())
+}
+
+fn execution_deadline_millis(
+    now_millis: u64,
+    max_runtime_seconds: i64,
+) -> Result<u64, DeliveryAuthorityError> {
+    now_millis
+        .checked_add(
+            u64::try_from(max_runtime_seconds)
+                .unwrap_or_default()
+                .saturating_mul(1_000),
+        )
+        .filter(|value| *value <= MAX_SAFE_INTEGER)
+        .ok_or_else(|| DeliveryAuthorityError::new("Delivery execution deadline exceeds the range"))
 }
 
 fn portable_repository_locator(

@@ -17,8 +17,7 @@ use rusqlite::Connection;
 use winwincode_api::generated::{
     Actor, PublicationPublishCommand as ApiPublicationPublishCommand,
     PublicationPublishCommandCommand, PublicationPublishPayload,
-    PublicationTarget as ApiPublicationTarget, PublicationTargetProvider, RepositoryScope,
-    RepositoryScopeKind, UserActor, UserActorKind,
+    PublicationTarget as ApiPublicationTarget, PublicationTargetProvider,
 };
 use winwincode_audit::{AuditOutcome, AuditScope};
 use winwincode_control_plane::{
@@ -66,6 +65,7 @@ use winwincode_domain::{
     SchemaVersion, Sha256Digest, StageRunId, UserId, WorkerId, WorkerInstanceId, WorkerSessionId,
     WorkspaceId,
 };
+use winwincode_domain::{RepositoryScope, RepositoryScopeKind, UserActor, UserActorKind};
 use winwincode_publication::{
     GitHubAdapterConfig, GitHubPublicationAdapter, PolicyPermission,
     PublicationEnterpriseAttribution, PublicationPolicyContext, PublicationPolicyEvidence,

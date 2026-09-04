@@ -298,6 +298,8 @@ test('stock Chat and a StrongFlow role share one embedded kernel with distinct i
     kernel.sessions.get('kernel-2').options.rolePolicy,
     strongFlowRoleSessionPolicy('requirements'),
   )
+  assert.equal(kernel.sessions.get('kernel-2').options.rolePolicy.schemaVersion, 2)
+  assert.equal(kernel.sessions.get('kernel-2').options.rolePolicy.executionMode, 'react')
   assert.match(
     kernel.sessions.get('kernel-2').options.rolePolicy.developerInstructions,
     /DeliverySpec/u,

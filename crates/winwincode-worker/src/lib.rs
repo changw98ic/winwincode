@@ -9,9 +9,14 @@
 //! same generated `ExecutionPortMessage` values to [`WorkerMain`].
 
 pub mod action_enforcement;
+pub mod change_batch_journal;
 pub mod remote_transport;
 pub mod stage_product;
+pub mod validation_artifact;
+pub mod validation_diagnostics;
+pub mod workspace_phase;
 pub mod workspace_runtime;
+pub(crate) mod workspace_tree;
 
 /// Canonical types used by deployment adapters that compose this Worker.
 ///
@@ -30,42 +35,59 @@ pub mod composition {
     };
 }
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 
 use sha2::{Digest, Sha256};
+use winwincode_change_batch::{ChangeBatchPolicy, prepare_change_batch};
 pub use winwincode_codex::candidate_artifact_outbox::{
     CandidateArtifactAckOutcome, CandidateArtifactAuthority, CandidateArtifactUpload,
     RetainedCandidateArtifact,
 };
 pub use winwincode_codex::{
     ActionRequestTransport, CodexCoreAdapter, CodexPoll, CodexRunKey, CodexThreadStart,
-    CodexTurnCompletion, DurableExecutionDelivery, WorkerExecutionPort,
-    secret_safe_runtime_summary,
+    CodexTurnCompletion, DelegatedLoopPhase, DelegatedLoopStopFact, DelegatedLoopTransition,
+    DelegatedLoopTransitionOutcome, DelegatedObserverPreflight, DelegatedObserverPreflightOutcome,
+    DelegatedObserverSettlement, DurableExecutionDelivery, ObserverMode, RoleExecutionMode,
+    WorkerExecutionPort, secret_safe_runtime_summary,
 };
 use winwincode_domain::{
-    CodexThreadId, ExecutionAckSequence, ExecutionEventId, ExecutionJobId, ExecutionMessageId,
-    ExecutionSequence, Instant, ProductSessionId, RequestId, SchemaVersion,
+    ChangeBatchId, CodexThreadId, ExecutionAckSequence, ExecutionEventId, ExecutionJobId,
+    ExecutionMessageId, ExecutionSequence, Instant, ProductSessionId, RequestId, SchemaVersion,
     SessionBindingSourceIdentity, SessionBindingSourceIdentityKind, SessionIdentity, StageRunId,
     WorkerId, WorkerInstanceId, WorkerSessionId,
 };
 use winwincode_execution_port::generated::{
     ActiveLeaseSummary, ApprovalDecisionMessage, ArtifactAckMessage, ArtifactKind,
-    ArtifactReference, DeliveryStageExecutionScope, ExecutionEventCategory, ExecutionJob,
+    ArtifactReference, ChangeBatchIdentity, ChangeBatchProgressEvent, ChangeBatchProgressState,
+    ChangeBatchProposalDisposition, ChangeBatchProposalEvent, ChangeBatchReceipt,
+    DeliveryStageExecutionScope, ExecutionEventCategory, ExecutionJob,
     ExecutionJobReplacementAuthority, ExecutionLeaseStamp, ExecutionOutcome,
     ExecutionOutcomeStatus, ExecutionOutcomeUsage, ExecutionPortError, ExecutionPortErrorCode,
-    ExecutionPortMessage, ExecutionScope, InputResponseMessage, JobCancelAckMessage,
+    ExecutionPortMessage, ExecutionScope, FinalCandidateFreezeFact,
+    FinalCandidateFreezeFactStopReason, InputResponseMessage, JobCancelAckMessage,
     JobCancelAckMessageKind, JobCancelAckMessageStatus, JobCancelMessage, JobDispatchMessage,
     JobDispatchResultMessage, JobDispatchResultMessageKind, JobDispatchResultMessageStatus,
-    JobOutcomeMessage, JobOutcomeMessageKind, ProductSessionExecutionScope, RuntimeEventMessage,
-    RuntimeReplayRequestMessage, SessionBindingMessage, SessionBindingMessageKind,
-    WorkerCapabilitySet, WorkerCapacity, WorkerHeartbeatMessage, WorkerHeartbeatMessageKind,
-    WorkerRegisterMessage, WorkerRegisterMessageKind, WorkerRegistrationResultMessage,
+    JobOutcomeMessage, JobOutcomeMessageKind, LeaseWriteStatus, ModelAckMessage,
+    ModelAckMessageKind, ModelChunkMessage, ObservationAcceptanceCriterion, ObservationDecision,
+    ProductSessionExecutionScope, RepairEnvelope, RepairLoopBudget, RepairLoopContextPack,
+    RepairLoopCounters, RepairLoopStopReason, RuntimeEventMessage, RuntimeReplayRequestMessage,
+    SessionBindingMessage, SessionBindingMessageKind, WorkerCapabilitySet, WorkerCapacity,
+    WorkerHeartbeatMessage, WorkerHeartbeatMessageKind, WorkerRegisterMessage,
+    WorkerRegisterMessageKind, WorkerRegistrationResultMessage,
     WorkerRegistrationResultMessageKind, WorkerRegistrationResultMessageLeaseRecovery,
     WorkerRegistrationResultMessageStatus,
 };
+use winwincode_execution_port::{
+    change_batch_identity::validate_change_batch_identity_derivation,
+    change_batch_progress::ChangeBatchProgressLedger,
+    repair_loop_context::seal_repair_loop_context_pack,
+};
+
+const MAX_DELEGATED_POLL_OUTCOMES: usize = 1024;
+use change_batch_journal::ObservationChunkRetention;
 use workspace::WorkspaceCloseReason;
-use workspace_runtime::JobWorkspaceRuntime;
+use workspace_runtime::{JobWorkspaceRuntime, ObservationModelConfiguration};
 
 pub mod workspace;
 
@@ -142,12 +164,26 @@ pub enum WorkerErrorCode {
     InvalidDispatchAuthority,
     /// A trace message does not match its exact active session.
     RuntimeTraceMismatch,
+    /// A delegated event does not match its exact active Job and session.
+    DelegatedPollMismatch,
+    /// Canonical finite context exceeded its byte ceiling.
+    DelegatedContextLimit,
     /// A detached per-Job checkout could not be created, recovered, or removed.
     Workspace,
     /// Candidate bytes or acknowledgement differ from the pending writer Job.
     CandidateArtifactMismatch,
     /// Outbound `ExecutionPort` failed.
     ExecutionPort,
+}
+
+/// Typed delegated event returned by Codex before an `ExecutionPort` transport
+/// envelope is defined for this family.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DelegatedPollOutcome {
+    ChangeBatchProposed(Box<ChangeBatchProposalEvent>),
+    ChangeBatchProgress(Box<ChangeBatchProgressEvent>),
+    ChangeBatchReceipt(Box<ChangeBatchReceipt>),
+    RepairRequired(Box<RepairEnvelope>),
 }
 
 /// Secret-free Worker lifecycle error.
@@ -221,6 +257,7 @@ struct DispatchRecord {
 struct PreparedDispatch {
     active: ActiveJob,
     checkout: std::path::PathBuf,
+    workspace_revision: winwincode_domain::WorkspaceRevision,
 }
 
 /// Test-only process stop around the adapter submission intent.
@@ -231,12 +268,76 @@ pub enum WorkerSubmissionFault {
     AfterIntent,
 }
 
+/// Test-only process stops around the durable delegated freeze.
+#[cfg(feature = "test-support")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkerFinalFreezeFault {
+    BeforePersist,
+    AfterPersistBeforeOutcome,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 struct PendingCandidateCompletion {
-    summary: String,
-    usage: ExecutionOutcomeUsage,
+    terminal_fact: CandidateTerminalFact,
     authority: CandidateArtifactAuthority,
     artifact: Option<ArtifactReference>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum CandidateTerminalFact {
+    ReactCompletion {
+        summary: String,
+        usage: ExecutionOutcomeUsage,
+    },
+    DelegatedFinalAccepted {
+        seed: Box<DelegatedFinalFreezeSeed>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ObserverRequestDisposition {
+    Open,
+    Stop(RepairLoopStopReason),
+    RouteUnavailable,
+}
+
+const fn observer_request_disposition(
+    mode: ObserverMode,
+    route_configured: bool,
+) -> ObserverRequestDisposition {
+    match mode {
+        ObserverMode::Off => {
+            ObserverRequestDisposition::Stop(RepairLoopStopReason::HumanReviewRequired)
+        }
+        ObserverMode::AmbiguousOnly if route_configured => ObserverRequestDisposition::Open,
+        ObserverMode::AmbiguousOnly => ObserverRequestDisposition::RouteUnavailable,
+        ObserverMode::Shadow | ObserverMode::Always => {
+            ObserverRequestDisposition::Stop(RepairLoopStopReason::InfrastructureError)
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct DelegatedFinalFreezeSeed {
+    context_pack_digest: winwincode_domain::Sha256Digest,
+    counters: RepairLoopCounters,
+    delta_digest: winwincode_domain::Sha256Digest,
+    final_observation: Option<winwincode_execution_port::generated::ObservationReceipt>,
+    final_receipt: ChangeBatchReceipt,
+    frozen_at: Instant,
+    identity: ChangeBatchIdentity,
+    result_revision: winwincode_domain::WorkspaceRevision,
+}
+
+impl CandidateTerminalFact {
+    fn outcome(&self) -> (&str, Option<ExecutionOutcomeUsage>) {
+        match self {
+            Self::ReactCompletion { summary, usage } => (summary, Some(usage.clone())),
+            Self::DelegatedFinalAccepted { .. } => {
+                ("final delegated ChangeBatch accepted and frozen", None)
+            }
+        }
+    }
 }
 
 /// Single semantic Worker core shared by local and remote `ExecutionPort` IO.
@@ -279,6 +380,7 @@ pub struct WorkerMain<Port, Codex> {
     /// Plane, but the live Core event must not produce a second copy in the
     /// same recovery turn.
     recovery_sent_delivery_ids: HashSet<String>,
+    recovered_delegated_routes: HashSet<String>,
     /// Recovered interactive requests stay behind the resumed Core event. A
     /// replacement Worker must not let the Control Plane answer the durable
     /// replay before Core has rebuilt its pending request in memory.
@@ -287,8 +389,15 @@ pub struct WorkerMain<Port, Codex> {
     /// clears the recovery deferral only after the exact resumed event has
     /// been observed and forwarded.
     core_interaction_jobs: HashSet<String>,
+    delegated_poll_outcomes: VecDeque<DelegatedPollOutcome>,
+    delegated_progress_ledgers: HashMap<(String, ChangeBatchId), ChangeBatchProgressLedger>,
+    observer_mode: ObserverMode,
+    observation_model: Option<ObservationModelConfiguration>,
+    sent_observation_opens: HashSet<String>,
     #[cfg(feature = "test-support")]
     submission_fault: Option<WorkerSubmissionFault>,
+    #[cfg(feature = "test-support")]
+    final_freeze_fault: Option<WorkerFinalFreezeFault>,
 }
 
 impl<Port, Codex> WorkerMain<Port, Codex>
@@ -325,11 +434,33 @@ where
             defer_core_interactions: false,
             sent_delivery_ids: HashSet::new(),
             recovery_sent_delivery_ids: HashSet::new(),
+            recovered_delegated_routes: HashSet::new(),
             deferred_core_interaction_jobs: HashSet::new(),
             core_interaction_jobs: HashSet::new(),
+            delegated_poll_outcomes: VecDeque::new(),
+            delegated_progress_ledgers: HashMap::new(),
+            observer_mode: ObserverMode::Off,
+            observation_model: None,
+            sent_observation_opens: HashSet::new(),
             #[cfg(feature = "test-support")]
             submission_fault: None,
+            #[cfg(feature = "test-support")]
+            final_freeze_fault: None,
         }
+    }
+
+    /// Selects the one Observer runtime policy supported by this Worker.
+    #[must_use]
+    pub const fn with_observer_mode(mut self, mode: ObserverMode) -> Self {
+        self.observer_mode = mode;
+        self
+    }
+
+    /// Installs the independent one-shot Observer route.
+    #[must_use]
+    pub fn with_observation_model(mut self, model: ObservationModelConfiguration) -> Self {
+        self.observation_model = Some(model);
+        self
     }
 
     /// Uses the Worker process identity to namespace its registration request.
@@ -356,6 +487,12 @@ where
         self.submission_fault = Some(fault);
     }
 
+    /// Stops one delegated finalization after the canonical freeze is durable.
+    #[cfg(feature = "test-support")]
+    pub fn inject_final_freeze_fault(&mut self, fault: WorkerFinalFreezeFault) {
+        self.final_freeze_fault = Some(fault);
+    }
+
     /// Returns the current process lifecycle.
     #[must_use]
     pub const fn lifecycle(&self) -> WorkerLifecycleState {
@@ -374,6 +511,15 @@ where
         let mut jobs = self.active.values().collect::<Vec<_>>();
         jobs.sort_by(|left, right| left.job.job_id.0.cmp(&right.job.job_id.0));
         jobs
+    }
+
+    /// Returns every validated delegated event in Codex poll order.
+    ///
+    /// The events remain inside the Worker until this explicit read, so the
+    /// current lack of an `ExecutionPortMessage` variant cannot silently drop
+    /// them or disguise them as runtime trace records.
+    pub fn take_delegated_poll_outcomes(&mut self) -> Vec<DelegatedPollOutcome> {
+        self.delegated_poll_outcomes.drain(..).collect()
     }
 
     /// Consumes the Worker and returns its injected ports for deterministic tests
@@ -473,6 +619,13 @@ where
                     .await
             }
             ExecutionPortMessage::ModelChunkMessage(chunk) => {
+                if self
+                    .workspaces
+                    .is_observation_model_exchange(&chunk.model_exchange_id)
+                    .map_err(|_| workspace_error())?
+                {
+                    return self.accept_observation_model_chunk(chunk, &now).await;
+                }
                 self.codex
                     .accept_model_chunk(chunk, &now)
                     .await
@@ -564,7 +717,7 @@ where
             message_id: self.next_message_id(),
             observed_at: now.clone(),
             schema_version: SchemaVersion::WinwincodeV1,
-            sent_at: now,
+            sent_at: now.clone(),
             worker_id: self.config.worker_id.clone(),
             worker_instance_id: self.config.worker_instance_id.clone(),
         };
@@ -579,6 +732,7 @@ where
     ///
     /// Returns an exact trace-identity or outbound-port failure. Codex polling
     /// failures become infrastructure outcomes without exposing adapter text.
+    #[allow(clippy::too_many_lines)]
     pub async fn poll_codex(&mut self, now: Instant) -> Result<(), WorkerError> {
         if self.lifecycle != WorkerLifecycleState::Active {
             return Err(worker_error(
@@ -599,7 +753,121 @@ where
         }
         let mut job_ids = self.active.keys().cloned().collect::<Vec<_>>();
         job_ids.sort();
+        for job_id in &job_ids {
+            let Some(thread_id) = self
+                .active
+                .get(job_id)
+                .map(|job| job.codex_thread_id.clone())
+            else {
+                continue;
+            };
+            if let Some(stop) = self
+                .codex
+                .delegated_loop_stop(&thread_id)
+                .map_err(|_| codex_model_error())?
+            {
+                self.finish_delegated_loop_stop_fact(job_id, stop, now.clone())
+                    .await?;
+                continue;
+            }
+            if let Some(freeze) = self
+                .codex
+                .final_candidate_freeze(&thread_id)
+                .map_err(|_| codex_model_error())?
+            {
+                let active = self.active.get(job_id).ok_or_else(|| {
+                    candidate_artifact_error("frozen candidate lost active authority")
+                })?;
+                self.pending_candidates.insert(
+                    job_id.clone(),
+                    PendingCandidateCompletion {
+                        terminal_fact: CandidateTerminalFact::DelegatedFinalAccepted {
+                            seed: Box::new(DelegatedFinalFreezeSeed {
+                                context_pack_digest: freeze.context_pack_digest.clone(),
+                                counters: freeze.counters.clone(),
+                                delta_digest: freeze.delta_digest.clone(),
+                                final_observation: freeze.final_observation.clone(),
+                                final_receipt: freeze.final_receipt.clone(),
+                                frozen_at: freeze.frozen_at.clone(),
+                                identity: freeze.identity.clone(),
+                                result_revision: freeze.result_revision.clone(),
+                            }),
+                        },
+                        authority: candidate_artifact_authority(active)?,
+                        artifact: Some(freeze.candidate_artifact_ref.clone()),
+                    },
+                );
+                self.finish_job(
+                    job_id,
+                    ExecutionOutcomeStatus::Succeeded,
+                    "final delegated ChangeBatch accepted and frozen",
+                    vec![freeze.candidate_artifact_ref],
+                    None,
+                    None,
+                    now.clone(),
+                )
+                .await?;
+            }
+        }
+        self.flush_pending_observation_opens().await?;
         for job_id in job_ids {
+            if !self.pending_candidates.contains_key(&job_id) {
+                let recovered_final = self.active.get(&job_id).cloned().and_then(|active| {
+                    self.workspaces
+                        .delegated_batch_history(&active)
+                        .ok()
+                        .and_then(|history| {
+                            history.last().and_then(|terminal| {
+                                (terminal.terminal_state == ChangeBatchProgressState::Accepted
+                                    && terminal.proposal.proposal.disposition
+                                        == ChangeBatchProposalDisposition::Final)
+                                    .then(|| {
+                                        (
+                                            terminal.proposal.identity.batch_id.clone(),
+                                            terminal.receipt.result_revision.clone(),
+                                        )
+                                    })
+                            })
+                        })
+                });
+                if let Some((batch_id, Some(result_revision))) = recovered_final {
+                    self.complete_accepted_delegated_candidate(
+                        &job_id,
+                        batch_id,
+                        result_revision,
+                        now.clone(),
+                    )
+                    .await?;
+                }
+            }
+            if self.pending_candidates.contains_key(&job_id) || !self.active.contains_key(&job_id) {
+                continue;
+            }
+            if !self.recovered_delegated_routes.contains(&job_id) {
+                let recovered_terminal = self.active.get(&job_id).cloned().and_then(|active| {
+                    self.workspaces
+                        .delegated_batch_history(&active)
+                        .ok()
+                        .and_then(|history| history.last().cloned())
+                        .filter(|terminal| {
+                            terminal.proposal.proposal.disposition
+                                != ChangeBatchProposalDisposition::Final
+                        })
+                });
+                if let Some(terminal) = recovered_terminal {
+                    self.route_delegated_terminal(
+                        &job_id,
+                        terminal.receipt,
+                        terminal.terminal_state,
+                        now.clone(),
+                    )
+                    .await?;
+                    self.recovered_delegated_routes.insert(job_id.clone());
+                }
+            }
+            if !self.active.contains_key(&job_id) {
+                continue;
+            }
             let Some(thread_id) = self
                 .active
                 .get(&job_id)
@@ -607,6 +875,15 @@ where
             else {
                 continue;
             };
+            if let Some(stop) = self
+                .codex
+                .delegated_loop_stop(&thread_id)
+                .map_err(|_| codex_model_error())?
+            {
+                self.finish_delegated_loop_stop_fact(&job_id, stop, now.clone())
+                    .await?;
+                continue;
+            }
             let Ok(polled) = self.codex.poll(&thread_id, &now).await else {
                 self.finish_unavailable_codex_job(&job_id, now.clone())
                     .await?;
@@ -627,11 +904,38 @@ where
         polled: CodexPoll,
         now: Instant,
     ) -> Result<(), WorkerError> {
+        if cancelling_job_has_late_result(self.active.get(job_id), &polled) {
+            return self.refence_cancelling_job(job_id, &now).await;
+        }
         match polled {
             CodexPoll::Pending => Ok(()),
             CodexPoll::RuntimeTrace(message) => self.forward_runtime_trace(job_id, *message).await,
+            CodexPoll::ChangeBatchProposed(event) => {
+                self.execute_delegated_proposal(job_id, *event, &now).await
+            }
+            CodexPoll::ChangeBatchProgress(event) => self.retain_delegated_progress(job_id, event),
+            CodexPoll::RepairRequired(envelope) => self.retain_delegated_poll_outcome(
+                job_id,
+                DelegatedPollOutcome::RepairRequired(envelope),
+            ),
             CodexPoll::Completed(completion) => {
                 self.complete_codex_job(job_id, completion, now).await
+            }
+            CodexPoll::Inconclusive(summary) => {
+                self.finish_job(
+                    job_id,
+                    ExecutionOutcomeStatus::Failed,
+                    summary.as_str(),
+                    Vec::new(),
+                    None,
+                    Some(port_error(
+                        ExecutionPortErrorCode::ExecutionFailed,
+                        "delegated ChangeBatch proposal was inconclusive",
+                        false,
+                    )),
+                    now,
+                )
+                .await
             }
             CodexPoll::Failed(summary) => {
                 self.finish_job(
@@ -682,6 +986,873 @@ where
                 .await
             }
         }
+    }
+
+    async fn refence_cancelling_job(
+        &mut self,
+        job_id: &str,
+        now: &Instant,
+    ) -> Result<(), WorkerError> {
+        let thread_id = self
+            .active
+            .get(job_id)
+            .map(|active| active.codex_thread_id.clone())
+            .ok_or_else(|| {
+                worker_error(
+                    WorkerErrorCode::UnexpectedMessage,
+                    "cancelled Codex result lost its active Job authority",
+                )
+            })?;
+        // Cancellation owns the terminal decision once its acknowledgement
+        // is accepted. If the first Core interrupt failed, a late result must
+        // retry that fence rather than apply a patch, retain progress, or
+        // replace the cancelled outcome with another terminal state.
+        self.codex
+            .interrupt(&thread_id, now)
+            .await
+            .map_err(|_| codex_model_error())?;
+        self.flush_codex_execution_messages().await
+    }
+
+    fn retain_delegated_poll_outcome(
+        &mut self,
+        job_id: &str,
+        outcome: DelegatedPollOutcome,
+    ) -> Result<(), WorkerError> {
+        let identity = match &outcome {
+            DelegatedPollOutcome::ChangeBatchProposed(event) => {
+                self.validate_delegated_proposal(job_id, event)?;
+                &event.identity
+            }
+            DelegatedPollOutcome::ChangeBatchProgress(event) => &event.identity,
+            DelegatedPollOutcome::ChangeBatchReceipt(receipt) => &receipt.identity,
+            DelegatedPollOutcome::RepairRequired(envelope) => &envelope.identity,
+        };
+        self.validate_delegated_identity(job_id, identity)?;
+        self.ensure_delegated_poll_capacity()?;
+        self.delegated_poll_outcomes.push_back(outcome);
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_lines)]
+    async fn execute_delegated_proposal(
+        &mut self,
+        job_id: &str,
+        event: ChangeBatchProposalEvent,
+        now: &Instant,
+    ) -> Result<(), WorkerError> {
+        self.validate_delegated_proposal(job_id, &event)?;
+        let active = self.active.get(job_id).cloned().ok_or_else(|| {
+            worker_error(
+                WorkerErrorCode::DelegatedPollMismatch,
+                "delegated ChangeBatch proposal has no active Job authority",
+            )
+        })?;
+        let executed = self
+            .workspaces
+            .execute_change_batch(&active, &event, now)
+            .await
+            .map_err(|_| {
+                worker_error(
+                    WorkerErrorCode::DelegatedPollMismatch,
+                    "delegated ChangeBatch execution or replay was rejected",
+                )
+            })?;
+        let accepted_final = event.proposal.disposition == ChangeBatchProposalDisposition::Final
+            && executed
+                .progress
+                .last()
+                .is_some_and(|progress| progress.state == ChangeBatchProgressState::Accepted);
+        let accepted_result_revision = if accepted_final {
+            Some(executed.receipt.result_revision.clone().ok_or_else(|| {
+                worker_error(
+                    WorkerErrorCode::DelegatedPollMismatch,
+                    "accepted delegated ChangeBatch has no result revision",
+                )
+            })?)
+        } else {
+            None
+        };
+        let accepted_batch_id = event.identity.batch_id.clone();
+        let terminal_state = executed
+            .progress
+            .last()
+            .map(|progress| progress.state.clone());
+        let terminal_receipt = executed.receipt.clone();
+        let mut observation_stop = None;
+        let observation_open = if let Some(request) = executed.observation_request.as_ref() {
+            match observer_request_disposition(self.observer_mode, self.observation_model.is_some())
+            {
+                ObserverRequestDisposition::Open => {
+                    let configuration = self.observation_model.as_ref().ok_or_else(|| {
+                        worker_error(
+                            WorkerErrorCode::DelegatedPollMismatch,
+                            "independent Observer model route is unavailable",
+                        )
+                    })?;
+                    Some(
+                        self.workspaces
+                            .prepare_observation_model_open(&active, request, configuration, now)
+                            .map_err(|_| {
+                                worker_error(
+                                    WorkerErrorCode::DelegatedPollMismatch,
+                                    "Observer model open could not be retained",
+                                )
+                            })?,
+                    )
+                }
+                ObserverRequestDisposition::Stop(reason) => {
+                    observation_stop = Some(reason);
+                    None
+                }
+                ObserverRequestDisposition::RouteUnavailable => {
+                    return Err(worker_error(
+                        WorkerErrorCode::DelegatedPollMismatch,
+                        "independent Observer model route is unavailable",
+                    ));
+                }
+            }
+        } else {
+            None
+        };
+        self.ensure_delegated_poll_capacity_for(executed.progress.len().saturating_add(2))?;
+        self.delegated_poll_outcomes
+            .push_back(DelegatedPollOutcome::ChangeBatchProposed(Box::new(event)));
+        self.delegated_poll_outcomes.extend(
+            executed
+                .progress
+                .into_iter()
+                .map(|progress| DelegatedPollOutcome::ChangeBatchProgress(Box::new(progress))),
+        );
+        self.delegated_poll_outcomes
+            .push_back(DelegatedPollOutcome::ChangeBatchReceipt(Box::new(
+                executed.receipt,
+            )));
+        if let Some(reason) = observation_stop {
+            return self
+                .finish_delegated_loop_stop(job_id, reason, now.clone())
+                .await;
+        }
+        if let Some(open) = observation_open {
+            self.send_observation_open(open).await?;
+        }
+        if let Some(result_revision) = accepted_result_revision {
+            self.complete_accepted_delegated_candidate(
+                job_id,
+                accepted_batch_id,
+                result_revision,
+                now.clone(),
+            )
+            .await?;
+        } else if let Some(
+            state @ (ChangeBatchProgressState::Accepted
+            | ChangeBatchProgressState::RepairRequired
+            | ChangeBatchProgressState::InfrastructureFailed),
+        ) = terminal_state
+        {
+            self.route_delegated_terminal(job_id, terminal_receipt, state, now.clone())
+                .await?;
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_lines)]
+    async fn route_delegated_terminal(
+        &mut self,
+        job_id: &str,
+        receipt: ChangeBatchReceipt,
+        terminal_state: ChangeBatchProgressState,
+        now: Instant,
+    ) -> Result<(), WorkerError> {
+        let active = self.active.get(job_id).cloned().ok_or_else(|| {
+            worker_error(
+                WorkerErrorCode::DelegatedPollMismatch,
+                "delegated loop transition has no active Job authority",
+            )
+        })?;
+        let history = self
+            .workspaces
+            .delegated_batch_history(&active)
+            .map_err(|_| workspace_error())?;
+        let current = history
+            .iter()
+            .find(|entry| entry.proposal.identity == receipt.identity)
+            .ok_or_else(|| {
+                worker_error(
+                    WorkerErrorCode::DelegatedPollMismatch,
+                    "delegated loop transition has no durable batch history",
+                )
+            })?;
+        if current.receipt != receipt || current.terminal_state != terminal_state {
+            return Err(worker_error(
+                WorkerErrorCode::DelegatedPollMismatch,
+                "delegated loop terminal facts changed before routing",
+            ));
+        }
+        let observation = receipt.observation.as_ref();
+        let phase = match terminal_state {
+            ChangeBatchProgressState::Accepted
+                if current.proposal.proposal.disposition
+                    == ChangeBatchProposalDisposition::ContinueValue =>
+            {
+                DelegatedLoopPhase::Continue
+            }
+            ChangeBatchProgressState::RepairRequired
+                if observation.is_some_and(|value| {
+                    value.response.decision == ObservationDecision::RepairRequired
+                }) =>
+            {
+                DelegatedLoopPhase::Repair
+            }
+            ChangeBatchProgressState::InfrastructureFailed => {
+                return self
+                    .finish_delegated_loop_stop(
+                        job_id,
+                        RepairLoopStopReason::InfrastructureError,
+                        now,
+                    )
+                    .await;
+            }
+            ChangeBatchProgressState::RepairRequired => {
+                let reason = match observation.map(|value| &value.response.decision) {
+                    Some(ObservationDecision::SemanticRisk) => RepairLoopStopReason::SemanticRisk,
+                    Some(ObservationDecision::Inconclusive) => {
+                        RepairLoopStopReason::HumanReviewRequired
+                    }
+                    _ => RepairLoopStopReason::InfrastructureError,
+                };
+                return self.finish_delegated_loop_stop(job_id, reason, now).await;
+            }
+            _ => return Ok(()),
+        };
+        let completed_repairs = history
+            .iter()
+            .filter(|entry| entry.terminal_state == ChangeBatchProgressState::RepairRequired)
+            .count();
+        if delegated_repair_round_limit_reached(phase, completed_repairs) {
+            return self
+                .finish_delegated_loop_stop(
+                    job_id,
+                    RepairLoopStopReason::RepairRoundLimitReached,
+                    now,
+                )
+                .await;
+        }
+        let transition = match build_delegated_loop_transition(
+            &active,
+            &history,
+            phase,
+            current.terminal_at.clone(),
+        ) {
+            Ok(transition) => transition,
+            Err(error) if error.code == WorkerErrorCode::DelegatedContextLimit => {
+                return self
+                    .finish_delegated_loop_stop(
+                        job_id,
+                        RepairLoopStopReason::ContextPackLimitReached,
+                        now,
+                    )
+                    .await;
+            }
+            Err(error) => return Err(error),
+        };
+        let outcome = self
+            .codex
+            .reconcile_delegated_transition(&active.codex_thread_id, transition)
+            .await
+            .map_err(|_| codex_model_error())?;
+        if let DelegatedLoopTransitionOutcome::Stopped { reason, .. } = outcome {
+            self.finish_delegated_loop_stop(job_id, reason, now).await?;
+        }
+        self.recovered_delegated_routes.insert(job_id.to_owned());
+        Ok(())
+    }
+
+    async fn finish_delegated_loop_stop(
+        &mut self,
+        job_id: &str,
+        reason: RepairLoopStopReason,
+        now: Instant,
+    ) -> Result<(), WorkerError> {
+        let active = self.active.get(job_id).cloned().ok_or_else(|| {
+            worker_error(
+                WorkerErrorCode::DelegatedPollMismatch,
+                "delegated stop has no active Job authority",
+            )
+        })?;
+        let history = self
+            .workspaces
+            .delegated_batch_history(&active)
+            .map_err(|_| workspace_error())?;
+        let batch_id = history
+            .last()
+            .map(|entry| entry.proposal.identity.batch_id.clone())
+            .ok_or_else(workspace_error)?;
+        let mut counters = self
+            .workspaces
+            .delegated_observer_counters(&active)
+            .map_err(|_| workspace_error())?;
+        if reason == RepairLoopStopReason::RepairRoundLimitReached {
+            counters.repair_rounds = counters.repair_rounds.saturating_sub(1);
+        }
+        let sealed = self
+            .codex
+            .retain_delegated_loop_stop(
+                &active.codex_thread_id,
+                &DelegatedLoopStopFact {
+                    batch_id,
+                    reason,
+                    counters,
+                    stopped_at: now.clone(),
+                },
+            )
+            .map_err(|_| codex_model_error())?;
+        self.finish_delegated_loop_stop_fact(job_id, sealed, now)
+            .await
+    }
+
+    async fn finish_delegated_loop_stop_exact(
+        &mut self,
+        job_id: &str,
+        batch_id: ChangeBatchId,
+        counters: RepairLoopCounters,
+        reason: RepairLoopStopReason,
+        now: Instant,
+    ) -> Result<(), WorkerError> {
+        let active = self.active.get(job_id).cloned().ok_or_else(|| {
+            worker_error(
+                WorkerErrorCode::DelegatedPollMismatch,
+                "delegated stop has no active Job authority",
+            )
+        })?;
+        let sealed = self
+            .codex
+            .retain_delegated_loop_stop(
+                &active.codex_thread_id,
+                &DelegatedLoopStopFact {
+                    batch_id,
+                    reason,
+                    counters,
+                    stopped_at: now.clone(),
+                },
+            )
+            .map_err(|_| codex_model_error())?;
+        self.finish_delegated_loop_stop_fact(job_id, sealed, now)
+            .await
+    }
+
+    async fn finish_delegated_loop_stop_fact(
+        &mut self,
+        job_id: &str,
+        sealed: DelegatedLoopStopFact,
+        now: Instant,
+    ) -> Result<(), WorkerError> {
+        let reason = sealed.reason;
+        let infrastructure = reason == RepairLoopStopReason::InfrastructureError;
+        self.finish_job(
+            job_id,
+            if infrastructure {
+                ExecutionOutcomeStatus::InfrastructureError
+            } else {
+                ExecutionOutcomeStatus::Failed
+            },
+            delegated_loop_stop_summary(&reason),
+            Vec::new(),
+            None,
+            Some(port_error(
+                if infrastructure {
+                    ExecutionPortErrorCode::InfrastructureError
+                } else {
+                    ExecutionPortErrorCode::ExecutionFailed
+                },
+                delegated_loop_stop_summary(&reason),
+                false,
+            )),
+            now,
+        )
+        .await
+    }
+
+    async fn complete_accepted_delegated_candidate(
+        &mut self,
+        job_id: &str,
+        batch_id: ChangeBatchId,
+        result_revision: winwincode_domain::WorkspaceRevision,
+        now: Instant,
+    ) -> Result<(), WorkerError> {
+        let active = self.active.get(job_id).cloned().ok_or_else(|| {
+            candidate_artifact_error("accepted delegated batch has no active workspace authority")
+        })?;
+        let history = self
+            .workspaces
+            .delegated_batch_history(&active)
+            .map_err(|_| workspace_error())?;
+        let terminal = history.last().ok_or_else(|| {
+            candidate_artifact_error("accepted delegated batch has no durable terminal history")
+        })?;
+        if terminal.proposal.identity.batch_id != batch_id
+            || terminal.receipt.result_revision.as_ref() != Some(&result_revision)
+            || terminal.terminal_state != ChangeBatchProgressState::Accepted
+        {
+            return Err(candidate_artifact_error(
+                "accepted delegated batch terminal history changed",
+            ));
+        }
+        let freeze_context = match build_delegated_final_freeze_context(&active, &history) {
+            Ok(context) => context,
+            Err(error) if error.code == WorkerErrorCode::DelegatedContextLimit => {
+                return self
+                    .finish_delegated_loop_stop(
+                        job_id,
+                        RepairLoopStopReason::ContextPackLimitReached,
+                        now,
+                    )
+                    .await;
+            }
+            Err(error) => return Err(error),
+        };
+        let pending = PendingCandidateCompletion {
+            terminal_fact: CandidateTerminalFact::DelegatedFinalAccepted {
+                seed: Box::new(DelegatedFinalFreezeSeed {
+                    context_pack_digest: freeze_context.context.context_digest,
+                    counters: freeze_context.worker_counters,
+                    delta_digest: terminal
+                        .receipt
+                        .delta_digest
+                        .clone()
+                        .ok_or_else(|| candidate_artifact_error("accepted delta is missing"))?,
+                    final_observation: terminal.receipt.observation.clone(),
+                    final_receipt: terminal.receipt.clone(),
+                    frozen_at: terminal.terminal_at.clone(),
+                    identity: terminal.proposal.identity.clone(),
+                    result_revision,
+                }),
+            },
+            authority: candidate_artifact_authority(&active)?,
+            artifact: None,
+        };
+        if let Some(existing) = self.pending_candidates.get(job_id) {
+            if existing.terminal_fact != pending.terminal_fact
+                || existing.authority != pending.authority
+            {
+                return Err(candidate_artifact_error(
+                    "accepted delegated batch changed before candidate acceptance",
+                ));
+            }
+        } else {
+            self.pending_candidates.insert(job_id.to_owned(), pending);
+        }
+        if let Some(artifact) = self
+            .codex
+            .accepted_candidate_artifact(
+                &self
+                    .pending_candidates
+                    .get(job_id)
+                    .ok_or_else(|| candidate_artifact_error("candidate fact disappeared"))?
+                    .authority,
+            )
+            .map_err(|_| codex_model_error())?
+        {
+            return self.finish_candidate_job(job_id, artifact, now).await;
+        }
+        let prepared = self
+            .workspaces
+            .prepare_candidate(&active, RoleExecutionMode::DelegatedBatch)
+            .map_err(|_| {
+                candidate_artifact_error("accepted delegated batch could not be frozen")
+            })?;
+        self.retain_candidate_artifact(&active.job.job_id, prepared, now)
+            .await
+    }
+
+    async fn flush_pending_observation_opens(&mut self) -> Result<(), WorkerError> {
+        let mut active = self.active.values().cloned().collect::<Vec<_>>();
+        active.sort_by(|left, right| left.job.job_id.0.cmp(&right.job.job_id.0));
+        for authority in active {
+            if let Some(open) = self
+                .workspaces
+                .pending_observation_model_open(&authority)
+                .map_err(|_| workspace_error())?
+            {
+                self.send_observation_open(open).await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn send_observation_open(
+        &mut self,
+        open: winwincode_execution_port::generated::ModelOpenMessage,
+    ) -> Result<(), WorkerError> {
+        if self
+            .sent_observation_opens
+            .contains(&open.model_exchange_id.0)
+        {
+            return Ok(());
+        }
+        if self.observer_mode != ObserverMode::AmbiguousOnly {
+            let reason = if self.observer_mode == ObserverMode::Off {
+                RepairLoopStopReason::HumanReviewRequired
+            } else {
+                RepairLoopStopReason::InfrastructureError
+            };
+            return self
+                .finish_delegated_loop_stop(&open.lease.job_id.0, reason, open.sent_at)
+                .await;
+        }
+        let active = self
+            .active
+            .get(&open.lease.job_id.0)
+            .cloned()
+            .ok_or_else(|| {
+                worker_error(
+                    WorkerErrorCode::DelegatedPollMismatch,
+                    "Observer preflight has no active Job authority",
+                )
+            })?;
+        let worker_counters = self
+            .workspaces
+            .delegated_observer_counters(&active)
+            .map_err(|_| workspace_error())?;
+        let preflight = DelegatedObserverPreflight {
+            batch_id: self
+                .workspaces
+                .observation_batch_id(&active, &open.model_exchange_id)
+                .map_err(|_| workspace_error())?,
+            budget: delegated_loop_budget(),
+            worker_counters,
+            observed_at: open.sent_at.clone(),
+        };
+        let batch_id = preflight.batch_id.clone();
+        if let DelegatedObserverPreflightOutcome::Stopped { reason, counters } = self
+            .codex
+            .preflight_delegated_observer(&active.codex_thread_id, preflight)
+            .map_err(|_| codex_model_error())?
+        {
+            return self
+                .finish_delegated_loop_stop_exact(
+                    &open.lease.job_id.0,
+                    batch_id,
+                    counters,
+                    reason,
+                    open.sent_at,
+                )
+                .await;
+        }
+        let exchange = open.model_exchange_id.0.clone();
+        self.port
+            .send(ExecutionPortMessage::ModelOpenMessage(open))
+            .await
+            .map_err(|_| execution_port_error())?;
+        self.sent_observation_opens.insert(exchange);
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_lines)]
+    async fn accept_observation_model_chunk(
+        &mut self,
+        chunk: &ModelChunkMessage,
+        now: &Instant,
+    ) -> Result<(), WorkerError> {
+        let application = self
+            .active
+            .get(&chunk.lease.job_id.0)
+            .cloned()
+            .map(|active| {
+                self.workspaces
+                    .accept_observation_model_chunk(&active, chunk, now)
+            });
+        let (
+            status,
+            acknowledged,
+            replay_from,
+            error,
+            completed_progress,
+            upgraded_receipt,
+            terminal_accounting,
+        ) = match application {
+            None => (
+                LeaseWriteStatus::RejectedStaleFencingToken,
+                0,
+                None,
+                Some(ExecutionPortError {
+                    code: ExecutionPortErrorCode::StaleFencingToken,
+                    message: "Observer model chunk was rejected".to_owned(),
+                    retryable: false,
+                }),
+                Vec::new(),
+                None,
+                None,
+            ),
+            Some(application) => match application {
+                Ok(Some(application)) => {
+                    let (status, acknowledged, replay_from) = match application.retention {
+                        ObservationChunkRetention::Inserted { confirmed_sequence } => {
+                            (LeaseWriteStatus::Accepted, confirmed_sequence, None)
+                        }
+                        ObservationChunkRetention::Duplicate { confirmed_sequence } => {
+                            (LeaseWriteStatus::Duplicate, confirmed_sequence, None)
+                        }
+                        ObservationChunkRetention::Gap { confirmed_sequence } => (
+                            LeaseWriteStatus::Gap,
+                            confirmed_sequence,
+                            Some(ExecutionSequence(confirmed_sequence.saturating_add(1))),
+                        ),
+                    };
+                    (
+                        status,
+                        acknowledged,
+                        replay_from,
+                        None,
+                        application.completed_progress,
+                        application.change_batch_receipt,
+                        application.terminal_accounting,
+                    )
+                }
+                Ok(None) => {
+                    return Err(worker_error(
+                        WorkerErrorCode::UnexpectedMessage,
+                        "Observer model exchange disappeared",
+                    ));
+                }
+                Err(rejection) => {
+                    let authority = rejection.code()
+                        == workspace_runtime::JobWorkspaceErrorCode::AuthorityMismatch;
+                    (
+                        if authority {
+                            LeaseWriteStatus::RejectedStaleFencingToken
+                        } else {
+                            LeaseWriteStatus::RejectedConflict
+                        },
+                        0,
+                        None,
+                        Some(ExecutionPortError {
+                            code: if authority {
+                                ExecutionPortErrorCode::StaleFencingToken
+                            } else {
+                                ExecutionPortErrorCode::ModelStreamFailed
+                            },
+                            message: "Observer model chunk was rejected".to_owned(),
+                            retryable: false,
+                        }),
+                        Vec::new(),
+                        None,
+                        None,
+                    )
+                }
+            },
+        };
+        if let Some(accounting) = terminal_accounting {
+            let active = self.active.get(&chunk.lease.job_id.0).ok_or_else(|| {
+                worker_error(
+                    WorkerErrorCode::DelegatedPollMismatch,
+                    "Observer terminal settlement has no active Job authority",
+                )
+            })?;
+            self.codex
+                .retain_delegated_observer_settlement(
+                    &active.codex_thread_id,
+                    DelegatedObserverSettlement {
+                        batch_id: accounting.batch_id,
+                        completed_at: now.clone(),
+                        usage: accounting.usage,
+                    },
+                )
+                .map_err(|_| codex_model_error())?;
+        }
+        let routed_terminal = upgraded_receipt.clone().and_then(|receipt| {
+            completed_progress
+                .last()
+                .map(|progress| (receipt, progress.state.clone()))
+        });
+        self.ensure_delegated_poll_capacity_for(
+            completed_progress.len() + usize::from(upgraded_receipt.is_some()),
+        )?;
+        self.delegated_poll_outcomes.extend(
+            completed_progress
+                .into_iter()
+                .map(|progress| DelegatedPollOutcome::ChangeBatchProgress(Box::new(progress))),
+        );
+        if let Some(receipt) = upgraded_receipt {
+            self.delegated_poll_outcomes
+                .push_back(DelegatedPollOutcome::ChangeBatchReceipt(Box::new(receipt)));
+            self.sent_observation_opens
+                .remove(&chunk.model_exchange_id.0);
+        }
+        let acknowledgement = ModelAckMessage {
+            ack_sequence: ExecutionAckSequence(acknowledged),
+            error,
+            kind: ModelAckMessageKind::ModelAck,
+            lease: chunk.lease.clone(),
+            message_id: observation_ack_message_id(chunk),
+            model_exchange_id: chunk.model_exchange_id.clone(),
+            replay_from_sequence: replay_from,
+            schema_version: SchemaVersion::WinwincodeV1,
+            sent_at: now.clone(),
+            session_identity: chunk.session_identity.clone(),
+            status,
+            worker_session_id: chunk.worker_session_id.clone(),
+        };
+        self.port
+            .send(ExecutionPortMessage::ModelAckMessage(acknowledgement))
+            .await
+            .map_err(|_| execution_port_error())?;
+        if let Some((receipt, state)) = routed_terminal {
+            self.route_delegated_terminal(&chunk.lease.job_id.0, receipt, state, now.clone())
+                .await?;
+        }
+        Ok(())
+    }
+
+    fn retain_delegated_progress(
+        &mut self,
+        job_id: &str,
+        event: Box<ChangeBatchProgressEvent>,
+    ) -> Result<(), WorkerError> {
+        self.validate_delegated_identity(job_id, &event.identity)?;
+        self.ensure_delegated_poll_capacity()?;
+        let key = (job_id.to_owned(), event.identity.batch_id.clone());
+        self.delegated_progress_ledgers
+            .entry(key)
+            .or_default()
+            .record(&event)
+            .map_err(|_| {
+                worker_error(
+                    WorkerErrorCode::DelegatedPollMismatch,
+                    "delegated ChangeBatch progress order or state is invalid",
+                )
+            })?;
+        self.delegated_poll_outcomes
+            .push_back(DelegatedPollOutcome::ChangeBatchProgress(event));
+        Ok(())
+    }
+
+    fn validate_delegated_identity(
+        &self,
+        job_id: &str,
+        identity: &ChangeBatchIdentity,
+    ) -> Result<(), WorkerError> {
+        let active = self.active.get(job_id).ok_or_else(|| {
+            worker_error(
+                WorkerErrorCode::DelegatedPollMismatch,
+                "delegated Codex event has no active Job authority",
+            )
+        })?;
+        let expected_run_key = self
+            .dispatches
+            .get(job_id)
+            .ok_or_else(|| {
+                worker_error(
+                    WorkerErrorCode::DelegatedPollMismatch,
+                    "delegated Codex event has no sealed dispatch identity",
+                )
+            })?
+            .run_key
+            .canonical_digest()
+            .map_err(|_| {
+                worker_error(
+                    WorkerErrorCode::DelegatedPollMismatch,
+                    "delegated Codex event run identity is invalid",
+                )
+            })?;
+        let expected_revision = self
+            .workspaces
+            .accepted_revision(&active.job.job_id)
+            .map_err(|_| {
+                worker_error(
+                    WorkerErrorCode::DelegatedPollMismatch,
+                    "delegated Codex workspace revision is unavailable",
+                )
+            })?;
+        let exact_replay = identity.workspace_revision != expected_revision
+            && self
+                .workspaces
+                .is_exact_delegated_identity_replay(active, identity)
+                .map_err(|_| {
+                    worker_error(
+                        WorkerErrorCode::DelegatedPollMismatch,
+                        "delegated Codex replay journal is unavailable",
+                    )
+                })?;
+        if validate_change_batch_identity_derivation(identity).is_err()
+            || identity.run_key != expected_run_key.0
+            || identity.job_id != active.job.job_id
+            || identity.attempt != active.job.attempt
+            || identity.lease_id != active.lease.lease_id
+            || identity.fencing_token != active.lease.fencing_token
+            || identity.session_identity != active.session_identity
+            || identity.repository_id != active.job.workspace.repository_id
+            || (identity.workspace_revision != expected_revision && !exact_replay)
+        {
+            return Err(worker_error(
+                WorkerErrorCode::DelegatedPollMismatch,
+                "delegated Codex event does not match its active Job authority",
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_delegated_proposal(
+        &self,
+        job_id: &str,
+        event: &ChangeBatchProposalEvent,
+    ) -> Result<(), WorkerError> {
+        self.validate_delegated_identity(job_id, &event.identity)?;
+        prepare_change_batch(event, ChangeBatchPolicy::default()).map_err(|_| {
+            worker_error(
+                WorkerErrorCode::DelegatedPollMismatch,
+                "delegated ChangeBatch proposal is invalid",
+            )
+        })?;
+        let active = self.active.get(job_id).ok_or_else(|| {
+            worker_error(
+                WorkerErrorCode::DelegatedPollMismatch,
+                "delegated proposal has no active Job authority",
+            )
+        })?;
+        let task_ids = active
+            .job
+            .stage_input
+            .as_ref()
+            .and_then(|stage| stage.task.as_ref())
+            .map(|task| {
+                task.acceptance_criterion_ids
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<HashSet<_>>()
+            });
+        if task_ids.is_some_and(|task_ids| {
+            !event
+                .proposal
+                .acceptance_criteria_ids
+                .iter()
+                .all(|id| task_ids.contains(id.as_str()))
+        }) {
+            return Err(worker_error(
+                WorkerErrorCode::DelegatedPollMismatch,
+                "delegated proposal acceptance criteria are outside the task",
+            ));
+        }
+        Ok(())
+    }
+
+    fn ensure_delegated_poll_capacity(&self) -> Result<(), WorkerError> {
+        self.ensure_delegated_poll_capacity_for(1)
+    }
+
+    fn ensure_delegated_poll_capacity_for(&self, additional: usize) -> Result<(), WorkerError> {
+        if self
+            .delegated_poll_outcomes
+            .len()
+            .saturating_add(additional)
+            > MAX_DELEGATED_POLL_OUTCOMES
+        {
+            return Err(worker_error(
+                WorkerErrorCode::DelegatedPollMismatch,
+                "delegated Codex event retention limit reached",
+            ));
+        }
+        Ok(())
     }
 
     async fn complete_codex_job(
@@ -754,7 +1925,10 @@ where
         let active = self.active.get(job_id).cloned().ok_or_else(|| {
             candidate_artifact_error("candidate completion has no active workspace authority")
         })?;
-        if let Ok(prepared) = self.workspaces.prepare_candidate(&active) {
+        if let Ok(prepared) = self
+            .workspaces
+            .prepare_candidate(&active, RoleExecutionMode::React)
+        {
             return self
                 .retain_candidate_artifact(&active.job.job_id, prepared, now)
                 .await;
@@ -995,6 +2169,13 @@ where
             };
             if self.codex.interrupt(&thread_id, &now).await.is_err() {
                 codex_failures += 1;
+            } else {
+                // The interrupt retains the terminal Usage and Stopped
+                // traces. Forward them while the active Job still owns the
+                // runtime cursor so the shutdown outcome binds their final
+                // sequence instead of closing the Job first.
+                self.flush_codex_execution_messages().await?;
+                self.flush_durable_execution_deliveries().await?;
             }
             let Some(id) = self.active.get(&job_id).map(|job| job.job.job_id.clone()) else {
                 continue;
@@ -1141,12 +2322,10 @@ where
         stage_run_id: Option<StageRunId>,
         now: Instant,
     ) -> Result<(), WorkerError> {
-        let mut prepared = match self.prepare_dispatch_workspace(
-            dispatch,
-            &run_key,
-            product_session_id,
-            stage_run_id,
-        ) {
+        let mut prepared = match self
+            .prepare_dispatch_workspace(dispatch, &run_key, product_session_id, stage_run_id, &now)
+            .await
+        {
             Ok(prepared) => prepared,
             Err(_error) => {
                 self.reject_dispatch_failure(
@@ -1169,6 +2348,7 @@ where
                 lease: &dispatch.lease,
                 worker_session_id: &prepared.active.worker_session_id,
                 workspace: &prepared.checkout,
+                workspace_revision: &prepared.workspace_revision,
             })
             .await
         {
@@ -1176,7 +2356,8 @@ where
             Err(_error) => {
                 let _ = self
                     .workspaces
-                    .close_job(&dispatch.job.job_id, WorkspaceCloseReason::Failed);
+                    .prepare_close_job(&dispatch.job.job_id, WorkspaceCloseReason::Failed, &now)
+                    .await;
                 self.reject_dispatch_failure(
                     dispatch,
                     JobDispatchResultMessageStatus::RejectedCapability,
@@ -1193,7 +2374,8 @@ where
             let _ = self.codex.close_thread(&thread_id).await;
             let _ = self
                 .workspaces
-                .close_job(&dispatch.job.job_id, WorkspaceCloseReason::Failed);
+                .prepare_close_job(&dispatch.job.job_id, WorkspaceCloseReason::Failed, &now)
+                .await;
             self.reject_dispatch_failure(
                 dispatch,
                 JobDispatchResultMessageStatus::Conflict,
@@ -1225,6 +2407,17 @@ where
         // Flush again after installing this dispatch so those exact retained
         // frames are replayed before a recovered Core turn is submitted.
         self.flush_recovered_durable_execution_deliveries().await?;
+        if let Some(active) = self.active.get(&dispatch.job.job_id.0).cloned()
+            && let Some(open) = self
+                .workspaces
+                .pending_observation_model_open(&active)
+                .map_err(|_| workspace_error())?
+        {
+            self.send_observation_open(open).await?;
+            if !self.active.contains_key(&dispatch.job.job_id.0) {
+                return Ok(());
+            }
+        }
         self.defer_core_interactions = true;
         #[cfg(feature = "test-support")]
         let submission_fault = self.submission_fault.take();
@@ -1282,12 +2475,13 @@ where
                 .any(|record| record.codex_thread_id == *thread_id)
     }
 
-    fn prepare_dispatch_workspace(
+    async fn prepare_dispatch_workspace(
         &mut self,
         dispatch: &JobDispatchMessage,
         run_key: &CodexRunKey,
         product_session_id: ProductSessionId,
         stage_run_id: Option<StageRunId>,
+        now: &Instant,
     ) -> Result<PreparedDispatch, WorkerError> {
         let worker_session_id = self.worker_session_id(dispatch, run_key)?;
         let expected_thread_id = run_key
@@ -1309,9 +2503,18 @@ where
         };
         let checkout = self
             .workspaces
-            .open_for_job(&active, dispatch.replacement_authority.as_ref())
+            .open_for_job_recovering(&active, dispatch.replacement_authority.as_ref(), now)
+            .await
             .map_err(|_| workspace_error())?;
-        Ok(PreparedDispatch { active, checkout })
+        let workspace_revision = self
+            .workspaces
+            .accepted_revision(&active.job.job_id)
+            .map_err(|_| workspace_error())?;
+        Ok(PreparedDispatch {
+            active,
+            checkout,
+            workspace_revision,
+        })
     }
 
     async fn reject_dispatch_failure(
@@ -1410,14 +2613,15 @@ where
         })?;
         let authority = candidate_artifact_authority(active)?;
         let pending = PendingCandidateCompletion {
-            summary: completion.summary.as_str().to_owned(),
-            usage: completion.usage,
+            terminal_fact: CandidateTerminalFact::ReactCompletion {
+                summary: completion.summary.as_str().to_owned(),
+                usage: completion.usage,
+            },
             authority: authority.clone(),
             artifact: None,
         };
         if let Some(existing) = self.pending_candidates.get(job_id) {
-            if existing.summary != pending.summary
-                || existing.usage != pending.usage
+            if existing.terminal_fact != pending.terminal_fact
                 || existing.authority != pending.authority
             {
                 return Err(candidate_artifact_error(
@@ -1625,13 +2829,52 @@ where
         }
         pending.artifact = Some(artifact.clone());
         let pending = pending.clone();
+        if let CandidateTerminalFact::DelegatedFinalAccepted { seed } = &pending.terminal_fact {
+            #[cfg(feature = "test-support")]
+            let final_freeze_fault = self.final_freeze_fault.take();
+            #[cfg(feature = "test-support")]
+            if final_freeze_fault == Some(WorkerFinalFreezeFault::BeforePersist) {
+                return Err(candidate_artifact_error(
+                    "test process stopped before final freeze persistence",
+                ));
+            }
+            let active = self.active.get(job_id).ok_or_else(|| {
+                candidate_artifact_error("accepted delegated candidate lost active authority")
+            })?;
+            let fact = FinalCandidateFreezeFact {
+                candidate_artifact_ref: artifact.clone(),
+                context_pack_digest: seed.context_pack_digest.clone(),
+                counters: seed.counters.clone(),
+                delta_digest: seed.delta_digest.clone(),
+                final_observation: seed.final_observation.clone(),
+                final_receipt: seed.final_receipt.clone(),
+                frozen_at: seed.frozen_at.clone(),
+                identity: seed.identity.clone(),
+                result_revision: seed.result_revision.clone(),
+                schema_version: 1,
+                stop_reason: FinalCandidateFreezeFactStopReason::Accepted,
+            };
+            let _sealed = self
+                .codex
+                .retain_final_candidate_freeze(&active.codex_thread_id, &fact)
+                .map_err(|_| {
+                    candidate_artifact_error("final delegated candidate fact conflicts")
+                })?;
+            #[cfg(feature = "test-support")]
+            if final_freeze_fault == Some(WorkerFinalFreezeFault::AfterPersistBeforeOutcome) {
+                return Err(candidate_artifact_error(
+                    "test process stopped after final freeze persistence",
+                ));
+            }
+        }
+        let (summary, usage) = pending.terminal_fact.outcome();
         let result = self
             .finish_job(
                 job_id,
                 ExecutionOutcomeStatus::Succeeded,
-                &pending.summary,
+                summary,
                 vec![artifact],
-                Some(pending.usage),
+                usage,
                 None,
                 now,
             )
@@ -1707,6 +2950,13 @@ where
             let _ = self.codex.interrupt(&thread_id, &now).await;
             self.flush_codex_execution_messages().await?;
         }
+        if matches!(
+            status,
+            JobCancelAckMessageStatus::Accepted | JobCancelAckMessageStatus::AlreadyCancelling
+        ) && let Some(active) = self.active.get(&key).cloned()
+        {
+            self.cancel_observation_open(&active, &now).await?;
+        }
         let ack = JobCancelAckMessage {
             error: None,
             kind: JobCancelAckMessageKind::JobCancelAck,
@@ -1721,6 +2971,44 @@ where
         };
         self.retain_and_send(ExecutionPortMessage::JobCancelAckMessage(ack))
             .await
+    }
+
+    async fn cancel_observation_open(
+        &mut self,
+        active: &ActiveJob,
+        now: &Instant,
+    ) -> Result<(), WorkerError> {
+        let Some(open) = self
+            .workspaces
+            .cancel_pending_observation_model(active, now)
+            .map_err(|_| workspace_error())?
+        else {
+            return Ok(());
+        };
+        self.sent_observation_opens
+            .remove(&open.model_exchange_id.0);
+        let acknowledgement = ModelAckMessage {
+            ack_sequence: ExecutionAckSequence(0),
+            error: Some(ExecutionPortError {
+                code: ExecutionPortErrorCode::Cancelled,
+                message: "Observer model exchange cancelled by Worker".to_owned(),
+                retryable: false,
+            }),
+            kind: ModelAckMessageKind::ModelAck,
+            lease: open.lease,
+            message_id: observation_cancel_message_id(&open.model_exchange_id),
+            model_exchange_id: open.model_exchange_id,
+            replay_from_sequence: None,
+            schema_version: SchemaVersion::WinwincodeV1,
+            sent_at: now.clone(),
+            session_identity: open.session_identity,
+            status: LeaseWriteStatus::RejectedConflict,
+            worker_session_id: open.worker_session_id,
+        };
+        self.port
+            .send(ExecutionPortMessage::ModelAckMessage(acknowledgement))
+            .await
+            .map_err(|_| execution_port_error())
     }
 
     async fn forward_runtime_trace(
@@ -1804,6 +3092,7 @@ where
                 ));
             }
         }
+        self.cancel_observation_open(&active, &now).await?;
         let close_reason = match status {
             ExecutionOutcomeStatus::Succeeded => WorkspaceCloseReason::Completed,
             ExecutionOutcomeStatus::Cancelled => WorkspaceCloseReason::Cancelled,
@@ -1826,7 +3115,7 @@ where
                 usage,
             },
             schema_version: SchemaVersion::WinwincodeV1,
-            sent_at: now,
+            sent_at: now.clone(),
             session_identity: active.session_identity.clone(),
             worker_session_id: active.worker_session_id.clone(),
         };
@@ -1839,12 +3128,15 @@ where
         // candidate and the outcome remain discoverable and the original
         // mutable workspace is still recoverable on the next dispatch.
         self.workspaces
-            .close_job_if_open(&active.job.job_id, close_reason)
+            .prepare_close_job(&active.job.job_id, close_reason, &now)
+            .await
             .map_err(|_| workspace_error())?;
         if let Some(record) = self.dispatches.get_mut(job_id) {
             record.terminal = true;
         }
         self.active.remove(job_id);
+        self.delegated_progress_ledgers
+            .retain(|(ledger_job_id, _), _| ledger_job_id != job_id);
         let _ = self.codex.close_thread(&active.codex_thread_id).await;
         self.send_retained_delivery(delivery).await?;
         self.flush_codex_execution_messages().await
@@ -2233,6 +3525,11 @@ where
             ) {
                 return Err(codex_model_error());
             }
+            if let ExecutionPortMessage::RuntimeEventMessage(event) = message {
+                let job_id = event.lease.job_id.0.clone();
+                self.forward_runtime_trace(&job_id, event).await?;
+                continue;
+            }
             let terminal_model_ack = matches!(
                 &message,
                 ExecutionPortMessage::ModelAckMessage(acknowledgement)
@@ -2259,6 +3556,19 @@ where
     }
 }
 
+fn cancelling_job_has_late_result(active: Option<&ActiveJob>, polled: &CodexPoll) -> bool {
+    active.is_some_and(|active| active.lifecycle == ActiveJobLifecycle::Cancelling)
+        && matches!(
+            polled,
+            CodexPoll::ChangeBatchProposed(_)
+                | CodexPoll::ChangeBatchProgress(_)
+                | CodexPoll::RepairRequired(_)
+                | CodexPoll::Inconclusive(_)
+                | CodexPoll::Failed(_)
+                | CodexPoll::InfrastructureFailed(_)
+        )
+}
+
 fn namespaced_registration_message_id(namespace: &str) -> ExecutionMessageId {
     let mut digest = Sha256::new();
     digest.update(b"winwincode.worker-registration-message.v1\0");
@@ -2267,6 +3577,31 @@ fn namespaced_registration_message_id(namespace: &str) -> ExecutionMessageId {
     ExecutionMessageId(format!(
         "xmsg_{}",
         &format!("{:x}", digest.finalize())[..26].to_ascii_uppercase()
+    ))
+}
+
+fn observation_ack_message_id(chunk: &ModelChunkMessage) -> ExecutionMessageId {
+    let mut digest = Sha256::new();
+    digest.update(b"winwincode.observation-model-ack.v1\0");
+    digest.update((chunk.model_exchange_id.0.len() as u64).to_be_bytes());
+    digest.update(chunk.model_exchange_id.0.as_bytes());
+    digest.update(chunk.sequence.0.to_be_bytes());
+    ExecutionMessageId(format!(
+        "xmsg_{}",
+        &format!("{:X}", digest.finalize())[..26]
+    ))
+}
+
+fn observation_cancel_message_id(
+    exchange: &winwincode_domain::ModelExchangeId,
+) -> ExecutionMessageId {
+    let mut digest = Sha256::new();
+    digest.update(b"winwincode.observation-model-cancel.v1\0");
+    digest.update((exchange.0.len() as u64).to_be_bytes());
+    digest.update(exchange.0.as_bytes());
+    ExecutionMessageId(format!(
+        "xmsg_{}",
+        &format!("{:X}", digest.finalize())[..26]
     ))
 }
 
@@ -2307,6 +3642,392 @@ fn candidate_delivery_job_id(message: &ExecutionPortMessage) -> Option<&str> {
 /// participate in this local cursor.
 fn recover_message_sequence<Codex: CodexCoreAdapter>(codex: &mut Codex) -> u64 {
     codex.recovered_message_sequence().unwrap_or(0)
+}
+
+fn build_delegated_loop_transition(
+    active: &ActiveJob,
+    history: &[workspace_runtime::DelegatedBatchHistory],
+    phase: DelegatedLoopPhase,
+    observed_at: Instant,
+) -> Result<DelegatedLoopTransition, WorkerError> {
+    let sealed =
+        build_delegated_sealed_context(active, history, phase == DelegatedLoopPhase::Repair)?;
+    Ok(DelegatedLoopTransition {
+        phase,
+        repair_round: sealed.repair_round,
+        context: sealed.context,
+        budget: delegated_loop_budget(),
+        worker_counters: sealed.worker_counters,
+        observed_at,
+    })
+}
+
+fn build_delegated_final_freeze_context(
+    active: &ActiveJob,
+    history: &[workspace_runtime::DelegatedBatchHistory],
+) -> Result<DelegatedSealedContext, WorkerError> {
+    build_delegated_sealed_context(active, history, false)
+}
+
+struct DelegatedSealedContext {
+    context: RepairLoopContextPack,
+    repair_round: i64,
+    worker_counters: RepairLoopCounters,
+}
+
+#[allow(clippy::too_many_lines)]
+fn build_delegated_sealed_context(
+    active: &ActiveJob,
+    history: &[workspace_runtime::DelegatedBatchHistory],
+    repair_phase: bool,
+) -> Result<DelegatedSealedContext, WorkerError> {
+    let current = history.last().ok_or_else(|| {
+        worker_error(
+            WorkerErrorCode::DelegatedPollMismatch,
+            "delegated loop history is empty",
+        )
+    })?;
+    let stage = active.job.stage_input.as_ref().ok_or_else(|| {
+        worker_error(
+            WorkerErrorCode::DelegatedPollMismatch,
+            "delegated loop stage input is missing",
+        )
+    })?;
+    let task = stage.task.as_ref().ok_or_else(|| {
+        worker_error(
+            WorkerErrorCode::DelegatedPollMismatch,
+            "delegated loop task input is missing",
+        )
+    })?;
+    let all_ids = task
+        .acceptance_criterion_ids
+        .iter()
+        .cloned()
+        .collect::<HashSet<_>>();
+    if all_ids.len() != task.acceptance_criterion_ids.len() {
+        return Err(worker_error(
+            WorkerErrorCode::DelegatedPollMismatch,
+            "delegated loop acceptance criteria are duplicated",
+        ));
+    }
+    let mut criteria = HashMap::new();
+    for criterion in &stage.acceptance_criteria {
+        if all_ids.contains(&criterion.criterion_id)
+            && criteria
+                .insert(
+                    criterion.criterion_id.clone(),
+                    ObservationAcceptanceCriterion {
+                        id: criterion.criterion_id.clone(),
+                        summary: delegated_bounded_summary(&criterion.description)?,
+                    },
+                )
+                .is_some()
+        {
+            return Err(worker_error(
+                WorkerErrorCode::DelegatedPollMismatch,
+                "delegated loop acceptance criterion descriptions conflict",
+            ));
+        }
+    }
+    if criteria.len() != all_ids.len() {
+        return Err(worker_error(
+            WorkerErrorCode::DelegatedPollMismatch,
+            "delegated loop acceptance criterion description is missing",
+        ));
+    }
+    let mut completed_ids = HashSet::new();
+    for entry in history {
+        if !entry
+            .proposal
+            .proposal
+            .acceptance_criteria_ids
+            .iter()
+            .all(|id| all_ids.contains(id))
+        {
+            return Err(worker_error(
+                WorkerErrorCode::DelegatedPollMismatch,
+                "delegated proposal acceptance criteria are outside the task",
+            ));
+        }
+        if entry.terminal_state == ChangeBatchProgressState::Accepted {
+            completed_ids.extend(
+                entry
+                    .proposal
+                    .proposal
+                    .acceptance_criteria_ids
+                    .iter()
+                    .cloned(),
+            );
+        }
+    }
+    let completed_acceptance_criteria = task
+        .acceptance_criterion_ids
+        .iter()
+        .filter(|id| completed_ids.contains(*id))
+        .map(|id| criteria.get(id).cloned().ok_or_else(workspace_error))
+        .collect::<Result<Vec<_>, _>>()?;
+    let incomplete_acceptance_criteria = task
+        .acceptance_criterion_ids
+        .iter()
+        .filter(|id| !completed_ids.contains(*id))
+        .map(|id| criteria.get(id).cloned().ok_or_else(workspace_error))
+        .collect::<Result<Vec<_>, _>>()?;
+    let repair_round = i64::try_from(
+        history
+            .iter()
+            .filter(|entry| entry.terminal_state == ChangeBatchProgressState::RepairRequired)
+            .count(),
+    )
+    .map_err(|_| workspace_error())?;
+    let repair_envelope = if repair_phase {
+        let observation = current.receipt.observation.as_ref().ok_or_else(|| {
+            worker_error(
+                WorkerErrorCode::DelegatedPollMismatch,
+                "repair transition has no Observer receipt",
+            )
+        })?;
+        let reason_code = serde_json::to_value(&observation.response.reason_code)
+            .ok()
+            .and_then(|value| value.as_str().map(ToOwned::to_owned))
+            .ok_or_else(workspace_error)?;
+        let validation = current.receipt.validation.as_ref();
+        Some(RepairEnvelope {
+            delta_digest: current
+                .receipt
+                .delta_digest
+                .clone()
+                .ok_or_else(workspace_error)?,
+            diagnostic_digests: validation
+                .into_iter()
+                .flat_map(|receipt| &receipt.checks)
+                .filter_map(|check| check.diagnostic_digest.clone())
+                .collect(),
+            identity: current.proposal.identity.clone(),
+            observed_revision: current
+                .receipt
+                .result_revision
+                .clone()
+                .ok_or_else(workspace_error)?,
+            previous_receipt_ref: history
+                .iter()
+                .rev()
+                .skip(1)
+                .find_map(|entry| entry.receipt.artifact_ref.clone()),
+            reason_code,
+            repair_round,
+            root_cause_summary: observation.response.summary.clone(),
+            snippet_artifact_refs: validation
+                .into_iter()
+                .flat_map(|receipt| receipt.artifact_refs.clone())
+                .collect(),
+        })
+    } else {
+        None
+    };
+    let mut artifact_refs = Vec::new();
+    if let Some(reference) = current.receipt.artifact_ref.clone() {
+        artifact_refs.push(reference);
+    }
+    if let Some(validation) = &current.receipt.validation {
+        for reference in &validation.artifact_refs {
+            if artifact_refs.len() < 16 && !artifact_refs.contains(reference) {
+                artifact_refs.push(reference.clone());
+            }
+        }
+    }
+    let context = RepairLoopContextPack {
+        artifact_refs,
+        completed_acceptance_criteria,
+        context_digest: winwincode_domain::Sha256Digest(format!("sha256:{}", "0".repeat(64))),
+        goal_summary: delegated_bounded_summary(&task.goal)?,
+        identity: current.proposal.identity.clone(),
+        incomplete_acceptance_criteria,
+        latest_observation: current.receipt.observation.clone(),
+        latest_receipt: current.receipt.clone(),
+        observed_revision: current
+            .receipt
+            .result_revision
+            .clone()
+            .ok_or_else(workspace_error)?,
+        proposal_disposition: current.proposal.proposal.disposition.clone(),
+        repair_envelope,
+        schema_version: 1,
+        serialized_byte_count: 0,
+    };
+    let (context, _) =
+        seal_repair_loop_context_pack(context).map_err(delegated_context_seal_error)?;
+    let context_pack_bytes = context.serialized_byte_count;
+    let observer_calls = i64::try_from(
+        history
+            .iter()
+            .filter(|entry| entry.receipt.observation.is_some())
+            .count(),
+    )
+    .map_err(|_| workspace_error())?;
+    Ok(DelegatedSealedContext {
+        repair_round,
+        context,
+        worker_counters: RepairLoopCounters {
+            change_batches: i64::try_from(history.len()).map_err(|_| workspace_error())?,
+            context_pack_bytes,
+            elapsed_millis: 0,
+            observer_calls,
+            primary_model_calls: 0,
+            repair_rounds: repair_round,
+            total_cost_microunits: 0,
+            total_tokens: 0,
+        },
+    })
+}
+
+const fn delegated_repair_round_limit_reached(
+    phase: DelegatedLoopPhase,
+    completed_repairs: usize,
+) -> bool {
+    matches!(phase, DelegatedLoopPhase::Repair) && completed_repairs > 3
+}
+
+fn delegated_context_seal_error(
+    error: winwincode_execution_port::repair_loop_context::RepairLoopContextError,
+) -> WorkerError {
+    if error
+        == winwincode_execution_port::repair_loop_context::RepairLoopContextError::PayloadTooLarge
+    {
+        worker_error(
+            WorkerErrorCode::DelegatedContextLimit,
+            "delegated context pack exceeds its byte limit",
+        )
+    } else {
+        workspace_error()
+    }
+}
+
+#[cfg(test)]
+mod delegated_loop_boundary_tests {
+    use winwincode_execution_port::repair_loop_context::RepairLoopContextError;
+
+    use super::{
+        DelegatedLoopPhase, ObserverMode, ObserverRequestDisposition, RepairLoopStopReason,
+        WorkerErrorCode, delegated_context_seal_error, delegated_repair_round_limit_reached,
+        observer_request_disposition,
+    };
+
+    #[test]
+    fn observer_request_modes_have_one_closed_runtime_disposition() {
+        for (mode, route_configured, expected) in [
+            (
+                ObserverMode::Off,
+                false,
+                ObserverRequestDisposition::Stop(RepairLoopStopReason::HumanReviewRequired),
+            ),
+            (
+                ObserverMode::Off,
+                true,
+                ObserverRequestDisposition::Stop(RepairLoopStopReason::HumanReviewRequired),
+            ),
+            (
+                ObserverMode::AmbiguousOnly,
+                true,
+                ObserverRequestDisposition::Open,
+            ),
+            (
+                ObserverMode::AmbiguousOnly,
+                false,
+                ObserverRequestDisposition::RouteUnavailable,
+            ),
+            (
+                ObserverMode::Shadow,
+                true,
+                ObserverRequestDisposition::Stop(RepairLoopStopReason::InfrastructureError),
+            ),
+            (
+                ObserverMode::Always,
+                true,
+                ObserverRequestDisposition::Stop(RepairLoopStopReason::InfrastructureError),
+            ),
+        ] {
+            assert_eq!(
+                observer_request_disposition(mode, route_configured),
+                expected,
+                "mode={mode:?}, route_configured={route_configured}"
+            );
+        }
+    }
+
+    #[test]
+    fn fourth_projected_repair_stops_before_constructing_round_four_context() {
+        assert!(!delegated_repair_round_limit_reached(
+            DelegatedLoopPhase::Repair,
+            3
+        ));
+        assert!(delegated_repair_round_limit_reached(
+            DelegatedLoopPhase::Repair,
+            4
+        ));
+        assert!(!delegated_repair_round_limit_reached(
+            DelegatedLoopPhase::Continue,
+            4
+        ));
+    }
+
+    #[test]
+    fn oversized_context_maps_to_the_explicit_budget_stop_path() {
+        assert_eq!(
+            delegated_context_seal_error(RepairLoopContextError::PayloadTooLarge).code,
+            WorkerErrorCode::DelegatedContextLimit
+        );
+        assert_eq!(
+            delegated_context_seal_error(RepairLoopContextError::InvalidPayload).code,
+            WorkerErrorCode::Workspace
+        );
+    }
+}
+
+fn delegated_bounded_summary(value: &str) -> Result<String, WorkerError> {
+    let normalized = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    let summary = normalized.chars().take(500).collect::<String>();
+    if summary.is_empty() {
+        return Err(worker_error(
+            WorkerErrorCode::DelegatedPollMismatch,
+            "delegated loop summary is empty",
+        ));
+    }
+    Ok(summary)
+}
+
+const fn delegated_loop_budget() -> RepairLoopBudget {
+    RepairLoopBudget {
+        max_change_batches: 4,
+        max_context_pack_bytes: 131_072,
+        max_observer_calls: 4,
+        max_primary_model_calls: 8,
+        max_repair_rounds: 3,
+        max_total_cost_microunits: 9_007_199_254_740_991,
+        max_total_tokens: 10_000_000,
+        max_wall_time_millis: 3_600_000,
+    }
+}
+
+const fn delegated_loop_stop_summary(reason: &RepairLoopStopReason) -> &'static str {
+    match reason {
+        RepairLoopStopReason::Accepted => "delegated repair loop accepted",
+        RepairLoopStopReason::RepairRoundLimitReached => "delegated repair round limit reached",
+        RepairLoopStopReason::ObserverCallLimitReached => "delegated Observer call limit reached",
+        RepairLoopStopReason::PrimaryModelCallLimitReached => {
+            "delegated Primary Model call limit reached"
+        }
+        RepairLoopStopReason::TotalTokenLimitReached => "delegated token limit reached",
+        RepairLoopStopReason::TotalCostLimitReached => "delegated cost limit reached",
+        RepairLoopStopReason::WallTimeLimitReached => "delegated wall-time limit reached",
+        RepairLoopStopReason::ChangeBatchLimitReached => "delegated ChangeBatch limit reached",
+        RepairLoopStopReason::ContextPackLimitReached => "delegated context limit reached",
+        RepairLoopStopReason::SemanticRisk => "delegated loop requires semantic review",
+        RepairLoopStopReason::InfrastructureError => {
+            "delegated loop stopped on infrastructure error"
+        }
+        RepairLoopStopReason::StateUncertain => "delegated loop state is uncertain",
+        RepairLoopStopReason::HumanReviewRequired => "delegated loop requires human review",
+    }
 }
 
 fn recover_heartbeat_sequence<Codex: CodexCoreAdapter>(

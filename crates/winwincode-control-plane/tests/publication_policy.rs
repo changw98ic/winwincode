@@ -13,8 +13,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use winwincode_api::generated::{
     Actor, ErrorCode, PublicationPublishCommand as ApiPublicationPublishCommand,
     PublicationPublishCommandCommand, PublicationPublishPayload,
-    PublicationTarget as ApiPublicationTarget, PublicationTargetProvider, RepositoryScope,
-    RepositoryScopeKind, UserActor, UserActorKind,
+    PublicationTarget as ApiPublicationTarget, PublicationTargetProvider,
 };
 use winwincode_audit::{AuditActionKind, AuditActor, AuditOutcome, AuditScope, AuditState};
 use winwincode_control_plane::{
@@ -24,6 +23,7 @@ use winwincode_domain::{
     OrganizationId, ProjectId, RepositoryId, RequestId, Revision, SchemaVersion, Sha256Digest,
     UserId, WorkspaceId,
 };
+use winwincode_domain::{RepositoryScope, RepositoryScopeKind, UserActor, UserActorKind};
 use winwincode_publication::{
     PolicyPermission, PublicationAuthorization, PublicationOperation, PublicationOperationKind,
     PublicationPolicyContext, PublicationPolicyDecision, PublicationPolicyEvidence,

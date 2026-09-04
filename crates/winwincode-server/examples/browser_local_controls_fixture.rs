@@ -11,10 +11,8 @@ use std::time::Duration;
 use serde_json::json;
 use tokio::signal::unix::{SignalKind, signal};
 use winwincode_api::generated::{
-    Actor, ControlPlaneWebSocketAuthorizationEpoch, CredentialReferenceCreateCommand,
-    CredentialReferenceCreateCommandCommand, CredentialReferenceCreatePayload, ModelRoute,
-    OrganizationScope, OrganizationScopeKind, RepositoryScope, RepositoryScopeKind, Scope,
-    UserActor, UserActorKind,
+    Actor, CredentialReferenceCreateCommand, CredentialReferenceCreateCommandCommand,
+    CredentialReferenceCreatePayload, ModelRoute, OrganizationScope, OrganizationScopeKind, Scope,
 };
 use winwincode_control_plane::{
     ChatInteractionService, ContinueProductSessionCommand, ControlPlane, ControlPlaneConfig,
@@ -24,12 +22,17 @@ use winwincode_control_plane::{
     ModelToolSupport, ProductSessionCommandContext, ProductSessionExecutionConfig,
     ProductSessionService, ProviderCatalogRequest, ProviderCatalogService, ProviderDescriptor,
     RecordApprovalInteractionCommand, RegisterGateInteractionCommand, RoutableGateDecision,
+    StructuredOutputSupport,
 };
 use winwincode_domain::{
     ApprovalId, CodexThreadId, ControlPlaneEventId, CredentialReferenceId, ExecutionJobId,
     ExecutionMessageId, ExecutionSequence, FencingToken, Instant, LeaseId, ModelExchangeId,
     OrganizationId, ProductSessionId, ProjectId, RepositoryId, RequestId, Revision, SchemaVersion,
     Sha256Digest, UserId, WorkerId, WorkerInstanceId, WorkerSessionId, WorkspaceId,
+};
+use winwincode_domain::{
+    ControlPlaneWebSocketAuthorizationEpoch, RepositoryScope, RepositoryScopeKind, UserActor,
+    UserActorKind,
 };
 use winwincode_execution_port::action_gateway::GateDecision;
 use winwincode_execution_port::generated::ApprovalRequestMessage;
@@ -168,6 +171,7 @@ fn seed_provider_and_credential(storage: &mut SqliteStorage) -> Result<(), Box<d
                 context_window_tokens: 128_000,
                 max_output_tokens: 16_000,
                 tool_support: ModelToolSupport::Parallel,
+                structured_output_support: StructuredOutputSupport::JsonSchemaStrict,
                 reasoning_efforts: vec!["high".into(), "medium".into()],
             }],
         },

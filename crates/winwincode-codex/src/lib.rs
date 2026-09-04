@@ -15,6 +15,8 @@ mod helper_release;
 mod model_bridge;
 pub mod model_port_client;
 mod outbox;
+mod performance;
+pub mod performance_evidence;
 pub mod stage_product;
 pub mod stage_runtime_projection;
 mod store;
@@ -24,10 +26,16 @@ pub use adapter::{
     ProductionCodexInstallation, ProductionCodexOptions,
 };
 #[cfg(feature = "test-support")]
-pub use adapter::{ProductionEventPollFault, ProductionSubmissionFault};
+pub use adapter::{
+    ProductionDelegatedTransitionFault, ProductionEventPollFault, ProductionSubmissionFault,
+};
 pub use contract::{
     ActionRequestTransport, CodexCoreAdapter, CodexPoll, CodexRunKey, CodexRunKeyError,
-    CodexThreadStart, CodexTurnCompletion, DurableExecutionDelivery, WorkerExecutionPort,
-    secret_safe_runtime_summary,
+    CodexThreadStart, CodexTurnCompletion, DelegatedLoopPhase, DelegatedLoopStopFact,
+    DelegatedLoopTransition, DelegatedLoopTransitionOutcome, DelegatedObserverPreflight,
+    DelegatedObserverPreflightOutcome, DelegatedObserverSettlement, DurableExecutionDelivery,
+    WorkerExecutionPort, delegated_loop_turn_id, secret_safe_runtime_summary,
 };
 pub use helper_release::{HelperReleaseManifest, HelperReleaseManifestError};
+pub use winwincode_execution_port::runtime_trace_outbox::{ExecutionMode, ObserverMode};
+pub use winwincode_kernel::RoleExecutionMode;

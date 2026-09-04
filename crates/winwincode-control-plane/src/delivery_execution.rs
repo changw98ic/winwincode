@@ -47,6 +47,7 @@ pub struct PendingDeliveryExecution {
     request_id: RequestId,
     stage_transition: StageAdvanceResult,
     job: ExecutionJob,
+    rollout_gate: Option<crate::rollout_gate::RolloutGateJobSeal>,
 }
 
 impl PendingDeliveryExecution {
@@ -68,6 +69,10 @@ impl PendingDeliveryExecution {
     #[must_use]
     pub fn job(&self) -> &ExecutionJob {
         &self.job
+    }
+
+    pub(crate) const fn rollout_gate(&self) -> Option<&crate::rollout_gate::RolloutGateJobSeal> {
+        self.rollout_gate.as_ref()
     }
 }
 
@@ -223,6 +228,24 @@ pub fn prepare_delivery_advance(
     result: StageAdvanceResult,
     config: DeliveryExecutionConfig,
 ) -> Result<PendingDeliveryExecution, DeliveryExecutionError> {
+    prepare_delivery_advance_inner(request_id, result, config, None)
+}
+
+pub(crate) fn prepare_delivery_advance_with_rollout_gate(
+    request_id: RequestId,
+    result: StageAdvanceResult,
+    config: DeliveryExecutionConfig,
+    rollout_gate: Option<crate::rollout_gate::RolloutGateJobSeal>,
+) -> Result<PendingDeliveryExecution, DeliveryExecutionError> {
+    prepare_delivery_advance_inner(request_id, result, config, rollout_gate)
+}
+
+fn prepare_delivery_advance_inner(
+    request_id: RequestId,
+    result: StageAdvanceResult,
+    config: DeliveryExecutionConfig,
+    rollout_gate: Option<crate::rollout_gate::RolloutGateJobSeal>,
+) -> Result<PendingDeliveryExecution, DeliveryExecutionError> {
     result.validate_projection().map_err(|error| {
         DeliveryExecutionError::InvalidEffect(format!("invalid sealed stage transition: {error}"))
     })?;
@@ -264,6 +287,7 @@ pub fn prepare_delivery_advance(
         request_id,
         stage_transition: result,
         job,
+        rollout_gate,
     })
 }
 
@@ -903,9 +927,10 @@ fn delivery_stage_role_shape_valid(
 
 fn delivery_role_write_mode_valid(job: &ExecutionJob) -> bool {
     match job.execution_profile.as_str() {
-        "executor" | "remediator" => {
-            job.workspace.write_mode == ExecutionWorkspaceWriteMode::Candidate
-        }
+        "executor" | "remediator" => matches!(
+            job.workspace.write_mode,
+            ExecutionWorkspaceWriteMode::Candidate | ExecutionWorkspaceWriteMode::ReadOnly
+        ),
         "requirements"
         | "solution"
         | "planner"

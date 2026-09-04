@@ -13,7 +13,7 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use winwincode_api::generated::{
     Actor, DeliverySubmitVerdictCommand, DeliverySubmitVerdictCommandCommand,
-    DeliverySubmitVerdictPayload, RepositoryScope, RepositoryScopeKind, UserActor, UserActorKind,
+    DeliverySubmitVerdictPayload,
 };
 use winwincode_control_plane::{
     ControlPlane, ControlPlaneConfig, EventPublishError, EventPublisher,
@@ -44,6 +44,7 @@ use winwincode_domain::{
     ExecutionSequence, Instant, OrganizationId, ProductSessionId, ProjectId, RepositoryId,
     RequestId, Revision, SchemaVersion, Sha256Digest, UserId, WorkspaceId,
 };
+use winwincode_domain::{RepositoryScope, RepositoryScopeKind, UserActor, UserActorKind};
 use winwincode_execution_port::generated::{
     ArtifactReference, EncodedPayload, ExecutionEventCategory, ExecutionEventRecord,
     ExecutionOutcomeStatus,

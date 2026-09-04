@@ -568,6 +568,13 @@ impl RuntimeReplayResponder {
             .map_err(RuntimeReplayError::Replay)?;
 
         let (ack_sequence, replay) = match message.status {
+            LeaseWriteStatus::Duplicate if validated.ack_sequence <= before.ack_sequence => {
+                // The Control Plane can deliver an older duplicate response
+                // after a later contiguous acknowledgement was already
+                // applied. Its authority and shape were validated above; the
+                // durable high-water mark remains the canonical receipt.
+                (before.ack_sequence, None)
+            }
             LeaseWriteStatus::Accepted | LeaseWriteStatus::Duplicate => {
                 let ack_sequence = self
                     .machine

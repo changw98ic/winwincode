@@ -8,9 +8,8 @@ use winwincode_api::generated::{
     DeliveryGetQueryQuery, DeliveryStageRuntimeProjectionGetParameters,
     DeliveryStageRuntimeProjectionGetParametersKind, EventReadCursor, PageRequest,
     ProductSessionRuntimeProjectionGetParameters, ProductSessionRuntimeProjectionGetParametersKind,
-    QueryResultResponse, RepositoryScope, RepositoryScopeKind, RuntimeProjectionEventCursor,
-    RuntimeProjectionGetParameters, RuntimeProjectionGetQuery, RuntimeProjectionGetQueryQuery,
-    StrongFlowReadCursor, UserActor, UserActorKind,
+    QueryResultResponse, RuntimeProjectionEventCursor, RuntimeProjectionGetParameters,
+    RuntimeProjectionGetQuery, RuntimeProjectionGetQueryQuery, StrongFlowReadCursor,
 };
 use winwincode_control_plane::{
     AggregateJournalKey, AggregateJournalRecord, CommitReceipt, ControlPlane, EventPublishError,
@@ -58,6 +57,7 @@ use winwincode_domain::{
     ProjectId, RepositoryId, RequestId, Revision, SchemaVersion, Sha256Digest, StageRunId, UserId,
     WorkerSessionId, WorkspaceId,
 };
+use winwincode_domain::{RepositoryScope, RepositoryScopeKind, UserActor, UserActorKind};
 use winwincode_execution_port::generated::{ExecutionEventCategory, ExecutionEventRecord};
 use winwincode_storage::{
     ProjectionReadCut, ReceiptIdentity, ReceiptScopeKey, SqliteStorage, StateCommit,

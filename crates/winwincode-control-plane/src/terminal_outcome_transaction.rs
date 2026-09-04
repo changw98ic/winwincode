@@ -6,7 +6,7 @@ use std::{collections::HashSet, fmt};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use winwincode_api::generated::{CommandEnvelope, CommandName, RepositoryScope};
+use winwincode_api::generated::{CommandEnvelope, CommandName};
 use winwincode_audit::{
     AuditAction, AuditEvent, AuditEventId, AuditExecutionIdentity, AuditExecutionSubjectKind,
     AuditState, AuditSubject,
@@ -20,6 +20,7 @@ use winwincode_delivery::{
     domain::{Delivery, StageRunStatus},
     store::{ApplyDeliveryTerminalOutcome, DeliveryCommand, DeliveryCommandPort, DeliveryStore},
 };
+use winwincode_domain::RepositoryScope;
 use winwincode_domain::{
     CodexThreadId, ControlPlaneEventId, DeliveryId, DeliveryTaskId, ExecutionAckSequence,
     ExecutionJobId, ExecutionMessageId, Instant, ProductSessionId, RequestId, SchemaVersion,
@@ -148,7 +149,7 @@ pub(crate) fn execute_at(
     validate_trusted_lease_time(facts, server_time)?;
 
     let (durable, job) = load_durable_execution_job(storage, &message.lease.job_id)?;
-    let context = TerminalContext::from_durable(scope, &durable, &job)?;
+    let context = TerminalContext::from_durable(scope, &durable, &job, server_time)?;
     let current = load_current_delivery(storage, &context.delivery_id)?;
     let session_identity = match validate_current_job_binding(&current, &job, &context) {
         Ok(identity) => identity,
@@ -192,7 +193,7 @@ pub(crate) fn verifier_policy_authority_at(
     validate_message_shape(message)?;
     validate_trusted_lease_time(facts, server_time)?;
     let (durable, job) = load_durable_execution_job(storage, &message.lease.job_id)?;
-    let context = TerminalContext::from_durable(scope, &durable, &job)?;
+    let context = TerminalContext::from_durable(scope, &durable, &job, server_time)?;
     let current = load_current_delivery(storage, &context.delivery_id)?;
     let session_identity = match validate_current_job_binding(&current, &job, &context) {
         Ok(identity) => identity,
@@ -324,6 +325,7 @@ impl TerminalPhase {
 }
 
 struct TerminalContext {
+    accepted_at: Instant,
     scope_key: ReceiptScopeKey,
     repository_scope: RepositoryScope,
     delivery_id: DeliveryId,
@@ -338,6 +340,7 @@ impl TerminalContext {
         scope: &RepositoryScope,
         durable: &DurableOutboxEvent,
         job: &ExecutionJob,
+        accepted_at: &Instant,
     ) -> Result<Self, StorageError> {
         let ExecutionScope::DeliveryStageExecutionScope(job_scope) = &job.scope else {
             return Err(StorageError::invalid_input(
@@ -357,6 +360,7 @@ impl TerminalContext {
         let job_event = DurableExecutionJobRef::new(durable);
         validate_durable_job_ref(&job_event)?;
         Ok(Self {
+            accepted_at: accepted_at.clone(),
             scope_key,
             repository_scope: scope.clone(),
             delivery_id: job_scope.delivery_id.clone(),
@@ -421,6 +425,7 @@ struct TerminalAcceptedEvent {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct AcceptedTerminalOutcome {
     artifacts: Vec<ArtifactReference>,
+    accepted_at_millis: u64,
     codex_thread_id: Option<CodexThreadId>,
     finished_at_millis: u64,
     last_event_sequence: ExecutionAckSequence,
@@ -443,6 +448,7 @@ struct PersistedTerminalAuthority {
     issued_at: Instant,
     expires_at: Instant,
     artifacts: Vec<ArtifactReference>,
+    accepted_at_millis: u64,
     codex_thread_id: Option<CodexThreadId>,
     finished_at_millis: u64,
     last_event_sequence: ExecutionAckSequence,
@@ -486,7 +492,15 @@ fn persisted_terminal_authority(
     message: &JobOutcomeMessage,
     context: &TerminalContext,
     disposition: PersistedTerminalDisposition,
+    accepted_at: &Instant,
 ) -> Result<PersistedTerminalAuthority, StorageError> {
+    let finished_at_millis = instant_millis(&message.outcome.finished_at)?;
+    let accepted_at_millis = instant_millis(accepted_at)?;
+    if accepted_at_millis < finished_at_millis {
+        return Err(StorageError::invalid_input(
+            "terminal acceptance precedes the Worker finish time",
+        ));
+    }
     Ok(PersistedTerminalAuthority {
         schema_version: 1,
         delivery_id: context.delivery_id.clone(),
@@ -502,8 +516,9 @@ fn persisted_terminal_authority(
         issued_at: message.lease.issued_at.clone(),
         expires_at: message.lease.expires_at.clone(),
         artifacts: message.outcome.artifacts.clone(),
+        accepted_at_millis,
         codex_thread_id: message.outcome.codex_thread_id.clone(),
-        finished_at_millis: instant_millis(&message.outcome.finished_at)?,
+        finished_at_millis,
         last_event_sequence: message.outcome.last_event_sequence.clone(),
         status: message.outcome.status.clone(),
         disposition,
@@ -820,13 +835,20 @@ fn commit_pending_handoff(
         message,
         context,
         PersistedTerminalDisposition::PendingHandoff,
+        &context.accepted_at,
     )?;
     let authority_payload = serde_json::to_vec(&authority).map_err(|error| {
         StorageError::adapter(format!(
             "failed to encode terminal handoff authority: {error}"
         ))
     })?;
-    let accepted = terminal_accepted_event(message, phase, context, current.revision())?;
+    let accepted = terminal_accepted_event(
+        message,
+        phase,
+        context,
+        current.revision(),
+        &context.accepted_at,
+    )?;
     let public_scope = crate::public_repository_scope(&context.repository_scope);
     let public_source = PublicEventSource::SessionExecutionWorker {
         worker_id: message.lease.worker_id.clone(),
@@ -913,7 +935,8 @@ fn commit_terminal(
             StorageError::invalid_input("stage.terminal did not stage a journal publication")
         })?;
     let revision = mutation.snapshot.revision();
-    let accepted = terminal_accepted_event(message, phase, context, revision)?;
+    let accepted =
+        terminal_accepted_event(message, phase, context, revision, &context.accepted_at)?;
     let public_scope = crate::public_repository_scope(&context.repository_scope);
     let public_source = PublicEventSource::SessionExecutionWorker {
         worker_id: message.lease.worker_id.clone(),
@@ -957,6 +980,7 @@ fn commit_terminal(
         PersistedTerminalDisposition::Settled {
             delivery_revision: revision,
         },
+        &context.accepted_at,
     )?;
     let commit = StateCommit::new(
         phase.receipt_identity.clone(),
@@ -1106,6 +1130,58 @@ pub(crate) fn load_settled_terminal_authority(
         .map_err(|error| StorageError::invalid_input(error.to_string()))
 }
 
+/// Durable CP terminal facts used by the closed performance-evaluation join.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct EvaluationTerminalAuthorityProjection {
+    pub(crate) artifacts: Vec<ArtifactReference>,
+    pub(crate) worker_finished_at_millis: u64,
+    pub(crate) accepted_at_millis: u64,
+    pub(crate) terminal_revision: u64,
+}
+
+/// Reads one successfully settled terminal authority without trusting a
+/// caller-supplied finish or acceptance time.
+pub(crate) fn load_evaluation_terminal_authority(
+    storage: &dyn ProductStateStorage,
+    job_id: &ExecutionJobId,
+) -> Result<Option<EvaluationTerminalAuthorityProjection>, StorageError> {
+    let Some(stored) = storage.load_state(&terminal_authority_stream_id(job_id))? else {
+        return Ok(None);
+    };
+    let persisted = decode_terminal_authority(&stored.payload)?;
+    let terminal_revision = match (&persisted.disposition, stored.revision) {
+        (PersistedTerminalDisposition::Settled { delivery_revision }, 1)
+        | (
+            PersistedTerminalDisposition::Consumed {
+                delivery_revision, ..
+            },
+            2,
+        ) => *delivery_revision,
+        (PersistedTerminalDisposition::PendingHandoff, 1) => return Ok(None),
+        _ => {
+            return Err(StorageError::invalid_input(
+                "performance terminal authority revision is invalid",
+            ));
+        }
+    };
+    if persisted.schema_version != 1
+        || persisted.job_id != *job_id
+        || persisted.status != ExecutionOutcomeStatus::Succeeded
+        || terminal_revision == 0
+        || persisted.accepted_at_millis < persisted.finished_at_millis
+    {
+        return Err(StorageError::invalid_input(
+            "performance terminal authority is incomplete or foreign",
+        ));
+    }
+    Ok(Some(EvaluationTerminalAuthorityProjection {
+        artifacts: persisted.artifacts,
+        worker_finished_at_millis: persisted.finished_at_millis,
+        accepted_at_millis: persisted.accepted_at_millis,
+        terminal_revision,
+    }))
+}
+
 fn decode_terminal_authority(payload: &[u8]) -> Result<PersistedTerminalAuthority, StorageError> {
     let persisted: PersistedTerminalAuthority =
         serde_json::from_slice(payload).map_err(|error| {
@@ -1222,6 +1298,7 @@ fn terminal_accepted_event(
     phase: &TerminalPhase,
     context: &TerminalContext,
     revision: u64,
+    accepted_at: &Instant,
 ) -> Result<NewOutboxEvent, StorageError> {
     let payload = TerminalAcceptedEvent {
         delivery_id: context.delivery_id.clone(),
@@ -1231,6 +1308,7 @@ fn terminal_accepted_event(
         message_id: message.message_id.clone(),
         outcome: AcceptedTerminalOutcome {
             artifacts: message.outcome.artifacts.clone(),
+            accepted_at_millis: instant_millis(accepted_at)?,
             codex_thread_id: message.outcome.codex_thread_id.clone(),
             finished_at_millis: instant_millis(&message.outcome.finished_at)?,
             last_event_sequence: message.outcome.last_event_sequence.clone(),
@@ -1283,6 +1361,7 @@ fn validate_receipt(
         StorageError::adapter(format!("failed to encode terminal outcome event: {error}"))
     })?;
     let expected_finished_at = instant_millis(&message.outcome.finished_at)?;
+    let lease_expires_at = instant_millis(&message.lease.expires_at)?;
     let pending_handoff = receipt.stream_id == terminal_authority_stream_id(&payload.job_id);
     let receipt_shape_is_valid = if pending_handoff {
         receipt.revision == 1 && receipt.events.len() == 2
@@ -1299,6 +1378,8 @@ fn validate_receipt(
         || payload.outcome.artifacts != message.outcome.artifacts
         || payload.outcome.codex_thread_id != message.outcome.codex_thread_id
         || payload.outcome.finished_at_millis != expected_finished_at
+        || payload.outcome.accepted_at_millis < expected_finished_at
+        || payload.outcome.accepted_at_millis >= lease_expires_at
         || payload.outcome.last_event_sequence != message.outcome.last_event_sequence
         || payload.outcome.status != message.outcome.status
         || payload.execution_job.event_id != format!("execution-job:{}", payload.job_id.0)

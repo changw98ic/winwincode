@@ -4,7 +4,6 @@
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use sha2::{Digest as _, Sha256};
-use winwincode_api::generated::RepositoryScope;
 use winwincode_delivery::{
     application::{
         solution_review::{PreparedPlannerSolutionReview, prepare_planner_solution_review},
@@ -12,6 +11,7 @@ use winwincode_delivery::{
     },
     domain::{Delivery, DeliveryStage, StageRunActorType},
 };
+use winwincode_domain::RepositoryScope;
 use winwincode_execution_port::generated::ExecutionEventCategory;
 use winwincode_storage::{ProductStateStorage, StorageError};
 

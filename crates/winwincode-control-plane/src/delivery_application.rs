@@ -23,7 +23,7 @@ use winwincode_api::generated::{
     DeliverySubmitVerdictCompletedResponseCommand, DeliverySubmitVerdictCompletedResponseOutcome,
     DeliveryTaskCountsProjection, DeliveryUpdateSpecCommand, DeliveryUpdateSpecCompletedResponse,
     DeliveryUpdateSpecCompletedResponseCommand, DeliveryUpdateSpecCompletedResponseOutcome,
-    ErrorCode, PageInfo, RepositoryScope, Scope,
+    ErrorCode, PageInfo, Scope,
 };
 use winwincode_delivery::{
     application::{
@@ -38,6 +38,7 @@ use winwincode_delivery::{
     },
     store::{DeliveryQuery, DeliveryQueryPort, DeliveryStore},
 };
+use winwincode_domain::RepositoryScope;
 use winwincode_domain::{
     Count, DeliveryId, OpaqueCursor, RequestId, Revision, SchemaVersion, Sha256Digest,
 };
@@ -52,7 +53,7 @@ use crate::{
     delivery_command_transaction::TrustedDeliverySpecFacts,
     delivery_execution::{
         DeliveryExecutionConfig, DeliveryExecutionError, ExecutionJobDispatcher,
-        prepare_delivery_advance,
+        prepare_delivery_advance_with_rollout_gate,
     },
     delivery_transaction::{StagedDeliveryJournal, delivery_journal_key, delivery_stream_id},
 };
@@ -179,6 +180,7 @@ pub struct DeliveryAdvanceAuthority {
     pub source_ref: Option<DeliverySourceRef>,
     pub transition: StageAdvanceResult,
     pub execution: Option<DeliveryExecutionConfig>,
+    pub(crate) rollout_gate: Option<crate::rollout_gate::RolloutGateJobSeal>,
     pub(crate) terminal_handoff:
         Option<crate::terminal_outcome_transaction::DeliveryTerminalHandoff>,
 }
@@ -571,6 +573,7 @@ impl ControlPlane {
             source_ref,
             transition,
             execution,
+            rollout_gate,
             terminal_handoff,
         } = authority;
         let Scope::RepositoryScope(scope) = &command.scope else {
@@ -580,7 +583,7 @@ impl ControlPlane {
         };
         match &transition.effect {
             StageAdvanceEffect::Review(_) => {
-                if execution.is_some() {
+                if execution.is_some() || rollout_gate.is_some() {
                     return Err(DeliveryApplicationError::TrustedFactsUnavailable(
                         "human Delivery stage unexpectedly carried execution configuration"
                             .to_owned(),
@@ -606,9 +609,13 @@ impl ControlPlane {
                         "Codex Delivery stage has no trusted execution configuration".to_owned(),
                     )
                 })?;
-                let pending =
-                    prepare_delivery_advance(command.request_id.clone(), transition, config)
-                        .map_err(DeliveryApplicationError::Execution)?;
+                let pending = prepare_delivery_advance_with_rollout_gate(
+                    command.request_id.clone(),
+                    transition,
+                    config,
+                    rollout_gate,
+                )
+                .map_err(DeliveryApplicationError::Execution)?;
                 let mut dispatcher = self.delivery_dispatcher.take().ok_or_else(|| {
                     DeliveryApplicationError::TrustedFactsUnavailable(
                         "Delivery execution dispatcher is not installed".to_owned(),
@@ -631,7 +638,7 @@ impl ControlPlane {
                     .committed_revision)
             }
             StageAdvanceEffect::Clarify(_) => {
-                if execution.is_some() || terminal_handoff.is_some() {
+                if execution.is_some() || rollout_gate.is_some() || terminal_handoff.is_some() {
                     return Err(DeliveryApplicationError::TrustedFactsUnavailable(
                         "clarification transition unexpectedly carried execution configuration"
                             .to_owned(),

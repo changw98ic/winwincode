@@ -21,8 +21,7 @@ use winwincode_api::generated::{
     ControlPlaneWebSocketSubscription, ControlPlaneWebSocketWorkerHealthChangedEvent,
     ControlPlaneWebSocketWorkerHealthChangedEventTypeValue, DeliveryEventReadStream,
     DeliveryEventReadStreamKind, EventReadStream, LeaseEventReadStream, LeaseEventReadStreamKind,
-    RepositoryScope, RepositoryScopeKind, Scope, ScopeEventReadStream, ScopeEventReadStreamKind,
-    UserActor, UserActorKind,
+    Scope, ScopeEventReadStream, ScopeEventReadStreamKind,
 };
 use winwincode_domain::{
     ControlPlaneEventId, ControlPlaneWebSocketAuthorizationEpoch,
@@ -30,6 +29,7 @@ use winwincode_domain::{
     OrganizationId, ProjectId, RepositoryId, RequestId, Revision, Sha256Digest, UserId, WorkerId,
     WorkspaceId,
 };
+use winwincode_domain::{RepositoryScope, RepositoryScopeKind, UserActor, UserActorKind};
 use winwincode_server::{
     AuthenticatedPrincipal, CommittedEventContext, DurableEventHub, DurableEventHubClock,
     DurableEventHubConfig,
