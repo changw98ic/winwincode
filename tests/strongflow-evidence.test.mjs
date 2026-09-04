@@ -1061,7 +1061,7 @@ function deepLink() {
       const parameters = new URLSearchParams(state.hash.slice(state.hash.indexOf('?') + 1))
       const tab = parameters.get('tab')
       return {
-        tab: tab === 'tests' || tab === 'logs' ? tab : 'evidence',
+        tab: tab === 'preview' || tab === 'tests' || tab === 'logs' ? tab : 'evidence',
         evidenceId: parameters.get('evidence'),
       }
     },
@@ -1107,8 +1107,14 @@ test('the workbench renders tab navigation, bounded rows, and candidate binding 
   const tablist = findByClass(rootElement, 'wwc-strongflow-evidence-tabs')
   assert.equal(tablist.getAttribute('role'), 'tablist')
   const tabs = tablist.children
-  assert.deepEqual(tabs.map(tab => tab.textContent), ['Evidence', 'Tests', 'Logs'])
-  assert.deepEqual(tabs.map(tab => tab.getAttribute('aria-selected')), ['true', 'false', 'false'])
+  assert.deepEqual(
+    tabs.map(tab => tab.textContent),
+    ['Evidence', 'Preview', 'Tests', 'Logs'],
+  )
+  assert.deepEqual(
+    tabs.map(tab => tab.getAttribute('aria-selected')),
+    ['true', 'false', 'false', 'false'],
+  )
   const rows = findAllByClass(rootElement, 'wwc-strongflow-evidence-row')
   assert.equal(rows.length, 2)
   const omitted = findAllByClass(rootElement, 'wwc-strongflow-omitted')
@@ -1124,8 +1130,11 @@ test('tabs own real panels and the keyed Drawer keeps one detail node with acces
   const { rootElement, mounted } = mountedWorkbench({ client })
   const tabs = findByClass(rootElement, 'wwc-strongflow-evidence-tabs').children
   const panels = findAllByClass(rootElement, 'wwc-strongflow-evidence-panel')
-  assert.equal(panels.length, 3)
-  assert.deepEqual(panels.map(panel => panel.getAttribute('role')), ['tabpanel', 'tabpanel', 'tabpanel'])
+  assert.equal(panels.length, 4)
+  assert.deepEqual(
+    panels.map(panel => panel.getAttribute('role')),
+    ['tabpanel', 'tabpanel', 'tabpanel', 'tabpanel'],
+  )
   assert.deepEqual(tabs.map(tab => tab.getAttribute('aria-controls')), panels.map(panel => panel.id))
   assert.equal(panels.filter(panel => !panel.hidden).length, 1)
   const row = findAllByClass(rootElement, 'wwc-strongflow-evidence-row')[0]
@@ -1180,21 +1189,33 @@ test('workbench shows bounded Verdict failures, criterion joins, and every Artif
 test('tab selection moves with the keyboard, filters rows, and writes a bounded deep link', () => {
   const { rootElement, link, mounted } = mountedWorkbench()
   const tabs = findByClass(rootElement, 'wwc-strongflow-evidence-tabs').children
+  // Evidence -> Preview: the Preview tab keeps the browser Evidence only.
   tabs[0].emit('keydown', { key: 'ArrowRight', preventDefault() {} })
+  assert.deepEqual(
+    findAllByClass(rootElement, 'wwc-strongflow-preview-row').map(row => row.dataset.previewKind),
+    ['runtime-log', 'test-run'],
+  )
+  // The hidden Evidence tab keeps its keyed rows mounted; Preview adds its own.
+  assert.equal(findByClass(rootElement, 'wwc-strongflow-preview-list').children.length, 2)
+  assert.equal(tabs[1].getAttribute('aria-selected'), 'true')
+  assert.equal(link.state.hash.includes('tab=preview'), true)
+  // Preview -> Tests.
+  tabs[1].emit('keydown', { key: 'ArrowRight', preventDefault() {} })
   assert.deepEqual(
     findAllByClass(rootElement, 'wwc-strongflow-evidence-row').map(row => row.dataset.evidenceType),
     ['test'],
   )
-  assert.equal(tabs[1].getAttribute('aria-selected'), 'true')
+  assert.equal(tabs[2].getAttribute('aria-selected'), 'true')
   assert.equal(link.state.hash.includes('tab=tests'), true)
-  tabs[1].emit('keydown', { key: 'ArrowRight', preventDefault() {} })
+  // Tests -> Logs.
+  tabs[2].emit('keydown', { key: 'ArrowRight', preventDefault() {} })
   assert.deepEqual(
     findAllByClass(rootElement, 'wwc-strongflow-evidence-row').map(row => row.dataset.evidenceType),
     ['command', 'runtime_event'],
   )
   assert.equal(link.state.hash.includes('tab=logs'), true)
   assert.equal(link.state.hash.includes(`delivery=${deliveryId}`), true)
-  tabs[2].emit('keydown', { key: 'Home', preventDefault() {} })
+  tabs[3].emit('keydown', { key: 'Home', preventDefault() {} })
   assert.equal(tabs[0].getAttribute('aria-selected'), 'true')
   mounted.close()
 })
@@ -1220,7 +1241,8 @@ test('opening a row from the list opens the detail drawer with sanitized provena
   )
   assert.equal(link.state.hash.includes(`evidence=${evidenceId(1)}`), true)
   const artifact = findByClass(rootElement, 'wwc-strongflow-evidence-artifact')
-  assert.match(artifact.textContent, /not available/u)
+  // The producer retained no Evidence-to-Artifact link, and the panel says so.
+  assert.match(artifact.textContent, /No authoritative Artifact link/u)
   assert.equal(client.queries.length, 1)
   findByClass(rootElement, 'wwc-drawer-close').emit('click')
   assert.equal(findByClass(rootElement, 'wwc-strongflow-evidence-detail').hidden, true)
@@ -1269,7 +1291,7 @@ test('log search filters only the loaded text and never claims the whole file', 
     })
   })
   const { rootElement, mounted } = mountedWorkbench({ client })
-  const logsTab = findByClass(rootElement, 'wwc-strongflow-evidence-tabs').children[2]
+  const logsTab = findByClass(rootElement, 'wwc-strongflow-evidence-tabs').children[3]
   logsTab.emit('click')
   const rows = findAllByClass(rootElement, 'wwc-strongflow-evidence-row')
   rows.find(row => row.dataset.evidenceId === evidenceId(2)).emit('click')
@@ -1300,7 +1322,8 @@ test('a deep link opens the requested tab and Evidence without extra clicks', as
   link.state.hash = `#/strongflow?delivery=${deliveryId}&tab=tests&evidence=${evidenceId(1)}`
   const { rootElement, mounted } = mountedWorkbench({ deepLink: link })
   const tabs = findByClass(rootElement, 'wwc-strongflow-evidence-tabs').children
-  assert.equal(tabs[1].getAttribute('aria-selected'), 'true')
+  // Tests is the third tab after the Preview tab was added.
+  assert.equal(tabs[2].getAttribute('aria-selected'), 'true')
   await new Promise(resolve => { setImmediate(resolve) })
   assert.notEqual(findByClass(rootElement, 'wwc-strongflow-evidence-detail'), null)
   mounted.close()

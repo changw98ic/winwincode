@@ -19,7 +19,7 @@ import {
   type StrongFlowHistorySelection,
 } from './strongflow-history-selection.js'
 
-export type StrongFlowEvidenceTabId = 'evidence' | 'tests' | 'logs'
+export type StrongFlowEvidenceTabId = 'evidence' | 'preview' | 'tests' | 'logs'
 
 /** Longest repository-relative path the canonical portable_path rules accept. */
 const MAX_CANDIDATE_PATH_LENGTH = 4_096
@@ -147,7 +147,7 @@ export function parseStrongFlowRouteHash(hash: string): StrongFlowRoute {
     candidatePath: candidatePathParameter(parameters),
     candidateView: strongFlowCandidateViewFromHash(hash) ?? 'unified',
     comparison: strongFlowComparisonFromHash(hash),
-    evidenceTab: tab === 'tests' || tab === 'logs' ? tab : 'evidence',
+    evidenceTab: tab === 'preview' || tab === 'tests' || tab === 'logs' ? tab : 'evidence',
     evidenceId: canonicalParameter<EvidenceId>(parameters, 'evidence', 'EvidenceId'),
   })
 }
