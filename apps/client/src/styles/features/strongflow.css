@@ -446,6 +446,30 @@
   font-size: var(--wwc-font-size-xs);
 }
 
+/*
+ * Windowed lists render one bounded window of records.  The row height and the
+ * viewport row count come from the scroller's inline custom properties, which
+ * the windowed list writes from the same constants its scroll math uses, so the
+ * painted rows and the spacer geometry can never disagree.
+ */
+.wwc-delivery-list-scroll {
+  max-height: calc(var(--wwc-window-viewport-rows) * var(--wwc-window-row-height));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.wwc-window-spacer {
+  width: 100%;
+  height: var(--wwc-window-spacer-height, var(--wwc-space-0));
+}
+
+.wwc-window-scroller > * > * {
+  box-sizing: border-box;
+  height: var(--wwc-window-row-height);
+  margin-bottom: var(--wwc-space-0);
+  overflow: hidden;
+}
+
 .wwc-strongflow-details {
   display: grid;
   min-width: var(--wwc-space-0);

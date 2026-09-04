@@ -24,6 +24,21 @@ export const DEFAULT_STRONGFLOW_RENDER_LIMITS: StrongFlowRenderLimits = Object.f
   activities: 100,
 })
 
+/**
+ * Exact rendered height of one windowed list row in CSS pixels.  It is also
+ * written onto the scroller as the `--wwc-window-row-height` custom property,
+ * so the scroll math and the painted row height cannot diverge.  `tokens.css`
+ * declares the same value as the design token fallback and the UI-605 suite
+ * asserts the two agree.
+ */
+export const STRONGFLOW_WINDOW_ROW_HEIGHT_PX = 60
+
+/** Rows a windowed list always renders for the visible viewport. */
+export const STRONGFLOW_WINDOW_VIEWPORT_ROWS = 24
+
+/** Extra rows rendered above and below the viewport to hide scroll work. */
+export const STRONGFLOW_WINDOW_OVERSCAN_ROWS = 6
+
 export interface BoundedItems<Value> {
   readonly items: readonly Value[]
   readonly omitted: number

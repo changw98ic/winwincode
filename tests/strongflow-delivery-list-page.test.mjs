@@ -465,8 +465,10 @@ test('the loaded note stays honest about visible and loaded counts', () => {
     hasMore: true,
   }))
   const note = findByClass(rootElement, 'wwc-delivery-loaded-note')
-  assert.match(note.textContent, /1 of 3/u)
-  assert.match(note.textContent, /3/u)
+  assert.match(note.textContent, /Rendered 1 of 1 matching deliveries/u)
+  assert.match(note.textContent, /3 loaded/u)
+  assert.match(note.textContent, /0 loaded Deliveries are not rendered in this window/u)
+  assert.match(note.textContent, /more Deliveries are available on the server/u)
   page.close()
 })
 

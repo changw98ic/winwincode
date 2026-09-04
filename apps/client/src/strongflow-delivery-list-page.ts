@@ -7,10 +7,23 @@ import type {
 import { DeliveryStatus as DeliveryStatusVocabulary } from './generated/contracts.js'
 import { scopeHash, type ScopeRouteSelection } from './core/scope-context.js'
 import { mountKeyedCollection, type KeyedCollectionView } from './components/keyed-collection.js'
+import {
+  mountWindowedList,
+  type WindowedListView,
+} from './components/windowed-list.js'
 import type {
   StrongFlowDeliveryListState,
   StrongFlowDeliveryListViewModel,
 } from './strongflow-delivery-list-view-model.js'
+import {
+  boundedItems,
+  DEFAULT_STRONGFLOW_RENDER_LIMITS,
+  strongFlowElement,
+  STRONGFLOW_WINDOW_OVERSCAN_ROWS,
+  STRONGFLOW_WINDOW_ROW_HEIGHT_PX,
+  STRONGFLOW_WINDOW_VIEWPORT_ROWS,
+  type StrongFlowRenderLimits,
+} from './strongflow-rendering.js'
 
 export type StrongFlowDeliveryListView = 'list' | 'kanban'
 
@@ -23,6 +36,8 @@ export interface StrongFlowDeliveryListPageOptions {
   readonly onViewChange?: (view: StrongFlowDeliveryListView) => void
   /** Presentation-only capability; Server authorization remains authoritative. */
   readonly readOnly?: boolean
+  /** Render caps; defaults keep the list to one bounded window. */
+  readonly limits?: StrongFlowRenderLimits
 }
 
 export interface StrongFlowDeliveryListPage {
@@ -72,10 +87,14 @@ export function mountStrongFlowDeliveryList(
 ): StrongFlowDeliveryListPage {
   const document = options.root.ownerDocument
   const readOnly = options.readOnly === true
+  const limits: StrongFlowRenderLimits = options.limits ?? DEFAULT_STRONGFLOW_RENDER_LIMITS
   let view: StrongFlowDeliveryListView = options.view ?? 'list'
   let activeDelivery: DeliveryProjection | null = null
   let currentState: StrongFlowDeliveryListState | null = null
   let dragCard: DragCard | null = null
+  /** Identity the window last revealed, so deep links scroll only once. */
+  let revealedDeliveryId: DeliveryProjection['deliveryId'] | null = null
+  let kanbanOmittedCount = 0
 
   const heading = document.createElement('h2')
   heading.className = 'wwc-strongflow-deliveries-heading'
@@ -172,10 +191,55 @@ export function mountStrongFlowDeliveryList(
   listView.className = 'wwc-delivery-list-view'
   const list = document.createElement('ul')
   list.className = 'wwc-strongflow-delivery-list'
-  listView.append(list)
+
+  const rows = new WeakMap<HTMLLIElement, {
+    readonly link: HTMLAnchorElement
+    readonly status: HTMLElement
+  }>()
+
+  function renderRow(item: HTMLLIElement, delivery: DeliveryProjection): void {
+    const row = rows.get(item)
+    if (row === undefined) return
+    row.link.href = deliveryRoute(delivery.deliveryId, options.routeScope)
+    row.link.textContent = delivery.title
+    row.link.dataset.deliveryId = delivery.deliveryId
+    row.status.textContent = statusText(delivery)
+    if (activeDelivery?.deliveryId === delivery.deliveryId) {
+      row.link.setAttribute('aria-current', 'page')
+    } else {
+      row.link.removeAttribute('aria-current')
+    }
+  }
+
+  // The list itself is the keyed window host; the scroller around it hosts the
+  // spacers that keep native scrolling exact for the records left out of the DOM.
+  const listCollection = mountWindowedList<DeliveryProjection, string, HTMLLIElement>({
+    document,
+    scroller: strongFlowElement(document, 'div', 'wwc-delivery-list-scroll'),
+    content: list,
+    key: delivery => delivery.deliveryId,
+    create() {
+      const item = document.createElement('li')
+      const link = document.createElement('a')
+      const deliveryStatus = document.createElement('span')
+      item.append(link, deliveryStatus)
+      rows.set(item, { link, status: deliveryStatus })
+      return item
+    },
+    update(item, delivery) { renderRow(item, delivery) },
+    remove(item) { rows.delete(item) },
+    rowHeight: STRONGFLOW_WINDOW_ROW_HEIGHT_PX,
+    viewportRows: STRONGFLOW_WINDOW_VIEWPORT_ROWS,
+    overscan: STRONGFLOW_WINDOW_OVERSCAN_ROWS,
+  })
+  listView.append(listCollection.root)
 
   const kanbanView = document.createElement('div')
   kanbanView.className = 'wwc-delivery-kanban-view'
+
+  const kanbanOmitted = document.createElement('p')
+  kanbanOmitted.className = 'wwc-delivery-kanban-omitted wwc-strongflow-omitted'
+  kanbanOmitted.hidden = true
 
   const loadedNote = document.createElement('p')
   loadedNote.className = 'wwc-delivery-loaded-note'
@@ -193,40 +257,10 @@ export function mountStrongFlowDeliveryList(
     empty,
     listView,
     kanbanView,
+    kanbanOmitted,
     loadedNote,
     loadMore,
   )
-
-  const rows = new WeakMap<HTMLLIElement, {
-    readonly link: HTMLAnchorElement
-    readonly status: HTMLElement
-  }>()
-  const listCollection = mountKeyedCollection({
-    parent: list,
-    key: (delivery: DeliveryProjection) => delivery.deliveryId,
-    create() {
-      const item = document.createElement('li')
-      const link = document.createElement('a')
-      const deliveryStatus = document.createElement('span')
-      item.append(link, deliveryStatus)
-      rows.set(item, { link, status: deliveryStatus })
-      return item
-    },
-    update(item, delivery: DeliveryProjection) {
-      const row = rows.get(item)
-      if (row === undefined) return
-      row.link.href = deliveryRoute(delivery.deliveryId, options.routeScope)
-      row.link.textContent = delivery.title
-      row.link.dataset.deliveryId = delivery.deliveryId
-      row.status.textContent = statusText(delivery)
-      if (activeDelivery?.deliveryId === delivery.deliveryId) {
-        row.link.setAttribute('aria-current', 'page')
-      } else {
-        row.link.removeAttribute('aria-current')
-      }
-    },
-    remove(item) { rows.delete(item) },
-  })
 
   const columns = new WeakMap<HTMLElement, {
     readonly cards: HTMLElement
@@ -321,6 +355,8 @@ export function mountStrongFlowDeliveryList(
     view = next
     options.onViewChange?.(next)
     renderViewSwitch()
+    // Only the active view mounts rows, so the hidden view costs no DOM.
+    if (currentState !== null) render(currentState)
   }
 
   function renderViewSwitch(): void {
@@ -340,6 +376,23 @@ export function mountStrongFlowDeliveryList(
     return state.visible.map(delivery => (
       delivery.deliveryId === activeDelivery?.deliveryId ? activeDelivery : delivery
     ))
+  }
+
+  function capacityText(
+    rendered: number,
+    matches: number,
+    state: StrongFlowDeliveryListState,
+  ): string {
+    const parts = [
+      `Rendered ${String(rendered)} of ${String(matches)} matching deliveries · ${String(
+        state.loadedCount,
+      )} loaded · ${String(Math.max(0, matches - rendered))}`
+        + ' loaded Deliveries are not rendered in this window',
+    ]
+    parts.push(state.hasMore
+      ? ' · more Deliveries are available on the server'
+      : ' · every loaded Delivery is already on the client')
+    return parts.join('')
   }
 
   function alertSection(
@@ -411,6 +464,7 @@ export function mountStrongFlowDeliveryList(
 
   function render(state: StrongFlowDeliveryListState): void {
     currentState = state
+    kanbanOmittedCount = 0
     feedback.textContent = state.status === 'loading'
       ? 'Loading Deliveries…'
       : state.status === 'refreshing'
@@ -421,7 +475,6 @@ export function mountStrongFlowDeliveryList(
     renderAlert(state)
 
     const visible = mergedVisible(state)
-    listCollection.update(visible)
     const byStatus = new Map<DeliveryStatus, DeliveryProjection[]>()
     for (const delivery of visible) {
       const bucket = byStatus.get(delivery.status) ?? []
@@ -429,11 +482,34 @@ export function mountStrongFlowDeliveryList(
       byStatus.set(delivery.status, bucket)
     }
     const vocabulary = Object.values(DeliveryStatusVocabulary)
-    kanbanCollection.update(
-      [...byStatus.entries()]
-        .sort((left, right) => vocabulary.indexOf(left[0]) - vocabulary.indexOf(right[0]))
-        .map(([status, deliveries]) => ({ status, deliveries })),
-    )
+    let kanbanRenderedCount = 0
+    const kanbanEntries = [...byStatus.entries()]
+      .sort((left, right) => vocabulary.indexOf(left[0]) - vocabulary.indexOf(right[0]))
+      .map(([status, deliveries]) => {
+        const bounded = boundedItems(deliveries, limits.deliveries)
+        kanbanRenderedCount += bounded.items.length
+        kanbanOmittedCount += bounded.omitted
+        return { status, deliveries: bounded.items }
+      })
+
+    // Only the active view mounts rows: the Delivery corpus stays bounded no
+    // matter which presentation the user picked.
+    let renderedCount = 0
+    if (view === 'list') {
+      listCollection.update(visible)
+      kanbanCollection.update([])
+      // A deep link to a Delivery outside the rendered window must still be
+      // visible, so the window scrolls to it once per active Delivery identity.
+      if (activeDelivery !== null && activeDelivery.deliveryId !== revealedDeliveryId) {
+        revealedDeliveryId = activeDelivery.deliveryId
+        listCollection.reveal(activeDelivery.deliveryId)
+      }
+      renderedCount = listCollection.window().end - listCollection.window().start
+    } else {
+      listCollection.update([])
+      kanbanCollection.update(kanbanEntries)
+      renderedCount = kanbanRenderedCount
+    }
 
     if (visible.length > 0) {
       empty.hidden = true
@@ -449,10 +525,14 @@ export function mountStrongFlowDeliveryList(
       empty.hidden = false
     }
 
-    loadedNote.textContent = state.loadedCount === 0
-      ? ''
-      : `Showing ${String(visible.length)} of ${String(state.loadedCount)} loaded deliveries.`
     loadedNote.hidden = state.loadedCount === 0
+    if (state.loadedCount !== 0) {
+      loadedNote.textContent = capacityText(renderedCount, visible.length, state)
+    }
+    kanbanOmitted.hidden = kanbanOmittedCount === 0
+    if (kanbanOmittedCount > 0) {
+      kanbanOmitted.textContent = `${String(kanbanOmittedCount)} kanban cards not rendered.`
+    }
 
     loadMore.hidden = !state.hasMore
     loadMore.disabled = state.loadingMore
@@ -466,6 +546,9 @@ export function mountStrongFlowDeliveryList(
   return {
     setActive(delivery) {
       activeDelivery = delivery
+      // Closing the Delivery clears the reveal marker so reopening the same one
+      // scrolls back to it instead of being swallowed by the earlier reveal.
+      if (delivery === null) revealedDeliveryId = null
       if (currentState !== null) render(currentState)
     },
     close() {
