@@ -3,11 +3,16 @@
 //! Shared identifiers and value objects for `WinWinCode`.
 //!
 //! The declarations are generated from `schema/winwincode/v1`; the canonical
-//! JSON Schema remains their only source.
+//! JSON Schema remains their only source. Hand-written domain modules add
+//! objects whose lifecycle lives in code rather than in the schema.
 
 mod generated;
+mod user_account;
 
 pub use generated::*;
+pub use user_account::{
+    UserAccount, UserAccountError, UserAccountErrorKind, UserAccountRole, UserAccountState,
+};
 
 /// Returns whether `value` is the canonical Delivery identifier defined by the
 /// public schema.
