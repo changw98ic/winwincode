@@ -100,6 +100,9 @@ test('real Chrome renders interactive solution graphs that survive runtime snaps
     'edge:control-api',
     'edge:api-exec',
   ])
+  assert.equal(scenario.edgeGeometryConnected, true, (
+    'winwincode-zs0: a branched visual edge must span the source-to-target gap'
+  ))
   assert.equal(scenario.edges[1].ariaLabel, 'WinWinCode → Delivery API: calls')
 
   assert.deepEqual(scenario.keyboardFocus, { id: 'platform:strongflow' })
@@ -145,5 +148,11 @@ test('real Chrome renders interactive solution graphs that survive runtime snaps
     'waitForDiagramViewportMode("narrow")',
   )
   assert.equal(narrowMode, 'narrow')
+  const narrowPageFits = await evaluate(
+    devtools,
+    sessionId,
+    'document.documentElement.scrollWidth <= window.innerWidth',
+  )
+  assert.equal(narrowPageFits, true, 'narrow graph controls must not overflow the page')
   assert.equal(exceptions.length, 0, JSON.stringify(exceptions))
 })

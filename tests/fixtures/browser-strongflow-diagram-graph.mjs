@@ -1,4 +1,5 @@
 import { mountStrongFlowPage } from '/module/strongflow-page.js'
+import { mountStrongFlowDiagramGraph } from '/module/strongflow-diagram-graph.js'
 
 const root = document.querySelector('[data-winwincode-client-root]')
 const deliveryId = 'dlv_00000000000000000000000001'
@@ -242,6 +243,56 @@ globalThis.runDiagramGraphScenario = () => {
   }
   const toggle = graph.querySelector('.wwc-strongflow-graph-toggle-view')
   toggle.click()
+  const geometryProbe = mountStrongFlowDiagramGraph({
+    document,
+    props: {
+      id: 'diagram:edge-geometry-probe',
+      title: 'Edge geometry probe',
+      narrow: false,
+      nodes: [
+        {
+          id: 'probe:a',
+          label: 'A',
+          description: 'Origin.',
+          kind: 'component',
+          trustBoundary: null,
+          unresolved: false,
+        },
+        {
+          id: 'probe:b',
+          label: 'B',
+          description: 'First branch.',
+          kind: 'component',
+          trustBoundary: null,
+          unresolved: false,
+        },
+        {
+          id: 'probe:c',
+          label: 'C',
+          description: 'Second branch.',
+          kind: 'component',
+          trustBoundary: null,
+          unresolved: false,
+        },
+      ],
+      edges: [
+        { id: 'probe:a-b', from: 'probe:a', to: 'probe:b', label: 'first' },
+        { id: 'probe:a-c', from: 'probe:a', to: 'probe:c', label: 'second' },
+      ],
+    },
+  })
+  document.body.append(geometryProbe.root)
+  const probeEdge = geometryProbe.root.querySelector(
+    '.wwc-strongflow-graph-edge[data-id="probe:a-c"]',
+  ).getBoundingClientRect()
+  const probeFrom = geometryProbe.nodeElement('probe:a').getBoundingClientRect()
+  const probeTo = geometryProbe.nodeElement('probe:c').getBoundingClientRect()
+  const edgeGeometryConnected = probeEdge.left <= probeFrom.right + 1
+    && probeEdge.right >= probeTo.left - 1
+    && probeEdge.top <= probeFrom.bottom + 1
+    && probeEdge.bottom >= probeTo.top - 1
+  geometryProbe.close()
+
   return {
     boundary: boundaryState,
     detail: graph.querySelector('.wwc-strongflow-graph-detail').textContent,
@@ -249,6 +300,7 @@ globalThis.runDiagramGraphScenario = () => {
       ariaLabel: edge.getAttribute('aria-label'),
       id: edge.dataset.id,
     })),
+    edgeGeometryConnected,
     keyboardFocus,
     listEquivalent: (() => {
       const list = graph.querySelector('.wwc-strongflow-graph-list')
