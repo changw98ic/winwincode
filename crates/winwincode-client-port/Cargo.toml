@@ -1,0 +1,19 @@
+[package]
+name = "winwincode-client-port"
+description = "Shared ClientControlPort wire types for WinWinCode device clients"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+include = ["src/**", "tests/**", "Cargo.toml"]
+
+[dependencies]
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true
