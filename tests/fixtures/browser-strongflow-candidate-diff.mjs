@@ -2,7 +2,7 @@ import {
   parseStrongFlowRouteHash,
   strongFlowCandidateViewFromHash,
   strongFlowRouteHash,
-} from '/module/application.js'
+} from '/module/strongflow-route.js'
 import { scopeSelectionFromHash } from '/module/core/scope-context.js'
 import { strongFlowHistorySelectionFromHash } from '/module/strongflow-history-selection.js'
 import { mountStrongFlowPage } from '/module/strongflow-page.js'
@@ -254,12 +254,16 @@ const mounted = mountStrongFlowPage({
   deliveryList,
   root,
   model,
-  candidateView: 'unified',
+  panel: 'candidate',
+  candidateView: strongFlowCandidateViewFromHash(location.hash) ?? 'unified',
   historyLocation: null,
   onCandidateViewModeChange(mode) {
     calls.push(['viewMode', mode])
-    const parameters = new URLSearchParams(location.hash.split('?')[1] ?? '')
-    location.hash = candidateRoute(parameters.get('file'), mode)
+    const selectedPath = state.candidateFiles.selectedPath
+    if (selectedPath !== null) location.hash = candidateRoute(selectedPath, mode)
+  },
+  onCandidateLineChange(line) {
+    calls.push(['line', line])
   },
 })
 
@@ -273,6 +277,13 @@ function query(selector) { return document.querySelector(selector) }
 function key(node, value, init = {}) {
   node.dispatchEvent(new KeyboardEvent('keydown', { key: value, bubbles: true, ...init }))
 }
+
+globalThis.candidateDeepLinkSnapshot = () => ({
+  route: routeFacts(),
+  panel: query('[data-artifact-tab="candidate"]')?.getAttribute('aria-selected') ?? null,
+  file: query('.wwc-candidate-file-row[aria-selected="true"]')?.dataset.path ?? null,
+  line: query('.wwc-candidate-diff-row[aria-current="location"]')?.dataset.line ?? null,
+})
 
 globalThis.runCandidateDiffScenario = async () => {
   await new Promise(resolve => { setTimeout(resolve, 0) })
@@ -290,6 +301,7 @@ globalThis.runCandidateDiffScenario = async () => {
     status: query('.wwc-candidate-diff-status').textContent,
     fileSummary: query('.wwc-candidate-file-summary').textContent,
     selectedPath: query('.wwc-candidate-file-row[aria-selected="true"]')?.dataset.path ?? null,
+    selectedLine: query('.wwc-candidate-diff-row[aria-current="location"]')?.dataset.line ?? null,
     hash: location.hash,
     route: routeFacts(),
   }
@@ -300,6 +312,23 @@ globalThis.runCandidateDiffScenario = async () => {
   const search = {
     matchStatus: query('.wwc-candidate-diff-match-status').textContent,
     activeText: document.activeElement?.textContent ?? null,
+  }
+
+  const evidenceTab = query('[data-artifact-tab="evidence"]')
+  evidenceTab.click()
+  await new Promise(resolve => { setTimeout(resolve, 0) })
+  const evidencePanel = { route: routeFacts(), selected: evidenceTab.getAttribute('aria-selected') }
+  query('[data-artifact-tab="candidate"]').click()
+  await new Promise(resolve => { setTimeout(resolve, 0) })
+
+  const routeLine = lineRows().find(row => row.dataset.line === '40')
+  routeLine.focus()
+  key(routeLine, 'Enter')
+  await new Promise(resolve => { setTimeout(resolve, 0) })
+  const lineSelection = {
+    route: routeFacts(),
+    activeLine: document.activeElement?.dataset.line ?? null,
+    currentLine: query('.wwc-candidate-diff-row[aria-current="location"]')?.dataset.line ?? null,
   }
 
   key(query('.wwc-candidate-diff-content'), 'j')
@@ -368,6 +397,8 @@ globalThis.runCandidateDiffScenario = async () => {
   return {
     initial,
     search,
+    evidencePanel,
+    lineSelection,
     collapsed,
     switched,
     backToUnified,

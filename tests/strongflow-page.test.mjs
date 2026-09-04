@@ -35,9 +35,9 @@ const rendering = await import(`${pathToFileURL(resolve(
   root,
   '.cache/strongflow-page-tests/strongflow-rendering.js',
 )).href}`)
-const application = await import(`${pathToFileURL(resolve(
+const strongFlowRoute = await import(`${pathToFileURL(resolve(
   root,
-  '.cache/strongflow-page-tests/application.js',
+  '.cache/strongflow-page-tests/strongflow-route.js',
 )).href}`)
 const clientSurface = await import(`${pathToFileURL(resolve(
   root,
@@ -50,7 +50,7 @@ const {
   strongFlowPagePresentation,
 } = page
 const { boundedItems } = rendering
-const { parseStrongFlowRouteHash, strongFlowRouteHash } = application
+const { parseStrongFlowRouteHash, strongFlowRouteHash } = strongFlowRoute
 const { clientSurfaceFromHash } = clientSurface
 const deliveryId = 'dlv_00000000000000000000000001'
 const stageRunId = 'run_00000000000000000000000001'

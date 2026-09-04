@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import {
+  ControlPlaneClientError,
   createControlPlaneClient,
   type ControlPlaneClient,
   type ControlPlaneClientTransport,
@@ -58,6 +59,7 @@ import {
 import {
   parseStrongFlowRouteHash,
   strongFlowCandidateViewFromHash,
+  strongFlowRawCandidateFileFromHash,
   strongFlowRouteHash,
   type StrongFlowEvidenceRouteState,
   type StrongFlowRoute,
@@ -140,6 +142,7 @@ function routeParameters(hash: string): URLSearchParams {
 export {
   parseStrongFlowRouteHash,
   strongFlowCandidateViewFromHash,
+  strongFlowRawCandidateFileFromHash,
   strongFlowRouteHash,
 }
 export type { StrongFlowEvidenceRouteState, StrongFlowRoute }
@@ -861,15 +864,27 @@ export function mountWinWinCodeClient(
         })
         return
       }
-      const detailValue = await controlPlane.query({
-        schemaVersion: 'winwincode/v1',
-        requestId: contractId('req', browser.crypto) as RequestId,
-        actor: context.actor,
-        scope: context.scope,
-        query: QueryName.DeliveryGet,
-        parameters: { deliveryId },
-        page: { cursor: null, limit: 1 },
-      }, { signal: controller.signal })
+      let detailValue
+      try {
+        detailValue = await controlPlane.query({
+          schemaVersion: 'winwincode/v1',
+          requestId: contractId('req', browser.crypto) as RequestId,
+          actor: context.actor,
+          scope: context.scope,
+          query: QueryName.DeliveryGet,
+          parameters: { deliveryId },
+          page: { cursor: null, limit: 1 },
+        }, { signal: controller.signal })
+      } catch (error) {
+        if (error instanceof ControlPlaneClientError && error.code === 'RESOURCE_NOT_FOUND') {
+          const unavailable = element(document, 'p', 'wwc-feature-route-unavailable')
+          unavailable.setAttribute('role', 'alert')
+          unavailable.textContent = 'This StrongFlow link no longer names an available Delivery.'
+          slot.replaceChildren(unavailable)
+          return
+        }
+        throw error
+      }
       if (detailValue.query !== QueryName.DeliveryGet) {
         throw new Error('The StrongFlow route received another detail response.')
       }
@@ -877,6 +892,7 @@ export function mountWinWinCodeClient(
       const requestedStageRunId = route.stageRunId
       let selectedCandidatePath = route.candidatePath
       const routeCandidateView = strongFlowCandidateViewFromHash(browser.location.hash)
+      const routeCandidateFile = strongFlowRawCandidateFileFromHash(browser.location.hash)
       let candidateView: CandidateDiffViewMode = route.candidateView
       const stage = requestedStageRunId === null
         ? [...detail.stages].reverse().find(candidate => candidate.sessionBinding !== null)
@@ -906,6 +922,9 @@ export function mountWinWinCodeClient(
         || route.productSessionId === null
         || route.stageRunId === null
         || routeCandidateView === null
+        // An illegal Candidate file deep link was dropped at parse time, so the
+        // URL is rewritten to the canonical route without it.
+        || routeCandidateFile !== currentRoute.candidatePath
       ) {
         replaceHash(strongFlowRouteHash(
           currentRoute,

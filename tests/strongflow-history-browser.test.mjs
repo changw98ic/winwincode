@@ -75,8 +75,7 @@ test('real Chrome restores, navigates, and reviews StrongFlow history through th
   await devtools.send('Page.navigate', { url: clientOrigin }, sessionId)
   await waitForGlobal(devtools, sessionId, 'historyDeepLinkSnapshot')
 
-  // The page loads through a deliberately crossed task/run deep link. Only the
-  // canonical association may survive, and the URL follows the normalization.
+  // The page loads the exact Task/Attempt association named by the deep link.
   const deepLink = await evaluate(devtools, sessionId, 'historyDeepLinkSnapshot()')
   assert.equal(deepLink.detailVisible, true, JSON.stringify(deepLink))
   assert.equal(deepLink.taskExpanded, 'true')

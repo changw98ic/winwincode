@@ -96,6 +96,26 @@ test('real Chrome reviews the Candidate Diff in both layouts with keyboard and s
     deviceScaleFactor: 1,
     mobile: false,
   }, sessionId)
+  const beforeReload = await evaluate(devtools, sessionId, 'globalThis.candidateDeepLinkSnapshot()')
+  await devtools.send('Page.reload', { ignoreCache: true }, sessionId)
+  await waitForGlobal(devtools, sessionId, 'runCandidateDiffScenario')
+  const afterReload = await evaluate(devtools, sessionId, 'globalThis.candidateDeepLinkSnapshot()')
+  assert.deepEqual(afterReload, beforeReload)
+  assert.deepEqual(afterReload, {
+    route: {
+      file: 'src/renamed.ts',
+      view: 'unified',
+      organizationId: routeContext.organizationId,
+      workspaceId: routeContext.workspaceId,
+      projectId: routeContext.projectId,
+      repositoryId: routeContext.repositoryId,
+      task: routeContext.task,
+      run: routeContext.run,
+    },
+    panel: 'true',
+    file: 'src/renamed.ts',
+    line: null,
+  })
   const result = await evaluate(devtools, sessionId, 'globalThis.runCandidateDiffScenario()')
 
   assert.equal(result.initial.columns, '3')
@@ -109,6 +129,9 @@ test('real Chrome reviews the Candidate Diff in both layouts with keyboard and s
   assert.equal(result.initial.selectedPath, 'src/renamed.ts')
   assert.equal(result.initial.route.file, 'src/renamed.ts')
   assert.equal(result.initial.route.view, 'unified')
+  assert.equal(result.initial.route.line, null,
+    'the current route owns no line parameter, so no Diff line is preselected')
+  assert.equal(result.initial.selectedLine, null)
   assert.deepEqual(
     Object.fromEntries(Object.keys(routeContext).map(key => [key, result.initial.route[key]])),
     routeContext,
@@ -117,6 +140,18 @@ test('real Chrome reviews the Candidate Diff in both layouts with keyboard and s
 
   assert.match(result.search.matchStatus, /Match 1 of 1/u)
   assert.match(result.search.activeText, /\+const kappa = 3/u)
+
+  assert.equal(result.evidencePanel.selected, 'true')
+  assert.equal(result.evidencePanel.route.tab, 'logs')
+  assert.equal(result.evidencePanel.route.file, 'src/renamed.ts')
+  assert.deepEqual(
+    Object.fromEntries(Object.keys(routeContext).map(key => [key, result.evidencePanel.route[key]])),
+    routeContext,
+  )
+  assert.equal(result.lineSelection.route.line, null,
+    'selecting a Diff line stays a presentation choice and never becomes a route value')
+  assert.equal(result.lineSelection.activeLine, '40')
+  assert.equal(result.lineSelection.currentLine, '40')
 
   assert.equal(result.collapsed.focusedHunk, 'hunk:1')
   assert.match(result.collapsed.hiddenNote, /6 unchanged lines hidden/u)
