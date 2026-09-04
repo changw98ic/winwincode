@@ -912,6 +912,11 @@
   outline-offset: calc(-1 * var(--wwc-border-width));
 }
 
+.wwc-candidate-diff-row[aria-current='location'] {
+  outline: var(--wwc-focus-width) solid var(--wwc-color-focus);
+  outline-offset: calc(-1 * var(--wwc-focus-width));
+}
+
 .wwc-candidate-diff-heading,
 .wwc-candidate-diff-hunk {
   position: sticky;
@@ -1158,6 +1163,15 @@
 .wwc-strongflow-history-host {
   display: grid;
   min-width: var(--wwc-space-0);
+}
+
+.wwc-strongflow-history-route-error {
+  margin: var(--wwc-space-0) var(--wwc-space-0) var(--wwc-space-3);
+  padding: var(--wwc-space-3);
+  border: var(--wwc-border-width) solid var(--wwc-color-danger-border-subtle);
+  border-radius: var(--wwc-radius-md);
+  color: var(--wwc-color-danger-text);
+  background: var(--wwc-color-danger-surface);
 }
 
 .wwc-strongflow-history {

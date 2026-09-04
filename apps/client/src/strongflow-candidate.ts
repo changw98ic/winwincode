@@ -201,13 +201,16 @@ export interface StrongFlowCandidateViewProps {
   readonly projection: StrongFlowProjection | null
   readonly candidateFiles: StrongFlowCandidateFilesState
   readonly viewMode: CandidateDiffViewMode
+  readonly selectedLine: number | null
 }
 
 export interface StrongFlowCandidateViewOptions {
   readonly document: Document
   readonly limits: StrongFlowRenderLimits
   readonly viewMode?: CandidateDiffViewMode
+  readonly selectedLine?: number | null
   readonly onViewModeChange?: (mode: CandidateDiffViewMode) => void
+  readonly onLineChange?: (line: number | null) => void
   readonly onLoadFiles: () => void
   readonly onLoadMoreFiles: () => void
   readonly onSelectFile: (path: string) => void
@@ -347,6 +350,7 @@ export function mountStrongFlowCandidate(
   let current: StrongFlowCandidateViewProps = {
     projection: null,
     viewMode: options.viewMode ?? 'unified',
+    selectedLine: options.selectedLine ?? null,
     candidateFiles: {
       status: 'idle',
       items: [],
@@ -390,8 +394,20 @@ export function mountStrongFlowCandidate(
         selectedPath: current.candidateFiles.selectedPath,
         viewMode: mode,
         candidateDigest: current.projection?.currentCandidate?.diffSha256 ?? null,
+        selectedLine: current.selectedLine,
       })
       options.onViewModeChange?.(mode)
+    },
+    onLineChange(line) {
+      current = { ...current, selectedLine: line }
+      options.onLineChange?.(line)
+      diffViewer.update({
+        diff: current.candidateFiles.diff,
+        selectedPath: current.candidateFiles.selectedPath,
+        viewMode: current.viewMode,
+        candidateDigest: current.projection?.currentCandidate?.diffSha256 ?? null,
+        selectedLine: line,
+      })
     },
   })
 
@@ -753,6 +769,7 @@ export function mountStrongFlowCandidate(
       selectedPath: props.candidateFiles.selectedPath,
       viewMode: props.viewMode,
       candidateDigest: candidate.diffSha256,
+      selectedLine: props.selectedLine,
     })
 
     technicalList.replaceChildren(

@@ -7,8 +7,10 @@ import type {
   StageRunId,
 } from './generated/contracts.js'
 import type { StrongFlowProjection } from './strongflow-view-model.js'
+import type { StrongFlowHistorySelection } from './strongflow-history-selection.js'
 import {
   boundedItems,
+  type BoundedItems,
   type StrongFlowRenderLimits,
 } from './strongflow-rendering.js'
 
@@ -93,6 +95,21 @@ function historyRun(
   })
 }
 
+function boundedItemsWithPinnedIdentity<Value>(
+  values: readonly Value[],
+  limit: number,
+  isPinned: (value: Value) => boolean,
+): BoundedItems<Value> {
+  const bounded = boundedItems(values, limit)
+  if (bounded.items.some(isPinned)) return bounded
+  const pinned = values.find(isPinned)
+  if (pinned === undefined) return bounded
+  return Object.freeze({
+    items: Object.freeze([...bounded.items.slice(0, -1), pinned]),
+    omitted: bounded.omitted,
+  })
+}
+
 /**
  * Project one bounded Delivery snapshot onto the navigable history tree.
  * The association truth is the StageRun's own `deliveryTaskId`, so Task nodes,
@@ -103,10 +120,15 @@ function historyRun(
 export function strongFlowHistoryTree(
   projection: StrongFlowProjection,
   limits: StrongFlowRenderLimits,
+  pinnedSelection?: StrongFlowHistorySelection,
 ): StrongFlowHistoryTree {
   const currentStageRunId = projection.stage?.id ?? null
   const currentCandidateRef = projection.currentCandidate?.candidateRef ?? null
-  const boundedStages = boundedItems(projection.delivery.stages, limits.stages)
+  const boundedStages = boundedItemsWithPinnedIdentity(
+    projection.delivery.stages,
+    limits.stages,
+    stage => stage.id === pinnedSelection?.stageRunId,
+  )
   const runs = boundedStages.items.map(stage => historyRun(
     stage,
     currentStageRunId,
@@ -125,7 +147,11 @@ export function strongFlowHistoryTree(
     owned.push(run)
     runsByTask.set(run.deliveryTaskId, owned)
   }
-  const boundedTasks = boundedItems(projection.delivery.tasks, limits.tasks)
+  const boundedTasks = boundedItemsWithPinnedIdentity(
+    projection.delivery.tasks,
+    limits.tasks,
+    task => task.id === pinnedSelection?.taskId,
+  )
   const tasks = boundedTasks.items.map(task => Object.freeze({
     task,
     runs: Object.freeze(runsByTask.get(task.id) ?? []),

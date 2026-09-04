@@ -1,4 +1,4 @@
-import { strongFlowRouteHash } from '/module/application.js'
+import { strongFlowRouteHash } from '/module/strongflow-route.js'
 import { mountStrongFlowPage } from '/module/strongflow-page.js'
 
 const deliveryId = 'dlv_00000000000000000000000001'

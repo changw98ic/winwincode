@@ -14,6 +14,8 @@ export * from './strongflow-rendering.js'
 export * from './strongflow-diagrams.js'
 export * from './strongflow-candidate.js'
 export * from './strongflow-evidence.js'
+// The typed StrongFlow route module is published through application.js, which
+// re-exports its single canonical surface.
 export * from './strongflow-page.js'
 export * from './settings-view-model.js'
 export * from './settings-page.js'
