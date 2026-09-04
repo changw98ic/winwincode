@@ -6,6 +6,7 @@ members = [
   "crates/winwincode-audit",
   "crates/winwincode-backup",
   "crates/winwincode-cli",
+  "crates/winwincode-client-port",
   "crates/winwincode-delivery",
   "crates/winwincode-drill",
   "crates/winwincode-control-plane",
