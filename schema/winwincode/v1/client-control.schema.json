@@ -28,7 +28,7 @@
         "occupancyLeaseId",
         "occupancyFencingToken"
       ],
-      "staleFencingToken": "a fencing token below the current occupancy token is rejected before any local effect"
+      "staleFencingToken": "a fencing token below the current occupancy token is rejected without local effect"
     },
     "redelivery": {
       "condition": "same messageId and payload digest after reconnect or server restart",
@@ -679,7 +679,7 @@
           "type": "string",
           "maxLength": 512,
           "pattern": "^\\$argon2id\\$[A-Za-z0-9$+=/.,-]{10,500}$",
-          "description": "Argon2id PHC password hash. Control Plane owned; it is never returned by any projection and never leaves the server boundary."
+          "description": "Argon2id PHC password hash. Control Plane owned; it is never returned by a projection and never leaves the server boundary."
         },
         "role": {
           "$ref": "#/$defs/UserAccountRole"
@@ -1459,7 +1459,7 @@
         "capacity"
       ],
       "title": "client.hello",
-      "description": "Announces full presence and capacity after connect or reconnect, before any other client traffic on the new exchange.",
+      "description": "Announces full presence and capacity after connect or reconnect, before all other client traffic on the new exchange.",
       "x-direction": "client-to-control-plane",
       "x-authority": "device-presence",
       "x-message-class": "report"

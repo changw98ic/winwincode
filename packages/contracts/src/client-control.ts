@@ -767,7 +767,7 @@ export interface ClientNode {
 
 /**
  * `ClientConnectCode`. Only `codeDigest` is stored or transported; the
- * plaintext code never appears in any contract, log, or projection.
+ * plaintext code never appears in a contract, log, or projection.
  */
 export interface ClientConnectCode {
   readonly connectCodeId: ClientConnectCodeId
@@ -869,7 +869,7 @@ export const REPOSITORY_ACCESS_GRANT_STATES = Object.freeze(['active', 'revoked'
 export type RepositoryAccessGrantState = typeof REPOSITORY_ACCESS_GRANT_STATES[number]
 
 /**
- * `WorkerLaunchGrant`. Every identity field must match on launch; any mismatch
+ * `WorkerLaunchGrant`. Every identity field must match on launch; a mismatch
  * is rejected. Occupancy fields bind the grant to one fenced lease.
  */
 export interface WorkerLaunchGrant {
@@ -1566,7 +1566,7 @@ export interface ClientControlCommandFields {
 
 /**
  * Occupancy stamp carried by exactly 11 command-class messages. The pair binds
- * the command to the single active lease; the Device Client must reject any
+ * the command to the single active lease; the Device Client must reject every
  * command whose fencing token is not the current maximum.
  */
 export interface ClientControlFencedCommandFields extends ClientControlCommandFields {
@@ -2690,7 +2690,7 @@ function parseClientWorkerLaunchMessage(
     controlError(
       'RELATIONSHIP_MISMATCH',
       `${path}.launchGrant`,
-      'the worker launch grant does not match the occupancy identity of its command; any field mismatch is rejected',
+      'the worker launch grant does not match the occupancy identity of its command; a field mismatch is rejected',
     )
   }
   return Object.freeze({
