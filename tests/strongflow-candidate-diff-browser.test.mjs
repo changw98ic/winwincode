@@ -107,6 +107,14 @@ test('real Chrome reviews the Candidate Diff in both layouts with keyboard and s
   assert.match(result.switched.hash, /&file=src%2Frenamed\.ts&view=side-by-side$/u)
   assert.deepEqual(result.switched.pressed, ['unified:false', 'side-by-side:true'])
   assert.deepEqual(result.switched.calls, [['viewMode', 'side-by-side']])
+  assert.equal(result.switched.stableHeaderPreserved, true,
+    'layout changes retain keyed file-header nodes')
+  assert.equal(result.switched.scrollTop, result.switched.scrollTopBeforeSwitch,
+    'layout changes retain the real scroll position')
+  assert.equal(result.switched.focusedHunkBeforeSwitch, 'hunk:1')
+  assert.equal(result.switched.focusedHunkAfterSwitch, 'hunk:1',
+    'layout changes keep focus on the same hunk control')
+  assert.match(result.switched.focusedClassAfterSwitch, /wwc-candidate-diff-hunk-toggle/u)
 
   assert.equal(result.backToUnified.columns, '3')
 

@@ -540,9 +540,18 @@ test('the viewer renders hunk headers, line numbers, and added or removed marker
 })
 
 test('the viewer renders one pair per row with four columns in side-by-side layout', () => {
-  const { viewer } = mountViewer({ viewMode: 'side-by-side' })
+  const { viewer } = mountViewer({
+    viewMode: 'side-by-side',
+    totalBytes: 440,
+    hasMore: true,
+  })
   const rows = rowNodes(viewer)
   assert.equal(findByClass(viewer.root, 'wwc-candidate-diff-table').getAttribute('data-columns'), '4')
+  assert.match(findByClass(viewer.root, 'wwc-candidate-diff-status').textContent,
+    /first 220 of 440 Diff bytes/u,
+    'an initial side-by-side render must publish the ready status')
+  assert.equal(findByClass(viewer.root, 'wwc-candidate-load-more-diff').hidden, false,
+    'an initial side-by-side render must expose available Diff bytes')
   assert.deepEqual(rows.slice(5).map(row => [
     row.dataset.type,
     row.children[0].textContent,
@@ -600,9 +609,20 @@ test('the viewer degrades binary, encoding, error, truncation, and empty states 
   assert.match(findByClass(encoded.viewer.root, 'wwc-candidate-diff-status').textContent,
     /encoding is not previewable/u)
 
-  const failure = mountViewer({ status: 'error' })
+  const failure = mountViewer({
+    status: 'error',
+    error: {
+      kind: 'protocol',
+      code: 'DIFF_FAILURE',
+      message: 'credential=review-secret-must-not-render',
+      requestId: null,
+      retryable: false,
+      details: {},
+    },
+  })
   assert.match(findByClass(failure.viewer.root, 'wwc-candidate-diff-status').textContent,
     /could not be loaded\./u)
+  assert.doesNotMatch(failure.viewer.root.textContent, /review-secret-must-not-render/u)
   assert.equal(findByClass(failure.viewer.root, 'wwc-candidate-load-more-diff').hidden, false)
   assert.equal(findByClass(failure.viewer.root, 'wwc-candidate-load-more-diff').textContent,
     'Retry Diff')
@@ -703,6 +723,23 @@ test('large Diffs render a bounded window and extend it without rebuilding rende
   assert.equal(findByClass(viewer.root, 'wwc-candidate-diff-search').value, 'const twenty')
   assert.equal(findByClass(viewer.root, 'wwc-candidate-diff-render-more').hidden, true,
     'nothing is left to render once every row is present')
+})
+
+test('the default 300-row window never leaves an actionable render-more no-op', () => {
+  const content = [
+    '@@ -1,650 +1,650 @@',
+    ...Array.from({ length: 650 }, (_, index) => ` const line ${String(index + 1)}`),
+    '',
+  ].join('\n')
+  const { viewer } = mountViewer({ content })
+  const renderMore = findByClass(viewer.root, 'wwc-candidate-diff-render-more')
+  assert.equal(rowNodes(viewer).length, 300)
+  renderMore.click()
+  assert.equal(rowNodes(viewer).length, 500)
+  renderMore.click()
+  assert.equal(rowNodes(viewer).length, 500)
+  assert.equal(renderMore.hidden || renderMore.disabled, true,
+    'the 500-row safety ceiling must not leave a button that cannot render another row')
 })
 
 function mountTwoHunkViewer() {
@@ -820,10 +857,13 @@ test('narrow viewports force the unified layout and disable the side-by-side opt
     candidateDigest: `sha256:${'3'.repeat(64)}`,
   })
   assert.equal(findByClass(viewer.root, 'wwc-candidate-diff-table').getAttribute('data-columns'), '3')
-  const sideBySideOption = [...viewer.root.children[0].children[0].children]
-    .find(node => node.dataset.mode === 'side-by-side')
+  const viewOptions = [...viewer.root.children[0].children[0].children]
+  const unifiedOption = viewOptions.find(node => node.dataset.mode === 'unified')
+  const sideBySideOption = viewOptions.find(node => node.dataset.mode === 'side-by-side')
   assert.equal(sideBySideOption.disabled, true)
-  assert.equal(sideBySideOption.getAttribute('aria-pressed'), 'true')
+  assert.equal(unifiedOption.getAttribute('aria-pressed'), 'true',
+    'the pressed state must describe the effective narrow layout')
+  assert.equal(sideBySideOption.getAttribute('aria-pressed'), 'false')
   assert.equal(findByClass(viewer.root, 'wwc-candidate-diff-view-toggle').dataset.narrow, 'true')
 })
 
