@@ -53,6 +53,10 @@ function createProjection({ candidateDigest = '3', runtimeSource = '1' } = {}) {
     runtime: {
       stageRunId,
       sessions: [{
+        productSessionId: 'psn_00000000000000000000000001',
+        stageRunId,
+        sessionBindingId: 'bind:1',
+        codexThreadId: 'cdx_t0000000000000000000000001',
         deliveryTaskId: 'task:browser',
         attempt: 1,
         asOfSequence: 1,
@@ -64,6 +68,15 @@ function createProjection({ candidateDigest = '3', runtimeSource = '1' } = {}) {
           additions: 2,
           deletions: 0,
           sourceRef: `runtime:diff:${runtimeSource}`,
+        },
+        usage: null,
+        plan: null,
+        recovery: {
+          failureCount: 0,
+          lastFailureSourceRef: null,
+          latestRecoverySourceRef: null,
+          recoveryCount: 0,
+          state: 'none',
         },
       }],
     },
@@ -234,10 +247,8 @@ globalThis.runStrongFlowEventReloadScenario = () => {
       === candidateAfterChange,
     diagramsRetained: document.querySelector('.wwc-strongflow-diagrams')
       === diagramsAfterCandidate,
-    executionRerendered: document.querySelector('.wwc-strongflow-execution-session')
-      !== executionAfterCandidate,
-    executionSourceRef: document.querySelector('.wwc-strongflow-live-diff')
-      ?.dataset.sourceRef ?? null,
+    executionSessionRetained: document.querySelector('.wwc-strongflow-execution-session')
+      === executionAfterCandidate,
   }
 
   comments.value = 'conflicted review draft'
