@@ -403,8 +403,23 @@ test('browser fake renders paged resources, role groups, access state, and acces
   assert.equal(text.includes('Role …000001 · 2 members'), true)
   assert.equal(text.includes('Core Project'), true)
   assert.equal(text.includes('Core Repository'), true)
+  assert.equal(byClass(fixture.rootElement, 'wwc-enterprise-resources').dataset.wwcPage, 'management')
+  assert.equal(
+    byClass(fixture.rootElement, 'wwc-enterprise-resources-heading').dataset.wwcComponent,
+    'page-header',
+  )
+  assert.equal(
+    byClass(fixture.rootElement, 'wwc-enterprise-resources-status').dataset.wwcComponent,
+    'status-badge',
+  )
   assert.equal(byClass(fixture.rootElement, 'wwc-enterprise-resources-status').attributes.get('role'), 'status')
   assert.equal(byClass(fixture.rootElement, 'wwc-enterprise-resources-error').attributes.get('role'), 'alert')
+  assert.equal(byClass(fixture.rootElement, 'wwc-enterprise-resources-retry').dataset.wwcComponent, 'button')
+  assert.equal(byClass(fixture.rootElement, 'wwc-enterprise-organizations').dataset.wwcComponent, 'panel')
+  assert.equal(byClass(fixture.rootElement, 'wwc-enterprise-members').dataset.wwcComponent, 'panel')
+  assert.equal(byClass(fixture.rootElement, 'wwc-enterprise-roles').dataset.wwcComponent, 'panel')
+  assert.equal(byClass(fixture.rootElement, 'wwc-enterprise-projects').dataset.wwcComponent, 'panel')
+  assert.equal(byClass(fixture.rootElement, 'wwc-enterprise-organization-empty').dataset.state, 'empty')
   fixture.mounted.close()
 })
 
@@ -474,6 +489,10 @@ test('browser fake creates, updates, archives, disables, assigns roles, and retr
     && fixture.model.state.areas.projects.status === 'ready', 'project archive')
   assert.equal(fixture.client.commands[4].command, 'enterprise.project_repository.update')
   assert.equal(fixture.client.commands[4].payload.state, 'archived')
+  assert.equal(
+    byClass(fixture.rootElement, 'wwc-enterprise-project-archive').dataset.variant,
+    'destructive',
+  )
   fixture.mounted.close()
 })
 

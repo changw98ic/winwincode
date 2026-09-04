@@ -138,11 +138,12 @@ test('deployable Client files contain only browser assets and runtime serverUrl 
 
 test('Client shell has one facade and the five canonical product entries with Chat first', () => {
   const application = readFileSync(join(clientRoot, 'src', 'application.ts'), 'utf8')
+  const surfaces = readFileSync(join(clientRoot, 'src', 'client-surface.ts'), 'utf8')
   const index = readFileSync(join(clientRoot, 'src', 'index.ts'), 'utf8')
-  for (const surface of ['chat', 'strongflow', 'settings', 'approvals', 'enterprise']) {
-    assert.match(application, new RegExp(`id: '${surface}'`, 'u'))
+  for (const surface of ['chat', 'strongflow', 'settings', 'attention', 'enterprise']) {
+    assert.match(surfaces, new RegExp(`id: '${surface}'`, 'u'))
   }
-  assert.match(application, /id: 'chat'[\s\S]+default: true/u)
+  assert.match(surfaces, /id: 'chat'[\s\S]+default: true/u)
   assert.equal((`${application}\n${index}`.match(/createControlPlaneClient/g) ?? []).length, 2)
   assert.doesNotMatch(application, /\bfetch\s*\(|new\s+WebSocket/u)
 })

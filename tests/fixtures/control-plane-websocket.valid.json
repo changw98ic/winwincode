@@ -847,7 +847,8 @@
               "enterprise-fleet.invalidated.v1",
               "enterprise-usage.invalidated.v1",
               "enterprise-audit.invalidated.v1",
-              "enterprise-integration.invalidated.v1"
+              "enterprise-integration.invalidated.v1",
+              "model-route-availability.invalidated.v1"
             ]
           },
           "startAt": "latest"
@@ -1171,6 +1172,37 @@
             "snapshotRevision": 10,
             "reloadQueries": [
               "enterprise.integration.list"
+            ]
+          }
+        },
+        {
+          "type": "event.v1",
+          "subscriptionId": "sub_01J00000000000000000000005",
+          "eventId": "evt_01J00000000000000000000050",
+          "scope": {
+            "kind": "organization",
+            "organizationId": "org_01J00000000000000000000000"
+          },
+          "stream": {
+            "kind": "scope"
+          },
+          "authorizationEpoch": 1,
+          "sequence": 11,
+          "occurredAt": "2026-08-27T12:00:11.000Z",
+          "source": {
+            "kind": "control-plane",
+            "component": "model-route-availability",
+            "actor": {
+              "kind": "user",
+              "id": "usr_01J00000000000000000000000"
+            }
+          },
+          "event": {
+            "type": "model-route-availability.invalidated.v1",
+            "source": "provider_catalog",
+            "sourceRevision": 11,
+            "reloadQueries": [
+              "model.route.availability.list"
             ]
           }
         }

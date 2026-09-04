@@ -335,6 +335,7 @@ fn configure_stream_storage(storage: &mut SqliteStorage) {
                     reasoning_efforts: vec!["high".to_owned()],
                 }],
             },
+            Instant("2026-09-02T00:00:00.000Z".to_owned()),
         )
         .expect("register stream Provider");
     CredentialReferenceService::new(storage)
@@ -375,6 +376,7 @@ fn configure_stream_storage(storage: &mut SqliteStorage) {
                 }),
                 worker_concurrency_limit: 1,
             },
+            Instant("2026-09-02T00:00:00.000Z".to_owned()),
         )
         .expect("configure stream route");
 }

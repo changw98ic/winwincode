@@ -2,9 +2,10 @@
 
 use serde_json::{Value, json};
 use winwincode_api::generated::{
-    CommandCompletedResponse, ControlPlaneWebSocketSubscribeFrame, DeliveryStageProjection,
-    DeliveryStageSessionBindingProjection, QueryRequest, QueryResultResponse,
-    RuntimeProjectionSnapshot, SettingsProjection, SolutionReviewProjection, StrongFlowReadCursor,
+    ApprovalProjection, CommandCompletedResponse, ControlPlaneWebSocketSubscribeFrame,
+    DeliveryStageProjection, DeliveryStageSessionBindingProjection, QueryRequest,
+    QueryResultResponse, RuntimeProjectionSnapshot, SettingsProjection, SolutionReviewProjection,
+    StrongFlowReadCursor,
 };
 
 fn http_examples() -> Value {
@@ -69,6 +70,50 @@ fn required_nullable_fields_cannot_be_omitted_from_generated_rust_dtos() {
         .expect("settings object")
         .remove("defaultModelRoute");
     assert!(serde_json::from_value::<SettingsProjection>(missing).is_err());
+}
+
+#[test]
+fn generated_approval_detail_is_required_closed_and_secret_safe() {
+    let valid = json!({
+        "binding": {
+            "executionJobId": "job_00000000000000000000000000",
+            "productSessionId": "psn_00000000000000000000000000",
+            "sessionIdentity": {
+                "codexThreadId": "cdx_00000000000000000000000000",
+                "productSessionId": "psn_00000000000000000000000000",
+                "workerSessionId": "wsn_00000000000000000000000000"
+            },
+            "workerSessionId": "wsn_00000000000000000000000000"
+        },
+        "category": "shell",
+        "effectiveDecisionScope": "once",
+        "expiresAt": "2026-08-24T12:10:00.000Z",
+        "id": "apr_00000000000000000000000000",
+        "requestedAt": "2026-08-24T12:00:00.000Z",
+        "revision": 1,
+        "sanitizedDetail": {
+            "kind": "unavailable",
+            "reason": "producer_unavailable"
+        },
+        "state": "pending",
+        "subject": "Approve embedded shell execution."
+    });
+    assert!(serde_json::from_value::<ApprovalProjection>(valid.clone()).is_ok());
+
+    let mut missing = valid.clone();
+    missing
+        .as_object_mut()
+        .expect("Approval object")
+        .remove("sanitizedDetail");
+    assert!(serde_json::from_value::<ApprovalProjection>(missing).is_err());
+
+    let mut selectable_scope = valid.clone();
+    selectable_scope["effectiveDecisionScope"] = json!("worker_session");
+    assert!(serde_json::from_value::<ApprovalProjection>(selectable_scope).is_err());
+
+    let mut leaked_detail = valid;
+    leaked_detail["sanitizedDetail"]["command"] = json!(["sh", "-c", "SECRET"]);
+    assert!(serde_json::from_value::<ApprovalProjection>(leaked_detail).is_err());
 }
 
 #[test]

@@ -1,0 +1,223 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+
+.wwc-enterprise-application {
+  display: grid;
+  gap: var(--wwc-space-4);
+  min-width: 0;
+}
+
+.wwc-enterprise-navigation {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--wwc-space-2);
+  padding: var(--wwc-space-3);
+  border-bottom: var(--wwc-border-width) solid var(--wwc-color-border);
+  background: var(--wwc-color-surface-subtle);
+}
+
+.wwc-enterprise-navigation-link {
+  padding: var(--wwc-space-2) var(--wwc-space-3);
+  border-radius: var(--wwc-radius-md);
+  color: var(--wwc-color-text-secondary);
+  text-decoration: none;
+}
+
+.wwc-enterprise-navigation-link[aria-current='page'] {
+  color: var(--wwc-color-action-strong);
+  background: var(--wwc-color-info-surface);
+  font-weight: var(--wwc-font-weight-strong);
+}
+
+.wwc-enterprise-navigation-link[aria-disabled='true'] {
+  color: var(--wwc-color-text-muted);
+  cursor: not-allowed;
+  opacity: var(--wwc-opacity-disabled);
+}
+
+.wwc-enterprise-route-status {
+  margin: var(--wwc-space-0) var(--wwc-space-4);
+  color: var(--wwc-color-text-muted);
+}
+
+.wwc-enterprise-resources,
+.wwc-enterprise-operations {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.wwc-enterprise-resources > .wwc-enterprise-resources-heading,
+.wwc-enterprise-resources > .wwc-enterprise-resources-status,
+.wwc-enterprise-resources > .wwc-enterprise-resources-error,
+.wwc-enterprise-operations > .wwc-enterprise-operations-heading,
+.wwc-enterprise-operations > .wwc-enterprise-operations-status,
+.wwc-enterprise-operations > .wwc-enterprise-operations-error,
+.wwc-enterprise-policies,
+.wwc-enterprise-integrations,
+.wwc-enterprise-projects {
+  grid-column: 1 / -1;
+}
+
+.wwc-enterprise-section-heading,
+.wwc-enterprise-subsection-heading,
+.wwc-enterprise-form-heading,
+.wwc-enterprise-resource-title,
+.wwc-enterprise-resource-summary,
+.wwc-enterprise-role-help,
+.wwc-enterprise-usage-summary,
+.wwc-enterprise-audit-export-status {
+  margin: var(--wwc-space-0);
+}
+
+.wwc-enterprise-section-heading {
+  margin-bottom: var(--wwc-space-1);
+  font-size: var(--wwc-font-size-lg);
+}
+
+.wwc-enterprise-subsection-heading {
+  margin-top: var(--wwc-space-4);
+  font-size: var(--wwc-font-size-md);
+}
+
+.wwc-enterprise-organization-status,
+.wwc-enterprise-members-status,
+.wwc-enterprise-project-status,
+.wwc-enterprise-policy-status,
+.wwc-enterprise-fleet-status,
+.wwc-enterprise-usage-status,
+.wwc-enterprise-audit-status,
+.wwc-enterprise-integration-status,
+.wwc-enterprise-role-help,
+.wwc-enterprise-resource-summary,
+.wwc-enterprise-audit-export-status {
+  color: var(--wwc-color-text-muted);
+  font-size: var(--wwc-font-size-sm);
+}
+
+.wwc-enterprise-organization-list,
+.wwc-enterprise-member-list,
+.wwc-enterprise-role-list,
+.wwc-enterprise-project-list,
+.wwc-enterprise-repository-list,
+.wwc-enterprise-policy-list,
+.wwc-enterprise-fleet-list,
+.wwc-enterprise-usage-list,
+.wwc-enterprise-audit-list,
+.wwc-enterprise-integration-list {
+  display: grid;
+  gap: var(--wwc-space-3);
+  min-width: 0;
+  margin: var(--wwc-space-4) var(--wwc-space-0);
+  padding: var(--wwc-space-0);
+  list-style: none;
+}
+
+.wwc-enterprise-organization,
+.wwc-enterprise-member,
+.wwc-enterprise-role,
+.wwc-enterprise-project,
+.wwc-enterprise-repository,
+.wwc-enterprise-policy,
+.wwc-enterprise-fleet,
+.wwc-enterprise-usage-bucket,
+.wwc-enterprise-audit-record,
+.wwc-enterprise-integration {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--wwc-space-2) var(--wwc-space-3);
+  min-width: 0;
+  padding: var(--wwc-space-3);
+  border: var(--wwc-border-width) solid var(--wwc-color-border-subtle);
+  border-radius: var(--wwc-radius-md);
+  background: var(--wwc-color-surface-subtle);
+  overflow-wrap: anywhere;
+}
+
+.wwc-enterprise-resource-title,
+.wwc-enterprise-resource-summary {
+  flex: 1 1 100%;
+  min-width: 0;
+}
+
+.wwc-enterprise-organization-form,
+.wwc-enterprise-member-form,
+.wwc-enterprise-project-form,
+.wwc-enterprise-policy-form,
+.wwc-enterprise-integration-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--wwc-space-3);
+}
+
+.wwc-enterprise-policy-form {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.wwc-enterprise-organization-form > [data-wwc-component='button'],
+.wwc-enterprise-member-form > [data-wwc-component='button'],
+.wwc-enterprise-project-form > [data-wwc-component='button'],
+.wwc-enterprise-policy-form > [data-wwc-component='button'],
+.wwc-enterprise-integration-form > [data-wwc-component='button'] {
+  align-self: end;
+}
+
+.wwc-enterprise-fleet [data-variant='destructive'],
+.wwc-enterprise-project [data-variant='destructive'],
+.wwc-enterprise-repository [data-variant='destructive'] {
+  margin-inline-end: var(--wwc-space-0);
+}
+
+.wwc-enterprise-resources [data-state='empty'],
+.wwc-enterprise-operations [data-state='empty'] {
+  padding: var(--wwc-space-4);
+  border: var(--wwc-border-width) dashed var(--wwc-color-border-strong);
+  border-radius: var(--wwc-radius-md);
+  color: var(--wwc-color-text-muted);
+  background: var(--wwc-color-surface-subtle);
+}
+
+.wwc-enterprise-resources [data-state='empty']::before,
+.wwc-enterprise-operations [data-state='empty']::before {
+  content: 'ⓘ';
+  margin-inline-end: var(--wwc-space-2);
+  color: var(--wwc-color-info-text);
+}
+
+@media (max-width: 64rem) {
+  .wwc-enterprise-resources,
+  .wwc-enterprise-operations {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .wwc-enterprise-organization-form,
+  .wwc-enterprise-member-form,
+  .wwc-enterprise-project-form,
+  .wwc-enterprise-policy-form,
+  .wwc-enterprise-integration-form {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 48rem) {
+  .wwc-enterprise-navigation {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .wwc-enterprise-organization,
+  .wwc-enterprise-member,
+  .wwc-enterprise-project,
+  .wwc-enterprise-repository,
+  .wwc-enterprise-policy,
+  .wwc-enterprise-fleet {
+    align-items: stretch;
+  }
+
+  .wwc-enterprise-organization > [data-wwc-component='button'],
+  .wwc-enterprise-member > [data-wwc-component='button'],
+  .wwc-enterprise-project > [data-wwc-component='button'],
+  .wwc-enterprise-repository > [data-wwc-component='button'],
+  .wwc-enterprise-policy > [data-wwc-component='button'],
+  .wwc-enterprise-fleet > [data-wwc-component='button'] {
+    flex: 1 1 100%;
+  }
+}

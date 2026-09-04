@@ -1232,6 +1232,8 @@ export interface ControlPlaneWebSocketClientOptions {
   readonly baseUrl?: string
   readonly createSocket?: ControlPlaneWebSocketFactory
   readonly reconnectDelayMillis?: number
+  /** Synchronous observer after validation and before ordered event application. */
+  readonly onEventQueued?: (event: ControlPlaneWebSocketEventFrame) => void
   readonly onEvent: (event: ControlPlaneWebSocketEventFrame) => Promise<void> | void
   readonly onResetRequired?: (
     frame: ControlPlaneWebSocketResetRequiredFrame | null,
@@ -1351,6 +1353,7 @@ function eventMatchesStream(frame: ControlPlaneWebSocketEventFrame): boolean {
     case 'enterprise-usage.invalidated.v1':
     case 'enterprise-audit.invalidated.v1':
     case 'enterprise-integration.invalidated.v1':
+    case 'model-route-availability.invalidated.v1':
       return stream.kind === 'scope'
     case 'activity.recorded.v1':
       if (stream.kind === 'scope') {
@@ -1564,6 +1567,12 @@ export function createControlPlaneWebSocketClient(
         'INVALID_WEBSOCKET_FRAME',
         'The event sequence is not contiguous with the active subscription.',
       ))
+      return
+    }
+    try {
+      options.onEventQueued?.(frame)
+    } catch (error) {
+      failEventProcessing(error)
       return
     }
     nextReceivedSequence += 1

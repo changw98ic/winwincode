@@ -42,6 +42,24 @@ export function boundedItems<Value>(
   })
 }
 
+export function boundedEdgesForNodes<Value extends {
+  readonly from: string
+  readonly to: string
+}>(
+  edges: readonly Value[],
+  retainedNodeIds: ReadonlySet<string>,
+  limit: number,
+): BoundedItems<Value> {
+  const joinable = edges.filter(
+    edge => retainedNodeIds.has(edge.from) && retainedNodeIds.has(edge.to),
+  )
+  const bounded = boundedItems(joinable, limit)
+  return Object.freeze({
+    items: bounded.items,
+    omitted: edges.length - joinable.length + bounded.omitted,
+  })
+}
+
 export function strongFlowElement<K extends keyof HTMLElementTagNameMap>(
   document: Document,
   tag: K,

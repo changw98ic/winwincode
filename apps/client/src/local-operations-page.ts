@@ -1,6 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type { ControlPlaneClientError } from './control-plane-client.js'
+import {
+  mountButton,
+  mountEmptyState,
+  mountErrorState,
+  mountPageHeader,
+  mountPanel,
+  mountStatusBadge,
+  type StatusTone,
+} from './components/index.js'
 import type { WorkerProjection } from './generated/contracts.js'
 import type {
   FailureClassification,
@@ -12,6 +21,10 @@ import type {
 export interface LocalOperationsPageOptions {
   readonly root: HTMLElement
   readonly model: LocalOperationsViewModel
+  /** Presentation-only capability; Server authorization remains authoritative. */
+  readonly readOnly?: boolean
+  /** Reopens the shell first-run checklist; the shell owns that panel's state. */
+  readonly onOpenReadiness?: () => void
 }
 
 export interface LocalOperationsPage {
@@ -157,41 +170,138 @@ function workerStateLabel(worker: WorkerProjection): string {
 export function mountLocalOperationsPage(options: LocalOperationsPageOptions): LocalOperationsPage {
   const document = options.root.ownerDocument
   const layout = element(document, 'main', 'wwc-local-operations')
-  const heading = element(document, 'h1', 'wwc-local-operations-heading')
-  const status = element(document, 'p', 'wwc-local-operations-status')
-  const error = element(document, 'div', 'wwc-local-operations-error')
-  const errorText = element(document, 'span', 'wwc-local-operations-error-text')
-  const retry = element(document, 'button', 'wwc-local-operations-retry')
-  const reconnect = element(document, 'button', 'wwc-local-operations-reconnect')
-  const repositorySection = element(document, 'section', 'wwc-local-repository')
-  const repositoryHeading = element(document, 'h2', 'wwc-local-operations-section-heading')
+  layout.dataset.wwcPage = 'management'
+  const pageHeader = mountPageHeader({
+    document,
+    props: {
+      title: 'Repository and local Worker operations',
+      eyebrow: 'Local diagnostics',
+      description: 'Inspect secret-safe repository signals, reported capacity, and local Worker state.',
+      headingLevel: 1,
+      className: 'wwc-local-operations-heading',
+    },
+  })
+  const heading = pageHeader.root
+  const readinessOpenButton = options.onOpenReadiness === undefined
+    ? null
+    : mountButton({
+        document,
+        props: {
+          label: 'Open first-run readiness',
+          className: 'wwc-local-readiness-open',
+          onActivate: () => { options.onOpenReadiness?.() },
+        },
+      })
+  const statusBadge = mountStatusBadge({
+    document,
+    props: {
+      label: 'Loading local operations…',
+      tone: 'info',
+      live: 'polite',
+      className: 'wwc-local-operations-status',
+    },
+  })
+  const status = statusBadge.root
+  const retryButton = mountButton({
+    document,
+    props: {
+      label: 'Retry snapshot',
+      className: 'wwc-local-operations-retry',
+      onActivate: () => { void options.model.refresh() },
+    },
+  })
+  const retry = retryButton.root
+  const reconnectButton = mountButton({
+    document,
+    props: {
+      label: 'Reconnect events',
+      className: 'wwc-local-operations-reconnect',
+      onActivate: () => { options.model.reconnect() },
+    },
+  })
+  const reconnect = reconnectButton.root
+  const errorState = mountErrorState({
+    document,
+    props: {
+      title: 'Local operations unavailable',
+      message: '',
+      actions: [retry, reconnect],
+      visible: false,
+      className: 'wwc-local-operations-error',
+    },
+  })
+  const error = errorState.root
+  errorState.message.className = 'wwc-local-operations-error-text'
+  const repositoryPanel = mountPanel({
+    document,
+    props: {
+      id: 'wwc-local-repository',
+      title: 'Repository diagnostics',
+      description: 'Repository paths stay hidden; only bounded identity and Git-risk signals are shown.',
+      className: 'wwc-local-repository',
+    },
+  })
+  const repositorySection = repositoryPanel.root
+  const repositoryHeading = repositoryPanel.title
+  repositoryHeading.className = 'wwc-local-operations-section-heading'
   const repositoryContent = element(document, 'div', 'wwc-local-repository-content')
-  const resourcesSection = element(document, 'section', 'wwc-local-resources')
-  const resourcesHeading = element(document, 'h2', 'wwc-local-operations-section-heading')
+  const resourcesPanel = mountPanel({
+    document,
+    props: {
+      id: 'wwc-local-resources',
+      title: 'Local resources',
+      description: 'Reported capacity is kept separate from code and infrastructure failure signals.',
+      className: 'wwc-local-resources',
+    },
+  })
+  const resourcesSection = resourcesPanel.root
+  const resourcesHeading = resourcesPanel.title
+  resourcesHeading.className = 'wwc-local-operations-section-heading'
   const resourcesContent = element(document, 'div', 'wwc-local-resources-content')
-  const workersSection = element(document, 'section', 'wwc-local-workers')
-  const workersHeading = element(document, 'h2', 'wwc-local-operations-section-heading')
+  const resourceStatusBadge = mountStatusBadge({
+    document,
+    props: {
+      label: 'No current failure signal',
+      tone: 'success',
+      className: 'wwc-local-resource-status',
+    },
+  })
+  const workersPanel = mountPanel({
+    document,
+    props: {
+      id: 'wwc-local-workers',
+      title: 'Local Workers',
+      description: 'Drain or enable a reported Worker without exposing host or repository paths.',
+      className: 'wwc-local-workers',
+    },
+  })
+  const workersSection = workersPanel.root
+  const workersHeading = workersPanel.title
+  workersHeading.className = 'wwc-local-operations-section-heading'
   const workers = element(document, 'ul', 'wwc-local-worker-list')
+  const workersEmpty = mountEmptyState({
+    document,
+    props: {
+      title: 'No local Workers reported',
+      detail: 'A local Worker will appear here after the Control Plane reports it.',
+      className: 'wwc-local-worker-empty',
+    },
+  })
   let closed = false
 
-  heading.textContent = 'Repository and local Worker operations'
-  status.setAttribute('role', 'status')
-  status.setAttribute('aria-live', 'polite')
-  error.setAttribute('role', 'alert')
-  error.setAttribute('aria-live', 'assertive')
-  retry.type = 'button'
-  retry.textContent = 'Retry snapshot'
-  reconnect.type = 'button'
-  reconnect.textContent = 'Reconnect events'
-  error.append(errorText, retry, reconnect)
-  repositoryHeading.textContent = 'Repository diagnostics'
-  resourcesHeading.textContent = 'Local resources'
-  workersHeading.textContent = 'Local Workers'
-  repositorySection.append(repositoryHeading, repositoryContent)
-  resourcesSection.append(resourcesHeading, resourcesContent)
+  repositoryPanel.content.append(repositoryContent)
+  resourcesPanel.content.append(resourceStatusBadge.root, resourcesContent)
   workers.setAttribute('aria-live', 'polite')
-  workersSection.append(workersHeading, workers)
-  layout.append(heading, status, error, repositorySection, resourcesSection, workersSection)
+  workersPanel.content.append(workers, workersEmpty.root)
+  layout.append(
+    heading,
+    ...(readinessOpenButton === null ? [] : [readinessOpenButton.root]),
+    status,
+    error,
+    repositorySection,
+    resourcesSection,
+    workersSection,
+  )
   options.root.replaceChildren(layout)
 
   function renderWorker(worker: WorkerProjection, commandsDisabled: boolean): HTMLLIElement {
@@ -210,12 +320,20 @@ export function mountLocalOperationsPage(options: LocalOperationsPageOptions): L
     item.dataset.state = worker.state
     drain.type = 'button'
     drain.textContent = 'Drain Worker'
+    drain.dataset.wwcComponent = 'button'
+    drain.dataset.variant = 'destructive'
     drain.disabled = commandsDisabled || worker.state !== 'enabled'
     enable.type = 'button'
     enable.textContent = 'Enable Worker'
+    enable.dataset.wwcComponent = 'button'
+    enable.dataset.variant = 'default'
     enable.disabled = commandsDisabled || worker.state === 'enabled'
-    drain.addEventListener('click', () => { void options.model.drainWorker(worker.id) })
-    enable.addEventListener('click', () => { void options.model.enableWorker(worker.id) })
+    drain.addEventListener('click', () => {
+      if (options.readOnly !== true) void options.model.drainWorker(worker.id)
+    })
+    enable.addEventListener('click', () => {
+      if (options.readOnly !== true) void options.model.enableWorker(worker.id)
+    })
     controls.append(drain, enable)
     item.append(title, details, controls)
     return item
@@ -224,10 +342,29 @@ export function mountLocalOperationsPage(options: LocalOperationsPageOptions): L
   function render(state: LocalOperationsViewModelState): void {
     if (closed) return
     const presentation = localOperationsPagePresentation(state)
-    status.textContent = presentation.statusText
+    const tone: StatusTone = presentation.errorText !== null
+      ? 'danger'
+      : state.realtime === 'reconnecting'
+        ? 'warning'
+        : presentation.busy
+          ? 'info'
+          : state.status === 'ready'
+            ? 'success'
+            : 'neutral'
+    statusBadge.update({
+      label: presentation.statusText,
+      tone,
+      live: 'polite',
+      className: 'wwc-local-operations-status',
+    })
     layout.setAttribute('aria-busy', String(presentation.busy))
-    error.hidden = presentation.errorText === null
-    errorText.textContent = presentation.errorText ?? ''
+    errorState.update({
+      title: 'Local operations unavailable',
+      message: presentation.errorText ?? '',
+      actions: [retry, reconnect],
+      visible: presentation.errorText !== null,
+      className: 'wwc-local-operations-error',
+    })
     retry.hidden = !presentation.retryVisible
     reconnect.hidden = !presentation.reconnectVisible
     repositoryContent.replaceChildren(descriptionList(document, [
@@ -240,6 +377,16 @@ export function mountLocalOperationsPage(options: LocalOperationsPageOptions): L
       ['Path policy', state.repository.pathsHidden ? 'Repository paths hidden' : 'Hidden'],
     ], 'wwc-local-repository-details'))
     resourcesContent.dataset.failureClassification = state.resources.failureClassification
+    resourceStatusBadge.update({
+      label: failureLabel(state.resources.failureClassification),
+      tone: state.resources.failureClassification === 'none'
+        ? 'success'
+        : state.resources.failureClassification === 'resource-shortage'
+          ? 'warning'
+          : 'danger',
+      live: state.resources.failureClassification === 'none' ? 'off' : 'polite',
+      className: 'wwc-local-resource-status',
+    })
     resourcesContent.replaceChildren(descriptionList(document, [
       ['Failure classification', failureLabel(state.resources.failureClassification)],
       ['Reported Workers', String(state.resources.reportedWorkerCount)],
@@ -251,17 +398,12 @@ export function mountLocalOperationsPage(options: LocalOperationsPageOptions): L
       ['Cleanup', 'Not reported by Control Plane'],
     ], 'wwc-local-resource-details'))
     workers.replaceChildren(...state.workers.map(worker => (
-      renderWorker(worker, presentation.commandsDisabled)
+      renderWorker(worker, options.readOnly === true || presentation.commandsDisabled)
     )))
-    if (state.workers.length === 0) {
-      const empty = element(document, 'li', 'wwc-local-worker-empty')
-      empty.textContent = 'No local Workers are currently reported.'
-      workers.append(empty)
-    }
+    workers.hidden = state.workers.length === 0
+    workersEmpty.root.hidden = state.workers.length !== 0
   }
 
-  retry.addEventListener('click', () => { void options.model.refresh() })
-  reconnect.addEventListener('click', () => { options.model.reconnect() })
   const unsubscribe = options.model.subscribe(render)
   void options.model.start()
   return {
@@ -270,6 +412,17 @@ export function mountLocalOperationsPage(options: LocalOperationsPageOptions): L
       closed = true
       unsubscribe()
       options.model.close()
+      retryButton.close()
+      reconnectButton.close()
+      errorState.close()
+      workersEmpty.close()
+      workersPanel.close()
+      if (readinessOpenButton !== null) readinessOpenButton.close()
+      resourceStatusBadge.close()
+      resourcesPanel.close()
+      repositoryPanel.close()
+      statusBadge.close()
+      pageHeader.close()
       options.root.replaceChildren()
     },
   }

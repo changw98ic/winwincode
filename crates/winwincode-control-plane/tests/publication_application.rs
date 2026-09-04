@@ -13,8 +13,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rusqlite::Connection;
 use winwincode_api::generated::{
     Actor, ErrorCode, PageRequest, PublicationCancelCommand, PublicationCancelCommandCommand,
-    PublicationCancelPayload, PublicationGetParameters, PublicationGetQuery,
-    PublicationGetQueryQuery, PublicationListParameters, PublicationListQuery,
+    PublicationCancelPayload, PublicationDetailProjectionKind, PublicationGetParameters,
+    PublicationGetQuery, PublicationGetQueryQuery, PublicationListParameters, PublicationListQuery,
     PublicationListQueryQuery, PublicationPublishCommand, PublicationPublishCommandCommand,
     PublicationPublishPayload, PublicationTarget as ApiPublicationTarget,
     PublicationTargetProvider, RepositoryScope, RepositoryScopeKind, UserActor, UserActorKind,
@@ -28,9 +28,11 @@ use winwincode_domain::{
     SchemaVersion, UserId, WorkspaceId,
 };
 use winwincode_publication::{
-    PolicyPermission, PublicationOperation, PublicationPolicyEvidence, PublicationPolicyOrigin,
-    PublicationPort, PublicationPortError, PublicationPortMutation, PublicationPortObservation,
-    PublicationRequester, RepositoryPolicyScope, RepositoryPublicationPolicy,
+    PolicyPermission, PublicationOperation, PublicationOperationKind, PublicationPolicyContext,
+    PublicationPolicyEvidence, PublicationPolicyOrigin, PublicationPort, PublicationPortError,
+    PublicationPortMutation, PublicationPortObservation, PublicationRequester,
+    PublicationResourceFact, PublicationResourceKind, RepositoryPolicyScope,
+    RepositoryPublicationPolicy,
     test_support::{CurrentPublicationFixture, current_publication_fixture},
 };
 
@@ -67,6 +69,53 @@ impl PublicationPort for NoProviderCalls {
     }
 }
 
+struct SuccessfulProvider;
+
+impl PublicationPort for SuccessfulProvider {
+    fn lookup(
+        &mut self,
+        operation: &PublicationOperation,
+    ) -> Result<PublicationPortObservation, PublicationPortError> {
+        Ok(PublicationPortObservation::absent(operation))
+    }
+
+    fn apply(
+        &mut self,
+        operation: &PublicationOperation,
+    ) -> Result<PublicationPortMutation, PublicationPortError> {
+        let resource = (operation.kind() == PublicationOperationKind::PullRequest).then(|| {
+            PublicationResourceFact::try_new(
+                PublicationResourceKind::GitHubPullRequest,
+                "example/widget",
+                17,
+            )
+            .expect("canonical pull request resource")
+        });
+        Ok(PublicationPortMutation::applied(operation, resource, true))
+    }
+}
+
+struct RemoteUrlCodeProvider;
+
+impl PublicationPort for RemoteUrlCodeProvider {
+    fn lookup(
+        &mut self,
+        operation: &PublicationOperation,
+    ) -> Result<PublicationPortObservation, PublicationPortError> {
+        Ok(PublicationPortObservation::unknown(
+            operation,
+            "https://example.com/provider-result",
+        ))
+    }
+
+    fn apply(
+        &mut self,
+        _operation: &PublicationOperation,
+    ) -> Result<PublicationPortMutation, PublicationPortError> {
+        panic!("an unknown lookup must stop before a provider write")
+    }
+}
+
 #[test]
 fn publish_maps_generated_projection_and_preserves_receipt_conflicts() {
     let root = temporary_root();
@@ -93,15 +142,69 @@ fn publish_maps_generated_projection_and_preserves_receipt_conflicts() {
     let projected = control_plane
         .publication_get(&get_query(10, 1, repository_scope()))
         .expect("map the verified intent through the generated get projection");
-    assert_eq!(projected.result.id, publication_id(1));
     assert_eq!(
-        projected.result.approved_by,
+        projected.result.kind,
+        PublicationDetailProjectionKind::PublicationDetail
+    );
+    assert_eq!(projected.result.summary.id, publication_id(1));
+    assert_eq!(
+        projected.result.summary.approved_by,
         winwincode_api::generated::ActorId::UserId(UserId(
             fixture.authorization().approved_by().to_owned()
         ))
     );
-    assert_eq!(projected.result.target.repository.0, "example/widget");
-    assert_eq!(projected.result.resource_ref, None);
+    assert_eq!(
+        projected.result.summary.target.repository.0,
+        "example/widget"
+    );
+    assert_eq!(projected.result.summary.resource_ref, None);
+    assert_eq!(projected.result.steps.len(), 4);
+    assert_eq!(
+        projected
+            .result
+            .steps
+            .iter()
+            .map(|step| (step.kind.as_str(), step.state.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("branch", "pending"),
+            ("pull_request", "pending"),
+            ("issue_comment", "pending"),
+            ("commit_status", "pending"),
+        ]
+    );
+    assert!(projected.result.retryable);
+    assert!(projected.result.cancellable);
+    assert_eq!(projected.result.cancellation, None);
+    assert!(!projected.result.history_truncated);
+    assert_eq!(projected.result.history.len(), 1);
+    assert_eq!(projected.result.history[0].revision, Revision(1));
+    assert_eq!(projected.result.history[0].state, "pending");
+    let public_detail = serde_json::to_value(&projected.result).expect("serialize public detail");
+    let encoded = serde_json::to_string(&public_detail).expect("encode public detail");
+    for forbidden in [
+        "providerIdempotencyKey",
+        "operationKey",
+        "requestSha256",
+        "candidateCommitId",
+        "artifactId",
+        "artifactDigest",
+        "intentSha256",
+        "repositoryScopeSha256",
+    ] {
+        assert!(!encoded.contains(forbidden), "detail leaked {forbidden}");
+    }
+    for private_value in [
+        fixture.authorization().artifact_id(),
+        fixture.authorization().artifact_digest().0.as_str(),
+        fixture.authorization().repository_scope_sha256().0.as_str(),
+        fixture.authorization().provider_idempotency_key(),
+    ] {
+        assert!(
+            !encoded.contains(private_value),
+            "detail leaked a private durable value"
+        );
+    }
 
     let replay = control_plane
         .commit_publication_publish(
@@ -150,6 +253,131 @@ fn publish_maps_generated_projection_and_preserves_receipt_conflicts() {
 }
 
 #[test]
+fn get_projects_completed_steps_and_exact_status_history_without_provider_requests() {
+    let root = temporary_root();
+    let fixture = current_publication_fixture();
+    let policy = policy(&fixture);
+    let origin = origin();
+    let mut no_provider = NoProviderCalls::default();
+    let mut control_plane = start(&root);
+    publish(
+        &mut control_plane,
+        &fixture,
+        &policy,
+        &origin,
+        &mut no_provider,
+        1,
+        11,
+        1_100,
+    );
+    let context = PublicationPolicyContext::try_new(
+        PublicationRequester::User(requester_id()),
+        request_id(12),
+        policy_scope(),
+        origin,
+        evidence(&fixture, 2_000),
+    )
+    .expect("current publication policy context");
+    control_plane
+        .resume_publication(
+            fixture.publication_id(),
+            &context,
+            &policy,
+            &mut SuccessfulProvider,
+        )
+        .expect("complete publication through existing domain authority");
+
+    let detail = control_plane
+        .publication_get(&get_query(13, 1, repository_scope()))
+        .expect("read completed publication detail");
+    assert_eq!(detail.result.summary.revision, Revision(11));
+    assert_eq!(detail.result.summary.state, "published");
+    assert_eq!(detail.result.history.len(), 11);
+    assert_eq!(detail.result.history[0].state, "pending");
+    assert_eq!(detail.result.history[1].state, "publishing");
+    assert_eq!(detail.result.history[10].state, "published");
+    assert!(
+        detail
+            .result
+            .steps
+            .iter()
+            .all(|step| step.state == "succeeded" && !step.retryable)
+    );
+    assert_eq!(
+        detail
+            .result
+            .steps
+            .iter()
+            .map(|step| step.kind.as_str())
+            .collect::<Vec<_>>(),
+        vec!["branch", "pull_request", "issue_comment", "commit_status"]
+    );
+    assert_eq!(
+        detail.result.steps[1].resource_ref,
+        detail.result.summary.resource_ref
+    );
+    assert!(!detail.result.retryable);
+    assert!(!detail.result.cancellable);
+    assert_eq!(detail.result.cancellation, None);
+    assert!(!detail.result.history_truncated);
+    assert_eq!((no_provider.lookups, no_provider.applies), (0, 0));
+
+    control_plane.shutdown().expect("clean shutdown");
+    fs::remove_dir_all(root).expect("remove fixture root");
+}
+
+#[test]
+fn get_redacts_a_provider_url_disguised_as_an_outcome_code() {
+    let root = temporary_root();
+    let fixture = current_publication_fixture();
+    let policy = policy(&fixture);
+    let origin = origin();
+    let mut no_provider = NoProviderCalls::default();
+    let mut control_plane = start(&root);
+    publish(
+        &mut control_plane,
+        &fixture,
+        &policy,
+        &origin,
+        &mut no_provider,
+        1,
+        11,
+        1_100,
+    );
+    let context = PublicationPolicyContext::try_new(
+        PublicationRequester::User(requester_id()),
+        request_id(12),
+        policy_scope(),
+        origin,
+        evidence(&fixture, 2_000),
+    )
+    .expect("current publication policy context");
+    control_plane
+        .resume_publication(
+            fixture.publication_id(),
+            &context,
+            &policy,
+            &mut RemoteUrlCodeProvider,
+        )
+        .expect("persist the provider's unknown result");
+
+    let detail = control_plane
+        .publication_get(&get_query(13, 1, repository_scope()))
+        .expect("redact the unsafe provider code without hiding durable status");
+    assert_eq!(detail.result.summary.revision, Revision(3));
+    assert_eq!(detail.result.steps[0].state, "unknown");
+    assert_eq!(detail.result.steps[0].outcome_code, None);
+    assert!(
+        !serde_json::to_string(&detail)
+            .expect("encode detail")
+            .contains("https://")
+    );
+
+    control_plane.shutdown().expect("clean shutdown");
+    fs::remove_dir_all(root).expect("remove fixture root");
+}
+
+#[test]
 fn cancel_is_scope_revision_and_restart_safe_without_provider_effects() {
     let root = temporary_root();
     let fixture = current_publication_fixture();
@@ -182,6 +410,28 @@ fn cancel_is_scope_revision_and_restart_safe_without_provider_effects() {
         .publication_cancel(&command, 9_000)
         .expect("restart replays the original cancellation time and result");
     assert_eq!(replay, cancelled);
+    let detail = control_plane
+        .publication_get(&get_query(44, 1, repository_scope()))
+        .expect("restart rebuilds cancellation detail from the verified journal");
+    assert_eq!(detail.result.summary.revision, Revision(2));
+    assert_eq!(
+        detail
+            .result
+            .history
+            .iter()
+            .map(|entry| (entry.revision.clone(), entry.state.as_str()))
+            .collect::<Vec<_>>(),
+        vec![(Revision(1), "pending"), (Revision(2), "cancelled")]
+    );
+    let cancellation = detail
+        .result
+        .cancellation
+        .expect("closed cancellation detail");
+    assert_eq!(cancellation.revision, Revision(2));
+    assert_eq!(cancellation.cancelled_at.0, "1970-01-01T00:00:01.200Z");
+    assert_eq!(cancellation.reason, "operator cancelled");
+    assert!(!detail.result.retryable);
+    assert!(!detail.result.cancellable);
 
     let mut changed = command.clone();
     changed.payload.reason = "changed receipt body".to_owned();
@@ -245,8 +495,8 @@ fn cancel_reuses_requested_audit_time_after_state_failure_and_restart() {
     let unchanged = control_plane
         .publication_get(&get_query(43, 1, repository_scope()))
         .expect("failed cancellation leaves the original Publication");
-    assert_eq!(unchanged.result.state, "pending");
-    assert_eq!(unchanged.result.revision, Revision(1));
+    assert_eq!(unchanged.result.summary.state, "pending");
+    assert_eq!(unchanged.result.summary.revision, Revision(1));
     control_plane.shutdown().expect("close failed attempt");
     assert_eq!(
         cancel_audit_facts(&root),
@@ -339,8 +589,8 @@ fn list_and_get_use_stable_scope_bound_snapshots_across_restart() {
     let get = control_plane
         .publication_get(&get_query(41, 3, repository_scope()))
         .expect("read exact fully verified Publication");
-    assert_eq!(get.result.id, publication_id(3));
-    assert_eq!(get.result.state, "pending");
+    assert_eq!(get.result.summary.id, publication_id(3));
+    assert_eq!(get.result.summary.state, "pending");
     let foreign_get = control_plane
         .publication_get(&get_query(42, 3, foreign_scope()))
         .expect_err("get cannot cross a repository scope");

@@ -2,12 +2,16 @@
 
 use serde_json::{Value, json};
 use winwincode_api::generated::{
-    ApprovalDecidePayload, ChatInteractionListQuery, ChatInteractionProjection, InputRespondPayload,
+    ApprovalDecidePayload, ApprovalEffectiveDecisionScope, ApprovalProjectionCategory,
+    ApprovalSanitizedDetailProjectionKind, ApprovalSanitizedDetailUnavailableReason,
+    ChatInteractionListQuery, ChatInteractionProjection, InputRespondPayload,
 };
 use winwincode_control_plane::chat_interaction_projection::{
     ChatInteractionProjectionError, ChatInteractionProjectionLedger, ProjectionWriteStatus,
 };
-use winwincode_domain::{Instant, InteractiveInputValue, ProductSessionId, Revision};
+use winwincode_domain::{
+    Instant, InteractiveInputChoiceId, InteractiveInputValue, ProductSessionId, Revision,
+};
 use winwincode_execution_port::generated::{
     ApprovalRequestMessage, EncodedPayload, InputRequestMessage,
 };
@@ -120,6 +124,19 @@ fn restart_rebuilds_pending_input_and_approval_without_private_details() {
             ChatInteractionProjection::ChatInputInteractionProjection(value) => value.binding,
             ChatInteractionProjection::ChatApprovalInteractionProjection(value) => {
                 assert_eq!(value.approval.subject, "Run the approved test command.");
+                assert_eq!(value.approval.category, ApprovalProjectionCategory::Shell);
+                assert_eq!(
+                    value.approval.effective_decision_scope,
+                    ApprovalEffectiveDecisionScope::Once
+                );
+                assert_eq!(
+                    value.approval.sanitized_detail.kind,
+                    ApprovalSanitizedDetailProjectionKind::Unavailable
+                );
+                assert_eq!(
+                    value.approval.sanitized_detail.reason,
+                    ApprovalSanitizedDetailUnavailableReason::EncodedPayloadRedacted
+                );
                 value.approval.binding
             }
         };
@@ -131,6 +148,101 @@ fn restart_rebuilds_pending_input_and_approval_without_private_details() {
         assert_eq!(binding.worker_session_id, input.worker_session_id);
         assert_eq!(binding.session_identity, input.session_identity);
     }
+}
+
+#[test]
+fn approval_without_typed_producer_detail_is_explicitly_unavailable() {
+    let (_, approval) = worker_messages();
+    assert!(approval.action.details.is_none());
+    let mut ledger = ChatInteractionProjectionLedger::default();
+    ledger
+        .record_approval_request(&approval)
+        .expect("record approval without detail");
+    let projection = ledger
+        .approval(
+            &approval.approval_id,
+            &Instant("2026-08-24T12:01:00.000Z".to_owned()),
+        )
+        .expect("read approval")
+        .expect("approval projection");
+    assert_eq!(projection.category, ApprovalProjectionCategory::Shell);
+    assert_eq!(
+        projection.sanitized_detail.reason,
+        ApprovalSanitizedDetailUnavailableReason::ProducerUnavailable
+    );
+}
+
+#[test]
+fn duplicate_choice_values_keep_stable_ids_and_only_canonical_values_are_accepted() {
+    let (mut input, _) = worker_messages();
+    let choices = input.choices.as_mut().expect("choice input fixture");
+    let mut repeated = choices[0].clone();
+    repeated.id = InteractiveInputChoiceId("ich_00000000000000000000000002".to_owned());
+    choices.push(repeated);
+
+    let mut ledger = ChatInteractionProjectionLedger::default();
+    let receipt = ledger.record_input_request(&input).expect("record input");
+    let snapshot = ledger.snapshot();
+    let mut restored = ChatInteractionProjectionLedger::restore(snapshot.clone())
+        .expect("restore stable choice identities");
+    let response = restored
+        .query(
+            &query(&input.session_identity.product_session_id, &["pending"]),
+            &Instant("2026-08-24T12:01:00.000Z".to_owned()),
+        )
+        .expect("query restored input");
+    let projection = response
+        .result
+        .items
+        .iter()
+        .find_map(|item| match item {
+            ChatInteractionProjection::ChatInputInteractionProjection(value) => Some(value),
+            ChatInteractionProjection::ChatApprovalInteractionProjection(_) => None,
+        })
+        .expect("input projection");
+    assert_eq!(projection.options.len(), 2);
+    assert_ne!(projection.options[0].id, projection.options[1].id);
+    assert_eq!(projection.options[0].value, projection.options[1].value);
+    assert_eq!(restored.snapshot(), snapshot);
+
+    let mut payload = InputRespondPayload {
+        execution_job_id: projection.binding.execution_job_id.clone(),
+        input_request_id: projection.input_request_id.clone(),
+        product_session_id: projection.binding.product_session_id.clone(),
+        session_identity: projection.binding.session_identity.clone(),
+        status: "provided".to_owned(),
+        value: Some(InteractiveInputValue {
+            mode: projection.mode.clone(),
+            value: "forged-choice-value".to_owned(),
+        }),
+        worker_session_id: projection.binding.worker_session_id.clone(),
+    };
+    assert_eq!(
+        restored.apply_input_response(
+            &receipt.revision,
+            &payload,
+            &Instant("2026-08-24T12:01:00.000Z".to_owned()),
+        ),
+        Err(ChatInteractionProjectionError::InvalidField("value.value"))
+    );
+    payload.value.as_mut().expect("provided value").value = projection.options[1].value.clone();
+    restored
+        .apply_input_response(
+            &receipt.revision,
+            &payload,
+            &Instant("2026-08-24T12:01:00.000Z".to_owned()),
+        )
+        .expect("accept canonical repeated choice value");
+
+    let mut duplicate_id = input;
+    let first_id = duplicate_id.choices.as_ref().expect("choice input fixture")[0]
+        .id
+        .clone();
+    duplicate_id.choices.as_mut().expect("choice input fixture")[1].id = first_id;
+    assert_eq!(
+        ChatInteractionProjectionLedger::default().record_input_request(&duplicate_id),
+        Err(ChatInteractionProjectionError::InvalidField("choices"))
+    );
 }
 
 #[test]

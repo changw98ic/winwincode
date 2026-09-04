@@ -344,6 +344,7 @@ fn configure_model_provider(fixture: &mut Fixture, seed: u64) {
                     reasoning_efforts: vec!["high".to_owned()],
                 }],
             },
+            Instant("2026-09-02T00:00:00.000Z".to_owned()),
         )
         .expect("register fixture Provider");
     CredentialReferenceService::new(&mut fixture.storage)
@@ -384,6 +385,7 @@ fn configure_model_provider(fixture: &mut Fixture, seed: u64) {
                 }),
                 worker_concurrency_limit: 1,
             },
+            Instant("2026-09-02T00:00:00.000Z".to_owned()),
         )
         .expect("configure ProductSession model route");
     let resolution = CredentialReferenceService::new(&mut fixture.storage)

@@ -36,10 +36,14 @@ const facadeModule = await import(`${pathToFileURL(resolve(
   cacheRoot,
   'control-plane-client.js',
 )).href}`)
+const clientSurfaceModule = await import(`${pathToFileURL(resolve(
+  cacheRoot,
+  'client-surface.js',
+)).href}`)
 const {
-  clientSurfaceFromHash,
   mountWinWinCodeClient,
 } = applicationModule
+const { clientSurfaceFromHash } = clientSurfaceModule
 const { ControlPlaneClientError } = facadeModule
 
 const schemaVersion = 'winwincode/v1'

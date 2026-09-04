@@ -46,6 +46,12 @@ const scope = {
   projectId: 'prj_00000000000000000000000001',
   repositoryId: 'rep_00000000000000000000000001',
 }
+const projectScope = {
+  kind: 'project',
+  organizationId: scope.organizationId,
+  workspaceId: scope.workspaceId,
+  projectId: scope.projectId,
+}
 const productSessionId = 'psn_00000000000000000000000001'
 const otherProductSessionId = 'psn_00000000000000000000000002'
 const subscriptionId = 'sub_00000000000000000000000001'
@@ -156,6 +162,12 @@ function approval(state = 'pending', revision = 1, id = productSessionId) {
     revision,
     state,
     subject: 'Allow one bounded tool call',
+    category: 'shell',
+    effectiveDecisionScope: 'once',
+    sanitizedDetail: {
+      kind: 'unavailable',
+      reason: 'producer_unavailable',
+    },
     binding: binding(id),
   }
 }
@@ -337,15 +349,39 @@ function contractFake() {
             : [],
         }))
       }
-      if (request.query === 'settings.get') {
+      if (request.query === 'model.route.availability.list') {
         return response(200, queryResponse(request, {
-          revision: 1,
-          workerConcurrencyLimit: 2,
-          defaultModelRoute: {
-            providerId: 'provider',
-            modelId: 'model',
-            credentialReferenceId: 'crd_00000000000000000000000001',
-          },
+          kind: 'model_route_availability_page',
+          scope,
+          settingsSource: scope,
+          settingsRevision: 1,
+          requestPoolSource: projectScope,
+          requestPoolRevision: 5,
+          defaultProviderId: 'provider',
+          defaultModelId: 'model',
+          status: 'enabled',
+          reason: 'ready',
+          items: [{
+            route: {
+              providerId: 'provider',
+              modelId: 'model',
+              credentialReferenceId: 'crd_00000000000000000000000001',
+            },
+            providerDisplayName: 'Repository Provider',
+            modelDisplayName: 'Repository Model',
+            catalogSource: scope,
+            catalogVersion: 1,
+            providerVersion: 1,
+            modelVersion: 1,
+            contextWindowTokens: 128_000,
+            maxOutputTokens: 16_000,
+            toolSupport: 'parallel',
+            reasoningEfforts: ['medium', 'high'],
+            credentialRotationVersion: 1,
+            isDefault: true,
+            status: 'enabled',
+            reason: 'ready',
+          }],
         }))
       }
       if (request.query === 'runtime.projection.get') {
@@ -465,10 +501,25 @@ test('Chat contract fake keeps sessions isolated, deduplicates events, and resum
     productSessionId,
     otherProductSessionId,
   ])
-  assert.equal(fake.sockets.sockets.length, 1)
-  assert.deepEqual(fake.sockets.urls, ['wss://control.example/root/api/v1/events'])
+  assert.equal(fake.sockets.sockets.length, 3)
+  assert.deepEqual(fake.sockets.urls, [
+    'wss://control.example/root/api/v1/events',
+    'wss://control.example/root/api/v1/events',
+    'wss://control.example/root/api/v1/events',
+  ])
 
-  const firstSocket = fake.sockets.sockets[0]
+  const availabilitySocket = fake.sockets.sockets[0]
+  availabilitySocket.open()
+  assert.equal(availabilitySocket.sent[0].subscription.stream.kind, 'scope')
+  assert.deepEqual(
+    availabilitySocket.sent[0].subscription.eventTypes,
+    ['model-route-availability.invalidated.v1'],
+  )
+  const requestPoolSocket = fake.sockets.sockets[1]
+  requestPoolSocket.open()
+  assert.deepEqual(requestPoolSocket.sent[0].subscription.scope, projectScope)
+
+  const firstSocket = fake.sockets.sockets[2]
   firstSocket.open()
   const subscribe = firstSocket.sent[0]
   assert.equal(subscribe.type, 'transport.subscribe.v1')
@@ -491,8 +542,8 @@ test('Chat contract fake keeps sessions isolated, deduplicates events, and resum
 
   firstSocket.serverClose(1006)
   await flush()
-  assert.equal(fake.sockets.sockets.length, 2)
-  const resumedSocket = fake.sockets.sockets[1]
+  assert.equal(fake.sockets.sockets.length, 4)
+  const resumedSocket = fake.sockets.sockets[3]
   resumedSocket.open()
   assert.equal(resumedSocket.sent[0].type, 'transport.resume.v1')
   assert.deepEqual(resumedSocket.sent[0].after, cursor(productSessionId, 1))

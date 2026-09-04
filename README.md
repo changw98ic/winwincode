@@ -134,8 +134,10 @@ corepack pnpm verify
 - [机器可读目标图](docs/decisions/0028-control-plane-worker-target-graph.json)；
 - [模块依赖门禁](docs/decisions/0028-control-plane-worker-dependency-rules.md)；
 - [Control Plane HTTP 合同](schema/winwincode/v1/control-plane-http.schema.json)；
-- [Control Plane WebSocket 合同](docs/contracts/control-plane-websocket.md)；
-- [ExecutionPort 合同](docs/contracts/execution-port-v1.md)；
+- [Control Plane WebSocket schema](schema/winwincode/v1/control-plane-events.schema.json)
+  与[协议说明](docs/contracts/control-plane-websocket.md)；
+- [ExecutionPort schema](schema/winwincode/v1/execution-port.schema.json)
+  与[协议说明](docs/contracts/execution-port-v1.md)；
 - [产品发布门禁](docs/release-gate.md)；
 - [发布流程](docs/releasing.md)；
 - [真实模型与真实仓库评估](docs/live-evaluation.md)；

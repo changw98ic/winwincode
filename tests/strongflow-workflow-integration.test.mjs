@@ -300,6 +300,7 @@ function deliveryDetail(state) {
       scope: ['apps/client'],
       outOfScope: [],
       constraints: [],
+      sourceProductSessionId: null,
       acceptanceCriteria: [{
         id: 'criterion:1',
         description: 'All decisions retain current identities.',
@@ -313,6 +314,7 @@ function deliveryDetail(state) {
       maxReworkAttempts: 2,
     },
     solutionReview: review(state),
+    diagramExecution: null,
     stages: [{
       id: stageRunId,
       actorType: 'codex',

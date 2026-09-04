@@ -1,12 +1,25 @@
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  chmodSync,
+  copyFileSync,
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs'
 import { createServer } from 'node:https'
 import { createServer as createNetServer } from 'node:net'
 import { join, normalize, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 import test from 'node:test'
+
+import {
+  serverTargetDirectory,
+  writeHelperReleaseManifest,
+} from '../scripts/run-api-production-vertical.mjs'
 
 const root = resolve(import.meta.dirname, '..')
 
@@ -120,9 +133,31 @@ async function waitForServer(controlUrl, child, errors) {
   throw new Error(`standalone Server did not become healthy:\n${errors.join('')}`)
 }
 
-function startStandaloneServer({ cert, clientOrigin, controlPort, directory, proof, errors }) {
+async function expectStartupFailure(child, errors, expectedMessage) {
+  const exited = await Promise.race([
+    new Promise(resolvePromise => child.once('exit', () => resolvePromise(true))),
+    new Promise(resolvePromise => setTimeout(() => resolvePromise(false), 5_000)),
+  ])
+  if (!exited) await stopChild(child, 'SIGKILL')
+  assert.equal(exited, true, 'standalone Server accepted an incomplete production configuration')
+  assert.equal(child.exitCode, 1)
+  assert.match(errors.join(''), expectedMessage)
+}
+
+function startStandaloneServer({
+  cert,
+  checkoutRevision,
+  clientOrigin,
+  controlPort,
+  directory,
+  proof,
+  errors,
+  helperExecutable,
+  helperReleaseManifest,
+  serverBinary,
+}) {
   const controlUrl = `https://control.localhost:${String(controlPort)}`
-  const child = spawn(resolve(root, 'target/debug/winwincode-server'), [], {
+  const child = spawn(serverBinary, [], {
     cwd: root,
     env: {
       ...process.env,
@@ -133,6 +168,9 @@ function startStandaloneServer({ cert, clientOrigin, controlPort, directory, pro
       WWC_SERVER_BOOTSTRAP_PROOF: proof,
       WWC_SERVER_AUTH_SUBJECT: 'usr_01J00000000000000000000000',
       WWC_SERVER_REPOSITORY_ROOT: root,
+      WWC_SERVER_CHECKOUT_REVISION: checkoutRevision,
+      WWC_SERVER_HELPER_EXECUTABLE: helperExecutable,
+      WWC_SERVER_HELPER_RELEASE_MANIFEST: helperReleaseManifest,
       WWC_SERVER_ORGANIZATION_ID: 'org_01J00000000000000000000000',
       WWC_SERVER_WORKSPACE_ID: 'wsp_01J00000000000000000000000',
       WWC_SERVER_PROJECT_ID: 'prj_01J00000000000000000000000',
@@ -267,12 +305,23 @@ test('static Client and standalone TLS Server run real cross-origin workflows an
   }
   command('corepack', ['pnpm', '--filter', '@winwincode/client', 'build'])
   command('cargo', ['build', '-p', 'winwincode-server', '--bin', 'winwincode-server', '--locked', '--offline'])
+  command('cargo', ['build', '--release', '-p', 'winwincode-kernel-helper', '--locked', '--offline'])
+  const targetDirectory = serverTargetDirectory(root)
+  const serverBinary = resolve(targetDirectory, 'debug/winwincode-server')
+  const helperExecutable = resolve(targetDirectory, 'debug/winwincode-kernel-helper')
+  const releaseHelper = resolve(targetDirectory, 'release/winwincode-kernel-helper')
+  assert.equal(existsSync(serverBinary), true, `Server binary is missing: ${serverBinary}`)
+  assert.equal(existsSync(releaseHelper), true, `release helper is missing: ${releaseHelper}`)
+  copyFileSync(releaseHelper, helperExecutable)
+  chmodSync(helperExecutable, 0o755)
+  const helperReleaseManifest = writeHelperReleaseManifest(root, helperExecutable)
   const directory = mkdtempSync(join(tmpdir(), 'winwincode-browser-auth-'))
   const cert = certificate(directory)
   let controlUrl = ''
   const baselineResult = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' })
   assert.equal(baselineResult.status, 0, baselineResult.stderr)
   const repositoryBaseline = baselineResult.stdout.trim()
+  assert.match(repositoryBaseline, /^[0-9a-f]{40}$/u)
   let clientServer = staticClientServer(cert, () => ({
     repositoryBaseline,
     serverUrl: controlUrl,
@@ -294,13 +343,35 @@ test('static Client and standalone TLS Server run real cross-origin workflows an
     ])
     rmSync(directory, { recursive: true, force: true })
   })
+  const missingRevisionErrors = []
+  const missingRevision = startStandaloneServer({
+    cert,
+    checkoutRevision: undefined,
+    clientOrigin,
+    controlPort,
+    directory,
+    proof,
+    errors: missingRevisionErrors,
+    helperExecutable,
+    helperReleaseManifest,
+    serverBinary,
+  }).child
+  await expectStartupFailure(
+    missingRevision,
+    missingRevisionErrors,
+    /WWC_SERVER_CHECKOUT_REVISION is required/u,
+  )
   ;({ child: standalone, controlUrl } = startStandaloneServer({
     cert,
+    checkoutRevision: repositoryBaseline,
     clientOrigin,
     controlPort,
     directory,
     proof,
     errors,
+    helperExecutable,
+    helperReleaseManifest,
+    serverBinary,
   }))
   const firstHealth = await waitForServer(controlUrl, standalone, errors)
   const debugPort = await freePort()
@@ -372,7 +443,7 @@ test('static Client and standalone TLS Server run real cross-origin workflows an
     versionReason: 'CLIENT_UPGRADE_REQUIRED',
     versionSupportedSchema: 'winwincode/v1',
     versionStatus: 426,
-    workerCount: 0,
+    workerCount: 1,
     cookieVisibleToScript: '',
   })
   const cookies = await devtools.send('Network.getAllCookies', {}, sessionId)
@@ -390,11 +461,15 @@ test('static Client and standalone TLS Server run real cross-origin workflows an
   await stopChild(standalone, 'SIGINT')
   ;({ child: standalone, controlUrl } = startStandaloneServer({
     cert,
+    checkoutRevision: repositoryBaseline,
     clientOrigin,
     controlPort,
     directory,
     proof,
     errors,
+    helperExecutable,
+    helperReleaseManifest,
+    serverBinary,
   }))
   const restartedHealth = await waitForServer(controlUrl, standalone, errors)
   assert.equal(restartedHealth.serverVersion, firstHealth.serverVersion)

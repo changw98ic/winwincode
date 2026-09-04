@@ -1,5 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import {
+  mountButton,
+  mountErrorState,
+  mountPageHeader,
+  mountPanel,
+  mountStatusBadge,
+  type StatusTone,
+} from './components/index.js'
 import type {
   CommandRequest,
   ActorId,
@@ -27,6 +35,8 @@ import type {
 export interface EnterpriseResourcePageOptions {
   readonly root: HTMLElement
   readonly model: EnterpriseManagementViewModel
+  /** Presentation-only capability; Server authorization remains authoritative. */
+  readonly readOnly?: boolean
 }
 
 export interface EnterpriseResourcePage {
@@ -194,6 +204,21 @@ function element<K extends keyof HTMLElementTagNameMap>(
   return node
 }
 
+function enterprisePanel(
+  document: Document,
+  id: string,
+  title: string,
+  description: string,
+  className: string,
+) {
+  const panel = mountPanel({
+    document,
+    props: { id, title, description, className },
+  })
+  panel.title.className = 'wwc-enterprise-section-heading'
+  return panel
+}
+
 function labelledInput(
   document: Document,
   id: string,
@@ -309,28 +334,65 @@ export function mountEnterpriseResourcePage(
 ): EnterpriseResourcePage {
   const document = options.root.ownerDocument
   const layout = element(document, 'main', 'wwc-enterprise-resources')
-  const heading = element(document, 'h1', 'wwc-enterprise-resources-heading')
-  const status = element(document, 'p', 'wwc-enterprise-resources-status')
-  const error = element(document, 'div', 'wwc-enterprise-resources-error')
-  const errorText = element(document, 'span', 'wwc-enterprise-resources-error-text')
-  const retry = element(document, 'button', 'wwc-enterprise-resources-retry')
-  const reconnect = element(document, 'button', 'wwc-enterprise-resources-reconnect')
+  layout.dataset.wwcPage = 'management'
+  const pageHeader = mountPageHeader({
+    document,
+    props: {
+      title: 'Enterprise resources and access',
+      eyebrow: 'Enterprise administration',
+      description: 'Manage organizations, members, role assignments, projects, and repositories.',
+      headingLevel: 1,
+      className: 'wwc-enterprise-resources-heading',
+    },
+  })
+  const heading = pageHeader.root
+  const statusBadge = mountStatusBadge({
+    document,
+    props: {
+      label: 'Loading enterprise resources…',
+      tone: 'info',
+      live: 'polite',
+      className: 'wwc-enterprise-resources-status',
+    },
+  })
+  const status = statusBadge.root
+  const retryButton = mountButton({
+    document,
+    props: {
+      label: 'Retry snapshot',
+      className: 'wwc-enterprise-resources-retry',
+      onActivate: () => { void options.model.refresh() },
+    },
+  })
+  const retry = retryButton.root
+  const reconnectButton = mountButton({
+    document,
+    props: {
+      label: 'Reconnect events',
+      className: 'wwc-enterprise-resources-reconnect',
+      onActivate: () => { options.model.reconnect() },
+    },
+  })
+  const reconnect = reconnectButton.root
+  const errorState = mountErrorState({
+    document,
+    props: {
+      title: 'Enterprise resources unavailable',
+      message: '',
+      actions: [retry, reconnect],
+      visible: false,
+      className: 'wwc-enterprise-resources-error',
+    },
+  })
+  const error = errorState.root
+  const errorText = errorState.message
+  errorText.className = 'wwc-enterprise-resources-error-text'
   const organization = createOrganizationSection(document, options.model)
   const membership = createMembershipSection(document, options.model)
   const roles = createRoleSection(document)
   const projects = createProjectSection(document, options.model)
   let closed = false
 
-  heading.textContent = 'Enterprise resources and access'
-  status.setAttribute('role', 'status')
-  status.setAttribute('aria-live', 'polite')
-  error.setAttribute('role', 'alert')
-  error.setAttribute('aria-live', 'assertive')
-  retry.type = 'button'
-  retry.textContent = 'Retry snapshot'
-  reconnect.type = 'button'
-  reconnect.textContent = 'Reconnect events'
-  error.append(errorText, retry, reconnect)
   layout.append(
     heading,
     status,
@@ -346,29 +408,50 @@ export function mountEnterpriseResourcePage(
     if (closed) return
     const presentation = enterpriseResourcePagePresentation(state)
     const snapshot = enterpriseResourceSnapshot(state)
-    status.textContent = presentation.statusText
+    const tone: StatusTone = presentation.errorText !== null
+      ? 'danger'
+      : state.realtime === 'reconnecting'
+        ? 'warning'
+        : presentation.busy
+          ? 'info'
+          : state.status === 'ready' || state.status === 'partial'
+            ? 'success'
+            : 'neutral'
+    statusBadge.update({
+      label: presentation.statusText,
+      tone,
+      live: 'polite',
+      className: 'wwc-enterprise-resources-status',
+    })
     layout.setAttribute('aria-busy', String(presentation.busy))
-    error.hidden = presentation.errorText === null
-    errorText.textContent = presentation.errorText ?? ''
+    errorState.update({
+      title: 'Enterprise resources unavailable',
+      message: presentation.errorText ?? '',
+      actions: [retry, reconnect],
+      visible: presentation.errorText !== null,
+      className: 'wwc-enterprise-resources-error',
+    })
     retry.hidden = !presentation.retryVisible
     reconnect.hidden = !presentation.reconnectVisible
     organization.render(
       snapshot.organizations,
       state,
-      presentation.mutationsDisabled.organization,
+      options.readOnly === true || presentation.mutationsDisabled.organization,
     )
-    membership.render(snapshot.members, state, presentation.mutationsDisabled.members)
+    membership.render(
+      snapshot.members,
+      state,
+      options.readOnly === true || presentation.mutationsDisabled.members,
+    )
     roles.render(snapshot.roleGroups, state)
     projects.render(
       snapshot.projects,
       snapshot.repositories,
       state,
-      presentation.mutationsDisabled.projects,
+      options.readOnly === true || presentation.mutationsDisabled.projects,
     )
   }
 
-  retry.addEventListener('click', () => { void options.model.refresh() })
-  reconnect.addEventListener('click', () => { options.model.reconnect() })
   const unsubscribe = options.model.subscribe(render)
   void options.model.start()
   return {
@@ -377,6 +460,15 @@ export function mountEnterpriseResourcePage(
       closed = true
       unsubscribe()
       options.model.close()
+      projects.close()
+      roles.close()
+      membership.close()
+      organization.close()
+      reconnectButton.close()
+      retryButton.close()
+      errorState.close()
+      statusBadge.close()
+      pageHeader.close()
       options.root.replaceChildren()
     },
   }
@@ -384,6 +476,7 @@ export function mountEnterpriseResourcePage(
 
 interface OrganizationSection {
   readonly section: HTMLElement
+  close(): void
   render(
     organizations: readonly EnterpriseOrganizationProjection[],
     state: EnterpriseManagementViewModelState,
@@ -395,8 +488,15 @@ function createOrganizationSection(
   document: Document,
   model: EnterpriseManagementViewModel,
 ): OrganizationSection {
-  const section = element(document, 'section', 'wwc-enterprise-organizations')
-  const heading = element(document, 'h2', 'wwc-enterprise-section-heading')
+  const panel = enterprisePanel(
+    document,
+    'wwc-enterprise-organizations',
+    'Organizations',
+    'Organization identity and lifecycle in the current enterprise snapshot.',
+    'wwc-enterprise-organizations',
+  )
+  const section = panel.root
+  const heading = panel.title
   const areaStatus = element(document, 'p', 'wwc-enterprise-organization-status')
   const list = element(document, 'ul', 'wwc-enterprise-organization-list')
   const fieldset = element(document, 'fieldset', 'wwc-enterprise-organization-fields')
@@ -420,6 +520,8 @@ function createOrganizationSection(
   id.input.pattern = 'org_[0-9A-HJKMNP-TV-Z]{26}'
   save.type = 'submit'
   save.textContent = 'Save organization'
+  save.dataset.wwcComponent = 'button'
+  save.dataset.variant = 'primary'
   form.addEventListener('submit', event => {
     event.preventDefault()
     const payload: EnterpriseOrganizationUpdatePayload = {
@@ -434,9 +536,10 @@ function createOrganizationSection(
   })
   form.append(id.label, name.label, slug.label, state.label, save)
   fieldset.append(legend, form)
-  section.append(heading, areaStatus, list, fieldset)
+  panel.content.append(areaStatus, list, fieldset)
   return {
     section,
+    close() { panel.close() },
     render(organizations, viewState, disabled) {
       areaStatus.textContent = areaLabel(viewState, 'organization')
       fieldset.disabled = disabled
@@ -450,6 +553,8 @@ function createOrganizationSection(
         summary.textContent = `${item.slug} · ${item.state} · ${shortId(item.id)} · revision ${String(item.revision)}`
         edit.type = 'button'
         edit.textContent = 'Edit organization'
+        edit.dataset.wwcComponent = 'button'
+        edit.dataset.variant = 'default'
         edit.disabled = disabled
         edit.addEventListener('click', () => {
           id.input.value = item.id
@@ -459,6 +564,8 @@ function createOrganizationSection(
         })
         archive.type = 'button'
         archive.textContent = item.state === 'archived' ? 'Organization archived' : 'Archive organization'
+        archive.dataset.wwcComponent = 'button'
+        archive.dataset.variant = 'destructive'
         archive.disabled = disabled || item.state === 'archived'
         archive.addEventListener('click', () => {
           void model.execute('organization', context => organizationCommand(context, {
@@ -473,6 +580,7 @@ function createOrganizationSection(
       }))
       if (organizations.length === 0) {
         const empty = element(document, 'li', 'wwc-enterprise-organization-empty')
+        empty.dataset.state = 'empty'
         empty.textContent = viewState.areas.organization.permission === 'denied'
           ? 'Organization data is not available for your current role.'
           : 'No organizations in the current snapshot.'
@@ -484,6 +592,7 @@ function createOrganizationSection(
 
 interface MembershipSection {
   readonly section: HTMLElement
+  close(): void
   render(
     members: readonly EnterpriseMembershipProjection[],
     state: EnterpriseManagementViewModelState,
@@ -495,8 +604,15 @@ function createMembershipSection(
   document: Document,
   model: EnterpriseManagementViewModel,
 ): MembershipSection {
-  const section = element(document, 'section', 'wwc-enterprise-members')
-  const heading = element(document, 'h2', 'wwc-enterprise-section-heading')
+  const panel = enterprisePanel(
+    document,
+    'wwc-enterprise-members',
+    'Members',
+    'Member state, teams, and versioned role assignments.',
+    'wwc-enterprise-members',
+  )
+  const section = panel.root
+  const heading = panel.title
   const areaStatus = element(document, 'p', 'wwc-enterprise-members-status')
   const list = element(document, 'ul', 'wwc-enterprise-member-list')
   const fieldset = element(document, 'fieldset', 'wwc-enterprise-member-fields')
@@ -523,6 +639,8 @@ function createMembershipSection(
   actor.input.pattern = '(usr|svc|sys)_[0-9A-HJKMNP-TV-Z]{26}'
   save.type = 'submit'
   save.textContent = 'Save member assignment'
+  save.dataset.wwcComponent = 'button'
+  save.dataset.variant = 'primary'
   form.addEventListener('submit', event => {
     event.preventDefault()
     const teamIds = [...new Set(
@@ -558,9 +676,10 @@ function createMembershipSection(
   })
   form.append(id.label, actor.label, displayName.label, teams.label, roles.label, state.label, save)
   fieldset.append(legend, form)
-  section.append(heading, areaStatus, list, fieldset)
+  panel.content.append(areaStatus, list, fieldset)
   return {
     section,
+    close() { panel.close() },
     render(members, viewState, disabled) {
       areaStatus.textContent = areaLabel(viewState, 'members')
       fieldset.disabled = disabled
@@ -574,6 +693,8 @@ function createMembershipSection(
         summary.textContent = `${member.state} · ${String(member.roleAssignments.length)} roles · ${shortId(member.id)} · revision ${String(member.revision)}`
         edit.type = 'button'
         edit.textContent = 'Edit role assignment'
+        edit.dataset.wwcComponent = 'button'
+        edit.dataset.variant = 'default'
         edit.disabled = disabled
         edit.addEventListener('click', () => {
           id.input.value = member.id
@@ -587,6 +708,8 @@ function createMembershipSection(
         })
         disable.type = 'button'
         disable.textContent = member.state === 'disabled' ? 'Member disabled' : 'Disable member'
+        disable.dataset.wwcComponent = 'button'
+        disable.dataset.variant = 'destructive'
         disable.disabled = disabled || member.state === 'disabled'
         disable.addEventListener('click', () => {
           void model.execute('members', context => membershipCommand(context, {
@@ -603,6 +726,7 @@ function createMembershipSection(
       }))
       if (members.length === 0) {
         const empty = element(document, 'li', 'wwc-enterprise-member-empty')
+        empty.dataset.state = 'empty'
         empty.textContent = viewState.areas.members.permission === 'denied'
           ? 'Membership data is not available for your current role.'
           : 'No members in the current snapshot.'
@@ -614,6 +738,7 @@ function createMembershipSection(
 
 interface RoleSection {
   readonly section: HTMLElement
+  close(): void
   render(
     roleGroups: readonly EnterpriseRoleGroup[],
     state: EnterpriseManagementViewModelState,
@@ -621,8 +746,15 @@ interface RoleSection {
 }
 
 function createRoleSection(document: Document): RoleSection {
-  const section = element(document, 'section', 'wwc-enterprise-roles')
-  const heading = element(document, 'h2', 'wwc-enterprise-section-heading')
+  const panel = enterprisePanel(
+    document,
+    'wwc-enterprise-roles',
+    'Teams and roles',
+    'Read-only grouping from current member role assignments.',
+    'wwc-enterprise-roles',
+  )
+  const section = panel.root
+  const heading = panel.title
   const help = element(document, 'p', 'wwc-enterprise-role-help')
   const list = element(document, 'ul', 'wwc-enterprise-role-list')
   heading.id = 'wwc-enterprise-roles-heading'
@@ -630,9 +762,10 @@ function createRoleSection(document: Document): RoleSection {
   section.setAttribute('aria-labelledby', heading.id)
   help.textContent = 'Teams are grouped from current member role assignments. Assign roles from the Members section.'
   list.setAttribute('aria-live', 'polite')
-  section.append(heading, help, list)
+  panel.content.append(help, list)
   return {
     section,
+    close() { panel.close() },
     render(roleGroups, viewState) {
       list.replaceChildren(...roleGroups.map(group => {
         const row = element(document, 'li', 'wwc-enterprise-role')
@@ -641,6 +774,7 @@ function createRoleSection(document: Document): RoleSection {
       }))
       if (roleGroups.length === 0) {
         const empty = element(document, 'li', 'wwc-enterprise-role-empty')
+        empty.dataset.state = 'empty'
         empty.textContent = viewState.areas.members.permission === 'denied'
           ? 'Role assignments are not available for your current role.'
           : 'No role assignments in the current snapshot.'
@@ -652,6 +786,7 @@ function createRoleSection(document: Document): RoleSection {
 
 interface ProjectSection {
   readonly section: HTMLElement
+  close(): void
   render(
     projects: readonly EnterpriseProjectProjection[],
     repositories: readonly EnterpriseRepositoryProjection[],
@@ -664,8 +799,15 @@ function createProjectSection(
   document: Document,
   model: EnterpriseManagementViewModel,
 ): ProjectSection {
-  const section = element(document, 'section', 'wwc-enterprise-projects')
-  const heading = element(document, 'h2', 'wwc-enterprise-section-heading')
+  const panel = enterprisePanel(
+    document,
+    'wwc-enterprise-projects',
+    'Projects and repositories',
+    'Project and repository identity, state, and current revision.',
+    'wwc-enterprise-projects',
+  )
+  const section = panel.root
+  const heading = panel.title
   const areaStatus = element(document, 'p', 'wwc-enterprise-project-status')
   const projectHeading = element(document, 'h3', 'wwc-enterprise-subsection-heading')
   const projectList = element(document, 'ul', 'wwc-enterprise-project-list')
@@ -700,6 +842,8 @@ function createProjectSection(
   repositoryId.input.pattern = 'rep_[0-9A-HJKMNP-TV-Z]{26}'
   save.type = 'submit'
   save.textContent = 'Save project or repository'
+  save.dataset.wwcComponent = 'button'
+  save.dataset.variant = 'primary'
   form.addEventListener('submit', event => {
     event.preventDefault()
     const resourceKind = kind.select.value as 'project' | 'repository'
@@ -716,8 +860,7 @@ function createProjectSection(
   })
   form.append(kind.label, projectId.label, repositoryId.label, name.label, state.label, save)
   fieldset.append(legend, form)
-  section.append(
-    heading,
+  panel.content.append(
     areaStatus,
     projectHeading,
     projectList,
@@ -742,6 +885,8 @@ function createProjectSection(
       : `${resource.state} · ${resource.defaultBranch} · ${shortId(resource.repositoryId)} · revision ${String(resource.revision)}`
     edit.type = 'button'
     edit.textContent = `Edit ${resource.kind}`
+    edit.dataset.wwcComponent = 'button'
+    edit.dataset.variant = 'default'
     edit.disabled = disabled
     edit.addEventListener('click', () => {
       kind.select.value = resource.kind
@@ -754,6 +899,8 @@ function createProjectSection(
     archive.textContent = resource.state === 'archived'
       ? `${resource.kind === 'project' ? 'Project' : 'Repository'} archived`
       : `Archive ${resource.kind}`
+    archive.dataset.wwcComponent = 'button'
+    archive.dataset.variant = 'destructive'
     archive.disabled = disabled || resource.state === 'archived'
     archive.addEventListener('click', () => {
       void model.execute('projects', context => projectCommand(context, {
@@ -769,6 +916,7 @@ function createProjectSection(
   }
   return {
     section,
+    close() { panel.close() },
     render(projects, repositories, viewState, disabled) {
       areaStatus.textContent = areaLabel(viewState, 'projects')
       fieldset.disabled = disabled
@@ -776,6 +924,7 @@ function createProjectSection(
       repositoryList.replaceChildren(...repositories.map(item => row(item, disabled)))
       if (projects.length === 0) {
         const empty = element(document, 'li', 'wwc-enterprise-project-empty')
+        empty.dataset.state = 'empty'
         empty.textContent = viewState.areas.projects.permission === 'denied'
           ? 'Project data is not available for your current role.'
           : 'No projects in the current snapshot.'
@@ -783,6 +932,7 @@ function createProjectSection(
       }
       if (repositories.length === 0) {
         const empty = element(document, 'li', 'wwc-enterprise-repository-empty')
+        empty.dataset.state = 'empty'
         empty.textContent = viewState.areas.projects.permission === 'denied'
           ? 'Repository data is not available for your current role.'
           : 'No repositories in the current snapshot.'

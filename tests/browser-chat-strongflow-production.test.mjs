@@ -591,7 +591,7 @@ test('real browser runs default Chat and StrongFlow through the production Clien
     JSON.stringify(strongflowInitial),
   )
   assert.equal(strongflowInitial.error, '')
-  assert.equal(strongflowInitial.status, 'clarifying')
+  assert.equal(strongflowInitial.status, 'Waiting for your input')
   assert.equal(strongflowInitial.deliveryStatus, 'clarifying')
   assert.ok(strongflowInitial.revision >= setup.deliveryRevision)
   const [strongflowRoute, strongflowQuery = ''] = strongflowInitial.hash.split('?', 2)
@@ -624,7 +624,7 @@ test('real browser runs default Chat and StrongFlow through the production Clien
     'globalThis.runStrongFlowToDelivered()',
   )
   assert.equal(strongflowTerminal.deliveryHeading, 'Browser production StrongFlow')
-  assert.equal(strongflowTerminal.status, 'delivered')
+  assert.equal(strongflowTerminal.status, 'Completed')
   assert.equal(strongflowTerminal.deliveryStatus, 'delivered')
   assert.equal(strongflowTerminal.candidatePresent, true)
   assert.equal(strongflowTerminal.verdictStatus, 'pass')
@@ -671,7 +671,7 @@ test('real browser runs default Chat and StrongFlow through the production Clien
   const strongflowReload = await evaluateGate(
     'globalThis.inspectTerminalStrongFlowAfterReload()',
   )
-  assert.equal(strongflowReload.status, 'delivered')
+  assert.equal(strongflowReload.status, 'Completed')
   assert.equal(strongflowReload.deliveryStatus, 'delivered')
   assert.equal(strongflowReload.revision, strongflowTerminal.revision)
   assert.equal(strongflowReload.hash, strongflowTerminal.hash)

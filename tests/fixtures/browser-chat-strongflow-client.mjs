@@ -183,7 +183,9 @@ function chatTurnIsTerminal() {
 
 function strongFlowDomSnapshot() {
   const statusText = visibleText('.wwc-strongflow-status')
-  const readyStatus = statusText?.match(/^([a-z-]+) · revision (\d+)$/u) ?? null
+  // The mounted header owns the ready-state announcement; the legacy line only
+  // carries loading, reconnecting, and failure states.
+  const headerStatus = visibleText('.wwc-strongflow-header-status')
   const metadata = visibleText('.wwc-strongflow-metadata')
   const metadataRevision = metadata?.match(/^Delivery r(\d+) ·/u) ?? null
   return {
@@ -195,7 +197,7 @@ function strongFlowDomSnapshot() {
       ? readyStatus === null ? null : Number(readyStatus[2])
       : Number(metadataRevision[1]),
     stageCount: document.querySelectorAll('.wwc-strongflow-stage-list > li').length,
-    status: readyStatus?.[1] ?? null,
+    status: headerStatus ?? null,
     statusText,
     tasks: [...document.querySelectorAll('.wwc-strongflow-task-list > li')]
       .map(node => node.dataset.status ?? ''),
@@ -494,6 +496,10 @@ globalThis.runChatStrongFlowSetup = async proof => {
       }],
       baseRevision: serverConfiguration.repositoryBaseline,
       goal: 'Verify Chat and StrongFlow through the canonical local backend',
+      scope: ['browser Chat to StrongFlow flow'],
+      outOfScope: [],
+      constraints: ['preserve the confirmed ProductSession requirements'],
+      sourceProductSessionId: productSessionId,
       publicationTarget: null,
       repositoryId: scope.repositoryId,
       title: 'Browser production StrongFlow',

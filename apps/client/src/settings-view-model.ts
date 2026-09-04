@@ -5,6 +5,7 @@ import {
   type ControlPlaneClient,
   type ControlPlaneSubscription,
 } from './control-plane-client.js'
+import { createQueryCacheLifecycle } from './core/query-cache.js'
 import type {
   Actor,
   CommandAcceptedResponse,
@@ -108,6 +109,8 @@ export interface CredentialReferenceRotateInput {
 
 export interface SettingsViewModel {
   readonly state: SettingsViewModelState
+  /** Browser draft owner; changes with the authenticated Actor or exact Scope. */
+  readonly draftScope: string
   subscribe(listener: SettingsViewModelListener): () => void
   start(): Promise<void>
   refresh(): Promise<void>
@@ -238,12 +241,14 @@ function checkedSecret(value: string): string {
 
 /** Build the local settings surface from generated Settings and Credential reference contracts. */
 export function createSettingsViewModel(options: SettingsViewModelOptions): SettingsViewModel {
+  const queryCache = createQueryCacheLifecycle(options)
   const listeners = new Set<SettingsViewModelListener>()
   const controllers = new Set<AbortController>()
   let currentState = initialState()
   let realtime: ControlPlaneSubscription | null = null
   let generation = 0
   let closed = false
+  const draftScope = JSON.stringify([options.actor, options.scope])
 
   function publish(state: SettingsViewModelState): void {
     currentState = Object.freeze(state)
@@ -492,6 +497,7 @@ export function createSettingsViewModel(options: SettingsViewModelOptions): Sett
 
   return {
     get state() { return currentState },
+    draftScope,
     subscribe(listener) {
       listeners.add(listener)
       listener(currentState)
@@ -502,6 +508,7 @@ export function createSettingsViewModel(options: SettingsViewModelOptions): Sett
       if (currentState.status === 'ready' && !closed) subscribeRealtime()
     },
     async refresh() {
+      queryCache.refresh()
       await load(false, realtime === null ? 'inactive' : 'subscribed')
       if (currentState.status === 'ready' && realtime === null && !closed) subscribeRealtime()
     },
@@ -729,10 +736,12 @@ export function createSettingsViewModel(options: SettingsViewModelOptions): Sett
       )
       patch({ realtime: 'reconnecting', error: null })
       realtime.reconnect()
+      void load(false, 'reloading')
     },
     close() {
       if (closed) return
       closed = true
+      queryCache.close()
       generation += 1
       abortRequests()
       realtime?.close()

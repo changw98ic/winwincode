@@ -82,6 +82,16 @@ run('corepack', [
   'pnpm',
   'exec',
   'esbuild',
+  'src/styles/client.css',
+  '--bundle',
+  '--minify',
+  '--outfile=dist/public/assets/client.css',
+  '--banner:css=/* SPDX-License-Identifier: Apache-2.0 */',
+], packageRoot)
+run('corepack', [
+  'pnpm',
+  'exec',
+  'esbuild',
   'src/enterprise-application.ts',
   'src/enterprise-resource-page.ts',
   'src/enterprise-operations-page.ts',

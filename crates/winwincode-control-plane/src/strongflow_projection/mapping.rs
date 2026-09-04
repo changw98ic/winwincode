@@ -2,25 +2,29 @@
 
 //! Lossless mapping from Delivery-owned read models to generated transport DTOs.
 
+use sha2::{Digest, Sha256};
 use winwincode_api::generated as api;
 use winwincode_delivery::{
     domain::{
-        AttentionItemStatus, AttentionItemType, CriterionVerdict, DeliveryStage,
-        DeliveryStatus as DomainDeliveryStatus, DeliveryTaskStatus as DomainTaskStatus,
-        EvidenceRefType, RepositoryKind, SessionBindingSourceKind, StageRunActorType,
+        AttentionItemStatus, AttentionItemType, CandidatePathFact, CandidatePathState,
+        CriterionVerdict, DeliveryStage, DeliveryStatus as DomainDeliveryStatus,
+        DeliveryTaskStatus as DomainTaskStatus, DeliveryVerdict, EvidenceRef, EvidenceRefType,
+        FrozenDeliveryCandidate, RepositoryKind, SessionBindingSourceKind, StageRunActorType,
         StageRunStatus,
     },
     projection::{self as delivery_projection, runtime as runtime_projection},
 };
 use winwincode_domain::{
-    Count, GitHubRepositorySlug, Instant, Revision, SchemaVersion, SessionBindingSourceIdentity,
-    SessionBindingSourceIdentityKind, SessionIdentity, Sha256Digest,
+    Count, EvidenceId, GitHubRepositorySlug, Instant, Revision, SchemaVersion,
+    SessionBindingSourceIdentity, SessionBindingSourceIdentityKind, SessionIdentity, Sha256Digest,
 };
 
 use super::{
     StrongFlowProjectionError, application::EstablishedDeliveryRead,
     sources::TrustedProductSessionRuntimeSession,
 };
+
+const CROCKFORD_BASE32: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
 pub(super) fn cursor(
     read: &EstablishedDeliveryRead,
@@ -44,6 +48,7 @@ pub(super) fn delivery_detail(
         status: delivery_status(source.status()),
         requirements: requirements(source.requirements())?,
         solution_review: source.solution_review().map(solution_review).transpose()?,
+        diagram_execution: diagram_execution(read)?,
         stages: source
             .stages()
             .iter()
@@ -64,6 +69,200 @@ pub(super) fn delivery_detail(
         verdict: source.verdict().map(verdict).transpose()?,
         publication,
     })
+}
+
+const MAX_DIAGRAM_LINK_FILES: usize = 1_000;
+
+fn diagram_file_node_ids(
+    review: &delivery_projection::SolutionReviewProjection,
+    process_node_id: &str,
+    path: &CandidatePathFact,
+) -> Vec<String> {
+    let mut node_ids = Vec::new();
+    if review
+        .architecture_diagram()
+        .nodes()
+        .iter()
+        .any(|node| node.id() == "platform:repository")
+    {
+        node_ids.push("platform:repository".to_owned());
+    }
+    node_ids.extend(
+        review
+            .components()
+            .iter()
+            .filter(|component| {
+                component.repository_path_prefixes().iter().any(|prefix| {
+                    path.path == *prefix
+                        || path
+                            .path
+                            .strip_prefix(prefix)
+                            .is_some_and(|tail| tail.starts_with('/'))
+                })
+            })
+            .map(|component| component.id().to_owned()),
+    );
+    if review
+        .process_diagram()
+        .nodes()
+        .iter()
+        .any(|node| node.id() == process_node_id)
+    {
+        node_ids.push(process_node_id.to_owned());
+    }
+    node_ids
+}
+
+fn diagram_diff_files(
+    review: &delivery_projection::SolutionReviewProjection,
+    process_node_id: &str,
+    finished_candidate: Option<&FrozenDeliveryCandidate>,
+) -> Vec<api::StrongFlowDiagramDiffFileProjection> {
+    finished_candidate.map_or_else(Vec::new, |value| {
+        value
+            .changed_paths()
+            .iter()
+            .take(MAX_DIAGRAM_LINK_FILES)
+            .map(|path| {
+                let identity = format!("{}\0{}", value.candidate_ref(), path.path);
+                api::StrongFlowDiagramDiffFileProjection {
+                    id: format!(
+                        "diagram-file:sha256:{:x}",
+                        Sha256::digest(identity.as_bytes())
+                    ),
+                    node_ids: diagram_file_node_ids(review, process_node_id, path),
+                    path: path.path.clone(),
+                    state: match path.state {
+                        CandidatePathState::Present => "present",
+                        CandidatePathState::Deleted => "deleted",
+                    }
+                    .to_owned(),
+                }
+            })
+            .collect::<Vec<_>>()
+    })
+}
+
+fn execution_diagram(
+    source: &delivery_projection::DiagramProjection,
+    kind: &str,
+    state: &str,
+    process_node_id: &str,
+    files: &[api::StrongFlowDiagramDiffFileProjection],
+) -> Result<api::StrongFlowDiagramExecutionDiagramProjection, StrongFlowProjectionError> {
+    Ok(api::StrongFlowDiagramExecutionDiagramProjection {
+        diagram_id: source.id().to_owned(),
+        kind: kind.to_owned(),
+        nodes: source
+            .nodes()
+            .iter()
+            .map(|node| {
+                let file_ids = files
+                    .iter()
+                    .filter(|file| file.node_ids.iter().any(|id| id == node.id()))
+                    .map(|file| file.id.clone())
+                    .collect::<Vec<_>>();
+                let live = state == "executing" && node.id() == process_node_id;
+                let affected = live || !file_ids.is_empty();
+                Ok(api::StrongFlowDiagramExecutionNodeProjection {
+                    affected_file_count: count(
+                        if live { 1 } else { file_ids.len() as u64 },
+                        "diagram node affected file count",
+                    )?,
+                    file_ids,
+                    node_id: node.id().to_owned(),
+                    state: if affected {
+                        if state == "executing" {
+                            "affected-live"
+                        } else {
+                            "affected-finished"
+                        }
+                    } else {
+                        "normal"
+                    }
+                    .to_owned(),
+                })
+            })
+            .collect::<Result<Vec<_>, StrongFlowProjectionError>>()?,
+    })
+}
+
+fn diagram_execution(
+    read: &EstablishedDeliveryRead,
+) -> Result<Option<api::StrongFlowDiagramExecutionProjection>, StrongFlowProjectionError> {
+    let delivery = &read.detail;
+    let Some(review) = delivery.solution_review() else {
+        return Ok(None);
+    };
+    let reentering_execution = matches!(
+        delivery.status(),
+        DomainDeliveryStatus::Executing | DomainDeliveryStatus::Reworking
+    );
+    let candidate = read.publication.candidate();
+    let finished_candidate = (!reentering_execution).then_some(candidate).flatten();
+    let state = if reentering_execution {
+        "executing"
+    } else if finished_candidate.is_some() {
+        "execution-finished"
+    } else {
+        "before-execution"
+    };
+    let process_node_id = if candidate
+        .is_some_and(|value| value.producer_stage() == DeliveryStage::Reworking)
+        || delivery.status() == DomainDeliveryStatus::Reworking
+    {
+        "process:reworking"
+    } else {
+        "process:executing"
+    };
+    let files = diagram_diff_files(review, process_node_id, finished_candidate);
+    let details = finished_candidate
+        .map(|value| {
+            let evidence_ref_ids = delivery
+                .evidence()
+                .iter()
+                .filter(|evidence| {
+                    evidence.candidate_ref() == value.candidate_ref()
+                        && evidence.delivery_spec_id() == value.delivery_spec_id()
+                        && evidence.delivery_spec_revision() == value.delivery_spec_revision()
+                        && evidence.stage_run_id() == value.producer_stage_run_id()
+                        && evidence.session_binding_id() == value.producer_session_binding_id()
+                })
+                .map(|evidence| public_evidence_id(evidence.id()))
+                .collect();
+            Ok::<_, StrongFlowProjectionError>(api::StrongFlowDiagramExecutionDetailsProjection {
+                candidate: frozen_candidate(value)?,
+                diff_sha256: digest(value.diff_sha256())?,
+                files: files.clone(),
+                provenance: api::StrongFlowDiagramExecutionProvenanceProjection {
+                    stage_run_id: value.producer_stage_run_id().clone(),
+                    session_binding_id: value.producer_session_binding_id().0.clone(),
+                    delivery_task_id: value.producer_delivery_task_id().cloned(),
+                    evidence_ref_ids,
+                },
+            })
+        })
+        .transpose()?;
+    let updated_at = finished_candidate
+        .map(|value| millis_to_instant(value.producer_finished_at_millis()))
+        .transpose()?
+        .unwrap_or_else(|| read.runtime.rebuilt_at().clone());
+    Ok(Some(api::StrongFlowDiagramExecutionProjection {
+        affected_file_count: count(
+            finished_candidate.map_or(0, |value| value.changed_paths().len() as u64),
+            "diagram affected file count",
+        )?,
+        architecture: execution_diagram(review.architecture_diagram(), "system-architecture", state, process_node_id, &files)?,
+        delivery_id: delivery.delivery_id().clone(),
+        delivery_revision: revision(delivery.delivery_revision(), "diagram delivery revision")?,
+        details,
+        process: execution_diagram(review.process_diagram(), "process-flow", state, process_node_id, &files)?,
+        protocol: api::StrongFlowDiagramExecutionProjectionProtocol::WinwincodeDiagramExecutionProjectionV1,
+        review_set_sha256: digest(review.review_set_sha256())?,
+        schema_version: 1.0,
+        state: state.to_owned(),
+        updated_at,
+    }))
 }
 
 fn ownership(scope: &api::RepositoryScope) -> api::DeliveryOwnershipProjection {
@@ -107,6 +306,7 @@ fn requirements(
         scope: spec.scope().to_vec(),
         out_of_scope: spec.out_of_scope().to_vec(),
         constraints: spec.constraints().to_vec(),
+        source_product_session_id: spec.source_product_session_id().cloned(),
         acceptance_criteria: spec
             .acceptance_criteria()
             .iter()
@@ -276,7 +476,11 @@ fn task(source: &delivery_projection::DeliveryTaskProjection) -> api::DeliveryTa
             DomainTaskStatus::Failed => api::DeliveryTaskStatus::Failed,
         },
         stage_run_ids: source.stage_run_ids().to_vec(),
-        evidence_refs: source.evidence_refs().to_vec(),
+        evidence_refs: source
+            .evidence_refs()
+            .iter()
+            .map(public_evidence_id)
+            .collect(),
     }
 }
 
@@ -320,11 +524,11 @@ fn attention(
     })
 }
 
-fn evidence(
+pub(super) fn evidence(
     source: &delivery_projection::EvidenceProjection,
 ) -> Result<api::DeliveryEvidenceProjection, StrongFlowProjectionError> {
     Ok(api::DeliveryEvidenceProjection {
-        id: source.id().clone(),
+        id: public_evidence_id(source.id()),
         delivery_spec_id: source.delivery_spec_id().0.clone(),
         delivery_spec_revision: revision(
             source.delivery_spec_revision(),
@@ -349,7 +553,7 @@ fn evidence(
     })
 }
 
-fn candidate(
+pub(super) fn candidate(
     source: &delivery_projection::CurrentCandidateProjection,
 ) -> Result<api::FrozenCandidateSummaryProjection, StrongFlowProjectionError> {
     Ok(api::FrozenCandidateSummaryProjection {
@@ -365,6 +569,98 @@ fn candidate(
         candidate_tree_id: source.candidate_tree_id().to_owned(),
         diff_sha256: digest(source.diff_sha256())?,
         frozen_at: millis_to_instant(source.frozen_at())?,
+    })
+}
+
+pub(super) fn frozen_candidate(
+    source: &FrozenDeliveryCandidate,
+) -> Result<api::FrozenCandidateSummaryProjection, StrongFlowProjectionError> {
+    Ok(api::FrozenCandidateSummaryProjection {
+        candidate_ref: source.candidate_ref().to_owned(),
+        delivery_spec_id: source.delivery_spec_id().0.clone(),
+        delivery_spec_revision: revision(
+            source.delivery_spec_revision(),
+            "historical candidate spec revision",
+        )?,
+        producer_stage_run_id: source.producer_stage_run_id().clone(),
+        producer_session_binding_id: source.producer_session_binding_id().0.clone(),
+        candidate_commit_id: source.candidate_commit_id().to_owned(),
+        candidate_tree_id: source.candidate_tree_id().to_owned(),
+        diff_sha256: digest(source.diff_sha256())?,
+        frozen_at: millis_to_instant(source.producer_finished_at_millis())?,
+    })
+}
+
+pub(super) fn historical_evidence(
+    source: &EvidenceRef,
+) -> Result<api::DeliveryEvidenceProjection, StrongFlowProjectionError> {
+    Ok(api::DeliveryEvidenceProjection {
+        id: public_evidence_id(&source.id),
+        delivery_spec_id: source.delivery_spec_id.0.clone(),
+        delivery_spec_revision: revision(
+            source.delivery_spec_revision,
+            "historical evidence spec revision",
+        )?,
+        stage_run_id: source.stage_run_id.clone(),
+        session_binding_id: source.session_binding_id.0.clone(),
+        candidate_ref: source.candidate_ref.clone(),
+        type_value: match source.evidence_type {
+            EvidenceRefType::Test => "test",
+            EvidenceRefType::Command => "command",
+            EvidenceRefType::Diff => "diff",
+            EvidenceRefType::File => "file",
+            EvidenceRefType::Commit => "commit",
+            EvidenceRefType::PullRequest => "pull_request",
+            EvidenceRefType::RuntimeEvent => "runtime_event",
+            EvidenceRefType::ReviewFinding => "review_finding",
+        }
+        .to_owned(),
+        source_ref: source.source_ref.clone(),
+        created_at: millis_to_instant(source.created_at_millis)?,
+    })
+}
+
+pub(super) fn historical_verdict(
+    source: &DeliveryVerdict,
+    candidate: &FrozenDeliveryCandidate,
+) -> Result<api::DeliveryVerdictProjection, StrongFlowProjectionError> {
+    if source.delivery_id != *candidate.delivery_id()
+        || source.delivery_spec_id != *candidate.delivery_spec_id()
+        || source.candidate_ref != candidate.candidate_ref()
+    {
+        return Err(StrongFlowProjectionError::TrustedFactsUnavailable(
+            "historical Verdict is not bound to its original Candidate".to_owned(),
+        ));
+    }
+    Ok(api::DeliveryVerdictProjection {
+        id: source.id.0.clone(),
+        delivery_spec_id: source.delivery_spec_id.0.clone(),
+        delivery_spec_revision: revision(
+            candidate.delivery_spec_revision(),
+            "historical verdict spec revision",
+        )?,
+        candidate_ref: source.candidate_ref.clone(),
+        status: criterion_verdict(source.status).to_owned(),
+        criteria: source
+            .criteria
+            .iter()
+            .map(|criterion| {
+                Ok(api::DeliveryCriterionResultProjection {
+                    result_id: criterion.id.0.clone(),
+                    criterion_id: criterion.criterion_id.0.clone(),
+                    verdict: criterion_verdict(criterion.verdict).to_owned(),
+                    evidence_refs: criterion
+                        .evidence_refs
+                        .iter()
+                        .map(public_evidence_id)
+                        .collect(),
+                    explanation: criterion.explanation.clone(),
+                    evaluated_at: millis_to_instant(criterion.evaluated_at_millis)?,
+                })
+            })
+            .collect::<Result<_, StrongFlowProjectionError>>()?,
+        unresolved_findings: source.unresolved_findings.clone(),
+        produced_at: millis_to_instant(source.produced_at_millis)?,
     })
 }
 
@@ -385,7 +681,11 @@ fn verdict(
                     result_id: criterion.result_id().0.clone(),
                     criterion_id: criterion.criterion_id().0.clone(),
                     verdict: criterion_verdict(criterion.verdict()).to_owned(),
-                    evidence_refs: criterion.evidence_refs().to_vec(),
+                    evidence_refs: criterion
+                        .evidence_refs()
+                        .iter()
+                        .map(public_evidence_id)
+                        .collect(),
                     explanation: criterion.explanation().to_owned(),
                     evaluated_at: millis_to_instant(criterion.evaluated_at())?,
                 })
@@ -393,6 +693,38 @@ fn verdict(
             .collect::<Result<_, StrongFlowProjectionError>>()?,
         unresolved_findings: source.unresolved_findings().to_vec(),
         produced_at: millis_to_instant(source.produced_at())?,
+    })
+}
+
+/// Maps the durable Evidence source identity to the one canonical public id.
+///
+/// Delivery currently derives Evidence identities from a full SHA-256 source
+/// seal. The public contract uses a fixed Crockford identifier, so projection
+/// code deterministically narrows that seal rather than exposing an invalid or
+/// transport-specific identifier. Already-canonical ids remain unchanged.
+pub(super) fn public_evidence_id(source: &EvidenceId) -> EvidenceId {
+    if is_public_evidence_id(&source.0) {
+        return source.clone();
+    }
+    let digest = Sha256::digest(source.0.as_bytes());
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    let mut value = u128::from_be_bytes(bytes);
+    let mut encoded = ['0'; 26];
+    for character in encoded.iter_mut().rev() {
+        *character = char::from(CROCKFORD_BASE32[(value & 31) as usize]);
+        value >>= 5;
+    }
+    EvidenceId(format!("evd_{}", encoded.iter().collect::<String>()))
+}
+
+fn is_public_evidence_id(value: &str) -> bool {
+    value.strip_prefix("evd_").is_some_and(|suffix| {
+        suffix.len() == 26
+            && suffix.bytes().all(|byte| {
+                byte.is_ascii_digit()
+                    || matches!(byte, b'A'..=b'H' | b'J'..=b'N' | b'P'..=b'T' | b'V'..=b'Z')
+            })
     })
 }
 

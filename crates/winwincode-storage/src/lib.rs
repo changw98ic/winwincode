@@ -34,10 +34,11 @@ mod worker_session_slots;
 
 pub use artifact::{
     ArtifactAccess, ArtifactChunk, ArtifactError, ArtifactErrorKind, ArtifactMeteringAttribution,
-    ArtifactObject, ArtifactObjectStore, ArtifactOpen, ArtifactProvenance, ArtifactRecord,
-    ArtifactRetention, ArtifactStorageOperationKind, ArtifactStorageSourceCursor,
-    ArtifactStorageSourceEntry, ArtifactStorageSourceFact, ArtifactStorageSourcePage,
-    ArtifactStore, ArtifactWriteReceipt, FakeArtifactObjectStore, LocalArtifactObjectStore,
+    ArtifactObject, ArtifactObjectRange, ArtifactObjectStore, ArtifactOpen, ArtifactProvenance,
+    ArtifactRangeObject, ArtifactRecord, ArtifactRetention, ArtifactStorageOperationKind,
+    ArtifactStorageSourceCursor, ArtifactStorageSourceEntry, ArtifactStorageSourceFact,
+    ArtifactStorageSourcePage, ArtifactStore, ArtifactWriteReceipt, FakeArtifactObjectStore,
+    LocalArtifactObjectStore, MAX_ARTIFACT_RANGE_BYTES,
 };
 pub use control_plane_instances::{
     ControlPlaneCommandAdmission, ControlPlaneCommandClaim, ControlPlaneCommittedCommand,
@@ -119,8 +120,10 @@ pub use git_candidate_retention::{
     CandidateGitRetentionState, CandidateGitTerminalOutcome,
 };
 pub use git_source::{
-    CandidateSourceManifest, GitSourceHunk, GitSourcePath, GitSourcePathState, GitSourceResolver,
-    LocalGitSourceResolver, ValidatedGitSourceArtifact,
+    CandidateSourceManifest, GitCandidateReviewFile, GitCandidateReviewFileEncoding,
+    GitCandidateReviewFileStatus, GitSourceHunk, GitSourcePath, GitSourcePathState,
+    GitSourceResolver, LocalGitSourceResolver, ValidatedGitCandidateDiff,
+    ValidatedGitCandidateReview, ValidatedGitSourceArtifact,
 };
 pub use provider_exchange::{
     ModelRequestPoolAuthority, ProviderExchangeBegin, ProviderExchangeFailure,

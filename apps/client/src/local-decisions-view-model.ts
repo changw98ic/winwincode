@@ -5,6 +5,7 @@ import {
   type ControlPlaneClient,
   type ControlPlaneSubscription,
 } from './control-plane-client.js'
+import { createQueryCacheLifecycle } from './core/query-cache.js'
 import type {
   Actor,
   ApprovalDecideCompletedResponse,
@@ -350,8 +351,7 @@ function validateInputValue(
     )
     return null
   }
-  const choices = new Set(input.options.map(option => option.value))
-  if (choices.size !== input.options.length || !choices.has(value.value)) return clientFailure(
+  if (!input.options.some(option => option.value === value.value)) return clientFailure(
     'LOCAL_DECISIONS_INPUT_OPTION_STALE',
     'Choose one current input option.',
   )
@@ -362,6 +362,7 @@ function validateInputValue(
 export function createLocalDecisionsViewModel(
   options: LocalDecisionsViewModelOptions,
 ): LocalDecisionsViewModel {
+  const queryCache = createQueryCacheLifecycle(options)
   const listeners = new Set<LocalDecisionsListener>()
   const controllers = new Set<AbortController>()
   const subscriptions = new Set<ControlPlaneSubscription>()
@@ -816,6 +817,7 @@ export function createLocalDecisionsViewModel(
       if (currentState.status === 'ready' && !closed) subscribeRealtime()
     },
     async refresh() {
+      queryCache.refresh()
       await load(false, subscriptions.size === 0 ? 'inactive' : 'subscribed')
       if (currentState.status === 'ready' && subscriptions.size === 0 && !closed) subscribeRealtime()
     },
@@ -987,10 +989,12 @@ export function createLocalDecisionsViewModel(
       )
       patch({ realtime: 'reconnecting', error: null })
       for (const subscription of subscriptions) subscription.reconnect()
+      void load(false, 'reloading')
     },
     close() {
       if (closed) return
       closed = true
+      queryCache.close()
       generation += 1
       inFlight.clear()
       abortRequests()

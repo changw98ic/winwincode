@@ -6,6 +6,7 @@ import {
   type EnterpriseManagementViewModel,
 } from './enterprise-management-view-model.js'
 import type { ControlPlaneClient } from './control-plane-client.js'
+import { scopeHash, scopeSelectionFromHash } from './core/scope-context.js'
 import type {
   Actor,
   ControlPlaneWebSocketSubscriptionId,
@@ -72,6 +73,8 @@ export interface EnterpriseApplicationOptions extends EnterpriseClientContext {
   readonly client: ControlPlaneClient
   readonly hash: string
   readonly signal?: AbortSignal
+  /** Presentation-only capability; Server authorization remains authoritative. */
+  readonly readOnly?: boolean
 }
 
 export interface EnterpriseApplication {
@@ -108,7 +111,11 @@ export async function mountEnterpriseApplication(
   const mountPage = route.id === 'resources'
     ? await import('./enterprise-resource-page.js').then(module => (
         (root: HTMLElement, model: EnterpriseManagementViewModel) => (
-          module.mountEnterpriseResourcePage({ root, model })
+          module.mountEnterpriseResourcePage({
+            root,
+            model,
+            ...(options.readOnly === undefined ? {} : { readOnly: options.readOnly }),
+          })
         )
       ))
     : await import('./enterprise-operations-page.js').then(module => (
@@ -116,6 +123,7 @@ export async function mountEnterpriseApplication(
           module.mountEnterpriseOperationsPage({
             root,
             model,
+            ...(options.readOnly === undefined ? {} : { readOnly: options.readOnly }),
             ...(options.onAuditExport === undefined
               ? {}
               : { onAuditExport: options.onAuditExport }),
@@ -145,7 +153,7 @@ export async function mountEnterpriseApplication(
   pageRoot.dataset.enterpriseRoute = route.id
   for (const candidate of ENTERPRISE_ROUTES) {
     const link = element(document, 'a', 'wwc-enterprise-navigation-link')
-    link.href = `#${candidate.path}`
+    link.href = scopeHash(`#${candidate.path}`, scopeSelectionFromHash(options.hash))
     link.textContent = candidate.label
     link.title = candidate.description
     link.dataset.enterpriseRoute = candidate.id

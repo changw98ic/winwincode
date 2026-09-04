@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::HashSet;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -130,6 +131,7 @@ fn initialize_schema(connection: &Connection) -> Result<(), AdapterStoreError> {
                    question_id TEXT NOT NULL,
                    turn_id TEXT NOT NULL,
                    request_digest TEXT NOT NULL,
+                   choice_identities_json BLOB NOT NULL,
                    resolution_digest TEXT,
                    state TEXT NOT NULL CHECK(state IN ('pending', 'resolved')),
                    CHECK (
@@ -150,6 +152,7 @@ impl AdapterStore {
         let connection = Connection::open(&path).map_err(|_| AdapterStoreError::Unavailable)?;
         initialize_schema(&connection)?;
         ensure_model_call_phase_columns(&connection)?;
+        ensure_input_operation_choice_identities_column(&connection)?;
         restrict_file(&path)?;
         restrict_file_if_present(&root.join(format!("{DATABASE_FILE}-wal")))?;
         restrict_file_if_present(&root.join(format!("{DATABASE_FILE}-shm")))?;
@@ -888,6 +891,8 @@ impl AdapterStore {
         operation: &StoredInputOperation,
     ) -> Result<StoredInputOperation, AdapterStoreError> {
         operation.validate()?;
+        let choice_identities_json = serde_json::to_vec(&operation.choice_identities)
+            .map_err(|_| AdapterStoreError::Corrupt)?;
         self.transaction(|transaction| {
             let existing = load_input_operation(transaction, &operation.input_request_id)?;
             if let Some(existing) = existing {
@@ -901,8 +906,8 @@ impl AdapterStore {
                 .execute(
                     "INSERT INTO input_operation(
                        input_request_id, run_key, kernel_session_id, question_id, turn_id,
-                       request_digest, resolution_digest, state
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                       request_digest, choice_identities_json, resolution_digest, state
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                     params![
                         operation.input_request_id,
                         operation.run_key,
@@ -910,6 +915,7 @@ impl AdapterStore {
                         operation.question_id,
                         operation.turn_id,
                         operation.request_digest,
+                        choice_identities_json,
                         operation.resolution_digest,
                         operation.state.as_str(),
                     ],
@@ -1285,6 +1291,37 @@ fn ensure_model_call_phase_columns(connection: &Connection) -> Result<(), Adapte
     Ok(())
 }
 
+fn ensure_input_operation_choice_identities_column(
+    connection: &Connection,
+) -> Result<(), AdapterStoreError> {
+    let mut statement = connection
+        .prepare("PRAGMA table_info(input_operation)")
+        .map_err(|_| AdapterStoreError::Unavailable)?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|_| AdapterStoreError::Unavailable)?;
+    let mut has_choice_identities = false;
+    for column in columns {
+        if column.map_err(|_| AdapterStoreError::Unavailable)? == "choice_identities_json" {
+            has_choice_identities = true;
+        }
+    }
+    drop(statement);
+    if !has_choice_identities {
+        // Existing rows predate opaque choice identities. The empty mapping
+        // makes any option-bearing replay fail closed instead of recreating a
+        // public identity from display or private request fields.
+        connection
+            .execute(
+                "ALTER TABLE input_operation
+                 ADD COLUMN choice_identities_json BLOB NOT NULL DEFAULT X'5B5D'",
+                [],
+            )
+            .map_err(|_| AdapterStoreError::Unavailable)?;
+    }
+    Ok(())
+}
+
 /// Migrates retained response frames into the canonical exchange binding once
 /// when opening a store created before `model_exchange_id` was persisted. The
 /// old frame scan is deliberately not a runtime lookup: a frame-backed row is
@@ -1519,12 +1556,30 @@ pub(crate) struct StoredInputOperation {
     pub(crate) question_id: String,
     pub(crate) turn_id: String,
     pub(crate) request_digest: String,
+    pub(crate) choice_identities: Vec<StoredInputChoiceIdentity>,
     pub(crate) resolution_digest: Option<String>,
     pub(crate) state: StoredInputOperationState,
 }
 
+/// One server-allocated public choice identity and its secret-free replay key.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct StoredInputChoiceIdentity {
+    pub(crate) public_label: String,
+    pub(crate) public_occurrence: u64,
+    pub(crate) choice_id: String,
+}
+
 impl StoredInputOperation {
     fn validate(&self) -> Result<(), AdapterStoreError> {
+        let mut replay_keys = HashSet::with_capacity(self.choice_identities.len());
+        let mut choice_ids = HashSet::with_capacity(self.choice_identities.len());
+        let invalid_choice_identity = self.choice_identities.iter().any(|identity| {
+            identity.public_label.trim().is_empty()
+                || !canonical_input_choice_id(&identity.choice_id)
+                || !replay_keys.insert((identity.public_label.as_str(), identity.public_occurrence))
+                || !choice_ids.insert(identity.choice_id.as_str())
+        });
         if self.input_request_id.is_empty()
             || self.run_key.is_empty()
             || self.kernel_session_id.is_empty()
@@ -1535,6 +1590,7 @@ impl StoredInputOperation {
                 .resolution_digest
                 .as_deref()
                 .is_some_and(|digest| validate_digest(digest).is_err())
+            || invalid_choice_identity
             || match self.state {
                 StoredInputOperationState::Pending => self.resolution_digest.is_some(),
                 StoredInputOperationState::Resolved => self.resolution_digest.is_none(),
@@ -1544,6 +1600,19 @@ impl StoredInputOperation {
         }
         Ok(())
     }
+}
+
+fn canonical_input_choice_id(value: &str) -> bool {
+    value.strip_prefix("ich_").is_some_and(|identifier| {
+        identifier.len() == 26
+            && identifier.bytes().all(|byte| {
+                byte.is_ascii_digit()
+                    || matches!(
+                        byte,
+                        b'A'..=b'H' | b'J'..=b'K' | b'M'..=b'N' | b'P'..=b'T' | b'V'..=b'Z'
+                    )
+            })
+    })
 }
 
 fn load_approval_operation(
@@ -1608,7 +1677,7 @@ fn load_input_operation(
     let stored = connection
         .query_row(
             "SELECT run_key, kernel_session_id, question_id, turn_id,
-                    request_digest, resolution_digest, state
+                    request_digest, choice_identities_json, resolution_digest, state
              FROM input_operation WHERE input_request_id = ?1",
             params![input_request_id],
             |row| {
@@ -1618,8 +1687,9 @@ fn load_input_operation(
                     row.get::<_, String>(2)?,
                     row.get::<_, String>(3)?,
                     row.get::<_, String>(4)?,
-                    row.get::<_, Option<String>>(5)?,
-                    row.get::<_, String>(6)?,
+                    row.get::<_, Vec<u8>>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                    row.get::<_, String>(7)?,
                 ))
             },
         )
@@ -1633,9 +1703,12 @@ fn load_input_operation(
                 question_id,
                 turn_id,
                 request_digest,
+                choice_identities_json,
                 resolution_digest,
                 state,
             )| {
+                let choice_identities = serde_json::from_slice(&choice_identities_json)
+                    .map_err(|_| AdapterStoreError::Corrupt)?;
                 let operation = StoredInputOperation {
                     input_request_id: input_request_id.to_owned(),
                     run_key,
@@ -1643,6 +1716,7 @@ fn load_input_operation(
                     question_id,
                     turn_id,
                     request_digest,
+                    choice_identities,
                     resolution_digest,
                     state: StoredInputOperationState::parse(&state)?,
                 };
@@ -2065,7 +2139,8 @@ fn write_snapshot<T: Serialize>(
 mod tests {
     use super::{
         AdapterStore, AdapterStoreError, DATABASE_FILE, ModelCallPhase, StoredApprovalOperation,
-        StoredApprovalOperationKind, StoredApprovalOperationState,
+        StoredApprovalOperationKind, StoredApprovalOperationState, StoredInputChoiceIdentity,
+        StoredInputOperation, StoredInputOperationState,
     };
     use std::path::PathBuf;
     use winwincode_domain::ModelExchangeId;
@@ -2307,6 +2382,99 @@ mod tests {
             );
         }
         std::fs::remove_dir_all(root).expect("remove store fixture");
+    }
+
+    #[test]
+    fn opaque_input_choice_identities_survive_restart_exactly() {
+        let root = test_root("input-choice-identities");
+        let operation = StoredInputOperation {
+            input_request_id: "inp_AAAAAAAAAAAAAAAAAAAAAAAAAA".to_owned(),
+            run_key: "run".to_owned(),
+            kernel_session_id: "kernel-session".to_owned(),
+            question_id: "continue".to_owned(),
+            turn_id: "turn".to_owned(),
+            request_digest: format!("sha256:{}", "1".repeat(64)),
+            choice_identities: vec![
+                StoredInputChoiceIdentity {
+                    public_label: "Continue".to_owned(),
+                    public_occurrence: 0,
+                    choice_id: "ich_AAAAAAAAAAAAAAAAAAAAAAAAAA".to_owned(),
+                },
+                StoredInputChoiceIdentity {
+                    public_label: "Continue".to_owned(),
+                    public_occurrence: 1,
+                    choice_id: "ich_BBBBBBBBBBBBBBBBBBBBBBBBBB".to_owned(),
+                },
+            ],
+            resolution_digest: None,
+            state: StoredInputOperationState::Pending,
+        };
+        {
+            let store = AdapterStore::open(&root).expect("open input store");
+            assert_eq!(
+                store
+                    .retain_input_operation(&operation)
+                    .expect("retain input choice identities"),
+                operation
+            );
+        }
+        {
+            let store = AdapterStore::open(&root).expect("reopen input store");
+            assert_eq!(
+                store
+                    .load_input_operation(&operation.input_request_id)
+                    .expect("load input choice identities after restart"),
+                Some(operation)
+            );
+        }
+        std::fs::remove_dir_all(root).expect("remove input store fixture");
+    }
+
+    #[test]
+    fn input_choice_identity_migration_fails_legacy_rows_to_an_empty_mapping() {
+        let root = test_root("input-choice-identity-migration");
+        std::fs::create_dir_all(&root).expect("create legacy store root");
+        {
+            let connection = rusqlite::Connection::open(root.join(DATABASE_FILE))
+                .expect("open legacy input store");
+            connection
+                .execute_batch(
+                    "CREATE TABLE input_operation (
+                       input_request_id TEXT PRIMARY KEY NOT NULL,
+                       run_key TEXT NOT NULL,
+                       kernel_session_id TEXT NOT NULL,
+                       question_id TEXT NOT NULL,
+                       turn_id TEXT NOT NULL,
+                       request_digest TEXT NOT NULL,
+                       resolution_digest TEXT,
+                       state TEXT NOT NULL
+                     );",
+                )
+                .expect("create legacy input operation table");
+            connection
+                .execute(
+                    "INSERT INTO input_operation(
+                       input_request_id, run_key, kernel_session_id, question_id, turn_id,
+                       request_digest, resolution_digest, state
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, 'pending')",
+                    rusqlite::params![
+                        "inp_AAAAAAAAAAAAAAAAAAAAAAAAAA",
+                        "run",
+                        "kernel-session",
+                        "continue",
+                        "turn",
+                        format!("sha256:{}", "1".repeat(64)),
+                    ],
+                )
+                .expect("retain legacy input operation");
+        }
+        let store = AdapterStore::open(&root).expect("migrate legacy input store");
+        let migrated = store
+            .load_input_operation("inp_AAAAAAAAAAAAAAAAAAAAAAAAAA")
+            .expect("load migrated input operation")
+            .expect("migrated input operation exists");
+        assert!(migrated.choice_identities.is_empty());
+        std::fs::remove_dir_all(root).expect("remove migration fixture");
     }
 
     #[cfg(unix)]

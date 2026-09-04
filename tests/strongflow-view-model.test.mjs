@@ -35,9 +35,14 @@ const facade = await import(`${pathToFileURL(resolve(
   root,
   '.cache/strongflow-view-model-tests/control-plane-client.js',
 )).href}`)
+const queryCacheModule = await import(`${pathToFileURL(resolve(
+  root,
+  '.cache/strongflow-view-model-tests/core/query-cache.js',
+)).href}`)
 
-const { createStrongFlowViewModel } = module
+const { createStrongFlowCreateViewModel, createStrongFlowViewModel } = module
 const { ControlPlaneClientError } = facade
+const { createQueryCache } = queryCacheModule
 const schemaVersion = 'winwincode/v1'
 const actor = { kind: 'user', id: 'usr_00000000000000000000000001' }
 const scope = {
@@ -227,6 +232,7 @@ function delivery(revision = 1, candidateRef = 'refs/winwincode/candidate/1') {
       maxReworkAttempts: 2,
     },
     solutionReview: solutionReview(),
+    diagramExecution: null,
     stages: [{
       id: stageRunId,
       actorType: 'codex',
@@ -315,6 +321,37 @@ function delivery(revision = 1, candidateRef = 'refs/winwincode/candidate/1') {
   }
 }
 
+function diagramExecution(deliveryValue) {
+  const review = deliveryValue.solutionReview
+  const nodes = diagramValue => diagramValue.nodes.map(node => ({
+    nodeId: node.id,
+    state: 'affected-live',
+    affectedFileCount: 1,
+    fileIds: [],
+  }))
+  return {
+    schemaVersion: 1,
+    protocol: 'winwincode.diagram-execution-projection.v1',
+    deliveryId: deliveryValue.deliveryId,
+    deliveryRevision: deliveryValue.deliveryRevision,
+    reviewSetSha256: review.reviewSetSha256,
+    state: 'executing',
+    architecture: {
+      diagramId: review.architectureDiagram.id,
+      kind: 'system-architecture',
+      nodes: nodes(review.architectureDiagram),
+    },
+    process: {
+      diagramId: review.processDiagram.id,
+      kind: 'process-flow',
+      nodes: nodes(review.processDiagram),
+    },
+    affectedFileCount: 1,
+    details: null,
+    updatedAt: '2026-08-27T01:00:05.500Z',
+  }
+}
+
 function deliveryWithNextActiveStage(revision = 2) {
   const value = delivery(revision)
   value.stages[0] = {
@@ -387,11 +424,12 @@ class FakeClient {
     this.queues.set(query, queue)
   }
 
-  async query(request) {
+  async query(request, options) {
     this.calls.push(structuredClone(request))
     const queue = this.queues.get(request.query)
     const value = queue?.shift() ?? this.responses.get(request.query)
     if (value instanceof Error) throw value
+    if (typeof value === 'function') return value(request, options)
     return structuredClone(value)
   }
 
@@ -471,6 +509,968 @@ test('initial bounded pair composes the complete StrongFlow projection and sourc
   ])
 })
 
+test('generated delivery.get diagram execution reaches the public StrongFlow projection', async () => {
+  const client = new FakeClient()
+  const deliveryResponse = client.responses.get('delivery.get')
+  deliveryResponse.result.diagramExecution = diagramExecution(deliveryResponse.result)
+  const { model } = view(client)
+
+  await model.start()
+
+  assert.equal(model.state.status, 'ready')
+  assert.deepEqual(
+    model.state.projection.diagramExecution,
+    deliveryResponse.result.diagramExecution,
+  )
+  assert.equal(model.state.projection.diagramExecution.state, 'executing')
+})
+
+test('Candidate files load progressively from the exact current Candidate read cut', async () => {
+  const { client, model } = view()
+  const currentCandidate = delivery().currentCandidate
+  client.enqueue('candidate.files.list', {
+    schemaVersion,
+    requestId: requestId(3),
+    query: 'candidate.files.list',
+    result: {
+      kind: 'candidate_file_page',
+      candidate: currentCandidate,
+      readCursor: readCursor(),
+      items: [{
+        path: 'src/app.ts',
+        oldPath: null,
+        status: 'modified',
+        additions: 7,
+        deletions: 2,
+        binary: false,
+        encoding: 'utf-8',
+      }],
+    },
+    page: { hasMore: true, nextCursor: 'candidate-files:2' },
+  })
+  client.enqueue('candidate.files.list', {
+    schemaVersion,
+    requestId: requestId(4),
+    query: 'candidate.files.list',
+    result: {
+      kind: 'candidate_file_page',
+      candidate: currentCandidate,
+      readCursor: readCursor(),
+      items: [{
+        path: 'src/current.ts',
+        oldPath: 'src/legacy.ts',
+        status: 'renamed',
+        additions: 0,
+        deletions: 0,
+        binary: false,
+        encoding: 'utf-8',
+      }],
+    },
+    page: { hasMore: false, nextCursor: null },
+  })
+
+  await model.start()
+  await model.loadCandidateFiles()
+
+  assert.deepEqual(client.calls[2], {
+    schemaVersion,
+    requestId: requestId(3),
+    actor,
+    scope,
+    query: 'candidate.files.list',
+    parameters: {
+      deliveryId,
+      atCursor: readCursor(),
+      readPageLimit: 1,
+      candidateRef: currentCandidate.candidateRef,
+      candidateTreeId: currentCandidate.candidateTreeId,
+      diffSha256: currentCandidate.diffSha256,
+      statuses: [],
+      pathPrefix: null,
+    },
+    page: { cursor: null, limit: 200 },
+  })
+  assert.equal(model.state.candidateFiles.status, 'ready')
+  assert.deepEqual(model.state.candidateFiles.items.map(file => file.path), ['src/app.ts'])
+  assert.equal(model.state.candidateFiles.hasMore, true)
+
+  await model.loadMoreCandidateFiles()
+  assert.equal(client.calls[3].page.cursor, 'candidate-files:2')
+  assert.deepEqual(model.state.candidateFiles.items.map(file => file.path), [
+    'src/app.ts',
+    'src/current.ts',
+  ])
+  assert.equal(model.state.candidateFiles.hasMore, false)
+})
+
+test('Candidate file selection updates the deep link and loads one bounded Diff at a time', async () => {
+  const selectedPaths = []
+  const { client, model } = view(undefined, {
+    selectedCandidatePath: null,
+    onCandidatePathChange(path) { selectedPaths.push(path) },
+  })
+  const currentCandidate = delivery().currentCandidate
+  const file = {
+    path: 'src/app.ts',
+    oldPath: null,
+    status: 'modified',
+    additions: 7,
+    deletions: 2,
+    binary: false,
+    encoding: 'utf-8',
+  }
+  client.enqueue('candidate.files.list', {
+    schemaVersion,
+    requestId: requestId(3),
+    query: 'candidate.files.list',
+    result: {
+      kind: 'candidate_file_page',
+      candidate: currentCandidate,
+      readCursor: readCursor(),
+      items: [file],
+    },
+    page: page(),
+  })
+  client.enqueue('candidate.diff.get', {
+    schemaVersion,
+    requestId: requestId(4),
+    query: 'candidate.diff.get',
+    result: {
+      kind: 'candidate_diff_chunk',
+      candidate: currentCandidate,
+      readCursor: readCursor(),
+      path: file.path,
+      oldPath: null,
+      status: 'modified',
+      binary: false,
+      contentEncoding: 'utf-8',
+      encoding: 'base64',
+      mediaType: 'application/vnd.winwincode.git-diff',
+      fileDiffSha256: `sha256:${'4'.repeat(64)}`,
+      offset: 0,
+      returnedBytes: 4,
+      totalBytes: 9,
+      dataBase64: 'ZGlmZg==',
+      nextOffset: 4,
+    },
+    page: page(),
+  })
+  client.enqueue('candidate.diff.get', {
+    schemaVersion,
+    requestId: requestId(5),
+    query: 'candidate.diff.get',
+    result: {
+      kind: 'candidate_diff_chunk',
+      candidate: currentCandidate,
+      readCursor: readCursor(),
+      path: file.path,
+      oldPath: null,
+      status: 'modified',
+      binary: false,
+      contentEncoding: 'utf-8',
+      encoding: 'base64',
+      mediaType: 'application/vnd.winwincode.git-diff',
+      fileDiffSha256: `sha256:${'4'.repeat(64)}`,
+      offset: 4,
+      returnedBytes: 5,
+      totalBytes: 9,
+      dataBase64: 'IG1vcmU=',
+      nextOffset: null,
+    },
+    page: page(),
+  })
+
+  await model.start()
+  await model.loadCandidateFiles()
+  await model.selectCandidateFile(file.path)
+
+  assert.deepEqual(selectedPaths, [file.path])
+  assert.equal(client.calls[3].query, 'candidate.diff.get')
+  assert.deepEqual(client.calls[3].parameters, {
+    deliveryId,
+    atCursor: readCursor(),
+    readPageLimit: 1,
+    candidateRef: currentCandidate.candidateRef,
+    candidateTreeId: currentCandidate.candidateTreeId,
+    diffSha256: currentCandidate.diffSha256,
+    path: file.path,
+    offset: 0,
+    length: 65_536,
+  })
+  assert.equal(model.state.candidateFiles.selectedPath, file.path)
+  assert.equal(model.state.candidateFiles.diff.content, 'diff')
+  assert.equal(model.state.candidateFiles.diff.hasMore, true)
+
+  await model.loadMoreCandidateDiff()
+  assert.equal(client.calls[4].parameters.offset, 4)
+  assert.equal(model.state.candidateFiles.diff.content, 'diff more')
+  assert.equal(model.state.candidateFiles.diff.hasMore, false)
+  assert.equal(model.state.candidateFiles.diff.fileDiffSha256, `sha256:${'4'.repeat(64)}`)
+})
+
+test('Candidate deep links select the exact file after its bounded page arrives', async () => {
+  const pathChanges = []
+  const { client, model } = view(undefined, {
+    selectedCandidatePath: 'src/deep-link.ts',
+    onCandidatePathChange(path) { pathChanges.push(path) },
+  })
+  const currentCandidate = delivery().currentCandidate
+  const file = {
+    path: 'src/deep-link.ts',
+    oldPath: null,
+    status: 'added',
+    additions: 1,
+    deletions: 0,
+    binary: false,
+    encoding: 'utf-8',
+  }
+  client.enqueue('candidate.files.list', {
+    schemaVersion,
+    requestId: requestId(3),
+    query: 'candidate.files.list',
+    result: {
+      kind: 'candidate_file_page',
+      candidate: currentCandidate,
+      readCursor: readCursor(),
+      items: [{
+        ...file,
+        path: 'src/first-page.ts',
+      }],
+    },
+    page: { hasMore: true, nextCursor: 'candidate-files:deep-link' },
+  })
+  client.enqueue('candidate.files.list', {
+    schemaVersion,
+    requestId: requestId(4),
+    query: 'candidate.files.list',
+    result: {
+      kind: 'candidate_file_page',
+      candidate: currentCandidate,
+      readCursor: readCursor(),
+      items: [file],
+    },
+    page: page(),
+  })
+  client.enqueue('candidate.diff.get', {
+    schemaVersion,
+    requestId: requestId(5),
+    query: 'candidate.diff.get',
+    result: {
+      kind: 'candidate_diff_chunk',
+      candidate: currentCandidate,
+      readCursor: readCursor(),
+      path: file.path,
+      oldPath: null,
+      status: 'added',
+      binary: false,
+      contentEncoding: 'utf-8',
+      encoding: 'base64',
+      mediaType: 'application/vnd.winwincode.git-diff',
+      fileDiffSha256: `sha256:${'5'.repeat(64)}`,
+      offset: 0,
+      returnedBytes: 4,
+      totalBytes: 4,
+      dataBase64: 'ZGlmZg==',
+      nextOffset: null,
+    },
+    page: page(),
+  })
+
+  await model.start()
+  await model.loadCandidateFiles()
+
+  assert.equal(model.state.candidateFiles.selectedPath, file.path)
+  assert.equal(model.state.candidateFiles.diff.content, 'diff')
+  assert.deepEqual(pathChanges, [])
+  assert.deepEqual(client.calls.map(call => call.query), [
+    'delivery.get',
+    'runtime.projection.get',
+    'candidate.files.list',
+    'candidate.files.list',
+    'candidate.diff.get',
+  ])
+  assert.equal(client.calls[3].page.cursor, 'candidate-files:deep-link')
+})
+
+test('a file deep link that exhausts bounded pages without its target reports route stale without a Diff request', async () => {
+  const { client, model } = view(undefined, {
+    selectedCandidatePath: 'src/gone.ts',
+    onCandidatePathChange() {},
+  })
+  const currentCandidate = delivery().currentCandidate
+  for (const [index, hasMore, nextCursor] of [
+    [3, true, 'candidate-files:route-stale-2'],
+    [4, true, 'candidate-files:route-stale-3'],
+    [5, false, null],
+  ]) {
+    client.enqueue('candidate.files.list', {
+      schemaVersion,
+      requestId: requestId(index),
+      query: 'candidate.files.list',
+      result: {
+        kind: 'candidate_file_page',
+        candidate: currentCandidate,
+        readCursor: readCursor(),
+        items: [{
+          path: `src/page-${String(index - 2)}.ts`,
+          oldPath: null,
+          status: 'modified',
+          additions: 1,
+          deletions: 0,
+          binary: false,
+          encoding: 'utf-8',
+        }],
+      },
+      page: { hasMore, nextCursor },
+    })
+  }
+
+  await model.start()
+  await model.loadCandidateFiles()
+
+  assert.equal(model.state.candidateFiles.status, 'error')
+  assert.equal(
+    model.state.candidateFiles.error.code,
+    'STRONGFLOW_CANDIDATE_FILE_ROUTE_STALE',
+  )
+  assert.match(model.state.candidateFiles.error.message, /file named by this StrongFlow link/u)
+  assert.equal(model.state.candidateFiles.hasMore, false)
+  assert.equal(model.state.candidateFiles.selectedPath, 'src/gone.ts')
+  assert.deepEqual(model.state.candidateFiles.items.map(file => file.path), [
+    'src/page-1.ts',
+    'src/page-2.ts',
+    'src/page-3.ts',
+  ])
+  assert.deepEqual(client.calls.map(call => call.query), [
+    'delivery.get',
+    'runtime.projection.get',
+    'candidate.files.list',
+    'candidate.files.list',
+    'candidate.files.list',
+  ])
+  assert.deepEqual(
+    client.calls.filter(call => call.query === 'candidate.files.list')
+      .map(call => call.page.cursor),
+    [null, 'candidate-files:route-stale-2', 'candidate-files:route-stale-3'],
+  )
+})
+
+test('a pinned Candidate deep link fails closed when refresh replaces that Candidate', async () => {
+  const initial = delivery()
+  let pinnedCandidateRef = null
+  const { client, model } = view(undefined, {
+    expectedCandidateRef: () => pinnedCandidateRef,
+  })
+  await model.start()
+  pinnedCandidateRef = initial.currentCandidate.candidateRef
+
+  const replacement = delivery(2, 'refs/winwincode/candidate/replacement')
+  client.enqueue('delivery.get', response('delivery.get', replacement))
+  await model.refresh()
+
+  assert.equal(model.state.status, 'error')
+  assert.equal(model.state.projection, null)
+  assert.equal(model.state.error.code, 'STRONGFLOW_CANDIDATE_ROUTE_STALE')
+  assert.match(model.state.error.message, /Candidate named by this StrongFlow link/u)
+})
+
+test('binary Candidate files report an unavailable preview without a Diff request', async () => {
+  const { client, model } = view()
+  const currentCandidate = delivery().currentCandidate
+  const file = {
+    path: 'public/logo.png',
+    oldPath: null,
+    status: 'modified',
+    additions: null,
+    deletions: null,
+    binary: true,
+    encoding: 'binary',
+  }
+  client.enqueue('candidate.files.list', {
+    schemaVersion,
+    requestId: requestId(3),
+    query: 'candidate.files.list',
+    result: {
+      kind: 'candidate_file_page',
+      candidate: currentCandidate,
+      readCursor: readCursor(),
+      items: [file],
+    },
+    page: page(),
+  })
+
+  await model.start()
+  await model.loadCandidateFiles()
+  await model.selectCandidateFile(file.path)
+
+  assert.equal(model.state.candidateFiles.diff.status, 'unavailable')
+  assert.equal(model.state.candidateFiles.diff.unavailableReason, 'binary')
+  assert.deepEqual(client.calls.map(call => call.query), [
+    'delivery.get',
+    'runtime.projection.get',
+    'candidate.files.list',
+  ])
+})
+
+test('Candidate file metadata is discarded when the frozen Candidate identity changes', async () => {
+  const { client, model } = view()
+  const currentCandidate = delivery().currentCandidate
+  client.enqueue('candidate.files.list', {
+    schemaVersion,
+    requestId: requestId(3),
+    query: 'candidate.files.list',
+    result: {
+      kind: 'candidate_file_page',
+      candidate: currentCandidate,
+      readCursor: readCursor(),
+      items: [{
+        path: 'src/old-candidate.ts',
+        oldPath: null,
+        status: 'modified',
+        additions: 1,
+        deletions: 1,
+        binary: false,
+        encoding: 'utf-8',
+      }],
+    },
+    page: page(),
+  })
+  await model.start()
+  await model.loadCandidateFiles()
+
+  const nextDelivery = delivery(2, 'refs/winwincode/candidate/2')
+  nextDelivery.currentCandidate = {
+    ...nextDelivery.currentCandidate,
+    candidateCommitId: '3333333333333333333333333333333333333333',
+    candidateTreeId: '4444444444444444444444444444444444444444',
+    diffSha256: `sha256:${'5'.repeat(64)}`,
+  }
+  client.enqueue('delivery.get', response('delivery.get', nextDelivery))
+  client.enqueue('runtime.projection.get', response(
+    'runtime.projection.get',
+    runtime(nextDelivery),
+  ))
+
+  await model.refresh()
+
+  assert.equal(model.state.candidateFiles.status, 'idle')
+  assert.deepEqual(model.state.candidateFiles.items, [])
+  assert.equal(model.state.candidateFiles.diff.status, 'idle')
+})
+
+test('Candidate file pages fail closed when their Candidate digest does not match', async () => {
+  const { client, model } = view()
+  const mismatchedCandidate = {
+    ...delivery().currentCandidate,
+    diffSha256: `sha256:${'9'.repeat(64)}`,
+  }
+  client.enqueue('candidate.files.list', {
+    schemaVersion,
+    requestId: requestId(3),
+    query: 'candidate.files.list',
+    result: {
+      kind: 'candidate_file_page',
+      candidate: mismatchedCandidate,
+      readCursor: readCursor(),
+      items: [],
+    },
+    page: page(),
+  })
+
+  await model.start()
+  await model.loadCandidateFiles()
+
+  assert.equal(model.state.candidateFiles.status, 'error')
+  assert.equal(model.state.candidateFiles.error.code, 'STRONGFLOW_CANDIDATE_FILES_MISMATCH')
+  assert.deepEqual(model.state.candidateFiles.items, [])
+})
+
+test('large Candidate inventories page progressively into one bounded client preview', async () => {
+  const { client, model } = view()
+  const currentCandidate = delivery().currentCandidate
+  for (let pageIndex = 0; pageIndex < 10; pageIndex += 1) {
+    client.enqueue('candidate.files.list', {
+      schemaVersion,
+      requestId: requestId(pageIndex + 3),
+      query: 'candidate.files.list',
+      result: {
+        kind: 'candidate_file_page',
+        candidate: currentCandidate,
+        readCursor: readCursor(),
+        items: Array.from({ length: 200 }, (_, itemIndex) => ({
+          path: `src/page-${String(pageIndex)}-file-${String(itemIndex).padStart(3, '0')}.ts`,
+          oldPath: null,
+          status: 'modified',
+          additions: 1,
+          deletions: 0,
+          binary: false,
+          encoding: 'utf-8',
+        })),
+      },
+      page: {
+        hasMore: true,
+        nextCursor: `candidate-files:${String(pageIndex + 2)}`,
+      },
+    })
+  }
+
+  await model.start()
+  await model.loadCandidateFiles()
+  for (let pageIndex = 1; pageIndex < 10; pageIndex += 1) {
+    await model.loadMoreCandidateFiles()
+  }
+
+  assert.equal(model.state.candidateFiles.items.length, 2_000)
+  assert.equal(model.state.candidateFiles.previewLimited, true)
+  assert.equal(model.state.candidateFiles.hasMore, false)
+  const queryCount = client.calls.length
+  await model.loadMoreCandidateFiles()
+  assert.equal(client.calls.length, queryCount)
+})
+
+test('Candidate Diff decoding preserves UTF-8 characters split across bounded chunks', async () => {
+  const { client, model } = view()
+  const currentCandidate = delivery().currentCandidate
+  const file = {
+    path: 'src/unicode.ts', oldPath: null, status: 'modified', additions: 1, deletions: 0,
+    binary: false, encoding: 'utf-8',
+  }
+  client.enqueue('candidate.files.list', {
+    schemaVersion, requestId: requestId(3), query: 'candidate.files.list',
+    result: {
+      kind: 'candidate_file_page', candidate: currentCandidate,
+      readCursor: readCursor(), items: [file],
+    },
+    page: page(),
+  })
+  for (const [request, offset, dataBase64, nextOffset] of [
+    [4, 0, 'ww==', 1],
+    [5, 1, 'qQ==', null],
+  ]) {
+    client.enqueue('candidate.diff.get', {
+      schemaVersion, requestId: requestId(request), query: 'candidate.diff.get',
+      result: {
+        kind: 'candidate_diff_chunk', candidate: currentCandidate,
+        readCursor: readCursor(), path: file.path, oldPath: null, status: 'modified',
+        binary: false, contentEncoding: 'utf-8', encoding: 'base64',
+        mediaType: 'application/vnd.winwincode.git-diff',
+        fileDiffSha256: `sha256:${'6'.repeat(64)}`,
+        offset, returnedBytes: 1, totalBytes: 2, dataBase64, nextOffset,
+      },
+      page: page(),
+    })
+  }
+
+  await model.start()
+  await model.loadCandidateFiles()
+  await model.selectCandidateFile(file.path)
+  assert.equal(model.state.candidateFiles.diff.content, '')
+  await model.loadMoreCandidateDiff()
+  assert.equal(model.state.candidateFiles.diff.content, 'é')
+})
+
+test('empty StrongFlow creates and advances one Delivery with exact authority and revisions', async () => {
+  const calls = []
+  const created = {
+    schemaVersion,
+    deliveryId,
+    revision: 1,
+    status: 'draft',
+    title: 'First StrongFlow Delivery',
+    updatedAt: '2026-09-02T01:00:00.000Z',
+    ownership: {
+      organizationId: scope.organizationId,
+      workspaceId: scope.workspaceId,
+      projectId: scope.projectId,
+      repositoryId: scope.repositoryId,
+    },
+    activeStageRunId: null,
+    openAttentionCount: 0,
+    taskCounts: {
+      total: 0,
+      pending: 0,
+      active: 0,
+      blocked: 0,
+      verifying: 0,
+      completed: 0,
+      failed: 0,
+    },
+  }
+  const advanced = {
+    ...created,
+    revision: 2,
+    status: 'clarifying',
+    activeStageRunId: stageRunId,
+  }
+  const client = {
+    async command(request) {
+      calls.push(structuredClone(request))
+      const result = request.command === 'delivery.create' ? created : advanced
+      return {
+        schemaVersion,
+        requestId: request.requestId,
+        command: request.command,
+        outcome: 'completed',
+        previousRevision: request.expectedRevision,
+        currentRevision: result.revision,
+        result,
+      }
+    },
+    close() {},
+  }
+  const createdIds = []
+  let requestSequence = 0
+  const model = createStrongFlowCreateViewModel({
+    client,
+    actor,
+    scope,
+    nextDeliveryId: () => deliveryId,
+    nextRequestId: () => requestId(++requestSequence),
+    onCreated(value) { createdIds.push(value) },
+  })
+
+  await model.create({
+    title: '  First StrongFlow Delivery  ',
+    goal: '  Enter the advanced workspace without a reload.  ',
+    baseRevision: '  0123456789abcdef0123456789abcdef01234567  ',
+    scope: ['  Open the advanced workspace.  '],
+    outOfScope: ['  Replace the default Chat surface.  '],
+    constraints: ['  Keep the exact repository binding.  '],
+    sourceProductSessionId: null,
+    acceptanceCriteria: [
+      '  The created Delivery is loaded from the Control Plane.  ',
+      'The Delivery event stream is subscribed.',
+    ],
+  })
+
+  assert.deepEqual(calls, [{
+    schemaVersion,
+    requestId: requestId(1),
+    actor,
+    scope,
+    command: 'delivery.create',
+    expectedRevision: 0,
+    payload: {
+      deliveryId,
+      spec: {
+        acceptanceCriteria: [{
+          id: 'criterion:1',
+          required: true,
+          title: 'The created Delivery is loaded from the Control Plane.',
+        }, {
+          id: 'criterion:2',
+          required: true,
+          title: 'The Delivery event stream is subscribed.',
+        }],
+        baseRevision: '0123456789abcdef0123456789abcdef01234567',
+        constraints: ['Keep the exact repository binding.'],
+        goal: 'Enter the advanced workspace without a reload.',
+        outOfScope: ['Replace the default Chat surface.'],
+        publicationTarget: null,
+        repositoryId: scope.repositoryId,
+        scope: ['Open the advanced workspace.'],
+        sourceProductSessionId: null,
+        title: 'First StrongFlow Delivery',
+      },
+      tasks: [],
+    },
+  }, {
+    schemaVersion,
+    requestId: requestId(2),
+    actor,
+    scope,
+    command: 'delivery.advance',
+    expectedRevision: 1,
+    payload: { deliveryId },
+  }])
+  assert.deepEqual(createdIds, [deliveryId])
+  assert.equal(model.state.status, 'created')
+  assert.equal(model.state.error, null)
+})
+
+test('Delivery conversion retries the same create and advance requests without duplicate creation', async () => {
+  const calls = []
+  const created = {
+    schemaVersion,
+    deliveryId,
+    revision: 1,
+    status: 'draft',
+    title: 'Confirmed Chat requirement',
+    updatedAt: '2026-09-02T01:00:00.000Z',
+    ownership: {
+      organizationId: scope.organizationId,
+      workspaceId: scope.workspaceId,
+      projectId: scope.projectId,
+      repositoryId: scope.repositoryId,
+    },
+    activeStageRunId: null,
+    openAttentionCount: 0,
+    taskCounts: {
+      total: 0,
+      pending: 0,
+      active: 0,
+      blocked: 0,
+      verifying: 0,
+      completed: 0,
+      failed: 0,
+    },
+  }
+  const advanced = {
+    ...created,
+    revision: 2,
+    status: 'clarifying',
+    activeStageRunId: stageRunId,
+  }
+  let createCalls = 0
+  let advanceCalls = 0
+  const client = {
+    async command(request) {
+      calls.push(structuredClone(request))
+      if (request.command === 'delivery.create') {
+        createCalls += 1
+        if (createCalls === 1) throw new ControlPlaneClientError({
+          kind: 'authorization',
+          code: 'PERMISSION_DENIED',
+          message: 'private permission detail',
+          requestId: request.requestId,
+          retryable: false,
+        })
+      } else {
+        advanceCalls += 1
+        if (advanceCalls === 1) throw new ControlPlaneClientError({
+          kind: 'network',
+          code: 'NETWORK_ERROR',
+          message: 'response was lost',
+          requestId: request.requestId,
+          retryable: true,
+        })
+      }
+      const result = request.command === 'delivery.create' ? created : advanced
+      return {
+        schemaVersion,
+        requestId: request.requestId,
+        command: request.command,
+        outcome: 'completed',
+        previousRevision: request.expectedRevision,
+        currentRevision: result.revision,
+        result,
+      }
+    },
+  }
+  let requestSequence = 0
+  const opened = []
+  const model = createStrongFlowCreateViewModel({
+    client,
+    actor,
+    scope,
+    nextDeliveryId: () => deliveryId,
+    nextRequestId: () => requestId(++requestSequence),
+    onCreated(value) { opened.push(value) },
+  })
+  const input = {
+    title: 'Confirmed Chat requirement',
+    goal: 'Implement the requirement confirmed in Chat.',
+    baseRevision: '0123456789abcdef0123456789abcdef01234567',
+    scope: ['Implement the confirmed requirement.'],
+    outOfScope: [],
+    constraints: ['Keep the source session binding.'],
+    sourceProductSessionId: productSessionId,
+    acceptanceCriteria: ['The confirmed result is delivered.'],
+  }
+
+  await model.create(input)
+  assert.equal(model.state.error.code, 'PERMISSION_DENIED')
+  await model.create(input)
+  assert.equal(model.state.error.code, 'NETWORK_ERROR')
+  await model.create(input)
+
+  assert.equal(createCalls, 2)
+  assert.equal(advanceCalls, 2)
+  assert.deepEqual(calls[1], calls[0], 'permission retry must reuse the create idempotency key')
+  assert.deepEqual(calls[3], calls[2], 'response-loss retry must reuse the advance idempotency key')
+  assert.equal(calls[2].expectedRevision, 1)
+  assert.deepEqual(opened, [deliveryId])
+  assert.equal(model.state.status, 'created')
+})
+
+test('cancelling and duplicate activation retain one Delivery attempt for exact retry', async () => {
+  const calls = []
+  let first = true
+  const created = {
+    schemaVersion,
+    deliveryId,
+    revision: 1,
+    status: 'draft',
+    title: 'Cancelable conversion',
+    updatedAt: '2026-09-02T01:00:00.000Z',
+    ownership: {
+      organizationId: scope.organizationId,
+      workspaceId: scope.workspaceId,
+      projectId: scope.projectId,
+      repositoryId: scope.repositoryId,
+    },
+    activeStageRunId: null,
+    openAttentionCount: 0,
+    taskCounts: {
+      total: 0,
+      pending: 0,
+      active: 0,
+      blocked: 0,
+      verifying: 0,
+      completed: 0,
+      failed: 0,
+    },
+  }
+  const advanced = { ...created, revision: 2, status: 'clarifying', activeStageRunId: stageRunId }
+  const client = {
+    async command(request, options) {
+      calls.push(structuredClone(request))
+      if (first) {
+        first = false
+        return new Promise((resolve, reject) => {
+          options.signal.addEventListener('abort', () => {
+            reject(new ControlPlaneClientError({
+              kind: 'cancelled',
+              code: 'REQUEST_CANCELLED',
+              message: 'cancelled locally',
+              requestId: request.requestId,
+              retryable: false,
+            }))
+          }, { once: true })
+        })
+      }
+      const result = request.command === 'delivery.create' ? created : advanced
+      return {
+        schemaVersion,
+        requestId: request.requestId,
+        command: request.command,
+        outcome: 'completed',
+        previousRevision: request.expectedRevision,
+        currentRevision: result.revision,
+        result,
+      }
+    },
+  }
+  let requestSequence = 0
+  const model = createStrongFlowCreateViewModel({
+    client,
+    actor,
+    scope,
+    nextDeliveryId: () => deliveryId,
+    nextRequestId: () => requestId(++requestSequence),
+    onCreated() {},
+  })
+  const input = {
+    title: 'Cancelable conversion',
+    goal: 'Retry the exact request.',
+    baseRevision: '0123456789abcdef0123456789abcdef01234567',
+    scope: ['Retry the submitted conversion.'],
+    outOfScope: [],
+    constraints: [],
+    sourceProductSessionId: null,
+    acceptanceCriteria: ['Only one Delivery is created.'],
+  }
+
+  const pending = model.create(input)
+  await Promise.resolve()
+  void model.create(input)
+  assert.equal(calls.length, 1)
+  assert.equal(model.state.status, 'submitting')
+  model.cancelPending()
+  await pending
+  assert.equal(model.state.error.code, 'REQUEST_CANCELLED')
+  await model.create(input)
+
+  assert.deepEqual(calls[1], calls[0], 'cancel retry must reuse the original request')
+  assert.equal(calls[2].command, 'delivery.advance')
+  assert.equal(model.state.status, 'created')
+})
+
+test('an accepted Delivery command can be cancelled and retried with its exact request', async () => {
+  const calls = []
+  const created = {
+    schemaVersion,
+    deliveryId,
+    revision: 1,
+    status: 'draft',
+    title: 'Accepted conversion',
+    updatedAt: '2026-09-02T01:00:00.000Z',
+    ownership: {
+      organizationId: scope.organizationId,
+      workspaceId: scope.workspaceId,
+      projectId: scope.projectId,
+      repositoryId: scope.repositoryId,
+    },
+    activeStageRunId: null,
+    openAttentionCount: 0,
+    taskCounts: {
+      total: 0,
+      pending: 0,
+      active: 0,
+      blocked: 0,
+      verifying: 0,
+      completed: 0,
+      failed: 0,
+    },
+  }
+  const advanced = { ...created, revision: 2, status: 'clarifying', activeStageRunId: stageRunId }
+  let accepted = true
+  const client = {
+    async command(request) {
+      calls.push(structuredClone(request))
+      if (accepted) {
+        accepted = false
+        return {
+          schemaVersion,
+          requestId: request.requestId,
+          command: request.command,
+          outcome: 'accepted',
+          acceptedAt: '2026-09-02T01:00:00.000Z',
+        }
+      }
+      const result = request.command === 'delivery.create' ? created : advanced
+      return {
+        schemaVersion,
+        requestId: request.requestId,
+        command: request.command,
+        outcome: 'completed',
+        previousRevision: request.expectedRevision,
+        currentRevision: result.revision,
+        result,
+      }
+    },
+  }
+  let requestSequence = 0
+  const model = createStrongFlowCreateViewModel({
+    client,
+    actor,
+    scope,
+    nextDeliveryId: () => deliveryId,
+    nextRequestId: () => requestId(++requestSequence),
+    onCreated() {},
+  })
+  const input = {
+    title: 'Accepted conversion',
+    goal: 'Retry a command accepted by the server.',
+    baseRevision: '0123456789abcdef0123456789abcdef01234567',
+    scope: ['Retry the accepted command.'],
+    outOfScope: [],
+    constraints: [],
+    sourceProductSessionId: null,
+    acceptanceCriteria: ['The exact accepted request is retried.'],
+  }
+
+  await model.create(input)
+  assert.equal(model.state.status, 'waiting')
+  model.cancelPending()
+  assert.equal(model.state.error.code, 'REQUEST_CANCELLED')
+  await model.create(input)
+
+  assert.deepEqual(calls[1], calls[0])
+  assert.equal(calls[2].command, 'delivery.advance')
+  assert.equal(model.state.status, 'created')
+})
+
 test('pending Worker attachment keeps the exact Delivery StageRun readable', async () => {
   const client = new FakeClient()
   const pending = delivery()
@@ -506,6 +1506,7 @@ test('Delivery events reload one complete pair without publishing a partial revi
   const observed = []
   model.subscribe(state => observed.push(state))
   await model.start()
+  const previousProjection = model.state.projection
   const nextDelivery = delivery(2, 'refs/winwincode/candidate/2')
   client.enqueue('delivery.get', response('delivery.get', nextDelivery))
   client.enqueue('runtime.projection.get', response(
@@ -523,11 +1524,12 @@ test('Delivery events reload one complete pair without publishing a partial revi
     },
   })
 
-  assert.equal(observed.some(state => (
+  const reloading = observed.find(state => (
     state.status === 'refreshing'
     && state.realtime === 'reloading'
-    && state.projection === null
-  )), true)
+  ))
+  assert.notEqual(reloading, undefined)
+  assert.equal(reloading.projection, previousProjection)
   assert.equal(model.state.projection.metadata.revisions.delivery, 2)
   assert.equal(model.state.projection.currentCandidate.candidateRef, 'refs/winwincode/candidate/2')
   assert.equal(model.state.projection.verdict.candidateRef, 'refs/winwincode/candidate/2')
@@ -768,6 +1770,52 @@ test('a transiently stale Delivery invalidation retries within the same generati
   ])
 })
 
+test('the production QueryCache lets a StrongFlow consistency retry reach HTTP again', async () => {
+  const rawClient = new FakeClient()
+  const rawQuery = rawClient.query.bind(rawClient)
+  rawClient.query = async request => ({
+    ...await rawQuery(request),
+    requestId: request.requestId,
+  })
+  const cache = createQueryCache({ client: rawClient })
+  const { model } = view(cache.client)
+  try {
+    await model.start()
+    const staleDelivery = delivery(1)
+    const currentDelivery = delivery(2)
+    rawClient.enqueue('delivery.get', response('delivery.get', staleDelivery))
+    rawClient.enqueue('delivery.get', response('delivery.get', currentDelivery))
+    rawClient.enqueue('runtime.projection.get', response(
+      'runtime.projection.get',
+      runtime(currentDelivery),
+    ))
+
+    await rawClient.subscription.onEvent({
+      sequence: 2,
+      authorizationEpoch: 1,
+      event: {
+        type: 'delivery.changed.v1',
+        deliveryId,
+        revision: 2,
+        changeKind: 'advanced',
+      },
+    })
+
+    assert.equal(model.state.status, 'ready')
+    assert.equal(model.state.projection.metadata.revisions.delivery, 2)
+    assert.deepEqual(rawClient.calls.map(call => call.query), [
+      'delivery.get',
+      'runtime.projection.get',
+      'delivery.get',
+      'delivery.get',
+      'runtime.projection.get',
+    ])
+  } finally {
+    model.close()
+    cache.close()
+  }
+})
+
 test('a StageRun rebind invalidation uses its zero runtime sequence as the Delivery minimum', async () => {
   const { client, model } = view()
   await model.start()
@@ -866,6 +1914,79 @@ test('expired bounded read restarts Delivery before Runtime and never mixes cuts
   ])
   assert.equal(model.state.projection.metadata.revisions.delivery, 2)
   assert.deepEqual(client.calls[3].parameters.atCursor, secondDelivery.readCursor)
+})
+
+test('the production QueryCache forces a fresh Delivery after READ_CURSOR_EXPIRED', async () => {
+  const rawClient = new FakeClient()
+  const rawQuery = rawClient.query.bind(rawClient)
+  rawClient.query = async request => ({
+    ...await rawQuery(request),
+    requestId: request.requestId,
+  })
+  const firstDelivery = delivery(1)
+  const secondDelivery = delivery(2)
+  rawClient.enqueue('delivery.get', response('delivery.get', firstDelivery))
+  rawClient.enqueue('runtime.projection.get', new ControlPlaneClientError({
+    kind: 'server',
+    code: 'READ_CURSOR_EXPIRED',
+    message: 'The bounded read expired.',
+    requestId: null,
+    retryable: true,
+  }))
+  rawClient.enqueue('delivery.get', response('delivery.get', secondDelivery))
+  rawClient.enqueue('runtime.projection.get', response(
+    'runtime.projection.get',
+    runtime(secondDelivery),
+  ))
+  const cache = createQueryCache({ client: rawClient })
+  const { model } = view(cache.client)
+  try {
+    await model.start()
+    assert.deepEqual(rawClient.calls.map(call => call.query), [
+      'delivery.get',
+      'runtime.projection.get',
+      'delivery.get',
+      'runtime.projection.get',
+    ])
+    assert.equal(model.state.projection.metadata.revisions.delivery, 2)
+    assert.deepEqual(rawClient.calls[3].parameters.atCursor, secondDelivery.readCursor)
+  } finally {
+    model.close()
+    cache.close()
+  }
+})
+
+test('the production QueryCache discards the StrongFlow read cut on retention reset', async () => {
+  const rawClient = new FakeClient()
+  const rawQuery = rawClient.query.bind(rawClient)
+  rawClient.query = async request => ({
+    ...await rawQuery(request),
+    requestId: request.requestId,
+  })
+  const cache = createQueryCache({ client: rawClient })
+  const { model } = view(cache.client)
+  try {
+    await model.start()
+    const nextDelivery = delivery(2)
+    rawClient.enqueue('delivery.get', response('delivery.get', nextDelivery))
+    rawClient.enqueue('runtime.projection.get', response(
+      'runtime.projection.get',
+      runtime(nextDelivery),
+    ))
+
+    const cursor = await rawClient.subscription.onResetRequired(null)
+    assert.deepEqual(rawClient.calls.map(call => call.query), [
+      'delivery.get',
+      'runtime.projection.get',
+      'delivery.get',
+      'runtime.projection.get',
+    ])
+    assert.equal(model.state.projection.metadata.revisions.delivery, 2)
+    assert.deepEqual(cursor, nextDelivery.readCursor.eventCursor)
+  } finally {
+    model.close()
+    cache.close()
+  }
 })
 
 test('a retryable trusted-facts command keeps its shape while rotating request keys', async () => {
@@ -1195,6 +2316,8 @@ test('candidate mismatch clears the previous projection and rejects an old Verdi
 
 test('reset, reconnect, authorization, cancellation, and close have explicit empty states', async () => {
   const { client, model } = view()
+  const observed = []
+  model.subscribe(state => observed.push(state))
   await model.start()
   const nextDelivery = delivery(3)
   client.enqueue('delivery.get', response('delivery.get', nextDelivery))
@@ -1203,6 +2326,11 @@ test('reset, reconnect, authorization, cancellation, and close have explicit emp
     runtime(nextDelivery),
   ))
   const cursor = await client.subscription.onResetRequired()
+  assert.equal(observed.some(state => (
+    state.status === 'refreshing'
+    && state.realtime === 'reloading'
+    && state.projection === null
+  )), true)
   assert.deepEqual(cursor, nextDelivery.readCursor.eventCursor)
   assert.equal(model.state.projection.metadata.revisions.delivery, 3)
 
@@ -1251,4 +2379,283 @@ test('StrongFlow view-model uses only the facade and never infers state from log
     source,
     /\bfetch\s*\(|new\s+WebSocket|@deepseek-ai|dsh-typert|remote\.|console\.|readFile|log\b/iu,
   )
+})
+
+test('historical review reads go through the canonical facade at the snapshot cursor', async () => {
+  const olderRunId = 'run_00000000000000000000000009'
+  const olderProductSessionId = 'psn_00000000000000000000000009'
+  const humanRunId = 'run_00000000000000000000000008'
+  const olderCandidateRef = 'refs/winwincode/candidate/9'
+  const { client, model } = view()
+  const deliveryValue = delivery()
+  deliveryValue.stages.unshift(
+    {
+      id: humanRunId,
+      actorType: 'human',
+      attempt: 1,
+      deliveryTaskId: null,
+      finishedAt: '2026-08-27T00:59:00.000Z',
+      role: 'reviewer',
+      sessionBinding: null,
+      stage: 'plan-review',
+      startedAt: '2026-08-27T00:58:00.000Z',
+      status: 'succeeded',
+    },
+    {
+      id: olderRunId,
+      actorType: 'codex',
+      attempt: 1,
+      deliveryTaskId: 'tsk_00000000000000000000000001',
+      finishedAt: '2026-08-27T00:57:00.000Z',
+      role: 'implementer',
+      sessionBinding: sessionBinding(olderProductSessionId, olderRunId, '09'),
+      stage: 'executing',
+      startedAt: '2026-08-27T00:50:00.000Z',
+      status: 'failed',
+    },
+  )
+  client.responses.set('delivery.get', response('delivery.get', deliveryValue))
+  await model.start()
+  assert.equal(model.state.status, 'ready')
+
+  client.enqueue(
+    'runtime.projection.get',
+    response('runtime.projection.get', runtime(deliveryValue, olderProductSessionId, olderRunId)),
+  )
+  const snapshot = await model.loadStageRunRuntime(olderRunId)
+  assert.equal(snapshot.stageRunId, olderRunId)
+  assert.equal(snapshot.productSessionId, olderProductSessionId)
+  const runtimeCall = client.calls.at(-1)
+  assert.equal(runtimeCall.query, 'runtime.projection.get')
+  assert.deepEqual(runtimeCall.parameters, {
+    kind: 'delivery-stage',
+    productSessionId: olderProductSessionId,
+    deliveryId,
+    stageRunId: olderRunId,
+    atCursor: deliveryValue.readCursor,
+  })
+  assert.deepEqual(runtimeCall.scope, scope)
+
+  // Human and unknown runs resolve to null without any facade request.
+  const callsBefore = client.calls.length
+  assert.equal(await model.loadStageRunRuntime(humanRunId), null)
+  assert.equal(await model.loadStageRunRuntime('run_00000000000000000000000077'), null)
+  assert.equal(client.calls.length, callsBefore)
+
+  const olderCandidate = {
+    availability: 'released',
+    candidate: {
+      candidateCommitId: '4444444444444444444444444444444444444444',
+      candidateRef: olderCandidateRef,
+      candidateTreeId: '5555555555555555555555555555555555555555',
+      deliverySpecId: 'spec:1',
+      deliverySpecRevision: 3,
+      diffSha256: `sha256:${'9'.repeat(64)}`,
+      frozenAt: '2026-08-27T00:56:00.000Z',
+      producerSessionBindingId: 'binding:strongflow:09',
+      producerStageRunId: olderRunId,
+    },
+    firstSeenDeliveryRevision: 1,
+    isCurrentAtReadCursor: false,
+    lastSeenDeliveryRevision: 1,
+    reviewDeliveryRevision: null,
+  }
+  const currentCandidateItem = {
+    ...olderCandidate,
+    candidate: {
+      ...olderCandidate.candidate,
+      candidateRef: 'refs/winwincode/candidate/1',
+      producerSessionBindingId: 'binding:strongflow:1',
+      producerStageRunId: stageRunId,
+    },
+    isCurrentAtReadCursor: true,
+  }
+  client.enqueue('candidate.list', response('candidate.list', {
+    kind: 'candidate_history_page',
+    items: [currentCandidateItem, olderCandidate],
+    readCursor: deliveryValue.readCursor,
+  }))
+  const items = await model.loadStageRunCandidates(olderRunId)
+  assert.deepEqual(items.map(item => item.candidate.candidateRef), [olderCandidateRef])
+  const listCall = client.calls.at(-1)
+  assert.equal(listCall.query, 'candidate.list')
+  assert.equal(
+    listCall.parameters.readPageLimit,
+    1,
+    'readPageLimit must match the delivery.get limit sealed into atCursor',
+  )
+  assert.equal(listCall.page.limit, 50)
+  assert.deepEqual(listCall.parameters.atCursor, deliveryValue.readCursor)
+
+  const identity = {
+    candidateRef: olderCandidateRef,
+    candidateTreeId: olderCandidate.candidate.candidateTreeId,
+    diffSha256: olderCandidate.candidate.diffSha256,
+  }
+  client.enqueue('candidate.review.get', response('candidate.review.get', {
+    availability: 'released',
+    candidate: olderCandidate.candidate,
+    currentAuthorization: false,
+    displayOnly: true,
+    evidence: [],
+    firstSeenDeliveryRevision: 1,
+    kind: 'candidate_historical_review',
+    lastSeenDeliveryRevision: 1,
+    readCursor: deliveryValue.readCursor,
+    reviewDeliveryRevision: null,
+    verdict: null,
+  }))
+  const review = await model.loadCandidateHistoricalReview(identity)
+  assert.equal(review.kind, 'candidate_historical_review')
+  assert.equal(review.displayOnly, true)
+  assert.equal(review.currentAuthorization, false)
+  assert.equal(client.calls.at(-1).query, 'candidate.review.get')
+  assert.equal(client.calls.at(-1).parameters.readPageLimit, 1)
+
+  // A response naming another Candidate fails closed instead of rendering it.
+  client.enqueue('candidate.review.get', response('candidate.review.get', {
+    availability: 'released',
+    candidate: currentCandidateItem.candidate,
+    currentAuthorization: false,
+    displayOnly: true,
+    evidence: [],
+    firstSeenDeliveryRevision: 1,
+    kind: 'candidate_historical_review',
+    lastSeenDeliveryRevision: 1,
+    readCursor: deliveryValue.readCursor,
+    reviewDeliveryRevision: null,
+    verdict: null,
+  }))
+  await assert.rejects(
+    model.loadCandidateHistoricalReview(identity),
+    error => error.code === 'STRONGFLOW_CANDIDATE_REVIEW_MISMATCH',
+  )
+
+  model.close()
+})
+
+test('a historical Candidate review from another read cut fails closed', async () => {
+  const { client, model } = view()
+  const deliveryValue = delivery()
+  client.responses.set('delivery.get', response('delivery.get', deliveryValue))
+  await model.start()
+  const candidate = deliveryValue.currentCandidate
+  const identity = {
+    candidateRef: candidate.candidateRef,
+    candidateTreeId: candidate.candidateTreeId,
+    diffSha256: candidate.diffSha256,
+  }
+  client.enqueue('candidate.review.get', response('candidate.review.get', {
+    availability: 'available',
+    candidate,
+    currentAuthorization: false,
+    displayOnly: true,
+    evidence: [],
+    firstSeenDeliveryRevision: deliveryValue.deliveryRevision,
+    kind: 'candidate_historical_review',
+    lastSeenDeliveryRevision: deliveryValue.deliveryRevision,
+    readCursor: {
+      ...deliveryValue.readCursor,
+      token: `${deliveryValue.readCursor.token}-another-cut`,
+    },
+    reviewDeliveryRevision: null,
+    verdict: null,
+  }))
+
+  await assert.rejects(
+    model.loadCandidateHistoricalReview(identity),
+    error => error.code === 'STRONGFLOW_CANDIDATE_REVIEW_MISMATCH',
+  )
+  model.close()
+})
+
+test('historical Candidate lookup follows canonical pages before reporting a run empty', async () => {
+  const selectedRunId = 'run_00000000000000000000000009'
+  const selectedSessionId = 'psn_00000000000000000000000009'
+  const { client, model } = view()
+  const deliveryValue = delivery()
+  deliveryValue.stages.unshift({
+    id: selectedRunId,
+    actorType: 'codex',
+    attempt: 1,
+    deliveryTaskId: 'tsk_00000000000000000000000001',
+    finishedAt: '2026-08-27T00:57:00.000Z',
+    role: 'implementer',
+    sessionBinding: sessionBinding(selectedSessionId, selectedRunId, '09'),
+    stage: 'executing',
+    startedAt: '2026-08-27T00:50:00.000Z',
+    status: 'failed',
+  })
+  client.responses.set('delivery.get', response('delivery.get', deliveryValue))
+  await model.start()
+
+  const item = {
+    availability: 'released',
+    candidate: {
+      candidateCommitId: '4444444444444444444444444444444444444444',
+      candidateRef: 'refs/winwincode/candidate/9',
+      candidateTreeId: '5555555555555555555555555555555555555555',
+      deliverySpecId: 'spec:1',
+      deliverySpecRevision: 3,
+      diffSha256: `sha256:${'9'.repeat(64)}`,
+      frozenAt: '2026-08-27T00:56:00.000Z',
+      producerSessionBindingId: 'binding:strongflow:09',
+      producerStageRunId: selectedRunId,
+    },
+    firstSeenDeliveryRevision: 1,
+    isCurrentAtReadCursor: false,
+    lastSeenDeliveryRevision: 1,
+    reviewDeliveryRevision: null,
+  }
+  client.enqueue('candidate.list', {
+    ...response('candidate.list', {
+      kind: 'candidate_history_page',
+      items: [],
+      readCursor: deliveryValue.readCursor,
+    }),
+    page: { hasMore: true, nextCursor: 'candidate-page-2' },
+  })
+  client.enqueue('candidate.list', {
+    ...response('candidate.list', {
+      kind: 'candidate_history_page',
+      items: [item],
+      readCursor: deliveryValue.readCursor,
+    }),
+    page: page(),
+  })
+
+  const items = await model.loadStageRunCandidates(selectedRunId)
+  assert.deepEqual(items.map(entry => entry.candidate.candidateRef), [
+    item.candidate.candidateRef,
+  ])
+  assert.deepEqual(
+    client.calls.filter(call => call.query === 'candidate.list').map(call => call.page.cursor),
+    [null, 'candidate-page-2'],
+  )
+  model.close()
+})
+
+test('historical facade reads propagate selection cancellation to the generated client', async () => {
+  const { client, model } = view()
+  const deliveryValue = delivery()
+  client.responses.set('delivery.get', response('delivery.get', deliveryValue))
+  await model.start()
+
+  let receivedSignal
+  client.enqueue('candidate.list', (_request, options) => new Promise((_resolve, reject) => {
+    receivedSignal = options.signal
+    const timeout = setTimeout(() => reject(new Error('historical request was not aborted')), 50)
+    receivedSignal.addEventListener('abort', () => {
+      clearTimeout(timeout)
+      reject(new DOMException('historical request aborted', 'AbortError'))
+    }, { once: true })
+  }))
+  const selection = new AbortController()
+  const pending = model.loadStageRunCandidates(stageRunId, selection.signal)
+  await Promise.resolve()
+  selection.abort()
+
+  await assert.rejects(pending, error => error.name === 'AbortError')
+  assert.equal(receivedSignal.aborted, true)
+  model.close()
 })

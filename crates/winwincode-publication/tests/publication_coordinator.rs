@@ -14,12 +14,13 @@ use winwincode_domain::{
     RepositoryId, RequestId, Sha256Digest, UserId, WorkspaceId,
 };
 use winwincode_publication::{
-    PUBLICATION_OPERATION_PROTOCOL, PUBLICATION_OPERATION_SCHEMA_VERSION, PublicationAuthorization,
-    PublicationCancelCommand, PublicationCommandContext, PublicationEnterpriseAttribution,
-    PublicationErrorKind, PublicationFactBinding, PublicationMeteringErrorKind,
-    PublicationMeteringFilter, PublicationMeteringLedger, PublicationOperation,
-    PublicationOperationKind, PublicationOperationPayload, PublicationPort, PublicationPortError,
-    PublicationPortMutation, PublicationPortObservation, PublicationPublishCommand,
+    MAX_PUBLICATION_DETAIL_HISTORY, PUBLICATION_OPERATION_PROTOCOL,
+    PUBLICATION_OPERATION_SCHEMA_VERSION, PublicationAuthorization, PublicationCancelCommand,
+    PublicationCommandContext, PublicationEnterpriseAttribution, PublicationErrorKind,
+    PublicationFactBinding, PublicationMeteringErrorKind, PublicationMeteringFilter,
+    PublicationMeteringLedger, PublicationOperation, PublicationOperationKind,
+    PublicationOperationPayload, PublicationPort, PublicationPortError, PublicationPortMutation,
+    PublicationPortObservation, PublicationPublishCommand, PublicationReadLedger,
     PublicationResourceFact, PublicationResourceKind, PublicationSourceIssue, PublicationState,
     PublicationTarget, RepositoryPolicyScope,
     test_support::{
@@ -39,6 +40,7 @@ struct RecordingPort {
     unknown_after_write_once: Option<PublicationOperationKind>,
     reject_once: Option<PublicationOperationKind>,
     no_remote_write_once: Option<PublicationOperationKind>,
+    always_unknown: bool,
 }
 
 impl PublicationPort for RecordingPort {
@@ -47,6 +49,12 @@ impl PublicationPort for RecordingPort {
         operation: &PublicationOperation,
     ) -> Result<PublicationPortObservation, PublicationPortError> {
         self.lookups.push(operation.operation_key().to_owned());
+        if self.always_unknown {
+            return Ok(PublicationPortObservation::unknown(
+                operation,
+                "provider-unavailable",
+            ));
+        }
         Ok(self.resources.get(operation.operation_key()).map_or_else(
             || PublicationPortObservation::absent(operation),
             |(request_sha256, resource)| {
@@ -154,6 +162,68 @@ fn unknown_remote_result_is_reconciled_after_restart_without_repeating_the_write
     Box::new(restarted)
         .close()
         .expect("close restarted storage");
+    fs::remove_dir_all(&root).expect("remove fixture");
+}
+
+#[test]
+fn detail_verifies_every_revision_but_returns_only_the_newest_bounded_history() {
+    let root = temporary_root();
+    let fixture = current_publication_fixture();
+    let mut storage = SqliteStorage::open(&root).expect("open storage");
+    let mut port = RecordingPort {
+        always_unknown: true,
+        ..RecordingPort::default()
+    };
+    coordinator(&mut storage, &mut port)
+        .publish(
+            fixture.publish_context(),
+            fixture.publish_command(),
+            fixture.authorization(),
+        )
+        .expect("persist publication intent");
+    let mut current = None;
+    for offset in 0..=MAX_PUBLICATION_DETAIL_HISTORY {
+        current = Some(
+            coordinator(&mut storage, &mut port)
+                .resume(
+                    fixture.publication_id(),
+                    fixture.resume_time_millis() + u64::try_from(offset).expect("bounded offset"),
+                )
+                .expect("record a retryable unknown result"),
+        );
+    }
+    let current = current.expect("at least one progress revision");
+    let detail = PublicationReadLedger::new(&storage)
+        .detail(fixture.publication_id())
+        .expect("read bounded verified history");
+
+    assert!(detail.history_truncated());
+    assert_eq!(detail.history().len(), MAX_PUBLICATION_DETAIL_HISTORY);
+    assert_eq!(detail.publication(), &current);
+    assert_eq!(
+        detail
+            .history()
+            .first()
+            .expect("first retained revision")
+            .revision(),
+        current.revision() - u64::try_from(MAX_PUBLICATION_DETAIL_HISTORY - 1).expect("limit")
+    );
+    assert_eq!(
+        detail
+            .history()
+            .last()
+            .expect("current retained revision")
+            .revision(),
+        current.revision()
+    );
+    assert!(
+        detail
+            .history()
+            .iter()
+            .all(|entry| entry.steps().len() == 4)
+    );
+
+    Box::new(storage).close().expect("close storage");
     fs::remove_dir_all(&root).expect("remove fixture");
 }
 
@@ -474,6 +544,59 @@ fn current_read_rejects_step_metadata_that_claims_progress_without_a_step_transi
         .get(fixture.publication_id())
         .expect_err("step metadata without a matching transition must be rejected");
     assert_eq!(error.kind(), PublicationErrorKind::Corrupt,);
+
+    Box::new(reopened).close().expect("close reopened storage");
+    fs::remove_dir_all(&root).expect("remove fixture");
+}
+
+#[test]
+fn current_read_rejects_individually_valid_snapshots_with_an_impossible_history_transition() {
+    let root = temporary_root();
+    let fixture = current_publication_fixture();
+    let mut storage = SqliteStorage::open(&root).expect("open storage");
+    let mut port = RecordingPort {
+        unknown_after_write_once: Some(PublicationOperationKind::Branch),
+        ..RecordingPort::default()
+    };
+    coordinator(&mut storage, &mut port)
+        .publish(
+            fixture.publish_context(),
+            fixture.publish_command(),
+            fixture.authorization(),
+        )
+        .expect("persist publication intent");
+    coordinator(&mut storage, &mut port)
+        .resume(fixture.publication_id(), fixture.resume_time_millis())
+        .expect("record several valid progress revisions");
+    Box::new(storage).close().expect("close storage");
+
+    let connection = Connection::open(root.join("control-plane.sqlite3")).expect("open database");
+    let payload: Vec<u8> = connection
+        .query_row(
+            "SELECT payload FROM aggregate_journal_records \
+             WHERE aggregate_type = 'publication' AND aggregate_id = ?1 AND sequence = 2",
+            [fixture.publication_id().0.clone()],
+            |row| row.get(0),
+        )
+        .expect("read second publication revision");
+    let mut value: serde_json::Value = serde_json::from_slice(&payload).expect("state JSON");
+    value["state"] = serde_json::Value::String("pending".to_owned());
+    let modified = serde_json::to_vec(&value).expect("encode individually valid snapshot");
+    let digest = format!("sha256:{:x}", Sha256::digest(&modified));
+    connection
+        .execute(
+            "UPDATE aggregate_journal_records SET payload = ?1, digest = ?2 \
+             WHERE aggregate_type = 'publication' AND aggregate_id = ?3 AND sequence = 2",
+            (&modified, &digest, &fixture.publication_id().0),
+        )
+        .expect("replace one historical snapshot");
+    drop(connection);
+
+    let mut reopened = SqliteStorage::open(&root).expect("reopen storage");
+    let error = coordinator(&mut reopened, &mut port)
+        .get(fixture.publication_id())
+        .expect_err("an impossible publication history transition must fail closed");
+    assert_eq!(error.kind(), PublicationErrorKind::Corrupt);
 
     Box::new(reopened).close().expect("close reopened storage");
     fs::remove_dir_all(&root).expect("remove fixture");

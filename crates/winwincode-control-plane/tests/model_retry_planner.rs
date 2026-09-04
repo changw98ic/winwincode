@@ -101,6 +101,7 @@ fn register_provider(storage: &mut SqliteStorage) {
                     reasoning_efforts: vec!["high".to_owned()],
                 }],
             },
+            Instant("2026-09-02T00:00:00.000Z".to_owned()),
         )
         .expect("register Provider");
     CredentialReferenceService::new(storage)
@@ -183,6 +184,7 @@ fn alternate_authority(root: &std::path::Path) -> FrozenModelRouteAuthority {
                     reasoning_efforts: vec!["medium".to_owned()],
                 }],
             },
+            Instant("2026-09-02T00:00:00.000Z".to_owned()),
         )
         .expect("register alternate Provider");
     CredentialReferenceService::new(&mut storage)

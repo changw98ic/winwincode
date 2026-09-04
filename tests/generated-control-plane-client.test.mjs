@@ -7,6 +7,7 @@ import {
   createControlPlaneWebSocketClient,
   createProductSessionRuntimeProjectionSubscription,
   createStrongFlowProjectionSubscription,
+  matchesCanonicalSchema,
 } from '../apps/client/src/generated/control-plane-client.ts'
 
 const schemaVersion = 'winwincode/v1'
@@ -17,6 +18,12 @@ const scope = {
   workspaceId: 'wsp_00000000000000000000000001',
   projectId: 'prj_00000000000000000000000001',
   repositoryId: 'rep_00000000000000000000000001',
+}
+const projectScope = {
+  kind: 'project',
+  organizationId: scope.organizationId,
+  workspaceId: scope.workspaceId,
+  projectId: scope.projectId,
 }
 const deliveryId = 'dlv_00000000000000000000000001'
 const otherDeliveryId = 'dlv_00000000000000000000000002'
@@ -78,6 +85,76 @@ function queryResponse(request, result) {
   }
 }
 
+function publicationSummary(revision = 2, state = 'cancelled') {
+  return {
+    id: 'pub_00000000000000000000000001',
+    revision,
+    deliveryId,
+    deliverySpecId: 'spec:current',
+    deliverySpecRevision: 1,
+    candidateRef: `git-candidate:sha256:${'a'.repeat(64)}`,
+    deliveryVerdictId: 'verdict:current:pass',
+    verdictStatus: 'pass',
+    approvalAttentionItemId: 'att_00000000000000000000000001',
+    approvedBy: actor.id,
+    approvedAt: '2026-08-25T00:00:00.000Z',
+    publicationSetSha256: `sha256:${'b'.repeat(64)}`,
+    target: {
+      provider: 'github',
+      repository: 'example/widget',
+      baseBranch: 'main',
+      headRepository: 'example/widget',
+      headBranch: 'winwincode/delivery',
+    },
+    state,
+    resourceRef: null,
+    updatedAt: '2026-08-25T00:00:02.000Z',
+  }
+}
+
+function publicationStepStates(state = 'pending') {
+  return ['branch', 'pull_request', 'issue_comment', 'commit_status']
+    .map(kind => ({ kind, state }))
+}
+
+function publicationDetail() {
+  const steps = publicationStepStates().map(step => ({
+    ...step,
+    outcomeCode: null,
+    resourceRef: null,
+    remoteWritePerformed: null,
+    retryable: false,
+  }))
+  return {
+    kind: 'publication_detail',
+    summary: publicationSummary(),
+    steps,
+    history: [{
+      revision: 1,
+      state: 'pending',
+      updatedAt: '2026-08-25T00:00:01.000Z',
+      stepStates: publicationStepStates(),
+      retryable: true,
+      cancellable: true,
+    }, {
+      revision: 2,
+      state: 'cancelled',
+      updatedAt: '2026-08-25T00:00:02.000Z',
+      stepStates: publicationStepStates(),
+      retryable: false,
+      cancellable: false,
+    }],
+    historyTruncated: false,
+    cancellation: {
+      revision: 2,
+      cancelledAt: '2026-08-25T00:00:02.000Z',
+      reason: 'Operator cancelled publication.',
+    },
+    retryable: false,
+    cancellable: false,
+  }
+}
+
 function readCursor(suffix = '1') {
   const sequence = Number(suffix)
   return {
@@ -125,6 +202,7 @@ function deliveryProjection(cursor) {
         verificationMethod: 'Focused generated client tests',
         required: true,
       }],
+      sourceProductSessionId: null,
       sourceRef: null,
       publicationTarget: null,
       repository: { kind: 'local-git', locator: 'workspace://repository' },
@@ -132,6 +210,7 @@ function deliveryProjection(cursor) {
       maxReworkAttempts: 2,
     },
     solutionReview: null,
+    diagramExecution: null,
     stages: [],
     tasks: [],
     attention: [],
@@ -139,6 +218,88 @@ function deliveryProjection(cursor) {
     currentCandidate: null,
     verdict: null,
     publication: null,
+  }
+}
+
+function diagram(id, kind) {
+  return {
+    id,
+    kind,
+    title: `${kind} diagram`,
+    nodes: [{
+      id: 'process:executing',
+      label: 'Execute',
+      description: 'Runs the exact current Delivery cut.',
+      kind: 'stage',
+      trustBoundary: null,
+      unresolved: false,
+    }],
+    edges: [],
+  }
+}
+
+function solutionReviewProjection() {
+  return {
+    deliveryId,
+    deliverySpecId: 'spec:current',
+    deliverySpecRevision: 1,
+    planningStageRunId: stageRunId,
+    planningSessionBindingId: 'binding:planner',
+    reviewStageRunId: stageRunId,
+    attentionItemId: canonicalId('att', 1),
+    reviewSetSha256: `sha256:${'a'.repeat(64)}`,
+    reviewStatus: 'approved',
+    decision: 'approve',
+    comments: null,
+    requestedChanges: null,
+    reviewerId: actor.id,
+    reviewedAt: '2026-08-25T00:00:00.000Z',
+    solutionId: 'solution:current',
+    summary: 'Use one generated delivery.get result.',
+    approach: ['Project the current cut.'],
+    components: [],
+    connections: [],
+    architectureDiagram: diagram('diagram:architecture', 'system-architecture'),
+    processDiagram: diagram('diagram:process', 'process-flow'),
+    risks: [],
+    unresolvedItems: [],
+    taskProposals: [{
+      id: canonicalId('dtk', 1),
+      title: 'Project execution',
+      goal: 'Keep browser facts on the generated contract.',
+      acceptanceCriterionIds: ['criterion:client'],
+      blockedByTaskIds: [],
+    }],
+  }
+}
+
+function diagramExecutionProjection(delivery) {
+  const node = {
+    nodeId: 'process:executing',
+    state: 'affected-live',
+    affectedFileCount: 1,
+    fileIds: [],
+  }
+  return {
+    schemaVersion: 1,
+    protocol: 'winwincode.diagram-execution-projection.v1',
+    deliveryId,
+    deliveryRevision: delivery.deliveryRevision,
+    reviewSetSha256: delivery.solutionReview.reviewSetSha256,
+    state: 'executing',
+    architecture: {
+      diagramId: delivery.solutionReview.architectureDiagram.id,
+      kind: 'system-architecture',
+      nodes: [node],
+    },
+    process: {
+      diagramId: delivery.solutionReview.processDiagram.id,
+      kind: 'process-flow',
+      nodes: [node],
+    },
+    affectedFileCount: 1,
+    details: null,
+    updatedAt: '2026-08-25T00:00:00.000Z',
   }
 }
 
@@ -154,6 +315,20 @@ function deliveryRuntimeProjection(cursor) {
     eventCursor: cursor.eventCursor,
     rebuiltAt: '2026-08-25T00:00:00.000Z',
     sessions: [],
+  }
+}
+
+function candidateProjection() {
+  return {
+    candidateRef: `git-candidate:sha256:${'a'.repeat(64)}`,
+    deliverySpecId: 'spec:current',
+    deliverySpecRevision: 1,
+    producerStageRunId: stageRunId,
+    producerSessionBindingId: 'binding:executor',
+    candidateCommitId: 'b'.repeat(40),
+    candidateTreeId: 'c'.repeat(40),
+    diffSha256: `sha256:${'d'.repeat(64)}`,
+    frozenAt: '2026-08-25T00:00:00.000Z',
   }
 }
 
@@ -174,6 +349,33 @@ function productRuntimeProjection(revision = 1) {
     },
     rebuiltAt: '2026-08-25T00:00:00.000Z',
     sessions: [],
+  }
+}
+
+function approvalProjection() {
+  return {
+    binding: {
+      executionJobId: canonicalId('job', 1),
+      productSessionId,
+      sessionIdentity: {
+        codexThreadId: canonicalId('cdx', 1),
+        productSessionId,
+        workerSessionId: canonicalId('wsn', 1),
+      },
+      workerSessionId: canonicalId('wsn', 1),
+    },
+    category: 'shell',
+    effectiveDecisionScope: 'once',
+    expiresAt: '2026-08-25T00:10:00.000Z',
+    id: canonicalId('apr', 1),
+    requestedAt: '2026-08-25T00:00:00.000Z',
+    revision: 1,
+    sanitizedDetail: {
+      kind: 'unavailable',
+      reason: 'producer_unavailable',
+    },
+    state: 'pending',
+    subject: 'Approve embedded shell execution.',
   }
 }
 
@@ -463,6 +665,507 @@ test('HTTP queries preserve opaque cursors and malformed errors stay bounded', a
   )
 })
 
+test('generated HTTP client validates diagram execution on delivery.get', async () => {
+  const cursor = readCursor('1')
+  const delivery = deliveryProjection(cursor)
+  delivery.solutionReview = solutionReviewProjection()
+  delivery.diagramExecution = diagramExecutionProjection(delivery)
+  const client = createControlPlaneHttpClient({
+    async fetch(_input, init) {
+      const request = JSON.parse(init.body)
+      return response(200, queryResponse(request, delivery))
+    },
+  })
+
+  assert.equal(matchesCanonicalSchema('SolutionReviewProjection', delivery.solutionReview), true)
+  assert.equal(
+    matchesCanonicalSchema('StrongFlowDiagramExecutionProjection', delivery.diagramExecution),
+    true,
+  )
+  assert.equal(matchesCanonicalSchema('DeliveryDetailProjection', delivery), true)
+
+  const result = await client.submitQuery({
+    schemaVersion,
+    requestId: requestId(28),
+    actor,
+    scope,
+    query: 'delivery.get',
+    parameters: { deliveryId },
+    page: { cursor: null, limit: 20 },
+  })
+
+  assert.equal(result.result.diagramExecution.state, 'executing')
+  assert.equal(
+    result.result.diagramExecution.reviewSetSha256,
+    result.result.solutionReview.reviewSetSha256,
+  )
+})
+
+test('generated HTTP client validates bounded Candidate file and diff reads', async () => {
+  let fetchCalls = 0
+  const cursor = readCursor('1')
+  const candidate = candidateProjection()
+  const client = createControlPlaneHttpClient({
+    async fetch(_input, init) {
+      fetchCalls += 1
+      const request = JSON.parse(init.body)
+      if (request.query === 'candidate.list') {
+        return response(200, queryResponse(request, {
+          kind: 'candidate_history_page',
+          readCursor: cursor,
+          items: [{
+            candidate,
+            availability: 'available',
+            firstSeenDeliveryRevision: 1,
+            lastSeenDeliveryRevision: 2,
+            reviewDeliveryRevision: 2,
+            isCurrentAtReadCursor: true,
+          }],
+        }))
+      }
+      if (request.query === 'candidate.review.get') {
+        return response(200, queryResponse(request, {
+          kind: 'candidate_historical_review',
+          candidate,
+          availability: 'available',
+          firstSeenDeliveryRevision: 1,
+          lastSeenDeliveryRevision: 2,
+          reviewDeliveryRevision: 2,
+          evidence: [],
+          verdict: null,
+          displayOnly: true,
+          currentAuthorization: false,
+          readCursor: cursor,
+        }))
+      }
+      if (request.query === 'candidate.files.list') {
+        return response(200, queryResponse(request, {
+          kind: 'candidate_file_page',
+          candidate,
+          readCursor: cursor,
+          items: [{
+            path: 'src/index.ts',
+            oldPath: null,
+            status: 'modified',
+            additions: 2,
+            deletions: 1,
+            binary: false,
+            encoding: 'utf-8',
+          }],
+        }))
+      }
+      return response(200, queryResponse(request, {
+        kind: 'candidate_diff_chunk',
+        candidate,
+        readCursor: cursor,
+        path: 'src/index.ts',
+        oldPath: null,
+        status: 'modified',
+        binary: false,
+        contentEncoding: 'utf-8',
+        encoding: 'base64',
+        mediaType: 'application/vnd.winwincode.git-diff',
+        fileDiffSha256: `sha256:${'e'.repeat(64)}`,
+        offset: 0,
+        returnedBytes: 4,
+        totalBytes: 4,
+        dataBase64: 'ZGlmZg==',
+        nextOffset: null,
+      }))
+    },
+  })
+  const binding = {
+    deliveryId,
+    atCursor: cursor,
+    readPageLimit: 1,
+    candidateRef: candidate.candidateRef,
+    candidateTreeId: candidate.candidateTreeId,
+    diffSha256: candidate.diffSha256,
+  }
+  const history = await client.submitQuery({
+    schemaVersion,
+    requestId: requestId(29),
+    actor,
+    scope,
+    query: 'candidate.list',
+    parameters: { deliveryId, atCursor: cursor, readPageLimit: 1 },
+    page: { cursor: null, limit: 20 },
+  })
+  assert.equal(history.result.items[0].availability, 'available')
+
+  const review = await client.submitQuery({
+    schemaVersion,
+    requestId: requestId(30),
+    actor,
+    scope,
+    query: 'candidate.review.get',
+    parameters: binding,
+    page: { cursor: null, limit: 1 },
+  })
+  assert.equal(review.result.displayOnly, true)
+  assert.equal(review.result.currentAuthorization, false)
+
+  const files = await client.submitQuery({
+    schemaVersion,
+    requestId: requestId(31),
+    actor,
+    scope,
+    query: 'candidate.files.list',
+    parameters: { ...binding, statuses: [], pathPrefix: 'src/' },
+    page: { cursor: null, limit: 1 },
+  })
+  assert.equal(files.result.items[0].path, 'src/index.ts')
+
+  const diff = await client.submitQuery({
+    schemaVersion,
+    requestId: requestId(32),
+    actor,
+    scope,
+    query: 'candidate.diff.get',
+    parameters: { ...binding, path: 'src/index.ts', offset: 0, length: 4 },
+    page: { cursor: null, limit: 1 },
+  })
+  assert.equal(diff.result.dataBase64, 'ZGlmZg==')
+
+  await assert.rejects(
+    client.submitQuery({
+      schemaVersion,
+      requestId: requestId(33),
+      actor,
+      scope,
+      query: 'candidate.diff.get',
+      parameters: {
+        ...binding,
+        path: '../secret',
+        offset: 0,
+        length: 262_145,
+      },
+      page: { cursor: null, limit: 1 },
+    }),
+    error => error instanceof ControlPlaneClientError
+      && error.code === 'INVALID_CLIENT_REQUEST',
+  )
+  assert.equal(fetchCalls, 4)
+})
+
+test('generated HTTP client validates exact Evidence and closed Artifact reads', async () => {
+  let fetchCalls = 0
+  const cursor = readCursor('2')
+  const evidence = {
+    id: canonicalId('evd', 2),
+    deliverySpecId: 'spec:current',
+    deliverySpecRevision: 1,
+    stageRunId,
+    sessionBindingId: 'binding:reviewer',
+    candidateRef: `git-candidate:sha256:${'a'.repeat(64)}`,
+    type: 'runtime_event',
+    sourceRef: canonicalId('exe', 2),
+    createdAt: '2026-08-25T00:00:00.000Z',
+  }
+  const client = createControlPlaneHttpClient({
+    async fetch(_input, init) {
+      fetchCalls += 1
+      const request = JSON.parse(init.body)
+      if (request.query === 'evidence.get') {
+        return response(200, queryResponse(request, {
+          kind: 'evidence_detail',
+          readCursor: cursor,
+          evidence,
+          outcome: 'succeeded',
+          artifactAccess: {
+            state: 'unavailable',
+            reason: 'no_authoritative_link',
+          },
+        }))
+      }
+      return response(200, queryResponse(request, {
+        kind: 'evidence_artifact_content_unavailable',
+        readCursor: cursor,
+        evidenceId: evidence.id,
+        artifactId: canonicalId('art', 2),
+        state: 'unavailable',
+        reason: 'no_authoritative_link',
+      }))
+    },
+  })
+  const binding = {
+    deliveryId,
+    atCursor: cursor,
+    readPageLimit: 20,
+    evidenceId: evidence.id,
+    candidateRef: evidence.candidateRef,
+    stageRunId: evidence.stageRunId,
+    sessionBindingId: evidence.sessionBindingId,
+    type: evidence.type,
+    sourceRef: evidence.sourceRef,
+  }
+  const detail = await client.submitQuery({
+    schemaVersion,
+    requestId: requestId(34),
+    actor,
+    scope,
+    query: 'evidence.get',
+    parameters: binding,
+    page: { cursor: null, limit: 1 },
+  })
+  assert.equal(detail.result.outcome, 'succeeded')
+  assert.equal(detail.result.artifactAccess.reason, 'no_authoritative_link')
+
+  const contentParameters = {
+    evidence: binding,
+    artifactId: canonicalId('art', 2),
+    artifactKind: 'log',
+    artifactDigest: `sha256:${'f'.repeat(64)}`,
+    artifactMediaType: 'text/plain',
+    artifactSizeBytes: 1_000_000,
+    offset: 0,
+    length: 262_144,
+  }
+  const content = await client.submitQuery({
+    schemaVersion,
+    requestId: requestId(35),
+    actor,
+    scope,
+    query: 'evidence.artifact.content.get',
+    parameters: contentParameters,
+    page: { cursor: null, limit: 1 },
+  })
+  assert.equal(content.result.state, 'unavailable')
+  assert.equal(content.result.reason, 'no_authoritative_link')
+
+  await assert.rejects(
+    client.submitQuery({
+      schemaVersion,
+      requestId: requestId(36),
+      actor,
+      scope,
+      query: 'evidence.artifact.content.get',
+      parameters: { ...contentParameters, length: 262_145, path: '../secret' },
+      page: { cursor: null, limit: 1 },
+    }),
+    error => error instanceof ControlPlaneClientError
+      && error.code === 'INVALID_CLIENT_REQUEST',
+  )
+  assert.equal(fetchCalls, 2)
+
+  const leaky = createControlPlaneHttpClient({
+    async fetch(_input, init) {
+      const request = JSON.parse(init.body)
+      return response(200, queryResponse(request, {
+        kind: 'evidence_artifact_content_unavailable',
+        readCursor: cursor,
+        evidenceId: evidence.id,
+        artifactId: canonicalId('art', 2),
+        state: 'unavailable',
+        reason: 'no_authoritative_link',
+        storeKey: '/private/artifacts/object',
+      }))
+    },
+  })
+  await assert.rejects(
+    leaky.submitQuery({
+      schemaVersion,
+      requestId: requestId(37),
+      actor,
+      scope,
+      query: 'evidence.artifact.content.get',
+      parameters: contentParameters,
+      page: { cursor: null, limit: 1 },
+    }),
+    error => error instanceof ControlPlaneClientError
+      && error.code === 'INVALID_RESPONSE',
+  )
+
+  const boundedBinary = createControlPlaneHttpClient({
+    async fetch(_input, init) {
+      const request = JSON.parse(init.body)
+      return response(200, queryResponse(request, {
+        kind: 'evidence_artifact_content_chunk',
+        readCursor: cursor,
+        evidence,
+        artifact: {
+          artifactId: canonicalId('art', 2),
+          kind: 'log',
+          mediaType: 'application/octet-stream',
+          digest: `sha256:${'f'.repeat(64)}`,
+          sizeBytes: 1_000_000,
+          fileName: 'review-output.bin',
+          previewMode: 'download_only',
+          provenance: {
+            deliveryId,
+            deliveryRevision: cursor.deliveryRevision,
+            stageRunId,
+            sessionBindingId: evidence.sessionBindingId,
+            candidateRef: evidence.candidateRef,
+            evidenceId: evidence.id,
+          },
+        },
+        state: 'available',
+        encoding: 'base64',
+        contentEncoding: 'binary',
+        previewMode: 'download_only',
+        offset: 0,
+        returnedBytes: 4,
+        totalBytes: 1_000_000,
+        dataBase64: 'AAECAw==',
+        nextOffset: 4,
+        truncated: true,
+      }))
+    },
+  })
+  const binary = await boundedBinary.submitQuery({
+    schemaVersion,
+    requestId: requestId(38),
+    actor,
+    scope,
+    query: 'evidence.artifact.content.get',
+    parameters: contentParameters,
+    page: { cursor: null, limit: 1 },
+  })
+  assert.equal(binary.result.contentEncoding, 'binary')
+  assert.equal(binary.result.previewMode, 'download_only')
+  assert.equal(binary.result.truncated, true)
+  assert.equal(binary.result.nextOffset, 4)
+})
+
+test('generated HTTP client reads only the server-joined secret-safe ModelRoute projection', async () => {
+  const captured = []
+  const client = createControlPlaneHttpClient({
+    async fetch(_input, init) {
+      const request = JSON.parse(init.body)
+      captured.push(request)
+      return response(200, queryResponse(request, {
+        kind: 'model_route_availability_page',
+        scope,
+        settingsSource: {
+          kind: 'organization',
+          organizationId: scope.organizationId,
+        },
+        settingsRevision: 4,
+        requestPoolSource: projectScope,
+        requestPoolRevision: 6,
+        defaultProviderId: 'provider-main',
+        defaultModelId: 'model-main',
+        status: 'enabled',
+        reason: 'ready',
+        items: [{
+          route: {
+            providerId: 'provider-main',
+            modelId: 'model-main',
+            credentialReferenceId: canonicalId('crd', 1),
+          },
+          providerDisplayName: 'Provider Main',
+          modelDisplayName: 'Model Main',
+          catalogSource: {
+            kind: 'organization',
+            organizationId: scope.organizationId,
+          },
+          catalogVersion: 7,
+          providerVersion: 3,
+          modelVersion: 2,
+          contextWindowTokens: 128_000,
+          maxOutputTokens: 16_000,
+          toolSupport: 'parallel',
+          reasoningEfforts: ['high', 'medium'],
+          credentialRotationVersion: 2,
+          isDefault: true,
+          status: 'enabled',
+          reason: 'ready',
+        }],
+      }))
+    },
+  })
+
+  const result = await client.submitQuery({
+    schemaVersion,
+    requestId: requestId(34),
+    actor,
+    scope,
+    query: 'model.route.availability.list',
+    parameters: {},
+    page: { cursor: null, limit: 20 },
+  })
+
+  assert.equal(captured.length, 1)
+  assert.deepEqual(captured[0].scope, scope)
+  assert.deepEqual(captured[0].parameters, {})
+  assert.equal(result.result.items.length, 1)
+  assert.equal(result.result.items[0].status, 'enabled')
+  assert.equal(result.result.items[0].reason, 'ready')
+  assert.deepEqual(result.result.requestPoolSource, projectScope)
+  assert.equal(result.result.requestPoolRevision, 6)
+  assert.doesNotMatch(JSON.stringify(result), /vault|locator|secret|poolSize|queueDepth/iu)
+})
+
+test('generated HTTP client rejects ModelRoute responses that add credential material', async () => {
+  const client = createControlPlaneHttpClient({
+    async fetch(_input, init) {
+      const request = JSON.parse(init.body)
+      return response(200, queryResponse(request, {
+        kind: 'model_route_availability_page',
+        scope,
+        settingsSource: null,
+        settingsRevision: null,
+        requestPoolSource: projectScope,
+        requestPoolRevision: 0,
+        defaultProviderId: null,
+        defaultModelId: null,
+        status: 'disabled',
+        reason: 'no_provider',
+        items: [],
+        vaultLocator: 'local-fixture://must-not-cross-http',
+      }))
+    },
+  })
+
+  await assert.rejects(
+    client.submitQuery({
+      schemaVersion,
+      requestId: requestId(35),
+      actor,
+      scope,
+      query: 'model.route.availability.list',
+      parameters: {},
+      page: { cursor: null, limit: 20 },
+    }),
+    error => error instanceof ControlPlaneClientError && error.code === 'INVALID_RESPONSE',
+  )
+})
+
+test('generated WebSocket client applies a scope-bound ModelRoute invalidation', async () => {
+  const factory = fakeWebSocketFactory()
+  const applied = []
+  const client = createControlPlaneWebSocketClient({
+    createSocket: factory.createSocket,
+    async onEvent(frame) {
+      applied.push(frame.event)
+    },
+  })
+  const modelRouteSubscription = {
+    scope,
+    stream: { kind: 'scope' },
+    eventTypes: ['model-route-availability.invalidated.v1'],
+  }
+  client.subscribe(subscriptionId, modelRouteSubscription)
+  factory.sockets[0].open()
+  factory.sockets[0].receive(acceptedFrame(scope, modelRouteSubscription.stream))
+  factory.sockets[0].receive(runtimeEvent(1, {
+    type: 'model-route-availability.invalidated.v1',
+    source: 'credential_reference',
+    sourceRevision: 3,
+    reloadQueries: ['model.route.availability.list'],
+  }, modelRouteSubscription.stream))
+  await flush()
+
+  assert.deepEqual(applied, [{
+    type: 'model-route-availability.invalidated.v1',
+    source: 'credential_reference',
+    sourceRevision: 3,
+    reloadQueries: ['model.route.availability.list'],
+  }])
+  assert.equal(factory.sockets[0].sent.at(-1).type, 'transport.ack.v1')
+})
+
 test('canonical HTTP errors expose only the five public safe fields', async () => {
   const client = createControlPlaneHttpClient({
     async fetch(_input, init) {
@@ -595,6 +1298,49 @@ test('WebSocket acknowledges only applied events, deduplicates, pongs, and resum
     type: 'transport.pong.v1',
     nonce: '0123456789abcdef',
   })
+})
+
+test('WebSocket exposes every validated queued event before serial application completes', async () => {
+  const factory = fakeWebSocketFactory()
+  const firstApplication = deferred()
+  const queued = []
+  const applied = []
+  const client = createControlPlaneWebSocketClient({
+    createSocket: factory.createSocket,
+    onEventQueued(frame) {
+      queued.push(frame.sequence)
+    },
+    async onEvent(frame) {
+      applied.push(frame.sequence)
+      if (frame.sequence === 1) await firstApplication.promise
+    },
+  })
+  client.subscribe(subscriptionId, {
+    scope,
+    stream: { kind: 'delivery', deliveryId },
+    eventTypes: ['delivery.changed.v1'],
+  })
+  factory.sockets[0].open()
+  factory.sockets[0].receive(acceptedFrame())
+
+  for (let sequence = 1; sequence <= 40; sequence += 1) {
+    factory.sockets[0].receive(deliveryChangedEvent(sequence))
+  }
+  await flush()
+
+  assert.deepEqual(queued, Array.from({ length: 40 }, (_, index) => index + 1))
+  assert.deepEqual(applied, [1])
+  assert.equal(factory.sockets[0].sent.some(frame => frame.type === 'transport.ack.v1'), false)
+
+  firstApplication.resolve()
+  await flush()
+  assert.deepEqual(applied, Array.from({ length: 40 }, (_, index) => index + 1))
+  assert.deepEqual(
+    factory.sockets[0].sent
+      .filter(frame => frame.type === 'transport.ack.v1')
+      .map(frame => frame.cursor.sequence),
+    Array.from({ length: 40 }, (_, index) => index + 1),
+  )
 })
 
 test('WebSocket handler failure sends no acknowledgement and 4403 stops reconnects', async () => {

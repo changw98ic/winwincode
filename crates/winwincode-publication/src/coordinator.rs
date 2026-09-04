@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::fmt;
+use std::{collections::VecDeque, fmt};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -33,6 +33,7 @@ const PUBLICATION_AGGREGATE_TYPE: &str = "publication";
 const PUBLICATION_EVENT_TOPIC: &str = "publication.state.v1";
 const INTERNAL_ACTOR_KEY: &[u8] = b"winwincode.publication.system.v1";
 const CROCKFORD_BASE32: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+pub const MAX_PUBLICATION_DETAIL_HISTORY: usize = 200;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -59,12 +60,141 @@ impl PublicationState {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum PublicationStepState {
+pub enum PublicationStepState {
     Pending,
     Applying,
     Unknown,
     Succeeded,
     Rejected,
+}
+
+impl PublicationStepState {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Applying => "applying",
+            Self::Unknown => "unknown",
+            Self::Succeeded => "succeeded",
+            Self::Rejected => "rejected",
+        }
+    }
+
+    #[must_use]
+    pub const fn retryable(self) -> bool {
+        matches!(self, Self::Applying | Self::Unknown)
+    }
+}
+
+/// Secret-safe current result of one canonical Publication operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublicationStepDetail {
+    kind: PublicationOperationKind,
+    state: PublicationStepState,
+    outcome_code: Option<String>,
+    resource: Option<PublicationResourceFact>,
+    remote_write_performed: Option<bool>,
+}
+
+impl PublicationStepDetail {
+    #[must_use]
+    pub const fn kind(&self) -> PublicationOperationKind {
+        self.kind
+    }
+
+    #[must_use]
+    pub const fn state(&self) -> PublicationStepState {
+        self.state
+    }
+
+    #[must_use]
+    pub fn outcome_code(&self) -> Option<&str> {
+        self.outcome_code.as_deref()
+    }
+
+    #[must_use]
+    pub const fn resource(&self) -> Option<&PublicationResourceFact> {
+        self.resource.as_ref()
+    }
+
+    #[must_use]
+    pub const fn remote_write_performed(&self) -> Option<bool> {
+        self.remote_write_performed
+    }
+
+    #[must_use]
+    pub const fn retryable(&self) -> bool {
+        self.state.retryable()
+    }
+}
+
+/// One verified Publication journal revision reduced to closed public status facts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublicationStatusHistory {
+    revision: u64,
+    state: PublicationState,
+    updated_at_millis: u64,
+    steps: Vec<PublicationStepDetail>,
+}
+
+impl PublicationStatusHistory {
+    #[must_use]
+    pub const fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    #[must_use]
+    pub const fn state(&self) -> PublicationState {
+        self.state
+    }
+
+    #[must_use]
+    pub const fn updated_at_millis(&self) -> u64 {
+        self.updated_at_millis
+    }
+
+    #[must_use]
+    pub fn steps(&self) -> &[PublicationStepDetail] {
+        &self.steps
+    }
+
+    #[must_use]
+    pub const fn retryable(&self) -> bool {
+        matches!(
+            self.state,
+            PublicationState::Pending | PublicationState::Publishing
+        )
+    }
+
+    #[must_use]
+    pub const fn cancellable(&self) -> bool {
+        self.retryable()
+    }
+}
+
+/// Bounded result of a fully verified Publication state and journal read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublicationDetail {
+    publication: Publication,
+    history: Vec<PublicationStatusHistory>,
+    history_truncated: bool,
+}
+
+impl PublicationDetail {
+    #[must_use]
+    pub const fn publication(&self) -> &Publication {
+        &self.publication
+    }
+
+    #[must_use]
+    pub fn history(&self) -> &[PublicationStatusHistory] {
+        &self.history
+    }
+
+    #[must_use]
+    pub const fn history_truncated(&self) -> bool {
+        self.history_truncated
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -362,6 +492,29 @@ impl Publication {
     }
 
     #[must_use]
+    pub fn steps(&self) -> Vec<PublicationStepDetail> {
+        self.steps.iter().map(publication_step_detail).collect()
+    }
+
+    #[must_use]
+    pub fn cancellation_reason(&self) -> Option<&str> {
+        self.cancellation_reason.as_deref()
+    }
+
+    #[must_use]
+    pub const fn retryable(&self) -> bool {
+        matches!(
+            self.state,
+            PublicationState::Pending | PublicationState::Publishing
+        )
+    }
+
+    #[must_use]
+    pub const fn cancellable(&self) -> bool {
+        self.retryable()
+    }
+
+    #[must_use]
     pub const fn updated_at_millis(&self) -> u64 {
         self.updated_at_millis
     }
@@ -656,6 +809,34 @@ impl<'storage> PublicationReadLedger<'storage> {
     /// or an unavailable canonical storage adapter.
     pub fn get(&self, publication_id: &PublicationId) -> Result<Publication, PublicationError> {
         load_publication(self.storage, publication_id)
+    }
+
+    /// Reads one Publication and returns only the newest bounded history after
+    /// validating every durable journal record.
+    ///
+    /// # Errors
+    ///
+    /// Rejects the same missing, malformed, or inconsistent facts as `get`.
+    pub fn detail(
+        &self,
+        publication_id: &PublicationId,
+    ) -> Result<PublicationDetail, PublicationError> {
+        let (publication, verified_history, history_truncated) =
+            load_publication_history(self.storage, publication_id, MAX_PUBLICATION_DETAIL_HISTORY)?;
+        let history = verified_history
+            .into_iter()
+            .map(|value| PublicationStatusHistory {
+                revision: value.revision,
+                state: value.state,
+                updated_at_millis: value.updated_at_millis,
+                steps: value.steps.iter().map(publication_step_detail).collect(),
+            })
+            .collect();
+        Ok(PublicationDetail {
+            publication,
+            history,
+            history_truncated,
+        })
     }
 
     /// Replays the exact Publication created by one durable command receipt.
@@ -1402,6 +1583,15 @@ fn load_publication(
     storage: &dyn ProductStateStorage,
     publication_id: &PublicationId,
 ) -> Result<Publication, PublicationError> {
+    load_publication_history(storage, publication_id, 0)
+        .map(|(publication, _history, _history_truncated)| publication)
+}
+
+fn load_publication_history(
+    storage: &dyn ProductStateStorage,
+    publication_id: &PublicationId,
+    history_limit: usize,
+) -> Result<(Publication, Vec<Publication>, bool), PublicationError> {
     if !canonical_prefixed_id(&publication_id.0, "pub_") {
         return Err(PublicationError::invalid("publication identity is invalid"));
     }
@@ -1435,6 +1625,9 @@ fn load_publication(
             "publication journal manifest or length is inconsistent",
         ));
     }
+    let mut previous = None;
+    let mut history = VecDeque::with_capacity(history_limit);
+    let mut history_truncated = false;
     for (index, record) in journal.records.iter().enumerate() {
         let expected_sequence = u64::try_from(index)
             .ok()
@@ -1451,6 +1644,21 @@ fn load_publication(
                 "publication journal record is inconsistent",
             ));
         }
+        if let Some(previous) = previous.as_ref() {
+            validate_publication_transition(previous, &historical)?;
+        } else if historical.revision != 1 || historical.state != PublicationState::Pending {
+            return Err(PublicationError::corrupt(
+                "publication journal does not begin with its pending intent",
+            ));
+        }
+        if history_limit > 0 {
+            if history.len() == history_limit {
+                history.pop_front();
+                history_truncated = true;
+            }
+            history.push_back(historical.clone());
+        }
+        previous = Some(historical);
     }
     let tail = journal
         .records
@@ -1461,7 +1669,114 @@ fn load_publication(
             "publication state differs from the journal tail",
         ));
     }
-    Ok(publication)
+    Ok((publication, history.into(), history_truncated))
+}
+
+fn validate_publication_transition(
+    previous: &Publication,
+    next: &Publication,
+) -> Result<(), PublicationError> {
+    if previous.revision.checked_add(1) != Some(next.revision)
+        || next.updated_at_millis < previous.updated_at_millis
+        || previous.id != next.id
+        || previous.binding != next.binding
+        || previous.source != next.source
+        || previous.target != next.target
+        || previous.candidate_digest != next.candidate_digest
+        || previous.candidate_commit_id != next.candidate_commit_id
+        || previous.artifact_id != next.artifact_id
+        || previous.artifact_digest != next.artifact_digest
+        || previous.approved_by != next.approved_by
+        || previous.approved_at_millis != next.approved_at_millis
+        || previous.repository_scope_sha256 != next.repository_scope_sha256
+        || previous.set_sha256 != next.set_sha256
+        || previous.provider_idempotency_key != next.provider_idempotency_key
+        || previous.intent_sha256 != next.intent_sha256
+        || previous.steps.len() != next.steps.len()
+        || previous
+            .steps
+            .iter()
+            .zip(&next.steps)
+            .any(|(left, right)| left.operation != right.operation)
+        || matches!(
+            previous.state,
+            PublicationState::Published | PublicationState::Cancelled | PublicationState::Failed
+        )
+    {
+        return Err(PublicationError::corrupt(
+            "publication journal transition changed immutable facts",
+        ));
+    }
+    let changed_steps = previous
+        .steps
+        .iter()
+        .zip(&next.steps)
+        .enumerate()
+        .filter_map(|(index, (left, right))| (left != right).then_some(index))
+        .collect::<Vec<_>>();
+    let first_incomplete = previous
+        .steps
+        .iter()
+        .position(|step| step.state != PublicationStepState::Succeeded);
+    let one_current_step_changed = matches!(changed_steps.as_slice(), [index]
+        if Some(*index) == first_incomplete
+            && next.steps[*index].state != PublicationStepState::Pending
+            && previous.steps[*index].state != PublicationStepState::Succeeded);
+    let same_progress = changed_steps.is_empty() && previous.resource == next.resource;
+
+    let valid = match next.state {
+        PublicationState::Pending => false,
+        PublicationState::Publishing => {
+            next.cancellation_reason.is_none()
+                && match previous.state {
+                    PublicationState::Pending => same_progress,
+                    PublicationState::Publishing => {
+                        same_progress
+                            || one_current_step_changed
+                                && next.steps[changed_steps[0]].state
+                                    != PublicationStepState::Rejected
+                    }
+                    PublicationState::Published
+                    | PublicationState::Cancelled
+                    | PublicationState::Failed => false,
+                }
+        }
+        PublicationState::Published => {
+            previous.state == PublicationState::Publishing
+                && same_progress
+                && next.cancellation_reason.is_none()
+        }
+        PublicationState::Cancelled => {
+            matches!(
+                previous.state,
+                PublicationState::Pending | PublicationState::Publishing
+            ) && same_progress
+                && previous.cancellation_reason.is_none()
+                && next.cancellation_reason.is_some()
+        }
+        PublicationState::Failed => {
+            previous.state == PublicationState::Publishing
+                && one_current_step_changed
+                && next.steps[changed_steps[0]].state == PublicationStepState::Rejected
+                && next.cancellation_reason.is_none()
+        }
+    };
+    if !valid {
+        return Err(PublicationError::corrupt(
+            "publication journal state transition is invalid",
+        ));
+    }
+    Ok(())
+}
+
+fn publication_step_detail(step: &PublicationStep) -> PublicationStepDetail {
+    PublicationStepDetail {
+        kind: step.operation.kind(),
+        state: step.state,
+        outcome_code: step.code.clone(),
+        resource: step.resource.clone(),
+        remote_write_performed: step.remote_write_performed,
+    }
 }
 
 fn publication_intent_sha256(

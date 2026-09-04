@@ -54,7 +54,8 @@ use crate::{
     ProductSessionServiceError, ProductSessionServiceErrorCode, product_session_command_context,
 };
 
-const CHAT_INTERACTION_SCHEMA_VERSION: u8 = 1;
+const LEGACY_CHAT_INTERACTION_SCHEMA_VERSION: u8 = 1;
+const CHAT_INTERACTION_SCHEMA_VERSION: u8 = 2;
 const CHAT_INTERACTION_RECEIPT_TOPIC: &str = "chat-interaction.receipt.internal.v1";
 const CHAT_INTERACTION_INVALIDATED_TOPIC: &str = "chat-interactions.invalidated.v1";
 const APPROVAL_CHANGED_TOPIC: &str = "approval.changed.v1";
@@ -723,8 +724,15 @@ impl<'storage> ChatInteractionService<'storage> {
         else {
             return Ok(PersistedChatInteractionCatalog::default());
         };
-        let catalog: PersistedChatInteractionCatalog = serde_json::from_slice(&state.payload)
-            .map_err(|error| {
+        let mut encoded: serde_json::Value =
+            serde_json::from_slice(&state.payload).map_err(|error| {
+                corrupt(format!(
+                    "Chat interaction catalog cannot be decoded: {error}"
+                ))
+            })?;
+        migrate_persisted_chat_interaction_catalog(&mut encoded)?;
+        let catalog: PersistedChatInteractionCatalog =
+            serde_json::from_value(encoded).map_err(|error| {
                 corrupt(format!(
                     "Chat interaction catalog cannot be decoded: {error}"
                 ))
@@ -1570,12 +1578,112 @@ fn decode_internal_receipt(
     if matching.next().is_some() {
         return Err(corrupt("Chat interaction receipt event is duplicated"));
     }
-    let decoded: PersistedReceiptEvent = serde_json::from_slice(&event.payload)
+    let mut encoded: serde_json::Value = serde_json::from_slice(&event.payload)
+        .map_err(|error| corrupt(format!("Chat interaction receipt is invalid: {error}")))?;
+    migrate_persisted_chat_interaction_receipt(&mut encoded)?;
+    let decoded: PersistedReceiptEvent = serde_json::from_value(encoded)
         .map_err(|error| corrupt(format!("Chat interaction receipt is invalid: {error}")))?;
     if decoded.schema_version != CHAT_INTERACTION_SCHEMA_VERSION {
         return Err(corrupt("Chat interaction receipt schema is invalid"));
     }
     Ok(decoded)
+}
+
+fn migrate_persisted_chat_interaction_catalog(
+    catalog: &mut serde_json::Value,
+) -> Result<(), ChatInteractionServiceError> {
+    let legacy = migrate_persisted_schema_version(catalog, "catalog")?;
+    let Some(events) = catalog
+        .get_mut("snapshot")
+        .and_then(|snapshot| snapshot.get_mut("events"))
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return Ok(());
+    };
+    for event in events {
+        if event.get("kind").and_then(serde_json::Value::as_str) != Some("approval_recorded") {
+            continue;
+        }
+        if let Some(projection) = event
+            .get_mut("projection")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            migrate_persisted_approval_projection(projection, legacy)?;
+        }
+    }
+    Ok(())
+}
+
+fn migrate_persisted_chat_interaction_receipt(
+    receipt: &mut serde_json::Value,
+) -> Result<(), ChatInteractionServiceError> {
+    let legacy = migrate_persisted_schema_version(receipt, "receipt")?;
+    if let Some(approval) = receipt
+        .get_mut("approval")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        migrate_persisted_approval_projection(approval, legacy)?;
+    }
+    Ok(())
+}
+
+fn migrate_persisted_schema_version(
+    value: &mut serde_json::Value,
+    label: &'static str,
+) -> Result<bool, ChatInteractionServiceError> {
+    let Some(version) = value
+        .get("schemaVersion")
+        .and_then(serde_json::Value::as_u64)
+    else {
+        return Err(corrupt(format!(
+            "Chat interaction {label} has no schema version"
+        )));
+    };
+    if version == u64::from(CHAT_INTERACTION_SCHEMA_VERSION) {
+        return Ok(false);
+    }
+    if version != u64::from(LEGACY_CHAT_INTERACTION_SCHEMA_VERSION) {
+        return Err(corrupt(format!(
+            "Chat interaction {label} schema is invalid"
+        )));
+    }
+    value["schemaVersion"] = serde_json::json!(CHAT_INTERACTION_SCHEMA_VERSION);
+    Ok(true)
+}
+
+fn migrate_persisted_approval_projection(
+    projection: &mut serde_json::Map<String, serde_json::Value>,
+    legacy: bool,
+) -> Result<(), ChatInteractionServiceError> {
+    const FIELDS: [&str; 3] = ["category", "effectiveDecisionScope", "sanitizedDetail"];
+    let present = FIELDS
+        .iter()
+        .filter(|field| projection.contains_key(**field))
+        .count();
+    if present == FIELDS.len() && !legacy {
+        return Ok(());
+    }
+    if present != 0 || !legacy {
+        return Err(corrupt(
+            "persisted Approval projection has an incomplete read-detail contract",
+        ));
+    }
+    projection.insert(
+        "category".to_owned(),
+        serde_json::Value::String("unavailable".to_owned()),
+    );
+    projection.insert(
+        "effectiveDecisionScope".to_owned(),
+        serde_json::Value::String("once".to_owned()),
+    );
+    projection.insert(
+        "sanitizedDetail".to_owned(),
+        serde_json::json!({
+            "kind": "unavailable",
+            "reason": "source_not_recorded"
+        }),
+    );
+    Ok(())
 }
 
 fn internal_receipt_event(

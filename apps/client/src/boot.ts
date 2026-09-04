@@ -9,13 +9,11 @@ function rootElement(): HTMLElement {
   return root
 }
 
-function renderStartupFailure(root: HTMLElement, error: unknown): void {
+function renderStartupFailure(root: HTMLElement): void {
   const message = document.createElement('p')
   message.className = 'wwc-startup-error'
   message.setAttribute('role', 'alert')
-  message.textContent = error instanceof Error
-    ? error.message
-    : 'WinWinCode Client could not read its runtime configuration.'
+  message.textContent = 'WinWinCode Client could not read its runtime configuration. Error code: CLIENT_STARTUP_FAILURE.'
   root.replaceChildren(message)
 }
 
@@ -23,6 +21,6 @@ const root = rootElement()
 try {
   const config = readWinWinCodeClientRuntimeConfig()
   mountWinWinCodeClient({ root, serverUrl: config.serverUrl })
-} catch (error) {
-  renderStartupFailure(root, error)
+} catch {
+  renderStartupFailure(root)
 }

@@ -395,8 +395,25 @@ test('browser fake renders bounded operations, pagination, permissions, and no s
     'raw integration secret',
     'raw permission record',
   ]) assert.equal(text.includes(hidden), false, hidden)
+  assert.equal(byClass(fixture.rootElement, 'wwc-enterprise-operations').dataset.wwcPage, 'management')
+  assert.equal(
+    byClass(fixture.rootElement, 'wwc-enterprise-operations-heading').dataset.wwcComponent,
+    'page-header',
+  )
+  assert.equal(
+    byClass(fixture.rootElement, 'wwc-enterprise-operations-status').dataset.wwcComponent,
+    'status-badge',
+  )
   assert.equal(byClass(fixture.rootElement, 'wwc-enterprise-operations-status').attributes.get('role'), 'status')
   assert.equal(byClass(fixture.rootElement, 'wwc-enterprise-operations-error').attributes.get('role'), 'alert')
+  assert.equal(byClass(fixture.rootElement, 'wwc-enterprise-operations-retry').dataset.wwcComponent, 'button')
+  for (const className of [
+    'wwc-enterprise-policies',
+    'wwc-enterprise-fleets',
+    'wwc-enterprise-usage',
+    'wwc-enterprise-audit',
+    'wwc-enterprise-integrations',
+  ]) assert.equal(byClass(fixture.rootElement, className).dataset.wwcComponent, 'panel')
   fixture.mounted.close()
 })
 
@@ -430,6 +447,10 @@ test('browser fake applies Policy dry-run, fleet drain, usage refresh, audit exp
   await waitFor(() => fixture.model.state.areas.fleet.revision === 3, 'fleet drain')
   assert.equal(fixture.client.commands[1].payload.action, 'drain')
   assert.equal(fixture.client.commands[1].expectedRevision, 2)
+  assert.equal(
+    byClass(fixture.rootElement, 'wwc-enterprise-fleet-drain').dataset.variant,
+    'destructive',
+  )
 
   const usageQueries = fixture.client.queries.filter(
     request => request.query === 'enterprise.usage.list',

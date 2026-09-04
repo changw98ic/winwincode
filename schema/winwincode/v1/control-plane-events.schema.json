@@ -40,6 +40,7 @@
         "product-session.message.appended.v1",
         "runtime-projection.invalidated.v1",
         "worker-health.changed.v1",
+        "model-route-availability.invalidated.v1",
         "enterprise-organization.invalidated.v1",
         "enterprise-membership.invalidated.v1",
         "enterprise-team.invalidated.v1",
@@ -621,6 +622,9 @@
         },
         {
           "$ref": "#/$defs/ControlPlaneWebSocketWorkerHealthChangedEvent"
+        },
+        {
+          "$ref": "#/$defs/ControlPlaneWebSocketModelRouteAvailabilityInvalidatedEvent"
         },
         {
           "$ref": "#/$defs/ControlPlaneWebSocketActivityRecordedEvent"
@@ -1518,6 +1522,51 @@
         }
       },
       "description": "Secret-safe role invalidation. The browser reloads only the named bounded enterprise query."
+    },
+    "ControlPlaneWebSocketModelRouteAvailabilityListReloadQuery": {
+      "const": "model.route.availability.list"
+    },
+    "ControlPlaneWebSocketModelRouteAvailabilityInvalidationSource": {
+      "type": "string",
+      "enum": [
+        "settings",
+        "provider_catalog",
+        "credential_reference",
+        "request_pool"
+      ]
+    },
+    "ControlPlaneWebSocketModelRouteAvailabilityInvalidatedEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "source",
+        "sourceRevision",
+        "reloadQueries"
+      ],
+      "properties": {
+        "type": {
+          "const": "model-route-availability.invalidated.v1"
+        },
+        "source": {
+          "$ref": "#/$defs/ControlPlaneWebSocketModelRouteAvailabilityInvalidationSource"
+        },
+        "sourceRevision": {
+          "$ref": "./domain.schema.json#/$defs/Revision"
+        },
+        "reloadQueries": {
+          "type": "array",
+          "prefixItems": [
+            {
+              "$ref": "#/$defs/ControlPlaneWebSocketModelRouteAvailabilityListReloadQuery"
+            }
+          ],
+          "items": false,
+          "minItems": 1,
+          "maxItems": 1
+        }
+      },
+      "description": "Secret-safe ModelRoute invalidation. The browser reloads the sole server-joined availability query and never receives Catalog, Credential, or request-pool internals."
     }
   },
   "x-winwincode-transports": {
@@ -1647,6 +1696,20 @@
           "query": "enterprise.integration.list"
         }
       ]
+    },
+    "modelRouteAvailabilityInvalidation": {
+      "eventType": "model-route-availability.invalidated.v1",
+      "sources": [
+        "settings",
+        "provider_catalog",
+        "credential_reference",
+        "request_pool"
+      ],
+      "payload": "source category, source revision, and exact reload query only",
+      "reloadQuery": "model.route.availability.list",
+      "credentialMaterialAllowed": false,
+      "providerCatalogPayloadAllowed": false,
+      "requestPoolDetailsAllowed": false
     }
   }
 }

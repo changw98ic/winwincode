@@ -111,6 +111,7 @@ fn register_provider(storage: &mut SqliteStorage, request_seed: u64, expected_ve
                 credential_reference_id: CredentialReferenceId(id("crd", 1)),
                 models: vec![model_capability()],
             },
+            Instant("2026-09-02T00:00:00.000Z".to_owned()),
         )
         .expect("register Provider");
 }
@@ -153,6 +154,7 @@ fn configure_session(storage: &mut SqliteStorage, session_seed: u64) {
                 default_model_route: Some(route()),
                 worker_concurrency_limit: 100,
             },
+            Instant("2026-09-02T00:00:00.000Z".to_owned()),
         )
         .expect("configure session route");
 }

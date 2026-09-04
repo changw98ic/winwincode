@@ -1,0 +1,20 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "declaration": false,
+    "declarationMap": false,
+    "lib": [
+      "DOM",
+      "DOM.Iterable",
+      "ES2023"
+    ],
+    "noEmit": false,
+    "outDir": "../../.cache/attention-center-tests",
+    "rootDir": "src",
+    "sourceMap": false,
+    "tsBuildInfoFile": "../../.cache/tsbuild/attention-center-tests.tsbuildinfo"
+  },
+  "include": [
+    "src/**/*.ts"
+  ]
+}

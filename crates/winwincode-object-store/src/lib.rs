@@ -17,7 +17,10 @@ use winwincode_backup::{
     BackupSnapshotSourceError,
 };
 use winwincode_domain::{ArtifactId, Sha256Digest};
-use winwincode_storage::{ArtifactError, ArtifactErrorKind, ArtifactObjectStore};
+use winwincode_storage::{
+    ArtifactError, ArtifactErrorKind, ArtifactObjectRange, ArtifactObjectStore,
+    MAX_ARTIFACT_RANGE_BYTES,
+};
 
 const INVENTORY_SCHEMA: &str = "winwincode.s3-artifact-inventory.v1";
 const MAX_ENDPOINT_BYTES: usize = 2_048;
@@ -833,6 +836,50 @@ impl ArtifactObjectStore for S3ArtifactObjectStore {
             ));
         }
         Ok(Some(response.body))
+    }
+
+    fn read_range(
+        &self,
+        digest: &Sha256Digest,
+        size_bytes: u64,
+        offset: u64,
+        length: u64,
+    ) -> Result<Option<ArtifactObjectRange>, ArtifactError> {
+        digest_hex(digest)?;
+        if length == 0
+            || length > MAX_ARTIFACT_RANGE_BYTES
+            || size_bytes > self.config.max_object_bytes as u64
+        {
+            return Err(invalid("S3 Artifact range authority is invalid"));
+        }
+        let requested_end = offset
+            .checked_add(length)
+            .ok_or_else(|| invalid("S3 Artifact range overflows"))?;
+        if offset >= size_bytes {
+            return Err(invalid("S3 Artifact range starts outside the object"));
+        }
+        let exact_length = requested_end.min(size_bytes) - offset;
+        let Some(range) = S3ArtifactObjectStore::read_range(self, digest, offset, exact_length)?
+        else {
+            return Ok(None);
+        };
+        if range.offset() != offset
+            || range.total_size() != size_bytes
+            || range.digest() != digest
+            || range.bytes().len() as u64 != exact_length
+        {
+            return Err(corrupt(
+                "S3 Artifact range disagrees with catalog authority",
+            ));
+        }
+        ArtifactObjectRange::verified(
+            range.bytes().to_vec(),
+            range.offset(),
+            range.total_size(),
+            range.digest().clone(),
+        )
+        .map(Some)
+        .map_err(|_| corrupt("S3 Artifact range disagrees with catalog authority"))
     }
 
     fn delete(&mut self, digest: &Sha256Digest) -> Result<(), ArtifactError> {

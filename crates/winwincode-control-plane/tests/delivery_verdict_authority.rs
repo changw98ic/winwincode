@@ -12,12 +12,24 @@ use serde::Serialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use winwincode_api::generated::{
-    Actor, DeliverySubmitVerdictCommand, DeliverySubmitVerdictCommandCommand,
-    DeliverySubmitVerdictPayload, RepositoryScope, RepositoryScopeKind, UserActor, UserActorKind,
+    Actor, CandidateAvailability, CandidateDiffGetParameters, CandidateDiffGetQuery,
+    CandidateDiffGetQueryQuery, CandidateFileEncoding, CandidateFileStatus,
+    CandidateFilesListParameters, CandidateFilesListQuery, CandidateFilesListQueryQuery,
+    CandidateHistoricalReviewGetParameters, CandidateHistoricalReviewGetQuery,
+    CandidateHistoricalReviewGetQueryQuery, CandidateHistoryListParameters,
+    CandidateHistoryListQuery, CandidateHistoryListQueryQuery, DeliveryGetParameters,
+    DeliveryGetQuery, DeliveryGetQueryQuery, DeliverySubmitVerdictCommand,
+    DeliverySubmitVerdictCommandCommand, DeliverySubmitVerdictPayload,
+    EvidenceArtifactAccessProjection, EvidenceArtifactContentGetParameters,
+    EvidenceArtifactContentGetQuery, EvidenceArtifactContentGetQueryQuery,
+    EvidenceArtifactContentResult, EvidenceArtifactKind, EvidenceGetQuery, EvidenceGetQueryQuery,
+    EvidenceOutcome, EvidenceReadBinding, PageRequest, QueryResultResponse, RepositoryScope,
+    RepositoryScopeKind, UserActor, UserActorKind,
 };
 use winwincode_control_plane::{
     ControlPlane, ControlPlaneConfig, EventPublishError, EventPublisher,
     LocalDeliveryAdapterConfig, OutboxEvent,
+    strongflow_projection::{StrongFlowProjectionError, StrongFlowProjectionQueryPort},
 };
 use winwincode_delivery::{
     application::{
@@ -40,9 +52,10 @@ use winwincode_delivery::{
     },
 };
 use winwincode_domain::{
-    ArtifactId, DeliveryId, ExecutionAckSequence, ExecutionEventId, ExecutionMessageId,
-    ExecutionSequence, Instant, OrganizationId, ProductSessionId, ProjectId, RepositoryId,
-    RequestId, Revision, SchemaVersion, Sha256Digest, UserId, WorkspaceId,
+    ArtifactId, ControlPlaneEventId, DeliveryId, ExecutionAckSequence, ExecutionEventId,
+    ExecutionMessageId, ExecutionSequence, Instant, OrganizationId, ProductSessionId, ProjectId,
+    RepositoryId, RequestId, Revision, SchemaVersion, Sha256Digest, SystemActorId, UserId,
+    WorkspaceId,
 };
 use winwincode_execution_port::generated::{
     ArtifactReference, EncodedPayload, ExecutionEventCategory, ExecutionEventRecord,
@@ -51,9 +64,12 @@ use winwincode_execution_port::generated::{
 use winwincode_storage::{
     AggregateJournalKey, AggregateJournalPublication, AggregateJournalRecord, ArtifactAccess,
     ArtifactChunk, ArtifactMeteringAttribution, ArtifactOpen, ArtifactProvenance,
-    ArtifactRetention, ArtifactStore, CandidateSourceManifest, LocalArtifactObjectStore,
-    LocalGitSourceResolver, NewOutboxEvent, ProductStateStorage, PublicEventScope, ReceiptActorKey,
-    ReceiptIdentity, ReceiptScopeKey, SqliteStorage, StateCommit, StateMutation, receipt_scope_key,
+    ArtifactRetention, ArtifactStore, CandidateGitPinReceipt, CandidateGitReleaseAuthority,
+    CandidateGitTerminalOutcome, CandidateSourceManifest, LocalArtifactObjectStore,
+    LocalGitSourceResolver, NewOutboxEvent, ProductStateStorage, ProjectionEventStream,
+    PublicEventActor, PublicEventScope, PublicEventSource, ReceiptActorKey, ReceiptIdentity,
+    ReceiptScopeKey, SqliteStorage, StateCommit, StateMutation, receipt_actor_key,
+    receipt_scope_key,
 };
 
 static NEXT_ROOT: AtomicU64 = AtomicU64::new(1);
@@ -67,6 +83,555 @@ enum RuntimeFixture {
     LaterWriterFailed,
     AmbiguousWriter,
     AmbiguousVerification,
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn candidate_file_and_diff_queries_are_exact_bounded_and_secret_safe() {
+    let seeded = seed_verdict("candidate-review-read", RuntimeFixture::Valid);
+    let host = start(&seeded);
+    let actor = Actor::UserActor(UserActor {
+        id: UserId(canonical_id("usr", 77)),
+        kind: UserActorKind::User,
+    });
+    let delivery_query = DeliveryGetQuery {
+        actor: actor.clone(),
+        page: PageRequest {
+            cursor: None,
+            limit: 20,
+        },
+        parameters: DeliveryGetParameters {
+            at_cursor: None,
+            delivery_id: seeded.delivery.id().clone(),
+        },
+        query: DeliveryGetQueryQuery::DeliveryGet,
+        request_id: RequestId(canonical_id("req", 920)),
+        schema_version: SchemaVersion::WinwincodeV1,
+        scope: seeded.scope.clone(),
+    };
+    let QueryResultResponse::DeliveryGetResultResponse(delivery_response) =
+        host.delivery_get(&delivery_query).expect("Delivery detail")
+    else {
+        panic!("delivery.get returned another response kind");
+    };
+    let candidate = delivery_response
+        .result
+        .current_candidate
+        .expect("current Candidate");
+    let cursor = delivery_response.result.read_cursor;
+    let files_query = CandidateFilesListQuery {
+        actor: actor.clone(),
+        page: PageRequest {
+            cursor: None,
+            limit: 1,
+        },
+        parameters: CandidateFilesListParameters {
+            at_cursor: cursor.clone(),
+            candidate_ref: candidate.candidate_ref.clone(),
+            candidate_tree_id: candidate.candidate_tree_id.clone(),
+            delivery_id: seeded.delivery.id().clone(),
+            diff_sha256: candidate.diff_sha256.clone(),
+            path_prefix: Some("src/".to_owned()),
+            read_page_limit: 20,
+            statuses: Vec::new(),
+        },
+        query: CandidateFilesListQueryQuery::CandidateFilesList,
+        request_id: RequestId(canonical_id("req", 921)),
+        schema_version: SchemaVersion::WinwincodeV1,
+        scope: seeded.scope.clone(),
+    };
+    let QueryResultResponse::CandidateFilesListResultResponse(first_page) = host
+        .candidate_files_list(&files_query)
+        .expect("first Candidate file page")
+    else {
+        panic!("candidate.files.list returned another response kind");
+    };
+    assert_eq!(first_page.result.items.len(), 1);
+    assert_eq!(
+        first_page.result.items[0].encoding,
+        CandidateFileEncoding::Utf8
+    );
+    assert!(first_page.page.has_more);
+    assert_eq!(first_page.result.read_cursor, cursor);
+    let mut second_query = files_query.clone();
+    second_query.page.cursor = first_page.page.next_cursor;
+    second_query.request_id = RequestId(canonical_id("req", 922));
+    let QueryResultResponse::CandidateFilesListResultResponse(second_page) = host
+        .candidate_files_list(&second_query)
+        .expect("second Candidate file page")
+    else {
+        panic!("candidate.files.list returned another response kind");
+    };
+    assert_eq!(second_page.result.items.len(), 1);
+    assert!(!second_page.page.has_more);
+    let paths = [
+        first_page.result.items[0].path.as_str(),
+        second_page.result.items[0].path.as_str(),
+    ];
+    assert!(paths.contains(&"src/extra.rs"));
+    assert!(paths.contains(&"src/lib.rs"));
+    let mut changed_filter = second_query;
+    changed_filter.parameters.path_prefix = Some("tests/".to_owned());
+    assert!(matches!(
+        host.candidate_files_list(&changed_filter),
+        Err(StrongFlowProjectionError::InvalidRequest(_))
+    ));
+
+    let diff_query = CandidateDiffGetQuery {
+        actor,
+        page: PageRequest {
+            cursor: None,
+            limit: 1,
+        },
+        parameters: CandidateDiffGetParameters {
+            at_cursor: cursor,
+            candidate_ref: candidate.candidate_ref.clone(),
+            candidate_tree_id: candidate.candidate_tree_id.clone(),
+            delivery_id: seeded.delivery.id().clone(),
+            diff_sha256: candidate.diff_sha256.clone(),
+            length: 32,
+            offset: 0,
+            path: "src/lib.rs".to_owned(),
+            read_page_limit: 20,
+        },
+        query: CandidateDiffGetQueryQuery::CandidateDiffGet,
+        request_id: RequestId(canonical_id("req", 923)),
+        schema_version: SchemaVersion::WinwincodeV1,
+        scope: seeded.scope.clone(),
+    };
+    let QueryResultResponse::CandidateDiffGetResultResponse(diff) = host
+        .candidate_diff_get(&diff_query)
+        .expect("bounded Candidate diff")
+    else {
+        panic!("candidate.diff.get returned another response kind");
+    };
+    assert_eq!(diff.result.path, "src/lib.rs");
+    assert_eq!(diff.result.status, CandidateFileStatus::Modified);
+    assert_eq!(diff.result.content_encoding, CandidateFileEncoding::Utf8);
+    assert_eq!(diff.result.returned_bytes, 32);
+    assert!(diff.result.next_offset.is_some());
+    assert!(!diff.result.data_base64.contains("candidate()"));
+
+    let mut stale = diff_query.clone();
+    stale.parameters.diff_sha256 = Sha256Digest(format!("sha256:{}", "0".repeat(64)));
+    assert!(matches!(
+        host.candidate_diff_get(&stale),
+        Err(StrongFlowProjectionError::CandidateStale(_))
+    ));
+    let mut traversal = diff_query.clone();
+    traversal.parameters.path = "../secret".to_owned();
+    assert!(matches!(
+        host.candidate_diff_get(&traversal),
+        Err(StrongFlowProjectionError::InvalidRequest(_))
+    ));
+    let mut foreign_scope = diff_query.clone();
+    foreign_scope.scope.repository_id = RepositoryId(canonical_id("rep", 88));
+    assert!(matches!(
+        host.candidate_diff_get(&foreign_scope),
+        Err(StrongFlowProjectionError::PermissionDenied(_))
+    ));
+    let mut over_limit = diff_query;
+    over_limit.parameters.length = 262_145;
+    assert!(matches!(
+        host.candidate_diff_get(&over_limit),
+        Err(StrongFlowProjectionError::InvalidRequest(_))
+    ));
+
+    host.shutdown().expect("Candidate review shutdown");
+    cleanup(seeded);
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn evidence_detail_rebuilds_outcome_and_artifact_access_stays_closed() {
+    let seeded = seed_verdict("evidence-detail-read", RuntimeFixture::Valid);
+    let mut host = start(&seeded);
+    host.delivery_submit_verdict(&verdict_command(&seeded, 924))
+        .expect("persist accepted Evidence");
+    let actor = Actor::UserActor(UserActor {
+        id: UserId(canonical_id("usr", 924)),
+        kind: UserActorKind::User,
+    });
+    let QueryResultResponse::DeliveryGetResultResponse(delivery) = host
+        .delivery_get(&DeliveryGetQuery {
+            actor: actor.clone(),
+            page: PageRequest {
+                cursor: None,
+                limit: 20,
+            },
+            parameters: DeliveryGetParameters {
+                at_cursor: None,
+                delivery_id: seeded.delivery.id().clone(),
+            },
+            query: DeliveryGetQueryQuery::DeliveryGet,
+            request_id: RequestId(canonical_id("req", 924)),
+            schema_version: SchemaVersion::WinwincodeV1,
+            scope: seeded.scope.clone(),
+        })
+        .expect("Delivery Evidence cut")
+    else {
+        panic!("delivery.get returned another response kind");
+    };
+    let evidence = delivery
+        .result
+        .evidence
+        .first()
+        .expect("accepted Evidence")
+        .clone();
+    let cursor = delivery.result.read_cursor;
+    let query = EvidenceGetQuery {
+        actor: actor.clone(),
+        page: PageRequest {
+            cursor: None,
+            limit: 1,
+        },
+        parameters: EvidenceReadBinding {
+            at_cursor: cursor.clone(),
+            candidate_ref: evidence.candidate_ref.clone(),
+            delivery_id: seeded.delivery.id().clone(),
+            evidence_id: evidence.id.clone(),
+            read_page_limit: 20,
+            session_binding_id: evidence.session_binding_id.clone(),
+            source_ref: evidence.source_ref.clone(),
+            stage_run_id: evidence.stage_run_id.clone(),
+            type_value: evidence.type_value.clone(),
+        },
+        query: EvidenceGetQueryQuery::EvidenceGet,
+        request_id: RequestId(canonical_id("req", 925)),
+        schema_version: SchemaVersion::WinwincodeV1,
+        scope: seeded.scope.clone(),
+    };
+    let QueryResultResponse::EvidenceGetResultResponse(detail) =
+        host.evidence_get(&query).expect("exact Evidence detail")
+    else {
+        panic!("evidence.get returned another response kind");
+    };
+    assert_eq!(detail.result.evidence, evidence);
+    assert_eq!(detail.result.read_cursor, cursor);
+    assert!(detail.result.evidence.id.0.starts_with("evd_"));
+    assert_eq!(detail.result.evidence.id.0.len(), 30);
+    assert!(
+        !serde_json::to_string(&detail)
+            .expect("serialize Evidence detail")
+            .contains("evidence:sha256:")
+    );
+    assert!(matches!(
+        detail.result.outcome,
+        EvidenceOutcome::Observed | EvidenceOutcome::Succeeded
+    ));
+    let EvidenceArtifactAccessProjection::EvidenceArtifactUnavailableProjection(access) =
+        detail.result.artifact_access
+    else {
+        panic!("unlinked Evidence exposed Artifact access");
+    };
+    assert_eq!(access.reason, "no_authoritative_link");
+
+    let content_query = EvidenceArtifactContentGetQuery {
+        actor,
+        page: PageRequest {
+            cursor: None,
+            limit: 1,
+        },
+        parameters: EvidenceArtifactContentGetParameters {
+            artifact_digest: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
+            artifact_id: canonical_id("art", 925),
+            artifact_kind: EvidenceArtifactKind::Log,
+            artifact_media_type: "text/plain".to_owned(),
+            artifact_size_bytes: 1_000_000,
+            evidence: EvidenceReadBinding {
+                at_cursor: cursor,
+                candidate_ref: evidence.candidate_ref.clone(),
+                delivery_id: seeded.delivery.id().clone(),
+                evidence_id: evidence.id.clone(),
+                read_page_limit: 20,
+                session_binding_id: evidence.session_binding_id.clone(),
+                source_ref: evidence.source_ref.clone(),
+                stage_run_id: evidence.stage_run_id.clone(),
+                type_value: evidence.type_value.clone(),
+            },
+            length: 262_144,
+            offset: 0,
+        },
+        query: EvidenceArtifactContentGetQueryQuery::EvidenceArtifactContentGet,
+        request_id: RequestId(canonical_id("req", 926)),
+        schema_version: SchemaVersion::WinwincodeV1,
+        scope: seeded.scope.clone(),
+    };
+    let QueryResultResponse::EvidenceArtifactContentGetResultResponse(content) = host
+        .evidence_artifact_content_get(&content_query)
+        .expect("closed Evidence Artifact content")
+    else {
+        panic!("evidence.artifact.content.get returned another response kind");
+    };
+    let EvidenceArtifactContentResult::EvidenceArtifactContentUnavailableProjection(content) =
+        content.result
+    else {
+        panic!("unlinked Evidence returned Artifact bytes");
+    };
+    assert_eq!(content.reason, "no_authoritative_link");
+    let public_json = serde_json::to_string(&content).expect("serialize safe response");
+    for forbidden in [
+        "leaseId",
+        "fencingToken",
+        "workerId",
+        "storeKey",
+        "objectKey",
+        "path",
+        "locator",
+        "credential",
+    ] {
+        assert!(!public_json.contains(forbidden), "leaked {forbidden}");
+    }
+
+    let mut stale = query.clone();
+    stale.parameters.stage_run_id = winwincode_domain::StageRunId(canonical_id("run", 999));
+    assert!(matches!(
+        host.evidence_get(&stale),
+        Err(StrongFlowProjectionError::CandidateStale(_))
+    ));
+    let mut stale_candidate = query.clone();
+    stale_candidate.parameters.candidate_ref = format!("git-candidate:sha256:{}", "0".repeat(64));
+    assert!(matches!(
+        host.evidence_get(&stale_candidate),
+        Err(StrongFlowProjectionError::CandidateStale(_))
+    ));
+    let mut stale_session = query.clone();
+    stale_session.parameters.session_binding_id = canonical_id("sbn", 999);
+    assert!(matches!(
+        host.evidence_get(&stale_session),
+        Err(StrongFlowProjectionError::CandidateStale(_))
+    ));
+    let mut stale_source = query.clone();
+    stale_source.parameters.source_ref = "foreign:runtime:source".to_owned();
+    assert!(matches!(
+        host.evidence_get(&stale_source),
+        Err(StrongFlowProjectionError::CandidateStale(_))
+    ));
+    let mut unknown = query.clone();
+    unknown.parameters.evidence_id = winwincode_domain::EvidenceId(canonical_id("evd", 999));
+    assert!(matches!(
+        host.evidence_get(&unknown),
+        Err(StrongFlowProjectionError::ResourceNotFound(_))
+    ));
+    let mut foreign = query.clone();
+    foreign.scope.repository_id = RepositoryId(canonical_id("rep", 999));
+    assert!(matches!(
+        host.evidence_get(&foreign),
+        Err(StrongFlowProjectionError::PermissionDenied(_))
+    ));
+    let mut oversized = content_query.clone();
+    oversized.parameters.length = 262_145;
+    assert!(matches!(
+        host.evidence_artifact_content_get(&oversized),
+        Err(StrongFlowProjectionError::InvalidRequest(_))
+    ));
+    let mut noncanonical_artifact = content_query.clone();
+    noncanonical_artifact.parameters.artifact_id = "../../private/object".to_owned();
+    assert!(matches!(
+        host.evidence_artifact_content_get(&noncanonical_artifact),
+        Err(StrongFlowProjectionError::InvalidRequest(_))
+    ));
+    let mut invalid_digest = content_query.clone();
+    invalid_digest.parameters.artifact_digest = Sha256Digest("sha256:UPPERCASE".to_owned());
+    assert!(matches!(
+        host.evidence_artifact_content_get(&invalid_digest),
+        Err(StrongFlowProjectionError::InvalidRequest(_))
+    ));
+
+    host.shutdown().expect("Evidence detail first shutdown");
+    let restarted = start(&seeded);
+    let QueryResultResponse::EvidenceGetResultResponse(replayed) = restarted
+        .evidence_get(&query)
+        .expect("restart exact Evidence detail")
+    else {
+        panic!("restart evidence.get returned another response kind");
+    };
+    assert_eq!(replayed.result.evidence, evidence);
+    restarted
+        .shutdown()
+        .expect("Evidence detail replay shutdown");
+    cleanup(seeded);
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn candidate_history_replays_original_review_and_retention_without_authorizing_it() {
+    let seeded = seed_verdict("candidate-history-read", RuntimeFixture::Valid);
+    let mut host = start(&seeded);
+    host.delivery_submit_verdict(&verdict_command(&seeded, 930))
+        .expect("persist Candidate review facts");
+    let actor = Actor::UserActor(UserActor {
+        id: UserId(canonical_id("usr", 931)),
+        kind: UserActorKind::User,
+    });
+    let QueryResultResponse::DeliveryGetResultResponse(delivery) = host
+        .delivery_get(&DeliveryGetQuery {
+            actor: actor.clone(),
+            page: PageRequest {
+                cursor: None,
+                limit: 20,
+            },
+            parameters: DeliveryGetParameters {
+                at_cursor: None,
+                delivery_id: seeded.delivery.id().clone(),
+            },
+            query: DeliveryGetQueryQuery::DeliveryGet,
+            request_id: RequestId(canonical_id("req", 931)),
+            schema_version: SchemaVersion::WinwincodeV1,
+            scope: seeded.scope.clone(),
+        })
+        .expect("Delivery review cut")
+    else {
+        panic!("delivery.get returned another response kind");
+    };
+    let cursor = delivery.result.read_cursor;
+    let candidate = delivery
+        .result
+        .current_candidate
+        .expect("reviewed Candidate");
+    let history_query = CandidateHistoryListQuery {
+        actor: actor.clone(),
+        page: PageRequest {
+            cursor: None,
+            limit: 20,
+        },
+        parameters: CandidateHistoryListParameters {
+            at_cursor: cursor.clone(),
+            delivery_id: seeded.delivery.id().clone(),
+            read_page_limit: 20,
+        },
+        query: CandidateHistoryListQueryQuery::CandidateList,
+        request_id: RequestId(canonical_id("req", 932)),
+        schema_version: SchemaVersion::WinwincodeV1,
+        scope: seeded.scope.clone(),
+    };
+    let QueryResultResponse::CandidateHistoryListResultResponse(history) = host
+        .candidate_history_list(&history_query)
+        .expect("Candidate history")
+    else {
+        panic!("candidate.list returned another response kind");
+    };
+    assert_eq!(history.result.items.len(), 1);
+    let item = &history.result.items[0];
+    assert_eq!(item.candidate, candidate);
+    assert_eq!(item.availability, CandidateAvailability::Available);
+    assert!(item.is_current_at_read_cursor);
+    assert_eq!(item.first_seen_delivery_revision, Revision(1));
+    assert_eq!(item.review_delivery_revision, Some(Revision(2)));
+
+    let review_query = CandidateHistoricalReviewGetQuery {
+        actor: actor.clone(),
+        page: PageRequest {
+            cursor: None,
+            limit: 1,
+        },
+        parameters: CandidateHistoricalReviewGetParameters {
+            at_cursor: cursor,
+            candidate_ref: candidate.candidate_ref.clone(),
+            candidate_tree_id: candidate.candidate_tree_id.clone(),
+            delivery_id: seeded.delivery.id().clone(),
+            diff_sha256: candidate.diff_sha256.clone(),
+            read_page_limit: 20,
+        },
+        query: CandidateHistoricalReviewGetQueryQuery::CandidateReviewGet,
+        request_id: RequestId(canonical_id("req", 933)),
+        schema_version: SchemaVersion::WinwincodeV1,
+        scope: seeded.scope.clone(),
+    };
+    let QueryResultResponse::CandidateHistoricalReviewGetResultResponse(review) = host
+        .candidate_historical_review_get(&review_query)
+        .expect("historical Candidate review")
+    else {
+        panic!("candidate.review.get returned another response kind");
+    };
+    assert!(review.result.display_only);
+    assert!(!review.result.current_authorization);
+    assert!(!review.result.evidence.is_empty());
+    assert!(review.result.verdict.is_some());
+    assert!(
+        review
+            .result
+            .evidence
+            .iter()
+            .all(|evidence| evidence.candidate_ref == candidate.candidate_ref)
+    );
+
+    let mut foreign = history_query.clone();
+    foreign.scope.repository_id = RepositoryId(canonical_id("rep", 999));
+    assert!(matches!(
+        host.candidate_history_list(&foreign),
+        Err(StrongFlowProjectionError::PermissionDenied(_))
+    ));
+    let mut stale = review_query.clone();
+    stale.parameters.diff_sha256 = Sha256Digest(format!("sha256:{}", "0".repeat(64)));
+    assert!(matches!(
+        host.candidate_historical_review_get(&stale),
+        Err(StrongFlowProjectionError::CandidateStale(_))
+    ));
+
+    let pin = load_candidate_pin(&seeded);
+    let base = git_text(&seeded.repository, &["rev-parse", "HEAD~1"]);
+    git(
+        &seeded.repository,
+        &["update-ref", pin.reference_name(), &base],
+    );
+    assert!(matches!(
+        host.candidate_history_list(&history_query),
+        Err(StrongFlowProjectionError::CandidateStale(_))
+    ));
+    git(
+        &seeded.repository,
+        &[
+            "update-ref",
+            pin.reference_name(),
+            pin.candidate_commit_id(),
+        ],
+    );
+
+    let moved_repository = seeded.root.join("repository-moved");
+    fs::rename(&seeded.repository, &moved_repository).expect("move repository");
+    assert!(host.candidate_history_list(&history_query).is_err());
+    fs::rename(&moved_repository, &seeded.repository).expect("restore repository");
+
+    host.shutdown().expect("history first shutdown");
+    let restarted = start(&seeded);
+    let QueryResultResponse::CandidateHistoryListResultResponse(replayed) = restarted
+        .candidate_history_list(&history_query)
+        .expect("restart Candidate history replay")
+    else {
+        panic!("candidate.list replay returned another response kind");
+    };
+    assert_eq!(
+        replayed.result.items[0].availability,
+        CandidateAvailability::Available
+    );
+
+    release_candidate_pin(&seeded);
+    let QueryResultResponse::CandidateHistoryListResultResponse(released) = restarted
+        .candidate_history_list(&history_query)
+        .expect("released Candidate history")
+    else {
+        panic!("released candidate.list returned another response kind");
+    };
+    assert_eq!(
+        released.result.items[0].availability,
+        CandidateAvailability::Released
+    );
+    let QueryResultResponse::CandidateHistoricalReviewGetResultResponse(released_review) =
+        restarted
+            .candidate_historical_review_get(&review_query)
+            .expect("released Candidate review")
+    else {
+        panic!("released candidate.review.get returned another response kind");
+    };
+    assert_eq!(
+        released_review.result.availability,
+        CandidateAvailability::Released
+    );
+    assert!(released_review.result.display_only);
+    assert!(!released_review.result.current_authorization);
+    restarted.shutdown().expect("history replay shutdown");
+    cleanup(seeded);
 }
 
 struct NoopPublisher;
@@ -356,6 +921,14 @@ fn seed_verdict_sources(
         candidate_commit,
         1_100,
     );
+    pin_writer_candidate(
+        &mut storage,
+        &mut artifacts,
+        repository,
+        &scope_key,
+        &writer_terminal,
+        &writer_source,
+    );
     if matches!(
         runtime_fixture,
         RuntimeFixture::LaterWriterFailed | RuntimeFixture::AmbiguousWriter
@@ -368,6 +941,16 @@ fn seed_verdict_sources(
         current_candidate_ref = frozen.candidate_ref().to_owned();
         writer_candidate.replace(frozen);
     }
+    seed_runtime(
+        &mut storage,
+        &scope_key,
+        delivery,
+        writer,
+        &current_candidate_ref,
+        "executor",
+        runtime_fixture,
+        1_290,
+    );
 
     for (index, role) in ["reviewer", "verifier"].into_iter().enumerate() {
         let run = delivery
@@ -411,6 +994,35 @@ fn seed_verdict_sources(
             )
         },
     )
+}
+
+fn pin_writer_candidate(
+    storage: &mut SqliteStorage,
+    artifacts: &mut ArtifactStore,
+    repository: &Path,
+    scope: &ReceiptScopeKey,
+    terminal: &DeliveryTerminalOutcomeFacts,
+    source: &winwincode_storage::ValidatedGitSourceArtifact,
+) {
+    let active = terminal.authority().active_lease();
+    let provenance = ArtifactProvenance::execution_job(
+        active.execution_job_id().clone(),
+        active.attempt(),
+        active.lease_id().clone(),
+        active.fencing_token().clone(),
+        active.worker_id().clone(),
+        active.worker_instance_id().clone(),
+        active.worker_session_id().clone(),
+    )
+    .expect("writer Artifact provenance");
+    let receipt = artifacts
+        .complete_write_receipt(scope, source.artifact().artifact_id(), &provenance)
+        .expect("writer Artifact receipt");
+    storage
+        .git_candidate_retention(repository.parent().expect("repository root"))
+        .expect("candidate retention")
+        .pin_after_final_artifact_ack(&receipt, source, &digest(61_100))
+        .expect("candidate pin");
 }
 
 fn append_failed_writer(snapshot: &mut winwincode_delivery::domain::DeliverySnapshot) {
@@ -917,20 +1529,42 @@ fn seed_delivery(root: &Path, scope: &RepositoryScope, delivery: &Delivery) {
         delivery_id: delivery.id(),
     })
     .expect("catalog JSON");
+    let public_actor = PublicEventActor::System {
+        id: SystemActorId(canonical_id("sys", 50_001)),
+    };
+    let event = NewOutboxEvent::public_projection(
+        ControlPlaneEventId(canonical_id("evt", 50_001)),
+        "delivery.changed.v1",
+        b"{}".to_vec(),
+        ProjectionEventStream::Delivery(delivery.id().clone()),
+        PublicEventScope::Repository {
+            organization_id: scope.organization_id.clone(),
+            workspace_id: scope.workspace_id.clone(),
+            project_id: scope.project_id.clone(),
+            repository_id: scope.repository_id.clone(),
+        },
+        Instant("2027-01-15T08:00:00.000Z".into()),
+        PublicEventSource::ControlPlane {
+            actor: public_actor.clone(),
+            component: "delivery-verdict-authority-test".into(),
+        },
+    )
+    .expect("public Delivery projection event");
     let mut storage = SqliteStorage::open(root).expect("seed storage");
     storage
         .commit(
             &StateCommit::new(
-                receipt_identity(repository_scope_key(scope), 50_001),
+                ReceiptIdentity::new(
+                    receipt_actor_key(&public_actor).expect("public actor key"),
+                    repository_scope_key(scope),
+                    RequestId(canonical_id("req", 50_001)),
+                )
+                .expect("public receipt identity"),
                 digest(50_001),
                 format!("delivery:{}", delivery.id().0),
                 0,
                 delivery.encode_json().expect("Delivery JSON"),
-                vec![NewOutboxEvent::internal(
-                    "fixture-delivery-seed",
-                    "fixture.seed.internal",
-                    b"{}".to_vec(),
-                )],
+                vec![event],
             )
             .with_journal_publication(publication)
             .with_state_mutation(
@@ -1028,6 +1662,49 @@ fn start(seeded: &SeededVerdict) -> ControlPlane {
     .expect("production Control Plane")
 }
 
+fn load_candidate_pin(seeded: &SeededVerdict) -> CandidateGitPinReceipt {
+    let mut storage = SqliteStorage::open(&seeded.data).expect("open retention storage");
+    let pins = {
+        let mut retention = storage
+            .git_candidate_retention(seeded.repository.parent().expect("repository root"))
+            .expect("candidate retention");
+        retention
+            .load_by_delivery(seeded.delivery.id())
+            .expect("load candidate retention")
+    };
+    Box::new(storage).close().expect("close retention storage");
+    let [pin] = pins.as_slice() else {
+        panic!("fixture must have one candidate pin");
+    };
+    pin.clone()
+}
+
+fn release_candidate_pin(seeded: &SeededVerdict) {
+    let mut storage = SqliteStorage::open(&seeded.data).expect("open release storage");
+    let authority = CandidateGitReleaseAuthority::delivery_final_without_future_reads(
+        seeded.delivery.id().clone(),
+        CandidateGitTerminalOutcome::Delivered,
+        digest(62_001),
+        digest(62_002),
+    )
+    .expect("release authority");
+    {
+        let mut retention = storage
+            .git_candidate_retention(seeded.repository.parent().expect("repository root"))
+            .expect("candidate retention");
+        let pins = retention
+            .load_by_delivery(seeded.delivery.id())
+            .expect("load candidate retention");
+        let [pin] = pins.as_slice() else {
+            panic!("fixture must have one candidate pin");
+        };
+        retention
+            .release_after_delivery_final(pin, &authority)
+            .expect("release candidate pin");
+    }
+    Box::new(storage).close().expect("close release storage");
+}
+
 fn repository_scope(seed: u64) -> RepositoryScope {
     RepositoryScope {
         kind: RepositoryScopeKind::Repository,
@@ -1086,6 +1763,11 @@ fn initialize_repository(repository: &Path) -> (String, String) {
         "pub fn base() {}\npub fn candidate() {}\n",
     )
     .expect("candidate source");
+    fs::write(
+        repository.join("src/extra.rs"),
+        "pub fn added_by_candidate() {}\n",
+    )
+    .expect("additional Candidate source");
     git(repository, &["add", "."]);
     git(repository, &["commit", "-q", "-m", "candidate"]);
     let candidate = git_text(repository, &["rev-parse", "HEAD"]);

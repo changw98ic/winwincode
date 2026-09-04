@@ -87,8 +87,15 @@ impl QueryFamily {
             | QueryName::SessionMessagesList
             | QueryName::SessionInteractionsList => Self::Session,
             QueryName::RuntimeProjectionGet => Self::Runtime,
-            QueryName::DeliveryList | QueryName::DeliveryGet => Self::Delivery,
-            QueryName::SettingsGet => Self::Settings,
+            QueryName::DeliveryList
+            | QueryName::DeliveryGet
+            | QueryName::CandidateList
+            | QueryName::CandidateReviewGet
+            | QueryName::CandidateFilesList
+            | QueryName::CandidateDiffGet
+            | QueryName::EvidenceGet
+            | QueryName::EvidenceArtifactContentGet => Self::Delivery,
+            QueryName::SettingsGet | QueryName::ModelRouteAvailabilityList => Self::Settings,
             QueryName::CredentialReferenceList | QueryName::CredentialReferenceGet => {
                 Self::CredentialReference
             }

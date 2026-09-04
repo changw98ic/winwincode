@@ -572,7 +572,7 @@ test('strict HTTP validation covers requests, responses, errors, and negative bo
     'chatMessagesPage',
     'deliveryDetailPendingReview',
     'runtimeProjection',
-    'publicationProjection',
+    'publicationDetail',
   ]) {
     assertValidation(
       validator(ajv, httpId, 'QueryResultResponse'),
@@ -582,10 +582,10 @@ test('strict HTTP validation covers requests, responses, errors, and negative bo
     )
   }
   const crossRepositoryPublication = structuredClone(
-    examples.responses.publicationProjection,
+    examples.responses.publicationDetail,
   )
-  crossRepositoryPublication.result.target.repository = 'openai/winwincode'
-  crossRepositoryPublication.result.target.headRepository = 'contributor/winwincode'
+  crossRepositoryPublication.result.summary.target.repository = 'openai/winwincode'
+  crossRepositoryPublication.result.summary.target.headRepository = 'contributor/winwincode'
   assertValidation(
     validator(ajv, httpId, 'QueryResultResponse'),
     crossRepositoryPublication,
@@ -595,7 +595,7 @@ test('strict HTTP validation covers requests, responses, errors, and negative bo
   const publicationWithoutHeadRepository = structuredClone(
     crossRepositoryPublication,
   )
-  delete publicationWithoutHeadRepository.result.target.headRepository
+  delete publicationWithoutHeadRepository.result.summary.target.headRepository
   assertValidation(
     validator(ajv, httpId, 'QueryResultResponse'),
     publicationWithoutHeadRepository,
@@ -699,24 +699,29 @@ test('strict HTTP validation covers requests, responses, errors, and negative bo
     .find(stage => stage.actorType === 'codex').sessionBinding
   partialBinding.workerSessionId = null
   const publicationWithArbitraryUrl = structuredClone(
-    examples.responses.publicationProjection,
+    examples.responses.publicationDetail,
   )
-  publicationWithArbitraryUrl.result.resourceRef =
+  publicationWithArbitraryUrl.result.summary.resourceRef =
     'https://token@example.com/repository/pull/42?access_token=secret#fragment'
   const publicationWithSecretBearingRepository = structuredClone(
-    examples.responses.publicationProjection,
+    examples.responses.publicationDetail,
   )
-  publicationWithSecretBearingRepository.result.resourceRef.repository =
+  publicationWithSecretBearingRepository.result.summary.resourceRef.repository =
     'openai/winwincode?access_token=secret'
   const publicationWithWebUrl = structuredClone(
-    examples.responses.publicationProjection,
+    examples.responses.publicationDetail,
   )
-  publicationWithWebUrl.result.resourceRef.webUrl =
+  publicationWithWebUrl.result.summary.resourceRef.webUrl =
     'https://github.com/openai/winwincode/pull/42'
   const publicationWithInvalidNumber = structuredClone(
-    examples.responses.publicationProjection,
+    examples.responses.publicationDetail,
   )
-  publicationWithInvalidNumber.result.resourceRef.number = 0
+  publicationWithInvalidNumber.result.summary.resourceRef.number = 0
+  const publicationWithRemoteUrlOutcome = structuredClone(
+    examples.responses.publicationDetail,
+  )
+  publicationWithRemoteUrlOutcome.result.steps[0].outcomeCode =
+    'https://example.com/provider-result'
   for (const [name, value] of Object.entries({
     pendingReviewWithReviewer,
     pendingReviewWithComments,
@@ -732,6 +737,7 @@ test('strict HTTP validation covers requests, responses, errors, and negative bo
     publicationWithSecretBearingRepository,
     publicationWithWebUrl,
     publicationWithInvalidNumber,
+    publicationWithRemoteUrlOutcome,
   })) {
     assertValidation(
       validator(ajv, httpId, 'QueryResultResponse'),
@@ -858,9 +864,9 @@ test('HTTP response discriminators, repository scope, and actor references fail 
   }
 
   const forgedPublicationApprover = structuredClone(
-    examples.responses.publicationProjection,
+    examples.responses.publicationDetail,
   )
-  forgedPublicationApprover.result.approvedBy = 'Authorization: Bearer secret'
+  forgedPublicationApprover.result.summary.approvedBy = 'Authorization: Bearer secret'
   assertValidation(
     queryResponse,
     forgedPublicationApprover,

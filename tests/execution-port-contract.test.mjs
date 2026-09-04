@@ -66,6 +66,7 @@ const domainDefinitions = [
   'ExecutionJobId',
   'InputRequestId',
   'Instant',
+  'InteractiveInputChoiceId',
   'InteractiveInputMode',
   'InteractiveInputValue',
   'LeaseId',
@@ -187,6 +188,29 @@ test('ExecutionPort accepts a positive sample for every message kind', () => {
   for (const message of fixture.messages) {
     assert.equal(validate(message), true, `${message.kind}: ${JSON.stringify(validate.errors)}`)
   }
+})
+
+test('interactive choices separate stable identity from canonical submitted value', () => {
+  const schema = json(schemaPath)
+  const validate = validator(schema)
+  const fixture = json(validFixturePath)
+  const input = structuredClone(fixture.messages.find(message => message.kind === 'input.request'))
+  input.choices = [
+    {
+      id: 'ich_00000000000000000000000001',
+      label: 'Continue',
+      value: 'continue',
+    },
+    {
+      id: 'ich_00000000000000000000000002',
+      label: 'Continue',
+      value: 'continue',
+    },
+  ]
+  assert.equal(validate(input), true, JSON.stringify(validate.errors))
+
+  delete input.choices[1].id
+  assert.equal(validate(input), false)
 })
 
 test('ExecutionPort seals typed stage input only on Delivery jobs', () => {

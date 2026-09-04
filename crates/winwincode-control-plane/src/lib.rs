@@ -49,6 +49,7 @@ mod model_request_pool;
 mod model_retry_planner;
 mod model_retry_settlement;
 mod model_retry_usage;
+mod model_route_availability;
 pub mod model_settings;
 mod model_stream_flow_control;
 mod observer_decision_service;
@@ -304,6 +305,9 @@ pub use model_retry_usage::{
     ModelUsageReconciliation, ModelUsageSettlementReceipt, ModelUsageSourceCursor,
     ModelUsageSourceEntry, ModelUsageSourcePage, ModelUsageTotals, SettledModelUsage,
 };
+pub use model_route_availability::{
+    ModelRouteAvailabilityError, ModelRouteAvailabilityErrorKind, ModelRouteAvailabilityService,
+};
 pub use model_settings::{
     DEFAULT_WORKER_CONCURRENCY_LIMIT, ModelSelection, ModelSettingsChange, ModelSettingsError,
     ModelSettingsErrorKind, ModelSettingsMutationReceipt, ModelSettingsProjection,
@@ -337,7 +341,8 @@ pub use product_session_service::{
     ProductSessionPersistence, ProductSessionRecord, ProductSessionService,
     ProductSessionServiceError, ProductSessionServiceErrorCode, ProductSessionTurnIntent,
     ProductSessionTurnState, ProductSessionTurnTerminalOutcome, RecordAssistantTerminalCommand,
-    SubmitChatMessageCommand, product_session_command_context, product_session_state_filters,
+    SubmitChatMessageCommand, load_product_session_authority_seal, product_session_command_context,
+    product_session_state_filters,
 };
 pub use provider_admission::{
     DurableProviderGatewayAdmission, ProviderAdmissionError, ProviderAdmissionErrorKind,
@@ -545,9 +550,6 @@ pub mod test_support {
         pub now_millis: u64,
         pub repository: RepositoryRef,
         pub source_ref: Option<DeliverySourceRef>,
-        pub scope: Vec<String>,
-        pub out_of_scope: Vec<String>,
-        pub constraints: Vec<String>,
         pub max_rework_attempts: u64,
         pub criterion_verification_methods: Vec<(String, String)>,
     }
@@ -579,9 +581,7 @@ pub mod test_support {
                 now_millis: fixture.now_millis,
                 repository: fixture.repository,
                 source_ref: fixture.source_ref,
-                scope: fixture.scope,
-                out_of_scope: fixture.out_of_scope,
-                constraints: fixture.constraints,
+                source_session_guard: None,
                 max_rework_attempts: fixture.max_rework_attempts,
                 criterion_verification_methods: fixture.criterion_verification_methods,
             }),

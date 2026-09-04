@@ -14,8 +14,9 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use winwincode_api::generated::{
-    Actor, CommandEnvelope, CredentialReferenceCreateCommand,
-    CredentialReferenceCreateCompletedResponse, CredentialReferenceCreateCompletedResponseCommand,
+    Actor, CommandEnvelope, ControlPlaneWebSocketModelRouteAvailabilityInvalidationSource,
+    CredentialReferenceCreateCommand, CredentialReferenceCreateCompletedResponse,
+    CredentialReferenceCreateCompletedResponseCommand,
     CredentialReferenceCreateCompletedResponseOutcome, CredentialReferenceDeleteCommand,
     CredentialReferenceDeleteCompletedResponse, CredentialReferenceDeleteCompletedResponseCommand,
     CredentialReferenceDeleteCompletedResponseOutcome, CredentialReferenceGetQuery,
@@ -45,7 +46,11 @@ use crate::credential_leak_gate::{
     CredentialLeakError, CredentialLeakGate, CredentialOutputBoundary,
 };
 use crate::session_binding_transaction::instant_millis;
-use crate::{StateChange, command_receipt, receipt_scope_key, storage_commit};
+use crate::{
+    StateChange, command_receipt,
+    model_route_availability::model_route_availability_invalidated_event, receipt_scope_key,
+    storage_commit,
+};
 
 const STATE_SCHEMA: &str = "winwincode.credential-reference.v1";
 const STREAM_PREFIX: &str = "credential-reference:";
@@ -1005,6 +1010,11 @@ impl<'a> CredentialReferenceService<'a> {
         let mut receipt = None;
         for attempt in 0..MAX_CATALOG_COMMIT_ATTEMPTS {
             let catalog = self.load_catalog(&prepared.scope_key)?;
+            let catalog_revision = catalog
+                .revision
+                .checked_add(1)
+                .filter(|revision| *revision <= MAX_SAFE_INTEGER)
+                .ok_or_else(CredentialReferenceError::invalid)?;
             let publication =
                 match catalog_publication(catalog, operation, next.id(), prepared.revision) {
                     Ok(publication) => publication,
@@ -1019,7 +1029,17 @@ impl<'a> CredentialReferenceService<'a> {
                         return Err(error);
                     }
                 };
-            let commit = storage_commit(command, prepared.change.clone())?
+            let invalidation = model_route_availability_invalidated_event(
+                &command.actor,
+                next.scope(),
+                ControlPlaneWebSocketModelRouteAvailabilityInvalidationSource::CredentialReference,
+                catalog_revision,
+                instant(now_millis)?,
+                command.request_id.0.as_bytes(),
+            )?;
+            let mut change = prepared.change.clone();
+            change.events.push(invalidation);
+            let commit = storage_commit(command, change)?
                 .with_pending_audit_event(prepared.pending_audit.clone())
                 .with_journal_publication(publication);
             match self.storage.commit(&commit) {

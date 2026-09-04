@@ -296,6 +296,7 @@ fn configure_storage(storage: &mut SqliteStorage) {
                     reasoning_efforts: vec!["high".to_owned()],
                 }],
             },
+            Instant("2026-09-02T00:00:00.000Z".to_owned()),
         )
         .expect("register namespace fixture Provider");
     CredentialReferenceService::new(storage)
@@ -332,6 +333,7 @@ fn configure_storage(storage: &mut SqliteStorage) {
                 default_model_route: Some(route()),
                 worker_concurrency_limit: 1,
             },
+            Instant("2026-09-02T00:00:00.000Z".to_owned()),
         )
         .expect("configure namespace fixture route");
 }

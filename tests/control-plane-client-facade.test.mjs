@@ -161,6 +161,10 @@ class FakeSocket {
     this.onopen?.({})
   }
 
+  receive(frame) {
+    this.onmessage?.({ data: JSON.stringify(frame) })
+  }
+
   closeFromServer(code) {
     this.readyState = 3
     this.onclose?.({ code })
@@ -433,6 +437,81 @@ test('subscribe derives one WS URL, reports authorization loss, and closes on ca
   controller.abort()
   assert.equal(sockets[0].readyState, 3)
   assert.equal(subscription.cursor, null)
+})
+
+test('facade forwards validated WebSocket queue hints before ordered event application', async () => {
+  const sockets = []
+  const queued = []
+  const applied = []
+  let finishFirst
+  const firstApplication = new Promise(resolvePromise => { finishFirst = resolvePromise })
+  const client = createControlPlaneClient({
+    serverUrl: 'https://control.example/root',
+    transport: {
+      createSocket() {
+        const socket = new FakeSocket()
+        sockets.push(socket)
+        return socket
+      },
+    },
+  })
+  client.subscribe({
+    subscriptionId,
+    subscription: {
+      scope,
+      stream: { kind: 'product-session', productSessionId },
+      eventTypes: ['product-session.changed.v1'],
+    },
+    onEventQueued(frame) { queued.push(frame.sequence) },
+    async onEvent(frame) {
+      applied.push(frame.sequence)
+      await firstApplication
+    },
+  })
+  sockets[0].open()
+  sockets[0].receive({
+    type: 'transport.subscription-accepted.v1',
+    subscriptionId,
+    cursor: {
+      scope,
+      stream: { kind: 'product-session', productSessionId },
+      sequence: 0,
+      eventId: null,
+    },
+    authorizationEpoch: 1,
+    limits: {
+      maxUnackedEvents: 256,
+      hardUnackedEvents: 1024,
+      ackDeadlineMillis: 30_000,
+      backpressureCloseCode: 4408,
+    },
+  })
+  sockets[0].receive({
+    type: 'event.v1',
+    subscriptionId,
+    eventId: 'evt_00000000000000000000000001',
+    scope,
+    stream: { kind: 'product-session', productSessionId },
+    sequence: 1,
+    occurredAt: '2026-09-02T00:00:00.000Z',
+    authorizationEpoch: 1,
+    source: { kind: 'control-plane', actor, component: 'test' },
+    event: {
+      type: 'product-session.changed.v1',
+      productSessionId,
+      revision: 2,
+      status: 'active',
+    },
+  })
+  await new Promise(resolvePromise => setImmediate(resolvePromise))
+  assert.deepEqual(queued, [1])
+  assert.deepEqual(applied, [1])
+  assert.equal(sockets[0].sent.some(frame => frame.type === 'transport.ack.v1'), false)
+
+  finishFirst()
+  await new Promise(resolvePromise => setImmediate(resolvePromise))
+  assert.equal(sockets[0].sent.at(-1).type, 'transport.ack.v1')
+  client.close()
 })
 
 test('apps/client exposes one facade and contains no Worker, Provider, or DSH remote path', () => {

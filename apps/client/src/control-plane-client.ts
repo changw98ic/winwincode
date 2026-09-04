@@ -206,6 +206,8 @@ export interface ControlPlaneSubscribeOptions {
   readonly subscription: ControlPlaneWebSocketSubscription
   readonly startAt?: ControlPlaneWebSocketSubscribeStartAt
   readonly signal?: AbortSignal
+  /** Synchronous observer for a validated event waiting in the ordered application queue. */
+  readonly onEventQueued?: (event: ControlPlaneWebSocketEventFrame) => void
   readonly onEvent: (event: ControlPlaneWebSocketEventFrame) => Promise<void> | void
   readonly onResetRequired?: (
     frame: import('./generated/contracts.js').ControlPlaneWebSocketResetRequiredFrame
@@ -685,6 +687,9 @@ export function createControlPlaneClient(options: ControlPlaneClientOptions): Co
           ? {}
           : { createSocket: options.transport.createSocket }),
         reconnectDelayMillis,
+        ...(subscriptionOptions.onEventQueued === undefined
+          ? {}
+          : { onEventQueued: subscriptionOptions.onEventQueued }),
         onEvent: subscriptionOptions.onEvent,
         ...(subscriptionOptions.onResetRequired === undefined
           ? {}

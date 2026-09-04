@@ -1,0 +1,108 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+
+.wwc-local-operations {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.wwc-local-operations-heading,
+.wwc-local-operations-status,
+.wwc-local-operations-error,
+.wwc-local-workers {
+  grid-column: 1 / -1;
+}
+
+.wwc-local-resource-status {
+  margin-bottom: var(--wwc-space-4);
+}
+
+.wwc-local-repository-details,
+.wwc-local-resource-details,
+.wwc-local-worker-details {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--wwc-space-2) var(--wwc-space-4);
+  min-width: 0;
+}
+
+.wwc-local-worker-list {
+  display: grid;
+  gap: var(--wwc-space-3);
+  margin: var(--wwc-space-0);
+  padding: var(--wwc-space-0);
+  list-style: none;
+}
+
+.wwc-local-worker {
+  display: grid;
+  gap: var(--wwc-space-3);
+  padding: var(--wwc-space-3);
+  border: var(--wwc-border-width) solid var(--wwc-color-border-subtle);
+  border-radius: var(--wwc-radius-md);
+  background: var(--wwc-color-surface-subtle);
+}
+
+.wwc-local-worker[data-state='draining'] {
+  border-color: var(--wwc-color-warning-border);
+  background: var(--wwc-color-warning-surface);
+}
+
+.wwc-local-worker[data-state='offline'] {
+  border-color: var(--wwc-color-danger-border);
+  background: var(--wwc-color-danger-surface);
+}
+
+.wwc-local-worker-heading {
+  margin: var(--wwc-space-0);
+}
+
+.wwc-local-worker-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--wwc-space-2);
+}
+
+.wwc-local-repository-details,
+.wwc-local-resource-details,
+.wwc-local-worker-details {
+  margin: var(--wwc-space-0);
+}
+
+.wwc-local-repository-details dt,
+.wwc-local-resource-details dt,
+.wwc-local-worker-details dt {
+  font-weight: var(--wwc-font-weight-medium);
+}
+
+.wwc-local-operations [data-state='empty'],
+.wwc-local-worker-empty {
+  max-width: var(--wwc-readable-max);
+}
+
+.wwc-local-operations [data-variant='destructive'] {
+  justify-self: start;
+}
+
+@media (max-width: 64rem) {
+  .wwc-local-operations {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .wwc-local-operations-heading,
+  .wwc-local-operations-status,
+  .wwc-local-operations-error,
+  .wwc-local-workers {
+    grid-column: auto;
+  }
+}
+
+@media (max-width: 48rem) {
+  .wwc-local-repository-details,
+  .wwc-local-resource-details,
+  .wwc-local-worker-details {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .wwc-local-worker-controls > * {
+    flex: 1 1 100%;
+  }
+}

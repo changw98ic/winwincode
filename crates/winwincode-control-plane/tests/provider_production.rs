@@ -394,6 +394,7 @@ fn configure_provider_authority(
                 credential_reference_id: CredentialReferenceId(id("crd", 1)),
                 models: vec![model_capability(model_id)],
             },
+            Instant("2026-09-02T00:00:00.000Z".to_owned()),
         )
         .expect("register loopback Provider");
     CredentialReferenceService::new(storage)
@@ -434,6 +435,7 @@ fn configure_provider_authority(
                 }),
                 worker_concurrency_limit: 1,
             },
+            Instant("2026-09-02T00:00:00.000Z".to_owned()),
         )
         .expect("configure ProductSession model route");
 }

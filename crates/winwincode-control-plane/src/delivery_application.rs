@@ -18,10 +18,11 @@ use winwincode_api::generated::{
     DeliveryListResultResponseQuery, DeliveryOwnershipProjection, DeliveryPage, DeliveryPageKind,
     DeliveryProjection, DeliveryResolveAttentionCommand, DeliveryResolveAttentionCompletedResponse,
     DeliveryResolveAttentionCompletedResponseCommand,
-    DeliveryResolveAttentionCompletedResponseOutcome, DeliveryStatus as ApiDeliveryStatus,
-    DeliverySubmitVerdictCommand, DeliverySubmitVerdictCompletedResponse,
-    DeliverySubmitVerdictCompletedResponseCommand, DeliverySubmitVerdictCompletedResponseOutcome,
-    DeliveryTaskCountsProjection, DeliveryUpdateSpecCommand, DeliveryUpdateSpecCompletedResponse,
+    DeliveryResolveAttentionCompletedResponseOutcome, DeliverySpecInput,
+    DeliveryStatus as ApiDeliveryStatus, DeliverySubmitVerdictCommand,
+    DeliverySubmitVerdictCompletedResponse, DeliverySubmitVerdictCompletedResponseCommand,
+    DeliverySubmitVerdictCompletedResponseOutcome, DeliveryTaskCountsProjection,
+    DeliveryUpdateSpecCommand, DeliveryUpdateSpecCompletedResponse,
     DeliveryUpdateSpecCompletedResponseCommand, DeliveryUpdateSpecCompletedResponseOutcome,
     ErrorCode, PageInfo, RepositoryScope, Scope,
 };
@@ -39,7 +40,8 @@ use winwincode_delivery::{
     store::{DeliveryQuery, DeliveryQueryPort, DeliveryStore},
 };
 use winwincode_domain::{
-    Count, DeliveryId, OpaqueCursor, RequestId, Revision, SchemaVersion, Sha256Digest,
+    Count, DeliveryId, OpaqueCursor, ProductSessionId, RequestId, Revision, SchemaVersion,
+    Sha256Digest,
 };
 use winwincode_storage::{
     CandidateGitTerminalOutcome, CommitReceipt, ProductStateStorage, ProjectionEventStream,
@@ -47,14 +49,16 @@ use winwincode_storage::{
 };
 
 use crate::{
-    CommitError, ControlPlane, DeliveryCommandCommitError, DeliveryCommandFacts, DeliverySpecFacts,
-    DeliveryVerdictCommitError,
+    CommitError, ControlPlane, CredentialLeakGate, CredentialOutputBoundary,
+    DeliveryCommandCommitError, DeliveryCommandFacts, DeliverySpecFacts,
+    DeliveryVerdictCommitError, ProductSessionServiceErrorCode,
     delivery_command_transaction::TrustedDeliverySpecFacts,
     delivery_execution::{
         DeliveryExecutionConfig, DeliveryExecutionError, ExecutionJobDispatcher,
         prepare_delivery_advance,
     },
     delivery_transaction::{StagedDeliveryJournal, delivery_journal_key, delivery_stream_id},
+    load_product_session_authority_seal, public_event_actor, repository_scope_key,
 };
 
 const DELIVERY_CATALOG_SCHEMA_VERSION: u8 = 1;
@@ -164,9 +168,6 @@ pub struct DeliverySpecificationAuthority {
     pub now_millis: u64,
     pub repository: RepositoryRef,
     pub source_ref: Option<DeliverySourceRef>,
-    pub scope: Vec<String>,
-    pub out_of_scope: Vec<String>,
-    pub constraints: Vec<String>,
     pub max_rework_attempts: u64,
     pub criterion_verification_methods: Vec<(String, String)>,
 }
@@ -412,11 +413,18 @@ impl ControlPlane {
         {
             return create_response(command, &receipt, &delivery);
         }
+        validate_spec_secret_safety(&command.payload.spec)?;
+        let source_session_guard = validate_source_product_session(
+            self.storage_ref()?,
+            &command.actor,
+            &command.scope,
+            command.payload.spec.source_product_session_id.as_ref(),
+        )?;
         let authority = self.resolve_specification_authority(&mapped, None)?;
         let facts = DeliveryCommandFacts::specification_from_trusted_adapter(
             &mapped,
             command.scope.clone(),
-            specification_facts(authority),
+            specification_facts(authority, source_session_guard),
         )?;
         let receipt = self
             .commit_delivery_command(&mapped, &facts)
@@ -460,11 +468,18 @@ impl ControlPlane {
             &command.payload.delivery_id,
         )?;
         let current = load_current_delivery(self.storage_ref()?, &command.payload.delivery_id)?;
+        validate_spec_secret_safety(&command.payload.spec)?;
+        let source_session_guard = validate_source_product_session(
+            self.storage_ref()?,
+            &command.actor,
+            &command.scope,
+            command.payload.spec.source_product_session_id.as_ref(),
+        )?;
         let authority = self.resolve_specification_authority(&mapped, Some(&current))?;
         let facts = DeliveryCommandFacts::specification_from_trusted_adapter(
             &mapped,
             command.scope.clone(),
-            specification_facts(authority),
+            specification_facts(authority, source_session_guard),
         )?;
         let receipt = self
             .commit_delivery_command(&mapped, &facts)
@@ -987,17 +1002,65 @@ fn authority_error(error: DeliveryAuthorityError) -> DeliveryApplicationError {
     DeliveryApplicationError::TrustedFactsUnavailable(error.message)
 }
 
-fn specification_facts(authority: DeliverySpecificationAuthority) -> DeliverySpecFacts {
+fn specification_facts(
+    authority: DeliverySpecificationAuthority,
+    source_session_guard: Option<StateRevisionGuard>,
+) -> DeliverySpecFacts {
     DeliverySpecFacts::from_trusted_adapter(TrustedDeliverySpecFacts {
         now_millis: authority.now_millis,
         repository: authority.repository,
         source_ref: authority.source_ref,
-        scope: authority.scope,
-        out_of_scope: authority.out_of_scope,
-        constraints: authority.constraints,
+        source_session_guard,
         max_rework_attempts: authority.max_rework_attempts,
         criterion_verification_methods: authority.criterion_verification_methods,
     })
+}
+
+fn validate_spec_secret_safety(spec: &DeliverySpecInput) -> Result<(), DeliveryApplicationError> {
+    CredentialLeakGate::default()
+        .inspect_serializable(CredentialOutputBoundary::Persistence, spec)
+        .map_err(|_| {
+            DeliveryApplicationError::InvalidRequest(
+                "Delivery Spec contains credential material".to_owned(),
+            )
+        })
+}
+
+fn validate_source_product_session(
+    storage: &dyn ProductStateStorage,
+    actor: &Actor,
+    scope: &RepositoryScope,
+    source_product_session_id: Option<&ProductSessionId>,
+) -> Result<Option<StateRevisionGuard>, DeliveryApplicationError> {
+    let Some(source_product_session_id) = source_product_session_id else {
+        return Ok(None);
+    };
+    let scope_key = repository_scope_key(scope)?;
+    let seal = load_product_session_authority_seal(storage, &scope_key, source_product_session_id)
+        .map_err(|error| match error.code() {
+            ProductSessionServiceErrorCode::NotFound
+            | ProductSessionServiceErrorCode::InvalidInput
+            | ProductSessionServiceErrorCode::ActorMismatch => {
+                DeliveryApplicationError::InvalidRequest(
+                    "source ProductSession does not match the command actor and repository scope"
+                        .to_owned(),
+                )
+            }
+            _ => DeliveryApplicationError::Storage(StorageError::adapter(
+                "source ProductSession authority is unavailable",
+            )),
+        })?;
+    let session = seal.record.session();
+    if session.project_id() != &scope.project_id
+        || session.repository_id() != &scope.repository_id
+        || seal.record.owner_actor() != &public_event_actor(actor)
+    {
+        return Err(DeliveryApplicationError::InvalidRequest(
+            "source ProductSession does not match the command actor and repository scope"
+                .to_owned(),
+        ));
+    }
+    Ok(Some(seal.state_guard))
 }
 
 fn map_command<T: Serialize>(
@@ -1280,7 +1343,7 @@ fn validate_list_query(query: &DeliveryListQuery) -> Result<(), DeliveryApplicat
         &Scope::RepositoryScope(query.scope.clone()),
         query.request_id.clone(),
     )?;
-    crate::repository_scope_key(&query.scope)?;
+    repository_scope_key(&query.scope)?;
     Ok(())
 }
 
@@ -1489,10 +1552,8 @@ pub(crate) fn collaboration_delivery_snapshot<S: ProductStateStorage + ?Sized>(
         state_stream_ids.push(delivery_stream_id(&delivery_id));
         delivery_ids.push(delivery_id);
     }
-    let key = ProjectionEventStreamKey::new(
-        crate::repository_scope_key(scope)?,
-        ProjectionEventStream::Scope,
-    )?;
+    let key =
+        ProjectionEventStreamKey::new(repository_scope_key(scope)?, ProjectionEventStream::Scope)?;
     let cut = storage.load_projection_read_cut(&state_stream_ids, &key, None)?;
     let confirmation =
         storage.load_bounded_state_directory(&prefix, MAX_SNAPSHOT_ROWS, MAX_DIRECTORY_BYTES)?;

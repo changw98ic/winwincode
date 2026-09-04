@@ -49,7 +49,14 @@ const QUERIES = Object.freeze([
   'runtime.projection.get',
   'delivery.list',
   'delivery.get',
+  'candidate.list',
+  'candidate.review.get',
+  'candidate.files.list',
+  'candidate.diff.get',
+  'evidence.get',
+  'evidence.artifact.content.get',
   'settings.get',
+  'model.route.availability.list',
   'credential.reference.list',
   'credential.reference.get',
   'approval.list',
@@ -209,7 +216,14 @@ test('HTTP query contract covers every current read surface with an opaque stabl
     'runtime.projection.get': './domain.schema.json#/$defs/RuntimeProjectionSnapshot',
     'delivery.list': '#/$defs/DeliveryPage',
     'delivery.get': '#/$defs/DeliveryDetailProjection',
+    'candidate.list': '#/$defs/CandidateHistoryPage',
+    'candidate.review.get': '#/$defs/CandidateHistoricalReviewProjection',
+    'candidate.files.list': '#/$defs/CandidateFilePage',
+    'candidate.diff.get': '#/$defs/CandidateDiffChunkProjection',
+    'evidence.get': '#/$defs/EvidenceDetailProjection',
+    'evidence.artifact.content.get': '#/$defs/EvidenceArtifactContentResult',
     'settings.get': '#/$defs/SettingsProjection',
+    'model.route.availability.list': '#/$defs/ModelRouteAvailabilityPage',
     'credential.reference.list': '#/$defs/CredentialReferencePage',
     'credential.reference.get': '#/$defs/CredentialReferenceProjection',
     'approval.list': '#/$defs/ApprovalPage',
@@ -217,7 +231,7 @@ test('HTTP query contract covers every current read surface with an opaque stabl
     'worker.list': '#/$defs/WorkerPage',
     'worker.get': '#/$defs/WorkerProjection',
     'publication.list': '#/$defs/PublicationPage',
-    'publication.get': '#/$defs/PublicationProjection',
+    'publication.get': '#/$defs/PublicationDetailProjection',
     'enterprise.organization.list': '#/$defs/EnterpriseOrganizationPage',
     'enterprise.membership.list': '#/$defs/EnterpriseMembershipPage',
     'enterprise.team.list': '#/$defs/EnterpriseTeamPage',
@@ -238,6 +252,9 @@ test('HTTP query contract covers every current read surface with an opaque stabl
       'ProductSessionPage',
       'ChatInteractionPage',
       'DeliveryPage',
+      'CandidateHistoryPage',
+      'CandidateFilePage',
+      'ModelRouteAvailabilityPage',
       'CredentialReferencePage',
       'ApprovalPage',
       'WorkerPage',
@@ -259,6 +276,9 @@ test('HTTP query contract covers every current read surface with an opaque stabl
       'product_session_page',
       'chat_interaction_page',
       'delivery_page',
+      'candidate_history_page',
+      'candidate_file_page',
+      'model_route_availability_page',
       'credential_reference_page',
       'approval_page',
       'worker_page',
@@ -282,6 +302,127 @@ test('HTTP query contract covers every current read surface with an opaque stabl
   assert.equal(pagination.order, 'snapshot_then_updated_at_then_id')
   assert.equal(pagination.cursor, 'opaque_scope_query_filter_bound')
   assert.equal(pagination.invalidCursorError, 'INVALID_REQUEST')
+
+  const candidateRead = schema['x-winwincode-semantics'].candidateReviewRead
+  assert.deepEqual(candidateRead.queries, [
+    'candidate.list',
+    'candidate.review.get',
+    'candidate.files.list',
+    'candidate.diff.get',
+  ])
+  assert.equal(candidateRead.diffChunkMaxBytes, 262_144)
+  assert.deepEqual(candidateRead.binding, [
+    'repository scope',
+    'deliveryId',
+    'deliveryRevision',
+    'readPageLimit',
+    'candidateRef',
+    'candidateTreeId',
+    'diffSha256',
+  ])
+  assert.equal(candidateRead.pathTraversalAllowed, false)
+  assert.equal(candidateRead.rawRepositoryLocatorAllowed, false)
+  assert.equal(candidateRead.callerGitRevisionAllowed, false)
+  assert.equal(candidateRead.baseProjectionIncludesContent, false)
+  assert.match(candidateRead.historyAvailability, /display-only/u)
+  assert.match(candidateRead.historicalReviewAuthorization, /never become current/u)
+
+  const modelRouteAvailability = schema['x-winwincode-semantics'].modelRouteAvailability
+  assert.equal(modelRouteAvailability.query, 'model.route.availability.list')
+  assert.match(modelRouteAvailability.scopeAuthority, /exact repository/u)
+  assert.deepEqual(modelRouteAvailability.sources, [
+    'effective model settings selection',
+    'effective Provider/model catalog',
+    'Credential reference lifecycle',
+    'configured durable model request pool',
+  ])
+  assert.deepEqual(schema.$defs.ModelRouteAvailabilityReason.enum, [
+    'ready',
+    'no_provider',
+    'credential_missing_or_revoked',
+    'default_route_invalid',
+    'provider_or_model_disabled',
+    'request_pool_unavailable',
+  ])
+  assert.equal(modelRouteAvailability.clientInferenceAllowed, false)
+  assert.equal(modelRouteAvailability.secretFieldsAllowed, false)
+  assert.equal(modelRouteAvailability.poolInternalFieldsAllowed, false)
+  assert.equal(
+    modelRouteAvailability.invalidationEvent,
+    'model-route-availability.invalidated.v1',
+  )
+})
+
+test('publication.get exposes one bounded secret-safe detail while publication.list stays compact', async () => {
+  const schema = await json('control-plane-http.schema.json')
+  const detail = schema.$defs.PublicationDetailProjection
+  assert.equal(detail.additionalProperties, false)
+  assert.equal(detail.properties.kind.const, 'publication_detail')
+  assert.equal(detail.properties.summary.$ref, '#/$defs/PublicationProjection')
+  assert.equal(detail.properties.steps.maxItems, 4)
+  assert.equal(detail.properties.steps.items.$ref, '#/$defs/PublicationStepProjection')
+  assert.equal(detail.properties.history.maxItems, 200)
+  assert.equal(
+    detail.properties.history.items.$ref,
+    '#/$defs/PublicationStatusHistoryProjection',
+  )
+  assert.deepEqual(detail.properties.cancellation.oneOf, [
+    { $ref: '#/$defs/PublicationCancellationProjection' },
+    { type: 'null' },
+  ])
+  assert.ok(detail.required.includes('historyTruncated'))
+  assert.ok(detail.required.includes('retryable'))
+  assert.ok(detail.required.includes('cancellable'))
+
+  const step = schema.$defs.PublicationStepProjection
+  assert.deepEqual(step.properties.kind.enum, [
+    'branch',
+    'pull_request',
+    'issue_comment',
+    'commit_status',
+  ])
+  assert.deepEqual(step.properties.state.enum, [
+    'pending',
+    'applying',
+    'unknown',
+    'succeeded',
+    'rejected',
+  ])
+  assert.equal(step.properties.outcomeCode.oneOf[0].pattern, '^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$')
+  assert.deepEqual(step.properties.resourceRef.oneOf, [
+    { $ref: '#/$defs/PublicationResourceRef' },
+    { type: 'null' },
+  ])
+
+  const history = schema.$defs.PublicationStatusHistoryProjection
+  assert.equal(history.properties.stepStates.maxItems, 4)
+  assert.equal(
+    history.properties.stepStates.items.$ref,
+    '#/$defs/PublicationStepStateProjection',
+  )
+  assert.equal(history.properties.revision.$ref, './domain.schema.json#/$defs/Revision')
+  assert.equal(history.properties.updatedAt.$ref, './domain.schema.json#/$defs/Instant')
+
+  const listItems = schema.$defs.PublicationPage.properties.items.items
+  assert.equal(listItems.$ref, '#/$defs/PublicationProjection')
+  const forbidden = JSON.stringify([
+    detail.properties,
+    step.properties,
+    history.properties,
+    schema.$defs.PublicationCancellationProjection.properties,
+  ])
+  for (const name of [
+    'providerRequest',
+    'providerResponse',
+    'credential',
+    'idempotencyKey',
+    'operationKey',
+    'requestSha256',
+    'rawReceipt',
+    'rawRequest',
+    'actorDigest',
+    'url',
+  ]) assert.doesNotMatch(forbidden, new RegExp(name, 'iu'))
 })
 
 test('HTTP input responses are bound and cannot inject an ExecutionPort message', async () => {
@@ -337,6 +478,42 @@ test('HTTP input responses are bound and cannot inject an ExecutionPort message'
   assert.equal(JSON.stringify(input).includes('kind'), false)
 })
 
+test('Delivery Spec input carries editable scope and one explicit ProductSession source', async () => {
+  const schema = await json('control-plane-http.schema.json')
+  const input = schema.$defs.DeliverySpecInput
+  for (const field of ['scope', 'outOfScope', 'constraints', 'sourceProductSessionId']) {
+    assert.ok(input.required.includes(field), `${field} is canonical input`)
+  }
+  assert.deepEqual(input.properties.scope, {
+    type: 'array',
+    items: { type: 'string', minLength: 1, maxLength: 65536 },
+    minItems: 1,
+    maxItems: 1000,
+    uniqueItems: true,
+  })
+  for (const field of ['outOfScope', 'constraints']) {
+    assert.deepEqual(input.properties[field], {
+      type: 'array',
+      items: { type: 'string', minLength: 1, maxLength: 65536 },
+      maxItems: 1000,
+      uniqueItems: true,
+    })
+  }
+  assert.deepEqual(input.properties.sourceProductSessionId.oneOf, [
+    { $ref: './domain.schema.json#/$defs/ProductSessionId' },
+    { type: 'null' },
+  ])
+
+  const output = schema.$defs.DeliveryRequirementsProjection
+  assert.ok(output.required.includes('sourceProductSessionId'))
+  assert.deepEqual(output.properties.sourceProductSessionId, {
+    oneOf: [
+      { $ref: './domain.schema.json#/$defs/ProductSessionId' },
+      { type: 'null' },
+    ],
+  })
+})
+
 test('enterprise identity contract returns metadata without API Token material', async () => {
   const schema = await json('control-plane-http.schema.json')
   const semantics = schema['x-winwincode-semantics'].enterpriseIdentity
@@ -383,8 +560,36 @@ test('Chat interaction snapshots expose one complete secret-safe binding contrac
     'requestedAt',
     'expiresAt',
     'subject',
+    'category',
+    'effectiveDecisionScope',
+    'sanitizedDetail',
     'binding',
   ])
+  assert.deepEqual(schema.$defs.ApprovalProjectionCategory.enum, [
+    'filesystem_write',
+    'mcp',
+    'network',
+    'shell',
+    'unavailable',
+  ])
+  assert.deepEqual(schema.$defs.ApprovalEffectiveDecisionScope.enum, ['once'])
+  assert.deepEqual(schema.$defs.ApprovalSanitizedDetailUnavailableReason.enum, [
+    'producer_unavailable',
+    'encoded_payload_redacted',
+    'source_not_recorded',
+  ])
+  assert.deepEqual(schema.$defs.ApprovalSanitizedDetailProjection.required, [
+    'kind',
+    'reason',
+  ])
+  assert.equal(schema.$defs.ApprovalSanitizedDetailProjection.properties.kind.const, 'unavailable')
+  assert.equal(schema.$defs.ApprovalSanitizedDetailProjection.properties.command, undefined)
+  assert.equal(schema.$defs.ApprovalSanitizedDetailProjection.properties.cwd, undefined)
+  assert.equal(schema.$defs.ApprovalSanitizedDetailProjection.properties.files, undefined)
+  assert.equal(schema.$defs.ApprovalSanitizedDetailProjection.properties.network, undefined)
+  assert.equal(schema.$defs.ApprovalSanitizedDetailProjection.properties.mcp, undefined)
+  assert.equal(schema.$defs.ApprovalSanitizedDetailProjection.properties.risk, undefined)
+  assert.equal(schema.$defs.ApprovalSanitizedDetailProjection.properties.reasonText, undefined)
   assert.ok(schema.$defs.ApprovalDecidePayload.required.includes('binding'))
   assert.equal(schema.$defs.ChatInputInteractionProjection.properties.details, undefined)
   assert.equal(schema.$defs.ChatInputInteractionProjection.properties.payload, undefined)
@@ -638,6 +843,9 @@ test('positive and negative samples pin retries, conflicts, cursors, and secret-
       'sha256:0000000000000000000000000000000000000000000000000000000000000000',
   })
   assert.equal(examples.responses.chatMessagesPage.result.kind, 'chat_message_page')
+  assert.equal(examples.responses.publicationDetail.result.kind, 'publication_detail')
+  assert.equal(examples.responses.publicationDetail.result.historyTruncated, true)
+  assert.equal(examples.responses.publicationDetail.result.history.at(-1).revision, 201)
   assert.equal(
     examples.responses.deliveryDetailPendingReview.result.solutionReview.reviewStatus,
     'pending',

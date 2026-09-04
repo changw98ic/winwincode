@@ -85,14 +85,35 @@ pub(crate) fn resolve_current_candidate(
     scope: &RepositoryScope,
     delivery: &Delivery,
 ) -> Result<Option<winwincode_delivery::domain::FrozenDeliveryCandidate>, DeliveryAuthorityError> {
+    resolve_current_candidate_with_source(storage, artifacts, source_resolver, scope, delivery)
+        .map(|resolved| resolved.map(|(candidate, _source)| candidate))
+}
+
+/// Rebuilds the current Candidate together with the opaque trusted Git source
+/// used to freeze it. Read-only Candidate detail projections use this seam so
+/// they never accept a caller-supplied repository locator, commit, tree, path,
+/// or diff digest.
+pub(crate) fn resolve_current_candidate_with_source(
+    storage: &dyn ProductStateStorage,
+    artifacts: &ArtifactStore,
+    source_resolver: &dyn GitSourceResolver,
+    scope: &RepositoryScope,
+    delivery: &Delivery,
+) -> Result<
+    Option<(
+        winwincode_delivery::domain::FrozenDeliveryCandidate,
+        ValidatedGitSourceArtifact,
+    )>,
+    DeliveryAuthorityError,
+> {
     let Some(writer) = selected_current_writer(delivery)? else {
         return Ok(None);
     };
     let terminal = load_terminal(storage, delivery, &writer.execution_job_id)?;
     let source = source_for_terminal(artifacts, source_resolver, scope, delivery, &terminal)?;
-    freeze_delivery_candidate_from_source(delivery, &source, &terminal)
-        .map(Some)
-        .map_err(|error| authority_error(&error))
+    let candidate = freeze_delivery_candidate_from_source(delivery, &source, &terminal)
+        .map_err(|error| authority_error(&error))?;
+    Ok(Some((candidate, source)))
 }
 
 /// Rebuilds the executor candidate from the terminal handoff that the same

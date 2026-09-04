@@ -172,7 +172,7 @@ class FakeWebSocket {
   }
 }
 
-function contractFake() {
+function contractFake(options = {}) {
   const requests = []
   const sockets = []
   let settings = {
@@ -181,6 +181,8 @@ function contractFake() {
     workerConcurrencyLimit: 2,
   }
   const credentials = new Map()
+  const deferredCreates = new Map()
+  let deferredSettings = null
 
   async function fetch(input, init) {
     const request = JSON.parse(init.body)
@@ -200,14 +202,29 @@ function contractFake() {
       if (request.expectedRevision !== settings.revision) {
         return response(409, terminalError(request, 'REVISION_CONFLICT', 'Settings changed.'))
       }
-      settings = {
+      const updated = {
         ...request.payload.patch,
         revision: settings.revision + 1,
       }
+      if (options.deferSettings === true) {
+        deferredSettings = updated
+        return response(200, {
+          schemaVersion,
+          requestId: request.requestId,
+          command: request.command,
+          outcome: 'accepted',
+          acceptedAt: '2026-08-27T01:00:01.000Z',
+          currentRevision: settings.revision,
+        })
+      }
+      settings = updated
       return response(200, commandResponse(request, settings))
     }
     if (request.command === 'credential.reference.create') {
-      if (credentials.has(request.payload.credentialReferenceId)) {
+      if (
+        credentials.has(request.payload.credentialReferenceId)
+        || deferredCreates.has(request.payload.credentialReferenceId)
+      ) {
         return response(409, terminalError(request, 'REVISION_CONFLICT', 'Reference exists.'))
       }
       const created = credential({
@@ -215,6 +232,17 @@ function contractFake() {
         displayName: request.payload.displayName,
         providerId: request.payload.providerId,
       })
+      if (options.deferCreates === true) {
+        deferredCreates.set(created.id, created)
+        return response(200, {
+          schemaVersion,
+          requestId: request.requestId,
+          command: request.command,
+          outcome: 'accepted',
+          acceptedAt: '2026-08-27T01:00:01.000Z',
+          currentRevision: 0,
+        })
+      }
       credentials.set(created.id, created)
       return response(200, commandResponse(request, created))
     }
@@ -260,6 +288,15 @@ function contractFake() {
       const socket = new FakeWebSocket()
       sockets.push(socket)
       return socket
+    },
+    applyDeferredCreates() {
+      for (const [id, created] of deferredCreates) credentials.set(id, created)
+      deferredCreates.clear()
+    },
+    applyDeferredSettings() {
+      assert.notEqual(deferredSettings, null)
+      settings = deferredSettings
+      deferredSettings = null
     },
     get settings() { return settings },
     set settings(value) { settings = value },
@@ -441,6 +478,7 @@ class FakeElement {
 
   attributes = new Map()
   children = []
+  parentNode = null
   listeners = new Map()
   dataset = {}
   className = ''
@@ -464,15 +502,33 @@ class FakeElement {
 
   set textContent(value) {
     this.#textContent = String(value)
-    this.children = []
+    this.replaceChildren()
   }
 
+  get childNodes() { return this.children }
+
   append(...children) {
-    this.children.push(...children)
+    for (const child of children) this.insertBefore(child, null)
   }
 
   replaceChildren(...children) {
-    this.children = [...children]
+    for (const child of [...this.children]) child.remove()
+    for (const child of children) this.insertBefore(child, null)
+  }
+
+  insertBefore(child, reference) {
+    child.remove?.()
+    const index = reference === null ? this.children.length : this.children.indexOf(reference)
+    this.children.splice(index < 0 ? this.children.length : index, 0, child)
+    child.parentNode = this
+    return child
+  }
+
+  remove() {
+    if (this.parentNode === null) return
+    const index = this.parentNode.children.indexOf(this)
+    if (index >= 0) this.parentNode.children.splice(index, 1)
+    this.parentNode = null
   }
 
   setAttribute(name, value) {
@@ -487,6 +543,11 @@ class FakeElement {
     const current = this.listeners.get(name) ?? []
     current.push(listener)
     this.listeners.set(name, current)
+  }
+
+  removeEventListener(name, listener) {
+    const current = this.listeners.get(name) ?? []
+    this.listeners.set(name, current.filter(candidate => candidate !== listener))
   }
 
   dispatch(name) {
@@ -531,13 +592,16 @@ function pageState(overrides = {}) {
   }
 }
 
-test('settings page clears each write-only input before handing it to the view-model', async () => {
+const pageDraftScope = '["settings-page-test-actor","settings-page-test-scope"]'
+
+test('settings keeps write-only inputs only in mounted controls until success or cancel', async () => {
   const document = new FakeDocument()
   const rootElement = new FakeElement(document, 'div')
   const calls = []
   let state = pageState()
   let listener = () => {}
   const model = {
+    draftScope: pageDraftScope,
     get state() { return state },
     subscribe(next) {
       listener = next
@@ -555,6 +619,13 @@ test('settings page clears each write-only input before handing it to the view-m
     close() {},
   }
   const mounted = mountSettingsPage({ root: rootElement, model })
+  assert.equal(byClass(rootElement, 'wwc-settings').dataset.wwcPage, 'management')
+  assert.equal(byClass(rootElement, 'wwc-settings-heading').dataset.wwcComponent, 'page-header')
+  assert.equal(byClass(rootElement, 'wwc-settings-status').dataset.wwcComponent, 'status-badge')
+  assert.equal(byClass(rootElement, 'wwc-settings-retry').dataset.wwcComponent, 'button')
+  assert.equal(byClass(rootElement, 'wwc-settings-route').dataset.wwcComponent, 'panel')
+  assert.equal(byClass(rootElement, 'wwc-settings-create-credential').dataset.wwcComponent, 'panel')
+  assert.equal(byClass(rootElement, 'wwc-settings-credentials').dataset.wwcComponent, 'panel')
 
   const createSecret = byClass(rootElement, 'wwc-settings-create-secret')
   const createForm = byClass(rootElement, 'wwc-settings-create-form')
@@ -563,19 +634,54 @@ test('settings page clears each write-only input before handing it to the view-m
   byClass(rootElement, 'wwc-settings-create-provider').value = 'openai-compatible'
   createSecret.value = 'PAGE_CREATE_SECRET'
   createForm.dispatch('submit')
-  assert.equal(createSecret.value, '')
+  assert.equal(createSecret.value, 'PAGE_CREATE_SECRET')
   assert.equal(calls[0].input.vaultLocator, 'PAGE_CREATE_SECRET')
+
+  state = pageState({
+    interaction: {
+      status: 'error',
+      operation: 'credential.reference.create',
+      error: { kind: 'network', code: 'TEST', message: 'offline' },
+    },
+  })
+  listener(state)
+  assert.equal(createSecret.value, 'PAGE_CREATE_SECRET')
+  state = pageState({
+    status: 'cancelled',
+    interaction: {
+      status: 'error',
+      operation: null,
+      error: { kind: 'cancelled', code: 'REQUEST_CANCELLED', message: 'cancelled' },
+    },
+  })
+  listener(state)
+  assert.equal(createSecret.value, '')
 
   const rotateSecret = byClass(rootElement, 'wwc-settings-rotate-secret')
   const rotateForm = byClass(rootElement, 'wwc-settings-rotate-form')
   rotateSecret.value = 'PAGE_ROTATE_SECRET'
   rotateForm.dispatch('submit')
-  assert.equal(rotateSecret.value, '')
+  assert.equal(rotateSecret.value, 'PAGE_ROTATE_SECRET')
   assert.equal(calls[1].input.vaultLocator, 'PAGE_ROTATE_SECRET')
 
+  state = pageState({
+    interaction: {
+      status: 'error',
+      operation: 'credential.reference.rotate',
+      error: { kind: 'network', code: 'TEST', message: 'offline' },
+    },
+  })
+  listener(state)
+  assert.equal(rotateSecret.value, 'PAGE_ROTATE_SECRET')
+  rotateForm.dispatch('submit')
+  assert.equal(calls[2].input.vaultLocator, 'PAGE_ROTATE_SECRET')
+  state = pageState({ credentials: [credential({ revision: 2, rotationVersion: 2 })] })
+  listener(state)
+  assert.equal(rotateSecret.value, '')
+
   byClass(rootElement, 'wwc-settings-revoke').dispatch('click')
-  assert.equal(calls[2].operation, 'revoke')
-  assert.equal(calls[2].id, credentialId)
+  assert.equal(calls[3].operation, 'revoke')
+  assert.equal(calls[3].id, credentialId)
 
   assert.equal(visibleText(rootElement).includes('PAGE_CREATE_SECRET'), false)
   assert.equal(visibleText(rootElement).includes('PAGE_ROTATE_SECRET'), false)
@@ -596,6 +702,740 @@ test('settings page clears each write-only input before handing it to the view-m
   assert.equal(visibleText(rootElement).includes('Revoked'), true)
   assert.equal(byClass(rootElement, 'wwc-settings-rotate').disabled, true)
   assert.equal(byClass(rootElement, 'wwc-settings-revoke').disabled, true)
+
+  state = pageState({ credentials: [] })
+  listener(state)
+  assert.equal(
+    byClass(rootElement, 'wwc-settings-credential-empty').dataset.wwcComponent,
+    'empty-state',
+  )
+  mounted.close()
+})
+
+test('read-only Settings disables mutation controls and ignores synthetic submits', () => {
+  const document = new FakeDocument()
+  const rootElement = new FakeElement(document, 'div')
+  const calls = []
+  const state = pageState()
+  const model = {
+    draftScope: pageDraftScope,
+    state,
+    subscribe(next) { next(state); return () => {} },
+    async start() {},
+    async refresh() {},
+    async updateSettings() { calls.push('settings') },
+    async createCredentialReference() { calls.push('create') },
+    async rotateCredentialReference() { calls.push('rotate') },
+    async revokeCredentialReference() { calls.push('revoke') },
+    cancelPending() {},
+    reconnect() {},
+    close() {},
+  }
+  const mounted = mountSettingsPage({ root: rootElement, model, readOnly: true })
+  for (const className of [
+    'wwc-settings-provider',
+    'wwc-settings-save-route',
+    'wwc-settings-create-submit',
+    'wwc-settings-rotate',
+    'wwc-settings-revoke',
+  ]) assert.equal(byClass(rootElement, className).disabled, true, className)
+  byClass(rootElement, 'wwc-settings-route-form').dispatch('submit')
+  byClass(rootElement, 'wwc-settings-create-form').dispatch('submit')
+  byClass(rootElement, 'wwc-settings-rotate-form').dispatch('submit')
+  byClass(rootElement, 'wwc-settings-revoke').dispatch('click')
+  assert.deepEqual(calls, [])
+  mounted.close()
+})
+
+test('an accepted model route stays pending across a completed stale settings snapshot', () => {
+  const document = new FakeDocument()
+  const rootElement = new FakeElement(document, 'div')
+  const calls = []
+  let current = pageState()
+  let listener = () => {}
+  const model = {
+    draftScope: pageDraftScope,
+    get state() { return current },
+    subscribe(next) {
+      listener = next
+      next(current)
+      return () => { listener = () => {} }
+    },
+    async start() {},
+    async refresh() {},
+    async updateSettings(input) { calls.push(input) },
+    async createCredentialReference() {},
+    async rotateCredentialReference() {},
+    async revokeCredentialReference() {},
+    cancelPending() {},
+    reconnect() {},
+    close() {},
+  }
+  const mounted = mountSettingsPage({ root: rootElement, model })
+  const provider = byClass(rootElement, 'wwc-settings-provider')
+  const routeModel = byClass(rootElement, 'wwc-settings-model')
+  const credentialChoice = byClass(rootElement, 'wwc-settings-credential')
+  const concurrency = byClass(rootElement, 'wwc-settings-concurrency')
+  const routeForm = byClass(rootElement, 'wwc-settings-route-form')
+  const saveRoute = byClass(rootElement, 'wwc-settings-save-route')
+
+  provider.value = 'openai-compatible'
+  provider.dispatch('input')
+  routeModel.value = 'gpt-test'
+  routeModel.dispatch('input')
+  credentialChoice.value = credentialId
+  credentialChoice.dispatch('change')
+  concurrency.value = '3'
+  concurrency.dispatch('input')
+  routeForm.dispatch('submit')
+
+  current = pageState({
+    interaction: { status: 'waiting', operation: 'settings.update', error: null },
+  })
+  listener(current)
+  current = pageState({ status: 'refreshing', realtime: 'reloading' })
+  listener(current)
+  current = pageState()
+  listener(current)
+  routeForm.dispatch('submit')
+
+  assert.deepEqual({ calls: calls.length, disabled: saveRoute.disabled }, {
+    calls: 1,
+    disabled: true,
+  })
+
+  current = pageState({
+    settings: {
+      revision: 2,
+      defaultModelRoute: {
+        providerId: 'openai-compatible',
+        modelId: 'gpt-test',
+        credentialReferenceId: credentialId,
+      },
+      workerConcurrencyLimit: 3,
+    },
+  })
+  listener(current)
+  assert.equal(saveRoute.disabled, false)
+
+  routeModel.value = 'gpt-next'
+  routeModel.dispatch('input')
+  routeForm.dispatch('submit')
+  assert.equal(calls.length, 2)
+  current = pageState({
+    settings: {
+      revision: 2,
+      defaultModelRoute: {
+        providerId: 'openai-compatible',
+        modelId: 'gpt-test',
+        credentialReferenceId: credentialId,
+      },
+      workerConcurrencyLimit: 3,
+    },
+    interaction: { status: 'waiting', operation: 'settings.update', error: null },
+  })
+  listener(current)
+  current = pageState({
+    settings: {
+      revision: 3,
+      defaultModelRoute: {
+        providerId: 'openai-compatible',
+        modelId: 'gpt-test',
+        credentialReferenceId: credentialId,
+      },
+      workerConcurrencyLimit: 3,
+    },
+  })
+  listener(current)
+  assert.equal(saveRoute.disabled, false)
+  routeForm.dispatch('submit')
+  assert.equal(calls.length, 3)
+  mounted.close()
+})
+
+test('an accepted Credential create keeps its submission until the refreshed snapshot confirms success', () => {
+  const document = new FakeDocument()
+  const rootElement = new FakeElement(document, 'div')
+  const calls = []
+  let current = pageState()
+  let listener = () => {}
+  const model = {
+    draftScope: pageDraftScope,
+    get state() { return current },
+    subscribe(next) {
+      listener = next
+      next(current)
+      return () => { listener = () => {} }
+    },
+    async start() {},
+    async refresh() {},
+    async updateSettings() {},
+    async createCredentialReference(input) { calls.push(input) },
+    async rotateCredentialReference() {},
+    async revokeCredentialReference() {},
+    cancelPending() {},
+    reconnect() {},
+    close() {},
+  }
+  const mounted = mountSettingsPage({ root: rootElement, model })
+  const createSecret = byClass(rootElement, 'wwc-settings-create-secret')
+  byClass(rootElement, 'wwc-settings-create-id').value = externalCredentialId
+  byClass(rootElement, 'wwc-settings-create-name').value = 'Async Credential'
+  byClass(rootElement, 'wwc-settings-create-provider').value = 'openai-compatible'
+  createSecret.value = 'ASYNC_CREATE_SECRET'
+  byClass(rootElement, 'wwc-settings-create-form').dispatch('submit')
+
+  current = pageState({
+    interaction: {
+      status: 'waiting',
+      operation: 'credential.reference.create',
+      error: null,
+    },
+  })
+  listener(current)
+  current = pageState({ status: 'refreshing', realtime: 'reloading' })
+  listener(current)
+  current = pageState()
+  listener(current)
+  byClass(rootElement, 'wwc-settings-create-form').dispatch('submit')
+  assert.deepEqual({
+    calls: calls.length,
+    disabled: byClass(rootElement, 'wwc-settings-create-submit').disabled,
+    secret: createSecret.value,
+  }, {
+    calls: 1,
+    disabled: true,
+    secret: 'ASYNC_CREATE_SECRET',
+  })
+  current = pageState({
+    credentials: [credential(), credential({
+      id: externalCredentialId,
+      displayName: 'Async Credential',
+    })],
+  })
+  listener(current)
+
+  assert.equal(createSecret.value, '')
+  assert.equal(byClass(rootElement, 'wwc-settings-create-submit').disabled, false)
+
+  byClass(rootElement, 'wwc-settings-create-id').value = credentialId
+  byClass(rootElement, 'wwc-settings-create-name').value = 'Unmounted Credential'
+  byClass(rootElement, 'wwc-settings-create-provider').value = 'openai-compatible'
+  createSecret.value = 'UNMOUNTED_CREATE_SECRET'
+  byClass(rootElement, 'wwc-settings-create-form').dispatch('submit')
+  assert.equal(calls.length, 2)
+  mounted.close()
+  assert.equal(createSecret.value, '')
+})
+
+test('an accepted Credential rotation keeps its row submission until the refreshed rotationVersion confirms', () => {
+  const document = new FakeDocument()
+  const rootElement = new FakeElement(document, 'div')
+  const calls = []
+  let current = pageState()
+  let listener = () => {}
+  const model = {
+    draftScope: pageDraftScope,
+    get state() { return current },
+    subscribe(next) {
+      listener = next
+      next(current)
+      return () => { listener = () => {} }
+    },
+    async start() {},
+    async refresh() {},
+    async updateSettings() {},
+    async createCredentialReference() {},
+    async rotateCredentialReference(input) { calls.push(input) },
+    async revokeCredentialReference() {},
+    cancelPending() {},
+    reconnect() {},
+    close() {},
+  }
+  const mounted = mountSettingsPage({ root: rootElement, model })
+  const rotateSecret = byClass(rootElement, 'wwc-settings-rotate-secret')
+  rotateSecret.value = 'ASYNC_ROTATE_SECRET'
+  rotateSecret.dispatch('input')
+
+  current = pageState({ credentials: [credential({ revision: 2 })] })
+  listener(current)
+  const conflict = byClass(rootElement, 'wwc-settings-rotate-conflict')
+  assert.equal(conflict.hidden, false)
+  assert.equal(
+    descendants(conflict).some(node => node.getAttribute('aria-hidden') === 'true'),
+    true,
+  )
+  byClass(rootElement, 'wwc-settings-rotate-keep-draft').dispatch('click')
+  byClass(rootElement, 'wwc-settings-rotate-form').dispatch('submit')
+
+  current = pageState({
+    credentials: [credential({ revision: 2 })],
+    interaction: {
+      status: 'waiting',
+      operation: 'credential.reference.rotate',
+      error: null,
+    },
+  })
+  listener(current)
+  current = pageState({
+    status: 'refreshing',
+    realtime: 'reloading',
+    credentials: [credential({ revision: 2 })],
+  })
+  listener(current)
+  current = pageState({ credentials: [credential({ revision: 2 })] })
+  listener(current)
+  byClass(rootElement, 'wwc-settings-rotate-form').dispatch('submit')
+  assert.deepEqual({
+    calls: calls.length,
+    disabled: byClass(rootElement, 'wwc-settings-rotate').disabled,
+    secret: rotateSecret.value,
+  }, {
+    calls: 1,
+    disabled: true,
+    secret: 'ASYNC_ROTATE_SECRET',
+  })
+
+  current = pageState({
+    credentials: [credential({ revision: 3, rotationVersion: 2 })],
+  })
+  listener(current)
+
+  assert.equal(rotateSecret.value, '')
+  assert.equal(byClass(rootElement, 'wwc-settings-rotate').disabled, false)
+
+  rotateSecret.value = 'REMOVED_ROTATE_SECRET'
+  rotateSecret.dispatch('input')
+  byClass(rootElement, 'wwc-settings-rotate-form').dispatch('submit')
+  assert.equal(calls.length, 2)
+  current = pageState({ credentials: [] })
+  listener(current)
+  assert.equal(rotateSecret.value, '')
+  assert.equal((rotateSecret.listeners.get('input') ?? []).length, 0)
+  mounted.close()
+})
+
+test('an accepted model route keeps one request identity until the production reload confirms it', async () => {
+  const fake = contractFake({ deferSettings: true })
+  fake.credentials.set(credentialId, credential())
+  const client = createControlPlaneClient({
+    serverUrl: 'https://control.example/local',
+    maxNetworkRetries: 0,
+    reconnectDelayMillis: 0,
+    transport: { fetch: fake.fetch, createSocket: fake.createSocket },
+  })
+  let nextRequest = 0
+  const model = createSettingsViewModel({
+    client,
+    actor,
+    scope,
+    subscriptionId,
+    nextRequestId() {
+      nextRequest += 1
+      return requestId(nextRequest)
+    },
+  })
+  const document = new FakeDocument()
+  const rootElement = new FakeElement(document, 'div')
+  const mounted = mountSettingsPage({ root: rootElement, model })
+  await model.start()
+  const socket = fake.sockets[0]
+  socket.open()
+  socket.receive({
+    type: 'transport.subscription-accepted.v1',
+    subscriptionId,
+    cursor: scopeCursor(),
+    authorizationEpoch: 1,
+    limits: transportLimits(),
+  })
+
+  const provider = byClass(rootElement, 'wwc-settings-provider')
+  const routeModel = byClass(rootElement, 'wwc-settings-model')
+  const credentialChoice = byClass(rootElement, 'wwc-settings-credential')
+  const concurrency = byClass(rootElement, 'wwc-settings-concurrency')
+  const routeForm = byClass(rootElement, 'wwc-settings-route-form')
+  provider.value = 'openai-compatible'
+  provider.dispatch('input')
+  routeModel.value = 'deferred-model'
+  routeModel.dispatch('input')
+  credentialChoice.value = credentialId
+  credentialChoice.dispatch('change')
+  concurrency.value = '3'
+  concurrency.dispatch('input')
+  routeForm.dispatch('submit')
+  await flush()
+
+  const initialRequests = fake.requests.filter(({ request }) => request.command === 'settings.update')
+  assert.equal(initialRequests.length, 1)
+  const submittedRequestId = initialRequests[0].request.requestId
+  assert.equal(initialRequests[0].request.expectedRevision, 1)
+  assert.equal(model.state.interaction.status, 'waiting')
+
+  socket.receive({
+    type: 'event.v1',
+    subscriptionId,
+    eventId: eventId(1),
+    scope,
+    stream: { kind: 'scope' },
+    sequence: 1,
+    occurredAt: '2026-08-27T01:00:05.000Z',
+    authorizationEpoch: 1,
+    source: { kind: 'control-plane', component: 'settings-contract-fake', actor },
+    event: {
+      type: 'activity.recorded.v1',
+      actor,
+      category: 'security',
+      summary: 'Unrelated settings activity.',
+    },
+  })
+  await flush()
+
+  assert.equal(model.state.settings.revision, 1)
+  assert.equal(byClass(rootElement, 'wwc-settings-save-route').disabled, true)
+  routeForm.dispatch('submit')
+  await flush()
+  const requestsAfterRepeat = fake.requests.filter(({ request }) => (
+    request.command === 'settings.update'
+  ))
+  assert.equal(requestsAfterRepeat.length, 1)
+  assert.equal(requestsAfterRepeat[0].request.requestId, submittedRequestId)
+
+  fake.applyDeferredSettings()
+  socket.receive({
+    type: 'event.v1',
+    subscriptionId,
+    eventId: eventId(2),
+    scope,
+    stream: { kind: 'scope' },
+    sequence: 2,
+    occurredAt: '2026-08-27T01:00:06.000Z',
+    authorizationEpoch: 1,
+    source: { kind: 'control-plane', component: 'settings-contract-fake', actor },
+    event: {
+      type: 'activity.recorded.v1',
+      actor,
+      category: 'security',
+      summary: 'Model route applied.',
+    },
+  })
+  await flush()
+
+  assert.equal(model.state.settings.revision, 2)
+  assert.equal(byClass(rootElement, 'wwc-settings-save-route').disabled, false)
+  assert.equal(routeModel.value, 'deferred-model')
+  mounted.close()
+})
+
+test('an accepted Credential create settles from the production event reload exactly once', async () => {
+  const fake = contractFake({ deferCreates: true })
+  const client = createControlPlaneClient({
+    serverUrl: 'https://control.example/local',
+    maxNetworkRetries: 0,
+    reconnectDelayMillis: 0,
+    transport: { fetch: fake.fetch, createSocket: fake.createSocket },
+  })
+  let nextRequest = 0
+  const model = createSettingsViewModel({
+    client,
+    actor,
+    scope,
+    subscriptionId,
+    nextRequestId() {
+      nextRequest += 1
+      return requestId(nextRequest)
+    },
+  })
+  const document = new FakeDocument()
+  const rootElement = new FakeElement(document, 'div')
+  const mounted = mountSettingsPage({ root: rootElement, model })
+  await model.start()
+  assert.equal(model.state.status, 'ready')
+  const socket = fake.sockets[0]
+  socket.open()
+  socket.receive({
+    type: 'transport.subscription-accepted.v1',
+    subscriptionId,
+    cursor: scopeCursor(),
+    authorizationEpoch: 1,
+    limits: transportLimits(),
+  })
+
+  const createSecret = byClass(rootElement, 'wwc-settings-create-secret')
+  byClass(rootElement, 'wwc-settings-create-id').value = externalCredentialId
+  byClass(rootElement, 'wwc-settings-create-name').value = 'Deferred Credential'
+  byClass(rootElement, 'wwc-settings-create-provider').value = 'openai-compatible'
+  createSecret.value = 'DEFERRED_CREATE_SECRET'
+  byClass(rootElement, 'wwc-settings-create-form').dispatch('submit')
+  await flush()
+  assert.equal(model.state.interaction.status, 'waiting')
+  assert.equal(model.state.credentials.length, 0)
+  assert.equal(createSecret.value, 'DEFERRED_CREATE_SECRET')
+
+  socket.receive({
+    type: 'event.v1',
+    subscriptionId,
+    eventId: eventId(1),
+    scope,
+    stream: { kind: 'scope' },
+    sequence: 1,
+    occurredAt: '2026-08-27T01:00:05.000Z',
+    authorizationEpoch: 1,
+    source: { kind: 'control-plane', component: 'settings-contract-fake', actor },
+    event: {
+      type: 'activity.recorded.v1',
+      actor,
+      category: 'security',
+      summary: 'Credential reference created.',
+    },
+  })
+  await flush()
+
+  assert.equal(model.state.status, 'ready')
+  assert.equal(model.state.interaction.status, 'idle')
+  assert.equal(model.state.credentials.length, 0)
+  assert.equal(createSecret.value, 'DEFERRED_CREATE_SECRET')
+  assert.equal(byClass(rootElement, 'wwc-settings-create-submit').disabled, true)
+  byClass(rootElement, 'wwc-settings-create-form').dispatch('submit')
+  await flush()
+  assert.equal(fake.requests.filter(({ request }) => (
+    request.command === 'credential.reference.create'
+  )).length, 1)
+
+  fake.applyDeferredCreates()
+  socket.receive({
+    type: 'event.v1',
+    subscriptionId,
+    eventId: eventId(2),
+    scope,
+    stream: { kind: 'scope' },
+    sequence: 2,
+    occurredAt: '2026-08-27T01:00:06.000Z',
+    authorizationEpoch: 1,
+    source: { kind: 'control-plane', component: 'settings-contract-fake', actor },
+    event: {
+      type: 'activity.recorded.v1',
+      actor,
+      category: 'security',
+      summary: 'Credential reference snapshot published.',
+    },
+  })
+  await flush()
+
+  assert.equal(model.state.status, 'ready')
+  assert.equal(model.state.interaction.status, 'idle')
+  assert.equal(
+    model.state.credentials.some(reference => reference.id === externalCredentialId),
+    true,
+  )
+  assert.equal(createSecret.value, '')
+  const createCommands = fake.requests.filter(({ request }) => (
+    request.command === 'credential.reference.create'
+  ))
+  assert.equal(createCommands.length, 1)
+  assert.equal(
+    fake.requests.every(({ input }) => !input.includes('DEFERRED_CREATE_SECRET')),
+    true,
+  )
+  mounted.close()
+  client.close()
+})
+
+test('settings keyed updates preserve route drafts, Credential row identity, focus, and scroll', () => {
+  const document = new FakeDocument()
+  document.activeElement = null
+  const rootElement = new FakeElement(document, 'div')
+  let current = pageState()
+  let listener = () => {}
+  const model = {
+    draftScope: pageDraftScope,
+    get state() { return current },
+    subscribe(next) {
+      listener = next
+      next(current)
+      return () => { listener = () => {} }
+    },
+    async start() {},
+    async refresh() {},
+    async updateSettings() {},
+    async createCredentialReference() {},
+    async rotateCredentialReference() {},
+    async revokeCredentialReference() {},
+    cancelPending() {},
+    reconnect() {},
+    close() {},
+  }
+  const mounted = mountSettingsPage({ root: rootElement, model })
+  const provider = byClass(rootElement, 'wwc-settings-provider')
+  const credentialSelect = byClass(rootElement, 'wwc-settings-credential')
+  const references = byClass(rootElement, 'wwc-settings-credential-list')
+  const credentialRow = byClass(rootElement, 'wwc-settings-credential-item')
+  const rotateSecret = byClass(rootElement, 'wwc-settings-rotate-secret')
+  const rotateForm = byClass(rootElement, 'wwc-settings-rotate-form')
+  const credentialChoice = credentialSelect.children[1]
+
+  provider.value = 'dirty-provider'
+  provider.selectionStart = 6
+  provider.dispatch('input')
+  credentialSelect.value = credentialId
+  credentialSelect.dispatch('change')
+  rotateSecret.value = 'dirty-secret'
+  rotateSecret.selectionStart = 5
+  document.activeElement = rotateSecret
+  references.scrollTop = 84
+
+  for (let index = 0; index < 200; index += 1) {
+    current = pageState({
+      realtime: index % 2 === 0 ? 'reloading' : 'subscribed',
+      credentials: [credential({
+        displayName: index === 199 ? 'Updated local key' : 'Local model key',
+        revision: index + 2,
+      })],
+    })
+    listener(current)
+  }
+
+  assert.equal(byClass(rootElement, 'wwc-settings-credential-item'), credentialRow)
+  assert.equal(credentialSelect.children[1], credentialChoice)
+  assert.equal(byClass(rootElement, 'wwc-settings-credential-title').textContent, 'Updated local key')
+  assert.equal(provider.value, 'dirty-provider')
+  assert.equal(provider.selectionStart, 6)
+  assert.equal(credentialSelect.value, credentialId)
+  assert.equal(rotateSecret.value, 'dirty-secret')
+  assert.equal(rotateSecret.selectionStart, 5)
+  assert.equal(document.activeElement, rotateSecret)
+  assert.equal(references.scrollTop, 84)
+  assert.equal(references.children.length, 1)
+  assert.equal(credentialSelect.children.length, 2)
+
+  mounted.close()
+  assert.equal((provider.listeners.get('input') ?? []).length, 0)
+  assert.equal((rotateForm.listeners.get('submit') ?? []).length, 0)
+  assert.equal(rotateSecret.value, '')
+})
+
+test('settings merges clean fields, exposes revision conflicts, and submits one draft snapshot', async () => {
+  const document = new FakeDocument()
+  const rootElement = new FakeElement(document, 'div')
+  let current = pageState({
+    settings: {
+      revision: 4,
+      defaultModelRoute: {
+        providerId: 'server-provider-a',
+        modelId: 'server-model-a',
+        credentialReferenceId: credentialId,
+      },
+      workerConcurrencyLimit: 2,
+    },
+  })
+  let listener = () => {}
+  const calls = []
+  let finishUpdate = () => {}
+  const model = {
+    draftScope: pageDraftScope,
+    get state() { return current },
+    subscribe(next) {
+      listener = next
+      next(current)
+      return () => { listener = () => {} }
+    },
+    async start() {},
+    async refresh() {},
+    updateSettings(input) {
+      calls.push(structuredClone(input))
+      current = pageState({
+        ...current,
+        interaction: { status: 'submitting', operation: 'settings.update', error: null },
+      })
+      listener(current)
+      return new Promise(resolve => { finishUpdate = resolve })
+    },
+    async createCredentialReference() {},
+    async rotateCredentialReference() {},
+    async revokeCredentialReference() {},
+    cancelPending() {},
+    reconnect() {},
+    close() {},
+  }
+  const mounted = mountSettingsPage({ root: rootElement, model })
+  const provider = byClass(rootElement, 'wwc-settings-provider')
+  const modelId = byClass(rootElement, 'wwc-settings-model')
+  const concurrency = byClass(rootElement, 'wwc-settings-concurrency')
+  const form = byClass(rootElement, 'wwc-settings-route-form')
+  const conflict = byClass(rootElement, 'wwc-settings-route-conflict')
+
+  provider.value = 'browser-provider'
+  provider.dispatch('input')
+  current = pageState({
+    settings: {
+      revision: 5,
+      defaultModelRoute: {
+        providerId: 'server-provider-b',
+        modelId: 'server-model-b',
+        credentialReferenceId: credentialId,
+      },
+      workerConcurrencyLimit: 3,
+    },
+  })
+  listener(current)
+
+  assert.equal(provider.value, 'browser-provider')
+  assert.equal(modelId.value, 'server-model-b')
+  assert.equal(concurrency.value, '3')
+  assert.equal(conflict.hidden, false)
+  assert.match(visibleText(conflict), /Provider ID.*server-provider-b.*browser-provider/u)
+  assert.equal(byClass(rootElement, 'wwc-settings-save-route').disabled, true)
+
+  byClass(rootElement, 'wwc-settings-route-keep-draft').dispatch('click')
+  assert.equal(conflict.hidden, true)
+  assert.equal(byClass(rootElement, 'wwc-settings-save-route').disabled, false)
+  form.dispatch('submit')
+  assert.deepEqual(calls[0], {
+    defaultModelRoute: {
+      providerId: 'browser-provider',
+      modelId: 'server-model-b',
+      credentialReferenceId: credentialId,
+    },
+    workerConcurrencyLimit: 3,
+  })
+
+  provider.value = 'attempted-late-edit'
+  provider.dispatch('input')
+  assert.equal(provider.value, 'attempted-late-edit')
+  current = pageState({
+    settings: {
+      revision: 6,
+      defaultModelRoute: {
+        providerId: 'browser-provider',
+        modelId: 'server-model-b',
+        credentialReferenceId: credentialId,
+      },
+      workerConcurrencyLimit: 3,
+    },
+    interaction: { status: 'idle', operation: null, error: null },
+  })
+  listener(current)
+  finishUpdate()
+  await Promise.resolve()
+  assert.equal(provider.value, 'browser-provider')
+
+  provider.value = 'draft-to-discard'
+  provider.dispatch('input')
+  current = pageState({
+    settings: {
+      revision: 7,
+      defaultModelRoute: {
+        providerId: 'external-provider',
+        modelId: 'server-model-c',
+        credentialReferenceId: credentialId,
+      },
+      workerConcurrencyLimit: 4,
+    },
+  })
+  listener(current)
+  byClass(rootElement, 'wwc-settings-route-use-server').dispatch('click')
+  assert.equal(provider.value, 'external-provider')
+  assert.equal(modelId.value, 'server-model-c')
+  assert.equal(concurrency.value, '4')
   mounted.close()
 })
 
@@ -630,6 +1470,7 @@ test('invalid settings scope fails before transport and produces a clear page pr
 
 test('settings page keeps its network boundary in the view-model and renders only safe errors', () => {
   const pageSource = readFileSync(resolve(root, 'apps/client/src/settings-page.ts'), 'utf8')
+  const draftSource = readFileSync(resolve(root, 'apps/client/src/editable-draft.ts'), 'utf8')
   const viewModelSource = readFileSync(
     resolve(root, 'apps/client/src/settings-view-model.ts'),
     'utf8',
@@ -638,6 +1479,7 @@ test('settings page keeps its network boundary in the view-model and renders onl
   assert.doesNotMatch(pageSource, /new\s+WebSocket/u)
   assert.doesNotMatch(pageSource, /innerHTML/u)
   assert.doesNotMatch(pageSource, /console\./u)
+  assert.doesNotMatch(`${pageSource}\n${draftSource}`, /localStorage|sessionStorage/u)
   assert.doesNotMatch(viewModelSource, /\bfetch\s*\(/u)
   assert.doesNotMatch(viewModelSource, /new\s+WebSocket/u)
   assert.doesNotMatch(viewModelSource, /console\./u)

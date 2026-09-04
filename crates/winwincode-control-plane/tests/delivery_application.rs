@@ -6,24 +6,27 @@ use winwincode_api::generated::{
     AcceptanceCriterionInput, Actor, DeliveryCreateCommand, DeliveryCreateCommandCommand,
     DeliveryCreatePayload, DeliveryListParameters, DeliveryListQuery, DeliveryListQueryQuery,
     DeliverySpecInput, DeliveryUpdateSpecCommand, DeliveryUpdateSpecCommandCommand,
-    DeliveryUpdateSpecPayload, PageRequest, RepositoryScope, RepositoryScopeKind, Scope, UserActor,
-    UserActorKind,
+    DeliveryUpdateSpecPayload, ModelRoute, PageRequest, RepositoryScope, RepositoryScopeKind,
+    Scope, UserActor, UserActorKind,
 };
 use winwincode_control_plane::{
-    CollaborationInboxItemId, CollaborationInboxSourcePort, ControlPlane, DeliveryAdvanceAuthority,
-    DeliveryApplicationError, DeliveryAttentionAuthority, DeliveryAuthorityError,
-    DeliveryAuthorityPort, DeliveryAuthorityRequest, DeliverySpecificationAuthority,
-    DeliveryVerdictAuthority, DurableCollaborationInboxSource, EventPublishError, EventPublisher,
-    FormalCollaborationCommandRoute, OutboxEvent, ResponsibilityReviewKind, ResponsibilityRole,
-    ResponsibilityTarget, command_receipt_identity,
+    CollaborationInboxItemId, CollaborationInboxSourcePort, ControlPlane,
+    CreateProductSessionCommand, DeliveryAdvanceAuthority, DeliveryApplicationError,
+    DeliveryAttentionAuthority, DeliveryAuthorityError, DeliveryAuthorityPort,
+    DeliveryAuthorityRequest, DeliverySpecificationAuthority, DeliveryVerdictAuthority,
+    DurableCollaborationInboxSource, EventPublishError, EventPublisher,
+    FormalCollaborationCommandRoute, OutboxEvent, ProductSessionService, ResponsibilityReviewKind,
+    ResponsibilityRole, ResponsibilityTarget, command_receipt_identity,
+    product_session_command_context,
 };
 use winwincode_delivery::domain::{
     AttentionItem, AttentionItemStatus, AttentionItemType, DELIVERY_SCHEMA_VERSION, Delivery,
     RepositoryKind, RepositoryRef,
 };
 use winwincode_domain::{
-    AttentionItemId, DeliveryId, OrganizationId, ProjectId, RepositoryId, RequestId, Revision,
-    SchemaVersion, Sha256Digest, UserId, WorkspaceId,
+    AttentionItemId, ControlPlaneEventId, CredentialReferenceId, DeliveryId, Instant,
+    OrganizationId, ProductSessionId, ProjectId, RepositoryId, RequestId, Revision, SchemaVersion,
+    Sha256Digest, UserId, WorkspaceId,
 };
 use winwincode_storage::{NewOutboxEvent, ProductStateStorage, SqliteStorage, StateCommit};
 
@@ -53,9 +56,6 @@ impl DeliveryAuthorityPort for RepositoryAuthority {
                 locator: "file:///workspace/repository".to_owned(),
             },
             source_ref: None,
-            scope: vec!["src".to_owned()],
-            out_of_scope: vec!["target".to_owned()],
-            constraints: vec!["tests pass".to_owned()],
             max_rework_attempts: 2,
             criterion_verification_methods: vec![(
                 "criterion-1".to_owned(),
@@ -85,6 +85,44 @@ impl DeliveryAuthorityPort for RepositoryAuthority {
         _request: DeliveryAuthorityRequest<'_>,
     ) -> Result<DeliveryVerdictAuthority, DeliveryAuthorityError> {
         Err(DeliveryAuthorityError::new("verdict authority is not used"))
+    }
+}
+
+struct CatalogChangingAuthority {
+    root: PathBuf,
+    scope: RepositoryScope,
+    actor_seed: u64,
+    session_seed: u64,
+}
+
+impl DeliveryAuthorityPort for CatalogChangingAuthority {
+    fn specification(
+        &mut self,
+        request: DeliveryAuthorityRequest<'_>,
+    ) -> Result<DeliverySpecificationAuthority, DeliveryAuthorityError> {
+        seed_product_session(&self.root, &self.scope, self.actor_seed, self.session_seed);
+        RepositoryAuthority.specification(request)
+    }
+
+    fn advance(
+        &mut self,
+        request: DeliveryAuthorityRequest<'_>,
+    ) -> Result<DeliveryAdvanceAuthority, DeliveryAuthorityError> {
+        RepositoryAuthority.advance(request)
+    }
+
+    fn resolve_attention(
+        &mut self,
+        request: DeliveryAuthorityRequest<'_>,
+    ) -> Result<DeliveryAttentionAuthority, DeliveryAuthorityError> {
+        RepositoryAuthority.resolve_attention(request)
+    }
+
+    fn verdict(
+        &mut self,
+        request: DeliveryAuthorityRequest<'_>,
+    ) -> Result<DeliveryVerdictAuthority, DeliveryAuthorityError> {
+        RepositoryAuthority.verdict(request)
     }
 }
 
@@ -125,6 +163,223 @@ fn generated_create_catalog_list_and_restart_replay_are_one_durable_path() {
         winwincode_api::generated::ErrorCode::IdempotencyConflict
     );
     restarted.shutdown().expect("close restarted Control Plane");
+    std::fs::remove_dir_all(root).expect("remove fixture");
+}
+
+#[test]
+fn source_product_session_is_actor_scoped_immutable_and_restart_stable() {
+    let root = unique_root("delivery-source-product-session");
+    let repository_scope = scope(51);
+    let source = seed_product_session(&root, &repository_scope, 51, 510);
+    let alternate = seed_product_session(&root, &repository_scope, 51, 511);
+    let delivery_id = DeliveryId(canonical_id("dlv", 51));
+    let mut command = create_command(
+        repository_scope.clone(),
+        delivery_id.clone(),
+        51,
+        "Session Delivery",
+    );
+    command.payload.spec.scope = vec!["apps/client/src/chat".to_owned()];
+    command.payload.spec.out_of_scope = vec!["crates".to_owned()];
+    command.payload.spec.constraints = vec!["keep the confirmed chat goal".to_owned()];
+    command.payload.spec.source_product_session_id = Some(source.clone());
+
+    let mut first = start(&root);
+    first
+        .install_delivery_authority_port(Box::new(RepositoryAuthority))
+        .expect("install authority");
+    let created = first
+        .delivery_create(&command)
+        .expect("create from matching ProductSession");
+    first.shutdown().expect("close first Control Plane");
+
+    let mut restarted = start(&root);
+    assert_eq!(
+        restarted
+            .delivery_create(&command)
+            .expect("receipt-first source replay"),
+        created
+    );
+    let mut changed_replay = command.clone();
+    changed_replay.payload.spec.source_product_session_id = Some(alternate.clone());
+    assert_eq!(
+        restarted
+            .delivery_create(&changed_replay)
+            .expect_err("same request cannot name another source")
+            .code(),
+        winwincode_api::generated::ErrorCode::IdempotencyConflict
+    );
+    restarted
+        .install_delivery_authority_port(Box::new(RepositoryAuthority))
+        .expect("install restart authority");
+
+    let mut stale = update_command(
+        repository_scope.clone(),
+        delivery_id.clone(),
+        0,
+        52,
+        "Stale",
+    );
+    stale.actor = actor(51);
+    stale.payload.spec.source_product_session_id = Some(source.clone());
+    assert_eq!(
+        restarted
+            .delivery_update_spec(&stale)
+            .expect_err("stale revision conflicts")
+            .code(),
+        winwincode_api::generated::ErrorCode::RevisionConflict
+    );
+
+    let mut replace_source = update_command(
+        repository_scope.clone(),
+        delivery_id,
+        1,
+        53,
+        "Replace source",
+    );
+    replace_source.actor = actor(51);
+    replace_source.payload.spec.source_product_session_id = Some(alternate);
+    assert_eq!(
+        restarted
+            .delivery_update_spec(&replace_source)
+            .expect_err("source provenance is immutable")
+            .code(),
+        winwincode_api::generated::ErrorCode::InvalidRequest
+    );
+
+    let mut valid_update = update_command(
+        repository_scope.clone(),
+        DeliveryId(canonical_id("dlv", 51)),
+        1,
+        56,
+        "Refined source Delivery",
+    );
+    valid_update.actor = actor(51);
+    valid_update.payload.spec.scope = vec!["apps/client/src/chat".to_owned(), "tests".to_owned()];
+    valid_update.payload.spec.out_of_scope = vec!["crates".to_owned()];
+    valid_update.payload.spec.constraints = vec!["preserve confirmed requirements".to_owned()];
+    valid_update.payload.spec.source_product_session_id = Some(source.clone());
+    assert_eq!(
+        restarted
+            .delivery_update_spec(&valid_update)
+            .expect("same source permits an editable Spec replacement")
+            .current_revision,
+        Revision(2)
+    );
+    restarted.shutdown().expect("close restarted Control Plane");
+    std::fs::remove_dir_all(root).expect("remove fixture");
+}
+
+#[test]
+fn source_product_session_rejects_foreign_repository_and_actor() {
+    let root = unique_root("delivery-source-product-session-authority");
+    let repository_scope = scope(52);
+    let source = seed_product_session(&root, &repository_scope, 52, 520);
+    let foreign_scope = scope(53);
+    let foreign = seed_product_session(&root, &foreign_scope, 52, 521);
+    let mut control_plane = start(&root);
+    control_plane
+        .install_delivery_authority_port(Box::new(RepositoryAuthority))
+        .expect("install authority");
+
+    let mut foreign_command = create_command(
+        repository_scope.clone(),
+        DeliveryId(canonical_id("dlv", 54)),
+        54,
+        "Foreign source",
+    );
+    foreign_command.actor = actor(52);
+    foreign_command.payload.spec.source_product_session_id = Some(foreign);
+    assert_eq!(
+        control_plane
+            .delivery_create(&foreign_command)
+            .expect_err("foreign repository source is rejected")
+            .code(),
+        winwincode_api::generated::ErrorCode::InvalidRequest
+    );
+
+    let mut other_actor = create_command(
+        repository_scope,
+        DeliveryId(canonical_id("dlv", 55)),
+        55,
+        "Other actor",
+    );
+    other_actor.payload.spec.source_product_session_id = Some(source);
+    assert_eq!(
+        control_plane
+            .delivery_create(&other_actor)
+            .expect_err("another actor cannot consume the source")
+            .code(),
+        winwincode_api::generated::ErrorCode::InvalidRequest
+    );
+    control_plane.shutdown().expect("close Control Plane");
+    std::fs::remove_dir_all(root).expect("remove fixture");
+}
+
+#[test]
+fn source_product_session_guard_rejects_a_concurrent_catalog_change() {
+    let root = unique_root("delivery-source-product-session-guard");
+    let scope = scope(71);
+    let source = seed_product_session(&root, &scope, 71, 710);
+    let mut command = create_command(
+        scope.clone(),
+        DeliveryId(canonical_id("dlv", 71)),
+        71,
+        "Guarded source",
+    );
+    command.payload.spec.source_product_session_id = Some(source);
+    let mut control_plane = start(&root);
+    control_plane
+        .install_delivery_authority_port(Box::new(CatalogChangingAuthority {
+            root: root.clone(),
+            scope,
+            actor_seed: 71,
+            session_seed: 711,
+        }))
+        .expect("install changing authority");
+    assert_eq!(
+        control_plane
+            .delivery_create(&command)
+            .expect_err("source catalog changed before commit")
+            .code(),
+        winwincode_api::generated::ErrorCode::RevisionConflict
+    );
+    assert_eq!(
+        control_plane
+            .delivery_create(&command)
+            .expect("same request retries after refreshing source authority")
+            .current_revision,
+        Revision(1)
+    );
+    control_plane.shutdown().expect("close Control Plane");
+    std::fs::remove_dir_all(root).expect("remove fixture");
+}
+
+#[test]
+fn credential_material_in_editable_spec_is_rejected_without_consuming_the_request() {
+    let root = unique_root("delivery-spec-secret-safety");
+    let scope = scope(61);
+    let delivery_id = DeliveryId(canonical_id("dlv", 61));
+    let mut command = create_command(scope, delivery_id, 61, "Secret-free retry");
+    command.payload.spec.constraints = vec!["Authorization: Bearer secret-value".to_owned()];
+    let mut control_plane = start(&root);
+    control_plane
+        .install_delivery_authority_port(Box::new(RepositoryAuthority))
+        .expect("install authority");
+    let error = control_plane
+        .delivery_create(&command)
+        .expect_err("credential material is rejected");
+    assert_eq!(
+        error.code(),
+        winwincode_api::generated::ErrorCode::InvalidRequest
+    );
+    assert!(!error.to_string().contains("secret-value"));
+
+    command.payload.spec.constraints = vec!["tests pass".to_owned()];
+    control_plane
+        .delivery_create(&command)
+        .expect("corrected retry uses the same request once");
+    control_plane.shutdown().expect("close Control Plane");
     std::fs::remove_dir_all(root).expect("remove fixture");
 }
 
@@ -327,6 +582,40 @@ fn start(root: &PathBuf) -> ControlPlane {
     ControlPlane::start(Box::new(storage), Box::new(NoopPublisher)).expect("start Control Plane")
 }
 
+fn seed_product_session(
+    root: &PathBuf,
+    scope: &RepositoryScope,
+    actor_seed: u64,
+    session_seed: u64,
+) -> ProductSessionId {
+    let product_session_id = ProductSessionId(canonical_id("psn", session_seed));
+    let context = product_session_command_context(
+        &actor(actor_seed),
+        scope,
+        RequestId(canonical_id("req", 10_000 + session_seed)),
+        &Revision(0),
+        ControlPlaneEventId(canonical_id("evt", 10_000 + session_seed)),
+        Instant("2027-01-15T08:00:00.000Z".to_owned()),
+    )
+    .expect("ProductSession command context");
+    let mut storage = SqliteStorage::open(root).expect("open ProductSession storage");
+    ProductSessionService::new(&mut storage)
+        .create(&CreateProductSessionCommand {
+            context,
+            product_session_id: product_session_id.clone(),
+            project_id: scope.project_id.clone(),
+            repository_id: scope.repository_id.clone(),
+            title: "Confirmed requirements".to_owned(),
+            model_route: ModelRoute {
+                credential_reference_id: CredentialReferenceId(canonical_id("crd", session_seed)),
+                model_id: "fixture-model".to_owned(),
+                provider_id: "fixture-provider".to_owned(),
+            },
+        })
+        .expect("create ProductSession");
+    product_session_id
+}
+
 fn create_command(
     scope: RepositoryScope,
     delivery_id: DeliveryId,
@@ -378,6 +667,10 @@ fn spec(scope: &RepositoryScope, title: &str) -> DeliverySpecInput {
         }],
         base_revision: "0123456789abcdef".to_owned(),
         goal: "Ship the exact implementation".to_owned(),
+        scope: vec!["src".to_owned()],
+        out_of_scope: vec!["target".to_owned()],
+        constraints: vec!["tests pass".to_owned()],
+        source_product_session_id: None,
         publication_target: None,
         repository_id: scope.repository_id.clone(),
         title: title.to_owned(),

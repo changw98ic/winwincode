@@ -631,6 +631,7 @@ impl LocalModelRoute {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn configure_local_model_authority(
     storage: &mut SqliteStorage,
     subject: &str,
@@ -638,6 +639,7 @@ fn configure_local_model_authority(
     model_route: &LocalModelRoute,
     secret_directory: PathBuf,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let occurred_at = SystemStandaloneApplicationClock.now_instant();
     let actor = Actor::UserActor(UserActor {
         kind: UserActorKind::User,
         id: UserId(subject.to_owned()),
@@ -715,6 +717,7 @@ fn configure_local_model_authority(
                 expected_catalog_version: catalog.catalog_version,
             },
             &descriptor,
+            occurred_at.clone(),
         )?;
     }
 
@@ -737,6 +740,7 @@ fn configure_local_model_authority(
                 default_model_route: Some(route),
                 worker_concurrency_limit: 1,
             },
+            occurred_at,
         )?;
     }
     Ok(())
@@ -763,16 +767,7 @@ fn open_local_model_execution(
         enterprise_ceilings: Vec::new(),
     })?;
     let retry_policy = local_loopback_retry_policy()?;
-    let pool = ModelRequestPoolConfig {
-        max_routes: 4,
-        max_active_per_route: 1,
-        max_waiting_per_route: 4,
-        max_exchange_records_per_route: 8,
-        max_buffered_frames_per_stream: 32,
-        max_buffered_bytes_per_stream: 64 * 1024,
-        resume_buffered_frames_per_stream: 8,
-        resume_buffered_bytes_per_stream: 16 * 1024,
-    };
+    let pool = local_model_request_pool_config();
     Ok(StandaloneModelExecutionApplication::open(
         StandaloneModelExecutionConfig {
             data_directory: config.data_directory().to_path_buf(),
@@ -786,6 +781,19 @@ fn open_local_model_execution(
             retry_policy: Box::new(retry_policy),
         },
     )?)
+}
+
+const fn local_model_request_pool_config() -> ModelRequestPoolConfig {
+    ModelRequestPoolConfig {
+        max_routes: 4,
+        max_active_per_route: 1,
+        max_waiting_per_route: 4,
+        max_exchange_records_per_route: 8,
+        max_buffered_frames_per_stream: 32,
+        max_buffered_bytes_per_stream: 64 * 1024,
+        resume_buffered_frames_per_stream: 8,
+        resume_buffered_bytes_per_stream: 16 * 1024,
+    }
 }
 
 fn open_production_codex(
@@ -929,7 +937,8 @@ fn compose_production_application(
         enterprise,
         collaboration,
         execution_config,
-    )?;
+    )?
+    .with_model_request_pool_config(local_model_request_pool_config())?;
     Ok(ComposedApplication {
         application,
         identities,

@@ -2477,14 +2477,6 @@ impl ScenarioRunner {
         let source_ref =
             serde_json::from_value(spec.get("sourceRef").cloned().unwrap_or(Value::Null))
                 .map_err(string_error)?;
-        let strings = |field: &str| -> Result<Vec<String>, String> {
-            serde_json::from_value(
-                spec.get(field)
-                    .cloned()
-                    .ok_or_else(|| format!("DeliverySpec lacks {field}"))?,
-            )
-            .map_err(string_error)
-        };
         let criteria = spec
             .get("acceptanceCriteria")
             .and_then(Value::as_array)
@@ -2503,9 +2495,6 @@ impl ScenarioRunner {
             now_millis,
             repository,
             source_ref,
-            scope: strings("scope")?,
-            out_of_scope: strings("outOfScope")?,
-            constraints: strings("constraints")?,
             max_rework_attempts: required_u64(spec, "maxReworkAttempts")?,
             criterion_verification_methods,
         })

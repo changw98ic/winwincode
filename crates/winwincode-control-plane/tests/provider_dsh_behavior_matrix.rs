@@ -173,7 +173,11 @@ fn revoke_credential() -> CredentialReferenceRevokeCommand {
 
 fn configure(storage: &mut SqliteStorage) {
     ProviderCatalogService::new(storage)
-        .upsert(&catalog_request(1, 0), &descriptor(1))
+        .upsert(
+            &catalog_request(1, 0),
+            &descriptor(1),
+            Instant("2026-09-02T00:00:00.000Z".to_owned()),
+        )
         .expect("create Provider catalog");
     CredentialReferenceService::new(storage)
         .create(&create_credential(), 1_800_000_000_000)
@@ -193,6 +197,7 @@ fn configure(storage: &mut SqliteStorage) {
                 default_model_route: Some(route()),
                 worker_concurrency_limit: 1,
             },
+            Instant("2026-09-02T00:00:00.000Z".to_owned()),
         )
         .expect("configure model route");
 }
@@ -469,7 +474,11 @@ fn apply_hot_update_and_reject_invalid(storage: &mut SqliteStorage) {
         .rotate(&rotate_credential(), 1_800_000_001_000)
         .expect("rotate Credential reference");
     ProviderCatalogService::new(storage)
-        .upsert(&catalog_request(5, 1), &descriptor(2))
+        .upsert(
+            &catalog_request(5, 1),
+            &descriptor(2),
+            Instant("2026-09-02T00:00:00.000Z".to_owned()),
+        )
         .expect("hot-update Provider catalog");
     let last_good = ProviderCatalogService::new(storage)
         .project(&Scope::OrganizationScope(organization_scope()))
@@ -478,7 +487,11 @@ fn apply_hot_update_and_reject_invalid(storage: &mut SqliteStorage) {
     let mut invalid = descriptor(3);
     invalid.models.push(model(999_999));
     let rejected = ProviderCatalogService::new(storage)
-        .upsert(&catalog_request(50, 2), &invalid)
+        .upsert(
+            &catalog_request(50, 2),
+            &invalid,
+            Instant("2026-09-02T00:00:00.000Z".to_owned()),
+        )
         .expect_err("duplicate model update is invalid");
     assert_eq!(rejected.kind(), ProviderCatalogErrorKind::InvalidRequest);
     assert_eq!(

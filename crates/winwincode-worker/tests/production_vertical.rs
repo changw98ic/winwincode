@@ -375,6 +375,7 @@ fn configure_provider(storage: &mut SqliteStorage, message: &ModelOpenMessage) {
                     reasoning_efforts: vec!["high".to_owned()],
                 }],
             },
+            Instant("2026-09-02T00:00:00.000Z".to_owned()),
         )
         .expect("register loopback Provider");
     CredentialReferenceService::new(storage)
@@ -415,6 +416,7 @@ fn configure_provider(storage: &mut SqliteStorage, message: &ModelOpenMessage) {
                 }),
                 worker_concurrency_limit: 2,
             },
+            Instant("2026-09-02T00:00:00.000Z".to_owned()),
         )
         .expect("configure ProductSession model route");
 }
@@ -2432,6 +2434,7 @@ fn stored_input_operation_json(root: &TestDirectory, input_request_id: &str) -> 
         question_id,
         turn_id,
         request_digest,
+        choice_identities_json,
         resolution_digest,
         state,
     ): (
@@ -2440,12 +2443,13 @@ fn stored_input_operation_json(root: &TestDirectory, input_request_id: &str) -> 
         String,
         String,
         String,
+        Vec<u8>,
         Option<String>,
         String,
     ) = connection
         .query_row(
             "SELECT run_key, kernel_session_id, question_id, turn_id,
-                    request_digest, resolution_digest, state
+                    request_digest, choice_identities_json, resolution_digest, state
              FROM input_operation WHERE input_request_id = ?1",
             rusqlite::params![input_request_id],
             |row| {
@@ -2457,6 +2461,7 @@ fn stored_input_operation_json(root: &TestDirectory, input_request_id: &str) -> 
                     row.get(4)?,
                     row.get(5)?,
                     row.get(6)?,
+                    row.get(7)?,
                 ))
             },
         )
@@ -2467,6 +2472,8 @@ fn stored_input_operation_json(root: &TestDirectory, input_request_id: &str) -> 
         "questionId": question_id,
         "turnId": turn_id,
         "requestDigest": request_digest,
+        "choiceIdentities": serde_json::from_slice::<serde_json::Value>(&choice_identities_json)
+            .expect("decode durable choice identities"),
         "resolutionDigest": resolution_digest,
         "state": state,
     })
@@ -3575,8 +3582,8 @@ fn real_request_user_input_resumes_after_response_loss_and_rejects_forged_replay
                             "header": "Continue",
                             "question": "Continue this turn?",
                             "options": [
-                                {"label": "yes", "description": "Continue the turn."},
-                                {"label": "no", "description": "Stop the turn."}
+                                {"label": "continue", "description": "PRIVATE_CHOICE_DESCRIPTION_MUST_NOT_LEAK"},
+                                {"label": "continue", "description": "Continue after revising the plan."}
                             ]
                         }]
                     })
@@ -3630,7 +3637,37 @@ fn real_request_user_input_resumes_after_response_loss_and_rejects_forged_replay
         );
         assert_eq!(request.mode, InteractiveInputMode::SingleChoice);
         assert_eq!(request.choices.as_ref().map(Vec::len), Some(2));
+        let choice_json =
+            serde_json::to_value(request.choices.as_ref().expect("interactive input choices"))
+                .expect("serialize interactive input choices");
+        let choice_json = choice_json.as_array().expect("choice array");
+        let first_choice_id = choice_json[0]["id"]
+            .as_str()
+            .expect("first stable choice identity");
+        let second_choice_id = choice_json[1]["id"]
+            .as_str()
+            .expect("second stable choice identity");
+        assert_ne!(first_choice_id, second_choice_id);
+        assert!(first_choice_id.starts_with("ich_"));
+        assert!(second_choice_id.starts_with("ich_"));
+        assert_eq!(choice_json[0]["value"], "continue");
+        assert_eq!(choice_json[1]["value"], "continue");
+        for choice in choice_json {
+            let mut public_keys = choice
+                .as_object()
+                .expect("public choice object")
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>();
+            public_keys.sort_unstable();
+            assert_eq!(public_keys, vec!["id", "label", "value"]);
+        }
         assert!(!request.prompt.is_empty());
+        assert!(
+            !serde_json::to_string(&request)
+                .expect("serialize public input request")
+                .contains("PRIVATE_CHOICE_DESCRIPTION_MUST_NOT_LEAK")
+        );
 
         let valid_response = input_response(&request);
         let mut foreign = valid_response.clone();
@@ -3661,6 +3698,30 @@ fn real_request_user_input_resumes_after_response_loss_and_rejects_forged_replay
         let input_before_restart = stored_input_operation_json(&root, &request.input_request_id.0);
         assert_eq!(input_before_restart["state"], "pending");
         assert!(!input_before_restart["turnId"].as_str().unwrap().is_empty());
+        let durable_choice_identities = input_before_restart["choiceIdentities"]
+            .as_array()
+            .expect("durable opaque choice identities");
+        assert_eq!(durable_choice_identities.len(), 2);
+        assert_eq!(durable_choice_identities[0]["choiceId"], first_choice_id);
+        assert_eq!(durable_choice_identities[1]["choiceId"], second_choice_id);
+        for identity in durable_choice_identities {
+            let mut durable_keys = identity
+                .as_object()
+                .expect("durable choice identity object")
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>();
+            durable_keys.sort_unstable();
+            assert_eq!(
+                durable_keys,
+                vec!["choiceId", "publicLabel", "publicOccurrence"]
+            );
+        }
+        assert!(
+            !serde_json::to_string(&input_before_restart)
+                .expect("serialize durable input operation")
+                .contains("PRIVATE_CHOICE_DESCRIPTION_MUST_NOT_LEAK")
+        );
         let crash_snapshot = DirectorySnapshot::capture(&root.worker());
         drop(first_app);
         drop(first);
@@ -3718,6 +3779,10 @@ fn real_request_user_input_resumes_after_response_loss_and_rejects_forged_replay
             "restart must rebind the durable input operation to the resumed Kernel session"
         );
         assert_eq!(rebound_input["turnId"], input_before_restart["turnId"]);
+        assert_eq!(
+            rebound_input["choiceIdentities"], input_before_restart["choiceIdentities"],
+            "restart must preserve the exact opaque choice identities"
+        );
 
         replay
             .accept_control(
@@ -3826,8 +3891,8 @@ fn real_request_user_input_resumes_after_response_loss_and_rejects_forged_replay
                             "header": "Continue",
                             "question": "Continue this turn?",
                             "options": [
-                                {"label": "yes", "description": "Continue the turn."},
-                                {"label": "no", "description": "Stop the turn."}
+                                {"label": "continue", "description": "PRIVATE_CHOICE_DESCRIPTION_MUST_NOT_LEAK"},
+                                {"label": "continue", "description": "Continue after revising the plan."}
                             ]
                         }]
                     })

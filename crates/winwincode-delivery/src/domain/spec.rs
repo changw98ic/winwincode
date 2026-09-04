@@ -4,7 +4,7 @@ use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use winwincode_domain::DeliveryId;
+use winwincode_domain::{DeliveryId, ProductSessionId};
 
 use super::{
     AcceptanceCriterionId, DeliverySpecId, DeliveryValidationError, DeliveryValidationErrorCode,
@@ -83,6 +83,8 @@ pub struct DeliverySpec {
     pub constraints: Vec<String>,
     pub acceptance_criteria: Vec<AcceptanceCriterion>,
     #[serde(deserialize_with = "super::deserialize_required_option")]
+    pub source_product_session_id: Option<ProductSessionId>,
+    #[serde(deserialize_with = "super::deserialize_required_option")]
     pub source_ref: Option<DeliverySourceRef>,
     #[serde(deserialize_with = "super::deserialize_required_option")]
     pub publication_target: Option<DeliveryPublicationTarget>,
@@ -144,6 +146,12 @@ pub(crate) fn validate(spec: &mut DeliverySpec, path: &str) -> Result<(), Delive
             .map(|criterion| criterion.id.0.as_str()),
         &format!("{path}.acceptanceCriteria"),
     )?;
+    if let Some(source_product_session_id) = &spec.source_product_session_id {
+        validate_product_session_id(
+            source_product_session_id,
+            &format!("{path}.sourceProductSessionId"),
+        )?;
+    }
     validate_repository(&spec.repository, &format!("{path}.repository"))?;
     bounded_text(
         &spec.base_revision,
@@ -178,6 +186,30 @@ pub(crate) fn validate(spec: &mut DeliverySpec, path: &str) -> Result<(), Delive
         validate_publication_target(target, &format!("{path}.publicationTarget"))?;
     }
     Ok(())
+}
+
+fn validate_product_session_id(
+    product_session_id: &ProductSessionId,
+    path: &str,
+) -> Result<(), DeliveryValidationError> {
+    let valid = product_session_id
+        .0
+        .strip_prefix("psn_")
+        .is_some_and(|value| {
+            value.len() == 26
+                && value
+                    .bytes()
+                    .all(|byte| CROCKFORD_BASE32_ALPHABET.contains(&byte))
+        });
+    if valid {
+        Ok(())
+    } else {
+        Err(validation_error(
+            DeliveryValidationErrorCode::InvalidIdentifier,
+            path,
+            "must use psn_ followed by 26 uppercase Crockford Base32 characters",
+        ))
+    }
 }
 
 /// Maps one valid GitHub issue source to its single stable canonical Delivery identity.

@@ -328,3 +328,32 @@ test('generated Client trigger, proof and documentation stay connected', () => {
     'corepack pnpm verify:source',
   ]) assert.equal(contract.includes(phrase), true, phrase)
 })
+
+test('StrongFlow diagram execution crosses the generated Control Plane boundary once', () => {
+  const generated = readFileSync(
+    join(root, 'apps', 'client', 'src', 'generated', 'contracts.ts'),
+    'utf8',
+  )
+  const deliveryDetail = generated.match(
+    /export type DeliveryDetailProjection = \{([\s\S]*?)\n\}/u,
+  )
+  assert.ok(deliveryDetail, 'the generated Delivery detail projection must exist')
+  assert.match(
+    deliveryDetail[1],
+    /readonly "diagramExecution":/u,
+    'diagram execution facts must arrive in the generated delivery.get projection',
+  )
+
+  const clientPackage = json(join(root, 'apps', 'client', 'package.json'))
+  assert.equal(
+    clientPackage.dependencies?.['@winwincode/contracts'],
+    undefined,
+    'the browser must not add a second internal contract path',
+  )
+  const viewModel = readFileSync(
+    join(root, 'apps', 'client', 'src', 'strongflow-view-model.ts'),
+    'utf8',
+  )
+  assert.doesNotMatch(viewModel, /from '@winwincode\/contracts'/u)
+  assert.match(viewModel, /diagramExecution: delivery\.diagramExecution/u)
+})
