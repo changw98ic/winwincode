@@ -58,7 +58,17 @@ const CONTROL_PLANE_SCHEMA_VERSION = 'winwincode/v1'
 const DEFAULT_NETWORK_RETRIES = 2
 const DEFAULT_RECONNECT_DELAY_MILLIS = 250
 const AUTH_SESSION_PATH = '/api/v1/auth/session'
+const AUTH_LOGIN_PATH = '/api/v1/auth/login'
+const SERVER_INITIALIZATION_PATH = '/api/v1/server/initialization'
 const RFC3339_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/u
+
+/**
+ * The one place that names the sign-in wire failure codes. Pages and
+ * view-models only ever see the `ControlPlaneLoginFailure` union below.
+ */
+const LOGIN_INVALID_CREDENTIALS_CODE = 'INVALID_CREDENTIALS'
+const LOGIN_RATE_LIMITED_CODE = 'RATE_LIMITED'
+const LOGIN_ACCOUNT_DISABLED_CODE = 'ACCOUNT_DISABLED'
 
 export type ControlPlaneClientErrorKind =
   | 'authentication'
@@ -201,6 +211,27 @@ export interface ControlPlaneRequestOptions {
 
 export type ControlPlaneSession = AuthSessionResponse
 
+/** Username and password material for one sign-in attempt. */
+export interface ControlPlanePasswordCredentials {
+  readonly username: string
+  readonly password: string
+}
+
+/** Whether the Server still accepts the one-time bootstrap initialization. */
+export interface ControlPlaneInitializationStatus {
+  readonly initialized: boolean
+}
+
+/**
+ * The one presentation-facing sign-in failure taxonomy. Server wire codes are
+ * translated by `controlPlaneLoginFailure` and never read anywhere else.
+ */
+export type ControlPlaneLoginFailure =
+  | 'invalid-credentials'
+  | 'rate-limited'
+  | 'account-disabled'
+  | 'unavailable'
+
 export interface ControlPlaneSubscribeOptions {
   readonly subscriptionId: ControlPlaneWebSocketSubscriptionId
   readonly subscription: ControlPlaneWebSocketSubscription
@@ -234,6 +265,15 @@ export interface ControlPlaneClient {
     bootstrapProof: string,
     options?: ControlPlaneRequestOptions,
   ): Promise<ControlPlaneSession>
+  /** Exchange a username and password for one browser session. */
+  loginWithPassword(
+    credentials: ControlPlanePasswordCredentials,
+    options?: ControlPlaneRequestOptions,
+  ): Promise<ControlPlaneSession>
+  /** Read whether the Server still shows the first-time initialization entry. */
+  initializationStatus(
+    options?: ControlPlaneRequestOptions,
+  ): Promise<ControlPlaneInitializationStatus>
   logout(options?: ControlPlaneRequestOptions): Promise<void>
   command(
     command: CommandRequest,
@@ -352,6 +392,132 @@ function accessKind(code: string): ControlPlaneClientErrorKind | null {
   if (code === 'AUTHENTICATION_REQUIRED') return 'authentication'
   if (code === 'PERMISSION_DENIED') return 'authorization'
   return null
+}
+
+/**
+ * Validate sign-in input before a request exists. The password length bound
+ * mirrors the bootstrap proof bound; neither the username nor the password is
+ * ever copied into an error message.
+ */
+function assertLoginCredentials(credentials: ControlPlanePasswordCredentials): void {
+  const username = typeof credentials?.username === 'string' ? credentials.username : ''
+  const password = typeof credentials?.password === 'string' ? credentials.password : ''
+  if (
+    username.length === 0
+    || username.length > 128
+    || /\s/u.test(username)
+    || password.length === 0
+    || password.length > 4096
+  ) {
+    throw new ControlPlaneClientError({
+      kind: 'authentication',
+      code: 'LOGIN_INPUT_INVALID',
+      message: 'Enter a valid username and password.',
+      requestId: null,
+      retryable: false,
+    })
+  }
+}
+
+function loginBoundaryError(status: number, source: string): ControlPlaneClientError {
+  let value: unknown
+  try {
+    value = JSON.parse(source)
+  } catch {
+    value = null
+  }
+  const error = isRecord(value) && isRecord(value.error) ? value.error : null
+  const code = error !== null && typeof error.code === 'string'
+    ? error.code
+    : (status === 401 ? LOGIN_INVALID_CREDENTIALS_CODE : 'AUTH_LOGIN_FAILED')
+  const kind: ControlPlaneClientErrorKind = code === LOGIN_INVALID_CREDENTIALS_CODE
+    || code === LOGIN_ACCOUNT_DISABLED_CODE
+    ? 'authentication'
+    : (code === LOGIN_RATE_LIMITED_CODE || status >= 500 ? 'server' : 'protocol')
+  return new ControlPlaneClientError({
+    kind,
+    code,
+    message: error !== null && typeof error.message === 'string'
+      ? error.message
+      : 'The sign-in request failed.',
+    requestId: isRecord(value) && typeof value.requestId === 'string'
+      ? value.requestId as RequestId
+      : null,
+    retryable: error !== null && error.retryable === true,
+  })
+}
+
+/**
+ * Translate one sign-in failure into the presentation taxonomy. Every wire
+ * code stays inside this function; view-models and pages branch only on the
+ * returned union.
+ */
+export function controlPlaneLoginFailure(error: unknown): ControlPlaneLoginFailure {
+  if (error instanceof ControlPlaneClientError) {
+    if (error.code === LOGIN_INVALID_CREDENTIALS_CODE) return 'invalid-credentials'
+    if (error.code === LOGIN_ACCOUNT_DISABLED_CODE) return 'account-disabled'
+    if (error.code === LOGIN_RATE_LIMITED_CODE) return 'rate-limited'
+    if (error.kind === 'authentication') return 'invalid-credentials'
+  }
+  return 'unavailable'
+}
+
+function initializationBoundaryError(
+  status: number,
+  source: string,
+): ControlPlaneClientError {
+  let value: unknown
+  try {
+    value = JSON.parse(source)
+  } catch {
+    value = null
+  }
+  const error = isRecord(value) && isRecord(value.error) ? value.error : null
+  return new ControlPlaneClientError({
+    kind: status >= 500 ? 'server' : 'protocol',
+    code: error !== null && typeof error.code === 'string'
+      ? error.code
+      : 'SERVER_INITIALIZATION_UNAVAILABLE',
+    message: error !== null && typeof error.message === 'string'
+      ? error.message
+      : 'The Control Plane initialization status is unavailable.',
+    requestId: isRecord(value) && typeof value.requestId === 'string'
+      ? value.requestId as RequestId
+      : null,
+    retryable: error !== null && error.retryable === true,
+  })
+}
+
+function initializationResponse(source: string): ControlPlaneInitializationStatus {
+  let value: unknown
+  try {
+    value = JSON.parse(source)
+  } catch {
+    value = null
+  }
+  if (
+    isRecord(value)
+    && typeof value.schemaVersion === 'string'
+    && value.schemaVersion !== CONTROL_PLANE_SCHEMA_VERSION
+  ) {
+    throw new ControlPlaneClientError({
+      kind: 'version',
+      code: 'SCHEMA_VERSION_MISMATCH',
+      message: `The Control Plane server must use ${CONTROL_PLANE_SCHEMA_VERSION}.`,
+      requestId: null,
+      retryable: false,
+    })
+  }
+  if (!isRecord(value) || typeof value.initialized !== 'boolean') {
+    throw new ControlPlaneClientError({
+      kind: 'protocol',
+      code: 'INVALID_SERVER_INITIALIZATION_RESPONSE',
+      message: 'The Control Plane server returned an invalid initialization status.',
+      requestId: null,
+      retryable: false,
+    })
+  }
+  return Object.freeze({ initialized: value.initialized })
 }
 
 function versionCode(code: string): boolean {
@@ -663,6 +829,92 @@ export function createControlPlaneClient(options: ControlPlaneClientOptions): Co
         retryable: false,
       })
       return session
+    },
+    async loginWithPassword(credentials, requestOptions) {
+      requireOpen()
+      if (signalIsAborted(requestOptions?.signal)) throw cancelledError(null)
+      assertLoginCredentials(credentials)
+      try {
+        const response = await transportRequest(
+          `${location.serverUrl}${AUTH_LOGIN_PATH}`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              schemaVersion: CONTROL_PLANE_SCHEMA_VERSION,
+              username: credentials.username,
+              password: credentials.password,
+            }),
+            redirect: 'error',
+            cache: 'no-store',
+            referrerPolicy: 'no-referrer',
+          },
+          requestOptions?.signal,
+        )
+        const source = await response.text()
+        if (!response.ok) throw loginBoundaryError(response.status, source)
+        if (response.status !== 201) throw new ControlPlaneClientError({
+          kind: 'protocol',
+          code: 'INVALID_AUTH_SESSION_RESPONSE',
+          message: 'The authentication server returned an invalid session response.',
+          requestId: null,
+          retryable: false,
+        })
+        return sessionResponse(source)
+      } catch (error) {
+        if (signalIsAborted(requestOptions?.signal)) throw cancelledError(null)
+        const normalized = error instanceof ControlPlaneClientError
+          ? error
+          : new ControlPlaneClientError({
+            kind: 'network',
+            code: 'NETWORK_ERROR',
+            message: 'The authentication server could not be reached.',
+            requestId: null,
+            retryable: true,
+          })
+        reportAccessFailure(normalized)
+        throw normalized
+      }
+    },
+    async initializationStatus(requestOptions) {
+      requireOpen()
+      if (signalIsAborted(requestOptions?.signal)) throw cancelledError(null)
+      try {
+        const response = await transportRequest(
+          `${location.serverUrl}${SERVER_INITIALIZATION_PATH}`,
+          {
+            method: 'GET',
+            headers: {},
+            redirect: 'error',
+            cache: 'no-store',
+            referrerPolicy: 'no-referrer',
+          },
+          requestOptions?.signal,
+        )
+        const source = await response.text()
+        if (!response.ok) throw initializationBoundaryError(response.status, source)
+        if (response.status !== 200) throw new ControlPlaneClientError({
+          kind: 'protocol',
+          code: 'INVALID_SERVER_INITIALIZATION_RESPONSE',
+          message: 'The Control Plane server returned an invalid initialization status.',
+          requestId: null,
+          retryable: false,
+        })
+        return initializationResponse(source)
+      } catch (error) {
+        if (signalIsAborted(requestOptions?.signal)) throw cancelledError(null)
+        const normalized = error instanceof ControlPlaneClientError
+          ? error
+          : new ControlPlaneClientError({
+            kind: 'network',
+            code: 'NETWORK_ERROR',
+            message: 'The Control Plane server could not be reached.',
+            requestId: null,
+            retryable: true,
+          })
+        reportAccessFailure(normalized)
+        throw normalized
+      }
     },
     async logout(requestOptions) {
       await authSessionRequest('DELETE', null, requestOptions)

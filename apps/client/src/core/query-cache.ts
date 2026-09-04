@@ -416,6 +416,14 @@ export function createQueryCache(options: { readonly client: ControlPlaneClient 
       clear('authorization-epoch')
       return session
     },
+    async loginWithPassword(credentials, requestOptions) {
+      const session = await options.client.loginWithPassword(credentials, requestOptions)
+      clear('authorization-epoch')
+      return session
+    },
+    async initializationStatus(requestOptions) {
+      return options.client.initializationStatus(requestOptions)
+    },
     async logout(requestOptions) {
       clear('authorization-epoch')
       await options.client.logout(requestOptions)

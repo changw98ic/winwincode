@@ -38,6 +38,11 @@ import {
   type AuthSessionViewModel,
 } from './auth-view-model.js'
 import {
+  createLoginViewModel,
+  type LoginViewModel,
+} from './login-view-model.js'
+import { mountLoginPage, type LoginPage } from './login-page.js'
+import {
   createReadinessViewModel,
   type ReadinessContext,
   type ReadinessItemState,
@@ -210,6 +215,10 @@ export function mountWinWinCodeClient(
   const controlPlane = queryCache.client
   const authSession = createAuthSessionViewModel(controlPlane)
   accessFailureSession = authSession
+  // AUTH-100.2: the username + password login page talks to the one Control
+  // Plane facade directly. Expected sign-in failures stay in the form instead
+  // of polluting feature connection health, mirroring the Scope selector seam.
+  const loginModel: LoginViewModel = createLoginViewModel({ client: rawControlPlane })
   let lastKnownDiagnosticScope: unknown = null
   const shell = element(document, 'div', 'wwc-shell')
   const header = element(document, 'header', 'wwc-header')
@@ -217,6 +226,7 @@ export function mountWinWinCodeClient(
   const brand = element(document, 'strong', 'wwc-brand')
   const navigation = element(document, 'nav', 'wwc-navigation')
   const authRoot = element(document, 'div', 'wwc-auth-session-root')
+  const loginRoot = element(document, 'div', 'wwc-login-root')
   const main = element(document, 'main', 'wwc-main')
   const scopeRoot = element(document, 'div', 'wwc-scope-selector-root')
   const readinessRoot = element(document, 'div', 'wwc-readiness-root')
@@ -447,12 +457,52 @@ export function mountWinWinCodeClient(
   }
 
   header.append(skipLink, brand, navigation, authRoot)
-  main.append(scopeRoot, readinessRoot, title, description, readOnlyNotice, errorBoundary.root, slot)
+  main.append(
+    scopeRoot,
+    readinessRoot,
+    title,
+    description,
+    readOnlyNotice,
+    loginRoot,
+    errorBoundary.root,
+    slot,
+  )
   shell.append(header, connectionBar.root, main)
   options.root.replaceChildren(shell)
   const authPage: AuthSessionPage = mountAuthSessionPage({
     root: authRoot,
     model: authSession,
+  })
+  const loginPage: LoginPage = mountLoginPage({
+    root: loginRoot,
+    model: loginModel,
+  })
+
+  /**
+   * The login page is the unauthenticated surface. It appears on sign-out and
+   * on session expiry, and the URL hash never changes, so a successful
+   * sign-in re-renders the originally requested route.
+   */
+  let loginVisible: boolean | null = null
+  function updateLoginVisibility(): void {
+    const status = authSession.state.status
+    const visible = status === 'signed-out'
+      || status === 'restoring'
+      || status === 'authentication-required'
+    if (loginVisible === visible) return
+    loginVisible = visible
+    loginPage.setVisible(visible)
+    if (visible) {
+      // Each unauthenticated episode arms a fresh form; the previous
+      // submission outcome must never re-trigger a session restore.
+      loginModel.reset()
+      void loginModel.refreshInitialization()
+    }
+  }
+  const unsubscribeLoginModel = loginModel.subscribe(state => {
+    if (state.status === 'succeeded' && authSession.state.status !== 'signed-in') {
+      void authSession.restore()
+    }
   })
 
   function readinessFixTarget(item: ReadinessItemState): ReadinessFixTarget | null {
@@ -1485,6 +1535,7 @@ export function mountWinWinCodeClient(
   browser.addEventListener('unhandledrejection', onUnhandledRejection)
   const unsubscribeConnection = connection.subscribe(updateReliabilityViews)
   const unsubscribeAuthSession = authSession.subscribe(state => {
+    updateLoginVisibility()
     if (state.status === 'authentication-required') {
       connection.authenticationRequired(state.error?.code, state.error?.requestId)
     } else if (state.status === 'signed-in'
@@ -1509,6 +1560,7 @@ export function mountWinWinCodeClient(
     )) render()
   })
   render()
+  updateLoginVisibility()
   void authSession.restore()
 
   return {
@@ -1540,6 +1592,7 @@ export function mountWinWinCodeClient(
       browser.removeEventListener('unhandledrejection', onUnhandledRejection)
       unsubscribeAuthSession()
       unsubscribeConnection()
+      unsubscribeLoginModel()
       featureController?.abort()
       featureController = null
       activeFeature?.close()
@@ -1550,6 +1603,8 @@ export function mountWinWinCodeClient(
       closeAttentionMonitor()
       readinessPage.close()
       readiness.close()
+      loginPage.close()
+      loginModel.close()
       authPage.close()
       authSession.close()
       accessFailureSession = null
