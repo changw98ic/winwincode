@@ -257,6 +257,8 @@ fn transform_snapshot(snapshot: &mut Value) -> Result<String, MigrationError> {
     ensure_exact_fields(object, ROOT_FIELDS, "delivery")?;
     require_schema_version(object, "delivery")?;
 
+    carry_spec_source_product_session_id(object)?;
+
     let delivery_id = required_text(object, "id")?;
     if !is_canonical_delivery_id(&delivery_id) {
         return Err(MigrationError::InvalidValue {
@@ -282,6 +284,32 @@ fn transform_snapshot(snapshot: &mut Value) -> Result<String, MigrationError> {
     );
 
     Ok(source_key(&delivery_id))
+}
+
+/// Carries the canonical source `ProductSession` into a converted legacy Spec.
+///
+/// Post `UI-900` canonical Specs require `sourceProductSessionId`, while the
+/// frozen legacy Delivery Spec contract cannot express it, so the conversion
+/// carries it as `null` — the same rule the differential runner applies to
+/// every legacy Spec it canonicalizes. A legacy snapshot that already names a
+/// source is a mixed identity shape and fails closed, like every other field
+/// this conversion accepts from exactly one shape.
+fn carry_spec_source_product_session_id(
+    delivery: &mut Map<String, Value>,
+) -> Result<(), MigrationError> {
+    let spec = delivery
+        .get_mut("spec")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| MigrationError::InvalidShape {
+            message: "legacy Delivery spec must be a JSON object".to_owned(),
+        })?;
+    if spec.contains_key("sourceProductSessionId") {
+        return Err(MigrationError::MixedIdentityShape {
+            field: "spec.sourceProductSessionId".to_owned(),
+        });
+    }
+    spec.insert("sourceProductSessionId".to_owned(), Value::Null);
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
