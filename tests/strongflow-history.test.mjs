@@ -781,6 +781,35 @@ test('the page restores history selection from a deep link and keeps the URL aut
   mounted.close()
 })
 
+test('historical attempt review blocks current Delivery mutation controls', () => {
+  const document = new FakeDocument()
+  const rootElement = document.createElement('main')
+  const current = historyProjection()
+  current.delivery.status = 'ready-to-deliver'
+  const model = new FakeStrongFlowViewModel({
+    status: 'ready',
+    realtime: 'subscribed',
+    projection: current,
+    interaction: { status: 'idle', error: null },
+    error: null,
+  })
+  const mounted = mountStrongFlowPage({
+    root: rootElement,
+    model,
+    limits,
+    historyLocation: new FakeHistoryLocation(
+      `#/strongflow?delivery=${deliveryId}&task=task%3A1&run=${failedRunId}`,
+    ),
+  })
+
+  const advance = findByClass(rootElement, 'wwc-strongflow-advance-delivery')
+  assert.equal(advance.disabled, true)
+  advance.emit('click')
+  assert.equal(model.calls.some(([name]) => name === 'advanceDelivery'), false)
+
+  mounted.close()
+})
+
 test('the page shows empty history notes instead of dead lists', () => {
   const document = new FakeDocument()
   const rootElement = document.createElement('main')
