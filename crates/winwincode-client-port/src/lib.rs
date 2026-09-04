@@ -9,7 +9,9 @@
 //!
 //! The types are self-contained: they intentionally do not reference schema
 //! JSON files and do not depend on other workspace crates, so the device
-//! client and the control plane can adopt them independently.
+//! client and the control plane can adopt them independently. The wire
+//! encodings (for example the decimal-string occupancy fencing token) live
+//! in the [`wire`] module.
 
 // The wire contract names many identifiers and brand words (`WinWinCode`,
 // `ClientControlPort`) that the `doc_markdown` lint would demand backticks
@@ -18,3 +20,4 @@
 
 pub mod domain;
 pub mod messages;
+pub mod wire;

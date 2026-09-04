@@ -269,6 +269,354 @@ pub enum ApplyResult {
     Failed,
 }
 
+/// Supported release target triple of the reporting Device Client
+/// (schema `ClientPlatformTarget`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ClientPlatformTarget {
+    /// Apple Silicon macOS release target.
+    #[serde(rename = "aarch64-apple-darwin")]
+    Aarch64AppleDarwin,
+    /// Intel macOS release target.
+    #[serde(rename = "x86_64-apple-darwin")]
+    X8664AppleDarwin,
+    /// ARM64 GNU Linux release target.
+    #[serde(rename = "aarch64-unknown-linux-gnu")]
+    Aarch64UnknownLinuxGnu,
+    /// x86-64 GNU Linux release target.
+    #[serde(rename = "x86_64-unknown-linux-gnu")]
+    X8664UnknownLinuxGnu,
+}
+
+/// Machine architecture of the reporting Device Client (schema
+/// `ClientArchitecture`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ClientArchitecture {
+    /// 64-bit ARM.
+    #[serde(rename = "aarch64")]
+    Aarch64,
+    /// 64-bit x86.
+    #[serde(rename = "x86_64")]
+    X8664,
+}
+
+/// Device Client verdict for one access challenge (schema
+/// `ClientChallengeAckStatus`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClientChallengeAckStatus {
+    /// The device confirmed the challenge.
+    Confirmed,
+    /// The device answered from an older credential generation.
+    StaleGeneration,
+}
+
+/// Why device credential rotation is requested (schema
+/// `ClientCredentialRotateReason`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClientCredentialRotateReason {
+    /// Rotation is part of the regular schedule.
+    Scheduled,
+    /// Rotation is a response to a suspected compromise.
+    SuspectedCompromise,
+}
+
+/// Client-side reason for rejecting an offered occupancy lease (schema
+/// `OccupancyRejectReason`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OccupancyRejectReason {
+    /// The device does not know the lease.
+    UnknownLease,
+    /// The offered fencing token is stale.
+    StaleFencingToken,
+    /// The offer conflicts with the device's local occupancy state.
+    LocalStateConflict,
+    /// The client node is locked.
+    ClientLocked,
+    /// The device has no capacity left.
+    CapacityExhausted,
+}
+
+/// Requested occupancy release behavior (schema
+/// `ClientOccupancyReleaseMode`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClientOccupancyReleaseMode {
+    /// Release immediately.
+    Immediate,
+    /// Finish active tasks, then release.
+    DrainThenRelease,
+    /// Cancel active tasks, then release.
+    CancelTasksAndRelease,
+}
+
+/// Recorded reason why an occupancy lease reached a released terminal state
+/// (schema `ClientOccupancyReleaseReason`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClientOccupancyReleaseReason {
+    /// The holder released the occupancy.
+    UserRequested,
+    /// Active tasks were cancelled and the lease released.
+    CancelTasksAndRelease,
+    /// Active tasks drained and the lease released.
+    Drained,
+    /// The lease expired while idle.
+    IdleTimeout,
+    /// The occupancy was revoked.
+    Revoked,
+    /// The lease was force-fenced.
+    ForceFenced,
+}
+
+/// Why the Control Plane force-fences a stale occupancy (schema
+/// `ClientOccupancyForceFenceReason`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClientOccupancyForceFenceReason {
+    /// The disconnected holder missed the recovery deadline.
+    RecoveryDeadlineExceeded,
+    /// An administrator forced a clean occupancy state.
+    AdministratorForceClean,
+}
+
+/// Why the Control Plane requests a repository rescan (schema
+/// `ClientRepositoryRescanReason`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClientRepositoryRescanReason {
+    /// The current occupant asked for the rescan.
+    OccupantRequested,
+    /// The occupancy was recovered after a disconnect.
+    OccupancyRecovered,
+    /// Policy requires a fresh scan.
+    Policy,
+}
+
+/// Why the Control Plane stops one supervised worker process (schema
+/// `ClientWorkerStopReason`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClientWorkerStopReason {
+    /// The occupant requested the stop.
+    OccupantRequested,
+    /// Draining finished and the worker must stop.
+    DrainingComplete,
+    /// The lease was recovered after a disconnect.
+    LeaseRecovered,
+    /// The launch grant backing the worker was revoked.
+    GrantRevoked,
+    /// A newer launch superseded the worker.
+    Superseded,
+}
+
+/// Observed run state of one supervised worker process (schema
+/// `ClientWorkerRunState`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClientWorkerRunState {
+    /// The process is starting.
+    Starting,
+    /// The process is running.
+    Running,
+    /// The process is draining active tasks.
+    Draining,
+    /// The process is stopping.
+    Stopping,
+    /// The process stopped cleanly.
+    Stopped,
+    /// The process crashed.
+    Crashed,
+    /// The process is gone.
+    Missing,
+    /// The state cannot be observed.
+    Unknown,
+}
+
+/// Reconciliation verdict for one worker process after a Device Client
+/// restart (schema `WorkerReconcileState`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerReconcileState {
+    /// The process is still running.
+    StillRunning,
+    /// The process reached a terminal state.
+    Terminal,
+    /// The process is gone.
+    Missing,
+    /// The verdict cannot be determined.
+    Unknown,
+}
+
+/// Idempotent result of applying one worker launch command (schema
+/// `WorkerLaunchAckStatus`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerLaunchAckStatus {
+    /// The worker launched.
+    Accepted,
+    /// The command replayed an already accepted launch.
+    Duplicate,
+    /// The fencing token was stale.
+    RejectedStaleFencingToken,
+    /// The lease does not match the grant.
+    RejectedLeaseMismatch,
+    /// The device has no capacity left.
+    RejectedCapacityExhausted,
+    /// The repository is not usable.
+    RejectedRepositoryUnavailable,
+    /// The grant is unknown to the device.
+    RejectedUnknownGrant,
+    /// The device is in the wrong state for the launch.
+    RejectedWrongState,
+}
+
+/// Universal acknowledgement status for one command (schema
+/// `CommandAckStatus`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CommandAckStatus {
+    /// The command was accepted.
+    Accepted,
+    /// The command replayed an already accepted command.
+    Duplicate,
+    /// The command kind is unknown.
+    RejectedUnknownCommand,
+    /// The expected revision did not match.
+    RejectedRevisionConflict,
+    /// The fencing token was stale.
+    RejectedStaleFencingToken,
+    /// The lease does not match the command.
+    RejectedLeaseMismatch,
+    /// The device is in the wrong state.
+    RejectedWrongState,
+    /// The sender lacks permission.
+    RejectedUnauthorized,
+    /// The device has no capacity left.
+    RejectedCapacityExhausted,
+}
+
+/// Machine-readable error code of the `ClientControlPort` (schema
+/// `ClientControlErrorCode`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ClientControlErrorCode {
+    /// The wire schema version is unsupported.
+    ProtocolVersionUnsupported,
+    /// The device is not enrolled.
+    DeviceNotEnrolled,
+    /// The device instance identity changed.
+    DeviceInstanceChanged,
+    /// The lease is unknown.
+    UnknownLease,
+    /// The fencing token is stale.
+    StaleFencingToken,
+    /// The expected revision did not match.
+    RevisionConflict,
+    /// The idempotency key was reused with a different payload.
+    IdempotencyConflict,
+    /// The capacity is exhausted.
+    CapacityExhausted,
+    /// The repository is unavailable.
+    RepositoryUnavailable,
+    /// A grant is invalid.
+    GrantInvalid,
+    /// The peer is in the wrong state.
+    WrongState,
+    /// The sender is rate limited.
+    RateLimited,
+    /// An internal error occurred.
+    InternalError,
+}
+
+/// Every `ClientControlPort` message kind (schema
+/// `ClientControlMessageKind`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ClientControlMessageKind {
+    /// `client.enroll`
+    #[serde(rename = "client.enroll")]
+    Enroll,
+    /// `client.hello`
+    #[serde(rename = "client.hello")]
+    Hello,
+    /// `client.heartbeat`
+    #[serde(rename = "client.heartbeat")]
+    Heartbeat,
+    /// `client.connect_code.published`
+    #[serde(rename = "client.connect_code.published")]
+    ConnectCodePublished,
+    /// `client.access.challenge_ack`
+    #[serde(rename = "client.access.challenge_ack")]
+    AccessChallengeAck,
+    /// `client.occupancy.ack`
+    #[serde(rename = "client.occupancy.ack")]
+    OccupancyAck,
+    /// `client.occupancy.rejected`
+    #[serde(rename = "client.occupancy.rejected")]
+    OccupancyRejected,
+    /// `client.repository.upsert`
+    #[serde(rename = "client.repository.upsert")]
+    RepositoryUpsert,
+    /// `client.repository.removed`
+    #[serde(rename = "client.repository.removed")]
+    RepositoryRemoved,
+    /// `client.repository.status`
+    #[serde(rename = "client.repository.status")]
+    RepositoryStatus,
+    /// `client.worker.launch_ack`
+    #[serde(rename = "client.worker.launch_ack")]
+    WorkerLaunchAck,
+    /// `client.worker.state`
+    #[serde(rename = "client.worker.state")]
+    WorkerState,
+    /// `client.worker.reconcile`
+    #[serde(rename = "client.worker.reconcile")]
+    WorkerReconcile,
+    /// `client.candidate.retained`
+    #[serde(rename = "client.candidate.retained")]
+    CandidateRetained,
+    /// `client.candidate.apply_result`
+    #[serde(rename = "client.candidate.apply_result")]
+    CandidateApplyResult,
+    /// `client.command_ack`
+    #[serde(rename = "client.command_ack")]
+    CommandAck,
+    /// `client.enrollment_accepted`
+    #[serde(rename = "client.enrollment_accepted")]
+    EnrollmentAccepted,
+    /// `client.access.challenge`
+    #[serde(rename = "client.access.challenge")]
+    AccessChallenge,
+    /// `client.occupancy.offer`
+    #[serde(rename = "client.occupancy.offer")]
+    OccupancyOffer,
+    /// `client.occupancy.release`
+    #[serde(rename = "client.occupancy.release")]
+    OccupancyRelease,
+    /// `client.occupancy.force_fence`
+    #[serde(rename = "client.occupancy.force_fence")]
+    OccupancyForceFence,
+    /// `client.repository.rescan`
+    #[serde(rename = "client.repository.rescan")]
+    RepositoryRescan,
+    /// `client.worker.launch`
+    #[serde(rename = "client.worker.launch")]
+    WorkerLaunch,
+    /// `client.worker.stop`
+    #[serde(rename = "client.worker.stop")]
+    WorkerStop,
+    /// `client.candidate.apply`
+    #[serde(rename = "client.candidate.apply")]
+    CandidateApply,
+    /// `client.client_lock`
+    #[serde(rename = "client.client_lock")]
+    ClientLock,
+    /// `client.credential_rotate`
+    #[serde(rename = "client.credential_rotate")]
+    CredentialRotate,
+}
+
 /// A user account on a WinWinCode server (plan 7.1).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -416,6 +764,75 @@ pub struct ClientAccessGrant {
     pub revision: u64,
 }
 
+/// Device Client worker session capacity report (schema
+/// `ClientCapacityReport`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClientCapacityReport {
+    /// Maximum concurrent worker sessions.
+    #[serde(rename = "maxConcurrentWorkerSessions")]
+    pub max_concurrent_worker_sessions: u32,
+    /// Worker sessions currently running.
+    #[serde(rename = "runningWorkerSessions")]
+    pub running_worker_sessions: u32,
+    /// Worker sessions durably reserved.
+    #[serde(rename = "reservedWorkerSessions")]
+    pub reserved_worker_sessions: u32,
+    /// Worker sessions draining before release.
+    #[serde(rename = "drainingWorkerSessions")]
+    pub draining_worker_sessions: u32,
+}
+
+/// Secret-safe repository projection the Device Client reports to the
+/// Control Plane (schema `RepositoryBindingProjection`).
+///
+/// It carries no local filesystem path and no revision.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RepositoryBindingProjection {
+    /// Binding identifier.
+    #[serde(rename = "repositoryBindingId")]
+    pub repository_binding_id: String,
+    /// Human-readable repository name.
+    #[serde(rename = "displayName")]
+    pub display_name: String,
+    /// Repository kind.
+    #[serde(rename = "repositoryKind")]
+    pub repository_kind: RepositoryKind,
+    /// Default branch name.
+    #[serde(rename = "defaultBranch")]
+    pub default_branch: String,
+    /// Current HEAD commit.
+    #[serde(rename = "headCommit")]
+    pub head_commit: String,
+    /// Dirty projection of the working tree.
+    #[serde(rename = "dirtyState")]
+    pub dirty_state: RepositoryDirtyState,
+    /// Availability projection.
+    pub availability: RepositoryAvailability,
+    /// Fingerprint binding the repository identity.
+    #[serde(rename = "repositoryFingerprint")]
+    pub repository_fingerprint: String,
+    /// Last scan timestamp (RFC 3339).
+    #[serde(rename = "lastScannedAt")]
+    pub last_scanned_at: String,
+}
+
+/// Machine-readable error fact (schema `ClientControlError`).
+///
+/// The optional `details` map is redaction-owned diagnostics; these contract
+/// types intentionally do not model it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClientControlError {
+    /// Machine-readable error code.
+    pub code: ClientControlErrorCode,
+    /// Human-readable error message.
+    pub message: String,
+    /// Whether retrying the command can succeed.
+    pub retryable: bool,
+}
+
 /// The occupancy lease of a client node (plan 7.5, 12).
 ///
 /// The database must guarantee at most one active lease per client node.
@@ -434,14 +851,16 @@ pub struct ClientOccupancyLease {
     /// Lifecycle state.
     pub state: OccupancyLeaseState,
     /// Monotonic fencing token; each new occupancy gets a higher token.
-    #[serde(rename = "fencingToken")]
+    ///
+    /// The wire encoding is a decimal string (schema `OccupancyFencingToken`).
+    #[serde(rename = "fencingToken", with = "crate::wire::fencing_token")]
     pub fencing_token: u64,
     /// Identifier of the claim request that created the lease.
     #[serde(rename = "claimRequestId")]
     pub claim_request_id: String,
     /// Claim timestamp (RFC 3339).
     #[serde(rename = "claimedAt")]
-    pub claimed_at: Option<String>,
+    pub claimed_at: String,
     /// Device acknowledgement timestamp (RFC 3339).
     #[serde(rename = "acknowledgedAt")]
     pub acknowledged_at: Option<String>,
@@ -462,7 +881,7 @@ pub struct ClientOccupancyLease {
     pub released_at: Option<String>,
     /// Reason recorded at release.
     #[serde(rename = "releaseReason")]
-    pub release_reason: Option<String>,
+    pub release_reason: Option<ClientOccupancyReleaseReason>,
     /// Monotonic optimistic-concurrency revision.
     pub revision: u64,
 }
@@ -485,12 +904,12 @@ pub struct RepositoryBinding {
     /// Repository kind.
     #[serde(rename = "repositoryKind")]
     pub repository_kind: RepositoryKind,
-    /// Default branch name, if known.
+    /// Default branch name.
     #[serde(rename = "defaultBranch")]
-    pub default_branch: Option<String>,
-    /// Current HEAD commit, if known.
+    pub default_branch: String,
+    /// Current HEAD commit.
     #[serde(rename = "headCommit")]
-    pub head_commit: Option<String>,
+    pub head_commit: String,
     /// Dirty projection of the working tree.
     #[serde(rename = "dirtyState")]
     pub dirty_state: RepositoryDirtyState,
@@ -499,7 +918,7 @@ pub struct RepositoryBinding {
     /// Fingerprint binding the repository identity.
     #[serde(rename = "repositoryFingerprint")]
     pub repository_fingerprint: String,
-    /// Last scan timestamp (RFC 3339).
+    /// Last scan timestamp (RFC 3339), `None` before the first scan.
     #[serde(rename = "lastScannedAt")]
     pub last_scanned_at: Option<String>,
     /// Monotonic optimistic-concurrency revision.
@@ -550,7 +969,9 @@ pub struct WorkerLaunchGrant {
     #[serde(rename = "occupancyLeaseId")]
     pub occupancy_lease_id: String,
     /// Fencing token of the occupancy lease.
-    #[serde(rename = "occupancyFencingToken")]
+    ///
+    /// The wire encoding is a decimal string (schema `OccupancyFencingToken`).
+    #[serde(rename = "occupancyFencingToken", with = "crate::wire::fencing_token")]
     pub occupancy_fencing_token: u64,
     /// Repository to run against.
     #[serde(rename = "repositoryBindingId")]
@@ -558,9 +979,9 @@ pub struct WorkerLaunchGrant {
     /// Product session the launch belongs to.
     #[serde(rename = "productSessionId")]
     pub product_session_id: String,
-    /// Stage run the launch belongs to, if assigned.
+    /// Stage run the launch belongs to.
     #[serde(rename = "stageRunId")]
-    pub stage_run_id: Option<String>,
+    pub stage_run_id: String,
     /// Worker session to start.
     #[serde(rename = "workerSessionId")]
     pub worker_session_id: String,
@@ -626,9 +1047,9 @@ pub struct LocalApplyReceipt {
     /// Target branch of the apply.
     #[serde(rename = "targetBranch")]
     pub target_branch: String,
-    /// Expected target HEAD before the apply, if pinned.
+    /// Expected target HEAD before the apply.
     #[serde(rename = "expectedHead")]
-    pub expected_head: Option<String>,
+    pub expected_head: String,
     /// Apply strategy.
     pub strategy: ApplyStrategy,
     /// Terminal result.
@@ -654,7 +1075,7 @@ mod tests {
 
     /// Deserializes `json`, re-serializes it, and asserts both the struct
     /// round-trip and the semantic JSON equality.
-    fn assert_round_trip<T>(json: &str)
+    fn assert_round_trip<T>(json: &str) -> T
     where
         T: Serialize + DeserializeOwned + PartialEq + std::fmt::Debug,
     {
@@ -672,6 +1093,7 @@ mod tests {
             expected,
             "reserialized JSON must be semantically equal to the inline JSON"
         );
+        parsed
     }
 
     #[test]
@@ -752,6 +1174,46 @@ mod tests {
     }
 
     #[test]
+    fn client_capacity_report_round_trips() {
+        assert_round_trip::<ClientCapacityReport>(
+            r#"{
+                "maxConcurrentWorkerSessions": 3,
+                "runningWorkerSessions": 1,
+                "reservedWorkerSessions": 1,
+                "drainingWorkerSessions": 0
+            }"#,
+        );
+    }
+
+    #[test]
+    fn repository_binding_projection_round_trips() {
+        assert_round_trip::<RepositoryBindingProjection>(
+            r#"{
+                "repositoryBindingId": "rbd_01j2",
+                "displayName": "winwincode",
+                "repositoryKind": "git",
+                "defaultBranch": "main",
+                "headCommit": "0123456789abcdef0123456789abcdef01234567",
+                "dirtyState": "clean",
+                "availability": "available",
+                "repositoryFingerprint": "sha256:cc33",
+                "lastScannedAt": "2026-01-02T11:00:00.000Z"
+            }"#,
+        );
+    }
+
+    #[test]
+    fn client_control_error_round_trips() {
+        assert_round_trip::<ClientControlError>(
+            r#"{
+                "code": "STALE_FENCING_TOKEN",
+                "message": "a newer occupancy superseded the lease",
+                "retryable": false
+            }"#,
+        );
+    }
+
+    #[test]
     fn client_occupancy_lease_round_trips() {
         assert_round_trip::<ClientOccupancyLease>(
             r#"{
@@ -759,11 +1221,11 @@ mod tests {
                 "clientNodeId": "node_01j2",
                 "holderUserId": "usr_01j2",
                 "state": "occupied",
-                "fencingToken": 7,
+                "fencingToken": "7",
                 "claimRequestId": "claim_01j2",
-                "claimedAt": "2026-01-02T12:00:00Z",
-                "acknowledgedAt": "2026-01-02T12:00:01Z",
-                "lastRenewedAt": "2026-01-02T12:05:00Z",
+                "claimedAt": "2026-01-02T12:00:00.000Z",
+                "acknowledgedAt": "2026-01-02T12:00:01.000Z",
+                "lastRenewedAt": "2026-01-02T12:05:00.000Z",
                 "idleExpiresAt": null,
                 "recoveryDeadlineAt": null,
                 "releaseRequestedAt": null,
@@ -771,6 +1233,34 @@ mod tests {
                 "releaseReason": null,
                 "revision": 9
             }"#,
+        );
+    }
+
+    #[test]
+    fn occupancy_lease_release_reason_round_trips() {
+        let parsed: ClientOccupancyLease = assert_round_trip::<ClientOccupancyLease>(
+            r#"{
+                "clientOccupancyLeaseId": "lease_01j2",
+                "clientNodeId": "node_01j2",
+                "holderUserId": "usr_01j2",
+                "state": "released",
+                "fencingToken": "18446744073709551615",
+                "claimRequestId": "claim_01j2",
+                "claimedAt": "2026-01-02T12:00:00.000Z",
+                "acknowledgedAt": null,
+                "lastRenewedAt": null,
+                "idleExpiresAt": null,
+                "recoveryDeadlineAt": null,
+                "releaseRequestedAt": "2026-01-02T13:00:00.000Z",
+                "releasedAt": "2026-01-02T13:01:00.000Z",
+                "releaseReason": "drained",
+                "revision": 10
+            }"#,
+        );
+        assert_eq!(parsed.fencing_token, u64::MAX);
+        assert_eq!(
+            parsed.release_reason,
+            Some(ClientOccupancyReleaseReason::Drained)
         );
     }
 
@@ -817,15 +1307,15 @@ mod tests {
                 "clientNodeId": "node_01j2",
                 "clientInstanceId": "inst_01j2",
                 "occupancyLeaseId": "lease_01j2",
-                "occupancyFencingToken": 7,
+                "occupancyFencingToken": "7",
                 "repositoryBindingId": "rb_01j2",
                 "productSessionId": "ps_01j2",
-                "stageRunId": null,
+                "stageRunId": "stg_01j2",
                 "workerSessionId": "ws_01j2",
                 "workerId": "worker_1",
                 "workerInstanceId": "winst_01j2",
                 "credentialDigest": "sha256:dd44",
-                "expiresAt": "2026-01-02T12:10:00Z",
+                "expiresAt": "2026-01-02T12:10:00.000Z",
                 "state": "issued",
                 "revision": 1
             }"#,
