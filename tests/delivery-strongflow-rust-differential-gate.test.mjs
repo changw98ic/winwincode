@@ -9,6 +9,7 @@ import {
   assertDifferentialResult,
   buildCanonicalMigrationPlan,
   buildDifferentialExecutionPlan,
+  carryCanonicalSpecSourceProductSessionId,
   findFirstJsonDifference,
   migrateLegacyTaskGraph,
   migrateLegacyTaskId,
@@ -428,7 +429,12 @@ test('task-dag migration remaps legacy task identities and rejects the cycle bef
     'spec',
   ])
   assert.equal(cycle.request.input.invalidProposalKind, 'dependency-cycle')
-  assert.deepEqual(cycle.request.input.spec, taskDag.commands[2].request.payload.spec)
+  assert.deepEqual(
+    cycle.request.input.spec,
+    carryCanonicalSpecSourceProductSessionId(
+      structuredClone(taskDag.commands[2].request.payload.spec),
+    ),
+  )
   assert.equal(cycle.response.outcome, 'rejected')
   assert.equal(cycle.response.error.code, 'INVALID_REQUEST')
 
@@ -1236,13 +1242,16 @@ function canonicalFixtureRequest(
         input.snapshot.id,
         input.snapshot.tasks,
       )
+      carryCanonicalSpecSourceProductSessionId(input.snapshot.spec)
       return { input, kind: group.target }
     }
     if (group.target === 'fixture.solution-review.validate') {
       return {
         input: {
           invalidProposalKind: 'dependency-cycle',
-          spec: structuredClone(sourceCommand.request.payload.spec),
+          spec: carryCanonicalSpecSourceProductSessionId(
+            structuredClone(sourceCommand.request.payload.spec),
+          ),
         },
         kind: group.target,
       }

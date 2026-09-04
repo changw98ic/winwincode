@@ -1165,10 +1165,12 @@ impl ScenarioRunner {
         legacy: &Value,
     ) -> Result<Value, String> {
         let payload = object(legacy, "payload")?;
-        let spec = payload
+        let mut spec = payload
             .get("spec")
+            .cloned()
             .ok_or_else(|| "cyclic create migration lacks spec".to_owned())?;
-        let (delivery, input) = cycle_validation_delivery(spec)?;
+        carry_legacy_source_product_session_id(&mut spec)?;
+        let (delivery, input) = cycle_validation_delivery(&spec)?;
         let invalid_review = invalid_cycle_review_fixture(&delivery)?;
         let primary_delivery_id = self
             .delivery_id
@@ -3190,6 +3192,21 @@ fn canonical_spec_input(spec: &Value, repository_id: &str) -> Result<Value, Stri
     }))
 }
 
+/// Carries the canonical source `ProductSession` into a Spec that the legacy
+/// `StrongFlow` contract authored without one.
+///
+/// Post `UI-900` canonical Specs require the `sourceProductSessionId` field,
+/// while the frozen legacy transcripts cannot express it, so a migrated Spec
+/// carries it as `null` where the legacy spec has none — the same rule as
+/// `canonical_spec_input` for `delivery.create` and `delivery.update_spec`.
+fn carry_legacy_source_product_session_id(spec: &mut Value) -> Result<(), String> {
+    spec.as_object_mut()
+        .ok_or_else(|| "legacy spec must be a JSON object".to_owned())?
+        .entry("sourceProductSessionId".to_owned())
+        .or_insert(Value::Null);
+    Ok(())
+}
+
 fn canonical_string_list(spec: &Value, field: &str) -> Result<Vec<String>, String> {
     spec.get(field)
         .and_then(Value::as_array)
@@ -4170,6 +4187,11 @@ fn migrate_legacy_snapshot(snapshot: Value) -> Result<Value, String> {
         }
     };
     let mut snapshot: Value = serde_json::from_slice(&canonical).map_err(string_error)?;
+    carry_legacy_source_product_session_id(
+        snapshot
+            .get_mut("spec")
+            .ok_or_else(|| "legacy seed snapshot lacks spec".to_owned())?,
+    )?;
     let delivery_id = required_str(&snapshot, "id")?.to_owned();
     let task_id_map = snapshot
         .get("tasks")

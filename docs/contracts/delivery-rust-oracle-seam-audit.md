@@ -26,9 +26,9 @@ The complete canonical result is committed at
 `tests/fixtures/oracles/delivery-strongflow-rust-expected.v1.json`:
 
 ```text
-bytes: 5,200,904
-lines: 82,348
-sha256: 496511c2c5910a7877a8ae4392e8cae4e119798481b7b7b4fcab3e18f3d5d5da
+bytes: 5,304,106
+lines: 84,703
+sha256: 93f437af6a59716355ebdb539008670968a2eee926f48ca051a19622eb9572d4
 ```
 
 The final comparison is 10/10. There are no remaining P0 or P1 seam gaps and

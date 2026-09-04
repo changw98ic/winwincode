@@ -1702,6 +1702,7 @@ function validateTaskDagCanonicalScenario(sourceScenario, scenario) {
   const sourceSnapshot = sourceScenario.commands[0].input.snapshot
   const expectedSnapshot = structuredClone(sourceSnapshot)
   expectedSnapshot.tasks = migrateLegacyTaskGraph(expectedSnapshot.id, expectedSnapshot.tasks)
+  carryCanonicalSpecSourceProductSessionId(expectedSnapshot.spec)
   requireDeepEqual(
     seed.request.input.snapshot,
     expectedSnapshot,
@@ -1709,9 +1710,11 @@ function validateTaskDagCanonicalScenario(sourceScenario, scenario) {
   )
 
   const cycle = commandFromSource(scenario, 2, 'fixture.solution-review.validate')
+  const expectedCycleSpec = structuredClone(sourceScenario.commands[2].request.payload.spec)
+  carryCanonicalSpecSourceProductSessionId(expectedCycleSpec)
   requireDeepEqual(
     cycle.request.input.spec,
-    sourceScenario.commands[2].request.payload.spec,
+    expectedCycleSpec,
     'task-dag cycle spec',
   )
   requireEqual(
@@ -1721,6 +1724,17 @@ function validateTaskDagCanonicalScenario(sourceScenario, scenario) {
   )
   requireEqual(cycle.response.outcome, 'rejected', 'task-dag cycle fixture outcome')
   requireEqual(cycle.response.error.code, 'INVALID_REQUEST', 'task-dag cycle fixture error')
+}
+
+/// Post-UI-900 canonical Specs require `sourceProductSessionId`, which the frozen
+/// legacy StrongFlow Spec contract cannot express. The Rust runner therefore
+/// carries it as `null` wherever it canonicalizes a legacy Spec, matching
+/// `canonical_spec_input`; this frozen expectation applies the same rule.
+export function carryCanonicalSpecSourceProductSessionId(spec) {
+  if (spec.sourceProductSessionId === undefined) {
+    spec.sourceProductSessionId = null
+  }
+  return spec
 }
 
 function validateTerminalOutcomeCanonicalScenario(sourceScenario, mapping, scenario, rules) {
