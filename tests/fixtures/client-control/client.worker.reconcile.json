@@ -6,10 +6,6 @@
   "sequence": 413,
   "occurredAt": "2026-09-01T09:40:00.000Z",
   "kind": "client.worker.reconcile",
-  "expectedRevision": 16,
-  "idempotencyKey": "idem-client-worker-reconcile-0001",
-  "occupancyLeaseId": "lse_000000000000000000000001",
-  "occupancyFencingToken": "3",
   "payload": {
     "workerSessionId": "wks_000000000000000000000001",
     "localState": "still_running",

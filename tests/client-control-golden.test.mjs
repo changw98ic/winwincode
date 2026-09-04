@@ -57,12 +57,19 @@ const KIND_TO_DIRECTION = Object.freeze(new Map([
   ...SERVER_TO_CLIENT_KINDS.map(kind => [kind, 'server-to-client']),
 ]))
 
-// Pure-fact deliveries carry no command fields. Per the frozen protocol
-// contract (docs/contracts/client-control-port-v1.md), client.heartbeat is the
-// only such kind: every other envelope in both directions is a command and
-// must carry expectedRevision + idempotencyKey.
+// Pure-fact deliveries carry no command fields. Per the frozen schema
+// (x-message-class), these 8 kinds are reports/acks/responses/requests:
+// every other envelope is one of the 19 commands and must carry
+// expectedRevision + idempotencyKey.
 const FACT_KINDS = Object.freeze(new Set([
   'client.heartbeat',
+  'client.hello',
+  'client.worker.state',
+  'client.worker.reconcile',
+  'client.repository.status',
+  'client.command_ack',
+  'client.enrollment_accepted',
+  'client.access.challenge',
 ]))
 
 // Repository traffic is stamped only when an active occupancy lease exists
@@ -75,9 +82,22 @@ const OPTIONAL_FENCING_KINDS = Object.freeze(new Set([
   'client.repository.rescan',
 ]))
 
-// Occupancy, worker, and candidate traffic always rides on an occupancy lease,
-// so every such envelope carries occupancyLeaseId + occupancyFencingToken.
-const OCCUPANCY_CLASS_PATTERN = /(?:^|\.)(?:occupancy|worker|candidate)(?:\.|$)/u
+// Occupancy, worker, and candidate traffic rides on an occupancy lease, so
+// these 11 envelopes carry occupancyLeaseId + occupancyFencingToken. The fact
+// reports worker.state and worker.reconcile are deliberately NOT fenced.
+const FENCED_KINDS = Object.freeze(new Set([
+  'client.occupancy.ack',
+  'client.occupancy.rejected',
+  'client.occupancy.offer',
+  'client.occupancy.release',
+  'client.occupancy.force_fence',
+  'client.worker.launch',
+  'client.worker.launch_ack',
+  'client.worker.stop',
+  'client.candidate.retained',
+  'client.candidate.apply_result',
+  'client.candidate.apply',
+]))
 
 const SCHEMA_VERSION = 'winwincode/v1'
 const ENVELOPE_REQUIRED_FIELDS = Object.freeze([
@@ -119,8 +139,8 @@ function collectPayloadStrings(value, found = []) {
   return found
 }
 
-function isOccupancyClass(kind) {
-  return OCCUPANCY_CLASS_PATTERN.test(kind)
+function isFencedKind(kind) {
+  return FENCED_KINDS.has(kind)
 }
 
 // Structural validator for one ClientControlPort envelope. Returns a sorted
@@ -176,7 +196,7 @@ function collectViolations(envelope) {
     }
   }
 
-  if (isOccupancyClass(kind)) {
+  if (isFencedKind(kind)) {
     if (!isFilledString(envelope.occupancyLeaseId)) {
       violations.push('fencing.missing:occupancyLeaseId')
     }
@@ -277,7 +297,7 @@ test('command envelopes carry expectedRevision and idempotencyKey', () => {
 test('occupancy, worker, and candidate envelopes carry lease fencing fields', () => {
   for (const file of validFiles) {
     const envelope = readJson(join(fixturesDir, file))
-    if (!isOccupancyClass(envelope.kind)) {
+    if (!isFencedKind(envelope.kind)) {
       assert.equal(envelope.occupancyLeaseId, undefined, file)
       assert.equal(envelope.occupancyFencingToken, undefined, file)
       continue

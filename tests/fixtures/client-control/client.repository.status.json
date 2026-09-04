@@ -6,8 +6,6 @@
   "sequence": 410,
   "occurredAt": "2026-09-01T09:31:30.000Z",
   "kind": "client.repository.status",
-  "expectedRevision": 36,
-  "idempotencyKey": "idem-client-repository-status-040930",
   "payload": {
     "repositoryBindingId": "rbd_000000000000000000000001",
     "availability": "dirty",

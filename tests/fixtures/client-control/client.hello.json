@@ -6,8 +6,6 @@
   "sequence": 402,
   "occurredAt": "2026-09-01T09:30:05.000Z",
   "kind": "client.hello",
-  "expectedRevision": 12,
-  "idempotencyKey": "idem-client-hello-0001",
   "payload": {
     "currentInstanceId": "cli_000000000000000000000001",
     "presenceState": "online",

@@ -109,48 +109,51 @@ occupancyFencingToken
 
 ## Client → Server 消息
 
-强制字段标记：`—` 纯事实；`C` 命令（`expectedRevision` + `idempotencyKey`）；
-`C + L` 命令再加占用盖章（`occupancyLeaseId` + `occupancyFencingToken`）；
-`C + L（活动占用时）` 表示存在活动 Lease 时必须盖章；`L` 绑定占用的事实报告。
+强制字段标记（与 `client-control.schema.json` 的 `x-message-class` 一致）：
+`C` 命令，必带 `expectedRevision` + `idempotencyKey`（共 19 条）；`C + L` 命令再加
+占用盖章 `occupancyLeaseId` + `occupancyFencingToken`（共 11 条）；`—` 非命令事实
+（report/ack/response/request），不带命令字段。
 
 | kind | 方向 | payload 概要 | 发送/处理时机 | 强制字段 |
 | --- | --- | --- | --- | --- |
 | `client.enroll` | Client → Server | 设备名、凭据请求材料、clientInstanceId、协议版本 | Device 首次启动且本地无已接受身份时发送；Server 以 `client.enrollment_accepted` 回应 | `C` |
-| `client.hello` | Client → Server | clientInstanceId、软件版本、inbox cursor、outbox 起点、待对账标记 | 进程启动以及每次断线恢复后的第一个交换中发送；Server 校验后继续两个流并把旧实例标记为被取代 | `C` |
+| `client.hello` | Client → Server | clientInstanceId、软件版本、inbox cursor、outbox 起点、待对账标记 | 进程启动以及每次断线恢复后的第一个交换中发送；Server 校验后继续两个流并把旧实例标记为被取代 | — |
 | `client.heartbeat` | Client → Server | presence、容量（`maxConcurrentWorkerSessions`、`runningWorkerSessions`、`reservedWorkerSessions`、draining）、lastObservedAt | 空闲期按固定间隔发送；Server 不得从 heartbeat 隐式派发命令 | `—` |
 | `client.connect_code.published` | Client → Server | connectCodeId、codeDigest、issuedByInstanceId、expiresAt、remainingAttempts、generation | 用户在设备上生成或刷新动态连接码后发送；Server 只保存摘要 | `C` |
 | `client.access.challenge_ack` | Client → Server | challengeId、connectCodeId、generation、accepted 或拒绝原因 | 回应 `client.access.challenge`：确认该 code generation 本地仍有效；Server 收到后原子创建 ClientAccessGrant | `C` |
 | `client.occupancy.ack` | Client → Server | occupancyLeaseId、occupancyFencingToken、mirrorRevision | 持久保存占用镜像后回应 `client.occupancy.offer`；Server 收到后 Lease 才进入 occupied | `C + L` |
 | `client.occupancy.rejected` | Client → Server | occupancyLeaseId、occupancyFencingToken、reason（本地锁定、容量、存储失败等） | 无法接受 offer 时回应；Lease 不进入 occupied，Server 回滚 reserving | `C + L` |
-| `client.repository.upsert` | Client → Server | repositoryBindingId、displayName、repositoryKind、defaultBranch、headCommit、dirtyState、availability、repositoryFingerprint、revision；无绝对路径 | 本地注册仓库或绑定元数据变化后上报安全投影 | `C + L（活动占用时）` |
-| `client.repository.removed` | Client → Server | repositoryBindingId、revision、reason | 本地移除绑定后上报；Server 作废对应投影与授权入口 | `C + L（活动占用时）` |
-| `client.repository.status` | Client → Server | repositoryBindingId、availability（available、dirty、unavailable、moved、invalid_git、permission_denied、scan_failed）、headCommit、dirtyState、lastScannedAt | 响应 `client.repository.rescan` 或本地检测到状态变化；每次 Worker Launch 前仍需重新 canonicalize，不依赖旧扫描结果 | `C + L（活动占用时）` |
+| `client.repository.upsert` | Client → Server | repositoryBindingId、displayName、repositoryKind、defaultBranch、headCommit、dirtyState、availability、repositoryFingerprint、revision；无绝对路径 | 本地注册仓库或绑定元数据变化后上报安全投影 | C |
+| `client.repository.removed` | Client → Server | repositoryBindingId、revision、reason | 本地移除绑定后上报；Server 作废对应投影与授权入口 | C |
+| `client.repository.status` | Client → Server | repositoryBindingId、availability（available、dirty、unavailable、moved、invalid_git、permission_denied、scan_failed）、headCommit、dirtyState、lastScannedAt | 响应 `client.repository.rescan` 或本地检测到状态变化；每次 Worker Launch 前仍需重新 canonicalize，不依赖旧扫描结果 | — |
 | `client.worker.launch_ack` | Client → Server | workerLaunchGrantId、workerSessionId、workerInstanceId、accepted 与拒绝原因（fence、repo、容量、本地状态） | 回应 `client.worker.launch`：接受表示本地 launch intent 已持久化并已 spawn 子进程；拒绝时 grant 不被消费 | `C + L` |
-| `client.worker.state` | Client → Server | workerSessionId、进程 state、exit 摘要、容量更新、lastObservedAt | lease 绑定的 Worker 进程状态迁移时发送，并随 heartbeat 汇总；不承载 ExecutionPort 执行事实 | `L` |
-| `client.worker.reconcile` | Client → Server | 每个 pending intent 与注册条目的 workerSessionId、对账结果（still_running、terminal、missing、unknown）、pending launch/apply intent 列表 | Device Client 重启扫描本地状态后发送；Server 接受前 presence 保持 degraded、occupancy 保持 recovery_pending | `C + L` |
+| `client.worker.state` | Client → Server | workerSessionId、进程 state、exit 摘要、容量更新、lastObservedAt | lease 绑定的 Worker 进程状态迁移时发送，并随 heartbeat 汇总；不承载 ExecutionPort 执行事实 | — |
+| `client.worker.reconcile` | Client → Server | 每个 pending intent 与注册条目的 workerSessionId、对账结果（still_running、terminal、missing、unknown）、pending launch/apply intent 列表 | Device Client 重启扫描本地状态后发送；Server 接受前 presence 保持 degraded、occupancy 保持 recovery_pending | — |
 | `client.candidate.retained` | Client → Server | candidateRef、repositoryBindingId、candidateCommit、localRefName、diff 摘要与 Evidence 引用、receipt revision | 冻结完成、稳定 candidate ref 创建并清理 Worktree 前发送；相同身份重发幂等 | `C + L` |
 | `client.candidate.apply_result` | Client → Server | localApplyReceiptId、candidateRef、repositoryBindingId、targetBranch、expectedHead、strategy、result、resultingCommit、conflictArtifactRef、revision | 回应 `client.candidate.apply`；本地 receipt 持久化后发送，支持重试与审计 | `C + L` |
-| `client.command_ack` | Client → Server | 被确认命令的 messageId、status（applied、rejected）、reason、生效 revision | 确认无专用 ack 的 Server → Client 命令（release、force_fence、rescan、client_lock、credential_rotate）；确认涉及占用的命令时必须回显盖章 | `C` |
+| `client.command_ack` | Client → Server | 被确认命令的 messageId、status（applied、rejected）、reason、生效 revision | 确认无专用 ack 的 Server → Client 命令（release、force_fence、rescan、client_lock、credential_rotate）；确认涉及占用的命令时必须回显盖章 | — |
 
 ## Server → Client 消息
 
 | kind | 方向 | payload 概要 | 发送/处理时机 | 强制字段 |
 | --- | --- | --- | --- | --- |
-| `client.enrollment_accepted` | Server → Client | clientNodeId、Device Credential 材料与指纹、server profile、下行流起点 | 回应 `client.enroll`；此后 Client 以该身份交换 | `C` |
-| `client.access.challenge` | Server → Client | challengeId、connectCodeId、申请用户、expiresAt | Web 用户提交 Client ID 与连接码且服务端校验、限流通过后发送；等待 `client.access.challenge_ack`，未 ACK 不创建 grant | `C` |
+| `client.enrollment_accepted` | Server → Client | clientNodeId、Device Credential 材料与指纹、server profile、下行流起点 | 回应 `client.enroll`；此后 Client 以该身份交换 | — |
+| `client.access.challenge` | Server → Client | challengeId、connectCodeId、申请用户、expiresAt | Web 用户提交 Client ID 与连接码且服务端校验、限流通过后发送；等待 `client.access.challenge_ack`，未 ACK 不创建 grant | — |
 | `client.occupancy.offer` | Server → Client | occupancyLeaseId、新 occupancyFencingToken、holderUserId、claimRequestId、idleExpiresAt | 原子检查通过并创建 reserving Lease 后发送；Client 持久化占用镜像后回 `client.occupancy.ack`。offer 本身携带的新 Lease 与 token 即被 ACK 回显的盖章值 | `C + L` |
 | `client.occupancy.release` | Server → Client | occupancyLeaseId、occupancyFencingToken、mode（release、drain、cancel_and_release）、reason | 占用者释放、drain 完成或取消全部任务并释放时发送；Client 停止接受新 WorkerSession，cancel 模式下停止现有 worker | `C + L` |
 | `client.occupancy.force_fence` | Server → Client | occupancyLeaseId、更高 occupancyFencingToken、reason、要求的本地清理动作 | 管理员或原占用者安全清理路径发送；Client 以新 token 覆盖镜像并立即拒绝一切旧 token 命令 | `C + L` |
-| `client.repository.rescan` | Server → Client | repositoryBindingId（或全部绑定）、reason | 投影过期或占用者请求刷新时发送；Client 重新 canonicalize 并回报 `client.repository.status` | `C + L（活动占用时）` |
+| `client.repository.rescan` | Server → Client | repositoryBindingId（或全部绑定）、reason | 投影过期或占用者请求刷新时发送；Client 重新 canonicalize 并回报 `client.repository.status` | C |
 | `client.worker.launch` | Server → Client | WorkerLaunchGrant 全部身份字段（workerLaunchGrantId、workerSessionId、workerId、workerInstanceId、repositoryBindingId、productSessionId、stageRunId、userId、occupancyLeaseId、occupancyFencingToken、credentialDigest、expiresAt）；不含绝对路径 | Scheduler 完成 durable ExecutionReservation 后发送；Client 校验 fencing、repo、容量与本地状态后写入 launch intent 并 spawn `winwincode-worker --managed-session` | `C + L` |
 | `client.worker.stop` | Server → Client | workerSessionId、occupancyLeaseId、occupancyFencingToken、mode、reason | 占用者或管理员停止任务、drain 取消时发送；Client 校验 fencing 后停止进程，回报 `client.worker.state` 与 `client.command_ack` | `C + L` |
 | `client.candidate.apply` | Server → Client | candidateRef、repositoryBindingId、targetBranch、expectedHead、strategy（create_branch、fast_forward、cherry_pick、merge）、occupancyLeaseId、occupancyFencingToken | 占用者从 Web 发起应用时发送；Client 在隔离 integration worktree 中执行校验与应用，回 `client.candidate.apply_result` | `C + L` |
 | `client.client_lock` | Server → Client | locked（true、false）、reason、actorUserId | 管理员或本地用户锁定、解锁设备时发送；锁定后拒绝新连接与占用申请 | `C` |
 | `client.credential_rotate` | Server → Client | rotationId、新 Device Credential 材料、新凭据生效时间与旧凭据吊销时间 | 凭据泄露或策略到期时发送；Client 持久化新凭据后回 `client.command_ack`，此后交换全部使用新凭据 | `C` |
 
-每条 Server → Client 命令都要求显式确认：有专用 ack 的用专用 ack，其余用
-`client.command_ack`。未确认的命令由 Server 保留在命令 outbox 中随后续 exchange 重放；
-Client 依靠 `idempotencyKey` 保证重放不产生第二次本地动作。
+每条 Server → Client 命令（`C`/`C + L`）都要求显式确认：有专用 ack 的用专用 ack，
+其余用 `client.command_ack`。未确认的命令由 Server 保留在命令 outbox 中随后续
+exchange 重放；Client 依靠 `idempotencyKey` 保证重放不产生第二次本地动作。request
+（`client.access.challenge` 由 `client.access.challenge_ack` 应答）、response 与
+report 类事实不走命令确认。
 
 ## Fencing 强制校验点
 
@@ -167,7 +170,7 @@ Device Client 对以下命令强制校验（§12.6）：
 | Worker launch | `client.worker.launch` | 盖章与镜像完全一致；grant 绑定当前 clientInstanceId；RepositoryBinding 重新 canonicalize 并满足路径与软链接规则；本地容量可用 | `client.worker.launch_ack`（accepted=false），不写 launch intent，不 spawn |
 | Worker stop | `client.worker.stop` | 盖章与镜像完全一致 | `client.command_ack`（rejected，stale fencing token），进程继续 |
 | Candidate apply | `client.candidate.apply` | 盖章与镜像一致；candidate ref 仍存在；目标 HEAD 等于 expectedHead；目标工作树满足策略；用户有 repo 权限 | `client.candidate.apply_result`（failed，stale fencing token），写入 LocalApplyReceipt 供审计 |
-| Repository mutation | `client.repository.upsert`、`client.repository.removed` 及占用触发的本地变更 | 存在活动占用时，变更必须基于当前盖章或来自持有当前盖章的指示 | 变更不生效，`client.command_ack`（rejected）；本地 binding 保持不变 |
+| Repository mutation | 本地 repository 注册/移除/变更（经 `client.repository.upsert`、`client.repository.removed` 上报；v1 无 Server 发起的 repository 变更消息） | 占用期间的本地变更须由当前占用授权驱动，Device Client 校验本地占用镜像未被更高 token 取代；上报消息本身不携带盖章 | 镜像已被更高 token 取代时拒绝执行本地变更 |
 
 盖章一致指 occupancyLeaseId 与 occupancyFencingToken 都与本地镜像完全一致；更低或
 不匹配的 token 一律拒绝。Control Plane 对每条带盖章的 Client → Server 消息同样校验
