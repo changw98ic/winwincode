@@ -23,6 +23,8 @@ export interface LocalOperationsPageOptions {
   readonly model: LocalOperationsViewModel
   /** Presentation-only capability; Server authorization remains authoritative. */
   readonly readOnly?: boolean
+  /** Reopens the shell first-run checklist; the shell owns that panel's state. */
+  readonly onOpenReadiness?: () => void
 }
 
 export interface LocalOperationsPage {
@@ -180,6 +182,16 @@ export function mountLocalOperationsPage(options: LocalOperationsPageOptions): L
     },
   })
   const heading = pageHeader.root
+  const readinessOpenButton = options.onOpenReadiness === undefined
+    ? null
+    : mountButton({
+        document,
+        props: {
+          label: 'Open first-run readiness',
+          className: 'wwc-local-readiness-open',
+          onActivate: () => { options.onOpenReadiness?.() },
+        },
+      })
   const statusBadge = mountStatusBadge({
     document,
     props: {
@@ -281,7 +293,15 @@ export function mountLocalOperationsPage(options: LocalOperationsPageOptions): L
   resourcesPanel.content.append(resourceStatusBadge.root, resourcesContent)
   workers.setAttribute('aria-live', 'polite')
   workersPanel.content.append(workers, workersEmpty.root)
-  layout.append(heading, status, error, repositorySection, resourcesSection, workersSection)
+  layout.append(
+    heading,
+    ...(readinessOpenButton === null ? [] : [readinessOpenButton.root]),
+    status,
+    error,
+    repositorySection,
+    resourcesSection,
+    workersSection,
+  )
   options.root.replaceChildren(layout)
 
   function renderWorker(worker: WorkerProjection, commandsDisabled: boolean): HTMLLIElement {
@@ -397,6 +417,7 @@ export function mountLocalOperationsPage(options: LocalOperationsPageOptions): L
       errorState.close()
       workersEmpty.close()
       workersPanel.close()
+      if (readinessOpenButton !== null) readinessOpenButton.close()
       resourceStatusBadge.close()
       resourcesPanel.close()
       repositoryPanel.close()

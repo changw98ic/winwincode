@@ -36,6 +36,15 @@ import {
   createAuthSessionViewModel,
   type AuthSessionViewModel,
 } from './auth-view-model.js'
+import {
+  createReadinessViewModel,
+  type ReadinessContext,
+  type ReadinessItemState,
+} from './readiness-view-model.js'
+import {
+  mountReadinessPage,
+  type ReadinessFixTarget,
+} from './readiness-page.js'
 import type { EnterpriseApplication } from './enterprise-application.js'
 import {
   mountScopeSelectorPage,
@@ -183,6 +192,7 @@ export function mountWinWinCodeClient(
   const authRoot = element(document, 'div', 'wwc-auth-session-root')
   const main = element(document, 'main', 'wwc-main')
   const scopeRoot = element(document, 'div', 'wwc-scope-selector-root')
+  const readinessRoot = element(document, 'div', 'wwc-readiness-root')
   const title = element(document, 'h1', 'wwc-surface-title')
   const description = element(document, 'p', 'wwc-surface-description')
   const readOnlyNotice = element(document, 'p', 'wwc-surface-read-only')
@@ -384,12 +394,49 @@ export function mountWinWinCodeClient(
   }
 
   header.append(brand, navigation, authRoot)
-  main.append(scopeRoot, title, description, readOnlyNotice, errorBoundary.root, slot)
+  main.append(scopeRoot, readinessRoot, title, description, readOnlyNotice, errorBoundary.root, slot)
   shell.append(header, connectionBar.root, main)
   options.root.replaceChildren(shell)
   const authPage: AuthSessionPage = mountAuthSessionPage({
     root: authRoot,
     model: authSession,
+  })
+
+  function readinessFixTarget(item: ReadinessItemState): ReadinessFixTarget | null {
+    const resolution = currentScopeResolution
+    const selection = resolution !== null && resolution.status === 'selected'
+      ? resolution.selection
+      : scopeSelectionFromHash(browser.location.hash)
+    if (item.id === 'model-route' || item.id === 'credential-reference') {
+      return { href: surfaceHash('/settings', selection), label: 'Open Settings' }
+    }
+    if (item.id === 'server-worker-health' || item.id === 'helper-availability') {
+      return {
+        href: surfaceHash('/settings/runtime', selection),
+        label: 'Open local diagnostics',
+      }
+    }
+    if (item.id === 'first-chat-delivery') {
+      return item.reason === 'no-delivery'
+        ? {
+            href: surfaceHash('/strongflow', selection),
+            label: 'Create your first Delivery',
+          }
+        : { href: surfaceHash('/chat', selection), label: 'Start your first Chat' }
+    }
+    return null
+  }
+
+  const readiness = createReadinessViewModel({
+    client: controlPlane,
+    serverStatus: () => connection.state.status,
+    now,
+    nextRequestId: () => contractId('req', browser.crypto) as RequestId,
+  })
+  const readinessPage = mountReadinessPage({
+    root: readinessRoot,
+    model: readiness,
+    fixTarget: readinessFixTarget,
   })
 
   function updateNavigation(): NavigationCapabilityProjection {
@@ -624,6 +671,9 @@ export function mountWinWinCodeClient(
           root: slot,
           model,
           readOnly: activeRouteReadOnly,
+          onOpenReadiness() {
+            if (!closed) readiness.setCollapsed(false)
+          },
         })
         return
       }
@@ -1063,6 +1113,24 @@ export function mountWinWinCodeClient(
       scopeRoot.hidden = true
       scopeRoot.replaceChildren()
     }
+    readinessRoot.hidden = !(
+      authSession.state.status === 'signed-in'
+      && session !== null
+      && activeSurface.id !== 'enterprise'
+    )
+    if (!readinessRoot.hidden) {
+      const resolution = currentScopeResolution
+      const context: ReadinessContext = authSession.state.status !== 'signed-in' || session === null
+        ? { status: 'signed-out' }
+        : resolution?.status === 'selected' && resolution.scope.kind === 'repository'
+          ? { status: 'ready', actor: session.actor, scope: resolution.scope }
+          : resolution?.status === 'denied'
+            ? { status: 'no-scope', reason: 'denied' }
+            : resolution?.status === 'empty'
+              ? { status: 'no-scope', reason: 'empty' }
+              : { status: 'no-scope', reason: 'selection-required' }
+      void readiness.updateContext(context)
+    }
     for (const [id, link] of links) {
       if (id === activeSurface.id) link.setAttribute('aria-current', 'page')
       else link.removeAttribute('aria-current')
@@ -1189,6 +1257,8 @@ export function mountWinWinCodeClient(
       scopeSelectorPage?.close()
       scopeSelectorPage = null
       currentScopeResolution = null
+      readinessPage.close()
+      readiness.close()
       authPage.close()
       authSession.close()
       accessFailureSession = null

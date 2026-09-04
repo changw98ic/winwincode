@@ -987,6 +987,8 @@
         "apps/client/src/local-operations-page.ts",
         "apps/client/src/local-operations-view-model.ts",
         "apps/client/src/navigation-capability.ts",
+        "apps/client/src/readiness-page.ts",
+        "apps/client/src/readiness-view-model.ts",
         "apps/client/src/runtime-config.ts",
         "apps/client/src/scope-selector-page.ts",
         "apps/client/src/scope-selector-view-model.ts",
