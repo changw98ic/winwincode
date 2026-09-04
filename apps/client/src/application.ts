@@ -16,10 +16,15 @@ import type {
   DeliveryGetResultResponse,
   DeliveryId,
   DeliveryListResultResponse,
+  ProviderAccountConnectionId,
+  ProviderAccountConnectionListResultResponse,
+  ProviderAccountPoolId,
+  ProviderAccountPoolListResultResponse,
   ProductSessionId,
   RepositoryScope,
   RequestId,
   SessionListResultResponse,
+  SessionModelSelection,
   StageRunId,
 } from './generated/contracts.js'
 import { QueryName } from './generated/contracts.js'
@@ -120,7 +125,7 @@ function element<K extends keyof HTMLElementTagNameMap>(
 const CONTRACT_ID_ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ'
 
 function contractId(
-  prefix: 'req' | 'sub' | 'psn',
+  prefix: 'req' | 'sub' | 'psn' | 'pac' | 'pap',
   crypto: Crypto,
 ): string {
   const entropy = crypto.getRandomValues(new Uint8Array(26))
@@ -282,6 +287,91 @@ export function mountWinWinCodeClient(
       if (parameters.get('session') === null) {
         replaceHash(`#/chat?session=${encodeURIComponent(productSessionId)}`)
       }
+      let accountSelections: readonly SessionModelSelection[] = Object.freeze([])
+      let preferredAccountSelection: SessionModelSelection | null = null
+      let enterpriseOnlyModelIds: readonly string[] = Object.freeze([])
+      try {
+        const [connectionsValue, poolsValue] = await Promise.all([
+          controlPlane.query({
+            schemaVersion: 'winwincode/v1',
+            requestId: contractId('req', browser.crypto) as RequestId,
+            actor: context.actor,
+            scope: context.scope,
+            query: QueryName.ProviderAccountConnectionList,
+            parameters: { states: ['active'] },
+            page: { cursor: null, limit: 200 },
+          }, { signal: controller.signal }),
+          controlPlane.query({
+            schemaVersion: 'winwincode/v1',
+            requestId: contractId('req', browser.crypto) as RequestId,
+            actor: context.actor,
+            scope: context.scope,
+            query: QueryName.ProviderAccountPoolList,
+            parameters: { enabled: true },
+            page: { cursor: null, limit: 200 },
+          }, { signal: controller.signal }),
+        ])
+        if (
+          connectionsValue.query === QueryName.ProviderAccountConnectionList
+          && poolsValue.query === QueryName.ProviderAccountPoolList
+        ) {
+          const connections = (connectionsValue as ProviderAccountConnectionListResultResponse)
+            .result.items.filter(connection => (
+              connection.owner.kind === 'user'
+              && context.actor.kind === 'user'
+              && connection.owner.userId === context.actor.id
+            ))
+          const pools = (poolsValue as ProviderAccountPoolListResultResponse).result.items
+          const personalModels = [
+            'gpt-5.6-sol',
+            'gpt-5.6-terra',
+            'gpt-5.6-luna',
+            'gpt-5.5',
+            'gpt-5.4',
+            'gpt-5.4-mini',
+            'gpt-5.2',
+          ] as const
+          const enterpriseOnlyModels = new Set(pools
+            .filter(pool => pool.sourcePolicy === 'enterprise_only')
+            .flatMap(pool => pool.allowedModelIds))
+          enterpriseOnlyModelIds = Object.freeze([...enterpriseOnlyModels])
+          const personalSelections = connections.flatMap(connection => personalModels
+            .filter(modelId => !enterpriseOnlyModels.has(modelId))
+            .map(modelId => Object.freeze({
+              providerId: connection.providerId,
+              modelId,
+              accountSource: Object.freeze({
+                kind: 'personal' as const,
+                accountConnectionId: connection.id,
+              }),
+            })))
+          const poolSelections = pools.flatMap(pool => pool.allowedModelIds.map(modelId => Object.freeze({
+              providerId: 'winwincode-openai-chatgpt',
+              modelId,
+              accountSource: Object.freeze({
+                kind: 'enterprise_pool' as const,
+                accountPoolId: pool.id,
+              }),
+            })))
+          accountSelections = Object.freeze([...personalSelections, ...poolSelections])
+          const preferredPool = pools.find(pool => (
+            pool.sourcePolicy === 'enterprise_only'
+            || pool.sourcePolicy === 'allow_personal_default_pool'
+          ))
+          const preferredPersonalPool = pools.find(
+            pool => pool.sourcePolicy === 'allow_personal_default_personal',
+          )
+          preferredAccountSelection = preferredPool === undefined
+            ? personalSelections.find(selection => (
+              preferredPersonalPool?.allowedModelIds.includes(selection.modelId) === true
+            )) ?? null
+            : poolSelections.find(selection => (
+              selection.accountSource.accountPoolId === preferredPool.id
+            )) ?? null
+        }
+      } catch {
+        accountSelections = Object.freeze([])
+      }
       const [{ createChatViewModel }, { mountChatPage }] = await Promise.all([
         import('./chat-view-model.js'),
         import('./chat-page.js'),
@@ -301,6 +391,9 @@ export function mountWinWinCodeClient(
       activeFeature = mountChatPage({
         root: slot,
         model,
+        modelSelections: accountSelections,
+        preferredModelSelection: preferredAccountSelection,
+        hiddenSystemDefaultModelIds: enterpriseOnlyModelIds,
         nextProductSessionId: () => contractId(
           'psn',
           browser.crypto,
@@ -405,6 +498,54 @@ export function mountWinWinCodeClient(
     }
   }
 
+  async function renderSettings(generation: number): Promise<void> {
+    const context = authenticatedRouteContext()
+    if (context === null) return
+    const controller = new AbortController()
+    featureController = controller
+    routeLoading('Loading Settings…')
+    try {
+      const [settingsModule, settingsPageModule, accountModule, accountPageModule] = await Promise.all([
+        import('./settings-view-model.js'),
+        import('./settings-page.js'),
+        import('./provider-account-view-model.js'),
+        import('./provider-account-page.js'),
+      ])
+      if (closed || generation !== renderGeneration || controller.signal.aborted) return
+      const settingsRoot = element(document, 'div', 'wwc-settings-route-settings')
+      const accountRoot = element(document, 'div', 'wwc-settings-route-provider-account')
+      slot.replaceChildren(settingsRoot, accountRoot)
+      const settingsModel = settingsModule.createSettingsViewModel({
+        client: controlPlane,
+        actor: context.actor,
+        scope: context.scope,
+        subscriptionId: contractId('sub', browser.crypto) as ControlPlaneWebSocketSubscriptionId,
+        nextRequestId: () => contractId('req', browser.crypto) as RequestId,
+      })
+      const accountModel = accountModule.createProviderAccountViewModel({
+        client: controlPlane,
+        actor: context.actor,
+        scope: context.scope,
+        nextRequestId: () => contractId('req', browser.crypto) as RequestId,
+      })
+      const settingsPage = settingsPageModule.mountSettingsPage({ root: settingsRoot, model: settingsModel })
+      const accountPage = accountPageModule.mountProviderAccountPage({
+        root: accountRoot,
+        model: accountModel,
+        nextConnectionId: () => contractId('pac', browser.crypto) as ProviderAccountConnectionId,
+      })
+      activeFeature = {
+        close() {
+          settingsPage.close()
+          accountPage.close()
+        },
+      }
+    } catch {
+      if (closed || generation !== renderGeneration || controller.signal.aborted) return
+      routeUnavailable('Settings could not be opened. Reload this route to retry.')
+    }
+  }
+
   async function renderEnterprise(generation: number): Promise<void> {
     const session = authSession.state.session
     if (authSession.state.status !== 'signed-in' || session === null) {
@@ -427,8 +568,12 @@ export function mountWinWinCodeClient(
     try {
       const enterprise = await import('./enterprise-application.js')
       if (closed || generation !== renderGeneration || controller.signal.aborted) return
+      const enterpriseRoot = element(document, 'div', 'wwc-enterprise-route-main')
+      const accountRoot = element(document, 'div', 'wwc-enterprise-route-provider-accounts')
+      const showProviderAccounts = enterprise.enterpriseRouteFromHash(browser.location.hash).id === 'operations'
+      slot.replaceChildren(enterpriseRoot, ...(showProviderAccounts ? [accountRoot] : []))
       const mounted = await enterprise.mountEnterpriseApplication({
-        root: slot,
+        root: enterpriseRoot,
         client: controlPlane,
         hash: browser.location.hash,
         signal: controller.signal,
@@ -445,7 +590,36 @@ export function mountWinWinCodeClient(
         mounted.close()
         return
       }
-      activeFeature = mounted
+      if (showProviderAccounts) {
+        const [accountModule, accountPageModule] = await Promise.all([
+          import('./provider-account-view-model.js'),
+          import('./provider-account-enterprise-page.js'),
+        ])
+        if (closed || generation !== renderGeneration || controller.signal.aborted) {
+          mounted.close()
+          return
+        }
+        const accountModel = accountModule.createProviderAccountViewModel({
+          client: controlPlane,
+          actor: session.actor,
+          scope,
+          nextRequestId: () => contractId('req', browser.crypto) as RequestId,
+        })
+        const accountPage = accountPageModule.mountEnterpriseProviderAccountPage({
+          root: accountRoot,
+          model: accountModel,
+          nextConnectionId: () => contractId('pac', browser.crypto) as ProviderAccountConnectionId,
+          nextPoolId: () => contractId('pap', browser.crypto) as ProviderAccountPoolId,
+        })
+        activeFeature = {
+          close() {
+            mounted.close()
+            accountPage.close()
+          },
+        }
+      } else {
+        activeFeature = mounted
+      }
     } catch {
       if (closed || generation !== renderGeneration || controller.signal.aborted) return
       const failure = element(document, 'p', 'wwc-enterprise-route-failure')
@@ -479,6 +653,7 @@ export function mountWinWinCodeClient(
     }))
     if (activeSurface.id === 'chat') void renderChat(generation)
     else if (activeSurface.id === 'strongflow') void renderStrongFlow(generation)
+    else if (activeSurface.id === 'settings') void renderSettings(generation)
     else if (activeSurface.id === 'enterprise') void renderEnterprise(generation)
   }
 
@@ -488,6 +663,7 @@ export function mountWinWinCodeClient(
     if (
       activeSurface.id === 'chat'
       || activeSurface.id === 'strongflow'
+      || activeSurface.id === 'settings'
       || activeSurface.id === 'enterprise'
     ) render()
   })

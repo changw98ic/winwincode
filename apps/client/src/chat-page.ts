@@ -5,15 +5,14 @@ import type {
   ChatViewModelState,
 } from './chat-view-model.js'
 import type { ControlPlaneClientError } from './control-plane-client.js'
-import type {
-  ModelRoute,
-  ProductSessionId,
-} from './generated/contracts.js'
+import type { ProductSessionId, SessionModelSelection } from './generated/contracts.js'
 
 export interface ChatPageOptions {
   readonly root: HTMLElement
   readonly model: ChatViewModel
-  readonly modelRoutes?: readonly ModelRoute[]
+  readonly modelSelections?: readonly SessionModelSelection[]
+  readonly preferredModelSelection?: SessionModelSelection | null
+  readonly hiddenSystemDefaultModelIds?: readonly string[]
   readonly nextProductSessionId?: () => ProductSessionId
 }
 
@@ -153,7 +152,7 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
   const cancel = element(document, 'button', 'wwc-chat-cancel')
   const send = element(document, 'button', 'wwc-chat-send')
   let closed = false
-  let renderedModelRoutes: readonly ModelRoute[] = Object.freeze([])
+  let renderedModelSelections: readonly SessionModelSelection[] = Object.freeze([])
 
   sessionHeading.textContent = 'Sessions'
   newSession.type = 'button'
@@ -213,40 +212,60 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
     retry.hidden = presentation.errorText === null
 
     const route = state.defaultModelRoute
-    const routeByIdentity = new Map<string, ModelRoute>()
-    for (const candidate of [route, ...(options.modelRoutes ?? [])]) {
+    const systemSelection: SessionModelSelection | null = route === null
+      || options.hiddenSystemDefaultModelIds?.includes(route.modelId) === true
+      ? null
+      : {
+          providerId: route.providerId,
+          modelId: route.modelId,
+          accountSource: { kind: 'system_default' },
+        }
+    const currentSelection = state.session?.modelSelection ?? null
+    const visibleCurrentSelection = currentSelection?.accountSource.kind === 'system_default'
+      && options.hiddenSystemDefaultModelIds?.includes(currentSelection.modelId) === true
+      ? null
+      : currentSelection
+    const selectionByIdentity = new Map<string, SessionModelSelection>()
+    for (const candidate of [
+      options.preferredModelSelection ?? null,
+      systemSelection,
+      ...(options.modelSelections ?? []),
+      visibleCurrentSelection,
+    ]) {
       if (candidate === null) continue
-      routeByIdentity.set(
-        `${candidate.providerId}\u0000${candidate.modelId}\u0000${candidate.credentialReferenceId}`,
-        candidate,
-      )
+      selectionByIdentity.set(JSON.stringify(candidate), candidate)
     }
-    renderedModelRoutes = Object.freeze([...routeByIdentity.values()])
+    renderedModelSelections = Object.freeze([...selectionByIdentity.values()])
     const previousModelIndex = modelSelect.selectedIndex
     modelSelect.replaceChildren()
-    if (renderedModelRoutes.length === 0) {
+    if (renderedModelSelections.length === 0) {
       const option = document.createElement('option')
       option.value = ''
       option.textContent = 'No model configured'
       modelSelect.append(option)
     } else {
-      modelSelect.append(...renderedModelRoutes.map((candidate, index) => {
+      modelSelect.append(...renderedModelSelections.map((candidate, index) => {
         const option = document.createElement('option')
         option.value = String(index)
-        option.textContent = `${candidate.providerId} / ${candidate.modelId}`
+        const source = candidate.accountSource.kind === 'personal'
+          ? 'personal account'
+          : candidate.accountSource.kind === 'enterprise_pool'
+            ? 'enterprise pool'
+            : 'system default'
+        option.textContent = `${candidate.providerId} / ${candidate.modelId} · ${source}`
         return option
       }))
       modelSelect.selectedIndex = previousModelIndex < 0
         ? 0
-        : Math.min(previousModelIndex, renderedModelRoutes.length - 1)
+        : Math.min(previousModelIndex, renderedModelSelections.length - 1)
     }
     const pageUnavailable = state.status === 'authentication-required'
       || state.status === 'authorization-denied'
       || state.status === 'closed'
       || ['submitting', 'cancelling'].includes(state.interaction.status)
-    modelSelect.disabled = renderedModelRoutes.length < 2 || pageUnavailable
+    modelSelect.disabled = renderedModelSelections.length < 2 || pageUnavailable
     newSession.disabled = options.nextProductSessionId === undefined
-      || renderedModelRoutes.length === 0
+      || renderedModelSelections.length === 0
       || pageUnavailable
 
     sessionList.replaceChildren(...state.sessions.map(session => {
@@ -310,12 +329,12 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
     void options.model.cancelSession('Stopped from the Chat page.')
   })
   newSession.addEventListener('click', () => {
-    const route = renderedModelRoutes[modelSelect.selectedIndex]
-    if (route === undefined || options.nextProductSessionId === undefined) return
+    const selection = renderedModelSelections[modelSelect.selectedIndex]
+    if (selection === undefined || options.nextProductSessionId === undefined) return
     void options.model.createSession({
       productSessionId: options.nextProductSessionId(),
       title: 'New Chat',
-      modelRoute: route,
+      modelSelection: selection,
     })
   })
   retry.addEventListener('click', () => { void options.model.refresh() })

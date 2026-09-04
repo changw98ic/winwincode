@@ -89,6 +89,11 @@ function session(overrides = {}) {
     state: 'waiting_for_input',
     title: 'Local decision session',
     updatedAt: '2026-08-27T03:00:00.000Z',
+    modelSelection: {
+      providerId: 'fixture-provider',
+      modelId: 'fixture-model',
+      accountSource: { kind: 'system_default' },
+    },
     ...overrides,
   }
 }

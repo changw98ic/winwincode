@@ -13,8 +13,9 @@ use tokio::signal::unix::{SignalKind, signal};
 use winwincode_api::generated::{
     Actor, ControlPlaneWebSocketAuthorizationEpoch, CredentialReferenceCreateCommand,
     CredentialReferenceCreateCommandCommand, CredentialReferenceCreatePayload, ModelRoute,
-    OrganizationScope, OrganizationScopeKind, RepositoryScope, RepositoryScopeKind, Scope,
-    UserActor, UserActorKind,
+    OrganizationScope, OrganizationScopeKind, ProviderAccountSource, RepositoryScope,
+    RepositoryScopeKind, Scope, SessionModelSelection, SystemDefaultProviderAccountSource,
+    SystemDefaultProviderAccountSourceKind, UserActor, UserActorKind,
 };
 use winwincode_control_plane::{
     ChatInteractionService, ContinueProductSessionCommand, ControlPlane, ControlPlaneConfig,
@@ -366,7 +367,7 @@ fn prepare_product_session(
         project_id: ProjectId(id("prj", 1)),
         repository_id: RepositoryId(id("rep", 1)),
         title: "Browser local controls".into(),
-        model_route: model_route(),
+        model_selection: model_selection(),
     })?;
     let binding = SessionBindingIdentity::product_session(
         ProductSessionId(id("psn", 1)),
@@ -564,6 +565,19 @@ fn model_route() -> ModelRoute {
         provider_id: "browser-provider".into(),
         model_id: "browser-model".into(),
         credential_reference_id: CredentialReferenceId(id("crd", 1)),
+    }
+}
+
+fn model_selection() -> SessionModelSelection {
+    let route = model_route();
+    SessionModelSelection {
+        provider_id: route.provider_id,
+        model_id: route.model_id,
+        account_source: ProviderAccountSource::SystemDefaultProviderAccountSource(
+            SystemDefaultProviderAccountSource {
+                kind: SystemDefaultProviderAccountSourceKind::SystemDefault,
+            },
+        ),
     }
 }
 

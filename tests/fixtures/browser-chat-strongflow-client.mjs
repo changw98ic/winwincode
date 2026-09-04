@@ -464,10 +464,10 @@ globalThis.runChatStrongFlowSetup = async proof => {
     projectId: scope.projectId,
     repositoryId: scope.repositoryId,
     title: 'Browser production Chat',
-    modelRoute: {
+    modelSelection: {
       providerId: 'winwincode-loopback',
       modelId: 'loopback-model',
-      credentialReferenceId,
+      accountSource: { kind: 'system_default' },
     },
   })
   await navigate(`#/chat?session=${productSessionId}`, '.wwc-chat')

@@ -44,6 +44,11 @@ const modelRoute = {
   modelId: 'model-one',
   credentialReferenceId: 'crd_PRIVATE_REFERENCE_00000001',
 }
+const modelSelection = {
+  providerId: modelRoute.providerId,
+  modelId: modelRoute.modelId,
+  accountSource: { kind: 'system_default' },
+}
 
 function session(
   id = productSessionId,
@@ -58,6 +63,7 @@ function session(
     state,
     title,
     updatedAt: '2026-08-27T01:00:00.000Z',
+    modelSelection,
   }
 }
 
@@ -276,10 +282,13 @@ test('mounted Chat page exposes accessible state and delegates every interaction
   const mounted = mountChatPage({
     root: rootElement,
     model,
-    modelRoutes: [{
+    modelSelections: [{
       providerId: 'provider-two',
       modelId: 'model-two',
-      credentialReferenceId: 'crd_PRIVATE_REFERENCE_00000002',
+      accountSource: {
+        kind: 'personal',
+        accountConnectionId: 'pac_00000000000000000000000002',
+      },
     }],
     nextProductSessionId: () => 'psn_00000000000000000000000003',
   })
@@ -302,7 +311,7 @@ test('mounted Chat page exposes accessible state and delegates every interaction
   assert.equal(messages.getAttribute('aria-live'), 'polite')
   assert.equal(messages.getAttribute('aria-busy'), 'false')
   assert.equal(messages.children[0].children[0].children[1].textContent, '<script>not markup</script>')
-  assert.equal(modelSelect.children[0].textContent, 'provider-one / model-one')
+  assert.equal(modelSelect.children[0].textContent, 'provider-one / model-one · system default')
   assert.doesNotMatch(modelSelect.children[0].textContent, /PRIVATE_REFERENCE/u)
 
   composer.value = '  steer this run  '
@@ -332,11 +341,37 @@ test('mounted Chat page exposes accessible state and delegates every interaction
     'selectSession',
     'createSession',
   ])
-  assert.equal(model.calls.at(-1)[1].modelRoute.credentialReferenceId, modelRoute.credentialReferenceId)
+  assert.deepEqual(model.calls.at(-1)[1].modelSelection, modelSelection)
 
   mounted.close()
   assert.deepEqual(model.calls.at(-1), ['close'])
   assert.deepEqual(rootElement.children, [])
+})
+
+test('enterprise-only policy removes the covered system default from new Chat choices', () => {
+  const document = new FakeDocument()
+  const rootElement = document.createElement('main')
+  const model = new FakeChatViewModel(state())
+  const mounted = mountChatPage({
+    root: rootElement,
+    model,
+    hiddenSystemDefaultModelIds: ['model-one'],
+    modelSelections: [{
+      providerId: 'winwincode-openai-chatgpt',
+      modelId: 'model-one',
+      accountSource: {
+        kind: 'enterprise_pool',
+        accountPoolId: 'pap_00000000000000000000000001',
+      },
+    }],
+    nextProductSessionId: () => 'psn_00000000000000000000000003',
+  })
+
+  const modelSelect = findByClass(rootElement, 'wwc-chat-model')
+  assert.equal(modelSelect.children.length, 1)
+  assert.match(modelSelect.children[0].textContent, /enterprise pool/u)
+  assert.doesNotMatch(modelSelect.children[0].textContent, /system default/u)
+  mounted.close()
 })
 
 test('Chat page source has no transport, legacy Remote, secret rendering, or HTML injection path', () => {

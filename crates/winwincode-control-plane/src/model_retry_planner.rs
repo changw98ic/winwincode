@@ -596,10 +596,19 @@ pub(crate) fn provider_gateway_identity(
             return Err(error);
         }
     };
-    Ok(ProviderGatewayIdentity::product_session(
-        authority.repository_scope,
-        authority.product_session_id,
-    ))
+    Ok(match authority.actor {
+        Actor::UserActor(actor) => ProviderGatewayIdentity::product_session_for_user(
+            authority.repository_scope,
+            authority.product_session_id,
+            actor.id,
+        ),
+        Actor::SystemActor(_) | Actor::ServiceAccountActor(_) => {
+            ProviderGatewayIdentity::product_session(
+                authority.repository_scope,
+                authority.product_session_id,
+            )
+        }
+    })
 }
 
 fn validate_job_target(

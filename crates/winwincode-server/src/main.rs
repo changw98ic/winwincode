@@ -22,15 +22,19 @@ use winwincode_control_plane::{
     CredentialReferenceService, DurableWorkerInteractionOutbound,
     EnterpriseIdentityProductionVerifiers, EnterpriseIdentityProtocolAdapter,
     EnterpriseIdentityProtocolConfig, EnterpriseIdentityService, EnterpriseIdentityVerifierConfig,
-    EnterpriseIdentityVerifierTimeouts, EnterpriseRbacService, LocalDeliveryAdapterConfig,
+    EnterpriseIdentityVerifierTimeouts, EnterpriseRbacService, HttpsSseProviderConfig,
+    HttpsSseProviderLimits, HttpsSseProviderTimeouts, LocalDeliveryAdapterConfig,
     LocalModelPolicyAuthority, LocalModelPolicyAuthorityConfig, LocalPublicationAdapterConfig,
     LocalSecretStoreAdapter, ModelAdmissionLimits, ModelAdmissionPolicyLayer, ModelCapability,
     ModelRequestPoolConfig, ModelRoutePolicyDecision, ModelSettingsRequest, ModelSettingsService,
-    ModelSettingsTarget, ModelSettingsValues, ModelToolSupport, ProductSessionExecutionApplication,
-    ProductSessionExecutionConfig, ProviderAdmissionReservationConfig, ProviderCatalogRequest,
-    ProviderCatalogService, ProviderDescriptor, ResolvedSecret, SecretStorePort,
-    StandaloneModelExecutionApplication, StandaloneModelExecutionConfig, StandaloneProviderConfig,
-    TrustedProtocolParty, local_loopback_retry_policy,
+    ModelSettingsTarget, ModelSettingsValues, ModelToolSupport, OPENAI_CHATGPT_PROVIDER_ID,
+    OpenAiDeviceAuthorizationAdapter, OpenAiDeviceAuthorizationConfig,
+    ProductSessionExecutionApplication, ProductSessionExecutionConfig,
+    ProviderAccountAuthorizationPort, ProviderAccountSecretStore,
+    ProviderAdmissionReservationConfig, ProviderCatalogRequest, ProviderCatalogService,
+    ProviderDescriptor, ResolvedSecret, SecretStorePort, StandaloneModelExecutionApplication,
+    StandaloneModelExecutionConfig, StandaloneProviderConfig, TrustedProtocolParty,
+    local_loopback_retry_policy,
 };
 use winwincode_domain::{
     CredentialReferenceId, OrganizationId, ProjectId, RepositoryId, RequestId, Revision,
@@ -564,7 +568,7 @@ fn open_local_model_execution(
     })?;
     let retry_policy = local_loopback_retry_policy()?;
     let pool = ModelRequestPoolConfig {
-        max_routes: 4,
+        max_routes: 64,
         max_active_per_route: 1,
         max_waiting_per_route: 4,
         max_exchange_records_per_route: 8,
@@ -577,9 +581,29 @@ fn open_local_model_execution(
         StandaloneModelExecutionConfig {
             data_directory: config.data_directory().to_path_buf(),
             secret_directory: PathBuf::from(required_environment("SECRET_DIRECTORY")?),
-            providers: vec![StandaloneProviderConfig::Loopback {
-                provider_id: model_route.provider.clone(),
-            }],
+            providers: vec![
+                StandaloneProviderConfig::Loopback {
+                    provider_id: model_route.provider.clone(),
+                },
+                StandaloneProviderConfig::HttpsSse(
+                    HttpsSseProviderConfig::try_new(
+                        OPENAI_CHATGPT_PROVIDER_ID.to_owned(),
+                        "https://chatgpt.com/backend-api/codex/responses".to_owned(),
+                        HttpsSseProviderTimeouts {
+                            connect: Duration::from_secs(10),
+                            first_byte: Duration::from_secs(30),
+                            idle: Duration::from_mins(2),
+                            total: Duration::from_mins(10),
+                        },
+                        HttpsSseProviderLimits {
+                            response_bytes: 64 * 1024 * 1024,
+                            event_bytes: 4 * 1024 * 1024,
+                            events: 100_000,
+                        },
+                    )?
+                    .with_openai_chatgpt_responses()?,
+                ),
+            ],
             admission: ProviderAdmissionReservationConfig::try_new(100, 10)?,
             pool,
             policy: Box::new(policy),
@@ -721,6 +745,18 @@ fn compose_production_application(
         Arc::clone(&identities),
         rbac_application,
     ));
+    let account_secrets: Arc<dyn ProviderAccountSecretStore> = Arc::new(
+        LocalSecretStoreAdapter::open(required_environment("SECRET_DIRECTORY")?)?,
+    );
+    let mut account_authorization_config = OpenAiDeviceAuthorizationConfig::production();
+    if let Ok(client_id) = env::var("CODEX_APP_SERVER_LOGIN_CLIENT_ID")
+        && !client_id.trim().is_empty()
+    {
+        account_authorization_config = account_authorization_config.with_client_id(client_id)?;
+    }
+    let account_authorization: Arc<dyn ProviderAccountAuthorizationPort> = Arc::new(
+        OpenAiDeviceAuthorizationAdapter::try_new(account_authorization_config)?,
+    );
     let application = StandaloneControlPlaneApplication::new_with_enterprise_and_collaboration(
         control_plane,
         storage,
@@ -729,7 +765,8 @@ fn compose_production_application(
         enterprise,
         collaboration,
         execution_config,
-    )?;
+    )?
+    .with_provider_accounts(account_secrets, account_authorization);
     Ok(ComposedApplication {
         application,
         identities,

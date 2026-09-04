@@ -64,6 +64,11 @@ function completedCommandResponse(requestId, command, revision = 8) {
       title: 'Generated client session',
       state: 'cancelled',
       updatedAt: '2026-08-25T00:00:00.000Z',
+      modelSelection: {
+        providerId: 'fixture-provider',
+        modelId: 'fixture-model',
+        accountSource: { kind: 'system_default' },
+      },
     },
   }
 }

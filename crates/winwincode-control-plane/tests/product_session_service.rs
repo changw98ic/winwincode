@@ -9,8 +9,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use rusqlite::{Connection, params};
 use winwincode_api::generated::{
     ControlPlaneWebSocketProductSessionChangedEvent,
-    ControlPlaneWebSocketProductSessionMessageAppendedEvent, ModelRoute, RepositoryScope,
-    RepositoryScopeKind,
+    ControlPlaneWebSocketProductSessionMessageAppendedEvent, ProviderAccountSource,
+    RepositoryScope, RepositoryScopeKind, SessionModelSelection,
+    SystemDefaultProviderAccountSource, SystemDefaultProviderAccountSourceKind,
 };
 use winwincode_control_plane::{
     AppendAssistantMessageCommand, AssistantMessageState, CancelProductSessionCommand,
@@ -20,10 +21,10 @@ use winwincode_control_plane::{
     ProductSessionTurnState, ProductSessionTurnTerminalOutcome, SubmitChatMessageCommand,
 };
 use winwincode_domain::{
-    CodexThreadId, ControlPlaneEventId, CredentialReferenceId, DeliveryId, DeliveryTaskId,
-    ExecutionAckSequence, ExecutionJobId, ExecutionMessageId, ExecutionSequence, FencingToken,
-    Instant, LeaseId, ModelExchangeId, OrganizationId, ProductSessionId, ProjectId, RepositoryId,
-    RequestId, ServiceAccountId, Sha256Digest, StageRunId, UserId, WorkerId, WorkerInstanceId,
+    CodexThreadId, ControlPlaneEventId, DeliveryId, DeliveryTaskId, ExecutionAckSequence,
+    ExecutionJobId, ExecutionMessageId, ExecutionSequence, FencingToken, Instant, LeaseId,
+    ModelExchangeId, OrganizationId, ProductSessionId, ProjectId, RepositoryId, RequestId,
+    ServiceAccountId, Sha256Digest, StageRunId, UserId, WorkerId, WorkerInstanceId,
     WorkerSessionId, WorkspaceId,
 };
 use winwincode_execution_port::generated::{ExecutionOutcomeStatus, ExecutionOutcomeUsage};
@@ -110,9 +111,13 @@ fn outbox_payload(directory: &TestDirectory, request: u64, topic: &str) -> Vec<u
         .expect("outbox payload")
 }
 
-fn model_route() -> ModelRoute {
-    ModelRoute {
-        credential_reference_id: CredentialReferenceId(id("crd", 1)),
+fn model_selection() -> SessionModelSelection {
+    SessionModelSelection {
+        account_source: ProviderAccountSource::SystemDefaultProviderAccountSource(
+            SystemDefaultProviderAccountSource {
+                kind: SystemDefaultProviderAccountSourceKind::SystemDefault,
+            },
+        ),
         model_id: "fixture-model".into(),
         provider_id: "fixture-provider".into(),
     }
@@ -173,7 +178,7 @@ fn create_command(
         project_id: ProjectId(id("prj", 1)),
         repository_id: RepositoryId(id("rep", 1)),
         title: title.into(),
-        model_route: model_route(),
+        model_selection: model_selection(),
     }
 }
 
@@ -776,7 +781,7 @@ fn chat_submit_retains_route_replays_exactly_and_rejects_changed_body_or_public_
     let created = service
         .create(&create_command(&scope, 30, 50, "Chat", 1))
         .expect("session create");
-    assert_eq!(created.record.model_route(), &model_route());
+    assert_eq!(created.record.model_selection(), &model_selection());
 
     let submit = submit_command(&scope, 30, 51, 1, "Implement the durable Chat ledger", 2);
     let accepted = service.submit_chat(&submit).expect("chat submit");
@@ -784,7 +789,7 @@ fn chat_submit_retains_route_replays_exactly_and_rejects_changed_body_or_public_
     assert_eq!(accepted.message.state, "completed");
     assert_eq!(accepted.message.sequence, 1);
     assert_eq!(accepted.turn_intent.state, ProductSessionTurnState::Pending);
-    assert_eq!(accepted.turn_intent.model_route, model_route());
+    assert_eq!(accepted.turn_intent.model_selection, model_selection());
     assert_eq!(accepted.mutation.record.session().revision(), 2);
     assert_eq!(
         accepted.mutation.record.session().state(),

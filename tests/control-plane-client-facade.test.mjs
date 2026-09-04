@@ -85,6 +85,11 @@ function commandResponse(request, revision = 8) {
       title: 'Facade session',
       state: 'cancelled',
       updatedAt: '2026-08-27T00:00:00.000Z',
+      modelSelection: {
+        providerId: 'fixture-provider',
+        modelId: 'fixture-model',
+        accountSource: { kind: 'system_default' },
+      },
     },
   }
 }

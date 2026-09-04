@@ -457,10 +457,10 @@ fn product_session_routes_replay_conflict_page_and_recover_after_restart() {
             "projectId": id("prj", 1),
             "repositoryId": id("rep", 1),
             "title": "Server-composed session",
-            "modelRoute": {
+            "modelSelection": {
                 "providerId": "provider-main",
                 "modelId": "model-main",
-                "credentialReferenceId": id("crd", 1)
+                "accountSource": { "kind": "system_default" }
             }
         }
     }))

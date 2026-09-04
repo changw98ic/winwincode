@@ -31,6 +31,7 @@ import type {
   RequestId,
   RuntimeProjectionSnapshot,
   RuntimeProjectionGetResultResponse,
+  SessionModelSelection,
   SessionCancelCompletedResponse,
   SessionCreateCompletedResponse,
   SessionGetResultResponse,
@@ -127,7 +128,7 @@ export interface ChatViewModelOptions {
 export interface ChatCreateSessionInput {
   readonly productSessionId: ProductSessionId
   readonly title: string
-  readonly modelRoute: ModelRoute
+  readonly modelSelection: SessionModelSelection
 }
 
 export interface ChatViewModel {
@@ -1086,7 +1087,7 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
           projectId: options.scope.projectId,
           repositoryId: options.scope.repositoryId,
           title,
-          modelRoute: input.modelRoute,
+          modelSelection: input.modelSelection,
         },
       }, { signal: active.signal })
       if (!isCurrent(ownGeneration)) return

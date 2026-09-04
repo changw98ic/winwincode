@@ -4,7 +4,7 @@
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use winwincode_api::generated::{ModelRoute, RepositoryScope};
+use winwincode_api::generated::{RepositoryScope, SessionModelSelection};
 use winwincode_domain::{ExecutionJobId, ProductSessionId, Sha256Digest};
 use winwincode_execution_port::generated::{
     ExecutionJob, ExecutionLimits, ExecutionScope, ExecutionWorkspace, ExecutionWorkspaceWriteMode,
@@ -81,7 +81,7 @@ impl ProductSessionExecutionConfig {
         context: &ProductSessionCommandContext,
         product_session_id: &ProductSessionId,
         message: &str,
-        model_route: &ModelRoute,
+        model_selection: &SessionModelSelection,
     ) -> Result<PreparedProductSessionExecution, ProductSessionServiceError> {
         if message.is_empty() || message.len() > MAX_GOAL_BYTES {
             return Err(service_error(
@@ -132,7 +132,7 @@ impl ProductSessionExecutionConfig {
             request_id: &context.receipt_identity.request_id().0,
             product_session_id,
             message,
-            model_route,
+            model_selection,
             execution_profile: &self.execution_profile,
             limits: &limits,
             workspace: &workspace,
@@ -191,7 +191,7 @@ struct ExecutionPayloadDigestInput<'input> {
     request_id: &'input str,
     product_session_id: &'input ProductSessionId,
     message: &'input str,
-    model_route: &'input ModelRoute,
+    model_selection: &'input SessionModelSelection,
     execution_profile: &'input str,
     limits: &'input ExecutionLimits,
     workspace: &'input ExecutionWorkspace,

@@ -23,6 +23,7 @@ pub enum CommandFamily {
     Publication,
     Enterprise,
     Collaboration,
+    ProviderAccount,
 }
 
 impl CommandFamily {
@@ -59,6 +60,12 @@ impl CommandFamily {
             | CommandName::EnterpriseIdentityUpdate => Self::Enterprise,
             CommandName::CollaborationNotificationAck
             | CommandName::CollaborationPresenceUpdate => Self::Collaboration,
+            CommandName::ProviderAccountConnectionStart
+            | CommandName::ProviderAccountConnectionComplete
+            | CommandName::ProviderAccountConnectionRefresh
+            | CommandName::ProviderAccountConnectionRevoke
+            | CommandName::ProviderAccountPoolUpsert
+            | CommandName::ProviderAccountPoolDisable => Self::ProviderAccount,
         }
     }
 }
@@ -76,6 +83,7 @@ pub enum QueryFamily {
     Publication,
     Enterprise,
     Collaboration,
+    ProviderAccount,
 }
 
 impl QueryFamily {
@@ -109,6 +117,10 @@ impl QueryFamily {
             QueryName::CollaborationActivityList
             | QueryName::CollaborationNotificationList
             | QueryName::CollaborationPresenceList => Self::Collaboration,
+            QueryName::ProviderAccountConnectionList
+            | QueryName::ProviderAccountConnectionGet
+            | QueryName::ProviderAccountPoolList
+            | QueryName::ProviderAccountPoolGet => Self::ProviderAccount,
         }
     }
 }

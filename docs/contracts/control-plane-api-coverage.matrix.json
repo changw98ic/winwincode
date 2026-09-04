@@ -44,7 +44,13 @@
       "enterprise.integration.update",
       "enterprise.identity.update",
       "collaboration.notification.ack",
-      "collaboration.presence.update"
+      "collaboration.presence.update",
+      "provider.account.connection.start",
+      "provider.account.connection.complete",
+      "provider.account.connection.refresh",
+      "provider.account.connection.revoke",
+      "provider.account.pool.upsert",
+      "provider.account.pool.disable"
     ],
     "httpQueries": [
       "session.list",
@@ -76,7 +82,11 @@
       "enterprise.identity.list",
       "collaboration.activity.list",
       "collaboration.notification.list",
-      "collaboration.presence.list"
+      "collaboration.presence.list",
+      "provider.account.connection.list",
+      "provider.account.connection.get",
+      "provider.account.pool.list",
+      "provider.account.pool.get"
     ],
     "websocketEvents": [
       "product-session.changed.v1",
@@ -787,12 +797,22 @@
         "credential.reference.create",
         "credential.reference.rotate",
         "credential.reference.revoke",
-        "credential.reference.delete"
+        "credential.reference.delete",
+        "provider.account.connection.start",
+        "provider.account.connection.complete",
+        "provider.account.connection.refresh",
+        "provider.account.connection.revoke",
+        "provider.account.pool.upsert",
+        "provider.account.pool.disable"
       ],
       "httpQueries": [
         "settings.get",
         "credential.reference.list",
-        "credential.reference.get"
+        "credential.reference.get",
+        "provider.account.connection.list",
+        "provider.account.connection.get",
+        "provider.account.pool.list",
+        "provider.account.pool.get"
       ],
       "websocketEvents": [
         "activity.recorded.v1"

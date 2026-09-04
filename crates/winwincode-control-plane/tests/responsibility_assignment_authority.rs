@@ -17,8 +17,10 @@ use winwincode_api::generated::{
     EnterpriseOrganizationUpdatePayload, EnterprisePermission, EnterpriseRoleAssignment,
     EnterpriseRolePermissionRule, EnterpriseRoleUpdateCommand, EnterpriseRoleUpdateCommandCommand,
     EnterpriseRoleUpdatePayload, EnterpriseTeamUpdateCommand, EnterpriseTeamUpdateCommandCommand,
-    EnterpriseTeamUpdatePayload, ModelRoute, OrganizationScope, OrganizationScopeKind,
-    RepositoryScope, RepositoryScopeKind, Scope, UserActor, UserActorKind,
+    EnterpriseTeamUpdatePayload, OrganizationScope, OrganizationScopeKind, ProviderAccountSource,
+    RepositoryScope, RepositoryScopeKind, Scope, SessionModelSelection,
+    SystemDefaultProviderAccountSource, SystemDefaultProviderAccountSourceKind, UserActor,
+    UserActorKind,
 };
 use winwincode_control_plane::{
     CollaborationInboxAudience, CollaborationInboxAuthorityPort, CollaborationInboxClock,
@@ -39,10 +41,9 @@ use winwincode_delivery::domain::{
     DELIVERY_SCHEMA_VERSION, DeliveryStage, RepositoryKind, RepositoryRef,
 };
 use winwincode_domain::{
-    ControlPlaneEventId, CredentialReferenceId, DeliveryId, EnterpriseMembershipId,
-    EnterpriseRoleId, EnterpriseRoleVersion, EnterpriseTeamId, Instant, OrganizationId,
-    ProductSessionId, ProjectId, RepositoryId, RequestId, Revision, SchemaVersion, UserId,
-    WorkspaceId,
+    ControlPlaneEventId, DeliveryId, EnterpriseMembershipId, EnterpriseRoleId,
+    EnterpriseRoleVersion, EnterpriseTeamId, Instant, OrganizationId, ProductSessionId, ProjectId,
+    RepositoryId, RequestId, Revision, SchemaVersion, UserId, WorkspaceId,
 };
 use winwincode_storage::{
     PublicEventActor, PublicEventScope, ReceiptIdentity, SqliteStorage, receipt_actor_key,
@@ -273,8 +274,12 @@ impl Fixture {
                 project_id: self.scope.project_id.clone(),
                 repository_id: self.scope.repository_id.clone(),
                 title: "Review session".to_owned(),
-                model_route: ModelRoute {
-                    credential_reference_id: CredentialReferenceId(id("crd", 1)),
+                model_selection: SessionModelSelection {
+                    account_source: ProviderAccountSource::SystemDefaultProviderAccountSource(
+                        SystemDefaultProviderAccountSource {
+                            kind: SystemDefaultProviderAccountSourceKind::SystemDefault,
+                        },
+                    ),
                     model_id: "fixture-model".to_owned(),
                     provider_id: "fixture-provider".to_owned(),
                 },

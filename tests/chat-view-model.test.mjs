@@ -67,6 +67,11 @@ function session(revision = 1, state = 'running') {
     state,
     title: 'Chat session',
     updatedAt: '2026-08-27T01:00:00.000Z',
+    modelSelection: {
+      providerId: 'provider-one',
+      modelId: 'model-one',
+      accountSource: { kind: 'system_default' },
+    },
   }
 }
 
@@ -571,10 +576,13 @@ test('creating a Chat uses the selected model then activates its server snapshot
   const createdRuntime = structuredClone(runtime(1, 0))
   createdRuntime.productSessionId = nextProductSessionId
   createdRuntime.eventCursor.stream.productSessionId = nextProductSessionId
-  const selectedModelRoute = {
+  const selectedModelSelection = {
     providerId: 'provider-two',
     modelId: 'model-two',
-    credentialReferenceId: 'crd_00000000000000000000000002',
+    accountSource: {
+      kind: 'personal',
+      accountConnectionId: 'pac_00000000000000000000000002',
+    },
   }
   client.enqueueCommand('session.create', completed('session.create', createdSession))
   client.responses.set('session.list', response(
@@ -602,7 +610,7 @@ test('creating a Chat uses the selected model then activates its server snapshot
   await model.createSession({
     productSessionId: nextProductSessionId,
     title: '  Created Chat  ',
-    modelRoute: selectedModelRoute,
+    modelSelection: selectedModelSelection,
   })
 
   assert.deepEqual(client.commandCalls.at(-1), {
@@ -617,7 +625,7 @@ test('creating a Chat uses the selected model then activates its server snapshot
       projectId: scope.projectId,
       repositoryId: scope.repositoryId,
       title: 'Created Chat',
-      modelRoute: selectedModelRoute,
+      modelSelection: selectedModelSelection,
     },
   })
   assert.equal(model.state.activeProductSessionId, nextProductSessionId)

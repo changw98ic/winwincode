@@ -208,10 +208,10 @@ async function runRealApplicationFlows() {
     projectId: scope.projectId,
     repositoryId: scope.repositoryId,
     title: 'Cross-origin browser Chat',
-    modelRoute: {
+    modelSelection: {
       providerId: 'fixture-provider',
       modelId: 'fixture-model',
-      credentialReferenceId,
+      accountSource: { kind: 'system_default' },
     },
   })
   await waitFor(() => receivedEvents.length === 1, 'ProductSession create event')

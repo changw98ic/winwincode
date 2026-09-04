@@ -655,7 +655,13 @@
         "enterprise.integration.update",
         "enterprise.identity.update",
         "collaboration.notification.ack",
-        "collaboration.presence.update"
+        "collaboration.presence.update",
+        "provider.account.connection.start",
+        "provider.account.connection.complete",
+        "provider.account.connection.refresh",
+        "provider.account.connection.revoke",
+        "provider.account.pool.upsert",
+        "provider.account.pool.disable"
       ]
     },
     "CommandEnvelope": {
@@ -1923,6 +1929,14 @@
     "ExternalIdentityId": {
       "type": "string",
       "pattern": "^xid_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "ProviderAccountConnectionId": {
+      "type": "string",
+      "pattern": "^pac_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "ProviderAccountPoolId": {
+      "type": "string",
+      "pattern": "^pap_[0-9A-HJKMNP-TV-Z]{26}$"
     }
   }
 }

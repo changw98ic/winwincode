@@ -27,6 +27,8 @@ const ID_DEFINITIONS = Object.freeze({
   OrganizationId: 'org_',
   ProductSessionId: 'psn_',
   ProjectId: 'prj_',
+  ProviderAccountConnectionId: 'pac_',
+  ProviderAccountPoolId: 'pap_',
   PublicationId: 'pub_',
   RepositoryId: 'rep_',
   RequestId: 'req_',
@@ -71,6 +73,12 @@ const COMMAND_NAMES = Object.freeze([
   'enterprise.identity.update',
   'collaboration.notification.ack',
   'collaboration.presence.update',
+  'provider.account.connection.start',
+  'provider.account.connection.complete',
+  'provider.account.connection.refresh',
+  'provider.account.connection.revoke',
+  'provider.account.pool.upsert',
+  'provider.account.pool.disable',
 ])
 const DELIVERY_STATUSES = Object.freeze([
   'draft',

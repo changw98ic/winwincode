@@ -10,7 +10,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use rusqlite::Connection;
 use serde_json::json;
 use winwincode_api::generated::{
-    ApprovalDecideCommand, InputRespondCommand, ModelRoute, RepositoryScope, RepositoryScopeKind,
+    ApprovalDecideCommand, InputRespondCommand, ProviderAccountSource, RepositoryScope,
+    RepositoryScopeKind, SessionModelSelection, SystemDefaultProviderAccountSource,
+    SystemDefaultProviderAccountSourceKind,
 };
 use winwincode_control_plane::{
     ChatInteractionApiService, ChatInteractionService, ChatInteractionServiceErrorCode,
@@ -26,10 +28,10 @@ use winwincode_control_plane::{
     WorkerInteractionOutboundPort,
 };
 use winwincode_domain::{
-    ApprovalId, CodexThreadId, ControlPlaneEventId, CredentialReferenceId, DeliveryId,
-    ExecutionJobId, ExecutionMessageId, ExecutionSequence, FencingToken, Instant, LeaseId,
-    ModelExchangeId, OrganizationId, ProductSessionId, ProjectId, RepositoryId, RequestId,
-    Sha256Digest, StageRunId, UserId, WorkerId, WorkerInstanceId, WorkerSessionId, WorkspaceId,
+    ApprovalId, CodexThreadId, ControlPlaneEventId, DeliveryId, ExecutionJobId, ExecutionMessageId,
+    ExecutionSequence, FencingToken, Instant, LeaseId, ModelExchangeId, OrganizationId,
+    ProductSessionId, ProjectId, RepositoryId, RequestId, Sha256Digest, StageRunId, UserId,
+    WorkerId, WorkerInstanceId, WorkerSessionId, WorkspaceId,
 };
 use winwincode_execution_port::action_gateway::GateDecision;
 use winwincode_execution_port::generated::{
@@ -115,9 +117,13 @@ fn repository_scope() -> RepositoryScope {
     }
 }
 
-fn model_route() -> ModelRoute {
-    ModelRoute {
-        credential_reference_id: CredentialReferenceId(id("crd", 1)),
+fn model_selection() -> SessionModelSelection {
+    SessionModelSelection {
+        account_source: ProviderAccountSource::SystemDefaultProviderAccountSource(
+            SystemDefaultProviderAccountSource {
+                kind: SystemDefaultProviderAccountSourceKind::SystemDefault,
+            },
+        ),
         model_id: "fixture-model".into(),
         provider_id: "fixture-provider".into(),
     }
@@ -416,7 +422,7 @@ fn prepare_product_session(
             project_id: ProjectId(id("prj", 1)),
             repository_id: RepositoryId(id("rep", 1)),
             title: "Gate route fixture".into(),
-            model_route: model_route(),
+            model_selection: model_selection(),
         })
         .expect("create ProductSession");
     let binding_identity = if delivery {

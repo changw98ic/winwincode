@@ -10,8 +10,9 @@ use sha2::{Digest, Sha256};
 use winwincode_api::generated::{
     Actor, CredentialReferenceCreateCommand, CredentialReferenceCreateCommandCommand,
     CredentialReferenceCreatePayload, ModelRoute, OrganizationId, OrganizationScope,
-    OrganizationScopeKind, ProjectId, RepositoryId, RepositoryScope, RepositoryScopeKind, Scope,
-    UserActor, UserActorKind, WorkspaceId,
+    OrganizationScopeKind, ProjectId, ProviderAccountSource, RepositoryId, RepositoryScope,
+    RepositoryScopeKind, Scope, SessionModelSelection, SystemDefaultProviderAccountSource,
+    SystemDefaultProviderAccountSourceKind, UserActor, UserActorKind, WorkspaceId,
 };
 use winwincode_control_plane::{
     ControlPlane, ControlPlaneConfig, CreateProductSessionCommand, CredentialReferenceService,
@@ -254,8 +255,12 @@ fn create_chat_job(fixture: &mut Fixture, seed: u64) -> ExecutionJob {
             project_id: fixture.repository_scope.project_id.clone(),
             repository_id: fixture.repository_scope.repository_id.clone(),
             title: "Terminal replay".to_owned(),
-            model_route: ModelRoute {
-                credential_reference_id: CredentialReferenceId(id("crd", seed)),
+            model_selection: SessionModelSelection {
+                account_source: ProviderAccountSource::SystemDefaultProviderAccountSource(
+                    SystemDefaultProviderAccountSource {
+                        kind: SystemDefaultProviderAccountSourceKind::SystemDefault,
+                    },
+                ),
                 model_id: "fixture-model".to_owned(),
                 provider_id: "fixture-provider".to_owned(),
             },

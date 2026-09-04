@@ -7,7 +7,10 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use rusqlite::Connection;
-use winwincode_api::generated::ModelRoute;
+use winwincode_api::generated::{
+    ProviderAccountSource, SessionModelSelection, SystemDefaultProviderAccountSource,
+    SystemDefaultProviderAccountSourceKind,
+};
 use winwincode_control_plane::{
     ApplyObserverCheckpointCommand, ContinueProductSessionCommand, CreateProductSessionCommand,
     ObserverCheckpointKind, ObserverDecisionCommandContext, ObserverDecisionInput,
@@ -17,10 +20,10 @@ use winwincode_control_plane::{
     RecordObserverDecisionCommand,
 };
 use winwincode_domain::{
-    CodexThreadId, ControlPlaneEventId, CredentialReferenceId, EvidenceId, ExecutionEventId,
-    ExecutionJobId, ExecutionMessageId, ExecutionSequence, FencingToken, Instant, LeaseId,
-    ModelExchangeId, OrganizationId, ProductSessionId, ProjectId, RepositoryId, RequestId,
-    Sha256Digest, UserId, WorkerId, WorkerInstanceId, WorkerSessionId, WorkspaceId,
+    CodexThreadId, ControlPlaneEventId, EvidenceId, ExecutionEventId, ExecutionJobId,
+    ExecutionMessageId, ExecutionSequence, FencingToken, Instant, LeaseId, ModelExchangeId,
+    OrganizationId, ProductSessionId, ProjectId, RepositoryId, RequestId, Sha256Digest, UserId,
+    WorkerId, WorkerInstanceId, WorkerSessionId, WorkspaceId,
 };
 use winwincode_execution_port::action_gateway::GateDecision;
 use winwincode_execution_port::runtime_trace_outbox::TraceGateOutcome;
@@ -128,9 +131,13 @@ fn assert_observer_receipts_are_internal(directory: &TestDirectory) {
     assert_eq!(internal_rows, 2);
 }
 
-fn model_route() -> ModelRoute {
-    ModelRoute {
-        credential_reference_id: CredentialReferenceId(id("crd", 1)),
+fn model_selection() -> SessionModelSelection {
+    SessionModelSelection {
+        account_source: ProviderAccountSource::SystemDefaultProviderAccountSource(
+            SystemDefaultProviderAccountSource {
+                kind: SystemDefaultProviderAccountSourceKind::SystemDefault,
+            },
+        ),
         model_id: "fixture-model".into(),
         provider_id: "fixture-provider".into(),
     }
@@ -262,7 +269,7 @@ fn prepare_running_fixture(storage: &mut SqliteStorage) -> RunningFixture {
             project_id: scope.project_id.clone(),
             repository_id: scope.repository_id.clone(),
             title: "Observer fixture".into(),
-            model_route: model_route(),
+            model_selection: model_selection(),
         })
         .expect("ProductSession create");
     {

@@ -39,6 +39,12 @@ const COMMANDS = Object.freeze([
   'enterprise.identity.update',
   'collaboration.notification.ack',
   'collaboration.presence.update',
+  'provider.account.connection.start',
+  'provider.account.connection.complete',
+  'provider.account.connection.refresh',
+  'provider.account.connection.revoke',
+  'provider.account.pool.upsert',
+  'provider.account.pool.disable',
 ])
 
 const QUERIES = Object.freeze([
@@ -72,6 +78,10 @@ const QUERIES = Object.freeze([
   'collaboration.activity.list',
   'collaboration.notification.list',
   'collaboration.presence.list',
+  'provider.account.connection.list',
+  'provider.account.connection.get',
+  'provider.account.pool.list',
+  'provider.account.pool.get',
 ])
 
 const ERROR_STATUS = Object.freeze({
@@ -232,6 +242,10 @@ test('HTTP query contract covers every current read surface with an opaque stabl
     'collaboration.activity.list': '#/$defs/CollaborationActivityPage',
     'collaboration.notification.list': '#/$defs/CollaborationNotificationPage',
     'collaboration.presence.list': '#/$defs/CollaborationPresencePage',
+    'provider.account.connection.list': '#/$defs/ProviderAccountConnectionPage',
+    'provider.account.connection.get': '#/$defs/ProviderAccountConnectionProjection',
+    'provider.account.pool.list': '#/$defs/ProviderAccountPoolPage',
+    'provider.account.pool.get': '#/$defs/ProviderAccountPoolProjection',
   })
   assert.deepEqual(
     [
@@ -254,6 +268,8 @@ test('HTTP query contract covers every current read surface with an opaque stabl
       'CollaborationActivityPage',
       'CollaborationNotificationPage',
       'CollaborationPresencePage',
+      'ProviderAccountConnectionPage',
+      'ProviderAccountPoolPage',
     ].map(name => schema.$defs[name].properties.kind.const),
     [
       'product_session_page',
@@ -275,6 +291,8 @@ test('HTTP query contract covers every current read surface with an opaque stabl
       'collaboration_activity_page',
       'collaboration_notification_page',
       'collaboration_presence_page',
+      'provider_account_connection_page',
+      'provider_account_pool_page',
     ],
   )
 

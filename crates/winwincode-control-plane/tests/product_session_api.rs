@@ -6,19 +6,21 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use rusqlite::Connection;
 use winwincode_api::generated::{
-    Actor, ChatSubmitCommand, ChatSubmitCommandCommand, ChatSubmitPayload, ModelRoute, PageRequest,
-    RepositoryScope, RepositoryScopeKind, SessionCloseCommand, SessionCloseCommandCommand,
-    SessionClosePayload, SessionCreateCommand, SessionCreateCommandCommand, SessionCreatePayload,
-    SessionGetParameters, SessionGetQuery, SessionGetQueryQuery, SessionListParameters,
-    SessionListQuery, SessionListQueryQuery, SessionMessagesListParameters,
-    SessionMessagesListQuery, SessionMessagesListQueryQuery, UserActor, UserActorKind,
+    Actor, ChatSubmitCommand, ChatSubmitCommandCommand, ChatSubmitPayload, PageRequest,
+    ProviderAccountSource, RepositoryScope, RepositoryScopeKind, SessionCloseCommand,
+    SessionCloseCommandCommand, SessionClosePayload, SessionCreateCommand,
+    SessionCreateCommandCommand, SessionCreatePayload, SessionGetParameters, SessionGetQuery,
+    SessionGetQueryQuery, SessionListParameters, SessionListQuery, SessionListQueryQuery,
+    SessionMessagesListParameters, SessionMessagesListQuery, SessionMessagesListQueryQuery,
+    SessionModelSelection, SystemDefaultProviderAccountSource,
+    SystemDefaultProviderAccountSourceKind, UserActor, UserActorKind,
 };
 use winwincode_control_plane::{
     ProductSessionApiClock, ProductSessionApiService, ProductSessionExecutionConfig,
 };
 use winwincode_domain::{
-    CredentialReferenceId, Instant, OrganizationId, ProductSessionId, ProjectId, RepositoryId,
-    RequestId, Revision, SchemaVersion, UserId, WorkspaceId,
+    Instant, OrganizationId, ProductSessionId, ProjectId, RepositoryId, RequestId, Revision,
+    SchemaVersion, UserId, WorkspaceId,
 };
 use winwincode_storage::SqliteStorage;
 
@@ -100,8 +102,12 @@ fn create_command(session: u64, request: u64, title: &str) -> SessionCreateComma
         command: SessionCreateCommandCommand::SessionCreate,
         expected_revision: Revision(0),
         payload: SessionCreatePayload {
-            model_route: ModelRoute {
-                credential_reference_id: CredentialReferenceId(id("crd", 1)),
+            model_selection: SessionModelSelection {
+                account_source: ProviderAccountSource::SystemDefaultProviderAccountSource(
+                    SystemDefaultProviderAccountSource {
+                        kind: SystemDefaultProviderAccountSourceKind::SystemDefault,
+                    },
+                ),
                 model_id: "fixture-model".to_owned(),
                 provider_id: "fixture-provider".to_owned(),
             },

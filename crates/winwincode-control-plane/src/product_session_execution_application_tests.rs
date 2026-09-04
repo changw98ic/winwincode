@@ -7,12 +7,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use rusqlite::{Connection, params};
 use serde_json::Value;
-use winwincode_api::generated::{ModelRoute, RepositoryScope, RepositoryScopeKind};
+use winwincode_api::generated::{
+    ProviderAccountSource, RepositoryScope, RepositoryScopeKind, SessionModelSelection,
+    SystemDefaultProviderAccountSource, SystemDefaultProviderAccountSourceKind,
+};
 use winwincode_domain::{
-    CodexThreadId, ControlPlaneEventId, CredentialReferenceId, ExecutionJobId, ExecutionMessageId,
-    ExecutionSequence, FencingToken, Instant, LeaseId, ModelExchangeId, OrganizationId,
-    ProductSessionId, ProjectId, RepositoryId, RequestId, SessionIdentity, Sha256Digest, UserId,
-    WorkerId, WorkerInstanceId, WorkerSessionId, WorkspaceId,
+    CodexThreadId, ControlPlaneEventId, ExecutionJobId, ExecutionMessageId, ExecutionSequence,
+    FencingToken, Instant, LeaseId, ModelExchangeId, OrganizationId, ProductSessionId, ProjectId,
+    RepositoryId, RequestId, SessionIdentity, Sha256Digest, UserId, WorkerId, WorkerInstanceId,
+    WorkerSessionId, WorkspaceId,
 };
 use winwincode_execution_port::generated::{
     EncodedPayload, ExecutionJob, ExecutionLeaseStamp, ModelChunkMessage, ModelChunkMessageKind,
@@ -269,8 +272,12 @@ fn seed_product_session(
             project_id: repository_scope.project_id.clone(),
             repository_id: repository_scope.repository_id.clone(),
             title: "Provider projection".to_owned(),
-            model_route: ModelRoute {
-                credential_reference_id: CredentialReferenceId(id("crd", seed)),
+            model_selection: SessionModelSelection {
+                account_source: ProviderAccountSource::SystemDefaultProviderAccountSource(
+                    SystemDefaultProviderAccountSource {
+                        kind: SystemDefaultProviderAccountSourceKind::SystemDefault,
+                    },
+                ),
                 model_id: "fixture-model".to_owned(),
                 provider_id: "fixture-provider".to_owned(),
             },

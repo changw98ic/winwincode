@@ -80,6 +80,11 @@ function session(id, revision = 1, state = 'running') {
     state,
     title: id === productSessionId ? 'Primary Chat' : 'Second Chat',
     updatedAt: `2026-08-27T01:00:0${String(revision)}.000Z`,
+    modelSelection: {
+      providerId: 'fixture-provider',
+      modelId: 'fixture-model',
+      accountSource: { kind: 'system_default' },
+    },
   }
 }
 

@@ -22,10 +22,12 @@
         "projectId": "prj_00000000000000000000000000",
         "repositoryId": "rep_00000000000000000000000000",
         "title": "Fix checkout race",
-        "modelRoute": {
+        "modelSelection": {
           "providerId": "deepseek",
           "modelId": "deepseek-v4",
-          "credentialReferenceId": "crd_00000000000000000000000000"
+          "accountSource": {
+            "kind": "system_default"
+          }
         }
       }
     },

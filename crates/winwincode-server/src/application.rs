@@ -11,8 +11,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 use winwincode_api::generated::{
-    CommandCompletedResponse, CommandRequest, ControlPlaneWebSocketClientFrame, ErrorCode,
-    QueryRequest, QueryResultResponse, Scope,
+    Actor, CommandCompletedResponse, CommandRequest, ControlPlaneWebSocketClientFrame,
+    EnterprisePermission, ErrorCode, ProviderAccountOwner, ProviderAccountSource, QueryRequest,
+    QueryResultResponse, Scope,
 };
 use winwincode_control_plane::credential_reference::{
     CredentialReferenceError, CredentialReferenceErrorKind, CredentialReferenceService,
@@ -24,11 +25,13 @@ use winwincode_control_plane::{
     ChatInteractionApiService, ChatInteractionServiceError, ChatInteractionServiceErrorCode,
     CollaborationClock, CollaborationClockError, CollaborationError, CollaborationErrorKind,
     CollaborationService, ControlPlane, DeliveryApplicationError, DurableWorkerInteractionOutbound,
-    EnterpriseRbacService, ModelSettingsError, ModelSettingsErrorKind, ModelSettingsService,
-    ProductSessionApiClock, ProductSessionApiService, ProductSessionExecutionConfig,
-    ProductSessionServiceError, ProductSessionServiceErrorCode, PublicationCommandError,
-    ScopeWorkerHealthEventPort, WorkerManagementService, WorkerManagementServiceError,
-    WorkerManagementServiceErrorKind,
+    EnterpriseRbacErrorKind, EnterpriseRbacService, ModelSettingsError, ModelSettingsErrorKind,
+    ModelSettingsService, ProductSessionApiClock, ProductSessionApiService,
+    ProductSessionExecutionConfig, ProductSessionServiceError, ProductSessionServiceErrorCode,
+    ProviderAccountAuthorizationPort, ProviderAccountError, ProviderAccountErrorKind,
+    ProviderAccountRoutingService, ProviderAccountSecretStore, ProviderAccountService,
+    PublicationCommandError, ScopeWorkerHealthEventPort, WorkerManagementService,
+    WorkerManagementServiceError, WorkerManagementServiceErrorKind,
 };
 use winwincode_domain::{ControlPlaneWebSocketAuthorizationEpoch, Instant};
 use winwincode_storage::{ProductStateStorage, SqliteStorage};
@@ -106,7 +109,10 @@ pub struct StandaloneControlPlaneApplication {
     clock: Arc<dyn StandaloneApplicationClock>,
     enterprise: Arc<dyn EnterpriseManagementApplicationPort>,
     collaboration: Arc<CollaborationService>,
+    provider_account_rbac: Arc<EnterpriseRbacService>,
     runtime: Arc<dyn RuntimeHealthPort>,
+    provider_account_secrets: Option<Arc<dyn ProviderAccountSecretStore>>,
+    provider_account_authorization: Option<Arc<dyn ProviderAccountAuthorizationPort>>,
 }
 
 impl StandaloneControlPlaneApplication {
@@ -267,6 +273,13 @@ impl StandaloneControlPlaneApplication {
         {
             return Err(application_configuration_invalid());
         }
+        let data_directory = storage
+            .database_path()
+            .parent()
+            .ok_or_else(application_configuration_invalid)?;
+        let provider_account_rbac = Arc::new(EnterpriseRbacService::new(Box::new(
+            SqliteStorage::open(data_directory).map_err(|_| application_configuration_invalid())?,
+        )));
         Ok(Self {
             state: Arc::new(Mutex::new(Some(ApplicationState {
                 control_plane,
@@ -278,8 +291,23 @@ impl StandaloneControlPlaneApplication {
             clock,
             enterprise: composition.enterprise,
             collaboration: composition.collaboration,
+            provider_account_rbac,
             runtime: Arc::new(HealthyRuntimeHealth),
+            provider_account_secrets: None,
+            provider_account_authorization: None,
         })
+    }
+
+    /// Installs the production secret and `OpenAI` device-authorization boundaries.
+    #[must_use]
+    pub fn with_provider_accounts(
+        mut self,
+        secrets: Arc<dyn ProviderAccountSecretStore>,
+        authorization: Arc<dyn ProviderAccountAuthorizationPort>,
+    ) -> Self {
+        self.provider_account_secrets = Some(secrets);
+        self.provider_account_authorization = Some(authorization);
+        self
     }
 
     /// Attaches the sole supervised runtime health source to this application.
@@ -369,12 +397,207 @@ impl StandaloneControlPlaneApplication {
         }
     }
 
+    fn provider_account_command(
+        &self,
+        principal: &AuthenticatedPrincipal,
+        request: CommandRequest,
+    ) -> Result<CommandDispatchResponse, ApiError> {
+        let secrets = self
+            .provider_account_secrets
+            .as_deref()
+            .ok_or_else(service_unavailable)?;
+        let authorization = self
+            .provider_account_authorization
+            .as_deref()
+            .ok_or_else(service_unavailable)?;
+        let now_millis = self.clock.now_millis();
+        let mut guard = self.state()?;
+        let state = guard.as_mut().ok_or_else(service_unavailable)?;
+        let mut service = ProviderAccountService::new(&mut state.storage, secrets, authorization);
+        let response = match request {
+            CommandRequest::ProviderAccountConnectionStartCommand(command) => {
+                if matches!(
+                    &command.payload.owner,
+                    ProviderAccountOwner::OrganizationProviderAccountOwner(_)
+                ) {
+                    self.authorize_provider_account_admin(
+                        principal,
+                        &command.actor,
+                        &command.scope,
+                    )?;
+                }
+                service
+                    .start(&command, now_millis)
+                    .map(CommandCompletedResponse::ProviderAccountConnectionStartCompletedResponse)
+            }
+            CommandRequest::ProviderAccountConnectionCompleteCommand(command) => {
+                self.authorize_connection_owner(
+                    principal,
+                    &command.actor,
+                    &command.scope,
+                    &service
+                        .connection_owner(&command.payload.account_connection_id)
+                        .map_err(|error| provider_account_error(&error))?,
+                )?;
+                service.complete(&command, now_millis).map(
+                    CommandCompletedResponse::ProviderAccountConnectionCompleteCompletedResponse,
+                )
+            }
+            CommandRequest::ProviderAccountConnectionRefreshCommand(command) => {
+                self.authorize_connection_owner(
+                    principal,
+                    &command.actor,
+                    &command.scope,
+                    &service
+                        .connection_owner(&command.payload.account_connection_id)
+                        .map_err(|error| provider_account_error(&error))?,
+                )?;
+                service.refresh(&command, now_millis).map(
+                    CommandCompletedResponse::ProviderAccountConnectionRefreshCompletedResponse,
+                )
+            }
+            CommandRequest::ProviderAccountConnectionRevokeCommand(command) => {
+                self.authorize_connection_owner(
+                    principal,
+                    &command.actor,
+                    &command.scope,
+                    &service
+                        .connection_owner(&command.payload.account_connection_id)
+                        .map_err(|error| provider_account_error(&error))?,
+                )?;
+                service
+                    .revoke(&command, now_millis)
+                    .map(CommandCompletedResponse::ProviderAccountConnectionRevokeCompletedResponse)
+            }
+            CommandRequest::ProviderAccountPoolUpsertCommand(command) => {
+                self.authorize_provider_account_admin(principal, &command.actor, &command.scope)?;
+                service
+                    .pool_upsert(&command, now_millis)
+                    .map(CommandCompletedResponse::ProviderAccountPoolUpsertCompletedResponse)
+            }
+            CommandRequest::ProviderAccountPoolDisableCommand(command) => {
+                self.authorize_provider_account_admin(principal, &command.actor, &command.scope)?;
+                service
+                    .pool_disable(&command, now_millis)
+                    .map(CommandCompletedResponse::ProviderAccountPoolDisableCompletedResponse)
+            }
+            _ => return Err(application_variant_mismatch()),
+        }
+        .map_err(|error| provider_account_error(&error))?;
+        self.hub
+            .publish_pending(&mut state.storage)
+            .map_err(|error| error.api_error())?;
+        Ok(CommandDispatchResponse::Completed(Box::new(response)))
+    }
+
+    fn authorize_connection_owner(
+        &self,
+        principal: &AuthenticatedPrincipal,
+        actor: &Actor,
+        scope: &Scope,
+        owner: &ProviderAccountOwner,
+    ) -> Result<(), ApiError> {
+        if matches!(
+            owner,
+            ProviderAccountOwner::OrganizationProviderAccountOwner(_)
+        ) {
+            self.authorize_provider_account_admin(principal, actor, scope)?;
+        }
+        Ok(())
+    }
+
+    fn authorize_provider_account_admin(
+        &self,
+        principal: &AuthenticatedPrincipal,
+        actor: &Actor,
+        scope: &Scope,
+    ) -> Result<(), ApiError> {
+        let decision = self
+            .provider_account_rbac
+            .authorize(
+                actor,
+                principal.authorized_scopes(),
+                scope,
+                &EnterprisePermission::PolicyWrite,
+            )
+            .map_err(|error| match error.kind() {
+                EnterpriseRbacErrorKind::Storage => service_unavailable(),
+                _ => ApiError::new(
+                    403,
+                    "PERMISSION_DENIED",
+                    "enterprise Provider account permission was denied",
+                ),
+            })?;
+        if decision.allowed {
+            Ok(())
+        } else {
+            Err(ApiError::new(
+                403,
+                "PERMISSION_DENIED",
+                "enterprise Provider account permission was denied",
+            ))
+        }
+    }
+
+    fn provider_account_query(
+        &self,
+        request: QueryRequest,
+    ) -> Result<QueryResultResponse, ApiError> {
+        let secrets = self
+            .provider_account_secrets
+            .as_deref()
+            .ok_or_else(service_unavailable)?;
+        let authorization = self
+            .provider_account_authorization
+            .as_deref()
+            .ok_or_else(service_unavailable)?;
+        let mut guard = self.state()?;
+        let state = guard.as_mut().ok_or_else(service_unavailable)?;
+        let service = ProviderAccountService::new(&mut state.storage, secrets, authorization);
+        match request {
+            QueryRequest::ProviderAccountConnectionGetQuery(query) => service
+                .connection_get(&query)
+                .map(QueryResultResponse::ProviderAccountConnectionGetResultResponse),
+            QueryRequest::ProviderAccountConnectionListQuery(query) => service
+                .connection_list(&query)
+                .map(QueryResultResponse::ProviderAccountConnectionListResultResponse),
+            QueryRequest::ProviderAccountPoolGetQuery(query) => service
+                .pool_get(&query)
+                .map(QueryResultResponse::ProviderAccountPoolGetResultResponse),
+            QueryRequest::ProviderAccountPoolListQuery(query) => service
+                .pool_list(&query)
+                .map(QueryResultResponse::ProviderAccountPoolListResultResponse),
+            _ => return Err(application_variant_mismatch()),
+        }
+        .map_err(|error| provider_account_error(&error))
+    }
+
     fn session_command(
         &self,
         request: CommandRequest,
     ) -> Result<CommandDispatchResponse, ApiError> {
         let mut guard = self.state()?;
         let state = guard.as_mut().ok_or_else(service_unavailable)?;
+        if let CommandRequest::SessionCreateCommand(command) = &request {
+            if let Actor::UserActor(actor) = &command.actor {
+                ProviderAccountRoutingService::new(&mut state.storage)
+                    .validate_session_selection(
+                        &actor.id,
+                        &command.scope,
+                        &command.payload.model_selection,
+                    )
+                    .map_err(|error| provider_account_error(&error))?;
+            } else if !matches!(
+                &command.payload.model_selection.account_source,
+                ProviderAccountSource::SystemDefaultProviderAccountSource(_)
+            ) {
+                return Err(ApiError::new(
+                    403,
+                    "PERMISSION_DENIED",
+                    "provider account selections require a user actor",
+                ));
+            }
+        }
         let response = {
             let mut clock = ProductSessionClockAdapter(self.clock.as_ref());
             let mut service = ProductSessionApiService::new(
@@ -760,6 +983,7 @@ impl TypedControlPlaneApiPort for StandaloneControlPlaneApplication {
             CommandFamily::Publication => self.publication_command(request),
             CommandFamily::Enterprise => self.enterprise.command(request),
             CommandFamily::Collaboration => self.collaboration_command(principal, request),
+            CommandFamily::ProviderAccount => self.provider_account_command(principal, request),
         }
     }
 
@@ -785,6 +1009,7 @@ impl TypedControlPlaneApiPort for StandaloneControlPlaneApplication {
             QueryFamily::Publication => self.publication_query(request),
             QueryFamily::Enterprise => self.enterprise.query(request),
             QueryFamily::Collaboration => self.collaboration_query(principal, request),
+            QueryFamily::ProviderAccount => self.provider_account_query(request),
         }
     }
 
@@ -892,6 +1117,45 @@ fn credential_error(error: &CredentialReferenceError) -> ApiError {
             "credential reference page cursor is invalid",
         ),
         CredentialReferenceErrorKind::CredentialLeak | CredentialReferenceErrorKind::Storage => {
+            service_unavailable()
+        }
+    }
+}
+
+fn provider_account_error(error: &ProviderAccountError) -> ApiError {
+    match error.kind() {
+        ProviderAccountErrorKind::InvalidRequest => ApiError::new(
+            400,
+            "INVALID_REQUEST",
+            "provider account request is invalid",
+        ),
+        ProviderAccountErrorKind::PermissionDenied => ApiError::new(
+            403,
+            "PERMISSION_DENIED",
+            "provider account access is denied",
+        ),
+        ProviderAccountErrorKind::NotFound => resource_not_found(),
+        ProviderAccountErrorKind::WrongState => ApiError::new(
+            409,
+            "WRONG_STATE",
+            "provider account state rejects the operation",
+        ),
+        ProviderAccountErrorKind::RevisionConflict => ApiError::new(
+            409,
+            "REVISION_CONFLICT",
+            "provider account revision changed",
+        ),
+        ProviderAccountErrorKind::RequestConflict => ApiError::new(
+            409,
+            "IDEMPOTENCY_CONFLICT",
+            "requestId was already used with different input",
+        ),
+        ProviderAccountErrorKind::ProviderUnavailable => ApiError::new(
+            503,
+            "PROVIDER_UNAVAILABLE",
+            "provider sign-in service is unavailable",
+        ),
+        ProviderAccountErrorKind::SecretStore | ProviderAccountErrorKind::Storage => {
             service_unavailable()
         }
     }

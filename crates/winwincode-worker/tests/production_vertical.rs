@@ -18,8 +18,9 @@ use sha2::{Digest as _, Sha256};
 use winwincode_api::generated::{
     Actor, CommandEnvelope, CommandName, CredentialReferenceCreateCommand,
     CredentialReferenceCreateCommandCommand, CredentialReferenceCreatePayload, ModelRoute,
-    OrganizationScope, OrganizationScopeKind, RepositoryScope, RepositoryScopeKind, Scope,
-    UserActor, UserActorKind,
+    OrganizationScope, OrganizationScopeKind, ProviderAccountSource, RepositoryScope,
+    RepositoryScopeKind, Scope, SessionModelSelection, SystemDefaultProviderAccountSource,
+    SystemDefaultProviderAccountSourceKind, UserActor, UserActorKind,
 };
 #[cfg(feature = "test-support")]
 use winwincode_codex::CodexCoreAdapter as _;
@@ -1342,8 +1343,12 @@ fn input_dispatch(root: &TestDirectory) -> JobDispatchMessage {
             project_id: scope.project_id.clone(),
             repository_id: scope.repository_id.clone(),
             title: "Production input response fixture".to_owned(),
-            model_route: ModelRoute {
-                credential_reference_id: CredentialReferenceId(id("crd", 1)),
+            model_selection: SessionModelSelection {
+                account_source: ProviderAccountSource::SystemDefaultProviderAccountSource(
+                    SystemDefaultProviderAccountSource {
+                        kind: SystemDefaultProviderAccountSourceKind::SystemDefault,
+                    },
+                ),
                 provider_id: PROVIDER_ID.to_owned(),
                 model_id: MODEL_ID.to_owned(),
             },

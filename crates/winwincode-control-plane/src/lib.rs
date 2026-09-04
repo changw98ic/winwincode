@@ -55,6 +55,7 @@ mod observer_decision_service;
 mod planning_solution_authority;
 mod product_session_execution_application;
 mod product_session_service;
+mod provider_account;
 mod provider_admission;
 mod provider_anthropic;
 pub mod provider_catalog;
@@ -339,6 +340,12 @@ pub use product_session_service::{
     ProductSessionTurnState, ProductSessionTurnTerminalOutcome, RecordAssistantTerminalCommand,
     SubmitChatMessageCommand, product_session_command_context, product_session_state_filters,
 };
+pub use provider_account::{
+    OPENAI_CHATGPT_PROVIDER_ID, ProviderAccountAuthorizationPort, ProviderAccountError,
+    ProviderAccountErrorKind, ProviderAccountRoutingService, ProviderAccountSecretStore,
+    ProviderAccountService, ProviderCredentialBundle, ProviderDeviceAuthorization,
+    ProviderDevicePoll,
+};
 pub use provider_admission::{
     DurableProviderGatewayAdmission, ProviderAdmissionError, ProviderAdmissionErrorKind,
     ProviderAdmissionOpenReceipt, ProviderAdmissionOpenRequest, ProviderAdmissionReservationConfig,
@@ -374,7 +381,8 @@ pub use provider_gateway::{
 pub use provider_https_sse::{
     HttpsSseProviderAdapter, HttpsSseProviderCompletion, HttpsSseProviderConfig,
     HttpsSseProviderError, HttpsSseProviderErrorKind, HttpsSseProviderLimits,
-    HttpsSseProviderTimeouts, ProviderTlsRoots,
+    HttpsSseProviderTimeouts, OpenAiDeviceAuthorizationAdapter, OpenAiDeviceAuthorizationConfig,
+    ProviderTlsRoots,
 };
 pub use provider_policy::{
     DurableProviderPolicyEnforcement, ProviderPolicyError, ProviderPolicyErrorKind,

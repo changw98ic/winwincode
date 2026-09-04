@@ -482,6 +482,24 @@
         },
         {
           "$ref": "#/$defs/CollaborationPresenceUpdateCommand"
+        },
+        {
+          "$ref": "#/$defs/ProviderAccountConnectionStartCommand"
+        },
+        {
+          "$ref": "#/$defs/ProviderAccountConnectionCompleteCommand"
+        },
+        {
+          "$ref": "#/$defs/ProviderAccountConnectionRefreshCommand"
+        },
+        {
+          "$ref": "#/$defs/ProviderAccountConnectionRevokeCommand"
+        },
+        {
+          "$ref": "#/$defs/ProviderAccountPoolUpsertCommand"
+        },
+        {
+          "$ref": "#/$defs/ProviderAccountPoolDisableCommand"
         }
       ]
     },
@@ -576,6 +594,18 @@
         },
         {
           "$ref": "#/$defs/CollaborationPresenceListQuery"
+        },
+        {
+          "$ref": "#/$defs/ProviderAccountConnectionListQuery"
+        },
+        {
+          "$ref": "#/$defs/ProviderAccountConnectionGetQuery"
+        },
+        {
+          "$ref": "#/$defs/ProviderAccountPoolListQuery"
+        },
+        {
+          "$ref": "#/$defs/ProviderAccountPoolGetQuery"
         }
       ]
     },
@@ -611,7 +641,11 @@
         "enterprise.identity.list",
         "collaboration.activity.list",
         "collaboration.notification.list",
-        "collaboration.presence.list"
+        "collaboration.presence.list",
+        "provider.account.connection.list",
+        "provider.account.connection.get",
+        "provider.account.pool.list",
+        "provider.account.pool.get"
       ]
     },
     "OpaqueCursor": {
@@ -804,6 +838,24 @@
         },
         {
           "$ref": "#/$defs/CollaborationPresenceUpdateCompletedResponse"
+        },
+        {
+          "$ref": "#/$defs/ProviderAccountConnectionStartCompletedResponse"
+        },
+        {
+          "$ref": "#/$defs/ProviderAccountConnectionCompleteCompletedResponse"
+        },
+        {
+          "$ref": "#/$defs/ProviderAccountConnectionRefreshCompletedResponse"
+        },
+        {
+          "$ref": "#/$defs/ProviderAccountConnectionRevokeCompletedResponse"
+        },
+        {
+          "$ref": "#/$defs/ProviderAccountPoolUpsertCompletedResponse"
+        },
+        {
+          "$ref": "#/$defs/ProviderAccountPoolDisableCompletedResponse"
         }
       ],
       "description": "Exact command/result response union. Relabeling a result under another command is invalid."
@@ -931,6 +983,18 @@
         },
         {
           "$ref": "#/$defs/CollaborationPresenceListResultResponse"
+        },
+        {
+          "$ref": "#/$defs/ProviderAccountConnectionListResultResponse"
+        },
+        {
+          "$ref": "#/$defs/ProviderAccountConnectionGetResultResponse"
+        },
+        {
+          "$ref": "#/$defs/ProviderAccountPoolListResultResponse"
+        },
+        {
+          "$ref": "#/$defs/ProviderAccountPoolGetResultResponse"
         }
       ],
       "description": "Exact query/result response union. A client can narrow result by query without accepting an unrelated projection."
@@ -1277,7 +1341,7 @@
         "projectId",
         "repositoryId",
         "title",
-        "modelRoute"
+        "modelSelection"
       ],
       "properties": {
         "productSessionId": {
@@ -1294,8 +1358,8 @@
           "minLength": 1,
           "maxLength": 500
         },
-        "modelRoute": {
-          "$ref": "#/$defs/ModelRoute"
+        "modelSelection": {
+          "$ref": "#/$defs/SessionModelSelection"
         }
       }
     },
@@ -2759,7 +2823,8 @@
         "repositoryId",
         "title",
         "state",
-        "updatedAt"
+        "updatedAt",
+        "modelSelection"
       ],
       "properties": {
         "id": {
@@ -2793,6 +2858,9 @@
         },
         "updatedAt": {
           "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "modelSelection": {
+          "$ref": "#/$defs/SessionModelSelection"
         }
       }
     },
@@ -9591,6 +9659,984 @@
             },
             "result": {
               "$ref": "#/$defs/CollaborationPresencePage"
+            }
+          }
+        }
+      ]
+    },
+    "PersonalProviderAccountOwner": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "user"
+        },
+        "userId": {
+          "$ref": "./domain.schema.json#/$defs/UserId"
+        }
+      },
+      "required": [
+        "kind",
+        "userId"
+      ]
+    },
+    "OrganizationProviderAccountOwner": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "organization"
+        },
+        "organizationId": {
+          "$ref": "./domain.schema.json#/$defs/OrganizationId"
+        }
+      },
+      "required": [
+        "kind",
+        "organizationId"
+      ]
+    },
+    "ProviderAccountOwner": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/PersonalProviderAccountOwner"
+        },
+        {
+          "$ref": "#/$defs/OrganizationProviderAccountOwner"
+        }
+      ]
+    },
+    "PersonalProviderAccountSource": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "personal"
+        },
+        "accountConnectionId": {
+          "$ref": "./domain.schema.json#/$defs/ProviderAccountConnectionId"
+        }
+      },
+      "required": [
+        "kind",
+        "accountConnectionId"
+      ]
+    },
+    "SystemDefaultProviderAccountSource": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "The deployment-managed default provider route. It keeps the existing local and service-account model path separate from user and organization ChatGPT accounts.",
+      "properties": {
+        "kind": {
+          "const": "system_default"
+        }
+      },
+      "required": [
+        "kind"
+      ]
+    },
+    "EnterpriseProviderAccountPoolSource": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "enterprise_pool"
+        },
+        "accountPoolId": {
+          "$ref": "./domain.schema.json#/$defs/ProviderAccountPoolId"
+        }
+      },
+      "required": [
+        "kind",
+        "accountPoolId"
+      ]
+    },
+    "ProviderAccountSource": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/SystemDefaultProviderAccountSource"
+        },
+        {
+          "$ref": "#/$defs/PersonalProviderAccountSource"
+        },
+        {
+          "$ref": "#/$defs/EnterpriseProviderAccountPoolSource"
+        }
+      ]
+    },
+    "SessionModelSelection": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "providerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "modelId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "accountSource": {
+          "$ref": "#/$defs/ProviderAccountSource"
+        }
+      },
+      "required": [
+        "providerId",
+        "modelId",
+        "accountSource"
+      ]
+    },
+    "ProviderLoginPromptProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Short-lived device sign-in prompt. It contains no provider access or refresh credential.",
+      "properties": {
+        "verificationUrl": {
+          "type": "string",
+          "format": "uri",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "userCode": {
+          "type": "string",
+          "minLength": 4,
+          "maxLength": 64
+        },
+        "expiresAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "pollAfterSeconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 60
+        }
+      },
+      "required": [
+        "verificationUrl",
+        "userCode",
+        "expiresAt",
+        "pollAfterSeconds"
+      ]
+    },
+    "ProviderAccountConnectionProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Secret-free provider account lifecycle. Provider credentials remain in the Control Plane SecretStore.",
+      "properties": {
+        "id": {
+          "$ref": "./domain.schema.json#/$defs/ProviderAccountConnectionId"
+        },
+        "revision": {
+          "$ref": "./domain.schema.json#/$defs/Revision"
+        },
+        "owner": {
+          "$ref": "#/$defs/ProviderAccountOwner"
+        },
+        "providerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "loginMethod": {
+          "type": "string",
+          "enum": [
+            "chatgpt_device_code"
+          ]
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "login_pending",
+            "active",
+            "refresh_required",
+            "revoked",
+            "failed"
+          ]
+        },
+        "credentialReferenceId": {
+          "$ref": "./domain.schema.json#/$defs/CredentialReferenceId"
+        },
+        "accountLabel": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 500
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "plan": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 100
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "workspaceId": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "expiresAt": {
+          "oneOf": [
+            {
+              "$ref": "./domain.schema.json#/$defs/Instant"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "loginPrompt": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ProviderLoginPromptProjection"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "lastErrorCode": {
+          "oneOf": [
+            {
+              "type": "string",
+              "enum": [
+                "LOGIN_PENDING",
+                "LOGIN_EXPIRED",
+                "LOGIN_REJECTED",
+                "REFRESH_REQUIRED",
+                "PROVIDER_UNAVAILABLE"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "updatedAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        }
+      },
+      "required": [
+        "id",
+        "revision",
+        "owner",
+        "providerId",
+        "displayName",
+        "loginMethod",
+        "state",
+        "credentialReferenceId",
+        "accountLabel",
+        "plan",
+        "workspaceId",
+        "expiresAt",
+        "loginPrompt",
+        "lastErrorCode",
+        "updatedAt"
+      ]
+    },
+    "ProviderAccountConnectionPage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "provider_account_connection_page"
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ProviderAccountConnectionProjection"
+          },
+          "maxItems": 200
+        }
+      },
+      "required": [
+        "kind",
+        "items"
+      ]
+    },
+    "ProviderAccountPoolProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Organization-owned account pool referencing organization-owned connections only.",
+      "properties": {
+        "id": {
+          "$ref": "./domain.schema.json#/$defs/ProviderAccountPoolId"
+        },
+        "revision": {
+          "$ref": "./domain.schema.json#/$defs/Revision"
+        },
+        "organizationId": {
+          "$ref": "./domain.schema.json#/$defs/OrganizationId"
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "accountConnectionIds": {
+          "type": "array",
+          "items": {
+            "$ref": "./domain.schema.json#/$defs/ProviderAccountConnectionId"
+          },
+          "minItems": 1,
+          "maxItems": 200,
+          "uniqueItems": true
+        },
+        "allowedModelIds": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "maxItems": 200,
+          "uniqueItems": true
+        },
+        "maxConcurrentPerAccount": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        },
+        "monthlyTokenLimitPerAccount": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "sourcePolicy": {
+          "type": "string",
+          "enum": [
+            "enterprise_only",
+            "allow_personal_default_personal",
+            "allow_personal_default_pool"
+          ]
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "updatedAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        }
+      },
+      "required": [
+        "id",
+        "revision",
+        "organizationId",
+        "displayName",
+        "accountConnectionIds",
+        "allowedModelIds",
+        "maxConcurrentPerAccount",
+        "monthlyTokenLimitPerAccount",
+        "sourcePolicy",
+        "enabled",
+        "updatedAt"
+      ]
+    },
+    "ProviderAccountPoolPage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "provider_account_pool_page"
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ProviderAccountPoolProjection"
+          },
+          "maxItems": 200
+        }
+      },
+      "required": [
+        "kind",
+        "items"
+      ]
+    },
+    "ProviderAccountConnectionStartPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "accountConnectionId": {
+          "$ref": "./domain.schema.json#/$defs/ProviderAccountConnectionId"
+        },
+        "owner": {
+          "$ref": "#/$defs/ProviderAccountOwner"
+        },
+        "providerId": {
+          "const": "openai"
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "loginMethod": {
+          "type": "string",
+          "enum": [
+            "chatgpt_device_code"
+          ]
+        }
+      },
+      "required": [
+        "accountConnectionId",
+        "owner",
+        "providerId",
+        "displayName",
+        "loginMethod"
+      ]
+    },
+    "ProviderAccountConnectionCompletePayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "accountConnectionId": {
+          "$ref": "./domain.schema.json#/$defs/ProviderAccountConnectionId"
+        }
+      },
+      "required": [
+        "accountConnectionId"
+      ]
+    },
+    "ProviderAccountConnectionRefreshPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "accountConnectionId": {
+          "$ref": "./domain.schema.json#/$defs/ProviderAccountConnectionId"
+        }
+      },
+      "required": [
+        "accountConnectionId"
+      ]
+    },
+    "ProviderAccountConnectionRevokePayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "accountConnectionId": {
+          "$ref": "./domain.schema.json#/$defs/ProviderAccountConnectionId"
+        }
+      },
+      "required": [
+        "accountConnectionId"
+      ]
+    },
+    "ProviderAccountPoolUpsertPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "accountPoolId": {
+          "$ref": "./domain.schema.json#/$defs/ProviderAccountPoolId"
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "accountConnectionIds": {
+          "type": "array",
+          "items": {
+            "$ref": "./domain.schema.json#/$defs/ProviderAccountConnectionId"
+          },
+          "minItems": 1,
+          "maxItems": 200,
+          "uniqueItems": true
+        },
+        "allowedModelIds": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "maxItems": 200,
+          "uniqueItems": true
+        },
+        "maxConcurrentPerAccount": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        },
+        "monthlyTokenLimitPerAccount": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "sourcePolicy": {
+          "type": "string",
+          "enum": [
+            "enterprise_only",
+            "allow_personal_default_personal",
+            "allow_personal_default_pool"
+          ]
+        }
+      },
+      "required": [
+        "accountPoolId",
+        "displayName",
+        "accountConnectionIds",
+        "allowedModelIds",
+        "maxConcurrentPerAccount",
+        "monthlyTokenLimitPerAccount",
+        "sourcePolicy"
+      ]
+    },
+    "ProviderAccountPoolDisablePayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "accountPoolId": {
+          "$ref": "./domain.schema.json#/$defs/ProviderAccountPoolId"
+        }
+      },
+      "required": [
+        "accountPoolId"
+      ]
+    },
+    "ProviderAccountConnectionStartCommand": {
+      "allOf": [
+        {
+          "$ref": "./domain.schema.json#/$defs/CommandEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "command": {
+              "const": "provider.account.connection.start"
+            },
+            "payload": {
+              "$ref": "#/$defs/ProviderAccountConnectionStartPayload"
+            }
+          }
+        }
+      ]
+    },
+    "ProviderAccountConnectionStartCompletedResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/CommandCompletedEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "command": {
+              "const": "provider.account.connection.start"
+            },
+            "result": {
+              "$ref": "#/$defs/ProviderAccountConnectionProjection"
+            }
+          }
+        }
+      ]
+    },
+    "ProviderAccountConnectionCompleteCommand": {
+      "allOf": [
+        {
+          "$ref": "./domain.schema.json#/$defs/CommandEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "command": {
+              "const": "provider.account.connection.complete"
+            },
+            "payload": {
+              "$ref": "#/$defs/ProviderAccountConnectionCompletePayload"
+            }
+          }
+        }
+      ]
+    },
+    "ProviderAccountConnectionCompleteCompletedResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/CommandCompletedEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "command": {
+              "const": "provider.account.connection.complete"
+            },
+            "result": {
+              "$ref": "#/$defs/ProviderAccountConnectionProjection"
+            }
+          }
+        }
+      ]
+    },
+    "ProviderAccountConnectionRefreshCommand": {
+      "allOf": [
+        {
+          "$ref": "./domain.schema.json#/$defs/CommandEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "command": {
+              "const": "provider.account.connection.refresh"
+            },
+            "payload": {
+              "$ref": "#/$defs/ProviderAccountConnectionRefreshPayload"
+            }
+          }
+        }
+      ]
+    },
+    "ProviderAccountConnectionRefreshCompletedResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/CommandCompletedEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "command": {
+              "const": "provider.account.connection.refresh"
+            },
+            "result": {
+              "$ref": "#/$defs/ProviderAccountConnectionProjection"
+            }
+          }
+        }
+      ]
+    },
+    "ProviderAccountConnectionRevokeCommand": {
+      "allOf": [
+        {
+          "$ref": "./domain.schema.json#/$defs/CommandEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "command": {
+              "const": "provider.account.connection.revoke"
+            },
+            "payload": {
+              "$ref": "#/$defs/ProviderAccountConnectionRevokePayload"
+            }
+          }
+        }
+      ]
+    },
+    "ProviderAccountConnectionRevokeCompletedResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/CommandCompletedEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "command": {
+              "const": "provider.account.connection.revoke"
+            },
+            "result": {
+              "$ref": "#/$defs/ProviderAccountConnectionProjection"
+            }
+          }
+        }
+      ]
+    },
+    "ProviderAccountPoolUpsertCommand": {
+      "allOf": [
+        {
+          "$ref": "./domain.schema.json#/$defs/CommandEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "command": {
+              "const": "provider.account.pool.upsert"
+            },
+            "payload": {
+              "$ref": "#/$defs/ProviderAccountPoolUpsertPayload"
+            }
+          }
+        }
+      ]
+    },
+    "ProviderAccountPoolUpsertCompletedResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/CommandCompletedEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "command": {
+              "const": "provider.account.pool.upsert"
+            },
+            "result": {
+              "$ref": "#/$defs/ProviderAccountPoolProjection"
+            }
+          }
+        }
+      ]
+    },
+    "ProviderAccountPoolDisableCommand": {
+      "allOf": [
+        {
+          "$ref": "./domain.schema.json#/$defs/CommandEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "command": {
+              "const": "provider.account.pool.disable"
+            },
+            "payload": {
+              "$ref": "#/$defs/ProviderAccountPoolDisablePayload"
+            }
+          }
+        }
+      ]
+    },
+    "ProviderAccountPoolDisableCompletedResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/CommandCompletedEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "command": {
+              "const": "provider.account.pool.disable"
+            },
+            "result": {
+              "$ref": "#/$defs/ProviderAccountPoolProjection"
+            }
+          }
+        }
+      ]
+    },
+    "ProviderAccountConnectionListParameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "states": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "login_pending",
+              "active",
+              "refresh_required",
+              "revoked",
+              "failed"
+            ]
+          },
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "states"
+      ]
+    },
+    "ProviderAccountConnectionGetParameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "accountConnectionId": {
+          "$ref": "./domain.schema.json#/$defs/ProviderAccountConnectionId"
+        }
+      },
+      "required": [
+        "accountConnectionId"
+      ]
+    },
+    "ProviderAccountPoolListParameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "oneOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "enabled"
+      ]
+    },
+    "ProviderAccountPoolGetParameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "accountPoolId": {
+          "$ref": "./domain.schema.json#/$defs/ProviderAccountPoolId"
+        }
+      },
+      "required": [
+        "accountPoolId"
+      ]
+    },
+    "ProviderAccountConnectionListQuery": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/QueryEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "query": {
+              "const": "provider.account.connection.list"
+            },
+            "parameters": {
+              "$ref": "#/$defs/ProviderAccountConnectionListParameters"
+            }
+          }
+        }
+      ]
+    },
+    "ProviderAccountConnectionListResultResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/QueryResultEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "query": {
+              "const": "provider.account.connection.list"
+            },
+            "result": {
+              "$ref": "#/$defs/ProviderAccountConnectionPage"
+            }
+          }
+        }
+      ]
+    },
+    "ProviderAccountConnectionGetQuery": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/QueryEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "query": {
+              "const": "provider.account.connection.get"
+            },
+            "parameters": {
+              "$ref": "#/$defs/ProviderAccountConnectionGetParameters"
+            }
+          }
+        }
+      ]
+    },
+    "ProviderAccountConnectionGetResultResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/QueryResultEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "query": {
+              "const": "provider.account.connection.get"
+            },
+            "result": {
+              "$ref": "#/$defs/ProviderAccountConnectionProjection"
+            }
+          }
+        }
+      ]
+    },
+    "ProviderAccountPoolListQuery": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/QueryEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "query": {
+              "const": "provider.account.pool.list"
+            },
+            "parameters": {
+              "$ref": "#/$defs/ProviderAccountPoolListParameters"
+            }
+          }
+        }
+      ]
+    },
+    "ProviderAccountPoolListResultResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/QueryResultEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "query": {
+              "const": "provider.account.pool.list"
+            },
+            "result": {
+              "$ref": "#/$defs/ProviderAccountPoolPage"
+            }
+          }
+        }
+      ]
+    },
+    "ProviderAccountPoolGetQuery": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/QueryEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "query": {
+              "const": "provider.account.pool.get"
+            },
+            "parameters": {
+              "$ref": "#/$defs/ProviderAccountPoolGetParameters"
+            }
+          }
+        }
+      ]
+    },
+    "ProviderAccountPoolGetResultResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/QueryResultEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "query": {
+              "const": "provider.account.pool.get"
+            },
+            "result": {
+              "$ref": "#/$defs/ProviderAccountPoolProjection"
             }
           }
         }

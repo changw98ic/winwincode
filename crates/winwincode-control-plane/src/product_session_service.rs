@@ -17,8 +17,9 @@ use winwincode_api::generated::{
     Actor, ChatMessageProjection, ControlPlaneWebSocketProductSessionChangedEvent,
     ControlPlaneWebSocketProductSessionChangedEventTypeValue,
     ControlPlaneWebSocketProductSessionMessageAppendedEvent,
-    ControlPlaneWebSocketProductSessionMessageAppendedEventTypeValue, ModelRoute,
-    ProductSessionProjection, RepositoryScope, SessionCloseCommand, SessionCreateCommand,
+    ControlPlaneWebSocketProductSessionMessageAppendedEventTypeValue, ProductSessionProjection,
+    ProviderAccountSource, RepositoryScope, SessionCloseCommand, SessionCreateCommand,
+    SessionModelSelection,
 };
 use winwincode_domain::{
     ChatMessageId, ControlPlaneEventId, DeliveryId, DeliveryTaskId, ExecutionJobId, Instant,
@@ -64,10 +65,10 @@ use chat::{
 use execution_job::PreparedProductSessionExecution;
 pub use execution_job::ProductSessionExecutionConfig;
 
-pub const PRODUCT_SESSION_SERVICE_SCHEMA_VERSION: u8 = 3;
+pub const PRODUCT_SESSION_SERVICE_SCHEMA_VERSION: u8 = 4;
 const PRODUCT_SESSION_CHANGED_TOPIC: &str = "product-session.changed.v1";
 const PRODUCT_SESSION_MESSAGE_APPENDED_TOPIC: &str = "product-session.message.appended.v1";
-const PRODUCT_SESSION_RECEIPT_TOPIC: &str = "product-session.receipt.internal.v3";
+const PRODUCT_SESSION_RECEIPT_TOPIC: &str = "product-session.receipt.internal.v4";
 
 /// Storage seam joining canonical state to an already durable Worker slot.
 ///
@@ -271,7 +272,7 @@ pub struct CreateProductSessionCommand {
     pub project_id: ProjectId,
     pub repository_id: RepositoryId,
     pub title: String,
-    pub model_route: ModelRoute,
+    pub model_selection: SessionModelSelection,
 }
 
 impl CreateProductSessionCommand {
@@ -300,7 +301,7 @@ impl CreateProductSessionCommand {
             project_id: command.payload.project_id,
             repository_id: command.payload.repository_id,
             title: command.payload.title,
-            model_route: command.payload.model_route,
+            model_selection: command.payload.model_selection,
         })
     }
 }
@@ -421,7 +422,7 @@ impl DurableSessionBinding {
 pub struct ProductSessionRecord {
     session: ProductSession,
     forked_from: Option<ProductSessionId>,
-    model_route: ModelRoute,
+    model_selection: SessionModelSelection,
     bindings: Vec<DurableSessionBinding>,
     messages: Vec<ChatMessageProjection>,
     turn_intents: Vec<ProductSessionTurnIntent>,
@@ -443,8 +444,8 @@ impl ProductSessionRecord {
     /// Returns the exact provider-neutral route selected when the session was
     /// created. It contains only a Credential reference, never secret bytes.
     #[must_use]
-    pub const fn model_route(&self) -> &ModelRoute {
-        &self.model_route
+    pub const fn model_selection(&self) -> &SessionModelSelection {
+        &self.model_selection
     }
 
     #[must_use]
@@ -492,6 +493,7 @@ impl ProductSessionRecord {
             state: session_state_label(self.session.state()).to_owned(),
             title: self.session.title().to_owned(),
             updated_at: self.session.updated_at().clone(),
+            model_selection: self.model_selection.clone(),
         })
     }
 }
@@ -611,8 +613,8 @@ impl<'storage> ProductSessionService<'storage> {
             ));
         }
         validate_create_scope(command)?;
-        validate_model_route(&command.model_route)?;
-        inspect_public_output(&self.output_gate, &command.model_route)?;
+        validate_model_selection(&command.model_selection)?;
+        inspect_public_output(&self.output_gate, &command.model_selection)?;
         let mut catalog = self.load_catalog(command.context.receipt_identity.scope_key())?;
         if catalog.sessions.contains_key(&command.product_session_id.0) {
             return Err(service_error(
@@ -631,7 +633,7 @@ impl<'storage> ProductSessionService<'storage> {
         let persisted = PersistedProductSession {
             session,
             forked_from: None,
-            model_route: command.model_route.clone(),
+            model_selection: command.model_selection.clone(),
             bindings: Vec::new(),
             messages: Vec::new(),
             turn_intents: Vec::new(),
@@ -877,11 +879,11 @@ impl<'storage> ProductSessionService<'storage> {
             now: command.context.occurred_at.clone(),
         })
         .map_err(|error| domain_error(&error))?;
-        let model_route = source.model_route.clone();
+        let model_selection = source.model_selection.clone();
         let persisted = PersistedProductSession {
             session,
             forked_from: Some(command.source_product_session_id.clone()),
-            model_route,
+            model_selection,
             bindings: Vec::new(),
             messages: Vec::new(),
             turn_intents: Vec::new(),
@@ -1197,7 +1199,7 @@ impl PersistedProductSessionCatalog {
 struct PersistedProductSession {
     session: ProductSession,
     forked_from: Option<ProductSessionId>,
-    model_route: ModelRoute,
+    model_selection: SessionModelSelection,
     bindings: Vec<PersistedSessionBinding>,
     messages: Vec<PersistedChatMessage>,
     turn_intents: Vec<PersistedTurnIntent>,
@@ -1213,12 +1215,12 @@ impl PersistedProductSession {
         {
             return Err(corrupt("ProductSession cannot be forked from itself"));
         }
-        validate_model_route(&self.model_route)?;
+        validate_model_selection(&self.model_selection)?;
         chat::validate_persisted_chat(self)?;
         Ok(ProductSessionRecord {
             session: self.session.clone(),
             forked_from: self.forked_from.clone(),
-            model_route: self.model_route.clone(),
+            model_selection: self.model_selection.clone(),
             bindings: self
                 .bindings
                 .iter()
@@ -1817,6 +1819,37 @@ pub(crate) fn catalog_stream_id(scope: &ReceiptScopeKey) -> String {
     format!("product-sessions:{:x}", Sha256::digest(scope.as_bytes()))
 }
 
+pub(crate) fn load_product_session_model_selection(
+    storage: &dyn ProductStateStorage,
+    scope: &RepositoryScope,
+    product_session_id: &ProductSessionId,
+) -> Result<SessionModelSelection, ProductSessionServiceError> {
+    let scope_key = crate::repository_scope_key(scope).map_err(|error| storage_error(&error))?;
+    let stream_id = catalog_stream_id(&scope_key);
+    let state = storage
+        .load_state(&stream_id)
+        .map_err(|error| storage_error(&error))?
+        .ok_or_else(|| {
+            service_error(
+                ProductSessionServiceErrorCode::NotFound,
+                "ProductSession was not found in this repository scope",
+            )
+        })?;
+    let catalog: PersistedProductSessionCatalog = serde_json::from_slice(&state.payload)
+        .map_err(|_| corrupt("ProductSession catalog cannot be decoded"))?;
+    catalog.validate(state.revision)?;
+    catalog
+        .sessions
+        .get(&product_session_id.0)
+        .map(|session| session.model_selection.clone())
+        .ok_or_else(|| {
+            service_error(
+                ProductSessionServiceErrorCode::NotFound,
+                "ProductSession was not found in this repository scope",
+            )
+        })
+}
+
 fn command_digest(
     kind: &str,
     fields: serde_json::Value,
@@ -1839,7 +1872,7 @@ fn command_digest_fields(command: &CreateProductSessionCommand) -> serde_json::V
         "projectId": command.project_id.0,
         "repositoryId": command.repository_id.0,
         "title": command.title,
-        "modelRoute": command.model_route,
+        "modelSelection": command.model_selection,
     })
 }
 
@@ -1892,16 +1925,27 @@ fn close_digest_fields(command: &CloseProductSessionCommand) -> serde_json::Valu
     })
 }
 
-fn validate_model_route(route: &ModelRoute) -> Result<(), ProductSessionServiceError> {
-    if route.provider_id.is_empty()
-        || route.provider_id.chars().count() > 128
-        || route.model_id.is_empty()
-        || route.model_id.chars().count() > 256
-        || !canonical_id(&route.credential_reference_id.0, "crd_")
+fn validate_model_selection(
+    selection: &SessionModelSelection,
+) -> Result<(), ProductSessionServiceError> {
+    let source_is_valid = match &selection.account_source {
+        ProviderAccountSource::SystemDefaultProviderAccountSource(_) => true,
+        ProviderAccountSource::PersonalProviderAccountSource(source) => {
+            canonical_id(&source.account_connection_id.0, "pac_")
+        }
+        ProviderAccountSource::EnterpriseProviderAccountPoolSource(source) => {
+            canonical_id(&source.account_pool_id.0, "pap_")
+        }
+    };
+    if selection.provider_id.is_empty()
+        || selection.provider_id.chars().count() > 128
+        || selection.model_id.is_empty()
+        || selection.model_id.chars().count() > 256
+        || !source_is_valid
     {
         return Err(service_error(
             ProductSessionServiceErrorCode::InvalidInput,
-            "ProductSession model route is invalid",
+            "ProductSession model selection is invalid",
         ));
     }
     Ok(())

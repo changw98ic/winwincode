@@ -7,7 +7,10 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use rusqlite::Connection;
-use winwincode_api::generated::ModelRoute;
+use winwincode_api::generated::{
+    ProviderAccountSource, SessionModelSelection, SystemDefaultProviderAccountSource,
+    SystemDefaultProviderAccountSourceKind,
+};
 use winwincode_control_plane::{
     ContinueProductSessionCommand, CreateProductSessionCommand, ExpireGateInteractionCommand,
     GateCandidateIdentity, GateDecisionFact, GateHumanDecision, GateInteractionActor,
@@ -17,10 +20,10 @@ use winwincode_control_plane::{
     RespondGateInteractionCommand, RoutableGateDecision,
 };
 use winwincode_domain::{
-    ApprovalId, AttentionItemId, CodexThreadId, ControlPlaneEventId, CredentialReferenceId,
-    DeliveryId, ExecutionJobId, ExecutionMessageId, ExecutionSequence, FencingToken, Instant,
-    LeaseId, ModelExchangeId, OrganizationId, ProductSessionId, ProjectId, RepositoryId, RequestId,
-    Sha256Digest, StageRunId, UserId, WorkerId, WorkerInstanceId, WorkerSessionId, WorkspaceId,
+    ApprovalId, AttentionItemId, CodexThreadId, ControlPlaneEventId, DeliveryId, ExecutionJobId,
+    ExecutionMessageId, ExecutionSequence, FencingToken, Instant, LeaseId, ModelExchangeId,
+    OrganizationId, ProductSessionId, ProjectId, RepositoryId, RequestId, Sha256Digest, StageRunId,
+    UserId, WorkerId, WorkerInstanceId, WorkerSessionId, WorkspaceId,
 };
 use winwincode_execution_port::action_gateway::GateDecision;
 use winwincode_session::SessionBindingIdentity;
@@ -120,9 +123,13 @@ fn assert_gate_receipts_are_internal(directory: &TestDirectory) {
     assert_eq!(internal_rows, 2);
 }
 
-fn model_route() -> ModelRoute {
-    ModelRoute {
-        credential_reference_id: CredentialReferenceId(id("crd", 1)),
+fn model_selection() -> SessionModelSelection {
+    SessionModelSelection {
+        account_source: ProviderAccountSource::SystemDefaultProviderAccountSource(
+            SystemDefaultProviderAccountSource {
+                kind: SystemDefaultProviderAccountSourceKind::SystemDefault,
+            },
+        ),
         model_id: "fixture-model".into(),
         provider_id: "fixture-provider".into(),
     }
@@ -375,7 +382,7 @@ fn prepare_product_session(
             project_id: ProjectId(id("prj", 1)),
             repository_id: RepositoryId(id("rep", 1)),
             title: "Gate route fixture".into(),
-            model_route: model_route(),
+            model_selection: model_selection(),
         })
         .expect("create ProductSession");
     let binding_identity = if delivery {

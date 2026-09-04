@@ -17,17 +17,18 @@ use super::{
     AuthenticatedActor, ChatMessageId, ChatMessageProjection, ExecutionCancellationRoutes,
     ExecutionJobId, ExecutionJobState, ExecutionQueueScope, ExecutionReservationRecord,
     ExecutionReservationState, ExecutionRoute, Instant, InteractionRouter, InteractionRoutingError,
-    ModelExchangeId, ModelRoute, ModelStreamCancellationRoute, MutationKind,
+    ModelExchangeId, ModelStreamCancellationRoute, MutationKind,
     PRODUCT_SESSION_SERVICE_SCHEMA_VERSION, PersistedBindingIdentity, PersistedProductSession,
     PersistedSessionBinding, ProductSessionCommandContext, ProductSessionExecutionConfig,
     ProductSessionId, ProductSessionMutationReceipt, ProductSessionRecord, ProductSessionService,
     ProductSessionServiceError, ProductSessionServiceErrorCode, ProductSessionState,
     PublicEventActor, PublicEventScope, ReceiptScopeKey, RouteWriteStatus, RuntimeRouteAuthority,
-    SessionBindingIdentity, SessionCancellationRequest, SessionCancellationSnapshot, StageRunId,
-    WorkerCancellationRoute, WorkerPoolId, WorkerSessionId, WorkerSlotAuthority, WorkerSlotRecord,
-    WorkerSlotState, binding_mismatch, canonical_id, command_digest, context_digest_fields,
-    corrupt, domain_error, inspect_public_output, not_found, product_session_command_context,
-    require_revision, service_error, session_state_label, storage_error,
+    SessionBindingIdentity, SessionCancellationRequest, SessionCancellationSnapshot,
+    SessionModelSelection, StageRunId, WorkerCancellationRoute, WorkerPoolId, WorkerSessionId,
+    WorkerSlotAuthority, WorkerSlotRecord, WorkerSlotState, binding_mismatch, canonical_id,
+    command_digest, context_digest_fields, corrupt, domain_error, inspect_public_output, not_found,
+    product_session_command_context, require_revision, service_error, session_state_label,
+    storage_error,
 };
 
 const MAX_MESSAGE_BYTES: usize = 1_048_576;
@@ -195,7 +196,7 @@ pub struct ProductSessionTurnIntent {
     pub user_message_id: ChatMessageId,
     pub execution_job_id: ExecutionJobId,
     pub session_revision: u64,
-    pub model_route: ModelRoute,
+    pub model_selection: SessionModelSelection,
     pub model_exchange_id: Option<ModelExchangeId>,
     pub requested_at: Instant,
     pub state: ProductSessionTurnState,
@@ -361,7 +362,7 @@ pub(super) struct PersistedTurnIntent {
     user_message_id: ChatMessageId,
     pub(super) execution_job_id: ExecutionJobId,
     session_revision: u64,
-    model_route: ModelRoute,
+    model_selection: SessionModelSelection,
     pub(super) model_exchange_id: Option<ModelExchangeId>,
     requested_at: Instant,
     pub(super) state: PersistedTurnState,
@@ -376,7 +377,7 @@ impl PersistedTurnIntent {
             user_message_id: self.user_message_id.clone(),
             execution_job_id: self.execution_job_id.clone(),
             session_revision: self.session_revision,
-            model_route: self.model_route.clone(),
+            model_selection: self.model_selection.clone(),
             model_exchange_id: self.model_exchange_id.clone(),
             requested_at: self.requested_at.clone(),
             state: match self.state {
@@ -577,7 +578,7 @@ impl ProductSessionService<'_> {
             &command.context,
             &command.product_session_id,
             &command.message,
-            &persisted.model_route,
+            &persisted.model_selection,
         )?;
         if persisted.messages.len() >= MAX_MESSAGES_PER_SESSION {
             return Err(service_error(
@@ -628,7 +629,7 @@ impl ProductSessionService<'_> {
             user_message_id: message_id,
             execution_job_id: execution.job.job_id.clone(),
             session_revision: persisted.session.revision(),
-            model_route: persisted.model_route.clone(),
+            model_selection: persisted.model_selection.clone(),
             model_exchange_id: None,
             requested_at: command.context.occurred_at.clone(),
             state: PersistedTurnState::Pending,
@@ -1288,7 +1289,7 @@ pub(super) fn validate_persisted_chat(
     }
     for turn in &session.turn_intents {
         if turn.product_session_id != *session.session.id()
-            || turn.model_route != session.model_route
+            || turn.model_selection != session.model_selection
             || !canonical_id(&turn.execution_job_id.0, "job_")
             || !session.messages.iter().any(|message| {
                 message.projection.id == turn.user_message_id && message.projection.role == "user"

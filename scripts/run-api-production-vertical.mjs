@@ -127,6 +127,14 @@ function configuredModelRoute(serverEnvironment = {}) {
   }
 }
 
+function systemModelSelection(modelRoute) {
+  return {
+    providerId: modelRoute.providerId,
+    modelId: modelRoute.modelId,
+    accountSource: { kind: 'system_default' },
+  }
+}
+
 function fail(message) {
   throw new Error(message)
 }
@@ -1130,7 +1138,7 @@ async function runChat(
       projectId: IDS.project,
       repositoryId: IDS.repository,
       title: 'API production Chat',
-      modelRoute,
+      modelSelection: systemModelSelection(modelRoute),
     })
     assertCompleted(created, 'session.create', 0)
     assert.equal(created.result.id, productSessionId)
@@ -1177,7 +1185,7 @@ async function runCancelledSession(client, modelRoute = configuredModelRoute()) 
     projectId: IDS.project,
     repositoryId: IDS.repository,
     title: 'API production cancellation',
-    modelRoute,
+    modelSelection: systemModelSelection(modelRoute),
   })
   assertCompleted(created, 'session.create', 0)
   assert.equal(created.result.id, IDS.cancelSession)

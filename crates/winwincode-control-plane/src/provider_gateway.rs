@@ -16,7 +16,7 @@ use sha2::{Digest, Sha256};
 use winwincode_api::generated::ModelRoute;
 use winwincode_domain::{
     Instant, ModelExchangeId, ProductSessionId, RequestId, SchemaVersion, SessionIdentity,
-    Sha256Digest, WorkerSessionId,
+    Sha256Digest, UserId, WorkerSessionId,
 };
 use winwincode_execution_port::generated::{
     EncodedPayload, ExecutionLeaseStamp, ExecutionPortErrorCode, LeaseWriteStatus, ModelAckMessage,
@@ -170,6 +170,7 @@ impl From<StorageError> for ProviderGatewayError {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ProviderGatewayIdentity {
     target: ModelSettingsTarget,
+    user_id: Option<UserId>,
 }
 
 impl ProviderGatewayIdentity {
@@ -184,6 +185,22 @@ impl ProviderGatewayIdentity {
                 repository_scope,
                 product_session_id,
             },
+            user_id: None,
+        }
+    }
+
+    #[must_use]
+    pub const fn product_session_for_user(
+        repository_scope: winwincode_api::generated::RepositoryScope,
+        product_session_id: ProductSessionId,
+        user_id: UserId,
+    ) -> Self {
+        Self {
+            target: ModelSettingsTarget::ProductSession {
+                repository_scope,
+                product_session_id,
+            },
+            user_id: Some(user_id),
         }
     }
 
@@ -191,6 +208,11 @@ impl ProviderGatewayIdentity {
     #[must_use]
     pub const fn target(&self) -> &ModelSettingsTarget {
         &self.target
+    }
+
+    #[must_use]
+    pub const fn user_id(&self) -> Option<&UserId> {
+        self.user_id.as_ref()
     }
 }
 
@@ -933,6 +955,14 @@ struct ResolvedProviderOpen {
     admission: crate::ProviderAdmissionOpenReceipt,
 }
 
+struct ResolvedRouteContext {
+    route: ModelRoute,
+    credential_scope: winwincode_api::generated::Scope,
+    settings: crate::ModelSettingsProjection,
+    capability: crate::ResolvedModelCapability,
+    provider_account_selected: bool,
+}
+
 fn admission_is_exact_replay(
     actual: &crate::ProviderAdmissionOpenReceipt,
     expected: &crate::ProviderAdmissionOpenReceipt,
@@ -1094,8 +1124,10 @@ impl<'a> ProviderGateway<'a> {
     /// Validates and routes one Worker model request.
     ///
     /// The Worker-supplied route must exactly equal the current configured
-    /// route. Secret bytes are resolved only after route and payload checks and
-    /// are borrowed only by the selected adapter call.
+    /// route for the system account source. Account-backed sessions replace
+    /// that secret-free hint with their server-authorized account route. Secret
+    /// bytes are resolved only after route and payload checks and are borrowed
+    /// only by the selected adapter call.
     ///
     /// # Errors
     ///
@@ -1178,8 +1210,33 @@ impl<'a> ProviderGateway<'a> {
                 "Provider admission did not replay the pre-open reservation",
             ));
         }
-        let (adapter_receipt, leak_gate) =
-            self.invoke_provider(message, &payload, &resolved, adapter_request_id)?;
+        let (adapter_receipt, leak_gate) = match self.invoke_provider(
+            message,
+            &payload,
+            &resolved,
+            adapter_request_id,
+        ) {
+            Ok(result) => result,
+            Err(error) => {
+                let settlement = if matches!(
+                    error.kind(),
+                    ProviderGatewayErrorKind::AdapterRateLimited
+                        | ProviderGatewayErrorKind::AdapterUnavailable
+                        | ProviderGatewayErrorKind::CredentialUnavailable
+                ) {
+                    crate::provider_account::ProviderAccountExchangeSettlement::RetryableBeforeAcceptance
+                } else {
+                    crate::provider_account::ProviderAccountExchangeSettlement::Final
+                };
+                self.release_provider_account_route(
+                    &identity,
+                    &message.model_exchange_id,
+                    0,
+                    settlement,
+                )?;
+                return Err(error);
+            }
+        };
         let receipt = ProviderGatewayOpenReceipt {
             model_exchange_id: message.model_exchange_id.clone(),
             request_id: message.request_id.clone(),
@@ -1284,28 +1341,26 @@ impl<'a> ProviderGateway<'a> {
         worker_route: Option<&ModelRoute>,
         identity: &ProviderGatewayIdentity,
     ) -> Result<ResolvedProviderOpen, ProviderGatewayError> {
-        let (route, credential_scope) = ModelSettingsService::new(self.storage)
-            .resolve_with_catalog_scope(identity.target())
-            .map_err(|error| map_model_settings_error(&error))?;
-        if worker_route.is_some_and(|worker_route| &route != worker_route) {
+        let context = self.resolve_route_context(message, identity)?;
+        let route = context.route;
+        let credential_scope = context.credential_scope;
+        if !context.provider_account_selected
+            && worker_route.is_some_and(|worker_route| &route != worker_route)
+        {
             return Err(ProviderGatewayError::new(
                 ProviderGatewayErrorKind::RouteMismatch,
                 "Worker route does not match the configured model route",
             ));
         }
         self.adapter(&route.provider_id)?;
-        let settings = ModelSettingsService::new(self.storage)
-            .project(identity.target())
-            .map_err(|error| map_model_settings_error(&error))?;
+        let settings = context.settings;
         if settings.default_model_route.as_ref() != Some(&route) {
             return Err(ProviderGatewayError::new(
                 ProviderGatewayErrorKind::RouteUnavailable,
                 "Model settings changed during Provider route resolution",
             ));
         }
-        let capability = ProviderCatalogService::new(self.storage)
-            .resolve_model(&credential_scope, &route.provider_id, &route.model_id)
-            .map_err(|error| map_provider_catalog_error(&error))?;
+        let capability = context.capability;
         let reference = CredentialReferenceService::new(self.storage)
             .resolve(&credential_scope, &route.credential_reference_id)
             .map_err(|error| map_credential_reference_error(&error))?;
@@ -1315,7 +1370,7 @@ impl<'a> ProviderGateway<'a> {
                 "Credential reference does not belong to the configured Provider",
             ));
         }
-        let admission = self
+        let admission_result = self
             .admission
             .reserve(&ProviderAdmissionOpenRequest {
                 identity,
@@ -1324,8 +1379,30 @@ impl<'a> ProviderGateway<'a> {
                 credential: &reference,
                 message,
             })
-            .map_err(|error| map_admission_reserve_error(&error))?;
+            .map_err(|error| map_admission_reserve_error(&error));
+        let admission = match admission_result {
+            Ok(admission) => admission,
+            Err(error) => {
+                if context.provider_account_selected {
+                    self.release_provider_account_route(
+                        identity,
+                        &message.model_exchange_id,
+                        0,
+                        crate::provider_account::ProviderAccountExchangeSettlement::Final,
+                    )?;
+                }
+                return Err(error);
+            }
+        };
         if !admission.reservation.admitted() {
+            if context.provider_account_selected {
+                self.release_provider_account_route(
+                    identity,
+                    &message.model_exchange_id,
+                    0,
+                    crate::provider_account::ProviderAccountExchangeSettlement::Final,
+                )?;
+            }
             return Err(ProviderGatewayError::new(
                 ProviderGatewayErrorKind::AdmissionDenied,
                 "Provider request was denied by durable model admission",
@@ -1336,6 +1413,168 @@ impl<'a> ProviderGateway<'a> {
             reference,
             admission,
         })
+    }
+
+    #[allow(clippy::too_many_lines)] // Keeps both account and system authority resolution auditable.
+    fn resolve_route_context(
+        &mut self,
+        message: &ModelOpenMessage,
+        identity: &ProviderGatewayIdentity,
+    ) -> Result<ResolvedRouteContext, ProviderGatewayError> {
+        let ModelSettingsTarget::ProductSession {
+            repository_scope,
+            product_session_id,
+        } = identity.target()
+        else {
+            return Err(ProviderGatewayError::new(
+                ProviderGatewayErrorKind::IdentityDenied,
+                "Provider Gateway target is not a ProductSession",
+            ));
+        };
+        let selection = crate::product_session_service::load_product_session_model_selection(
+            self.storage,
+            repository_scope,
+            product_session_id,
+        );
+        let selection = match selection {
+            Ok(selection) => Some(selection),
+            Err(error)
+                if error.code()
+                    == crate::product_session_service::ProductSessionServiceErrorCode::NotFound
+                    && identity.user_id().is_none() =>
+            {
+                None
+            }
+            Err(error)
+                if error.code()
+                    == crate::product_session_service::ProductSessionServiceErrorCode::NotFound
+                    && identity.user_id().is_some()
+                    && message.session_identity.stage_run_id.is_some() =>
+            {
+                let (system_route, _) = ModelSettingsService::new(self.storage)
+                    .resolve_with_catalog_scope(identity.target())
+                    .map_err(|error| map_model_settings_error(&error))?;
+                crate::provider_account::ProviderAccountRoutingService::new(self.storage)
+                    .default_selection_for_user(
+                        identity
+                            .user_id()
+                            .ok_or_else(ProviderGatewayError::invalid)?,
+                        repository_scope,
+                        &system_route.model_id,
+                        &message.sent_at,
+                    )
+                    .map_err(map_provider_account_route_error)?
+            }
+            Err(_) => {
+                return Err(ProviderGatewayError::new(
+                    ProviderGatewayErrorKind::RouteUnavailable,
+                    "ProductSession model selection is unavailable",
+                ));
+            }
+        };
+        if matches!(
+            selection.as_ref().map(|selection| &selection.account_source),
+            None | Some(
+                winwincode_api::generated::ProviderAccountSource::SystemDefaultProviderAccountSource(_)
+            )
+        ) {
+            let (route, credential_scope) = ModelSettingsService::new(self.storage)
+                .resolve_with_catalog_scope(identity.target())
+                .map_err(|error| map_model_settings_error(&error))?;
+            let settings = ModelSettingsService::new(self.storage)
+                .project(identity.target())
+                .map_err(|error| map_model_settings_error(&error))?;
+            let capability = ProviderCatalogService::new(self.storage)
+                .resolve_model(&credential_scope, &route.provider_id, &route.model_id)
+                .map_err(|error| map_provider_catalog_error(&error))?;
+            return Ok(ResolvedRouteContext {
+                route,
+                credential_scope,
+                settings,
+                capability,
+                provider_account_selected: false,
+            });
+        }
+        let selection = selection.ok_or_else(ProviderGatewayError::invalid)?;
+        let user_id = identity.user_id().ok_or_else(|| {
+            ProviderGatewayError::new(
+                ProviderGatewayErrorKind::IdentityDenied,
+                "Provider account route requires a user identity",
+            )
+        })?;
+        let period_id = message.sent_at.0.get(..7).filter(|value| {
+            value.as_bytes().get(4) == Some(&b'-')
+                && value
+                    .bytes()
+                    .enumerate()
+                    .all(|(index, byte)| index == 4 || byte.is_ascii_digit())
+        });
+        let period_id = period_id.ok_or_else(ProviderGatewayError::invalid)?;
+        let account = crate::provider_account::ProviderAccountRoutingService::new(self.storage)
+            .select_for_exchange(
+                user_id,
+                repository_scope,
+                &selection,
+                &message.model_exchange_id,
+                period_id,
+                &message.sent_at,
+            )
+            .map_err(map_provider_account_route_error)?
+            .ok_or_else(|| {
+                ProviderGatewayError::new(
+                    ProviderGatewayErrorKind::RouteUnavailable,
+                    "Provider account route was not selected",
+                )
+            })?;
+        let route = ModelRoute {
+            credential_reference_id: account.credential_reference_id.clone(),
+            model_id: selection.model_id.clone(),
+            provider_id: selection.provider_id.clone(),
+        };
+        let mut settings = ModelSettingsService::new(self.storage)
+            .project(identity.target())
+            .map_err(|error| map_model_settings_error(&error))?;
+        settings.selection = Some(crate::ModelSelection {
+            provider_id: selection.provider_id.clone(),
+            model_id: selection.model_id.clone(),
+        });
+        settings.default_model_route = Some(route.clone());
+        let mut capability = ProviderCatalogService::new(self.storage)
+            .resolve_model(
+                &account.credential_scope,
+                &selection.provider_id,
+                &selection.model_id,
+            )
+            .map_err(|error| map_provider_catalog_error(&error))?;
+        capability.credential_reference_id = account.credential_reference_id;
+        Ok(ResolvedRouteContext {
+            route,
+            credential_scope: account.credential_scope,
+            settings,
+            capability,
+            provider_account_selected: true,
+        })
+    }
+
+    fn release_provider_account_route(
+        &mut self,
+        identity: &ProviderGatewayIdentity,
+        model_exchange_id: &ModelExchangeId,
+        used_tokens: u64,
+        settlement: crate::provider_account::ProviderAccountExchangeSettlement,
+    ) -> Result<(), ProviderGatewayError> {
+        let ModelSettingsTarget::ProductSession {
+            repository_scope, ..
+        } = identity.target()
+        else {
+            return Err(ProviderGatewayError::new(
+                ProviderGatewayErrorKind::IdentityDenied,
+                "Provider Gateway target is not a ProductSession",
+            ));
+        };
+        crate::provider_account::ProviderAccountRoutingService::new(self.storage)
+            .settle_exchange(repository_scope, model_exchange_id, used_tokens, settlement)
+            .map_err(map_provider_account_route_error)
     }
 
     fn invoke_provider(
@@ -1680,6 +1919,7 @@ impl<'a> ProviderGateway<'a> {
                 "Provider Gateway settlement operation failed",
             )
         })?;
+        self.settle_provider_account_usage(model_exchange_id, command)?;
         let receipt = ProviderGatewayTerminalReceipt {
             model_exchange_id: model_exchange_id.clone(),
             outcome,
@@ -1700,6 +1940,44 @@ impl<'a> ProviderGateway<'a> {
         record.terminal = Some((command, receipt.clone()));
         record.terminating = None;
         Ok(receipt)
+    }
+
+    fn settle_provider_account_usage(
+        &mut self,
+        model_exchange_id: &ModelExchangeId,
+        command: ProviderGatewayTerminal,
+    ) -> Result<(), ProviderGatewayError> {
+        let repository_scope = match self
+            .exchange(model_exchange_id)?
+            .admission_authority
+            .target()
+        {
+            ModelSettingsTarget::ProductSession {
+                repository_scope, ..
+            } => repository_scope.clone(),
+            ModelSettingsTarget::Organization { .. }
+            | ModelSettingsTarget::Project { .. }
+            | ModelSettingsTarget::Repository { .. } => {
+                return Err(ProviderGatewayError::new(
+                    ProviderGatewayErrorKind::IdentityDenied,
+                    "Provider account exchange target is invalid",
+                ));
+            }
+        };
+        let used_tokens = command.charge().map_or(0, |charge| {
+            charge
+                .usage
+                .input_tokens
+                .saturating_add(charge.usage.output_tokens)
+        });
+        crate::provider_account::ProviderAccountRoutingService::new(self.storage)
+            .settle_exchange(
+                &repository_scope,
+                model_exchange_id,
+                used_tokens,
+                crate::provider_account::ProviderAccountExchangeSettlement::Final,
+            )
+            .map_err(map_provider_account_route_error)
     }
 
     fn prepare_terminal(
@@ -2430,6 +2708,36 @@ fn map_credential_reference_error(error: &CredentialReferenceError) -> ProviderG
 
 fn map_secret_store_error(_error: &SecretStoreError) -> ProviderGatewayError {
     ProviderGatewayError::credential_unavailable()
+}
+
+fn map_provider_account_route_error(
+    error: crate::provider_account::ProviderAccountError,
+) -> ProviderGatewayError {
+    use crate::provider_account::ProviderAccountErrorKind;
+    match error.kind() {
+        ProviderAccountErrorKind::PermissionDenied => ProviderGatewayError::new(
+            ProviderGatewayErrorKind::IdentityDenied,
+            "Provider account route is not authorized",
+        ),
+        ProviderAccountErrorKind::NotFound
+        | ProviderAccountErrorKind::WrongState
+        | ProviderAccountErrorKind::RevisionConflict => ProviderGatewayError::new(
+            ProviderGatewayErrorKind::RouteUnavailable,
+            "Provider account route is unavailable",
+        ),
+        ProviderAccountErrorKind::InvalidRequest | ProviderAccountErrorKind::RequestConflict => {
+            ProviderGatewayError::new(
+                ProviderGatewayErrorKind::RouteMismatch,
+                "Provider account route conflicts with the model exchange",
+            )
+        }
+        ProviderAccountErrorKind::ProviderUnavailable
+        | ProviderAccountErrorKind::SecretStore
+        | ProviderAccountErrorKind::Storage => ProviderGatewayError::new(
+            ProviderGatewayErrorKind::RouteUnavailable,
+            "Provider account route authority is unavailable",
+        ),
+    }
 }
 
 fn map_adapter_error(error: &ProviderAdapterError) -> ProviderGatewayError {
