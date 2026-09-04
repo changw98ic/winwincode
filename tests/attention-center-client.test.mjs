@@ -835,6 +835,15 @@ function centerState(overrides = {}) {
         deliveryTitle: 'Foreign delivery',
       }),
     ],
+    origins: [
+      {
+        deliveryId,
+        deliveryTitle: 'Delivery under attention',
+        deliveryRevision: 12,
+        activeStageRunId: stageRunId,
+        needsAttention: true,
+      },
+    ],
     error: null,
     ...overrides,
   }
@@ -971,6 +980,7 @@ test('the mounted center shows safe cards, disables fail-closed actions, and kee
     root: rootElement,
     model,
     scopeSelection: emptyScopeSelection,
+    ownsModel: true,
     readOnly: false,
   })
   assert.equal(byClass(rootElement, 'wwc-attention-center').dataset.wwcPage, 'management')
@@ -1027,6 +1037,7 @@ test('read-only centers and failures present explicit, non-actionable states', (
     root: rootElement,
     model,
     scopeSelection: emptyScopeSelection,
+    ownsModel: true,
     readOnly: true,
   })
   const pendingCard = [...byClass(rootElement, 'wwc-attention-center-list').children]
@@ -1046,6 +1057,7 @@ test('read-only centers and failures present explicit, non-actionable states', (
     root: failedRoot,
     model: failedModel,
     scopeSelection: emptyScopeSelection,
+    ownsModel: true,
     readOnly: false,
   })
   const presentation = attentionCenterPresentation(failedModel.state, { kind: 'all', sort: 'urgency' })
@@ -1064,6 +1076,7 @@ test('closing the Attention Center page closes its model exactly once', () => {
     root: rootElement,
     model,
     scopeSelection: emptyScopeSelection,
+    ownsModel: true,
   })
   mounted.close()
   mounted.close()

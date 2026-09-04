@@ -75,7 +75,9 @@ import type {
   RepositoryScope,
   RequestId,
   Scope,
+  StageRunId,
 } from './generated/contracts.js'
+import { matchesCanonicalSchema } from './generated/control-plane-client.js'
 import { QueryName } from './generated/contracts.js'
 import {
   projectionForSession,
@@ -84,6 +86,10 @@ import {
   type NavigationCapabilityProjection,
   type SurfaceCapability,
 } from './navigation-capability.js'
+import type {
+  AttentionNotificationControl,
+  AttentionNotificationMonitor,
+} from './attention-notifications.js'
 
 export interface WinWinCodeClientApplicationOptions {
   readonly serverUrl: string
@@ -140,6 +146,15 @@ function contractId(
 function routeParameters(hash: string): URLSearchParams {
   const query = hash.indexOf('?')
   return new URLSearchParams(query < 0 ? '' : hash.slice(query + 1))
+}
+
+/** A route stage-run identity that survives the canonical StageRun schema. */
+function canonicalStageRunParameter(parameters: URLSearchParams): StageRunId | null {
+  const values = parameters.getAll('stageRun')
+  const value = values.length === 1 ? values[0] : null
+  return value !== null && matchesCanonicalSchema('StageRunId', value)
+    ? value as StageRunId
+    : null
 }
 
 export {
@@ -214,6 +229,9 @@ export function mountWinWinCodeClient(
   let activeRouteReadOnly = false
   let revokedScopeIdentity: string | null = null
   let closed = false
+  // UI-506: one shell-owned notification monitor for the selected repository Scope.
+  let attentionMonitor: AttentionNotificationMonitor | null = null
+  let attentionMonitorScope: string | null = null
 
   function selectionIdentity(selection: ScopeRouteSelection): string {
     return [
@@ -488,6 +506,8 @@ export function mountWinWinCodeClient(
     }
     navigation.replaceChildren(...visible)
     navigation.dataset.deployment = projection.deployment
+    // Rebuilding the labels also rebuilds the badge, so it is re-applied here.
+    attentionMonitor?.applyBadge()
     return projection
   }
 
@@ -517,6 +537,7 @@ export function mountWinWinCodeClient(
     scopeSelectorPage?.close()
     scopeSelectorPage = null
     currentScopeResolution = null
+    closeAttentionMonitor()
     const scopeRevoked = element(document, 'p', 'wwc-scope-selector-access')
     scopeRevoked.setAttribute('role', 'alert')
     scopeRevoked.textContent = 'The current Scope authorization was revoked. Return to a safe entry and restore access.'
@@ -535,6 +556,59 @@ export function mountWinWinCodeClient(
       capability: 'disabled',
       reason: 'capability-denied',
     })
+  }
+
+  function closeAttentionMonitor(): void {
+    attentionMonitor?.close()
+    attentionMonitor = null
+    attentionMonitorScope = null
+  }
+
+  /** The shell-owned control the Attention Center consent button binds to. */
+  function notificationsControl(): { readonly notifications: AttentionNotificationControl } | {} {
+    return attentionMonitor === null ? {} : { notifications: attentionMonitor }
+  }
+
+  /**
+   * Keep exactly one shell-owned notification monitor for the selected
+   * repository Scope.  It opens no event subscription of its own, so the
+   * mounted feature routes keep their single event stream.
+   */
+  async function ensureAttentionMonitor(
+    generation: number,
+    actor: NonNullable<AuthSessionViewModel['state']['session']>['actor'],
+    scope: RepositoryScope,
+  ): Promise<void> {
+    const identity = selectionIdentity({
+      organizationId: scope.organizationId,
+      workspaceId: scope.workspaceId,
+      projectId: scope.projectId,
+      repositoryId: scope.repositoryId,
+    })
+    if (attentionMonitor !== null && attentionMonitorScope === identity) return
+    closeAttentionMonitor()
+    const badgeTarget = links.get('attention')
+    if (badgeTarget === undefined) return
+    const notifications = await import('./attention-notifications.js')
+    if (closed || generation !== renderGeneration) return
+    const monitor = notifications.createAttentionNotificationMonitor({
+      client: controlPlane,
+      actor,
+      scope,
+      nextRequestId: () => contractId('req', browser.crypto) as RequestId,
+      document: browser.document,
+      badgeTarget,
+      notifications: notifications.browserAttentionDesktopNotifications(browser),
+      onOpenTarget(hash) {
+        if (closed) return
+        browser.location.hash = hash
+        render()
+      },
+    })
+    monitor.subscribe(() => { updateNavigation() })
+    attentionMonitor = monitor
+    attentionMonitorScope = identity
+    await monitor.start()
   }
 
   function authenticatedRouteContext(): {
@@ -737,6 +811,7 @@ export function mountWinWinCodeClient(
       routeLoading('Loading session decisions…')
       try {
         const deliveryId = parameters.get('delivery') as DeliveryId | null
+        const stageRunId = canonicalStageRunParameter(parameters)
         const [{ createLocalDecisionsViewModel }, { mountLocalDecisionsPage }] = await Promise.all([
           import('./local-decisions-view-model.js'),
           import('./local-decisions-page.js'),
@@ -768,6 +843,25 @@ export function mountWinWinCodeClient(
           root: slot,
           model,
           readOnly: activeRouteReadOnly,
+          // The exact execution origin this decision came from, so handling the
+          // decision can return to the Task/StageRun that raised it.
+          ...(deliveryId === null || stageRunId === null
+            ? {}
+            : {
+                returnTarget: {
+                  hash: strongFlowRouteHash({
+                    deliveryId,
+                    productSessionId,
+                    stageRunId,
+                    candidatePath: null,
+                    candidateView: 'unified',
+                    comparison: { status: 'none' },
+                    evidenceTab: 'evidence',
+                    evidenceId: null,
+                  }, scopeSelectionFromHash(browser.location.hash)),
+                  label: 'Return to execution context',
+                },
+              }),
         })
       } catch (error) {
         if (closed || generation !== renderGeneration || controller.signal.aborted) return
@@ -798,6 +892,10 @@ export function mountWinWinCodeClient(
         root: slot,
         model,
         scopeSelection: scopeSelectionFromHash(browser.location.hash),
+        // The page owns the Attention Center snapshot; the shell notification
+        // monitor is a separate, lighter projection for badges and alerts.
+        ownsModel: true,
+        ...notificationsControl(),
         readOnly: activeRouteReadOnly,
       })
     } catch (error) {
@@ -1214,8 +1312,20 @@ export function mountWinWinCodeClient(
       else link.removeAttribute('aria-current')
     }
     if (routeAccessDenied) {
+      closeAttentionMonitor()
       routeDenied(capability)
       return
+    }
+    const monitorContext = currentScopeResolution
+    if (
+      authSession.state.status === 'signed-in'
+      && session !== null
+      && monitorContext?.status === 'selected'
+      && monitorContext.scope.kind === 'repository'
+    ) {
+      void ensureAttentionMonitor(generation, session.actor, monitorContext.scope).catch(() => {})
+    } else {
+      closeAttentionMonitor()
     }
     options.root.dispatchEvent(new CustomEvent('winwincode:surface-change', {
       detail: Object.freeze({
@@ -1256,6 +1366,8 @@ export function mountWinWinCodeClient(
 
   const onHashChange = () => { render() }
   const onOffline = () => { connection.offline() }
+  // Returning to the tab revalidates the badge so it never shows stale counts.
+  const onFocus = () => { void attentionMonitor?.refresh().catch(() => {}) }
   const onOnline = () => {
     queryCache.clear('reconnect')
     observedControlPlane.reconnectAll()
@@ -1271,6 +1383,7 @@ export function mountWinWinCodeClient(
   browser.addEventListener('hashchange', onHashChange)
   browser.addEventListener('offline', onOffline)
   browser.addEventListener('online', onOnline)
+  browser.addEventListener('focus', onFocus)
   browser.addEventListener('error', onWindowError)
   browser.addEventListener('unhandledrejection', onUnhandledRejection)
   const unsubscribeConnection = connection.subscribe(updateReliabilityViews)
@@ -1324,6 +1437,7 @@ export function mountWinWinCodeClient(
       browser.removeEventListener('hashchange', onHashChange)
       browser.removeEventListener('offline', onOffline)
       browser.removeEventListener('online', onOnline)
+      browser.removeEventListener('focus', onFocus)
       browser.removeEventListener('error', onWindowError)
       browser.removeEventListener('unhandledrejection', onUnhandledRejection)
       unsubscribeAuthSession()
@@ -1335,6 +1449,7 @@ export function mountWinWinCodeClient(
       scopeSelectorPage?.close()
       scopeSelectorPage = null
       currentScopeResolution = null
+      closeAttentionMonitor()
       readinessPage.close()
       readiness.close()
       authPage.close()

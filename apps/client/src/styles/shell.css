@@ -59,6 +59,28 @@
   cursor: not-allowed;
 }
 
+/* UI-506: navigation badge for entries that need the user. */
+.wwc-navigation-badge {
+  display: inline-block;
+  min-width: var(--wwc-space-4);
+  margin-left: var(--wwc-space-2);
+  padding: var(--wwc-space-0) var(--wwc-space-1);
+  border: var(--wwc-border-width) solid var(--wwc-color-on-header);
+  border-radius: var(--wwc-radius-lg);
+  background: var(--wwc-color-header-active);
+  color: var(--wwc-color-on-header);
+  font-size: var(--wwc-font-size-xs);
+  font-weight: var(--wwc-font-weight-strong);
+  line-height: var(--wwc-line-height-tight);
+  text-align: center;
+}
+
+@media (max-width: 48rem) {
+  .wwc-navigation-badge {
+    margin-left: var(--wwc-space-1);
+  }
+}
+
 .wwc-main {
   max-width: var(--wwc-content-max);
   margin: var(--wwc-space-0) auto;

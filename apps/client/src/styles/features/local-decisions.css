@@ -12,6 +12,17 @@
   grid-column: 1 / -1;
 }
 
+/* UI-506: return to the exact Task/StageRun that raised these decisions. */
+.wwc-local-decisions-return {
+  justify-self: start;
+  color: var(--wwc-color-action);
+  font-weight: var(--wwc-font-weight-medium);
+}
+
+.wwc-local-decisions-return[hidden] {
+  display: none;
+}
+
 .wwc-local-decisions-help {
   max-width: var(--wwc-readable-max);
   margin: var(--wwc-space-0);
@@ -116,6 +127,7 @@
   .wwc-local-decisions-help,
   .wwc-local-decisions-status,
   .wwc-local-decisions-error,
+  .wwc-local-decisions-return,
   .wwc-local-attention {
     grid-column: auto;
   }

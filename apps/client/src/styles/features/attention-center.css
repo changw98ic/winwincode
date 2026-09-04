@@ -77,3 +77,22 @@
   pointer-events: none;
   opacity: 0.6;
 }
+
+/* UI-506: the exact StageRun context that raised the decision. */
+.wwc-attention-card-origin {
+  color: var(--wwc-color-action);
+  font-weight: var(--wwc-font-weight-medium);
+}
+
+.wwc-attention-card-origin[hidden] {
+  display: none;
+}
+
+.wwc-attention-center-desktop-status {
+  margin: var(--wwc-space-2) var(--wwc-space-0) var(--wwc-space-0);
+  color: var(--wwc-color-text-secondary);
+}
+
+.wwc-attention-center-desktop-toggle {
+  margin-top: var(--wwc-space-2);
+}

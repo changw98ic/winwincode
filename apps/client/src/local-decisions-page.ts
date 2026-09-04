@@ -25,11 +25,19 @@ import type {
   LocalInputDecision,
 } from './local-decisions-view-model.js'
 
+/** UI-506 exact execution context that raised the decisions handled on this surface. */
+export interface LocalDecisionsReturnTarget {
+  readonly hash: string
+  readonly label: string
+}
+
 export interface LocalDecisionsPageOptions {
   readonly root: HTMLElement
   readonly model: LocalDecisionsViewModel
   /** Presentation-only capability; Server authorization remains authoritative. */
   readonly readOnly?: boolean
+  /** Present when the route names the StageRun that raised these decisions. */
+  readonly returnTarget?: LocalDecisionsReturnTarget
 }
 
 export interface LocalDecisionsPage {
@@ -313,9 +321,17 @@ export function mountLocalDecisionsPage(options: LocalDecisionsPageOptions): Loc
   inputsPanel.content.append(inputs, inputsEmpty.root)
   approvalsPanel.content.append(approvals, approvalsEmpty.root)
   attentionPanel.content.append(attention, attentionEmpty.root)
+  const returnLink = element(document, 'a', 'wwc-local-decisions-return')
+  returnLink.hidden = true
+  if (options.returnTarget !== undefined) {
+    returnLink.href = options.returnTarget.hash
+    returnLink.textContent = options.returnTarget.label
+    returnLink.hidden = false
+  }
   layout.append(
     heading,
     help,
+    returnLink,
     status,
     error,
     inputsSection,
