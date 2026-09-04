@@ -174,7 +174,7 @@ function conflictWarningIcon(document: Document, className: string): HTMLElement
 export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
   const document = options.root.ownerDocument
   const pageDraftScope = options.model.draftScope
-  const layout = element(document, 'main', 'wwc-settings')
+  const layout = element(document, 'section', 'wwc-settings')
   layout.dataset.wwcPage = 'management'
   const pageHeader = mountPageHeader({
     document,
@@ -182,7 +182,7 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
       title: 'Local Provider settings',
       eyebrow: 'Local control plane',
       description: 'Choose the default model route and manage write-only Credential references.',
-      headingLevel: 1,
+      headingLevel: 2,
       className: 'wwc-settings-heading',
     },
   })
@@ -234,6 +234,7 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
     document,
     props: {
       id: 'wwc-settings-route',
+      headingLevel: 3,
       title: 'Default model route',
       description: 'Select the Provider, model, Credential reference, and local Worker limit.',
       className: 'wwc-settings-route',
@@ -270,6 +271,7 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
     document,
     props: {
       id: 'wwc-settings-create-credential',
+      headingLevel: 3,
       title: 'Add Credential reference',
       description: 'The local secret-store locator is submitted once and is not shown again.',
       className: 'wwc-settings-create-credential',
@@ -301,6 +303,7 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
     document,
     props: {
       id: 'wwc-settings-credentials',
+      headingLevel: 3,
       title: 'Credential references',
       description: 'Only secret-safe lifecycle metadata is displayed.',
       className: 'wwc-settings-credentials',
@@ -317,6 +320,7 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
       title: 'No Credential references',
       detail: 'Add a write-only Credential reference before choosing a default model route.',
       className: 'wwc-settings-credential-empty',
+      headingLevel: 3,
     },
   })
   let closed = false
@@ -376,7 +380,6 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
 
   referencesHelp.textContent = 'Only secret-safe lifecycle metadata is displayed.'
   referencesHelp.hidden = true
-  references.setAttribute('aria-live', 'polite')
   referencesPanel.content.append(referencesHelp, references, referencesEmpty.root)
   layout.append(
     heading,

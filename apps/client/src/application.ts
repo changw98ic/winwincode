@@ -189,6 +189,7 @@ export function mountWinWinCodeClient(
   let lastKnownDiagnosticScope: unknown = null
   const shell = element(document, 'div', 'wwc-shell')
   const header = element(document, 'header', 'wwc-header')
+  const skipLink = element(document, 'a', 'wwc-skip-link')
   const brand = element(document, 'strong', 'wwc-brand')
   const navigation = element(document, 'nav', 'wwc-navigation')
   const authRoot = element(document, 'div', 'wwc-auth-session-root')
@@ -379,7 +380,18 @@ export function mountWinWinCodeClient(
   readOnlyNotice.setAttribute('role', 'status')
   readOnlyNotice.textContent = 'This product area is read-only. Write actions are unavailable, and Server authorization still applies to every request.'
   readOnlyNotice.hidden = true
-  slot.setAttribute('aria-live', 'polite')
+  // UI-604: the surface slot holds the whole mounted page.  Marking it as a live
+  // region queued every realtime DOM change for announcement and nested inside
+  // the page's own status regions, so the shell stays silent and each page keeps
+  // exactly one polite channel for its own status line.
+  skipLink.href = '#wwc-main'
+  skipLink.textContent = 'Skip to main content'
+  skipLink.addEventListener('click', event => {
+    event.preventDefault()
+    main.focus()
+  })
+  main.tabIndex = -1
+  main.id = 'wwc-main'
 
   for (const surface of CLIENT_SURFACES) {
     const link = element(document, 'a', 'wwc-navigation-link')
@@ -395,7 +407,7 @@ export function mountWinWinCodeClient(
     navigation.append(link)
   }
 
-  header.append(brand, navigation, authRoot)
+  header.append(skipLink, brand, navigation, authRoot)
   main.append(scopeRoot, readinessRoot, title, description, readOnlyNotice, errorBoundary.root, slot)
   shell.append(header, connectionBar.root, main)
   options.root.replaceChildren(shell)

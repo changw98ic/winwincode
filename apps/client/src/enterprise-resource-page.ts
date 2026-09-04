@@ -213,7 +213,7 @@ function enterprisePanel(
 ) {
   const panel = mountPanel({
     document,
-    props: { id, title, description, className },
+    props: { id, title, description, className, headingLevel: 3 },
   })
   panel.title.className = 'wwc-enterprise-section-heading'
   return panel
@@ -333,7 +333,7 @@ export function mountEnterpriseResourcePage(
   options: EnterpriseResourcePageOptions,
 ): EnterpriseResourcePage {
   const document = options.root.ownerDocument
-  const layout = element(document, 'main', 'wwc-enterprise-resources')
+  const layout = element(document, 'section', 'wwc-enterprise-resources')
   layout.dataset.wwcPage = 'management'
   const pageHeader = mountPageHeader({
     document,
@@ -341,7 +341,7 @@ export function mountEnterpriseResourcePage(
       title: 'Enterprise resources and access',
       eyebrow: 'Enterprise administration',
       description: 'Manage organizations, members, role assignments, projects, and repositories.',
-      headingLevel: 1,
+      headingLevel: 2,
       className: 'wwc-enterprise-resources-heading',
     },
   })
@@ -515,7 +515,6 @@ function createOrganizationSection(
   heading.textContent = 'Organizations'
   section.setAttribute('aria-labelledby', heading.id)
   areaStatus.setAttribute('aria-live', 'polite')
-  list.setAttribute('aria-live', 'polite')
   legend.textContent = 'Create or update organization'
   id.input.pattern = 'org_[0-9A-HJKMNP-TV-Z]{26}'
   save.type = 'submit'
@@ -633,7 +632,6 @@ function createMembershipSection(
   heading.textContent = 'Members'
   section.setAttribute('aria-labelledby', heading.id)
   areaStatus.setAttribute('aria-live', 'polite')
-  list.setAttribute('aria-live', 'polite')
   legend.textContent = 'Add or update member and role assignment'
   id.input.pattern = 'mbr_[0-9A-HJKMNP-TV-Z]{26}'
   actor.input.pattern = '(usr|svc|sys)_[0-9A-HJKMNP-TV-Z]{26}'
@@ -761,7 +759,7 @@ function createRoleSection(document: Document): RoleSection {
   heading.textContent = 'Teams and roles'
   section.setAttribute('aria-labelledby', heading.id)
   help.textContent = 'Teams are grouped from current member role assignments. Assign roles from the Members section.'
-  list.setAttribute('aria-live', 'polite')
+
   panel.content.append(help, list)
   return {
     section,
@@ -834,8 +832,8 @@ function createProjectSection(
   areaStatus.setAttribute('aria-live', 'polite')
   projectHeading.textContent = 'Projects'
   repositoryHeading.textContent = 'Repositories'
-  projectList.setAttribute('aria-live', 'polite')
-  repositoryList.setAttribute('aria-live', 'polite')
+
+
   legend.textContent = 'Create or update project or repository'
   projectId.input.pattern = 'prj_[0-9A-HJKMNP-TV-Z]{26}'
   repositoryId.input.required = false

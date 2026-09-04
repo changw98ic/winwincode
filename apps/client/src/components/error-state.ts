@@ -2,6 +2,8 @@
 
 import { assertMounted, removeNode, type MountedView } from './mounted-view.js'
 
+export type ErrorStateHeadingLevel = 2 | 3 | 4
+
 export interface ErrorStateProps {
   readonly title: string
   readonly message: string
@@ -9,6 +11,8 @@ export interface ErrorStateProps {
   readonly actions?: readonly HTMLElement[]
   readonly visible?: boolean
   readonly className?: string
+  /** UI-604: follow the level of the panel the state nests inside. */
+  readonly headingLevel?: ErrorStateHeadingLevel
 }
 
 export interface ErrorStateMountOptions {
@@ -29,7 +33,8 @@ export function mountErrorState(options: ErrorStateMountOptions): ErrorStateView
   const root = options.document.createElement('section')
   const icon = options.document.createElement('span')
   const content = options.document.createElement('div')
-  const title = options.document.createElement('h2')
+  const headingLevel = options.props.headingLevel ?? 2
+  const title = options.document.createElement(`h${String(headingLevel)}`) as HTMLHeadingElement
   const message = options.document.createElement('p')
   const detail = options.document.createElement('p')
   const actions = options.document.createElement('div')
@@ -51,6 +56,9 @@ export function mountErrorState(options: ErrorStateMountOptions): ErrorStateView
 
   function update(props: Readonly<ErrorStateProps>): void {
     assertMounted(open, 'ErrorState')
+    if ((props.headingLevel ?? 2) !== headingLevel) {
+      throw new Error('ErrorState headingLevel cannot change after mount.')
+    }
     root.className = props.className ?? 'wwc-error-state'
     root.hidden = props.visible === false
     title.textContent = props.title

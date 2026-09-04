@@ -525,6 +525,40 @@ test('the Diff search label uses its canonical presentation class', () => {
   assert.equal(findByClass(searchLabel, 'wwc-candidate-diff-search').tagName, 'INPUT')
 })
 
+test('UI-604 the Diff table names itself and labels its columns', () => {
+  const { viewer } = mountViewer()
+  const table = findByClass(viewer.root, 'wwc-candidate-diff-table')
+  assert.match(findByClass(table, 'wwc-candidate-diff-caption').textContent, /src\/app\.ts/u)
+  const headers = findAllByClass(
+    findByClass(table, 'wwc-candidate-diff-head'),
+    'wwc-candidate-diff-column',
+  )
+  assert.deepEqual(headers.map(header => header.textContent), [
+    'Old line',
+    'New line',
+    'Line content',
+  ])
+  for (const header of headers) {
+    assert.equal(header.tagName, 'TH')
+    assert.equal(header.getAttribute('scope'), 'col')
+  }
+})
+
+test('UI-604 the Diff header row follows the active layout', () => {
+  const { viewer } = mountViewer({ viewMode: 'side-by-side' })
+  const table = findByClass(viewer.root, 'wwc-candidate-diff-table')
+  assert.equal(table.getAttribute('data-columns'), '4')
+  assert.deepEqual(findAllByClass(
+    findByClass(table, 'wwc-candidate-diff-head'),
+    'wwc-candidate-diff-column',
+  ).map(header => header.textContent), [
+    'Old line',
+    'Removed content',
+    'New line',
+    'Added content',
+  ])
+})
+
 test('the viewer renders hunk headers, line numbers, and added or removed markers', () => {
   const { viewer } = mountViewer()
   const rows = rowNodes(viewer)

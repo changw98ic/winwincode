@@ -228,7 +228,7 @@ function updateCardContext(list: HTMLUListElement, entries: readonly string[]): 
 /** Mount the unified Attention Center: one filtered, ordered view of every pending decision. */
 export function mountAttentionCenterPage(options: AttentionCenterPageOptions): AttentionCenterPage {
   const document = options.root.ownerDocument
-  const layout = element(document, 'main', 'wwc-attention-center')
+  const layout = element(document, 'section', 'wwc-attention-center')
   layout.dataset.wwcPage = 'management'
   const pageHeader = mountPageHeader({
     document,
@@ -236,7 +236,7 @@ export function mountAttentionCenterPage(options: AttentionCenterPageOptions): A
       title: 'Attention Center',
       eyebrow: 'Every pending decision',
       description: 'Inputs, tool approvals, and business Attention across the current repository Scope.',
-      headingLevel: 1,
+      headingLevel: 2,
       className: 'wwc-attention-center-heading',
     },
   })
@@ -295,6 +295,7 @@ export function mountAttentionCenterPage(options: AttentionCenterPageOptions): A
     document,
     props: {
       id: 'wwc-attention-center-controls',
+      headingLevel: 3,
       title: 'Browse',
       description: 'Filter by type and order by urgency, newest, or soonest expiry.',
       className: 'wwc-attention-center-controls',
@@ -346,6 +347,7 @@ export function mountAttentionCenterPage(options: AttentionCenterPageOptions): A
     document,
     props: {
       id: 'wwc-attention-center-items',
+      headingLevel: 3,
       title: 'Pending items',
       description: 'Each card opens its authoritative decision or Delivery context.',
       className: 'wwc-attention-center-items',
@@ -359,10 +361,10 @@ export function mountAttentionCenterPage(options: AttentionCenterPageOptions): A
       title: 'Nothing needs a decision',
       detail: 'New inputs, tool approvals, and business Attention will appear here.',
       className: 'wwc-attention-center-empty',
+      headingLevel: 3,
     },
   })
   listPanel.content.append(cards, empty.root)
-  cards.setAttribute('aria-live', 'polite')
 
   layout.append(heading, status, refresh, error, controlsSection, listSection)
   options.root.replaceChildren(layout)
@@ -395,7 +397,7 @@ export function mountAttentionCenterPage(options: AttentionCenterPageOptions): A
     create(item: AttentionCenterItem) {
       const row = element(document, 'li', 'wwc-attention-card')
       const kind = element(document, 'span', 'wwc-attention-card-kind')
-      const title = element(document, 'h3', 'wwc-attention-card-title')
+      const title = element(document, 'h4', 'wwc-attention-card-title')
       const context = cardContext(document, ['', '', '', '', '', '', '', ''])
       const action = element(document, 'a', 'wwc-attention-card-action')
       row.append(kind, title, context, action)

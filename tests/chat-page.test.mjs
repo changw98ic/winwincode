@@ -264,9 +264,15 @@ class FakeElement {
   requestSubmit() {
     this.emit('submit')
   }
+
+  focus() {
+    this.ownerDocument.activeElement = this
+  }
 }
 
 class FakeDocument {
+  activeElement = null
+
   createElement(tagName) {
     return new FakeElement(this, tagName)
   }
@@ -603,6 +609,9 @@ test('Chat confirms one editable requirement draft before converting it to Stron
 
   const open = findByClass(rootElement, 'wwc-chat-convert-delivery')
   assert.equal(open.disabled, false)
+  assert.equal(open.getAttribute('aria-expanded'), 'false')
+  assert.notEqual(open.getAttribute('aria-controls'), null)
+  open.focus()
   open.emit('click')
   const form = findByClass(rootElement, 'wwc-chat-convert-form')
   const confirmationPanel = findByClass(rootElement, 'wwc-chat-convert')
@@ -618,6 +627,15 @@ test('Chat confirms one editable requirement draft before converting it to Stron
   const modelContext = findByClass(rootElement, 'wwc-chat-convert-model')
   const confirmation = findByClass(rootElement, 'wwc-chat-convert-confirm')
   assert.equal(confirmationPanel.hidden, false)
+  // UI-604: the confirmation is a named dialog that takes focus on open and
+  // hands it back to the trigger on Escape.
+  assert.equal(confirmationPanel.getAttribute('role'), 'dialog')
+  assert.equal(confirmationPanel.getAttribute('aria-modal'), 'false')
+  const labelledBy = confirmationPanel.getAttribute('aria-labelledby')
+  assert.equal(labelledBy, findByClass(rootElement, 'wwc-chat-convert-heading').id)
+  assert.equal(open.getAttribute('aria-expanded'), 'true')
+  assert.equal(open.getAttribute('aria-controls'), labelledBy)
+  assert.equal(document.activeElement, title)
   assert.equal(findByClass(rootElement, 'wwc-chat-convert-submit').disabled, false)
   assert.equal(title.value, 'Primary Chat')
   assert.equal(goal.value, 'Implement the requirement confirmed in this Chat.')
@@ -666,6 +684,13 @@ test('Chat confirms one editable requirement draft before converting it to Stron
   assert.equal(findByClass(rootElement, 'wwc-chat-convert-submit').disabled, true)
   findByClass(rootElement, 'wwc-chat-convert-cancel').emit('click')
   assert.deepEqual(deliveryCreator.calls.at(-1), ['cancelPending'])
+
+  const prevented = confirmationPanel.emit('keydown', { key: 'Escape', cancelable: true })
+  assert.equal(prevented, true)
+  assert.equal(confirmationPanel.hidden, true)
+  assert.equal(open.getAttribute('aria-expanded'), 'false')
+  assert.equal(document.activeElement, open)
+
   mounted.close()
   assert.deepEqual(deliveryCreator.calls.at(-1), ['close'])
 })

@@ -184,7 +184,7 @@ function attentionTypeLabel(item: LocalAttentionDecision): string {
 /** Mount secret-safe input, approval, and business Attention controls against one view-model. */
 export function mountLocalDecisionsPage(options: LocalDecisionsPageOptions): LocalDecisionsPage {
   const document = options.root.ownerDocument
-  const layout = element(document, 'main', 'wwc-local-decisions')
+  const layout = element(document, 'section', 'wwc-local-decisions')
   layout.dataset.wwcPage = 'management'
   const pageHeader = mountPageHeader({
     document,
@@ -192,7 +192,7 @@ export function mountLocalDecisionsPage(options: LocalDecisionsPageOptions): Loc
       title: 'Local decisions',
       eyebrow: 'Approvals and attention',
       description: 'Review pending inputs, tool approvals, and business Attention with current revision bindings.',
-      headingLevel: 1,
+      headingLevel: 2,
       className: 'wwc-local-decisions-heading',
     },
   })
@@ -242,6 +242,7 @@ export function mountLocalDecisionsPage(options: LocalDecisionsPageOptions): Loc
     document,
     props: {
       id: 'wwc-local-inputs',
+      headingLevel: 3,
       title: 'Pending inputs',
       description: 'Responses remain bound to the current ProductSession and execution identity.',
       className: 'wwc-local-inputs',
@@ -257,12 +258,14 @@ export function mountLocalDecisionsPage(options: LocalDecisionsPageOptions): Loc
       title: 'No pending inputs',
       detail: 'New input requests will appear here when a session needs a response.',
       className: 'wwc-local-input-empty',
+      headingLevel: 3,
     },
   })
   const approvalsPanel = mountPanel({
     document,
     props: {
       id: 'wwc-local-approvals',
+      headingLevel: 3,
       title: 'Tool approvals',
       description: 'Each decision is submitted with the current session identity and revision.',
       className: 'wwc-local-approvals',
@@ -278,12 +281,14 @@ export function mountLocalDecisionsPage(options: LocalDecisionsPageOptions): Loc
       title: 'No pending tool approvals',
       detail: 'Tool requests that require a decision will appear here.',
       className: 'wwc-local-approval-empty',
+      headingLevel: 3,
     },
   })
   const attentionPanel = mountPanel({
     document,
     props: {
       id: 'wwc-local-attention',
+      headingLevel: 3,
       title: 'Business Attention',
       description: 'Resolve Delivery questions and blockers against the current Delivery revision.',
       className: 'wwc-local-attention',
@@ -299,14 +304,12 @@ export function mountLocalDecisionsPage(options: LocalDecisionsPageOptions): Loc
       title: 'No open business Attention',
       detail: 'Delivery questions and blocking decisions will appear here.',
       className: 'wwc-local-attention-empty',
+      headingLevel: 3,
     },
   })
   let closed = false
 
   help.textContent = 'Inputs include exact current choices such as Plan Delta or Replan. Submitted responses are cleared immediately.'
-  inputs.setAttribute('aria-live', 'polite')
-  approvals.setAttribute('aria-live', 'polite')
-  attention.setAttribute('aria-live', 'polite')
   inputsPanel.content.append(inputs, inputsEmpty.root)
   approvalsPanel.content.append(approvals, approvalsEmpty.root)
   attentionPanel.content.append(attention, attentionEmpty.root)
