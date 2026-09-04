@@ -748,6 +748,32 @@ test('default route remains Chat while StrongFlow query routes stay on the advan
       + '&projectId=prj_00000000000000000000000001'
       + '&repositoryId=rep_00000000000000000000000001',
   )
+
+  const completeRoute = strongFlowRouteHash(
+    deliveryId,
+    'psn_00000000000000000000000002',
+    'run_00000000000000000000000003',
+    'src/current file.ts',
+    'side-by-side',
+    {
+      organizationId: 'org_00000000000000000000000001',
+      workspaceId: 'wsp_00000000000000000000000001',
+      projectId: 'prj_00000000000000000000000001',
+      repositoryId: 'rep_00000000000000000000000001',
+    },
+    {
+      taskId: 'task:history',
+      stageRunId: 'run_00000000000000000000000004',
+    },
+  )
+  const completeParameters = new URLSearchParams(completeRoute.split('?')[1])
+  assert.equal(completeParameters.get('file'), 'src/current file.ts')
+  assert.equal(completeParameters.get('view'), 'side-by-side')
+  assert.equal(completeParameters.get('repositoryId'), 'rep_00000000000000000000000001')
+  assert.equal(completeParameters.get('task'), 'task:history',
+    'Diff route updates must retain the selected historical Task')
+  assert.equal(completeParameters.get('run'), 'run_00000000000000000000000004',
+    'Diff route updates must retain the selected historical StageRun')
 })
 
 test('review controls send only current view-model decisions and disable while waiting', () => {
