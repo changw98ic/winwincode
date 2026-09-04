@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, open, readFile, rename, rm, stat, } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
-import { RUNTIME_EVENT_SCHEMA_VERSION, } from '@winwincode/contracts';
+import { RUNTIME_EVENT_SCHEMA_VERSION, } from '../../../packages/contracts/dist/index.js';
 export const RUNTIME_SESSION_LEDGER_SCHEMA_VERSION = 1;
 /** Visible failure at the durable DSH-to-kernel session mapping boundary. */
 export class RuntimeSessionLedgerError extends Error {

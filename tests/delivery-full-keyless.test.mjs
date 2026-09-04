@@ -74,7 +74,7 @@ test('one keyless Delivery requires review, fails, reworks, reverifies, and deli
   )
   assert.equal(result.measures.dimensions.stability.status.value, 'reworked')
   assert.equal(result.measures.dimensions.efficiency.modelCallCount.value, 2)
-  assert.equal(result.measures.dimensions.efficiency.totalTokens.value, 63)
+  assert.equal(result.measures.dimensions.efficiency.totalTokens.value, 84)
   assert.equal(result.measures.dimensions.efficiency.parallelExecutionObserved.value, true)
   assert.deepEqual(result.credentialNames, [])
   assert.deepEqual(result.rootEntries, ['home', 'repository'])

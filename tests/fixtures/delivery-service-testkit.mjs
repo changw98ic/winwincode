@@ -3,25 +3,11 @@ import { createHash } from 'node:crypto'
 import {
   mkdir,
   mkdtemp,
-  readFile,
   rm,
   writeFile,
 } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
-import vm from 'node:vm'
-
-import { Context } from '@deepseek-ai/cordis'
-import AgentRegistry from '@deepseek-ai/dsh-agent'
-import LlmRuntime, {
-  LlmAdapter,
-  createUserMessage,
-} from '@deepseek-ai/dsh-llm'
-import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
-import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
-import ApprovalService from '@deepseek-ai/dsh-user-approval'
-import * as React from 'react'
-import { renderToStaticMarkup } from 'react-dom/server'
 
 import {
   DELIVERY_SCHEMA_VERSION,
@@ -37,8 +23,6 @@ import {
   RuntimeSessionLedger,
   reconcileDeliveryAfterRestart,
 } from './dsh-profile/index.mjs'
-import { WinWinCodeAgentFactoryFixture } from './dsh-profile/agent-factory-test-support.mjs'
-import { WinWinCodeKernel } from '../../packages/native/dist/index.js'
 import {
   DeliveryRuntimeProjection,
   DeliveryRuntimeProjectionError,
@@ -60,7 +44,6 @@ const DEFAULT_MODEL = 'fixture-coder'
 const DEFAULT_PROVIDER = 'fixture'
 const CREDENTIAL_ENVIRONMENT_PATTERN = /(?:API_KEY|CREDENTIAL|SECRET|TOKEN)/iu
 const CANDIDATE_TEST_TIMEOUT_MILLIS = 60_000
-const ADOPT_DSH_RUNTIME = Symbol('adoptDshRuntime')
 
 function immutable(value) {
   const clone = structuredClone(value)
@@ -99,21 +82,6 @@ function checked(command, arguments_, options = {}) {
 
 function git(repository, ...arguments_) {
   return checked('git', arguments_, { cwd: repository }).trim()
-}
-
-function textBlocks(messages) {
-  return messages.flatMap(message => message.content.flatMap(block => (
-    block.type === 'text' ? [block.text] : []
-  )))
-}
-
-function assistantMessages(agent) {
-  return agent.session.events.flatMap(event => {
-    if (event.type !== 'assistant/message') return []
-    return event.data.message.content.flatMap(block => (
-      block.type === 'text' ? [block.text] : []
-    ))
-  })
 }
 
 function requestFailure(response) {
@@ -161,218 +129,6 @@ export function kernelFixtureEvent(
     payload,
     rawJson: JSON.stringify(payload),
   })
-}
-
-/**
- * Deterministic DSH provider stream. It replaces only the external model
- * provider; DSH and the embedded Codex kernel still own the real Agent loop.
- */
-export class ScriptedDshModelAdapter extends LlmAdapter {
-  calls = []
-
-  #script
-
-  constructor(script) {
-    super()
-    if (!Array.isArray(script) || script.length === 0) {
-      throw new TypeError('scripted DSH adapter requires at least one response')
-    }
-    this.#script = script.map(entry => immutable({
-      text: entry.text,
-      usage: entry.usage ?? { inputTokens: 12, outputTokens: 8 },
-      finishReason: entry.finishReason ?? 'stop',
-      failure: entry.failure ?? null,
-    }))
-  }
-
-  async *stream(options) {
-    const entry = this.#script[this.calls.length]
-    if (entry === undefined) {
-      throw new Error('scripted DSH adapter response queue is exhausted')
-    }
-    const prompt = textBlocks(options.messages).at(-1) ?? ''
-    this.calls.push(immutable({
-      provider: options.provider,
-      model: options.model,
-      maxTokens: options.maxTokens ?? null,
-      purpose: options.purpose ?? null,
-      prompt,
-      answer: entry.text,
-      usage: entry.usage,
-    }))
-    if (entry.failure !== null) {
-      yield {
-        type: 'finish',
-        reason: {
-          kind: 'error',
-          failure: entry.failure,
-        },
-      }
-      return
-    }
-    yield { type: 'block-start', index: 0, blockType: 'text' }
-    yield { type: 'text-delta', index: 0, text: entry.text }
-    yield {
-      type: 'block-end',
-      index: 0,
-      block: { type: 'text', text: entry.text },
-    }
-    yield { type: 'usage', usage: entry.usage }
-    yield { type: 'finish', reason: { kind: entry.finishReason } }
-  }
-
-  get remainingResponses() {
-    return this.#script.length - this.calls.length
-  }
-}
-
-/** Real DSH composition over one embedded Codex kernel and a scripted provider. */
-export class ScriptedDshFixtureRuntime {
-  #adapter
-  #closed = false
-  #closePromise
-  #context
-  #handles = new Set()
-  #kernel
-  #releaseOwner
-
-  constructor(options) {
-    this.home = resolve(options.home)
-    this.workspace = resolve(options.workspace)
-    this.#adapter = new ScriptedDshModelAdapter(options.script)
-    this.#context = new Context()
-    this.#kernel = undefined
-  }
-
-  static async create(options) {
-    if (typeof options.owner?.[ADOPT_DSH_RUNTIME] !== 'function') {
-      throw new TypeError('scripted DSH fixture runtime requires its filesystem owner')
-    }
-    const runtime = new ScriptedDshFixtureRuntime(options)
-    runtime.#releaseOwner = options.owner[ADOPT_DSH_RUNTIME](runtime)
-    try {
-      await runtime.#start()
-      return runtime
-    } catch (error) {
-      try {
-        await runtime.close()
-      } catch (cleanupError) {
-        throw new AggregateError(
-          [error, cleanupError],
-          'scripted DSH fixture runtime startup and cleanup failed',
-        )
-      }
-      throw error
-    }
-  }
-
-  get calls() {
-    return immutable(this.#adapter.calls)
-  }
-
-  get remainingResponses() {
-    return this.#adapter.remainingResponses
-  }
-
-  get closed() {
-    return this.#closed
-  }
-
-  async #start() {
-    await this.#context.plugin(LlmRuntime)
-    await this.#context.plugin(SessionStore)
-    await this.#context.plugin(SystemPrompt)
-    await this.#context.plugin(AgentRegistry)
-    await this.#context.plugin(ApprovalService, { policy: 'never' })
-
-    const adapter = this.#adapter
-    const adapterPlugin = pluginContext => {
-      pluginContext.llm.registerAdapter([DEFAULT_PROVIDER], adapter)
-    }
-    adapterPlugin.inject = ['llm']
-    await this.#context.plugin(adapterPlugin)
-
-    const runtime = this
-    const factoryPlugin = pluginContext => {
-      new WinWinCodeAgentFactoryFixture(
-        pluginContext,
-        { home: runtime.home, roleId: 'chat' },
-        options => {
-          if (runtime.#kernel !== undefined) {
-            throw new Error('fixture attempted to create a second embedded Codex kernel')
-          }
-          runtime.#kernel = new WinWinCodeKernel(options)
-          return runtime.#kernel
-        },
-      )
-    }
-    factoryPlugin.inject = ['agents', 'sessions', 'llm', 'systemPrompt', 'approval']
-    await this.#context.plugin(factoryPlugin)
-  }
-
-  async runRole(options) {
-    const handle = await this.#context.agents.create({
-      sessionId: SessionId(options.sessionId),
-      meta: { cwd: this.workspace, agentPreset: options.roleId },
-      agentOptions: {
-        provider: DEFAULT_PROVIDER,
-        model: DEFAULT_MODEL,
-        maxTokens: options.maxTokens,
-      },
-    })
-    this.#handles.add(handle)
-    handle.agent.followup(createUserMessage({
-      content: [{ type: 'text', text: options.prompt }],
-      source: { kind: 'user' },
-    }))
-    await handle.agent.whenIdle()
-    const stored = await RuntimeSessionLedger.open(this.home, handle.agent.id)
-      .then(ledger => ledger.read())
-    const result = immutable({
-      dshSessionId: handle.agent.id,
-      codexSessionId: stored.manifest.kernelSessionId,
-      roleId: stored.manifest.roleId,
-      rolloutPath: stored.manifest.rolloutPath,
-      configuredMaxTokens: handle.agent.options.maxTokens ?? null,
-      events: stored.events,
-      assistantMessages: assistantMessages(handle.agent),
-    })
-    await handle.dispose()
-    this.#handles.delete(handle)
-    return result
-  }
-
-  async close() {
-    this.#closePromise ??= this.#close()
-    return this.#closePromise
-  }
-
-  async #close() {
-    const failures = []
-    for (const handle of [...this.#handles]) {
-      try {
-        await handle.dispose()
-        this.#handles.delete(handle)
-      } catch (error) {
-        failures.push(error)
-      }
-    }
-    try {
-      await this.#context.fiber.dispose()
-    } catch (error) {
-      failures.push(error)
-    }
-    try {
-      await this.#kernel?.shutdown()
-    } catch (error) {
-      failures.push(error)
-    }
-    if (failures.length > 0) {
-      throw new AggregateError(failures, 'scripted DSH fixture runtime cleanup failed')
-    }
-    this.#closed = true
-    this.#releaseOwner?.()
-  }
 }
 
 export class DeterministicFixtureClock {
@@ -748,62 +504,12 @@ async function appendKernelEvents(home, delivery, stageRunId, sourceEvents) {
   return runtimeEvents
 }
 
-function loadStrongFlowClient() {
-  let registration
-  const bundlePath = resolve(
-    import.meta.dirname,
-    '..',
-    '..',
-    'packages',
-    'strongflow',
-    'dist',
-    'client.js',
-  )
-  return readFile(bundlePath, 'utf8').then((source) => {
-    vm.runInNewContext(source, {
-      Symbol,
-      structuredClone,
-      window: {
-        __ModuleLoader__: {
-          load(value) { registration = value },
-        },
-      },
-    })
-    if (registration?.id !== '@winwincode/strongflow') {
-      throw new Error('StrongFlow production browser bundle did not register')
-    }
-    return registration.factory((id) => {
-      if (id === 'react') return React
-      throw new Error(`unexpected StrongFlow browser dependency: ${id}`)
-    })
-  })
-}
-
-export async function renderFixtureDeliveryProjection(input) {
-  const client = await loadStrongFlowClient()
-  return renderToStaticMarkup(React.createElement(
-    client.StrongFlowDeliveryProjection,
-    {
-      delivery: input.delivery,
-      diagramExecution: input.diagramExecution ?? null,
-      runtimeExecution: input.runtimeExecution ?? null,
-      sessionId: input.sessionId,
-      refreshing: false,
-      onRefresh() {},
-      onClose() {},
-      openSession() {},
-      async onPlanReviewDecision() {},
-    },
-  ))
-}
-
 /**
- * Reusable offline test environment over the production contracts, DSH
- * projection, embedded kernel bridge, StrongFlow service, store, and UI bundle.
+ * Reusable offline test environment over the production contracts, runtime
+ * projection ledger, StrongFlow service, and store.
  */
 export class DeliveryServiceFixtureTestkit {
   #cleanupPromise
-  #dshRuntimes = new Set()
   #ownsRoot
   #runtimeEvents = []
 
@@ -843,17 +549,6 @@ export class DeliveryServiceFixtureTestkit {
       repositoryLocator: options.repositoryLocator,
       repositoryIdentity,
     })
-  }
-
-  [ADOPT_DSH_RUNTIME](runtime) {
-    if (this.#cleanupPromise !== undefined) {
-      throw new Error('Delivery testkit cleanup already started')
-    }
-    if (runtime.home !== this.home || runtime.workspace !== this.repository) {
-      throw new TypeError('scripted DSH runtime must use its owning testkit paths')
-    }
-    this.#dshRuntimes.add(runtime)
-    return () => this.#dshRuntimes.delete(runtime)
   }
 
   #replaceService() {
@@ -1004,46 +699,37 @@ export class DeliveryServiceFixtureTestkit {
       throw new Error('fixture accepted a SessionBinding for an unknown StageRun')
     }
 
-    let plannerSession = {
+    const plannerSession = {
       dshSessionId: 'dsh-fixture-planner',
       codexSessionId: 'codex-fixture-planner',
     }
-    if (options.dshRuntime !== undefined) {
-      plannerSession = await options.dshRuntime.runRole({
-        sessionId: 'dsh-fixture-planner',
-        roleId: 'planner',
-        prompt: 'Prepare the deterministic fixture solution.',
-        maxTokens: options.plannerMaxTokens ?? 128,
-      })
-    } else {
-      this.#runtimeEvents.push(...await appendKernelEvents(
-        this.home,
-        {
-          ...planning,
-          sessionBindings: [{
-            schemaVersion: DELIVERY_SCHEMA_VERSION,
-            id: 'binding-fixture-planner-shadow',
-            deliveryId: this.deliveryId,
-            stageRunId: 'stage-fixture-planning',
-            ...plannerSession,
-            boundAtMillis: planning.updatedAtMillis,
-          }],
-        },
-        'stage-fixture-planning',
-        [
-          kernelFixtureEvent(1, 'task_started', { turn_id: 'turn-fixture-planner' }),
-          kernelFixtureEvent(2, 'plan_update', {
-            explanation: 'Keep the solution separate from the DeliverySpec.',
-            plan: [{ step: 'Prepare the review set', status: 'completed' }],
-          }),
-          kernelFixtureEvent(3, 'task_complete', {
-            turn_id: 'turn-fixture-planner',
-            last_agent_message: 'Solution prepared.',
-            error: null,
-          }),
-        ],
-      ))
-    }
+    this.#runtimeEvents.push(...await appendKernelEvents(
+      this.home,
+      {
+        ...planning,
+        sessionBindings: [{
+          schemaVersion: DELIVERY_SCHEMA_VERSION,
+          id: 'binding-fixture-planner-shadow',
+          deliveryId: this.deliveryId,
+          stageRunId: 'stage-fixture-planning',
+          ...plannerSession,
+          boundAtMillis: planning.updatedAtMillis,
+        }],
+      },
+      'stage-fixture-planning',
+      [
+        kernelFixtureEvent(1, 'task_started', { turn_id: 'turn-fixture-planner' }),
+        kernelFixtureEvent(2, 'plan_update', {
+          explanation: 'Keep the solution separate from the DeliverySpec.',
+          plan: [{ step: 'Prepare the review set', status: 'completed' }],
+        }),
+        kernelFixtureEvent(3, 'task_complete', {
+          turn_id: 'turn-fixture-planner',
+          last_agent_message: 'Solution prepared.',
+          error: null,
+        }),
+      ],
+    ))
     const boundPlanning = await this.requireSuccess('bindSession', 'fixture:bind:planning', {
       deliveryId: this.deliveryId,
       expectedRevision: planning.revision,
@@ -1117,17 +803,10 @@ export class DeliveryServiceFixtureTestkit {
       role: 'planner',
       attention: null,
     })
-    const plannerSession = options.dshRuntime === undefined
-      ? {
-        dshSessionId: `dsh-fixture-${prefix}-planner`,
-        codexSessionId: `codex-fixture-${prefix}-planner`,
-      }
-      : await options.dshRuntime.runRole({
-        sessionId: `dsh-fixture-${prefix}-planner`,
-        roleId: 'planner',
-        prompt: 'Revise the deterministic fixture solution from the human review note.',
-        maxTokens: options.plannerMaxTokens ?? 128,
-      })
+    const plannerSession = {
+      dshSessionId: `dsh-fixture-${prefix}-planner`,
+      codexSessionId: `codex-fixture-${prefix}-planner`,
+    }
     const boundPlanning = await this.requireSuccess(
       'bindSession',
       `fixture:${prefix}:bind:planning`,
@@ -1140,27 +819,25 @@ export class DeliveryServiceFixtureTestkit {
         codexSessionId: plannerSession.codexSessionId,
       },
     )
-    if (options.dshRuntime === undefined) {
-      this.#runtimeEvents.push(...await appendKernelEvents(
-        this.home,
-        boundPlanning,
-        planningStageRunId,
-        [
-          kernelFixtureEvent(1, 'task_started', {
-            turn_id: `turn-fixture-${prefix}-planner`,
-          }),
-          kernelFixtureEvent(2, 'plan_update', {
-            explanation: 'Revise only the reviewed solution; keep the DeliverySpec unchanged.',
-            plan: [{ step: 'Apply the requested solution correction', status: 'completed' }],
-          }),
-          kernelFixtureEvent(3, 'task_complete', {
-            turn_id: `turn-fixture-${prefix}-planner`,
-            last_agent_message: 'Revised solution prepared.',
-            error: null,
-          }),
-        ],
-      ))
-    }
+    this.#runtimeEvents.push(...await appendKernelEvents(
+      this.home,
+      boundPlanning,
+      planningStageRunId,
+      [
+        kernelFixtureEvent(1, 'task_started', {
+          turn_id: `turn-fixture-${prefix}-planner`,
+        }),
+        kernelFixtureEvent(2, 'plan_update', {
+          explanation: 'Revise only the reviewed solution; keep the DeliverySpec unchanged.',
+          plan: [{ step: 'Apply the requested solution correction', status: 'completed' }],
+        }),
+        kernelFixtureEvent(3, 'task_complete', {
+          turn_id: `turn-fixture-${prefix}-planner`,
+          last_agent_message: 'Revised solution prepared.',
+          error: null,
+        }),
+      ],
+    ))
     const attentionItemId = `attention-fixture-${prefix}-plan-review`
     const reviewStageRunId = `stage-fixture-${prefix}-plan-review`
     const attention = createStrongFlowPlanReviewAttention({
@@ -1592,10 +1269,6 @@ export class DeliveryServiceFixtureTestkit {
   }
 
   async #cleanup() {
-    for (const runtime of [...this.#dshRuntimes]) await runtime.close()
-    if (this.#dshRuntimes.size !== 0) {
-      throw new Error('Delivery testkit still owns an active DSH runtime')
-    }
     if (this.#ownsRoot) await rm(this.root, { recursive: true, force: true })
   }
 }

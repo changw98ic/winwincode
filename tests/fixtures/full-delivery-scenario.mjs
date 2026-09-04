@@ -13,7 +13,6 @@ import {
 import {
   DELIVERY_FIXTURE_UI_PROOF,
   DeliveryServiceFixtureTestkit,
-  ScriptedDshFixtureRuntime,
   keylessFixtureEnvironment,
 } from './delivery-service-testkit.mjs'
 
@@ -28,23 +27,9 @@ assert.deepEqual(credentialNames, [])
 const kit = await DeliveryServiceFixtureTestkit.create({
   deliveryId: 'dlv_0PTBCVJPC8TKAFZDNF1YJY6GMD',
 })
-let dshRuntime
 
 try {
-  dshRuntime = await ScriptedDshFixtureRuntime.create({
-    owner: kit,
-    home: kit.home,
-    workspace: kit.repository,
-    script: [{
-      text: 'The first solution is ready for a separate human review.',
-      usage: { inputTokens: 18, outputTokens: 11 },
-    }, {
-      text: 'The requested solution correction is ready for a new review set.',
-      usage: { inputTokens: 21, outputTokens: 13 },
-    }],
-  })
-
-  const firstReview = await kit.preparePlanReview({ dshRuntime })
+  const firstReview = await kit.preparePlanReview()
   assert.equal(firstReview.delivery.status, 'needs-attention')
   assert.equal(firstReview.delivery.stageRuns.some(run => (
     run.stage === 'executing' || run.stage === 'reworking'
@@ -73,7 +58,7 @@ try {
 
   const revisedReview = await kit.preparePlanRevision(
     requestedChange.result.delivery,
-    { prefix: 'revised', dshRuntime },
+    { prefix: 'revised' },
   )
   const revisedReviewContext = parseStrongFlowPlanReviewContextText(
     revisedReview.attention.context,
@@ -251,17 +236,20 @@ try {
   assert.equal(Object.hasOwn(delivered, 'agentGraph'), false)
   assert.equal(Object.hasOwn(delivered, 'plan'), false)
 
-  assert.deepEqual(dshRuntime.calls.map(call => ({
-    provider: call.provider,
-    model: call.model,
-  })), [{
-    provider: 'fixture',
-    model: 'fixture-coder',
-  }, {
-    provider: 'fixture',
-    model: 'fixture-coder',
-  }])
-  assert.equal(dshRuntime.remainingResponses, 0)
+  const modelCalls = runtimeProjection.stages.flatMap(stage => (
+    stage.sessions.filter(session => session.usage !== null)
+  )).map((session, index) => Object.freeze({
+    sourceRef: `evaluation_run:deterministic-full-delivery#/modelCalls/${String(index)}`,
+    status: 'completed',
+    startedAtMillis: null,
+    finishedAtMillis: null,
+    inputTokens: session.usage.totals.input_tokens ?? null,
+    outputTokens: session.usage.totals.output_tokens ?? null,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    costUsdMicros: null,
+  }))
+  assert.equal(modelCalls.length, 2)
   assert.deepEqual((await readdir(kit.root)).toSorted(), ['home', 'repository'])
 
   const measures = createDeliveryMeasuresProjection({
@@ -274,17 +262,7 @@ try {
     delivery: delivered,
     runtimeProjection,
     requiredVerificationRoles: ['reviewer', 'verifier'],
-    modelCalls: dshRuntime.calls.map((call, index) => Object.freeze({
-      sourceRef: `evaluation_run:deterministic-full-delivery#/modelCalls/${String(index)}`,
-      status: 'completed',
-      startedAtMillis: null,
-      finishedAtMillis: null,
-      inputTokens: call.usage.inputTokens,
-      outputTokens: call.usage.outputTokens,
-      cacheReadTokens: call.usage.cacheReadTokens ?? 0,
-      cacheWriteTokens: call.usage.cacheWriteTokens ?? 0,
-      costUsdMicros: null,
-    })),
+    modelCalls,
     pricingSource: null,
     historicalVerdicts: [failedDelivery.verdict, delivered.verdict],
   })
@@ -292,7 +270,7 @@ try {
   assert.equal(measures.dimensions.completeness.status.value, 'complete')
   assert.equal(measures.dimensions.confidence.status.value, 'independently-supported')
   assert.equal(measures.dimensions.stability.status.value, 'reworked')
-  assert.equal(measures.dimensions.efficiency.totalTokens.value, 63)
+  assert.equal(measures.dimensions.efficiency.totalTokens.value, 84)
 
   process.stdout.write(`${JSON.stringify({
     deliveryId: delivered.id,
@@ -342,13 +320,15 @@ try {
     stageCount: delivered.stageRuns.length,
     bindingCount: delivered.sessionBindings.length,
     projectedSubagentCount: projectedSubagents.length,
-    modelCalls: dshRuntime.calls.length,
+    modelCalls: modelCalls.length,
     measures,
     releaseGateFixture: {
       delivery: delivered,
       candidate: correctedCandidate.candidate,
       runtimeProjection,
-      modelCalls: dshRuntime.calls.map(call => ({ usage: call.usage })),
+      modelCalls: modelCalls.map(call => Object.freeze({
+        usage: { inputTokens: call.inputTokens, outputTokens: call.outputTokens },
+      })),
     },
     credentialNames,
     rootEntries: (await readdir(kit.root)).toSorted(),

@@ -1,4 +1,4 @@
-import { RUNTIME_VERIFICATION_RESULT_PROTOCOL, RUNTIME_EVENT_SCHEMA_VERSION, runtimeEventId, } from '@winwincode/contracts';
+import { RUNTIME_VERIFICATION_RESULT_PROTOCOL, RUNTIME_EVENT_SCHEMA_VERSION, runtimeEventId, } from '../../../packages/contracts/dist/index.js';
 const DEFAULT_REMEMBERED_EVENT_LIMIT = 2_048;
 const MAX_REMEMBERED_EVENT_LIMIT = 65_536;
 /** Visible failure at the Codex-to-product projection boundary. */

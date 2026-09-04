@@ -1,5 +1,5 @@
-import { DeliveryId, } from '@winwincode/contracts';
-import { DeliveryRuntimeProjection, DeliveryStore, assertFrozenDeliveryCandidateCurrent, } from '@winwincode/strongflow';
+import { DeliveryId, } from '../../../packages/contracts/dist/index.js';
+import { DeliveryRuntimeProjection, DeliveryStore, assertFrozenDeliveryCandidateCurrent, } from '../../../packages/strongflow/dist/index.js';
 import { DshRuntimeProjection, } from './runtime-projection.mjs';
 import { RuntimeSessionLedger, } from './session-ledger.mjs';
 export const DELIVERY_RECOVERY_SCHEMA_VERSION = 1;

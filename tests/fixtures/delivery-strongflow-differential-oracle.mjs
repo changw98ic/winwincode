@@ -91,6 +91,20 @@ async function createScenarioContext(id) {
   return context
 }
 
+async function createReplayScenarioContext(id) {
+  const {
+    DeliveryRequestReplayFixture,
+  } = await import('./delivery-request-replay-fixture.mjs')
+  const kit = await DeliveryRequestReplayFixture.create({
+    deliveryId: oracleDeliveryId(id),
+    repositoryLocator: `/workspace/oracle/${id}`,
+  })
+  const commands = []
+  const context = { id, kit, commands }
+  attachRecordingInvoker(context)
+  return context
+}
+
 function attachRecordingInvoker(context) {
   const invoker = context.kit.invoker
   context.kit.invoker = Object.freeze({
@@ -211,7 +225,7 @@ async function successClosedLoopScenario() {
 }
 
 async function requestIdReplayScenario() {
-  const context = await createScenarioContext('request-id-replay')
+  const context = await createReplayScenarioContext('request-id-replay')
   try {
     const specification = context.kit.spec(1, 'replay')
     const payload = { spec: specification, tasks: [] }
