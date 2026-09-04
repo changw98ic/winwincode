@@ -12,6 +12,14 @@
 //! client and the control plane can adopt them independently. The wire
 //! encodings (for example the decimal-string occupancy fencing token) live
 //! in the [`wire`] module.
+//!
+//! On top of the frozen wire types, the [`exchange`] module is the
+//! transport-neutral exchange framework for the
+//! `POST /internal/v1/client/exchange` endpoint: bidirectional sequence
+//! allocation, contiguous acknowledgement advancement, gap detection with
+//! `replayFromSequence`, the durable outbox seam, deduplication and
+//! idempotency-conflict judgement, and the bounded envelope codec. It is a
+//! pure synchronous library: no IO and no async runtime.
 
 // The wire contract names many identifiers and brand words (`WinWinCode`,
 // `ClientControlPort`) that the `doc_markdown` lint would demand backticks
@@ -19,5 +27,6 @@
 #![allow(clippy::doc_markdown)]
 
 pub mod domain;
+pub mod exchange;
 pub mod messages;
 pub mod wire;
