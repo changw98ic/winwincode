@@ -17,6 +17,14 @@ import type {
   InteractiveInputValue,
 } from './generated/contracts.js'
 import { mountKeyedCollection, type KeyedCollectionView } from './components/keyed-collection.js'
+import {
+  approvalRiskDetail,
+  boundApprovalText,
+} from './approval-risk-detail.js'
+import {
+  mountApprovalRiskDetail,
+  type ApprovalRiskDetailView,
+} from './approval-risk-detail-view.js'
 import type {
   LocalApprovalDecision,
   LocalAttentionDecision,
@@ -502,6 +510,7 @@ export function mountLocalDecisionsPage(options: LocalDecisionsPageOptions): Loc
   interface ApprovalRow {
     current: LocalApprovalDecision
     readonly title: HTMLElement
+    readonly risk: ApprovalRiskDetailView
     readonly context: HTMLUListElement
     readonly reason: HTMLTextAreaElement
     readonly approve: HTMLButtonElement
@@ -517,6 +526,9 @@ export function mountLocalDecisionsPage(options: LocalDecisionsPageOptions): Loc
       const projection = item.projection
       const row = element(document, 'li', 'wwc-local-approval')
       const title = element(document, 'h3', 'wwc-local-approval-subject')
+      // The risk block sits before the decision form so the scope, expiry, and
+      // impact are already on screen when approve or reject is reached.
+      const risk = mountApprovalRiskDetail({ document })
       const context = decisionContext(document, ['', '', '', '', ''])
       const form = element(document, 'form', 'wwc-local-approval-form')
       const label = element(document, 'label', 'wwc-local-approval-reason-label')
@@ -557,10 +569,11 @@ export function mountLocalDecisionsPage(options: LocalDecisionsPageOptions): Loc
       label.append(reason)
       controls.append(approve, reject)
       form.append(label, controls)
-      row.append(title, context, form)
+      row.append(title, risk.root, context, form)
       approvalRows.set(row, {
         current: item,
         title,
+        risk,
         context,
         reason,
         approve,
@@ -578,8 +591,12 @@ export function mountLocalDecisionsPage(options: LocalDecisionsPageOptions): Loc
         options.model.state,
       ).decisionsDisabled || options.readOnly === true || item.expired
       mounted.current = item
-      mounted.title.textContent = projection.subject
+      mounted.title.textContent = boundApprovalText(projection.subject).text
       row.dataset.state = item.expired ? 'expired' : 'pending'
+      mounted.risk.update(approvalRiskDetail(projection, {
+        expired: item.expired,
+        nowMillis: Date.now,
+      }))
       updateDecisionContext(mounted.context, [
         approvalStateLabel(item),
         projection.binding.sessionIdentity.stageRunId === undefined
@@ -599,6 +616,7 @@ export function mountLocalDecisionsPage(options: LocalDecisionsPageOptions): Loc
       mounted.reason.value = ''
       mounted.approve.removeEventListener('click', mounted.onApprove)
       mounted.reject.removeEventListener('click', mounted.onReject)
+      mounted.risk.close()
       approvalRows.delete(row)
     },
   })

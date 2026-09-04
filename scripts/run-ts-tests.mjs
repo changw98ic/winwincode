@@ -20,6 +20,8 @@ const root = resolve(import.meta.dirname, '..')
 const canonicalTestFiles = Object.freeze([
   'tests/api-production-vertical-runner.test.mjs',
   'tests/architecture-documentation.test.mjs',
+  'tests/approval-risk-browser.test.mjs',
+  'tests/approval-risk-detail.test.mjs',
   'tests/attention-center-client.test.mjs',
   'tests/auth-session-client.test.mjs',
   'tests/chat-control-plane-integration.test.mjs',
