@@ -1,0 +1,17 @@
+{
+  "schemaVersion": "winwincode/v1",
+  "messageId": "msg_000000000000000000000022",
+  "clientNodeId": "cln_000000000000000000000001",
+  "clientInstanceId": "cli_000000000000000000000001",
+  "sequence": 906,
+  "occurredAt": "2026-09-01T09:39:00.000Z",
+  "kind": "client.repository.rescan",
+  "expectedRevision": 36,
+  "idempotencyKey": "idem-client-repository-rescan-0001",
+  "payload": {
+    "rescanId": "rsc_000000000000000000000001",
+    "repositoryBindingId": "rbd_000000000000000000000001",
+    "requestedByUserId": "usr_00000000000000000000000a",
+    "reason": "user_requested"
+  }
+}

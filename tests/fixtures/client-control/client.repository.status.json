@@ -1,0 +1,20 @@
+{
+  "schemaVersion": "winwincode/v1",
+  "messageId": "msg_000000000000000000000010",
+  "clientNodeId": "cln_000000000000000000000001",
+  "clientInstanceId": "cli_000000000000000000000001",
+  "sequence": 410,
+  "occurredAt": "2026-09-01T09:31:30.000Z",
+  "kind": "client.repository.status",
+  "expectedRevision": 36,
+  "idempotencyKey": "idem-client-repository-status-040930",
+  "payload": {
+    "repositoryBindingId": "rbd_000000000000000000000001",
+    "availability": "dirty",
+    "defaultBranch": "main",
+    "headCommit": "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0",
+    "dirtyState": true,
+    "lastScannedAt": "2026-09-01T09:31:28.000Z",
+    "detail": "Working tree has uncommitted changes."
+  }
+}

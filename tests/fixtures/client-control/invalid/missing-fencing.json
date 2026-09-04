@@ -1,0 +1,23 @@
+{
+  "name": "occupancy-class worker launch without lease id and fencing token",
+  "expectedViolations": [
+    "fencing.missing:occupancyFencingToken",
+    "fencing.missing:occupancyLeaseId"
+  ],
+  "envelope": {
+    "schemaVersion": "winwincode/v1",
+    "messageId": "msg_000000000000000000000901",
+    "clientNodeId": "cln_000000000000000000000001",
+    "clientInstanceId": "cli_000000000000000000000001",
+    "sequence": 907,
+    "occurredAt": "2026-09-01T09:31:18.000Z",
+    "kind": "client.worker.launch",
+    "expectedRevision": 15,
+    "idempotencyKey": "idem-client-worker-launch-invalid-0001",
+    "payload": {
+      "workerLaunchGrantId": "wlg_000000000000000000000001",
+      "repositoryBindingId": "rbd_000000000000000000000001",
+      "workerSessionId": "wks_000000000000000000000001"
+    }
+  }
+}

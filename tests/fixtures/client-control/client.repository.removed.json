@@ -1,0 +1,16 @@
+{
+  "schemaVersion": "winwincode/v1",
+  "messageId": "msg_000000000000000000000009",
+  "clientNodeId": "cln_000000000000000000000001",
+  "clientInstanceId": "cli_000000000000000000000001",
+  "sequence": 409,
+  "occurredAt": "2026-09-01T09:31:25.000Z",
+  "kind": "client.repository.removed",
+  "expectedRevision": 35,
+  "idempotencyKey": "idem-client-repository-removed-0001",
+  "payload": {
+    "repositoryBindingId": "rbd_000000000000000000000001",
+    "reason": "user_removed",
+    "removedAt": "2026-09-01T09:31:25.000Z"
+  }
+}
