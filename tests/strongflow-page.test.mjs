@@ -615,7 +615,7 @@ test('workspace renders Delivery, solution, execution, candidate, Evidence, Verd
   const rootElement = document.createElement('main')
   const model = new FakeStrongFlowViewModel(state())
   const evidenceOptions = pageEvidenceOptions()
-  const mounted = ({
+  const mounted = mountStrongFlowPage({
     root: rootElement,
     model,
     deliveryList: fakeDeliveryList(many(5, deliverySummary)),
@@ -747,7 +747,7 @@ test('Candidate workspace renders a bounded searchable tree and linked Diff with
   }
   const model = new FakeStrongFlowViewModel(candidateState)
   const viewModeChanges = []
-  const mounted = ({
+  const mounted = mountStrongFlowPage({
     root: rootElement,
     model,
     deliveryList: fakeDeliveryList([]),
@@ -1153,7 +1153,7 @@ test('review controls send only current view-model decisions and disable while w
   const current = projection()
   current.solutionReview.reviewStatus = 'pending'
   const model = new FakeStrongFlowViewModel(state({ projection: current }))
-  const mounted = ({
+  const mounted = mountStrongFlowPage({
     root: rootElement,
     model,
     deliveryList: fakeDeliveryList([]),
@@ -1184,7 +1184,7 @@ test('read-only StrongFlow keeps the snapshot visible and blocks review decision
   const current = projection()
   current.solutionReview.reviewStatus = 'pending'
   const model = new FakeStrongFlowViewModel(state({ projection: current }))
-  const mounted = ({ root: rootElement, model, deliveryList: fakeDeliveryList([]), limits, readOnly: true })
+  const mounted = mountStrongFlowPage({ root: rootElement, model, deliveryList: fakeDeliveryList([]), limits, readOnly: true })
   const approve = findByClass(rootElement, 'wwc-strongflow-approve-solution')
   assert.equal(approve.disabled, true)
   approve.emit('click')
@@ -1233,7 +1233,7 @@ test('StrongFlow keyed updates retain workspace, review drafts, focus, scroll, a
   const current = projection()
   current.solutionReview.reviewStatus = 'pending'
   const model = new FakeStrongFlowViewModel(state({ projection: current }))
-  const mounted = ({
+  const mounted = mountStrongFlowPage({
     root: rootElement,
     model,
     deliveryList: fakeDeliveryList(many(5, deliverySummary)),
@@ -1300,7 +1300,7 @@ test('StrongFlow review isolates its draft, exposes revision changes, and submit
   const current = projection()
   current.solutionReview.reviewStatus = 'pending'
   const model = new FakeStrongFlowViewModel(state({ projection: current }))
-  const mounted = ({ root: rootElement, model, deliveryList: fakeDeliveryList([]), limits })
+  const mounted = mountStrongFlowPage({ root: rootElement, model, deliveryList: fakeDeliveryList([]), limits })
   const actions = findByClass(rootElement, 'wwc-strongflow-solution-actions')
   const comments = actions.children[0].children[0]
   const changes = actions.children[1].children[0]
@@ -1365,7 +1365,7 @@ test('StrongFlow review draft is isolated by Candidate identity, not only its Di
   const current = projection()
   current.solutionReview.reviewStatus = 'pending'
   const model = new FakeStrongFlowViewModel(state({ projection: current }))
-  const mounted = ({ root: rootElement, model, deliveryList: fakeDeliveryList([]), limits })
+  const mounted = mountStrongFlowPage({ root: rootElement, model, deliveryList: fakeDeliveryList([]), limits })
   const comments = findByClass(rootElement, 'wwc-strongflow-solution-actions').children[0].children[0]
   comments.value = 'draft for candidate one'
   comments.emit('input')
@@ -1385,7 +1385,7 @@ test('an accepted StrongFlow review stays in flight across an unrelated event sn
   const current = projection()
   current.solutionReview.reviewStatus = 'pending'
   const model = new FakeStrongFlowViewModel(state({ projection: current }))
-  const mounted = ({ root: rootElement, model, deliveryList: fakeDeliveryList([]), limits })
+  const mounted = mountStrongFlowPage({ root: rootElement, model, deliveryList: fakeDeliveryList([]), limits })
   const comments = findByClass(rootElement, 'wwc-strongflow-solution-actions').children[0].children[0]
   const approve = findByClass(rootElement, 'wwc-strongflow-approve-solution')
   comments.value = 'one accepted review'
@@ -1413,7 +1413,7 @@ test('an accepted Attention decision stays in flight across an unrelated event s
   const rootElement = document.createElement('main')
   const current = projection()
   const model = new FakeStrongFlowViewModel(state({ projection: current }))
-  const mounted = ({ root: rootElement, model, deliveryList: fakeDeliveryList([]), limits })
+  const mounted = mountStrongFlowPage({ root: rootElement, model, deliveryList: fakeDeliveryList([]), limits })
   const resolution = findByClass(rootElement, 'wwc-strongflow-attention-actions').children[1].children[0]
   const resolve = findByClass(rootElement, 'wwc-strongflow-resolve-attention')
   resolution.value = 'accepted Attention decision'
@@ -1441,7 +1441,7 @@ test('Attention decision drafts keep exact submissions and clear with their enti
   const rootElement = document.createElement('main')
   const current = projection()
   const model = new FakeStrongFlowViewModel(state({ projection: current }))
-  const mounted = ({ root: rootElement, model, deliveryList: fakeDeliveryList([]), limits })
+  const mounted = mountStrongFlowPage({ root: rootElement, model, deliveryList: fakeDeliveryList([]), limits })
   const group = findByClass(rootElement, 'wwc-strongflow-attention-actions')
   const resolution = group.children[1].children[0]
   resolution.value = 'browser Attention decision'
@@ -1499,7 +1499,7 @@ test('verdict control stays hidden until all active StageRuns settle', () => {
   const current = projection()
   current.verdict = null
   const model = new FakeStrongFlowViewModel(state({ projection: current }))
-  const mounted = ({
+  const mounted = mountStrongFlowPage({
     root: rootElement,
     model,
     deliveryList: fakeDeliveryList([]),
@@ -1542,7 +1542,7 @@ test('the Delivery panel serves the paginated list model with its toolbar and vi
   const rootElement = document.createElement('main')
   const model = new FakeStrongFlowViewModel(state())
   const deliveryList = fakeDeliveryList(many(5, deliverySummary))
-  const mounted = ({
+  const mounted = mountStrongFlowPage({
     root: rootElement,
     model,
     deliveryList,
@@ -1566,7 +1566,7 @@ test('one realtime reload edge refreshes the Delivery list once per event batch'
   const rootElement = document.createElement('main')
   const model = new FakeStrongFlowViewModel(state())
   const deliveryList = fakeDeliveryList(many(2, deliverySummary))
-  const mounted = ({
+  const mounted = mountStrongFlowPage({
     root: rootElement,
     model,
     deliveryList,
@@ -1590,7 +1590,7 @@ test('the open Delivery stays listed with its exact identity while the list relo
   const rootElement = document.createElement('main')
   const model = new FakeStrongFlowViewModel(state())
   const deliveryList = fakeDeliveryList(many(3, deliverySummary).slice(1))
-  const mounted = ({
+  const mounted = mountStrongFlowPage({
     root: rootElement,
     model,
     deliveryList,
@@ -1618,7 +1618,7 @@ test('the Delivery view choice persists as a browser preference only', () => {
   const document = new FakeDocument()
   const rootElement = document.createElement('main')
   const model = new FakeStrongFlowViewModel(state())
-  const mounted = ({
+  const mounted = mountStrongFlowPage({
     root: rootElement,
     model,
     deliveryList: fakeDeliveryList(many(2, deliverySummary)),
