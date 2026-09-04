@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import type { StrongFlowDeliveryListView } from './strongflow-delivery-list-page.js'
+
 /** Pane sizes are a browser preference: they never enter the Delivery or Control Plane state. */
 export interface StrongFlowLayoutPreferences {
   /** Navigation pane width as a percentage of the workspace, clamped to [18, 45]. */
@@ -9,6 +11,7 @@ export interface StrongFlowLayoutPreferences {
   readonly navigationCollapsed: boolean
   readonly contextCollapsed: boolean
   readonly artifactsTab: StrongFlowArtifactsTab
+  readonly deliveriesView: StrongFlowDeliveryListView
 }
 
 export type StrongFlowArtifactsTab = 'solution' | 'execution' | 'candidate' | 'evidence'
@@ -22,12 +25,15 @@ export const STRONGFLOW_ARTIFACTS_TABS: readonly StrongFlowArtifactsTab[] = Obje
   'evidence',
 ])
 
+const DELIVERIES_VIEWS: readonly StrongFlowDeliveryListView[] = Object.freeze(['list', 'kanban'])
+
 export const DEFAULT_STRONGFLOW_LAYOUT: StrongFlowLayoutPreferences = Object.freeze({
   navigationWidth: 22,
   contextWidth: 30,
   navigationCollapsed: false,
   contextCollapsed: false,
   artifactsTab: 'solution',
+  deliveriesView: 'list',
 })
 
 const MIN_PANE_WIDTH = 18
@@ -48,6 +54,7 @@ export function normalizeStrongFlowLayoutPreferences(
   const navigationWidth = clampPaneWidth(record.navigationWidth)
   const contextWidth = clampPaneWidth(record.contextWidth)
   const artifactsTab = STRONGFLOW_ARTIFACTS_TABS.find(tab => tab === record.artifactsTab)
+  const deliveriesView = DELIVERIES_VIEWS.find(view => view === record.deliveriesView)
   return Object.freeze({
     navigationWidth: navigationWidth ?? DEFAULT_STRONGFLOW_LAYOUT.navigationWidth,
     contextWidth: contextWidth ?? DEFAULT_STRONGFLOW_LAYOUT.contextWidth,
@@ -56,6 +63,7 @@ export function normalizeStrongFlowLayoutPreferences(
     contextCollapsed: record.contextCollapsed === true
       || record.contextCollapsed === 'yes',
     artifactsTab: artifactsTab ?? DEFAULT_STRONGFLOW_LAYOUT.artifactsTab,
+    deliveriesView: deliveriesView ?? DEFAULT_STRONGFLOW_LAYOUT.deliveriesView,
   })
 }
 
@@ -105,4 +113,5 @@ function sameLayout(
     && left.navigationCollapsed === right.navigationCollapsed
     && left.contextCollapsed === right.contextCollapsed
     && left.artifactsTab === right.artifactsTab
+    && left.deliveriesView === right.deliveriesView
 }

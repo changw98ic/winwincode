@@ -244,6 +244,49 @@ function findByClass(node, className) {
   return null
 }
 
+class FakeDeliveryListModel {
+  constructor(visible) {
+    this.state = {
+      status: 'ready',
+      filters: { search: '', status: null, attentionOnly: false, order: 'recent' },
+      visible,
+      loadedCount: visible.length,
+      hasMore: false,
+      loadingMore: false,
+      moreFailure: null,
+      error: null,
+      advance: { deliveryId: null, failure: null },
+    }
+  }
+
+  calls = []
+  listener = null
+
+  subscribe(listener) {
+    this.listener = listener
+    listener(this.state)
+    return () => { this.listener = null }
+  }
+
+  publish(next) {
+    this.state = next
+    this.listener?.(next)
+  }
+
+  async refresh() { this.calls.push(['refresh']) }
+  async loadMore() { this.calls.push(['loadMore']) }
+  setSearch(value) { this.calls.push(['setSearch', value]) }
+  async setStatusFilter(value) { this.calls.push(['setStatusFilter', value]) }
+  setAttentionOnly(value) { this.calls.push(['setAttentionOnly', value]) }
+  setOrder(value) { this.calls.push(['setOrder', value]) }
+  async advanceDelivery(id, revision) { this.calls.push(['advanceDelivery', id, revision]) }
+  close() { this.calls.push(['close']) }
+}
+
+function fakeDeliveryList(visible) {
+  return new FakeDeliveryListModel(visible)
+}
+
 class FakeStrongFlowViewModel {
   constructor(initialState) { this.state = initialState }
 
@@ -275,7 +318,7 @@ class FakeStrongFlowViewModel {
 }
 
 const limits = {
-  deliveries: 2, tasks: 2, stages: 2, attention: 2, evidence: 2,
+  tasks: 2, stages: 2, attention: 2, evidence: 2,
   runtimeSessions: 2, graphNodes: 2, graphEdges: 2, activities: 2,
 }
 
@@ -314,7 +357,7 @@ test('UI-601: realtime event reload keeps the solution review draft and Diff Vie
   const document = new FakeDocument()
   const root = document.createElement('main')
   const model = new FakeStrongFlowViewModel(state())
-  const mounted = page.mountStrongFlowPage({ root, model, limits })
+  const mounted = page.mountStrongFlowPage({ root, model, deliveryList: fakeDeliveryList([]), limits })
   const actions = findByClass(root, 'wwc-strongflow-solution-actions')
   const comments = actions.children[0].children[0]
   const changes = actions.children[1].children[0]
@@ -365,7 +408,7 @@ test('UI-601: repeated realtime events keep DOM node identity bounded to one reb
   const document = new FakeDocument()
   const root = document.createElement('main')
   const model = new FakeStrongFlowViewModel(state())
-  const mounted = page.mountStrongFlowPage({ root, model, limits })
+  const mounted = page.mountStrongFlowPage({ root, model, deliveryList: fakeDeliveryList([]), limits })
   const distinctCandidates = new Set()
   const distinctDiagrams = new Set()
   for (let index = 0; index < 20; index += 1) {
@@ -398,7 +441,7 @@ test('UI-601: mounted artifact views retain identity while their content changes
   const document = new FakeDocument()
   const root = document.createElement('main')
   const model = new FakeStrongFlowViewModel(state())
-  const mounted = page.mountStrongFlowPage({ root, model, limits })
+  const mounted = page.mountStrongFlowPage({ root, model, deliveryList: fakeDeliveryList([]), limits })
   const actions = findByClass(root, 'wwc-strongflow-solution-actions')
   const comments = actions.children[0].children[0]
   const candidateBefore = findByClass(root, 'wwc-strongflow-view-candidate')

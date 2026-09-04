@@ -73,6 +73,7 @@ test('layout preferences default to an expanded three-pane desktop workbench', (
     navigationCollapsed: false,
     contextCollapsed: false,
     artifactsTab: 'solution',
+    deliveriesView: 'list',
   })
 })
 
@@ -91,6 +92,7 @@ test('normalization clamps pane widths and canonicalizes tabs and collapse flags
     navigationCollapsed: true,
     contextCollapsed: false,
     artifactsTab: 'evidence',
+    deliveriesView: 'list',
   })
   assert.deepEqual(normalizeStrongFlowLayoutPreferences({
     navigationWidth: 12,
@@ -99,6 +101,15 @@ test('normalization clamps pane widths and canonicalizes tabs and collapse flags
     ...DEFAULT_STRONGFLOW_LAYOUT,
     navigationWidth: 18,
   })
+  assert.deepEqual(
+    normalizeStrongFlowLayoutPreferences({ deliveriesView: 'kanban' }).deliveriesView,
+    'kanban',
+  )
+  assert.deepEqual(
+    normalizeStrongFlowLayoutPreferences({ deliveriesView: 'grid' }).deliveriesView,
+    'list',
+    'an unknown Delivery view falls back to the list view',
+  )
 })
 
 test('preferences round-trip through localStorage under one canonical key', () => {

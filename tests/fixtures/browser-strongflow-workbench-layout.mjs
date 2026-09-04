@@ -157,16 +157,55 @@ class BrowserStrongFlowModel {
 }
 
 const model = new BrowserStrongFlowModel()
+const deliveryList = {
+  state: {
+    status: 'ready',
+    filters: { search: '', status: null, attentionOnly: false, order: 'recent' },
+    visible: [{
+      schemaVersion: 'winwincode/v1',
+      deliveryId,
+      title: 'Real browser StrongFlow workbench',
+      revision: 4,
+      status: 'executing',
+      updatedAt: '2026-09-02T08:12:30.000Z',
+      openAttentionCount: 0,
+      activeStageRunId: null,
+      ownership: projection.delivery.ownership,
+      taskCounts: {
+        total: 0,
+        pending: 0,
+        active: 0,
+        blocked: 0,
+        verifying: 0,
+        completed: 0,
+        failed: 0,
+      },
+    }],
+    loadedCount: 1,
+    hasMore: false,
+    loadingMore: false,
+    moreFailure: null,
+    error: null,
+    advance: { deliveryId: null, failure: null },
+  },
+  subscribe(listener) {
+    listener(this.state)
+    return () => {}
+  },
+  async start() {},
+  async refresh() {},
+  async loadMore() {},
+  setSearch() {},
+  async setStatusFilter() {},
+  setAttentionOnly() {},
+  setOrder() {},
+  async advanceDelivery() {},
+  close() {},
+}
 const mounted = mountStrongFlowPage({
   root,
   model,
-  deliveries: [{
-    schemaVersion: 'winwincode/v1',
-    deliveryId,
-    title: 'Real browser StrongFlow workbench',
-    revision: 4,
-    status: 'executing',
-  }],
+  deliveryList,
 })
 
 function visible(element) {

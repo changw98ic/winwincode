@@ -190,7 +190,33 @@ const model = {
 }
 
 const root = document.querySelector('[data-winwincode-client-root]')
-const mounted = mountStrongFlowPage({ root, model })
+const deliveryList = {
+  state: {
+    status: 'ready',
+    filters: { search: '', status: null, attentionOnly: false, order: 'recent' },
+    visible: [],
+    loadedCount: 0,
+    hasMore: false,
+    loadingMore: false,
+    moreFailure: null,
+    error: null,
+    advance: { deliveryId: null, failure: null },
+  },
+  subscribe(listener) {
+    listener(this.state)
+    return () => {}
+  },
+  async start() {},
+  async refresh() {},
+  async loadMore() {},
+  setSearch() {},
+  async setStatusFilter() {},
+  setAttentionOnly() {},
+  setOrder() {},
+  async advanceDelivery() {},
+  close() {},
+}
+const mounted = mountStrongFlowPage({ root, model, deliveryList })
 
 function visibleRows() {
   return [...document.querySelectorAll('.wwc-candidate-file-row')]

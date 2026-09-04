@@ -858,6 +858,49 @@ function state(overrides = {}) {
   }
 }
 
+class FakeDeliveryListModel {
+  constructor(visible) {
+    this.state = {
+      status: 'ready',
+      filters: { search: '', status: null, attentionOnly: false, order: 'recent' },
+      visible,
+      loadedCount: visible.length,
+      hasMore: false,
+      loadingMore: false,
+      moreFailure: null,
+      error: null,
+      advance: { deliveryId: null, failure: null },
+    }
+  }
+
+  calls = []
+  listener = null
+
+  subscribe(listener) {
+    this.listener = listener
+    listener(this.state)
+    return () => { this.listener = null }
+  }
+
+  publish(next) {
+    this.state = next
+    this.listener?.(next)
+  }
+
+  async refresh() { this.calls.push(['refresh']) }
+  async loadMore() { this.calls.push(['loadMore']) }
+  setSearch(value) { this.calls.push(['setSearch', value]) }
+  async setStatusFilter(value) { this.calls.push(['setStatusFilter', value]) }
+  setAttentionOnly(value) { this.calls.push(['setAttentionOnly', value]) }
+  setOrder(value) { this.calls.push(['setOrder', value]) }
+  async advanceDelivery(id, revision) { this.calls.push(['advanceDelivery', id, revision]) }
+  close() { this.calls.push(['close']) }
+}
+
+function fakeDeliveryList(visible) {
+  return new FakeDeliveryListModel(visible)
+}
+
 class FakeStrongFlowViewModel {
   constructor(initialState) {
     this.state = initialState
@@ -926,6 +969,7 @@ test('the page mounts both solution graphs with state chips inside the solution 
   const rootElement = document.createElement('main')
   const model = new FakeStrongFlowViewModel(state())
   const mounted = mountStrongFlowPage({
+    deliveryList: fakeDeliveryList([]),
     root: rootElement,
     model,
     deliveries: [],
@@ -1030,6 +1074,7 @@ test('canonical diagram execution state reaches matching graph nodes as a text s
   }
   const model = new FakeStrongFlowViewModel(state({ projection: current }))
   const mounted = mountStrongFlowPage({
+    deliveryList: fakeDeliveryList([]),
     root: rootElement,
     model,
     deliveries: [],
@@ -1152,6 +1197,7 @@ test('node selection links only exact canonical Task Attention Diff and Evidence
   }
   const model = new FakeStrongFlowViewModel(state({ projection: current }))
   const mounted = mountStrongFlowPage({
+    deliveryList: fakeDeliveryList([]),
     root: rootElement,
     model,
     deliveries: [],
@@ -1288,6 +1334,7 @@ test('a missing solution review exposes only the empty state and resets graph ch
   const withoutReview = projection({ solutionReview: null })
   const model = new FakeStrongFlowViewModel(state({ projection: withoutReview }))
   const mounted = mountStrongFlowPage({
+    deliveryList: fakeDeliveryList([]),
     root: rootElement,
     model,
     deliveries: [],
@@ -1311,6 +1358,7 @@ test('two hundred runtime snapshots keep graph state and isolated session partit
   const rootElement = document.createElement('main')
   const model = new FakeStrongFlowViewModel(state())
   const mounted = mountStrongFlowPage({
+    deliveryList: fakeDeliveryList([]),
     root: rootElement,
     model,
     deliveries: [],
@@ -1377,6 +1425,7 @@ test('two hundred unrelated runtime snapshots perform zero graph DOM writes', ()
   const rootElement = document.createElement('main')
   const model = new FakeStrongFlowViewModel(state())
   const mounted = mountStrongFlowPage({
+    deliveryList: fakeDeliveryList([]),
     root: rootElement,
     model,
     deliveries: [],

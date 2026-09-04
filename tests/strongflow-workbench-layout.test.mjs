@@ -211,6 +211,49 @@ function state(overrides = {}) {
   }
 }
 
+class FakeDeliveryListModel {
+  constructor(visible) {
+    this.state = {
+      status: 'ready',
+      filters: { search: '', status: null, attentionOnly: false, order: 'recent' },
+      visible,
+      loadedCount: visible.length,
+      hasMore: false,
+      loadingMore: false,
+      moreFailure: null,
+      error: null,
+      advance: { deliveryId: null, failure: null },
+    }
+  }
+
+  calls = []
+  listener = null
+
+  subscribe(listener) {
+    this.listener = listener
+    listener(this.state)
+    return () => { this.listener = null }
+  }
+
+  publish(next) {
+    this.state = next
+    this.listener?.(next)
+  }
+
+  async refresh() { this.calls.push(['refresh']) }
+  async loadMore() { this.calls.push(['loadMore']) }
+  setSearch(value) { this.calls.push(['setSearch', value]) }
+  async setStatusFilter(value) { this.calls.push(['setStatusFilter', value]) }
+  setAttentionOnly(value) { this.calls.push(['setAttentionOnly', value]) }
+  setOrder(value) { this.calls.push(['setOrder', value]) }
+  async advanceDelivery(id, revision) { this.calls.push(['advanceDelivery', id, revision]) }
+  close() { this.calls.push(['close']) }
+}
+
+function fakeDeliveryList(visible) {
+  return new FakeDeliveryListModel(visible)
+}
+
 function deliverySummary(value) {
   return {
     schemaVersion: 'winwincode/v1',
@@ -414,7 +457,6 @@ class FakeStorage {
 }
 
 const limits = {
-  deliveries: 50,
   tasks: 100,
   stages: 50,
   attention: 50,
@@ -433,7 +475,7 @@ test('desktop workbench renders navigation, main, context, and artifact landmark
   const mounted = mountStrongFlowPage({
     root: rootElement,
     model,
-    deliveries: many(5, deliverySummary),
+    deliveryList: fakeDeliveryList(many(5, deliverySummary)),
     limits,
     storage,
   })
@@ -474,7 +516,7 @@ test('keyboard order follows navigation, main content, context, then artifacts',
   const mounted = mountStrongFlowPage({
     root: rootElement,
     model,
-    deliveries: many(2, deliverySummary),
+    deliveryList: fakeDeliveryList(many(2, deliverySummary)),
     limits,
     storage: new FakeStorage(),
   })
@@ -501,7 +543,7 @@ test('pane resize handles update clamped browser preferences and persist them', 
   const mounted = mountStrongFlowPage({
     root: rootElement,
     model,
-    deliveries: many(2, deliverySummary),
+    deliveryList: fakeDeliveryList(many(2, deliverySummary)),
     limits,
     storage,
   })
@@ -555,7 +597,7 @@ test('pointer dragging resizes panes against the rendered workspace width', () =
   const mounted = mountStrongFlowPage({
     root: rootElement,
     model,
-    deliveries: many(2, deliverySummary),
+    deliveryList: fakeDeliveryList(many(2, deliverySummary)),
     limits,
     storage,
   })
@@ -610,7 +652,7 @@ test('collapse toggles hide one pane and persist the collapsed preference', () =
   const mounted = mountStrongFlowPage({
     root: rootElement,
     model,
-    deliveries: many(2, deliverySummary),
+    deliveryList: fakeDeliveryList(many(2, deliverySummary)),
     limits,
     storage,
   })
@@ -653,7 +695,7 @@ test('stored preferences are restored on the next mount', () => {
   const mounted = mountStrongFlowPage({
     root: rootElement,
     model,
-    deliveries: many(2, deliverySummary),
+    deliveryList: fakeDeliveryList(many(2, deliverySummary)),
     limits,
     storage,
   })
@@ -678,7 +720,7 @@ test('artifact tabs switch between solution, execution, candidate, and evidence 
   const mounted = mountStrongFlowPage({
     root: rootElement,
     model,
-    deliveries: many(2, deliverySummary),
+    deliveryList: fakeDeliveryList(many(2, deliverySummary)),
     limits,
     storage: new FakeStorage(),
   })
@@ -734,7 +776,7 @@ test('narrow viewport degrades panes into labeled drawer navigation and tabbed c
   const mounted = mountStrongFlowPage({
     root: rootElement,
     model,
-    deliveries: many(2, deliverySummary),
+    deliveryList: fakeDeliveryList(many(2, deliverySummary)),
     limits,
     storage,
     viewport: { width: 420 },
@@ -793,7 +835,7 @@ test('viewport mode changes re-render without losing the current projection', ()
   const mounted = mountStrongFlowPage({
     root: rootElement,
     model,
-    deliveries: many(2, deliverySummary),
+    deliveryList: fakeDeliveryList(many(2, deliverySummary)),
     limits,
     storage: new FakeStorage(),
     viewport: {
@@ -827,7 +869,7 @@ test('two hundred equivalent state snapshots preserve drafts, focus, and artifac
   const mounted = mountStrongFlowPage({
     root: rootElement,
     model,
-    deliveries: many(2, deliverySummary),
+    deliveryList: fakeDeliveryList(many(2, deliverySummary)),
     limits,
     storage: new FakeStorage(),
     viewport: { width: 1_440 },
