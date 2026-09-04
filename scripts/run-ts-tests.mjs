@@ -101,6 +101,8 @@ const canonicalTestFiles = Object.freeze([
   'tests/ui604-shell-a11y-browser.test.mjs',
   'tests/ui605-large-data-performance.test.mjs',
   'tests/ui605-large-list-virtualization.test.mjs',
+  'tests/usage-health-browser.test.mjs',
+  'tests/usage-health-client.test.mjs',
   'tests/workspace-smoke.test.mjs',
 ])
 

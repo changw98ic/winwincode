@@ -17,6 +17,7 @@ const sourceFiles = [
   'features/local-decisions.css',
   'features/attention-center.css',
   'features/enterprise.css',
+  'features/usage-health.css',
 ]
 
 function source(path) {

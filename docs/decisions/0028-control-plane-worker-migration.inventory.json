@@ -266,6 +266,7 @@
     {
       "id": "canonical-schema",
       "sourcePaths": [
+        "schema/winwincode/v1/client-control.schema.json",
         "schema/winwincode/v1/control-plane-events.schema.json",
         "schema/winwincode/v1/control-plane-http.schema.json",
         "schema/winwincode/v1/domain.samples.json",
@@ -867,6 +868,7 @@
     {
       "id": "shared-typescript-contracts",
       "sourcePaths": [
+        "packages/contracts/src/client-control.ts",
         "packages/contracts/src/delivery-candidate.ts",
         "packages/contracts/src/delivery.ts",
         "packages/contracts/src/index.ts",
@@ -1006,18 +1008,20 @@
         "apps/client/src/strongflow-diff-viewer.ts",
         "apps/client/src/strongflow-evidence.ts",
         "apps/client/src/strongflow-execution-graph.ts",
-        "apps/client/src/strongflow-preview.ts",
         "apps/client/src/strongflow-header.ts",
         "apps/client/src/strongflow-history-navigation.ts",
         "apps/client/src/strongflow-history-selection.ts",
         "apps/client/src/strongflow-history-tree.ts",
         "apps/client/src/strongflow-layout-preferences.ts",
         "apps/client/src/strongflow-page.ts",
+        "apps/client/src/strongflow-preview.ts",
         "apps/client/src/strongflow-rendering.ts",
         "apps/client/src/strongflow-review-annotations.ts",
         "apps/client/src/strongflow-route.ts",
         "apps/client/src/strongflow-run-detail.ts",
-        "apps/client/src/strongflow-view-model.ts"
+        "apps/client/src/strongflow-view-model.ts",
+        "apps/client/src/usage-health-page.ts",
+        "apps/client/src/usage-health-view-model.ts"
       ],
       "entrySymbols": [
         "mountWinWinCodeClient"
@@ -1492,7 +1496,7 @@
     },
     {
       "id": "candidate-comparison",
-      "scenario": "candidate-comparison",
+      "scenario": "success",
       "testFile": "tests/strongflow-candidate-comparison.test.mjs",
       "testName": "returning from bounded rework defaults to the rework pair and renders its summary",
       "expectedFacts": [
@@ -1503,7 +1507,7 @@
     },
     {
       "id": "candidate-preview",
-      "scenario": "candidate-preview",
+      "scenario": "success",
       "testFile": "tests/strongflow-preview.test.mjs",
       "testName": "the workbench renders one Preview tab with health, reasons, and criterion joins",
       "expectedFacts": [
