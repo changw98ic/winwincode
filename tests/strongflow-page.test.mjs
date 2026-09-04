@@ -1649,3 +1649,208 @@ test('the Delivery view choice persists as a browser preference only', () => {
 
   mounted.close()
 })
+
+function candidateFilesState(overrides = {}) {
+  return {
+    status: 'ready',
+    items: many(6, value => ({
+      path: `src/file-${String(value)}.ts`,
+      oldPath: null,
+      status: 'modified',
+      additions: value,
+      deletions: 0,
+      binary: false,
+      encoding: 'utf-8',
+    })),
+    hasMore: false,
+    previewLimited: false,
+    selectedPath: 'src/file-2.ts',
+    diff: {
+      status: 'ready',
+      path: 'src/file-2.ts',
+      content: 'diff --git a/src/file-2.ts b/src/file-2.ts\n@@ -1,1 +1,1 @@',
+      loadedBytes: 58,
+      totalBytes: 58,
+      hasMore: false,
+      previewLimited: false,
+      fileDiffSha256: `sha256:${'4'.repeat(64)}`,
+      unavailableReason: null,
+      error: null,
+    },
+    error: null,
+    ...overrides,
+  }
+}
+
+test('a runtime event batch keeps the open Candidate review context exactly where it was', () => {
+  const document = new FakeDocument()
+  const rootElement = document.createElement('main')
+  const current = projection()
+  const model = new FakeStrongFlowViewModel(state({
+    projection: current,
+    candidateFiles: candidateFilesState(),
+  }))
+  const mounted = mountStrongFlowPage({ root: rootElement, model, deliveryList: fakeDeliveryList([]), limits })
+  const workspace = findByClass(rootElement, 'wwc-strongflow-workspace')
+  const tree = findByClass(rootElement, 'wwc-candidate-file-tree')
+  const taskRow = findByClass(rootElement, 'wwc-strongflow-task-list').children[0]
+  // StageRuns[0] is the current run and renders a different control; the
+  // historical selection this assertion protects is a non-current run row.
+  const stageRow = findByClass(rootElement, 'wwc-strongflow-stage-list').children[1]
+  const fileRow = findAllByClass(rootElement, 'wwc-candidate-file-row')
+    .find(row => row.dataset.path === 'src/file-3.ts')
+  const selectedRow = findAllByClass(rootElement, 'wwc-candidate-file-row')
+    .find(row => row.dataset.path === 'src/file-2.ts')
+
+  // The keyboard is on an unrelated tree row, the user scrolled the tree, and
+  // one Task of the current Stage is expanded.
+  fileRow.focus()
+  const taskToggle = findByClass(taskRow, 'wwc-strongflow-history-toggle')
+  taskToggle.click()
+  const stageButton = findByClass(stageRow, 'wwc-strongflow-run-button')
+  const candidateTab = findAllByClass(rootElement, 'wwc-strongflow-artifact-tab')
+    .find(tab => tab.dataset.artifactTab === 'candidate')
+  candidateTab.click()
+  workspace.scrollTop = 96
+  tree.scrollTop = 240
+
+  for (let index = 0; index < 50; index += 1) {
+    model.publish(state({
+      projection: current,
+      candidateFiles: model.state.candidateFiles,
+      realtime: index % 2 === 0 ? 'reloading' : 'subscribed',
+    }))
+  }
+
+  assert.equal(
+    findAllByClass(rootElement, 'wwc-candidate-file-row').find(row => row.dataset.path === 'src/file-3.ts'),
+    fileRow,
+    'UI-305: a runtime event batch must not rebuild the Candidate file tree',
+  )
+  assert.equal(
+    findByClass(rootElement, 'wwc-strongflow-task-list').children[0],
+    taskRow,
+    'UI-305: a runtime event batch must not rebuild the Task rows',
+  )
+  assert.equal(
+    findByClass(taskRow, 'wwc-strongflow-history-toggle').getAttribute('aria-expanded'),
+    'true',
+    'UI-305: a runtime event batch must not collapse the expanded Task',
+  )
+  assert.equal(
+    findByClass(rootElement, 'wwc-strongflow-stage-list').children[1],
+    stageRow,
+    'UI-305: a runtime event batch must not rebuild the Stage rows',
+  )
+  assert.equal(
+    findByClass(stageRow, 'wwc-strongflow-run-button').getAttribute('aria-pressed'),
+    stageButton.getAttribute('aria-pressed'),
+    'UI-305: a runtime event batch must not move the historical Stage selection',
+  )
+  assert.equal(
+    findAllByClass(rootElement, 'wwc-strongflow-artifact-tab')
+      .find(tab => tab.dataset.artifactTab === 'candidate').getAttribute('aria-selected'),
+    'true',
+    'UI-305: a runtime event batch must not switch the artifacts panel',
+  )
+  assert.equal(
+    findAllByClass(rootElement, 'wwc-candidate-file-row')
+      .find(row => row.dataset.path === 'src/file-2.ts').getAttribute('aria-selected'),
+    'true',
+    'UI-305: a runtime event batch must not drop the selected Candidate file',
+  )
+  assert.equal(
+    fileRow.tabIndex,
+    0,
+    'UI-305: a runtime event batch must keep the roving tabindex on the row the keyboard is on',
+  )
+  assert.equal(selectedRow.tabIndex, -1)
+  assert.equal(document.activeElement, fileRow, 'UI-305: keyboard focus survives unrelated snapshots')
+  assert.equal(findByClass(rootElement, 'wwc-strongflow-workspace').scrollTop, 96, 'UI-305: scroll position survives unrelated snapshots')
+  assert.equal(findByClass(rootElement, 'wwc-candidate-file-tree').scrollTop, 240, 'UI-305: file tree scroll survives unrelated snapshots')
+
+  mounted.close()
+})
+
+test('a changed Candidate says so instead of silently rereading the same file', () => {
+  const document = new FakeDocument()
+  const rootElement = document.createElement('main')
+  const current = projection()
+  const model = new FakeStrongFlowViewModel(state({
+    projection: current,
+    candidateFiles: candidateFilesState(),
+  }))
+  const mounted = mountStrongFlowPage({ root: rootElement, model, deliveryList: fakeDeliveryList([]), limits })
+
+  // An equivalent snapshot is not a Candidate change: no notice may appear.
+  model.publish(state({ projection: current, candidateFiles: model.state.candidateFiles }))
+  const stale = findByClass(rootElement, 'wwc-strongflow-candidate-stale')
+  assert.equal(stale.hidden, true, 'UI-305: an equivalent snapshot needs no stale notice')
+
+  const nextCandidate = structuredClone(current)
+  nextCandidate.currentCandidate.candidateRef = 'refs/winwincode/candidate/2'
+  nextCandidate.currentCandidate.candidateCommitId = '9'.repeat(40)
+  nextCandidate.currentCandidate.candidateTreeId = '8'.repeat(40)
+  nextCandidate.currentCandidate.diffSha256 = `sha256:${'7'.repeat(64)}`
+  model.publish(state({
+    projection: nextCandidate,
+    candidateFiles: candidateFilesState({ selectedPath: 'src/file-2.ts' }),
+  }))
+
+  assert.equal(
+    findByClass(rootElement, 'wwc-strongflow-candidate-stale').hidden,
+    false,
+    'UI-305: a Candidate change must surface an explicit stale notice',
+  )
+  const notice = findByClass(rootElement, 'wwc-strongflow-candidate-stale')
+  assert.equal(notice.getAttribute('role'), 'alert', 'UI-305: the stale notice is announced as a warning')
+  assert.equal(
+    findByClass(notice, 'wwc-strongflow-candidate-stale-icon').getAttribute('aria-hidden'),
+    'true',
+    'UI-305: the stale notice carries a non-color warning icon',
+  )
+  assert.match(
+    findByClass(notice, 'wwc-strongflow-candidate-stale-text').textContent,
+    /Candidate changed/u,
+    'UI-305: the stale notice names the changed Candidate in words',
+  )
+  assert.match(
+    findByClass(notice, 'wwc-strongflow-candidate-stale-text').textContent,
+    /src\/file-2\.ts/u,
+    'UI-305: the stale notice names the file whose Diff was silently replaced',
+  )
+  assert.equal(
+    findAllByClass(rootElement, 'wwc-candidate-file-row')
+      .find(row => row.dataset.path === 'src/file-2.ts').getAttribute('aria-selected'),
+    'true',
+    'UI-305: the stale notice replaces the review context instead of dropping it',
+  )
+
+  // Selecting a file again is the explicit re-confirmation.
+  findAllByClass(rootElement, 'wwc-candidate-file-row')
+    .find(row => row.dataset.path === 'src/file-3.ts').click()
+  assert.deepEqual(model.calls.at(-1), ['selectCandidateFile', 'src/file-3.ts'])
+  model.publish(state({
+    projection: nextCandidate,
+    candidateFiles: candidateFilesState({ selectedPath: 'src/file-3.ts' }),
+  }))
+  assert.equal(
+    findByClass(rootElement, 'wwc-strongflow-candidate-stale').hidden,
+    true,
+    'UI-305: re-selecting a file confirms the current Candidate and clears the notice',
+  )
+
+  // A Candidate change with no open review context has nothing to re-confirm.
+  model.publish(state({ projection: nextCandidate, candidateFiles: candidateFilesState({ selectedPath: null }) }))
+  model.publish(state({
+    projection: structuredClone(current),
+    candidateFiles: candidateFilesState({ selectedPath: null }),
+  }))
+  assert.equal(
+    findByClass(rootElement, 'wwc-strongflow-candidate-stale').hidden,
+    true,
+    'UI-305: no stale notice without an open review context',
+  )
+
+  mounted.close()
+})

@@ -19,7 +19,8 @@
 }
 
 .wwc-strongflow-review-conflict,
-.wwc-strongflow-attention-conflict {
+.wwc-strongflow-attention-conflict,
+.wwc-strongflow-candidate-stale {
   display: flex;
   flex-wrap: wrap;
   gap: var(--wwc-space-2);
@@ -32,12 +33,14 @@
 }
 
 .wwc-strongflow-review-conflict[hidden],
-.wwc-strongflow-attention-conflict[hidden] {
+.wwc-strongflow-attention-conflict[hidden],
+.wwc-strongflow-candidate-stale[hidden] {
   display: none;
 }
 
 .wwc-strongflow-review-conflict p,
-.wwc-strongflow-attention-conflict p {
+.wwc-strongflow-attention-conflict p,
+.wwc-strongflow-candidate-stale p {
   flex: 1 1 100%;
   margin: var(--wwc-space-0);
 }

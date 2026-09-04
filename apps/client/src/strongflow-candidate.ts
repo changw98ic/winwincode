@@ -204,6 +204,33 @@ export interface StrongFlowCandidateViewProps {
   readonly selectedLine: number | null
 }
 
+/**
+ * The review cut the Candidate panel is currently showing: which exact
+ * Candidate the Diff belongs to and which file is open underneath it.
+ */
+export interface StrongFlowCandidateReviewCut {
+  readonly candidateIdentity: string | null
+  readonly selectedPath: string | null
+}
+
+/**
+ * UI-305: an unrelated snapshot must never silently re-read the file the user
+ * is reviewing under a different Candidate. A Candidate change that keeps an
+ * open file selection is therefore reported instead of swapped in quietly, and
+ * only an open review context produces the notice — nothing to re-confirm when
+ * no Diff was being read.
+ */
+export function strongFlowCandidateStaleNotice(
+  reviewed: StrongFlowCandidateReviewCut,
+  current: StrongFlowCandidateReviewCut,
+): string | null {
+  if (reviewed.candidateIdentity === null || current.candidateIdentity === null) return null
+  if (reviewed.selectedPath === null || current.selectedPath === null) return null
+  if (reviewed.candidateIdentity === current.candidateIdentity) return null
+  return `Candidate changed. ${current.selectedPath} now shows the new Candidate instead of the `
+    + 'Diff you were reading. Select the file again to confirm the current Candidate.'
+}
+
 export interface StrongFlowCandidateViewOptions {
   readonly document: Document
   readonly limits: StrongFlowRenderLimits
@@ -310,6 +337,12 @@ export function mountStrongFlowCandidate(
   const { document } = options
   const root = strongFlowElement(document, 'section', 'wwc-strongflow-view-candidate')
   const heading = strongFlowElement(document, 'h3', 'wwc-strongflow-section-heading')
+  // ADR-0029 §5: a warning carries a non-color icon beside its text, and a new
+  // error condition uses role="alert". The page's single polite live region
+  // stays reserved for progress announcements.
+  const staleNotice = strongFlowElement(document, 'div', 'wwc-strongflow-candidate-stale')
+  const staleNoticeIcon = strongFlowElement(document, 'span', 'wwc-strongflow-candidate-stale-icon')
+  const staleNoticeText = strongFlowElement(document, 'p', 'wwc-strongflow-candidate-stale-text')
   const empty = strongFlowElement(document, 'p', 'wwc-strongflow-empty')
   const workspace = strongFlowElement(document, 'section', 'wwc-candidate-workspace')
   const fileBrowser = strongFlowElement(document, 'section', 'wwc-candidate-file-browser')
@@ -376,13 +409,31 @@ export function mountStrongFlowCandidate(
   let requestedCandidateIdentity: string | null = null
   let visibleRows: readonly CandidateFileTreeRow[] = []
   let rovingRowKey: string | null = null
+  // UI-305: the review cut the panel last showed, and the notice that a newer
+  // Candidate silently replaced it. Selecting a file again is the user's
+  // explicit re-confirmation and clears the notice.
+  let reviewedCandidate: StrongFlowCandidateReviewCut = {
+    candidateIdentity: null,
+    selectedPath: null,
+  }
+  let staleCandidateNotice: string | null = null
+
+  /**
+   * Selecting a file is the explicit re-confirmation of the current Candidate,
+   * so it is also the only user action that clears the stale notice.
+   */
+  function selectFile(path: string): void {
+    staleCandidateNotice = null
+    reviewedCandidate = { candidateIdentity: null, selectedPath: null }
+    options.onSelectFile(path)
+  }
 
   const diffViewer: CandidateDiffViewer = mountCandidateDiffViewer({
     document,
     onLoadMoreDiff() {
       const selectedDiff = current.candidateFiles.diff
       if (selectedDiff.status === 'error' && selectedDiff.path !== null) {
-        options.onSelectFile(selectedDiff.path)
+        selectFile(selectedDiff.path)
       } else {
         options.onLoadMoreDiff()
       }
@@ -413,6 +464,11 @@ export function mountStrongFlowCandidate(
 
   root.dataset.view = 'frozen-candidate'
   heading.textContent = 'Candidate changes'
+  staleNoticeIcon.setAttribute('aria-hidden', 'true')
+  staleNoticeIcon.textContent = '!'
+  staleNotice.setAttribute('role', 'alert')
+  staleNotice.append(staleNoticeIcon, staleNoticeText)
+  staleNotice.hidden = true
   empty.textContent = 'No candidate has been frozen.'
   searchLabel.textContent = 'Search changed files'
   search.type = 'search'
@@ -464,7 +520,17 @@ export function mountStrongFlowCandidate(
   verdict.append(verdictHeading, verdictBody, criteria)
   publicationHeading.textContent = 'Publication'
   publication.append(publicationHeading, publicationBody)
-  root.append(heading, empty, workspace, evidenceHeading, evidence, evidenceOmitted, verdict, publication)
+  root.append(
+    heading,
+    staleNotice,
+    empty,
+    workspace,
+    evidenceHeading,
+    evidence,
+    evidenceOmitted,
+    verdict,
+    publication,
+  )
 
   const evidenceRows = new WeakMap<HTMLLIElement, {
     readonly title: HTMLElement
@@ -629,7 +695,16 @@ export function mountStrongFlowCandidate(
       limit: CANDIDATE_TREE_ROW_LIMIT,
     })
     visibleRows = result.rows
-    rovingRowKey = visibleRows.find(row => row.selected)?.key ?? visibleRows[0]?.key ?? null
+    // UI-305: the roving tabindex belongs to the row the keyboard is on, so an
+    // unrelated snapshot must not move it back to the selected row and leave
+    // the focused row unreachable from the Tab order.
+    const focusedRow = visibleRows.find(
+      row => rowCollection.node(row.key) === document.activeElement,
+    )
+    rovingRowKey = focusedRow?.key
+      ?? visibleRows.find(row => row.selected)?.key
+      ?? visibleRows[0]?.key
+      ?? null
     rowCollection.update(result.rows)
     hiddenRows.hidden = result.hiddenRows === 0
     hiddenRows.textContent = result.hiddenRows === 0
@@ -647,6 +722,9 @@ export function mountStrongFlowCandidate(
   function focusRow(index: number): void {
     const row = visibleRows[index]
     if (row === undefined) return
+    // Keep one source of truth for the roving anchor so a later snapshot
+    // re-derives the same tabindex instead of moving it to the selected row.
+    rovingRowKey = row.key
     for (const visible of visibleRows) rowCollection.node(visible.key)?.setAttribute('tabindex', '-1')
     const node = rowCollection.node(row.key)
     node?.setAttribute('tabindex', '0')
@@ -667,7 +745,7 @@ export function mountStrongFlowCandidate(
       if (nextIndex >= 0) focusRow(nextIndex)
       return
     }
-    options.onSelectFile(row.path)
+    selectFile(row.path)
   }
   const onTreeKeyDown = (event: KeyboardEvent) => {
     const target = event.target as HTMLElement | null
@@ -726,6 +804,14 @@ export function mountStrongFlowCandidate(
   status.addEventListener('change', onStatus)
   loadMoreFiles.addEventListener('click', onLoadFiles)
 
+  /** ADR-0029 §5: unchanged presentation never rewrites the DOM. */
+  function renderStaleNotice(): void {
+    const visible = staleCandidateNotice !== null
+    if (staleNotice.hidden !== !visible) staleNotice.hidden = !visible
+    const text = staleCandidateNotice ?? ''
+    if (staleNoticeText.textContent !== text) staleNoticeText.textContent = text
+  }
+
   function update(props: StrongFlowCandidateViewProps): void {
     if (!open) throw new Error('StrongFlow Candidate view is closed.')
     current = props
@@ -738,12 +824,22 @@ export function mountStrongFlowCandidate(
     publication.hidden = props.projection === null
     if (candidate === null || props.projection === null) {
       requestedCandidateIdentity = null
+      reviewedCandidate = { candidateIdentity: null, selectedPath: null }
+      staleCandidateNotice = null
+      renderStaleNotice()
       rowCollection.update([])
       candidateEvidenceCollection.update([])
       criterionCollection.update([])
       return
     }
     const identity = candidateViewIdentity(candidate)
+    const selectedPath = props.candidateFiles.selectedPath
+    staleCandidateNotice = strongFlowCandidateStaleNotice(reviewedCandidate, {
+      candidateIdentity: identity,
+      selectedPath,
+    }) ?? staleCandidateNotice
+    reviewedCandidate = { candidateIdentity: identity, selectedPath }
+    renderStaleNotice()
     if (props.candidateFiles.status !== 'idle') requestedCandidateIdentity = null
     if (props.candidateFiles.status === 'idle' && requestedCandidateIdentity !== identity) {
       requestedCandidateIdentity = identity
