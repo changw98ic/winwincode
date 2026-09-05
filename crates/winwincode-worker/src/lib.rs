@@ -9,6 +9,7 @@
 //! same generated `ExecutionPortMessage` values to [`WorkerMain`].
 
 pub mod action_enforcement;
+pub mod managed_session;
 pub mod remote_transport;
 pub mod stage_product;
 pub mod workspace_runtime;
@@ -2488,6 +2489,9 @@ pub struct WorkerBinaryIdentity {
     pub execution_kernel: &'static str,
     /// Whether a CLI or external-agent fallback exists.
     pub external_fallback: bool,
+    /// Whether this binary accepts `--managed-session <config-file>` (plan
+    /// §14.4) and reports the managed session identity surface.
+    pub managed_session: bool,
 }
 
 /// Returns compile-time Worker role identity without starting runtime services.
@@ -2498,6 +2502,7 @@ pub const fn binary_identity() -> WorkerBinaryIdentity {
         execution_port: "winwincode/v1",
         execution_kernel: "embedded-codex-core",
         external_fallback: false,
+        managed_session: true,
     }
 }
 

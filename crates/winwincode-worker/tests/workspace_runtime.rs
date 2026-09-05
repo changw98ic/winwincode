@@ -212,6 +212,9 @@ fn second_replacement_successor(predecessor: &ActiveJob) -> ActiveJob {
     successor
 }
 
+// Its only caller is the `test-support` parallel-cleaning test below; the
+// default feature set would otherwise flag this helper as dead code.
+#[cfg(feature = "test-support")]
 fn second_active_job() -> ActiveJob {
     let mut active = active_job();
     active.job.job_id = ExecutionJobId("job_00000000000000000000000002".to_owned());
