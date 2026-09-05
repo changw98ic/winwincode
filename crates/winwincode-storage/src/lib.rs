@@ -266,8 +266,8 @@ use sha2::{Digest, Sha256};
 use winwincode_domain::{
     CodexThreadId, ControlPlaneEventId, DeliveryId, ExecutionJobId, Instant, LeaseId,
     OrganizationId, ProductSessionId, ProjectId, RepositoryId, RequestId, ServiceAccountId,
-    SessionIdentity, Sha256Digest, SystemActorId, UserId, WorkerId, WorkerSessionId, WorkspaceId,
-    is_canonical_delivery_id,
+    SessionIdentity, Sha256Digest, StageRunId, SystemActorId, UserId, WorkerId, WorkerSessionId,
+    WorkspaceId, is_canonical_delivery_id,
 };
 
 const DATABASE_FILE_NAME: &str = "control-plane.sqlite3";
@@ -2054,6 +2054,22 @@ pub trait ProductStateStorage: Send {
         Ok(None)
     }
 
+    /// Loads the one active scheduler row of a Delivery stage run (`FLOW-100.5`).
+    ///
+    /// Local production storage overrides this seam so the `StrongFlow` device
+    /// routing resolves exactly the stage's committed job. Non-scheduler
+    /// adapters return no row.
+    ///
+    /// # Errors
+    ///
+    /// Returns storage corruption or adapter failures.
+    fn load_active_execution_job_record_for_stage_run(
+        &self,
+        _stage_run_id: &StageRunId,
+    ) -> Result<Option<ExecutionJobRecord>, StorageError> {
+        Ok(None)
+    }
+
     /// Loads the scheduler-sealed predecessor-to-successor authority for a Job.
     ///
     /// # Errors
@@ -2538,6 +2554,16 @@ impl ProductStateStorage for SqliteStorage {
         job_id: &ExecutionJobId,
     ) -> Result<Option<ExecutionJobRecord>, StorageError> {
         repository_scheduler::load_execution_job_by_id(self.connection()?, job_id)
+    }
+
+    fn load_active_execution_job_record_for_stage_run(
+        &self,
+        stage_run_id: &StageRunId,
+    ) -> Result<Option<ExecutionJobRecord>, StorageError> {
+        repository_scheduler::load_active_execution_job_by_stage_run(
+            self.connection()?,
+            stage_run_id,
+        )
     }
 
     fn load_execution_scope_replacement_authority(

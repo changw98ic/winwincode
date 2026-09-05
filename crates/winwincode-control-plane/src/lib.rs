@@ -90,6 +90,7 @@ mod rework_transaction;
 mod runtime_event_transaction;
 mod session_binding_transaction;
 pub mod session_identity;
+mod strongflow_device_execution;
 pub mod strongflow_projection;
 mod task_breakdown_transaction;
 mod temporary_root_lease;
@@ -488,6 +489,10 @@ pub use responsibility_assignment_authority::{
 pub use runtime_event_transaction::RuntimeMessageError;
 pub use session_identity::{
     SessionBindingAcceptance, SessionIdentityAdapterError, validate_session_binding,
+};
+pub use strongflow_device_execution::{
+    STRONGFLOW_DEVICE_WORKER_POOL_ID, StrongflowDeviceDispatch, StrongflowDeviceDispatchError,
+    StrongflowDeviceDispatchErrorKind, dispatch_stage_to_device_worker,
 };
 pub use temporary_root_lease::{
     OwnedTemporaryRoot, SystemTemporaryRootLeaseRuntime, TEMPORARY_ROOT_LEASE_FILE,

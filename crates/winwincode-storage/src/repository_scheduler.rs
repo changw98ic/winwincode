@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use winwincode_domain::{
     ExecutionJobId, ExecutionMessageId, FencingToken, Instant, LeaseId, OrganizationId, ProjectId,
-    RepositoryId, RequestId, WorkerId, WorkerInstanceId, WorkerSessionId, WorkspaceId,
+    RepositoryId, RequestId, StageRunId, WorkerId, WorkerInstanceId, WorkerSessionId, WorkspaceId,
 };
 
 use crate::execution_queue::{
@@ -722,6 +722,33 @@ pub(crate) fn load_execution_job_by_id(
                     updated_at, cancellation_request_id, cancellation_requested_at
              FROM scheduler_execution_jobs WHERE job_id = ?1",
             [&job_id.0],
+            stored_job_from_row,
+        )
+        .optional()
+        .map_err(sql_error)?
+        .map(|stored| complete_record(connection, stored))
+        .transpose()
+}
+
+/// `FLOW-100.5`: resolves the one active (non-terminal) Job of a Delivery
+/// stage run — the active-job unique index guarantees at most one — so the
+/// `StrongFlow` device routing can anchor exactly that stage's work.
+pub(crate) fn load_active_execution_job_by_stage_run(
+    connection: &Connection,
+    stage_run_id: &StageRunId,
+) -> Result<Option<ExecutionJobRecord>, StorageError> {
+    ensure_execution_queue_schema(connection)?;
+    connection
+        .query_row(
+            "SELECT job_id, organization_id, workspace_id, project_id, repository_id,
+                    product_session_id, delivery_id, stage_run_id, submission_request_id,
+                    payload_digest, dispatch_payload, state, attempt, revision, submitted_at,
+                    updated_at, cancellation_request_id, cancellation_requested_at
+             FROM scheduler_execution_jobs
+             WHERE stage_run_id = ?1
+               AND state IN ('queued', 'leased', 'running', 'cancelling')
+             ORDER BY job_id LIMIT 1",
+            [stage_run_id.0.as_str()],
             stored_job_from_row,
         )
         .optional()

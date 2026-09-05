@@ -72,6 +72,7 @@ CREATE TABLE IF NOT EXISTS device_execution_reservation_facts (
     stage_run_id TEXT,
     attached_at TEXT NOT NULL,
     revision INTEGER NOT NULL CHECK (revision = 1),
+    role TEXT,
     FOREIGN KEY (job_id)
         REFERENCES execution_admission_reservations(job_id) ON DELETE RESTRICT
 );
@@ -304,6 +305,10 @@ pub struct DeviceExecutionFactsAttachment {
     pub request_id: String,
     pub job_id: String,
     pub worker_launch_grant_id: String,
+    /// `FLOW-100.5`: the `StrongFlow` execution role the job dispatches as
+    /// (`planner`, `executor`, ...). `None` for role-less Quick dispatches.
+    #[serde(default)]
+    pub role: Option<String>,
 }
 
 impl DeviceExecutionFactsAttachment {
@@ -317,10 +322,29 @@ impl DeviceExecutionFactsAttachment {
         job_id: impl Into<String>,
         worker_launch_grant_id: impl Into<String>,
     ) -> Result<Self, DeviceExecutionBindingStoreError> {
+        Self::try_new_with_role(request_id, job_id, worker_launch_grant_id, None)
+    }
+
+    /// Builds one validated attachment command carrying the `StrongFlow`
+    /// execution role of the dispatched job.
+    ///
+    /// # Errors
+    ///
+    /// Rejects non-canonical identities or an out-of-bounds role label.
+    pub fn try_new_with_role(
+        request_id: impl Into<String>,
+        job_id: impl Into<String>,
+        worker_launch_grant_id: impl Into<String>,
+        role: Option<String>,
+    ) -> Result<Self, DeviceExecutionBindingStoreError> {
+        if let Some(role) = role.as_deref() {
+            validate_role(role)?;
+        }
         let command = Self {
             request_id: request_id.into(),
             job_id: job_id.into(),
             worker_launch_grant_id: worker_launch_grant_id.into(),
+            role,
         };
         validate_request_id(&command.request_id)?;
         validate_job_id(&command.job_id)?;
@@ -372,6 +396,10 @@ pub struct DeviceExecutionReservationFacts {
     pub product_session_id: Option<String>,
     pub stage_run_id: Option<String>,
     pub attached_at: Instant,
+    /// `FLOW-100.5`: the `StrongFlow` execution role stamped on the dispatch,
+    /// or `None` for the role-less Quick Chat dispatches.
+    #[serde(default)]
+    pub role: Option<String>,
 }
 
 /// Replay-safe response for the bind and release transitions.
@@ -498,6 +526,7 @@ impl<'storage> DeviceExecutionBindingLedger<'storage> {
         connection
             .execute_batch(&binding_schema())
             .map_err(|sql| sql_error(&sql))?;
+        ensure_facts_role_column(connection)?;
         validate_schema(connection)?;
         Ok(Self { storage })
     }
@@ -753,6 +782,7 @@ impl<'storage> DeviceExecutionBindingLedger<'storage> {
             product_session_id: grant.product_session_id,
             stage_run_id: grant.stage_run_id,
             attached_at: now.clone(),
+            role: command.role.clone(),
         };
         let inserted = transaction
             .execute(
@@ -761,8 +791,8 @@ impl<'storage> DeviceExecutionBindingLedger<'storage> {
                   repository_binding_id, occupancy_lease_id, occupancy_fencing_token,
                   worker_launch_grant_id, worker_session_id, worker_id,
                   worker_instance_id, product_session_id, stage_run_id,
-                  attached_at, revision)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, 1)",
+                  attached_at, revision, role)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, 1, ?15)",
                 params![
                     facts.job_id,
                     facts.client_node_id,
@@ -778,6 +808,7 @@ impl<'storage> DeviceExecutionBindingLedger<'storage> {
                     facts.product_session_id,
                     facts.stage_run_id,
                     facts.attached_at.0,
+                    facts.role,
                 ],
             )
             .map_err(|sql| map_facts_insert_sql(&sql))?;
@@ -1232,6 +1263,7 @@ fn complete_facts(
         Option<String>,
         Option<String>,
         String,
+        Option<String>,
     ),
 ) -> Result<DeviceExecutionReservationFacts, DeviceExecutionBindingStoreError> {
     let (
@@ -1249,6 +1281,7 @@ fn complete_facts(
         product_session_id,
         stage_run_id,
         attached_at,
+        role,
     ) = row;
     Ok(DeviceExecutionReservationFacts {
         job_id,
@@ -1268,6 +1301,7 @@ fn complete_facts(
         product_session_id,
         stage_run_id,
         attached_at: parse_stored_instant(&attached_at, "attachment time")?,
+        role,
     })
 }
 
@@ -1289,6 +1323,7 @@ fn facts_row(
     Option<String>,
     Option<String>,
     String,
+    Option<String>,
 )> {
     Ok((
         row.get(0)?,
@@ -1305,6 +1340,7 @@ fn facts_row(
         row.get(11)?,
         row.get(12)?,
         row.get(13)?,
+        row.get(14)?,
     ))
 }
 
@@ -1317,7 +1353,8 @@ fn load_facts(
             "SELECT job_id, client_node_id, client_instance_id, holder_user_id,
                     repository_binding_id, occupancy_lease_id, occupancy_fencing_token,
                     worker_launch_grant_id, worker_session_id, worker_id,
-                    worker_instance_id, product_session_id, stage_run_id, attached_at
+                    worker_instance_id, product_session_id, stage_run_id, attached_at,
+                    role
              FROM device_execution_reservation_facts WHERE job_id = ?1",
             [job_id],
             facts_row,
@@ -1445,6 +1482,7 @@ fn validate_schema(connection: &Connection) -> Result<(), DeviceExecutionBinding
             "stage_run_id",
             "attached_at",
             "revision",
+            "role",
         ],
     )?;
     validate_columns(
@@ -1452,6 +1490,53 @@ fn validate_schema(connection: &Connection) -> Result<(), DeviceExecutionBinding
         "device_execution_binding_receipts",
         &["scope_key", "request_id", "request_digest", "response_json"],
     )
+}
+
+/// `FLOW-100.5`: adds the nullable `StrongFlow` `role` column to reservation
+/// facts stored by an earlier schema. `ALTER TABLE` appends the column last,
+/// exactly where the create-table schema declares it, so fresh and migrated
+/// databases share one column order. Quick Chat facts keep `role` NULL.
+fn ensure_facts_role_column(
+    connection: &Connection,
+) -> Result<(), DeviceExecutionBindingStoreError> {
+    let table_exists = connection
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table'
+             AND name = 'device_execution_reservation_facts'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(|sql| sql_error(&sql))?
+        .is_some();
+    if !table_exists {
+        return Ok(());
+    }
+    let has_role = {
+        let mut statement = connection
+            .prepare("PRAGMA table_info(device_execution_reservation_facts)")
+            .map_err(|sql| sql_error(&sql))?;
+        let columns = statement
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(|sql| sql_error(&sql))?;
+        let mut found = false;
+        for column in columns {
+            if column.map_err(|sql| sql_error(&sql))? == "role" {
+                found = true;
+                break;
+            }
+        }
+        found
+    };
+    if !has_role {
+        connection
+            .execute(
+                "ALTER TABLE device_execution_reservation_facts ADD COLUMN role TEXT",
+                [],
+            )
+            .map_err(|sql| sql_error(&sql))?;
+    }
+    Ok(())
 }
 
 fn validate_columns(
@@ -1566,6 +1651,26 @@ fn validate_request_id(value: &str) -> Result<(), DeviceExecutionBindingStoreErr
 
 fn validate_job_id(value: &str) -> Result<(), DeviceExecutionBindingStoreError> {
     validate_crockford_id(value, "job_", "execution job id")
+}
+
+/// `FLOW-100.5`: the `StrongFlow` execution role stamped on reservation facts.
+/// It is a portable execution-profile label (the same shape the generated
+/// `ExecutionJob.executionProfile` uses), bounded like the Delivery
+/// execution profile and free of secret material.
+fn validate_role(value: &str) -> Result<(), DeviceExecutionBindingStoreError> {
+    let bounded = !value.is_empty()
+        && value.len() <= 100
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-');
+    if bounded {
+        Ok(())
+    } else {
+        Err(error(
+            DeviceExecutionBindingStoreErrorKind::InvalidInput,
+            "device execution role is not a canonical execution profile",
+        ))
+    }
 }
 
 fn validate_revision(value: u64) -> Result<(), DeviceExecutionBindingStoreError> {
