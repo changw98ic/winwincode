@@ -107,16 +107,14 @@ pub mod store;
 pub mod supervisor;
 pub mod worker_logs;
 
-<<<<<<< HEAD
+pub use apply_engine::{
+    CandidateApplyError, CandidateApplyErrorKind, CandidateApplyOutcome, CandidateApplyRequest,
+    apply_candidate_to_branch,
+};
 pub use candidate_branch::{
     BranchCreationFacts, BranchCreationOutcome, BranchCreationReport, CandidateBranchError,
     CandidateBranchErrorKind, CreatedBranchRecord, WINWINCODE_BRANCH_PREFIX,
     create_candidate_branch, created_branch_record, enqueue_branch_created,
-=======
-pub use apply_engine::{
-    CandidateApplyError, CandidateApplyErrorKind, CandidateApplyOutcome, CandidateApplyRequest,
-    apply_candidate_to_branch,
->>>>>>> agent/w5-apply-engine
 };
 pub use candidate_registry::{
     CANDIDATE_REF_PREFIX, CandidateLocalRefRecord, CandidateReconciliation, CandidateRefVerdict,
