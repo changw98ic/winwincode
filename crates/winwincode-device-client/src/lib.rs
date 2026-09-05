@@ -54,6 +54,13 @@
 //!   integration worktree that never touches the user's working tree, the
 //!   compare-and-swap atomic target ref update, kept conflict artifacts, and
 //!   one durable `client.candidate.apply_result` receipt per attempt.
+//! - [`candidate_retention`]: the candidate retention policy, discard, and
+//!   garbage collection (GIT-100.9, plan 15) — the configurable per-binding
+//!   cap on active candidates with oldest-first auto-discard, the fail-closed
+//!   discard vertical (created-branch deletion, `discarded` registry
+//!   transition, lease-stamped `client.candidate.apply_result` uplink), and
+//!   the crash-resumable GC that reclaims a terminal candidate's stable ref
+//!   only after its retention window and a fully acknowledged uplink.
 //! - [`daemon`]: the periodic device-client exchange loop
 //!   (`POST /internal/v1/client/exchange`) over an injected transport:
 //!   enrollment adoption, hello announcement, heartbeat reporting,
@@ -95,6 +102,7 @@
 pub mod apply_engine;
 pub mod candidate_branch;
 pub mod candidate_registry;
+pub mod candidate_retention;
 pub mod connect_code;
 pub mod daemon;
 pub mod fencing;
@@ -122,6 +130,14 @@ pub use candidate_registry::{
     CandidateRetentionOutcome, candidate_local_ref, enqueue_candidate_retained,
     progress_candidate_lifecycle, reconcile_retained_candidates, record_candidate_retention,
     retain_candidate, retained_candidates,
+};
+pub use candidate_retention::{
+    CandidateDiscardFacts, CandidateDiscardOutcome, CandidateDiscardRecord, CandidateDiscardReport,
+    CandidateDiscardRequest, CandidateRetentionError, CandidateRetentionErrorKind,
+    CandidateRetentionPolicy, CandidateUplinkState, CollectedCandidate, DeferredCandidate,
+    GcDeferralReason, GcReport, RetentionSweepReport, candidate_discard_record,
+    collect_expired_candidates, discard_candidate, enforce_retention_policy,
+    enqueue_candidate_discarded,
 };
 pub use connect_code::{
     CONNECT_CODE_DIGITS, CONNECT_CODE_TTL, ChallengeVerdict, ConnectCodeError,
