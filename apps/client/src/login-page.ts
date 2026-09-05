@@ -32,9 +32,6 @@ function failureText(
   failure: ControlPlaneLoginFailure,
   source: LoginSubmissionSource | null,
 ): string {
-  if (failure === 'account-disabled') {
-    return 'This account is disabled. Ask an Owner to restore access.'
-  }
   if (source === 'initialization') {
     switch (failure) {
       case 'invalid-credentials': return 'The bootstrap proof was rejected.'

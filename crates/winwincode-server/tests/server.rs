@@ -27,7 +27,7 @@ use winwincode_api::generated::{
     Scope, TerminalErrorCode, UserActor, UserActorKind,
 };
 use winwincode_control_plane::{EnterpriseIdentityService, generate_api_token};
-use winwincode_domain::{ApiTokenId, OrganizationId, UserAccountRole, UserId};
+use winwincode_domain::{ApiTokenId, Instant, OrganizationId, UserAccountRole, UserId};
 use winwincode_server::{
     ApiError, AuthSessionBootstrap, AuthSessionConfig, AuthenticatedPrincipal, ControlPlaneApiPort,
     EnterpriseRequestAuthenticator, EventSubscription, RequestAuthenticator, RunningServer,
@@ -732,7 +732,7 @@ async fn session_context_isolates_users_shrinks_scope_revokes_and_survives_resta
             "Ada",
             UserAccountRole::Member,
             "member-password-1",
-            &winwincode_domain::Instant("2027-05-01T08:00:00.000Z".to_owned()),
+            &Instant("2027-05-01T08:00:00.000Z".to_owned()),
         )
         .expect("member account");
     let first_server = start_server(
@@ -2195,4 +2195,134 @@ async fn unauthenticated_requests_are_rejected() {
         "{early_login}"
     );
     running.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn initialization_status_is_public_and_reflects_the_durable_marker() {
+    let running = start_server(
+        config("127.0.0.1:0".parse().expect("address")),
+        auth(),
+        Arc::new(FakeApi::default()),
+    )
+    .await
+    .expect("start server");
+    let address = running.local_address();
+
+    // Unauthenticated and credential-free: the probe publishes exactly the
+    // schema version and the boolean, nothing else.
+    let before = http_request(
+        address,
+        &origin_get("/api/v1/server/initialization", "https://client.example"),
+    )
+    .await;
+    assert!(before.starts_with("HTTP/1.1 200 OK"), "{before}");
+    assert!(before.contains("cache-control: no-store"), "{before}");
+    assert_eq!(
+        response_json(&before),
+        json!({ "schemaVersion": "winwincode/v1", "initialized": false })
+    );
+
+    bootstrap_cookie(address).await;
+
+    let after = http_request(
+        address,
+        &origin_get("/api/v1/server/initialization", "https://client.example"),
+    )
+    .await;
+    assert!(after.starts_with("HTTP/1.1 200 OK"), "{after}");
+    assert_eq!(
+        response_json(&after),
+        json!({ "schemaVersion": "winwincode/v1", "initialized": true })
+    );
+    running.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn an_existing_owner_rejects_browser_bootstrap_initialization() {
+    let directory = test_directory("winwincode-cli-owner-bootstrap-test");
+    // The CLI's first-Owner command writes the account without the
+    // session-store marker; the Server must still refuse a browser bootstrap
+    // and report itself initialized through the shared active-Owner fact.
+    let accounts = Arc::new(UserAccountService::open(&directory).expect("account service"));
+    accounts
+        .initialize_owner(
+            OWNER_USERNAME,
+            OWNER_PASSWORD,
+            &Instant("2027-05-01T08:00:00.000Z".to_owned()),
+        )
+        .expect("CLI first owner");
+    let (_, manager) = open_auth(&directory, "proof-late-bootstrap", vec![fixture_scope(1)]);
+    // The CLI path leaves no durable session-store marker behind.
+    assert!(manager_marker_is_absent(&directory));
+    let running = start_server(
+        config("127.0.0.1:0".parse().expect("address")),
+        manager,
+        Arc::new(FakeApi::default()),
+    )
+    .await
+    .expect("start server");
+    let address = running.local_address();
+
+    let status = http_request(
+        address,
+        &origin_get("/api/v1/server/initialization", "https://client.example"),
+    )
+    .await;
+    assert!(status.starts_with("HTTP/1.1 200 OK"), "{status}");
+    assert_eq!(response_json(&status)["initialized"], json!(true));
+
+    // A fresh bootstrap proof cannot create a second Owner.
+    let bootstrap = initialize_owner(
+        address,
+        "proof-late-bootstrap",
+        "second",
+        "second-owner-password",
+    )
+    .await;
+    assert!(
+        bootstrap.starts_with("HTTP/1.1 409 Conflict"),
+        "{bootstrap}"
+    );
+    assert!(bootstrap.contains("WRONG_STATE"), "{bootstrap}");
+
+    // The closed loop: the CLI-created Owner signs in normally.
+    let (cookie, session) = login_as(address, OWNER_USERNAME, OWNER_PASSWORD).await;
+    assert_eq!(session["actor"]["kind"], "user");
+    assert!(
+        current_session(address, &cookie)
+            .await
+            .starts_with("HTTP/1.1 200 OK")
+    );
+    drop(accounts);
+    running.shutdown().await.expect("shutdown");
+    fs::remove_dir_all(directory).expect("remove CLI-owner directory");
+}
+
+/// Reads whether the session store carries a durable initialization marker.
+fn manager_marker_is_absent(directory: &std::path::Path) -> bool {
+    let database_path = directory
+        .join("auth-sessions")
+        .join("auth-sessions.sqlite3");
+    let connection = rusqlite::Connection::open_with_flags(
+        database_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .expect("open session store");
+    let marker_table: i64 = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master
+             WHERE type = 'table' AND name = 'server_initialization')",
+            [],
+            |row| row.get(0),
+        )
+        .expect("marker table probe");
+    if marker_table == 0 {
+        return true;
+    }
+    let marker_rows: i64 = connection
+        .query_row("SELECT COUNT(*) FROM server_initialization", [], |row| {
+            row.get(0)
+        })
+        .expect("marker row count");
+    marker_rows == 0
 }

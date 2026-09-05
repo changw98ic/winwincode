@@ -12,7 +12,9 @@
 use std::fmt;
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 
+use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use winwincode_domain::{
     Instant, Revision, UserAccount, UserAccountRole, UserAccountState, UserId,
 };
@@ -20,6 +22,10 @@ use winwincode_storage::SqliteStorage;
 use winwincode_storage::UserAccountStoreErrorKind;
 
 use crate::password_hash::{hash_password, verify_password};
+
+/// How long one read-only probe waits for a concurrent writer. Matches the
+/// storage adapter's busy bound so Server and CLI probes behave alike.
+const PROBE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Crockford-style identifier alphabet shared with the canonical `usr_`
 /// identifier rules in the domain model (no `I`, `L`, `O`, or `U`).
@@ -112,6 +118,51 @@ impl UserAccountService {
         self.with_ledger(|ledger| ledger.find(user_id).map_err(|store| storage_error(&store)))
     }
 
+    /// Loads the durable active Owner's identity, if one exists, through one
+    /// read-only probe of the ledger-owned `users` table.
+    ///
+    /// "One active Owner exists" is the shared initialization authority for
+    /// both first-Owner paths: the browser bootstrap writes the account plus
+    /// the session-store marker, while the CLI's `create --role owner` writes
+    /// the same account without the marker. Both surfaces therefore agree on
+    /// one durable fact, and a disabled-only Owner leaves the recovery path
+    /// open.
+    ///
+    /// # Errors
+    ///
+    /// Reports an unavailable store.
+    pub fn active_owner_id(&self) -> Result<Option<UserId>, UserAccountServiceError> {
+        let database_path = {
+            let guard = self.storage.lock().map_err(|_| storage_unavailable())?;
+            guard.database_path().to_path_buf()
+        };
+        let connection =
+            Connection::open_with_flags(&database_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .map_err(|_| storage_unavailable())?;
+        connection
+            .busy_timeout(PROBE_BUSY_TIMEOUT)
+            .map_err(|_| storage_unavailable())?;
+        let users_table: i64 = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master
+                 WHERE type = 'table' AND name = 'users')",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|_| storage_unavailable())?;
+        if users_table != 1 {
+            return Ok(None);
+        }
+        connection
+            .query_row(
+                "SELECT user_id FROM users WHERE role = 'owner' AND state = 'active' LIMIT 1",
+                [],
+                |row| Ok(UserId(row.get(0)?)),
+            )
+            .optional()
+            .map_err(|_| storage_unavailable())
+    }
+
     /// Normalizes one raw username: trim first, then lowercase; the
     /// normalized form must not contain any whitespace. The raw username is
     /// stored exactly as supplied.
@@ -175,13 +226,15 @@ impl UserAccountService {
     /// Creates the first Owner account with a fresh canonical `usr_` id.
     ///
     /// The per-Server one-shot initialization gate lives in the session
-    /// manager's durable marker; this layer additionally refuses any request
+    /// manager's durable marker, and one durable active Owner — from the
+    /// browser bootstrap or from the CLI's `create --role owner` — closes
+    /// this path permanently. This layer additionally refuses any request
     /// whose normalized username is already taken.
     ///
     /// # Errors
     ///
-    /// Rejects an occupied normalized username, invalid input, and storage
-    /// failure.
+    /// Rejects an existing active Owner, an occupied normalized username,
+    /// invalid input, and storage failure.
     pub fn initialize_owner(
         &self,
         username: &str,
@@ -189,6 +242,12 @@ impl UserAccountService {
         now: &Instant,
     ) -> Result<UserAccount, UserAccountServiceError> {
         Self::validate_password(password)?;
+        if self.active_owner_id()?.is_some() {
+            return Err(error(
+                UserAccountServiceErrorKind::AlreadyInitialized,
+                "server initialization already completed",
+            ));
+        }
         let password_hash = hash_password(password).map_err(|()| hashing_unavailable())?;
         self.with_ledger(|ledger| {
             let normalized = Self::normalize_username(username)?;
@@ -526,6 +585,49 @@ mod tests {
             UserAccountServiceErrorKind::AlreadyInitialized
         );
         assert_eq!(UserAccountService::stored_username("  Ada  "), "Ada");
+        drop(service);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn active_owner_blocks_a_second_owner_from_either_initialization_path() {
+        let (service, directory) = service("shared-authority");
+        assert_eq!(service.active_owner_id().expect("empty store"), None);
+        let owner = service
+            .initialize_owner("Wen", "first-owner-password", &now())
+            .expect("first owner");
+        assert_eq!(
+            service.active_owner_id().expect("active owner"),
+            Some(owner.user_id.clone())
+        );
+
+        // A second Owner under a fresh username is refused exactly like a
+        // repeated username: one active Owner closes initialization for both
+        // the browser bootstrap and the CLI.
+        let refused = service
+            .initialize_owner("Ada", "second-owner-password", &now())
+            .expect_err("second owner initialization");
+        assert_eq!(
+            refused.kind(),
+            UserAccountServiceErrorKind::AlreadyInitialized
+        );
+
+        // A disabled-only Owner no longer blocks bootstrap, keeping the
+        // recovery path open.
+        let disabled = service
+            .set_state(
+                &owner.user_id,
+                &owner.revision,
+                UserAccountState::Disabled,
+                &now(),
+            )
+            .expect("disable");
+        assert_eq!(service.active_owner_id().expect("no active owner"), None);
+        let recovered = service
+            .initialize_owner("Ada", "recovery-owner-password", &now())
+            .expect("recovery owner");
+        assert_eq!(recovered.role, UserAccountRole::Owner);
+        assert_eq!(disabled.state, UserAccountState::Disabled);
         drop(service);
         let _ = std::fs::remove_dir_all(directory);
     }
