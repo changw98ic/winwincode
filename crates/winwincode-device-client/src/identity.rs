@@ -236,6 +236,83 @@ pub fn ensure_device_identity(
     })
 }
 
+/// Loads the durable device identity without mutating anything.
+///
+/// Unlike [`ensure_device_identity`] this never rotates the
+/// `clientInstanceId`, so read-only callers (status display) can inspect the
+/// identity without producing a new launch identity. Returns `None` before
+/// the first boot.
+///
+/// # Errors
+///
+/// Returns an adapter-neutral error when the store is closed or the stored
+/// rows are inconsistent, and an adapter-neutral error when a read fails.
+pub fn load_device_identity(
+    store: &DeviceStore,
+) -> Result<Option<IdentityRecord>, DeviceStoreError> {
+    let connection = store.connection()?;
+    let stored: Option<(String, String, String, String, i64)> = connection
+        .query_row(
+            "SELECT device_id, client_node_id, public_client_id, created_at, revision \
+             FROM device_identity",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(sql_error)?;
+    let Some((device_id, client_node_id, public_client_id, created_at, revision)) = stored else {
+        return Ok(None);
+    };
+    let stored_credential: (Vec<u8>, String, i64, String) = connection
+        .query_row(
+            "SELECT credential_secret, credential_digest, credential_generation, rotated_at \
+             FROM device_credential WHERE device_id = ?1",
+            [device_id.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()
+        .map_err(sql_error)?
+        .ok_or_else(|| {
+            DeviceStoreError::adapter("device identity exists without a durable credential")
+        })?;
+    let (secret, digest, generation, _rotated_at) = stored_credential;
+    let generation = u64::try_from(generation)
+        .map_err(|_| DeviceStoreError::adapter("stored credential generation is negative"))?;
+    validate_credential_rows(&device_id, &secret, &digest, generation)?;
+    let revision = u64::try_from(revision)
+        .map_err(|_| DeviceStoreError::adapter("stored identity revision is negative"))?;
+    let current_instance_id: String = connection
+        .query_row(
+            "SELECT current_instance_id FROM device_identity WHERE device_id = ?1",
+            [device_id.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(sql_error)?;
+    Ok(Some(IdentityRecord {
+        identity: DeviceIdentity {
+            device_id,
+            client_node_id,
+            public_client_id,
+        },
+        credential: DeviceCredential {
+            secret,
+            digest,
+            generation,
+        },
+        current_instance_id,
+        created_at,
+        revision,
+    }))
+}
+
 /// Adopts the server-issued enrollment identity: backfills the persisted
 /// identity row with the assigned `clientNodeId` and `publicClientId` and
 /// replaces the local credential secret with the issued Device Credential.
@@ -556,8 +633,9 @@ fn credential_digest(secret: &[u8]) -> String {
 
 /// Generates one canonical `prefix` + 26 character Crockford identifier, the
 /// same encoding the server assigns (`cnd_` node ids) and the registry
-/// validates (`cix_` instance ids).
-fn generate_prefixed_id(prefix: &str) -> Result<String, DeviceStoreError> {
+/// validates (`cix_` instance ids); also used for locally generated
+/// `cct_` connect code ids.
+pub(crate) fn generate_prefixed_id(prefix: &str) -> Result<String, DeviceStoreError> {
     let mut random = [0_u8; 13];
     fill_random(&mut random)?;
     let mut identity = String::with_capacity(prefix.len() + CANONICAL_ID_SUFFIX_LEN);

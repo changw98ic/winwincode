@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Local device-client `SQLite` store holding the eleven local tables from
-//! plan section 8.
+//! plan section 8 plus the two CLIENT-200.2 tables (`connect_code_state`,
+//! `client_connection_policy`) for the dynamic connect code and the local
+//! lock/new-connection policy.
 //!
 //! The open sequence, migration style, transaction discipline, and the
 //! static-SQL-only rule deliberately mirror `crates/winwincode-storage`, the
@@ -22,6 +24,7 @@ use std::thread;
 use std::time::{Duration, Instant as StdInstant};
 
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
+use winwincode_client_port::domain::{ClientLockState, ConnectCodeState};
 use winwincode_client_port::exchange::{
     CompactingOutbox, FrameCodec, FrameOutbox, OutboxSnapshot, StoredFrame,
 };
@@ -31,9 +34,12 @@ use winwincode_client_port::messages::{
 
 /// Current schema version of the local device-client database. Version 2
 /// added the server-issued `client_node_id` column to `device_identity`
-/// (plan 17.1 enrollment adoption); no version-1 database ever shipped, so
-/// older databases fail closed as unsupported.
-pub const CLIENT_STORE_SCHEMA_VERSION: i64 = 2;
+/// (plan 17.1 enrollment adoption). Version 3 added the two CLIENT-200.2
+/// tables (`connect_code_state`, `client_connection_policy`) holding the
+/// durable state of the dynamic connect code and the local lock/new-connection
+/// policy. No version-1 or version-2 database ever shipped, so older
+/// databases fail closed as unsupported.
+pub const CLIENT_STORE_SCHEMA_VERSION: i64 = 3;
 
 const DATABASE_FILE_NAME: &str = "device-client.sqlite3";
 const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -190,6 +196,43 @@ pub struct ClientInboxCursorUpdate {
     pub last_sequence: u64,
     pub last_message_id: Option<String>,
     /// RFC 3339 timestamp supplied by the caller's clock.
+    pub updated_at: String,
+}
+
+/// Durable state of the currently published dynamic connect code
+/// (CLIENT-200.2, plan 11.3).
+///
+/// LOCAL ONLY: the plaintext code never persists — this record carries the
+/// `sha256:` digest plus the metadata needed to answer
+/// `client.access.challenge` with the code-generation verdict.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConnectCodeStateRecord {
+    pub connect_code_id: String,
+    /// `sha256:` digest of the 8-digit plaintext code.
+    pub code_digest: String,
+    /// Monotonic publication generation; a refresh replaces the row with
+    /// `generation + 1`, invalidating every older generation.
+    pub generation: u64,
+    /// `clientInstanceId` of the process that published the code.
+    pub issued_by_instance_id: String,
+    /// RFC 3339 expiry of the code (default 120 seconds after issuance).
+    pub expires_at: String,
+    /// Lifecycle state (`active`, or `revoked` after a local disable).
+    pub state: ConnectCodeState,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Durable local connection policy (CLIENT-200.2, plan 11.1/12.1).
+///
+/// Mirrored into every `client.hello` / `client.heartbeat` report and
+/// enforced against `client.access.challenge`: while the node is locked or
+/// new connections are disabled, every challenge is rejected.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConnectionPolicyRecord {
+    pub accepting_connections: bool,
+    pub lock_state: ClientLockState,
+    /// RFC 3339 timestamp of the last policy change.
     pub updated_at: String,
 }
 
@@ -665,6 +708,184 @@ impl DeviceStore {
                 "outbox message id {message_id} does not exist"
             )));
         }
+        Ok(())
+    }
+
+    /// Loads the durable state of the currently published connect code.
+    ///
+    /// The plaintext code is never stored; only this digest-bearing record
+    /// survives a restart so challenges stay answerable across process
+    /// launches.
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter-neutral error when the read fails, the store is
+    /// closed, or the stored row disagrees with its schema vocabulary.
+    pub fn connect_code_state(&self) -> Result<Option<ConnectCodeStateRecord>, DeviceStoreError> {
+        self.connection()?
+            .query_row(
+                "SELECT connect_code_id, code_digest, generation, issued_by_instance_id, \
+                 expires_at, state, created_at, updated_at \
+                 FROM connect_code_state WHERE singleton = 1",
+                [],
+                row_to_connect_code_state,
+            )
+            .optional()
+            .map_err(sql_error)
+    }
+
+    /// Replaces the durable connect-code state with the next publication.
+    ///
+    /// The replacement is generation-monotonic: a record whose
+    /// [`ConnectCodeStateRecord::generation`] does not strictly advance past
+    /// the stored generation is rejected, so two racing publishers can never
+    /// end up with colliding generations.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DeviceStoreErrorKind::InvalidInput`] for an empty or
+    /// overlong field, [`DeviceStoreErrorKind::Conflict`] for a
+    /// non-advancing generation, and an adapter-neutral error when the write
+    /// fails or the store is closed.
+    pub fn replace_connect_code_state(
+        &mut self,
+        record: &ConnectCodeStateRecord,
+    ) -> Result<(), DeviceStoreError> {
+        validate_connect_code_record(record)?;
+        let connection = self.connection_mut()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sql_error)?;
+        let stored: Option<i64> = transaction
+            .query_row(
+                "SELECT generation FROM connect_code_state WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(sql_error)?;
+        if stored.is_some_and(|stored| {
+            u64::try_from(stored).is_ok_and(|stored| stored >= record.generation)
+        }) {
+            return Err(DeviceStoreError::conflict(format!(
+                "connect code generation {} does not advance past the stored generation",
+                record.generation
+            )));
+        }
+        transaction
+            .execute(
+                "INSERT INTO connect_code_state \
+                 (singleton, connect_code_id, code_digest, generation, \
+                  issued_by_instance_id, expires_at, state, created_at, updated_at) \
+                 VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
+                 ON CONFLICT (singleton) DO UPDATE SET \
+                 connect_code_id = excluded.connect_code_id, \
+                 code_digest = excluded.code_digest, \
+                 generation = excluded.generation, \
+                 issued_by_instance_id = excluded.issued_by_instance_id, \
+                 expires_at = excluded.expires_at, \
+                 state = excluded.state, \
+                 created_at = excluded.created_at, \
+                 updated_at = excluded.updated_at",
+                params![
+                    record.connect_code_id,
+                    record.code_digest,
+                    i64::try_from(record.generation).map_err(|_| {
+                        DeviceStoreError::invalid("connect code generation is out of range")
+                    })?,
+                    record.issued_by_instance_id,
+                    record.expires_at,
+                    connect_code_state_to_str(record.state),
+                    record.created_at,
+                    record.updated_at,
+                ],
+            )
+            .map_err(sql_error)?;
+        transaction.commit().map_err(sql_error)
+    }
+
+    /// Marks the stored connect code `revoked` (the local disable). A no-op
+    /// returning `false` when no active code exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter-neutral error when the write fails or the store is
+    /// closed.
+    pub fn revoke_connect_code_state(
+        &mut self,
+        revoked_at: &str,
+    ) -> Result<bool, DeviceStoreError> {
+        require_non_empty(revoked_at, "revoked at", MAX_ID_BYTES)?;
+        let changed = self
+            .connection_mut()?
+            .execute(
+                "UPDATE connect_code_state SET state = 'revoked', updated_at = ?1 \
+                 WHERE singleton = 1 AND state = 'active'",
+                params![revoked_at],
+            )
+            .map_err(sql_error)?;
+        Ok(changed > 0)
+    }
+
+    /// Loads the durable local connection policy.
+    ///
+    /// `None` before the first policy write; callers default to accepting
+    /// connections with an unlocked node.
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter-neutral error when the read fails or the store is
+    /// closed.
+    pub fn connection_policy(&self) -> Result<Option<ConnectionPolicyRecord>, DeviceStoreError> {
+        self.connection()?
+            .query_row(
+                "SELECT accepting_connections, lock_state, updated_at \
+                 FROM client_connection_policy WHERE singleton = 1",
+                [],
+                |row| {
+                    let accepting: i64 = row.get(0)?;
+                    let lock_state: String = row.get(1)?;
+                    Ok(ConnectionPolicyRecord {
+                        accepting_connections: accepting != 0,
+                        lock_state: parse_lock_state(&lock_state)?,
+                        updated_at: row.get(2)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(sql_error)
+    }
+
+    /// Persists the local connection policy (lock state plus whether new
+    /// connections are accepted).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DeviceStoreErrorKind::InvalidInput`] for an empty timestamp
+    /// and an adapter-neutral error when the write fails or the store is
+    /// closed.
+    pub fn put_connection_policy(
+        &mut self,
+        record: &ConnectionPolicyRecord,
+    ) -> Result<(), DeviceStoreError> {
+        require_non_empty(&record.updated_at, "policy updated at", MAX_ID_BYTES)?;
+        let connection = self.connection_mut()?;
+        connection
+            .execute(
+                "INSERT INTO client_connection_policy \
+                 (singleton, accepting_connections, lock_state, updated_at) \
+                 VALUES (1, ?1, ?2, ?3) \
+                 ON CONFLICT (singleton) DO UPDATE SET \
+                 accepting_connections = excluded.accepting_connections, \
+                 lock_state = excluded.lock_state, \
+                 updated_at = excluded.updated_at",
+                params![
+                    i64::from(record.accepting_connections),
+                    lock_state_to_str(record.lock_state),
+                    record.updated_at,
+                ],
+            )
+            .map_err(sql_error)?;
         Ok(())
     }
 }
@@ -1286,6 +1507,88 @@ fn row_to_outbox_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<ClientOutbox
     })
 }
 
+fn row_to_connect_code_state(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConnectCodeStateRecord> {
+    let generation: i64 = row.get(2)?;
+    Ok(ConnectCodeStateRecord {
+        connect_code_id: row.get(0)?,
+        code_digest: row.get(1)?,
+        generation: u64::try_from(generation).map_err(|_| {
+            rusqlite::Error::FromSqlConversionFailure(
+                0,
+                rusqlite::types::Type::Integer,
+                "stored connect code generation is negative".into(),
+            )
+        })?,
+        issued_by_instance_id: row.get(3)?,
+        expires_at: row.get(4)?,
+        state: parse_connect_code_state(&row.get::<_, String>(5)?)?,
+        created_at: row.get(6)?,
+        updated_at: row.get(7)?,
+    })
+}
+
+fn parse_connect_code_state(value: &str) -> rusqlite::Result<ConnectCodeState> {
+    match value {
+        "active" => Ok(ConnectCodeState::Active),
+        "consumed" => Ok(ConnectCodeState::Consumed),
+        "expired" => Ok(ConnectCodeState::Expired),
+        "revoked" => Ok(ConnectCodeState::Revoked),
+        other => Err(rusqlite::Error::FromSqlConversionFailure(
+            0,
+            rusqlite::types::Type::Text,
+            format!("stored connect code state {other} is not a lifecycle state").into(),
+        )),
+    }
+}
+
+const fn connect_code_state_to_str(state: ConnectCodeState) -> &'static str {
+    match state {
+        ConnectCodeState::Active => "active",
+        ConnectCodeState::Consumed => "consumed",
+        ConnectCodeState::Expired => "expired",
+        ConnectCodeState::Revoked => "revoked",
+    }
+}
+
+fn parse_lock_state(value: &str) -> rusqlite::Result<ClientLockState> {
+    match value {
+        "unlocked" => Ok(ClientLockState::Unlocked),
+        "locked" => Ok(ClientLockState::Locked),
+        other => Err(rusqlite::Error::FromSqlConversionFailure(
+            0,
+            rusqlite::types::Type::Text,
+            format!("stored lock state {other} is not a lock state").into(),
+        )),
+    }
+}
+
+const fn lock_state_to_str(state: ClientLockState) -> &'static str {
+    match state {
+        ClientLockState::Unlocked => "unlocked",
+        ClientLockState::Locked => "locked",
+    }
+}
+
+/// Validates the durable connect-code record fields before any write.
+fn validate_connect_code_record(record: &ConnectCodeStateRecord) -> Result<(), DeviceStoreError> {
+    require_non_empty(&record.connect_code_id, "connect code id", MAX_ID_BYTES)?;
+    require_non_empty(&record.code_digest, "connect code digest", MAX_ID_BYTES)?;
+    require_non_empty(
+        &record.issued_by_instance_id,
+        "issued by instance id",
+        MAX_ID_BYTES,
+    )?;
+    require_non_empty(&record.expires_at, "connect code expires at", MAX_ID_BYTES)?;
+    require_non_empty(&record.created_at, "connect code created at", MAX_ID_BYTES)?;
+    require_non_empty(&record.updated_at, "connect code updated at", MAX_ID_BYTES)?;
+    if record.generation == 0 {
+        return Err(DeviceStoreError::invalid(
+            "connect code generation must be positive",
+        ));
+    }
+    Ok(())
+}
+
 const STORE_SCHEMA: &str = r"
 CREATE TABLE device_identity (
     device_id TEXT PRIMARY KEY NOT NULL,
@@ -1399,6 +1702,30 @@ CREATE TABLE client_inbox_cursor (
     server_profile_id TEXT PRIMARY KEY NOT NULL,
     last_sequence INTEGER NOT NULL CHECK (last_sequence >= 0),
     last_message_id TEXT,
+    updated_at TEXT NOT NULL
+);
+-- CLIENT-200.2 (plan 11.3): local state of the currently published dynamic
+-- connect code. The plaintext code never persists; only its sha256 digest
+-- plus the metadata needed to answer client.access.challenge survive a
+-- restart. A refresh replaces the single row at generation + 1.
+CREATE TABLE connect_code_state (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    connect_code_id TEXT NOT NULL,
+    code_digest TEXT NOT NULL,
+    generation INTEGER NOT NULL CHECK (generation > 0),
+    issued_by_instance_id TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('active', 'consumed', 'expired', 'revoked')),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+-- CLIENT-200.2 (plan 11.1/12.1): durable local connection policy, mirrored
+-- into client.hello / client.heartbeat and enforced against
+-- client.access.challenge.
+CREATE TABLE client_connection_policy (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    accepting_connections INTEGER NOT NULL CHECK (accepting_connections IN (0, 1)),
+    lock_state TEXT NOT NULL CHECK (lock_state IN ('unlocked', 'locked')),
     updated_at TEXT NOT NULL
 );
 ";
@@ -1579,6 +1906,31 @@ const STORE_SCHEMA_COLUMNS: &[(&str, &str, &[&str])] = &[
             "server_profile_id",
             "last_sequence",
             "last_message_id",
+            "updated_at",
+        ],
+    ),
+    (
+        "connect_code_state",
+        "PRAGMA table_info(connect_code_state)",
+        &[
+            "singleton",
+            "connect_code_id",
+            "code_digest",
+            "generation",
+            "issued_by_instance_id",
+            "expires_at",
+            "state",
+            "created_at",
+            "updated_at",
+        ],
+    ),
+    (
+        "client_connection_policy",
+        "PRAGMA table_info(client_connection_policy)",
+        &[
+            "singleton",
+            "accepting_connections",
+            "lock_state",
             "updated_at",
         ],
     ),

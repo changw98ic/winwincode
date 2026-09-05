@@ -55,7 +55,7 @@ fn envelope(message_id: &str, client_instance_id: &str, sequence: u64) -> Client
 
 #[test]
 fn open_migrates_the_full_local_schema_and_round_trips_it() {
-    assert_eq!(winwincode_device_client::CLIENT_STORE_SCHEMA_VERSION, 2);
+    assert_eq!(winwincode_device_client::CLIENT_STORE_SCHEMA_VERSION, 3);
     let (root, mut store) = open_store("schema-round-trip");
     let database_path = store.database_path().to_path_buf();
     let canonical_root = fs::canonicalize(&root).expect("root should canonicalize");
@@ -91,7 +91,7 @@ fn open_migrates_the_full_local_schema_and_round_trips_it() {
     let version: i64 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .expect("schema version should be readable");
-    assert_eq!(version, 2);
+    assert_eq!(version, 3);
     assert_canonical_local_tables(&connection);
     connection.close().expect("inspection close");
     fs::remove_dir_all(root).expect("database directory should be released");
@@ -251,6 +251,31 @@ const CANONICAL_LOCAL_TABLES: &[(&str, &str, &[&str])] = &[
             "server_profile_id",
             "last_sequence",
             "last_message_id",
+            "updated_at",
+        ],
+    ),
+    (
+        "connect_code_state",
+        "PRAGMA table_info(connect_code_state)",
+        &[
+            "singleton",
+            "connect_code_id",
+            "code_digest",
+            "generation",
+            "issued_by_instance_id",
+            "expires_at",
+            "state",
+            "created_at",
+            "updated_at",
+        ],
+    ),
+    (
+        "client_connection_policy",
+        "PRAGMA table_info(client_connection_policy)",
+        &[
+            "singleton",
+            "accepting_connections",
+            "lock_state",
             "updated_at",
         ],
     ),
