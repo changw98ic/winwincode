@@ -26,6 +26,7 @@ mod execution_registry;
 mod execution_scope_replacement;
 mod git_candidate_retention;
 mod git_source;
+mod local_candidate;
 mod provider_exchange;
 mod repository_binding;
 mod repository_scheduler;
@@ -158,6 +159,11 @@ pub use git_source::{
     GitCandidateReviewFileStatus, GitSourceHunk, GitSourcePath, GitSourcePathState,
     GitSourceResolver, LocalGitSourceResolver, ValidatedGitCandidateDiff,
     ValidatedGitCandidateReview, ValidatedGitSourceArtifact,
+};
+pub use local_candidate::{
+    LocalApplyReceiptRecord, LocalApplyResult, LocalApplySettlement, LocalApplyStrategy,
+    LocalCandidateLedger, LocalCandidateReceiptRecord, LocalCandidateReceiptState,
+    LocalCandidateRetained, LocalCandidateStoreError, LocalCandidateStoreErrorKind,
 };
 pub use provider_exchange::{
     ModelRequestPoolAuthority, ProviderExchangeBegin, ProviderExchangeFailure,

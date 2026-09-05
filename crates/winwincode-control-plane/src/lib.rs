@@ -45,6 +45,7 @@ mod enterprise_scope_binding;
 mod enterprise_usage;
 pub mod execution_port_service;
 mod gate_interaction_service;
+mod local_candidate;
 pub mod local_secret_store;
 mod model_admission;
 mod model_execution_runtime;
@@ -274,6 +275,11 @@ pub use gate_interaction_service::{
     GateInteractionServiceErrorCode, GateInteractionState, GateInteractionSubject,
     RegisterGateInteractionCommand, RespondGateInteractionCommand, RoutableGateDecision,
     RoutableGateDecisionKind,
+};
+pub use local_candidate::{
+    LocalApplyReceiptRecord, LocalApplyResult, LocalApplyStrategy, LocalCandidateReceiptRecord,
+    LocalCandidateReceiptState, LocalCandidateService, LocalCandidateServiceError,
+    LocalCandidateServiceErrorKind,
 };
 pub use local_secret_store::{
     LocalSecretCleanupReceipt, LocalSecretStoreAdapter, LocalSecretWriteReceipt,
