@@ -33,6 +33,12 @@
 //!   the four fenced command entry points (worker launch/stop, candidate
 //!   apply, repository mutation), with revision-bound tickets that a mirror
 //!   advance invalidates.
+//! - [`candidate_registry`]: the device-local candidate registry
+//!   (GIT-100.2, plan 7.9/15.2) — durable retention of frozen Worker
+//!   candidates (`candidate_local_refs`), the lease-stamped durable
+//!   `client.candidate.retained` uplink, restart recovery of the retained
+//!   set, and the read-only reconciliation of retained candidates against
+//!   the actual Git refs of their bound checkouts.
 //! - [`daemon`]: the periodic device-client exchange loop
 //!   (`POST /internal/v1/client/exchange`) over an injected transport:
 //!   enrollment adoption, hello announcement, heartbeat reporting,
@@ -51,7 +57,8 @@
 //!
 //! The local database never leaves the device: absolute paths stored in
 //! `repository_path_mapping` (and worker/candidate data directories) are
-//! never uploaded to any server.
+//! never uploaded to any server; the candidate registry reconciles against
+//! Git through those local paths and reports only stable identities.
 //!
 //! The SQLite storage patterns (open sequence, migration style, transaction
 //! discipline, static-SQL-only rule, and test infrastructure) deliberately
@@ -63,6 +70,7 @@
 
 #![allow(clippy::doc_markdown)]
 
+pub mod candidate_registry;
 pub mod connect_code;
 pub mod daemon;
 pub mod fencing;
@@ -72,6 +80,13 @@ pub mod repository;
 pub mod store;
 pub mod supervisor;
 
+pub use candidate_registry::{
+    CANDIDATE_REF_PREFIX, CandidateLocalRefRecord, CandidateReconciliation, CandidateRefVerdict,
+    CandidateRegistryError, CandidateRegistryErrorKind, CandidateRetainReport, CandidateRetention,
+    CandidateRetentionOutcome, candidate_local_ref, enqueue_candidate_retained,
+    reconcile_retained_candidates, record_candidate_retention, retain_candidate,
+    retained_candidates,
+};
 pub use connect_code::{
     CONNECT_CODE_DIGITS, CONNECT_CODE_TTL, ChallengeVerdict, ConnectCodeError,
     ConnectCodePlaintext, PublishedConnectCode,

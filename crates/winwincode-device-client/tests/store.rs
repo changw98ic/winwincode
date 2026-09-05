@@ -58,7 +58,7 @@ fn envelope(message_id: &str, client_instance_id: &str, sequence: u64) -> Client
 
 #[test]
 fn open_migrates_the_full_local_schema_and_round_trips_it() {
-    assert_eq!(winwincode_device_client::CLIENT_STORE_SCHEMA_VERSION, 5);
+    assert_eq!(winwincode_device_client::CLIENT_STORE_SCHEMA_VERSION, 6);
     let (root, mut store) = open_store("schema-round-trip");
     let database_path = store.database_path().to_path_buf();
     let canonical_root = fs::canonicalize(&root).expect("root should canonicalize");
@@ -94,7 +94,7 @@ fn open_migrates_the_full_local_schema_and_round_trips_it() {
     let version: i64 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .expect("schema version should be readable");
-    assert_eq!(version, 5);
+    assert_eq!(version, 6);
     assert_canonical_local_tables(&connection);
     connection.close().expect("inspection close");
     fs::remove_dir_all(root).expect("database directory should be released");
@@ -245,6 +245,9 @@ const CANONICAL_LOCAL_TABLES: &[(&str, &str, &[&str])] = &[
             "local_git_ref",
             "local_state",
             "created_at",
+            "candidate_ref",
+            "candidate_commit",
+            "retained_at",
         ],
     ),
     (
