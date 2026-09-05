@@ -231,6 +231,9 @@ fn service_drives_claim_ack_release_and_reapproval_across_a_fencing_chain() {
 }
 
 #[test]
+// The recovery matrix asserts many denial kinds in one durable scenario, so
+// the line-count lint is intentionally allowed for this single test.
+#[allow(clippy::too_many_lines)]
 fn service_maps_recovery_semantics_and_denial_kinds() {
     let mut storage = SqliteStorage::open(temporary_directory("recovery-errors")).expect("storage");
     let holder = user_id(2);

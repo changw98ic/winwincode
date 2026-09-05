@@ -26,6 +26,7 @@ mod execution_scope_replacement;
 mod git_candidate_retention;
 mod git_source;
 mod provider_exchange;
+mod repository_binding;
 mod repository_scheduler;
 mod repository_scheduler_replacement;
 mod scheduler_policy;
@@ -157,6 +158,12 @@ pub use provider_exchange::{
     ProviderExchangeState, ProviderExchangeStore, ProviderExchangeStoreError,
     ProviderExchangeStoreErrorCode, ProviderExchangeTerminal, ProviderExchangeTerminalProgress,
     ProviderExchangeTerminalStage,
+};
+pub use repository_binding::{
+    RepositoryAccessGrantIssuance, RepositoryAccessGrantRecord, RepositoryAvailability,
+    RepositoryBindingLedger, RepositoryBindingProjection, RepositoryBindingReceipt,
+    RepositoryBindingRecord, RepositoryBindingStoreError, RepositoryBindingStoreErrorKind,
+    RepositoryDirtyState, RepositoryGrantPermissions, RepositoryGrantState, RepositoryScanOutcome,
 };
 pub use repository_scheduler::{
     RepositoryScheduler, RepositorySchedulerCancellationReceipt,

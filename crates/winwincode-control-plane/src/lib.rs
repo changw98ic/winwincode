@@ -76,6 +76,7 @@ mod publication_preparation;
 mod publication_production;
 pub mod recovery_router;
 mod remote_worker_pool;
+mod repository_binding;
 mod repository_scheduler;
 mod responsibility_assignment;
 mod responsibility_assignment_authority;
@@ -431,6 +432,11 @@ pub use remote_worker_pool::{
     RemoteWorkerAuthenticator, RemoteWorkerConnection, RemoteWorkerConnectionState,
     RemoteWorkerCredential, RemoteWorkerPoolAdapter, RemoteWorkerPoolError,
     RemoteWorkerPoolErrorKind, RemoteWorkerPrincipal,
+};
+pub use repository_binding::{
+    RepositoryAccessGrantService, RepositoryAvailability, RepositoryBindingService,
+    RepositoryBindingServiceError, RepositoryBindingServiceErrorKind, RepositoryDirtyState,
+    RepositoryGrantState,
 };
 pub use repository_scheduler::{RepositoryExecutionScheduler, RepositoryExecutionSchedulerError};
 pub use responsibility_assignment::{
