@@ -1,3 +1,4 @@
+mod backup;
 mod cli;
 mod community_gate;
 mod device_admin;
@@ -8,6 +9,7 @@ mod model;
 mod repo_admin;
 mod user_admin;
 
+pub use backup::{BACKUP_HELP_LINES, BackupOutcome, run_backup};
 pub use cli::{WwcCliExit, render_help, run_cli};
 pub use community_gate::{
     COMMUNITY_LOCAL_GATE_SCHEMA_VERSION, CommunityGateFailureCategory, CommunityGateFailureCode,

@@ -51,7 +51,7 @@ pub fn run_cli(arguments: &[String], launcher: &dyn LocalLauncherPort) -> WwcCli
 }
 
 pub fn render_help() -> String {
-    [
+    let mut lines = vec![
         "WinWinCode 本地命令：",
         "  wwc init [PATH] [--confirm-git-init] [--baseline head|snapshot|cancel] [--confirm-snapshot] [--json]",
         "  wwc repo attach [PATH] [--baseline head|snapshot|cancel] [--confirm-snapshot] [--json]",
@@ -64,6 +64,9 @@ pub fn render_help() -> String {
         "  wwc user enable <USERNAME> [--data-dir PATH] [--json]",
         "  wwc user reset-password <USERNAME> [--data-dir PATH] [--json]",
         "  wwc device status|refresh-code|lock|unlock [--data-dir PATH] [--json]",
+    ];
+    lines.extend_from_slice(&crate::backup::BACKUP_HELP_LINES);
+    lines.extend([
         "  wwc help",
         "",
         "Git 初始化和 Snapshot 都需要显式确认。Snapshot 使用专用 ref，不会修改当前分支、索引或 stash。",
@@ -74,8 +77,8 @@ pub fn render_help() -> String {
         "device 命令操作 Device Client 本地数据目录：--data-dir 为 Device Client 的数据目录。",
         "动态连接码明文只在 refresh-code 时显示一次，绝不写入日志或数据库；锁定期间新的连接验证一律拒绝。",
         "",
-    ]
-    .join("\n")
+    ]);
+    lines.join("\n")
 }
 
 fn run(arguments: &[String], launcher: &dyn LocalLauncherPort) -> Result<WwcCliExit, UsageError> {
@@ -102,6 +105,7 @@ fn run(arguments: &[String], launcher: &dyn LocalLauncherPort) -> Result<WwcCliE
         "doctor" => run_doctor(&arguments[1..], launcher),
         "user" => run_user(&arguments[1..]),
         "device" => run_device(&arguments[1..]),
+        "backup" => Ok(crate::backup::run_backup(&arguments[1..])),
         other => Err(UsageError(format!("未知命令 {other}。"))),
     }
 }
