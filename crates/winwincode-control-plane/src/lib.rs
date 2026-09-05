@@ -29,6 +29,7 @@ pub mod delivery_execution;
 mod delivery_production_adapters;
 mod delivery_transaction;
 mod delivery_verdict_authority;
+pub mod device_session_gate;
 mod durable_execution_port;
 mod enterprise_hierarchy;
 mod enterprise_identity;

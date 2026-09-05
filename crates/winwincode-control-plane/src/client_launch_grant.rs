@@ -276,6 +276,23 @@ impl<'storage> WorkerLaunchGrantService<'storage> {
             .active_grant_for_session(worker_session_id)?)
     }
 
+    /// Returns the newest launch grant anchored to one product session, if
+    /// any, whatever its lifecycle state: the anchor is the permission fact
+    /// that ties the session to device execution.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a non-canonical product session identity or storage failure.
+    pub fn newest_grant_for_product_session(
+        &mut self,
+        product_session_id: &str,
+    ) -> Result<Option<WorkerLaunchGrantRecord>, WorkerLaunchGrantServiceError> {
+        Ok(self
+            .storage
+            .worker_launch_grant_ledger()?
+            .newest_grant_for_product_session(product_session_id)?)
+    }
+
     /// Counts the non-terminal grants of one client node — the durable
     /// reservation view capacity is judged against (plan 14.5).
     ///
