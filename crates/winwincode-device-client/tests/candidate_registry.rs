@@ -525,7 +525,7 @@ fn the_retain_uplink_stamps_the_frame_with_the_mirrored_lease() {
     let expected_receipt_id: String = {
         let hex: String = COMMIT
             .chars()
-            .filter(|c| c.is_ascii_hexdigit())
+            .filter(char::is_ascii_hexdigit)
             .take(25)
             .collect();
         format!("lcr_{}G", hex.to_ascii_uppercase())

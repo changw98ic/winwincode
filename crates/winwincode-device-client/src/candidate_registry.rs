@@ -390,7 +390,7 @@ pub fn retain_candidate(
 fn deterministic_lcr_id(candidate_id: &str) -> String {
     let hex: String = candidate_id
         .chars()
-        .filter(|c| c.is_ascii_hexdigit())
+        .filter(char::is_ascii_hexdigit)
         .take(25)
         .map(|c| c.to_ascii_uppercase())
         .collect();

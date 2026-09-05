@@ -524,7 +524,7 @@ pub fn discard_candidate(
 fn deterministic_lar_id(candidate_id: &str, tag: char) -> String {
     let hex: String = candidate_id
         .chars()
-        .filter(|c| c.is_ascii_hexdigit())
+        .filter(char::is_ascii_hexdigit)
         .take(25)
         .map(|c| c.to_ascii_uppercase())
         .collect();

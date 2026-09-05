@@ -492,7 +492,7 @@ fn a_branch_creation_round_trips_without_touching_the_checkout() {
         let hex: String = state
             .candidate_commit
             .chars()
-            .filter(|c| c.is_ascii_hexdigit())
+            .filter(char::is_ascii_hexdigit)
             .take(25)
             .collect();
         format!("lar_{}G", hex.to_ascii_uppercase())

@@ -533,11 +533,11 @@ fn a_discard_deletes_the_created_branch_and_stamps_the_discarded_uplink() {
         let hex: String = state
             .candidate_commit
             .chars()
-            .filter(|c| c.is_ascii_hexdigit())
+            .filter(char::is_ascii_hexdigit)
             .take(25)
             .map(|c| c.to_ascii_uppercase())
             .collect();
-        format!("lar_{}H", hex)
+        format!("lar_{hex}H")
     };
     assert_eq!(
         receipt.local_apply_receipt_id, expected_receipt_id,
