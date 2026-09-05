@@ -47,6 +47,8 @@ use crate::client_occupancy::ClientOccupancyApplication;
 use crate::client_occupancy::ClientOccupancyConfig;
 use crate::client_occupancy::ClientOccupancyError;
 use crate::client_occupancy::ClientOccupancyErrorKind;
+use crate::client_repositories::ClientRepositoriesApplication;
+use crate::client_repositories::ClientRepositoriesErrorKind;
 use crate::config::{ServerConfig, ServerTls};
 use crate::enterprise_identity_protocol::{
     EnterpriseIdentityProtocolApplication, router as enterprise_identity_router,
@@ -120,6 +122,7 @@ struct ServerState {
     client_exchange: Option<Arc<dyn ClientExchangePort>>,
     client_connections: Option<Arc<ClientConnectionsApplication>>,
     client_occupancy: Option<Arc<ClientOccupancyApplication>>,
+    client_repositories: Option<Arc<ClientRepositoriesApplication>>,
 }
 
 /// Running standalone listener with deterministic graceful shutdown.
@@ -262,6 +265,10 @@ pub async fn start_server_with_remote_worker(
         // Servers without a Client surface keep the occupancy routes absent.
         None => None,
     };
+    // Servers without a Client surface keep the repository directory absent.
+    let client_repositories = client_exchange
+        .as_ref()
+        .map(|_| Arc::new(ClientRepositoriesApplication::open(config.data_directory())));
     // The periodic offline sweep projects heartbeat-stale devices to
     // `offline` and their active occupancy leases to `recovery_pending`
     // (plan 12.5). Each iteration opens and closes its own storage
@@ -288,6 +295,7 @@ pub async fn start_server_with_remote_worker(
         client_exchange,
         client_connections,
         client_occupancy,
+        client_repositories,
     };
     let router = router(state, enterprise_identity);
     let handle = Handle::new();
@@ -415,6 +423,10 @@ fn router(
             "/api/v1/clients/{client_id}/occupancy",
             get(client_occupancy_status).options(preflight),
         )
+        .route(
+            "/api/v1/repositories",
+            get(list_repositories).options(preflight),
+        )
         .fallback(not_found)
         .with_state(state);
     let router = enterprise_identity.map_or(router.clone(), |application| {
@@ -525,6 +537,71 @@ async fn list_clients(State(state): State<ServerState>, headers: HeaderMap, uri:
     match application.list_clients(&user_id.0) {
         Ok(body) => json_response(StatusCode::OK, body, origin.as_ref()),
         Err(error) => connect_flow_error(&error, origin.as_ref()),
+    }
+}
+
+/// The signed-in user's repository directory for one Client (REPO-100.4):
+/// the dual-authorized repository list (plan 13.4), projected field-by-field
+/// onto the repo-ui facade shape (REPO-100.3).
+///
+/// Unlike every other browser route the Client identity arrives in the URL
+/// query (`?clientId=…`), so the shared `authorize` query rejection does not
+/// apply here; every other authentication step is identical.
+async fn list_repositories(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Response {
+    let Some(application) = &state.client_repositories else {
+        return not_found().await;
+    };
+    let origin = match allowed_origin(&state, &headers) {
+        Ok(origin) => origin,
+        Err(error) => return error.into_response(),
+    };
+    let credentials = match extract_credentials(&headers) {
+        Ok(credentials) => credentials,
+        Err(error) => return error.into_response(),
+    };
+    let Ok(principal) = state.authenticator.authenticate(&credentials) else {
+        return BoundaryError::new(
+            StatusCode::UNAUTHORIZED,
+            "AUTHENTICATION_REQUIRED",
+            "authentication failed",
+            origin,
+        )
+        .into_response();
+    };
+    let Some(user_id) = principal.actor_user_id() else {
+        return connect_error_response(
+            StatusCode::FORBIDDEN,
+            "PERMISSION_DENIED",
+            "a signed-in user is required",
+            origin.as_ref(),
+        );
+    };
+    match application.list(&user_id.0, uri.query()) {
+        Ok(body) => json_response(StatusCode::OK, body, origin.as_ref()),
+        Err(error) => {
+            let (status, code, message) = match error.kind() {
+                ClientRepositoriesErrorKind::InvalidRequest => (
+                    StatusCode::BAD_REQUEST,
+                    "INVALID_REQUEST",
+                    "repository list request is invalid",
+                ),
+                ClientRepositoriesErrorKind::ClientNotFound => (
+                    StatusCode::NOT_FOUND,
+                    "CLIENT_NOT_FOUND",
+                    "no client matches the requested id",
+                ),
+                ClientRepositoriesErrorKind::Unavailable => (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "SERVICE_UNAVAILABLE",
+                    "repository directory service is unavailable",
+                ),
+            };
+            connect_error_response(status, code, message, origin.as_ref())
+        }
     }
 }
 
