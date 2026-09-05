@@ -73,8 +73,8 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use winwincode_client_port::domain::{
     ClientArchitecture, ClientCapacityReport, ClientControlError, ClientControlErrorCode,
-    ClientControlMessageKind, ClientLockState, ClientPlatformTarget, CommandAckStatus,
-    OccupancyRejectReason, PresenceState,
+    ClientControlMessageKind, ClientLockState, ClientOccupancyReleaseMode, ClientPlatformTarget,
+    CommandAckStatus, OccupancyRejectReason, PresenceState,
 };
 use winwincode_client_port::exchange::{
     AckCursor, FrameCodec, FrameCodecError, FrameOutbox, OutboxBatch, OutboxError, OutboxSession,
@@ -98,6 +98,43 @@ use crate::store::{
     OccupancyMirrorUpdate, OccupancyReleaseIntentOutcome, OccupancyReleaseIntentRecord,
     ServerProfileRecord, envelope_kind,
 };
+
+/// Live worker-capacity facts for hello/heartbeat reports (plan 14.5).
+///
+/// The daemon's static [`DaemonConfig::capacity`] stays the report skeleton
+/// (`maxConcurrentWorkerSessions`, `draining`); the two live facts —
+/// `runningWorkerSessions` from the local process registry and
+/// `reservedWorkerSessions` under the simplified claim-time rule — come
+/// from the wired [`WorkerCapacitySource`] when one is present.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WorkerCapacitySnapshot {
+    /// Worker sessions whose registry row currently says `running`.
+    pub running_worker_sessions: u32,
+    /// Reserved-but-not-yet-running worker slots. Simplified v1 semantics:
+    /// one slot while the device holds an occupancy claim whose lease has no
+    /// running worker yet. The durable reservation math stays server-owned
+    /// (the Control Plane/FLOW epic) — this is the device's local hint only.
+    pub reserved_worker_sessions: u32,
+}
+
+/// The live capacity source the daemon consults on every hello/heartbeat
+/// (WORKER-100.2). Implemented by the local worker supervisor; tests inject
+/// fakes. Best effort: a source failure reports the last stored facts
+/// instead of blocking the exchange loop.
+pub trait WorkerCapacitySource: Send + Sync {
+    /// The live worker capacity facts to report.
+    fn worker_capacity(&self) -> WorkerCapacitySnapshot;
+}
+
+/// The local worker-stop hook the daemon invokes when a
+/// `cancel_tasks_and_release` occupancy release lands (plan 12.4): every
+/// supervised worker bound to the lease must stop. Implemented by the local
+/// worker supervisor; tests inject fakes.
+pub trait LeaseWorkerController: Send + Sync {
+    /// Stops every supervised worker bound to the lease and answers how
+    /// many workers a stop was requested for.
+    fn stop_lease_workers(&self, occupancy_lease_id: &str) -> usize;
+}
 
 /// Longest slice the run loop sleeps without re-reading the shutdown flag.
 const WAKE_SLICE: Duration = Duration::from_millis(20);
@@ -357,6 +394,9 @@ pub struct DaemonStatus {
     /// `client.occupancy.force_fence` commands applied (mirror overwritten
     /// with the higher token).
     pub occupancy_force_fences_applied: u64,
+    /// Supervised workers a stop was requested for by a
+    /// `cancel_tasks_and_release` occupancy release (WORKER-100.2).
+    pub workers_stopped_on_release: u64,
     /// Client-to-server frames handed to the transport so far.
     pub frames_sent: u64,
     /// Absolute server acknowledgement cursor after the last exchange.
@@ -429,6 +469,12 @@ pub struct DeviceDaemon {
     /// field. Restored from the store at start and never cleared by a
     /// disconnect.
     occupancy_mirror: Option<OccupancyMirrorRecord>,
+    /// Live worker-capacity source (WORKER-100.2); `None` keeps the static
+    /// [`DaemonConfig::capacity`] skeleton on every report.
+    worker_capacity_source: Option<Arc<dyn WorkerCapacitySource>>,
+    /// Local worker-stop hook for `cancel_tasks_and_release` releases
+    /// (WORKER-100.2); `None` records the intent without stopping workers.
+    lease_worker_controller: Option<Arc<dyn LeaseWorkerController>>,
     status: DaemonStatus,
 }
 
@@ -505,6 +551,8 @@ impl DeviceDaemon {
             consecutive_failures: 0,
             connection_policy,
             occupancy_mirror,
+            worker_capacity_source: None,
+            lease_worker_controller: None,
             status: DaemonStatus {
                 enrolled,
                 ..DaemonStatus::default()
@@ -791,6 +839,33 @@ impl DeviceDaemon {
         self.fencing_guard().verify_ticket(ticket)
     }
 
+    /// Wires the live worker-capacity source (WORKER-100.2): every later
+    /// hello and heartbeat replaces the report's `runningWorkerSessions`
+    /// and `reservedWorkerSessions` with the source's live facts while
+    /// keeping the configured `maxConcurrentWorkerSessions`/`draining`.
+    pub fn set_worker_capacity_source(&mut self, source: Arc<dyn WorkerCapacitySource>) {
+        self.worker_capacity_source = Some(source);
+    }
+
+    /// Wires the local worker-stop hook (WORKER-100.2): a
+    /// `cancel_tasks_and_release` occupancy release stops every supervised
+    /// worker bound to the lease after its durable intent is recorded.
+    pub fn set_lease_worker_controller(&mut self, controller: Arc<dyn LeaseWorkerController>) {
+        self.lease_worker_controller = Some(controller);
+    }
+
+    /// The capacity report for the current moment: the configured skeleton
+    /// with the live running/reserved facts overlaid when a source is wired.
+    fn current_capacity(&self) -> ClientCapacityReport {
+        let mut capacity = self.config.capacity;
+        if let Some(source) = self.worker_capacity_source.as_ref() {
+            let snapshot = source.worker_capacity();
+            capacity.running_worker_sessions = snapshot.running_worker_sessions;
+            capacity.reserved_worker_sessions = snapshot.reserved_worker_sessions;
+        }
+        capacity
+    }
+
     /// Runs the loop until `shutdown` is observed.
     ///
     /// Shutdown is graceful: no exchange is abandoned mid-transport, and
@@ -920,7 +995,7 @@ impl DeviceDaemon {
         if !self.hello_announced {
             self.enqueue(ClientToServerMessage::Hello(ClientHelloPayload {
                 client_version: self.config.client_version.clone(),
-                capacity: self.config.capacity,
+                capacity: self.current_capacity(),
                 accepting_connections: self.connection_policy.accepting_connections,
                 lock_state: self.connection_policy.lock_state,
                 presence_state: PresenceState::Online,
@@ -931,7 +1006,7 @@ impl DeviceDaemon {
         }
         if now >= self.next_heartbeat_at {
             self.enqueue(ClientToServerMessage::Heartbeat(ClientHeartbeatPayload {
-                capacity: self.config.capacity,
+                capacity: self.current_capacity(),
                 accepting_connections: self.connection_policy.accepting_connections,
                 lock_state: self.connection_policy.lock_state,
                 presence_state: PresenceState::Online,
@@ -1443,7 +1518,7 @@ impl DeviceDaemon {
         let intent = OccupancyReleaseIntentRecord {
             idempotency_key: stamp.command.idempotency_key.clone(),
             command_message_id: command_message_id.to_owned(),
-            occupancy_lease_id: mirror_lease,
+            occupancy_lease_id: mirror_lease.clone(),
             fencing_token: stamp.occupancy_fencing_token,
             mode: payload.mode,
             affected_worker_sessions: self
@@ -1456,14 +1531,24 @@ impl DeviceDaemon {
             .store
             .record_occupancy_release_intent(&intent)
             .map_err(DaemonError::Store)?;
+        let mut stopped = 0_u64;
         let status = match outcome {
-            // Persist-before-send: the intent is durable before the ack.
+            // Persist-before-send: the intent is durable before the ack —
+            // and before any worker stop, so a crash mid-stop leaves the
+            // promise on disk for the restart scan to reconcile.
             OccupancyReleaseIntentOutcome::Recorded(_) => {
                 self.status.occupancy_release_intents_recorded += 1;
+                if payload.mode == ClientOccupancyReleaseMode::CancelTasksAndRelease
+                    && let Some(controller) = self.lease_worker_controller.as_ref()
+                {
+                    stopped = u64::try_from(controller.stop_lease_workers(&mirror_lease))
+                        .unwrap_or(u64::MAX);
+                }
                 CommandAckStatus::Accepted
             }
             OccupancyReleaseIntentOutcome::Duplicate(_) => CommandAckStatus::Duplicate,
         };
+        self.status.workers_stopped_on_release += stopped;
         ack(self, status, None, mirror_revision)
     }
 

@@ -10,7 +10,7 @@
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -124,12 +124,16 @@ fn issued_credential_digest() -> String {
 }
 
 fn issued_enrollment() -> EnrollmentIssuance {
+    issued_enrollment_with_heartbeat(10)
+}
+
+fn issued_enrollment_with_heartbeat(heartbeat_interval_ms: u32) -> EnrollmentIssuance {
     EnrollmentIssuance {
         client_node_id: ASSIGNED_NODE.to_owned(),
         public_client_id: ASSIGNED_PUBLIC_CLIENT_ID.to_owned(),
         device_credential: issued_credential_hex(),
         device_credential_digest: issued_credential_digest(),
-        heartbeat_interval_ms: 10,
+        heartbeat_interval_ms,
         server_time: "2026-09-04T00:00:00.000Z".to_owned(),
         downlink_from_sequence: 1,
     }
@@ -172,6 +176,11 @@ struct ServerSim {
     /// After the enrollment settled once, every later enroll exchange is
     /// refused like the endpoint's uniform authentication rejection.
     enrollment_settled: AtomicBool,
+    /// The heartbeat cadence the acceptance demands (the daemon adopts it
+    /// over its configured cadence). Tests that stage exact crash shapes
+    /// around the enroll/hello window raise it so the idle daemon stays
+    /// silent while the window is staged.
+    acceptance_heartbeat_ms: AtomicU32,
 }
 
 impl ServerSim {
@@ -181,6 +190,7 @@ impl ServerSim {
             gap_first_exchange: AtomicBool::new(false),
             corrupt_issuance: AtomicBool::new(false),
             enrollment_settled: AtomicBool::new(false),
+            acceptance_heartbeat_ms: AtomicU32::new(10),
         }
     }
 
@@ -199,7 +209,7 @@ impl ServerSim {
             .collect()
     }
 
-    fn acceptance_frame(node: &str, sequence: u64) -> Value {
+    fn acceptance_frame(node: &str, sequence: u64, heartbeat_interval_ms: u32) -> Value {
         let envelope = ServerToClientEnvelope {
             schema_version: CLIENT_CONTROL_PORT_SCHEMA_VERSION.to_owned(),
             message_id: format!("srv-accept-{sequence}"),
@@ -209,7 +219,7 @@ impl ServerSim {
             occurred_at: "2026-09-04T00:00:00.000Z".to_owned(),
             message: ServerToClientMessage::EnrollmentAccepted(ServerEnrollmentAcceptedPayload {
                 public_client_id: ASSIGNED_PUBLIC_CLIENT_ID.to_owned(),
-                heartbeat_interval_ms: 10,
+                heartbeat_interval_ms,
                 server_time: "2026-09-04T00:00:00.000Z".to_owned(),
             }),
         };
@@ -304,14 +314,19 @@ impl ServerSim {
                         .or_insert(1);
                     let sequence = *next;
                     *next += 1;
-                    downlink.push(Self::acceptance_frame(ASSIGNED_NODE, sequence));
+                    let heartbeat_ms = self.acceptance_heartbeat_ms.load(Ordering::SeqCst);
+                    downlink.push(Self::acceptance_frame(
+                        ASSIGNED_NODE,
+                        sequence,
+                        heartbeat_ms,
+                    ));
                     issuance = Some(if self.corrupt_issuance.load(Ordering::SeqCst) {
                         EnrollmentIssuance {
                             client_node_id: enroll_node.clone(),
                             ..issued_enrollment()
                         }
                     } else {
-                        issued_enrollment()
+                        issued_enrollment_with_heartbeat(heartbeat_ms)
                     });
                     // The enroll settlement starts the assigned stream at 1.
                     state
@@ -912,6 +927,12 @@ fn restart_recovers_unacked_frames_from_the_persistent_outbox() {
 fn graceful_shutdown_keeps_taken_frames_durable() {
     let root = temporary_directory("daemon-shutdown");
     let sim = Arc::new(ServerSim::new());
+    // The staged shutdown window must stay quiet: the demanded heartbeat
+    // cadence rises above the window so the idle daemon never injects a
+    // heartbeat frame between the test's three enqueues and the armed
+    // exchange.
+    sim.acceptance_heartbeat_ms
+        .store(3_600_000, Ordering::SeqCst);
     // One frame per exchange: the armed transport blocks exactly the first
     // in-flight frame of the shutdown window.
     let config = DaemonConfig {

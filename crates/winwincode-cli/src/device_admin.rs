@@ -96,6 +96,9 @@ pub struct DeviceStatusView {
     pub accepting_connections: bool,
     /// Machine-level lock state.
     pub lock_state: String,
+    /// Worker sessions currently in the `running` state of the local
+    /// worker-process registry (WORKER-100.2).
+    pub running_worker_sessions: u64,
     /// The published connect code, if any.
     pub connect_code: Option<ConnectCodeView>,
 }
@@ -184,6 +187,9 @@ pub fn device_status(data_directory: &Path) -> Result<DeviceAdminOutcome, Device
         .as_ref()
         .map(|record| ConnectCodeView::of(record, now));
     let policy = connect_code::connection_policy(&store).map_err(|error| store_failed(&error))?;
+    let running_worker_sessions = store
+        .count_worker_processes_in_state(winwincode_device_client::WORKER_STATE_RUNNING)
+        .map_err(|error| store_failed(&error))?;
     Ok(DeviceAdminOutcome::Status {
         device: DeviceStatusView {
             device_id: identity.identity().device_id().to_owned(),
@@ -192,6 +198,7 @@ pub fn device_status(data_directory: &Path) -> Result<DeviceAdminOutcome, Device
             enrolled: identity.identity().is_enrolled(),
             accepting_connections: policy.accepting_connections,
             lock_state: lock_state_label(policy.lock_state).to_owned(),
+            running_worker_sessions,
             connect_code: code,
         },
     })

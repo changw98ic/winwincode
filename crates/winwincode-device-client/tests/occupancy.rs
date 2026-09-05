@@ -28,7 +28,8 @@ use winwincode_client_port::messages::{
 use winwincode_device_client::fencing::{FencedCommandKind, FencingRejection, FencingVerdict};
 use winwincode_device_client::{
     DaemonConfig, DeviceDaemon, DeviceIdentitySeed, DeviceStore, ExchangeRequest, ExchangeResponse,
-    ExchangeTransport, ExchangeTransportError, IdentityRecord, IssuedEnrollment, adopt_enrollment,
+    ExchangeTransport, ExchangeTransportError, IdentityRecord, IssuedEnrollment,
+    LeaseWorkerController, WorkerCapacitySnapshot, WorkerCapacitySource, adopt_enrollment,
     ensure_device_identity, load_device_identity,
 };
 
@@ -1004,4 +1005,157 @@ fn wire_payloads_of_the_lane_commands_keep_the_schema_vocabulary() {
     assert_eq!(frame["kind"], "client.occupancy.release");
     assert_eq!(frame["payload"]["occupancyFencingToken"], "7");
     assert_eq!(frame["payload"]["mode"], "immediate");
+}
+
+// --- WORKER-100.2: live capacity reporting and the cancel-and-release
+// --- worker-stop hook (plan 14.5 / 12.4).
+
+struct StaticCapacity {
+    running: u32,
+    reserved: u32,
+}
+
+impl WorkerCapacitySource for StaticCapacity {
+    fn worker_capacity(&self) -> WorkerCapacitySnapshot {
+        WorkerCapacitySnapshot {
+            running_worker_sessions: self.running,
+            reserved_worker_sessions: self.reserved,
+        }
+    }
+}
+
+struct RecordingController {
+    leases: Mutex<Vec<String>>,
+    stopped: usize,
+}
+
+impl LeaseWorkerController for RecordingController {
+    fn stop_lease_workers(&self, occupancy_lease_id: &str) -> usize {
+        self.leases
+            .lock()
+            .expect("controller lease lock")
+            .push(occupancy_lease_id.to_owned());
+        self.stopped
+    }
+}
+
+#[test]
+fn hello_and_heartbeat_report_the_live_worker_capacity() {
+    let root = temporary_directory("live-capacity");
+    let (store, identity) = open_enrolled(&root);
+    let sim = Arc::new(ServerSim::new());
+    let mut daemon = DeviceDaemon::start(
+        daemon_config("live-capacity"),
+        store,
+        sim.clone(),
+        &identity,
+    )
+    .expect("daemon start");
+    daemon.set_worker_capacity_source(Arc::new(StaticCapacity {
+        running: 3,
+        reserved: 1,
+    }));
+
+    // The hello announcement already carries the live facts, keeping the
+    // configured max/draining skeleton around them.
+    drive_until(&mut daemon, |_| {
+        !sim.frames_with_kind("client.hello").is_empty()
+    });
+    let hello = &sim.frames_with_kind("client.hello")[0].frame;
+    let capacity = &hello["payload"]["capacity"];
+    assert_eq!(capacity["maxConcurrentWorkerSessions"], 2);
+    assert_eq!(capacity["runningWorkerSessions"], 3);
+    assert_eq!(capacity["reservedWorkerSessions"], 1);
+    assert_eq!(capacity["drainingWorkerSessions"], 0);
+
+    // Every heartbeat refreshes the facts from the source (the daemon
+    // config skeleton says running=0, so a 3 can only come from the wire).
+    sim.queue_downlink(offer(0, LEASE_ONE, 7));
+    drive_until(&mut daemon, |_| {
+        !sim.frames_with_kind("client.occupancy.ack").is_empty()
+    });
+    drive_until(&mut daemon, |_| {
+        sim.frames_with_kind("client.heartbeat")
+            .iter()
+            .any(|frame| {
+                frame.frame["payload"]["capacity"]["runningWorkerSessions"] == 3
+                    && frame.frame["payload"]["capacity"]["reservedWorkerSessions"] == 1
+            })
+    });
+    daemon.into_store().close().expect("store close");
+    cleanup(&root);
+}
+
+#[test]
+fn cancel_and_release_stops_the_lease_workers_through_the_controller() {
+    let root = temporary_directory("cancel-release-stop");
+    let (store, identity) = open_enrolled(&root);
+    let sim = Arc::new(ServerSim::new());
+    let mut daemon = DeviceDaemon::start(
+        daemon_config("cancel-release-stop"),
+        store,
+        sim.clone(),
+        &identity,
+    )
+    .expect("daemon start");
+    let controller = Arc::new(RecordingController {
+        leases: Mutex::new(Vec::new()),
+        stopped: 2,
+    });
+    daemon.set_lease_worker_controller(controller.clone());
+
+    // Claim the lease, then release it with cancel_tasks_and_release.
+    sim.queue_downlink(offer(0, LEASE_ONE, 7));
+    drive_until(&mut daemon, |_| {
+        !sim.frames_with_kind("client.occupancy.ack").is_empty()
+    });
+    sim.queue_downlink(release(
+        1,
+        "srv-release-cancel",
+        LEASE_ONE,
+        7,
+        ClientOccupancyReleaseMode::CancelTasksAndRelease,
+    ));
+    drive_until(&mut daemon, |_| {
+        !sim.frames_with_kind("client.command_ack").is_empty()
+    });
+    assert_eq!(
+        daemon.status().workers_stopped_on_release,
+        2,
+        "the controller's answer lands in the status counters"
+    );
+    assert_eq!(*controller.leases.lock().expect("leases lock"), [LEASE_ONE]);
+
+    // A replayed release (duplicate) and other modes never re-stop.
+    let acks = sim.frames_with_kind("client.command_ack").len();
+    sim.queue_downlink(release(
+        1,
+        "srv-release-cancel",
+        LEASE_ONE,
+        7,
+        ClientOccupancyReleaseMode::CancelTasksAndRelease,
+    ));
+    sim.queue_downlink(release(
+        1,
+        "srv-release-immediate",
+        LEASE_ONE,
+        7,
+        ClientOccupancyReleaseMode::Immediate,
+    ));
+    drive_until(&mut daemon, |_| {
+        sim.frames_with_kind("client.command_ack").len() >= acks + 2
+    });
+    assert_eq!(
+        daemon.status().workers_stopped_on_release,
+        2,
+        "duplicates and non-cancel modes stop nothing"
+    );
+    assert_eq!(
+        controller.leases.lock().expect("leases lock").len(),
+        1,
+        "only the first cancel_and_release reached the controller"
+    );
+
+    daemon.into_store().close().expect("store close");
+    cleanup(&root);
 }
