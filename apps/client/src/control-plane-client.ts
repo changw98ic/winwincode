@@ -2305,3 +2305,731 @@ export function createControlPlaneClientOccupancy(options: {
   }
   return Object.freeze(occupancy)
 }
+
+// ---------------------------------------------------------------------------
+// Device candidate local operations: the retained list, local branch
+// creation, target-branch apply, and discard (GIT-100.8, plan §15).
+//
+// FAKE-FIRST SHAPES: the field names, state strings, and the ten result codes
+// below mirror the landed device receipt domain — `LocalCandidateReceipt`,
+// `LocalApplyReceipt`, and the ten `ApplyResult` codes of
+// crates/winwincode-client-port/src/domain.rs as they are projected through
+// the generated client-control contracts. The HTTP routes and status codes in
+// this block are provisional until the GIT-100.3 branch engine and the
+// GIT-100.4 apply engine land; the engine route table is authoritative at
+// that point, and only the path constants and expected status codes below
+// should need to move. The receipt ledger projection of the Server decides
+// the `history` and `branchName` fields of a summary; pages and view-models
+// only ever see the typed unions below.
+// ---------------------------------------------------------------------------
+
+/** The retention lifecycle states a candidate projection can carry. */
+export type ControlPlaneCandidateState =
+  | 'retained'
+  | 'branch_created'
+  | 'applied'
+  | 'discarded'
+  | 'failed'
+
+/** The strategy the apply engine chose for one attempt. */
+export type ControlPlaneCandidateApplyStrategy =
+  | 'create_branch'
+  | 'fast_forward'
+  | 'cherry_pick'
+  | 'merge'
+
+/**
+ * The ten terminal apply results of the Server receipt ledger. `retained`,
+ * `branch_created`, and `discarded` close a lifecycle step; every other code
+ * is presented as a failed or retryable attempt.
+ */
+export type ControlPlaneCandidateApplyResult =
+  | 'retained'
+  | 'branch_created'
+  | 'applied'
+  | 'base_stale'
+  | 'working_tree_dirty'
+  | 'merge_conflict'
+  | 'candidate_missing'
+  | 'permission_denied'
+  | 'discarded'
+  | 'failed'
+
+/** One audited apply attempt, mirroring `LocalApplyReceipt` field for field. */
+export interface ControlPlaneCandidateApplyReceipt {
+  readonly localApplyReceiptId: string
+  readonly candidateRef: string
+  readonly repositoryBindingId: string
+  readonly targetBranch: string
+  readonly expectedHead: string
+  readonly strategy: ControlPlaneCandidateApplyStrategy
+  readonly result: ControlPlaneCandidateApplyResult
+  readonly resultingCommit: string | null
+  readonly conflictArtifactRef: string | null
+  readonly createdAt: string
+  readonly revision: number
+}
+
+/**
+ * One candidate card projection: the device receipt plus the two ledger facts
+ * the card renders — the working branch name once one exists, and the apply
+ * receipt history in ledger order.
+ */
+export interface ControlPlaneCandidateSummary {
+  readonly localCandidateReceiptId: string
+  readonly candidateRef: string
+  readonly repositoryBindingId: string
+  readonly candidateCommit: string
+  readonly localRefName: string
+  readonly state: ControlPlaneCandidateState
+  readonly createdAt: string
+  readonly revision: number
+  readonly branchName: string | null
+  readonly history: readonly ControlPlaneCandidateApplyReceipt[]
+}
+
+/** One candidate list read. */
+export interface ControlPlaneCandidateReadInput {
+  /** 9-12 digits; grouping separators are stripped by the facade. */
+  readonly clientId: string
+}
+
+/** One local branch creation from a stable candidate ref. */
+export interface ControlPlaneCandidateBranchInput {
+  readonly clientId: string
+  readonly candidateRef: string
+  readonly repositoryBindingId: string
+}
+
+/**
+ * One dangerous apply onto a target branch. The Server re-checks the branch
+ * HEAD against `expectedHead` even though the browser already showed it.
+ */
+export interface ControlPlaneCandidateApplyInput {
+  readonly clientId: string
+  readonly candidateRef: string
+  readonly repositoryBindingId: string
+  readonly targetBranch: string
+  readonly expectedHead: string
+}
+
+/** One discard of a retained candidate. */
+export interface ControlPlaneCandidateDiscardInput {
+  readonly clientId: string
+  readonly candidateRef: string
+  readonly repositoryBindingId: string
+}
+
+/** One branch creation outcome: the created branch and the refreshed card. */
+export interface ControlPlaneCandidateBranchOutcome {
+  readonly candidate: ControlPlaneCandidateSummary
+  readonly branchName: string
+}
+
+/**
+ * The one presentation-facing candidate action failure taxonomy. Wire codes
+ * are translated by `controlPlaneCandidateActionFailure` and never read
+ * anywhere else. `unavailable` is the catch-all for outages, expired browser
+ * sessions, protocol drift, and unknown codes, mirroring the occupancy
+ * taxonomy above.
+ */
+export type ControlPlaneCandidateActionFailure =
+  | 'invalid-request'
+  | 'candidate-not-found'
+  | 'client-not-found'
+  | 'client-offline'
+  | 'permission-denied'
+  | 'wrong-state'
+  | 'rate-limited'
+  | 'unavailable'
+
+const CANDIDATE_ACTION_FAILURE_CODES: Readonly<Record<string, ControlPlaneCandidateActionFailure>> =
+  Object.freeze({
+    INVALID_REQUEST: 'invalid-request',
+    RESOURCE_NOT_FOUND: 'candidate-not-found',
+    CLIENT_NOT_FOUND: 'client-not-found',
+    CLIENT_OFFLINE: 'client-offline',
+    ACCESS_DENIED: 'permission-denied',
+    PERMISSION_DENIED: 'permission-denied',
+    WRONG_STATE: 'wrong-state',
+    RATE_LIMITED: 'rate-limited',
+  })
+
+/**
+ * Translate one candidate action rejection into the presentation taxonomy.
+ * Every wire code stays inside this function; view-models and pages branch
+ * only on the returned union.
+ */
+export function controlPlaneCandidateActionFailure(
+  error: unknown,
+): ControlPlaneCandidateActionFailure {
+  if (error instanceof ControlPlaneClientError) {
+    const failure = CANDIDATE_ACTION_FAILURE_CODES[error.code]
+    if (failure !== undefined) return failure
+    if (error.kind === 'authorization') return 'permission-denied'
+  }
+  return 'unavailable'
+}
+
+const CANDIDATE_STATE_VALUES: readonly string[] = Object.freeze([
+  'retained',
+  'branch_created',
+  'applied',
+  'discarded',
+  'failed',
+])
+const CANDIDATE_APPLY_STRATEGY_VALUES: readonly string[] = Object.freeze([
+  'create_branch',
+  'fast_forward',
+  'cherry_pick',
+  'merge',
+])
+const CANDIDATE_APPLY_RESULT_VALUES: readonly string[] = Object.freeze([
+  'retained',
+  'branch_created',
+  'applied',
+  'base_stale',
+  'working_tree_dirty',
+  'merge_conflict',
+  'candidate_missing',
+  'permission_denied',
+  'discarded',
+  'failed',
+])
+
+const CLIENT_CANDIDATES_BRANCH_PATH = '/api/v1/clients/candidates/branch'
+const CLIENT_CANDIDATES_APPLY_PATH = '/api/v1/clients/candidates/apply'
+const CLIENT_CANDIDATES_DISCARD_PATH = '/api/v1/clients/candidates/discard'
+
+function invalidCandidateResponseError(): ControlPlaneClientError {
+  return new ControlPlaneClientError({
+    kind: 'protocol',
+    code: 'INVALID_CLIENT_CANDIDATES_RESPONSE',
+    message: 'The Control Plane server returned an invalid candidate response.',
+    requestId: null,
+    retryable: false,
+  })
+}
+
+function candidateNetworkError(): ControlPlaneClientError {
+  return new ControlPlaneClientError({
+    kind: 'network',
+    code: 'NETWORK_ERROR',
+    message: 'The Control Plane server could not be reached.',
+    requestId: null,
+    retryable: true,
+  })
+}
+
+function candidateBoundaryError(status: number, source: string): ControlPlaneClientError {
+  let value: unknown
+  try {
+    value = JSON.parse(source)
+  } catch {
+    value = null
+  }
+  const error = isRecord(value) && isRecord(value.error) ? value.error : null
+  const code = error !== null && typeof error.code === 'string'
+    ? error.code
+    : 'CLIENT_CANDIDATES_FAILED'
+  const kind: ControlPlaneClientErrorKind = accessKind(code)
+    ?? (code === 'RATE_LIMITED'
+      ? 'server'
+      : (versionCode(code)
+        ? 'version'
+        : (status >= 500 ? 'server' : 'protocol')))
+  return new ControlPlaneClientError({
+    kind,
+    code,
+    message: error !== null && typeof error.message === 'string'
+      ? error.message
+      : 'The Client candidate request failed.',
+    requestId: isRecord(value) && typeof value.requestId === 'string'
+      ? value.requestId as RequestId
+      : null,
+    retryable: error !== null && error.retryable === true,
+  })
+}
+
+function parsedCandidatePayload(source: string): Readonly<Record<string, unknown>> {
+  let value: unknown
+  try {
+    value = JSON.parse(source)
+  } catch {
+    value = null
+  }
+  if (
+    isRecord(value)
+    && typeof value.schemaVersion === 'string'
+    && value.schemaVersion !== CONTROL_PLANE_SCHEMA_VERSION
+  ) {
+    throw new ControlPlaneClientError({
+      kind: 'version',
+      code: 'SCHEMA_VERSION_MISMATCH',
+      message: `The Control Plane server must use ${CONTROL_PLANE_SCHEMA_VERSION}.`,
+      requestId: null,
+      retryable: false,
+    })
+  }
+  if (!isRecord(value)) throw invalidCandidateResponseError()
+  return value
+}
+
+/** The identity text fields of the candidate payloads share one bound. */
+function candidateIdentityText(value: unknown): string {
+  if (typeof value !== 'string' || value.length === 0 || value.length > 200) {
+    throw invalidCandidateResponseError()
+  }
+  return value
+}
+
+/** A commit SHA is hex; the exact width stays the engine's decision. */
+function candidateShaValue(value: unknown): string {
+  if (typeof value !== 'string' || !/^[0-9a-f]{4,64}$/iu.test(value)) {
+    throw invalidCandidateResponseError()
+  }
+  return value
+}
+
+/** One receipt instant; the canonical RFC 3339 Z form is the only shape. */
+function candidateInstantValue(value: unknown): string {
+  if (
+    typeof value !== 'string'
+    || !RFC3339_INSTANT.test(value)
+    || Number.isNaN(Date.parse(value))
+  ) {
+    throw invalidCandidateResponseError()
+  }
+  return value
+}
+
+function candidateNullableShaValue(value: unknown): string | null {
+  if (value === null) return null
+  return candidateShaValue(value)
+}
+
+function candidateNullableText(value: unknown): string | null {
+  if (value === null) return null
+  const text = candidateIdentityText(value)
+  return text
+}
+
+function candidateRevisionValue(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) {
+    throw invalidCandidateResponseError()
+  }
+  return value
+}
+
+function candidateApplyReceiptValue(value: unknown): ControlPlaneCandidateApplyReceipt {
+  if (!isRecord(value)) throw invalidCandidateResponseError()
+  const strategy = value.strategy
+  const result = value.result
+  if (
+    typeof value.localApplyReceiptId !== 'string'
+    || value.localApplyReceiptId.length === 0
+    || typeof value.candidateRef !== 'string'
+    || value.candidateRef.length === 0
+    || typeof value.repositoryBindingId !== 'string'
+    || value.repositoryBindingId.length === 0
+    || typeof value.targetBranch !== 'string'
+    || value.targetBranch.length === 0
+    || typeof value.expectedHead !== 'string'
+    || value.expectedHead.length === 0
+    || typeof strategy !== 'string'
+    || !CANDIDATE_APPLY_STRATEGY_VALUES.includes(strategy)
+    || typeof result !== 'string'
+    || !CANDIDATE_APPLY_RESULT_VALUES.includes(result)
+  ) {
+    throw invalidCandidateResponseError()
+  }
+  return Object.freeze({
+    localApplyReceiptId: value.localApplyReceiptId,
+    candidateRef: value.candidateRef,
+    repositoryBindingId: value.repositoryBindingId,
+    targetBranch: value.targetBranch,
+    expectedHead: value.expectedHead,
+    strategy: strategy as ControlPlaneCandidateApplyStrategy,
+    result: result as ControlPlaneCandidateApplyResult,
+    resultingCommit: candidateNullableShaValue(value.resultingCommit),
+    conflictArtifactRef: candidateNullableText(value.conflictArtifactRef),
+    createdAt: candidateInstantValue(value.createdAt),
+    revision: candidateRevisionValue(value.revision),
+  })
+}
+
+function candidateSummaryValue(value: unknown): ControlPlaneCandidateSummary {
+  if (!isRecord(value)) throw invalidCandidateResponseError()
+  const state = value.state
+  if (
+    typeof value.localCandidateReceiptId !== 'string'
+    || value.localCandidateReceiptId.length === 0
+    || typeof value.candidateRef !== 'string'
+    || value.candidateRef.length === 0
+    || typeof value.repositoryBindingId !== 'string'
+    || value.repositoryBindingId.length === 0
+    || typeof value.localRefName !== 'string'
+    || value.localRefName.length === 0
+    || typeof state !== 'string'
+    || !CANDIDATE_STATE_VALUES.includes(state)
+    || !Array.isArray(value.history)
+  ) {
+    throw invalidCandidateResponseError()
+  }
+  return Object.freeze({
+    localCandidateReceiptId: value.localCandidateReceiptId,
+    candidateRef: value.candidateRef,
+    repositoryBindingId: value.repositoryBindingId,
+    candidateCommit: candidateShaValue(value.candidateCommit),
+    localRefName: value.localRefName,
+    state: state as ControlPlaneCandidateState,
+    createdAt: candidateInstantValue(value.createdAt),
+    revision: candidateRevisionValue(value.revision),
+    branchName: candidateNullableText(value.branchName),
+    history: Object.freeze(value.history.map(candidateApplyReceiptValue)),
+  })
+}
+
+function candidateListResponse(source: string): readonly ControlPlaneCandidateSummary[] {
+  const value = parsedCandidatePayload(source)
+  if (!Array.isArray(value.candidates)) throw invalidCandidateResponseError()
+  return Object.freeze(value.candidates.map(candidateSummaryValue))
+}
+
+function candidateBranchOutcomeResponse(source: string): ControlPlaneCandidateBranchOutcome {
+  const value = parsedCandidatePayload(source)
+  return Object.freeze({
+    candidate: candidateSummaryValue(value.candidate),
+    branchName: candidateIdentityText(value.branchName),
+  })
+}
+
+function candidateSummaryResponse(source: string): ControlPlaneCandidateSummary {
+  return candidateSummaryValue(parsedCandidatePayload(source).candidate)
+}
+
+/**
+ * The shared input bound of every candidate action. The facade owns the
+ * identity shapes, so grouping separators never reach the wire and an
+ * injected implementation receives the same normalized input the wire path
+ * would send.
+ */
+function candidateInputFields(input: {
+  readonly clientId: string
+  readonly candidateRef?: string
+  readonly repositoryBindingId?: string
+}): { readonly clientId: string; readonly candidateRef: string; readonly repositoryBindingId: string } {
+  const clientId = (typeof input?.clientId === 'string' ? input.clientId : '')
+    .replace(/\D+/gu, '')
+  assertOccupancyClientId(clientId)
+  const candidateRef = (typeof input?.candidateRef === 'string' ? input.candidateRef : '').trim()
+  if (candidateRef.length === 0 || candidateRef.length > 200 || /\s/u.test(candidateRef)) {
+    throw new ControlPlaneClientError({
+      kind: 'protocol',
+      code: 'CLIENT_CANDIDATE_REF_INVALID',
+      message: 'Select a candidate from the device list.',
+      requestId: null,
+      retryable: false,
+    })
+  }
+  const repositoryBindingId =
+    (typeof input?.repositoryBindingId === 'string' ? input.repositoryBindingId : '').trim()
+  if (repositoryBindingId.length === 0 || repositoryBindingId.length > 200) {
+    throw new ControlPlaneClientError({
+      kind: 'protocol',
+      code: 'CLIENT_CANDIDATE_BINDING_INVALID',
+      message: 'The candidate is missing its repository binding.',
+      requestId: null,
+      retryable: false,
+    })
+  }
+  return Object.freeze({ clientId, candidateRef, repositoryBindingId })
+}
+
+function candidateApplyFields(input: ControlPlaneCandidateApplyInput): {
+  readonly clientId: string
+  readonly candidateRef: string
+  readonly repositoryBindingId: string
+  readonly targetBranch: string
+  readonly expectedHead: string
+} {
+  const identity = candidateInputFields(input)
+  const targetBranch = (typeof input?.targetBranch === 'string' ? input.targetBranch : '').trim()
+  if (
+    targetBranch.length === 0
+    || targetBranch.length > 200
+    || /\s/u.test(targetBranch)
+    || targetBranch.startsWith('-')
+    || targetBranch.includes('..')
+    || targetBranch.endsWith('/')
+    || targetBranch.endsWith('.lock')
+  ) {
+    throw new ControlPlaneClientError({
+      kind: 'protocol',
+      code: 'CLIENT_CANDIDATE_TARGET_BRANCH_INVALID',
+      message: 'Enter the target branch of the apply.',
+      requestId: null,
+      retryable: false,
+    })
+  }
+  const expectedHead = (typeof input?.expectedHead === 'string' ? input.expectedHead : '').trim()
+  if (!/^[0-9a-f]{4,64}$/iu.test(expectedHead)) {
+    throw new ControlPlaneClientError({
+      kind: 'protocol',
+      code: 'CLIENT_CANDIDATE_EXPECTED_HEAD_INVALID',
+      message: 'Enter the expected HEAD commit of the target branch.',
+      requestId: null,
+      retryable: false,
+    })
+  }
+  return Object.freeze({ ...identity, targetBranch, expectedHead })
+}
+
+/**
+ * The base facade extended with the candidate local operations of one Client
+ * device. The decorator delegates every base method, so hosts can pass it
+ * anywhere a `ControlPlaneClient` is accepted and keep one session and one
+ * error identity.
+ */
+export interface ControlPlaneClientCandidates extends ControlPlaneClient {
+  /** Read the candidate cards projected for one Client device. */
+  listDeviceCandidates(
+    input: ControlPlaneCandidateReadInput,
+    options?: ControlPlaneRequestOptions,
+  ): Promise<readonly ControlPlaneCandidateSummary[]>
+  /**
+   * Create the local branch of one candidate ref without touching the user's
+   * worktree. Repeated requests return the original branch.
+   */
+  createCandidateBranch(
+    input: ControlPlaneCandidateBranchInput,
+    options?: ControlPlaneRequestOptions,
+  ): Promise<ControlPlaneCandidateBranchOutcome>
+  /** Apply one candidate onto a target branch under an expected HEAD. */
+  applyCandidate(
+    input: ControlPlaneCandidateApplyInput,
+    options?: ControlPlaneRequestOptions,
+  ): Promise<ControlPlaneCandidateApplyReceipt>
+  /** Discard one retained candidate; the fact lands in the next list read. */
+  discardCandidate(
+    input: ControlPlaneCandidateDiscardInput,
+    options?: ControlPlaneRequestOptions,
+  ): Promise<ControlPlaneCandidateSummary>
+}
+
+/**
+ * Extend the one Control Plane facade with the device candidate local
+ * operations. An injected facade that already implements the candidate
+ * methods is reused verbatim so deterministic fixtures and host composition
+ * keep their single seam.
+ */
+export function createControlPlaneClientCandidates(options: {
+  readonly client: ControlPlaneClient
+  /** Same deterministic transport seam the base facade was created with. */
+  readonly transport?: ControlPlaneClientTransport
+}): ControlPlaneClientCandidates {
+  const location = parseControlPlaneServerUrl(options.client.serverUrl)
+  const transportFetch = options.transport?.fetch
+  const injected = options.client as Partial<ControlPlaneClientCandidates>
+  const injectedListCandidates = injected.listDeviceCandidates
+  const injectedCreateCandidateBranch = injected.createCandidateBranch
+  const injectedApplyCandidate = injected.applyCandidate
+  const injectedDiscardCandidate = injected.discardCandidate
+
+  async function candidateRequest(
+    path: string,
+    method: 'GET' | 'POST',
+    body: string | null,
+    signal: AbortSignal | undefined,
+  ): Promise<ControlPlaneHttpResponse> {
+    if (signalIsAborted(signal)) throw cancelledError(null)
+    if (transportFetch === undefined) {
+      throw new ControlPlaneClientError({
+        kind: 'protocol',
+        code: 'TRANSPORT_UNAVAILABLE',
+        message: 'The browser HTTP transport is unavailable.',
+        requestId: null,
+        retryable: false,
+      })
+    }
+    return transportFetch(`${location.serverUrl}${path}`, {
+      method,
+      headers: body === null ? {} : { 'Content-Type': 'application/json' },
+      ...(body === null ? {} : { body }),
+      redirect: 'error',
+      cache: 'no-store',
+      referrerPolicy: 'no-referrer',
+      credentials: 'include',
+      ...(signal === undefined ? {} : { signal }),
+    })
+  }
+
+  async function listCandidatesRequest(
+    input: ControlPlaneCandidateReadInput,
+    requestOptions: ControlPlaneRequestOptions | undefined,
+  ): Promise<readonly ControlPlaneCandidateSummary[]> {
+    try {
+      const response = await candidateRequest(
+        `/api/v1/clients/${encodeURIComponent(input.clientId)}/candidates`,
+        'GET',
+        null,
+        requestOptions?.signal,
+      )
+      const source = await response.text()
+      if (!response.ok) throw candidateBoundaryError(response.status, source)
+      if (response.status !== 200) throw invalidCandidateResponseError()
+      return candidateListResponse(source)
+    } catch (error) {
+      if (signalIsAborted(requestOptions?.signal)) throw cancelledError(null)
+      if (error instanceof ControlPlaneClientError) throw error
+      throw candidateNetworkError()
+    }
+  }
+
+  async function branchRequest(
+    input: ControlPlaneCandidateBranchInput,
+    requestOptions: ControlPlaneRequestOptions | undefined,
+  ): Promise<ControlPlaneCandidateBranchOutcome> {
+    try {
+      const response = await candidateRequest(
+        CLIENT_CANDIDATES_BRANCH_PATH,
+        'POST',
+        JSON.stringify({
+          schemaVersion: CONTROL_PLANE_SCHEMA_VERSION,
+          clientId: input.clientId,
+          candidateRef: input.candidateRef,
+          repositoryBindingId: input.repositoryBindingId,
+        }),
+        requestOptions?.signal,
+      )
+      const source = await response.text()
+      if (!response.ok) throw candidateBoundaryError(response.status, source)
+      if (response.status !== 201) throw invalidCandidateResponseError()
+      return candidateBranchOutcomeResponse(source)
+    } catch (error) {
+      if (signalIsAborted(requestOptions?.signal)) throw cancelledError(null)
+      if (error instanceof ControlPlaneClientError) throw error
+      throw candidateNetworkError()
+    }
+  }
+
+  async function applyRequest(
+    input: ControlPlaneCandidateApplyInput,
+    requestOptions: ControlPlaneRequestOptions | undefined,
+  ): Promise<ControlPlaneCandidateApplyReceipt> {
+    try {
+      const response = await candidateRequest(
+        CLIENT_CANDIDATES_APPLY_PATH,
+        'POST',
+        JSON.stringify({
+          schemaVersion: CONTROL_PLANE_SCHEMA_VERSION,
+          clientId: input.clientId,
+          candidateRef: input.candidateRef,
+          repositoryBindingId: input.repositoryBindingId,
+          targetBranch: input.targetBranch,
+          expectedHead: input.expectedHead,
+        }),
+        requestOptions?.signal,
+      )
+      const source = await response.text()
+      if (!response.ok) throw candidateBoundaryError(response.status, source)
+      if (response.status !== 201) throw invalidCandidateResponseError()
+      return candidateApplyReceiptValue(parsedCandidatePayload(source).receipt)
+    } catch (error) {
+      if (signalIsAborted(requestOptions?.signal)) throw cancelledError(null)
+      if (error instanceof ControlPlaneClientError) throw error
+      throw candidateNetworkError()
+    }
+  }
+
+  async function discardRequest(
+    input: ControlPlaneCandidateDiscardInput,
+    requestOptions: ControlPlaneRequestOptions | undefined,
+  ): Promise<ControlPlaneCandidateSummary> {
+    try {
+      const response = await candidateRequest(
+        CLIENT_CANDIDATES_DISCARD_PATH,
+        'POST',
+        JSON.stringify({
+          schemaVersion: CONTROL_PLANE_SCHEMA_VERSION,
+          clientId: input.clientId,
+          candidateRef: input.candidateRef,
+          repositoryBindingId: input.repositoryBindingId,
+        }),
+        requestOptions?.signal,
+      )
+      const source = await response.text()
+      if (!response.ok) throw candidateBoundaryError(response.status, source)
+      if (response.status !== 200) throw invalidCandidateResponseError()
+      return candidateSummaryResponse(source)
+    } catch (error) {
+      if (signalIsAborted(requestOptions?.signal)) throw cancelledError(null)
+      if (error instanceof ControlPlaneClientError) throw error
+      throw candidateNetworkError()
+    }
+  }
+
+  const candidates: ControlPlaneClientCandidates = {
+    serverUrl: options.client.serverUrl,
+    restore(requestOptions) {
+      return options.client.restore(requestOptions)
+    },
+    login(bootstrapProof, requestOptions) {
+      return options.client.login(bootstrapProof, requestOptions)
+    },
+    loginWithPassword(credentials, requestOptions) {
+      return options.client.loginWithPassword(credentials, requestOptions)
+    },
+    initializationStatus(requestOptions) {
+      return options.client.initializationStatus(requestOptions)
+    },
+    logout(requestOptions) {
+      return options.client.logout(requestOptions)
+    },
+    command(command, requestOptions) {
+      return options.client.command(command, requestOptions)
+    },
+    query(query, requestOptions) {
+      return options.client.query(query, requestOptions)
+    },
+    subscribe(subscriptionOptions) {
+      return options.client.subscribe(subscriptionOptions)
+    },
+    async listDeviceCandidates(rawInput, requestOptions) {
+      const input: ControlPlaneCandidateReadInput = {
+        clientId: (typeof rawInput?.clientId === 'string' ? rawInput.clientId : '')
+          .replace(/\D+/gu, ''),
+      }
+      assertOccupancyClientId(input.clientId)
+      if (typeof injectedListCandidates === 'function') {
+        return injectedListCandidates.call(options.client, input, requestOptions)
+      }
+      return listCandidatesRequest(input, requestOptions)
+    },
+    async createCandidateBranch(rawInput, requestOptions) {
+      const input = candidateInputFields(rawInput)
+      if (typeof injectedCreateCandidateBranch === 'function') {
+        return injectedCreateCandidateBranch.call(options.client, input, requestOptions)
+      }
+      return branchRequest(input, requestOptions)
+    },
+    async applyCandidate(rawInput, requestOptions) {
+      const input = candidateApplyFields(rawInput)
+      if (typeof injectedApplyCandidate === 'function') {
+        return injectedApplyCandidate.call(options.client, input, requestOptions)
+      }
+      return applyRequest(input, requestOptions)
+    },
+    async discardCandidate(rawInput, requestOptions) {
+      const input = candidateInputFields(rawInput)
+      if (typeof injectedDiscardCandidate === 'function') {
+        return injectedDiscardCandidate.call(options.client, input, requestOptions)
+      }
+      return discardRequest(input, requestOptions)
+    },
+    close() {
+      options.client.close()
+    },
+  }
+  return Object.freeze(candidates)
+}
