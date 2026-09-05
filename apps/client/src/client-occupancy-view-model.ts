@@ -319,14 +319,30 @@ function facadeMethod(value: unknown): OccupancyFacadeMethod | null {
  */
 export function clientOccupancyPortFromFacade(facade: object): ClientOccupancyPort | null {
   const methods = facade as Record<string, unknown>
-  const claim = facadeMethod(methods['claim'])
-  const release = facadeMethod(methods['release'])
-  const cancelAndRelease = facadeMethod(methods['cancelAndRelease'])
-    ?? facadeMethod(methods['forceRelease'])
+  const claim =
+    facadeMethod(methods['claim']) ?? facadeMethod(methods['claimOccupancy'])
+  const release =
+    facadeMethod(methods['release']) ??
+    bindOccupancyMode(methods['releaseOccupancy'], 'release')
+  const cancelAndRelease =
+    facadeMethod(methods['cancelAndRelease']) ??
+    facadeMethod(methods['forceRelease']) ??
+    bindOccupancyMode(methods['forceReleaseOccupancy'], 'cancel_and_release', true)
   if (claim === null || release === null || cancelAndRelease === null) return null
   return {
     claim: input => claim(input),
     release: input => release(input),
     cancelAndRelease: input => cancelAndRelease(input),
   }
+}
+
+function bindOccupancyMode(
+  value: unknown,
+  mode: 'release' | 'cancel_and_release',
+  confirm?: boolean,
+): OccupancyFacadeMethod | null {
+  const method = facadeMethod(value)
+  if (method === null) return null
+  const bound = method as (input: Record<string, unknown>) => Promise<void>
+  return input => bound({ ...input, mode, confirm })
 }

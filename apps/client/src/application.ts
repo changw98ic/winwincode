@@ -4,6 +4,7 @@ import {
   ControlPlaneClientError,
   createControlPlaneClient,
   createControlPlaneClientDirectory,
+  createControlPlaneClientOccupancy,
   type ControlPlaneClient,
   type ControlPlaneClientTransport,
 } from './control-plane-client.js'
@@ -248,11 +249,16 @@ export function mountWinWinCodeClient(
     client: clientDirectory,
   })
   // CLIENT-300.5: the device card occupancy interactions run against the
-  // frozen occupancy facade when it exposes claim/release/force-release;
-  // until then the model mounts with a null port and reports the honest
-  // unavailable failure instead of pretending the actions landed.
+  // frozen occupancy facade (claim / drain-aware release / cancel-and-release
+  // with confirmation); without a Client surface the model mounts with a null
+  // port and reports the honest unavailable failure instead of pretending the
+  // actions landed.
+  const clientOccupancy = createControlPlaneClientOccupancy({
+    client: rawControlPlane,
+    transport: browserTransport,
+  })
   const occupancyModel: ClientOccupancyViewModel = createClientOccupancyViewModel({
-    port: clientOccupancyPortFromFacade(clientDirectory),
+    port: clientOccupancyPortFromFacade(clientOccupancy),
     clients: clientsModel,
   })
   // REPO-100.3: the repository list talks to the same directory facade; the
