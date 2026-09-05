@@ -22,6 +22,7 @@ mod runtime;
 mod server;
 mod transport;
 mod user_accounts;
+mod worker_session_credentials;
 
 pub use application::{
     StandaloneApplicationClock, StandaloneControlPlaneApplication, SystemStandaloneApplicationClock,
@@ -83,4 +84,9 @@ pub use transport::{
 };
 pub use user_accounts::{
     CredentialRejection, UserAccountService, UserAccountServiceError, UserAccountServiceErrorKind,
+};
+pub use worker_session_credentials::{
+    CredentialMaterial, CredentialRotationReceipt, DEFAULT_CREDENTIAL_TTL,
+    WorkerSessionCredentialError, WorkerSessionCredentialErrorKind, WorkerSessionCredentialPolicy,
+    WorkerSessionCredentialService, issue_credential_material,
 };

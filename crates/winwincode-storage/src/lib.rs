@@ -37,6 +37,7 @@ mod worker_fleet_operations;
 mod worker_outbound_queue;
 mod worker_placement;
 mod worker_registry;
+mod worker_session_credential;
 mod worker_session_slots;
 
 pub use artifact::{
@@ -215,6 +216,12 @@ pub use worker_registry::{
     WorkerCapacitySnapshot, WorkerHealth, WorkerManagementPage, WorkerManagementPageCursor,
     WorkerManagementSnapshot, WorkerManagementState, WorkerOperationalState, WorkerPlatform,
     WorkerRegistrationErrorCode, WorkerRegistryScope,
+};
+pub use worker_session_credential::{
+    CredentialAuditAction, CredentialAuditEntry, CredentialIssuance, CredentialRotation,
+    CredentialRotationOutcome, WorkerSessionCredentialLedger, WorkerSessionCredentialRecord,
+    WorkerSessionCredentialState, WorkerSessionCredentialStoreError,
+    WorkerSessionCredentialStoreErrorKind,
 };
 pub use worker_session_slots::{
     WorkerSessionSlots, WorkerSlotAuthority, WorkerSlotCancellation, WorkerSlotCapacity,
