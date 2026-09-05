@@ -2,6 +2,11 @@
 
 import { mountKeyedCollection } from './components/keyed-collection.js'
 import type { ControlPlaneDeviceSummary } from './control-plane-client.js'
+import {
+  mountClientOccupancyControls,
+  type ClientOccupancyControls,
+} from './client-occupancy-controls.js'
+import type { ClientOccupancyViewModel } from './client-occupancy-view-model.js'
 import type {
   ClientsAddFailure,
   ClientsViewModel,
@@ -17,6 +22,12 @@ import {
 export interface ClientsPageOptions {
   readonly root: HTMLElement
   readonly model: ClientsViewModel
+  /**
+   * CLIENT-300.5: the occupancy interaction model behind the device card
+   * connect, release, and cancel-and-release controls. When absent the cards
+   * render without the occupancy actions.
+   */
+  readonly occupancy?: ClientOccupancyViewModel
   /** Epoch-milliseconds clock for the relative heartbeat text. */
   readonly now?: () => number
   /**
@@ -42,8 +53,9 @@ interface ClientCardRefs {
   readonly capacity: HTMLElement
   readonly heartbeat: HTMLElement
   readonly version: HTMLElement
-  readonly connect: HTMLButtonElement
-  readonly release: HTMLButtonElement
+  readonly actions: HTMLElement
+  readonly notice: HTMLElement
+  readonly occupancy: ClientOccupancyControls | null
   readonly select: HTMLButtonElement
 }
 
@@ -110,6 +122,8 @@ export function mountClientsPage(options: ClientsPageOptions): ClientsPage {
   let clearedAfterSuccess = false
   // REPO-100.3: the device card selection that drives the repository area.
   let selectedClientId: string | null = null
+  // CLIENT-300.5: the snapshot the occupancy interaction re-renders against.
+  let latestDevices: readonly ControlPlaneDeviceSummary[] = []
 
   region.setAttribute('aria-label', 'Clients')
   region.hidden = true
@@ -171,16 +185,18 @@ export function mountClientsPage(options: ClientsPageOptions): ClientsPage {
       const heartbeat = element(document, 'p', 'wwc-clients-card-heartbeat')
       const version = element(document, 'p', 'wwc-clients-card-version')
       const actions = element(document, 'div', 'wwc-clients-card-actions')
-      const connect = element(document, 'button', 'wwc-clients-card-connect')
-      const release = element(document, 'button', 'wwc-clients-card-release')
-      // Placeholder action area: occupancy connect/release arrives with the
-      // occupancy epic, so both render disabled and carry no click behavior.
-      connect.type = 'button'
-      connect.textContent = 'Connect'
-      connect.disabled = true
-      release.type = 'button'
-      release.textContent = 'Release'
-      release.disabled = true
+      const notice = element(document, 'div', 'wwc-clients-card-notice')
+      // CLIENT-300.5: the occupancy controls replace the Wave 2 placeholder
+      // buttons; without an occupancy model the actions keep only the
+      // repository toggle.
+      const occupancy = options.occupancy === undefined
+        ? null
+        : mountClientOccupancyControls({
+          document,
+          actions,
+          notice,
+          model: options.occupancy,
+        })
       // REPO-100.3: the repository list of this device opens from a pressed
       // toggle so keyboard and screen-reader users get the same selection.
       const select = element(document, 'button', 'wwc-clients-card-select')
@@ -192,11 +208,11 @@ export function mountClientsPage(options: ClientsPageOptions): ClientsPage {
         applySelection()
         options.onDeviceSelect?.(selectedClientId)
       })
-      actions.append(connect, release, select)
-      card.append(name, presence, stateText, capacity, heartbeat, version, actions)
+      actions.append(select)
+      card.append(name, presence, stateText, capacity, heartbeat, version, actions, notice)
       const refs: ClientCardRefs = {
         card, clientId: device.clientId, name, presence, stateText,
-        capacity, heartbeat, version, connect, release, select,
+        capacity, heartbeat, version, actions, notice, occupancy, select,
       }
       cards.set(card, refs)
       updateCard(refs, device)
@@ -206,6 +222,10 @@ export function mountClientsPage(options: ClientsPageOptions): ClientsPage {
       const refs = cards.get(node)
       if (refs === undefined) return
       updateCard(refs, device)
+    },
+    remove(node) {
+      const refs = cards.get(node)
+      refs?.occupancy?.close()
     },
   })
 
@@ -218,6 +238,7 @@ export function mountClientsPage(options: ClientsPageOptions): ClientsPage {
     refs.capacity.textContent = `Capacity ${device.capacityUsed} / ${device.capacityTotal}`
     refs.heartbeat.textContent = relativeHeartbeatText(device.lastHeartbeatAt, now())
     refs.version.textContent = `Version ${device.version}`
+    refs.occupancy?.update(device)
   }
 
   /** Reflect the single card selection across every mounted select toggle. */
@@ -269,6 +290,7 @@ export function mountClientsPage(options: ClientsPageOptions): ClientsPage {
     codeInput.disabled = busy
     submit.disabled = busy
     form.setAttribute('aria-busy', busy ? 'true' : 'false')
+    latestDevices = snapshot.devices
     cardCollection.update(snapshot.devices)
     // A device that left the list can stay selected nowhere; the repository
     // area hears the drop through the same callback as a manual toggle.
@@ -316,6 +338,12 @@ export function mountClientsPage(options: ClientsPageOptions): ClientsPage {
   codeInput.addEventListener('input', onCodeEdit)
 
   const unsubscribe = options.model.subscribe(render)
+  // CLIENT-300.5: an interaction change re-renders the occupancy controls of
+  // the shown snapshot without re-reading the Server.
+  const unsubscribeOccupancy = options.occupancy?.subscribe(() => {
+    if (closed) return
+    cardCollection.update(latestDevices)
+  })
 
   return {
     setVisible(visible) {
@@ -326,6 +354,7 @@ export function mountClientsPage(options: ClientsPageOptions): ClientsPage {
       if (closed) return
       closed = true
       unsubscribe()
+      unsubscribeOccupancy?.()
       cardCollection.close()
       idInput.value = ''
       codeInput.value = ''

@@ -34,6 +34,7 @@ async function cachedModule(name) {
 }
 const facade = await cachedModule('control-plane-client.js')
 const clientsViewModelModule = await cachedModule('clients-view-model.js')
+const occupancyViewModelModule = await cachedModule('client-occupancy-view-model.js')
 const clientsPageModule = await cachedModule('clients-page.js')
 const applicationModule = await cachedModule('application.js')
 
@@ -43,6 +44,7 @@ const {
   createControlPlaneClientDirectory,
 } = facade
 const { createClientsViewModel } = clientsViewModelModule
+const { createClientOccupancyViewModel } = occupancyViewModelModule
 const { mountClientsPage } = clientsPageModule
 const { mountWinWinCodeClient } = applicationModule
 
@@ -651,7 +653,7 @@ test('clients page renders the device cards with the six Presence×Occupancy sta
   model.close()
 })
 
-test('clients page keeps card identity across refreshes and disables the placeholder actions', async () => {
+test('clients page keeps card identity across refreshes and mounts the occupancy actions', async () => {
   let devices = [device(), device({ clientId: '999999999999', displayName: 'Team Mac Studio' })]
   const model = createClientsViewModel({
     client: {
@@ -659,9 +661,13 @@ test('clients page keeps card identity across refreshes and disables the placeho
       async listClients() { return devices },
     },
   })
+  const occupancyModel = createClientOccupancyViewModel({
+    port: null,
+    clients: model,
+  })
   const document = new PageDocument()
   const rootElement = new PageElement(document, 'div')
-  const page = mountClientsPage({ root: rootElement, model, now: () => fixedNow })
+  const page = mountClientsPage({ root: rootElement, model, occupancy: occupancyModel, now: () => fixedNow })
   page.setVisible(true)
   const list = findOne(rootElement, 'wwc-clients-list')
   await model.refresh()
@@ -670,13 +676,18 @@ test('clients page keeps card identity across refreshes and disables the placeho
   const secondCard = list.children[1]
   assert.equal(
     findOne(firstCard, 'wwc-clients-card-connect').disabled,
-    true,
-    'the placeholder connect action renders disabled',
+    false,
+    'a free online device offers the connect entry',
   )
   assert.equal(
-    findOne(firstCard, 'wwc-clients-card-release').disabled,
+    findOne(firstCard, 'wwc-clients-card-release').hidden,
     true,
-    'the placeholder release action renders disabled',
+    'a free device hides the holder release entry',
+  )
+  assert.equal(
+    findOne(firstCard, 'wwc-clients-card-cancel-release').hidden,
+    true,
+    'a free device hides the immediate stop entry',
   )
 
   devices = [
@@ -699,6 +710,7 @@ test('clients page keeps card identity across refreshes and disables the placeho
   await model.refresh()
   assert.equal(findAll(rootElement, 'wwc-clients-card').length, 0)
   assert.equal(findOne(rootElement, 'wwc-clients-empty').hidden, false)
+  occupancyModel.close()
   page.close()
   assert.deepEqual(rootElement.children, [])
 })
@@ -975,8 +987,16 @@ test('the signed-in Clients area lists devices, adds one, and hides on sign-out'
   const card = applicationNode(fixture.rootElement, 'wwc-clients-card')
   assert.equal(applicationNode(fixture.rootElement, 'wwc-clients-card-state').textContent,
     'Online, ready to connect')
-  assert.equal(applicationNode(fixture.rootElement, 'wwc-clients-card-connect').disabled, true)
-  assert.equal(applicationNode(fixture.rootElement, 'wwc-clients-card-release').disabled, true)
+  assert.equal(
+    applicationNode(fixture.rootElement, 'wwc-clients-card-connect').disabled,
+    false,
+    'a free online device offers the connect entry',
+  )
+  assert.equal(
+    applicationNode(fixture.rootElement, 'wwc-clients-card-release').hidden,
+    true,
+    'a free device hides the holder release entry',
+  )
 
   const idInput = applicationNode(fixture.rootElement, 'wwc-clients-id-input')
   const codeInput = applicationNode(fixture.rootElement, 'wwc-clients-code-input')

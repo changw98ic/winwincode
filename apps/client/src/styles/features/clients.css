@@ -151,3 +151,54 @@
   border-color: var(--wwc-color-info-border);
   background: var(--wwc-color-info-surface);
 }
+
+/* CLIENT-300.5: the occupancy interaction. The immediate-stop and confirmed
+   release entries carry the danger tone; the meaning stays in the text. */
+.wwc-clients-card-danger {
+  color: var(--wwc-color-danger-text);
+  border-color: var(--wwc-color-danger-border);
+  background: var(--wwc-color-danger-surface);
+}
+
+.wwc-clients-card-notice {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: var(--wwc-space-2);
+}
+
+.wwc-clients-card-confirm {
+  display: grid;
+  gap: var(--wwc-space-2);
+  justify-items: start;
+  padding: var(--wwc-space-2) var(--wwc-space-3);
+  border: var(--wwc-border-width) solid var(--wwc-color-warning-border);
+  border-radius: var(--wwc-radius-md);
+  background: var(--wwc-color-warning-surface);
+}
+
+.wwc-clients-card-confirm-text {
+  margin: var(--wwc-space-0);
+  color: var(--wwc-color-warning-text);
+  font-size: var(--wwc-font-size-sm);
+}
+
+.wwc-clients-card-confirm-accept,
+.wwc-clients-card-confirm-keep {
+  justify-self: start;
+}
+
+.wwc-clients-card-confirm-accept {
+  color: var(--wwc-color-danger-text);
+  border-color: var(--wwc-color-danger-border);
+  background: var(--wwc-color-danger-surface);
+}
+
+.wwc-clients-card-error {
+  margin: var(--wwc-space-0);
+  padding: var(--wwc-space-1) var(--wwc-space-2);
+  border: var(--wwc-border-width) solid var(--wwc-color-danger-border);
+  border-radius: var(--wwc-radius-md);
+  color: var(--wwc-color-danger-text);
+  background: var(--wwc-color-danger-surface);
+  font-size: var(--wwc-font-size-sm);
+}
