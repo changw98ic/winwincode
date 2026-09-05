@@ -11,6 +11,7 @@
 mod artifact;
 mod client_connect;
 mod client_downlink;
+mod client_occupancy;
 mod client_registry;
 mod control_plane_instances;
 mod enterprise_policy;
@@ -55,6 +56,10 @@ pub use client_connect::{
 pub use client_downlink::{
     ClientDownlinkAppend, ClientDownlinkError, ClientDownlinkErrorKind, ClientDownlinkFrame,
     ClientDownlinkOutbox,
+};
+pub use client_occupancy::{
+    OccupancyClaim, OccupancyLeaseRecord, OccupancyLeaseState, OccupancyLedger,
+    OccupancyReconcileTarget, OccupancyReleaseReason, OccupancyStoreError, OccupancyStoreErrorKind,
 };
 pub use client_registry::{
     ClientExchangeCursors, ClientLockState, ClientNodeRecord, ClientNodeRegistration,
