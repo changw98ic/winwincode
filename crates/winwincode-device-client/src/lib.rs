@@ -48,6 +48,12 @@
 //!   `client.candidate.retained` uplink, restart recovery of the retained
 //!   set, and the read-only reconciliation of retained candidates against
 //!   the actual Git refs of their bound checkouts.
+//! - [`apply_engine`]: the target-branch safe apply engine (GIT-100.4, plan
+//!   15.4/15.5) — preflight (candidate ref, `expectedHead` equality, dirty
+//!   policy, occupancy fencing), strategy execution in an isolated
+//!   integration worktree that never touches the user's working tree, the
+//!   compare-and-swap atomic target ref update, kept conflict artifacts, and
+//!   one durable `client.candidate.apply_result` receipt per attempt.
 //! - [`daemon`]: the periodic device-client exchange loop
 //!   (`POST /internal/v1/client/exchange`) over an injected transport:
 //!   enrollment adoption, hello announcement, heartbeat reporting,
@@ -86,6 +92,7 @@
 
 #![allow(clippy::doc_markdown)]
 
+pub mod apply_engine;
 pub mod candidate_branch;
 pub mod candidate_registry;
 pub mod connect_code;
@@ -100,10 +107,16 @@ pub mod store;
 pub mod supervisor;
 pub mod worker_logs;
 
+<<<<<<< HEAD
 pub use candidate_branch::{
     BranchCreationFacts, BranchCreationOutcome, BranchCreationReport, CandidateBranchError,
     CandidateBranchErrorKind, CreatedBranchRecord, WINWINCODE_BRANCH_PREFIX,
     create_candidate_branch, created_branch_record, enqueue_branch_created,
+=======
+pub use apply_engine::{
+    CandidateApplyError, CandidateApplyErrorKind, CandidateApplyOutcome, CandidateApplyRequest,
+    apply_candidate_to_branch,
+>>>>>>> agent/w5-apply-engine
 };
 pub use candidate_registry::{
     CANDIDATE_REF_PREFIX, CandidateLocalRefRecord, CandidateReconciliation, CandidateRefVerdict,
