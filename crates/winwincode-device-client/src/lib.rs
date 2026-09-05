@@ -79,7 +79,8 @@ pub use connect_code::{
 pub use daemon::{
     DaemonConfig, DaemonError, DaemonStatus, DeviceDaemon, EnrollmentIssuance, ExchangeRequest,
     ExchangeResponse, ExchangeTransport, ExchangeTransportError, LeaseWorkerController,
-    TickOutcome, WorkerCapacitySnapshot, WorkerCapacitySource,
+    TickOutcome, WorkerCapacitySnapshot, WorkerCapacitySource, WorkerLaunchDirectories,
+    WorkerLaunchMaterialSource,
 };
 pub use fencing::{
     FencedCommandKind, FencingGuard, FencingRejection, FencingTicket, FencingVerdict,
