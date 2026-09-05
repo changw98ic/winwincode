@@ -130,6 +130,51 @@ function message() {
   }
 }
 
+function decisionBinding(sessionId = productSessionId) {
+  return {
+    productSessionId: sessionId,
+    executionJobId: 'job_00000000000000000000000001',
+    workerSessionId: 'wsn_00000000000000000000000001',
+    sessionIdentity: {
+      productSessionId: sessionId,
+      workerSessionId: 'wsn_00000000000000000000000001',
+      codexThreadId: 'cdx_00000000000000000000000001',
+      stageRunId: 'run_00000000000000000000000001',
+    },
+  }
+}
+
+function pendingInput(overrides = {}) {
+  return {
+    kind: 'input',
+    inputRequestId: 'inp_00000000000000000000000001',
+    revision: 2,
+    state: 'pending',
+    prompt: 'Select the workspace to continue in.',
+    binding: decisionBinding(),
+    mode: 'single_choice',
+    options: [
+      { id: 'ich_00000000000000000000000001', value: 'candidate', label: 'Candidate workspace' },
+    ],
+    allowEmpty: false,
+    expiresAt: '2099-08-27T01:10:00.000Z',
+    ...overrides,
+  }
+}
+
+function pendingApproval(overrides = {}) {
+  return {
+    id: 'apr_00000000000000000000000001',
+    requestedAt: '2026-08-27T01:00:00.000Z',
+    expiresAt: '2099-08-27T01:10:00.000Z',
+    revision: 4,
+    state: 'pending',
+    subject: 'Run the approved test command.',
+    binding: decisionBinding(),
+    ...overrides,
+  }
+}
+
 function state(overrides = {}) {
   const activeSession = session()
   return {
@@ -152,6 +197,7 @@ function state(overrides = {}) {
     selectedModelRoute: modelRoute,
     modelRouteSelectionIssue: null,
     runtime: null,
+    pendingInputs: [],
     pendingApprovals: [],
     interaction: { status: 'idle', error: null },
     error: null,
@@ -287,6 +333,12 @@ function findByClass(node, className) {
   return null
 }
 
+function findAllByClass(node, className, matches = []) {
+  if (node.className === className) matches.push(node)
+  for (const child of node.children) findAllByClass(child, className, matches)
+  return matches
+}
+
 class FakeChatViewModel {
   constructor(initialState) {
     this.state = initialState
@@ -327,6 +379,14 @@ class FakeChatViewModel {
 
   async cancelSession(reason) {
     this.calls.push(['cancelSession', reason])
+  }
+
+  async respondToInput(inputRequestId, status, value) {
+    this.calls.push(['respondToInput', inputRequestId, status, value])
+  }
+
+  async decideApproval(approvalId, decision, reason) {
+    this.calls.push(['decideApproval', approvalId, decision, reason])
   }
 
   publish(next) {
@@ -437,6 +497,85 @@ test('presentation explains first-Chat model setup and bounded creation failures
     assert.match(errorText, pattern)
     assert.doesNotMatch(errorText, /private server diagnostic/iu)
   }
+})
+
+test('Chat keeps the Session decisions on the first screen and retires the card when they close', () => {
+  const document = new FakeDocument()
+  const rootElement = document.createElement('main')
+  const model = new FakeChatViewModel(state({
+    pendingInputs: [pendingInput()],
+    pendingApprovals: [pendingApproval()],
+  }))
+  const mounted = mountChatPage({ root: rootElement, model })
+
+  const card = findByClass(rootElement, 'wwc-contextual-decision')
+  assert.equal(card.hidden, false)
+  const items = findAllByClass(rootElement, 'wwc-contextual-decision-item')
+  assert.equal(items.length, 2)
+  // The blocking tool approval is the first row of the card.
+  assert.equal(items[0].dataset.kind, 'approval')
+  assert.equal(items[0].dataset.urgency, 'blocking')
+  assert.match(
+    findByClass(items[0], 'wwc-contextual-decision-title').textContent,
+    /Run the approved test command/u,
+  )
+  assert.equal(items[1].dataset.kind, 'input')
+  // The card is not a second announcement channel: Chat keeps one polite status.
+  assert.equal(findByClass(card, 'wwc-contextual-decision-note').getAttribute('aria-live'), null)
+
+  model.publish(state())
+  assert.equal(findByClass(rootElement, 'wwc-contextual-decision').hidden, true)
+  assert.deepEqual(findAllByClass(rootElement, 'wwc-contextual-decision-item'), [])
+
+  mounted.close()
+  assert.deepEqual(model.calls.at(-1), ['close'])
+})
+
+test('Chat decides an approval and answers an input through its own commands', () => {
+  const document = new FakeDocument()
+  const rootElement = document.createElement('main')
+  const model = new FakeChatViewModel(state({
+    pendingInputs: [pendingInput()],
+    pendingApprovals: [pendingApproval()],
+  }))
+  const mounted = mountChatPage({ root: rootElement, model })
+
+  const items = findAllByClass(rootElement, 'wwc-contextual-decision-item')
+  const approvalRow = items.find(row => row.dataset.kind === 'approval')
+  const reason = findByClass(approvalRow, 'wwc-contextual-decision-response')
+  reason.value = 'Reviewed the exact command.'
+  findByClass(approvalRow, 'wwc-contextual-decision-submit').emit('click')
+  assert.deepEqual(model.calls.at(-1), [
+    'decideApproval',
+    'apr_00000000000000000000000001',
+    'approve',
+    'Reviewed the exact command.',
+  ])
+  // The typed reason survives until the server stops listing the decision.
+  assert.equal(reason.value, 'Reviewed the exact command.')
+
+  const inputRow = items.find(row => row.dataset.kind === 'input')
+  findByClass(inputRow, 'wwc-contextual-decision-option').emit('click')
+  assert.deepEqual(model.calls.at(-1), [
+    'respondToInput',
+    'inp_00000000000000000000000001',
+    'provided',
+    { mode: 'single_choice', value: 'candidate' },
+  ])
+
+  // A read-only Chat renders the decisions but submits nothing.
+  const sealedRoot = document.createElement('main')
+  const sealed = mountChatPage({
+    root: sealedRoot,
+    model: new FakeChatViewModel(state({ pendingApprovals: [pendingApproval()] })),
+    readOnly: true,
+  })
+  const sealedRow = findAllByClass(sealedRoot, 'wwc-contextual-decision-item')[0]
+  assert.equal(findByClass(sealedRow, 'wwc-contextual-decision-submit').disabled, true)
+  findByClass(sealedRow, 'wwc-contextual-decision-submit').emit('click')
+  assert.deepEqual(model.calls.filter(([name]) => name === 'decideApproval').length, 1)
+  sealed.close()
+  mounted.close()
 })
 
 test('mounted Chat page exposes accessible state and delegates every interaction to its view-model', async () => {

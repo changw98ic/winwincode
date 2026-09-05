@@ -1,0 +1,132 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+
+/* UI-502: one decision card shared by Chat and StrongFlow.  It stays inside the
+   host page grid and keeps every colour on the token layer. */
+
+.wwc-strongflow-decision-host {
+  display: block;
+  min-width: var(--wwc-space-0);
+}
+
+.wwc-contextual-decision {
+  display: grid;
+  gap: var(--wwc-space-3);
+  padding: var(--wwc-space-3);
+  border: var(--wwc-border-width) solid var(--wwc-color-border-subtle);
+  border-radius: var(--wwc-radius-md);
+  background: var(--wwc-color-surface);
+}
+
+.wwc-contextual-decision-note {
+  margin: var(--wwc-space-0);
+  color: var(--wwc-color-text-muted);
+  font-size: var(--wwc-font-size-sm);
+}
+
+.wwc-contextual-decision-list {
+  display: grid;
+  gap: var(--wwc-space-2);
+  margin: var(--wwc-space-0);
+  padding: var(--wwc-space-0);
+  list-style: none;
+}
+
+.wwc-contextual-decision-item {
+  display: grid;
+  min-width: var(--wwc-space-0);
+  gap: var(--wwc-space-2);
+  padding: var(--wwc-space-2);
+  border: var(--wwc-border-width) solid var(--wwc-color-border-subtle);
+  border-radius: var(--wwc-radius-sm);
+  background: var(--wwc-color-surface-subtle);
+}
+
+.wwc-contextual-decision-item[data-urgency='blocking'] {
+  border-color: var(--wwc-color-danger-border);
+  background: var(--wwc-color-danger-surface);
+}
+
+.wwc-contextual-decision-item[data-urgency='expired'] {
+  border-color: var(--wwc-color-warning-border);
+  background: var(--wwc-color-warning-surface);
+}
+
+.wwc-contextual-decision-item[data-urgency='binding-invalid'] {
+  border-style: dashed;
+}
+
+.wwc-contextual-decision-title {
+  margin: var(--wwc-space-0);
+  overflow-wrap: anywhere;
+  font-size: var(--wwc-font-size-md);
+  font-weight: var(--wwc-font-weight-medium);
+}
+
+.wwc-contextual-decision-context {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--wwc-space-1) var(--wwc-space-3);
+  margin: var(--wwc-space-0);
+  padding: var(--wwc-space-0);
+  list-style: none;
+  color: var(--wwc-color-text-muted);
+  font-size: var(--wwc-font-size-sm);
+}
+
+.wwc-contextual-decision-response-label {
+  display: grid;
+  gap: var(--wwc-space-1);
+  font-size: var(--wwc-font-size-sm);
+}
+
+.wwc-contextual-decision-response {
+  min-height: var(--wwc-space-12);
+  padding: var(--wwc-space-2);
+  resize: vertical;
+}
+
+.wwc-contextual-decision-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--wwc-space-2);
+}
+
+.wwc-contextual-decision-submit,
+.wwc-contextual-decision-secondary,
+.wwc-contextual-decision-option {
+  justify-self: start;
+}
+
+.wwc-contextual-decision-rejected {
+  margin: var(--wwc-space-0);
+  color: var(--wwc-color-warning-text);
+  font-size: var(--wwc-font-size-sm);
+}
+
+.wwc-contextual-decision-detail {
+  justify-self: start;
+  color: var(--wwc-color-action);
+  font-size: var(--wwc-font-size-sm);
+}
+
+.wwc-contextual-decision-omitted {
+  margin: var(--wwc-space-0);
+  color: var(--wwc-color-text-muted);
+  font-size: var(--wwc-font-size-sm);
+}
+
+@media (max-width: 48rem) {
+  .wwc-contextual-decision-list {
+    gap: var(--wwc-space-2);
+  }
+
+  .wwc-contextual-decision-item {
+    padding: var(--wwc-space-2);
+  }
+}
+
+@media (max-width: 64rem) {
+  .wwc-strongflow-decision-host {
+    grid-column: 1 / -1;
+  }
+}
