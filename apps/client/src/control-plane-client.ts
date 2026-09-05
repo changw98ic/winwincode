@@ -2305,3 +2305,704 @@ export function createControlPlaneClientOccupancy(options: {
   }
   return Object.freeze(occupancy)
 }
+
+// ---------------------------------------------------------------------------
+// User management: Owner create, account state, and password resets
+// (UI-100.1).
+//
+// REAL SERVER SHAPES: the routes, payload names, role and state strings, and
+// wire error codes in this block mirror the landed Server account endpoints
+// (POST /api/v1/users, /api/v1/users/state, /api/v1/users/password of
+// crates/winwincode-server). The account list read is the one presentation-
+// side contract: the Server route that lists accounts has not landed yet, so
+// USERS_LIST_PATH and its parser follow the repository directory precedent
+// and only they change when that landing settles the wire. Pages and
+// view-models only ever see the typed unions below. The one-time temporary
+// password of a create or Owner reset is handed to the caller exactly once
+// and never cached here.
+// ---------------------------------------------------------------------------
+
+const USERS_CREATE_PATH = '/api/v1/users'
+const USERS_STATE_PATH = '/api/v1/users/state'
+const USERS_PASSWORD_PATH = '/api/v1/users/password'
+const USERS_LIST_PATH = '/api/v1/users'
+
+/** The two account roles the Server issues through account creation. */
+export type ControlPlaneUserRole = 'owner' | 'member'
+
+/** The two durable account states the Server projects. */
+export type ControlPlaneUserAccountState = 'active' | 'disabled'
+
+/** The username bound: trimmed, at most 96 bytes, no whitespace. */
+const MAX_USERNAME_BYTES = 96
+/** The self-service password bound mirrors the Server credential window. */
+const MAX_PASSWORD_BYTES = 256
+
+const usernameEncoder = new TextEncoder()
+
+const USER_ROLE_VALUES: readonly string[] = Object.freeze(['owner', 'member'])
+const USER_ACCOUNT_STATE_VALUES: readonly string[] = Object.freeze(['active', 'disabled'])
+
+/**
+ * One account row of the list read. `revision` is not a display column; it is
+ * the compare-and-swap input every state and password write requires.
+ */
+export interface ControlPlaneUserSummary {
+  readonly userId: string
+  readonly username: string
+  readonly role: ControlPlaneUserRole
+  readonly state: ControlPlaneUserAccountState
+  readonly createdAt: string
+  readonly revision: number
+}
+
+/** The full account projection the Server returns with every write. */
+export interface ControlPlaneUserAccount {
+  readonly userId: string
+  readonly username: string
+  readonly normalizedUsername: string
+  readonly role: ControlPlaneUserRole
+  readonly state: ControlPlaneUserAccountState
+  readonly createdAt: string
+  readonly updatedAt: string
+  readonly revision: number
+}
+
+/** One Owner account creation: the username plus its role. */
+export interface ControlPlaneUserCreateInput {
+  readonly username: string
+  readonly role: ControlPlaneUserRole
+}
+
+/** One account state write under the exact expected revision. */
+export interface ControlPlaneUserStateInput {
+  readonly userId: string
+  readonly expectedRevision: number
+  readonly state: ControlPlaneUserAccountState
+}
+
+/**
+ * One password write. Without the optional password fields this is the Owner
+ * reset form: the Server issues a fresh one-time temporary password. With
+ * both fields this is the self-service form: the account holder proves the
+ * current password and rotates it, and no secret is returned.
+ */
+export interface ControlPlaneUserPasswordResetInput {
+  readonly userId: string
+  readonly expectedRevision: number
+  readonly currentPassword?: string
+  readonly newPassword?: string
+}
+
+/** One account creation outcome; the temporary password is shown exactly once. */
+export interface ControlPlaneUserCreateOutcome {
+  readonly user: ControlPlaneUserAccount
+  readonly temporaryPassword: string
+}
+
+/** One password write outcome; only the Owner reset form carries a secret. */
+export interface ControlPlaneUserPasswordResetOutcome {
+  readonly user: ControlPlaneUserAccount
+  /** The one-time credential of an Owner reset; null after a self rotation. */
+  readonly temporaryPassword: string | null
+}
+
+/**
+ * The one presentation-facing user-management failure taxonomy. Wire codes
+ * are translated by the context classifiers below and never read anywhere
+ * else. The Server folds duplicate normalized usernames and the exhausted
+ * one-Owner initialization into the same 409 `WRONG_STATE` rejection, so the
+ * create form presents that code as a username conflict.
+ */
+export type ControlPlaneUserManagementFailure =
+  | 'invalid-request'
+  | 'username-conflict'
+  | 'wrong-state'
+  | 'revision-conflict'
+  | 'user-not-found'
+  | 'permission-denied'
+  | 'authentication-required'
+  | 'current-password-wrong'
+  | 'unavailable'
+
+const USER_MANAGEMENT_FAILURE_CODES: Readonly<Record<string, ControlPlaneUserManagementFailure>> =
+  Object.freeze({
+    INVALID_REQUEST: 'invalid-request',
+    WRONG_STATE: 'wrong-state',
+    REVISION_CONFLICT: 'revision-conflict',
+    RESOURCE_NOT_FOUND: 'user-not-found',
+    PERMISSION_DENIED: 'permission-denied',
+    AUTHENTICATION_REQUIRED: 'authentication-required',
+  })
+
+function userManagementFailureOfCode(
+  error: unknown,
+  codeOverrides: Readonly<Record<string, ControlPlaneUserManagementFailure>>,
+): ControlPlaneUserManagementFailure {
+  if (error instanceof ControlPlaneClientError) {
+    const overridden = codeOverrides[error.code]
+    if (overridden !== undefined) return overridden
+    const failure = USER_MANAGEMENT_FAILURE_CODES[error.code]
+    if (failure !== undefined) return failure
+  }
+  return 'unavailable'
+}
+
+/**
+ * Translate one creation rejection into the presentation taxonomy. Every wire
+ * code stays inside these functions; view-models and pages branch only on the
+ * returned union.
+ */
+export function controlPlaneUserCreateFailure(
+  error: unknown,
+): ControlPlaneUserManagementFailure {
+  return userManagementFailureOfCode(error, {
+    WRONG_STATE: 'username-conflict',
+  })
+}
+
+/** Translate one account state rejection into the presentation taxonomy. */
+export function controlPlaneUserStateFailure(
+  error: unknown,
+): ControlPlaneUserManagementFailure {
+  return userManagementFailureOfCode(error, {})
+}
+
+/**
+ * Translate one password-write rejection into the presentation taxonomy. A
+ * self-service rejection of the current proof shares the wire code of an
+ * expired browser session, so this context presents 401 as the wrong current
+ * password — the form still holds and the session case reaches the page
+ * through the access-failure channel.
+ */
+export function controlPlaneUserPasswordFailure(
+  error: unknown,
+): ControlPlaneUserManagementFailure {
+  return userManagementFailureOfCode(error, {
+    AUTHENTICATION_REQUIRED: 'current-password-wrong',
+  })
+}
+
+/**
+ * Validate creation input before a request exists, mirroring the Server
+ * username bound: the trimmed value stays non-empty, at most 96 bytes, and
+ * free of whitespace so the normalized form is accepted unchanged.
+ */
+function assertUserCreateInput(input: ControlPlaneUserCreateInput): void {
+  const username = typeof input?.username === 'string' ? input.username.trim() : ''
+  if (
+    username.length === 0
+    || usernameEncoder.encode(username).length > MAX_USERNAME_BYTES
+    || /\s/u.test(username)
+    || !USER_ROLE_VALUES.includes(input?.role as string)
+  ) {
+    throw new ControlPlaneClientError({
+      kind: 'protocol',
+      code: 'USERS_CREATE_INPUT_INVALID',
+      message: 'Enter a username without whitespace and choose a role.',
+      requestId: null,
+      retryable: false,
+    })
+  }
+}
+
+/** Validate one state write before a request exists. */
+function assertUserStateInput(input: ControlPlaneUserStateInput): void {
+  if (
+    typeof input?.userId !== 'string'
+    || input.userId.length === 0
+    || typeof input?.expectedRevision !== 'number'
+    || !Number.isInteger(input.expectedRevision)
+    || input.expectedRevision < 1
+    || !USER_ACCOUNT_STATE_VALUES.includes(input?.state as string)
+  ) {
+    throw new ControlPlaneClientError({
+      kind: 'protocol',
+      code: 'USERS_STATE_INPUT_INVALID',
+      message: 'Select a user and retry: the account revision moved.',
+      requestId: null,
+      retryable: false,
+    })
+  }
+}
+
+/**
+ * Validate one password write before a request exists. The two optional
+ * fields travel together or not at all: a self-service form without the
+ * current proof never reaches the wire.
+ */
+function assertUserPasswordResetInput(input: ControlPlaneUserPasswordResetInput): void {
+  const hasCurrent = typeof input?.currentPassword === 'string'
+  const hasNew = typeof input?.newPassword === 'string'
+  const newPassword = hasNew ? (input.newPassword as string) : ''
+  const selfForm = hasCurrent || hasNew
+  if (
+    typeof input?.userId !== 'string'
+    || input.userId.length === 0
+    || typeof input?.expectedRevision !== 'number'
+    || !Number.isInteger(input.expectedRevision)
+    || input.expectedRevision < 1
+    || (selfForm
+      && (!hasCurrent
+        || (input.currentPassword as string).length === 0
+        || newPassword.length === 0
+        || newPassword.length > MAX_PASSWORD_BYTES))
+  ) {
+    throw new ControlPlaneClientError({
+      kind: 'protocol',
+      code: 'USERS_PASSWORD_INPUT_INVALID',
+      message: 'Enter the required passwords before submitting.',
+      requestId: null,
+      retryable: false,
+    })
+  }
+}
+
+function userManagementBoundaryError(
+  status: number,
+  source: string,
+): ControlPlaneClientError {
+  let value: unknown
+  try {
+    value = JSON.parse(source)
+  } catch {
+    value = null
+  }
+  const error = isRecord(value) && isRecord(value.error) ? value.error : null
+  const code = error !== null && typeof error.code === 'string'
+    ? error.code
+    : 'USER_MANAGEMENT_FAILED'
+  const kind: ControlPlaneClientErrorKind = accessKind(code)
+    ?? (versionCode(code)
+      ? 'version'
+      : (status >= 500 ? 'server' : 'protocol'))
+  return new ControlPlaneClientError({
+    kind,
+    code,
+    message: error !== null && typeof error.message === 'string'
+      ? error.message
+      : 'The user management request failed.',
+    requestId: isRecord(value) && typeof value.requestId === 'string'
+      ? value.requestId as RequestId
+      : null,
+    retryable: error !== null && error.retryable === true,
+  })
+}
+
+function invalidUserAccountError(): ControlPlaneClientError {
+  return new ControlPlaneClientError({
+    kind: 'protocol',
+    code: 'INVALID_USER_ACCOUNT_RESPONSE',
+    message: 'The Control Plane server returned an invalid user account.',
+    requestId: null,
+    retryable: false,
+  })
+}
+
+function userAccountValue(value: unknown): ControlPlaneUserAccount {
+  if (!isRecord(value)) throw invalidUserAccountError()
+  const role = value.role
+  const state = value.state
+  const revision = value.revision
+  const createdAt = value.createdAt
+  const updatedAt = value.updatedAt
+  if (
+    typeof value.userId !== 'string'
+    || value.userId.length === 0
+    || typeof value.username !== 'string'
+    || value.username.length === 0
+    || typeof value.normalizedUsername !== 'string'
+    || value.normalizedUsername.length === 0
+    || typeof role !== 'string'
+    || !USER_ROLE_VALUES.includes(role)
+    || typeof state !== 'string'
+    || !USER_ACCOUNT_STATE_VALUES.includes(state)
+    || typeof createdAt !== 'string'
+    || !RFC3339_INSTANT.test(createdAt)
+    || Number.isNaN(Date.parse(createdAt))
+    || typeof updatedAt !== 'string'
+    || !RFC3339_INSTANT.test(updatedAt)
+    || Number.isNaN(Date.parse(updatedAt))
+    || typeof revision !== 'number'
+    || !Number.isInteger(revision)
+    || revision < 1
+  ) {
+    throw invalidUserAccountError()
+  }
+  return Object.freeze({
+    userId: value.userId,
+    username: value.username,
+    normalizedUsername: value.normalizedUsername,
+    role: role as ControlPlaneUserRole,
+    state: state as ControlPlaneUserAccountState,
+    createdAt,
+    updatedAt,
+    revision,
+  })
+}
+
+function userSummaryValue(value: unknown): ControlPlaneUserSummary {
+  if (!isRecord(value)) throw invalidUserAccountError()
+  const role = value.role
+  const state = value.state
+  const revision = value.revision
+  const createdAt = value.createdAt
+  if (
+    typeof value.userId !== 'string'
+    || value.userId.length === 0
+    || typeof value.username !== 'string'
+    || value.username.length === 0
+    || typeof role !== 'string'
+    || !USER_ROLE_VALUES.includes(role)
+    || typeof state !== 'string'
+    || !USER_ACCOUNT_STATE_VALUES.includes(state)
+    || typeof createdAt !== 'string'
+    || !RFC3339_INSTANT.test(createdAt)
+    || Number.isNaN(Date.parse(createdAt))
+    || typeof revision !== 'number'
+    || !Number.isInteger(revision)
+    || revision < 1
+  ) {
+    throw invalidUserAccountError()
+  }
+  return Object.freeze({
+    userId: value.userId,
+    username: value.username,
+    role: role as ControlPlaneUserRole,
+    state: state as ControlPlaneUserAccountState,
+    createdAt,
+    revision,
+  })
+}
+
+function userPayload(source: string): Readonly<Record<string, unknown>> {
+  let value: unknown
+  try {
+    value = JSON.parse(source)
+  } catch {
+    value = null
+  }
+  if (
+    isRecord(value)
+    && typeof value.schemaVersion === 'string'
+    && value.schemaVersion !== CONTROL_PLANE_SCHEMA_VERSION
+  ) {
+    throw new ControlPlaneClientError({
+      kind: 'version',
+      code: 'SCHEMA_VERSION_MISMATCH',
+      message: `The Control Plane server must use ${CONTROL_PLANE_SCHEMA_VERSION}.`,
+      requestId: null,
+      retryable: false,
+    })
+  }
+  if (!isRecord(value)) throw invalidUserAccountError()
+  return value
+}
+
+function userAccountResponse(source: string): ControlPlaneUserAccount {
+  return userAccountValue(userPayload(source).user)
+}
+
+function userCreateResponse(source: string): ControlPlaneUserCreateOutcome {
+  const value = userPayload(source)
+  const temporaryPassword = value.temporaryPassword
+  if (
+    typeof temporaryPassword !== 'string'
+    || temporaryPassword.length === 0
+  ) {
+    throw invalidUserAccountError()
+  }
+  return Object.freeze({
+    user: userAccountValue(value.user),
+    temporaryPassword,
+  })
+}
+
+function userPasswordResetResponse(
+  source: string,
+  selfForm: boolean,
+): ControlPlaneUserPasswordResetOutcome {
+  const value = userPayload(source)
+  const user = userAccountValue(value.user)
+  if (selfForm) {
+    // The self-service rotation never carries a secret; a payload that tried
+    // to hand one back is dropped here so the page has one secret channel.
+    return Object.freeze({ user, temporaryPassword: null })
+  }
+  const temporaryPassword = value.temporaryPassword
+  if (typeof temporaryPassword !== 'string' || temporaryPassword.length === 0) {
+    throw invalidUserAccountError()
+  }
+  return Object.freeze({ user, temporaryPassword })
+}
+
+function userListResponse(source: string): readonly ControlPlaneUserSummary[] {
+  const value = userPayload(source)
+  if (!Array.isArray(value.users)) throw invalidUserAccountError()
+  return Object.freeze(value.users.map(userSummaryValue))
+}
+
+/**
+ * The base facade extended with the Owner user-management surface. The
+ * decorator delegates every base method, so hosts can pass it anywhere a
+ * `ControlPlaneClient` is accepted and keep one session and one error identity.
+ */
+export interface ControlPlaneClientUsers extends ControlPlaneClient {
+  /** Read the account list that backs the user management rows. */
+  listUsers(options?: ControlPlaneRequestOptions): Promise<readonly ControlPlaneUserSummary[]>
+  /** Create one account; the returned temporary password is shown exactly once. */
+  createUser(
+    input: ControlPlaneUserCreateInput,
+    options?: ControlPlaneRequestOptions,
+  ): Promise<ControlPlaneUserCreateOutcome>
+  /** Activate or disable one account under the exact expected revision. */
+  setUserState(
+    input: ControlPlaneUserStateInput,
+    options?: ControlPlaneRequestOptions,
+  ): Promise<ControlPlaneUserAccount>
+  /**
+   * Write one password: an Owner reset of another account returns the
+   * one-time temporary password; the self-service form returns none.
+   */
+  resetUserPassword(
+    input: ControlPlaneUserPasswordResetInput,
+    options?: ControlPlaneRequestOptions,
+  ): Promise<ControlPlaneUserPasswordResetOutcome>
+}
+
+/**
+ * Extend the one Control Plane facade with the user-management writes over
+ * the real Server account routes. An injected facade that already implements
+ * these methods is reused verbatim so deterministic fixtures and host
+ * composition keep their single seam.
+ */
+export function createControlPlaneClientUsers(options: {
+  readonly client: ControlPlaneClient
+  /** Same deterministic transport seam the base facade was created with. */
+  readonly transport?: ControlPlaneClientTransport
+}): ControlPlaneClientUsers {
+  const location = parseControlPlaneServerUrl(options.client.serverUrl)
+  const transportFetch = options.transport?.fetch
+  const injected = options.client as Partial<ControlPlaneClientUsers>
+  const injectedListUsers = injected.listUsers
+  const injectedCreateUser = injected.createUser
+  const injectedSetUserState = injected.setUserState
+  const injectedResetUserPassword = injected.resetUserPassword
+
+  async function usersRequest(
+    path: string,
+    body: string | null,
+    signal: AbortSignal | undefined,
+  ): Promise<ControlPlaneHttpResponse> {
+    if (signalIsAborted(signal)) throw cancelledError(null)
+    if (transportFetch === undefined) {
+      throw new ControlPlaneClientError({
+        kind: 'protocol',
+        code: 'TRANSPORT_UNAVAILABLE',
+        message: 'The browser HTTP transport is unavailable.',
+        requestId: null,
+        retryable: false,
+      })
+    }
+    return transportFetch(`${location.serverUrl}${path}`, {
+      method: body === null ? 'GET' : 'POST',
+      headers: body === null ? {} : { 'Content-Type': 'application/json' },
+      ...(body === null ? {} : { body }),
+      redirect: 'error',
+      cache: 'no-store',
+      referrerPolicy: 'no-referrer',
+      credentials: 'include',
+      ...(signal === undefined ? {} : { signal }),
+    })
+  }
+
+  function usersNetworkError(): ControlPlaneClientError {
+    return new ControlPlaneClientError({
+      kind: 'network',
+      code: 'NETWORK_ERROR',
+      message: 'The Control Plane server could not be reached.',
+      requestId: null,
+      retryable: true,
+    })
+  }
+
+  async function listRequest(
+    requestOptions: ControlPlaneRequestOptions | undefined,
+  ): Promise<readonly ControlPlaneUserSummary[]> {
+    try {
+      const response = await usersRequest(
+        USERS_LIST_PATH,
+        null,
+        requestOptions?.signal,
+      )
+      const source = await response.text()
+      if (!response.ok) throw userManagementBoundaryError(response.status, source)
+      if (response.status !== 200) throw invalidUserAccountError()
+      return userListResponse(source)
+    } catch (error) {
+      if (signalIsAborted(requestOptions?.signal)) throw cancelledError(null)
+      if (error instanceof ControlPlaneClientError) throw error
+      throw usersNetworkError()
+    }
+  }
+
+  async function createRequest(
+    input: ControlPlaneUserCreateInput,
+    requestOptions: ControlPlaneRequestOptions | undefined,
+  ): Promise<ControlPlaneUserCreateOutcome> {
+    try {
+      const response = await usersRequest(
+        USERS_CREATE_PATH,
+        JSON.stringify({
+          schemaVersion: CONTROL_PLANE_SCHEMA_VERSION,
+          username: input.username.trim(),
+          role: input.role,
+        }),
+        requestOptions?.signal,
+      )
+      const source = await response.text()
+      if (!response.ok) throw userManagementBoundaryError(response.status, source)
+      if (response.status !== 201) throw invalidUserAccountError()
+      return userCreateResponse(source)
+    } catch (error) {
+      if (signalIsAborted(requestOptions?.signal)) throw cancelledError(null)
+      if (error instanceof ControlPlaneClientError) throw error
+      throw usersNetworkError()
+    }
+  }
+
+  async function stateRequest(
+    input: ControlPlaneUserStateInput,
+    requestOptions: ControlPlaneRequestOptions | undefined,
+  ): Promise<ControlPlaneUserAccount> {
+    try {
+      const response = await usersRequest(
+        USERS_STATE_PATH,
+        JSON.stringify({
+          schemaVersion: CONTROL_PLANE_SCHEMA_VERSION,
+          userId: input.userId,
+          expectedRevision: input.expectedRevision,
+          state: input.state,
+        }),
+        requestOptions?.signal,
+      )
+      const source = await response.text()
+      if (!response.ok) throw userManagementBoundaryError(response.status, source)
+      if (response.status !== 200) throw invalidUserAccountError()
+      return userAccountResponse(source)
+    } catch (error) {
+      if (signalIsAborted(requestOptions?.signal)) throw cancelledError(null)
+      if (error instanceof ControlPlaneClientError) throw error
+      throw usersNetworkError()
+    }
+  }
+
+  async function passwordRequest(
+    input: ControlPlaneUserPasswordResetInput,
+    requestOptions: ControlPlaneRequestOptions | undefined,
+  ): Promise<ControlPlaneUserPasswordResetOutcome> {
+    const selfForm = input.currentPassword !== undefined || input.newPassword !== undefined
+    try {
+      const response = await usersRequest(
+        USERS_PASSWORD_PATH,
+        JSON.stringify({
+          schemaVersion: CONTROL_PLANE_SCHEMA_VERSION,
+          userId: input.userId,
+          expectedRevision: input.expectedRevision,
+          ...(selfForm
+            ? {
+              currentPassword: input.currentPassword,
+              newPassword: input.newPassword,
+            }
+            : {}),
+        }),
+        requestOptions?.signal,
+      )
+      const source = await response.text()
+      if (!response.ok) throw userManagementBoundaryError(response.status, source)
+      if (response.status !== 200) throw invalidUserAccountError()
+      return userPasswordResetResponse(source, selfForm)
+    } catch (error) {
+      if (signalIsAborted(requestOptions?.signal)) throw cancelledError(null)
+      if (error instanceof ControlPlaneClientError) throw error
+      throw usersNetworkError()
+    }
+  }
+
+  const users: ControlPlaneClientUsers = {
+    serverUrl: options.client.serverUrl,
+    restore(requestOptions) {
+      return options.client.restore(requestOptions)
+    },
+    login(bootstrapProof, requestOptions) {
+      return options.client.login(bootstrapProof, requestOptions)
+    },
+    loginWithPassword(credentials, requestOptions) {
+      return options.client.loginWithPassword(credentials, requestOptions)
+    },
+    initializationStatus(requestOptions) {
+      return options.client.initializationStatus(requestOptions)
+    },
+    logout(requestOptions) {
+      return options.client.logout(requestOptions)
+    },
+    command(command, requestOptions) {
+      return options.client.command(command, requestOptions)
+    },
+    query(query, requestOptions) {
+      return options.client.query(query, requestOptions)
+    },
+    subscribe(subscriptionOptions) {
+      return options.client.subscribe(subscriptionOptions)
+    },
+    async listUsers(requestOptions) {
+      if (typeof injectedListUsers === 'function') {
+        return injectedListUsers.call(options.client, requestOptions)
+      }
+      return listRequest(requestOptions)
+    },
+    async createUser(rawInput, requestOptions) {
+      // The facade is the one place that owns the username shape, so an
+      // injected users implementation receives the same trimmed input the
+      // wire path would send.
+      const input: ControlPlaneUserCreateInput = {
+        username: typeof rawInput?.username === 'string' ? rawInput.username.trim() : '',
+        role: rawInput?.role,
+      }
+      assertUserCreateInput(input)
+      if (typeof injectedCreateUser === 'function') {
+        return injectedCreateUser.call(options.client, input, requestOptions)
+      }
+      return createRequest(input, requestOptions)
+    },
+    async setUserState(rawInput, requestOptions) {
+      const input: ControlPlaneUserStateInput = {
+        userId: typeof rawInput?.userId === 'string' ? rawInput.userId : '',
+        expectedRevision: rawInput?.expectedRevision as number,
+        state: rawInput?.state as ControlPlaneUserAccountState,
+      }
+      assertUserStateInput(input)
+      if (typeof injectedSetUserState === 'function') {
+        return injectedSetUserState.call(options.client, input, requestOptions)
+      }
+      return stateRequest(input, requestOptions)
+    },
+    async resetUserPassword(rawInput, requestOptions) {
+      const input: ControlPlaneUserPasswordResetInput = {
+        userId: typeof rawInput?.userId === 'string' ? rawInput.userId : '',
+        expectedRevision: rawInput?.expectedRevision as number,
+        ...(rawInput?.currentPassword === undefined ? {} : { currentPassword: rawInput.currentPassword }),
+        ...(rawInput?.newPassword === undefined ? {} : { newPassword: rawInput.newPassword }),
+      }
+      assertUserPasswordResetInput(input)
+      if (typeof injectedResetUserPassword === 'function') {
+        return injectedResetUserPassword.call(options.client, input, requestOptions)
+      }
+      return passwordRequest(input, requestOptions)
+    },
+    close() {
+      options.client.close()
+    },
+  }
+  return Object.freeze(users)
+}
