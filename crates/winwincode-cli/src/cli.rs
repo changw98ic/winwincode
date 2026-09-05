@@ -5,6 +5,10 @@ use std::path::PathBuf;
 use serde::Serialize;
 use winwincode_domain::{UserAccountRole, UserAccountState};
 
+use crate::device_admin::{
+    DeviceAdminError, DeviceAdminOutcome, device_status, refresh_device_connect_code,
+    set_device_lock,
+};
 use crate::user_admin::{UserAccountAdmin, UserAdminError, UserAdminOutcome};
 use crate::{
     AttachRequest, BaselineChoice, DiagnosticCategory, DiagnosticReport, DiagnosticStatus,
@@ -55,6 +59,7 @@ pub fn render_help() -> String {
         "  wwc user disable <USERNAME> [--data-dir PATH] [--json]",
         "  wwc user enable <USERNAME> [--data-dir PATH] [--json]",
         "  wwc user reset-password <USERNAME> [--data-dir PATH] [--json]",
+        "  wwc device status|refresh-code|lock|unlock [--data-dir PATH] [--json]",
         "  wwc help",
         "",
         "Git 初始化和 Snapshot 都需要显式确认。Snapshot 使用专用 ref，不会修改当前分支、索引或 stash。",
@@ -62,6 +67,8 @@ pub fn render_help() -> String {
         "用户管理直接操作 Server 产品状态数据库：--data-dir 与 Server 的 WWC_SERVER_DATA_DIRECTORY 一致。",
         "临时密码只显示一次，绝不再次展示。禁用用户不触达浏览器会话：会话撤销由 Server 负责，",
         "与正在运行的 Server 共库时需重启 Server 或经 HTTP 端点操作才即时生效。",
+        "device 命令操作 Device Client 本地数据目录：--data-dir 为 Device Client 的数据目录。",
+        "动态连接码明文只在 refresh-code 时显示一次，绝不写入日志或数据库；锁定期间新的连接验证一律拒绝。",
         "",
     ]
     .join("\n")
@@ -90,6 +97,7 @@ fn run(arguments: &[String], launcher: &dyn LocalLauncherPort) -> Result<WwcCliE
         "repo" => run_repo(&arguments[1..], launcher),
         "doctor" => run_doctor(&arguments[1..], launcher),
         "user" => run_user(&arguments[1..]),
+        "device" => run_device(&arguments[1..]),
         other => Err(UsageError(format!("未知命令 {other}。"))),
     }
 }
@@ -272,6 +280,173 @@ fn render_initialization_guidance() -> String {
         "Server 尚未初始化：该数据目录还没有 Owner。",
         "请先通过浏览器完成一次性初始化（在 Server 登录页输入 bootstrap proof），或运行：",
         "  wwc user create <USERNAME> --role owner --data-dir <数据目录>",
+        "",
+    ]
+    .join("\n")
+}
+
+/// Parses and runs one `wwc device ...` command against the Device Client
+/// local data directory (plan 16.8: the CLI is the no-desktop fallback).
+fn run_device(arguments: &[String]) -> Result<WwcCliExit, UsageError> {
+    let Some(action) = arguments.first().map(String::as_str) else {
+        return Err(UsageError(
+            "device 后需要 status、refresh-code、lock 或 unlock。".into(),
+        ));
+    };
+    if !matches!(action, "status" | "refresh-code" | "lock" | "unlock") {
+        return Err(UsageError(format!("未知 device 命令 {action}。")));
+    }
+    let parsed = parse(&arguments[1..], &["json"])?;
+    reject_unknown(&parsed, &["data-dir"], &["json"])?;
+    let data_directory = device_data_directory(&parsed)?;
+    let json = parsed.switches.contains("json");
+    let result = match action {
+        "status" => device_status(&data_directory),
+        "refresh-code" => refresh_device_connect_code(&data_directory),
+        "lock" => set_device_lock(&data_directory, true),
+        "unlock" => set_device_lock(&data_directory, false),
+        _ => unreachable!("action vocabulary is checked above"),
+    };
+    Ok(device_exit(result, json))
+}
+
+fn device_data_directory(parsed: &ParsedArguments) -> Result<PathBuf, UsageError> {
+    let values = parsed.flags.get("data-dir").map_or(&[][..], Vec::as_slice);
+    if values.len() > 1 {
+        return Err(UsageError("--data-dir 不能重复。".into()));
+    }
+    values.first().map(PathBuf::from).ok_or_else(|| {
+        UsageError("缺少 --data-dir：device 命令需要 Device Client 的本地数据目录。".into())
+    })
+}
+
+fn device_exit(result: Result<DeviceAdminOutcome, DeviceAdminError>, json: bool) -> WwcCliExit {
+    match result {
+        Ok(outcome) => WwcCliExit {
+            code: EXIT_SUCCESS,
+            stdout: if json {
+                render_json(&outcome)
+            } else {
+                render_device(&outcome)
+            },
+            stderr: String::new(),
+        },
+        Err(DeviceAdminError::NotInitialized) => WwcCliExit {
+            code: EXIT_ACTION_REQUIRED,
+            stdout: if json {
+                "{\"status\":\"not-initialized\"}\n".to_owned()
+            } else {
+                render_device_initialization_guidance()
+            },
+            stderr: String::new(),
+        },
+        Err(DeviceAdminError::NotEnrolled) => WwcCliExit {
+            code: EXIT_ACTION_REQUIRED,
+            stdout: if json {
+                "{\"status\":\"not-enrolled\"}\n".to_owned()
+            } else {
+                render_device_enrollment_guidance()
+            },
+            stderr: String::new(),
+        },
+        Err(DeviceAdminError::Failed { code, message }) => WwcCliExit {
+            code: EXIT_SERVICE,
+            stdout: String::new(),
+            stderr: format!("device 命令失败 [{code}]：{message}\n"),
+        },
+    }
+}
+
+fn render_device(outcome: &DeviceAdminOutcome) -> String {
+    match outcome {
+        DeviceAdminOutcome::Status { device } => {
+            let mut output = format!("WinWinCode Device\n设备 ID：{}\n", device.device_id);
+            if device.enrolled {
+                let _ = write!(
+                    output,
+                    "Client ID：{}\n节点 ID：{}\n",
+                    device.public_client_id, device.client_node_id
+                );
+            } else {
+                output.push_str("注册状态：未完成 enrollment（等待 Server 接受）\n");
+            }
+            output.push_str(if device.accepting_connections {
+                "连接状态：接受新连接\n"
+            } else {
+                "连接状态：不接受新连接\n"
+            });
+            output.push_str(if device.lock_state == "locked" {
+                "锁定状态：已锁定\n"
+            } else {
+                "锁定状态：未锁定\n"
+            });
+            match &device.connect_code {
+                Some(code) => {
+                    let _ = write!(
+                        output,
+                        "动态连接码：第 {} 代（{}）\n连接码编号：{}\n有效期至：{}",
+                        code.generation, code.state, code.connect_code_id, code.expires_at
+                    );
+                    match code.remaining_seconds {
+                        Some(seconds @ 0..) => {
+                            let _ = writeln!(output, "（剩余 {seconds} 秒）");
+                        }
+                        _ => output.push_str("（已过期）\n"),
+                    }
+                    output.push_str(
+                        "说明：状态页不显示明文连接码；明文只在 refresh-code 时显示一次。\n",
+                    );
+                }
+                None => output.push_str("动态连接码：未发布\n"),
+            }
+            output
+        }
+        DeviceAdminOutcome::CodeRefreshed {
+            code,
+            connect_code,
+            valid_seconds,
+        } => format!(
+            "动态连接码已生成。\n动态连接码：{} {}\n有效期至：{}（{valid_seconds} 秒）\n说明：明文连接码只显示这一次，请立即在 Web 端输入；关闭本输出后无法找回。\
+             旧连接码已立即失效，发布帧将在 Device Client 下一次交换时送达 Server。\n",
+            &connect_code[..connect_code.len() / 2],
+            &connect_code[connect_code.len() / 2..],
+            code.expires_at
+        ),
+        DeviceAdminOutcome::PolicyUpdated {
+            accepting_connections,
+            lock_state,
+        } => {
+            let headline = if lock_state == "locked" {
+                "Client 已锁定。"
+            } else {
+                "Client 已解锁。"
+            };
+            let connections = if *accepting_connections {
+                "接受新连接"
+            } else {
+                "不接受新连接"
+            };
+            format!(
+                "{headline}\n连接状态：{connections}\n说明：锁定期间新的连接验证请求一律拒绝；策略已持久化，并随后续 hello/心跳上报 Server。\n"
+            )
+        }
+    }
+}
+
+fn render_device_initialization_guidance() -> String {
+    [
+        "Device Client 尚未初始化：该数据目录还没有设备身份。",
+        "请先启动 WinWinCode Device Client（它会生成本地身份并向 Server 注册），",
+        "或用 --data-dir 指向 Device Client 的数据目录。",
+        "",
+    ]
+    .join("\n")
+}
+
+fn render_device_enrollment_guidance() -> String {
+    [
+        "设备尚未完成 enrollment 注册：请先启动 Device Client 与 Server 完成一次交换。",
+        "注册接受后才可发布动态连接码（否则发布帧无法挂到分配的节点流上）。",
         "",
     ]
     .join("\n")

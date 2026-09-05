@@ -22,7 +22,11 @@ rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+# RFC 3339 parsing for the device connect-code expiry display.
+time = { workspace = true, features = ["parsing"] }
 winwincode-delivery = { path = "../winwincode-delivery" }
+# Local Device Client display and control surface (plan 16.8 CLI fallback).
+winwincode-device-client = { path = "../winwincode-device-client" }
 winwincode-domain.workspace = true
 winwincode-evidence-export = { path = "../winwincode-evidence-export" }
 winwincode-repository-context = { path = "../winwincode-repository-context" }

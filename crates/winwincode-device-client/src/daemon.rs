@@ -64,22 +64,25 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use winwincode_client_port::domain::{
-    ClientArchitecture, ClientCapacityReport, ClientLockState, ClientPlatformTarget, PresenceState,
+    ClientArchitecture, ClientCapacityReport, ClientControlMessageKind, ClientLockState,
+    ClientPlatformTarget, CommandAckStatus, PresenceState,
 };
 use winwincode_client_port::exchange::{
     AckCursor, FrameCodec, FrameCodecError, FrameOutbox, OutboxBatch, OutboxError, OutboxSession,
     OutboxSnapshot, OutboxStateError, SequenceVerdict,
 };
 use winwincode_client_port::messages::{
-    CLIENT_CONTROL_PORT_SCHEMA_VERSION, ClientEnrollPayload, ClientHeartbeatPayload,
-    ClientHelloPayload, ClientToServerEnvelope, ClientToServerMessage, CommandContext,
+    CLIENT_CONTROL_PORT_SCHEMA_VERSION, ClientCommandAckPayload, ClientEnrollPayload,
+    ClientHeartbeatPayload, ClientHelloPayload, ClientToServerEnvelope, ClientToServerMessage,
+    CommandContext, ServerAccessChallengePayload, ServerClientLockPayload,
     ServerEnrollmentAcceptedPayload, ServerToClientEnvelope, ServerToClientMessage,
 };
 
+use crate::connect_code::{self, PublishedConnectCode};
 use crate::identity::{IdentityRecord, IssuedEnrollment, adopt_enrollment};
 use crate::store::{
-    ClientInboxCursorUpdate, DeviceStore, DeviceStoreError, DeviceStoreErrorKind,
-    ServerProfileRecord, envelope_kind,
+    ClientInboxCursorUpdate, ConnectCodeStateRecord, ConnectionPolicyRecord, DeviceStore,
+    DeviceStoreError, DeviceStoreErrorKind, ServerProfileRecord, envelope_kind,
 };
 
 /// Longest slice the run loop sleeps without re-reading the shutdown flag.
@@ -318,6 +321,15 @@ pub struct DaemonStatus {
     pub consecutive_failures: u64,
     /// `client.heartbeat` frames enqueued.
     pub heartbeats_enqueued: u64,
+    /// `client.connect_code.published` frames enqueued by this session.
+    pub connect_codes_published: u64,
+    /// `client.access.challenge` frames answered with a
+    /// `client.access.challenge_ack`.
+    pub access_challenges_answered: u64,
+    /// Access challenges whose local verdict was `confirmed`.
+    pub access_challenges_confirmed: u64,
+    /// `client.client_lock` commands applied and acknowledged.
+    pub client_lock_commands_applied: u64,
     /// Client-to-server frames handed to the transport so far.
     pub frames_sent: u64,
     /// Absolute server acknowledgement cursor after the last exchange.
@@ -382,6 +394,9 @@ pub struct DeviceDaemon {
     next_heartbeat_at: Instant,
     next_attempt_at: Instant,
     consecutive_failures: u64,
+    /// In-memory mirror of the durable connection policy; every write goes
+    /// through the store first and refreshes this mirror.
+    connection_policy: ConnectionPolicyRecord,
     status: DaemonStatus,
 }
 
@@ -430,6 +445,8 @@ impl DeviceDaemon {
         };
         let enroll_idempotency_key = format!("enroll-{device_id}-{instance_id}");
         let heartbeat_interval = config.heartbeat_interval;
+        let connection_policy =
+            connect_code::connection_policy(&store).map_err(DaemonError::Store)?;
         let mut daemon = Self {
             config,
             store,
@@ -450,6 +467,7 @@ impl DeviceDaemon {
             next_heartbeat_at: Instant::now() + heartbeat_interval,
             next_attempt_at: Instant::now(),
             consecutive_failures: 0,
+            connection_policy,
             status: DaemonStatus {
                 enrolled,
                 ..DaemonStatus::default()
@@ -574,6 +592,137 @@ impl DeviceDaemon {
     #[must_use]
     pub fn into_store(self) -> DeviceStore {
         self.store
+    }
+
+    /// Generates a new dynamic connect code (or refreshes the current one:
+    /// the previous generation stops validating challenges immediately and
+    /// the new publication carries `generation + 1`), persists its digest
+    /// state, and enqueues the durable `client.connect_code.published`
+    /// frame. The plaintext rides the returned value only — never the store,
+    /// the outbox, or any log.
+    ///
+    /// Requires an adopted enrollment: a pending publication frame on the
+    /// placeholder stream could never be re-keyed onto the assigned node.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DaemonError::Protocol`] before the enrollment adoption and
+    /// [`DaemonError::Store`] for durable failures.
+    pub fn publish_connect_code(&mut self) -> Result<PublishedConnectCode, DaemonError> {
+        self.publish_connect_code_with_ttl(connect_code::CONNECT_CODE_TTL)
+    }
+
+    /// [`DeviceDaemon::publish_connect_code`] with an explicit validity
+    /// window (tests and policy-driven callers).
+    ///
+    /// # Errors
+    ///
+    /// Same failure modes as [`DeviceDaemon::publish_connect_code`].
+    pub fn publish_connect_code_with_ttl(
+        &mut self,
+        ttl: Duration,
+    ) -> Result<PublishedConnectCode, DaemonError> {
+        if !self.enrolled {
+            return Err(DaemonError::Protocol(
+                "the connect code publication requires an adopted enrollment".to_owned(),
+            ));
+        }
+        let now = OffsetDateTime::now_utc();
+        let published =
+            connect_code::publish_connect_code(&mut self.store, &self.instance_id, now, ttl)
+                .map_err(map_connect_code_error)?;
+        connect_code::enqueue_published_frame(
+            &mut self.store,
+            &self.node_id,
+            &self.instance_id,
+            &published.record,
+            OffsetDateTime::now_utc(),
+        )
+        .map_err(map_connect_code_error)?;
+        self.status.connect_codes_published += 1;
+        Ok(published)
+    }
+
+    /// Revokes the current connect code (the local disable): every later
+    /// challenge naming it is refused. Returns the revoked record, or `None`
+    /// when no active code exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DaemonError::Store`] for durable failures.
+    pub fn revoke_connect_code(&mut self) -> Result<Option<ConnectCodeStateRecord>, DaemonError> {
+        connect_code::revoke_connect_code(&mut self.store, OffsetDateTime::now_utc())
+            .map_err(DaemonError::Store)
+    }
+
+    /// Locks the client locally: `acceptingConnections = false` and
+    /// `lockState = locked`, durably, mirrored into every later hello and
+    /// heartbeat. While locked, every access challenge is refused.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DaemonError::Store`] for durable failures.
+    pub fn lock_client(&mut self) -> Result<ConnectionPolicyRecord, DaemonError> {
+        self.apply_policy(false, ClientLockState::Locked)
+    }
+
+    /// Unlocks the client locally: `acceptingConnections = true` and
+    /// `lockState = unlocked`, durably.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DaemonError::Store`] for durable failures.
+    pub fn unlock_client(&mut self) -> Result<ConnectionPolicyRecord, DaemonError> {
+        self.apply_policy(true, ClientLockState::Unlocked)
+    }
+
+    /// Disables (or re-enables) new connections without changing the lock
+    /// state (plan 11.1 `禁止新连接`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DaemonError::Store`] for durable failures.
+    pub fn set_accepting_connections(
+        &mut self,
+        accepting: bool,
+    ) -> Result<ConnectionPolicyRecord, DaemonError> {
+        let lock_state = self.connection_policy.lock_state;
+        self.apply_policy(accepting, lock_state)
+    }
+
+    /// Persists and mirrors one connection policy update.
+    fn apply_policy(
+        &mut self,
+        accepting_connections: bool,
+        lock_state: ClientLockState,
+    ) -> Result<ConnectionPolicyRecord, DaemonError> {
+        let record = connect_code::set_connection_policy(
+            &mut self.store,
+            accepting_connections,
+            lock_state,
+            OffsetDateTime::now_utc(),
+        )
+        .map_err(DaemonError::Store)?;
+        self.connection_policy = record.clone();
+        Ok(record)
+    }
+
+    /// The durable connect-code state (digest-bearing; no plaintext).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DaemonError::Store`] for durable failures.
+    pub fn connect_code_state(&self) -> Result<Option<ConnectCodeStateRecord>, DaemonError> {
+        self.store.connect_code_state().map_err(DaemonError::Store)
+    }
+
+    /// The current durable connection policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DaemonError::Store`] for durable failures.
+    pub fn connection_policy(&self) -> Result<ConnectionPolicyRecord, DaemonError> {
+        connect_code::connection_policy(&self.store).map_err(DaemonError::Store)
     }
 
     /// Runs the loop until `shutdown` is observed.
@@ -706,8 +855,8 @@ impl DeviceDaemon {
             self.enqueue(ClientToServerMessage::Hello(ClientHelloPayload {
                 client_version: self.config.client_version.clone(),
                 capacity: self.config.capacity,
-                accepting_connections: true,
-                lock_state: ClientLockState::Unlocked,
+                accepting_connections: self.connection_policy.accepting_connections,
+                lock_state: self.connection_policy.lock_state,
                 presence_state: PresenceState::Online,
             }))?;
             self.hello_announced = true;
@@ -717,8 +866,8 @@ impl DeviceDaemon {
         if now >= self.next_heartbeat_at {
             self.enqueue(ClientToServerMessage::Heartbeat(ClientHeartbeatPayload {
                 capacity: self.config.capacity,
-                accepting_connections: true,
-                lock_state: ClientLockState::Unlocked,
+                accepting_connections: self.connection_policy.accepting_connections,
+                lock_state: self.connection_policy.lock_state,
                 presence_state: PresenceState::Online,
                 // Occupancy mirroring is owned by a later lane.
                 occupancy_lease_id: None,
@@ -840,7 +989,9 @@ impl DeviceDaemon {
 
     /// Ingests the server-to-client batch: validates contiguous sequences,
     /// persists the acknowledgement cursor, and handles the enrollment
-    /// response. Other commands are counted for their owning lanes.
+    /// response, access challenges (answer with a `challenge_ack` verdict),
+    /// and client-lock commands (persist the policy, acknowledge). Commands
+    /// owned by later lanes are counted without acting.
     fn ingest_downlink(
         &mut self,
         frames: &[serde_json::Value],
@@ -866,14 +1017,27 @@ impl DeviceDaemon {
                             updated_at: now_rfc3339(),
                         })
                         .map_err(|error| DownlinkFailure::Fatal(DaemonError::Store(error)))?;
-                    if let ServerToClientMessage::EnrollmentAccepted(payload) = envelope.message {
-                        acceptance = Some(payload);
-                    } else {
-                        // Worker launch/stop, occupancy, repository, lock,
-                        // and credential commands are owned by later
-                        // device-client lanes; the skeleton records them
-                        // without acting.
-                        self.status.unhandled_downlink_commands += 1;
+                    match envelope.message {
+                        ServerToClientMessage::EnrollmentAccepted(payload) => {
+                            acceptance = Some(payload);
+                        }
+                        ServerToClientMessage::AccessChallenge(payload) => {
+                            self.answer_access_challenge(&payload)
+                                .map_err(DownlinkFailure::Fatal)?;
+                        }
+                        ServerToClientMessage::ClientLock(payload) => {
+                            self.apply_client_lock(&payload, &envelope.message_id)
+                                .map_err(DownlinkFailure::Fatal)?;
+                        }
+                        _ => {
+                            // Worker launch/stop, occupancy, repository,
+                            // rescan, and credential commands are owned by
+                            // later device-client lanes; the skeleton
+                            // records them without acting. The cursor has
+                            // already advanced, so the skipped frame never
+                            // blocks the stream.
+                            self.status.unhandled_downlink_commands += 1;
+                        }
                     }
                     accepted += 1;
                 }
@@ -967,6 +1131,58 @@ impl DeviceDaemon {
         Ok(())
     }
 
+    /// Answers one `client.access.challenge`: validates the challenged code
+    /// generation against the durable local state and enqueues the
+    /// `client.access.challenge_ack` verdict (persist-before-send, so a
+    /// crash cannot drop the answer).
+    ///
+    /// The ack is answered for every challenge — `stale_generation` is the
+    /// frozen v1 schema's only negative verdict, so local rejections
+    /// (unknown/older generation, revoked, expired, locked, new connections
+    /// disabled) all map onto it while the precise local reason stays in the
+    /// status counters and logs never carry code material.
+    fn answer_access_challenge(
+        &mut self,
+        payload: &ServerAccessChallengePayload,
+    ) -> Result<(), DaemonError> {
+        let verdict = connect_code::evaluate_access_challenge(
+            &self.store,
+            payload,
+            OffsetDateTime::now_utc(),
+        )
+        .map_err(DaemonError::Store)?;
+        self.enqueue(connect_code::challenge_ack_message(payload, verdict))?;
+        self.status.access_challenges_answered += 1;
+        if verdict.is_confirmed() {
+            self.status.access_challenges_confirmed += 1;
+        }
+        Ok(())
+    }
+
+    /// Applies one `client.client_lock` command: persists the new durable
+    /// policy (locked also disables new connections) and acknowledges the
+    /// command with `client.command_ack`, per the contract's explicit-ack
+    /// rule for server commands without a dedicated ack. The idempotency key
+    /// derives from the command's own key, so a server replay re-acks
+    /// idempotently.
+    fn apply_client_lock(
+        &mut self,
+        payload: &ServerClientLockPayload,
+        command_message_id: &str,
+    ) -> Result<(), DaemonError> {
+        let locked = payload.lock_state == ClientLockState::Locked;
+        self.apply_policy(!locked, payload.lock_state)?;
+        self.enqueue(ClientToServerMessage::CommandAck(ClientCommandAckPayload {
+            command_kind: ClientControlMessageKind::ClientLock,
+            command_message_id: command_message_id.to_owned(),
+            status: CommandAckStatus::Accepted,
+            current_revision: None,
+            error: None,
+        }))?;
+        self.status.client_lock_commands_applied += 1;
+        Ok(())
+    }
+
     fn restore_downlink_cursor(&mut self) -> Result<(), DaemonError> {
         self.downlink = match self.store.inbox_cursor(&self.config.server_profile_id)? {
             Some(cursor) => AckCursor::from_ack(cursor.last_sequence),
@@ -1031,6 +1247,15 @@ enum DownlinkFailure {
     Retriable(String),
     /// The local durable state failed; the daemon must stop.
     Fatal(DaemonError),
+}
+
+/// Maps a connect-code failure onto the daemon error set.
+fn map_connect_code_error(error: connect_code::ConnectCodeError) -> DaemonError {
+    match error {
+        connect_code::ConnectCodeError::Store(store) => DaemonError::Store(store),
+        connect_code::ConnectCodeError::NotEnrolled
+        | connect_code::ConnectCodeError::Protocol(_) => DaemonError::Protocol(error.to_string()),
+    }
 }
 
 /// Decodes one server-to-client frame value under the codec bound.
