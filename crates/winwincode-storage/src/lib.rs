@@ -10,6 +10,7 @@
 
 mod artifact;
 mod client_connect;
+mod client_downlink;
 mod client_registry;
 mod control_plane_instances;
 mod enterprise_policy;
@@ -44,11 +45,16 @@ pub use artifact::{
     LocalArtifactObjectStore, MAX_ARTIFACT_RANGE_BYTES,
 };
 pub use client_connect::{
-    AccessGrantIssuance, AccessGrantRecord, AccessGrantState, AttemptDimension,
-    ClientConnectLedger, ClientConnectStoreError, ClientConnectStoreErrorKind, ConnectAttemptState,
-    ConnectCodeConsume, ConnectCodePublication, ConnectCodeRecord, ConnectCodeRevocation,
-    ConnectCodeState, ConnectGrantReceipt, GrantPermissions, GrantSource, GrantTrustMode,
-    connect_attempt_window_anchor,
+    AccessChallengeCreation, AccessChallengeRecord, AccessGrantIssuance, AccessGrantRecord,
+    AccessGrantState, AttemptDimension, ClientConnectLedger, ClientConnectStoreError,
+    ClientConnectStoreErrorKind, ConnectAttemptState, ConnectAuditAction, ConnectAuditEntry,
+    ConnectChallengeState, ConnectChallengeVerdict, ConnectCodeConsume, ConnectCodePublication,
+    ConnectCodeRecord, ConnectCodeRevocation, ConnectCodeState, ConnectGrantReceipt,
+    GrantPermissions, GrantSource, GrantTrustMode, connect_attempt_window_anchor,
+};
+pub use client_downlink::{
+    ClientDownlinkAppend, ClientDownlinkError, ClientDownlinkErrorKind, ClientDownlinkFrame,
+    ClientDownlinkOutbox,
 };
 pub use client_registry::{
     ClientExchangeCursors, ClientLockState, ClientNodeRecord, ClientNodeRegistration,

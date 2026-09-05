@@ -137,6 +137,23 @@ impl<'storage> ClientRegistryService<'storage> {
             .snapshot(client_node_id)?)
     }
 
+    /// Returns one durable `ClientNode` projection by its public device
+    /// number (plan 11.2: the public id only locates one Client).
+    ///
+    /// # Errors
+    ///
+    /// Rejects a non-canonical public id, corrupt durable rows, or storage
+    /// failure.
+    pub fn snapshot_by_public_client_id(
+        &mut self,
+        public_client_id: &str,
+    ) -> Result<Option<ClientNodeRecord>, ClientRegistryServiceError> {
+        Ok(self
+            .storage
+            .client_node_registry()?
+            .snapshot_by_public_client_id(public_client_id)?)
+    }
+
     /// Applies one presence state transition under `expectedRevision` CAS.
     ///
     /// Only frozen-state-machine transitions are accepted; the current state is
