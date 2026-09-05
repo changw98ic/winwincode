@@ -9,6 +9,7 @@
 //! callers cannot publish an event before every durable fact commits.
 
 mod artifact;
+mod client_connect;
 mod client_registry;
 mod control_plane_instances;
 mod enterprise_policy;
@@ -41,6 +42,13 @@ pub use artifact::{
     ArtifactStorageSourceCursor, ArtifactStorageSourceEntry, ArtifactStorageSourceFact,
     ArtifactStorageSourcePage, ArtifactStore, ArtifactWriteReceipt, FakeArtifactObjectStore,
     LocalArtifactObjectStore, MAX_ARTIFACT_RANGE_BYTES,
+};
+pub use client_connect::{
+    AccessGrantIssuance, AccessGrantRecord, AccessGrantState, AttemptDimension,
+    ClientConnectLedger, ClientConnectStoreError, ClientConnectStoreErrorKind, ConnectAttemptState,
+    ConnectCodeConsume, ConnectCodePublication, ConnectCodeRecord, ConnectCodeRevocation,
+    ConnectCodeState, ConnectGrantReceipt, GrantPermissions, GrantSource, GrantTrustMode,
+    connect_attempt_window_anchor,
 };
 pub use client_registry::{
     ClientExchangeCursors, ClientLockState, ClientNodeRecord, ClientNodeRegistration,

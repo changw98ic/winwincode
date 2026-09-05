@@ -13,6 +13,7 @@ mod candidate_git_release;
 mod candidate_source;
 mod chat_interaction_application;
 pub mod chat_interaction_projection;
+mod client_connect;
 mod client_registry;
 mod collaboration;
 mod collaboration_inbox;
@@ -113,6 +114,10 @@ pub use chat_interaction_application::{
     ChatInteractionWriteStatus, InputRespondMutationReceipt, RecordApprovalInteractionCommand,
     RecordInputInteractionCommand, WorkerInteractionAuthority, WorkerInteractionDeliveryError,
     WorkerInteractionDeliveryErrorKind, WorkerInteractionOutboundPort,
+};
+pub use client_connect::{
+    AccessGrantService, ClientConnectServiceError, ClientConnectServiceErrorKind,
+    ConnectCodeService,
 };
 pub use client_registry::{
     ClientRegistryService, ClientRegistryServiceError, ClientRegistryServiceErrorKind,
