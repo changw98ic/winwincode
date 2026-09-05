@@ -29,6 +29,8 @@ pub mod delivery_execution;
 mod delivery_production_adapters;
 mod delivery_transaction;
 mod delivery_verdict_authority;
+mod device_execution_binding;
+mod device_scheduler;
 mod durable_execution_port;
 mod enterprise_hierarchy;
 mod enterprise_identity;
@@ -177,6 +179,16 @@ pub use delivery_command_transaction::{DeliveryCommandFacts, DeliverySpecFacts};
 pub use delivery_production_adapters::{
     LocalDeliveryAdapterConfig, LocalDeliveryAdapterError, LocalDeliveryAuthority,
     LocalExecutionJobDispatcher,
+};
+pub use device_execution_binding::{
+    DeviceBindingReceipt, DeviceBindingState, DeviceExecutionBindingRecord,
+    DeviceExecutionBindingService, DeviceExecutionBindingServiceError,
+    DeviceExecutionBindingServiceErrorKind, DeviceExecutionCapacitySnapshot,
+    DeviceExecutionFactsAttachment, DeviceExecutionReservationFacts, DeviceFactsReceipt,
+};
+pub use device_scheduler::{
+    DeviceSchedulerService, DeviceSchedulerServiceError, DeviceSchedulerServiceErrorKind,
+    DeviceWorkerSchedulingReceipt, DeviceWorkerSchedulingRequest,
 };
 pub use durable_execution_port::{
     DurableExecutionPortContext, DurableExecutionPortDelegate, DurableExecutionPortError,
