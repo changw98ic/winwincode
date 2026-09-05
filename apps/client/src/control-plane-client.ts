@@ -3734,3 +3734,209 @@ export function createControlPlaneClientCandidates(options: {
   }
   return Object.freeze(candidates)
 }
+
+// ---------------------------------------------------------------------------
+// UI-100.2 (fake-first): new-task entry and run-page local identity.
+//
+// Plan §16.6/§16.7.  Everything below is the ONE concentrated seam for the
+// new-task form backend and the run-page local identity zone.  The shapes are
+// the presentation contract; the factories are deterministic local fakes that
+// keep the browser honest until the FLOW scheduler and launch routing land
+// (FLOW-100).  When those routes arrive they replace the fake factories with
+// real Server queries/commands while these shapes stay authoritative — every
+// further addition to this seam belongs inside this block.
+// ---------------------------------------------------------------------------
+
+/** One model route choice the new-task form offers (plan §16.6). */
+export interface ControlPlaneTaskModelRouteOption {
+  readonly routeId: string
+  readonly label: string
+  readonly detail: string
+}
+
+/**
+ * Fake route catalog.  MODEL routing replaces this list with the Server-joined
+ * availability projection when that seam reaches the task entry; the ids stay
+ * stable so saved tasks keep naming their route.
+ */
+const TASK_MODEL_ROUTE_FAKE_OPTIONS: readonly ControlPlaneTaskModelRouteOption[] =
+  Object.freeze([
+    Object.freeze({
+      routeId: 'route_default',
+      label: 'Workspace default',
+      detail: 'The default model route configured in Settings.',
+    }),
+    Object.freeze({
+      routeId: 'route_long_context',
+      label: 'Long context',
+      detail: 'A wide-context route for large repositories.',
+    }),
+    Object.freeze({
+      routeId: 'route_fast',
+      label: 'Fast',
+      detail: 'A low-latency route for quick iterations.',
+    }),
+  ])
+
+/** The fake §16.6 route catalog; one frozen list shared by form and tests. */
+export function controlPlaneTaskModelRouteOptions(): readonly ControlPlaneTaskModelRouteOption[] {
+  return TASK_MODEL_ROUTE_FAKE_OPTIONS
+}
+
+/** One new-task submission before a task identity exists. */
+export interface ControlPlaneTaskCreateInput {
+  readonly clientId: string
+  readonly repositoryBindingId: string
+  readonly baseBranch: string
+  readonly description: string
+  readonly modelRouteId: string
+}
+
+/**
+ * The started-task anchor.  `taskId` is the shareable identity that names the
+ * run route; the remaining fields let the run page reconstruct the task
+ * context without parsing form values out of the URL (ADR-0029).
+ */
+export interface ControlPlaneTaskAnchor {
+  readonly taskId: string
+  readonly clientId: string
+  readonly repositoryBindingId: string
+  readonly baseBranch: string
+  readonly description: string
+  readonly modelRouteId: string
+}
+
+/**
+ * The task-creation seam of the new-task form.  `create` resolves with the
+ * anchor once the Server (today: the fake) accepted the task; `describe`
+ * re-reads a previously created anchor for a deep-linked run page.
+ */
+export interface ControlPlaneTaskPort {
+  create(input: ControlPlaneTaskCreateInput): Promise<ControlPlaneTaskAnchor>
+  describe(taskId: string): ControlPlaneTaskAnchor | null
+}
+
+/**
+ * Fake task store: creates monotonic task ids and remembers every anchor it
+ * issued, so a reloaded run page still names its task.  FLOW task creation
+ * replaces this port without changing the interface.
+ */
+export function createControlPlaneTaskFake(options?: {
+  readonly nextTaskId?: () => string
+}): ControlPlaneTaskPort {
+  const nextTaskId = options?.nextTaskId
+  let sequence = 0
+  const anchors = new Map<string, ControlPlaneTaskAnchor>()
+  return Object.freeze({
+    async create(input: ControlPlaneTaskCreateInput): Promise<ControlPlaneTaskAnchor> {
+      sequence += 1
+      const taskId = nextTaskId !== undefined
+        ? nextTaskId()
+        : `tsk_${String(sequence).padStart(26, '0')}`
+      const anchor: ControlPlaneTaskAnchor = Object.freeze({
+        taskId,
+        clientId: input.clientId,
+        repositoryBindingId: input.repositoryBindingId,
+        baseBranch: input.baseBranch,
+        description: input.description,
+        modelRouteId: input.modelRouteId,
+      })
+      anchors.set(taskId, anchor)
+      return anchor
+    },
+    describe(taskId: string): ControlPlaneTaskAnchor | null {
+      return anchors.get(taskId) ?? null
+    },
+  })
+}
+
+/** The WorkerSession states the run-page zone projects (plan §16.7). */
+export type ControlPlaneRunWorkerSessionState =
+  | 'reserving'
+  | 'launching'
+  | 'running'
+  | 'draining'
+  | 'stopped'
+  | 'failed'
+
+/** One WorkerSession row of the run-page identity zone. */
+export interface ControlPlaneRunWorkerSession {
+  readonly workerSessionId: string
+  readonly state: ControlPlaneRunWorkerSessionState
+  readonly startedAt: string | null
+}
+
+/**
+ * The run-page local identity projection beyond the live Client, Repository,
+ * and Occupancy facts the shell models already own: the task's WorkerSessions
+ * and its latest Candidate with the apply ledger history.
+ */
+export interface ControlPlaneRunIdentityProjection {
+  readonly taskId: string
+  readonly workerSessions: readonly ControlPlaneRunWorkerSession[]
+  readonly candidate: ControlPlaneCandidateSummary | null
+}
+
+/** The run-page identity seam the run view model consumes. */
+export interface ControlPlaneRunIdentityPort {
+  read(anchor: ControlPlaneTaskAnchor): Promise<ControlPlaneRunIdentityProjection>
+}
+
+const RUN_WORKER_SESSION_FAKE_COMMIT = 'f00dcafef00dcafef00dcafef00dcafef00dcafe'
+
+/**
+ * Fake run identity: one running WorkerSession and one consistently staged
+ * candidate (local branch created, one ledger receipt, nothing applied yet)
+ * derived deterministically from the anchor.  FLOW worker/candidate
+ * projections replace this port without changing the interface.
+ */
+export function createControlPlaneRunIdentityFake(options?: {
+  readonly now?: () => string
+}): ControlPlaneRunIdentityPort {
+  const now = options?.now ?? (() => new Date().toISOString())
+  return Object.freeze({
+    async read(
+      anchor: ControlPlaneTaskAnchor,
+    ): Promise<ControlPlaneRunIdentityProjection> {
+      const startedAt = now()
+      const suffix = anchor.taskId.slice(4) || '00000000000000000000000000'
+      const workerSession: ControlPlaneRunWorkerSession = Object.freeze({
+        workerSessionId: `wss_${suffix}`,
+        state: 'running',
+        startedAt,
+      })
+      const candidateRef = `cand_${suffix}`
+      const branchName = `winwincode/task/${anchor.taskId}`
+      const receipt: ControlPlaneCandidateApplyReceipt = Object.freeze({
+        localApplyReceiptId: `lar_${suffix}`,
+        candidateRef,
+        repositoryBindingId: anchor.repositoryBindingId,
+        targetBranch: branchName,
+        expectedHead: RUN_WORKER_SESSION_FAKE_COMMIT,
+        strategy: 'create_branch',
+        result: 'branch_created',
+        resultingCommit: RUN_WORKER_SESSION_FAKE_COMMIT,
+        conflictArtifactRef: null,
+        createdAt: startedAt,
+        revision: 1,
+      })
+      const candidate: ControlPlaneCandidateSummary = Object.freeze({
+        localCandidateReceiptId: `lcr_${suffix}`,
+        candidateRef,
+        repositoryBindingId: anchor.repositoryBindingId,
+        candidateCommit: RUN_WORKER_SESSION_FAKE_COMMIT,
+        localRefName: `refs/winwincode/candidates/${candidateRef}`,
+        state: 'branch_created',
+        createdAt: startedAt,
+        revision: 1,
+        branchName,
+        history: Object.freeze([receipt]),
+      })
+      return Object.freeze({
+        taskId: anchor.taskId,
+        workerSessions: Object.freeze([workerSession]),
+        candidate,
+      })
+    },
+  })
+}
