@@ -15,6 +15,7 @@ mod client_launch_grant;
 mod client_occupancy;
 mod client_registry;
 mod control_plane_instances;
+mod device_execution_binding;
 mod enterprise_policy;
 mod enterprise_policy_evaluation;
 mod enterprise_quota;
@@ -80,6 +81,13 @@ pub use control_plane_instances::{
     ControlPlaneInstanceAuthority, ControlPlaneInstanceError, ControlPlaneInstanceErrorKind,
     ControlPlaneInstanceHealth, ControlPlaneInstanceIdentity, ControlPlaneInstanceLedger,
     ControlPlaneInstanceState,
+};
+pub use device_execution_binding::{
+    DeviceBindingReceipt, DeviceExecutionBindingIssuance, DeviceExecutionBindingLedger,
+    DeviceExecutionBindingRecord, DeviceExecutionBindingRelease, DeviceExecutionBindingState,
+    DeviceExecutionBindingStoreError, DeviceExecutionBindingStoreErrorKind,
+    DeviceExecutionCapacitySnapshot, DeviceExecutionFactsAttachment,
+    DeviceExecutionReservationFacts, DeviceFactsReceipt,
 };
 pub use enterprise_policy::{
     EnterprisePolicyActor, EnterprisePolicyChildOverrideMode, EnterprisePolicyCursor,
