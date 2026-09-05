@@ -1,0 +1,205 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+
+/* UI-100.1: the Owner user management area. It only reads tokens, like every
+   other shell region. */
+.wwc-users {
+  max-width: 36rem;
+  margin: var(--wwc-space-4) auto;
+  padding: var(--wwc-space-4);
+  border: var(--wwc-border-width) solid var(--wwc-color-border);
+  border-radius: var(--wwc-radius-lg);
+  background: var(--wwc-color-surface);
+}
+
+.wwc-users-heading {
+  margin: var(--wwc-space-0) var(--wwc-space-0) var(--wwc-space-2);
+  font-size: var(--wwc-font-size-lg);
+  font-weight: var(--wwc-font-weight-strong);
+}
+
+.wwc-users-label {
+  display: block;
+  margin: var(--wwc-space-2) var(--wwc-space-0) var(--wwc-space-1);
+  font-weight: var(--wwc-font-weight-medium);
+}
+
+.wwc-users-control {
+  width: 100%;
+  padding: var(--wwc-space-2) var(--wwc-space-3);
+  border: var(--wwc-border-width) solid var(--wwc-color-border);
+  border-radius: var(--wwc-radius-md);
+  font: inherit;
+  color: var(--wwc-color-text);
+  background: var(--wwc-color-surface);
+}
+
+.wwc-users-create-form,
+.wwc-users-self-form {
+  margin: var(--wwc-space-3) var(--wwc-space-0);
+  padding: var(--wwc-space-3);
+  border: var(--wwc-border-width) solid var(--wwc-color-border);
+  border-radius: var(--wwc-radius-md);
+  background: var(--wwc-color-surface-subtle);
+}
+
+.wwc-users-create-heading,
+.wwc-users-self-heading,
+.wwc-users-list-heading {
+  margin: var(--wwc-space-0) var(--wwc-space-0) var(--wwc-space-2);
+  font-weight: var(--wwc-font-weight-strong);
+}
+
+.wwc-users-create-submit,
+.wwc-users-self-submit,
+.wwc-users-one-time-copy,
+.wwc-users-one-time-done,
+.wwc-users-row-state-button,
+.wwc-users-row-reset,
+.wwc-users-row-confirm-accept,
+.wwc-users-row-confirm-keep {
+  margin-top: var(--wwc-space-2);
+  margin-right: var(--wwc-space-2);
+  padding: var(--wwc-space-2) var(--wwc-space-3);
+  border: var(--wwc-border-width) solid var(--wwc-color-action);
+  border-radius: var(--wwc-radius-md);
+  font: inherit;
+  color: var(--wwc-color-surface);
+  background: var(--wwc-color-action);
+}
+
+.wwc-users-create-submit:disabled,
+.wwc-users-self-submit:disabled,
+.wwc-users-one-time-copy:disabled,
+.wwc-users-one-time-done:disabled,
+.wwc-users-row-state-button:disabled,
+.wwc-users-row-reset:disabled,
+.wwc-users-row-confirm-accept:disabled,
+.wwc-users-row-confirm-keep:disabled {
+  opacity: 0.6;
+}
+
+.wwc-users-create-status,
+.wwc-users-self-status,
+.wwc-users-one-time-copied {
+  margin: var(--wwc-space-2) var(--wwc-space-0);
+  color: var(--wwc-color-info-text);
+}
+
+.wwc-users-create-error,
+.wwc-users-self-error,
+.wwc-users-row-error {
+  margin: var(--wwc-space-2) var(--wwc-space-0);
+  padding: var(--wwc-space-2) var(--wwc-space-3);
+  border: var(--wwc-border-width) solid var(--wwc-color-danger-border);
+  border-radius: var(--wwc-radius-md);
+  color: var(--wwc-color-danger-text);
+  background: var(--wwc-color-danger-surface);
+}
+
+.wwc-users-one-time {
+  margin: var(--wwc-space-3) var(--wwc-space-0);
+  padding: var(--wwc-space-3);
+  border: var(--wwc-border-width) solid var(--wwc-color-warning-border);
+  border-radius: var(--wwc-radius-md);
+  color: var(--wwc-color-warning-text);
+  background: var(--wwc-color-warning-surface);
+}
+
+.wwc-users-one-time-title {
+  margin: var(--wwc-space-0) var(--wwc-space-0) var(--wwc-space-1);
+  font-weight: var(--wwc-font-weight-strong);
+}
+
+.wwc-users-one-time-secret {
+  display: block;
+  margin: var(--wwc-space-2) var(--wwc-space-0);
+  padding: var(--wwc-space-2) var(--wwc-space-3);
+  border: var(--wwc-border-width) solid var(--wwc-color-warning-border);
+  border-radius: var(--wwc-radius-sm);
+  font-family: ui-monospace, monospace;
+  font-size: var(--wwc-font-size-md);
+  color: var(--wwc-color-text);
+  background: var(--wwc-color-surface);
+  user-select: all;
+}
+
+.wwc-users-one-time-hint {
+  margin: var(--wwc-space-2) var(--wwc-space-0);
+  color: var(--wwc-color-warning-text);
+}
+
+.wwc-users-empty {
+  margin: var(--wwc-space-3) var(--wwc-space-0);
+  color: var(--wwc-color-text-muted);
+}
+
+.wwc-users-list {
+  margin-top: var(--wwc-space-3);
+}
+
+.wwc-users-row {
+  margin: var(--wwc-space-3) var(--wwc-space-0);
+  padding: var(--wwc-space-3);
+  border: var(--wwc-border-width) solid var(--wwc-color-border);
+  border-radius: var(--wwc-radius-md);
+}
+
+.wwc-users-row-username {
+  margin: var(--wwc-space-0) var(--wwc-space-0) var(--wwc-space-1);
+  font-weight: var(--wwc-font-weight-strong);
+}
+
+.wwc-users-row-role,
+.wwc-users-row-state {
+  display: inline-block;
+  margin: var(--wwc-space-1) var(--wwc-space-2) var(--wwc-space-1) var(--wwc-space-0);
+  padding: var(--wwc-space-1) var(--wwc-space-2);
+  border: var(--wwc-border-width) solid var(--wwc-color-border);
+  border-radius: var(--wwc-radius-sm);
+  font-size: var(--wwc-font-size-xs);
+}
+
+.wwc-users-row-state[data-tone='success'] {
+  color: var(--wwc-color-success-text);
+  background: var(--wwc-color-success-surface);
+  border-color: var(--wwc-color-success-border);
+}
+
+.wwc-users-row-state[data-tone='danger'] {
+  color: var(--wwc-color-danger-text);
+  background: var(--wwc-color-danger-surface);
+  border-color: var(--wwc-color-danger-border);
+}
+
+.wwc-users-row-created {
+  margin: var(--wwc-space-1) var(--wwc-space-0);
+  color: var(--wwc-color-text-muted);
+  font-size: var(--wwc-font-size-sm);
+}
+
+.wwc-users-row-actions {
+  margin-top: var(--wwc-space-2);
+}
+
+.wwc-users-row-danger {
+  border-color: var(--wwc-color-danger-border);
+  color: var(--wwc-color-danger-text);
+  background: var(--wwc-color-danger-surface);
+}
+
+.wwc-users-row-confirm {
+  margin-top: var(--wwc-space-2);
+  padding: var(--wwc-space-2) var(--wwc-space-3);
+  border: var(--wwc-border-width) solid var(--wwc-color-warning-border);
+  border-radius: var(--wwc-radius-md);
+  background: var(--wwc-color-warning-surface);
+}
+
+.wwc-users-row-confirm-text {
+  margin: var(--wwc-space-1) var(--wwc-space-0);
+  color: var(--wwc-color-warning-text);
+}
+
+.wwc-users-row-notice {
+  margin-top: var(--wwc-space-1);
+}
