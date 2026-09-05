@@ -24,6 +24,7 @@ use winwincode_execution_port::generated::{
 };
 
 use crate::ActiveJob;
+use crate::candidate_ref;
 
 const RECOVERY_MANIFEST: &str = ".winwincode-workspace.json";
 const CREATION_INTENT_PREFIX: &str = ".winwincode-workspace-create-";
@@ -1284,6 +1285,11 @@ impl WorkerWorkspace {
 
     /// Freezes checkout changes into a deterministic detached candidate commit.
     ///
+    /// The stable `refs/winwincode/candidates/<candidate-id>` ref is recorded
+    /// before the snapshot is returned, so the ref always exists ahead of any
+    /// later Worktree cleanup. A ref failure fails the freeze, which keeps the
+    /// Candidate from being announced as deliverable.
+    ///
     /// # Errors
     ///
     /// Rejects an unchanged tree, unsupported path types, or Git failures.
@@ -1312,6 +1318,14 @@ impl WorkerWorkspace {
             &candidate_tree_id,
             &self.source_commit_id,
             &message,
+        )?;
+        candidate_ref::create_candidate_ref(&self.layout.checkout, &candidate_commit_id).map_err(
+            |error| {
+                WorkspaceError::new(
+                    WorkspaceErrorCode::Git,
+                    format!("candidate stable ref cannot be recorded: {error}"),
+                )
+            },
         )?;
         let content_digest = tree_digest(&self.layout.checkout, &candidate_commit_id)?;
         let manifest_bytes = serde_json::to_vec(&CandidateArtifactManifest {

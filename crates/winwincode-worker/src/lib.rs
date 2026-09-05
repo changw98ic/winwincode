@@ -9,6 +9,7 @@
 //! same generated `ExecutionPortMessage` values to [`WorkerMain`].
 
 pub mod action_enforcement;
+pub mod candidate_ref;
 pub mod managed_session;
 pub mod remote_transport;
 pub mod stage_product;
