@@ -99,15 +99,14 @@ pub use store::{
     ConnectCodeStateRecord, ConnectionPolicyRecord, DeviceStore, DeviceStoreError,
     DeviceStoreErrorKind, OccupancyMirrorAdvance, OccupancyMirrorRecord, OccupancyMirrorUpdate,
     OccupancyReleaseIntentOutcome, OccupancyReleaseIntentRecord, PathMappingRecord,
-    RepositoryLocalStateRecord, ServerProfileRecord, WorkerProcessRecord,
-    availability_wire_name, dirty_state_wire_name,
+    RepositoryLocalStateRecord, ServerProfileRecord, WorkerProcessRecord, availability_wire_name,
+    dirty_state_wire_name,
 };
 pub use supervisor::{
     ModelRoute, ReapedWorker, SessionSupervisor, SpawnOutcome, SpawnRequest, SupervisorConfig,
     SupervisorError, WORKER_STATE_CRASHED, WORKER_STATE_EXITED, WORKER_STATE_MISSING,
     WORKER_STATE_RUNNING, WorkerHandle, WorkerReconcileReport, WorkerReconcileVerdict,
     WorkerStopOutcome,
-
 };
 
 // Façade re-export: the connection policy, lock, and connect-code lifecycle
