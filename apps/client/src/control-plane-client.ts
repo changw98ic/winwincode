@@ -2307,65 +2307,6 @@ export function createControlPlaneClientOccupancy(options: {
 }
 
 // ---------------------------------------------------------------------------
-// Device candidate local operations: the retained list, local branch
-// creation, target-branch apply, and discard (GIT-100.8, plan §15).
-//
-// FAKE-FIRST SHAPES: the field names, state strings, and the ten result codes
-// below mirror the landed device receipt domain — `LocalCandidateReceipt`,
-// `LocalApplyReceipt`, and the ten `ApplyResult` codes of
-// crates/winwincode-client-port/src/domain.rs as they are projected through
-// the generated client-control contracts. The HTTP routes and status codes in
-// this block are provisional until the GIT-100.3 branch engine and the
-// GIT-100.4 apply engine land; the engine route table is authoritative at
-// that point, and only the path constants and expected status codes below
-// should need to move. The receipt ledger projection of the Server decides
-// the `history` and `branchName` fields of a summary; pages and view-models
-// only ever see the typed unions below.
-// ---------------------------------------------------------------------------
-
-/** The retention lifecycle states a candidate projection can carry. */
-export type ControlPlaneCandidateState =
-  | 'retained'
-  | 'branch_created'
-  | 'applied'
-  | 'discarded'
-  | 'failed'
-
-/** The strategy the apply engine chose for one attempt. */
-export type ControlPlaneCandidateApplyStrategy =
-  | 'create_branch'
-  | 'fast_forward'
-  | 'cherry_pick'
-  | 'merge'
-
-/**
- * The ten terminal apply results of the Server receipt ledger. `retained`,
- * `branch_created`, and `discarded` close a lifecycle step; every other code
- * is presented as a failed or retryable attempt.
- */
-export type ControlPlaneCandidateApplyResult =
-  | 'retained'
-  | 'branch_created'
-  | 'applied'
-  | 'base_stale'
-  | 'working_tree_dirty'
-  | 'merge_conflict'
-  | 'candidate_missing'
-  | 'permission_denied'
-  | 'discarded'
-  | 'failed'
-
-/** One audited apply attempt, mirroring `LocalApplyReceipt` field for field. */
-export interface ControlPlaneCandidateApplyReceipt {
-  readonly localApplyReceiptId: string
-  readonly candidateRef: string
-  readonly repositoryBindingId: string
-  readonly targetBranch: string
-  readonly expectedHead: string
-  readonly strategy: ControlPlaneCandidateApplyStrategy
-  readonly result: ControlPlaneCandidateApplyResult
-  readonly resultingCommit: string | null
-  readonly conflictArtifactRef: string | null
 // User management: Owner create, account state, and password resets
 // (UI-100.1).
 //
@@ -2415,103 +2356,6 @@ export interface ControlPlaneUserSummary {
   readonly revision: number
 }
 
-/**
- * One candidate card projection: the device receipt plus the two ledger facts
- * the card renders — the working branch name once one exists, and the apply
- * receipt history in ledger order.
- */
-export interface ControlPlaneCandidateSummary {
-  readonly localCandidateReceiptId: string
-  readonly candidateRef: string
-  readonly repositoryBindingId: string
-  readonly candidateCommit: string
-  readonly localRefName: string
-  readonly state: ControlPlaneCandidateState
-  readonly createdAt: string
-  readonly revision: number
-  readonly branchName: string | null
-  readonly history: readonly ControlPlaneCandidateApplyReceipt[]
-}
-
-/** One candidate list read. */
-export interface ControlPlaneCandidateReadInput {
-  /** 9-12 digits; grouping separators are stripped by the facade. */
-  readonly clientId: string
-}
-
-/** One local branch creation from a stable candidate ref. */
-export interface ControlPlaneCandidateBranchInput {
-  readonly clientId: string
-  readonly candidateRef: string
-  readonly repositoryBindingId: string
-}
-
-/**
- * One dangerous apply onto a target branch. The Server re-checks the branch
- * HEAD against `expectedHead` even though the browser already showed it.
- */
-export interface ControlPlaneCandidateApplyInput {
-  readonly clientId: string
-  readonly candidateRef: string
-  readonly repositoryBindingId: string
-  readonly targetBranch: string
-  readonly expectedHead: string
-}
-
-/** One discard of a retained candidate. */
-export interface ControlPlaneCandidateDiscardInput {
-  readonly clientId: string
-  readonly candidateRef: string
-  readonly repositoryBindingId: string
-}
-
-/** One branch creation outcome: the created branch and the refreshed card. */
-export interface ControlPlaneCandidateBranchOutcome {
-  readonly candidate: ControlPlaneCandidateSummary
-  readonly branchName: string
-}
-
-/**
- * The one presentation-facing candidate action failure taxonomy. Wire codes
- * are translated by `controlPlaneCandidateActionFailure` and never read
- * anywhere else. `unavailable` is the catch-all for outages, expired browser
- * sessions, protocol drift, and unknown codes, mirroring the occupancy
- * taxonomy above.
- */
-export type ControlPlaneCandidateActionFailure =
-  | 'invalid-request'
-  | 'candidate-not-found'
-  | 'client-not-found'
-  | 'client-offline'
-  | 'permission-denied'
-  | 'wrong-state'
-  | 'rate-limited'
-  | 'unavailable'
-
-const CANDIDATE_ACTION_FAILURE_CODES: Readonly<Record<string, ControlPlaneCandidateActionFailure>> =
-  Object.freeze({
-    INVALID_REQUEST: 'invalid-request',
-    RESOURCE_NOT_FOUND: 'candidate-not-found',
-    CLIENT_NOT_FOUND: 'client-not-found',
-    CLIENT_OFFLINE: 'client-offline',
-    ACCESS_DENIED: 'permission-denied',
-    PERMISSION_DENIED: 'permission-denied',
-    WRONG_STATE: 'wrong-state',
-    RATE_LIMITED: 'rate-limited',
-  })
-
-/**
- * Translate one candidate action rejection into the presentation taxonomy.
- * Every wire code stays inside this function; view-models and pages branch
- * only on the returned union.
- */
-export function controlPlaneCandidateActionFailure(
-  error: unknown,
-): ControlPlaneCandidateActionFailure {
-  if (error instanceof ControlPlaneClientError) {
-    const failure = CANDIDATE_ACTION_FAILURE_CODES[error.code]
-    if (failure !== undefined) return failure
-    if (error.kind === 'authorization') return 'permission-denied'
 /** The full account projection the Server returns with every write. */
 export interface ControlPlaneUserAccount {
   readonly userId: string
@@ -2604,57 +2448,6 @@ function userManagementFailureOfCode(
   return 'unavailable'
 }
 
-const CANDIDATE_STATE_VALUES: readonly string[] = Object.freeze([
-  'retained',
-  'branch_created',
-  'applied',
-  'discarded',
-  'failed',
-])
-const CANDIDATE_APPLY_STRATEGY_VALUES: readonly string[] = Object.freeze([
-  'create_branch',
-  'fast_forward',
-  'cherry_pick',
-  'merge',
-])
-const CANDIDATE_APPLY_RESULT_VALUES: readonly string[] = Object.freeze([
-  'retained',
-  'branch_created',
-  'applied',
-  'base_stale',
-  'working_tree_dirty',
-  'merge_conflict',
-  'candidate_missing',
-  'permission_denied',
-  'discarded',
-  'failed',
-])
-
-const CLIENT_CANDIDATES_BRANCH_PATH = '/api/v1/clients/candidates/branch'
-const CLIENT_CANDIDATES_APPLY_PATH = '/api/v1/clients/candidates/apply'
-const CLIENT_CANDIDATES_DISCARD_PATH = '/api/v1/clients/candidates/discard'
-
-function invalidCandidateResponseError(): ControlPlaneClientError {
-  return new ControlPlaneClientError({
-    kind: 'protocol',
-    code: 'INVALID_CLIENT_CANDIDATES_RESPONSE',
-    message: 'The Control Plane server returned an invalid candidate response.',
-    requestId: null,
-    retryable: false,
-  })
-}
-
-function candidateNetworkError(): ControlPlaneClientError {
-  return new ControlPlaneClientError({
-    kind: 'network',
-    code: 'NETWORK_ERROR',
-    message: 'The Control Plane server could not be reached.',
-    requestId: null,
-    retryable: true,
-  })
-}
-
-function candidateBoundaryError(status: number, source: string): ControlPlaneClientError {
 /**
  * Translate one creation rejection into the presentation taxonomy. Every wire
  * code stays inside these functions; view-models and pages branch only on the
@@ -2778,13 +2571,6 @@ function userManagementBoundaryError(
   const error = isRecord(value) && isRecord(value.error) ? value.error : null
   const code = error !== null && typeof error.code === 'string'
     ? error.code
-    : 'CLIENT_CANDIDATES_FAILED'
-  const kind: ControlPlaneClientErrorKind = accessKind(code)
-    ?? (code === 'RATE_LIMITED'
-      ? 'server'
-      : (versionCode(code)
-        ? 'version'
-        : (status >= 500 ? 'server' : 'protocol')))
     : 'USER_MANAGEMENT_FAILED'
   const kind: ControlPlaneClientErrorKind = accessKind(code)
     ?? (versionCode(code)
@@ -2795,7 +2581,6 @@ function userManagementBoundaryError(
     code,
     message: error !== null && typeof error.message === 'string'
       ? error.message
-      : 'The Client candidate request failed.',
       : 'The user management request failed.',
     requestId: isRecord(value) && typeof value.requestId === 'string'
       ? value.requestId as RequestId
@@ -2804,7 +2589,6 @@ function userManagementBoundaryError(
   })
 }
 
-function parsedCandidatePayload(source: string): Readonly<Record<string, unknown>> {
 function invalidUserAccountError(): ControlPlaneClientError {
   return new ControlPlaneClientError({
     kind: 'protocol',
@@ -2892,6 +2676,583 @@ function userSummaryValue(value: unknown): ControlPlaneUserSummary {
 }
 
 function userPayload(source: string): Readonly<Record<string, unknown>> {
+  let value: unknown
+  try {
+    value = JSON.parse(source)
+  } catch {
+    value = null
+  }
+  if (
+    isRecord(value)
+    && typeof value.schemaVersion === 'string'
+    && value.schemaVersion !== CONTROL_PLANE_SCHEMA_VERSION
+  ) {
+    throw new ControlPlaneClientError({
+      kind: 'version',
+      code: 'SCHEMA_VERSION_MISMATCH',
+      message: `The Control Plane server must use ${CONTROL_PLANE_SCHEMA_VERSION}.`,
+      requestId: null,
+      retryable: false,
+    })
+  }
+  if (!isRecord(value)) throw invalidUserAccountError()
+  return value
+}
+
+function userAccountResponse(source: string): ControlPlaneUserAccount {
+  return userAccountValue(userPayload(source).user)
+}
+
+function userCreateResponse(source: string): ControlPlaneUserCreateOutcome {
+  const value = userPayload(source)
+  const temporaryPassword = value.temporaryPassword
+  if (
+    typeof temporaryPassword !== 'string'
+    || temporaryPassword.length === 0
+  ) {
+    throw invalidUserAccountError()
+  }
+  return Object.freeze({
+    user: userAccountValue(value.user),
+    temporaryPassword,
+  })
+}
+
+function userPasswordResetResponse(
+  source: string,
+  selfForm: boolean,
+): ControlPlaneUserPasswordResetOutcome {
+  const value = userPayload(source)
+  const user = userAccountValue(value.user)
+  if (selfForm) {
+    // The self-service rotation never carries a secret; a payload that tried
+    // to hand one back is dropped here so the page has one secret channel.
+    return Object.freeze({ user, temporaryPassword: null })
+  }
+  const temporaryPassword = value.temporaryPassword
+  if (typeof temporaryPassword !== 'string' || temporaryPassword.length === 0) {
+    throw invalidUserAccountError()
+  }
+  return Object.freeze({ user, temporaryPassword })
+}
+
+function userListResponse(source: string): readonly ControlPlaneUserSummary[] {
+  const value = userPayload(source)
+  if (!Array.isArray(value.users)) throw invalidUserAccountError()
+  return Object.freeze(value.users.map(userSummaryValue))
+}
+
+/**
+ * The base facade extended with the Owner user-management surface. The
+ * decorator delegates every base method, so hosts can pass it anywhere a
+ * `ControlPlaneClient` is accepted and keep one session and one error identity.
+ */
+export interface ControlPlaneClientUsers extends ControlPlaneClient {
+  /** Read the account list that backs the user management rows. */
+  listUsers(options?: ControlPlaneRequestOptions): Promise<readonly ControlPlaneUserSummary[]>
+  /** Create one account; the returned temporary password is shown exactly once. */
+  createUser(
+    input: ControlPlaneUserCreateInput,
+    options?: ControlPlaneRequestOptions,
+  ): Promise<ControlPlaneUserCreateOutcome>
+  /** Activate or disable one account under the exact expected revision. */
+  setUserState(
+    input: ControlPlaneUserStateInput,
+    options?: ControlPlaneRequestOptions,
+  ): Promise<ControlPlaneUserAccount>
+  /**
+   * Write one password: an Owner reset of another account returns the
+   * one-time temporary password; the self-service form returns none.
+   */
+  resetUserPassword(
+    input: ControlPlaneUserPasswordResetInput,
+    options?: ControlPlaneRequestOptions,
+  ): Promise<ControlPlaneUserPasswordResetOutcome>
+}
+
+/**
+ * Extend the one Control Plane facade with the user-management writes over
+ * the real Server account routes. An injected facade that already implements
+ * these methods is reused verbatim so deterministic fixtures and host
+ * composition keep their single seam.
+ */
+export function createControlPlaneClientUsers(options: {
+  readonly client: ControlPlaneClient
+  /** Same deterministic transport seam the base facade was created with. */
+  readonly transport?: ControlPlaneClientTransport
+}): ControlPlaneClientUsers {
+  const location = parseControlPlaneServerUrl(options.client.serverUrl)
+  const transportFetch = options.transport?.fetch
+  const injected = options.client as Partial<ControlPlaneClientUsers>
+  const injectedListUsers = injected.listUsers
+  const injectedCreateUser = injected.createUser
+  const injectedSetUserState = injected.setUserState
+  const injectedResetUserPassword = injected.resetUserPassword
+
+  async function usersRequest(
+    path: string,
+    body: string | null,
+    signal: AbortSignal | undefined,
+  ): Promise<ControlPlaneHttpResponse> {
+    if (signalIsAborted(signal)) throw cancelledError(null)
+    if (transportFetch === undefined) {
+      throw new ControlPlaneClientError({
+        kind: 'protocol',
+        code: 'TRANSPORT_UNAVAILABLE',
+        message: 'The browser HTTP transport is unavailable.',
+        requestId: null,
+        retryable: false,
+      })
+    }
+    return transportFetch(`${location.serverUrl}${path}`, {
+      method: body === null ? 'GET' : 'POST',
+      headers: body === null ? {} : { 'Content-Type': 'application/json' },
+      ...(body === null ? {} : { body }),
+      redirect: 'error',
+      cache: 'no-store',
+      referrerPolicy: 'no-referrer',
+      credentials: 'include',
+      ...(signal === undefined ? {} : { signal }),
+    })
+  }
+
+  function usersNetworkError(): ControlPlaneClientError {
+    return new ControlPlaneClientError({
+      kind: 'network',
+      code: 'NETWORK_ERROR',
+      message: 'The Control Plane server could not be reached.',
+      requestId: null,
+      retryable: true,
+    })
+  }
+
+  async function listRequest(
+    requestOptions: ControlPlaneRequestOptions | undefined,
+  ): Promise<readonly ControlPlaneUserSummary[]> {
+    try {
+      const response = await usersRequest(
+        USERS_LIST_PATH,
+        null,
+        requestOptions?.signal,
+      )
+      const source = await response.text()
+      if (!response.ok) throw userManagementBoundaryError(response.status, source)
+      if (response.status !== 200) throw invalidUserAccountError()
+      return userListResponse(source)
+    } catch (error) {
+      if (signalIsAborted(requestOptions?.signal)) throw cancelledError(null)
+      if (error instanceof ControlPlaneClientError) throw error
+      throw usersNetworkError()
+    }
+  }
+
+  async function createRequest(
+    input: ControlPlaneUserCreateInput,
+    requestOptions: ControlPlaneRequestOptions | undefined,
+  ): Promise<ControlPlaneUserCreateOutcome> {
+    try {
+      const response = await usersRequest(
+        USERS_CREATE_PATH,
+        JSON.stringify({
+          schemaVersion: CONTROL_PLANE_SCHEMA_VERSION,
+          username: input.username.trim(),
+          role: input.role,
+        }),
+        requestOptions?.signal,
+      )
+      const source = await response.text()
+      if (!response.ok) throw userManagementBoundaryError(response.status, source)
+      if (response.status !== 201) throw invalidUserAccountError()
+      return userCreateResponse(source)
+    } catch (error) {
+      if (signalIsAborted(requestOptions?.signal)) throw cancelledError(null)
+      if (error instanceof ControlPlaneClientError) throw error
+      throw usersNetworkError()
+    }
+  }
+
+  async function stateRequest(
+    input: ControlPlaneUserStateInput,
+    requestOptions: ControlPlaneRequestOptions | undefined,
+  ): Promise<ControlPlaneUserAccount> {
+    try {
+      const response = await usersRequest(
+        USERS_STATE_PATH,
+        JSON.stringify({
+          schemaVersion: CONTROL_PLANE_SCHEMA_VERSION,
+          userId: input.userId,
+          expectedRevision: input.expectedRevision,
+          state: input.state,
+        }),
+        requestOptions?.signal,
+      )
+      const source = await response.text()
+      if (!response.ok) throw userManagementBoundaryError(response.status, source)
+      if (response.status !== 200) throw invalidUserAccountError()
+      return userAccountResponse(source)
+    } catch (error) {
+      if (signalIsAborted(requestOptions?.signal)) throw cancelledError(null)
+      if (error instanceof ControlPlaneClientError) throw error
+      throw usersNetworkError()
+    }
+  }
+
+  async function passwordRequest(
+    input: ControlPlaneUserPasswordResetInput,
+    requestOptions: ControlPlaneRequestOptions | undefined,
+  ): Promise<ControlPlaneUserPasswordResetOutcome> {
+    const selfForm = input.currentPassword !== undefined || input.newPassword !== undefined
+    try {
+      const response = await usersRequest(
+        USERS_PASSWORD_PATH,
+        JSON.stringify({
+          schemaVersion: CONTROL_PLANE_SCHEMA_VERSION,
+          userId: input.userId,
+          expectedRevision: input.expectedRevision,
+          ...(selfForm
+            ? {
+              currentPassword: input.currentPassword,
+              newPassword: input.newPassword,
+            }
+            : {}),
+        }),
+        requestOptions?.signal,
+      )
+      const source = await response.text()
+      if (!response.ok) throw userManagementBoundaryError(response.status, source)
+      if (response.status !== 200) throw invalidUserAccountError()
+      return userPasswordResetResponse(source, selfForm)
+    } catch (error) {
+      if (signalIsAborted(requestOptions?.signal)) throw cancelledError(null)
+      if (error instanceof ControlPlaneClientError) throw error
+      throw usersNetworkError()
+    }
+  }
+
+  const users: ControlPlaneClientUsers = {
+    serverUrl: options.client.serverUrl,
+    restore(requestOptions) {
+      return options.client.restore(requestOptions)
+    },
+    login(bootstrapProof, requestOptions) {
+      return options.client.login(bootstrapProof, requestOptions)
+    },
+    loginWithPassword(credentials, requestOptions) {
+      return options.client.loginWithPassword(credentials, requestOptions)
+    },
+    initializationStatus(requestOptions) {
+      return options.client.initializationStatus(requestOptions)
+    },
+    logout(requestOptions) {
+      return options.client.logout(requestOptions)
+    },
+    command(command, requestOptions) {
+      return options.client.command(command, requestOptions)
+    },
+    query(query, requestOptions) {
+      return options.client.query(query, requestOptions)
+    },
+    subscribe(subscriptionOptions) {
+      return options.client.subscribe(subscriptionOptions)
+    },
+    async listUsers(requestOptions) {
+      if (typeof injectedListUsers === 'function') {
+        return injectedListUsers.call(options.client, requestOptions)
+      }
+      return listRequest(requestOptions)
+    },
+    async createUser(rawInput, requestOptions) {
+      // The facade is the one place that owns the username shape, so an
+      // injected users implementation receives the same trimmed input the
+      // wire path would send.
+      const input: ControlPlaneUserCreateInput = {
+        username: typeof rawInput?.username === 'string' ? rawInput.username.trim() : '',
+        role: rawInput?.role,
+      }
+      assertUserCreateInput(input)
+      if (typeof injectedCreateUser === 'function') {
+        return injectedCreateUser.call(options.client, input, requestOptions)
+      }
+      return createRequest(input, requestOptions)
+    },
+    async setUserState(rawInput, requestOptions) {
+      const input: ControlPlaneUserStateInput = {
+        userId: typeof rawInput?.userId === 'string' ? rawInput.userId : '',
+        expectedRevision: rawInput?.expectedRevision as number,
+        state: rawInput?.state as ControlPlaneUserAccountState,
+      }
+      assertUserStateInput(input)
+      if (typeof injectedSetUserState === 'function') {
+        return injectedSetUserState.call(options.client, input, requestOptions)
+      }
+      return stateRequest(input, requestOptions)
+    },
+    async resetUserPassword(rawInput, requestOptions) {
+      const input: ControlPlaneUserPasswordResetInput = {
+        userId: typeof rawInput?.userId === 'string' ? rawInput.userId : '',
+        expectedRevision: rawInput?.expectedRevision as number,
+        ...(rawInput?.currentPassword === undefined ? {} : { currentPassword: rawInput.currentPassword }),
+        ...(rawInput?.newPassword === undefined ? {} : { newPassword: rawInput.newPassword }),
+      }
+      assertUserPasswordResetInput(input)
+      if (typeof injectedResetUserPassword === 'function') {
+        return injectedResetUserPassword.call(options.client, input, requestOptions)
+      }
+      return passwordRequest(input, requestOptions)
+    },
+    close() {
+      options.client.close()
+    },
+  }
+  return Object.freeze(users)
+}
+
+// ---------------------------------------------------------------------------
+// Device candidate local operations: the retained list, local branch
+// creation, target-branch apply, and discard (GIT-100.8, plan §15).
+//
+// FAKE-FIRST SHAPES: the field names, state strings, and the ten result codes
+// below mirror the landed device receipt domain — `LocalCandidateReceipt`,
+// `LocalApplyReceipt`, and the ten `ApplyResult` codes of
+// crates/winwincode-client-port/src/domain.rs as they are projected through
+// the generated client-control contracts. The HTTP routes and status codes in
+// this block are provisional until the GIT-100.3 branch engine and the
+// GIT-100.4 apply engine land; the engine route table is authoritative at
+// that point, and only the path constants and expected status codes below
+// should need to move. The receipt ledger projection of the Server decides
+// the `history` and `branchName` fields of a summary; pages and view-models
+// only ever see the typed unions below.
+// ---------------------------------------------------------------------------
+
+/** The retention lifecycle states a candidate projection can carry. */
+export type ControlPlaneCandidateState =
+  | 'retained'
+  | 'branch_created'
+  | 'applied'
+  | 'discarded'
+  | 'failed'
+
+/** The strategy the apply engine chose for one attempt. */
+export type ControlPlaneCandidateApplyStrategy =
+  | 'create_branch'
+  | 'fast_forward'
+  | 'cherry_pick'
+  | 'merge'
+
+/**
+ * The ten terminal apply results of the Server receipt ledger. `retained`,
+ * `branch_created`, and `discarded` close a lifecycle step; every other code
+ * is presented as a failed or retryable attempt.
+ */
+export type ControlPlaneCandidateApplyResult =
+  | 'retained'
+  | 'branch_created'
+  | 'applied'
+  | 'base_stale'
+  | 'working_tree_dirty'
+  | 'merge_conflict'
+  | 'candidate_missing'
+  | 'permission_denied'
+  | 'discarded'
+  | 'failed'
+
+/** One audited apply attempt, mirroring `LocalApplyReceipt` field for field. */
+export interface ControlPlaneCandidateApplyReceipt {
+  readonly localApplyReceiptId: string
+  readonly candidateRef: string
+  readonly repositoryBindingId: string
+  readonly targetBranch: string
+  readonly expectedHead: string
+  readonly strategy: ControlPlaneCandidateApplyStrategy
+  readonly result: ControlPlaneCandidateApplyResult
+  readonly resultingCommit: string | null
+  readonly conflictArtifactRef: string | null
+  readonly createdAt: string
+  readonly revision: number
+}
+
+/**
+ * One candidate card projection: the device receipt plus the two ledger facts
+ * the card renders — the working branch name once one exists, and the apply
+ * receipt history in ledger order.
+ */
+export interface ControlPlaneCandidateSummary {
+  readonly localCandidateReceiptId: string
+  readonly candidateRef: string
+  readonly repositoryBindingId: string
+  readonly candidateCommit: string
+  readonly localRefName: string
+  readonly state: ControlPlaneCandidateState
+  readonly createdAt: string
+  readonly revision: number
+  readonly branchName: string | null
+  readonly history: readonly ControlPlaneCandidateApplyReceipt[]
+}
+
+/** One candidate list read. */
+export interface ControlPlaneCandidateReadInput {
+  /** 9-12 digits; grouping separators are stripped by the facade. */
+  readonly clientId: string
+}
+
+/** One local branch creation from a stable candidate ref. */
+export interface ControlPlaneCandidateBranchInput {
+  readonly clientId: string
+  readonly candidateRef: string
+  readonly repositoryBindingId: string
+}
+
+/**
+ * One dangerous apply onto a target branch. The Server re-checks the branch
+ * HEAD against `expectedHead` even though the browser already showed it.
+ */
+export interface ControlPlaneCandidateApplyInput {
+  readonly clientId: string
+  readonly candidateRef: string
+  readonly repositoryBindingId: string
+  readonly targetBranch: string
+  readonly expectedHead: string
+}
+
+/** One discard of a retained candidate. */
+export interface ControlPlaneCandidateDiscardInput {
+  readonly clientId: string
+  readonly candidateRef: string
+  readonly repositoryBindingId: string
+}
+
+/** One branch creation outcome: the created branch and the refreshed card. */
+export interface ControlPlaneCandidateBranchOutcome {
+  readonly candidate: ControlPlaneCandidateSummary
+  readonly branchName: string
+}
+
+/**
+ * The one presentation-facing candidate action failure taxonomy. Wire codes
+ * are translated by `controlPlaneCandidateActionFailure` and never read
+ * anywhere else. `unavailable` is the catch-all for outages, expired browser
+ * sessions, protocol drift, and unknown codes, mirroring the occupancy
+ * taxonomy above.
+ */
+export type ControlPlaneCandidateActionFailure =
+  | 'invalid-request'
+  | 'candidate-not-found'
+  | 'client-not-found'
+  | 'client-offline'
+  | 'permission-denied'
+  | 'wrong-state'
+  | 'rate-limited'
+  | 'unavailable'
+
+const CANDIDATE_ACTION_FAILURE_CODES: Readonly<Record<string, ControlPlaneCandidateActionFailure>> =
+  Object.freeze({
+    INVALID_REQUEST: 'invalid-request',
+    RESOURCE_NOT_FOUND: 'candidate-not-found',
+    CLIENT_NOT_FOUND: 'client-not-found',
+    CLIENT_OFFLINE: 'client-offline',
+    ACCESS_DENIED: 'permission-denied',
+    PERMISSION_DENIED: 'permission-denied',
+    WRONG_STATE: 'wrong-state',
+    RATE_LIMITED: 'rate-limited',
+  })
+
+/**
+ * Translate one candidate action rejection into the presentation taxonomy.
+ * Every wire code stays inside this function; view-models and pages branch
+ * only on the returned union.
+ */
+export function controlPlaneCandidateActionFailure(
+  error: unknown,
+): ControlPlaneCandidateActionFailure {
+  if (error instanceof ControlPlaneClientError) {
+    const failure = CANDIDATE_ACTION_FAILURE_CODES[error.code]
+    if (failure !== undefined) return failure
+    if (error.kind === 'authorization') return 'permission-denied'
+  }
+  return 'unavailable'
+}
+
+const CANDIDATE_STATE_VALUES: readonly string[] = Object.freeze([
+  'retained',
+  'branch_created',
+  'applied',
+  'discarded',
+  'failed',
+])
+const CANDIDATE_APPLY_STRATEGY_VALUES: readonly string[] = Object.freeze([
+  'create_branch',
+  'fast_forward',
+  'cherry_pick',
+  'merge',
+])
+const CANDIDATE_APPLY_RESULT_VALUES: readonly string[] = Object.freeze([
+  'retained',
+  'branch_created',
+  'applied',
+  'base_stale',
+  'working_tree_dirty',
+  'merge_conflict',
+  'candidate_missing',
+  'permission_denied',
+  'discarded',
+  'failed',
+])
+
+const CLIENT_CANDIDATES_BRANCH_PATH = '/api/v1/clients/candidates/branch'
+const CLIENT_CANDIDATES_APPLY_PATH = '/api/v1/clients/candidates/apply'
+const CLIENT_CANDIDATES_DISCARD_PATH = '/api/v1/clients/candidates/discard'
+
+function invalidCandidateResponseError(): ControlPlaneClientError {
+  return new ControlPlaneClientError({
+    kind: 'protocol',
+    code: 'INVALID_CLIENT_CANDIDATES_RESPONSE',
+    message: 'The Control Plane server returned an invalid candidate response.',
+    requestId: null,
+    retryable: false,
+  })
+}
+
+function candidateNetworkError(): ControlPlaneClientError {
+  return new ControlPlaneClientError({
+    kind: 'network',
+    code: 'NETWORK_ERROR',
+    message: 'The Control Plane server could not be reached.',
+    requestId: null,
+    retryable: true,
+  })
+}
+
+function candidateBoundaryError(status: number, source: string): ControlPlaneClientError {
+  let value: unknown
+  try {
+    value = JSON.parse(source)
+  } catch {
+    value = null
+  }
+  const error = isRecord(value) && isRecord(value.error) ? value.error : null
+  const code = error !== null && typeof error.code === 'string'
+    ? error.code
+    : 'CLIENT_CANDIDATES_FAILED'
+  const kind: ControlPlaneClientErrorKind = accessKind(code)
+    ?? (code === 'RATE_LIMITED'
+      ? 'server'
+      : (versionCode(code)
+        ? 'version'
+        : (status >= 500 ? 'server' : 'protocol')))
+  return new ControlPlaneClientError({
+    kind,
+    code,
+    message: error !== null && typeof error.message === 'string'
+      ? error.message
+      : 'The Client candidate request failed.',
+    requestId: isRecord(value) && typeof value.requestId === 'string'
+      ? value.requestId as RequestId
+      : null,
+    retryable: error !== null && error.retryable === true,
+  })
+}
+
+function parsedCandidatePayload(source: string): Readonly<Record<string, unknown>> {
   let value: unknown
   try {
     value = JSON.parse(source)
@@ -3179,102 +3540,6 @@ export function createControlPlaneClientCandidates(options: {
   async function candidateRequest(
     path: string,
     method: 'GET' | 'POST',
-  if (!isRecord(value)) throw invalidUserAccountError()
-  return value
-}
-
-function userAccountResponse(source: string): ControlPlaneUserAccount {
-  return userAccountValue(userPayload(source).user)
-}
-
-function userCreateResponse(source: string): ControlPlaneUserCreateOutcome {
-  const value = userPayload(source)
-  const temporaryPassword = value.temporaryPassword
-  if (
-    typeof temporaryPassword !== 'string'
-    || temporaryPassword.length === 0
-  ) {
-    throw invalidUserAccountError()
-  }
-  return Object.freeze({
-    user: userAccountValue(value.user),
-    temporaryPassword,
-  })
-}
-
-function userPasswordResetResponse(
-  source: string,
-  selfForm: boolean,
-): ControlPlaneUserPasswordResetOutcome {
-  const value = userPayload(source)
-  const user = userAccountValue(value.user)
-  if (selfForm) {
-    // The self-service rotation never carries a secret; a payload that tried
-    // to hand one back is dropped here so the page has one secret channel.
-    return Object.freeze({ user, temporaryPassword: null })
-  }
-  const temporaryPassword = value.temporaryPassword
-  if (typeof temporaryPassword !== 'string' || temporaryPassword.length === 0) {
-    throw invalidUserAccountError()
-  }
-  return Object.freeze({ user, temporaryPassword })
-}
-
-function userListResponse(source: string): readonly ControlPlaneUserSummary[] {
-  const value = userPayload(source)
-  if (!Array.isArray(value.users)) throw invalidUserAccountError()
-  return Object.freeze(value.users.map(userSummaryValue))
-}
-
-/**
- * The base facade extended with the Owner user-management surface. The
- * decorator delegates every base method, so hosts can pass it anywhere a
- * `ControlPlaneClient` is accepted and keep one session and one error identity.
- */
-export interface ControlPlaneClientUsers extends ControlPlaneClient {
-  /** Read the account list that backs the user management rows. */
-  listUsers(options?: ControlPlaneRequestOptions): Promise<readonly ControlPlaneUserSummary[]>
-  /** Create one account; the returned temporary password is shown exactly once. */
-  createUser(
-    input: ControlPlaneUserCreateInput,
-    options?: ControlPlaneRequestOptions,
-  ): Promise<ControlPlaneUserCreateOutcome>
-  /** Activate or disable one account under the exact expected revision. */
-  setUserState(
-    input: ControlPlaneUserStateInput,
-    options?: ControlPlaneRequestOptions,
-  ): Promise<ControlPlaneUserAccount>
-  /**
-   * Write one password: an Owner reset of another account returns the
-   * one-time temporary password; the self-service form returns none.
-   */
-  resetUserPassword(
-    input: ControlPlaneUserPasswordResetInput,
-    options?: ControlPlaneRequestOptions,
-  ): Promise<ControlPlaneUserPasswordResetOutcome>
-}
-
-/**
- * Extend the one Control Plane facade with the user-management writes over
- * the real Server account routes. An injected facade that already implements
- * these methods is reused verbatim so deterministic fixtures and host
- * composition keep their single seam.
- */
-export function createControlPlaneClientUsers(options: {
-  readonly client: ControlPlaneClient
-  /** Same deterministic transport seam the base facade was created with. */
-  readonly transport?: ControlPlaneClientTransport
-}): ControlPlaneClientUsers {
-  const location = parseControlPlaneServerUrl(options.client.serverUrl)
-  const transportFetch = options.transport?.fetch
-  const injected = options.client as Partial<ControlPlaneClientUsers>
-  const injectedListUsers = injected.listUsers
-  const injectedCreateUser = injected.createUser
-  const injectedSetUserState = injected.setUserState
-  const injectedResetUserPassword = injected.resetUserPassword
-
-  async function usersRequest(
-    path: string,
     body: string | null,
     signal: AbortSignal | undefined,
   ): Promise<ControlPlaneHttpResponse> {
@@ -3290,7 +3555,6 @@ export function createControlPlaneClientUsers(options: {
     }
     return transportFetch(`${location.serverUrl}${path}`, {
       method,
-      method: body === null ? 'GET' : 'POST',
       headers: body === null ? {} : { 'Content-Type': 'application/json' },
       ...(body === null ? {} : { body }),
       redirect: 'error',
@@ -3309,22 +3573,6 @@ export function createControlPlaneClientUsers(options: {
       const response = await candidateRequest(
         `/api/v1/clients/${encodeURIComponent(input.clientId)}/candidates`,
         'GET',
-  function usersNetworkError(): ControlPlaneClientError {
-    return new ControlPlaneClientError({
-      kind: 'network',
-      code: 'NETWORK_ERROR',
-      message: 'The Control Plane server could not be reached.',
-      requestId: null,
-      retryable: true,
-    })
-  }
-
-  async function listRequest(
-    requestOptions: ControlPlaneRequestOptions | undefined,
-  ): Promise<readonly ControlPlaneUserSummary[]> {
-    try {
-      const response = await usersRequest(
-        USERS_LIST_PATH,
         null,
         requestOptions?.signal,
       )
@@ -3352,27 +3600,6 @@ export function createControlPlaneClientUsers(options: {
           clientId: input.clientId,
           candidateRef: input.candidateRef,
           repositoryBindingId: input.repositoryBindingId,
-      if (!response.ok) throw userManagementBoundaryError(response.status, source)
-      if (response.status !== 200) throw invalidUserAccountError()
-      return userListResponse(source)
-    } catch (error) {
-      if (signalIsAborted(requestOptions?.signal)) throw cancelledError(null)
-      if (error instanceof ControlPlaneClientError) throw error
-      throw usersNetworkError()
-    }
-  }
-
-  async function createRequest(
-    input: ControlPlaneUserCreateInput,
-    requestOptions: ControlPlaneRequestOptions | undefined,
-  ): Promise<ControlPlaneUserCreateOutcome> {
-    try {
-      const response = await usersRequest(
-        USERS_CREATE_PATH,
-        JSON.stringify({
-          schemaVersion: CONTROL_PLANE_SCHEMA_VERSION,
-          username: input.username.trim(),
-          role: input.role,
         }),
         requestOptions?.signal,
       )
@@ -3402,28 +3629,6 @@ export function createControlPlaneClientUsers(options: {
           repositoryBindingId: input.repositoryBindingId,
           targetBranch: input.targetBranch,
           expectedHead: input.expectedHead,
-      if (!response.ok) throw userManagementBoundaryError(response.status, source)
-      if (response.status !== 201) throw invalidUserAccountError()
-      return userCreateResponse(source)
-    } catch (error) {
-      if (signalIsAborted(requestOptions?.signal)) throw cancelledError(null)
-      if (error instanceof ControlPlaneClientError) throw error
-      throw usersNetworkError()
-    }
-  }
-
-  async function stateRequest(
-    input: ControlPlaneUserStateInput,
-    requestOptions: ControlPlaneRequestOptions | undefined,
-  ): Promise<ControlPlaneUserAccount> {
-    try {
-      const response = await usersRequest(
-        USERS_STATE_PATH,
-        JSON.stringify({
-          schemaVersion: CONTROL_PLANE_SCHEMA_VERSION,
-          userId: input.userId,
-          expectedRevision: input.expectedRevision,
-          state: input.state,
         }),
         requestOptions?.signal,
       )
@@ -3451,34 +3656,6 @@ export function createControlPlaneClientUsers(options: {
           clientId: input.clientId,
           candidateRef: input.candidateRef,
           repositoryBindingId: input.repositoryBindingId,
-      if (!response.ok) throw userManagementBoundaryError(response.status, source)
-      if (response.status !== 200) throw invalidUserAccountError()
-      return userAccountResponse(source)
-    } catch (error) {
-      if (signalIsAborted(requestOptions?.signal)) throw cancelledError(null)
-      if (error instanceof ControlPlaneClientError) throw error
-      throw usersNetworkError()
-    }
-  }
-
-  async function passwordRequest(
-    input: ControlPlaneUserPasswordResetInput,
-    requestOptions: ControlPlaneRequestOptions | undefined,
-  ): Promise<ControlPlaneUserPasswordResetOutcome> {
-    const selfForm = input.currentPassword !== undefined || input.newPassword !== undefined
-    try {
-      const response = await usersRequest(
-        USERS_PASSWORD_PATH,
-        JSON.stringify({
-          schemaVersion: CONTROL_PLANE_SCHEMA_VERSION,
-          userId: input.userId,
-          expectedRevision: input.expectedRevision,
-          ...(selfForm
-            ? {
-              currentPassword: input.currentPassword,
-              newPassword: input.newPassword,
-            }
-            : {}),
         }),
         requestOptions?.signal,
       )
@@ -3494,17 +3671,6 @@ export function createControlPlaneClientUsers(options: {
   }
 
   const candidates: ControlPlaneClientCandidates = {
-      if (!response.ok) throw userManagementBoundaryError(response.status, source)
-      if (response.status !== 200) throw invalidUserAccountError()
-      return userPasswordResetResponse(source, selfForm)
-    } catch (error) {
-      if (signalIsAborted(requestOptions?.signal)) throw cancelledError(null)
-      if (error instanceof ControlPlaneClientError) throw error
-      throw usersNetworkError()
-    }
-  }
-
-  const users: ControlPlaneClientUsers = {
     serverUrl: options.client.serverUrl,
     restore(requestOptions) {
       return options.client.restore(requestOptions)
@@ -3561,55 +3727,10 @@ export function createControlPlaneClientUsers(options: {
         return injectedDiscardCandidate.call(options.client, input, requestOptions)
       }
       return discardRequest(input, requestOptions)
-    async listUsers(requestOptions) {
-      if (typeof injectedListUsers === 'function') {
-        return injectedListUsers.call(options.client, requestOptions)
-      }
-      return listRequest(requestOptions)
-    },
-    async createUser(rawInput, requestOptions) {
-      // The facade is the one place that owns the username shape, so an
-      // injected users implementation receives the same trimmed input the
-      // wire path would send.
-      const input: ControlPlaneUserCreateInput = {
-        username: typeof rawInput?.username === 'string' ? rawInput.username.trim() : '',
-        role: rawInput?.role,
-      }
-      assertUserCreateInput(input)
-      if (typeof injectedCreateUser === 'function') {
-        return injectedCreateUser.call(options.client, input, requestOptions)
-      }
-      return createRequest(input, requestOptions)
-    },
-    async setUserState(rawInput, requestOptions) {
-      const input: ControlPlaneUserStateInput = {
-        userId: typeof rawInput?.userId === 'string' ? rawInput.userId : '',
-        expectedRevision: rawInput?.expectedRevision as number,
-        state: rawInput?.state as ControlPlaneUserAccountState,
-      }
-      assertUserStateInput(input)
-      if (typeof injectedSetUserState === 'function') {
-        return injectedSetUserState.call(options.client, input, requestOptions)
-      }
-      return stateRequest(input, requestOptions)
-    },
-    async resetUserPassword(rawInput, requestOptions) {
-      const input: ControlPlaneUserPasswordResetInput = {
-        userId: typeof rawInput?.userId === 'string' ? rawInput.userId : '',
-        expectedRevision: rawInput?.expectedRevision as number,
-        ...(rawInput?.currentPassword === undefined ? {} : { currentPassword: rawInput.currentPassword }),
-        ...(rawInput?.newPassword === undefined ? {} : { newPassword: rawInput.newPassword }),
-      }
-      assertUserPasswordResetInput(input)
-      if (typeof injectedResetUserPassword === 'function') {
-        return injectedResetUserPassword.call(options.client, input, requestOptions)
-      }
-      return passwordRequest(input, requestOptions)
     },
     close() {
       options.client.close()
     },
   }
   return Object.freeze(candidates)
-  return Object.freeze(users)
 }
