@@ -63,6 +63,7 @@ use chat::{
 };
 use execution_job::PreparedProductSessionExecution;
 pub use execution_job::ProductSessionExecutionConfig;
+pub(crate) use execution_job::chat_turn_execution_job_id;
 
 pub const PRODUCT_SESSION_SERVICE_SCHEMA_VERSION: u8 = 3;
 const PRODUCT_SESSION_CHANGED_TOPIC: &str = "product-session.changed.v1";

@@ -794,7 +794,36 @@ impl RepositoryRuntimeScheduler {
                 debug_scheduler_error("list queued jobs", &error);
                 scheduler_failure()
             })?;
-        let Some(record) = queued.first() else {
+        // FLOW-100.4: a job dispatched to a Device WorkerSession carries one
+        // durable device execution fact row. The local embedded worker never
+        // admits device-owned work — admitting it would fault this driver on
+        // the foreign admission identity and could lease device work locally.
+        // Skip to the first local job so device work cannot strand the queue
+        // head; the queue selection excludes such jobs from claims as well.
+        let mut local_head = None;
+        for record in &queued {
+            let device_dispatched = {
+                let ledger = state
+                    .storage
+                    .device_execution_binding_ledger()
+                    .map_err(|error| {
+                        debug_scheduler_error("open device execution binding ledger", &error);
+                        scheduler_failure()
+                    })?;
+                ledger
+                    .facts(record.job_id.0.as_str())
+                    .map_err(|error| {
+                        debug_scheduler_error("read device execution facts", &error);
+                        scheduler_failure()
+                    })?
+                    .is_some()
+            };
+            if !device_dispatched {
+                local_head = Some(record);
+                break;
+            }
+        }
+        let Some(record) = local_head else {
             return Ok(true);
         };
         let admission_ready = self

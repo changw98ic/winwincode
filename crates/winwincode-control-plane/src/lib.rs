@@ -79,6 +79,7 @@ mod publication_policy;
 mod publication_policy_enforcement;
 mod publication_preparation;
 mod publication_production;
+mod quick_device_execution;
 pub mod recovery_router;
 mod remote_worker_pool;
 mod repository_binding;
@@ -450,6 +451,10 @@ pub use publication_production::{
     PublicationAuthorityPort, PublicationAuthorityRequest, PublicationProviderRegistry,
     PublicationProviderRegistryError, PublicationProviderRegistryErrorKind,
     PublicationProviderSession,
+};
+pub use quick_device_execution::{
+    QUICK_DEVICE_WORKER_POOL_ID, QuickDeviceDispatch, QuickDeviceDispatchError,
+    QuickDeviceDispatchErrorKind, dispatch_turn_to_device_worker,
 };
 pub use remote_worker_pool::{
     RemoteWorkerAuthenticationError, RemoteWorkerAuthenticationErrorKind,

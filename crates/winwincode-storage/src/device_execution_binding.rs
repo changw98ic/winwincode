@@ -47,7 +47,41 @@ use crate::{SqliteStorage, StorageError};
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 const MAX_ID_BYTES: usize = 96;
 
-const DEVICE_EXECUTION_BINDING_SCHEMA: &str = r"
+/// FLOW-100.4: the durable device-dispatch ownership marker. One row names
+/// the exact Device `WorkerSession` an execution reservation must execute
+/// on. The repository scheduler executes this fragment before its queue
+/// selection so the local-claim exclusion predicate cannot miss its table
+/// on a database that never opened the binding ledger; the full binding
+/// schema below embeds the same fragment, so both appliers create exactly
+/// one table.
+pub(crate) const DEVICE_EXECUTION_RESERVATION_FACTS_SCHEMA: &str = r"
+CREATE TABLE IF NOT EXISTS device_execution_reservation_facts (
+    job_id TEXT PRIMARY KEY NOT NULL,
+    client_node_id TEXT NOT NULL,
+    client_instance_id TEXT NOT NULL,
+    holder_user_id TEXT NOT NULL,
+    repository_binding_id TEXT NOT NULL,
+    occupancy_lease_id TEXT NOT NULL,
+    occupancy_fencing_token INTEGER NOT NULL
+        CHECK (occupancy_fencing_token > 0 AND occupancy_fencing_token <= 9007199254740991),
+    worker_launch_grant_id TEXT NOT NULL,
+    worker_session_id TEXT NOT NULL,
+    worker_id TEXT NOT NULL,
+    worker_instance_id TEXT NOT NULL,
+    product_session_id TEXT,
+    stage_run_id TEXT,
+    attached_at TEXT NOT NULL,
+    revision INTEGER NOT NULL CHECK (revision = 1),
+    FOREIGN KEY (job_id)
+        REFERENCES execution_admission_reservations(job_id) ON DELETE RESTRICT
+);
+CREATE INDEX IF NOT EXISTS device_execution_reservation_facts_by_session
+    ON device_execution_reservation_facts (worker_session_id);
+CREATE INDEX IF NOT EXISTS device_execution_reservation_facts_by_client
+    ON device_execution_reservation_facts (client_node_id);
+";
+
+const DEVICE_EXECUTION_BINDINGS_SCHEMA: &str = r"
 CREATE TABLE IF NOT EXISTS device_execution_bindings (
     device_execution_binding_id TEXT PRIMARY KEY NOT NULL,
     worker_session_id TEXT NOT NULL,
@@ -80,30 +114,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS device_execution_bindings_one_per_launch_grant
     ON device_execution_bindings (worker_launch_grant_id);
 CREATE INDEX IF NOT EXISTS device_execution_bindings_by_client
     ON device_execution_bindings (client_node_id, state);
-CREATE TABLE IF NOT EXISTS device_execution_reservation_facts (
-    job_id TEXT PRIMARY KEY NOT NULL,
-    client_node_id TEXT NOT NULL,
-    client_instance_id TEXT NOT NULL,
-    holder_user_id TEXT NOT NULL,
-    repository_binding_id TEXT NOT NULL,
-    occupancy_lease_id TEXT NOT NULL,
-    occupancy_fencing_token INTEGER NOT NULL
-        CHECK (occupancy_fencing_token > 0 AND occupancy_fencing_token <= 9007199254740991),
-    worker_launch_grant_id TEXT NOT NULL,
-    worker_session_id TEXT NOT NULL,
-    worker_id TEXT NOT NULL,
-    worker_instance_id TEXT NOT NULL,
-    product_session_id TEXT,
-    stage_run_id TEXT,
-    attached_at TEXT NOT NULL,
-    revision INTEGER NOT NULL CHECK (revision = 1),
-    FOREIGN KEY (job_id)
-        REFERENCES execution_admission_reservations(job_id) ON DELETE RESTRICT
-);
-CREATE INDEX IF NOT EXISTS device_execution_reservation_facts_by_session
-    ON device_execution_reservation_facts (worker_session_id);
-CREATE INDEX IF NOT EXISTS device_execution_reservation_facts_by_client
-    ON device_execution_reservation_facts (client_node_id);
+";
+
+const DEVICE_EXECUTION_BINDING_RECEIPTS_SCHEMA: &str = r"
 CREATE TABLE IF NOT EXISTS device_execution_binding_receipts (
     scope_key TEXT NOT NULL,
     request_id TEXT NOT NULL,
@@ -112,6 +125,16 @@ CREATE TABLE IF NOT EXISTS device_execution_binding_receipts (
     PRIMARY KEY (scope_key, request_id)
 );
 ";
+
+/// The full binding ledger schema: the binding lifecycle, the embedded
+/// reservation-facts fragment, and the receipt namespace.
+fn binding_schema() -> String {
+    format!(
+        "{DEVICE_EXECUTION_BINDINGS_SCHEMA}\
+         {DEVICE_EXECUTION_RESERVATION_FACTS_SCHEMA}\
+         {DEVICE_EXECUTION_BINDING_RECEIPTS_SCHEMA}"
+    )
+}
 
 /// Scope partition of the bind/release receipt namespace.
 const BINDING_SCOPE_KEY: &str = "device_execution_binding";
@@ -473,7 +496,7 @@ impl<'storage> DeviceExecutionBindingLedger<'storage> {
             .connection()
             .map_err(|storage| storage_error(&storage))?;
         connection
-            .execute_batch(DEVICE_EXECUTION_BINDING_SCHEMA)
+            .execute_batch(&binding_schema())
             .map_err(|sql| sql_error(&sql))?;
         validate_schema(connection)?;
         Ok(Self { storage })
@@ -1523,7 +1546,14 @@ fn validate_worker_launch_grant_id(value: &str) -> Result<(), DeviceExecutionBin
 }
 
 fn validate_product_session_id(value: &str) -> Result<(), DeviceExecutionBindingStoreError> {
-    validate_crockford_id(value, "ps_", "product session id")
+    // A binding echoes its launch grant verbatim, and a launch may bind
+    // either a launch-minted device session (`ps_`) or a chat-surface
+    // session (`psn_`) — the same dual rule the launch grant ledger uses,
+    // which is what lets a Chat session anchor to device execution.
+    if validate_crockford_id(value, "ps_", "product session id").is_ok() {
+        return Ok(());
+    }
+    validate_crockford_id(value, "psn_", "product session id")
 }
 
 fn validate_stage_run_id(value: &str) -> Result<(), DeviceExecutionBindingStoreError> {
