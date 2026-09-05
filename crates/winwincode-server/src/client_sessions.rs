@@ -10,8 +10,10 @@
 //! the caller is the lease holder, the lease is `occupied` or `draining`,
 //! the binding belongs to the leased Client and is visible to the holder,
 //! and a worker-session slot is free), mints the worker identities and a
-//! 32-byte one-time worker credential (only the `sha256:` digest is
-//! persisted), enqueues the `client.worker.launch` downlink frame with every
+//! 32-byte short-lived worker credential through the credential lifecycle
+//! service (only the `sha256:` digest is persisted; the durable credential
+//! row is what revoke, rotate, and expiry resolve against), enqueues the
+//! `client.worker.launch` downlink frame with every
 //! `C + L` field into the durable outbox, and waits a bounded, configurable
 //! interval for the Device Client's `client.worker.launch_ack` to be settled
 //! by the client exchange (`settle_launch_ack`). An accepted acknowledgement
@@ -27,8 +29,6 @@ use std::path::PathBuf;
 
 use serde_json::Value;
 use serde_json::json;
-use sha2::Digest;
-use sha2::Sha256;
 use winwincode_client_port::domain::ClientWorkerStopReason;
 use winwincode_client_port::domain::WorkerLaunchGrant;
 use winwincode_client_port::domain::WorkerLaunchGrantState as WireGrantState;
@@ -55,6 +55,8 @@ use winwincode_storage::SqliteStorage;
 
 use crate::client_occupancy::client_mirror_revision_view;
 use crate::client_occupancy::offset_instant;
+use crate::worker_session_credentials::WorkerSessionCredentialService;
+use crate::worker_session_credentials::issue_credential_material;
 
 /// Schema version of the public browser-facing launch surface.
 const SUPPORTED_SCHEMA_VERSION: &str = "winwincode/v1";
@@ -305,18 +307,22 @@ impl ClientSessionsApplication {
             ));
         }
 
-        // Worker identities and the one-time credential (32 random bytes;
-        // only the digest is persisted).
+        // Worker identities and the short-lived credential (32 random bytes
+        // through the credential lifecycle service; only the digest is
+        // persisted).
         let worker_session_id = generate_prefixed_id("ws_")?;
         let worker_id = generate_prefixed_id("wkr_")?;
         let worker_instance_id = generate_prefixed_id("winst_")?;
         let product_session_id = generate_prefixed_id("ps_")?;
         let stage_run_id = generate_prefixed_id("run_")?;
-        let (worker_credential, credential_digest) = issue_worker_credential()?;
+        let worker_launch_grant_id = generate_prefixed_id("wlg_")?;
+        let credential_material =
+            issue_credential_material().map_err(|_| ClientSessionsError::unavailable())?;
+        let worker_credential = credential_material.material().to_owned();
         let expires_at = offset_instant(&now, duration_millis(self.config.grant_ttl))
             .ok_or_else(ClientSessionsError::unavailable)?;
         let issuance = winwincode_storage::LaunchGrantIssuance::try_new(
-            generate_prefixed_id("wlg_")?,
+            worker_launch_grant_id.clone(),
             node.client_node_id.clone(),
             node.current_instance_id
                 .clone()
@@ -325,10 +331,10 @@ impl ClientSessionsApplication {
             lease.occupancy_lease_id.clone(),
             lease.fencing_token,
             repository_binding_id,
-            worker_session_id,
-            worker_id,
-            worker_instance_id,
-            credential_digest,
+            worker_session_id.clone(),
+            worker_id.clone(),
+            worker_instance_id.clone(),
+            credential_material.credential_digest().to_owned(),
             Some(product_session_id.clone()),
             Some(stage_run_id.clone()),
             expires_at,
@@ -341,6 +347,26 @@ impl ClientSessionsApplication {
                 Err(error) => return Err(issue_gate_error(error.kind())),
             }
         };
+
+        // The durable credential row is the lifecycle handle for the
+        // material just issued: revoke, rotate, expiry, and status of the
+        // worker session resolve through it. A failure here fails the launch
+        // before any downlink frame exists, so the device never learns of a
+        // credential the server could not record; the orphaned grant expires
+        // at its deadline.
+        {
+            let mut credentials = WorkerSessionCredentialService::new(&mut storage);
+            credentials
+                .issue_for_launch(
+                    &worker_session_id,
+                    &worker_id,
+                    &worker_instance_id,
+                    &worker_launch_grant_id,
+                    credential_material.credential_digest(),
+                    &now,
+                )
+                .map_err(|_| ClientSessionsError::unavailable())?;
+        }
 
         // The launch command is computed against the mirror revision the
         // device last confirmed: the device refuses any other stamp.
@@ -655,31 +681,6 @@ fn required_client_id(value: Option<&Value>) -> Result<String, ClientSessionsErr
     }
 }
 
-/// Issues one random 32-byte worker credential and returns its lowercase hex
-/// material plus the persisted `sha256:` digest. Only the digest ever enters
-/// durable state (plan 17.2); the material crosses the launch response and
-/// the device chain exactly once.
-fn issue_worker_credential() -> Result<(String, String), ClientSessionsError> {
-    let mut secret = [0_u8; 32];
-    getrandom::fill(&mut secret).map_err(|_| ClientSessionsError::unavailable())?;
-    Ok((hex_encode(&secret), credential_digest(&secret)))
-}
-
-/// Computes the persisted `sha256:` digest of one credential secret.
-fn credential_digest(secret: &[u8]) -> String {
-    format!("sha256:{:x}", Sha256::digest(secret))
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut encoded = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        encoded.push(HEX[usize::from(byte >> 4)] as char);
-        encoded.push(HEX[usize::from(byte & 0x0f)] as char);
-    }
-    encoded
-}
-
 /// The canonical application instant the boundary shares across one flow.
 fn now_instant() -> Instant {
     use crate::application::StandaloneApplicationClock as _;
@@ -726,22 +727,6 @@ mod tests {
             assert_eq!(id.len(), prefix.len() + 26);
             assert!(id.starts_with(prefix));
         }
-    }
-
-    #[test]
-    fn worker_credential_material_is_32_bytes_and_digest_bound() {
-        let (material, digest) = issue_worker_credential().expect("entropy");
-        assert_eq!(material.len(), 64, "lowercase hex of 32 bytes");
-        assert!(
-            material
-                .bytes()
-                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-        );
-        assert!(digest.starts_with("sha256:"));
-        assert_eq!(digest.len(), 71);
-        let (again, again_digest) = issue_worker_credential().expect("entropy");
-        assert_ne!(material, again, "every credential is fresh randomness");
-        assert_ne!(digest, again_digest);
     }
 
     #[test]
