@@ -20,11 +20,17 @@
 //!   publications, refresh-superseded generations, the local connection
 //!   policy (lock / new connections), challenge verdicts, and the durable
 //!   `client.connect_code.published` frame.
+//! - [`fencing`]: the pure occupancy fencing decision surface
+//!   (CLIENT-300.3, plan 12.6) — [`FencingGuard::authorize_command`] over
+//!   the four fenced command entry points (worker launch/stop, candidate
+//!   apply, repository mutation), with revision-bound tickets that a mirror
+//!   advance invalidates.
 //! - [`daemon`]: the periodic device-client exchange loop
 //!   (`POST /internal/v1/client/exchange`) over an injected transport:
 //!   enrollment adoption, hello announcement, heartbeat reporting,
 //!   acknowledgement advancement, gap replay, access-challenge answering,
-//!   client-lock application, and exponential-backoff
+//!   client-lock application, occupancy mirroring (offer → durable mirror →
+//!   ack, release intents, force-fence overwrites), and exponential-backoff
 //!   recovery on a plain `std` thread — no async runtime.
 //! - [`http`]: the dependency-free std TCP HTTP/1.1 exchange transport
 //!   implementation of [`daemon::ExchangeTransport`].
@@ -45,6 +51,7 @@
 
 pub mod connect_code;
 pub mod daemon;
+pub mod fencing;
 pub mod http;
 pub mod identity;
 pub mod store;
@@ -57,6 +64,9 @@ pub use daemon::{
     DaemonConfig, DaemonError, DaemonStatus, DeviceDaemon, EnrollmentIssuance, ExchangeRequest,
     ExchangeResponse, ExchangeTransport, ExchangeTransportError, TickOutcome,
 };
+pub use fencing::{
+    FencedCommandKind, FencingGuard, FencingRejection, FencingTicket, FencingVerdict,
+};
 pub use http::HttpExchangeTransport;
 pub use identity::{
     DeviceCredential, DeviceIdentity, DeviceIdentitySeed, IdentityRecord, IssuedEnrollment,
@@ -65,7 +75,9 @@ pub use identity::{
 pub use store::{
     CLIENT_STORE_SCHEMA_VERSION, ClientInboxCursor, ClientInboxCursorUpdate, ClientOutboxEntry,
     ConnectCodeStateRecord, ConnectionPolicyRecord, DeviceStore, DeviceStoreError,
-    DeviceStoreErrorKind, PathMappingRecord, ServerProfileRecord,
+    DeviceStoreErrorKind, OccupancyMirrorAdvance, OccupancyMirrorRecord, OccupancyMirrorUpdate,
+    OccupancyReleaseIntentOutcome, OccupancyReleaseIntentRecord, PathMappingRecord,
+    ServerProfileRecord,
 };
 
 // Façade re-export: the connection policy, lock, and connect-code lifecycle

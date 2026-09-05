@@ -10,13 +10,16 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use rusqlite::Connection;
+use winwincode_client_port::domain::ClientOccupancyReleaseMode;
 use winwincode_client_port::exchange::{FrameCodec, FrameOutbox, OutboxSession};
 use winwincode_client_port::messages::{
     CLIENT_CONTROL_PORT_SCHEMA_VERSION, ClientRepositoryRemovedPayload, ClientToServerEnvelope,
     ClientToServerMessage, CommandContext,
 };
 use winwincode_device_client::{
-    ClientInboxCursorUpdate, DeviceStore, DeviceStoreErrorKind, PathMappingRecord,
+    ClientInboxCursorUpdate, DeviceStore, DeviceStoreErrorKind, OccupancyMirrorAdvance,
+    OccupancyMirrorUpdate, OccupancyReleaseIntentOutcome, OccupancyReleaseIntentRecord,
+    PathMappingRecord,
 };
 
 static NEXT_TEMP_DIRECTORY: AtomicU64 = AtomicU64::new(1);
@@ -55,7 +58,7 @@ fn envelope(message_id: &str, client_instance_id: &str, sequence: u64) -> Client
 
 #[test]
 fn open_migrates_the_full_local_schema_and_round_trips_it() {
-    assert_eq!(winwincode_device_client::CLIENT_STORE_SCHEMA_VERSION, 3);
+    assert_eq!(winwincode_device_client::CLIENT_STORE_SCHEMA_VERSION, 4);
     let (root, mut store) = open_store("schema-round-trip");
     let database_path = store.database_path().to_path_buf();
     let canonical_root = fs::canonicalize(&root).expect("root should canonicalize");
@@ -91,7 +94,7 @@ fn open_migrates_the_full_local_schema_and_round_trips_it() {
     let version: i64 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .expect("schema version should be readable");
-    assert_eq!(version, 3);
+    assert_eq!(version, 4);
     assert_canonical_local_tables(&connection);
     connection.close().expect("inspection close");
     fs::remove_dir_all(root).expect("database directory should be released");
@@ -178,14 +181,28 @@ const CANONICAL_LOCAL_TABLES: &[(&str, &str, &[&str])] = &[
         "occupancy_mirror",
         "PRAGMA table_info(occupancy_mirror)",
         &[
+            "singleton",
             "occupancy_lease_id",
-            "repository_binding_id",
-            "user_id",
-            "state",
             "fencing_token",
-            "acquired_at",
-            "expires_at",
+            "holder_user_id",
+            "mirror_revision",
+            "claim_request_id",
+            "idle_expires_at",
+            "acknowledged_at",
             "updated_at",
+        ],
+    ),
+    (
+        "occupancy_release_intents",
+        "PRAGMA table_info(occupancy_release_intents)",
+        &[
+            "idempotency_key",
+            "command_message_id",
+            "occupancy_lease_id",
+            "fencing_token",
+            "mode",
+            "affected_worker_sessions",
+            "recorded_at",
         ],
     ),
     (
@@ -728,5 +745,257 @@ fn frame_outbox_acknowledgement_compaction_and_cursors_stay_durable() {
     other_node.close().expect("third store handle close");
 
     store.close().expect("restarted store close");
+    fs::remove_dir_all(root).expect("database directory should be released");
+}
+
+// ---------------------------------------------------------------------------
+// CLIENT-300.3: the occupancy mirror and its release intents.
+// ---------------------------------------------------------------------------
+
+const STAMP: &str = "2026-09-04T00:00:00.000Z";
+
+fn mirror_update(lease: &str, token: u64) -> OccupancyMirrorUpdate {
+    OccupancyMirrorUpdate {
+        occupancy_lease_id: lease.to_owned(),
+        fencing_token: token,
+        holder_user_id: Some("usr_holder".to_owned()),
+        claim_request_id: Some("ocq_CCCCCCCCCCCCCCCCCCCCCCCCCC".to_owned()),
+        idle_expires_at: Some("2026-09-04T02:00:00.000Z".to_owned()),
+        acknowledged_at: STAMP.to_owned(),
+    }
+}
+
+fn release_intent(
+    key: &str,
+    lease: &str,
+    token: u64,
+    mode: ClientOccupancyReleaseMode,
+) -> OccupancyReleaseIntentRecord {
+    OccupancyReleaseIntentRecord {
+        idempotency_key: key.to_owned(),
+        command_message_id: format!("srv-release-{key}"),
+        occupancy_lease_id: lease.to_owned(),
+        fencing_token: token,
+        mode,
+        affected_worker_sessions: 2,
+        recorded_at: STAMP.to_owned(),
+    }
+}
+
+#[test]
+fn occupancy_mirror_advances_monotonically_and_survives_restarts() {
+    let (root, mut store) = open_store("occupancy-mirror");
+
+    // No mirror: the device holds no occupancy.
+    assert!(store.occupancy_mirror().expect("read").is_none());
+
+    // First offer starts the revision at 1.
+    let first = store
+        .advance_occupancy_mirror(&mirror_update("ocl_LEASEONE", 3))
+        .expect("first advance");
+    let OccupancyMirrorAdvance::Advanced(first) = first else {
+        panic!("the first write must advance");
+    };
+    assert_eq!(first.mirror_revision, 1);
+    assert_eq!(first.occupancy_lease_id, "ocl_LEASEONE");
+    assert_eq!(first.fencing_token, 3);
+    assert_eq!(first.holder_user_id.as_deref(), Some("usr_holder"));
+    assert_eq!(first.acknowledged_at, STAMP);
+    assert_eq!(store.occupancy_mirror().expect("read"), Some(first.clone()));
+
+    // A higher token (new lease or force-fence) advances the revision.
+    let second = store
+        .advance_occupancy_mirror(&mirror_update("ocl_LEASETWO", 9))
+        .expect("second advance");
+    let OccupancyMirrorAdvance::Advanced(second) = second else {
+        panic!("a higher token must advance");
+    };
+    assert_eq!(second.mirror_revision, 2);
+    assert_eq!(second.occupancy_lease_id, "ocl_LEASETWO");
+
+    // The exact stored lease/token pair is an idempotent replay: unchanged,
+    // same revision, no second row.
+    let replay = store
+        .advance_occupancy_mirror(&mirror_update("ocl_LEASETWO", 9))
+        .expect("replay advance");
+    assert_eq!(
+        replay,
+        OccupancyMirrorAdvance::Unchanged(second.clone()),
+        "the replay must return the stored record untouched"
+    );
+
+    // Lower, equal-on-a-foreign-lease, and equal-token updates never roll
+    // the mirror back.
+    for (label, lease, token) in [
+        ("lower token", "ocl_LEASETWO", 8),
+        ("much older token", "ocl_LEASETWO", 1),
+        ("foreign lease at the same token", "ocl_LEASEOLD", 9),
+    ] {
+        let error = store
+            .advance_occupancy_mirror(&mirror_update(lease, token))
+            .expect_err(label);
+        assert_eq!(error.kind(), DeviceStoreErrorKind::Conflict, "{label}");
+    }
+    assert_eq!(
+        store.occupancy_mirror().expect("read"),
+        Some(second),
+        "the refused updates must not touch the mirror"
+    );
+
+    // Restart: the mirror is rebuilt from the store, never cleared.
+    store.close().expect("store close");
+    let store = DeviceStore::open(&root).expect("restarted store");
+    let mirror = store.occupancy_mirror().expect("restarted read");
+    assert!(mirror.is_some(), "the mirror survives the restart");
+    assert_eq!(mirror.expect("mirror").mirror_revision, 2);
+    store.close().expect("restarted store close");
+    fs::remove_dir_all(root).expect("database directory should be released");
+}
+
+#[test]
+fn occupancy_mirror_validates_and_persists_its_facts() {
+    let (root, mut store) = open_store("occupancy-mirror-fields");
+
+    // Token 0 and out-of-range tokens are refused before any write.
+    for token in [0, 9_007_199_254_740_992] {
+        let error = store
+            .advance_occupancy_mirror(&mirror_update("ocl_LEASEONE", token))
+            .expect_err("token bound");
+        assert_eq!(error.kind(), DeviceStoreErrorKind::InvalidInput);
+    }
+    let mut empty_holder = mirror_update("ocl_LEASEONE", 3);
+    empty_holder.holder_user_id = Some(String::new());
+    let error = store
+        .advance_occupancy_mirror(&empty_holder)
+        .expect_err("empty holder");
+    assert_eq!(error.kind(), DeviceStoreErrorKind::InvalidInput);
+
+    // The force-fence shape: a fence superseding a foreign lease carries no
+    // holder/claim facts (None columns).
+    let mut fenced = mirror_update("ocl_LEASEONE", 3);
+    fenced.holder_user_id = None;
+    fenced.claim_request_id = None;
+    fenced.idle_expires_at = None;
+    let record = store.advance_occupancy_mirror(&fenced).expect("fence");
+    let OccupancyMirrorAdvance::Advanced(record) = record else {
+        panic!("the fence must advance");
+    };
+    assert!(record.holder_user_id.is_none());
+    assert!(record.claim_request_id.is_none());
+    assert!(record.idle_expires_at.is_none());
+
+    store.close().expect("store close");
+    let store = DeviceStore::open(&root).expect("restarted store");
+    let mirror = store
+        .occupancy_mirror()
+        .expect("restarted read")
+        .expect("mirror survives");
+    assert!(mirror.holder_user_id.is_none());
+    store.close().expect("restarted store close");
+    fs::remove_dir_all(root).expect("database directory should be released");
+}
+
+#[test]
+fn release_intents_are_idempotent_by_key_and_ordered() {
+    let (root, mut store) = open_store("release-intents");
+    store
+        .advance_occupancy_mirror(&mirror_update("ocl_LEASEONE", 3))
+        .expect("mirror for lease");
+
+    let immediate = release_intent(
+        "rel-key-1",
+        "ocl_LEASEONE",
+        3,
+        ClientOccupancyReleaseMode::Immediate,
+    );
+    let outcome = store
+        .record_occupancy_release_intent(&immediate)
+        .expect("first intent");
+    assert_eq!(
+        outcome,
+        OccupancyReleaseIntentOutcome::Recorded(immediate.clone())
+    );
+
+    // A replayed release command (same idempotency key) never records twice.
+    let replay = store
+        .record_occupancy_release_intent(&immediate)
+        .expect("replayed intent");
+    assert_eq!(
+        replay,
+        OccupancyReleaseIntentOutcome::Duplicate(immediate.clone())
+    );
+
+    let drain = release_intent(
+        "rel-key-2",
+        "ocl_LEASEONE",
+        3,
+        ClientOccupancyReleaseMode::DrainThenRelease,
+    );
+    let cancel = release_intent(
+        "rel-key-3",
+        "ocl_LEASEONE",
+        3,
+        ClientOccupancyReleaseMode::CancelTasksAndRelease,
+    );
+    store
+        .record_occupancy_release_intent(&drain)
+        .expect("second intent");
+    store
+        .record_occupancy_release_intent(&cancel)
+        .expect("third intent");
+
+    let intents = store.occupancy_release_intents().expect("list");
+    assert_eq!(intents.len(), 3, "the duplicate never added a row");
+    assert_eq!(intents[0].idempotency_key, "rel-key-1");
+    assert_eq!(intents[0].mode, ClientOccupancyReleaseMode::Immediate);
+    assert_eq!(
+        intents[1].mode,
+        ClientOccupancyReleaseMode::DrainThenRelease
+    );
+    assert_eq!(
+        intents[2].mode,
+        ClientOccupancyReleaseMode::CancelTasksAndRelease
+    );
+    assert_eq!(intents[2].affected_worker_sessions, 2);
+    assert_eq!(
+        store
+            .occupancy_release_intent("rel-key-2")
+            .expect("by key")
+            .expect("intent exists")
+            .command_message_id,
+        "srv-release-rel-key-2"
+    );
+    assert!(
+        store
+            .occupancy_release_intent("rel-key-missing")
+            .expect("by key")
+            .is_none()
+    );
+
+    store.close().expect("store close");
+    let store = DeviceStore::open(&root).expect("restarted store");
+    assert_eq!(
+        store
+            .occupancy_release_intents()
+            .expect("restarted list")
+            .len(),
+        3,
+        "release intents are durable"
+    );
+    store.close().expect("restarted store close");
+    fs::remove_dir_all(root).expect("database directory should be released");
+}
+
+#[test]
+fn lease_worker_session_counts_reflect_the_process_registry() {
+    let (root, store) = open_store("lease-worker-count");
+    assert_eq!(
+        store
+            .count_lease_worker_sessions("ocl_LEASEONE")
+            .expect("empty count"),
+        0,
+        "the worker epic owns spawning; the count starts at zero"
+    );
+    store.close().expect("store close");
     fs::remove_dir_all(root).expect("database directory should be released");
 }
