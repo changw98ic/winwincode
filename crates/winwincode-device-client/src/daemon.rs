@@ -30,11 +30,19 @@
 //!    durable outbox stream onto the assigned node at the sequence the
 //!    server credited, and presents the issued material as the bearer
 //!    credential of every later exchange.
-//! 6. **Backoff.** Transport failures, malformed responses, and protocol
+//! 6. **Occupancy mirroring.** `client.occupancy.offer` persists the
+//!    occupancy mirror (strictly token-monotonic, revision-bumped) and only
+//!    then answers `client.occupancy.ack`; `client.occupancy.release`
+//!    records a durable release intent after the fencing stamp passes; and
+//!    `client.occupancy.force_fence` overwrites the mirror with the higher
+//!    token, immediately invalidating every intent authorized under the
+//!    previous revision (plan 12.2/12.4/12.6). The mirror survives
+//!    disconnects and restarts; recovery semantics stay server-owned.
+//! 7. **Backoff.** Transport failures, malformed responses, and protocol
 //!    violations double the exchange backoff from
 //!    [`DaemonConfig::initial_backoff`] up to
 //!    [`DaemonConfig::max_backoff`]; any successful exchange resets it.
-//! 7. **Lifecycle.** [`DeviceDaemon::run`] loops on a plain `std` thread
+//! 8. **Lifecycle.** [`DeviceDaemon::run`] loops on a plain `std` thread
 //!    with interruptible sleeps until an [`AtomicBool`] shutdown flag is
 //!    observed. Shutdown never discards taken frames: frames leave the
 //!    durable outbox only when their acknowledgement is persisted.
@@ -64,8 +72,9 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use winwincode_client_port::domain::{
-    ClientArchitecture, ClientCapacityReport, ClientControlMessageKind, ClientLockState,
-    ClientPlatformTarget, CommandAckStatus, PresenceState,
+    ClientArchitecture, ClientCapacityReport, ClientControlError, ClientControlErrorCode,
+    ClientControlMessageKind, ClientLockState, ClientPlatformTarget, CommandAckStatus,
+    OccupancyRejectReason, PresenceState,
 };
 use winwincode_client_port::exchange::{
     AckCursor, FrameCodec, FrameCodecError, FrameOutbox, OutboxBatch, OutboxError, OutboxSession,
@@ -73,16 +82,21 @@ use winwincode_client_port::exchange::{
 };
 use winwincode_client_port::messages::{
     CLIENT_CONTROL_PORT_SCHEMA_VERSION, ClientCommandAckPayload, ClientEnrollPayload,
-    ClientHeartbeatPayload, ClientHelloPayload, ClientToServerEnvelope, ClientToServerMessage,
-    CommandContext, ServerAccessChallengePayload, ServerClientLockPayload,
-    ServerEnrollmentAcceptedPayload, ServerToClientEnvelope, ServerToClientMessage,
+    ClientHeartbeatPayload, ClientHelloPayload, ClientOccupancyAckPayload,
+    ClientOccupancyRejectedPayload, ClientToServerEnvelope, ClientToServerMessage, CommandContext,
+    OccupancyCommandContext, ServerAccessChallengePayload, ServerClientLockPayload,
+    ServerEnrollmentAcceptedPayload, ServerOccupancyForceFencePayload, ServerOccupancyOfferPayload,
+    ServerOccupancyReleasePayload, ServerToClientEnvelope, ServerToClientMessage,
 };
 
 use crate::connect_code::{self, PublishedConnectCode};
+use crate::fencing::{FencingGuard, FencingRejection, FencingTicket};
 use crate::identity::{IdentityRecord, IssuedEnrollment, adopt_enrollment};
 use crate::store::{
     ClientInboxCursorUpdate, ConnectCodeStateRecord, ConnectionPolicyRecord, DeviceStore,
-    DeviceStoreError, DeviceStoreErrorKind, ServerProfileRecord, envelope_kind,
+    DeviceStoreError, DeviceStoreErrorKind, OccupancyMirrorAdvance, OccupancyMirrorRecord,
+    OccupancyMirrorUpdate, OccupancyReleaseIntentOutcome, OccupancyReleaseIntentRecord,
+    ServerProfileRecord, envelope_kind,
 };
 
 /// Longest slice the run loop sleeps without re-reading the shutdown flag.
@@ -330,6 +344,19 @@ pub struct DaemonStatus {
     pub access_challenges_confirmed: u64,
     /// `client.client_lock` commands applied and acknowledged.
     pub client_lock_commands_applied: u64,
+    /// `client.occupancy.offer` frames accepted (mirror persisted, ack
+    /// enqueued).
+    pub occupancy_offers_acked: u64,
+    /// `client.occupancy.offer` frames refused with
+    /// `client.occupancy.rejected` (locked node, revision divergence, or a
+    /// non-advancing fencing token).
+    pub occupancy_offers_rejected: u64,
+    /// `client.occupancy.release` commands recorded as new durable release
+    /// intents (replayed duplicates are not counted again).
+    pub occupancy_release_intents_recorded: u64,
+    /// `client.occupancy.force_fence` commands applied (mirror overwritten
+    /// with the higher token).
+    pub occupancy_force_fences_applied: u64,
     /// Client-to-server frames handed to the transport so far.
     pub frames_sent: u64,
     /// Absolute server acknowledgement cursor after the last exchange.
@@ -397,6 +424,11 @@ pub struct DeviceDaemon {
     /// In-memory mirror of the durable connection policy; every write goes
     /// through the store first and refreshes this mirror.
     connection_policy: ConnectionPolicyRecord,
+    /// In-memory mirror of the durable occupancy mirror; every write goes
+    /// through the store first (persist-before-send) and refreshes this
+    /// field. Restored from the store at start and never cleared by a
+    /// disconnect.
+    occupancy_mirror: Option<OccupancyMirrorRecord>,
     status: DaemonStatus,
 }
 
@@ -447,6 +479,10 @@ impl DeviceDaemon {
         let heartbeat_interval = config.heartbeat_interval;
         let connection_policy =
             connect_code::connection_policy(&store).map_err(DaemonError::Store)?;
+        // Plan 18.3: the restart scan rebuilds the occupancy mirror from the
+        // durable row — a restart never clears it; the server-side recovery
+        // flow reconciles against whatever the device still mirrors.
+        let occupancy_mirror = store.occupancy_mirror().map_err(DaemonError::Store)?;
         let mut daemon = Self {
             config,
             store,
@@ -468,6 +504,7 @@ impl DeviceDaemon {
             next_attempt_at: Instant::now(),
             consecutive_failures: 0,
             connection_policy,
+            occupancy_mirror,
             status: DaemonStatus {
                 enrolled,
                 ..DaemonStatus::default()
@@ -725,6 +762,35 @@ impl DeviceDaemon {
         connect_code::connection_policy(&self.store).map_err(DaemonError::Store)
     }
 
+    /// The current occupancy mirror (`None` while the device holds no
+    /// occupancy). It survives disconnects and restarts and is only advanced
+    /// by `client.occupancy.offer` and `client.occupancy.force_fence`.
+    #[must_use]
+    pub const fn occupancy_mirror(&self) -> Option<&OccupancyMirrorRecord> {
+        self.occupancy_mirror.as_ref()
+    }
+
+    /// A fencing guard over the current mirror — the entry point the worker
+    /// epic calls before any fenced local action (worker launch/stop,
+    /// candidate apply, repository mutation): `daemon.fencing_guard()
+    /// .authorize_command(kind, lease, token)`.
+    #[must_use]
+    pub fn fencing_guard(&self) -> FencingGuard {
+        FencingGuard::new(self.occupancy_mirror.clone())
+    }
+
+    /// Re-validates a previously authorized fencing ticket against the
+    /// current mirror immediately before executing the command (the
+    /// invalidate semantics: an offer or force-fence handled in between
+    /// strands every outstanding ticket with `SupersededIntent`).
+    ///
+    /// # Errors
+    ///
+    /// Returns the fencing rejection when the ticket is no longer current.
+    pub fn verify_fencing_ticket(&self, ticket: &FencingTicket) -> Result<(), FencingRejection> {
+        self.fencing_guard().verify_ticket(ticket)
+    }
+
     /// Runs the loop until `shutdown` is observed.
     ///
     /// Shutdown is graceful: no exchange is abandoned mid-transport, and
@@ -869,8 +935,12 @@ impl DeviceDaemon {
                 accepting_connections: self.connection_policy.accepting_connections,
                 lock_state: self.connection_policy.lock_state,
                 presence_state: PresenceState::Online,
-                // Occupancy mirroring is owned by a later lane.
-                occupancy_lease_id: None,
+                // The mirrored lease rides every heartbeat, rebuilt from the
+                // durable mirror (plan 18.3: a restart keeps reporting it).
+                occupancy_lease_id: self
+                    .occupancy_mirror
+                    .as_ref()
+                    .map(|mirror| mirror.occupancy_lease_id.clone()),
             }))?;
             self.status.heartbeats_enqueued += 1;
             self.next_heartbeat_at = now + self.heartbeat_interval;
@@ -990,8 +1060,10 @@ impl DeviceDaemon {
     /// Ingests the server-to-client batch: validates contiguous sequences,
     /// persists the acknowledgement cursor, and handles the enrollment
     /// response, access challenges (answer with a `challenge_ack` verdict),
-    /// and client-lock commands (persist the policy, acknowledge). Commands
-    /// owned by later lanes are counted without acting.
+    /// client-lock commands (persist the policy, acknowledge), and the
+    /// occupancy commands (mirror advance with persist-before-send acks,
+    /// release intents, force-fence overwrites). Commands owned by later
+    /// lanes are counted without acting.
     fn ingest_downlink(
         &mut self,
         frames: &[serde_json::Value],
@@ -1029,13 +1101,25 @@ impl DeviceDaemon {
                             self.apply_client_lock(&payload, &envelope.message_id)
                                 .map_err(DownlinkFailure::Fatal)?;
                         }
+                        ServerToClientMessage::OccupancyOffer(payload) => {
+                            self.apply_occupancy_offer(&payload)
+                                .map_err(DownlinkFailure::Fatal)?;
+                        }
+                        ServerToClientMessage::OccupancyRelease(payload) => {
+                            self.apply_occupancy_release(&payload, &envelope.message_id)
+                                .map_err(DownlinkFailure::Fatal)?;
+                        }
+                        ServerToClientMessage::OccupancyForceFence(payload) => {
+                            self.apply_occupancy_force_fence(&payload, &envelope.message_id)
+                                .map_err(DownlinkFailure::Fatal)?;
+                        }
                         _ => {
-                            // Worker launch/stop, occupancy, repository,
-                            // rescan, and credential commands are owned by
-                            // later device-client lanes; the skeleton
-                            // records them without acting. The cursor has
-                            // already advanced, so the skipped frame never
-                            // blocks the stream.
+                            // Worker launch/stop, candidate apply,
+                            // repository, rescan, and credential commands
+                            // are owned by later device-client lanes; the
+                            // skeleton records them without acting. The
+                            // cursor has already advanced, so the skipped
+                            // frame never blocks the stream.
                             self.status.unhandled_downlink_commands += 1;
                         }
                     }
@@ -1181,6 +1265,307 @@ impl DeviceDaemon {
         }))?;
         self.status.client_lock_commands_applied += 1;
         Ok(())
+    }
+
+    /// Applies one `client.occupancy.offer` (plan 12.2): persists the
+    /// occupancy mirror and only then answers `client.occupancy.ack`
+    /// carrying the lease, the token, and the new mirror revision
+    /// (persist-before-send, so the lease enters `occupied` only after the
+    /// durable fact exists). A locked node, a revision divergence, or a
+    /// non-advancing token answers `client.occupancy.rejected` instead and
+    /// never touches the mirror — a stale offer can never roll it back.
+    ///
+    /// An offer repeating the exact stored lease/token pair is the
+    /// idempotent replay of an unanswered first ack: the ack is re-enqueued
+    /// unchanged and the revision does not move.
+    fn apply_occupancy_offer(
+        &mut self,
+        payload: &ServerOccupancyOfferPayload,
+    ) -> Result<(), DaemonError> {
+        let stamp = payload.occupancy.clone();
+        let current_revision = self
+            .occupancy_mirror
+            .as_ref()
+            .map_or(0, |mirror| mirror.mirror_revision);
+
+        // Plan 12.1: a locked node refuses every occupancy application.
+        if self.connection_policy.lock_state == ClientLockState::Locked {
+            return self.reject_occupancy_offer(
+                &stamp,
+                OccupancyRejectReason::ClientLocked,
+                current_revision,
+            );
+        }
+        // Idempotent replay: the mirror already holds this exact lease and
+        // token, so re-ack the persisted record without advancing it.
+        if self
+            .occupancy_mirror
+            .as_ref()
+            .is_some_and(|mirror| mirror_is_exact(mirror, &stamp))
+        {
+            let record = self.occupancy_mirror.clone().expect("checked above");
+            return self.ack_occupancy_mirror(&record);
+        }
+        // The offer was computed against the mirror revision the server
+        // last saw acknowledged; any divergence means the server's view of
+        // this device moved (or replayed) and the offer must not land.
+        if stamp.command.expected_revision != current_revision {
+            return self.reject_occupancy_offer(
+                &stamp,
+                OccupancyRejectReason::LocalStateConflict,
+                current_revision,
+            );
+        }
+        let update = OccupancyMirrorUpdate {
+            occupancy_lease_id: stamp.occupancy_lease_id.clone(),
+            fencing_token: stamp.occupancy_fencing_token,
+            holder_user_id: Some(payload.holder_user_id.clone()),
+            claim_request_id: Some(payload.claim_request_id.clone()),
+            idle_expires_at: payload.idle_expires_at.clone(),
+            acknowledged_at: now_rfc3339(),
+        };
+        match self.store.advance_occupancy_mirror(&update) {
+            Ok(
+                OccupancyMirrorAdvance::Advanced(record)
+                | OccupancyMirrorAdvance::Unchanged(record),
+            ) => self.ack_occupancy_mirror(&record),
+            Err(error) if error.kind() == DeviceStoreErrorKind::Conflict => self
+                .reject_occupancy_offer(
+                    &stamp,
+                    OccupancyRejectReason::StaleFencingToken,
+                    current_revision,
+                ),
+            Err(error) => Err(DaemonError::Store(error)),
+        }
+    }
+
+    /// Persists the acked mirror state in memory and enqueues the durable
+    /// `client.occupancy.ack` (the mirror write already committed, so the
+    /// ack frame is the persist-before-send tail).
+    fn ack_occupancy_mirror(&mut self, record: &OccupancyMirrorRecord) -> Result<(), DaemonError> {
+        self.occupancy_mirror = Some(record.clone());
+        self.enqueue(occupancy_ack_message(record))?;
+        self.status.occupancy_offers_acked += 1;
+        Ok(())
+    }
+
+    /// Enqueues the durable `client.occupancy.rejected` frame for one
+    /// refused offer, echoing the offered stamp so the Control Plane can
+    /// settle the `reserving` lease back to `released`, and carrying the
+    /// current local mirror revision in `expectedRevision`.
+    fn reject_occupancy_offer(
+        &mut self,
+        stamp: &OccupancyCommandContext,
+        reason: OccupancyRejectReason,
+        current_revision: u64,
+    ) -> Result<(), DaemonError> {
+        self.enqueue(ClientToServerMessage::OccupancyRejected(
+            ClientOccupancyRejectedPayload {
+                occupancy: OccupancyCommandContext {
+                    command: CommandContext {
+                        expected_revision: current_revision,
+                        idempotency_key: format!(
+                            "occupancy-rejected-{}-{}-{}",
+                            stamp.occupancy_lease_id,
+                            stamp.occupancy_fencing_token,
+                            reject_reason_slug(reason)
+                        ),
+                    },
+                    occupancy_lease_id: stamp.occupancy_lease_id.clone(),
+                    occupancy_fencing_token: stamp.occupancy_fencing_token,
+                },
+                reason,
+            },
+        ))?;
+        self.status.occupancy_offers_rejected += 1;
+        Ok(())
+    }
+
+    /// Applies one `client.occupancy.release` (plan 12.4): the command must
+    /// carry the current occupancy stamp; passing commands record a durable
+    /// release intent (mode plus affected worker-session count — actually
+    /// stopping workers belongs to the worker epic) and are answered with
+    /// `client.command_ack`. Stale or unknown stamps are refused with a
+    /// rejected ack and no local action. The mirror itself is never
+    /// mutated: only an offer or a force-fence advances it.
+    fn apply_occupancy_release(
+        &mut self,
+        payload: &ServerOccupancyReleasePayload,
+        command_message_id: &str,
+    ) -> Result<(), DaemonError> {
+        let stamp = &payload.occupancy;
+        let current_revision = self
+            .occupancy_mirror
+            .as_ref()
+            .map_or(0, |mirror| mirror.mirror_revision);
+        let guard = self.fencing_guard();
+        let stamp_match = guard
+            .check_stamp(&stamp.occupancy_lease_id, stamp.occupancy_fencing_token)
+            .map(|mirror| (mirror.occupancy_lease_id.clone(), mirror.mirror_revision))
+            .map_err(|rejection| (rejection, rejection.wire_error_code()));
+        drop(guard);
+        let ack = |daemon: &mut Self,
+                   status: CommandAckStatus,
+                   error: Option<ClientControlError>,
+                   current_revision: u64| {
+            daemon
+                .enqueue(command_ack_message(
+                    ClientControlMessageKind::OccupancyRelease,
+                    command_message_id,
+                    status,
+                    Some(current_revision),
+                    error,
+                ))
+                .map(|_| ())
+        };
+        let (mirror_lease, mirror_revision) = match stamp_match {
+            Ok(matched) => matched,
+            Err((rejection, code)) => {
+                return ack(
+                    self,
+                    release_rejection_status(rejection),
+                    Some(control_error(code, rejection)),
+                    current_revision,
+                );
+            }
+        };
+        if stamp.command.expected_revision != mirror_revision {
+            return ack(
+                self,
+                CommandAckStatus::RejectedRevisionConflict,
+                Some(control_error(
+                    ClientControlErrorCode::RevisionConflict,
+                    FencingRejection::StaleFencingToken,
+                )),
+                mirror_revision,
+            );
+        }
+        let intent = OccupancyReleaseIntentRecord {
+            idempotency_key: stamp.command.idempotency_key.clone(),
+            command_message_id: command_message_id.to_owned(),
+            occupancy_lease_id: mirror_lease,
+            fencing_token: stamp.occupancy_fencing_token,
+            mode: payload.mode,
+            affected_worker_sessions: self
+                .store
+                .count_lease_worker_sessions(&stamp.occupancy_lease_id)
+                .map_err(DaemonError::Store)?,
+            recorded_at: now_rfc3339(),
+        };
+        let outcome = self
+            .store
+            .record_occupancy_release_intent(&intent)
+            .map_err(DaemonError::Store)?;
+        let status = match outcome {
+            // Persist-before-send: the intent is durable before the ack.
+            OccupancyReleaseIntentOutcome::Recorded(_) => {
+                self.status.occupancy_release_intents_recorded += 1;
+                CommandAckStatus::Accepted
+            }
+            OccupancyReleaseIntentOutcome::Duplicate(_) => CommandAckStatus::Duplicate,
+        };
+        ack(self, status, None, mirror_revision)
+    }
+
+    /// Applies one `client.occupancy.force_fence` (plan 12.6): overwrites
+    /// the mirror with the strictly higher token and answers
+    /// `client.command_ack`. Every intent authorized under the previous
+    /// revision is invalidated from this moment
+    /// ([`DeviceDaemon::verify_fencing_ticket`] refuses them), which is the
+    /// "镜像更新后旧 token 的未处理命令立即失效" rule. A non-advancing fence is
+    /// refused and never rolls the mirror back.
+    fn apply_occupancy_force_fence(
+        &mut self,
+        payload: &ServerOccupancyForceFencePayload,
+        command_message_id: &str,
+    ) -> Result<(), DaemonError> {
+        let stamp = &payload.occupancy;
+        let ack = |daemon: &mut Self,
+                   status: CommandAckStatus,
+                   error: Option<ClientControlError>,
+                   current_revision: u64| {
+            daemon
+                .enqueue(command_ack_message(
+                    ClientControlMessageKind::OccupancyForceFence,
+                    command_message_id,
+                    status,
+                    Some(current_revision),
+                    error,
+                ))
+                .map(|_| ())
+        };
+        // Idempotent replay of an unanswered ack: the mirror already holds
+        // the fenced stamp, so re-ack it without advancing.
+        if self
+            .occupancy_mirror
+            .as_ref()
+            .is_some_and(|mirror| mirror_is_exact(mirror, stamp))
+        {
+            let revision = self
+                .occupancy_mirror
+                .as_ref()
+                .map_or(0, |mirror| mirror.mirror_revision);
+            return ack(self, CommandAckStatus::Duplicate, None, revision);
+        }
+        let current_revision = self
+            .occupancy_mirror
+            .as_ref()
+            .map_or(0, |mirror| mirror.mirror_revision);
+        if stamp.command.expected_revision != current_revision {
+            return ack(
+                self,
+                CommandAckStatus::RejectedRevisionConflict,
+                Some(control_error(
+                    ClientControlErrorCode::RevisionConflict,
+                    FencingRejection::StaleFencingToken,
+                )),
+                current_revision,
+            );
+        }
+        // Descriptive facts ride only a lease-matched fence: a fence that
+        // supersedes a foreign lease carries no holder/claim facts.
+        let (holder, claim, idle) = match self.occupancy_mirror.as_ref() {
+            Some(mirror) if mirror.occupancy_lease_id == stamp.occupancy_lease_id => (
+                mirror.holder_user_id.clone(),
+                mirror.claim_request_id.clone(),
+                mirror.idle_expires_at.clone(),
+            ),
+            _ => (None, None, None),
+        };
+        let update = OccupancyMirrorUpdate {
+            occupancy_lease_id: stamp.occupancy_lease_id.clone(),
+            fencing_token: stamp.occupancy_fencing_token,
+            holder_user_id: holder,
+            claim_request_id: claim,
+            idle_expires_at: idle,
+            acknowledged_at: now_rfc3339(),
+        };
+        match self.store.advance_occupancy_mirror(&update) {
+            Ok(OccupancyMirrorAdvance::Advanced(record)) => {
+                self.occupancy_mirror = Some(record.clone());
+                self.status.occupancy_force_fences_applied += 1;
+                ack(
+                    self,
+                    CommandAckStatus::Accepted,
+                    None,
+                    record.mirror_revision,
+                )
+            }
+            Ok(OccupancyMirrorAdvance::Unchanged(record)) => {
+                self.occupancy_mirror = Some(record);
+                ack(self, CommandAckStatus::Duplicate, None, current_revision)
+            }
+            Err(error) if error.kind() == DeviceStoreErrorKind::Conflict => ack(
+                self,
+                CommandAckStatus::RejectedStaleFencingToken,
+                Some(control_error(
+                    ClientControlErrorCode::StaleFencingToken,
+                    FencingRejection::StaleFencingToken,
+                )),
+                current_revision,
+            ),
+            Err(error) => Err(DaemonError::Store(error)),
+        }
     }
 
     fn restore_downlink_cursor(&mut self) -> Result<(), DaemonError> {
@@ -1364,4 +1749,93 @@ fn now_rfc3339() -> String {
     OffsetDateTime::now_utc()
         .format(&Rfc3339)
         .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_owned())
+}
+
+/// Whether the mirror holds exactly the offered/fenced lease and token —
+/// the identity test behind idempotent replays of the mirror-advancing
+/// commands.
+fn mirror_is_exact(mirror: &OccupancyMirrorRecord, stamp: &OccupancyCommandContext) -> bool {
+    mirror.occupancy_lease_id == stamp.occupancy_lease_id
+        && mirror.fencing_token == stamp.occupancy_fencing_token
+}
+
+/// Builds the durable `client.occupancy.ack` for one persisted mirror: the
+/// ack's `expectedRevision` is the persisted mirror revision (the
+/// contract's `mirrorRevision` ack fact), and the idempotency key is
+/// deterministic per lease/token so a replayed offer re-acks with the same
+/// key and payload.
+fn occupancy_ack_message(record: &OccupancyMirrorRecord) -> ClientToServerMessage {
+    ClientToServerMessage::OccupancyAck(ClientOccupancyAckPayload {
+        occupancy: OccupancyCommandContext {
+            command: CommandContext {
+                expected_revision: record.mirror_revision,
+                idempotency_key: format!(
+                    "occupancy-ack-{}-{}",
+                    record.occupancy_lease_id, record.fencing_token
+                ),
+            },
+            occupancy_lease_id: record.occupancy_lease_id.clone(),
+            occupancy_fencing_token: record.fencing_token,
+        },
+    })
+}
+
+/// Stable idempotency suffix for one reject reason.
+const fn reject_reason_slug(reason: OccupancyRejectReason) -> &'static str {
+    match reason {
+        OccupancyRejectReason::UnknownLease => "unknown-lease",
+        OccupancyRejectReason::StaleFencingToken => "stale-fencing-token",
+        OccupancyRejectReason::LocalStateConflict => "local-state-conflict",
+        OccupancyRejectReason::ClientLocked => "client-locked",
+        OccupancyRejectReason::CapacityExhausted => "capacity-exhausted",
+    }
+}
+
+/// The command-ack status for one release fencing rejection.
+const fn release_rejection_status(rejection: FencingRejection) -> CommandAckStatus {
+    match rejection {
+        FencingRejection::MirrorNotSet => CommandAckStatus::RejectedLeaseMismatch,
+        FencingRejection::StaleFencingToken | FencingRejection::SupersededIntent => {
+            CommandAckStatus::RejectedStaleFencingToken
+        }
+    }
+}
+
+/// Builds the machine-readable error fact for one fencing rejection.
+fn control_error(code: ClientControlErrorCode, rejection: FencingRejection) -> ClientControlError {
+    let (message, retryable) = match rejection {
+        FencingRejection::MirrorNotSet => {
+            ("the device holds no occupancy mirror".to_owned(), false)
+        }
+        FencingRejection::StaleFencingToken => (
+            "the occupancy fencing token is not the current mirror stamp".to_owned(),
+            false,
+        ),
+        FencingRejection::SupersededIntent => (
+            "the mirror advanced after this intent was authorized".to_owned(),
+            true,
+        ),
+    };
+    ClientControlError {
+        code,
+        message,
+        retryable,
+    }
+}
+
+/// Builds one durable `client.command_ack` frame.
+fn command_ack_message(
+    command_kind: ClientControlMessageKind,
+    command_message_id: &str,
+    status: CommandAckStatus,
+    current_revision: Option<u64>,
+    error: Option<ClientControlError>,
+) -> ClientToServerMessage {
+    ClientToServerMessage::CommandAck(ClientCommandAckPayload {
+        command_kind,
+        command_message_id: command_message_id.to_owned(),
+        status,
+        current_revision,
+        error,
+    })
 }

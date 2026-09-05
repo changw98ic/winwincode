@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Local device-client `SQLite` store holding the eleven local tables from
-//! plan section 8 plus the two CLIENT-200.2 tables (`connect_code_state`,
+//! plan section 8, the two CLIENT-200.2 tables (`connect_code_state`,
 //! `client_connection_policy`) for the dynamic connect code and the local
-//! lock/new-connection policy.
+//! lock/new-connection policy, and the two CLIENT-300.3 tables
+//! (`occupancy_mirror`, `occupancy_release_intents`) for the durable
+//! occupancy mirror and its release intents.
 //!
 //! The open sequence, migration style, transaction discipline, and the
 //! static-SQL-only rule deliberately mirror `crates/winwincode-storage`, the
@@ -24,7 +26,9 @@ use std::thread;
 use std::time::{Duration, Instant as StdInstant};
 
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
-use winwincode_client_port::domain::{ClientLockState, ConnectCodeState};
+use winwincode_client_port::domain::{
+    ClientLockState, ClientOccupancyReleaseMode, ConnectCodeState,
+};
 use winwincode_client_port::exchange::{
     CompactingOutbox, FrameCodec, FrameOutbox, OutboxSnapshot, StoredFrame,
 };
@@ -37,9 +41,12 @@ use winwincode_client_port::messages::{
 /// (plan 17.1 enrollment adoption). Version 3 added the two CLIENT-200.2
 /// tables (`connect_code_state`, `client_connection_policy`) holding the
 /// durable state of the dynamic connect code and the local lock/new-connection
-/// policy. No version-1 or version-2 database ever shipped, so older
-/// databases fail closed as unsupported.
-pub const CLIENT_STORE_SCHEMA_VERSION: i64 = 3;
+/// policy. Version 4 (CLIENT-300.3) reshaped `occupancy_mirror` into the
+/// singleton authoritative occupancy mirror (lease, fencing token, holder,
+/// mirror revision, acknowledgement stamp) and added the
+/// `occupancy_release_intents` table. No version-1 through version-3
+/// database ever shipped, so older databases fail closed as unsupported.
+pub const CLIENT_STORE_SCHEMA_VERSION: i64 = 4;
 
 const DATABASE_FILE_NAME: &str = "device-client.sqlite3";
 const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -243,6 +250,94 @@ pub struct ClientInboxCursor {
     pub last_sequence: u64,
     pub last_message_id: Option<String>,
     pub updated_at: String,
+}
+
+/// The durable occupancy mirror (CLIENT-300.3, plan 12.2/12.6/18.3).
+///
+/// The device-local execution projection of the Control Plane's occupancy
+/// lease. Only `client.occupancy.offer` and `client.occupancy.force_fence`
+/// may write it (never a release), and every write bumps
+/// [`OccupancyMirrorRecord::mirror_revision`], so commands authorized under
+/// a previous revision are invalidated. The row survives disconnects and
+/// restarts; while it exists, every fenced command is checked against its
+/// lease/token identity.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OccupancyMirrorRecord {
+    pub occupancy_lease_id: String,
+    /// Fencing token of the mirrored lease (wire `occupancyFencingToken`).
+    pub fencing_token: u64,
+    /// Occupying user from the offer. `None` when the mirror was advanced by
+    /// a `client.occupancy.force_fence` that superseded a foreign lease and
+    /// carried no holder fact.
+    pub holder_user_id: Option<String>,
+    /// Locally monotonic revision, bumped on every mirror advance; the value
+    /// reported back as the ack's `mirrorRevision`/`expectedRevision`.
+    pub mirror_revision: u64,
+    /// Claim that created the lease (`None` under the same force-fence
+    /// condition as [`OccupancyMirrorRecord::holder_user_id`]).
+    pub claim_request_id: Option<String>,
+    pub idle_expires_at: Option<String>,
+    /// RFC 3339 stamp of when this mirror revision was persisted.
+    pub acknowledged_at: String,
+    /// RFC 3339 stamp of the last mirror write.
+    pub updated_at: String,
+}
+
+/// Facts of one mirror advance (an offer, or the new stamp of a
+/// force-fence). The store assigns the monotonic mirror revision inside the
+/// write transaction; callers cannot forge one.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OccupancyMirrorUpdate {
+    pub occupancy_lease_id: String,
+    pub fencing_token: u64,
+    pub holder_user_id: Option<String>,
+    pub claim_request_id: Option<String>,
+    pub idle_expires_at: Option<String>,
+    /// RFC 3339 stamp written to both `acknowledged_at` and `updated_at`.
+    pub acknowledged_at: String,
+}
+
+/// Outcome of one mirror-advance attempt.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum OccupancyMirrorAdvance {
+    /// The mirror advanced to the update's lease/token at a new revision.
+    Advanced(OccupancyMirrorRecord),
+    /// The identical lease/token mirror was already persisted (an
+    /// idempotent replay of the same offer or force-fence); the stored
+    /// record is returned unchanged and the revision does not move.
+    Unchanged(OccupancyMirrorRecord),
+}
+
+/// One durable release intent (CLIENT-300.3, plan 12.4).
+///
+/// The daemon records the requested mode plus the affected worker-session
+/// count when `client.occupancy.release` passes the fencing stamp; actually
+/// stopping worker processes belongs to the worker epic and reconciles from
+/// these rows after a restart. The release command's `idempotencyKey` is
+/// the primary key, so a server replay never records the intent twice.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OccupancyReleaseIntentRecord {
+    /// Idempotency key of the release command that produced the intent.
+    pub idempotency_key: String,
+    /// Message id of the release frame being answered.
+    pub command_message_id: String,
+    pub occupancy_lease_id: String,
+    pub fencing_token: u64,
+    pub mode: ClientOccupancyReleaseMode,
+    /// Worker sessions bound to the lease when the intent was recorded.
+    pub affected_worker_sessions: u64,
+    /// RFC 3339 stamp of the recording.
+    pub recorded_at: String,
+}
+
+/// Outcome of one release-intent write.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum OccupancyReleaseIntentOutcome {
+    /// A new intent row was persisted.
+    Recorded(OccupancyReleaseIntentRecord),
+    /// The idempotency key already recorded an intent (a replayed release
+    /// command); the stored row is returned unchanged.
+    Duplicate(OccupancyReleaseIntentRecord),
 }
 
 /// The exchange sender stream the durable outbox is currently bound to.
@@ -887,6 +982,198 @@ impl DeviceStore {
             )
             .map_err(sql_error)?;
         Ok(())
+    }
+
+    /// Reads the durable occupancy mirror.
+    ///
+    /// `None` while no mirror is set: the device holds no occupancy and
+    /// every fenced command fails closed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter-neutral error when the read fails, the store is
+    /// closed, or the stored row disagrees with its schema vocabulary.
+    pub fn occupancy_mirror(&self) -> Result<Option<OccupancyMirrorRecord>, DeviceStoreError> {
+        let connection = self.connection()?;
+        read_occupancy_mirror(connection)
+    }
+
+    /// Advances the occupancy mirror to `update` (CLIENT-300.3).
+    ///
+    /// Only `client.occupancy.offer` and `client.occupancy.force_fence` may
+    /// call this. The advance is strictly token-monotonic: with a mirror
+    /// present, the update's fencing token must be greater than the stored
+    /// token, otherwise the write is refused as a conflict and the mirror
+    /// never rolls back. An update naming the exact stored lease/token pair
+    /// is the idempotent replay of the same mirror fact: nothing is written
+    /// and [`OccupancyMirrorAdvance::Unchanged`] returns the stored record
+    /// (a different holder for the same lease/token pair is still a
+    /// conflict). Every real advance assigns
+    /// [`OccupancyMirrorRecord::mirror_revision`] `= stored + 1` (or `1`
+    /// when no mirror existed) inside the write transaction, invalidating
+    /// every intent authorized under the previous revision.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DeviceStoreErrorKind::InvalidInput`] for an empty or
+    /// overlong identity, [`DeviceStoreErrorKind::Conflict`] for a
+    /// non-advancing or diverging update, and an adapter-neutral error when
+    /// the write fails or the store is closed.
+    pub fn advance_occupancy_mirror(
+        &mut self,
+        update: &OccupancyMirrorUpdate,
+    ) -> Result<OccupancyMirrorAdvance, DeviceStoreError> {
+        validate_mirror_update(update)?;
+        let connection = self.connection_mut()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sql_error)?;
+        let advance = if let Some(stored) = read_occupancy_mirror(&transaction)? {
+            if stored.occupancy_lease_id == update.occupancy_lease_id
+                && stored.fencing_token == update.fencing_token
+            {
+                if stored.holder_user_id != update.holder_user_id {
+                    return Err(DeviceStoreError::conflict(format!(
+                        "occupancy mirror update for lease {} token {} names a \
+                         different holder than the stored mirror",
+                        update.occupancy_lease_id, update.fencing_token
+                    )));
+                }
+                OccupancyMirrorAdvance::Unchanged(stored)
+            } else if update.fencing_token <= stored.fencing_token {
+                return Err(DeviceStoreError::conflict(format!(
+                    "occupancy mirror token {} does not advance past the \
+                     stored token {}",
+                    update.fencing_token, stored.fencing_token
+                )));
+            } else {
+                let record = OccupancyMirrorRecord {
+                    mirror_revision: stored.mirror_revision + 1,
+                    ..mirror_record_from_update(update)
+                };
+                write_occupancy_mirror(&transaction, &record)?;
+                OccupancyMirrorAdvance::Advanced(record)
+            }
+        } else {
+            let record = OccupancyMirrorRecord {
+                mirror_revision: 1,
+                ..mirror_record_from_update(update)
+            };
+            write_occupancy_mirror(&transaction, &record)?;
+            OccupancyMirrorAdvance::Advanced(record)
+        };
+        transaction.commit().map_err(sql_error)?;
+        Ok(advance)
+    }
+
+    /// Counts the worker sessions in the local process registry that are
+    /// bound to one occupancy lease — the "affected workers" figure recorded
+    /// with a release intent. Worker supervision itself belongs to the
+    /// worker epic.
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter-neutral error when the read fails or the store is
+    /// closed.
+    pub fn count_lease_worker_sessions(
+        &self,
+        occupancy_lease_id: &str,
+    ) -> Result<u64, DeviceStoreError> {
+        require_non_empty(occupancy_lease_id, "occupancy lease id", MAX_ID_BYTES)?;
+        let count: i64 = self
+            .connection()?
+            .query_row(
+                "SELECT COUNT(*) FROM worker_process_registry \
+                 WHERE occupancy_lease_id = ?1",
+                params![occupancy_lease_id],
+                |row| row.get(0),
+            )
+            .map_err(sql_error)?;
+        u64::try_from(count).map_err(|_| DeviceStoreError::adapter("worker count is negative"))
+    }
+
+    /// Records one release intent (idempotent by the release command's
+    /// idempotency key), answering whether the row is new or a duplicate.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DeviceStoreErrorKind::InvalidInput`] for an empty or
+    /// overlong field and an adapter-neutral error when the write fails or
+    /// the store is closed.
+    pub fn record_occupancy_release_intent(
+        &mut self,
+        intent: &OccupancyReleaseIntentRecord,
+    ) -> Result<OccupancyReleaseIntentOutcome, DeviceStoreError> {
+        validate_release_intent(intent)?;
+        let connection = self.connection_mut()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sql_error)?;
+        if let Some(stored) = read_release_intent(&transaction, &intent.idempotency_key)? {
+            transaction.commit().map_err(sql_error)?;
+            return Ok(OccupancyReleaseIntentOutcome::Duplicate(stored));
+        }
+        transaction
+            .execute(
+                "INSERT INTO occupancy_release_intents \
+                 (idempotency_key, command_message_id, occupancy_lease_id, \
+                  fencing_token, mode, affected_worker_sessions, recorded_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    intent.idempotency_key,
+                    intent.command_message_id,
+                    intent.occupancy_lease_id,
+                    i64::try_from(intent.fencing_token).map_err(|_| {
+                        DeviceStoreError::invalid("release fencing token is out of range")
+                    })?,
+                    release_mode_to_str(intent.mode),
+                    i64::try_from(intent.affected_worker_sessions).map_err(|_| {
+                        DeviceStoreError::invalid("affected worker count is out of range")
+                    })?,
+                    intent.recorded_at,
+                ],
+            )
+            .map_err(sql_error)?;
+        transaction.commit().map_err(sql_error)?;
+        Ok(OccupancyReleaseIntentOutcome::Recorded(intent.clone()))
+    }
+
+    /// Loads one release intent by its release command idempotency key.
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter-neutral error when the read fails or the store is
+    /// closed.
+    pub fn occupancy_release_intent(
+        &self,
+        idempotency_key: &str,
+    ) -> Result<Option<OccupancyReleaseIntentRecord>, DeviceStoreError> {
+        require_non_empty(idempotency_key, "idempotency key", MAX_ID_BYTES)?;
+        let connection = self.connection()?;
+        read_release_intent(connection, idempotency_key)
+    }
+
+    /// Loads every recorded release intent in recording order.
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter-neutral error when the read fails or the store is
+    /// closed.
+    pub fn occupancy_release_intents(
+        &self,
+    ) -> Result<Vec<OccupancyReleaseIntentRecord>, DeviceStoreError> {
+        let mut statement = self
+            .connection()?
+            .prepare(
+                "SELECT idempotency_key, command_message_id, occupancy_lease_id, \
+                 fencing_token, mode, affected_worker_sessions, recorded_at \
+                 FROM occupancy_release_intents ORDER BY rowid",
+            )
+            .map_err(sql_error)?;
+        let rows = statement
+            .query_map([], row_to_release_intent)
+            .map_err(sql_error)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(sql_error)
     }
 }
 
@@ -1589,6 +1876,215 @@ fn validate_connect_code_record(record: &ConnectCodeStateRecord) -> Result<(), D
     Ok(())
 }
 
+/// Reads the occupancy mirror through any connection or open transaction.
+fn read_occupancy_mirror(
+    connection: &Connection,
+) -> Result<Option<OccupancyMirrorRecord>, DeviceStoreError> {
+    connection
+        .query_row(
+            "SELECT occupancy_lease_id, fencing_token, holder_user_id, \
+             mirror_revision, claim_request_id, idle_expires_at, \
+             acknowledged_at, updated_at \
+             FROM occupancy_mirror WHERE singleton = 1",
+            [],
+            row_to_occupancy_mirror,
+        )
+        .optional()
+        .map_err(sql_error)
+}
+
+/// Writes the singleton occupancy mirror row inside an open transaction.
+fn write_occupancy_mirror(
+    transaction: &rusqlite::Transaction<'_>,
+    record: &OccupancyMirrorRecord,
+) -> Result<(), DeviceStoreError> {
+    transaction
+        .execute(
+            "INSERT INTO occupancy_mirror \
+             (singleton, occupancy_lease_id, fencing_token, holder_user_id, \
+              mirror_revision, claim_request_id, idle_expires_at, \
+              acknowledged_at, updated_at) \
+             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
+             ON CONFLICT (singleton) DO UPDATE SET \
+             occupancy_lease_id = excluded.occupancy_lease_id, \
+             fencing_token = excluded.fencing_token, \
+             holder_user_id = excluded.holder_user_id, \
+             mirror_revision = excluded.mirror_revision, \
+             claim_request_id = excluded.claim_request_id, \
+             idle_expires_at = excluded.idle_expires_at, \
+             acknowledged_at = excluded.acknowledged_at, \
+             updated_at = excluded.updated_at",
+            params![
+                record.occupancy_lease_id,
+                i64::try_from(record.fencing_token).map_err(|_| DeviceStoreError::invalid(
+                    "occupancy fencing token is outside the SQLite integer range"
+                ))?,
+                record.holder_user_id,
+                i64::try_from(record.mirror_revision).map_err(|_| DeviceStoreError::invalid(
+                    "occupancy mirror revision is outside the SQLite integer range"
+                ))?,
+                record.claim_request_id,
+                record.idle_expires_at,
+                record.acknowledged_at,
+                record.updated_at,
+            ],
+        )
+        .map_err(sql_error)?;
+    Ok(())
+}
+
+/// Builds the stored shape of one mirror advance; the caller assigns the
+/// monotonic revision.
+fn mirror_record_from_update(update: &OccupancyMirrorUpdate) -> OccupancyMirrorRecord {
+    OccupancyMirrorRecord {
+        occupancy_lease_id: update.occupancy_lease_id.clone(),
+        fencing_token: update.fencing_token,
+        holder_user_id: update.holder_user_id.clone(),
+        mirror_revision: 1,
+        claim_request_id: update.claim_request_id.clone(),
+        idle_expires_at: update.idle_expires_at.clone(),
+        acknowledged_at: update.acknowledged_at.clone(),
+        updated_at: update.acknowledged_at.clone(),
+    }
+}
+
+/// Reads one release-intent row through any connection or transaction.
+fn read_release_intent(
+    connection: &Connection,
+    idempotency_key: &str,
+) -> Result<Option<OccupancyReleaseIntentRecord>, DeviceStoreError> {
+    connection
+        .query_row(
+            "SELECT idempotency_key, command_message_id, occupancy_lease_id, \
+             fencing_token, mode, affected_worker_sessions, recorded_at \
+             FROM occupancy_release_intents WHERE idempotency_key = ?1",
+            params![idempotency_key],
+            row_to_release_intent,
+        )
+        .optional()
+        .map_err(sql_error)
+}
+
+fn row_to_occupancy_mirror(row: &rusqlite::Row<'_>) -> rusqlite::Result<OccupancyMirrorRecord> {
+    let fencing_token: i64 = row.get(1)?;
+    let mirror_revision: i64 = row.get(3)?;
+    Ok(OccupancyMirrorRecord {
+        occupancy_lease_id: row.get(0)?,
+        fencing_token: u64::try_from(fencing_token).map_err(|_| {
+            rusqlite::Error::FromSqlConversionFailure(
+                1,
+                rusqlite::types::Type::Integer,
+                "stored occupancy fencing token is negative".into(),
+            )
+        })?,
+        holder_user_id: row.get(2)?,
+        mirror_revision: u64::try_from(mirror_revision).map_err(|_| {
+            rusqlite::Error::FromSqlConversionFailure(
+                3,
+                rusqlite::types::Type::Integer,
+                "stored occupancy mirror revision is negative".into(),
+            )
+        })?,
+        claim_request_id: row.get(4)?,
+        idle_expires_at: row.get(5)?,
+        acknowledged_at: row.get(6)?,
+        updated_at: row.get(7)?,
+    })
+}
+
+fn row_to_release_intent(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<OccupancyReleaseIntentRecord> {
+    let fencing_token: i64 = row.get(3)?;
+    let affected_worker_sessions: i64 = row.get(5)?;
+    Ok(OccupancyReleaseIntentRecord {
+        idempotency_key: row.get(0)?,
+        command_message_id: row.get(1)?,
+        occupancy_lease_id: row.get(2)?,
+        fencing_token: u64::try_from(fencing_token).map_err(|_| {
+            rusqlite::Error::FromSqlConversionFailure(
+                3,
+                rusqlite::types::Type::Integer,
+                "stored release fencing token is negative".into(),
+            )
+        })?,
+        mode: parse_release_mode(&row.get::<_, String>(4)?)?,
+        affected_worker_sessions: u64::try_from(affected_worker_sessions).map_err(|_| {
+            rusqlite::Error::FromSqlConversionFailure(
+                5,
+                rusqlite::types::Type::Integer,
+                "stored affected worker count is negative".into(),
+            )
+        })?,
+        recorded_at: row.get(6)?,
+    })
+}
+
+const fn release_mode_to_str(mode: ClientOccupancyReleaseMode) -> &'static str {
+    match mode {
+        ClientOccupancyReleaseMode::Immediate => "immediate",
+        ClientOccupancyReleaseMode::DrainThenRelease => "drain_then_release",
+        ClientOccupancyReleaseMode::CancelTasksAndRelease => "cancel_tasks_and_release",
+    }
+}
+
+fn parse_release_mode(value: &str) -> rusqlite::Result<ClientOccupancyReleaseMode> {
+    match value {
+        "immediate" => Ok(ClientOccupancyReleaseMode::Immediate),
+        "drain_then_release" => Ok(ClientOccupancyReleaseMode::DrainThenRelease),
+        "cancel_tasks_and_release" => Ok(ClientOccupancyReleaseMode::CancelTasksAndRelease),
+        other => Err(rusqlite::Error::FromSqlConversionFailure(
+            0,
+            rusqlite::types::Type::Text,
+            format!("stored release mode {other} is not a release mode").into(),
+        )),
+    }
+}
+
+/// Validates one mirror update before any write.
+fn validate_mirror_update(update: &OccupancyMirrorUpdate) -> Result<(), DeviceStoreError> {
+    require_non_empty(
+        &update.occupancy_lease_id,
+        "occupancy lease id",
+        MAX_ID_BYTES,
+    )?;
+    require_non_empty(&update.acknowledged_at, "acknowledged at", MAX_ID_BYTES)?;
+    if update.fencing_token == 0 || update.fencing_token > MAX_SAFE_INTEGER {
+        return Err(DeviceStoreError::invalid(
+            "occupancy fencing token must be a positive SQLite-range integer",
+        ));
+    }
+    if let Some(holder_user_id) = &update.holder_user_id {
+        require_non_empty(holder_user_id, "holder user id", MAX_ID_BYTES)?;
+    }
+    if let Some(claim_request_id) = &update.claim_request_id {
+        require_non_empty(claim_request_id, "claim request id", MAX_ID_BYTES)?;
+    }
+    Ok(())
+}
+
+/// Validates one release-intent record before any write.
+fn validate_release_intent(intent: &OccupancyReleaseIntentRecord) -> Result<(), DeviceStoreError> {
+    require_non_empty(&intent.idempotency_key, "idempotency key", MAX_ID_BYTES)?;
+    require_non_empty(
+        &intent.command_message_id,
+        "command message id",
+        MAX_ID_BYTES,
+    )?;
+    require_non_empty(
+        &intent.occupancy_lease_id,
+        "occupancy lease id",
+        MAX_ID_BYTES,
+    )?;
+    require_non_empty(&intent.recorded_at, "recorded at", MAX_ID_BYTES)?;
+    if intent.fencing_token == 0 || intent.fencing_token > MAX_SAFE_INTEGER {
+        return Err(DeviceStoreError::invalid(
+            "release fencing token must be a positive SQLite-range integer",
+        ));
+    }
+    Ok(())
+}
+
 const STORE_SCHEMA: &str = r"
 CREATE TABLE device_identity (
     device_id TEXT PRIMARY KEY NOT NULL,
@@ -1634,18 +2130,42 @@ CREATE TABLE repository_local_state (
     last_scanned_at TEXT,
     updated_at TEXT NOT NULL
 );
+-- CLIENT-300.3 (plan 12.2, 12.6, 18.3): the durable occupancy mirror — the
+-- device-local execution projection of the Control Plane's occupancy lease.
+-- At most one row exists: the absence of a row means the device holds no
+-- occupancy and every fenced command fails closed. Only
+-- client.occupancy.offer and client.occupancy.force_fence advance the row
+-- (a release never mutates it), and every advance bumps mirror_revision, so
+-- intents authorized under a previous revision are invalidated. The token
+-- bound matches the occupancy ledger's safe-integer bound; the row survives
+-- disconnects and restarts (recovery reconciles against it).
 CREATE TABLE occupancy_mirror (
-    occupancy_lease_id TEXT PRIMARY KEY NOT NULL,
-    repository_binding_id TEXT NOT NULL,
-    user_id TEXT NOT NULL,
-    state TEXT NOT NULL,
-    fencing_token INTEGER NOT NULL CHECK (fencing_token >= 0),
-    acquired_at TEXT,
-    expires_at TEXT,
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    occupancy_lease_id TEXT NOT NULL,
+    fencing_token INTEGER NOT NULL
+        CHECK (fencing_token > 0 AND fencing_token <= 9007199254740991),
+    holder_user_id TEXT,
+    mirror_revision INTEGER NOT NULL CHECK (mirror_revision > 0),
+    claim_request_id TEXT,
+    idle_expires_at TEXT,
+    acknowledged_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
-CREATE INDEX occupancy_mirror_by_repository
-    ON occupancy_mirror (repository_binding_id, updated_at);
+-- CLIENT-300.3 (plan 12.4): durable release intents. The worker-stopping
+-- execution itself belongs to the worker epic; this lane records the
+-- requested mode and the affected worker-session count so a restart can
+-- reconcile what the device promised. The release command's idempotency
+-- key is the primary key, so a server replay never records twice.
+CREATE TABLE occupancy_release_intents (
+    idempotency_key TEXT PRIMARY KEY NOT NULL,
+    command_message_id TEXT NOT NULL,
+    occupancy_lease_id TEXT NOT NULL,
+    fencing_token INTEGER NOT NULL
+        CHECK (fencing_token > 0 AND fencing_token <= 9007199254740991),
+    mode TEXT NOT NULL CHECK (mode IN ('immediate', 'drain_then_release', 'cancel_tasks_and_release')),
+    affected_worker_sessions INTEGER NOT NULL CHECK (affected_worker_sessions >= 0),
+    recorded_at TEXT NOT NULL
+);
 -- Plan section 8.2: a PID alone is never sufficient because PIDs are reused;
 -- every row additionally binds the process start identity (platform handle).
 CREATE TABLE worker_process_registry (
@@ -1833,14 +2353,28 @@ const STORE_SCHEMA_COLUMNS: &[(&str, &str, &[&str])] = &[
         "occupancy_mirror",
         "PRAGMA table_info(occupancy_mirror)",
         &[
+            "singleton",
             "occupancy_lease_id",
-            "repository_binding_id",
-            "user_id",
-            "state",
             "fencing_token",
-            "acquired_at",
-            "expires_at",
+            "holder_user_id",
+            "mirror_revision",
+            "claim_request_id",
+            "idle_expires_at",
+            "acknowledged_at",
             "updated_at",
+        ],
+    ),
+    (
+        "occupancy_release_intents",
+        "PRAGMA table_info(occupancy_release_intents)",
+        &[
+            "idempotency_key",
+            "command_message_id",
+            "occupancy_lease_id",
+            "fencing_token",
+            "mode",
+            "affected_worker_sessions",
+            "recorded_at",
         ],
     ),
     (
