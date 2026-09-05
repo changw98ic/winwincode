@@ -1625,3 +1625,683 @@ export function createControlPlaneClientDirectory(options: {
   }
   return Object.freeze(directory)
 }
+
+// ---------------------------------------------------------------------------
+// Client occupancy: claim, status, release, and Owner force-release
+// (CLIENT-300.4, plan §12).
+//
+// REAL SERVER SHAPES: the routes, payload names, state strings, and wire error
+// codes in this block mirror the landed Server occupancy flow (the occupancy
+// routes and the central occupancy error-code table of
+// crates/winwincode-server). Pages and view-models only ever see the typed
+// unions below. The occupied-by-other projection is rebuilt here field by
+// field, so a non-holder read can never carry the holder identity even when
+// the wire payload drifted.
+// ---------------------------------------------------------------------------
+
+const CLIENT_OCCUPANCY_CLAIM_PATH = '/api/v1/clients/occupancy'
+const CLIENT_OCCUPANCY_FORCE_RELEASE_PATH = '/api/v1/clients/occupancy/force-release'
+
+/** One occupancy claim: the Client device to occupy. */
+export interface ControlPlaneOccupancyClaimInput {
+  /** 9-12 digits; grouping separators are stripped by the facade. */
+  readonly clientId: string
+}
+
+/** The three Server release modes of plan §12.4. */
+export type ControlPlaneOccupancyReleaseMode = 'release' | 'drain' | 'cancel_and_release'
+
+/** One holder release request: finish, cancel, or withdraw the occupancy. */
+export interface ControlPlaneOccupancyReleaseInput {
+  /** 9-12 digits; grouping separators are stripped by the facade. */
+  readonly clientId: string
+  readonly mode: ControlPlaneOccupancyReleaseMode
+  /** The Server demands this flag for `cancel_and_release`. */
+  readonly confirm?: boolean
+}
+
+/** One occupancy status read. */
+export interface ControlPlaneOccupancyStatusInput {
+  /** 9-12 digits; grouping separators are stripped by the facade. */
+  readonly clientId: string
+}
+
+/** The lease states the holder-side projection returns. */
+export type ControlPlaneOccupancyHolderState =
+  | 'reserving'
+  | 'occupied'
+  | 'draining'
+  | 'recovery_pending'
+
+/** No active lease: the Client is free for the signed-in user. */
+export interface ControlPlaneOccupancyAvailable {
+  readonly occupancy: 'available'
+  readonly presence: ControlPlaneDevicePresence
+}
+
+/**
+ * Privacy projection for a signed-in non-holder (plan §16.4): it names the
+ * occupancy and nothing else — never the holder identity, never lease or
+ * capacity details.
+ */
+export interface ControlPlaneOccupiedByOther {
+  readonly occupancy: 'occupied-by-other'
+}
+
+/** The full view only the occupancy holder receives. */
+export interface ControlPlaneOccupancyHolderView {
+  readonly occupancy: ControlPlaneOccupancyHolderState
+  readonly presence: ControlPlaneDevicePresence
+  readonly holderUserId: string
+  readonly occupancyLeaseId: string
+  readonly fencingToken: number
+  readonly claimedAt: string | null
+  readonly acknowledgedAt: string | null
+  readonly recoveryDeadlineAt: string | null
+  readonly capacityUsed: number
+  readonly capacityTotal: number
+}
+
+/** The one occupancy projection the signed-in user can read. */
+export type ControlPlaneOccupancyStatus =
+  | ControlPlaneOccupancyAvailable
+  | ControlPlaneOccupiedByOther
+  | ControlPlaneOccupancyHolderView
+
+/** One holder release outcome: released at once, or draining first. */
+export interface ControlPlaneOccupancyReleaseOutcome {
+  readonly occupancy: 'released' | 'draining'
+  readonly occupancyLeaseId: string
+  readonly mode: ControlPlaneOccupancyReleaseMode
+}
+
+/** One Owner force-release outcome with the strictly higher fence token. */
+export interface ControlPlaneOccupancyForceReleaseOutcome {
+  readonly released: true
+  readonly occupancyLeaseId: string
+  readonly forceFenceToken: number
+}
+
+/**
+ * The one presentation-facing occupancy failure taxonomy. Wire codes are
+ * translated by `controlPlaneOccupancyFailure` and never read anywhere else.
+ * `unavailable` is the catch-all for outages, expired browser sessions,
+ * protocol drift, and unknown codes, mirroring the sign-in taxonomy above.
+ */
+export type ControlPlaneOccupancyFailure =
+  | 'invalid-request'
+  | 'confirmation-required'
+  | 'client-not-found'
+  | 'client-offline'
+  | 'client-locked'
+  | 'new-connections-forbidden'
+  | 'access-denied'
+  | 'occupied-by-other'
+  | 'capacity-exhausted'
+  | 'occupancy-rejected'
+  | 'occupancy-ack-timeout'
+  | 'recovery-pending'
+  | 'permission-denied'
+  | 'no-active-occupancy'
+  | 'wrong-state'
+  | 'rate-limited'
+  | 'unavailable'
+
+const OCCUPANCY_FAILURE_CODES: Readonly<Record<string, ControlPlaneOccupancyFailure>> =
+  Object.freeze({
+    INVALID_REQUEST: 'invalid-request',
+    CONFIRMATION_REQUIRED: 'confirmation-required',
+    CLIENT_NOT_FOUND: 'client-not-found',
+    CLIENT_OFFLINE: 'client-offline',
+    CLIENT_LOCKED: 'client-locked',
+    CLIENT_CONNECTIONS_FORBIDDEN: 'new-connections-forbidden',
+    ACCESS_DENIED: 'access-denied',
+    OCCUPIED_BY_OTHER: 'occupied-by-other',
+    CAPACITY_EXHAUSTED: 'capacity-exhausted',
+    OCCUPANCY_REJECTED: 'occupancy-rejected',
+    OCCUPANCY_ACK_TIMEOUT: 'occupancy-ack-timeout',
+    OCCUPANCY_RECOVERY_PENDING: 'recovery-pending',
+    PERMISSION_DENIED: 'permission-denied',
+    RESOURCE_NOT_FOUND: 'no-active-occupancy',
+    WRONG_STATE: 'wrong-state',
+    RATE_LIMITED: 'rate-limited',
+  })
+
+/**
+ * Translate one occupancy failure into the presentation taxonomy. Every wire
+ * code stays inside this function; view-models and pages branch only on the
+ * returned union.
+ */
+export function controlPlaneOccupancyFailure(error: unknown): ControlPlaneOccupancyFailure {
+  if (error instanceof ControlPlaneClientError) {
+    const failure = OCCUPANCY_FAILURE_CODES[error.code]
+    if (failure !== undefined) return failure
+  }
+  return 'unavailable'
+}
+
+const OCCUPANCY_HOLDER_STATE_VALUES: readonly string[] = Object.freeze([
+  'reserving',
+  'occupied',
+  'draining',
+  'recovery_pending',
+])
+const OCCUPANCY_RELEASE_OUTCOME_VALUES: readonly string[] = Object.freeze([
+  'released',
+  'draining',
+])
+const OCCUPANCY_RELEASE_MODE_VALUES: readonly string[] = Object.freeze([
+  'release',
+  'drain',
+  'cancel_and_release',
+])
+
+function invalidOccupancyResponseError(): ControlPlaneClientError {
+  return new ControlPlaneClientError({
+    kind: 'protocol',
+    code: 'INVALID_CLIENT_OCCUPANCY_RESPONSE',
+    message: 'The Control Plane server returned an invalid occupancy response.',
+    requestId: null,
+    retryable: false,
+  })
+}
+
+function occupancyNetworkError(): ControlPlaneClientError {
+  return new ControlPlaneClientError({
+    kind: 'network',
+    code: 'NETWORK_ERROR',
+    message: 'The Control Plane server could not be reached.',
+    requestId: null,
+    retryable: true,
+  })
+}
+
+/**
+ * Validate occupancy input before a request exists, mirroring the connect
+ * input bound: the facade owns the digit shape, so grouping separators are
+ * stripped here and never reach the wire.
+ */
+function assertOccupancyClientId(clientId: string): void {
+  if (!/^\d{9,12}$/u.test(clientId)) {
+    throw new ControlPlaneClientError({
+      kind: 'protocol',
+      code: 'CLIENT_OCCUPANCY_ID_INVALID',
+      message: 'Select a Client to manage its occupancy.',
+      requestId: null,
+      retryable: false,
+    })
+  }
+}
+
+function occupancyInputClientId(
+  input: ControlPlaneOccupancyClaimInput | ControlPlaneOccupancyReleaseInput
+    | ControlPlaneOccupancyStatusInput,
+): string {
+  const raw = typeof input?.clientId === 'string' ? input.clientId : ''
+  return raw.replace(/\D+/gu, '')
+}
+
+function clientOccupancyBoundaryError(
+  status: number,
+  source: string,
+): ControlPlaneClientError {
+  let value: unknown
+  try {
+    value = JSON.parse(source)
+  } catch {
+    value = null
+  }
+  const error = isRecord(value) && isRecord(value.error) ? value.error : null
+  const code = error !== null && typeof error.code === 'string'
+    ? error.code
+    : 'CLIENT_OCCUPANCY_FAILED'
+  const kind: ControlPlaneClientErrorKind = accessKind(code)
+    ?? (code === 'RATE_LIMITED'
+      ? 'server'
+      : (versionCode(code)
+        ? 'version'
+        : (status >= 500 ? 'server' : 'protocol')))
+  return new ControlPlaneClientError({
+    kind,
+    code,
+    message: error !== null && typeof error.message === 'string'
+      ? error.message
+      : 'The Client occupancy request failed.',
+    requestId: isRecord(value) && typeof value.requestId === 'string'
+      ? value.requestId as RequestId
+      : null,
+    retryable: error !== null && error.retryable === true,
+  })
+}
+
+function occupancyPresenceValue(value: unknown): ControlPlaneDevicePresence {
+  if (typeof value !== 'string' || !DEVICE_PRESENCE_VALUES.includes(value)) {
+    throw invalidOccupancyResponseError()
+  }
+  return value as ControlPlaneDevicePresence
+}
+
+function occupancyInstantValue(value: unknown): string | null {
+  if (
+    typeof value !== 'string'
+    || !RFC3339_INSTANT.test(value)
+    || Number.isNaN(Date.parse(value))
+  ) {
+    throw invalidOccupancyResponseError()
+  }
+  return value
+}
+
+function occupancyNullableInstantValue(value: unknown): string | null {
+  if (value === null) return null
+  return occupancyInstantValue(value)
+}
+
+function occupancyHolderViewValue(
+  value: Readonly<Record<string, unknown>>,
+): ControlPlaneOccupancyHolderView {
+  const occupancy = value.occupancy
+  const fencingToken = value.fencingToken
+  const capacityUsed = value.capacityUsed
+  const capacityTotal = value.capacityTotal
+  if (
+    typeof occupancy !== 'string'
+    || !OCCUPANCY_HOLDER_STATE_VALUES.includes(occupancy)
+    || typeof value.holderUserId !== 'string'
+    || value.holderUserId.length === 0
+    || typeof value.occupancyLeaseId !== 'string'
+    || value.occupancyLeaseId.length === 0
+    || typeof fencingToken !== 'number'
+    || !Number.isInteger(fencingToken)
+    || fencingToken < 1
+    || typeof capacityUsed !== 'number'
+    || !Number.isInteger(capacityUsed)
+    || capacityUsed < 0
+    || typeof capacityTotal !== 'number'
+    || !Number.isInteger(capacityTotal)
+    || capacityTotal < capacityUsed
+  ) {
+    throw invalidOccupancyResponseError()
+  }
+  const presence = occupancyPresenceValue(value.presence)
+  const claimedAt = occupancyNullableInstantValue(value.claimedAt)
+  const acknowledgedAt = occupancyNullableInstantValue(value.acknowledgedAt)
+  const recoveryDeadlineAt = occupancyNullableInstantValue(value.recoveryDeadlineAt)
+  return Object.freeze({
+    occupancy: occupancy as ControlPlaneOccupancyHolderState,
+    presence,
+    holderUserId: value.holderUserId,
+    occupancyLeaseId: value.occupancyLeaseId,
+    fencingToken,
+    claimedAt,
+    acknowledgedAt,
+    recoveryDeadlineAt,
+    capacityUsed,
+    capacityTotal,
+  })
+}
+
+function parsedOccupancyPayload(source: string): Readonly<Record<string, unknown>> {
+  let value: unknown
+  try {
+    value = JSON.parse(source)
+  } catch {
+    value = null
+  }
+  if (
+    isRecord(value)
+    && typeof value.schemaVersion === 'string'
+    && value.schemaVersion !== CONTROL_PLANE_SCHEMA_VERSION
+  ) {
+    throw new ControlPlaneClientError({
+      kind: 'version',
+      code: 'SCHEMA_VERSION_MISMATCH',
+      message: `The Control Plane server must use ${CONTROL_PLANE_SCHEMA_VERSION}.`,
+      requestId: null,
+      retryable: false,
+    })
+  }
+  if (!isRecord(value)) throw invalidOccupancyResponseError()
+  return value
+}
+
+function occupancyHolderViewResponse(source: string): ControlPlaneOccupancyHolderView {
+  return occupancyHolderViewValue(parsedOccupancyPayload(source))
+}
+
+function occupancyStatusResponse(source: string): ControlPlaneOccupancyStatus {
+  const value = parsedOccupancyPayload(source)
+  if (value.occupancy === 'available') {
+    return Object.freeze({
+      occupancy: 'available',
+      presence: occupancyPresenceValue(value.presence),
+    })
+  }
+  if (value.occupancy === 'occupied-by-other') {
+    // Rebuilt field by field: the parsed projection carries the occupancy
+    // name and nothing else, whatever the wire payload said (plan §16.4).
+    return Object.freeze({ occupancy: 'occupied-by-other' })
+  }
+  return occupancyHolderViewValue(value)
+}
+
+function occupancyReleaseResponse(source: string): ControlPlaneOccupancyReleaseOutcome {
+  const value = parsedOccupancyPayload(source)
+  const occupancy = value.occupancy
+  const mode = value.mode
+  if (
+    typeof occupancy !== 'string'
+    || !OCCUPANCY_RELEASE_OUTCOME_VALUES.includes(occupancy)
+    || typeof value.occupancyLeaseId !== 'string'
+    || value.occupancyLeaseId.length === 0
+    || typeof mode !== 'string'
+    || !OCCUPANCY_RELEASE_MODE_VALUES.includes(mode)
+  ) {
+    throw invalidOccupancyResponseError()
+  }
+  return Object.freeze({
+    occupancy: occupancy as ControlPlaneOccupancyReleaseOutcome['occupancy'],
+    occupancyLeaseId: value.occupancyLeaseId,
+    mode: mode as ControlPlaneOccupancyReleaseMode,
+  })
+}
+
+function occupancyForceReleaseResponse(
+  source: string,
+): ControlPlaneOccupancyForceReleaseOutcome {
+  const value = parsedOccupancyPayload(source)
+  const forceFenceToken = value.forceFenceToken
+  if (
+    value.released !== true
+    || typeof value.occupancyLeaseId !== 'string'
+    || value.occupancyLeaseId.length === 0
+    || typeof forceFenceToken !== 'number'
+    || !Number.isInteger(forceFenceToken)
+    || forceFenceToken < 1
+  ) {
+    throw invalidOccupancyResponseError()
+  }
+  return Object.freeze({
+    released: true,
+    occupancyLeaseId: value.occupancyLeaseId,
+    forceFenceToken,
+  })
+}
+
+/**
+ * The base facade extended with the signed-in user's occupancy surface. The
+ * decorator delegates every base method, so hosts can pass it anywhere a
+ * `ControlPlaneClient` is accepted and keep one session and one error identity.
+ */
+export interface ControlPlaneClientOccupancy extends ControlPlaneClient {
+  /**
+   * Submit one occupancy claim. Repeated claims for the same Client are
+   * idempotent: an in-flight claim is never repeated, and a settled claim
+   * replays to the same holder view without a second lease.
+   */
+  claimOccupancy(
+    input: ControlPlaneOccupancyClaimInput,
+    options?: ControlPlaneRequestOptions,
+  ): Promise<ControlPlaneOccupancyHolderView>
+  /** Read the signed-in user's occupancy projection for one Client. */
+  occupancyStatus(
+    input: ControlPlaneOccupancyStatusInput,
+    options?: ControlPlaneRequestOptions,
+  ): Promise<ControlPlaneOccupancyStatus>
+  /** Release, drain, or cancel-and-release the caller's own occupancy. */
+  releaseOccupancy(
+    input: ControlPlaneOccupancyReleaseInput,
+    options?: ControlPlaneRequestOptions,
+  ): Promise<ControlPlaneOccupancyReleaseOutcome>
+  /** Owner-only safe cleanup of a recovery-pending lease past its deadline. */
+  forceReleaseOccupancy(
+    input: ControlPlaneOccupancyStatusInput,
+    options?: ControlPlaneRequestOptions,
+  ): Promise<ControlPlaneOccupancyForceReleaseOutcome>
+}
+
+/**
+ * Extend the one Control Plane facade with the Client occupancy flow over the
+ * real Server occupancy routes. An injected facade that already implements
+ * the occupancy methods is reused verbatim so deterministic fixtures and host
+ * composition keep their single seam.
+ */
+export function createControlPlaneClientOccupancy(options: {
+  readonly client: ControlPlaneClient
+  /** Same deterministic transport seam the base facade was created with. */
+  readonly transport?: ControlPlaneClientTransport
+}): ControlPlaneClientOccupancy {
+  const location = parseControlPlaneServerUrl(options.client.serverUrl)
+  const transportFetch = options.transport?.fetch
+  const injected = options.client as Partial<ControlPlaneClientOccupancy>
+  const injectedClaimOccupancy = injected.claimOccupancy
+  const injectedOccupancyStatus = injected.occupancyStatus
+  const injectedReleaseOccupancy = injected.releaseOccupancy
+  const injectedForceReleaseOccupancy = injected.forceReleaseOccupancy
+  // One claim per Client at a time: a second claim for the same Client while
+  // one is in flight joins the first instead of racing the lease gate.
+  const claimsInFlight = new Map<string, Promise<ControlPlaneOccupancyHolderView>>()
+
+  function claimOnce(
+    clientId: string,
+    run: () => Promise<ControlPlaneOccupancyHolderView>,
+  ): Promise<ControlPlaneOccupancyHolderView> {
+    const pending = claimsInFlight.get(clientId)
+    if (pending !== undefined) return pending
+    const claim = run().finally(() => {
+      claimsInFlight.delete(clientId)
+    })
+    claimsInFlight.set(clientId, claim)
+    return claim
+  }
+
+  async function occupancyRequest(
+    path: string,
+    method: 'DELETE' | 'GET' | 'POST',
+    body: string | null,
+    signal: AbortSignal | undefined,
+  ): Promise<ControlPlaneHttpResponse> {
+    if (signalIsAborted(signal)) throw cancelledError(null)
+    if (transportFetch === undefined) {
+      throw new ControlPlaneClientError({
+        kind: 'protocol',
+        code: 'TRANSPORT_UNAVAILABLE',
+        message: 'The browser HTTP transport is unavailable.',
+        requestId: null,
+        retryable: false,
+      })
+    }
+    return transportFetch(`${location.serverUrl}${path}`, {
+      method,
+      headers: body === null ? {} : { 'Content-Type': 'application/json' },
+      ...(body === null ? {} : { body }),
+      redirect: 'error',
+      cache: 'no-store',
+      referrerPolicy: 'no-referrer',
+      credentials: 'include',
+      ...(signal === undefined ? {} : { signal }),
+    })
+  }
+
+  async function claimRequest(
+    input: ControlPlaneOccupancyClaimInput,
+    requestOptions: ControlPlaneRequestOptions | undefined,
+  ): Promise<ControlPlaneOccupancyHolderView> {
+    try {
+      const response = await occupancyRequest(
+        CLIENT_OCCUPANCY_CLAIM_PATH,
+        'POST',
+        JSON.stringify({
+          schemaVersion: CONTROL_PLANE_SCHEMA_VERSION,
+          clientId: input.clientId,
+        }),
+        requestOptions?.signal,
+      )
+      const source = await response.text()
+      if (!response.ok) throw clientOccupancyBoundaryError(response.status, source)
+      if (response.status !== 201) throw invalidOccupancyResponseError()
+      return occupancyHolderViewResponse(source)
+    } catch (error) {
+      if (signalIsAborted(requestOptions?.signal)) throw cancelledError(null)
+      if (error instanceof ControlPlaneClientError) throw error
+      throw occupancyNetworkError()
+    }
+  }
+
+  async function statusRequest(
+    input: ControlPlaneOccupancyStatusInput,
+    requestOptions: ControlPlaneRequestOptions | undefined,
+  ): Promise<ControlPlaneOccupancyStatus> {
+    try {
+      const response = await occupancyRequest(
+        `/api/v1/clients/${encodeURIComponent(input.clientId)}/occupancy`,
+        'GET',
+        null,
+        requestOptions?.signal,
+      )
+      const source = await response.text()
+      if (!response.ok) throw clientOccupancyBoundaryError(response.status, source)
+      if (response.status !== 200) throw invalidOccupancyResponseError()
+      return occupancyStatusResponse(source)
+    } catch (error) {
+      if (signalIsAborted(requestOptions?.signal)) throw cancelledError(null)
+      if (error instanceof ControlPlaneClientError) throw error
+      throw occupancyNetworkError()
+    }
+  }
+
+  async function releaseRequest(
+    input: ControlPlaneOccupancyReleaseInput,
+    requestOptions: ControlPlaneRequestOptions | undefined,
+  ): Promise<ControlPlaneOccupancyReleaseOutcome> {
+    try {
+      const response = await occupancyRequest(
+        CLIENT_OCCUPANCY_CLAIM_PATH,
+        'DELETE',
+        JSON.stringify({
+          schemaVersion: CONTROL_PLANE_SCHEMA_VERSION,
+          clientId: input.clientId,
+          mode: input.mode,
+          ...(input.confirm === undefined ? {} : { confirm: input.confirm }),
+        }),
+        requestOptions?.signal,
+      )
+      const source = await response.text()
+      if (!response.ok) throw clientOccupancyBoundaryError(response.status, source)
+      if (response.status !== 200) throw invalidOccupancyResponseError()
+      return occupancyReleaseResponse(source)
+    } catch (error) {
+      if (signalIsAborted(requestOptions?.signal)) throw cancelledError(null)
+      if (error instanceof ControlPlaneClientError) throw error
+      throw occupancyNetworkError()
+    }
+  }
+
+  async function forceReleaseRequest(
+    input: ControlPlaneOccupancyStatusInput,
+    requestOptions: ControlPlaneRequestOptions | undefined,
+  ): Promise<ControlPlaneOccupancyForceReleaseOutcome> {
+    try {
+      const response = await occupancyRequest(
+        CLIENT_OCCUPANCY_FORCE_RELEASE_PATH,
+        'POST',
+        JSON.stringify({
+          schemaVersion: CONTROL_PLANE_SCHEMA_VERSION,
+          clientId: input.clientId,
+        }),
+        requestOptions?.signal,
+      )
+      const source = await response.text()
+      if (!response.ok) throw clientOccupancyBoundaryError(response.status, source)
+      if (response.status !== 200) throw invalidOccupancyResponseError()
+      return occupancyForceReleaseResponse(source)
+    } catch (error) {
+      if (signalIsAborted(requestOptions?.signal)) throw cancelledError(null)
+      if (error instanceof ControlPlaneClientError) throw error
+      throw occupancyNetworkError()
+    }
+  }
+
+  const occupancy: ControlPlaneClientOccupancy = {
+    serverUrl: options.client.serverUrl,
+    restore(requestOptions) {
+      return options.client.restore(requestOptions)
+    },
+    login(bootstrapProof, requestOptions) {
+      return options.client.login(bootstrapProof, requestOptions)
+    },
+    loginWithPassword(credentials, requestOptions) {
+      return options.client.loginWithPassword(credentials, requestOptions)
+    },
+    initializationStatus(requestOptions) {
+      return options.client.initializationStatus(requestOptions)
+    },
+    logout(requestOptions) {
+      return options.client.logout(requestOptions)
+    },
+    command(command, requestOptions) {
+      return options.client.command(command, requestOptions)
+    },
+    query(query, requestOptions) {
+      return options.client.query(query, requestOptions)
+    },
+    subscribe(subscriptionOptions) {
+      return options.client.subscribe(subscriptionOptions)
+    },
+    claimOccupancy(rawInput, requestOptions) {
+      // Non-async on purpose: callers that join an in-flight claim receive the
+      // one shared promise. Validation failures surface through the explicit
+      // rejection below, so every failure still rejects instead of throwing.
+      try {
+        // The facade is the one place that owns the digit shape, so an
+        // injected occupancy implementation receives the same normalized
+        // input the wire path would send.
+        const clientId = occupancyInputClientId(rawInput)
+        assertOccupancyClientId(clientId)
+        const input: ControlPlaneOccupancyClaimInput = { clientId }
+        if (typeof injectedClaimOccupancy === 'function') {
+          return claimOnce(clientId, () =>
+            injectedClaimOccupancy.call(options.client, input, requestOptions))
+        }
+        return claimOnce(clientId, () => claimRequest(input, requestOptions))
+      } catch (error) {
+        return Promise.reject(error)
+      }
+    },
+    async occupancyStatus(rawInput, requestOptions) {
+      const clientId = occupancyInputClientId(rawInput)
+      assertOccupancyClientId(clientId)
+      const input: ControlPlaneOccupancyStatusInput = { clientId }
+      if (typeof injectedOccupancyStatus === 'function') {
+        return injectedOccupancyStatus.call(options.client, input, requestOptions)
+      }
+      return statusRequest(input, requestOptions)
+    },
+    async releaseOccupancy(rawInput, requestOptions) {
+      const clientId = occupancyInputClientId(rawInput)
+      assertOccupancyClientId(clientId)
+      const input: ControlPlaneOccupancyReleaseInput = {
+        clientId,
+        mode: rawInput.mode,
+        ...(rawInput.confirm === undefined ? {} : { confirm: rawInput.confirm }),
+      }
+      if (typeof injectedReleaseOccupancy === 'function') {
+        return injectedReleaseOccupancy.call(options.client, input, requestOptions)
+      }
+      return releaseRequest(input, requestOptions)
+    },
+    async forceReleaseOccupancy(rawInput, requestOptions) {
+      const clientId = occupancyInputClientId(rawInput)
+      assertOccupancyClientId(clientId)
+      const input: ControlPlaneOccupancyStatusInput = { clientId }
+      if (typeof injectedForceReleaseOccupancy === 'function') {
+        return injectedForceReleaseOccupancy.call(options.client, input, requestOptions)
+      }
+      return forceReleaseRequest(input, requestOptions)
+    },
+    close() {
+      options.client.close()
+    },
+  }
+  return Object.freeze(occupancy)
+}
