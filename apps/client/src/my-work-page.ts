@@ -26,6 +26,7 @@ import type {
  */
 export interface MyWorkPresentation {
   readonly startLabel: string
+  readonly startTaskEntryLabel: string
   readonly startChatLabel: string
   readonly startDeliveryLabel: string
   readonly clientsHeading: string
@@ -39,6 +40,7 @@ export interface MyWorkPresentation {
 
 const PRESENTATION_SPEC: MyWorkPresentation = {
   startLabel: 'Start a new task',
+  startTaskEntryLabel: 'Start a task on your Client',
   startChatLabel: 'Start a Chat task',
   startDeliveryLabel: 'Plan a StrongFlow Delivery',
   clientsHeading: 'Clients',
@@ -116,6 +118,11 @@ export function mountMyWorkPage(
 
   const startLabel = element(document, 'p', 'wwc-my-work-start-label')
   startLabel.textContent = presentation.startLabel
+  // UI-100.2: the §16.6 new-task form deep link reuses the scope-complete
+  // start-entry pattern of the Chat and Delivery links.
+  const startTaskEntry = element(document, 'a', 'wwc-my-work-start-task-entry')
+  startTaskEntry.href = surfaceHash('/home/new-task', options.scopeSelection)
+  startTaskEntry.textContent = presentation.startTaskEntryLabel
   const startChat = element(document, 'a', 'wwc-my-work-start-chat')
   startChat.href = surfaceHash('/chat', options.scopeSelection)
   startChat.textContent = presentation.startChatLabel
@@ -123,7 +130,7 @@ export function mountMyWorkPage(
   startDelivery.href = surfaceHash('/strongflow', options.scopeSelection)
   startDelivery.textContent = presentation.startDeliveryLabel
   const start = element(document, 'div', 'wwc-my-work-start')
-  start.append(startLabel, startChat, startDelivery)
+  start.append(startLabel, startTaskEntry, startChat, startDelivery)
 
   // The work sections are the existing Home dashboard page; this composition
   // reuses its live region, deep links, and first-use entry instead of a copy.

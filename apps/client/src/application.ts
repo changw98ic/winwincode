@@ -6,8 +6,11 @@ import {
   createControlPlaneClientDirectory,
   createControlPlaneClientOccupancy,
   createControlPlaneClientUsers,
+  createControlPlaneRunIdentityFake,
+  createControlPlaneTaskFake,
   type ControlPlaneClient,
   type ControlPlaneClientTransport,
+  type ControlPlaneTaskAnchor,
 } from './control-plane-client.js'
 import { mountClientErrorBoundary } from './components/client-error-boundary.js'
 import { mountConnectionBar } from './components/connection-bar.js'
@@ -167,7 +170,7 @@ function element<K extends keyof HTMLElementTagNameMap>(
 const CONTRACT_ID_ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ'
 
 function contractId(
-  prefix: 'req' | 'sub' | 'psn' | 'dlv',
+  prefix: 'req' | 'sub' | 'psn' | 'dlv' | 'tsk',
   crypto: Crypto,
 ): string {
   const entropy = crypto.getRandomValues(new Uint8Array(26))
@@ -288,6 +291,13 @@ export function mountWinWinCodeClient(
   const repositoriesModel: RepositoriesViewModel = createRepositoriesViewModel({
     client: clientDirectory,
   })
+  // UI-100.2 (fake-first): the §16.6 task creation seam and the §16.7 run
+  // identity zone run on the local fakes from the one facade block until the
+  // FLOW scheduler and worker/candidate routing land and replace the ports.
+  const taskPort = createControlPlaneTaskFake({
+    nextTaskId: () => contractId('tsk', browser.crypto),
+  })
+  const runIdentityPort = createControlPlaneRunIdentityFake()
   let lastKnownDiagnosticScope: unknown = null
   const shell = element(document, 'div', 'wwc-shell')
   const header = element(document, 'header', 'wwc-header')
@@ -1060,6 +1070,128 @@ export function mountWinWinCodeClient(
     }
   }
 
+  /** The Home surface carries the §16.6/§16.7 sub-routes under its path. */
+  function homeSubRoute(): 'my-work' | 'task-entry' | 'task-run' {
+    const path = browser.location.hash.replace(/^#/u, '').replace(/\?.*$/u, '')
+    if (path === '/home/new-task') return 'task-entry'
+    if (path === '/home/run') return 'task-run'
+    return 'my-work'
+  }
+
+  /** The anchor facts a deep-linked run route must carry to be actionable. */
+  function taskRunRouteAnchor(): {
+    readonly taskId: string
+    readonly clientId: string
+    readonly repositoryBindingId: string
+  } | null {
+    const parameters = routeParameters(browser.location.hash)
+    const taskId = parameters.get('task')
+    const clientId = parameters.get('client')
+    const repositoryBindingId = parameters.get('repository')
+    if (
+      taskId === null || clientId === null || repositoryBindingId === null
+      || taskId.length === 0 || clientId.length === 0 || repositoryBindingId.length === 0
+    ) {
+      return null
+    }
+    return { taskId, clientId, repositoryBindingId }
+  }
+
+  /**
+   * UI-100.2 (fake-first): the §16.6 new-task form.  It reuses the shell-owned
+   * Clients and Repositories models for its options, creates the task through
+   * the fake-first task port, and lands on the run route with the task anchor
+   * in the URL (form values like the description never enter the URL).
+   */
+  async function renderTaskEntry(generation: number): Promise<void> {
+    const context = authenticatedRouteContext()
+    if (context === null) return
+    const controller = new AbortController()
+    featureController = controller
+    routeLoading('Loading the new task form…')
+    try {
+      const [{ createTaskEntryViewModel }, { mountTaskEntryPage }] = await Promise.all([
+        import('./task-entry-view-model.js'),
+        import('./task-entry-page.js'),
+      ])
+      if (closed || generation !== renderGeneration || controller.signal.aborted) return
+      const model = createTaskEntryViewModel({
+        clients: clientsModel,
+        repositories: repositoriesModel,
+        port: taskPort,
+      })
+      activeFeature = mountTaskEntryPage({
+        root: slot,
+        model,
+        onStarted(anchor: ControlPlaneTaskAnchor) {
+          if (closed || generation !== renderGeneration || controller.signal.aborted) return
+          const parameters = new URLSearchParams({
+            task: anchor.taskId,
+            client: anchor.clientId,
+            repository: anchor.repositoryBindingId,
+          })
+          replaceHash(scopeHash(
+            `#/home/run?${parameters.toString()}`,
+            scopeSelectionFromHash(browser.location.hash),
+          ))
+          render()
+        },
+      })
+      await model.start()
+    } catch (error) {
+      if (closed || generation !== renderGeneration || controller.signal.aborted) return
+      showRouteFailure(error, 'TASK_ENTRY_ROUTE_FAILURE')
+    }
+  }
+
+  /**
+   * UI-100.2 (fake-first): the §16.7 run page.  The Client, Occupancy, and
+   * Repository rows project the live shell-owned models; the WorkerSession
+   * and Candidate/Apply rows come from the fake-first identity port.
+   */
+  async function renderTaskRun(generation: number): Promise<void> {
+    const context = authenticatedRouteContext()
+    if (context === null) return
+    const anchorFacts = taskRunRouteAnchor()
+    if (anchorFacts === null) {
+      routeUnavailable('This task link is incomplete. Start a task from My Work.')
+      return
+    }
+    const controller = new AbortController()
+    featureController = controller
+    routeLoading('Loading the running task…')
+    try {
+      const [{ createTaskRunViewModel }, { mountTaskRunPage }] = await Promise.all([
+        import('./task-run-view-model.js'),
+        import('./task-run-page.js'),
+      ])
+      if (closed || generation !== renderGeneration || controller.signal.aborted) return
+      const knownAnchor = taskPort.describe(anchorFacts.taskId)
+      const anchor: ControlPlaneTaskAnchor = knownAnchor ?? Object.freeze({
+        ...anchorFacts,
+        baseBranch: '',
+        description: '',
+        modelRouteId: '',
+      })
+      const model = createTaskRunViewModel({
+        anchor,
+        taskDescription: knownAnchor?.description ?? null,
+        clients: clientsModel,
+        repositories: repositoriesModel,
+        identity: runIdentityPort,
+      })
+      activeFeature = mountTaskRunPage({
+        root: slot,
+        model,
+        homeHref: surfaceHash('/home', scopeSelectionFromHash(browser.location.hash)),
+      })
+      await model.start()
+    } catch (error) {
+      if (closed || generation !== renderGeneration || controller.signal.aborted) return
+      showRouteFailure(error, 'TASK_RUN_ROUTE_FAILURE')
+    }
+  }
+
   async function renderAttention(generation: number): Promise<void> {
     const context = authenticatedRouteContext()
     if (context === null) return
@@ -1594,7 +1726,18 @@ export function mountWinWinCodeClient(
         controlPlane,
       }),
     }))
-    if (activeSurface.id === 'home') launchRoute(renderHome(generation), generation, 'HOME_ROUTE_FAILURE')
+    if (activeSurface.id === 'home') {
+      // UI-100.2: the Home surface carries the §16.6 new-task form and the
+      // §16.7 run page as sub-routes of the My Work first screen.
+      const homeRoute = homeSubRoute()
+      if (homeRoute === 'task-entry') {
+        launchRoute(renderTaskEntry(generation), generation, 'TASK_ENTRY_ROUTE_FAILURE')
+      } else if (homeRoute === 'task-run') {
+        launchRoute(renderTaskRun(generation), generation, 'TASK_RUN_ROUTE_FAILURE')
+      } else {
+        launchRoute(renderHome(generation), generation, 'HOME_ROUTE_FAILURE')
+      }
+    }
     else if (activeSurface.id === 'chat') launchRoute(renderChat(generation), generation, 'CHAT_ROUTE_FAILURE')
     else if (activeSurface.id === 'strongflow') {
       launchRoute(renderStrongFlow(generation), generation, 'STRONGFLOW_ROUTE_FAILURE')
