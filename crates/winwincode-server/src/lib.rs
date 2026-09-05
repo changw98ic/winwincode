@@ -6,6 +6,7 @@ mod application;
 mod auth_session;
 mod client_connections;
 mod client_exchange;
+mod client_occupancy;
 mod config;
 mod dispatcher;
 mod durable_event_hub;
@@ -34,6 +35,10 @@ pub use client_connections::{
 pub use client_exchange::{
     ClientExchangeApplication, ClientExchangeConfig, ClientExchangeError, ClientExchangeErrorKind,
     ClientExchangePort,
+};
+pub use client_occupancy::{
+    ClientOccupancyApplication, ClientOccupancyConfig, ClientOccupancyError,
+    ClientOccupancyErrorKind, OfflineSweepOutcome,
 };
 pub use winwincode_api::generated::{AuthSessionRequest, AuthSessionResponse};
 

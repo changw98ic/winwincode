@@ -16,8 +16,12 @@
 //! the fixed contract outcomes (accept, duplicate, gap with replay hint,
 //! conflict, malformed, reacquire), and accepted frames execute their
 //! kind-specific effect against the `ClientNode` registry (`client.enroll`,
-//! `client.hello`, `client.heartbeat`; the remaining kinds settle at the
-//! cursor only and are owned by later lanes).
+//! `client.hello`, `client.heartbeat`), the occupancy ledger
+//! (`client.occupancy.ack` promotes `reserving -> occupied`,
+//! `client.occupancy.rejected` rolls the offer back, and a zero-running
+//! heartbeat completes a `draining` lease), and the connect ledger
+//! (`client.access.challenge_ack`); the remaining kinds settle at the cursor
+//! only and are owned by later lanes.
 //!
 //! Credential model (plan 17.1): the server issues one random 32-byte
 //! Device Credential at enrollment, persists only its `sha256:` digest in
@@ -68,9 +72,11 @@ use winwincode_client_port::messages::ClientToServerMessage;
 use winwincode_client_port::messages::ServerEnrollmentAcceptedPayload;
 use winwincode_client_port::messages::ServerToClientEnvelope;
 use winwincode_client_port::messages::ServerToClientMessage;
+use winwincode_control_plane::ClientOccupancyService;
 use winwincode_control_plane::ClientRegistryService;
 use winwincode_control_plane::ClientRegistryServiceErrorKind;
 use winwincode_control_plane::ConnectCodeService;
+use winwincode_control_plane::OccupancyLeaseState;
 use winwincode_domain::Instant;
 use winwincode_storage::ClientDownlinkAppend;
 use winwincode_storage::ClientExchangeCursors;
@@ -78,6 +84,7 @@ use winwincode_storage::ClientNodeRecord;
 use winwincode_storage::ClientNodeRegistration;
 use winwincode_storage::ClientPresenceState;
 use winwincode_storage::ConnectChallengeVerdict;
+use winwincode_storage::OccupancyReleaseReason;
 use winwincode_storage::ProductStateStorage;
 use winwincode_storage::SqliteStorage;
 
@@ -959,6 +966,17 @@ fn apply_effect(
                     record.revision,
                 );
             }
+            // Drain automation (plan 12.4): a `draining` lease releases once
+            // the device reports no running worker session. A refused
+            // judgement is an ignored report fact.
+            if payload.capacity.running_worker_sessions == 0 {
+                let mut occupancy = ClientOccupancyService::new(storage);
+                if let Ok(Some(lease)) = occupancy.active_lease_for_node(node_id)
+                    && lease.state == OccupancyLeaseState::Draining
+                {
+                    let _ = occupancy.drain_complete(&lease.occupancy_lease_id);
+                }
+            }
             Ok(())
         }
         ClientToServerMessage::AccessChallengeAck(payload) => {
@@ -980,9 +998,35 @@ fn apply_effect(
             );
             Ok(())
         }
+        ClientToServerMessage::OccupancyAck(payload) => {
+            // The device persisted the occupancy mirror: the exact lease and
+            // token promote `reserving -> occupied` (plan 12.2, contract
+            // 9.3). A stale or rolled-back offer refuses the promotion as an
+            // ignored report fact and changes no frame settlement.
+            let mut occupancy = ClientOccupancyService::new(storage);
+            let _ = occupancy.record_acknowledgement(
+                &payload.occupancy.occupancy_lease_id,
+                payload.occupancy.occupancy_fencing_token,
+                None,
+                now,
+            );
+            Ok(())
+        }
+        ClientToServerMessage::OccupancyRejected(payload) => {
+            // The device refused the offer: the `reserving` lease rolls back
+            // to `released` with the `client_rejected` reason (contract 4).
+            let mut occupancy = ClientOccupancyService::new(storage);
+            let _ = occupancy.reject_offer(
+                &payload.occupancy.occupancy_lease_id,
+                payload.occupancy.occupancy_fencing_token,
+                OccupancyReleaseReason::ClientRejected,
+                now,
+            );
+            Ok(())
+        }
         // The remaining kinds settle at the cursor in this lane; their
-        // Control Plane effects belong to the occupancy, repository, worker,
-        // and candidate lanes.
+        // Control Plane effects belong to the repository, worker, and
+        // candidate lanes.
         _ => Ok(()),
     }
 }
