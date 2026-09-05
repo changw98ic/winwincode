@@ -79,6 +79,7 @@
 
 #![allow(clippy::doc_markdown)]
 
+pub mod candidate_branch;
 pub mod candidate_registry;
 pub mod connect_code;
 pub mod daemon;
@@ -91,12 +92,17 @@ pub mod repository_git;
 pub mod store;
 pub mod supervisor;
 
+pub use candidate_branch::{
+    BranchCreationFacts, BranchCreationOutcome, BranchCreationReport, CandidateBranchError,
+    CandidateBranchErrorKind, CreatedBranchRecord, WINWINCODE_BRANCH_PREFIX,
+    create_candidate_branch, created_branch_record, enqueue_branch_created,
+};
 pub use candidate_registry::{
     CANDIDATE_REF_PREFIX, CandidateLocalRefRecord, CandidateReconciliation, CandidateRefVerdict,
     CandidateRegistryError, CandidateRegistryErrorKind, CandidateRetainReport, CandidateRetention,
     CandidateRetentionOutcome, candidate_local_ref, enqueue_candidate_retained,
-    reconcile_retained_candidates, record_candidate_retention, retain_candidate,
-    retained_candidates,
+    progress_candidate_lifecycle, reconcile_retained_candidates, record_candidate_retention,
+    retain_candidate, retained_candidates,
 };
 pub use connect_code::{
     CONNECT_CODE_DIGITS, CONNECT_CODE_TTL, ChallengeVerdict, ConnectCodeError,

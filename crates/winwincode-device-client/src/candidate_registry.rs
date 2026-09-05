@@ -476,6 +476,110 @@ pub fn reconcile_retained_candidates(
     Ok(reconciliations)
 }
 
+/// Progresses one candidate's lifecycle state along the device-local
+/// contract 6 transition table (`docs/contracts/client-control-state-machines.md`).
+///
+/// The legal moves are `retained -> {branch_created, applied, discarded,
+/// failed}`, `branch_created -> {applied, discarded, failed}`, and
+/// `failed -> {applied, branch_created, discarded}`; a move onto the state a
+/// row already holds is an accepted no-op so replays stay idempotent.
+/// Terminal rows (`applied`, `discarded`) refuse every move. The compare-
+/// and-swap on the stored state keeps a concurrent progression from being
+/// silently lost.
+///
+/// This is the shared primitive the local delivery engines (branch creation
+/// here, target-branch apply in the later lane) use to write back their
+/// lifecycle facts.
+///
+/// # Errors
+///
+/// Returns [`CandidateRegistryErrorKind::InvalidInput`] for an empty
+/// candidate id or an id this device never retained,
+/// [`CandidateRegistryErrorKind::Conflict`] for a terminal row or an illegal
+/// transition, and a store failure when the write fails or the store is
+/// closed.
+pub fn progress_candidate_lifecycle(
+    store: &mut DeviceStore,
+    candidate_id: &str,
+    target: LocalCandidateState,
+) -> Result<CandidateLocalRefRecord, CandidateRegistryError> {
+    if candidate_id.is_empty() {
+        return Err(CandidateRegistryError::invalid(
+            "candidate id must not be empty",
+        ));
+    }
+    let current = candidate_local_ref(store, candidate_id)?.ok_or_else(|| {
+        CandidateRegistryError::invalid(format!(
+            "candidate {candidate_id} is not retained on this device"
+        ))
+    })?;
+    if current.local_state == target {
+        return Ok(current);
+    }
+    let legal = match current.local_state {
+        LocalCandidateState::Retained => matches!(
+            target,
+            LocalCandidateState::BranchCreated
+                | LocalCandidateState::Applied
+                | LocalCandidateState::Discarded
+                | LocalCandidateState::Failed
+        ),
+        LocalCandidateState::BranchCreated => matches!(
+            target,
+            LocalCandidateState::Applied
+                | LocalCandidateState::Discarded
+                | LocalCandidateState::Failed
+        ),
+        LocalCandidateState::Failed => matches!(
+            target,
+            LocalCandidateState::Applied
+                | LocalCandidateState::Discarded
+                | LocalCandidateState::BranchCreated
+        ),
+        LocalCandidateState::Applied | LocalCandidateState::Discarded => false,
+    };
+    if !legal {
+        return Err(CandidateRegistryError::conflict(format!(
+            "candidate transition {:?} -> {target:?} is not a contract 6 transition",
+            current.local_state
+        )));
+    }
+    let updated = store
+        .connection_mut()?
+        .execute(
+            "UPDATE candidate_local_refs SET local_state = ?2 \
+             WHERE candidate_id = ?1 AND local_state = ?3",
+            params![
+                candidate_id,
+                lifecycle_wire_name(target),
+                lifecycle_wire_name(current.local_state)
+            ],
+        )
+        .map_err(crate::store::sql_error)?;
+    if updated != 1 {
+        return Err(CandidateRegistryError::store(
+            "the candidate lifecycle compare-and-swap lost inside one write",
+        ));
+    }
+    candidate_local_ref(store, candidate_id)?.ok_or_else(|| {
+        CandidateRegistryError::store(
+            "the progressed candidate row disappeared before the read-back",
+        )
+    })
+}
+
+/// The wire/storage spelling of one plan 15 lifecycle state, matching the
+/// vocabulary [`parse_local_state`] reads back.
+fn lifecycle_wire_name(state: LocalCandidateState) -> &'static str {
+    match state {
+        LocalCandidateState::Retained => STATE_RETAINED,
+        LocalCandidateState::BranchCreated => "branch_created",
+        LocalCandidateState::Applied => "applied",
+        LocalCandidateState::Discarded => "discarded",
+        LocalCandidateState::Failed => "failed",
+    }
+}
+
 /// Reads one candidate's ref through Git in its bound checkout.
 ///
 /// `None` is the explicit missing-ref answer: either the binding no longer
