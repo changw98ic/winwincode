@@ -381,24 +381,15 @@ impl SqliteAuthSessionManager {
 
     /// Returns the userId of the durable first Owner, or `None` while the
     /// Server is still uninitialized.
+    ///
+    /// The session store's `server_initialization` marker is the browser
+    /// bootstrap's durable close; the account ledger's active Owner is the
+    /// equivalent durable fact written by the CLI's first-Owner command.
+    /// Either one means initialization is complete, so both initialization
+    /// paths share one authority.
     #[must_use]
     pub fn initialized_owner(&self) -> Option<UserId> {
-        let closed = self.with_initialization(|gate| gate.closed);
-        if !closed {
-            return None;
-        }
-        self.connection
-            .lock()
-            .ok()?
-            .query_row(
-                "SELECT owner_user_id FROM server_initialization WHERE singleton = 1",
-                [],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()
-            .ok()
-            .flatten()
-            .map(UserId)
+        self.initialization_owner()
     }
 
     /// Exposes the canonical account authority for Owner administration.
@@ -510,7 +501,9 @@ impl SqliteAuthSessionManager {
         if credentials.bearer().is_some() {
             return Err(AuthSessionError::authentication());
         }
-        if !self.initialization_is_closed() {
+        // Login requires a completed initialization from either path: the
+        // browser bootstrap's durable marker or the CLI's durable first Owner.
+        if self.initialization_owner().is_none() {
             return Err(AuthSessionError::authentication());
         }
         let Ok(normalized) = UserAccountService::normalize_username(username) else {
@@ -540,16 +533,29 @@ impl SqliteAuthSessionManager {
         }
     }
 
-    fn initialization_is_closed(&self) -> bool {
-        self.with_initialization(|gate| gate.closed)
+    /// One durable first-Owner fact: the session-store marker first, then the
+    /// account ledger's active Owner (the CLI's initialization path). Storage
+    /// failures degrade to "uninitialized" so callers fail closed.
+    fn initialization_owner(&self) -> Option<UserId> {
+        if let Some(owner) = self.stored_initialization_owner() {
+            return Some(owner);
+        }
+        self.accounts.active_owner_id().ok().flatten()
     }
 
-    fn with_initialization<T>(&self, operation: impl FnOnce(&mut InitializationGate) -> T) -> T {
-        let mut guard = self
-            .initialization
+    fn stored_initialization_owner(&self) -> Option<UserId> {
+        self.connection
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        operation(&mut guard)
+            .ok()?
+            .query_row(
+                "SELECT owner_user_id FROM server_initialization WHERE singleton = 1",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .ok()
+            .flatten()
+            .map(UserId)
     }
 
     fn issue_for_user(&self, user_id: &UserId) -> Result<IssuedBrowserSession, AuthSessionError> {

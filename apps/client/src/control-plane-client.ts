@@ -58,17 +58,18 @@ const CONTROL_PLANE_SCHEMA_VERSION = 'winwincode/v1'
 const DEFAULT_NETWORK_RETRIES = 2
 const DEFAULT_RECONNECT_DELAY_MILLIS = 250
 const AUTH_SESSION_PATH = '/api/v1/auth/session'
-const AUTH_LOGIN_PATH = '/api/v1/auth/login'
 const SERVER_INITIALIZATION_PATH = '/api/v1/server/initialization'
 const RFC3339_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/u
 
 /**
- * The one place that names the sign-in wire failure codes. Pages and
- * view-models only ever see the `ControlPlaneLoginFailure` union below.
+ * The one place that names the sign-in wire failure codes of
+ * `POST /api/v1/auth/session`. Pages and view-models only ever see the
+ * `ControlPlaneLoginFailure` union below. The Server deliberately folds
+ * disabled accounts into the same `AUTHENTICATION_REQUIRED` rejection as a
+ * wrong password, so no separate disabled wire code exists.
  */
-const LOGIN_INVALID_CREDENTIALS_CODE = 'INVALID_CREDENTIALS'
+const LOGIN_AUTHENTICATION_REQUIRED_CODE = 'AUTHENTICATION_REQUIRED'
 const LOGIN_RATE_LIMITED_CODE = 'RATE_LIMITED'
-const LOGIN_ACCOUNT_DISABLED_CODE = 'ACCOUNT_DISABLED'
 
 export type ControlPlaneClientErrorKind =
   | 'authentication'
@@ -225,11 +226,12 @@ export interface ControlPlaneInitializationStatus {
 /**
  * The one presentation-facing sign-in failure taxonomy. Server wire codes are
  * translated by `controlPlaneLoginFailure` and never read anywhere else.
+ * Disabled accounts share the wrong-password rejection on the wire, so no
+ * separate disabled presentation state exists.
  */
 export type ControlPlaneLoginFailure =
   | 'invalid-credentials'
   | 'rate-limited'
-  | 'account-disabled'
   | 'unavailable'
 
 export interface ControlPlaneSubscribeOptions {
@@ -429,9 +431,8 @@ function loginBoundaryError(status: number, source: string): ControlPlaneClientE
   const error = isRecord(value) && isRecord(value.error) ? value.error : null
   const code = error !== null && typeof error.code === 'string'
     ? error.code
-    : (status === 401 ? LOGIN_INVALID_CREDENTIALS_CODE : 'AUTH_LOGIN_FAILED')
-  const kind: ControlPlaneClientErrorKind = code === LOGIN_INVALID_CREDENTIALS_CODE
-    || code === LOGIN_ACCOUNT_DISABLED_CODE
+    : (status === 401 ? LOGIN_AUTHENTICATION_REQUIRED_CODE : 'AUTH_SESSION_FAILED')
+  const kind: ControlPlaneClientErrorKind = code === LOGIN_AUTHENTICATION_REQUIRED_CODE
     ? 'authentication'
     : (code === LOGIN_RATE_LIMITED_CODE || status >= 500 ? 'server' : 'protocol')
   return new ControlPlaneClientError({
@@ -450,12 +451,13 @@ function loginBoundaryError(status: number, source: string): ControlPlaneClientE
 /**
  * Translate one sign-in failure into the presentation taxonomy. Every wire
  * code stays inside this function; view-models and pages branch only on the
- * returned union.
+ * returned union. A 401 `AUTHENTICATION_REQUIRED` rejection covers wrong
+ * credentials and disabled accounts alike (the Server does not distinguish
+ * them), and every other failure — outage, protocol drift, wrong state — is
+ * presented as an unavailable sign-in.
  */
 export function controlPlaneLoginFailure(error: unknown): ControlPlaneLoginFailure {
   if (error instanceof ControlPlaneClientError) {
-    if (error.code === LOGIN_INVALID_CREDENTIALS_CODE) return 'invalid-credentials'
-    if (error.code === LOGIN_ACCOUNT_DISABLED_CODE) return 'account-disabled'
     if (error.code === LOGIN_RATE_LIMITED_CODE) return 'rate-limited'
     if (error.kind === 'authentication') return 'invalid-credentials'
   }
@@ -836,7 +838,7 @@ export function createControlPlaneClient(options: ControlPlaneClientOptions): Co
       assertLoginCredentials(credentials)
       try {
         const response = await transportRequest(
-          `${location.serverUrl}${AUTH_LOGIN_PATH}`,
+          `${location.serverUrl}${AUTH_SESSION_PATH}`,
           {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },

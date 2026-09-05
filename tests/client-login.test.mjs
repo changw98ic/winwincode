@@ -86,7 +86,7 @@ function errorPayload(code, message, retryable = false) {
 
 function loginError(code, message, retryable = false) {
   return new ControlPlaneClientError({
-    kind: code === 'ACCOUNT_DISABLED' ? 'authentication' : 'server',
+    kind: code === 'AUTHENTICATION_REQUIRED' ? 'authentication' : 'server',
     code,
     message,
     requestId: null,
@@ -113,7 +113,7 @@ test('facade exchanges username and password for one validated session', async (
 
   assert.deepEqual(created, session())
   assert.deepEqual(requests.map(request => [request.input, request.init.method]), [
-    ['https://control.example/auth/api/v1/auth/login', 'POST'],
+    ['https://control.example/auth/api/v1/auth/session', 'POST'],
   ])
   const loginRequest = requests[0]
   assert.equal(loginRequest.init.credentials, 'include')
@@ -129,11 +129,12 @@ test('facade exchanges username and password for one validated session', async (
   assert.equal(JSON.stringify(created).includes(passwordMaterial), false)
 })
 
-test('facade separates wrong password, rate limit, disabled account, and outage', async () => {
+test('facade separates wrong credentials, rate limit, wrong state, and outage', async () => {
   const cases = [
-    { status: 401, code: 'INVALID_CREDENTIALS', kind: 'authentication', failure: 'invalid-credentials' },
+    { status: 401, code: 'AUTHENTICATION_REQUIRED', kind: 'authentication', failure: 'invalid-credentials' },
     { status: 429, code: 'RATE_LIMITED', kind: 'server', failure: 'rate-limited', retryable: true },
-    { status: 403, code: 'ACCOUNT_DISABLED', kind: 'authentication', failure: 'account-disabled' },
+    { status: 409, code: 'WRONG_STATE', kind: 'protocol', failure: 'unavailable' },
+    { status: 503, code: 'SERVICE_UNAVAILABLE', kind: 'server', failure: 'unavailable', retryable: true },
   ]
   for (const candidate of cases) {
     const client = createControlPlaneClient({
@@ -241,7 +242,7 @@ test('login view-model publishes submissions and failure reasons without storing
   const client = {
     async loginWithPassword(credentials) {
       attempts.push({ username: credentials.username, password: credentials.password })
-      throw loginError('INVALID_CREDENTIALS', 'wrong password')
+      throw loginError('AUTHENTICATION_REQUIRED', 'wrong password')
     },
     async login() {
       return session()
@@ -287,10 +288,10 @@ test('login view-model publishes submissions and failure reasons without storing
   model.close()
 })
 
-test('login view-model keeps rate limit, disabled account, and probe failures distinct', async () => {
+test('login view-model keeps rate limit, wrong credentials, and probe failures distinct', async () => {
   for (const [code, expected] of [
     ['RATE_LIMITED', 'rate-limited'],
-    ['ACCOUNT_DISABLED', 'account-disabled'],
+    ['AUTHENTICATION_REQUIRED', 'invalid-credentials'],
   ]) {
     const model = createLoginViewModel({
       client: {
@@ -412,7 +413,7 @@ function loginFixture(clientOverrides = {}) {
   const rootElement = new FakeElement('div', document)
   const client = {
     async loginWithPassword() {
-      throw loginError('INVALID_CREDENTIALS', 'wrong password')
+      throw loginError('AUTHENTICATION_REQUIRED', 'wrong password')
     },
     async login() { return session() },
     async initializationStatus() { return { initialized: true } },
@@ -445,9 +446,8 @@ test('login page keeps credentials out of the DOM and distinguishes failure stat
   assert.equal(initializationSection.hidden, true)
 
   const failureExpectations = [
-    { mode: 'INVALID_CREDENTIALS', text: 'Incorrect username or password.' },
+    { mode: 'AUTHENTICATION_REQUIRED', text: 'Incorrect username or password.' },
     { mode: 'RATE_LIMITED', text: 'Too many sign-in attempts. Wait a moment, then try again.' },
-    { mode: 'ACCOUNT_DISABLED', text: 'This account is disabled. Ask an Owner to restore access.' },
   ]
   for (const candidate of failureExpectations) {
     mode = candidate.mode
@@ -458,9 +458,9 @@ test('login page keeps credentials out of the DOM and distinguishes failure stat
     assert.equal(username.value, 'ada', 'the username draft survives the attempt')
     await new Promise(resolvePromise => setImmediate(resolvePromise))
     assert.equal(model.state.status, 'idle')
-    assert.equal(model.state.failure, candidate.mode === 'INVALID_CREDENTIALS'
+    assert.equal(model.state.failure, candidate.mode === 'AUTHENTICATION_REQUIRED'
       ? 'invalid-credentials'
-      : candidate.mode === 'RATE_LIMITED' ? 'rate-limited' : 'account-disabled')
+      : 'rate-limited')
     assert.equal(error.hidden, false)
     assert.equal(error.textContent, candidate.text)
     assert.equal(username.getAttribute('aria-invalid'), 'true')
@@ -648,7 +648,7 @@ function settingsFacadeFake({ initialized = true } = {}) {
       if (expired) {
         throw new ControlPlaneClientError({
           kind: 'authentication',
-          code: 'INVALID_CREDENTIALS',
+          code: 'AUTHENTICATION_REQUIRED',
           message: 'The username or password is wrong.',
           requestId: null,
           retryable: false,

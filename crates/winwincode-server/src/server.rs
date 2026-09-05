@@ -310,6 +310,10 @@ fn router(
                 .delete(close_auth_session)
                 .options(preflight),
         )
+        .route(
+            "/api/v1/server/initialization",
+            get(server_initialization).options(preflight),
+        )
         .route("/api/v1/commands", post(command).options(preflight))
         .route("/api/v1/queries", post(query).options(preflight))
         .route("/api/v1/events", get(events).options(preflight))
@@ -478,6 +482,39 @@ async fn get_auth_session(
     };
     let value = serde_json::to_value(session).expect("auth response is serializable");
     let mut response = json_response(StatusCode::OK, value, Some(&origin));
+    prevent_auth_session_caching(&mut response);
+    response
+}
+
+/// The one unauthenticated initialization probe. It publishes exactly one
+/// boolean — whether a first Owner already exists — and nothing else, so the
+/// login page can show or hide the first-time bootstrap entry.
+async fn server_initialization(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Response {
+    let origin = match required_origin(&state, &headers) {
+        Ok(origin) => origin,
+        Err(error) => return error.into_response(),
+    };
+    if uri.query().is_some() {
+        return BoundaryError::new(
+            StatusCode::BAD_REQUEST,
+            "QUERY_PARAMETERS_FORBIDDEN",
+            "credentials and routing values are not accepted in the URL query",
+            Some(origin),
+        )
+        .into_response();
+    }
+    let mut response = json_response(
+        StatusCode::OK,
+        json!({
+            "schemaVersion": SUPPORTED_SCHEMA_VERSION,
+            "initialized": state.auth_sessions.initialized_owner().is_some(),
+        }),
+        Some(&origin),
+    );
     prevent_auth_session_caching(&mut response);
     response
 }

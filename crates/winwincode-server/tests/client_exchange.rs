@@ -17,9 +17,7 @@ use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
-use winwincode_api::generated::{
-    Actor, OrganizationScope, OrganizationScopeKind, Scope, UserActor, UserActorKind,
-};
+use winwincode_api::generated::{OrganizationScope, OrganizationScopeKind, Scope};
 use winwincode_client_port::domain::ClientArchitecture;
 use winwincode_client_port::domain::ClientCapacityReport;
 use winwincode_client_port::domain::ClientLockState;
@@ -32,7 +30,7 @@ use winwincode_client_port::messages::ClientToServerEnvelope;
 use winwincode_client_port::messages::ClientToServerMessage;
 use winwincode_client_port::messages::CommandContext;
 use winwincode_control_plane::ClientRegistryService;
-use winwincode_domain::{OrganizationId, UserId};
+use winwincode_domain::OrganizationId;
 use winwincode_server::{
     ApiError, AuthSessionBootstrap, AuthSessionConfig, AuthenticatedPrincipal,
     ClientExchangeApplication, ClientExchangeConfig, ClientExchangePort, ControlPlaneApiPort,
