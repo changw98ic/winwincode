@@ -58,6 +58,7 @@ use winwincode_client_port::domain::ClientChallengeAckStatus;
 use winwincode_client_port::domain::ClientControlMessageKind;
 use winwincode_client_port::domain::ClientPlatformTarget;
 use winwincode_client_port::domain::PresenceState;
+use winwincode_client_port::domain::WorkerLaunchAckStatus;
 use winwincode_client_port::exchange::AckCursor;
 use winwincode_client_port::exchange::CommandIdentity;
 use winwincode_client_port::exchange::CommandOutcome;
@@ -79,6 +80,7 @@ use winwincode_control_plane::ClientRegistryService;
 use winwincode_control_plane::ClientRegistryServiceErrorKind;
 use winwincode_control_plane::ConnectCodeService;
 use winwincode_control_plane::OccupancyLeaseState;
+use winwincode_control_plane::WorkerLaunchGrantService;
 use winwincode_domain::Instant;
 use winwincode_storage::ClientDownlinkAppend;
 use winwincode_storage::ClientExchangeCursors;
@@ -86,6 +88,7 @@ use winwincode_storage::ClientNodeRecord;
 use winwincode_storage::ClientNodeRegistration;
 use winwincode_storage::ClientPresenceState;
 use winwincode_storage::ConnectChallengeVerdict;
+use winwincode_storage::LaunchAckSettlement;
 use winwincode_storage::OccupancyReleaseReason;
 use winwincode_storage::ProductStateStorage;
 use winwincode_storage::SqliteStorage;
@@ -1044,28 +1047,100 @@ fn apply_effect(
             );
             Ok(())
         }
+        ClientToServerMessage::WorkerLaunchAck(payload) => {
+            settle_worker_launch_ack(storage, data_directory, node_id, payload, now);
+            Ok(())
+        }
         ClientToServerMessage::CommandAck(payload) => {
-            // A release or force-fence ack reports the effective device
-            // mirror revision; keep the Server view current.
-            if matches!(
-                payload.command_kind,
-                ClientControlMessageKind::OccupancyRelease
-                    | ClientControlMessageKind::OccupancyForceFence
-            ) && let Some(revision) = payload.current_revision
-            {
-                let _ = crate::client_occupancy::observe_client_mirror_revision(
-                    data_directory,
-                    node_id,
-                    revision,
-                    now,
-                );
-            }
+            observe_command_ack_revision(data_directory, node_id, payload, now);
             Ok(())
         }
         // The remaining kinds settle at the cursor in this lane; their
         // Control Plane effects belong to the repository, worker, and
         // candidate lanes.
         _ => Ok(()),
+    }
+}
+
+/// A release or force-fence ack reports the effective device mirror
+/// revision; keep the Server view current.
+fn observe_command_ack_revision(
+    data_directory: &Path,
+    node_id: &str,
+    payload: &winwincode_client_port::messages::ClientCommandAckPayload,
+    now: &Instant,
+) {
+    if matches!(
+        payload.command_kind,
+        ClientControlMessageKind::OccupancyRelease | ClientControlMessageKind::OccupancyForceFence
+    ) && let Some(revision) = payload.current_revision
+    {
+        let _ = crate::client_occupancy::observe_client_mirror_revision(
+            data_directory,
+            node_id,
+            revision,
+            now,
+        );
+    }
+}
+
+/// Settles one `client.worker.launch_ack` (plan 14.3 step 10). The
+/// acknowledged mirror revision keeps the Server stamp view current, and the
+/// verdict settles the grant exactly once: an accepted acknowledgement
+/// consumes it, a rejection keeps it `issued` with the reason in the launch
+/// audit trail. A refused settlement (unknown grant, field mismatch, stale
+/// token) is an ignored report fact and changes no frame settlement.
+fn settle_worker_launch_ack(
+    storage: &mut SqliteStorage,
+    data_directory: &Path,
+    node_id: &str,
+    payload: &winwincode_client_port::messages::ClientWorkerLaunchAckPayload,
+    now: &Instant,
+) {
+    let _ = crate::client_occupancy::observe_client_mirror_revision(
+        data_directory,
+        node_id,
+        payload.occupancy.command.expected_revision,
+        now,
+    );
+    let accepted = matches!(
+        payload.status,
+        WorkerLaunchAckStatus::Accepted | WorkerLaunchAckStatus::Duplicate
+    );
+    let Ok(settlement) = LaunchAckSettlement::try_new(
+        &payload.worker_launch_grant_id,
+        &payload.occupancy.occupancy_lease_id,
+        payload.occupancy.occupancy_fencing_token,
+        &payload.worker_session_id,
+        &payload.worker_id,
+        &payload.worker_instance_id,
+        accepted,
+        (!accepted).then(|| launch_rejection_reason(payload.status, payload.error.as_ref())),
+    ) else {
+        return;
+    };
+    let mut grants = WorkerLaunchGrantService::new(storage);
+    let _ = grants.settle_launch_ack(&settlement, now);
+}
+
+/// Maps one rejected `client.worker.launch_ack` onto the stable audit
+/// reason text: the wire status name, refined by the device error code when
+/// the device supplied one.
+fn launch_rejection_reason(
+    status: WorkerLaunchAckStatus,
+    error: Option<&winwincode_client_port::domain::ClientControlError>,
+) -> String {
+    let status_text = serde_json::to_value(status)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_else(|| "rejected".to_owned());
+    match error {
+        Some(error) => serde_json::to_value(error.code)
+            .ok()
+            .and_then(|value| value.as_str().map(str::to_owned))
+            .map(|code| format!("{status_text}:{code}"))
+            .unwrap_or(status_text),
+        None => status_text,
     }
 }
 
@@ -1377,7 +1452,7 @@ mod tests {
                     worker_session_id: "ws_1".to_owned(),
                     worker_id: "worker_1".to_owned(),
                     worker_instance_id: "winst_1".to_owned(),
-                    status: winwincode_client_port::domain::WorkerLaunchAckStatus::Accepted,
+                    status: WorkerLaunchAckStatus::Accepted,
                     error: None,
                 },
             )),

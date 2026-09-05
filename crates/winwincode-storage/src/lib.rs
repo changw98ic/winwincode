@@ -11,6 +11,7 @@
 mod artifact;
 mod client_connect;
 mod client_downlink;
+mod client_launch_grant;
 mod client_occupancy;
 mod client_registry;
 mod control_plane_instances;
@@ -57,6 +58,11 @@ pub use client_connect::{
 pub use client_downlink::{
     ClientDownlinkAppend, ClientDownlinkError, ClientDownlinkErrorKind, ClientDownlinkFrame,
     ClientDownlinkOutbox,
+};
+pub use client_launch_grant::{
+    LaunchAckOutcome, LaunchAckSettlement, LaunchAuditAction, LaunchAuditEntry,
+    LaunchGrantIssuance, WorkerLaunchGrantLedger, WorkerLaunchGrantRecord, WorkerLaunchGrantState,
+    WorkerLaunchGrantStoreError, WorkerLaunchGrantStoreErrorKind,
 };
 pub use client_occupancy::{
     OccupancyClaim, OccupancyLeaseRecord, OccupancyLeaseState, OccupancyLedger,

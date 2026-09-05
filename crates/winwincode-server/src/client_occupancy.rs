@@ -1289,7 +1289,7 @@ fn duration_millis(duration: std::time::Duration) -> i64 {
 /// Offsets one canonical millisecond application instant by a signed
 /// millisecond amount, preserving the fixed `YYYY-MM-DDTHH:MM:SS.mmmZ` shape
 /// the durable lexicographic comparisons rely on.
-fn offset_instant(instant: &Instant, offset_millis: i64) -> Option<Instant> {
+pub(crate) fn offset_instant(instant: &Instant, offset_millis: i64) -> Option<Instant> {
     let bytes = instant.0.as_bytes();
     if bytes.len() != 24
         || bytes[4] != b'-'
