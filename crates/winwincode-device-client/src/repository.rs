@@ -37,21 +37,20 @@
 //! `client.repository.status`) carries the binding identity, the derived
 //! fingerprint, and scan facts — never an absolute path.
 //!
-//! Git interconnect: the scan shells out to the system `git` binary through
-//! `std::process::Command`, the same dependency-free convention
-//! `winwincode-repository-context` uses for its baseline snapshots; no new
-//! crate dependency is introduced. The local Git installation must exist, a
-//! remote origin may be empty, and GitHub is never required — the Server
-//! only ever sees the commit, branch, dirty projection, and binding identity
-//! (plan §13.3).
+//! Git interconnect: the scan delegates every Git probe to the independent
+//! inspector in [`crate::repository_git`], which shells out to the system
+//! `git` binary through `std::process::Command` — the same dependency-free
+//! convention `winwincode-repository-context` uses for its baseline
+//! snapshots; no new crate dependency is introduced. The local Git
+//! installation must exist, a remote origin may be empty, and GitHub is
+//! never required — the Server only ever sees the commit, branch, dirty
+//! projection, and binding identity (plan §13.3).
 
 use std::fmt;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
-use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use winwincode_client_port::domain::{
@@ -65,17 +64,19 @@ use winwincode_client_port::messages::{
 };
 
 use crate::identity::generate_prefixed_id;
+use crate::repository_git::{GitInspectOptions, GitInspector};
 use crate::store::{
     DeviceStore, DeviceStoreError, PathMappingRecord, RepositoryLocalStateRecord,
     availability_wire_name,
 };
 
+// The fingerprint rule is owned and documented by the Git inspector; the
+// registry re-exports it so every historical import path keeps working.
+pub use crate::repository_git::repository_fingerprint;
+
 /// Canonical repository binding id prefix, matching the schema's
 /// `RepositoryBindingId` pattern (`rbd_` + 26 Crockford characters).
 const REPOSITORY_BINDING_ID_PREFIX: &str = "rbd_";
-/// Branch label reported for a detached HEAD, where no symbolic branch name
-/// exists.
-const DETACHED_BRANCH: &str = "HEAD";
 /// Upper bound on binding-id regeneration when the random draw collides with
 /// a stored binding (practically unreachable with 26 Crockford characters).
 const MAX_BINDING_ID_ATTEMPTS: usize = 4;
@@ -549,18 +550,6 @@ pub fn list_bindings(
     Ok(summaries)
 }
 
-/// The `sha256:` fingerprint over HEAD and branch reported as
-/// `repositoryFingerprint`. Neither input is secret; the digest binds the
-/// scanned identity without carrying any local path.
-#[must_use]
-pub fn repository_fingerprint(head_commit: &str, branch: &str) -> String {
-    let mut digest = Sha256::new();
-    digest.update(head_commit.as_bytes());
-    digest.update([0_u8]);
-    digest.update(branch.as_bytes());
-    format!("sha256:{:x}", digest.finalize())
-}
-
 /// The availability a healthy scan reports: `dirty` when the working tree
 /// has local modifications, `available` otherwise (plan §13.5 treats the two
 /// as distinct states).
@@ -716,56 +705,24 @@ fn require_readable_directory(
 }
 
 /// Chain steps 3–5 on the already-canonical directory: confirm-or-initialize
-/// Git, the Git common directory, then HEAD / branch / dirty state. A refused
-/// registration never mutates the directory; `git init` runs only on the
-/// explicit confirmation.
+/// Git, the Git common directory, then HEAD / branch / dirty state. The
+/// probes live in [`crate::repository_git`]; this wrapper maps the
+/// inspector's stable refusal classification onto the registry's rejection
+/// vocabulary unchanged.
 #[allow(clippy::type_complexity)] // the five scan facts in plan §13.2 order
 fn scan_git_state(
     canonical_path: &Path,
     allow_git_init: bool,
 ) -> Result<(Option<PathBuf>, String, String, RepositoryDirtyState, bool), RegistrationRejection> {
-    let mut git_initialized_by_scan = false;
-    match probe_git(
-        canonical_path,
-        "detect the Git repository",
-        &["rev-parse", "--git-dir"],
-    ) {
-        Ok(_) => {}
-        Err(GitProbeFailure::Unavailable(detail)) => {
-            return Err(RegistrationRejection::new(
-                RepositoryAvailability::ScanFailed,
-                detail,
-            ));
-        }
-        Err(GitProbeFailure::Failed(_)) if allow_git_init => {
-            run_git_init(canonical_path)?;
-            git_initialized_by_scan = true;
-        }
-        Err(GitProbeFailure::Failed(_)) => {
-            return Err(RegistrationRejection::new(
-                RepositoryAvailability::InvalidGit,
-                format!(
-                    "the directory is not a Git repository: {}; pass the explicit \
-                     confirmation to initialize one",
-                    canonical_path.to_string_lossy()
-                ),
-            ));
-        }
-    }
-
-    // The Git common directory (absolute, resolved through symlinks).
-    let git_common_directory = Some(read_git_common_directory(canonical_path)?);
-
-    // HEAD / branch / dirty state.
-    let branch = read_branch(canonical_path)?;
-    let head_commit = read_head(canonical_path, &branch)?;
-    let dirty_state = read_dirty_state(canonical_path)?;
+    let scan = GitInspector::new()
+        .inspect(canonical_path, &GitInspectOptions { allow_git_init })
+        .map_err(|error| RegistrationRejection::new(error.availability(), error.detail()))?;
     Ok((
-        git_common_directory,
-        branch,
-        head_commit,
-        dirty_state,
-        git_initialized_by_scan,
+        Some(scan.git_common_directory),
+        scan.branch,
+        scan.head_commit,
+        scan.dirty_state,
+        scan.initialized_by_inspection,
     ))
 }
 
@@ -780,159 +737,6 @@ fn missing_rejection(missing_maps_to_moved: bool, detail: String) -> Registratio
         },
         detail,
     )
-}
-
-/// Why one `git` invocation could not answer.
-enum GitProbeFailure {
-    /// The `git` binary itself is missing or unusable.
-    Unavailable(String),
-    /// Git ran and rejected the operation.
-    Failed(String),
-}
-
-fn probe_git(
-    root: &Path,
-    operation: &'static str,
-    arguments: &[&str],
-) -> Result<String, GitProbeFailure> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(arguments)
-        .output()
-        .map_err(|error| {
-            GitProbeFailure::Unavailable(format!("{operation}: git is not usable: {error}"))
-        })?;
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
-    } else {
-        Err(GitProbeFailure::Failed(format!(
-            "{operation}: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        )))
-    }
-}
-
-fn run_git_init(root: &Path) -> Result<(), RegistrationRejection> {
-    let output = Command::new("git").arg("-C").arg(root).arg("init").output();
-    let output = output.map_err(|error| {
-        RegistrationRejection::new(
-            RepositoryAvailability::ScanFailed,
-            format!("git is not usable: {error}"),
-        )
-    })?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(RegistrationRejection::new(
-            RepositoryAvailability::ScanFailed,
-            format!(
-                "git init failed: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            ),
-        ))
-    }
-}
-
-/// Resolves the absolute Git common directory (plan §13.2 step 4). Plain
-/// repositories answer with a relative `.git`; linked worktrees answer with
-/// the main repository's absolute common dir. The result is canonicalized so
-/// the stored value is stable across the symlink spelling of the day.
-fn read_git_common_directory(root: &Path) -> Result<PathBuf, RegistrationRejection> {
-    let reported = match probe_git(
-        root,
-        "read the Git common directory",
-        &["rev-parse", "--git-common-dir"],
-    ) {
-        Ok(reported) => reported,
-        Err(GitProbeFailure::Unavailable(detail) | GitProbeFailure::Failed(detail)) => {
-            return Err(RegistrationRejection::new(
-                RepositoryAvailability::ScanFailed,
-                format!("the Git common directory is unreadable: {detail}"),
-            ));
-        }
-    };
-    let reported_path = PathBuf::from(&reported);
-    let joined = if reported_path.is_absolute() {
-        reported_path
-    } else {
-        root.join(reported_path)
-    };
-    fs::canonicalize(&joined).map_err(|error| {
-        RegistrationRejection::new(
-            RepositoryAvailability::ScanFailed,
-            format!(
-                "the Git common directory cannot be resolved: {} ({error})",
-                joined.to_string_lossy()
-            ),
-        )
-    })
-}
-
-/// Reads the current branch. A detached HEAD reports the `HEAD` label; an
-/// unborn branch (fresh `git init`, no commit yet) still reports its name.
-fn read_branch(root: &Path) -> Result<String, RegistrationRejection> {
-    match probe_git(
-        root,
-        "read the current branch",
-        &["symbolic-ref", "--quiet", "--short", "HEAD"],
-    ) {
-        Ok(branch) if !branch.is_empty() => Ok(branch),
-        Ok(_) => Err(RegistrationRejection::new(
-            RepositoryAvailability::ScanFailed,
-            "git reported an empty branch name".to_owned(),
-        )),
-        Err(GitProbeFailure::Unavailable(detail)) => Err(RegistrationRejection::new(
-            RepositoryAvailability::ScanFailed,
-            detail,
-        )),
-        Err(GitProbeFailure::Failed(_)) => Ok(DETACHED_BRANCH.to_owned()),
-    }
-}
-
-/// Reads HEAD. An unborn branch has no commit: the empty HEAD is a healthy
-/// scan fact, not a failure. HEAD unreadable on a detached checkout means a
-/// corrupt repository and maps to `scan_failed`.
-fn read_head(root: &Path, branch: &str) -> Result<String, RegistrationRejection> {
-    match probe_git(root, "read HEAD", &["rev-parse", "--verify", "HEAD"]) {
-        Ok(head) => Ok(head),
-        Err(GitProbeFailure::Unavailable(detail)) => Err(RegistrationRejection::new(
-            RepositoryAvailability::ScanFailed,
-            detail,
-        )),
-        Err(GitProbeFailure::Failed(detail)) => {
-            if branch == DETACHED_BRANCH {
-                Err(RegistrationRejection::new(
-                    RepositoryAvailability::ScanFailed,
-                    format!("HEAD is unreadable on a detached checkout: {detail}"),
-                ))
-            } else {
-                Ok(String::new())
-            }
-        }
-    }
-}
-
-/// Reads the dirty projection: any `git status --porcelain` row (staged,
-/// unstaged, or untracked) means dirty.
-fn read_dirty_state(root: &Path) -> Result<RepositoryDirtyState, RegistrationRejection> {
-    match probe_git(
-        root,
-        "read the working-tree status",
-        &["status", "--porcelain"],
-    ) {
-        Ok(status) => Ok(if status.is_empty() {
-            RepositoryDirtyState::Clean
-        } else {
-            RepositoryDirtyState::Dirty
-        }),
-        Err(GitProbeFailure::Unavailable(detail) | GitProbeFailure::Failed(detail)) => {
-            Err(RegistrationRejection::new(
-                RepositoryAvailability::ScanFailed,
-                format!("the working-tree status is unreadable: {detail}"),
-            ))
-        }
-    }
 }
 
 /// Draws a fresh binding id, re-drawing on the (practically unreachable)

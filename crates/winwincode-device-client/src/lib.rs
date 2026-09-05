@@ -28,6 +28,15 @@
 //!   path-free `client.repository.upsert` / `removed` / `status` frames, and
 //!   the launch-time [`repository::revalidate_repository`] the Worker epic
 //!   must call before every launch.
+//! - [`repository_git`]: the independent Git inspector behind the registry —
+//!   one `git`-shelling probe surface that classifies repository shapes
+//!   stably (plain, dirty, detached HEAD, unborn branch, linked worktree,
+//!   submodule, bare, non-Git) and owns the documented
+//!   `sha256(head \0 branch)` repository fingerprint rule.
+//! - [`path_confinement`]: fail-closed containment of canonical paths within
+//!   an authorized binding root — component-boundary exact, symlink- and
+//!   `..`-refusing, reading nothing outside the root — the primitive the
+//!   launch-time revalidation reuses.
 //! - [`fencing`]: the pure occupancy fencing decision surface
 //!   (CLIENT-300.3, plan 12.6) — [`FencingGuard::authorize_command`] over
 //!   the four fenced command entry points (worker launch/stop, candidate
@@ -68,7 +77,9 @@ pub mod daemon;
 pub mod fencing;
 pub mod http;
 pub mod identity;
+pub mod path_confinement;
 pub mod repository;
+pub mod repository_git;
 pub mod store;
 pub mod supervisor;
 
@@ -90,10 +101,14 @@ pub use identity::{
     DeviceCredential, DeviceIdentity, DeviceIdentitySeed, IdentityRecord, IssuedEnrollment,
     adopt_enrollment, ensure_device_identity, load_device_identity,
 };
+pub use path_confinement::{ConfinedPath, ConfinedRoot, ConfinementVerdict, PathConfinementError};
 pub use repository::{
     RegistrationOptions, RegistrationRejection, RepositoryBindingSummary, RepositoryRegistration,
     RepositoryRegistryError, RepositoryRemoval, RepositoryRevalidation, list_bindings,
     register_repository, remove_repository, repository_fingerprint, revalidate_repository,
+};
+pub use repository_git::{
+    DETACHED_BRANCH, GitHeadState, GitInspectError, GitInspectOptions, GitInspector, GitScan,
 };
 pub use store::{
     CLIENT_STORE_SCHEMA_VERSION, ClientInboxCursor, ClientInboxCursorUpdate, ClientOutboxEntry,
