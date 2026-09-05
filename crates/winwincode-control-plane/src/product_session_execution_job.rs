@@ -5,7 +5,7 @@
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use winwincode_api::generated::{ModelRoute, RepositoryScope};
-use winwincode_domain::{ExecutionJobId, ProductSessionId, Sha256Digest};
+use winwincode_domain::{ExecutionJobId, ProductSessionId, RequestId, Sha256Digest};
 use winwincode_execution_port::generated::{
     ExecutionJob, ExecutionLimits, ExecutionScope, ExecutionWorkspace, ExecutionWorkspaceWriteMode,
     ProductSessionExecutionScope, ProductSessionExecutionScopeKind,
@@ -224,4 +224,15 @@ fn deterministic_job_id(
     hasher.update(product_session_id.0.as_bytes());
     let encoded = format!("{:X}", hasher.finalize());
     ExecutionJobId(format!("job_{}", &encoded[..26]))
+}
+
+/// The canonical `ExecutionJob` identity of one committed Chat turn, derived
+/// exactly like `prepare` derives it (FLOW-100.4). The Quick device dispatch
+/// glue names the queued turn job without re-encoding the dispatch payload.
+#[must_use]
+pub(crate) fn chat_turn_execution_job_id(
+    request_id: &RequestId,
+    product_session_id: &ProductSessionId,
+) -> ExecutionJobId {
+    deterministic_job_id(request_id.0.as_bytes(), product_session_id)
 }

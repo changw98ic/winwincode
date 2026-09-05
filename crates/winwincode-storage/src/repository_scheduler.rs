@@ -260,6 +260,18 @@ impl<'storage> RepositoryScheduler<'storage> {
                 "{SCHEDULER_SCHEMA}{EXECUTION_SCOPE_REPLACEMENT_SCHEMA}"
             ))
             .map_err(sql_error)?;
+        // FLOW-100.4: a job dispatched to a Device WorkerSession carries one
+        // durable device execution fact row, and queue selection excludes such
+        // jobs so the local embedded worker can never claim device-owned work.
+        // The marker table is owned by the device execution binding ledger;
+        // ensuring it here keeps the exclusion predicate working on every
+        // database that selects the queue, whatever ledger was opened first.
+        storage
+            .connection()?
+            .execute_batch(
+                crate::device_execution_binding::DEVICE_EXECUTION_RESERVATION_FACTS_SCHEMA,
+            )
+            .map_err(sql_error)?;
         Ok(Self { storage })
     }
 
@@ -1252,6 +1264,10 @@ fn select_ready_job(
                    WHERE d.job_id = j.job_id
                      AND (dependency.job_id IS NULL OR dependency.state != 'completed'
                           OR dependency.cancellation_request_id IS NOT NULL)
+               )
+               AND NOT EXISTS (
+                   SELECT 1 FROM device_execution_reservation_facts device_dispatch
+                   WHERE device_dispatch.job_id = j.job_id
                )
              ORDER BY COALESCE(f.last_sequence, 0), j.submitted_at, j.job_id
              LIMIT 1",

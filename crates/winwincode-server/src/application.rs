@@ -18,7 +18,7 @@ use winwincode_control_plane::credential_reference::{
     CredentialReferenceError, CredentialReferenceErrorKind, CredentialReferenceService,
 };
 use winwincode_control_plane::device_session_gate::{
-    DeviceSessionGateDenial, authorize_product_session_turn,
+    DeviceSessionGateApproval, DeviceSessionGateDenial, authorize_product_session_turn,
 };
 use winwincode_control_plane::strongflow_projection::{
     StrongFlowProjectionError, StrongFlowProjectionQueryPort,
@@ -31,8 +31,9 @@ use winwincode_control_plane::{
     ModelRouteAvailabilityErrorKind, ModelRouteAvailabilityService, ModelSettingsError,
     ModelSettingsErrorKind, ModelSettingsService, ProductSessionApiClock, ProductSessionApiService,
     ProductSessionExecutionConfig, ProductSessionServiceError, ProductSessionServiceErrorCode,
-    PublicationCommandError, ScopeWorkerHealthEventPort, WorkerManagementService,
-    WorkerManagementServiceError, WorkerManagementServiceErrorKind,
+    PublicationCommandError, QuickDeviceDispatchError, QuickDeviceDispatchErrorKind,
+    ScopeWorkerHealthEventPort, WorkerManagementService, WorkerManagementServiceError,
+    WorkerManagementServiceErrorKind, dispatch_turn_to_device_worker,
 };
 use winwincode_domain::{ControlPlaneWebSocketAuthorizationEpoch, Instant, ProductSessionId};
 use winwincode_storage::{ProductStateStorage, SqliteStorage};
@@ -407,13 +408,24 @@ impl StandaloneControlPlaneApplication {
         // holder while the repository binding stays visible under the
         // dual-authorization projection; sessions without a device anchor
         // pass through unchanged.
-        if let CommandRequest::ChatSubmitCommand(command) = &request {
-            product_session_turn_gate(
+        // FLOW-100.4: the approval is the dispatch trigger — an approved
+        // Chat turn of a device-anchored session executes on the launched
+        // Device WorkerSession instead of the local embedded worker.
+        let device_dispatch = match &request {
+            CommandRequest::ChatSubmitCommand(command) => product_session_turn_gate(
                 &mut state.storage,
                 &command.actor,
                 &command.payload.product_session_id,
-            )?;
-        }
+            )?
+            .map(|_: DeviceSessionGateApproval| {
+                (
+                    command.payload.product_session_id.clone(),
+                    command.request_id.clone(),
+                )
+            }),
+            _ => None,
+        };
+        let dispatch_now = self.clock.now_instant();
         let response = {
             let mut clock = ProductSessionClockAdapter(self.clock.as_ref());
             let mut service = ProductSessionApiService::new(
@@ -438,6 +450,19 @@ impl StandaloneControlPlaneApplication {
             }
         }
         .map_err(|error| product_session_error(&error))?;
+        // FLOW-100.4: route the committed turn to the session's Device
+        // WorkerSession. The durable dispatch never blocks the accepted
+        // Chat receipt on a transport action; ordinary admission
+        // backpressure keeps the turn queued for the device worker.
+        if let Some((product_session_id, request_id)) = device_dispatch {
+            dispatch_turn_to_device_worker(
+                &mut state.storage,
+                &product_session_id,
+                &request_id,
+                &dispatch_now,
+            )
+            .map_err(|error| quick_device_dispatch_error(&error))?;
+        }
         self.hub
             .publish_pending(&mut state.storage)
             .map_err(|error| error.api_error())?;
@@ -972,16 +997,18 @@ fn credential_error(error: &CredentialReferenceError) -> ApiError {
 
 /// FLOW-100.3: the `ProductSession` continue permission gate entry. Only a
 /// signed-in user actor is gated; service and system actors pass through.
+/// The returned approval is `Some` exactly when the session is
+/// device-anchored and the gate approved its continuation (FLOW-100.4 uses
+/// it as the device dispatch trigger).
 fn product_session_turn_gate(
     storage: &mut SqliteStorage,
     actor: &Actor,
     product_session_id: &ProductSessionId,
-) -> Result<(), ApiError> {
+) -> Result<Option<DeviceSessionGateApproval>, ApiError> {
     let Actor::UserActor(user) = actor else {
-        return Ok(());
+        return Ok(None);
     };
     authorize_product_session_turn(storage, user.id.0.as_str(), product_session_id.0.as_str())
-        .map(|_| ())
         .map_err(|error| device_session_gate_error(&error))
 }
 
@@ -993,6 +1020,30 @@ fn device_session_gate_error(error: &DeviceSessionGateDenial) -> ApiError {
         error.wire_code(),
         "ProductSession device execution gate denied the request",
     )
+}
+
+/// Maps one Quick device dispatch failure onto the wire error codes. The
+/// committed Chat turn stays queued and an exact retry re-runs the dispatch,
+/// so a temporary failure presents as service unavailability while a dead
+/// anchor or conflicting dispatch presents as wrong state.
+fn quick_device_dispatch_error(error: &QuickDeviceDispatchError) -> ApiError {
+    match error.kind() {
+        QuickDeviceDispatchErrorKind::InvalidInput => ApiError::new(
+            400,
+            "INVALID_REQUEST",
+            "device execution dispatch request is invalid",
+        ),
+        QuickDeviceDispatchErrorKind::AnchorNotLive
+        | QuickDeviceDispatchErrorKind::WorkerSessionEnded
+        | QuickDeviceDispatchErrorKind::DispatchConflict => ApiError::new(
+            409,
+            "WRONG_STATE",
+            "the device worker session cannot execute this turn",
+        ),
+        QuickDeviceDispatchErrorKind::AdmissionUnavailable
+        | QuickDeviceDispatchErrorKind::CorruptState
+        | QuickDeviceDispatchErrorKind::Storage => service_unavailable(),
+    }
 }
 
 fn product_session_error(error: &ProductSessionServiceError) -> ApiError {
