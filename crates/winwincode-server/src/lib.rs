@@ -4,6 +4,7 @@
 
 mod application;
 mod auth_session;
+mod client_candidates;
 mod client_connections;
 mod client_exchange;
 mod client_occupancy;
@@ -30,6 +31,10 @@ pub use application::{
 pub use auth_session::{
     AuthSessionBootstrap, AuthSessionConfig, AuthSessionError, ExternalIdentitySessionIssuer,
     ExternalIdentitySessionResult, OwnerInitializationHook, SqliteAuthSessionManager,
+};
+pub use client_candidates::{
+    ClientCandidatesApplication, ClientCandidatesConfig, ClientCandidatesError,
+    ClientCandidatesErrorKind,
 };
 pub use client_connections::{
     ClientConnectionsApplication, ClientConnectionsConfig, ClientConnectionsError,
