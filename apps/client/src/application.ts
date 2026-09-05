@@ -5,6 +5,7 @@ import {
   createControlPlaneClient,
   createControlPlaneClientDirectory,
   createControlPlaneClientOccupancy,
+  createControlPlaneClientUsers,
   type ControlPlaneClient,
   type ControlPlaneClientTransport,
 } from './control-plane-client.js'
@@ -49,6 +50,11 @@ import {
   type ClientsViewModel,
 } from './clients-view-model.js'
 import { mountClientsPage, type ClientsPage } from './clients-page.js'
+import {
+  createUserManagementViewModel,
+  type UserManagementViewModel,
+} from './user-management-view-model.js'
+import { mountUsersPage, type UsersPage } from './users-page.js'
 import {
   clientOccupancyPortFromFacade,
   createClientOccupancyViewModel,
@@ -245,6 +251,10 @@ export function mountWinWinCodeClient(
     client: rawControlPlane,
     transport: browserTransport,
   })
+  const clientUsers = createControlPlaneClientUsers({
+    client: rawControlPlane,
+    transport: browserTransport,
+  })
   const clientsModel: ClientsViewModel = createClientsViewModel({
     client: clientDirectory,
   })
@@ -260,6 +270,18 @@ export function mountWinWinCodeClient(
   const occupancyModel: ClientOccupancyViewModel = createClientOccupancyViewModel({
     port: clientOccupancyPortFromFacade(clientOccupancy),
     clients: clientsModel,
+  })
+  // UI-100.1: the Owner user management area talks to the real user
+  // endpoints; the self-service password form stays disabled until the
+  // signed-in account id is exposed by the session model.
+  const usersRoot = element(document, 'div', 'wwc-users-root')
+  const usersModel: UserManagementViewModel = createUserManagementViewModel({
+    port: {
+      listUsers: () => clientUsers.listUsers(),
+      create: input => clientUsers.createUser(input),
+      setState: input => clientUsers.setUserState(input),
+      resetPassword: input => clientUsers.resetUserPassword(input),
+    },
   })
   // REPO-100.3: the repository list talks to the same directory facade; the
   // list is a Server snapshot read, so expected failures stay inside the area.
@@ -540,6 +562,10 @@ export function mountWinWinCodeClient(
   const repositoriesPage: RepositoriesPage = mountRepositoriesPage({
     root: repositoriesRoot,
     model: repositoriesModel,
+  })
+  const usersPage: UsersPage = mountUsersPage({
+    root: usersRoot,
+    model: usersModel,
   })
 
   /**
