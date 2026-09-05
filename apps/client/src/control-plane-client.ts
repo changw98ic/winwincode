@@ -1015,3 +1015,413 @@ export function createControlPlaneClient(options: ControlPlaneClientOptions): Co
     },
   }
 }
+
+// ---------------------------------------------------------------------------
+// Client directory: add-Client connect and the device card list (CLIENT-200.4).
+//
+// FAKE-DRIVEN SHAPES: the routes and payload shapes in this block are the
+// presentation-side contract for the add-Client form and the device list.
+// The server-connect-flow lane owns the real wire routes and payload names;
+// when those land, only the path constants and parsers in this block change.
+// Pages and view-models only ever see the typed unions and summaries below.
+// ---------------------------------------------------------------------------
+
+const CLIENT_DIRECTORY_LIST_PATH = '/api/v1/clients'
+const CLIENT_DIRECTORY_CONNECT_PATH = '/api/v1/clients/connections'
+
+/** §12.1: presence is displayed separately from occupancy, never merged. */
+export type ControlPlaneDevicePresence = 'online' | 'offline' | 'locked'
+
+/** §12.1 occupancy states projected for device cards. */
+export type ControlPlaneDeviceOccupancy =
+  | 'available'
+  | 'occupied-by-me'
+  | 'occupied-by-other'
+  | 'draining'
+  | 'recovery-pending'
+
+/** One device card. The Server owns every field; the browser only displays. */
+export interface ControlPlaneDeviceSummary {
+  readonly clientId: string
+  readonly displayName: string
+  readonly presence: ControlPlaneDevicePresence
+  readonly occupancy: ControlPlaneDeviceOccupancy
+  readonly capacityUsed: number
+  readonly capacityTotal: number
+  readonly lastHeartbeatAt: string
+  readonly version: string
+}
+
+/** One add-Client attempt: the device identity plus its dynamic code. */
+export interface ControlPlaneClientConnectInput {
+  /** 9-12 digits; grouping separators are stripped by the facade. */
+  readonly clientId: string
+  /** Exactly 8 digits. */
+  readonly connectionCode: string
+}
+
+/**
+ * The one presentation-facing add-Client failure taxonomy. Wire codes are
+ * translated by `controlPlaneClientAddFailure` and never read anywhere else.
+ * `unavailable` is the catch-all for outages, protocol drift, and expired
+ * browser sessions, mirroring the sign-in taxonomy above.
+ */
+export type ControlPlaneClientAddFailure =
+  | 'id-not-found'
+  | 'client-offline'
+  | 'code-invalid'
+  | 'code-expired'
+  | 'new-connections-forbidden'
+  | 'client-locked'
+  | 'rate-limited'
+  | 'unavailable'
+
+const CLIENT_ADD_FAILURE_CODES: Readonly<Record<string, ControlPlaneClientAddFailure>> =
+  Object.freeze({
+    CLIENT_NOT_FOUND: 'id-not-found',
+    CLIENT_OFFLINE: 'client-offline',
+    CONNECT_CODE_INVALID: 'code-invalid',
+    CONNECT_CODE_EXPIRED: 'code-expired',
+    CLIENT_CONNECTIONS_FORBIDDEN: 'new-connections-forbidden',
+    CLIENT_LOCKED: 'client-locked',
+    RATE_LIMITED: 'rate-limited',
+  })
+
+const DEVICE_PRESENCE_VALUES: readonly string[] = Object.freeze([
+  'online',
+  'offline',
+  'locked',
+])
+const DEVICE_OCCUPANCY_VALUES: readonly string[] = Object.freeze([
+  'available',
+  'occupied-by-me',
+  'occupied-by-other',
+  'draining',
+  'recovery-pending',
+])
+
+/**
+ * Translate one add-Client failure into the presentation taxonomy. Every wire
+ * code stays inside this function; view-models and pages branch only on the
+ * returned union.
+ */
+export function controlPlaneClientAddFailure(error: unknown): ControlPlaneClientAddFailure {
+  if (error instanceof ControlPlaneClientError) {
+    const failure = CLIENT_ADD_FAILURE_CODES[error.code]
+    if (failure !== undefined) return failure
+  }
+  return 'unavailable'
+}
+
+/**
+ * Validate connect input before a request exists, mirroring the sign-in input
+ * bound. Grouping separators are stripped here, so the facade is the one place
+ * that owns the digit shape; the failure code says which field is wrong.
+ */
+function assertClientConnectInput(input: ControlPlaneClientConnectInput): void {
+  const clientId = typeof input?.clientId === 'string' ? input.clientId : ''
+  const connectionCode = typeof input?.connectionCode === 'string' ? input.connectionCode : ''
+  const clientIdDigits = clientId.replace(/\D+/gu, '')
+  const codeDigits = connectionCode.replace(/\D+/gu, '')
+  if (!/^\d{9,12}$/u.test(clientIdDigits)) {
+    throw new ControlPlaneClientError({
+      kind: 'protocol',
+      code: 'CLIENT_CONNECT_ID_INVALID',
+      message: 'Enter the 9-12 digit Client ID shown on the device.',
+      requestId: null,
+      retryable: false,
+    })
+  }
+  if (!/^\d{8}$/u.test(codeDigits)) {
+    throw new ControlPlaneClientError({
+      kind: 'protocol',
+      code: 'CLIENT_CONNECT_CODE_INVALID',
+      message: 'Enter the 8-digit connection code shown on the device.',
+      requestId: null,
+      retryable: false,
+    })
+  }
+}
+
+function clientDirectoryBoundaryError(
+  status: number,
+  source: string,
+): ControlPlaneClientError {
+  let value: unknown
+  try {
+    value = JSON.parse(source)
+  } catch {
+    value = null
+  }
+  const error = isRecord(value) && isRecord(value.error) ? value.error : null
+  const code = error !== null && typeof error.code === 'string'
+    ? error.code
+    : 'CLIENT_DIRECTORY_FAILED'
+  const kind: ControlPlaneClientErrorKind = accessKind(code)
+    ?? (code === 'RATE_LIMITED'
+      ? 'server'
+      : (versionCode(code)
+        ? 'version'
+        : (status >= 500 ? 'server' : 'protocol')))
+  return new ControlPlaneClientError({
+    kind,
+    code,
+    message: error !== null && typeof error.message === 'string'
+      ? error.message
+      : 'The Client directory request failed.',
+    requestId: isRecord(value) && typeof value.requestId === 'string'
+      ? value.requestId as RequestId
+      : null,
+    retryable: error !== null && error.retryable === true,
+  })
+}
+
+function invalidDeviceListError(): ControlPlaneClientError {
+  return new ControlPlaneClientError({
+    kind: 'protocol',
+    code: 'INVALID_CLIENT_DIRECTORY_RESPONSE',
+    message: 'The Control Plane server returned an invalid device list.',
+    requestId: null,
+    retryable: false,
+  })
+}
+
+function deviceSummaryValue(value: unknown): ControlPlaneDeviceSummary {
+  if (!isRecord(value)) throw invalidDeviceListError()
+  const presence = value.presence
+  const occupancy = value.occupancy
+  const capacityUsed = value.capacityUsed
+  const capacityTotal = value.capacityTotal
+  const lastHeartbeatAt = value.lastHeartbeatAt
+  if (
+    typeof value.clientId !== 'string'
+    || value.clientId.length === 0
+    || typeof value.displayName !== 'string'
+    || typeof presence !== 'string'
+    || !DEVICE_PRESENCE_VALUES.includes(presence)
+    || typeof occupancy !== 'string'
+    || !DEVICE_OCCUPANCY_VALUES.includes(occupancy)
+    || typeof capacityUsed !== 'number'
+    || !Number.isInteger(capacityUsed)
+    || capacityUsed < 0
+    || typeof capacityTotal !== 'number'
+    || !Number.isInteger(capacityTotal)
+    || capacityTotal < capacityUsed
+    || typeof lastHeartbeatAt !== 'string'
+    || !RFC3339_INSTANT.test(lastHeartbeatAt)
+    || Number.isNaN(Date.parse(lastHeartbeatAt))
+    || typeof value.version !== 'string'
+    || value.version.length === 0
+  ) {
+    throw invalidDeviceListError()
+  }
+  return Object.freeze({
+    clientId: value.clientId,
+    displayName: value.displayName,
+    presence: presence as ControlPlaneDevicePresence,
+    occupancy: occupancy as ControlPlaneDeviceOccupancy,
+    capacityUsed,
+    capacityTotal,
+    lastHeartbeatAt,
+    version: value.version,
+  })
+}
+
+function deviceListResponse(source: string): readonly ControlPlaneDeviceSummary[] {
+  let value: unknown
+  try {
+    value = JSON.parse(source)
+  } catch {
+    value = null
+  }
+  if (
+    isRecord(value)
+    && typeof value.schemaVersion === 'string'
+    && value.schemaVersion !== CONTROL_PLANE_SCHEMA_VERSION
+  ) {
+    throw new ControlPlaneClientError({
+      kind: 'version',
+      code: 'SCHEMA_VERSION_MISMATCH',
+      message: `The Control Plane server must use ${CONTROL_PLANE_SCHEMA_VERSION}.`,
+      requestId: null,
+      retryable: false,
+    })
+  }
+  if (!isRecord(value) || !Array.isArray(value.clients)) throw invalidDeviceListError()
+  return Object.freeze(value.clients.map(deviceSummaryValue))
+}
+
+/**
+ * The base facade extended with the two Client directory reads/writes. The
+ * decorator delegates every base method, so hosts can pass it anywhere a
+ * `ControlPlaneClient` is accepted and keep one session and one error identity.
+ */
+export interface ControlPlaneClientDirectory extends ControlPlaneClient {
+  /** Submit one dynamic-code connect; resolves to the fresh device list. */
+  addClient(
+    input: ControlPlaneClientConnectInput,
+    options?: ControlPlaneRequestOptions,
+  ): Promise<readonly ControlPlaneDeviceSummary[]>
+  /** Read the device card list for the signed-in identity. */
+  listClients(
+    options?: ControlPlaneRequestOptions,
+  ): Promise<readonly ControlPlaneDeviceSummary[]>
+}
+
+/**
+ * Extend the one Control Plane facade with the Client directory. Expected
+ * add-Client failures stay in the add form (the base client keeps reporting
+ * connection health), and an injected facade that already implements the
+ * directory methods is reused verbatim so deterministic fixtures and host
+ * composition keep their single seam.
+ */
+export function createControlPlaneClientDirectory(options: {
+  readonly client: ControlPlaneClient
+  /** Same deterministic transport seam the base facade was created with. */
+  readonly transport?: ControlPlaneClientTransport
+}): ControlPlaneClientDirectory {
+  const location = parseControlPlaneServerUrl(options.client.serverUrl)
+  const transportFetch = options.transport?.fetch
+  const injected = options.client as Partial<ControlPlaneClientDirectory>
+  const injectedAddClient = injected.addClient
+  const injectedListClients = injected.listClients
+
+  async function directoryRequest(
+    path: string,
+    method: 'GET' | 'POST',
+    body: string | null,
+    signal: AbortSignal | undefined,
+  ): Promise<ControlPlaneHttpResponse> {
+    if (signalIsAborted(signal)) throw cancelledError(null)
+    if (transportFetch === undefined) {
+      throw new ControlPlaneClientError({
+        kind: 'protocol',
+        code: 'TRANSPORT_UNAVAILABLE',
+        message: 'The browser HTTP transport is unavailable.',
+        requestId: null,
+        retryable: false,
+      })
+    }
+    return transportFetch(`${location.serverUrl}${path}`, {
+      method,
+      headers: body === null ? {} : { 'Content-Type': 'application/json' },
+      ...(body === null ? {} : { body }),
+      redirect: 'error',
+      cache: 'no-store',
+      referrerPolicy: 'no-referrer',
+      credentials: 'include',
+      ...(signal === undefined ? {} : { signal }),
+    })
+  }
+
+  async function connectRequest(
+    input: ControlPlaneClientConnectInput,
+    requestOptions: ControlPlaneRequestOptions | undefined,
+  ): Promise<readonly ControlPlaneDeviceSummary[]> {
+    assertClientConnectInput(input)
+    try {
+      const response = await directoryRequest(
+        CLIENT_DIRECTORY_CONNECT_PATH,
+        'POST',
+        JSON.stringify({
+          schemaVersion: CONTROL_PLANE_SCHEMA_VERSION,
+          clientId: input.clientId.replace(/\D+/gu, ''),
+          connectionCode: input.connectionCode.replace(/\D+/gu, ''),
+        }),
+        requestOptions?.signal,
+      )
+      const source = await response.text()
+      if (!response.ok) throw clientDirectoryBoundaryError(response.status, source)
+      if (response.status !== 201) throw invalidDeviceListError()
+      return deviceListResponse(source)
+    } catch (error) {
+      if (signalIsAborted(requestOptions?.signal)) throw cancelledError(null)
+      if (error instanceof ControlPlaneClientError) throw error
+      throw new ControlPlaneClientError({
+        kind: 'network',
+        code: 'NETWORK_ERROR',
+        message: 'The Control Plane server could not be reached.',
+        requestId: null,
+        retryable: true,
+      })
+    }
+  }
+
+  async function listRequest(
+    requestOptions: ControlPlaneRequestOptions | undefined,
+  ): Promise<readonly ControlPlaneDeviceSummary[]> {
+    try {
+      const response = await directoryRequest(
+        CLIENT_DIRECTORY_LIST_PATH,
+        'GET',
+        null,
+        requestOptions?.signal,
+      )
+      const source = await response.text()
+      if (!response.ok) throw clientDirectoryBoundaryError(response.status, source)
+      if (response.status !== 200) throw invalidDeviceListError()
+      return deviceListResponse(source)
+    } catch (error) {
+      if (signalIsAborted(requestOptions?.signal)) throw cancelledError(null)
+      if (error instanceof ControlPlaneClientError) throw error
+      throw new ControlPlaneClientError({
+        kind: 'network',
+        code: 'NETWORK_ERROR',
+        message: 'The Control Plane server could not be reached.',
+        requestId: null,
+        retryable: true,
+      })
+    }
+  }
+
+  const directory: ControlPlaneClientDirectory = {
+    serverUrl: options.client.serverUrl,
+    restore(requestOptions) {
+      return options.client.restore(requestOptions)
+    },
+    login(bootstrapProof, requestOptions) {
+      return options.client.login(bootstrapProof, requestOptions)
+    },
+    loginWithPassword(credentials, requestOptions) {
+      return options.client.loginWithPassword(credentials, requestOptions)
+    },
+    initializationStatus(requestOptions) {
+      return options.client.initializationStatus(requestOptions)
+    },
+    logout(requestOptions) {
+      return options.client.logout(requestOptions)
+    },
+    command(command, requestOptions) {
+      return options.client.command(command, requestOptions)
+    },
+    query(query, requestOptions) {
+      return options.client.query(query, requestOptions)
+    },
+    subscribe(subscriptionOptions) {
+      return options.client.subscribe(subscriptionOptions)
+    },
+    addClient(rawInput, requestOptions) {
+      // The facade is the one place that owns the digit shape, so an injected
+      // directory implementation receives the same normalized input the wire
+      // path would send.
+      const input: ControlPlaneClientConnectInput = {
+        clientId: rawInput.clientId.replace(/\D+/gu, ''),
+        connectionCode: rawInput.connectionCode.replace(/\D+/gu, ''),
+      }
+      if (typeof injectedAddClient === 'function') {
+        return injectedAddClient.call(options.client, input, requestOptions)
+      }
+      return connectRequest(input, requestOptions)
+    },
+    listClients(requestOptions) {
+      if (typeof injectedListClients === 'function') {
+        return injectedListClients.call(options.client, requestOptions)
+      }
+      return listRequest(requestOptions)
+    },
+    close() {
+      options.client.close()
+    },
+  }
+  return Object.freeze(directory)
+}

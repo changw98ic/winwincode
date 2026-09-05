@@ -28,6 +28,7 @@ const canonicalTestFiles = Object.freeze([
   'tests/chat-control-plane-integration.test.mjs',
   'tests/chat-page.test.mjs',
   'tests/chat-view-model.test.mjs',
+  'tests/client-clients.test.mjs',
   'tests/client-control-contract.test.mjs',
   'tests/client-editable-draft.test.mjs',
   'tests/client-keyed-collection.test.mjs',

@@ -3,6 +3,7 @@
 import {
   ControlPlaneClientError,
   createControlPlaneClient,
+  createControlPlaneClientDirectory,
   type ControlPlaneClient,
   type ControlPlaneClientTransport,
 } from './control-plane-client.js'
@@ -42,6 +43,11 @@ import {
   type LoginViewModel,
 } from './login-view-model.js'
 import { mountLoginPage, type LoginPage } from './login-page.js'
+import {
+  createClientsViewModel,
+  type ClientsViewModel,
+} from './clients-view-model.js'
+import { mountClientsPage, type ClientsPage } from './clients-page.js'
 import {
   createReadinessViewModel,
   type ReadinessContext,
@@ -198,9 +204,10 @@ export function mountWinWinCodeClient(
   }
   let accessFailureSession: AuthSessionViewModel | null = null
   let onRouteAuthorizationRevoked: (() => void) | null = null
+  const browserTransport = browserControlPlaneTransport(browser)
   const rawControlPlane = options.controlPlane ?? createControlPlaneClient({
       serverUrl: options.serverUrl,
-      transport: browserControlPlaneTransport(browser),
+      transport: browserTransport,
       onAccessFailure(error) {
         accessFailureSession?.authenticationRequired(error)
       },
@@ -219,6 +226,17 @@ export function mountWinWinCodeClient(
   // Plane facade directly. Expected sign-in failures stay in the form instead
   // of polluting feature connection health, mirroring the Scope selector seam.
   const loginModel: LoginViewModel = createLoginViewModel({ client: rawControlPlane })
+  // CLIENT-200.4: the Clients area talks to the one Control Plane facade
+  // through its directory extension. Expected add-Client failures stay in the
+  // form instead of polluting feature connection health, mirroring the login
+  // page seam above.
+  const clientDirectory = createControlPlaneClientDirectory({
+    client: rawControlPlane,
+    transport: browserTransport,
+  })
+  const clientsModel: ClientsViewModel = createClientsViewModel({
+    client: clientDirectory,
+  })
   let lastKnownDiagnosticScope: unknown = null
   const shell = element(document, 'div', 'wwc-shell')
   const header = element(document, 'header', 'wwc-header')
@@ -227,6 +245,7 @@ export function mountWinWinCodeClient(
   const navigation = element(document, 'nav', 'wwc-navigation')
   const authRoot = element(document, 'div', 'wwc-auth-session-root')
   const loginRoot = element(document, 'div', 'wwc-login-root')
+  const clientsRoot = element(document, 'div', 'wwc-clients-root')
   const main = element(document, 'main', 'wwc-main')
   const scopeRoot = element(document, 'div', 'wwc-scope-selector-root')
   const readinessRoot = element(document, 'div', 'wwc-readiness-root')
@@ -464,6 +483,7 @@ export function mountWinWinCodeClient(
     description,
     readOnlyNotice,
     loginRoot,
+    clientsRoot,
     errorBoundary.root,
     slot,
   )
@@ -477,6 +497,11 @@ export function mountWinWinCodeClient(
     root: loginRoot,
     model: loginModel,
   })
+  const clientsPage: ClientsPage = mountClientsPage({
+    root: clientsRoot,
+    model: clientsModel,
+    now: () => Date.parse(now()),
+  })
 
   /**
    * The login page is the unauthenticated surface. It appears on sign-out and
@@ -484,8 +509,19 @@ export function mountWinWinCodeClient(
    * sign-in re-renders the originally requested route.
    */
   let loginVisible: boolean | null = null
+  let clientsVisible: boolean | null = null
+  function updateClientsVisibility(status: AuthSessionViewModel['state']['status']): void {
+    const visible = status === 'signed-in'
+    if (clientsVisible === visible) return
+    clientsVisible = visible
+    clientsPage.setVisible(visible)
+    if (visible) void clientsModel.refresh()
+  }
   function updateLoginVisibility(): void {
     const status = authSession.state.status
+    // CLIENT-200.4: the Clients area is the signed-in device directory, so its
+    // visibility is decided independently of the login page's early return.
+    updateClientsVisibility(status)
     const visible = status === 'signed-out'
       || status === 'restoring'
       || status === 'authentication-required'
@@ -1605,6 +1641,8 @@ export function mountWinWinCodeClient(
       readiness.close()
       loginPage.close()
       loginModel.close()
+      clientsPage.close()
+      clientsModel.close()
       authPage.close()
       authSession.close()
       accessFailureSession = null
