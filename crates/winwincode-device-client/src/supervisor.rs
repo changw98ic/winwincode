@@ -20,9 +20,10 @@
 //! 2. **Registry before acknowledgement**: the spawn writes the plan-8.2
 //!    `worker_process_registry` row binding `pid` **and**
 //!    `process_start_identity` — a PID alone is never sufficient because
-//!    PIDs are reused — with the fresh `workerInstanceId` and state
-//!    `running`. The stable `workerId` survives replacement boots of the
-//!    same session; every boot gets a fresh `cix_` instance id.
+//!    PIDs are reused — with the launch grant's `workerInstanceId` and state
+//!    `running`. The server-minted stable `workerId` is reused across
+//!    replacement boots of the same session; every launch grant carries a
+//!    fresh instance id.
 //! 3. **Locality**: the supervisor writes the two private (mode-0600)
 //!    files the managed Worker entry reads — the Worker Session Credential
 //!    and the `managed-session.json` config — field-for-field aligned with
@@ -73,7 +74,6 @@ use time::format_description::well_known::Rfc3339;
 
 use crate::daemon::{LeaseWorkerController, WorkerCapacitySnapshot, WorkerCapacitySource};
 use crate::fencing::{FencedCommandKind, FencingGuard, FencingRejection, FencingVerdict};
-use crate::identity::generate_prefixed_id;
 use crate::store::{DeviceStore, DeviceStoreError, WorkerProcessRecord};
 
 /// Registry lifecycle state of a supervised, believed-live worker process.
@@ -97,9 +97,6 @@ const WORKER_CREDENTIAL_FILE: &str = "worker-credential";
 const MANAGED_SESSION_ARG: &str = "--managed-session";
 /// Default Worker binary name looked up next to the current executable.
 const WORKER_BINARY_NAME: &str = "winwincode-worker";
-/// Canonical `cix_` instance id prefix (the same encoding the server-side
-/// client registry validates).
-const INSTANCE_ID_PREFIX: &str = "cix_";
 /// Poll slice while waiting for a graceful stop to land.
 const STOP_POLL_INTERVAL: Duration = Duration::from_millis(20);
 
@@ -156,6 +153,13 @@ pub struct ModelRoute {
 
 /// One launch request: the identity facts of the Worker Session to start.
 ///
+/// The identity facts arrive server-minted from the launch grant the
+/// `client.worker.launch` frame carried: the stable `workerId` (reused
+/// across replacement boots of the same session) and the fresh
+/// `workerInstanceId` of this exact boot. The registry records them
+/// verbatim, so a `client.worker.launch_ack` echoing the registry facts
+/// settles against the grant.
+///
 /// `worker_credential_token` is the Worker Session Credential material —
 /// the fourth, strictly separated credential class. It is written exactly
 /// once to the mode-0600 credential file the config names and is never
@@ -164,6 +168,12 @@ pub struct ModelRoute {
 pub struct SpawnRequest<'a> {
     /// The one `WorkerSession` this process authenticates.
     pub worker_session_id: &'a str,
+    /// Stable server-minted worker identity (launch grant `workerId`,
+    /// config `workerId`).
+    pub worker_id: &'a str,
+    /// Fresh server-minted identity of this process boot (launch grant
+    /// `workerInstanceId`, config `workerInstanceId`).
+    pub worker_instance_id: &'a str,
     /// Occupancy lease the session consumes (config `occupancyLeaseId`).
     pub occupancy_lease_id: &'a str,
     /// Fencing token of the lease; judged against the durable mirror before
@@ -177,6 +187,11 @@ pub struct SpawnRequest<'a> {
     /// Server-issued launch grant the launch is settled against (registry
     /// `launch_grant_id`).
     pub launch_grant_id: &'a str,
+    /// Product session scope from the grant (optional config
+    /// `productSessionId`).
+    pub product_session_id: Option<&'a str>,
+    /// Stage run scope from the grant (optional config `stageRunId`).
+    pub stage_run_id: Option<&'a str>,
     /// Local source root — the only Worker-visible filesystem path the
     /// Device Client writes into the config (`sourceDirectory`).
     pub source_directory: &'a Path,
@@ -456,6 +471,31 @@ impl SessionSupervisor {
         Ok(self.lock_store().worker_process(worker_session_id)?)
     }
 
+    /// Writes (or overwrites) the mode-0600 Worker Session Credential file
+    /// of one supervised worker session — the deferred-material delivery the
+    /// daemon invokes when the launch response's one-time credential lands
+    /// after the spawn. The worker transport re-reads the private file on
+    /// every exchange, so the next retry picks the material up.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SupervisorError::NotFound`] for an unknown session and the
+    /// write failure otherwise.
+    pub fn write_worker_credential(
+        &self,
+        worker_session_id: &str,
+        material: &str,
+    ) -> Result<(), SupervisorError> {
+        let record = self
+            .lock_store()
+            .worker_process(worker_session_id)?
+            .ok_or_else(|| SupervisorError::NotFound {
+                worker_session_id: worker_session_id.to_owned(),
+            })?;
+        let path = PathBuf::from(record.data_directory).join(WORKER_CREDENTIAL_FILE);
+        write_private_file(&path, material.as_bytes())
+    }
+
     /// Loads every worker-process registry row.
     ///
     /// # Errors
@@ -492,9 +532,8 @@ impl SessionSupervisor {
     /// Order of operations: fencing authorization, the one-session-one-worker
     /// idempotence check, the local capacity second-check, then credential +
     /// config files (mode 0600), the process spawn, and the registry row
-    /// binding `pid` + `process_start_identity` with a fresh
-    /// `workerInstanceId` (the stable `workerId` is reused from a previous
-    /// boot of the same session).
+    /// binding `pid` + `process_start_identity` with the launch grant's
+    /// `workerInstanceId` (the grant owns both worker identities).
     ///
     /// # Errors
     ///
@@ -541,12 +580,12 @@ impl SessionSupervisor {
             }
         }
 
-        // Stable worker identity across replacement boots; fresh instance id.
-        let worker_id = match store.worker_process(request.worker_session_id)? {
-            Some(previous) => previous.worker_id,
-            None => generate_prefixed_id(INSTANCE_ID_PREFIX)?,
-        };
-        let worker_instance_id = generate_prefixed_id(INSTANCE_ID_PREFIX)?;
+        // The launch grant owns the identity facts: the stable workerId and
+        // the fresh workerInstanceId of this boot arrive server-minted, and
+        // the registry records them verbatim so the launch acknowledgement
+        // echoes exactly what the grant carries.
+        let worker_id = request.worker_id;
+        let worker_instance_id = request.worker_instance_id;
 
         // Locality: the two private files the managed entry reads, written
         // under the worker data directory with exactly mode 0600.
@@ -558,8 +597,8 @@ impl SessionSupervisor {
         let config_json = managed_session_config_json(
             &self.inner.config,
             request,
-            &worker_id,
-            &worker_instance_id,
+            worker_id,
+            worker_instance_id,
             &credential_path,
         )?;
         write_private_file(&config_path, config_json.as_bytes())?;
@@ -569,8 +608,8 @@ impl SessionSupervisor {
             &mut store,
             request,
             &mut child,
-            worker_id.clone(),
-            worker_instance_id.clone(),
+            worker_id.to_owned(),
+            worker_instance_id.to_owned(),
             &stamp,
         )?;
         self.lock_children()
@@ -1095,17 +1134,36 @@ fn validate_server_origin(origin: &str) -> Result<(), SupervisorError> {
 }
 
 /// Validates one spawn request's identity facts and local paths.
+///
+/// The worker credential material may be empty: the launch acknowledgement
+/// must not wait for the one-time material (the launch response delivers it
+/// to the local user-session bridge after the grant is consumed), so the
+/// supervisor writes the private credential file as a placeholder and the
+/// daemon fills it via [`SessionSupervisor::write_worker_credential`] when
+/// the material lands. The worker transport re-reads the file on every
+/// exchange.
 fn validate_request(request: SpawnRequest<'_>) -> Result<(), SupervisorError> {
     for (value, label) in [
         (request.worker_session_id, "worker session id"),
+        (request.worker_id, "worker id"),
+        (request.worker_instance_id, "worker instance id"),
         (request.occupancy_lease_id, "occupancy lease id"),
-        (request.worker_credential_token, "worker credential token"),
         (request.repository_binding_id, "repository binding id"),
         (request.launch_grant_id, "launch grant id"),
     ] {
         if value.is_empty() {
             return Err(SupervisorError::invalid(format!(
                 "{label} must not be empty"
+            )));
+        }
+    }
+    for (value, label) in [
+        (request.product_session_id, "product session id"),
+        (request.stage_run_id, "stage run id"),
+    ] {
+        if value.is_some_and(str::is_empty) {
+            return Err(SupervisorError::invalid(format!(
+                "{label} must not be empty when present"
             )));
         }
     }
@@ -1174,8 +1232,9 @@ fn write_private_file(path: &Path, contents: &[u8]) -> Result<(), SupervisorErro
 
 /// Builds the managed-session config: field-for-field the camelCase shape
 /// `winwincode-worker --managed-session` reads (unknown fields are refused
-/// by the reader, so this writes exactly the known fields, omitting the
-/// optional `productSessionId`/`stageRunId` this lane does not carry).
+/// by the reader, so this writes exactly the known fields, carrying the
+/// optional `productSessionId`/`stageRunId` scopes when the launch grant
+/// provides them).
 fn managed_session_config_json(
     config: &SupervisorConfig,
     request: SpawnRequest<'_>,
@@ -1202,6 +1261,12 @@ fn managed_session_config_json(
         "serverOrigin": config.server_origin,
         "workerCredentialPath": local_path(credential_path, "worker credential path")?,
     });
+    if let Some(product_session_id) = request.product_session_id {
+        object["productSessionId"] = serde_json::Value::String(product_session_id.to_owned());
+    }
+    if let Some(stage_run_id) = request.stage_run_id {
+        object["stageRunId"] = serde_json::Value::String(stage_run_id.to_owned());
+    }
     if let Some(route) = &config.model_route {
         object["modelRoute"] = serde_json::json!({
             "capability": route.capability,
@@ -1474,6 +1539,10 @@ mod tests {
     const CLIENT_INSTANCE: &str = "cix_B2B2B2B2B2B2B2B2B2B2B2B2B2";
     const ORIGIN: &str = "https://127.0.0.1:8443";
     const CREDENTIAL_TOKEN: &str = "wsc-supervisor-test-token";
+    /// Server-minted identities a launch grant would carry.
+    const WORKER_ID: &str = "wkr_TESTWORKER00000000000001";
+    const WORKER_INSTANCE: &str = "winst_TESTINSTANCE0000000001";
+    const WORKER_INSTANCE_2: &str = "winst_TESTINSTANCE0000000002";
 
     /// A long-lived worker test double: installs the terminate trap first,
     /// then signals readiness next to the config file (`$2`), then idles.
@@ -1562,17 +1631,22 @@ mod tests {
 
     fn spawn_request<'a>(
         worker_session_id: &'a str,
+        worker_instance_id: &'a str,
         source_directory: &'a Path,
         data_directory: &'a Path,
         worker_root: &'a Path,
     ) -> SpawnRequest<'a> {
         SpawnRequest {
             worker_session_id,
+            worker_id: WORKER_ID,
+            worker_instance_id,
             occupancy_lease_id: LEASE,
             occupancy_fencing_token: 7,
             worker_credential_token: CREDENTIAL_TOKEN,
             repository_binding_id: "rbn_TESTREPO",
             launch_grant_id: "wlg_TESTGRANT",
+            product_session_id: None,
+            stage_run_id: None,
             source_directory,
             data_directory,
             worker_root,
@@ -1656,7 +1730,13 @@ mod tests {
         let worker_root = root.join("worker-root");
 
         let outcome = supervisor
-            .spawn(spawn_request("wss_ONE", &source, &data, &worker_root))
+            .spawn(spawn_request(
+                "wss_ONE",
+                WORKER_INSTANCE,
+                &source,
+                &data,
+                &worker_root,
+            ))
             .expect("spawn starts");
         let SpawnOutcome::Started(handle) = &outcome else {
             panic!("first spawn must start");
@@ -1665,10 +1745,14 @@ mod tests {
 
         // Handle and registry agree; the platform boot identity is bound.
         assert!(handle.pid > 0);
-        assert!(handle.worker_id.starts_with("cix_"));
-        assert_eq!(handle.worker_id.len(), 30, "cix_ + 26 Crockford");
-        assert!(handle.worker_instance_id.starts_with("cix_"));
-        assert_ne!(handle.worker_instance_id, handle.worker_id);
+        assert_eq!(
+            handle.worker_id, WORKER_ID,
+            "the launch grant's worker identity is registered verbatim"
+        );
+        assert_eq!(
+            handle.worker_instance_id, WORKER_INSTANCE,
+            "the launch grant's instance identity is registered verbatim"
+        );
         assert!(
             handle.process_start_identity.starts_with("darwin-ps-")
                 || handle.process_start_identity.starts_with("linux-"),
@@ -1780,7 +1864,13 @@ mod tests {
         let worker_root = root.join("worker-root");
 
         let SpawnOutcome::Started(first) = supervisor
-            .spawn(spawn_request("wss_DUP", &source, &data, &worker_root))
+            .spawn(spawn_request(
+                "wss_DUP",
+                WORKER_INSTANCE,
+                &source,
+                &data,
+                &worker_root,
+            ))
             .expect("first spawn")
         else {
             panic!("first spawn must start");
@@ -1789,7 +1879,13 @@ mod tests {
         wait_for_ready_marker(&data, "wss_DUP");
 
         let second = supervisor
-            .spawn(spawn_request("wss_DUP", &source, &data, &worker_root))
+            .spawn(spawn_request(
+                "wss_DUP",
+                WORKER_INSTANCE,
+                &source,
+                &data,
+                &worker_root,
+            ))
             .expect("duplicate spawn");
         assert_eq!(
             second,
@@ -1827,7 +1923,13 @@ mod tests {
         let worker_root = root.join("worker-root");
 
         let SpawnOutcome::Started(first) = supervisor
-            .spawn(spawn_request("wss_RESPAWN", &source, &data, &worker_root))
+            .spawn(spawn_request(
+                "wss_RESPAWN",
+                WORKER_INSTANCE,
+                &source,
+                &data,
+                &worker_root,
+            ))
             .expect("first spawn")
         else {
             panic!("first spawn must start");
@@ -1835,7 +1937,13 @@ mod tests {
         supervisor.stop("wss_RESPAWN", true).expect("stop");
 
         let SpawnOutcome::Started(second) = supervisor
-            .spawn(spawn_request("wss_RESPAWN", &source, &data, &worker_root))
+            .spawn(spawn_request(
+                "wss_RESPAWN",
+                WORKER_INSTANCE_2,
+                &source,
+                &data,
+                &worker_root,
+            ))
             .expect("replacement spawn")
         else {
             panic!("replacement spawn must start");
@@ -1844,11 +1952,12 @@ mod tests {
 
         assert_eq!(
             second.worker_id, first.worker_id,
-            "the stable worker identity survives the replacement boot"
+            "the grant's stable worker identity rides the replacement boot"
         );
+        assert_eq!(second.worker_instance_id, WORKER_INSTANCE_2);
         assert_ne!(
             second.worker_instance_id, first.worker_instance_id,
-            "every boot gets a fresh workerInstanceId"
+            "the replacement grant carries a fresh workerInstanceId"
         );
         assert_ne!(second.pid, first.pid);
     }
@@ -1867,7 +1976,13 @@ mod tests {
         let data = root.join("data");
         let worker_root = root.join("worker-root");
         let error = supervisor
-            .spawn(spawn_request("wss_FENCED", &source, &data, &worker_root))
+            .spawn(spawn_request(
+                "wss_FENCED",
+                WORKER_INSTANCE,
+                &source,
+                &data,
+                &worker_root,
+            ))
             .expect_err("no mirror must refuse");
         assert_eq!(
             error,
@@ -1895,7 +2010,7 @@ mod tests {
             .expect("mirror advances");
         let supervisor =
             SessionSupervisor::new(test_config(&binary), store).expect("supervisor builds");
-        let mut stale = spawn_request("wss_FENCED", &source, &data, &worker_root);
+        let mut stale = spawn_request("wss_FENCED", WORKER_INSTANCE, &source, &data, &worker_root);
         stale.occupancy_fencing_token = 9;
         let error = supervisor
             .spawn(stale)
@@ -1925,7 +2040,13 @@ mod tests {
         assert!(
             matches!(
                 supervisor
-                    .spawn(spawn_request("wss_CRASH", &source, &data, &worker_root))
+                    .spawn(spawn_request(
+                        "wss_CRASH",
+                        WORKER_INSTANCE,
+                        &source,
+                        &data,
+                        &worker_root
+                    ))
                     .expect("spawn starts"),
                 SpawnOutcome::Started(_)
             ),
@@ -1980,13 +2101,25 @@ mod tests {
 
         assert!(matches!(
             supervisor
-                .spawn(spawn_request("wss_CAP1", &source, &data, &worker_root))
+                .spawn(spawn_request(
+                    "wss_CAP1",
+                    WORKER_INSTANCE,
+                    &source,
+                    &data,
+                    &worker_root,
+                ))
                 .expect("first spawn"),
             SpawnOutcome::Started(_)
         ));
         let _guard = StopOnDrop::watch(&supervisor, "wss_CAP1");
         let error = supervisor
-            .spawn(spawn_request("wss_CAP2", &source, &data, &worker_root))
+            .spawn(spawn_request(
+                "wss_CAP2",
+                WORKER_INSTANCE,
+                &source,
+                &data,
+                &worker_root,
+            ))
             .expect_err("local cap must refuse the second spawn");
         assert_eq!(
             error,
@@ -2019,6 +2152,7 @@ mod tests {
                 supervisor
                     .spawn(spawn_request(
                         worker_session_id,
+                        WORKER_INSTANCE,
                         &source,
                         &data,
                         &worker_root
@@ -2086,7 +2220,13 @@ mod tests {
 
         assert!(matches!(
             supervisor
-                .spawn(spawn_request("wss_CAPACITY", &source, &data, &worker_root))
+                .spawn(spawn_request(
+                    "wss_CAPACITY",
+                    WORKER_INSTANCE,
+                    &source,
+                    &data,
+                    &worker_root
+                ))
                 .expect("spawn starts"),
             SpawnOutcome::Started(_)
         ));
@@ -2119,7 +2259,13 @@ mod tests {
         let data = root.join("data");
         let worker_root = root.join("worker-root");
         let SpawnOutcome::Started(live) = previous
-            .spawn(spawn_request("wss_LIVE", &source, &data, &worker_root))
+            .spawn(spawn_request(
+                "wss_LIVE",
+                WORKER_INSTANCE,
+                &source,
+                &data,
+                &worker_root,
+            ))
             .expect("live spawn")
         else {
             panic!("live spawn must start");
@@ -2138,7 +2284,8 @@ mod tests {
             DeviceStore::open(&root).expect("store reopens for the crasher"),
         )
         .expect("crash supervisor builds");
-        let mut crash_request = spawn_request("wss_CRASHED", &source, &data, &worker_root);
+        let mut crash_request =
+            spawn_request("wss_CRASHED", WORKER_INSTANCE, &source, &data, &worker_root);
         crash_request.worker_credential_token = "wsc-second-token";
         assert!(matches!(
             crash_supervisor.spawn(crash_request).expect("crash spawn"),
@@ -2296,15 +2443,31 @@ mod tests {
 
         // Field validation is directly testable; the spawn path judges the
         // fencing stamp first (a zero token can never match a mirror).
-        let mut request = spawn_request("wss_VALIDATE", &source, &data, &worker_root);
+        let mut request = spawn_request(
+            "wss_VALIDATE",
+            WORKER_INSTANCE,
+            &source,
+            &data,
+            &worker_root,
+        );
         request.occupancy_fencing_token = 0;
         let error = validate_request(request).expect_err("zero fencing token must refuse");
         assert!(error.to_string().contains("fencing token"), "{error}");
 
-        let mut request = spawn_request("wss_VALIDATE", &source, &data, &worker_root);
+        let mut request = spawn_request(
+            "wss_VALIDATE",
+            WORKER_INSTANCE,
+            &source,
+            &data,
+            &worker_root,
+        );
+        // An empty credential material is the deferred-delivery placeholder:
+        // accepted at spawn, filled later via write_worker_credential.
         request.worker_credential_token = "";
-        let error = validate_request(request).expect_err("empty credential must refuse");
-        assert!(error.to_string().contains("credential"), "{error}");
+        assert!(
+            validate_request(request).is_ok(),
+            "deferred material is valid"
+        );
 
         // A configured worker binary that is missing refuses the spawn.
         let mut config = test_config(&binary);
@@ -2319,7 +2482,13 @@ mod tests {
         ));
         let supervisor = SessionSupervisor::new(config, reopened).expect("builds");
         let error = supervisor
-            .spawn(spawn_request("wss_VALIDATE", &source, &data, &worker_root))
+            .spawn(spawn_request(
+                "wss_VALIDATE",
+                WORKER_INSTANCE,
+                &source,
+                &data,
+                &worker_root,
+            ))
             .expect_err("missing binary must refuse");
         assert!(
             matches!(error, SupervisorError::WorkerBinary { .. }),

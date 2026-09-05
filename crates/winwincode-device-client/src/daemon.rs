@@ -38,11 +38,22 @@
 //!    token, immediately invalidating every intent authorized under the
 //!    previous revision (plan 12.2/12.4/12.6). The mirror survives
 //!    disconnects and restarts; recovery semantics stay server-owned.
-//! 7. **Backoff.** Transport failures, malformed responses, and protocol
+//! 7. **Worker launch.** `client.worker.launch` is fenced against the
+//!    mirror (plan 12.6 `WorkerLaunch`), its grant's instance binding is
+//!    checked against the current launch, the one-time worker credential is
+//!    taken from the wired [`WorkerLaunchMaterialSource`] when the local
+//!    bridge already holds it (a placeholder 0600 file is written
+//!    otherwise, filled by [`DeviceDaemon::receive_worker_credential`] once
+//!    the launch response lands — the worker transport re-reads the file
+//!    per exchange), and the wired [`SessionSupervisor`] spawns the managed
+//!    worker process. Every verdict is answered with a durable
+//!    `client.worker.launch_ack` echoing the grant identities — accepted,
+//!    idempotent duplicate, or rejected with a reason.
+//! 8. **Backoff.** Transport failures, malformed responses, and protocol
 //!    violations double the exchange backoff from
 //!    [`DaemonConfig::initial_backoff`] up to
 //!    [`DaemonConfig::max_backoff`]; any successful exchange resets it.
-//! 8. **Lifecycle.** [`DeviceDaemon::run`] loops on a plain `std` thread
+//! 9. **Lifecycle.** [`DeviceDaemon::run`] loops on a plain `std` thread
 //!    with interruptible sleeps until an [`AtomicBool`] shutdown flag is
 //!    observed. Shutdown never discards taken frames: frames leave the
 //!    durable outbox only when their acknowledgement is persisted.
@@ -63,6 +74,7 @@
 //! dependency-free std TCP implementation in [`crate::http`].
 
 use std::fmt;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
@@ -74,7 +86,8 @@ use time::format_description::well_known::Rfc3339;
 use winwincode_client_port::domain::{
     ClientArchitecture, ClientCapacityReport, ClientControlError, ClientControlErrorCode,
     ClientControlMessageKind, ClientLockState, ClientOccupancyReleaseMode, ClientPlatformTarget,
-    CommandAckStatus, OccupancyRejectReason, PresenceState,
+    CommandAckStatus, OccupancyRejectReason, PresenceState, WorkerLaunchAckStatus,
+    WorkerLaunchGrant,
 };
 use winwincode_client_port::exchange::{
     AckCursor, FrameCodec, FrameCodecError, FrameOutbox, OutboxBatch, OutboxError, OutboxSession,
@@ -83,14 +96,17 @@ use winwincode_client_port::exchange::{
 use winwincode_client_port::messages::{
     CLIENT_CONTROL_PORT_SCHEMA_VERSION, ClientCommandAckPayload, ClientEnrollPayload,
     ClientHeartbeatPayload, ClientHelloPayload, ClientOccupancyAckPayload,
-    ClientOccupancyRejectedPayload, ClientToServerEnvelope, ClientToServerMessage, CommandContext,
-    OccupancyCommandContext, ServerAccessChallengePayload, ServerClientLockPayload,
-    ServerEnrollmentAcceptedPayload, ServerOccupancyForceFencePayload, ServerOccupancyOfferPayload,
-    ServerOccupancyReleasePayload, ServerToClientEnvelope, ServerToClientMessage,
+    ClientOccupancyRejectedPayload, ClientToServerEnvelope, ClientToServerMessage,
+    ClientWorkerLaunchAckPayload, CommandContext, OccupancyCommandContext,
+    ServerAccessChallengePayload, ServerClientLockPayload, ServerEnrollmentAcceptedPayload,
+    ServerOccupancyForceFencePayload, ServerOccupancyOfferPayload, ServerOccupancyReleasePayload,
+    ServerToClientEnvelope, ServerToClientMessage, ServerWorkerLaunchPayload,
 };
 
 use crate::connect_code::{self, PublishedConnectCode};
-use crate::fencing::{FencingGuard, FencingRejection, FencingTicket};
+use crate::fencing::{
+    FencedCommandKind, FencingGuard, FencingRejection, FencingTicket, FencingVerdict,
+};
 use crate::identity::{IdentityRecord, IssuedEnrollment, adopt_enrollment};
 use crate::store::{
     ClientInboxCursorUpdate, ConnectCodeStateRecord, ConnectionPolicyRecord, DeviceStore,
@@ -98,6 +114,7 @@ use crate::store::{
     OccupancyMirrorUpdate, OccupancyReleaseIntentOutcome, OccupancyReleaseIntentRecord,
     ServerProfileRecord, envelope_kind,
 };
+use crate::supervisor::{SessionSupervisor, SpawnOutcome, SpawnRequest, SupervisorError};
 
 /// Live worker-capacity facts for hello/heartbeat reports (plan 14.5).
 ///
@@ -134,6 +151,39 @@ pub trait LeaseWorkerController: Send + Sync {
     /// Stops every supervised worker bound to the lease and answers how
     /// many workers a stop was requested for.
     fn stop_lease_workers(&self, occupancy_lease_id: &str) -> usize;
+}
+
+/// The device-local directories hosting one worker session launch.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkerLaunchDirectories {
+    /// Local source root the worker executes against (config
+    /// `sourceDirectory`).
+    pub source_directory: PathBuf,
+    /// Local data root carrying the worker's private files (config
+    /// `dataDirectory`).
+    pub data_directory: PathBuf,
+    /// Local directory the worker process starts in.
+    pub worker_root: PathBuf,
+}
+
+/// The device-local launch material one `client.worker.launch` command
+/// needs beyond the frame itself (plan 14.3): the one-time Worker Session
+/// Credential material — delivered once with the launch response to the
+/// local user-session bridge, never on the exchange — and the local
+/// directories hosting the worker session. The daemon matches the material
+/// against the launch grant's `credentialDigest`. The credential may
+/// legitimately be absent when the launch command lands (the bridge
+/// receives it only after the grant was consumed): the daemon then spawns
+/// with a placeholder private file and fills it through
+/// [`DeviceDaemon::receive_worker_credential`]. Implementations must keep
+/// the credential material in memory only; tests inject fakes.
+pub trait WorkerLaunchMaterialSource: Send + Sync {
+    /// The raw Worker Session Credential whose `sha256:` digest the launch
+    /// grant carries; `None` when the local bridge has not received it yet.
+    fn worker_credential(&self, credential_digest: &str) -> Option<String>;
+    /// The local directories hosting the named worker session; `None` when
+    /// the device holds no usable local root for it.
+    fn launch_directories(&self, worker_session_id: &str) -> Option<WorkerLaunchDirectories>;
 }
 
 /// Longest slice the run loop sleeps without re-reading the shutdown flag.
@@ -394,6 +444,14 @@ pub struct DaemonStatus {
     /// `client.occupancy.force_fence` commands applied (mirror overwritten
     /// with the higher token).
     pub occupancy_force_fences_applied: u64,
+    /// `client.worker.launch_ack` frames answered `accepted`/`duplicate`
+    /// (the supervisor spawned the managed worker, or the launch replayed an
+    /// already-running one) (WORKER-200.2).
+    pub worker_launches_accepted: u64,
+    /// `client.worker.launch_ack` frames answered with a rejection — a
+    /// stale fencing stamp, missing launch material, or a failed spawn
+    /// (WORKER-200.2).
+    pub worker_launches_rejected: u64,
     /// Supervised workers a stop was requested for by a
     /// `cancel_tasks_and_release` occupancy release (WORKER-100.2).
     pub workers_stopped_on_release: u64,
@@ -475,6 +533,17 @@ pub struct DeviceDaemon {
     /// Local worker-stop hook for `cancel_tasks_and_release` releases
     /// (WORKER-100.2); `None` records the intent without stopping workers.
     lease_worker_controller: Option<Arc<dyn LeaseWorkerController>>,
+    /// The local worker supervisor (WORKER-200.2): the execution authority
+    /// `client.worker.launch` commands spawn through. `None` answers every
+    /// launch with a rejected acknowledgement.
+    worker_supervisor: Option<SessionSupervisor>,
+    /// The device-local launch material source (WORKER-200.2): the one-time
+    /// worker credential and the local directories one launch needs.
+    worker_launch_material: Option<Arc<dyn WorkerLaunchMaterialSource>>,
+    /// Credential digest → worker session of every launch this daemon
+    /// handled, so the deferred launch-response material reaches the right
+    /// worker's private file (`receive_worker_credential`).
+    launch_credential_sessions: std::collections::HashMap<String, String>,
     status: DaemonStatus,
 }
 
@@ -553,6 +622,9 @@ impl DeviceDaemon {
             occupancy_mirror,
             worker_capacity_source: None,
             lease_worker_controller: None,
+            worker_supervisor: None,
+            worker_launch_material: None,
+            launch_credential_sessions: std::collections::HashMap::new(),
             status: DaemonStatus {
                 enrolled,
                 ..DaemonStatus::default()
@@ -852,6 +924,24 @@ impl DeviceDaemon {
     /// worker bound to the lease after its durable intent is recorded.
     pub fn set_lease_worker_controller(&mut self, controller: Arc<dyn LeaseWorkerController>) {
         self.lease_worker_controller = Some(controller);
+    }
+
+    /// Wires the local worker supervisor (WORKER-200.2): every later
+    /// `client.worker.launch` command spawns its managed worker process
+    /// through it. Without a supervisor every launch is answered with a
+    /// rejected acknowledgement.
+    pub fn set_worker_supervisor(&mut self, supervisor: SessionSupervisor) {
+        self.worker_supervisor = Some(supervisor);
+    }
+
+    /// Wires the device-local launch material source (WORKER-200.2): the
+    /// bridge that received the one-time worker credential with the launch
+    /// response and owns the local worker directories.
+    pub fn set_worker_launch_material_source(
+        &mut self,
+        source: Arc<dyn WorkerLaunchMaterialSource>,
+    ) {
+        self.worker_launch_material = Some(source);
     }
 
     /// The capacity report for the current moment: the configured skeleton
@@ -1188,13 +1278,17 @@ impl DeviceDaemon {
                             self.apply_occupancy_force_fence(&payload, &envelope.message_id)
                                 .map_err(DownlinkFailure::Fatal)?;
                         }
+                        ServerToClientMessage::WorkerLaunch(payload) => {
+                            self.apply_worker_launch(&payload)
+                                .map_err(DownlinkFailure::Fatal)?;
+                        }
                         _ => {
-                            // Worker launch/stop, candidate apply,
-                            // repository, rescan, and credential commands
-                            // are owned by later device-client lanes; the
-                            // skeleton records them without acting. The
-                            // cursor has already advanced, so the skipped
-                            // frame never blocks the stream.
+                            // Worker stop, candidate apply, repository,
+                            // rescan, and credential commands are owned by
+                            // later device-client lanes; the skeleton
+                            // records them without acting. The cursor has
+                            // already advanced, so the skipped frame never
+                            // blocks the stream.
                             self.status.unhandled_downlink_commands += 1;
                         }
                     }
@@ -1653,6 +1747,261 @@ impl DeviceDaemon {
         }
     }
 
+    /// Applies one `client.worker.launch` (plan 14.3 steps 6-9,
+    /// WORKER-200.2): the occupancy fencing stamp is judged first (plan
+    /// 12.6), the grant's instance binding is checked against the current
+    /// launch, the launch material is resolved from the wired local source
+    /// (the one-time worker credential the launch response delivered to the
+    /// local user-session bridge plus the local worker directories), and
+    /// the supervisor spawns the one managed worker process. A passing
+    /// spawn — or its idempotent already-running replay — is answered with
+    /// a durable `client.worker.launch_ack` echoing the grant identities
+    /// and the current mirror revision, the settlement fact the Server
+    /// consumes the grant against. Every refusal answers a rejected
+    /// acknowledgement and touches nothing.
+    #[allow(clippy::too_many_lines)]
+    fn apply_worker_launch(
+        &mut self,
+        payload: &ServerWorkerLaunchPayload,
+    ) -> Result<(), DaemonError> {
+        let stamp = &payload.occupancy;
+        let grant = &payload.launch_grant;
+        let current_revision = self
+            .occupancy_mirror
+            .as_ref()
+            .map_or(0, |mirror| mirror.mirror_revision);
+
+        // Plan 12.6: the launch must carry the current mirror stamp; a
+        // rejected stamp spawns nothing and stops nothing.
+        let guard = self.fencing_guard();
+        let ticket = match guard.authorize_command(
+            FencedCommandKind::WorkerLaunch,
+            &stamp.occupancy_lease_id,
+            stamp.occupancy_fencing_token,
+        ) {
+            FencingVerdict::Authorized(ticket) => ticket,
+            FencingVerdict::Rejected(rejection) => {
+                drop(guard);
+                return self.enqueue_launch_ack(
+                    stamp,
+                    grant,
+                    fencing_launch_status(rejection),
+                    current_revision,
+                    Some(control_error(rejection.wire_error_code(), rejection)),
+                    None,
+                );
+            }
+        };
+        drop(guard);
+
+        // The grant binds the worker to the device instance that received
+        // it; a stale launch frame from a previous device boot can never
+        // spawn (the supervisor config would bake the wrong instance).
+        if grant.client_node_id != self.node_id || grant.client_instance_id != self.instance_id {
+            return self.enqueue_launch_ack(
+                stamp,
+                grant,
+                WorkerLaunchAckStatus::RejectedWrongState,
+                current_revision,
+                Some(ClientControlError {
+                    code: ClientControlErrorCode::DeviceInstanceChanged,
+                    message: "the launch grant names another device instance".to_owned(),
+                    retryable: false,
+                }),
+                None,
+            );
+        }
+
+        let rejection = |daemon: &mut Self,
+                         status: WorkerLaunchAckStatus,
+                         code: ClientControlErrorCode,
+                         message: String,
+                         retryable: bool| {
+            daemon.enqueue_launch_ack(
+                stamp,
+                grant,
+                status,
+                current_revision,
+                Some(ClientControlError {
+                    code,
+                    message,
+                    retryable,
+                }),
+                None,
+            )
+        };
+        let Some(supervisor) = self.worker_supervisor.clone() else {
+            return rejection(
+                self,
+                WorkerLaunchAckStatus::RejectedWrongState,
+                ClientControlErrorCode::InternalError,
+                "no local worker supervisor is wired".to_owned(),
+                false,
+            );
+        };
+        let Some(material) = self.worker_launch_material.as_ref() else {
+            return rejection(
+                self,
+                WorkerLaunchAckStatus::RejectedWrongState,
+                ClientControlErrorCode::GrantInvalid,
+                "no local worker launch material source is wired".to_owned(),
+                false,
+            );
+        };
+        let Some(directories) = material.launch_directories(&grant.worker_session_id) else {
+            return rejection(
+                self,
+                WorkerLaunchAckStatus::RejectedWrongState,
+                ClientControlErrorCode::GrantInvalid,
+                "no local worker directories are available for the launch".to_owned(),
+                false,
+            );
+        };
+        // The one-time credential may already sit in the local bridge (the
+        // launch response delivered it there) or land after the launch
+        // acknowledgement — the supervisor then writes a placeholder private
+        // file and [`DeviceDaemon::receive_worker_credential`] fills it once
+        // the material arrives; the worker transport re-reads it on every
+        // exchange.
+        let credential = material
+            .worker_credential(&grant.credential_digest)
+            .unwrap_or_default();
+        let spawn_request = SpawnRequest {
+            worker_session_id: &grant.worker_session_id,
+            worker_id: &grant.worker_id,
+            worker_instance_id: &grant.worker_instance_id,
+            occupancy_lease_id: &stamp.occupancy_lease_id,
+            occupancy_fencing_token: stamp.occupancy_fencing_token,
+            worker_credential_token: &credential,
+            repository_binding_id: &grant.repository_binding_id,
+            launch_grant_id: &grant.worker_launch_grant_id,
+            product_session_id: non_empty(&grant.product_session_id),
+            stage_run_id: non_empty(&grant.stage_run_id),
+            source_directory: &directories.source_directory,
+            data_directory: &directories.data_directory,
+            worker_root: &directories.worker_root,
+        };
+        let outcome = supervisor.spawn(spawn_request);
+        match outcome {
+            Ok(spawn_outcome) => {
+                // Remember which worker session the grant's credential binds
+                // to, so the deferred launch-response material can be
+                // written into the right private file when it lands.
+                self.launch_credential_sessions.insert(
+                    grant.credential_digest.clone(),
+                    grant.worker_session_id.clone(),
+                );
+                let (status, worker_id, worker_instance_id) = match spawn_outcome {
+                    // One-session-one-worker idempotence: the live process
+                    // of a previous identical launch answers `duplicate`.
+                    SpawnOutcome::Started(handle) => (
+                        WorkerLaunchAckStatus::Accepted,
+                        handle.worker_id,
+                        handle.worker_instance_id,
+                    ),
+                    SpawnOutcome::AlreadyRunning(record) => (
+                        WorkerLaunchAckStatus::Duplicate,
+                        record.worker_id,
+                        record.worker_instance_id,
+                    ),
+                };
+                self.enqueue_launch_ack(
+                    stamp,
+                    grant,
+                    status,
+                    ticket.mirror_revision,
+                    None,
+                    Some((&worker_id, &worker_instance_id)),
+                )
+            }
+            Err(error) => {
+                let (status, code, retryable) = launch_spawn_rejection(&error);
+                rejection(self, status, code, error.to_string(), retryable)
+            }
+        }
+    }
+
+    /// Delivers one deferred Worker Session Credential: the launch response
+    /// handed the raw material to the local user-session bridge after the
+    /// grant was consumed, and the bridge hands it over here. The material
+    /// is written into the supervised worker's mode-0600 credential file
+    /// (the worker transport re-reads it on every exchange) and never
+    /// persisted anywhere else. Answers whether the digest named a launch
+    /// this daemon handled.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DaemonError::Protocol`] when the credential file write
+    /// fails.
+    pub fn receive_worker_credential(
+        &mut self,
+        credential_digest: &str,
+        material: &str,
+    ) -> Result<bool, DaemonError> {
+        let Some(worker_session_id) = self.launch_credential_sessions.get(credential_digest) else {
+            return Ok(false);
+        };
+        let Some(supervisor) = self.worker_supervisor.as_ref() else {
+            return Ok(false);
+        };
+        supervisor
+            .write_worker_credential(worker_session_id, material)
+            .map_err(|error| {
+                DaemonError::Protocol(format!("deferred credential delivery failed: {error}"))
+            })?;
+        Ok(true)
+    }
+
+    /// Builds and enqueues the durable `client.worker.launch_ack` for one
+    /// handled launch. The idempotency key is deterministic per grant, so a
+    /// redelivered command re-acks with the same key, and the occupancy
+    /// stamp echoes the command's lease and token with the device's current
+    /// mirror revision (the revision fact the Server's grant settlement
+    /// observes).
+    #[allow(clippy::too_many_arguments)]
+    fn enqueue_launch_ack(
+        &mut self,
+        stamp: &OccupancyCommandContext,
+        grant: &WorkerLaunchGrant,
+        status: WorkerLaunchAckStatus,
+        expected_revision: u64,
+        error: Option<ClientControlError>,
+        worker_identity: Option<(&str, &str)>,
+    ) -> Result<(), DaemonError> {
+        let (worker_id, worker_instance_id) =
+            worker_identity.unwrap_or((&grant.worker_id, &grant.worker_instance_id));
+        self.enqueue(ClientToServerMessage::WorkerLaunchAck(Box::new(
+            ClientWorkerLaunchAckPayload {
+                occupancy: OccupancyCommandContext {
+                    command: CommandContext {
+                        expected_revision,
+                        idempotency_key: format!(
+                            "worker-launch-ack-{}",
+                            grant.worker_launch_grant_id
+                        ),
+                    },
+                    occupancy_lease_id: stamp.occupancy_lease_id.clone(),
+                    occupancy_fencing_token: stamp.occupancy_fencing_token,
+                },
+                worker_launch_grant_id: grant.worker_launch_grant_id.clone(),
+                worker_session_id: grant.worker_session_id.clone(),
+                worker_id: worker_id.to_owned(),
+                worker_instance_id: worker_instance_id.to_owned(),
+                status,
+                error,
+            },
+        )))?;
+        if matches!(
+            status,
+            WorkerLaunchAckStatus::Accepted | WorkerLaunchAckStatus::Duplicate
+        ) {
+            self.status.worker_launches_accepted += 1;
+        } else {
+            self.status.worker_launches_rejected += 1;
+        }
+        Ok(())
+    }
+
     fn restore_downlink_cursor(&mut self) -> Result<(), DaemonError> {
         self.downlink = match self.store.inbox_cursor(&self.config.server_profile_id)? {
             Some(cursor) => AckCursor::from_ack(cursor.last_sequence),
@@ -1923,4 +2272,48 @@ fn command_ack_message(
         current_revision,
         error,
     })
+}
+
+/// The `client.worker.launch_ack` status for one fencing rejection: an
+/// unknown mirror reads as a lease mismatch, a stale or superseded stamp as
+/// a stale fencing token (the same distinction the release ack draws).
+const fn fencing_launch_status(rejection: FencingRejection) -> WorkerLaunchAckStatus {
+    match rejection {
+        FencingRejection::MirrorNotSet => WorkerLaunchAckStatus::RejectedLeaseMismatch,
+        FencingRejection::StaleFencingToken | FencingRejection::SupersededIntent => {
+            WorkerLaunchAckStatus::RejectedStaleFencingToken
+        }
+    }
+}
+
+/// Maps one supervisor spawn failure onto the launch-ack rejection verdict:
+/// a fencing refusal keeps its precise wire status, an exhausted local
+/// capacity bound its own status, and every other spawn failure is a wrong
+/// device state with an internal error fact.
+fn launch_spawn_rejection(
+    error: &SupervisorError,
+) -> (WorkerLaunchAckStatus, ClientControlErrorCode, bool) {
+    match error {
+        SupervisorError::Fencing(rejection) => (
+            fencing_launch_status(*rejection),
+            rejection.wire_error_code(),
+            false,
+        ),
+        SupervisorError::CapacityExhausted { .. } => (
+            WorkerLaunchAckStatus::RejectedCapacityExhausted,
+            ClientControlErrorCode::CapacityExhausted,
+            true,
+        ),
+        _ => (
+            WorkerLaunchAckStatus::RejectedWrongState,
+            ClientControlErrorCode::InternalError,
+            false,
+        ),
+    }
+}
+
+/// `Some(value)` when the grant's optional scope field is a non-empty
+/// string, `None` otherwise (the wire encodes absent scopes as empty).
+fn non_empty(value: &str) -> Option<&str> {
+    (!value.is_empty()).then_some(value)
 }
