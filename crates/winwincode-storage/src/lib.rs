@@ -16,6 +16,7 @@ mod client_occupancy;
 mod client_registry;
 mod control_plane_instances;
 mod device_execution_binding;
+mod device_scheduler;
 mod enterprise_policy;
 mod enterprise_policy_evaluation;
 mod enterprise_quota;
@@ -88,6 +89,12 @@ pub use device_execution_binding::{
     DeviceExecutionBindingStoreError, DeviceExecutionBindingStoreErrorKind,
     DeviceExecutionCapacitySnapshot, DeviceExecutionFactsAttachment,
     DeviceExecutionReservationFacts, DeviceFactsReceipt,
+};
+pub use device_scheduler::{
+    DeviceSchedulerLedger, DeviceSchedulerReleaseReason, DeviceSchedulerReservationGrant,
+    DeviceSchedulerReservationRecord, DeviceSchedulerReservationRelease,
+    DeviceSchedulerReservationRequest, DeviceSchedulerReservationState,
+    DeviceSchedulerReserveOutcome, DeviceSchedulerStoreError, DeviceSchedulerStoreErrorKind,
 };
 pub use enterprise_policy::{
     EnterprisePolicyActor, EnterprisePolicyChildOverrideMode, EnterprisePolicyCursor,
