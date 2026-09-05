@@ -61,6 +61,13 @@
 //!   `worker_process_registry` (pid + process-start identity), reap/stop
 //!   with terminal observations, the restart `reconcile` scan, and the
 //!   live capacity facts wired into the daemon's hello/heartbeat.
+//! - [`worker_logs`]: the bounded, redacted worker-subprocess logs
+//!   (WORKER-100.5) — capped, rotated, retention-pruned stdout/stderr
+//!   capture filtered at ingest (credentials, absolute paths, model
+//!   bodies), idempotent terminal exit facts, and the safe diagnostics
+//!   surface ([`worker_logs::WorkerLogSummary`] and
+//!   [`worker_logs::WorkerLogCrashReference`]) that correlates an abnormal
+//!   exit to its unique WorkerSession without ever exposing raw content.
 //! - [`http`]: the dependency-free std TCP HTTP/1.1 exchange transport
 //!   implementation of [`daemon::ExchangeTransport`].
 //!
@@ -90,6 +97,7 @@ pub mod repository;
 pub mod repository_git;
 pub mod store;
 pub mod supervisor;
+pub mod worker_logs;
 
 pub use candidate_registry::{
     CANDIDATE_REF_PREFIX, CandidateLocalRefRecord, CandidateReconciliation, CandidateRefVerdict,
@@ -138,6 +146,11 @@ pub use supervisor::{
     SupervisorError, WORKER_STATE_CRASHED, WORKER_STATE_EXITED, WORKER_STATE_MISSING,
     WORKER_STATE_RUNNING, WorkerHandle, WorkerReconcileReport, WorkerReconcileVerdict,
     WorkerStopOutcome,
+};
+pub use worker_logs::{
+    WORKER_LOG_SCHEMA_VERSION, WorkerExitFact, WorkerExitRecordOutcome, WorkerLogAppendStats,
+    WorkerLogConfig, WorkerLogContentKind, WorkerLogCrashReference, WorkerLogError,
+    WorkerLogRecorder, WorkerLogStream, WorkerLogSummary,
 };
 
 // Façade re-export: the connection policy, lock, and connect-code lifecycle
