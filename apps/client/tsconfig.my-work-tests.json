@@ -1,0 +1,20 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "declaration": false,
+    "declarationMap": false,
+    "lib": [
+      "DOM",
+      "DOM.Iterable",
+      "ES2023"
+    ],
+    "noEmit": false,
+    "outDir": "../../.cache/my-work-tests",
+    "rootDir": "src",
+    "sourceMap": false,
+    "tsBuildInfoFile": "../../.cache/tsbuild/my-work-tests.tsbuildinfo"
+  },
+  "include": [
+    "src/**/*.ts"
+  ]
+}

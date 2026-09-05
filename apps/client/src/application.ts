@@ -988,7 +988,12 @@ export function mountWinWinCodeClient(
     }
   }
 
-  /** UI-504: the Attention-first dashboard composed from the existing projections. */
+  /**
+   * UX-100.1: My Work is the converged post-login first screen.  It reuses the
+   * existing Home dashboard projection (Attention, Delivery, Usage) as its work
+   * sections, adds the §16.2 start-task entry and the Clients status zone from
+   * the shell-owned Clients area model, and keeps every Home deep link.
+   */
   async function renderHome(generation: number): Promise<void> {
     const context = authenticatedRouteContext()
     if (context === null) return
@@ -996,12 +1001,12 @@ export function mountWinWinCodeClient(
     featureController = controller
     routeLoading('Loading Home…')
     try {
-      const [{ createHomeDashboardViewModel }, { mountHomeDashboardPage }] = await Promise.all([
-        import('./home-dashboard-view-model.js'),
-        import('./home-dashboard-page.js'),
+      const [{ createMyWorkViewModel }, { mountMyWorkPage }] = await Promise.all([
+        import('./my-work-view-model.js'),
+        import('./my-work-page.js'),
       ])
       if (closed || generation !== renderGeneration || controller.signal.aborted) return
-      const model = createHomeDashboardViewModel({
+      const model = createMyWorkViewModel({
         client: controlPlane,
         actor: context.actor,
         scope: context.scope,
@@ -1010,11 +1015,14 @@ export function mountWinWinCodeClient(
           browser.crypto,
         ) as ControlPlaneWebSocketSubscriptionId,
         nextRequestId: () => contractId('req', browser.crypto) as RequestId,
+        // The Clients zone reuses the one shell-owned Clients area model, so
+        // the first screen never grows a second device-list state.
+        clients: clientsModel,
         visits: homeVisits,
       })
       // The page owns the composed model: its close chain also closes the
       // Attention, Delivery and Usage projections it mounted.
-      activeFeature = mountHomeDashboardPage({
+      activeFeature = mountMyWorkPage({
         root: slot,
         model,
         scopeSelection: scopeSelectionFromHash(browser.location.hash),
