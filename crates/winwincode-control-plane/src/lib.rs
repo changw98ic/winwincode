@@ -31,6 +31,7 @@ mod delivery_transaction;
 mod delivery_verdict_authority;
 mod device_execution_binding;
 mod device_scheduler;
+pub mod device_session_gate;
 mod durable_execution_port;
 mod enterprise_hierarchy;
 mod enterprise_identity;

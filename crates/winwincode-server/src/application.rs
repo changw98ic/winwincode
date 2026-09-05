@@ -11,11 +11,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 use winwincode_api::generated::{
-    CommandCompletedResponse, CommandRequest, ControlPlaneWebSocketClientFrame, ErrorCode,
+    Actor, CommandCompletedResponse, CommandRequest, ControlPlaneWebSocketClientFrame, ErrorCode,
     QueryRequest, QueryResultResponse, Scope,
 };
 use winwincode_control_plane::credential_reference::{
     CredentialReferenceError, CredentialReferenceErrorKind, CredentialReferenceService,
+};
+use winwincode_control_plane::device_session_gate::{
+    DeviceSessionGateDenial, authorize_product_session_turn,
 };
 use winwincode_control_plane::strongflow_projection::{
     StrongFlowProjectionError, StrongFlowProjectionQueryPort,
@@ -31,7 +34,7 @@ use winwincode_control_plane::{
     PublicationCommandError, ScopeWorkerHealthEventPort, WorkerManagementService,
     WorkerManagementServiceError, WorkerManagementServiceErrorKind,
 };
-use winwincode_domain::{ControlPlaneWebSocketAuthorizationEpoch, Instant};
+use winwincode_domain::{ControlPlaneWebSocketAuthorizationEpoch, Instant, ProductSessionId};
 use winwincode_storage::{ProductStateStorage, SqliteStorage};
 
 use crate::{
@@ -399,6 +402,18 @@ impl StandaloneControlPlaneApplication {
     ) -> Result<CommandDispatchResponse, ApiError> {
         let mut guard = self.state()?;
         let state = guard.as_mut().ok_or_else(service_unavailable)?;
+        // FLOW-100.3: the ProductSession continue permission gate. A session
+        // bound to device execution continues only for its current occupancy
+        // holder while the repository binding stays visible under the
+        // dual-authorization projection; sessions without a device anchor
+        // pass through unchanged.
+        if let CommandRequest::ChatSubmitCommand(command) = &request {
+            product_session_turn_gate(
+                &mut state.storage,
+                &command.actor,
+                &command.payload.product_session_id,
+            )?;
+        }
         let response = {
             let mut clock = ProductSessionClockAdapter(self.clock.as_ref());
             let mut service = ProductSessionApiService::new(
@@ -953,6 +968,31 @@ fn credential_error(error: &CredentialReferenceError) -> ApiError {
             service_unavailable()
         }
     }
+}
+
+/// FLOW-100.3: the `ProductSession` continue permission gate entry. Only a
+/// signed-in user actor is gated; service and system actors pass through.
+fn product_session_turn_gate(
+    storage: &mut SqliteStorage,
+    actor: &Actor,
+    product_session_id: &ProductSessionId,
+) -> Result<(), ApiError> {
+    let Actor::UserActor(user) = actor else {
+        return Ok(());
+    };
+    authorize_product_session_turn(storage, user.id.0.as_str(), product_session_id.0.as_str())
+        .map(|_| ())
+        .map_err(|error| device_session_gate_error(&error))
+}
+
+/// Maps one gate denial onto the central gate wire error code
+/// (`OCCUPANCY_REQUIRED` / `ACCESS_DENIED` / `BINDING_NOT_VISIBLE`).
+fn device_session_gate_error(error: &DeviceSessionGateDenial) -> ApiError {
+    ApiError::new(
+        error.http_status(),
+        error.wire_code(),
+        "ProductSession device execution gate denied the request",
+    )
 }
 
 fn product_session_error(error: &ProductSessionServiceError) -> ApiError {

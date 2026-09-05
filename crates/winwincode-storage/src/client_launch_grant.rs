@@ -864,6 +864,37 @@ impl<'storage> WorkerLaunchGrantLedger<'storage> {
         }
     }
 
+    /// Returns the newest launch grant anchored to one product session, if
+    /// any, regardless of its lifecycle state: the anchor proves the session
+    /// was bound to device execution and stays the permission anchor of the
+    /// session after the grant itself ends.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a non-canonical product session identity, a corrupt stored
+    /// row, or storage failure.
+    pub fn newest_grant_for_product_session(
+        &self,
+        product_session_id: &str,
+    ) -> Result<Option<WorkerLaunchGrantRecord>, WorkerLaunchGrantStoreError> {
+        validate_product_session_id(product_session_id)?;
+        let connection = self.connection()?;
+        let grant_id = connection
+            .query_row(
+                "SELECT worker_launch_grant_id FROM worker_launch_grants
+                 WHERE product_session_id = ?1
+                 ORDER BY created_at DESC, worker_launch_grant_id DESC LIMIT 1",
+                [product_session_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|sql| sql_error(&sql))?;
+        match grant_id {
+            Some(grant_id) => load_launch_grant(connection, &grant_id),
+            None => Ok(None),
+        }
+    }
+
     /// Counts the non-terminal (`issued` plus `consumed`) grants of one
     /// client node — the durable reservation view capacity is judged against
     /// (plan 14.5).
@@ -1561,7 +1592,13 @@ fn validate_worker_instance_id(value: &str) -> Result<(), WorkerLaunchGrantStore
 }
 
 fn validate_product_session_id(value: &str) -> Result<(), WorkerLaunchGrantStoreError> {
-    validate_crockford_id(value, "ps_", "product session id")
+    // A launch may bind either a launch-minted device session (`ps_`) or a
+    // chat-surface session (`psn_`); both share the 26 character identity
+    // suffix, which is what lets a Chat session anchor to device execution.
+    if validate_crockford_id(value, "ps_", "product session id").is_ok() {
+        return Ok(());
+    }
+    validate_crockford_id(value, "psn_", "product session id")
 }
 
 fn validate_stage_run_id(value: &str) -> Result<(), WorkerLaunchGrantStoreError> {
