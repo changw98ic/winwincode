@@ -139,3 +139,15 @@
     grid-template-columns: 1fr;
   }
 }
+
+/* REPO-100.3: the per-device repository toggle; pressed marks the selected
+   card whose repository list the repository area shows. */
+.wwc-clients-card-select {
+  justify-self: start;
+}
+
+.wwc-clients-card-select[aria-pressed='true'] {
+  color: var(--wwc-color-info-text);
+  border-color: var(--wwc-color-info-border);
+  background: var(--wwc-color-info-surface);
+}

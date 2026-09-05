@@ -1017,6 +1017,186 @@ export function createControlPlaneClient(options: ControlPlaneClientOptions): Co
 }
 
 // ---------------------------------------------------------------------------
+// Repository directory: the authorized repository list (REPO-100.3).
+//
+// FAKE-DRIVEN SHAPES: the route and payload shape in this block are the
+// presentation-side contract for the repository list. The Server owns the
+// real wire route and payload names; when the Server landing settles them,
+// only the path constant and the parsers in this block change. Pages and
+// view-models only ever see the typed unions and summaries below. The enum
+// values mirror the canonical contracts (`RepositoryDirtyState`,
+// `RepositoryAvailability`) without importing the contracts source.
+// ---------------------------------------------------------------------------
+
+const REPOSITORY_DIRECTORY_LIST_PATH = '/api/v1/repositories'
+
+export type ControlPlaneRepositoryDirtyState = 'clean' | 'dirty'
+
+/** The seven canonical repository availability projections. */
+export type ControlPlaneRepositoryAvailability =
+  | 'available'
+  | 'dirty'
+  | 'unavailable'
+  | 'moved'
+  | 'invalid_git'
+  | 'permission_denied'
+  | 'scan_failed'
+
+/** One repository list read: the Client device whose bindings are listed. */
+export interface ControlPlaneRepositoryListInput {
+  readonly clientId: string
+}
+
+/** One repository card. The Server owns every field; the browser only displays. */
+export interface ControlPlaneRepositorySummary {
+  readonly repositoryBindingId: string
+  readonly displayName: string
+  readonly defaultBranch: string
+  readonly headCommit: string
+  readonly dirtyState: ControlPlaneRepositoryDirtyState
+  readonly availability: ControlPlaneRepositoryAvailability
+}
+
+const REPOSITORY_DIRTY_STATE_VALUES: readonly string[] = Object.freeze(['clean', 'dirty'])
+const REPOSITORY_AVAILABILITY_VALUES: readonly string[] = Object.freeze([
+  'available',
+  'dirty',
+  'unavailable',
+  'moved',
+  'invalid_git',
+  'permission_denied',
+  'scan_failed',
+])
+
+function invalidRepositoryListError(): ControlPlaneClientError {
+  return new ControlPlaneClientError({
+    kind: 'protocol',
+    code: 'INVALID_REPOSITORY_LIST_RESPONSE',
+    message: 'The Control Plane server returned an invalid repository list.',
+    requestId: null,
+    retryable: false,
+  })
+}
+
+/**
+ * Validate the list input before a request exists: the query names one Client
+ * device, so the identity must be a non-empty digit string with no grouping
+ * separators or path-shaped text.
+ */
+function assertRepositoryListInput(clientId: string): void {
+  if (!/^\d+$/u.test(clientId)) {
+    throw new ControlPlaneClientError({
+      kind: 'protocol',
+      code: 'REPOSITORY_LIST_INPUT_INVALID',
+      message: 'Select a Client to list its repositories.',
+      requestId: null,
+      retryable: false,
+    })
+  }
+}
+
+function repositorySummaryValue(value: unknown): ControlPlaneRepositorySummary {
+  if (!isRecord(value)) throw invalidRepositoryListError()
+  const dirtyState = value.dirtyState
+  const availability = value.availability
+  if (
+    typeof value.repositoryBindingId !== 'string'
+    || value.repositoryBindingId.length === 0
+    || typeof value.displayName !== 'string'
+    || value.displayName.length === 0
+    || typeof value.defaultBranch !== 'string'
+    || value.defaultBranch.length === 0
+    || typeof value.headCommit !== 'string'
+    || value.headCommit.length === 0
+    || typeof dirtyState !== 'string'
+    || !REPOSITORY_DIRTY_STATE_VALUES.includes(dirtyState)
+    || typeof availability !== 'string'
+    || !REPOSITORY_AVAILABILITY_VALUES.includes(availability)
+  ) {
+    throw invalidRepositoryListError()
+  }
+  return Object.freeze({
+    repositoryBindingId: value.repositoryBindingId,
+    displayName: value.displayName,
+    defaultBranch: value.defaultBranch,
+    headCommit: value.headCommit,
+    dirtyState: dirtyState as ControlPlaneRepositoryDirtyState,
+    availability: availability as ControlPlaneRepositoryAvailability,
+  })
+}
+
+function repositoryListResponse(source: string): readonly ControlPlaneRepositorySummary[] {
+  let value: unknown
+  try {
+    value = JSON.parse(source)
+  } catch {
+    value = null
+  }
+  if (
+    isRecord(value)
+    && typeof value.schemaVersion === 'string'
+    && value.schemaVersion !== CONTROL_PLANE_SCHEMA_VERSION
+  ) {
+    throw new ControlPlaneClientError({
+      kind: 'version',
+      code: 'SCHEMA_VERSION_MISMATCH',
+      message: `The Control Plane server must use ${CONTROL_PLANE_SCHEMA_VERSION}.`,
+      requestId: null,
+      retryable: false,
+    })
+  }
+  if (!isRecord(value) || !Array.isArray(value.repositories)) throw invalidRepositoryListError()
+  return Object.freeze(value.repositories.map(repositorySummaryValue))
+}
+
+async function repositoriesListRequest(
+  location: ControlPlaneServerLocation,
+  transportFetch: ControlPlaneTransportFetch | undefined,
+  clientId: string,
+  signal: AbortSignal | undefined,
+): Promise<readonly ControlPlaneRepositorySummary[]> {
+  if (signalIsAborted(signal)) throw cancelledError(null)
+  if (transportFetch === undefined) {
+    throw new ControlPlaneClientError({
+      kind: 'protocol',
+      code: 'TRANSPORT_UNAVAILABLE',
+      message: 'The browser HTTP transport is unavailable.',
+      requestId: null,
+      retryable: false,
+    })
+  }
+  try {
+    const response = await transportFetch(
+      `${location.serverUrl}${REPOSITORY_DIRECTORY_LIST_PATH}`
+        + `?clientId=${encodeURIComponent(clientId)}`,
+      {
+        method: 'GET',
+        headers: {},
+        redirect: 'error',
+        cache: 'no-store',
+        referrerPolicy: 'no-referrer',
+        credentials: 'include',
+        ...(signal === undefined ? {} : { signal }),
+      },
+    )
+    const source = await response.text()
+    if (!response.ok) throw clientDirectoryBoundaryError(response.status, source)
+    if (response.status !== 200) throw invalidRepositoryListError()
+    return repositoryListResponse(source)
+  } catch (error) {
+    if (signalIsAborted(signal)) throw cancelledError(null)
+    if (error instanceof ControlPlaneClientError) throw error
+    throw new ControlPlaneClientError({
+      kind: 'network',
+      code: 'NETWORK_ERROR',
+      message: 'The Control Plane server could not be reached.',
+      requestId: null,
+      retryable: true,
+    })
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Client directory: add-Client connect and the device card list (CLIENT-200.4).
 //
 // FAKE-DRIVEN SHAPES: the routes and payload shapes in this block are the
@@ -1266,6 +1446,11 @@ export interface ControlPlaneClientDirectory extends ControlPlaneClient {
   listClients(
     options?: ControlPlaneRequestOptions,
   ): Promise<readonly ControlPlaneDeviceSummary[]>
+  /** Read the repository list bound to one Client device. */
+  listRepositories(
+    input: ControlPlaneRepositoryListInput,
+    options?: ControlPlaneRequestOptions,
+  ): Promise<readonly ControlPlaneRepositorySummary[]>
 }
 
 /**
@@ -1285,6 +1470,7 @@ export function createControlPlaneClientDirectory(options: {
   const injected = options.client as Partial<ControlPlaneClientDirectory>
   const injectedAddClient = injected.addClient
   const injectedListClients = injected.listClients
+  const injectedListRepositories = injected.listRepositories
 
   async function directoryRequest(
     path: string,
@@ -1418,6 +1604,20 @@ export function createControlPlaneClientDirectory(options: {
         return injectedListClients.call(options.client, requestOptions)
       }
       return listRequest(requestOptions)
+    },
+    async listRepositories(rawInput, requestOptions) {
+      // The facade is the one place that owns the query identity, so an
+      // injected directory implementation receives the same normalized input
+      // the wire path would send. Every rejection surfaces as a promise
+      // rejection, mirroring the connect path above.
+      const input: ControlPlaneRepositoryListInput = {
+        clientId: (typeof rawInput?.clientId === 'string' ? rawInput.clientId : '').trim(),
+      }
+      assertRepositoryListInput(input.clientId)
+      if (typeof injectedListRepositories === 'function') {
+        return injectedListRepositories.call(options.client, input, requestOptions)
+      }
+      return repositoriesListRequest(location, transportFetch, input.clientId, requestOptions?.signal)
     },
     close() {
       options.client.close()

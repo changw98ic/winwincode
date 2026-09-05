@@ -1,0 +1,112 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+
+/* REPO-100.3: the signed-in repository list for the selected Client. It only
+   reads tokens, like every other shell region. */
+.wwc-repositories {
+  max-width: 36rem;
+  margin: var(--wwc-space-4) auto;
+  padding: var(--wwc-space-4);
+  border: var(--wwc-border-width) solid var(--wwc-color-border);
+  border-radius: var(--wwc-radius-lg);
+  background: var(--wwc-color-surface);
+}
+
+.wwc-repositories-heading {
+  margin: var(--wwc-space-0) var(--wwc-space-0) var(--wwc-space-2);
+  font-size: var(--wwc-font-size-lg);
+  font-weight: var(--wwc-font-weight-strong);
+}
+
+.wwc-repositories-hint {
+  margin: var(--wwc-space-2) var(--wwc-space-0);
+  color: var(--wwc-color-text-muted);
+}
+
+.wwc-repositories-error {
+  margin: var(--wwc-space-2) var(--wwc-space-0);
+  padding: var(--wwc-space-2) var(--wwc-space-3);
+  border: var(--wwc-border-width) solid var(--wwc-color-danger-border);
+  border-radius: var(--wwc-radius-md);
+  color: var(--wwc-color-danger-text);
+  background: var(--wwc-color-danger-surface);
+}
+
+.wwc-repositories-empty {
+  margin: var(--wwc-space-3) var(--wwc-space-0);
+  color: var(--wwc-color-text-muted);
+}
+
+.wwc-repositories-list {
+  margin-top: var(--wwc-space-3);
+  border-top: var(--wwc-border-width) solid var(--wwc-color-border);
+}
+
+.wwc-repositories-card {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+  gap: var(--wwc-space-1) var(--wwc-space-3);
+  padding: var(--wwc-space-3) var(--wwc-space-0);
+  border-bottom: var(--wwc-border-width) solid var(--wwc-color-border);
+}
+
+.wwc-repositories-card-name {
+  margin: var(--wwc-space-0);
+  font-weight: var(--wwc-font-weight-medium);
+}
+
+.wwc-repositories-card-availability {
+  align-self: center;
+  justify-self: start;
+  padding: 0 var(--wwc-space-2);
+  border: var(--wwc-border-width) solid var(--wwc-color-border);
+  border-radius: var(--wwc-radius-sm);
+  font-size: var(--wwc-font-size-xs);
+}
+
+.wwc-repositories-card-availability[data-tone='warning'] {
+  color: var(--wwc-color-warning-text);
+  border-color: var(--wwc-color-warning-border);
+  background: var(--wwc-color-warning-surface);
+}
+
+.wwc-repositories-card-availability[data-tone='danger'] {
+  color: var(--wwc-color-danger-text);
+  border-color: var(--wwc-color-danger-border);
+  background: var(--wwc-color-danger-surface);
+}
+
+.wwc-repositories-card-meta {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--wwc-space-2);
+  margin: var(--wwc-space-0);
+  color: var(--wwc-color-text-muted);
+  font-size: var(--wwc-font-size-sm);
+}
+
+.wwc-repositories-card-dirty {
+  padding: 0 var(--wwc-space-2);
+  border: var(--wwc-border-width) solid var(--wwc-color-border);
+  border-radius: var(--wwc-radius-sm);
+  font-size: var(--wwc-font-size-xs);
+}
+
+.wwc-repositories-card-dirty[data-tone='success'] {
+  color: var(--wwc-color-success-text);
+  border-color: var(--wwc-color-success-border);
+  background: var(--wwc-color-success-surface);
+}
+
+.wwc-repositories-card-dirty[data-tone='warning'] {
+  color: var(--wwc-color-warning-text);
+  border-color: var(--wwc-color-warning-border);
+  background: var(--wwc-color-warning-surface);
+}
+
+@media (max-width: 48rem) {
+  .wwc-repositories {
+    margin: var(--wwc-space-3) var(--wwc-space-2);
+  }
+}

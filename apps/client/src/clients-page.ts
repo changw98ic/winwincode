@@ -19,6 +19,12 @@ export interface ClientsPageOptions {
   readonly model: ClientsViewModel
   /** Epoch-milliseconds clock for the relative heartbeat text. */
   readonly now?: () => number
+  /**
+   * REPO-100.3: raised when the user selects a device card for its repository
+   * list, and with null when the selection is toggled off or the selected
+   * device leaves the list.
+   */
+  readonly onDeviceSelect?: (clientId: string | null) => void
 }
 
 export interface ClientsPage {
@@ -29,6 +35,7 @@ export interface ClientsPage {
 
 interface ClientCardRefs {
   readonly card: HTMLElement
+  readonly clientId: string
   readonly name: HTMLElement
   readonly presence: HTMLElement
   readonly stateText: HTMLElement
@@ -37,6 +44,7 @@ interface ClientCardRefs {
   readonly version: HTMLElement
   readonly connect: HTMLButtonElement
   readonly release: HTMLButtonElement
+  readonly select: HTMLButtonElement
 }
 
 function element<K extends keyof HTMLElementTagNameMap>(
@@ -100,6 +108,8 @@ export function mountClientsPage(options: ClientsPageOptions): ClientsPage {
   const cards = new WeakMap<HTMLElement, ClientCardRefs>()
   let closed = false
   let clearedAfterSuccess = false
+  // REPO-100.3: the device card selection that drives the repository area.
+  let selectedClientId: string | null = null
 
   region.setAttribute('aria-label', 'Clients')
   region.hidden = true
@@ -171,10 +181,22 @@ export function mountClientsPage(options: ClientsPageOptions): ClientsPage {
       release.type = 'button'
       release.textContent = 'Release'
       release.disabled = true
-      actions.append(connect, release)
+      // REPO-100.3: the repository list of this device opens from a pressed
+      // toggle so keyboard and screen-reader users get the same selection.
+      const select = element(document, 'button', 'wwc-clients-card-select')
+      select.type = 'button'
+      select.textContent = 'Repositories'
+      select.setAttribute('aria-pressed', 'false')
+      select.addEventListener('click', () => {
+        selectedClientId = selectedClientId === device.clientId ? null : device.clientId
+        applySelection()
+        options.onDeviceSelect?.(selectedClientId)
+      })
+      actions.append(connect, release, select)
       card.append(name, presence, stateText, capacity, heartbeat, version, actions)
       const refs: ClientCardRefs = {
-        card, name, presence, stateText, capacity, heartbeat, version, connect, release,
+        card, clientId: device.clientId, name, presence, stateText,
+        capacity, heartbeat, version, connect, release, select,
       }
       cards.set(card, refs)
       updateCard(refs, device)
@@ -196,6 +218,18 @@ export function mountClientsPage(options: ClientsPageOptions): ClientsPage {
     refs.capacity.textContent = `Capacity ${device.capacityUsed} / ${device.capacityTotal}`
     refs.heartbeat.textContent = relativeHeartbeatText(device.lastHeartbeatAt, now())
     refs.version.textContent = `Version ${device.version}`
+  }
+
+  /** Reflect the single card selection across every mounted select toggle. */
+  function applySelection(): void {
+    for (const node of list.children) {
+      const refs = cards.get(node as HTMLElement)
+      if (refs === undefined) continue
+      refs.select.setAttribute(
+        'aria-pressed',
+        refs.clientId === selectedClientId ? 'true' : 'false',
+      )
+    }
   }
 
   function setFieldError(control: HTMLInputElement, hasError: boolean): void {
@@ -236,6 +270,16 @@ export function mountClientsPage(options: ClientsPageOptions): ClientsPage {
     submit.disabled = busy
     form.setAttribute('aria-busy', busy ? 'true' : 'false')
     cardCollection.update(snapshot.devices)
+    // A device that left the list can stay selected nowhere; the repository
+    // area hears the drop through the same callback as a manual toggle.
+    if (
+      selectedClientId !== null
+      && !snapshot.devices.some(device => device.clientId === selectedClientId)
+    ) {
+      selectedClientId = null
+      options.onDeviceSelect?.(null)
+    }
+    applySelection()
     empty.hidden = snapshot.devices.length !== 0 || snapshot.devicesStatus === 'loading'
   }
 
