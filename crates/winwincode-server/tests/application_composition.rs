@@ -11,8 +11,7 @@ use winwincode_api::generated::{
     CredentialReferenceGetParameters, CredentialReferenceGetQuery,
     CredentialReferenceGetQueryQuery, CredentialReferenceRotateCommand,
     CredentialReferenceRotateCommandCommand, CredentialReferenceRotatePayload, OrganizationScope,
-    OrganizationScopeKind, PageRequest, QueryRequest, QueryResultResponse, RepositoryScope, Scope,
-    UserActor, UserActorKind,
+    OrganizationScopeKind, PageRequest, QueryRequest, QueryResultResponse, Scope,
 };
 use winwincode_control_plane::{
     ControlPlane, ControlPlaneConfig, DurableWorkerInteractionOutbound, EventPublishError,
@@ -22,6 +21,7 @@ use winwincode_domain::{
     CredentialReferenceId, ExecutionMessageId, OrganizationId, RequestId, Revision, SchemaVersion,
     Sha256Digest, UserId, WorkerId, WorkerInstanceId,
 };
+use winwincode_domain::{RepositoryScope, UserActor, UserActorKind};
 use winwincode_server::{
     ApiError, AuthenticatedPrincipal, CommandDispatchResponse, CommandFamily, DurableEventHub,
     DurableEventHubConfig, QueryFamily, StandaloneApplicationClock,

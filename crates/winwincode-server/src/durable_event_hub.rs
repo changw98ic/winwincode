@@ -39,14 +39,14 @@ use winwincode_api::generated::{
     DeliveryEventReadStream, DeliveryEventReadStreamKind, EventReadCursor, EventReadStream,
     LeaseEventReadStream, LeaseEventReadStreamKind, OrganizationScope, OrganizationScopeKind,
     ProductSessionEventReadStream, ProductSessionEventReadStreamKind, ProjectScope,
-    ProjectScopeKind, RepositoryScope, RepositoryScopeKind, Scope, ScopeEventReadStream,
-    ScopeEventReadStreamKind, ServiceAccountActor, ServiceAccountActorKind, SystemActor,
-    SystemActorKind, UserActor, UserActorKind, WorkspaceScope, WorkspaceScopeKind,
+    ProjectScopeKind, Scope, ScopeEventReadStream, ScopeEventReadStreamKind, ServiceAccountActor,
+    ServiceAccountActorKind, SystemActor, SystemActorKind, WorkspaceScope, WorkspaceScopeKind,
 };
 use winwincode_domain::{
     ControlPlaneEventId, ControlPlaneWebSocketAuthorizationEpoch,
     ControlPlaneWebSocketEventSequence, ControlPlaneWebSocketSubscriptionId, Instant,
 };
+use winwincode_domain::{RepositoryScope, RepositoryScopeKind, UserActor, UserActorKind};
 use winwincode_storage::{
     OutboxEvent, ProductStateStorage, ProjectionEventStream, PublicEventActor, PublicEventScope,
     PublicEventSource, PublicProjectionEventContext, StorageErrorKind,

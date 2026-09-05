@@ -16,7 +16,8 @@ use futures::FutureExt;
 use sha2::{Digest, Sha256};
 use tokio::sync::{Mutex, watch};
 use tokio::task::JoinHandle;
-use winwincode_api::generated::{RepositoryScope, RepositoryScopeKind};
+use winwincode_domain::{RepositoryScope, RepositoryScopeKind};
+
 use winwincode_control_plane::{
     DurableExecutionPortDelegate, DurableExecutionPortIngress, DurableWorkerExecutionLifecycle,
     RepositoryExecutionScheduler, WorkerEnterpriseQuotaClaim,
