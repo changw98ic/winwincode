@@ -38,6 +38,10 @@ use crate::application::{StandaloneApplicationClock, SystemStandaloneApplication
 use crate::auth_session::{
     AuthSessionError, SqliteAuthSessionManager, cleared_session_cookie_header,
 };
+use crate::client_candidates::ClientCandidatesApplication;
+use crate::client_candidates::ClientCandidatesConfig;
+use crate::client_candidates::ClientCandidatesError;
+use crate::client_candidates::ClientCandidatesErrorKind;
 use crate::client_connections::ClientConnectionsApplication;
 use crate::client_connections::ClientConnectionsConfig;
 use crate::client_connections::ClientConnectionsError;
@@ -124,6 +128,7 @@ struct ServerState {
     api: Arc<dyn ControlPlaneApiPort>,
     remote_worker: Option<Arc<dyn RemoteWorkerExchangePort>>,
     client_exchange: Option<Arc<dyn ClientExchangePort>>,
+    client_candidates: Option<Arc<ClientCandidatesApplication>>,
     client_connections: Option<Arc<ClientConnectionsApplication>>,
     client_occupancy: Option<Arc<ClientOccupancyApplication>>,
     client_repositories: Option<Arc<ClientRepositoriesApplication>>,
@@ -231,6 +236,7 @@ pub async fn start_server(
 ///
 /// Fails closed when remote Worker mode is configured without TLS, or when
 /// the listener cannot start.
+#[allow(clippy::too_many_lines)]
 pub async fn start_server_with_remote_worker(
     config: ServerConfig,
     auth_sessions: Arc<SqliteAuthSessionManager>,
@@ -274,6 +280,18 @@ pub async fn start_server_with_remote_worker(
     let client_repositories = client_exchange
         .as_ref()
         .map(|_| Arc::new(ClientRepositoriesApplication::open(config.data_directory())));
+    // Servers without a Client surface keep the candidate routes absent.
+    let client_candidates = match &client_exchange {
+        Some(_) => {
+            let application = ClientCandidatesApplication::open(
+                config.data_directory(),
+                &ClientCandidatesConfig::default(),
+            )
+            .map_err(|error| ServerError::new(error.to_string()))?;
+            Some(Arc::new(application))
+        }
+        None => None,
+    };
     let client_sessions = match &client_exchange {
         Some(_) => {
             let application = ClientSessionsApplication::open(
@@ -310,6 +328,7 @@ pub async fn start_server_with_remote_worker(
         api: Arc::clone(&api),
         remote_worker,
         client_exchange,
+        client_candidates,
         client_connections,
         client_occupancy,
         client_repositories,
@@ -444,6 +463,22 @@ fn router(
         .route(
             "/api/v1/repositories",
             get(list_repositories).options(preflight),
+        )
+        .route(
+            "/api/v1/clients/candidates/branch",
+            post(create_client_candidate_branch).options(preflight),
+        )
+        .route(
+            "/api/v1/clients/candidates/apply",
+            post(apply_client_candidate).options(preflight),
+        )
+        .route(
+            "/api/v1/clients/candidates/discard",
+            post(discard_client_candidate).options(preflight),
+        )
+        .route(
+            "/api/v1/clients/{client_id}/candidates",
+            get(list_client_candidates).options(preflight),
         )
         .route("/api/v1/sessions", post(create_session).options(preflight))
         .fallback(not_found)
@@ -1036,6 +1071,239 @@ fn occupancy_flow_error(error: &ClientOccupancyError, origin: Option<&HeaderValu
             StatusCode::SERVICE_UNAVAILABLE,
             "SERVICE_UNAVAILABLE",
             "client occupancy service is unavailable",
+        ),
+    };
+    connect_error_response(status, code, message, origin)
+}
+
+/// The dual-authorized candidate card list of one Client device (GIT-100.7):
+/// the receipt ledger projection filtered through the repository directory's
+/// visibility check.
+async fn list_client_candidates(
+    State(state): State<ServerState>,
+    axum::extract::Path(client_id): axum::extract::Path<String>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Response {
+    let Some(application) = &state.client_candidates else {
+        return not_found().await;
+    };
+    let (principal, origin, _) = match authorize(&state, &headers, &uri) {
+        Ok(authorized) => authorized,
+        Err(error) => return error.into_response(),
+    };
+    let Some(user_id) = principal.actor_user_id() else {
+        return connect_error_response(
+            StatusCode::FORBIDDEN,
+            "PERMISSION_DENIED",
+            "a signed-in user is required",
+            origin.as_ref(),
+        );
+    };
+    match application.list(&user_id.0, &client_id) {
+        Ok(body) => json_response(StatusCode::OK, body, origin.as_ref()),
+        Err(error) => candidate_flow_error(&error, origin.as_ref()),
+    }
+}
+
+/// One candidate branch creation (GIT-100.7): the occupancy holder requests
+/// the local branch, the `client.candidate.apply` command with the
+/// `create_branch` strategy goes downlink durable, and the bounded wait
+/// resolves with the branch once the device settles `branch_created`.
+async fn create_client_candidate_branch(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    uri: Uri,
+    request: Request<Body>,
+) -> Response {
+    let Some(application) = &state.client_candidates else {
+        return not_found().await;
+    };
+    let origin = match allowed_origin(&state, &headers) {
+        Ok(origin) => origin,
+        Err(error) => return error.into_response(),
+    };
+    if uri.query().is_some() {
+        return BoundaryError::new(
+            StatusCode::BAD_REQUEST,
+            "QUERY_PARAMETERS_FORBIDDEN",
+            "credentials and routing values are not accepted in the URL query",
+            origin,
+        )
+        .into_response();
+    }
+    let body = match parse_json_body(request, origin.clone()).await {
+        Ok(body) => body,
+        Err(error) => return error.into_response(),
+    };
+    let (principal, origin, _) = match authorize(&state, &headers, &uri) {
+        Ok(authorized) => authorized,
+        Err(error) => return error.into_response(),
+    };
+    let Some(user_id) = principal.actor_user_id() else {
+        return connect_error_response(
+            StatusCode::FORBIDDEN,
+            "PERMISSION_DENIED",
+            "a signed-in user is required",
+            origin.as_ref(),
+        );
+    };
+    match application.create_branch(&user_id.0, &body).await {
+        Ok(body) => json_response(StatusCode::CREATED, body, origin.as_ref()),
+        Err(error) => candidate_flow_error(&error, origin.as_ref()),
+    }
+}
+
+/// One candidate target-branch apply (GIT-100.7): the expected head passes
+/// through to the device engine, the command goes downlink durable, and the
+/// bounded wait resolves with the settled apply receipt.
+async fn apply_client_candidate(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    uri: Uri,
+    request: Request<Body>,
+) -> Response {
+    let Some(application) = &state.client_candidates else {
+        return not_found().await;
+    };
+    let origin = match allowed_origin(&state, &headers) {
+        Ok(origin) => origin,
+        Err(error) => return error.into_response(),
+    };
+    if uri.query().is_some() {
+        return BoundaryError::new(
+            StatusCode::BAD_REQUEST,
+            "QUERY_PARAMETERS_FORBIDDEN",
+            "credentials and routing values are not accepted in the URL query",
+            origin,
+        )
+        .into_response();
+    }
+    let body = match parse_json_body(request, origin.clone()).await {
+        Ok(body) => body,
+        Err(error) => return error.into_response(),
+    };
+    let (principal, origin, _) = match authorize(&state, &headers, &uri) {
+        Ok(authorized) => authorized,
+        Err(error) => return error.into_response(),
+    };
+    let Some(user_id) = principal.actor_user_id() else {
+        return connect_error_response(
+            StatusCode::FORBIDDEN,
+            "PERMISSION_DENIED",
+            "a signed-in user is required",
+            origin.as_ref(),
+        );
+    };
+    match application.apply_candidate(&user_id.0, &body).await {
+        Ok(body) => json_response(StatusCode::CREATED, body, origin.as_ref()),
+        Err(error) => candidate_flow_error(&error, origin.as_ref()),
+    }
+}
+
+/// One candidate discard (GIT-100.7): the terminal decision settles into the
+/// receipt ledger and the refreshed card answers.
+async fn discard_client_candidate(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    uri: Uri,
+    request: Request<Body>,
+) -> Response {
+    let Some(application) = &state.client_candidates else {
+        return not_found().await;
+    };
+    let origin = match allowed_origin(&state, &headers) {
+        Ok(origin) => origin,
+        Err(error) => return error.into_response(),
+    };
+    if uri.query().is_some() {
+        return BoundaryError::new(
+            StatusCode::BAD_REQUEST,
+            "QUERY_PARAMETERS_FORBIDDEN",
+            "credentials and routing values are not accepted in the URL query",
+            origin,
+        )
+        .into_response();
+    }
+    let body = match parse_json_body(request, origin.clone()).await {
+        Ok(body) => body,
+        Err(error) => return error.into_response(),
+    };
+    let (principal, origin, _) = match authorize(&state, &headers, &uri) {
+        Ok(authorized) => authorized,
+        Err(error) => return error.into_response(),
+    };
+    let Some(user_id) = principal.actor_user_id() else {
+        return connect_error_response(
+            StatusCode::FORBIDDEN,
+            "PERMISSION_DENIED",
+            "a signed-in user is required",
+            origin.as_ref(),
+        );
+    };
+    match application.discard_candidate(&user_id.0, &body) {
+        Ok(body) => json_response(StatusCode::OK, body, origin.as_ref()),
+        Err(error) => candidate_flow_error(&error, origin.as_ref()),
+    }
+}
+
+/// Maps one candidate flow failure onto its §16.3 wire error code.
+fn candidate_flow_error(error: &ClientCandidatesError, origin: Option<&HeaderValue>) -> Response {
+    let (status, code, message) = match error.kind() {
+        ClientCandidatesErrorKind::InvalidRequest => (
+            StatusCode::BAD_REQUEST,
+            "INVALID_REQUEST",
+            "candidate request is invalid",
+        ),
+        ClientCandidatesErrorKind::ClientNotFound => (
+            StatusCode::NOT_FOUND,
+            "CLIENT_NOT_FOUND",
+            "no client matches the requested id",
+        ),
+        ClientCandidatesErrorKind::ClientOffline => (
+            StatusCode::CONFLICT,
+            "CLIENT_OFFLINE",
+            "the client is not online",
+        ),
+        ClientCandidatesErrorKind::ClientLocked => (
+            StatusCode::CONFLICT,
+            "CLIENT_LOCKED",
+            "the client is locked",
+        ),
+        ClientCandidatesErrorKind::OccupancyRequired => (
+            StatusCode::CONFLICT,
+            "OCCUPANCY_REQUIRED",
+            "the client must be occupied by the requester before candidate operations",
+        ),
+        ClientCandidatesErrorKind::NotHolder => (
+            StatusCode::FORBIDDEN,
+            "PERMISSION_DENIED",
+            "only the occupancy holder may operate on candidates",
+        ),
+        ClientCandidatesErrorKind::AccessDenied => (
+            StatusCode::FORBIDDEN,
+            "ACCESS_DENIED",
+            "the repository binding is not visible to the caller",
+        ),
+        ClientCandidatesErrorKind::CandidateNotFound => (
+            StatusCode::NOT_FOUND,
+            "RESOURCE_NOT_FOUND",
+            "no retained candidate matches the requested reference",
+        ),
+        ClientCandidatesErrorKind::WrongState => (
+            StatusCode::CONFLICT,
+            "WRONG_STATE",
+            "the candidate lifecycle state refuses the requested change",
+        ),
+        ClientCandidatesErrorKind::ApplyResultTimeout => (
+            StatusCode::GATEWAY_TIMEOUT,
+            "APPLY_RESULT_TIMEOUT",
+            "the device did not settle the candidate command in time",
+        ),
+        ClientCandidatesErrorKind::Unavailable => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "SERVICE_UNAVAILABLE",
+            "client candidate service is unavailable",
         ),
     };
     connect_error_response(status, code, message, origin)

@@ -19,9 +19,13 @@
 //! `client.hello`, `client.heartbeat`), the occupancy ledger
 //! (`client.occupancy.ack` promotes `reserving -> occupied`,
 //! `client.occupancy.rejected` rolls the offer back, and a zero-running
-//! heartbeat completes a `draining` lease), and the connect ledger
-//! (`client.access.challenge_ack`); the remaining kinds settle at the cursor
-//! only and are owned by later lanes.
+//! heartbeat completes a `draining` lease), the connect ledger
+//! (`client.access.challenge_ack`), and the candidate receipt ledger
+//! (`client.candidate.retained` records the frozen candidate idempotently;
+//! `client.candidate.apply_result` settles the device's apply receipt under
+//! the occupancy fencing judgement — a ticket stamped with a superseded
+//! lease or token is refused); the remaining kinds settle at the cursor only
+//! and are owned by later lanes.
 //!
 //! Credential model (plan 17.1): the server issues one random 32-byte
 //! Device Credential at enrollment, persists only its `sha256:` digest in
@@ -53,6 +57,8 @@ use serde::Serialize;
 use serde_json::Value;
 use sha2::Digest;
 use sha2::Sha256;
+use winwincode_client_port::domain::ApplyResult;
+use winwincode_client_port::domain::ApplyStrategy;
 use winwincode_client_port::domain::ClientArchitecture;
 use winwincode_client_port::domain::ClientChallengeAckStatus;
 use winwincode_client_port::domain::ClientControlMessageKind;
@@ -69,6 +75,8 @@ use winwincode_client_port::exchange::FrameCodec;
 use winwincode_client_port::exchange::FrameIdentity;
 use winwincode_client_port::exchange::SequenceVerdict;
 use winwincode_client_port::messages::CLIENT_CONTROL_PORT_SCHEMA_VERSION;
+use winwincode_client_port::messages::ClientCandidateApplyResultPayload;
+use winwincode_client_port::messages::ClientCandidateRetainedPayload;
 use winwincode_client_port::messages::ClientEnrollPayload;
 use winwincode_client_port::messages::ClientToServerEnvelope;
 use winwincode_client_port::messages::ClientToServerMessage;
@@ -79,6 +87,7 @@ use winwincode_control_plane::ClientOccupancyService;
 use winwincode_control_plane::ClientRegistryService;
 use winwincode_control_plane::ClientRegistryServiceErrorKind;
 use winwincode_control_plane::ConnectCodeService;
+use winwincode_control_plane::LocalCandidateService;
 use winwincode_control_plane::OccupancyLeaseState;
 use winwincode_control_plane::WorkerLaunchGrantService;
 use winwincode_domain::Instant;
@@ -89,6 +98,10 @@ use winwincode_storage::ClientNodeRegistration;
 use winwincode_storage::ClientPresenceState;
 use winwincode_storage::ConnectChallengeVerdict;
 use winwincode_storage::LaunchAckSettlement;
+use winwincode_storage::LocalApplyResult;
+use winwincode_storage::LocalApplySettlement;
+use winwincode_storage::LocalApplyStrategy;
+use winwincode_storage::LocalCandidateRetained;
 use winwincode_storage::OccupancyReleaseReason;
 use winwincode_storage::ProductStateStorage;
 use winwincode_storage::SqliteStorage;
@@ -940,6 +953,7 @@ fn command_identity(
 /// mirror-revision facts (ack mirror revision, rejection current revision,
 /// release/force-fence effective revision) feed the Server's durable view
 /// the occupancy downlink stamps are computed against.
+#[allow(clippy::too_many_lines)]
 fn apply_effect(
     storage: &mut SqliteStorage,
     data_directory: &Path,
@@ -1051,13 +1065,40 @@ fn apply_effect(
             settle_worker_launch_ack(storage, data_directory, node_id, payload, now);
             Ok(())
         }
+        ClientToServerMessage::CandidateRetained(payload) => {
+            // The device (or its worker) froze a candidate commit under its
+            // stable local ref and reported the retention: record it into
+            // the receipt ledger (plan 15.2, contract 6). The retention is a
+            // report fact without a fencing precondition (contract 6: the
+            // candidate production belongs to the running task itself).
+            let _ = crate::client_occupancy::observe_client_mirror_revision(
+                data_directory,
+                node_id,
+                payload.occupancy.command.expected_revision,
+                now,
+            );
+            settle_candidate_retained(storage, node_id, payload, now);
+            Ok(())
+        }
+        ClientToServerMessage::CandidateApplyResult(payload) => {
+            // The device answered a `client.candidate.apply` command with
+            // its local apply receipt (plan 15.5, contract 8): settle it
+            // into the ledger behind the occupancy fencing judgement.
+            let _ = crate::client_occupancy::observe_client_mirror_revision(
+                data_directory,
+                node_id,
+                payload.occupancy.command.expected_revision,
+                now,
+            );
+            settle_candidate_apply_result(storage, node_id, payload, now);
+            Ok(())
+        }
         ClientToServerMessage::CommandAck(payload) => {
             observe_command_ack_revision(data_directory, node_id, payload, now);
             Ok(())
         }
         // The remaining kinds settle at the cursor in this lane; their
-        // Control Plane effects belong to the repository, worker, and
-        // candidate lanes.
+        // Control Plane effects belong to the repository lane.
         _ => Ok(()),
     }
 }
@@ -1141,6 +1182,117 @@ fn launch_rejection_reason(
             .map(|code| format!("{status_text}:{code}"))
             .unwrap_or(status_text),
         None => status_text,
+    }
+}
+
+/// Records one `client.candidate.retained` report into the receipt ledger
+/// (GIT-100.7, plan 15.2, contract 6). The ledger is the audit authority
+/// and already owns the idempotency and conflict semantics: a replayed
+/// receipt and a duplicate retention of the same candidate ref return the
+/// original row, and any fact disagreement (or an unknown binding owner)
+/// fails closed — a refused retention is an ignored report fact and changes
+/// no frame settlement.
+fn settle_candidate_retained(
+    storage: &mut SqliteStorage,
+    node_id: &str,
+    payload: &ClientCandidateRetainedPayload,
+    now: &Instant,
+) {
+    let receipt = &payload.receipt;
+    let Ok(command) = LocalCandidateRetained::try_new(
+        receipt.local_candidate_receipt_id.clone(),
+        node_id,
+        receipt.repository_binding_id.clone(),
+        receipt.candidate_ref.clone(),
+        receipt.candidate_commit.clone(),
+        receipt.local_ref_name.clone(),
+    ) else {
+        return;
+    };
+    let mut candidates = LocalCandidateService::new(storage);
+    let _ = candidates.record_retained(&command, now);
+}
+
+/// Settles one `client.candidate.apply_result` report into the receipt
+/// ledger (GIT-100.7, plan 15.5, contract 8), advancing the candidate state
+/// machine and appending exactly one immutable receipt.
+///
+/// Fencing (contract 9.2): the result settles only while it names the
+/// node's one active occupancy lease with its current token — an apply
+/// ticket superseded by a higher token (a force fence or a fresh claim) is
+/// refused as an ignored report fact and never reaches the ledger. A refused
+/// settlement (an unknown or drifted candidate identity, a terminal
+/// candidate, a receipt id replayed with different fields) changes no frame
+/// settlement either; the frame settles at the cursor and the ledger's
+/// append-only authority stays intact.
+fn settle_candidate_apply_result(
+    storage: &mut SqliteStorage,
+    node_id: &str,
+    payload: &ClientCandidateApplyResultPayload,
+    now: &Instant,
+) {
+    let fenced = {
+        let mut occupancy = ClientOccupancyService::new(storage);
+        occupancy
+            .active_lease_for_node(node_id)
+            .ok()
+            .flatten()
+            .is_some_and(|lease| {
+                lease.occupancy_lease_id == payload.occupancy.occupancy_lease_id
+                    && lease.fencing_token == payload.occupancy.occupancy_fencing_token
+            })
+    };
+    if !fenced {
+        return;
+    }
+    let receipt = &payload.receipt;
+    let mut candidates = LocalCandidateService::new(storage);
+    // The wire apply receipt names the candidate by its local ref; the
+    // ledger keys the settlement on the retained receipt identity.
+    let Ok(Some(candidate)) = candidates.candidate_for_ref(node_id, &receipt.candidate_ref) else {
+        return;
+    };
+    let Ok(settlement) = LocalApplySettlement::try_new(
+        receipt.local_apply_receipt_id.clone(),
+        candidate.local_candidate_receipt_id.clone(),
+        node_id,
+        receipt.repository_binding_id.clone(),
+        receipt.candidate_ref.clone(),
+        receipt.target_branch.clone(),
+        receipt.expected_head.clone(),
+        storage_strategy(receipt.strategy),
+        storage_result(receipt.result),
+        receipt.resulting_commit.clone(),
+        receipt.conflict_artifact_ref.clone(),
+    ) else {
+        return;
+    };
+    let _ = candidates.record_apply_result(&settlement, now);
+}
+
+/// Maps the wire apply strategy onto the ledger's frozen strategy vocabulary.
+const fn storage_strategy(strategy: ApplyStrategy) -> LocalApplyStrategy {
+    match strategy {
+        ApplyStrategy::CreateBranch => LocalApplyStrategy::CreateBranch,
+        ApplyStrategy::FastForward => LocalApplyStrategy::FastForward,
+        ApplyStrategy::CherryPick => LocalApplyStrategy::CherryPick,
+        ApplyStrategy::Merge => LocalApplyStrategy::Merge,
+    }
+}
+
+/// Maps the wire apply result onto the ledger's frozen ten-code vocabulary.
+const fn storage_result(result: ApplyResult) -> LocalApplyResult {
+    match result {
+        ApplyResult::Retained => LocalApplyResult::Retained,
+        ApplyResult::BranchCreated => LocalApplyResult::BranchCreated,
+        ApplyResult::Applied => LocalApplyResult::Applied,
+        ApplyResult::BaseStale => LocalApplyResult::BaseStale,
+        ApplyResult::WorkingTreeDirty => LocalApplyResult::WorkingTreeDirty,
+        ApplyResult::MergeConflict => LocalApplyResult::MergeConflict,
+        ApplyResult::CandidateMissing => LocalApplyResult::CandidateMissing,
+        ApplyResult::PermissionDenied => LocalApplyResult::PermissionDenied,
+        ApplyResult::Discarded => LocalApplyResult::Discarded,
+        ApplyResult::Failed => LocalApplyResult::Failed,
     }
 }
 
@@ -1456,40 +1608,36 @@ mod tests {
                     error: None,
                 },
             )),
-            ClientToServerMessage::CandidateRetained(
-                winwincode_client_port::messages::ClientCandidateRetainedPayload {
-                    occupancy: occupancy.clone(),
-                    worker_session_id: "ws_1".to_owned(),
-                    receipt: winwincode_client_port::domain::LocalCandidateReceipt {
-                        local_candidate_receipt_id: "lcr_1".to_owned(),
-                        candidate_ref: "cand_1".to_owned(),
-                        repository_binding_id: "rb_1".to_owned(),
-                        candidate_commit: "0123456789abcdef0123456789abcdef01234567".to_owned(),
-                        local_ref_name: "refs/winwincode/candidates/cand_1".to_owned(),
-                        state: winwincode_client_port::domain::LocalCandidateState::Retained,
-                        created_at: "2026-01-02T12:00:00.000Z".to_owned(),
-                        revision: 1,
-                    },
+            ClientToServerMessage::CandidateRetained(ClientCandidateRetainedPayload {
+                occupancy: occupancy.clone(),
+                worker_session_id: "ws_1".to_owned(),
+                receipt: winwincode_client_port::domain::LocalCandidateReceipt {
+                    local_candidate_receipt_id: "lcr_1".to_owned(),
+                    candidate_ref: "cand_1".to_owned(),
+                    repository_binding_id: "rb_1".to_owned(),
+                    candidate_commit: "0123456789abcdef0123456789abcdef01234567".to_owned(),
+                    local_ref_name: "refs/winwincode/candidates/cand_1".to_owned(),
+                    state: winwincode_client_port::domain::LocalCandidateState::Retained,
+                    created_at: "2026-01-02T12:00:00.000Z".to_owned(),
+                    revision: 1,
                 },
-            ),
-            ClientToServerMessage::CandidateApplyResult(
-                winwincode_client_port::messages::ClientCandidateApplyResultPayload {
-                    occupancy,
-                    receipt: winwincode_client_port::domain::LocalApplyReceipt {
-                        local_apply_receipt_id: "lar_1".to_owned(),
-                        candidate_ref: "cand_1".to_owned(),
-                        repository_binding_id: "rb_1".to_owned(),
-                        target_branch: "main".to_owned(),
-                        expected_head: "0123456789abcdef0123456789abcdef01234567".to_owned(),
-                        strategy: winwincode_client_port::domain::ApplyStrategy::CherryPick,
-                        result: winwincode_client_port::domain::ApplyResult::Applied,
-                        resulting_commit: None,
-                        conflict_artifact_ref: None,
-                        created_at: "2026-01-02T12:00:00.000Z".to_owned(),
-                        revision: 1,
-                    },
+            }),
+            ClientToServerMessage::CandidateApplyResult(ClientCandidateApplyResultPayload {
+                occupancy,
+                receipt: winwincode_client_port::domain::LocalApplyReceipt {
+                    local_apply_receipt_id: "lar_1".to_owned(),
+                    candidate_ref: "cand_1".to_owned(),
+                    repository_binding_id: "rb_1".to_owned(),
+                    target_branch: "main".to_owned(),
+                    expected_head: "0123456789abcdef0123456789abcdef01234567".to_owned(),
+                    strategy: ApplyStrategy::CherryPick,
+                    result: ApplyResult::Applied,
+                    resulting_commit: None,
+                    conflict_artifact_ref: None,
+                    created_at: "2026-01-02T12:00:00.000Z".to_owned(),
+                    revision: 1,
                 },
-            ),
+            }),
         ];
         assert_eq!(commands.len(), 10, "the client command kinds");
         for message in &commands {
