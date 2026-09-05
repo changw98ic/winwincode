@@ -42,10 +42,28 @@
 //! Past the deadline nothing happens automatically — the occupancy is never
 //! handed to a new user; the Owner force-release is the explicit resolution
 //! path.
+//!
+//! Every occupancy downlink command (offer, release, force fence) stamps its
+//! `expectedRevision` with the Server's current view of the Device Client's
+//! durable occupancy mirror revision (contract `client-control-port-v1.md`:
+//! Server → Client commands are computed against "Server 计算命令所依据的
+//! Client 已确认镜像 revision"). The device refuses any stamp whose revision
+//! is not exactly its local mirror revision, so the view is tracked durably
+//! per client node in a small sidecar database: the client exchange settles
+//! the device's reported facts (`client.occupancy.ack` mirror revision,
+//! `client.occupancy.rejected` current revision, and the
+//! `client.command_ack` effective revision of release and force-fence
+//! commands) into it, and the flows here read it back when they construct a
+//! stamp. A device rejection therefore re-syncs the view, and the next claim
+//! recomputes against the revision the device actually reported.
 
 use std::fmt;
+use std::path::Path;
 use std::path::PathBuf;
 
+use crate::client_exchange::is_canonical_client_node_id;
+use rusqlite::OptionalExtension;
+use rusqlite::params;
 use serde_json::Value;
 use serde_json::json;
 use winwincode_client_port::domain::ClientOccupancyForceFenceReason;
@@ -410,12 +428,17 @@ impl ClientOccupancyApplication {
         };
         if released_lease.state == OccupancyLeaseState::Occupied {
             // The holder release command always goes downlink stamped with
-            // the lease and its fencing token (contract 4, plan 12.4).
+            // the lease, its fencing token, and the mirror revision the
+            // device last confirmed (contract 4, plan 12.4).
+            let mirror_revision_view =
+                client_mirror_revision_view(&self.data_directory, &node.client_node_id)
+                    .map_err(|_| ClientOccupancyError::unavailable())?;
             enqueue_occupancy_frame(
                 &mut storage,
                 &node,
                 ServerToClientMessage::OccupancyRelease(ServerOccupancyReleasePayload {
                     occupancy: occupancy_stamp(
+                        mirror_revision_view,
                         &released_lease.occupancy_lease_id,
                         released_lease.fencing_token,
                         &format!("idem_release_{}", released_lease.occupancy_lease_id),
@@ -493,11 +516,18 @@ impl ClientOccupancyApplication {
                 .map_err(|_| ClientOccupancyError::unavailable())?;
             (released, new_token)
         };
+        // The device mirror revision the fence is computed against: the
+        // device refuses any other stamp and would keep honouring the old
+        // token.
+        let mirror_revision_view =
+            client_mirror_revision_view(&self.data_directory, &node.client_node_id)
+                .map_err(|_| ClientOccupancyError::unavailable())?;
         enqueue_occupancy_frame(
             &mut storage,
             &node,
             ServerToClientMessage::OccupancyForceFence(ServerOccupancyForceFencePayload {
                 occupancy: occupancy_stamp(
+                    mirror_revision_view,
                     &released.occupancy_lease_id,
                     new_token,
                     &format!("idem_force_fence_{}", released.occupancy_lease_id),
@@ -764,11 +794,17 @@ impl ClientOccupancyApplication {
                 }
             }
         };
+        // The offer is computed against the mirror revision the device last
+        // confirmed: the device refuses any other stamp.
+        let mirror_revision_view =
+            client_mirror_revision_view(&self.data_directory, &node.client_node_id)
+                .map_err(|_| ClientOccupancyError::unavailable())?;
         enqueue_occupancy_frame(
             &mut storage,
             &node,
             ServerToClientMessage::OccupancyOffer(ServerOccupancyOfferPayload {
                 occupancy: occupancy_stamp(
+                    mirror_revision_view,
                     &lease.occupancy_lease_id,
                     lease.fencing_token,
                     &format!("idem_offer_{}", lease.occupancy_lease_id),
@@ -1030,20 +1066,124 @@ const fn mode_text(mode: ClientOccupancyReleaseMode) -> &'static str {
 }
 
 /// Builds the occupancy fencing stamp every occupancy downlink command
-/// carries (contract `client-control-port-v1.md`, `C + L`).
+/// carries (contract `client-control-port-v1.md`, `C + L`). The stamp's
+/// `expectedRevision` is the Server's current view of the Device Client's
+/// durable occupancy mirror revision — the device refuses any stamp whose
+/// revision is not exactly its local mirror revision.
 fn occupancy_stamp(
+    expected_revision: u64,
     occupancy_lease_id: &str,
     fencing_token: u64,
     idempotency_key: &str,
 ) -> OccupancyCommandContext {
     OccupancyCommandContext {
         command: CommandContext {
-            expected_revision: 0,
+            expected_revision,
             idempotency_key: idempotency_key.to_owned(),
         },
         occupancy_lease_id: occupancy_lease_id.to_owned(),
         occupancy_fencing_token: fencing_token,
     }
+}
+
+// ── Server-side view of the Device Client occupancy mirror revision ──────
+
+/// Sidecar database that tracks, per client node, the Server's view of the
+/// Device Client's durable occupancy mirror revision (the same per-concern
+/// sidecar pattern as the auth-session store and the event hub). The client
+/// exchange observation writes every revision fact the device reports; the
+/// occupancy flows read the view when they stamp a downlink command.
+const MIRROR_VIEW_DATABASE_FILE: &str = "client-occupancy-mirror.sqlite3";
+
+const MIRROR_VIEW_SCHEMA: &str = r"
+CREATE TABLE IF NOT EXISTS client_occupancy_mirror_revisions (
+    client_node_id TEXT PRIMARY KEY NOT NULL,
+    mirror_revision INTEGER NOT NULL
+        CHECK (mirror_revision >= 0 AND mirror_revision <= 9007199254740991),
+    updated_at TEXT NOT NULL
+);
+";
+
+/// Failure of the mirror-revision view store.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum MirrorRevisionViewError {
+    /// The client node id is not canonical.
+    InvalidNode,
+    /// The sidecar database failed.
+    Storage,
+}
+
+/// Reads the Server's current view of one device's occupancy mirror
+/// revision; zero before the device reported any mirror fact.
+pub(crate) fn client_mirror_revision_view(
+    data_directory: &Path,
+    client_node_id: &str,
+) -> Result<u64, MirrorRevisionViewError> {
+    if !is_canonical_client_node_id(client_node_id) {
+        return Err(MirrorRevisionViewError::InvalidNode);
+    }
+    let connection = open_mirror_view_connection(data_directory)?;
+    let stored: Option<i64> = connection
+        .query_row(
+            "SELECT mirror_revision FROM client_occupancy_mirror_revisions
+             WHERE client_node_id = ?1",
+            [client_node_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|_| MirrorRevisionViewError::Storage)?;
+    stored
+        .map(u64::try_from)
+        .transpose()
+        .map_err(|_| MirrorRevisionViewError::Storage)
+        .map(Option::unwrap_or_default)
+}
+
+/// Records one mirror-revision fact the device reported (the ack's
+/// `mirrorRevision`, a rejection's current revision, or a command ack's
+/// effective revision). The view only advances: the device mirror never
+/// rolls back, so a late lower report never regresses the stamp source.
+pub(crate) fn observe_client_mirror_revision(
+    data_directory: &Path,
+    client_node_id: &str,
+    reported_revision: u64,
+    now: &Instant,
+) -> Result<(), MirrorRevisionViewError> {
+    if !is_canonical_client_node_id(client_node_id) {
+        return Err(MirrorRevisionViewError::InvalidNode);
+    }
+    let reported =
+        i64::try_from(reported_revision).map_err(|_| MirrorRevisionViewError::Storage)?;
+    let connection = open_mirror_view_connection(data_directory)?;
+    connection
+        .execute(
+            "INSERT INTO client_occupancy_mirror_revisions
+             (client_node_id, mirror_revision, updated_at)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT (client_node_id) DO UPDATE SET
+                 mirror_revision = MAX(mirror_revision, excluded.mirror_revision),
+                 updated_at = excluded.updated_at",
+            params![client_node_id, reported, now.0],
+        )
+        .map_err(|_| MirrorRevisionViewError::Storage)?;
+    Ok(())
+}
+
+/// Opens the sidecar database and ensures its schema (per-call connection,
+/// like every other occupancy flow storage access).
+fn open_mirror_view_connection(
+    data_directory: &Path,
+) -> Result<rusqlite::Connection, MirrorRevisionViewError> {
+    std::fs::create_dir_all(data_directory).map_err(|_| MirrorRevisionViewError::Storage)?;
+    let connection = rusqlite::Connection::open(data_directory.join(MIRROR_VIEW_DATABASE_FILE))
+        .map_err(|_| MirrorRevisionViewError::Storage)?;
+    connection
+        .execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")
+        .map_err(|_| MirrorRevisionViewError::Storage)?;
+    connection
+        .execute_batch(MIRROR_VIEW_SCHEMA)
+        .map_err(|_| MirrorRevisionViewError::Storage)?;
+    Ok(connection)
 }
 
 /// Enqueues one `client.occupancy.*` downlink frame into the durable outbox
@@ -1251,7 +1391,96 @@ fn generate_prefixed_id(prefix: &str) -> Result<String, ClientOccupancyError> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::OnceLock;
+    use std::sync::atomic::AtomicU64;
+    use std::sync::atomic::Ordering;
+
     use super::*;
+
+    static NEXT_VIEW_DIRECTORY: AtomicU64 = AtomicU64::new(1);
+
+    fn view_directory(label: &str) -> PathBuf {
+        static NAMESPACE: OnceLock<String> = OnceLock::new();
+        let namespace = NAMESPACE.get_or_init(|| {
+            const HEX: &[u8; 16] = b"0123456789abcdef";
+            let mut nonce = [0_u8; 8];
+            getrandom::fill(&mut nonce).expect("entropy");
+            let mut encoded = String::new();
+            for byte in nonce {
+                encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+                encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+            }
+            format!("{}-{encoded}", std::process::id())
+        });
+        let id = NEXT_VIEW_DIRECTORY.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!("occupancy-view-{label}-{namespace}-{id}"))
+    }
+
+    fn canonical_node(suffix_digit: char) -> String {
+        format!("cnd_{suffix_digit}{}", "A".repeat(25))
+    }
+
+    #[test]
+    fn the_mirror_revision_view_starts_at_zero_and_only_advances() {
+        let directory = view_directory("advance");
+        let node = canonical_node('A');
+        assert_eq!(
+            client_mirror_revision_view(&directory, &node).expect("view read"),
+            0,
+            "a device that reported nothing is viewed at revision zero"
+        );
+        let now = Instant("2026-09-04T12:00:00.000Z".to_owned());
+        observe_client_mirror_revision(&directory, &node, 1, &now).expect("observe");
+        assert_eq!(
+            client_mirror_revision_view(&directory, &node).expect("view read"),
+            1
+        );
+        // A later report names the advanced revision.
+        observe_client_mirror_revision(&directory, &node, 3, &now).expect("observe");
+        assert_eq!(
+            client_mirror_revision_view(&directory, &node).expect("view read"),
+            3
+        );
+        // The device mirror never rolls back, so a late lower report (an
+        // interleaved older frame) must not regress the stamp source.
+        observe_client_mirror_revision(&directory, &node, 2, &now).expect("observe");
+        assert_eq!(
+            client_mirror_revision_view(&directory, &node).expect("view read"),
+            3
+        );
+    }
+
+    #[test]
+    fn the_mirror_revision_view_tracks_nodes_independently() {
+        let directory = view_directory("nodes");
+        let now = Instant("2026-09-04T12:00:00.000Z".to_owned());
+        let first = canonical_node('B');
+        let second = canonical_node('C');
+        observe_client_mirror_revision(&directory, &first, 2, &now).expect("observe");
+        assert_eq!(
+            client_mirror_revision_view(&directory, &first).expect("view read"),
+            2
+        );
+        assert_eq!(
+            client_mirror_revision_view(&directory, &second).expect("view read"),
+            0,
+            "the other device reported nothing"
+        );
+    }
+
+    #[test]
+    fn the_mirror_revision_view_refuses_non_canonical_nodes() {
+        let directory = view_directory("invalid");
+        assert_eq!(
+            client_mirror_revision_view(&directory, "device-local-pending"),
+            Err(MirrorRevisionViewError::InvalidNode)
+        );
+        let now = Instant("2026-09-04T12:00:00.000Z".to_owned());
+        assert_eq!(
+            observe_client_mirror_revision(&directory, "nope", 1, &now),
+            Err(MirrorRevisionViewError::InvalidNode)
+        );
+    }
 
     #[test]
     fn config_rejects_zero_bounds() {
