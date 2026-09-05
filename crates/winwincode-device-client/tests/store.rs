@@ -19,7 +19,7 @@ use winwincode_client_port::messages::{
 use winwincode_device_client::{
     ClientInboxCursorUpdate, DeviceStore, DeviceStoreErrorKind, OccupancyMirrorAdvance,
     OccupancyMirrorUpdate, OccupancyReleaseIntentOutcome, OccupancyReleaseIntentRecord,
-    PathMappingRecord,
+    PathMappingRecord, WorkerProcessRecord,
 };
 
 static NEXT_TEMP_DIRECTORY: AtomicU64 = AtomicU64::new(1);
@@ -58,7 +58,7 @@ fn envelope(message_id: &str, client_instance_id: &str, sequence: u64) -> Client
 
 #[test]
 fn open_migrates_the_full_local_schema_and_round_trips_it() {
-    assert_eq!(winwincode_device_client::CLIENT_STORE_SCHEMA_VERSION, 4);
+    assert_eq!(winwincode_device_client::CLIENT_STORE_SCHEMA_VERSION, 5);
     let (root, mut store) = open_store("schema-round-trip");
     let database_path = store.database_path().to_path_buf();
     let canonical_root = fs::canonicalize(&root).expect("root should canonicalize");
@@ -94,7 +94,7 @@ fn open_migrates_the_full_local_schema_and_round_trips_it() {
     let version: i64 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .expect("schema version should be readable");
-    assert_eq!(version, 4);
+    assert_eq!(version, 5);
     assert_canonical_local_tables(&connection);
     connection.close().expect("inspection close");
     fs::remove_dir_all(root).expect("database directory should be released");
@@ -219,6 +219,7 @@ const CANONICAL_LOCAL_TABLES: &[(&str, &str, &[&str])] = &[
             "launch_grant_id",
             "data_directory",
             "state",
+            "exit_code",
             "last_observed_at",
         ],
     ),
@@ -996,6 +997,129 @@ fn lease_worker_session_counts_reflect_the_process_registry() {
         0,
         "the worker epic owns spawning; the count starts at zero"
     );
+    store.close().expect("store close");
+    fs::remove_dir_all(root).expect("database directory should be released");
+}
+
+fn worker_process_row(session: &str, pid: u32, state: &str) -> WorkerProcessRecord {
+    WorkerProcessRecord {
+        worker_session_id: session.to_owned(),
+        worker_id: "wrk_STABLEWORKER".to_owned(),
+        worker_instance_id: format!("cix_{session}"),
+        pid,
+        process_start_identity: format!("linux-{pid}000000"),
+        repository_binding_id: "rbn_ONE".to_owned(),
+        occupancy_lease_id: "ocl_LEASEONE".to_owned(),
+        launch_grant_id: "wlg_ONE".to_owned(),
+        data_directory: "/data/workers/one".to_owned(),
+        state: state.to_owned(),
+        exit_code: None,
+        last_observed_at: "2026-09-04T00:00:00.000Z".to_owned(),
+    }
+}
+
+#[test]
+fn worker_process_registry_round_trips_rows_and_state_transitions() {
+    let (root, mut store) = open_store("worker-process-registry");
+
+    store
+        .put_worker_process(&worker_process_row("wss_ONE", 411, "running"))
+        .expect("first row writes");
+    store
+        .put_worker_process(&worker_process_row("wss_TWO", 412, "running"))
+        .expect("second row writes");
+
+    let loaded = store
+        .worker_process("wss_ONE")
+        .expect("row read")
+        .expect("row exists");
+    assert_eq!(loaded, worker_process_row("wss_ONE", 411, "running"));
+    assert!(store.worker_process("wss_MISSING").expect("read").is_none());
+
+    // One session one worker: the session id is the primary key, so a
+    // replacement boot replaces the row instead of adding a second one.
+    let mut replacement = worker_process_row("wss_ONE", 499, "running");
+    replacement.worker_instance_id = "cix_REPLACEMENT".to_owned();
+    store
+        .put_worker_process(&replacement)
+        .expect("replacement row writes");
+    let rows = store.worker_processes().expect("all rows");
+    assert_eq!(rows.len(), 2, "one row per worker session");
+    assert_eq!(rows[0].worker_instance_id, "cix_REPLACEMENT");
+
+    assert_eq!(
+        store
+            .count_worker_processes_in_state("running")
+            .expect("running count"),
+        2
+    );
+    assert_eq!(
+        store
+            .worker_processes_for_lease("ocl_LEASEONE")
+            .expect("lease scan")
+            .len(),
+        2
+    );
+
+    // Terminal observation keeps the exit code next to the state.
+    assert!(
+        store
+            .mark_worker_process_state("wss_ONE", "crashed", Some(3), "2026-09-04T01:00:00.000Z")
+            .expect("state write")
+    );
+    let crashed = store
+        .worker_process("wss_ONE")
+        .expect("row read")
+        .expect("row exists");
+    assert_eq!(crashed.state, "crashed");
+    assert_eq!(crashed.exit_code, Some(3));
+    assert_eq!(crashed.last_observed_at, "2026-09-04T01:00:00.000Z");
+    assert_eq!(
+        store
+            .count_worker_processes_in_state("running")
+            .expect("running count"),
+        1
+    );
+    assert!(
+        !store
+            .mark_worker_process_state("wss_MISSING", "exited", None, "2026-09-04T01:00:00.000Z")
+            .expect("state write for unknown session")
+    );
+
+    store.close().expect("store close");
+    fs::remove_dir_all(root).expect("database directory should be released");
+}
+
+#[test]
+fn worker_process_registry_validates_its_rows() {
+    let (root, mut store) = open_store("worker-process-registry-validate");
+    let mut row = worker_process_row("wss_ONE", 411, "running");
+    store.put_worker_process(&row).expect("valid row writes");
+
+    row.pid = 0;
+    let error = store
+        .put_worker_process(&row)
+        .expect_err("pid zero must refuse");
+    assert_eq!(error.kind(), DeviceStoreErrorKind::InvalidInput);
+    assert!(error.message().contains("pid"), "{error}");
+
+    let mut empty_state = worker_process_row("wss_ONE", 411, "");
+    empty_state.state = String::new();
+    let error = store
+        .put_worker_process(&empty_state)
+        .expect_err("empty state must refuse");
+    assert_eq!(error.kind(), DeviceStoreErrorKind::InvalidInput);
+
+    let error = store
+        .worker_process("")
+        .expect_err("empty session id must refuse");
+    assert_eq!(error.kind(), DeviceStoreErrorKind::InvalidInput);
+
+    let error = store
+        .worker_processes_for_lease("")
+        .expect_err("empty lease must refuse");
+    assert_eq!(error.kind(), DeviceStoreErrorKind::InvalidInput);
+
     store.close().expect("store close");
     fs::remove_dir_all(root).expect("database directory should be released");
 }

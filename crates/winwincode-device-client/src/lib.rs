@@ -32,6 +32,12 @@
 //!   client-lock application, occupancy mirroring (offer → durable mirror →
 //!   ack, release intents, force-fence overwrites), and exponential-backoff
 //!   recovery on a plain `std` thread — no async runtime.
+//! - [`supervisor`]: the local one-session-one-worker process supervisor
+//!   (WORKER-100.2, plan 14.1/14.5/8.2/18.3) — fencing-gated managed
+//!   worker spawns over 0600 config/credential files, the durable
+//!   `worker_process_registry` (pid + process-start identity), reap/stop
+//!   with terminal observations, the restart `reconcile` scan, and the
+//!   live capacity facts wired into the daemon's hello/heartbeat.
 //! - [`http`]: the dependency-free std TCP HTTP/1.1 exchange transport
 //!   implementation of [`daemon::ExchangeTransport`].
 //!
@@ -55,6 +61,7 @@ pub mod fencing;
 pub mod http;
 pub mod identity;
 pub mod store;
+pub mod supervisor;
 
 pub use connect_code::{
     CONNECT_CODE_DIGITS, CONNECT_CODE_TTL, ChallengeVerdict, ConnectCodeError,
@@ -62,7 +69,8 @@ pub use connect_code::{
 };
 pub use daemon::{
     DaemonConfig, DaemonError, DaemonStatus, DeviceDaemon, EnrollmentIssuance, ExchangeRequest,
-    ExchangeResponse, ExchangeTransport, ExchangeTransportError, TickOutcome,
+    ExchangeResponse, ExchangeTransport, ExchangeTransportError, LeaseWorkerController,
+    TickOutcome, WorkerCapacitySnapshot, WorkerCapacitySource,
 };
 pub use fencing::{
     FencedCommandKind, FencingGuard, FencingRejection, FencingTicket, FencingVerdict,
@@ -77,7 +85,13 @@ pub use store::{
     ConnectCodeStateRecord, ConnectionPolicyRecord, DeviceStore, DeviceStoreError,
     DeviceStoreErrorKind, OccupancyMirrorAdvance, OccupancyMirrorRecord, OccupancyMirrorUpdate,
     OccupancyReleaseIntentOutcome, OccupancyReleaseIntentRecord, PathMappingRecord,
-    ServerProfileRecord,
+    ServerProfileRecord, WorkerProcessRecord,
+};
+pub use supervisor::{
+    ModelRoute, ReapedWorker, SessionSupervisor, SpawnOutcome, SpawnRequest, SupervisorConfig,
+    SupervisorError, WORKER_STATE_CRASHED, WORKER_STATE_EXITED, WORKER_STATE_MISSING,
+    WORKER_STATE_RUNNING, WorkerHandle, WorkerReconcileReport, WorkerReconcileVerdict,
+    WorkerStopOutcome,
 };
 
 // Façade re-export: the connection policy, lock, and connect-code lifecycle

@@ -5,7 +5,9 @@
 //! `client_connection_policy`) for the dynamic connect code and the local
 //! lock/new-connection policy, and the two CLIENT-300.3 tables
 //! (`occupancy_mirror`, `occupancy_release_intents`) for the durable
-//! occupancy mirror and its release intents.
+//! occupancy mirror and its release intents. The `worker_process_registry`
+//! table (plan section 8.2) is the durable one-session-one-worker process
+//! registry driven by the local supervisor ([`crate::supervisor`]).
 //!
 //! The open sequence, migration style, transaction discipline, and the
 //! static-SQL-only rule deliberately mirror `crates/winwincode-storage`, the
@@ -44,9 +46,12 @@ use winwincode_client_port::messages::{
 /// policy. Version 4 (CLIENT-300.3) reshaped `occupancy_mirror` into the
 /// singleton authoritative occupancy mirror (lease, fencing token, holder,
 /// mirror revision, acknowledgement stamp) and added the
-/// `occupancy_release_intents` table. No version-1 through version-3
-/// database ever shipped, so older databases fail closed as unsupported.
-pub const CLIENT_STORE_SCHEMA_VERSION: i64 = 4;
+/// `occupancy_release_intents` table. Version 5 (WORKER-100.2) added the
+/// nullable `exit_code` column to `worker_process_registry` so a terminal
+/// observation (exited/crashed) keeps the exit status next to the state. No
+/// version-1 through version-4 database ever shipped, so older databases fail
+/// closed as unsupported.
+pub const CLIENT_STORE_SCHEMA_VERSION: i64 = 5;
 
 const DATABASE_FILE_NAME: &str = "device-client.sqlite3";
 const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -338,6 +343,43 @@ pub enum OccupancyReleaseIntentOutcome {
     /// The idempotency key already recorded an intent (a replayed release
     /// command); the stored row is returned unchanged.
     Duplicate(OccupancyReleaseIntentRecord),
+}
+
+/// One durable worker-process registry row (plan section 8.2, WORKER-100.2).
+///
+/// LOCAL ONLY: `data_directory` (and every other absolute local path in this
+/// record) never leaves the device — the `ClientControlPort` frames carry
+/// only identities and state vocabulary.
+///
+/// A PID alone is never sufficient (PIDs are reused): every row additionally
+/// binds `process_start_identity`, the platform's process-boot identity, so
+/// a stale row can never be mistaken for a live process after PID reuse.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkerProcessRecord {
+    /// The one `WorkerSession` this process authenticates (primary key).
+    pub worker_session_id: String,
+    /// Stable Worker identity reused across replacement boots of the same
+    /// session.
+    pub worker_id: String,
+    /// Identity of this exact process boot; fresh on every launch.
+    pub worker_instance_id: String,
+    /// OS process id of the supervised child.
+    pub pid: u32,
+    /// Platform process-boot identity binding the pid (e.g. the process
+    /// start time); the supervisor owns the platform encoding.
+    pub process_start_identity: String,
+    pub repository_binding_id: String,
+    pub occupancy_lease_id: String,
+    pub launch_grant_id: String,
+    pub data_directory: String,
+    /// Local lifecycle state (`running`, `exited`, `crashed`, `missing`).
+    pub state: String,
+    /// Exit status of the terminal observation, when the platform supplied
+    /// one (`None` while running, for signal deaths, and for unobserved
+    /// exits recorded as `missing`).
+    pub exit_code: Option<i64>,
+    /// RFC 3339 stamp of the last state observation.
+    pub last_observed_at: String,
 }
 
 /// The exchange sender stream the durable outbox is currently bound to.
@@ -1090,6 +1132,186 @@ impl DeviceStore {
             )
             .map_err(sql_error)?;
         u64::try_from(count).map_err(|_| DeviceStoreError::adapter("worker count is negative"))
+    }
+
+    /// Inserts or replaces one worker-process registry row (plan 8.2),
+    /// keyed by `worker_session_id` — the one-session-one-worker invariant
+    /// makes the session id the natural primary key.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DeviceStoreErrorKind::InvalidInput`] for an empty or
+    /// overlong identity, path, state, or timestamp field and an
+    /// adapter-neutral error when the write fails or the store is closed.
+    pub fn put_worker_process(
+        &mut self,
+        record: &WorkerProcessRecord,
+    ) -> Result<(), DeviceStoreError> {
+        validate_worker_process_record(record)?;
+        let connection = self.connection_mut()?;
+        connection
+            .execute(
+                "INSERT INTO worker_process_registry \
+                 (worker_session_id, worker_id, worker_instance_id, pid, \
+                  process_start_identity, repository_binding_id, occupancy_lease_id, \
+                  launch_grant_id, data_directory, state, exit_code, last_observed_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12) \
+                 ON CONFLICT (worker_session_id) DO UPDATE SET \
+                 worker_id = excluded.worker_id, \
+                 worker_instance_id = excluded.worker_instance_id, \
+                 pid = excluded.pid, \
+                 process_start_identity = excluded.process_start_identity, \
+                 repository_binding_id = excluded.repository_binding_id, \
+                 occupancy_lease_id = excluded.occupancy_lease_id, \
+                 launch_grant_id = excluded.launch_grant_id, \
+                 data_directory = excluded.data_directory, \
+                 state = excluded.state, \
+                 exit_code = excluded.exit_code, \
+                 last_observed_at = excluded.last_observed_at",
+                params![
+                    record.worker_session_id,
+                    record.worker_id,
+                    record.worker_instance_id,
+                    i64::from(record.pid),
+                    record.process_start_identity,
+                    record.repository_binding_id,
+                    record.occupancy_lease_id,
+                    record.launch_grant_id,
+                    record.data_directory,
+                    record.state,
+                    record.exit_code,
+                    record.last_observed_at,
+                ],
+            )
+            .map_err(sql_error)?;
+        Ok(())
+    }
+
+    /// Loads one worker-process registry row by its worker session id.
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter-neutral error when the read fails or the store is
+    /// closed.
+    pub fn worker_process(
+        &self,
+        worker_session_id: &str,
+    ) -> Result<Option<WorkerProcessRecord>, DeviceStoreError> {
+        require_non_empty(worker_session_id, "worker session id", MAX_ID_BYTES)?;
+        let mut statement = self
+            .connection()?
+            .prepare(
+                "SELECT worker_session_id, worker_id, worker_instance_id, pid, \
+                 process_start_identity, repository_binding_id, occupancy_lease_id, \
+                 launch_grant_id, data_directory, state, exit_code, last_observed_at \
+                 FROM worker_process_registry WHERE worker_session_id = ?1",
+            )
+            .map_err(sql_error)?;
+        statement
+            .query_row(params![worker_session_id], row_to_worker_process)
+            .optional()
+            .map_err(sql_error)
+    }
+
+    /// Loads every worker-process registry row in worker-session order.
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter-neutral error when the read fails or the store is
+    /// closed.
+    pub fn worker_processes(&self) -> Result<Vec<WorkerProcessRecord>, DeviceStoreError> {
+        let mut statement = self
+            .connection()?
+            .prepare(
+                "SELECT worker_session_id, worker_id, worker_instance_id, pid, \
+                 process_start_identity, repository_binding_id, occupancy_lease_id, \
+                 launch_grant_id, data_directory, state, exit_code, last_observed_at \
+                 FROM worker_process_registry ORDER BY worker_session_id",
+            )
+            .map_err(sql_error)?;
+        let rows = statement
+            .query_map([], row_to_worker_process)
+            .map_err(sql_error)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(sql_error)
+    }
+
+    /// Loads every worker-process registry row bound to one occupancy lease,
+    /// in worker-session order — the affected-worker scan for a release.
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter-neutral error when the read fails or the store is
+    /// closed.
+    pub fn worker_processes_for_lease(
+        &self,
+        occupancy_lease_id: &str,
+    ) -> Result<Vec<WorkerProcessRecord>, DeviceStoreError> {
+        require_non_empty(occupancy_lease_id, "occupancy lease id", MAX_ID_BYTES)?;
+        let mut statement = self
+            .connection()?
+            .prepare(
+                "SELECT worker_session_id, worker_id, worker_instance_id, pid, \
+                 process_start_identity, repository_binding_id, occupancy_lease_id, \
+                 launch_grant_id, data_directory, state, exit_code, last_observed_at \
+                 FROM worker_process_registry WHERE occupancy_lease_id = ?1 \
+                 ORDER BY worker_session_id",
+            )
+            .map_err(sql_error)?;
+        let rows = statement
+            .query_map(params![occupancy_lease_id], row_to_worker_process)
+            .map_err(sql_error)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(sql_error)
+    }
+
+    /// Counts the registry rows in one lifecycle state (the live
+    /// `runningWorkerSessions` capacity fact comes from `running`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DeviceStoreErrorKind::InvalidInput`] for an empty state and
+    /// an adapter-neutral error when the read fails or the store is closed.
+    pub fn count_worker_processes_in_state(&self, state: &str) -> Result<u64, DeviceStoreError> {
+        require_non_empty(state, "worker state", MAX_ID_BYTES)?;
+        let count: i64 = self
+            .connection()?
+            .query_row(
+                "SELECT COUNT(*) FROM worker_process_registry WHERE state = ?1",
+                params![state],
+                |row| row.get(0),
+            )
+            .map_err(sql_error)?;
+        u64::try_from(count).map_err(|_| DeviceStoreError::adapter("worker count is negative"))
+    }
+
+    /// Moves one worker-process registry row to `state` with an optional
+    /// exit code, refreshing its observation stamp. Answers whether a row
+    /// was updated.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DeviceStoreErrorKind::InvalidInput`] for an empty session
+    /// id, state, or timestamp and an adapter-neutral error when the write
+    /// fails or the store is closed.
+    pub fn mark_worker_process_state(
+        &mut self,
+        worker_session_id: &str,
+        state: &str,
+        exit_code: Option<i64>,
+        observed_at: &str,
+    ) -> Result<bool, DeviceStoreError> {
+        require_non_empty(worker_session_id, "worker session id", MAX_ID_BYTES)?;
+        require_non_empty(state, "worker state", MAX_ID_BYTES)?;
+        require_non_empty(observed_at, "observed at", MAX_ID_BYTES)?;
+        let changed = self
+            .connection_mut()?
+            .execute(
+                "UPDATE worker_process_registry \
+                 SET state = ?2, exit_code = ?3, last_observed_at = ?4 \
+                 WHERE worker_session_id = ?1",
+                params![worker_session_id, state, exit_code, observed_at],
+            )
+            .map_err(sql_error)?;
+        Ok(changed > 0)
     }
 
     /// Records one release intent (idempotent by the release command's
@@ -2085,6 +2307,68 @@ fn validate_release_intent(intent: &OccupancyReleaseIntentRecord) -> Result<(), 
     Ok(())
 }
 
+/// Validates one worker-process registry record before any write.
+fn validate_worker_process_record(record: &WorkerProcessRecord) -> Result<(), DeviceStoreError> {
+    require_non_empty(&record.worker_session_id, "worker session id", MAX_ID_BYTES)?;
+    require_non_empty(&record.worker_id, "worker id", MAX_ID_BYTES)?;
+    require_non_empty(
+        &record.worker_instance_id,
+        "worker instance id",
+        MAX_ID_BYTES,
+    )?;
+    if record.pid == 0 {
+        return Err(DeviceStoreError::invalid("worker pid must be positive"));
+    }
+    require_non_empty(
+        &record.process_start_identity,
+        "process start identity",
+        MAX_ID_BYTES,
+    )?;
+    require_non_empty(
+        &record.repository_binding_id,
+        "repository binding id",
+        MAX_ID_BYTES,
+    )?;
+    require_non_empty(
+        &record.occupancy_lease_id,
+        "occupancy lease id",
+        MAX_ID_BYTES,
+    )?;
+    require_non_empty(&record.launch_grant_id, "launch grant id", MAX_ID_BYTES)?;
+    require_non_empty(
+        &record.data_directory,
+        "worker data directory",
+        MAX_PATH_BYTES,
+    )?;
+    require_non_empty(&record.state, "worker state", MAX_ID_BYTES)?;
+    require_non_empty(&record.last_observed_at, "observed at", MAX_ID_BYTES)?;
+    Ok(())
+}
+
+fn row_to_worker_process(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkerProcessRecord> {
+    let pid: i64 = row.get(3)?;
+    Ok(WorkerProcessRecord {
+        worker_session_id: row.get(0)?,
+        worker_id: row.get(1)?,
+        worker_instance_id: row.get(2)?,
+        pid: u32::try_from(pid).map_err(|_| {
+            rusqlite::Error::FromSqlConversionFailure(
+                3,
+                rusqlite::types::Type::Integer,
+                "stored worker pid is outside the platform pid range".into(),
+            )
+        })?,
+        process_start_identity: row.get(4)?,
+        repository_binding_id: row.get(5)?,
+        occupancy_lease_id: row.get(6)?,
+        launch_grant_id: row.get(7)?,
+        data_directory: row.get(8)?,
+        state: row.get(9)?,
+        exit_code: row.get(10)?,
+        last_observed_at: row.get(11)?,
+    })
+}
+
 const STORE_SCHEMA: &str = r"
 CREATE TABLE device_identity (
     device_id TEXT PRIMARY KEY NOT NULL,
@@ -2168,6 +2452,8 @@ CREATE TABLE occupancy_release_intents (
 );
 -- Plan section 8.2: a PID alone is never sufficient because PIDs are reused;
 -- every row additionally binds the process start identity (platform handle).
+-- WORKER-100.2: `exit_code` keeps the terminal observation's exit status (a
+-- signal death or an unobserved `missing` exit stores NULL).
 CREATE TABLE worker_process_registry (
     worker_session_id TEXT PRIMARY KEY NOT NULL,
     worker_id TEXT NOT NULL,
@@ -2179,6 +2465,7 @@ CREATE TABLE worker_process_registry (
     launch_grant_id TEXT NOT NULL,
     data_directory TEXT NOT NULL,
     state TEXT NOT NULL,
+    exit_code INTEGER,
     last_observed_at TEXT NOT NULL
 );
 CREATE INDEX worker_process_registry_by_repository
@@ -2391,6 +2678,7 @@ const STORE_SCHEMA_COLUMNS: &[(&str, &str, &[&str])] = &[
             "launch_grant_id",
             "data_directory",
             "state",
+            "exit_code",
             "last_observed_at",
         ],
     ),

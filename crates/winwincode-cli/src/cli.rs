@@ -380,6 +380,11 @@ fn render_device(outcome: &DeviceAdminOutcome) -> String {
             } else {
                 "锁定状态：未锁定\n"
             });
+            let _ = writeln!(
+                output,
+                "运行中 Worker：{} 个",
+                device.running_worker_sessions
+            );
             match &device.connect_code {
                 Some(code) => {
                     let _ = write!(
