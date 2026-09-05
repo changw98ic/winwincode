@@ -14,6 +14,7 @@ mod candidate_source;
 mod chat_interaction_application;
 pub mod chat_interaction_projection;
 mod client_connect;
+mod client_launch_grant;
 mod client_occupancy;
 mod client_registry;
 mod collaboration;
@@ -120,6 +121,10 @@ pub use chat_interaction_application::{
 pub use client_connect::{
     AccessGrantService, ClientConnectServiceError, ClientConnectServiceErrorKind,
     ConnectCodeService,
+};
+pub use client_launch_grant::{
+    LaunchGrantState, WorkerLaunchGrantService, WorkerLaunchGrantServiceError,
+    WorkerLaunchGrantServiceErrorKind,
 };
 pub use client_occupancy::{
     ClientOccupancyService, ClientOccupancyServiceError, ClientOccupancyServiceErrorKind,

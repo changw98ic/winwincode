@@ -8,6 +8,7 @@ mod client_connections;
 mod client_exchange;
 mod client_occupancy;
 mod client_repositories;
+mod client_sessions;
 mod config;
 mod dispatcher;
 mod durable_event_hub;
@@ -43,6 +44,10 @@ pub use client_occupancy::{
 };
 pub use client_repositories::{
     ClientRepositoriesApplication, ClientRepositoriesError, ClientRepositoriesErrorKind,
+};
+pub use client_sessions::{
+    ClientSessionsApplication, ClientSessionsConfig, ClientSessionsError, ClientSessionsErrorKind,
+    worker_stop_message,
 };
 pub use winwincode_api::generated::{AuthSessionRequest, AuthSessionResponse};
 

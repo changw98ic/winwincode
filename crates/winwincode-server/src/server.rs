@@ -49,6 +49,10 @@ use crate::client_occupancy::ClientOccupancyError;
 use crate::client_occupancy::ClientOccupancyErrorKind;
 use crate::client_repositories::ClientRepositoriesApplication;
 use crate::client_repositories::ClientRepositoriesErrorKind;
+use crate::client_sessions::ClientSessionsApplication;
+use crate::client_sessions::ClientSessionsConfig;
+use crate::client_sessions::ClientSessionsError;
+use crate::client_sessions::ClientSessionsErrorKind;
 use crate::config::{ServerConfig, ServerTls};
 use crate::enterprise_identity_protocol::{
     EnterpriseIdentityProtocolApplication, router as enterprise_identity_router,
@@ -123,6 +127,7 @@ struct ServerState {
     client_connections: Option<Arc<ClientConnectionsApplication>>,
     client_occupancy: Option<Arc<ClientOccupancyApplication>>,
     client_repositories: Option<Arc<ClientRepositoriesApplication>>,
+    client_sessions: Option<Arc<ClientSessionsApplication>>,
 }
 
 /// Running standalone listener with deterministic graceful shutdown.
@@ -269,6 +274,18 @@ pub async fn start_server_with_remote_worker(
     let client_repositories = client_exchange
         .as_ref()
         .map(|_| Arc::new(ClientRepositoriesApplication::open(config.data_directory())));
+    let client_sessions = match &client_exchange {
+        Some(_) => {
+            let application = ClientSessionsApplication::open(
+                config.data_directory(),
+                &ClientSessionsConfig::default(),
+            )
+            .map_err(|error| ServerError::new(error.to_string()))?;
+            Some(Arc::new(application))
+        }
+        // Servers without a Client surface keep the launch routes absent.
+        None => None,
+    };
     // The periodic offline sweep projects heartbeat-stale devices to
     // `offline` and their active occupancy leases to `recovery_pending`
     // (plan 12.5). Each iteration opens and closes its own storage
@@ -296,6 +313,7 @@ pub async fn start_server_with_remote_worker(
         client_connections,
         client_occupancy,
         client_repositories,
+        client_sessions,
     };
     let router = router(state, enterprise_identity);
     let handle = Handle::new();
@@ -427,6 +445,7 @@ fn router(
             "/api/v1/repositories",
             get(list_repositories).options(preflight),
         )
+        .route("/api/v1/sessions", post(create_session).options(preflight))
         .fallback(not_found)
         .with_state(state);
     let router = enterprise_identity.map_or(router.clone(), |application| {
@@ -1017,6 +1036,121 @@ fn occupancy_flow_error(error: &ClientOccupancyError, origin: Option<&HeaderValu
             StatusCode::SERVICE_UNAVAILABLE,
             "SERVICE_UNAVAILABLE",
             "client occupancy service is unavailable",
+        ),
+    };
+    connect_error_response(status, code, message, origin)
+}
+
+/// One Worker launch (plan 14.3): the occupancy holder submits the Client
+/// and repository binding, the server issues the single-use launch grant,
+/// the `client.worker.launch` frame goes downlink, and the bounded wait
+/// resolves with the session identity once the device acknowledges.
+async fn create_session(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    uri: Uri,
+    request: Request<Body>,
+) -> Response {
+    let Some(application) = &state.client_sessions else {
+        return not_found().await;
+    };
+    let origin = match allowed_origin(&state, &headers) {
+        Ok(origin) => origin,
+        Err(error) => return error.into_response(),
+    };
+    if uri.query().is_some() {
+        return BoundaryError::new(
+            StatusCode::BAD_REQUEST,
+            "QUERY_PARAMETERS_FORBIDDEN",
+            "credentials and routing values are not accepted in the URL query",
+            origin,
+        )
+        .into_response();
+    }
+    let body = match parse_json_body(request, origin.clone()).await {
+        Ok(body) => body,
+        Err(error) => return error.into_response(),
+    };
+    let (principal, origin, _) = match authorize(&state, &headers, &uri) {
+        Ok(authorized) => authorized,
+        Err(error) => return error.into_response(),
+    };
+    let Some(user_id) = principal.actor_user_id() else {
+        return connect_error_response(
+            StatusCode::FORBIDDEN,
+            "PERMISSION_DENIED",
+            "a signed-in user is required",
+            origin.as_ref(),
+        );
+    };
+    match application.launch(&user_id.0, &body).await {
+        Ok(body) => json_response(StatusCode::CREATED, body, origin.as_ref()),
+        Err(error) => session_flow_error(&error, origin.as_ref()),
+    }
+}
+
+/// Maps one launch flow failure onto the central launch wire error code.
+fn session_flow_error(error: &ClientSessionsError, origin: Option<&HeaderValue>) -> Response {
+    let (status, code, message) = match error.kind() {
+        ClientSessionsErrorKind::InvalidRequest => (
+            StatusCode::BAD_REQUEST,
+            "INVALID_REQUEST",
+            "launch request is invalid",
+        ),
+        ClientSessionsErrorKind::ClientNotFound => (
+            StatusCode::NOT_FOUND,
+            "CLIENT_NOT_FOUND",
+            "no client matches the requested id",
+        ),
+        ClientSessionsErrorKind::ClientOffline => (
+            StatusCode::CONFLICT,
+            "CLIENT_OFFLINE",
+            "the client is not online",
+        ),
+        ClientSessionsErrorKind::ClientLocked => (
+            StatusCode::CONFLICT,
+            "CLIENT_LOCKED",
+            "the client is locked",
+        ),
+        ClientSessionsErrorKind::NotHolder => (
+            StatusCode::FORBIDDEN,
+            "NOT_HOLDER",
+            "only the occupancy holder may launch a worker session",
+        ),
+        ClientSessionsErrorKind::OccupancyRequired => (
+            StatusCode::CONFLICT,
+            "OCCUPANCY_REQUIRED",
+            "the client must be occupied by the requester before launching",
+        ),
+        ClientSessionsErrorKind::BindingNotVisible => (
+            StatusCode::FORBIDDEN,
+            "BINDING_NOT_VISIBLE",
+            "the repository binding is not visible to the holder",
+        ),
+        ClientSessionsErrorKind::CapacityExhausted => (
+            StatusCode::CONFLICT,
+            "CAPACITY_EXHAUSTED",
+            "the client has no free worker-session slot",
+        ),
+        ClientSessionsErrorKind::GrantExpired => (
+            StatusCode::CONFLICT,
+            "GRANT_EXPIRED",
+            "the launch grant expired before the device accepted",
+        ),
+        ClientSessionsErrorKind::LaunchRejected => (
+            StatusCode::CONFLICT,
+            "LAUNCH_REJECTED",
+            "the device rejected the worker launch",
+        ),
+        ClientSessionsErrorKind::LaunchAckTimeout => (
+            StatusCode::GATEWAY_TIMEOUT,
+            "LAUNCH_ACK_TIMEOUT",
+            "the device did not acknowledge the worker launch in time",
+        ),
+        ClientSessionsErrorKind::Unavailable => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "SERVICE_UNAVAILABLE",
+            "client session launch service is unavailable",
         ),
     };
     connect_error_response(status, code, message, origin)
