@@ -20,6 +20,14 @@
 //!   publications, refresh-superseded generations, the local connection
 //!   policy (lock / new connections), challenge verdicts, and the durable
 //!   `client.connect_code.published` frame.
+//! - [`repository`]: the local repository registry (plan 8.1, 13.1–13.3,
+//!   13.5) — the registration check chain (canonicalize with symlink
+//!   resolution and replacement detection, readable directory,
+//!   confirm-or-initialize Git, common directory, HEAD/branch/dirty), random
+//!   `rbd_` binding ids, the local path mapping and scan projection, the
+//!   path-free `client.repository.upsert` / `removed` / `status` frames, and
+//!   the launch-time [`repository::revalidate_repository`] the Worker epic
+//!   must call before every launch.
 //! - [`fencing`]: the pure occupancy fencing decision surface
 //!   (CLIENT-300.3, plan 12.6) — [`FencingGuard::authorize_command`] over
 //!   the four fenced command entry points (worker launch/stop, candidate
@@ -54,6 +62,7 @@ pub mod daemon;
 pub mod fencing;
 pub mod http;
 pub mod identity;
+pub mod repository;
 pub mod store;
 
 pub use connect_code::{
@@ -72,12 +81,17 @@ pub use identity::{
     DeviceCredential, DeviceIdentity, DeviceIdentitySeed, IdentityRecord, IssuedEnrollment,
     adopt_enrollment, ensure_device_identity, load_device_identity,
 };
+pub use repository::{
+    RegistrationOptions, RegistrationRejection, RepositoryBindingSummary, RepositoryRegistration,
+    RepositoryRegistryError, RepositoryRemoval, RepositoryRevalidation, list_bindings,
+    register_repository, remove_repository, repository_fingerprint, revalidate_repository,
+};
 pub use store::{
     CLIENT_STORE_SCHEMA_VERSION, ClientInboxCursor, ClientInboxCursorUpdate, ClientOutboxEntry,
     ConnectCodeStateRecord, ConnectionPolicyRecord, DeviceStore, DeviceStoreError,
     DeviceStoreErrorKind, OccupancyMirrorAdvance, OccupancyMirrorRecord, OccupancyMirrorUpdate,
     OccupancyReleaseIntentOutcome, OccupancyReleaseIntentRecord, PathMappingRecord,
-    ServerProfileRecord,
+    RepositoryLocalStateRecord, ServerProfileRecord, availability_wire_name, dirty_state_wire_name,
 };
 
 // Façade re-export: the connection policy, lock, and connect-code lifecycle

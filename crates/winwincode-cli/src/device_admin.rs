@@ -293,14 +293,14 @@ pub fn set_device_lock(
     })
 }
 
-fn open_store(data_directory: &Path) -> Result<DeviceStore, DeviceAdminError> {
+pub(crate) fn open_store(data_directory: &Path) -> Result<DeviceStore, DeviceAdminError> {
     DeviceStore::open(data_directory).map_err(|error| DeviceAdminError::Failed {
         code: "device-store-open",
         message: error.to_string(),
     })
 }
 
-fn store_failed(error: &winwincode_device_client::DeviceStoreError) -> DeviceAdminError {
+pub(crate) fn store_failed(error: &winwincode_device_client::DeviceStoreError) -> DeviceAdminError {
     DeviceAdminError::Failed {
         code: "device-store",
         message: error.to_string(),
@@ -324,9 +324,9 @@ fn connect_code_failed(error: &connect_code::ConnectCodeError) -> DeviceAdminErr
 /// The rotation path of `ensure_device_identity` only validates the seed and
 /// rewrites the `clientInstanceId` — the stored device description of an
 /// existing identity is never overwritten, so these placeholder values exist
-/// purely to pass that validation. `refresh-code` refuses to run before an
-/// identity exists, so the fresh-boot write path is unreachable here.
-fn rotation_seed() -> winwincode_device_client::DeviceIdentitySeed {
+/// purely to pass that validation. Commands that refuse to run before an
+/// identity exists never reach the fresh-boot write path.
+pub(crate) fn rotation_seed() -> winwincode_device_client::DeviceIdentitySeed {
     winwincode_device_client::DeviceIdentitySeed {
         display_name: "wwc device refresh-code".to_owned(),
         platform: "cli".to_owned(),
@@ -335,7 +335,7 @@ fn rotation_seed() -> winwincode_device_client::DeviceIdentitySeed {
     }
 }
 
-fn now_rfc3339() -> String {
+pub(crate) fn now_rfc3339() -> String {
     OffsetDateTime::now_utc()
         .format(&Rfc3339)
         .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_owned())

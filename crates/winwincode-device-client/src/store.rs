@@ -27,7 +27,8 @@ use std::time::{Duration, Instant as StdInstant};
 
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use winwincode_client_port::domain::{
-    ClientLockState, ClientOccupancyReleaseMode, ConnectCodeState,
+    ClientLockState, ClientOccupancyReleaseMode, ConnectCodeState, RepositoryAvailability,
+    RepositoryDirtyState,
 };
 use winwincode_client_port::exchange::{
     CompactingOutbox, FrameCodec, FrameOutbox, OutboxSnapshot, StoredFrame,
@@ -179,6 +180,30 @@ pub struct PathMappingRecord {
     pub last_canonicalized_at: Option<String>,
     /// Local lifecycle vocabulary owned by later device-client lanes.
     pub local_state: String,
+}
+
+/// One local repository scan projection row (`repository_local_state`,
+/// plan section 8).
+///
+/// LOCAL ONLY: like [`PathMappingRecord`], this row never leaves the device.
+/// Only the digest-bearing safe projection of these facts rides the
+/// `client.repository.upsert` / `client.repository.status` frames; the
+/// absolute path never does. Availability uses the plan 13.5 seven-state
+/// vocabulary in its wire spelling (`available`, `dirty`, `unavailable`,
+/// `moved`, `invalid_git`, `permission_denied`, `scan_failed`); the dirty
+/// state uses `clean` / `dirty`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RepositoryLocalStateRecord {
+    pub repository_binding_id: String,
+    pub dirty_state: RepositoryDirtyState,
+    pub availability: RepositoryAvailability,
+    /// Last observed HEAD commit; empty before the first commit (an unborn
+    /// branch) and `None` when the last scan could not read it.
+    pub head_commit: Option<String>,
+    /// RFC 3339 stamp of the scan that produced this projection.
+    pub last_scanned_at: Option<String>,
+    /// RFC 3339 stamp of the last write to this row.
+    pub updated_at: String,
 }
 
 /// One durable pending (or published) client-to-server envelope.
@@ -576,6 +601,133 @@ impl DeviceStore {
                 params![repository_binding_id],
             )
             .map_err(sql_error)?;
+        Ok(changed > 0)
+    }
+
+    /// Inserts or replaces one local repository scan projection row.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DeviceStoreErrorKind::InvalidInput`] for an empty or
+    /// overlong binding id or update stamp, and an adapter-neutral error when
+    /// the write fails or the store is closed.
+    pub fn put_repository_local_state(
+        &mut self,
+        record: &RepositoryLocalStateRecord,
+    ) -> Result<(), DeviceStoreError> {
+        require_non_empty(
+            &record.repository_binding_id,
+            "repository binding id",
+            MAX_ID_BYTES,
+        )?;
+        require_non_empty(
+            &record.updated_at,
+            "repository state updated at",
+            MAX_ID_BYTES,
+        )?;
+        let connection = self.connection_mut()?;
+        connection
+            .execute(
+                "INSERT INTO repository_local_state \
+                 (repository_binding_id, dirty_state, availability, head_commit, \
+                  last_scanned_at, updated_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
+                 ON CONFLICT (repository_binding_id) DO UPDATE SET \
+                 dirty_state = excluded.dirty_state, \
+                 availability = excluded.availability, \
+                 head_commit = excluded.head_commit, \
+                 last_scanned_at = excluded.last_scanned_at, \
+                 updated_at = excluded.updated_at",
+                params![
+                    record.repository_binding_id,
+                    dirty_state_wire_name(record.dirty_state),
+                    availability_wire_name(record.availability),
+                    record.head_commit,
+                    record.last_scanned_at,
+                    record.updated_at,
+                ],
+            )
+            .map_err(sql_error)?;
+        Ok(())
+    }
+
+    /// Loads one local repository scan projection row by its binding id.
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter-neutral error when the read fails, the store is
+    /// closed, or a stored row disagrees with its schema vocabulary.
+    pub fn repository_local_state(
+        &self,
+        repository_binding_id: &str,
+    ) -> Result<Option<RepositoryLocalStateRecord>, DeviceStoreError> {
+        self.connection()?
+            .query_row(
+                "SELECT repository_binding_id, dirty_state, availability, head_commit, \
+                 last_scanned_at, updated_at \
+                 FROM repository_local_state WHERE repository_binding_id = ?1",
+                params![repository_binding_id],
+                row_to_repository_local_state,
+            )
+            .optional()
+            .map_err(sql_error)
+    }
+
+    /// Loads every local repository scan projection row in binding-id order.
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter-neutral error when the read fails, the store is
+    /// closed, or a stored row disagrees with its schema vocabulary.
+    pub fn repository_local_states(
+        &self,
+    ) -> Result<Vec<RepositoryLocalStateRecord>, DeviceStoreError> {
+        let mut statement = self
+            .connection()?
+            .prepare(
+                "SELECT repository_binding_id, dirty_state, availability, head_commit, \
+                 last_scanned_at, updated_at \
+                 FROM repository_local_state ORDER BY repository_binding_id",
+            )
+            .map_err(sql_error)?;
+        let rows = statement
+            .query_map([], row_to_repository_local_state)
+            .map_err(sql_error)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(sql_error)
+    }
+
+    /// Deletes one repository binding atomically: the path-mapping row and
+    /// its scan projection row disappear together or not at all.
+    ///
+    /// Returns whether the binding existed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DeviceStoreErrorKind::InvalidInput`] for an empty binding id
+    /// and an adapter-neutral error when the delete fails or the store is
+    /// closed.
+    pub fn delete_repository_binding(
+        &mut self,
+        repository_binding_id: &str,
+    ) -> Result<bool, DeviceStoreError> {
+        require_non_empty(repository_binding_id, "repository binding id", MAX_ID_BYTES)?;
+        let connection = self.connection_mut()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sql_error)?;
+        transaction
+            .execute(
+                "DELETE FROM repository_local_state WHERE repository_binding_id = ?1",
+                params![repository_binding_id],
+            )
+            .map_err(sql_error)?;
+        let changed = transaction
+            .execute(
+                "DELETE FROM repository_path_mapping WHERE repository_binding_id = ?1",
+                params![repository_binding_id],
+            )
+            .map_err(sql_error)?;
+        transaction.commit().map_err(sql_error)?;
         Ok(changed > 0)
     }
 
@@ -1765,6 +1917,75 @@ fn row_to_path_mapping(row: &rusqlite::Row<'_>) -> rusqlite::Result<PathMappingR
         last_canonicalized_at: row.get(3)?,
         local_state: row.get(4)?,
     })
+}
+
+fn row_to_repository_local_state(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<RepositoryLocalStateRecord> {
+    Ok(RepositoryLocalStateRecord {
+        repository_binding_id: row.get(0)?,
+        dirty_state: parse_dirty_state_wire_name(&row.get::<_, String>(1)?)?,
+        availability: parse_availability_wire_name(&row.get::<_, String>(2)?)?,
+        head_commit: row.get(3)?,
+        last_scanned_at: row.get(4)?,
+        updated_at: row.get(5)?,
+    })
+}
+
+/// The wire/storage spelling of one plan 13.5 availability state.
+#[must_use]
+pub const fn availability_wire_name(availability: RepositoryAvailability) -> &'static str {
+    match availability {
+        RepositoryAvailability::Available => "available",
+        RepositoryAvailability::Dirty => "dirty",
+        RepositoryAvailability::Unavailable => "unavailable",
+        RepositoryAvailability::Moved => "moved",
+        RepositoryAvailability::InvalidGit => "invalid_git",
+        RepositoryAvailability::PermissionDenied => "permission_denied",
+        RepositoryAvailability::ScanFailed => "scan_failed",
+    }
+}
+
+/// Parses one stored availability value, fail-closing on an unknown
+/// vocabulary.
+fn parse_availability_wire_name(value: &str) -> rusqlite::Result<RepositoryAvailability> {
+    match value {
+        "available" => Ok(RepositoryAvailability::Available),
+        "dirty" => Ok(RepositoryAvailability::Dirty),
+        "unavailable" => Ok(RepositoryAvailability::Unavailable),
+        "moved" => Ok(RepositoryAvailability::Moved),
+        "invalid_git" => Ok(RepositoryAvailability::InvalidGit),
+        "permission_denied" => Ok(RepositoryAvailability::PermissionDenied),
+        "scan_failed" => Ok(RepositoryAvailability::ScanFailed),
+        other => Err(rusqlite::Error::FromSqlConversionFailure(
+            2,
+            rusqlite::types::Type::Text,
+            format!("stored availability {other} is not in the plan 13.5 vocabulary").into(),
+        )),
+    }
+}
+
+/// The wire/storage spelling of one repository dirty state.
+#[must_use]
+pub const fn dirty_state_wire_name(dirty_state: RepositoryDirtyState) -> &'static str {
+    match dirty_state {
+        RepositoryDirtyState::Clean => "clean",
+        RepositoryDirtyState::Dirty => "dirty",
+    }
+}
+
+/// Parses one stored dirty-state value, fail-closing on an unknown
+/// vocabulary.
+fn parse_dirty_state_wire_name(value: &str) -> rusqlite::Result<RepositoryDirtyState> {
+    match value {
+        "clean" => Ok(RepositoryDirtyState::Clean),
+        "dirty" => Ok(RepositoryDirtyState::Dirty),
+        other => Err(rusqlite::Error::FromSqlConversionFailure(
+            1,
+            rusqlite::types::Type::Text,
+            format!("stored dirty state {other} is not clean or dirty").into(),
+        )),
+    }
 }
 
 fn row_to_outbox_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<ClientOutboxEntry> {

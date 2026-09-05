@@ -9,6 +9,7 @@ use crate::device_admin::{
     DeviceAdminError, DeviceAdminOutcome, device_status, refresh_device_connect_code,
     set_device_lock,
 };
+use crate::repo_admin::{RepoAdminError, RepoAdminOutcome, repo_add, repo_list, repo_remove};
 use crate::user_admin::{UserAccountAdmin, UserAdminError, UserAdminOutcome};
 use crate::{
     AttachRequest, BaselineChoice, DiagnosticCategory, DiagnosticReport, DiagnosticStatus,
@@ -54,6 +55,9 @@ pub fn render_help() -> String {
         "WinWinCode 本地命令：",
         "  wwc init [PATH] [--confirm-git-init] [--baseline head|snapshot|cancel] [--confirm-snapshot] [--json]",
         "  wwc repo attach [PATH] [--baseline head|snapshot|cancel] [--confirm-snapshot] [--json]",
+        "  wwc repo add <PATH> [--init] [--data-dir PATH] [--json]",
+        "  wwc repo list [--data-dir PATH] [--json]",
+        "  wwc repo remove <BINDING-ID> [--data-dir PATH] [--json]",
         "  wwc doctor [PATH] [--json]",
         "  wwc user create <USERNAME> [--role owner|member] [--data-dir PATH] [--json]",
         "  wwc user disable <USERNAME> [--data-dir PATH] [--json]",
@@ -128,13 +132,24 @@ fn run_repo(
     arguments: &[String],
     launcher: &dyn LocalLauncherPort,
 ) -> Result<WwcCliExit, UsageError> {
-    let Some(action) = arguments.first() else {
-        return Err(UsageError("repo 后需要 attach。".into()));
+    let Some(action) = arguments.first().map(String::as_str) else {
+        return Err(UsageError(
+            "repo 后需要 attach、add、list 或 remove。".into(),
+        ));
     };
-    if action != "attach" {
-        return Err(UsageError(format!("未知 repo 命令 {action}。")));
+    match action {
+        "attach" => run_repo_attach(&arguments[1..], launcher),
+        "add" | "list" | "remove" => run_repo_registry(action, &arguments[1..]),
+        other => Err(UsageError(format!("未知 repo 命令 {other}。"))),
     }
-    let parsed = parse(&arguments[1..], &["confirm-snapshot", "json"])?;
+}
+
+/// Runs the local-attachment `wwc repo attach` flow.
+fn run_repo_attach(
+    arguments: &[String],
+    launcher: &dyn LocalLauncherPort,
+) -> Result<WwcCliExit, UsageError> {
+    let parsed = parse(arguments, &["confirm-snapshot", "json"])?;
     reject_unknown(&parsed, &["baseline"], &["confirm-snapshot", "json"])?;
     let request = AttachRequest {
         repository_path: repository_path(&parsed)?,
@@ -145,6 +160,142 @@ fn run_repo(
         launcher.attach_repository(&request),
         parsed.switches.contains("json"),
     ))
+}
+
+/// Runs one Device Client repository registry command
+/// (`wwc repo add|list|remove`, plan §13.1) against the Device Client local
+/// data directory.
+fn run_repo_registry(action: &str, arguments: &[String]) -> Result<WwcCliExit, UsageError> {
+    let parsed = parse(arguments, &["init", "json"])?;
+    reject_unknown(&parsed, &["data-dir"], &["init", "json"])?;
+    let data_directory = device_data_directory(&parsed)?;
+    let json = parsed.switches.contains("json");
+    let result = match action {
+        "add" => {
+            if parsed.positionals.len() != 1 {
+                return Err(UsageError("repo add 需要且只需要一个仓库路径。".into()));
+            }
+            let requested_path = parsed
+                .positionals
+                .first()
+                .map(PathBuf::from)
+                .unwrap_or_default();
+            repo_add(
+                &data_directory,
+                &requested_path,
+                parsed.switches.contains("init"),
+            )
+        }
+        "list" => repo_list(&data_directory),
+        _ => {
+            let binding_id = single_binding_id(&parsed)?;
+            repo_remove(&data_directory, binding_id)
+        }
+    };
+    Ok(repo_registry_exit(result, json))
+}
+
+fn single_binding_id(parsed: &ParsedArguments) -> Result<&str, UsageError> {
+    if parsed.positionals.len() != 1 {
+        return Err(UsageError("需要且只需要一个绑定 ID。".into()));
+    }
+    Ok(parsed
+        .positionals
+        .first()
+        .map(String::as_str)
+        .unwrap_or_default())
+}
+
+fn repo_registry_exit(result: Result<RepoAdminOutcome, RepoAdminError>, json: bool) -> WwcCliExit {
+    match result {
+        Ok(outcome) => WwcCliExit {
+            code: EXIT_SUCCESS,
+            stdout: if json {
+                render_json(&outcome)
+            } else {
+                render_repo_registry(&outcome)
+            },
+            stderr: String::new(),
+        },
+        Err(RepoAdminError::NotInitialized) => WwcCliExit {
+            code: EXIT_ACTION_REQUIRED,
+            stdout: if json {
+                "{\"status\":\"not-initialized\"}\n".to_owned()
+            } else {
+                render_device_initialization_guidance()
+            },
+            stderr: String::new(),
+        },
+        Err(RepoAdminError::NotEnrolled) => WwcCliExit {
+            code: EXIT_ACTION_REQUIRED,
+            stdout: if json {
+                "{\"status\":\"not-enrolled\"}\n".to_owned()
+            } else {
+                render_device_enrollment_guidance()
+            },
+            stderr: String::new(),
+        },
+        Err(error @ (RepoAdminError::NotFound | RepoAdminError::Rejected { .. })) => WwcCliExit {
+            code: EXIT_ACTION_REQUIRED,
+            stdout: String::new(),
+            stderr: format!("仓库注册问题：{error}\n"),
+        },
+        Err(RepoAdminError::Failed { code, message }) => WwcCliExit {
+            code: EXIT_SERVICE,
+            stdout: String::new(),
+            stderr: format!("仓库命令失败 [{code}]：{message}\n"),
+        },
+    }
+}
+
+fn render_repo_registry(outcome: &RepoAdminOutcome) -> String {
+    match outcome {
+        RepoAdminOutcome::Registered {
+            repository,
+            git_initialized,
+        } => {
+            let mut output = String::new();
+            if *git_initialized {
+                output.push_str("已在显式确认后初始化 Git 仓库。\n");
+            }
+            let _ = write!(
+                output,
+                "仓库已注册。\n绑定 ID：{}\n仓库：{}\nGit common directory：{}\n分支：{}\nHEAD：{}\n状态：{}（dirty：{}）\n\
+                 说明：注册投影不含绝对路径，已写入本地 outbox，将在 Device Client 下一次交换时上报 Server。\n",
+                repository.repository_binding_id,
+                repository.canonical_path,
+                repository.git_common_directory.as_deref().unwrap_or("未知"),
+                repository.default_branch.as_deref().unwrap_or("未知"),
+                repository.head_commit.as_deref().unwrap_or("（尚无提交）"),
+                repository.availability,
+                repository.dirty_state.as_deref().unwrap_or("未知"),
+            );
+            output
+        }
+        RepoAdminOutcome::List { repositories } => {
+            if repositories.is_empty() {
+                return "还没有注册的仓库。用 `wwc repo add <路径>` 注册第一个仓库。\n".into();
+            }
+            let mut output = format!("已注册 {} 个仓库。\n", repositories.len());
+            for repository in repositories {
+                let _ = write!(
+                    output,
+                    "绑定 ID：{}\n仓库：{}\n状态：{}\n最近扫描：{}\n\n",
+                    repository.repository_binding_id,
+                    repository.canonical_path,
+                    repository.availability,
+                    repository.last_scanned_at.as_deref().unwrap_or("尚未扫描"),
+                );
+            }
+            output
+        }
+        RepoAdminOutcome::Removed {
+            repository_binding_id,
+        } => format!(
+            "仓库绑定已移除。\n绑定 ID：{repository_binding_id}\n\
+             说明：本地路径映射与扫描投影已删除；移除事件已写入本地 outbox，将在下一次交换时上报 Server。\n"
+        ),
+    }
 }
 
 fn run_doctor(
