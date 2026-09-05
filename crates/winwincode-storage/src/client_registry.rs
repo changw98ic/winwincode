@@ -475,6 +475,33 @@ impl<'storage> ClientNodeRegistry<'storage> {
         load_client_node(self.connection()?, client_node_id)
     }
 
+    /// Returns one durable `ClientNode` projection by its public device
+    /// number (plan 11.2: the public id only ever locates one Client).
+    ///
+    /// # Errors
+    ///
+    /// Rejects a non-canonical public id, corrupt stored rows, or storage
+    /// failure.
+    pub fn snapshot_by_public_client_id(
+        &self,
+        public_client_id: &str,
+    ) -> Result<Option<ClientNodeRecord>, ClientRegistryError> {
+        validate_public_client_id(public_client_id)?;
+        let connection = self.connection()?;
+        let client_node_id = connection
+            .query_row(
+                "SELECT client_node_id FROM client_nodes WHERE public_client_id = ?1",
+                [public_client_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|sql| sql_error(&sql))?;
+        match client_node_id {
+            Some(client_node_id) => load_client_node(connection, &client_node_id),
+            None => Ok(None),
+        }
+    }
+
     /// Applies one presence state transition under `expectedRevision` CAS.
     ///
     /// Only transitions in the frozen state machine are accepted; requesting

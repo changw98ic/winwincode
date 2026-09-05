@@ -15,8 +15,9 @@ use std::fmt;
 
 use winwincode_domain::Instant;
 use winwincode_storage::{
-    AccessGrantIssuance, AccessGrantRecord, AttemptDimension, ClientConnectStoreError,
-    ClientConnectStoreErrorKind, ConnectAttemptState, ConnectCodeConsume, ConnectCodePublication,
+    AccessChallengeCreation, AccessChallengeRecord, AccessGrantIssuance, AccessGrantRecord,
+    AttemptDimension, ClientConnectStoreError, ClientConnectStoreErrorKind, ConnectAttemptState,
+    ConnectAuditEntry, ConnectChallengeVerdict, ConnectCodeConsume, ConnectCodePublication,
     ConnectCodeRecord, ConnectCodeRevocation, ConnectGrantReceipt, GrantPermissions, GrantSource,
     SqliteStorage,
 };
@@ -47,6 +48,8 @@ pub enum ClientConnectServiceErrorKind {
     /// An active grant for the user and client already exists, or the grant
     /// id is already used.
     AccessGrantConflict,
+    /// A challenge id is already used, or the challenge was already settled.
+    ChallengeConflict,
     /// The requested change is not a legal state machine transition.
     IllegalStateTransition,
     /// The supplied `expectedRevision` no longer matches the durable revision.
@@ -115,6 +118,9 @@ impl From<ClientConnectStoreError> for ClientConnectServiceError {
                 }
                 ClientConnectStoreErrorKind::AccessGrantConflict => {
                     ClientConnectServiceErrorKind::AccessGrantConflict
+                }
+                ClientConnectStoreErrorKind::ChallengeConflict => {
+                    ClientConnectServiceErrorKind::ChallengeConflict
                 }
                 ClientConnectStoreErrorKind::IllegalStateTransition => {
                     ClientConnectServiceErrorKind::IllegalStateTransition
@@ -352,6 +358,96 @@ impl<'storage> ConnectCodeService<'storage> {
             .storage
             .client_connect_ledger()?
             .connect_attempts_blocked(dimension, subject_key, window_anchor, max_attempts)?)
+    }
+
+    /// Creates one pending `client.access.challenge` (plan 11.4, step 5).
+    ///
+    /// # Errors
+    ///
+    /// Rejects a non-canonical command, an unknown client node, an
+    /// already-used challenge id, or storage failure.
+    pub fn create_challenge(
+        &mut self,
+        creation: &AccessChallengeCreation,
+        now: &Instant,
+    ) -> Result<AccessChallengeRecord, ClientConnectServiceError> {
+        Ok(self
+            .storage
+            .client_connect_ledger()?
+            .create_challenge(creation, now)?)
+    }
+
+    /// Settles one pending challenge with the Device Client's challenge-ACK
+    /// verdict (plan 11.4, step 7). Unknown or mismatched acknowledgements
+    /// settle nothing and read as `None`.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a non-canonical identity or storage failure.
+    pub fn settle_challenge(
+        &mut self,
+        challenge_id: &str,
+        client_node_id: &str,
+        connect_code_id: &str,
+        verdict: ConnectChallengeVerdict,
+        now: &Instant,
+    ) -> Result<Option<AccessChallengeRecord>, ClientConnectServiceError> {
+        Ok(self.storage.client_connect_ledger()?.settle_challenge(
+            challenge_id,
+            client_node_id,
+            connect_code_id,
+            verdict,
+            now,
+        )?)
+    }
+
+    /// Returns one durable access challenge projection.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a non-canonical challenge identity or storage failure.
+    pub fn challenge_snapshot(
+        &mut self,
+        challenge_id: &str,
+    ) -> Result<Option<AccessChallengeRecord>, ClientConnectServiceError> {
+        Ok(self
+            .storage
+            .client_connect_ledger()?
+            .challenge_snapshot(challenge_id)?)
+    }
+
+    /// Returns the one live pending challenge of a user on a client for a
+    /// connect code, if any.
+    ///
+    /// # Errors
+    ///
+    /// Rejects non-canonical identities or storage failure.
+    pub fn pending_challenge_for_subject(
+        &mut self,
+        client_node_id: &str,
+        requester_user_id: &str,
+        connect_code_id: &str,
+    ) -> Result<Option<AccessChallengeRecord>, ClientConnectServiceError> {
+        Ok(self
+            .storage
+            .client_connect_ledger()?
+            .pending_challenge_for_subject(client_node_id, requester_user_id, connect_code_id)?)
+    }
+
+    /// Appends one connect-domain authorization audit entry.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a non-canonical entry, an already-used audit id, or storage
+    /// failure.
+    pub fn record_connect_audit(
+        &mut self,
+        entry: &ConnectAuditEntry,
+    ) -> Result<(), ClientConnectServiceError> {
+        Ok(self
+            .storage
+            .client_connect_ledger()?
+            .record_connect_audit(entry)?)
     }
 }
 

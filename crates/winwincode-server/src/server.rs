@@ -38,6 +38,10 @@ use crate::application::{StandaloneApplicationClock, SystemStandaloneApplication
 use crate::auth_session::{
     AuthSessionError, SqliteAuthSessionManager, cleared_session_cookie_header,
 };
+use crate::client_connections::ClientConnectionsApplication;
+use crate::client_connections::ClientConnectionsConfig;
+use crate::client_connections::ClientConnectionsError;
+use crate::client_connections::ClientConnectionsErrorKind;
 use crate::client_exchange::ClientExchangePort;
 use crate::config::{ServerConfig, ServerTls};
 use crate::enterprise_identity_protocol::{
@@ -110,6 +114,7 @@ struct ServerState {
     api: Arc<dyn ControlPlaneApiPort>,
     remote_worker: Option<Arc<dyn RemoteWorkerExchangePort>>,
     client_exchange: Option<Arc<dyn ClientExchangePort>>,
+    client_connections: Option<Arc<ClientConnectionsApplication>>,
 }
 
 /// Running standalone listener with deterministic graceful shutdown.
@@ -224,6 +229,18 @@ pub async fn start_server_with_remote_worker(
         ));
     }
     let config = Arc::new(config);
+    let client_connections = match &client_exchange {
+        Some(_) => {
+            let application = ClientConnectionsApplication::open(
+                config.data_directory(),
+                &ClientConnectionsConfig::default(),
+            )
+            .map_err(|error| ServerError::new(error.to_string()))?;
+            Some(Arc::new(application))
+        }
+        // Servers without a Client surface keep the connect routes absent.
+        None => None,
+    };
     let state = ServerState {
         config: Arc::clone(&config),
         auth_sessions,
@@ -231,6 +248,7 @@ pub async fn start_server_with_remote_worker(
         api: Arc::clone(&api),
         remote_worker,
         client_exchange,
+        client_connections,
     };
     let router = router(state, enterprise_identity);
     let handle = Handle::new();
@@ -334,6 +352,15 @@ fn router(
             "/internal/v1/client/exchange",
             post(client_control_exchange),
         )
+        .route("/api/v1/clients", get(list_clients).options(preflight))
+        .route(
+            "/api/v1/clients/connections",
+            post(create_client_connection).options(preflight),
+        )
+        .route(
+            "/api/v1/clients/grants/revoke",
+            post(revoke_client_grant).options(preflight),
+        )
         .fallback(not_found)
         .with_state(state);
     let router = enterprise_identity.map_or(router.clone(), |application| {
@@ -421,6 +448,217 @@ async fn client_control_exchange(
             }
         }
     }
+}
+
+/// The signed-in user's Client directory: one `DeviceSummary` card per
+/// granted Client (§16.4).
+async fn list_clients(State(state): State<ServerState>, headers: HeaderMap, uri: Uri) -> Response {
+    let Some(application) = &state.client_connections else {
+        return not_found().await;
+    };
+    let (principal, origin, _) = match authorize(&state, &headers, &uri) {
+        Ok(authorized) => authorized,
+        Err(error) => return error.into_response(),
+    };
+    let Some(user_id) = principal.actor_user_id() else {
+        return connect_error_response(
+            StatusCode::FORBIDDEN,
+            "PERMISSION_DENIED",
+            "a signed-in user is required",
+            origin.as_ref(),
+        );
+    };
+    match application.list_clients(&user_id.0) {
+        Ok(body) => json_response(StatusCode::OK, body, origin.as_ref()),
+        Err(error) => connect_flow_error(&error, origin.as_ref()),
+    }
+}
+
+/// One add-Client attempt (plan 11.4): bounded wait for the Device Client
+/// challenge acknowledgement, then the atomic consume-and-grant.
+#[allow(clippy::too_many_lines)]
+async fn create_client_connection(
+    State(state): State<ServerState>,
+    ConnectInfo(client): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    uri: Uri,
+    request: Request<Body>,
+) -> Response {
+    let Some(application) = &state.client_connections else {
+        return not_found().await;
+    };
+    let origin = match allowed_origin(&state, &headers) {
+        Ok(origin) => origin,
+        Err(error) => return error.into_response(),
+    };
+    if uri.query().is_some() {
+        return BoundaryError::new(
+            StatusCode::BAD_REQUEST,
+            "QUERY_PARAMETERS_FORBIDDEN",
+            "credentials and routing values are not accepted in the URL query",
+            origin,
+        )
+        .into_response();
+    }
+    let body = match parse_json_body(request, origin.clone()).await {
+        Ok(body) => body,
+        Err(error) => return error.into_response(),
+    };
+    let (principal, origin, _) = match authorize(&state, &headers, &uri) {
+        Ok(authorized) => authorized,
+        Err(error) => return error.into_response(),
+    };
+    let Some(user_id) = principal.actor_user_id() else {
+        return connect_error_response(
+            StatusCode::FORBIDDEN,
+            "PERMISSION_DENIED",
+            "a signed-in user is required",
+            origin.as_ref(),
+        );
+    };
+    let client_ip = client.ip().to_string();
+    match application.connect(&user_id.0, &client_ip, &body).await {
+        Ok(body) => json_response(StatusCode::CREATED, body, origin.as_ref()),
+        Err(error) => connect_flow_error(&error, origin.as_ref()),
+    }
+}
+
+/// Immediate grant revocation (contract 3): the holder or an Owner.
+async fn revoke_client_grant(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    uri: Uri,
+    request: Request<Body>,
+) -> Response {
+    let Some(application) = &state.client_connections else {
+        return not_found().await;
+    };
+    let origin = match allowed_origin(&state, &headers) {
+        Ok(origin) => origin,
+        Err(error) => return error.into_response(),
+    };
+    if uri.query().is_some() {
+        return BoundaryError::new(
+            StatusCode::BAD_REQUEST,
+            "QUERY_PARAMETERS_FORBIDDEN",
+            "credentials and routing values are not accepted in the URL query",
+            origin,
+        )
+        .into_response();
+    }
+    let body = match parse_json_body(request, origin.clone()).await {
+        Ok(body) => body,
+        Err(error) => return error.into_response(),
+    };
+    let (principal, origin, _) = match authorize(&state, &headers, &uri) {
+        Ok(authorized) => authorized,
+        Err(error) => return error.into_response(),
+    };
+    let Some(user_id) = principal.actor_user_id() else {
+        return connect_error_response(
+            StatusCode::FORBIDDEN,
+            "PERMISSION_DENIED",
+            "a signed-in user is required",
+            origin.as_ref(),
+        );
+    };
+    let acting_is_owner = state
+        .auth_sessions
+        .accounts()
+        .find(&user_id)
+        .ok()
+        .flatten()
+        .is_some_and(|account| {
+            account.role == UserAccountRole::Owner && account.state == UserAccountState::Active
+        });
+    match application.revoke(&user_id.0, acting_is_owner, &body) {
+        Ok(body) => json_response(StatusCode::OK, body, origin.as_ref()),
+        Err(error) => connect_flow_error(&error, origin.as_ref()),
+    }
+}
+
+/// Maps one connect flow failure onto its §16.3 wire error code.
+fn connect_flow_error(error: &ClientConnectionsError, origin: Option<&HeaderValue>) -> Response {
+    let (status, code, message) = match error.kind() {
+        ClientConnectionsErrorKind::InvalidRequest => (
+            StatusCode::BAD_REQUEST,
+            "INVALID_REQUEST",
+            "connect request is invalid",
+        ),
+        ClientConnectionsErrorKind::ClientNotFound => (
+            StatusCode::NOT_FOUND,
+            "CLIENT_NOT_FOUND",
+            "no client matches the requested id",
+        ),
+        ClientConnectionsErrorKind::ClientOffline => (
+            StatusCode::CONFLICT,
+            "CLIENT_OFFLINE",
+            "the client is not online",
+        ),
+        ClientConnectionsErrorKind::ConnectCodeInvalid => (
+            StatusCode::CONFLICT,
+            "CONNECT_CODE_INVALID",
+            "the connection code is not valid for this client",
+        ),
+        ClientConnectionsErrorKind::ConnectCodeExpired => (
+            StatusCode::CONFLICT,
+            "CONNECT_CODE_EXPIRED",
+            "the connection code is no longer usable",
+        ),
+        ClientConnectionsErrorKind::ClientConnectionsForbidden => (
+            StatusCode::CONFLICT,
+            "CLIENT_CONNECTIONS_FORBIDDEN",
+            "the client no longer accepts new connections",
+        ),
+        ClientConnectionsErrorKind::ClientLocked => (
+            StatusCode::CONFLICT,
+            "CLIENT_LOCKED",
+            "the client is locked",
+        ),
+        ClientConnectionsErrorKind::RateLimited => (
+            StatusCode::TOO_MANY_REQUESTS,
+            "RATE_LIMITED",
+            "connect attempts are rate limited",
+        ),
+        ClientConnectionsErrorKind::PermissionDenied => (
+            StatusCode::FORBIDDEN,
+            "PERMISSION_DENIED",
+            "only the grant holder or an Owner may revoke a grant",
+        ),
+        ClientConnectionsErrorKind::ResourceNotFound => (
+            StatusCode::NOT_FOUND,
+            "RESOURCE_NOT_FOUND",
+            "no active grant matches the request",
+        ),
+        ClientConnectionsErrorKind::Unavailable => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "SERVICE_UNAVAILABLE",
+            "client connect service is unavailable",
+        ),
+    };
+    connect_error_response(status, code, message, origin)
+}
+
+/// The wire error shape of the connect surface: `error.code` carries the
+/// §16.3 taxonomy the browser facade translates.
+fn connect_error_response(
+    status: StatusCode,
+    code: &str,
+    message: &str,
+    origin: Option<&HeaderValue>,
+) -> Response {
+    json_response(
+        status,
+        json!({
+            "error": {
+                "code": code,
+                "message": message,
+                "retryable": status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error(),
+            },
+            "schemaVersion": SUPPORTED_SCHEMA_VERSION,
+        }),
+        origin,
+    )
 }
 
 async fn health(State(state): State<ServerState>) -> Response {

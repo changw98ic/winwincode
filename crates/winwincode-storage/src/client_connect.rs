@@ -70,6 +70,31 @@ CREATE TABLE IF NOT EXISTS connect_attempts (
     failed_attempts INTEGER NOT NULL CHECK (failed_attempts >= 0),
     PRIMARY KEY (dimension, subject_key)
 );
+CREATE TABLE IF NOT EXISTS client_access_challenges (
+    challenge_id TEXT PRIMARY KEY NOT NULL,
+    client_node_id TEXT NOT NULL,
+    connect_code_id TEXT NOT NULL,
+    requester_user_id TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('pending', 'confirmed', 'rejected')),
+    created_at TEXT NOT NULL,
+    resolved_at TEXT,
+    CHECK ((state = 'pending') = (resolved_at IS NULL)),
+    FOREIGN KEY (client_node_id) REFERENCES client_nodes(client_node_id) ON DELETE RESTRICT
+);
+CREATE INDEX IF NOT EXISTS client_access_challenges_by_subject
+    ON client_access_challenges (client_node_id, requester_user_id, connect_code_id, state);
+CREATE TABLE IF NOT EXISTS client_connect_audit (
+    audit_id TEXT PRIMARY KEY NOT NULL,
+    action TEXT NOT NULL CHECK (action IN ('client.access.granted', 'client.access.revoked')),
+    client_node_id TEXT NOT NULL,
+    client_access_grant_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    actor_user_id TEXT NOT NULL,
+    detail TEXT,
+    occurred_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS client_connect_audit_by_client
+    ON client_connect_audit (client_node_id, occurred_at);
 ";
 
 /// Lifecycle state of one `ClientConnectCode` (contract 2).
@@ -726,6 +751,255 @@ pub struct ConnectAttemptState {
     pub failed_attempts: u64,
 }
 
+/// Lifecycle state of one `client.access.challenge` (plan 11.4, step 5-8).
+///
+/// `pending` is the only live state; `confirmed` and `rejected` are terminal
+/// settlements recorded when the Device Client's `client.access.challenge_ack`
+/// frame is judged by the client exchange.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ConnectChallengeState {
+    /// Created and awaiting the Device Client acknowledgement.
+    Pending,
+    /// The device confirmed the code generation still valid.
+    Confirmed,
+    /// The device answered `stale_generation` or refused the challenge.
+    Rejected,
+}
+
+impl ConnectChallengeState {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Confirmed => "confirmed",
+            Self::Rejected => "rejected",
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self, ClientConnectStoreError> {
+        match value {
+            "pending" => Ok(Self::Pending),
+            "confirmed" => Ok(Self::Confirmed),
+            "rejected" => Ok(Self::Rejected),
+            _ => Err(error(
+                ClientConnectStoreErrorKind::CorruptState,
+                "stored access challenge state is invalid",
+            )),
+        }
+    }
+}
+
+impl fmt::Display for ConnectChallengeState {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// Device verdict carried by one `client.access.challenge_ack` frame.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ConnectChallengeVerdict {
+    /// `confirmed`: the presented code generation is still valid locally.
+    Confirmed,
+    /// `stale_generation`: the device no longer holds this code generation.
+    Rejected,
+}
+
+/// Command that creates one pending access challenge (plan 11.4, step 5).
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[allow(clippy::struct_field_names)]
+pub struct AccessChallengeCreation {
+    challenge_id: String,
+    client_node_id: String,
+    connect_code_id: String,
+    requester_user_id: String,
+}
+
+impl AccessChallengeCreation {
+    /// Builds one validated challenge creation command.
+    ///
+    /// # Errors
+    ///
+    /// Rejects non-canonical identities.
+    pub fn try_new(
+        challenge_id: impl Into<String>,
+        client_node_id: impl Into<String>,
+        connect_code_id: impl Into<String>,
+        requester_user_id: impl Into<String>,
+    ) -> Result<Self, ClientConnectStoreError> {
+        let creation = Self {
+            challenge_id: challenge_id.into(),
+            client_node_id: client_node_id.into(),
+            connect_code_id: connect_code_id.into(),
+            requester_user_id: requester_user_id.into(),
+        };
+        validate_challenge_id(&creation.challenge_id)?;
+        validate_client_node_id(&creation.client_node_id)?;
+        validate_connect_code_id(&creation.connect_code_id)?;
+        validate_user_id(&creation.requester_user_id)?;
+        Ok(creation)
+    }
+
+    #[must_use]
+    pub fn challenge_id(&self) -> &str {
+        &self.challenge_id
+    }
+
+    #[must_use]
+    pub fn client_node_id(&self) -> &str {
+        &self.client_node_id
+    }
+
+    #[must_use]
+    pub fn connect_code_id(&self) -> &str {
+        &self.connect_code_id
+    }
+
+    #[must_use]
+    pub fn requester_user_id(&self) -> &str {
+        &self.requester_user_id
+    }
+}
+
+/// Durable access challenge projection row (plan 11.4, step 5).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AccessChallengeRecord {
+    /// Stable Server-side challenge identifier.
+    pub challenge_id: String,
+    /// Client the challenge was issued to.
+    pub client_node_id: String,
+    /// Connect code the challenge verifies.
+    pub connect_code_id: String,
+    /// Connecting user the challenge was issued to.
+    pub requester_user_id: String,
+    /// Machine-level challenge state.
+    pub state: ConnectChallengeState,
+    /// Instant the challenge was created.
+    pub created_at: Instant,
+    /// Instant the challenge was settled, if it was.
+    pub resolved_at: Option<Instant>,
+}
+
+/// Grant authorization or revocation recorded in the connect audit trail.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ConnectAuditAction {
+    /// One access grant was created (plan 11.4, step 8).
+    AccessGranted,
+    /// One access grant was revoked.
+    AccessRevoked,
+}
+
+impl ConnectAuditAction {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::AccessGranted => "client.access.granted",
+            Self::AccessRevoked => "client.access.revoked",
+        }
+    }
+}
+
+/// One connect-domain authorization audit entry.
+///
+/// The connect flow records its authorization decisions in this dedicated
+/// durable audit table; no secret or code material is ever stored.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConnectAuditEntry {
+    audit_id: String,
+    action: ConnectAuditAction,
+    client_node_id: String,
+    client_access_grant_id: String,
+    user_id: String,
+    actor_user_id: String,
+    detail: Option<String>,
+    occurred_at: Instant,
+}
+
+impl ConnectAuditEntry {
+    /// Builds one validated audit entry.
+    ///
+    /// # Errors
+    ///
+    /// Rejects non-canonical identities, an over-long detail, or a
+    /// non-canonical instant.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_new(
+        audit_id: impl Into<String>,
+        action: ConnectAuditAction,
+        client_node_id: impl Into<String>,
+        client_access_grant_id: impl Into<String>,
+        user_id: impl Into<String>,
+        actor_user_id: impl Into<String>,
+        detail: Option<String>,
+        occurred_at: Instant,
+    ) -> Result<Self, ClientConnectStoreError> {
+        let entry = Self {
+            audit_id: audit_id.into(),
+            action,
+            client_node_id: client_node_id.into(),
+            client_access_grant_id: client_access_grant_id.into(),
+            user_id: user_id.into(),
+            actor_user_id: actor_user_id.into(),
+            detail,
+            occurred_at,
+        };
+        validate_crockford_id(&entry.audit_id, "cad_", "connect audit id")?;
+        validate_client_node_id(&entry.client_node_id)?;
+        validate_access_grant_id(&entry.client_access_grant_id)?;
+        validate_user_id(&entry.user_id)?;
+        validate_user_id(&entry.actor_user_id)?;
+        if let Some(detail) = &entry.detail
+            && (detail.is_empty() || detail.len() > 256)
+        {
+            return Err(error(
+                ClientConnectStoreErrorKind::InvalidInput,
+                "connect audit detail must contain 1 to 256 bytes",
+            ));
+        }
+        validate_instant(&entry.occurred_at, "connect audit instant")?;
+        Ok(entry)
+    }
+
+    #[must_use]
+    pub fn audit_id(&self) -> &str {
+        &self.audit_id
+    }
+
+    #[must_use]
+    pub const fn action(&self) -> ConnectAuditAction {
+        self.action
+    }
+
+    #[must_use]
+    pub fn client_node_id(&self) -> &str {
+        &self.client_node_id
+    }
+
+    #[must_use]
+    pub fn client_access_grant_id(&self) -> &str {
+        &self.client_access_grant_id
+    }
+
+    #[must_use]
+    pub fn user_id(&self) -> &str {
+        &self.user_id
+    }
+
+    #[must_use]
+    pub fn actor_user_id(&self) -> &str {
+        &self.actor_user_id
+    }
+
+    #[must_use]
+    pub fn detail(&self) -> Option<&str> {
+        self.detail.as_deref()
+    }
+
+    #[must_use]
+    pub fn occurred_at(&self) -> &Instant {
+        &self.occurred_at
+    }
+}
+
 /// Stable connect-domain failure categories.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ClientConnectStoreErrorKind {
@@ -752,6 +1026,8 @@ pub enum ClientConnectStoreErrorKind {
     /// An active grant for the user and client already exists, or the grant
     /// id is already used.
     AccessGrantConflict,
+    /// A challenge id is already used, or the challenge was already settled.
+    ChallengeConflict,
     /// The requested change is not a legal state machine transition.
     IllegalStateTransition,
     /// The supplied `expectedRevision` no longer matches the durable revision.
@@ -1583,6 +1859,191 @@ impl<'storage> ClientConnectLedger<'storage> {
         Ok(count >= max_attempts)
     }
 
+    /// Creates one pending access challenge (plan 11.4, step 5).
+    ///
+    /// # Errors
+    ///
+    /// Rejects a non-canonical command, an unknown client node, an
+    /// already-used challenge id, or storage failure.
+    pub fn create_challenge(
+        &mut self,
+        creation: &AccessChallengeCreation,
+        now: &Instant,
+    ) -> Result<AccessChallengeRecord, ClientConnectStoreError> {
+        validate_instant(now, "challenge creation time")?;
+        let transaction = self.transaction()?;
+        require_client_node(&transaction, creation.client_node_id())?;
+        let inserted = transaction
+            .execute(
+                "INSERT INTO client_access_challenges
+                 (challenge_id, client_node_id, connect_code_id, requester_user_id,
+                  state, created_at, resolved_at)
+                 VALUES (?1, ?2, ?3, ?4, 'pending', ?5, NULL)",
+                params![
+                    creation.challenge_id(),
+                    creation.client_node_id(),
+                    creation.connect_code_id(),
+                    creation.requester_user_id(),
+                    now.0,
+                ],
+            )
+            .map_err(|sql| map_challenge_insert_sql(&sql))?;
+        if inserted != 1 {
+            return Err(error(
+                ClientConnectStoreErrorKind::Storage,
+                "access challenge insert did not store exactly one row",
+            ));
+        }
+        let record = load_challenge(&transaction, creation.challenge_id())?
+            .ok_or_else(challenge_missing_after_insert)?;
+        transaction.commit().map_err(|sql| sql_error(&sql))?;
+        Ok(record)
+    }
+
+    /// Settles one pending challenge with the Device Client's verdict (plan
+    /// 11.4, step 7).
+    ///
+    /// The challenge must exist, belong to the acknowledged client, and name
+    /// the acknowledged connect code; anything else settles nothing and reads
+    /// as `None` so a stray acknowledgement stays a report fact. Settling an
+    /// already-settled challenge is an accepted idempotent replay that
+    /// returns the existing record.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a non-canonical identity or storage failure.
+    pub fn settle_challenge(
+        &mut self,
+        challenge_id: &str,
+        client_node_id: &str,
+        connect_code_id: &str,
+        verdict: ConnectChallengeVerdict,
+        now: &Instant,
+    ) -> Result<Option<AccessChallengeRecord>, ClientConnectStoreError> {
+        validate_challenge_id(challenge_id)?;
+        validate_client_node_id(client_node_id)?;
+        validate_connect_code_id(connect_code_id)?;
+        validate_instant(now, "challenge settlement time")?;
+        let transaction = self.transaction()?;
+        let Some(record) = load_challenge(&transaction, challenge_id)? else {
+            return Ok(None);
+        };
+        if record.client_node_id != client_node_id || record.connect_code_id != connect_code_id {
+            return Ok(None);
+        }
+        if record.state != ConnectChallengeState::Pending {
+            transaction.commit().map_err(|sql| sql_error(&sql))?;
+            return Ok(Some(record));
+        }
+        let state = match verdict {
+            ConnectChallengeVerdict::Confirmed => "confirmed",
+            ConnectChallengeVerdict::Rejected => "rejected",
+        };
+        let updated = transaction
+            .execute(
+                "UPDATE client_access_challenges
+                 SET state = ?2, resolved_at = ?3
+                 WHERE challenge_id = ?1 AND state = 'pending'",
+                params![challenge_id, state, now.0],
+            )
+            .map_err(|sql| sql_error(&sql))?;
+        if updated != 1 {
+            return Err(error(
+                ClientConnectStoreErrorKind::ChallengeConflict,
+                "access challenge changed during settlement",
+            ));
+        }
+        let settled = load_challenge(&transaction, challenge_id)?
+            .ok_or_else(challenge_missing_after_insert)?;
+        transaction.commit().map_err(|sql| sql_error(&sql))?;
+        Ok(Some(settled))
+    }
+
+    /// Returns one durable access challenge projection.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a non-canonical challenge identity or storage failure.
+    pub fn challenge_snapshot(
+        &self,
+        challenge_id: &str,
+    ) -> Result<Option<AccessChallengeRecord>, ClientConnectStoreError> {
+        validate_challenge_id(challenge_id)?;
+        load_challenge(self.connection()?, challenge_id)
+    }
+
+    /// Returns the one live pending challenge of a user on a client for a
+    /// connect code, if any.
+    ///
+    /// # Errors
+    ///
+    /// Rejects non-canonical identities or storage failure.
+    pub fn pending_challenge_for_subject(
+        &self,
+        client_node_id: &str,
+        requester_user_id: &str,
+        connect_code_id: &str,
+    ) -> Result<Option<AccessChallengeRecord>, ClientConnectStoreError> {
+        validate_client_node_id(client_node_id)?;
+        validate_user_id(requester_user_id)?;
+        validate_connect_code_id(connect_code_id)?;
+        let connection = self.connection()?;
+        connection
+            .query_row(
+                "SELECT challenge_id, client_node_id, connect_code_id, requester_user_id,
+                        state, created_at, resolved_at
+                 FROM client_access_challenges
+                 WHERE client_node_id = ?1 AND requester_user_id = ?2
+                   AND connect_code_id = ?3 AND state = 'pending'
+                 ORDER BY created_at DESC, challenge_id DESC LIMIT 1",
+                params![client_node_id, requester_user_id, connect_code_id],
+                read_challenge_row,
+            )
+            .optional()
+            .map_err(|sql| sql_error(&sql))?
+            .map(challenge_from_row)
+            .transpose()
+    }
+
+    /// Appends one connect-domain authorization audit entry.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a non-canonical entry, an already-used audit id, or storage
+    /// failure.
+    pub fn record_connect_audit(
+        &mut self,
+        entry: &ConnectAuditEntry,
+    ) -> Result<(), ClientConnectStoreError> {
+        let transaction = self.transaction()?;
+        let inserted = transaction
+            .execute(
+                "INSERT INTO client_connect_audit
+                 (audit_id, action, client_node_id, client_access_grant_id, user_id,
+                  actor_user_id, detail, occurred_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    entry.audit_id(),
+                    entry.action().as_str(),
+                    entry.client_node_id(),
+                    entry.client_access_grant_id(),
+                    entry.user_id(),
+                    entry.actor_user_id(),
+                    entry.detail(),
+                    entry.occurred_at().0,
+                ],
+            )
+            .map_err(|sql| map_audit_insert_sql(&sql))?;
+        if inserted != 1 {
+            return Err(error(
+                ClientConnectStoreErrorKind::Storage,
+                "connect audit insert did not store exactly one row",
+            ));
+        }
+        transaction.commit().map_err(|sql| sql_error(&sql))?;
+        Ok(())
+    }
+
     fn transaction(&mut self) -> Result<Transaction<'_>, ClientConnectStoreError> {
         self.storage
             .connection_mut()
@@ -2062,6 +2523,33 @@ fn validate_schema(connection: &rusqlite::Connection) -> Result<(), ClientConnec
             "window_started_at",
             "failed_attempts",
         ],
+    )?;
+    validate_columns(
+        connection,
+        "client_access_challenges",
+        &[
+            "challenge_id",
+            "client_node_id",
+            "connect_code_id",
+            "requester_user_id",
+            "state",
+            "created_at",
+            "resolved_at",
+        ],
+    )?;
+    validate_columns(
+        connection,
+        "client_connect_audit",
+        &[
+            "audit_id",
+            "action",
+            "client_node_id",
+            "client_access_grant_id",
+            "user_id",
+            "actor_user_id",
+            "detail",
+            "occurred_at",
+        ],
     )
 }
 
@@ -2104,6 +2592,138 @@ fn validate_client_instance_id(value: &str) -> Result<(), ClientConnectStoreErro
 
 fn validate_user_id(value: &str) -> Result<(), ClientConnectStoreError> {
     validate_crockford_id(value, "usr_", "user id")
+}
+
+fn validate_challenge_id(value: &str) -> Result<(), ClientConnectStoreError> {
+    validate_crockford_id(value, "cch_", "access challenge id")
+}
+
+fn challenge_missing_after_insert() -> ClientConnectStoreError {
+    error(
+        ClientConnectStoreErrorKind::CorruptState,
+        "access challenge row is missing after insert",
+    )
+}
+
+fn map_challenge_insert_sql(sql: &rusqlite::Error) -> ClientConnectStoreError {
+    if let rusqlite::Error::SqliteFailure(failure, _) = sql
+        && failure.code == rusqlite::ErrorCode::ConstraintViolation
+    {
+        return match failure.extended_code {
+            rusqlite::ffi::SQLITE_CONSTRAINT_PRIMARYKEY => error(
+                ClientConnectStoreErrorKind::ChallengeConflict,
+                "access challenge id is already used",
+            ),
+            rusqlite::ffi::SQLITE_CONSTRAINT_FOREIGNKEY => error(
+                ClientConnectStoreErrorKind::UnknownClientNode,
+                "client node does not exist",
+            ),
+            _ => error(
+                ClientConnectStoreErrorKind::InvalidInput,
+                "access challenge violates a durable constraint",
+            ),
+        };
+    }
+    sql_error(sql)
+}
+
+fn map_audit_insert_sql(sql: &rusqlite::Error) -> ClientConnectStoreError {
+    if let rusqlite::Error::SqliteFailure(failure, _) = sql
+        && failure.code == rusqlite::ErrorCode::ConstraintViolation
+    {
+        return match failure.extended_code {
+            rusqlite::ffi::SQLITE_CONSTRAINT_PRIMARYKEY => error(
+                ClientConnectStoreErrorKind::ChallengeConflict,
+                "connect audit id is already used",
+            ),
+            _ => error(
+                ClientConnectStoreErrorKind::InvalidInput,
+                "connect audit entry violates a durable constraint",
+            ),
+        };
+    }
+    sql_error(sql)
+}
+
+#[allow(clippy::type_complexity)]
+fn read_challenge_row(
+    row: &rusqlite::Row<'_>,
+) -> Result<
+    (
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        Option<String>,
+    ),
+    rusqlite::Error,
+> {
+    Ok((
+        row.get(0)?,
+        row.get(1)?,
+        row.get(2)?,
+        row.get(3)?,
+        row.get(4)?,
+        row.get(5)?,
+        row.get(6)?,
+    ))
+}
+
+#[allow(clippy::type_complexity)]
+fn challenge_from_row(
+    row: (
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        Option<String>,
+    ),
+) -> Result<AccessChallengeRecord, ClientConnectStoreError> {
+    let (
+        challenge_id,
+        client_node_id,
+        connect_code_id,
+        requester_user_id,
+        state,
+        created_at,
+        resolved_at,
+    ) = row;
+    let state = ConnectChallengeState::parse(&state)?;
+    let created_at = parse_stored_instant(&created_at, "challenge creation")?;
+    let resolved_at = resolved_at
+        .map(|value| parse_stored_instant(&value, "challenge settlement"))
+        .transpose()?;
+    Ok(AccessChallengeRecord {
+        challenge_id,
+        client_node_id,
+        connect_code_id,
+        requester_user_id,
+        state,
+        created_at,
+        resolved_at,
+    })
+}
+
+fn load_challenge(
+    connection: &rusqlite::Connection,
+    challenge_id: &str,
+) -> Result<Option<AccessChallengeRecord>, ClientConnectStoreError> {
+    connection
+        .query_row(
+            "SELECT challenge_id, client_node_id, connect_code_id, requester_user_id,
+                    state, created_at, resolved_at
+             FROM client_access_challenges WHERE challenge_id = ?1",
+            [challenge_id],
+            read_challenge_row,
+        )
+        .optional()
+        .map_err(|sql| sql_error(&sql))?
+        .map(challenge_from_row)
+        .transpose()
 }
 
 fn validate_crockford_id(

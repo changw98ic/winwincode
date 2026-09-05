@@ -4,6 +4,7 @@
 
 mod application;
 mod auth_session;
+mod client_connections;
 mod client_exchange;
 mod config;
 mod dispatcher;
@@ -25,6 +26,10 @@ pub use application::{
 pub use auth_session::{
     AuthSessionBootstrap, AuthSessionConfig, AuthSessionError, ExternalIdentitySessionIssuer,
     ExternalIdentitySessionResult, OwnerInitializationHook, SqliteAuthSessionManager,
+};
+pub use client_connections::{
+    ClientConnectionsApplication, ClientConnectionsConfig, ClientConnectionsError,
+    ClientConnectionsErrorKind,
 };
 pub use client_exchange::{
     ClientExchangeApplication, ClientExchangeConfig, ClientExchangeError, ClientExchangeErrorKind,

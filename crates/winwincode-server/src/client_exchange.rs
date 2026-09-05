@@ -32,9 +32,13 @@
 //! Cursor durability: the Client → Server acknowledgement cursor and the
 //! Server → Client acknowledgement cursor persist in
 //! `client_exchange_cursors`, so a Server restart never replays settled
-//! frames. The durable Server → Client frame retention (outbox rows) is
-//! owned by a later lane; this skeleton delivers the frames it produces
-//! within the same exchange and reserves the cursor and batch shape.
+//! frames. Downlink frames persist in the durable `client_downlink_frames`
+//! outbox until the device acknowledges their sequence: the exchange
+//! delivers every retained frame above the acknowledgement cursor (bounded
+//! by the batch size), and acknowledged frames are retained no longer. The
+//! `client.access.challenge_ack` frame settles its durable access challenge
+//! through the `ConnectCodeService`, completing the connect flow's bounded
+//! wait (plan 11.4).
 
 use std::fmt;
 use std::path::PathBuf;
@@ -45,6 +49,7 @@ use serde_json::Value;
 use sha2::Digest;
 use sha2::Sha256;
 use winwincode_client_port::domain::ClientArchitecture;
+use winwincode_client_port::domain::ClientChallengeAckStatus;
 use winwincode_client_port::domain::ClientPlatformTarget;
 use winwincode_client_port::domain::PresenceState;
 use winwincode_client_port::exchange::AckCursor;
@@ -55,10 +60,6 @@ use winwincode_client_port::exchange::DedupRegister;
 use winwincode_client_port::exchange::DedupVerdict;
 use winwincode_client_port::exchange::FrameCodec;
 use winwincode_client_port::exchange::FrameIdentity;
-use winwincode_client_port::exchange::InMemoryOutbox;
-use winwincode_client_port::exchange::OutboxError;
-use winwincode_client_port::exchange::OutboxSession;
-use winwincode_client_port::exchange::OutboxSnapshot;
 use winwincode_client_port::exchange::SequenceVerdict;
 use winwincode_client_port::messages::CLIENT_CONTROL_PORT_SCHEMA_VERSION;
 use winwincode_client_port::messages::ClientEnrollPayload;
@@ -69,11 +70,14 @@ use winwincode_client_port::messages::ServerToClientEnvelope;
 use winwincode_client_port::messages::ServerToClientMessage;
 use winwincode_control_plane::ClientRegistryService;
 use winwincode_control_plane::ClientRegistryServiceErrorKind;
+use winwincode_control_plane::ConnectCodeService;
 use winwincode_domain::Instant;
+use winwincode_storage::ClientDownlinkAppend;
 use winwincode_storage::ClientExchangeCursors;
 use winwincode_storage::ClientNodeRecord;
 use winwincode_storage::ClientNodeRegistration;
 use winwincode_storage::ClientPresenceState;
+use winwincode_storage::ConnectChallengeVerdict;
 use winwincode_storage::ProductStateStorage;
 use winwincode_storage::SqliteStorage;
 
@@ -256,17 +260,16 @@ impl ClientExchangeApplication {
         let node_id = envelopes[0].client_node_id.clone();
         let mut storage = SqliteStorage::open(&self.data_directory)
             .map_err(|_| ClientExchangeError::unavailable())?;
-        let mut registry = ClientRegistryService::new(&mut storage);
         let response = match credential {
             None => self.enroll_exchange(
-                &mut registry,
+                &mut storage,
                 &node_id,
                 &envelopes,
                 request.ack_sequence,
                 now,
             ),
             Some(raw) => self.authenticated_exchange(
-                &mut registry,
+                &mut storage,
                 &node_id,
                 std::str::from_utf8(raw)
                     .ok()
@@ -291,7 +294,7 @@ impl ClientExchangeApplication {
     #[allow(clippy::too_many_lines)]
     fn enroll_exchange(
         &self,
-        registry: &mut ClientRegistryService<'_>,
+        storage: &mut SqliteStorage,
         node_id: &str,
         envelopes: &[ClientToServerEnvelope],
         client_ack: u64,
@@ -305,12 +308,15 @@ impl ClientExchangeApplication {
         }
         // A fresh device sends its local placeholder as `clientNodeId`; only
         // a canonical server-assigned id can name an existing row.
-        let record = if is_canonical_client_node_id(node_id) {
-            registry
-                .snapshot(node_id)
-                .map_err(|_| ClientExchangeError::unavailable())?
-        } else {
-            None
+        let record = {
+            let mut registry = ClientRegistryService::new(storage);
+            if is_canonical_client_node_id(node_id) {
+                registry
+                    .snapshot(node_id)
+                    .map_err(|_| ClientExchangeError::unavailable())?
+            } else {
+                None
+            }
         };
         let payload = enroll_payload(&envelopes[0])?;
         match record {
@@ -318,7 +324,7 @@ impl ClientExchangeApplication {
                 if payload.command.expected_revision != 0 || client_ack != 0 {
                     return Err(ClientExchangeError::invalid_request());
                 }
-                self.create_enrollment(registry, None, 0, payload, envelopes, now)
+                self.create_enrollment(storage, None, 0, payload, envelopes, now)
             }
             // A pending node without any credential yet may refresh its
             // enrollment facts. Once a credential was issued — pending or
@@ -329,13 +335,17 @@ impl ClientExchangeApplication {
                 if record.presence_state == ClientPresenceState::PendingEnrollment
                     && record.device_credential_digest.is_none() =>
             {
-                let cursors = cursors_or_unavailable(registry, node_id)?;
-                if client_ack > cursors.server_to_client_ack_sequence {
+                let cursors = {
+                    let mut registry = ClientRegistryService::new(storage);
+                    cursors_or_unavailable(&mut registry, node_id)?
+                };
+                let high_water = outbox_high_water_or_unavailable(storage, node_id)?;
+                if client_ack > cursors.server_to_client_ack_sequence.max(high_water) {
                     return Err(ClientExchangeError::invalid_request());
                 }
                 let downlink_high_water = cursors.server_to_client_ack_sequence;
                 self.create_enrollment(
-                    registry,
+                    storage,
                     Some(&record),
                     downlink_high_water,
                     payload,
@@ -351,12 +361,17 @@ impl ClientExchangeApplication {
 
     /// Creates or refreshes the `pending_enrollment` node, issues one Device
     /// Credential, settles the enroll frames on the fresh per-node stream,
-    /// and delivers the `client.enrollment_accepted` downlink frame together
-    /// with the credential material and the server profile.
+    /// and appends the `client.enrollment_accepted` downlink frame to the
+    /// durable outbox. The frame is delivered inside this response together
+    /// with the credential material and the server profile, and stays durable
+    /// until the device acknowledges its sequence.
+    ///
+    /// `downlink_high_water` is the acknowledged downlink sequence the fresh
+    /// acceptance frame is ordered after.
     #[allow(clippy::too_many_lines)]
     fn create_enrollment(
         &self,
-        registry: &mut ClientRegistryService<'_>,
+        storage: &mut SqliteStorage,
         existing: Option<&ClientNodeRecord>,
         downlink_high_water: u64,
         payload: &ClientEnrollPayload,
@@ -391,6 +406,7 @@ impl ClientExchangeApplication {
                 0,
             )
             .map_err(|_| ClientExchangeError::invalid_request())?;
+            let mut registry = ClientRegistryService::new(storage);
             match registry.register(&registration, expected_revision, now) {
                 Ok(receipt) => break receipt,
                 Err(error)
@@ -427,7 +443,16 @@ impl ClientExchangeApplication {
         let ack_sequence = settler.ack_sequence();
 
         let codec = FrameCodec::new(self.config.max_frame_bytes);
+        // The next free stream position: one past the acknowledged
+        // high-water or the highest retained frame, whichever is higher.
+        let mut downlink = storage
+            .client_downlink_outbox()
+            .map_err(|_| ClientExchangeError::unavailable())?;
+        let outbox_high_water = downlink
+            .high_water(&receipt.record.client_node_id)
+            .map_err(|_| ClientExchangeError::unavailable())?;
         let acceptance_sequence = downlink_high_water
+            .max(outbox_high_water)
             .checked_add(1)
             .ok_or(ClientExchangeError::invalid_request())?;
         let acceptance = ServerToClientEnvelope {
@@ -446,15 +471,35 @@ impl ClientExchangeApplication {
         let stored = codec
             .encode_envelope(&acceptance)
             .map_err(|_| ClientExchangeError::unavailable())?;
-        let frame_value: Value = serde_json::from_slice(&stored.frame)
+        let frame_text = std::str::from_utf8(&stored.frame)
+            .map_err(|_| ClientExchangeError::unavailable())?
+            .to_owned();
+        let appended = downlink
+            .append(
+                &ClientDownlinkAppend::try_new(
+                    node_id.clone(),
+                    acceptance.message_id.clone(),
+                    acceptance_sequence,
+                    frame_text,
+                )
+                .map_err(|_| ClientExchangeError::unavailable())?,
+                now,
+            )
+            .map_err(|_| ClientExchangeError::unavailable())?;
+        debug_assert_eq!(appended.sequence, acceptance_sequence);
+        let frame_value: Value = serde_json::from_str(&appended.frame)
             .map_err(|_| ClientExchangeError::unavailable())?;
 
-        // The acceptance frame is delivered inside this response; the cursor
-        // records it as the delivered downlink high-water until the durable
-        // Server → Client outbox lane replaces this skeleton.
-        registry
-            .advance_exchange_cursors(&node_id, ack_sequence, acceptance_sequence)
-            .map_err(|_| ClientExchangeError::unavailable())?;
+        // The acceptance frame was persisted in the durable outbox and is
+        // delivered inside this response; the cursor records it as the
+        // delivered downlink high-water, and the durable row is retained
+        // until the device acknowledges its sequence.
+        {
+            let mut registry = ClientRegistryService::new(storage);
+            registry
+                .advance_exchange_cursors(&node_id, ack_sequence, acceptance_sequence)
+                .map_err(|_| ClientExchangeError::unavailable())?;
+        }
 
         Ok(ExchangeResponseBody {
             schema_version: CLIENT_CONTROL_PORT_SCHEMA_VERSION.to_owned(),
@@ -475,11 +520,12 @@ impl ClientExchangeApplication {
 
     /// Settles one authenticated exchange: constant-time credential match,
     /// per-frame cursor judgement, `client.hello` instance takeover and
-    /// presence, `client.heartbeat` projection, and the downlink batch.
+    /// presence, `client.heartbeat` projection, `client.access.challenge_ack`
+    /// settlement, and the durable downlink batch.
     #[allow(clippy::too_many_lines)]
     fn authenticated_exchange(
         &self,
-        registry: &mut ClientRegistryService<'_>,
+        storage: &mut SqliteStorage,
         node_id: &str,
         secret: Option<&[u8; 32]>,
         envelopes: &[ClientToServerEnvelope],
@@ -494,10 +540,13 @@ impl ClientExchangeApplication {
         if !is_canonical_client_node_id(node_id) {
             return Err(ClientExchangeError::authentication());
         }
-        let record = registry
-            .snapshot(node_id)
-            .map_err(|_| ClientExchangeError::unavailable())?
-            .ok_or(ClientExchangeError::authentication())?;
+        let record = {
+            let mut registry = ClientRegistryService::new(storage);
+            registry
+                .snapshot(node_id)
+                .map_err(|_| ClientExchangeError::unavailable())?
+                .ok_or(ClientExchangeError::authentication())?
+        };
         let Some(stored_digest) = record.device_credential_digest.as_deref() else {
             return Err(ClientExchangeError::authentication());
         };
@@ -507,8 +556,15 @@ impl ClientExchangeApplication {
         if record.presence_state == ClientPresenceState::Revoked {
             return Err(ClientExchangeError::authentication());
         }
-        let cursors = cursors_or_unavailable(registry, node_id)?;
-        if client_ack > cursors.server_to_client_ack_sequence {
+        let cursors = {
+            let mut registry = ClientRegistryService::new(storage);
+            cursors_or_unavailable(&mut registry, node_id)?
+        };
+        // An acknowledgement may only name delivered downlink positions:
+        // either the durable cursor or a frame still retained in the outbox
+        // (delivered, but not yet acknowledged).
+        let outbox_high_water = outbox_high_water_or_unavailable(storage, node_id)?;
+        if client_ack > cursors.server_to_client_ack_sequence.max(outbox_high_water) {
             return Err(ClientExchangeError::invalid_request());
         }
         let effective_instance = record
@@ -532,7 +588,7 @@ impl ClientExchangeApplication {
                 // superseded) before the frame is judged, so the guard
                 // accepts the new instance and later old-instance frames are
                 // refused as reacquire-required.
-                supersede_instance(registry, &record, envelope, now);
+                supersede_instance(storage, &record, envelope, now);
                 settler.take_over_instance(&envelope.client_instance_id);
             }
             let identity = FrameCodec::envelope_identity(envelope)
@@ -541,7 +597,7 @@ impl ClientExchangeApplication {
             match settler.ingest(&envelope.client_instance_id, &identity, command.as_ref()) {
                 BatchOutcome::Accepted {
                     command: CommandOutcome::Fresh,
-                } => apply_effect(registry, node_id, envelope, now)?,
+                } => apply_effect(storage, node_id, envelope, now)?,
                 BatchOutcome::Accepted { .. } | BatchOutcome::Duplicate => {}
                 BatchOutcome::Gap {
                     replay_from_sequence,
@@ -553,29 +609,33 @@ impl ClientExchangeApplication {
             }
         }
         let ack_sequence = settler.ack_sequence();
-        let cursors = registry
-            .advance_exchange_cursors(node_id, ack_sequence, client_ack)
-            .map_err(|_| ClientExchangeError::unavailable())?;
+        let cursors = {
+            let mut registry = ClientRegistryService::new(storage);
+            registry
+                .advance_exchange_cursors(node_id, ack_sequence, client_ack)
+                .map_err(|_| ClientExchangeError::unavailable())?
+        };
 
-        // Skeleton downlink: the durable frame retention is a later lane, so
-        // the retained range is empty and the batch shape stays reserved.
-        let mut outbox = InMemoryOutbox::from_snapshot(OutboxSnapshot {
-            ack_sequence: cursors.server_to_client_ack_sequence,
-            highest_sequence: cursors.server_to_client_ack_sequence,
-            frames: Vec::new(),
-        });
-        let batch = OutboxSession::new()
+        // Durable downlink: every frame above the acknowledged sequence is
+        // delivered until the device acknowledges it; acknowledged frames are
+        // retained no longer.
+        let mut downlink = storage
+            .client_downlink_outbox()
+            .map_err(|_| ClientExchangeError::unavailable())?;
+        let batch = downlink
             .deliverable(
-                &mut outbox,
+                node_id,
                 cursors.server_to_client_ack_sequence,
                 self.config.max_frames_per_exchange,
             )
-            .map_err(outbox_unavailable)?;
+            .map_err(|_| ClientExchangeError::unavailable())?;
         let frames = batch
-            .frames
             .iter()
-            .map(|frame| serde_json::from_slice(&frame.frame))
+            .map(|frame| serde_json::from_str(&frame.frame))
             .collect::<Result<Vec<Value>, _>>()
+            .map_err(|_| ClientExchangeError::unavailable())?;
+        downlink
+            .retain_through(node_id, cursors.server_to_client_ack_sequence)
             .map_err(|_| ClientExchangeError::unavailable())?;
 
         Ok(ExchangeResponseBody {
@@ -588,8 +648,17 @@ impl ClientExchangeApplication {
     }
 }
 
-fn outbox_unavailable<Store>(_: OutboxError<Store>) -> ClientExchangeError {
-    ClientExchangeError::unavailable()
+/// Reads the durable outbox high-water of one node, or fails the exchange as
+/// unavailable.
+fn outbox_high_water_or_unavailable(
+    storage: &mut SqliteStorage,
+    node_id: &str,
+) -> Result<u64, ClientExchangeError> {
+    storage
+        .client_downlink_outbox()
+        .map_err(|_| ClientExchangeError::unavailable())?
+        .high_water(node_id)
+        .map_err(|_| ClientExchangeError::unavailable())
 }
 
 fn cursors_or_unavailable(
@@ -855,15 +924,16 @@ fn command_identity(
 
 /// Applies the kind-specific effect of one freshly accepted frame. Effects
 /// are report facts: a refused projection (illegal transition, lost revision
-/// race) changes no frame settlement.
+/// race, unknown challenge) changes no frame settlement.
 fn apply_effect(
-    registry: &mut ClientRegistryService<'_>,
+    storage: &mut SqliteStorage,
     node_id: &str,
     envelope: &ClientToServerEnvelope,
     now: &Instant,
 ) -> Result<(), ClientExchangeError> {
     match &envelope.message {
         ClientToServerMessage::Hello(payload) => {
+            let mut registry = ClientRegistryService::new(storage);
             if let Some(target) = presence_target(payload.presence_state)
                 && let Some(record) = registry
                     .snapshot(node_id)
@@ -876,6 +946,7 @@ fn apply_effect(
             Ok(())
         }
         ClientToServerMessage::Heartbeat(payload) => {
+            let mut registry = ClientRegistryService::new(storage);
             if let Some(record) = registry
                 .snapshot(node_id)
                 .map_err(|_| ClientExchangeError::unavailable())?
@@ -890,6 +961,25 @@ fn apply_effect(
             }
             Ok(())
         }
+        ClientToServerMessage::AccessChallengeAck(payload) => {
+            // The device verdict settles the durable challenge the connect
+            // flow is waiting on. A verdict the device no longer holds a
+            // matching generation for is carried by the `stale_generation`
+            // status and settles as a rejection.
+            let verdict = match payload.status {
+                ClientChallengeAckStatus::Confirmed => ConnectChallengeVerdict::Confirmed,
+                ClientChallengeAckStatus::StaleGeneration => ConnectChallengeVerdict::Rejected,
+            };
+            let mut connect = ConnectCodeService::new(storage);
+            let _ = connect.settle_challenge(
+                &payload.challenge_id,
+                node_id,
+                &payload.connect_code_id,
+                verdict,
+                now,
+            );
+            Ok(())
+        }
         // The remaining kinds settle at the cursor in this lane; their
         // Control Plane effects belong to the occupancy, repository, worker,
         // and candidate lanes.
@@ -901,7 +991,7 @@ fn apply_effect(
 /// superseded and the hello's software facts refresh the device projection.
 /// A lost revision race only delays the takeover until the next hello.
 fn supersede_instance(
-    registry: &mut ClientRegistryService<'_>,
+    storage: &mut SqliteStorage,
     record: &ClientNodeRecord,
     envelope: &ClientToServerEnvelope,
     now: &Instant,
@@ -909,6 +999,7 @@ fn supersede_instance(
     let ClientToServerMessage::Hello(payload) = &envelope.message else {
         return;
     };
+    let mut registry = ClientRegistryService::new(storage);
     let Ok(current) = registry.snapshot(&record.client_node_id) else {
         return;
     };
@@ -1159,7 +1250,7 @@ mod tests {
                     command: command.clone(),
                     challenge_id: "chal_1".to_owned(),
                     connect_code_id: "code_1".to_owned(),
-                    status: winwincode_client_port::domain::ClientChallengeAckStatus::Confirmed,
+                    status: ClientChallengeAckStatus::Confirmed,
                 },
             )),
             ClientToServerMessage::RepositoryUpsert(
