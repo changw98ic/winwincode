@@ -895,6 +895,37 @@ impl<'storage> WorkerLaunchGrantLedger<'storage> {
         }
     }
 
+    /// Returns the newest launch grant anchored to one `StrongFlow` stage run,
+    /// if any, regardless of its lifecycle state (`FLOW-100.5`): the per-stage
+    /// anchor routes that role's job to the exact `WorkerSession` the Client
+    /// launched for it, so distinct roles never share a `CodexThread`.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a non-canonical stage run identity, a corrupt stored row, or
+    /// storage failure.
+    pub fn newest_grant_for_stage_run(
+        &self,
+        stage_run_id: &str,
+    ) -> Result<Option<WorkerLaunchGrantRecord>, WorkerLaunchGrantStoreError> {
+        validate_stage_run_id(stage_run_id)?;
+        let connection = self.connection()?;
+        let grant_id = connection
+            .query_row(
+                "SELECT worker_launch_grant_id FROM worker_launch_grants
+                 WHERE stage_run_id = ?1
+                 ORDER BY created_at DESC, worker_launch_grant_id DESC LIMIT 1",
+                [stage_run_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|sql| sql_error(&sql))?;
+        match grant_id {
+            Some(grant_id) => load_launch_grant(connection, &grant_id),
+            None => Ok(None),
+        }
+    }
+
     /// Counts the non-terminal (`issued` plus `consumed`) grants of one
     /// client node — the durable reservation view capacity is judged against
     /// (plan 14.5).

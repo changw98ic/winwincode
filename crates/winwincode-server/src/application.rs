@@ -32,8 +32,9 @@ use winwincode_control_plane::{
     ModelSettingsErrorKind, ModelSettingsService, ProductSessionApiClock, ProductSessionApiService,
     ProductSessionExecutionConfig, ProductSessionServiceError, ProductSessionServiceErrorCode,
     PublicationCommandError, QuickDeviceDispatchError, QuickDeviceDispatchErrorKind,
-    ScopeWorkerHealthEventPort, WorkerManagementService, WorkerManagementServiceError,
-    WorkerManagementServiceErrorKind, dispatch_turn_to_device_worker,
+    ScopeWorkerHealthEventPort, StrongflowDeviceDispatchError, StrongflowDeviceDispatchErrorKind,
+    WorkerManagementService, WorkerManagementServiceError, WorkerManagementServiceErrorKind,
+    dispatch_stage_to_device_worker, dispatch_turn_to_device_worker,
 };
 use winwincode_domain::{ControlPlaneWebSocketAuthorizationEpoch, Instant, ProductSessionId};
 use winwincode_storage::{ProductStateStorage, SqliteStorage};
@@ -548,6 +549,17 @@ impl StandaloneControlPlaneApplication {
         &self,
         request: CommandRequest,
     ) -> Result<CommandDispatchResponse, ApiError> {
+        let dispatch_now = self.clock.now_instant();
+        // FLOW-100.5: the acting browser user of a `delivery.advance` is the
+        // candidate device dispatcher; service and system actors never route
+        // to a device.
+        let advance_actor = match &request {
+            CommandRequest::DeliveryAdvanceCommand(command) => match &command.actor {
+                Actor::UserActor(user) => Some(user.id.0.clone()),
+                _ => None,
+            },
+            _ => None,
+        };
         let mut guard = self.state()?;
         let state = guard.as_mut().ok_or_else(service_unavailable)?;
         let response = match request {
@@ -578,6 +590,27 @@ impl StandaloneControlPlaneApplication {
             _ => return Err(application_variant_mismatch()),
         }
         .map_err(|error| delivery_application_error(&error))?;
+        // FLOW-100.5: route the committed Codex stage job of the advanced
+        // Delivery stage to its Device WorkerSession. The stage's durable
+        // launch anchor decides: with an anchor, the routing glue binds the
+        // launched worker session and attaches the job's device facts (after
+        // the FLOW-100.3 permission gate approves the acting user); without
+        // one, the stage keeps the supervised local execution path. The
+        // durable dispatch never blocks the committed Delivery receipt on a
+        // transport action; ordinary admission backpressure keeps the stage
+        // job queued for the device worker.
+        if let Some(user_id) = advance_actor
+            && let CommandCompletedResponse::DeliveryAdvanceCompletedResponse(completed) = &response
+            && let Some(stage_run_id) = &completed.result.active_stage_run_id
+        {
+            dispatch_stage_to_device_worker(
+                &mut state.storage,
+                Some(&user_id),
+                stage_run_id,
+                &dispatch_now,
+            )
+            .map_err(|error| strongflow_device_dispatch_error(&error))?;
+        }
         self.hub
             .publish_pending(&mut state.storage)
             .map_err(|error| error.api_error())?;
@@ -1043,6 +1076,41 @@ fn quick_device_dispatch_error(error: &QuickDeviceDispatchError) -> ApiError {
         QuickDeviceDispatchErrorKind::AdmissionUnavailable
         | QuickDeviceDispatchErrorKind::CorruptState
         | QuickDeviceDispatchErrorKind::Storage => service_unavailable(),
+    }
+}
+
+/// Maps one `StrongFlow` device routing failure onto the wire error codes. The
+/// committed Delivery advance stays durable and an exact retry re-runs the
+/// routing, so a temporary failure presents as service unavailability, a
+/// gate denial carries the central gate wire code, and a dead anchor or
+/// conflicting dispatch presents as wrong state.
+fn strongflow_device_dispatch_error(error: &StrongflowDeviceDispatchError) -> ApiError {
+    match error.kind() {
+        StrongflowDeviceDispatchErrorKind::InvalidInput => ApiError::new(
+            400,
+            "INVALID_REQUEST",
+            "device stage dispatch request is invalid",
+        ),
+        StrongflowDeviceDispatchErrorKind::GateDenied => {
+            let denial = error
+                .gate_denial()
+                .expect("a gate denial carries its facts");
+            ApiError::new(
+                denial.http_status(),
+                denial.wire_code(),
+                "ProductSession device execution gate denied the request",
+            )
+        }
+        StrongflowDeviceDispatchErrorKind::AnchorNotLive
+        | StrongflowDeviceDispatchErrorKind::WorkerSessionEnded
+        | StrongflowDeviceDispatchErrorKind::DispatchConflict => ApiError::new(
+            409,
+            "WRONG_STATE",
+            "the device worker session cannot execute this stage",
+        ),
+        StrongflowDeviceDispatchErrorKind::AdmissionUnavailable
+        | StrongflowDeviceDispatchErrorKind::CorruptState
+        | StrongflowDeviceDispatchErrorKind::Storage => service_unavailable(),
     }
 }
 

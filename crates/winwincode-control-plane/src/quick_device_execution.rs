@@ -475,8 +475,9 @@ fn admission_error(
 
 /// One canonical `prefix` + 26 character Crockford identity derived from
 /// stable dispatch material, so every replay of the same dispatch reuses the
-/// exact same command identities.
-fn derived_id(prefix: &str, namespace: &[u8], identity: &str) -> String {
+/// exact same command identities. Shared with the `StrongFlow` device routing,
+/// which derives its identities from distinct namespaces.
+pub(crate) fn derived_id(prefix: &str, namespace: &[u8], identity: &str) -> String {
     const ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
     let mut hasher = Sha256::new();
     hasher.update(namespace);

@@ -293,6 +293,24 @@ impl<'storage> WorkerLaunchGrantService<'storage> {
             .newest_grant_for_product_session(product_session_id)?)
     }
 
+    /// Returns the newest launch grant anchored to one `StrongFlow` stage run,
+    /// if any, whatever its lifecycle state (`FLOW-100.5`): the per-stage
+    /// anchor routes that role's job to the exact `WorkerSession` the Client
+    /// launched for it.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a non-canonical stage run identity or storage failure.
+    pub fn newest_grant_for_stage_run(
+        &mut self,
+        stage_run_id: &str,
+    ) -> Result<Option<WorkerLaunchGrantRecord>, WorkerLaunchGrantServiceError> {
+        Ok(self
+            .storage
+            .worker_launch_grant_ledger()?
+            .newest_grant_for_stage_run(stage_run_id)?)
+    }
+
     /// Counts the non-terminal grants of one client node — the durable
     /// reservation view capacity is judged against (plan 14.5).
     ///
