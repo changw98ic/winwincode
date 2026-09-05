@@ -15,6 +15,6 @@
     "tsBuildInfoFile": "../../.cache/tsbuild/client-occupancy-tests.tsbuildinfo"
   },
   "include": [
-    "src/control-plane-client.ts"
+    "src/**/*.ts"
   ]
 }

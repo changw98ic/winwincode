@@ -49,6 +49,11 @@ import {
 } from './clients-view-model.js'
 import { mountClientsPage, type ClientsPage } from './clients-page.js'
 import {
+  clientOccupancyPortFromFacade,
+  createClientOccupancyViewModel,
+  type ClientOccupancyViewModel,
+} from './client-occupancy-view-model.js'
+import {
   createRepositoriesViewModel,
   type RepositoriesViewModel,
 } from './repositories-view-model.js'
@@ -241,6 +246,14 @@ export function mountWinWinCodeClient(
   })
   const clientsModel: ClientsViewModel = createClientsViewModel({
     client: clientDirectory,
+  })
+  // CLIENT-300.5: the device card occupancy interactions run against the
+  // frozen occupancy facade when it exposes claim/release/force-release;
+  // until then the model mounts with a null port and reports the honest
+  // unavailable failure instead of pretending the actions landed.
+  const occupancyModel: ClientOccupancyViewModel = createClientOccupancyViewModel({
+    port: clientOccupancyPortFromFacade(clientDirectory),
+    clients: clientsModel,
   })
   // REPO-100.3: the repository list talks to the same directory facade; the
   // list is a Server snapshot read, so expected failures stay inside the area.
@@ -512,6 +525,7 @@ export function mountWinWinCodeClient(
   const clientsPage: ClientsPage = mountClientsPage({
     root: clientsRoot,
     model: clientsModel,
+    occupancy: occupancyModel,
     now: () => Date.parse(now()),
     onDeviceSelect: clientId => {
       void repositoriesModel.showDevice(clientId)
@@ -1668,6 +1682,7 @@ export function mountWinWinCodeClient(
       loginModel.close()
       clientsPage.close()
       clientsModel.close()
+      occupancyModel.close()
       repositoriesPage.close()
       repositoriesModel.close()
       authPage.close()
