@@ -1,0 +1,141 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+
+/* CLIENT-200.4: the signed-in Clients area. It only reads tokens, like every
+   other shell region. */
+.wwc-clients {
+  max-width: 36rem;
+  margin: var(--wwc-space-4) auto;
+  padding: var(--wwc-space-4);
+  border: var(--wwc-border-width) solid var(--wwc-color-border);
+  border-radius: var(--wwc-radius-lg);
+  background: var(--wwc-color-surface);
+}
+
+.wwc-clients-heading {
+  margin: var(--wwc-space-0) var(--wwc-space-0) var(--wwc-space-3);
+  font-size: var(--wwc-font-size-lg);
+  font-weight: var(--wwc-font-weight-strong);
+}
+
+.wwc-clients-add-heading {
+  margin: var(--wwc-space-0) var(--wwc-space-0) var(--wwc-space-2);
+  font-size: var(--wwc-font-size-md);
+  font-weight: var(--wwc-font-weight-strong);
+}
+
+.wwc-clients-status {
+  margin: var(--wwc-space-2) var(--wwc-space-0);
+  color: var(--wwc-color-success-text);
+}
+
+.wwc-clients-error {
+  margin: var(--wwc-space-2) var(--wwc-space-0);
+  padding: var(--wwc-space-2) var(--wwc-space-3);
+  border: var(--wwc-border-width) solid var(--wwc-color-danger-border);
+  border-radius: var(--wwc-radius-md);
+  color: var(--wwc-color-danger-text);
+  background: var(--wwc-color-danger-surface);
+}
+
+.wwc-clients-label {
+  display: block;
+  margin-bottom: var(--wwc-space-1);
+  font-size: var(--wwc-font-size-sm);
+  font-weight: var(--wwc-font-weight-medium);
+}
+
+.wwc-clients-control {
+  width: 100%;
+  box-sizing: border-box;
+  margin-bottom: var(--wwc-space-2);
+}
+
+.wwc-clients-add-submit {
+  margin-top: var(--wwc-space-2);
+}
+
+.wwc-clients-empty {
+  margin: var(--wwc-space-3) var(--wwc-space-0);
+  color: var(--wwc-color-text-muted);
+}
+
+.wwc-clients-list {
+  margin-top: var(--wwc-space-3);
+  border-top: var(--wwc-border-width) solid var(--wwc-color-border);
+}
+
+.wwc-clients-card {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+  gap: var(--wwc-space-1) var(--wwc-space-3);
+  padding: var(--wwc-space-3) var(--wwc-space-0);
+  border-bottom: var(--wwc-border-width) solid var(--wwc-color-border);
+}
+
+.wwc-clients-card-name {
+  margin: var(--wwc-space-0);
+  font-weight: var(--wwc-font-weight-medium);
+}
+
+.wwc-clients-card-presence {
+  align-self: center;
+  justify-self: start;
+  padding: 0 var(--wwc-space-2);
+  border: var(--wwc-border-width) solid var(--wwc-color-border);
+  border-radius: var(--wwc-radius-sm);
+  font-size: var(--wwc-font-size-xs);
+}
+
+.wwc-clients-card-presence[data-tone='success'] {
+  color: var(--wwc-color-success-text);
+  border-color: var(--wwc-color-success-border);
+  background: var(--wwc-color-success-surface);
+}
+
+.wwc-clients-card-presence[data-tone='info'] {
+  color: var(--wwc-color-info-text);
+  border-color: var(--wwc-color-info-border);
+  background: var(--wwc-color-info-surface);
+}
+
+.wwc-clients-card-presence[data-tone='warning'] {
+  color: var(--wwc-color-warning-text);
+  border-color: var(--wwc-color-warning-border);
+  background: var(--wwc-color-warning-surface);
+}
+
+.wwc-clients-card-presence[data-tone='danger'] {
+  color: var(--wwc-color-danger-text);
+  border-color: var(--wwc-color-danger-border);
+  background: var(--wwc-color-danger-surface);
+}
+
+.wwc-clients-card-state {
+  grid-column: 1 / -1;
+  margin: var(--wwc-space-0);
+}
+
+.wwc-clients-card-capacity,
+.wwc-clients-card-heartbeat,
+.wwc-clients-card-version {
+  grid-column: 1 / -1;
+  margin: var(--wwc-space-0);
+  color: var(--wwc-color-text-muted);
+  font-size: var(--wwc-font-size-sm);
+}
+
+.wwc-clients-card-actions {
+  grid-column: 1 / -1;
+  display: flex;
+  gap: var(--wwc-space-2);
+}
+
+@media (max-width: 48rem) {
+  .wwc-clients {
+    margin: var(--wwc-space-3) var(--wwc-space-2);
+  }
+
+  .wwc-clients-card {
+    grid-template-columns: 1fr;
+  }
+}
