@@ -49,6 +49,11 @@ import {
 } from './clients-view-model.js'
 import { mountClientsPage, type ClientsPage } from './clients-page.js'
 import {
+  createRepositoriesViewModel,
+  type RepositoriesViewModel,
+} from './repositories-view-model.js'
+import { mountRepositoriesPage, type RepositoriesPage } from './repositories-page.js'
+import {
   createReadinessViewModel,
   type ReadinessContext,
   type ReadinessItemState,
@@ -237,6 +242,11 @@ export function mountWinWinCodeClient(
   const clientsModel: ClientsViewModel = createClientsViewModel({
     client: clientDirectory,
   })
+  // REPO-100.3: the repository list talks to the same directory facade; the
+  // list is a Server snapshot read, so expected failures stay inside the area.
+  const repositoriesModel: RepositoriesViewModel = createRepositoriesViewModel({
+    client: clientDirectory,
+  })
   let lastKnownDiagnosticScope: unknown = null
   const shell = element(document, 'div', 'wwc-shell')
   const header = element(document, 'header', 'wwc-header')
@@ -246,6 +256,7 @@ export function mountWinWinCodeClient(
   const authRoot = element(document, 'div', 'wwc-auth-session-root')
   const loginRoot = element(document, 'div', 'wwc-login-root')
   const clientsRoot = element(document, 'div', 'wwc-clients-root')
+  const repositoriesRoot = element(document, 'div', 'wwc-repositories-root')
   const main = element(document, 'main', 'wwc-main')
   const scopeRoot = element(document, 'div', 'wwc-scope-selector-root')
   const readinessRoot = element(document, 'div', 'wwc-readiness-root')
@@ -484,6 +495,7 @@ export function mountWinWinCodeClient(
     readOnlyNotice,
     loginRoot,
     clientsRoot,
+    repositoriesRoot,
     errorBoundary.root,
     slot,
   )
@@ -501,6 +513,13 @@ export function mountWinWinCodeClient(
     root: clientsRoot,
     model: clientsModel,
     now: () => Date.parse(now()),
+    onDeviceSelect: clientId => {
+      void repositoriesModel.showDevice(clientId)
+    },
+  })
+  const repositoriesPage: RepositoriesPage = mountRepositoriesPage({
+    root: repositoriesRoot,
+    model: repositoriesModel,
   })
 
   /**
@@ -516,6 +535,12 @@ export function mountWinWinCodeClient(
     clientsVisible = visible
     clientsPage.setVisible(visible)
     if (visible) void clientsModel.refresh()
+    // REPO-100.3: the repository area follows the Clients area's signed-in
+    // visibility; its content is driven by the device card selection.
+    repositoriesPage.setVisible(visible)
+    if (visible && repositoriesModel.state.clientId !== null) {
+      void repositoriesModel.refresh()
+    }
   }
   function updateLoginVisibility(): void {
     const status = authSession.state.status
@@ -1643,6 +1668,8 @@ export function mountWinWinCodeClient(
       loginModel.close()
       clientsPage.close()
       clientsModel.close()
+      repositoriesPage.close()
+      repositoriesModel.close()
       authPage.close()
       authSession.close()
       accessFailureSession = null
