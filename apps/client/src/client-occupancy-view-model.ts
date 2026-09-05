@@ -20,13 +20,22 @@ export interface ClientOccupancyPort {
   release(input: { readonly clientId: string }): Promise<void>
   /** Stop the running tasks and release the device immediately. */
   cancelAndRelease(input: { readonly clientId: string }): Promise<void>
+  /**
+   * UI-100.3: the Owner's safe cleanup of a recovery-pending lease. Present
+   * only when the composed facade exposes the force-release seam; the Server
+   * stays the one authority that decides who an Owner is.
+   */
+  forceRelease?(input: { readonly clientId: string }): Promise<void>
 }
 
 /** The one occupancy interaction a device card can be in. */
-export type ClientOccupancyAction = 'claim' | 'release' | 'cancel-and-release'
+export type ClientOccupancyAction = 'claim' | 'release' | 'cancel-and-release' | 'force-release'
 
-/** The two actions that must pass an explicit confirmation before they submit. */
-export type ClientOccupancyDangerAction = 'release' | 'cancel-and-release'
+/** The actions that must pass an explicit confirmation before they submit. */
+export type ClientOccupancyDangerAction =
+  | 'release'
+  | 'cancel-and-release'
+  | 'force-release'
 
 /**
  * The one presentation-facing occupancy failure taxonomy. Wire codes are
@@ -39,6 +48,7 @@ export type ClientOccupancyFailure =
   | 'device-offline'
   | 'device-locked'
   | 'recovery-pending'
+  | 'permission-denied'
   | 'rate-limited'
   | 'unavailable'
 
@@ -73,18 +83,29 @@ export function deviceSupportsCancelAndRelease(device: ControlPlaneDeviceSummary
   return device.occupancy === 'occupied-by-me' && device.capacityUsed > 0
 }
 
+/**
+ * UI-100.3: whether the Owner force-release entry applies. Only an interrupted
+ * (recovery-pending) lease offers the cleanup; the Server stays the one
+ * authority that decides who an Owner is, and the card never names the holder.
+ */
+export function deviceSupportsForceRelease(device: ControlPlaneDeviceSummary): boolean {
+  return device.occupancy === 'recovery-pending'
+}
+
 /** Whether releasing this device drains first instead of freeing it directly. */
 export function releaseDrainsFirst(device: ControlPlaneDeviceSummary): boolean {
   return device.capacityUsed > 0
 }
 
 /**
- * The provisional wire-code translation used until the facade-owned error
- * classifier (CLIENT-300.4) is injected through `classify`. Stable codes map
- * to their presentation reasons; everything else stays honestly unavailable.
+ * The wire-code translation behind the default `classify` seam, aligned with
+ * the landed facade taxonomy (CLIENT-300.4): the stable Server codes map to
+ * their presentation reasons, the holder/Owner denial is resolved per action
+ * by `clientOccupancyFailure`, and everything else stays honestly unavailable.
  */
 const OCCUPANCY_FAILURE_CODES: Readonly<Record<string, ClientOccupancyFailure>> =
   Object.freeze({
+    OCCUPIED_BY_OTHER: 'occupied-by-other',
     OCCUPANCY_HELD_BY_OTHER: 'occupied-by-other',
     OCCUPANCY_NOT_HELD: 'not-holder',
     CLIENT_OFFLINE: 'device-offline',
@@ -96,15 +117,44 @@ const OCCUPANCY_FAILURE_CODES: Readonly<Record<string, ClientOccupancyFailure>> 
 /**
  * Translate one occupancy rejection into the presentation taxonomy. Every
  * wire code stays inside this function; view-models and pages branch only on
- * the returned union.
+ * the returned union. The attempted action sharpens the holder denial: a
+ * force-release rejection names the Owner-only rule instead of implying the
+ * caller once held the device.
  */
-export function clientOccupancyFailure(error: unknown): ClientOccupancyFailure {
+export function clientOccupancyFailure(
+  error: unknown,
+  action?: ClientOccupancyAction,
+): ClientOccupancyFailure {
   if (error instanceof ControlPlaneClientError) {
+    const holderDenial = action === 'force-release' ? 'permission-denied' : 'not-holder'
+    if (error.code === 'PERMISSION_DENIED') return holderDenial
     const mapped = OCCUPANCY_FAILURE_CODES[error.code]
-    if (mapped !== undefined) return mapped
-    if (error.kind === 'authorization') return 'not-holder'
+    if (mapped !== undefined) {
+      if (mapped === 'not-holder') return holderDenial
+      return mapped
+    }
+    if (error.kind === 'authorization') return holderDenial
   }
   return 'unavailable'
+}
+
+/**
+ * The §12.4 recovery window of one recovery-pending card, as the card prints
+ * it: the wire instant stays verbatim, a missing or malformed deadline stays
+ * honestly unreported, and a passed deadline names the Owner cleanup.
+ */
+export function deviceRecoveryDeadlineText(
+  device: ControlPlaneDeviceSummary,
+  nowMillis: number,
+): string {
+  const deadline = device.recoveryDeadlineAt ?? null
+  if (deadline === null || Number.isNaN(Date.parse(deadline))) {
+    return 'Waiting to recover · no recovery deadline was reported'
+  }
+  if (Date.parse(deadline) <= nowMillis) {
+    return `Recovery deadline ${deadline} has passed · the device Owner can force-release`
+  }
+  return `Connection interrupted · recovers by ${deadline}`
 }
 
 export type ClientOccupancyViewModelListener = () => void
@@ -118,6 +168,11 @@ export type ClientOccupancyViewModelListener = () => void
 export interface ClientOccupancyViewModel {
   /** The current interaction of one device; unknown devices rest. */
   interaction(clientId: string): ClientOccupancyInteraction
+  /**
+   * Whether the Owner force-release entry can submit at all: the composed
+   * facade exposes the force-release seam. The entry stays hidden otherwise.
+   */
+  supportsForceRelease(): boolean
   /** Connect (claim) the free device; an in-flight request is never repeated. */
   requestClaim(clientId: string): void
   /**
@@ -127,6 +182,11 @@ export interface ClientOccupancyViewModel {
   requestRelease(clientId: string): void
   /** Arm the explicit cancel-and-release confirmation for the held device. */
   requestCancelAndRelease(clientId: string): void
+  /**
+   * UI-100.3: arm the explicit Owner force-release confirmation for a
+   * recovery-pending device.
+   */
+  requestForceRelease(clientId: string): void
   /** Submit the armed dangerous action; only a confirmation state submits. */
   confirmPending(clientId: string): void
   /** Drop the armed confirmation or the shown failure of one device. */
@@ -144,7 +204,7 @@ export function createClientOccupancyViewModel(options: {
   readonly port: ClientOccupancyPort | null
   readonly clients: ClientsViewModel
   /** Facade-owned classifier seam; the default reads stable wire codes only. */
-  readonly classify?: (error: unknown) => ClientOccupancyFailure
+  readonly classify?: (error: unknown, action: ClientOccupancyAction) => ClientOccupancyFailure
 }): ClientOccupancyViewModel {
   const classify = options.classify ?? clientOccupancyFailure
   const interactions = new Map<string, ClientOccupancyInteraction>()
@@ -190,6 +250,7 @@ export function createClientOccupancyViewModel(options: {
   ): boolean {
     if (action === 'claim') return deviceSupportsClaim(device)
     if (action === 'release') return deviceSupportsRelease(device)
+    if (action === 'force-release') return deviceSupportsForceRelease(device)
     return deviceSupportsCancelAndRelease(device)
   }
 
@@ -214,10 +275,18 @@ export function createClientOccupancyViewModel(options: {
       const input = { clientId }
       if (action === 'claim') await port.claim(input)
       else if (action === 'release') await port.release(input)
-      else await port.cancelAndRelease(input)
+      else if (action === 'cancel-and-release') await port.cancelAndRelease(input)
+      else {
+        const forceRelease = port.forceRelease
+        if (forceRelease === undefined) {
+          setInteraction(clientId, { kind: 'failed', action, failure: 'unavailable' })
+          return
+        }
+        await forceRelease(input)
+      }
     } catch (error) {
       if (closed) return
-      setInteraction(clientId, { kind: 'failed', action, failure: classify(error) })
+      setInteraction(clientId, { kind: 'failed', action, failure: classify(error, action) })
       return
     }
     if (closed) return
@@ -248,6 +317,9 @@ export function createClientOccupancyViewModel(options: {
     interaction(clientId) {
       return interactions.get(clientId) ?? REST
     },
+    supportsForceRelease() {
+      return options.port?.forceRelease !== undefined
+    },
     requestClaim(clientId) {
       if (requestDevice(clientId, 'claim') === null) return
       void submit(clientId, 'claim')
@@ -266,6 +338,10 @@ export function createClientOccupancyViewModel(options: {
     requestCancelAndRelease(clientId) {
       if (requestDevice(clientId, 'cancel-and-release') === null) return
       setInteraction(clientId, { kind: 'confirming', action: 'cancel-and-release' })
+    },
+    requestForceRelease(clientId) {
+      if (requestDevice(clientId, 'force-release') === null) return
+      setInteraction(clientId, { kind: 'confirming', action: 'force-release' })
     },
     confirmPending(clientId) {
       if (closed) return
@@ -312,10 +388,14 @@ function facadeMethod(value: unknown): OccupancyFacadeMethod | null {
 }
 
 /**
- * Adapt the frozen occupancy facade to the port the controls consume. The
- * facade names the immediate stop path force-release; the controls call it
- * cancel-and-release. Returns null while the facade methods have not landed,
- * so hosts compose the port only when the seam exists.
+ * Adapt the frozen occupancy facade to the port the controls consume, keeping
+ * the two destructive paths on their own facade seams: the holder's
+ * cancel-and-release goes through `releaseOccupancy` with the explicit
+ * `cancel_and_release` mode, and the Owner's recovery cleanup goes through the
+ * dedicated `forceReleaseOccupancy` seam (CLIENT-300.4). `forceRelease` stays
+ * optional: a facade without the seam simply hides the Owner entry. Returns
+ * null while the base methods have not landed, so hosts compose the port only
+ * when the seam exists.
  */
 export function clientOccupancyPortFromFacade(facade: object): ClientOccupancyPort | null {
   const methods = facade as Record<string, unknown>
@@ -326,13 +406,15 @@ export function clientOccupancyPortFromFacade(facade: object): ClientOccupancyPo
     bindOccupancyMode(methods['releaseOccupancy'], 'release')
   const cancelAndRelease =
     facadeMethod(methods['cancelAndRelease']) ??
-    facadeMethod(methods['forceRelease']) ??
-    bindOccupancyMode(methods['forceReleaseOccupancy'], 'cancel_and_release', true)
+    bindOccupancyMode(methods['releaseOccupancy'], 'cancel_and_release', true)
   if (claim === null || release === null || cancelAndRelease === null) return null
+  const forceRelease = facadeMethod(methods['forceRelease']) ??
+    facadeMethod(methods['forceReleaseOccupancy'])
   return {
     claim: input => claim(input),
     release: input => release(input),
     cancelAndRelease: input => cancelAndRelease(input),
+    ...(forceRelease === null ? {} : { forceRelease: input => forceRelease(input) }),
   }
 }
 

@@ -579,26 +579,49 @@ test('a port-less composition reports the honest unavailable failure', async () 
   clientsModel.close()
 })
 
-test('the facade adapter maps force-release and rejects incomplete facades', async () => {
+test('the facade adapter separates the holder stop from the Owner force-release and rejects incomplete facades', async () => {
   const calls = []
+  // UI-100.3: the landed facade seam — the holder's cancel-and-release goes
+  // through releaseOccupancy with the explicit mode, and the Owner recovery
+  // cleanup goes through the dedicated force-release entry.
   const completeFacade = {
-    claim: input => { calls.push(['claim', input.clientId]); return Promise.resolve() },
-    release: input => { calls.push(['release', input.clientId]); return Promise.resolve() },
-    forceRelease: input => { calls.push(['forceRelease', input.clientId]); return Promise.resolve() },
+    claimOccupancy: input => { calls.push(['claim', input.clientId]); return Promise.resolve() },
+    releaseOccupancy: input => {
+      calls.push(['release', input.clientId, input.mode, input.confirm === true])
+      return Promise.resolve()
+    },
+    forceReleaseOccupancy: input => {
+      calls.push(['forceRelease', input.clientId])
+      return Promise.resolve()
+    },
   }
   const port = clientOccupancyPortFromFacade(completeFacade)
   assert.notEqual(port, null)
   await port.claim({ clientId: '123456789012' })
   await port.cancelAndRelease({ clientId: '123456789012' })
+  await port.forceRelease({ clientId: '123456789012' })
   assert.deepEqual(calls, [
     ['claim', '123456789012'],
+    ['release', '123456789012', 'cancel_and_release', true],
     ['forceRelease', '123456789012'],
   ])
 
-  assert.equal(clientOccupancyPortFromFacade({ claim: completeFacade.claim }), null)
+  // A facade without the force-release seam still serves the holder paths.
+  const holderOnly = clientOccupancyPortFromFacade({
+    claim: completeFacade.claimOccupancy,
+    releaseOccupancy: completeFacade.releaseOccupancy,
+  })
+  assert.notEqual(holderOnly, null)
+  assert.equal(holderOnly.forceRelease, undefined)
+
+  assert.equal(clientOccupancyPortFromFacade({ claim: completeFacade.claimOccupancy }), null)
   assert.equal(
-    clientOccupancyPortFromFacade({ claim: completeFacade.claim, release: completeFacade.release }),
+    clientOccupancyPortFromFacade({
+      claim: completeFacade.claimOccupancy,
+      forceReleaseOccupancy: completeFacade.forceReleaseOccupancy,
+    }),
     null,
+    'a facade with no holder release path composes no port',
   )
 })
 

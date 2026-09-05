@@ -196,6 +196,9 @@ export function mountClientsPage(options: ClientsPageOptions): ClientsPage {
           actions,
           notice,
           model: options.occupancy,
+          // UI-100.3: the card's recovery deadline uses the page clock so the
+          // passed-window copy and the heartbeat text move together.
+          now,
         })
       // REPO-100.3: the repository list of this device opens from a pressed
       // toggle so keyboard and screen-reader users get the same selection.

@@ -215,9 +215,20 @@ export function attentionCenterItemHash(
   origins?: readonly AttentionCenterOrigin[],
 ): string {
   if (item.kind === 'attention') {
-    const hash = `#/strongflow?delivery=${encodeURIComponent(item.deliveryId ?? '')}`
-      + (item.stageRunId === null ? '' : `&stageRun=${encodeURIComponent(item.stageRunId)}`)
-    return scopeHash(hash, scopeSelection)
+    // The run page is the one authoritative Delivery/StageRun surface, so a
+    // business Attention deep link goes through the same typed StrongFlow
+    // route boundary every other run-page entry uses (parse and format stay
+    // one canonical shape), instead of a hand-built query string.
+    return strongFlowRouteHash({
+      deliveryId: item.deliveryId,
+      productSessionId: null,
+      stageRunId: item.stageRunId,
+      candidatePath: null,
+      candidateView: 'unified',
+      comparison: { status: 'none' },
+      evidenceTab: 'evidence',
+      evidenceId: null,
+    }, scopeSelection)
   }
   // The decision link carries the exact execution origin so the decision
   // surface can return to the Task/StageRun that raised the decision.
@@ -600,7 +611,7 @@ export function mountAttentionCenterPage(options: AttentionCenterPageOptions): A
         parts.action.tabIndex = -1
         parts.action.title = 'This entry is disabled. Refresh for the current state.'
       } else {
-        parts.action.href = attentionCenterItemHash(item, options.scopeSelection)
+        parts.action.href = attentionCenterItemHash(item, options.scopeSelection, origins())
         parts.action.removeAttribute('aria-disabled')
         parts.action.tabIndex = 0
         parts.action.title = ''

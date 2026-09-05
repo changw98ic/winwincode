@@ -202,3 +202,12 @@
   background: var(--wwc-color-danger-surface);
   font-size: var(--wwc-font-size-sm);
 }
+
+/* UI-100.3: the §12.4 recovery window of an interrupted lease. The instant
+   stays the wire shape, the warning tone only supports the words, and the
+   card's one alert channel stays reserved for real failures. */
+.wwc-clients-card-recovery {
+  margin: var(--wwc-space-0);
+  color: var(--wwc-color-warning-text);
+  font-size: var(--wwc-font-size-sm);
+}

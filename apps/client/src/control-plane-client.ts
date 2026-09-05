@@ -1230,6 +1230,13 @@ export interface ControlPlaneDeviceSummary {
   readonly capacityTotal: number
   readonly lastHeartbeatAt: string
   readonly version: string
+  /**
+   * §12.4 recovery window: while the device is `recovery-pending`, the Server
+   * may report when the interrupted lease becomes force-releasable by the
+   * device Owner. The field is absent for every other state, and the instant
+   * stays the wire shape — the card never reformats or localizes it.
+   */
+  readonly recoveryDeadlineAt?: string | null
 }
 
 /** One add-Client attempt: the device identity plus its dynamic code. */
@@ -1395,6 +1402,19 @@ function deviceSummaryValue(value: unknown): ControlPlaneDeviceSummary {
   ) {
     throw invalidDeviceListError()
   }
+  // The recovery deadline rides only when the Server reports one; an absent
+  // field stays absent so the served snapshot keeps its exact wire shape.
+  const recoveryDeadlineAt = value.recoveryDeadlineAt === undefined
+    ? null
+    : value.recoveryDeadlineAt
+  if (
+    recoveryDeadlineAt !== null
+    && (typeof recoveryDeadlineAt !== 'string'
+      || !RFC3339_INSTANT.test(recoveryDeadlineAt)
+      || Number.isNaN(Date.parse(recoveryDeadlineAt)))
+  ) {
+    throw invalidDeviceListError()
+  }
   return Object.freeze({
     clientId: value.clientId,
     displayName: value.displayName,
@@ -1404,6 +1424,9 @@ function deviceSummaryValue(value: unknown): ControlPlaneDeviceSummary {
     capacityTotal,
     lastHeartbeatAt,
     version: value.version,
+    ...(recoveryDeadlineAt === null
+      ? {}
+      : { recoveryDeadlineAt: recoveryDeadlineAt as string }),
   })
 }
 
