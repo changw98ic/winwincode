@@ -147,6 +147,7 @@ function pageState(update = 0) {
     selectedModelRoute: secondRoute,
     modelRouteSelectionIssue: null,
     runtime: null,
+    pendingInputs: [],
     pendingApprovals: [],
     interaction: {
       status: update % 2 === 0 ? 'idle' : 'waiting',

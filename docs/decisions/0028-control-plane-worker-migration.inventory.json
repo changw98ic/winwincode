@@ -978,6 +978,8 @@
         "apps/client/src/components/tabs.ts",
         "apps/client/src/components/toolbar.ts",
         "apps/client/src/components/windowed-list.ts",
+        "apps/client/src/contextual-decision.ts",
+        "apps/client/src/contextual-decision-view-model.ts",
         "apps/client/src/control-plane-client.ts",
         "apps/client/src/core/connection-state.ts",
         "apps/client/src/core/query-cache.ts",

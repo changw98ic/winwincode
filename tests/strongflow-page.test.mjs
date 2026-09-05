@@ -2163,3 +2163,109 @@ test('a failing required criterion leaves no final Delivery approval bypass', as
   mounted.close()
   assert.deepEqual(rootElement.children, [])
 })
+
+test('the StrongFlow context pane opens with the Delivery decisions and links to the session surface', () => {
+  const document = new FakeDocument()
+  const rootElement = document.createElement('main')
+  const productSessionId = 'psn_00000000000000000000000001'
+  const snapshot = state()
+  snapshot.projection.stage = {
+    id: stageRunId,
+    sessionBinding: { productSessionId, stageRunId },
+  }
+  snapshot.projection.delivery.attention = [
+    {
+      id: 'atn:1',
+      title: 'Verification blocked on the delivery criterion.',
+      status: 'open',
+      blocking: true,
+      stageRunId,
+      createdAt: '2026-08-27T01:00:00.000Z',
+      options: [],
+    },
+    {
+      id: 'atn:2',
+      title: 'Requirement question needs an owner.',
+      status: 'open',
+      blocking: false,
+      stageRunId: null,
+      createdAt: '2026-08-27T01:00:00.000Z',
+      options: [],
+    },
+    {
+      id: 'atn:3',
+      title: 'Already resolved.',
+      status: 'resolved',
+      blocking: true,
+      stageRunId: null,
+      createdAt: '2026-08-27T01:00:00.000Z',
+      options: [],
+    },
+  ]
+  snapshot.projection.solutionReview = {
+    ...snapshot.projection.solutionReview,
+    reviewStatus: 'pending',
+  }
+  const model = new FakeStrongFlowViewModel(snapshot)
+  const mounted = mountStrongFlowPage({
+    root: rootElement,
+    model,
+    deliveryList: fakeDeliveryList([]),
+    limits,
+    routeScope: {
+      organizationId: 'org_00000000000000000000000001',
+      workspaceId: 'wsp_00000000000000000000000001',
+      projectId: 'prj_00000000000000000000000001',
+      repositoryId: 'rep_00000000000000000000000001',
+    },
+  })
+
+  const card = findByClass(rootElement, 'wwc-strongflow-contextual-decisions')
+  assert.equal(card.hidden, false)
+  // The card sits in the Attention and Evidence context pane.
+  assert.equal(
+    findByClass(findByClass(rootElement, 'wwc-strongflow-context'), 'wwc-strongflow-contextual-decisions'),
+    card,
+  )
+  const rows = findAllByClass(rootElement, 'wwc-contextual-decision-item')
+  assert.deepEqual(rows.map(row => row.dataset.kind), ['attention', 'attention'])
+  assert.equal(rows[0].dataset.urgency, 'blocking')
+  assert.equal(rows[1].dataset.urgency, 'pending')
+  // StrongFlow decides Delivery Attention in its own actions region, so the
+  // card is a summary that opens the owning decision surface instead.
+  assert.equal(findByClass(rows[0], 'wwc-contextual-decision-submit').hidden, true)
+  assert.equal(findByClass(rows[0], 'wwc-contextual-decision-secondary').hidden, true)
+  assert.match(
+    findByClass(card, 'wwc-contextual-decision-note').textContent,
+    /Solution review is decided in the Delivery actions/u,
+  )
+  const link = findByClass(rows[0], 'wwc-contextual-decision-detail')
+  assert.equal(link.hidden, false)
+  assert.match(link.href, new RegExp(`session=${productSessionId}`, 'u'))
+  assert.match(link.href, new RegExp(`delivery=${deliveryId}`, 'u'))
+  assert.match(link.href, new RegExp(`stageRun=${stageRunId}`, 'u'))
+
+  mounted.close()
+  assert.equal(findByClass(rootElement, 'wwc-contextual-decision'), null)
+})
+
+test('a Delivery without an open decision hides the StrongFlow decision card', () => {
+  const document = new FakeDocument()
+  const rootElement = document.createElement('main')
+  const snapshot = state()
+  snapshot.projection.delivery.attention = [
+    { id: 'atn:9', title: 'Resolved', status: 'resolved', blocking: true, stageRunId: null },
+  ]
+  const model = new FakeStrongFlowViewModel(snapshot)
+  const mounted = mountStrongFlowPage({
+    root: rootElement,
+    model,
+    deliveryList: fakeDeliveryList([]),
+    limits,
+  })
+  assert.equal(findByClass(rootElement, 'wwc-strongflow-contextual-decisions').hidden, true)
+
+  model.publish(state({ projection: null }))
+  assert.equal(findByClass(rootElement, 'wwc-strongflow-decision-host').hidden, true)
+  mounted.close()
+})

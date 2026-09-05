@@ -385,6 +385,7 @@ function chatState(overrides = {}) {
     selectedModelRoute: modelRoute,
     modelRouteSelectionIssue: null,
     runtime: null,
+    pendingInputs: [],
     pendingApprovals: [],
     interaction: { status: 'idle', error: null },
     error: null,

@@ -18,6 +18,14 @@ import {
   ModelRouteAvailabilityReason,
   ModelRouteAvailabilityStatus,
 } from './generated/contracts.js'
+import {
+  contextualDecisionPresentation,
+  contextualDecisions,
+} from './contextual-decision-view-model.js'
+import {
+  mountContextualDecisionCard,
+  type ContextualDecisionCard,
+} from './contextual-decision.js'
 
 export interface ChatDeliveryCreateInput {
   readonly title: string
@@ -51,6 +59,8 @@ export interface ChatPageOptions {
   readonly deliveryCreator?: ChatDeliveryCreator
   readonly scope?: RepositoryScope
   readonly settingsHref?: string
+  /** Deterministic clock for the contextual decision card; defaults to Date.now. */
+  readonly nowMillis?: () => number
   /** Presentation-only capability; Server authorization remains authoritative. */
   readonly readOnly?: boolean
 }
@@ -284,6 +294,7 @@ function focusableElement(value: Element | null | undefined): HTMLElement | null
 /** Mount the default, keyboard-accessible Chat page against the read/write view-model only. */
 export function mountChatPage(options: ChatPageOptions): ChatPage {
   const readOnly = options.readOnly === true
+  const nowMillis = options.nowMillis ?? Date.now
   const document = options.root.ownerDocument
   const layout = element(document, 'div', 'wwc-chat')
   const sessionPanel = element(document, 'aside', 'wwc-chat-sessions')
@@ -362,6 +373,34 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
   let conversionOpen = false
   let conversionSessionId: ProductSessionId | null = null
   let conversionFocusReturn: HTMLElement | null = null
+
+  // UI-502: the Session's own pending inputs and approvals, decided in place
+  // through this page's view-model commands instead of a detour to the global
+  // Attention Center.  The card is a projection of this page's snapshot, so it
+  // cannot drift from the state the rest of the page renders.
+  // The card mounts into this detached root, so a hidden card adds no node to
+  // the conversation and the page layout stays byte-identical when idle.
+  const decisionCard: ContextualDecisionCard = mountContextualDecisionCard({
+    root: document.createElement('div'),
+    id: 'wwc-chat-decisions',
+    title: 'Decisions in this Chat',
+    description: 'Answer this Session input or approve this tool call without leaving Chat.',
+    readOnly,
+    actions: {
+      provideInput(item, value) {
+        if (readOnly) return
+        void options.model.respondToInput(item.id, 'provided', value)
+      },
+      cancelInput(item) {
+        if (readOnly) return
+        void options.model.respondToInput(item.id, 'cancelled', null)
+      },
+      decideApproval(item, decision, reason) {
+        if (readOnly) return
+        void options.model.decideApproval(item.id, decision, reason)
+      },
+    },
+  })
 
   sessionHeading.textContent = 'Sessions'
   newSession.type = 'button'
@@ -514,7 +553,7 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
     modelNotice,
     convertDelivery.root,
   )
-  conversation.append(header, conversion, error, loadEarlier, messages, empty, form)
+  conversation.append(header, decisionCard.root, conversion, error, loadEarlier, messages, empty, form)
   layout.append(sessionPanel, conversation)
   options.root.replaceChildren(layout)
 
@@ -741,6 +780,23 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
 
     sessionCollection.update(state.sessions)
     messageCollection.update(state.messages)
+
+    const decisions = contextualDecisions({
+      inputs: state.pendingInputs,
+      approvals: state.pendingApprovals,
+      attention: [],
+      nowMillis: nowMillis(),
+    })
+    decisionCard.update({
+      view: decisions,
+      presentation: contextualDecisionPresentation(decisions, {
+        busy: ['submitting', 'cancelling', 'waiting'].includes(state.interaction.status),
+        pageUnavailable: state.status === 'authentication-required'
+          || state.status === 'authorization-denied'
+          || state.status === 'closed',
+        readOnly,
+      }),
+    })
   }
 
   function closeConversion(): void {
@@ -901,6 +957,7 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
       retry.removeEventListener('click', onRetry)
       loadEarlier.removeEventListener('click', onLoadEarlier)
       for (const field of conversionFields) field.close()
+      decisionCard.close()
       convertDelivery.close()
       conversionSubmit.close()
       conversionCancel.close()

@@ -8,6 +8,15 @@ import type {
   RepositoryScope,
 } from './generated/contracts.js'
 import { scopeHash, type ScopeRouteSelection } from './core/scope-context.js'
+import {
+  contextualDecisionPresentation,
+  contextualDecisions,
+} from './contextual-decision-view-model.js'
+import type { ContextualDecisionAttention } from './contextual-decision-view-model.js'
+import {
+  mountContextualDecisionCard,
+  type ContextualDecisionCard,
+} from './contextual-decision.js'
 import { mountButton } from './components/button.js'
 import { mountDrawer } from './components/drawer.js'
 import { mountEmptyState } from './components/empty-state.js'
@@ -138,6 +147,8 @@ export interface StrongFlowPageOptions {
   /** One-based changed-file line requested by the typed route seam. */
   readonly candidateLine?: number | null
   readonly onCandidateLineChange?: (line: number | null) => void
+  /** Deterministic clock for the contextual decision card; defaults to Date.now. */
+  readonly nowMillis?: () => number
 }
 
 export interface StrongFlowLayoutViewport {
@@ -684,6 +695,7 @@ function conflictWarningIcon(document: Document, className: string): HTMLElement
 /** Mount the advanced StrongFlow workspace against its Control Plane view-model. */
 export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowPage {
   const readOnly = options.readOnly === true
+  const nowMillis = options.nowMillis ?? Date.now
   const document = options.root.ownerDocument
   const pageDraftScope = options.model.draftScope
   const limits = options.limits ?? DEFAULT_STRONGFLOW_RENDER_LIMITS
@@ -936,6 +948,37 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
     readOnly,
     onOpenEvidence: openEvidence,
     ...(options.copy === undefined ? {} : { copy: options.copy }),
+  })
+  // UI-502: the decisions this exact Delivery and StageRun is waiting on, with
+  // one link per row into the canonical session decision surface that carries
+  // the return path to this StageRun.  The card projects this page's own
+  // snapshot and owns no command, so it adds no second mutation authority.
+  const decisionHost = strongFlowElement(document, 'div', 'wwc-strongflow-decision-host')
+  const decisionCard: ContextualDecisionCard = mountContextualDecisionCard({
+    root: decisionHost,
+    id: 'wwc-strongflow-decisions',
+    title: 'Decisions in this Delivery',
+    description: 'What this StageRun is waiting on and where each decision is made.',
+    className: 'wwc-strongflow-contextual-decisions',
+    readOnly,
+    detailHref: item => {
+      const routeScope = options.routeScope
+      if (routeScope === undefined) return null
+      const deliveryId = item.deliveryId
+        ?? options.model.state.projection?.delivery.deliveryId
+        ?? null
+      const productSessionId = options.model.state.projection?.stage.sessionBinding
+        ?.productSessionId ?? null
+      if (productSessionId === null || deliveryId === null) return null
+      return scopeHash(
+        `#/attention?session=${encodeURIComponent(productSessionId)}`
+          + `&delivery=${encodeURIComponent(deliveryId)}`
+          + (item.stageRunId === null
+            ? ''
+            : `&stageRun=${encodeURIComponent(item.stageRunId)}`),
+        routeScope,
+      )
+    },
   })
 
   function updateOmitted(node: HTMLElement, count: number, label: string): void {
@@ -1250,7 +1293,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
   )
   navigation.append(deliveriesRoot, tasksSection, stagesSection)
   mainRegion.append(details, historyHost, actions)
-  context.append(attentionSection)
+  context.append(decisionHost, attentionSection)
   outerSplit.root.replaceChildren(
     outerSplit.primary,
     navigationResize.root,
@@ -1849,6 +1892,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       historyTreeSource = null
       historyNavigation.update(null)
       runDetail.update({ tree: null, selection: historyNavigation.selection() })
+      decisionHost.hidden = true
       attentionCollection.update([])
       updateOmitted(attentionOmitted, 0, 'Attention records')
       diagrams.update({ projection: null, narrow: strongFlowLayoutMode(viewport.width) === 'narrow' })
@@ -1896,6 +1940,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       && projection.stage.id !== historySelection.stageRunId
     )
     runDetail.update({ tree: historyTree, selection: historySelection })
+    decisionHost.hidden = false
     const boundedAttention = boundedItems(projection.attention, limits.attention)
     attentionCollection.update(boundedAttention.items)
     updateOmitted(attentionOmitted, boundedAttention.omitted, 'Attention records')
@@ -2058,6 +2103,41 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
     updateOmitted(actionsOmitted, openAttention.omitted, 'Attention actions')
   }
 
+  /** The contextual decision card: this Delivery's open decisions, bounded. */
+  function renderDecisions(state: StrongFlowViewModelState): void {
+    const projection = state.projection
+    const attention: readonly ContextualDecisionAttention[] = projection === null
+      ? []
+      : projection.delivery.attention
+        .filter(item => item.status === 'open')
+        .map(item => ({
+          projection: item,
+          deliveryId: projection.delivery.deliveryId,
+          deliveryRevision: projection.metadata.revisions.delivery,
+        }))
+    const view = contextualDecisions({
+      inputs: [],
+      approvals: [],
+      attention,
+      nowMillis: nowMillis(),
+      limit: limits.attention,
+    })
+    const interaction = state.interaction ?? { status: 'idle' as const, error: null }
+    decisionCard.update({
+      view,
+      presentation: contextualDecisionPresentation(view, {
+        busy: interaction.status === 'submitting' || interaction.status === 'waiting',
+        pageUnavailable: state.status === 'authentication-required'
+          || state.status === 'authorization-denied'
+          || state.status === 'closed',
+        readOnly,
+      }),
+      note: projection?.solutionReview?.reviewStatus === 'pending'
+        ? 'The Solution review is decided in the Delivery actions.'
+        : null,
+    })
+  }
+
   function mountRegion(target: HTMLElement, nodes: readonly HTMLElement[]): void {
     if (
       target.children.length === nodes.length
@@ -2115,7 +2195,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
     )
     mountRegion(
       narrow ? contextDrawerContent : context,
-      [attentionSection],
+      [decisionHost, attentionSection],
     )
 
     desktopControls.hidden = narrow
@@ -2268,6 +2348,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
     renderDeliveries(state)
     renderProjection(state.projection, state.status, state.candidateFiles)
     renderActions(state)
+    renderDecisions(state)
     reviewPanel.update()
     reviewDetail.update()
     renderLayout(strongFlowLayoutMode(viewport.width))
@@ -2305,6 +2386,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       runDetail.close()
       reviewPanel.close()
       reviewDetail.close()
+      decisionCard.close()
       deliveryListPage.close()
       options.deliveryList.close()
       diagrams.close()

@@ -1,0 +1,20 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "declaration": false,
+    "declarationMap": false,
+    "lib": [
+      "DOM",
+      "DOM.Iterable",
+      "ES2023"
+    ],
+    "noEmit": false,
+    "outDir": "../../.cache/contextual-decision-view-model-tests",
+    "rootDir": "src",
+    "sourceMap": false,
+    "tsBuildInfoFile": "../../.cache/tsbuild/contextual-decision-view-model-tests.tsbuildinfo"
+  },
+  "include": [
+    "src/**/*.ts"
+  ]
+}

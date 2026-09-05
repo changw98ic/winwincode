@@ -19,6 +19,7 @@ const sourceFiles = [
   'features/home.css',
   'features/enterprise.css',
   'features/usage-health.css',
+  'features/contextual-decision.css',
 ]
 
 function source(path) {
