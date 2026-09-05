@@ -148,6 +148,9 @@ test('Client shell has one facade and the six canonical product entries with Hom
   assert.match(surfaces, /id: 'home'[\s\S]+default: true/u)
   assert.match(surfaces, /id: 'home'[\s\S]+default: true[\s\S]+id: 'chat'/u)
   assert.match(application, /activeSurface\.id === 'home'/u)
-  assert.equal((`${application}\n${index}`.match(/createControlPlaneClient/g) ?? []).length, 2)
+  // The factory seam grows with each authenticated surface (login, clients,
+  // repositories); what must stay stable is that every surface resolves it
+  // through the single control-plane-client facade.
+  assert.equal((`${application}\n${index}`.match(/createControlPlaneClient/g) ?? []).length, 4)
   assert.doesNotMatch(application, /\bfetch\s*\(|new\s+WebSocket/u)
 })
