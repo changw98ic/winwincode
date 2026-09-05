@@ -49,10 +49,14 @@ use winwincode_client_port::messages::{
 /// mirror revision, acknowledgement stamp) and added the
 /// `occupancy_release_intents` table. Version 5 (WORKER-100.2) added the
 /// nullable `exit_code` column to `worker_process_registry` so a terminal
-/// observation (exited/crashed) keeps the exit status next to the state. No
-/// version-1 through version-4 database ever shipped, so older databases fail
+/// observation (exited/crashed) keeps the exit status next to the state.
+/// Version 6 (GIT-100.2) extended `candidate_local_refs` into the full
+/// device-local candidate registry: the product-level `candidate_ref`, the
+/// frozen `candidate_commit`, and the `retained_at` stamp joined the row, and
+/// `local_state` froze onto the plan 15 `LocalCandidateState` vocabulary. No
+/// version-1 through version-5 database ever shipped, so older databases fail
 /// closed as unsupported.
-pub const CLIENT_STORE_SCHEMA_VERSION: i64 = 5;
+pub const CLIENT_STORE_SCHEMA_VERSION: i64 = 6;
 
 const DATABASE_FILE_NAME: &str = "device-client.sqlite3";
 const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -2701,15 +2705,27 @@ CREATE TABLE worker_launch_receipts (
 );
 CREATE INDEX worker_launch_receipts_by_session
     ON worker_launch_receipts (worker_session_id, received_at);
--- LOCAL ONLY: local candidate git refs and workspace paths never leave the
--- device; only the stable candidate id is server-visible.
+-- LOCAL ONLY (GIT-100.2): the device-local candidate registry. Local
+-- candidate git refs and workspace paths never leave the device; only the
+-- stable candidate identity rides the client.candidate.retained frame.
+-- candidate_id is the stable candidate identity — the frozen candidate
+-- commit id per the worker freeze convention — so a repeated retention of
+-- the same candidate re-encounters the same primary key and the registry
+-- stays idempotent. local_state uses the frozen plan 15 lifecycle
+-- vocabulary; `retained_at` is the retention fact stamp the wire receipt
+-- reports, `created_at` the stamp of the first recording.
 CREATE TABLE candidate_local_refs (
     candidate_id TEXT PRIMARY KEY NOT NULL,
     worker_session_id TEXT NOT NULL,
     repository_binding_id TEXT NOT NULL,
     local_git_ref TEXT NOT NULL,
-    local_state TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    local_state TEXT NOT NULL
+        CHECK (local_state IN
+            ('retained', 'branch_created', 'applied', 'discarded', 'failed')),
+    created_at TEXT NOT NULL,
+    candidate_ref TEXT NOT NULL,
+    candidate_commit TEXT NOT NULL,
+    retained_at TEXT NOT NULL
 );
 CREATE INDEX candidate_local_refs_by_session
     ON candidate_local_refs (worker_session_id, created_at);
@@ -2925,6 +2941,9 @@ const STORE_SCHEMA_COLUMNS: &[(&str, &str, &[&str])] = &[
             "local_git_ref",
             "local_state",
             "created_at",
+            "candidate_ref",
+            "candidate_commit",
+            "retained_at",
         ],
     ),
     (
