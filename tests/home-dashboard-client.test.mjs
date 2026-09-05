@@ -798,6 +798,7 @@ test('a decision card links to the exact decision surface and the exact Chat ses
     homeDecisionHash(attentionCard, scopeSelection),
     '#/strongflow?delivery=dlv_00000000000000000000000001'
       + '&stageRun=str_00000000000000000000000001'
+      + '&view=unified'
       + '&organizationId=org_00000000000000000000000001'
       + '&workspaceId=wsp_00000000000000000000000001'
       + '&projectId=prj_00000000000000000000000001'
