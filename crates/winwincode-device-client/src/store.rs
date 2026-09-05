@@ -29,8 +29,11 @@ use winwincode_client_port::messages::{
     CLIENT_CONTROL_PORT_SCHEMA_VERSION, ClientToServerEnvelope, ClientToServerMessage,
 };
 
-/// Current schema version of the local device-client database.
-pub const CLIENT_STORE_SCHEMA_VERSION: i64 = 1;
+/// Current schema version of the local device-client database. Version 2
+/// added the server-issued `client_node_id` column to `device_identity`
+/// (plan 17.1 enrollment adoption); no version-1 database ever shipped, so
+/// older databases fail closed as unsupported.
+pub const CLIENT_STORE_SCHEMA_VERSION: i64 = 2;
 
 const DATABASE_FILE_NAME: &str = "device-client.sqlite3";
 const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -664,48 +667,6 @@ impl DeviceStore {
         }
         Ok(())
     }
-
-    /// Re-issues one pending outbox row of a superseded instance under the
-    /// current launch instance (plan section 18.3 restart recovery).
-    ///
-    /// The stream sequence and message id are kept — the node stream must
-    /// stay contiguous and an already in-flight frame must stay a duplicate
-    /// for the receiver's dedup — while the payload bytes are rewritten with
-    /// the new `clientInstanceId`.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`DeviceStoreErrorKind::InvalidInput`] for an empty identity
-    /// or payload, [`DeviceStoreErrorKind::NotFound`] when the pending row
-    /// does not exist, and an adapter-neutral error when the write fails or
-    /// the store is closed.
-    pub fn reissue_outbox_row(
-        &mut self,
-        message_id: &str,
-        client_instance_id: &str,
-        payload: &[u8],
-    ) -> Result<(), DeviceStoreError> {
-        require_non_empty(message_id, "message id", MAX_ID_BYTES)?;
-        require_non_empty(client_instance_id, "client instance id", MAX_ID_BYTES)?;
-        if payload.is_empty() {
-            return Err(DeviceStoreError::invalid(
-                "reissued outbox payload must not be empty",
-            ));
-        }
-        let changed = self
-            .connection_mut()?
-            .execute(
-                "UPDATE client_outbox SET client_instance_id = ?2, payload = ?3                  WHERE message_id = ?1 AND published = 0",
-                params![message_id, client_instance_id, payload],
-            )
-            .map_err(sql_error)?;
-        if changed == 0 {
-            return Err(DeviceStoreError::not_found(format!(
-                "pending outbox message id {message_id} does not exist"
-            )));
-        }
-        Ok(())
-    }
 }
 
 impl DeviceStore {
@@ -734,6 +695,133 @@ impl DeviceStore {
         self.outbox_stream = Some(OutboxStream {
             client_node_id: client_node_id.to_owned(),
             client_instance_id: client_instance_id.to_owned(),
+        });
+        Ok(())
+    }
+
+    /// Re-keys the enrolled sender stream after the enrollment exchange:
+    /// every acknowledged (published) row of the placeholder stream is copied
+    /// under the server-assigned node id at the same stream sequence, the
+    /// copies are marked published, and the outbox stream rebinds to the
+    /// enrolled node.
+    ///
+    /// The server credits the settled enroll frames to the assigned `cnd_`
+    /// stream, so the copies keep the node sequence continuous: the next
+    /// appended frame continues at the sequence the server expects. Pending
+    /// (unacknowledged) placeholder rows stay untouched on the placeholder
+    /// stream; the daemon enqueues nothing but the enroll before the
+    /// adoption, so none exist in the exchange flow.
+    ///
+    /// Refused when the enrolled node already has rows, so a replayed
+    /// adoption can never duplicate the stream.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DeviceStoreErrorKind::InvalidInput`] for an empty node
+    /// identity and an adapter-neutral error when the store is closed, a
+    /// stored row disagrees with its encoded envelope, the enrolled stream
+    /// already exists, or the write fails.
+    pub fn adopt_enrolled_stream(
+        &mut self,
+        placeholder_node_id: &str,
+        enrolled_node_id: &str,
+    ) -> Result<(), DeviceStoreError> {
+        require_non_empty(placeholder_node_id, "placeholder node id", MAX_ID_BYTES)?;
+        require_non_empty(enrolled_node_id, "enrolled node id", MAX_ID_BYTES)?;
+        let instance = self.outbox_stream()?.client_instance_id.clone();
+        let connection = self.connection_mut()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sql_error)?;
+        let existing: Option<i64> = transaction
+            .query_row(
+                "SELECT MAX(envelope_sequence) FROM client_outbox WHERE client_node_id = ?1",
+                [enrolled_node_id],
+                |row| row.get(0),
+            )
+            .map_err(sql_error)?;
+        if existing.is_some() {
+            return Err(DeviceStoreError::conflict(
+                "the enrolled node stream already has rows",
+            ));
+        }
+        let published: Vec<(String, i64, String, Vec<u8>, String)> = transaction
+            .prepare(
+                "SELECT message_id, envelope_sequence, kind, payload, occurred_at \
+                 FROM client_outbox \
+                 WHERE client_node_id = ?1 AND published = 1 ORDER BY envelope_sequence",
+            )
+            .map_err(sql_error)?
+            .query_map([placeholder_node_id], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            })
+            .map_err(sql_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(sql_error)?;
+        for (message_id, envelope_sequence, kind, payload, occurred_at) in published {
+            let envelope: ClientToServerEnvelope =
+                serde_json::from_slice(&payload).map_err(|error| {
+                    DeviceStoreError::adapter(format!(
+                        "published outbox row {message_id} is corrupt: {error}"
+                    ))
+                })?;
+            if envelope.client_node_id != placeholder_node_id
+                || envelope.message_id != message_id
+                || envelope_kind(&envelope.message)? != kind
+            {
+                return Err(DeviceStoreError::adapter(format!(
+                    "published outbox row {message_id} disagrees with its encoded envelope"
+                )));
+            }
+            let sequence = u64::try_from(envelope_sequence)
+                .map_err(|_| DeviceStoreError::adapter("stored outbox sequence is negative"))?;
+            if envelope.sequence != sequence {
+                return Err(DeviceStoreError::adapter(format!(
+                    "published outbox row {message_id} disagrees with its encoded sequence"
+                )));
+            }
+            let mut adopted = envelope;
+            enrolled_node_id.clone_into(&mut adopted.client_node_id);
+            let payload = serde_json::to_vec(&adopted).map_err(|error| {
+                DeviceStoreError::adapter(format!(
+                    "adopted outbox row for {enrolled_node_id} is not encodable: {error}"
+                ))
+            })?;
+            transaction
+                .execute(
+                    "INSERT INTO client_outbox \
+                     (message_id, client_node_id, client_instance_id, envelope_sequence, \
+                      kind, payload, occurred_at, published) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1)",
+                    params![
+                        format!("{enrolled_node_id}-{kind}-{sequence}"),
+                        enrolled_node_id,
+                        adopted.client_instance_id,
+                        envelope_sequence,
+                        kind,
+                        payload,
+                        occurred_at,
+                    ],
+                )
+                .map_err(|error| match error {
+                    rusqlite::Error::SqliteFailure(failure, _)
+                        if failure.code == rusqlite::ErrorCode::ConstraintViolation =>
+                    {
+                        DeviceStoreError::conflict("the adopted outbox message id already exists")
+                    }
+                    other => sql_error(other),
+                })?;
+        }
+        transaction.commit().map_err(sql_error)?;
+        self.outbox_stream = Some(OutboxStream {
+            client_node_id: enrolled_node_id.to_owned(),
+            client_instance_id: instance,
         });
         Ok(())
     }
@@ -1201,6 +1289,7 @@ fn row_to_outbox_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<ClientOutbox
 const STORE_SCHEMA: &str = r"
 CREATE TABLE device_identity (
     device_id TEXT PRIMARY KEY NOT NULL,
+    client_node_id TEXT NOT NULL DEFAULT '',
     public_client_id TEXT NOT NULL UNIQUE,
     display_name TEXT NOT NULL,
     platform TEXT NOT NULL,
@@ -1357,6 +1446,7 @@ const STORE_SCHEMA_COLUMNS: &[(&str, &str, &[&str])] = &[
         "PRAGMA table_info(device_identity)",
         &[
             "device_id",
+            "client_node_id",
             "public_client_id",
             "display_name",
             "platform",

@@ -15,15 +15,21 @@
 //! 2. **Bounded delivery.** Each exchange takes at most
 //!    [`DaemonConfig::max_frames_per_exchange`] deliverable frames from the
 //!    durable delivery cursor; remainders page through later exchanges.
+//!    Empty batches are never sent: the endpoint rejects them, so an idle
+//!    daemon waits for the heartbeat cadence instead of polling.
 //! 3. **Acknowledgement.** The response's `ackSequence` is persisted through
 //!    the outbox state machine and the confirmed prefix is compacted.
-//! 4. **Gap replay.** A `gap` response moves the delivery cursor back to
-//!    `replayFromSequence - 1`, so the next exchange re-delivers from there.
-//! 5. **Reacquire.** A `reacquire_required` response means the server
-//!    superseded this instance: the daemon rebuilds its session by
-//!    re-announcing `client.hello` under the same stable identity while the
-//!    durable outbox stays intact (plan section 18.3 reconciliation itself
-//!    is owned by a later lane).
+//! 4. **Gap replay.** A response carrying `replayFromSequence` moves the
+//!    delivery cursor back to `replayFromSequence - 1`, so the next exchange
+//!    re-delivers from there.
+//! 5. **Enrollment adoption.** The enrollment exchange response carries the
+//!    server-issued identity (`cnd_` `clientNodeId`, `publicClientId`, the
+//!    one-time Device Credential material, and the requested heartbeat
+//!    interval). The daemon backfills the persisted identity
+//!    ([`adopt_enrollment`](crate::identity::adopt_enrollment)), re-keys the
+//!    durable outbox stream onto the assigned node at the sequence the
+//!    server credited, and presents the issued material as the bearer
+//!    credential of every later exchange.
 //! 6. **Backoff.** Transport failures, malformed responses, and protocol
 //!    violations double the exchange backoff from
 //!    [`DaemonConfig::initial_backoff`] up to
@@ -33,18 +39,20 @@
 //!    observed. Shutdown never discards taken frames: frames leave the
 //!    durable outbox only when their acknowledgement is persisted.
 //!
-//! Enrollment: when the durable `server_profile` row for the configured
-//! profile is missing, the daemon enqueues `client.enroll` first and waits
-//! for the `client.enrollment_accepted` downlink frame (re-polling at
-//! [`DaemonConfig::enroll_poll_interval`]) before announcing hello. The
-//! accepted payload must name this device's `publicClientId`; acceptance is
-//! persisted as the server profile row and its heartbeat interval is
-//! adopted.
+//! Restart semantics: the durable identity decides the phase. Before the
+//! enrollment is adopted the daemon sends `client.enroll` (once — the
+//! durable enroll frame is redelivered, never re-enqueued) under the local
+//! placeholder node id; after adoption the daemon is enrolled, announces
+//! `client.hello` for the new launch instance as the first new frame, and
+//! the server's instance guard keeps accepting the surviving frames of the
+//! previous instance until the hello takes the instance over mid-batch.
 //!
-//! The [`ExchangeRequest`] / [`ExchangeResponse`] bodies here are this
-//! adapter's projection of the exchange transport; the canonical HTTP wire
-//! contract for the endpoint is owned by the later server-endpoint lane and
-//! must replace these shapes without touching the state machine.
+//! The [`ExchangeRequest`] / [`ExchangeResponse`] bodies are the endpoint's
+//! canonical wire contract: the request carries `{schemaVersion, frames[],
+//! ackSequence}`, the response carries `{schemaVersion, ackSequence,
+//! replayFromSequence?, frames[], enrollment?}`. The HTTP implementation
+//! lives behind [`ExchangeTransport`] and is injectable; the crate ships a
+//! dependency-free std TCP implementation in [`crate::http`].
 
 use std::fmt;
 use std::sync::Arc;
@@ -68,9 +76,10 @@ use winwincode_client_port::messages::{
     ServerEnrollmentAcceptedPayload, ServerToClientEnvelope, ServerToClientMessage,
 };
 
-use crate::identity::IdentityRecord;
+use crate::identity::{IdentityRecord, IssuedEnrollment, adopt_enrollment};
 use crate::store::{
-    ClientInboxCursorUpdate, DeviceStore, DeviceStoreError, ServerProfileRecord, envelope_kind,
+    ClientInboxCursorUpdate, DeviceStore, DeviceStoreError, DeviceStoreErrorKind,
+    ServerProfileRecord, envelope_kind,
 };
 
 /// Longest slice the run loop sleeps without re-reading the shutdown flag.
@@ -108,9 +117,11 @@ impl std::error::Error for ExchangeTransportError {}
 
 /// The network boundary of the exchange loop.
 ///
-/// The HTTP implementation for `POST /internal/v1/client/exchange` is owned
-/// by the later server-endpoint lane; tests and embedders supply their own
-/// implementations (the daemon itself only ever sees bytes).
+/// The daemon composes one implementation per session and hands it the
+/// encoded canonical request body together with the bearer credential to
+/// present (`None` before the enrollment issued one). Tests and embedders
+/// supply their own implementations; the crate ships the minimal std HTTP
+/// implementation [`crate::HttpExchangeTransport`].
 pub trait ExchangeTransport: Send + Sync {
     /// Sends one encoded exchange request and returns the encoded response.
     ///
@@ -119,66 +130,81 @@ pub trait ExchangeTransport: Send + Sync {
     /// Returns a transport failure when the request cannot be delivered or
     /// no response can be received. The daemon answers every failure with
     /// exponential backoff and re-delivers the same durable frames.
-    fn exchange(&self, request_bytes: &[u8]) -> Result<Vec<u8>, ExchangeTransportError>;
+    fn exchange(
+        &self,
+        credential: Option<&str>,
+        request_bytes: &[u8],
+    ) -> Result<Vec<u8>, ExchangeTransportError>;
 }
 
-/// Adapter projection of one exchange request body.
-///
-/// Carries a bounded batch of client-to-server frames (each value is one
-/// serialized `ClientToServerEnvelope`) plus this client's contiguous
-/// acknowledgement of the server-to-client stream.
+/// Canonical exchange request body: a bounded batch of client-to-server
+/// frames (each value is one serialized `ClientToServerEnvelope`) plus this
+/// client's contiguous acknowledgement of the server-to-client stream. The
+/// routing identity rides inside each frame envelope.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExchangeRequest {
     /// Wire contract schema version (`winwincode/v1`).
     #[serde(rename = "schemaVersion")]
     pub schema_version: String,
-    /// Stable public client identity.
-    #[serde(rename = "clientNodeId")]
-    pub client_node_id: String,
-    /// This process launch's instance identity.
-    #[serde(rename = "clientInstanceId")]
-    pub client_instance_id: String,
+    /// The bounded client-to-server frame batch.
+    pub frames: Vec<serde_json::Value>,
     /// Highest server-to-client sequence this client consecutively accepted.
     #[serde(rename = "ackSequence")]
     pub ack_sequence: u64,
-    /// The bounded client-to-server frame batch.
-    pub frames: Vec<serde_json::Value>,
 }
 
-/// Fixed contract status of one exchange batch (plan section "重试与恢复的
-/// 固定结果").
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ExchangeBatchStatus {
-    /// The server consecutively accepted the batch through `ackSequence`.
-    Accepted,
-    /// The server is missing frames; it answered `replayFromSequence`.
-    Gap,
-    /// The server superseded the sending instance; the session must rebuild.
-    ReacquireRequired,
+/// The one-time enrollment issuance carried only by the enrollment exchange
+/// response. The raw credential material crosses the transport exactly once
+/// and never enters a frame payload.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnrollmentIssuance {
+    /// Server-assigned canonical `clientNodeId` (`cnd_` identity).
+    #[serde(rename = "clientNodeId")]
+    pub client_node_id: String,
+    /// Server-assigned public `publicClientId`.
+    #[serde(rename = "publicClientId")]
+    pub public_client_id: String,
+    /// Raw Device Credential material as lowercase hex of the 32 secret
+    /// bytes; the server persists only `deviceCredentialDigest`.
+    #[serde(rename = "deviceCredential")]
+    pub device_credential: String,
+    /// The persisted `sha256:` digest of the issued material.
+    #[serde(rename = "deviceCredentialDigest")]
+    pub device_credential_digest: String,
+    /// Heartbeat interval the server profile asks this device to use.
+    #[serde(rename = "heartbeatIntervalMs")]
+    pub heartbeat_interval_ms: u32,
+    /// Server timestamp the device should clock-drift against (RFC 3339).
+    #[serde(rename = "serverTime")]
+    pub server_time: String,
+    /// First sequence of the server-to-client stream this device continues
+    /// at.
+    #[serde(rename = "downlinkFromSequence")]
+    pub downlink_from_sequence: u64,
 }
 
-/// Adapter projection of one exchange response body.
-///
-/// Carries the server's acknowledgement of the client batch (with the gap
-/// replay hint when present) plus a bounded batch of server-to-client
-/// frames (each value is one serialized `ServerToClientEnvelope`).
+/// Canonical exchange response body: the server's acknowledgement of the
+/// client batch (with the gap replay hint when present) plus a bounded
+/// server-to-client frame batch and — only on the exchange that accepted a
+/// fresh enrollment — the issued Device Credential material.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExchangeResponse {
     /// Wire contract schema version (`winwincode/v1`).
     #[serde(rename = "schemaVersion")]
     pub schema_version: String,
-    /// Fixed contract status of the request batch.
-    pub status: ExchangeBatchStatus,
     /// Highest client-to-server sequence the server consecutively accepted.
     #[serde(rename = "ackSequence")]
     pub ack_sequence: u64,
-    /// First missing sequence when the status is [`ExchangeBatchStatus::Gap`].
+    /// First missing client-to-server sequence; the receiving cursor stays
+    /// at `ackSequence` and the client must replay from here.
     #[serde(rename = "replayFromSequence", default)]
     pub replay_from_sequence: Option<u64>,
     /// The bounded server-to-client frame batch.
     #[serde(default)]
     pub frames: Vec<serde_json::Value>,
+    /// The one-time enrollment issuance on the accepting exchange.
+    #[serde(default)]
+    pub enrollment: Option<EnrollmentIssuance>,
 }
 
 /// Static configuration of one daemon session.
@@ -201,8 +227,8 @@ pub struct DaemonConfig {
     /// Idle cadence for `client.heartbeat`; the enrollment acceptance may
     /// override it with the server-requested interval.
     pub heartbeat_interval: Duration,
-    /// Cadence for empty exchanges while waiting for
-    /// `client.enrollment_accepted`.
+    /// Cadence for the enrollment wait while no deliverable enroll frame
+    /// exists (the endpoint rejects empty batches, so the wait never sends).
     pub enroll_poll_interval: Duration,
     /// Maximum client-to-server frames per exchange batch.
     pub max_frames_per_exchange: usize,
@@ -251,15 +277,9 @@ pub enum DaemonError {
     /// The durable outbox violates its invariants; recovery is refused
     /// (`缺失即按损坏状态拒绝恢复`).
     CorruptOutbox(OutboxStateError),
-    /// A durable-state invariant the daemon itself violated.
+    /// A durable-state invariant the daemon itself violated, or an
+    /// enrollment issuance that contradicts the durable identity.
     Protocol(String),
-    /// The server accepted enrollment under a foreign `publicClientId`.
-    IdentityMismatch {
-        /// This device's stable public client id.
-        local: String,
-        /// The id the server reported.
-        reported: String,
-    },
 }
 
 impl fmt::Display for DaemonError {
@@ -273,10 +293,6 @@ impl fmt::Display for DaemonError {
             Self::Protocol(message) => {
                 write!(formatter, "device daemon protocol failure: {message}")
             }
-            Self::IdentityMismatch { local, reported } => write!(
-                formatter,
-                "server enrollment names publicClientId {reported} but this device is {local}"
-            ),
         }
     }
 }
@@ -312,8 +328,6 @@ pub struct DaemonStatus {
     pub unhandled_downlink_commands: u64,
     /// Gap replays performed.
     pub replays: u64,
-    /// Reacquire rebuilds performed.
-    pub reacquires: u64,
     /// Backoff applied to the next exchange attempt.
     pub current_backoff: Duration,
     /// Reason of the most recent retriable failure.
@@ -344,12 +358,6 @@ pub enum TickOutcome {
         /// Failure reason.
         reason: String,
     },
-    /// The server demanded an instance rebuild; hello is re-announced after
-    /// the cooldown.
-    Reacquiring {
-        /// Cooldown before the re-announcement exchange.
-        reannounce_in: Duration,
-    },
 }
 
 /// The Device Client daemon: one persistent exchange loop over one durable
@@ -360,9 +368,11 @@ pub struct DeviceDaemon {
     transport: Arc<dyn ExchangeTransport>,
     codec: FrameCodec,
     session: OutboxSession,
+    device_id: String,
     node_id: String,
     instance_id: String,
     enroll_idempotency_key: String,
+    credential: Option<String>,
     enrolled: bool,
     enroll_frame_pending: bool,
     hello_announced: bool,
@@ -379,31 +389,46 @@ impl DeviceDaemon {
     /// Starts one daemon session over an open store and an injected
     /// transport.
     ///
-    /// Restores the delivery state from the durable outbox, restores the
-    /// server-to-client acknowledgement cursor from the durable inbox
-    /// cursor, and migrates frames left pending by previous instances of
-    /// this device into the current launch's stream so a restart (which
-    /// always rotates `clientInstanceId`) never loses a frame.
+    /// Restores the phase from the durable identity: an adopted enrollment
+    /// (`clientNodeId` persisted) resumes enrolled with the issued bearer
+    /// credential, a fresh identity enrolls under the local placeholder node
+    /// id. The server-to-client acknowledgement cursor restores from the
+    /// durable inbox cursor. Pending frames keep their original stream
+    /// sequence, message id, and launch instance — the server accepts them
+    /// as the still-current instance and the announcement hello of this
+    /// launch takes the instance over mid-batch.
     ///
     /// # Errors
     ///
     /// Returns [`DaemonError::Config`] for an invalid configuration,
     /// [`DaemonError::Store`] for store failures, and
-    /// [`DaemonError::Protocol`] when a persisted frame cannot be migrated.
+    /// [`DaemonError::Protocol`] when durable state is inconsistent.
     pub fn start(
         config: DaemonConfig,
-        mut store: DeviceStore,
+        store: DeviceStore,
         transport: Arc<dyn ExchangeTransport>,
         identity: &IdentityRecord,
     ) -> Result<Self, DaemonError> {
         validate_config(&config)?;
-        let node_id = identity.identity().public_client_id().to_owned();
+        let device_id = identity.identity().device_id().to_owned();
+        let enrolled_node_id = identity.identity().client_node_id().to_owned();
+        let enrolled = !enrolled_node_id.is_empty();
+        let node_id = if enrolled {
+            enrolled_node_id
+        } else {
+            device_id.clone()
+        };
         let instance_id = identity.current_instance_id().to_owned();
+        let mut store = store;
         store
             .bind_outbox_stream(&node_id, &instance_id)
             .map_err(DaemonError::Store)?;
-        let enroll_idempotency_key =
-            format!("enroll-{}-{instance_id}", identity.identity().device_id());
+        let credential = if enrolled {
+            Some(identity.credential().material_hex())
+        } else {
+            None
+        };
+        let enroll_idempotency_key = format!("enroll-{device_id}-{instance_id}");
         let heartbeat_interval = config.heartbeat_interval;
         let mut daemon = Self {
             config,
@@ -411,10 +436,12 @@ impl DeviceDaemon {
             transport,
             codec: FrameCodec::default(),
             session: OutboxSession::new(),
+            device_id,
             node_id,
             instance_id,
             enroll_idempotency_key,
-            enrolled: false,
+            credential,
+            enrolled,
             enroll_frame_pending: false,
             hello_announced: false,
             delivery_cursor: 0,
@@ -423,10 +450,41 @@ impl DeviceDaemon {
             next_heartbeat_at: Instant::now() + heartbeat_interval,
             next_attempt_at: Instant::now(),
             consecutive_failures: 0,
-            status: DaemonStatus::default(),
+            status: DaemonStatus {
+                enrolled,
+                ..DaemonStatus::default()
+            },
         };
+        if !daemon.enrolled {
+            // The durable enroll frame is redelivered as-is; never enqueue a
+            // second one (`client.enroll` must stay the first stream frame).
+            daemon.enroll_frame_pending = daemon
+                .store
+                .pending_outbox_envelopes()?
+                .iter()
+                .any(|entry| entry.kind == "client.enroll");
+        }
+        if daemon.enrolled
+            && daemon
+                .store
+                .server_profile(&daemon.config.server_profile_id)?
+                .is_none()
+        {
+            // Crash window between the identity adoption and the profile
+            // write: heal the profile from the configuration.
+            let stamp = now_rfc3339();
+            daemon
+                .store
+                .upsert_server_profile(&ServerProfileRecord {
+                    server_profile_id: daemon.config.server_profile_id.clone(),
+                    base_url: daemon.config.base_url.clone(),
+                    display_name: daemon.config.server_display_name.clone(),
+                    created_at: stamp.clone(),
+                    last_connected_at: Some(stamp),
+                })
+                .map_err(DaemonError::Store)?;
+        }
         daemon.restore_downlink_cursor()?;
-        daemon.migrate_previous_instance_frames()?;
         Ok(daemon)
     }
 
@@ -436,7 +494,14 @@ impl DeviceDaemon {
         &self.status
     }
 
-    /// This device's stable public client id (`clientNodeId`).
+    /// This device's stable local device id.
+    #[must_use]
+    pub fn device_id(&self) -> &str {
+        &self.device_id
+    }
+
+    /// The exchange routing node id: the server-assigned `clientNodeId`
+    /// after enrollment, the local placeholder before it.
     #[must_use]
     pub fn client_node_id(&self) -> &str {
         &self.node_id
@@ -520,7 +585,7 @@ impl DeviceDaemon {
     /// # Errors
     ///
     /// Returns the first fatal [`DaemonError`] (store failure, corrupt
-    /// outbox, enrollment identity mismatch).
+    /// outbox, enrollment identity contradiction).
     pub fn run(&mut self, shutdown: &AtomicBool) -> Result<DaemonStatus, DaemonError> {
         while !shutdown.load(Ordering::Relaxed) {
             let outcome = self.tick(Instant::now())?;
@@ -529,7 +594,6 @@ impl DeviceDaemon {
                 | TickOutcome::Retrying {
                     after: ready_in, ..
                 } => ready_in,
-                TickOutcome::Reacquiring { reannounce_in } => reannounce_in,
                 TickOutcome::Exchanged { .. } => Duration::ZERO,
             };
             Self::sleep_interruptibly(ready_in, shutdown);
@@ -567,20 +631,25 @@ impl DeviceDaemon {
                 )));
             }
         };
-        if batch.frames.is_empty() && self.enrolled {
-            // Steady state with nothing pending: the heartbeat cadence owns
-            // the next exchange. While enrollment is pending, fall through to
-            // an empty poll exchange so the server can deliver the
-            // enrollment acceptance downlink.
-            return Ok(TickOutcome::Waiting {
-                ready_in: self.idle_ready_in(now),
-            });
+        if batch.frames.is_empty() {
+            // The endpoint rejects empty batches: an idle enrolled daemon
+            // waits for the heartbeat cadence, and an enrollment wait paces
+            // its next poll without sending.
+            let ready_in = if self.enrolled {
+                self.idle_ready_in(now)
+            } else {
+                self.config.enroll_poll_interval
+            };
+            return Ok(TickOutcome::Waiting { ready_in });
         }
         self.status.exchanges_started += 1;
         let request = self.build_request(&batch)?;
         let request_bytes = serde_json::to_vec(&request)
             .map_err(|error| DaemonError::Protocol(format!("request encoding failed: {error}")))?;
-        let response_bytes = match self.transport.exchange(&request_bytes) {
+        let response_bytes = match self
+            .transport
+            .exchange(self.credential.as_deref(), &request_bytes)
+        {
             Ok(bytes) => bytes,
             Err(error) => {
                 let reason = format!("exchange transport failed: {}", error.message());
@@ -605,10 +674,10 @@ impl DeviceDaemon {
             self.register_failure(now, reason);
             return Ok(self.retry_outcome());
         }
-        match response.status {
-            ExchangeBatchStatus::Accepted => self.apply_accepted(&response, &batch, now),
-            ExchangeBatchStatus::Gap => self.apply_gap(&response, &batch, now),
-            ExchangeBatchStatus::ReacquireRequired => Ok(self.apply_reacquire(now)),
+        if let Some(replay_from) = response.replay_from_sequence {
+            self.apply_gap(&response, replay_from, &batch, now)
+        } else {
+            self.apply_accepted(&response, &batch, now)
         }
     }
 
@@ -673,10 +742,8 @@ impl DeviceDaemon {
         }
         Ok(ExchangeRequest {
             schema_version: CLIENT_CONTROL_PORT_SCHEMA_VERSION.to_owned(),
-            client_node_id: self.node_id.clone(),
-            client_instance_id: self.instance_id.clone(),
-            ack_sequence: self.downlink.ack_sequence(),
             frames: values,
+            ack_sequence: self.downlink.ack_sequence(),
         })
     }
 
@@ -710,22 +777,18 @@ impl DeviceDaemon {
         self.status.exchanges_succeeded += 1;
         self.reset_backoff();
 
-        let downlink_frames = match self.ingest_downlink(&response.frames) {
-            Ok(count) => count,
-            Err(DownlinkFailure::Retriable(reason)) => {
-                // The client acknowledgement was already persisted; the
-                // offending downlink batch is simply refused and the server
-                // replays it after our next ackSequence report.
-                self.register_failure(now, reason);
-                return Ok(self.retry_outcome());
-            }
-            Err(DownlinkFailure::Fatal(error)) => return Err(error),
-        };
-        if batch.frames.is_empty() && !self.enrolled {
-            // The exchange was an enrollment poll with no frames; pace the
-            // next poll instead of hammering the endpoint.
-            self.next_attempt_at = now + self.config.enroll_poll_interval;
-        }
+        let downlink_frames =
+            match self.ingest_downlink(&response.frames, response.enrollment.as_ref()) {
+                Ok(count) => count,
+                Err(DownlinkFailure::Retriable(reason)) => {
+                    // The client acknowledgement was already persisted; the
+                    // offending downlink batch is simply refused and the server
+                    // replays it after our next ackSequence report.
+                    self.register_failure(now, reason);
+                    return Ok(self.retry_outcome());
+                }
+                Err(DownlinkFailure::Fatal(error)) => return Err(error),
+            };
         Ok(TickOutcome::Exchanged {
             frames_sent: batch.frames.len(),
             acked_through: ack,
@@ -736,14 +799,10 @@ impl DeviceDaemon {
     fn apply_gap(
         &mut self,
         response: &ExchangeResponse,
+        replay_from: u64,
         batch: &OutboxBatch,
         now: Instant,
     ) -> Result<TickOutcome, DaemonError> {
-        let Some(replay_from) = response.replay_from_sequence else {
-            let reason = "gap response without replayFromSequence".to_owned();
-            self.register_failure(now, reason);
-            return Ok(self.retry_outcome());
-        };
         if replay_from == 0 || replay_from > batch.highest_sequence + 1 {
             let reason = format!(
                 "gap replayFromSequence {replay_from} is outside the retained stream \
@@ -753,13 +812,18 @@ impl DeviceDaemon {
             self.register_failure(now, reason);
             return Ok(self.retry_outcome());
         }
+        if response.enrollment.is_some() {
+            let reason = "enrollment issuance on a gapped exchange is not actionable".to_owned();
+            self.register_failure(now, reason);
+            return Ok(self.retry_outcome());
+        }
         // Re-deliver from the first missing frame; confirmed frames above the
         // gap are replayed too and deduplicated by the receiver.
         self.delivery_cursor = replay_from - 1;
         self.status.replays += 1;
         self.status.exchanges_succeeded += 1;
         self.reset_backoff();
-        let downlink_frames = match self.ingest_downlink(&response.frames) {
+        let downlink_frames = match self.ingest_downlink(&response.frames, None) {
             Ok(count) => count,
             Err(DownlinkFailure::Retriable(reason)) => {
                 self.register_failure(now, reason);
@@ -774,26 +838,16 @@ impl DeviceDaemon {
         })
     }
 
-    fn apply_reacquire(&mut self, now: Instant) -> TickOutcome {
-        self.status.reacquires += 1;
-        self.status.exchanges_succeeded += 1;
-        self.reset_backoff();
-        // Instance rebuild: re-announce this instance (client.hello) after a
-        // short cooldown. Durable frames stay queued and are replayed from
-        // the delivery cursor; plan section 18.3 reconciliation belongs to a
-        // later lane.
-        self.hello_announced = false;
-        self.next_attempt_at = now + self.config.initial_backoff;
-        TickOutcome::Reacquiring {
-            reannounce_in: self.config.initial_backoff,
-        }
-    }
-
     /// Ingests the server-to-client batch: validates contiguous sequences,
     /// persists the acknowledgement cursor, and handles the enrollment
     /// response. Other commands are counted for their owning lanes.
-    fn ingest_downlink(&mut self, frames: &[serde_json::Value]) -> Result<usize, DownlinkFailure> {
+    fn ingest_downlink(
+        &mut self,
+        frames: &[serde_json::Value],
+        enrollment: Option<&EnrollmentIssuance>,
+    ) -> Result<usize, DownlinkFailure> {
         let mut accepted = 0_usize;
+        let mut acceptance: Option<ServerEnrollmentAcceptedPayload> = None;
         for value in frames {
             let envelope: ServerToClientEnvelope =
                 decode_downlink_frame(&self.codec, value).map_err(DownlinkFailure::Retriable)?;
@@ -812,8 +866,15 @@ impl DeviceDaemon {
                             updated_at: now_rfc3339(),
                         })
                         .map_err(|error| DownlinkFailure::Fatal(DaemonError::Store(error)))?;
-                    self.handle_downlink_message(envelope.message)
-                        .map_err(DownlinkFailure::Fatal)?;
+                    if let ServerToClientMessage::EnrollmentAccepted(payload) = envelope.message {
+                        acceptance = Some(payload);
+                    } else {
+                        // Worker launch/stop, occupancy, repository, lock,
+                        // and credential commands are owned by later
+                        // device-client lanes; the skeleton records them
+                        // without acting.
+                        self.status.unhandled_downlink_commands += 1;
+                    }
                     accepted += 1;
                 }
                 SequenceVerdict::Duplicate => {}
@@ -833,39 +894,62 @@ impl DeviceDaemon {
                 }
             }
         }
+        if let Some(payload) = acceptance {
+            let Some(issuance) = enrollment else {
+                return Err(DownlinkFailure::Retriable(
+                    "enrollment acceptance arrived without the enrollment issuance".to_owned(),
+                ));
+            };
+            if payload.public_client_id != issuance.public_client_id {
+                return Err(DownlinkFailure::Fatal(DaemonError::Protocol(format!(
+                    "enrollment acceptance names publicClientId {} but the issuance \
+                     carries {}",
+                    payload.public_client_id, issuance.public_client_id
+                ))));
+            }
+            self.accept_enrollment(issuance)
+                .map_err(DownlinkFailure::Fatal)?;
+        } else if enrollment.is_some() {
+            return Err(DownlinkFailure::Retriable(
+                "enrollment issuance arrived without an acceptance frame".to_owned(),
+            ));
+        }
         self.status.downlink_accepted_through = self.downlink.ack_sequence();
         Ok(accepted)
     }
 
-    fn handle_downlink_message(
-        &mut self,
-        message: ServerToClientMessage,
-    ) -> Result<(), DaemonError> {
-        match message {
-            ServerToClientMessage::EnrollmentAccepted(payload) => {
-                self.accept_enrollment(&payload)?;
-            }
-            _ => {
-                // Worker launch/stop, occupancy, repository, lock, and
-                // credential commands are owned by later device-client
-                // lanes; the skeleton records them without acting.
-                self.status.unhandled_downlink_commands += 1;
-            }
-        }
-        Ok(())
-    }
-
-    fn accept_enrollment(
-        &mut self,
-        payload: &ServerEnrollmentAcceptedPayload,
-    ) -> Result<(), DaemonError> {
-        if payload.public_client_id != self.node_id {
-            return Err(DaemonError::IdentityMismatch {
-                local: self.node_id.clone(),
-                reported: payload.public_client_id.clone(),
-            });
-        }
+    /// Adopts the server-issued enrollment: identity backfill, durable
+    /// stream re-key onto the assigned node, bearer credential, server
+    /// profile, and the server-requested heartbeat cadence.
+    fn accept_enrollment(&mut self, issuance: &EnrollmentIssuance) -> Result<(), DaemonError> {
+        let placeholder_node_id = self.node_id.clone();
         let stamp = now_rfc3339();
+        adopt_enrollment(
+            &mut self.store,
+            &self.device_id,
+            &IssuedEnrollment {
+                client_node_id: issuance.client_node_id.clone(),
+                public_client_id: issuance.public_client_id.clone(),
+                credential_material: issuance.device_credential.clone(),
+                credential_digest: issuance.device_credential_digest.clone(),
+            },
+            &stamp,
+        )
+        .map_err(|error| match error.kind() {
+            DeviceStoreErrorKind::InvalidInput => DaemonError::Protocol(format!(
+                "the issued enrollment identity is invalid: {error}"
+            )),
+            _ => DaemonError::Store(error),
+        })?;
+        self.store
+            .adopt_enrolled_stream(&placeholder_node_id, &issuance.client_node_id)
+            .map_err(DaemonError::Store)?;
+        self.node_id.clone_from(&issuance.client_node_id);
+        self.credential = Some(issuance.device_credential.clone());
+        if issuance.heartbeat_interval_ms > 0 {
+            self.heartbeat_interval =
+                Duration::from_millis(u64::from(issuance.heartbeat_interval_ms));
+        }
         self.store
             .upsert_server_profile(&ServerProfileRecord {
                 server_profile_id: self.config.server_profile_id.clone(),
@@ -875,59 +959,11 @@ impl DeviceDaemon {
                 last_connected_at: Some(stamp),
             })
             .map_err(DaemonError::Store)?;
-        if payload.heartbeat_interval_ms > 0 {
-            self.heartbeat_interval =
-                Duration::from_millis(u64::from(payload.heartbeat_interval_ms));
-        }
         self.enrolled = true;
         self.enroll_frame_pending = false;
         self.hello_announced = false;
         self.next_heartbeat_at = Instant::now() + self.heartbeat_interval;
         self.status.enrolled = true;
-        Ok(())
-    }
-
-    /// Re-issues frames left pending by previous instances of this device
-    /// under the current launch instance.
-    ///
-    /// A restart always rotates `clientInstanceId`, and the server's instance
-    /// guard refuses frames of a superseded instance. Each pending row keeps
-    /// its stream sequence and message id — the node stream must stay
-    /// contiguous, and a frame already in flight when the process died must
-    /// stay a duplicate for the receiver's dedup — while the payload is
-    /// rewritten with the current `clientInstanceId`.
-    fn migrate_previous_instance_frames(&mut self) -> Result<(), DaemonError> {
-        let pending = self.store.pending_outbox_envelopes()?;
-        for entry in pending {
-            if entry.client_node_id != self.node_id || entry.client_instance_id == self.instance_id
-            {
-                continue;
-            }
-            let mut envelope: ClientToServerEnvelope = serde_json::from_slice(&entry.payload)
-                .map_err(|error| {
-                    DaemonError::Protocol(format!(
-                        "pending outbox row {} is corrupt: {error}",
-                        entry.message_id
-                    ))
-                })?;
-            if envelope.client_instance_id != entry.client_instance_id
-                || envelope.sequence != entry.envelope_sequence
-            {
-                return Err(DaemonError::Protocol(format!(
-                    "pending outbox row {} disagrees with its encoded envelope",
-                    entry.message_id
-                )));
-            }
-            envelope.client_instance_id.clone_from(&self.instance_id);
-            let payload = serde_json::to_vec(&envelope).map_err(|error| {
-                DaemonError::Protocol(format!(
-                    "pending outbox row {} is not re-encodable: {error}",
-                    entry.message_id
-                ))
-            })?;
-            self.store
-                .reissue_outbox_row(&entry.message_id, &self.instance_id, &payload)?;
-        }
         Ok(())
     }
 

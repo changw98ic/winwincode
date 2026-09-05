@@ -12887,6 +12887,7 @@ dependencies = [
  "winwincode-client-port",
  "winwincode-codex",
  "winwincode-control-plane",
+ "winwincode-device-client",
  "winwincode-domain",
  "winwincode-execution-port",
  "winwincode-local",
