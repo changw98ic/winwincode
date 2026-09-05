@@ -14,13 +14,16 @@
 //!   `winwincode-client-port` exchange traits ([`FrameOutbox`] and
 //!   [`CompactingOutbox`]).
 //! - [`identity`]: first-boot generation and durable persistence of the
-//!   device identity and device credential, including the stable
-//!   `publicClientId` and the fresh-per-launch `clientInstanceId`.
+//!   device identity and device credential, including the fresh-per-launch
+//!   canonical `clientInstanceId` and the server-issued enrollment identity
+//!   adopted after the exchange (`adopt_enrollment`).
 //! - [`daemon`]: the periodic device-client exchange loop
 //!   (`POST /internal/v1/client/exchange`) over an injected transport:
-//!   enrollment, hello announcement, heartbeat reporting, acknowledgement
-//!   advancement, gap replay, reacquire handling, and exponential-backoff
+//!   enrollment adoption, hello announcement, heartbeat reporting,
+//!   acknowledgement advancement, gap replay, and exponential-backoff
 //!   recovery on a plain `std` thread — no async runtime.
+//! - [`http`]: the dependency-free std TCP HTTP/1.1 exchange transport
+//!   implementation of [`daemon::ExchangeTransport`].
 //!
 //! The local database never leaves the device: absolute paths stored in
 //! `repository_path_mapping` (and worker/candidate data directories) are
@@ -37,15 +40,18 @@
 #![allow(clippy::doc_markdown)]
 
 pub mod daemon;
+pub mod http;
 pub mod identity;
 pub mod store;
 
 pub use daemon::{
-    DaemonConfig, DaemonError, DaemonStatus, DeviceDaemon, ExchangeBatchStatus, ExchangeRequest,
+    DaemonConfig, DaemonError, DaemonStatus, DeviceDaemon, EnrollmentIssuance, ExchangeRequest,
     ExchangeResponse, ExchangeTransport, ExchangeTransportError, TickOutcome,
 };
+pub use http::HttpExchangeTransport;
 pub use identity::{
-    DeviceCredential, DeviceIdentity, DeviceIdentitySeed, IdentityRecord, ensure_device_identity,
+    DeviceCredential, DeviceIdentity, DeviceIdentitySeed, IdentityRecord, IssuedEnrollment,
+    adopt_enrollment, ensure_device_identity,
 };
 pub use store::{
     CLIENT_STORE_SCHEMA_VERSION, ClientInboxCursor, ClientInboxCursorUpdate, ClientOutboxEntry,

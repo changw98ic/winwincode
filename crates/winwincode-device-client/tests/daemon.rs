@@ -1,20 +1,22 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! End-to-end daemon exchange-loop scenarios driven by in-memory fake
-//! transports: enrollment, hello, heartbeat, acknowledgement advancement,
-//! exponential backoff after network failures, gap replay, restart recovery
-//! from the durable outbox, and graceful shutdown. Temporary-directory
+//! transports speaking the endpoint's canonical wire contract: enrollment
+//! adoption, hello, heartbeat, acknowledgement advancement, exponential
+//! backoff after network failures, gap replay, restart recovery from the
+//! durable outbox, and graceful shutdown. Temporary-directory
 //! infrastructure mirrors `crates/winwincode-storage/tests/sqlite.rs`.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use winwincode_client_port::domain::{
     ClientArchitecture, ClientCapacityReport, ClientLockState, ClientPlatformTarget, PresenceState,
 };
@@ -24,7 +26,7 @@ use winwincode_client_port::messages::{
 };
 use winwincode_device_client::{
     DaemonConfig, DaemonError, DaemonStatus, DeviceDaemon, DeviceIdentitySeed, DeviceStore,
-    ExchangeBatchStatus, ExchangeRequest, ExchangeResponse, ExchangeTransport,
+    EnrollmentIssuance, ExchangeRequest, ExchangeResponse, ExchangeTransport,
     ExchangeTransportError, IdentityRecord, TickOutcome, ensure_device_identity,
 };
 
@@ -74,6 +76,16 @@ fn daemon_config(name: &str) -> DaemonConfig {
     }
 }
 
+/// A configuration whose heartbeat cadence stays quiet for the whole test:
+/// scenarios that stage exact crash shapes around the enroll/hello exchange
+/// keep the stream deterministic.
+fn quiet_daemon_config(name: &str) -> DaemonConfig {
+    DaemonConfig {
+        heartbeat_interval: Duration::from_hours(12),
+        ..daemon_config(name)
+    }
+}
+
 fn open_identity(root: &Path) -> (DeviceStore, IdentityRecord) {
     let mut store = DeviceStore::open(root).expect("device store should open");
     let identity = ensure_device_identity(&mut store, &seed(), "2026-09-04T00:00:00.000Z")
@@ -91,9 +103,42 @@ fn heartbeat_message(capacity: &ClientCapacityReport) -> ClientToServerMessage {
     })
 }
 
+/// The canonical server-issued enrollment identity the fake endpoint hands
+/// out (`cnd_` + 26 Crockford, 10 public digits, one 32-byte credential).
+const ASSIGNED_NODE: &str = "cnd_A1A1A1A1A1A1A1A1A1A1A1A1A1";
+const ASSIGNED_PUBLIC_CLIENT_ID: &str = "0123456789";
+const ISSUED_SECRET: [u8; 32] = [0xab; 32];
+
+fn issued_credential_hex() -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(ISSUED_SECRET.len() * 2);
+    for byte in ISSUED_SECRET {
+        encoded.push(HEX[usize::from(byte >> 4)] as char);
+        encoded.push(HEX[usize::from(byte & 0x0f)] as char);
+    }
+    encoded
+}
+
+fn issued_credential_digest() -> String {
+    format!("sha256:{:x}", Sha256::digest(ISSUED_SECRET))
+}
+
+fn issued_enrollment() -> EnrollmentIssuance {
+    EnrollmentIssuance {
+        client_node_id: ASSIGNED_NODE.to_owned(),
+        public_client_id: ASSIGNED_PUBLIC_CLIENT_ID.to_owned(),
+        device_credential: issued_credential_hex(),
+        device_credential_digest: issued_credential_digest(),
+        heartbeat_interval_ms: 10,
+        server_time: "2026-09-04T00:00:00.000Z".to_owned(),
+        downlink_from_sequence: 1,
+    }
+}
+
 /// One client-to-server frame the fake server received.
 #[derive(Clone, Debug)]
 struct SimFrame {
+    node: String,
     instance: String,
     sequence: u64,
     kind: String,
@@ -105,35 +150,37 @@ struct ServerState {
     received: Vec<SimFrame>,
     sequences: HashMap<String, BTreeSet<u64>>,
     downlink_next: HashMap<String, u64>,
-    enroll_seen: HashSet<String>,
-    acceptance_issued: HashSet<String>,
+    enroll_node: Option<String>,
+    assigned: bool,
 }
 
-/// In-memory fake of the exchange endpoint: it records every frame,
-/// acknowledges the contiguous sequence prefix, and answers the first
-/// exchanges after a `client.enroll` with a `client.enrollment_accepted`
-/// downlink frame.
+/// In-memory fake of the canonical exchange endpoint: it records every
+/// frame keyed by the frame envelope's `clientNodeId`, acknowledges the
+/// contiguous sequence prefix, and answers the first `client.enroll`
+/// exchange with the assigned identity, the acceptance downlink frame, and
+/// the one-time credential issuance. Like the real endpoint, the assigned
+/// stream is credited with the settled enroll sequence (the enrollment
+/// settlement starts the assigned node's client-to-server stream at 1).
 struct ServerSim {
     state: Mutex<ServerState>,
-    /// Exchanges after the enroll that stay silent before the acceptance.
-    withhold_acceptance: AtomicUsize,
-    /// publicClientId reported by the acceptance instead of the real one.
-    acceptance_client_id_override: Mutex<Option<String>>,
-    /// Exchanges that are processed but answered with a gap (a lost
-    /// response), forcing the client to replay its retained batch.
-    gap_responses_remaining: AtomicUsize,
-    /// The `replayFromSequence` the gap responses carry.
-    gap_replay_from_sequence: AtomicU64,
+    /// The first exchange is answered with a gap instead of settling (a
+    /// lost batch), forcing the client to replay its durable frames.
+    gap_first_exchange: AtomicBool,
+    /// The enrollment issuance names a non-canonical clientNodeId (server
+    /// misbehavior the daemon must refuse fatally).
+    corrupt_issuance: AtomicBool,
+    /// After the enrollment settled once, every later enroll exchange is
+    /// refused like the endpoint's uniform authentication rejection.
+    enrollment_settled: AtomicBool,
 }
 
 impl ServerSim {
     fn new() -> Self {
         Self {
             state: Mutex::new(ServerState::default()),
-            withhold_acceptance: AtomicUsize::new(0),
-            acceptance_client_id_override: Mutex::new(None),
-            gap_responses_remaining: AtomicUsize::new(0),
-            gap_replay_from_sequence: AtomicU64::new(1),
+            gap_first_exchange: AtomicBool::new(false),
+            corrupt_issuance: AtomicBool::new(false),
+            enrollment_settled: AtomicBool::new(false),
         }
     }
 
@@ -152,38 +199,16 @@ impl ServerSim {
             .collect()
     }
 
-    fn respond(
-        status: ExchangeBatchStatus,
-        ack: u64,
-        replay: Option<u64>,
-        frames: Vec<Value>,
-    ) -> Result<Vec<u8>, ExchangeTransportError> {
-        serde_json::to_vec(&ExchangeResponse {
-            schema_version: CLIENT_CONTROL_PORT_SCHEMA_VERSION.to_owned(),
-            status,
-            ack_sequence: ack,
-            replay_from_sequence: replay,
-            frames,
-        })
-        .map_err(|error| ExchangeTransportError::new(format!("fake response encode: {error}")))
-    }
-
-    fn acceptance_frame(&self, node: &str, sequence: u64) -> Value {
-        let public_client_id = self
-            .acceptance_client_id_override
-            .lock()
-            .expect("override lock")
-            .clone()
-            .unwrap_or_else(|| node.to_owned());
+    fn acceptance_frame(node: &str, sequence: u64) -> Value {
         let envelope = ServerToClientEnvelope {
             schema_version: CLIENT_CONTROL_PORT_SCHEMA_VERSION.to_owned(),
             message_id: format!("srv-accept-{sequence}"),
-            client_node_id: "control-plane".to_owned(),
-            client_instance_id: "control-plane".to_owned(),
+            client_node_id: node.to_owned(),
+            client_instance_id: "srv-instance".to_owned(),
             sequence,
             occurred_at: "2026-09-04T00:00:00.000Z".to_owned(),
             message: ServerToClientMessage::EnrollmentAccepted(ServerEnrollmentAcceptedPayload {
-                public_client_id,
+                public_client_id: ASSIGNED_PUBLIC_CLIENT_ID.to_owned(),
                 heartbeat_interval_ms: 10,
                 server_time: "2026-09-04T00:00:00.000Z".to_owned(),
             }),
@@ -202,18 +227,28 @@ impl ServerSim {
         }
         expected - 1
     }
-}
 
-impl ExchangeTransport for ServerSim {
-    fn exchange(&self, request_bytes: &[u8]) -> Result<Vec<u8>, ExchangeTransportError> {
-        let request: ExchangeRequest = serde_json::from_slice(request_bytes).map_err(|error| {
-            ExchangeTransportError::new(format!("fake request decode: {error}"))
-        })?;
+    /// Settles one canonical exchange request like the endpoint.
+    #[allow(clippy::too_many_lines)]
+    fn settle(&self, request: &ExchangeRequest) -> Result<Vec<u8>, ExchangeTransportError> {
         let mut downlink = Vec::new();
+        let mut issuance = None;
+        let mut gap_response = false;
         let ack;
         {
             let mut state = self.state.lock().expect("server sim lock");
-            let node = request.client_node_id.clone();
+            let gap_fired = self
+                .gap_first_exchange
+                .compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok();
+            let Some(first) = request.frames.first() else {
+                return Err(ExchangeTransportError::new("empty batch is invalid"));
+            };
+            let node = first
+                .get("clientNodeId")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+                .to_owned();
             for frame in &request.frames {
                 let kind = frame
                     .get("kind")
@@ -224,57 +259,116 @@ impl ExchangeTransport for ServerSim {
                     .get("sequence")
                     .and_then(Value::as_u64)
                     .unwrap_or_default();
+                let instance = frame
+                    .get("clientInstanceId")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown")
+                    .to_owned();
                 state
                     .sequences
                     .entry(node.clone())
                     .or_default()
                     .insert(sequence);
                 state.received.push(SimFrame {
-                    instance: request.client_instance_id.clone(),
+                    node: node.clone(),
+                    instance,
                     sequence,
                     kind: kind.clone(),
                     frame: frame.clone(),
                 });
-                if kind == "client.enroll" {
-                    state.enroll_seen.insert(node.clone());
+                if kind == "client.enroll" && state.enroll_node.is_none() {
+                    state.enroll_node = Some(node.clone());
                 }
             }
-            // The acceptance rides any exchange once the enroll was seen; the
-            // withhold counter keeps the waiting period going.
-            if state.enroll_seen.contains(&node)
-                && !state.acceptance_issued.contains(&node)
-                && self
-                    .withhold_acceptance
-                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
-                        value.checked_sub(1)
-                    })
-                    .is_err()
-            {
-                let next = state.downlink_next.entry(node.clone()).or_insert(1);
-                let sequence = *next;
-                *next += 1;
-                downlink.push(self.acceptance_frame(&node, sequence));
-                state.acceptance_issued.insert(node.clone());
+            if gap_fired {
+                // The batch was processed but the answer is a gap: the
+                // cursor stays and the client must replay its batch.
+                gap_response = true;
+                ack = 0;
+            } else {
+                // First enroll settles: assign the identity, credit the
+                // assigned stream with the settled enroll sequence, and
+                // deliver the acceptance with the one-time issuance.
+                if let Some(enroll_node) = state.enroll_node.clone()
+                    && !state.assigned
+                {
+                    if self.enrollment_settled.load(Ordering::SeqCst) {
+                        return Err(ExchangeTransportError::new(
+                            "device credential authentication failed",
+                        ));
+                    }
+                    state.assigned = true;
+                    let next = state
+                        .downlink_next
+                        .entry(ASSIGNED_NODE.to_owned())
+                        .or_insert(1);
+                    let sequence = *next;
+                    *next += 1;
+                    downlink.push(Self::acceptance_frame(ASSIGNED_NODE, sequence));
+                    issuance = Some(if self.corrupt_issuance.load(Ordering::SeqCst) {
+                        EnrollmentIssuance {
+                            client_node_id: enroll_node.clone(),
+                            ..issued_enrollment()
+                        }
+                    } else {
+                        issued_enrollment()
+                    });
+                    // The enroll settlement starts the assigned stream at 1.
+                    state
+                        .sequences
+                        .entry(ASSIGNED_NODE.to_owned())
+                        .or_default()
+                        .insert(1);
+                }
+                ack = Self::contiguous_ack(&state, &node);
             }
-            ack = Self::contiguous_ack(&state, &node);
         }
-        // A configured lost response: the batch was processed, but the client
-        // receives a gap and must replay from the hint.
-        if self
-            .gap_responses_remaining
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
-                value.checked_sub(1)
-            })
-            .is_ok()
-        {
-            return Self::respond(
-                ExchangeBatchStatus::Gap,
-                0,
-                Some(self.gap_replay_from_sequence.load(Ordering::SeqCst)),
-                downlink,
-            );
+        let response = ExchangeResponse {
+            schema_version: CLIENT_CONTROL_PORT_SCHEMA_VERSION.to_owned(),
+            ack_sequence: ack,
+            replay_from_sequence: gap_response.then_some(1),
+            frames: downlink,
+            enrollment: issuance,
+        };
+        serde_json::to_vec(&response)
+            .map_err(|error| ExchangeTransportError::new(format!("fake response encode: {error}")))
+    }
+}
+
+impl ExchangeTransport for ServerSim {
+    fn exchange(
+        &self,
+        _credential: Option<&str>,
+        request_bytes: &[u8],
+    ) -> Result<Vec<u8>, ExchangeTransportError> {
+        let request: ExchangeRequest = serde_json::from_slice(request_bytes).map_err(|error| {
+            ExchangeTransportError::new(format!("fake request decode: {error}"))
+        })?;
+        self.settle(&request)
+    }
+}
+
+/// Fake transport whose first exchange is processed by the endpoint fake but
+/// whose response is lost in transit — the worst enrollment case, because
+/// the credential material crossed a transport that never delivered it.
+struct LostFirstResponseTransport {
+    inner: Arc<ServerSim>,
+    first_exchange_done: AtomicBool,
+}
+
+impl ExchangeTransport for LostFirstResponseTransport {
+    fn exchange(
+        &self,
+        credential: Option<&str>,
+        request_bytes: &[u8],
+    ) -> Result<Vec<u8>, ExchangeTransportError> {
+        if !self.first_exchange_done.swap(true, Ordering::SeqCst) {
+            let _ = self.inner.exchange(credential, request_bytes);
+            return Err(ExchangeTransportError::new(
+                "connection reset before the response arrived",
+            ));
         }
-        Self::respond(ExchangeBatchStatus::Accepted, ack, None, downlink)
+        self.inner.exchange(credential, request_bytes)
     }
 }
 
@@ -286,28 +380,37 @@ struct FlakyTransport {
 }
 
 impl ExchangeTransport for FlakyTransport {
-    fn exchange(&self, request_bytes: &[u8]) -> Result<Vec<u8>, ExchangeTransportError> {
+    fn exchange(
+        &self,
+        credential: Option<&str>,
+        request_bytes: &[u8],
+    ) -> Result<Vec<u8>, ExchangeTransportError> {
         if self.failures_remaining.load(Ordering::SeqCst) > 0 {
             self.failures_remaining.fetch_sub(1, Ordering::SeqCst);
             return Err(ExchangeTransportError::new("connection refused"));
         }
-        self.inner.exchange(request_bytes)
+        self.inner.exchange(credential, request_bytes)
     }
 }
 
-/// Fake transport whose first exchange blocks until the test releases it and
-/// then completes against the endpoint fake: the frame is "taken" (in
-/// flight) while the test shuts the daemon down.
-struct BlockingTransport {
+/// Fake transport whose next exchange blocks once the test arms it: the
+/// frame is "taken" (in flight) while the test shuts the daemon down.
+struct ArmedBlockingTransport {
     inner: Arc<ServerSim>,
-    started: Arc<(Mutex<bool>, Condvar)>,
-    release: Arc<(Mutex<bool>, Condvar)>,
-    first_exchange_done: AtomicBool,
+    armed: AtomicBool,
+    started: Arc<(Mutex<bool>, std::sync::Condvar)>,
+    release: Arc<(Mutex<bool>, std::sync::Condvar)>,
+    blocked_once: AtomicBool,
 }
 
-impl ExchangeTransport for BlockingTransport {
-    fn exchange(&self, request_bytes: &[u8]) -> Result<Vec<u8>, ExchangeTransportError> {
-        let blocked = !self.first_exchange_done.swap(true, Ordering::SeqCst);
+impl ExchangeTransport for ArmedBlockingTransport {
+    fn exchange(
+        &self,
+        credential: Option<&str>,
+        request_bytes: &[u8],
+    ) -> Result<Vec<u8>, ExchangeTransportError> {
+        let blocked =
+            self.armed.load(Ordering::SeqCst) && !self.blocked_once.swap(true, Ordering::SeqCst);
         if blocked {
             {
                 let (mutex, condvar) = &*self.started;
@@ -321,7 +424,7 @@ impl ExchangeTransport for BlockingTransport {
                 flag = condvar.wait(flag).expect("release wait");
             }
         }
-        self.inner.exchange(request_bytes)
+        self.inner.exchange(credential, request_bytes)
     }
 }
 
@@ -339,22 +442,41 @@ fn drive(daemon: &mut DeviceDaemon, shutdown: &AtomicBool, max_ticks: usize) {
                 let ready_in = match outcome {
                     TickOutcome::Waiting { ready_in } => ready_in,
                     TickOutcome::Retrying { after, .. } => after,
-                    _ => unreachable!("matched above"),
+                    TickOutcome::Exchanged { .. } => unreachable!("matched above"),
                 };
                 thread::sleep(ready_in.min(DRIVE_SLEEP_CAP).max(Duration::from_millis(1)));
             }
-            Ok(TickOutcome::Reacquiring { reannounce_in }) => {
-                thread::sleep(
-                    reannounce_in
-                        .min(DRIVE_SLEEP_CAP)
-                        .max(Duration::from_millis(1)),
-                );
-            }
             Ok(TickOutcome::Exchanged { .. }) => thread::sleep(Duration::from_millis(2)),
-            Err(DaemonError::IdentityMismatch { .. }) => return,
             Err(error) => panic!("daemon tick failed fatally: {error:?}"),
         }
     }
+}
+
+/// Drives the loop until the enrollment settled, the announcement hello was
+/// exchanged, and every durable frame was delivered (the quiet cadence keeps
+/// the stream empty afterwards).
+fn drive_until_enrolled_and_settled(daemon: &mut DeviceDaemon) {
+    for _ in 0..200 {
+        if daemon.is_enrolled() && daemon.status().frames_sent >= 2 {
+            let snapshot = daemon.outbox_snapshot().expect("outbox snapshot");
+            if snapshot.frames.is_empty() && snapshot.ack_sequence == snapshot.highest_sequence {
+                return;
+            }
+        }
+        match daemon.tick(Instant::now()) {
+            Ok(outcome @ (TickOutcome::Waiting { .. } | TickOutcome::Retrying { .. })) => {
+                let ready_in = match outcome {
+                    TickOutcome::Waiting { ready_in } => ready_in,
+                    TickOutcome::Retrying { after, .. } => after,
+                    TickOutcome::Exchanged { .. } => unreachable!("matched above"),
+                };
+                thread::sleep(ready_in.min(DRIVE_SLEEP_CAP).max(Duration::from_millis(1)));
+            }
+            Ok(TickOutcome::Exchanged { .. }) => thread::sleep(Duration::from_millis(2)),
+            Err(error) => panic!("daemon tick failed fatally: {error:?}"),
+        }
+    }
+    panic!("the daemon never reached the enrolled, settled state");
 }
 
 fn assert_fully_exchanged(daemon: &mut DeviceDaemon) {
@@ -377,29 +499,45 @@ fn enroll_hello_heartbeat_and_ack_advance_end_to_end() {
     let (store, identity) = open_identity(&root);
     let mut daemon =
         DeviceDaemon::start(config.clone(), store, sim.clone(), &identity).expect("daemon start");
+    assert!(!daemon.is_enrolled());
+    assert_eq!(
+        daemon.client_node_id(),
+        identity.identity().device_id(),
+        "the enrollment rides the local placeholder node id"
+    );
 
     drive(&mut daemon, &AtomicBool::new(false), 60);
 
     let status: DaemonStatus = daemon.status().clone();
     assert!(daemon.is_enrolled(), "the enrollment must be accepted");
     assert!(status.enrolled);
+    assert_eq!(
+        daemon.client_node_id(),
+        ASSIGNED_NODE,
+        "the exchange node id is the server-assigned identity"
+    );
     assert!(
         status.heartbeats_enqueued >= 2,
         "the heartbeat cadence must fire: {status:?}"
     );
 
-    // Wire order: enroll first, hello after acceptance, then heartbeats.
-    let enroll_position = sim
+    // Wire order: enroll first (sequence 1 under the placeholder node), then
+    // the hello at sequence 2 under the assigned node.
+    let all_frames = sim.all_frames();
+    let enroll = sim
         .frames_with_kind("client.enroll")
         .first()
         .expect("the enroll must be sent")
-        .sequence;
-    assert_eq!(enroll_position, 1);
-    let all_frames = sim.all_frames();
+        .clone();
+    assert_eq!(enroll.sequence, 1);
+    assert_eq!(enroll.node, identity.identity().device_id());
     let hello_position = all_frames
         .iter()
         .position(|frame| frame.kind == "client.hello")
         .expect("hello must be sent");
+    let hello = &all_frames[hello_position];
+    assert_eq!(hello.sequence, 2, "the assigned stream continues at 2");
+    assert_eq!(hello.node, ASSIGNED_NODE);
     assert!(
         all_frames[..hello_position]
             .iter()
@@ -408,19 +546,24 @@ fn enroll_hello_heartbeat_and_ack_advance_end_to_end() {
     );
     let heartbeats = sim.frames_with_kind("client.heartbeat");
     assert!(heartbeats.len() >= 2, "{all_frames:?}");
-    let capacity = heartbeats[0]
-        .frame
-        .get("payload")
-        .and_then(|payload| payload.get("capacity"))
-        .cloned()
-        .map(serde_json::from_value::<ClientCapacityReport>)
-        .and_then(Result::ok)
-        .expect("heartbeat capacity report");
+    assert!(
+        heartbeats.iter().all(|frame| frame.node == ASSIGNED_NODE),
+        "post-enrollment frames ride the assigned node: {heartbeats:?}"
+    );
+    let capacity: ClientCapacityReport = serde_json::from_value(
+        heartbeats[0]
+            .frame
+            .get("payload")
+            .and_then(|payload| payload.get("capacity"))
+            .cloned()
+            .expect("heartbeat capacity object"),
+    )
+    .expect("heartbeat capacity report");
     assert_eq!(capacity, config.capacity, "the skeleton capacity rides");
 
     assert_fully_exchanged(&mut daemon);
 
-    // Enrollment is persisted as the server profile row.
+    // The enrollment adoption persisted the server profile.
     let profile = daemon
         .store_mut()
         .server_profile(&config.server_profile_id)
@@ -492,10 +635,9 @@ fn network_errors_back_off_and_recover() {
 fn gap_response_triggers_replay_from_the_hint() {
     let root = temporary_directory("daemon-gap");
     let sim = Arc::new(ServerSim::new());
-    // The first exchange (the enroll batch) is processed but its response is
-    // a gap pointing at sequence 1, so the client must replay the batch.
-    sim.gap_responses_remaining.store(1, Ordering::SeqCst);
-    sim.gap_replay_from_sequence.store(1, Ordering::SeqCst);
+    // The first exchange (the enroll batch) is lost: the response is a gap
+    // pointing at sequence 1, so the client must replay the durable batch.
+    sim.gap_first_exchange.store(true, Ordering::SeqCst);
     let config = daemon_config("gap");
     let (store, identity) = open_identity(&root);
     let mut daemon =
@@ -523,47 +665,83 @@ fn gap_response_triggers_replay_from_the_hint() {
 }
 
 #[test]
-fn enrollment_polls_until_accepted_and_retries_with_backoff() {
-    let root = temporary_directory("daemon-enroll-wait");
+fn a_lost_enrollment_response_never_reenrolls_and_keeps_backing_off() {
+    let root = temporary_directory("daemon-enroll-lost");
     let sim = Arc::new(ServerSim::new());
-    sim.withhold_acceptance.store(3, Ordering::SeqCst);
-    let config = daemon_config("enroll-wait");
+    // The first enroll exchange settles server-side (the identity was
+    // issued) but its response — carrying the one-time credential material —
+    // is lost in transit. Every retry is then refused like the endpoint's
+    // uniform rejection, because a node with a credential never re-enrolls.
+    sim.enrollment_settled.store(true, Ordering::SeqCst);
+    let config = daemon_config("enroll-lost");
     let (store, identity) = open_identity(&root);
+    let transport = Arc::new(LostFirstResponseTransport {
+        inner: sim.clone(),
+        first_exchange_done: AtomicBool::new(false),
+    });
     let mut daemon =
-        DeviceDaemon::start(config.clone(), store, sim.clone(), &identity).expect("daemon start");
+        DeviceDaemon::start(config.clone(), store, transport, &identity).expect("daemon start");
 
-    drive(&mut daemon, &AtomicBool::new(false), 150);
+    drive(&mut daemon, &AtomicBool::new(false), 60);
 
     let status = daemon.status().clone();
     assert!(
-        status.exchanges_started > 3,
-        "the waiting period polls with exchanges: {status:?}"
+        !daemon.is_enrolled(),
+        "the adoption cannot complete: {status:?}"
     );
-    assert!(daemon.is_enrolled(), "acceptance ends the wait: {status:?}");
+    assert!(!status.enrolled, "the adoption cannot complete: {status:?}");
+    assert!(
+        status.consecutive_failures >= 2,
+        "the refusals back off: {status:?}"
+    );
+    assert!(status.last_error.is_some(), "{status:?}");
+    // The durable enroll frame redelivers; no second enroll is ever
+    // enqueued, and the identity stays unadopted.
     let enroll_deliveries = sim.frames_with_kind("client.enroll");
-    assert_eq!(
-        enroll_deliveries.len(),
-        1,
-        "the durable enroll frame is delivered once and acked, never re-enqueued: \
-         {enroll_deliveries:?}"
+    assert!(
+        enroll_deliveries.len() >= 2,
+        "the durable enroll redelivers: {enroll_deliveries:?}"
     );
-    assert_fully_exchanged(&mut daemon);
+    assert!(
+        enroll_deliveries.iter().all(|frame| frame.sequence == 1),
+        "every delivery is the same durable frame: {enroll_deliveries:?}"
+    );
+    let pending = daemon
+        .store_mut()
+        .pending_outbox_envelopes()
+        .expect("pending rows");
+    assert_eq!(
+        pending
+            .iter()
+            .filter(|entry| entry.kind == "client.enroll")
+            .count(),
+        1,
+        "exactly one durable enroll row exists: {pending:?}"
+    );
+    let reloaded = {
+        let mut store = DeviceStore::open(&root).expect("store reopen");
+        let record = ensure_device_identity(&mut store, &seed(), "2026-09-04T00:01:00.000Z")
+            .expect("identity reload");
+        store.close().expect("close");
+        record
+    };
+    assert_eq!(reloaded.identity().client_node_id(), "");
 
     daemon.into_store().close().expect("store close");
     cleanup(&root);
 }
 
 #[test]
-fn enrollment_identity_mismatch_is_fatal() {
-    let root = temporary_directory("daemon-enroll-mismatch");
+fn a_corrupt_enrollment_issuance_is_fatal() {
+    let root = temporary_directory("daemon-enroll-corrupt");
     let sim = Arc::new(ServerSim::new());
-    *sim.acceptance_client_id_override.lock().expect("override") = Some("9999999999".to_owned());
-    let config = daemon_config("enroll-mismatch");
+    sim.corrupt_issuance.store(true, Ordering::SeqCst);
+    let config = daemon_config("enroll-corrupt");
     let (store, identity) = open_identity(&root);
     let mut daemon =
-        DeviceDaemon::start(config, store, sim.clone(), &identity).expect("daemon start");
+        DeviceDaemon::start(config.clone(), store, sim.clone(), &identity).expect("daemon start");
 
-    let mut mismatch = None;
+    let mut failure = None;
     for _ in 0..20 {
         match daemon.tick(Instant::now()) {
             Ok(
@@ -574,24 +752,20 @@ fn enrollment_identity_mismatch_is_fatal() {
             ) => {
                 thread::sleep(ready_in.min(DRIVE_SLEEP_CAP).max(Duration::from_millis(1)));
             }
-            Ok(TickOutcome::Reacquiring { reannounce_in }) => {
-                thread::sleep(
-                    reannounce_in
-                        .min(DRIVE_SLEEP_CAP)
-                        .max(Duration::from_millis(1)),
-                );
-            }
             Ok(TickOutcome::Exchanged { .. }) => thread::sleep(Duration::from_millis(2)),
-            Err(DaemonError::IdentityMismatch { local, reported }) => {
-                mismatch = Some((local, reported));
+            Err(error @ DaemonError::Protocol(_)) => {
+                failure = Some(error);
                 break;
             }
             Err(other) => panic!("unexpected fatal error: {other:?}"),
         }
     }
-    let (local, reported) = mismatch.expect("the foreign acceptance must fail the daemon");
-    assert_eq!(local, daemon.client_node_id());
-    assert_eq!(reported, "9999999999");
+    let error = failure.expect("the corrupt issuance must fail the daemon fatally");
+    let message = error.to_string();
+    assert!(
+        message.contains("issuance") || message.contains("canonical"),
+        "the failure names the enrollment identity problem: {message}"
+    );
     assert!(!daemon.is_enrolled());
 
     daemon.into_store().close().expect("store close");
@@ -599,27 +773,38 @@ fn enrollment_identity_mismatch_is_fatal() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn restart_recovers_unacked_frames_from_the_persistent_outbox() {
     let root = temporary_directory("daemon-restart");
     let sim = Arc::new(ServerSim::new());
-    let config = daemon_config("restart");
+    let config = quiet_daemon_config("restart");
     let (store, first_identity) = open_identity(&root);
     let mut daemon = DeviceDaemon::start(config.clone(), store, sim.clone(), &first_identity)
         .expect("daemon start");
 
-    // Enqueue three frames but never exchange them: a crash-shaped state.
+    // Enroll and announce hello; the quiet cadence keeps the stream settled.
+    drive_until_enrolled_and_settled(&mut daemon);
+    assert_eq!(daemon.client_node_id(), ASSIGNED_NODE);
+
+    // Enqueue three frames that are never exchanged: a crash-shaped state.
     for _ in 0..3 {
         daemon
             .enqueue(heartbeat_message(&config.capacity))
             .expect("enqueue before crash");
     }
     let snapshot = daemon.outbox_snapshot().expect("snapshot");
-    assert_eq!(snapshot.frames.len(), 3);
-    assert_eq!(snapshot.highest_sequence, 3);
+    assert_eq!(
+        snapshot
+            .frames
+            .iter()
+            .map(|frame| frame.sequence)
+            .collect::<Vec<_>>(),
+        [3, 4, 5]
+    );
     daemon.into_store().close().expect("crash close");
 
     // Restart: a new process launch rotates clientInstanceId, while the
-    // device identity stays stable.
+    // enrolled identity stays stable.
     let (store, second_identity) = {
         let mut store = DeviceStore::open(&root).expect("restarted store");
         let identity = ensure_device_identity(&mut store, &seed(), "2026-09-04T01:00:00.000Z")
@@ -632,9 +817,19 @@ fn restart_recovers_unacked_frames_from_the_persistent_outbox() {
         "device_id must be stable across restarts"
     );
     assert_eq!(
+        second_identity.identity().client_node_id(),
+        ASSIGNED_NODE,
+        "the adopted clientNodeId must be stable across restarts"
+    );
+    assert_eq!(
         second_identity.identity().public_client_id(),
-        first_identity.identity().public_client_id(),
-        "publicClientId must be stable across restarts"
+        ASSIGNED_PUBLIC_CLIENT_ID,
+        "the adopted publicClientId must be stable across restarts"
+    );
+    assert_eq!(
+        second_identity.credential().digest(),
+        issued_credential_digest(),
+        "the issued credential must survive restarts"
     );
     assert_ne!(
         second_identity.current_instance_id(),
@@ -644,26 +839,19 @@ fn restart_recovers_unacked_frames_from_the_persistent_outbox() {
 
     let mut daemon = DeviceDaemon::start(config.clone(), store, sim.clone(), &second_identity)
         .expect("restarted daemon");
-
-    // The pending frames of the superseded instance were re-issued under the
-    // current launch instance with their stream sequences kept: nothing was
-    // lost and the node stream stays contiguous.
     assert_eq!(
         daemon.client_instance_id(),
         second_identity.current_instance_id()
     );
-    let snapshot = daemon.outbox_snapshot().expect("migrated snapshot");
-    assert_eq!(snapshot.frames.len(), 3, "{snapshot:?}");
-    assert_eq!(
-        snapshot
-            .frames
-            .iter()
-            .map(|frame| frame.sequence)
-            .collect::<Vec<_>>(),
-        [1, 2, 3]
+    assert!(
+        daemon.is_enrolled(),
+        "the enrolled phase restores from the durable identity without any exchange"
     );
-    assert_eq!(snapshot.highest_sequence, 3);
-    assert_eq!(snapshot.ack_sequence, 0);
+
+    // The pending frames of the superseded instance keep their stream
+    // sequences and their original launch instance: the server still
+    // accepts them as the current instance, and this launch's announcement
+    // hello takes the instance over right behind them.
     let pending = daemon
         .store_mut()
         .pending_outbox_envelopes()
@@ -672,28 +860,48 @@ fn restart_recovers_unacked_frames_from_the_persistent_outbox() {
     assert!(
         pending
             .iter()
-            .all(|entry| entry.client_instance_id == second_identity.current_instance_id()),
-        "migrated frames carry the current launch instance: {pending:?}"
+            .all(|entry| entry.client_instance_id == first_identity.current_instance_id()),
+        "pending frames keep their original instance: {pending:?}"
     );
 
     drive(&mut daemon, &AtomicBool::new(false), 80);
 
-    let status = daemon.status().clone();
-    assert!(daemon.is_enrolled(), "{status:?}");
     assert_fully_exchanged(&mut daemon);
+    let all_frames = sim.all_frames();
     let heartbeats = sim.frames_with_kind("client.heartbeat");
+    let replayed = &heartbeats[..3];
     assert!(
-        heartbeats.len() >= 3,
-        "the three migrated frames must reach the server: {}",
-        heartbeats.len()
-    );
-    let migrated = &heartbeats[..3];
-    assert!(
-        migrated
+        replayed
             .iter()
-            .all(|frame| frame.sequence <= 3
-                && frame.instance == second_identity.current_instance_id()),
-        "migrated frames replay under the current instance: {migrated:?}"
+            .all(|frame| (3..=5).contains(&frame.sequence)
+                && frame.instance == first_identity.current_instance_id()),
+        "the three durable frames reach the server under their original instance: \
+         {replayed:?}"
+    );
+    let hello = all_frames
+        .iter()
+        .rfind(|frame| frame.kind == "client.hello")
+        .expect("the restarted daemon announces hello");
+    assert_eq!(
+        hello.instance,
+        second_identity.current_instance_id(),
+        "the announcement hello carries the new launch instance"
+    );
+    assert_eq!(
+        hello.sequence,
+        replayed
+            .iter()
+            .map(|frame| frame.sequence)
+            .max()
+            .expect("sequences")
+            + 1,
+        "the hello continues the stream contiguously"
+    );
+    let enroll_deliveries = sim.frames_with_kind("client.enroll");
+    assert_eq!(
+        enroll_deliveries.len(),
+        1,
+        "a restarted enrolled daemon never re-enrolls: {enroll_deliveries:?}"
     );
 
     daemon.into_store().close().expect("restarted store close");
@@ -704,31 +912,37 @@ fn restart_recovers_unacked_frames_from_the_persistent_outbox() {
 fn graceful_shutdown_keeps_taken_frames_durable() {
     let root = temporary_directory("daemon-shutdown");
     let sim = Arc::new(ServerSim::new());
-    let config = daemon_config("shutdown");
+    // One frame per exchange: the armed transport blocks exactly the first
+    // in-flight frame of the shutdown window.
+    let config = DaemonConfig {
+        max_frames_per_exchange: 1,
+        ..quiet_daemon_config("shutdown")
+    };
     let (store, identity) = open_identity(&root);
-    let started = Arc::new((Mutex::new(false), Condvar::new()));
-    let release = Arc::new((Mutex::new(false), Condvar::new()));
-    let transport = Arc::new(BlockingTransport {
+    let started = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+    let release = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+    let transport = Arc::new(ArmedBlockingTransport {
         inner: sim.clone(),
+        armed: AtomicBool::new(false),
         started: started.clone(),
         release: release.clone(),
-        first_exchange_done: AtomicBool::new(false),
+        blocked_once: AtomicBool::new(false),
     });
-    let mut daemon = DeviceDaemon::start(
-        DaemonConfig {
-            max_frames_per_exchange: 1,
-            ..config.clone()
-        },
-        store,
-        transport,
-        &identity,
-    )
-    .expect("daemon start");
+    let mut daemon = DeviceDaemon::start(config.clone(), store, transport.clone(), &identity)
+        .expect("daemon start");
+
+    // Enroll and announce hello; the stream is settled and empty.
+    drive_until_enrolled_and_settled(&mut daemon);
+    assert_eq!(daemon.client_node_id(), ASSIGNED_NODE);
+
+    // Enqueue three frames, then arm the transport and run the loop: the
+    // first frame is taken (in flight) while the test shuts the daemon down.
     for _ in 0..3 {
         daemon
             .enqueue(heartbeat_message(&config.capacity))
             .expect("enqueue");
     }
+    transport.armed.store(true, Ordering::SeqCst);
 
     let shutdown = Arc::new(AtomicBool::new(false));
     thread::scope(|scope| {
@@ -760,19 +974,18 @@ fn graceful_shutdown_keeps_taken_frames_durable() {
         assert!(status.is_ok(), "graceful shutdown must not fail");
     });
 
-    // The in-flight frame (the enroll, sequence 1) was acknowledged and
-    // confirmed; the frames the loop never reached stay durable exactly as
-    // they were taken.
+    // The in-flight frame (sequence 3) was acknowledged and confirmed; the
+    // frames the loop never reached stay durable exactly as they were taken.
     let snapshot = daemon.outbox_snapshot().expect("post-shutdown snapshot");
-    assert_eq!(snapshot.ack_sequence, 1);
-    assert_eq!(snapshot.highest_sequence, 4);
+    assert_eq!(snapshot.ack_sequence, 3);
+    assert_eq!(snapshot.highest_sequence, 5);
     assert_eq!(
         snapshot
             .frames
             .iter()
             .map(|frame| frame.sequence)
             .collect::<Vec<_>>(),
-        [2, 3, 4],
+        [4, 5],
         "unconfirmed frames survive shutdown untouched"
     );
 

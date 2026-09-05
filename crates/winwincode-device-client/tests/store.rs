@@ -55,7 +55,7 @@ fn envelope(message_id: &str, client_instance_id: &str, sequence: u64) -> Client
 
 #[test]
 fn open_migrates_the_full_local_schema_and_round_trips_it() {
-    assert_eq!(winwincode_device_client::CLIENT_STORE_SCHEMA_VERSION, 1);
+    assert_eq!(winwincode_device_client::CLIENT_STORE_SCHEMA_VERSION, 2);
     let (root, mut store) = open_store("schema-round-trip");
     let database_path = store.database_path().to_path_buf();
     let canonical_root = fs::canonicalize(&root).expect("root should canonicalize");
@@ -91,7 +91,7 @@ fn open_migrates_the_full_local_schema_and_round_trips_it() {
     let version: i64 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .expect("schema version should be readable");
-    assert_eq!(version, 1);
+    assert_eq!(version, 2);
     assert_canonical_local_tables(&connection);
     connection.close().expect("inspection close");
     fs::remove_dir_all(root).expect("database directory should be released");
@@ -118,6 +118,7 @@ const CANONICAL_LOCAL_TABLES: &[(&str, &str, &[&str])] = &[
         "PRAGMA table_info(device_identity)",
         &[
             "device_id",
+            "client_node_id",
             "public_client_id",
             "display_name",
             "platform",
@@ -260,16 +261,21 @@ fn startup_rejects_a_database_from_a_newer_schema_version() {
     let (root, store) = open_store("newer-schema");
     let database_path = store.database_path().to_path_buf();
     store.close().expect("store should close");
+    let newer_version = winwincode_device_client::CLIENT_STORE_SCHEMA_VERSION + 1;
     let connection = Connection::open(&database_path).expect("test database should open");
     connection
-        .pragma_update(None, "user_version", 2)
+        .pragma_update(None, "user_version", newer_version)
         .expect("test schema version should be written");
     connection.close().expect("test database should close");
 
     let Err(error) = DeviceStore::open(&root) else {
         panic!("a newer schema must not be silently downgraded");
     };
-    assert!(error.to_string().contains("unsupported schema version 2"));
+    assert!(
+        error
+            .to_string()
+            .contains(&format!("unsupported schema version {newer_version}"))
+    );
     fs::remove_dir_all(root).expect("rejected database should have no open connection");
 }
 
@@ -651,6 +657,36 @@ fn frame_outbox_acknowledgement_compaction_and_cursors_stay_durable() {
     assert_eq!(snapshot.ack_sequence, 1);
     assert_eq!(snapshot.highest_sequence, 2);
     assert_eq!(session.next_sequence(&mut store).expect("next"), 3);
+
+    // The enrollment adoption re-keys the acknowledged prefix onto the
+    // assigned node at the same sequences and rebinds the stream: the next
+    // sequence continues where the assigned stream expects it (the server
+    // credited the acknowledged enroll sequence), and pending placeholder
+    // rows are untouched.
+    store
+        .adopt_enrolled_stream("node_local", "cnd_ASSIGNEDNODE1A1A1A1A1A1")
+        .expect("adopt the enrolled stream");
+    let adopted_snapshot = FrameOutbox::load(&mut store)
+        .expect("adopted load")
+        .expect("the assigned stream has the acknowledged prefix");
+    assert_eq!(adopted_snapshot.ack_sequence, 1);
+    assert_eq!(adopted_snapshot.highest_sequence, 1);
+    assert!(
+        adopted_snapshot.frames.is_empty(),
+        "the acknowledged prefix was copied as confirmed: {adopted_snapshot:?}"
+    );
+    assert_eq!(session.next_sequence(&mut store).expect("next"), 2);
+    let rows = store.pending_outbox_envelopes().expect("all pending rows");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].client_node_id, "node_local");
+    assert_eq!(rows[0].message_id, "msg-two");
+    assert_eq!(rows[0].client_instance_id, "inst-a");
+    let replayed_adoption =
+        store.adopt_enrolled_stream("node_local", "cnd_ASSIGNEDNODE1A1A1A1A1A1");
+    assert!(
+        replayed_adoption.is_err(),
+        "a stream that already has rows is never adopted twice"
+    );
 
     // Another node's rows are never visible to this stream.
     store
