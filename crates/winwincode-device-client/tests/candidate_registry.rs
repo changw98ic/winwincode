@@ -522,9 +522,16 @@ fn the_retain_uplink_stamps_the_frame_with_the_mirrored_lease() {
         "the idempotency key is deterministic per candidate"
     );
     assert_eq!(payload.worker_session_id, SESSION);
+    let expected_receipt_id: String = {
+        let hex: String = COMMIT
+            .chars()
+            .filter(|c| c.is_ascii_hexdigit())
+            .take(25)
+            .collect();
+        format!("lcr_{}G", hex.to_ascii_uppercase())
+    };
     assert_eq!(
-        payload.receipt.local_candidate_receipt_id,
-        format!("lcr_{COMMIT}"),
+        payload.receipt.local_candidate_receipt_id, expected_receipt_id,
         "the receipt id is deterministic per candidate"
     );
     assert_eq!(payload.receipt.candidate_ref, CANDIDATE_REF_NAME);

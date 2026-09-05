@@ -371,7 +371,7 @@ pub fn retain_candidate(
 /// registry row.
 ///
 /// The receipt is derived deterministically from the row (receipt id
-/// `lcr_<candidate id>`, the retention stamps, revision 1), so every report
+/// a canonical `lcr_` receipt id, the retention stamps, revision 1), so every report
 /// of the same candidate encodes byte-identical receipt facts. Only rows in
 /// the `retained` state may be reported — the retained frame reports the
 /// retention event, and progressed lifecycle states belong to the later
@@ -383,6 +383,20 @@ pub fn retain_candidate(
 /// the retained state or with divergent facts,
 /// [`CandidateRegistryErrorKind::NoOccupancyMirror`] when the device holds
 /// no occupancy mirror, and a store failure when the outbox append fails.
+/// Deterministic canonical `lcr_` receipt id for one frozen candidate: the
+/// first 25 uppercase hex characters of the commit plus a G tag (all valid
+/// Crockford symbols, matching the Server ledger's id validator), so every
+/// report of the same candidate reuses one identical receipt id.
+fn deterministic_lcr_id(candidate_id: &str) -> String {
+    let hex: String = candidate_id
+        .chars()
+        .filter(|c| c.is_ascii_hexdigit())
+        .take(25)
+        .map(|c| c.to_ascii_uppercase())
+        .collect();
+    format!("lcr_{hex}G")
+}
+
 pub fn enqueue_candidate_retained(
     daemon: &mut DeviceDaemon,
     record: &CandidateLocalRefRecord,
@@ -404,7 +418,7 @@ pub fn enqueue_candidate_retained(
                 .to_owned(),
         })?;
     let receipt = winwincode_client_port::domain::LocalCandidateReceipt {
-        local_candidate_receipt_id: format!("lcr_{}", record.candidate_id),
+        local_candidate_receipt_id: deterministic_lcr_id(&record.candidate_id),
         candidate_ref: record.candidate_ref.clone(),
         repository_binding_id: record.repository_binding_id.clone(),
         candidate_commit: record.candidate_commit.clone(),

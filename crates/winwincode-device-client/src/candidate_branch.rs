@@ -475,7 +475,7 @@ fn finish_creation(
 /// created branch.
 ///
 /// The receipt is derived deterministically from the durable facts (receipt
-/// id `lar_branch_<candidate id>`, the creation stamp, revision 1, expected
+/// id a canonical `lar_` receipt id, the creation stamp, revision 1, expected
 /// head and resulting commit both the frozen candidate commit), so every
 /// report of the same creation encodes byte-identical receipt facts under
 /// the identical idempotency key — the Control Plane settles the replay as
@@ -486,6 +486,21 @@ fn finish_creation(
 /// Returns [`CandidateBranchErrorKind::NoOccupancyMirror`] when the device
 /// holds no occupancy mirror and a store failure when the outbox append
 /// fails.
+/// Deterministic canonical `lar_` receipt id for one branch-creation
+/// delivery: the first 25 uppercase hex characters of the frozen commit
+/// plus a `G` domain tag (valid Crockford symbols, matching the Server
+/// ledger validator), so repeated reports of the same creation carry one
+/// identical receipt id.
+fn deterministic_lar_id(candidate_id: &str, tag: char) -> String {
+    let hex: String = candidate_id
+        .chars()
+        .filter(|c| c.is_ascii_hexdigit())
+        .take(25)
+        .map(|c| c.to_ascii_uppercase())
+        .collect();
+    format!("lar_{hex}{tag}")
+}
+
 pub fn enqueue_branch_created(
     daemon: &mut DeviceDaemon,
     record: &CandidateLocalRefRecord,
@@ -500,7 +515,7 @@ pub fn enqueue_branch_created(
                 .to_owned(),
         })?;
     let receipt = LocalApplyReceipt {
-        local_apply_receipt_id: format!("lar_branch_{}", record.candidate_id),
+        local_apply_receipt_id: deterministic_lar_id(&record.candidate_id, 'G'),
         candidate_ref: record.candidate_ref.clone(),
         repository_binding_id: record.repository_binding_id.clone(),
         target_branch: durable.branch_name.clone(),

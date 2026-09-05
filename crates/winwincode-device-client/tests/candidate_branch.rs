@@ -488,9 +488,17 @@ fn a_branch_creation_round_trips_without_touching_the_checkout() {
         "the idempotency key is deterministic per candidate"
     );
     let receipt = &payload.receipt;
+    let expected_receipt_id: String = {
+        let hex: String = state
+            .candidate_commit
+            .chars()
+            .filter(|c| c.is_ascii_hexdigit())
+            .take(25)
+            .collect();
+        format!("lar_{}G", hex.to_ascii_uppercase())
+    };
     assert_eq!(
-        receipt.local_apply_receipt_id,
-        format!("lar_branch_{}", state.candidate_commit),
+        receipt.local_apply_receipt_id, expected_receipt_id,
         "the receipt id is deterministic per candidate"
     );
     assert_eq!(

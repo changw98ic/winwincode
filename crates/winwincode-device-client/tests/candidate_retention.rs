@@ -529,9 +529,18 @@ fn a_discard_deletes_the_created_branch_and_stamps_the_discarded_uplink() {
     assert_eq!(frames.len(), 2, "the branch creation and discard frames");
     let (sequence, payload) = &frames[1];
     let receipt = &payload.receipt;
+    let expected_receipt_id: String = {
+        let hex: String = state
+            .candidate_commit
+            .chars()
+            .filter(|c| c.is_ascii_hexdigit())
+            .take(25)
+            .map(|c| c.to_ascii_uppercase())
+            .collect();
+        format!("lar_{}H", hex)
+    };
     assert_eq!(
-        receipt.local_apply_receipt_id,
-        format!("lar_discard_{}", state.candidate_commit),
+        receipt.local_apply_receipt_id, expected_receipt_id,
         "the discard receipt id is deterministic per candidate"
     );
     assert_eq!(

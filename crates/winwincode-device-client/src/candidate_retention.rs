@@ -506,7 +506,7 @@ pub fn discard_candidate(
 /// discarded candidate.
 ///
 /// The receipt is derived deterministically from the registry row and the
-/// durable discard record (receipt id `lar_discard_<candidate id>`, the
+/// durable discard record (receipt id a canonical `lar_` id, the
 /// first discard stamp, revision 1, expected head the frozen candidate
 /// commit, no resulting commit), so every report of the same discard encodes
 /// byte-identical receipt facts under the identical idempotency key — the
@@ -517,6 +517,20 @@ pub fn discard_candidate(
 /// Returns [`CandidateRetentionErrorKind::NoOccupancyMirror`] when the
 /// device holds no occupancy mirror and a store failure when the outbox
 /// append fails.
+/// Deterministic canonical `lar_` receipt id for one discard delivery: the
+/// first 25 uppercase hex characters of the candidate commit plus an `H`
+/// domain tag (distinct from the branch-creation `G` receipt for the same
+/// candidate), so discard replays stay byte-identical.
+fn deterministic_lar_id(candidate_id: &str, tag: char) -> String {
+    let hex: String = candidate_id
+        .chars()
+        .filter(|c| c.is_ascii_hexdigit())
+        .take(25)
+        .map(|c| c.to_ascii_uppercase())
+        .collect();
+    format!("lar_{hex}{tag}")
+}
+
 pub fn enqueue_candidate_discarded(
     daemon: &mut DeviceDaemon,
     record: &CandidateLocalRefRecord,
@@ -531,7 +545,7 @@ pub fn enqueue_candidate_discarded(
                 .to_owned(),
         })?;
     let receipt = LocalApplyReceipt {
-        local_apply_receipt_id: format!("lar_discard_{}", record.candidate_id),
+        local_apply_receipt_id: deterministic_lar_id(&record.candidate_id, 'H'),
         candidate_ref: record.candidate_ref.clone(),
         repository_binding_id: record.repository_binding_id.clone(),
         target_branch: durable.target_branch.clone(),
