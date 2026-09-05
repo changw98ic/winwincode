@@ -6,6 +6,7 @@
 
 use std::env;
 use std::fs;
+use std::future::Future;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -18,11 +19,15 @@ use winwincode_execution_port::action_gateway::ExecutionEnvelopeToken;
 use winwincode_execution_port::generated::{
     ModelGatewayRoute, WorkerCapabilityFeature, WorkerCapabilitySet, WorkerCapabilitySetPlatform,
 };
+use winwincode_worker::managed_session::{ManagedSessionConfig, WorkerSessionCredential};
 use winwincode_worker::remote_transport::{RemoteWorkerPort, RemoteWorkerTransportHandle};
 use winwincode_worker::workspace_runtime::JobWorkspaceRuntime;
 use winwincode_worker::{WorkerConfig, WorkerLifecycleState, WorkerMain};
 
 const WORKER_TOKIO_STACK_BYTES: usize = 16 * 1024 * 1024;
+
+const USAGE: &str =
+    "usage: winwincode-worker [--check|--remote|--managed-session <config-file>|--version]";
 
 fn main() {
     let mut args = env::args().skip(1);
@@ -30,22 +35,21 @@ fn main() {
         Some("--version") => println!("winwincode-worker {}", env!("CARGO_PKG_VERSION")),
         Some("--check") | None => print_identity(),
         Some("--remote") if args.next().is_none() => {
-            let runtime = tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .thread_name("winwincode-worker")
-                .thread_stack_size(WORKER_TOKIO_STACK_BYTES)
-                .build()
-                .unwrap_or_else(|error| panic!("failed to create Worker runtime: {error}"));
-            if let Err(error) = runtime.block_on(run_remote()) {
-                eprintln!("winwincode-worker: {error}");
-                std::process::exit(1);
+            run_worker_process(run_remote());
+        }
+        Some("--managed-session") => match args.next() {
+            Some(config_path) if args.next().is_none() => {
+                run_worker_process(run_managed(&config_path));
             }
-        }
-        Some(_) => {
-            eprintln!("usage: winwincode-worker [--check|--remote|--version]");
-            std::process::exit(2);
-        }
+            _ => usage_error(),
+        },
+        Some(_) => usage_error(),
     }
+}
+
+fn usage_error() -> ! {
+    eprintln!("{USAGE}");
+    std::process::exit(2);
 }
 
 fn print_identity() {
@@ -58,22 +62,108 @@ fn print_identity() {
     }
 }
 
+/// Identity and locality inputs the two entries differ on. Everything the
+/// execution loop needs beyond this (TLS trust root, helper release,
+/// provider model selection, action signing, execution envelope) stays on
+/// the existing process environment for both entries.
+struct WorkerBootstrap {
+    worker_id: WorkerId,
+    worker_instance_id: WorkerInstanceId,
+    started_at: Instant,
+    data_directory: PathBuf,
+    source_directory: PathBuf,
+    server_origin: String,
+    credential_path: PathBuf,
+    model_route: ModelGatewayRoute,
+}
+
+fn run_worker_process(future: impl Future<Output = Result<(), Box<dyn std::error::Error>>>) {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_name("winwincode-worker")
+        .thread_stack_size(WORKER_TOKIO_STACK_BYTES)
+        .build()
+        .unwrap_or_else(|error| panic!("failed to create Worker runtime: {error}"));
+    if let Err(error) = runtime.block_on(future) {
+        eprintln!("winwincode-worker: {error}");
+        std::process::exit(1);
+    }
+}
+
 async fn run_remote() -> Result<(), Box<dyn std::error::Error>> {
-    let worker_id = WorkerId(required("WWC_WORKER_ID")?);
-    let worker_instance_id = WorkerInstanceId(required("WWC_WORKER_INSTANCE_ID")?);
-    let started_at = env::var("WWC_WORKER_STARTED_AT").map_or(now_instant()?, Instant);
-    let data_directory = PathBuf::from(required("WWC_WORKER_DATA_DIRECTORY")?);
-    let source_directory = PathBuf::from(required("WWC_WORKER_SOURCE_ROOT")?);
+    let bootstrap = WorkerBootstrap {
+        worker_id: WorkerId(required("WWC_WORKER_ID")?),
+        worker_instance_id: WorkerInstanceId(required("WWC_WORKER_INSTANCE_ID")?),
+        started_at: env::var("WWC_WORKER_STARTED_AT").map_or(now_instant()?, Instant),
+        data_directory: PathBuf::from(required("WWC_WORKER_DATA_DIRECTORY")?),
+        source_directory: PathBuf::from(required("WWC_WORKER_SOURCE_ROOT")?),
+        server_origin: required("WWC_WORKER_SERVER_ORIGIN")?,
+        credential_path: PathBuf::from(required("WWC_WORKER_CREDENTIAL_FILE")?),
+        model_route: default_model_route(),
+    };
+    run_worker(bootstrap).await
+}
+
+/// Managed entry (plan §14.4): identity and locality come only from the
+/// local mode-0600 config file written by the Device Client. The execution
+/// loop below is the exact `--remote` machinery over the same
+/// `serverOrigin` `ExecutionPort` exchange; nothing is read from or decided
+/// by the Server beyond that existing protocol.
+async fn run_managed(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let config = ManagedSessionConfig::read(std::path::Path::new(config_path))?;
+    let credential = WorkerSessionCredential::load(&config.worker_credential_path)?;
+    eprintln!(
+        "winwincode-worker: managed session {} for worker {} instance {} under lease {} with fencing token {} on {} (client {} instance {}); worker session credential digest {}",
+        config.worker_session_id.0,
+        config.worker_id.0,
+        config.worker_instance_id.0,
+        config.occupancy_lease_id.0,
+        config.occupancy_fencing_token,
+        config.repository_binding_id.0,
+        config.client_node_id.0,
+        config.client_instance_id.0,
+        credential.digest().0,
+    );
+    run_worker(WorkerBootstrap {
+        worker_id: config.worker_id.clone(),
+        worker_instance_id: config.worker_instance_id.clone(),
+        started_at: now_instant()?,
+        data_directory: config.data_directory.clone(),
+        source_directory: config.source_directory.clone(),
+        server_origin: config.server_origin.clone(),
+        credential_path: credential.path().to_path_buf(),
+        model_route: config
+            .model_route
+            .clone()
+            .unwrap_or_else(default_model_route),
+    })
+    .await
+}
+
+/// The shared execution main loop. Both entries run the same registration,
+/// control drain, heartbeat, and Codex drive cycles over
+/// [`RemoteWorkerPort::open`]; only the [`WorkerBootstrap`] source differs.
+async fn run_worker(bootstrap: WorkerBootstrap) -> Result<(), Box<dyn std::error::Error>> {
+    let WorkerBootstrap {
+        worker_id,
+        worker_instance_id,
+        started_at,
+        data_directory,
+        source_directory,
+        server_origin,
+        credential_path,
+        model_route,
+    } = bootstrap;
     let capabilities = worker_capabilities()?;
     let (port, handle) = RemoteWorkerPort::open(
-        &required("WWC_WORKER_SERVER_ORIGIN")?,
+        &server_origin,
         &fs::read(required("WWC_WORKER_TLS_ROOT_DER_FILE")?)?,
-        PathBuf::from(required("WWC_WORKER_CREDENTIAL_FILE")?),
+        credential_path,
         worker_id.clone(),
         worker_instance_id.clone(),
         Duration::from_secs(15),
     )?;
-    let codex = production_codex(&data_directory, capabilities.clone())?;
+    let codex = production_codex(&data_directory, model_route, capabilities.clone())?;
     let workspaces =
         JobWorkspaceRuntime::open(data_directory.join("worker-workspaces"), &source_directory)?;
     let config = WorkerConfig {
@@ -155,6 +245,7 @@ where
 
 fn production_codex(
     data_directory: &std::path::Path,
+    model_route: ModelGatewayRoute,
     capabilities: WorkerCapabilitySet,
 ) -> Result<ProductionCodexAdapter, Box<dyn std::error::Error>> {
     let helper_release_manifest = HelperReleaseManifest::from_file(&PathBuf::from(required(
@@ -166,10 +257,7 @@ fn production_codex(
         helper_release_manifest,
         provider: required("WWC_WORKER_MODEL_PROVIDER_ID")?,
         model: required("WWC_WORKER_MODEL_ID")?,
-        gateway_route: ModelGatewayRoute {
-            capability: "reasoning".to_owned(),
-            route: "embedded-canonical-remote".to_owned(),
-        },
+        gateway_route: model_route,
         registered_capabilities: capabilities,
         discovered_capabilities: Vec::new(),
         action_signing_key: ActionEnforcementSigningKey::from_bytes(parse_hex_key(&required(
@@ -183,6 +271,15 @@ fn production_codex(
     Ok(ProductionCodexAdapter::open(
         ProductionCodexConfig::try_new(options)?,
     )?)
+}
+
+/// Canonical model route used when no managed config override exists —
+/// identical to the previous hardcoded `--remote` value.
+fn default_model_route() -> ModelGatewayRoute {
+    ModelGatewayRoute {
+        capability: "reasoning".to_owned(),
+        route: "embedded-canonical-remote".to_owned(),
+    }
 }
 
 fn worker_capabilities() -> Result<WorkerCapabilitySet, Box<dyn std::error::Error>> {

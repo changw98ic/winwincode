@@ -37,7 +37,7 @@ impl fmt::Display for RemoteWorkerPortError {
 impl std::error::Error for RemoteWorkerPortError {}
 
 #[derive(Clone)]
-struct Endpoint {
+pub(crate) struct Endpoint {
     host: String,
     port: u16,
 }
@@ -390,7 +390,9 @@ fn remote_transport_debug(message: &str) {
     }
 }
 
-fn parse_origin(origin: &str) -> Result<Endpoint, RemoteWorkerPortError> {
+/// The only accepted Worker origin form, `https://HOST:PORT`; shared by the
+/// `--remote` entry and the managed session config validator.
+pub(crate) fn parse_origin(origin: &str) -> Result<Endpoint, RemoteWorkerPortError> {
     let authority = origin
         .strip_prefix("https://")
         .filter(|value| !value.contains('/') && !value.contains('@'))
