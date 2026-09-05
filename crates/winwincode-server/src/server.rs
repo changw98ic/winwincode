@@ -43,6 +43,10 @@ use crate::client_connections::ClientConnectionsConfig;
 use crate::client_connections::ClientConnectionsError;
 use crate::client_connections::ClientConnectionsErrorKind;
 use crate::client_exchange::ClientExchangePort;
+use crate::client_occupancy::ClientOccupancyApplication;
+use crate::client_occupancy::ClientOccupancyConfig;
+use crate::client_occupancy::ClientOccupancyError;
+use crate::client_occupancy::ClientOccupancyErrorKind;
 use crate::config::{ServerConfig, ServerTls};
 use crate::enterprise_identity_protocol::{
     EnterpriseIdentityProtocolApplication, router as enterprise_identity_router,
@@ -115,6 +119,7 @@ struct ServerState {
     remote_worker: Option<Arc<dyn RemoteWorkerExchangePort>>,
     client_exchange: Option<Arc<dyn ClientExchangePort>>,
     client_connections: Option<Arc<ClientConnectionsApplication>>,
+    client_occupancy: Option<Arc<ClientOccupancyApplication>>,
 }
 
 /// Running standalone listener with deterministic graceful shutdown.
@@ -124,6 +129,7 @@ pub struct RunningServer {
     shutdown_grace: Duration,
     handle: Handle<SocketAddr>,
     task: Option<tokio::task::JoinHandle<Result<(), ServerError>>>,
+    background_tasks: Vec<tokio::task::JoinHandle<()>>,
     api: Arc<dyn ControlPlaneApiPort>,
 }
 
@@ -149,6 +155,9 @@ impl RunningServer {
     /// Reports a listener task or join failure after the listener no longer
     /// accepts work.
     pub async fn shutdown_listener(&mut self) -> Result<(), ServerError> {
+        for background in self.background_tasks.drain(..) {
+            background.abort();
+        }
         let Some(task) = self.task.take() else {
             return Ok(());
         };
@@ -241,6 +250,35 @@ pub async fn start_server_with_remote_worker(
         // Servers without a Client surface keep the connect routes absent.
         None => None,
     };
+    let client_occupancy = match &client_exchange {
+        Some(_) => {
+            let application = ClientOccupancyApplication::open(
+                config.data_directory(),
+                &ClientOccupancyConfig::default(),
+            )
+            .map_err(|error| ServerError::new(error.to_string()))?;
+            Some(Arc::new(application))
+        }
+        // Servers without a Client surface keep the occupancy routes absent.
+        None => None,
+    };
+    // The periodic offline sweep projects heartbeat-stale devices to
+    // `offline` and their active occupancy leases to `recovery_pending`
+    // (plan 12.5). Each iteration opens and closes its own storage
+    // connection; the task holds no lock across awaits.
+    let background_tasks = match &client_occupancy {
+        Some(application) => {
+            let sweep_application = Arc::clone(application);
+            let sweep_interval = ClientOccupancyConfig::default().sweep_interval;
+            vec![tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(sweep_interval).await;
+                    let _ = sweep_application.run_server_sweep();
+                }
+            })]
+        }
+        None => Vec::new(),
+    };
     let state = ServerState {
         config: Arc::clone(&config),
         auth_sessions,
@@ -249,6 +287,7 @@ pub async fn start_server_with_remote_worker(
         remote_worker,
         client_exchange,
         client_connections,
+        client_occupancy,
     };
     let router = router(state, enterprise_identity);
     let handle = Handle::new();
@@ -276,6 +315,7 @@ pub async fn start_server_with_remote_worker(
         shutdown_grace: config.shutdown_grace(),
         handle,
         task: Some(task),
+        background_tasks,
         api,
     })
 }
@@ -360,6 +400,20 @@ fn router(
         .route(
             "/api/v1/clients/grants/revoke",
             post(revoke_client_grant).options(preflight),
+        )
+        .route(
+            "/api/v1/clients/occupancy",
+            post(create_client_occupancy)
+                .delete(release_client_occupancy)
+                .options(preflight),
+        )
+        .route(
+            "/api/v1/clients/occupancy/force-release",
+            post(force_release_client_occupancy).options(preflight),
+        )
+        .route(
+            "/api/v1/clients/{client_id}/occupancy",
+            get(client_occupancy_status).options(preflight),
         )
         .fallback(not_found)
         .with_state(state);
@@ -634,6 +688,258 @@ fn connect_flow_error(error: &ClientConnectionsError, origin: Option<&HeaderValu
             StatusCode::SERVICE_UNAVAILABLE,
             "SERVICE_UNAVAILABLE",
             "client connect service is unavailable",
+        ),
+    };
+    connect_error_response(status, code, message, origin)
+}
+
+/// One occupancy claim (plan 12.2): bounded wait for the Device Client
+/// occupancy acknowledgement, then the `occupied` holder view.
+async fn create_client_occupancy(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    uri: Uri,
+    request: Request<Body>,
+) -> Response {
+    let Some(application) = &state.client_occupancy else {
+        return not_found().await;
+    };
+    let origin = match allowed_origin(&state, &headers) {
+        Ok(origin) => origin,
+        Err(error) => return error.into_response(),
+    };
+    if uri.query().is_some() {
+        return BoundaryError::new(
+            StatusCode::BAD_REQUEST,
+            "QUERY_PARAMETERS_FORBIDDEN",
+            "credentials and routing values are not accepted in the URL query",
+            origin,
+        )
+        .into_response();
+    }
+    let body = match parse_json_body(request, origin.clone()).await {
+        Ok(body) => body,
+        Err(error) => return error.into_response(),
+    };
+    let (principal, origin, _) = match authorize(&state, &headers, &uri) {
+        Ok(authorized) => authorized,
+        Err(error) => return error.into_response(),
+    };
+    let Some(user_id) = principal.actor_user_id() else {
+        return connect_error_response(
+            StatusCode::FORBIDDEN,
+            "PERMISSION_DENIED",
+            "a signed-in user is required",
+            origin.as_ref(),
+        );
+    };
+    match application.claim(&user_id.0, &body).await {
+        Ok(body) => json_response(StatusCode::CREATED, body, origin.as_ref()),
+        Err(error) => occupancy_flow_error(&error, origin.as_ref()),
+    }
+}
+
+/// One occupancy release (plan 12.4): the holder releases, drains, or
+/// cancels-and-releases; a release while still `reserving` withdraws the
+/// claim.
+async fn release_client_occupancy(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    uri: Uri,
+    request: Request<Body>,
+) -> Response {
+    let Some(application) = &state.client_occupancy else {
+        return not_found().await;
+    };
+    let origin = match allowed_origin(&state, &headers) {
+        Ok(origin) => origin,
+        Err(error) => return error.into_response(),
+    };
+    if uri.query().is_some() {
+        return BoundaryError::new(
+            StatusCode::BAD_REQUEST,
+            "QUERY_PARAMETERS_FORBIDDEN",
+            "credentials and routing values are not accepted in the URL query",
+            origin,
+        )
+        .into_response();
+    }
+    let body = match parse_json_body(request, origin.clone()).await {
+        Ok(body) => body,
+        Err(error) => return error.into_response(),
+    };
+    let (principal, origin, _) = match authorize(&state, &headers, &uri) {
+        Ok(authorized) => authorized,
+        Err(error) => return error.into_response(),
+    };
+    let Some(user_id) = principal.actor_user_id() else {
+        return connect_error_response(
+            StatusCode::FORBIDDEN,
+            "PERMISSION_DENIED",
+            "a signed-in user is required",
+            origin.as_ref(),
+        );
+    };
+    match application.release(&user_id.0, &body) {
+        Ok(body) => json_response(StatusCode::OK, body, origin.as_ref()),
+        Err(error) => occupancy_flow_error(&error, origin.as_ref()),
+    }
+}
+
+/// The Owner-only safe cleanup of a recovery-pending lease whose window has
+/// passed (plan 12.5), with the higher force-fence token going downlink.
+async fn force_release_client_occupancy(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    uri: Uri,
+    request: Request<Body>,
+) -> Response {
+    let Some(application) = &state.client_occupancy else {
+        return not_found().await;
+    };
+    let origin = match allowed_origin(&state, &headers) {
+        Ok(origin) => origin,
+        Err(error) => return error.into_response(),
+    };
+    if uri.query().is_some() {
+        return BoundaryError::new(
+            StatusCode::BAD_REQUEST,
+            "QUERY_PARAMETERS_FORBIDDEN",
+            "credentials and routing values are not accepted in the URL query",
+            origin,
+        )
+        .into_response();
+    }
+    let body = match parse_json_body(request, origin.clone()).await {
+        Ok(body) => body,
+        Err(error) => return error.into_response(),
+    };
+    if let Err(error) = require_owner(&state, &headers, &uri) {
+        return error.into_response();
+    }
+    match application.force_release(&body) {
+        Ok(body) => json_response(StatusCode::OK, body, origin.as_ref()),
+        Err(error) => occupancy_flow_error(&error, origin.as_ref()),
+    }
+}
+
+/// The occupancy projection of one Client: full view for the holder, the
+/// `occupied-by-other` privacy projection for everyone else (plan §16.4).
+async fn client_occupancy_status(
+    State(state): State<ServerState>,
+    axum::extract::Path(client_id): axum::extract::Path<String>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Response {
+    let Some(application) = &state.client_occupancy else {
+        return not_found().await;
+    };
+    let (principal, origin, _) = match authorize(&state, &headers, &uri) {
+        Ok(authorized) => authorized,
+        Err(error) => return error.into_response(),
+    };
+    let Some(user_id) = principal.actor_user_id() else {
+        return connect_error_response(
+            StatusCode::FORBIDDEN,
+            "PERMISSION_DENIED",
+            "a signed-in user is required",
+            origin.as_ref(),
+        );
+    };
+    match application.status(&user_id.0, &client_id) {
+        Ok(body) => json_response(StatusCode::OK, body, origin.as_ref()),
+        Err(error) => occupancy_flow_error(&error, origin.as_ref()),
+    }
+}
+
+/// Maps one occupancy flow failure onto its central occupancy wire error
+/// code.
+fn occupancy_flow_error(error: &ClientOccupancyError, origin: Option<&HeaderValue>) -> Response {
+    let (status, code, message) = match error.kind() {
+        ClientOccupancyErrorKind::InvalidRequest => (
+            StatusCode::BAD_REQUEST,
+            "INVALID_REQUEST",
+            "occupancy request is invalid",
+        ),
+        ClientOccupancyErrorKind::ConfirmationRequired => (
+            StatusCode::BAD_REQUEST,
+            "CONFIRMATION_REQUIRED",
+            "cancel_and_release requires the explicit confirm flag",
+        ),
+        ClientOccupancyErrorKind::ClientNotFound => (
+            StatusCode::NOT_FOUND,
+            "CLIENT_NOT_FOUND",
+            "no client matches the requested id",
+        ),
+        ClientOccupancyErrorKind::ClientOffline => (
+            StatusCode::CONFLICT,
+            "CLIENT_OFFLINE",
+            "the client is not online",
+        ),
+        ClientOccupancyErrorKind::ClientLocked => (
+            StatusCode::CONFLICT,
+            "CLIENT_LOCKED",
+            "the client is locked",
+        ),
+        ClientOccupancyErrorKind::ClientConnectionsForbidden => (
+            StatusCode::CONFLICT,
+            "CLIENT_CONNECTIONS_FORBIDDEN",
+            "the client no longer accepts new occupancy",
+        ),
+        ClientOccupancyErrorKind::AccessDenied => (
+            StatusCode::FORBIDDEN,
+            "ACCESS_DENIED",
+            "an active use grant on the client is required",
+        ),
+        ClientOccupancyErrorKind::OccupiedByOther => (
+            StatusCode::CONFLICT,
+            "OCCUPIED_BY_OTHER",
+            "the client is occupied by another user",
+        ),
+        ClientOccupancyErrorKind::CapacityExhausted => (
+            StatusCode::CONFLICT,
+            "CAPACITY_EXHAUSTED",
+            "the client has no free worker-session slot",
+        ),
+        ClientOccupancyErrorKind::OccupancyRejected => (
+            StatusCode::CONFLICT,
+            "OCCUPANCY_REJECTED",
+            "the device rejected the occupancy offer",
+        ),
+        ClientOccupancyErrorKind::OccupancyAckTimeout => (
+            StatusCode::GATEWAY_TIMEOUT,
+            "OCCUPANCY_ACK_TIMEOUT",
+            "the device did not confirm the occupancy offer in time",
+        ),
+        ClientOccupancyErrorKind::OccupancyRecoveryPending => (
+            StatusCode::CONFLICT,
+            "OCCUPANCY_RECOVERY_PENDING",
+            "the recovery window is still open",
+        ),
+        ClientOccupancyErrorKind::PermissionDenied => (
+            StatusCode::FORBIDDEN,
+            "PERMISSION_DENIED",
+            "the acting user may not perform this occupancy change",
+        ),
+        ClientOccupancyErrorKind::ResourceNotFound => (
+            StatusCode::NOT_FOUND,
+            "RESOURCE_NOT_FOUND",
+            "no active occupancy matches the request",
+        ),
+        ClientOccupancyErrorKind::WrongState => (
+            StatusCode::CONFLICT,
+            "WRONG_STATE",
+            "the occupancy lease state refuses the requested change",
+        ),
+        ClientOccupancyErrorKind::RateLimited => (
+            StatusCode::TOO_MANY_REQUESTS,
+            "RATE_LIMITED",
+            "occupancy claims are rate limited",
+        ),
+        ClientOccupancyErrorKind::Unavailable => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "SERVICE_UNAVAILABLE",
+            "client occupancy service is unavailable",
         ),
     };
     connect_error_response(status, code, message, origin)
