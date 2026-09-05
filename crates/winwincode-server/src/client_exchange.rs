@@ -45,6 +45,7 @@
 //! wait (plan 11.4).
 
 use std::fmt;
+use std::path::Path;
 use std::path::PathBuf;
 
 use serde::Deserialize;
@@ -54,6 +55,7 @@ use sha2::Digest;
 use sha2::Sha256;
 use winwincode_client_port::domain::ClientArchitecture;
 use winwincode_client_port::domain::ClientChallengeAckStatus;
+use winwincode_client_port::domain::ClientControlMessageKind;
 use winwincode_client_port::domain::ClientPlatformTarget;
 use winwincode_client_port::domain::PresenceState;
 use winwincode_client_port::exchange::AckCursor;
@@ -604,7 +606,7 @@ impl ClientExchangeApplication {
             match settler.ingest(&envelope.client_instance_id, &identity, command.as_ref()) {
                 BatchOutcome::Accepted {
                     command: CommandOutcome::Fresh,
-                } => apply_effect(storage, node_id, envelope, now)?,
+                } => apply_effect(storage, &self.data_directory, node_id, envelope, now)?,
                 BatchOutcome::Accepted { .. } | BatchOutcome::Duplicate => {}
                 BatchOutcome::Gap {
                     replay_from_sequence,
@@ -931,9 +933,13 @@ fn command_identity(
 
 /// Applies the kind-specific effect of one freshly accepted frame. Effects
 /// are report facts: a refused projection (illegal transition, lost revision
-/// race, unknown challenge) changes no frame settlement.
+/// race, unknown challenge) changes no frame settlement. The occupancy
+/// mirror-revision facts (ack mirror revision, rejection current revision,
+/// release/force-fence effective revision) feed the Server's durable view
+/// the occupancy downlink stamps are computed against.
 fn apply_effect(
     storage: &mut SqliteStorage,
+    data_directory: &Path,
     node_id: &str,
     envelope: &ClientToServerEnvelope,
     now: &Instant,
@@ -1003,6 +1009,12 @@ fn apply_effect(
             // token promote `reserving -> occupied` (plan 12.2, contract
             // 9.3). A stale or rolled-back offer refuses the promotion as an
             // ignored report fact and changes no frame settlement.
+            let _ = crate::client_occupancy::observe_client_mirror_revision(
+                data_directory,
+                node_id,
+                payload.occupancy.command.expected_revision,
+                now,
+            );
             let mut occupancy = ClientOccupancyService::new(storage);
             let _ = occupancy.record_acknowledgement(
                 &payload.occupancy.occupancy_lease_id,
@@ -1015,6 +1027,14 @@ fn apply_effect(
         ClientToServerMessage::OccupancyRejected(payload) => {
             // The device refused the offer: the `reserving` lease rolls back
             // to `released` with the `client_rejected` reason (contract 4).
+            // The rejection also carries the device's current mirror
+            // revision, which re-syncs the Server view for the next offer.
+            let _ = crate::client_occupancy::observe_client_mirror_revision(
+                data_directory,
+                node_id,
+                payload.occupancy.command.expected_revision,
+                now,
+            );
             let mut occupancy = ClientOccupancyService::new(storage);
             let _ = occupancy.reject_offer(
                 &payload.occupancy.occupancy_lease_id,
@@ -1022,6 +1042,24 @@ fn apply_effect(
                 OccupancyReleaseReason::ClientRejected,
                 now,
             );
+            Ok(())
+        }
+        ClientToServerMessage::CommandAck(payload) => {
+            // A release or force-fence ack reports the effective device
+            // mirror revision; keep the Server view current.
+            if matches!(
+                payload.command_kind,
+                ClientControlMessageKind::OccupancyRelease
+                    | ClientControlMessageKind::OccupancyForceFence
+            ) && let Some(revision) = payload.current_revision
+            {
+                let _ = crate::client_occupancy::observe_client_mirror_revision(
+                    data_directory,
+                    node_id,
+                    revision,
+                    now,
+                );
+            }
             Ok(())
         }
         // The remaining kinds settle at the cursor in this lane; their
@@ -1173,7 +1211,7 @@ fn generate_public_client_id() -> Result<String, ClientExchangeError> {
 /// Whether `value` has the canonical `cnd_` + 26 character Crockford shape
 /// a server-assigned node id carries. Only canonical ids can name an
 /// existing row; device-local placeholders always take the fresh path.
-fn is_canonical_client_node_id(value: &str) -> bool {
+pub(crate) fn is_canonical_client_node_id(value: &str) -> bool {
     let Some(suffix) = value.strip_prefix("cnd_") else {
         return false;
     };
@@ -1439,8 +1477,7 @@ mod tests {
             ),
             ClientToServerMessage::CommandAck(
                 winwincode_client_port::messages::ClientCommandAckPayload {
-                    command_kind:
-                        winwincode_client_port::domain::ClientControlMessageKind::ClientLock,
+                    command_kind: ClientControlMessageKind::ClientLock,
                     command_message_id: "msg_1".to_owned(),
                     status: winwincode_client_port::domain::CommandAckStatus::Accepted,
                     current_revision: Some(2),
