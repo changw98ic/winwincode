@@ -62,7 +62,7 @@ function waitFor(predicate, label) {
       }
       if (Date.now() >= deadline) {
         reject(new Error(
-          `timed out waiting for ${label}; frames=${JSON.stringify(transportFrames)}; events=${JSON.stringify(receivedEvents)}; console=${capturedConsole.join(' | ')}`,
+          `timed out waiting for ${label}; state=${JSON.stringify(application.authSession.state)}; frames=${JSON.stringify(transportFrames)}; events=${JSON.stringify(receivedEvents)}; console=${capturedConsole.join(' | ')}`,
         ))
         return
       }
@@ -72,12 +72,22 @@ function waitFor(predicate, label) {
   })
 }
 
-function submitProof(value) {
-  const input = document.querySelector('.wwc-auth-session-proof')
-  const form = document.querySelector('.wwc-auth-session-form')
-  input.value = value
+// The unauthenticated surface is the login page: first-time initialization
+// exchanges the bootstrap proof plus the new Owner credentials for the first
+// Owner account (AUTH-100.3 session contract).
+const bootstrapOwnerUsername = 'owner'
+const bootstrapOwnerPassword = 'owner-password-123'
+
+function submitInitialization(value) {
+  const proofInput = document.querySelector('.wwc-login-initialization-proof')
+  const usernameInput = document.querySelector('.wwc-login-initialization-username')
+  const passwordInput = document.querySelector('.wwc-login-initialization-password')
+  const form = document.querySelector('.wwc-login-initialization-form')
+  usernameInput.value = bootstrapOwnerUsername
+  passwordInput.value = bootstrapOwnerPassword
+  proofInput.value = value
   form.requestSubmit()
-  return input.value
+  return proofInput.value
 }
 
 function storageText(storage) {
@@ -309,15 +319,24 @@ async function currentSettings(requestId) {
 }
 
 globalThis.runAuthBrowserFixture = async proof => {
-  const failedInputValue = submitProof('incorrect-bootstrap-proof')
+  const failedInputValue = submitInitialization('incorrect-bootstrap-proof')
+  await waitFor(
+    () => {
+      const errorNode = document.querySelector('.wwc-login-error')
+      return errorNode !== null
+        && errorNode.hidden === false
+        && errorNode.textContent.includes('The bootstrap proof was rejected.')
+    },
+    'failed bootstrap rejection surface',
+  )
   await waitFor(
     () => application.authSession.state.status === 'authentication-required',
     'failed login',
   )
-  const inputAfterFailedLogin = document.querySelector('.wwc-auth-session-proof').value
-  const submittedInputValue = submitProof(proof)
+  const inputAfterFailedLogin = document.querySelector('.wwc-login-initialization-proof').value
+  const submittedInputValue = submitInitialization(proof)
   await waitFor(() => application.authSession.state.status === 'signed-in', 'successful login')
-  const inputAfterSuccessfulLogin = document.querySelector('.wwc-auth-session-proof').value
+  const inputAfterSuccessfulLogin = document.querySelector('.wwc-login-initialization-proof').value
   const flows = await runRealApplicationFlows()
   const context = authenticatedContext()
   const sessionState = JSON.stringify(application.authSession.state)

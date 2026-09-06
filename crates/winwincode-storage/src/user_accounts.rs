@@ -195,6 +195,35 @@ impl<'storage> UserAccountLedger<'storage> {
             .transpose()
     }
 
+    /// Loads the durable active Owner, if one exists.
+    ///
+    /// The one-shot initialization authority guarantees at most one active
+    /// Owner; the stable ordering keeps this read deterministic even while
+    /// that invariant is momentarily violated.
+    ///
+    /// # Errors
+    ///
+    /// Rejects corrupt rows or storage failure.
+    pub fn active_owner(&self) -> Result<Option<UserAccount>, UserAccountStoreError> {
+        let connection = self
+            .storage
+            .connection()
+            .map_err(|storage| storage_error(&storage))?;
+        connection
+            .query_row(
+                "SELECT user_id, username, normalized_username, password_hash, role, state,
+                        created_at, updated_at, revision
+                 FROM users WHERE role = 'owner' AND state = 'active'
+                 ORDER BY created_at, user_id LIMIT 1",
+                [],
+                read_user_row,
+            )
+            .optional()
+            .map_err(|sql| sql_error(&sql))?
+            .map(restore_user_parts)
+            .transpose()
+    }
+
     /// Replaces the password hash under an exact revision expectation.
     ///
     /// # Errors

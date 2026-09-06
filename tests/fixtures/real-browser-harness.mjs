@@ -157,18 +157,22 @@ export function staticClientServer({ root, certificateFiles, fixturePath, config
       response.writeHead(204).end()
       return
     }
+    const sharedLoginBootstrapRequest = path === '/fixture/login-bootstrap.mjs'
     const fixtureRequest = path === `/fixture/${fixturePath.split('/').at(-1)}`
     const moduleRequest = path.startsWith('/module/')
     const publicRequest = path.startsWith('/assets/')
-    const source = fixtureRequest
-      ? fixture
-      : moduleRequest
+    const source = sharedLoginBootstrapRequest
+      ? resolve(root, 'tests/fixtures/login-bootstrap.mjs')
+      : fixtureRequest
+        ? fixture
+        : moduleRequest
         ? normalize(resolve(moduleRoot, path.replace(/^\/module\//u, '')))
         : normalize(resolve(publicRoot, path.replace(/^\//u, '')))
     if (
       (moduleRequest && source.startsWith(`${moduleRoot}/`))
       || (publicRequest && source.startsWith(`${publicRoot}/`))
       || fixtureRequest
+      || sharedLoginBootstrapRequest
     ) {
       response.writeHead(200, {
         'Content-Type': publicRequest && path.endsWith('.css')
@@ -213,7 +217,6 @@ export function startStandaloneServer({
       WWC_SERVER_DATA_DIRECTORY: resolve(directory, 'server-data'),
       WWC_SERVER_ALLOWED_ORIGINS: clientOrigin,
       WWC_SERVER_BOOTSTRAP_PROOF: proof,
-      WWC_SERVER_AUTH_SUBJECT: 'usr_01J00000000000000000000000',
       WWC_SERVER_REPOSITORY_ROOT: repositoryRoot,
       WWC_SERVER_SOURCE_ROOT: sourceRoot,
       WWC_SERVER_CHECKOUT_REVISION: checkoutRevision,

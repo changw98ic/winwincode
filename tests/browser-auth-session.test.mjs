@@ -134,10 +134,14 @@ async function waitForServer(controlUrl, child, errors) {
 }
 
 async function expectStartupFailure(child, errors, expectedMessage) {
-  const exited = await Promise.race([
-    new Promise(resolvePromise => child.once('exit', () => resolvePromise(true))),
-    new Promise(resolvePromise => setTimeout(() => resolvePromise(false), 5_000)),
-  ])
+  // The rejected process must exit on its own; poll instead of racing a fixed
+  // window because the first exec of a freshly linked binary can stall in
+  // dyld for many seconds on external volumes.
+  const deadline = Date.now() + 30_000
+  while (child.exitCode === null && child.signalCode === null && Date.now() < deadline) {
+    await new Promise(resolvePromise => setTimeout(resolvePromise, 100))
+  }
+  const exited = child.exitCode !== null || child.signalCode !== null
   if (!exited) await stopChild(child, 'SIGKILL')
   assert.equal(exited, true, 'standalone Server accepted an incomplete production configuration')
   assert.equal(child.exitCode, 1)
@@ -166,7 +170,6 @@ function startStandaloneServer({
       WWC_SERVER_DATA_DIRECTORY: join(directory, 'server-data'),
       WWC_SERVER_ALLOWED_ORIGINS: clientOrigin,
       WWC_SERVER_BOOTSTRAP_PROOF: proof,
-      WWC_SERVER_AUTH_SUBJECT: 'usr_01J00000000000000000000000',
       WWC_SERVER_REPOSITORY_ROOT: root,
       WWC_SERVER_CHECKOUT_REVISION: checkoutRevision,
       WWC_SERVER_HELPER_EXECUTABLE: helperExecutable,
@@ -397,7 +400,10 @@ test('static Client and standalone TLS Server run real cross-origin workflows an
     sessionId,
     `globalThis.runAuthBrowserFixture(${JSON.stringify(proof)})`,
   )
-  assert.deepEqual(result, {
+  // The Owner id is server-assigned at initialization; assert its shape
+  // separately from the deterministic flow contract.
+  const { sessionActor, ...flows } = result
+  assert.deepEqual(flows, {
     failedInputValue: '',
     inputAfterFailedLogin: '',
     submittedInputValue: '',
@@ -425,10 +431,6 @@ test('static Client and standalone TLS Server run real cross-origin workflows an
     proofFound: false,
     redirectedResources: 0,
     sessionCommand: 'session.create',
-    sessionActor: {
-      kind: 'user',
-      id: 'usr_01J00000000000000000000000',
-    },
     sessionScope: {
       kind: 'repository',
       organizationId: 'org_01J00000000000000000000000',
@@ -446,6 +448,8 @@ test('static Client and standalone TLS Server run real cross-origin workflows an
     workerCount: 1,
     cookieVisibleToScript: '',
   })
+  assert.deepEqual(sessionActor, { kind: 'user', id: result.sessionActor.id })
+  assert.match(sessionActor.id, /^usr_[0-9A-Z]{26}$/u)
   const cookies = await devtools.send('Network.getAllCookies', {}, sessionId)
   const sessionCookie = cookies.cookies.find(cookie => cookie.name === 'wwc_session')
   assert.ok(sessionCookie)
@@ -502,14 +506,16 @@ test('static Client and standalone TLS Server run real cross-origin workflows an
   await evaluate(devtools, sessionId, 'delete globalThis.runAuthBrowserFixture')
   await devtools.send('Page.reload', { ignoreCache: true }, sessionId)
   await waitForFixture(devtools, sessionId)
+  const existing = await evaluate(devtools, sessionId, 'globalThis.runExistingSessionFixture()')
   assert.deepEqual(
-    await evaluate(devtools, sessionId, 'globalThis.runExistingSessionFixture()'),
+    {
+      settings: existing.settings,
+      actor: existing.actor,
+      scope: existing.scope,
+    },
     {
       settings: { concurrency: 2, revision: 1 },
-      actor: {
-        kind: 'user',
-        id: 'usr_01J00000000000000000000000',
-      },
+      actor: result.sessionActor,
       scope: {
         kind: 'repository',
         organizationId: 'org_01J00000000000000000000000',

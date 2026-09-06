@@ -115,6 +115,8 @@ const IDS = Object.freeze({
 })
 
 const ACTOR = Object.freeze({ kind: 'user', id: IDS.actor })
+const OWNER_USERNAME = 'vertical-owner'
+const OWNER_PASSWORD = 'vertical-owner-password-1'
 const SCOPE = Object.freeze({
   kind: 'repository',
   organizationId: IDS.organization,
@@ -622,11 +624,11 @@ export function writeHelperReleaseManifest(root, helperExecutable) {
   return manifestPath
 }
 
-function commandRequest(requestId, command, expectedRevision, payload) {
+function commandRequest(requestId, command, expectedRevision, payload, actor = ACTOR) {
   return {
     schemaVersion: SCHEMA_VERSION,
     requestId,
-    actor: ACTOR,
+    actor,
     scope: SCOPE,
     command,
     expectedRevision,
@@ -634,11 +636,11 @@ function commandRequest(requestId, command, expectedRevision, payload) {
   }
 }
 
-function queryRequest(requestId, query, parameters) {
+function queryRequest(requestId, query, parameters, actor = ACTOR) {
   return {
     schemaVersion: SCHEMA_VERSION,
     requestId,
-    actor: ACTOR,
+    actor,
     scope: SCOPE,
     query,
     parameters,
@@ -733,18 +735,23 @@ class ApiClient {
     return value
   }
 
-  async bootstrap(proof) {
+  async bootstrap(proof, { login = false } = {}) {
     const response = await requestJson(`${this.baseUrl}/api/v1/auth/session`, {
       method: 'POST',
       origin: this.origin,
-      authorization: proof,
-      body: { schemaVersion: SCHEMA_VERSION },
+      ...(login ? {} : { authorization: proof }),
+      body: {
+        schemaVersion: SCHEMA_VERSION,
+        username: OWNER_USERNAME,
+        password: OWNER_PASSWORD,
+      },
     })
     assert.equal(response.status, 201, 'API authentication bootstrap must return 201')
     this.cookie = responseSetCookie(response.headers)
     assert.notEqual(this.cookie, null, 'API authentication must issue a session cookie')
     assert.equal(response.json?.schemaVersion, SCHEMA_VERSION)
-    assert.deepEqual(response.json?.actor, this.actor)
+    assert.equal(response.json?.actor?.kind, 'user')
+    this.actor = response.json.actor
     this.session = response.json
     return response.json
   }
@@ -755,6 +762,7 @@ class ApiClient {
       command,
       expectedRevision,
       payload,
+      this.actor ?? ACTOR,
     )
     const response = await requestJson(`${this.baseUrl}/api/v1/commands`, {
       method: 'POST',
@@ -777,7 +785,7 @@ class ApiClient {
   }
 
   async query(query, parameters) {
-    const request = queryRequest(this.requestId(), query, parameters)
+    const request = queryRequest(this.requestId(), query, parameters, this.actor ?? ACTOR)
     const response = await requestJson(`${this.baseUrl}/api/v1/queries`, {
       method: 'POST',
       origin: this.origin,
@@ -1018,7 +1026,6 @@ function spawnStandaloneServer({
       WWC_SERVER_DATA_DIRECTORY: resolve(directory, 'server-data'),
       WWC_SERVER_ALLOWED_ORIGINS: origin,
       WWC_SERVER_BOOTSTRAP_PROOF: proof,
-      WWC_SERVER_AUTH_SUBJECT: IDS.actor,
       WWC_SERVER_REPOSITORY_ROOT: repositoryRoot,
       WWC_SERVER_SOURCE_ROOT: sourceRoot,
       WWC_SERVER_CHECKOUT_REVISION: checkoutRevision,
@@ -1335,9 +1342,13 @@ function deliverySpec(baseRevision) {
       title: 'The API production workflow reaches a terminal projection',
     }],
     baseRevision,
+    constraints: ['use the exact repository baseline'],
     goal: 'Verify Chat and StrongFlow through the canonical local API',
+    outOfScope: [],
     publicationTarget: null,
     repositoryId: IDS.repository,
+    scope: ['canonical local API chat and StrongFlow workflow'],
+    sourceProductSessionId: null,
     title: 'API production StrongFlow',
   }
 }
@@ -1955,7 +1966,7 @@ export async function runApiProductionVertical({
       // namespace for new work after restart while retaining the original ids
       // only for the explicit terminal replay assertion below.
       const restartedApi = new ApiClient(started.controlUrl, started.origin, 1_000_001)
-      await restartedApi.bootstrap(restartProof)
+      await restartedApi.bootstrap(restartProof, { login: true })
       if (workerStarted !== null) {
         report.remoteWorker.survivedServerRestartPid = workerStarted.child.pid
         const readyWorker = await waitForRemoteWorker(

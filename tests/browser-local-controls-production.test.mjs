@@ -96,12 +96,16 @@ function staticClientServer(cert, controlConfiguration) {
         response.end(JSON.stringify(controlConfiguration()))
         return
       }
+      const loginBootstrap = resolve(root, 'tests/fixtures/login-bootstrap.mjs')
       const source = path === '/fixture/browser-local-controls-client.mjs'
         ? fixture
-        : normalize(join(moduleRoot, path.replace(/^\/module\//u, '')))
+        : path === '/fixture/login-bootstrap.mjs'
+          ? loginBootstrap
+          : normalize(join(moduleRoot, path.replace(/^\/module\//u, '')))
       if (
         (path.startsWith('/module/') && source.startsWith(`${moduleRoot}/`))
         || path === '/fixture/browser-local-controls-client.mjs'
+        || path === '/fixture/login-bootstrap.mjs'
       ) {
         response.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8' })
         response.end(readFileSync(source))
@@ -119,10 +123,19 @@ async function freePort() {
   return port
 }
 
+function fixtureTargetDirectory() {
+  // Cargo honors CARGO_TARGET_DIR for example binaries too; without it the
+  // default is <root>/target.
+  const configured = process.env.CARGO_TARGET_DIR
+  return configured === undefined || configured.length === 0
+    ? resolve(root, 'target')
+    : resolve(root, configured)
+}
+
 function startFixture({ cert, clientOrigin, controlPort, directory, proof, errors }) {
   const controlUrl = `https://control.localhost:${String(controlPort)}`
   const child = spawn(
-    resolve(root, 'target/debug/examples/browser_local_controls_fixture'),
+    resolve(fixtureTargetDirectory(), 'debug/examples/browser_local_controls_fixture'),
     [],
     {
       cwd: root,
@@ -343,8 +356,8 @@ test('real browser preserves local settings, decisions, resume cursors, and revo
     sessionId,
     `globalThis.runLocalControlsFixture(${JSON.stringify(proof)}, ${JSON.stringify(firstLocator)}, ${JSON.stringify(rotatedLocator)})`,
   )
-  assert.equal(first.submittedProof, '')
-  assert.equal(first.clearedProof, '')
+  assert.equal(first.submittedPassword, '')
+  assert.equal(first.clearedPassword, '')
   assert.equal(first.browserSecretFound, false)
   assert.deepEqual(first.credentialRevisions, [1, 2, 3])
   assert.equal(first.credentialState, 'revoked')

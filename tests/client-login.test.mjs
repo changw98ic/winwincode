@@ -94,6 +94,41 @@ function loginError(code, message, retryable = false) {
   })
 }
 
+test('facade initializes the Owner with the bootstrap proof and credentials', async () => {
+  const requests = []
+  const client = createControlPlaneClient({
+    serverUrl: 'https://control.example/auth',
+    transport: {
+      async fetch(input, init) {
+        requests.push({ input: String(input), init: structuredClone(init) })
+        return response(201, session())
+      },
+    },
+  })
+
+  const created = await client.login(
+    'bootstrap-proof-material',
+    { username: 'owner', password: 'owner-password-123' },
+  )
+
+  assert.deepEqual(created, session())
+  const initializeRequest = requests[0]
+  assert.equal(initializeRequest.init.headers.Authorization, 'Bearer bootstrap-proof-material')
+  assert.deepEqual(JSON.parse(initializeRequest.init.body), {
+    schemaVersion,
+    username: 'owner',
+    password: 'owner-password-123',
+  })
+  await assert.rejects(
+    client.login('bootstrap-proof-material', { username: '', password: 'x' }),
+    error => error.code === 'LOGIN_INPUT_INVALID',
+  )
+  await assert.rejects(
+    client.login('', { username: 'owner', password: 'owner-password-123' }),
+    error => error.code === 'BOOTSTRAP_PROOF_INVALID',
+  )
+})
+
 test('facade exchanges username and password for one validated session', async () => {
   const requests = []
   const client = createControlPlaneClient({
@@ -307,10 +342,18 @@ test('login view-model keeps rate limit, wrong credentials, and probe failures d
     assert.equal(model.state.status, 'idle')
     model.close()
   }
+  const initializeAttempts = []
   const model = createLoginViewModel({
     client: {
       async loginWithPassword() { return session() },
-      async login() { return session() },
+      async login(proof, credentials) {
+        initializeAttempts.push({
+          proof,
+          username: credentials.username,
+          password: credentials.password,
+        })
+        return session()
+      },
       async initializationStatus() {
         throw new ControlPlaneClientError({
           kind: 'network',
@@ -324,9 +367,17 @@ test('login view-model keeps rate limit, wrong credentials, and probe failures d
   })
   await model.refreshInitialization()
   assert.equal(model.state.initialization, 'unknown')
-  await model.initialize('bootstrap-proof-material')
+  await model.initialize('bootstrap-proof-material', {
+    username: 'owner',
+    password: 'owner-password-123',
+  })
   assert.equal(model.state.status, 'succeeded')
   assert.equal(model.state.source, 'initialization')
+  assert.deepEqual(initializeAttempts, [{
+    proof: 'bootstrap-proof-material',
+    username: 'owner',
+    password: 'owner-password-123',
+  }])
   model.close()
 })
 
@@ -490,15 +541,29 @@ test('login page shows the initialization entry only while the server is uniniti
   const initializationSection = findOne(first.rootElement, 'wwc-login-initialization')
   assert.equal(initializationSection.hidden, false)
   const proof = findOne(first.rootElement, 'wwc-login-initialization-proof')
+  const initializationUsername = findOne(first.rootElement, 'wwc-login-initialization-username')
+  const initializationPassword = findOne(first.rootElement, 'wwc-login-initialization-password')
+  initializationUsername.value = 'owner'
+  initializationPassword.value = 'owner-password-123'
   proof.value = 'bootstrap-proof-material'
   submitForm(first.rootElement, 'wwc-login-initialization-form')
   assert.equal(proof.value, '', 'the proof leaves the DOM before the await')
+  assert.equal(
+    initializationPassword.value,
+    '',
+    'the initialization password leaves the DOM before the await',
+  )
   await new Promise(resolvePromise => setImmediate(resolvePromise))
   assert.equal(first.model.state.status, 'succeeded')
   assert.equal(first.model.state.source, 'initialization')
   assert.equal(
     descendants(first.rootElement).map(node => node.textContent).join(' ')
       .includes('bootstrap-proof-material'),
+    false,
+  )
+  assert.equal(
+    descendants(first.rootElement).map(node => node.textContent).join(' ')
+      .includes('owner-password-123'),
     false,
   )
   first.model.close()
@@ -619,11 +684,13 @@ function settingsFacadeFake({ initialized = true } = {}) {
   const subscriptions = []
   const loginAttempts = []
   const proofAttempts = []
+  const initializeAttempts = []
   const client = {
     queries,
     subscriptions,
     loginAttempts,
     proofAttempts,
+    initializeAttempts,
     serverUrl: 'https://control.example/login-app',
     setExpired(next) { expired = next },
     async restore() {
@@ -638,8 +705,12 @@ function settingsFacadeFake({ initialized = true } = {}) {
       }
       return structuredClone(session())
     },
-    async login(proof) {
+    async login(proof, credentials) {
       proofAttempts.push(proof)
+      initializeAttempts.push({
+        username: credentials.username,
+        password: credentials.password,
+      })
       expired = false
       return structuredClone(session())
     },
@@ -842,6 +913,9 @@ test('an uninitialized server offers the bootstrap initialization entry from the
   const initializationSection = applicationNode(fixture.rootElement, 'wwc-login-initialization')
   await waitFor(() => initializationSection.hidden === false, 'initialization entry')
   const proof = applicationNode(fixture.rootElement, 'wwc-login-initialization-proof')
+  applicationNode(fixture.rootElement, 'wwc-login-initialization-username').value = 'owner'
+  applicationNode(fixture.rootElement, 'wwc-login-initialization-password').value =
+    'owner-password-123'
   proof.value = 'bootstrap-proof-material'
   applicationNode(fixture.rootElement, 'wwc-login-initialization-form').dispatchEvent({
     type: 'submit',
@@ -853,6 +927,10 @@ test('an uninitialized server offers the bootstrap initialization entry from the
     'owner initialization signed in',
   )
   assert.deepEqual(client.proofAttempts, ['bootstrap-proof-material'])
+  assert.deepEqual(client.initializeAttempts, [{
+    username: 'owner',
+    password: 'owner-password-123',
+  }])
   assert.equal(fixture.browser.location.hash, '#/settings')
   const login = applicationNode(fixture.rootElement, 'wwc-login')
   await waitFor(() => login.hidden === true, 'login page closes')

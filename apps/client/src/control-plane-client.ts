@@ -265,6 +265,7 @@ export interface ControlPlaneClient {
   restore(options?: ControlPlaneRequestOptions): Promise<ControlPlaneSession>
   login(
     bootstrapProof: string,
+    credentials: ControlPlanePasswordCredentials,
     options?: ControlPlaneRequestOptions,
   ): Promise<ControlPlaneSession>
   /** Exchange a username and password for one browser session. */
@@ -674,6 +675,7 @@ export function createControlPlaneClient(options: ControlPlaneClientOptions): Co
   async function authSessionRequest(
     method: 'DELETE' | 'GET' | 'POST',
     bootstrapProof: string | null,
+    credentials: ControlPlanePasswordCredentials | null,
     requestOptions: ControlPlaneRequestOptions | undefined,
   ): Promise<ControlPlaneSession | null> {
     requireOpen()
@@ -694,6 +696,19 @@ export function createControlPlaneClient(options: ControlPlaneClientOptions): Co
         retryable: false,
       })
     }
+    // The AUTH-100.3 Server session contract carries the Owner credentials in
+    // every create request: a Bearer proof turns the same body into the
+    // one-shot initialization of that Owner account.
+    if (method === 'POST') {
+      if (credentials === null) throw new ControlPlaneClientError({
+        kind: 'protocol',
+        code: 'LOGIN_INPUT_INVALID',
+        message: 'Enter a valid username and password.',
+        requestId: null,
+        retryable: false,
+      })
+      assertLoginCredentials(credentials)
+    }
     try {
       const response = await transportRequest(
         `${location.serverUrl}${AUTH_SESSION_PATH}`,
@@ -705,7 +720,13 @@ export function createControlPlaneClient(options: ControlPlaneClientOptions): Co
           },
           ...(method === 'GET'
             ? {}
-            : { body: JSON.stringify({ schemaVersion: CONTROL_PLANE_SCHEMA_VERSION }) }),
+            : {
+              body: JSON.stringify({
+                schemaVersion: CONTROL_PLANE_SCHEMA_VERSION,
+                username: credentials?.username,
+                password: credentials?.password,
+              }),
+            }),
           redirect: 'error',
           cache: 'no-store',
           referrerPolicy: 'no-referrer',
@@ -811,7 +832,7 @@ export function createControlPlaneClient(options: ControlPlaneClientOptions): Co
   return {
     serverUrl: location.serverUrl,
     async restore(requestOptions) {
-      const session = await authSessionRequest('GET', null, requestOptions)
+      const session = await authSessionRequest('GET', null, null, requestOptions)
       if (session === null) throw new ControlPlaneClientError({
         kind: 'protocol',
         code: 'INVALID_AUTH_SESSION_RESPONSE',
@@ -821,8 +842,8 @@ export function createControlPlaneClient(options: ControlPlaneClientOptions): Co
       })
       return session
     },
-    async login(bootstrapProof, requestOptions) {
-      const session = await authSessionRequest('POST', bootstrapProof, requestOptions)
+    async login(bootstrapProof, credentials, requestOptions) {
+      const session = await authSessionRequest('POST', bootstrapProof, credentials, requestOptions)
       if (session === null) throw new ControlPlaneClientError({
         kind: 'protocol',
         code: 'INVALID_AUTH_SESSION_RESPONSE',
@@ -919,7 +940,7 @@ export function createControlPlaneClient(options: ControlPlaneClientOptions): Co
       }
     },
     async logout(requestOptions) {
-      await authSessionRequest('DELETE', null, requestOptions)
+      await authSessionRequest('DELETE', null, null, requestOptions)
       for (const subscription of [...subscriptions]) subscription.close()
     },
     command(command, requestOptions) {
@@ -1588,8 +1609,8 @@ export function createControlPlaneClientDirectory(options: {
     restore(requestOptions) {
       return options.client.restore(requestOptions)
     },
-    login(bootstrapProof, requestOptions) {
-      return options.client.login(bootstrapProof, requestOptions)
+    login(bootstrapProof, credentials, requestOptions) {
+      return options.client.login(bootstrapProof, credentials, requestOptions)
     },
     loginWithPassword(credentials, requestOptions) {
       return options.client.loginWithPassword(credentials, requestOptions)
@@ -2250,8 +2271,8 @@ export function createControlPlaneClientOccupancy(options: {
     restore(requestOptions) {
       return options.client.restore(requestOptions)
     },
-    login(bootstrapProof, requestOptions) {
-      return options.client.login(bootstrapProof, requestOptions)
+    login(bootstrapProof, credentials, requestOptions) {
+      return options.client.login(bootstrapProof, credentials, requestOptions)
     },
     loginWithPassword(credentials, requestOptions) {
       return options.client.loginWithPassword(credentials, requestOptions)
@@ -2957,8 +2978,8 @@ export function createControlPlaneClientUsers(options: {
     restore(requestOptions) {
       return options.client.restore(requestOptions)
     },
-    login(bootstrapProof, requestOptions) {
-      return options.client.login(bootstrapProof, requestOptions)
+    login(bootstrapProof, credentials, requestOptions) {
+      return options.client.login(bootstrapProof, credentials, requestOptions)
     },
     loginWithPassword(credentials, requestOptions) {
       return options.client.loginWithPassword(credentials, requestOptions)
@@ -3698,8 +3719,8 @@ export function createControlPlaneClientCandidates(options: {
     restore(requestOptions) {
       return options.client.restore(requestOptions)
     },
-    login(bootstrapProof, requestOptions) {
-      return options.client.login(bootstrapProof, requestOptions)
+    login(bootstrapProof, credentials, requestOptions) {
+      return options.client.login(bootstrapProof, credentials, requestOptions)
     },
     loginWithPassword(credentials, requestOptions) {
       return options.client.loginWithPassword(credentials, requestOptions)

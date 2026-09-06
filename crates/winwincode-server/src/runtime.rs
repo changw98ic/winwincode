@@ -326,6 +326,30 @@ impl RepositoryRuntimeScheduler {
         })
     }
 
+    /// Adopts the durable active Owner as the local admission identity once
+    /// one exists.
+    ///
+    /// The composition root resolves the Owner once at process startup, so a
+    /// Server initialized after startup (browser bootstrap) would otherwise
+    /// keep the stable default subject for its whole lifetime and reserve
+    /// admission under an identity that can never pass the active-account
+    /// check. Adoption re-reads the account ledger on every drive until the
+    /// default is replaced; a lookup failure leaves the identity untouched so
+    /// admission simply defers.
+    fn refresh_admission_identity(&mut self, storage: &mut winwincode_storage::SqliteStorage) {
+        if self.user_id.0 != DEFAULT_RUNTIME_USER_ID {
+            return;
+        }
+        let active_owner = storage
+            .user_account_ledger()
+            .and_then(|ledger| ledger.active_owner())
+            .ok()
+            .flatten();
+        if let Some(owner) = active_owner {
+            self.user_id = owner.user_id;
+        }
+    }
+
     /// Installs the authenticated local user and the one configured Worker
     /// pool used by operational execution admission.  These identities are
     /// carried into the durable reservation; Worker frames cannot replace
@@ -412,6 +436,15 @@ impl RepositoryRuntimeScheduler {
             max_runtime_millis: runtime_limit_millis.max(LOCAL_ADMISSION_LIMITS.max_runtime_millis),
             ..LOCAL_ADMISSION_LIMITS
         };
+        // Never reserve under an identity that is not an active durable
+        // account: an uninitialized Server still carries the stable default
+        // subject, and a reservation created under it could never pass the
+        // active-account check below. Leave the Job queued (and the
+        // supervisor healthy) until the Owner exists and
+        // `refresh_admission_identity` adopts it.
+        if !admission_user_is_active(storage, &self.user_id)? {
+            return Ok(false);
+        }
         let mut admission = storage.execution_admission().map_err(|error| {
             debug_scheduler_error("open execution admission", &error);
             scheduler_failure()
@@ -442,6 +475,12 @@ impl RepositoryRuntimeScheduler {
         // Admission admits reservations from any active user account instead
         // of one fixed process subject: every browser session now carries its
         // own durable userId, so the reservation subject may differ per user.
+        // The stable default subject is the embedded local runtime's own
+        // pre-initialization identity rather than an account: it can never
+        // resolve through the ledger, so reservations it created (a Server
+        // that queued work before its first Owner existed) stay admissible
+        // for the local pool instead of faulting the supervisor on every
+        // restart.
         let reservation_user = reservation.user_id.clone();
         let reservation_state = reservation.state;
         let reservation_revision = reservation.revision;
@@ -449,7 +488,9 @@ impl RepositoryRuntimeScheduler {
         let reservation_scope = reservation.scope.clone();
         let reservation_pool = reservation.worker_pool_id.clone();
         // The first admission borrow ends here; the reopen below shadows it.
-        if !admission_user_is_active(storage, &reservation_user)? {
+        if reservation_user.0 != DEFAULT_RUNTIME_USER_ID
+            && !admission_user_is_active(storage, &reservation_user)?
+        {
             return Err(RuntimeSupervisorError::new(
                 RuntimeSupervisorErrorKind::Driver,
                 "repository runtime scheduler admission identity differs",
@@ -1023,6 +1064,7 @@ impl RepositoryRuntimeScheduler {
                 "repository runtime scheduler application has stopped",
             )
         })?;
+        self.refresh_admission_identity(&mut state.storage);
         self.prune_worker_authorities(&mut state.storage)?;
         let admission_ready = self.ensure_queued_admission(state, now)?;
         self.dispatch_scheduler_messages(
@@ -1814,4 +1856,311 @@ fn civil_from_days(days_since_epoch: i64) -> (i64, i64, i64) {
     let month = month_prime + if month_prime < 10 { 3 } else { -9 };
     year += i64::from(month <= 2);
     (year, month, day)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::DurableEventHubConfig;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+
+    use winwincode_domain::{
+        OrganizationId, ProductSessionId, ProjectId, RepositoryId, Revision, Sha256Digest,
+        UserAccount, UserAccountRole, UserAccountState, WorkspaceId,
+    };
+    use winwincode_execution_port::generated::{
+        ExecutionJob, ExecutionLimits, ExecutionScope, ExecutionWorkspace,
+        ExecutionWorkspaceWriteMode, ProductSessionExecutionScope,
+        ProductSessionExecutionScopeKind,
+    };
+    use winwincode_storage::{
+        ExecutionJobState, ExecutionQueueScope, ExecutionReservationState, SqliteStorage,
+    };
+
+    const OWNER_USER_ID: &str = "usr_A0A0A0A0A0A0A0A0A0A0A0A0A0";
+    const FOREIGN_USER_ID: &str = "usr_ZZZZZZZZZZZZZZZZZZZZZZZZZZ";
+
+    fn unique_directory(label: &str) -> PathBuf {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let unique = COUNTER.fetch_add(1, AtomicOrdering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "winwincode-runtime-{label}-{}-{unique}",
+            std::process::id()
+        ))
+    }
+
+    fn fixed_instant(text: &str) -> Instant {
+        Instant(text.to_owned())
+    }
+
+    fn fixed_id(prefix: &str) -> String {
+        format!("{prefix}{}", "A".repeat(26))
+    }
+
+    fn test_scope() -> ExecutionQueueScope {
+        ExecutionQueueScope {
+            organization_id: OrganizationId(fixed_id("org_")),
+            workspace_id: WorkspaceId(fixed_id("wsp_")),
+            project_id: ProjectId(fixed_id("prj_")),
+            repository_id: RepositoryId(fixed_id("rep_")),
+            product_session_id: ProductSessionId(fixed_id("psn_")),
+            delivery_id: None,
+        }
+    }
+
+    fn scheduler_with_user(
+        user_id: UserId,
+        directory: &std::path::Path,
+    ) -> RepositoryRuntimeScheduler {
+        RepositoryRuntimeScheduler {
+            state: Arc::new(StdMutex::new(None)),
+            hub: Arc::new(
+                crate::DurableEventHub::open(
+                    directory.join("event-hub"),
+                    DurableEventHubConfig::default(),
+                )
+                .expect("event hub opens"),
+            ),
+            scope: RepositorySchedulerScope {
+                organization_id: OrganizationId(fixed_id("org_")),
+                workspace_id: WorkspaceId(fixed_id("wsp_")),
+                project_id: ProjectId(fixed_id("prj_")),
+                repository_id: RepositoryId(fixed_id("rep_")),
+            },
+            worker_id: WorkerId(fixed_id("wrk_")),
+            worker_instance_id: WorkerInstanceId(fixed_id("wki_")),
+            user_id,
+            worker_pool_id: WorkerPoolId(DEFAULT_RUNTIME_WORKER_POOL_ID.to_owned()),
+            scheduler_generation: fixed_id("gen_"),
+            lease_duration_millis: 30_000,
+            sequence: 0,
+            active_worker_authorities: Vec::new(),
+            pending_interaction_acknowledgements: Vec::new(),
+        }
+    }
+
+    fn queued_job_record(scope: &ExecutionQueueScope) -> (ExecutionJobRecord, ExecutionJob) {
+        let job = ExecutionJob {
+            attempt: 0,
+            execution_profile: "codex-chat".to_owned(),
+            goal: "admission regression fixture".to_owned(),
+            job_id: ExecutionJobId(fixed_id("job_")),
+            limits: ExecutionLimits {
+                deadline_at: fixed_instant("2026-09-07T00:00:00.000Z"),
+                max_artifact_bytes: 1_024,
+                max_runtime_seconds: 3_600,
+            },
+            payload_digest: Sha256Digest(format!("sha256:{}", "A".repeat(64))),
+            scope: ExecutionScope::ProductSessionExecutionScope(ProductSessionExecutionScope {
+                kind: ProductSessionExecutionScopeKind::ProductSession,
+                product_session_id: ProductSessionId(fixed_id("psn_")),
+            }),
+            stage_input: None,
+            workspace: ExecutionWorkspace {
+                checkout_revision: "04e7640e".to_owned(),
+                repository_id: RepositoryId(fixed_id("rep_")),
+                write_mode: ExecutionWorkspaceWriteMode::ReadOnly,
+            },
+        };
+        let dispatch_payload = serde_json::to_vec(&job).expect("canonical job serialization");
+        let record = ExecutionJobRecord {
+            scope: scope.clone(),
+            job_id: job.job_id.clone(),
+            submission_request_id: RequestId(format!("req_{}", "A".repeat(26))),
+            payload_digest: job.payload_digest.clone(),
+            dispatch_payload,
+            state: ExecutionJobState::Queued,
+            attempt: 0,
+            revision: 1,
+            dependencies: Vec::new(),
+            stage_run_id: None,
+            submitted_at: fixed_instant("2026-09-06T00:00:00.000Z"),
+            updated_at: fixed_instant("2026-09-06T00:00:00.000Z"),
+            cancellation: None,
+        };
+        (record, job)
+    }
+
+    fn poison_reservation_with_user(
+        storage: &mut SqliteStorage,
+        scope: &ExecutionQueueScope,
+        job_id: &ExecutionJobId,
+        user_id: &UserId,
+    ) {
+        let mut admission = storage.execution_admission().expect("admission opens");
+        for boundary in admission_boundaries(
+            scope,
+            &WorkerPoolId(DEFAULT_RUNTIME_WORKER_POOL_ID.to_owned()),
+        ) {
+            admission
+                .configure_policy(&ExecutionAdmissionPolicy {
+                    boundary,
+                    limits: LOCAL_ADMISSION_LIMITS,
+                })
+                .expect("admission policy configures");
+        }
+        admission
+            .reserve(&ExecutionReservationRequest {
+                scope: scope.clone(),
+                user_id: user_id.clone(),
+                worker_pool_id: WorkerPoolId(DEFAULT_RUNTIME_WORKER_POOL_ID.to_owned()),
+                job_id: job_id.clone(),
+                request_id: RequestId(format!("req_{}", "B".repeat(26))),
+                repository_access: ExecutionRepositoryAccess::ReadOnly,
+                reserved_tokens: 1_000,
+                reserved_cost_microunits: 1_000,
+                runtime_limit_millis: 3_600_000,
+                submitted_at: fixed_instant("2026-09-06T00:00:00.000Z"),
+            })
+            .expect("stale reservation is created");
+    }
+
+    fn create_active_owner(storage: &mut SqliteStorage) -> UserId {
+        let user_id = UserId(OWNER_USER_ID.to_owned());
+        let account = UserAccount {
+            user_id: user_id.clone(),
+            username: "nb4-owner".to_owned(),
+            normalized_username: "nb4-owner".to_owned(),
+            password_hash: "$argon2id$v=19$m=19456,t=2,p=1$fixture$fixture".to_owned(),
+            role: UserAccountRole::Owner,
+            state: UserAccountState::Active,
+            created_at: fixed_instant("2026-09-06T00:00:00.000Z"),
+            updated_at: fixed_instant("2026-09-06T00:00:00.000Z"),
+            revision: Revision(1),
+        };
+        storage
+            .user_account_ledger()
+            .and_then(|mut ledger| ledger.create(&account))
+            .expect("owner account is created");
+        user_id
+    }
+
+    #[test]
+    fn uninitialized_server_defers_admission_without_reserving() {
+        let directory = unique_directory("defer");
+        std::fs::create_dir_all(&directory).expect("temp directory");
+        let mut storage = SqliteStorage::open(&directory).expect("storage opens");
+        let scope = test_scope();
+        let (record, _) = queued_job_record(&scope);
+        let mut scheduler =
+            scheduler_with_user(UserId(DEFAULT_RUNTIME_USER_ID.to_owned()), &directory);
+        scheduler.refresh_admission_identity(&mut storage);
+
+        let ready = scheduler
+            .ensure_admission(
+                &mut storage,
+                &record,
+                &fixed_instant("2026-09-06T12:00:00.000Z"),
+            )
+            .expect("ensure_admission defers without faulting");
+
+        assert!(!ready, "an uninitialized Server defers the queued job");
+        let admission = storage.execution_admission().expect("admission reopens");
+        assert!(
+            admission
+                .load_reservation_by_job(&record.job_id)
+                .expect("reservation lookup succeeds")
+                .is_none(),
+            "no reservation may be created under the stable default subject"
+        );
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
+    fn restart_with_stale_default_subject_reservation_becomes_admissible() {
+        let directory = unique_directory("adopt");
+        std::fs::create_dir_all(&directory).expect("temp directory");
+        let mut storage = SqliteStorage::open(&directory).expect("storage opens");
+        let scope = test_scope();
+        let (record, _) = queued_job_record(&scope);
+        let default_user = UserId(DEFAULT_RUNTIME_USER_ID.to_owned());
+        poison_reservation_with_user(&mut storage, &scope, &record.job_id, &default_user);
+        // The restarted Server resolves a durable Owner at startup (the
+        // browser bootstrap ran before the previous shutdown).
+        create_active_owner(&mut storage);
+
+        let mut scheduler =
+            scheduler_with_user(UserId(DEFAULT_RUNTIME_USER_ID.to_owned()), &directory);
+        scheduler.refresh_admission_identity(&mut storage);
+        assert_eq!(
+            scheduler.user_id.0, OWNER_USER_ID,
+            "the durable active Owner is adopted as the admission identity"
+        );
+
+        let ready = scheduler
+            .ensure_admission(
+                &mut storage,
+                &record,
+                &fixed_instant("2026-09-06T12:00:00.000Z"),
+            )
+            .expect("the stale local reservation is admitted without faulting");
+        assert!(ready, "the queued job becomes schedulable again");
+
+        let admission = storage.execution_admission().expect("admission reopens");
+        let reservation = admission
+            .load_reservation_by_job(&record.job_id)
+            .expect("reservation lookup succeeds")
+            .expect("the reservation still exists");
+        assert_eq!(reservation.state, ExecutionReservationState::Running);
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
+    fn fresh_reservations_carry_the_adopted_owner_identity() {
+        let directory = unique_directory("fresh");
+        std::fs::create_dir_all(&directory).expect("temp directory");
+        let mut storage = SqliteStorage::open(&directory).expect("storage opens");
+        let owner = create_active_owner(&mut storage);
+        let scope = test_scope();
+        let (record, _) = queued_job_record(&scope);
+        let mut scheduler =
+            scheduler_with_user(UserId(DEFAULT_RUNTIME_USER_ID.to_owned()), &directory);
+        scheduler.refresh_admission_identity(&mut storage);
+        assert_eq!(scheduler.user_id, owner);
+
+        let ready = scheduler
+            .ensure_admission(
+                &mut storage,
+                &record,
+                &fixed_instant("2026-09-06T12:00:00.000Z"),
+            )
+            .expect("ensure_admission succeeds");
+        assert!(ready);
+
+        let admission = storage.execution_admission().expect("admission reopens");
+        let reservation = admission
+            .load_reservation_by_job(&record.job_id)
+            .expect("reservation lookup succeeds")
+            .expect("the reservation was created");
+        assert_eq!(reservation.user_id, owner);
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
+    fn inactive_foreign_reservation_subject_still_fails_closed() {
+        let directory = unique_directory("foreign");
+        std::fs::create_dir_all(&directory).expect("temp directory");
+        let mut storage = SqliteStorage::open(&directory).expect("storage opens");
+        let owner = create_active_owner(&mut storage);
+        let scope = test_scope();
+        let (record, _) = queued_job_record(&scope);
+        poison_reservation_with_user(
+            &mut storage,
+            &scope,
+            &record.job_id,
+            &UserId(FOREIGN_USER_ID.to_owned()),
+        );
+
+        let scheduler = scheduler_with_user(owner, &directory);
+        let error = scheduler
+            .ensure_admission(
+                &mut storage,
+                &record,
+                &fixed_instant("2026-09-06T12:00:00.000Z"),
+            )
+            .expect_err("a foreign inactive reservation subject still fails closed");
+        assert!(matches!(error.kind(), RuntimeSupervisorErrorKind::Driver));
+        std::fs::remove_dir_all(&directory).ok();
+    }
 }

@@ -79,6 +79,10 @@ export function mountLoginPage(options: LoginPageOptions): LoginPage {
   const initializationHeading = element(document, 'p', 'wwc-login-initialization-heading')
   const initializationDetail = element(document, 'p', 'wwc-login-initialization-detail')
   const initializationForm = element(document, 'form', 'wwc-login-initialization-form')
+  const initializationUsernameLabel = element(document, 'label', 'wwc-login-label')
+  const initializationUsername = element(document, 'input', 'wwc-login-control wwc-login-initialization-username')
+  const initializationPasswordLabel = element(document, 'label', 'wwc-login-label')
+  const initializationPassword = element(document, 'input', 'wwc-login-control wwc-login-initialization-password')
   const proofLabel = element(document, 'label', 'wwc-login-label')
   const proof = element(document, 'input', 'wwc-login-control wwc-login-initialization-proof')
   const initializationSubmit = element(document, 'button', 'wwc-login-initialization-submit')
@@ -121,6 +125,26 @@ export function mountLoginPage(options: LoginPageOptions): LoginPage {
 
   initializationHeading.textContent = 'First-time initialization'
   initializationDetail.textContent = 'This server has no accounts yet. Enter the bootstrap proof from the server owner environment to create the first Owner.'
+  initializationUsername.id = 'wwc-login-initialization-username'
+  initializationUsername.name = 'username'
+  initializationUsername.type = 'text'
+  initializationUsername.autocomplete = 'username'
+  initializationUsername.spellcheck = false
+  initializationUsername.setAttribute('autocapitalize', 'none')
+  initializationUsername.maxLength = 128
+  initializationUsername.required = true
+  initializationUsernameLabel.htmlFor = initializationUsername.id
+  initializationUsernameLabel.textContent = 'Owner username'
+
+  initializationPassword.id = 'wwc-login-initialization-password'
+  initializationPassword.name = 'password'
+  initializationPassword.type = 'password'
+  initializationPassword.autocomplete = 'new-password'
+  initializationPassword.maxLength = 4096
+  initializationPassword.required = true
+  initializationPasswordLabel.htmlFor = initializationPassword.id
+  initializationPasswordLabel.textContent = 'Owner password'
+
   proof.id = 'wwc-login-initialization-proof'
   proof.type = 'password'
   proof.autocomplete = 'off'
@@ -131,7 +155,15 @@ export function mountLoginPage(options: LoginPageOptions): LoginPage {
   proofLabel.textContent = 'Bootstrap proof'
   initializationSubmit.type = 'submit'
   initializationSubmit.textContent = 'Initialize owner account'
-  initializationForm.append(proofLabel, proof, initializationSubmit)
+  initializationForm.append(
+    proofLabel,
+    proof,
+    initializationUsernameLabel,
+    initializationUsername,
+    initializationPasswordLabel,
+    initializationPassword,
+    initializationSubmit,
+  )
   initialization.append(initializationHeading, initializationDetail, initializationForm)
   initialization.hidden = true
 
@@ -164,10 +196,14 @@ export function mountLoginPage(options: LoginPageOptions): LoginPage {
     setFieldError(username, described)
     setFieldError(password, described)
     setFieldError(proof, nextFailure !== null && state.source === 'initialization')
+    setFieldError(initializationUsername, nextFailure !== null && state.source === 'initialization')
+    setFieldError(initializationPassword, nextFailure !== null && state.source === 'initialization')
     username.disabled = busy || finished
     password.disabled = busy || finished
     submit.disabled = busy || finished
     proof.disabled = busy || finished
+    initializationUsername.disabled = busy || finished
+    initializationPassword.disabled = busy || finished
     initializationSubmit.disabled = busy || finished
     form.setAttribute('aria-busy', busy ? 'true' : 'false')
     initializationForm.setAttribute('aria-busy', busy ? 'true' : 'false')
@@ -189,10 +225,21 @@ export function mountLoginPage(options: LoginPageOptions): LoginPage {
   }
   const onInitialization = (event: SubmitEvent) => {
     event.preventDefault()
-    if (proof.value.length === 0) return
+    if (
+      proof.value.length === 0
+      || initializationUsername.value.length === 0
+      || initializationPassword.value.length === 0
+    ) return
     const submittedProof = proof.value
+    const submittedUsername = initializationUsername.value
+    const submittedPassword = initializationPassword.value
     proof.value = ''
-    void options.model.initialize(submittedProof)
+    // Secret-safe submission: the password leaves the DOM before the await.
+    initializationPassword.value = ''
+    void options.model.initialize(
+      submittedProof,
+      { username: submittedUsername, password: submittedPassword },
+    )
   }
   const onEdit = () => { clearErrorDraft() }
   form.addEventListener('submit', onSignIn)
@@ -200,6 +247,8 @@ export function mountLoginPage(options: LoginPageOptions): LoginPage {
   username.addEventListener('input', onEdit)
   password.addEventListener('input', onEdit)
   proof.addEventListener('input', onEdit)
+  initializationUsername.addEventListener('input', onEdit)
+  initializationPassword.addEventListener('input', onEdit)
 
   const unsubscribe = options.model.subscribe(render)
 
@@ -215,11 +264,15 @@ export function mountLoginPage(options: LoginPageOptions): LoginPage {
       username.value = ''
       password.value = ''
       proof.value = ''
+      initializationUsername.value = ''
+      initializationPassword.value = ''
       form.removeEventListener('submit', onSignIn)
       initializationForm.removeEventListener('submit', onInitialization)
       username.removeEventListener('input', onEdit)
       password.removeEventListener('input', onEdit)
       proof.removeEventListener('input', onEdit)
+      initializationUsername.removeEventListener('input', onEdit)
+      initializationPassword.removeEventListener('input', onEdit)
       options.root.replaceChildren()
     },
   }

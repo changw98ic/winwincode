@@ -62,7 +62,6 @@ async fn main() {
 
 async fn run() -> Result<(), Box<dyn Error>> {
     let config = environment_config()?;
-    let actor = actor();
     let scope = repository_scope();
     seed_once(config.data_directory())?;
 
@@ -96,6 +95,13 @@ async fn run() -> Result<(), Box<dyn Error>> {
         )?,
     )?);
     let api = Arc::new(GeneratedContractDispatcher::new(application));
+    // The browser session acts as the durable Owner created at seed time, so
+    // the revocation signal must address that Owner's principal.
+    let owner_user_id = seed_owner_account(config.data_directory())?;
+    let owner_actor = Actor::UserActor(UserActor {
+        kind: UserActorKind::User,
+        id: owner_user_id.clone(),
+    });
     let accounts = Arc::new(UserAccountService::open(config.data_directory())?);
     let sessions = Arc::new(SqliteAuthSessionManager::open(
         config.data_directory().join("auth-sessions"),
@@ -108,7 +114,13 @@ async fn run() -> Result<(), Box<dyn Error>> {
         None,
     )?);
     let authenticator: Arc<dyn RequestAuthenticator> = sessions.clone();
-    let principal = AuthenticatedPrincipal::new(actor.clone(), vec![scope.clone()])?;
+    let principal = AuthenticatedPrincipal::new(
+        Actor::UserActor(UserActor {
+            kind: UserActorKind::User,
+            id: owner_user_id,
+        }),
+        vec![scope.clone()],
+    )?;
     let running = start_server(config, Arc::clone(&sessions), authenticator, api, None).await?;
     println!(
         "{{\"status\":\"ready\",\"port\":{}}}",
@@ -127,7 +139,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
                 &scope,
                 &ControlPlaneWebSocketAuthorizationEpoch(2),
             )?;
-            sessions.replace_authorized_scopes(&actor, Vec::new())?;
+            sessions.replace_authorized_scopes(&owner_actor, Vec::new())?;
             tokio::signal::ctrl_c().await?;
         }
     }
@@ -145,7 +157,10 @@ fn seed_once(data_directory: &std::path::Path) -> Result<(), Box<dyn Error>> {
     seed_provider_and_credential(&mut storage)?;
     let runtime = prepare_runtime(&mut storage)?;
     let session_revision = prepare_product_session(&mut storage, &runtime)?;
-    prepare_approval(&mut storage, &runtime, session_revision)?;
+    // The browser signs in as the durable Owner (AUTH-100.3), so the seeded
+    // approval's authorized actor must be that Owner account.
+    let owner_user_id = seed_owner_account(data_directory)?;
+    prepare_approval(&mut storage, &runtime, session_revision, owner_user_id)?;
     Box::new(storage).close()?;
     std::fs::write(marker, b"v1\n")?;
     Ok(())
@@ -387,10 +402,24 @@ fn prepare_product_session(
     Ok(receipt.record.session().revision())
 }
 
+fn seed_owner_account(data_directory: &std::path::Path) -> Result<UserId, Box<dyn Error>> {
+    let accounts = UserAccountService::open(data_directory)?;
+    if let Some(existing) = accounts.active_owner_id()? {
+        return Ok(existing);
+    }
+    let owner = accounts.initialize_owner(
+        "owner",
+        "browser-owner-password-1",
+        &at(0),
+    )?;
+    Ok(owner.user_id)
+}
+
 fn prepare_approval(
     storage: &mut SqliteStorage,
     runtime: &WorkerSlotAuthority,
     product_session_revision: u64,
+    authorized_user: UserId,
 ) -> Result<(), Box<dyn Error>> {
     let scope_key = receipt_scope_key()?;
     let authority = GateInteractionAuthority {
@@ -426,7 +455,7 @@ fn prepare_approval(
         },
         subject: GateInteractionSubject::Approval(ApprovalId(id("apr", 1))),
         authority: authority.clone(),
-        authorized_actor: GateInteractionActor::User(UserId(id("usr", 1))),
+        authorized_actor: GateInteractionActor::User(authorized_user),
         expires_at: expires_at(),
         attention_decisions: Vec::new(),
     })?;

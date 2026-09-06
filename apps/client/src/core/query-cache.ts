@@ -411,8 +411,8 @@ export function createQueryCache(options: { readonly client: ControlPlaneClient 
       clear('authorization-epoch')
       return session
     },
-    async login(bootstrapProof, requestOptions) {
-      const session = await options.client.login(bootstrapProof, requestOptions)
+    async login(bootstrapProof, credentials, requestOptions) {
+      const session = await options.client.login(bootstrapProof, credentials, requestOptions)
       clear('authorization-epoch')
       return session
     },

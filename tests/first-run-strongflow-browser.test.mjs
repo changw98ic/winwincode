@@ -295,7 +295,7 @@ test('a real browser runs the first-use vertical from sign-in into StrongFlow', 
   assert.equal(signIn.unsigned.checklistHidden, true)
   assert.deepEqual(Object.values(signIn.unsigned.secrets), [false, false, false, false])
   assert.equal(signIn.rejected.status, 'Sign in required')
-  assert.equal(signIn.rejected.error, 'The bootstrap proof was rejected or expired.')
+  assert.equal(signIn.rejected.error, 'The bootstrap proof was rejected.')
   assert.equal(signIn.rejected.diagnosticLeak, false)
   assert.deepEqual(Object.values(signIn.rejected.secrets), [false, false, false, false])
   assert.equal(signIn.signedIn.status, 'signed-in')
