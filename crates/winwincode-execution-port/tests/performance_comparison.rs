@@ -166,13 +166,12 @@ fn conflicting_settled_charge_replay_is_rejected_as_one_evidence_failure() {
 }
 
 #[test]
-fn debug_probe_is_retained_as_structured_execution_evidence() {
+fn debug_probe_is_rejected_from_react_vs_delegated_performance_evidence() {
     let run = run_evidence('d', ExecutionMode::DebugProbe, (1, 40, 5, 10, 120, 300));
     let call = model_call(run.run_id.clone(), digest('6'), 40, 5, 10, 120, Some(9));
 
-    let comparison = summarize_performance_v0(&[run], &[call]).expect("DebugProbe evidence");
-    assert_eq!(comparison.react.sample_count, 0);
-    assert_eq!(comparison.structured.sample_count, 1);
-    assert_eq!(comparison.structured.strong_model_call_count, 1);
-    assert_eq!(comparison.structured.total_tokens, 55);
+    assert_eq!(
+        summarize_performance_v0(&[run], &[call]),
+        Err(PerformanceV0ComparisonError::UnsupportedExecutionMode)
+    );
 }

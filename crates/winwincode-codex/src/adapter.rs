@@ -180,9 +180,10 @@ impl ProductionCodexConfig {
     ///
     /// # Errors
     ///
-    /// Rejects relative or missing paths, blank routing fields, and malformed
-    /// capability discovery.
+    /// Rejects relative or missing paths, blank routing fields, execution
+    /// modes without production routing, and malformed capability discovery.
     pub fn try_new(options: ProductionCodexOptions) -> Result<Self, ProductionCodexError> {
+        released_production_execution_mode_required(options.execution_mode)?;
         if !options.data_directory.is_absolute()
             || !options.helper_executable.is_absolute()
             || !valid_route_token(&options.provider)
@@ -1610,12 +1611,9 @@ impl ProductionCodexAdapter {
         run_key: &str,
         job: &ExecutionJob,
     ) -> Result<(), ProductionCodexError> {
+        let execution_mode = performance_execution_mode(self.config.execution_mode, job)?;
         self.store
-            .register_performance_run(
-                run_key,
-                performance_execution_mode(self.config.execution_mode, job),
-                self.config.observer_mode,
-            )
+            .register_performance_run(run_key, execution_mode, self.config.observer_mode)
             .map_err(map_store_error)
     }
 
@@ -4084,14 +4082,45 @@ fn sealed_job_role_execution_mode(job: &ExecutionJob) -> RoleExecutionMode {
     }
 }
 
-fn performance_execution_mode(configured: ExecutionMode, job: &ExecutionJob) -> ExecutionMode {
-    match sealed_job_role_execution_mode(job) {
-        RoleExecutionMode::DelegatedBatch => ExecutionMode::DelegatedPatch,
-        RoleExecutionMode::React if configured == ExecutionMode::DelegatedPatchShadow => {
-            ExecutionMode::DelegatedPatchShadow
-        }
-        RoleExecutionMode::React => ExecutionMode::React,
+fn performance_execution_mode(
+    configured: ExecutionMode,
+    job: &ExecutionJob,
+) -> Result<ExecutionMode, ProductionCodexError> {
+    performance_execution_mode_for_role(configured, &sealed_job_role_execution_mode(job))
+}
+
+fn performance_execution_mode_for_role(
+    configured: ExecutionMode,
+    role_mode: &RoleExecutionMode,
+) -> Result<ExecutionMode, ProductionCodexError> {
+    released_production_execution_mode_required(configured)?;
+    match role_mode {
+        RoleExecutionMode::DelegatedBatch => Ok(ExecutionMode::DelegatedPatch),
+        RoleExecutionMode::DebugProbe => Err(debug_probe_runtime_unavailable()),
+        RoleExecutionMode::React => match configured {
+            ExecutionMode::DelegatedPatchShadow => Ok(ExecutionMode::DelegatedPatchShadow),
+            ExecutionMode::React | ExecutionMode::DelegatedPatch => Ok(ExecutionMode::React),
+            ExecutionMode::DebugProbe => Err(debug_probe_runtime_unavailable()),
+        },
     }
+}
+
+fn released_production_execution_mode_required(
+    mode: ExecutionMode,
+) -> Result<(), ProductionCodexError> {
+    match mode {
+        ExecutionMode::React
+        | ExecutionMode::DelegatedPatchShadow
+        | ExecutionMode::DelegatedPatch => Ok(()),
+        ExecutionMode::DebugProbe => Err(debug_probe_runtime_unavailable()),
+    }
+}
+
+const fn debug_probe_runtime_unavailable() -> ProductionCodexError {
+    ProductionCodexError::new(
+        ProductionCodexErrorKind::InvalidConfiguration,
+        "DebugProbe runtime routing is not available in this release",
+    )
 }
 
 fn sealed_role_session_policy(
@@ -5209,8 +5238,9 @@ mod tests {
         decode_kernel_event, delegated_budget_stop, delegated_budget_stopped_counters,
         delegated_change_batch_event, load_stored_run, migrate_stored_run_role_policies_v1_to_v2,
         interactive_input_choice_replay_keys,
-        performance_execution_mode, project_helper, read_helper_bytes, role_session_policy,
-        project_interactive_input_choices,
+        performance_execution_mode, performance_execution_mode_for_role, project_helper,
+        project_interactive_input_choices, read_helper_bytes,
+        released_production_execution_mode_required, role_session_policy,
         seal_helper, sealed_job_role_execution_mode, submission_input_digest,
         terminate_helper_process_group, turn_submission_options, validate_delegated_patch,
         validate_delegated_patch_path, validate_helper_image, validate_sealed_helper,
@@ -5285,8 +5315,37 @@ mod tests {
             job.workspace.write_mode = write_mode;
             assert_eq!(sealed_job_role_execution_mode(&job), expected_role);
             assert_eq!(
-                performance_execution_mode(configured, &job),
+                performance_execution_mode(configured, &job).expect("released performance mode"),
                 expected_performance
+            );
+        }
+
+        for (configured, role_mode) in [
+            (ExecutionMode::DebugProbe, RoleExecutionMode::React),
+            (ExecutionMode::React, RoleExecutionMode::DebugProbe),
+            (ExecutionMode::DebugProbe, RoleExecutionMode::DebugProbe),
+        ] {
+            assert_eq!(
+                performance_execution_mode_for_role(configured, &role_mode)
+                    .expect_err("DebugProbe performance routing must fail closed")
+                    .kind(),
+                ProductionCodexErrorKind::InvalidConfiguration
+            );
+        }
+    }
+
+    #[test]
+    fn production_execution_modes_fail_closed_until_debug_probe_routing_exists() {
+        for (mode, expected) in [
+            (ExecutionMode::React, Ok(())),
+            (ExecutionMode::DelegatedPatchShadow, Ok(())),
+            (ExecutionMode::DelegatedPatch, Ok(())),
+            (ExecutionMode::DebugProbe, Err(())),
+        ] {
+            assert_eq!(
+                released_production_execution_mode_required(mode).map_err(|_| ()),
+                expected,
+                "mode={mode:?}"
             );
         }
     }

@@ -44,6 +44,7 @@ const MAX_PLANNER_SOLUTION_BYTES: usize = 1024 * 1024;
 const MAX_STAGE_PROMPT_BYTES: usize = 1024 * 1024;
 const DELEGATED_EXECUTOR_INSTRUCTIONS: &str = "Produce only one bounded ChangeBatch proposal from the approved delivery plan in the read-only candidate workspace. Return the canonical proposal and content-addressed Artifact references. Do not modify workspace files, apply the patch, approve, or verify your own work.";
 const DELEGATED_REMEDIATOR_INSTRUCTIONS: &str = "Produce only one bounded Repair proposal from reviewed findings in the read-only candidate workspace. Return the canonical RepairEnvelope, ChangeBatch proposal, and content-addressed Artifact references. Do not modify workspace files, apply the repair, broaden scope, approve, or verify your own work.";
+const DEBUG_PROBE_DEVELOPER_INSTRUCTIONS: &str = "Investigate the current failure from the read-only candidate workspace. Produce one bounded DebugProbePlan with explicit hypotheses, commands, paths, resource claims, budgets, and a round completion rule. Do not modify candidate files, apply a fix, install or upgrade dependencies, approve, or verify final delivery.";
 
 /// Fixed structured-output schema for the generated canonical
 /// `ChangeBatchProposal` DTO. Bounds and closed fields mirror the execution
@@ -246,12 +247,14 @@ pub fn role_session_policy(
                     "Delivery-stage execution profile is not a canonical StrongFlow role",
                 )
             })?;
-            let workspace_mode = if execution_mode == RoleExecutionMode::DelegatedBatch
-                && matches!(job.execution_profile.as_str(), "executor" | "remediator")
-            {
-                "candidate-read-only"
-            } else {
-                role.workspace_mode
+            let workspace_mode = match &execution_mode {
+                RoleExecutionMode::DebugProbe => "candidate-read-only",
+                RoleExecutionMode::DelegatedBatch
+                    if matches!(job.execution_profile.as_str(), "executor" | "remediator") =>
+                {
+                    "candidate-read-only"
+                }
+                RoleExecutionMode::React | RoleExecutionMode::DelegatedBatch => role.workspace_mode,
             };
             let expected_write_mode = if matches!(workspace_mode, "candidate-write") {
                 ExecutionWorkspaceWriteMode::Candidate
@@ -264,12 +267,14 @@ pub fn role_session_policy(
                     "Delivery role and workspace write mode do not agree",
                 ));
             }
-            let developer_instructions = match (&execution_mode, job.execution_profile.as_str()) {
-                (RoleExecutionMode::DelegatedBatch, "executor") => DELEGATED_EXECUTOR_INSTRUCTIONS,
-                (RoleExecutionMode::DelegatedBatch, "remediator") => {
-                    DELEGATED_REMEDIATOR_INSTRUCTIONS
-                }
-                _ => role.developer_instructions,
+            let developer_instructions = match &execution_mode {
+                RoleExecutionMode::DebugProbe => DEBUG_PROBE_DEVELOPER_INSTRUCTIONS,
+                RoleExecutionMode::DelegatedBatch => match job.execution_profile.as_str() {
+                    "executor" => DELEGATED_EXECUTOR_INSTRUCTIONS,
+                    "remediator" => DELEGATED_REMEDIATOR_INSTRUCTIONS,
+                    _ => role.developer_instructions,
+                },
+                RoleExecutionMode::React => role.developer_instructions,
             };
             Ok(Some(RoleSessionPolicy {
                 schema_version: i64::from(ROLE_POLICY_SCHEMA_VERSION),
@@ -1457,6 +1462,50 @@ mod tests {
             );
             assert!(
                 !policy.developer_instructions.contains("Apply only"),
+                "{role}"
+            );
+        }
+    }
+
+    #[test]
+    fn debug_probe_all_roles_require_one_read_only_candidate_policy() {
+        for role in [
+            "requirements",
+            "solution",
+            "planner",
+            "executor",
+            "reviewer",
+            "verifier",
+            "adversarial-verifier",
+            "remediator",
+        ] {
+            let mut writable = delivery_job(role);
+            writable.workspace.write_mode = ExecutionWorkspaceWriteMode::Candidate;
+            assert_eq!(
+                role_session_policy(&writable, RoleExecutionMode::DebugProbe)
+                    .expect_err("DebugProbe must reject candidate-write authority")
+                    .code(),
+                StageProductErrorCode::InvalidScope,
+                "{role}"
+            );
+
+            let mut read_only = delivery_job(role);
+            read_only.workspace.write_mode = ExecutionWorkspaceWriteMode::ReadOnly;
+            let policy = role_session_policy(&read_only, RoleExecutionMode::DebugProbe)
+                .expect("DebugProbe role policy")
+                .expect("Delivery role");
+            assert_eq!(
+                policy.workspace_mode,
+                RoleSessionPolicyWorkspaceMode::CandidateReadOnly,
+                "{role}"
+            );
+            assert_eq!(
+                policy.execution_mode,
+                RoleExecutionMode::DebugProbe,
+                "{role}"
+            );
+            assert_eq!(
+                policy.developer_instructions, DEBUG_PROBE_DEVELOPER_INSTRUCTIONS,
                 "{role}"
             );
         }

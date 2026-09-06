@@ -168,6 +168,33 @@ fn delegated_executor_freezes_only_under_its_read_only_composer_policy() {
 }
 
 #[test]
+fn structured_modes_reject_writable_executor_workspaces() {
+    let fixture = Fixture::new();
+    let active = active_job(&fixture.repository_id, "structured-writer", "executor");
+    let mut workspace = fixture
+        .manager()
+        .create(&active)
+        .expect("create structured writer workspace");
+
+    for mode in [
+        RoleExecutionMode::DelegatedBatch,
+        RoleExecutionMode::DebugProbe,
+    ] {
+        assert_eq!(
+            prepare_candidate_artifact(&active, &mut workspace, mode.clone())
+                .expect_err("structured role mode must reject candidate-write authority")
+                .code(),
+            CandidateProductErrorCode::InvalidScope,
+            "mode={mode:?}"
+        );
+    }
+
+    workspace
+        .close(WorkspaceCloseReason::Cancelled)
+        .expect("close structured writer workspace");
+}
+
+#[test]
 fn non_writer_and_cancelled_jobs_emit_no_candidate() {
     let fixture = Fixture::new();
     let mut reviewer = active_job(&fixture.repository_id, "reviewer", "reviewer");

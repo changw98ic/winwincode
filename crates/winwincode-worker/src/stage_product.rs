@@ -168,7 +168,9 @@ pub fn prepare_candidate_artifact(
     }
     let expected_write_mode = match execution_mode {
         RoleExecutionMode::React => ExecutionWorkspaceWriteMode::Candidate,
-        RoleExecutionMode::DelegatedBatch => ExecutionWorkspaceWriteMode::ReadOnly,
+        RoleExecutionMode::DelegatedBatch | RoleExecutionMode::DebugProbe => {
+            ExecutionWorkspaceWriteMode::ReadOnly
+        }
     };
     if active.job.workspace.write_mode != expected_write_mode {
         return Err(CandidateProductError::new(

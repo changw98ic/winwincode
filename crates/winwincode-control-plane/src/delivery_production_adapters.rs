@@ -394,7 +394,11 @@ impl LocalDeliveryAuthority {
             }
             _ => (None, delivery.snapshot().spec.base_revision.clone()),
         };
-        let write_mode = if self.config.execution_mode == ExecutionMode::DelegatedPatch {
+        let structured_read_only = match self.config.execution_mode {
+            ExecutionMode::React | ExecutionMode::DelegatedPatchShadow => false,
+            ExecutionMode::DelegatedPatch | ExecutionMode::DebugProbe => true,
+        };
+        let write_mode = if structured_read_only {
             ExecutionWorkspaceWriteMode::ReadOnly
         } else if matches!(intent.role.as_str(), "executor" | "remediator") {
             ExecutionWorkspaceWriteMode::Candidate
@@ -896,6 +900,16 @@ fn review_handoff(
 }
 
 fn validate_config(config: &LocalDeliveryAdapterConfig) -> Result<(), LocalDeliveryAdapterError> {
+    match config.execution_mode {
+        ExecutionMode::React
+        | ExecutionMode::DelegatedPatchShadow
+        | ExecutionMode::DelegatedPatch => {}
+        ExecutionMode::DebugProbe => {
+            return Err(LocalDeliveryAdapterError::new(
+                "DebugProbe Delivery routing is not available in this release",
+            ));
+        }
+    }
     if config.repository_root.as_os_str().is_empty()
         || !(0..=100).contains(&config.max_rework_attempts)
         || !(1..=604_800).contains(&config.max_runtime_seconds)

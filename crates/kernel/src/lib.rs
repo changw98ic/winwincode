@@ -595,6 +595,15 @@ fn canonical_role_policy(
     role_id: &RoleSessionPolicyRoleId,
     execution_mode: &RoleExecutionMode,
 ) -> CanonicalRolePolicy {
+    match execution_mode {
+        RoleExecutionMode::DebugProbe => {
+            return CanonicalRolePolicy {
+                workspace_mode: "candidate-read-only",
+                workspace_write: false,
+            };
+        }
+        RoleExecutionMode::React | RoleExecutionMode::DelegatedBatch => {}
+    }
     let mut policy = match role_id {
         RoleSessionPolicyRoleId::Requirements
         | RoleSessionPolicyRoleId::Solution
@@ -2189,6 +2198,11 @@ mod tests {
             let policy = canonical_role_policy(&generated_role_id(role), &RoleExecutionMode::React);
             assert_eq!(policy.workspace_mode, workspace, "{role}");
             assert_eq!(policy.workspace_write, writer, "{role}");
+
+            let debug_probe =
+                canonical_role_policy(&generated_role_id(role), &RoleExecutionMode::DebugProbe);
+            assert_eq!(debug_probe.workspace_mode, "candidate-read-only", "{role}");
+            assert!(!debug_probe.workspace_write, "{role}");
         }
     }
 

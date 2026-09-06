@@ -789,11 +789,24 @@ fn configured_action_signing_key() -> Result<ActionEnforcementSigningKey, Box<dy
 }
 
 fn configured_server_execution_mode() -> Result<ExecutionMode, Box<dyn std::error::Error>> {
-    ExecutionMode::from_config(&required_environment_or(
+    let mode = ExecutionMode::from_config(&required_environment_or(
         "WWC_SERVER_EXECUTION_MODE",
         "react",
     )?)
-    .ok_or_else(|| "WWC_SERVER_EXECUTION_MODE contains an unsupported execution mode".into())
+    .ok_or("WWC_SERVER_EXECUTION_MODE contains an unsupported execution mode")?;
+    released_server_execution_mode_required(mode)?;
+    Ok(mode)
+}
+
+fn released_server_execution_mode_required(mode: ExecutionMode) -> Result<(), &'static str> {
+    match mode {
+        ExecutionMode::React
+        | ExecutionMode::DelegatedPatchShadow
+        | ExecutionMode::DelegatedPatch => Ok(()),
+        ExecutionMode::DebugProbe => {
+            Err("WWC_SERVER_EXECUTION_MODE selects DebugProbe before runtime routing is available")
+        }
+    }
 }
 
 fn configured_server_observer_mode() -> Result<ObserverMode, Box<dyn std::error::Error>> {
@@ -1210,4 +1223,44 @@ fn optional_duration_seconds(
         Err(error) => return Err(error.into()),
     };
     Ok(Duration::from_secs(seconds))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        ExecutionMode, ObserverMode, released_server_execution_mode_required,
+        released_server_observer_route_required,
+    };
+
+    #[test]
+    fn execution_modes_fail_closed_until_debug_probe_routing_exists() {
+        for (mode, expected) in [
+            (ExecutionMode::React, Ok(())),
+            (ExecutionMode::DelegatedPatchShadow, Ok(())),
+            (ExecutionMode::DelegatedPatch, Ok(())),
+            (ExecutionMode::DebugProbe, Err(())),
+        ] {
+            assert_eq!(
+                released_server_execution_mode_required(mode).map_err(|_| ()),
+                expected,
+                "mode={mode:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn observer_modes_have_one_closed_server_release_configuration() {
+        for (mode, expected_route) in [
+            (ObserverMode::Off, Ok(false)),
+            (ObserverMode::AmbiguousOnly, Ok(true)),
+            (ObserverMode::Shadow, Err(())),
+            (ObserverMode::Always, Err(())),
+        ] {
+            assert_eq!(
+                released_server_observer_route_required(mode).map_err(|_| ()),
+                expected_route,
+                "mode={mode:?}"
+            );
+        }
+    }
 }

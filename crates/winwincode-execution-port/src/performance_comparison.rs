@@ -112,6 +112,7 @@ pub enum PerformanceV0ComparisonError {
     InvalidIdentity,
     InvalidMetric,
     MetricOverflow,
+    UnsupportedExecutionMode,
     UnknownRun,
     ConflictingRunReplay,
     ConflictingModelCallReplay,
@@ -125,6 +126,9 @@ impl fmt::Display for PerformanceV0ComparisonError {
             Self::InvalidIdentity => "performance evidence identity is invalid",
             Self::InvalidMetric => "performance evidence metric is invalid",
             Self::MetricOverflow => "performance evidence metric overflowed",
+            Self::UnsupportedExecutionMode => {
+                "performance evidence execution mode is not supported"
+            }
             Self::UnknownRun => "model-call evidence references an unknown run",
             Self::ConflictingRunReplay => "run replay conflicts with retained evidence",
             Self::ConflictingModelCallReplay => {
@@ -168,7 +172,8 @@ struct ModelCallTotals {
 ///
 /// # Errors
 ///
-/// Returns an error for malformed values, unknown identities, conflicting
+/// Returns an error for malformed values, an execution mode outside the
+/// React-versus-DelegatedBatch comparison, unknown identities, conflicting
 /// replays, overflow, or a report that disagrees with its model-call rows.
 pub fn summarize_performance_v0(
     runs: &[PerformanceV0RunEvidence],
@@ -185,13 +190,13 @@ pub fn summarize_performance_v0(
                 return Err(PerformanceV0ComparisonError::ConflictingRunReplay);
             }
             add_metric(
-                &mut summary_mut(&mut comparison, arm(run)).duplicate_run_write_count,
+                &mut summary_mut(&mut comparison, arm(run)?).duplicate_run_write_count,
                 1,
             )?;
             continue;
         }
 
-        let summary = summary_mut(&mut comparison, arm(run));
+        let summary = summary_mut(&mut comparison, arm(run)?);
         add_metric(&mut summary.sample_count, 1)?;
         add_metric(
             &mut summary.strong_model_call_count,
@@ -231,7 +236,7 @@ pub fn summarize_performance_v0(
             if existing != call {
                 return Err(PerformanceV0ComparisonError::ConflictingModelCallReplay);
             }
-            let summary = summary_mut(&mut comparison, arm(run));
+            let summary = summary_mut(&mut comparison, arm(run)?);
             add_metric(&mut summary.duplicate_model_call_write_count, 1)?;
             if let Some(cost) = call.actual_cost_microunits {
                 add_metric(&mut summary.duplicate_settled_charge_write_count, 1)?;
@@ -240,7 +245,7 @@ pub fn summarize_performance_v0(
             continue;
         }
 
-        let summary = summary_mut(&mut comparison, arm(run));
+        let summary = summary_mut(&mut comparison, arm(run)?);
         if call.completed {
             match call.model_kind {
                 PerformanceV0ModelKind::Primary => {
@@ -311,10 +316,13 @@ fn reconcile_model_calls(
     Ok(())
 }
 
-const fn arm(run: &PerformanceV0RunEvidence) -> ComparisonArm {
+const fn arm(
+    run: &PerformanceV0RunEvidence,
+) -> Result<ComparisonArm, PerformanceV0ComparisonError> {
     match run.execution_mode {
-        ExecutionMode::React | ExecutionMode::DelegatedPatchShadow => ComparisonArm::React,
-        ExecutionMode::DelegatedPatch | ExecutionMode::DebugProbe => ComparisonArm::Structured,
+        ExecutionMode::React | ExecutionMode::DelegatedPatchShadow => Ok(ComparisonArm::React),
+        ExecutionMode::DelegatedPatch => Ok(ComparisonArm::Structured),
+        ExecutionMode::DebugProbe => Err(PerformanceV0ComparisonError::UnsupportedExecutionMode),
     }
 }
 

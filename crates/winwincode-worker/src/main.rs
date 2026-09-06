@@ -157,6 +157,9 @@ async fn run_worker(bootstrap: WorkerBootstrap) -> Result<(), Box<dyn std::error
         model_route,
     } = bootstrap;
     let capabilities = worker_capabilities()?;
+    let execution_mode = configured_execution_mode("WWC_WORKER_EXECUTION_MODE")?;
+    let observer_mode = configured_observer_mode("WWC_WORKER_OBSERVER_MODE")?;
+    let observation_model = configured_observation_model(observer_mode, required)?;
     let (port, handle) = RemoteWorkerPort::open(
         &server_origin,
         &fs::read(required("WWC_WORKER_TLS_ROOT_DER_FILE")?)?,
@@ -165,9 +168,6 @@ async fn run_worker(bootstrap: WorkerBootstrap) -> Result<(), Box<dyn std::error
         worker_instance_id.clone(),
         Duration::from_secs(15),
     )?;
-    let execution_mode = configured_execution_mode("WWC_WORKER_EXECUTION_MODE")?;
-    let observer_mode = configured_observer_mode("WWC_WORKER_OBSERVER_MODE")?;
-    let observation_model = configured_observation_model(observer_mode, required)?;
     let codex = production_codex(
         &data_directory,
         model_route,
@@ -306,8 +306,21 @@ fn default_model_route() -> ModelGatewayRoute {
 
 fn configured_execution_mode(name: &str) -> Result<ExecutionMode, Box<dyn std::error::Error>> {
     let value = optional_configuration(name, "react")?;
-    ExecutionMode::from_config(&value)
-        .ok_or_else(|| format!("{name} contains an unsupported execution mode").into())
+    let mode = ExecutionMode::from_config(&value)
+        .ok_or_else(|| format!("{name} contains an unsupported execution mode"))?;
+    released_worker_execution_mode_required(mode)?;
+    Ok(mode)
+}
+
+fn released_worker_execution_mode_required(mode: ExecutionMode) -> Result<(), &'static str> {
+    match mode {
+        ExecutionMode::React
+        | ExecutionMode::DelegatedPatchShadow
+        | ExecutionMode::DelegatedPatch => Ok(()),
+        ExecutionMode::DebugProbe => {
+            Err("WWC_WORKER_EXECUTION_MODE selects DebugProbe before runtime routing is available")
+        }
+    }
 }
 
 fn configured_observer_mode(name: &str) -> Result<ObserverMode, Box<dyn std::error::Error>> {
@@ -424,7 +437,26 @@ fn civil_from_days(days_since_unix_epoch: i64) -> (i64, i64, i64) {
 
 #[cfg(test)]
 mod tests {
-    use super::{ObserverMode, configured_observation_model};
+    use super::{
+        ExecutionMode, ObserverMode, configured_observation_model,
+        released_worker_execution_mode_required,
+    };
+
+    #[test]
+    fn execution_modes_fail_closed_until_debug_probe_routing_exists() {
+        for (mode, expected) in [
+            (ExecutionMode::React, Ok(())),
+            (ExecutionMode::DelegatedPatchShadow, Ok(())),
+            (ExecutionMode::DelegatedPatch, Ok(())),
+            (ExecutionMode::DebugProbe, Err(())),
+        ] {
+            assert_eq!(
+                released_worker_execution_mode_required(mode).map_err(|_| ()),
+                expected,
+                "mode={mode:?}"
+            );
+        }
+    }
 
     #[test]
     fn observer_modes_have_one_closed_release_configuration() {

@@ -85,6 +85,66 @@ fn local_authority_dispatches_once_and_restart_replays_exact_command() {
 }
 
 #[test]
+fn local_authority_dispatches_each_released_execution_mode_without_write_widening() {
+    for (seed, mode) in [
+        (10, ExecutionMode::React),
+        (11, ExecutionMode::DelegatedPatchShadow),
+        (12, ExecutionMode::DelegatedPatch),
+    ] {
+        let root = unique_root(&format!("delivery-production-mode-{seed}"));
+        let repository = root.join("repository");
+        let data = root.join("data");
+        let baseline = initialize_repository(&repository);
+        let repository_scope = scope(seed);
+        let delivery_id = DeliveryId(canonical_id("dlv", seed));
+        let create = create_command(
+            repository_scope.clone(),
+            delivery_id.clone(),
+            baseline,
+            seed,
+        );
+        let advance = advance_command(repository_scope.clone(), delivery_id, 1, seed + 100);
+        let mut control_plane =
+            start_with_execution_mode(&data, &repository, repository_scope, mode);
+
+        control_plane
+            .delivery_create(&create)
+            .expect("create Delivery");
+        control_plane
+            .delivery_advance(&advance)
+            .expect("advance Delivery");
+        control_plane.shutdown().expect("shutdown host");
+
+        assert_eq!(
+            queued_job(&data).workspace.write_mode,
+            ExecutionWorkspaceWriteMode::ReadOnly,
+            "mode={mode:?}"
+        );
+        std::fs::remove_dir_all(root).expect("remove fixture");
+    }
+}
+
+#[test]
+fn local_authority_rejects_debug_probe_before_queueing_a_job() {
+    let seed = 13;
+    let root = unique_root("delivery-production-debug-probe");
+    let repository = root.join("repository");
+    let data = root.join("data");
+    initialize_repository(&repository);
+
+    let started = ControlPlane::start_local_with_delivery_adapters(
+        ControlPlaneConfig::local(&data),
+        Box::new(NoopPublisher),
+        LocalDeliveryAdapterConfig::new(&repository, scope(seed))
+            .with_execution_mode(ExecutionMode::DebugProbe),
+    );
+
+    assert!(started.is_err(), "DebugProbe startup must fail closed");
+    assert_eq!(queued_jobs_if_initialized(&data), 0);
+    std::fs::remove_dir_all(root).expect("remove fixture");
+}
+
+#[test]
 fn local_authority_rejects_foreign_scope_and_missing_baseline_without_writes() {
     let root = unique_root("delivery-production-stale");
     let repository = root.join("repository");
@@ -187,6 +247,26 @@ fn queued_jobs(data: &Path) -> i64 {
             row.get(0)
         })
         .expect("count queued jobs")
+}
+
+fn queued_jobs_if_initialized(data: &Path) -> i64 {
+    let connection = Connection::open(data.join("control-plane.sqlite3"))
+        .expect("open startup-failure database");
+    let table_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'scheduler_execution_jobs'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("inspect queue schema");
+    if table_count == 0 {
+        return 0;
+    }
+    connection
+        .query_row("SELECT COUNT(*) FROM scheduler_execution_jobs", [], |row| {
+            row.get(0)
+        })
+        .expect("count initialized queued jobs")
 }
 
 fn queued_job(data: &Path) -> ExecutionJob {
