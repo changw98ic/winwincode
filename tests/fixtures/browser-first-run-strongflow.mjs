@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { mountWinWinCodeClient } from '/module/application.js'
+
+import {
+  loginErrorNode,
+  submitLoginInitialization,
+} from './login-bootstrap.mjs'
 import { ControlPlaneClientError } from '/module/control-plane-client.js'
 
 // Deterministic first-run workspace.  The injected Control Plane facade starts
@@ -379,7 +384,9 @@ const controlPlane = {
   async login(bootstrapProof) {
     calls.submittedProofs.push(bootstrapProof)
     if (bootstrapProof !== BOOTSTRAP_PROOF) {
-      throw accessFailure(null, 'authentication', 'BOOTSTRAP_PROOF_REJECTED', false)
+      // Mirror the real Server wire code for a rejected bootstrap proof
+      // (AUTH-100.3: wrong proof maps to 401 AUTHENTICATION_REQUIRED).
+      throw accessFailure(null, 'authentication', 'AUTHENTICATION_REQUIRED', false)
     }
     state.authenticated = true
     save()
@@ -953,7 +960,7 @@ globalThis.firstRunSignIn = async () => {
     'missing browser session',
   )
   await waitFor(
-    () => document.querySelector('.wwc-auth-session-form')?.hidden === false,
+    () => document.querySelector('.wwc-login')?.hidden === false,
     'first-run sign-in form',
   )
   const unsigned = {
@@ -964,24 +971,25 @@ globalThis.firstRunSignIn = async () => {
     checklistHidden: document.querySelector('.wwc-readiness-root')?.hidden ?? null,
     secrets: secretScan(),
   }
-  const input = document.querySelector('.wwc-auth-session-proof')
-  input.value = REJECTED_PROOF
-  document.querySelector('.wwc-auth-session-form').requestSubmit()
+  submitLoginInitialization(document, REJECTED_PROOF)
   await waitFor(
-    () => document.querySelector('.wwc-auth-session-error')?.hidden === false,
-    'rejected bootstrap proof',
+    () => loginErrorNode(document)?.hidden === false
+      && loginErrorNode(document).textContent.includes('The bootstrap proof was rejected.'),
+    `rejected bootstrap proof; err=${JSON.stringify({
+      hidden: loginErrorNode(document)?.hidden ?? null,
+      text: loginErrorNode(document)?.textContent ?? null,
+    })}; proof=${JSON.stringify(document.querySelector('.wwc-login-initialization-proof')?.value)}; user=${JSON.stringify(document.querySelector('.wwc-login-initialization-username')?.value)}; state=${JSON.stringify(application.authSession.state.status)}`,
   )
   const rejected = {
     status: document.querySelector('.wwc-auth-session-status')?.textContent ?? '',
-    error: document.querySelector('.wwc-auth-session-error').textContent,
+    error: loginErrorNode(document).textContent,
     diagnosticLeak: document.body.textContent.includes('private first-run diagnostics'),
     secrets: secretScan(),
   }
-  input.value = BOOTSTRAP_PROOF
-  document.querySelector('.wwc-auth-session-form').requestSubmit()
+  submitLoginInitialization(document, BOOTSTRAP_PROOF)
   await waitFor(() => signedIn(), 'first sign-in')
   await waitFor(
-    () => document.querySelector('.wwc-auth-session-form')?.hidden === true,
+    () => document.querySelector('.wwc-login')?.hidden === true,
     'hidden sign-in form',
   )
   return {

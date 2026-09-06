@@ -157,18 +157,22 @@ export function staticClientServer({ root, certificateFiles, fixturePath, config
       response.writeHead(204).end()
       return
     }
+    const sharedLoginBootstrapRequest = path === '/fixture/login-bootstrap.mjs'
     const fixtureRequest = path === `/fixture/${fixturePath.split('/').at(-1)}`
     const moduleRequest = path.startsWith('/module/')
     const publicRequest = path.startsWith('/assets/')
-    const source = fixtureRequest
-      ? fixture
-      : moduleRequest
+    const source = sharedLoginBootstrapRequest
+      ? resolve(root, 'tests/fixtures/login-bootstrap.mjs')
+      : fixtureRequest
+        ? fixture
+        : moduleRequest
         ? normalize(resolve(moduleRoot, path.replace(/^\/module\//u, '')))
         : normalize(resolve(publicRoot, path.replace(/^\//u, '')))
     if (
       (moduleRequest && source.startsWith(`${moduleRoot}/`))
       || (publicRequest && source.startsWith(`${publicRoot}/`))
       || fixtureRequest
+      || sharedLoginBootstrapRequest
     ) {
       response.writeHead(200, {
         'Content-Type': publicRequest && path.endsWith('.css')

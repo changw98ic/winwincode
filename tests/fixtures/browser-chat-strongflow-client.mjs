@@ -1,5 +1,7 @@
 import { mountWinWinCodeClient } from '/module/application.js'
 
+import { submitLoginInitialization } from './login-bootstrap.mjs'
+
 const serverConfiguration = await fetch('/fixture/server-url.json', {
   cache: 'no-store',
 }).then(async response => {
@@ -79,17 +81,16 @@ async function waitFor(predicate, label, timeoutMillis = 20_000) {
   for (;;) {
     if (await predicate()) return
     if (Date.now() >= deadline) {
-      throw new Error(`timed out waiting for ${label}: ${document.body.textContent}`)
+      // A run-away render can grow the DOM without bound; read a bounded
+      // slice so the timeout diagnostic cannot exhaust the runner heap.
+      throw new Error(`timed out waiting for ${label}: ${document.body.textContent.slice(0, 2_000)}`)
     }
     await new Promise(resolve => { setTimeout(resolve, 20) })
   }
 }
 
 function submitProof(value) {
-  const input = document.querySelector('.wwc-auth-session-proof')
-  const form = document.querySelector('.wwc-auth-session-form')
-  input.value = value
-  form.requestSubmit()
+  submitLoginInitialization(document, value)
 }
 
 function context() {

@@ -1342,9 +1342,13 @@ function deliverySpec(baseRevision) {
       title: 'The API production workflow reaches a terminal projection',
     }],
     baseRevision,
+    constraints: ['use the exact repository baseline'],
     goal: 'Verify Chat and StrongFlow through the canonical local API',
+    outOfScope: [],
     publicationTarget: null,
     repositoryId: IDS.repository,
+    scope: ['canonical local API chat and StrongFlow workflow'],
+    sourceProductSessionId: null,
     title: 'API production StrongFlow',
   }
 }

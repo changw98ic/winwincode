@@ -1,5 +1,10 @@
 import { mountWinWinCodeClient } from '/module/application.js'
 
+import {
+  submitLoginInitialization,
+  submitOwnerSignIn,
+} from './login-bootstrap.mjs'
+
 const serverConfiguration = await fetch('/fixture/server-url.json', {
   cache: 'no-store',
 }).then(async response => {
@@ -57,7 +62,10 @@ function page(limit = 100) {
 
 function waitFor(predicate, label) {
   return new Promise((resolve, reject) => {
-    const deadline = Date.now() + 20_000
+    // External-volume checkouts run the Server, Chrome, and this fixture off
+    // one slow disk; keep the assertions identical but give each step the
+    // same generous budget the startup gates use.
+    const deadline = Date.now() + 45_000
     const poll = () => {
       if (predicate()) {
         resolve()
@@ -115,10 +123,9 @@ function query(operation, parameters, limit = 100) {
 }
 
 function submitProof(value) {
-  const input = document.querySelector('.wwc-auth-session-proof')
-  input.value = value
-  document.querySelector('.wwc-auth-session-form').requestSubmit()
-  return input.value
+  // The example pre-creates the durable Owner, so the browser signs in with
+  // Owner credentials on the login page's password form.
+  return submitOwnerSignIn(document)
 }
 
 function subscribe() {
@@ -192,10 +199,10 @@ function browserSurfaceContains(...secrets) {
 }
 
 globalThis.runLocalControlsFixture = async (proof, firstLocator, rotatedLocator) => {
-  const submittedProof = submitProof(proof)
+  const submittedPassword = submitProof(proof)
   await waitFor(() => application.authSession.state.status === 'signed-in', 'browser sign-in')
   authorizedContext = context()
-  const clearedProof = document.querySelector('.wwc-auth-session-proof').value
+  const clearedPassword = document.querySelector('.wwc-login-password').value
 
   subscribe()
   await waitFor(() => acceptedFrameCount() === 1, 'initial subscription acceptance')
@@ -270,8 +277,8 @@ globalThis.runLocalControlsFixture = async (proof, firstLocator, rotatedLocator)
     firstCursorSequence: firstCursor?.sequence ?? null,
     settingsConcurrency: settings.result.workerConcurrencyLimit,
     settingsRevision: settings.result.revision,
-    submittedProof,
-    clearedProof,
+    submittedPassword,
+    clearedPassword,
     uniqueEventCount: uniqueEvents(),
   }
 }
