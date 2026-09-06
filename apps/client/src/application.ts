@@ -4,7 +4,6 @@ import {
   ControlPlaneClientError,
   createControlPlaneClient,
   createControlPlaneClientDirectory,
-  createControlPlaneClientOccupancy,
   createControlPlaneClientUsers,
   createControlPlaneRunIdentityFake,
   createControlPlaneTaskFake,
@@ -12,6 +11,7 @@ import {
   type ControlPlaneClientTransport,
   type ControlPlaneTaskAnchor,
 } from './control-plane-client.js'
+import { createClientOccupancyFacade } from './client-occupancy-facade.js'
 import { mountClientErrorBoundary } from './components/client-error-boundary.js'
 import { mountConnectionBar } from './components/connection-bar.js'
 import {
@@ -266,7 +266,7 @@ export function mountWinWinCodeClient(
   // with confirmation); without a Client surface the model mounts with a null
   // port and reports the honest unavailable failure instead of pretending the
   // actions landed.
-  const clientOccupancy = createControlPlaneClientOccupancy({
+  const clientOccupancy = createClientOccupancyFacade({
     client: rawControlPlane,
     transport: browserTransport,
   })
