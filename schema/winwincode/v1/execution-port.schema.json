@@ -3123,9 +3123,10 @@
       "type": "string",
       "enum": [
         "react",
-        "delegated_batch"
+        "delegated_batch",
+        "debug_probe"
       ],
-      "description": "Role-session execution strategy. It is independent from the process-level Worker execution mode."
+      "description": "Role-session execution strategy. DebugProbe and delegated batch sessions are read-only; the mode is independent from the process-level Worker execution mode."
     },
     "RoleSessionPolicy": {
       "type": "object",
@@ -3173,7 +3174,7 @@
         "developerInstructions",
         "executionMode"
       ],
-      "description": "Canonical version 2 policy applied to one role-scoped Kernel session. Durable version 1 rows are migrated once with executionMode react; version 1 is not a supported runtime shape.",
+      "description": "Canonical version 2 policy applied to one role-scoped Kernel session. DebugProbe and delegated batch policies use a read-only workspace. Durable version 1 rows are migrated once with executionMode react; version 1 is not a supported runtime shape.",
       "oneOf": [
         {
           "properties": {
@@ -3184,6 +3185,45 @@
               "type": "string",
               "minLength": 1,
               "maxLength": 20000
+            },
+            "executionMode": {
+              "const": "react"
+            }
+          }
+        },
+        {
+          "properties": {
+            "schemaVersion": {
+              "const": 2
+            },
+            "developerInstructions": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 20000
+            },
+            "executionMode": {
+              "const": "delegated_batch"
+            },
+            "workspaceMode": {
+              "$ref": "#/$defs/ReadOnlyRoleWorkspaceMode"
+            }
+          }
+        },
+        {
+          "properties": {
+            "schemaVersion": {
+              "const": 2
+            },
+            "developerInstructions": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 20000
+            },
+            "executionMode": {
+              "const": "debug_probe"
+            },
+            "workspaceMode": {
+              "$ref": "#/$defs/ReadOnlyRoleWorkspaceMode"
             }
           }
         }
@@ -6109,6 +6149,2132 @@
         "frozenAt"
       ],
       "description": "Sealed final-candidate fact for one accepted exact result. It binds the result Git tree and delta to the canonical receipt, optional bounded observation, bounded-loop usage, finite-context digest, and content-addressed candidate Artifact. A deterministic hard-check acceptance may freeze with finalObservation null."
+    },
+    "DebugSessionStatus": {
+      "type": "string",
+      "enum": [
+        "active",
+        "root_cause_identified",
+        "transitioned_to_delegated_batch",
+        "completed",
+        "cancelled",
+        "failed"
+      ],
+      "description": "Closed lifecycle state for one durable DebugProbe session."
+    },
+    "DebugProbeKind": {
+      "type": "string",
+      "enum": [
+        "search",
+        "read",
+        "static_analysis",
+        "test",
+        "build",
+        "runtime_trace",
+        "database_query",
+        "network_observation"
+      ],
+      "description": "Closed family of bounded read-only probes."
+    },
+    "ProbeSideEffectClass": {
+      "type": "string",
+      "enum": [
+        "pure_read",
+        "isolated_side_effect",
+        "exclusive"
+      ],
+      "description": "Host-verified resource isolation class. No class grants writes to the accepted candidate workspace."
+    },
+    "ProbeWorkspaceAccess": {
+      "type": "string",
+      "enum": [
+        "read_only"
+      ],
+      "description": "The only workspace access granted to DebugProbe execution."
+    },
+    "ProbeNetworkAccess": {
+      "type": "string",
+      "enum": [
+        "none",
+        "loopback",
+        "declared_read_only"
+      ],
+      "description": "Closed network observation scope; production mutations are never represented."
+    },
+    "ProbeCompletionRuleKind": {
+      "type": "string",
+      "enum": [
+        "all_terminal",
+        "minimum_successes",
+        "first_conclusive"
+      ],
+      "description": "Deterministic rule used to stop one probe round without sampling the primary model per probe."
+    },
+    "ProbeExecutionStatus": {
+      "type": "string",
+      "enum": [
+        "scheduled",
+        "running",
+        "succeeded",
+        "failed",
+        "timed_out",
+        "cancelled",
+        "skipped",
+        "cache_hit",
+        "stale"
+      ],
+      "description": "Closed status for one probe execution."
+    },
+    "ProbeRoundStatus": {
+      "type": "string",
+      "enum": [
+        "planned",
+        "running",
+        "completed",
+        "failed",
+        "cancelled",
+        "stale"
+      ],
+      "description": "Closed status for one probe round."
+    },
+    "ProbeRoundCompletionReason": {
+      "type": "string",
+      "enum": [
+        "completion_rule_satisfied",
+        "all_probes_terminal",
+        "budget_exhausted",
+        "cancelled",
+        "stale_authority",
+        "infrastructure_error"
+      ],
+      "description": "Closed terminal reason for one probe round."
+    },
+    "ProbeExecutionEventKind": {
+      "type": "string",
+      "enum": [
+        "scheduled",
+        "started",
+        "finished"
+      ],
+      "description": "Ordered worker fact for one probe execution. These facts do not wake the primary model."
+    },
+    "ProbeRoundEventKind": {
+      "type": "string",
+      "enum": [
+        "planned",
+        "started",
+        "finished"
+      ],
+      "description": "Ordered round fact. Only the terminal round fact is a primary-model feedback boundary."
+    },
+    "DebugProbeErrorCode": {
+      "type": "string",
+      "enum": [
+        "invalid_plan",
+        "invalid_probe",
+        "budget_exceeded",
+        "workspace_write_forbidden",
+        "undeclared_resource",
+        "resource_conflict",
+        "timed_out",
+        "cancelled",
+        "stale_authority",
+        "artifact_digest_mismatch",
+        "process_cleanup_failed",
+        "infrastructure_error"
+      ],
+      "description": "Stable machine-readable DebugProbe failure code."
+    },
+    "DebugHypothesisStatus": {
+      "type": "string",
+      "enum": [
+        "active",
+        "rejected",
+        "confirmed"
+      ],
+      "description": "Closed evidence-backed state of one debug hypothesis."
+    },
+    "DebugExperimentStatus": {
+      "type": "string",
+      "enum": [
+        "planned",
+        "preparing",
+        "ready",
+        "running",
+        "cleanup_pending",
+        "cleaned_up",
+        "cleanup_failed",
+        "expired",
+        "cancelled"
+      ],
+      "description": "Closed lifecycle state for one isolated ephemeral debug experiment."
+    },
+    "DebugExperimentCleanupStatus": {
+      "type": "string",
+      "enum": [
+        "cleaned_up",
+        "cleanup_failed"
+      ],
+      "description": "Terminal cleanup state for one isolated debug experiment."
+    },
+    "DebugProbeRoundAuthority": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "debugSessionId": {
+          "$ref": "./domain.schema.json#/$defs/DebugSessionId"
+        },
+        "jobId": {
+          "$ref": "./domain.schema.json#/$defs/ExecutionJobId"
+        },
+        "attempt": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        },
+        "leaseId": {
+          "$ref": "./domain.schema.json#/$defs/LeaseId"
+        },
+        "fencingToken": {
+          "$ref": "#/$defs/FencingToken"
+        },
+        "sessionIdentity": {
+          "$ref": "./domain.schema.json#/$defs/SessionIdentity"
+        },
+        "repositoryId": {
+          "$ref": "./domain.schema.json#/$defs/RepositoryId"
+        },
+        "roundId": {
+          "$ref": "./domain.schema.json#/$defs/ProbeRoundId"
+        },
+        "workspaceRevision": {
+          "$ref": "./domain.schema.json#/$defs/WorkspaceRevision"
+        },
+        "environmentDigest": {
+          "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+        }
+      },
+      "required": [
+        "debugSessionId",
+        "jobId",
+        "attempt",
+        "leaseId",
+        "fencingToken",
+        "sessionIdentity",
+        "repositoryId",
+        "roundId",
+        "workspaceRevision",
+        "environmentDigest"
+      ],
+      "description": "Replay-stable authority for one probe round. Job attempt, lease fence, session, repository revision, and environment are immutable.",
+      "oneOf": [
+        {
+          "properties": {
+            "debugSessionId": {
+              "type": "string",
+              "minLength": 30,
+              "maxLength": 30
+            },
+            "jobId": {
+              "type": "string",
+              "minLength": 30,
+              "maxLength": 30
+            },
+            "attempt": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000
+            },
+            "leaseId": {
+              "type": "string",
+              "minLength": 30,
+              "maxLength": 30
+            },
+            "fencingToken": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 20
+            },
+            "sessionIdentity": {
+              "$ref": "./domain.schema.json#/$defs/SessionIdentity"
+            },
+            "repositoryId": {
+              "type": "string",
+              "minLength": 30,
+              "maxLength": 30
+            },
+            "roundId": {
+              "type": "string",
+              "minLength": 30,
+              "maxLength": 30
+            },
+            "workspaceRevision": {
+              "$ref": "./domain.schema.json#/$defs/WorkspaceRevision"
+            },
+            "environmentDigest": {
+              "type": "string",
+              "minLength": 71,
+              "maxLength": 71,
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            }
+          }
+        }
+      ]
+    },
+    "DebugProbeIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "debugSessionId": {
+          "$ref": "./domain.schema.json#/$defs/DebugSessionId"
+        },
+        "jobId": {
+          "$ref": "./domain.schema.json#/$defs/ExecutionJobId"
+        },
+        "attempt": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        },
+        "leaseId": {
+          "$ref": "./domain.schema.json#/$defs/LeaseId"
+        },
+        "fencingToken": {
+          "$ref": "#/$defs/FencingToken"
+        },
+        "sessionIdentity": {
+          "$ref": "./domain.schema.json#/$defs/SessionIdentity"
+        },
+        "repositoryId": {
+          "$ref": "./domain.schema.json#/$defs/RepositoryId"
+        },
+        "roundId": {
+          "$ref": "./domain.schema.json#/$defs/ProbeRoundId"
+        },
+        "workspaceRevision": {
+          "$ref": "./domain.schema.json#/$defs/WorkspaceRevision"
+        },
+        "environmentDigest": {
+          "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+        },
+        "probeId": {
+          "$ref": "./domain.schema.json#/$defs/ProbeId"
+        },
+        "probeExecutionId": {
+          "$ref": "./domain.schema.json#/$defs/ProbeExecutionId"
+        }
+      },
+      "required": [
+        "debugSessionId",
+        "jobId",
+        "attempt",
+        "leaseId",
+        "fencingToken",
+        "sessionIdentity",
+        "repositoryId",
+        "roundId",
+        "workspaceRevision",
+        "environmentDigest",
+        "probeId",
+        "probeExecutionId"
+      ],
+      "description": "Replay-stable identity for one probe. It binds the exact job attempt, lease fence, round, probe, workspace revision, and environment digest.",
+      "oneOf": [
+        {
+          "properties": {
+            "debugSessionId": {
+              "type": "string",
+              "minLength": 30,
+              "maxLength": 30
+            },
+            "jobId": {
+              "type": "string",
+              "minLength": 30,
+              "maxLength": 30
+            },
+            "attempt": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000
+            },
+            "leaseId": {
+              "type": "string",
+              "minLength": 30,
+              "maxLength": 30
+            },
+            "fencingToken": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 20
+            },
+            "sessionIdentity": {
+              "$ref": "./domain.schema.json#/$defs/SessionIdentity"
+            },
+            "repositoryId": {
+              "type": "string",
+              "minLength": 30,
+              "maxLength": 30
+            },
+            "roundId": {
+              "type": "string",
+              "minLength": 30,
+              "maxLength": 30
+            },
+            "workspaceRevision": {
+              "$ref": "./domain.schema.json#/$defs/WorkspaceRevision"
+            },
+            "environmentDigest": {
+              "type": "string",
+              "minLength": 71,
+              "maxLength": 71,
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            },
+            "probeId": {
+              "type": "string",
+              "minLength": 30,
+              "maxLength": 30
+            },
+            "probeExecutionId": {
+              "type": "string",
+              "minLength": 71,
+              "maxLength": 71,
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            }
+          }
+        }
+      ]
+    },
+    "DebugProbeError": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/DebugProbeErrorCode"
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500,
+          "pattern": "^[^\\u0000]+$"
+        },
+        "retryable": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "retryable"
+      ],
+      "description": "Bounded machine-readable failure retained by DebugProbe receipts.",
+      "oneOf": [
+        {
+          "properties": {
+            "code": {
+              "$ref": "#/$defs/DebugProbeErrorCode"
+            },
+            "message": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 500,
+              "pattern": "^[^\\u0000]+$"
+            }
+          }
+        }
+      ]
+    },
+    "ProbeCommandSpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "argv": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "uniqueItems": false,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "pattern": "^[^\\u0000]+$"
+          }
+        },
+        "workingDirectory": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*//)[^\\u0000]+$"
+        },
+        "commandArgBytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 262144
+        }
+      },
+      "required": [
+        "argv",
+        "workingDirectory",
+        "commandArgBytes"
+      ],
+      "description": "Bounded no-shell command definition. The host recomputes commandArgBytes from the canonical argv encoding.",
+      "oneOf": [
+        {
+          "properties": {
+            "argv": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 64,
+              "uniqueItems": false,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096,
+                "pattern": "^[^\\u0000]+$"
+              }
+            },
+            "workingDirectory": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096,
+              "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*//)[^\\u0000]+$"
+            },
+            "commandArgBytes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 262144
+            }
+          }
+        }
+      ]
+    },
+    "ProbeResourceClaim": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "workspaceAccess": {
+          "$ref": "#/$defs/ProbeWorkspaceAccess"
+        },
+        "sideEffectClass": {
+          "$ref": "#/$defs/ProbeSideEffectClass"
+        },
+        "paths": {
+          "type": "array",
+          "minItems": 0,
+          "maxItems": 128,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*//)[^\\u0000]+$"
+          }
+        },
+        "cpuLimitMillis": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3600000
+        },
+        "memoryLimitBytes": {
+          "type": "integer",
+          "minimum": 1048576,
+          "maximum": 8589934592
+        },
+        "portNumbers": {
+          "type": "array",
+          "minItems": 0,
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 65535
+          }
+        },
+        "serviceKeys": {
+          "type": "array",
+          "minItems": 0,
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]*$"
+          }
+        },
+        "databaseKeys": {
+          "type": "array",
+          "minItems": 0,
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]*$"
+          }
+        },
+        "exclusiveKeys": {
+          "type": "array",
+          "minItems": 0,
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]*$"
+          }
+        },
+        "networkAccess": {
+          "$ref": "#/$defs/ProbeNetworkAccess"
+        }
+      },
+      "required": [
+        "workspaceAccess",
+        "sideEffectClass",
+        "paths",
+        "cpuLimitMillis",
+        "memoryLimitBytes",
+        "portNumbers",
+        "serviceKeys",
+        "databaseKeys",
+        "exclusiveKeys",
+        "networkAccess"
+      ],
+      "description": "Complete resource declaration revalidated by the host before scheduling. Candidate workspace access is always read-only.",
+      "oneOf": [
+        {
+          "properties": {
+            "workspaceAccess": {
+              "$ref": "#/$defs/ProbeWorkspaceAccess"
+            },
+            "sideEffectClass": {
+              "$ref": "#/$defs/ProbeSideEffectClass"
+            },
+            "paths": {
+              "type": "array",
+              "minItems": 0,
+              "maxItems": 128,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096,
+                "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*//)[^\\u0000]+$"
+              }
+            },
+            "cpuLimitMillis": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 3600000
+            },
+            "memoryLimitBytes": {
+              "type": "integer",
+              "minimum": 1048576,
+              "maximum": 8589934592
+            },
+            "portNumbers": {
+              "type": "array",
+              "minItems": 0,
+              "maxItems": 32,
+              "uniqueItems": true,
+              "items": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 65535
+              }
+            },
+            "serviceKeys": {
+              "type": "array",
+              "minItems": 0,
+              "maxItems": 32,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200,
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]*$"
+              }
+            },
+            "databaseKeys": {
+              "type": "array",
+              "minItems": 0,
+              "maxItems": 16,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200,
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]*$"
+              }
+            },
+            "exclusiveKeys": {
+              "type": "array",
+              "minItems": 0,
+              "maxItems": 16,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200,
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]*$"
+              }
+            },
+            "networkAccess": {
+              "$ref": "#/$defs/ProbeNetworkAccess"
+            }
+          }
+        }
+      ]
+    },
+    "ProbeSpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "probeId": {
+          "$ref": "./domain.schema.json#/$defs/ProbeId"
+        },
+        "probeDefinitionDigest": {
+          "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+        },
+        "kind": {
+          "$ref": "#/$defs/DebugProbeKind"
+        },
+        "command": {
+          "$ref": "#/$defs/ProbeCommandSpec"
+        },
+        "resources": {
+          "$ref": "#/$defs/ProbeResourceClaim"
+        },
+        "timeoutMillis": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 600000
+        },
+        "outputLimitBytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16777216
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "targetHypothesisIds": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "./domain.schema.json#/$defs/DebugHypothesisId"
+          }
+        }
+      },
+      "required": [
+        "probeId",
+        "probeDefinitionDigest",
+        "kind",
+        "command",
+        "resources",
+        "timeoutMillis",
+        "outputLimitBytes",
+        "required",
+        "targetHypothesisIds"
+      ],
+      "description": "One bounded read-only information probe. Raw shell source, candidate writes, package installation, and undeclared resources have no contract field.",
+      "oneOf": [
+        {
+          "properties": {
+            "probeId": {
+              "type": "string",
+              "minLength": 30,
+              "maxLength": 30
+            },
+            "probeDefinitionDigest": {
+              "type": "string",
+              "minLength": 71,
+              "maxLength": 71,
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            },
+            "kind": {
+              "$ref": "#/$defs/DebugProbeKind"
+            },
+            "command": {
+              "$ref": "#/$defs/ProbeCommandSpec"
+            },
+            "resources": {
+              "$ref": "#/$defs/ProbeResourceClaim"
+            },
+            "timeoutMillis": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 600000
+            },
+            "outputLimitBytes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 16777216
+            },
+            "targetHypothesisIds": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 16,
+              "uniqueItems": true,
+              "items": {
+                "$ref": "./domain.schema.json#/$defs/DebugHypothesisId"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "ProbeRoundBudget": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "probeLimit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32
+        },
+        "parallelProbeLimit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16
+        },
+        "wallTimeLimitMillis": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3600000
+        },
+        "totalOutputLimitBytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 268435456
+        },
+        "totalCpuLimitMillis": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 28800000
+        },
+        "peakMemoryLimitBytes": {
+          "type": "integer",
+          "minimum": 1048576,
+          "maximum": 34359738368
+        },
+        "totalCommandArgLimitBytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8388608
+        },
+        "budgetDigest": {
+          "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+        }
+      },
+      "required": [
+        "probeLimit",
+        "parallelProbeLimit",
+        "wallTimeLimitMillis",
+        "totalOutputLimitBytes",
+        "totalCpuLimitMillis",
+        "peakMemoryLimitBytes",
+        "totalCommandArgLimitBytes",
+        "budgetDigest"
+      ],
+      "description": "Immutable hard limits for one probe round. The scheduler rejects a plan whose declared sum exceeds any limit.",
+      "oneOf": [
+        {
+          "properties": {
+            "probeLimit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 32
+            },
+            "parallelProbeLimit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 16
+            },
+            "wallTimeLimitMillis": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 3600000
+            },
+            "totalOutputLimitBytes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 268435456
+            },
+            "totalCpuLimitMillis": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 28800000
+            },
+            "peakMemoryLimitBytes": {
+              "type": "integer",
+              "minimum": 1048576,
+              "maximum": 34359738368
+            },
+            "totalCommandArgLimitBytes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 8388608
+            },
+            "budgetDigest": {
+              "type": "string",
+              "minLength": 71,
+              "maxLength": 71,
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            }
+          }
+        }
+      ]
+    },
+    "ProbeRoundBudgetUsage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "probeCount": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 32
+        },
+        "peakParallelProbes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 16
+        },
+        "elapsedMillis": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 3600000
+        },
+        "totalOutputBytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 268435456
+        },
+        "totalCpuMillis": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 28800000
+        },
+        "peakMemoryBytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 34359738368
+        },
+        "totalCommandArgBytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 8388608
+        },
+        "budgetDigest": {
+          "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+        }
+      },
+      "required": [
+        "probeCount",
+        "peakParallelProbes",
+        "elapsedMillis",
+        "totalOutputBytes",
+        "totalCpuMillis",
+        "peakMemoryBytes",
+        "totalCommandArgBytes",
+        "budgetDigest"
+      ],
+      "description": "Audited cumulative resource use for one probe round.",
+      "oneOf": [
+        {
+          "properties": {
+            "probeCount": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 32
+            },
+            "peakParallelProbes": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 16
+            },
+            "elapsedMillis": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 3600000
+            },
+            "totalOutputBytes": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 268435456
+            },
+            "totalCpuMillis": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 28800000
+            },
+            "peakMemoryBytes": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 34359738368
+            },
+            "totalCommandArgBytes": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 8388608
+            },
+            "budgetDigest": {
+              "type": "string",
+              "minLength": 71,
+              "maxLength": 71,
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            }
+          }
+        }
+      ]
+    },
+    "ProbeCompletionRule": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/ProbeCompletionRuleKind"
+        },
+        "minimumCompletedProbes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32
+        },
+        "minimumSuccessfulProbes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 32
+        },
+        "stopOnRequiredProbeFailure": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "kind",
+        "minimumCompletedProbes",
+        "minimumSuccessfulProbes",
+        "stopOnRequiredProbeFailure"
+      ],
+      "description": "Deterministic round completion rule evaluated only by the host.",
+      "oneOf": [
+        {
+          "properties": {
+            "kind": {
+              "$ref": "#/$defs/ProbeCompletionRuleKind"
+            },
+            "minimumCompletedProbes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 32
+            },
+            "minimumSuccessfulProbes": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 32
+            }
+          }
+        }
+      ]
+    },
+    "DebugProbePlan": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schemaVersion": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1
+        },
+        "authority": {
+          "$ref": "#/$defs/DebugProbeRoundAuthority"
+        },
+        "planDigest": {
+          "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+        },
+        "probes": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/ProbeSpec"
+          }
+        },
+        "budget": {
+          "$ref": "#/$defs/ProbeRoundBudget"
+        },
+        "completionRule": {
+          "$ref": "#/$defs/ProbeCompletionRule"
+        },
+        "createdAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "authority",
+        "planDigest",
+        "probes",
+        "budget",
+        "completionRule",
+        "createdAt"
+      ],
+      "description": "Canonical bounded model output for one DebugProbe round. A round, not an individual probe, is the primary-model feedback unit.",
+      "oneOf": [
+        {
+          "properties": {
+            "schemaVersion": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1
+            },
+            "authority": {
+              "$ref": "#/$defs/DebugProbeRoundAuthority"
+            },
+            "planDigest": {
+              "type": "string",
+              "minLength": 71,
+              "maxLength": 71,
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            },
+            "probes": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 32,
+              "uniqueItems": true,
+              "items": {
+                "$ref": "#/$defs/ProbeSpec"
+              }
+            },
+            "budget": {
+              "$ref": "#/$defs/ProbeRoundBudget"
+            },
+            "completionRule": {
+              "$ref": "#/$defs/ProbeCompletionRule"
+            },
+            "createdAt": {
+              "$ref": "./domain.schema.json#/$defs/Instant"
+            }
+          }
+        }
+      ]
+    },
+    "ProbeExecutionIntent": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schemaVersion": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1
+        },
+        "identity": {
+          "$ref": "#/$defs/DebugProbeIdentity"
+        },
+        "planDigest": {
+          "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+        },
+        "spec": {
+          "$ref": "#/$defs/ProbeSpec"
+        },
+        "createdAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "identity",
+        "planDigest",
+        "spec",
+        "createdAt"
+      ],
+      "description": "Durable intent written before one probe is scheduled. Identity and spec probe IDs must match exactly.",
+      "oneOf": [
+        {
+          "properties": {
+            "schemaVersion": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1
+            },
+            "identity": {
+              "$ref": "#/$defs/DebugProbeIdentity"
+            },
+            "planDigest": {
+              "type": "string",
+              "minLength": 71,
+              "maxLength": 71,
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            },
+            "spec": {
+              "$ref": "#/$defs/ProbeSpec"
+            },
+            "createdAt": {
+              "$ref": "./domain.schema.json#/$defs/Instant"
+            }
+          }
+        }
+      ]
+    },
+    "ProbeExecutionReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schemaVersion": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1
+        },
+        "identity": {
+          "$ref": "#/$defs/DebugProbeIdentity"
+        },
+        "planDigest": {
+          "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+        },
+        "status": {
+          "$ref": "#/$defs/ProbeReceiptStatus"
+        },
+        "exitCode": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": -2147483648,
+              "maximum": 2147483647
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "signal": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64,
+              "pattern": "^[A-Za-z0-9_+-]+$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "timedOut": {
+          "type": "boolean"
+        },
+        "durationMillis": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 3600000
+        },
+        "outputBytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 16777216
+        },
+        "outputTruncated": {
+          "type": "boolean"
+        },
+        "artifactRefs": {
+          "type": "array",
+          "minItems": 0,
+          "maxItems": 8,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/ArtifactReference"
+          }
+        },
+        "error": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/DebugProbeError"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "startedAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "finishedAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "identity",
+        "planDigest",
+        "status",
+        "exitCode",
+        "signal",
+        "timedOut",
+        "durationMillis",
+        "outputBytes",
+        "outputTruncated",
+        "artifactRefs",
+        "error",
+        "startedAt",
+        "finishedAt"
+      ],
+      "description": "Terminal bounded receipt for one exact probe execution. Raw output is retained only through Artifact references.",
+      "oneOf": [
+        {
+          "properties": {
+            "schemaVersion": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1
+            },
+            "identity": {
+              "$ref": "#/$defs/DebugProbeIdentity"
+            },
+            "planDigest": {
+              "type": "string",
+              "minLength": 71,
+              "maxLength": 71,
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            },
+            "status": {
+              "$ref": "#/$defs/ProbeReceiptStatus"
+            },
+            "durationMillis": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 3600000
+            },
+            "outputBytes": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 16777216
+            },
+            "artifactRefs": {
+              "type": "array",
+              "minItems": 0,
+              "maxItems": 8,
+              "uniqueItems": true,
+              "items": {
+                "$ref": "#/$defs/ArtifactReference"
+              }
+            },
+            "startedAt": {
+              "$ref": "./domain.schema.json#/$defs/Instant"
+            },
+            "finishedAt": {
+              "$ref": "./domain.schema.json#/$defs/Instant"
+            }
+          }
+        }
+      ]
+    },
+    "ProbeRoundReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schemaVersion": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1
+        },
+        "authority": {
+          "$ref": "#/$defs/DebugProbeRoundAuthority"
+        },
+        "planDigest": {
+          "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+        },
+        "status": {
+          "$ref": "#/$defs/ProbeRoundReceiptStatus"
+        },
+        "completionReason": {
+          "$ref": "#/$defs/ProbeRoundCompletionReason"
+        },
+        "probeReceipts": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/ProbeExecutionReceipt"
+          }
+        },
+        "usage": {
+          "$ref": "#/$defs/ProbeRoundBudgetUsage"
+        },
+        "error": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/DebugProbeError"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "startedAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "finishedAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "authority",
+        "planDigest",
+        "status",
+        "completionReason",
+        "probeReceipts",
+        "usage",
+        "error",
+        "startedAt",
+        "finishedAt"
+      ],
+      "description": "Terminal model-feedback receipt for a whole probe round. Every nested receipt repeats the exact probe authority binding.",
+      "oneOf": [
+        {
+          "properties": {
+            "schemaVersion": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1
+            },
+            "authority": {
+              "$ref": "#/$defs/DebugProbeRoundAuthority"
+            },
+            "planDigest": {
+              "type": "string",
+              "minLength": 71,
+              "maxLength": 71,
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            },
+            "status": {
+              "$ref": "#/$defs/ProbeRoundReceiptStatus"
+            },
+            "completionReason": {
+              "$ref": "#/$defs/ProbeRoundCompletionReason"
+            },
+            "probeReceipts": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 32,
+              "uniqueItems": true,
+              "items": {
+                "$ref": "#/$defs/ProbeExecutionReceipt"
+              }
+            },
+            "usage": {
+              "$ref": "#/$defs/ProbeRoundBudgetUsage"
+            },
+            "startedAt": {
+              "$ref": "./domain.schema.json#/$defs/Instant"
+            },
+            "finishedAt": {
+              "$ref": "./domain.schema.json#/$defs/Instant"
+            }
+          }
+        }
+      ]
+    },
+    "ProbeExecutionEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "identity": {
+          "$ref": "#/$defs/DebugProbeIdentity"
+        },
+        "sequence": {
+          "$ref": "#/$defs/ExecutionSequence"
+        },
+        "kind": {
+          "$ref": "#/$defs/ProbeExecutionEventKind"
+        },
+        "status": {
+          "$ref": "#/$defs/ProbeExecutionStatus"
+        },
+        "occurredAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500,
+          "pattern": "^[^\\u0000\\r\\n]+$"
+        },
+        "artifactRefs": {
+          "type": "array",
+          "minItems": 0,
+          "maxItems": 8,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/ArtifactReference"
+          }
+        }
+      },
+      "required": [
+        "identity",
+        "sequence",
+        "kind",
+        "status",
+        "occurredAt",
+        "summary",
+        "artifactRefs"
+      ],
+      "description": "Strictly ordered probe execution fact. It is persisted and projected without triggering primary-model feedback.",
+      "oneOf": [
+        {
+          "properties": {
+            "identity": {
+              "$ref": "#/$defs/DebugProbeIdentity"
+            },
+            "sequence": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "kind": {
+              "$ref": "#/$defs/ProbeExecutionEventKind"
+            },
+            "status": {
+              "$ref": "#/$defs/ProbeExecutionStatus"
+            },
+            "occurredAt": {
+              "$ref": "./domain.schema.json#/$defs/Instant"
+            },
+            "summary": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 500,
+              "pattern": "^[^\\u0000\\r\\n]+$"
+            },
+            "artifactRefs": {
+              "type": "array",
+              "minItems": 0,
+              "maxItems": 8,
+              "uniqueItems": true,
+              "items": {
+                "$ref": "#/$defs/ArtifactReference"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "ProbeRoundEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "authority": {
+          "$ref": "#/$defs/DebugProbeRoundAuthority"
+        },
+        "sequence": {
+          "$ref": "#/$defs/ExecutionSequence"
+        },
+        "kind": {
+          "$ref": "#/$defs/ProbeRoundEventKind"
+        },
+        "status": {
+          "$ref": "#/$defs/ProbeRoundStatus"
+        },
+        "occurredAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500,
+          "pattern": "^[^\\u0000\\r\\n]+$"
+        }
+      },
+      "required": [
+        "authority",
+        "sequence",
+        "kind",
+        "status",
+        "occurredAt",
+        "summary"
+      ],
+      "description": "Strictly ordered round fact. The finished event is the only DebugProbe primary-model feedback boundary.",
+      "oneOf": [
+        {
+          "properties": {
+            "authority": {
+              "$ref": "#/$defs/DebugProbeRoundAuthority"
+            },
+            "sequence": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "kind": {
+              "$ref": "#/$defs/ProbeRoundEventKind"
+            },
+            "status": {
+              "$ref": "#/$defs/ProbeRoundStatus"
+            },
+            "occurredAt": {
+              "$ref": "./domain.schema.json#/$defs/Instant"
+            },
+            "summary": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 500,
+              "pattern": "^[^\\u0000\\r\\n]+$"
+            }
+          }
+        }
+      ]
+    },
+    "DebugHypothesisEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "identity": {
+          "$ref": "#/$defs/DebugProbeIdentity"
+        },
+        "artifactRef": {
+          "$ref": "#/$defs/ArtifactReference"
+        },
+        "evidenceDigest": {
+          "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+        },
+        "recordedAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        }
+      },
+      "required": [
+        "identity",
+        "artifactRef",
+        "evidenceDigest",
+        "recordedAt"
+      ],
+      "description": "Evidence reference bound to the exact probe authority, workspace revision, and environment.",
+      "oneOf": [
+        {
+          "properties": {
+            "identity": {
+              "$ref": "#/$defs/DebugProbeIdentity"
+            },
+            "artifactRef": {
+              "$ref": "#/$defs/ArtifactReference"
+            },
+            "evidenceDigest": {
+              "type": "string",
+              "minLength": 71,
+              "maxLength": 71,
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            },
+            "recordedAt": {
+              "$ref": "./domain.schema.json#/$defs/Instant"
+            }
+          }
+        }
+      ]
+    },
+    "DebugHypothesis": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "hypothesisId": {
+          "$ref": "./domain.schema.json#/$defs/DebugHypothesisId"
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000,
+          "pattern": "^[^\\u0000]+$"
+        },
+        "status": {
+          "$ref": "#/$defs/DebugHypothesisStatus"
+        },
+        "confidenceBps": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10000
+        },
+        "supportingEvidence": {
+          "type": "array",
+          "minItems": 0,
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/DebugHypothesisEvidence"
+          }
+        },
+        "contradictingEvidence": {
+          "type": "array",
+          "minItems": 0,
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/DebugHypothesisEvidence"
+          }
+        },
+        "lastUpdatedRoundId": {
+          "$ref": "./domain.schema.json#/$defs/ProbeRoundId"
+        }
+      },
+      "required": [
+        "hypothesisId",
+        "summary",
+        "status",
+        "confidenceBps",
+        "supportingEvidence",
+        "contradictingEvidence",
+        "lastUpdatedRoundId"
+      ],
+      "description": "One evidence-backed hypothesis. Status and confidence changes require current-authority evidence.",
+      "oneOf": [
+        {
+          "properties": {
+            "hypothesisId": {
+              "type": "string",
+              "minLength": 30,
+              "maxLength": 30
+            },
+            "summary": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1000,
+              "pattern": "^[^\\u0000]+$"
+            },
+            "status": {
+              "$ref": "#/$defs/DebugHypothesisStatus"
+            },
+            "confidenceBps": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 10000
+            },
+            "supportingEvidence": {
+              "type": "array",
+              "minItems": 0,
+              "maxItems": 64,
+              "uniqueItems": true,
+              "items": {
+                "$ref": "#/$defs/DebugHypothesisEvidence"
+              }
+            },
+            "contradictingEvidence": {
+              "type": "array",
+              "minItems": 0,
+              "maxItems": 64,
+              "uniqueItems": true,
+              "items": {
+                "$ref": "#/$defs/DebugHypothesisEvidence"
+              }
+            },
+            "lastUpdatedRoundId": {
+              "$ref": "./domain.schema.json#/$defs/ProbeRoundId"
+            }
+          }
+        }
+      ]
+    },
+    "DebugConfirmedFact": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "summary": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000,
+          "pattern": "^[^\\u0000]+$"
+        },
+        "evidence": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/DebugHypothesisEvidence"
+          }
+        }
+      },
+      "required": [
+        "summary",
+        "evidence"
+      ],
+      "description": "A bounded confirmed fact with traceable probe evidence.",
+      "oneOf": [
+        {
+          "properties": {
+            "summary": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1000,
+              "pattern": "^[^\\u0000]+$"
+            },
+            "evidence": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 16,
+              "uniqueItems": true,
+              "items": {
+                "$ref": "#/$defs/DebugHypothesisEvidence"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "DebugHypothesisLedger": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schemaVersion": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1
+        },
+        "authority": {
+          "$ref": "#/$defs/DebugProbeRoundAuthority"
+        },
+        "sessionStatus": {
+          "$ref": "#/$defs/DebugSessionStatus"
+        },
+        "ledgerDigest": {
+          "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+        },
+        "hypotheses": {
+          "type": "array",
+          "minItems": 0,
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/DebugHypothesis"
+          }
+        },
+        "confirmedFacts": {
+          "type": "array",
+          "minItems": 0,
+          "maxItems": 128,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/DebugConfirmedFact"
+          }
+        },
+        "reproductionRecipe": {
+          "type": "array",
+          "minItems": 0,
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1000,
+            "pattern": "^[^\\u0000]+$"
+          }
+        },
+        "unresolvedQuestions": {
+          "type": "array",
+          "minItems": 0,
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1000,
+            "pattern": "^[^\\u0000]+$"
+          }
+        },
+        "updatedAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "authority",
+        "sessionStatus",
+        "ledgerDigest",
+        "hypotheses",
+        "confirmedFacts",
+        "reproductionRecipe",
+        "unresolvedQuestions",
+        "updatedAt"
+      ],
+      "description": "Canonical bounded DebugProbe ledger. It contains evidence references and deltas, never raw logs or complete conversation history.",
+      "oneOf": [
+        {
+          "properties": {
+            "schemaVersion": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1
+            },
+            "authority": {
+              "$ref": "#/$defs/DebugProbeRoundAuthority"
+            },
+            "sessionStatus": {
+              "$ref": "#/$defs/DebugSessionStatus"
+            },
+            "ledgerDigest": {
+              "type": "string",
+              "minLength": 71,
+              "maxLength": 71,
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            },
+            "hypotheses": {
+              "type": "array",
+              "minItems": 0,
+              "maxItems": 64,
+              "uniqueItems": true,
+              "items": {
+                "$ref": "#/$defs/DebugHypothesis"
+              }
+            },
+            "confirmedFacts": {
+              "type": "array",
+              "minItems": 0,
+              "maxItems": 128,
+              "uniqueItems": true,
+              "items": {
+                "$ref": "#/$defs/DebugConfirmedFact"
+              }
+            },
+            "reproductionRecipe": {
+              "type": "array",
+              "minItems": 0,
+              "maxItems": 64,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1000,
+                "pattern": "^[^\\u0000]+$"
+              }
+            },
+            "unresolvedQuestions": {
+              "type": "array",
+              "minItems": 0,
+              "maxItems": 64,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1000,
+                "pattern": "^[^\\u0000]+$"
+              }
+            },
+            "updatedAt": {
+              "$ref": "./domain.schema.json#/$defs/Instant"
+            }
+          }
+        }
+      ]
+    },
+    "DebugExperimentCleanupReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "identity": {
+          "$ref": "#/$defs/DebugProbeIdentity"
+        },
+        "experimentId": {
+          "$ref": "./domain.schema.json#/$defs/DebugExperimentId"
+        },
+        "status": {
+          "$ref": "#/$defs/DebugExperimentCleanupStatus"
+        },
+        "residualResourceCount": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1024
+        },
+        "error": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/DebugProbeError"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cleanedAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        }
+      },
+      "required": [
+        "identity",
+        "experimentId",
+        "status",
+        "residualResourceCount",
+        "error",
+        "cleanedAt"
+      ],
+      "description": "Terminal cleanup receipt. Any residual resource makes the experiment ineligible for reuse.",
+      "oneOf": [
+        {
+          "properties": {
+            "identity": {
+              "$ref": "#/$defs/DebugProbeIdentity"
+            },
+            "experimentId": {
+              "type": "string",
+              "minLength": 30,
+              "maxLength": 30
+            },
+            "status": {
+              "$ref": "#/$defs/DebugExperimentCleanupStatus"
+            },
+            "residualResourceCount": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1024
+            },
+            "cleanedAt": {
+              "$ref": "./domain.schema.json#/$defs/Instant"
+            }
+          }
+        }
+      ]
+    },
+    "DebugExperiment": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schemaVersion": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1
+        },
+        "identity": {
+          "$ref": "#/$defs/DebugProbeIdentity"
+        },
+        "experimentId": {
+          "$ref": "./domain.schema.json#/$defs/DebugExperimentId"
+        },
+        "instrumentationDigest": {
+          "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+        },
+        "baseRevision": {
+          "$ref": "./domain.schema.json#/$defs/WorkspaceRevision"
+        },
+        "experimentRevision": {
+          "oneOf": [
+            {
+              "$ref": "./domain.schema.json#/$defs/WorkspaceRevision"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "$ref": "#/$defs/DebugExperimentStatus"
+        },
+        "createdAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "expiresAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "cleanupReceipt": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/DebugExperimentCleanupReceipt"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "identity",
+        "experimentId",
+        "instrumentationDigest",
+        "baseRevision",
+        "experimentRevision",
+        "status",
+        "createdAt",
+        "expiresAt",
+        "cleanupReceipt"
+      ],
+      "description": "One isolated ephemeral experiment. Its revision is never a candidate revision and cleanup is mandatory before reuse.",
+      "oneOf": [
+        {
+          "properties": {
+            "schemaVersion": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1
+            },
+            "identity": {
+              "$ref": "#/$defs/DebugProbeIdentity"
+            },
+            "experimentId": {
+              "type": "string",
+              "minLength": 30,
+              "maxLength": 30
+            },
+            "instrumentationDigest": {
+              "type": "string",
+              "minLength": 71,
+              "maxLength": 71,
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            },
+            "baseRevision": {
+              "$ref": "./domain.schema.json#/$defs/WorkspaceRevision"
+            },
+            "status": {
+              "$ref": "#/$defs/DebugExperimentStatus"
+            },
+            "createdAt": {
+              "$ref": "./domain.schema.json#/$defs/Instant"
+            },
+            "expiresAt": {
+              "$ref": "./domain.schema.json#/$defs/Instant"
+            }
+          }
+        }
+      ]
+    },
+    "ReadOnlyRoleWorkspaceMode": {
+      "type": "string",
+      "enum": [
+        "source-read-only",
+        "candidate-read-only"
+      ],
+      "description": "Workspace modes that never grant candidate Writer authority."
+    },
+    "ProbeReceiptStatus": {
+      "type": "string",
+      "enum": [
+        "succeeded",
+        "failed",
+        "timed_out",
+        "cancelled",
+        "skipped",
+        "cache_hit",
+        "stale"
+      ],
+      "description": "Closed terminal status retained by one probe execution receipt."
+    },
+    "ProbeRoundReceiptStatus": {
+      "type": "string",
+      "enum": [
+        "completed",
+        "failed",
+        "cancelled",
+        "stale"
+      ],
+      "description": "Closed terminal status retained by one probe round receipt."
+    },
+    "ExecutionMode": {
+      "type": "string",
+      "enum": [
+        "react",
+        "delegated_patch_shadow",
+        "delegated_patch",
+        "debug_probe"
+      ],
+      "description": "Process-level Worker execution strategy persisted in runtime evidence. Selecting DebugProbe never grants candidate workspace writes."
     }
   }
 }

@@ -1951,6 +1951,36 @@
     "ExternalIdentityId": {
       "type": "string",
       "pattern": "^xid_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "DebugSessionId": {
+      "type": "string",
+      "pattern": "^dbg_[0-9A-HJKMNP-TV-Z]{26}$",
+      "description": "Identity of one durable DebugProbe session."
+    },
+    "ProbeRoundId": {
+      "type": "string",
+      "pattern": "^prn_[0-9A-HJKMNP-TV-Z]{26}$",
+      "description": "Identity of one bounded DebugProbe round."
+    },
+    "ProbeId": {
+      "type": "string",
+      "pattern": "^prb_[0-9A-HJKMNP-TV-Z]{26}$",
+      "description": "Identity of one probe definition within a DebugProbe round."
+    },
+    "ProbeExecutionId": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "description": "Content-derived identity of one exact scheduled probe execution, including its authority and probe definition digest."
+    },
+    "DebugHypothesisId": {
+      "type": "string",
+      "pattern": "^hyp_[0-9A-HJKMNP-TV-Z]{26}$",
+      "description": "Identity of one hypothesis tracked by a DebugProbe ledger."
+    },
+    "DebugExperimentId": {
+      "type": "string",
+      "pattern": "^exp_[0-9A-HJKMNP-TV-Z]{26}$",
+      "description": "Identity of one isolated ephemeral debug experiment."
     }
   }
 }

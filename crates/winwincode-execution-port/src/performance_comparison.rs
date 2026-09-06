@@ -314,7 +314,7 @@ fn reconcile_model_calls(
 const fn arm(run: &PerformanceV0RunEvidence) -> ComparisonArm {
     match run.execution_mode {
         ExecutionMode::React | ExecutionMode::DelegatedPatchShadow => ComparisonArm::React,
-        ExecutionMode::DelegatedPatch => ComparisonArm::Structured,
+        ExecutionMode::DelegatedPatch | ExecutionMode::DebugProbe => ComparisonArm::Structured,
     }
 }
 

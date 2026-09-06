@@ -7,6 +7,7 @@ export const STRONGFLOW_ROLE_SESSION_POLICY_SCHEMA_VERSION = 2 as const
 export enum RoleExecutionMode {
   React = 'react',
   DelegatedBatch = 'delegated_batch',
+  DebugProbe = 'debug_probe',
 }
 
 export const STRONGFLOW_ROLE_IDS = Object.freeze([
@@ -63,6 +64,8 @@ export interface StrongFlowRoleConfiguration {
 }
 
 /** Minimal canonical v2 host input that configures Codex Core. */
+const DEBUG_PROBE_DEVELOPER_INSTRUCTIONS = 'Investigate the current failure from the read-only candidate workspace. Produce one bounded DebugProbePlan with explicit hypotheses, commands, paths, resource claims, budgets, and a round completion rule. Do not modify candidate files, apply a fix, install or upgrade dependencies, approve, or verify final delivery.'
+
 export interface RoleSessionPolicy {
   readonly schemaVersion: typeof STRONGFLOW_ROLE_SESSION_POLICY_SCHEMA_VERSION
   readonly roleId: StrongFlowRoleId
@@ -167,6 +170,7 @@ export function strongFlowRoleWorkspaceMode(
   if (!Object.values(RoleExecutionMode).includes(executionMode)) {
     return configurationError('INVALID_ROLE_POLICY', 'role execution mode is unknown')
   }
+  if (executionMode === RoleExecutionMode.DebugProbe) return 'candidate-read-only'
   if (
     executionMode === RoleExecutionMode.DelegatedBatch
     && (roleId === 'executor' || roleId === 'remediator')
@@ -182,7 +186,9 @@ export function strongFlowRoleSessionPolicy(
   const policy = ROLE_POLICIES[roleId]
   const developerInstructions = executionMode === RoleExecutionMode.DelegatedBatch
     ? policy.delegatedDeveloperInstructions ?? policy.developerInstructions
-    : policy.developerInstructions
+    : executionMode === RoleExecutionMode.DebugProbe
+      ? DEBUG_PROBE_DEVELOPER_INSTRUCTIONS
+      : policy.developerInstructions
   return Object.freeze({
     schemaVersion: STRONGFLOW_ROLE_SESSION_POLICY_SCHEMA_VERSION,
     roleId,

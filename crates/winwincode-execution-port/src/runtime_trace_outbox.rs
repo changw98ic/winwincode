@@ -120,17 +120,9 @@ pub enum WorkerRuntimeTraceState {
 
 /// Process-level execution strategy selected before a Job starts.
 ///
-/// PR0 keeps [`Self::React`] as the default. The delegated variants are
-/// feature gates only until their deterministic executors are introduced by
-/// later changes.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ExecutionMode {
-    #[default]
-    React,
-    DelegatedPatchShadow,
-    DelegatedPatch,
-}
+/// [`Self::React`] remains the default. Structured modes select host-managed
+/// execution paths; selecting a mode never grants candidate workspace writes.
+pub use crate::generated::ExecutionMode;
 
 impl ExecutionMode {
     /// Parses the canonical configuration spelling.
@@ -140,6 +132,7 @@ impl ExecutionMode {
             "react" => Some(Self::React),
             "delegated_patch_shadow" => Some(Self::DelegatedPatchShadow),
             "delegated_patch" => Some(Self::DelegatedPatch),
+            "debug_probe" => Some(Self::DebugProbe),
             _ => None,
         }
     }
@@ -151,6 +144,7 @@ impl ExecutionMode {
             Self::React => "react",
             Self::DelegatedPatchShadow => "delegated_patch_shadow",
             Self::DelegatedPatch => "delegated_patch",
+            Self::DebugProbe => "debug_probe",
         }
     }
 }

@@ -5,10 +5,12 @@ use winwincode_domain::WorkspaceRevision;
 use winwincode_execution_port::generated::{
     ActionEnforcementDecision, ActionPolicyKind, ActionPolicyMode, ApprovalDecisionMessageDecision,
     ApprovalDecisionMessageScope, ChangeBatchIdentity, ChangeBatchProgressEvent,
-    ChangeBatchProposal, ChangeBatchProposalEvent, ChangeBatchReceipt, ExecutionPortMessage,
-    InputResponseMessageStatus, JobCancelAckMessageStatus, JobCancelMessageReason,
-    JobDispatchResultMessageStatus, JobOutcomeAckMessageStatus, RepairEnvelope, RoleSessionPolicy,
-    ValidationReceipt, WorkerCapabilitySetPlatform, WorkerHeartbeatAckMessageStatus,
+    ChangeBatchProposal, ChangeBatchProposalEvent, ChangeBatchReceipt, DebugExperiment,
+    DebugHypothesisLedger, DebugProbePlan, ExecutionPortMessage, InputResponseMessageStatus,
+    JobCancelAckMessageStatus, JobCancelMessageReason, JobDispatchResultMessageStatus,
+    JobOutcomeAckMessageStatus, ProbeExecutionEvent, ProbeExecutionIntent, ProbeExecutionReceipt,
+    ProbeRoundEvent, ProbeRoundReceipt, RepairEnvelope, RoleSessionPolicy, ValidationReceipt,
+    WorkerCapabilitySetPlatform, WorkerHeartbeatAckMessageStatus,
     WorkerRegistrationResultMessageLeaseRecovery, WorkerRegistrationResultMessageStatus,
 };
 
@@ -421,4 +423,316 @@ fn change_batch_receipt_statuses_bind_only_proven_tree_results() {
     let mut illegal_status = uncertain;
     illegal_status["status"] = Value::String("completed".to_owned());
     assert!(from_value::<ChangeBatchReceipt>(illegal_status).is_err());
+}
+
+fn debug_probe_authority() -> Value {
+    serde_json::json!({
+        "debugSessionId": "dbg_00000000000000000000000000",
+        "jobId": "job_00000000000000000000000000",
+        "attempt": 1,
+        "leaseId": "lse_00000000000000000000000000",
+        "fencingToken": "7",
+        "sessionIdentity": {
+            "productSessionId": "psn_00000000000000000000000000",
+            "workerSessionId": "wsn_00000000000000000000000000",
+            "codexThreadId": "cdx_00000000000000000000000000"
+        },
+        "repositoryId": "rep_00000000000000000000000000",
+        "roundId": "prn_00000000000000000000000000",
+        "workspaceRevision": format!("git-tree:{}", "0".repeat(40)),
+        "environmentDigest": format!("sha256:{}", "1".repeat(64))
+    })
+}
+
+fn debug_probe_identity() -> Value {
+    let mut identity = debug_probe_authority();
+    let object = identity
+        .as_object_mut()
+        .expect("debug probe authority object");
+    object.insert(
+        "probeId".to_owned(),
+        Value::String("prb_00000000000000000000000000".to_owned()),
+    );
+    object.insert(
+        "probeExecutionId".to_owned(),
+        Value::String(format!("sha256:{}", "7".repeat(64))),
+    );
+    identity
+}
+
+fn probe_spec() -> Value {
+    serde_json::json!({
+        "probeId": "prb_00000000000000000000000000",
+        "probeDefinitionDigest": format!("sha256:{}", "2".repeat(64)),
+        "kind": "static_analysis",
+        "command": {
+            "argv": ["corepack", "pnpm", "typecheck"],
+            "workingDirectory": ".",
+            "commandArgBytes": 30
+        },
+        "resources": {
+            "workspaceAccess": "read_only",
+            "sideEffectClass": "pure_read",
+            "paths": ["src/example.ts"],
+            "cpuLimitMillis": 10_000,
+            "memoryLimitBytes": 134_217_728,
+            "portNumbers": [],
+            "serviceKeys": [],
+            "databaseKeys": [],
+            "exclusiveKeys": [],
+            "networkAccess": "none"
+        },
+        "timeoutMillis": 300_000,
+        "outputLimitBytes": 1_048_576,
+        "required": true,
+        "targetHypothesisIds": ["hyp_00000000000000000000000000"]
+    })
+}
+
+fn debug_probe_plan() -> Value {
+    serde_json::json!({
+        "schemaVersion": 1,
+        "authority": debug_probe_authority(),
+        "planDigest": format!("sha256:{}", "3".repeat(64)),
+        "probes": [probe_spec()],
+        "budget": {
+            "probeLimit": 8,
+            "parallelProbeLimit": 4,
+            "wallTimeLimitMillis": 600_000,
+            "totalOutputLimitBytes": 8_388_608,
+            "totalCpuLimitMillis": 2_400_000,
+            "peakMemoryLimitBytes": 1_073_741_824,
+            "totalCommandArgLimitBytes": 262_144,
+            "budgetDigest": format!("sha256:{}", "6".repeat(64))
+        },
+        "completionRule": {
+            "kind": "all_terminal",
+            "minimumCompletedProbes": 1,
+            "minimumSuccessfulProbes": 1,
+            "stopOnRequiredProbeFailure": true
+        },
+        "createdAt": "2026-09-04T08:00:00.000Z"
+    })
+}
+
+fn probe_execution_receipt() -> Value {
+    serde_json::json!({
+        "schemaVersion": 1,
+        "identity": debug_probe_identity(),
+        "planDigest": format!("sha256:{}", "3".repeat(64)),
+        "status": "succeeded",
+        "exitCode": 0,
+        "signal": null,
+        "timedOut": false,
+        "durationMillis": 1_200,
+        "outputBytes": 4_096,
+        "outputTruncated": false,
+        "artifactRefs": [],
+        "error": null,
+        "startedAt": "2026-09-04T08:00:01.000Z",
+        "finishedAt": "2026-09-04T08:00:02.000Z"
+    })
+}
+
+#[test]
+fn generated_debug_probe_execution_contracts_round_trip() {
+    let plan = debug_probe_plan();
+    let decoded: DebugProbePlan = from_value(plan.clone()).expect("bounded DebugProbe plan");
+    assert_eq!(serde_json::to_value(decoded).expect("plan JSON"), plan);
+
+    let intent = serde_json::json!({
+        "schemaVersion": 1,
+        "identity": debug_probe_identity(),
+        "planDigest": format!("sha256:{}", "3".repeat(64)),
+        "spec": probe_spec(),
+        "createdAt": "2026-09-04T08:00:00.000Z"
+    });
+    let decoded: ProbeExecutionIntent = from_value(intent.clone()).expect("probe intent");
+    assert_eq!(serde_json::to_value(decoded).expect("intent JSON"), intent);
+
+    let receipt = probe_execution_receipt();
+    let decoded: ProbeExecutionReceipt = from_value(receipt.clone()).expect("probe receipt");
+    assert_eq!(
+        serde_json::to_value(decoded).expect("probe receipt JSON"),
+        receipt
+    );
+
+    let round_receipt = serde_json::json!({
+        "schemaVersion": 1,
+        "authority": debug_probe_authority(),
+        "planDigest": format!("sha256:{}", "3".repeat(64)),
+        "status": "completed",
+        "completionReason": "all_probes_terminal",
+        "probeReceipts": [probe_execution_receipt()],
+        "usage": {
+            "probeCount": 1,
+            "peakParallelProbes": 1,
+            "elapsedMillis": 1_200,
+            "totalOutputBytes": 4_096,
+            "totalCpuMillis": 800,
+            "peakMemoryBytes": 67_108_864,
+            "totalCommandArgBytes": 30,
+            "budgetDigest": format!("sha256:{}", "6".repeat(64))
+        },
+        "error": null,
+        "startedAt": "2026-09-04T08:00:01.000Z",
+        "finishedAt": "2026-09-04T08:00:02.000Z"
+    });
+    let decoded: ProbeRoundReceipt =
+        from_value(round_receipt.clone()).expect("probe round receipt");
+    assert_eq!(
+        serde_json::to_value(decoded).expect("round receipt JSON"),
+        round_receipt
+    );
+
+    let execution_event = serde_json::json!({
+        "identity": debug_probe_identity(),
+        "sequence": 1,
+        "kind": "finished",
+        "status": "succeeded",
+        "occurredAt": "2026-09-04T08:00:02.000Z",
+        "summary": "probe finished",
+        "artifactRefs": []
+    });
+    assert!(from_value::<ProbeExecutionEvent>(execution_event).is_ok());
+    let round_event = serde_json::json!({
+        "authority": debug_probe_authority(),
+        "sequence": 2,
+        "kind": "finished",
+        "status": "completed",
+        "occurredAt": "2026-09-04T08:00:02.000Z",
+        "summary": "round finished"
+    });
+    assert!(from_value::<ProbeRoundEvent>(round_event).is_ok());
+}
+
+#[test]
+fn generated_debug_probe_state_contracts_round_trip() {
+    let ledger = serde_json::json!({
+        "schemaVersion": 1,
+        "authority": debug_probe_authority(),
+        "sessionStatus": "active",
+        "ledgerDigest": format!("sha256:{}", "4".repeat(64)),
+        "hypotheses": [{
+            "hypothesisId": "hyp_00000000000000000000000000",
+            "summary": "The type graph contains a missing edge.",
+            "status": "active",
+            "confidenceBps": 5_000,
+            "supportingEvidence": [],
+            "contradictingEvidence": [],
+            "lastUpdatedRoundId": "prn_00000000000000000000000000"
+        }],
+        "confirmedFacts": [],
+        "reproductionRecipe": ["Run the bounded typecheck probe."],
+        "unresolvedQuestions": ["Which declaration owns the missing edge?"],
+        "updatedAt": "2026-09-04T08:00:02.000Z"
+    });
+    let decoded: DebugHypothesisLedger = from_value(ledger.clone()).expect("hypothesis ledger");
+    assert_eq!(serde_json::to_value(decoded).expect("ledger JSON"), ledger);
+
+    let experiment = serde_json::json!({
+        "schemaVersion": 1,
+        "identity": debug_probe_identity(),
+        "experimentId": "exp_00000000000000000000000000",
+        "instrumentationDigest": format!("sha256:{}", "5".repeat(64)),
+        "baseRevision": format!("git-tree:{}", "0".repeat(40)),
+        "experimentRevision": null,
+        "status": "planned",
+        "createdAt": "2026-09-04T08:00:00.000Z",
+        "expiresAt": "2026-09-04T08:10:00.000Z",
+        "cleanupReceipt": null
+    });
+    let decoded: DebugExperiment = from_value(experiment.clone()).expect("debug experiment");
+    assert_eq!(
+        serde_json::to_value(decoded).expect("experiment JSON"),
+        experiment
+    );
+}
+
+#[test]
+fn generated_debug_probe_contracts_fail_closed() {
+    let mut unknown = debug_probe_plan();
+    unknown["rawLog"] = Value::String("not allowed".to_owned());
+    assert!(from_value::<DebugProbePlan>(unknown).is_err());
+
+    let mut empty_job_id = debug_probe_plan();
+    empty_job_id["authority"]["jobId"] = Value::String(String::new());
+    assert!(from_value::<DebugProbePlan>(empty_job_id).is_err());
+
+    let mut wrong_version = debug_probe_plan();
+    wrong_version["schemaVersion"] = Value::from(2);
+    assert!(from_value::<DebugProbePlan>(wrong_version).is_err());
+
+    let mut too_many_probes = debug_probe_plan();
+    too_many_probes["probes"] = Value::Array((0..33).map(|_| probe_spec()).collect());
+    assert!(from_value::<DebugProbePlan>(too_many_probes).is_err());
+
+    let mut too_many_arguments = debug_probe_plan();
+    too_many_arguments["probes"][0]["command"]["argv"] =
+        Value::Array((0..65).map(|_| Value::String("x".to_owned())).collect());
+    assert!(from_value::<DebugProbePlan>(too_many_arguments).is_err());
+
+    let mut too_many_paths = debug_probe_plan();
+    too_many_paths["probes"][0]["resources"]["paths"] = Value::Array(
+        (0..129)
+            .map(|index| Value::String(format!("src/{index}.rs")))
+            .collect(),
+    );
+    assert!(from_value::<DebugProbePlan>(too_many_paths).is_err());
+
+    for (field, invalid) in [("timeoutMillis", 600_001), ("outputLimitBytes", 16_777_217)] {
+        let mut over_limit = debug_probe_plan();
+        over_limit["probes"][0][field] = Value::from(invalid);
+        assert!(from_value::<DebugProbePlan>(over_limit).is_err(), "{field}");
+    }
+
+    for (field, invalid) in [
+        ("cpuLimitMillis", 3_600_001_i64),
+        ("memoryLimitBytes", 8_589_934_593_i64),
+    ] {
+        let mut over_limit = debug_probe_plan();
+        over_limit["probes"][0]["resources"][field] = Value::from(invalid);
+        assert!(from_value::<DebugProbePlan>(over_limit).is_err(), "{field}");
+    }
+
+    let mut write_authority = debug_probe_plan();
+    write_authority["probes"][0]["resources"]["workspaceAccess"] =
+        Value::String("candidate_write".to_owned());
+    assert!(from_value::<DebugProbePlan>(write_authority).is_err());
+
+    let mut over_budget = debug_probe_plan();
+    over_budget["budget"]["totalOutputLimitBytes"] = Value::from(268_435_457);
+    assert!(from_value::<DebugProbePlan>(over_budget).is_err());
+
+    let mut missing_nullable = probe_execution_receipt();
+    missing_nullable
+        .as_object_mut()
+        .expect("probe receipt object")
+        .remove("error");
+    assert!(from_value::<ProbeExecutionReceipt>(missing_nullable).is_err());
+
+    let mut zero_sequence = serde_json::json!({
+        "authority": debug_probe_authority(),
+        "sequence": 0,
+        "kind": "started",
+        "status": "running",
+        "occurredAt": "2026-09-04T08:00:01.000Z",
+        "summary": "round started"
+    });
+    assert!(from_value::<ProbeRoundEvent>(zero_sequence.clone()).is_err());
+    zero_sequence["sequence"] = Value::from(1);
+    zero_sequence["status"] = Value::String("unknown".to_owned());
+    assert!(from_value::<ProbeRoundEvent>(zero_sequence).is_err());
+
+    let read_only_policy = serde_json::json!({
+        "schemaVersion": 2,
+        "roleId": "executor",
+        "workspaceMode": "candidate-read-only",
+        "developerInstructions": "Produce one bounded DebugProbe plan.",
+        "executionMode": "debug_probe"
+    });
+    assert!(from_value::<RoleSessionPolicy>(read_only_policy.clone()).is_ok());
+    let mut writable_policy = read_only_policy;
+    writable_policy["workspaceMode"] = Value::String("candidate-write".to_owned());
+    assert!(from_value::<RoleSessionPolicy>(writable_policy).is_err());
 }

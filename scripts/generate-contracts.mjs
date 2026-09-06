@@ -3157,10 +3157,17 @@ function renderRustDefinition(entry, context, qualifyShared) {
     && schema.enum.every(value => typeof value === 'string')
   ) {
     const lines = [...rustDocumentation(schema.description)]
-    lines.push('#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]')
+    if (name === 'ExecutionMode') {
+      lines.push('#[derive(')
+      lines.push('    Debug, Clone, Copy, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,')
+      lines.push(')]')
+    } else {
+      lines.push('#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]')
+    }
     lines.push(`pub enum ${name} {`)
     const used = new Set()
     for (const value of schema.enum) {
+      if (name === 'ExecutionMode' && value === 'react') lines.push('    #[default]')
       lines.push(`    #[serde(rename = ${JSON.stringify(value)})]`)
       lines.push(`    ${rustVariantName(value, used)},`)
     }

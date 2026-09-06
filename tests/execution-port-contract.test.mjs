@@ -62,6 +62,9 @@ const domainDefinitions = [
   'ApprovalId',
   'ChangeBatchId',
   'CodexThreadId',
+  'DebugExperimentId',
+  'DebugHypothesisId',
+  'DebugSessionId',
   'DeliveryId',
   'DeliveryTaskId',
   'EvidenceId',
@@ -73,6 +76,9 @@ const domainDefinitions = [
   'InteractiveInputValue',
   'LeaseId',
   'ObservationId',
+  'ProbeExecutionId',
+  'ProbeId',
+  'ProbeRoundId',
   'ProductSessionId',
   'RepositoryId',
   'RepositoryScope',
@@ -1258,4 +1264,262 @@ test('ChangeBatch contracts have one generated closed and bounded schema surface
   assert.equal(validateFreezeFact({ ...freezeFact, finalObservation: undefined }), false)
   assert.equal(validateFreezeFact({ ...freezeFact, stopReason: 'wall_time_limit_reached' }), false)
   assert.match(rust, /pub struct RepairLoopBudget \{[\s\S]*max_repair_rounds: i64,/u)
+})
+
+test('DebugProbe contracts are generated, closed, bounded, authority-bound, and read-only', () => {
+  const schema = json(schemaPath)
+  const openapi = json(join(root, 'schema/winwincode/v1/openapi.generated.json'))
+  const collection = json(join(root, 'schema/winwincode/v1/schema-collection.generated.json'))
+  const normalizeOpenApiReferences = value => JSON.parse(
+    JSON.stringify(value).replaceAll('#/components/schemas/', '#/$defs/'),
+  )
+  const definitions = [
+    'DebugConfirmedFact',
+    'DebugExperiment',
+    'DebugExperimentCleanupReceipt',
+    'DebugExperimentCleanupStatus',
+    'DebugExperimentStatus',
+    'DebugHypothesis',
+    'DebugHypothesisEvidence',
+    'DebugHypothesisLedger',
+    'DebugHypothesisStatus',
+    'DebugProbeError',
+    'DebugProbeErrorCode',
+    'DebugProbeIdentity',
+    'DebugProbeKind',
+    'DebugProbePlan',
+    'DebugProbeRoundAuthority',
+    'DebugSessionStatus',
+    'ExecutionMode',
+    'ProbeCommandSpec',
+    'ProbeCompletionRule',
+    'ProbeCompletionRuleKind',
+    'ProbeExecutionEvent',
+    'ProbeExecutionEventKind',
+    'ProbeExecutionIntent',
+    'ProbeExecutionReceipt',
+    'ProbeExecutionStatus',
+    'ProbeNetworkAccess',
+    'ProbeReceiptStatus',
+    'ProbeResourceClaim',
+    'ProbeRoundBudget',
+    'ProbeRoundBudgetUsage',
+    'ProbeRoundCompletionReason',
+    'ProbeRoundEvent',
+    'ProbeRoundEventKind',
+    'ProbeRoundReceipt',
+    'ProbeRoundReceiptStatus',
+    'ProbeRoundStatus',
+    'ProbeSideEffectClass',
+    'ProbeSpec',
+    'ProbeWorkspaceAccess',
+    'ReadOnlyRoleWorkspaceMode',
+  ]
+  for (const name of definitions) {
+    assert.ok(schema.$defs[name], `${name} must exist in the canonical schema`)
+    assert.deepEqual(
+      normalizeOpenApiReferences(openapi.components.schemas[name]),
+      collection.$defs[name],
+      `${name} must have one generated OpenAPI and JSON Schema shape`,
+    )
+    if (schema.$defs[name].type === 'object') {
+      assert.equal(schema.$defs[name].additionalProperties, false)
+    }
+  }
+
+  const typescript = readFileSync(join(root, 'apps/client/src/generated/contracts.ts'), 'utf8')
+  const rust = readFileSync(
+    join(root, 'crates/winwincode-execution-port/src/generated.rs'),
+    'utf8',
+  )
+  for (const name of definitions) {
+    assert.match(typescript, new RegExp(`export (?:type|enum) ${name}\\b`, 'u'), name)
+    assert.match(rust, new RegExp(`pub (?:struct|enum|type) ${name}\\b`, 'u'), name)
+  }
+  assert.equal(rust.match(/pub enum ExecutionMode\b/gu)?.length, 1)
+  assert.match(rust, /Debug, Clone, Copy, Default, PartialEq, Eq, Hash/u)
+  assert.doesNotMatch(
+    readFileSync(
+      join(root, 'crates/winwincode-execution-port/src/runtime_trace_outbox.rs'),
+      'utf8',
+    ),
+    /pub enum ExecutionMode\b/u,
+  )
+
+  const authority = {
+    debugSessionId: 'dbg_00000000000000000000000000',
+    jobId: 'job_00000000000000000000000000',
+    attempt: 1,
+    leaseId: 'lse_00000000000000000000000000',
+    fencingToken: '7',
+    sessionIdentity: {
+      productSessionId: 'psn_00000000000000000000000000',
+      workerSessionId: 'wsn_00000000000000000000000000',
+      codexThreadId: 'cdx_00000000000000000000000000',
+    },
+    repositoryId: 'rep_00000000000000000000000000',
+    roundId: 'prn_00000000000000000000000000',
+    workspaceRevision: `git-tree:${'0'.repeat(40)}`,
+    environmentDigest: `sha256:${'1'.repeat(64)}`,
+  }
+  const identity = {
+    ...authority,
+    probeId: 'prb_00000000000000000000000000',
+    probeExecutionId: `sha256:${'7'.repeat(64)}`,
+  }
+  const resources = {
+    workspaceAccess: 'read_only',
+    sideEffectClass: 'pure_read',
+    paths: ['src/example.ts'],
+    cpuLimitMillis: 10_000,
+    memoryLimitBytes: 134_217_728,
+    portNumbers: [],
+    serviceKeys: [],
+    databaseKeys: [],
+    exclusiveKeys: [],
+    networkAccess: 'none',
+  }
+  const probe = {
+    probeId: identity.probeId,
+    probeDefinitionDigest: `sha256:${'2'.repeat(64)}`,
+    kind: 'static_analysis',
+    command: {
+      argv: ['corepack', 'pnpm', 'typecheck'],
+      workingDirectory: '.',
+      commandArgBytes: 30,
+    },
+    resources,
+    timeoutMillis: 300_000,
+    outputLimitBytes: 1_048_576,
+    required: true,
+    targetHypothesisIds: ['hyp_00000000000000000000000000'],
+  }
+  const budget = {
+    probeLimit: 8,
+    parallelProbeLimit: 4,
+    wallTimeLimitMillis: 600_000,
+    totalOutputLimitBytes: 8_388_608,
+    totalCpuLimitMillis: 2_400_000,
+    peakMemoryLimitBytes: 1_073_741_824,
+    totalCommandArgLimitBytes: 262_144,
+    budgetDigest: `sha256:${'6'.repeat(64)}`,
+  }
+  const plan = {
+    schemaVersion: 1,
+    authority,
+    planDigest: `sha256:${'3'.repeat(64)}`,
+    probes: [probe],
+    budget,
+    completionRule: {
+      kind: 'all_terminal',
+      minimumCompletedProbes: 1,
+      minimumSuccessfulProbes: 1,
+      stopOnRequiredProbeFailure: true,
+    },
+    createdAt: '2026-09-04T08:00:00.000Z',
+  }
+
+  const validatePlan = validator(schema, 'DebugProbePlan')
+  assert.equal(validatePlan(plan), true, JSON.stringify(validatePlan.errors))
+  assert.equal(validatePlan({ ...plan, unknownField: true }), false)
+  assert.equal(validatePlan({ ...plan, probes: [] }), false)
+  assert.equal(validatePlan({ ...plan, probes: Array(33).fill(probe) }), false)
+  assert.equal(validatePlan({ ...plan, authority: { ...authority, jobId: '' } }), false)
+  assert.equal(validatePlan({
+    ...plan,
+    probes: [{ ...probe, command: { ...probe.command, argv: Array(65).fill('x') } }],
+  }), false)
+  assert.equal(validatePlan({
+    ...plan,
+    probes: [{ ...probe, resources: { ...resources, paths: Array(129).fill('src/a.ts') } }],
+  }), false)
+  assert.equal(validatePlan({ ...plan, probes: [{ ...probe, timeoutMillis: 600_001 }] }), false)
+  assert.equal(validatePlan({ ...plan, probes: [{ ...probe, outputLimitBytes: 16_777_217 }] }), false)
+  assert.equal(validatePlan({
+    ...plan,
+    probes: [{ ...probe, resources: { ...resources, cpuLimitMillis: 3_600_001 } }],
+  }), false)
+  assert.equal(validatePlan({
+    ...plan,
+    probes: [{ ...probe, resources: { ...resources, memoryLimitBytes: 8_589_934_593 } }],
+  }), false)
+  assert.equal(validatePlan({
+    ...plan,
+    probes: [{ ...probe, resources: { ...resources, workspaceAccess: 'candidate_write' } }],
+  }), false)
+  assert.equal(validatePlan({
+    ...plan,
+    budget: { ...budget, totalOutputLimitBytes: 268_435_457 },
+  }), false)
+
+  const validateIntent = validator(schema, 'ProbeExecutionIntent')
+  const intent = {
+    schemaVersion: 1,
+    identity,
+    planDigest: plan.planDigest,
+    spec: probe,
+    createdAt: plan.createdAt,
+  }
+  assert.equal(validateIntent(intent), true, JSON.stringify(validateIntent.errors))
+  assert.equal(validateIntent({ ...intent, identity: { ...identity, roundId: '' } }), false)
+  assert.equal(validateIntent({ ...intent, schemaVersion: 2 }), false)
+
+  const probeReceipt = {
+    schemaVersion: 1,
+    identity,
+    planDigest: plan.planDigest,
+    status: 'succeeded',
+    exitCode: 0,
+    signal: null,
+    timedOut: false,
+    durationMillis: 1200,
+    outputBytes: 4096,
+    outputTruncated: false,
+    artifactRefs: [],
+    error: null,
+    startedAt: '2026-09-04T08:00:01.000Z',
+    finishedAt: '2026-09-04T08:00:02.000Z',
+  }
+  const roundReceipt = {
+    schemaVersion: 1,
+    authority,
+    planDigest: plan.planDigest,
+    status: 'completed',
+    completionReason: 'all_probes_terminal',
+    probeReceipts: [probeReceipt],
+    usage: {
+      probeCount: 1,
+      peakParallelProbes: 1,
+      elapsedMillis: 1200,
+      totalOutputBytes: 4096,
+      totalCpuMillis: 800,
+      peakMemoryBytes: 67_108_864,
+      totalCommandArgBytes: 30,
+      budgetDigest: budget.budgetDigest,
+    },
+    error: null,
+    startedAt: probeReceipt.startedAt,
+    finishedAt: probeReceipt.finishedAt,
+  }
+  const validateReceipt = validator(schema, 'ProbeRoundReceipt')
+  assert.equal(validateReceipt(roundReceipt), true, JSON.stringify(validateReceipt.errors))
+  assert.equal(validateReceipt({ ...roundReceipt, probeReceipts: [] }), false)
+  assert.equal(validateReceipt({ ...roundReceipt, status: 'done' }), false)
+  assert.equal(validateReceipt({ ...roundReceipt, error: undefined }), false)
+  assert.equal(validateReceipt({
+    ...roundReceipt,
+    probeReceipts: [{ ...probeReceipt, identity: { ...identity, fencingToken: '' } }],
+  }), false)
+
+  const validateRolePolicy = validator(schema, 'RoleSessionPolicy')
+  const debugPolicy = {
+    schemaVersion: 2,
+    roleId: 'executor',
+    workspaceMode: 'candidate-read-only',
+    developerInstructions: 'Produce one bounded DebugProbe plan.',
+    executionMode: 'debug_probe',
+  }
+  assert.equal(validateRolePolicy(debugPolicy), true, JSON.stringify(validateRolePolicy.errors))
+  assert.equal(validateRolePolicy({ ...debugPolicy, workspaceMode: 'candidate-write' }), false)
+  assert.equal(validateRolePolicy({ ...debugPolicy, executionMode: 'unknown' }), false)
 })

@@ -496,6 +496,15 @@ fn performance_baseline_is_bounded_secret_safe_and_replayable() {
         Some(ExecutionMode::DelegatedPatchShadow)
     );
     assert_eq!(
+        ExecutionMode::from_config("debug_probe"),
+        Some(ExecutionMode::DebugProbe)
+    );
+    assert_eq!(ExecutionMode::DebugProbe.as_config(), "debug_probe");
+    assert_eq!(
+        serde_json::to_value(ExecutionMode::DebugProbe).expect("DebugProbe JSON"),
+        serde_json::Value::String("debug_probe".to_owned())
+    );
+    assert_eq!(
         ObserverMode::from_config("ambiguous_only"),
         Some(ObserverMode::AmbiguousOnly)
     );

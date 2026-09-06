@@ -158,6 +158,17 @@ test('delegated batch keeps Composer roles read-only while React retains direct 
   }
 })
 
+test('DebugProbe keeps every role read-only and has one bounded-plan instruction', () => {
+  for (const roleId of STRONGFLOW_ROLE_IDS) {
+    const policy = strongFlowRoleSessionPolicy(roleId, RoleExecutionMode.DebugProbe)
+    assert.equal(policy.workspaceMode, 'candidate-read-only')
+    assert.equal(policy.executionMode, RoleExecutionMode.DebugProbe)
+    assert.match(policy.developerInstructions, /bounded DebugProbePlan/u)
+    assert.match(policy.developerInstructions, /read-only candidate workspace/u)
+    assert.doesNotMatch(policy.developerInstructions, /Implement only/u)
+  }
+})
+
 test('runtime role-policy parsing accepts only canonical v2 without a legacy read path', () => {
   const canonical = strongFlowRoleSessionPolicy('executor', RoleExecutionMode.DelegatedBatch)
   assert.deepEqual(parseRoleSessionPolicy(jsonClone(canonical)), canonical)
