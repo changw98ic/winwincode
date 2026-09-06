@@ -60,7 +60,10 @@ test('facade restores context, exchanges proof once, and closes the cookie sessi
   })
 
   const restored = await client.restore()
-  const created = await client.login(proof)
+  const created = await client.login(proof, {
+    username: 'owner',
+    password: 'owner-password-123',
+  })
   await client.logout()
 
   assert.deepEqual(restored, session())
@@ -80,7 +83,11 @@ test('facade restores context, exchanges proof once, and closes the cookie sessi
   assert.equal(requests[0].init.body, undefined)
   assert.equal(requests[1].init.headers.Authorization, `Bearer ${proof}`)
   assert.equal(requests[2].init.headers.Authorization, undefined)
-  assert.deepEqual(JSON.parse(requests[1].init.body), { schemaVersion })
+  assert.deepEqual(JSON.parse(requests[1].init.body), {
+    schemaVersion,
+    username: 'owner',
+    password: 'owner-password-123',
+  })
   assert.doesNotMatch(JSON.stringify(client), /proof-material/u)
 })
 
@@ -99,7 +106,7 @@ test('facade treats redirect as an error and submits proof exactly once', async 
   })
 
   await assert.rejects(
-    client.login(proof),
+    client.login(proof, { username: 'owner', password: 'owner-password-123' }),
     error => error instanceof ControlPlaneClientError
       && error.code === 'INVALID_AUTH_SESSION_RESPONSE'
       && !error.message.includes(proof),
@@ -130,7 +137,7 @@ test('facade rejects expired proof and malformed expiresAt without echoing proof
   })
 
   await assert.rejects(
-    client.login(proof),
+    client.login(proof, { username: 'owner', password: 'owner-password-123' }),
     error => error instanceof ControlPlaneClientError
       && error.kind === 'authentication'
       && !JSON.stringify(error).includes(proof)
@@ -138,7 +145,7 @@ test('facade rejects expired proof and malformed expiresAt without echoing proof
   )
   mode = 'malformed'
   await assert.rejects(
-    client.login(proof),
+    client.login(proof, { username: 'owner', password: 'owner-password-123' }),
     error => error instanceof ControlPlaneClientError
       && error.code === 'INVALID_AUTH_SESSION_RESPONSE'
       && !error.message.includes(proof),
@@ -230,41 +237,48 @@ function descendants(node) {
   return [node, ...node.children.flatMap(child => descendants(child))]
 }
 
-test('login page clears proof before facade submission and view-model never stores it', async () => {
+test('auth session widget shows status and sign-out without a proof form', async () => {
   const document = new FakeDocument()
   const rootElement = new FakeElement('div', document)
-  const proof = 'proof-never-rendered-or-stored'
-  let submitted = null
-  let release
+  let signedIn = true
   const client = {
-    async restore() { return session() },
-    async login(value) {
-      submitted = value
-      await new Promise(resolvePromise => { release = resolvePromise })
-      return session('2026-08-27T08:15:30Z')
+    async restore() {
+      if (signedIn) return session()
+      throw new ControlPlaneClientError({
+        kind: 'authentication',
+        code: 'AUTHENTICATION_REQUIRED',
+        message: 'The browser session is missing.',
+        requestId: null,
+        retryable: false,
+      })
     },
-    async logout() {},
+    async login() {
+      throw new Error('the auth session widget never signs in')
+    },
+    async logout() { signedIn = false },
   }
   const model = createAuthSessionViewModel(client)
   const mounted = mountAuthSessionPage({ root: rootElement, model })
+  await model.restore()
+
   const nodes = descendants(rootElement)
-  const input = nodes.find(node => node.className === 'wwc-auth-session-proof')
-  const form = nodes.find(node => node.className === 'wwc-auth-session-form')
-  input.value = proof
-
-  form.emit('submit', { preventDefault() {} })
-
-  assert.equal(input.value, '')
-  assert.equal(submitted, proof)
-  assert.doesNotMatch(JSON.stringify(model.state), /proof-never/u)
-  assert.doesNotMatch(
-    descendants(rootElement).map(node => node.textContent).join(' '),
-    /proof-never/u,
+  assert.equal(
+    nodes.some(node => node.className === 'wwc-auth-session-proof'),
+    false,
+    'the retired proof form stays unmounted',
   )
-  release()
+  assert.equal(
+    nodes.some(node => node.className === 'wwc-auth-session-form'),
+    false,
+    'the retired proof form stays unmounted',
+  )
+  const signOut = nodes.find(node => node.className === 'wwc-auth-session-sign-out')
+  assert.notEqual(signOut, undefined)
+  assert.equal(signOut.hidden, false, 'sign-out follows the signed-in state')
+
+  signOut.emit('click')
   await new Promise(resolvePromise => setImmediate(resolvePromise))
-  assert.equal(model.state.status, 'signed-in')
-  assert.doesNotMatch(JSON.stringify(model.state), /proof-never/u)
+  assert.equal(model.state.status, 'signed-out')
 
   mounted.close()
   model.close()

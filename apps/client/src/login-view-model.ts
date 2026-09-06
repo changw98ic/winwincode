@@ -30,7 +30,7 @@ export interface LoginViewModel {
   readonly state: LoginViewModelState
   subscribe(listener: LoginViewModelListener): () => void
   login(credentials: LoginCredentials): Promise<void>
-  initialize(bootstrapProof: string): Promise<void>
+  initialize(bootstrapProof: string, credentials: LoginCredentials): Promise<void>
   refreshInitialization(): Promise<void>
   /** Clear one submission outcome so the page is armed for the next session. */
   reset(): void
@@ -86,9 +86,11 @@ export function createLoginViewModel(options: {
         publish(state('idle', null, null, current.initialization))
         return
       }
+      // Keep the submission source so the page can render the failure on the
+      // form that produced it.
       publish(state(
         'idle',
-        null,
+        source,
         controlPlaneLoginFailure(error),
         current.initialization,
       ))
@@ -120,11 +122,16 @@ export function createLoginViewModel(options: {
         return operation
       })
     },
-    initialize(bootstrapProof) {
+    initialize(bootstrapProof, credentials) {
       let submittedProof = bootstrapProof
+      const attempt = {
+        username: credentials.username,
+        password: credentials.password,
+      }
       return submit('initialization', signal => {
-        const operation = client.login(submittedProof, { signal })
+        const operation = client.login(submittedProof, attempt, { signal })
         submittedProof = ''
+        attempt.password = ''
         return operation
       })
     },

@@ -420,8 +420,8 @@ export function observeControlPlaneClient(
     restore(requestOptions) {
       return observe(options.client.restore(requestOptions))
     },
-    login(bootstrapProof, requestOptions) {
-      return observe(options.client.login(bootstrapProof, requestOptions))
+    login(bootstrapProof, credentials, requestOptions) {
+      return observe(options.client.login(bootstrapProof, credentials, requestOptions))
     },
     loginWithPassword(credentials, requestOptions) {
       return observe(options.client.loginWithPassword(credentials, requestOptions))
