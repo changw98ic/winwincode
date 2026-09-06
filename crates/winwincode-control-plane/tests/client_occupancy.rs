@@ -11,8 +11,8 @@ use winwincode_control_plane::{
 use winwincode_domain::Instant;
 use winwincode_storage::{
     AccessGrantIssuance, ClientNodeRegistration, ClientPresenceState, GrantPermissions,
-    GrantSource, GrantTrustMode, OccupancyClaim, OccupancyReconcileTarget, OccupancyReleaseReason,
-    SqliteStorage,
+    GrantSource, GrantTrustMode, OccupancyClaim, OccupancyLeaseRecord, OccupancyReconcileTarget,
+    OccupancyReleaseReason, SqliteStorage,
 };
 
 static NEXT_TEMP_DIRECTORY: AtomicU64 = AtomicU64::new(1);
@@ -87,9 +87,15 @@ fn seed_client_with_holder(storage: &mut SqliteStorage, seed: u64, holder: &str)
             .update_presence(node_id(seed).as_str(), ClientPresenceState::Online, 1)
             .expect("presence online");
     }
+    grant_use_to_holder(storage, seed, node_id(seed).as_str(), holder);
+    node_id(seed)
+}
+
+/// Adds one administrator `use` grant for `holder` on `client`.
+fn grant_use_to_holder(storage: &mut SqliteStorage, grant_seed: u64, client: &str, holder: &str) {
     let issuance = AccessGrantIssuance::try_new(
-        grant_id(seed),
-        node_id(seed),
+        grant_id(grant_seed),
+        client,
         holder,
         holder,
         GrantTrustMode::Trusted,
@@ -106,7 +112,6 @@ fn seed_client_with_holder(storage: &mut SqliteStorage, seed: u64, holder: &str)
             &instant(T0),
         )
         .expect("grant");
-    node_id(seed)
 }
 
 fn set_presence(storage: &mut SqliteStorage, client: &str, target: ClientPresenceState) {
@@ -132,8 +137,61 @@ fn expect_kind(
     assert_eq!(error.kind(), kind);
 }
 
+/// One online client whose `use` grants cover both `holder` and `other`: the
+/// world every recovery scenario starts from.
+struct RecoveryWorld {
+    storage: SqliteStorage,
+    client: String,
+    holder: String,
+    other: String,
+}
+
+fn seed_recovery_world(name: &str) -> RecoveryWorld {
+    let mut storage = SqliteStorage::open(temporary_directory(name)).expect("storage");
+    let holder = user_id(2);
+    let other = user_id(3);
+    let client = seed_client_with_holder(&mut storage, 1, &holder);
+    grant_use_to_holder(&mut storage, 5, client.as_str(), other.as_str());
+    RecoveryWorld {
+        storage,
+        client,
+        holder,
+        other,
+    }
+}
+
+/// Claims and ACKs an occupied lease for the holder, loses the heartbeat so
+/// the registry projects the node offline, then marks the lease
+/// `RecoveryPending` at `T4`.
+fn seed_recovery_pending(world: &mut RecoveryWorld) -> OccupancyLeaseRecord {
+    {
+        let mut service = ClientOccupancyService::new(&mut world.storage);
+        let reserved = service
+            .atomic_claim(&claim(21, &world.client, &world.holder), &instant(T0))
+            .expect("claim");
+        service
+            .record_acknowledgement(
+                reserved.occupancy_lease_id.as_str(),
+                reserved.fencing_token,
+                None,
+                &instant(T1),
+            )
+            .expect("ack");
+    }
+    // The heartbeat is lost: the registry projects the node offline first.
+    set_presence(
+        &mut world.storage,
+        &world.client,
+        ClientPresenceState::Offline,
+    );
+    let mut service = ClientOccupancyService::new(&mut world.storage);
+    service
+        .mark_recovery_pending(lease_id(21).as_str(), &instant(T4))
+        .expect("mark recovery")
+}
+
 #[test]
-fn service_drives_claim_ack_release_and_reapproval_across_a_fencing_chain() {
+fn service_claims_acknowledges_and_expires_leases_across_fencing_tokens() {
     let mut storage = SqliteStorage::open(temporary_directory("vertical")).expect("storage");
     let holder = user_id(2);
     let client = seed_client_with_holder(&mut storage, 1, &holder);
@@ -185,10 +243,33 @@ fn service_drives_claim_ack_release_and_reapproval_across_a_fencing_chain() {
         .atomic_claim(&claim(11, &client, &holder), &instant(T0))
         .expect("second claim");
     assert!(second.fencing_token > occupied.fencing_token);
-    let occupied = service
+    service
         .record_acknowledgement(
             second.occupancy_lease_id.as_str(),
             second.fencing_token,
+            None,
+            &instant(T1),
+        )
+        .expect("ack");
+    assert_eq!(
+        service.current_fencing_token().expect("current"),
+        second.fencing_token
+    );
+}
+
+#[test]
+fn service_releases_and_drains_into_the_snapshot_read_model() {
+    let mut storage = SqliteStorage::open(temporary_directory("release-drain")).expect("storage");
+    let holder = user_id(2);
+    let client = seed_client_with_holder(&mut storage, 1, &holder);
+    let mut service = ClientOccupancyService::new(&mut storage);
+    let reserved = service
+        .atomic_claim(&claim(10, &client, &holder), &instant(T0))
+        .expect("claim");
+    let occupied = service
+        .record_acknowledgement(
+            reserved.occupancy_lease_id.as_str(),
+            reserved.fencing_token,
             None,
             &instant(T1),
         )
@@ -226,81 +307,49 @@ fn service_drives_claim_ack_release_and_reapproval_across_a_fencing_chain() {
     );
     assert_eq!(
         service.current_fencing_token().expect("current"),
-        second.fencing_token
+        released.fencing_token
     );
 }
 
 #[test]
-// The recovery matrix asserts many denial kinds in one durable scenario, so
-// the line-count lint is intentionally allowed for this single test.
-#[allow(clippy::too_many_lines)]
-fn service_maps_recovery_semantics_and_denial_kinds() {
-    let mut storage = SqliteStorage::open(temporary_directory("recovery-errors")).expect("storage");
-    let holder = user_id(2);
-    let other = user_id(3);
-    let client = seed_client_with_holder(&mut storage, 1, &holder);
-    // A second holder with a `use` grant on the same client.
-    let issuance = AccessGrantIssuance::try_new(
-        grant_id(5),
-        client.as_str(),
-        other.as_str(),
-        other.as_str(),
-        GrantTrustMode::Trusted,
-        None,
-    )
-    .expect("issuance");
-    storage
-        .client_connect_ledger()
-        .expect("connect ledger")
-        .create_grant(
-            &issuance,
-            GrantSource::Administrator,
-            GrantPermissions::USE,
-            &instant(T0),
-        )
-        .expect("grant");
-
+fn service_denies_claims_from_holders_without_a_use_grant() {
+    let mut world = seed_recovery_world("stranger-denial");
+    let mut service = ClientOccupancyService::new(&mut world.storage);
     // A user without any grant is denied before the registry gate.
-    {
-        let mut service = ClientOccupancyService::new(&mut storage);
-        let stranger = user_id(9);
-        expect_kind(
-            &service
-                .atomic_claim(&claim(20, &client, stranger.as_str()), &instant(T0))
-                .expect_err("stranger claim must fail"),
-            ClientOccupancyServiceErrorKind::AccessDenied,
-        );
-
-        // Recovery: claim and ACK an occupied lease.
-        let reserved = service
-            .atomic_claim(&claim(21, &client, &holder), &instant(T0))
-            .expect("claim");
-        service
-            .record_acknowledgement(
-                reserved.occupancy_lease_id.as_str(),
-                reserved.fencing_token,
-                None,
-                &instant(T1),
-            )
-            .expect("ack");
-    }
-    // The heartbeat is lost: the registry projects the node offline first.
-    set_presence(&mut storage, &client, ClientPresenceState::Offline);
-    let pending = {
-        let mut service = ClientOccupancyService::new(&mut storage);
-        let pending = service
-            .mark_recovery_pending(lease_id(21).as_str(), &instant(T4))
-            .expect("mark recovery");
-        assert_eq!(pending.state, OccupancyLeaseState::RecoveryPending);
-        pending
-    };
-    // The device reconnects while reconciliation is still pending: the node
-    // is reachable again, yet the recovery lease must not be preemptable.
-    set_presence(&mut storage, &client, ClientPresenceState::Online);
-    let mut service = ClientOccupancyService::new(&mut storage);
+    let stranger = user_id(9);
     expect_kind(
         &service
-            .atomic_claim(&claim(22, &client, other.as_str()), &instant(T1))
+            .atomic_claim(
+                &claim(20, world.client.as_str(), stranger.as_str()),
+                &instant(T0),
+            )
+            .expect_err("stranger claim must fail"),
+        ClientOccupancyServiceErrorKind::AccessDenied,
+    );
+}
+
+#[test]
+fn service_marks_recovery_pending_after_a_lost_heartbeat() {
+    let mut world = seed_recovery_world("recovery-pending");
+    let pending = seed_recovery_pending(&mut world);
+    assert_eq!(pending.state, OccupancyLeaseState::RecoveryPending);
+}
+
+#[test]
+fn service_blocks_preemption_and_cleanup_during_the_recovery_window() {
+    let mut world = seed_recovery_world("recovery-window");
+    let pending = seed_recovery_pending(&mut world);
+    // The device reconnects while reconciliation is still pending: the node
+    // is reachable again, yet the recovery lease must not be preemptable.
+    set_presence(
+        &mut world.storage,
+        &world.client,
+        ClientPresenceState::Online,
+    );
+    let mut service = ClientOccupancyService::new(&mut world.storage);
+    expect_kind(
+        &service
+            .atomic_claim(&claim(22, &world.client, &world.other), &instant(T1))
             .expect_err("recovery must block preemption"),
         ClientOccupancyServiceErrorKind::ActiveLeaseConflict,
     );
@@ -311,7 +360,13 @@ fn service_maps_recovery_semantics_and_denial_kinds() {
             .expect_err("early cleanup must fail"),
         ClientOccupancyServiceErrorKind::IllegalStateTransition,
     );
+}
 
+#[test]
+fn service_reconcile_resume_restores_the_fencing_token_without_minting() {
+    let mut world = seed_recovery_world("reconcile-resume");
+    let pending = seed_recovery_pending(&mut world);
+    let mut service = ClientOccupancyService::new(&mut world.storage);
     // Reconciliation resumes the lease under the original fencing token.
     let resumed = service
         .reconcile_resume(
@@ -327,7 +382,21 @@ fn service_maps_recovery_semantics_and_denial_kinds() {
         pending.fencing_token + 1,
         "recovery must not mint; the next new occupancy does"
     );
+}
 
+#[test]
+fn service_rejects_ack_and_drain_after_a_terminal_release() {
+    let mut world = seed_recovery_world("terminal-release");
+    let pending = seed_recovery_pending(&mut world);
+    let mut service = ClientOccupancyService::new(&mut world.storage);
+    let resumed = service
+        .reconcile_resume(
+            pending.occupancy_lease_id.as_str(),
+            OccupancyReconcileTarget::ResumeOccupied,
+            None,
+            &instant(T2),
+        )
+        .expect("resume");
     // An ACK against a terminal lease is not a legal transition.
     let released = service
         .request_release(
