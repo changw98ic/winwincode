@@ -11,33 +11,28 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use winwincode_api::generated::{
-    Actor, CredentialReferenceCreateCommand, CredentialReferenceCreateCommandCommand,
-    CredentialReferenceCreatePayload, ModelRoute, OrganizationScope, OrganizationScopeKind,
-    RepositoryScope, RepositoryScopeKind, SchemaVersion, Scope, UserActor, UserActorKind,
+    Actor, OrganizationScope, OrganizationScopeKind, RepositoryScope, RepositoryScopeKind, Scope,
+    UserActor, UserActorKind,
 };
 use winwincode_codex::{
     HelperReleaseManifest, ProductionCodexAdapter, ProductionCodexConfig, ProductionCodexOptions,
 };
 use winwincode_control_plane::{
-    CanonicalEnterpriseIdentityLifecycle, CatalogAvailability, CollaborationService, ControlPlane,
-    ControlPlaneConfig, ControlPlaneInstanceRuntimeConfig, CredentialReferenceErrorKind,
-    CredentialReferenceService, DurableWorkerInteractionOutbound,
+    CanonicalEnterpriseIdentityLifecycle, CollaborationService, ControlPlane, ControlPlaneConfig,
+    ControlPlaneInstanceRuntimeConfig, DurableWorkerInteractionOutbound,
     EnterpriseIdentityProductionVerifiers, EnterpriseIdentityProtocolAdapter,
     EnterpriseIdentityProtocolConfig, EnterpriseIdentityService, EnterpriseIdentityVerifierConfig,
     EnterpriseIdentityVerifierTimeouts, EnterpriseRbacService, LocalDeliveryAdapterConfig,
     LocalModelPolicyAuthority, LocalModelPolicyAuthorityConfig, LocalPublicationAdapterConfig,
-    LocalSecretStoreAdapter, ModelAdmissionLimits, ModelAdmissionPolicyLayer, ModelCapability,
-    ModelRequestPoolConfig, ModelRoutePolicyDecision, ModelSettingsRequest, ModelSettingsService,
-    ModelSettingsTarget, ModelSettingsValues, ModelToolSupport, ProductSessionExecutionApplication,
-    ProductSessionExecutionConfig, ProviderAdmissionReservationConfig, ProviderCatalogRequest,
-    ProviderCatalogService, ProviderDescriptor, ResolvedSecret, SecretStorePort,
+    LocalSecretStoreAdapter, ModelAdmissionLimits, ModelAdmissionPolicyLayer,
+    ModelRequestPoolConfig, ModelRoutePolicyDecision, ProductSessionExecutionApplication,
+    ProductSessionExecutionConfig, ProviderAdmissionReservationConfig, SecretStorePort,
     StandaloneModelExecutionApplication, StandaloneModelExecutionConfig, StandaloneProviderConfig,
     TrustedProtocolParty, local_loopback_retry_policy,
 };
 use winwincode_domain::{
-    CredentialReferenceId, OrganizationId, ProjectId, RepositoryId, RequestId, Revision,
-    Sha256Digest, UserAccount, UserAccountRole, UserAccountState, UserId, WorkerId,
-    WorkerInstanceId, WorkspaceId,
+    CredentialReferenceId, OrganizationId, ProjectId, RepositoryId, Sha256Digest, UserAccount,
+    UserAccountRole, UserAccountState, UserId, WorkerId, WorkerInstanceId, WorkspaceId,
 };
 use winwincode_execution_port::{
     action_enforcement::{ActionEnforcementIssuer, ActionEnforcementSigningKey},
@@ -54,13 +49,13 @@ use winwincode_server::{
     ClientExchangePort, DurableEventHub, DurableEventHubConfig, DurableEventPublisher,
     EnterpriseIdentityManagementApplication, EnterpriseIdentityProtocolApplication,
     EnterpriseRbacManagementApplication, EnterpriseRequestAuthenticator,
-    FileRemoteWorkerAuthenticator, GeneratedContractDispatcher, LocalRuntimeSupervisor,
-    OwnerInitializationHook, ProductionRemoteWorkerExchange, RemoteWorkerExchangePort,
-    RepositoryRuntimeScheduler, RequestAuthenticator, ServerConfig, ServerExecutionPortCore,
-    ServerTls, SqliteAuthSessionManager, StandaloneApplicationClock,
+    FileRemoteWorkerAuthenticator, GeneratedContractDispatcher, LocalModelRoute,
+    LocalRuntimeSupervisor, OwnerInitializationHook, ProductionRemoteWorkerExchange,
+    RemoteWorkerExchangePort, RepositoryRuntimeScheduler, RequestAuthenticator, ServerConfig,
+    ServerExecutionPortCore, ServerTls, SqliteAuthSessionManager, StandaloneApplicationClock,
     StandaloneControlPlaneApplication, SystemStandaloneApplicationClock,
-    UnavailableEnterpriseManagementApplication, UserAccountService, start_server,
-    start_server_with_remote_worker,
+    UnavailableEnterpriseManagementApplication, UserAccountService,
+    configure_local_model_authority, start_server, start_server_with_remote_worker,
 };
 use winwincode_storage::{
     ProductStateStorage, SqliteStorage, WorkerOutboundQueueConfig, WorkerPoolId,
@@ -673,152 +668,6 @@ async fn serve_runtime(
     Ok(())
 }
 
-#[derive(Clone, Debug)]
-struct LocalModelRoute {
-    provider: String,
-    model: String,
-    credential_reference: CredentialReferenceId,
-}
-
-impl LocalModelRoute {
-    fn from_environment() -> Result<Self, Box<dyn std::error::Error>> {
-        Ok(Self {
-            provider: required_environment_or(
-                "WWC_SERVER_MODEL_PROVIDER_ID",
-                "winwincode-loopback",
-            )?,
-            model: required_environment_or("WWC_SERVER_MODEL_ID", "loopback-model")?,
-            credential_reference: CredentialReferenceId(required_environment_or(
-                "WWC_SERVER_MODEL_CREDENTIAL_REFERENCE_ID",
-                "crd_00000000000000000000000001",
-            )?),
-        })
-    }
-
-    fn as_api_route(&self) -> ModelRoute {
-        ModelRoute {
-            provider_id: self.provider.clone(),
-            model_id: self.model.clone(),
-            credential_reference_id: self.credential_reference.clone(),
-        }
-    }
-}
-
-#[allow(clippy::too_many_lines)]
-fn configure_local_model_authority(
-    storage: &mut SqliteStorage,
-    owner_user_id: &UserId,
-    repository_scope: &RepositoryScope,
-    model_route: &LocalModelRoute,
-    secret_directory: PathBuf,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let occurred_at = SystemStandaloneApplicationClock.now_instant();
-    let actor = Actor::UserActor(UserActor {
-        kind: UserActorKind::User,
-        id: owner_user_id.clone(),
-    });
-    let organization_scope = OrganizationScope {
-        kind: OrganizationScopeKind::Organization,
-        organization_id: repository_scope.organization_id.clone(),
-    };
-    let organization = Scope::OrganizationScope(organization_scope.clone());
-    let credential_command = CredentialReferenceCreateCommand {
-        actor: actor.clone(),
-        command: CredentialReferenceCreateCommandCommand::CredentialReferenceCreate,
-        expected_revision: Revision(0),
-        payload: CredentialReferenceCreatePayload {
-            credential_reference_id: model_route.credential_reference.clone(),
-            display_name: "WinWinCode local model credential".to_owned(),
-            provider_id: model_route.provider.clone(),
-            vault_locator: "local-production://loopback".to_owned(),
-        },
-        request_id: RequestId("req_00000000000000000000000090".to_owned()),
-        schema_version: SchemaVersion::WinwincodeV1,
-        scope: organization.clone(),
-    };
-    match CredentialReferenceService::new(storage).create(&credential_command, now_millis()) {
-        Ok(_) => {}
-        Err(error) if error.kind() == CredentialReferenceErrorKind::WrongState => {
-            let current = CredentialReferenceService::new(storage)
-                .resolve(&organization, &model_route.credential_reference)?;
-            if current.provider_id() != model_route.provider {
-                return Err(Box::new(error));
-            }
-        }
-        Err(error) => return Err(Box::new(error)),
-    }
-    let credential = CredentialReferenceService::new(storage)
-        .resolve(&organization, &model_route.credential_reference)?;
-    let secret_store = LocalSecretStoreAdapter::open(secret_directory)?;
-    secret_store.store(
-        &credential,
-        ResolvedSecret::from_bytes(b"winwincode-local-loopback-secret".to_vec())?,
-    )?;
-
-    let descriptor = ProviderDescriptor {
-        provider_id: model_route.provider.clone(),
-        display_name: "WinWinCode local loopback Provider".to_owned(),
-        adapter_kind: "deterministic-loopback".to_owned(),
-        credential_reference_id: model_route.credential_reference.clone(),
-        models: vec![ModelCapability {
-            model_id: model_route.model.clone(),
-            display_name: "WinWinCode local loopback model".to_owned(),
-            context_window_tokens: 128_000,
-            max_output_tokens: 16_000,
-            tool_support: ModelToolSupport::Parallel,
-            reasoning_efforts: vec!["high".to_owned(), "medium".to_owned()],
-        }],
-    };
-    let catalog = ProviderCatalogService::new(storage).project(&organization)?;
-    let provider_matches = catalog.providers.iter().any(|provider| {
-        provider.provider_id == descriptor.provider_id
-            && provider.availability == CatalogAvailability::Enabled
-            && provider.credential_reference_id == descriptor.credential_reference_id
-            && provider.adapter_kind == descriptor.adapter_kind
-            && provider.models.len() == 1
-            && provider.models.iter().any(|model| {
-                model.model_id == model_route.model
-                    && model.availability == CatalogAvailability::Enabled
-            })
-    });
-    if !provider_matches {
-        ProviderCatalogService::new(storage).upsert(
-            &ProviderCatalogRequest {
-                actor: actor.clone(),
-                scope: organization.clone(),
-                request_id: RequestId("req_00000000000000000000000091".to_owned()),
-                expected_catalog_version: catalog.catalog_version,
-            },
-            &descriptor,
-            occurred_at.clone(),
-        )?;
-    }
-
-    let target = ModelSettingsTarget::Organization {
-        scope: organization_scope,
-    };
-    let route = model_route.as_api_route();
-    let settings = ModelSettingsService::new(storage).project(&target)?;
-    if settings.default_model_route.as_ref() != Some(&route)
-        || settings.worker_concurrency_limit != 1
-    {
-        ModelSettingsService::new(storage).update(
-            &ModelSettingsRequest {
-                actor,
-                target,
-                request_id: RequestId("req_00000000000000000000000092".to_owned()),
-                expected_revision: settings.revision,
-            },
-            ModelSettingsValues {
-                default_model_route: Some(route),
-                worker_concurrency_limit: 1,
-            },
-            occurred_at,
-        )?;
-    }
-    Ok(())
-}
-
 fn open_local_model_execution(
     config: &ServerConfig,
     model_route: &LocalModelRoute,
@@ -966,14 +815,6 @@ fn runtime_identity(
         identity.push(char::from(ALPHABET[usize::from(byte & 0x0f)]));
     }
     Ok(identity)
-}
-
-fn now_millis() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |duration| {
-            u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
-        })
 }
 
 fn compose_production_application(

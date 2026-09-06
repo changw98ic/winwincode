@@ -93,6 +93,21 @@ pub struct ModelSettingsProjection {
     pub revision: u64,
 }
 
+/// Durable settings facts read without catalog resolution.
+///
+/// The stored selection may be temporarily unresolved (for example right
+/// after the catalog dropped the previously selected model), so this read
+/// carries only what is durably stored instead of a resolved route.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StoredModelSettings {
+    /// Durable optimistic-concurrency revision of the target.
+    pub revision: u64,
+    /// Stored Provider/model override, resolved only on demand.
+    pub selection: Option<ModelSelection>,
+    /// Durable Worker concurrency limit.
+    pub worker_concurrency_limit: u64,
+}
+
 /// Scoped idempotency identity and optimistic settings revision.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -449,6 +464,34 @@ impl<'a> ModelSettingsService<'a> {
         CredentialLeakGate::default()
             .inspect_serializable(CredentialOutputBoundary::Serialization, &projection)?;
         Ok(projection)
+    }
+
+    /// Returns one target's durable revision, stored selection, and
+    /// concurrency limit without resolving the stored selection through the
+    /// current Provider catalog.
+    ///
+    /// This bounded read exists for converge-style callers, such as the
+    /// Server startup model authority, that must observe the current revision
+    /// even when the stored selection is temporarily unresolved after a
+    /// catalog change. Unlike [`Self::project`], an unresolved selection is
+    /// returned as stored instead of failing the read; serving paths keep
+    /// using [`Self::project`] so an invalid default stays a hard error.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an unsupported target or durable state that belongs to
+    /// another target.
+    pub fn stored_configuration(
+        &mut self,
+        target: &ModelSettingsTarget,
+    ) -> Result<StoredModelSettings, ModelSettingsError> {
+        validate_target(target)?;
+        let state = self.load_or_empty(target)?;
+        Ok(StoredModelSettings {
+            revision: state.revision,
+            selection: state.selection,
+            worker_concurrency_limit: state.worker_concurrency_limit,
+        })
     }
 
     /// Serves the generated `settings.get` response from one service-owned

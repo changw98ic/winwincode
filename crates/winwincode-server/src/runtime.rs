@@ -1703,7 +1703,7 @@ fn debug_scheduler_error(step: &str, error: &impl fmt::Debug) {
     }
 }
 
-fn crockford_26(bytes: &[u8]) -> String {
+pub(crate) fn crockford_26(bytes: &[u8]) -> String {
     const ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
     let mut value = [0_u8; 26];
     for (index, slot) in value.iter_mut().enumerate() {

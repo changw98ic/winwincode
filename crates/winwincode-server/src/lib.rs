@@ -17,6 +17,7 @@ mod enterprise_identity_protocol;
 mod enterprise_management;
 mod identity_authenticator;
 mod login_rate_limiter;
+mod model_authority;
 mod password_hash;
 mod remote_worker_transport;
 mod runtime;
@@ -72,6 +73,9 @@ pub use enterprise_management::{
     EnterpriseRbacManagementApplication, UnavailableEnterpriseManagementApplication,
 };
 pub use identity_authenticator::EnterpriseRequestAuthenticator;
+pub use model_authority::{
+    LocalModelRoute, configure_local_model_authority, credential_create_command,
+};
 pub use remote_worker_transport::{
     FileRemoteWorkerAuthenticator, ProductionRemoteWorkerExchange, RemoteWorkerExchangePort,
     RemoteWorkerTransportError,
