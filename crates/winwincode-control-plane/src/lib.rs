@@ -71,6 +71,7 @@ mod provider_enterprise_quota;
 pub mod provider_gateway;
 mod provider_https_sse;
 mod provider_policy;
+pub mod provider_presets;
 mod provider_production;
 pub mod provider_stream;
 mod publication_application;
@@ -425,6 +426,13 @@ pub use provider_https_sse::{
 pub use provider_policy::{
     DurableProviderPolicyEnforcement, ProviderPolicyError, ProviderPolicyErrorKind,
     ProviderPolicyReceipt,
+};
+pub use provider_presets::{
+    EndpointSource, ModelCapabilityOrigin, ModelCapabilitySnapshot, ModelCapabilitySource,
+    ModelCatalogModelEntry, ModelCatalogResolution, ModelCatalogService, PresetModel,
+    ProviderPreset, ProviderPresetsError, ProviderPresetsErrorKind, ResolvedEndpoint,
+    find_provider_preset, list_provider_presets, resolve_provider_endpoint,
+    validate_custom_endpoint,
 };
 pub use provider_production::{
     DeterministicLoopbackProviderAdapter, DurableProviderGatewayIdentitySource,
