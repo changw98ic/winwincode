@@ -213,6 +213,27 @@ const COMPONENT_ATTRIBUTE = 'data-wwc-component'
 const ROOT_PATH = '.'
 
 /**
+ * Native select list membership.  While a native `<select>` popup is closed,
+ * its options paint nothing, yet Chrome still answers `getBoundingClientRect`
+ * with a zero-size box pinned to the viewport origin — a phantom that carries
+ * no visual identity and leaks whatever happens to sit between the viewport
+ * top and the capture root into the baseline.  Such nodes are skipped at
+ * capture time; an option that is really rendered (a `multiple` or `size`
+ * select list) occupies line height and is still captured.
+ */
+const NATIVE_SELECT_LIST_TAGS: ReadonlySet<string> = Object.freeze(
+  new Set(['OPTION', 'OPTGROUP']),
+)
+
+function isUnrenderedNativeListElement(
+  element: Element,
+  rect: VisualRect,
+): boolean {
+  return rect.width === 0 && rect.height === 0
+    && NATIVE_SELECT_LIST_TAGS.has(element.tagName.toUpperCase())
+}
+
+/**
  * The one real-DOM inspector.  Browser fixtures use it; unit tests inject a
  * double so the traversal contract is pinned without Chrome.
  */
@@ -423,6 +444,11 @@ export function captureVisualFingerprint(options: VisualCaptureOptions): VisualF
     // from the baseline is the correct picture of it.
     if (styles.display === 'none') return
 
+    const rect = inspector.rect(element)
+    // An unrendered native option paints nothing and its rect is a viewport-
+    // origin phantom, so skipping it loses no rendered surface.
+    if (isUnrenderedNativeListElement(element, rect)) return
+
     const attributes = inspector.attributes(element)
     const state: Record<string, string> = {}
     for (const name of STATE_ATTRIBUTES) {
@@ -444,7 +470,6 @@ export function captureVisualFingerprint(options: VisualCaptureOptions): VisualF
       recorded[property] = value
     }
 
-    const rect = inspector.rect(element)
     const orderedState: Record<string, string> = {}
     for (const name of Object.keys(state).sort((left, right) => left.localeCompare(right))) {
       orderedState[name] = state[name] ?? ''

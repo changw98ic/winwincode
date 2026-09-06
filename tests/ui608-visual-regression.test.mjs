@@ -286,6 +286,34 @@ test('visibility:hidden nodes stay in the fingerprint because they still hold la
   assert.deepEqual(nodes['./span[1]'].box, { x: 0, y: 24, width: 80, height: 20 })
 })
 
+test('unrendered native options paint nothing and their viewport-origin phantom rects stay out of the fingerprint', () => {
+  const root_ = createNode('div')
+  // A closed native <select>: Chrome answers every option's
+  // getBoundingClientRect with a zero-size box pinned to the viewport origin.
+  const closed = root_.append(createNode('select'))
+  const phantom = closed.append(createNode('option'))
+  phantom.appendText('Closed list choice')
+  const grouping = closed.append(createNode('optgroup'))
+  grouping.setAttribute('label', 'Closed group')
+  // A rendered option list (`multiple` or `size`): real line height, real box.
+  const listed = root_.append(createNode('select'))
+  const rendered = listed.append(createNode('option'))
+  rendered.appendText('Listed choice')
+  rendered.rect = { x: 0, y: 24, width: 80, height: 20 }
+
+  const nodes = flatten(capture(root_))
+  // The zero-size selects themselves stay: the skip is scoped to unrendered
+  // list membership, not to every zero-size box.
+  assert.deepEqual(Object.keys(nodes), [
+    '.',
+    './select[1]',
+    './select[2]',
+    './select[2]/option[1]',
+  ])
+  assert.equal(nodes['./select[2]/option[1]'].text, 'Listed choice')
+  assert.deepEqual(nodes['./select[2]/option[1]'].box, { x: 0, y: 24, width: 80, height: 20 })
+})
+
 test('a descendant that only inherits records no style decision of its own', () => {
   const root_ = createNode('div', { styles: { color: TOKENS['--wwc-color-text'] } })
   const child = root_.append(createNode('span', { styles: { color: TOKENS['--wwc-color-text'] } }))
