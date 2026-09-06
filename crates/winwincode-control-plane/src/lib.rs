@@ -353,6 +353,7 @@ pub use model_settings::{
     DEFAULT_WORKER_CONCURRENCY_LIMIT, ModelSelection, ModelSettingsChange, ModelSettingsError,
     ModelSettingsErrorKind, ModelSettingsMutationReceipt, ModelSettingsProjection,
     ModelSettingsRequest, ModelSettingsService, ModelSettingsTarget, ModelSettingsValues,
+    StoredModelSettings,
 };
 pub use model_stream_flow_control::{
     ModelStreamFlowAckReceipt, ModelStreamFlowCancellationReceipt, ModelStreamFlowCoordinator,
