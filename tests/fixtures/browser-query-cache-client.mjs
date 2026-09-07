@@ -1,4 +1,4 @@
-import { createQueryCache } from '/module/core/query-cache.js'
+import { createQueryCache } from '/browser-core/query-cache.js'
 import { mountSettingsPage } from '/module/settings-page.js'
 import { createSettingsViewModel } from '/module/settings-view-model.js'
 

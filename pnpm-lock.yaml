@@ -11,6 +11,15 @@ importers:
       '@types/node':
         specifier: 24.13.3
         version: 24.13.3
+      '@winwincode/browser-core':
+        specifier: 0.1.0-alpha.1
+        version: link:packages/browser-core
+      '@winwincode/browser-ui':
+        specifier: 0.1.0-alpha.1
+        version: link:packages/browser-ui
+      '@winwincode/control-plane-client':
+        specifier: 0.1.0-alpha.1
+        version: link:packages/control-plane-client
       ajv:
         specifier: 8.20.0
         version: 8.20.0
@@ -24,14 +33,38 @@ importers:
         specifier: 6.0.3
         version: 6.0.3
 
-  apps/client: {}
+  apps/client:
+    dependencies:
+      '@winwincode/browser-core':
+        specifier: 0.1.0-alpha.1
+        version: link:../../packages/browser-core
+      '@winwincode/browser-ui':
+        specifier: 0.1.0-alpha.1
+        version: link:../../packages/browser-ui
+      '@winwincode/control-plane-client':
+        specifier: 0.1.0-alpha.1
+        version: link:../../packages/control-plane-client
+
+  packages/browser-core:
+    dependencies:
+      '@winwincode/contracts':
+        specifier: 0.1.0-alpha.1
+        version: link:../contracts
+
+  packages/browser-ui: {}
 
   packages/contracts: {}
+
+  packages/control-plane-client:
+    dependencies:
+      '@winwincode/contracts':
+        specifier: 0.1.0-alpha.1
+        version: link:../contracts
 
   packages/strongflow:
     dependencies:
       '@winwincode/contracts':
-        specifier: workspace:*
+        specifier: 0.1.0-alpha.1
         version: link:../contracts
 
 packages:

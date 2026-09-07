@@ -1,19 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import type { ControlPlaneClientError } from './control-plane-client.js'
+import type { ControlPlaneClientError } from './community-control-plane-client.js'
 import {
   mountButton,
-  mountEmptyState,
   mountErrorState,
   mountPageHeader,
   mountPanel,
   mountStatusBadge,
-  mountToolbar,
   type StatusTone,
-} from './components/index.js'
+} from '@winwincode/browser-ui'
+import { mountEmptyState, mountToolbar } from './components/index.js'
 import { mountKeyedCollection, type KeyedCollectionView } from './components/keyed-collection.js'
 import { boundApprovalText } from './approval-risk-detail.js'
-import { scopeHash, type ScopeRouteSelection } from './core/scope-context.js'
+import { scopeHash, type ScopeRouteSelection } from '@winwincode/browser-core/scope-context'
 import type { StageRunId } from './generated/contracts.js'
 import type {
   AttentionNotificationControl,

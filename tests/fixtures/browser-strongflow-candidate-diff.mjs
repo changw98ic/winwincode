@@ -3,7 +3,7 @@ import {
   strongFlowCandidateViewFromHash,
   strongFlowRouteHash,
 } from '/module/strongflow-route.js'
-import { scopeSelectionFromHash } from '/module/core/scope-context.js'
+import { scopeSelectionFromHash } from '/browser-core/scope-context.js'
 import { strongFlowHistorySelectionFromHash } from '/module/strongflow-history-selection.js'
 import { mountStrongFlowPage } from '/module/strongflow-page.js'
 

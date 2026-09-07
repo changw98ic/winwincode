@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { assertMounted } from './mounted-view.js'
+import { assertMounted } from '@winwincode/browser-ui'
 
 export type KeyedCollectionKey = string | number
 

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { assertMounted, removeNode } from './components/mounted-view.js'
+import { assertMounted, removeNode } from '@winwincode/browser-ui'
 
 /** Deterministic geometry shared by every diagram graph instance. */
 export const STRONGFLOW_DIAGRAM_GRAPH_COLUMN_WIDTH = 220

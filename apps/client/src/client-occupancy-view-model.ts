@@ -3,7 +3,7 @@
 import {
   ControlPlaneClientError,
   type ControlPlaneDeviceSummary,
-} from './control-plane-client.js'
+} from './community-control-plane-client.js'
 import type { ClientsViewModel } from './clients-view-model.js'
 
 /**

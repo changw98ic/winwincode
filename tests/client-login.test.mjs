@@ -32,7 +32,7 @@ const cache = resolve(root, '.cache/client-login-tests')
 async function cachedModule(name) {
   return import(pathToFileURL(resolve(cache, name)).href)
 }
-const facade = await cachedModule('control-plane-client.js')
+const facade = await cachedModule('community-control-plane-client.js')
 const loginViewModelModule = await cachedModule('login-view-model.js')
 const loginPageModule = await cachedModule('login-page.js')
 const applicationModule = await cachedModule('application.js')
@@ -106,7 +106,7 @@ test('facade exchanges username and password for one validated session', async (
     },
   })
 
-  const created = await client.loginWithPassword({
+  const created = await client.login({
     username: 'ada',
     password: passwordMaterial,
   })
@@ -150,7 +150,7 @@ test('facade separates wrong credentials, rate limit, wrong state, and outage', 
       },
     })
     await assert.rejects(
-      client.loginWithPassword({ username: 'ada', password: passwordMaterial }),
+      client.login({ username: 'ada', password: passwordMaterial }),
       error => {
         assert.equal(error instanceof ControlPlaneClientError, true)
         assert.equal(error.code, candidate.code)
@@ -171,7 +171,7 @@ test('facade separates wrong credentials, rate limit, wrong state, and outage', 
     },
   })
   await assert.rejects(
-    offline.loginWithPassword({ username: 'ada', password: passwordMaterial }),
+    offline.login({ username: 'ada', password: passwordMaterial }),
     error => error instanceof ControlPlaneClientError
       && error.kind === 'network'
       && controlPlaneLoginFailure(error) === 'unavailable',
@@ -190,11 +190,11 @@ test('facade validates sign-in input before any request exists', async () => {
     },
   })
   await assert.rejects(
-    client.loginWithPassword({ username: '', password: passwordMaterial }),
+    client.login({ username: '', password: passwordMaterial }),
     error => error.code === 'LOGIN_INPUT_INVALID',
   )
   await assert.rejects(
-    client.loginWithPassword({ username: 'ada', password: '' }),
+    client.login({ username: 'ada', password: '' }),
     error => error.code === 'LOGIN_INPUT_INVALID',
   )
   assert.equal(requests, 0)
@@ -240,11 +240,11 @@ test('facade reads initialization and rejects malformed initialization status', 
 test('login view-model publishes submissions and failure reasons without storing secrets', async () => {
   const attempts = []
   const client = {
-    async loginWithPassword(credentials) {
+    async login(credentials) {
       attempts.push({ username: credentials.username, password: credentials.password })
       throw loginError('AUTHENTICATION_REQUIRED', 'wrong password')
     },
-    async login() {
+    async initializeOwner() {
       return session()
     },
     async initializationStatus() {
@@ -268,7 +268,7 @@ test('login view-model publishes submissions and failure reasons without storing
   assert.equal(model.state.failure, null)
 
   let release
-  client.loginWithPassword = async credentials => {
+  client.login = async credentials => {
     attempts.push({ username: credentials.username, password: credentials.password })
     await new Promise(resolvePromise => { release = resolvePromise })
     return session()
@@ -295,10 +295,10 @@ test('login view-model keeps rate limit, wrong credentials, and probe failures d
   ]) {
     const model = createLoginViewModel({
       client: {
-        async loginWithPassword() {
+        async login() {
           throw loginError(code, 'rejected')
         },
-        async login() { return session() },
+        async initializeOwner() { return session() },
         async initializationStatus() { return { initialized: true } },
       },
     })
@@ -309,8 +309,8 @@ test('login view-model keeps rate limit, wrong credentials, and probe failures d
   }
   const model = createLoginViewModel({
     client: {
-      async loginWithPassword() { return session() },
       async login() { return session() },
+      async initializeOwner() { return session() },
       async initializationStatus() {
         throw new ControlPlaneClientError({
           kind: 'network',
@@ -324,7 +324,11 @@ test('login view-model keeps rate limit, wrong credentials, and probe failures d
   })
   await model.refreshInitialization()
   assert.equal(model.state.initialization, 'unknown')
-  await model.initialize('bootstrap-proof-material')
+  await model.initialize({
+    bootstrapProof: 'bootstrap-proof-material',
+    username: 'owner',
+    password: passwordMaterial,
+  })
   assert.equal(model.state.status, 'succeeded')
   assert.equal(model.state.source, 'initialization')
   model.close()
@@ -412,10 +416,10 @@ function loginFixture(clientOverrides = {}) {
   const document = new FakeDocument()
   const rootElement = new FakeElement('div', document)
   const client = {
-    async loginWithPassword() {
+    async login() {
       throw loginError('AUTHENTICATION_REQUIRED', 'wrong password')
     },
-    async login() { return session() },
+    async initializeOwner() { return session() },
     async initializationStatus() { return { initialized: true } },
     ...clientOverrides,
   }
@@ -431,7 +435,7 @@ function submitForm(rootElement, className) {
 test('login page keeps credentials out of the DOM and distinguishes failure states', async () => {
   let mode = 'invalid'
   const { rootElement, model } = loginFixture({
-    async loginWithPassword(credentials) {
+    async login(credentials) {
       if (mode === 'success') return session()
       throw loginError(mode, 'sign-in rejected')
     },
@@ -490,9 +494,14 @@ test('login page shows the initialization entry only while the server is uniniti
   const initializationSection = findOne(first.rootElement, 'wwc-login-initialization')
   assert.equal(initializationSection.hidden, false)
   const proof = findOne(first.rootElement, 'wwc-login-initialization-proof')
+  const initializationUsername = findOne(first.rootElement, 'wwc-login-initialization-username')
+  const initializationPassword = findOne(first.rootElement, 'wwc-login-initialization-password')
+  initializationUsername.value = 'owner'
+  initializationPassword.value = passwordMaterial
   proof.value = 'bootstrap-proof-material'
   submitForm(first.rootElement, 'wwc-login-initialization-form')
   assert.equal(proof.value, '', 'the proof leaves the DOM before the await')
+  assert.equal(initializationPassword.value, '', 'the password leaves the DOM before the await')
   await new Promise(resolvePromise => setImmediate(resolvePromise))
   assert.equal(first.model.state.status, 'succeeded')
   assert.equal(first.model.state.source, 'initialization')
@@ -638,12 +647,12 @@ function settingsFacadeFake({ initialized = true } = {}) {
       }
       return structuredClone(session())
     },
-    async login(proof) {
-      proofAttempts.push(proof)
+    async initializeOwner(initialization) {
+      proofAttempts.push(initialization.bootstrapProof)
       expired = false
       return structuredClone(session())
     },
-    async loginWithPassword(credentials) {
+    async login(credentials) {
       loginAttempts.push({ username: credentials.username, password: credentials.password })
       if (expired) {
         throw new ControlPlaneClientError({
@@ -842,12 +851,23 @@ test('an uninitialized server offers the bootstrap initialization entry from the
   const initializationSection = applicationNode(fixture.rootElement, 'wwc-login-initialization')
   await waitFor(() => initializationSection.hidden === false, 'initialization entry')
   const proof = applicationNode(fixture.rootElement, 'wwc-login-initialization-proof')
+  const initializationUsername = applicationNode(
+    fixture.rootElement,
+    'wwc-login-initialization-username',
+  )
+  const initializationPassword = applicationNode(
+    fixture.rootElement,
+    'wwc-login-initialization-password',
+  )
+  initializationUsername.value = 'owner'
+  initializationPassword.value = passwordMaterial
   proof.value = 'bootstrap-proof-material'
   applicationNode(fixture.rootElement, 'wwc-login-initialization-form').dispatchEvent({
     type: 'submit',
     preventDefault() {},
   })
   assert.equal(proof.value, '')
+  assert.equal(initializationPassword.value, '')
   await waitFor(
     () => fixture.application.authSession.state.status === 'signed-in',
     'owner initialization signed in',

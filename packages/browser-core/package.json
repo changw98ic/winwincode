@@ -1,0 +1,28 @@
+{
+  "name": "@winwincode/browser-core",
+  "version": "0.1.0-alpha.1",
+  "description": "Product-neutral browser query cache and scope routing",
+  "license": "Apache-2.0",
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    "./query-cache": {
+      "types": "./dist/query-cache.d.ts",
+      "import": "./dist/query-cache.js"
+    },
+    "./scope-context": {
+      "types": "./dist/scope-context.d.ts",
+      "import": "./dist/scope-context.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@winwincode/contracts": "0.1.0-alpha.1"
+  }
+}

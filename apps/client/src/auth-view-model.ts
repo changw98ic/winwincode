@@ -4,7 +4,7 @@ import {
   ControlPlaneClientError,
   type ControlPlaneClient,
   type ControlPlaneSession,
-} from './control-plane-client.js'
+} from './community-control-plane-client.js'
 
 export type AuthSessionStatus =
   | 'signed-out'
@@ -28,7 +28,6 @@ export interface AuthSessionViewModel {
   readonly state: AuthSessionViewModelState
   subscribe(listener: AuthSessionViewModelListener): () => void
   restore(): Promise<void>
-  login(bootstrapProof: string): Promise<void>
   logout(): Promise<void>
   authenticationRequired(error: ControlPlaneClientError): void
   cancel(): void
@@ -102,30 +101,6 @@ export function createAuthSessionViewModel(client: ControlPlaneClient): AuthSess
       publish(state('restoring'))
       try {
         const session = await client.restore({ signal: controller.signal })
-        if (pending !== controller || closed) return
-        publish(state('signed-in', session))
-      } catch (error) {
-        if (pending !== controller || closed) return
-        const normalized = safeError(error, controller.signal)
-        publish(state(
-          normalized.kind === 'authentication' ? 'authentication-required' : 'error',
-          null,
-          normalized,
-        ))
-      } finally {
-        if (pending === controller) pending = null
-      }
-    },
-    async login(bootstrapProof) {
-      requireOpen()
-      pending?.abort()
-      const controller = new AbortController()
-      pending = controller
-      publish(state('signing-in'))
-      const operation = client.login(bootstrapProof, { signal: controller.signal })
-      bootstrapProof = ''
-      try {
-        const session = await operation
         if (pending !== controller || closed) return
         publish(state('signed-in', session))
       } catch (error) {

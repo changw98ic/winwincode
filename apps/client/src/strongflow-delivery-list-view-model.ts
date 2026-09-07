@@ -4,7 +4,7 @@ import {
   ControlPlaneClientError,
   type ControlPlaneClient,
   type ControlPlaneClientErrorKind,
-} from './control-plane-client.js'
+} from './community-control-plane-client.js'
 import {
   CommandName,
   QueryName,

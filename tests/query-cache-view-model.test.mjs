@@ -25,7 +25,7 @@ assert.equal(
 
 const cacheModule = await import(`${pathToFileURL(resolve(
   root,
-  '.cache/ui-components-tests/core/query-cache.js',
+  'packages/browser-core/dist/query-cache.js',
 )).href}`)
 const settingsModule = await import(`${pathToFileURL(resolve(
   root,

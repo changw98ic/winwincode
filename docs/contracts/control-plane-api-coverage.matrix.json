@@ -162,7 +162,8 @@
       "sourcePaths": [
         "apps/client/src/strongflow-page.ts",
         "apps/client/src/strongflow-view-model.ts",
-        "apps/client/src/control-plane-client.ts"
+        "packages/control-plane-client/src/index.ts",
+        "apps/client/src/community-control-plane-client.ts"
       ],
       "flowIds": [
         "client-transport",

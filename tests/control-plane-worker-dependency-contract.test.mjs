@@ -45,7 +45,7 @@ const REQUIRED_GUARDRAILS = Object.freeze({
   localLauncher: 'winwincode-local',
   localLauncherAllowedProductDependencies: [
     'winwincode-control-plane',
-    'winwincode-observability',
+    'winwincode-observability-core',
     'winwincode-worker',
   ],
   serverEntrypoint: 'winwincode-server',

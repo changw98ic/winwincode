@@ -3,7 +3,7 @@
 import {
   ControlPlaneClientError,
   type ControlPlaneClient,
-} from './control-plane-client.js'
+} from './community-control-plane-client.js'
 import type {
   Actor,
   DeliveryCriterionResultProjection,
@@ -27,7 +27,7 @@ import {
 } from './generated/contracts.js'
 import { mountDrawer } from './components/drawer.js'
 import { mountKeyedCollection } from './components/keyed-collection.js'
-import { mountStatusBadge, type StatusTone } from './components/status-badge.js'
+import { mountStatusBadge, type StatusTone } from '@winwincode/browser-ui'
 import { mountTabs, type TabsProps } from './components/tabs.js'
 import type {
   StrongFlowEvidenceRouteState,

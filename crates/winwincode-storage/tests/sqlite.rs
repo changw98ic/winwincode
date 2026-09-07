@@ -1640,6 +1640,28 @@ fn sqlite_adapter_uses_no_dynamic_savepoint_or_sql_identifier_path() {
 }
 
 #[test]
+fn named_savepoint_quotes_tainted_identifiers() {
+    let mut connection = Connection::open_in_memory().expect("in-memory SQLite should open");
+    assert_eq!(rusqlite::version(), "3.51.3");
+
+    let savepoint = connection
+        .savepoint_with_name("safe_name; CREATE TABLE injected(value); --")
+        .expect("quoted savepoint name should be accepted");
+    savepoint
+        .commit()
+        .expect("quoted savepoint name should be released");
+
+    let injected_table_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+            ["injected"],
+            |row| row.get(0),
+        )
+        .expect("schema should remain queryable");
+    assert_eq!(injected_table_count, 0);
+}
+
+#[test]
 fn projection_event_positions_are_stream_local_durable_and_exact() {
     let root = temporary_directory("projection-event-streams");
     let mut storage = SqliteStorage::open(&root).expect("SQLite storage should open");

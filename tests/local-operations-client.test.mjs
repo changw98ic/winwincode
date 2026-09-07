@@ -476,7 +476,7 @@ test('local operations source has one facade and no local process, filesystem, o
     assert.doesNotMatch(source, /node:fs|child_process|\bprocess\.|localStorage|sessionStorage/u)
     assert.doesNotMatch(source, /navigator\.|performance\./u)
   }
-  assert.equal((viewModelSource.match(/\.\/control-plane-client\.js/gu) ?? []).length, 1)
+  assert.equal((viewModelSource.match(/\.\/community-control-plane-client\.js/gu) ?? []).length, 1)
   assert.equal((pageSource.match(/\.\/local-operations-view-model\.js/gu) ?? []).length, 1)
 
   const codeFailure = pageState({

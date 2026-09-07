@@ -124,7 +124,14 @@ test('deployable Client files contain only browser assets and runtime serverUrl 
   ]) assert.ok(packed.includes(required), required)
   assert.equal(packed.every(path => !/(?:^|\/)(?:node_modules|target|prebuild)(?:\/|$)/u.test(path)), true)
   assert.equal(packed.every(path => !/\.(?:node|dylib|so|exe)$/u.test(path)), true)
-  assert.deepEqual(JSON.parse(readFileSync(join(clientRoot, 'package.json'), 'utf8')).dependencies, undefined)
+  assert.deepEqual(
+    JSON.parse(readFileSync(join(clientRoot, 'package.json'), 'utf8')).dependencies,
+    {
+      '@winwincode/browser-core': '0.1.0-alpha.1',
+      '@winwincode/browser-ui': '0.1.0-alpha.1',
+      '@winwincode/control-plane-client': '0.1.0-alpha.1',
+    },
+  )
 
   const runtimeConfig = readFileSync(join(publicRoot, 'runtime-config.js'), 'utf8')
   assert.match(runtimeConfig, /serverUrl/u)
@@ -140,6 +147,10 @@ test('Client shell has one facade and the six canonical product entries with Hom
   const application = readFileSync(join(clientRoot, 'src', 'application.ts'), 'utf8')
   const surfaces = readFileSync(join(clientRoot, 'src', 'client-surface.ts'), 'utf8')
   const index = readFileSync(join(clientRoot, 'src', 'index.ts'), 'utf8')
+  const composition = readFileSync(
+    join(clientRoot, 'src', 'community-control-plane-client.ts'),
+    'utf8',
+  )
   for (const surface of ['home', 'chat', 'strongflow', 'settings', 'attention', 'enterprise']) {
     assert.match(surfaces, new RegExp(`id: '${surface}'`, 'u'))
   }
@@ -148,9 +159,14 @@ test('Client shell has one facade and the six canonical product entries with Hom
   assert.match(surfaces, /id: 'home'[\s\S]+default: true/u)
   assert.match(surfaces, /id: 'home'[\s\S]+default: true[\s\S]+id: 'chat'/u)
   assert.match(application, /activeSurface\.id === 'home'/u)
-  // The factory seam grows with each authenticated surface (login, clients,
-  // repositories); what must stay stable is that every surface resolves it
-  // through the single control-plane-client facade.
-  assert.equal((`${application}\n${index}`.match(/createControlPlaneClient/g) ?? []).length, 4)
+  // The shell imports and invokes the exact base factory once. Product-specific
+  // directory extensions do not count as another transport composition root.
+  assert.equal((application.match(/\bcreateControlPlaneClient\b/gu) ?? []).length, 2)
+  assert.doesNotMatch(
+    application,
+    /createControlPlaneHttpClient|createControlPlaneWebSocketClient|generatedTransport/u,
+  )
+  assert.match(composition, /generated:\s*generatedTransport/u)
+  assert.doesNotMatch(index, /generated\/control-plane-client/u)
   assert.doesNotMatch(application, /\bfetch\s*\(|new\s+WebSocket/u)
 })

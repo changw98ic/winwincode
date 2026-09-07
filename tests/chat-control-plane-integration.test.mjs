@@ -28,7 +28,7 @@ assert.equal(
 
 const facade = await import(`${pathToFileURL(resolve(
   root,
-  '.cache/chat-integration-tests/control-plane-client.js',
+  '.cache/chat-integration-tests/community-control-plane-client.js',
 )).href}?run=${String(Date.now())}`)
 const chat = await import(`${pathToFileURL(resolve(
   root,

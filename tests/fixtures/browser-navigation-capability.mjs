@@ -1,5 +1,5 @@
 import { mountWinWinCodeClient } from '/module/application.js'
-import { ControlPlaneClientError } from '/module/control-plane-client.js'
+import { ControlPlaneClientError } from '/module/community-control-plane-client.js'
 
 const schemaVersion = 'winwincode/v1'
 const actor = { kind: 'user', id: 'usr_00000000000000000000000001' }

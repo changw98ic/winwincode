@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import type { ControlPlaneCandidateSummary } from './control-plane-client.js'
+import type { ControlPlaneCandidateSummary } from './community-control-plane-client.js'
 import {
   candidateDisplayState,
   candidateDisplayStateText,

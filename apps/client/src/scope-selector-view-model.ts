@@ -3,11 +3,11 @@
 import {
   ControlPlaneClientError,
   type ControlPlaneClient,
-} from './control-plane-client.js'
+} from './community-control-plane-client.js'
 import {
   scopeSelectionOptions,
   type ScopeRouteSelection,
-} from './core/scope-context.js'
+} from '@winwincode/browser-core/scope-context'
 import type {
   Actor,
   EnterpriseOrganizationListResultResponse,

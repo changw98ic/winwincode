@@ -1,0 +1,19 @@
+[package]
+name = "winwincode-observability-core"
+description = "Storage-neutral bounded observability types, aggregation, alerts, and ports"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+include = ["src/**", "tests/**", "Cargo.toml"]
+
+[dependencies]
+serde.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

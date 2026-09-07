@@ -32,7 +32,7 @@ const modelModule = await import(`${pathToFileURL(resolve(
 )).href}`)
 const facadeModule = await import(`${pathToFileURL(resolve(
   root,
-  '.cache/scope-selector-tests/control-plane-client.js',
+  '.cache/scope-selector-tests/community-control-plane-client.js',
 )).href}`)
 const { createScopeSelectorViewModel } = modelModule
 const { ControlPlaneClientError } = facadeModule

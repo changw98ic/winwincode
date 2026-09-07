@@ -1018,6 +1018,6 @@ test('local decisions presentation never exposes raw server messages and source 
     assert.doesNotMatch(source, /node:fs|child_process|\bprocess\.|localStorage|sessionStorage/u)
     assert.doesNotMatch(source, /navigator\.|performance\./u)
   }
-  assert.equal((viewModelSource.match(/\.\/control-plane-client\.js/gu) ?? []).length, 1)
+  assert.equal((viewModelSource.match(/\.\/community-control-plane-client\.js/gu) ?? []).length, 1)
   assert.equal((pageSource.match(/\.\/local-decisions-view-model\.js/gu) ?? []).length, 1)
 })

@@ -1,0 +1,125 @@
+{
+  "schemaVersion": 2,
+  "status": "accepted",
+  "decision": "docs/decisions/0031-three-product-editions.md",
+  "repositories": {
+    "community": {
+      "repository": "winwincode",
+      "productName": "WinWinCode Community",
+      "visibility": "public",
+      "productAudience": "individual-developer",
+      "deploymentOwner": "user",
+      "beadsDatabase": "repository-local",
+      "productStorage": "local-sqlite",
+      "kernelStorage": "kernel-sqlite",
+      "deviceStorage": "device-sqlite",
+      "workerPlacement": [
+        "local"
+      ]
+    },
+    "cloud": {
+      "repository": "winwincode-cloud",
+      "productName": "WinWinCode Cloud",
+      "visibility": "private",
+      "productAudience": "hosted-multi-tenant",
+      "deploymentOwner": "winwincode-operator",
+      "beadsDatabase": "repository-local",
+      "productStorage": "postgresql",
+      "kernelStorage": "kernel-sqlite",
+      "deviceStorage": "device-sqlite",
+      "workerPlacement": [
+        "hosted-cloud",
+        "managed-device"
+      ]
+    },
+    "enterprise": {
+      "repository": "winwincode-enterprise",
+      "productName": "WinWinCode Enterprise",
+      "visibility": "private",
+      "productAudience": "customer-private-deployment",
+      "deploymentOwner": "customer",
+      "beadsDatabase": "repository-local",
+      "productStorage": "postgresql",
+      "kernelStorage": "kernel-sqlite",
+      "deviceStorage": "device-sqlite",
+      "workerPlacement": [
+        "customer-device",
+        "customer-managed-worker"
+      ]
+    }
+  },
+  "communityCoreRelease": {
+    "ownerRepository": "winwincode",
+    "consumers": [
+      "winwincode-cloud",
+      "winwincode-enterprise"
+    ],
+    "contents": [
+      "rust-core-crates",
+      "typescript-contract-packages",
+      "json-schema",
+      "openapi",
+      "protocol-samples",
+      "sbom",
+      "license-manifest",
+      "sha256-checksums"
+    ],
+    "consumerPin": "exact-version-and-sha256",
+    "localPathDependency": false,
+    "multiProtocolRuntime": false
+  },
+  "sourceOwnership": [
+    {
+      "repository": "winwincode",
+      "areas": [
+        "codex-core-integration",
+        "execution-port",
+        "worker-runtime",
+        "kernel-helper",
+        "dsh-chat-core",
+        "strongflow-core",
+        "repository-and-candidate-core",
+        "community-local-application",
+        "public-contracts"
+      ]
+    },
+    {
+      "repository": "winwincode-cloud",
+      "areas": [
+        "cloud-application",
+        "multi-tenant-identity",
+        "tenant-isolation",
+        "billing-and-plans",
+        "hosted-object-storage",
+        "hosted-cloud-workers",
+        "hosted-operations"
+      ]
+    },
+    {
+      "repository": "winwincode-enterprise",
+      "areas": [
+        "enterprise-application",
+        "organization-access",
+        "customer-identity",
+        "enterprise-policy-and-audit",
+        "private-deployment",
+        "customer-backup-and-upgrade",
+        "customer-managed-workers"
+      ]
+    }
+  ],
+  "releaseOrder": [
+    "winwincode-core",
+    "winwincode-cloud",
+    "winwincode-enterprise"
+  ],
+  "hardRules": [
+    "each-source-file-has-one-owner-repository",
+    "each-repository-has-its-own-beads-ci-version-and-release",
+    "cloud-and-enterprise-consume-released-community-core",
+    "cross-repository-local-path-dependencies-are-rejected",
+    "cloud-and-enterprise-use-postgresql-for-product-data",
+    "kernel-sqlite-is-owned-by-codex-core",
+    "device-sqlite-is-owned-by-device-client"
+  ]
+}

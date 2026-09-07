@@ -6,12 +6,12 @@ import {
   deviceStateTone,
   relativeHeartbeatText,
 } from './clients-view-model.js'
-import type { ControlPlaneDeviceSummary } from './control-plane-client.js'
+import type { ControlPlaneDeviceSummary } from './community-control-plane-client.js'
 import {
   mountKeyedCollection,
   type KeyedCollectionView,
 } from './components/keyed-collection.js'
-import { surfaceHash, type ScopeRouteSelection } from './core/scope-context.js'
+import { surfaceHash, type ScopeRouteSelection } from '@winwincode/browser-core/scope-context'
 import { mountHomeDashboardPage, type HomeDashboardPage } from './home-dashboard-page.js'
 import type {
   MyWorkClientsZone,

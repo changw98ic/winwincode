@@ -5,6 +5,15 @@
       "path": "./packages/contracts"
     },
     {
+      "path": "./packages/browser-ui"
+    },
+    {
+      "path": "./packages/control-plane-client"
+    },
+    {
+      "path": "./packages/browser-core"
+    },
+    {
       "path": "./packages/strongflow"
     },
     {

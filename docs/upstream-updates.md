@@ -94,7 +94,7 @@ THIRD_PARTY_NOTICES.md
 
 ## 更新 vendored Cargo source
 
-当前 vendored Cargo source 是 `i18n-embed-fl 0.9.4`。它用于修复上游 proc macro 的非确定顺序，根 `[patch.crates-io]` 只能选择一个 path source。
+当前 vendored Cargo sources 是 `i18n-embed-fl 0.9.4` 和 `rusqlite 0.39.0`。前者修复上游 proc macro 的非确定顺序，后者在保持唯一 `libsqlite3-sys 0.37.0` 和 SQLite `3.51.3` 的同时回移命名 SAVEPOINT 标识符转义修复。根 `[patch.crates-io]` 对每个包只能选择一个 path source。
 
 ### 1. 取得并核对候选
 
@@ -130,12 +130,12 @@ THIRD_PARTY_NOTICES.md
 
 ```bash
 cargo metadata --locked --offline --format-version 1
-node --test tests/i18n-embed-fl-reproducibility.test.mjs
+node --test tests/i18n-embed-fl-reproducibility.test.mjs tests/rusqlite-savepoint-backport.test.mjs
 corepack pnpm test
 corepack pnpm verify
 ```
 
-`i18n-embed-fl` 回归会检查唯一 path source、registry archive checksum、原始与补丁后源码树、补丁反向恢复、许可证、宏生成顺序和 release source inventory。Cargo metadata 必须只返回一个目标版本；根测试还会通过实际下游构建使用该 proc macro。
+两组精确测试都会检查唯一 path source、registry archive checksum、原始与补丁后源码树、补丁反向恢复、许可证和 release source inventory。`i18n-embed-fl` 测试另外检查宏生成顺序；`rusqlite` 测试另外检查单一 `libsqlite3-sys 0.37.0` 和 SAVEPOINT 名称转义。Cargo metadata 必须只返回一个目标版本；根测试还会通过实际下游构建执行对应代码。
 
 ### 4. 回滚 vendored source
 

@@ -21,6 +21,11 @@
   "publishConfig": {
     "access": "public"
   },
+  "dependencies": {
+    "@winwincode/browser-ui": "0.1.0-alpha.1",
+    "@winwincode/browser-core": "0.1.0-alpha.1",
+    "@winwincode/control-plane-client": "0.1.0-alpha.1"
+  },
   "scripts": {
     "build": "node scripts/build.mjs",
     "typecheck": "tsc -p tsconfig.json --pretty false"

@@ -2,8 +2,8 @@
 
 - 状态：已接受并按阶段 6.7 更新
 - 日期：2026-08-21
-- 当前边界更新：2026-08-31
-- 对应任务：`winwincode-9c4.1.1`、`winwincode-9c4.16.6.7.9`
+- 当前边界更新：2026-09-05
+- 对应任务：`winwincode-9c4.1.1`、`winwincode-9c4.16.6.7.9`、`winwincode-9c4.16.7`
 - 机器可读清单：[`upstream/sources.lock.json`](../../upstream/sources.lock.json)
 
 ## 结论
@@ -18,6 +18,7 @@ Chat 是 `apps/client` 的默认页面，StrongFlow 是同一 Client 中的高�
 | --- | --- | --- | --- | --- | --- |
 | OpenAI Codex | `rust-v0.149.0` / Cargo `0.149.0` | `758ef40f50c1a458425c7cfbf1eb12cbc07af0b0` | `0413a0e7680bcc2b6c6e998a6ad358115707317ef5d0121dcb9275e88c36121a` | `third_party/codex/` 中的 Rust 源码，由 Kernel 直接构建 | Apache-2.0 |
 | `i18n-embed-fl` | Cargo `0.9.4` | `ceb3da0ee3acf91b17a7a52e02642267ddb47a3d` | crates.io checksum `04b2969d0b3fc6143776c535184c19722032b43e6a642d710fa3f88faec53c2d` | `upstream/vendor/i18n-embed-fl-0.9.4/` 中的精确 vendored source | MIT |
+| `rusqlite` | Cargo `0.39.0` | `2a1790a69107cd03dae85d501dcbdb11c5b32ef3` | crates.io checksum `a0d2b0146dd9661bf67bb107c0bb2a55064d556eeb3fc314151b957f313bcd4e` | `upstream/vendor/rusqlite-0.39.0/` 中的精确 vendored source | MIT |
 
 完整提交号或 registry checksum 是源码身份。不得使用 `main`、`latest`、版本范围、未固定 Git URL 或运行时下载代替这些身份。
 
@@ -59,6 +60,7 @@ Codex 的 Thread、Turn、Plan、Agent Graph、工具、Shell、沙箱、权限�
 | 补丁 | 上游位置 | 目的 |
 | --- | --- | --- |
 | `i18n-embed-fl/0001-stable-specified-argument-order.patch` | `upstream/vendor/i18n-embed-fl-0.9.4/src/lib.rs` | 回移上游 `f02d3ca8` 的可复现构建修复：编译期宏参数按 key 稳定排序，生成的运行时 Fluent 参数仍使用原有 `HashMap` |
+| `rusqlite/0001-quote-savepoint-identifiers.patch` | `upstream/vendor/rusqlite-0.39.0/src/transaction.rs` | 回移上游 `15385cc0` 的命名 SAVEPOINT 修复：把调用方提供的名称作为 SQLite 标识符转义，不把它直接拼进 SQL |
 | `codex/0001-export-client-mcp-extensions.patch` | `codex-rs/core-api/src/lib.rs` | 从公共门面导出已有 MCP extension 类型 |
 | `codex/0002-inject-model-stream-transport.patch` | `codex-rs/core` 与 `core-api` | 注入 Provider Gateway 使用的模型流接口 |
 | `codex/0003-export-config-builder.patch` | `codex-rs/core-api/src/lib.rs` | 导出上游已有 `ConfigBuilder` |
@@ -72,6 +74,14 @@ Codex 的 Thread、Turn、Plan、Agent Graph、工具、Shell、沙箱、权限�
 `age 0.11.2` 间接使用 `i18n-embed-fl 0.9.4`。该版本原始 proc macro 会遍历随机种子的 `HashMap`，使同一宏输入生成不同顺序的 LLVM IR。仓库保留 crates.io `0.9.4` 的完整源码与 MIT 许可证，只把编译期 `specified_args` 改成排序后的 `Vec`；宏生成的运行时 `HashMap` API 不变。
 
 `Cargo.toml` 的 `[patch.crates-io]` 只选择这个 path source，`Cargo.lock` 中只能有一个 `i18n-embed-fl 0.9.4` 且没有 registry source/checksum。原始归档、原始与补丁后源码树、补丁、许可证和上游修复提交的 SHA-256 都记录在机器可读清单中。
+
+## SQLite 单一原生库与修复回移
+
+当前 workspace 保持 `rusqlite 0.39.0`、`libsqlite3-sys 0.37.0` 和其 bundled SQLite `3.51.3`。vendored Codex 的 `sqlx-sqlite 0.9.0` 与 WinWinCode 的 `rusqlite` 共同解析到这一份 `libsqlite3-sys`，因此构建结果只链接一套 SQLite 原生库。
+
+`rusqlite 0.39.0` 原始实现把自定义 SAVEPOINT 名称直接拼进 SQL；仓库精确回移上游提交 `15385cc046364b68c9d7e65d2644dc86c0980f25`，改为用 SQLite 标识符规则转义名称。该修复已在上游 `rusqlite 0.40.1` 发布。当前不升级到 `0.40.x`，因为它要求 `libsqlite3-sys 0.38.x`，而 `sqlx-sqlite 0.9.0` 只接受低于 `0.38.0` 的版本；同时放入两版会让两个包争用同一个 `links=sqlite3` 原生链接名。
+
+根 `[patch.crates-io]` 只选择 `upstream/vendor/rusqlite-0.39.0`。当正式 SQLx/Codex 版本允许整个 workspace 直接升级到带修复的 rusqlite 时，应删除这份 vendored 源码、补丁和 path source，并一次升级唯一依赖，不能保留两条运行路径。
 
 ## 历史来源记录
 
@@ -97,8 +107,9 @@ WinWinCode 自有代码只使用 Apache-2.0。源代码与平台产物必须：
 1. 带上 WinWinCode 的 `LICENSE`、`NOTICE` 和 `THIRD_PARTY_NOTICES.md`；
 2. 保留 Codex 的 Apache-2.0 许可证和 NOTICE 义务；
 3. 保留 vendored `i18n-embed-fl` 的 MIT 许可证；
-4. 保留历史评估来源依法需要的归属文字，同时明确它不是当前运行依赖；
-5. 不把第三方 MIT 条款写成 WinWinCode 的第二项目许可证。
+4. 保留 vendored `rusqlite` 的 MIT 许可证；
+5. 保留历史评估来源依法需要的归属文字，同时明确它不是当前运行依赖；
+6. 不把第三方 MIT 条款写成 WinWinCode 的第二项目许可证。
 
 ## 更新与回滚
 
@@ -106,7 +117,7 @@ WinWinCode 自有代码只使用 Apache-2.0。源代码与平台产物必须：
 
 ```bash
 cargo metadata --locked --offline --format-version 1
-node --test tests/i18n-embed-fl-reproducibility.test.mjs tests/open-source-governance.test.mjs
+node --test tests/i18n-embed-fl-reproducibility.test.mjs tests/rusqlite-savepoint-backport.test.mjs tests/open-source-governance.test.mjs
 corepack pnpm verify
 ```
 

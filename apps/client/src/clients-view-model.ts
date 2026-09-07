@@ -6,7 +6,7 @@ import {
   type ControlPlaneClientAddFailure,
   type ControlPlaneClientDirectory,
   type ControlPlaneDeviceSummary,
-} from './control-plane-client.js'
+} from './community-control-plane-client.js'
 
 /**
  * The facade-owned wire taxonomy plus the two pre-request shape reasons the

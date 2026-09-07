@@ -146,16 +146,33 @@
       "allowedInternalDependencies": []
     },
     {
-      "id": "winwincode-observability",
+      "id": "winwincode-observability-core",
       "kind": "rust-crate",
-      "path": "crates/winwincode-observability",
-      "packageName": "winwincode-observability",
+      "path": "crates/winwincode-observability-core",
+      "packageName": "winwincode-observability-core",
       "phase": "2",
       "zone": "shared",
       "responsibilities": [
-        "carry-secret-safe-runtime-trace-facts"
+        "carry-secret-safe-runtime-trace-facts",
+        "define-storage-neutral-metric-and-alert-rules",
+        "expose-storage-neutral-observability-ports"
       ],
       "allowedInternalDependencies": []
+    },
+    {
+      "id": "winwincode-observability-sqlite",
+      "kind": "rust-crate",
+      "path": "crates/winwincode-observability-sqlite",
+      "packageName": "winwincode-observability-sqlite",
+      "phase": "2",
+      "zone": "control-plane",
+      "responsibilities": [
+        "persist-community-observability-state-in-sqlite",
+        "enforce-community-wal-retention-and-file-permissions"
+      ],
+      "allowedInternalDependencies": [
+        "winwincode-observability-core"
+      ]
     },
     {
       "id": "winwincode-delivery",
@@ -427,7 +444,7 @@
       ],
       "allowedInternalDependencies": [
         "winwincode-control-plane",
-        "winwincode-observability",
+        "winwincode-observability-core",
         "winwincode-worker"
       ]
     },
@@ -545,7 +562,7 @@
     "localLauncher": "winwincode-local",
     "localLauncherAllowedProductDependencies": [
       "winwincode-control-plane",
-      "winwincode-observability",
+      "winwincode-observability-core",
       "winwincode-worker"
     ],
     "serverEntrypoint": "winwincode-server",

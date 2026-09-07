@@ -17,7 +17,8 @@ members = [
   "crates/winwincode-evidence-export",
   "crates/winwincode-integration",
   "crates/winwincode-local",
-  "crates/winwincode-observability",
+  "crates/winwincode-observability-core",
+  "crates/winwincode-observability-sqlite",
   "crates/winwincode-object-store",
   "crates/winwincode-publication",
   "crates/winwincode-postgres",
@@ -31,6 +32,7 @@ members = [
 exclude = [
   "third_party/codex/codex-rs",
   "upstream/vendor/i18n-embed-fl-0.9.4",
+  "upstream/vendor/rusqlite-0.39.0",
 ]
 resolver = "2"
 
@@ -56,8 +58,8 @@ futures = "=0.3.31"
 getrandom = "=0.3.4"
 http = "=1.4.0"
 httpdate = "=1.0.3"
-# 0.40.x requires libsqlite3-sys 0.38.x, which cannot coexist with the Codex/sqlx
-# closure's libsqlite3-sys 0.37.x because both crates link the same native library.
+# Keep rusqlite and Codex/sqlx on the workspace's single libsqlite3-sys 0.37.x
+# native link. The path source below backports the upstream named-SAVEPOINT fix.
 rusqlite = { version = "=0.39.0", default-features = false, features = ["bundled"] }
 rcgen = "=0.14.7"
 rustls = "=0.23.36"
@@ -100,6 +102,7 @@ strip = "symbols"
 
 [patch.crates-io]
 i18n-embed-fl = { path = "upstream/vendor/i18n-embed-fl-0.9.4" }
+rusqlite = { path = "upstream/vendor/rusqlite-0.39.0" }
 tokio-tungstenite = { git = "https://github.com/openai-oss-forks/tokio-tungstenite", rev = "0e5b2d73aa18dd9f0a50ee9ff199d5aef7594186" }
 tungstenite = { git = "https://github.com/openai-oss-forks/tungstenite-rs", rev = "4fffad30fe373adbdcffab9545e9e9bf4f2fc19f" }
 

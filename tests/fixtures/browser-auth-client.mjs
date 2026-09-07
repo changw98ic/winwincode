@@ -62,7 +62,7 @@ function waitFor(predicate, label) {
       }
       if (Date.now() >= deadline) {
         reject(new Error(
-          `timed out waiting for ${label}; frames=${JSON.stringify(transportFrames)}; events=${JSON.stringify(receivedEvents)}; console=${capturedConsole.join(' | ')}`,
+          `timed out waiting for ${label}; auth=${JSON.stringify(application.authSession.state)}; frames=${JSON.stringify(transportFrames)}; events=${JSON.stringify(receivedEvents)}; console=${capturedConsole.join(' | ')}`,
         ))
         return
       }
@@ -72,12 +72,26 @@ function waitFor(predicate, label) {
   })
 }
 
-function submitProof(value) {
-  const input = document.querySelector('.wwc-auth-session-proof')
-  const form = document.querySelector('.wwc-auth-session-form')
-  input.value = value
+function submitInitialization(proof, username, password) {
+  const input = document.querySelector('.wwc-login-initialization-proof')
+  const usernameInput = document.querySelector('.wwc-login-initialization-username')
+  const passwordInput = document.querySelector('.wwc-login-initialization-password')
+  const form = document.querySelector('.wwc-login-initialization-form')
+  input.value = proof
+  usernameInput.value = username
+  passwordInput.value = password
   form.requestSubmit()
   return input.value
+}
+
+function submitLogin(username, password) {
+  const usernameInput = document.querySelector('.wwc-login-username')
+  const passwordInput = document.querySelector('.wwc-login-password')
+  const form = document.querySelector('.wwc-login-form')
+  usernameInput.value = username
+  passwordInput.value = password
+  form.requestSubmit()
+  return passwordInput.value
 }
 
 function storageText(storage) {
@@ -309,15 +323,27 @@ async function currentSettings(requestId) {
 }
 
 globalThis.runAuthBrowserFixture = async proof => {
-  const failedInputValue = submitProof('incorrect-bootstrap-proof')
-  await waitFor(
-    () => application.authSession.state.status === 'authentication-required',
-    'failed login',
-  )
-  const inputAfterFailedLogin = document.querySelector('.wwc-auth-session-proof').value
-  const submittedInputValue = submitProof(proof)
+  const username = 'owner'
+  const password = 'initial-owner-password'
+  const rejectedPassword = 'incorrect-password'
+  const submittedInputValue = submitInitialization(proof, username, password)
   await waitFor(() => application.authSession.state.status === 'signed-in', 'successful login')
-  const inputAfterSuccessfulLogin = document.querySelector('.wwc-auth-session-proof').value
+  const inputAfterSuccessfulLogin = document.querySelector(
+    '.wwc-login-initialization-proof',
+  ).value
+  await application.authSession.logout()
+  await waitFor(
+    () => application.authSession.state.status === 'signed-out',
+    'logout after initialization',
+  )
+  const failedInputValue = submitLogin(username, rejectedPassword)
+  await waitFor(
+    () => document.querySelector('.wwc-login-error').hidden === false,
+    'failed password login',
+  )
+  const inputAfterFailedLogin = document.querySelector('.wwc-login-password').value
+  submitLogin(username, password)
+  await waitFor(() => application.authSession.state.status === 'signed-in', 'password login')
   const flows = await runRealApplicationFlows()
   const context = authenticatedContext()
   const sessionState = JSON.stringify(application.authSession.state)
@@ -342,7 +368,9 @@ globalThis.runAuthBrowserFixture = async proof => {
     inputAfterSuccessfulLogin,
     sessionActor: context.actor,
     sessionScope: context.scope,
+    passwordFound: Object.values(scans).some(value => value.includes(password)),
     proofFound: Object.values(scans).some(value => value.includes(proof)),
+    rejectedPasswordFound: Object.values(scans).some(value => value.includes(rejectedPassword)),
     redirectedResources: resources.filter(entry => entry.redirectEnd > entry.redirectStart).length,
     cookieVisibleToScript: document.cookie,
   }

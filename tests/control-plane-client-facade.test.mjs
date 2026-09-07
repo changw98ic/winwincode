@@ -19,7 +19,7 @@ assert.equal(
 
 const facade = await import(`${pathToFileURL(resolve(
   root,
-  '.cache/control-plane-client-tests/control-plane-client.js',
+  '.cache/control-plane-client-tests/community-control-plane-client.js',
 )).href}?run=${String(Date.now())}`)
 
 const {
@@ -514,11 +514,17 @@ test('facade forwards validated WebSocket queue hints before ordered event appli
   client.close()
 })
 
-test('apps/client exposes one facade and contains no Worker, Provider, or DSH remote path', () => {
-  const source = readFileSync(resolve(root, 'apps/client/src/control-plane-client.ts'), 'utf8')
+test('the public facade receives the Community generated transport at composition', () => {
+  const source = readFileSync(resolve(root, 'packages/control-plane-client/src/index.ts'), 'utf8')
+  const composition = readFileSync(
+    resolve(root, 'apps/client/src/community-control-plane-client.ts'),
+    'utf8',
+  )
   const index = readFileSync(resolve(root, 'apps/client/src/index.ts'), 'utf8')
   assert.match(source, /createControlPlaneClient/u)
   assert.match(source, /serverUrl/u)
-  assert.doesNotMatch(`${source}\n${index}`, /@deepseek-ai|execution-worker|provider-gateway/iu)
+  assert.doesNotMatch(source, /generated\/control-plane-client|generated\/contracts/u)
+  assert.match(composition, /generatedTransport/u)
+  assert.doesNotMatch(`${source}\n${composition}\n${index}`, /@deepseek-ai|execution-worker|provider-gateway/iu)
   assert.doesNotMatch(index, /generated\/control-plane-client/u)
 })

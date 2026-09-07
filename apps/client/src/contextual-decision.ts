@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { boundApprovalText } from './approval-risk-detail.js'
-import { mountPanel } from './components/panel.js'
+import { mountPanel } from '@winwincode/browser-ui'
 import { mountKeyedCollection } from './components/keyed-collection.js'
 import type { InteractiveInputValue } from './generated/contracts.js'
 import {

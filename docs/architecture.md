@@ -40,7 +40,7 @@ winwincode-local 只负责在本机组装 Control Plane 和 Worker。
 | `winwincode-local` | 读取进程配置、组装两个 Rust 模块、启动、停止和有限诊断 | 业务写入、Provider 路由、工作区和执行决策 |
 
 所有业务写入都进入 Control Plane。Server 只负责边界和组合，Client 只通过
-[`control-plane-client.ts`](../apps/client/src/control-plane-client.ts) 调用生成客户端；Worker
+[`control-plane-client.ts`](../packages/control-plane-client/src/index.ts) 调用生成客户端；Worker
 通过 `ExecutionPort` 上报事实，不能直接改写 Delivery 或 ProductSession。
 
 ## 目标运行结构
@@ -218,7 +218,7 @@ Server 启动先恢复持久 state、receipt、outbox、SessionBinding 和事件
 
 | 结论 | 实现 | 检查 |
 | --- | --- | --- |
-| Client 只有一个请求 facade | [`apps/client/src/control-plane-client.ts`](../apps/client/src/control-plane-client.ts) | [`tests/control-plane-client-facade.test.mjs`](../tests/control-plane-client-facade.test.mjs) |
+| Client 只有一个请求 facade | [`packages/control-plane-client/src/index.ts`](../packages/control-plane-client/src/index.ts) | [`tests/control-plane-client-facade.test.mjs`](../tests/control-plane-client-facade.test.mjs) |
 | Client 通过一个 `serverUrl` 派生两种传输 | [`apps/client/src/runtime-config.ts`](../apps/client/src/runtime-config.ts) | [`tests/client-server-separation.test.mjs`](../tests/client-server-separation.test.mjs) |
 | Server 是唯一公开网络边界 | [`crates/winwincode-server/src/server.rs`](../crates/winwincode-server/src/server.rs) | [`tests/server-durable-event-hub-contract.test.mjs`](../tests/server-durable-event-hub-contract.test.mjs) |
 | Server 只接受生成合同 | [`crates/winwincode-server/src/dispatcher.rs`](../crates/winwincode-server/src/dispatcher.rs) | [`tests/control-plane-http-contract.test.mjs`](../tests/control-plane-http-contract.test.mjs) |

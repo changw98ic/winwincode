@@ -1,0 +1,2979 @@
+// SPDX-License-Identifier: Apache-2.0
+
+import {
+  ControlPlaneClientError,
+  controlPlaneLoginFailure,
+  createControlPlaneClient as createNeutralControlPlaneClient,
+  parseControlPlaneServerUrl,
+  type ControlPlaneClient as NeutralControlPlaneClient,
+  type ControlPlaneClientOptions as NeutralControlPlaneClientOptions,
+  type ControlPlaneClientErrorKind,
+  type ControlPlaneClientTransport,
+  type ControlPlaneHttpResponse,
+  type ControlPlaneGeneratedTransport,
+  type ControlPlaneInitializationStatus,
+  type ControlPlaneLoginFailure,
+  type ControlPlanePasswordCredentials,
+  type ControlPlaneRequestOptions,
+  type ControlPlaneServerLocation,
+  type ControlPlaneSubscribeOptions as NeutralControlPlaneSubscribeOptions,
+  type ControlPlaneSubscription,
+  type ControlPlaneTransportFetch,
+} from '@winwincode/control-plane-client'
+import {
+  ControlPlaneClientError as GeneratedControlPlaneClientError,
+  createControlPlaneHttpClient,
+  createControlPlaneWebSocketClient,
+  matchesCanonicalSchema,
+  type ControlPlaneWebSocketClientOptions,
+} from './generated/control-plane-client.js'
+import { ControlPlaneWebSocketSubscribeOrigin } from './generated/contracts.js'
+import type {
+  AuthSessionResponse,
+  CommandAcceptedResponse,
+  CommandCompletedResponse,
+  CommandRequest,
+  ControlPlaneWebSocketAuthorizationRevokedFrame,
+  ControlPlaneWebSocketEventFrame,
+  ControlPlaneWebSocketResetRequiredFrame,
+  ControlPlaneWebSocketSubscription,
+  ControlPlaneWebSocketSubscriptionId,
+  ControlPlaneWebSocketSubscribeStartAt,
+  ErrorDetails,
+  EventReadCursor,
+  QueryRequest,
+  QueryResultResponse,
+  RequestId,
+} from './generated/contracts.js'
+
+export {
+  ControlPlaneClientError,
+  controlPlaneLoginFailure,
+  parseControlPlaneServerUrl,
+}
+export type {
+  AuthSessionResponse,
+  CommandAcceptedResponse,
+  CommandCompletedResponse,
+  CommandRequest,
+  ControlPlaneRequestOptions,
+  ControlPlaneServerLocation,
+  ControlPlaneClientTransport,
+  ControlPlaneClientErrorKind,
+  ControlPlaneHttpResponse,
+  ControlPlaneInitializationStatus,
+  ControlPlaneLoginFailure,
+  ControlPlanePasswordCredentials,
+  ControlPlaneSubscription,
+  ControlPlaneTransportFetch,
+  ControlPlaneWebSocketAuthorizationRevokedFrame,
+  ControlPlaneWebSocketEventFrame,
+  ControlPlaneWebSocketSubscription,
+  ControlPlaneWebSocketSubscriptionId,
+  ControlPlaneWebSocketSubscribeStartAt,
+  ErrorDetails,
+  EventReadCursor,
+  QueryRequest,
+  QueryResultResponse,
+  RequestId,
+}
+
+export type ControlPlaneClient = NeutralControlPlaneClient<
+  AuthSessionResponse,
+  CommandRequest,
+  CommandAcceptedResponse | CommandCompletedResponse,
+  QueryRequest,
+  QueryResultResponse,
+  ControlPlaneWebSocketEventFrame,
+  ControlPlaneWebSocketResetRequiredFrame,
+  ControlPlaneWebSocketAuthorizationRevokedFrame,
+  ControlPlaneWebSocketSubscription,
+  ControlPlaneWebSocketSubscriptionId,
+  ControlPlaneWebSocketSubscribeStartAt,
+  EventReadCursor
+>
+
+export type ControlPlaneSession = AuthSessionResponse
+
+export type ControlPlaneSubscribeOptions = NeutralControlPlaneSubscribeOptions<
+  ControlPlaneWebSocketEventFrame,
+  ControlPlaneWebSocketResetRequiredFrame,
+  ControlPlaneWebSocketAuthorizationRevokedFrame,
+  ControlPlaneWebSocketSubscription,
+  ControlPlaneWebSocketSubscriptionId,
+  ControlPlaneWebSocketSubscribeStartAt,
+  EventReadCursor
+>
+
+export type ControlPlaneClientOptions = Omit<NeutralControlPlaneClientOptions<
+  AuthSessionResponse,
+  CommandRequest,
+  CommandAcceptedResponse | CommandCompletedResponse,
+  QueryRequest,
+  QueryResultResponse,
+  ControlPlaneWebSocketEventFrame,
+  ControlPlaneWebSocketResetRequiredFrame,
+  ControlPlaneWebSocketAuthorizationRevokedFrame,
+  ControlPlaneWebSocketSubscription,
+  ControlPlaneWebSocketSubscriptionId,
+  ControlPlaneWebSocketSubscribeStartAt,
+  EventReadCursor
+>, 'generated'>
+
+const generatedTransport = Object.freeze<ControlPlaneGeneratedTransport<
+  AuthSessionResponse,
+  CommandRequest,
+  CommandAcceptedResponse | CommandCompletedResponse,
+  QueryRequest,
+  QueryResultResponse,
+  ControlPlaneWebSocketEventFrame,
+  ControlPlaneWebSocketResetRequiredFrame,
+  ControlPlaneWebSocketAuthorizationRevokedFrame,
+  ControlPlaneWebSocketSubscription,
+  ControlPlaneWebSocketSubscriptionId,
+  ControlPlaneWebSocketSubscribeStartAt,
+  EventReadCursor
+>>({
+  latestSubscriptionStart: ControlPlaneWebSocketSubscribeOrigin.Latest,
+  createError(fields) {
+    return new GeneratedControlPlaneClientError({
+      ...fields,
+      details: fields.details,
+    })
+  },
+  errorFields(error) {
+    if (!(error instanceof GeneratedControlPlaneClientError)) return null
+    return {
+      code: error.code,
+      message: error.message,
+      requestId: error.requestId,
+      retryable: error.retryable,
+      details: error.details,
+    }
+  },
+  matchesAuthSession(value): value is AuthSessionResponse {
+    return matchesCanonicalSchema('AuthSessionResponse', value)
+  },
+  createHttpClient(options) {
+    const client = createControlPlaneHttpClient({
+      baseUrl: options.baseUrl,
+      fetch: (input, init) => (
+        Reflect.apply(options.fetch, undefined, [input, {
+          method: init.method,
+          headers: init.headers,
+          body: init.body,
+          credentials: 'include',
+        }])
+      ),
+      maxNetworkRetries: options.maxNetworkRetries,
+      waitBeforeRetry: options.waitBeforeRetry,
+    })
+    return {
+      submitCommand(command) {
+        return client.submitCommand(command)
+      },
+      submitQuery(query) {
+        return client.submitQuery(query)
+      },
+    }
+  },
+  createWebSocketClient(options) {
+    const onResetRequired = options.onResetRequired
+    const socketOptions: ControlPlaneWebSocketClientOptions = {
+      baseUrl: options.baseUrl,
+      ...(options.createSocket === undefined ? {} : { createSocket: options.createSocket }),
+      reconnectDelayMillis: options.reconnectDelayMillis,
+      ...(options.onEventQueued === undefined ? {} : {
+        onEventQueued: event => { options.onEventQueued?.(event) },
+      }),
+      onEvent: event => options.onEvent(event),
+      ...(onResetRequired === undefined ? {} : {
+        async onResetRequired(frame) {
+          return onResetRequired(frame)
+        },
+      }),
+      ...(options.onAuthorizationRevoked === undefined ? {} : {
+        onAuthorizationRevoked: frame => options.onAuthorizationRevoked?.(frame),
+      }),
+      ...(options.onError === undefined ? {} : { onError: options.onError }),
+    }
+    const client = createControlPlaneWebSocketClient(socketOptions)
+    return {
+      get cursor() { return client.cursor },
+      subscribe(subscriptionId, subscription, startAt) {
+        client.subscribe(
+          subscriptionId,
+          subscription,
+          startAt,
+        )
+      },
+      resume() { client.resume() },
+      reconnect() { client.reconnect() },
+      close() { client.close() },
+    }
+  },
+})
+
+export function createControlPlaneClient(options: ControlPlaneClientOptions): ControlPlaneClient {
+  return createNeutralControlPlaneClient({
+    ...options,
+    generated: generatedTransport,
+  })
+}
+
+const CONTROL_PLANE_SCHEMA_VERSION = 'winwincode/v1'
+const RFC3339_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/u
+
+function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
+function signalIsAborted(signal: AbortSignal | undefined): boolean {
+  return signal?.aborted ?? false
+}
+
+function cancelledError(requestId: RequestId | null): ControlPlaneClientError {
+  return new ControlPlaneClientError({
+    kind: 'cancelled',
+    code: 'REQUEST_CANCELLED',
+    message: 'The Control Plane operation was cancelled.',
+    requestId,
+    retryable: false,
+  })
+}
+
+function versionCode(code: string): boolean {
+  return code === 'SCHEMA_VERSION_MISMATCH'
+    || code === 'PROTOCOL_VERSION_UNSUPPORTED'
+    || code === 'VERSION_MISMATCH'
+}
+
+function accessKind(code: string): ControlPlaneClientErrorKind | null {
+  if (code === 'AUTHENTICATION_REQUIRED') return 'authentication'
+  if (code === 'PERMISSION_DENIED') return 'authorization'
+  return null
+}
+
+function versionDetails(details: ErrorDetails): boolean {
+  return Reflect.get(details, 'reason') === 'CLIENT_UPGRADE_REQUIRED'
+}
+
+const REPOSITORY_DIRECTORY_LIST_PATH = '/api/v1/repositories'
+
+export type ControlPlaneRepositoryDirtyState = 'clean' | 'dirty'
+
+/** The seven canonical repository availability projections. */
+export type ControlPlaneRepositoryAvailability =
+  | 'available'
+  | 'dirty'
+  | 'unavailable'
+  | 'moved'
+  | 'invalid_git'
+  | 'permission_denied'
+  | 'scan_failed'
+
+/** One repository list read: the Client device whose bindings are listed. */
+export interface ControlPlaneRepositoryListInput {
+  readonly clientId: string
+}
+
+/** One repository card. The Server owns every field; the browser only displays. */
+export interface ControlPlaneRepositorySummary {
+  readonly repositoryBindingId: string
+  readonly displayName: string
+  readonly defaultBranch: string
+  readonly headCommit: string
+  readonly dirtyState: ControlPlaneRepositoryDirtyState
+  readonly availability: ControlPlaneRepositoryAvailability
+}
+
+const REPOSITORY_DIRTY_STATE_VALUES: readonly string[] = Object.freeze(['clean', 'dirty'])
+const REPOSITORY_AVAILABILITY_VALUES: readonly string[] = Object.freeze([
+  'available',
+  'dirty',
+  'unavailable',
+  'moved',
+  'invalid_git',
+  'permission_denied',
+  'scan_failed',
+])
+
+function invalidRepositoryListError(): ControlPlaneClientError {
+  return new ControlPlaneClientError({
+    kind: 'protocol',
+    code: 'INVALID_REPOSITORY_LIST_RESPONSE',
+    message: 'The Control Plane server returned an invalid repository list.',
+    requestId: null,
+    retryable: false,
+  })
+}
+
+/**
+ * Validate the list input before a request exists: the query names one Client
+ * device, so the identity must be a non-empty digit string with no grouping
+ * separators or path-shaped text.
+ */
+function assertRepositoryListInput(clientId: string): void {
+  if (!/^\d+$/u.test(clientId)) {
+    throw new ControlPlaneClientError({
+      kind: 'protocol',
+      code: 'REPOSITORY_LIST_INPUT_INVALID',
+      message: 'Select a Client to list its repositories.',
+      requestId: null,
+      retryable: false,
+    })
+  }
+}
+
+function repositorySummaryValue(value: unknown): ControlPlaneRepositorySummary {
+  if (!isRecord(value)) throw invalidRepositoryListError()
+  const dirtyState = value.dirtyState
+  const availability = value.availability
+  if (
+    typeof value.repositoryBindingId !== 'string'
+    || value.repositoryBindingId.length === 0
+    || typeof value.displayName !== 'string'
+    || value.displayName.length === 0
+    || typeof value.defaultBranch !== 'string'
+    || value.defaultBranch.length === 0
+    || typeof value.headCommit !== 'string'
+    || value.headCommit.length === 0
+    || typeof dirtyState !== 'string'
+    || !REPOSITORY_DIRTY_STATE_VALUES.includes(dirtyState)
+    || typeof availability !== 'string'
+    || !REPOSITORY_AVAILABILITY_VALUES.includes(availability)
+  ) {
+    throw invalidRepositoryListError()
+  }
+  return Object.freeze({
+    repositoryBindingId: value.repositoryBindingId,
+    displayName: value.displayName,
+    defaultBranch: value.defaultBranch,
+    headCommit: value.headCommit,
+    dirtyState: dirtyState as ControlPlaneRepositoryDirtyState,
+    availability: availability as ControlPlaneRepositoryAvailability,
+  })
+}
+
+function repositoryListResponse(source: string): readonly ControlPlaneRepositorySummary[] {
+  let value: unknown
+  try {
+    value = JSON.parse(source)
+  } catch {
+    value = null
+  }
+  if (
+    isRecord(value)
+    && typeof value.schemaVersion === 'string'
+    && value.schemaVersion !== CONTROL_PLANE_SCHEMA_VERSION
+  ) {
+    throw new ControlPlaneClientError({
+      kind: 'version',
+      code: 'SCHEMA_VERSION_MISMATCH',
+      message: `The Control Plane server must use ${CONTROL_PLANE_SCHEMA_VERSION}.`,
+      requestId: null,
+      retryable: false,
+    })
+  }
+  if (!isRecord(value) || !Array.isArray(value.repositories)) throw invalidRepositoryListError()
+  return Object.freeze(value.repositories.map(repositorySummaryValue))
+}
+
+async function repositoriesListRequest(
+  location: ControlPlaneServerLocation,
+  transportFetch: ControlPlaneTransportFetch | undefined,
+  clientId: string,
+  signal: AbortSignal | undefined,
+): Promise<readonly ControlPlaneRepositorySummary[]> {
+  if (signalIsAborted(signal)) throw cancelledError(null)
+  if (transportFetch === undefined) {
+    throw new ControlPlaneClientError({
+      kind: 'protocol',
+      code: 'TRANSPORT_UNAVAILABLE',
+      message: 'The browser HTTP transport is unavailable.',
+      requestId: null,
+      retryable: false,
+    })
+  }
+  try {
+    const response = await transportFetch(
+      `${location.serverUrl}${REPOSITORY_DIRECTORY_LIST_PATH}`
+        + `?clientId=${encodeURIComponent(clientId)}`,
+      {
+        method: 'GET',
+        headers: {},
+        redirect: 'error',
+        cache: 'no-store',
+        referrerPolicy: 'no-referrer',
+        credentials: 'include',
+        ...(signal === undefined ? {} : { signal }),
+      },
+    )
+    const source = await response.text()
+    if (!response.ok) throw clientDirectoryBoundaryError(response.status, source)
+    if (response.status !== 200) throw invalidRepositoryListError()
+    return repositoryListResponse(source)
+  } catch (error) {
+    if (signalIsAborted(signal)) throw cancelledError(null)
+    if (error instanceof ControlPlaneClientError) throw error
+    throw new ControlPlaneClientError({
+      kind: 'network',
+      code: 'NETWORK_ERROR',
+      message: 'The Control Plane server could not be reached.',
+      requestId: null,
+      retryable: true,
+    })
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Client directory: add-Client connect and the device card list (CLIENT-200.4).
+//
+// FAKE-DRIVEN SHAPES: the routes and payload shapes in this block are the
+// presentation-side contract for the add-Client form and the device list.
+// The server-connect-flow lane owns the real wire routes and payload names;
+// when those land, only the path constants and parsers in this block change.
+// Pages and view-models only ever see the typed unions and summaries below.
+// ---------------------------------------------------------------------------
+
+const CLIENT_DIRECTORY_LIST_PATH = '/api/v1/clients'
+const CLIENT_DIRECTORY_CONNECT_PATH = '/api/v1/clients/connections'
+
+/** §12.1: presence is displayed separately from occupancy, never merged. */
+export type ControlPlaneDevicePresence = 'online' | 'offline' | 'locked'
+
+/** §12.1 occupancy states projected for device cards. */
+export type ControlPlaneDeviceOccupancy =
+  | 'available'
+  | 'occupied-by-me'
+  | 'occupied-by-other'
+  | 'draining'
+  | 'recovery-pending'
+
+/** One device card. The Server owns every field; the browser only displays. */
+export interface ControlPlaneDeviceSummary {
+  readonly clientId: string
+  readonly displayName: string
+  readonly presence: ControlPlaneDevicePresence
+  readonly occupancy: ControlPlaneDeviceOccupancy
+  readonly capacityUsed: number
+  readonly capacityTotal: number
+  readonly lastHeartbeatAt: string
+  readonly version: string
+  readonly recoveryDeadlineAt?: string | null
+}
+
+/** One add-Client attempt: the device identity plus its dynamic code. */
+export interface ControlPlaneClientConnectInput {
+  /** 9-12 digits; grouping separators are stripped by the facade. */
+  readonly clientId: string
+  /** Exactly 8 digits. */
+  readonly connectionCode: string
+}
+
+/**
+ * The one presentation-facing add-Client failure taxonomy. Wire codes are
+ * translated by `controlPlaneClientAddFailure` and never read anywhere else.
+ * `unavailable` is the catch-all for outages, protocol drift, and expired
+ * browser sessions, mirroring the sign-in taxonomy above.
+ */
+export type ControlPlaneClientAddFailure =
+  | 'id-not-found'
+  | 'client-offline'
+  | 'code-invalid'
+  | 'code-expired'
+  | 'new-connections-forbidden'
+  | 'client-locked'
+  | 'rate-limited'
+  | 'unavailable'
+
+const CLIENT_ADD_FAILURE_CODES: Readonly<Record<string, ControlPlaneClientAddFailure>> =
+  Object.freeze({
+    CLIENT_NOT_FOUND: 'id-not-found',
+    CLIENT_OFFLINE: 'client-offline',
+    CONNECT_CODE_INVALID: 'code-invalid',
+    CONNECT_CODE_EXPIRED: 'code-expired',
+    CLIENT_CONNECTIONS_FORBIDDEN: 'new-connections-forbidden',
+    CLIENT_LOCKED: 'client-locked',
+    RATE_LIMITED: 'rate-limited',
+  })
+
+const DEVICE_PRESENCE_VALUES: readonly string[] = Object.freeze([
+  'online',
+  'offline',
+  'locked',
+])
+const DEVICE_OCCUPANCY_VALUES: readonly string[] = Object.freeze([
+  'available',
+  'occupied-by-me',
+  'occupied-by-other',
+  'draining',
+  'recovery-pending',
+])
+
+/**
+ * Translate one add-Client failure into the presentation taxonomy. Every wire
+ * code stays inside this function; view-models and pages branch only on the
+ * returned union.
+ */
+export function controlPlaneClientAddFailure(error: unknown): ControlPlaneClientAddFailure {
+  if (error instanceof ControlPlaneClientError) {
+    const failure = CLIENT_ADD_FAILURE_CODES[error.code]
+    if (failure !== undefined) return failure
+  }
+  return 'unavailable'
+}
+
+/**
+ * Validate connect input before a request exists, mirroring the sign-in input
+ * bound. Grouping separators are stripped here, so the facade is the one place
+ * that owns the digit shape; the failure code says which field is wrong.
+ */
+function assertClientConnectInput(input: ControlPlaneClientConnectInput): void {
+  const clientId = typeof input?.clientId === 'string' ? input.clientId : ''
+  const connectionCode = typeof input?.connectionCode === 'string' ? input.connectionCode : ''
+  const clientIdDigits = clientId.replace(/\D+/gu, '')
+  const codeDigits = connectionCode.replace(/\D+/gu, '')
+  if (!/^\d{9,12}$/u.test(clientIdDigits)) {
+    throw new ControlPlaneClientError({
+      kind: 'protocol',
+      code: 'CLIENT_CONNECT_ID_INVALID',
+      message: 'Enter the 9-12 digit Client ID shown on the device.',
+      requestId: null,
+      retryable: false,
+    })
+  }
+  if (!/^\d{8}$/u.test(codeDigits)) {
+    throw new ControlPlaneClientError({
+      kind: 'protocol',
+      code: 'CLIENT_CONNECT_CODE_INVALID',
+      message: 'Enter the 8-digit connection code shown on the device.',
+      requestId: null,
+      retryable: false,
+    })
+  }
+}
+
+function clientDirectoryBoundaryError(
+  status: number,
+  source: string,
+): ControlPlaneClientError {
+  let value: unknown
+  try {
+    value = JSON.parse(source)
+  } catch {
+    value = null
+  }
+  const error = isRecord(value) && isRecord(value.error) ? value.error : null
+  const code = error !== null && typeof error.code === 'string'
+    ? error.code
+    : 'CLIENT_DIRECTORY_FAILED'
+  const kind: ControlPlaneClientErrorKind = accessKind(code)
+    ?? (code === 'RATE_LIMITED'
+      ? 'server'
+      : (versionCode(code)
+        ? 'version'
+        : (status >= 500 ? 'server' : 'protocol')))
+  return new ControlPlaneClientError({
+    kind,
+    code,
+    message: error !== null && typeof error.message === 'string'
+      ? error.message
+      : 'The Client directory request failed.',
+    requestId: isRecord(value) && typeof value.requestId === 'string'
+      ? value.requestId as RequestId
+      : null,
+    retryable: error !== null && error.retryable === true,
+  })
+}
+
+function invalidDeviceListError(): ControlPlaneClientError {
+  return new ControlPlaneClientError({
+    kind: 'protocol',
+    code: 'INVALID_CLIENT_DIRECTORY_RESPONSE',
+    message: 'The Control Plane server returned an invalid device list.',
+    requestId: null,
+    retryable: false,
+  })
+}
+
+function deviceSummaryValue(value: unknown): ControlPlaneDeviceSummary {
+  if (!isRecord(value)) throw invalidDeviceListError()
+  const presence = value.presence
+  const occupancy = value.occupancy
+  const capacityUsed = value.capacityUsed
+  const capacityTotal = value.capacityTotal
+  const lastHeartbeatAt = value.lastHeartbeatAt
+  if (
+    typeof value.clientId !== 'string'
+    || value.clientId.length === 0
+    || typeof value.displayName !== 'string'
+    || typeof presence !== 'string'
+    || !DEVICE_PRESENCE_VALUES.includes(presence)
+    || typeof occupancy !== 'string'
+    || !DEVICE_OCCUPANCY_VALUES.includes(occupancy)
+    || typeof capacityUsed !== 'number'
+    || !Number.isInteger(capacityUsed)
+    || capacityUsed < 0
+    || typeof capacityTotal !== 'number'
+    || !Number.isInteger(capacityTotal)
+    || capacityTotal < capacityUsed
+    || typeof lastHeartbeatAt !== 'string'
+    || !RFC3339_INSTANT.test(lastHeartbeatAt)
+    || Number.isNaN(Date.parse(lastHeartbeatAt))
+    || typeof value.version !== 'string'
+    || value.version.length === 0
+  ) {
+    throw invalidDeviceListError()
+  }
+  const recoveryDeadlineAt = value.recoveryDeadlineAt === undefined
+    ? null
+    : value.recoveryDeadlineAt
+  if (
+    recoveryDeadlineAt !== null
+    && (typeof recoveryDeadlineAt !== 'string'
+      || !RFC3339_INSTANT.test(recoveryDeadlineAt)
+      || Number.isNaN(Date.parse(recoveryDeadlineAt)))
+  ) {
+    throw invalidDeviceListError()
+  }
+  return Object.freeze({
+    clientId: value.clientId,
+    displayName: value.displayName,
+    presence: presence as ControlPlaneDevicePresence,
+    occupancy: occupancy as ControlPlaneDeviceOccupancy,
+    capacityUsed,
+    capacityTotal,
+    lastHeartbeatAt,
+    version: value.version,
+    ...(recoveryDeadlineAt === null ? {} : { recoveryDeadlineAt }),
+  })
+}
+
+function deviceListResponse(source: string): readonly ControlPlaneDeviceSummary[] {
+  let value: unknown
+  try {
+    value = JSON.parse(source)
+  } catch {
+    value = null
+  }
+  if (
+    isRecord(value)
+    && typeof value.schemaVersion === 'string'
+    && value.schemaVersion !== CONTROL_PLANE_SCHEMA_VERSION
+  ) {
+    throw new ControlPlaneClientError({
+      kind: 'version',
+      code: 'SCHEMA_VERSION_MISMATCH',
+      message: `The Control Plane server must use ${CONTROL_PLANE_SCHEMA_VERSION}.`,
+      requestId: null,
+      retryable: false,
+    })
+  }
+  if (!isRecord(value) || !Array.isArray(value.clients)) throw invalidDeviceListError()
+  return Object.freeze(value.clients.map(deviceSummaryValue))
+}
+
+/**
+ * The base facade extended with the two Client directory reads/writes. The
+ * decorator delegates every base method, so hosts can pass it anywhere a
+ * `ControlPlaneClient` is accepted and keep one session and one error identity.
+ */
+export interface ControlPlaneClientDirectory extends ControlPlaneClient {
+  /** Submit one dynamic-code connect; resolves to the fresh device list. */
+  addClient(
+    input: ControlPlaneClientConnectInput,
+    options?: ControlPlaneRequestOptions,
+  ): Promise<readonly ControlPlaneDeviceSummary[]>
+  /** Read the device card list for the signed-in identity. */
+  listClients(
+    options?: ControlPlaneRequestOptions,
+  ): Promise<readonly ControlPlaneDeviceSummary[]>
+  /** Read the repository list bound to one Client device. */
+  listRepositories(
+    input: ControlPlaneRepositoryListInput,
+    options?: ControlPlaneRequestOptions,
+  ): Promise<readonly ControlPlaneRepositorySummary[]>
+}
+
+/**
+ * Extend the one Control Plane facade with the Client directory. Expected
+ * add-Client failures stay in the add form (the base client keeps reporting
+ * connection health), and an injected facade that already implements the
+ * directory methods is reused verbatim so deterministic fixtures and host
+ * composition keep their single seam.
+ */
+export function createControlPlaneClientDirectory(options: {
+  readonly client: ControlPlaneClient
+  /** Same deterministic transport seam the base facade was created with. */
+  readonly transport?: ControlPlaneClientTransport
+}): ControlPlaneClientDirectory {
+  const location = parseControlPlaneServerUrl(options.client.serverUrl)
+  const transportFetch = options.transport?.fetch
+  const injected = options.client as Partial<ControlPlaneClientDirectory>
+  const injectedAddClient = injected.addClient
+  const injectedListClients = injected.listClients
+  const injectedListRepositories = injected.listRepositories
+
+  async function directoryRequest(
+    path: string,
+    method: 'GET' | 'POST',
+    body: string | null,
+    signal: AbortSignal | undefined,
+  ): Promise<ControlPlaneHttpResponse> {
+    if (signalIsAborted(signal)) throw cancelledError(null)
+    if (transportFetch === undefined) {
+      throw new ControlPlaneClientError({
+        kind: 'protocol',
+        code: 'TRANSPORT_UNAVAILABLE',
+        message: 'The browser HTTP transport is unavailable.',
+        requestId: null,
+        retryable: false,
+      })
+    }
+    return transportFetch(`${location.serverUrl}${path}`, {
+      method,
+      headers: body === null ? {} : { 'Content-Type': 'application/json' },
+      ...(body === null ? {} : { body }),
+      redirect: 'error',
+      cache: 'no-store',
+      referrerPolicy: 'no-referrer',
+      credentials: 'include',
+      ...(signal === undefined ? {} : { signal }),
+    })
+  }
+
+  async function connectRequest(
+    input: ControlPlaneClientConnectInput,
+    requestOptions: ControlPlaneRequestOptions | undefined,
+  ): Promise<readonly ControlPlaneDeviceSummary[]> {
+    assertClientConnectInput(input)
+    try {
+      const response = await directoryRequest(
+        CLIENT_DIRECTORY_CONNECT_PATH,
+        'POST',
+        JSON.stringify({
+          schemaVersion: CONTROL_PLANE_SCHEMA_VERSION,
+          clientId: input.clientId.replace(/\D+/gu, ''),
+          connectionCode: input.connectionCode.replace(/\D+/gu, ''),
+        }),
+        requestOptions?.signal,
+      )
+      const source = await response.text()
+      if (!response.ok) throw clientDirectoryBoundaryError(response.status, source)
+      if (response.status !== 201) throw invalidDeviceListError()
+      return deviceListResponse(source)
+    } catch (error) {
+      if (signalIsAborted(requestOptions?.signal)) throw cancelledError(null)
+      if (error instanceof ControlPlaneClientError) throw error
+      throw new ControlPlaneClientError({
+        kind: 'network',
+        code: 'NETWORK_ERROR',
+        message: 'The Control Plane server could not be reached.',
+        requestId: null,
+        retryable: true,
+      })
+    }
+  }
+
+  async function listRequest(
+    requestOptions: ControlPlaneRequestOptions | undefined,
+  ): Promise<readonly ControlPlaneDeviceSummary[]> {
+    try {
+      const response = await directoryRequest(
+        CLIENT_DIRECTORY_LIST_PATH,
+        'GET',
+        null,
+        requestOptions?.signal,
+      )
+      const source = await response.text()
+      if (!response.ok) throw clientDirectoryBoundaryError(response.status, source)
+      if (response.status !== 200) throw invalidDeviceListError()
+      return deviceListResponse(source)
+    } catch (error) {
+      if (signalIsAborted(requestOptions?.signal)) throw cancelledError(null)
+      if (error instanceof ControlPlaneClientError) throw error
+      throw new ControlPlaneClientError({
+        kind: 'network',
+        code: 'NETWORK_ERROR',
+        message: 'The Control Plane server could not be reached.',
+        requestId: null,
+        retryable: true,
+      })
+    }
+  }
+
+  const directory: ControlPlaneClientDirectory = {
+    serverUrl: options.client.serverUrl,
+    restore(requestOptions) {
+      return options.client.restore(requestOptions)
+    },
+    initializeOwner(initialization, requestOptions) {
+      return options.client.initializeOwner(initialization, requestOptions)
+    },
+    login(credentials, requestOptions) {
+      return options.client.login(credentials, requestOptions)
+    },
+    initializationStatus(requestOptions) {
+      return options.client.initializationStatus(requestOptions)
+    },
+    logout(requestOptions) {
+      return options.client.logout(requestOptions)
+    },
+    command(command, requestOptions) {
+      return options.client.command(command, requestOptions)
+    },
+    query(query, requestOptions) {
+      return options.client.query(query, requestOptions)
+    },
+    subscribe(subscriptionOptions) {
+      return options.client.subscribe(subscriptionOptions)
+    },
+    addClient(rawInput, requestOptions) {
+      // The facade is the one place that owns the digit shape, so an injected
+      // directory implementation receives the same normalized input the wire
+      // path would send.
+      const input: ControlPlaneClientConnectInput = {
+        clientId: rawInput.clientId.replace(/\D+/gu, ''),
+        connectionCode: rawInput.connectionCode.replace(/\D+/gu, ''),
+      }
+      if (typeof injectedAddClient === 'function') {
+        return injectedAddClient.call(options.client, input, requestOptions)
+      }
+      return connectRequest(input, requestOptions)
+    },
+    listClients(requestOptions) {
+      if (typeof injectedListClients === 'function') {
+        return injectedListClients.call(options.client, requestOptions)
+      }
+      return listRequest(requestOptions)
+    },
+    async listRepositories(rawInput, requestOptions) {
+      // The facade is the one place that owns the query identity, so an
+      // injected directory implementation receives the same normalized input
+      // the wire path would send. Every rejection surfaces as a promise
+      // rejection, mirroring the connect path above.
+      const input: ControlPlaneRepositoryListInput = {
+        clientId: (typeof rawInput?.clientId === 'string' ? rawInput.clientId : '').trim(),
+      }
+      assertRepositoryListInput(input.clientId)
+      if (typeof injectedListRepositories === 'function') {
+        return injectedListRepositories.call(options.client, input, requestOptions)
+      }
+      return repositoriesListRequest(location, transportFetch, input.clientId, requestOptions?.signal)
+    },
+    close() {
+      options.client.close()
+    },
+  }
+  return Object.freeze(directory)
+}
+
+// ---------------------------------------------------------------------------
+// Client occupancy: claim, status, release, and Owner force-release
+// (CLIENT-300.4, plan §12).
+//
+// REAL SERVER SHAPES: the routes, payload names, state strings, and wire error
+// codes in this block mirror the landed Server occupancy flow (the occupancy
+// routes and the central occupancy error-code table of
+// crates/winwincode-server). Pages and view-models only ever see the typed
+// unions below. The occupied-by-other projection is rebuilt here field by
+// field, so a non-holder read can never carry the holder identity even when
+// the wire payload drifted.
+// ---------------------------------------------------------------------------
+
+const CLIENT_OCCUPANCY_CLAIM_PATH = '/api/v1/clients/occupancy'
+const CLIENT_OCCUPANCY_FORCE_RELEASE_PATH = '/api/v1/clients/occupancy/force-release'
+
+/** One occupancy claim: the Client device to occupy. */
+export interface ControlPlaneOccupancyClaimInput {
+  /** 9-12 digits; grouping separators are stripped by the facade. */
+  readonly clientId: string
+}
+
+/** The three Server release modes of plan §12.4. */
+export type ControlPlaneOccupancyReleaseMode = 'release' | 'drain' | 'cancel_and_release'
+
+/** One holder release request: finish, cancel, or withdraw the occupancy. */
+export interface ControlPlaneOccupancyReleaseInput {
+  /** 9-12 digits; grouping separators are stripped by the facade. */
+  readonly clientId: string
+  readonly mode: ControlPlaneOccupancyReleaseMode
+  /** The Server demands this flag for `cancel_and_release`. */
+  readonly confirm?: boolean
+}
+
+/** One occupancy status read. */
+export interface ControlPlaneOccupancyStatusInput {
+  /** 9-12 digits; grouping separators are stripped by the facade. */
+  readonly clientId: string
+}
+
+/** The lease states the holder-side projection returns. */
+export type ControlPlaneOccupancyHolderState =
+  | 'reserving'
+  | 'occupied'
+  | 'draining'
+  | 'recovery_pending'
+
+/** No active lease: the Client is free for the signed-in user. */
+export interface ControlPlaneOccupancyAvailable {
+  readonly occupancy: 'available'
+  readonly presence: ControlPlaneDevicePresence
+}
+
+/**
+ * Privacy projection for a signed-in non-holder (plan §16.4): it names the
+ * occupancy and nothing else — never the holder identity, never lease or
+ * capacity details.
+ */
+export interface ControlPlaneOccupiedByOther {
+  readonly occupancy: 'occupied-by-other'
+}
+
+/** The full view only the occupancy holder receives. */
+export interface ControlPlaneOccupancyHolderView {
+  readonly occupancy: ControlPlaneOccupancyHolderState
+  readonly presence: ControlPlaneDevicePresence
+  readonly holderUserId: string
+  readonly occupancyLeaseId: string
+  readonly fencingToken: number
+  readonly claimedAt: string | null
+  readonly acknowledgedAt: string | null
+  readonly recoveryDeadlineAt: string | null
+  readonly capacityUsed: number
+  readonly capacityTotal: number
+}
+
+/** The one occupancy projection the signed-in user can read. */
+export type ControlPlaneOccupancyStatus =
+  | ControlPlaneOccupancyAvailable
+  | ControlPlaneOccupiedByOther
+  | ControlPlaneOccupancyHolderView
+
+/** One holder release outcome: released at once, or draining first. */
+export interface ControlPlaneOccupancyReleaseOutcome {
+  readonly occupancy: 'released' | 'draining'
+  readonly occupancyLeaseId: string
+  readonly mode: ControlPlaneOccupancyReleaseMode
+}
+
+/** One Owner force-release outcome with the strictly higher fence token. */
+export interface ControlPlaneOccupancyForceReleaseOutcome {
+  readonly released: true
+  readonly occupancyLeaseId: string
+  readonly forceFenceToken: number
+}
+
+/**
+ * The one presentation-facing occupancy failure taxonomy. Wire codes are
+ * translated by `controlPlaneOccupancyFailure` and never read anywhere else.
+ * `unavailable` is the catch-all for outages, expired browser sessions,
+ * protocol drift, and unknown codes, mirroring the sign-in taxonomy above.
+ */
+export type ControlPlaneOccupancyFailure =
+  | 'invalid-request'
+  | 'confirmation-required'
+  | 'client-not-found'
+  | 'client-offline'
+  | 'client-locked'
+  | 'new-connections-forbidden'
+  | 'access-denied'
+  | 'occupied-by-other'
+  | 'capacity-exhausted'
+  | 'occupancy-rejected'
+  | 'occupancy-ack-timeout'
+  | 'recovery-pending'
+  | 'permission-denied'
+  | 'no-active-occupancy'
+  | 'wrong-state'
+  | 'rate-limited'
+  | 'unavailable'
+
+const OCCUPANCY_FAILURE_CODES: Readonly<Record<string, ControlPlaneOccupancyFailure>> =
+  Object.freeze({
+    INVALID_REQUEST: 'invalid-request',
+    CONFIRMATION_REQUIRED: 'confirmation-required',
+    CLIENT_NOT_FOUND: 'client-not-found',
+    CLIENT_OFFLINE: 'client-offline',
+    CLIENT_LOCKED: 'client-locked',
+    CLIENT_CONNECTIONS_FORBIDDEN: 'new-connections-forbidden',
+    ACCESS_DENIED: 'access-denied',
+    OCCUPIED_BY_OTHER: 'occupied-by-other',
+    CAPACITY_EXHAUSTED: 'capacity-exhausted',
+    OCCUPANCY_REJECTED: 'occupancy-rejected',
+    OCCUPANCY_ACK_TIMEOUT: 'occupancy-ack-timeout',
+    OCCUPANCY_RECOVERY_PENDING: 'recovery-pending',
+    PERMISSION_DENIED: 'permission-denied',
+    RESOURCE_NOT_FOUND: 'no-active-occupancy',
+    WRONG_STATE: 'wrong-state',
+    RATE_LIMITED: 'rate-limited',
+  })
+
+/**
+ * Translate one occupancy failure into the presentation taxonomy. Every wire
+ * code stays inside this function; view-models and pages branch only on the
+ * returned union.
+ */
+export function controlPlaneOccupancyFailure(error: unknown): ControlPlaneOccupancyFailure {
+  if (error instanceof ControlPlaneClientError) {
+    const failure = OCCUPANCY_FAILURE_CODES[error.code]
+    if (failure !== undefined) return failure
+  }
+  return 'unavailable'
+}
+
+const OCCUPANCY_HOLDER_STATE_VALUES: readonly string[] = Object.freeze([
+  'reserving',
+  'occupied',
+  'draining',
+  'recovery_pending',
+])
+const OCCUPANCY_RELEASE_OUTCOME_VALUES: readonly string[] = Object.freeze([
+  'released',
+  'draining',
+])
+const OCCUPANCY_RELEASE_MODE_VALUES: readonly string[] = Object.freeze([
+  'release',
+  'drain',
+  'cancel_and_release',
+])
+
+function invalidOccupancyResponseError(): ControlPlaneClientError {
+  return new ControlPlaneClientError({
+    kind: 'protocol',
+    code: 'INVALID_CLIENT_OCCUPANCY_RESPONSE',
+    message: 'The Control Plane server returned an invalid occupancy response.',
+    requestId: null,
+    retryable: false,
+  })
+}
+
+function occupancyNetworkError(): ControlPlaneClientError {
+  return new ControlPlaneClientError({
+    kind: 'network',
+    code: 'NETWORK_ERROR',
+    message: 'The Control Plane server could not be reached.',
+    requestId: null,
+    retryable: true,
+  })
+}
+
+/**
+ * Validate occupancy input before a request exists, mirroring the connect
+ * input bound: the facade owns the digit shape, so grouping separators are
+ * stripped here and never reach the wire.
+ */
+function assertOccupancyClientId(clientId: string): void {
+  if (!/^\d{9,12}$/u.test(clientId)) {
+    throw new ControlPlaneClientError({
+      kind: 'protocol',
+      code: 'CLIENT_OCCUPANCY_ID_INVALID',
+      message: 'Select a Client to manage its occupancy.',
+      requestId: null,
+      retryable: false,
+    })
+  }
+}
+
+function occupancyInputClientId(
+  input: ControlPlaneOccupancyClaimInput | ControlPlaneOccupancyReleaseInput
+    | ControlPlaneOccupancyStatusInput,
+): string {
+  const raw = typeof input?.clientId === 'string' ? input.clientId : ''
+  return raw.replace(/\D+/gu, '')
+}
+
+function clientOccupancyBoundaryError(
+  status: number,
+  source: string,
+): ControlPlaneClientError {
+  let value: unknown
+  try {
+    value = JSON.parse(source)
+  } catch {
+    value = null
+  }
+  const error = isRecord(value) && isRecord(value.error) ? value.error : null
+  const code = error !== null && typeof error.code === 'string'
+    ? error.code
+    : 'CLIENT_OCCUPANCY_FAILED'
+  const kind: ControlPlaneClientErrorKind = accessKind(code)
+    ?? (code === 'RATE_LIMITED'
+      ? 'server'
+      : (versionCode(code)
+        ? 'version'
+        : (status >= 500 ? 'server' : 'protocol')))
+  return new ControlPlaneClientError({
+    kind,
+    code,
+    message: error !== null && typeof error.message === 'string'
+      ? error.message
+      : 'The Client occupancy request failed.',
+    requestId: isRecord(value) && typeof value.requestId === 'string'
+      ? value.requestId as RequestId
+      : null,
+    retryable: error !== null && error.retryable === true,
+  })
+}
+
+function occupancyPresenceValue(value: unknown): ControlPlaneDevicePresence {
+  if (typeof value !== 'string' || !DEVICE_PRESENCE_VALUES.includes(value)) {
+    throw invalidOccupancyResponseError()
+  }
+  return value as ControlPlaneDevicePresence
+}
+
+function occupancyInstantValue(value: unknown): string | null {
+  if (
+    typeof value !== 'string'
+    || !RFC3339_INSTANT.test(value)
+    || Number.isNaN(Date.parse(value))
+  ) {
+    throw invalidOccupancyResponseError()
+  }
+  return value
+}
+
+function occupancyNullableInstantValue(value: unknown): string | null {
+  if (value === null) return null
+  return occupancyInstantValue(value)
+}
+
+function occupancyHolderViewValue(
+  value: Readonly<Record<string, unknown>>,
+): ControlPlaneOccupancyHolderView {
+  const occupancy = value.occupancy
+  const fencingToken = value.fencingToken
+  const capacityUsed = value.capacityUsed
+  const capacityTotal = value.capacityTotal
+  if (
+    typeof occupancy !== 'string'
+    || !OCCUPANCY_HOLDER_STATE_VALUES.includes(occupancy)
+    || typeof value.holderUserId !== 'string'
+    || value.holderUserId.length === 0
+    || typeof value.occupancyLeaseId !== 'string'
+    || value.occupancyLeaseId.length === 0
+    || typeof fencingToken !== 'number'
+    || !Number.isInteger(fencingToken)
+    || fencingToken < 1
+    || typeof capacityUsed !== 'number'
+    || !Number.isInteger(capacityUsed)
+    || capacityUsed < 0
+    || typeof capacityTotal !== 'number'
+    || !Number.isInteger(capacityTotal)
+    || capacityTotal < capacityUsed
+  ) {
+    throw invalidOccupancyResponseError()
+  }
+  const presence = occupancyPresenceValue(value.presence)
+  const claimedAt = occupancyNullableInstantValue(value.claimedAt)
+  const acknowledgedAt = occupancyNullableInstantValue(value.acknowledgedAt)
+  const recoveryDeadlineAt = occupancyNullableInstantValue(value.recoveryDeadlineAt)
+  return Object.freeze({
+    occupancy: occupancy as ControlPlaneOccupancyHolderState,
+    presence,
+    holderUserId: value.holderUserId,
+    occupancyLeaseId: value.occupancyLeaseId,
+    fencingToken,
+    claimedAt,
+    acknowledgedAt,
+    recoveryDeadlineAt,
+    capacityUsed,
+    capacityTotal,
+  })
+}
+
+function parsedOccupancyPayload(source: string): Readonly<Record<string, unknown>> {
+  let value: unknown
+  try {
+    value = JSON.parse(source)
+  } catch {
+    value = null
+  }
+  if (
+    isRecord(value)
+    && typeof value.schemaVersion === 'string'
+    && value.schemaVersion !== CONTROL_PLANE_SCHEMA_VERSION
+  ) {
+    throw new ControlPlaneClientError({
+      kind: 'version',
+      code: 'SCHEMA_VERSION_MISMATCH',
+      message: `The Control Plane server must use ${CONTROL_PLANE_SCHEMA_VERSION}.`,
+      requestId: null,
+      retryable: false,
+    })
+  }
+  if (!isRecord(value)) throw invalidOccupancyResponseError()
+  return value
+}
+
+function occupancyHolderViewResponse(source: string): ControlPlaneOccupancyHolderView {
+  return occupancyHolderViewValue(parsedOccupancyPayload(source))
+}
+
+function occupancyStatusResponse(source: string): ControlPlaneOccupancyStatus {
+  const value = parsedOccupancyPayload(source)
+  if (value.occupancy === 'available') {
+    return Object.freeze({
+      occupancy: 'available',
+      presence: occupancyPresenceValue(value.presence),
+    })
+  }
+  if (value.occupancy === 'occupied-by-other') {
+    // Rebuilt field by field: the parsed projection carries the occupancy
+    // name and nothing else, whatever the wire payload said (plan §16.4).
+    return Object.freeze({ occupancy: 'occupied-by-other' })
+  }
+  return occupancyHolderViewValue(value)
+}
+
+function occupancyReleaseResponse(source: string): ControlPlaneOccupancyReleaseOutcome {
+  const value = parsedOccupancyPayload(source)
+  const occupancy = value.occupancy
+  const mode = value.mode
+  if (
+    typeof occupancy !== 'string'
+    || !OCCUPANCY_RELEASE_OUTCOME_VALUES.includes(occupancy)
+    || typeof value.occupancyLeaseId !== 'string'
+    || value.occupancyLeaseId.length === 0
+    || typeof mode !== 'string'
+    || !OCCUPANCY_RELEASE_MODE_VALUES.includes(mode)
+  ) {
+    throw invalidOccupancyResponseError()
+  }
+  return Object.freeze({
+    occupancy: occupancy as ControlPlaneOccupancyReleaseOutcome['occupancy'],
+    occupancyLeaseId: value.occupancyLeaseId,
+    mode: mode as ControlPlaneOccupancyReleaseMode,
+  })
+}
+
+function occupancyForceReleaseResponse(
+  source: string,
+): ControlPlaneOccupancyForceReleaseOutcome {
+  const value = parsedOccupancyPayload(source)
+  const forceFenceToken = value.forceFenceToken
+  if (
+    value.released !== true
+    || typeof value.occupancyLeaseId !== 'string'
+    || value.occupancyLeaseId.length === 0
+    || typeof forceFenceToken !== 'number'
+    || !Number.isInteger(forceFenceToken)
+    || forceFenceToken < 1
+  ) {
+    throw invalidOccupancyResponseError()
+  }
+  return Object.freeze({
+    released: true,
+    occupancyLeaseId: value.occupancyLeaseId,
+    forceFenceToken,
+  })
+}
+
+/**
+ * The base facade extended with the signed-in user's occupancy surface. The
+ * decorator delegates every base method, so hosts can pass it anywhere a
+ * `ControlPlaneClient` is accepted and keep one session and one error identity.
+ */
+export interface ControlPlaneClientOccupancy extends ControlPlaneClient {
+  /**
+   * Submit one occupancy claim. Repeated claims for the same Client are
+   * idempotent: an in-flight claim is never repeated, and a settled claim
+   * replays to the same holder view without a second lease.
+   */
+  claimOccupancy(
+    input: ControlPlaneOccupancyClaimInput,
+    options?: ControlPlaneRequestOptions,
+  ): Promise<ControlPlaneOccupancyHolderView>
+  /** Read the signed-in user's occupancy projection for one Client. */
+  occupancyStatus(
+    input: ControlPlaneOccupancyStatusInput,
+    options?: ControlPlaneRequestOptions,
+  ): Promise<ControlPlaneOccupancyStatus>
+  /** Release, drain, or cancel-and-release the caller's own occupancy. */
+  releaseOccupancy(
+    input: ControlPlaneOccupancyReleaseInput,
+    options?: ControlPlaneRequestOptions,
+  ): Promise<ControlPlaneOccupancyReleaseOutcome>
+  /** Owner-only safe cleanup of a recovery-pending lease past its deadline. */
+  forceReleaseOccupancy(
+    input: ControlPlaneOccupancyStatusInput,
+    options?: ControlPlaneRequestOptions,
+  ): Promise<ControlPlaneOccupancyForceReleaseOutcome>
+}
+
+/**
+ * Extend the one Control Plane facade with the Client occupancy flow over the
+ * real Server occupancy routes. An injected facade that already implements
+ * the occupancy methods is reused verbatim so deterministic fixtures and host
+ * composition keep their single seam.
+ */
+export function createControlPlaneClientOccupancy(options: {
+  readonly client: ControlPlaneClient
+  /** Same deterministic transport seam the base facade was created with. */
+  readonly transport?: ControlPlaneClientTransport
+}): ControlPlaneClientOccupancy {
+  const location = parseControlPlaneServerUrl(options.client.serverUrl)
+  const transportFetch = options.transport?.fetch
+  const injected = options.client as Partial<ControlPlaneClientOccupancy>
+  const injectedClaimOccupancy = injected.claimOccupancy
+  const injectedOccupancyStatus = injected.occupancyStatus
+  const injectedReleaseOccupancy = injected.releaseOccupancy
+  const injectedForceReleaseOccupancy = injected.forceReleaseOccupancy
+  // One claim per Client at a time: a second claim for the same Client while
+  // one is in flight joins the first instead of racing the lease gate.
+  const claimsInFlight = new Map<string, Promise<ControlPlaneOccupancyHolderView>>()
+
+  function claimOnce(
+    clientId: string,
+    run: () => Promise<ControlPlaneOccupancyHolderView>,
+  ): Promise<ControlPlaneOccupancyHolderView> {
+    const pending = claimsInFlight.get(clientId)
+    if (pending !== undefined) return pending
+    const claim = run().finally(() => {
+      claimsInFlight.delete(clientId)
+    })
+    claimsInFlight.set(clientId, claim)
+    return claim
+  }
+
+  async function occupancyRequest(
+    path: string,
+    method: 'DELETE' | 'GET' | 'POST',
+    body: string | null,
+    signal: AbortSignal | undefined,
+  ): Promise<ControlPlaneHttpResponse> {
+    if (signalIsAborted(signal)) throw cancelledError(null)
+    if (transportFetch === undefined) {
+      throw new ControlPlaneClientError({
+        kind: 'protocol',
+        code: 'TRANSPORT_UNAVAILABLE',
+        message: 'The browser HTTP transport is unavailable.',
+        requestId: null,
+        retryable: false,
+      })
+    }
+    return transportFetch(`${location.serverUrl}${path}`, {
+      method,
+      headers: body === null ? {} : { 'Content-Type': 'application/json' },
+      ...(body === null ? {} : { body }),
+      redirect: 'error',
+      cache: 'no-store',
+      referrerPolicy: 'no-referrer',
+      credentials: 'include',
+      ...(signal === undefined ? {} : { signal }),
+    })
+  }
+
+  async function claimRequest(
+    input: ControlPlaneOccupancyClaimInput,
+    requestOptions: ControlPlaneRequestOptions | undefined,
+  ): Promise<ControlPlaneOccupancyHolderView> {
+    try {
+      const response = await occupancyRequest(
+        CLIENT_OCCUPANCY_CLAIM_PATH,
+        'POST',
+        JSON.stringify({
+          schemaVersion: CONTROL_PLANE_SCHEMA_VERSION,
+          clientId: input.clientId,
+        }),
+        requestOptions?.signal,
+      )
+      const source = await response.text()
+      if (!response.ok) throw clientOccupancyBoundaryError(response.status, source)
+      if (response.status !== 201) throw invalidOccupancyResponseError()
+      return occupancyHolderViewResponse(source)
+    } catch (error) {
+      if (signalIsAborted(requestOptions?.signal)) throw cancelledError(null)
+      if (error instanceof ControlPlaneClientError) throw error
+      throw occupancyNetworkError()
+    }
+  }
+
+  async function statusRequest(
+    input: ControlPlaneOccupancyStatusInput,
+    requestOptions: ControlPlaneRequestOptions | undefined,
+  ): Promise<ControlPlaneOccupancyStatus> {
+    try {
+      const response = await occupancyRequest(
+        `/api/v1/clients/${encodeURIComponent(input.clientId)}/occupancy`,
+        'GET',
+        null,
+        requestOptions?.signal,
+      )
+      const source = await response.text()
+      if (!response.ok) throw clientOccupancyBoundaryError(response.status, source)
+      if (response.status !== 200) throw invalidOccupancyResponseError()
+      return occupancyStatusResponse(source)
+    } catch (error) {
+      if (signalIsAborted(requestOptions?.signal)) throw cancelledError(null)
+      if (error instanceof ControlPlaneClientError) throw error
+      throw occupancyNetworkError()
+    }
+  }
+
+  async function releaseRequest(
+    input: ControlPlaneOccupancyReleaseInput,
+    requestOptions: ControlPlaneRequestOptions | undefined,
+  ): Promise<ControlPlaneOccupancyReleaseOutcome> {
+    try {
+      const response = await occupancyRequest(
+        CLIENT_OCCUPANCY_CLAIM_PATH,
+        'DELETE',
+        JSON.stringify({
+          schemaVersion: CONTROL_PLANE_SCHEMA_VERSION,
+          clientId: input.clientId,
+          mode: input.mode,
+          ...(input.confirm === undefined ? {} : { confirm: input.confirm }),
+        }),
+        requestOptions?.signal,
+      )
+      const source = await response.text()
+      if (!response.ok) throw clientOccupancyBoundaryError(response.status, source)
+      if (response.status !== 200) throw invalidOccupancyResponseError()
+      return occupancyReleaseResponse(source)
+    } catch (error) {
+      if (signalIsAborted(requestOptions?.signal)) throw cancelledError(null)
+      if (error instanceof ControlPlaneClientError) throw error
+      throw occupancyNetworkError()
+    }
+  }
+
+  async function forceReleaseRequest(
+    input: ControlPlaneOccupancyStatusInput,
+    requestOptions: ControlPlaneRequestOptions | undefined,
+  ): Promise<ControlPlaneOccupancyForceReleaseOutcome> {
+    try {
+      const response = await occupancyRequest(
+        CLIENT_OCCUPANCY_FORCE_RELEASE_PATH,
+        'POST',
+        JSON.stringify({
+          schemaVersion: CONTROL_PLANE_SCHEMA_VERSION,
+          clientId: input.clientId,
+        }),
+        requestOptions?.signal,
+      )
+      const source = await response.text()
+      if (!response.ok) throw clientOccupancyBoundaryError(response.status, source)
+      if (response.status !== 200) throw invalidOccupancyResponseError()
+      return occupancyForceReleaseResponse(source)
+    } catch (error) {
+      if (signalIsAborted(requestOptions?.signal)) throw cancelledError(null)
+      if (error instanceof ControlPlaneClientError) throw error
+      throw occupancyNetworkError()
+    }
+  }
+
+  const occupancy: ControlPlaneClientOccupancy = {
+    serverUrl: options.client.serverUrl,
+    restore(requestOptions) {
+      return options.client.restore(requestOptions)
+    },
+    initializeOwner(initialization, requestOptions) {
+      return options.client.initializeOwner(initialization, requestOptions)
+    },
+    login(credentials, requestOptions) {
+      return options.client.login(credentials, requestOptions)
+    },
+    initializationStatus(requestOptions) {
+      return options.client.initializationStatus(requestOptions)
+    },
+    logout(requestOptions) {
+      return options.client.logout(requestOptions)
+    },
+    command(command, requestOptions) {
+      return options.client.command(command, requestOptions)
+    },
+    query(query, requestOptions) {
+      return options.client.query(query, requestOptions)
+    },
+    subscribe(subscriptionOptions) {
+      return options.client.subscribe(subscriptionOptions)
+    },
+    claimOccupancy(rawInput, requestOptions) {
+      // Non-async on purpose: callers that join an in-flight claim receive the
+      // one shared promise. Validation failures surface through the explicit
+      // rejection below, so every failure still rejects instead of throwing.
+      try {
+        // The facade is the one place that owns the digit shape, so an
+        // injected occupancy implementation receives the same normalized
+        // input the wire path would send.
+        const clientId = occupancyInputClientId(rawInput)
+        assertOccupancyClientId(clientId)
+        const input: ControlPlaneOccupancyClaimInput = { clientId }
+        if (typeof injectedClaimOccupancy === 'function') {
+          return claimOnce(clientId, () =>
+            injectedClaimOccupancy.call(options.client, input, requestOptions))
+        }
+        return claimOnce(clientId, () => claimRequest(input, requestOptions))
+      } catch (error) {
+        return Promise.reject(error)
+      }
+    },
+    async occupancyStatus(rawInput, requestOptions) {
+      const clientId = occupancyInputClientId(rawInput)
+      assertOccupancyClientId(clientId)
+      const input: ControlPlaneOccupancyStatusInput = { clientId }
+      if (typeof injectedOccupancyStatus === 'function') {
+        return injectedOccupancyStatus.call(options.client, input, requestOptions)
+      }
+      return statusRequest(input, requestOptions)
+    },
+    async releaseOccupancy(rawInput, requestOptions) {
+      const clientId = occupancyInputClientId(rawInput)
+      assertOccupancyClientId(clientId)
+      const input: ControlPlaneOccupancyReleaseInput = {
+        clientId,
+        mode: rawInput.mode,
+        ...(rawInput.confirm === undefined ? {} : { confirm: rawInput.confirm }),
+      }
+      if (typeof injectedReleaseOccupancy === 'function') {
+        return injectedReleaseOccupancy.call(options.client, input, requestOptions)
+      }
+      return releaseRequest(input, requestOptions)
+    },
+    async forceReleaseOccupancy(rawInput, requestOptions) {
+      const clientId = occupancyInputClientId(rawInput)
+      assertOccupancyClientId(clientId)
+      const input: ControlPlaneOccupancyStatusInput = { clientId }
+      if (typeof injectedForceReleaseOccupancy === 'function') {
+        return injectedForceReleaseOccupancy.call(options.client, input, requestOptions)
+      }
+      return forceReleaseRequest(input, requestOptions)
+    },
+    close() {
+      options.client.close()
+    },
+  }
+  return Object.freeze(occupancy)
+}
+
+// ---------------------------------------------------------------------------
+// User management: Owner create, account state, and password resets
+// (UI-100.1).
+//
+// REAL SERVER SHAPES: the routes, payload names, role and state strings, and
+// wire error codes in this block mirror the landed Server account endpoints
+// (POST /api/v1/users, /api/v1/users/state, /api/v1/users/password of
+// crates/winwincode-server). The account list read is the one presentation-
+// side contract: the Server route that lists accounts has not landed yet, so
+// USERS_LIST_PATH and its parser follow the repository directory precedent
+// and only they change when that landing settles the wire. Pages and
+// view-models only ever see the typed unions below. The one-time temporary
+// password of a create or Owner reset is handed to the caller exactly once
+// and never cached here.
+// ---------------------------------------------------------------------------
+
+const USERS_CREATE_PATH = '/api/v1/users'
+const USERS_STATE_PATH = '/api/v1/users/state'
+const USERS_PASSWORD_PATH = '/api/v1/users/password'
+const USERS_LIST_PATH = '/api/v1/users'
+
+/** The two account roles the Server issues through account creation. */
+export type ControlPlaneUserRole = 'owner' | 'member'
+
+/** The two durable account states the Server projects. */
+export type ControlPlaneUserAccountState = 'active' | 'disabled'
+
+/** The username bound: trimmed, at most 96 bytes, no whitespace. */
+const MAX_USERNAME_BYTES = 96
+/** The self-service password bound mirrors the Server credential window. */
+const MAX_PASSWORD_BYTES = 256
+
+const usernameEncoder = new TextEncoder()
+
+const USER_ROLE_VALUES: readonly string[] = Object.freeze(['owner', 'member'])
+const USER_ACCOUNT_STATE_VALUES: readonly string[] = Object.freeze(['active', 'disabled'])
+
+/**
+ * One account row of the list read. `revision` is not a display column; it is
+ * the compare-and-swap input every state and password write requires.
+ */
+export interface ControlPlaneUserSummary {
+  readonly userId: string
+  readonly username: string
+  readonly role: ControlPlaneUserRole
+  readonly state: ControlPlaneUserAccountState
+  readonly createdAt: string
+  readonly revision: number
+}
+
+/** The full account projection the Server returns with every write. */
+export interface ControlPlaneUserAccount {
+  readonly userId: string
+  readonly username: string
+  readonly normalizedUsername: string
+  readonly role: ControlPlaneUserRole
+  readonly state: ControlPlaneUserAccountState
+  readonly createdAt: string
+  readonly updatedAt: string
+  readonly revision: number
+}
+
+/** One Owner account creation: the username plus its role. */
+export interface ControlPlaneUserCreateInput {
+  readonly username: string
+  readonly role: ControlPlaneUserRole
+}
+
+/** One account state write under the exact expected revision. */
+export interface ControlPlaneUserStateInput {
+  readonly userId: string
+  readonly expectedRevision: number
+  readonly state: ControlPlaneUserAccountState
+}
+
+/**
+ * One password write. Without the optional password fields this is the Owner
+ * reset form: the Server issues a fresh one-time temporary password. With
+ * both fields this is the self-service form: the account holder proves the
+ * current password and rotates it, and no secret is returned.
+ */
+export interface ControlPlaneUserPasswordResetInput {
+  readonly userId: string
+  readonly expectedRevision: number
+  readonly currentPassword?: string
+  readonly newPassword?: string
+}
+
+/** One account creation outcome; the temporary password is shown exactly once. */
+export interface ControlPlaneUserCreateOutcome {
+  readonly user: ControlPlaneUserAccount
+  readonly temporaryPassword: string
+}
+
+/** One password write outcome; only the Owner reset form carries a secret. */
+export interface ControlPlaneUserPasswordResetOutcome {
+  readonly user: ControlPlaneUserAccount
+  /** The one-time credential of an Owner reset; null after a self rotation. */
+  readonly temporaryPassword: string | null
+}
+
+/**
+ * The one presentation-facing user-management failure taxonomy. Wire codes
+ * are translated by the context classifiers below and never read anywhere
+ * else. The Server folds duplicate normalized usernames and the exhausted
+ * one-Owner initialization into the same 409 `WRONG_STATE` rejection, so the
+ * create form presents that code as a username conflict.
+ */
+export type ControlPlaneUserManagementFailure =
+  | 'invalid-request'
+  | 'username-conflict'
+  | 'wrong-state'
+  | 'revision-conflict'
+  | 'user-not-found'
+  | 'permission-denied'
+  | 'authentication-required'
+  | 'current-password-wrong'
+  | 'unavailable'
+
+const USER_MANAGEMENT_FAILURE_CODES: Readonly<Record<string, ControlPlaneUserManagementFailure>> =
+  Object.freeze({
+    INVALID_REQUEST: 'invalid-request',
+    WRONG_STATE: 'wrong-state',
+    REVISION_CONFLICT: 'revision-conflict',
+    RESOURCE_NOT_FOUND: 'user-not-found',
+    PERMISSION_DENIED: 'permission-denied',
+    AUTHENTICATION_REQUIRED: 'authentication-required',
+  })
+
+function userManagementFailureOfCode(
+  error: unknown,
+  codeOverrides: Readonly<Record<string, ControlPlaneUserManagementFailure>>,
+): ControlPlaneUserManagementFailure {
+  if (error instanceof ControlPlaneClientError) {
+    const overridden = codeOverrides[error.code]
+    if (overridden !== undefined) return overridden
+    const failure = USER_MANAGEMENT_FAILURE_CODES[error.code]
+    if (failure !== undefined) return failure
+  }
+  return 'unavailable'
+}
+
+/**
+ * Translate one creation rejection into the presentation taxonomy. Every wire
+ * code stays inside these functions; view-models and pages branch only on the
+ * returned union.
+ */
+export function controlPlaneUserCreateFailure(
+  error: unknown,
+): ControlPlaneUserManagementFailure {
+  return userManagementFailureOfCode(error, {
+    WRONG_STATE: 'username-conflict',
+  })
+}
+
+/** Translate one account state rejection into the presentation taxonomy. */
+export function controlPlaneUserStateFailure(
+  error: unknown,
+): ControlPlaneUserManagementFailure {
+  return userManagementFailureOfCode(error, {})
+}
+
+/**
+ * Translate one password-write rejection into the presentation taxonomy. A
+ * self-service rejection of the current proof shares the wire code of an
+ * expired browser session, so this context presents 401 as the wrong current
+ * password — the form still holds and the session case reaches the page
+ * through the access-failure channel.
+ */
+export function controlPlaneUserPasswordFailure(
+  error: unknown,
+): ControlPlaneUserManagementFailure {
+  return userManagementFailureOfCode(error, {
+    AUTHENTICATION_REQUIRED: 'current-password-wrong',
+  })
+}
+
+/**
+ * Validate creation input before a request exists, mirroring the Server
+ * username bound: the trimmed value stays non-empty, at most 96 bytes, and
+ * free of whitespace so the normalized form is accepted unchanged.
+ */
+function assertUserCreateInput(input: ControlPlaneUserCreateInput): void {
+  const username = typeof input?.username === 'string' ? input.username.trim() : ''
+  if (
+    username.length === 0
+    || usernameEncoder.encode(username).length > MAX_USERNAME_BYTES
+    || /\s/u.test(username)
+    || !USER_ROLE_VALUES.includes(input?.role as string)
+  ) {
+    throw new ControlPlaneClientError({
+      kind: 'protocol',
+      code: 'USERS_CREATE_INPUT_INVALID',
+      message: 'Enter a username without whitespace and choose a role.',
+      requestId: null,
+      retryable: false,
+    })
+  }
+}
+
+/** Validate one state write before a request exists. */
+function assertUserStateInput(input: ControlPlaneUserStateInput): void {
+  if (
+    typeof input?.userId !== 'string'
+    || input.userId.length === 0
+    || typeof input?.expectedRevision !== 'number'
+    || !Number.isInteger(input.expectedRevision)
+    || input.expectedRevision < 1
+    || !USER_ACCOUNT_STATE_VALUES.includes(input?.state as string)
+  ) {
+    throw new ControlPlaneClientError({
+      kind: 'protocol',
+      code: 'USERS_STATE_INPUT_INVALID',
+      message: 'Select a user and retry: the account revision moved.',
+      requestId: null,
+      retryable: false,
+    })
+  }
+}
+
+/**
+ * Validate one password write before a request exists. The two optional
+ * fields travel together or not at all: a self-service form without the
+ * current proof never reaches the wire.
+ */
+function assertUserPasswordResetInput(input: ControlPlaneUserPasswordResetInput): void {
+  const hasCurrent = typeof input?.currentPassword === 'string'
+  const hasNew = typeof input?.newPassword === 'string'
+  const newPassword = hasNew ? (input.newPassword as string) : ''
+  const selfForm = hasCurrent || hasNew
+  if (
+    typeof input?.userId !== 'string'
+    || input.userId.length === 0
+    || typeof input?.expectedRevision !== 'number'
+    || !Number.isInteger(input.expectedRevision)
+    || input.expectedRevision < 1
+    || (selfForm
+      && (!hasCurrent
+        || (input.currentPassword as string).length === 0
+        || newPassword.length === 0
+        || newPassword.length > MAX_PASSWORD_BYTES))
+  ) {
+    throw new ControlPlaneClientError({
+      kind: 'protocol',
+      code: 'USERS_PASSWORD_INPUT_INVALID',
+      message: 'Enter the required passwords before submitting.',
+      requestId: null,
+      retryable: false,
+    })
+  }
+}
+
+function userManagementBoundaryError(
+  status: number,
+  source: string,
+): ControlPlaneClientError {
+  let value: unknown
+  try {
+    value = JSON.parse(source)
+  } catch {
+    value = null
+  }
+  const error = isRecord(value) && isRecord(value.error) ? value.error : null
+  const code = error !== null && typeof error.code === 'string'
+    ? error.code
+    : 'USER_MANAGEMENT_FAILED'
+  const kind: ControlPlaneClientErrorKind = accessKind(code)
+    ?? (versionCode(code)
+      ? 'version'
+      : (status >= 500 ? 'server' : 'protocol'))
+  return new ControlPlaneClientError({
+    kind,
+    code,
+    message: error !== null && typeof error.message === 'string'
+      ? error.message
+      : 'The user management request failed.',
+    requestId: isRecord(value) && typeof value.requestId === 'string'
+      ? value.requestId as RequestId
+      : null,
+    retryable: error !== null && error.retryable === true,
+  })
+}
+
+function invalidUserAccountError(): ControlPlaneClientError {
+  return new ControlPlaneClientError({
+    kind: 'protocol',
+    code: 'INVALID_USER_ACCOUNT_RESPONSE',
+    message: 'The Control Plane server returned an invalid user account.',
+    requestId: null,
+    retryable: false,
+  })
+}
+
+function userAccountValue(value: unknown): ControlPlaneUserAccount {
+  if (!isRecord(value)) throw invalidUserAccountError()
+  const role = value.role
+  const state = value.state
+  const revision = value.revision
+  const createdAt = value.createdAt
+  const updatedAt = value.updatedAt
+  if (
+    typeof value.userId !== 'string'
+    || value.userId.length === 0
+    || typeof value.username !== 'string'
+    || value.username.length === 0
+    || typeof value.normalizedUsername !== 'string'
+    || value.normalizedUsername.length === 0
+    || typeof role !== 'string'
+    || !USER_ROLE_VALUES.includes(role)
+    || typeof state !== 'string'
+    || !USER_ACCOUNT_STATE_VALUES.includes(state)
+    || typeof createdAt !== 'string'
+    || !RFC3339_INSTANT.test(createdAt)
+    || Number.isNaN(Date.parse(createdAt))
+    || typeof updatedAt !== 'string'
+    || !RFC3339_INSTANT.test(updatedAt)
+    || Number.isNaN(Date.parse(updatedAt))
+    || typeof revision !== 'number'
+    || !Number.isInteger(revision)
+    || revision < 1
+  ) {
+    throw invalidUserAccountError()
+  }
+  return Object.freeze({
+    userId: value.userId,
+    username: value.username,
+    normalizedUsername: value.normalizedUsername,
+    role: role as ControlPlaneUserRole,
+    state: state as ControlPlaneUserAccountState,
+    createdAt,
+    updatedAt,
+    revision,
+  })
+}
+
+function userSummaryValue(value: unknown): ControlPlaneUserSummary {
+  if (!isRecord(value)) throw invalidUserAccountError()
+  const role = value.role
+  const state = value.state
+  const revision = value.revision
+  const createdAt = value.createdAt
+  if (
+    typeof value.userId !== 'string'
+    || value.userId.length === 0
+    || typeof value.username !== 'string'
+    || value.username.length === 0
+    || typeof role !== 'string'
+    || !USER_ROLE_VALUES.includes(role)
+    || typeof state !== 'string'
+    || !USER_ACCOUNT_STATE_VALUES.includes(state)
+    || typeof createdAt !== 'string'
+    || !RFC3339_INSTANT.test(createdAt)
+    || Number.isNaN(Date.parse(createdAt))
+    || typeof revision !== 'number'
+    || !Number.isInteger(revision)
+    || revision < 1
+  ) {
+    throw invalidUserAccountError()
+  }
+  return Object.freeze({
+    userId: value.userId,
+    username: value.username,
+    role: role as ControlPlaneUserRole,
+    state: state as ControlPlaneUserAccountState,
+    createdAt,
+    revision,
+  })
+}
+
+function userPayload(source: string): Readonly<Record<string, unknown>> {
+  let value: unknown
+  try {
+    value = JSON.parse(source)
+  } catch {
+    value = null
+  }
+  if (
+    isRecord(value)
+    && typeof value.schemaVersion === 'string'
+    && value.schemaVersion !== CONTROL_PLANE_SCHEMA_VERSION
+  ) {
+    throw new ControlPlaneClientError({
+      kind: 'version',
+      code: 'SCHEMA_VERSION_MISMATCH',
+      message: `The Control Plane server must use ${CONTROL_PLANE_SCHEMA_VERSION}.`,
+      requestId: null,
+      retryable: false,
+    })
+  }
+  if (!isRecord(value)) throw invalidUserAccountError()
+  return value
+}
+
+function userAccountResponse(source: string): ControlPlaneUserAccount {
+  return userAccountValue(userPayload(source).user)
+}
+
+function userCreateResponse(source: string): ControlPlaneUserCreateOutcome {
+  const value = userPayload(source)
+  const temporaryPassword = value.temporaryPassword
+  if (
+    typeof temporaryPassword !== 'string'
+    || temporaryPassword.length === 0
+  ) {
+    throw invalidUserAccountError()
+  }
+  return Object.freeze({
+    user: userAccountValue(value.user),
+    temporaryPassword,
+  })
+}
+
+function userPasswordResetResponse(
+  source: string,
+  selfForm: boolean,
+): ControlPlaneUserPasswordResetOutcome {
+  const value = userPayload(source)
+  const user = userAccountValue(value.user)
+  if (selfForm) {
+    // The self-service rotation never carries a secret; a payload that tried
+    // to hand one back is dropped here so the page has one secret channel.
+    return Object.freeze({ user, temporaryPassword: null })
+  }
+  const temporaryPassword = value.temporaryPassword
+  if (typeof temporaryPassword !== 'string' || temporaryPassword.length === 0) {
+    throw invalidUserAccountError()
+  }
+  return Object.freeze({ user, temporaryPassword })
+}
+
+function userListResponse(source: string): readonly ControlPlaneUserSummary[] {
+  const value = userPayload(source)
+  if (!Array.isArray(value.users)) throw invalidUserAccountError()
+  return Object.freeze(value.users.map(userSummaryValue))
+}
+
+/**
+ * The base facade extended with the Owner user-management surface. The
+ * decorator delegates every base method, so hosts can pass it anywhere a
+ * `ControlPlaneClient` is accepted and keep one session and one error identity.
+ */
+export interface ControlPlaneClientUsers extends ControlPlaneClient {
+  /** Read the account list that backs the user management rows. */
+  listUsers(options?: ControlPlaneRequestOptions): Promise<readonly ControlPlaneUserSummary[]>
+  /** Create one account; the returned temporary password is shown exactly once. */
+  createUser(
+    input: ControlPlaneUserCreateInput,
+    options?: ControlPlaneRequestOptions,
+  ): Promise<ControlPlaneUserCreateOutcome>
+  /** Activate or disable one account under the exact expected revision. */
+  setUserState(
+    input: ControlPlaneUserStateInput,
+    options?: ControlPlaneRequestOptions,
+  ): Promise<ControlPlaneUserAccount>
+  /**
+   * Write one password: an Owner reset of another account returns the
+   * one-time temporary password; the self-service form returns none.
+   */
+  resetUserPassword(
+    input: ControlPlaneUserPasswordResetInput,
+    options?: ControlPlaneRequestOptions,
+  ): Promise<ControlPlaneUserPasswordResetOutcome>
+}
+
+/**
+ * Extend the one Control Plane facade with the user-management writes over
+ * the real Server account routes. An injected facade that already implements
+ * these methods is reused verbatim so deterministic fixtures and host
+ * composition keep their single seam.
+ */
+export function createControlPlaneClientUsers(options: {
+  readonly client: ControlPlaneClient
+  /** Same deterministic transport seam the base facade was created with. */
+  readonly transport?: ControlPlaneClientTransport
+}): ControlPlaneClientUsers {
+  const location = parseControlPlaneServerUrl(options.client.serverUrl)
+  const transportFetch = options.transport?.fetch
+  const injected = options.client as Partial<ControlPlaneClientUsers>
+  const injectedListUsers = injected.listUsers
+  const injectedCreateUser = injected.createUser
+  const injectedSetUserState = injected.setUserState
+  const injectedResetUserPassword = injected.resetUserPassword
+
+  async function usersRequest(
+    path: string,
+    body: string | null,
+    signal: AbortSignal | undefined,
+  ): Promise<ControlPlaneHttpResponse> {
+    if (signalIsAborted(signal)) throw cancelledError(null)
+    if (transportFetch === undefined) {
+      throw new ControlPlaneClientError({
+        kind: 'protocol',
+        code: 'TRANSPORT_UNAVAILABLE',
+        message: 'The browser HTTP transport is unavailable.',
+        requestId: null,
+        retryable: false,
+      })
+    }
+    return transportFetch(`${location.serverUrl}${path}`, {
+      method: body === null ? 'GET' : 'POST',
+      headers: body === null ? {} : { 'Content-Type': 'application/json' },
+      ...(body === null ? {} : { body }),
+      redirect: 'error',
+      cache: 'no-store',
+      referrerPolicy: 'no-referrer',
+      credentials: 'include',
+      ...(signal === undefined ? {} : { signal }),
+    })
+  }
+
+  function usersNetworkError(): ControlPlaneClientError {
+    return new ControlPlaneClientError({
+      kind: 'network',
+      code: 'NETWORK_ERROR',
+      message: 'The Control Plane server could not be reached.',
+      requestId: null,
+      retryable: true,
+    })
+  }
+
+  async function listRequest(
+    requestOptions: ControlPlaneRequestOptions | undefined,
+  ): Promise<readonly ControlPlaneUserSummary[]> {
+    try {
+      const response = await usersRequest(
+        USERS_LIST_PATH,
+        null,
+        requestOptions?.signal,
+      )
+      const source = await response.text()
+      if (!response.ok) throw userManagementBoundaryError(response.status, source)
+      if (response.status !== 200) throw invalidUserAccountError()
+      return userListResponse(source)
+    } catch (error) {
+      if (signalIsAborted(requestOptions?.signal)) throw cancelledError(null)
+      if (error instanceof ControlPlaneClientError) throw error
+      throw usersNetworkError()
+    }
+  }
+
+  async function createRequest(
+    input: ControlPlaneUserCreateInput,
+    requestOptions: ControlPlaneRequestOptions | undefined,
+  ): Promise<ControlPlaneUserCreateOutcome> {
+    try {
+      const response = await usersRequest(
+        USERS_CREATE_PATH,
+        JSON.stringify({
+          schemaVersion: CONTROL_PLANE_SCHEMA_VERSION,
+          username: input.username.trim(),
+          role: input.role,
+        }),
+        requestOptions?.signal,
+      )
+      const source = await response.text()
+      if (!response.ok) throw userManagementBoundaryError(response.status, source)
+      if (response.status !== 201) throw invalidUserAccountError()
+      return userCreateResponse(source)
+    } catch (error) {
+      if (signalIsAborted(requestOptions?.signal)) throw cancelledError(null)
+      if (error instanceof ControlPlaneClientError) throw error
+      throw usersNetworkError()
+    }
+  }
+
+  async function stateRequest(
+    input: ControlPlaneUserStateInput,
+    requestOptions: ControlPlaneRequestOptions | undefined,
+  ): Promise<ControlPlaneUserAccount> {
+    try {
+      const response = await usersRequest(
+        USERS_STATE_PATH,
+        JSON.stringify({
+          schemaVersion: CONTROL_PLANE_SCHEMA_VERSION,
+          userId: input.userId,
+          expectedRevision: input.expectedRevision,
+          state: input.state,
+        }),
+        requestOptions?.signal,
+      )
+      const source = await response.text()
+      if (!response.ok) throw userManagementBoundaryError(response.status, source)
+      if (response.status !== 200) throw invalidUserAccountError()
+      return userAccountResponse(source)
+    } catch (error) {
+      if (signalIsAborted(requestOptions?.signal)) throw cancelledError(null)
+      if (error instanceof ControlPlaneClientError) throw error
+      throw usersNetworkError()
+    }
+  }
+
+  async function passwordRequest(
+    input: ControlPlaneUserPasswordResetInput,
+    requestOptions: ControlPlaneRequestOptions | undefined,
+  ): Promise<ControlPlaneUserPasswordResetOutcome> {
+    const selfForm = input.currentPassword !== undefined || input.newPassword !== undefined
+    try {
+      const response = await usersRequest(
+        USERS_PASSWORD_PATH,
+        JSON.stringify({
+          schemaVersion: CONTROL_PLANE_SCHEMA_VERSION,
+          userId: input.userId,
+          expectedRevision: input.expectedRevision,
+          ...(selfForm
+            ? {
+              currentPassword: input.currentPassword,
+              newPassword: input.newPassword,
+            }
+            : {}),
+        }),
+        requestOptions?.signal,
+      )
+      const source = await response.text()
+      if (!response.ok) throw userManagementBoundaryError(response.status, source)
+      if (response.status !== 200) throw invalidUserAccountError()
+      return userPasswordResetResponse(source, selfForm)
+    } catch (error) {
+      if (signalIsAborted(requestOptions?.signal)) throw cancelledError(null)
+      if (error instanceof ControlPlaneClientError) throw error
+      throw usersNetworkError()
+    }
+  }
+
+  const users: ControlPlaneClientUsers = {
+    serverUrl: options.client.serverUrl,
+    restore(requestOptions) {
+      return options.client.restore(requestOptions)
+    },
+    initializeOwner(initialization, requestOptions) {
+      return options.client.initializeOwner(initialization, requestOptions)
+    },
+    login(credentials, requestOptions) {
+      return options.client.login(credentials, requestOptions)
+    },
+    initializationStatus(requestOptions) {
+      return options.client.initializationStatus(requestOptions)
+    },
+    logout(requestOptions) {
+      return options.client.logout(requestOptions)
+    },
+    command(command, requestOptions) {
+      return options.client.command(command, requestOptions)
+    },
+    query(query, requestOptions) {
+      return options.client.query(query, requestOptions)
+    },
+    subscribe(subscriptionOptions) {
+      return options.client.subscribe(subscriptionOptions)
+    },
+    async listUsers(requestOptions) {
+      if (typeof injectedListUsers === 'function') {
+        return injectedListUsers.call(options.client, requestOptions)
+      }
+      return listRequest(requestOptions)
+    },
+    async createUser(rawInput, requestOptions) {
+      // The facade is the one place that owns the username shape, so an
+      // injected users implementation receives the same trimmed input the
+      // wire path would send.
+      const input: ControlPlaneUserCreateInput = {
+        username: typeof rawInput?.username === 'string' ? rawInput.username.trim() : '',
+        role: rawInput?.role,
+      }
+      assertUserCreateInput(input)
+      if (typeof injectedCreateUser === 'function') {
+        return injectedCreateUser.call(options.client, input, requestOptions)
+      }
+      return createRequest(input, requestOptions)
+    },
+    async setUserState(rawInput, requestOptions) {
+      const input: ControlPlaneUserStateInput = {
+        userId: typeof rawInput?.userId === 'string' ? rawInput.userId : '',
+        expectedRevision: rawInput?.expectedRevision as number,
+        state: rawInput?.state as ControlPlaneUserAccountState,
+      }
+      assertUserStateInput(input)
+      if (typeof injectedSetUserState === 'function') {
+        return injectedSetUserState.call(options.client, input, requestOptions)
+      }
+      return stateRequest(input, requestOptions)
+    },
+    async resetUserPassword(rawInput, requestOptions) {
+      const input: ControlPlaneUserPasswordResetInput = {
+        userId: typeof rawInput?.userId === 'string' ? rawInput.userId : '',
+        expectedRevision: rawInput?.expectedRevision as number,
+        ...(rawInput?.currentPassword === undefined ? {} : { currentPassword: rawInput.currentPassword }),
+        ...(rawInput?.newPassword === undefined ? {} : { newPassword: rawInput.newPassword }),
+      }
+      assertUserPasswordResetInput(input)
+      if (typeof injectedResetUserPassword === 'function') {
+        return injectedResetUserPassword.call(options.client, input, requestOptions)
+      }
+      return passwordRequest(input, requestOptions)
+    },
+    close() {
+      options.client.close()
+    },
+  }
+  return Object.freeze(users)
+}
+
+// ---------------------------------------------------------------------------
+// Device candidate local operations: the retained list, local branch
+// creation, target-branch apply, and discard (GIT-100.8, plan §15).
+//
+// FAKE-FIRST SHAPES: the field names, state strings, and the ten result codes
+// below mirror the landed device receipt domain — `LocalCandidateReceipt`,
+// `LocalApplyReceipt`, and the ten `ApplyResult` codes of
+// crates/winwincode-client-port/src/domain.rs as they are projected through
+// the generated client-control contracts. The HTTP routes and status codes in
+// this block are provisional until the GIT-100.3 branch engine and the
+// GIT-100.4 apply engine land; the engine route table is authoritative at
+// that point, and only the path constants and expected status codes below
+// should need to move. The receipt ledger projection of the Server decides
+// the `history` and `branchName` fields of a summary; pages and view-models
+// only ever see the typed unions below.
+// ---------------------------------------------------------------------------
+
+/** The retention lifecycle states a candidate projection can carry. */
+export type ControlPlaneCandidateState =
+  | 'retained'
+  | 'branch_created'
+  | 'applied'
+  | 'discarded'
+  | 'failed'
+
+/** The strategy the apply engine chose for one attempt. */
+export type ControlPlaneCandidateApplyStrategy =
+  | 'create_branch'
+  | 'fast_forward'
+  | 'cherry_pick'
+  | 'merge'
+
+/**
+ * The ten terminal apply results of the Server receipt ledger. `retained`,
+ * `branch_created`, and `discarded` close a lifecycle step; every other code
+ * is presented as a failed or retryable attempt.
+ */
+export type ControlPlaneCandidateApplyResult =
+  | 'retained'
+  | 'branch_created'
+  | 'applied'
+  | 'base_stale'
+  | 'working_tree_dirty'
+  | 'merge_conflict'
+  | 'candidate_missing'
+  | 'permission_denied'
+  | 'discarded'
+  | 'failed'
+
+/** One audited apply attempt, mirroring `LocalApplyReceipt` field for field. */
+export interface ControlPlaneCandidateApplyReceipt {
+  readonly localApplyReceiptId: string
+  readonly candidateRef: string
+  readonly repositoryBindingId: string
+  readonly targetBranch: string
+  readonly expectedHead: string
+  readonly strategy: ControlPlaneCandidateApplyStrategy
+  readonly result: ControlPlaneCandidateApplyResult
+  readonly resultingCommit: string | null
+  readonly conflictArtifactRef: string | null
+  readonly createdAt: string
+  readonly revision: number
+}
+
+/**
+ * One candidate card projection: the device receipt plus the two ledger facts
+ * the card renders — the working branch name once one exists, and the apply
+ * receipt history in ledger order.
+ */
+export interface ControlPlaneCandidateSummary {
+  readonly localCandidateReceiptId: string
+  readonly candidateRef: string
+  readonly repositoryBindingId: string
+  readonly candidateCommit: string
+  readonly localRefName: string
+  readonly state: ControlPlaneCandidateState
+  readonly createdAt: string
+  readonly revision: number
+  readonly branchName: string | null
+  readonly history: readonly ControlPlaneCandidateApplyReceipt[]
+}
+
+/** One candidate list read. */
+export interface ControlPlaneCandidateReadInput {
+  /** 9-12 digits; grouping separators are stripped by the facade. */
+  readonly clientId: string
+}
+
+/** One local branch creation from a stable candidate ref. */
+export interface ControlPlaneCandidateBranchInput {
+  readonly clientId: string
+  readonly candidateRef: string
+  readonly repositoryBindingId: string
+}
+
+/**
+ * One dangerous apply onto a target branch. The Server re-checks the branch
+ * HEAD against `expectedHead` even though the browser already showed it.
+ */
+export interface ControlPlaneCandidateApplyInput {
+  readonly clientId: string
+  readonly candidateRef: string
+  readonly repositoryBindingId: string
+  readonly targetBranch: string
+  readonly expectedHead: string
+}
+
+/** One discard of a retained candidate. */
+export interface ControlPlaneCandidateDiscardInput {
+  readonly clientId: string
+  readonly candidateRef: string
+  readonly repositoryBindingId: string
+}
+
+/** One branch creation outcome: the created branch and the refreshed card. */
+export interface ControlPlaneCandidateBranchOutcome {
+  readonly candidate: ControlPlaneCandidateSummary
+  readonly branchName: string
+}
+
+/**
+ * The one presentation-facing candidate action failure taxonomy. Wire codes
+ * are translated by `controlPlaneCandidateActionFailure` and never read
+ * anywhere else. `unavailable` is the catch-all for outages, expired browser
+ * sessions, protocol drift, and unknown codes, mirroring the occupancy
+ * taxonomy above.
+ */
+export type ControlPlaneCandidateActionFailure =
+  | 'invalid-request'
+  | 'candidate-not-found'
+  | 'client-not-found'
+  | 'client-offline'
+  | 'permission-denied'
+  | 'wrong-state'
+  | 'rate-limited'
+  | 'unavailable'
+
+const CANDIDATE_ACTION_FAILURE_CODES: Readonly<Record<string, ControlPlaneCandidateActionFailure>> =
+  Object.freeze({
+    INVALID_REQUEST: 'invalid-request',
+    RESOURCE_NOT_FOUND: 'candidate-not-found',
+    CLIENT_NOT_FOUND: 'client-not-found',
+    CLIENT_OFFLINE: 'client-offline',
+    ACCESS_DENIED: 'permission-denied',
+    PERMISSION_DENIED: 'permission-denied',
+    WRONG_STATE: 'wrong-state',
+    RATE_LIMITED: 'rate-limited',
+  })
+
+/**
+ * Translate one candidate action rejection into the presentation taxonomy.
+ * Every wire code stays inside this function; view-models and pages branch
+ * only on the returned union.
+ */
+export function controlPlaneCandidateActionFailure(
+  error: unknown,
+): ControlPlaneCandidateActionFailure {
+  if (error instanceof ControlPlaneClientError) {
+    const failure = CANDIDATE_ACTION_FAILURE_CODES[error.code]
+    if (failure !== undefined) return failure
+    if (error.kind === 'authorization') return 'permission-denied'
+  }
+  return 'unavailable'
+}
+
+const CANDIDATE_STATE_VALUES: readonly string[] = Object.freeze([
+  'retained',
+  'branch_created',
+  'applied',
+  'discarded',
+  'failed',
+])
+const CANDIDATE_APPLY_STRATEGY_VALUES: readonly string[] = Object.freeze([
+  'create_branch',
+  'fast_forward',
+  'cherry_pick',
+  'merge',
+])
+const CANDIDATE_APPLY_RESULT_VALUES: readonly string[] = Object.freeze([
+  'retained',
+  'branch_created',
+  'applied',
+  'base_stale',
+  'working_tree_dirty',
+  'merge_conflict',
+  'candidate_missing',
+  'permission_denied',
+  'discarded',
+  'failed',
+])
+
+const CLIENT_CANDIDATES_BRANCH_PATH = '/api/v1/clients/candidates/branch'
+const CLIENT_CANDIDATES_APPLY_PATH = '/api/v1/clients/candidates/apply'
+const CLIENT_CANDIDATES_DISCARD_PATH = '/api/v1/clients/candidates/discard'
+
+function invalidCandidateResponseError(): ControlPlaneClientError {
+  return new ControlPlaneClientError({
+    kind: 'protocol',
+    code: 'INVALID_CLIENT_CANDIDATES_RESPONSE',
+    message: 'The Control Plane server returned an invalid candidate response.',
+    requestId: null,
+    retryable: false,
+  })
+}
+
+function candidateNetworkError(): ControlPlaneClientError {
+  return new ControlPlaneClientError({
+    kind: 'network',
+    code: 'NETWORK_ERROR',
+    message: 'The Control Plane server could not be reached.',
+    requestId: null,
+    retryable: true,
+  })
+}
+
+function candidateBoundaryError(status: number, source: string): ControlPlaneClientError {
+  let value: unknown
+  try {
+    value = JSON.parse(source)
+  } catch {
+    value = null
+  }
+  const error = isRecord(value) && isRecord(value.error) ? value.error : null
+  const code = error !== null && typeof error.code === 'string'
+    ? error.code
+    : 'CLIENT_CANDIDATES_FAILED'
+  const kind: ControlPlaneClientErrorKind = accessKind(code)
+    ?? (code === 'RATE_LIMITED'
+      ? 'server'
+      : (versionCode(code)
+        ? 'version'
+        : (status >= 500 ? 'server' : 'protocol')))
+  return new ControlPlaneClientError({
+    kind,
+    code,
+    message: error !== null && typeof error.message === 'string'
+      ? error.message
+      : 'The Client candidate request failed.',
+    requestId: isRecord(value) && typeof value.requestId === 'string'
+      ? value.requestId as RequestId
+      : null,
+    retryable: error !== null && error.retryable === true,
+  })
+}
+
+function parsedCandidatePayload(source: string): Readonly<Record<string, unknown>> {
+  let value: unknown
+  try {
+    value = JSON.parse(source)
+  } catch {
+    value = null
+  }
+  if (
+    isRecord(value)
+    && typeof value.schemaVersion === 'string'
+    && value.schemaVersion !== CONTROL_PLANE_SCHEMA_VERSION
+  ) {
+    throw new ControlPlaneClientError({
+      kind: 'version',
+      code: 'SCHEMA_VERSION_MISMATCH',
+      message: `The Control Plane server must use ${CONTROL_PLANE_SCHEMA_VERSION}.`,
+      requestId: null,
+      retryable: false,
+    })
+  }
+  if (!isRecord(value)) throw invalidCandidateResponseError()
+  return value
+}
+
+/** The identity text fields of the candidate payloads share one bound. */
+function candidateIdentityText(value: unknown): string {
+  if (typeof value !== 'string' || value.length === 0 || value.length > 200) {
+    throw invalidCandidateResponseError()
+  }
+  return value
+}
+
+/** A commit SHA is hex; the exact width stays the engine's decision. */
+function candidateShaValue(value: unknown): string {
+  if (typeof value !== 'string' || !/^[0-9a-f]{4,64}$/iu.test(value)) {
+    throw invalidCandidateResponseError()
+  }
+  return value
+}
+
+/** One receipt instant; the canonical RFC 3339 Z form is the only shape. */
+function candidateInstantValue(value: unknown): string {
+  if (
+    typeof value !== 'string'
+    || !RFC3339_INSTANT.test(value)
+    || Number.isNaN(Date.parse(value))
+  ) {
+    throw invalidCandidateResponseError()
+  }
+  return value
+}
+
+function candidateNullableShaValue(value: unknown): string | null {
+  if (value === null) return null
+  return candidateShaValue(value)
+}
+
+function candidateNullableText(value: unknown): string | null {
+  if (value === null) return null
+  const text = candidateIdentityText(value)
+  return text
+}
+
+function candidateRevisionValue(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) {
+    throw invalidCandidateResponseError()
+  }
+  return value
+}
+
+function candidateApplyReceiptValue(value: unknown): ControlPlaneCandidateApplyReceipt {
+  if (!isRecord(value)) throw invalidCandidateResponseError()
+  const strategy = value.strategy
+  const result = value.result
+  if (
+    typeof value.localApplyReceiptId !== 'string'
+    || value.localApplyReceiptId.length === 0
+    || typeof value.candidateRef !== 'string'
+    || value.candidateRef.length === 0
+    || typeof value.repositoryBindingId !== 'string'
+    || value.repositoryBindingId.length === 0
+    || typeof value.targetBranch !== 'string'
+    || value.targetBranch.length === 0
+    || typeof value.expectedHead !== 'string'
+    || value.expectedHead.length === 0
+    || typeof strategy !== 'string'
+    || !CANDIDATE_APPLY_STRATEGY_VALUES.includes(strategy)
+    || typeof result !== 'string'
+    || !CANDIDATE_APPLY_RESULT_VALUES.includes(result)
+  ) {
+    throw invalidCandidateResponseError()
+  }
+  return Object.freeze({
+    localApplyReceiptId: value.localApplyReceiptId,
+    candidateRef: value.candidateRef,
+    repositoryBindingId: value.repositoryBindingId,
+    targetBranch: value.targetBranch,
+    expectedHead: value.expectedHead,
+    strategy: strategy as ControlPlaneCandidateApplyStrategy,
+    result: result as ControlPlaneCandidateApplyResult,
+    resultingCommit: candidateNullableShaValue(value.resultingCommit),
+    conflictArtifactRef: candidateNullableText(value.conflictArtifactRef),
+    createdAt: candidateInstantValue(value.createdAt),
+    revision: candidateRevisionValue(value.revision),
+  })
+}
+
+function candidateSummaryValue(value: unknown): ControlPlaneCandidateSummary {
+  if (!isRecord(value)) throw invalidCandidateResponseError()
+  const state = value.state
+  if (
+    typeof value.localCandidateReceiptId !== 'string'
+    || value.localCandidateReceiptId.length === 0
+    || typeof value.candidateRef !== 'string'
+    || value.candidateRef.length === 0
+    || typeof value.repositoryBindingId !== 'string'
+    || value.repositoryBindingId.length === 0
+    || typeof value.localRefName !== 'string'
+    || value.localRefName.length === 0
+    || typeof state !== 'string'
+    || !CANDIDATE_STATE_VALUES.includes(state)
+    || !Array.isArray(value.history)
+  ) {
+    throw invalidCandidateResponseError()
+  }
+  return Object.freeze({
+    localCandidateReceiptId: value.localCandidateReceiptId,
+    candidateRef: value.candidateRef,
+    repositoryBindingId: value.repositoryBindingId,
+    candidateCommit: candidateShaValue(value.candidateCommit),
+    localRefName: value.localRefName,
+    state: state as ControlPlaneCandidateState,
+    createdAt: candidateInstantValue(value.createdAt),
+    revision: candidateRevisionValue(value.revision),
+    branchName: candidateNullableText(value.branchName),
+    history: Object.freeze(value.history.map(candidateApplyReceiptValue)),
+  })
+}
+
+function candidateListResponse(source: string): readonly ControlPlaneCandidateSummary[] {
+  const value = parsedCandidatePayload(source)
+  if (!Array.isArray(value.candidates)) throw invalidCandidateResponseError()
+  return Object.freeze(value.candidates.map(candidateSummaryValue))
+}
+
+function candidateBranchOutcomeResponse(source: string): ControlPlaneCandidateBranchOutcome {
+  const value = parsedCandidatePayload(source)
+  return Object.freeze({
+    candidate: candidateSummaryValue(value.candidate),
+    branchName: candidateIdentityText(value.branchName),
+  })
+}
+
+function candidateSummaryResponse(source: string): ControlPlaneCandidateSummary {
+  return candidateSummaryValue(parsedCandidatePayload(source).candidate)
+}
+
+/**
+ * The shared input bound of every candidate action. The facade owns the
+ * identity shapes, so grouping separators never reach the wire and an
+ * injected implementation receives the same normalized input the wire path
+ * would send.
+ */
+function candidateInputFields(input: {
+  readonly clientId: string
+  readonly candidateRef?: string
+  readonly repositoryBindingId?: string
+}): { readonly clientId: string; readonly candidateRef: string; readonly repositoryBindingId: string } {
+  const clientId = (typeof input?.clientId === 'string' ? input.clientId : '')
+    .replace(/\D+/gu, '')
+  assertOccupancyClientId(clientId)
+  const candidateRef = (typeof input?.candidateRef === 'string' ? input.candidateRef : '').trim()
+  if (candidateRef.length === 0 || candidateRef.length > 200 || /\s/u.test(candidateRef)) {
+    throw new ControlPlaneClientError({
+      kind: 'protocol',
+      code: 'CLIENT_CANDIDATE_REF_INVALID',
+      message: 'Select a candidate from the device list.',
+      requestId: null,
+      retryable: false,
+    })
+  }
+  const repositoryBindingId =
+    (typeof input?.repositoryBindingId === 'string' ? input.repositoryBindingId : '').trim()
+  if (repositoryBindingId.length === 0 || repositoryBindingId.length > 200) {
+    throw new ControlPlaneClientError({
+      kind: 'protocol',
+      code: 'CLIENT_CANDIDATE_BINDING_INVALID',
+      message: 'The candidate is missing its repository binding.',
+      requestId: null,
+      retryable: false,
+    })
+  }
+  return Object.freeze({ clientId, candidateRef, repositoryBindingId })
+}
+
+function candidateApplyFields(input: ControlPlaneCandidateApplyInput): {
+  readonly clientId: string
+  readonly candidateRef: string
+  readonly repositoryBindingId: string
+  readonly targetBranch: string
+  readonly expectedHead: string
+} {
+  const identity = candidateInputFields(input)
+  const targetBranch = (typeof input?.targetBranch === 'string' ? input.targetBranch : '').trim()
+  if (
+    targetBranch.length === 0
+    || targetBranch.length > 200
+    || /\s/u.test(targetBranch)
+    || targetBranch.startsWith('-')
+    || targetBranch.includes('..')
+    || targetBranch.endsWith('/')
+    || targetBranch.endsWith('.lock')
+  ) {
+    throw new ControlPlaneClientError({
+      kind: 'protocol',
+      code: 'CLIENT_CANDIDATE_TARGET_BRANCH_INVALID',
+      message: 'Enter the target branch of the apply.',
+      requestId: null,
+      retryable: false,
+    })
+  }
+  const expectedHead = (typeof input?.expectedHead === 'string' ? input.expectedHead : '').trim()
+  if (!/^[0-9a-f]{4,64}$/iu.test(expectedHead)) {
+    throw new ControlPlaneClientError({
+      kind: 'protocol',
+      code: 'CLIENT_CANDIDATE_EXPECTED_HEAD_INVALID',
+      message: 'Enter the expected HEAD commit of the target branch.',
+      requestId: null,
+      retryable: false,
+    })
+  }
+  return Object.freeze({ ...identity, targetBranch, expectedHead })
+}
+
+/**
+ * The base facade extended with the candidate local operations of one Client
+ * device. The decorator delegates every base method, so hosts can pass it
+ * anywhere a `ControlPlaneClient` is accepted and keep one session and one
+ * error identity.
+ */
+export interface ControlPlaneClientCandidates extends ControlPlaneClient {
+  /** Read the candidate cards projected for one Client device. */
+  listDeviceCandidates(
+    input: ControlPlaneCandidateReadInput,
+    options?: ControlPlaneRequestOptions,
+  ): Promise<readonly ControlPlaneCandidateSummary[]>
+  /**
+   * Create the local branch of one candidate ref without touching the user's
+   * worktree. Repeated requests return the original branch.
+   */
+  createCandidateBranch(
+    input: ControlPlaneCandidateBranchInput,
+    options?: ControlPlaneRequestOptions,
+  ): Promise<ControlPlaneCandidateBranchOutcome>
+  /** Apply one candidate onto a target branch under an expected HEAD. */
+  applyCandidate(
+    input: ControlPlaneCandidateApplyInput,
+    options?: ControlPlaneRequestOptions,
+  ): Promise<ControlPlaneCandidateApplyReceipt>
+  /** Discard one retained candidate; the fact lands in the next list read. */
+  discardCandidate(
+    input: ControlPlaneCandidateDiscardInput,
+    options?: ControlPlaneRequestOptions,
+  ): Promise<ControlPlaneCandidateSummary>
+}
+
+/**
+ * Extend the one Control Plane facade with the device candidate local
+ * operations. An injected facade that already implements the candidate
+ * methods is reused verbatim so deterministic fixtures and host composition
+ * keep their single seam.
+ */
+export function createControlPlaneClientCandidates(options: {
+  readonly client: ControlPlaneClient
+  /** Same deterministic transport seam the base facade was created with. */
+  readonly transport?: ControlPlaneClientTransport
+}): ControlPlaneClientCandidates {
+  const location = parseControlPlaneServerUrl(options.client.serverUrl)
+  const transportFetch = options.transport?.fetch
+  const injected = options.client as Partial<ControlPlaneClientCandidates>
+  const injectedListCandidates = injected.listDeviceCandidates
+  const injectedCreateCandidateBranch = injected.createCandidateBranch
+  const injectedApplyCandidate = injected.applyCandidate
+  const injectedDiscardCandidate = injected.discardCandidate
+
+  async function candidateRequest(
+    path: string,
+    method: 'GET' | 'POST',
+    body: string | null,
+    signal: AbortSignal | undefined,
+  ): Promise<ControlPlaneHttpResponse> {
+    if (signalIsAborted(signal)) throw cancelledError(null)
+    if (transportFetch === undefined) {
+      throw new ControlPlaneClientError({
+        kind: 'protocol',
+        code: 'TRANSPORT_UNAVAILABLE',
+        message: 'The browser HTTP transport is unavailable.',
+        requestId: null,
+        retryable: false,
+      })
+    }
+    return transportFetch(`${location.serverUrl}${path}`, {
+      method,
+      headers: body === null ? {} : { 'Content-Type': 'application/json' },
+      ...(body === null ? {} : { body }),
+      redirect: 'error',
+      cache: 'no-store',
+      referrerPolicy: 'no-referrer',
+      credentials: 'include',
+      ...(signal === undefined ? {} : { signal }),
+    })
+  }
+
+  async function listCandidatesRequest(
+    input: ControlPlaneCandidateReadInput,
+    requestOptions: ControlPlaneRequestOptions | undefined,
+  ): Promise<readonly ControlPlaneCandidateSummary[]> {
+    try {
+      const response = await candidateRequest(
+        `/api/v1/clients/${encodeURIComponent(input.clientId)}/candidates`,
+        'GET',
+        null,
+        requestOptions?.signal,
+      )
+      const source = await response.text()
+      if (!response.ok) throw candidateBoundaryError(response.status, source)
+      if (response.status !== 200) throw invalidCandidateResponseError()
+      return candidateListResponse(source)
+    } catch (error) {
+      if (signalIsAborted(requestOptions?.signal)) throw cancelledError(null)
+      if (error instanceof ControlPlaneClientError) throw error
+      throw candidateNetworkError()
+    }
+  }
+
+  async function branchRequest(
+    input: ControlPlaneCandidateBranchInput,
+    requestOptions: ControlPlaneRequestOptions | undefined,
+  ): Promise<ControlPlaneCandidateBranchOutcome> {
+    try {
+      const response = await candidateRequest(
+        CLIENT_CANDIDATES_BRANCH_PATH,
+        'POST',
+        JSON.stringify({
+          schemaVersion: CONTROL_PLANE_SCHEMA_VERSION,
+          clientId: input.clientId,
+          candidateRef: input.candidateRef,
+          repositoryBindingId: input.repositoryBindingId,
+        }),
+        requestOptions?.signal,
+      )
+      const source = await response.text()
+      if (!response.ok) throw candidateBoundaryError(response.status, source)
+      if (response.status !== 201) throw invalidCandidateResponseError()
+      return candidateBranchOutcomeResponse(source)
+    } catch (error) {
+      if (signalIsAborted(requestOptions?.signal)) throw cancelledError(null)
+      if (error instanceof ControlPlaneClientError) throw error
+      throw candidateNetworkError()
+    }
+  }
+
+  async function applyRequest(
+    input: ControlPlaneCandidateApplyInput,
+    requestOptions: ControlPlaneRequestOptions | undefined,
+  ): Promise<ControlPlaneCandidateApplyReceipt> {
+    try {
+      const response = await candidateRequest(
+        CLIENT_CANDIDATES_APPLY_PATH,
+        'POST',
+        JSON.stringify({
+          schemaVersion: CONTROL_PLANE_SCHEMA_VERSION,
+          clientId: input.clientId,
+          candidateRef: input.candidateRef,
+          repositoryBindingId: input.repositoryBindingId,
+          targetBranch: input.targetBranch,
+          expectedHead: input.expectedHead,
+        }),
+        requestOptions?.signal,
+      )
+      const source = await response.text()
+      if (!response.ok) throw candidateBoundaryError(response.status, source)
+      if (response.status !== 201) throw invalidCandidateResponseError()
+      return candidateApplyReceiptValue(parsedCandidatePayload(source).receipt)
+    } catch (error) {
+      if (signalIsAborted(requestOptions?.signal)) throw cancelledError(null)
+      if (error instanceof ControlPlaneClientError) throw error
+      throw candidateNetworkError()
+    }
+  }
+
+  async function discardRequest(
+    input: ControlPlaneCandidateDiscardInput,
+    requestOptions: ControlPlaneRequestOptions | undefined,
+  ): Promise<ControlPlaneCandidateSummary> {
+    try {
+      const response = await candidateRequest(
+        CLIENT_CANDIDATES_DISCARD_PATH,
+        'POST',
+        JSON.stringify({
+          schemaVersion: CONTROL_PLANE_SCHEMA_VERSION,
+          clientId: input.clientId,
+          candidateRef: input.candidateRef,
+          repositoryBindingId: input.repositoryBindingId,
+        }),
+        requestOptions?.signal,
+      )
+      const source = await response.text()
+      if (!response.ok) throw candidateBoundaryError(response.status, source)
+      if (response.status !== 200) throw invalidCandidateResponseError()
+      return candidateSummaryResponse(source)
+    } catch (error) {
+      if (signalIsAborted(requestOptions?.signal)) throw cancelledError(null)
+      if (error instanceof ControlPlaneClientError) throw error
+      throw candidateNetworkError()
+    }
+  }
+
+  const candidates: ControlPlaneClientCandidates = {
+    serverUrl: options.client.serverUrl,
+    restore(requestOptions) {
+      return options.client.restore(requestOptions)
+    },
+    initializeOwner(initialization, requestOptions) {
+      return options.client.initializeOwner(initialization, requestOptions)
+    },
+    login(credentials, requestOptions) {
+      return options.client.login(credentials, requestOptions)
+    },
+    initializationStatus(requestOptions) {
+      return options.client.initializationStatus(requestOptions)
+    },
+    logout(requestOptions) {
+      return options.client.logout(requestOptions)
+    },
+    command(command, requestOptions) {
+      return options.client.command(command, requestOptions)
+    },
+    query(query, requestOptions) {
+      return options.client.query(query, requestOptions)
+    },
+    subscribe(subscriptionOptions) {
+      return options.client.subscribe(subscriptionOptions)
+    },
+    async listDeviceCandidates(rawInput, requestOptions) {
+      const input: ControlPlaneCandidateReadInput = {
+        clientId: (typeof rawInput?.clientId === 'string' ? rawInput.clientId : '')
+          .replace(/\D+/gu, ''),
+      }
+      assertOccupancyClientId(input.clientId)
+      if (typeof injectedListCandidates === 'function') {
+        return injectedListCandidates.call(options.client, input, requestOptions)
+      }
+      return listCandidatesRequest(input, requestOptions)
+    },
+    async createCandidateBranch(rawInput, requestOptions) {
+      const input = candidateInputFields(rawInput)
+      if (typeof injectedCreateCandidateBranch === 'function') {
+        return injectedCreateCandidateBranch.call(options.client, input, requestOptions)
+      }
+      return branchRequest(input, requestOptions)
+    },
+    async applyCandidate(rawInput, requestOptions) {
+      const input = candidateApplyFields(rawInput)
+      if (typeof injectedApplyCandidate === 'function') {
+        return injectedApplyCandidate.call(options.client, input, requestOptions)
+      }
+      return applyRequest(input, requestOptions)
+    },
+    async discardCandidate(rawInput, requestOptions) {
+      const input = candidateInputFields(rawInput)
+      if (typeof injectedDiscardCandidate === 'function') {
+        return injectedDiscardCandidate.call(options.client, input, requestOptions)
+      }
+      return discardRequest(input, requestOptions)
+    },
+    close() {
+      options.client.close()
+    },
+  }
+  return Object.freeze(candidates)
+}

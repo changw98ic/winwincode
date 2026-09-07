@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import type { ControlPlaneLoginFailure } from './control-plane-client.js'
+import type { ControlPlaneLoginFailure } from './community-control-plane-client.js'
 import type {
   LoginSubmissionSource,
   LoginViewModel,
@@ -79,6 +79,18 @@ export function mountLoginPage(options: LoginPageOptions): LoginPage {
   const initializationHeading = element(document, 'p', 'wwc-login-initialization-heading')
   const initializationDetail = element(document, 'p', 'wwc-login-initialization-detail')
   const initializationForm = element(document, 'form', 'wwc-login-initialization-form')
+  const initializationUsernameLabel = element(document, 'label', 'wwc-login-label')
+  const initializationUsername = element(
+    document,
+    'input',
+    'wwc-login-control wwc-login-initialization-username',
+  )
+  const initializationPasswordLabel = element(document, 'label', 'wwc-login-label')
+  const initializationPassword = element(
+    document,
+    'input',
+    'wwc-login-control wwc-login-initialization-password',
+  )
   const proofLabel = element(document, 'label', 'wwc-login-label')
   const proof = element(document, 'input', 'wwc-login-control wwc-login-initialization-proof')
   const initializationSubmit = element(document, 'button', 'wwc-login-initialization-submit')
@@ -121,6 +133,20 @@ export function mountLoginPage(options: LoginPageOptions): LoginPage {
 
   initializationHeading.textContent = 'First-time initialization'
   initializationDetail.textContent = 'This server has no accounts yet. Enter the bootstrap proof from the server owner environment to create the first Owner.'
+  initializationUsername.id = 'wwc-login-initialization-username'
+  initializationUsername.type = 'text'
+  initializationUsername.autocomplete = 'username'
+  initializationUsername.required = true
+  initializationUsername.maxLength = 128
+  initializationUsernameLabel.htmlFor = initializationUsername.id
+  initializationUsernameLabel.textContent = 'Owner username'
+  initializationPassword.id = 'wwc-login-initialization-password'
+  initializationPassword.type = 'password'
+  initializationPassword.autocomplete = 'new-password'
+  initializationPassword.required = true
+  initializationPassword.maxLength = 4096
+  initializationPasswordLabel.htmlFor = initializationPassword.id
+  initializationPasswordLabel.textContent = 'Owner password'
   proof.id = 'wwc-login-initialization-proof'
   proof.type = 'password'
   proof.autocomplete = 'off'
@@ -131,7 +157,15 @@ export function mountLoginPage(options: LoginPageOptions): LoginPage {
   proofLabel.textContent = 'Bootstrap proof'
   initializationSubmit.type = 'submit'
   initializationSubmit.textContent = 'Initialize owner account'
-  initializationForm.append(proofLabel, proof, initializationSubmit)
+  initializationForm.append(
+    initializationUsernameLabel,
+    initializationUsername,
+    initializationPasswordLabel,
+    initializationPassword,
+    proofLabel,
+    proof,
+    initializationSubmit,
+  )
   initialization.append(initializationHeading, initializationDetail, initializationForm)
   initialization.hidden = true
 
@@ -168,6 +202,8 @@ export function mountLoginPage(options: LoginPageOptions): LoginPage {
     password.disabled = busy || finished
     submit.disabled = busy || finished
     proof.disabled = busy || finished
+    initializationUsername.disabled = busy || finished
+    initializationPassword.disabled = busy || finished
     initializationSubmit.disabled = busy || finished
     form.setAttribute('aria-busy', busy ? 'true' : 'false')
     initializationForm.setAttribute('aria-busy', busy ? 'true' : 'false')
@@ -189,10 +225,21 @@ export function mountLoginPage(options: LoginPageOptions): LoginPage {
   }
   const onInitialization = (event: SubmitEvent) => {
     event.preventDefault()
-    if (proof.value.length === 0) return
+    if (
+      proof.value.length === 0
+      || initializationUsername.value.length === 0
+      || initializationPassword.value.length === 0
+    ) return
     const submittedProof = proof.value
+    const submittedUsername = initializationUsername.value
+    const submittedPassword = initializationPassword.value
     proof.value = ''
-    void options.model.initialize(submittedProof)
+    initializationPassword.value = ''
+    void options.model.initialize({
+      bootstrapProof: submittedProof,
+      username: submittedUsername,
+      password: submittedPassword,
+    })
   }
   const onEdit = () => { clearErrorDraft() }
   form.addEventListener('submit', onSignIn)
@@ -200,6 +247,8 @@ export function mountLoginPage(options: LoginPageOptions): LoginPage {
   username.addEventListener('input', onEdit)
   password.addEventListener('input', onEdit)
   proof.addEventListener('input', onEdit)
+  initializationUsername.addEventListener('input', onEdit)
+  initializationPassword.addEventListener('input', onEdit)
 
   const unsubscribe = options.model.subscribe(render)
 
@@ -215,11 +264,15 @@ export function mountLoginPage(options: LoginPageOptions): LoginPage {
       username.value = ''
       password.value = ''
       proof.value = ''
+      initializationUsername.value = ''
+      initializationPassword.value = ''
       form.removeEventListener('submit', onSignIn)
       initializationForm.removeEventListener('submit', onInitialization)
       username.removeEventListener('input', onEdit)
       password.removeEventListener('input', onEdit)
       proof.removeEventListener('input', onEdit)
+      initializationUsername.removeEventListener('input', onEdit)
+      initializationPassword.removeEventListener('input', onEdit)
       options.root.replaceChildren()
     },
   }

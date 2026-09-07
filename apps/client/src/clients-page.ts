@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { mountKeyedCollection } from './components/keyed-collection.js'
-import type { ControlPlaneDeviceSummary } from './control-plane-client.js'
+import type { ControlPlaneDeviceSummary } from './community-control-plane-client.js'
 import {
   mountClientOccupancyControls,
   type ClientOccupancyControls,

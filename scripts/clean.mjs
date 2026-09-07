@@ -7,7 +7,10 @@ const root = resolve(import.meta.dirname, '..')
 
 for (const path of [
   'apps/client/dist',
+  'packages/browser-core/dist',
+  'packages/browser-ui/dist',
   'packages/contracts/dist',
+  'packages/control-plane-client/dist',
   'packages/strongflow/dist',
   '.cache',
   'target',

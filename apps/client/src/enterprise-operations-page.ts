@@ -7,7 +7,7 @@ import {
   mountPanel,
   mountStatusBadge,
   type StatusTone,
-} from './components/index.js'
+} from '@winwincode/browser-ui'
 import type {
   CommandRequest,
   CredentialReferenceId,

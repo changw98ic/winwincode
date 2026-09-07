@@ -39,7 +39,7 @@ const pageModule = await import(`${pathToFileURL(resolve(
 
 const { ControlPlaneClientError } = await import(`${pathToFileURL(resolve(
   cacheRoot,
-  'control-plane-client.js',
+  'community-control-plane-client.js',
 )).href}`)
 
 const { createUsageHealthViewModel } = viewModelModule

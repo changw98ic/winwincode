@@ -7,7 +7,7 @@ import type {
   StageRunId,
 } from './generated/contracts.js'
 import { matchesCanonicalSchema } from './generated/control-plane-client.js'
-import { scopeHash, type ScopeRouteSelection } from './core/scope-context.js'
+import { scopeHash, type ScopeRouteSelection } from '@winwincode/browser-core/scope-context'
 import type { CandidateDiffViewMode } from './strongflow-diff-model.js'
 import {
   formatCandidateComparisonRequest,

@@ -34,7 +34,7 @@ const applicationModule = await import(`${pathToFileURL(resolve(
 )).href}`)
 const facadeModule = await import(`${pathToFileURL(resolve(
   cacheRoot,
-  'control-plane-client.js',
+  'community-control-plane-client.js',
 )).href}`)
 const clientSurfaceModule = await import(`${pathToFileURL(resolve(
   cacheRoot,

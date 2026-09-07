@@ -1,0 +1,28 @@
+{
+  "name": "@winwincode/browser-ui",
+  "version": "0.1.0-alpha.1",
+  "description": "Product-neutral browser UI primitives for WinWinCode products",
+  "license": "Apache-2.0",
+  "type": "module",
+  "sideEffects": false,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json --pretty false",
+    "typecheck": "tsc -p tsconfig.json --pretty false --noEmit",
+    "pack:release": "node scripts/build-release.mjs"
+  }
+}

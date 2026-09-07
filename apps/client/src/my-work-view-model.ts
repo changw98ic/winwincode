@@ -3,7 +3,7 @@
 import type {
   ControlPlaneClient,
   ControlPlaneDeviceSummary,
-} from './control-plane-client.js'
+} from './community-control-plane-client.js'
 import type { ClientsLoadStatus, ClientsViewModel } from './clients-view-model.js'
 import {
   createHomeDashboardViewModel,

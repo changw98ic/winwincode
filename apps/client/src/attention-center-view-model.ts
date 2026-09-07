@@ -4,8 +4,8 @@ import {
   ControlPlaneClientError,
   type ControlPlaneClient,
   type ControlPlaneSubscription,
-} from './control-plane-client.js'
-import { createQueryCacheLifecycle } from './core/query-cache.js'
+} from './community-control-plane-client.js'
+import { createQueryCacheLifecycle } from '@winwincode/browser-core/query-cache'
 import type {
   Actor,
   ApprovalListResultResponse,

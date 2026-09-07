@@ -63,7 +63,7 @@ pnpm workspace 精确包含 `apps/client`、`packages/contracts` 和 `packages/s
 
 ### 4. Local 只负责组装
 
-`winwincode-local` 的生产依赖精确为 `winwincode-control-plane`、`winwincode-worker` 和 `winwincode-observability`。它读取配置、创建数据根、连接 typed frame、启动和停止模块；产品状态、Provider、Credential、工作区和 Kernel 责任留在各自所有者。
+`winwincode-local` 的生产依赖精确为 `winwincode-control-plane`、`winwincode-worker` 和 `winwincode-observability-core`。它只使用中立的追踪类型；Community SQLite 持久化由独立的 `winwincode-observability-sqlite` 包提供。它读取配置、创建数据根、连接 typed frame、启动和停止模块；产品状态、Provider、Credential、工作区和 Kernel 责任留在各自所有者。
 
 ### 5. Server 与 Helper 的边界固定
 
@@ -81,11 +81,11 @@ Provider Gateway 和 Credential 解析属于 `winwincode-control-plane` 内部�
 | --- | --- | --- |
 | `presentation` | 页面、生成客户端与 StrongFlow 投影合同 | `typescript-web`、`typescript-generated-client`、`typescript-strongflow` |
 | `contract` | canonical schema 与共享 TypeScript 合同 | `canonical-schema`、`typescript-contracts` |
-| `shared` | 不拥有业务状态的窄类型与基础设施 | `winwincode-domain`、`winwincode-api`、`winwincode-execution-port`、`winwincode-storage`、`winwincode-observability` |
+| `shared` | 不拥有业务状态的窄类型与基础设施 | `winwincode-domain`、`winwincode-api`、`winwincode-execution-port`、`winwincode-storage`、`winwincode-observability-core` |
 | `control-plane` | 产品状态、策略、仓库事实和外部治理 | `winwincode-control-plane`、`winwincode-delivery`、`winwincode-session`、`winwincode-publication`、`winwincode-audit`、`winwincode-repository-context` |
 | `execution-worker` | 工作区、执行协调、Kernel 和 Helper | `winwincode-worker`、`winwincode-codex`、`winwincode-kernel`、`winwincode-kernel-helper` |
 | `composition` | HTTP 边界、本机组装和运维入口 | `winwincode-server`、`winwincode-local`、`winwincode-cli`、`winwincode-drill` |
-| `control-plane` 的 enterprise/support 节点 | 备份、证据、连接器和存储 adapter | `winwincode-backup`、`winwincode-evidence-export`、`winwincode-integration`、`winwincode-object-store`、`winwincode-postgres`、`winwincode-test-assets` |
+| `control-plane` 的 product/support 节点 | Community SQLite、备份、证据、连接器和存储 adapter | `winwincode-observability-sqlite`、`winwincode-backup`、`winwincode-evidence-export`、`winwincode-integration`、`winwincode-object-store`、`winwincode-postgres`、`winwincode-test-assets` |
 
 `allowedInternalDependencies` 是精确集合。每个依赖都必须同时在目标图中出现；未知节点、未声明边和路径重复均使门禁失败。
 
@@ -96,7 +96,7 @@ Provider Gateway 和 Credential 解析属于 `winwincode-control-plane` 内部�
 1. 验证图状态、节点 ID、路径、Rust/npm package name、职责和允许边；
 2. 验证 Client、Server、Worker、Local、Kernel、Helper 的边界与接口消费者；
 3. 验证源码清单的 source root、surface、phase、target module 和行为合同；
-4. 读取 `cargo metadata --locked`，双向核对全部 25 个 workspace crate 与目标图节点，并核对每个生产依赖；同时核对 pnpm 的 3 个 workspace package、锁 importer 与内部 package 依赖；
+4. 读取 `cargo metadata --locked`，双向核对全部 workspace crate 与目标图节点，并核对每个生产依赖；同时核对 pnpm 的 3 个 workspace package、锁 importer 与内部 package 依赖；
 5. 扫描 `apps/client`，确保网络调用集中在 generated Client；
 6. 检查文档中的相对链接、生成合同和格式。
 

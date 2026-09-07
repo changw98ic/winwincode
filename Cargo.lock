@@ -9268,8 +9268,6 @@ dependencies = [
 [[package]]
 name = "rusqlite"
 version = "0.39.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a0d2b0146dd9661bf67bb107c0bb2a55064d556eeb3fc314151b957f313bcd4e"
 dependencies = [
  "bitflags 2.13.1",
  "fallible-iterator",
@@ -12802,7 +12800,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "winwincode-control-plane",
- "winwincode-observability",
+ "winwincode-observability-core",
  "winwincode-worker",
 ]
 
@@ -12823,13 +12821,22 @@ dependencies = [
 ]
 
 [[package]]
-name = "winwincode-observability"
+name = "winwincode-observability-core"
 version = "0.1.0-alpha.1"
 dependencies = [
- "rusqlite",
  "serde",
  "serde_json",
  "sha2 0.10.9",
+]
+
+[[package]]
+name = "winwincode-observability-sqlite"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "rusqlite",
+ "serde_json",
+ "sha2 0.10.9",
+ "winwincode-observability-core",
 ]
 
 [[package]]

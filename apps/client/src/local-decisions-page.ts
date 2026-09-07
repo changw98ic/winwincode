@@ -1,15 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import type { ControlPlaneClientError } from './control-plane-client.js'
+import type { ControlPlaneClientError } from './community-control-plane-client.js'
 import {
   mountButton,
-  mountEmptyState,
   mountErrorState,
   mountPageHeader,
   mountPanel,
   mountStatusBadge,
   type StatusTone,
-} from './components/index.js'
+} from '@winwincode/browser-ui'
+import { mountEmptyState } from './components/index.js'
 import type {
   ChatInputInteractionProjection,
   ChatInteractionOptionProjection,

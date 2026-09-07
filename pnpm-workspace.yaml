@@ -1,5 +1,8 @@
 packages:
   - apps/client
+  - packages/browser-ui
+  - packages/control-plane-client
+  - packages/browser-core
   - packages/contracts
   - packages/strongflow
 

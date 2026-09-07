@@ -63,13 +63,33 @@ if (scope === 'all' || scope === 'rust') {
 if (scope === 'all' || scope === 'typescript') {
   const clientManifest = JSON.parse(readFileSync(resolve(root, 'apps/client/package.json'), 'utf8'))
   if (clientManifest.name !== '@winwincode/client') throw new Error('client package identity is invalid')
-  for (const [directory, packageName] of [
-    ['packages/contracts', '@winwincode/contracts'],
-    ['packages/strongflow', '@winwincode/strongflow'],
+  for (const [directory, packageName, artifacts] of [
+    [
+      'packages/browser-core',
+      '@winwincode/browser-core',
+      [
+        'dist/query-cache.js',
+        'dist/query-cache.d.ts',
+        'dist/scope-context.js',
+        'dist/scope-context.d.ts',
+      ],
+    ],
+    [
+      'packages/browser-ui',
+      '@winwincode/browser-ui',
+      ['dist/index.js', 'dist/index.d.ts'],
+    ],
+    ['packages/contracts', '@winwincode/contracts', ['dist/index.js', 'dist/index.d.ts']],
+    [
+      'packages/control-plane-client',
+      '@winwincode/control-plane-client',
+      ['dist/index.js', 'dist/index.d.ts'],
+    ],
+    ['packages/strongflow', '@winwincode/strongflow', ['dist/index.js', 'dist/index.d.ts']],
   ]) {
     const manifest = JSON.parse(readFileSync(resolve(root, directory, 'package.json'), 'utf8'))
     if (manifest.name !== packageName) throw new Error(`${directory} package identity is invalid`)
-    for (const path of ['dist/index.js', 'dist/index.d.ts']) {
+    for (const path of artifacts) {
       if (!existsSync(resolve(root, directory, path))) {
         throw new Error(`missing ${packageName} artifact ${path}`)
       }

@@ -34,7 +34,8 @@
     "crates/winwincode-domain/src",
     "crates/winwincode-execution-port/src",
     "crates/winwincode-local/src",
-    "crates/winwincode-observability/src",
+    "crates/winwincode-observability-core/src",
+    "crates/winwincode-observability-sqlite/src",
     "crates/winwincode-publication/src",
     "crates/winwincode-repository-context/src",
     "crates/winwincode-server/src",
@@ -590,22 +591,27 @@
     {
       "id": "observability",
       "sourcePaths": [
-        "crates/winwincode-observability/src/lib.rs"
+        "crates/winwincode-observability-core/src/lib.rs",
+        "crates/winwincode-observability-sqlite/src/lib.rs"
       ],
       "entrySymbols": [
-        "TraceContext"
+        "TraceContext",
+        "ObservabilityStore",
+        "SqliteObservability"
       ],
       "targetOwners": [
         "control-plane",
         "execution-worker"
       ],
       "targetModules": [
-        "crates/winwincode-observability"
+        "crates/winwincode-observability-core",
+        "crates/winwincode-observability-sqlite"
       ],
       "phase": "2",
       "disposition": "retain",
       "observableContracts": [
-        "secret-safe runtime trace facts"
+        "secret-safe runtime trace facts and storage-neutral aggregation rules",
+        "Community SQLite replay, WAL, rollback, retention, and file permissions"
       ],
       "behaviorBaselineIds": [
         "success",

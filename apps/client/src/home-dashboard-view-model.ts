@@ -7,8 +7,8 @@ import {
   type AttentionCenterViewModel,
   type AttentionCenterViewModelState,
 } from './attention-center-view-model.js'
-import type { ControlPlaneClient } from './control-plane-client.js'
-import type { ScopeRouteSelection } from './core/scope-context.js'
+import type { ControlPlaneClient } from './community-control-plane-client.js'
+import type { ScopeRouteSelection } from '@winwincode/browser-core/scope-context'
 import {
   DEFAULT_HOME_VISIT_LIMIT,
   browserHomeVisitStorage,

@@ -4,13 +4,13 @@ import { attentionCenterItemHash } from './attention-center-page.js'
 import type { AttentionCenterOrigin } from './attention-center-view-model.js'
 import {
   mountButton,
-  mountEmptyState,
   mountPageHeader,
   mountStatusBadge,
   type StatusTone,
-} from './components/index.js'
+} from '@winwincode/browser-ui'
+import { mountEmptyState } from './components/index.js'
 import { mountKeyedCollection, type KeyedCollectionView } from './components/keyed-collection.js'
-import { scopeHash, surfaceHash, type ScopeRouteSelection } from './core/scope-context.js'
+import { scopeHash, surfaceHash, type ScopeRouteSelection } from '@winwincode/browser-core/scope-context'
 import type { Instant, ProductSessionId } from './generated/contracts.js'
 import type {
   HomeDashboardSource,

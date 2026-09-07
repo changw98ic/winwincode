@@ -28,7 +28,7 @@ assert.equal(
 
 const scopeContext = await import(`${pathToFileURL(resolve(
   root,
-  '.cache/scope-selector-tests/core/scope-context.js',
+  'packages/browser-core/dist/scope-context.js',
 )).href}`)
 const {
   resolveScopeContext,
