@@ -443,14 +443,37 @@ fn stage_managing_client_grant(data_directory: &Path, node: &str, user_id: &str)
 
 /// Creates one active repository access grant for `user_id`.
 fn stage_repository_grant(data_directory: &Path, binding_id: &str, user_id: &str) {
+    stage_repository_grant_with_permissions(
+        data_directory,
+        binding_id,
+        user_id,
+        RepositoryGrantPermissions::Use,
+    );
+}
+
+fn stage_repository_grant_with_permissions(
+    data_directory: &Path,
+    binding_id: &str,
+    user_id: &str,
+    permissions: RepositoryGrantPermissions,
+) {
     let mut storage = SqliteStorage::open(data_directory).expect("storage");
     let mut grants = RepositoryAccessGrantService::new(&mut storage);
     let issuance =
         RepositoryAccessGrantIssuance::try_new(fresh_grant_id("rag"), binding_id, user_id, user_id)
             .expect("repository grant issuance");
     grants
-        .create_grant(&issuance, RepositoryGrantPermissions::Use, &instant(T0))
+        .create_grant(&issuance, permissions, &instant(T0))
         .expect("repository grant");
+}
+
+fn stage_managing_repository_grant(data_directory: &Path, binding_id: &str, user_id: &str) {
+    stage_repository_grant_with_permissions(
+        data_directory,
+        binding_id,
+        user_id,
+        RepositoryGrantPermissions::UseManage,
+    );
 }
 
 /// Applies one rescan outcome through the repository service (the server-side
@@ -641,7 +664,7 @@ async fn repository_directory_follows_the_dual_authorization_and_facade_shape() 
     assert_eq!(card["dirtyState"], "clean");
     assert_eq!(card["availability"], "available");
     assert_eq!(card["permissions"], "use");
-    assert_eq!(card["canGrantAccess"], true);
+    assert_eq!(card["canGrantAccess"], false);
 
     // The Member's directory is a different set: beta, with its own facts.
     let response = http_request(
@@ -682,6 +705,114 @@ async fn repository_directory_follows_the_dual_authorization_and_facade_shape() 
         0,
         "the spectator holds a repository grant but no Client grant"
     );
+
+    running.shutdown().await.expect("shutdown");
+    let _ = std::fs::remove_dir_all(&data_directory);
+    let _ = std::fs::remove_dir_all(&auth_directory);
+}
+
+#[tokio::test]
+async fn repository_grant_route_requires_binding_manage_and_accepts_canonical_body() {
+    let data_directory = test_directory("repo-grant-route");
+    let auth_directory = test_directory("repo-grant-route-sessions");
+    let running = start_server(&data_directory, &auth_directory).await;
+    let address = running.local_address();
+    let (owner_cookie, owner_id) = initialize_and_login_owner(address).await;
+    let (_, target_id) = create_and_login_member(address, &owner_cookie, "grant-target").await;
+    let (limited_cookie, limited_id) =
+        create_and_login_member(address, &owner_cookie, "limited-grantor").await;
+
+    stage_device(&data_directory);
+    upsert_binding(
+        &data_directory,
+        &alpha_binding_id(),
+        "Alpha Repo",
+        "main",
+        &"a".repeat(40),
+        "fingerprint-alpha",
+    );
+    stage_managing_client_grant(&data_directory, NODE, &owner_id);
+    stage_managing_repository_grant(&data_directory, &alpha_binding_id(), &owner_id);
+    stage_managing_client_grant(&data_directory, NODE, &limited_id);
+    stage_repository_grant(&data_directory, &alpha_binding_id(), &limited_id);
+
+    let body = serde_json::json!({
+        "schemaVersion": SCHEMA_VERSION,
+        "repositoryBindingId": alpha_binding_id(),
+        "userId": target_id,
+        "permissions": "use",
+    })
+    .to_string();
+    let response = http_request(
+        address,
+        &cookie_post("/api/v1/repositories/grants", &body, &owner_cookie),
+    )
+    .await;
+    assert_eq!(status_of(&response), "201", "authorized grant: {response}");
+    let grant = response_body(&response);
+    assert_eq!(grant["schemaVersion"], SCHEMA_VERSION);
+    assert_eq!(grant["repositoryBindingId"], alpha_binding_id());
+    assert_eq!(grant["userId"], target_id);
+    assert_eq!(grant["permissions"], "use");
+    assert_eq!(grant["revision"], 1);
+
+    for (body, expected_status) in [
+        (
+            serde_json::json!({
+                "schemaVersion": "winwincode/v0",
+                "repositoryBindingId": alpha_binding_id(),
+                "userId": target_id,
+                "permissions": "use",
+            }),
+            "426",
+        ),
+        (
+            serde_json::json!({
+                "schemaVersion": SCHEMA_VERSION,
+                "repositoryBindingId": alpha_binding_id(),
+                "userId": target_id,
+                "permissions": "use",
+                "unexpected": true,
+            }),
+            "400",
+        ),
+    ] {
+        let response = http_request(
+            address,
+            &cookie_post(
+                "/api/v1/repositories/grants",
+                &body.to_string(),
+                &owner_cookie,
+            ),
+        )
+        .await;
+        assert_eq!(
+            status_of(&response),
+            expected_status,
+            "non-canonical grant: {response}"
+        );
+        assert_eq!(wire_code(&response), "INVALID_REQUEST");
+    }
+
+    // Client manage alone does not grant administration of a binding.
+    let body = serde_json::json!({
+        "schemaVersion": SCHEMA_VERSION,
+        "repositoryBindingId": alpha_binding_id(),
+        "userId": target_id,
+        "permissions": "use+manage",
+    })
+    .to_string();
+    let response = http_request(
+        address,
+        &cookie_post("/api/v1/repositories/grants", &body, &limited_cookie),
+    )
+    .await;
+    assert_eq!(
+        status_of(&response),
+        "403",
+        "use-only binding grant: {response}"
+    );
+    assert_eq!(wire_code(&response), "PERMISSION_DENIED");
 
     running.shutdown().await.expect("shutdown");
     let _ = std::fs::remove_dir_all(&data_directory);

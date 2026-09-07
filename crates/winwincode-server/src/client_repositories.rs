@@ -210,7 +210,11 @@ impl ClientRepositoriesApplication {
                         .into_iter()
                         .find(|grant| grant.user_id == user_id)
                         .map_or(RepositoryGrantPermissions::Use, |grant| grant.permissions);
-                    Ok(repository_summary(binding, permission, can_grant_access))
+                    Ok(repository_summary(
+                        binding,
+                        permission,
+                        can_grant_access && permission == RepositoryGrantPermissions::UseManage,
+                    ))
                 })
                 .collect::<Result<Vec<_>, ClientRepositoriesError>>()?
         };
@@ -222,7 +226,7 @@ impl ClientRepositoriesApplication {
 
     /// Creates one repository grant for a user already authorized to manage
     /// the Client. The request body is the sole write contract for this
-    /// surface: `{repositoryBindingId,userId,permissions}`.
+    /// surface: `{schemaVersion,repositoryBindingId,userId,permissions}`.
     ///
     /// # Errors
     ///
@@ -236,6 +240,17 @@ impl ClientRepositoriesApplication {
         let object = body
             .as_object()
             .ok_or_else(ClientRepositoriesError::invalid_request)?;
+        if object.len() != 4
+            || object.get("schemaVersion").and_then(Value::as_str) != Some(SUPPORTED_SCHEMA_VERSION)
+            || object.keys().any(|key| {
+                !matches!(
+                    key.as_str(),
+                    "schemaVersion" | "repositoryBindingId" | "userId" | "permissions"
+                )
+            })
+        {
+            return Err(ClientRepositoriesError::invalid_request());
+        }
         let binding_id = object
             .get("repositoryBindingId")
             .and_then(Value::as_str)
@@ -249,9 +264,6 @@ impl ClientRepositoriesApplication {
             Some("use+manage") => RepositoryGrantPermissions::UseManage,
             _ => return Err(ClientRepositoriesError::invalid_request()),
         };
-        if object.len() != 4 {
-            return Err(ClientRepositoriesError::invalid_request());
-        }
         let mut storage = self.open_storage()?;
         let binding = {
             let mut service = RepositoryBindingService::new(&mut storage);
@@ -266,6 +278,19 @@ impl ClientRepositoriesApplication {
                 .active_grant(&binding.client_node_id, acting_user_id)
                 .map_err(|_| ClientRepositoriesError::unavailable())?;
             if !client_grant.is_some_and(|grant| grant.permissions.can_manage()) {
+                return Err(ClientRepositoriesError::permission_denied());
+            }
+        }
+        {
+            let mut grants = RepositoryAccessGrantService::new(&mut storage);
+            let repository_grant = grants
+                .active_grants_for_binding(&binding.repository_binding_id)
+                .map_err(|_| ClientRepositoriesError::unavailable())?
+                .into_iter()
+                .find(|grant| grant.user_id == acting_user_id);
+            if !repository_grant
+                .is_some_and(|grant| grant.permissions == RepositoryGrantPermissions::UseManage)
+            {
                 return Err(ClientRepositoriesError::permission_denied());
             }
         }
