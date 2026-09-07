@@ -104,6 +104,9 @@ export function mountRepositoriesPage(options: RepositoriesPageOptions): Reposit
       grantUser.type = 'text'
       grantUser.placeholder = 'User ID'
       grantUser.autocomplete = 'off'
+      grantUser.setAttribute('aria-label', 'User ID')
+      grantPermissions.setAttribute('aria-label', 'Repository permission')
+      grantStatus.setAttribute('aria-live', 'polite')
       for (const [value, label] of [['use', 'Use'], ['use+manage', 'Use + manage']] as const) {
         const option = element(document, 'option', '')
         option.setAttribute('value', value)

@@ -555,6 +555,9 @@ test('repositories page renders every card field and never renders a path', asyn
   assert.equal(findOne(cards[0], 'wwc-repositories-card-dirty').dataset.tone, 'success')
   assert.equal(findOne(cards[0], 'wwc-repositories-card-head').textContent, 'HEAD abc1234')
   assert.equal(findOne(cards[0], 'wwc-repositories-card-availability').hidden, true)
+  assert.equal(findOne(cards[0], 'wwc-repositories-card-grant-user').getAttribute('aria-label'), 'User ID')
+  assert.equal(findOne(cards[0], 'wwc-repositories-card-grant-permissions').getAttribute('aria-label'), 'Repository permission')
+  assert.equal(findOne(cards[0], 'wwc-repositories-card-grant-status').getAttribute('aria-live'), 'polite')
 
   assert.equal(findOne(cards[1], 'wwc-repositories-card-name').textContent, 'n0vel')
   assert.equal(findOne(cards[1], 'wwc-repositories-card-branch').textContent, 'develop')
