@@ -1,0 +1,26 @@
+# WinWinCode data export contract
+
+This database-neutral crate owns the canonical `winwincode-export/v1` document. It validates,
+sorts, hashes, encodes, and decodes the complete one-time export while exposing no database
+driver, connection, filesystem, credential, log, Codex, or Device Client type.
+
+The JSON Schema is `schema/winwincode-export/v1/winwincode-export.schema.json`. It describes
+field shapes only; the cross-record rules of this crate (references, uniqueness, canonical order,
+digest, canonical bytes) live in `schema/winwincode-export/v1/validate.js`, the one non-Rust
+validation path. Community's local SQLite adapter creates this document; other products consume
+these bytes rather than defining a second source format.
+
+String limits count Unicode code points and reject leading or trailing ECMA-262 whitespace,
+including U+FEFF. The complete compact UTF-8 document is limited to 16 MiB. Non-Rust consumers
+enter through `validateWinWinCodeExportBytes` in `schema/winwincode-export/v1/validate.js`, which
+applies that byte limit, the structural schema rules, and every semantic rule of this crate.
+
+`schema/winwincode-export/v1/conformance-vectors.json` publishes the shared positive and negative
+vectors. `tests/conformance_vectors.rs` and
+`tests/data-export-semantic-conformance.test.mjs` execute the same file, so this crate and the
+non-Rust gate must return the same verdict and category for every vector.
+
+`schema/winwincode-export/v1/canonical-json.md` defines the only byte encoding. It fixes UTF-8,
+object-member and array order, and string escapes independently of `serde_json` or another JSON
+library. The Rust writer and `schema/winwincode-export/v1/canonical-json.js` implement those rules
+separately and must reproduce the published document, string conformance fixture, and digest bytes.

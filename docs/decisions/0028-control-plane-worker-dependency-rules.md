@@ -80,7 +80,7 @@ Provider Gateway 和 Credential 解析属于 `winwincode-control-plane` 内部�
 | 区域 | 责任 | 节点 |
 | --- | --- | --- |
 | `presentation` | 页面、生成客户端与 StrongFlow 投影合同 | `typescript-web`、`typescript-generated-client`、`typescript-strongflow` |
-| `contract` | canonical schema 与共享 TypeScript 合同 | `canonical-schema`、`typescript-contracts` |
+| `contract` | canonical schema 与共享 TypeScript/Rust 数据合同 | `canonical-schema`、`typescript-contracts`、`winwincode-data-export` |
 | `shared` | 不拥有业务状态的窄类型与基础设施 | `winwincode-domain`、`winwincode-api`、`winwincode-execution-port`、`winwincode-storage`、`winwincode-observability` |
 | `control-plane` | 产品状态、策略、仓库事实和外部治理 | `winwincode-control-plane`、`winwincode-delivery`、`winwincode-session`、`winwincode-publication`、`winwincode-audit`、`winwincode-repository-context` |
 | `execution-worker` | 工作区、执行协调、Kernel 和 Helper | `winwincode-worker`、`winwincode-codex`、`winwincode-kernel`、`winwincode-kernel-helper` |

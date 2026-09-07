@@ -104,6 +104,18 @@
       ]
     },
     {
+      "id": "winwincode-data-export",
+      "kind": "rust-crate",
+      "path": "crates/winwincode-data-export",
+      "packageName": "winwincode-data-export",
+      "phase": "1",
+      "zone": "contract",
+      "responsibilities": [
+        "own-the-database-neutral-one-time-export-contract"
+      ],
+      "allowedInternalDependencies": []
+    },
+    {
       "id": "winwincode-execution-port",
       "kind": "rust-crate",
       "path": "crates/winwincode-execution-port",
@@ -566,6 +578,7 @@
       "phase": "1",
       "surfaceIds": [
         "canonical-schema",
+        "data-export-contract",
         "client-generated-contracts",
         "api-types",
         "domain-types",

@@ -13,6 +13,7 @@
   },
   "sourceRoots": [
     "schema/winwincode/v1",
+    "schema/winwincode-export/v1",
     "apps/client/src",
     "packages/contracts/src",
     "packages/strongflow/src",
@@ -31,6 +32,7 @@
     "crates/winwincode-control-plane/src",
     "crates/winwincode-codex/src",
     "crates/winwincode-delivery/src",
+    "crates/winwincode-data-export/src",
     "crates/winwincode-domain/src",
     "crates/winwincode-execution-port/src",
     "crates/winwincode-local/src",
@@ -292,6 +294,37 @@
       ],
       "behaviorBaselineIds": [
         "api-contract"
+      ]
+    },
+    {
+      "id": "data-export-contract",
+      "sourcePaths": [
+        "schema/winwincode-export/v1/canonical-json.js",
+        "schema/winwincode-export/v1/canonical-json.md",
+        "schema/winwincode-export/v1/conformance-vectors.json",
+        "schema/winwincode-export/v1/parse-bounded.js",
+        "schema/winwincode-export/v1/validate.js",
+        "schema/winwincode-export/v1/winwincode-export.schema.json",
+        "crates/winwincode-data-export/src/lib.rs"
+      ],
+      "entrySymbols": [
+        "WinWinCodeExport",
+        "validateWinWinCodeExportBytes"
+      ],
+      "targetOwners": [
+        "canonical-schema"
+      ],
+      "targetModules": [
+        "crates/winwincode-data-export"
+      ],
+      "phase": "1",
+      "disposition": "retain",
+      "observableContracts": [
+        "canonical sorted export bytes digest domain counts and database-neutral source identities"
+      ],
+      "behaviorBaselineIds": [
+        "api-contract",
+        "exact-replay"
       ]
     },
     {

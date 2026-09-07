@@ -11,6 +11,7 @@ const inventoryPath = join(
 )
 const TARGET_SOURCE_ROOTS = Object.freeze([
   'schema/winwincode/v1',
+  'schema/winwincode-export/v1',
   'apps/client/src',
   'packages/contracts/src',
   'packages/strongflow/src',
@@ -29,6 +30,7 @@ const TARGET_SOURCE_ROOTS = Object.freeze([
   'crates/winwincode-control-plane/src',
   'crates/winwincode-codex/src',
   'crates/winwincode-delivery/src',
+  'crates/winwincode-data-export/src',
   'crates/winwincode-domain/src',
   'crates/winwincode-execution-port/src',
   'crates/winwincode-local/src',
