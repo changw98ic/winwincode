@@ -4,8 +4,8 @@
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use winwincode_api::generated::{ModelRoute, RepositoryScope};
-use winwincode_domain::{ExecutionJobId, ProductSessionId, RequestId, Sha256Digest};
+use winwincode_api::generated::ModelRoute;
+use winwincode_domain::{ExecutionJobId, ProductSessionId, RepositoryScope, RequestId, Sha256Digest};
 use winwincode_execution_port::generated::{
     ExecutionJob, ExecutionLimits, ExecutionScope, ExecutionWorkspace, ExecutionWorkspaceWriteMode,
     ProductSessionExecutionScope, ProductSessionExecutionScopeKind,

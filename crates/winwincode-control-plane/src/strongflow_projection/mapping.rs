@@ -14,7 +14,7 @@ use winwincode_delivery::{
     },
     projection::{self as delivery_projection, runtime as runtime_projection},
 };
-use winwincode_domain::{
+use winwincode_domain::{RepositoryScope,
     Count, EvidenceId, GitHubRepositorySlug, Instant, Revision, SchemaVersion,
     SessionBindingSourceIdentity, SessionBindingSourceIdentityKind, SessionIdentity, Sha256Digest,
 };
@@ -265,7 +265,7 @@ fn diagram_execution(
     }))
 }
 
-fn ownership(scope: &api::RepositoryScope) -> api::DeliveryOwnershipProjection {
+fn ownership(scope: &RepositoryScope) -> api::DeliveryOwnershipProjection {
     api::DeliveryOwnershipProjection {
         organization_id: scope.organization_id.clone(),
         workspace_id: scope.workspace_id.clone(),

@@ -15,10 +15,10 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use winwincode_api::generated::{
-    ModelRoute, ProjectScope, ProjectScopeKind, RepositoryScope, RepositoryScopeKind,
+    ModelRoute, ProjectScope, ProjectScopeKind,
 };
 use winwincode_domain::{
-    CredentialReferenceId, ModelExchangeId, OrganizationId, ProjectId, RepositoryId, RequestId,
+    CredentialReferenceId, ModelExchangeId, OrganizationId, ProjectId, RepositoryId, RepositoryScope, RepositoryScopeKind, RequestId,
     WorkspaceId,
 };
 
