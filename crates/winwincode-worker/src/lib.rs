@@ -10,8 +10,8 @@
 
 pub mod action_enforcement;
 pub mod candidate_ref;
-pub mod managed_session;
 pub mod change_batch_store;
+pub mod managed_session;
 mod probe_process;
 pub mod probe_scheduler;
 pub mod remote_transport;

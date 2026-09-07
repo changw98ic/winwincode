@@ -22,8 +22,8 @@ use winwincode_audit::{
     AuditState, AuditSubject,
 };
 use winwincode_domain::{
-    GitHubRepositorySlug, OpaqueCursor, PublicationId, RepositoryScope, Revision, SchemaVersion, Sha256Digest,
-    UserId,
+    GitHubRepositorySlug, OpaqueCursor, PublicationId, RepositoryScope, Revision, SchemaVersion,
+    Sha256Digest, UserId,
 };
 use winwincode_publication::{
     Publication, PublicationCancelCommand as DomainCancelCommand, PublicationCommandContext,

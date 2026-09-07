@@ -4504,7 +4504,7 @@ fn validate_delegated_patch(patch: &str) -> Result<(), ProductionCodexError> {
     if parsed.hunks.is_empty() || parsed.hunks.len() > 100 {
         return Err(invalid_delegated_output());
     }
-    let mut files = std::collections::HashSet::new();
+    let mut files = HashSet::new();
     for hunk in &parsed.hunks {
         match hunk {
             Hunk::AddFile { path, .. } | Hunk::DeleteFile { path } => {
@@ -4541,10 +4541,10 @@ fn validate_delegated_proposal(
             task.acceptance_criterion_ids
                 .iter()
                 .map(String::as_str)
-                .collect::<std::collections::HashSet<_>>()
+                .collect::<HashSet<_>>()
         })
         .ok_or_else(invalid_delegated_output)?;
-    let mut observed = std::collections::HashSet::new();
+    let mut observed = HashSet::new();
     if proposal.acceptance_criteria_ids.len() != expected.len()
         || proposal
             .acceptance_criteria_ids
@@ -5358,11 +5358,10 @@ mod tests {
         StoredRun, StoredRunPhase, TurnSubmissionOptions,
         allocate_interactive_input_choice_identities, bounded_helper_handshake,
         decode_kernel_event, delegated_budget_stop, delegated_budget_stopped_counters,
-        delegated_change_batch_event, load_stored_run, migrate_stored_run_role_policies_v1_to_v2,
-        interactive_input_choice_replay_keys,
-        performance_execution_mode, performance_execution_mode_for_role, project_helper,
-        project_interactive_input_choices, read_helper_bytes,
-        released_production_execution_mode_required, role_session_policy,
+        delegated_change_batch_event, interactive_input_choice_replay_keys, load_stored_run,
+        migrate_stored_run_role_policies_v1_to_v2, performance_execution_mode,
+        performance_execution_mode_for_role, project_helper, project_interactive_input_choices,
+        read_helper_bytes, released_production_execution_mode_required, role_session_policy,
         seal_helper, sealed_job_role_execution_mode, submission_input_digest,
         terminate_helper_process_group, turn_submission_options, validate_delegated_patch,
         validate_delegated_patch_path, validate_helper_image, validate_sealed_helper,

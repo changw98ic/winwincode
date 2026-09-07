@@ -14,7 +14,7 @@ use winwincode_api::generated::{
     PageInfo, QueryResultResponse, StrongFlowReadCursor,
 };
 use winwincode_delivery::domain::{DeliveryVerdict, EvidenceRef, FrozenDeliveryCandidate};
-use winwincode_domain::{DeliveryId, OpaqueCursor, Revision, SchemaVersion, RepositoryScope};
+use winwincode_domain::{DeliveryId, OpaqueCursor, RepositoryScope, Revision, SchemaVersion};
 use winwincode_storage::{
     CandidateGitPinReceipt, CandidateGitRetentionError, CandidateGitRetentionErrorKind,
     CandidateGitRetentionState, ProductStateStorage as _, SqliteStorage,

@@ -31,7 +31,8 @@ use winwincode_api::generated::{
 };
 use winwincode_control_plane::{CredentialLeakGate, CredentialOutputBoundary};
 use winwincode_domain::{
-    RequestId, Revision, SchemaVersion, UserAccount, UserAccountRole, UserAccountState, UserActor, UserActorKind, UserId,
+    RequestId, Revision, SchemaVersion, UserAccount, UserAccountRole, UserAccountState, UserActor,
+    UserActorKind, UserId,
 };
 
 use crate::application::{StandaloneApplicationClock, SystemStandaloneApplicationClock};

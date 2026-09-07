@@ -15,7 +15,7 @@ use winwincode_api::generated::{
     CandidateFilesListQuery, CandidateFilesListResultResponse,
     CandidateFilesListResultResponseQuery, PageInfo, QueryResultResponse,
 };
-use winwincode_domain::{Count, OpaqueCursor, SchemaVersion, Sha256Digest, RepositoryScope};
+use winwincode_domain::{Count, OpaqueCursor, RepositoryScope, SchemaVersion, Sha256Digest};
 use winwincode_storage::{
     ArtifactError, ArtifactErrorKind, GitCandidateReviewFile, GitCandidateReviewFileEncoding,
     GitCandidateReviewFileStatus, ValidatedGitCandidateReview, ValidatedGitSourceArtifact,

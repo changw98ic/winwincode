@@ -11,8 +11,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use winwincode_api::generated::{
-    Actor, OrganizationScope, OrganizationScopeKind, ProjectScope, ProjectScopeKind, Scope, WorkspaceScope,
-    WorkspaceScopeKind,
+    Actor, OrganizationScope, OrganizationScopeKind, ProjectScope, ProjectScopeKind, Scope,
+    WorkspaceScope, WorkspaceScopeKind,
 };
 use winwincode_codex::{
     ExecutionMode, HelperReleaseManifest, ObserverMode, ProductionCodexAdapter,
@@ -32,8 +32,9 @@ use winwincode_control_plane::{
     TrustedProtocolParty, local_loopback_retry_policy,
 };
 use winwincode_domain::{
-    CredentialReferenceId, OrganizationId, ProjectId, RepositoryId, RepositoryScope, RepositoryScopeKind, Sha256Digest, UserAccount,
-    UserAccountRole, UserAccountState, UserActor, UserActorKind, UserId, WorkerId, WorkerInstanceId, WorkspaceId,
+    CredentialReferenceId, OrganizationId, ProjectId, RepositoryId, RepositoryScope,
+    RepositoryScopeKind, Sha256Digest, UserAccount, UserAccountRole, UserAccountState, UserActor,
+    UserActorKind, UserId, WorkerId, WorkerInstanceId, WorkspaceId,
 };
 use winwincode_execution_port::{
     action_enforcement::{ActionEnforcementIssuer, ActionEnforcementSigningKey},

@@ -14,8 +14,8 @@ use winwincode_delivery::{
     },
     projection::{self as delivery_projection, runtime as runtime_projection},
 };
-use winwincode_domain::{RepositoryScope,
-    Count, EvidenceId, GitHubRepositorySlug, Instant, Revision, SchemaVersion,
+use winwincode_domain::{
+    Count, EvidenceId, GitHubRepositorySlug, Instant, RepositoryScope, Revision, SchemaVersion,
     SessionBindingSourceIdentity, SessionBindingSourceIdentityKind, SessionIdentity, Sha256Digest,
 };
 

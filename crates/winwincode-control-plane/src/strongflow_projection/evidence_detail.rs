@@ -14,7 +14,7 @@ use winwincode_api::generated::{
     QueryResultResponse, StrongFlowReadCursor,
 };
 use winwincode_delivery::domain::{EvidenceRef, VerifiedEvidenceOutcome};
-use winwincode_domain::{DeliveryId, EvidenceId, SchemaVersion, RepositoryScope};
+use winwincode_domain::{DeliveryId, EvidenceId, RepositoryScope, SchemaVersion};
 
 use super::{StrongFlowProjectionError, application, mapping};
 use crate::ControlPlane;

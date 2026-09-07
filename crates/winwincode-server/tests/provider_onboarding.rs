@@ -14,16 +14,18 @@ use std::sync::Mutex;
 use winwincode_api::generated::{
     Actor, CredentialReferenceListParameters, CredentialReferenceListQuery,
     CredentialReferenceListQueryQuery, OrganizationScope, OrganizationScopeKind, PageRequest,
-    SchemaVersion, Scope, UserActor, UserActorKind,
+    Scope,
 };
 use winwincode_control_plane::{
     CatalogAvailability, CredentialLeakErrorKind, CredentialLeakGate, CredentialOutputBoundary,
     CredentialReferenceResolution, CredentialReferenceService, LocalSecretStoreAdapter,
     ModelCapability, ModelCapabilitySource, ModelSettingsService, ModelSettingsTarget,
     ModelToolSupport, ProviderCatalogService, ResolvedSecret, SecretStoreError,
-    SecretStoreErrorKind, SecretStorePort,
+    SecretStoreErrorKind, SecretStorePort, StructuredOutputSupport,
 };
-use winwincode_domain::{CredentialReferenceId, OrganizationId, RequestId};
+use winwincode_domain::{
+    CredentialReferenceId, OrganizationId, RequestId, SchemaVersion, UserActor, UserActorKind,
+};
 use winwincode_server::{
     ConnectionProbe, ConnectionTestReport, CreateCredentialRequest, CredentialReferenceOnboarded,
     EstablishRouteRequest, OnboardProviderRequest, OnboardingSecretStore, ProbeOutcome,
@@ -73,6 +75,7 @@ fn confirmed_deepseek_models() -> Vec<ModelCapability> {
             context_window_tokens: 128_000,
             max_output_tokens: 8_000,
             tool_support: ModelToolSupport::Parallel,
+            structured_output_support: StructuredOutputSupport::JsonSchemaStrict,
             reasoning_efforts: vec![],
         },
         ModelCapability {
@@ -81,6 +84,7 @@ fn confirmed_deepseek_models() -> Vec<ModelCapability> {
             context_window_tokens: 128_000,
             max_output_tokens: 8_000,
             tool_support: ModelToolSupport::Serial,
+            structured_output_support: StructuredOutputSupport::JsonSchemaStrict,
             reasoning_efforts: vec!["medium".to_owned()],
         },
     ]
@@ -661,6 +665,7 @@ fn probe_reports_violating_catalog_rules_are_rejected() {
         context_window_tokens: 8_000,
         max_output_tokens: 16_000,
         tool_support: ModelToolSupport::Parallel,
+        structured_output_support: StructuredOutputSupport::JsonSchemaStrict,
         reasoning_efforts: vec![],
     }];
     let harness = harness("invalid-report", FakeProbe::confirmed(invalid));
@@ -981,6 +986,7 @@ fn custom_endpoints_pass_canonical_https_validation_before_any_write() {
         context_window_tokens: 64_000,
         max_output_tokens: 4_000,
         tool_support: ModelToolSupport::Serial,
+        structured_output_support: StructuredOutputSupport::JsonSchemaStrict,
         reasoning_efforts: vec![],
     }];
     let harness = harness("custom-endpoint", FakeProbe::confirmed(model));

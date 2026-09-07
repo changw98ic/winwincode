@@ -61,8 +61,7 @@ use winwincode_api::generated::{
     CredentialReferenceGetParameters, CredentialReferenceGetQuery,
     CredentialReferenceGetQueryQuery, CredentialReferenceProjection,
     CredentialReferenceRotateCommand, CredentialReferenceRotateCommandCommand,
-    CredentialReferenceRotatePayload, ModelRoute, OrganizationScope, PageRequest, SchemaVersion,
-    Scope,
+    CredentialReferenceRotatePayload, ModelRoute, OrganizationScope, PageRequest, Scope,
 };
 use winwincode_control_plane::{
     CredentialLeakError, CredentialLeakGate, CredentialOutputBoundary, CredentialReferenceError,
@@ -75,7 +74,7 @@ use winwincode_control_plane::{
     ProviderPresetsError, ProviderPresetsErrorKind, ResolvedSecret, SecretStoreError,
     SecretStoreErrorKind, SecretStorePort, find_provider_preset, resolve_provider_endpoint,
 };
-use winwincode_domain::{CredentialReferenceId, Revision};
+use winwincode_domain::{CredentialReferenceId, Revision, SchemaVersion};
 use winwincode_storage::SqliteStorage;
 
 use crate::model_authority::{derived_request_id, now_millis};
@@ -848,7 +847,6 @@ impl<'a> ProviderOnboardingService<'a> {
                 expected_catalog_version: catalog.catalog_version,
             },
             &descriptor,
-            SystemStandaloneApplicationClock.now_instant(),
         )?;
         let settings_revision = match converge_default_route(
             &mut *self.storage,
@@ -880,7 +878,6 @@ impl<'a> ProviderOnboardingService<'a> {
                             expected_catalog_version: receipt.catalog_version,
                         },
                         &descriptor.provider_id,
-                        SystemStandaloneApplicationClock.now_instant(),
                     );
                 }
                 return Err(error);
@@ -1373,6 +1370,7 @@ fn validate_probe_models(
             context_window_tokens: model.context_window_tokens,
             max_output_tokens: model.max_output_tokens,
             tool_support: model.tool_support,
+            structured_output_support: model.structured_output_support.clone(),
             reasoning_efforts: efforts,
         });
     }

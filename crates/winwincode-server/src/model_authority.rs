@@ -43,16 +43,19 @@ use std::{env, path::PathBuf};
 use sha2::{Digest, Sha256};
 use winwincode_api::generated::{
     Actor, CredentialReferenceCreateCommand, CredentialReferenceCreateCommandCommand,
-    CredentialReferenceCreatePayload, ModelRoute, OrganizationScope, OrganizationScopeKind,
-    Scope,
+    CredentialReferenceCreatePayload, ModelRoute, OrganizationScope, OrganizationScopeKind, Scope,
 };
 use winwincode_control_plane::{
     CatalogAvailability, CredentialReferenceErrorKind, CredentialReferenceService,
     LocalSecretStoreAdapter, ModelCapability, ModelSelection, ModelSettingsRequest,
     ModelSettingsService, ModelSettingsTarget, ModelSettingsValues, ModelToolSupport,
-    ProviderCatalogRequest, ProviderCatalogService, ProviderDescriptor, ResolvedSecret, StructuredOutputSupport,
+    ProviderCatalogRequest, ProviderCatalogService, ProviderDescriptor, ResolvedSecret,
+    StructuredOutputSupport,
 };
-use winwincode_domain::{CredentialReferenceId, RepositoryScope, Revision, SchemaVersion, UserActor, UserActorKind, RequestId, UserId};
+use winwincode_domain::{
+    CredentialReferenceId, RepositoryScope, RequestId, Revision, SchemaVersion, UserActor,
+    UserActorKind, UserId,
+};
 use winwincode_storage::SqliteStorage;
 
 use crate::runtime::crockford_26;
