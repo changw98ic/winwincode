@@ -899,9 +899,10 @@ fn delivery_stage_role_shape_valid(
 
 fn delivery_role_write_mode_valid(job: &ExecutionJob) -> bool {
     match job.execution_profile.as_str() {
-        "executor" | "remediator" => {
-            job.workspace.write_mode == ExecutionWorkspaceWriteMode::Candidate
-        }
+        "executor" | "remediator" => matches!(
+            job.workspace.write_mode,
+            ExecutionWorkspaceWriteMode::Candidate | ExecutionWorkspaceWriteMode::ReadOnly
+        ),
         "requirements"
         | "solution"
         | "planner"

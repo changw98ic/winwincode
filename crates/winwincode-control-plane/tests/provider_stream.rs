@@ -14,8 +14,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use winwincode_api::generated::{
     Actor, CredentialReferenceCreateCommand, CredentialReferenceCreateCommandCommand,
-    CredentialReferenceCreatePayload, ModelRoute, OrganizationScope, OrganizationScopeKind,
-    RepositoryScope, RepositoryScopeKind, Scope, UserActor, UserActorKind,
+    CredentialReferenceCreatePayload, ModelRoute, OrganizationScope, OrganizationScopeKind, Scope,
 };
 use winwincode_control_plane::{
     CanonicalModelStreamFrame, CredentialReferenceResolution, CredentialReferenceService,
@@ -33,7 +32,7 @@ use winwincode_control_plane::{
     ProviderGatewaySettlementPort, ProviderStreamControlAction, ProviderStreamConversionErrorKind,
     ProviderStreamConverter, ProviderStreamEvent, ProviderStreamFailure, ProviderStreamFailureKind,
     ProviderTokenUsage, ProviderToolIdentity, ProviderToolKind, ResolvedSecret, SecretStoreError,
-    SecretStorePort,
+    SecretStorePort, StructuredOutputSupport,
 };
 use winwincode_domain::{
     CodexThreadId, CredentialReferenceId, ExecutionAckSequence, ExecutionJobId, ExecutionMessageId,
@@ -41,6 +40,7 @@ use winwincode_domain::{
     RepositoryId, RequestId, Revision, SchemaVersion, SessionIdentity, Sha256Digest, UserId,
     WorkerId, WorkerInstanceId, WorkerSessionId, WorkspaceId,
 };
+use winwincode_domain::{RepositoryScope, RepositoryScopeKind, UserActor, UserActorKind};
 use winwincode_execution_port::generated::{
     EncodedPayload, ExecutionLeaseStamp, ExecutionPortError, ExecutionPortErrorCode,
     LeaseWriteStatus, ModelAckMessage, ModelAckMessageKind, ModelGatewayRoute, ModelOpenMessage,
@@ -332,6 +332,7 @@ fn configure_stream_storage(storage: &mut SqliteStorage) {
                     context_window_tokens: 128_000,
                     max_output_tokens: 16_000,
                     tool_support: ModelToolSupport::Parallel,
+                    structured_output_support: StructuredOutputSupport::Unsupported,
                     reasoning_efforts: vec!["high".to_owned()],
                 }],
             },

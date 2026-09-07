@@ -1,7 +1,13 @@
 /** Canonical StrongFlow roles and the minimal policy applied by Codex Core. */
 
 export const STRONGFLOW_ROLE_CONFIGURATION_SCHEMA_VERSION = 3 as const
-export const STRONGFLOW_ROLE_SESSION_POLICY_SCHEMA_VERSION = 1 as const
+export const STRONGFLOW_ROLE_SESSION_POLICY_SCHEMA_VERSION = 2 as const
+
+/** Canonical per-role execution strategy from the generated ExecutionPort schema. */
+export enum RoleExecutionMode {
+  React = 'react',
+  DelegatedBatch = 'delegated_batch',
+}
 
 export const STRONGFLOW_ROLE_IDS = Object.freeze([
   'requirements',
@@ -56,12 +62,13 @@ export interface StrongFlowRoleConfiguration {
   readonly roles: readonly StrongFlowRoleSpec[]
 }
 
-/** Minimal host input that configures Codex Core without replacing its runtime or tools. */
-export interface StrongFlowRoleSessionPolicy {
+/** Minimal canonical v2 host input that configures Codex Core. */
+export interface RoleSessionPolicy {
   readonly schemaVersion: typeof STRONGFLOW_ROLE_SESSION_POLICY_SCHEMA_VERSION
   readonly roleId: StrongFlowRoleId
   readonly workspaceMode: StrongFlowRoleWorkspaceMode
   readonly developerInstructions: string
+  readonly executionMode: RoleExecutionMode
 }
 
 export interface StrongFlowRoleModelCatalogEntry {
@@ -87,6 +94,7 @@ export type StrongFlowRoleConfigurationErrorCode =
   | 'DUPLICATE_ROLE'
   | 'UNKNOWN_MODEL_ROUTE'
   | 'UNKNOWN_REASONING_EFFORT'
+  | 'INVALID_ROLE_POLICY'
   | 'POLICY_MISMATCH'
 
 export class StrongFlowRoleConfigurationError extends Error {
@@ -102,6 +110,7 @@ export class StrongFlowRoleConfigurationError extends Error {
 interface CanonicalRolePolicy {
   readonly displayName: string
   readonly developerInstructions: string
+  readonly delegatedDeveloperInstructions?: string
   readonly workspaceMode: StrongFlowRoleWorkspaceMode
 }
 
@@ -124,6 +133,7 @@ const ROLE_POLICIES: Readonly<Record<StrongFlowRoleId, CanonicalRolePolicy>> = O
   executor: Object.freeze({
     displayName: 'Executor',
     developerInstructions: 'Implement only the approved delivery plan in the assigned candidate workspace. Use Codex tools, sandbox, approvals, plan, and subagents as needed. Preserve exact changed-file, command, test, diff, failure, recovery, and usage events. Do not approve or verify your own work.',
+    delegatedDeveloperInstructions: 'Produce only one bounded ChangeBatch proposal from the approved delivery plan in the read-only candidate workspace. Return the canonical proposal and content-addressed Artifact references. Do not modify workspace files, apply the patch, approve, or verify your own work.',
     workspaceMode: 'candidate-write',
   }),
   reviewer: Object.freeze({
@@ -144,6 +154,7 @@ const ROLE_POLICIES: Readonly<Record<StrongFlowRoleId, CanonicalRolePolicy>> = O
   remediator: Object.freeze({
     displayName: 'Remediator',
     developerInstructions: 'Apply only the bounded rework requested from reviewed findings in the assigned candidate workspace. Use Codex tools, sandbox, approvals, plan, and subagents as needed, preserve unrelated accepted work, and produce fresh runtime evidence. Do not broaden scope, approve, or verify your own work.',
+    delegatedDeveloperInstructions: 'Produce only one bounded Repair proposal from reviewed findings in the read-only candidate workspace. Return the canonical RepairEnvelope, ChangeBatch proposal, and content-addressed Artifact references. Do not modify workspace files, apply the repair, broaden scope, approve, or verify your own work.',
     workspaceMode: 'candidate-write',
   }),
 })
@@ -151,21 +162,108 @@ const ROLE_POLICIES: Readonly<Record<StrongFlowRoleId, CanonicalRolePolicy>> = O
 /** Return the canonical workspace intent for one StrongFlow role. */
 export function strongFlowRoleWorkspaceMode(
   roleId: StrongFlowRoleId,
+  executionMode: RoleExecutionMode = RoleExecutionMode.React,
 ): StrongFlowRoleWorkspaceMode {
+  if (!Object.values(RoleExecutionMode).includes(executionMode)) {
+    return configurationError('INVALID_ROLE_POLICY', 'role execution mode is unknown')
+  }
+  if (
+    executionMode === RoleExecutionMode.DelegatedBatch
+    && (roleId === 'executor' || roleId === 'remediator')
+  ) return 'candidate-read-only'
   return ROLE_POLICIES[roleId].workspaceMode
 }
 
 /** Return the minimal immutable policy passed to Codex Core for one role-scoped session. */
 export function strongFlowRoleSessionPolicy(
   roleId: StrongFlowRoleId,
-): StrongFlowRoleSessionPolicy {
+  executionMode: RoleExecutionMode = RoleExecutionMode.React,
+): RoleSessionPolicy {
   const policy = ROLE_POLICIES[roleId]
+  const developerInstructions = executionMode === RoleExecutionMode.DelegatedBatch
+    ? policy.delegatedDeveloperInstructions ?? policy.developerInstructions
+    : policy.developerInstructions
   return Object.freeze({
     schemaVersion: STRONGFLOW_ROLE_SESSION_POLICY_SCHEMA_VERSION,
     roleId,
-    workspaceMode: policy.workspaceMode,
-    developerInstructions: policy.developerInstructions,
+    workspaceMode: strongFlowRoleWorkspaceMode(roleId, executionMode),
+    developerInstructions,
+    executionMode,
   })
+}
+
+/** Parse the only runtime role-policy shape. Durable version 1 is rejected here. */
+export function parseRoleSessionPolicy(value: unknown): RoleSessionPolicy {
+  if (!isRecord(value)) {
+    return configurationError('INVALID_ROLE_POLICY', 'role session policy must be an object')
+  }
+  exactKeys(
+    value,
+    ['schemaVersion', 'roleId', 'workspaceMode', 'developerInstructions', 'executionMode'],
+    'role session policy',
+    'INVALID_ROLE_POLICY',
+  )
+  if (value.schemaVersion !== STRONGFLOW_ROLE_SESSION_POLICY_SCHEMA_VERSION) {
+    return configurationError('INVALID_ROLE_POLICY', 'role session policy version is unsupported')
+  }
+  if (
+    typeof value.roleId !== 'string'
+    || !STRONGFLOW_ROLE_IDS.includes(value.roleId as StrongFlowRoleId)
+  ) return configurationError('INVALID_ROLE_POLICY', 'role session policy role is unknown')
+  if (
+    typeof value.executionMode !== 'string'
+    || !Object.values(RoleExecutionMode).includes(value.executionMode as RoleExecutionMode)
+  ) return configurationError('INVALID_ROLE_POLICY', 'role session policy execution mode is unknown')
+
+  const roleId = value.roleId as StrongFlowRoleId
+  const executionMode = value.executionMode as RoleExecutionMode
+  const expected = strongFlowRoleSessionPolicy(roleId, executionMode)
+  if (
+    value.workspaceMode !== expected.workspaceMode
+    || value.developerInstructions !== expected.developerInstructions
+  ) {
+    return configurationError(
+      'POLICY_MISMATCH',
+      `role ${roleId} changes its canonical session policy`,
+    )
+  }
+  return expected
+}
+
+/**
+ * One-time persisted-data migration. It accepts exactly the retired v1 shape
+ * and returns canonical v2 + React for the caller to save before replay.
+ */
+export function migratePersistedRoleSessionPolicyV1(value: unknown): RoleSessionPolicy {
+  if (!isRecord(value)) {
+    return configurationError('INVALID_ROLE_POLICY', 'persisted v1 role policy must be an object')
+  }
+  exactKeys(
+    value,
+    ['schemaVersion', 'roleId', 'workspaceMode', 'developerInstructions'],
+    'persisted v1 role policy',
+    'INVALID_ROLE_POLICY',
+  )
+  if (value.schemaVersion !== 1) {
+    return configurationError('INVALID_ROLE_POLICY', 'persisted role policy is not version 1')
+  }
+  if (
+    typeof value.roleId !== 'string'
+    || !STRONGFLOW_ROLE_IDS.includes(value.roleId as StrongFlowRoleId)
+  ) return configurationError('INVALID_ROLE_POLICY', 'persisted v1 role is unknown')
+
+  const roleId = value.roleId as StrongFlowRoleId
+  const expected = strongFlowRoleSessionPolicy(roleId, RoleExecutionMode.React)
+  if (
+    value.workspaceMode !== expected.workspaceMode
+    || value.developerInstructions !== expected.developerInstructions
+  ) {
+    return configurationError(
+      'POLICY_MISMATCH',
+      `persisted v1 role ${roleId} changes its canonical policy`,
+    )
+  }
+  return expected
 }
 
 function configurationError(

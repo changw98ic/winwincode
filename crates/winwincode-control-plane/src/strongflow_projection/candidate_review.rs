@@ -13,9 +13,9 @@ use winwincode_api::generated::{
     CandidateDiffGetResultResponse, CandidateDiffGetResultResponseQuery, CandidateFileEncoding,
     CandidateFilePage, CandidateFilePageKind, CandidateFileProjection, CandidateFileStatus,
     CandidateFilesListQuery, CandidateFilesListResultResponse,
-    CandidateFilesListResultResponseQuery, PageInfo, QueryResultResponse, RepositoryScope,
+    CandidateFilesListResultResponseQuery, PageInfo, QueryResultResponse,
 };
-use winwincode_domain::{Count, OpaqueCursor, SchemaVersion, Sha256Digest};
+use winwincode_domain::{Count, OpaqueCursor, SchemaVersion, Sha256Digest, RepositoryScope};
 use winwincode_storage::{
     ArtifactError, ArtifactErrorKind, GitCandidateReviewFile, GitCandidateReviewFileEncoding,
     GitCandidateReviewFileStatus, ValidatedGitCandidateReview, ValidatedGitSourceArtifact,

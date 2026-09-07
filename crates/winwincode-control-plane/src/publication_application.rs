@@ -15,14 +15,14 @@ use winwincode_api::generated::{
     PublicationPageKind, PublicationProjection, PublicationProjectionVerdictStatus,
     PublicationResourceKind as ApiPublicationResourceKind, PublicationResourceRef,
     PublicationStatusHistoryProjection, PublicationStepProjection, PublicationStepStateProjection,
-    PublicationTarget as ApiPublicationTarget, PublicationTargetProvider, RepositoryScope, Scope,
+    PublicationTarget as ApiPublicationTarget, PublicationTargetProvider, Scope,
 };
 use winwincode_audit::{
     AuditAction, AuditActor, AuditEvent, AuditEventId, AuditOrigin, AuditRetention, AuditScope,
     AuditState, AuditSubject,
 };
 use winwincode_domain::{
-    GitHubRepositorySlug, OpaqueCursor, PublicationId, Revision, SchemaVersion, Sha256Digest,
+    GitHubRepositorySlug, OpaqueCursor, PublicationId, RepositoryScope, Revision, SchemaVersion, Sha256Digest,
     UserId,
 };
 use winwincode_publication::{

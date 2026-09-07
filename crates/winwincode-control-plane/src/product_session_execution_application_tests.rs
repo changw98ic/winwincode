@@ -7,13 +7,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use rusqlite::{Connection, params};
 use serde_json::Value;
-use winwincode_api::generated::{ModelRoute, RepositoryScope, RepositoryScopeKind};
+use winwincode_api::generated::ModelRoute;
 use winwincode_domain::{
     CodexThreadId, ControlPlaneEventId, CredentialReferenceId, ExecutionJobId, ExecutionMessageId,
     ExecutionSequence, FencingToken, Instant, LeaseId, ModelExchangeId, OrganizationId,
     ProductSessionId, ProjectId, RepositoryId, RequestId, SessionIdentity, Sha256Digest, UserId,
     WorkerId, WorkerInstanceId, WorkerSessionId, WorkspaceId,
 };
+use winwincode_domain::{RepositoryScope, RepositoryScopeKind};
 use winwincode_execution_port::generated::{
     EncodedPayload, ExecutionJob, ExecutionLeaseStamp, ModelChunkMessage, ModelChunkMessageKind,
 };

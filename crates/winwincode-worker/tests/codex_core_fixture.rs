@@ -29,7 +29,7 @@ use winwincode_execution_port::generated::{
 };
 use winwincode_kernel::{
     EventPoll, Kernel, KernelOptions, ModelPort, ModelPortFailure, ModelPortRequest,
-    ModelPortStream, SessionOptions,
+    ModelPortStream, SessionOptions, TurnSubmissionOptions,
 };
 use winwincode_worker::{
     ActiveJob, CandidateArtifactAckOutcome, CandidateArtifactAuthority, CandidateArtifactUpload,
@@ -250,7 +250,11 @@ impl CodexCoreAdapter for RealKernelAdapter {
         let session_id = self.session_id(thread_id)?.to_owned();
         let submission = self
             .kernel
-            .submit_turn(&session_id, goal.to_owned())
+            .submit_turn(
+                &session_id,
+                goal.to_owned(),
+                TurnSubmissionOptions::default(),
+            )
             .await
             .map_err(|error| error.to_string())?;
         if submission.status != "started" {

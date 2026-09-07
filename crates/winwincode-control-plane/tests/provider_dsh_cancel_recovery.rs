@@ -17,8 +17,7 @@ use winwincode_api::generated::{
     Actor, CredentialReferenceCreateCommand, CredentialReferenceCreateCommandCommand,
     CredentialReferenceCreatePayload, CredentialReferenceRevokeCommand,
     CredentialReferenceRevokeCommandCommand, CredentialReferenceRevokePayload, ModelRoute,
-    OrganizationScope, OrganizationScopeKind, RepositoryScope, RepositoryScopeKind, Scope,
-    UserActor, UserActorKind,
+    OrganizationScope, OrganizationScopeKind, Scope,
 };
 use winwincode_control_plane::{
     CredentialReferenceResolution, CredentialReferenceService, DurableModelExchangeAuthority,
@@ -36,7 +35,7 @@ use winwincode_control_plane::{
     ProviderGatewaySettlementPort, ProviderGatewayTerminal, ProviderGatewayTerminalOutcome,
     ProviderGatewayTerminalReceipt, ProviderStreamControlAction, ProviderStreamConverter,
     ProviderStreamEvent, ProviderStreamFailure, ProviderStreamFailureKind, ProviderTokenUsage,
-    ResolvedSecret, SecretStoreError, SecretStorePort,
+    ResolvedSecret, SecretStoreError, SecretStorePort, StructuredOutputSupport,
 };
 use winwincode_domain::{
     CodexThreadId, CredentialReferenceId, ExecutionAckSequence, ExecutionJobId, ExecutionMessageId,
@@ -44,6 +43,7 @@ use winwincode_domain::{
     RepositoryId, RequestId, Revision, SchemaVersion, SessionIdentity, Sha256Digest, UserId,
     WorkerId, WorkerInstanceId, WorkerSessionId, WorkspaceId,
 };
+use winwincode_domain::{RepositoryScope, RepositoryScopeKind, UserActor, UserActorKind};
 use winwincode_execution_port::generated::{
     EncodedPayload, ExecutionLeaseStamp, ExecutionPortError, ExecutionPortErrorCode,
     LeaseWriteStatus, ModelAckMessage, ModelAckMessageKind, ModelGatewayRoute, ModelOpenMessage,
@@ -111,6 +111,7 @@ fn descriptor() -> ProviderDescriptor {
             context_window_tokens: 128_000,
             max_output_tokens: 16_000,
             tool_support: ModelToolSupport::Parallel,
+            structured_output_support: StructuredOutputSupport::Unsupported,
             reasoning_efforts: vec!["high".to_owned()],
         }],
     }

@@ -30,6 +30,9 @@ use winwincode_execution_port::{
 };
 use winwincode_kernel::{ModelPort, ModelPortFailure, ModelPortRequest, ModelPortStream};
 
+use crate::performance::{
+    PerformanceOperationCompletion, PerformanceOperationKind, PrimaryModelUsage,
+};
 use crate::store::{AdapterStore, ModelCallPhase};
 
 type ModelClient =
@@ -79,6 +82,13 @@ impl SharedAuthoritySource {
             *trusted_now = Some(now.clone());
         }
         Ok(())
+    }
+
+    pub(crate) fn observed_now(&self) -> Result<Option<Instant>, BridgeError> {
+        self.trusted_now
+            .read()
+            .map(|now| now.clone())
+            .map_err(|_| BridgeError::Unavailable)
     }
 
     pub(crate) fn install(
@@ -730,6 +740,7 @@ impl ExecutionPortModelBridge {
                 .accept_terminal_duplicate(binding.authority.clone(), chunk, metadata)
                 .await
                 .map_err(|_| BridgeError::Protocol)?;
+            self.record_primary_model_completion(&owner, chunk, received_at)?;
             self.ordinal_store
                 .mark_model_call_provider_final(&owner.run_key, &owner.model_call_id)
                 .map_err(|error| match error {
@@ -775,6 +786,7 @@ impl ExecutionPortModelBridge {
         ) || matches!(disposition, ModelChunkDisposition::Duplicate { .. })
             && chunk.is_final;
         if terminal {
+            self.record_primary_model_completion(&owner, chunk, received_at)?;
             self.ordinal_store
                 .mark_model_call_provider_final(&owner.run_key, &owner.model_call_id)
                 .map_err(|error| match error {
@@ -794,6 +806,30 @@ impl ExecutionPortModelBridge {
                 .remove(&chunk.model_exchange_id.0);
         }
         Ok(disposition)
+    }
+
+    fn record_primary_model_completion(
+        &self,
+        owner: &ModelExchangeOwner,
+        chunk: &ModelChunkMessage,
+        received_at: &Instant,
+    ) -> Result<(), BridgeError> {
+        let usage = primary_model_usage(chunk)?;
+        self.ordinal_store
+            .record_performance_completion(
+                &owner.run_key,
+                PerformanceOperationKind::PrimaryModel,
+                &owner.model_call_id,
+                received_at,
+                PerformanceOperationCompletion {
+                    duration_millis: None,
+                    input_tokens: usage.input,
+                    cached_tokens: usage.cached,
+                    output_tokens: usage.output,
+                    actual_cost_microunits: usage.actual_cost_microunits,
+                },
+            )
+            .map_err(model_frame_store_error)
     }
 
     fn validate_chunk_authority(
@@ -1138,8 +1174,7 @@ impl ExecutionPortModelBridge {
         // the exact binding in the action gate before Core can authorize a
         // tool, rather than waiting for the outer adapter poll loop.
         self.sync_action_binding(&binding).map_err(model_failure)?;
-        let payload_bytes = serde_json::to_vec(&envelope.request)
-            .map_err(|_| model_failure(BridgeError::InvalidPayload))?;
+        let payload_bytes = request.payload_json.as_bytes().to_vec();
         let request_digest = model_call_digest(&envelope.request).map_err(model_failure)?;
         let model_call_id = envelope.request_id.clone();
         let exchange_identity = format!("{}:{model_call_id}", binding.run_key);
@@ -1151,6 +1186,19 @@ impl ExecutionPortModelBridge {
         let _ordinal = self
             .ordinal_store
             .claim_model_call(&binding.run_key, &model_call_id, &exchange, &request_digest)
+            .map_err(model_store_failure)?;
+        let observed_at = self
+            .authority
+            .observed_now()
+            .map_err(model_failure)?
+            .unwrap_or_else(|| binding.opened_at.clone());
+        self.ordinal_store
+            .record_performance_start(
+                &binding.run_key,
+                PerformanceOperationKind::PrimaryModel,
+                &model_call_id,
+                &observed_at,
+            )
             .map_err(model_store_failure)?;
         let phase = self
             .ordinal_store
@@ -1218,7 +1266,7 @@ impl ExecutionPortModelBridge {
             Some(open) => {
                 let original_request = decode_payload(&open.request).map_err(model_failure)?;
                 let original_digest =
-                    model_call_digest(&original_request).map_err(model_failure)?;
+                    model_open_request_digest(&original_request).map_err(model_failure)?;
                 if open.lease != exchange.binding.authority.lease
                     || open.worker_session_id != exchange.binding.authority.worker_session_id
                     || open.session_identity != exchange.binding.authority.session_identity
@@ -1310,6 +1358,14 @@ fn model_call_digest(
     )))
 }
 
+fn model_open_request_digest(
+    payload: &serde_json::Value,
+) -> Result<winwincode_domain::Sha256Digest, BridgeError> {
+    let envelope: KernelRequestEnvelope =
+        serde_json::from_value(payload.clone()).map_err(|_| BridgeError::InvalidPayload)?;
+    model_call_digest(&envelope.request)
+}
+
 fn same_binding(left: &ModelRunBinding, right: &ModelRunBinding) -> bool {
     left.run_key == right.run_key
         && left.canonical_thread_id == right.canonical_thread_id
@@ -1368,6 +1424,49 @@ fn decode_payload(payload: &EncodedPayload) -> Result<serde_json::Value, BridgeE
         return Err(BridgeError::InvalidPayload);
     }
     Ok(request)
+}
+
+fn primary_model_usage(chunk: &ModelChunkMessage) -> Result<PrimaryModelUsage, BridgeError> {
+    let Some(payload) = &chunk.payload else {
+        return Ok(PrimaryModelUsage::default());
+    };
+    let payload = decode_payload(payload)?;
+    let usage = payload
+        .get("tokenUsage")
+        .or_else(|| payload.get("token_usage"));
+    let Some(usage) = usage else {
+        return Ok(PrimaryModelUsage::default());
+    };
+    let input = non_negative_metric(usage, "inputTokens", "input_tokens")?;
+    let cached = non_negative_metric(usage, "cachedInputTokens", "cached_input_tokens")?;
+    let output = non_negative_metric(usage, "outputTokens", "output_tokens")?;
+    let actual_cost_microunits = payload
+        .get("actualCostMicros")
+        .or_else(|| payload.get("actual_cost_micros"))
+        .map(|_| non_negative_metric(&payload, "actualCostMicros", "actual_cost_micros"))
+        .transpose()?;
+    if cached > input {
+        return Err(BridgeError::InvalidPayload);
+    }
+    Ok(PrimaryModelUsage {
+        input: input.saturating_sub(cached),
+        cached,
+        output,
+        actual_cost_microunits,
+    })
+}
+
+fn non_negative_metric(
+    value: &serde_json::Value,
+    camel_case: &str,
+    snake_case: &str,
+) -> Result<i64, BridgeError> {
+    value
+        .get(camel_case)
+        .or_else(|| value.get(snake_case))
+        .and_then(serde_json::Value::as_i64)
+        .filter(|value| *value >= 0)
+        .ok_or(BridgeError::InvalidPayload)
 }
 
 fn replay_model_call_frames(
@@ -1580,7 +1679,7 @@ mod tests {
 
     use super::{
         ExecutionPortModelBridge, ModelLeaseAuthority, ModelRunBinding, SharedAuthoritySource,
-        model_call_digest,
+        model_call_digest, primary_model_usage,
     };
     use crate::model_port_client::{
         ModelChunkDisposition, ModelChunkFingerprint, ModelCursorStore, ModelLeaseAuthoritySource,
@@ -1596,6 +1695,7 @@ mod tests {
         EncodedPayload, ExecutionPortMessage, ModelChunkMessage, ModelChunkMessageKind,
         ModelGatewayRoute, ModelOpenMessage,
     };
+    use winwincode_execution_port::runtime_trace_outbox::{ExecutionMode, ObserverMode};
     use winwincode_execution_port::typed_replay::frame_from_message;
     use winwincode_kernel::ModelPortRequest;
 
@@ -1675,6 +1775,64 @@ mod tests {
             session_identity: open.session_identity.clone(),
             worker_session_id: open.worker_session_id.clone(),
         }
+    }
+
+    #[test]
+    fn provider_terminal_usage_separates_cached_from_non_cached_input() {
+        let payload = json!({
+            "type": "completed",
+            "responseId": "response-fixture",
+            "tokenUsage": {
+                "input_tokens": 120,
+                "cached_input_tokens": 35,
+                "output_tokens": 20
+            },
+            "actualCostMicros": 47
+        });
+        let bytes = serde_json::to_vec(&payload).expect("usage payload");
+        let chunk = ModelChunkMessage {
+            error: None,
+            is_final: true,
+            kind: ModelChunkMessageKind::ModelChunk,
+            lease: authority(&id("cdx", 'A')).lease,
+            message_id: ExecutionMessageId(id("xmsg", 'A')),
+            model_exchange_id: ModelExchangeId(id("mdl", 'A')),
+            payload: Some(EncodedPayload {
+                content_type: "application/json".to_owned(),
+                data_base64: base64::engine::general_purpose::STANDARD.encode(&bytes),
+                payload_digest: winwincode_domain::Sha256Digest(format!(
+                    "sha256:{:x}",
+                    Sha256::digest(&bytes)
+                )),
+            }),
+            schema_version: winwincode_domain::SchemaVersion::WinwincodeV1,
+            sent_at: Instant("2030-01-01T00:00:01.000Z".to_owned()),
+            sequence: ExecutionSequence(1),
+            session_identity: authority(&id("cdx", 'A')).session_identity,
+            worker_session_id: WorkerSessionId(id("wsn", 'A')),
+        };
+        let usage = primary_model_usage(&chunk).expect("decode terminal usage");
+        assert_eq!(usage.input, 85);
+        assert_eq!(usage.cached, 35);
+        assert_eq!(usage.output, 20);
+        assert_eq!(usage.actual_cost_microunits, Some(47));
+
+        let mut invalid = payload;
+        invalid["tokenUsage"]["cached_input_tokens"] = json!(121);
+        let bytes = serde_json::to_vec(&invalid).expect("invalid usage payload");
+        let mut invalid_chunk = chunk;
+        invalid_chunk.payload = Some(EncodedPayload {
+            content_type: "application/json".to_owned(),
+            data_base64: base64::engine::general_purpose::STANDARD.encode(&bytes),
+            payload_digest: winwincode_domain::Sha256Digest(format!(
+                "sha256:{:x}",
+                Sha256::digest(&bytes)
+            )),
+        });
+        assert_eq!(
+            primary_model_usage(&invalid_chunk),
+            Err(super::BridgeError::InvalidPayload)
+        );
     }
 
     #[test]
@@ -1844,6 +2002,9 @@ mod tests {
             uuid::Uuid::now_v7()
         ));
         let store = AdapterStore::open(&root).expect("open child model-call store");
+        store
+            .register_performance_run("child-run", ExecutionMode::React, ObserverMode::Off)
+            .expect("register child performance run");
         let root_authority = authority(&id("cdx", 'R'));
         let root_binding = ModelRunBinding {
             run_key: "child-run".to_owned(),
@@ -2094,6 +2255,14 @@ mod tests {
             Some(ModelCallPhase::ProviderFinal)
         );
         replay_final_child_calls(&store, &root_binding, &route).await;
+        let report = store
+            .performance_report("child-run", 60_000)
+            .expect("child performance report after restart replay");
+        assert_eq!(report.primary_model_call_count, 2);
+        assert_eq!(report.primary_model_wait_ms, 120_000);
+        assert_eq!(report.primary_model_input_tokens, 0);
+        assert_eq!(report.primary_model_cached_tokens, 0);
+        assert_eq!(report.primary_model_output_tokens, 0);
         std::fs::remove_dir_all(root).expect("remove child model-call store");
     }
 

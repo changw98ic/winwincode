@@ -18,8 +18,7 @@ use sha2::{Digest as _, Sha256};
 use winwincode_api::generated::{
     Actor, CommandEnvelope, CommandName, CredentialReferenceCreateCommand,
     CredentialReferenceCreateCommandCommand, CredentialReferenceCreatePayload, ModelRoute,
-    OrganizationScope, OrganizationScopeKind, RepositoryScope, RepositoryScopeKind, Scope,
-    UserActor, UserActorKind,
+    OrganizationScope, OrganizationScopeKind, Scope,
 };
 #[cfg(feature = "test-support")]
 use winwincode_codex::CodexCoreAdapter as _;
@@ -39,8 +38,8 @@ use winwincode_control_plane::{
     ProviderCatalogService, ProviderDescriptor, ProviderFinishReason, ProviderGatewayOpenReceipt,
     ProviderStreamConverter, ProviderStreamEvent, ProviderTokenUsage, ProviderToolIdentity,
     ProviderToolKind, ResolvedSecret, StandaloneModelExecutionApplication,
-    StandaloneModelExecutionConfig, StandaloneProviderConfig, SubmitChatMessageCommand,
-    local_loopback_retry_policy, product_session_command_context,
+    StandaloneModelExecutionConfig, StandaloneProviderConfig, StructuredOutputSupport,
+    SubmitChatMessageCommand, local_loopback_retry_policy, product_session_command_context,
 };
 use winwincode_delivery::{
     application::stage::{AdvanceStageInput, NewStageIdentities, advance},
@@ -60,6 +59,7 @@ use winwincode_domain::{
     RequestId, Revision, SchemaVersion, Sha256Digest, StageRunId, UserId, WorkerId,
     WorkerInstanceId, WorkspaceId,
 };
+use winwincode_domain::{RepositoryScope, RepositoryScopeKind, UserActor, UserActorKind};
 use winwincode_execution_port::{
     action_enforcement::{ActionEnforcementIssuer, ActionEnforcementSigningKey},
     generated::{
@@ -67,14 +67,15 @@ use winwincode_execution_port::{
         ActionEnforcementReceiptMessageKind, ApprovalDecisionMessage,
         ApprovalDecisionMessageDecision, ApprovalDecisionMessageKind, ApprovalDecisionMessageScope,
         ArtifactAckMessage, ArtifactAckMessageKind, ArtifactKind, ArtifactReference,
-        ExecutionEventCategory, ExecutionJob, ExecutionLeaseStamp, ExecutionLimits,
-        ExecutionOutcomeStatus, ExecutionPortMessage, ExecutionScope, ExecutionWorkspace,
-        ExecutionWorkspaceWriteMode, InputRequestMessage, InputResponseMessage,
-        InputResponseMessageKind, InputResponseMessageStatus, JobCancelMessage,
-        JobCancelMessageKind, JobCancelMessageReason, JobDispatchMessage, JobDispatchMessageKind,
-        JobDispatchResultMessageStatus, LeaseWriteStatus, ModelChunkMessage, ModelChunkMessageKind,
-        ModelGatewayRoute, ModelOpenMessage, RuntimeEventMessage, WorkerCapabilityFeature,
-        WorkerCapabilitySet, WorkerCapabilitySetPlatform, WorkerRegistrationResultMessage,
+        ChangeBatchProposalEvent, ExecutionEventCategory, ExecutionJob, ExecutionLeaseStamp,
+        ExecutionLimits, ExecutionOutcomeStatus, ExecutionPortErrorCode, ExecutionPortMessage,
+        ExecutionScope, ExecutionWorkspace, ExecutionWorkspaceWriteMode, InputRequestMessage,
+        InputResponseMessage, InputResponseMessageKind, InputResponseMessageStatus,
+        JobCancelMessage, JobCancelMessageKind, JobCancelMessageReason, JobDispatchMessage,
+        JobDispatchMessageKind, JobDispatchResultMessageStatus, LeaseWriteStatus,
+        ModelChunkMessage, ModelChunkMessageKind, ModelGatewayRoute, ModelOpenMessage,
+        RuntimeEventMessage, WorkerCapabilityFeature, WorkerCapabilitySet,
+        WorkerCapabilitySetPlatform, WorkerRegistrationResultMessage,
         WorkerRegistrationResultMessageKind, WorkerRegistrationResultMessageLeaseRecovery,
         WorkerRegistrationResultMessageStatus,
     },
@@ -86,19 +87,17 @@ use winwincode_storage::{
     ExecutionAdmissionPolicy, ExecutionJobState, ExecutionJobSubmission,
     ExecutionJobTransitionRequest, ExecutionLeaseClaim, ExecutionQueueScope,
     ExecutionRepositoryAccess, ExecutionReservationRequest, ExecutionReservationStart,
-    NewOutboxEvent, ProductStateStorage, StateCommit, WorkerAuthenticationIdentity,
+    NewOutboxEvent, ProductStateStorage, StateCommit, StateMutation, WorkerAuthenticationIdentity,
     WorkerHeartbeatRequest, WorkerPlatform, WorkerPoolId, WorkerRegistrationRequest,
     WorkerSlotAuthority, WorkerSlotOpenRequest, WorkerSlotResourceLimits, WorkerSlotResources,
 };
 use winwincode_storage::{LeaseWriteStatus as StorageLeaseWriteStatus, SqliteStorage};
-
 static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(1);
 const PROVIDER_ID: &str = "winwincode-loopback";
 const MODEL_ID: &str = "loopback-model";
 const PROVIDER_SECRET: &[u8] = b"native-cutover-provider-secret";
 const FIXTURE_CANDIDATE_REF: &str =
     "git-candidate:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-
 fn run_on_large_stack(future: impl Future<Output = ()> + Send + 'static) {
     std::thread::Builder::new()
         .name("production-codex-vertical".to_owned())
@@ -218,7 +217,7 @@ fn detached_checkout(root: &TestDirectory) -> PathBuf {
 }
 
 struct DirectorySnapshot {
-    directories: Vec<PathBuf>,
+    directories: Vec<(PathBuf, fs::Permissions)>,
     files: Vec<(PathBuf, Vec<u8>, fs::Permissions)>,
 }
 
@@ -227,7 +226,7 @@ impl DirectorySnapshot {
         fn visit(
             root: &Path,
             current: &Path,
-            directories: &mut Vec<PathBuf>,
+            directories: &mut Vec<(PathBuf, fs::Permissions)>,
             files: &mut Vec<(PathBuf, Vec<u8>, fs::Permissions)>,
         ) {
             let mut entries = fs::read_dir(current)
@@ -243,7 +242,13 @@ impl DirectorySnapshot {
                     .to_path_buf();
                 let file_type = entry.file_type().expect("read snapshot entry type");
                 if file_type.is_dir() {
-                    directories.push(relative);
+                    directories.push((
+                        relative,
+                        entry
+                            .metadata()
+                            .expect("read durable crash snapshot directory permissions")
+                            .permissions(),
+                    ));
                     visit(root, &path, directories, files);
                 } else if file_type.is_file() {
                     let permissions = entry
@@ -270,8 +275,11 @@ impl DirectorySnapshot {
     fn restore(&self, root: &Path) {
         let _ = fs::remove_dir_all(root);
         fs::create_dir_all(root).expect("recreate crash snapshot root");
-        for directory in &self.directories {
-            fs::create_dir_all(root.join(directory)).expect("restore snapshot directory");
+        for (directory, permissions) in &self.directories {
+            let directory = root.join(directory);
+            fs::create_dir_all(&directory).expect("restore snapshot directory");
+            fs::set_permissions(directory, permissions.clone())
+                .expect("restore durable crash snapshot directory permissions");
         }
         for (path, bytes, permissions) in &self.files {
             let path = root.join(path);
@@ -372,10 +380,10 @@ fn configure_provider(storage: &mut SqliteStorage, message: &ModelOpenMessage) {
                     context_window_tokens: 128_000,
                     max_output_tokens: 16_000,
                     tool_support: ModelToolSupport::Parallel,
+                    structured_output_support: StructuredOutputSupport::JsonSchemaStrict,
                     reasoning_efforts: vec!["high".to_owned()],
                 }],
             },
-            Instant("2026-09-02T00:00:00.000Z".to_owned()),
         )
         .expect("register loopback Provider");
     CredentialReferenceService::new(storage)
@@ -531,6 +539,44 @@ fn seed_pending_delivery_job(
     source: &Delivery,
     pending: &PendingDeliveryExecution,
 ) {
+    seed_delivery_state(&root.data(), source);
+
+    let mut control_plane = ControlPlane::start_local(
+        ControlPlaneConfig::local(root.data()),
+        Box::new(DiscardingPublisher),
+    )
+    .expect("start Delivery execution Control Plane");
+    control_plane
+        .commit_delivery_execution(
+            &CommandEnvelope {
+                actor: actor(),
+                command: CommandName::DeliveryAdvance,
+                expected_revision: Revision(
+                    i64::try_from(source.revision()).expect("Delivery revision fits API"),
+                ),
+                payload: serde_json::json!({"deliveryId": source.id().0}),
+                request_id: pending.request_id().clone(),
+                schema_version: SchemaVersion::WinwincodeV1,
+                scope: Scope::RepositoryScope(repository_scope()),
+            },
+            pending,
+            &mut RecordingDispatcher,
+        )
+        .expect("commit canonical Delivery and ExecutionJob");
+    control_plane
+        .shutdown()
+        .expect("shutdown Delivery execution Control Plane");
+}
+
+fn seed_delivery_state(data: &Path, source: &Delivery) {
+    #[derive(serde::Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct SeedDeliveryCatalogEntry<'scope> {
+        schema_version: u8,
+        repository_scope: &'scope RepositoryScope,
+        delivery_id: &'scope DeliveryId,
+    }
+
     let journal = CapturingJournal::default();
     DeliveryStore::borrowed(&journal)
         .execute(DeliveryCommand::SeedForTest(CreateDelivery {
@@ -566,7 +612,19 @@ fn seed_pending_delivery_job(
         RequestId(id("req", 14)),
     )
     .expect("source Delivery receipt identity");
-    let mut storage = SqliteStorage::open(root.data()).expect("open source Delivery storage");
+    let scope = repository_scope();
+    let catalog = serde_json::to_vec(&SeedDeliveryCatalogEntry {
+        schema_version: 1,
+        repository_scope: &scope,
+        delivery_id: source.id(),
+    })
+    .expect("Delivery catalog entry JSON");
+    let catalog_stream = format!(
+        "delivery-catalog:{:x}:{}",
+        Sha256::digest(serde_json::to_vec(&scope).expect("catalog scope JSON")),
+        source.id().0
+    );
+    let mut storage = SqliteStorage::open(data).expect("open source Delivery storage");
     storage
         .commit(
             &StateCommit::new(
@@ -581,38 +639,15 @@ fn seed_pending_delivery_job(
                     source.encode_json().expect("source Delivery event JSON"),
                 )],
             )
-            .with_journal_publication(publication),
+            .with_journal_publication(publication)
+            .with_state_mutation(
+                StateMutation::new(catalog_stream, 0, catalog).expect("catalog mutation"),
+            ),
         )
         .expect("commit source Delivery");
     Box::new(storage)
         .close()
         .expect("close source Delivery storage");
-
-    let mut control_plane = ControlPlane::start_local(
-        ControlPlaneConfig::local(root.data()),
-        Box::new(DiscardingPublisher),
-    )
-    .expect("start Delivery execution Control Plane");
-    control_plane
-        .commit_delivery_execution(
-            &CommandEnvelope {
-                actor: actor(),
-                command: CommandName::DeliveryAdvance,
-                expected_revision: Revision(
-                    i64::try_from(source.revision()).expect("Delivery revision fits API"),
-                ),
-                payload: serde_json::json!({"deliveryId": source.id().0}),
-                request_id: pending.request_id().clone(),
-                schema_version: SchemaVersion::WinwincodeV1,
-                scope: Scope::RepositoryScope(repository_scope()),
-            },
-            pending,
-            &mut RecordingDispatcher,
-        )
-        .expect("commit canonical Delivery and ExecutionJob");
-    control_plane
-        .shutdown()
-        .expect("shutdown Delivery execution Control Plane");
 }
 
 #[derive(Default)]
@@ -1452,6 +1487,13 @@ fn dispatch_for_job(job: ExecutionJob, lease: ExecutionLeaseStamp) -> JobDispatc
 }
 
 fn adapter_config(root: &TestDirectory) -> winwincode_codex::ProductionCodexConfig {
+    adapter_config_with_mode(root, winwincode_codex::ExecutionMode::React)
+}
+
+fn adapter_config_with_mode(
+    root: &TestDirectory,
+    execution_mode: winwincode_codex::ExecutionMode,
+) -> winwincode_codex::ProductionCodexConfig {
     winwincode_codex::ProductionCodexConfig::try_new(winwincode_codex::ProductionCodexOptions {
         data_directory: root.worker(),
         helper_executable: helper_executable(),
@@ -1469,8 +1511,615 @@ fn adapter_config(root: &TestDirectory) -> winwincode_codex::ProductionCodexConf
             version: 1,
             digest: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
         },
+        execution_mode,
+        observer_mode: winwincode_codex::ObserverMode::Off,
     })
     .expect("validated production Codex configuration")
+}
+
+#[test]
+fn delegated_structured_proposal_is_retained_once_without_terminal_outcome() {
+    run_on_large_stack(async {
+        let root = TestDirectory::new("production-delegated-proposal");
+        let mut dispatch = dispatch(&root);
+        dispatch.job.workspace.write_mode = ExecutionWorkspaceWriteMode::ReadOnly;
+        let port = RecordedPort::default();
+        let adapter = winwincode_codex::ProductionCodexAdapter::open(adapter_config_with_mode(
+            &root,
+            winwincode_codex::ExecutionMode::DelegatedPatch,
+        ))
+        .expect("open delegated production adapter");
+        let mut worker = winwincode_worker::WorkerMain::new(
+            worker_config(),
+            port.clone(),
+            adapter,
+            root.workspace_runtime(),
+        );
+        register(&mut worker, &port).await;
+        worker
+            .accept_control(
+                &ExecutionPortMessage::JobDispatchMessage(dispatch.clone()),
+                at("2030-01-01T00:00:00.000Z"),
+            )
+            .await
+            .expect("accept delegated dispatch");
+        let open = poll_until_message(
+            &mut worker,
+            &port,
+            &at("2030-01-01T00:00:01.000Z"),
+            |messages| {
+                messages.iter().find_map(|message| match message {
+                    ExecutionPortMessage::ModelOpenMessage(open) => Some(open.clone()),
+                    _ => None,
+                })
+            },
+            "delegated model request was not delivered",
+        )
+        .await;
+        let request_bytes = STANDARD
+            .decode(&open.request.data_base64)
+            .expect("decode delegated request");
+        let request: serde_json::Value =
+            serde_json::from_slice(&request_bytes).expect("decode delegated request JSON");
+        let format = &request["request"]["text"]["format"];
+        assert_eq!(format["type"], "json_schema", "{request:#}");
+        assert_eq!(format["strict"], true);
+        assert_eq!(format["schema"]["additionalProperties"], false);
+
+        setup_model(&root, &open, &dispatch.job);
+        let mut app = application(&root);
+        let gateway = opened(
+            app.accept_local(&typed(ExecutionPortMessage::ModelOpenMessage(open.clone())))
+                .expect("accept delegated ModelOpen"),
+        );
+        let final_message = serde_json::json!({
+            "acceptanceCriteriaIds": dispatch.job.stage_input
+                .as_ref()
+                .and_then(|input| input.task.as_ref())
+                .expect("delegated task")
+                .acceptance_criterion_ids,
+            "disposition": "final",
+            "patch": "*** Begin Patch\n*** Update File: src/lib.rs\n@@\n-pub fn fixture_value() -> u64 { 1 }\n+pub fn fixture_value() -> u64 { 2 }\n*** End Patch\n",
+            "schemaVersion": 1,
+            "validationProfile": "changed"
+        })
+        .to_string();
+        let usage = ProviderTokenUsage {
+            input_tokens: 10,
+            cached_input_tokens: 0,
+            cache_write_input_tokens: 0,
+            output_tokens: 5,
+            reasoning_output_tokens: 0,
+        };
+        for chunk in provider_chunks(
+            &open,
+            &gateway,
+            [
+                ProviderStreamEvent::ResponseStarted {
+                    provider_response_id: "provider-delegated-response".to_owned(),
+                },
+                ProviderStreamEvent::TextStarted { index: 0 },
+                ProviderStreamEvent::TextDelta {
+                    index: 0,
+                    delta: final_message,
+                },
+                ProviderStreamEvent::TextEnded { index: 0 },
+                ProviderStreamEvent::Usage(usage),
+                ProviderStreamEvent::Finished(ProviderFinishReason::Stop),
+            ],
+            980,
+        ) {
+            worker
+                .accept_control(
+                    &ExecutionPortMessage::ModelChunkMessage(chunk),
+                    at("2030-01-01T00:00:02.000Z"),
+                )
+                .await
+                .expect("deliver delegated structured output");
+        }
+
+        let mut stopped_at_writer_boundary = false;
+        for _ in 0..400 {
+            if worker
+                .poll_codex(at("2030-01-01T00:00:02.000Z"))
+                .await
+                .is_err()
+            {
+                stopped_at_writer_boundary = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(
+            stopped_at_writer_boundary,
+            "the PR2 proposal must stop at the unavailable writer boundary"
+        );
+
+        let journal = rusqlite::Connection::open(
+            root.0
+                .join(".workspaces-change-batches/change-batch.sqlite3"),
+        )
+        .expect("open retained ChangeBatch proposals");
+        let mut statement = journal
+            .prepare("SELECT event_json FROM change_batch_intent ORDER BY batch_id")
+            .expect("prepare retained proposal query");
+        let retained_events = statement
+            .query_map([], |row| row.get::<_, Vec<u8>>(0))
+            .expect("query retained proposals")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("read retained proposals");
+        assert_eq!(
+            retained_events.len(),
+            1,
+            "the delegated structured proposal must be retained exactly once"
+        );
+        let retained: ChangeBatchProposalEvent = serde_json::from_slice(&retained_events[0])
+            .expect("decode retained delegated proposal");
+        assert_eq!(retained.proposal.schema_version, 1);
+        assert_eq!(
+            serde_json::to_value(&retained.proposal.validation_profile)
+                .expect("encode retained validation profile"),
+            "changed"
+        );
+        assert_eq!(
+            serde_json::to_value(&retained).expect("encode retained proposal"),
+            stored_run_json(&root)["batchIntent"]["event"],
+            "the adapter and Worker stores must bind the same proposal"
+        );
+        assert_eq!(worker.active_jobs().len(), 1);
+        assert!(
+            !port.messages().iter().any(|message| matches!(
+                message,
+                ExecutionPortMessage::ArtifactOpenMessage(open)
+                    if open.artifact.kind == ArtifactKind::Candidate
+            )),
+            "a retained proposal must not produce a Candidate"
+        );
+        assert!(!port.messages().iter().any(|message| matches!(
+            message,
+            ExecutionPortMessage::ActionEnforcementRequestMessage(_)
+        )));
+        assert!(
+            !port
+                .messages()
+                .iter()
+                .any(|message| matches!(message, ExecutionPortMessage::JobOutcomeMessage(_))),
+            "a retained proposal must leave the Job nonterminal"
+        );
+        assert_eq!(
+            fs::read_to_string(root.sources().join(id("rep", 1)).join("src/lib.rs"))
+                .expect("read unchanged delegated source"),
+            "pub fn fixture_value() -> u64 { 1 }\n"
+        );
+        assert_eq!(
+            fs::read_to_string(detached_checkout(&root).join("src/lib.rs"))
+                .expect("read unchanged delegated checkout"),
+            "pub fn fixture_value() -> u64 { 1 }\n"
+        );
+    });
+}
+
+#[cfg(feature = "test-support")]
+#[test]
+fn delegated_proposal_restart_replays_one_intent_without_second_composer() {
+    use winwincode_codex::{CodexPoll, CodexRunKey, CodexThreadStart};
+
+    run_on_large_stack(async {
+        let root = TestDirectory::new("production-delegated-proposal-restart");
+        let mut dispatch = dispatch(&root);
+        dispatch.job.workspace.write_mode = ExecutionWorkspaceWriteMode::ReadOnly;
+        let port = RecordedPort::default();
+        let adapter = winwincode_codex::ProductionCodexAdapter::open(adapter_config_with_mode(
+            &root,
+            winwincode_codex::ExecutionMode::DelegatedPatch,
+        ))
+        .expect("open delegated proposal restart adapter");
+        let mut worker = winwincode_worker::WorkerMain::new(
+            worker_config(),
+            port.clone(),
+            adapter,
+            root.workspace_runtime(),
+        );
+        register(&mut worker, &port).await;
+        worker
+            .accept_control(
+                &ExecutionPortMessage::JobDispatchMessage(dispatch.clone()),
+                at("2030-01-01T00:00:00.000Z"),
+            )
+            .await
+            .expect("accept delegated proposal restart fixture");
+        let open = poll_until_message(
+            &mut worker,
+            &port,
+            &at("2030-01-01T00:00:01.000Z"),
+            |messages| {
+                messages.iter().find_map(|message| match message {
+                    ExecutionPortMessage::ModelOpenMessage(open) => Some(open.clone()),
+                    _ => None,
+                })
+            },
+            "initial delegated proposal request was not delivered",
+        )
+        .await;
+        setup_model(&root, &open, &dispatch.job);
+        let mut app = application(&root);
+        let gateway = opened(
+            app.accept_local(&typed(ExecutionPortMessage::ModelOpenMessage(open.clone())))
+                .expect("accept initial delegated proposal open"),
+        );
+        let final_message = serde_json::json!({
+            "acceptanceCriteriaIds": dispatch.job.stage_input
+                .as_ref()
+                .and_then(|input| input.task.as_ref())
+                .expect("delegated task")
+                .acceptance_criterion_ids,
+            "disposition": "continue",
+            "patch": "*** Begin Patch\n*** Update File: src/lib.rs\n@@\n-pub fn fixture_value() -> u64 { 1 }\n+pub fn fixture_value() -> u64 { 2 }\n*** End Patch\n",
+            "schemaVersion": 1,
+            "validationProfile": "changed"
+        })
+        .to_string();
+        let usage = ProviderTokenUsage {
+            input_tokens: 10,
+            cached_input_tokens: 0,
+            cache_write_input_tokens: 0,
+            output_tokens: 5,
+            reasoning_output_tokens: 0,
+        };
+        for chunk in provider_chunks(
+            &open,
+            &gateway,
+            [
+                ProviderStreamEvent::ResponseStarted {
+                    provider_response_id: "provider-delegated-proposal-restart".to_owned(),
+                },
+                ProviderStreamEvent::TextStarted { index: 0 },
+                ProviderStreamEvent::TextDelta {
+                    index: 0,
+                    delta: final_message,
+                },
+                ProviderStreamEvent::TextEnded { index: 0 },
+                ProviderStreamEvent::Usage(usage),
+                ProviderStreamEvent::Finished(ProviderFinishReason::Stop),
+            ],
+            980,
+        ) {
+            worker
+                .accept_control(
+                    &ExecutionPortMessage::ModelChunkMessage(chunk),
+                    at("2030-01-01T00:00:02.000Z"),
+                )
+                .await
+                .expect("deliver delegated proposal restart response");
+        }
+        let mut retained_at_writer_boundary = false;
+        for _ in 0..400 {
+            if worker
+                .poll_codex(at("2030-01-01T00:00:02.000Z"))
+                .await
+                .is_err()
+            {
+                retained_at_writer_boundary = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(
+            retained_at_writer_boundary,
+            "delegated proposal was not retained before restart"
+        );
+
+        let journal_path = root
+            .0
+            .join(".workspaces-change-batches/change-batch.sqlite3");
+        let retained_events = rusqlite::Connection::open(&journal_path)
+            .expect("open delegated proposal store")
+            .prepare("SELECT event_json FROM change_batch_intent ORDER BY batch_id")
+            .expect("prepare delegated proposal query")
+            .query_map([], |row| row.get::<_, Vec<u8>>(0))
+            .expect("query delegated proposals")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("read delegated proposals");
+        assert_eq!(retained_events.len(), 1);
+        let proposal: ChangeBatchProposalEvent = serde_json::from_slice(&retained_events[0])
+            .expect("decode retained proposal before restart");
+        let active = worker.active_jobs()[0].clone();
+        let checkout = detached_checkout(&root);
+        let crash_snapshot = DirectorySnapshot::capture(&root.0);
+        drop(worker);
+        crash_snapshot.restore(&root.0);
+
+        let run_key = CodexRunKey::from_dispatch(&dispatch);
+        let mut replay_adapter = winwincode_codex::ProductionCodexAdapter::open(
+            adapter_config_with_mode(&root, winwincode_codex::ExecutionMode::DelegatedPatch),
+        )
+        .expect("reopen delegated proposal adapter");
+        let replayed_thread = replay_adapter
+            .ensure_thread(CodexThreadStart {
+                run_key: &run_key,
+                job: &dispatch.job,
+                lease: &dispatch.lease,
+                worker_session_id: &active.worker_session_id,
+                workspace: &checkout,
+                workspace_revision: &proposal.identity.workspace_revision,
+            })
+            .await
+            .expect("recover delegated proposal thread");
+        assert_eq!(replayed_thread, active.codex_thread_id);
+        replay_adapter
+            .observe_now(&at("2030-01-01T00:00:03.000Z"))
+            .expect("observe delegated proposal replay time");
+
+        let mut replayed_proposal = None;
+        for _ in 0..80 {
+            match replay_adapter
+                .poll(&replayed_thread, &at("2030-01-01T00:00:03.000Z"))
+                .await
+                .expect("poll retained delegated proposal")
+            {
+                CodexPoll::ChangeBatchProposed(event) => {
+                    replayed_proposal = Some(*event);
+                    break;
+                }
+                CodexPoll::Pending | CodexPoll::RuntimeTrace(_) => {}
+                outcome => panic!("unexpected delegated proposal replay: {outcome:?}"),
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            replayed_proposal.as_ref(),
+            Some(&proposal),
+            "restart must replay the exact retained proposal"
+        );
+        for _ in 0..4 {
+            assert!(!matches!(
+                replay_adapter
+                    .poll(&replayed_thread, &at("2030-01-01T00:00:03.000Z"))
+                    .await
+                    .expect("poll after retained proposal replay"),
+                CodexPoll::ChangeBatchProposed(_)
+            ));
+        }
+        assert!(
+            !replay_adapter
+                .take_execution_messages()
+                .expect("read delegated proposal replay messages")
+                .iter()
+                .any(|message| matches!(message, ExecutionPortMessage::ModelOpenMessage(_)))
+        );
+
+        let replayed_events = rusqlite::Connection::open(&journal_path)
+            .expect("reopen delegated proposal store")
+            .prepare("SELECT event_json FROM change_batch_intent ORDER BY batch_id")
+            .expect("prepare replayed proposal query")
+            .query_map([], |row| row.get::<_, Vec<u8>>(0))
+            .expect("query replayed proposals")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("read replayed proposals");
+        assert_eq!(replayed_events, retained_events);
+        let replayed_run = stored_run_json(&root);
+        assert_eq!(
+            replayed_run["batchIntent"]["event"],
+            serde_json::to_value(&proposal).expect("encode replayed proposal")
+        );
+        assert!(replayed_run["terminal"].is_null());
+        assert!(
+            replayed_run["delegatedTransitions"]
+                .as_array()
+                .expect("delegated transition array")
+                .is_empty()
+        );
+        assert_eq!(
+            fs::read_to_string(root.sources().join(id("rep", 1)).join("src/lib.rs"))
+                .expect("read unchanged delegated source after restart"),
+            "pub fn fixture_value() -> u64 { 1 }\n"
+        );
+        assert_eq!(
+            fs::read_to_string(checkout.join("src/lib.rs"))
+                .expect("read unchanged delegated checkout after restart"),
+            "pub fn fixture_value() -> u64 { 1 }\n"
+        );
+    });
+}
+
+#[test]
+fn delegated_invalid_output_gets_one_format_repair_then_becomes_inconclusive() {
+    run_on_large_stack(async {
+        let root = TestDirectory::new("production-delegated-repair");
+        let mut dispatch = dispatch(&root);
+        dispatch.job.workspace.write_mode = ExecutionWorkspaceWriteMode::ReadOnly;
+        let port = RecordedPort::default();
+        let adapter = winwincode_codex::ProductionCodexAdapter::open(adapter_config_with_mode(
+            &root,
+            winwincode_codex::ExecutionMode::DelegatedPatch,
+        ))
+        .expect("open delegated repair adapter");
+        let mut worker = winwincode_worker::WorkerMain::new(
+            worker_config(),
+            port.clone(),
+            adapter,
+            root.workspace_runtime(),
+        );
+        register(&mut worker, &port).await;
+        worker
+            .accept_control(
+                &ExecutionPortMessage::JobDispatchMessage(dispatch.clone()),
+                at("2030-01-01T00:00:00.000Z"),
+            )
+            .await
+            .expect("accept delegated repair dispatch");
+        let first_open = poll_until_message(
+            &mut worker,
+            &port,
+            &at("2030-01-01T00:00:01.000Z"),
+            |messages| {
+                messages.iter().find_map(|message| match message {
+                    ExecutionPortMessage::ModelOpenMessage(open) => Some(open.clone()),
+                    _ => None,
+                })
+            },
+            "delegated repair request was not delivered",
+        )
+        .await;
+        setup_model(&root, &first_open, &dispatch.job);
+        let mut app = application(&root);
+        let first_gateway = opened(
+            app.accept_local(&typed(ExecutionPortMessage::ModelOpenMessage(
+                first_open.clone(),
+            )))
+            .expect("accept first delegated repair ModelOpen"),
+        );
+        let usage = ProviderTokenUsage {
+            input_tokens: 10,
+            cached_input_tokens: 0,
+            cache_write_input_tokens: 0,
+            output_tokens: 5,
+            reasoning_output_tokens: 0,
+        };
+        for chunk in provider_chunks(
+            &first_open,
+            &first_gateway,
+            [
+                ProviderStreamEvent::ResponseStarted {
+                    provider_response_id: "provider-delegated-invalid-1".to_owned(),
+                },
+                ProviderStreamEvent::TextStarted { index: 0 },
+                ProviderStreamEvent::TextDelta {
+                    index: 0,
+                    delta: "not a ChangeBatch proposal".to_owned(),
+                },
+                ProviderStreamEvent::TextEnded { index: 0 },
+                ProviderStreamEvent::Usage(usage),
+                ProviderStreamEvent::Finished(ProviderFinishReason::Stop),
+            ],
+            990,
+        ) {
+            worker
+                .accept_control(
+                    &ExecutionPortMessage::ModelChunkMessage(chunk),
+                    at("2030-01-01T00:00:02.000Z"),
+                )
+                .await
+                .expect("deliver first invalid delegated output");
+        }
+        let repair_open = poll_until_message(
+            &mut worker,
+            &port,
+            &at("2030-01-01T00:00:02.000Z"),
+            |messages| {
+                messages
+                    .iter()
+                    .filter_map(|message| match message {
+                        ExecutionPortMessage::ModelOpenMessage(open) => Some(open.clone()),
+                        _ => None,
+                    })
+                    .nth(1)
+            },
+            "one delegated format-repair request was not delivered",
+        )
+        .await;
+        let first_request: serde_json::Value = serde_json::from_slice(
+            &STANDARD
+                .decode(&first_open.request.data_base64)
+                .expect("decode first delegated repair request"),
+        )
+        .expect("parse first delegated repair request");
+        let repair_request: serde_json::Value = serde_json::from_slice(
+            &STANDARD
+                .decode(&repair_open.request.data_base64)
+                .expect("decode delegated format-repair request"),
+        )
+        .expect("parse delegated format-repair request");
+        assert_eq!(
+            repair_request["request"]["text"]["format"],
+            first_request["request"]["text"]["format"]
+        );
+        let repair_gateway = opened(
+            app.accept_local(&typed(ExecutionPortMessage::ModelOpenMessage(
+                repair_open.clone(),
+            )))
+            .expect("accept delegated format-repair ModelOpen"),
+        );
+        for chunk in provider_chunks(
+            &repair_open,
+            &repair_gateway,
+            [
+                ProviderStreamEvent::ResponseStarted {
+                    provider_response_id: "provider-delegated-invalid-2".to_owned(),
+                },
+                ProviderStreamEvent::TextStarted { index: 0 },
+                ProviderStreamEvent::TextDelta {
+                    index: 0,
+                    delta: "still invalid".to_owned(),
+                },
+                ProviderStreamEvent::TextEnded { index: 0 },
+                ProviderStreamEvent::Usage(ProviderTokenUsage {
+                    input_tokens: 10,
+                    cached_input_tokens: 0,
+                    cache_write_input_tokens: 0,
+                    output_tokens: 5,
+                    reasoning_output_tokens: 0,
+                }),
+                ProviderStreamEvent::Finished(ProviderFinishReason::Stop),
+            ],
+            1_000,
+        ) {
+            worker
+                .accept_control(
+                    &ExecutionPortMessage::ModelChunkMessage(chunk),
+                    at("2030-01-01T00:00:02.000Z"),
+                )
+                .await
+                .expect("deliver second invalid delegated output");
+        }
+        let outcome = poll_until_message(
+            &mut worker,
+            &port,
+            &at("2030-01-01T00:00:02.000Z"),
+            |messages| {
+                messages.iter().find_map(|message| match message {
+                    ExecutionPortMessage::JobOutcomeMessage(outcome) => Some(outcome.clone()),
+                    _ => None,
+                })
+            },
+            "delegated invalid repair did not become inconclusive",
+        )
+        .await;
+        assert_eq!(outcome.outcome.status, ExecutionOutcomeStatus::Failed);
+        assert_eq!(
+            outcome.outcome.summary,
+            "delegated ChangeBatch proposal was inconclusive"
+        );
+        let error = outcome
+            .outcome
+            .error
+            .as_ref()
+            .expect("delegated inconclusive outcome error");
+        assert_eq!(error.code, ExecutionPortErrorCode::ExecutionFailed);
+        assert_eq!(
+            error.message,
+            "delegated ChangeBatch proposal was inconclusive"
+        );
+        assert!(!error.retryable);
+        assert_eq!(
+            port.messages()
+                .iter()
+                .filter(|message| matches!(message, ExecutionPortMessage::ModelOpenMessage(_)))
+                .count(),
+            2
+        );
+        assert!(worker.take_delegated_poll_outcomes().is_empty());
+        assert!(worker.active_jobs().is_empty());
+        assert_eq!(
+            fs::read_to_string(root.sources().join(id("rep", 1)).join("src/lib.rs"),)
+                .expect("read unchanged delegated source"),
+            "pub fn fixture_value() -> u64 { 1 }\n"
+        );
+        assert!(!port.messages().iter().any(|message| matches!(
+            message,
+            ExecutionPortMessage::ActionEnforcementRequestMessage(_)
+        )));
+    });
 }
 
 async fn register(
@@ -2483,8 +3132,13 @@ fn exact_submission_digest(job: &ExecutionJob) -> Sha256Digest {
     let prompt = winwincode_codex::stage_product::stage_product_prompt(job)
         .expect("build canonical stage prompt");
     let mut digest = Sha256::new();
-    digest.update(b"winwincode.codex-submission.v1\0");
+    digest.update(b"winwincode.codex-submission.v2\0");
+    digest.update((prompt.len() as u64).to_be_bytes());
     digest.update(prompt.as_bytes());
+    let no_schema = serde_json::to_vec(&Option::<serde_json::Value>::None)
+        .expect("serialize absent output schema");
+    digest.update((no_schema.len() as u64).to_be_bytes());
+    digest.update(no_schema);
     Sha256Digest(format!("sha256:{:x}", digest.finalize()))
 }
 
@@ -2785,8 +3439,38 @@ fn production_worker_kernel_gateway_loopback_and_restart_replay_are_exact() {
                 .iter()
                 .filter(|message| matches!(message, ExecutionPortMessage::RuntimeEventMessage(_)))
                 .count(),
-            3
+            4
         );
+        let baseline = first_terminal_facts
+            .iter()
+            .find_map(|message| match message {
+                ExecutionPortMessage::RuntimeEventMessage(event)
+                    if event.event.category == ExecutionEventCategory::Usage =>
+                {
+                    runtime_payload(event)
+                }
+                _ => None,
+            })
+            .expect("terminal performance baseline Usage event");
+        assert_eq!(baseline["fact"]["kind"], "performance_baseline");
+        assert_eq!(baseline["fact"]["report"]["executionMode"], "react");
+        assert_eq!(baseline["fact"]["report"]["observerMode"], "off");
+        assert_eq!(baseline["fact"]["report"]["primaryModelCallCount"], 1);
+        assert_eq!(baseline["fact"]["report"]["primaryModelInputTokens"], 10);
+        assert_eq!(baseline["fact"]["report"]["primaryModelCachedTokens"], 0);
+        assert_eq!(baseline["fact"]["report"]["primaryModelOutputTokens"], 5);
+        assert_eq!(baseline["fact"]["report"]["turnCount"], 1);
+        let first_performance_evidence =
+            winwincode_codex::performance_evidence::export_performance_v0_evidence(&root.worker())
+                .expect("export production performance evidence");
+        assert_eq!(first_performance_evidence.runs.len(), 1);
+        assert_eq!(first_performance_evidence.model_calls.len(), 1);
+        let comparison = first_performance_evidence
+            .summarize()
+            .expect("summarize production performance evidence");
+        assert_eq!(comparison.react.sample_count, 1);
+        assert_eq!(comparison.react.strong_model_call_count, 1);
+        assert_eq!(comparison.react.total_tokens, 15);
         let outcome = first_terminal_facts
             .iter()
             .find_map(|message| match message {
@@ -2840,6 +3524,11 @@ fn production_worker_kernel_gateway_loopback_and_restart_replay_are_exact() {
         assert_eq!(
             unique_terminal_facts(&replay_port.messages()),
             expected_replay
+        );
+        assert_eq!(
+            winwincode_codex::performance_evidence::export_performance_v0_evidence(&root.worker())
+                .expect("re-export production performance evidence after replay"),
+            first_performance_evidence
         );
         replay
             .shutdown(at("2030-01-01T00:00:03.000Z"))
@@ -3072,17 +3761,22 @@ fn production_event_poll_faults_retain_one_terminal_before_restart() {
                     | ExecutionPortMessage::ModelAckMessage(_)
             )));
             let first_facts = unique_terminal_facts(&first_messages);
-            assert_eq!(first_facts.len(), 2);
-            let ExecutionPortMessage::RuntimeEventMessage(stopped) = &first_facts[0] else {
+            assert_eq!(first_facts.len(), 3);
+            let ExecutionPortMessage::RuntimeEventMessage(baseline) = &first_facts[0] else {
+                panic!("durable performance baseline must precede the Stopped trace");
+            };
+            assert_eq!(baseline.event.sequence, ExecutionSequence(1));
+            assert_eq!(baseline.event.category, ExecutionEventCategory::Usage);
+            let ExecutionPortMessage::RuntimeEventMessage(stopped) = &first_facts[1] else {
                 panic!("durable Stopped trace must precede infrastructure Outcome");
             };
-            assert_eq!(stopped.event.sequence, ExecutionSequence(1));
+            assert_eq!(stopped.event.sequence, ExecutionSequence(2));
             assert_eq!(stopped.event.summary, expected_summary);
-            let ExecutionPortMessage::JobOutcomeMessage(outcome) = &first_facts[1] else {
+            let ExecutionPortMessage::JobOutcomeMessage(outcome) = &first_facts[2] else {
                 panic!("durable infrastructure Outcome must follow Stopped trace");
             };
             assert_eq!(outcome.outcome.status, expected_status);
-            assert_eq!(outcome.outcome.last_event_sequence.0, 1);
+            assert_eq!(outcome.outcome.last_event_sequence.0, 2);
             assert_eq!(stored_run_json(&root)["phase"], "outcome_retained");
             first
                 .shutdown(at("2030-01-01T00:00:03.000Z"))
@@ -3169,18 +3863,24 @@ fn pre_start_cancellation_restarts_with_one_exact_stopped_outcome() {
             ExecutionPortMessage::ModelOpenMessage(_) | ExecutionPortMessage::ModelAckMessage(_)
         )));
         let first_facts = unique_terminal_facts(&first_messages);
-        assert_eq!(first_facts.len(), 2);
+        assert_eq!(first_facts.len(), 3);
         assert!(matches!(
             &first_facts[0],
             ExecutionPortMessage::RuntimeEventMessage(event)
                 if event.event.sequence.0 == 1
-                    && event.event.summary == "embedded Codex turn cancelled"
+                    && event.event.category == ExecutionEventCategory::Usage
         ));
         assert!(matches!(
             &first_facts[1],
+            ExecutionPortMessage::RuntimeEventMessage(event)
+                if event.event.sequence.0 == 2
+                    && event.event.summary == "embedded Codex turn cancelled"
+        ));
+        assert!(matches!(
+            &first_facts[2],
             ExecutionPortMessage::JobOutcomeMessage(outcome)
                 if outcome.outcome.status == ExecutionOutcomeStatus::Cancelled
-                    && outcome.outcome.last_event_sequence.0 == 1
+                    && outcome.outcome.last_event_sequence.0 == 2
         ));
         first
             .shutdown(at("2030-01-01T00:00:03.000Z"))

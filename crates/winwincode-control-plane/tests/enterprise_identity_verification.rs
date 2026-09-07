@@ -20,7 +20,7 @@ use winwincode_api::generated::{
     Actor, CredentialReferenceCreateCommand, CredentialReferenceCreateCommandCommand,
     CredentialReferenceCreatePayload, CredentialReferenceRevokeCommand,
     CredentialReferenceRevokeCommandCommand, CredentialReferenceRevokePayload, OrganizationScope,
-    OrganizationScopeKind, Scope, UserActor, UserActorKind,
+    OrganizationScopeKind, Scope,
 };
 use winwincode_control_plane::{
     CredentialReferenceService, EnterpriseIdentityProductionVerifiers,
@@ -31,6 +31,7 @@ use winwincode_control_plane::{
 use winwincode_domain::{
     CredentialReferenceId, OrganizationId, RequestId, Revision, SchemaVersion, UserId,
 };
+use winwincode_domain::{UserActor, UserActorKind};
 use winwincode_storage::SqliteStorage;
 
 const AUTHORITY_CREDENTIAL: &[u8] = b"fixture-verification-authority-credential";

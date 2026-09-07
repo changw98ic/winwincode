@@ -9,8 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use rusqlite::{Connection, params};
 use winwincode_api::generated::{
     ControlPlaneWebSocketProductSessionChangedEvent,
-    ControlPlaneWebSocketProductSessionMessageAppendedEvent, ModelRoute, RepositoryScope,
-    RepositoryScopeKind,
+    ControlPlaneWebSocketProductSessionMessageAppendedEvent, ModelRoute,
 };
 use winwincode_control_plane::{
     AppendAssistantMessageCommand, AssistantMessageState, CancelProductSessionCommand,
@@ -26,6 +25,7 @@ use winwincode_domain::{
     RequestId, ServiceAccountId, Sha256Digest, StageRunId, UserId, WorkerId, WorkerInstanceId,
     WorkerSessionId, WorkspaceId,
 };
+use winwincode_domain::{RepositoryScope, RepositoryScopeKind};
 use winwincode_execution_port::generated::{ExecutionOutcomeStatus, ExecutionOutcomeUsage};
 use winwincode_session::{
     AuthenticatedActor, ProductSessionState, RouteWriteStatus, SessionBindingIdentity,

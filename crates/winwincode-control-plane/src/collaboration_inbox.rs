@@ -15,7 +15,8 @@ use std::{
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
-use winwincode_api::generated::{Actor, RepositoryScope, Scope};
+use winwincode_api::generated::{Actor, Scope};
+use winwincode_domain::RepositoryScope;
 use winwincode_domain::{
     ApprovalId, AttentionItemId, DeliveryId, EnterpriseTeamId, OpaqueCursor, ProductSessionId,
     RequestId, Sha256Digest, UserId,

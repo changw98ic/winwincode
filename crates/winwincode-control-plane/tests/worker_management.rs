@@ -8,10 +8,10 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use winwincode_api::generated::{
-    Actor, PageRequest, RepositoryScope, RepositoryScopeKind, Scope, SystemActor, SystemActorKind,
-    WorkerDrainCommand, WorkerDrainCommandCommand, WorkerDrainPayload, WorkerEnableCommand,
-    WorkerEnableCommandCommand, WorkerEnablePayload, WorkerGetParameters, WorkerGetQuery,
-    WorkerGetQueryQuery, WorkerListParameters, WorkerListQuery, WorkerListQueryQuery,
+    Actor, PageRequest, Scope, SystemActor, SystemActorKind, WorkerDrainCommand,
+    WorkerDrainCommandCommand, WorkerDrainPayload, WorkerEnableCommand, WorkerEnableCommandCommand,
+    WorkerEnablePayload, WorkerGetParameters, WorkerGetQuery, WorkerGetQueryQuery,
+    WorkerListParameters, WorkerListQuery, WorkerListQueryQuery,
 };
 use winwincode_control_plane::{
     ScopeWorkerHealthEventPort, WorkerHealthEventPort, WorkerHealthEventPortError,
@@ -21,6 +21,7 @@ use winwincode_domain::{
     ExecutionMessageId, Instant, OpaqueCursor, OrganizationId, ProjectId, RepositoryId, RequestId,
     Revision, SchemaVersion, Sha256Digest, SystemActorId, WorkerId, WorkerInstanceId, WorkspaceId,
 };
+use winwincode_domain::{RepositoryScope, RepositoryScopeKind};
 use winwincode_storage::{
     EXECUTION_PROTOCOL_VERSION, NewOutboxEvent, SqliteStorage, WorkerAuthenticationIdentity,
     WorkerManagementState, WorkerPlatform, WorkerRegistrationRequest, WorkerRegistryScope,

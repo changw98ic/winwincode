@@ -16,8 +16,7 @@ use winwincode_api::generated::{
     CredentialReferenceCreatePayload, CredentialReferenceRevokeCommand,
     CredentialReferenceRevokeCommandCommand, CredentialReferenceRevokePayload,
     CredentialReferenceRotateCommand, CredentialReferenceRotateCommandCommand,
-    CredentialReferenceRotatePayload, OrganizationScope, OrganizationScopeKind, Scope, UserActor,
-    UserActorKind,
+    CredentialReferenceRotatePayload, OrganizationScope, OrganizationScopeKind, Scope,
 };
 use winwincode_control_plane::{
     CredentialReferenceErrorKind, CredentialReferenceResolution, CredentialReferenceService,
@@ -28,6 +27,7 @@ use winwincode_control_plane::{
 use winwincode_domain::{
     CredentialReferenceId, OrganizationId, RequestId, Revision, SchemaVersion, UserId,
 };
+use winwincode_domain::{UserActor, UserActorKind};
 use winwincode_storage::SqliteStorage;
 
 const INITIAL_SECRET: &[u8] = b"VAULT_INITIAL_PROVIDER_SECRET";

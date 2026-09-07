@@ -1986,6 +1986,7 @@ fn gateway_kind(kind: ProviderGatewayErrorKind) -> &'static str {
         ProviderGatewayErrorKind::SettlementUnavailable => "settlement_unavailable",
         ProviderGatewayErrorKind::CredentialLeak => "credential_leak",
         ProviderGatewayErrorKind::Storage => "storage",
+        ProviderGatewayErrorKind::StructuredOutputUnsupported => "structured_output_unsupported",
     }
 }
 

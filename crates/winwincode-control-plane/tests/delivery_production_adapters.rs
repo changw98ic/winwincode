@@ -9,8 +9,7 @@ use rusqlite::Connection;
 use winwincode_api::generated::{
     AcceptanceCriterionInput, Actor, DeliveryAdvanceCommand, DeliveryAdvanceCommandCommand,
     DeliveryAdvancePayload, DeliveryCreateCommand, DeliveryCreateCommandCommand,
-    DeliveryCreatePayload, DeliverySpecInput, RepositoryScope, RepositoryScopeKind, UserActor,
-    UserActorKind,
+    DeliveryCreatePayload, DeliverySpecInput,
 };
 use winwincode_control_plane::{
     ControlPlane, ControlPlaneConfig, EventPublishError, EventPublisher,
@@ -19,6 +18,11 @@ use winwincode_control_plane::{
 use winwincode_domain::{
     DeliveryId, OrganizationId, ProjectId, RepositoryId, RequestId, Revision, SchemaVersion,
     UserId, WorkspaceId,
+};
+use winwincode_domain::{RepositoryScope, RepositoryScopeKind, UserActor, UserActorKind};
+use winwincode_execution_port::{
+    generated::{ExecutionJob, ExecutionWorkspaceWriteMode},
+    runtime_trace_outbox::ExecutionMode,
 };
 
 struct NoopPublisher;
@@ -40,7 +44,12 @@ fn local_authority_dispatches_once_and_restart_replays_exact_command() {
     let create = create_command(scope.clone(), delivery_id.clone(), baseline, 1);
     let advance = advance_command(scope.clone(), delivery_id, 1, 2);
 
-    let mut first = start(&data, &repository, scope.clone());
+    let mut first = start_with_execution_mode(
+        &data,
+        &repository,
+        scope.clone(),
+        ExecutionMode::DelegatedPatch,
+    );
     let canonical_repository_source_root = std::fs::canonicalize(
         repository
             .parent()
@@ -58,7 +67,12 @@ fn local_authority_dispatches_once_and_restart_replays_exact_command() {
     first.shutdown().expect("shutdown first host");
 
     assert_eq!(queued_jobs(&data), 1);
-    let mut restarted = start(&data, &repository, scope);
+    assert_eq!(
+        queued_job(&data).workspace.write_mode,
+        ExecutionWorkspaceWriteMode::ReadOnly
+    );
+    let mut restarted =
+        start_with_execution_mode(&data, &repository, scope, ExecutionMode::DelegatedPatch);
     assert_eq!(
         restarted
             .delivery_advance(&advance)
@@ -112,10 +126,19 @@ fn local_authority_rejects_foreign_scope_and_missing_baseline_without_writes() {
 }
 
 fn start(data: &PathBuf, repository: &PathBuf, scope: RepositoryScope) -> ControlPlane {
+    start_with_execution_mode(data, repository, scope, ExecutionMode::React)
+}
+
+fn start_with_execution_mode(
+    data: &PathBuf,
+    repository: &PathBuf,
+    scope: RepositoryScope,
+    execution_mode: ExecutionMode,
+) -> ControlPlane {
     ControlPlane::start_local_with_delivery_adapters(
         ControlPlaneConfig::local(data),
         Box::new(NoopPublisher),
-        LocalDeliveryAdapterConfig::new(repository, scope),
+        LocalDeliveryAdapterConfig::new(repository, scope).with_execution_mode(execution_mode),
     )
     .expect("start production-local Delivery host")
 }
@@ -164,6 +187,18 @@ fn queued_jobs(data: &Path) -> i64 {
             row.get(0)
         })
         .expect("count queued jobs")
+}
+
+fn queued_job(data: &Path) -> ExecutionJob {
+    let payload = Connection::open(data.join("control-plane.sqlite3"))
+        .expect("open queue database")
+        .query_row(
+            "SELECT dispatch_payload FROM scheduler_execution_jobs ORDER BY rowid DESC LIMIT 1",
+            [],
+            |row| row.get::<_, Vec<u8>>(0),
+        )
+        .expect("read queued job");
+    serde_json::from_slice(&payload).expect("decode queued job")
 }
 
 fn create_command(

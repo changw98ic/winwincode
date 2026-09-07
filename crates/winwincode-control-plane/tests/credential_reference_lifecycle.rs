@@ -21,7 +21,7 @@ use winwincode_api::generated::{
     CredentialReferenceRevokeCommand, CredentialReferenceRevokeCommandCommand,
     CredentialReferenceRevokePayload, CredentialReferenceRotateCommand,
     CredentialReferenceRotateCommandCommand, CredentialReferenceRotatePayload, OrganizationScope,
-    OrganizationScopeKind, PageRequest, Scope, UserActor, UserActorKind,
+    OrganizationScopeKind, PageRequest, Scope,
 };
 use winwincode_audit::{AuditActionKind, AuditEvent};
 use winwincode_control_plane::{
@@ -31,6 +31,7 @@ use winwincode_control_plane::{
 use winwincode_domain::{
     CredentialReferenceId, OpaqueCursor, OrganizationId, RequestId, Revision, SchemaVersion, UserId,
 };
+use winwincode_domain::{UserActor, UserActorKind};
 use winwincode_storage::{
     AggregateJournalKey, PublicEventScope, SqliteStorage,
     receipt_scope_key as storage_receipt_scope_key,

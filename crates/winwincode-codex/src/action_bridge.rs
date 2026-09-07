@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 
 use futures::future::BoxFuture;
@@ -39,6 +39,8 @@ struct ActionGateState {
     verifier: ActionEnforcementVerifier,
     receipt_store: Mutex<FileActionReceiptUseStore>,
     bindings: RwLock<HashMap<String, ModelRunBinding>>,
+    read_only_runs: RwLock<HashMap<String, PathBuf>>,
+    trusted_read_programs: HashMap<String, PathBuf>,
     session_generations: Mutex<HashMap<String, u64>>,
     trusted_now: Mutex<Option<Instant>>,
     pending: Mutex<HashMap<String, PendingAction>>,
@@ -93,6 +95,8 @@ impl ExecutionPortActionGate {
                 verifier: signing_key.into_verifier(),
                 receipt_store: Mutex::new(receipt_store),
                 bindings: RwLock::new(HashMap::new()),
+                read_only_runs: RwLock::new(HashMap::new()),
+                trusted_read_programs: resolve_trusted_read_programs(),
                 session_generations: Mutex::new(HashMap::new()),
                 trusted_now: Mutex::new(None),
                 pending: Mutex::new(HashMap::new()),
@@ -112,8 +116,23 @@ impl ExecutionPortActionGate {
     pub(crate) fn install_binding(
         &self,
         binding: ModelRunBinding,
+        read_only_workspace: Option<&Path>,
     ) -> Result<(), ActionBridgeError> {
-        self.install_binding_mode(binding, true)
+        let run_key = binding.run_key.clone();
+        self.install_binding_mode(binding, true)?;
+        let mut read_only_runs = self
+            .state
+            .read_only_runs
+            .write()
+            .map_err(|_| ActionBridgeError::Unavailable)?;
+        if let Some(workspace) = read_only_workspace {
+            let workspace =
+                std::fs::canonicalize(workspace).map_err(|_| ActionBridgeError::Unavailable)?;
+            read_only_runs.insert(run_key, workspace);
+        } else {
+            read_only_runs.remove(&run_key);
+        }
+        Ok(())
     }
 
     /// Installs a descendant binding without allowing it to overwrite an
@@ -172,7 +191,7 @@ impl ExecutionPortActionGate {
                         existing.canonical_thread_id.0.clone(),
                     ]
                 })
-                .collect::<std::collections::HashSet<_>>();
+                .collect::<HashSet<_>>();
             if fence_lineage {
                 // A replacement root fences the complete run lineage.  Do not
                 // preserve descendants merely because they share the run key:
@@ -231,13 +250,18 @@ impl ExecutionPortActionGate {
                         candidate.canonical_thread_id.0.clone(),
                     ]
                 })
-                .collect::<std::collections::HashSet<_>>();
+                .collect::<HashSet<_>>();
             bindings.retain(|_, candidate| candidate.run_key != binding.run_key);
             session_ids
         };
         for session_id in session_ids {
             self.cancel_session(&session_id)?;
         }
+        self.state
+            .read_only_runs
+            .write()
+            .map_err(|_| ActionBridgeError::Unavailable)?
+            .remove(&binding.run_key);
         Ok(())
     }
 
@@ -534,6 +558,9 @@ async fn authorize_action(
     request: KernelActionRequest,
 ) -> Result<(), ActionBridgeError> {
     let (binding, now) = current_binding_and_time(state, &request.session_id)?;
+    if delegated_read_only_action(state, &binding, &request)? {
+        return Ok(());
+    }
     let generation = current_generation(state, &request.session_id)?;
     let tool_requests = prepare_tool_requests(state, &binding, &request)?;
     let request_digest = kernel_request_digest(&request);
@@ -803,6 +830,9 @@ fn revalidate_action(
     request: &KernelActionRequest,
 ) -> Result<(), ActionBridgeError> {
     let (binding, _) = current_binding_and_time(state, &request.session_id)?;
+    if delegated_read_only_action(state, &binding, request)? {
+        return Ok(());
+    }
     let generation = current_generation(state, &request.session_id)?;
     let tool_requests = canonical_tool_requests(request)?;
     let digest = kernel_request_digest(request);
@@ -822,6 +852,176 @@ fn revalidate_action(
         }
     }
     Ok(())
+}
+
+fn delegated_read_only_action(
+    state: &ActionGateState,
+    binding: &ModelRunBinding,
+    request: &KernelActionRequest,
+) -> Result<bool, ActionBridgeError> {
+    let workspace = state
+        .read_only_runs
+        .read()
+        .map_err(|_| ActionBridgeError::Unavailable)?
+        .get(&binding.run_key)
+        .cloned();
+    let Some(workspace) = workspace else {
+        return Ok(false);
+    };
+    if is_request_user_input(request) || is_explicit_read_only_shell(state, request, &workspace) {
+        return Ok(true);
+    }
+    Err(ActionBridgeError::Rejected)
+}
+
+fn is_request_user_input(request: &KernelActionRequest) -> bool {
+    request.tool_name == "request_user_input"
+        && request
+            .namespace
+            .as_deref()
+            .is_none_or(|namespace| namespace.is_empty() || namespace == "functions")
+        && matches!(request.payload, KernelActionPayload::Function { .. })
+}
+
+fn is_explicit_read_only_shell(
+    state: &ActionGateState,
+    request: &KernelActionRequest,
+    workspace: &Path,
+) -> bool {
+    let KernelActionPayload::Shell {
+        program,
+        args,
+        working_directory,
+    } = &request.payload
+    else {
+        return false;
+    };
+    if !matches!(request.tool_name.as_str(), "shell_command" | "exec_command")
+        || request
+            .namespace
+            .as_deref()
+            .is_some_and(|namespace| !namespace.is_empty() && namespace != "functions")
+        || args.iter().any(|arg| shell_read_arg_is_unsafe(arg))
+    {
+        return false;
+    }
+    let Some(program) = trusted_read_program_name(&state.trusted_read_programs, program) else {
+        return false;
+    };
+    if !read_paths_stay_in_workspace(working_directory, args, workspace) {
+        return false;
+    }
+    read_only_program_arguments(program, args)
+}
+
+fn read_only_program_arguments(program: &str, args: &[String]) -> bool {
+    match program {
+        "cat" | "head" | "tail" | "wc" | "ls" | "pwd" | "stat" => true,
+        "grep" => !args.iter().any(|arg| {
+            matches!(arg.as_str(), "-f" | "--file")
+                || arg.starts_with("--file=")
+                || (arg.starts_with("-f") && arg.len() > 2)
+        }),
+        "rg" => !args.iter().any(|arg| {
+            arg == "--pre"
+                || arg.starts_with("--pre=")
+                || arg == "--hostname-bin"
+                || arg.starts_with("--hostname-bin=")
+                || matches!(arg.as_str(), "-f" | "--file" | "--ignore-file")
+                || arg.starts_with("--file=")
+                || arg.starts_with("--ignore-file=")
+                || (arg.starts_with("-f") && arg.len() > 2)
+        }),
+        _ => false,
+    }
+}
+
+fn resolve_trusted_read_programs() -> HashMap<String, PathBuf> {
+    const PROGRAMS: &[&str] = &[
+        "cat", "head", "tail", "wc", "ls", "pwd", "stat", "grep", "rg",
+    ];
+    let search_paths = std::env::var_os("PATH")
+        .map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+        .unwrap_or_default();
+    PROGRAMS
+        .iter()
+        .filter(|name| {
+            **name != "rg"
+                || std::env::var_os("RIPGREP_CONFIG_PATH").is_none_or(|value| value.is_empty())
+        })
+        .filter_map(|name| {
+            search_paths.iter().find_map(|directory| {
+                let candidate = directory.join(name);
+                candidate
+                    .is_file()
+                    .then(|| std::fs::canonicalize(candidate).ok())
+                    .flatten()
+                    .map(|path| ((*name).to_owned(), path))
+            })
+        })
+        .collect()
+}
+
+fn trusted_read_program_name<'a>(
+    trusted: &'a HashMap<String, PathBuf>,
+    program: &str,
+) -> Option<&'a str> {
+    let path = Path::new(program);
+    if path.components().count() == 1
+        && matches!(path.components().next(), Some(Component::Normal(_)))
+    {
+        return trusted
+            .get_key_value(program)
+            .map(|(name, _)| name.as_str());
+    }
+    if !path.is_absolute() {
+        return None;
+    }
+    let canonical = std::fs::canonicalize(path).ok()?;
+    trusted
+        .iter()
+        .find_map(|(name, fixed)| (fixed == &canonical).then_some(name.as_str()))
+}
+
+fn read_paths_stay_in_workspace(
+    working_directory: &str,
+    args: &[String],
+    workspace: &Path,
+) -> bool {
+    let Ok(working_directory) = std::fs::canonicalize(working_directory) else {
+        return false;
+    };
+    if !working_directory.starts_with(workspace) {
+        return false;
+    }
+    args.iter().all(|arg| {
+        [
+            Some(arg.as_str()),
+            arg.split_once('=').map(|(_, value)| value),
+        ]
+        .into_iter()
+        .flatten()
+        .all(|candidate| {
+            let path = Path::new(candidate);
+            if path.is_absolute()
+                || path
+                    .components()
+                    .any(|component| component == Component::ParentDir)
+            {
+                return false;
+            }
+            let candidate = working_directory.join(path);
+            !candidate.exists()
+                || std::fs::canonicalize(candidate)
+                    .is_ok_and(|canonical| canonical.starts_with(workspace))
+        })
+    })
+}
+
+fn shell_read_arg_is_unsafe(arg: &str) -> bool {
+    matches!(arg, ">" | ">>" | "<" | "<<" | "|" | "||" | "&&" | ";")
+        || arg.contains('\n')
+        || arg.contains('\r')
 }
 
 fn authorize_capability(
@@ -1176,6 +1376,43 @@ mod tests {
         }
     }
 
+    fn shell_request(
+        operation_id: &str,
+        program: &str,
+        args: &[&str],
+        working_directory: &std::path::Path,
+    ) -> KernelActionRequest {
+        KernelActionRequest {
+            session_id: "kernel-session-action".to_owned(),
+            turn_id: "turn-read-only".to_owned(),
+            operation_id: operation_id.to_owned(),
+            namespace: Some("functions".to_owned()),
+            tool_name: "exec_command".to_owned(),
+            payload: KernelActionPayload::Shell {
+                program: program.to_owned(),
+                args: args.iter().map(|arg| (*arg).to_owned()).collect(),
+                working_directory: working_directory.to_string_lossy().into_owned(),
+            },
+        }
+    }
+
+    fn patch_request(marker: &std::path::Path) -> KernelActionRequest {
+        KernelActionRequest {
+            session_id: "kernel-session-action".to_owned(),
+            turn_id: "turn-read-only".to_owned(),
+            operation_id: "call-patch".to_owned(),
+            namespace: Some("functions".to_owned()),
+            tool_name: "apply_patch".to_owned(),
+            payload: KernelActionPayload::Files {
+                changes: vec![KernelFileChange {
+                    operation: KernelFileOperation::Write,
+                    path: marker.to_string_lossy().into_owned(),
+                    move_path: None,
+                }],
+            },
+        }
+    }
+
     fn assert_pending_shell_request(
         gate: &ExecutionPortActionGate,
         request: &winwincode_execution_port::generated::ActionEnforcementRequestMessage,
@@ -1320,7 +1557,8 @@ mod tests {
             signing_key(),
         )
         .expect("open action gate");
-        gate.install_binding(binding()).expect("install binding");
+        gate.install_binding(binding(), None)
+            .expect("install binding");
         let now = Instant("2030-01-01T00:00:02.000Z".to_owned());
         gate.update_now(&now).expect("install trusted time");
 
@@ -1358,6 +1596,152 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn delegated_composer_allows_only_explicit_reads_before_the_action_queue() {
+        let root = std::env::temp_dir().join(format!(
+            "winwincode-codex-action-read-only-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create read-only action fixture");
+        let marker = root.join("marker.txt");
+        std::fs::write(&marker, "unchanged").expect("write marker");
+        let outside = root.with_extension("outside");
+        let _ = std::fs::remove_dir_all(&outside);
+        std::fs::create_dir_all(&outside).expect("create outside read fixture");
+        std::fs::write(outside.join("secret.txt"), "outside").expect("write outside read fixture");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, root.join("outside-link"))
+            .expect("create outside symlink fixture");
+        let gate = ExecutionPortActionGate::open(
+            &root,
+            catalog(),
+            ExecutionEnvelopeToken {
+                version: 1,
+                digest: Sha256Digest(format!("sha256:{}", "c".repeat(64))),
+            },
+            signing_key(),
+        )
+        .expect("open action gate");
+        gate.install_binding(binding(), Some(&root))
+            .expect("install delegated binding");
+        gate.update_now(&Instant("2030-01-01T00:00:02.000Z".to_owned()))
+            .expect("install trusted time");
+
+        let read = shell_request("call-read", "rg", &["fixture_value", "src"], &root);
+        gate.authorize(read.clone())
+            .await
+            .expect("allow explicit repository search");
+        gate.revalidate(read)
+            .await
+            .expect("revalidate explicit repository search");
+
+        for request in [
+            shell_request(
+                "call-shell",
+                "sh",
+                &["-c", "printf changed > marker.txt"],
+                &root,
+            ),
+            patch_request(&marker),
+            shell_request("call-find-delete", "find", &[".", "-delete"], &root),
+            shell_request("call-external-read", "cat", &["/etc/passwd"], &root),
+            shell_request(
+                "call-parent-read",
+                "grep",
+                &["fixture", "../outside.txt"],
+                &root,
+            ),
+            #[cfg(unix)]
+            shell_request(
+                "call-symlink-read",
+                "cat",
+                &["outside-link/secret.txt"],
+                &root,
+            ),
+            shell_request(
+                "call-git-pager",
+                "git",
+                &["grep", "--open-files-in-pager=sh", "fixture"],
+                &root,
+            ),
+            shell_request(
+                "call-git-write",
+                "git",
+                &["checkout", "--", "marker.txt"],
+                &root,
+            ),
+        ] {
+            assert_eq!(
+                gate.authorize(request.clone()).await,
+                Err(winwincode_kernel::KernelFailure::action_rejected())
+            );
+            assert_eq!(
+                gate.revalidate(request).await,
+                Err(winwincode_kernel::KernelFailure::action_rejected())
+            );
+        }
+        assert!(gate.take_messages().expect("no queued actions").is_empty());
+        assert!(
+            gate.state
+                .pending
+                .lock()
+                .expect("no pending actions")
+                .is_empty()
+        );
+        assert_eq!(
+            std::fs::read_to_string(&marker).expect("read unchanged marker"),
+            "unchanged"
+        );
+        std::fs::remove_dir_all(root).expect("remove read-only action fixture");
+        std::fs::remove_dir_all(outside).expect("remove outside read fixture");
+    }
+
+    #[test]
+    fn delegated_shell_read_allowlist_is_closed_against_execution_and_codegen() {
+        for (program, args) in [
+            ("cat", &["src/lib.rs"][..]),
+            ("rg", &["fixture", "src"][..]),
+            ("grep", &["fixture", "src/lib.rs"][..]),
+        ] {
+            assert!(super::read_only_program_arguments(
+                program,
+                &args.iter().map(ToString::to_string).collect::<Vec<_>>()
+            ));
+        }
+        for (program, args) in [
+            ("sh", &["-c", "cat src/lib.rs"][..]),
+            ("sed", &["-i", "s/a/b/", "src/lib.rs"][..]),
+            ("cargo", &["build"][..]),
+            ("python3", &["generate.py"][..]),
+            ("rg", &["--pre=tool", "fixture"][..]),
+            ("rg", &["--hostname-bin=sh", "fixture"][..]),
+            ("find", &[".", "-exec", "rm", "{}", ";"][..]),
+            ("find", &[".", "-delete"][..]),
+            ("find", &[".", "-fprint", "paths.txt"][..]),
+            ("find", &[".", "-fprintf", "paths.txt", "%p"][..]),
+            ("find", &[".", "-fprint0", "paths.bin"][..]),
+            ("find", &[".", "-fls", "paths.txt"][..]),
+            ("tree", &["-o", "tree.txt"][..]),
+            ("git", &["grep", "--open-files-in-pager=sh", "fixture"][..]),
+        ] {
+            assert!(!super::read_only_program_arguments(
+                program,
+                &args.iter().map(ToString::to_string).collect::<Vec<_>>()
+            ));
+        }
+        let trusted = std::collections::HashMap::from([
+            ("cat".to_owned(), std::path::PathBuf::from("/usr/bin/cat")),
+            ("rg".to_owned(), std::path::PathBuf::from("/usr/bin/rg")),
+        ]);
+        assert_eq!(
+            super::trusted_read_program_name(&trusted, "cat"),
+            Some("cat")
+        );
+        assert!(super::trusted_read_program_name(&trusted, "./cat").is_none());
+        assert!(super::trusted_read_program_name(&trusted, "/tmp/malicious/cat").is_none());
+    }
+
+    #[tokio::test]
     async fn replacing_kernel_binding_cancels_pending_action_generation() {
         let root = std::env::temp_dir().join(format!(
             "winwincode-codex-action-rebind-{}",
@@ -1375,7 +1759,7 @@ mod tests {
         )
         .expect("open action gate");
         let original = binding();
-        gate.install_binding(original.clone())
+        gate.install_binding(original.clone(), None)
             .expect("install binding");
         let now = Instant("2030-01-01T00:00:02.000Z".to_owned());
         gate.update_now(&now).expect("install trusted time");
@@ -1401,7 +1785,7 @@ mod tests {
         child.authority.session_identity.codex_thread_id = child.canonical_thread_id.clone();
         gate.install_child_binding(child.clone())
             .expect("install descendant binding");
-        gate.install_binding(original.clone())
+        gate.install_binding(original.clone(), None)
             .expect("idempotent root rebind preserves descendant");
         assert!(
             gate.state
@@ -1413,7 +1797,7 @@ mod tests {
 
         let mut replacement = original.clone();
         replacement.kernel_session_id = "kernel-session-rebound".to_owned();
-        gate.install_binding(replacement.clone())
+        gate.install_binding(replacement.clone(), None)
             .expect("replace binding");
         assert!(task.await.expect("authorization task").is_err());
         assert!(
@@ -1460,7 +1844,8 @@ mod tests {
             signing_key(),
         )
         .expect("open action gate");
-        gate.install_binding(binding()).expect("install binding");
+        gate.install_binding(binding(), None)
+            .expect("install binding");
         let issued = Instant("2030-01-01T00:00:02.000Z".to_owned());
         gate.update_now(&issued).expect("install trusted time");
         let task = tokio::spawn(gate.authorize(KernelActionRequest {

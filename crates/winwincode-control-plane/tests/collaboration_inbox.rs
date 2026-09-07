@@ -9,9 +9,7 @@ use std::{
 };
 
 use sha2::{Digest as _, Sha256};
-use winwincode_api::generated::{
-    Actor, RepositoryScope, RepositoryScopeKind, Scope, UserActor, UserActorKind,
-};
+use winwincode_api::generated::{Actor, Scope};
 use winwincode_control_plane::{
     CollaborationAnnotationAction, CollaborationAnnotationCommand, CollaborationAnnotationId,
     CollaborationAnnotationState, CollaborationAnnotationTarget, CollaborationCandidateIdentity,
@@ -31,6 +29,7 @@ use winwincode_domain::{
     ApprovalId, AttentionItemId, DeliveryId, EnterpriseTeamId, OpaqueCursor, OrganizationId,
     ProductSessionId, ProjectId, RepositoryId, RequestId, Sha256Digest, UserId, WorkspaceId,
 };
+use winwincode_domain::{RepositoryScope, RepositoryScopeKind, UserActor, UserActorKind};
 use winwincode_storage::SqliteStorage;
 use winwincode_storage::{
     NewOutboxEvent, ProductStateStorage, ReceiptActorKey, ReceiptIdentity, ReceiptScopeKey,

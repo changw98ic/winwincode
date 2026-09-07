@@ -11,12 +11,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use winwincode_api::generated::{
-    Actor, OrganizationScope, OrganizationScopeKind, ProjectScope, ProjectScopeKind,
-    RepositoryScope, RepositoryScopeKind, Scope, UserActor, UserActorKind, WorkspaceScope,
+    Actor, OrganizationScope, OrganizationScopeKind, ProjectScope, ProjectScopeKind, Scope, WorkspaceScope,
     WorkspaceScopeKind,
 };
 use winwincode_codex::{
-    HelperReleaseManifest, ProductionCodexAdapter, ProductionCodexConfig, ProductionCodexOptions,
+    ExecutionMode, HelperReleaseManifest, ObserverMode, ProductionCodexAdapter,
+    ProductionCodexConfig, ProductionCodexOptions,
 };
 use winwincode_control_plane::{
     CanonicalEnterpriseIdentityLifecycle, CollaborationService, ControlPlane, ControlPlaneConfig,
@@ -32,8 +32,8 @@ use winwincode_control_plane::{
     TrustedProtocolParty, local_loopback_retry_policy,
 };
 use winwincode_domain::{
-    CredentialReferenceId, OrganizationId, ProjectId, RepositoryId, Sha256Digest, UserAccount,
-    UserAccountRole, UserAccountState, UserId, WorkerId, WorkerInstanceId, WorkspaceId,
+    CredentialReferenceId, OrganizationId, ProjectId, RepositoryId, RepositoryScope, RepositoryScopeKind, Sha256Digest, UserAccount,
+    UserAccountRole, UserAccountState, UserActor, UserActorKind, UserId, WorkerId, WorkerInstanceId, WorkspaceId,
 };
 use winwincode_execution_port::{
     action_enforcement::{ActionEnforcementIssuer, ActionEnforcementSigningKey},
@@ -62,7 +62,7 @@ use winwincode_storage::{
     ProductStateStorage, SqliteStorage, WorkerOutboundQueueConfig, WorkerPoolId,
     WorkerRegistryScope,
 };
-use winwincode_worker::WorkerConfig;
+use winwincode_worker::{WorkerConfig, workspace_runtime::ObservationModelConfiguration};
 
 const SERVER_TOKIO_WORKER_STACK_BYTES: usize = 16 * 1024 * 1024;
 
@@ -412,6 +412,7 @@ async fn run_composed_server(
         ControlPlaneInstanceRuntimeConfig::default(),
         256,
     )?;
+    let launcher_config = configured_local_launcher_observer(launcher_config)?;
     let worker_pool_id = WorkerPoolId(required_environment_or(
         "WWC_SERVER_WORKER_POOL_ID",
         "wpl_00000000000000000000000001",
@@ -774,6 +775,8 @@ fn open_production_codex(
         discovered_capabilities: Vec::new(),
         action_signing_key,
         execution_envelope,
+        execution_mode: configured_server_execution_mode()?,
+        observer_mode: configured_server_observer_mode()?,
     })?;
     Ok(ProductionCodexAdapter::open(codex_config)?)
 }
@@ -783,6 +786,80 @@ fn configured_action_signing_key() -> Result<ActionEnforcementSigningKey, Box<dy
     Ok(ActionEnforcementSigningKey::from_bytes(parse_hex_key(
         &required_environment_or("WWC_SERVER_ACTION_SIGNING_KEY_HEX", &"1f".repeat(32))?,
     )?)?)
+}
+
+fn configured_server_execution_mode() -> Result<ExecutionMode, Box<dyn std::error::Error>> {
+    ExecutionMode::from_config(&required_environment_or(
+        "WWC_SERVER_EXECUTION_MODE",
+        "react",
+    )?)
+    .ok_or_else(|| "WWC_SERVER_EXECUTION_MODE contains an unsupported execution mode".into())
+}
+
+fn configured_server_observer_mode() -> Result<ObserverMode, Box<dyn std::error::Error>> {
+    let mode =
+        ObserverMode::from_config(&required_environment_or("WWC_SERVER_OBSERVER_MODE", "off")?)
+            .ok_or("WWC_SERVER_OBSERVER_MODE contains an unsupported observer mode")?;
+    released_server_observer_route_required(mode)?;
+    Ok(mode)
+}
+
+fn released_server_observer_route_required(mode: ObserverMode) -> Result<bool, &'static str> {
+    match mode {
+        ObserverMode::Off => Ok(false),
+        ObserverMode::AmbiguousOnly => Ok(true),
+        ObserverMode::Shadow | ObserverMode::Always => Err(
+            "WWC_SERVER_OBSERVER_MODE selects an Observer policy not implemented by this release",
+        ),
+    }
+}
+
+fn configured_local_observation_model(
+    observer_mode: ObserverMode,
+) -> Result<Option<ObservationModelConfiguration>, Box<dyn std::error::Error>> {
+    if !released_server_observer_route_required(observer_mode)? {
+        return Ok(None);
+    }
+    Ok(Some(ObservationModelConfiguration::try_new(
+        required_environment("WWC_SERVER_OBSERVER_MODEL_PROVIDER_ID")?,
+        required_environment("WWC_SERVER_OBSERVER_MODEL_ID")?,
+        ModelGatewayRoute {
+            capability: required_environment("WWC_SERVER_OBSERVER_MODEL_CAPABILITY")?,
+            route: required_environment("WWC_SERVER_OBSERVER_MODEL_ROUTE")?,
+        },
+    )?))
+}
+
+fn configured_local_launcher_observer(
+    launcher: LocalLauncherConfig,
+) -> Result<LocalLauncherConfig, Box<dyn std::error::Error>> {
+    let observer_mode = configured_server_observer_mode()?;
+    let launcher = launcher.with_observer_mode(observer_mode);
+    Ok(match configured_local_observation_model(observer_mode)? {
+        Some(model) => launcher.with_observation_model(model),
+        None => launcher,
+    })
+}
+
+#[cfg(test)]
+mod observer_tests {
+    use super::{ObserverMode, released_server_observer_route_required};
+
+    #[test]
+    fn observer_modes_have_one_closed_server_release_configuration() {
+        for (mode, expected_route) in [
+            (ObserverMode::Off, Ok(false)),
+            (ObserverMode::AmbiguousOnly, Ok(true)),
+            (ObserverMode::Shadow, Err(())),
+            (ObserverMode::Always, Err(())),
+        ] {
+            assert_eq!(
+                released_server_observer_route_required(mode).map_err(|_| ()),
+                expected_route,
+                "mode={mode:?}"
+            );
+        }
+    }
 }
 
 fn worker_capabilities() -> Result<WorkerCapabilitySet, Box<dyn std::error::Error>> {

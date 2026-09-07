@@ -19,6 +19,7 @@ use winwincode_execution_port::generated::{
 
 use crate::workspace::{CandidateSnapshot, WorkerWorkspace, WorkspaceError, WorkspaceProvenance};
 use crate::{ActiveJob, ActiveJobLifecycle};
+use winwincode_codex::RoleExecutionMode;
 
 /// Stable candidate preparation failure categories.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -148,6 +149,7 @@ impl PreparedCandidateArtifact {
 pub fn prepare_candidate_artifact(
     active: &ActiveJob,
     workspace: &mut WorkerWorkspace,
+    execution_mode: RoleExecutionMode,
 ) -> Result<PreparedCandidateArtifact, CandidateProductError> {
     if active.lifecycle != ActiveJobLifecycle::Running {
         return Err(CandidateProductError::new(
@@ -164,18 +166,24 @@ pub fn prepare_candidate_artifact(
             "candidate product requires an executor or remediator role",
         ));
     }
-    if active.job.workspace.write_mode != ExecutionWorkspaceWriteMode::Candidate {
+    let expected_write_mode = match execution_mode {
+        RoleExecutionMode::React => ExecutionWorkspaceWriteMode::Candidate,
+        RoleExecutionMode::DelegatedBatch => ExecutionWorkspaceWriteMode::ReadOnly,
+    };
+    if active.job.workspace.write_mode != expected_write_mode {
         return Err(CandidateProductError::new(
             CandidateProductErrorCode::InvalidScope,
-            "candidate Job requires a candidate-write workspace",
+            "candidate Job write mode does not match its execution mode",
         ));
     }
-    winwincode_codex::stage_product::role_session_policy(&active.job).map_err(|_| {
-        CandidateProductError::new(
-            CandidateProductErrorCode::InvalidScope,
-            "candidate Job is missing its exact sealed stage input",
-        )
-    })?;
+    winwincode_codex::stage_product::role_session_policy(&active.job, execution_mode).map_err(
+        |_| {
+            CandidateProductError::new(
+                CandidateProductErrorCode::InvalidScope,
+                "candidate Job is missing its exact sealed stage input",
+            )
+        },
+    )?;
     let provenance = candidate_workspace_provenance(active, workspace)?;
 
     let snapshot = workspace
@@ -230,12 +238,13 @@ pub fn prepare_verification_artifact(
             "verification Job requires a read-only workspace",
         ));
     }
-    winwincode_codex::stage_product::role_session_policy(&active.job).map_err(|_| {
-        CandidateProductError::new(
-            CandidateProductErrorCode::InvalidScope,
-            "verification Job is missing its exact sealed stage input",
-        )
-    })?;
+    winwincode_codex::stage_product::role_session_policy(&active.job, RoleExecutionMode::React)
+        .map_err(|_| {
+            CandidateProductError::new(
+                CandidateProductErrorCode::InvalidScope,
+                "verification Job is missing its exact sealed stage input",
+            )
+        })?;
     let provenance = candidate_workspace_provenance(active, workspace)?;
     let snapshot = workspace
         .snapshot_verification()

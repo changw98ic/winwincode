@@ -11,10 +11,10 @@ use winwincode_api::generated::{
     EvidenceArtifactUnavailableProjectionState, EvidenceDetailProjection,
     EvidenceDetailProjectionKind, EvidenceGetQuery, EvidenceGetResultResponse,
     EvidenceGetResultResponseQuery, EvidenceOutcome, EvidenceReadBinding, PageInfo,
-    QueryResultResponse, RepositoryScope, StrongFlowReadCursor,
+    QueryResultResponse, StrongFlowReadCursor,
 };
 use winwincode_delivery::domain::{EvidenceRef, VerifiedEvidenceOutcome};
-use winwincode_domain::{DeliveryId, EvidenceId, SchemaVersion};
+use winwincode_domain::{DeliveryId, EvidenceId, SchemaVersion, RepositoryScope};
 
 use super::{StrongFlowProjectionError, application, mapping};
 use crate::ControlPlane;

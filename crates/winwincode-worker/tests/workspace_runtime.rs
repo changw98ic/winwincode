@@ -1,23 +1,43 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{path::PathBuf, process::Command};
+use std::{collections::HashMap, path::PathBuf, process::Command};
 
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+use rusqlite::Connection;
 use sha2::{Digest, Sha256};
 use winwincode_domain::{
-    CodexThreadId, DeliveryId, DeliveryTaskId, ExecutionAckSequence, ExecutionJobId, FencingToken,
-    Instant, LeaseId, ProductSessionId, RepositoryId, RequestId, SchemaVersion, SessionIdentity,
-    Sha256Digest, StageRunId, WorkerId, WorkerInstanceId, WorkerSessionId,
+    ArtifactId, CodexThreadId, DeliveryId, DeliveryTaskId, ExecutionAckSequence, ExecutionJobId,
+    ExecutionMessageId, ExecutionSequence, FencingToken, Instant, LeaseId, ProductSessionId,
+    RepositoryId, RequestId, SchemaVersion, SessionIdentity, Sha256Digest, StageRunId, WorkerId,
+    WorkerInstanceId, WorkerSessionId, WorkspaceRevision,
 };
-use winwincode_execution_port::generated::{
-    DeliveryStageAcceptanceCriterionInput, DeliveryStageExecutionScope,
-    DeliveryStageExecutionScopeKind, DeliveryStageInput, DeliveryStageTaskInput, ExecutionJob,
-    ExecutionJobReplacementAuthority, ExecutionLeaseStamp, ExecutionLimits, ExecutionScope,
-    ExecutionWorkspace, ExecutionWorkspaceWriteMode,
+use winwincode_execution_port::{
+    change_batch_identity::derive_change_batch_id,
+    generated::{
+        AppliedFileOperation, AppliedFileSummary, ArtifactReference, ChangeBatchIdentity,
+        ChangeBatchProgressEvent, ChangeBatchProgressState, ChangeBatchProposal,
+        ChangeBatchProposalDisposition, ChangeBatchProposalEvent,
+        DeliveryStageAcceptanceCriterionInput, DeliveryStageExecutionScope,
+        DeliveryStageExecutionScopeKind, DeliveryStageInput, DeliveryStageTaskInput,
+        EncodedPayload, ExecutionJob, ExecutionJobReplacementAuthority, ExecutionLeaseStamp,
+        ExecutionLimits, ExecutionOutcomeUsage, ExecutionScope, ExecutionWorkspace,
+        ExecutionWorkspaceWriteMode, ModelChunkMessage, ModelChunkMessageKind, ModelGatewayRoute,
+        ModelOpenMessage, ObservationReceipt, ObservationSource, ValidationProfileName,
+    },
+    observation_contract::{derive_observation_output_digest, parse_observation_response_strict},
 };
 use winwincode_worker::{
-    ActiveJob, ActiveJobLifecycle,
+    ActiveJob, ActiveJobLifecycle, CodexRunKey,
+    change_batch_store::{
+        BatchState, ChangeBatchStore, ObservationChunkRetention, ObservationModelFrame,
+    },
     workspace::WorkspaceCloseReason,
-    workspace_runtime::{JobWorkspaceErrorCode, JobWorkspaceRuntime},
+    workspace_runtime::{
+        ChangeBatchExecutionRequest, ChangeBatchExecutionResult, ChangeBatchExecutor,
+        ChangeBatchExecutorFuture, JobWorkspaceErrorCode, JobWorkspaceRuntime,
+        ObservationModelConfiguration, ValidationArtifactError, ValidationArtifactPort,
+        ValidationArtifactRequest, ValidationArtifactStream,
+    },
 };
 
 #[cfg(feature = "test-support")]
@@ -64,11 +84,215 @@ impl Fixture {
     }
 
     fn runtime(&self) -> JobWorkspaceRuntime {
-        JobWorkspaceRuntime::open(&self.workspaces, &self.sources).expect("open workspace runtime")
+        JobWorkspaceRuntime::open(&self.workspaces, &self.sources)
+            .expect("open workspace runtime")
+            .with_validation_artifact_port(FixtureValidationArtifacts::default())
+            .with_change_batch_executor(PatchApplyingExecutor)
     }
 
     fn repository(&self) -> PathBuf {
         self.sources.join("repo_00000000000000000000000001")
+    }
+
+    fn install_validation_config_text(&self, configuration: &str) {
+        let repository = self.repository();
+        std::fs::create_dir_all(repository.join(".winwincode"))
+            .expect("validation config directory");
+        std::fs::write(
+            repository.join(".winwincode/validation.toml"),
+            configuration,
+        )
+        .expect("validation config");
+        git(&repository, &["add", ".winwincode/validation.toml"]);
+        git(&repository, &["commit", "-qm", "validation config"]);
+    }
+}
+
+#[derive(Debug, Default)]
+struct FixtureValidationArtifacts {
+    retained: HashMap<String, (Vec<u8>, ArtifactReference)>,
+}
+
+impl ValidationArtifactPort for FixtureValidationArtifacts {
+    fn persist(
+        &mut self,
+        request: ValidationArtifactRequest<'_>,
+    ) -> Result<ArtifactReference, ValidationArtifactError> {
+        let stream = match request.stream {
+            ValidationArtifactStream::Stdout => "stdout",
+            ValidationArtifactStream::Stderr => "stderr",
+        };
+        let key = format!(
+            "{}:{}:{}:{stream}",
+            request.identity.batch_id.0, request.command_ordinal, request.command_id
+        );
+        if let Some((bytes, artifact)) = self.retained.get(&key) {
+            return if bytes == request.bytes {
+                Ok(artifact.clone())
+            } else {
+                Err(ValidationArtifactError)
+            };
+        }
+        let digest = Sha256::digest(request.bytes);
+        let key_digest = format!("{:x}", Sha256::digest(key.as_bytes()));
+        let artifact = ArtifactReference {
+            artifact_id: ArtifactId(format!("art_{}", &key_digest[..26])),
+            digest: Sha256Digest(format!("sha256:{digest:x}")),
+        };
+        self.retained
+            .insert(key, (request.bytes.to_vec(), artifact.clone()));
+        Ok(artifact)
+    }
+}
+
+const VALIDATION_CONFIG: &str = r#"schemaVersion = 1
+
+[[commands]]
+id = "python-format"
+phase = "formatter"
+language = "python"
+allowedCompanionPaths = []
+argv = ["/usr/bin/python3", "-B", "-c", 'from pathlib import Path; p=Path("delegated.txt"); p.write_text(p.read_text().replace("fixture", "formatted"))']
+workingDirectory = "."
+environment = []
+network = false
+timeoutMillis = 300000
+outputLimitBytes = 1048576
+
+[[commands]]
+id = "python-check"
+phase = "validation"
+language = "python"
+allowedCompanionPaths = []
+argv = ["/usr/bin/python3", "-B", "-c", 'from pathlib import Path; assert Path("delegated.txt").read_text() == "formatted\n"']
+workingDirectory = "."
+environment = []
+network = false
+timeoutMillis = 300000
+outputLimitBytes = 1048576
+
+[[commands]]
+id = "rust-check"
+phase = "validation"
+language = "rust"
+allowedCompanionPaths = []
+argv = ["/usr/bin/true"]
+workingDirectory = "."
+environment = []
+network = false
+timeoutMillis = 300000
+outputLimitBytes = 1048576
+
+[[commands]]
+id = "typescript-check"
+phase = "validation"
+language = "typescript"
+allowedCompanionPaths = []
+argv = ["/usr/bin/true"]
+workingDirectory = "."
+environment = []
+network = false
+timeoutMillis = 300000
+outputLimitBytes = 1048576
+
+[[profiles]]
+name = "changed"
+commandIds = ["python-format", "python-check"]
+[[profiles]]
+name = "fast"
+commandIds = ["rust-check"]
+[[profiles]]
+name = "affected"
+commandIds = ["typescript-check"]
+[[profiles]]
+name = "final"
+commandIds = ["rust-check", "typescript-check"]
+"#;
+
+fn baseline_unavailable_validation_config() -> String {
+    let diagnostic_command = r"from pathlib import Path; module='new-module' if Path('second.txt').exists() else 'existing-module'; print(f'delegated.txt(1,1): error TS2307: Cannot find module {module!r}.'); raise SystemExit(1)";
+    VALIDATION_CONFIG.replace(
+        "id = \"python-check\"\nphase = \"validation\"\nlanguage = \"python\"\nallowedCompanionPaths = []\nargv = [\"/usr/bin/python3\", \"-B\", \"-c\", 'from pathlib import Path; assert Path(\"delegated.txt\").read_text() == \"formatted\\n\"']",
+        &format!(
+            "id = \"python-check\"\nphase = \"validation\"\nlanguage = \"typescript\"\ndiagnosticParserVersion = \"typescript_v1\"\nallowedCompanionPaths = []\nargv = [\"/usr/bin/python3\", \"-B\", \"-c\", {diagnostic_command:?}]"
+        ),
+    )
+}
+
+/// Applies the exact Add File patch bytes through the injected executor port.
+///
+/// This is the same port seam the production deterministic delivery installs:
+/// the Worker itself never writes checkout bytes, so every re-cut fixture that
+/// exercises an executed batch installs its executor here.
+#[derive(Debug, Default)]
+struct PatchApplyingExecutor;
+
+impl PatchApplyingExecutor {
+    fn apply(request: ChangeBatchExecutionRequest<'_>) -> ChangeBatchExecutionResult {
+        let mut written: Vec<(PathBuf, Vec<u8>)> = Vec::new();
+        for line in request.patch.lines() {
+            if let Some(path) = line.strip_prefix("*** Add File: ") {
+                written.push((request.checkout.join(path.trim()), Vec::new()));
+            } else if let Some(body) = line.strip_prefix('+')
+                && let Some((_, bytes)) = written.last_mut()
+            {
+                bytes.extend_from_slice(body.as_bytes());
+                bytes.push(b'\n');
+            }
+        }
+        let files = written
+            .into_iter()
+            .map(|(path, bytes)| {
+                std::fs::write(&path, &bytes).expect("apply fixture patch bytes");
+                AppliedFileSummary {
+                    after_sha256: Some(Sha256Digest(format!(
+                        "sha256:{:x}",
+                        Sha256::digest(&bytes)
+                    ))),
+                    before_sha256: None,
+                    bytes_after: i64::try_from(bytes.len()).expect("fixture byte bound"),
+                    bytes_before: 0,
+                    mode_after: Some("0644".to_owned()),
+                    mode_before: None,
+                    move_path: None,
+                    operation: AppliedFileOperation::Create,
+                    path: path
+                        .strip_prefix(request.checkout)
+                        .expect("fixture checkout path")
+                        .to_string_lossy()
+                        .to_string(),
+                }
+            })
+            .collect();
+        ChangeBatchExecutionResult::Applied {
+            files,
+            artifact_ref: None,
+        }
+    }
+}
+
+impl ChangeBatchExecutor for PatchApplyingExecutor {
+    fn execute<'operation>(
+        &'operation mut self,
+        request: ChangeBatchExecutionRequest<'operation>,
+    ) -> ChangeBatchExecutorFuture<'operation> {
+        let result = Self::apply(request);
+        Box::pin(async move { Ok(result) })
+    }
+
+    fn recover<'operation>(
+        &'operation mut self,
+        request: ChangeBatchExecutionRequest<'operation>,
+    ) -> ChangeBatchExecutorFuture<'operation> {
+        let result = Self::apply(request);
+        Box::pin(async move { Ok(result) })
+    }
+
+    fn cancel<'operation>(
+        &'operation mut self,
+        _request: ChangeBatchExecutionRequest<'operation>,
+    ) -> ChangeBatchExecutorFuture<'operation> {
+        Box::pin(async { Ok(ChangeBatchExecutionResult::RolledBack { artifact_ref: None }) })
     }
 }
 
@@ -175,6 +399,91 @@ fn active_job() -> ActiveJob {
         codex_thread_id,
         lifecycle: ActiveJobLifecycle::Running,
         last_event_sequence: ExecutionAckSequence(0),
+    }
+}
+
+fn observation_chunk(
+    open: &ModelOpenMessage,
+    sequence: i64,
+    payload: &serde_json::Value,
+    is_final: bool,
+) -> ModelChunkMessage {
+    let bytes = serde_json::to_vec(payload).expect("Observer chunk payload");
+    ModelChunkMessage {
+        error: None,
+        is_final,
+        kind: ModelChunkMessageKind::ModelChunk,
+        lease: open.lease.clone(),
+        message_id: ExecutionMessageId(format!("xmsg_{sequence:026}")),
+        model_exchange_id: open.model_exchange_id.clone(),
+        payload: Some(EncodedPayload {
+            content_type: "application/json".to_owned(),
+            data_base64: STANDARD.encode(&bytes),
+            payload_digest: Sha256Digest(format!("sha256:{:x}", Sha256::digest(&bytes))),
+        }),
+        schema_version: SchemaVersion::WinwincodeV1,
+        sent_at: open.sent_at.clone(),
+        sequence: ExecutionSequence(sequence),
+        session_identity: open.session_identity.clone(),
+        worker_session_id: open.worker_session_id.clone(),
+    }
+}
+
+fn source_revision(fixture: &Fixture) -> WorkspaceRevision {
+    WorkspaceRevision(format!(
+        "git-tree:{}",
+        git_output(&fixture.repository(), &["rev-parse", "HEAD^{tree}"])
+    ))
+}
+
+fn batch_proposal(
+    active: &ActiveJob,
+    workspace_revision: WorkspaceRevision,
+) -> ChangeBatchProposalEvent {
+    let patch = "*** Begin Patch\n*** Add File: delegated.txt\n+fixture\n*** End Patch\n";
+    batch_proposal_with_patch(active, workspace_revision, patch, "turn-fixture")
+}
+
+fn batch_proposal_with_patch(
+    active: &ActiveJob,
+    workspace_revision: WorkspaceRevision,
+    patch: &str,
+    turn_id: &str,
+) -> ChangeBatchProposalEvent {
+    let patch_digest = Sha256Digest(format!("sha256:{:x}", Sha256::digest(patch.as_bytes())));
+    let run_key = CodexRunKey {
+        job_id: active.job.job_id.clone(),
+        attempt: active.job.attempt,
+        fencing_token: active.lease.fencing_token.clone(),
+        payload_digest: active.job.payload_digest.clone(),
+    }
+    .canonical_digest()
+    .expect("canonical batch run key")
+    .0;
+    ChangeBatchProposalEvent {
+        identity: ChangeBatchIdentity {
+            attempt: active.job.attempt,
+            batch_id: derive_change_batch_id(&run_key, turn_id, None, &patch_digest)
+                .expect("canonical batch id"),
+            call_id: None,
+            fencing_token: active.lease.fencing_token.clone(),
+            job_id: active.job.job_id.clone(),
+            lease_id: active.lease.lease_id.clone(),
+            patch_digest,
+            repository_id: active.job.workspace.repository_id.clone(),
+            run_key,
+            session_identity: active.session_identity.clone(),
+            turn_id: turn_id.to_owned(),
+            workspace_revision,
+        },
+        occurred_at: Instant("2026-08-28T00:00:01.000Z".to_owned()),
+        proposal: ChangeBatchProposal {
+            acceptance_criteria_ids: vec!["criterion-fixture".to_owned()],
+            disposition: ChangeBatchProposalDisposition::Final,
+            patch: patch.to_owned(),
+            schema_version: 1,
+            validation_profile: ValidationProfileName::Changed,
+        },
     }
 }
 
@@ -288,7 +597,7 @@ fn crash_recovery_keeps_original_checkout_and_freezes_one_candidate() {
         b"candidate\n"
     );
     let prepared = restarted
-        .prepare_candidate(&active)
+        .prepare_candidate(&active, winwincode_codex::RoleExecutionMode::React)
         .expect("freeze recovered candidate");
     assert_ne!(
         prepared.snapshot().candidate_tree_id,
@@ -315,7 +624,7 @@ fn frozen_candidate_restarts_with_the_same_commit_and_artifact_bytes() {
     std::fs::write(checkout.join("fixture.txt"), b"candidate\n").expect("write candidate change");
 
     let original = first
-        .prepare_candidate(&active)
+        .prepare_candidate(&active, winwincode_codex::RoleExecutionMode::React)
         .expect("freeze original candidate");
     assert_eq!(git_output(&checkout, &["rev-parse", "HEAD"]), source_commit);
     drop(first);
@@ -330,7 +639,7 @@ fn frozen_candidate_restarts_with_the_same_commit_and_artifact_bytes() {
         source_commit
     );
     let replayed = restarted
-        .prepare_candidate(&active)
+        .prepare_candidate(&active, winwincode_codex::RoleExecutionMode::React)
         .expect("freeze the same candidate after restart");
     assert_eq!(replayed, original);
     restarted
@@ -361,7 +670,7 @@ fn sealed_replacement_rotates_authority_and_preserves_the_predecessor_checkout()
         b"candidate\n"
     );
     let prepared = restarted
-        .prepare_candidate(&successor)
+        .prepare_candidate(&successor, winwincode_codex::RoleExecutionMode::React)
         .expect("freeze candidate under successor authority");
     assert_eq!(
         prepared.snapshot().origin_provenance.worker_instance_id,
@@ -383,7 +692,7 @@ fn sealed_replacement_rotates_authority_and_preserves_the_predecessor_checkout()
     );
     assert_eq!(
         replayed
-            .prepare_candidate(&successor)
+            .prepare_candidate(&successor, winwincode_codex::RoleExecutionMode::React)
             .expect("replay successor candidate")
             .snapshot()
             .candidate_commit_id,
@@ -1150,6 +1459,620 @@ fn duplicate_authority_is_stable_and_foreign_authority_is_rejected() {
     assert!(!first.parent().expect("workspace root").exists());
 }
 
+async fn prepare_terminal_observer_replay_fixture()
+-> (Fixture, ActiveJob, ModelOpenMessage, ModelChunkMessage) {
+    let fixture = Fixture::new("observer-terminal-before-receipt");
+    fixture.install_validation_config_text(&baseline_unavailable_validation_config());
+    let active = active_job();
+    let mut runtime = fixture.runtime();
+    runtime
+        .open_for_job(&active, None)
+        .expect("open terminal replay workspace");
+    let proposal = batch_proposal(&active, source_revision(&fixture));
+    let executed = Box::pin(runtime.execute_change_batch(
+        &active,
+        &proposal,
+        &Instant("2026-08-28T00:00:02.000Z".to_owned()),
+    ))
+    .await
+    .expect("retain unresolved validation");
+    let observation = executed
+        .observation_request
+        .expect("retain bounded Observer intent");
+    let model = ObservationModelConfiguration::try_new(
+        "observer-provider",
+        "observer-model",
+        ModelGatewayRoute {
+            capability: "observer-strict-json".to_owned(),
+            route: "enterprise-observer".to_owned(),
+        },
+    )
+    .expect("independent Observer route");
+    let open = runtime
+        .prepare_observation_model_open(
+            &active,
+            &observation,
+            &model,
+            &Instant("2026-08-28T00:00:03.000Z".to_owned()),
+        )
+        .expect("retain Observer open");
+    let response = serde_json::json!({
+        "schemaVersion": 1,
+        "observationId": observation.intent.observation_id.0,
+        "decision": "accept",
+        "reasonCode": "criteria_satisfied",
+        "summary": "The bounded evidence satisfies the requested criterion.",
+        "rootCauses": [],
+        "repairClass": null,
+        "confidenceBps": 9000
+    })
+    .to_string();
+    runtime
+        .accept_observation_model_chunk(
+            &active,
+            &observation_chunk(
+                &open,
+                1,
+                &serde_json::json!({"type": "output_text_delta", "delta": response}),
+                false,
+            ),
+            &Instant("2026-08-28T00:00:04.000Z".to_owned()),
+        )
+        .expect("retain Observer response")
+        .expect("Observer exchange");
+    let completed = observation_chunk(
+        &open,
+        2,
+        &serde_json::json!({
+            "type": "completed",
+            "responseId": "response-observer-terminal-replay",
+            "actualCostMicros": 53,
+            "tokenUsage": {
+                "input_tokens": 80,
+                "cached_input_tokens": 0,
+                "cache_write_input_tokens": 0,
+                "output_tokens": 20,
+                "reasoning_output_tokens": 0,
+                "total_tokens": 100
+            },
+            "endTurn": true
+        }),
+        true,
+    );
+    drop(runtime);
+    (fixture, active, open, completed)
+}
+
+fn retain_terminal_frame_without_receipt(
+    fixture: &Fixture,
+    open: &ModelOpenMessage,
+    completed: &ModelChunkMessage,
+) {
+    let mut interrupted =
+        ChangeBatchStore::open(&fixture.root).expect("open terminal replay journal");
+    let completed_bytes = serde_json::to_vec(&completed).expect("encode terminal Observer frame");
+    interrupted
+        .retain_observation_model_chunk(
+            &ObservationModelFrame {
+                model_exchange_id: open.model_exchange_id.clone(),
+                sequence: 2,
+                chunk_digest: Sha256Digest(format!(
+                    "sha256:{:x}",
+                    Sha256::digest(&completed_bytes)
+                )),
+                response_delta: &[],
+                model_usage: Some(ExecutionOutcomeUsage {
+                    cost_microunits: 53,
+                    runtime_millis: 0,
+                    tokens: 100,
+                }),
+                terminal_status: Some("completed"),
+            },
+            &Instant("2026-08-28T00:00:05.000Z".to_owned()),
+        )
+        .expect("retain terminal frame without receipt");
+    assert!(
+        interrupted
+            .observation_model_record(&open.model_exchange_id)
+            .expect("load terminal record")
+            .expect("terminal record exists")
+            .receipt
+            .is_none()
+    );
+    drop(interrupted);
+}
+
+#[tokio::test]
+async fn terminal_observer_frame_replays_after_restart_before_receipt_commit() {
+    let (fixture, active, open, completed) =
+        Box::pin(prepare_terminal_observer_replay_fixture()).await;
+    retain_terminal_frame_without_receipt(&fixture, &open, &completed);
+
+    let mut restarted = fixture.runtime();
+    restarted
+        .open_for_job_recovering(
+            &active,
+            None,
+            &Instant("2026-08-28T00:00:06.000Z".to_owned()),
+        )
+        .expect("reopen terminal frame before receipt");
+    assert_eq!(
+        restarted
+            .pending_observation_model_open(&active)
+            .expect("load pending terminal open"),
+        Some(open.clone())
+    );
+    let recovered = restarted
+        .accept_observation_model_chunk(
+            &active,
+            &completed,
+            &Instant("2026-08-28T00:00:07.000Z".to_owned()),
+        )
+        .expect("replay terminal Observer frame")
+        .expect("Observer exchange");
+    assert_eq!(
+        recovered
+            .completed_progress
+            .iter()
+            .map(|event| &event.state)
+            .collect::<Vec<_>>(),
+        [
+            &ChangeBatchProgressState::ObservationCompleted,
+            &ChangeBatchProgressState::Accepted,
+        ]
+    );
+    assert!(recovered.receipt.is_some());
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn diagnostic_baseline_does_not_blame_history_then_routes_one_new_missing_module() {
+    let fixture = Fixture::new("diagnostic-baseline-routing");
+    let configuration = baseline_unavailable_validation_config();
+    fixture.install_validation_config_text(&configuration);
+    let active = active_job();
+    let mut runtime = fixture.runtime();
+    runtime
+        .open_for_job(&active, None)
+        .expect("open diagnostic workspace");
+    let base = source_revision(&fixture);
+    let first_proposal = batch_proposal(&active, base);
+    let first = Box::pin(runtime.execute_change_batch(
+        &active,
+        &first_proposal,
+        &Instant("2026-08-28T00:00:02.000Z".to_owned()),
+    ))
+    .await
+    .expect("validate first diagnostic baseline");
+    assert_eq!(
+        first.progress.last().map(|event| &event.state),
+        Some(&ChangeBatchProgressState::ObservationRequested),
+        "an absent baseline must not blame an existing diagnostic on this batch"
+    );
+    let observation = first
+        .observation_request
+        .clone()
+        .expect("baseline uncertainty retains one bounded Observer intent");
+    assert!(observation.one_shot);
+    assert!(!observation.intent.hard_check_failed);
+    assert!(observation.intent.all_checks_executed);
+    assert_eq!(
+        Some(&observation.intent.result_revision),
+        first.receipt.result_revision.as_ref()
+    );
+    let observer_model = ObservationModelConfiguration::try_new(
+        "observer-provider",
+        "observer-model",
+        ModelGatewayRoute {
+            capability: "observer-strict-json".to_owned(),
+            route: "enterprise-observer".to_owned(),
+        },
+    )
+    .expect("independent Observer route");
+    let opened_at = Instant("2026-08-28T00:00:07.000Z".to_owned());
+    let first_open = runtime
+        .prepare_observation_model_open(&active, &observation, &observer_model, &opened_at)
+        .expect("retain Observer open before provider send");
+    let replay_open = runtime
+        .prepare_observation_model_open(&active, &observation, &observer_model, &opened_at)
+        .expect("replay exact Observer open");
+    assert_eq!(first_open, replay_open);
+    let payload = STANDARD
+        .decode(&first_open.request.data_base64)
+        .expect("decode Observer provider payload");
+    assert_eq!(
+        first_open.request.payload_digest,
+        Sha256Digest(format!("sha256:{:x}", Sha256::digest(&payload))),
+        "provider payload is content-bound"
+    );
+    let payload: serde_json::Value =
+        serde_json::from_slice(&payload).expect("Observer provider payload JSON");
+    assert_eq!(payload["provider"], "observer-provider");
+    assert_eq!(payload["requestId"], first_open.request_id.0);
+    assert_eq!(payload["request"]["tools"], serde_json::json!([]));
+    assert_eq!(payload["request"]["tool_choice"], "none");
+    assert_eq!(
+        payload["request"]["text"]["format"]["strict"],
+        serde_json::json!(true)
+    );
+    let encoded = serde_json::to_string(&payload).expect("bounded Observer payload");
+    assert!(!encoded.contains("*** Begin Patch"));
+    assert!(!encoded.to_ascii_lowercase().contains("credential"));
+    drop(runtime);
+    let mut runtime = fixture.runtime();
+    runtime
+        .open_for_job_recovering(
+            &active,
+            None,
+            &Instant("2026-08-28T00:00:07.500Z".to_owned()),
+        )
+        .expect("reopen pending Observer checkpoint");
+    assert_eq!(
+        runtime
+            .pending_observation_model_open(&active)
+            .expect("load pending Observer open"),
+        Some(first_open.clone()),
+        "restart replays the exact retained model open rather than creating a second call"
+    );
+    let validation = first
+        .receipt
+        .validation
+        .as_ref()
+        .expect("validation receipt");
+    assert_eq!(validation.artifact_refs.len(), 2);
+    let result_revision = first.receipt.result_revision.clone().expect("result tree");
+    let created = observation_chunk(
+        &first_open,
+        1,
+        &serde_json::json!({"type": "created"}),
+        false,
+    );
+    let created_result = runtime
+        .accept_observation_model_chunk(
+            &active,
+            &created,
+            &Instant("2026-08-28T00:00:08.000Z".to_owned()),
+        )
+        .expect("retain Observer created frame")
+        .expect("Observer exchange");
+    assert_eq!(
+        created_result.retention,
+        ObservationChunkRetention::Inserted {
+            confirmed_sequence: 1
+        }
+    );
+    let response = serde_json::json!({
+        "schemaVersion": 1,
+        "observationId": observation.intent.observation_id.0,
+        "decision": "accept",
+        "reasonCode": "criteria_satisfied",
+        "summary": "The bounded evidence satisfies the requested criterion.",
+        "rootCauses": [],
+        "repairClass": null,
+        "confidenceBps": 9000
+    })
+    .to_string();
+    let delta = observation_chunk(
+        &first_open,
+        2,
+        &serde_json::json!({"type": "output_text_delta", "delta": response}),
+        false,
+    );
+    let mut stale = active.clone();
+    stale.lease.fencing_token = FencingToken("2".to_owned());
+    let stale_error = runtime
+        .accept_observation_model_chunk(
+            &stale,
+            &delta,
+            &Instant("2026-08-28T00:00:08.050Z".to_owned()),
+        )
+        .expect_err("stale Observer authority");
+    assert_eq!(stale_error.code(), JobWorkspaceErrorCode::AuthorityMismatch);
+    runtime
+        .accept_observation_model_chunk(
+            &active,
+            &delta,
+            &Instant("2026-08-28T00:00:08.100Z".to_owned()),
+        )
+        .expect("retain Observer response")
+        .expect("Observer exchange");
+    let completed_payload = serde_json::json!({
+        "type": "completed",
+        "responseId": "response-observer-fixture",
+        "actualCostMicros": 47,
+        "tokenUsage": {
+            "input_tokens": 80,
+            "cached_input_tokens": 0,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 20,
+            "reasoning_output_tokens": 0,
+            "total_tokens": 100
+        },
+        "endTurn": true
+    });
+    let gap = observation_chunk(&first_open, 4, &completed_payload, true);
+    assert_eq!(
+        runtime
+            .accept_observation_model_chunk(
+                &active,
+                &gap,
+                &Instant("2026-08-28T00:00:08.200Z".to_owned()),
+            )
+            .expect("classify Observer gap")
+            .expect("Observer exchange")
+            .retention,
+        ObservationChunkRetention::Gap {
+            confirmed_sequence: 2
+        }
+    );
+    let completed = observation_chunk(&first_open, 3, &completed_payload, true);
+    drop(runtime);
+    let mut interrupted =
+        ChangeBatchStore::open(&fixture.root).expect("open interrupted Observer journal");
+    let completed_bytes = serde_json::to_vec(&completed).expect("encode terminal Observer frame");
+    assert_eq!(
+        interrupted
+            .retain_observation_model_chunk(
+                &ObservationModelFrame {
+                    model_exchange_id: first_open.model_exchange_id.clone(),
+                    sequence: 3,
+                    chunk_digest: Sha256Digest(format!(
+                        "sha256:{:x}",
+                        Sha256::digest(&completed_bytes)
+                    )),
+                    response_delta: &[],
+                    model_usage: Some(ExecutionOutcomeUsage {
+                        cost_microunits: 47,
+                        runtime_millis: 0,
+                        tokens: 100,
+                    }),
+                    terminal_status: Some("completed"),
+                },
+                &Instant("2026-08-28T00:00:08.250Z".to_owned()),
+            )
+            .expect("retain terminal frame before simulated process loss"),
+        ObservationChunkRetention::Inserted {
+            confirmed_sequence: 3
+        }
+    );
+    let interrupted_record = interrupted
+        .observation_model_record(&first_open.model_exchange_id)
+        .expect("load terminal Observer exchange")
+        .expect("terminal Observer exchange exists");
+    let interrupted_response = parse_observation_response_strict(
+        &interrupted_record.response_bytes,
+        &interrupted_record.request.intent,
+    )
+    .expect("parse retained terminal Observer response");
+    let interrupted_receipt = ObservationReceipt {
+        identity: interrupted_record.request.intent.identity.clone(),
+        input_digest: interrupted_record.request.intent.input_digest.clone(),
+        model_usage: interrupted_record.model_usage.clone(),
+        output_digest: derive_observation_output_digest(&interrupted_response)
+            .expect("derive retained Observer output"),
+        profile_digest: interrupted_record.request.intent.profile_digest.clone(),
+        response: interrupted_response,
+        result_revision: interrupted_record.request.intent.result_revision.clone(),
+        source: ObservationSource::Model,
+    };
+    interrupted
+        .retain_observation_receipt(
+            &interrupted_receipt,
+            &Instant("2026-08-28T00:00:08.260Z".to_owned()),
+        )
+        .expect("retain receipt before simulated process loss");
+    let journal_database = fixture
+        .root
+        .join(".workspaces-change-batches/change-batch.sqlite3");
+    let workspace_id = Connection::open(&journal_database)
+        .expect("open Observer recovery database")
+        .query_row(
+            "SELECT workspace_id FROM change_batch_workspace WHERE active_batch_id = ?1",
+            [&observation.intent.identity.batch_id.0],
+            |row| row.get::<_, String>(0),
+        )
+        .expect("load Observer workspace identity");
+    let retained_progress = interrupted
+        .progress_events(&observation.intent.identity.batch_id)
+        .expect("load retained Observer progress");
+    let observation_completed = ChangeBatchProgressEvent {
+        artifact_refs: Vec::new(),
+        identity: observation.intent.identity.clone(),
+        occurred_at: Instant("2026-08-28T00:00:08.265Z".to_owned()),
+        sequence: retained_progress
+            .last()
+            .expect("ObservationRequested progress")
+            .sequence
+            + 1,
+        state: ChangeBatchProgressState::ObservationCompleted,
+        summary: "ChangeBatch bounded observation completed".to_owned(),
+    };
+    interrupted
+        .retain_workspace_progress(
+            &workspace_id,
+            &observation_completed,
+            BatchState::ObservationPending,
+            BatchState::ObservationPending,
+        )
+        .expect("retain ObservationCompleted before simulated process loss");
+    drop(interrupted);
+    let mut runtime = fixture.runtime();
+    runtime
+        .open_for_job_recovering(
+            &active,
+            None,
+            &Instant("2026-08-28T00:00:08.275Z".to_owned()),
+        )
+        .expect("reopen terminal Observer frame without receipt");
+    assert_eq!(
+        runtime
+            .pending_observation_model_open(&active)
+            .expect("reload terminal Observer exchange"),
+        Some(first_open.clone()),
+        "restart replays a billed terminal exchange until its final route is durable"
+    );
+    let applied = runtime
+        .accept_observation_model_chunk(
+            &active,
+            &completed,
+            &Instant("2026-08-28T00:00:08.300Z".to_owned()),
+        )
+        .expect("complete strict Observer response")
+        .expect("Observer exchange");
+    assert_eq!(
+        applied
+            .completed_progress
+            .iter()
+            .map(|event| &event.state)
+            .collect::<Vec<_>>(),
+        [&ChangeBatchProgressState::Accepted]
+    );
+    assert_eq!(
+        applied.receipt.as_ref().map(|receipt| &receipt.source),
+        Some(&ObservationSource::Model)
+    );
+    assert_eq!(
+        applied
+            .receipt
+            .as_ref()
+            .and_then(|receipt| receipt.model_usage.as_ref())
+            .map(|usage| usage.cost_microunits),
+        Some(47),
+        "the exact settled Observer charge survives terminal replay"
+    );
+    assert!(
+        applied
+            .change_batch_receipt
+            .as_ref()
+            .and_then(|receipt| receipt.observation.as_ref())
+            .is_some()
+    );
+    let replay = runtime
+        .accept_observation_model_chunk(
+            &active,
+            &completed,
+            &Instant("2026-08-28T00:00:08.400Z".to_owned()),
+        )
+        .expect("replay terminal Observer frame")
+        .expect("Observer exchange");
+    assert_eq!(
+        replay.retention,
+        ObservationChunkRetention::Duplicate {
+            confirmed_sequence: 3
+        }
+    );
+    assert!(replay.completed_progress.is_empty());
+    let second = batch_proposal_with_patch(
+        &active,
+        result_revision,
+        "*** Begin Patch\n*** Add File: second.txt\n+second\n*** End Patch\n",
+        "turn-new-diagnostic",
+    );
+    let executed = Box::pin(runtime.execute_change_batch(
+        &active,
+        &second,
+        &Instant("2026-08-28T00:00:10.000Z".to_owned()),
+    ))
+    .await
+    .expect("compare new missing-module diagnostic");
+    assert_eq!(
+        executed.progress.last().map(|event| &event.state),
+        Some(&ChangeBatchProgressState::RepairRequired)
+    );
+    assert!(
+        executed.observation_request.is_none(),
+        "a new missing module is a hard Repair decision and must not call the Observer model"
+    );
+}
+
+#[tokio::test]
+async fn failed_parser_command_does_not_skip_the_remaining_profile_snapshot() {
+    let fixture = Fixture::new("diagnostic-complete-profile");
+    let typescript = r"print('delegated.txt(1,1): error TS2307: Cannot find module \'existing\'.'); raise SystemExit(1)";
+    let cargo = r#"print('{"reason":"build-finished","success":true}')"#;
+    let configuration = VALIDATION_CONFIG
+        .replace(
+            "id = \"python-check\"\nphase = \"validation\"\nlanguage = \"python\"\nallowedCompanionPaths = []\nargv = [\"/usr/bin/python3\", \"-B\", \"-c\", 'from pathlib import Path; assert Path(\"delegated.txt\").read_text() == \"formatted\\n\"']",
+            &format!(
+                "id = \"python-check\"\nphase = \"validation\"\nlanguage = \"typescript\"\ndiagnosticParserVersion = \"typescript_v1\"\nallowedCompanionPaths = []\nargv = [\"/usr/bin/python3\", \"-B\", \"-c\", {typescript:?}]"
+            ),
+        )
+        .replace(
+            "id = \"rust-check\"\nphase = \"validation\"\nlanguage = \"rust\"\nallowedCompanionPaths = []\nargv = [\"/usr/bin/true\"]",
+            &format!(
+                "id = \"rust-check\"\nphase = \"validation\"\nlanguage = \"rust\"\ndiagnosticParserVersion = \"cargo_json_v1\"\nallowedCompanionPaths = []\nargv = [\"/usr/bin/python3\", \"-B\", \"-c\", {cargo:?}]"
+            ),
+        )
+        .replace(
+            "commandIds = [\"python-format\", \"python-check\"]",
+            "commandIds = [\"python-format\", \"python-check\", \"rust-check\"]",
+        );
+    fixture.install_validation_config_text(&configuration);
+    let active = active_job();
+    let mut runtime = fixture.runtime();
+    runtime
+        .open_for_job(&active, None)
+        .expect("open complete-profile workspace");
+    let proposal = batch_proposal(&active, source_revision(&fixture));
+    let executed = Box::pin(runtime.execute_change_batch(
+        &active,
+        &proposal,
+        &Instant("2026-08-28T00:00:02.000Z".to_owned()),
+    ))
+    .await
+    .expect("retain every parser snapshot");
+    let validation = executed.receipt.validation.expect("validation receipt");
+    assert_eq!(validation.checks.len(), 2);
+    assert_eq!(validation.artifact_refs.len(), 4);
+    assert_eq!(
+        executed.progress.last().map(|event| &event.state),
+        Some(&ChangeBatchProgressState::ObservationRequested)
+    );
+}
+
+#[tokio::test]
+async fn timed_out_parser_profile_persists_infrastructure_instead_of_an_incomplete_snapshot() {
+    let fixture = Fixture::new("diagnostic-timeout-profile");
+    let configuration = VALIDATION_CONFIG
+        .replace(
+            "id = \"python-check\"\nphase = \"validation\"\nlanguage = \"python\"\nallowedCompanionPaths = []\nargv = [\"/usr/bin/python3\", \"-B\", \"-c\", 'from pathlib import Path; assert Path(\"delegated.txt\").read_text() == \"formatted\\n\"']\nworkingDirectory = \".\"\nenvironment = []\nnetwork = false\ntimeoutMillis = 300000",
+            "id = \"python-check\"\nphase = \"validation\"\nlanguage = \"typescript\"\ndiagnosticParserVersion = \"typescript_v1\"\nallowedCompanionPaths = []\nargv = [\"/usr/bin/python3\", \"-B\", \"-c\", \"import time; time.sleep(1)\"]\nworkingDirectory = \".\"\nenvironment = []\nnetwork = false\ntimeoutMillis = 10",
+        )
+        .replace(
+            "id = \"rust-check\"\nphase = \"validation\"\nlanguage = \"rust\"\nallowedCompanionPaths = []\nargv = [\"/usr/bin/true\"]",
+            "id = \"rust-check\"\nphase = \"validation\"\nlanguage = \"rust\"\ndiagnosticParserVersion = \"cargo_json_v1\"\nallowedCompanionPaths = []\nargv = [\"/usr/bin/true\"]",
+        )
+        .replace(
+            "commandIds = [\"python-format\", \"python-check\"]",
+            "commandIds = [\"python-format\", \"python-check\", \"rust-check\"]",
+        );
+    fixture.install_validation_config_text(&configuration);
+    let active = active_job();
+    let mut runtime = fixture.runtime();
+    runtime
+        .open_for_job(&active, None)
+        .expect("open timeout workspace");
+    let proposal = batch_proposal(&active, source_revision(&fixture));
+    let executed = Box::pin(runtime.execute_change_batch(
+        &active,
+        &proposal,
+        &Instant("2026-08-28T00:00:02.000Z".to_owned()),
+    ))
+    .await
+    .expect("persist timeout diagnostic decision");
+    let validation = executed.receipt.validation.expect("validation receipt");
+    assert_eq!(
+        validation.status,
+        winwincode_execution_port::generated::ValidationReceiptStatus::InfrastructureError
+    );
+    assert_eq!(validation.checks.len(), 1);
+    assert_eq!(validation.artifact_refs.len(), 2);
+    assert_eq!(
+        executed.progress.last().map(|event| &event.state),
+        Some(&ChangeBatchProgressState::RepairRequired)
+    );
+}
+
 #[test]
 fn unchanged_or_cancelled_writer_produces_no_candidate() {
     let fixture = Fixture::new("fail-closed");
@@ -1159,12 +2082,12 @@ fn unchanged_or_cancelled_writer_produces_no_candidate() {
         .open_for_job(&active, None)
         .expect("create unchanged Job checkout");
     let unchanged = runtime
-        .prepare_candidate(&active)
+        .prepare_candidate(&active, winwincode_codex::RoleExecutionMode::React)
         .expect_err("unchanged checkout has no candidate");
     assert_eq!(unchanged.code(), JobWorkspaceErrorCode::Candidate);
     active.lifecycle = ActiveJobLifecycle::Cancelling;
     let cancelling = runtime
-        .prepare_candidate(&active)
+        .prepare_candidate(&active, winwincode_codex::RoleExecutionMode::React)
         .expect_err("cancelling Job has no candidate");
     assert_eq!(cancelling.code(), JobWorkspaceErrorCode::Candidate);
     runtime

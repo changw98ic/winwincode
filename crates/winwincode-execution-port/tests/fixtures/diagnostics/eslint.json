@@ -1,0 +1,14 @@
+[
+  {
+    "filePath": "src/lint.ts",
+    "messages": [
+      {
+        "ruleId": "no-undef",
+        "severity": 2,
+        "message": "name is not defined",
+        "line": 3,
+        "column": 7
+      }
+    ]
+  }
+]

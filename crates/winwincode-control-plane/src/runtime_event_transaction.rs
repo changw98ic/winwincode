@@ -20,7 +20,7 @@ use winwincode_api::generated::{
     ControlPlaneWebSocketProductSessionRuntimeProjectionInvalidatedEvent,
     ControlPlaneWebSocketProductSessionRuntimeProjectionInvalidatedEventScopeKind,
     ControlPlaneWebSocketProductSessionRuntimeProjectionInvalidatedEventTypeValue,
-    ControlPlaneWebSocketRuntimeProjectionGetReloadQuery, RepositoryScope,
+    ControlPlaneWebSocketRuntimeProjectionGetReloadQuery,
 };
 use winwincode_audit::{
     AuditAction, AuditEvent, AuditEventId, AuditExecutionIdentity, AuditExecutionSubjectKind,
@@ -30,6 +30,7 @@ use winwincode_delivery::{
     application::stage::SessionBindingAuthority,
     domain::{Delivery, StageRunStatus},
 };
+use winwincode_domain::RepositoryScope;
 use winwincode_domain::{
     CodexThreadId, DeliveryId, DeliveryTaskId, ExecutionAckSequence, ExecutionJobId,
     ExecutionMessageId, ExecutionSequence, FencingToken, Instant, LeaseId, ProductSessionId,

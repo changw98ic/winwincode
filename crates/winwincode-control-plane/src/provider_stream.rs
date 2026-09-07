@@ -341,6 +341,15 @@ pub struct CanonicalModelStreamFrame {
 }
 
 impl CanonicalModelStreamFrame {
+    #[cfg(test)]
+    pub(crate) fn for_test(sequence: u64, payload_json: &str, terminal: bool) -> Self {
+        Self {
+            sequence,
+            payload_json: payload_json.to_owned(),
+            terminal,
+        }
+    }
+
     #[must_use]
     pub const fn sequence(&self) -> u64 {
         self.sequence

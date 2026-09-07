@@ -11,10 +11,10 @@ use winwincode_api::generated::{
     CandidateHistoricalReviewProjection, CandidateHistoricalReviewProjectionKind,
     CandidateHistoryItemProjection, CandidateHistoryListQuery, CandidateHistoryListResultResponse,
     CandidateHistoryListResultResponseQuery, CandidateHistoryPage, CandidateHistoryPageKind,
-    PageInfo, QueryResultResponse, RepositoryScope, StrongFlowReadCursor,
+    PageInfo, QueryResultResponse, StrongFlowReadCursor,
 };
 use winwincode_delivery::domain::{DeliveryVerdict, EvidenceRef, FrozenDeliveryCandidate};
-use winwincode_domain::{DeliveryId, OpaqueCursor, Revision, SchemaVersion};
+use winwincode_domain::{DeliveryId, OpaqueCursor, Revision, SchemaVersion, RepositoryScope};
 use winwincode_storage::{
     CandidateGitPinReceipt, CandidateGitRetentionError, CandidateGitRetentionErrorKind,
     CandidateGitRetentionState, ProductStateStorage as _, SqliteStorage,

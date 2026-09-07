@@ -6,7 +6,6 @@ use std::fmt;
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use winwincode_api::generated::RepositoryScope;
 use winwincode_delivery::{
     domain::{CandidatePathFact, Delivery, FrozenDeliveryCandidate},
     projection::{
@@ -15,6 +14,7 @@ use winwincode_delivery::{
         project_delivery_detail,
     },
 };
+use winwincode_domain::RepositoryScope;
 use winwincode_domain::{
     ArtifactId, AttentionItemId, ExecutionMessageId, RequestId, Sha256Digest, StageRunId, UserId,
 };

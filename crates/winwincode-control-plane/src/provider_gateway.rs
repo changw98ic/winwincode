@@ -53,6 +53,7 @@ pub enum ProviderGatewayErrorKind {
     ProviderDisabled,
     ModelNotFound,
     ModelDisabled,
+    StructuredOutputUnsupported,
     CredentialUnavailable,
     CredentialScopeMismatch,
     AdapterNotRegistered,
@@ -176,7 +177,7 @@ impl ProviderGatewayIdentity {
     /// Constructs the only Gateway target accepted for a model-open envelope.
     #[must_use]
     pub const fn product_session(
-        repository_scope: winwincode_api::generated::RepositoryScope,
+        repository_scope: winwincode_domain::RepositoryScope,
         product_session_id: ProductSessionId,
     ) -> Self {
         Self {
@@ -1179,7 +1180,14 @@ impl<'a> ProviderGateway<'a> {
         }
 
         let payload = decode_payload(&message.request)?;
-        let resolved = self.resolve_admitted_open(message, Some(worker_route), &identity)?;
+        let requires_strict_json_schema =
+            requests_strict_json_schema(&message.request.content_type, &payload)?;
+        let resolved = self.resolve_admitted_open(
+            message,
+            Some(worker_route),
+            &identity,
+            requires_strict_json_schema,
+        )?;
         if expected_reservation
             .is_some_and(|expected| !admission_is_exact_replay(&resolved.admission, expected))
         {
@@ -1277,9 +1285,10 @@ impl<'a> ProviderGateway<'a> {
     /// Durably reserves the current route before retry context persistence.
     ///
     /// This step reads only secret-free settings, catalog, and Credential
-    /// reference authority. It neither decodes the model payload nor resolves
-    /// a secret or invokes a Provider adapter. [`Self::open`] must later replay
-    /// this exact reservation with the returned route authority.
+    /// reference authority. It decodes the bounded model payload solely to
+    /// reject unsupported strict JSON Schema requests before a reservation,
+    /// secret read, or Provider call. [`Self::open`] must later replay this
+    /// exact reservation with the returned route authority.
     ///
     /// # Errors
     ///
@@ -1295,7 +1304,10 @@ impl<'a> ProviderGateway<'a> {
             .authorize(message)
             .map_err(|error| map_identity_error(&error))?;
         validate_identity(message, &identity)?;
-        self.resolve_admitted_open(message, None, &identity)
+        let payload = decode_payload(&message.request)?;
+        let requires_strict_json_schema =
+            requests_strict_json_schema(&message.request.content_type, &payload)?;
+        self.resolve_admitted_open(message, None, &identity, requires_strict_json_schema)
             .map(|resolved| resolved.admission)
     }
 
@@ -1304,6 +1316,7 @@ impl<'a> ProviderGateway<'a> {
         message: &ModelOpenMessage,
         worker_route: Option<&ModelRoute>,
         identity: &ProviderGatewayIdentity,
+        requires_strict_json_schema: bool,
     ) -> Result<ResolvedProviderOpen, ProviderGatewayError> {
         let (route, credential_scope) = ModelSettingsService::new(self.storage)
             .resolve_with_catalog_scope(identity.target())
@@ -1314,7 +1327,6 @@ impl<'a> ProviderGateway<'a> {
                 "Worker route does not match the configured model route",
             ));
         }
-        self.adapter(&route.provider_id)?;
         let settings = ModelSettingsService::new(self.storage)
             .project(identity.target())
             .map_err(|error| map_model_settings_error(&error))?;
@@ -1327,6 +1339,16 @@ impl<'a> ProviderGateway<'a> {
         let capability = ProviderCatalogService::new(self.storage)
             .resolve_model(&credential_scope, &route.provider_id, &route.model_id)
             .map_err(|error| map_provider_catalog_error(&error))?;
+        if requires_strict_json_schema
+            && capability.model.structured_output_support
+                != crate::StructuredOutputSupport::JsonSchemaStrict
+        {
+            return Err(ProviderGatewayError::new(
+                ProviderGatewayErrorKind::StructuredOutputUnsupported,
+                "Configured model does not support strict JSON Schema output",
+            ));
+        }
+        self.adapter(&route.provider_id)?;
         let reference = CredentialReferenceService::new(self.storage)
             .resolve(&credential_scope, &route.credential_reference_id)
             .map_err(|error| map_credential_reference_error(&error))?;
@@ -2490,6 +2512,79 @@ fn decode_payload(payload: &EncodedPayload) -> Result<Vec<u8>, ProviderGatewayEr
         return Err(ProviderGatewayError::invalid());
     }
     Ok(bytes)
+}
+
+fn requests_strict_json_schema(
+    content_type: &str,
+    payload: &[u8],
+) -> Result<bool, ProviderGatewayError> {
+    if !is_json_content_type(content_type) {
+        return Ok(false);
+    }
+    let envelope: serde_json::Value =
+        serde_json::from_slice(payload).map_err(|_| ProviderGatewayError::invalid())?;
+    let Some(request) = envelope.get("request") else {
+        return Ok(false);
+    };
+    let request = request
+        .as_object()
+        .ok_or_else(ProviderGatewayError::invalid)?;
+    let Some(text) = request.get("text") else {
+        return Ok(false);
+    };
+    if text.is_null() {
+        return Ok(false);
+    }
+    let text = text.as_object().ok_or_else(ProviderGatewayError::invalid)?;
+    let Some(format) = text.get("format") else {
+        return Ok(false);
+    };
+    if format.is_null() {
+        return Ok(false);
+    }
+    let format = format
+        .as_object()
+        .ok_or_else(ProviderGatewayError::invalid)?;
+    let format_type = format
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(ProviderGatewayError::invalid)?;
+    if format_type == "text" {
+        if format.len() != 1 {
+            return Err(ProviderGatewayError::invalid());
+        }
+        return Ok(false);
+    }
+    let name = format.get("name").and_then(serde_json::Value::as_str);
+    if format_type != "json_schema"
+        || format.keys().any(|key| {
+            !matches!(
+                key.as_str(),
+                "type" | "name" | "description" | "schema" | "strict"
+            )
+        })
+        || name.is_none_or(|name| {
+            name.is_empty()
+                || name.len() > 64
+                || !name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        })
+        || format
+            .get("schema")
+            .is_none_or(|schema| !schema.is_object())
+        || format.get("description").is_some_and(|description| {
+            description
+                .as_str()
+                .is_none_or(|description| description.len() > 1_024)
+        })
+    {
+        return Err(ProviderGatewayError::invalid());
+    }
+    format
+        .get("strict")
+        .and_then(serde_json::Value::as_bool)
+        .ok_or_else(ProviderGatewayError::invalid)
 }
 
 fn gateway_open_digest(

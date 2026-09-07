@@ -9,9 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use rusqlite::Connection;
 use serde_json::json;
-use winwincode_api::generated::{
-    ApprovalDecideCommand, InputRespondCommand, ModelRoute, RepositoryScope, RepositoryScopeKind,
-};
+use winwincode_api::generated::{ApprovalDecideCommand, InputRespondCommand, ModelRoute};
 use winwincode_control_plane::{
     ChatInteractionApiService, ChatInteractionService, ChatInteractionServiceErrorCode,
     CollaborationInboxItemId, CollaborationInboxItemState, CollaborationInboxSourcePort,
@@ -31,6 +29,7 @@ use winwincode_domain::{
     ModelExchangeId, OrganizationId, ProductSessionId, ProjectId, RepositoryId, RequestId,
     Sha256Digest, StageRunId, UserId, WorkerId, WorkerInstanceId, WorkerSessionId, WorkspaceId,
 };
+use winwincode_domain::{RepositoryScope, RepositoryScopeKind};
 use winwincode_execution_port::action_gateway::GateDecision;
 use winwincode_execution_port::generated::{
     ApprovalRequestMessage, ExecutionPortMessage, InputRequestMessage,

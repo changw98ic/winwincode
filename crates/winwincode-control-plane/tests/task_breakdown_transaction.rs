@@ -9,8 +9,7 @@ use std::{
 
 use sha2::{Digest, Sha256};
 use winwincode_api::generated::{
-    Actor, CommandEnvelope, CommandName, RepositoryScope, RepositoryScopeKind, Scope, UserActor,
-    UserActorKind, WorkspaceScope, WorkspaceScopeKind,
+    Actor, CommandEnvelope, CommandName, Scope, WorkspaceScope, WorkspaceScopeKind,
 };
 use winwincode_control_plane::{
     CommitError, ControlPlane, ControlPlaneConfig, EventPublishError, EventPublisher, OutboxEvent,
@@ -28,6 +27,7 @@ use winwincode_domain::{
     DeliveryId, OrganizationId, ProjectId, RepositoryId, RequestId, Revision, SchemaVersion,
     Sha256Digest, UserId, WorkspaceId,
 };
+use winwincode_domain::{RepositoryScope, RepositoryScopeKind, UserActor, UserActorKind};
 use winwincode_storage::{
     AggregateJournalKey, AggregateJournalPublication, AggregateJournalRecord, NewOutboxEvent,
     ProductStateStorage, ReceiptActorKey, ReceiptIdentity, ReceiptScopeKey, SqliteStorage,

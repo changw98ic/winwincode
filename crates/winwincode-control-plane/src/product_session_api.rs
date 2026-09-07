@@ -5,7 +5,7 @@
 use sha2::{Digest, Sha256};
 use winwincode_api::generated::{
     Actor, ChatSubmitCommand, ChatSubmitCompletedResponse, ChatSubmitCompletedResponseCommand,
-    ChatSubmitCompletedResponseOutcome, PageInfo, RepositoryScope, SessionCancelCommand,
+    ChatSubmitCompletedResponseOutcome, PageInfo, SessionCancelCommand,
     SessionCancelCompletedResponse, SessionCancelCompletedResponseCommand,
     SessionCancelCompletedResponseOutcome, SessionCloseCommand, SessionCloseCompletedResponse,
     SessionCloseCompletedResponseCommand, SessionCloseCompletedResponseOutcome,
@@ -15,6 +15,7 @@ use winwincode_api::generated::{
     SessionListResultResponseQuery, SessionMessagesListQuery, SessionMessagesListResultResponse,
     SessionMessagesListResultResponseQuery,
 };
+use winwincode_domain::RepositoryScope;
 use winwincode_domain::{ControlPlaneEventId, Instant, RequestId};
 use winwincode_storage::{
     PublicEventActor, PublicEventScope, ReceiptScopeKey, public_receipt_identity,
