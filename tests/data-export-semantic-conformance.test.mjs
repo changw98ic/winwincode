@@ -7,6 +7,7 @@ import test from 'node:test'
 import Ajv2020 from 'ajv/dist/2020.js'
 
 import {
+  canonicalJsonString,
   canonicalWinWinCodeExportBytes,
   canonicalWinWinCodeExportDigestMaterialBytes,
 } from '../schema/winwincode-export/v1/canonical-json.js'
@@ -28,6 +29,13 @@ const schemaPath = join(
   'winwincode-export',
   'v1',
   'winwincode-export.schema.json',
+)
+const canonicalStringFixturePath = join(
+  root,
+  'schema',
+  'winwincode-export',
+  'v1',
+  'canonical-json-string.example.json.bytes',
 )
 function publishedVectors() {
   return JSON.parse(readFileSync(vectorsPath, 'utf8'))
@@ -53,6 +61,23 @@ function sealedDocument(content) {
     .digest('hex')
   return document
 }
+
+test('the Node canonical string encoder matches the shared Rust fixture byte-for-byte', () => {
+  const fixture = readFileSync(canonicalStringFixturePath)
+  const value = JSON.parse(fixture)
+  assert.equal(value.includes('/'), true)
+  assert.equal(value.includes('\\'), true)
+  assert.equal(value.includes('"'), true)
+  assert.equal(value.includes('é'), true)
+  assert.equal(value.includes('🦀'), true)
+  assert.equal(value.includes('\b'), true)
+  assert.equal(value.includes('\t'), true)
+  assert.equal(value.includes('\n'), true)
+  assert.equal(value.includes('\f'), true)
+  assert.equal(value.includes('\r'), true)
+  assert.equal(value.includes('\u001f'), true)
+  assert.deepEqual(Buffer.from(canonicalJsonString(value)), fixture)
+})
 
 test('the published conformance vectors reproduce from the canonical encoder', () => {
   const published = publishedVectors()
