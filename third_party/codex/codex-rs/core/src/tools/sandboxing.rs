@@ -401,6 +401,9 @@ pub(crate) struct SandboxAttempt<'a> {
     pub windows_sandbox_private_desktop: bool,
     pub network_denial_cancellation_token: Option<CancellationToken>,
     pub(crate) network_proxy: Option<&'a NetworkProxy>,
+    /// Exact host authorization for this attempt. Shell runtimes use its
+    /// canonical absolute executable instead of resolving `argv[0]` again.
+    pub(crate) action_authorization: Option<&'a crate::ToolCallGateAuthorization>,
 }
 
 pub(crate) fn executor_windows_sandbox_level(

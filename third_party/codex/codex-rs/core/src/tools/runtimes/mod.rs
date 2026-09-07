@@ -28,6 +28,7 @@ use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::models::AdditionalPermissionProfile;
 use codex_protocol::shell_environment::is_non_inheritable_env_var;
 use codex_sandboxing::SandboxCommand;
+use codex_shell_command::bash::parse_shell_lc_plain_commands;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::PathUri;
 use std::collections::HashMap;
@@ -37,6 +38,57 @@ use std::path::Path;
 pub(crate) mod apply_patch;
 pub(crate) mod shell;
 pub(crate) mod unified_exec;
+
+/// Replaces only `argv[0]` with the exact executable admitted by the host.
+/// Arguments and working directory remain the handler-parsed values that were
+/// bound into the gate request.
+pub(crate) fn command_with_authorized_executable(
+    command: &[String],
+    attempt: &crate::tools::sandboxing::SandboxAttempt<'_>,
+) -> Result<Vec<String>, ToolError> {
+    let Some(executable) = attempt
+        .action_authorization
+        .and_then(crate::ToolCallGateAuthorization::executable)
+    else {
+        return Ok(command.to_vec());
+    };
+    let path = executable.canonical_absolute_path();
+    if !std::path::Path::new(path).is_absolute()
+        || executable.identity().is_empty()
+        || attempt
+            .action_authorization
+            .is_none_or(|authorization| authorization.request_binding().is_empty())
+    {
+        return Err(ToolError::Rejected(
+            "host executable authorization is invalid".to_string(),
+        ));
+    }
+    let mut authorized = Vec::with_capacity(executable.arguments().len() + 1);
+    authorized.push(path.to_string());
+    authorized.extend_from_slice(executable.arguments());
+    Ok(authorized)
+}
+
+pub(crate) fn has_authorized_executable(
+    attempt: &crate::tools::sandboxing::SandboxAttempt<'_>,
+) -> bool {
+    attempt
+        .action_authorization
+        .and_then(crate::ToolCallGateAuthorization::executable)
+        .is_some()
+}
+
+/// Returns the one plain command represented by a shell wrapper. Complex
+/// scripts remain wrapped and therefore cannot match a delegated executable
+/// allowlist.
+pub(crate) fn command_for_action_gate(command: &[String]) -> Vec<String> {
+    if let Some(commands) = parse_shell_lc_plain_commands(command)
+        && let [single] = commands.as_slice()
+    {
+        return single.clone();
+    }
+    command.to_vec()
+}
 
 /// Shared helper to construct sandbox transform inputs from a tokenized command line and native
 /// working directory. Validates that at least a program is present.

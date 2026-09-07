@@ -189,14 +189,14 @@ impl ToolCallRuntime {
                         tool_name: dispatch_call.tool_name.name.clone(),
                         payload,
                     };
-                    attachment
+                    let authorization = attachment
                         .gate()
                         .authorize(request.clone())
                         .await
                         .map_err(|error| FunctionCallError::RespondToModel(error.to_string()))?;
                     attachment
                         .gate()
-                        .revalidate(request)
+                        .revalidate(request, authorization)
                         .await
                         .map_err(|error| FunctionCallError::RespondToModel(error.to_string()))?;
                 }
@@ -449,7 +449,10 @@ mod tests {
         fn authorize(
             &self,
             request: crate::ToolCallGateRequest,
-        ) -> futures::future::BoxFuture<'static, Result<(), crate::ToolCallGateRejection>> {
+        ) -> futures::future::BoxFuture<
+            'static,
+            Result<crate::ToolCallGateAuthorization, crate::ToolCallGateRejection>,
+        > {
             let entered = self
                 .entered
                 .lock()
@@ -461,13 +464,14 @@ mod tests {
                     let _ = entered.send(request);
                 }
                 release.notified().await;
-                Ok(())
+                Ok(crate::ToolCallGateAuthorization::default())
             })
         }
 
         fn revalidate(
             &self,
             _request: crate::ToolCallGateRequest,
+            _authorization: crate::ToolCallGateAuthorization,
         ) -> futures::future::BoxFuture<'static, Result<(), crate::ToolCallGateRejection>> {
             Box::pin(async {
                 Err(crate::ToolCallGateRejection::new(

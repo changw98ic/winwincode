@@ -54,6 +54,8 @@ pub use codex_core::ThreadManager;
 pub use codex_core::ThreadShutdownReport;
 pub use codex_core::ToolCallGate;
 pub use codex_core::ToolCallGateAttachment;
+pub use codex_core::ToolCallGateAuthorization;
+pub use codex_core::ToolCallGateExecutableAuthorization;
 pub use codex_core::ToolCallGateFileChange;
 pub use codex_core::ToolCallGateFileOperation;
 pub use codex_core::ToolCallGatePayload;

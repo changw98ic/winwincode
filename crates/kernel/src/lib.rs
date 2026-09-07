@@ -46,6 +46,8 @@ use codex_core_api::SteerSubmission;
 use codex_core_api::ThreadId;
 use codex_core_api::ThreadManager;
 use codex_core_api::ToolCallGate;
+use codex_core_api::ToolCallGateAuthorization;
+use codex_core_api::ToolCallGateExecutableAuthorization;
 use codex_core_api::ToolCallGateFileOperation;
 use codex_core_api::ToolCallGatePayload;
 use codex_core_api::ToolCallGateRejection;
@@ -90,6 +92,70 @@ pub struct KernelActionRequest {
     pub namespace: Option<String>,
     pub tool_name: String,
     pub payload: KernelActionPayload,
+}
+
+/// Host receipt retained from admission through the final Core execution
+/// boundary. The optional executable is the only program identity a delegated
+/// read may launch.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct KernelActionAuthorization {
+    request_binding: String,
+    executable: Option<KernelExecutableAuthorization>,
+}
+
+impl KernelActionAuthorization {
+    #[must_use]
+    pub fn new(request_binding: String, executable: Option<KernelExecutableAuthorization>) -> Self {
+        Self {
+            request_binding,
+            executable,
+        }
+    }
+
+    #[must_use]
+    pub fn request_binding(&self) -> &str {
+        &self.request_binding
+    }
+
+    #[must_use]
+    pub fn executable(&self) -> Option<&KernelExecutableAuthorization> {
+        self.executable.as_ref()
+    }
+}
+
+/// Canonical absolute executable and opaque immutable identity selected by the
+/// host action authority.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct KernelExecutableAuthorization {
+    canonical_absolute_path: String,
+    arguments: Vec<String>,
+    identity: String,
+}
+
+impl KernelExecutableAuthorization {
+    #[must_use]
+    pub fn new(canonical_absolute_path: String, arguments: Vec<String>, identity: String) -> Self {
+        Self {
+            canonical_absolute_path,
+            arguments,
+            identity,
+        }
+    }
+
+    #[must_use]
+    pub fn canonical_absolute_path(&self) -> &str {
+        &self.canonical_absolute_path
+    }
+
+    #[must_use]
+    pub fn identity(&self) -> &str {
+        &self.identity
+    }
+
+    #[must_use]
+    pub fn arguments(&self) -> &[String] {
+        &self.arguments
+    }
 }
 
 /// Exact Codex tool payload retained only for in-process pre-action authorization.
@@ -167,8 +233,15 @@ impl fmt::Debug for KernelActionPayload {
 
 /// Required host admission boundary for every embedded Codex tool call.
 pub trait KernelActionGate: Send + Sync {
-    fn authorize(&self, request: KernelActionRequest) -> BoxFuture<'static, KernelResult<()>>;
-    fn revalidate(&self, request: KernelActionRequest) -> BoxFuture<'static, KernelResult<()>>;
+    fn authorize(
+        &self,
+        request: KernelActionRequest,
+    ) -> BoxFuture<'static, KernelResult<KernelActionAuthorization>>;
+    fn revalidate(
+        &self,
+        request: KernelActionRequest,
+        authorization: KernelActionAuthorization,
+    ) -> BoxFuture<'static, KernelResult<()>>;
 }
 
 /// Explicit fail-closed gate for surfaces that have not installed an action authority.
@@ -176,7 +249,10 @@ pub trait KernelActionGate: Send + Sync {
 pub struct RejectingKernelActionGate;
 
 impl KernelActionGate for RejectingKernelActionGate {
-    fn authorize(&self, _request: KernelActionRequest) -> BoxFuture<'static, KernelResult<()>> {
+    fn authorize(
+        &self,
+        _request: KernelActionRequest,
+    ) -> BoxFuture<'static, KernelResult<KernelActionAuthorization>> {
         Box::pin(async {
             Err(KernelFailure::new(
                 "ACTION_GATE_UNAVAILABLE",
@@ -185,7 +261,11 @@ impl KernelActionGate for RejectingKernelActionGate {
         })
     }
 
-    fn revalidate(&self, _request: KernelActionRequest) -> BoxFuture<'static, KernelResult<()>> {
+    fn revalidate(
+        &self,
+        _request: KernelActionRequest,
+        _authorization: KernelActionAuthorization,
+    ) -> BoxFuture<'static, KernelResult<()>> {
         Box::pin(async {
             Err(KernelFailure::new(
                 "ACTION_GATE_UNAVAILABLE",
@@ -203,11 +283,12 @@ impl ToolCallGate for CoreToolCallGate {
     fn authorize(
         &self,
         request: ToolCallGateRequest,
-    ) -> BoxFuture<'static, Result<(), ToolCallGateRejection>> {
+    ) -> BoxFuture<'static, Result<ToolCallGateAuthorization, ToolCallGateRejection>> {
         let host = Arc::clone(&self.host);
         Box::pin(async move {
             host.authorize(kernel_action_request(request))
                 .await
+                .map(tool_call_gate_authorization)
                 .map_err(|_| {
                     ToolCallGateRejection::new(
                         "HOST_ACTION_REJECTED",
@@ -220,19 +301,53 @@ impl ToolCallGate for CoreToolCallGate {
     fn revalidate(
         &self,
         request: ToolCallGateRequest,
+        authorization: ToolCallGateAuthorization,
     ) -> BoxFuture<'static, Result<(), ToolCallGateRejection>> {
         let host = Arc::clone(&self.host);
         Box::pin(async move {
-            host.revalidate(kernel_action_request(request))
-                .await
-                .map_err(|_| {
-                    ToolCallGateRejection::new(
-                        "HOST_ACTION_STALE",
-                        "host action authority is no longer current",
-                    )
-                })
+            host.revalidate(
+                kernel_action_request(request),
+                kernel_action_authorization(&authorization),
+            )
+            .await
+            .map_err(|_| {
+                ToolCallGateRejection::new(
+                    "HOST_ACTION_STALE",
+                    "host action authority is no longer current",
+                )
+            })
         })
     }
+}
+
+fn tool_call_gate_authorization(
+    authorization: KernelActionAuthorization,
+) -> ToolCallGateAuthorization {
+    ToolCallGateAuthorization::new(
+        authorization.request_binding,
+        authorization.executable.map(|executable| {
+            ToolCallGateExecutableAuthorization::new(
+                executable.canonical_absolute_path,
+                executable.arguments,
+                executable.identity,
+            )
+        }),
+    )
+}
+
+fn kernel_action_authorization(
+    authorization: &ToolCallGateAuthorization,
+) -> KernelActionAuthorization {
+    KernelActionAuthorization::new(
+        authorization.request_binding().to_owned(),
+        authorization.executable().map(|executable| {
+            KernelExecutableAuthorization::new(
+                executable.canonical_absolute_path().to_owned(),
+                executable.arguments().to_vec(),
+                executable.identity().to_owned(),
+            )
+        }),
+    )
 }
 
 fn kernel_action_request(request: ToolCallGateRequest) -> KernelActionRequest {
@@ -282,7 +397,7 @@ pub const CODEX_COMMIT: &str = "758ef40f50c1a458425c7cfbf1eb12cbc07af0b0";
 /// Exact embedded Codex release tag.
 pub const CODEX_TAG: &str = "rust-v0.149.0";
 /// Native contract version, independent of the application package version.
-pub const INTERFACE_VERSION: u32 = 8;
+pub const INTERFACE_VERSION: u32 = 9;
 /// Patches applied to the embedded source in deterministic order.
 pub const CODEX_PATCH_SET: &[&str] = &[
     "upstream/patches/codex/0001-export-client-mcp-extensions.patch",
@@ -290,6 +405,7 @@ pub const CODEX_PATCH_SET: &[&str] = &[
     "upstream/patches/codex/0003-export-config-builder.patch",
     "upstream/patches/codex/0005-remount-split-bwrap-root-read-only.patch",
     "upstream/patches/codex/0006-tool-gate-and-exact-turn-replay.patch",
+    "upstream/patches/codex/0007-bind-tool-gate-executable-identity.patch",
 ];
 
 const ROLE_SESSION_POLICY_SCHEMA_VERSION: u32 = 2;
@@ -2090,7 +2206,7 @@ mod tests {
         .expect("construct kernel");
         let build = kernel.build_info();
         assert_eq!(build.interface_version, INTERFACE_VERSION);
-        assert_eq!(build.interface_version, 8);
+        assert_eq!(build.interface_version, 9);
         assert_eq!(build.codex_commit, CODEX_COMMIT);
         assert_eq!(
             build.patch_set,
@@ -2100,6 +2216,7 @@ mod tests {
                 "upstream/patches/codex/0003-export-config-builder.patch",
                 "upstream/patches/codex/0005-remount-split-bwrap-root-read-only.patch",
                 "upstream/patches/codex/0006-tool-gate-and-exact-turn-replay.patch",
+                "upstream/patches/codex/0007-bind-tool-gate-executable-identity.patch",
             ]
         );
         assert_eq!(build.event_capacity, 16);
