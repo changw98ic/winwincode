@@ -236,6 +236,7 @@ fn converge_provider_catalog(
             actor: local_actor(owner_user_id),
             scope: organization,
             request_id: derived_request_id(
+                LOCAL_MODEL_AUTHORITY_DOMAIN,
                 "provider-catalog-upsert",
                 &(
                     owner_user_id.0.clone(),
@@ -285,6 +286,7 @@ fn converge_model_settings(
             actor: local_actor(owner_user_id),
             target,
             request_id: derived_request_id(
+                LOCAL_MODEL_AUTHORITY_DOMAIN,
                 "model-settings-update",
                 &(
                     owner_user_id.0.clone(),
@@ -362,6 +364,7 @@ pub fn credential_create_command(
         command: CredentialReferenceCreateCommandCommand::CredentialReferenceCreate,
         expected_revision: Revision(0),
         request_id: derived_request_id(
+            LOCAL_MODEL_AUTHORITY_DOMAIN,
             "credential-reference-create",
             &(
                 owner_user_id.0.clone(),
@@ -375,18 +378,25 @@ pub fn credential_create_command(
     })
 }
 
-/// Derives the deterministic startup requestId for one exact desired input.
+/// Request-id derivation domain of the startup local model authority.
+const LOCAL_MODEL_AUTHORITY_DOMAIN: &str = "winwincode.server.local-model-authority.v1";
+
+/// Derives the deterministic requestId for one exact desired input.
 ///
 /// Identical inputs derive identical ids so the durable receipt replays the
 /// original result; changed inputs derive different ids so the desired state
-/// applies without reusing a requestId for different input.
-fn derived_request_id<T: serde::Serialize>(
+/// applies without reusing a requestId for different input. The provider
+/// onboarding module reuses this canonical derivation with its own domain
+/// string so the two flows can never collide.
+pub(crate) fn derived_request_id<T: serde::Serialize>(
+    domain: &str,
     purpose: &str,
     input: &T,
 ) -> Result<RequestId, serde_json::Error> {
     let input = serde_json::to_vec(input)?;
     let mut digest = Sha256::new();
-    digest.update(b"winwincode.server.local-model-authority.v1\0");
+    digest.update(domain.as_bytes());
+    digest.update([0]);
     digest.update(purpose.as_bytes());
     digest.update([0]);
     digest.update(u64::try_from(input.len()).unwrap_or(u64::MAX).to_be_bytes());
@@ -405,7 +415,7 @@ fn environment_or(name: &str, default: &str) -> Result<String, Box<dyn std::erro
     }
 }
 
-fn now_millis() -> u64 {
+pub(crate) fn now_millis() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |duration| {

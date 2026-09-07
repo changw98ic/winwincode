@@ -19,6 +19,7 @@ mod identity_authenticator;
 mod login_rate_limiter;
 mod model_authority;
 mod password_hash;
+mod provider_onboarding;
 mod remote_worker_transport;
 mod runtime;
 mod server;
@@ -75,6 +76,13 @@ pub use enterprise_management::{
 pub use identity_authenticator::EnterpriseRequestAuthenticator;
 pub use model_authority::{
     LocalModelRoute, configure_local_model_authority, credential_create_command,
+};
+pub use provider_onboarding::{
+    ConnectionProbe, ConnectionTestReport, CreateCredentialRequest, CredentialReferenceOnboarded,
+    CredentialRotated, EstablishRouteRequest, HttpsConnectionProbe, ModelRouteEstablished,
+    OnboardProviderRequest, OnboardingSecretStore, ProbeOutcome, ProviderOnboarded,
+    ProviderOnboardingError, ProviderOnboardingErrorKind, ProviderOnboardingService,
+    RotateCredentialRequest, TestConnectionRequest,
 };
 pub use remote_worker_transport::{
     FileRemoteWorkerAuthenticator, ProductionRemoteWorkerExchange, RemoteWorkerExchangePort,

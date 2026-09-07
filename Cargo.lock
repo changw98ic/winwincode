@@ -12906,6 +12906,7 @@ dependencies = [
  "winwincode-session",
  "winwincode-storage",
  "winwincode-worker",
+ "ureq",
 ]
 
 [[package]]
