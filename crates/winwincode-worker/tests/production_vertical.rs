@@ -384,7 +384,6 @@ fn configure_provider(storage: &mut SqliteStorage, message: &ModelOpenMessage) {
                     reasoning_efforts: vec!["high".to_owned()],
                 }],
             },
-            Instant("2026-09-02T00:00:00.000Z".to_owned()),
         )
         .expect("register loopback Provider");
     CredentialReferenceService::new(storage)
@@ -425,7 +424,6 @@ fn configure_provider(storage: &mut SqliteStorage, message: &ModelOpenMessage) {
                 }),
                 worker_concurrency_limit: 2,
             },
-            Instant("2026-09-02T00:00:00.000Z".to_owned()),
         )
         .expect("configure ProductSession model route");
 }
