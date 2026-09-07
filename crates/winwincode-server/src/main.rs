@@ -11,8 +11,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use winwincode_api::generated::{
-    Actor, OrganizationScope, OrganizationScopeKind, RepositoryScope, RepositoryScopeKind, Scope,
-    UserActor, UserActorKind,
+    Actor, OrganizationScope, OrganizationScopeKind, ProjectScope, ProjectScopeKind,
+    RepositoryScope, RepositoryScopeKind, Scope, UserActor, UserActorKind, WorkspaceScope,
+    WorkspaceScopeKind,
 };
 use winwincode_codex::{
     HelperReleaseManifest, ProductionCodexAdapter, ProductionCodexConfig, ProductionCodexOptions,
@@ -193,7 +194,7 @@ fn open_accounts_authority(
     let auth_sessions = Arc::new(SqliteAuthSessionManager::open(
         config.data_directory().join("auth-sessions"),
         vec![auth_bootstrap],
-        vec![Scope::RepositoryScope(repository_scope.clone())],
+        local_session_authority(&repository_scope),
         auth_config,
         Arc::clone(&accounts),
         Some(Arc::new(DeferredModelAuthority {
@@ -207,6 +208,32 @@ fn open_accounts_authority(
         Arc::clone(&auth_sessions),
         resolved_owner(&auth_sessions, &accounts)?,
     ))
+}
+
+/// The local Server exposes one configured repository, but the browser's
+/// post-login shell also reads the canonical organization, project, and
+/// request-pool streams for that repository. Keep those exact ancestor
+/// scopes in the session authority so every generated request and
+/// subscription is authorized by the same initialized Owner session.
+fn local_session_authority(repository: &RepositoryScope) -> Vec<Scope> {
+    vec![
+        Scope::OrganizationScope(OrganizationScope {
+            kind: OrganizationScopeKind::Organization,
+            organization_id: repository.organization_id.clone(),
+        }),
+        Scope::WorkspaceScope(WorkspaceScope {
+            kind: WorkspaceScopeKind::Workspace,
+            organization_id: repository.organization_id.clone(),
+            workspace_id: repository.workspace_id.clone(),
+        }),
+        Scope::ProjectScope(ProjectScope {
+            kind: ProjectScopeKind::Project,
+            organization_id: repository.organization_id.clone(),
+            workspace_id: repository.workspace_id.clone(),
+            project_id: repository.project_id.clone(),
+        }),
+        Scope::RepositoryScope(repository.clone()),
+    ]
 }
 
 fn open_production_application(
