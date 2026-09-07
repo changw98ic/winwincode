@@ -12,6 +12,7 @@ pub mod action_enforcement;
 pub mod candidate_ref;
 pub mod change_batch_store;
 pub mod context_safety;
+pub mod debug_experiment;
 pub mod debug_probe_context;
 pub mod managed_session;
 mod probe_evidence;

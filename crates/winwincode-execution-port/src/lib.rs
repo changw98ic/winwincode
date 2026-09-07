@@ -12,6 +12,7 @@ pub mod action_normalizer;
 pub mod capability_adapter;
 pub mod change_batch_identity;
 pub mod change_batch_progress;
+pub mod debug_experiment;
 pub mod debug_hypothesis_ledger;
 pub mod debug_probe_contract;
 pub mod debug_probe_delta_context;

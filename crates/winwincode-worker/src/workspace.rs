@@ -1520,6 +1520,41 @@ impl WorkerWorkspace {
         Ok(())
     }
 
+    /// Captures an ephemeral Git tree without creating a candidate commit or
+    /// candidate ref. This is the snapshot primitive for `DebugExperiment`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a workspace error when the checkout cannot be staged or its
+    /// tree cannot be read.
+    pub fn snapshot_ephemeral_revision(&mut self) -> Result<WorkspaceRevision, WorkspaceError> {
+        git_status(&self.layout.checkout, &["add", "--all"])?;
+        let tree_id = git_text(&self.layout.checkout, &["write-tree"])?;
+        Ok(WorkspaceRevision(format!("git-tree:{tree_id}")))
+    }
+
+    /// Restores an ephemeral checkout to its accepted source commit. The base
+    /// revision is checked first so a foreign experiment cannot be reset.
+    ///
+    /// # Errors
+    ///
+    /// Returns a conflict for a foreign base or a Git error during reset.
+    pub fn rollback_ephemeral_revision(
+        &mut self,
+        base_revision: &WorkspaceRevision,
+    ) -> Result<(), WorkspaceError> {
+        if base_revision != &self.resolved_source_tree() {
+            return Err(WorkspaceError::conflict(
+                "ephemeral rollback revision does not match workspace source",
+            ));
+        }
+        git_status(
+            &self.layout.checkout,
+            &["reset", "--hard", self.source_commit_id.as_str()],
+        )?;
+        git_status(&self.layout.checkout, &["clean", "-fdx"])
+    }
+
     /// Removes the worktree, sandbox, home, temporary files, and Artifact staging.
     ///
     /// # Errors
