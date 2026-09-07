@@ -4,6 +4,10 @@ import {
   ControlPlaneClientError,
   type ControlPlaneDeviceSummary,
 } from './control-plane-client.js'
+import {
+  clientOccupancyErrorCategory,
+  type ClientOccupancyErrorCategory,
+} from './client-occupancy-facade.js'
 import type { ClientsViewModel } from './clients-view-model.js'
 
 /**
@@ -16,8 +20,16 @@ import type { ClientsViewModel } from './clients-view-model.js'
 export interface ClientOccupancyPort {
   /** Claim the free device for the signed-in identity; the same holder repeats idempotently. */
   claim(input: { readonly clientId: string }): Promise<void>
-  /** Release the held device; the Server drains while tasks still run. */
-  release(input: { readonly clientId: string }): Promise<void>
+  /**
+   * Release the held device. The Server frees an idle device immediately and
+   * moves a busy one to `draining`; `mode: 'drain'` stamps the confirmed
+   * busy-release path so the downlink frame tells the device to let the
+   * running tasks finish instead of abandoning them.
+   */
+  release(input: {
+    readonly clientId: string
+    readonly mode?: 'release' | 'drain'
+  }): Promise<void>
   /** Stop the running tasks and release the device immediately. */
   cancelAndRelease(input: { readonly clientId: string }): Promise<void>
   /**
@@ -38,17 +50,28 @@ export type ClientOccupancyDangerAction =
   | 'force-release'
 
 /**
- * The one presentation-facing occupancy failure taxonomy. Wire codes are
- * translated by the classifier seam below and never read anywhere else; the
- * facade-owned classifier replaces the provisional default when it lands.
+ * The one presentation-facing occupancy failure taxonomy. Rejections are
+ * translated through the facade's stable category union (winwincode-cms.1) —
+ * the one canonical wire-code table lives in the facade's classifier, and
+ * only the retired-code bridge below still reads a wire code directly.
+ * `unavailable` stays the honest catch-all for outages, expired sessions,
+ * protocol drift, and unknown codes.
  */
 export type ClientOccupancyFailure =
   | 'occupied-by-other'
   | 'not-holder'
+  | 'device-gone'
   | 'device-offline'
   | 'device-locked'
+  | 'connections-forbidden'
+  | 'account-denied'
+  | 'capacity-exhausted'
+  | 'device-rejected'
+  | 'ack-timeout'
   | 'recovery-pending'
   | 'permission-denied'
+  | 'confirmation-required'
+  | 'state-changed'
   | 'rate-limited'
   | 'unavailable'
 
@@ -98,44 +121,65 @@ export function releaseDrainsFirst(device: ControlPlaneDeviceSummary): boolean {
 }
 
 /**
- * The wire-code translation behind the default `classify` seam, aligned with
- * the landed facade taxonomy (CLIENT-300.4): the stable Server codes map to
- * their presentation reasons, the holder/Owner denial is resolved per action
- * by `clientOccupancyFailure`, and everything else stays honestly unavailable.
+ * The stable-category translation behind the default `classify` seam. Every
+ * facade category carries its honest card reason; the holder/Owner denial
+ * category (`permission-denied`) is resolved per action by
+ * `clientOccupancyFailure` because the Server reuses one code for "only the
+ * holder may release" and "only the Owner may force-release".
  */
-const OCCUPANCY_FAILURE_CODES: Readonly<Record<string, ClientOccupancyFailure>> =
+const CATEGORY_FAILURES: Readonly<
+  Record<ClientOccupancyErrorCategory, ClientOccupancyFailure | 'holder-denial'>
+> = Object.freeze({
+  'invalid-request': 'unavailable',
+  'confirmation-required': 'confirmation-required',
+  'client-not-found': 'device-gone',
+  'client-offline': 'device-offline',
+  'client-locked': 'device-locked',
+  'new-connections-forbidden': 'connections-forbidden',
+  'access-denied': 'account-denied',
+  'occupied-by-other': 'occupied-by-other',
+  'capacity-exhausted': 'capacity-exhausted',
+  'occupancy-rejected': 'device-rejected',
+  'occupancy-ack-timeout': 'ack-timeout',
+  'recovery-pending': 'recovery-pending',
+  'permission-denied': 'holder-denial',
+  'no-active-occupancy': 'not-holder',
+  'wrong-state': 'state-changed',
+  'rate-limited': 'rate-limited',
+  'unavailable': 'unavailable',
+})
+
+/**
+ * The retired occupancy codes that predate the frozen facade table. The
+ * presentation seam keeps resolving them to their named reasons instead of
+ * degrading the card copy to the unavailable catch-all; every other code the
+ * facade table does not list stays honestly unavailable.
+ */
+const RETIRED_FAILURE_CODES: Readonly<Record<string, ClientOccupancyFailure | 'holder-denial'>> =
   Object.freeze({
-    OCCUPIED_BY_OTHER: 'occupied-by-other',
     OCCUPANCY_HELD_BY_OTHER: 'occupied-by-other',
-    OCCUPANCY_NOT_HELD: 'not-holder',
-    CLIENT_OFFLINE: 'device-offline',
-    CLIENT_LOCKED: 'device-locked',
-    OCCUPANCY_RECOVERY_PENDING: 'recovery-pending',
-    RATE_LIMITED: 'rate-limited',
+    OCCUPANCY_NOT_HELD: 'holder-denial',
   })
 
 /**
- * Translate one occupancy rejection into the presentation taxonomy. Every
- * wire code stays inside this function; view-models and pages branch only on
- * the returned union. The attempted action sharpens the holder denial: a
- * force-release rejection names the Owner-only rule instead of implying the
- * caller once held the device.
+ * Translate one occupancy rejection into the presentation taxonomy. The
+ * facade's stable classifier owns every wire code; view-models and pages
+ * branch only on the returned union. The attempted action sharpens the
+ * holder denial: a force-release rejection names the Owner-only rule instead
+ * of implying the caller once held the device.
  */
 export function clientOccupancyFailure(
   error: unknown,
   action?: ClientOccupancyAction,
 ): ClientOccupancyFailure {
+  const holderDenial = action === 'force-release' ? 'permission-denied' : 'not-holder'
+  const resolve = (mapped: ClientOccupancyFailure | 'holder-denial'): ClientOccupancyFailure =>
+    mapped === 'holder-denial' ? holderDenial : mapped
   if (error instanceof ControlPlaneClientError) {
-    const holderDenial = action === 'force-release' ? 'permission-denied' : 'not-holder'
-    if (error.code === 'PERMISSION_DENIED') return holderDenial
-    const mapped = OCCUPANCY_FAILURE_CODES[error.code]
-    if (mapped !== undefined) {
-      if (mapped === 'not-holder') return holderDenial
-      return mapped
-    }
-    if (error.kind === 'authorization') return holderDenial
+    const retired = RETIRED_FAILURE_CODES[error.code]
+    if (retired !== undefined) return resolve(retired)
   }
-  return 'unavailable'
+  return resolve(CATEGORY_FAILURES[clientOccupancyErrorCategory(error)])
 }
 
 /**
@@ -274,7 +318,15 @@ export function createClientOccupancyViewModel(options: {
     try {
       const input = { clientId }
       if (action === 'claim') await port.claim(input)
-      else if (action === 'release') await port.release(input)
+      else if (action === 'release') {
+        // The confirmed busy release is the drain path: the port stamps the
+        // downlink mode so the device lets the running tasks finish, while an
+        // idle device frees immediately. The current Server snapshot stays
+        // the one authority on whether tasks still run.
+        const device = findDevice(clientId)
+        const mode = device !== undefined && releaseDrainsFirst(device) ? 'drain' : undefined
+        await port.release(mode === undefined ? input : { ...input, mode })
+      }
       else if (action === 'cancel-and-release') await port.cancelAndRelease(input)
       else {
         const forceRelease = port.forceRelease
@@ -380,7 +432,10 @@ export function createClientOccupancyViewModel(options: {
   }
 }
 
-type OccupancyFacadeMethod = (input: { readonly clientId: string }) => Promise<void>
+type OccupancyFacadeMethod = (input: {
+  readonly clientId: string
+  readonly mode?: 'release' | 'drain'
+}) => Promise<void>
 
 function facadeMethod(value: unknown): OccupancyFacadeMethod | null {
   if (typeof value !== 'function') return null
@@ -389,21 +444,21 @@ function facadeMethod(value: unknown): OccupancyFacadeMethod | null {
 
 /**
  * Adapt the frozen occupancy facade to the port the controls consume, keeping
- * the two destructive paths on their own facade seams: the holder's
- * cancel-and-release goes through `releaseOccupancy` with the explicit
- * `cancel_and_release` mode, and the Owner's recovery cleanup goes through the
- * dedicated `forceReleaseOccupancy` seam (CLIENT-300.4). `forceRelease` stays
- * optional: a facade without the seam simply hides the Owner entry. Returns
- * null while the base methods have not landed, so hosts compose the port only
- * when the seam exists.
+ * the destructive paths on their own facade seams: the holder's drain-aware
+ * release goes through `releaseOccupancy` with the requested mode (defaulting
+ * to the immediate release), the holder's cancel-and-release goes through
+ * `releaseOccupancy` with the explicit `cancel_and_release` mode, and the
+ * Owner's recovery cleanup goes through the dedicated `forceReleaseOccupancy`
+ * seam (CLIENT-300.4). `forceRelease` stays optional: a facade without the
+ * seam simply hides the Owner entry. Returns null while the base methods have
+ * not landed, so hosts compose the port only when the seam exists.
  */
 export function clientOccupancyPortFromFacade(facade: object): ClientOccupancyPort | null {
   const methods = facade as Record<string, unknown>
   const claim =
     facadeMethod(methods['claim']) ?? facadeMethod(methods['claimOccupancy'])
   const release =
-    facadeMethod(methods['release']) ??
-    bindOccupancyMode(methods['releaseOccupancy'], 'release')
+    facadeMethod(methods['release']) ?? bindOccupancyRelease(methods['releaseOccupancy'])
   const cancelAndRelease =
     facadeMethod(methods['cancelAndRelease']) ??
     bindOccupancyMode(methods['releaseOccupancy'], 'cancel_and_release', true)
@@ -418,9 +473,17 @@ export function clientOccupancyPortFromFacade(facade: object): ClientOccupancyPo
   }
 }
 
+/** Bind the wire release seam to the caller's mode; an idle release stays immediate. */
+function bindOccupancyRelease(value: unknown): OccupancyFacadeMethod | null {
+  const method = facadeMethod(value)
+  if (method === null) return null
+  const bound = method as (input: Record<string, unknown>) => Promise<void>
+  return input => bound({ ...input, mode: input.mode ?? 'release' })
+}
+
 function bindOccupancyMode(
   value: unknown,
-  mode: 'release' | 'cancel_and_release',
+  mode: 'cancel_and_release',
   confirm?: boolean,
 ): OccupancyFacadeMethod | null {
   const method = facadeMethod(value)

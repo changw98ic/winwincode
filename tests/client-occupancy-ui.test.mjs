@@ -77,7 +77,7 @@ function portFake() {
   const calls = []
   const pending = []
   function track(action, input) {
-    calls.push({ action, clientId: input.clientId })
+    calls.push({ action, ...input })
     return new Promise((resolvePromise, rejectPromise) => {
       pending.push({ action, resolve: resolvePromise, reject: rejectPromise })
     })
@@ -88,6 +88,19 @@ function portFake() {
     claim(input) { return track('claim', input) },
     release(input) { return track('release', input) },
     cancelAndRelease(input) { return track('cancel-and-release', input) },
+    forceRelease(input) { return track('force-release', input) },
+  }
+}
+
+/** The holder-only shape of the fake: no Owner force-release seam. */
+function holderPortFake() {
+  const port = portFake()
+  return {
+    calls: port.calls,
+    pending: port.pending,
+    claim: port.claim,
+    release: port.release,
+    cancelAndRelease: port.cancelAndRelease,
   }
 }
 
@@ -268,6 +281,7 @@ test('occupancy controls cover the five occupancy states and the presence guards
   const connectOf = card => findOne(card, 'wwc-clients-card-connect')
   const releaseOf = card => findOne(card, 'wwc-clients-card-release')
   const cancelOf = card => findOne(card, 'wwc-clients-card-cancel-release')
+  const forceOf = card => findOne(card, 'wwc-clients-card-force-release')
 
   const available = cardAt(rootElement, 0)
   assert.equal(connectOf(available).disabled, false, 'a free online device offers connect')
@@ -300,6 +314,13 @@ test('occupancy controls cover the five occupancy states and the presence guards
   assert.equal(connectOf(recovering).disabled, true, 'recovery blocks preemption')
   assert.equal(releaseOf(recovering).hidden, true)
   assert.equal(cancelOf(recovering).hidden, true)
+  assert.equal(
+    forceOf(recovering).hidden,
+    false,
+    'an interrupted lease offers the Owner cleanup',
+  )
+  assert.equal(forceOf(recovering).disabled, false)
+  assert.equal(forceOf(other).hidden, true, 'another holder’s lease offers no cleanup')
 
   assert.equal(connectOf(cardAt(rootElement, 6)).disabled, true, 'an offline device cannot connect')
   assert.equal(connectOf(cardAt(rootElement, 7)).disabled, true, 'a locked device cannot connect')
@@ -337,7 +358,7 @@ test('connect submits one deduplicated claim and re-reads the Server snapshot', 
   assert.equal(findOne(card, 'wwc-clients-card-actions').getAttribute('aria-busy'), 'false')
 })
 
-test('a busy release requires the explicit confirmation and keeps the failed draft', async () => {
+test('a busy release is the confirmed drain path and keeps the failed draft', async () => {
   const { rootElement, occupancyModel, port } = await occupancyFixture({
     devices: [device({ occupancy: 'occupied-by-me', capacityUsed: 2 })],
   })
@@ -354,7 +375,11 @@ test('a busy release requires the explicit confirmation and keeps the failed dra
   assert.equal(findOne(card, 'wwc-clients-card-confirm-accept').textContent, 'Release device')
 
   findOne(card, 'wwc-clients-card-confirm-accept').emit('click')
-  assert.deepEqual(port.calls, [{ action: 'release', clientId: '123456789012' }])
+  assert.deepEqual(
+    port.calls,
+    [{ action: 'release', clientId: '123456789012', mode: 'drain' }],
+    'the confirmed busy release stamps the drain mode for the device',
+  )
   port.pending[0].reject(occupancyError('PERMISSION_DENIED', 'authorization'))
 
   await waitFor(
@@ -426,6 +451,110 @@ test('cancel and release always asks first, and Keep drops the armed draft', asy
   await waitFor(() => occupancyModel.interaction('123456789012').kind === 'rest', 'stop lands')
 })
 
+test('force release always asks first, and Keep drops the armed draft', async () => {
+  const { rootElement, client, occupancyModel, port } = await occupancyFixture({
+    devices: [device({ occupancy: 'recovery-pending' })],
+  })
+  const card = cardAt(rootElement, 0)
+  const force = findOne(card, 'wwc-clients-card-force-release')
+  assert.equal(force.hidden, false, 'the composed port exposes the Owner seam')
+  force.emit('click')
+
+  assert.equal(port.calls.length, 0, 'force release waits for the explicit accept')
+  assert.equal(findOne(card, 'wwc-clients-card-confirm').hidden, false)
+  assert.equal(
+    findOne(card, 'wwc-clients-card-confirm-text').textContent,
+    'Force-releasing now ends the interrupted occupancy immediately so the device can be claimed again.',
+  )
+  assert.equal(findOne(card, 'wwc-clients-card-confirm-accept').textContent, 'Force release')
+
+  findOne(card, 'wwc-clients-card-confirm-keep').emit('click')
+  assert.equal(findOne(card, 'wwc-clients-card-confirm').hidden, true)
+  assert.equal(occupancyModel.interaction('123456789012').kind, 'rest')
+
+  force.emit('click')
+  assert.equal(findOne(card, 'wwc-clients-card-confirm').hidden, false)
+  findOne(card, 'wwc-clients-card-confirm-accept').emit('click')
+  assert.deepEqual(port.calls, [{ action: 'force-release', clientId: '123456789012' }])
+  port.pending[0].resolve()
+  await waitFor(() => occupancyModel.interaction('123456789012').kind === 'rest', 'cleanup lands')
+  assert.ok(client.listCalls.length >= 2, 'the landed cleanup re-read the device list')
+})
+
+test('a denied force release names the Owner rule and keeps the armed draft', async () => {
+  const { rootElement, occupancyModel, port } = await occupancyFixture({
+    devices: [device({ occupancy: 'recovery-pending' })],
+  })
+  const card = cardAt(rootElement, 0)
+  findOne(card, 'wwc-clients-card-force-release').emit('click')
+  findOne(card, 'wwc-clients-card-confirm-accept').emit('click')
+  assert.equal(port.calls.length, 1)
+  port.pending[0].reject(occupancyError('PERMISSION_DENIED', 'authorization'))
+
+  await waitFor(
+    () => occupancyModel.interaction('123456789012').kind === 'failed',
+    'the denial reaches the interaction',
+  )
+  assert.equal(
+    findOne(card, 'wwc-clients-card-error').textContent,
+    'Only the device Owner can force-release this device.',
+  )
+  assert.equal(
+    findOne(card, 'wwc-clients-card-confirm').hidden,
+    false,
+    'the armed confirmation survives the denial as the retry draft',
+  )
+
+  findOne(card, 'wwc-clients-card-confirm-accept').emit('click')
+  assert.equal(port.calls.length, 2, 'the same explicit accept retries the cleanup')
+  port.pending[1].resolve()
+  await waitFor(
+    () => occupancyModel.interaction('123456789012').kind === 'rest',
+    'the retry settles',
+  )
+  assert.equal(findOne(card, 'wwc-clients-card-confirm').hidden, true)
+  assert.equal(findOne(card, 'wwc-clients-card-error').hidden, true)
+})
+
+test('a port without the force-release seam hides the Owner entry but keeps the recovery copy', async () => {
+  const { rootElement, occupancyModel } = await occupancyFixture({
+    devices: [device({ occupancy: 'recovery-pending' })],
+    port: holderPortFake(),
+  })
+  const card = cardAt(rootElement, 0)
+  assert.equal(
+    findOne(card, 'wwc-clients-card-force-release').hidden,
+    true,
+    'a facade without the seam never shows the entry',
+  )
+  assert.equal(
+    findOne(card, 'wwc-clients-card-recovery').hidden,
+    false,
+    'the recovery window stays honest without the cleanup entry',
+  )
+  occupancyModel.close()
+})
+
+test('a claim rejection renders the facade category copy through the default classifier', async () => {
+  const { rootElement, occupancyModel, port } = await occupancyFixture({
+    devices: [device()],
+  })
+  const card = cardAt(rootElement, 0)
+  findOne(card, 'wwc-clients-card-connect').emit('click')
+  port.pending[0].reject(occupancyError('CAPACITY_EXHAUSTED'))
+
+  await waitFor(
+    () => occupancyModel.interaction('123456789012').kind === 'failed',
+    'the rejection reaches the interaction',
+  )
+  assert.equal(
+    findOne(card, 'wwc-clients-card-error').textContent,
+    'The device has no free capacity left.',
+    'the stable category lands on its own card copy without an injected classify',
+  )
+  occupancyModel.close()
+})
+
 test('a failed claim shows the classified copy and the entry retries', async () => {
   const { rootElement, occupancyModel, port } = await occupancyFixture({
     devices: [device()],
@@ -459,9 +588,18 @@ test('every taxonomy failure carries its own honest copy', async () => {
   const failures = [
     ['occupied-by-other', 'Another user claimed the device first.'],
     ['not-holder', 'You no longer hold this device.'],
+    ['device-gone', 'The device no longer exists.'],
     ['device-offline', 'The device is offline right now.'],
     ['device-locked', 'The device is locked.'],
+    ['connections-forbidden', 'The device no longer accepts new connections.'],
+    ['account-denied', 'The signed-in account may not use this device.'],
+    ['capacity-exhausted', 'The device has no free capacity left.'],
+    ['device-rejected', 'The device rejected the connection request.'],
+    ['ack-timeout', 'The device did not confirm the connection in time.'],
     ['recovery-pending', 'The device is waiting to recover. Try again after it recovers.'],
+    ['permission-denied', 'Only the device Owner can force-release this device.'],
+    ['confirmation-required', 'The release needs the explicit confirmation. Try again.'],
+    ['state-changed', 'The occupancy changed before the request landed.'],
     ['rate-limited', 'Too many attempts. Wait a moment, then try again.'],
     ['unavailable', 'The request did not go through. Check the connection and try again.'],
   ]
@@ -486,31 +624,62 @@ test('every taxonomy failure carries its own honest copy', async () => {
   }
 })
 
-test('the provisional classifier maps the stable wire codes', () => {
+test('the facade-backed classifier maps the stable categories per action', () => {
   assert.equal(
-    clientOccupancyFailure(occupancyError('OCCUPANCY_HELD_BY_OTHER')),
+    clientOccupancyFailure(occupancyError('OCCUPIED_BY_OTHER')),
     'occupied-by-other',
   )
-  assert.equal(
-    clientOccupancyFailure(occupancyError('OCCUPANCY_NOT_HELD')),
-    'not-holder',
-  )
+  assert.equal(clientOccupancyFailure(occupancyError('CLIENT_NOT_FOUND')), 'device-gone')
   assert.equal(clientOccupancyFailure(occupancyError('CLIENT_OFFLINE')), 'device-offline')
   assert.equal(clientOccupancyFailure(occupancyError('CLIENT_LOCKED')), 'device-locked')
+  assert.equal(
+    clientOccupancyFailure(occupancyError('CLIENT_CONNECTIONS_FORBIDDEN')),
+    'connections-forbidden',
+  )
+  assert.equal(clientOccupancyFailure(occupancyError('ACCESS_DENIED')), 'account-denied')
+  assert.equal(clientOccupancyFailure(occupancyError('CAPACITY_EXHAUSTED')), 'capacity-exhausted')
+  assert.equal(clientOccupancyFailure(occupancyError('OCCUPANCY_REJECTED')), 'device-rejected')
+  assert.equal(clientOccupancyFailure(occupancyError('OCCUPANCY_ACK_TIMEOUT')), 'ack-timeout')
   assert.equal(
     clientOccupancyFailure(occupancyError('OCCUPANCY_RECOVERY_PENDING')),
     'recovery-pending',
   )
+  assert.equal(
+    clientOccupancyFailure(occupancyError('RESOURCE_NOT_FOUND')),
+    'not-holder',
+    'no active occupancy means the caller no longer holds the device',
+  )
+  assert.equal(clientOccupancyFailure(occupancyError('WRONG_STATE')), 'state-changed')
+  assert.equal(
+    clientOccupancyFailure(occupancyError('CONFIRMATION_REQUIRED')),
+    'confirmation-required',
+  )
   assert.equal(clientOccupancyFailure(occupancyError('RATE_LIMITED')), 'rate-limited')
   assert.equal(
-    clientOccupancyFailure(occupancyError('PERMISSION_DENIED', 'authorization')),
-    'not-holder',
+    clientOccupancyFailure(occupancyError('INVALID_REQUEST')),
+    'unavailable',
+    'protocol drift stays honestly unavailable',
+  )
+
+  // The holder/Owner denial category is resolved per attempted action.
+  assert.equal(clientOccupancyFailure(occupancyError('PERMISSION_DENIED')), 'not-holder')
+  assert.equal(clientOccupancyFailure(occupancyError('PERMISSION_DENIED'), 'release'), 'not-holder')
+  assert.equal(
+    clientOccupancyFailure(occupancyError('PERMISSION_DENIED'), 'force-release'),
+    'permission-denied',
+  )
+
+  // The retired pre-facade codes still resolve to their named reasons.
+  assert.equal(clientOccupancyFailure(occupancyError('OCCUPANCY_NOT_HELD')), 'not-holder')
+  assert.equal(
+    clientOccupancyFailure(occupancyError('OCCUPANCY_NOT_HELD'), 'force-release'),
+    'permission-denied',
   )
   assert.equal(
-    clientOccupancyFailure(occupancyError('SOMETHING_ELSE')),
-    'unavailable',
-    'an unknown wire code stays honestly unavailable',
+    clientOccupancyFailure(occupancyError('OCCUPANCY_HELD_BY_OTHER')),
+    'occupied-by-other',
   )
+  assert.equal(clientOccupancyFailure(occupancyError('SOMETHING_ELSE')), 'unavailable')
   assert.equal(clientOccupancyFailure(new Error('boom')), 'unavailable')
 })
 

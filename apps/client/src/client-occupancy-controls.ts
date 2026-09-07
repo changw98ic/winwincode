@@ -44,16 +44,26 @@ const CONFIRM_ACCEPT_TEXT: Readonly<Record<ClientOccupancyDangerAction, string>>
 
 /**
  * The one copy per occupancy failure; every entry also reaches the screen
- * reader through the alert role of the failure line.
+ * reader through the alert role of the failure line. The failure union is the
+ * card's translation of the facade's stable error categories, so no raw
+ * server text and no other user's identity can reach the card.
  */
 function failureText(failure: ClientOccupancyFailure): string {
   switch (failure) {
     case 'occupied-by-other': return 'Another user claimed the device first.'
     case 'not-holder': return 'You no longer hold this device.'
+    case 'device-gone': return 'The device no longer exists.'
     case 'device-offline': return 'The device is offline right now.'
     case 'device-locked': return 'The device is locked.'
+    case 'connections-forbidden': return 'The device no longer accepts new connections.'
+    case 'account-denied': return 'The signed-in account may not use this device.'
+    case 'capacity-exhausted': return 'The device has no free capacity left.'
+    case 'device-rejected': return 'The device rejected the connection request.'
+    case 'ack-timeout': return 'The device did not confirm the connection in time.'
     case 'recovery-pending': return 'The device is waiting to recover. Try again after it recovers.'
     case 'permission-denied': return 'Only the device Owner can force-release this device.'
+    case 'confirmation-required': return 'The release needs the explicit confirmation. Try again.'
+    case 'state-changed': return 'The occupancy changed before the request landed.'
     case 'rate-limited': return 'Too many attempts. Wait a moment, then try again.'
     case 'unavailable': return 'The request did not go through. Check the connection and try again.'
   }
