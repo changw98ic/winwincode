@@ -669,16 +669,6 @@ test('the facade-backed classifier maps the stable categories per action', () =>
     'permission-denied',
   )
 
-  // The retired pre-facade codes still resolve to their named reasons.
-  assert.equal(clientOccupancyFailure(occupancyError('OCCUPANCY_NOT_HELD')), 'not-holder')
-  assert.equal(
-    clientOccupancyFailure(occupancyError('OCCUPANCY_NOT_HELD'), 'force-release'),
-    'permission-denied',
-  )
-  assert.equal(
-    clientOccupancyFailure(occupancyError('OCCUPANCY_HELD_BY_OTHER')),
-    'occupied-by-other',
-  )
   assert.equal(clientOccupancyFailure(occupancyError('SOMETHING_ELSE')), 'unavailable')
   assert.equal(clientOccupancyFailure(new Error('boom')), 'unavailable')
 })

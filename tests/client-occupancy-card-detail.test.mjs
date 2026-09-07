@@ -452,10 +452,6 @@ test('the default classifier sharpens the holder denial per action and reads fac
     'permission-denied',
   )
   assert.equal(
-    clientOccupancyFailure(occupancyError('OCCUPANCY_NOT_HELD'), 'force-release'),
-    'permission-denied',
-  )
-  assert.equal(
     clientOccupancyFailure(occupancyError('OCCUPIED_BY_OTHER')),
     'occupied-by-other',
     'the landed facade wire code maps onto the presentation taxonomy',

@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import {
-  ControlPlaneClientError,
-  type ControlPlaneDeviceSummary,
-} from './control-plane-client.js'
+import type { ControlPlaneDeviceSummary } from './control-plane-client.js'
 import {
   clientOccupancyErrorCategory,
   type ClientOccupancyErrorCategory,
@@ -51,9 +48,8 @@ export type ClientOccupancyDangerAction =
 
 /**
  * The one presentation-facing occupancy failure taxonomy. Rejections are
- * translated through the facade's stable category union (winwincode-cms.1) —
- * the one canonical wire-code table lives in the facade's classifier, and
- * only the retired-code bridge below still reads a wire code directly.
+ * translated through the facade's stable category union (winwincode-cms.1); the
+ * one canonical wire-code table lives in the facade's classifier.
  * `unavailable` stays the honest catch-all for outages, expired sessions,
  * protocol drift, and unknown codes.
  */
@@ -150,18 +146,6 @@ const CATEGORY_FAILURES: Readonly<
 })
 
 /**
- * The retired occupancy codes that predate the frozen facade table. The
- * presentation seam keeps resolving them to their named reasons instead of
- * degrading the card copy to the unavailable catch-all; every other code the
- * facade table does not list stays honestly unavailable.
- */
-const RETIRED_FAILURE_CODES: Readonly<Record<string, ClientOccupancyFailure | 'holder-denial'>> =
-  Object.freeze({
-    OCCUPANCY_HELD_BY_OTHER: 'occupied-by-other',
-    OCCUPANCY_NOT_HELD: 'holder-denial',
-  })
-
-/**
  * Translate one occupancy rejection into the presentation taxonomy. The
  * facade's stable classifier owns every wire code; view-models and pages
  * branch only on the returned union. The attempted action sharpens the
@@ -175,10 +159,6 @@ export function clientOccupancyFailure(
   const holderDenial = action === 'force-release' ? 'permission-denied' : 'not-holder'
   const resolve = (mapped: ClientOccupancyFailure | 'holder-denial'): ClientOccupancyFailure =>
     mapped === 'holder-denial' ? holderDenial : mapped
-  if (error instanceof ControlPlaneClientError) {
-    const retired = RETIRED_FAILURE_CODES[error.code]
-    if (retired !== undefined) return resolve(retired)
-  }
   return resolve(CATEGORY_FAILURES[clientOccupancyErrorCategory(error)])
 }
 
