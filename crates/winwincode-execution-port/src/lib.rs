@@ -12,6 +12,7 @@ pub mod action_normalizer;
 pub mod capability_adapter;
 pub mod change_batch_identity;
 pub mod change_batch_progress;
+pub mod debug_probe_contract;
 pub mod diagnostic_parser;
 pub mod generated;
 pub mod observation_contract;
