@@ -16,13 +16,19 @@ const application = mountWinWinCodeClient({
 const transportFailures = []
 const subscriptionFailures = []
 const eventHandlerFailures = []
+const MAX_CAPTURED_FAILURES = 64
+
+function recordFailure(target, failure) {
+  if (target.length >= MAX_CAPTURED_FAILURES) target.shift()
+  target.push(failure)
+}
 for (const operation of ['command', 'query']) {
   const invoke = application.controlPlane[operation].bind(application.controlPlane)
   application.controlPlane[operation] = async (request, options) => {
     try {
       return await invoke(request, options)
     } catch (error) {
-      transportFailures.push({
+      recordFailure(transportFailures, {
         code: error?.code ?? 'UNKNOWN',
         kind: error?.kind ?? 'unknown',
         name: request[operation],
@@ -40,7 +46,7 @@ application.controlPlane.subscribe = options => subscribe({
     try {
       return await options.onEvent(frame)
     } catch (error) {
-      eventHandlerFailures.push({
+      recordFailure(eventHandlerFailures, {
         code: error?.code ?? 'UNKNOWN',
         kind: error?.kind ?? 'unknown',
         type: frame?.event?.type ?? 'unknown',
@@ -49,7 +55,7 @@ application.controlPlane.subscribe = options => subscribe({
     }
   },
   onError(error) {
-    subscriptionFailures.push({
+    recordFailure(subscriptionFailures, {
       code: error?.code ?? 'UNKNOWN',
       kind: error?.kind ?? 'unknown',
       reason: error?.details?.reason ?? null,
@@ -69,7 +75,7 @@ const forbiddenRequestPaths = serverConfiguration.forbiddenRequestPathPatterns
 
 function id(prefix) {
   requestSequence += 1
-  return `${prefix}_${String(requestSequence).padStart(26, '0')}`
+  return `${prefix}_${'B'.repeat(20)}${String(requestSequence).padStart(6, '0')}`
 }
 
 function page(limit = 50) {
@@ -81,8 +87,6 @@ async function waitFor(predicate, label, timeoutMillis = 20_000) {
   for (;;) {
     if (await predicate()) return
     if (Date.now() >= deadline) {
-      // A run-away render can grow the DOM without bound; read a bounded
-      // slice so the timeout diagnostic cannot exhaust the runner heap.
       throw new Error(`timed out waiting for ${label}: ${document.body.textContent.slice(0, 2_000)}`)
     }
     await new Promise(resolve => { setTimeout(resolve, 20) })
@@ -194,9 +198,7 @@ function strongFlowDomSnapshot() {
       .map(node => node.dataset.status ?? ''),
     deliveryHeading: visibleText('.wwc-strongflow-heading'),
     error: visibleText('.wwc-strongflow-error-text'),
-    revision: metadataRevision === null
-      ? readyStatus === null ? null : Number(readyStatus[2])
-      : Number(metadataRevision[1]),
+    revision: metadataRevision === null ? null : Number(metadataRevision[1]),
     stageCount: document.querySelectorAll('.wwc-strongflow-stage-list > li').length,
     status: headerStatus ?? null,
     statusText,
@@ -309,7 +311,7 @@ function strongFlowAction() {
   ]
   for (const [name, selector] of actions) {
     const button = document.querySelector(selector)
-    if (button !== null && !button.disabled) return { button, name }
+    if (button !== null && !button.disabled && button.checkVisibility()) return { button, name }
   }
   return null
 }
@@ -528,6 +530,7 @@ globalThis.runChatStrongFlowSetup = async proof => {
     authSessionBytes: authSessionBytes(),
     chatHash: location.hash,
     chatHeading: visibleText('.wwc-chat-heading'),
+    chatError: visibleText('.wwc-chat-error-text'),
     chatMessages: chatMessages(),
     chatStatus: visibleText('.wwc-chat-status'),
     deliveryRevision: advance.currentRevision,
@@ -535,6 +538,8 @@ globalThis.runChatStrongFlowSetup = async proof => {
     deliveryId,
     productSessionId: stage.sessionBinding.productSessionId,
     stageRunId: stage.id,
+    subscriptionFailures: subscriptionFailures.slice(-5),
+    transportFailures: transportFailures.slice(-5),
     ...browserEvidence(),
   }
 }
@@ -597,10 +602,23 @@ globalThis.runStrongFlowToDelivered = async () => {
 
   for (;;) {
     observe(snapshot)
-    if (snapshot.status === 'delivered') break
+    if (snapshot.status === 'Completed') break
     const remaining = deadline - Date.now()
     if (remaining <= 0) {
-      throw new Error(`StrongFlow did not reach delivered: ${JSON.stringify(observations)}`)
+      let delivery
+      try {
+        delivery = deliveryDiagnostic(await deliveryDetail())
+      } catch (error) {
+        delivery = {
+          code: error?.code ?? 'UNKNOWN',
+          kind: error?.kind ?? 'unknown',
+        }
+      }
+      throw new Error(`StrongFlow did not reach delivered: ${JSON.stringify({
+        delivery,
+        observations,
+        transport: summarizedTransportFailures(),
+      })}`)
     }
     const action = strongFlowAction()
     if (action !== null) {
@@ -665,7 +683,7 @@ globalThis.runStrongFlowToDelivered = async () => {
     await navigate(terminalHash, '.wwc-strongflow')
     snapshot = await waitForStrongFlowSnapshot(
       'terminal StrongFlow deep link',
-      candidate => candidate.status === 'delivered',
+      candidate => candidate.status === 'Completed',
       20_000,
     )
   }
@@ -697,7 +715,7 @@ globalThis.inspectTerminalStrongFlowAfterReload = async () => {
   await waitFor(() => document.querySelector('.wwc-strongflow') !== null, 'reloaded StrongFlow')
   const snapshot = await waitForStrongFlowSnapshot(
     'reloaded terminal StrongFlow snapshot',
-    candidate => candidate.status === 'delivered',
+    candidate => candidate.status === 'Completed',
   )
   const detail = await deliveryDetail()
   return {

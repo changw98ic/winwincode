@@ -28,6 +28,7 @@ import {
   chromeBinary,
   closeServer,
   command,
+  BoundedEventBuffer,
   DevTools,
   evaluate,
   freePort,
@@ -38,6 +39,7 @@ import {
   waitForGlobal,
   waitForServer,
 } from './fixtures/real-browser-harness.mjs'
+import { boundedRemoteObjectText } from './fixtures/bounded-browser-diagnostics.mjs'
 
 const root = resolve(import.meta.dirname, '..')
 const artifactDirectory = resolve(root, 'test-results/browser-chat-strongflow-production')
@@ -83,6 +85,14 @@ assert.deepEqual(rules.forbiddenRequestPathPatterns, [
 ])
 const forbiddenRequestPaths = rules.forbiddenRequestPathPatterns.map(pattern => new RegExp(pattern, 'u'))
 const artifactFiles = rules.artifacts.map(path => resolve(root, path))
+const MAX_CAPTURED_REQUESTS = 512
+const MAX_CAPTURED_WEB_SOCKETS = 64
+const MAX_CAPTURED_WEB_SOCKET_FRAMES = 25
+const MAX_CAPTURED_BROWSER_DIAGNOSTICS = 128
+const MAX_CAPTURED_EXCEPTIONS = 16
+const MAX_CAPTURED_ERROR_LOGS = 128
+const MAX_REMOTE_DIAGNOSTIC_CHARS = 8_000
+const MAX_REMOTE_DIAGNOSTIC_READS = 8
 assert.equal(new Set(artifactFiles.map(dirname)).size, 1)
 assert.equal(dirname(artifactFiles[0]), artifactDirectory)
 
@@ -221,39 +231,6 @@ function diagnosticText(value, seen = new Set()) {
   if (value === null || typeof value !== 'object' || seen.has(value)) return ''
   seen.add(value)
   return Object.values(value).map(item => diagnosticText(item, seen)).join('\n')
-}
-
-async function remoteObjectText(devtools, sessionId, remoteObject, seen = new Set()) {
-  if (remoteObject === null || typeof remoteObject !== 'object') {
-    return diagnosticText(remoteObject)
-  }
-  const text = [diagnosticText({
-    description: remoteObject.description,
-    type: remoteObject.type,
-    unserializableValue: remoteObject.unserializableValue,
-    value: remoteObject.value,
-  })]
-  if (typeof remoteObject.objectId !== 'string' || seen.has(remoteObject.objectId)) {
-    return text.join('\n')
-  }
-  seen.add(remoteObject.objectId)
-  const properties = await devtools.send('Runtime.getProperties', {
-    objectId: remoteObject.objectId,
-    ownProperties: true,
-    accessorPropertiesOnly: false,
-    generatePreview: false,
-  }, sessionId)
-  for (const property of [
-    ...(properties.result ?? []),
-    ...(properties.internalProperties ?? []),
-    ...(properties.privateProperties ?? []),
-  ]) {
-    text.push(property.name ?? '')
-    if (property.value !== undefined) {
-      text.push(await remoteObjectText(devtools, sessionId, property.value, seen))
-    }
-  }
-  return text.join('\n')
 }
 
 function normalizedUrl(value, clientOrigin, controlUrl) {
@@ -452,23 +429,77 @@ test('real browser runs default Chat and StrongFlow through the production Clien
   })
   chrome = launched.chrome
   devtools = launched.devtools
-  const requests = []
-  const webSockets = []
-  const webSocketFrames = []
-  const browserDiagnostics = []
-  const browserDiagnosticReads = []
-  const uncaughtExceptions = []
-  const errorLogEntries = []
+  const requests = new BoundedEventBuffer(MAX_CAPTURED_REQUESTS)
+  const webSockets = new BoundedEventBuffer(MAX_CAPTURED_WEB_SOCKETS)
+  const webSocketFrames = new BoundedEventBuffer(MAX_CAPTURED_WEB_SOCKET_FRAMES)
+  const browserDiagnostics = new BoundedEventBuffer(MAX_CAPTURED_BROWSER_DIAGNOSTICS)
+  const browserDiagnosticReads = new Set()
+  const uncaughtExceptions = new BoundedEventBuffer(MAX_CAPTURED_EXCEPTIONS)
+  const errorLogEntries = new BoundedEventBuffer(MAX_CAPTURED_ERROR_LOGS)
+  let browserDiagnosticLeakDetected = false
+  let requestLeakDetected = false
+  let webSocketLeakDetected = false
+  let forbiddenNetworkRequestDetected = false
+  let unexpectedRequestOriginDetected = false
+  let unexpectedWebSocketOriginDetected = false
+  let uncaughtExceptionCount = 0
+  let skippedRemoteDiagnosticReads = 0
+  let remoteDiagnosticCollectionClosed = false
   let authenticationEstablished = false
   let sessionId = null
-  function collectRemoteDiagnostics(remoteObjects) {
-    if (sessionId === null) return
-    browserDiagnosticReads.push(Promise.all(
-      remoteObjects.map(remoteObject => remoteObjectText(devtools, sessionId, remoteObject)),
-    ).then(values => values.join('\n')).catch(error => diagnosticText(error)))
+  function recordBrowserDiagnostic(value) {
+    const text = diagnosticText(value).slice(0, MAX_REMOTE_DIAGNOSTIC_CHARS)
+    browserDiagnosticLeakDetected ||= text.includes(proof)
+    browserDiagnostics.push(text)
   }
-  devtools.on('Network.requestWillBeSent', event => { requests.push(event.request) })
-  devtools.on('Network.webSocketCreated', event => { webSockets.push(event.url) })
+  function collectRemoteDiagnostics(remoteObjects) {
+    if (
+      remoteDiagnosticCollectionClosed
+      || sessionId === null
+      || remoteObjects.length === 0
+    ) return
+    if (browserDiagnosticReads.size >= MAX_REMOTE_DIAGNOSTIC_READS) {
+      skippedRemoteDiagnosticReads += 1
+      return
+    }
+    let read
+    read = Promise.all(
+      remoteObjects.map(remoteObject => (
+        boundedRemoteObjectText(devtools, sessionId, remoteObject)
+      )),
+    ).then(values => { recordBrowserDiagnostic(values.join('\n')) })
+      .catch(error => { recordBrowserDiagnostic(error) })
+      .finally(() => { browserDiagnosticReads.delete(read) })
+    browserDiagnosticReads.add(read)
+  }
+  async function drainRemoteDiagnostics() {
+    remoteDiagnosticCollectionClosed = true
+    await Promise.all(browserDiagnosticReads)
+  }
+  devtools.on('Network.requestWillBeSent', event => {
+    const request = { method: event.request.method, url: event.request.url }
+    requestLeakDetected ||= request.url.includes(proof)
+    forbiddenNetworkRequestDetected ||= forbiddenRequestUrl(request.url)
+    try {
+      const origin = new URL(request.url).origin
+      unexpectedRequestOriginDetected ||= (
+        origin !== clientOrigin
+        && origin !== controlUrl
+        && request.url !== 'about:blank'
+      )
+    } catch {
+      unexpectedRequestOriginDetected = true
+    }
+    requests.push(request)
+  })
+  devtools.on('Network.webSocketCreated', event => {
+    webSocketLeakDetected ||= event.url.includes(proof)
+    forbiddenNetworkRequestDetected ||= forbiddenRequestUrl(event.url)
+    unexpectedWebSocketOriginDetected ||= !event.url.startsWith(
+      controlUrl.replace(/^https:/u, 'wss:'),
+    )
+    webSockets.push(event.url)
+  })
   devtools.on('Network.webSocketFrameReceived', event => {
     try {
       const frame = JSON.parse(event.response.payloadData)
@@ -487,12 +518,13 @@ test('real browser runs default Chat and StrongFlow through the production Clien
     }
   })
   devtools.on('Runtime.consoleAPICalled', event => {
-    browserDiagnostics.push(diagnosticText(event.args))
+    recordBrowserDiagnostic(event.args)
     collectRemoteDiagnostics(event.args ?? [])
   })
   devtools.on('Runtime.exceptionThrown', event => {
+    uncaughtExceptionCount += 1
     uncaughtExceptions.push(event)
-    browserDiagnostics.push(diagnosticText(event))
+    recordBrowserDiagnostic(event)
     collectRemoteDiagnostics(event.exceptionDetails?.exception === undefined
       ? []
       : [event.exceptionDetails.exception])
@@ -504,7 +536,7 @@ test('real browser runs default Chat and StrongFlow through the production Clien
         entry: event.entry,
       })
     }
-    browserDiagnostics.push(diagnosticText(event))
+    recordBrowserDiagnostic(event)
     collectRemoteDiagnostics(event.entry?.args ?? [])
   })
   const { targetId } = await devtools.send('Target.createTarget', { url: 'about:blank' })
@@ -526,9 +558,7 @@ test('real browser runs default Chat and StrongFlow through the production Clien
     try {
       return await evaluate(devtools, sessionId, expression)
     } catch (error) {
-      if (browserDiagnosticReads.length > 0) {
-        browserDiagnostics.push(...await Promise.all(browserDiagnosticReads.splice(0)))
-      }
+      await drainRemoteDiagnostics()
       const diagnostics = [
         ...serverErrors,
         ...browserDiagnostics,
@@ -702,18 +732,15 @@ test('real browser runs default Chat and StrongFlow through the production Clien
   assert.equal(chatReload.legacyBackendRequests.length, 0)
 
   const browserLeakScan = await proofLeakScan()
-  for (let offset = 0; offset < browserDiagnosticReads.length;) {
-    const pending = browserDiagnosticReads.slice(offset)
-    offset = browserDiagnosticReads.length
-    browserDiagnostics.push(...await Promise.all(pending))
-  }
+  await drainRemoteDiagnostics()
   assert.equal(Object.values(browserLeakScan).some(value => value.includes(proof)), false)
   for (const marker of [proof, actionSigningKeyHex]) {
     assert.equal(serverErrors.join('').includes(marker), false)
     assert.equal(directoryContainsMarker(resolve(directory, 'server-data'), marker), false)
   }
-  assert.equal(browserDiagnostics.some(message => message.includes(proof)), false)
-  assert.deepEqual(uncaughtExceptions, [], diagnosticText(uncaughtExceptions))
+  assert.equal(browserDiagnosticLeakDetected, false)
+  assert.equal(uncaughtExceptionCount, 0, diagnosticText(uncaughtExceptions.values()))
+  assert.equal(skippedRemoteDiagnosticReads, 0, 'browser diagnostic inspection fell behind')
   assert.equal(strongflowTerminal.transportFailures.every(failure => (
     failure.operation === 'command'
       ? failure.code === 'TRUSTED_FACTS_UNAVAILABLE'
@@ -763,8 +790,8 @@ test('real browser runs default Chat and StrongFlow through the production Clien
     }
   })
   assert.deepEqual(unexpectedErrorLogEntries, [], diagnosticText(unexpectedErrorLogEntries))
-  assert.equal(requests.some(request => request.url.includes(proof)), false)
-  assert.equal(webSockets.some(url => url.includes(proof)), false)
+  assert.equal(requestLeakDetected, false)
+  assert.equal(webSocketLeakDetected, false)
   const resourceUrls = [
     ...setup.resources,
     ...strongflowInitial.resources,
@@ -774,21 +801,12 @@ test('real browser runs default Chat and StrongFlow through the production Clien
     ...chatAfterStrongFlowReload.resources,
     ...chatReload.resources,
   ]
-  assert.equal([
-    ...requests.map(request => request.url),
-    ...webSockets,
-    ...resourceUrls,
-  ].some(forbiddenRequestUrl), false)
-  assert.equal(
-    requests.every(request => (
-      new URL(request.url).origin === clientOrigin
-      || new URL(request.url).origin === controlUrl
-      || request.url === 'about:blank'
-    )),
-    true,
-  )
+  assert.equal(forbiddenNetworkRequestDetected, false)
+  assert.equal(resourceUrls.some(forbiddenRequestUrl), false)
+  assert.equal(unexpectedRequestOriginDetected, false)
   const controlSocketUrl = controlUrl.replace(/^https:/u, 'wss:')
   assert.ok(webSockets.length > 0, 'the real Client did not open its Control Plane WebSocket')
+  assert.equal(unexpectedWebSocketOriginDetected, false)
   assert.equal(webSockets.every(url => url.startsWith(controlSocketUrl)), true)
 
   const trace = canonicalTrace({

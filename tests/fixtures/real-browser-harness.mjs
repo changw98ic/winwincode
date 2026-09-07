@@ -13,6 +13,73 @@ import { normalize, resolve } from 'node:path'
 // of failing inside the request; an asset that never returns still throws.
 const SHARED_CLIENT_READ_TIMEOUT_MILLIS = 60_000
 const SHARED_CLIENT_READ_POLL_MILLIS = 25
+const DEVTOOLS_COMMAND_TIMEOUT_MILLIS = 270_000
+
+export class BoundedEventBuffer {
+  #capacity
+  #next = 0
+  #size = 0
+  #values
+
+  constructor(capacity) {
+    assert.ok(Number.isSafeInteger(capacity) && capacity > 0, 'capacity must be positive')
+    this.#capacity = capacity
+    this.#values = new Array(capacity)
+  }
+
+  get length() {
+    return this.#size
+  }
+
+  get totalCount() {
+    return this.#next
+  }
+
+  push(...values) {
+    for (const value of values) {
+      this.#values[this.#next % this.#capacity] = value
+      this.#next += 1
+      this.#size = Math.min(this.#size + 1, this.#capacity)
+    }
+    return this.#size
+  }
+
+  values() {
+    const first = Math.max(0, this.#next - this.#size)
+    return Array.from(
+      { length: this.#size },
+      (_, index) => this.#values[(first + index) % this.#capacity],
+    )
+  }
+
+  every(predicate) {
+    return this.values().every(predicate)
+  }
+
+  filter(predicate) {
+    return this.values().filter(predicate)
+  }
+
+  join(separator = ',') {
+    return this.values().join(separator)
+  }
+
+  map(predicate) {
+    return this.values().map(predicate)
+  }
+
+  slice(start, end) {
+    return this.values().slice(start, end)
+  }
+
+  some(predicate) {
+    return this.values().some(predicate)
+  }
+
+  [Symbol.iterator]() {
+    return this.values()[Symbol.iterator]()
+  }
+}
 
 function waitSync(millis) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, millis)
@@ -166,8 +233,8 @@ export function staticClientServer({ root, certificateFiles, fixturePath, config
       : fixtureRequest
         ? fixture
         : moduleRequest
-        ? normalize(resolve(moduleRoot, path.replace(/^\/module\//u, '')))
-        : normalize(resolve(publicRoot, path.replace(/^\//u, '')))
+          ? normalize(resolve(moduleRoot, path.replace(/^\/module\//u, '')))
+          : normalize(resolve(publicRoot, path.replace(/^\//u, '')))
     if (
       (moduleRequest && source.startsWith(`${moduleRoot}/`))
       || (publicRequest && source.startsWith(`${publicRoot}/`))
@@ -217,6 +284,7 @@ export function startStandaloneServer({
       WWC_SERVER_DATA_DIRECTORY: resolve(directory, 'server-data'),
       WWC_SERVER_ALLOWED_ORIGINS: clientOrigin,
       WWC_SERVER_BOOTSTRAP_PROOF: proof,
+      WWC_SERVER_AUTH_SUBJECT: 'usr_01J00000000000000000000000',
       WWC_SERVER_REPOSITORY_ROOT: repositoryRoot,
       WWC_SERVER_SOURCE_ROOT: sourceRoot,
       WWC_SERVER_CHECKOUT_REVISION: checkoutRevision,
@@ -278,8 +346,9 @@ async function devtoolsUrl(port) {
 }
 
 export class DevTools {
-  constructor(socket) {
+  constructor(socket, { commandTimeoutMillis = DEVTOOLS_COMMAND_TIMEOUT_MILLIS } = {}) {
     this.socket = socket
+    this.commandTimeoutMillis = commandTimeoutMillis
     socket.addEventListener('message', event => {
       const message = JSON.parse(event.data)
       if (message.id === undefined) {
@@ -289,8 +358,16 @@ export class DevTools {
       const pending = this.pending.get(message.id)
       if (pending === undefined) return
       this.pending.delete(message.id)
+      clearTimeout(pending.timer)
       if (message.error === undefined) pending.resolve(message.result)
       else pending.reject(new Error(message.error.message))
+    })
+    socket.addEventListener('close', () => {
+      for (const pending of this.pending.values()) {
+        clearTimeout(pending.timer)
+        pending.reject(new Error('Chrome DevTools connection closed'))
+      }
+      this.pending.clear()
     })
   }
 
@@ -317,17 +394,27 @@ export class DevTools {
     return { chrome, devtools: new DevTools(socket) }
   }
 
-  send(method, params = {}, sessionId = undefined) {
+  send(method, params = {}, sessionId = undefined, timeoutMillis = this.commandTimeoutMillis) {
     const id = this.nextId
     this.nextId += 1
     return new Promise((resolvePromise, reject) => {
-      this.pending.set(id, { resolve: resolvePromise, reject })
-      this.socket.send(JSON.stringify({
-        id,
-        method,
-        params,
-        ...(sessionId === undefined ? {} : { sessionId }),
-      }))
+      const timer = setTimeout(() => {
+        this.pending.delete(id)
+        reject(new Error(`Chrome DevTools ${method} command timed out`))
+      }, timeoutMillis)
+      this.pending.set(id, { resolve: resolvePromise, reject, timer })
+      try {
+        this.socket.send(JSON.stringify({
+          id,
+          method,
+          params,
+          ...(sessionId === undefined ? {} : { sessionId }),
+        }))
+      } catch (error) {
+        clearTimeout(timer)
+        this.pending.delete(id)
+        reject(error)
+      }
     })
   }
 
@@ -338,6 +425,7 @@ export class DevTools {
   }
 
   close() {
+    this.listeners.clear()
     this.socket.close()
   }
 }
