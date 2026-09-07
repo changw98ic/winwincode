@@ -301,12 +301,15 @@
       "sourcePaths": [
         "schema/winwincode-export/v1/canonical-json.js",
         "schema/winwincode-export/v1/canonical-json.md",
+        "schema/winwincode-export/v1/conformance-vectors.json",
         "schema/winwincode-export/v1/parse-bounded.js",
+        "schema/winwincode-export/v1/validate.js",
         "schema/winwincode-export/v1/winwincode-export.schema.json",
         "crates/winwincode-data-export/src/lib.rs"
       ],
       "entrySymbols": [
-        "WinWinCodeExport"
+        "WinWinCodeExport",
+        "validateWinWinCodeExportBytes"
       ],
       "targetOwners": [
         "canonical-schema"

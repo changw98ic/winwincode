@@ -44,4 +44,6 @@ fields. The fixture intentionally has no trailing newline.
 `contentSha256` is lowercase SHA-256 of the canonical digest-material bytes. The complete document
 uses the same rules. A decoder parses only after the 16 MiB original-byte gate, validates the JSON
 value against the schema, independently regenerates the canonical document and digest-material
-bytes, and accepts only an exact byte-for-byte match.
+bytes, and accepts only an exact byte-for-byte match. `validate.js` implements these steps for
+non-Rust consumers, and `conformance-vectors.json` holds the shared vectors both implementations
+must accept and reject identically.
