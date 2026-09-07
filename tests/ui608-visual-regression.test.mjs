@@ -286,7 +286,7 @@ test('visibility:hidden nodes stay in the fingerprint because they still hold la
   assert.deepEqual(nodes['./span[1]'].box, { x: 0, y: 24, width: 80, height: 20 })
 })
 
-test('unrendered native options paint nothing and their viewport-origin phantom rects stay out of the fingerprint', () => {
+test('native options stay in the fingerprint with their viewport-origin geometry', () => {
   const root_ = createNode('div')
   // A closed native <select>: Chrome answers every option's
   // getBoundingClientRect with a zero-size box pinned to the viewport origin.
@@ -302,14 +302,18 @@ test('unrendered native options paint nothing and their viewport-origin phantom 
   rendered.rect = { x: 0, y: 24, width: 80, height: 20 }
 
   const nodes = flatten(capture(root_))
-  // The zero-size selects themselves stay: the skip is scoped to unrendered
-  // list membership, not to every zero-size box.
+  // Native list membership is part of the baseline, including phantom boxes;
+  // ignoring these nodes would hide shell-level geometry changes.
   assert.deepEqual(Object.keys(nodes), [
     '.',
     './select[1]',
+    './select[1]/option[1]',
+    './select[1]/optgroup[1]',
     './select[2]',
     './select[2]/option[1]',
   ])
+  assert.equal(nodes['./select[1]/option[1]'].text, 'Closed list choice')
+  assert.deepEqual(nodes['./select[1]/option[1]'].box, { x: 0, y: 0, width: 0, height: 0 })
   assert.equal(nodes['./select[2]/option[1]'].text, 'Listed choice')
   assert.deepEqual(nodes['./select[2]/option[1]'].box, { x: 0, y: 24, width: 80, height: 20 })
 })
