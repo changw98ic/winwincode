@@ -23,7 +23,9 @@ function sourceTreeSha256(directory) {
     for (const entry of readdirSync(current, { withFileTypes: true })) {
       const path = join(current, entry.name)
       if (entry.isDirectory()) visit(path)
-      else if (entry.isFile()) files.push(relative(directory, path).replaceAll('\\', '/'))
+      else if (entry.isFile() && entry.name !== 'Cargo.lock') {
+        files.push(relative(directory, path).replaceAll('\\', '/'))
+      }
     }
   }
   visit(directory)
