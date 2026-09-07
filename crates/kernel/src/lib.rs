@@ -97,10 +97,20 @@ pub struct KernelActionRequest {
 /// Host receipt retained from admission through the final Core execution
 /// boundary. The optional executable is the only program identity a delegated
 /// read may launch.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Default, Eq, PartialEq)]
 pub struct KernelActionAuthorization {
     request_binding: String,
     executable: Option<KernelExecutableAuthorization>,
+}
+
+impl fmt::Debug for KernelActionAuthorization {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("KernelActionAuthorization")
+            .field("request_binding", &"<private>")
+            .field("executable", &self.executable.as_ref().map(|_| "<private>"))
+            .finish()
+    }
 }
 
 impl KernelActionAuthorization {
@@ -125,11 +135,22 @@ impl KernelActionAuthorization {
 
 /// Canonical absolute executable and opaque immutable identity selected by the
 /// host action authority.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct KernelExecutableAuthorization {
     canonical_absolute_path: String,
     arguments: Vec<String>,
     identity: String,
+}
+
+impl fmt::Debug for KernelExecutableAuthorization {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("KernelExecutableAuthorization")
+            .field("canonical_absolute_path", &"<private>")
+            .field("arguments", &"<private>")
+            .field("identity", &"<private>")
+            .finish()
+    }
 }
 
 impl KernelExecutableAuthorization {
@@ -2030,8 +2051,10 @@ mod tests {
     use super::ConfigBuilder;
     use super::INTERFACE_VERSION;
     use super::Kernel;
+    use super::KernelActionAuthorization;
     use super::KernelActionPayload;
     use super::KernelActionRequest;
+    use super::KernelExecutableAuthorization;
     use super::KernelFileChange;
     use super::KernelFileOperation;
     use super::KernelOptions;
@@ -2135,6 +2158,37 @@ mod tests {
         let rendered = format!("{change:?}");
         assert!(!rendered.contains("TOKEN_VALUE"));
         assert!(!rendered.contains("PAYLOAD_VALUE"));
+    }
+
+    #[test]
+    fn action_authorization_debug_redacts_binding_executable_and_arguments() {
+        let authorization = KernelActionAuthorization::new(
+            "REQUEST_BINDING_VALUE".to_owned(),
+            Some(KernelExecutableAuthorization::new(
+                "/private/executable".to_owned(),
+                vec!["SECRET_ARGUMENT".to_owned()],
+                "IDENTITY_DIGEST_VALUE".to_owned(),
+            )),
+        );
+        let rendered = format!("{authorization:?}");
+        for secret in [
+            "REQUEST_BINDING_VALUE",
+            "/private/executable",
+            "SECRET_ARGUMENT",
+            "IDENTITY_DIGEST_VALUE",
+        ] {
+            assert!(!rendered.contains(secret), "{secret} leaked in {rendered}");
+        }
+
+        let executable = authorization.executable().expect("authorized executable");
+        let rendered = format!("{executable:?}");
+        for secret in [
+            "/private/executable",
+            "SECRET_ARGUMENT",
+            "IDENTITY_DIGEST_VALUE",
+        ] {
+            assert!(!rendered.contains(secret), "{secret} leaked in {rendered}");
+        }
     }
 
     #[test]

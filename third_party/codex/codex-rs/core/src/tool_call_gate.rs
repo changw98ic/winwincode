@@ -116,10 +116,20 @@ impl std::error::Error for ToolCallGateRejection {}
 /// revalidation.  An executable authorization is deliberately an absolute
 /// path plus an opaque host identity: runtimes must execute that path instead
 /// of resolving the model-provided program through `PATH` again.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Default, Eq, PartialEq)]
 pub struct ToolCallGateAuthorization {
     request_binding: String,
     executable: Option<ToolCallGateExecutableAuthorization>,
+}
+
+impl fmt::Debug for ToolCallGateAuthorization {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ToolCallGateAuthorization")
+            .field("request_binding", &"<private>")
+            .field("executable", &self.executable.as_ref().map(|_| "<private>"))
+            .finish()
+    }
 }
 
 impl ToolCallGateAuthorization {
@@ -143,11 +153,22 @@ impl ToolCallGateAuthorization {
 }
 
 /// Exact executable selected by the host action authority.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct ToolCallGateExecutableAuthorization {
     canonical_absolute_path: String,
     arguments: Vec<String>,
     identity: String,
+}
+
+impl fmt::Debug for ToolCallGateExecutableAuthorization {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ToolCallGateExecutableAuthorization")
+            .field("canonical_absolute_path", &"<private>")
+            .field("arguments", &"<private>")
+            .field("identity", &"<private>")
+            .finish()
+    }
 }
 
 impl ToolCallGateExecutableAuthorization {
@@ -188,7 +209,10 @@ pub trait ToolCallGate: Send + Sync {
 
 #[cfg(test)]
 mod tests {
-    use super::{ToolCallGateFileChange, ToolCallGatePayload, ToolCallGateRequest};
+    use super::{
+        ToolCallGateAuthorization, ToolCallGateExecutableAuthorization, ToolCallGateFileChange,
+        ToolCallGatePayload, ToolCallGateRequest,
+    };
 
     #[test]
     fn debug_output_redacts_exact_tool_payload() {
@@ -214,6 +238,37 @@ mod tests {
         let rendered = format!("{path:?}");
         assert!(!rendered.contains("TOKEN_VALUE"));
         assert!(!rendered.contains("PAYLOAD_VALUE"));
+    }
+
+    #[test]
+    fn debug_output_redacts_action_authorization() {
+        let authorization = ToolCallGateAuthorization::new(
+            "REQUEST_BINDING_VALUE".to_owned(),
+            Some(ToolCallGateExecutableAuthorization::new(
+                "/private/executable".to_owned(),
+                vec!["SECRET_ARGUMENT".to_owned()],
+                "IDENTITY_DIGEST_VALUE".to_owned(),
+            )),
+        );
+        let rendered = format!("{authorization:?}");
+        for secret in [
+            "REQUEST_BINDING_VALUE",
+            "/private/executable",
+            "SECRET_ARGUMENT",
+            "IDENTITY_DIGEST_VALUE",
+        ] {
+            assert!(!rendered.contains(secret), "{secret} leaked in {rendered}");
+        }
+
+        let executable = authorization.executable().expect("authorized executable");
+        let rendered = format!("{executable:?}");
+        for secret in [
+            "/private/executable",
+            "SECRET_ARGUMENT",
+            "IDENTITY_DIGEST_VALUE",
+        ] {
+            assert!(!rendered.contains(secret), "{secret} leaked in {rendered}");
+        }
     }
 }
 

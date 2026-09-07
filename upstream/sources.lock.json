@@ -286,6 +286,7 @@
       "id": "codex-bind-tool-gate-executable-identity",
       "file": "upstream/patches/codex/0007-bind-tool-gate-executable-identity.patch",
       "planned": false,
+      "patchSha256": "11fff355bc3b2156e3d31cc4f2a9712f3a074010afaf52815ba1ecb80e4919bc",
       "targets": [
         "codex-rs/core-api/src/lib.rs",
         "codex-rs/core/src/lib.rs",

@@ -964,7 +964,10 @@ fn explicit_read_only_shell_authorization(
 
 fn read_only_program_arguments(program: &str, args: &[String]) -> bool {
     match program {
-        "cat" | "head" | "tail" | "wc" | "ls" | "pwd" | "stat" => true,
+        "cat" | "head" | "tail" | "ls" | "pwd" | "stat" => true,
+        "wc" => !args
+            .iter()
+            .any(|arg| arg == "--files0-from" || arg.starts_with("--files0-from=")),
         "grep" => !args.iter().any(|arg| {
             matches!(arg.as_str(), "-f" | "--file")
                 || arg.starts_with("--file=")
@@ -1730,6 +1733,18 @@ mod tests {
             shell_request("call-codegen", "python3", &["generate.py"], root),
             shell_request("call-external-read", "cat", &["/etc/passwd"], root),
             shell_request("call-outside-cwd", "cat", &["secret.txt"], outside),
+            shell_request(
+                "call-wc-files0-from-equals",
+                "wc",
+                &["--files0-from=files.list"],
+                root,
+            ),
+            shell_request(
+                "call-wc-files0-from-paired",
+                "wc",
+                &["--files0-from", "files.list"],
+                root,
+            ),
             shell_request("call-rg-pre", "rg", &["--pre=sh", "fixture"], root),
             shell_request(
                 "call-rg-config",
@@ -1949,6 +1964,8 @@ mod tests {
             ("sed", &["-i", "s/a/b/", "src/lib.rs"][..]),
             ("cargo", &["build"][..]),
             ("python3", &["generate.py"][..]),
+            ("wc", &["--files0-from=files.list"][..]),
+            ("wc", &["--files0-from", "files.list"][..]),
             ("rg", &["--pre=tool", "fixture"][..]),
             ("rg", &["--pre-glob=*.rs", "fixture"][..]),
             ("rg", &["--config=rg.conf", "fixture"][..]),
