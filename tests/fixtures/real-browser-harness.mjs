@@ -284,7 +284,6 @@ export function startStandaloneServer({
       WWC_SERVER_DATA_DIRECTORY: resolve(directory, 'server-data'),
       WWC_SERVER_ALLOWED_ORIGINS: clientOrigin,
       WWC_SERVER_BOOTSTRAP_PROOF: proof,
-      WWC_SERVER_AUTH_SUBJECT: 'usr_01J00000000000000000000000',
       WWC_SERVER_REPOSITORY_ROOT: repositoryRoot,
       WWC_SERVER_SOURCE_ROOT: sourceRoot,
       WWC_SERVER_CHECKOUT_REVISION: checkoutRevision,
