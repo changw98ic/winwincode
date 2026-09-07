@@ -407,11 +407,7 @@ fn seed_owner_account(data_directory: &std::path::Path) -> Result<UserId, Box<dy
     if let Some(existing) = accounts.active_owner_id()? {
         return Ok(existing);
     }
-    let owner = accounts.initialize_owner(
-        "owner",
-        "browser-owner-password-1",
-        &at(0),
-    )?;
+    let owner = accounts.initialize_owner("owner", "browser-owner-password-1", &at(0))?;
     Ok(owner.user_id)
 }
 
