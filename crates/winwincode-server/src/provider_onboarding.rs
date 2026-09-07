@@ -41,11 +41,11 @@
 //!    construct, with no public constructor — so the Provider catalog
 //!    descriptor and the default route can only ever be built from verified
 //!    connection data.
-//! 4. [`ProviderOnboardingService::rotate_credential`] stages the next
-//!    immutable secret version beside the current one, commits the auditable
-//!    metadata rotation, and only afterwards scrubs the obsolete version. On
-//!    every earlier failure the previous credential stays authoritative, so a
-//!    route never points at nothing.
+//! 4. [`ProviderOnboardingService::rotate_credential`] probes the replacement
+//!    secret before staging its next immutable version beside the current one,
+//!    commits the auditable metadata rotation, and only afterwards scrubs the
+//!    obsolete version. On every earlier failure the previous credential stays
+//!    authoritative, so a route never points at nothing.
 //!
 //! HTTP routes and UI are intentionally out of scope: this module defines the
 //! functions a future route layer calls.
@@ -571,6 +571,10 @@ pub struct RotateCredentialRequest {
     pub organization_scope: OrganizationScope,
     /// The credential reference derived by a previous create.
     pub credential_reference_id: CredentialReferenceId,
+    /// The validated custom endpoint used by the credential, when it is not
+    /// a built-in Provider preset. A custom endpoint must be supplied again
+    /// because it is deliberately not persisted in Credential metadata.
+    pub custom_endpoint: Option<String>,
     /// The replacement secret; consumed and cleared by the secret store.
     pub next_secret: ResolvedSecret,
 }
@@ -846,12 +850,42 @@ impl<'a> ProviderOnboardingService<'a> {
             &descriptor,
             SystemStandaloneApplicationClock.now_instant(),
         )?;
-        let settings_revision = converge_default_route(
+        let settings_revision = match converge_default_route(
             &mut *self.storage,
             &request.actor,
             &request.organization_scope,
             &route,
-        )?;
+        ) {
+            Ok(revision) => revision,
+            Err(error) => {
+                // Catalog and settings are separate durable streams. If the
+                // second write fails, disable the descriptor before returning
+                // so cleanup by the end-to-end caller cannot leave an active
+                // route pointing at a deleted credential reference.
+                if let Ok(request_id) = derived_request_id(
+                    PROVIDER_ONBOARDING_DOMAIN,
+                    "provider-catalog-disable-after-settings-failure",
+                    &(
+                        request.actor.clone(),
+                        request.organization_scope.clone(),
+                        descriptor.provider_id.clone(),
+                        receipt.catalog_version,
+                    ),
+                ) {
+                    let _ = ProviderCatalogService::new(&mut *self.storage).disable(
+                        &ProviderCatalogRequest {
+                            actor: request.actor.clone(),
+                            scope: scope.clone(),
+                            request_id,
+                            expected_catalog_version: receipt.catalog_version,
+                        },
+                        &descriptor.provider_id,
+                        SystemStandaloneApplicationClock.now_instant(),
+                    );
+                }
+                return Err(error);
+            }
+        };
         let established = ModelRouteEstablished {
             provider_id: route.provider_id.clone(),
             model_id: route.model_id.clone(),
@@ -877,8 +911,9 @@ impl<'a> ProviderOnboardingService<'a> {
     /// # Errors
     ///
     /// Rejects an unknown or revoked reference, a failing secret store, and
-    /// reference lifecycle failures; on every failure the previous credential
-    /// stays authoritative.
+    /// reference lifecycle failures; the replacement is probed before any
+    /// secret-store write, and on every failure the previous credential stays
+    /// authoritative.
     pub fn rotate_credential(
         &mut self,
         request: RotateCredentialRequest,
@@ -889,6 +924,16 @@ impl<'a> ProviderOnboardingService<'a> {
         let current = CredentialReferenceService::new(&mut *self.storage)
             .resolve(&scope, &request.credential_reference_id)?;
         let previous_rotation_version = current.rotation_version();
+        let endpoint = resolve_endpoint(current.provider_id(), request.custom_endpoint.as_deref())?;
+        let outcome = self
+            .probe
+            .probe(current.provider_id(), &endpoint, &request.next_secret);
+        if !outcome.succeeded() {
+            return Err(ProviderOnboardingError::new(
+                ProviderOnboardingErrorKind::ConnectionFailed,
+                "Provider credential rotation probe did not authenticate the endpoint",
+            ));
+        }
         // Stage the next immutable version while the current one stays
         // authoritative; the secret buffer is consumed and cleared either
         // way. On a staging failure this flow staged nothing of its own, and
@@ -1022,14 +1067,25 @@ impl<'a> ProviderOnboardingService<'a> {
                 return Err(error);
             }
         };
-        let route = self.establish_model_route(
+        let route = match self.establish_model_route(
             &connection,
             &EstablishRouteRequest {
-                actor: request.actor,
-                organization_scope: request.organization_scope,
+                actor: request.actor.clone(),
+                organization_scope: request.organization_scope.clone(),
                 default_model_id: request.default_model_id,
             },
-        )?;
+        ) {
+            Ok(route) => route,
+            Err(error) => {
+                self.cleanup_failed_reference(
+                    &request.actor,
+                    &request.organization_scope,
+                    &credential.credential_reference_id,
+                    credential.revision.clone(),
+                );
+                return Err(error);
+            }
+        };
         Ok(ProviderOnboarded {
             credential_reference: credential,
             route,

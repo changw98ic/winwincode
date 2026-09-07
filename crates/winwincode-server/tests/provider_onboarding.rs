@@ -481,6 +481,7 @@ fn the_plaintext_secret_never_reaches_storage_events_audit_disk_or_responses() {
             actor: actor(),
             organization_scope: organization_scope(),
             credential_reference_id: unknown_reference_id(),
+            custom_endpoint: None,
             next_secret: secret(ROTATED_SECRET),
         })
         .expect_err("an unknown reference rejects the rotation");
@@ -718,6 +719,7 @@ fn rotation_switches_material_and_scrubs_the_old_version() {
             actor: actor(),
             organization_scope: organization_scope(),
             credential_reference_id: id.clone(),
+            custom_endpoint: None,
             next_secret: secret(ROTATED_SECRET),
         })
         .expect("rotation commits");
@@ -783,6 +785,48 @@ fn rotation_switches_material_and_scrubs_the_old_version() {
 }
 
 #[test]
+fn failed_rotation_probe_leaves_no_staged_material_or_metadata_change() {
+    let harness = harness(
+        "rotation-probe-fail",
+        FakeProbe::confirmed(confirmed_deepseek_models()),
+    );
+    let mut storage = SqliteStorage::open(&harness.data_directory).expect("storage opens");
+    let store = secret_store(&harness);
+    let (reference, _) = onboard(&harness, &mut storage);
+    let id = reference.credential_reference_id.clone();
+    harness.probe.set_outcome(ProbeOutcome::unreachable());
+
+    let error = ProviderOnboardingService::new(&mut storage, &store, &harness.probe)
+        .rotate_credential(RotateCredentialRequest {
+            actor: actor(),
+            organization_scope: organization_scope(),
+            credential_reference_id: id.clone(),
+            custom_endpoint: None,
+            next_secret: secret(ROTATED_SECRET),
+        })
+        .expect_err("an unverified replacement must abort before staging");
+    assert_eq!(error.kind(), ProviderOnboardingErrorKind::ConnectionFailed);
+
+    let resolution = CredentialReferenceService::new(&mut storage)
+        .resolve(&scope(), &id)
+        .expect("reference resolves");
+    assert_eq!(resolution.rotation_version(), 1);
+    let current = CredentialReferenceService::new(&mut storage)
+        .resolve_secret(&store, &scope(), &id)
+        .expect("old secret still resolves");
+    assert_eq!(current.expose(), USER_SECRET.as_bytes());
+    let versions = secret_files(&harness.secret_directory)
+        .into_iter()
+        .filter(|(name, _)| name.starts_with("version-"))
+        .collect::<Vec<_>>();
+    assert_eq!(versions.len(), 1, "probe failure must not stage a version");
+    assert_eq!(versions[0].1.as_slice(), USER_SECRET.as_bytes());
+
+    drop(storage);
+    let _ = std::fs::remove_dir_all(&harness.data_directory);
+}
+
+#[test]
 fn failed_rotation_leaves_the_previous_credential_authoritative() {
     let harness = harness(
         "rotation-stage-fail",
@@ -799,6 +843,7 @@ fn failed_rotation_leaves_the_previous_credential_authoritative() {
             actor: actor(),
             organization_scope: organization_scope(),
             credential_reference_id: id.clone(),
+            custom_endpoint: None,
             next_secret: secret(ROTATED_SECRET),
         })
         .expect_err("a staging failure aborts the rotation");
@@ -855,6 +900,7 @@ fn occupied_next_version_rejection_keeps_the_old_credential_authoritative() {
             actor: actor(),
             organization_scope: organization_scope(),
             credential_reference_id: id.clone(),
+            custom_endpoint: None,
             next_secret: secret(ROTATED_SECRET),
         })
         .expect_err("a different value already occupies the next version");
