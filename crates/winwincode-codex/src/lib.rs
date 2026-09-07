@@ -27,7 +27,8 @@ pub use adapter::{
 };
 #[cfg(feature = "test-support")]
 pub use adapter::{
-    ProductionDelegatedTransitionFault, ProductionEventPollFault, ProductionSubmissionFault,
+    ProductionDelegatedTransitionFault, ProductionEventPollFault, ProductionFormatRepairFault,
+    ProductionSubmissionFault,
 };
 pub use contract::{
     ActionRequestTransport, CodexCoreAdapter, CodexPoll, CodexRunKey, CodexRunKeyError,

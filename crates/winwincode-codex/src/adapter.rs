@@ -145,6 +145,8 @@ pub struct ProductionCodexConfig {
     submission_faults: VecDeque<ProductionSubmissionFault>,
     #[cfg(feature = "test-support")]
     delegated_transition_faults: VecDeque<ProductionDelegatedTransitionFault>,
+    #[cfg(feature = "test-support")]
+    format_repair_faults: VecDeque<ProductionFormatRepairFault>,
 }
 
 /// Test-only faults injected at the embedded Kernel event boundary.
@@ -172,6 +174,13 @@ pub enum ProductionDelegatedTransitionFault {
     BeforeIntent,
     AfterIntentBeforeKernel,
     AfterKernelBeforeSettlement,
+}
+
+/// Test-only fault at the bounded format-repair reconciliation boundary.
+#[cfg(feature = "test-support")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProductionFormatRepairFault {
+    KernelRecoveryFailed,
 }
 
 impl ProductionCodexConfig {
@@ -234,6 +243,8 @@ impl ProductionCodexConfig {
             submission_faults: VecDeque::new(),
             #[cfg(feature = "test-support")]
             delegated_transition_faults: VecDeque::new(),
+            #[cfg(feature = "test-support")]
+            format_repair_faults: VecDeque::new(),
         })
     }
 
@@ -261,6 +272,15 @@ impl ProductionCodexConfig {
         fault: ProductionDelegatedTransitionFault,
     ) -> Self {
         self.delegated_transition_faults.push_back(fault);
+        self
+    }
+
+    /// Fails one exact delegated format-repair reconciliation without opening
+    /// another Provider exchange.
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub fn with_test_format_repair_fault(mut self, fault: ProductionFormatRepairFault) -> Self {
+        self.format_repair_faults.push_back(fault);
         self
     }
 
@@ -1310,6 +1330,13 @@ impl ProductionCodexAdapter {
                 .commit_provider_final_model_calls(run_key)
                 .map_err(map_store_error)?;
             if failed {
+                if self
+                    .runs
+                    .get(run_key)
+                    .is_some_and(|run| is_format_repair_turn(&run.record, &completed.turn_id))
+                {
+                    return self.retain_delegated_repair_infrastructure_failure(run_key, now);
+                }
                 return self.retain_delegated_inconclusive(run_key, now);
             }
             return self.accept_delegated_final_output(
@@ -1452,6 +1479,52 @@ impl ProductionCodexAdapter {
             .ok_or_else(unavailable)
     }
 
+    fn retain_delegated_repair_infrastructure_failure(
+        &mut self,
+        run_key: &str,
+        now: &Instant,
+    ) -> Result<CodexPoll, ProductionCodexError> {
+        self.store
+            .commit_provider_final_model_calls(run_key)
+            .map_err(map_store_error)?;
+        let run = self.runs.get_mut(run_key).ok_or_else(unknown_thread)?;
+        run.record.last_activity_at = now.clone();
+        run.record.terminal = Some(StoredTerminal::DelegatedRepairInfrastructureFailed);
+        run.record.phase = StoredRunPhase::TerminalTracePending;
+        self.persist_run(run_key)?;
+        self.poll_retained_terminal(run_key)?
+            .ok_or_else(unavailable)
+    }
+
+    async fn poll_delegated_repair_infrastructure_terminal(
+        &mut self,
+        run_key: &str,
+        now: &Instant,
+    ) -> Result<CodexPoll, ProductionCodexError> {
+        self.store
+            .commit_provider_final_model_calls(run_key)
+            .map_err(map_store_error)?;
+        let first_failure = self
+            .runs
+            .get(run_key)
+            .ok_or_else(unknown_thread)?
+            .record
+            .terminal
+            .is_none();
+        if first_failure {
+            {
+                let run = self.runs.get_mut(run_key).ok_or_else(unknown_thread)?;
+                run.record.last_activity_at = now.clone();
+                run.record.terminal = Some(StoredTerminal::DelegatedRepairInfrastructureFailed);
+                run.record.phase = StoredRunPhase::TerminalTracePending;
+            }
+            self.persist_run(run_key)?;
+            self.quiesce_infrastructure_run(run_key, now).await;
+        }
+        self.poll_retained_terminal(run_key)?
+            .ok_or_else(unavailable)
+    }
+
     fn poll_batch_intent(
         &mut self,
         run_key: &str,
@@ -1494,16 +1567,13 @@ impl ProductionCodexAdapter {
             )
         };
         let reconciliation = self
-            .kernel
-            .reconcile_turn_exact(
-                &repair.0,
-                repair.1.clone(),
-                FORMAT_REPAIR_PROMPT.to_owned(),
-                repair.2,
-            )
+            .reconcile_format_repair_turn(&repair.0, repair.1.clone(), repair.2)
             .await;
         let Ok(reconciliation) = reconciliation else {
-            return self.retain_delegated_inconclusive(run_key, now).map(Some);
+            return self
+                .poll_delegated_repair_infrastructure_terminal(run_key, now)
+                .await
+                .map(Some);
         };
         match reconciliation {
             ExactTurnReconciliation::Started { turn_id, .. } if turn_id == repair.1 => {
@@ -1545,10 +1615,34 @@ impl ProductionCodexAdapter {
             ExactTurnReconciliation::Started { .. }
             | ExactTurnReconciliation::Completed(_)
             | ExactTurnReconciliation::Failed(_)
-            | ExactTurnReconciliation::NotSubmitted { .. } => {
-                self.retain_delegated_inconclusive(run_key, now).map(Some)
-            }
+            | ExactTurnReconciliation::NotSubmitted { .. } => self
+                .poll_delegated_repair_infrastructure_terminal(run_key, now)
+                .await
+                .map(Some),
         }
+    }
+
+    async fn reconcile_format_repair_turn(
+        &mut self,
+        session_id: &str,
+        turn_id: String,
+        options: TurnSubmissionOptions,
+    ) -> Result<ExactTurnReconciliation, ()> {
+        #[cfg(feature = "test-support")]
+        if let Some(fault) = self.config.format_repair_faults.pop_front() {
+            return match fault {
+                ProductionFormatRepairFault::KernelRecoveryFailed => Err(()),
+            };
+        }
+        self.kernel
+            .reconcile_turn_exact(
+                session_id,
+                turn_id,
+                FORMAT_REPAIR_PROMPT.to_owned(),
+                options,
+            )
+            .await
+            .map_err(|_| ())
     }
 
     fn accept_command_end(
@@ -1752,6 +1846,13 @@ impl ProductionCodexAdapter {
             .get(run_key)
             .is_some_and(|run| is_delegated_composer(&run.record))
         {
+            if self
+                .runs
+                .get(run_key)
+                .is_some_and(|run| is_active_format_repair(&run.record))
+            {
+                return self.retain_delegated_repair_infrastructure_failure(run_key, now);
+            }
             return self.retain_delegated_inconclusive(run_key, now);
         }
         let run = self.runs.get_mut(run_key).ok_or_else(unknown_thread)?;
@@ -3973,6 +4074,7 @@ enum StoredTerminal {
     },
     Failed,
     DelegatedInconclusive,
+    DelegatedRepairInfrastructureFailed,
     Cancelled,
     InfrastructureFailed,
 }
@@ -3983,6 +4085,9 @@ impl StoredTerminal {
             Self::Completed { .. } => "embedded Codex turn stopped",
             Self::Failed => "embedded Codex turn failed",
             Self::DelegatedInconclusive => "delegated ChangeBatch proposal was inconclusive",
+            Self::DelegatedRepairInfrastructureFailed => {
+                "delegated format-repair infrastructure failure"
+            }
             Self::Cancelled => "embedded Codex turn cancelled",
             Self::InfrastructureFailed => "embedded Codex infrastructure failure",
         }
@@ -4006,6 +4111,10 @@ impl StoredTerminal {
             )),
             Self::DelegatedInconclusive => Ok(CodexPoll::Inconclusive(
                 SecretSafeTraceSummary::new("delegated ChangeBatch proposal was inconclusive")
+                    .map_err(|_| unavailable())?,
+            )),
+            Self::DelegatedRepairInfrastructureFailed => Ok(CodexPoll::InfrastructureFailed(
+                SecretSafeTraceSummary::new("delegated format-repair infrastructure failure")
                     .map_err(|_| unavailable())?,
             )),
             Self::Cancelled => Ok(CodexPoll::Cancelled(
@@ -4305,6 +4414,19 @@ fn is_delegated_composer(record: &StoredRun) -> bool {
                 policy.role_id,
                 RoleSessionPolicyRoleId::Executor | RoleSessionPolicyRoleId::Remediator
             )
+    })
+}
+
+fn is_format_repair_turn(record: &StoredRun, turn_id: &str) -> bool {
+    record
+        .format_repair
+        .as_ref()
+        .is_some_and(|repair| repair.turn_id == turn_id)
+}
+
+fn is_active_format_repair(record: &StoredRun) -> bool {
+    record.format_repair.as_ref().is_some_and(|repair| {
+        repair.submitted && record.current_turn_id.as_deref() == Some(repair.turn_id.as_str())
     })
 }
 
@@ -5232,9 +5354,9 @@ fn map_bridge_error(_: BridgeError) -> ProductionCodexError {
 mod tests {
     use super::{
         AdapterStore, ExecutionMode, HELPER_RELEASE_BINARY_MODE, MAX_HELPER_BYTES,
-        allocate_interactive_input_choice_identities,
         ModelLeaseAuthority, ModelRunBinding, ProductionCodexErrorKind, RoleExecutionMode,
-        StoredRun, StoredRunPhase, TurnSubmissionOptions, bounded_helper_handshake,
+        StoredRun, StoredRunPhase, TurnSubmissionOptions,
+        allocate_interactive_input_choice_identities, bounded_helper_handshake,
         decode_kernel_event, delegated_budget_stop, delegated_budget_stopped_counters,
         delegated_change_batch_event, load_stored_run, migrate_stored_run_role_policies_v1_to_v2,
         interactive_input_choice_replay_keys,

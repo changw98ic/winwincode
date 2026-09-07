@@ -36,10 +36,11 @@ use winwincode_control_plane::{
     ModelSettingsValues, ModelToolSupport, OutboxEvent, ProductSessionExecutionConfig,
     ProductSessionService, ProviderAdmissionReservationConfig, ProviderCatalogRequest,
     ProviderCatalogService, ProviderDescriptor, ProviderFinishReason, ProviderGatewayOpenReceipt,
-    ProviderStreamConverter, ProviderStreamEvent, ProviderTokenUsage, ProviderToolIdentity,
-    ProviderToolKind, ResolvedSecret, StandaloneModelExecutionApplication,
-    StandaloneModelExecutionConfig, StandaloneProviderConfig, StructuredOutputSupport,
-    SubmitChatMessageCommand, local_loopback_retry_policy, product_session_command_context,
+    ProviderStreamConverter, ProviderStreamEvent, ProviderStreamFailure, ProviderStreamFailureKind,
+    ProviderTokenUsage, ProviderToolIdentity, ProviderToolKind, ResolvedSecret,
+    StandaloneModelExecutionApplication, StandaloneModelExecutionConfig, StandaloneProviderConfig,
+    StructuredOutputSupport, SubmitChatMessageCommand, local_loopback_retry_policy,
+    product_session_command_context,
 };
 use winwincode_delivery::{
     application::stage::{AdvanceStageInput, NewStageIdentities, advance},
@@ -2119,6 +2120,367 @@ fn delegated_invalid_output_gets_one_format_repair_then_becomes_inconclusive() {
             message,
             ExecutionPortMessage::ActionEnforcementRequestMessage(_)
         )));
+    });
+}
+
+async fn assert_delegated_repair_provider_failure(
+    label: &str,
+    failure_kind: ProviderStreamFailureKind,
+) {
+    let root = TestDirectory::new(&format!("production-delegated-repair-{label}"));
+    let mut dispatch = dispatch(&root);
+    dispatch.job.workspace.write_mode = ExecutionWorkspaceWriteMode::ReadOnly;
+    let port = RecordedPort::default();
+    let adapter = winwincode_codex::ProductionCodexAdapter::open(adapter_config_with_mode(
+        &root,
+        winwincode_codex::ExecutionMode::DelegatedPatch,
+    ))
+    .expect("open delegated Provider-failure adapter");
+    let mut worker = winwincode_worker::WorkerMain::new(
+        worker_config(),
+        port.clone(),
+        adapter,
+        root.workspace_runtime(),
+    );
+    register(&mut worker, &port).await;
+    worker
+        .accept_control(
+            &ExecutionPortMessage::JobDispatchMessage(dispatch.clone()),
+            at("2030-01-01T00:00:00.000Z"),
+        )
+        .await
+        .expect("accept delegated Provider-failure dispatch");
+    let first_open = poll_until_message(
+        &mut worker,
+        &port,
+        &at("2030-01-01T00:00:01.000Z"),
+        |messages| {
+            messages.iter().find_map(|message| match message {
+                ExecutionPortMessage::ModelOpenMessage(open) => Some(open.clone()),
+                _ => None,
+            })
+        },
+        "delegated initial request was not delivered",
+    )
+    .await;
+    setup_model(&root, &first_open, &dispatch.job);
+    let mut app = application(&root);
+    let first_gateway = opened(
+        app.accept_local(&typed(ExecutionPortMessage::ModelOpenMessage(
+            first_open.clone(),
+        )))
+        .expect("accept delegated initial ModelOpen"),
+    );
+    for chunk in provider_chunks(
+        &first_open,
+        &first_gateway,
+        [
+            ProviderStreamEvent::ResponseStarted {
+                provider_response_id: format!("provider-delegated-invalid-{label}"),
+            },
+            ProviderStreamEvent::TextStarted { index: 0 },
+            ProviderStreamEvent::TextDelta {
+                index: 0,
+                delta: "not a ChangeBatch proposal".to_owned(),
+            },
+            ProviderStreamEvent::TextEnded { index: 0 },
+            ProviderStreamEvent::Finished(ProviderFinishReason::Stop),
+        ],
+        1_010,
+    ) {
+        worker
+            .accept_control(
+                &ExecutionPortMessage::ModelChunkMessage(chunk),
+                at("2030-01-01T00:00:02.000Z"),
+            )
+            .await
+            .expect("deliver initial malformed delegated output");
+    }
+    let repair_open = poll_until_message(
+        &mut worker,
+        &port,
+        &at("2030-01-01T00:00:02.000Z"),
+        |messages| {
+            messages
+                .iter()
+                .filter_map(|message| match message {
+                    ExecutionPortMessage::ModelOpenMessage(open) => Some(open.clone()),
+                    _ => None,
+                })
+                .nth(1)
+        },
+        "delegated repair request was not delivered",
+    )
+    .await;
+    let repair_gateway = opened(
+        app.accept_local(&typed(ExecutionPortMessage::ModelOpenMessage(
+            repair_open.clone(),
+        )))
+        .expect("accept delegated repair ModelOpen"),
+    );
+    for chunk in provider_chunks(
+        &repair_open,
+        &repair_gateway,
+        [ProviderStreamEvent::Failed(ProviderStreamFailure::new(
+            failure_kind,
+        ))],
+        1_020,
+    ) {
+        worker
+            .accept_control(
+                &ExecutionPortMessage::ModelChunkMessage(chunk),
+                at("2030-01-01T00:00:02.000Z"),
+            )
+            .await
+            .expect("deliver delegated repair Provider failure");
+    }
+    let outcome = poll_until_message(
+        &mut worker,
+        &port,
+        &at("2030-01-01T00:00:02.000Z"),
+        |messages| {
+            messages.iter().find_map(|message| match message {
+                ExecutionPortMessage::JobOutcomeMessage(outcome) => Some(outcome.clone()),
+                _ => None,
+            })
+        },
+        "delegated repair Provider failure did not become infrastructure failure",
+    )
+    .await;
+    assert_eq!(
+        outcome.outcome.status,
+        ExecutionOutcomeStatus::InfrastructureError
+    );
+    assert_eq!(
+        outcome.outcome.summary,
+        "delegated format-repair infrastructure failure"
+    );
+    let error = outcome
+        .outcome
+        .error
+        .as_ref()
+        .expect("repair Provider failure code");
+    assert_eq!(error.code, ExecutionPortErrorCode::InfrastructureError);
+    assert!(error.retryable);
+    assert_eq!(
+        stored_run_json(&root)["terminal"]["kind"],
+        "delegated_repair_infrastructure_failed"
+    );
+    assert_eq!(
+        port.messages()
+            .iter()
+            .filter(|message| matches!(message, ExecutionPortMessage::ModelOpenMessage(_)))
+            .count(),
+        2
+    );
+    assert!(!port.messages().iter().any(|message| matches!(
+        message,
+        ExecutionPortMessage::ActionEnforcementRequestMessage(_)
+    )));
+
+    let first_terminal_facts = unique_terminal_facts(&port.messages());
+    worker
+        .shutdown(at("2030-01-01T00:00:03.000Z"))
+        .await
+        .expect("shutdown delegated Provider-failure Worker");
+    drop(worker);
+
+    let replay_port = RecordedPort::default();
+    let adapter = winwincode_codex::ProductionCodexAdapter::open(adapter_config_with_mode(
+        &root,
+        winwincode_codex::ExecutionMode::DelegatedPatch,
+    ))
+    .expect("reopen delegated Provider-failure adapter");
+    let mut replay = winwincode_worker::WorkerMain::new(
+        worker_config(),
+        replay_port.clone(),
+        adapter,
+        root.workspace_runtime(),
+    );
+    register(&mut replay, &replay_port).await;
+    replay
+        .accept_control(
+            &ExecutionPortMessage::JobDispatchMessage(dispatch),
+            at("2030-01-01T00:00:00.000Z"),
+        )
+        .await
+        .expect("accept delegated Provider-failure replay dispatch");
+    run_until_outcome_without_gateway(&mut replay, &replay_port).await;
+    assert!(!replay_port.messages().iter().any(|message| matches!(
+        message,
+        ExecutionPortMessage::ModelOpenMessage(_)
+            | ExecutionPortMessage::ActionEnforcementRequestMessage(_)
+    )));
+    assert_eq!(
+        unique_terminal_facts(&replay_port.messages()),
+        first_terminal_facts
+    );
+}
+
+#[test]
+fn delegated_repair_provider_failures_are_retryable_infrastructure_and_replay_exactly() {
+    run_on_large_stack(async {
+        for (label, failure_kind) in [
+            ("capability", ProviderStreamFailureKind::InvalidRequest),
+            ("rate-limit", ProviderStreamFailureKind::RateLimit),
+            ("timeout", ProviderStreamFailureKind::Timeout),
+            ("transport", ProviderStreamFailureKind::Transport),
+        ] {
+            assert_delegated_repair_provider_failure(label, failure_kind).await;
+        }
+    });
+}
+
+#[cfg(feature = "test-support")]
+#[test]
+fn delegated_repair_kernel_recovery_failure_is_retryable_without_an_extra_provider_call() {
+    use winwincode_codex::ProductionFormatRepairFault;
+
+    run_on_large_stack(async {
+        let root = TestDirectory::new("production-delegated-repair-kernel-recovery");
+        let mut dispatch = dispatch(&root);
+        dispatch.job.workspace.write_mode = ExecutionWorkspaceWriteMode::ReadOnly;
+        let port = RecordedPort::default();
+        let adapter = winwincode_codex::ProductionCodexAdapter::open(
+            adapter_config_with_mode(&root, winwincode_codex::ExecutionMode::DelegatedPatch)
+                .with_test_format_repair_fault(ProductionFormatRepairFault::KernelRecoveryFailed),
+        )
+        .expect("open delegated Kernel-recovery-failure adapter");
+        let mut worker = winwincode_worker::WorkerMain::new(
+            worker_config(),
+            port.clone(),
+            adapter,
+            root.workspace_runtime(),
+        );
+        register(&mut worker, &port).await;
+        worker
+            .accept_control(
+                &ExecutionPortMessage::JobDispatchMessage(dispatch.clone()),
+                at("2030-01-01T00:00:00.000Z"),
+            )
+            .await
+            .expect("accept delegated Kernel-recovery-failure dispatch");
+        let first_open = poll_until_message(
+            &mut worker,
+            &port,
+            &at("2030-01-01T00:00:01.000Z"),
+            |messages| {
+                messages.iter().find_map(|message| match message {
+                    ExecutionPortMessage::ModelOpenMessage(open) => Some(open.clone()),
+                    _ => None,
+                })
+            },
+            "delegated initial request was not delivered",
+        )
+        .await;
+        setup_model(&root, &first_open, &dispatch.job);
+        let mut app = application(&root);
+        let gateway = opened(
+            app.accept_local(&typed(ExecutionPortMessage::ModelOpenMessage(
+                first_open.clone(),
+            )))
+            .expect("accept delegated initial ModelOpen"),
+        );
+        for chunk in provider_chunks(
+            &first_open,
+            &gateway,
+            [
+                ProviderStreamEvent::ResponseStarted {
+                    provider_response_id: "provider-delegated-kernel-recovery".to_owned(),
+                },
+                ProviderStreamEvent::TextStarted { index: 0 },
+                ProviderStreamEvent::TextDelta {
+                    index: 0,
+                    delta: "not a ChangeBatch proposal".to_owned(),
+                },
+                ProviderStreamEvent::TextEnded { index: 0 },
+                ProviderStreamEvent::Finished(ProviderFinishReason::Stop),
+            ],
+            1_030,
+        ) {
+            worker
+                .accept_control(
+                    &ExecutionPortMessage::ModelChunkMessage(chunk),
+                    at("2030-01-01T00:00:02.000Z"),
+                )
+                .await
+                .expect("deliver malformed delegated output before Kernel recovery failure");
+        }
+        let outcome = poll_until_message(
+            &mut worker,
+            &port,
+            &at("2030-01-01T00:00:02.000Z"),
+            |messages| {
+                messages.iter().find_map(|message| match message {
+                    ExecutionPortMessage::JobOutcomeMessage(outcome) => Some(outcome.clone()),
+                    _ => None,
+                })
+            },
+            "delegated repair Kernel recovery failure did not terminalize",
+        )
+        .await;
+        assert_eq!(
+            outcome.outcome.status,
+            ExecutionOutcomeStatus::InfrastructureError
+        );
+        let error = outcome
+            .outcome
+            .error
+            .as_ref()
+            .expect("Kernel recovery failure code");
+        assert_eq!(error.code, ExecutionPortErrorCode::InfrastructureError);
+        assert!(error.retryable);
+        assert_eq!(
+            stored_run_json(&root)["terminal"]["kind"],
+            "delegated_repair_infrastructure_failed"
+        );
+        assert_eq!(
+            port.messages()
+                .iter()
+                .filter(|message| matches!(message, ExecutionPortMessage::ModelOpenMessage(_)))
+                .count(),
+            1,
+            "failed repair reconciliation must not open another Provider exchange"
+        );
+
+        let first_terminal_facts = unique_terminal_facts(&port.messages());
+        worker
+            .shutdown(at("2030-01-01T00:00:03.000Z"))
+            .await
+            .expect("shutdown delegated Kernel-recovery-failure Worker");
+        drop(worker);
+
+        let replay_port = RecordedPort::default();
+        let adapter = winwincode_codex::ProductionCodexAdapter::open(adapter_config_with_mode(
+            &root,
+            winwincode_codex::ExecutionMode::DelegatedPatch,
+        ))
+        .expect("reopen delegated Kernel-recovery-failure adapter");
+        let mut replay = winwincode_worker::WorkerMain::new(
+            worker_config(),
+            replay_port.clone(),
+            adapter,
+            root.workspace_runtime(),
+        );
+        register(&mut replay, &replay_port).await;
+        replay
+            .accept_control(
+                &ExecutionPortMessage::JobDispatchMessage(dispatch),
+                at("2030-01-01T00:00:00.000Z"),
+            )
+            .await
+            .expect("accept delegated Kernel-recovery-failure replay dispatch");
+        run_until_outcome_without_gateway(&mut replay, &replay_port).await;
+        assert!(
+            !replay_port
+                .messages()
+                .iter()
+                .any(|message| matches!(message, ExecutionPortMessage::ModelOpenMessage(_)))
+        );
+        assert_eq!(
+            unique_terminal_facts(&replay_port.messages()),
+            first_terminal_facts
+        );
     });
 }
 
