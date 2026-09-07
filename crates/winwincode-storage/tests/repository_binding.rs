@@ -130,6 +130,7 @@ fn outcome(
 fn upserts_are_idempotent_by_binding_id_and_cas_guarded() {
     let mut storage = SqliteStorage::open(temporary_directory("upsert")).expect("storage");
     let client = seed_client(&mut storage, 1);
+    let foreign_client = seed_client(&mut storage, 2);
     {
         let mut ledger = storage.repository_binding_ledger().expect("ledger");
 
@@ -165,6 +166,40 @@ fn upserts_are_idempotent_by_binding_id_and_cas_guarded() {
             .expect("replay upsert");
         assert!(!replay.enrolled);
         assert_eq!(replay.record.revision, 1);
+
+        // A replay received later still compares the device's scan instant,
+        // not the Server receive time, so the revision remains unchanged.
+        let replay_after_delivery_delay = ledger
+            .upsert(
+                &projection(10, &client, "fingerprint-a"),
+                Some(&instant(T1)),
+                0,
+                &instant(T2),
+            )
+            .expect("delayed replay");
+        assert!(!replay_after_delivery_delay.enrolled);
+        assert_eq!(replay_after_delivery_delay.record.revision, 1);
+
+        // A different client cannot take over an existing binding id, even
+        // when it supplies a fresh revision and the same fingerprint.
+        let foreign_error = ledger
+            .upsert(
+                &projection(10, &foreign_client, "fingerprint-a"),
+                Some(&instant(T2)),
+                1,
+                &instant(T2),
+            )
+            .expect_err("foreign binding owner must fail closed");
+        assert_eq!(
+            foreign_error.kind(),
+            RepositoryBindingStoreErrorKind::FingerprintConflict
+        );
+        let unchanged = ledger
+            .snapshot(binding_id(10).as_str())
+            .expect("snapshot")
+            .expect("binding remains");
+        assert_eq!(unchanged.client_node_id, client);
+        assert_eq!(unchanged.revision, 1);
 
         // A changed projection advances the revision exactly once under CAS.
         let changed = RepositoryBindingProjection::try_new(

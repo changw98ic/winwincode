@@ -370,7 +370,11 @@ impl RepositoryBindingProjection {
     }
 
     /// True when every projected field equals the other projection's fields.
-    fn is_idempotent_replay_of(&self, record: &RepositoryBindingRecord, now: &Instant) -> bool {
+    fn is_idempotent_replay_of(
+        &self,
+        record: &RepositoryBindingRecord,
+        last_scanned_at: Option<&Instant>,
+    ) -> bool {
         self.repository_binding_id == record.repository_binding_id
             && self.client_node_id == record.client_node_id
             && self.display_name == record.display_name
@@ -379,7 +383,7 @@ impl RepositoryBindingProjection {
             && self.dirty_state == record.dirty_state
             && self.availability == record.availability
             && self.repository_fingerprint == record.repository_fingerprint
-            && Some(now) == record.last_scanned_at.as_ref()
+            && last_scanned_at == record.last_scanned_at.as_ref()
     }
 }
 
@@ -674,7 +678,13 @@ impl<'storage> RepositoryBindingLedger<'storage> {
                 upsert_receipt(&transaction, projection, true, "insert")?
             }
             Some(record) => {
-                if projection.is_idempotent_replay_of(&record, now) {
+                if projection.client_node_id() != record.client_node_id {
+                    return Err(error(
+                        RepositoryBindingStoreErrorKind::FingerprintConflict,
+                        "repository binding id is already used by another client node",
+                    ));
+                }
+                if projection.is_idempotent_replay_of(&record, last_scanned_at) {
                     upsert_receipt(&transaction, projection, false, "replay")?
                 } else {
                     ensure_binding_revision(&record, expected_revision)?;
