@@ -34,7 +34,9 @@ use crate::{
 
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 const MAX_PROVIDER_ID_BYTES: usize = 128;
-const MAX_ENDPOINT_BYTES: usize = 2_048;
+/// Authority-owned endpoint size bound, shared with the Provider modules that
+/// must accept exactly the endpoints this adapter accepts.
+pub(crate) const MAX_ENDPOINT_BYTES: usize = 2_048;
 const MAX_ADAPTER_REQUEST_ID_BYTES: usize = 200;
 const AUTHORIZATION_PREFIX: &[u8] = b"Bearer ";
 const CONTROL_PAUSE: u8 = 1;
@@ -1373,8 +1375,14 @@ fn authorization_value(secret: &[u8]) -> Result<String, ProviderAdapterError> {
     String::from_utf8(value).map_err(|_| ProviderAdapterError::rejected())
 }
 
-fn canonical_https_endpoint(value: &str) -> bool {
-    if value.trim() != value {
+/// Canonical HTTPS endpoint shape for every Provider module: a trimmed
+/// `https` URI with a host, no embedded userinfo, and no query or fragment.
+/// The fragment guard is explicit because `Uri::from_str` strips a fragment
+/// instead of rejecting it. Other Provider modules validate through this
+/// check, so an endpoint can never be accepted at preset time and rejected at
+/// request time, or the reverse.
+pub(crate) fn canonical_https_endpoint(value: &str) -> bool {
+    if value.trim() != value || value.contains('#') {
         return false;
     }
     let Ok(uri) = ureq::http::Uri::from_str(value) else {
@@ -1852,6 +1860,25 @@ mod tests {
         );
         assert_eq!(
             result.expect_err("credential-bearing endpoint").kind(),
+            HttpsSseProviderErrorKind::InvalidConfiguration
+        );
+        let result = HttpsSseProviderConfig::try_new(
+            "provider".to_owned(),
+            "https://localhost/v1/model#fragment".to_owned(),
+            HttpsSseProviderTimeouts {
+                connect: Duration::from_secs(1),
+                first_byte: Duration::from_secs(1),
+                idle: Duration::from_secs(1),
+                total: Duration::from_secs(2),
+            },
+            HttpsSseProviderLimits {
+                response_bytes: 1024,
+                event_bytes: 1024,
+                events: 1,
+            },
+        );
+        assert_eq!(
+            result.expect_err("fragment-bearing endpoint").kind(),
             HttpsSseProviderErrorKind::InvalidConfiguration
         );
     }
