@@ -24,27 +24,47 @@ use rusqlite::{Connection, OptionalExtension as _, params};
 use winwincode_domain::Instant;
 use winwincode_execution_port::{
     debug_probe_contract::{
-        ValidatedDebugProbePlan, seal_debug_probe_plan, seal_probe_execution_intent,
-        validate_probe_execution_receipt, validate_probe_round_receipt,
+        ValidatedDebugProbePlan, ValidatedProbeExecutionIntent, seal_debug_probe_plan,
+        seal_probe_execution_intent, validate_probe_execution_receipt,
+        validate_probe_round_receipt,
     },
     generated::{
-        DebugProbeError, DebugProbeErrorCode, DebugProbeKind, DebugProbePlan,
-        DebugProbeRoundAuthority, ProbeCommandSpec, ProbeCompletionRuleKind, ProbeExecutionIntent,
-        ProbeExecutionReceipt, ProbeReceiptStatus, ProbeResourceClaim, ProbeRoundBudgetUsage,
+        ArtifactReference, DebugProbeError, DebugProbeErrorCode, DebugProbeKind, DebugProbePlan,
+        DebugProbeRoundAuthority, HypothesisEvidenceCandidate, ProbeCommandSpec,
+        ProbeCompletionRuleKind, ProbeEvidenceSummary, ProbeExecutionIntent, ProbeExecutionReceipt,
+        ProbeNormalizerProfile, ProbeReceiptStatus, ProbeResourceClaim, ProbeRoundBudgetUsage,
         ProbeRoundCompletionReason, ProbeRoundReceipt, ProbeRoundReceiptStatus,
         ProbeSideEffectClass, ProbeWorkspaceAccess,
     },
+    probe_result_normalizer::{
+        ProbeEvidenceProjection, ProbeRawStreamInput, ValidatedProbeEvidenceBundle,
+        ValidatedProbeNormalizerProfile, normalize_probe_evidence, seal_probe_normalizer_profile,
+    },
+};
+
+use crate::probe_evidence::{
+    DurableProbeEvidenceStore, PreparedProbeCapture, ProbeEvidenceStoreError,
+    ProbeEvidenceStoreErrorKind, ProbeNormalizationContext, ProbePriorEvidenceReference,
+    ProbeRawArtifactManifest, ProbeRawArtifactReadRequest, RecoveredProbeEvidence,
+    RetainedProbeEvidenceBundle,
 };
 
 const DATABASE_DIRECTORY: &str = ".probe-scheduler";
 const DATABASE_FILE: &str = "probe-scheduler.sqlite3";
+const EVIDENCE_DIRECTORY: &str = ".probe-evidence";
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS probe_round (
     round_id TEXT PRIMARY KEY,
     plan_json BLOB NOT NULL,
     receipt_json BLOB,
+    workspace_root TEXT NOT NULL,
+    workspace_request_root TEXT NOT NULL,
+    observed_elapsed_millis INTEGER NOT NULL,
+    stop_reason TEXT,
+    stop_elapsed_millis INTEGER,
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    CHECK ((stop_reason IS NULL) = (stop_elapsed_millis IS NULL))
 );
 CREATE TABLE IF NOT EXISTS probe_execution (
     probe_execution_id TEXT PRIMARY KEY,
@@ -167,6 +187,8 @@ pub struct TrustedPureReadTemplate {
     resources: ProbeResourceClaim,
     max_timeout_millis: i64,
     max_output_limit_bytes: i64,
+    normalizer_profile: ValidatedProbeNormalizerProfile,
+    prior_evidence: Option<ProbePriorEvidence>,
 }
 
 impl TrustedPureReadTemplate {
@@ -183,6 +205,8 @@ impl TrustedPureReadTemplate {
         mut resources: ProbeResourceClaim,
         max_timeout_millis: i64,
         max_output_limit_bytes: i64,
+        normalizer_profile: ProbeNormalizerProfile,
+        prior_evidence: Option<ProbePriorEvidence>,
     ) -> Result<Self, ProbeSchedulerError> {
         if command.argv.is_empty()
             || max_timeout_millis <= 0
@@ -210,12 +234,16 @@ impl TrustedPureReadTemplate {
         for path in &resources.paths {
             validate_lexical_path(path)?;
         }
+        let normalizer_profile = seal_probe_normalizer_profile(normalizer_profile)
+            .map_err(|error| ProbeSchedulerError::new(error.code().clone(), error.message()))?;
         Ok(Self {
             kind,
             command,
             resources,
             max_timeout_millis,
             max_output_limit_bytes,
+            normalizer_profile,
+            prior_evidence,
         })
     }
 
@@ -227,10 +255,73 @@ impl TrustedPureReadTemplate {
     }
 }
 
+/// Opaque exact predecessor selected by durable host round context.
+///
+/// Only evidence returned by [`ProbeScheduler::evidence_for_round`] can create
+/// this value. A model cannot submit an Artifact reference as a baseline.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProbePriorEvidence {
+    reference: ProbePriorEvidenceReference,
+}
+
+/// Durable normalized evidence exposed at the round boundary without raw
+/// process output.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProbeEvidenceRecord {
+    bundle_artifact_ref: ArtifactReference,
+    bundle: ValidatedProbeEvidenceBundle,
+    projection: ProbeEvidenceProjection,
+    prior: ProbePriorEvidence,
+}
+
+impl ProbeEvidenceRecord {
+    fn from_retained(retained: &RetainedProbeEvidenceBundle) -> Self {
+        Self {
+            bundle_artifact_ref: retained.bundle_artifact_ref().clone(),
+            bundle: retained.bundle().clone(),
+            projection: retained.projection().clone(),
+            prior: ProbePriorEvidence {
+                reference: retained.prior_reference(),
+            },
+        }
+    }
+
+    /// Canonical bundle Artifact reference, separate from raw receipt refs.
+    #[must_use]
+    pub const fn bundle_artifact_ref(&self) -> &ArtifactReference {
+        &self.bundle_artifact_ref
+    }
+
+    /// Fully revalidated canonical bundle for deterministic host composition.
+    #[must_use]
+    pub const fn bundle(&self) -> &ValidatedProbeEvidenceBundle {
+        &self.bundle
+    }
+
+    /// Bounded summary containing no raw process bytes.
+    #[must_use]
+    pub const fn summary(&self) -> &ProbeEvidenceSummary {
+        self.projection.summary()
+    }
+
+    /// Unpolarized hypothesis candidates containing no confidence assignment.
+    #[must_use]
+    pub fn candidates(&self) -> &[HypothesisEvidenceCandidate] {
+        self.projection.candidates()
+    }
+
+    /// Exact predecessor capability that a host may bind to a later template.
+    #[must_use]
+    pub fn prior_evidence(&self) -> ProbePriorEvidence {
+        self.prior.clone()
+    }
+}
+
 /// Host-admitted input given to the narrow process adapter.
 #[derive(Clone, Debug)]
 pub struct AdmittedProbe {
-    intent: ProbeExecutionIntent,
+    intent: ValidatedProbeExecutionIntent,
+    normalization: ProbeNormalizationContext,
     host_resources: ProbeResourceClaim,
     workspace_root: PathBuf,
     working_directory: PathBuf,
@@ -240,7 +331,7 @@ impl AdmittedProbe {
     /// Exact durable intent retained before this value reaches a runner.
     #[must_use]
     pub const fn intent(&self) -> &ProbeExecutionIntent {
-        &self.intent
+        self.intent.intent()
     }
 
     /// Canonical resource claim recomputed from the exact host template.
@@ -262,16 +353,40 @@ impl AdmittedProbe {
     }
 }
 
-/// Process-level result consumed by the scheduler without exposing raw output
-/// to the model feedback boundary.
+/// Process facts supplied while raw bytes are still inside the runner seam.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ProbeRunResult {
+pub struct ProbeRunFacts {
     termination: ProbeRunTermination,
     exit_code: Option<i64>,
     signal: Option<String>,
     duration: Duration,
-    output_bytes: usize,
-    output_truncated: bool,
+}
+
+impl ProbeRunFacts {
+    /// Creates exact terminal process facts. Raw bytes are submitted separately
+    /// to [`ProbeExecutionCompletion::retain`].
+    #[must_use]
+    pub const fn new(
+        termination: ProbeRunTermination,
+        exit_code: Option<i64>,
+        signal: Option<String>,
+        duration: Duration,
+    ) -> Self {
+        Self {
+            termination,
+            exit_code,
+            signal,
+            duration,
+        }
+    }
+}
+
+/// Opaque durable process result consumed by the scheduler. It contains only
+/// the exact receipt and private Artifact metadata, never raw output bytes.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProbeRunResult {
+    receipt: ProbeExecutionReceipt,
+    manifest: ProbeRawArtifactManifest,
 }
 
 /// Closed process result understood by the scheduler.
@@ -286,30 +401,137 @@ pub enum ProbeRunTermination {
 }
 
 impl ProbeRunResult {
-    /// Creates a bounded runner result.
+    /// Exact durable receipt whose Artifact refs address only raw streams.
     #[must_use]
-    pub const fn new(
-        termination: ProbeRunTermination,
-        exit_code: Option<i64>,
-        signal: Option<String>,
-        duration: Duration,
-        output_bytes: usize,
+    pub const fn receipt(&self) -> &ProbeExecutionReceipt {
+        &self.receipt
+    }
+}
+
+/// One-shot durable completion authority passed to an admitted runner.
+///
+/// The runner must call [`Self::retain`] before raw stdout or stderr leaves its
+/// private seam. Capture, exact terminal receipt, host-selected profile, and
+/// baseline selection are committed together.
+#[derive(Clone)]
+pub struct ProbeExecutionCompletion {
+    journal: Arc<Mutex<ProbeJournal>>,
+    evidence: Arc<DurableProbeEvidenceStore>,
+    intent: ValidatedProbeExecutionIntent,
+    normalization: ProbeNormalizationContext,
+    started_at: Instant,
+    round_started_monotonic: MonotonicInstant,
+    round_deadline: MonotonicInstant,
+    wall_limit_millis: i64,
+    cancellation: ProbeRunCancellation,
+    clock: Arc<dyn ProbeClock>,
+}
+
+impl fmt::Debug for ProbeExecutionCompletion {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProbeExecutionCompletion")
+            .field("identity", &self.intent.intent().identity)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ProbeExecutionCompletion {
+    /// Atomically retains raw Artifacts, the exact terminal receipt, and the
+    /// normalization binding before returning an opaque result.
+    ///
+    /// # Errors
+    ///
+    /// Rejects stale authority, changed bytes, invalid process facts, an
+    /// unavailable clock, or unavailable durable storage.
+    pub fn retain(
+        &self,
+        facts: ProbeRunFacts,
+        stdout: &[u8],
+        stderr: &[u8],
         output_truncated: bool,
-    ) -> Self {
-        Self {
-            termination,
-            exit_code,
-            signal,
-            duration,
-            output_bytes,
-            output_truncated,
+    ) -> Result<ProbeRunResult, ProbeSchedulerError> {
+        let finished_at = self.clock.now()?;
+        let elapsed_millis = monotonic_elapsed_millis(self.round_started_monotonic);
+        let process_cancelled = facts.termination == ProbeRunTermination::Cancelled;
+        self.journal
+            .lock()
+            .map_err(|_| journal_error())?
+            .observe_round_elapsed(
+                &self.intent.intent().identity.round_id.0,
+                elapsed_millis.min(self.wall_limit_millis),
+                &finished_at,
+            )?;
+        if self.cancellation.is_budget_exhausted() {
+            self.retain_stop_reason(
+                RoundStopReason::BudgetExhausted,
+                self.wall_limit_millis,
+                &finished_at,
+            )?;
+        } else if self.cancellation.is_cancelled() || process_cancelled {
+            self.retain_stop_reason(
+                RoundStopReason::Cancelled,
+                elapsed_millis.min(self.wall_limit_millis),
+                &finished_at,
+            )?;
+        } else if MonotonicInstant::now() >= self.round_deadline {
+            self.retain_stop_reason(
+                RoundStopReason::BudgetExhausted,
+                self.wall_limit_millis,
+                &finished_at,
+            )?;
+            self.cancellation.exhaust_budget();
         }
+        let prepared = PreparedProbeCapture::try_new(
+            &self.intent,
+            stdout,
+            stderr,
+            output_truncated,
+            &self.normalization,
+        )
+        .map_err(|error| evidence_store_error(&error))?;
+        let mut receipt = process_receipt(
+            self.intent.intent(),
+            facts,
+            prepared.manifest(),
+            &self.started_at,
+            &finished_at,
+        );
+        apply_completion_cancellation(&mut receipt, &self.cancellation);
+        let manifest = self
+            .evidence
+            .persist_completed_execution(&prepared, &receipt)
+            .map_err(|error| evidence_store_error(&error))?;
+        Ok(ProbeRunResult { receipt, manifest })
+    }
+
+    fn retain_stop_reason(
+        &self,
+        reason: RoundStopReason,
+        elapsed_millis: i64,
+        now: &Instant,
+    ) -> Result<(), ProbeSchedulerError> {
+        let retained = self
+            .journal
+            .lock()
+            .map_err(|_| journal_error())?
+            .retain_round_stop(
+                &self.intent.intent().identity.round_id.0,
+                reason,
+                elapsed_millis,
+                now,
+            )?;
+        match retained.reason {
+            RoundStopReason::BudgetExhausted => self.cancellation.exhaust_budget(),
+            RoundStopReason::Cancelled => self.cancellation.cancel(),
+        }
+        Ok(())
     }
 }
 
 /// Boxed runner future used by production and deterministic fixture adapters.
 pub type ProbeRunnerFuture<'runner> =
-    Pin<Box<dyn Future<Output = ProbeRunResult> + Send + 'runner>>;
+    Pin<Box<dyn Future<Output = Result<ProbeRunResult, ProbeSchedulerError>> + Send + 'runner>>;
 
 /// Narrow execution seam below host admission and durable intent retention.
 pub trait ProbeRunner: fmt::Debug + Send + Sync + 'static {
@@ -326,6 +548,7 @@ pub trait ProbeRunner: fmt::Debug + Send + Sync + 'static {
         &self,
         probe: AdmittedProbe,
         cancellation: ProbeRunCancellation,
+        completion: ProbeExecutionCompletion,
     ) -> ProbeRunnerFuture<'_>;
 }
 
@@ -358,15 +581,18 @@ impl ProbeRoundRequest {
 struct ActiveRound {
     authority: DebugProbeRoundAuthority,
     cancellation: ProbeRunCancellation,
+    started_monotonic: MonotonicInstant,
+    wall_limit_millis: i64,
 }
 
 /// Deep Worker-owned facade for one complete `DebugProbe` scheduling round.
 pub struct ProbeScheduler<Runner, Clock = SystemProbeClock> {
-    journal: Mutex<ProbeJournal>,
+    journal: Arc<Mutex<ProbeJournal>>,
+    evidence: Arc<DurableProbeEvidenceStore>,
     runner: Arc<Runner>,
     templates: Vec<TrustedPureReadTemplate>,
     active: Mutex<BTreeMap<String, ActiveRound>>,
-    clock: Clock,
+    clock: Arc<Clock>,
 }
 
 impl<Runner, Clock> fmt::Debug for ProbeScheduler<Runner, Clock> {
@@ -424,12 +650,17 @@ where
                 return Err(invalid_probe("host command template is duplicated"));
             }
         }
+        let root = root.as_ref();
         Ok(Self {
-            journal: Mutex::new(ProbeJournal::open(root)?),
+            journal: Arc::new(Mutex::new(ProbeJournal::open(root)?)),
+            evidence: Arc::new(
+                DurableProbeEvidenceStore::open(root.join(EVIDENCE_DIRECTORY))
+                    .map_err(|error| evidence_store_error(&error))?,
+            ),
             runner: Arc::new(runner),
             templates,
             active: Mutex::new(BTreeMap::new()),
-            clock,
+            clock: Arc::new(clock),
         })
     }
 
@@ -449,14 +680,29 @@ where
     ) -> Result<ProbeRoundReceipt, ProbeSchedulerError> {
         let validated = seal_debug_probe_plan(request.plan, &request.expected_authority)
             .map_err(|error| ProbeSchedulerError::new(error.code().clone(), error.message()))?;
-        match self
+        let request_workspace_root = absolute_workspace_request(&request.workspace_root)?;
+        let workspace_missing = !request.workspace_root.exists();
+        let replay_workspace_root = replay_workspace(&request.workspace_root)?;
+        let replay = self
             .journal
             .lock()
             .map_err(|_| journal_error())?
-            .replay_round(&validated)?
-        {
-            RoundReplay::Terminal(receipt) => return Ok(*receipt),
+            .replay_round(
+                &validated,
+                &replay_workspace_root,
+                &request_workspace_root,
+                workspace_missing,
+            )?;
+        match replay {
+            RoundReplay::Terminal(receipt) => {
+                self.read_evidence_for_validated(&validated, &receipt)?;
+                return Ok(*receipt);
+            }
             RoundReplay::Unresolved => {
+                canonical_workspace(&request.workspace_root)?;
+                if let Some(receipt) = self.resume_unresolved(&validated)? {
+                    return Ok(receipt);
+                }
                 return Err(ProbeSchedulerError::new(
                     DebugProbeErrorCode::InfrastructureError,
                     "unfinished probe intent requires explicit reconciliation",
@@ -485,9 +731,19 @@ where
                 .journal
                 .lock()
                 .map_err(|_| journal_error())?
-                .claim_round(&validated, &admitted, &round_started_at)?;
+                .claim_round(
+                    &validated,
+                    &admitted,
+                    &workspace_root,
+                    &request_workspace_root,
+                    &round_started_at,
+                )?;
             match claim {
-                RoundClaim::Terminal(receipt) => return Ok(*receipt),
+                RoundClaim::Terminal(receipt) => {
+                    drop(active);
+                    self.read_evidence_for_validated(&validated, &receipt)?;
+                    return Ok(*receipt);
+                }
                 RoundClaim::Unresolved => {
                     return Err(ProbeSchedulerError::new(
                         DebugProbeErrorCode::InfrastructureError,
@@ -500,6 +756,8 @@ where
                         ActiveRound {
                             authority: request.expected_authority.clone(),
                             cancellation: cancellation.clone(),
+                            started_monotonic: round_started_monotonic,
+                            wall_limit_millis: validated.plan().budget.wall_time_limit_millis,
                         },
                     );
                 }
@@ -512,7 +770,6 @@ where
                 admitted,
                 waves,
                 cancellation,
-                &round_started_at,
                 round_started_monotonic,
             )
             .await;
@@ -520,6 +777,164 @@ where
             self.remove_active(&round_key)?;
         }
         result
+    }
+
+    fn resume_unresolved(
+        &self,
+        plan: &ValidatedDebugProbePlan,
+    ) -> Result<Option<ProbeRoundReceipt>, ProbeSchedulerError> {
+        let (intents, recovery) = {
+            let journal = self.journal.lock().map_err(|_| journal_error())?;
+            (journal.load_intents(plan)?, journal.recovery_context(plan)?)
+        };
+        let mut receipts = Vec::with_capacity(intents.len());
+        for intent in intents {
+            let intent = seal_probe_execution_intent(intent, plan)
+                .map_err(|error| ProbeSchedulerError::new(error.code().clone(), error.message()))?;
+            let journal_receipt = self
+                .journal
+                .lock()
+                .map_err(|_| journal_error())?
+                .load_probe_receipt(intent.intent())?;
+            let recovered = self
+                .evidence
+                .recover(&intent)
+                .map_err(|error| evidence_store_error(&error))?;
+            let receipt = match recovered {
+                Some(RecoveredProbeEvidence::ReceiptRetained {
+                    manifest,
+                    receipt,
+                    normalization,
+                }) => {
+                    self.normalize_recovered(
+                        &intent,
+                        &manifest,
+                        &receipt,
+                        &normalization,
+                        &recovery.workspace_root,
+                    )?;
+                    receipt
+                }
+                Some(RecoveredProbeEvidence::Complete {
+                    receipt, evidence, ..
+                }) => {
+                    if evidence.bundle().bundle().l0_receipt != receipt {
+                        return Err(stale_authority(
+                            "recovered evidence differs from its execution receipt",
+                        ));
+                    }
+                    receipt
+                }
+                None => {
+                    let Some(receipt) = journal_receipt.clone() else {
+                        return Ok(None);
+                    };
+                    if !receipt.artifact_refs.is_empty() || receipt.output_bytes != 0 {
+                        return Ok(None);
+                    }
+                    receipts.push(receipt);
+                    continue;
+                }
+            };
+            if journal_receipt
+                .as_ref()
+                .is_some_and(|retained| retained != &receipt)
+            {
+                return Err(stale_authority(
+                    "recovered receipt differs from the scheduler journal",
+                ));
+            }
+            self.journal
+                .lock()
+                .map_err(|_| journal_error())?
+                .retain_probe_receipt(&receipt, &receipt.finished_at)?;
+            receipts.push(receipt);
+        }
+        let receipt = canonical_round_receipt(plan, receipts, &recovery)?;
+        self.journal
+            .lock()
+            .map_err(|_| journal_error())?
+            .retain_round_receipt(&receipt, &receipt.finished_at)?;
+        Ok(Some(receipt))
+    }
+
+    /// Reads the exact normalized evidence for one terminal round.
+    ///
+    /// Returned records contain canonical bundles, bounded summaries, and
+    /// unpolarized candidates. Raw Artifact bodies remain private. A record's
+    /// opaque predecessor capability may be explicitly attached to a later
+    /// trusted command template.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a non-terminal round, changed plan bytes, missing evidence,
+    /// or any durable authority/digest mismatch.
+    pub fn evidence_for_round(
+        &self,
+        request: &ProbeRoundRequest,
+    ) -> Result<Vec<ProbeEvidenceRecord>, ProbeSchedulerError> {
+        let validated = seal_debug_probe_plan(request.plan.clone(), &request.expected_authority)
+            .map_err(|error| ProbeSchedulerError::new(error.code().clone(), error.message()))?;
+        let request_workspace_root = absolute_workspace_request(&request.workspace_root)?;
+        let workspace_missing = !request.workspace_root.exists();
+        let workspace_root = replay_workspace(&request.workspace_root)?;
+        let replay = self
+            .journal
+            .lock()
+            .map_err(|_| journal_error())?
+            .replay_round(
+                &validated,
+                &workspace_root,
+                &request_workspace_root,
+                workspace_missing,
+            )?;
+        let receipt = match replay {
+            RoundReplay::Terminal(receipt) => receipt,
+            RoundReplay::Missing | RoundReplay::Unresolved => {
+                return Err(evidence_missing());
+            }
+        };
+        self.read_evidence_for_validated(&validated, &receipt)
+    }
+
+    fn read_evidence_for_validated(
+        &self,
+        plan: &ValidatedDebugProbePlan,
+        receipt: &ProbeRoundReceipt,
+    ) -> Result<Vec<ProbeEvidenceRecord>, ProbeSchedulerError> {
+        let intents = self
+            .journal
+            .lock()
+            .map_err(|_| journal_error())?
+            .load_intents(plan)?;
+        let mut records = Vec::new();
+        for intent in intents {
+            let validated = seal_probe_execution_intent(intent, plan)
+                .map_err(|error| ProbeSchedulerError::new(error.code().clone(), error.message()))?;
+            let probe_receipt = receipt
+                .probe_receipts
+                .iter()
+                .find(|candidate| candidate.identity == validated.intent().identity)
+                .ok_or_else(journal_error)?;
+            match self
+                .evidence
+                .read_bundle(&validated)
+                .map_err(|error| evidence_store_error(&error))?
+            {
+                Some(evidence) => {
+                    if evidence.bundle().bundle().l0_receipt != *probe_receipt {
+                        return Err(stale_authority(
+                            "probe evidence differs from its terminal round receipt",
+                        ));
+                    }
+                    records.push(ProbeEvidenceRecord::from_retained(&evidence));
+                }
+                None if probe_receipt.artifact_refs.is_empty()
+                    && probe_receipt.output_bytes == 0 => {}
+                None => return Err(evidence_missing()),
+            }
+        }
+        Ok(records)
     }
 
     fn remove_active(&self, round_key: &str) -> Result<(), ProbeSchedulerError> {
@@ -546,8 +961,139 @@ where
         if round.authority != *authority {
             return Err(stale_authority("probe cancellation authority is stale"));
         }
-        round.cancellation.cancel();
+        let now = self.clock.now()?;
+        let elapsed_millis = monotonic_elapsed_millis(round.started_monotonic);
+        let (reason, elapsed_millis) = if elapsed_millis >= round.wall_limit_millis {
+            (RoundStopReason::BudgetExhausted, round.wall_limit_millis)
+        } else {
+            (RoundStopReason::Cancelled, elapsed_millis)
+        };
+        let retained = self
+            .journal
+            .lock()
+            .map_err(|_| journal_error())?
+            .retain_round_stop(&authority.round_id.0, reason, elapsed_millis, &now)?;
+        match retained.reason {
+            RoundStopReason::Cancelled => round.cancellation.cancel(),
+            RoundStopReason::BudgetExhausted => round.cancellation.exhaust_budget(),
+        }
         Ok(())
+    }
+
+    fn completion(
+        &self,
+        probe: &AdmittedProbe,
+        started_at: &Instant,
+        round_started_monotonic: MonotonicInstant,
+        round_deadline: MonotonicInstant,
+        wall_limit_millis: i64,
+        cancellation: &ProbeRunCancellation,
+    ) -> ProbeExecutionCompletion {
+        let clock: Arc<dyn ProbeClock> = self.clock.clone();
+        ProbeExecutionCompletion {
+            journal: Arc::clone(&self.journal),
+            evidence: Arc::clone(&self.evidence),
+            intent: probe.intent.clone(),
+            normalization: probe.normalization.clone(),
+            started_at: started_at.clone(),
+            round_started_monotonic,
+            round_deadline,
+            wall_limit_millis,
+            cancellation: cancellation.clone(),
+            clock,
+        }
+    }
+
+    fn normalize_retained(
+        &self,
+        probe: &AdmittedProbe,
+        result: &ProbeRunResult,
+    ) -> Result<RetainedProbeEvidenceBundle, ProbeSchedulerError> {
+        let recovered = self
+            .evidence
+            .recover(&probe.intent)
+            .map_err(|error| evidence_store_error(&error))?
+            .ok_or_else(evidence_missing)?;
+        match recovered {
+            RecoveredProbeEvidence::ReceiptRetained {
+                manifest,
+                receipt,
+                normalization,
+            } => {
+                if manifest != result.manifest || receipt != result.receipt {
+                    return Err(stale_authority(
+                        "retained probe completion differs from runner result",
+                    ));
+                }
+                self.normalize_recovered(
+                    &probe.intent,
+                    &manifest,
+                    &receipt,
+                    &normalization,
+                    &probe.workspace_root,
+                )
+            }
+            RecoveredProbeEvidence::Complete {
+                manifest,
+                receipt,
+                evidence,
+                ..
+            } => {
+                if manifest != result.manifest || receipt != result.receipt {
+                    return Err(stale_authority(
+                        "retained probe completion differs from runner result",
+                    ));
+                }
+                Ok(*evidence)
+            }
+        }
+    }
+
+    fn normalize_recovered(
+        &self,
+        intent: &ValidatedProbeExecutionIntent,
+        manifest: &ProbeRawArtifactManifest,
+        receipt: &ProbeExecutionReceipt,
+        normalization: &ProbeNormalizationContext,
+        workspace_root: &Path,
+    ) -> Result<RetainedProbeEvidenceBundle, ProbeSchedulerError> {
+        let raw = manifest
+            .streams()
+            .iter()
+            .map(|binding| {
+                self.evidence
+                    .read_raw(&ProbeRawArtifactReadRequest::new(
+                        intent,
+                        binding.stream.clone(),
+                        &binding.artifact_ref,
+                    ))
+                    .map_err(|error| evidence_store_error(&error))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let inputs = manifest
+            .streams()
+            .iter()
+            .zip(&raw)
+            .map(|(binding, bytes)| {
+                ProbeRawStreamInput::new(
+                    binding.stream.clone(),
+                    binding.artifact_ref.clone(),
+                    bytes,
+                )
+            })
+            .collect::<Vec<_>>();
+        let bundle = normalize_probe_evidence(
+            intent,
+            receipt,
+            normalization.profile(),
+            &inputs,
+            normalization.baseline(),
+            workspace_root,
+        )
+        .map_err(|error| ProbeSchedulerError::new(error.code().clone(), error.message()))?;
+        self.evidence
+            .persist_bundle(intent, manifest, receipt, &bundle)
+            .map_err(|error| evidence_store_error(&error))
     }
 
     fn admit(
@@ -596,8 +1142,20 @@ where
             };
             let intent = seal_probe_execution_intent(intent, plan)
                 .map_err(|error| ProbeSchedulerError::new(error.code().clone(), error.message()))?;
+            let normalization = self
+                .evidence
+                .prepare_normalization(
+                    &intent,
+                    &template.normalizer_profile,
+                    template
+                        .prior_evidence
+                        .as_ref()
+                        .map(|prior| &prior.reference),
+                )
+                .map_err(|error| evidence_store_error(&error))?;
             admitted.push(AdmittedProbe {
-                intent: intent.into_intent(),
+                intent,
+                normalization,
                 host_resources: template.resources.clone(),
                 workspace_root: workspace_root.to_path_buf(),
                 working_directory,
@@ -605,10 +1163,11 @@ where
         }
         admitted.sort_by(|left, right| {
             left.intent
+                .intent()
                 .identity
                 .probe_id
                 .0
-                .cmp(&right.intent.identity.probe_id.0)
+                .cmp(&right.intent.intent().identity.probe_id.0)
         });
         Ok(admitted)
     }
@@ -620,87 +1179,90 @@ where
         admitted: Vec<AdmittedProbe>,
         waves: Vec<Vec<usize>>,
         cancellation: ProbeRunCancellation,
-        round_started_at: &Instant,
         round_started_monotonic: MonotonicInstant,
     ) -> Result<ProbeRoundReceipt, ProbeSchedulerError> {
+        let wall_limit_millis = plan.plan().budget.wall_time_limit_millis;
         let wall_limit = Duration::from_millis(
-            u64::try_from(plan.plan().budget.wall_time_limit_millis)
+            u64::try_from(wall_limit_millis)
                 .map_err(|_| budget_error("round wall-time budget is invalid"))?,
         );
         let round_deadline = round_started_monotonic + wall_limit;
         let mut receipts = Vec::with_capacity(admitted.len());
         let mut executed = BTreeSet::new();
-        let mut total_output_bytes = 0_i64;
-        let mut total_cpu_millis = 0_i64;
-        let mut total_command_arg_bytes = 0_i64;
-        let mut peak_memory_bytes = 0_i64;
-        let mut peak_parallel_probes = 0_i64;
         let mut cancelled = false;
-        let mut rule_satisfied = false;
 
         for wave in waves {
             if MonotonicInstant::now() >= round_deadline {
-                cancellation.exhaust_budget();
+                let now = self.clock.now()?;
+                self.retain_round_stop_current(
+                    plan,
+                    &cancellation,
+                    RoundStopReason::BudgetExhausted,
+                    wall_limit_millis,
+                    &now,
+                )?;
             }
             if cancellation.is_cancelled() {
                 cancelled = true;
                 break;
             }
-            peak_parallel_probes =
-                peak_parallel_probes.max(i64::try_from(wave.len()).unwrap_or(i64::MAX));
-            peak_memory_bytes = peak_memory_bytes.max(
-                wave.iter()
-                    .map(|index| admitted[*index].host_resources.memory_limit_bytes)
-                    .sum(),
-            );
             let wave_started_at = self.clock.now()?;
             let futures = wave
                 .iter()
                 .map(|index| {
+                    let completion = self.completion(
+                        &admitted[*index],
+                        &wave_started_at,
+                        round_started_monotonic,
+                        round_deadline,
+                        wall_limit_millis,
+                        &cancellation,
+                    );
                     self.runner
-                        .execute(admitted[*index].clone(), cancellation.clone())
+                        .execute(admitted[*index].clone(), cancellation.clone(), completion)
                 })
                 .collect::<Vec<_>>();
             let mut joined = Box::pin(join_all(futures));
             let results = tokio::select! {
                 results = &mut joined => results,
                 () = tokio::time::sleep_until(tokio::time::Instant::from_std(round_deadline)) => {
-                    cancellation.exhaust_budget();
+                    let now = self.clock.now()?;
+                    self.retain_round_stop_current(
+                        plan,
+                        &cancellation,
+                        RoundStopReason::BudgetExhausted,
+                        wall_limit_millis,
+                        &now,
+                    )?;
                     joined.await
                 }
             };
-            let wave_finished_at = self.clock.now()?;
             for (index, result) in wave.into_iter().zip(results) {
-                let mut receipt = process_receipt(
-                    &admitted[index].intent,
-                    result,
-                    &wave_started_at,
-                    &wave_finished_at,
-                );
-                if receipt.status == ProbeReceiptStatus::Cancelled {
-                    cancellation.cancel();
-                }
+                let result = result?;
+                self.normalize_retained(&admitted[index], &result)?;
+                let receipt = result.receipt;
                 if MonotonicInstant::now() >= round_deadline {
-                    cancellation.exhaust_budget();
+                    let now = self.clock.now()?;
+                    self.retain_round_stop_current(
+                        plan,
+                        &cancellation,
+                        RoundStopReason::BudgetExhausted,
+                        wall_limit_millis,
+                        &now,
+                    )?;
                 }
-                self.persist_probe_receipt_current(
+                self.persist_completed_probe_receipt_current(
                     plan,
                     &admitted[index].intent,
-                    &mut receipt,
+                    &receipt,
                     &cancellation,
-                    &wave_finished_at,
+                    &receipt.finished_at,
                 )?;
-                total_cpu_millis = total_cpu_millis
-                    .saturating_add(admitted[index].host_resources.cpu_limit_millis);
-                total_command_arg_bytes = total_command_arg_bytes
-                    .saturating_add(admitted[index].intent.spec.command.command_arg_bytes);
-                total_output_bytes = total_output_bytes.saturating_add(receipt.output_bytes);
                 cancelled |= receipt.status == ProbeReceiptStatus::Cancelled;
                 executed.insert(index);
                 receipts.push(receipt);
             }
             if completion_reached(plan, &receipts) {
-                rule_satisfied = true;
                 break;
             }
         }
@@ -711,10 +1273,10 @@ where
             }
             let now = self.clock.now()?;
             cancelled |= cancellation.is_cancelled();
-            let mut receipt = skipped_receipt(&probe.intent, &now, cancelled);
+            let mut receipt = skipped_receipt(probe.intent.intent(), &now, cancelled);
             self.persist_probe_receipt_current(
                 plan,
-                &probe.intent,
+                probe.intent.intent(),
                 &mut receipt,
                 &cancellation,
                 &now,
@@ -728,92 +1290,17 @@ where
             )
         });
 
-        let required_failed = receipts.iter().any(|receipt| {
-            admitted.iter().any(|probe| {
-                probe.intent.identity.probe_id == receipt.identity.probe_id
-                    && probe.intent.spec.required
-                    && !matches!(
-                        receipt.status,
-                        ProbeReceiptStatus::Succeeded | ProbeReceiptStatus::CacheHit
-                    )
-            })
-        });
-        let completion_satisfied = completion_threshold_satisfied(plan, &receipts);
         if MonotonicInstant::now() >= round_deadline {
-            cancellation.exhaust_budget();
+            let now = self.clock.now()?;
+            self.retain_round_stop_current(
+                plan,
+                &cancellation,
+                RoundStopReason::BudgetExhausted,
+                wall_limit_millis,
+                &now,
+            )?;
         }
-        let budget_exhausted = cancellation.is_budget_exhausted();
-        let status = if budget_exhausted {
-            ProbeRoundReceiptStatus::Failed
-        } else if cancelled {
-            ProbeRoundReceiptStatus::Cancelled
-        } else if required_failed || !completion_satisfied {
-            ProbeRoundReceiptStatus::Failed
-        } else {
-            ProbeRoundReceiptStatus::Completed
-        };
-        let completion_reason = if budget_exhausted {
-            ProbeRoundCompletionReason::BudgetExhausted
-        } else if cancelled {
-            ProbeRoundCompletionReason::Cancelled
-        } else if status == ProbeRoundReceiptStatus::Completed
-            && rule_satisfied
-            && completion_satisfied
-        {
-            ProbeRoundCompletionReason::CompletionRuleSatisfied
-        } else {
-            ProbeRoundCompletionReason::AllProbesTerminal
-        };
-        let error = if budget_exhausted {
-            Some(probe_error(
-                DebugProbeErrorCode::BudgetExceeded,
-                "probe round wall-time budget exhausted",
-            ))
-        } else if cancelled {
-            Some(probe_error(
-                DebugProbeErrorCode::Cancelled,
-                "probe round cancelled",
-            ))
-        } else if required_failed {
-            Some(probe_error(
-                DebugProbeErrorCode::InfrastructureError,
-                "required probe did not succeed",
-            ))
-        } else if !completion_satisfied {
-            Some(probe_error(
-                DebugProbeErrorCode::InfrastructureError,
-                "probe completion threshold was not satisfied",
-            ))
-        } else {
-            None
-        };
-        let round_finished_at = self.clock.now()?;
-        let actual_elapsed_millis =
-            i64::try_from(round_started_monotonic.elapsed().as_millis()).unwrap_or(i64::MAX);
-        let elapsed_millis = actual_elapsed_millis.min(plan.plan().budget.wall_time_limit_millis);
-        let mut receipt = ProbeRoundReceipt {
-            authority: plan.plan().authority.clone(),
-            completion_reason,
-            error,
-            finished_at: round_finished_at.clone(),
-            plan_digest: plan.plan().plan_digest.clone(),
-            probe_receipts: receipts,
-            schema_version: 1,
-            started_at: round_started_at.clone(),
-            status,
-            usage: ProbeRoundBudgetUsage {
-                budget_digest: plan.plan().budget.budget_digest.clone(),
-                elapsed_millis,
-                peak_memory_bytes,
-                peak_parallel_probes,
-                probe_count: i64::try_from(admitted.len()).unwrap_or(i64::MAX),
-                total_command_arg_bytes,
-                total_cpu_millis,
-                total_output_bytes,
-            },
-        };
-        self.persist_round_receipt_current(plan, &mut receipt, &cancellation, &round_finished_at)?;
-        Ok(receipt)
+        self.finalize_round_current(plan, receipts, &cancellation)
     }
 
     fn persist_probe_receipt_current(
@@ -859,13 +1346,73 @@ where
             .retain_probe_receipt(receipt, now)
     }
 
-    fn persist_round_receipt_current(
+    fn persist_completed_probe_receipt_current(
         &self,
         plan: &ValidatedDebugProbePlan,
-        receipt: &mut ProbeRoundReceipt,
+        intent: &ValidatedProbeExecutionIntent,
+        receipt: &ProbeExecutionReceipt,
         cancellation: &ProbeRunCancellation,
         now: &Instant,
     ) -> Result<(), ProbeSchedulerError> {
+        let active = self.active.lock().map_err(|_| journal_error())?;
+        let Some(round) = active.get(&plan.plan().authority.round_id.0) else {
+            return Err(stale_authority(
+                "probe receipt arrived after its authority ended",
+            ));
+        };
+        if round.authority != plan.plan().authority
+            || !Arc::ptr_eq(&round.cancellation.0, &cancellation.0)
+        {
+            return Err(stale_authority("probe receipt authority is stale"));
+        }
+        validate_probe_execution_receipt(receipt, intent)
+            .map_err(|error| ProbeSchedulerError::new(error.code().clone(), error.message()))?;
+        self.journal
+            .lock()
+            .map_err(|_| journal_error())?
+            .retain_probe_receipt(receipt, now)
+    }
+
+    fn retain_round_stop_current(
+        &self,
+        plan: &ValidatedDebugProbePlan,
+        cancellation: &ProbeRunCancellation,
+        reason: RoundStopReason,
+        elapsed_millis: i64,
+        now: &Instant,
+    ) -> Result<(), ProbeSchedulerError> {
+        let active = self.active.lock().map_err(|_| journal_error())?;
+        let Some(round) = active.get(&plan.plan().authority.round_id.0) else {
+            return Err(stale_authority("probe round stop authority is stale"));
+        };
+        if round.authority != plan.plan().authority
+            || !Arc::ptr_eq(&round.cancellation.0, &cancellation.0)
+        {
+            return Err(stale_authority("probe round stop authority was replaced"));
+        }
+        let retained = self
+            .journal
+            .lock()
+            .map_err(|_| journal_error())?
+            .retain_round_stop(
+                &plan.plan().authority.round_id.0,
+                reason,
+                elapsed_millis,
+                now,
+            )?;
+        match retained.reason {
+            RoundStopReason::BudgetExhausted => round.cancellation.exhaust_budget(),
+            RoundStopReason::Cancelled => round.cancellation.cancel(),
+        }
+        Ok(())
+    }
+
+    fn finalize_round_current(
+        &self,
+        plan: &ValidatedDebugProbePlan,
+        receipts: Vec<ProbeExecutionReceipt>,
+        cancellation: &ProbeRunCancellation,
+    ) -> Result<ProbeRoundReceipt, ProbeSchedulerError> {
         let mut active = self.active.lock().map_err(|_| journal_error())?;
         let Some(round) = active.get(&plan.plan().authority.round_id.0) else {
             return Err(stale_authority("probe round ended under stale authority"));
@@ -875,29 +1422,12 @@ where
         {
             return Err(stale_authority("probe round authority was replaced"));
         }
-        if round.cancellation.is_budget_exhausted() {
-            receipt.status = ProbeRoundReceiptStatus::Failed;
-            receipt.completion_reason = ProbeRoundCompletionReason::BudgetExhausted;
-            receipt.error = Some(probe_error(
-                DebugProbeErrorCode::BudgetExceeded,
-                "probe round wall-time budget exhausted",
-            ));
-        } else if round.cancellation.is_cancelled() {
-            receipt.status = ProbeRoundReceiptStatus::Cancelled;
-            receipt.completion_reason = ProbeRoundCompletionReason::Cancelled;
-            receipt.error = Some(probe_error(
-                DebugProbeErrorCode::Cancelled,
-                "probe round cancelled",
-            ));
-        }
-        validate_probe_round_receipt(receipt, plan)
-            .map_err(|error| ProbeSchedulerError::new(error.code().clone(), error.message()))?;
-        self.journal
-            .lock()
-            .map_err(|_| journal_error())?
-            .retain_round_receipt(receipt, now)?;
+        let mut journal = self.journal.lock().map_err(|_| journal_error())?;
+        let recovery = journal.recovery_context(plan)?;
+        let receipt = canonical_round_receipt(plan, receipts, &recovery)?;
+        journal.retain_round_receipt(&receipt, &receipt.finished_at)?;
         active.remove(&plan.plan().authority.round_id.0);
-        Ok(())
+        Ok(receipt)
     }
 }
 
@@ -943,7 +1473,7 @@ fn validate_wave_budget(
     let worst_case_wall = waves.iter().try_fold(0_i64, |total, wave| {
         let wave_timeout = wave
             .iter()
-            .map(|index| admitted[*index].intent.spec.timeout_millis)
+            .map(|index| admitted[*index].intent.intent().spec.timeout_millis)
             .max()
             .unwrap_or(0);
         total.checked_add(wave_timeout)
@@ -1066,14 +1596,20 @@ fn completion_threshold_satisfied(
 
 fn process_receipt(
     intent: &ProbeExecutionIntent,
-    result: ProbeRunResult,
+    facts: ProbeRunFacts,
+    manifest: &ProbeRawArtifactManifest,
     started_at: &Instant,
     finished_at: &Instant,
 ) -> ProbeExecutionReceipt {
-    let duration_millis = i64::try_from(result.duration.as_millis()).unwrap_or(i64::MAX);
-    let output_bytes = i64::try_from(result.output_bytes).unwrap_or(i64::MAX);
-    let (status, error, exit_code, signal) = match result.termination {
-        ProbeRunTermination::Exited if result.exit_code == Some(0) => {
+    let ProbeRunFacts {
+        termination,
+        exit_code,
+        signal,
+        duration,
+    } = facts;
+    let duration_millis = i64::try_from(duration.as_millis()).unwrap_or(i64::MAX);
+    let (status, error, exit_code, signal) = match termination {
+        ProbeRunTermination::Exited if exit_code == Some(0) => {
             (ProbeReceiptStatus::Succeeded, None, Some(0), None)
         }
         ProbeRunTermination::Exited => (
@@ -1082,8 +1618,8 @@ fn process_receipt(
                 DebugProbeErrorCode::InfrastructureError,
                 "probe exited non-zero",
             )),
-            result.exit_code.filter(|code| *code != 0),
-            result.signal,
+            exit_code.filter(|code| *code != 0),
+            signal,
         ),
         ProbeRunTermination::TimedOut => (
             ProbeReceiptStatus::TimedOut,
@@ -1092,7 +1628,7 @@ fn process_receipt(
                 "probe timed out",
             )),
             None,
-            result.signal,
+            signal,
         ),
         ProbeRunTermination::Cancelled => (
             ProbeReceiptStatus::Cancelled,
@@ -1101,7 +1637,7 @@ fn process_receipt(
                 "probe was cancelled",
             )),
             None,
-            result.signal,
+            signal,
         ),
         ProbeRunTermination::CleanupFailed => (
             ProbeReceiptStatus::Failed,
@@ -1109,8 +1645,8 @@ fn process_receipt(
                 DebugProbeErrorCode::ProcessCleanupFailed,
                 "probe process cleanup failed",
             )),
-            result.exit_code.filter(|code| *code != 0),
-            result.signal,
+            exit_code.filter(|code| *code != 0),
+            signal,
         ),
         ProbeRunTermination::OutputLimitExceeded | ProbeRunTermination::InfrastructureError => (
             ProbeReceiptStatus::Failed,
@@ -1118,26 +1654,243 @@ fn process_receipt(
                 DebugProbeErrorCode::InfrastructureError,
                 "probe execution infrastructure failed",
             )),
-            result.exit_code.filter(|code| *code != 0),
-            result.signal,
+            exit_code.filter(|code| *code != 0),
+            signal,
         ),
     };
     ProbeExecutionReceipt {
-        artifact_refs: Vec::new(),
+        artifact_refs: manifest.artifact_references(),
         duration_millis,
         error,
         exit_code,
         finished_at: finished_at.clone(),
         identity: intent.identity.clone(),
-        output_bytes,
-        output_truncated: result.output_truncated,
+        output_bytes: manifest.output_bytes(),
+        output_truncated: manifest.output_truncated(),
         plan_digest: intent.plan_digest.clone(),
         schema_version: 1,
         signal,
         started_at: started_at.clone(),
         status,
-        timed_out: result.termination == ProbeRunTermination::TimedOut,
+        timed_out: termination == ProbeRunTermination::TimedOut,
     }
+}
+
+fn apply_completion_cancellation(
+    receipt: &mut ProbeExecutionReceipt,
+    cancellation: &ProbeRunCancellation,
+) {
+    let cleanup_failed = receipt
+        .error
+        .as_ref()
+        .is_some_and(|error| error.code == DebugProbeErrorCode::ProcessCleanupFailed);
+    if cancellation.is_cancelled() && !cleanup_failed {
+        receipt.status = ProbeReceiptStatus::Cancelled;
+        receipt.error = Some(probe_error(
+            DebugProbeErrorCode::Cancelled,
+            "probe was cancelled",
+        ));
+        receipt.exit_code = None;
+        receipt.signal = None;
+        receipt.timed_out = false;
+    }
+}
+
+fn canonical_round_receipt(
+    plan: &ValidatedDebugProbePlan,
+    receipts: Vec<ProbeExecutionReceipt>,
+    recovery: &RoundRecoveryContext,
+) -> Result<ProbeRoundReceipt, ProbeSchedulerError> {
+    if receipts.len() != plan.probes().len() {
+        return Err(journal_error());
+    }
+    let finished_at = receipts
+        .iter()
+        .map(|receipt| receipt.finished_at.clone())
+        .max_by(|left, right| left.0.cmp(&right.0))
+        .ok_or_else(journal_error)?;
+    let usage = canonical_round_usage(plan, &receipts, recovery)?;
+    let outcome = canonical_round_outcome(plan, &receipts, recovery);
+    let receipt = ProbeRoundReceipt {
+        authority: plan.plan().authority.clone(),
+        completion_reason: outcome.completion_reason,
+        error: outcome.error,
+        finished_at,
+        plan_digest: plan.plan().plan_digest.clone(),
+        probe_receipts: receipts,
+        schema_version: 1,
+        started_at: recovery.started_at.clone(),
+        status: outcome.status,
+        usage,
+    };
+    validate_probe_round_receipt(&receipt, plan)
+        .map_err(|error| ProbeSchedulerError::new(error.code().clone(), error.message()))?;
+    Ok(receipt)
+}
+
+fn canonical_round_usage(
+    plan: &ValidatedDebugProbePlan,
+    receipts: &[ProbeExecutionReceipt],
+    recovery: &RoundRecoveryContext,
+) -> Result<ProbeRoundBudgetUsage, ProbeSchedulerError> {
+    let executed = receipts
+        .iter()
+        .map(|receipt| !receipt.artifact_refs.is_empty())
+        .collect::<Vec<_>>();
+    let waves = recovered_plan_waves(plan)?;
+    let mut peak_parallel_probes = 0_i64;
+    let mut peak_memory_bytes = 0_i64;
+    for wave in &waves {
+        let active = wave
+            .iter()
+            .filter(|index| executed[**index])
+            .collect::<Vec<_>>();
+        peak_parallel_probes =
+            peak_parallel_probes.max(i64::try_from(active.len()).unwrap_or(i64::MAX));
+        peak_memory_bytes = peak_memory_bytes.max(
+            active
+                .iter()
+                .map(|index| plan.probes()[**index].spec().resources.memory_limit_bytes)
+                .sum(),
+        );
+    }
+    let elapsed_millis = recovery
+        .stop
+        .map_or(recovery.observed_elapsed_millis, |stop| {
+            stop.elapsed_millis.max(recovery.observed_elapsed_millis)
+        })
+        .min(plan.plan().budget.wall_time_limit_millis);
+    let total_output_bytes = receipts.iter().map(|receipt| receipt.output_bytes).sum();
+    let total_cpu_millis = plan
+        .probes()
+        .iter()
+        .zip(&executed)
+        .filter(|(_, executed)| **executed)
+        .map(|(probe, _)| probe.spec().resources.cpu_limit_millis)
+        .sum();
+    let total_command_arg_bytes = plan
+        .probes()
+        .iter()
+        .zip(&executed)
+        .filter(|(_, executed)| **executed)
+        .map(|(probe, _)| probe.spec().command.command_arg_bytes)
+        .sum();
+    Ok(ProbeRoundBudgetUsage {
+        budget_digest: plan.plan().budget.budget_digest.clone(),
+        elapsed_millis,
+        peak_memory_bytes,
+        peak_parallel_probes,
+        probe_count: i64::try_from(plan.probes().len()).unwrap_or(i64::MAX),
+        total_command_arg_bytes,
+        total_cpu_millis,
+        total_output_bytes,
+    })
+}
+
+struct CanonicalRoundOutcome {
+    status: ProbeRoundReceiptStatus,
+    completion_reason: ProbeRoundCompletionReason,
+    error: Option<DebugProbeError>,
+}
+
+fn canonical_round_outcome(
+    plan: &ValidatedDebugProbePlan,
+    receipts: &[ProbeExecutionReceipt],
+    recovery: &RoundRecoveryContext,
+) -> CanonicalRoundOutcome {
+    let required_failed = plan.probes().iter().zip(receipts).any(|(probe, receipt)| {
+        probe.spec().required
+            && !matches!(
+                receipt.status,
+                ProbeReceiptStatus::Succeeded | ProbeReceiptStatus::CacheHit
+            )
+    });
+    let budget_exhausted = recovery
+        .stop
+        .is_some_and(|stop| stop.reason == RoundStopReason::BudgetExhausted);
+    let cancelled = recovery
+        .stop
+        .is_some_and(|stop| stop.reason == RoundStopReason::Cancelled)
+        || receipts
+            .iter()
+            .any(|receipt| receipt.status == ProbeReceiptStatus::Cancelled);
+    let completion_satisfied = completion_threshold_satisfied(plan, receipts);
+    let status = if budget_exhausted {
+        ProbeRoundReceiptStatus::Failed
+    } else if cancelled {
+        ProbeRoundReceiptStatus::Cancelled
+    } else if required_failed || !completion_satisfied {
+        ProbeRoundReceiptStatus::Failed
+    } else {
+        ProbeRoundReceiptStatus::Completed
+    };
+    let completion_reason = if budget_exhausted {
+        ProbeRoundCompletionReason::BudgetExhausted
+    } else if cancelled {
+        ProbeRoundCompletionReason::Cancelled
+    } else if status == ProbeRoundReceiptStatus::Completed && completion_reached(plan, receipts) {
+        ProbeRoundCompletionReason::CompletionRuleSatisfied
+    } else {
+        ProbeRoundCompletionReason::AllProbesTerminal
+    };
+    let error = if budget_exhausted {
+        Some(probe_error(
+            DebugProbeErrorCode::BudgetExceeded,
+            "probe round wall-time budget exhausted",
+        ))
+    } else if cancelled {
+        Some(probe_error(
+            DebugProbeErrorCode::Cancelled,
+            "probe round cancelled",
+        ))
+    } else if required_failed {
+        Some(probe_error(
+            DebugProbeErrorCode::InfrastructureError,
+            "required probe did not succeed",
+        ))
+    } else if !completion_satisfied {
+        Some(probe_error(
+            DebugProbeErrorCode::InfrastructureError,
+            "probe completion threshold was not satisfied",
+        ))
+    } else {
+        None
+    };
+    CanonicalRoundOutcome {
+        status,
+        completion_reason,
+        error,
+    }
+}
+
+fn recovered_plan_waves(
+    plan: &ValidatedDebugProbePlan,
+) -> Result<Vec<Vec<usize>>, ProbeSchedulerError> {
+    let parallel_limit = usize::try_from(plan.plan().budget.parallel_probe_limit)
+        .map_err(|_| budget_error("parallel probe limit is invalid"))?;
+    let memory_limit = plan.plan().budget.peak_memory_limit_bytes;
+    let mut waves: Vec<Vec<usize>> = Vec::new();
+    for (index, probe) in plan.probes().iter().enumerate() {
+        let resources = &probe.spec().resources;
+        let selected = waves.iter().position(|wave| {
+            wave.len() < parallel_limit
+                && wave
+                    .iter()
+                    .map(|other| plan.probes()[*other].spec().resources.memory_limit_bytes)
+                    .sum::<i64>()
+                    .saturating_add(resources.memory_limit_bytes)
+                    <= memory_limit
+                && wave.iter().all(|other| {
+                    !claims_conflict(&plan.probes()[*other].spec().resources, resources)
+                })
+        });
+        if let Some(wave) = selected {
+            waves[wave].push(index);
+        } else {
+            waves.push(vec![index]);
+        }
+    }
+    Ok(waves)
 }
 
 fn skipped_receipt(
@@ -1242,7 +1995,54 @@ fn canonical_workspace(path: &Path) -> Result<PathBuf, ProbeSchedulerError> {
     if !path.is_dir() {
         return Err(invalid_probe("probe workspace is not a directory"));
     }
+    workspace_path(&path)?;
     Ok(path)
+}
+
+fn replay_workspace(path: &Path) -> Result<PathBuf, ProbeSchedulerError> {
+    match fs::canonicalize(path) {
+        Ok(canonical) if canonical.is_dir() => {
+            workspace_path(&canonical)?;
+            Ok(canonical)
+        }
+        Ok(_) => Err(invalid_probe("probe workspace is not a directory")),
+        Err(_) => absolute_workspace_request(path),
+    }
+}
+
+fn absolute_workspace_request(path: &Path) -> Result<PathBuf, ProbeSchedulerError> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|_| invalid_probe("probe workspace cannot be opened"))?
+            .join(path)
+    };
+    let mut normalized = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(Path::new("/")),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    return Err(invalid_probe("probe workspace path is not canonical"));
+                }
+            }
+            Component::Normal(part) => normalized.push(part),
+        }
+    }
+    workspace_path(&normalized)?;
+    Ok(normalized)
+}
+
+fn workspace_path(path: &Path) -> Result<&str, ProbeSchedulerError> {
+    path.to_str()
+        .ok_or_else(|| invalid_probe("probe workspace path is not canonical UTF-8"))
+}
+
+fn monotonic_elapsed_millis(started_at: MonotonicInstant) -> i64 {
+    i64::try_from(started_at.elapsed().as_millis()).unwrap_or(i64::MAX)
 }
 
 fn resolve_existing_path(
@@ -1308,6 +2108,43 @@ enum RoundReplay {
     Unresolved,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RoundStopReason {
+    Cancelled,
+    BudgetExhausted,
+}
+
+impl RoundStopReason {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Cancelled => "cancelled",
+            Self::BudgetExhausted => "budget_exhausted",
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self, ProbeSchedulerError> {
+        match value {
+            "cancelled" => Ok(Self::Cancelled),
+            "budget_exhausted" => Ok(Self::BudgetExhausted),
+            _ => Err(journal_error()),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RetainedRoundStop {
+    reason: RoundStopReason,
+    elapsed_millis: i64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RoundRecoveryContext {
+    workspace_root: PathBuf,
+    started_at: Instant,
+    observed_elapsed_millis: i64,
+    stop: Option<RetainedRoundStop>,
+}
+
 struct ProbeJournal {
     connection: Connection,
 }
@@ -1336,10 +2173,12 @@ impl ProbeJournal {
         &mut self,
         plan: &ValidatedDebugProbePlan,
         admitted: &[AdmittedProbe],
+        workspace_root: &Path,
+        workspace_request_root: &Path,
         now: &Instant,
     ) -> Result<RoundClaim, ProbeSchedulerError> {
         let round_id = &plan.plan().authority.round_id.0;
-        match self.replay_round(plan)? {
+        match self.replay_round(plan, workspace_root, workspace_request_root, false)? {
             RoundReplay::Terminal(receipt) => return Ok(RoundClaim::Terminal(receipt)),
             RoundReplay::Unresolved => return Ok(RoundClaim::Unresolved),
             RoundReplay::Missing => {}
@@ -1350,17 +2189,26 @@ impl ProbeJournal {
         transaction
             .execute(
                 "INSERT INTO probe_round
-                   (round_id, plan_json, receipt_json, created_at, updated_at)
-                 VALUES (?1, ?2, NULL, ?3, ?3)",
-                params![round_id, plan_bytes, now.0],
+                   (round_id, plan_json, receipt_json, workspace_root, workspace_request_root,
+                    observed_elapsed_millis,
+                    stop_reason, stop_elapsed_millis, created_at, updated_at)
+                 VALUES (?1, ?2, NULL, ?3, ?4, 0, NULL, NULL, ?5, ?5)",
+                params![
+                    round_id,
+                    plan_bytes,
+                    workspace_path(workspace_root)?,
+                    workspace_path(workspace_request_root)?,
+                    now.0
+                ],
             )
             .map_err(|_| journal_error())?;
         for probe in admitted {
+            let intent = probe.intent.intent();
             let ordinal = plan
-                .probe_by_id(&probe.intent.identity.probe_id)
+                .probe_by_id(&intent.identity.probe_id)
                 .map(|probe| i64::try_from(probe.ordinal()).unwrap_or(i64::MAX))
                 .ok_or_else(journal_error)?;
-            let bytes = serde_json::to_vec(&probe.intent).map_err(|_| journal_error())?;
+            let bytes = serde_json::to_vec(intent).map_err(|_| journal_error())?;
             transaction
                 .execute(
                     "INSERT INTO probe_execution
@@ -1368,7 +2216,7 @@ impl ProbeJournal {
                         created_at, updated_at)
                      VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?5)",
                     params![
-                        probe.intent.identity.probe_execution_id.0,
+                        intent.identity.probe_execution_id.0,
                         round_id,
                         ordinal,
                         bytes,
@@ -1384,23 +2232,46 @@ impl ProbeJournal {
     fn replay_round(
         &self,
         plan: &ValidatedDebugProbePlan,
+        workspace_root: &Path,
+        workspace_request_root: &Path,
+        workspace_missing: bool,
     ) -> Result<RoundReplay, ProbeSchedulerError> {
         let round_id = &plan.plan().authority.round_id.0;
         let plan_bytes = serde_json::to_vec(plan.plan()).map_err(|_| journal_error())?;
         let existing = self
             .connection
             .query_row(
-                "SELECT plan_json, receipt_json FROM probe_round WHERE round_id = ?1",
+                "SELECT plan_json, receipt_json, workspace_root, workspace_request_root
+                 FROM probe_round WHERE round_id = ?1",
                 [round_id],
-                |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Option<Vec<u8>>>(1)?)),
+                |row| {
+                    Ok((
+                        row.get::<_, Vec<u8>>(0)?,
+                        row.get::<_, Option<Vec<u8>>>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
             )
             .optional()
             .map_err(|_| journal_error())?;
-        let Some((stored_plan, stored_receipt)) = existing else {
+        let Some((stored_plan, stored_receipt, stored_workspace_root, stored_request_root)) =
+            existing
+        else {
             return Ok(RoundReplay::Missing);
         };
         if stored_plan != plan_bytes {
             return Err(stale_authority("probe round replay changed its plan bytes"));
+        }
+        let workspace_matches = if workspace_missing {
+            stored_request_root == workspace_path(workspace_request_root)?
+        } else {
+            stored_workspace_root == workspace_path(workspace_root)?
+        };
+        if !workspace_matches {
+            return Err(stale_authority(
+                "probe round replay changed its canonical workspace root",
+            ));
         }
         let Some(bytes) = stored_receipt else {
             return Ok(RoundReplay::Unresolved);
@@ -1410,6 +2281,178 @@ impl ProbeJournal {
         validate_probe_round_receipt(&receipt, plan).map_err(|_| journal_error())?;
         self.validate_terminal_execution_rows(round_id, &receipt)?;
         Ok(RoundReplay::Terminal(Box::new(receipt)))
+    }
+
+    fn load_intents(
+        &self,
+        plan: &ValidatedDebugProbePlan,
+    ) -> Result<Vec<ProbeExecutionIntent>, ProbeSchedulerError> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT intent_json FROM probe_execution
+                 WHERE round_id = ?1 ORDER BY ordinal ASC",
+            )
+            .map_err(|_| journal_error())?;
+        let rows = statement
+            .query_map([&plan.plan().authority.round_id.0], |row| {
+                row.get::<_, Vec<u8>>(0)
+            })
+            .map_err(|_| journal_error())?;
+        let mut intents = Vec::new();
+        for row in rows {
+            let bytes = row.map_err(|_| journal_error())?;
+            let intent = serde_json::from_slice::<ProbeExecutionIntent>(&bytes)
+                .map_err(|_| journal_error())?;
+            if serde_json::to_vec(&intent).map_err(|_| journal_error())? != bytes {
+                return Err(journal_error());
+            }
+            seal_probe_execution_intent(intent.clone(), plan).map_err(|_| journal_error())?;
+            intents.push(intent);
+        }
+        if intents.len() != plan.probes().len() {
+            return Err(journal_error());
+        }
+        Ok(intents)
+    }
+
+    fn recovery_context(
+        &self,
+        plan: &ValidatedDebugProbePlan,
+    ) -> Result<RoundRecoveryContext, ProbeSchedulerError> {
+        let value = self
+            .connection
+            .query_row(
+                "SELECT workspace_root, created_at, observed_elapsed_millis,
+                        stop_reason, stop_elapsed_millis
+                 FROM probe_round WHERE round_id = ?1",
+                [&plan.plan().authority.round_id.0],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Option<i64>>(4)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|_| journal_error())?
+            .ok_or_else(journal_error)?;
+        let (workspace_root, started_at, observed_elapsed, stop_reason, stop_elapsed) = value;
+        if observed_elapsed < 0 || stop_reason.is_some() != stop_elapsed.is_some() {
+            return Err(journal_error());
+        }
+        let stop = stop_reason
+            .zip(stop_elapsed)
+            .map(|(reason, elapsed_millis)| {
+                if elapsed_millis < 0 {
+                    return Err(journal_error());
+                }
+                Ok(RetainedRoundStop {
+                    reason: RoundStopReason::parse(&reason)?,
+                    elapsed_millis,
+                })
+            })
+            .transpose()?;
+        Ok(RoundRecoveryContext {
+            workspace_root: PathBuf::from(workspace_root),
+            started_at: Instant(started_at),
+            observed_elapsed_millis: observed_elapsed,
+            stop,
+        })
+    }
+
+    fn observe_round_elapsed(
+        &mut self,
+        round_id: &str,
+        elapsed_millis: i64,
+        now: &Instant,
+    ) -> Result<(), ProbeSchedulerError> {
+        if elapsed_millis < 0 {
+            return Err(journal_error());
+        }
+        let changed = self
+            .connection
+            .execute(
+                "UPDATE probe_round
+                 SET updated_at = CASE
+                         WHEN observed_elapsed_millis < ?2 THEN ?3 ELSE updated_at END,
+                     observed_elapsed_millis = MAX(observed_elapsed_millis, ?2)
+                 WHERE round_id = ?1 AND receipt_json IS NULL",
+                params![round_id, elapsed_millis, now.0],
+            )
+            .map_err(|_| journal_error())?;
+        if changed == 1 {
+            Ok(())
+        } else {
+            Err(journal_error())
+        }
+    }
+
+    fn retain_round_stop(
+        &mut self,
+        round_id: &str,
+        reason: RoundStopReason,
+        elapsed_millis: i64,
+        now: &Instant,
+    ) -> Result<RetainedRoundStop, ProbeSchedulerError> {
+        if elapsed_millis < 0 {
+            return Err(journal_error());
+        }
+        self.connection
+            .execute(
+                "UPDATE probe_round
+                 SET stop_reason = ?2, stop_elapsed_millis = ?3, updated_at = ?4
+                 WHERE round_id = ?1 AND receipt_json IS NULL AND stop_reason IS NULL",
+                params![round_id, reason.as_str(), elapsed_millis, now.0],
+            )
+            .map_err(|_| journal_error())?;
+        let stored = self
+            .connection
+            .query_row(
+                "SELECT stop_reason, stop_elapsed_millis
+                 FROM probe_round WHERE round_id = ?1 AND receipt_json IS NULL",
+                [round_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .optional()
+            .map_err(|_| journal_error())?
+            .ok_or_else(journal_error)?;
+        Ok(RetainedRoundStop {
+            reason: RoundStopReason::parse(&stored.0)?,
+            elapsed_millis: stored.1,
+        })
+    }
+
+    fn load_probe_receipt(
+        &self,
+        intent: &ProbeExecutionIntent,
+    ) -> Result<Option<ProbeExecutionReceipt>, ProbeSchedulerError> {
+        let bytes = self
+            .connection
+            .query_row(
+                "SELECT receipt_json FROM probe_execution WHERE probe_execution_id = ?1",
+                [&intent.identity.probe_execution_id.0],
+                |row| row.get::<_, Option<Vec<u8>>>(0),
+            )
+            .optional()
+            .map_err(|_| journal_error())?
+            .ok_or_else(journal_error)?;
+        bytes
+            .map(|bytes| {
+                let receipt = serde_json::from_slice::<ProbeExecutionReceipt>(&bytes)
+                    .map_err(|_| journal_error())?;
+                if serde_json::to_vec(&receipt).map_err(|_| journal_error())? != bytes
+                    || receipt.identity != intent.identity
+                    || receipt.plan_digest != intent.plan_digest
+                {
+                    return Err(journal_error());
+                }
+                Ok(receipt)
+            })
+            .transpose()
     }
 
     fn validate_terminal_execution_rows(
@@ -1643,4 +2686,23 @@ fn journal_error() -> ProbeSchedulerError {
         DebugProbeErrorCode::InfrastructureError,
         "probe scheduler journal is unavailable",
     )
+}
+
+fn evidence_missing() -> ProbeSchedulerError {
+    ProbeSchedulerError::new(
+        DebugProbeErrorCode::InfrastructureError,
+        "probe evidence is unavailable",
+    )
+}
+
+fn evidence_store_error(error: &ProbeEvidenceStoreError) -> ProbeSchedulerError {
+    let code = match error.kind() {
+        ProbeEvidenceStoreErrorKind::InvalidInput => DebugProbeErrorCode::InvalidProbe,
+        ProbeEvidenceStoreErrorKind::Conflict => DebugProbeErrorCode::StaleAuthority,
+        ProbeEvidenceStoreErrorKind::DigestMismatch => DebugProbeErrorCode::ArtifactDigestMismatch,
+        ProbeEvidenceStoreErrorKind::NotFound
+        | ProbeEvidenceStoreErrorKind::Corrupt
+        | ProbeEvidenceStoreErrorKind::Unavailable => DebugProbeErrorCode::InfrastructureError,
+    };
+    ProbeSchedulerError::new(code, "probe evidence durable state is unavailable")
 }

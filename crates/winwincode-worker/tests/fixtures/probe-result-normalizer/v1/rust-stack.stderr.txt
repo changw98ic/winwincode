@@ -1,0 +1,12 @@
+thread 'main' panicked at /workspace/crates/probe-fixture/src/main.rs:17:9:
+fixture invariant failed
+stack backtrace:
+   0: rust_begin_unwind
+             at /rustc/FIXTURE/library/std/src/panicking.rs:692:5
+   1: core::panicking::panic_fmt
+             at /rustc/FIXTURE/library/core/src/panicking.rs:75:14
+   2: probe_fixture::validate
+             at /workspace/crates/probe-fixture/src/main.rs:17:9
+   3: probe_fixture::main
+             at /workspace/crates/probe-fixture/src/main.rs:8:5
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.

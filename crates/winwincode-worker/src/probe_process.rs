@@ -19,6 +19,11 @@ use tokio::io::{AsyncRead, AsyncReadExt as _};
 use tokio::process::Child;
 use tokio::task::JoinHandle;
 
+use crate::probe_scheduler::{
+    ProbeExecutionCompletion, ProbeRunFacts, ProbeRunResult, ProbeRunTermination,
+    ProbeSchedulerError,
+};
+
 const MAX_ARGUMENTS: usize = 64;
 const MAX_ARGUMENT_BYTES: usize = 262_144;
 const MAX_TIMEOUT: Duration = Duration::from_mins(10);
@@ -659,7 +664,8 @@ pub(crate) enum ProbeProcessTermination {
     CleanupFailed,
 }
 
-/// Bounded process result. It owns bytes only until the scheduler writes Artifacts.
+/// Bounded process result. It owns bytes only until [`Self::retain`] writes
+/// their exact Artifacts before crossing the public runner seam.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ProbeProcessReceipt {
     termination: ProbeProcessTermination,
@@ -710,11 +716,13 @@ impl ProbeProcessReceipt {
         self.duration
     }
 
+    #[cfg(test)]
     #[must_use]
     pub(crate) fn stdout(&self) -> &[u8] {
         &self.stdout
     }
 
+    #[cfg(test)]
     #[must_use]
     pub(crate) fn stderr(&self) -> &[u8] {
         &self.stderr
@@ -728,6 +736,37 @@ impl ProbeProcessReceipt {
     #[must_use]
     pub(crate) const fn cleanup_confirmed(&self) -> bool {
         self.cleanup_confirmed
+    }
+
+    /// Consumes private output bytes by atomically retaining their Artifacts
+    /// and exact terminal receipt.
+    pub(crate) fn retain(
+        self,
+        completion: &ProbeExecutionCompletion,
+    ) -> Result<ProbeRunResult, ProbeSchedulerError> {
+        let termination = match self.termination {
+            ProbeProcessTermination::Exited => ProbeRunTermination::Exited,
+            ProbeProcessTermination::TimedOut => ProbeRunTermination::TimedOut,
+            ProbeProcessTermination::Cancelled => ProbeRunTermination::Cancelled,
+            ProbeProcessTermination::OutputLimitExceeded => {
+                ProbeRunTermination::OutputLimitExceeded
+            }
+            ProbeProcessTermination::InfrastructureError => {
+                ProbeRunTermination::InfrastructureError
+            }
+            ProbeProcessTermination::CleanupFailed => ProbeRunTermination::CleanupFailed,
+        };
+        completion.retain(
+            ProbeRunFacts::new(
+                termination,
+                self.exit_code.map(i64::from),
+                self.signal.map(|signal| signal.to_string()),
+                self.duration,
+            ),
+            &self.stdout,
+            &self.stderr,
+            self.output_truncated,
+        )
     }
 }
 

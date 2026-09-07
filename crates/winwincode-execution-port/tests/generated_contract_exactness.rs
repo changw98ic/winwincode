@@ -8,9 +8,10 @@ use winwincode_execution_port::generated::{
     ChangeBatchProposal, ChangeBatchProposalEvent, ChangeBatchReceipt, DebugExperiment,
     DebugHypothesisLedger, DebugProbePlan, ExecutionPortMessage, InputResponseMessageStatus,
     JobCancelAckMessageStatus, JobCancelMessageReason, JobDispatchResultMessageStatus,
-    JobOutcomeAckMessageStatus, ProbeExecutionEvent, ProbeExecutionIntent, ProbeExecutionReceipt,
-    ProbeRoundEvent, ProbeRoundReceipt, RepairEnvelope, RoleSessionPolicy, ValidationReceipt,
-    WorkerCapabilitySetPlatform, WorkerHeartbeatAckMessageStatus,
+    JobOutcomeAckMessageStatus, ProbeBaselineSelection, ProbeDiagnosticOccurrence,
+    ProbeExecutionEvent, ProbeExecutionIntent, ProbeExecutionReceipt, ProbeNormalizerProfile,
+    ProbeRoundEvent, ProbeRoundReceipt, ProbeStackFrame, RepairEnvelope, RoleSessionPolicy,
+    ValidationReceipt, WorkerCapabilitySetPlatform, WorkerHeartbeatAckMessageStatus,
     WorkerRegistrationResultMessageLeaseRecovery, WorkerRegistrationResultMessageStatus,
 };
 
@@ -23,6 +24,56 @@ fn valid_messages() -> Vec<Value> {
         .as_array()
         .expect("ExecutionPort messages")
         .clone()
+}
+
+#[test]
+fn generated_probe_evidence_leaf_contracts_are_closed_required_and_bounded() {
+    let selection = serde_json::json!({
+        "state": "not_applicable",
+        "priorBundleArtifactRef": null,
+        "priorBundleDigest": null,
+        "priorEnvironmentDigest": null,
+        "priorProbeDefinitionDigest": null,
+        "priorProfileDigest": null
+    });
+    assert!(from_value::<ProbeBaselineSelection>(selection.clone()).is_ok());
+    let mut unknown_selection = selection.clone();
+    unknown_selection["registryLookup"] = Value::String("latest".to_owned());
+    assert!(from_value::<ProbeBaselineSelection>(unknown_selection).is_err());
+    let mut missing_nullable = selection;
+    missing_nullable
+        .as_object_mut()
+        .expect("selection object")
+        .remove("priorBundleDigest");
+    assert!(from_value::<ProbeBaselineSelection>(missing_nullable).is_err());
+
+    let profile = serde_json::json!({
+        "normalizerVersion": "l0_l1_v1",
+        "diagnosticParserVersion": null,
+        "stackParserVersion": null,
+        "profileDigest": format!("sha256:{}", "0".repeat(64))
+    });
+    assert!(from_value::<ProbeNormalizerProfile>(profile.clone()).is_ok());
+    let mut inferred = profile;
+    inferred["inferFromOutput"] = Value::Bool(true);
+    assert!(from_value::<ProbeNormalizerProfile>(inferred).is_err());
+
+    let frame = serde_json::json!({
+        "function": "fixture::run",
+        "path": "src/main.rs",
+        "line": 12,
+        "column": 7
+    });
+    assert!(from_value::<ProbeStackFrame>(frame.clone()).is_ok());
+    let mut unknown_frame = frame;
+    unknown_frame["raw"] = Value::String("not retained".to_owned());
+    assert!(from_value::<ProbeStackFrame>(unknown_frame).is_err());
+
+    let occurrence = serde_json::json!({
+        "diagnostic": {},
+        "occurrenceCount": 0
+    });
+    assert!(from_value::<ProbeDiagnosticOccurrence>(occurrence).is_err());
 }
 
 #[test]

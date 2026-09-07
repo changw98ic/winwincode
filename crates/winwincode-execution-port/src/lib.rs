@@ -17,6 +17,7 @@ pub mod diagnostic_parser;
 pub mod generated;
 pub mod observation_contract;
 pub mod performance_comparison;
+pub mod probe_result_normalizer;
 pub mod repair_loop_context;
 pub mod replay;
 pub mod runtime_replay;

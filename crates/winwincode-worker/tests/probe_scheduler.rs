@@ -23,14 +23,16 @@ use winwincode_execution_port::{
     generated::{
         DebugProbeErrorCode, DebugProbeKind, DebugProbePlan, DebugProbeRoundAuthority,
         ProbeCommandSpec, ProbeCompletionRule, ProbeCompletionRuleKind, ProbeNetworkAccess,
-        ProbeReceiptStatus, ProbeResourceClaim, ProbeRoundBudget, ProbeRoundCompletionReason,
-        ProbeRoundReceiptStatus, ProbeSideEffectClass, ProbeSpec, ProbeWorkspaceAccess,
+        ProbeNormalizerProfile, ProbeNormalizerVersion, ProbeReceiptStatus, ProbeResourceClaim,
+        ProbeRoundBudget, ProbeRoundCompletionReason, ProbeRoundReceiptStatus,
+        ProbeSideEffectClass, ProbeSpec, ProbeWorkspaceAccess,
     },
+    probe_result_normalizer::derive_probe_normalizer_profile_digest,
 };
 use winwincode_worker::probe_scheduler::{
-    AdmittedProbe, ProbeClock, ProbeRoundRequest, ProbeRunCancellation, ProbeRunResult,
-    ProbeRunTermination, ProbeRunner, ProbeRunnerFuture, ProbeScheduler, ProbeSchedulerError,
-    TrustedPureReadTemplate,
+    AdmittedProbe, ProbeClock, ProbeExecutionCompletion, ProbeRoundRequest, ProbeRunCancellation,
+    ProbeRunFacts, ProbeRunTermination, ProbeRunner, ProbeRunnerFuture, ProbeScheduler,
+    ProbeSchedulerError, TrustedPureReadTemplate,
 };
 
 #[derive(Clone, Debug)]
@@ -142,6 +144,7 @@ impl ProbeRunner for RecordingRunner {
         &self,
         probe: AdmittedProbe,
         cancellation: ProbeRunCancellation,
+        completion: ProbeExecutionCompletion,
     ) -> ProbeRunnerFuture<'_> {
         let state = Arc::clone(&self.state);
         Box::pin(async move {
@@ -191,7 +194,12 @@ impl ProbeRunner for RecordingRunner {
                 ProbeRunTermination::Exited | ProbeRunTermination::CleanupFailed => Some(0),
                 _ => None,
             };
-            ProbeRunResult::new(termination, exit_code, None, state.delay, 3, false)
+            completion.retain(
+                ProbeRunFacts::new(termination, exit_code, None, state.delay),
+                b"ok\n",
+                b"",
+                false,
+            )
         })
     }
 }
@@ -343,10 +351,24 @@ fn templates(plan: &DebugProbePlan) -> Vec<TrustedPureReadTemplate> {
                 probe.resources.clone(),
                 probe.timeout_millis,
                 probe.output_limit_bytes,
+                normalizer_profile(),
+                None,
             )
             .expect("trusted fixture template")
         })
         .collect()
+}
+
+fn normalizer_profile() -> ProbeNormalizerProfile {
+    let mut profile = ProbeNormalizerProfile {
+        diagnostic_parser_version: None,
+        normalizer_version: ProbeNormalizerVersion::L0L1V1,
+        profile_digest: digest('0'),
+        stack_parser_version: None,
+    };
+    profile.profile_digest =
+        derive_probe_normalizer_profile_digest(&profile).expect("profile digest");
+    profile
 }
 
 fn request(plan: &DebugProbePlan, workspace: &TempDir) -> ProbeRoundRequest {
@@ -885,6 +907,8 @@ async fn completion_and_receipt_boundaries_are_table_driven() {
             resource,
             specification.timeout_millis,
             specification.output_limit_bytes,
+            normalizer_profile(),
+            None,
         )
         .expect_err(name);
         assert_eq!(error.code(), &DebugProbeErrorCode::InvalidProbe, "{name}");

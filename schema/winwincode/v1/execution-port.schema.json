@@ -4983,7 +4983,7 @@
         "snippets": {
           "type": "array",
           "minItems": 0,
-          "maxItems": 8,
+          "maxItems": 10,
           "uniqueItems": true,
           "items": {
             "$ref": "#/$defs/ObservationSnippet"
@@ -7455,7 +7455,7 @@
             "artifactRefs": {
               "type": "array",
               "minItems": 0,
-              "maxItems": 8,
+              "maxItems": 10,
               "uniqueItems": true,
               "items": {
                 "$ref": "#/$defs/ArtifactReference"
@@ -7723,6 +7723,984 @@
               "minLength": 1,
               "maxLength": 500,
               "pattern": "^[^\\u0000\\r\\n]+$"
+            }
+          }
+        }
+      ]
+    },
+    "ProbeRawStream": {
+      "type": "string",
+      "enum": [
+        "stdout",
+        "stderr"
+      ],
+      "description": "Closed process stream retained as a raw content-addressed Artifact."
+    },
+    "ProbeRawStreamEncoding": {
+      "type": "string",
+      "enum": [
+        "utf8",
+        "invalid_utf8"
+      ],
+      "description": "Exact UTF-8 decoding state of one retained raw stream. Invalid bytes remain only in the raw Artifact."
+    },
+    "ProbeRawStreamBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "stream": {
+          "$ref": "#/$defs/ProbeRawStream"
+        },
+        "artifactRef": {
+          "$ref": "#/$defs/ArtifactReference"
+        },
+        "retainedBytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 16777216
+        },
+        "encoding": {
+          "$ref": "#/$defs/ProbeRawStreamEncoding"
+        }
+      },
+      "required": [
+        "stream",
+        "artifactRef",
+        "retainedBytes",
+        "encoding"
+      ],
+      "description": "One bounded raw stream binding. It contains metadata and an Artifact reference, never raw output bytes.",
+      "oneOf": [
+        {
+          "properties": {
+            "stream": {
+              "$ref": "#/$defs/ProbeRawStream"
+            },
+            "artifactRef": {
+              "$ref": "#/$defs/ArtifactReference"
+            },
+            "retainedBytes": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 16777216
+            },
+            "encoding": {
+              "$ref": "#/$defs/ProbeRawStreamEncoding"
+            }
+          }
+        }
+      ]
+    },
+    "ProbeNormalizerVersion": {
+      "type": "string",
+      "enum": [
+        "l0_l1_v1"
+      ],
+      "description": "Closed deterministic Probe Result Normalizer implementation version."
+    },
+    "ProbeStackParserVersion": {
+      "type": "string",
+      "enum": [
+        "rust_v1",
+        "node_v1",
+        "python_v1"
+      ],
+      "description": "Closed host-selected stack parser version. Selection is part of the normalizer profile and is never inferred from output."
+    },
+    "ProbeNormalizerProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "normalizerVersion": {
+          "$ref": "#/$defs/ProbeNormalizerVersion"
+        },
+        "diagnosticParserVersion": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/DiagnosticParserVersion"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "stackParserVersion": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ProbeStackParserVersion"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "profileDigest": {
+          "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+        }
+      },
+      "required": [
+        "normalizerVersion",
+        "diagnosticParserVersion",
+        "stackParserVersion",
+        "profileDigest"
+      ],
+      "description": "Host-selected exact normalizer profile bound into every evidence bundle. A model probe cannot select or infer this profile.",
+      "oneOf": [
+        {
+          "properties": {
+            "normalizerVersion": {
+              "$ref": "#/$defs/ProbeNormalizerVersion"
+            },
+            "profileDigest": {
+              "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+            }
+          }
+        }
+      ]
+    },
+    "ProbeBaselineState": {
+      "type": "string",
+      "enum": [
+        "not_applicable",
+        "available",
+        "unavailable",
+        "incompatible",
+        "result_incomplete"
+      ],
+      "description": "Explicit baseline state. Missing, incompatible, or unparseable current evidence is never represented as an empty clean comparison."
+    },
+    "ProbeBaselineEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "state": {
+          "$ref": "#/$defs/ProbeBaselineState"
+        },
+        "comparison": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/DiagnosticBaselineComparison"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "baselineEnvironmentDigest": {
+          "oneOf": [
+            {
+              "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "baselineProbeDefinitionDigest": {
+          "oneOf": [
+            {
+              "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "baselineProfileDigest": {
+          "oneOf": [
+            {
+              "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "baselineBundleArtifactRef": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ArtifactReference"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "baselineBundleDigest": {
+          "oneOf": [
+            {
+              "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "state",
+        "comparison",
+        "baselineEnvironmentDigest",
+        "baselineProbeDefinitionDigest",
+        "baselineProfileDigest",
+        "baselineBundleArtifactRef",
+        "baselineBundleDigest"
+      ],
+      "description": "Exact optional diagnostic baseline comparison with explicit absence state and authority dimensions required for comparability.",
+      "oneOf": [
+        {
+          "properties": {
+            "state": {
+              "$ref": "#/$defs/ProbeBaselineState"
+            }
+          }
+        }
+      ]
+    },
+    "ProbeBaselineSelectionState": {
+      "type": "string",
+      "enum": [
+        "not_applicable",
+        "unavailable",
+        "prior_bundle"
+      ],
+      "description": "Host-owned baseline selection persisted before execution. A prior bundle is never replaced by a later registry lookup during recovery."
+    },
+    "ProbeBaselineSelection": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "state": {
+          "$ref": "#/$defs/ProbeBaselineSelectionState"
+        },
+        "priorBundleArtifactRef": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ArtifactReference"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "priorBundleDigest": {
+          "oneOf": [
+            {
+              "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "priorEnvironmentDigest": {
+          "oneOf": [
+            {
+              "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "priorProbeDefinitionDigest": {
+          "oneOf": [
+            {
+              "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "priorProfileDigest": {
+          "oneOf": [
+            {
+              "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "state",
+        "priorBundleArtifactRef",
+        "priorBundleDigest",
+        "priorEnvironmentDigest",
+        "priorProbeDefinitionDigest",
+        "priorProfileDigest"
+      ],
+      "description": "Exact durable baseline choice. Prior authority fields are all present only for prior_bundle and are revalidated against canonical stored bytes.",
+      "oneOf": [
+        {
+          "properties": {
+            "state": {
+              "$ref": "#/$defs/ProbeBaselineSelectionState"
+            }
+          }
+        }
+      ]
+    },
+    "ProbeEvidenceCompletenessStatus": {
+      "type": "string",
+      "enum": [
+        "complete",
+        "incomplete"
+      ],
+      "description": "Whether deterministic L0/L1 evidence is complete for the host-selected profile."
+    },
+    "ProbeEvidenceIncompleteReason": {
+      "type": "string",
+      "enum": [
+        "output_truncated",
+        "invalid_utf8",
+        "diagnostic_input_too_large",
+        "invalid_payload",
+        "too_many_diagnostics",
+        "invalid_path",
+        "too_many_stack_frames",
+        "too_many_stack_clusters",
+        "baseline_unavailable",
+        "baseline_incompatible"
+      ],
+      "description": "Closed reasons that make a probe evidence bundle incomplete rather than clean."
+    },
+    "ProbeEvidenceCompleteness": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "$ref": "#/$defs/ProbeEvidenceCompletenessStatus"
+        },
+        "reasons": {
+          "type": "array",
+          "minItems": 0,
+          "maxItems": 8,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/ProbeEvidenceIncompleteReason"
+          }
+        }
+      },
+      "required": [
+        "status",
+        "reasons"
+      ],
+      "description": "Explicit completeness result. Complete has no reasons; incomplete has at least one canonical reason.",
+      "oneOf": [
+        {
+          "properties": {
+            "status": {
+              "$ref": "#/$defs/ProbeEvidenceCompletenessStatus"
+            },
+            "reasons": {
+              "type": "array",
+              "minItems": 0,
+              "maxItems": 8,
+              "uniqueItems": true,
+              "items": {
+                "$ref": "#/$defs/ProbeEvidenceIncompleteReason"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "ProbeStackFrame": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "function": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 500,
+              "pattern": "^[^\\u0000\\r\\n]+$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "path": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096,
+              "pattern": "^(?:\\.|(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*//)(?!.*\\\\)[^\\u0000\\r\\n]+)$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "line": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 2147483647
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "column": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 2147483647
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "function",
+        "path",
+        "line",
+        "column"
+      ],
+      "description": "One bounded canonical stack frame. At least one field is present and raw stack text remains in an Artifact. The pure evidence validator enforces the cross-field non-empty rule."
+    },
+    "ProbeStackCluster": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "stackDigest": {
+          "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+        },
+        "frames": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/ProbeStackFrame"
+          }
+        },
+        "occurrenceCount": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000000
+        },
+        "sourceStreams": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 2,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/ProbeRawStream"
+          }
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500,
+          "pattern": "^[^\\u0000\\r\\n]+$"
+        }
+      },
+      "required": [
+        "stackDigest",
+        "frames",
+        "occurrenceCount",
+        "sourceStreams",
+        "summary"
+      ],
+      "description": "One de-duplicated stack with a deterministic digest and total occurrence count. It contains no raw stack text.",
+      "oneOf": [
+        {
+          "properties": {
+            "stackDigest": {
+              "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+            },
+            "frames": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 64,
+              "items": {
+                "$ref": "#/$defs/ProbeStackFrame"
+              }
+            },
+            "occurrenceCount": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000000
+            },
+            "sourceStreams": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 2,
+              "uniqueItems": true,
+              "items": {
+                "$ref": "#/$defs/ProbeRawStream"
+              }
+            },
+            "summary": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 500,
+              "pattern": "^[^\\u0000\\r\\n]+$"
+            }
+          }
+        }
+      ]
+    },
+    "ProbeDiagnosticOccurrence": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "diagnostic": {
+          "$ref": "#/$defs/NormalizedDiagnostic"
+        },
+        "occurrenceCount": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000000
+        }
+      },
+      "required": [
+        "diagnostic",
+        "occurrenceCount"
+      ],
+      "description": "One unique normalized diagnostic together with its exact bounded occurrence count.",
+      "oneOf": [
+        {
+          "properties": {
+            "diagnostic": {
+              "$ref": "#/$defs/NormalizedDiagnostic"
+            },
+            "occurrenceCount": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000000
+            }
+          }
+        }
+      ]
+    },
+    "ProbeFailedTest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "diagnostic": {
+          "$ref": "#/$defs/NormalizedDiagnostic"
+        },
+        "occurrenceCount": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000000
+        }
+      },
+      "required": [
+        "diagnostic",
+        "occurrenceCount"
+      ],
+      "description": "One deterministic failed-test fact projected from an existing normalized diagnostic.",
+      "oneOf": [
+        {
+          "properties": {
+            "diagnostic": {
+              "$ref": "#/$defs/NormalizedDiagnostic"
+            },
+            "occurrenceCount": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000000
+            }
+          }
+        }
+      ]
+    },
+    "ProbeWorkspaceDeltaState": {
+      "type": "string",
+      "enum": [
+        "not_applicable",
+        "available"
+      ],
+      "description": "Whether an authoritative workspace delta was captured. Pure read-only probes are not applicable rather than an ambiguous empty change set."
+    },
+    "ProbeWorkspaceDeltaEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "state": {
+          "$ref": "#/$defs/ProbeWorkspaceDeltaState"
+        },
+        "changedFiles": {
+          "type": "array",
+          "minItems": 0,
+          "maxItems": 20,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/AppliedFileSummary"
+          }
+        }
+      },
+      "required": [
+        "state",
+        "changedFiles"
+      ],
+      "description": "Explicit workspace-delta observation state. Not-applicable requires an empty list; available is reserved for trusted host observation.",
+      "oneOf": [
+        {
+          "properties": {
+            "state": {
+              "$ref": "#/$defs/ProbeWorkspaceDeltaState"
+            },
+            "changedFiles": {
+              "type": "array",
+              "minItems": 0,
+              "maxItems": 20,
+              "uniqueItems": true,
+              "items": {
+                "$ref": "#/$defs/AppliedFileSummary"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "ProbeEvidenceBundle": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schemaVersion": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1
+        },
+        "identity": {
+          "$ref": "#/$defs/DebugProbeIdentity"
+        },
+        "planDigest": {
+          "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+        },
+        "probeDefinitionDigest": {
+          "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+        },
+        "profile": {
+          "$ref": "#/$defs/ProbeNormalizerProfile"
+        },
+        "l0Receipt": {
+          "$ref": "#/$defs/ProbeExecutionReceipt"
+        },
+        "rawStreams": {
+          "type": "array",
+          "minItems": 0,
+          "maxItems": 2,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/ProbeRawStreamBinding"
+          }
+        },
+        "completeness": {
+          "$ref": "#/$defs/ProbeEvidenceCompleteness"
+        },
+        "diagnostics": {
+          "type": "array",
+          "minItems": 0,
+          "maxItems": 4096,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/ProbeDiagnosticOccurrence"
+          }
+        },
+        "failedTests": {
+          "type": "array",
+          "minItems": 0,
+          "maxItems": 512,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/ProbeFailedTest"
+          }
+        },
+        "stackClusters": {
+          "type": "array",
+          "minItems": 0,
+          "maxItems": 256,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/ProbeStackCluster"
+          }
+        },
+        "workspaceDelta": {
+          "$ref": "#/$defs/ProbeWorkspaceDeltaEvidence"
+        },
+        "baseline": {
+          "$ref": "#/$defs/ProbeBaselineEvidence"
+        },
+        "targetHypothesisIds": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "./domain.schema.json#/$defs/DebugHypothesisId"
+          }
+        },
+        "bundleDigest": {
+          "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+        },
+        "normalizedAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "identity",
+        "planDigest",
+        "probeDefinitionDigest",
+        "profile",
+        "l0Receipt",
+        "rawStreams",
+        "completeness",
+        "diagnostics",
+        "failedTests",
+        "stackClusters",
+        "workspaceDelta",
+        "baseline",
+        "targetHypothesisIds",
+        "bundleDigest",
+        "normalizedAt"
+      ],
+      "description": "Canonical durable deterministic L0/L1 evidence for one exact probe. Raw output appears only through raw stream Artifact references.",
+      "oneOf": [
+        {
+          "properties": {
+            "schemaVersion": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1
+            },
+            "identity": {
+              "$ref": "#/$defs/DebugProbeIdentity"
+            },
+            "planDigest": {
+              "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+            },
+            "probeDefinitionDigest": {
+              "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+            },
+            "profile": {
+              "$ref": "#/$defs/ProbeNormalizerProfile"
+            },
+            "l0Receipt": {
+              "$ref": "#/$defs/ProbeExecutionReceipt"
+            },
+            "rawStreams": {
+              "type": "array",
+              "minItems": 0,
+              "maxItems": 2,
+              "uniqueItems": true,
+              "items": {
+                "$ref": "#/$defs/ProbeRawStreamBinding"
+              }
+            },
+            "completeness": {
+              "$ref": "#/$defs/ProbeEvidenceCompleteness"
+            },
+            "diagnostics": {
+              "type": "array",
+              "minItems": 0,
+              "maxItems": 4096,
+              "uniqueItems": true,
+              "items": {
+                "$ref": "#/$defs/ProbeDiagnosticOccurrence"
+              }
+            },
+            "failedTests": {
+              "type": "array",
+              "minItems": 0,
+              "maxItems": 512,
+              "uniqueItems": true,
+              "items": {
+                "$ref": "#/$defs/ProbeFailedTest"
+              }
+            },
+            "stackClusters": {
+              "type": "array",
+              "minItems": 0,
+              "maxItems": 256,
+              "uniqueItems": true,
+              "items": {
+                "$ref": "#/$defs/ProbeStackCluster"
+              }
+            },
+            "workspaceDelta": {
+              "$ref": "#/$defs/ProbeWorkspaceDeltaEvidence"
+            },
+            "baseline": {
+              "$ref": "#/$defs/ProbeBaselineEvidence"
+            },
+            "targetHypothesisIds": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 16,
+              "uniqueItems": true,
+              "items": {
+                "$ref": "./domain.schema.json#/$defs/DebugHypothesisId"
+              }
+            },
+            "bundleDigest": {
+              "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+            },
+            "normalizedAt": {
+              "$ref": "./domain.schema.json#/$defs/Instant"
+            }
+          }
+        }
+      ]
+    },
+    "ProbeEvidenceSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "identity": {
+          "$ref": "#/$defs/DebugProbeIdentity"
+        },
+        "bundleDigest": {
+          "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+        },
+        "bundleArtifactRef": {
+          "$ref": "#/$defs/ArtifactReference"
+        },
+        "completeness": {
+          "$ref": "#/$defs/ProbeEvidenceCompleteness"
+        },
+        "uniqueDiagnosticCount": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4096
+        },
+        "diagnosticOccurrenceCount": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "failedTestCount": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 512
+        },
+        "stackClusterCount": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 256
+        },
+        "changedFileCount": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 20
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500,
+          "pattern": "^[^\\u0000\\r\\n]+$"
+        },
+        "recordedAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        }
+      },
+      "required": [
+        "identity",
+        "bundleDigest",
+        "bundleArtifactRef",
+        "completeness",
+        "uniqueDiagnosticCount",
+        "diagnosticOccurrenceCount",
+        "failedTestCount",
+        "stackClusterCount",
+        "changedFileCount",
+        "summary",
+        "recordedAt"
+      ],
+      "description": "Bounded bundle projection for a later round feedback boundary. It contains counts, completeness and a bundle reference, never raw logs.",
+      "oneOf": [
+        {
+          "properties": {
+            "identity": {
+              "$ref": "#/$defs/DebugProbeIdentity"
+            },
+            "bundleDigest": {
+              "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+            },
+            "bundleArtifactRef": {
+              "$ref": "#/$defs/ArtifactReference"
+            },
+            "completeness": {
+              "$ref": "#/$defs/ProbeEvidenceCompleteness"
+            },
+            "uniqueDiagnosticCount": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096
+            },
+            "diagnosticOccurrenceCount": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "failedTestCount": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 512
+            },
+            "stackClusterCount": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 256
+            },
+            "changedFileCount": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 20
+            },
+            "summary": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 500,
+              "pattern": "^[^\\u0000\\r\\n]+$"
+            },
+            "recordedAt": {
+              "$ref": "./domain.schema.json#/$defs/Instant"
+            }
+          }
+        }
+      ]
+    },
+    "HypothesisEvidenceCandidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "targetHypothesisId": {
+          "$ref": "./domain.schema.json#/$defs/DebugHypothesisId"
+        },
+        "evidence": {
+          "$ref": "#/$defs/DebugHypothesisEvidence"
+        }
+      },
+      "required": [
+        "targetHypothesisId",
+        "evidence"
+      ],
+      "description": "Unpolarized deterministic evidence candidate for one probe target. D3 does not assign support, contradiction, or confidence.",
+      "oneOf": [
+        {
+          "properties": {
+            "targetHypothesisId": {
+              "$ref": "./domain.schema.json#/$defs/DebugHypothesisId"
+            },
+            "evidence": {
+              "$ref": "#/$defs/DebugHypothesisEvidence"
             }
           }
         }

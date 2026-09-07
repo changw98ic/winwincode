@@ -25,11 +25,13 @@ pub const MAX_DIAGNOSTICS: usize = 4096;
 
 const DIAGNOSTIC_ID_DOMAIN: &[u8] = b"winwincode.diagnostic-id.v1";
 const DIAGNOSTIC_SET_DOMAIN: &[u8] = b"winwincode.diagnostic-set.v1";
+const DIAGNOSTIC_OCCURRENCE_DOMAIN: &[u8] = b"winwincode.diagnostic-occurrence.v1";
 
 /// Stable diagnostic parser failure category.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DiagnosticParseErrorCode {
     InputTooLarge,
+    TruncatedInput,
     InvalidUtf8,
     InvalidPayload,
     TooManyDiagnostics,
@@ -64,6 +66,105 @@ impl std::error::Error for DiagnosticParseError {}
 pub struct DiagnosticParseBatch {
     pub parser_version: DiagnosticParserVersion,
     pub diagnostics: Vec<NormalizedDiagnostic>,
+}
+
+/// Whether the supplied diagnostic stream is complete.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DiagnosticInputCompleteness {
+    Complete,
+    Truncated,
+}
+
+/// One unique diagnostic together with its exact occurrence count.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DiagnosticOccurrence {
+    pub diagnostic: NormalizedDiagnostic,
+    pub frequency: u64,
+    pub occurrence_digest: Sha256Digest,
+}
+
+/// Bounded unique diagnostics accumulated from one complete parser input.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DiagnosticOccurrenceBatch {
+    pub parser_version: DiagnosticParserVersion,
+    pub occurrences: Vec<DiagnosticOccurrence>,
+    pub total_occurrences: u64,
+}
+
+/// Accumulates repeated diagnostics without applying the unique-diagnostic
+/// limit to every raw occurrence.
+#[derive(Debug)]
+pub struct DiagnosticOccurrenceAccumulator {
+    parser_version: DiagnosticParserVersion,
+    occurrences: BTreeMap<String, (NormalizedDiagnostic, u64)>,
+    total_occurrences: u64,
+}
+
+impl DiagnosticOccurrenceAccumulator {
+    /// Creates an empty accumulator for one exact parser version.
+    #[must_use]
+    pub const fn new(parser_version: DiagnosticParserVersion) -> Self {
+        Self {
+            parser_version,
+            occurrences: BTreeMap::new(),
+            total_occurrences: 0,
+        }
+    }
+
+    /// Records one validated occurrence.
+    ///
+    /// # Errors
+    ///
+    /// Rejects invalid identities, parser-version drift, conflicting values,
+    /// occurrence overflow, or a 4,097th unique diagnostic.
+    pub fn record(&mut self, diagnostic: NormalizedDiagnostic) -> Result<(), DiagnosticParseError> {
+        if diagnostic.parser_version != self.parser_version
+            || !valid_normalized_diagnostic(&diagnostic)
+        {
+            return Err(invalid_baseline());
+        }
+        let total_occurrences = self
+            .total_occurrences
+            .checked_add(1)
+            .ok_or_else(too_many_diagnostics)?;
+        let diagnostic_id = diagnostic.diagnostic_id.0.clone();
+        if let Some((retained, frequency)) = self.occurrences.get_mut(&diagnostic_id) {
+            if retained != &diagnostic {
+                return Err(invalid_baseline());
+            }
+            let next_frequency = frequency.checked_add(1).ok_or_else(too_many_diagnostics)?;
+            *frequency = next_frequency;
+        } else {
+            if self.occurrences.len() == MAX_DIAGNOSTICS {
+                return Err(too_many_diagnostics());
+            }
+            self.occurrences.insert(diagnostic_id, (diagnostic, 1));
+        }
+        self.total_occurrences = total_occurrences;
+        Ok(())
+    }
+
+    /// Seals the accumulator into diagnostic-ID order.
+    #[must_use]
+    pub fn finish(self) -> DiagnosticOccurrenceBatch {
+        let occurrences = self
+            .occurrences
+            .into_values()
+            .map(|(diagnostic, frequency)| DiagnosticOccurrence {
+                occurrence_digest: diagnostic_occurrence_digest(
+                    &diagnostic.diagnostic_id,
+                    frequency,
+                ),
+                diagnostic,
+                frequency,
+            })
+            .collect();
+        DiagnosticOccurrenceBatch {
+            parser_version: self.parser_version,
+            occurrences,
+            total_occurrences: self.total_occurrences,
+        }
+    }
 }
 
 /// Selects the canonical stream for every supported parser.
@@ -102,6 +203,40 @@ pub fn parse_diagnostics(
     input: &[u8],
     workspace_root: &Path,
 ) -> Result<DiagnosticParseBatch, DiagnosticParseError> {
+    let occurrence_batch = parse_diagnostic_occurrences(
+        version,
+        input,
+        workspace_root,
+        DiagnosticInputCompleteness::Complete,
+    )?;
+    Ok(DiagnosticParseBatch {
+        parser_version: occurrence_batch.parser_version,
+        diagnostics: occurrence_batch
+            .occurrences
+            .into_iter()
+            .map(|occurrence| occurrence.diagnostic)
+            .collect(),
+    })
+}
+
+/// Normalizes a complete parser input while retaining duplicate frequencies.
+///
+/// # Errors
+///
+/// Rejects truncated, oversized, malformed, non-UTF-8, path-escaping, or
+/// overfull unique diagnostic input.
+pub fn parse_diagnostic_occurrences(
+    version: DiagnosticParserVersion,
+    input: &[u8],
+    workspace_root: &Path,
+    completeness: DiagnosticInputCompleteness,
+) -> Result<DiagnosticOccurrenceBatch, DiagnosticParseError> {
+    if completeness == DiagnosticInputCompleteness::Truncated {
+        return Err(error(
+            DiagnosticParseErrorCode::TruncatedInput,
+            "truncated diagnostic input cannot establish a complete result",
+        ));
+    }
     if input.len() > MAX_DIAGNOSTIC_INPUT_BYTES {
         return Err(error(
             DiagnosticParseErrorCode::InputTooLarge,
@@ -114,7 +249,7 @@ pub fn parse_diagnostics(
             "diagnostic input is not UTF-8",
         )
     })?;
-    let drafts = match version {
+    let drafts = match &version {
         DiagnosticParserVersion::EslintJsonV1 => parse_eslint(text)?,
         DiagnosticParserVersion::TypescriptV1 => parse_typescript(text)?,
         DiagnosticParserVersion::CargoJsonV1 => parse_cargo(text)?,
@@ -122,19 +257,12 @@ pub fn parse_diagnostics(
         DiagnosticParserVersion::JunitXmlV1 => parse_junit(text)?,
         DiagnosticParserVersion::PytestJsonV1 => parse_pytest(text)?,
     };
-    if drafts.len() > MAX_DIAGNOSTICS {
-        return Err(too_many_diagnostics());
+    let mut accumulator = DiagnosticOccurrenceAccumulator::new(version);
+    for draft in drafts {
+        let diagnostic = normalize_diagnostic(&accumulator.parser_version, draft, workspace_root)?;
+        accumulator.record(diagnostic)?;
     }
-    let mut diagnostics = drafts
-        .into_iter()
-        .map(|draft| normalize_diagnostic(&version, draft, workspace_root))
-        .collect::<Result<Vec<_>, _>>()?;
-    diagnostics.sort_by(|left, right| left.diagnostic_id.0.cmp(&right.diagnostic_id.0));
-    diagnostics.dedup_by(|left, right| left.diagnostic_id == right.diagnostic_id);
-    Ok(DiagnosticParseBatch {
-        parser_version: version,
-        diagnostics,
-    })
+    Ok(accumulator.finish())
 }
 
 /// Binds parsed batches to one exact workspace tree and canonical set digest.
@@ -693,6 +821,14 @@ fn derive_diagnostic_id(fields: &DiagnosticIdentityFields<'_>) -> Sha256Digest {
     Sha256Digest(format!("sha256:{:x}", digest.finalize()))
 }
 
+fn diagnostic_occurrence_digest(diagnostic_id: &Sha256Digest, frequency: u64) -> Sha256Digest {
+    let mut digest = Sha256::new();
+    digest.update(DIAGNOSTIC_OCCURRENCE_DOMAIN);
+    digest_field(&mut digest, diagnostic_id.0.as_bytes());
+    digest.update(frequency.to_be_bytes());
+    Sha256Digest(format!("sha256:{:x}", digest.finalize()))
+}
+
 fn diagnostic_set_digest(
     versions: &[DiagnosticParserVersion],
     diagnostics: &[NormalizedDiagnostic],
@@ -1060,7 +1196,7 @@ const fn invalid_path() -> DiagnosticParseError {
 const fn too_many_diagnostics() -> DiagnosticParseError {
     error(
         DiagnosticParseErrorCode::TooManyDiagnostics,
-        "diagnostic count exceeds the canonical limit",
+        "unique diagnostic count exceeds the canonical limit",
     )
 }
 

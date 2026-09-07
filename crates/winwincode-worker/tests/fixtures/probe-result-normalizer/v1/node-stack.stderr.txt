@@ -1,0 +1,4 @@
+Error: fixture failure
+    at parseProbe (file:///workspace/src/probe.mjs:12:9)
+    at runProbe (file:///workspace/src/run.mjs:7:3)
+    at async file:///workspace/tests/probe.test.mjs:5:1

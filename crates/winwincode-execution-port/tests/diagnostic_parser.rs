@@ -5,10 +5,10 @@ use std::path::Path;
 use serde_json::json;
 use winwincode_domain::WorkspaceRevision;
 use winwincode_execution_port::diagnostic_parser::{
-    DiagnosticParseBatch, DiagnosticParseErrorCode, build_diagnostic_baseline,
-    compare_diagnostic_baselines, diagnostic_input, diagnostic_media_type,
-    dominant_diagnostic_repair_reason, parse_diagnostics, validate_diagnostic_baseline,
-    validate_diagnostic_baseline_comparison,
+    DiagnosticInputCompleteness, DiagnosticParseBatch, DiagnosticParseErrorCode,
+    build_diagnostic_baseline, compare_diagnostic_baselines, diagnostic_input,
+    diagnostic_media_type, dominant_diagnostic_repair_reason, parse_diagnostic_occurrences,
+    parse_diagnostics, validate_diagnostic_baseline, validate_diagnostic_baseline_comparison,
 };
 use winwincode_execution_port::generated::{
     DiagnosticCategory, DiagnosticChangeStatus, DiagnosticParserVersion, NormalizedDiagnostic,
@@ -293,6 +293,67 @@ fn stream_path_size_and_generated_shape_boundaries_fail_closed() {
         .expect("object")
         .insert("unknown".to_owned(), json!(true));
     assert!(serde_json::from_value::<NormalizedDiagnostic>(wire).is_err());
+}
+
+#[test]
+fn repeated_occurrences_are_bounded_by_unique_identity_and_retain_frequency() {
+    let line = "src/repeated.ts(7,9): error TS2304: Cannot find name 'repeated'.\n";
+    let input = line.repeat(30_000);
+    let parsed = parse_diagnostic_occurrences(
+        DiagnosticParserVersion::TypescriptV1,
+        input.as_bytes(),
+        root(),
+        DiagnosticInputCompleteness::Complete,
+    )
+    .expect("bounded repeated diagnostics");
+    assert_eq!(parsed.total_occurrences, 30_000);
+    assert_eq!(parsed.occurrences.len(), 1);
+    assert_eq!(parsed.occurrences[0].frequency, 30_000);
+    assert_eq!(
+        parsed.occurrences[0].occurrence_digest.0,
+        "sha256:849cb232e3ee07d762ea7e12ad65f35ab59b7134ee659ec0a6baf947eb2786a5"
+    );
+
+    let legacy = parse_diagnostics(
+        DiagnosticParserVersion::TypescriptV1,
+        input.as_bytes(),
+        root(),
+    )
+    .expect("legacy unique projection");
+    assert_eq!(legacy.diagnostics.len(), 1);
+    assert_eq!(legacy.diagnostics[0], parsed.occurrences[0].diagnostic);
+}
+
+#[test]
+fn truncated_and_invalid_inputs_never_report_a_clean_occurrence_batch() {
+    for input in [
+        b"".as_slice(),
+        b"src/incomplete.ts(1,1): error TS".as_slice(),
+        b"ordinary output with no diagnostics".as_slice(),
+    ] {
+        assert_eq!(
+            parse_diagnostic_occurrences(
+                DiagnosticParserVersion::TypescriptV1,
+                input,
+                root(),
+                DiagnosticInputCompleteness::Truncated,
+            )
+            .expect_err("truncated input")
+            .code(),
+            DiagnosticParseErrorCode::TruncatedInput
+        );
+    }
+    assert_eq!(
+        parse_diagnostic_occurrences(
+            DiagnosticParserVersion::TypescriptV1,
+            &[0xff],
+            root(),
+            DiagnosticInputCompleteness::Complete,
+        )
+        .expect_err("invalid UTF-8")
+        .code(),
+        DiagnosticParseErrorCode::InvalidUtf8
+    );
 }
 
 #[test]

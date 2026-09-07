@@ -1292,6 +1292,10 @@ test('DebugProbe contracts are generated, closed, bounded, authority-bound, and 
     'DebugSessionStatus',
     'ExecutionMode',
     'ProbeCommandSpec',
+    'ProbeBaselineEvidence',
+    'ProbeBaselineSelection',
+    'ProbeBaselineSelectionState',
+    'ProbeBaselineState',
     'ProbeCompletionRule',
     'ProbeCompletionRuleKind',
     'ProbeExecutionEvent',
@@ -1299,7 +1303,19 @@ test('DebugProbe contracts are generated, closed, bounded, authority-bound, and 
     'ProbeExecutionIntent',
     'ProbeExecutionReceipt',
     'ProbeExecutionStatus',
+    'ProbeDiagnosticOccurrence',
+    'ProbeEvidenceBundle',
+    'ProbeEvidenceCompleteness',
+    'ProbeEvidenceCompletenessStatus',
+    'ProbeEvidenceIncompleteReason',
+    'ProbeEvidenceSummary',
+    'HypothesisEvidenceCandidate',
     'ProbeNetworkAccess',
+    'ProbeNormalizerProfile',
+    'ProbeNormalizerVersion',
+    'ProbeRawStream',
+    'ProbeRawStreamBinding',
+    'ProbeRawStreamEncoding',
     'ProbeReceiptStatus',
     'ProbeResourceClaim',
     'ProbeRoundBudget',
@@ -1312,7 +1328,12 @@ test('DebugProbe contracts are generated, closed, bounded, authority-bound, and 
     'ProbeRoundStatus',
     'ProbeSideEffectClass',
     'ProbeSpec',
+    'ProbeStackCluster',
+    'ProbeStackFrame',
+    'ProbeStackParserVersion',
     'ProbeWorkspaceAccess',
+    'ProbeWorkspaceDeltaEvidence',
+    'ProbeWorkspaceDeltaState',
     'ReadOnlyRoleWorkspaceMode',
   ]
   for (const name of definitions) {
@@ -1510,6 +1531,77 @@ test('DebugProbe contracts are generated, closed, bounded, authority-bound, and 
     ...roundReceipt,
     probeReceipts: [{ ...probeReceipt, identity: { ...identity, fencingToken: '' } }],
   }), false)
+
+  const rawArtifact = {
+    artifactId: 'art_00000000000000000000000000',
+    digest: `sha256:${'8'.repeat(64)}`,
+  }
+  const profile = {
+    normalizerVersion: 'l0_l1_v1',
+    diagnosticParserVersion: null,
+    stackParserVersion: null,
+    profileDigest: `sha256:${'9'.repeat(64)}`,
+  }
+  const baseline = {
+    state: 'not_applicable',
+    comparison: null,
+    baselineEnvironmentDigest: null,
+    baselineProbeDefinitionDigest: null,
+    baselineProfileDigest: null,
+    baselineBundleArtifactRef: null,
+    baselineBundleDigest: null,
+  }
+  const evidenceBundle = {
+    schemaVersion: 1,
+    identity,
+    planDigest: plan.planDigest,
+    probeDefinitionDigest: probe.probeDefinitionDigest,
+    profile,
+    l0Receipt: { ...probeReceipt, outputBytes: 0 },
+    rawStreams: [],
+    completeness: { status: 'complete', reasons: [] },
+    diagnostics: [],
+    failedTests: [],
+    stackClusters: [],
+    workspaceDelta: { state: 'not_applicable', changedFiles: [] },
+    baseline,
+    targetHypothesisIds: probe.targetHypothesisIds,
+    bundleDigest: `sha256:${'a'.repeat(64)}`,
+    normalizedAt: probeReceipt.finishedAt,
+  }
+  const validateEvidence = validator(schema, 'ProbeEvidenceBundle')
+  assert.equal(validateEvidence(evidenceBundle), true, JSON.stringify(validateEvidence.errors))
+  assert.equal(validateEvidence({ ...evidenceBundle, rawOutput: 'secret' }), false)
+  assert.equal(validateEvidence({
+    ...evidenceBundle,
+    rawStreams: Array(3).fill({
+      stream: 'stdout',
+      artifactRef: rawArtifact,
+      retainedBytes: 0,
+      encoding: 'utf8',
+    }),
+  }), false)
+  assert.equal(validateEvidence({
+    ...evidenceBundle,
+    diagnostics: [{ diagnostic: {}, occurrenceCount: 0 }],
+  }), false)
+  assert.equal(validateEvidence({
+    ...evidenceBundle,
+    completeness: { status: 'incomplete', reasons: Array(11).fill('invalid_payload') },
+  }), false)
+
+  const validateSelection = validator(schema, 'ProbeBaselineSelection')
+  const noBaseline = {
+    state: 'not_applicable',
+    priorBundleArtifactRef: null,
+    priorBundleDigest: null,
+    priorEnvironmentDigest: null,
+    priorProbeDefinitionDigest: null,
+    priorProfileDigest: null,
+  }
+  assert.equal(validateSelection(noBaseline), true, JSON.stringify(validateSelection.errors))
+  assert.equal(validateSelection({ ...noBaseline, registryLookup: 'latest' }), false)
+  assert.equal(validateSelection({ ...noBaseline, priorBundleDigest: undefined }), false)
 
   const validateRolePolicy = validator(schema, 'RoleSessionPolicy')
   const debugPolicy = {
