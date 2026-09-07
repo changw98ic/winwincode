@@ -17,8 +17,13 @@ use std::{
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use winwincode_api::generated::{
+    Actor, ControlPlaneWebSocketModelRouteAvailabilityInvalidationSource, ProjectScope, Scope,
+    SystemActor, SystemActorKind,
+};
 use winwincode_domain::{
-    ExecutionMessageId, ExecutionSequence, Instant, ModelExchangeId, Sha256Digest,
+    ExecutionMessageId, ExecutionSequence, Instant, ModelExchangeId, RequestId, Sha256Digest,
+    SystemActorId,
 };
 use winwincode_execution_port::{
     generated::{
@@ -32,7 +37,7 @@ use winwincode_storage::{
     ProviderExchangeFailure, ProviderExchangeFinalAck, ProviderExchangeOpened,
     ProviderExchangeSnapshot, ProviderExchangeState, ProviderExchangeStoreError,
     ProviderExchangeStoreErrorCode, ProviderExchangeTerminal, ProviderExchangeTerminalProgress,
-    ProviderExchangeTerminalStage, SqliteStorage,
+    ProviderExchangeTerminalStage, SqliteStorage, StateCommit,
 };
 
 use crate::{
@@ -47,13 +52,32 @@ use crate::{
     ModelStreamReadControl, ProviderAdmissionOpenReceipt, ProviderEnterpriseQuotaSaga,
     ProviderGateway, ProviderGatewayDurableExchange, ProviderGatewayError,
     ProviderGatewayErrorKind, ProviderGatewayOpenReceipt, ProviderGatewayTerminal,
-    ProviderGatewayTerminalCharge, ProviderGatewayTerminalOutcome, ProviderGatewayTerminalProgress,
+    ProviderGatewayTerminalOutcome, ProviderGatewayTerminalProgress,
     ProviderGatewayTerminalProgressPort, ProviderGatewayTerminalProgressStage,
-    ProviderGatewayTerminalReceipt, ProviderPolicyErrorKind, ProviderTokenUsage,
+    ProviderGatewayTerminalReceipt, ProviderPolicyErrorKind, command_receipt_identity,
+    model_route_availability::{
+        model_request_pool_readiness_stream_id, model_route_availability_invalidated_event,
+    },
 };
 
 const FAILURE_INTERRUPTED: &str = "provider_acceptance_unknown";
 const FAILURE_GATEWAY_PREFIX: &str = "gateway_";
+const POOL_READINESS_STATE_SCHEMA: &str = "winwincode.model-request-pool-readiness.v1";
+const POOL_READINESS_SYSTEM_ACTOR: &str = "sys_00000000000000000000000002";
+
+fn pool_submit_operation(
+    model_exchange_id: &ModelExchangeId,
+    open_digest: &Sha256Digest,
+) -> String {
+    format!("submit\0{}\0{}", model_exchange_id.0, open_digest.0)
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PoolReadinessState<'scope> {
+    schema: &'static str,
+    scope: &'scope ProjectScope,
+}
 
 /// Stable production runtime failure category.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -184,11 +208,19 @@ impl DurableModelExchangeAuthority {
         &self,
         request: &ProviderExchangeBegin,
         pool_authority_json: &[u8],
+        scope: &ProjectScope,
     ) -> Result<ProviderExchangeSnapshot, ModelExecutionRuntimeError> {
+        let operation = pool_submit_operation(&request.model_exchange_id, &request.open_digest);
+        let readiness = self.pool_readiness_commit(
+            scope,
+            &operation,
+            pool_authority_json,
+            &request.started_at,
+        )?;
         let mut storage = self.lock()?;
         storage
             .provider_exchange_store()?
-            .begin_open_with_pool_authority(request, pool_authority_json)
+            .begin_open_with_pool_authority(request, pool_authority_json, &readiness)
             .map_err(Into::into)
     }
 
@@ -211,7 +243,14 @@ impl DurableModelExchangeAuthority {
         open_digest: &Sha256Digest,
         failure: &ProviderExchangeFailure,
         pool_authority_json: &[u8],
+        scope: &ProjectScope,
     ) -> Result<ProviderExchangeSnapshot, ModelExecutionRuntimeError> {
+        let operation = format!(
+            "failed\0{}\0{}\0{}",
+            model_exchange_id.0, open_digest.0, failure.failure_kind
+        );
+        let readiness =
+            self.pool_readiness_commit(scope, &operation, pool_authority_json, &failure.failed_at)?;
         let mut storage = self.lock()?;
         storage
             .provider_exchange_store()?
@@ -220,6 +259,7 @@ impl DurableModelExchangeAuthority {
                 open_digest,
                 failure,
                 pool_authority_json,
+                &readiness,
             )
             .map_err(Into::into)
     }
@@ -229,11 +269,27 @@ impl DurableModelExchangeAuthority {
         model_exchange_id: &ModelExchangeId,
         terminal: &ProviderExchangeTerminal,
         pool_authority_json: &[u8],
+        scope: &ProjectScope,
     ) -> Result<ProviderExchangeSnapshot, ModelExecutionRuntimeError> {
+        let operation = format!(
+            "terminal\0{}\0{}",
+            model_exchange_id.0, terminal.terminal_digest.0
+        );
+        let readiness = self.pool_readiness_commit(
+            scope,
+            &operation,
+            pool_authority_json,
+            &terminal.settled_at,
+        )?;
         let mut storage = self.lock()?;
         storage
             .provider_exchange_store()?
-            .commit_terminal_with_pool_authority(model_exchange_id, terminal, pool_authority_json)
+            .commit_terminal_with_pool_authority(
+                model_exchange_id,
+                terminal,
+                pool_authority_json,
+                &readiness,
+            )
             .map_err(Into::into)
     }
 
@@ -270,6 +326,22 @@ impl DurableModelExchangeAuthority {
             .map_err(Into::into)
     }
 
+    fn save_pool_authority_with_readiness(
+        &self,
+        bytes: &[u8],
+        updated_at: &Instant,
+        scope: &ProjectScope,
+        operation: &str,
+    ) -> Result<(), ModelExecutionRuntimeError> {
+        let readiness = self.pool_readiness_commit(scope, operation, bytes, updated_at)?;
+        let mut storage = self.lock()?;
+        storage
+            .provider_exchange_store()?
+            .save_pool_authority_with_readiness(bytes, updated_at, &readiness)
+            .map(|_| ())
+            .map_err(Into::into)
+    }
+
     fn final_ack(
         &self,
         model_exchange_id: &ModelExchangeId,
@@ -287,7 +359,18 @@ impl DurableModelExchangeAuthority {
         ack_digest: &Sha256Digest,
         receipt_json: &[u8],
         pool_authority_json: &[u8],
+        scope: &ProjectScope,
     ) -> Result<ProviderExchangeFinalAck, ModelExecutionRuntimeError> {
+        let operation = format!(
+            "final-ack\0{}\0{}",
+            acknowledgement.model_exchange_id.0, ack_digest.0
+        );
+        let readiness = self.pool_readiness_commit(
+            scope,
+            &operation,
+            pool_authority_json,
+            &acknowledgement.sent_at,
+        )?;
         let mut storage = self.lock()?;
         storage
             .provider_exchange_store()?
@@ -298,6 +381,7 @@ impl DurableModelExchangeAuthority {
                 receipt_json,
                 pool_authority_json,
                 &acknowledgement.sent_at,
+                &readiness,
             )
             .map_err(Into::into)
     }
@@ -317,6 +401,67 @@ impl DurableModelExchangeAuthority {
         self.storage
             .lock()
             .map_err(|_| ModelExecutionRuntimeError::new(ModelExecutionRuntimeErrorKind::Storage))
+    }
+
+    fn pool_readiness_commit(
+        &self,
+        project_scope: &ProjectScope,
+        operation: &str,
+        authority_json: &[u8],
+        occurred_at: &Instant,
+    ) -> Result<StateCommit, ModelExecutionRuntimeError> {
+        let scope = Scope::ProjectScope(project_scope.clone());
+        let stream_id = model_request_pool_readiness_stream_id(project_scope).map_err(|_| {
+            ModelExecutionRuntimeError::new(ModelExecutionRuntimeErrorKind::Storage)
+        })?;
+        let expected_revision = self
+            .lock()?
+            .load_state(&stream_id)
+            .map_err(|_| ModelExecutionRuntimeError::new(ModelExecutionRuntimeErrorKind::Storage))?
+            .map_or(0, |stored| stored.revision);
+        let revision = expected_revision.checked_add(1).ok_or_else(|| {
+            ModelExecutionRuntimeError::new(ModelExecutionRuntimeErrorKind::Storage)
+        })?;
+        let actor = Actor::SystemActor(SystemActor {
+            id: SystemActorId(POOL_READINESS_SYSTEM_ACTOR.to_owned()),
+            kind: SystemActorKind::System,
+        });
+        let mut request_digest = Sha256::new();
+        request_digest.update(b"winwincode.model-request-pool-readiness-request.v1\0");
+        request_digest.update(operation.as_bytes());
+        let request_hex = format!("{:X}", request_digest.finalize());
+        let request_id = RequestId(format!("req_{}", &request_hex[..26]));
+        let identity = command_receipt_identity(&actor, &scope, request_id).map_err(|_| {
+            ModelExecutionRuntimeError::new(ModelExecutionRuntimeErrorKind::Storage)
+        })?;
+        let mut command_digest = Sha256::new();
+        command_digest.update(b"winwincode.model-request-pool-readiness-command.v1\0");
+        command_digest.update(operation.as_bytes());
+        command_digest.update([0]);
+        command_digest.update(authority_json);
+        let command_digest = Sha256Digest(format!("sha256:{:x}", command_digest.finalize()));
+        let event = model_route_availability_invalidated_event(
+            &actor,
+            &scope,
+            ControlPlaneWebSocketModelRouteAvailabilityInvalidationSource::RequestPool,
+            revision,
+            occurred_at.clone(),
+            operation.as_bytes(),
+        )
+        .map_err(|_| ModelExecutionRuntimeError::new(ModelExecutionRuntimeErrorKind::Storage))?;
+        let state = serde_json::to_vec(&PoolReadinessState {
+            schema: POOL_READINESS_STATE_SCHEMA,
+            scope: project_scope,
+        })
+        .map_err(|_| ModelExecutionRuntimeError::new(ModelExecutionRuntimeErrorKind::Storage))?;
+        Ok(StateCommit::new(
+            identity,
+            command_digest,
+            stream_id,
+            expected_revision,
+            state,
+            vec![event],
+        ))
     }
 }
 
@@ -365,7 +510,7 @@ impl ProviderGatewayTerminalProgressPort for DurableModelExchangeAuthority {
             .transpose()
             .map_err(|_| ProviderGatewayError::storage())?;
         let terminal_json = terminal
-            .map(|receipt| terminal_receipt_json(receipt, command))
+            .map(terminal_receipt_json)
             .transpose()
             .map_err(|_| ProviderGatewayError::storage())?;
         let mut storage = self
@@ -487,11 +632,11 @@ pub(crate) fn recover_terminal_model_execution_batches(
             return Err(runtime_context_corrupt());
         }
         let durable = durable_gateway_exchange(&exchange)?;
-        let terminal_receipt_json = exchange
+        let gateway_terminal = exchange
             .terminal_receipt_json()
+            .map(decode_terminal_receipt)
+            .transpose()?
             .ok_or_else(runtime_context_corrupt)?;
-        let gateway_terminal = decode_terminal_receipt(terminal_receipt_json)?;
-        let terminal_accounting = decode_terminal_accounting(terminal_receipt_json)?;
         if pool_snapshot.request_id != durable.open_receipt().request_id
             || &pool_snapshot.route != durable.route_authority().route_key()
             || !terminal_outcomes_match(pool_snapshot.terminal_outcome, gateway_terminal.outcome)
@@ -515,12 +660,7 @@ pub(crate) fn recover_terminal_model_execution_batches(
         {
             return Err(runtime_context_corrupt());
         }
-        let chunks = model_chunks_from_pool_frames(
-            &durable,
-            &frames,
-            terminal_accounting,
-            &exchange.updated_at,
-        )?;
+        let chunks = model_chunks_from_pool_frames(&durable, &frames, &exchange.updated_at)?;
         let flow = ModelStreamFlowWriteReceipt {
             pool: ModelFrameWriteReceipt {
                 status: ModelFrameWriteStatus::Duplicate,
@@ -668,6 +808,7 @@ impl<'a, 'storage> ModelExecutionRuntime<'a, 'storage> {
     ///
     /// Fails closed for missing/corrupt context, changed input, interrupted
     /// opening, Gateway failure, or pool failure.
+    #[allow(clippy::too_many_lines)]
     pub fn open(
         &mut self,
         message: &ModelOpenMessage,
@@ -706,10 +847,13 @@ impl<'a, 'storage> ModelExecutionRuntime<'a, 'storage> {
             }
         };
         if pool.state == ModelRequestState::Queued {
-            if let Err(error) = self
-                .exchanges
-                .save_pool_authority(&pool_authority_json, &message.sent_at)
-            {
+            let operation = pool_submit_operation(&message.model_exchange_id, &open_digest);
+            if let Err(error) = self.exchanges.save_pool_authority_with_readiness(
+                &pool_authority_json,
+                &message.sent_at,
+                &route_authority.route_key().project_scope(),
+                &operation,
+            ) {
                 *self.pool = pool_before_submit;
                 return Err(error);
             }
@@ -724,10 +868,11 @@ impl<'a, 'storage> ModelExecutionRuntime<'a, 'storage> {
             ));
         }
 
-        let snapshot = match self
-            .exchanges
-            .begin_with_pool_authority(&begin, &pool_authority_json)
-        {
+        let snapshot = match self.exchanges.begin_with_pool_authority(
+            &begin,
+            &pool_authority_json,
+            &route_authority.route_key().project_scope(),
+        ) {
             Ok(snapshot) => snapshot,
             Err(error) => {
                 *self.pool = pool_before_submit;
@@ -885,7 +1030,7 @@ impl<'a, 'storage> ModelExecutionRuntime<'a, 'storage> {
                 self.exchanges,
                 sent_at,
             )?;
-        let chunks = model_chunks(&durable, frames, terminal, sent_at)?;
+        let chunks = model_chunks(&durable, frames, sent_at)?;
         if let (Some(command), Some(receipt)) = (terminal, flow.gateway_terminal.as_ref()) {
             self.persist_terminal(model_exchange_id, command, receipt, sent_at)?;
         } else {
@@ -1005,6 +1150,12 @@ impl<'a, 'storage> ModelExecutionRuntime<'a, 'storage> {
                 &ack_digest,
                 &receipt_json,
                 &authority,
+                &self
+                    .pool
+                    .project_scope_for_exchange(&acknowledgement.model_exchange_id)
+                    .map_err(|_| {
+                        ModelExecutionRuntimeError::new(ModelExecutionRuntimeErrorKind::Flow)
+                    })?,
             )?;
         } else {
             let authority = staged_pool.export_authority().map_err(|_| {
@@ -1122,6 +1273,7 @@ impl<'a, 'storage> ModelExecutionRuntime<'a, 'storage> {
                         failed_at: message.sent_at.clone(),
                     },
                     &pool_authority_json,
+                    &active_authority(context)?.route_key().project_scope(),
                 )?;
                 Err(ModelExecutionRuntimeError::new(
                     ModelExecutionRuntimeErrorKind::OpenInterrupted,
@@ -1347,6 +1499,9 @@ impl<'a, 'storage> ModelExecutionRuntime<'a, 'storage> {
                 failed_at: message.sent_at.clone(),
             },
             &pool_authority_json,
+            &active_authority(&self.load_planned_context(&message.model_exchange_id)?)?
+                .route_key()
+                .project_scope(),
         )?;
         Ok(())
     }
@@ -1384,8 +1539,12 @@ impl<'a, 'storage> ModelExecutionRuntime<'a, 'storage> {
         receipt: &ProviderGatewayTerminalReceipt,
         settled_at: &Instant,
     ) -> Result<(), ModelExecutionRuntimeError> {
-        let receipt_json = terminal_receipt_json(receipt, command)?;
+        let receipt_json = terminal_receipt_json(receipt)?;
         let pool_authority_json = self.pool_authority_json()?;
+        let project_scope = self
+            .pool
+            .project_scope_for_exchange(model_exchange_id)
+            .map_err(|_| ModelExecutionRuntimeError::new(ModelExecutionRuntimeErrorKind::Flow))?;
         self.release_failed_enterprise_quota(model_exchange_id, command, settled_at)?;
         self.exchanges.terminal_with_pool_authority(
             model_exchange_id,
@@ -1395,6 +1554,7 @@ impl<'a, 'storage> ModelExecutionRuntime<'a, 'storage> {
                 settled_at.clone(),
             )?,
             &pool_authority_json,
+            &project_scope,
         )?;
         Ok(())
     }
@@ -1534,7 +1694,6 @@ fn durable_gateway_exchange(
 fn model_chunks(
     durable: &ProviderGatewayDurableExchange,
     frames: &[CanonicalModelStreamFrame],
-    terminal: Option<ProviderGatewayTerminal>,
     sent_at: &Instant,
 ) -> Result<Vec<ModelChunkMessage>, ModelExecutionRuntimeError> {
     frames
@@ -1553,7 +1712,7 @@ fn model_chunks(
                     frame.sequence(),
                 ),
                 model_exchange_id: durable.open_receipt().model_exchange_id.clone(),
-                payload: Some(model_chunk_payload(frame, terminal)?),
+                payload: Some(frame.encoded_payload()),
                 schema_version: winwincode_domain::SchemaVersion::WinwincodeV1,
                 sent_at: sent_at.clone(),
                 sequence: ExecutionSequence(sequence),
@@ -1564,78 +1723,9 @@ fn model_chunks(
         .collect()
 }
 
-fn model_chunk_payload(
-    frame: &CanonicalModelStreamFrame,
-    terminal: Option<ProviderGatewayTerminal>,
-) -> Result<EncodedPayload, ModelExecutionRuntimeError> {
-    let terminal_accounting = match terminal {
-        Some(ProviderGatewayTerminal::Completed {
-            usage,
-            actual_cost_micros,
-        }) => Some(ProviderGatewayTerminalCharge {
-            usage,
-            actual_cost_micros,
-        }),
-        Some(ProviderGatewayTerminal::Failed {
-            charge: Some(charge),
-            ..
-        }) => Some(charge),
-        _ => None,
-    };
-    let Some(terminal_accounting) = terminal_accounting else {
-        return Ok(frame.encoded_payload());
-    };
-    if !frame.is_terminal() {
-        return Ok(frame.encoded_payload());
-    }
-    add_terminal_accounting(frame.payload_json().as_bytes(), terminal_accounting)
-}
-
-fn add_terminal_accounting(
-    payload_bytes: &[u8],
-    accounting: ProviderGatewayTerminalCharge,
-) -> Result<EncodedPayload, ModelExecutionRuntimeError> {
-    let mut payload: serde_json::Value = serde_json::from_slice(payload_bytes).map_err(|_| {
-        ModelExecutionRuntimeError::new(ModelExecutionRuntimeErrorKind::ContextCorrupt)
-    })?;
-    let object = payload.as_object_mut().ok_or_else(|| {
-        ModelExecutionRuntimeError::new(ModelExecutionRuntimeErrorKind::ContextCorrupt)
-    })?;
-    object.insert(
-        "actualCostMicros".to_owned(),
-        serde_json::Value::from(accounting.actual_cost_micros),
-    );
-    let total_tokens = accounting
-        .usage
-        .input_tokens
-        .checked_add(accounting.usage.output_tokens)
-        .ok_or_else(|| {
-            ModelExecutionRuntimeError::new(ModelExecutionRuntimeErrorKind::ContextCorrupt)
-        })?;
-    object.insert(
-        "tokenUsage".to_owned(),
-        serde_json::json!({
-            "input_tokens": accounting.usage.input_tokens,
-            "cached_input_tokens": accounting.usage.cached_input_tokens,
-            "cache_write_input_tokens": accounting.usage.cache_write_input_tokens,
-            "output_tokens": accounting.usage.output_tokens,
-            "reasoning_output_tokens": accounting.usage.reasoning_output_tokens,
-            "total_tokens": total_tokens,
-        }),
-    );
-    let bytes = serde_json::to_vec(&payload)
-        .map_err(|_| ModelExecutionRuntimeError::new(ModelExecutionRuntimeErrorKind::Storage))?;
-    Ok(EncodedPayload {
-        content_type: "application/json".to_owned(),
-        data_base64: STANDARD.encode(&bytes),
-        payload_digest: Sha256Digest(format!("sha256:{:x}", Sha256::digest(&bytes))),
-    })
-}
-
 fn model_chunks_from_pool_frames(
     durable: &ProviderGatewayDurableExchange,
     frames: &[crate::ModelStreamFrame],
-    terminal_accounting: Option<ProviderGatewayTerminalCharge>,
     sent_at: &Instant,
 ) -> Result<Vec<ModelChunkMessage>, ModelExecutionRuntimeError> {
     frames
@@ -1654,22 +1744,14 @@ fn model_chunks_from_pool_frames(
                     frame.sequence(),
                 ),
                 model_exchange_id: durable.open_receipt().model_exchange_id.clone(),
-                payload: Some(
-                    if let (Some(accounting), Some(_)) =
-                        (terminal_accounting, frame.terminal_outcome())
-                    {
-                        add_terminal_accounting(frame.payload(), accounting)?
-                    } else {
-                        EncodedPayload {
-                            content_type: "application/json".to_owned(),
-                            data_base64: STANDARD.encode(frame.payload()),
-                            payload_digest: Sha256Digest(format!(
-                                "sha256:{:x}",
-                                Sha256::digest(frame.payload())
-                            )),
-                        }
-                    },
-                ),
+                payload: Some(EncodedPayload {
+                    content_type: "application/json".to_owned(),
+                    data_base64: STANDARD.encode(frame.payload()),
+                    payload_digest: Sha256Digest(format!(
+                        "sha256:{:x}",
+                        Sha256::digest(frame.payload())
+                    )),
+                }),
                 schema_version: winwincode_domain::SchemaVersion::WinwincodeV1,
                 sent_at: sent_at.clone(),
                 sequence: ExecutionSequence(sequence),
@@ -1678,101 +1760,6 @@ fn model_chunks_from_pool_frames(
             })
         })
         .collect()
-}
-
-#[cfg(test)]
-mod cost_replay_tests {
-    use base64::{Engine as _, engine::general_purpose::STANDARD};
-
-    use crate::{
-        CanonicalModelStreamFrame, ModelAttemptFailureFact, ModelAttemptFailureKind,
-        ModelExecutionCertainty, ProviderGatewayTerminal, ProviderGatewayTerminalCharge,
-        ProviderTokenUsage,
-    };
-
-    use super::{add_terminal_accounting, model_chunk_payload};
-
-    #[test]
-    fn terminal_accounting_is_exact_for_live_and_recovery_payloads() {
-        let usage = ProviderTokenUsage {
-            input_tokens: 11,
-            cached_input_tokens: 2,
-            cache_write_input_tokens: 0,
-            output_tokens: 3,
-            reasoning_output_tokens: 0,
-        };
-        let cost = 47;
-        let failure = ModelAttemptFailureFact {
-            kind: ModelAttemptFailureKind::Transport,
-            certainty: ModelExecutionCertainty::AcceptanceUnknown,
-        };
-        let cases = [
-            (
-                "completed",
-                r#"{"type":"completed","responseId":"rsp_1","endTurn":true}"#,
-                ProviderGatewayTerminal::Completed {
-                    usage,
-                    actual_cost_micros: cost,
-                },
-                Some(ProviderGatewayTerminalCharge {
-                    usage,
-                    actual_cost_micros: cost,
-                }),
-            ),
-            (
-                "charged failure",
-                r#"{"type":"error","error":{"kind":"transport"}}"#,
-                ProviderGatewayTerminal::Failed {
-                    failure,
-                    charge: Some(ProviderGatewayTerminalCharge {
-                        usage,
-                        actual_cost_micros: cost,
-                    }),
-                },
-                Some(ProviderGatewayTerminalCharge {
-                    usage,
-                    actual_cost_micros: cost,
-                }),
-            ),
-            (
-                "unbilled failure",
-                r#"{"type":"error","error":{"kind":"transport"}}"#,
-                ProviderGatewayTerminal::Failed {
-                    failure,
-                    charge: None,
-                },
-                None,
-            ),
-        ];
-
-        for (name, payload, command, accounting) in cases {
-            let frame = CanonicalModelStreamFrame::for_test(7, payload, true);
-            let live = model_chunk_payload(&frame, Some(command))
-                .unwrap_or_else(|_| panic!("build {name} live terminal payload"));
-            let recovered = accounting
-                .map_or_else(
-                    || Ok(frame.encoded_payload()),
-                    |accounting| {
-                        add_terminal_accounting(frame.payload_json().as_bytes(), accounting)
-                    },
-                )
-                .unwrap_or_else(|_| panic!("rebuild {name} recovered terminal payload"));
-
-            assert_eq!(live, recovered, "{name}");
-            let decoded = STANDARD
-                .decode(&live.data_base64)
-                .unwrap_or_else(|_| panic!("decode {name} exact payload bytes"));
-            let value = serde_json::from_slice::<serde_json::Value>(&decoded)
-                .unwrap_or_else(|_| panic!("decode {name} terminal JSON"));
-            if accounting.is_some() {
-                assert_eq!(value["actualCostMicros"], cost, "{name}");
-                assert_eq!(value["tokenUsage"]["total_tokens"], 14, "{name}");
-            } else {
-                assert!(value.get("actualCostMicros").is_none(), "{name}");
-                assert!(value.get("tokenUsage").is_none(), "{name}");
-            }
-        }
-    }
 }
 
 fn seal_batch_receipt(
@@ -1833,43 +1820,6 @@ struct StoredTerminalReceipt<'a> {
     outcome: ProviderGatewayTerminalOutcome,
     admission: &'a crate::ModelReservationTerminalReceipt,
     settled_at: &'a Instant,
-    actual_cost_micros: Option<u64>,
-    token_usage: Option<DurableProviderTokenUsage>,
-}
-
-#[derive(Clone, Copy, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-#[allow(clippy::struct_field_names)] // Mirrors ProviderTokenUsage in the durable terminal ledger.
-struct DurableProviderTokenUsage {
-    input_tokens: u64,
-    cached_input_tokens: u64,
-    cache_write_input_tokens: u64,
-    output_tokens: u64,
-    reasoning_output_tokens: u64,
-}
-
-impl From<ProviderTokenUsage> for DurableProviderTokenUsage {
-    fn from(usage: ProviderTokenUsage) -> Self {
-        Self {
-            input_tokens: usage.input_tokens,
-            cached_input_tokens: usage.cached_input_tokens,
-            cache_write_input_tokens: usage.cache_write_input_tokens,
-            output_tokens: usage.output_tokens,
-            reasoning_output_tokens: usage.reasoning_output_tokens,
-        }
-    }
-}
-
-impl From<DurableProviderTokenUsage> for ProviderTokenUsage {
-    fn from(usage: DurableProviderTokenUsage) -> Self {
-        Self {
-            input_tokens: usage.input_tokens,
-            cached_input_tokens: usage.cached_input_tokens,
-            cache_write_input_tokens: usage.cache_write_input_tokens,
-            output_tokens: usage.output_tokens,
-            reasoning_output_tokens: usage.reasoning_output_tokens,
-        }
-    }
 }
 
 #[derive(Deserialize)]
@@ -1879,51 +1829,18 @@ struct DurableTerminalReceipt {
     outcome: ProviderGatewayTerminalOutcome,
     admission: crate::ModelReservationTerminalReceipt,
     settled_at: Instant,
-    actual_cost_micros: Option<u64>,
-    token_usage: Option<DurableProviderTokenUsage>,
 }
 
 fn terminal_receipt_json(
     receipt: &ProviderGatewayTerminalReceipt,
-    command: ProviderGatewayTerminal,
 ) -> Result<Vec<u8>, ModelExecutionRuntimeError> {
-    let accounting = match command {
-        ProviderGatewayTerminal::Completed {
-            usage,
-            actual_cost_micros,
-        } => Some(ProviderGatewayTerminalCharge {
-            usage,
-            actual_cost_micros,
-        }),
-        ProviderGatewayTerminal::Failed { charge, .. } => charge,
-        ProviderGatewayTerminal::Cancelled => None,
-    };
     serde_json::to_vec(&StoredTerminalReceipt {
         model_exchange_id: &receipt.model_exchange_id,
         outcome: receipt.outcome,
         admission: &receipt.admission,
         settled_at: &receipt.settled_at,
-        actual_cost_micros: accounting.map(|accounting| accounting.actual_cost_micros),
-        token_usage: accounting.map(|accounting| accounting.usage.into()),
     })
     .map_err(|_| ModelExecutionRuntimeError::new(ModelExecutionRuntimeErrorKind::Storage))
-}
-
-fn decode_terminal_accounting(
-    bytes: &[u8],
-) -> Result<Option<ProviderGatewayTerminalCharge>, ModelExecutionRuntimeError> {
-    let receipt: DurableTerminalReceipt = serde_json::from_slice(bytes)
-        .map_err(|_| ModelExecutionRuntimeError::new(ModelExecutionRuntimeErrorKind::Storage))?;
-    match (receipt.token_usage, receipt.actual_cost_micros) {
-        (Some(usage), Some(actual_cost_micros)) => Ok(Some(ProviderGatewayTerminalCharge {
-            usage: usage.into(),
-            actual_cost_micros,
-        })),
-        (None, None) => Ok(None),
-        _ => Err(ModelExecutionRuntimeError::new(
-            ModelExecutionRuntimeErrorKind::ContextCorrupt,
-        )),
-    }
 }
 
 fn decode_terminal_receipt(
@@ -2052,7 +1969,6 @@ fn gateway_kind(kind: ProviderGatewayErrorKind) -> &'static str {
         ProviderGatewayErrorKind::ProviderDisabled => "provider_disabled",
         ProviderGatewayErrorKind::ModelNotFound => "model_not_found",
         ProviderGatewayErrorKind::ModelDisabled => "model_disabled",
-        ProviderGatewayErrorKind::StructuredOutputUnsupported => "structured_output_unsupported",
         ProviderGatewayErrorKind::CredentialUnavailable => "credential_unavailable",
         ProviderGatewayErrorKind::CredentialScopeMismatch => "credential_scope_mismatch",
         ProviderGatewayErrorKind::AdapterNotRegistered => "adapter_not_registered",
