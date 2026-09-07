@@ -44,15 +44,15 @@ use sha2::{Digest, Sha256};
 use winwincode_api::generated::{
     Actor, CredentialReferenceCreateCommand, CredentialReferenceCreateCommandCommand,
     CredentialReferenceCreatePayload, ModelRoute, OrganizationScope, OrganizationScopeKind,
-    RepositoryScope, SchemaVersion, Scope, UserActor, UserActorKind,
+    Scope,
 };
 use winwincode_control_plane::{
     CatalogAvailability, CredentialReferenceErrorKind, CredentialReferenceService,
     LocalSecretStoreAdapter, ModelCapability, ModelSelection, ModelSettingsRequest,
     ModelSettingsService, ModelSettingsTarget, ModelSettingsValues, ModelToolSupport,
-    ProviderCatalogRequest, ProviderCatalogService, ProviderDescriptor, ResolvedSecret,
+    ProviderCatalogRequest, ProviderCatalogService, ProviderDescriptor, ResolvedSecret, StructuredOutputSupport,
 };
-use winwincode_domain::{CredentialReferenceId, RequestId, Revision, UserId};
+use winwincode_domain::{CredentialReferenceId, RepositoryScope, Revision, SchemaVersion, UserActor, UserActorKind, RequestId, UserId};
 use winwincode_storage::SqliteStorage;
 
 use crate::runtime::crockford_26;
@@ -128,7 +128,6 @@ pub fn configure_local_model_authority(
         repository_scope,
         &organization_scope,
         model_route,
-        occurred_at.clone(),
     )?;
     converge_model_settings(
         storage,
@@ -212,7 +211,6 @@ fn converge_provider_catalog(
     repository_scope: &RepositoryScope,
     organization_scope: &OrganizationScope,
     model_route: &LocalModelRoute,
-    occurred_at: winwincode_domain::Instant,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let organization = Scope::OrganizationScope(organization_scope.clone());
     let descriptor = local_provider_descriptor(model_route);
@@ -246,7 +244,6 @@ fn converge_provider_catalog(
             expected_catalog_version: catalog.catalog_version,
         },
         &descriptor,
-        occurred_at,
     )?;
     Ok(())
 }
@@ -262,7 +259,7 @@ fn converge_model_settings(
     repository_scope: &RepositoryScope,
     organization_scope: &OrganizationScope,
     model_route: &LocalModelRoute,
-    occurred_at: winwincode_domain::Instant,
+    _occurred_at: winwincode_domain::Instant,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let route = model_route.as_api_route();
     let target = ModelSettingsTarget::Organization {
@@ -319,6 +316,7 @@ fn local_provider_descriptor(model_route: &LocalModelRoute) -> ProviderDescripto
             context_window_tokens: 128_000,
             max_output_tokens: 16_000,
             tool_support: ModelToolSupport::Parallel,
+            structured_output_support: StructuredOutputSupport::JsonSchemaStrict,
             reasoning_efforts: vec!["high".to_owned(), "medium".to_owned()],
         }],
     }

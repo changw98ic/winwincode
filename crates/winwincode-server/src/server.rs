@@ -27,11 +27,11 @@ use winwincode_api::generated::{
     Actor, AuthSessionRequest, ControlPlaneWebSocketProtocolErrorFrame,
     ControlPlaneWebSocketProtocolErrorFrameTypeValue, ControlPlaneWebSocketServerFrame, Error,
     ErrorDetailValue, ErrorDetails, ErrorEnvelope, RetryableError, RetryableErrorCode,
-    TerminalError, TerminalErrorCode, UserActor, UserActorKind,
+    TerminalError, TerminalErrorCode,
 };
 use winwincode_control_plane::{CredentialLeakGate, CredentialOutputBoundary};
 use winwincode_domain::{
-    RequestId, Revision, SchemaVersion, UserAccount, UserAccountRole, UserAccountState, UserId,
+    RequestId, Revision, SchemaVersion, UserAccount, UserAccountRole, UserAccountState, UserActor, UserActorKind, UserId,
 };
 
 use crate::application::{StandaloneApplicationClock, SystemStandaloneApplicationClock};

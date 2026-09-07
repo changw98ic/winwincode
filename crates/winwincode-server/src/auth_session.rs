@@ -25,11 +25,11 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
-use winwincode_api::generated::{Actor, AuthSessionResponse, Scope, UserActor, UserActorKind};
+use winwincode_api::generated::{Actor, AuthSessionResponse, Scope};
 use winwincode_control_plane::{
     BrowserSessionLifecycleError, BrowserSessionLifecyclePort, ExternalAuthenticationOutcome,
 };
-use winwincode_domain::{Instant, SchemaVersion, UserId};
+use winwincode_domain::{Instant, SchemaVersion, UserActor, UserActorKind, UserId};
 
 use crate::login_rate_limiter::LoginRateLimiter;
 use crate::transport::{
