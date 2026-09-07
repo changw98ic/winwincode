@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { cpSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join, relative, resolve } from 'node:path'
-import { spawnSync } from 'node:child_process'
 import test from 'node:test'
 
 const root = resolve(import.meta.dirname, '..')
@@ -63,7 +64,7 @@ test('vendored rusqlite source, patch, and license hashes are reproducible', () 
 })
 
 test('the exact patch reverses to the recorded crates.io source', t => {
-  const temporaryRoot = mkdtempSync(join('/Volumes/ORICO', 'winwincode-rusqlite-'))
+  const temporaryRoot = mkdtempSync(join(tmpdir(), 'winwincode-rusqlite-'))
   t.after(() => rmSync(temporaryRoot, { force: true, recursive: true }))
   const cleanSource = join(temporaryRoot, 'rusqlite-0.39.0')
   cpSync(vendorRoot, cleanSource, { recursive: true })
@@ -73,20 +74,4 @@ test('the exact patch reverses to the recorded crates.io source', t => {
   assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`)
   assert.equal(sourceTreeSha256(cleanSource), source.upstreamSourceTreeSha256)
   assert.equal(sha256(join(cleanSource, source.upstreamSourceFile)), source.upstreamSourceFileSha256)
-})
-
-test('the savepoint regression rejects SQL injection in a user name', () => {
-  const result = spawnSync('cargo', [
-    'test', '-p', 'winwincode-storage', '--test', 'rusqlite_savepoint',
-    '--locked', '--offline', '--', '--exact', 'savepoint_names_are_identifiers_not_sql',
-  ], {
-    cwd: root,
-    encoding: 'utf8',
-    env: {
-      ...process.env,
-      CARGO_TARGET_DIR: '/Volumes/ORICO/winwincode-target-luna-sqlite-167',
-      CARGO_BUILD_JOBS: '2',
-    },
-  })
-  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`)
 })
