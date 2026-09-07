@@ -20735,6 +20735,28 @@
       ],
       "type": "string"
     },
+    "ProbeReducerReasonCode": {
+      "enum": [
+        "l0_sufficient",
+        "l1_sufficient",
+        "provider_completed",
+        "provider_rate_limited",
+        "provider_timeout",
+        "provider_infrastructure",
+        "invalid_json",
+        "unknown_field",
+        "prompt_injection",
+        "output_budget_exceeded"
+      ],
+      "type": "string"
+    },
+    "ProbeReducerStatus": {
+      "enum": [
+        "completed",
+        "inconclusive"
+      ],
+      "type": "string"
+    },
     "ProbeResourceClaim": {
       "additionalProperties": false,
       "description": "Complete resource declaration revalidated by the host before scheduling. Candidate workspace access is always read-only.",
@@ -21290,6 +21312,16 @@
           "type": "array",
           "uniqueItems": true
         },
+        "reducer": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ProbeRoundReducerSupplement"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "schemaVersion": {
           "maximum": 1,
           "minimum": 1,
@@ -21353,6 +21385,111 @@
         "stale"
       ],
       "type": "string"
+    },
+    "ProbeRoundReducerSupplement": {
+      "additionalProperties": false,
+      "description": "Bounded, read-only reducer result. It never changes the hard facts in the enclosing probe receipt.",
+      "properties": {
+        "contradictingHypothesisIds": {
+          "items": {
+            "$ref": "#/$defs/DebugHypothesisId"
+          },
+          "maxItems": 16,
+          "minItems": 0,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "evidenceArtifactRefs": {
+          "items": {
+            "$ref": "#/$defs/ArtifactReference"
+          },
+          "maxItems": 16,
+          "minItems": 0,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "inputDigest": {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "operationId": {
+          "maxLength": 85,
+          "minLength": 85,
+          "pattern": "^probe-reducer:sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "outputDigest": {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "providerCalls": {
+          "maximum": 1,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "reasonCode": {
+          "$ref": "#/$defs/ProbeReducerReasonCode"
+        },
+        "rootCauses": {
+          "items": {
+            "maxLength": 200,
+            "minLength": 1,
+            "pattern": "^[^\\u0000\\r\\n]+$",
+            "type": "string"
+          },
+          "maxItems": 16,
+          "minItems": 0,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "schemaVersion": {
+          "maximum": 1,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "status": {
+          "$ref": "#/$defs/ProbeReducerStatus"
+        },
+        "summary": {
+          "maxLength": 500,
+          "minLength": 1,
+          "pattern": "^[^\\u0000\\r\\n]+$",
+          "type": "string"
+        },
+        "supportingHypothesisIds": {
+          "items": {
+            "$ref": "#/$defs/DebugHypothesisId"
+          },
+          "maxItems": 16,
+          "minItems": 0,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "usage": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ExecutionOutcomeUsage"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "operationId",
+        "status",
+        "reasonCode",
+        "summary",
+        "rootCauses",
+        "evidenceArtifactRefs",
+        "supportingHypothesisIds",
+        "contradictingHypothesisIds",
+        "inputDigest",
+        "outputDigest",
+        "providerCalls",
+        "usage"
+      ],
+      "type": "object"
     },
     "ProbeRoundStatus": {
       "description": "Closed status for one probe round.",
@@ -28126,7 +28263,7 @@
     "https://schemas.winwincode.dev/winwincode/v1/domain.schema.json",
     "https://schemas.winwincode.dev/winwincode/v1/execution-port.schema.json"
   ],
-  "x-source-digest": "sha256:03020d648f49ec60f21cfac3f31bc425437e1cb7ffbba35432ee810079d9951c",
+  "x-source-digest": "sha256:754a86a7355a92b83cc7e86c9f334040f608f314d70c451bdde3d0d51a5f4e5a",
   "x-winwincode-client-metadata": {
     "http": {
       "authentication": {

@@ -561,6 +561,56 @@ pub fn validate_probe_execution_receipt(
     Ok(())
 }
 
+fn validate_reducer_supplement(
+    supplement: Option<&crate::generated::ProbeRoundReducerSupplement>,
+) -> Result<(), DebugProbeContractError> {
+    let Some(supplement) = supplement else {
+        return Ok(());
+    };
+    if supplement.schema_version != 1
+        || !supplement.operation_id.starts_with("probe-reducer:sha256:")
+        || supplement.operation_id.len() != 85
+        || !(0..=1).contains(&supplement.provider_calls)
+        || (supplement.provider_calls == 0 && supplement.usage.is_some())
+        || (supplement.provider_calls == 0
+            && !matches!(
+                supplement.reason_code,
+                crate::generated::ProbeReducerReasonCode::L0Sufficient
+                    | crate::generated::ProbeReducerReasonCode::L1Sufficient
+            ))
+        || (matches!(
+            supplement.reason_code,
+            crate::generated::ProbeReducerReasonCode::ProviderCompleted
+        ) && supplement.status != crate::generated::ProbeReducerStatus::Completed)
+        || (matches!(
+            supplement.reason_code,
+            crate::generated::ProbeReducerReasonCode::ProviderRateLimited
+                | crate::generated::ProbeReducerReasonCode::ProviderTimeout
+                | crate::generated::ProbeReducerReasonCode::ProviderInfrastructure
+                | crate::generated::ProbeReducerReasonCode::InvalidJson
+                | crate::generated::ProbeReducerReasonCode::UnknownField
+                | crate::generated::ProbeReducerReasonCode::PromptInjection
+                | crate::generated::ProbeReducerReasonCode::OutputBudgetExceeded
+        ) && supplement.status != crate::generated::ProbeReducerStatus::Inconclusive)
+        || (supplement.provider_calls == 1
+            && matches!(
+                supplement.reason_code,
+                crate::generated::ProbeReducerReasonCode::L0Sufficient
+                    | crate::generated::ProbeReducerReasonCode::L1Sufficient
+            ))
+    {
+        return Err(invalid_plan("probe reducer supplement is inconsistent"));
+    }
+    if supplement
+        .supporting_hypothesis_ids
+        .iter()
+        .any(|id| supplement.contradicting_hypothesis_ids.contains(id))
+    {
+        return Err(invalid_plan("probe reducer hypothesis polarity overlaps"));
+    }
+    Ok(())
+}
+
 /// Validates the complete strictly ordered event history for one probe.
 ///
 /// # Errors
@@ -822,6 +872,7 @@ pub fn validate_probe_round_receipt(
         ));
     }
     validate_error_shape(receipt.error.as_ref())?;
+    validate_reducer_supplement(receipt.reducer.as_ref())?;
 
     if !round_receipt_status_valid(
         receipt,

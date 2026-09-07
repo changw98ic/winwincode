@@ -16,6 +16,7 @@ pub mod debug_probe_context;
 pub mod managed_session;
 mod probe_evidence;
 mod probe_process;
+pub mod probe_reducer;
 pub mod probe_scheduler;
 pub mod remote_transport;
 pub mod stage_product;

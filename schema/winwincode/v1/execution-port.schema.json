@@ -7471,6 +7471,111 @@
         }
       ]
     },
+    "ProbeRoundReducerSupplement": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schemaVersion": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1
+        },
+        "operationId": {
+          "type": "string",
+          "minLength": 85,
+          "maxLength": 85,
+          "pattern": "^probe-reducer:sha256:[0-9a-f]{64}$"
+        },
+        "status": {
+          "$ref": "#/$defs/ProbeReducerStatus"
+        },
+        "reasonCode": {
+          "$ref": "#/$defs/ProbeReducerReasonCode"
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500,
+          "pattern": "^[^\\u0000\\r\\n]+$"
+        },
+        "rootCauses": {
+          "type": "array",
+          "minItems": 0,
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "pattern": "^[^\\u0000\\r\\n]+$"
+          }
+        },
+        "evidenceArtifactRefs": {
+          "type": "array",
+          "minItems": 0,
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/ArtifactReference"
+          }
+        },
+        "supportingHypothesisIds": {
+          "type": "array",
+          "minItems": 0,
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "./domain.schema.json#/$defs/DebugHypothesisId"
+          }
+        },
+        "contradictingHypothesisIds": {
+          "type": "array",
+          "minItems": 0,
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "./domain.schema.json#/$defs/DebugHypothesisId"
+          }
+        },
+        "inputDigest": {
+          "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+        },
+        "outputDigest": {
+          "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+        },
+        "providerCalls": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "usage": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ExecutionOutcomeUsage"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "operationId",
+        "status",
+        "reasonCode",
+        "summary",
+        "rootCauses",
+        "evidenceArtifactRefs",
+        "supportingHypothesisIds",
+        "contradictingHypothesisIds",
+        "inputDigest",
+        "outputDigest",
+        "providerCalls",
+        "usage"
+      ],
+      "description": "Bounded, read-only reducer result. It never changes the hard facts in the enclosing probe receipt."
+    },
     "ProbeRoundReceipt": {
       "type": "object",
       "additionalProperties": false,
@@ -7519,6 +7624,16 @@
         },
         "finishedAt": {
           "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "reducer": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ProbeRoundReducerSupplement"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -9124,6 +9239,28 @@
         "stale"
       ],
       "description": "Closed terminal status retained by one probe execution receipt."
+    },
+    "ProbeReducerStatus": {
+      "type": "string",
+      "enum": [
+        "completed",
+        "inconclusive"
+      ]
+    },
+    "ProbeReducerReasonCode": {
+      "type": "string",
+      "enum": [
+        "l0_sufficient",
+        "l1_sufficient",
+        "provider_completed",
+        "provider_rate_limited",
+        "provider_timeout",
+        "provider_infrastructure",
+        "invalid_json",
+        "unknown_field",
+        "prompt_injection",
+        "output_budget_exceeded"
+      ]
     },
     "ProbeRoundReceiptStatus": {
       "type": "string",

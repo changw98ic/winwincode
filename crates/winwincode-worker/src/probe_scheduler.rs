@@ -575,6 +575,10 @@ impl ProbeRoundRequest {
             workspace_root: workspace_root.into(),
         }
     }
+
+    pub(crate) const fn expected_authority(&self) -> &DebugProbeRoundAuthority {
+        &self.expected_authority
+    }
 }
 
 #[derive(Clone)]
@@ -1718,6 +1722,7 @@ fn canonical_round_receipt(
         finished_at,
         plan_digest: plan.plan().plan_digest.clone(),
         probe_receipts: receipts,
+        reducer: None,
         schema_version: 1,
         started_at: recovery.started_at.clone(),
         status: outcome.status,
