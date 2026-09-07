@@ -709,6 +709,14 @@ async fn one_origin_serves_authenticated_commands_queries_and_events() {
     .await;
     assert!(query.starts_with("HTTP/1.1 200 OK"), "{query}");
 
+    let clients = http_request(
+        address,
+        &cookie_get("/api/v1/clients", "https://client.example", &session_cookie),
+    )
+    .await;
+    assert!(clients.starts_with("HTTP/1.1 404 Not Found"), "{clients}");
+    assert!(clients.contains("access-control-allow-origin: https://client.example"));
+
     assert_websocket_session(address, &session_cookie).await;
 
     assert_eq!(api.commands.lock().expect("commands").len(), 1);

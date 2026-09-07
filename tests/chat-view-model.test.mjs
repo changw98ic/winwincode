@@ -54,7 +54,6 @@ const projectScope = {
   workspaceId: scope.workspaceId,
   projectId: scope.projectId,
 }
-const subscriptionId = 'sub_00000000000000000000000001'
 const credentialReferenceId = 'crd_00000000000000000000000001'
 const modelRoute = {
   providerId: 'provider',
@@ -69,6 +68,10 @@ const secondModelRoute = {
 
 function requestId(value) {
   return `req_${String(value).padStart(26, '0')}`
+}
+
+function subscriptionId(value) {
+  return `sub_${String(value).padStart(26, '0')}`
 }
 
 function page(nextCursor = null) {
@@ -271,6 +274,7 @@ class FakeClient {
   availabilitySubscriptions = []
   subscriptionClosed = false
   availabilitySubscriptionsClosed = 0
+  subscriptionIds = new Set()
   reconnects = 0
   queryImplementation = null
 
@@ -307,6 +311,8 @@ class FakeClient {
   }
 
   subscribe(options) {
+    assert.equal(this.subscriptionIds.has(options.subscriptionId), false)
+    this.subscriptionIds.add(options.subscriptionId)
     const availability = options.subscription.stream.kind === 'scope'
     if (availability) {
       this.availabilitySubscriptions.push(options)
@@ -330,6 +336,7 @@ class FakeClient {
 
 function view(client = new FakeClient(), overrides = {}) {
   let next = 0
+  let nextSubscription = 0
   return {
     client,
     model: createChatViewModel({
@@ -337,7 +344,10 @@ function view(client = new FakeClient(), overrides = {}) {
       actor,
       scope,
       productSessionId,
-      subscriptionId,
+      nextSubscriptionId() {
+        nextSubscription += 1
+        return subscriptionId(nextSubscription)
+      },
       nextRequestId() {
         next += 1
         return requestId(next)

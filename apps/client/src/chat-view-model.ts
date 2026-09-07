@@ -125,7 +125,7 @@ export interface ChatViewModelOptions {
   readonly actor: Actor
   readonly scope: RepositoryScope
   readonly productSessionId: ProductSessionId | null
-  readonly subscriptionId: ControlPlaneWebSocketSubscriptionId
+  readonly nextSubscriptionId: () => ControlPlaneWebSocketSubscriptionId
   readonly nextRequestId: () => RequestId
   /** Keep the browser route bound to the ProductSession selected by this view-model. */
   readonly onActiveSessionChange?: (productSessionId: ProductSessionId) => void
@@ -407,30 +407,6 @@ function modelRouteIdentity(route: ModelRoute): string {
 function isReadyModelRoute(candidate: ModelRouteAvailabilityProjection): boolean {
   return candidate.status === ModelRouteAvailabilityStatus.Enabled
     && candidate.reason === ModelRouteAvailabilityReason.Ready
-}
-
-function availabilitySubscriptionId(
-  subscriptionId: ControlPlaneWebSocketSubscriptionId,
-  offset: number,
-): ControlPlaneWebSocketSubscriptionId {
-  const alphabet = '0123456789ABCDEFGHJKMNPQRSTVWXYZ'
-  const value = [...subscriptionId]
-  let carry = offset
-  for (let index = value.length - 1; index >= 4 && carry > 0; index -= 1) {
-    const digit = alphabet.indexOf(value[index] ?? '')
-    if (digit < 0) throw clientFailure(
-      'CHAT_SUBSCRIPTION_ID_INVALID',
-      'The Chat subscription identity is not canonical.',
-    )
-    const sum = digit + carry
-    value[index] = alphabet[sum % alphabet.length] ?? '0'
-    carry = Math.floor(sum / alphabet.length)
-  }
-  if (carry > 0) throw clientFailure(
-    'CHAT_SUBSCRIPTION_ID_EXHAUSTED',
-    'The Chat subscription identity range is exhausted.',
-  )
-  return value.join('') as ControlPlaneWebSocketSubscriptionId
 }
 
 function assertRuntime(
@@ -1315,9 +1291,9 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
     }
     add(availability.requestPoolSource, 'request-pool')
 
-    modelRouteRealtime = [...bindings.values()].map((binding, index) => (
+    modelRouteRealtime = [...bindings.values()].map(binding => (
       options.client.subscribe({
-        subscriptionId: availabilitySubscriptionId(options.subscriptionId, index + 1),
+        subscriptionId: options.nextSubscriptionId(),
         subscription: {
           scope: binding.scope,
           stream: { kind: 'scope' },
@@ -1363,7 +1339,7 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
     const productSessionId = requireActiveSession()
     realtime?.close()
     realtime = options.client.subscribe({
-      subscriptionId: options.subscriptionId,
+      subscriptionId: options.nextSubscriptionId(),
       subscription: {
         scope: options.scope,
         stream: { kind: 'product-session', productSessionId },

@@ -401,7 +401,7 @@ function strongFlowHash(detail) {
     throw new Error('the Delivery has no canonical Codex StageRun binding')
   }
   return `#/strongflow?delivery=${deliveryId}`
-    + `&session=${stage.sessionBinding.productSessionId}&stageRun=${stage.id}`
+    + `&session=${stage.sessionBinding.productSessionId}&stageRun=${stage.id}&view=unified`
 }
 
 function browserEvidence() {

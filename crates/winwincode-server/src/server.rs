@@ -573,8 +573,18 @@ async fn client_control_exchange(
 /// The signed-in user's Client directory: one `DeviceSummary` card per
 /// granted Client (§16.4).
 async fn list_clients(State(state): State<ServerState>, headers: HeaderMap, uri: Uri) -> Response {
+    let origin = match allowed_origin(&state, &headers) {
+        Ok(origin) => origin,
+        Err(error) => return error.into_response(),
+    };
     let Some(application) = &state.client_connections else {
-        return not_found().await;
+        return error_response(
+            StatusCode::NOT_FOUND,
+            "NOT_FOUND",
+            "public endpoint not found",
+            None,
+            origin.as_ref(),
+        );
     };
     let (principal, origin, _) = match authorize(&state, &headers, &uri) {
         Ok(authorized) => authorized,

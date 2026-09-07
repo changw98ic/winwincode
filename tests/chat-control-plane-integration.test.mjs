@@ -226,10 +226,10 @@ function transportLimits() {
   }
 }
 
-function eventFrame(sequence, event, id = productSessionId) {
+function eventFrame(sequence, event, id = productSessionId, activeSubscriptionId = subscriptionId) {
   return {
     type: 'event.v1',
-    subscriptionId,
+    subscriptionId: activeSubscriptionId,
     eventId: eventId(sequence),
     scope,
     stream: { kind: 'product-session', productSessionId: id },
@@ -241,20 +241,20 @@ function eventFrame(sequence, event, id = productSessionId) {
   }
 }
 
-function acceptedFrame(activeCursor) {
+function acceptedFrame(activeCursor, activeSubscriptionId = subscriptionId) {
   return {
     type: 'transport.subscription-accepted.v1',
-    subscriptionId,
+    subscriptionId: activeSubscriptionId,
     cursor: activeCursor,
     authorizationEpoch: 1,
     limits: transportLimits(),
   }
 }
 
-function resumedFrame(after) {
+function resumedFrame(after, activeSubscriptionId = subscriptionId) {
   return {
     type: 'transport.resume-accepted.v1',
-    subscriptionId,
+    subscriptionId: activeSubscriptionId,
     after,
     replayThrough: after,
     authorizationEpoch: 1,
@@ -484,12 +484,16 @@ test('Chat contract fake keeps sessions isolated, deduplicates events, and resum
     },
   })
   let nextRequest = 0
+  let nextSubscription = 0
   const model = createChatViewModel({
     client,
     actor,
     scope,
     productSessionId,
-    subscriptionId,
+    nextSubscriptionId() {
+      nextSubscription += 1
+      return `sub_${String(nextSubscription).padStart(26, '0')}`
+    },
     nextRequestId() {
       nextRequest += 1
       return requestId(nextRequest)
@@ -524,12 +528,12 @@ test('Chat contract fake keeps sessions isolated, deduplicates events, and resum
   const subscribe = firstSocket.sent[0]
   assert.equal(subscribe.type, 'transport.subscribe.v1')
   assert.deepEqual(subscribe.startAt, cursor(productSessionId))
-  firstSocket.receive(acceptedFrame(subscribe.startAt))
+  firstSocket.receive(acceptedFrame(subscribe.startAt, subscribe.subscriptionId))
   const appended = eventFrame(1, {
     type: 'product-session.message.appended.v1',
     productSessionId,
     message: message(2),
-  })
+  }, productSessionId, subscribe.subscriptionId)
   firstSocket.receive(appended)
   await flush()
   assert.deepEqual(model.state.messages.map(item => item.sequence), [1, 2])
@@ -547,7 +551,10 @@ test('Chat contract fake keeps sessions isolated, deduplicates events, and resum
   resumedSocket.open()
   assert.equal(resumedSocket.sent[0].type, 'transport.resume.v1')
   assert.deepEqual(resumedSocket.sent[0].after, cursor(productSessionId, 1))
-  resumedSocket.receive(resumedFrame(resumedSocket.sent[0].after))
+  resumedSocket.receive(resumedFrame(
+    resumedSocket.sent[0].after,
+    resumedSocket.sent[0].subscriptionId,
+  ))
 
   resumedSocket.receive(eventFrame(2, {
     type: 'approval.changed.v1',
@@ -557,7 +564,7 @@ test('Chat contract fake keeps sessions isolated, deduplicates events, and resum
     subject: 'Allow one bounded tool call',
     requestedBy: actor,
     decidedBy: null,
-  }))
+  }, productSessionId, resumedSocket.sent[0].subscriptionId))
   await flush()
   assert.deepEqual(model.state.pendingApprovals.map(item => item.id), [approvalId])
   assert.equal(resumedSocket.sent.at(-1).cursor.sequence, 2)
@@ -574,7 +581,7 @@ test('Chat contract fake keeps sessions isolated, deduplicates events, and resum
     subject: 'Must not enter another Chat',
     requestedBy: actor,
     decidedBy: null,
-  }))
+  }, productSessionId, resumedSocket.sent[0].subscriptionId))
   await flush()
   assert.deepEqual(model.state.messages.map(item => item.id), messageIdentityBefore)
   assert.equal(fake.requests.filter(

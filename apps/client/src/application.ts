@@ -868,7 +868,7 @@ export function mountWinWinCodeClient(
         actor: context.actor,
         scope: context.scope,
         productSessionId,
-        subscriptionId: contractId(
+        nextSubscriptionId: () => contractId(
           'sub',
           browser.crypto,
         ) as ControlPlaneWebSocketSubscriptionId,
