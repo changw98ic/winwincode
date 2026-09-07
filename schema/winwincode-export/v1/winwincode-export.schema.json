@@ -1,0 +1,128 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.winwincode.dev/export/v1/winwincode-export.schema.json",
+  "title": "WinWinCode database-neutral one-time export",
+  "description": "String lengths count Unicode code points. A complete document must pass the 16777216-byte pre-parse gate and the normative canonical-json.md byte-encoding adjunct.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "format",
+    "exportId",
+    "contentSha256",
+    "content"
+  ],
+  "properties": {
+    "format": {
+      "type": "string",
+      "const": "winwincode-export/v1"
+    },
+    "exportId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9_.:-]+$"
+    },
+    "contentSha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "content": {
+      "$ref": "#/$defs/content"
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "sourceId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^(?!\\s)(?!/|~/|file://|\\\\\\\\|[A-Za-z]:[\\\\/])(?![\\s\\S]*[\\p{Cc}\\p{Cs}])[\\s\\S]*\\S$"
+    },
+    "slug": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$"
+    },
+    "displayName": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^(?!\\s)(?!/|~/|file://|\\\\\\\\|[A-Za-z]:[\\\\/])(?![\\s\\S]*[\\p{Cc}\\p{Cs}])[\\s\\S]*\\S$"
+    },
+    "organization": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sourceOrganizationId",
+        "slug",
+        "displayName"
+      ],
+      "properties": {
+        "sourceOrganizationId": {
+          "$ref": "#/$defs/sourceId"
+        },
+        "slug": {
+          "$ref": "#/$defs/slug"
+        },
+        "displayName": {
+          "$ref": "#/$defs/displayName"
+        }
+      }
+    },
+    "project": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sourceProjectId",
+        "sourceOrganizationId",
+        "slug",
+        "displayName"
+      ],
+      "properties": {
+        "sourceProjectId": {
+          "$ref": "#/$defs/sourceId"
+        },
+        "sourceOrganizationId": {
+          "$ref": "#/$defs/sourceId"
+        },
+        "slug": {
+          "$ref": "#/$defs/slug"
+        },
+        "displayName": {
+          "$ref": "#/$defs/displayName"
+        }
+      }
+    },
+    "content": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "profileDisplayName",
+        "organizations",
+        "projects"
+      ],
+      "properties": {
+        "profileDisplayName": {
+          "$ref": "#/$defs/displayName"
+        },
+        "organizations": {
+          "type": "array",
+          "maxItems": 10000,
+          "items": {
+            "$ref": "#/$defs/organization"
+          }
+        },
+        "projects": {
+          "type": "array",
+          "maxItems": 100000,
+          "items": {
+            "$ref": "#/$defs/project"
+          }
+        }
+      }
+    }
+  }
+}

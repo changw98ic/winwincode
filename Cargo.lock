@@ -12687,6 +12687,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "winwincode-data-export"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+]
+
+[[package]]
 name = "winwincode-delivery"
 version = "0.1.0-alpha.1"
 dependencies = [
