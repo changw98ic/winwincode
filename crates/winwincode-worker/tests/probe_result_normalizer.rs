@@ -6,18 +6,24 @@ use std::sync::{
 };
 use std::time::Duration;
 
+use sha2::{Digest as _, Sha256};
 use tempfile::TempDir;
 use winwincode_domain::{
-    CodexThreadId, DebugHypothesisId, DebugSessionId, ExecutionJobId, FencingToken, Instant,
-    LeaseId, ProbeId, ProbeRoundId, ProductSessionId, RepositoryId, SessionIdentity, Sha256Digest,
-    WorkerSessionId, WorkspaceRevision,
+    ArtifactId, CodexThreadId, DebugHypothesisId, DebugSessionId, ExecutionJobId, FencingToken,
+    Instant, LeaseId, ProbeId, ProbeRoundId, ProductSessionId, RepositoryId, SessionIdentity,
+    Sha256Digest, WorkerSessionId, WorkspaceRevision,
 };
 use winwincode_execution_port::{
+    debug_hypothesis_ledger::{
+        DebugHypothesisLedgerReducer, canonical_probe_round_receipt_bytes,
+        seal_debug_hypothesis_round_evidence,
+    },
     debug_probe_contract::{
         derive_debug_probe_plan_digest, derive_probe_budget_digest, derive_probe_command_arg_bytes,
-        derive_probe_definition_digest,
+        derive_probe_definition_digest, seal_debug_probe_plan,
     },
     generated::{
+        ArtifactReference, DebugHypothesis, DebugHypothesisLedgerSeed, DebugHypothesisStatus,
         DebugProbeErrorCode, DebugProbeKind, DebugProbePlan, DebugProbeRoundAuthority,
         DiagnosticParserVersion, ProbeCommandSpec, ProbeCompletionRule, ProbeCompletionRuleKind,
         ProbeEvidenceCompletenessStatus, ProbeEvidenceIncompleteReason, ProbeNetworkAccess,
@@ -25,7 +31,7 @@ use winwincode_execution_port::{
         ProbeRoundBudget, ProbeRoundCompletionReason, ProbeRoundReceiptStatus,
         ProbeSideEffectClass, ProbeSpec, ProbeStackParserVersion, ProbeWorkspaceAccess,
     },
-    probe_result_normalizer::derive_probe_normalizer_profile_digest,
+    probe_result_normalizer::{derive_probe_normalizer_profile_digest, project_probe_evidence},
 };
 
 #[path = "fixtures/probe-result-normalizer/v1/mod.rs"]
@@ -34,6 +40,10 @@ use winwincode_worker::probe_scheduler::{
     AdmittedProbe, ProbeClock, ProbeExecutionCompletion, ProbePriorEvidence, ProbeRoundRequest,
     ProbeRunCancellation, ProbeRunFacts, ProbeRunTermination, ProbeRunner, ProbeRunnerFuture,
     ProbeScheduler, ProbeSchedulerError, TrustedPureReadTemplate,
+};
+use winwincode_worker::{
+    context_safety::WorkerContextSafetyScanner,
+    debug_probe_context::{WorkerDebugProbeContextInput, prepare_worker_debug_probe_context},
 };
 
 #[derive(Clone, Debug)]
@@ -144,6 +154,10 @@ impl ProbeClock for StepClock {
 
 fn digest(symbol: char) -> Sha256Digest {
     Sha256Digest(format!("sha256:{}", symbol.to_string().repeat(64)))
+}
+
+fn content_digest(bytes: &[u8]) -> Sha256Digest {
+    Sha256Digest(format!("sha256:{:x}", Sha256::digest(bytes)))
 }
 
 fn authority(round: char, environment: char) -> DebugProbeRoundAuthority {
@@ -334,6 +348,81 @@ async fn assert_stop_restart(
         receipt
     );
     assert_eq!(no_run_observer.calls(), 0);
+}
+
+#[tokio::test]
+async fn worker_assembles_only_bounded_round_evidence_with_its_fixed_scanner() {
+    let raw = b"raw log token=abcdefghijklmnop\n".to_vec();
+    let root = TempDir::new().expect("durable root");
+    let workspace = TempDir::new().expect("workspace");
+    let plan = plan('J', '1', raw.len());
+    let scheduler = ProbeScheduler::open_with_clock(
+        root.path(),
+        ArtifactRunner::new(raw.clone(), false),
+        vec![template(&plan, profile(None), None)],
+        StepClock::default(),
+    )
+    .expect("scheduler");
+    let request = request(&plan, &workspace);
+    let receipt = scheduler
+        .run_round(request.clone())
+        .await
+        .expect("terminal round");
+    let records = scheduler
+        .evidence_for_round(&request)
+        .expect("bounded evidence");
+    let projections = records
+        .iter()
+        .map(|record| {
+            project_probe_evidence(record.bundle(), record.bundle_artifact_ref().clone())
+                .expect("reproject exact retained evidence")
+        })
+        .collect::<Vec<_>>();
+    let sealed_plan = seal_debug_probe_plan(plan.clone(), &plan.authority).expect("validated plan");
+    let receipt_bytes = canonical_probe_round_receipt_bytes(&receipt).expect("receipt bytes");
+    let round_evidence = seal_debug_hypothesis_round_evidence(
+        &sealed_plan,
+        &receipt,
+        ArtifactReference {
+            artifact_id: ArtifactId("art_RRRRRRRRRRRRRRRRRRRRRRRRRR".to_owned()),
+            digest: content_digest(&receipt_bytes),
+        },
+        &projections,
+    )
+    .expect("sealed round evidence");
+    let hypothesis = &plan.probes[0].target_hypothesis_ids[0];
+    let ledger = DebugHypothesisLedgerReducer::initialize(DebugHypothesisLedgerSeed {
+        authority: plan.authority.clone(),
+        created_at: plan.created_at.clone(),
+        hypotheses: vec![DebugHypothesis {
+            confidence_bps: 0,
+            contradicting_evidence: Vec::new(),
+            created_round_id: plan.authority.round_id.clone(),
+            hypothesis_id: hypothesis.clone(),
+            last_updated_round_id: plan.authority.round_id.clone(),
+            status: DebugHypothesisStatus::Active,
+            summary: "The current revision may fail its static check".to_owned(),
+            supporting_evidence: Vec::new(),
+        }],
+        unresolved_questions: Vec::new(),
+    })
+    .expect("validated ledger");
+
+    let prepared = prepare_worker_debug_probe_context(&WorkerDebugProbeContextInput {
+        current_ledger: ledger.ledger(),
+        previous_context: None,
+        previous_ledger: None,
+        round_evidence: &round_evidence,
+    })
+    .expect("Worker context");
+    assert!(prepared.context().snippets.is_empty());
+    assert_eq!(prepared.context().omitted_snippet_count, 0);
+    assert_eq!(
+        prepared.context().safety_profile,
+        *WorkerContextSafetyScanner.profile()
+    );
+    let payload = std::str::from_utf8(prepared.canonical_bytes()).expect("UTF-8 context");
+    assert!(!payload.contains("raw log token=abcdefghijklmnop"));
 }
 
 #[tokio::test]

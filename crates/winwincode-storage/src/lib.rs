@@ -1800,6 +1800,71 @@ pub struct StateExecutionJobCommitReceipt {
     pub execution_job: ExecutionJobMutationReceipt,
 }
 
+/// Exact current execution authority that must still hold when one terminal
+/// round state commit starts writing.
+///
+/// The guard owns the complete queue and accepted-dispatch records rather than
+/// a caller-selected subset. This keeps scope, payload, attempt, revision,
+/// state, lease, Worker instance/session, fence, and lease times inside one
+/// compare-and-swap fact.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExecutionAuthorityCommitGuard {
+    expected_job: ExecutionJobRecord,
+    expected_dispatch: ExecutionDispatchAuthority,
+}
+
+impl ExecutionAuthorityCommitGuard {
+    /// Seals the authority accepted for a terminal-round state commit.
+    ///
+    /// Running and cancelling Jobs cover receipt processing before scheduler
+    /// settlement. Completed and failed Jobs cover the legal ordering where
+    /// the exact Registry lease was terminalized first.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a non-active/non-terminal Job or a queue record that differs
+    /// from the accepted dispatch's Job, payload, or attempt.
+    pub fn terminal_round(
+        expected_job: ExecutionJobRecord,
+        expected_dispatch: ExecutionDispatchAuthority,
+    ) -> Result<Self, StorageError> {
+        if !matches!(
+            expected_job.state,
+            ExecutionJobState::Running
+                | ExecutionJobState::Cancelling
+                | ExecutionJobState::Completed
+                | ExecutionJobState::Failed
+        ) {
+            return Err(StorageError::invalid_input(
+                "execution authority guard requires an active or terminal Job",
+            ));
+        }
+        let lease = expected_dispatch.lease();
+        if expected_job.job_id != lease.job_id
+            || expected_job.payload_digest != lease.payload_digest
+            || expected_job.attempt != lease.attempt
+        {
+            return Err(StorageError::invalid_input(
+                "execution authority guard queue and dispatch facts differ",
+            ));
+        }
+        Ok(Self {
+            expected_job,
+            expected_dispatch,
+        })
+    }
+
+    #[must_use]
+    pub const fn expected_job(&self) -> &ExecutionJobRecord {
+        &self.expected_job
+    }
+
+    #[must_use]
+    pub const fn expected_dispatch(&self) -> &ExecutionDispatchAuthority {
+        &self.expected_dispatch
+    }
+}
+
 /// Stable error categories exposed by storage adapters.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StorageErrorKind {
@@ -1861,6 +1926,14 @@ impl StorageError {
         Self {
             kind: StorageErrorKind::RevisionConflict,
             message: format!("expected revision {expected}, but current revision is {actual}"),
+            state_guard_conflict: false,
+        }
+    }
+
+    fn execution_authority_conflict(message: impl Into<String>) -> Self {
+        Self {
+            kind: StorageErrorKind::RevisionConflict,
+            message: message.into(),
             state_guard_conflict: false,
         }
     }
@@ -2036,6 +2109,30 @@ pub trait ProductStateStorage: Send {
         validate_state_execution_job_authority(commit, submission)?;
         Err(StorageError::adapter(
             "atomic state and execution job commit is unavailable",
+        ))
+    }
+
+    /// Atomically verifies one exact current execution authority before the
+    /// first state, journal, receipt, or outbox write.
+    ///
+    /// Exact command receipt replay is checked before current authority so a
+    /// previously committed result remains recoverable after the Job advances.
+    /// Callers should still perform receipt-first lookup before reconstructing
+    /// a command or current authority.
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter error unless the implementation can verify the
+    /// queue, Registry, and state commit in one transaction.
+    fn commit_with_execution_authority_guard(
+        &mut self,
+        commit: &StateCommit,
+        guard: &ExecutionAuthorityCommitGuard,
+    ) -> Result<CommitReceipt, StorageError> {
+        commit.validate()?;
+        validate_execution_authority_commit_scope(commit, guard)?;
+        Err(StorageError::adapter(
+            "atomic execution authority guard is unavailable",
         ))
     }
 
@@ -2550,6 +2647,23 @@ impl ProductStateStorage for SqliteStorage {
         })
     }
 
+    fn commit_with_execution_authority_guard(
+        &mut self,
+        commit: &StateCommit,
+        guard: &ExecutionAuthorityCommitGuard,
+    ) -> Result<CommitReceipt, StorageError> {
+        commit.validate()?;
+        validate_execution_authority_commit_scope(commit, guard)?;
+        let connection = self.connection_mut()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sql_error)?;
+        let receipt =
+            commit_with_execution_authority_guard_in_transaction(&transaction, commit, guard)?;
+        transaction.commit().map_err(sql_error)?;
+        Ok(receipt)
+    }
+
     fn load_execution_job_record(
         &self,
         job_id: &ExecutionJobId,
@@ -2994,11 +3108,103 @@ fn validate_state_execution_job_authority(
     Ok(())
 }
 
+fn validate_execution_authority_commit_scope(
+    commit: &StateCommit,
+    guard: &ExecutionAuthorityCommitGuard,
+) -> Result<(), StorageError> {
+    let PublicEventScope::Repository {
+        organization_id,
+        workspace_id,
+        project_id,
+        repository_id,
+    } = repository_scope_from_receipt_key(commit.receipt_identity.scope_key())?
+    else {
+        return Err(StorageError::invalid_input(
+            "execution authority guard requires a repository receipt scope",
+        ));
+    };
+    let expected = &guard.expected_job.scope;
+    if expected.organization_id != organization_id
+        || expected.workspace_id != workspace_id
+        || expected.project_id != project_id
+        || expected.repository_id != repository_id
+    {
+        return Err(StorageError::invalid_input(
+            "execution authority guard and state receipt repository scopes differ",
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn commit_in_transaction(
     transaction: &rusqlite::Transaction<'_>,
     commit: &StateCommit,
 ) -> Result<CommitReceipt, StorageError> {
     commit_in_transaction_with_claim_authority(transaction, commit, false)
+}
+
+fn commit_with_execution_authority_guard_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    commit: &StateCommit,
+    guard: &ExecutionAuthorityCommitGuard,
+) -> Result<CommitReceipt, StorageError> {
+    if let Some(prior) = prior_receipt(transaction, &commit.receipt_identity)? {
+        return replay_receipt(transaction, commit, prior);
+    }
+    let actual_job =
+        repository_scheduler::load_execution_job_by_id(transaction, &guard.expected_job.job_id)?
+            .ok_or_else(|| {
+                StorageError::execution_authority_conflict(
+                    "execution authority guard Job is no longer current",
+                )
+            })?;
+    if actual_job != guard.expected_job {
+        return Err(StorageError::execution_authority_conflict(
+            "execution authority guard Job facts changed",
+        ));
+    }
+    let actual_dispatch = execution_registry::load_dispatch_authority_in_transaction(
+        transaction,
+        &guard.expected_job.job_id,
+    )?
+    .ok_or_else(|| {
+        StorageError::execution_authority_conflict(
+            "execution authority guard dispatch is no longer current",
+        )
+    })?;
+    if actual_dispatch != guard.expected_dispatch {
+        return Err(StorageError::execution_authority_conflict(
+            "execution authority guard dispatch facts changed",
+        ));
+    }
+    if !execution_registry::execution_worker_instance_is_current_in_transaction(
+        transaction,
+        &actual_dispatch.lease().worker_id,
+        &actual_dispatch.lease().worker_instance_id,
+    )? {
+        return Err(StorageError::execution_authority_conflict(
+            "execution authority guard Worker instance is no longer current",
+        ));
+    }
+    let terminal = execution_registry::load_execution_lease_terminal_outcome_in_transaction(
+        transaction,
+        &actual_dispatch.lease().lease_id,
+    )?;
+    let legal_timing = match actual_job.state {
+        ExecutionJobState::Running | ExecutionJobState::Cancelling => terminal.is_none(),
+        ExecutionJobState::Completed => terminal == Some(ExecutionLeaseTerminalOutcome::Completed),
+        ExecutionJobState::Failed => matches!(
+            terminal,
+            Some(ExecutionLeaseTerminalOutcome::Cancelled | ExecutionLeaseTerminalOutcome::Failed)
+        ),
+        ExecutionJobState::Queued | ExecutionJobState::Leased => false,
+    };
+    if !legal_timing {
+        return Err(StorageError::execution_authority_conflict(
+            "execution authority guard terminal timing changed",
+        ));
+    }
+    commit_in_transaction(transaction, commit)
 }
 
 pub(crate) fn commit_claimed_in_transaction(

@@ -1275,21 +1275,43 @@ test('DebugProbe contracts are generated, closed, bounded, authority-bound, and 
   )
   const definitions = [
     'DebugConfirmedFact',
+    'DebugContextSafetyProfile',
+    'DebugContextSafetyScannerVersion',
+    'DebugContextSnippet',
+    'DebugDeltaContextBudget',
+    'DebugDeltaContextEstimatorVersion',
     'DebugExperiment',
     'DebugExperimentCleanupReceipt',
     'DebugExperimentCleanupStatus',
     'DebugExperimentStatus',
     'DebugHypothesis',
     'DebugHypothesisEvidence',
+    'DebugHypothesisEvidenceAssessment',
+    'DebugHypothesisEvidencePolarity',
+    'DebugHypothesisChange',
     'DebugHypothesisLedger',
+    'DebugHypothesisLedgerEvent',
+    'DebugHypothesisLedgerEventKind',
+    'DebugHypothesisLedgerSeed',
+    'DebugHypothesisLedgerUpdate',
+    'DebugHypothesisMutation',
+    'DebugHypothesisMutationKind',
+    'DebugHypothesisRoundEvidence',
     'DebugHypothesisStatus',
     'DebugProbeError',
     'DebugProbeErrorCode',
     'DebugProbeIdentity',
     'DebugProbeKind',
     'DebugProbePlan',
+    'DebugProbeDeltaContext',
     'DebugProbeRoundAuthority',
+    'DebugQuestionChange',
+    'DebugQuestionChangeKind',
+    'DebugReproductionRecipe',
+    'DebugReproductionRecipeStep',
+    'DebugReproductionRecipeUpdate',
     'DebugSessionStatus',
+    'DebugUnresolvedQuestion',
     'ExecutionMode',
     'ProbeCommandSpec',
     'ProbeBaselineEvidence',
@@ -1324,6 +1346,7 @@ test('DebugProbe contracts are generated, closed, bounded, authority-bound, and 
     'ProbeRoundEvent',
     'ProbeRoundEventKind',
     'ProbeRoundReceipt',
+    'ProbeRoundReceiptReference',
     'ProbeRoundReceiptStatus',
     'ProbeRoundStatus',
     'ProbeSideEffectClass',
@@ -1602,6 +1625,102 @@ test('DebugProbe contracts are generated, closed, bounded, authority-bound, and 
   assert.equal(validateSelection(noBaseline), true, JSON.stringify(validateSelection.errors))
   assert.equal(validateSelection({ ...noBaseline, registryLookup: 'latest' }), false)
   assert.equal(validateSelection({ ...noBaseline, priorBundleDigest: undefined }), false)
+
+  const hypothesis = {
+    hypothesisId: probe.targetHypothesisIds[0],
+    summary: 'The type graph contains a missing edge.',
+    status: 'active',
+    confidenceBps: 0,
+    supportingEvidence: [],
+    contradictingEvidence: [],
+    createdRoundId: authority.roundId,
+    lastUpdatedRoundId: authority.roundId,
+  }
+  const validateLedgerSeed = validator(schema, 'DebugHypothesisLedgerSeed')
+  const ledgerSeed = {
+    authority,
+    hypotheses: [hypothesis],
+    unresolvedQuestions: [],
+    createdAt: plan.createdAt,
+  }
+  assert.equal(validateLedgerSeed(ledgerSeed), true, JSON.stringify(validateLedgerSeed.errors))
+  assert.equal(validateLedgerSeed({ ...ledgerSeed, modelConfidence: 1 }), false)
+  assert.equal(validateLedgerSeed({ ...ledgerSeed, hypotheses: Array(65).fill(hypothesis) }), false)
+
+  const receiptReference = {
+    authority,
+    planDigest: plan.planDigest,
+    receiptArtifactRef: rawArtifact,
+    receiptDigest: `sha256:${'b'.repeat(64)}`,
+  }
+  const validateRoundEvidence = validator(schema, 'DebugHypothesisRoundEvidence')
+  const roundEvidence = {
+    schemaVersion: 1,
+    receipt: roundReceipt,
+    sourceRoundReceipt: receiptReference,
+    evidenceSummaries: [],
+    evidenceCandidates: [],
+    evidenceCutDigest: `sha256:${'c'.repeat(64)}`,
+  }
+  assert.equal(
+    validateRoundEvidence(roundEvidence),
+    true,
+    JSON.stringify(validateRoundEvidence.errors),
+  )
+  assert.equal(validateRoundEvidence({ ...roundEvidence, stale: true }), false)
+  assert.equal(validateRoundEvidence({
+    ...roundEvidence,
+    evidenceCandidates: Array(513).fill({}),
+  }), false)
+
+  const safetyProfile = {
+    scannerVersion: 'workspace_secret_scan_v1',
+    scannerPolicyDigest: `sha256:${'d'.repeat(64)}`,
+  }
+  const deltaBudget = {
+    maxSerializedBytes: 32_768,
+    maxEstimatedTokens: 8_192,
+    maxSnippets: 8,
+    maxSnippetBytes: 2_000,
+    maxTotalSnippetBytes: 16_000,
+    estimatorVersion: 'utf8_bytes_v1',
+    policyDigest: `sha256:${'e'.repeat(64)}`,
+  }
+  const deltaContext = {
+    schemaVersion: 1,
+    authority,
+    sourceRoundReceipt: receiptReference,
+    previousLedgerDigest: null,
+    ledgerDigest: `sha256:${'f'.repeat(64)}`,
+    sourceEventDigest: `sha256:${'1'.repeat(64)}`,
+    sourceRequestDigest: `sha256:${'2'.repeat(64)}`,
+    previousContextDigest: null,
+    contextDigest: `sha256:${'3'.repeat(64)}`,
+    hypothesisChanges: [],
+    newEvidenceSummaries: [],
+    newEvidenceCandidates: [],
+    confirmedFacts: [],
+    reproductionRecipe: null,
+    questionChanges: [],
+    snippets: [],
+    omittedSnippetCount: 0,
+    serializedByteCount: 1,
+    estimatedTokenCount: 1,
+    budget: deltaBudget,
+    safetyProfile,
+  }
+  const validateDeltaContext = validator(schema, 'DebugProbeDeltaContext')
+  assert.equal(
+    validateDeltaContext(deltaContext),
+    true,
+    JSON.stringify(validateDeltaContext.errors),
+  )
+  assert.equal(validateDeltaContext({ ...deltaContext, previousLedgerDigest: undefined }), false)
+  assert.equal(validateDeltaContext({ ...deltaContext, estimatedTokenCount: 8_193 }), false)
+  assert.equal(validateDeltaContext({
+    ...deltaContext,
+    budget: { ...deltaBudget, estimatorVersion: 'utf8_bytes_div_4_v1' },
+  }), false)
 
   const validateRolePolicy = validator(schema, 'RoleSessionPolicy')
   const debugPolicy = {

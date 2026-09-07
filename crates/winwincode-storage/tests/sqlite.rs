@@ -6,18 +6,25 @@ use std::thread;
 
 use rusqlite::Connection;
 use winwincode_domain::{
-    CodexThreadId, ControlPlaneEventId, DeliveryId, Instant, LeaseId, OrganizationId,
-    ProductSessionId, ProjectId, RepositoryId, RequestId, Sha256Digest, UserId, WorkerId,
-    WorkerSessionId, WorkspaceId,
+    CodexThreadId, ControlPlaneEventId, DeliveryId, ExecutionJobId, ExecutionMessageId,
+    ExecutionSequence, Instant, LeaseId, OrganizationId, ProductSessionId, ProjectId, RepositoryId,
+    RequestId, Sha256Digest, UserId, WorkerId, WorkerInstanceId, WorkerSessionId, WorkspaceId,
 };
 use winwincode_storage::{
     AggregateJournalKey, AggregateJournalPublication, AggregateJournalRecord, CommitReceipt,
-    LoadedAggregateJournal, MAX_STATE_MUTATION_BYTES_PER_COMMIT, MAX_STATE_MUTATION_PAYLOAD_BYTES,
+    DispatchResultRequest, DispatchResultStatus, EXECUTION_PROTOCOL_VERSION,
+    ExecutionAuthorityCommitGuard, ExecutionDispatchAuthority, ExecutionJobRecord,
+    ExecutionJobState, ExecutionJobSubmission, ExecutionLeaseRecord, ExecutionLeaseTerminalOutcome,
+    ExecutionLeaseTerminalRequest, ExecutionQueueScope, LoadedAggregateJournal,
+    MAX_STATE_MUTATION_BYTES_PER_COMMIT, MAX_STATE_MUTATION_PAYLOAD_BYTES,
     MAX_STATE_MUTATIONS_PER_COMMIT, NewOutboxEvent, OutboxEvent, PendingAuditEvent,
     ProductStateStorage, ProjectionEventCursor, ProjectionEventStream, ProjectionEventStreamKey,
     ProjectionReadCut, PublicEventActor, PublicEventScope, PublicEventSource, ReceiptActorKey,
-    ReceiptIdentity, ReceiptScopeKey, SqliteStorage, StateCommit, StateMutation,
-    StateRevisionGuard, StorageError, StorageErrorKind, StoredState, receipt_actor_key,
+    ReceiptIdentity, ReceiptScopeKey, RepositorySchedulerClaimRequest,
+    RepositorySchedulerDispatchResultRequest, RepositorySchedulerScope,
+    RepositorySchedulerTerminalRequest, SqliteStorage, StateCommit, StateMutation,
+    StateRevisionGuard, StorageError, StorageErrorKind, StoredState, WorkerAuthenticationIdentity,
+    WorkerHeartbeatRequest, WorkerPlatform, WorkerRegistrationRequest, receipt_actor_key,
     receipt_scope_key,
 };
 
@@ -162,6 +169,419 @@ fn projection_key_for_scope(
 ) -> ProjectionEventStreamKey {
     ProjectionEventStreamKey::new(receipt_scope_key(scope).expect("scope key"), stream)
         .expect("projection stream key")
+}
+
+fn guard_id(prefix: &str, seed: u64) -> String {
+    format!("{prefix}_{seed:026}")
+}
+
+fn guard_at(second: u64) -> Instant {
+    Instant(format!("2027-09-28T10:00:{second:02}.000Z"))
+}
+
+fn guard_queue_scope() -> ExecutionQueueScope {
+    let PublicEventScope::Repository {
+        organization_id,
+        workspace_id,
+        project_id,
+        repository_id,
+    } = projection_scope()
+    else {
+        unreachable!("fixture scope is a repository")
+    };
+    ExecutionQueueScope {
+        organization_id,
+        workspace_id,
+        project_id,
+        repository_id,
+        product_session_id: ProductSessionId(guard_id("psn", 1)),
+        delivery_id: None,
+    }
+}
+
+fn guard_repository_scope() -> RepositorySchedulerScope {
+    let scope = guard_queue_scope();
+    RepositorySchedulerScope {
+        organization_id: scope.organization_id,
+        workspace_id: scope.workspace_id,
+        project_id: scope.project_id,
+        repository_id: scope.repository_id,
+    }
+}
+
+struct RunningAuthorityFixture {
+    job: ExecutionJobRecord,
+    dispatch: ExecutionDispatchAuthority,
+    lease: ExecutionLeaseRecord,
+}
+
+fn register_guard_worker(storage: &mut SqliteStorage) -> (WorkerId, WorkerInstanceId) {
+    let worker_id = WorkerId(guard_id("wrk", 1));
+    let worker_instance_id = WorkerInstanceId(guard_id("wki", 1));
+    storage
+        .execution_registry()
+        .expect("execution registry")
+        .register_worker(&WorkerRegistrationRequest {
+            authentication_identity: WorkerAuthenticationIdentity::LocalEmbedded {
+                control_plane_principal: "fixture-control-plane".into(),
+            },
+            protocol_version: EXECUTION_PROTOCOL_VERSION.into(),
+            platform: WorkerPlatform::Aarch64AppleDarwin,
+            capabilities: vec!["debug-probe".into()],
+            capability_digest: Sha256Digest(format!("sha256:{}", "b".repeat(64))),
+            security_zone: "local".into(),
+            max_slots: 1,
+            message_id: ExecutionMessageId(guard_id("xmsg", 1)),
+            request_id: RequestId(guard_id("req", 2)),
+            sent_at: guard_at(1),
+            started_at: guard_at(0),
+            worker_id: worker_id.clone(),
+            worker_instance_id: worker_instance_id.clone(),
+        })
+        .expect("worker registration");
+    storage
+        .execution_registry()
+        .expect("execution registry")
+        .record_heartbeat(&WorkerHeartbeatRequest {
+            active_leases: Vec::new(),
+            available_slots: 1,
+            heartbeat_sequence: ExecutionSequence(1),
+            max_slots: 1,
+            running_slots: 0,
+            message_id: ExecutionMessageId(guard_id("xmsg", 2)),
+            observed_at: guard_at(2),
+            sent_at: guard_at(2),
+            worker_id: worker_id.clone(),
+            worker_instance_id: worker_instance_id.clone(),
+        })
+        .expect("worker heartbeat");
+    (worker_id, worker_instance_id)
+}
+
+fn running_authority_fixture(storage: &mut SqliteStorage) -> RunningAuthorityFixture {
+    let job_id = ExecutionJobId(guard_id("job", 1));
+    let payload_digest = Sha256Digest(format!("sha256:{}", "a".repeat(64)));
+    storage
+        .execution_queue()
+        .expect("execution queue")
+        .submit(&ExecutionJobSubmission {
+            scope: guard_queue_scope(),
+            job_id: job_id.clone(),
+            request_id: RequestId(guard_id("req", 1)),
+            payload_digest: payload_digest.clone(),
+            dispatch_payload: br#"{"kind":"debug-probe"}"#.to_vec(),
+            attempt: 1,
+            dependencies: Vec::new(),
+            stage_run_id: None,
+            submitted_at: guard_at(1),
+        })
+        .expect("job submission");
+    let (worker_id, worker_instance_id) = register_guard_worker(storage);
+
+    let claimed = storage
+        .repository_scheduler()
+        .expect("repository scheduler")
+        .claim_next(&RepositorySchedulerClaimRequest {
+            scope: guard_repository_scope(),
+            request_id: RequestId(guard_id("req", 3)),
+            scheduler_generation: "fixture-generation".into(),
+            worker_id: worker_id.clone(),
+            worker_instance_id: worker_instance_id.clone(),
+            issued_at: guard_at(3),
+            expires_at: guard_at(50),
+        })
+        .expect("job claim")
+        .expect("claimed job");
+    let worker_session_id = WorkerSessionId(guard_id("wsn", 1));
+    let running = storage
+        .repository_scheduler()
+        .expect("repository scheduler")
+        .record_dispatch_result(&RepositorySchedulerDispatchResultRequest {
+            scope: guard_repository_scope(),
+            dispatch: DispatchResultRequest {
+                checked_at: guard_at(4),
+                expires_at: claimed.lease.expires_at.clone(),
+                fencing_token: claimed.lease.fencing_token.clone(),
+                issued_at: claimed.lease.issued_at.clone(),
+                job_id,
+                lease_id: claimed.lease.lease_id.clone(),
+                message_id: claimed.message_id,
+                payload_digest,
+                request_id: RequestId(guard_id("req", 4)),
+                sent_at: guard_at(4),
+                status: DispatchResultStatus::Accepted,
+                attempt: claimed.job.attempt,
+                error: None,
+                worker_id,
+                worker_instance_id,
+                worker_session_id: Some(worker_session_id),
+            },
+        })
+        .expect("accepted dispatch")
+        .job;
+    let dispatch = storage
+        .execution_registry()
+        .expect("execution registry")
+        .load_dispatch_authority(&running.job_id)
+        .expect("dispatch authority read")
+        .expect("dispatch authority");
+    RunningAuthorityFixture {
+        job: running,
+        dispatch,
+        lease: claimed.lease,
+    }
+}
+
+fn guard_state_commit(request: u64, stream: &str, event: &str) -> StateCommit {
+    StateCommit::new(
+        projection_receipt_identity(&guard_id("req", request)),
+        Sha256Digest(format!("sha256:{}", "c".repeat(64))),
+        stream,
+        0,
+        b"debug-ledger-state".to_vec(),
+        vec![NewOutboxEvent::internal(
+            event,
+            "debug.hypothesis-ledger.changed",
+            b"event".to_vec(),
+        )],
+    )
+}
+
+fn settled_guard_authority(
+    storage: &mut SqliteStorage,
+    running: &RunningAuthorityFixture,
+    outcome: ExecutionLeaseTerminalOutcome,
+    request: u64,
+) -> (ExecutionJobRecord, ExecutionDispatchAuthority) {
+    let terminal = storage
+        .repository_scheduler()
+        .expect("repository scheduler")
+        .settle_terminal(&RepositorySchedulerTerminalRequest {
+            scope: guard_repository_scope(),
+            terminal: ExecutionLeaseTerminalRequest {
+                job_id: running.lease.job_id.clone(),
+                lease_id: running.lease.lease_id.clone(),
+                worker_id: running.lease.worker_id.clone(),
+                worker_instance_id: running.lease.worker_instance_id.clone(),
+                attempt: running.lease.attempt,
+                fencing_token: running.lease.fencing_token.clone(),
+                outcome,
+                terminal_at: guard_at(5),
+                request_id: RequestId(guard_id("req", request)),
+            },
+        })
+        .expect("terminal settlement")
+        .job;
+    let dispatch = storage
+        .execution_registry()
+        .expect("execution registry")
+        .load_dispatch_authority(&terminal.job_id)
+        .expect("dispatch authority read")
+        .expect("terminal dispatch authority");
+    (terminal, dispatch)
+}
+
+fn replace_guard_worker(storage: &mut SqliteStorage, worker_id: WorkerId) {
+    storage
+        .execution_registry()
+        .expect("execution registry")
+        .register_worker(&WorkerRegistrationRequest {
+            authentication_identity: WorkerAuthenticationIdentity::LocalEmbedded {
+                control_plane_principal: "fixture-control-plane".into(),
+            },
+            protocol_version: EXECUTION_PROTOCOL_VERSION.into(),
+            platform: WorkerPlatform::Aarch64AppleDarwin,
+            capabilities: vec!["debug-probe".into()],
+            capability_digest: Sha256Digest(format!("sha256:{}", "b".repeat(64))),
+            security_zone: "local".into(),
+            max_slots: 1,
+            message_id: ExecutionMessageId(guard_id("xmsg", 14)),
+            request_id: RequestId(guard_id("req", 14)),
+            sent_at: guard_at(7),
+            started_at: guard_at(6),
+            worker_id,
+            worker_instance_id: WorkerInstanceId(guard_id("wki", 2)),
+        })
+        .expect("replacement Worker registration");
+}
+
+fn assert_guard_event_absent(storage: &SqliteStorage, event_id: &str) {
+    assert!(
+        storage
+            .pending_events()
+            .expect("pending event read")
+            .iter()
+            .all(|event| event.event_id != event_id)
+    );
+}
+
+fn assert_guard_receipt_absent(storage: &SqliteStorage, commit: &StateCommit) {
+    assert!(
+        storage
+            .load_receipt(&commit.receipt_identity, &commit.command_digest)
+            .expect("guard receipt read")
+            .is_none()
+    );
+}
+
+fn assert_guard_commit_absent(
+    storage: &SqliteStorage,
+    commit: &StateCommit,
+    stream: &str,
+    event_id: &str,
+) {
+    assert!(
+        storage
+            .load_state(stream)
+            .expect("guard state read")
+            .is_none()
+    );
+    assert_guard_event_absent(storage, event_id);
+    assert_guard_receipt_absent(storage, commit);
+}
+
+#[test]
+fn execution_authority_guard_commits_running_and_terminal_rounds_but_rejects_stale_facts() {
+    let root = temporary_directory("execution-authority-guard");
+    let mut storage = SqliteStorage::open(&root).expect("storage should open");
+    let running = running_authority_fixture(&mut storage);
+    let running_guard = ExecutionAuthorityCommitGuard::terminal_round(
+        running.job.clone(),
+        running.dispatch.clone(),
+    )
+    .expect("running round authority");
+    let mut leased_job = running.job.clone();
+    leased_job.state = ExecutionJobState::Leased;
+    assert_eq!(
+        ExecutionAuthorityCommitGuard::terminal_round(leased_job, running.dispatch.clone())
+            .expect_err("leased Job has no terminal-round authority")
+            .kind(),
+        StorageErrorKind::InvalidInput
+    );
+    let mut changed_payload = running.job.clone();
+    changed_payload.dispatch_payload.push(b' ');
+    let changed_payload_guard =
+        ExecutionAuthorityCommitGuard::terminal_round(changed_payload, running.dispatch.clone())
+            .expect("well-shaped changed payload guard");
+    let changed_payload_commit =
+        guard_state_commit(9, "debug-ledger:changed-payload", "event:changed-payload");
+    assert_eq!(
+        storage
+            .commit_with_execution_authority_guard(&changed_payload_commit, &changed_payload_guard)
+            .expect_err("changed dispatch payload must not write")
+            .kind(),
+        StorageErrorKind::RevisionConflict
+    );
+    assert_guard_commit_absent(
+        &storage,
+        &changed_payload_commit,
+        "debug-ledger:changed-payload",
+        "event:changed-payload",
+    );
+    let active_commit = guard_state_commit(10, "debug-ledger:active", "event:active");
+    let active_receipt = storage
+        .commit_with_execution_authority_guard(&active_commit, &running_guard)
+        .expect("running guard commit");
+    assert_eq!(active_receipt.revision, 1);
+    assert!(!active_receipt.idempotent_replay);
+
+    let (terminal, terminal_dispatch) = settled_guard_authority(
+        &mut storage,
+        &running,
+        ExecutionLeaseTerminalOutcome::Completed,
+        11,
+    );
+    let terminal_guard = ExecutionAuthorityCommitGuard::terminal_round(terminal, terminal_dispatch)
+        .expect("terminal round authority");
+    let terminal_commit = guard_state_commit(12, "debug-ledger:terminal", "event:terminal");
+    storage
+        .commit_with_execution_authority_guard(&terminal_commit, &terminal_guard)
+        .expect("terminal guard commit");
+
+    let stale_journal_key = AggregateJournalKey::new("debug-hypothesis-ledger", guard_id("dbg", 1))
+        .expect("stale journal key");
+    let stale_commit = guard_state_commit(13, "debug-ledger:stale", "event:stale")
+        .with_journal_publication(AggregateJournalPublication::Create {
+            key: stale_journal_key.clone(),
+            manifest: b"manifest".to_vec(),
+            first_record: AggregateJournalRecord::new(1, "d".repeat(64), b"stale-event".to_vec()),
+        });
+    let error = storage
+        .commit_with_execution_authority_guard(&stale_commit, &running_guard)
+        .expect_err("stale running authority must not write");
+    assert_eq!(error.kind(), StorageErrorKind::RevisionConflict);
+    assert_guard_commit_absent(&storage, &stale_commit, "debug-ledger:stale", "event:stale");
+    assert!(
+        storage
+            .load_journal(&stale_journal_key)
+            .expect("stale journal read")
+            .is_none()
+    );
+
+    let replay = storage
+        .commit_with_execution_authority_guard(&active_commit, &running_guard)
+        .expect("receipt-first replay");
+    assert_eq!(replay.revision, active_receipt.revision);
+    assert!(replay.idempotent_replay);
+
+    replace_guard_worker(&mut storage, running.lease.worker_id.clone());
+    let replaced_worker_commit =
+        guard_state_commit(15, "debug-ledger:replaced-worker", "event:replaced-worker");
+    let error = storage
+        .commit_with_execution_authority_guard(&replaced_worker_commit, &terminal_guard)
+        .expect_err("replaced Worker instance must not write");
+    assert_eq!(error.kind(), StorageErrorKind::RevisionConflict);
+    assert_guard_commit_absent(
+        &storage,
+        &replaced_worker_commit,
+        "debug-ledger:replaced-worker",
+        "event:replaced-worker",
+    );
+
+    drop(storage);
+    fs::remove_dir_all(root).expect("cleanup");
+}
+
+#[test]
+fn execution_authority_guard_accepts_only_exact_legal_terminal_outcomes() {
+    for (index, outcome, expected_state) in [
+        (
+            0_u64,
+            ExecutionLeaseTerminalOutcome::Completed,
+            ExecutionJobState::Completed,
+        ),
+        (
+            1,
+            ExecutionLeaseTerminalOutcome::Cancelled,
+            ExecutionJobState::Failed,
+        ),
+        (
+            2,
+            ExecutionLeaseTerminalOutcome::Failed,
+            ExecutionJobState::Failed,
+        ),
+    ] {
+        let root = temporary_directory(&format!("execution-authority-terminal-{index}"));
+        let mut storage = SqliteStorage::open(&root).expect("storage should open");
+        let running = running_authority_fixture(&mut storage);
+        let (terminal, terminal_dispatch) =
+            settled_guard_authority(&mut storage, &running, outcome, 20 + index);
+        assert_eq!(terminal.state, expected_state);
+        let guard = ExecutionAuthorityCommitGuard::terminal_round(terminal, terminal_dispatch)
+            .expect("terminal round guard");
+        storage
+            .commit_with_execution_authority_guard(
+                &guard_state_commit(
+                    30 + index,
+                    &format!("debug-ledger:terminal-{index}"),
+                    &format!("event:terminal-{index}"),
+                ),
+                &guard,
+            )
+            .expect("legal terminal timing");
+        drop(storage);
+        fs::remove_dir_all(root).expect("cleanup");
+    }
 }
 
 #[test]

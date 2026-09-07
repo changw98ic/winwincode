@@ -3255,6 +3255,14 @@ fn load_lease_terminal(
         .map_err(sql_error)
 }
 
+pub(crate) fn load_execution_lease_terminal_outcome_in_transaction(
+    connection: &rusqlite::Connection,
+    lease_id: &LeaseId,
+) -> Result<Option<ExecutionLeaseTerminalOutcome>, StorageError> {
+    load_lease_terminal(connection, lease_id)
+        .map(|terminal| terminal.map(|terminal| terminal.outcome))
+}
+
 fn worker_instance_seen(
     connection: &rusqlite::Connection,
     worker_id: &WorkerId,
@@ -3287,6 +3295,14 @@ fn worker_instance_is_current(
         .optional()
         .map_err(sql_error)?
         .is_some())
+}
+
+pub(crate) fn execution_worker_instance_is_current_in_transaction(
+    connection: &rusqlite::Connection,
+    worker_id: &WorkerId,
+    worker_instance_id: &WorkerInstanceId,
+) -> Result<bool, StorageError> {
+    worker_instance_is_current(connection, worker_id, worker_instance_id)
 }
 
 fn worker_accepts_new_claim(

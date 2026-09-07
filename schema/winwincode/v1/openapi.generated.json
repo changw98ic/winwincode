@@ -8194,50 +8194,191 @@
       },
       "DebugConfirmedFact": {
         "additionalProperties": false,
-        "description": "A bounded confirmed fact with traceable probe evidence.",
-        "oneOf": [
-          {
-            "properties": {
-              "evidence": {
-                "items": {
-                  "$ref": "#/components/schemas/DebugHypothesisEvidence"
-                },
-                "maxItems": 16,
-                "minItems": 1,
-                "type": "array",
-                "uniqueItems": true
-              },
-              "summary": {
-                "maxLength": 1000,
-                "minLength": 1,
-                "pattern": "^[^\\u0000]+$",
-                "type": "string"
-              }
-            }
-          }
-        ],
+        "description": "One immutable confirmed fact derived from complete exact current-round evidence.",
         "properties": {
+          "confirmedRoundId": {
+            "$ref": "#/components/schemas/ProbeRoundId"
+          },
           "evidence": {
             "items": {
-              "$ref": "#/components/schemas/DebugHypothesisEvidence"
+              "$ref": "#/components/schemas/HypothesisEvidenceCandidate"
             },
             "maxItems": 16,
             "minItems": 1,
             "type": "array",
             "uniqueItems": true
           },
+          "factDigest": {
+            "$ref": "#/components/schemas/Sha256Digest"
+          },
           "summary": {
-            "maxLength": 1000,
+            "maxLength": 500,
             "minLength": 1,
-            "pattern": "^[^\\u0000]+$",
+            "pattern": "^[^\\u0000\\r\\n]+$",
             "type": "string"
           }
         },
         "required": [
+          "factDigest",
           "summary",
-          "evidence"
+          "evidence",
+          "confirmedRoundId"
         ],
         "type": "object"
+      },
+      "DebugContextSafetyProfile": {
+        "additionalProperties": false,
+        "description": "Host-owned scanner profile bound to every safe DebugProbe context payload.",
+        "properties": {
+          "scannerPolicyDigest": {
+            "$ref": "#/components/schemas/Sha256Digest"
+          },
+          "scannerVersion": {
+            "$ref": "#/components/schemas/DebugContextSafetyScannerVersion"
+          }
+        },
+        "required": [
+          "scannerVersion",
+          "scannerPolicyDigest"
+        ],
+        "type": "object"
+      },
+      "DebugContextSafetyScannerVersion": {
+        "description": "Closed host secret-scanner rule version for DebugProbe context text.",
+        "enum": [
+          "workspace_secret_scan_v1"
+        ],
+        "type": "string"
+      },
+      "DebugContextSnippet": {
+        "additionalProperties": false,
+        "description": "One explicitly bounded secret-scanned evidence or source fragment. Full files, full logs and conversations are excluded.",
+        "properties": {
+          "content": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "pattern": "^[^\\u0000]+$",
+            "type": "string"
+          },
+          "contentDigest": {
+            "$ref": "#/components/schemas/Sha256Digest"
+          },
+          "endLine": {
+            "oneOf": [
+              {
+                "maximum": 2147483647,
+                "minimum": 1,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "path": {
+            "oneOf": [
+              {
+                "maxLength": 4096,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "safetyProfile": {
+            "$ref": "#/components/schemas/DebugContextSafetyProfile"
+          },
+          "sourceArtifactRef": {
+            "$ref": "#/components/schemas/ArtifactReference"
+          },
+          "sourceEvidenceDigest": {
+            "$ref": "#/components/schemas/Sha256Digest"
+          },
+          "startLine": {
+            "oneOf": [
+              {
+                "maximum": 2147483647,
+                "minimum": 1,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "sourceArtifactRef",
+          "sourceEvidenceDigest",
+          "path",
+          "startLine",
+          "endLine",
+          "content",
+          "contentDigest",
+          "safetyProfile"
+        ],
+        "type": "object"
+      },
+      "DebugDeltaContextBudget": {
+        "additionalProperties": false,
+        "description": "Immutable hard bounds and estimator policy for one DebugProbe Delta Context.",
+        "properties": {
+          "estimatorVersion": {
+            "$ref": "#/components/schemas/DebugDeltaContextEstimatorVersion"
+          },
+          "maxEstimatedTokens": {
+            "const": 8192,
+            "maximum": 8192,
+            "minimum": 8192,
+            "type": "integer"
+          },
+          "maxSerializedBytes": {
+            "const": 32768,
+            "maximum": 32768,
+            "minimum": 32768,
+            "type": "integer"
+          },
+          "maxSnippetBytes": {
+            "const": 2000,
+            "maximum": 2000,
+            "minimum": 2000,
+            "type": "integer"
+          },
+          "maxSnippets": {
+            "const": 8,
+            "maximum": 8,
+            "minimum": 8,
+            "type": "integer"
+          },
+          "maxTotalSnippetBytes": {
+            "const": 16000,
+            "maximum": 16000,
+            "minimum": 16000,
+            "type": "integer"
+          },
+          "policyDigest": {
+            "$ref": "#/components/schemas/Sha256Digest"
+          }
+        },
+        "required": [
+          "maxSerializedBytes",
+          "maxEstimatedTokens",
+          "maxSnippets",
+          "maxSnippetBytes",
+          "maxTotalSnippetBytes",
+          "estimatorVersion",
+          "policyDigest"
+        ],
+        "type": "object"
+      },
+      "DebugDeltaContextEstimatorVersion": {
+        "description": "Frozen conservative context accounting profile: one estimated token per canonical UTF-8 byte.",
+        "enum": [
+          "utf8_bytes_v1"
+        ],
+        "type": "string"
       },
       "DebugExperiment": {
         "additionalProperties": false,
@@ -8438,53 +8579,7 @@
       },
       "DebugHypothesis": {
         "additionalProperties": false,
-        "description": "One evidence-backed hypothesis. Status and confidence changes require current-authority evidence.",
-        "oneOf": [
-          {
-            "properties": {
-              "confidenceBps": {
-                "maximum": 10000,
-                "minimum": 0,
-                "type": "integer"
-              },
-              "contradictingEvidence": {
-                "items": {
-                  "$ref": "#/components/schemas/DebugHypothesisEvidence"
-                },
-                "maxItems": 64,
-                "minItems": 0,
-                "type": "array",
-                "uniqueItems": true
-              },
-              "hypothesisId": {
-                "maxLength": 30,
-                "minLength": 30,
-                "type": "string"
-              },
-              "lastUpdatedRoundId": {
-                "$ref": "#/components/schemas/ProbeRoundId"
-              },
-              "status": {
-                "$ref": "#/components/schemas/DebugHypothesisStatus"
-              },
-              "summary": {
-                "maxLength": 1000,
-                "minLength": 1,
-                "pattern": "^[^\\u0000]+$",
-                "type": "string"
-              },
-              "supportingEvidence": {
-                "items": {
-                  "$ref": "#/components/schemas/DebugHypothesisEvidence"
-                },
-                "maxItems": 64,
-                "minItems": 0,
-                "type": "array",
-                "uniqueItems": true
-              }
-            }
-          }
-        ],
+        "description": "One canonical evidence-backed hypothesis projection. Supporting and contradicting evidence are append-only, disjoint and reducer-owned.",
         "properties": {
           "confidenceBps": {
             "maximum": 10000,
@@ -8500,6 +8595,9 @@
             "type": "array",
             "uniqueItems": true
           },
+          "createdRoundId": {
+            "$ref": "#/components/schemas/ProbeRoundId"
+          },
           "hypothesisId": {
             "$ref": "#/components/schemas/DebugHypothesisId"
           },
@@ -8510,9 +8608,9 @@
             "$ref": "#/components/schemas/DebugHypothesisStatus"
           },
           "summary": {
-            "maxLength": 1000,
+            "maxLength": 500,
             "minLength": 1,
-            "pattern": "^[^\\u0000]+$",
+            "pattern": "^[^\\u0000\\r\\n]+$",
             "type": "string"
           },
           "supportingEvidence": {
@@ -8532,7 +8630,82 @@
           "confidenceBps",
           "supportingEvidence",
           "contradictingEvidence",
+          "createdRoundId",
           "lastUpdatedRoundId"
+        ],
+        "type": "object"
+      },
+      "DebugHypothesisChange": {
+        "additionalProperties": false,
+        "description": "Only the before/after hypothesis fields and exact new evidence added by one applied round.",
+        "properties": {
+          "addedContradictingEvidence": {
+            "items": {
+              "$ref": "#/components/schemas/HypothesisEvidenceCandidate"
+            },
+            "maxItems": 16,
+            "minItems": 0,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "addedSupportingEvidence": {
+            "items": {
+              "$ref": "#/components/schemas/HypothesisEvidenceCandidate"
+            },
+            "maxItems": 16,
+            "minItems": 0,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "confidenceBps": {
+            "maximum": 10000,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "hypothesisId": {
+            "$ref": "#/components/schemas/DebugHypothesisId"
+          },
+          "previousConfidenceBps": {
+            "oneOf": [
+              {
+                "maximum": 10000,
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "previousStatus": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/DebugHypothesisStatus"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "status": {
+            "$ref": "#/components/schemas/DebugHypothesisStatus"
+          },
+          "summary": {
+            "maxLength": 500,
+            "minLength": 1,
+            "pattern": "^[^\\u0000\\r\\n]+$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "hypothesisId",
+          "previousStatus",
+          "previousConfidenceBps",
+          "summary",
+          "status",
+          "confidenceBps",
+          "addedSupportingEvidence",
+          "addedContradictingEvidence"
         ],
         "type": "object"
       },
@@ -8582,6 +8755,31 @@
         ],
         "type": "object"
       },
+      "DebugHypothesisEvidenceAssessment": {
+        "additionalProperties": false,
+        "description": "One explicit support or contradiction assessment. The reducer must match candidate target and evidence exactly against the sealed current-round D3 projection.",
+        "properties": {
+          "candidate": {
+            "$ref": "#/components/schemas/HypothesisEvidenceCandidate"
+          },
+          "polarity": {
+            "$ref": "#/components/schemas/DebugHypothesisEvidencePolarity"
+          }
+        },
+        "required": [
+          "candidate",
+          "polarity"
+        ],
+        "type": "object"
+      },
+      "DebugHypothesisEvidencePolarity": {
+        "description": "Explicit model disposition for one exact neutral D3 evidence candidate.",
+        "enum": [
+          "supports",
+          "contradicts"
+        ],
+        "type": "string"
+      },
       "DebugHypothesisId": {
         "description": "Identity of one hypothesis tracked by a DebugProbe ledger.",
         "pattern": "^hyp_[0-9A-HJKMNP-TV-Z]{26}$",
@@ -8589,75 +8787,7 @@
       },
       "DebugHypothesisLedger": {
         "additionalProperties": false,
-        "description": "Canonical bounded DebugProbe ledger. It contains evidence references and deltas, never raw logs or complete conversation history.",
-        "oneOf": [
-          {
-            "properties": {
-              "authority": {
-                "$ref": "#/components/schemas/DebugProbeRoundAuthority"
-              },
-              "confirmedFacts": {
-                "items": {
-                  "$ref": "#/components/schemas/DebugConfirmedFact"
-                },
-                "maxItems": 128,
-                "minItems": 0,
-                "type": "array",
-                "uniqueItems": true
-              },
-              "hypotheses": {
-                "items": {
-                  "$ref": "#/components/schemas/DebugHypothesis"
-                },
-                "maxItems": 64,
-                "minItems": 0,
-                "type": "array",
-                "uniqueItems": true
-              },
-              "ledgerDigest": {
-                "maxLength": 71,
-                "minLength": 71,
-                "pattern": "^sha256:[0-9a-f]{64}$",
-                "type": "string"
-              },
-              "reproductionRecipe": {
-                "items": {
-                  "maxLength": 1000,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]+$",
-                  "type": "string"
-                },
-                "maxItems": 64,
-                "minItems": 0,
-                "type": "array",
-                "uniqueItems": true
-              },
-              "schemaVersion": {
-                "maximum": 1,
-                "minimum": 1,
-                "type": "integer"
-              },
-              "sessionStatus": {
-                "$ref": "#/components/schemas/DebugSessionStatus"
-              },
-              "unresolvedQuestions": {
-                "items": {
-                  "maxLength": 1000,
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]+$",
-                  "type": "string"
-                },
-                "maxItems": 64,
-                "minItems": 0,
-                "type": "array",
-                "uniqueItems": true
-              },
-              "updatedAt": {
-                "$ref": "#/components/schemas/Instant"
-              }
-            }
-          }
-        ],
+        "description": "Canonical projection of the applied DebugProbe Ledger event chain. It contains bounded summaries and evidence references, never raw logs or conversation history.",
         "properties": {
           "authority": {
             "$ref": "#/components/schemas/DebugProbeRoundAuthority"
@@ -8671,29 +8801,43 @@
             "type": "array",
             "uniqueItems": true
           },
+          "eventSequence": {
+            "$ref": "#/components/schemas/ExecutionSequence"
+          },
           "hypotheses": {
             "items": {
               "$ref": "#/components/schemas/DebugHypothesis"
             },
             "maxItems": 64,
-            "minItems": 0,
+            "minItems": 1,
             "type": "array",
             "uniqueItems": true
+          },
+          "lastEventDigest": {
+            "$ref": "#/components/schemas/Sha256Digest"
+          },
+          "latestAppliedRoundReceipt": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ProbeRoundReceiptReference"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "ledgerDigest": {
             "$ref": "#/components/schemas/Sha256Digest"
           },
           "reproductionRecipe": {
-            "items": {
-              "maxLength": 1000,
-              "minLength": 1,
-              "pattern": "^[^\\u0000]+$",
-              "type": "string"
-            },
-            "maxItems": 64,
-            "minItems": 0,
-            "type": "array",
-            "uniqueItems": true
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/DebugReproductionRecipe"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "schemaVersion": {
             "maximum": 1,
@@ -8705,10 +8849,7 @@
           },
           "unresolvedQuestions": {
             "items": {
-              "maxLength": 1000,
-              "minLength": 1,
-              "pattern": "^[^\\u0000]+$",
-              "type": "string"
+              "$ref": "#/components/schemas/DebugUnresolvedQuestion"
             },
             "maxItems": 64,
             "minItems": 0,
@@ -8723,12 +8864,416 @@
           "schemaVersion",
           "authority",
           "sessionStatus",
+          "eventSequence",
+          "lastEventDigest",
+          "latestAppliedRoundReceipt",
           "ledgerDigest",
           "hypotheses",
           "confirmedFacts",
           "reproductionRecipe",
           "unresolvedQuestions",
           "updatedAt"
+        ],
+        "type": "object"
+      },
+      "DebugHypothesisLedgerEvent": {
+        "additionalProperties": false,
+        "description": "One canonical applied Ledger fact. Stale evidence is not a Ledger event and cannot advance sequence, digest or context cursor.",
+        "properties": {
+          "authority": {
+            "$ref": "#/components/schemas/DebugProbeRoundAuthority"
+          },
+          "confirmedFacts": {
+            "items": {
+              "$ref": "#/components/schemas/DebugConfirmedFact"
+            },
+            "maxItems": 32,
+            "minItems": 0,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "eventDigest": {
+            "$ref": "#/components/schemas/Sha256Digest"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/DebugHypothesisLedgerEventKind"
+          },
+          "mutations": {
+            "items": {
+              "$ref": "#/components/schemas/DebugHypothesisMutation"
+            },
+            "maxItems": 64,
+            "minItems": 0,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "occurredAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "openedQuestions": {
+            "items": {
+              "$ref": "#/components/schemas/DebugUnresolvedQuestion"
+            },
+            "maxItems": 32,
+            "minItems": 0,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "previousEventDigest": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Sha256Digest"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "previousLedgerDigest": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Sha256Digest"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reproductionRecipeUpdate": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/DebugReproductionRecipeUpdate"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "resolvedQuestionDigests": {
+            "items": {
+              "$ref": "#/components/schemas/Sha256Digest"
+            },
+            "maxItems": 32,
+            "minItems": 0,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "resultingLedgerDigest": {
+            "$ref": "#/components/schemas/Sha256Digest"
+          },
+          "schemaVersion": {
+            "maximum": 1,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "sequence": {
+            "$ref": "#/components/schemas/ExecutionSequence"
+          },
+          "sessionStatus": {
+            "$ref": "#/components/schemas/DebugSessionStatus"
+          },
+          "sourceContextDigest": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Sha256Digest"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "sourceRequestDigest": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Sha256Digest"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "sourceRoundReceipt": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ProbeRoundReceiptReference"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "schemaVersion",
+          "kind",
+          "sequence",
+          "authority",
+          "previousEventDigest",
+          "previousLedgerDigest",
+          "sourceRoundReceipt",
+          "sourceContextDigest",
+          "sourceRequestDigest",
+          "mutations",
+          "confirmedFacts",
+          "reproductionRecipeUpdate",
+          "openedQuestions",
+          "resolvedQuestionDigests",
+          "sessionStatus",
+          "resultingLedgerDigest",
+          "eventDigest",
+          "occurredAt"
+        ],
+        "type": "object"
+      },
+      "DebugHypothesisLedgerEventKind": {
+        "description": "Only applied facts enter the current Ledger chain. Prepared rounds and stale evidence use separate journals.",
+        "enum": [
+          "initialized",
+          "round_applied"
+        ],
+        "type": "string"
+      },
+      "DebugHypothesisLedgerSeed": {
+        "additionalProperties": false,
+        "description": "Initialization input. Every seed hypothesis must be active at zero confidence with no evidence.",
+        "properties": {
+          "authority": {
+            "$ref": "#/components/schemas/DebugProbeRoundAuthority"
+          },
+          "createdAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "hypotheses": {
+            "items": {
+              "$ref": "#/components/schemas/DebugHypothesis"
+            },
+            "maxItems": 64,
+            "minItems": 1,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "unresolvedQuestions": {
+            "items": {
+              "$ref": "#/components/schemas/DebugUnresolvedQuestion"
+            },
+            "maxItems": 64,
+            "minItems": 0,
+            "type": "array",
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "authority",
+          "hypotheses",
+          "unresolvedQuestions",
+          "createdAt"
+        ],
+        "type": "object"
+      },
+      "DebugHypothesisLedgerUpdate": {
+        "additionalProperties": false,
+        "description": "One model-proposed current-round update. Source receipt, context, request and previous Ledger digests form the idempotency boundary.",
+        "properties": {
+          "confirmedFacts": {
+            "items": {
+              "$ref": "#/components/schemas/DebugConfirmedFact"
+            },
+            "maxItems": 32,
+            "minItems": 0,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "mutations": {
+            "items": {
+              "$ref": "#/components/schemas/DebugHypothesisMutation"
+            },
+            "maxItems": 64,
+            "minItems": 0,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "occurredAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "openedQuestions": {
+            "items": {
+              "$ref": "#/components/schemas/DebugUnresolvedQuestion"
+            },
+            "maxItems": 32,
+            "minItems": 0,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "previousLedgerDigest": {
+            "$ref": "#/components/schemas/Sha256Digest"
+          },
+          "reproductionRecipeUpdate": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/DebugReproductionRecipeUpdate"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "resolvedQuestionDigests": {
+            "items": {
+              "$ref": "#/components/schemas/Sha256Digest"
+            },
+            "maxItems": 32,
+            "minItems": 0,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "sessionStatus": {
+            "$ref": "#/components/schemas/DebugSessionStatus"
+          },
+          "sourceContextDigest": {
+            "$ref": "#/components/schemas/Sha256Digest"
+          },
+          "sourceRequestDigest": {
+            "$ref": "#/components/schemas/Sha256Digest"
+          },
+          "sourceRoundReceipt": {
+            "$ref": "#/components/schemas/ProbeRoundReceiptReference"
+          }
+        },
+        "required": [
+          "previousLedgerDigest",
+          "sourceRoundReceipt",
+          "sourceContextDigest",
+          "sourceRequestDigest",
+          "mutations",
+          "confirmedFacts",
+          "reproductionRecipeUpdate",
+          "openedQuestions",
+          "resolvedQuestionDigests",
+          "sessionStatus",
+          "occurredAt"
+        ],
+        "type": "object"
+      },
+      "DebugHypothesisMutation": {
+        "additionalProperties": false,
+        "description": "Evidence-bound before/after mutation proposed for one hypothesis. The reducer owns transition, direction, target and current-round checks.",
+        "properties": {
+          "assessments": {
+            "items": {
+              "$ref": "#/components/schemas/DebugHypothesisEvidenceAssessment"
+            },
+            "maxItems": 16,
+            "minItems": 0,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "confidenceBps": {
+            "maximum": 10000,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "hypothesisId": {
+            "$ref": "#/components/schemas/DebugHypothesisId"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/DebugHypothesisMutationKind"
+          },
+          "previousConfidenceBps": {
+            "oneOf": [
+              {
+                "maximum": 10000,
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "previousStatus": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/DebugHypothesisStatus"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "status": {
+            "$ref": "#/components/schemas/DebugHypothesisStatus"
+          },
+          "summary": {
+            "maxLength": 500,
+            "minLength": 1,
+            "pattern": "^[^\\u0000\\r\\n]+$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "hypothesisId",
+          "previousStatus",
+          "previousConfidenceBps",
+          "summary",
+          "status",
+          "confidenceBps",
+          "assessments"
+        ],
+        "type": "object"
+      },
+      "DebugHypothesisMutationKind": {
+        "description": "Closed mutation kind for one hypothesis in a current-round Ledger update.",
+        "enum": [
+          "create",
+          "update"
+        ],
+        "type": "string"
+      },
+      "DebugHypothesisRoundEvidence": {
+        "additionalProperties": false,
+        "description": "Canonical durable current-round evidence cut used for Delta preparation, model assessment validation and exact Ledger replay.",
+        "properties": {
+          "evidenceCandidates": {
+            "items": {
+              "$ref": "#/components/schemas/HypothesisEvidenceCandidate"
+            },
+            "maxItems": 512,
+            "minItems": 0,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "evidenceCutDigest": {
+            "$ref": "#/components/schemas/Sha256Digest"
+          },
+          "evidenceSummaries": {
+            "items": {
+              "$ref": "#/components/schemas/ProbeEvidenceSummary"
+            },
+            "maxItems": 32,
+            "minItems": 0,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "receipt": {
+            "$ref": "#/components/schemas/ProbeRoundReceipt"
+          },
+          "schemaVersion": {
+            "maximum": 1,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "sourceRoundReceipt": {
+            "$ref": "#/components/schemas/ProbeRoundReceiptReference"
+          }
+        },
+        "required": [
+          "schemaVersion",
+          "receipt",
+          "sourceRoundReceipt",
+          "evidenceSummaries",
+          "evidenceCandidates",
+          "evidenceCutDigest"
         ],
         "type": "object"
       },
@@ -8740,6 +9285,164 @@
           "confirmed"
         ],
         "type": "string"
+      },
+      "DebugProbeDeltaContext": {
+        "additionalProperties": false,
+        "description": "Deterministic bounded model context for one new evidence round. It contains only changes since the nullable durable cursor, new bounded evidence summaries and candidates, questions and selected safe snippets.",
+        "properties": {
+          "authority": {
+            "$ref": "#/components/schemas/DebugProbeRoundAuthority"
+          },
+          "budget": {
+            "$ref": "#/components/schemas/DebugDeltaContextBudget"
+          },
+          "confirmedFacts": {
+            "items": {
+              "$ref": "#/components/schemas/DebugConfirmedFact"
+            },
+            "maxItems": 32,
+            "minItems": 0,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "contextDigest": {
+            "$ref": "#/components/schemas/Sha256Digest"
+          },
+          "estimatedTokenCount": {
+            "maximum": 8192,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "hypothesisChanges": {
+            "items": {
+              "$ref": "#/components/schemas/DebugHypothesisChange"
+            },
+            "maxItems": 64,
+            "minItems": 0,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "ledgerDigest": {
+            "$ref": "#/components/schemas/Sha256Digest"
+          },
+          "newEvidenceCandidates": {
+            "items": {
+              "$ref": "#/components/schemas/HypothesisEvidenceCandidate"
+            },
+            "maxItems": 512,
+            "minItems": 0,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "newEvidenceSummaries": {
+            "items": {
+              "$ref": "#/components/schemas/ProbeEvidenceSummary"
+            },
+            "maxItems": 32,
+            "minItems": 0,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "omittedSnippetCount": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "previousContextDigest": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Sha256Digest"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "previousLedgerDigest": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Sha256Digest"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "questionChanges": {
+            "items": {
+              "$ref": "#/components/schemas/DebugQuestionChange"
+            },
+            "maxItems": 64,
+            "minItems": 0,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "reproductionRecipe": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/DebugReproductionRecipe"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "safetyProfile": {
+            "$ref": "#/components/schemas/DebugContextSafetyProfile"
+          },
+          "schemaVersion": {
+            "maximum": 1,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "serializedByteCount": {
+            "maximum": 32768,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "snippets": {
+            "items": {
+              "$ref": "#/components/schemas/DebugContextSnippet"
+            },
+            "maxItems": 8,
+            "minItems": 0,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "sourceEventDigest": {
+            "$ref": "#/components/schemas/Sha256Digest"
+          },
+          "sourceRequestDigest": {
+            "$ref": "#/components/schemas/Sha256Digest"
+          },
+          "sourceRoundReceipt": {
+            "$ref": "#/components/schemas/ProbeRoundReceiptReference"
+          }
+        },
+        "required": [
+          "schemaVersion",
+          "authority",
+          "sourceRoundReceipt",
+          "previousLedgerDigest",
+          "ledgerDigest",
+          "sourceEventDigest",
+          "sourceRequestDigest",
+          "previousContextDigest",
+          "contextDigest",
+          "hypothesisChanges",
+          "newEvidenceSummaries",
+          "newEvidenceCandidates",
+          "confirmedFacts",
+          "reproductionRecipe",
+          "questionChanges",
+          "snippets",
+          "omittedSnippetCount",
+          "serializedByteCount",
+          "estimatedTokenCount",
+          "budget",
+          "safetyProfile"
+        ],
+        "type": "object"
       },
       "DebugProbeError": {
         "additionalProperties": false,
@@ -9122,6 +9825,130 @@
         ],
         "type": "object"
       },
+      "DebugQuestionChange": {
+        "additionalProperties": false,
+        "description": "One stable question opened or resolved by the applied round.",
+        "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/DebugQuestionChangeKind"
+          },
+          "questionDigest": {
+            "$ref": "#/components/schemas/Sha256Digest"
+          },
+          "summary": {
+            "maxLength": 500,
+            "minLength": 1,
+            "pattern": "^[^\\u0000\\r\\n]+$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "questionDigest",
+          "summary"
+        ],
+        "type": "object"
+      },
+      "DebugQuestionChangeKind": {
+        "description": "Closed unresolved-question Delta operation.",
+        "enum": [
+          "opened",
+          "resolved"
+        ],
+        "type": "string"
+      },
+      "DebugReproductionRecipe": {
+        "additionalProperties": false,
+        "description": "Current bounded reproduction recipe with exact supporting evidence and stable step digests.",
+        "properties": {
+          "evidence": {
+            "items": {
+              "$ref": "#/components/schemas/HypothesisEvidenceCandidate"
+            },
+            "maxItems": 16,
+            "minItems": 1,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "lastUpdatedRoundId": {
+            "$ref": "#/components/schemas/ProbeRoundId"
+          },
+          "recipeDigest": {
+            "$ref": "#/components/schemas/Sha256Digest"
+          },
+          "steps": {
+            "items": {
+              "$ref": "#/components/schemas/DebugReproductionRecipeStep"
+            },
+            "maxItems": 32,
+            "minItems": 1,
+            "type": "array",
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "recipeDigest",
+          "steps",
+          "evidence",
+          "lastUpdatedRoundId"
+        ],
+        "type": "object"
+      },
+      "DebugReproductionRecipeStep": {
+        "additionalProperties": false,
+        "description": "One stable ordered reproduction step. A machine probe step may bind the exact admitted probe definition digest.",
+        "properties": {
+          "probeDefinitionDigest": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Sha256Digest"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "stepDigest": {
+            "$ref": "#/components/schemas/Sha256Digest"
+          },
+          "summary": {
+            "maxLength": 500,
+            "minLength": 1,
+            "pattern": "^[^\\u0000\\r\\n]+$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "stepDigest",
+          "summary",
+          "probeDefinitionDigest"
+        ],
+        "type": "object"
+      },
+      "DebugReproductionRecipeUpdate": {
+        "additionalProperties": false,
+        "description": "Evidence-backed replacement of the current reproduction recipe. Null at the event boundary means no recipe change.",
+        "properties": {
+          "previousRecipeDigest": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Sha256Digest"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "recipe": {
+            "$ref": "#/components/schemas/DebugReproductionRecipe"
+          }
+        },
+        "required": [
+          "previousRecipeDigest",
+          "recipe"
+        ],
+        "type": "object"
+      },
       "DebugSessionId": {
         "description": "Identity of one durable DebugProbe session.",
         "pattern": "^dbg_[0-9A-HJKMNP-TV-Z]{26}$",
@@ -9138,6 +9965,34 @@
           "failed"
         ],
         "type": "string"
+      },
+      "DebugUnresolvedQuestion": {
+        "additionalProperties": false,
+        "description": "One stable unresolved question retained without conversation history.",
+        "properties": {
+          "lastUpdatedRoundId": {
+            "$ref": "#/components/schemas/ProbeRoundId"
+          },
+          "openedRoundId": {
+            "$ref": "#/components/schemas/ProbeRoundId"
+          },
+          "questionDigest": {
+            "$ref": "#/components/schemas/Sha256Digest"
+          },
+          "summary": {
+            "maxLength": 500,
+            "minLength": 1,
+            "pattern": "^[^\\u0000\\r\\n]+$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "questionDigest",
+          "summary",
+          "openedRoundId",
+          "lastUpdatedRoundId"
+        ],
+        "type": "object"
       },
       "DeliveryAcceptanceCriterionProjection": {
         "additionalProperties": false,
@@ -20465,6 +21320,31 @@
         ],
         "type": "object"
       },
+      "ProbeRoundReceiptReference": {
+        "additionalProperties": false,
+        "description": "Canonical durable reference to one exact terminal ProbeRoundReceipt. The Artifact digest binds canonical bytes; receiptDigest binds semantic fields.",
+        "properties": {
+          "authority": {
+            "$ref": "#/components/schemas/DebugProbeRoundAuthority"
+          },
+          "planDigest": {
+            "$ref": "#/components/schemas/Sha256Digest"
+          },
+          "receiptArtifactRef": {
+            "$ref": "#/components/schemas/ArtifactReference"
+          },
+          "receiptDigest": {
+            "$ref": "#/components/schemas/Sha256Digest"
+          }
+        },
+        "required": [
+          "authority",
+          "planDigest",
+          "receiptArtifactRef",
+          "receiptDigest"
+        ],
+        "type": "object"
+      },
       "ProbeRoundReceiptStatus": {
         "description": "Closed terminal status retained by one probe round receipt.",
         "enum": [
@@ -27678,7 +28558,7 @@
     "https://schemas.winwincode.dev/winwincode/v1/domain.schema.json",
     "https://schemas.winwincode.dev/winwincode/v1/execution-port.schema.json"
   ],
-  "x-source-digest": "sha256:9d7d276f700acc5631d001774148412668e0f2c5e143fd2ace3b3884baa044f3",
+  "x-source-digest": "sha256:03020d648f49ec60f21cfac3f31bc425437e1cb7ffbba35432ee810079d9951c",
   "x-winwincode-client-metadata": {
     "http": {
       "authentication": {

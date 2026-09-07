@@ -23,6 +23,7 @@ mod collaboration_inbox_production;
 mod control_plane_instance;
 pub mod credential_leak_gate;
 pub mod credential_reference;
+pub mod debug_hypothesis_ledger;
 mod delivery_application;
 mod delivery_command_transaction;
 pub mod delivery_execution;

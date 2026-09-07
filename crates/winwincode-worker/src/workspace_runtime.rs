@@ -71,6 +71,7 @@ use crate::{
         ObservationGateResult, ObservationModelFrame, ObservationModelRecord, StoreRetention,
         ValidationDiagnosticEvaluation, canonical_applied_file_summaries, derive_delta_digest,
     },
+    context_safety::{contains_sensitive_material, observation_secret_scan_version},
     stage_product::{
         CandidateProductError, PreparedCandidateArtifact, prepare_candidate_artifact,
         prepare_verification_artifact,
@@ -149,7 +150,7 @@ impl ObservationModelConfiguration {
                 configured.route.route.as_str(),
             ]
             .into_iter()
-            .any(secret_shaped_text)
+            .any(contains_sensitive_material)
         {
             return Err(change_batch_error(
                 "Observer model configuration is invalid",
@@ -2637,11 +2638,11 @@ fn validate_observation_model_open_payload(
     let provider = envelope
         .get("provider")
         .and_then(serde_json::Value::as_str)
-        .filter(|value| bounded_model_token(value) && !secret_shaped_text(value));
+        .filter(|value| bounded_model_token(value) && !contains_sensitive_material(value));
     let model = request
         .get("model")
         .and_then(serde_json::Value::as_str)
-        .filter(|value| bounded_model_token(value) && !secret_shaped_text(value));
+        .filter(|value| bounded_model_token(value) && !contains_sensitive_material(value));
     let expected_observation = serde_json::to_string(observation)
         .map_err(|_| change_batch_error("Observer request cannot be encoded"))?;
     let input = request
@@ -3200,28 +3201,7 @@ fn bounded_observation_line(value: &str) -> String {
 }
 
 fn observation_input_has_sensitive_material(input: &ObservationUntrustedInput) -> bool {
-    observation_input_lines(input).any(secret_shaped_text)
-}
-
-const SECRET_SCAN_RULES: [&str; 7] = [
-    "private-key:-----BEGIN (RSA |OPENSSH )?PRIVATE KEY-----",
-    "bearer:Bearer [A-Za-z0-9._~+/=-]{12,}",
-    "basic:Basic [A-Za-z0-9+/]{12,}={0,2}",
-    "jwt:eyJ<base64url>.<base64url>.<base64url>",
-    "provider:sk|github|aws|google|slack|npm token families",
-    "url-userinfo:http|https|ws|wss://user:secret@host",
-    "assignment:credential key [=:] secret value length >= 8",
-];
-
-fn observation_secret_scan_version() -> String {
-    let mut digest = Sha256::new();
-    digest.update(b"winwincode.observation-secret-scan-rules.v2\0");
-    for rule in SECRET_SCAN_RULES {
-        digest.update((rule.len() as u64).to_be_bytes());
-        digest.update(rule.as_bytes());
-    }
-    let encoded = format!("{:x}", digest.finalize());
-    format!("winwincode-secret-scan-v2-{}", &encoded[..16])
+    observation_input_lines(input).any(contains_sensitive_material)
 }
 
 fn observation_prompt_injection_findings(input: &ObservationUntrustedInput) -> i64 {
@@ -3273,188 +3253,6 @@ fn observation_input_lines(input: &ObservationUntrustedInput) -> impl Iterator<I
                 .iter()
                 .flat_map(|snippet| [snippet.path.as_str(), snippet.content.as_str()]),
         )
-}
-
-fn secret_shaped_text(value: &str) -> bool {
-    let lower = value.to_ascii_lowercase();
-    contains_private_key(&lower)
-        || contains_authorization_token(&lower, "bearer ", bearer_character)
-        || contains_authorization_token(&lower, "basic ", basic_character)
-        || contains_jwt(value)
-        || contains_provider_token(value)
-        || contains_url_userinfo(&lower)
-        || contains_sensitive_assignment(&lower)
-}
-
-fn contains_private_key(value: &str) -> bool {
-    [
-        "-----begin private key-----",
-        "-----begin rsa private key-----",
-        "-----begin openssh private key-----",
-    ]
-    .iter()
-    .any(|marker| value.contains(marker))
-}
-
-fn bearer_character(character: char) -> bool {
-    character.is_ascii_alphanumeric() || "._~+/=-".contains(character)
-}
-
-fn basic_character(character: char) -> bool {
-    character.is_ascii_alphanumeric() || "+/=".contains(character)
-}
-
-fn contains_authorization_token(value: &str, marker: &str, allowed: fn(char) -> bool) -> bool {
-    value.match_indices(marker).any(|(index, _)| {
-        let candidate = value[index + marker.len()..]
-            .chars()
-            .take_while(|character| allowed(*character))
-            .collect::<String>();
-        candidate.len() >= 12
-            && !matches!(candidate.as_str(), "[redacted]" | "<redacted>" | "redacted")
-    })
-}
-
-fn contains_jwt(value: &str) -> bool {
-    value
-        .split(|character: char| {
-            character.is_ascii_whitespace() || "\"'()[]{}<>,;".contains(character)
-        })
-        .any(|token| {
-            let mut segments = token.split('.');
-            let Some(header) = segments.next() else {
-                return false;
-            };
-            let Some(payload) = segments.next() else {
-                return false;
-            };
-            let Some(signature) = segments.next() else {
-                return false;
-            };
-            segments.next().is_none()
-                && header.starts_with("eyJ")
-                && [header, payload, signature].iter().all(|segment| {
-                    !segment.is_empty()
-                        && segment
-                            .bytes()
-                            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
-                })
-        })
-}
-
-fn contains_provider_token(value: &str) -> bool {
-    [
-        ("sk-", 16, TokenAlphabet::Mixed),
-        ("ghp_", 20, TokenAlphabet::Mixed),
-        ("gho_", 20, TokenAlphabet::Mixed),
-        ("ghs_", 20, TokenAlphabet::Mixed),
-        ("ghu_", 20, TokenAlphabet::Mixed),
-        ("ghr_", 20, TokenAlphabet::Mixed),
-        ("github_pat_", 20, TokenAlphabet::Mixed),
-        ("AKIA", 16, TokenAlphabet::Upper),
-        ("AIza", 35, TokenAlphabet::Mixed),
-        ("xoxb-", 10, TokenAlphabet::Mixed),
-        ("xoxa-", 10, TokenAlphabet::Mixed),
-        ("xoxp-", 10, TokenAlphabet::Mixed),
-        ("xoxr-", 10, TokenAlphabet::Mixed),
-        ("xoxs-", 10, TokenAlphabet::Mixed),
-        ("npm_", 20, TokenAlphabet::Alphanumeric),
-    ]
-    .iter()
-    .any(|(prefix, minimum, alphabet)| {
-        value.match_indices(prefix).any(|(index, _)| {
-            (index == 0 || !value.as_bytes()[index - 1].is_ascii_alphanumeric())
-                && value[index + prefix.len()..]
-                    .bytes()
-                    .take_while(|byte| alphabet.contains(*byte))
-                    .count()
-                    >= *minimum
-        })
-    })
-}
-
-#[derive(Clone, Copy)]
-enum TokenAlphabet {
-    Alphanumeric,
-    Mixed,
-    Upper,
-}
-
-impl TokenAlphabet {
-    fn contains(self, byte: u8) -> bool {
-        match self {
-            Self::Alphanumeric => byte.is_ascii_alphanumeric(),
-            Self::Mixed => byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'),
-            Self::Upper => byte.is_ascii_uppercase() || byte.is_ascii_digit(),
-        }
-    }
-}
-
-fn contains_url_userinfo(value: &str) -> bool {
-    let mut remainder = value;
-    while let Some(scheme_end) = remainder.find("://") {
-        let scheme = remainder[..scheme_end]
-            .rsplit(|character: char| !character.is_ascii_alphabetic())
-            .next()
-            .unwrap_or("");
-        let after_scheme = &remainder[scheme_end + 3..];
-        let authority_end = after_scheme
-            .find(|character: char| character.is_ascii_whitespace() || "/?#".contains(character))
-            .unwrap_or(after_scheme.len());
-        let authority = &after_scheme[..authority_end];
-        if matches!(scheme, "http" | "https" | "ws" | "wss")
-            && authority
-                .rfind('@')
-                .is_some_and(|at| authority[..at].contains(':'))
-        {
-            return true;
-        }
-        remainder = &after_scheme[authority_end..];
-    }
-    false
-}
-
-fn contains_sensitive_assignment(value: &str) -> bool {
-    [
-        "api-key",
-        "api_key",
-        "apikey",
-        "authorization",
-        "client-secret",
-        "client_secret",
-        "password",
-        "passwd",
-        "private-key",
-        "private_key",
-        "secret",
-        "access-token",
-        "access_token",
-        "refresh-token",
-        "refresh_token",
-        "id-token",
-        "id_token",
-        "session-token",
-        "session_token",
-        "token",
-    ]
-    .iter()
-    .any(|key| {
-        value.match_indices(key).any(|(index, _)| {
-            let boundary = index == 0 || !value.as_bytes()[index - 1].is_ascii_alphanumeric();
-            let remainder = value[index + key.len()..].trim_start();
-            let Some(remainder) = remainder.strip_prefix(['=', ':']) else {
-                return false;
-            };
-            let candidate = remainder
-                .trim_start_matches([' ', '\t', '\"', '\''])
-                .chars()
-                .take_while(|character| bearer_character(*character))
-                .collect::<String>();
-            boundary
-                && candidate.len() >= 8
-                && !matches!(candidate.as_str(), "[redacted]" | "<redacted>" | "redacted")
-        })
-    })
 }
 
 fn prompt_injection_text(value: &str) -> bool {

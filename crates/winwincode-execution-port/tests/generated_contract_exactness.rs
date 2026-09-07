@@ -663,23 +663,41 @@ fn generated_debug_probe_state_contracts_round_trip() {
         "schemaVersion": 1,
         "authority": debug_probe_authority(),
         "sessionStatus": "active",
+        "eventSequence": 1,
+        "lastEventDigest": format!("sha256:{}", "5".repeat(64)),
+        "latestAppliedRoundReceipt": null,
         "ledgerDigest": format!("sha256:{}", "4".repeat(64)),
         "hypotheses": [{
             "hypothesisId": "hyp_00000000000000000000000000",
             "summary": "The type graph contains a missing edge.",
             "status": "active",
-            "confidenceBps": 5_000,
+            "confidenceBps": 0,
             "supportingEvidence": [],
             "contradictingEvidence": [],
+            "createdRoundId": "prn_00000000000000000000000000",
             "lastUpdatedRoundId": "prn_00000000000000000000000000"
         }],
         "confirmedFacts": [],
-        "reproductionRecipe": ["Run the bounded typecheck probe."],
-        "unresolvedQuestions": ["Which declaration owns the missing edge?"],
+        "reproductionRecipe": null,
+        "unresolvedQuestions": [{
+            "questionDigest": format!("sha256:{}", "6".repeat(64)),
+            "summary": "Which declaration owns the missing edge?",
+            "openedRoundId": "prn_00000000000000000000000000",
+            "lastUpdatedRoundId": "prn_00000000000000000000000000"
+        }],
         "updatedAt": "2026-09-04T08:00:02.000Z"
     });
     let decoded: DebugHypothesisLedger = from_value(ledger.clone()).expect("hypothesis ledger");
     assert_eq!(serde_json::to_value(decoded).expect("ledger JSON"), ledger);
+    let mut unknown_ledger = ledger.clone();
+    unknown_ledger["conversationHistory"] = Value::Array(Vec::new());
+    assert!(from_value::<DebugHypothesisLedger>(unknown_ledger).is_err());
+    let mut missing_nullable_cursor = ledger.clone();
+    missing_nullable_cursor
+        .as_object_mut()
+        .expect("Ledger object")
+        .remove("latestAppliedRoundReceipt");
+    assert!(from_value::<DebugHypothesisLedger>(missing_nullable_cursor).is_err());
 
     let experiment = serde_json::json!({
         "schemaVersion": 1,
