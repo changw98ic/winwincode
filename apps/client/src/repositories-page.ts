@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { mountKeyedCollection } from './components/keyed-collection.js'
-import type { ControlPlaneRepositorySummary } from './control-plane-client.js'
+import type {
+  ControlPlaneRepositoryPermissions,
+  ControlPlaneRepositorySummary,
+} from './control-plane-client.js'
 import type {
   RepositoriesViewModel,
   RepositoriesViewModelState,
@@ -32,6 +35,11 @@ interface RepositoryCardRefs {
   readonly branch: HTMLElement
   readonly dirty: HTMLElement
   readonly head: HTMLElement
+  readonly permissions: HTMLElement
+  readonly grantForm: HTMLFormElement
+  readonly grantUser: HTMLInputElement
+  readonly grantPermissions: HTMLSelectElement
+  readonly grantStatus: HTMLElement
 }
 
 function element<K extends keyof HTMLElementTagNameMap>(
@@ -88,10 +96,49 @@ export function mountRepositoriesPage(options: RepositoriesPageOptions): Reposit
       const branch = element(document, 'span', 'wwc-repositories-card-branch')
       const dirty = element(document, 'span', 'wwc-repositories-card-dirty')
       const head = element(document, 'span', 'wwc-repositories-card-head')
-      meta.append(branch, dirty, head)
-      card.append(name, availability, meta)
-      const refs: RepositoryCardRefs = { card, name, availability, branch, dirty, head }
+      const permissions = element(document, 'span', 'wwc-repositories-card-permissions')
+      const grantForm = element(document, 'form', 'wwc-repositories-card-grant') as HTMLFormElement
+      const grantUser = element(document, 'input', 'wwc-repositories-card-grant-user') as HTMLInputElement
+      const grantPermissions = element(document, 'select', 'wwc-repositories-card-grant-permissions') as HTMLSelectElement
+      const grantStatus = element(document, 'p', 'wwc-repositories-card-grant-status')
+      grantUser.type = 'text'
+      grantUser.placeholder = 'User ID'
+      grantUser.autocomplete = 'off'
+      for (const [value, label] of [['use', 'Use'], ['use+manage', 'Use + manage']] as const) {
+        const option = element(document, 'option', '')
+        option.setAttribute('value', value)
+        option.textContent = label
+        grantPermissions.append(option)
+      }
+      const grantSubmit = element(document, 'button', 'wwc-repositories-card-grant-submit')
+      grantSubmit.type = 'submit'
+      grantSubmit.textContent = 'Grant access'
+      grantForm.append(grantUser, grantPermissions, grantSubmit, grantStatus)
+      meta.append(branch, dirty, head, permissions)
+      card.append(name, availability, meta, grantForm)
+      const refs: RepositoryCardRefs = {
+        card, name, availability, branch, dirty, head, permissions,
+        grantForm, grantUser, grantPermissions, grantStatus,
+      }
       cards.set(card, refs)
+      grantForm.addEventListener('submit', event => {
+        event.preventDefault()
+        grantSubmit.disabled = true
+        grantStatus.textContent = ''
+        void options.model.grantRepositoryAccess({
+          repositoryBindingId: repository.repositoryBindingId,
+          userId: grantUser.value.trim(),
+          permissions: grantPermissions.value as ControlPlaneRepositoryPermissions,
+        }).then(() => {
+          grantUser.value = ''
+          grantStatus.textContent = 'Repository access granted.'
+        }).catch(error => {
+          grantStatus.textContent = error instanceof Error
+            ? error.message : 'Repository access could not be granted.'
+        }).finally(() => {
+          grantSubmit.disabled = false
+        })
+      })
       updateCard(refs, repository)
       return card
     },
@@ -115,6 +162,9 @@ export function mountRepositoriesPage(options: RepositoriesPageOptions): Reposit
     refs.dirty.textContent = repositoryDirtyText(repository)
     refs.dirty.dataset.tone = repositoryDirtyTone(repository)
     refs.head.textContent = repositoryHeadShortText(repository)
+    refs.permissions.textContent = repository.permissions === 'use+manage'
+      ? 'Permission: use + manage' : 'Permission: use'
+    refs.grantForm.hidden = !repository.canGrantAccess
   }
 
   function render(snapshot: RepositoriesViewModelState): void {

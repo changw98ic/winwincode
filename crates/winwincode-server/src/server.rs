@@ -465,6 +465,10 @@ fn router(
             get(list_repositories).options(preflight),
         )
         .route(
+            "/api/v1/repositories/grants",
+            post(grant_repository_access).options(preflight),
+        )
+        .route(
             "/api/v1/clients/candidates/branch",
             post(create_client_candidate_branch).options(preflight),
         )
@@ -658,7 +662,78 @@ async fn list_repositories(
                     "CLIENT_NOT_FOUND",
                     "no client matches the requested id",
                 ),
-                ClientRepositoriesErrorKind::Unavailable => (
+                ClientRepositoriesErrorKind::PermissionDenied
+                | ClientRepositoriesErrorKind::ResourceNotFound
+                | ClientRepositoriesErrorKind::Conflict
+                | ClientRepositoriesErrorKind::Unavailable => (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "SERVICE_UNAVAILABLE",
+                    "repository directory service is unavailable",
+                ),
+            };
+            connect_error_response(status, code, message, origin.as_ref())
+        }
+    }
+}
+
+/// Grants one visible repository to another signed-in user. The application
+/// checks the durable Client `manage` grant before writing the repository
+/// grant; the browser never supplies credentials or local paths.
+async fn grant_repository_access(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    uri: Uri,
+    request: Request<Body>,
+) -> Response {
+    let Some(application) = &state.client_repositories else {
+        return not_found().await;
+    };
+    let origin = match allowed_origin(&state, &headers) {
+        Ok(origin) => origin,
+        Err(error) => return error.into_response(),
+    };
+    let body = match parse_json_body(request, origin.clone()).await {
+        Ok(body) => body,
+        Err(error) => return error.into_response(),
+    };
+    let (principal, origin, _) = match authorize(&state, &headers, &uri) {
+        Ok(authorized) => authorized,
+        Err(error) => return error.into_response(),
+    };
+    let Some(user_id) = principal.actor_user_id() else {
+        return connect_error_response(
+            StatusCode::FORBIDDEN,
+            "PERMISSION_DENIED",
+            "a signed-in user is required",
+            origin.as_ref(),
+        );
+    };
+    match application.grant(&user_id.0, &body) {
+        Ok(body) => json_response(StatusCode::CREATED, body, origin.as_ref()),
+        Err(error) => {
+            let (status, code, message) = match error.kind() {
+                ClientRepositoriesErrorKind::InvalidRequest => (
+                    StatusCode::BAD_REQUEST,
+                    "INVALID_REQUEST",
+                    "repository grant request is invalid",
+                ),
+                ClientRepositoriesErrorKind::PermissionDenied => (
+                    StatusCode::FORBIDDEN,
+                    "PERMISSION_DENIED",
+                    "the signed-in user may not grant repository access",
+                ),
+                ClientRepositoriesErrorKind::ResourceNotFound => (
+                    StatusCode::NOT_FOUND,
+                    "RESOURCE_NOT_FOUND",
+                    "the repository binding was not found",
+                ),
+                ClientRepositoriesErrorKind::Conflict => (
+                    StatusCode::CONFLICT,
+                    "REVISION_CONFLICT",
+                    "an active repository grant already exists",
+                ),
+                ClientRepositoriesErrorKind::ClientNotFound
+                | ClientRepositoriesErrorKind::Unavailable => (
                     StatusCode::SERVICE_UNAVAILABLE,
                     "SERVICE_UNAVAILABLE",
                     "repository directory service is unavailable",

@@ -418,6 +418,29 @@ fn stage_client_grant(data_directory: &Path, node: &str, user_id: &str) {
         .expect("client grant");
 }
 
+fn stage_managing_client_grant(data_directory: &Path, node: &str, user_id: &str) {
+    let mut storage = SqliteStorage::open(data_directory).expect("storage");
+    let issuance = AccessGrantIssuance::try_new(
+        fresh_grant_id("cag"),
+        node,
+        user_id,
+        user_id,
+        GrantTrustMode::Trusted,
+        None,
+    )
+    .expect("client grant issuance");
+    storage
+        .client_connect_ledger()
+        .expect("connect ledger")
+        .create_grant(
+            &issuance,
+            GrantSource::Administrator,
+            GrantPermissions::USE_MANAGE_SHARE,
+            &instant(T0),
+        )
+        .expect("managing client grant");
+}
+
 /// Creates one active repository access grant for `user_id`.
 fn stage_repository_grant(data_directory: &Path, binding_id: &str, user_id: &str) {
     let mut storage = SqliteStorage::open(data_directory).expect("storage");
@@ -563,7 +586,7 @@ async fn repository_directory_follows_the_dual_authorization_and_facade_shape() 
         &"b".repeat(64),
         "fingerprint-beta",
     );
-    stage_client_grant(&data_directory, NODE, &owner_id);
+    stage_managing_client_grant(&data_directory, NODE, &owner_id);
     stage_client_grant(&data_directory, NODE, &member_id);
     stage_repository_grant(&data_directory, &alpha_binding_id(), &owner_id);
     stage_repository_grant(&data_directory, &beta_binding_id(), &member_id);
@@ -602,10 +625,12 @@ async fn repository_directory_follows_the_dual_authorization_and_facade_shape() 
         field_names,
         vec![
             "availability",
+            "canGrantAccess",
             "defaultBranch",
             "dirtyState",
             "displayName",
             "headCommit",
+            "permissions",
             "repositoryBindingId",
         ]
     );
@@ -615,6 +640,8 @@ async fn repository_directory_follows_the_dual_authorization_and_facade_shape() 
     assert_eq!(card["headCommit"], "a".repeat(40));
     assert_eq!(card["dirtyState"], "clean");
     assert_eq!(card["availability"], "available");
+    assert_eq!(card["permissions"], "use");
+    assert_eq!(card["canGrantAccess"], true);
 
     // The Member's directory is a different set: beta, with its own facts.
     let response = http_request(
@@ -637,6 +664,8 @@ async fn repository_directory_follows_the_dual_authorization_and_facade_shape() 
     assert_eq!(repositories[0]["headCommit"], "b".repeat(64));
     assert_eq!(repositories[0]["dirtyState"], "clean");
     assert_eq!(repositories[0]["availability"], "available");
+    assert_eq!(repositories[0]["permissions"], "use");
+    assert_eq!(repositories[0]["canGrantAccess"], false);
 
     // A repository grant without the Client grant is invisible (plan 13.4).
     let response = http_request(

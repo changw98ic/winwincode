@@ -1076,6 +1076,26 @@ export interface ControlPlaneRepositorySummary {
   readonly headCommit: string
   readonly dirtyState: ControlPlaneRepositoryDirtyState
   readonly availability: ControlPlaneRepositoryAvailability
+  readonly permissions: ControlPlaneRepositoryPermissions
+  readonly canGrantAccess: boolean
+}
+
+/** Durable permission projected for the signed-in user on one repository. */
+export type ControlPlaneRepositoryPermissions = 'use' | 'use+manage'
+
+/** One repository grant write; the Server owns authorization and identity. */
+export interface ControlPlaneRepositoryGrantInput {
+  readonly repositoryBindingId: string
+  readonly userId: string
+  readonly permissions: ControlPlaneRepositoryPermissions
+}
+
+/** The durable grant projection returned after a successful write. */
+export interface ControlPlaneRepositoryGrantOutcome {
+  readonly repositoryBindingId: string
+  readonly userId: string
+  readonly permissions: ControlPlaneRepositoryPermissions
+  readonly revision: number
 }
 
 const REPOSITORY_DIRTY_STATE_VALUES: readonly string[] = Object.freeze(['clean', 'dirty'])
@@ -1088,6 +1108,8 @@ const REPOSITORY_AVAILABILITY_VALUES: readonly string[] = Object.freeze([
   'permission_denied',
   'scan_failed',
 ])
+const REPOSITORY_PERMISSION_VALUES: readonly string[] = Object.freeze(['use', 'use+manage'])
+const REPOSITORY_GRANT_PATH = '/api/v1/repositories/grants'
 
 function invalidRepositoryListError(): ControlPlaneClientError {
   return new ControlPlaneClientError({
@@ -1133,6 +1155,9 @@ function repositorySummaryValue(value: unknown): ControlPlaneRepositorySummary {
     || !REPOSITORY_DIRTY_STATE_VALUES.includes(dirtyState)
     || typeof availability !== 'string'
     || !REPOSITORY_AVAILABILITY_VALUES.includes(availability)
+    || typeof value.permissions !== 'string'
+    || !REPOSITORY_PERMISSION_VALUES.includes(value.permissions)
+    || typeof value.canGrantAccess !== 'boolean'
   ) {
     throw invalidRepositoryListError()
   }
@@ -1143,6 +1168,73 @@ function repositorySummaryValue(value: unknown): ControlPlaneRepositorySummary {
     headCommit: value.headCommit,
     dirtyState: dirtyState as ControlPlaneRepositoryDirtyState,
     availability: availability as ControlPlaneRepositoryAvailability,
+    permissions: value.permissions as ControlPlaneRepositoryPermissions,
+    canGrantAccess: value.canGrantAccess,
+  })
+}
+
+function assertRepositoryGrantInput(input: ControlPlaneRepositoryGrantInput): void {
+  if (
+    typeof input?.repositoryBindingId !== 'string'
+    || !/^rbd_[0-9A-HJKMNP-TV-Z]{26}$/u.test(input.repositoryBindingId)
+    || typeof input?.userId !== 'string'
+    || !/^usr_[0-9A-HJKMNP-TV-Z]{26}$/u.test(input.userId)
+    || !REPOSITORY_PERMISSION_VALUES.includes(input?.permissions as string)
+  ) {
+    throw new ControlPlaneClientError({
+      kind: 'protocol',
+      code: 'REPOSITORY_GRANT_INPUT_INVALID',
+      message: 'Enter a valid user and repository permission.',
+      requestId: null,
+      retryable: false,
+    })
+  }
+}
+
+function repositoryGrantResponse(source: string): ControlPlaneRepositoryGrantOutcome {
+  let value: unknown
+  try {
+    value = JSON.parse(source)
+  } catch {
+    value = null
+  }
+  if (isRecord(value)
+    && typeof value.schemaVersion === 'string'
+    && value.schemaVersion !== CONTROL_PLANE_SCHEMA_VERSION
+  ) {
+    throw new ControlPlaneClientError({
+      kind: 'version',
+      code: 'SCHEMA_VERSION_MISMATCH',
+      message: `The Control Plane server must use ${CONTROL_PLANE_SCHEMA_VERSION}.`,
+      requestId: null,
+      retryable: false,
+    })
+  }
+  if (!isRecord(value)
+    || value.schemaVersion !== CONTROL_PLANE_SCHEMA_VERSION
+    || typeof value.repositoryBindingId !== 'string'
+    || !/^rbd_[0-9A-HJKMNP-TV-Z]{26}$/u.test(value.repositoryBindingId)
+    || typeof value.userId !== 'string'
+    || !/^usr_[0-9A-HJKMNP-TV-Z]{26}$/u.test(value.userId)
+    || typeof value.permissions !== 'string'
+    || !REPOSITORY_PERMISSION_VALUES.includes(value.permissions)
+    || typeof value.revision !== 'number'
+    || !Number.isInteger(value.revision)
+    || value.revision < 1
+  ) {
+    throw new ControlPlaneClientError({
+      kind: 'protocol',
+      code: 'INVALID_REPOSITORY_GRANT_RESPONSE',
+      message: 'The Control Plane server returned an invalid repository grant.',
+      requestId: null,
+      retryable: false,
+    })
+  }
+  return Object.freeze({
+    repositoryBindingId: value.repositoryBindingId,
+    userId: value.userId,
+    permissions: value.permissions as ControlPlaneRepositoryPermissions,
+    revision: value.revision,
   })
 }
 
@@ -1495,6 +1587,11 @@ export interface ControlPlaneClientDirectory extends ControlPlaneClient {
     input: ControlPlaneRepositoryListInput,
     options?: ControlPlaneRequestOptions,
   ): Promise<readonly ControlPlaneRepositorySummary[]>
+  /** Grant one repository to an existing user. */
+  grantRepositoryAccess(
+    input: ControlPlaneRepositoryGrantInput,
+    options?: ControlPlaneRequestOptions,
+  ): Promise<ControlPlaneRepositoryGrantOutcome>
 }
 
 /**
@@ -1515,6 +1612,7 @@ export function createControlPlaneClientDirectory(options: {
   const injectedAddClient = injected.addClient
   const injectedListClients = injected.listClients
   const injectedListRepositories = injected.listRepositories
+  const injectedGrantRepositoryAccess = injected.grantRepositoryAccess
 
   async function directoryRequest(
     path: string,
@@ -1564,6 +1662,45 @@ export function createControlPlaneClientDirectory(options: {
       if (!response.ok) throw clientDirectoryBoundaryError(response.status, source)
       if (response.status !== 201) throw invalidDeviceListError()
       return deviceListResponse(source)
+    } catch (error) {
+      if (signalIsAborted(requestOptions?.signal)) throw cancelledError(null)
+      if (error instanceof ControlPlaneClientError) throw error
+      throw new ControlPlaneClientError({
+        kind: 'network',
+        code: 'NETWORK_ERROR',
+        message: 'The Control Plane server could not be reached.',
+        requestId: null,
+        retryable: true,
+      })
+    }
+  }
+
+  async function grantRequest(
+    input: ControlPlaneRepositoryGrantInput,
+    requestOptions: ControlPlaneRequestOptions | undefined,
+  ): Promise<ControlPlaneRepositoryGrantOutcome> {
+    try {
+      const response = await directoryRequest(
+        REPOSITORY_GRANT_PATH,
+        'POST',
+        JSON.stringify({
+          schemaVersion: CONTROL_PLANE_SCHEMA_VERSION,
+          repositoryBindingId: input.repositoryBindingId,
+          userId: input.userId,
+          permissions: input.permissions,
+        }),
+        requestOptions?.signal,
+      )
+      const source = await response.text()
+      if (!response.ok) throw clientDirectoryBoundaryError(response.status, source)
+      if (response.status !== 200 && response.status !== 201) throw new ControlPlaneClientError({
+        kind: 'protocol',
+        code: 'INVALID_REPOSITORY_GRANT_RESPONSE',
+        message: 'The Control Plane server returned an invalid repository grant.',
+        requestId: null,
+        retryable: false,
+      })
+      return repositoryGrantResponse(source)
     } catch (error) {
       if (signalIsAborted(requestOptions?.signal)) throw cancelledError(null)
       if (error instanceof ControlPlaneClientError) throw error
@@ -1662,6 +1799,19 @@ export function createControlPlaneClientDirectory(options: {
         return injectedListRepositories.call(options.client, input, requestOptions)
       }
       return repositoriesListRequest(location, transportFetch, input.clientId, requestOptions?.signal)
+    },
+    async grantRepositoryAccess(rawInput, requestOptions) {
+      const input: ControlPlaneRepositoryGrantInput = {
+        repositoryBindingId: typeof rawInput?.repositoryBindingId === 'string'
+          ? rawInput.repositoryBindingId.trim() : '',
+        userId: typeof rawInput?.userId === 'string' ? rawInput.userId.trim() : '',
+        permissions: rawInput?.permissions as ControlPlaneRepositoryPermissions,
+      }
+      assertRepositoryGrantInput(input)
+      if (typeof injectedGrantRepositoryAccess === 'function') {
+        return injectedGrantRepositoryAccess.call(options.client, input, requestOptions)
+      }
+      return grantRequest(input, requestOptions)
     },
     close() {
       options.client.close()
