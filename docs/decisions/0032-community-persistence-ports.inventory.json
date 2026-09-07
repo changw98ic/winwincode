@@ -1,0 +1,159 @@
+{
+  "schemaVersion": 1,
+  "status": "required-public-boundary",
+  "task": "winwincode-edition.2.4.1.2.2",
+  "scope": {
+    "ownerCrates": [
+      "winwincode-storage",
+      "winwincode-control-plane",
+      "winwincode-server"
+    ],
+    "selectionRule": "Every public trait whose name contains Persistence, plus every public trait carrying the compiler-visible persistencePortMarker attribute.",
+    "persistencePortMarker": "#[doc = \"winwincode-community-persistence-port\"]",
+    "portCount": 3,
+    "exportSurfaceRule": "Each port must be reachable through the public export surface of its crate, every exported identifier containing Persistence must be a frozen port, and glob re-exports are rejected because they hide exported names."
+  },
+  "contract": {
+    "allowedSemantics": [
+      "domain-transaction",
+      "revision-or-read-cut",
+      "idempotent-replay",
+      "stable-domain-error",
+      "opaque-authority-identity"
+    ],
+    "stableErrorRule": "Every Result error in a public port is a named domain error frozen by this inventory.",
+    "databaseSpecificTypesAllowed": false,
+    "forbiddenProductWords": [
+      "Postgres",
+      "PostgreSQL",
+      "Hosted",
+      "Enterprise"
+    ],
+    "forbiddenPublicTypePatterns": [
+      "SqliteStorage",
+      "rusqlite",
+      "Postgres",
+      "PostgreSQL",
+      "PgPool",
+      "PgConnect",
+      "DatabaseUrl",
+      "Dsn",
+      "ConnectionPool",
+      "PoolOptions",
+      "TlsConfig",
+      "TlsMode",
+      "SslMode",
+      "HostedPostgres",
+      "HostedStorage",
+      "EnterpriseDatabaseConfig",
+      "Hosted",
+      "Enterprise"
+    ],
+    "productPersistenceExportRule": "No exported identifier may combine a forbidden product word with Persistence, and no owner crate source may name a removed Enterprise persistence type."
+  },
+  "removedEnterprisePersistenceTraits": [
+    "EnterprisePolicyPersistence",
+    "EnterprisePolicyProductStatePersistence",
+    "EnterprisePolicyEvaluationPersistence",
+    "EnterpriseQuotaPersistence",
+    "EnterpriseUsagePersistence",
+    "EnterpriseUsageProductStatePersistence",
+    "EnterpriseUsageReconciliationPersistence"
+  ],
+  "removedEnterpriseDisposition": "All seven names describe Enterprise product semantics for policy, quota, and usage reconciliation. None carried genuinely shared neutral capability, so nothing was renamed and no alias survives; the neutral Community boundary is the three frozen ports below, and product databases are composed in their own repositories.",
+  "ports": [
+    {
+      "crate": "winwincode-control-plane",
+      "trait": "ObserverDecisionPersistence",
+      "source": "crates/winwincode-control-plane/src/observer_decision_service.rs",
+      "role": "domain",
+      "stableErrors": [
+        "StorageError"
+      ]
+    },
+    {
+      "crate": "winwincode-control-plane",
+      "trait": "ProductSessionPersistence",
+      "source": "crates/winwincode-control-plane/src/product_session_service.rs",
+      "role": "domain",
+      "stableErrors": [
+        "StorageError"
+      ]
+    },
+    {
+      "crate": "winwincode-storage",
+      "trait": "ProductStateStorage",
+      "source": "crates/winwincode-storage/src/lib.rs",
+      "role": "composite",
+      "stableErrors": [
+        "StorageError"
+      ]
+    }
+  ],
+  "evidence": {
+    "rule": "Every frozen port keeps Rust behavior evidence that must still exist in the named test files; the symbol is the adapter or service that exercises the port.",
+    "ports": [
+      {
+        "trait": "ProductStateStorage",
+        "cases": [
+          {
+            "path": "crates/winwincode-storage/tests/sqlite.rs",
+            "symbol": "SqliteStorage",
+            "test": "one_commit_makes_state_journal_receipt_and_outbox_authoritative_together"
+          },
+          {
+            "path": "crates/winwincode-storage/tests/sqlite.rs",
+            "symbol": "SqliteStorage",
+            "test": "sqlite_state_revision_guard_conflict_writes_none_of_the_four_commit_members"
+          }
+        ]
+      },
+      {
+        "trait": "ObserverDecisionPersistence",
+        "cases": [
+          {
+            "path": "crates/winwincode-control-plane/tests/observer_decision_service.rs",
+            "symbol": "ObserverDecisionService",
+            "test": "pause_waits_for_safe_checkpoint_and_preserves_all_runtime_resources_across_restart"
+          },
+          {
+            "path": "crates/winwincode-control-plane/tests/observer_decision_service.rs",
+            "symbol": "ObserverDecisionService",
+            "test": "disconnect_replay_returns_the_original_pause_without_a_second_mutation"
+          },
+          {
+            "path": "crates/winwincode-control-plane/tests/observer_decision_service.rs",
+            "symbol": "ObserverDecisionService",
+            "test": "source_and_checkpoint_validation_rejects_foreign_or_unsafe_facts"
+          }
+        ]
+      },
+      {
+        "trait": "ProductSessionPersistence",
+        "cases": [
+          {
+            "path": "crates/winwincode-control-plane/tests/product_session_service.rs",
+            "symbol": "ProductSessionService",
+            "test": "continue_joins_exact_worker_slots_and_keeps_sibling_bindings_after_restart"
+          },
+          {
+            "path": "crates/winwincode-control-plane/tests/product_session_service.rs",
+            "symbol": "ProductSessionService",
+            "test": "request_and_runtime_identity_conflicts_fail_without_guessing_or_cross_session_reuse"
+          },
+          {
+            "path": "crates/winwincode-control-plane/tests/product_session_service.rs",
+            "symbol": "ProductSessionService",
+            "test": "multiple_sessions_create_fork_query_close_replay_and_restart_deterministically"
+          }
+        ]
+      }
+    ]
+  },
+  "dependencyBoundary": {
+    "manifest": "crates/winwincode-storage/Cargo.toml",
+    "gitDependenciesAllowed": false,
+    "pathDependencies": "same-repository-only",
+    "productDatabaseCratesAllowed": false
+  }
+}
