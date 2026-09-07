@@ -172,6 +172,27 @@
       "patchSha256": "fc008b58d42c97fcba1b48f9f89b4a1abf1f173addc7b996306adf7d7b39692c",
       "fixUpstreamCommit": "f02d3ca8acb0c197290f13934aa9541f1e12b097",
       "fixReleasedIn": "i18n-embed-fl 0.10.0"
+    },
+    {
+      "package": "rusqlite",
+      "version": "0.39.0",
+      "registry": "https://crates.io",
+      "registryChecksumSha256": "a0d2b0146dd9661bf67bb107c0bb2a55064d556eeb3fc314151b957f313bcd4e",
+      "repository": "https://github.com/rusqlite/rusqlite",
+      "upstreamCommit": "2a1790a69107cd03dae85d501dcbdb11c5b32ef3",
+      "sourceDirectory": "upstream/vendor/rusqlite-0.39.0",
+      "upstreamSourceTreeSha256": "8d4e03def1ae49028fbfe45a10b5e2bf428a4f6e1494ad411c3b36fe62f0059c",
+      "patchedSourceTreeSha256": "03440f707e72f00967756e279ba47346a0d19b35bc640c752d063a7989991a3b",
+      "upstreamSourceFile": "src/transaction.rs",
+      "upstreamSourceFileSha256": "61f190f116f0d843584192631b33b9c94537117b1e95fe3caa954e8b6b163d55",
+      "patchedSourceFileSha256": "8232ca711afd32718180284efd2c57f575a11e746c97bdb69088d8a4875070c4",
+      "license": "MIT",
+      "licenseFile": "upstream/vendor/rusqlite-0.39.0/LICENSE",
+      "licenseFileSha256": "c10c1f27337546471e5f7e4e97fdd398b35b9d4e126115dcd22de8d8e65abf6f",
+      "patch": "upstream/patches/rusqlite-0.39.0/0001-quote-savepoint-identifiers.patch",
+      "patchSha256": "a242c0a70e2cae6d3a12f726304d841692e706c024129f03b12d92939a879554",
+      "fixUpstreamCommit": "15385cc046364b68c9d7e65d2644dc86c0980f25",
+      "fixReleasedIn": "rusqlite 0.40.1"
     }
   ],
   "patches": [
@@ -181,6 +202,14 @@
       "planned": false,
       "targets": [
         "upstream/vendor/i18n-embed-fl-0.9.4/src/lib.rs"
+      ]
+    },
+    {
+      "id": "rusqlite-0.39.0-quote-savepoint-identifiers",
+      "file": "upstream/patches/rusqlite-0.39.0/0001-quote-savepoint-identifiers.patch",
+      "planned": false,
+      "targets": [
+        "upstream/vendor/rusqlite-0.39.0/src/transaction.rs"
       ]
     },
     {

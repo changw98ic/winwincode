@@ -72,6 +72,13 @@ Copyright 2020 Luke Frisken
 
 This component is licensed under the MIT terms reproduced above.
 
+## rusqlite
+
+WinWinCode vendors `rusqlite 0.39.0` from the rusqlite project and applies the
+savepoint-identifier quoting fix recorded in `upstream/sources.lock.json`. The
+preserved upstream MIT license is at
+`upstream/vendor/rusqlite-0.39.0/LICENSE`.
+
 ## Rust dependency notices
 
 Every generated platform artifact contains a target-specific

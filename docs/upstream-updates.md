@@ -94,7 +94,7 @@ THIRD_PARTY_NOTICES.md
 
 ## 更新 vendored Cargo source
 
-当前 vendored Cargo source 是 `i18n-embed-fl 0.9.4`。它用于修复上游 proc macro 的非确定顺序，根 `[patch.crates-io]` 只能选择一个 path source。
+当前 vendored Cargo sources 是 `i18n-embed-fl 0.9.4` 和 `rusqlite 0.39.0`。它们分别修复上游 proc macro 的非确定顺序与命名 SAVEPOINT 标识符转义；每个 crate 都通过根 `[patch.crates-io]` 选择唯一的 path source。
 
 ### 1. 取得并核对候选
 

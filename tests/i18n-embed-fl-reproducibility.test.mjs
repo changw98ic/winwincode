@@ -15,7 +15,9 @@ import { releaseSourcePaths } from '../scripts/release-source-contract.mjs'
 
 const root = resolve(import.meta.dirname, '..')
 const sourceLock = JSON.parse(readFileSync(join(root, 'upstream', 'sources.lock.json'), 'utf8'))
-const [vendoredSource] = sourceLock.vendoredCargoSources
+const vendoredSource = sourceLock.vendoredCargoSources.find(
+  source => source.package === 'i18n-embed-fl',
+)
 const vendorRoot = join(root, vendoredSource.sourceDirectory)
 const patchPath = join(root, vendoredSource.patch)
 
@@ -62,7 +64,7 @@ test('Cargo selects one patched i18n-embed-fl 0.9.4 source', () => {
 })
 
 test('vendored source identity, patch and MIT license are exact', () => {
-  assert.equal(sourceLock.vendoredCargoSources.length, 1)
+  assert.equal(vendoredSource.package, 'i18n-embed-fl')
   assert.deepEqual(
     {
       package: vendoredSource.package,

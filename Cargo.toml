@@ -102,6 +102,7 @@ strip = "symbols"
 
 [patch.crates-io]
 i18n-embed-fl = { path = "upstream/vendor/i18n-embed-fl-0.9.4" }
+rusqlite = { path = "upstream/vendor/rusqlite-0.39.0" }
 tokio-tungstenite = { git = "https://github.com/openai-oss-forks/tokio-tungstenite", rev = "0e5b2d73aa18dd9f0a50ee9ff199d5aef7594186" }
 tungstenite = { git = "https://github.com/openai-oss-forks/tungstenite-rs", rev = "4fffad30fe373adbdcffab9545e9e9bf4f2fc19f" }
 
