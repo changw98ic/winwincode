@@ -1990,10 +1990,11 @@ impl fmt::Display for StorageError {
 
 impl std::error::Error for StorageError {}
 
-/// Deep storage seam shared by the `SQLite` adapter and a future `PostgreSQL` adapter.
+/// Deep storage seam shared by local and remote adapters.
 ///
 /// `commit` owns the full transaction. `pending_events` and `mark_published`
 /// implement an at-least-once outbox with stable event ids.
+#[doc = "winwincode-community-persistence-port"]
 pub trait ProductStateStorage: Send {
     /// Atomically writes canonical state, its request receipt, and outbox
     /// events. Every [`StateRevisionGuard`] and [`StateMutation`] on `commit`

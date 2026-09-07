@@ -1,0 +1,98 @@
+{
+  "schemaVersion": 1,
+  "status": "required-public-boundary",
+  "task": "winwincode-edition.2.4.1.2",
+  "scope": {
+    "ownerCrates": [
+      "winwincode-storage",
+      "winwincode-control-plane",
+      "winwincode-server"
+    ],
+    "selectionRule": "Every public trait whose name contains Persistence, plus every public trait carrying the compiler-visible persistencePortMarker attribute.",
+    "persistencePortMarker": "#[doc = \"winwincode-community-persistence-port\"]",
+    "portCount": 3
+  },
+  "contract": {
+    "allowedSemantics": [
+      "domain-transaction",
+      "revision-or-read-cut",
+      "idempotent-replay",
+      "stable-domain-error",
+      "opaque-authority-identity"
+    ],
+    "stableErrorRule": "Every Result error in a public port is a named domain error frozen by this inventory.",
+    "databaseSpecificTypesAllowed": false,
+    "forbiddenPublicTypePatterns": [
+      "SqliteStorage",
+      "rusqlite",
+      "Postgres",
+      "PostgreSQL",
+      "PgPool",
+      "PgConnect",
+      "DatabaseUrl",
+      "Dsn",
+      "ConnectionPool",
+      "PoolOptions",
+      "TlsConfig",
+      "TlsMode",
+      "SslMode",
+      "HostedPostgres",
+      "HostedStorage",
+      "EnterpriseDatabaseConfig",
+      "Hosted",
+      "Enterprise"
+    ]
+  },
+  "removedEnterprisePersistenceTraits": [
+    "EnterprisePolicyPersistence",
+    "EnterprisePolicyProductStatePersistence",
+    "EnterprisePolicyEvaluationPersistence",
+    "EnterpriseQuotaPersistence",
+    "EnterpriseUsagePersistence",
+    "EnterpriseUsageProductStatePersistence",
+    "EnterpriseUsageReconciliationPersistence"
+  ],
+  "ports": [
+    {
+      "crate": "winwincode-control-plane",
+      "trait": "ObserverDecisionPersistence",
+      "source": "crates/winwincode-control-plane/src/observer_decision_service.rs",
+      "role": "domain",
+      "stableErrors": ["StorageError"]
+    },
+    {
+      "crate": "winwincode-control-plane",
+      "trait": "ProductSessionPersistence",
+      "source": "crates/winwincode-control-plane/src/product_session_service.rs",
+      "role": "domain",
+      "stableErrors": ["StorageError"]
+    },
+    {
+      "crate": "winwincode-storage",
+      "trait": "ProductStateStorage",
+      "source": "crates/winwincode-storage/src/lib.rs",
+      "role": "composite",
+      "stableErrors": ["StorageError"]
+    }
+  ],
+  "evidence": {
+    "sqlite": [
+      {
+        "path": "crates/winwincode-storage/tests/sqlite.rs",
+        "symbol": "SqliteStorage",
+        "test": "one_commit_makes_state_journal_receipt_and_outbox_authoritative_together"
+      },
+      {
+        "path": "crates/winwincode-storage/tests/sqlite.rs",
+        "symbol": "SqliteStorage",
+        "test": "sqlite_state_revision_guard_conflict_writes_none_of_the_four_commit_members"
+      }
+    ]
+  },
+  "dependencyBoundary": {
+    "manifest": "crates/winwincode-storage/Cargo.toml",
+    "gitDependenciesAllowed": false,
+    "pathDependencies": "same-repository-only",
+    "productDatabaseCratesAllowed": false
+  }
+}
