@@ -8,8 +8,31 @@ use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
 use pretty_assertions::assert_eq;
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn starts_resolved_agent_prompt_in_forked_thread() -> Result<()> {
+#[test]
+fn starts_resolved_agent_prompt_in_forked_thread() -> Result<()> {
+    const TEST_STACK_SIZE_BYTES: usize = 8 * 1024 * 1024;
+
+    let handle = std::thread::Builder::new()
+        .name("agent-service-test".to_string())
+        .stack_size(TEST_STACK_SIZE_BYTES)
+        .spawn(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .thread_stack_size(TEST_STACK_SIZE_BYTES)
+                .enable_all()
+                .build()
+                .expect("agent service test runtime should build")
+                .block_on(starts_resolved_agent_prompt_in_forked_thread_async())
+        })
+        .expect("agent service test thread should spawn");
+
+    match handle.join() {
+        Ok(result) => result,
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
+}
+
+async fn starts_resolved_agent_prompt_in_forked_thread_async() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = responses::start_mock_server().await;
