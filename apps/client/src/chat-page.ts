@@ -4,8 +4,8 @@ import type {
   ChatViewModel,
   ChatViewModelState,
 } from './chat-view-model.js'
-import type { ControlPlaneClientError } from './control-plane-client.js'
-import { mountButton } from './components/button.js'
+import type { ControlPlaneClientError } from './community-control-plane-client.js'
+import { mountButton } from '@winwincode/browser-ui'
 import { mountFormField } from './components/form-field.js'
 import { mountKeyedCollection } from './components/keyed-collection.js'
 import type {

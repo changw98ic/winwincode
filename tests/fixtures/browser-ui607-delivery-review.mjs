@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { mountWinWinCodeClient } from '/module/application.js'
-import { ControlPlaneClientError } from '/module/control-plane-client.js'
+import { ControlPlaneClientError } from '/module/community-control-plane-client.js'
 import {
   canAdvanceStrongFlowDelivery,
   hasUnmetStrongFlowRequiredCriterion,

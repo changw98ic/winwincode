@@ -4,7 +4,7 @@ import { mountKeyedCollection } from './components/keyed-collection.js'
 import type {
   ControlPlaneUserManagementFailure,
   ControlPlaneUserSummary,
-} from './control-plane-client.js'
+} from './community-control-plane-client.js'
 import {
   mountUserRowControls,
   type UserRowControls,

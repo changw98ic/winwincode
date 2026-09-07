@@ -5,7 +5,7 @@ import type {
   DeliveryStatus,
 } from './generated/contracts.js'
 import { DeliveryStatus as DeliveryStatusVocabulary } from './generated/contracts.js'
-import { scopeHash, type ScopeRouteSelection } from './core/scope-context.js'
+import { scopeHash, type ScopeRouteSelection } from '@winwincode/browser-core/scope-context'
 import { mountKeyedCollection, type KeyedCollectionView } from './components/keyed-collection.js'
 import {
   mountWindowedList,

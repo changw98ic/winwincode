@@ -7,7 +7,7 @@ import type {
   RepositoryScope,
   Scope,
   WorkspaceId,
-} from '../generated/contracts.js'
+} from '@winwincode/contracts/browser-control'
 
 const SCOPE_PARAMETER_NAMES = Object.freeze([
   'organizationId',

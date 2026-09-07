@@ -9,7 +9,10 @@ const root = resolve(import.meta.dirname, '..')
 const errors = []
 const workspacePackages = Object.freeze([
   'apps/client',
+  'packages/browser-core',
+  'packages/browser-ui',
   'packages/contracts',
+  'packages/control-plane-client',
   'packages/strongflow',
 ])
 const requiredIgnoredPaths = Object.freeze([
@@ -55,6 +58,9 @@ for (const packageDirectory of workspacePackages) {
     continue
   }
   const manifest = json(manifestPath)
+  if (manifest.version !== rootManifest.version) {
+    errors.push(`${packageDirectory}: version must equal workspace version ${rootManifest.version}`)
+  }
   if (manifest.type !== 'module') errors.push(`${packageDirectory}: type must be module`)
   if (manifest.license !== 'Apache-2.0') {
     errors.push(`${packageDirectory}: license must be Apache-2.0`)
@@ -63,13 +69,13 @@ for (const packageDirectory of workspacePackages) {
     errors.push(`${packageDirectory}: files allowlist is required`)
   }
   for (const [dependency, version] of Object.entries(manifest.dependencies ?? {})) {
-    if (dependency.startsWith('@winwincode/') && version !== 'workspace:*') {
-      errors.push(`${packageDirectory}: ${dependency} must use workspace:*`)
+    if (dependency.startsWith('@winwincode/') && version !== rootManifest.version) {
+      errors.push(`${packageDirectory}: ${dependency} must use exact version ${rootManifest.version}`)
     }
   }
   for (const [dependency, version] of Object.entries(manifest.optionalDependencies ?? {})) {
-    if (dependency.startsWith('@winwincode/') && version !== 'workspace:*') {
-      errors.push(`${packageDirectory}: optional ${dependency} must use workspace:*`)
+    if (dependency.startsWith('@winwincode/') && version !== rootManifest.version) {
+      errors.push(`${packageDirectory}: optional ${dependency} must use exact version ${rootManifest.version}`)
     }
   }
 }

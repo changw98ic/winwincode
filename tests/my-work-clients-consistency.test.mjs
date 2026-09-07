@@ -35,7 +35,7 @@ const cache = resolve(root, '.cache/my-work-tests')
 async function cachedModule(name) {
   return import(pathToFileURL(resolve(cache, name)).href)
 }
-const facade = await cachedModule('control-plane-client.js')
+const facade = await cachedModule('community-control-plane-client.js')
 const clientsViewModelModule = await cachedModule('clients-view-model.js')
 const occupancyViewModelModule = await cachedModule('client-occupancy-view-model.js')
 const dashboardModule = await cachedModule('home-dashboard-view-model.js')

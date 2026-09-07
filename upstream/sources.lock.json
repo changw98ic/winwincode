@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "recordedAt": "2026-08-21",
+  "recordedAt": "2026-09-05",
   "project": {
     "license": "Apache-2.0",
     "node": "24.x",
@@ -189,8 +189,8 @@
       "license": "MIT",
       "licenseFile": "upstream/vendor/rusqlite-0.39.0/LICENSE",
       "licenseFileSha256": "c10c1f27337546471e5f7e4e97fdd398b35b9d4e126115dcd22de8d8e65abf6f",
-      "patch": "upstream/patches/rusqlite-0.39.0/0001-quote-savepoint-identifiers.patch",
-      "patchSha256": "a242c0a70e2cae6d3a12f726304d841692e706c024129f03b12d92939a879554",
+      "patch": "upstream/patches/rusqlite/0001-quote-savepoint-identifiers.patch",
+      "patchSha256": "a7172969aa927a8ee36829e5974b7718c19ddaee4ce9d025fd42b0d63c639071",
       "fixUpstreamCommit": "15385cc046364b68c9d7e65d2644dc86c0980f25",
       "fixReleasedIn": "rusqlite 0.40.1"
     }
@@ -205,8 +205,8 @@
       ]
     },
     {
-      "id": "rusqlite-0.39.0-quote-savepoint-identifiers",
-      "file": "upstream/patches/rusqlite-0.39.0/0001-quote-savepoint-identifiers.patch",
+      "id": "rusqlite-quote-savepoint-identifiers",
+      "file": "upstream/patches/rusqlite/0001-quote-savepoint-identifiers.patch",
       "planned": false,
       "targets": [
         "upstream/vendor/rusqlite-0.39.0/src/transaction.rs"

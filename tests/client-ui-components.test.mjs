@@ -1,10 +1,23 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
+import { rmSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import test from 'node:test'
 
 const repositoryRoot = resolve(import.meta.dirname, '..')
+const cacheRoot = resolve(repositoryRoot, '.cache/ui-components-tests')
+rmSync(cacheRoot, { recursive: true, force: true })
+const browserUiCompiler = spawnSync(
+  'corepack',
+  ['pnpm', '--filter', '@winwincode/browser-ui', 'build'],
+  { cwd: repositoryRoot, encoding: 'utf8' },
+)
+assert.equal(
+  browserUiCompiler.status,
+  0,
+  `Browser UI primitives did not compile:\n${browserUiCompiler.stdout}${browserUiCompiler.stderr}`,
+)
 const compiler = spawnSync(
   'corepack',
   [
@@ -26,22 +39,17 @@ assert.equal(
   `Client UI components did not compile:\n${compiler.stdout}${compiler.stderr}`,
 )
 
-const { mountButton } = await import(`${pathToFileURL(resolve(
+const browserUi = await import(`${pathToFileURL(resolve(
   repositoryRoot,
-  '.cache/ui-components-tests/components/button.js',
+  'packages/browser-ui/dist/index.js',
 )).href}`)
-const { mountStatusBadge } = await import(`${pathToFileURL(resolve(
-  repositoryRoot,
-  '.cache/ui-components-tests/components/status-badge.js',
-)).href}`)
-const { mountPageHeader } = await import(`${pathToFileURL(resolve(
-  repositoryRoot,
-  '.cache/ui-components-tests/components/page-header.js',
-)).href}`)
-const { mountPanel } = await import(`${pathToFileURL(resolve(
-  repositoryRoot,
-  '.cache/ui-components-tests/components/panel.js',
-)).href}`)
+const {
+  mountButton,
+  mountErrorState,
+  mountPageHeader,
+  mountPanel,
+  mountStatusBadge,
+} = browserUi
 const { mountMetric } = await import(`${pathToFileURL(resolve(
   repositoryRoot,
   '.cache/ui-components-tests/components/metric.js',
@@ -53,10 +61,6 @@ const { mountFormField } = await import(`${pathToFileURL(resolve(
 const { mountEmptyState } = await import(`${pathToFileURL(resolve(
   repositoryRoot,
   '.cache/ui-components-tests/components/empty-state.js',
-)).href}`)
-const { mountErrorState } = await import(`${pathToFileURL(resolve(
-  repositoryRoot,
-  '.cache/ui-components-tests/components/error-state.js',
 )).href}`)
 const { mountToolbar } = await import(`${pathToFileURL(resolve(
   repositoryRoot,
@@ -172,25 +176,39 @@ class FakeDocument {
   }
 }
 
-test('component barrel exposes the complete first primitive set', () => {
+test('browser-ui is the only public entry for the extracted primitive set', () => {
+  assert.deepEqual(Object.keys(browserUi).sort(), [
+    'assertMounted',
+    'mountButton',
+    'mountErrorState',
+    'mountPageHeader',
+    'mountPanel',
+    'mountStatusBadge',
+    'removeNode',
+  ])
   assert.deepEqual(
     [
       'mountActionBar',
-      'mountButton',
+      'mountClientErrorBoundary',
+      'mountConnectionBar',
       'mountDrawer',
       'mountEmptyState',
-      'mountErrorState',
       'mountFormField',
+      'mountKeyedCollection',
       'mountMetric',
-      'mountPageHeader',
-      'mountPanel',
       'mountSplitPane',
-      'mountStatusBadge',
       'mountTabs',
       'mountToolbar',
     ].filter(name => typeof components[name] !== 'function'),
     [],
   )
+  for (const oldEntry of [
+    'mountButton',
+    'mountErrorState',
+    'mountPageHeader',
+    'mountPanel',
+    'mountStatusBadge',
+  ]) assert.equal(oldEntry in components, false, `${oldEntry} must not remain on the client barrel`)
 })
 
 test('Button keeps one native control across updates and exposes busy and destructive states', () => {

@@ -4,7 +4,7 @@ import {
   controlPlaneLoginFailure,
   type ControlPlaneClient,
   type ControlPlaneLoginFailure,
-} from './control-plane-client.js'
+} from './community-control-plane-client.js'
 
 /** Which mounted form produced the current submission or failure. */
 export type LoginSubmissionSource = 'sign-in' | 'initialization'
@@ -15,6 +15,10 @@ export type LoginInitialization = 'unknown' | 'uninitialized' | 'initialized'
 export interface LoginCredentials {
   readonly username: string
   readonly password: string
+}
+
+export interface OwnerInitializationCredentials extends LoginCredentials {
+  readonly bootstrapProof: string
 }
 
 export interface LoginViewModelState {
@@ -30,7 +34,7 @@ export interface LoginViewModel {
   readonly state: LoginViewModelState
   subscribe(listener: LoginViewModelListener): () => void
   login(credentials: LoginCredentials): Promise<void>
-  initialize(bootstrapProof: string, credentials: LoginCredentials): Promise<void>
+  initialize(credentials: OwnerInitializationCredentials): Promise<void>
   refreshInitialization(): Promise<void>
   /** Clear one submission outcome so the page is armed for the next session. */
   reset(): void
@@ -115,22 +119,22 @@ export function createLoginViewModel(options: {
         password: credentials.password,
       }
       return submit('sign-in', signal => {
-        const operation = client.loginWithPassword(attempt, { signal })
+        const operation = client.login(attempt, { signal })
         // The facade consumed the material synchronously, so the retained
         // reference keeps only the username.
         attempt.password = ''
         return operation
       })
     },
-    initialize(bootstrapProof, credentials) {
-      let submittedProof = bootstrapProof
+    initialize(credentials) {
       const attempt = {
+        bootstrapProof: credentials.bootstrapProof,
         username: credentials.username,
         password: credentials.password,
       }
       return submit('initialization', signal => {
-        const operation = client.login(submittedProof, attempt, { signal })
-        submittedProof = ''
+        const operation = client.initializeOwner(attempt, { signal })
+        attempt.bootstrapProof = ''
         attempt.password = ''
         return operation
       })

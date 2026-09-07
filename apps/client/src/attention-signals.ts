@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { scopeHash, type ScopeRouteSelection } from './core/scope-context.js'
+import { scopeHash, type ScopeRouteSelection } from '@winwincode/browser-core/scope-context'
 import type {
   ApprovalProjection,
   DeliveryId,

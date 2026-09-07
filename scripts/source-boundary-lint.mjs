@@ -292,7 +292,8 @@ function executionNetworkFindings() {
 
 function canonicalFacadeFindings() {
   const files = [
-    'apps/client/src/control-plane-client.ts',
+    'packages/control-plane-client/src/index.ts',
+    'apps/client/src/community-control-plane-client.ts',
     'apps/client/src/generated/control-plane-client.ts',
   ]
   return files

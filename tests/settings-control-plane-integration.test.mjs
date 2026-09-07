@@ -29,7 +29,7 @@ assert.equal(
 
 const facade = await import(`${pathToFileURL(resolve(
   root,
-  '.cache/settings-tests/control-plane-client.js',
+  '.cache/settings-tests/community-control-plane-client.js',
 )).href}`)
 const settingsModule = await import(`${pathToFileURL(resolve(
   root,
@@ -1483,7 +1483,7 @@ test('settings page keeps its network boundary in the view-model and renders onl
   assert.doesNotMatch(viewModelSource, /\bfetch\s*\(/u)
   assert.doesNotMatch(viewModelSource, /new\s+WebSocket/u)
   assert.doesNotMatch(viewModelSource, /console\./u)
-  assert.equal((viewModelSource.match(/\.\/control-plane-client\.js/gu) ?? []).length, 1)
+  assert.equal((viewModelSource.match(/\.\/community-control-plane-client\.js/gu) ?? []).length, 1)
 
   const configuration = pageState({
     status: 'error',

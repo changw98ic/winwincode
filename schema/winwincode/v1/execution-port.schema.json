@@ -6981,7 +6981,7 @@
         "totalCommandArgLimitBytes",
         "budgetDigest"
       ],
-      "description": "Immutable hard limits for one probe round. The scheduler rejects a plan whose declared sum exceeds any limit.",
+      "description": "Immutable hard limits for one probe round. The scheduler rejects a plan whose declared sum exceeds a limit.",
       "oneOf": [
         {
           "properties": {

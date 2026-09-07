@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import type { ControlPlaneTaskAnchor } from './control-plane-client.js'
+import type { ControlPlaneTaskAnchor } from './community-control-plane-client.js'
 import type {
   TaskRunApplyFacts,
   TaskRunCandidateFacts,

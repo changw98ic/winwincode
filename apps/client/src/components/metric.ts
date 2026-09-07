@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { assertMounted, removeNode, type MountedView } from './mounted-view.js'
-import type { StatusTone } from './status-badge.js'
+import {
+  assertMounted,
+  removeNode,
+  type MountedView,
+  type StatusTone,
+} from '@winwincode/browser-ui'
 
 export interface MetricProps {
   readonly label: string

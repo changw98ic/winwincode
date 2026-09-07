@@ -33,7 +33,7 @@ async function cachedModule(name) {
   return import(pathToFileURL(resolve(cache, name)).href)
 }
 const facadeModule = await cachedModule('client-occupancy-facade.js')
-const wireModule = await cachedModule('control-plane-client.js')
+const wireModule = await cachedModule('community-control-plane-client.js')
 const occupancyViewModelModule = await cachedModule('client-occupancy-view-model.js')
 
 const {
@@ -93,8 +93,8 @@ function baseClient(overrides = {}) {
   return {
     serverUrl: 'https://control.example',
     async restore() { throw new Error('not used') },
+    async initializeOwner() { throw new Error('not used') },
     async login() { throw new Error('not used') },
-    async loginWithPassword() { throw new Error('not used') },
     async initializationStatus() { throw new Error('not used') },
     async logout() {},
     async command() { throw new Error('not used') },

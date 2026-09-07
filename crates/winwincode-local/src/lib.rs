@@ -27,7 +27,7 @@ use winwincode_worker::{
 
 use winwincode_worker::composition::{ExecutionPortMessage, Instant};
 
-pub use winwincode_observability::{
+pub use winwincode_observability_core::{
     FactDigest as LocalTraceFactDigest, TraceContext as LocalObservationTraceContext,
 };
 

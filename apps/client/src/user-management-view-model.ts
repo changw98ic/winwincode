@@ -12,7 +12,7 @@ import {
   type ControlPlaneUserPasswordResetOutcome,
   type ControlPlaneUserRole,
   type ControlPlaneUserSummary,
-} from './control-plane-client.js'
+} from './community-control-plane-client.js'
 
 /**
  * The user-management seam the page consumes, derived from the frozen

@@ -8,7 +8,7 @@ import {
   type ControlPlaneSubscribeOptions,
   type ControlPlaneSubscription,
   type RequestId,
-} from '../control-plane-client.js'
+} from '../community-control-plane-client.js'
 
 export type GlobalConnectionStatus =
   | 'connected'
@@ -420,11 +420,11 @@ export function observeControlPlaneClient(
     restore(requestOptions) {
       return observe(options.client.restore(requestOptions))
     },
-    login(bootstrapProof, credentials, requestOptions) {
-      return observe(options.client.login(bootstrapProof, credentials, requestOptions))
+    initializeOwner(initialization, requestOptions) {
+      return observe(options.client.initializeOwner(initialization, requestOptions))
     },
-    loginWithPassword(credentials, requestOptions) {
-      return observe(options.client.loginWithPassword(credentials, requestOptions))
+    login(credentials, requestOptions) {
+      return observe(options.client.login(credentials, requestOptions))
     },
     initializationStatus(requestOptions) {
       // A missing pre-auth initialization probe is presentation state for the

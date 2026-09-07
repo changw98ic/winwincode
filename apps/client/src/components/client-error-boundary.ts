@@ -1,9 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type { ClientFailure } from '../core/connection-state.js'
-import { mountButton, type ButtonView } from './button.js'
-import { mountErrorState, type ErrorStateView } from './error-state.js'
-import { assertMounted, removeNode, type MountedView } from './mounted-view.js'
+import {
+  assertMounted,
+  mountButton,
+  mountErrorState,
+  removeNode,
+  type ButtonView,
+  type ErrorStateView,
+  type MountedView,
+} from '@winwincode/browser-ui'
 
 export interface ClientErrorBoundaryProps {
   readonly failure: ClientFailure | null

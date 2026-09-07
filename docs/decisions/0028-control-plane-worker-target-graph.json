@@ -69,7 +69,10 @@
         "hold-browser-state-and-route-user-actions-through-generated-client"
       ],
       "allowedInternalDependencies": [
-        "typescript-generated-client"
+        "typescript-generated-client",
+        "typescript-browser-core",
+        "typescript-browser-ui",
+        "typescript-control-plane-client"
       ],
       "allowedBackends": [
         "control-plane-http",
@@ -158,16 +161,33 @@
       "allowedInternalDependencies": []
     },
     {
-      "id": "winwincode-observability",
+      "id": "winwincode-observability-core",
       "kind": "rust-crate",
-      "path": "crates/winwincode-observability",
-      "packageName": "winwincode-observability",
+      "path": "crates/winwincode-observability-core",
+      "packageName": "winwincode-observability-core",
       "phase": "2",
       "zone": "shared",
       "responsibilities": [
-        "carry-secret-safe-runtime-trace-facts"
+        "carry-secret-safe-runtime-trace-facts",
+        "define-storage-neutral-metric-and-alert-rules",
+        "expose-storage-neutral-observability-ports"
       ],
       "allowedInternalDependencies": []
+    },
+    {
+      "id": "winwincode-observability-sqlite",
+      "kind": "rust-crate",
+      "path": "crates/winwincode-observability-sqlite",
+      "packageName": "winwincode-observability-sqlite",
+      "phase": "2",
+      "zone": "control-plane",
+      "responsibilities": [
+        "persist-community-observability-state-in-sqlite",
+        "enforce-community-wal-retention-and-file-permissions"
+      ],
+      "allowedInternalDependencies": [
+        "winwincode-observability-core"
+      ]
     },
     {
       "id": "winwincode-delivery",
@@ -239,7 +259,9 @@
         "expose-secret-free-model-port-and-typed-runtime-events",
         "remain-free-of-worker-lifecycle-product-state-and-provider-credential-ownership"
       ],
-      "allowedInternalDependencies": []
+      "allowedInternalDependencies": [
+        "winwincode-execution-port"
+      ]
     },
     {
       "id": "winwincode-codex",
@@ -328,7 +350,11 @@
         "winwincode-delivery",
         "winwincode-evidence-export",
         "winwincode-repository-context",
-        "winwincode-test-assets"
+        "winwincode-test-assets",
+        "winwincode-device-client",
+        "winwincode-domain",
+        "winwincode-server",
+        "winwincode-storage"
       ]
     },
     {
@@ -439,7 +465,7 @@
       ],
       "allowedInternalDependencies": [
         "winwincode-control-plane",
-        "winwincode-observability",
+        "winwincode-observability-core",
         "winwincode-worker"
       ]
     },
@@ -457,6 +483,7 @@
       ],
       "allowedInternalDependencies": [
         "winwincode-api",
+        "winwincode-client-port",
         "winwincode-codex",
         "winwincode-control-plane",
         "winwincode-domain",
@@ -477,6 +504,72 @@
         "provide-the-authenticated-helper-executable-for-codex-sandbox-operations"
       ],
       "allowedInternalDependencies": []
+    },
+    {
+      "id": "typescript-browser-core",
+      "kind": "typescript-package",
+      "path": "packages/browser-core",
+      "packageName": "@winwincode/browser-core",
+      "phase": "6",
+      "zone": "presentation",
+      "responsibilities": [
+        "product-neutral-query-caching-and-scope-state"
+      ],
+      "allowedInternalDependencies": [
+        "typescript-contracts"
+      ]
+    },
+    {
+      "id": "typescript-browser-ui",
+      "kind": "typescript-package",
+      "path": "packages/browser-ui",
+      "packageName": "@winwincode/browser-ui",
+      "phase": "6",
+      "zone": "presentation",
+      "responsibilities": [
+        "product-neutral-accessible-browser-components"
+      ],
+      "allowedInternalDependencies": []
+    },
+    {
+      "id": "typescript-control-plane-client",
+      "kind": "typescript-package",
+      "path": "packages/control-plane-client",
+      "packageName": "@winwincode/control-plane-client",
+      "phase": "6",
+      "zone": "presentation",
+      "responsibilities": [
+        "product-neutral-authenticated-browser-requests-through-injected-generated-transport"
+      ],
+      "allowedInternalDependencies": [
+        "typescript-contracts"
+      ]
+    },
+    {
+      "id": "winwincode-client-port",
+      "kind": "rust-crate",
+      "path": "crates/winwincode-client-port",
+      "packageName": "winwincode-client-port",
+      "phase": "1",
+      "zone": "shared",
+      "responsibilities": [
+        "versioned-device-exchange-frames-acknowledgements-replay-and-fencing-identities"
+      ],
+      "allowedInternalDependencies": []
+    },
+    {
+      "id": "winwincode-device-client",
+      "kind": "rust-crate",
+      "path": "crates/winwincode-device-client",
+      "packageName": "winwincode-device-client",
+      "phase": "4",
+      "zone": "execution",
+      "responsibilities": [
+        "device-local-identity-repository-registration-durable-exchange-and-candidate-application"
+      ],
+      "allowedInternalDependencies": [
+        "winwincode-client-port"
+      ]
     }
   ],
   "interfaces": [
@@ -557,12 +650,13 @@
     "localLauncher": "winwincode-local",
     "localLauncherAllowedProductDependencies": [
       "winwincode-control-plane",
-      "winwincode-observability",
+      "winwincode-observability-core",
       "winwincode-worker"
     ],
     "serverEntrypoint": "winwincode-server",
     "serverAllowedProductDependencies": [
       "winwincode-api",
+      "winwincode-client-port",
       "winwincode-codex",
       "winwincode-control-plane",
       "winwincode-domain",
@@ -582,7 +676,8 @@
         "client-generated-contracts",
         "api-types",
         "domain-types",
-        "execution-port"
+        "execution-port",
+        "client-control-port"
       ]
     },
     {
@@ -606,7 +701,8 @@
       "surfaceIds": [
         "session-binding",
         "codex-kernel",
-        "execution-worker"
+        "execution-worker",
+        "device-client"
       ]
     },
     {
@@ -624,7 +720,10 @@
         "client-application",
         "server-network-boundary",
         "local-composition",
-        "kernel-helper"
+        "kernel-helper",
+        "browser-core",
+        "browser-ui",
+        "browser-control-plane-client"
       ]
     },
     {

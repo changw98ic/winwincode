@@ -5,8 +5,8 @@ import {
   type EnterpriseManagementArea,
   type EnterpriseManagementViewModel,
 } from './enterprise-management-view-model.js'
-import type { ControlPlaneClient } from './control-plane-client.js'
-import { scopeHash, scopeSelectionFromHash } from './core/scope-context.js'
+import type { ControlPlaneClient } from './community-control-plane-client.js'
+import { scopeHash, scopeSelectionFromHash } from '@winwincode/browser-core/scope-context'
 import type {
   Actor,
   ControlPlaneWebSocketSubscriptionId,

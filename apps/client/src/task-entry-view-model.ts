@@ -8,7 +8,7 @@ import {
   type ControlPlaneTaskCreateInput,
   type ControlPlaneTaskModelRouteOption,
   type ControlPlaneTaskPort,
-} from './control-plane-client.js'
+} from './community-control-plane-client.js'
 import type { ClientsLoadStatus, ClientsViewModel } from './clients-view-model.js'
 import type {
   RepositoriesLoadStatus,

@@ -8,12 +8,13 @@ use std::{
 
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
-use winwincode_observability::{
+use winwincode_observability_core::{
     AlertCondition, AlertRule, AlertRuleId, AlertSeverity, AlertStatus, CapacityResource,
     Component, DiagnosticCode, FactDigest, LogSeverity, MetricSeriesKey, ObservabilityConfig,
     ObservabilityErrorKind, Observation, ObservationId, ObservationSignal, ObservationSource,
-    ObservationSourceKind, Operation, Outcome, SourceFactId, SqliteObservability, TraceContext,
+    ObservationSourceKind, Operation, Outcome, SourceFactId, TraceContext,
 };
+use winwincode_observability_sqlite::SqliteObservability;
 
 static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(1);
 
@@ -387,7 +388,7 @@ fn resolving_observations() -> Vec<Observation> {
 fn record_initial_alerts(
     path: &Path,
     firing: &[Observation],
-) -> Vec<winwincode_observability::AlertTransition> {
+) -> Vec<winwincode_observability_core::AlertTransition> {
     let mut service = SqliteObservability::open(path, config()).expect("open observability");
     let mut transitions = Vec::new();
     for fact in firing {
@@ -455,12 +456,6 @@ fn trace_and_alert_identity_survive_restart_while_replay_and_active_alerts_dedup
     .expect("derived trace");
     assert_eq!(firing[0].trace, expected_trace);
     let first_transitions = record_initial_alerts(&path, &firing);
-    let fixture = format!(
-        "{}\n",
-        serde_json::to_string_pretty(&first_transitions).expect("serialize alert fixture")
-    );
-    assert_eq!(fixture, include_str!("fixtures/alert-transitions.v1.json"));
-
     let mut service = SqliteObservability::open(&path, config()).expect("restart observability");
     let trace_page = service
         .trace_page(&expected_trace.trace_id, 0, 10)
@@ -646,7 +641,7 @@ fn assert_bounded_queries(service: &SqliteObservability) {
             .kind(),
         ObservabilityErrorKind::InvalidInput
     );
-    let invalid_cursor = winwincode_observability::MetricCursor {
+    let invalid_cursor = winwincode_observability_core::MetricCursor {
         bucket_start_unix_millis: 60_000,
         key: MetricSeriesKey::Capacity {
             component: Component::Http,

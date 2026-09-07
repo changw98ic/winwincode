@@ -10,7 +10,7 @@ import type {
   ControlPlaneRunWorkerSession,
   ControlPlaneRunWorkerSessionState,
   ControlPlaneTaskAnchor,
-} from './control-plane-client.js'
+} from './community-control-plane-client.js'
 import {
   candidateDisplayState,
   candidateDisplayStateText,

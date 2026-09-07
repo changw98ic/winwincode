@@ -20940,7 +20940,7 @@
     },
     "ProbeRoundBudget": {
       "additionalProperties": false,
-      "description": "Immutable hard limits for one probe round. The scheduler rejects a plan whose declared sum exceeds any limit.",
+      "description": "Immutable hard limits for one probe round. The scheduler rejects a plan whose declared sum exceeds a limit.",
       "oneOf": [
         {
           "properties": {
@@ -28263,7 +28263,7 @@
     "https://schemas.winwincode.dev/winwincode/v1/domain.schema.json",
     "https://schemas.winwincode.dev/winwincode/v1/execution-port.schema.json"
   ],
-  "x-source-digest": "sha256:754a86a7355a92b83cc7e86c9f334040f608f314d70c451bdde3d0d51a5f4e5a",
+  "x-source-digest": "sha256:8c5257d07754b59015ee3a36e33326a8104d6ccaafad47d37d0d772945e77c9a",
   "x-winwincode-client-metadata": {
     "http": {
       "authentication": {

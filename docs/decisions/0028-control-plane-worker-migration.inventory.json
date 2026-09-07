@@ -36,13 +36,19 @@
     "crates/winwincode-domain/src",
     "crates/winwincode-execution-port/src",
     "crates/winwincode-local/src",
-    "crates/winwincode-observability/src",
+    "crates/winwincode-observability-core/src",
+    "crates/winwincode-observability-sqlite/src",
     "crates/winwincode-publication/src",
     "crates/winwincode-repository-context/src",
     "crates/winwincode-server/src",
     "crates/winwincode-session/src",
     "crates/winwincode-storage/src",
-    "crates/winwincode-worker/src"
+    "crates/winwincode-worker/src",
+    "packages/browser-core/src",
+    "packages/browser-ui/src",
+    "packages/control-plane-client/src",
+    "crates/winwincode-client-port/src",
+    "crates/winwincode-device-client/src"
   ],
   "callers": [
     {
@@ -75,7 +81,7 @@
       "sourcePaths": [
         "apps/client/src/strongflow-page.ts",
         "apps/client/src/strongflow-view-model.ts",
-        "apps/client/src/control-plane-client.ts"
+        "apps/client/src/community-control-plane-client.ts"
       ],
       "currentEntryPoints": [
         "mountStrongFlowPage",
@@ -299,13 +305,13 @@
     {
       "id": "data-export-contract",
       "sourcePaths": [
+        "crates/winwincode-data-export/src/lib.rs",
         "schema/winwincode-export/v1/canonical-json.js",
         "schema/winwincode-export/v1/canonical-json.md",
         "schema/winwincode-export/v1/conformance-vectors.json",
         "schema/winwincode-export/v1/parse-bounded.js",
         "schema/winwincode-export/v1/validate.js",
-        "schema/winwincode-export/v1/winwincode-export.schema.json",
-        "crates/winwincode-data-export/src/lib.rs"
+        "schema/winwincode-export/v1/winwincode-export.schema.json"
       ],
       "entrySymbols": [
         "WinWinCodeExport",
@@ -380,7 +386,8 @@
       "id": "domain-types",
       "sourcePaths": [
         "crates/winwincode-domain/src/generated.rs",
-        "crates/winwincode-domain/src/lib.rs"
+        "crates/winwincode-domain/src/lib.rs",
+        "crates/winwincode-domain/src/user_account.rs"
       ],
       "entrySymbols": [
         "DeliveryId"
@@ -407,13 +414,25 @@
         "crates/winwincode-execution-port/src/action_gateway.rs",
         "crates/winwincode-execution-port/src/action_normalizer.rs",
         "crates/winwincode-execution-port/src/capability_adapter.rs",
+        "crates/winwincode-execution-port/src/change_batch_identity.rs",
+        "crates/winwincode-execution-port/src/change_batch_progress.rs",
+        "crates/winwincode-execution-port/src/debug_experiment.rs",
+        "crates/winwincode-execution-port/src/debug_hypothesis_ledger.rs",
+        "crates/winwincode-execution-port/src/debug_probe_contract.rs",
+        "crates/winwincode-execution-port/src/debug_probe_delta_context.rs",
+        "crates/winwincode-execution-port/src/diagnostic_parser.rs",
         "crates/winwincode-execution-port/src/generated.rs",
         "crates/winwincode-execution-port/src/lib.rs",
+        "crates/winwincode-execution-port/src/observation_contract.rs",
+        "crates/winwincode-execution-port/src/performance_comparison.rs",
+        "crates/winwincode-execution-port/src/probe_result_normalizer.rs",
+        "crates/winwincode-execution-port/src/repair_loop_context.rs",
         "crates/winwincode-execution-port/src/replay.rs",
         "crates/winwincode-execution-port/src/runtime_replay.rs",
         "crates/winwincode-execution-port/src/runtime_trace_outbox.rs",
         "crates/winwincode-execution-port/src/transport.rs",
-        "crates/winwincode-execution-port/src/typed_replay.rs"
+        "crates/winwincode-execution-port/src/typed_replay.rs",
+        "crates/winwincode-execution-port/src/validation_config.rs"
       ],
       "entrySymbols": [
         "ExecutionPortMessage"
@@ -438,9 +457,16 @@
     {
       "id": "storage",
       "sourcePaths": [
-        "crates/winwincode-storage/src/artifact/metering.rs",
         "crates/winwincode-storage/src/artifact.rs",
+        "crates/winwincode-storage/src/artifact/metering.rs",
+        "crates/winwincode-storage/src/client_connect.rs",
+        "crates/winwincode-storage/src/client_downlink.rs",
+        "crates/winwincode-storage/src/client_launch_grant.rs",
+        "crates/winwincode-storage/src/client_occupancy.rs",
+        "crates/winwincode-storage/src/client_registry.rs",
         "crates/winwincode-storage/src/control_plane_instances.rs",
+        "crates/winwincode-storage/src/device_execution_binding.rs",
+        "crates/winwincode-storage/src/device_scheduler.rs",
         "crates/winwincode-storage/src/enterprise_policy.rs",
         "crates/winwincode-storage/src/enterprise_policy_evaluation.rs",
         "crates/winwincode-storage/src/enterprise_quota.rs",
@@ -453,15 +479,19 @@
         "crates/winwincode-storage/src/git_candidate_retention.rs",
         "crates/winwincode-storage/src/git_source.rs",
         "crates/winwincode-storage/src/lib.rs",
+        "crates/winwincode-storage/src/local_candidate.rs",
         "crates/winwincode-storage/src/provider_exchange.rs",
+        "crates/winwincode-storage/src/repository_binding.rs",
         "crates/winwincode-storage/src/repository_scheduler.rs",
         "crates/winwincode-storage/src/repository_scheduler_replacement.rs",
         "crates/winwincode-storage/src/scheduler_policy.rs",
+        "crates/winwincode-storage/src/user_accounts.rs",
         "crates/winwincode-storage/src/worker_fleet_inventory.rs",
         "crates/winwincode-storage/src/worker_fleet_operations.rs",
         "crates/winwincode-storage/src/worker_outbound_queue.rs",
         "crates/winwincode-storage/src/worker_placement.rs",
         "crates/winwincode-storage/src/worker_registry.rs",
+        "crates/winwincode-storage/src/worker_session_credential.rs",
         "crates/winwincode-storage/src/worker_session_slots.rs"
       ],
       "entrySymbols": [
@@ -523,8 +553,8 @@
         "crates/winwincode-delivery/src/application/task_breakdown.rs",
         "crates/winwincode-delivery/src/application/verdict.rs",
         "crates/winwincode-delivery/src/domain/attention.rs",
-        "crates/winwincode-delivery/src/domain/candidate/verdict_authority.rs",
         "crates/winwincode-delivery/src/domain/candidate.rs",
+        "crates/winwincode-delivery/src/domain/candidate/verdict_authority.rs",
         "crates/winwincode-delivery/src/domain/evidence.rs",
         "crates/winwincode-delivery/src/domain/mod.rs",
         "crates/winwincode-delivery/src/domain/rework.rs",
@@ -623,22 +653,27 @@
     {
       "id": "observability",
       "sourcePaths": [
-        "crates/winwincode-observability/src/lib.rs"
+        "crates/winwincode-observability-core/src/lib.rs",
+        "crates/winwincode-observability-sqlite/src/lib.rs"
       ],
       "entrySymbols": [
-        "TraceContext"
+        "TraceContext",
+        "ObservabilityStore",
+        "SqliteObservability"
       ],
       "targetOwners": [
         "control-plane",
         "execution-worker"
       ],
       "targetModules": [
-        "crates/winwincode-observability"
+        "crates/winwincode-observability-core",
+        "crates/winwincode-observability-sqlite"
       ],
       "phase": "2",
       "disposition": "retain",
       "observableContracts": [
-        "secret-safe runtime trace facts"
+        "secret-safe runtime trace facts and storage-neutral aggregation rules",
+        "Community SQLite replay, WAL, rollback, retention, and file permissions"
       ],
       "behaviorBaselineIds": [
         "success",
@@ -689,6 +724,8 @@
         "crates/winwincode-codex/src/model_bridge.rs",
         "crates/winwincode-codex/src/model_port_client.rs",
         "crates/winwincode-codex/src/outbox.rs",
+        "crates/winwincode-codex/src/performance.rs",
+        "crates/winwincode-codex/src/performance_evidence.rs",
         "crates/winwincode-codex/src/stage_product.rs",
         "crates/winwincode-codex/src/stage_runtime_projection.rs",
         "crates/winwincode-codex/src/store.rs"
@@ -719,10 +756,22 @@
       "id": "execution-worker",
       "sourcePaths": [
         "crates/winwincode-worker/src/action_enforcement.rs",
+        "crates/winwincode-worker/src/candidate_ref.rs",
+        "crates/winwincode-worker/src/change_batch_store.rs",
+        "crates/winwincode-worker/src/context_safety.rs",
+        "crates/winwincode-worker/src/debug_experiment.rs",
+        "crates/winwincode-worker/src/debug_probe_context.rs",
         "crates/winwincode-worker/src/lib.rs",
         "crates/winwincode-worker/src/main.rs",
+        "crates/winwincode-worker/src/managed_session.rs",
+        "crates/winwincode-worker/src/probe_evidence.rs",
+        "crates/winwincode-worker/src/probe_process.rs",
+        "crates/winwincode-worker/src/probe_reducer.rs",
+        "crates/winwincode-worker/src/probe_scheduler.rs",
         "crates/winwincode-worker/src/remote_transport.rs",
         "crates/winwincode-worker/src/stage_product.rs",
+        "crates/winwincode-worker/src/validation_artifact.rs",
+        "crates/winwincode-worker/src/validation_diagnostics.rs",
         "crates/winwincode-worker/src/workspace.rs",
         "crates/winwincode-worker/src/workspace_runtime.rs"
       ],
@@ -757,16 +806,24 @@
         "crates/winwincode-control-plane/src/candidate_source.rs",
         "crates/winwincode-control-plane/src/chat_interaction_application.rs",
         "crates/winwincode-control-plane/src/chat_interaction_projection.rs",
+        "crates/winwincode-control-plane/src/client_connect.rs",
+        "crates/winwincode-control-plane/src/client_launch_grant.rs",
+        "crates/winwincode-control-plane/src/client_occupancy.rs",
+        "crates/winwincode-control-plane/src/client_registry.rs",
         "crates/winwincode-control-plane/src/collaboration.rs",
         "crates/winwincode-control-plane/src/collaboration_inbox.rs",
         "crates/winwincode-control-plane/src/collaboration_inbox_production.rs",
         "crates/winwincode-control-plane/src/control_plane_instance.rs",
+        "crates/winwincode-control-plane/src/debug_hypothesis_ledger.rs",
         "crates/winwincode-control-plane/src/delivery_application.rs",
         "crates/winwincode-control-plane/src/delivery_command_transaction.rs",
         "crates/winwincode-control-plane/src/delivery_execution.rs",
         "crates/winwincode-control-plane/src/delivery_production_adapters.rs",
         "crates/winwincode-control-plane/src/delivery_transaction.rs",
         "crates/winwincode-control-plane/src/delivery_verdict_authority.rs",
+        "crates/winwincode-control-plane/src/device_execution_binding.rs",
+        "crates/winwincode-control-plane/src/device_scheduler.rs",
+        "crates/winwincode-control-plane/src/device_session_gate.rs",
         "crates/winwincode-control-plane/src/durable_execution_port.rs",
         "crates/winwincode-control-plane/src/enterprise_hierarchy.rs",
         "crates/winwincode-control-plane/src/enterprise_identity.rs",
@@ -784,6 +841,7 @@
         "crates/winwincode-control-plane/src/execution_port_service.rs",
         "crates/winwincode-control-plane/src/gate_interaction_service.rs",
         "crates/winwincode-control-plane/src/lib.rs",
+        "crates/winwincode-control-plane/src/local_candidate.rs",
         "crates/winwincode-control-plane/src/local_secret_store.rs",
         "crates/winwincode-control-plane/src/observer_decision_service.rs",
         "crates/winwincode-control-plane/src/planning_solution_authority.rs",
@@ -799,8 +857,10 @@
         "crates/winwincode-control-plane/src/publication_policy_enforcement.rs",
         "crates/winwincode-control-plane/src/publication_preparation.rs",
         "crates/winwincode-control-plane/src/publication_production.rs",
+        "crates/winwincode-control-plane/src/quick_device_execution.rs",
         "crates/winwincode-control-plane/src/recovery_router.rs",
         "crates/winwincode-control-plane/src/remote_worker_pool.rs",
+        "crates/winwincode-control-plane/src/repository_binding.rs",
         "crates/winwincode-control-plane/src/repository_scheduler.rs",
         "crates/winwincode-control-plane/src/responsibility_assignment.rs",
         "crates/winwincode-control-plane/src/responsibility_assignment_authority.rs",
@@ -808,6 +868,7 @@
         "crates/winwincode-control-plane/src/runtime_event_transaction.rs",
         "crates/winwincode-control-plane/src/session_binding_transaction.rs",
         "crates/winwincode-control-plane/src/session_identity.rs",
+        "crates/winwincode-control-plane/src/strongflow_device_execution.rs",
         "crates/winwincode-control-plane/src/strongflow_projection.rs",
         "crates/winwincode-control-plane/src/strongflow_projection/application.rs",
         "crates/winwincode-control-plane/src/strongflow_projection/candidate_history.rs",
@@ -874,6 +935,7 @@
         "crates/winwincode-control-plane/src/provider_gateway.rs",
         "crates/winwincode-control-plane/src/provider_https_sse.rs",
         "crates/winwincode-control-plane/src/provider_policy.rs",
+        "crates/winwincode-control-plane/src/provider_presets.rs",
         "crates/winwincode-control-plane/src/provider_production.rs",
         "crates/winwincode-control-plane/src/provider_stream.rs",
         "crates/winwincode-control-plane/src/vault_kms_network.rs",
@@ -901,6 +963,7 @@
     {
       "id": "shared-typescript-contracts",
       "sourcePaths": [
+        "packages/contracts/src/browser-control.ts",
         "packages/contracts/src/client-control.ts",
         "packages/contracts/src/delivery-candidate.ts",
         "packages/contracts/src/delivery.ts",
@@ -991,32 +1054,29 @@
         "apps/client/src/boot.ts",
         "apps/client/src/chat-page.ts",
         "apps/client/src/chat-view-model.ts",
+        "apps/client/src/client-occupancy-controls.ts",
+        "apps/client/src/client-occupancy-facade.ts",
+        "apps/client/src/client-occupancy-view-model.ts",
         "apps/client/src/client-surface.ts",
+        "apps/client/src/clients-page.ts",
+        "apps/client/src/clients-view-model.ts",
+        "apps/client/src/community-control-plane-client.ts",
         "apps/client/src/components/action-bar.ts",
-        "apps/client/src/components/button.ts",
         "apps/client/src/components/client-error-boundary.ts",
         "apps/client/src/components/connection-bar.ts",
         "apps/client/src/components/drawer.ts",
         "apps/client/src/components/empty-state.ts",
-        "apps/client/src/components/error-state.ts",
         "apps/client/src/components/form-field.ts",
         "apps/client/src/components/index.ts",
         "apps/client/src/components/keyed-collection.ts",
         "apps/client/src/components/metric.ts",
-        "apps/client/src/components/mounted-view.ts",
-        "apps/client/src/components/page-header.ts",
-        "apps/client/src/components/panel.ts",
         "apps/client/src/components/split-pane.ts",
-        "apps/client/src/components/status-badge.ts",
         "apps/client/src/components/tabs.ts",
         "apps/client/src/components/toolbar.ts",
         "apps/client/src/components/windowed-list.ts",
-        "apps/client/src/contextual-decision.ts",
         "apps/client/src/contextual-decision-view-model.ts",
-        "apps/client/src/control-plane-client.ts",
+        "apps/client/src/contextual-decision.ts",
         "apps/client/src/core/connection-state.ts",
-        "apps/client/src/core/query-cache.ts",
-        "apps/client/src/core/scope-context.ts",
         "apps/client/src/editable-draft.ts",
         "apps/client/src/enterprise-application.ts",
         "apps/client/src/enterprise-management-view-model.ts",
@@ -1026,13 +1086,21 @@
         "apps/client/src/home-dashboard-view-model.ts",
         "apps/client/src/home-recent-visits.ts",
         "apps/client/src/index.ts",
+        "apps/client/src/local-candidate-actions.ts",
+        "apps/client/src/local-candidate-view-model.ts",
         "apps/client/src/local-decisions-page.ts",
         "apps/client/src/local-decisions-view-model.ts",
         "apps/client/src/local-operations-page.ts",
         "apps/client/src/local-operations-view-model.ts",
+        "apps/client/src/login-page.ts",
+        "apps/client/src/login-view-model.ts",
+        "apps/client/src/my-work-page.ts",
+        "apps/client/src/my-work-view-model.ts",
         "apps/client/src/navigation-capability.ts",
         "apps/client/src/readiness-page.ts",
         "apps/client/src/readiness-view-model.ts",
+        "apps/client/src/repositories-page.ts",
+        "apps/client/src/repositories-view-model.ts",
         "apps/client/src/runtime-config.ts",
         "apps/client/src/scope-selector-page.ts",
         "apps/client/src/scope-selector-view-model.ts",
@@ -1061,8 +1129,15 @@
         "apps/client/src/strongflow-route.ts",
         "apps/client/src/strongflow-run-detail.ts",
         "apps/client/src/strongflow-view-model.ts",
+        "apps/client/src/task-entry-page.ts",
+        "apps/client/src/task-entry-view-model.ts",
+        "apps/client/src/task-run-page.ts",
+        "apps/client/src/task-run-view-model.ts",
         "apps/client/src/usage-health-page.ts",
         "apps/client/src/usage-health-view-model.ts",
+        "apps/client/src/user-management-controls.ts",
+        "apps/client/src/user-management-view-model.ts",
+        "apps/client/src/users-page.ts",
         "apps/client/src/visual-regression.ts"
       ],
       "entrySymbols": [
@@ -1097,6 +1172,12 @@
       "sourcePaths": [
         "crates/winwincode-server/src/application.rs",
         "crates/winwincode-server/src/auth_session.rs",
+        "crates/winwincode-server/src/client_candidates.rs",
+        "crates/winwincode-server/src/client_connections.rs",
+        "crates/winwincode-server/src/client_exchange.rs",
+        "crates/winwincode-server/src/client_occupancy.rs",
+        "crates/winwincode-server/src/client_repositories.rs",
+        "crates/winwincode-server/src/client_sessions.rs",
         "crates/winwincode-server/src/config.rs",
         "crates/winwincode-server/src/dispatcher.rs",
         "crates/winwincode-server/src/durable_event_hub.rs",
@@ -1104,11 +1185,17 @@
         "crates/winwincode-server/src/enterprise_management.rs",
         "crates/winwincode-server/src/identity_authenticator.rs",
         "crates/winwincode-server/src/lib.rs",
+        "crates/winwincode-server/src/login_rate_limiter.rs",
         "crates/winwincode-server/src/main.rs",
+        "crates/winwincode-server/src/model_authority.rs",
+        "crates/winwincode-server/src/password_hash.rs",
+        "crates/winwincode-server/src/provider_onboarding.rs",
         "crates/winwincode-server/src/remote_worker_transport.rs",
         "crates/winwincode-server/src/runtime.rs",
         "crates/winwincode-server/src/server.rs",
-        "crates/winwincode-server/src/transport.rs"
+        "crates/winwincode-server/src/transport.rs",
+        "crates/winwincode-server/src/user_accounts.rs",
+        "crates/winwincode-server/src/worker_session_credentials.rs"
       ],
       "entrySymbols": [
         "start_server",
@@ -1214,14 +1301,18 @@
     {
       "id": "local-cli",
       "sourcePaths": [
+        "crates/winwincode-cli/src/backup.rs",
         "crates/winwincode-cli/src/cli.rs",
         "crates/winwincode-cli/src/community_gate.rs",
+        "crates/winwincode-cli/src/device_admin.rs",
         "crates/winwincode-cli/src/doctor.rs",
         "crates/winwincode-cli/src/git.rs",
         "crates/winwincode-cli/src/launcher.rs",
         "crates/winwincode-cli/src/lib.rs",
         "crates/winwincode-cli/src/main.rs",
-        "crates/winwincode-cli/src/model.rs"
+        "crates/winwincode-cli/src/model.rs",
+        "crates/winwincode-cli/src/repo_admin.rs",
+        "crates/winwincode-cli/src/user_admin.rs"
       ],
       "entrySymbols": [
         "wwc"
@@ -1411,6 +1502,158 @@
       ],
       "behaviorBaselineIds": [
         "success"
+      ]
+    },
+    {
+      "id": "browser-core",
+      "sourcePaths": [
+        "packages/browser-core/src/query-cache.ts",
+        "packages/browser-core/src/scope-context.ts"
+      ],
+      "entrySymbols": [
+        "createQueryCache",
+        "resolveScopeContext"
+      ],
+      "targetOwners": [
+        "typescript-web"
+      ],
+      "targetModules": [
+        "packages/browser-core"
+      ],
+      "phase": "6",
+      "disposition": "retain",
+      "observableContracts": [
+        "product-neutral query caching and scope state"
+      ],
+      "behaviorBaselineIds": [
+        "api-contract"
+      ]
+    },
+    {
+      "id": "browser-ui",
+      "sourcePaths": [
+        "packages/browser-ui/src/button.ts",
+        "packages/browser-ui/src/error-state.ts",
+        "packages/browser-ui/src/index.ts",
+        "packages/browser-ui/src/mounted-view.ts",
+        "packages/browser-ui/src/page-header.ts",
+        "packages/browser-ui/src/panel.ts",
+        "packages/browser-ui/src/status-badge.ts"
+      ],
+      "entrySymbols": [
+        "mountButton",
+        "mountPanel"
+      ],
+      "targetOwners": [
+        "typescript-web"
+      ],
+      "targetModules": [
+        "packages/browser-ui"
+      ],
+      "phase": "6",
+      "disposition": "retain",
+      "observableContracts": [
+        "product-neutral accessible browser components"
+      ],
+      "behaviorBaselineIds": [
+        "api-contract"
+      ]
+    },
+    {
+      "id": "browser-control-plane-client",
+      "sourcePaths": [
+        "packages/control-plane-client/src/index.ts"
+      ],
+      "entrySymbols": [
+        "createControlPlaneClient"
+      ],
+      "targetOwners": [
+        "typescript-web"
+      ],
+      "targetModules": [
+        "packages/control-plane-client"
+      ],
+      "phase": "6",
+      "disposition": "retain",
+      "observableContracts": [
+        "product-neutral authenticated browser requests through injected generated transport"
+      ],
+      "behaviorBaselineIds": [
+        "api-contract"
+      ]
+    },
+    {
+      "id": "client-control-port",
+      "sourcePaths": [
+        "crates/winwincode-client-port/src/domain.rs",
+        "crates/winwincode-client-port/src/exchange/dedup.rs",
+        "crates/winwincode-client-port/src/exchange/frame.rs",
+        "crates/winwincode-client-port/src/exchange/inbound.rs",
+        "crates/winwincode-client-port/src/exchange/mod.rs",
+        "crates/winwincode-client-port/src/exchange/outbox.rs",
+        "crates/winwincode-client-port/src/exchange/sequence.rs",
+        "crates/winwincode-client-port/src/lib.rs",
+        "crates/winwincode-client-port/src/messages.rs",
+        "crates/winwincode-client-port/src/wire.rs"
+      ],
+      "entrySymbols": [
+        "exchange",
+        "messages",
+        "wire"
+      ],
+      "targetOwners": [
+        "canonical-schema"
+      ],
+      "targetModules": [
+        "crates/winwincode-client-port"
+      ],
+      "phase": "1",
+      "disposition": "retain",
+      "observableContracts": [
+        "versioned device exchange frames acknowledgements replay and fencing identities"
+      ],
+      "behaviorBaselineIds": [
+        "api-contract"
+      ]
+    },
+    {
+      "id": "device-client",
+      "sourcePaths": [
+        "crates/winwincode-device-client/src/apply_engine.rs",
+        "crates/winwincode-device-client/src/candidate_branch.rs",
+        "crates/winwincode-device-client/src/candidate_registry.rs",
+        "crates/winwincode-device-client/src/candidate_retention.rs",
+        "crates/winwincode-device-client/src/connect_code.rs",
+        "crates/winwincode-device-client/src/daemon.rs",
+        "crates/winwincode-device-client/src/fencing.rs",
+        "crates/winwincode-device-client/src/http.rs",
+        "crates/winwincode-device-client/src/identity.rs",
+        "crates/winwincode-device-client/src/lib.rs",
+        "crates/winwincode-device-client/src/path_confinement.rs",
+        "crates/winwincode-device-client/src/repository.rs",
+        "crates/winwincode-device-client/src/repository_exchange.rs",
+        "crates/winwincode-device-client/src/repository_git.rs",
+        "crates/winwincode-device-client/src/store.rs",
+        "crates/winwincode-device-client/src/supervisor.rs",
+        "crates/winwincode-device-client/src/worker_logs.rs"
+      ],
+      "entrySymbols": [
+        "DeviceStore",
+        "FencingGuard"
+      ],
+      "targetOwners": [
+        "execution-worker"
+      ],
+      "targetModules": [
+        "crates/winwincode-device-client"
+      ],
+      "phase": "4",
+      "disposition": "retain",
+      "observableContracts": [
+        "device-local identity repository registration durable exchange and candidate application"
+      ],
+      "behaviorBaselineIds": [
+        "api-contract"
       ]
     }
   ],

@@ -32,7 +32,7 @@ const cache = resolve(root, '.cache/client-clients-tests')
 async function cachedModule(name) {
   return import(pathToFileURL(resolve(cache, name)).href)
 }
-const facade = await cachedModule('control-plane-client.js')
+const facade = await cachedModule('community-control-plane-client.js')
 const clientsViewModelModule = await cachedModule('clients-view-model.js')
 const occupancyViewModelModule = await cachedModule('client-occupancy-view-model.js')
 const clientsPageModule = await cachedModule('clients-page.js')
@@ -117,8 +117,8 @@ function baseClient(overrides = {}) {
   return {
     serverUrl: 'https://control.example',
     async restore() { return session() },
+    async initializeOwner() { return session() },
     async login() { return session() },
-    async loginWithPassword() { return session() },
     async initializationStatus() { return { initialized: true } },
     async logout() {},
     async command() { throw new Error('not used') },
@@ -874,10 +874,10 @@ function clientsFacadeFake({ expired = true, devices = [device()] } = {}) {
       }
       return structuredClone(session())
     },
-    async login() {
+    async initializeOwner() {
       return structuredClone(session())
     },
-    async loginWithPassword() {
+    async login() {
       return structuredClone(session())
     },
     async initializationStatus() {

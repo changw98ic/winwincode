@@ -30,7 +30,7 @@ const reliability = await import(`${pathToFileURL(resolve(
 )).href}`)
 const { ControlPlaneClientError } = await import(`${pathToFileURL(resolve(
   cache,
-  'control-plane-client.js',
+  'community-control-plane-client.js',
 )).href}`)
 const { mountConnectionBar } = await import(`${pathToFileURL(resolve(
   cache,

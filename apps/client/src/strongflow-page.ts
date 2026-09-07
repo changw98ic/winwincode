@@ -7,7 +7,7 @@ import type {
   EvidenceId,
   RepositoryScope,
 } from './generated/contracts.js'
-import { scopeHash, type ScopeRouteSelection } from './core/scope-context.js'
+import { scopeHash, type ScopeRouteSelection } from '@winwincode/browser-core/scope-context'
 import {
   contextualDecisionPresentation,
   contextualDecisions,
@@ -17,7 +17,7 @@ import {
   mountContextualDecisionCard,
   type ContextualDecisionCard,
 } from './contextual-decision.js'
-import { mountButton } from './components/button.js'
+import { mountButton } from '@winwincode/browser-ui'
 import { mountDrawer } from './components/drawer.js'
 import { mountEmptyState } from './components/empty-state.js'
 import { mountFormField } from './components/form-field.js'

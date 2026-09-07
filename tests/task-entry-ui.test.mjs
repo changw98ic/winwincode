@@ -32,7 +32,7 @@ const cache = resolve(root, '.cache/task-entry-tests')
 async function cachedModule(name) {
   return import(pathToFileURL(resolve(cache, name)).href)
 }
-const facade = await cachedModule('control-plane-client.js')
+const facade = await cachedModule('community-control-plane-client.js')
 const clientsViewModelModule = await cachedModule('clients-view-model.js')
 const repositoriesViewModelModule = await cachedModule('repositories-view-model.js')
 const taskEntryViewModelModule = await cachedModule('task-entry-view-model.js')

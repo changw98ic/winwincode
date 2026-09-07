@@ -37,7 +37,7 @@ const pageModule = await import(`${pathToFileURL(resolve(
 
 const { ControlPlaneClientError } = await import(`${pathToFileURL(resolve(
   root,
-  '.cache/attention-center-tests/control-plane-client.js',
+  '.cache/attention-center-tests/community-control-plane-client.js',
 )).href}`)
 
 const { createAttentionCenterViewModel } = viewModelModule

@@ -34,7 +34,7 @@ const applicationModule = await import(`${pathToFileURL(resolve(
 )).href}`)
 const facadeModule = await import(`${pathToFileURL(resolve(
   cacheRoot,
-  'control-plane-client.js',
+  'community-control-plane-client.js',
 )).href}`)
 const { mountWinWinCodeClient } = applicationModule
 const { ControlPlaneClientError } = facadeModule
@@ -590,6 +590,6 @@ test('navigation shell keeps one facade and no direct network path', () => {
   assert.match(application, /from '\.\/navigation-capability\.js'/u)
   assert.match(navigation, /from '\.\/client-surface\.js'/u)
   assert.doesNotMatch(navigation, /from '\.\/application\.js'/u)
-  assert.equal((application.match(/createControlPlaneClient/gu) ?? []).length, 2)
+  assert.equal((application.match(/\bcreateControlPlaneClient\b/gu) ?? []).length, 2)
   assert.doesNotMatch(application, /\bfetch\s*\(|new\s+WebSocket/u)
 })

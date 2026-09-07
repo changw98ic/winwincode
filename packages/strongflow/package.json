@@ -20,6 +20,6 @@
     "dist"
   ],
   "dependencies": {
-    "@winwincode/contracts": "workspace:*"
+    "@winwincode/contracts": "0.1.0-alpha.1"
   }
 }

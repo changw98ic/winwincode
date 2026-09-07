@@ -190,6 +190,10 @@ function signalChild(child, signal) {
 
 export function staticClientServer({ root, certificateFiles, fixturePath, configuration }) {
   const moduleRoot = resolve(root, 'apps/client/dist/module')
+  const browserCoreRoot = resolve(root, 'packages/browser-core/dist')
+  const browserUiRoot = resolve(root, 'packages/browser-ui/dist')
+  const contractsRoot = resolve(root, 'packages/contracts/dist')
+  const controlPlaneClientRoot = resolve(root, 'packages/control-plane-client/dist')
   const publicRoot = resolve(root, 'apps/client/dist/public')
   const fixture = resolve(root, fixturePath)
   const productionIndex = readSharedClientFile(resolve(publicRoot, 'index.html'))
@@ -227,16 +231,35 @@ export function staticClientServer({ root, certificateFiles, fixturePath, config
     const sharedLoginBootstrapRequest = path === '/fixture/login-bootstrap.mjs'
     const fixtureRequest = path === `/fixture/${fixturePath.split('/').at(-1)}`
     const moduleRequest = path.startsWith('/module/')
+    const browserCoreRequest = path.startsWith('/browser-core/')
+    const browserUiRequest = path.startsWith('/browser-ui/')
+    const contractsRequest = path.startsWith('/contracts/')
+    const controlPlaneClientRequest = path.startsWith('/control-plane-client/')
     const publicRequest = path.startsWith('/assets/')
     const source = sharedLoginBootstrapRequest
       ? resolve(root, 'tests/fixtures/login-bootstrap.mjs')
       : fixtureRequest
         ? fixture
-        : moduleRequest
-          ? normalize(resolve(moduleRoot, path.replace(/^\/module\//u, '')))
+      : moduleRequest
+        ? normalize(resolve(moduleRoot, path.replace(/^\/module\//u, '')))
+        : browserCoreRequest
+          ? normalize(resolve(browserCoreRoot, path.replace(/^\/browser-core\//u, '')))
+        : browserUiRequest
+          ? normalize(resolve(browserUiRoot, path.replace(/^\/browser-ui\//u, '')))
+          : contractsRequest
+            ? normalize(resolve(contractsRoot, path.replace(/^\/contracts\//u, '')))
+            : controlPlaneClientRequest
+              ? normalize(resolve(
+                  controlPlaneClientRoot,
+                  path.replace(/^\/control-plane-client\//u, ''),
+                ))
           : normalize(resolve(publicRoot, path.replace(/^\//u, '')))
     if (
       (moduleRequest && source.startsWith(`${moduleRoot}/`))
+      || (browserCoreRequest && source.startsWith(`${browserCoreRoot}/`))
+      || (browserUiRequest && source.startsWith(`${browserUiRoot}/`))
+      || (contractsRequest && source.startsWith(`${contractsRoot}/`))
+      || (controlPlaneClientRequest && source.startsWith(`${controlPlaneClientRoot}/`))
       || (publicRequest && source.startsWith(`${publicRoot}/`))
       || fixtureRequest
       || sharedLoginBootstrapRequest
@@ -250,7 +273,30 @@ export function staticClientServer({ root, certificateFiles, fixturePath, config
         // already evaluated.
         'Cache-Control': 'no-store',
       })
-      response.end(readSharedClientFile(source))
+      const bytes = readSharedClientFile(source)
+      const moduleSource = bytes.toString('utf8')
+        .replace(/from ['"]@winwincode\/browser-ui['"]/gu, "from '/browser-ui/index.js'")
+        .replace(
+          /from ['"]@winwincode\/browser-core\/query-cache['"]/gu,
+          "from '/browser-core/query-cache.js'",
+        )
+        .replace(
+          /from ['"]@winwincode\/browser-core\/scope-context['"]/gu,
+          "from '/browser-core/scope-context.js'",
+        )
+        .replace(
+          /from ['"]@winwincode\/control-plane-client['"]/gu,
+          "from '/control-plane-client/index.js'",
+        )
+        .replace(
+          /from ['"]@winwincode\/contracts\/browser-control['"]/gu,
+          "from '/contracts/browser-control.js'",
+        )
+      response.end(
+        moduleRequest || browserCoreRequest || controlPlaneClientRequest
+          ? moduleSource
+          : bytes,
+      )
       return
     }
     response.writeHead(404).end()

@@ -57,13 +57,18 @@ test('Client and Server expose independent version and rollback coordinates', ()
 })
 
 test('browser boundary has one serverUrl and no internal Worker or Provider route', () => {
-  const facade = source('apps/client/src/control-plane-client.ts')
+  const facade = source('packages/control-plane-client/src/index.ts')
+  const composition = source('apps/client/src/community-control-plane-client.ts')
+  const application = source('apps/client/src/application.ts')
   const server = source('crates/winwincode-server/src/server.rs')
 
   assert.match(facade, /readonly serverUrl: string/u)
   assert.match(facade, /webSocket\.protocol = parsed\.protocol === 'https:' \? 'wss:' : 'ws:'/u)
   assert.match(facade, /credentials: 'include'/u)
   assert.doesNotMatch(facade, /[?&](?:token|authorization|credential)=/iu)
+  assert.doesNotMatch(facade, /globalThis|browser\.fetch|window\.fetch/u)
+  assert.doesNotMatch(composition, /globalThis|browser\.fetch|window\.fetch/u)
+  assert.equal(application.match(/browser\.fetch/gu)?.length, 1)
   for (const endpoint of ['/api/v1/commands', '/api/v1/queries', '/api/v1/events']) {
     assert.match(server, new RegExp(endpoint.replaceAll('/', '\\/'), 'u'))
   }

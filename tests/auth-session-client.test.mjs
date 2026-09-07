@@ -18,15 +18,14 @@ assert.equal(
 
 const cache = resolve(root, '.cache/control-plane-client-tests')
 const run = String(Date.now())
-const facade = await import(`${pathToFileURL(resolve(cache, 'control-plane-client.js')).href}?run=${run}`)
+const facade = await import(`${pathToFileURL(resolve(cache, 'community-control-plane-client.js')).href}?run=${run}`)
 const viewModel = await import(`${pathToFileURL(resolve(cache, 'auth-view-model.js')).href}?run=${run}`)
-const page = await import(`${pathToFileURL(resolve(cache, 'auth-page.js')).href}?run=${run}`)
 
 const { ControlPlaneClientError, createControlPlaneClient } = facade
 const { createAuthSessionViewModel } = viewModel
-const { mountAuthSessionPage } = page
 const schemaVersion = 'winwincode/v1'
 const actor = { kind: 'user', id: 'usr_00000000000000000000000001' }
+const ownerCredentials = { username: 'owner', password: 'initial-owner-password' }
 const authorizedScopes = [
   { kind: 'organization', organizationId: 'org_00000000000000000000000001' },
 ]
@@ -45,7 +44,7 @@ function response(status, payload = '') {
   }
 }
 
-test('facade restores context, exchanges proof once, and closes the cookie session', async () => {
+test('facade restores context, initializes the owner once, and closes the cookie session', async () => {
   const requests = []
   const proof = 'proof-material-only-for-this-call'
   const client = createControlPlaneClient({
@@ -60,10 +59,7 @@ test('facade restores context, exchanges proof once, and closes the cookie sessi
   })
 
   const restored = await client.restore()
-  const created = await client.login(proof, {
-    username: 'owner',
-    password: 'owner-password-123',
-  })
+  const created = await client.initializeOwner({ bootstrapProof: proof, ...ownerCredentials })
   await client.logout()
 
   assert.deepEqual(restored, session())
@@ -83,15 +79,11 @@ test('facade restores context, exchanges proof once, and closes the cookie sessi
   assert.equal(requests[0].init.body, undefined)
   assert.equal(requests[1].init.headers.Authorization, `Bearer ${proof}`)
   assert.equal(requests[2].init.headers.Authorization, undefined)
-  assert.deepEqual(JSON.parse(requests[1].init.body), {
-    schemaVersion,
-    username: 'owner',
-    password: 'owner-password-123',
-  })
+  assert.deepEqual(JSON.parse(requests[1].init.body), { schemaVersion, ...ownerCredentials })
   assert.doesNotMatch(JSON.stringify(client), /proof-material/u)
 })
 
-test('facade treats redirect as an error and submits proof exactly once', async () => {
+test('facade treats redirect as an error and submits owner initialization exactly once', async () => {
   let requests = 0
   const proof = 'proof-not-forwarded-by-the-client'
   const client = createControlPlaneClient({
@@ -106,9 +98,9 @@ test('facade treats redirect as an error and submits proof exactly once', async 
   })
 
   await assert.rejects(
-    client.login(proof, { username: 'owner', password: 'owner-password-123' }),
+    client.initializeOwner({ bootstrapProof: proof, ...ownerCredentials }),
     error => error instanceof ControlPlaneClientError
-      && error.code === 'INVALID_AUTH_SESSION_RESPONSE'
+      && error.code === 'AUTH_SESSION_FAILED'
       && !error.message.includes(proof),
   )
   assert.equal(requests, 1)
@@ -137,7 +129,7 @@ test('facade rejects expired proof and malformed expiresAt without echoing proof
   })
 
   await assert.rejects(
-    client.login(proof, { username: 'owner', password: 'owner-password-123' }),
+    client.initializeOwner({ bootstrapProof: proof, ...ownerCredentials }),
     error => error instanceof ControlPlaneClientError
       && error.kind === 'authentication'
       && !JSON.stringify(error).includes(proof)
@@ -145,7 +137,7 @@ test('facade rejects expired proof and malformed expiresAt without echoing proof
   )
   mode = 'malformed'
   await assert.rejects(
-    client.login(proof, { username: 'owner', password: 'owner-password-123' }),
+    client.initializeOwner({ bootstrapProof: proof, ...ownerCredentials }),
     error => error instanceof ControlPlaneClientError
       && error.code === 'INVALID_AUTH_SESSION_RESPONSE'
       && !error.message.includes(proof),
@@ -236,51 +228,3 @@ class FakeDocument {
 function descendants(node) {
   return [node, ...node.children.flatMap(child => descendants(child))]
 }
-
-test('auth session widget shows status and sign-out without a proof form', async () => {
-  const document = new FakeDocument()
-  const rootElement = new FakeElement('div', document)
-  let signedIn = true
-  const client = {
-    async restore() {
-      if (signedIn) return session()
-      throw new ControlPlaneClientError({
-        kind: 'authentication',
-        code: 'AUTHENTICATION_REQUIRED',
-        message: 'The browser session is missing.',
-        requestId: null,
-        retryable: false,
-      })
-    },
-    async login() {
-      throw new Error('the auth session widget never signs in')
-    },
-    async logout() { signedIn = false },
-  }
-  const model = createAuthSessionViewModel(client)
-  const mounted = mountAuthSessionPage({ root: rootElement, model })
-  await model.restore()
-
-  const nodes = descendants(rootElement)
-  assert.equal(
-    nodes.some(node => node.className === 'wwc-auth-session-proof'),
-    false,
-    'the retired proof form stays unmounted',
-  )
-  assert.equal(
-    nodes.some(node => node.className === 'wwc-auth-session-form'),
-    false,
-    'the retired proof form stays unmounted',
-  )
-  const signOut = nodes.find(node => node.className === 'wwc-auth-session-sign-out')
-  assert.notEqual(signOut, undefined)
-  assert.equal(signOut.hidden, false, 'sign-out follows the signed-in state')
-
-  signOut.emit('click')
-  await new Promise(resolvePromise => setImmediate(resolvePromise))
-  assert.equal(model.state.status, 'signed-out')
-
-  mounted.close()
-  model.close()
-  assert.deepEqual(rootElement.children, [])
-})

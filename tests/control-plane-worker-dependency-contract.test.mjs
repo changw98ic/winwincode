@@ -45,12 +45,13 @@ const REQUIRED_GUARDRAILS = Object.freeze({
   localLauncher: 'winwincode-local',
   localLauncherAllowedProductDependencies: [
     'winwincode-control-plane',
-    'winwincode-observability',
+    'winwincode-observability-core',
     'winwincode-worker',
   ],
   serverEntrypoint: 'winwincode-server',
   serverAllowedProductDependencies: [
     'winwincode-api',
+    'winwincode-client-port',
     'winwincode-codex',
     'winwincode-control-plane',
     'winwincode-domain',
@@ -207,6 +208,7 @@ test('dependency graph enforces the Control Plane, Server, Worker, Client, Local
   const server = graph.nodes.find(node => node.id === 'winwincode-server')
   assert.deepEqual(server.allowedInternalDependencies, [
     'winwincode-api',
+    'winwincode-client-port',
     'winwincode-codex',
     'winwincode-control-plane',
     'winwincode-domain',
@@ -246,7 +248,12 @@ test('dependency graph enforces the Control Plane, Server, Worker, Client, Local
 
   const web = graph.nodes.find(node => node.id === 'typescript-web')
   assert.deepEqual(web.allowedBackends, graph.guardrails.webAllowedBackends)
-  assert.deepEqual(web.allowedInternalDependencies, ['typescript-generated-client'])
+  assert.deepEqual(web.allowedInternalDependencies, [
+    'typescript-generated-client',
+    'typescript-browser-core',
+    'typescript-browser-ui',
+    'typescript-control-plane-client',
+  ])
 
   const local = graph.nodes.find(node => node.id === graph.guardrails.localLauncher)
   assert.deepEqual(

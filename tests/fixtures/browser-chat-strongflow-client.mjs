@@ -1,6 +1,5 @@
 import { mountWinWinCodeClient } from '/module/application.js'
 
-import { submitLoginInitialization } from './login-bootstrap.mjs'
 
 const serverConfiguration = await fetch('/fixture/server-url.json', {
   cache: 'no-store',
@@ -93,8 +92,18 @@ async function waitFor(predicate, label, timeoutMillis = 20_000) {
   }
 }
 
-function submitProof(value) {
-  submitLoginInitialization(document, value)
+async function initializeOwner(value) {
+  await waitFor(
+    () => document.querySelector('.wwc-login-initialization')?.hidden === false,
+    'owner initialization form',
+  )
+  const username = document.querySelector('.wwc-login-initialization-username')
+  const password = document.querySelector('.wwc-login-initialization-password')
+  const proof = document.querySelector('.wwc-login-initialization-proof')
+  username.value = 'owner'
+  password.value = `${value}-owner-password`
+  proof.value = value
+  document.querySelector('.wwc-login-initialization-form').requestSubmit()
 }
 
 function context() {
@@ -461,7 +470,7 @@ globalThis.runChatStrongFlowSetup = async proof => {
     ),
     'initial unauthenticated session restore',
   )
-  submitProof(proof)
+  await initializeOwner(proof)
   await waitFor(() => application.authSession.state.status === 'signed-in', 'signed-in session')
   const { scope } = context()
   await command('session.create', 0, {

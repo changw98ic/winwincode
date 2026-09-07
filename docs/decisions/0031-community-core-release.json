@@ -1,0 +1,610 @@
+{
+  "schemaVersion": 1,
+  "kind": "winwincode.community-core-release-contract.v1",
+  "status": "proposed",
+  "ownerRepository": "winwincode",
+  "consumerRepositories": [
+    "winwincode-cloud",
+    "winwincode-enterprise"
+  ],
+  "currentState": {
+    "observedSourceCommit": "a5b3b96df35e11a04931299823eec76799dea31f",
+    "observedWorkspaceVersion": "0.1.0-alpha.1",
+    "inspectionMode": {
+      "mode": "git-file-inventory",
+      "symbolAndCallGraphCoverage": false,
+      "reason": "dist/scripts/code-index.js is absent, and this repository has no build:node script with which to create the required local index"
+    },
+    "releasePipeline": {
+      "workflow": ".github/workflows/native-release.yml",
+      "distribution": "github-actions-artifact",
+      "immutableCoreRelease": false,
+      "publishedCoreManifest": false,
+      "publishedCoreLockSchema": false,
+      "publishedSbom": false,
+      "publishedLicenseManifest": false,
+      "artifacts": [
+        "winwincode-server",
+        "winwincode-worker",
+        "winwincode-kernel-helper",
+        "@winwincode/client static files",
+        "LICENSE",
+        "NOTICE",
+        "THIRD_PARTY_NOTICES.md",
+        "release-artifact-manifest.json",
+        "SHA256SUMS"
+      ],
+      "limitations": [
+        "The workflow uploads product artifacts to one workflow run; it does not create an immutable Community core release.",
+        "The artifact set mixes the Server and Client product with the Worker runtime and does not publish linkable Rust or npm core packages.",
+        "The legal files are copied, but there is no machine-readable artifact-to-license manifest or SBOM."
+      ]
+    },
+    "rustPackages": {
+      "declaredVersion": "0.1.0-alpha.1",
+      "registryPublicationConfigured": false,
+      "intendedLinkableCore": [
+        {
+          "name": "winwincode-domain",
+          "manifest": "crates/winwincode-domain/Cargo.toml",
+          "publish": false,
+          "boundaryReady": true
+        },
+        {
+          "name": "winwincode-api",
+          "manifest": "crates/winwincode-api/Cargo.toml",
+          "publish": false,
+          "boundaryReady": true
+        },
+        {
+          "name": "winwincode-client-port",
+          "manifest": "crates/winwincode-client-port/Cargo.toml",
+          "publish": false,
+          "boundaryReady": true
+        },
+        {
+          "name": "winwincode-execution-port",
+          "manifest": "crates/winwincode-execution-port/Cargo.toml",
+          "publish": false,
+          "boundaryReady": true
+        },
+        {
+          "name": "winwincode-repository-context",
+          "manifest": "crates/winwincode-repository-context/Cargo.toml",
+          "publish": false,
+          "boundaryReady": true
+        },
+        {
+          "name": "winwincode-observability-core",
+          "manifest": "crates/winwincode-observability-core/Cargo.toml",
+          "publish": true,
+          "boundaryReady": true
+        },
+        {
+          "name": "winwincode-session",
+          "manifest": "crates/winwincode-session/Cargo.toml",
+          "publish": false,
+          "boundaryReady": false,
+          "blocker": "The public crate currently exports SqliteSessionIdentityMigration and directly depends on rusqlite."
+        },
+        {
+          "name": "winwincode-delivery",
+          "manifest": "crates/winwincode-delivery/Cargo.toml",
+          "publish": false,
+          "boundaryReady": false,
+          "blocker": "The domain and application modules directly import winwincode-storage types."
+        },
+        {
+          "name": "winwincode-publication",
+          "manifest": "crates/winwincode-publication/Cargo.toml",
+          "publish": false,
+          "boundaryReady": false,
+          "blocker": "The coordinator and metering modules directly import winwincode-storage types."
+        }
+      ],
+      "communityOnlyAdapters": [
+        {
+          "name": "winwincode-observability-sqlite",
+          "manifest": "crates/winwincode-observability-sqlite/Cargo.toml",
+          "publish": false,
+          "reason": "This SQLite persistence adapter belongs to the Community product and is excluded from the cross-repository core release."
+        }
+      ],
+      "runtimeOnlySourcePackages": [
+        "winwincode-kernel",
+        "winwincode-codex",
+        "winwincode-worker",
+        "winwincode-kernel-helper"
+      ],
+      "runtimeOnlyReason": "The embedded Codex dependencies are repository path dependencies. Cloud and Enterprise consume the verified Worker runtime bundle over ExecutionPort instead of linking the kernel implementation into their Server products."
+    },
+    "npmPackages": {
+      "declaredVersion": "0.1.0-alpha.1",
+      "registryPublicationProven": false,
+      "packages": [
+        {
+          "name": "@winwincode/contracts",
+          "manifest": "packages/contracts/package.json",
+          "publishConfigAccess": "public",
+          "boundaryReady": true
+        },
+        {
+          "name": "@winwincode/strongflow",
+          "manifest": "packages/strongflow/package.json",
+          "publishConfigAccess": "public",
+          "boundaryReady": true
+        },
+        {
+          "name": "@winwincode/browser-ui",
+          "manifest": "packages/browser-ui/package.json",
+          "publishConfigAccess": "public",
+          "boundaryReady": true
+        },
+        {
+          "name": "@winwincode/control-plane-client",
+          "manifest": "packages/control-plane-client/package.json",
+          "publishConfigAccess": "public",
+          "boundaryReady": true
+        },
+        {
+          "name": "@winwincode/browser-core",
+          "manifest": "packages/browser-core/package.json",
+          "publishConfigAccess": "public",
+          "boundaryReady": true
+        }
+      ],
+      "excludedProductPackage": "@winwincode/client",
+      "limitations": [
+        "No npm publish job or immutable npm provenance is present in the current release workflow.",
+        "scripts/generate-contracts.mjs writes generated TypeScript into apps/client rather than the public @winwincode/contracts package; schema-to-package exactness needs one release gate."
+      ]
+    },
+    "contracts": {
+      "generator": "scripts/generate-contracts.mjs",
+      "canonicalSchemas": [
+        "schema/winwincode/v1/client-control.schema.json",
+        "schema/winwincode/v1/control-plane-events.schema.json",
+        "schema/winwincode/v1/control-plane-http.schema.json",
+        "schema/winwincode/v1/domain.schema.json",
+        "schema/winwincode/v1/execution-port.schema.json"
+      ],
+      "generatedArtifacts": [
+        "crates/winwincode-api/src/generated.rs",
+        "crates/winwincode-domain/src/generated.rs",
+        "crates/winwincode-execution-port/src/generated.rs",
+        "apps/client/src/generated/contracts.ts",
+        "apps/client/src/generated/control-plane-client.ts",
+        "schema/winwincode/v1/schema-collection.generated.json",
+        "schema/winwincode/v1/openapi.generated.json"
+      ],
+      "protocolSamples": [
+        "schema/winwincode/v1/domain.samples.json",
+        "schema/winwincode/v1/examples/control-plane-http.examples.json"
+      ],
+      "publishedBundle": false
+    },
+    "currentSourcePaths": [
+      ".github/workflows/native-release.yml",
+      "Cargo.toml",
+      "crates/winwincode-api/Cargo.toml",
+      "crates/winwincode-client-port/Cargo.toml",
+      "crates/winwincode-delivery/Cargo.toml",
+      "crates/winwincode-domain/Cargo.toml",
+      "crates/winwincode-execution-port/Cargo.toml",
+      "crates/winwincode-observability-core/Cargo.toml",
+      "crates/winwincode-observability-sqlite/Cargo.toml",
+      "crates/winwincode-publication/Cargo.toml",
+      "crates/winwincode-repository-context/Cargo.toml",
+      "crates/winwincode-session/Cargo.toml",
+      "docs/decisions/0031-community-core-release.json",
+      "packages/browser-ui/package.json",
+      "packages/browser-core/package.json",
+      "packages/control-plane-client/package.json",
+      "packages/contracts/package.json",
+      "packages/strongflow/package.json",
+      "pnpm-workspace.yaml",
+      "schema/winwincode/core-lock.schema.json",
+      "schema/winwincode/v1/client-control.schema.json",
+      "schema/winwincode/v1/control-plane-events.schema.json",
+      "schema/winwincode/v1/control-plane-http.schema.json",
+      "schema/winwincode/v1/domain.samples.json",
+      "schema/winwincode/v1/domain.schema.json",
+      "schema/winwincode/v1/examples/control-plane-http.examples.json",
+      "schema/winwincode/v1/execution-port.schema.json",
+      "schema/winwincode/v1/openapi.generated.json",
+      "schema/winwincode/v1/schema-collection.generated.json",
+      "scripts/build-products.mjs",
+      "scripts/generate-contracts.mjs",
+      "scripts/product-build-contract.mjs",
+      "scripts/release-artifact-contract.mjs",
+      "scripts/run-release-artifact-gate.mjs",
+      "scripts/verify-products.mjs",
+      "scripts/verify-release-artifacts.mjs",
+      "tests/community-core-release-contract.test.mjs"
+    ]
+  },
+  "targetState": {
+    "releaseIdentity": {
+      "version": "one SemVer value shared by every artifact in one core release",
+      "sourceCommit": "the exact 40-character lowercase Git commit built from a clean winwincode checkout",
+      "sourceTag": "core-v{version}",
+      "protocolVersion": "winwincode/v1",
+      "sourceDateEpoch": "the positive integer commit timestamp",
+      "immutability": "A tag, registry version, or release attachment is never overwritten. Corrections require a new version."
+    },
+    "consumableRustCrates": [
+      {
+        "name": "winwincode-domain",
+        "role": "shared identifiers and scalar value objects"
+      },
+      {
+        "name": "winwincode-api",
+        "role": "public HTTP and WebSocket transport types"
+      },
+      {
+        "name": "winwincode-client-port",
+        "role": "Device Client control messages and exchange framing"
+      },
+      {
+        "name": "winwincode-execution-port",
+        "role": "Server-to-Worker wire types, replay, and transport-neutral enforcement"
+      },
+      {
+        "name": "winwincode-repository-context",
+        "role": "repository facts, Git snapshot facts, and code-index capability reports"
+      },
+      {
+        "name": "winwincode-observability-core",
+        "role": "storage-neutral observability dimensions, aggregation, alert transitions, and persistence port"
+      },
+      {
+        "name": "winwincode-session",
+        "role": "storage-neutral product and execution session domain",
+        "requiredChangeBeforeFirstRelease": "Remove the SQLite adapter from this published crate and keep the session port as the only persistence boundary."
+      },
+      {
+        "name": "winwincode-delivery",
+        "role": "storage-neutral Delivery and StrongFlow domain",
+        "requiredChangeBeforeFirstRelease": "Replace direct winwincode-storage type imports with core-owned immutable facts and persistence ports."
+      },
+      {
+        "name": "winwincode-publication",
+        "role": "storage-neutral publication facts, policy, and external-effect port",
+        "requiredChangeBeforeFirstRelease": "Replace direct winwincode-storage imports with publication-owned facts and persistence ports."
+      }
+    ],
+    "consumableNpmPackages": [
+      {
+        "name": "@winwincode/contracts",
+        "role": "public browser and service contracts",
+        "requiredReleaseProperty": "The package bytes are verified against the canonical schema set during the release."
+      },
+      {
+        "name": "@winwincode/strongflow",
+        "role": "product-neutral StrongFlow domain and projections",
+        "dependencies": [
+          "@winwincode/contracts at the same exact core version"
+        ]
+      },
+      {
+        "name": "@winwincode/browser-ui",
+        "role": "product-neutral browser UI primitives",
+        "requiredReleaseProperty": "The package contains only the six canonical browser primitives and exposes one public code entry."
+      },
+      {
+        "name": "@winwincode/control-plane-client",
+        "role": "product-neutral browser Control Plane facade",
+        "dependencies": [
+          "@winwincode/contracts at the same exact core version"
+        ],
+        "requiredReleaseProperty": "Product-generated HTTP and WebSocket transports are injected; the package contains no product-generated DTO or transport source."
+      },
+      {
+        "name": "@winwincode/browser-core",
+        "role": "product-neutral browser query cache and scope routing",
+        "dependencies": [
+          "@winwincode/contracts at the same exact core version"
+        ],
+        "requiredReleaseProperty": "The package exposes only query-cache and scope-context subpaths and contains no product DTO."
+      }
+    ],
+    "contractBundle": {
+      "fileName": "winwincode-contracts-{version}.tar.zst",
+      "canonicalSchemas": [
+        "schema/winwincode/v1/client-control.schema.json",
+        "schema/winwincode/v1/control-plane-events.schema.json",
+        "schema/winwincode/v1/control-plane-http.schema.json",
+        "schema/winwincode/v1/domain.schema.json",
+        "schema/winwincode/v1/execution-port.schema.json"
+      ],
+      "generatedContracts": [
+        "schema/winwincode/v1/schema-collection.generated.json",
+        "schema/winwincode/v1/openapi.generated.json"
+      ],
+      "protocolSamples": [
+        "schema/winwincode/v1/domain.samples.json",
+        "schema/winwincode/v1/examples/control-plane-http.examples.json"
+      ],
+      "generationRule": "The canonical schemas are the only authored wire definitions. Generated Rust, TypeScript, JSON Schema collection, and OpenAPI bytes must be current before packaging."
+    },
+    "workerRuntimeBundles": {
+      "purpose": "Provide the Community-owned execution implementation without linking Codex Core into Cloud or Enterprise product source.",
+      "targets": [
+        "aarch64-apple-darwin",
+        "x86_64-apple-darwin",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-unknown-linux-gnu"
+      ],
+      "fileName": "winwincode-worker-{version}-{target}.tar.zst",
+      "requiredFiles": [
+        "bin/winwincode-worker",
+        "bin/winwincode-kernel-helper",
+        "bin/winwincode-kernel-helper.release.json",
+        "LICENSE",
+        "NOTICE",
+        "THIRD_PARTY_NOTICES.md"
+      ],
+      "serverBinaryIncluded": false,
+      "clientStaticFilesIncluded": false
+    },
+    "forbiddenCoreContent": {
+      "rustCrates": [
+        "winwincode-server",
+        "winwincode-control-plane",
+        "winwincode-storage",
+        "winwincode-postgres",
+        "winwincode-audit",
+        "winwincode-backup",
+        "winwincode-drill",
+        "winwincode-object-store",
+        "winwincode-integration",
+        "winwincode-observability-sqlite",
+        "winwincode-evidence-export",
+        "winwincode-test-assets",
+        "winwincode-local",
+        "winwincode-cli",
+        "winwincode-device-client"
+      ],
+      "npmPackages": [
+        "@winwincode/client"
+      ],
+      "sourceAreas": [
+        "Community application composition and UI",
+        "Cloud tenant identity, tenant isolation, billing, plans, hosted object storage, cloud scheduling, and hosted operations",
+        "Enterprise organization administration, customer identity, private deployment, customer backup, upgrade, audit storage, and policy administration",
+        "SQLite or PostgreSQL product-storage adapters",
+        "Server configuration, deployment credentials, customer data, and operator secrets"
+      ],
+      "runtimeException": "winwincode-kernel, winwincode-codex, winwincode-worker, and winwincode-kernel-helper source stays in Community, but downstream repositories receive only the verified Worker runtime bundle, not linkable copies of those crates."
+    },
+    "releaseManifest": {
+      "fileName": "community-core-release-manifest.json",
+      "kind": "winwincode.community-core-release.v1",
+      "requiredIdentityFields": [
+        "schemaVersion",
+        "kind",
+        "version",
+        "sourceCommit",
+        "sourceTag",
+        "sourceDateEpoch",
+        "protocolVersion",
+        "releasedAt"
+      ],
+      "requiredArtifactFields": [
+        "name",
+        "kind",
+        "version",
+        "uri",
+        "bytes",
+        "sha256",
+        "licenseSpdx"
+      ],
+      "requiredSupplyChainFields": [
+        "sbom",
+        "licenseManifest",
+        "checksums",
+        "signature"
+      ],
+      "sbom": {
+        "format": "CycloneDX",
+        "specVersion": "1.6",
+        "mediaType": "application/vnd.cyclonedx+json",
+        "fileName": "community-core-{version}.cdx.json",
+        "sha256Required": true
+      },
+      "licenseManifest": {
+        "fileName": "community-core-{version}.licenses.json",
+        "sha256Required": true,
+        "requiredFieldsPerComponent": [
+          "name",
+          "version",
+          "purl",
+          "licenseSpdx",
+          "source",
+          "noticeFiles"
+        ],
+        "requiredProjectFiles": [
+          "LICENSE",
+          "NOTICE",
+          "THIRD_PARTY_NOTICES.md"
+        ]
+      },
+      "checksums": {
+        "fileName": "SHA256SUMS",
+        "coverage": "every downloaded registry tarball, release attachment, SBOM, license manifest, and the release manifest"
+      },
+      "signature": {
+        "fileName": "community-core-release-manifest.json.sig",
+        "algorithm": "Ed25519",
+        "trustAnchor": "The consumer repository pins the approved public-key SHA-256 fingerprint outside the downloaded release."
+      }
+    },
+    "acquisition": {
+      "cargo": {
+        "source": "CORE_CARGO_REGISTRY",
+        "versionRequirement": "={version}",
+        "requirements": [
+          "Every crate is fetched from the configured immutable registry, never through a cross-repository path dependency or Git branch.",
+          "Cargo.lock records the registry source and registry checksum for every crate.",
+          "The downloaded .crate SHA-256 equals the release manifest and core.lock.json value."
+        ]
+      },
+      "npm": {
+        "source": "CORE_NPM_REGISTRY",
+        "versionRequirement": "{version} without a range operator",
+        "requirements": [
+          "pnpm-lock.yaml records the immutable tarball URL and registry integrity.",
+          "The downloaded .tgz SHA-256 equals the release manifest and core.lock.json value.",
+          "Installations use corepack pnpm install --frozen-lockfile."
+        ]
+      },
+      "releaseAttachments": {
+        "source": "CORE_RELEASE_BASE_URL/core-v{version}/",
+        "requirements": [
+          "Fetch the release manifest and detached signature first.",
+          "Verify the manifest signature with the separately pinned public-key fingerprint.",
+          "Fetch contract, Worker runtime, SBOM, license, and checksum files only from immutable versioned URLs.",
+          "Verify file byte length and SHA-256 before extraction or execution."
+        ]
+      },
+      "offlineEnterpriseMirror": {
+        "allowed": true,
+        "rule": "An Enterprise mirror may change only the download base URL. It must serve byte-identical artifacts, and core.lock.json retains the upstream version, commit, and SHA-256 values."
+      }
+    },
+    "coreLockManifest": {
+      "path": "core.lock.json",
+      "canonicalEncoding": "UTF-8 JSON with recursively sorted object keys, two-space indentation, and one trailing newline",
+      "validationRulesBeyondSchema": [
+        "The Cargo package names are exactly the eight consumableRustCrates names, without duplicates.",
+        "The npm package names are exactly @winwincode/contracts, @winwincode/strongflow, @winwincode/browser-ui, @winwincode/control-plane-client, and @winwincode/browser-core, without duplicates.",
+        "Every artifact version equals core.version.",
+        "sourceTag equals core-v followed by core.version.",
+        "Every URI is immutable and every downloaded byte stream matches both bytes and sha256.",
+        "A lock update replaces the complete core object; mixed core versions are rejected."
+      ],
+      "schemaPath": "schema/winwincode/core-lock.schema.json",
+      "schemaId": "https://schemas.winwincode.dev/core-lock/v1/schema.json"
+    },
+    "upgradeOrder": [
+      {
+        "step": 1,
+        "action": "Select one released Community core version whose manifest signature and source commit are approved."
+      },
+      {
+        "step": 2,
+        "action": "Download the release manifest, signature, SBOM, license manifest, contract bundle, required Worker runtime bundles, Cargo packages, and npm packages into a temporary directory."
+      },
+      {
+        "step": 3,
+        "action": "Verify the signing-key fingerprint, Ed25519 signature, byte lengths, SHA-256 values, one shared version, source tag, source commit, protocol version, SBOM, and license coverage before extracting or installing anything."
+      },
+      {
+        "step": 4,
+        "action": "Replace the complete core object in core.lock.json in one change; do not combine artifacts from different core versions."
+      },
+      {
+        "step": 5,
+        "action": "Update Cargo.toml and package.json to exact versions, then regenerate Cargo.lock and pnpm-lock.yaml from the approved registries."
+      },
+      {
+        "step": 6,
+        "action": "Install with frozen locks, unpack the verified contract bundle, run schema and generated-contract checks, and reject drift rather than retaining an old protocol path."
+      },
+      {
+        "step": 7,
+        "action": "Build the consumer Server and Web products, then run their PostgreSQL, identity, authorization, Worker protocol, restart, and product-boundary tests."
+      },
+      {
+        "step": 8,
+        "action": "Commit the lock, dependency locks, generated outputs, and verification evidence together in the consumer repository, then release that product independently."
+      }
+    ],
+    "rollbackRule": "Rollback selects the complete previously approved core.lock.json and corresponding product release. Runtime negotiation or dual support for old and new application contracts is not added."
+  },
+  "firstReleaseGates": [
+    {
+      "id": "CORE-BOUNDARY",
+      "requirement": "The release contains only the exact Rust crates, npm packages, schemas, samples, Worker runtime files, and supply-chain metadata listed in targetState."
+    },
+    {
+      "id": "RUST-PACKAGE",
+      "requirement": "All eight linkable crates package from a clean checkout, use registry-resolvable exact inter-core dependencies, and contain no path dependency outside their own package."
+    },
+    {
+      "id": "RUST-STORAGE",
+      "requirement": "winwincode-session, winwincode-delivery, and winwincode-publication compile and test without rusqlite, winwincode-storage, or winwincode-postgres dependencies."
+    },
+    {
+      "id": "NPM-PACKAGE",
+      "requirement": "All three npm tarballs are built once, carry the exact core version, use exact inter-core dependencies, and pass package boundary and schema-to-package exactness tests."
+    },
+    {
+      "id": "CONTRACTS",
+      "requirement": "pnpm contracts:check passes and the contract bundle contains exactly the five canonical schemas, two generated contract documents, and two protocol sample files."
+    },
+    {
+      "id": "WORKER-MATRIX",
+      "requirement": "Worker bundles for all four supported targets pass reproducible-build, helper-signature, ExecutionPort smoke, restart, and checksum verification."
+    },
+    {
+      "id": "SUPPLY-CHAIN",
+      "requirement": "The release manifest, detached signature, SHA256SUMS, CycloneDX SBOM, and component license manifest cover every released byte artifact."
+    },
+    {
+      "id": "CONSUMER-LOCK",
+      "requirement": "Clean Cloud and Enterprise fixture repositories resolve only core.lock.json-pinned artifacts, build with frozen Cargo and pnpm locks, and contain no cross-repository path dependencies."
+    },
+    {
+      "id": "NO-PRODUCT-MIX",
+      "requirement": "A release-content scan rejects Community UI, Server, Control Plane, SQLite or PostgreSQL product storage, Cloud SaaS features, Enterprise deployment features, credentials, and customer data."
+    }
+  ],
+  "knownBlockers": [
+    {
+      "id": "INDEX-MISSING",
+      "impact": "This inspection proves file-level coverage only; it does not prove a complete symbol or call graph.",
+      "evidence": "node dist/scripts/code-index.js status failed because the file is absent, and package.json has no build:node script."
+    },
+    {
+      "id": "NO-CORE-PUBLISHER",
+      "impact": "No Community core release exists for Cloud or Enterprise to consume.",
+      "evidence": "The native release workflow uploads only per-run product artifacts and has read-only contents permission."
+    },
+    {
+      "id": "RUST-NOT-PUBLISHABLE",
+      "impact": "The intended linkable Rust crates cannot yet be resolved from a registry.",
+      "evidence": "All eight target crate manifests currently set publish = false; several inter-core dependencies still use workspace or path resolution."
+    },
+    {
+      "id": "STORAGE-COUPLING",
+      "impact": "Three shared domain crates would pull Community SQLite product storage into PostgreSQL products.",
+      "evidence": "winwincode-session imports rusqlite; winwincode-delivery and winwincode-publication import winwincode-storage types."
+    },
+    {
+      "id": "CODEX-PATH-DEPS",
+      "impact": "Kernel, Codex adapter, and Worker cannot be offered as ordinary downstream Cargo dependencies without also exporting repository-local Codex sources.",
+      "evidence": "The workspace maps codex-core-api, codex-api, codex-arg0, codex-protocol, and codex-model-provider-info to third_party/codex paths."
+    },
+    {
+      "id": "NPM-NOT-PUBLISHED",
+      "impact": "Cloud and Enterprise have no proven immutable npm source for the two public packages.",
+      "evidence": "Package manifests declare public access, but no npm publication workflow or publication evidence exists."
+    },
+    {
+      "id": "CONTRACT-PACKAGE-DRIFT-RISK",
+      "impact": "A schema change can update generated Client files without proving that @winwincode/contracts carries the same definitions.",
+      "evidence": "scripts/generate-contracts.mjs writes TypeScript outputs under apps/client; @winwincode/contracts is a separate package source tree."
+    },
+    {
+      "id": "NO-SBOM-OR-LICENSE-MANIFEST",
+      "impact": "A consumer cannot verify component-level dependency and license coverage from current artifacts.",
+      "evidence": "The current artifact gate includes three legal text files but produces neither an SBOM nor a machine-readable license manifest."
+    },
+    {
+      "id": "DIRTY-CHECKOUT",
+      "impact": "The current release artifact gate would reject this shared working tree until all concurrent work is committed or moved to clean worktrees.",
+      "evidence": "git status reported tracked modifications and untracked files during this inspection; run-release-artifact-gate.mjs requires an empty porcelain status."
+    }
+  ]
+}

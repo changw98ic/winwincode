@@ -17,8 +17,28 @@
     "noImplicitOverride": true,
     "noUncheckedIndexedAccess": true,
     "paths": {
+      "@winwincode/browser-ui": [
+        "./packages/browser-ui/dist/index.d.ts",
+        "./packages/browser-ui/src/index.ts"
+      ],
       "@winwincode/contracts": [
         "./packages/contracts/src/index.ts"
+      ],
+      "@winwincode/browser-core/query-cache": [
+        "./packages/browser-core/dist/query-cache.d.ts",
+        "./packages/browser-core/src/query-cache.ts"
+      ],
+      "@winwincode/browser-core/scope-context": [
+        "./packages/browser-core/dist/scope-context.d.ts",
+        "./packages/browser-core/src/scope-context.ts"
+      ],
+      "@winwincode/control-plane-client": [
+        "./packages/control-plane-client/dist/index.d.ts",
+        "./packages/control-plane-client/src/index.ts"
+      ],
+      "@winwincode/contracts/browser-control": [
+        "./packages/contracts/dist/browser-control.d.ts",
+        "./packages/contracts/src/browser-control.ts"
       ]
     },
     "resolveJsonModule": true,

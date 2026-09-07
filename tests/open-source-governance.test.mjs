@@ -243,7 +243,7 @@ test('release source and package metadata retain the Apache-2.0 project boundary
     )),
   ]
   const version = manifests[0].version
-  assert.equal(manifests.length, 4)
+  assert.equal(manifests.length, PRODUCT_PACKAGE_DIRECTORIES.length + 1)
   assert.equal(manifests.every(manifest => manifest.version === version), true)
   assert.equal(manifests.every(manifest => manifest.license === 'Apache-2.0'), true)
   assert.match(read('LICENSE'), /Apache License\s+Version 2\.0/u)
@@ -313,6 +313,9 @@ test('product version command updates every manifest and rejects invalid version
         name: index === 0 ? '@winwincode/workspace' : `fixture-${String(index)}`,
         version: '0.0.0-dev.0',
         license: 'Apache-2.0',
+        ...(index === 1
+          ? { dependencies: { '@winwincode/contracts': '0.0.0-dev.0' } }
+          : {}),
       }, null, 2)}\n`)
     }
     writeFileSync(join(fixture, 'Cargo.toml'), [
@@ -327,12 +330,17 @@ test('product version command updates every manifest and rejects invalid version
       '',
     ].join('\n'))
     const updated = setProductVersion(fixture, '1.2.3-rc.1')
-    assert.equal(updated.length, 6)
+    assert.equal(updated.length, PRODUCT_PACKAGE_DIRECTORIES.length + 3)
     for (const directory of directories) {
       const manifest = JSON.parse(
         readFileSync(join(fixture, directory, 'package.json'), 'utf8'),
       )
       assert.equal(manifest.version, '1.2.3-rc.1')
+      for (const [name, dependencyVersion] of Object.entries(manifest.dependencies ?? {})) {
+        if (name.startsWith('@winwincode/')) {
+          assert.equal(dependencyVersion, '1.2.3-rc.1')
+        }
+      }
     }
     assert.match(
       readFileSync(join(fixture, 'Cargo.toml'), 'utf8'),

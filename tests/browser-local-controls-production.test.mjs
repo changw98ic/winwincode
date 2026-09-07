@@ -68,6 +68,10 @@ async function listen(server, port = 0) {
 
 function staticClientServer(cert, controlConfiguration) {
   const moduleRoot = resolve(root, 'apps/client/dist/module')
+  const browserCoreRoot = resolve(root, 'packages/browser-core/dist')
+  const browserUiRoot = resolve(root, 'packages/browser-ui/dist')
+  const contractsRoot = resolve(root, 'packages/contracts/dist')
+  const controlPlaneClientRoot = resolve(root, 'packages/control-plane-client/dist')
   const fixture = resolve(root, 'tests/fixtures/browser-local-controls-client.mjs')
   const productionIndex = readFileSync(resolve(root, 'apps/client/public/index.html'), 'utf8')
     .replace(/\s*<link rel="stylesheet"[^>]*>/u, '')
@@ -96,19 +100,45 @@ function staticClientServer(cert, controlConfiguration) {
         response.end(JSON.stringify(controlConfiguration()))
         return
       }
-      const loginBootstrap = resolve(root, 'tests/fixtures/login-bootstrap.mjs')
-      const source = path === '/fixture/browser-local-controls-client.mjs'
+      const fixtureRequest = path === '/fixture/browser-local-controls-client.mjs'
+      const moduleRequest = path.startsWith('/module/')
+      const browserCoreRequest = path.startsWith('/browser-core/')
+      const browserUiRequest = path.startsWith('/browser-ui/')
+      const contractsRequest = path.startsWith('/contracts/')
+      const controlPlaneClientRequest = path.startsWith('/control-plane-client/')
+      const source = fixtureRequest
         ? fixture
-        : path === '/fixture/login-bootstrap.mjs'
-          ? loginBootstrap
+        : browserUiRequest
+          ? normalize(join(browserUiRoot, path.replace(/^\/browser-ui\//u, '')))
+          : browserCoreRequest
+            ? normalize(join(browserCoreRoot, path.replace(/^\/browser-core\//u, '')))
+            : contractsRequest
+              ? normalize(join(contractsRoot, path.replace(/^\/contracts\//u, '')))
+              : controlPlaneClientRequest
+                ? normalize(join(
+                    controlPlaneClientRoot,
+                    path.replace(/^\/control-plane-client\//u, ''),
+                  ))
           : normalize(join(moduleRoot, path.replace(/^\/module\//u, '')))
       if (
-        (path.startsWith('/module/') && source.startsWith(`${moduleRoot}/`))
-        || path === '/fixture/browser-local-controls-client.mjs'
-        || path === '/fixture/login-bootstrap.mjs'
+        (moduleRequest && source.startsWith(`${moduleRoot}/`))
+        || (browserCoreRequest && source.startsWith(`${browserCoreRoot}/`))
+        || (browserUiRequest && source.startsWith(`${browserUiRoot}/`))
+        || (contractsRequest && source.startsWith(`${contractsRoot}/`))
+        || (controlPlaneClientRequest && source.startsWith(`${controlPlaneClientRoot}/`))
+        || fixtureRequest
       ) {
         response.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8' })
-        response.end(readFileSync(source))
+        const bytes = readFileSync(source)
+        const moduleSource = bytes.toString('utf8')
+          .replace(/from ['"]@winwincode\/browser-ui['"]/gu, "from '/browser-ui/index.js'")
+          .replace(/from ['"]@winwincode\/browser-core\/query-cache['"]/gu, "from '/browser-core/query-cache.js'")
+          .replace(/from ['"]@winwincode\/browser-core\/scope-context['"]/gu, "from '/browser-core/scope-context.js'")
+          .replace(/from ['"]@winwincode\/control-plane-client['"]/gu, "from '/control-plane-client/index.js'")
+          .replace(/from ['"]@winwincode\/contracts\/browser-control['"]/gu, "from '/contracts/browser-control.js'")
+        response.end(
+          moduleRequest || browserCoreRequest || controlPlaneClientRequest ? moduleSource : bytes,
+        )
         return
       }
       response.writeHead(404).end()
@@ -331,6 +361,21 @@ test('real browser preserves local settings, decisions, resume cursors, and revo
     errors,
   }))
   await waitForServer(controlUrl, standalone, errors)
+  const initializationProbe = spawnSync(
+    'curl',
+    [
+      '-ksS',
+      '--noproxy', '*',
+      '-H', `Origin: ${clientOrigin}`,
+      `${controlUrl}/api/v1/server/initialization`,
+    ],
+    { encoding: 'utf8' },
+  )
+  assert.equal(initializationProbe.status, 0, initializationProbe.stderr)
+  assert.deepEqual(JSON.parse(initializationProbe.stdout), {
+    initialized: false,
+    schemaVersion: 'winwincode/v1',
+  })
 
   const debugPort = await freePort()
   chrome = spawn(chromePath, [
@@ -356,7 +401,8 @@ test('real browser preserves local settings, decisions, resume cursors, and revo
     sessionId,
     `globalThis.runLocalControlsFixture(${JSON.stringify(proof)}, ${JSON.stringify(firstLocator)}, ${JSON.stringify(rotatedLocator)})`,
   )
-  assert.equal(first.submittedPassword, '')
+  assert.equal(first.submittedProof, '')
+  assert.equal(first.clearedProof, '')
   assert.equal(first.clearedPassword, '')
   assert.equal(first.browserSecretFound, false)
   assert.deepEqual(first.credentialRevisions, [1, 2, 3])

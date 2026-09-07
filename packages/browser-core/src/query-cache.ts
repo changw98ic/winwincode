@@ -1,18 +1,26 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import {
-  ControlPlaneClientError,
-  type ControlPlaneClient,
-  type ControlPlaneRequestOptions,
-  type ControlPlaneSubscription,
-} from '../control-plane-client.js'
 import type {
   Actor,
+  BrowserControlClientErrorKind,
+  BrowserControlRequestOptions as ControlPlaneRequestOptions,
+  BrowserControlSubscribeOptions,
+  BrowserControlSubscription as ControlPlaneSubscription,
+  ControlPlaneAuthSession,
+  ControlPlaneCommandRequest,
+  ControlPlaneCommandResponse,
+  ControlPlaneWebSocketAuthorizationRevokedFrame,
   ControlPlaneWebSocketEventFrame,
-  QueryRequest,
-  QueryResultResponse,
+  ControlPlaneWebSocketResetRequiredFrame,
+  ControlPlaneWebSocketSubscribeStartAt,
+  ControlPlaneWebSocketSubscription,
+  ControlPlaneWebSocketSubscriptionId,
+  EventReadCursor,
+  QueryCacheClientPort,
   Scope,
-} from '../generated/contracts.js'
+  ControlPlaneQueryRequest as QueryRequest,
+  ControlPlaneQueryResponse as QueryResultResponse,
+} from '@winwincode/contracts/browser-control'
 
 export type QueryInvalidationReason =
   | 'authorization-epoch'
@@ -31,43 +39,63 @@ export interface QueryInvalidation {
   readonly discard?: boolean
 }
 
-export interface QueryCacheSnapshot {
+export interface QueryCacheSnapshot<
+  ProductQueryResponse extends QueryResultResponse = QueryResultResponse,
+> {
   readonly key: string
-  readonly response: QueryResultResponse
+  readonly response: ProductQueryResponse
   readonly status: 'fresh' | 'stale'
 }
 
-export interface QueryCache {
-  readonly client: ControlPlaneClient
-  peek(query: QueryRequest): QueryCacheSnapshot | null
+export interface QueryCache<
+  Client extends object,
+  ProductQueryRequest extends QueryRequest = QueryRequest,
+  ProductQueryResponse extends QueryResultResponse = QueryResultResponse,
+> {
+  readonly client: Client
+  peek(query: ProductQueryRequest): QueryCacheSnapshot<ProductQueryResponse> | null
   invalidate(invalidation: QueryInvalidation): void
-  revalidate(query: QueryRequest): void
+  revalidate(query: ProductQueryRequest): void
   clear(reason?: QueryInvalidationReason): void
   close(): void
 }
 
 /** Cache-only lifecycle seam shared by feature view-models; it owns no business state. */
-export interface QueryCacheLifecycle {
+export interface QueryCacheLifecycle<
+  ProductQueryRequest extends QueryRequest = QueryRequest,
+> {
   refresh(queries?: readonly QueryRequest['query'][]): void
-  revalidate(...queries: readonly QueryRequest[]): void
+  revalidate(...queries: readonly ProductQueryRequest[]): void
   close(): void
 }
 
-const QUERY_CACHES = new WeakMap<ControlPlaneClient, QueryCache>()
+interface QueryCacheLifecycleTarget {
+  invalidate(invalidation: QueryInvalidation): void
+  revalidate(query: QueryRequest): void
+}
 
-export function createQueryCacheLifecycle(options: {
-  readonly client: ControlPlaneClient
+const QUERY_CACHES = new WeakMap<object, QueryCacheLifecycleTarget>()
+
+interface QueryCacheLifecycleClientPort {
+  query(...arguments_: never[]): Promise<QueryResultResponse>
+}
+
+type LifecycleQueryRequest<Client extends QueryCacheLifecycleClientPort> =
+  Parameters<Client['query']>[0] & QueryRequest
+
+export function createQueryCacheLifecycle<Client extends QueryCacheLifecycleClientPort>(options: {
+  readonly client: Client
   readonly actor: Actor
   readonly scope: Scope
-}): QueryCacheLifecycle {
+}): QueryCacheLifecycle<LifecycleQueryRequest<Client>> {
   const actor = actorIdentity(options.actor)
   const scope = scopeIdentity(options.scope)
 
-  function cache(): QueryCache | undefined {
+  function cache(): QueryCacheLifecycleTarget | undefined {
     return QUERY_CACHES.get(options.client)
   }
 
-  return Object.freeze<QueryCacheLifecycle>({
+  return Object.freeze<QueryCacheLifecycle<LifecycleQueryRequest<Client>>>({
     refresh(queries?: readonly QueryRequest['query'][]) {
       cache()?.invalidate({
         actor: options.actor,
@@ -99,36 +127,68 @@ export function createQueryCacheLifecycle(options: {
   })
 }
 
-interface CachedSnapshot {
-  readonly response: QueryResultResponse
+interface CachedSnapshot<ProductQueryResponse extends QueryResultResponse> {
+  readonly response: ProductQueryResponse
   readonly version: number
 }
 
-interface QueryFlight {
+interface QueryFlight<
+  ProductQueryRequest extends QueryRequest,
+  ProductQueryResponse extends QueryResultResponse,
+> {
   readonly controller: AbortController
   consumers: number
   invalidated: boolean
-  nextRequest: QueryRequest | null
-  promise: Promise<QueryResultResponse>
+  nextRequest: ProductQueryRequest | null
+  promise: Promise<ProductQueryResponse>
   settled: boolean
 }
 
-interface QueryEntry {
+interface QueryEntry<
+  ProductQueryRequest extends QueryRequest,
+  ProductQueryResponse extends QueryResultResponse,
+> {
   readonly actor: string
   readonly key: string
   readonly query: QueryRequest['query']
   readonly scope: string
-  flight: QueryFlight | null
-  snapshot: CachedSnapshot | null
+  flight: QueryFlight<ProductQueryRequest, ProductQueryResponse> | null
+  snapshot: CachedSnapshot<ProductQueryResponse> | null
   version: number
+}
+
+interface QueryCacheClientErrorFields {
+  readonly kind: BrowserControlClientErrorKind
+  readonly code: string
+  readonly message: string
+  readonly requestId: QueryRequest['requestId'] | null
+  readonly retryable: boolean
+}
+
+/** Error raised by cache lifecycle and correlation checks before a transport is involved. */
+export class QueryCacheClientError extends Error {
+  readonly kind: BrowserControlClientErrorKind
+  readonly code: string
+  readonly requestId: QueryRequest['requestId'] | null
+  readonly retryable: boolean
+  readonly details = Object.freeze({})
+
+  constructor(fields: QueryCacheClientErrorFields) {
+    super(fields.message)
+    this.name = 'QueryCacheClientError'
+    this.kind = fields.kind
+    this.code = fields.code
+    this.requestId = fields.requestId
+    this.retryable = fields.retryable
+  }
 }
 
 function clientFailure(
   code: string,
   message: string,
   requestId: QueryRequest['requestId'] | null = null,
-): ControlPlaneClientError {
-  return new ControlPlaneClientError({
+): QueryCacheClientError {
+  return new QueryCacheClientError({
     kind: 'protocol',
     code,
     message,
@@ -137,8 +197,8 @@ function clientFailure(
   })
 }
 
-function cancelled(requestId: QueryRequest['requestId']): ControlPlaneClientError {
-  return new ControlPlaneClientError({
+function cancelled(requestId: QueryRequest['requestId']): QueryCacheClientError {
+  return new QueryCacheClientError({
     kind: 'cancelled',
     code: 'REQUEST_CANCELLED',
     message: 'The cached query consumer was cancelled.',
@@ -192,18 +252,18 @@ export function queryCacheKey(query: QueryRequest): string {
   })
 }
 
-function correlate(
-  response: QueryResultResponse,
+function correlate<ProductQueryResponse extends QueryResultResponse>(
+  response: ProductQueryResponse,
   query: QueryRequest,
-): QueryResultResponse {
+): ProductQueryResponse {
   if (response.requestId === query.requestId) return response
-  return Object.freeze({ ...response, requestId: query.requestId }) as QueryResultResponse
+  return Object.freeze({ ...response, requestId: query.requestId })
 }
 
-function requireCorrelation(
-  response: QueryResultResponse,
+function requireCorrelation<ProductQueryResponse extends QueryResultResponse>(
+  response: ProductQueryResponse,
   query: QueryRequest,
-): QueryResultResponse {
+): ProductQueryResponse {
   if (
     response.requestId !== query.requestId
     || response.query !== query.query
@@ -224,16 +284,75 @@ function reloadQueries(
   return value as readonly QueryRequest['query'][]
 }
 
-export function createQueryCache(options: { readonly client: ControlPlaneClient }): QueryCache {
-  const entries = new Map<string, QueryEntry>()
+type QueryCacheCompatibleClient<Client extends object> = Client extends QueryCacheClientPort<
+  infer ProductSession,
+  infer ProductCommandRequest,
+  infer ProductCommandResponse,
+  infer ProductQueryRequest,
+  infer ProductQueryResponse,
+  infer ProductEventFrame,
+  infer ProductResetFrame,
+  infer ProductAuthorizationRevokedFrame,
+  infer ProductSubscription,
+  infer ProductSubscriptionId,
+  infer ProductStartAt,
+  infer ProductEventReadCursor
+> ? readonly [ProductQueryRequest, ProductQueryResponse] : never
+
+type QueryCacheQueryRequest<Client extends object> = QueryCacheCompatibleClient<Client>[0]
+type QueryCacheQueryResponse<Client extends object> = QueryCacheCompatibleClient<Client>[1]
+
+export function createQueryCache<Client extends object>(
+  options: { readonly client: Client } & (
+    QueryCacheCompatibleClient<Client> extends never ? never : unknown
+  ),
+): QueryCache<
+  Client,
+  QueryCacheQueryRequest<Client>,
+  QueryCacheQueryResponse<Client>
+>
+export function createQueryCache<
+  ProductSession extends ControlPlaneAuthSession,
+  ProductCommandRequest extends ControlPlaneCommandRequest,
+  ProductCommandResponse extends ControlPlaneCommandResponse,
+  ProductQueryRequest extends QueryRequest,
+  ProductQueryResponse extends QueryResultResponse,
+  ProductEventFrame extends ControlPlaneWebSocketEventFrame,
+  ProductResetFrame extends ControlPlaneWebSocketResetRequiredFrame,
+  ProductAuthorizationRevokedFrame extends ControlPlaneWebSocketAuthorizationRevokedFrame,
+  ProductSubscription extends ControlPlaneWebSocketSubscription,
+  ProductSubscriptionId extends ControlPlaneWebSocketSubscriptionId,
+  ProductStartAt extends ControlPlaneWebSocketSubscribeStartAt,
+  ProductEventReadCursor extends EventReadCursor,
+  Client extends QueryCacheClientPort<
+    ProductSession,
+    ProductCommandRequest,
+    ProductCommandResponse,
+    ProductQueryRequest,
+    ProductQueryResponse,
+    ProductEventFrame,
+    ProductResetFrame,
+    ProductAuthorizationRevokedFrame,
+    ProductSubscription,
+    ProductSubscriptionId,
+    ProductStartAt,
+    ProductEventReadCursor
+  >,
+>(
+  options: { readonly client: Client },
+): QueryCache<Client, ProductQueryRequest, ProductQueryResponse> {
+  const sourceClient = options.client
+  const entries = new Map<string, QueryEntry<ProductQueryRequest, ProductQueryResponse>>()
   const subscriptions = new Set<ControlPlaneSubscription>()
   let closed = false
 
-  function entryFor(query: QueryRequest): QueryEntry {
+  function entryFor(
+    query: ProductQueryRequest,
+  ): QueryEntry<ProductQueryRequest, ProductQueryResponse> {
     const key = queryCacheKey(query)
     const existing = entries.get(key)
     if (existing !== undefined) return existing
-    const created: QueryEntry = {
+    const created: QueryEntry<ProductQueryRequest, ProductQueryResponse> = {
       actor: actorIdentity(query.actor),
       key,
       query: query.query,
@@ -246,7 +365,10 @@ export function createQueryCache(options: { readonly client: ControlPlaneClient 
     return created
   }
 
-  function matches(entry: QueryEntry, invalidation: QueryInvalidation): boolean {
+  function matches(
+    entry: QueryEntry<ProductQueryRequest, ProductQueryResponse>,
+    invalidation: QueryInvalidation,
+  ): boolean {
     return (invalidation.actor === undefined
       || entry.actor === actorIdentity(invalidation.actor))
       && (invalidation.scope === undefined
@@ -286,11 +408,15 @@ export function createQueryCache(options: { readonly client: ControlPlaneClient 
     entries.clear()
   }
 
-  async function executeFlight(entry: QueryEntry, flight: QueryFlight, initial: QueryRequest) {
+  async function executeFlight(
+    entry: QueryEntry<ProductQueryRequest, ProductQueryResponse>,
+    flight: QueryFlight<ProductQueryRequest, ProductQueryResponse>,
+    initial: ProductQueryRequest,
+  ) {
     let request = initial
     for (;;) {
       const response = requireCorrelation(
-        await options.client.query(request, { signal: flight.controller.signal }),
+        await sourceClient.query(request, { signal: flight.controller.signal }),
         request,
       )
       if (flight.controller.signal.aborted) throw cancelled(request.requestId)
@@ -306,14 +432,17 @@ export function createQueryCache(options: { readonly client: ControlPlaneClient 
     }
   }
 
-  function startFlight(entry: QueryEntry, request: QueryRequest): QueryFlight {
+  function startFlight(
+    entry: QueryEntry<ProductQueryRequest, ProductQueryResponse>,
+    request: ProductQueryRequest,
+  ): QueryFlight<ProductQueryRequest, ProductQueryResponse> {
     const controller = new AbortController()
-    const flight: QueryFlight = {
+    const flight: QueryFlight<ProductQueryRequest, ProductQueryResponse> = {
       controller,
       consumers: 0,
       invalidated: false,
       nextRequest: null,
-      promise: Promise.resolve(null as unknown as QueryResultResponse),
+      promise: new Promise<ProductQueryResponse>(() => {}),
       settled: false,
     }
     entry.flight = flight
@@ -330,11 +459,11 @@ export function createQueryCache(options: { readonly client: ControlPlaneClient 
   }
 
   function consume(
-    entry: QueryEntry,
-    flight: QueryFlight,
-    query: QueryRequest,
+    entry: QueryEntry<ProductQueryRequest, ProductQueryResponse>,
+    flight: QueryFlight<ProductQueryRequest, ProductQueryResponse>,
+    query: ProductQueryRequest,
     requestOptions?: ControlPlaneRequestOptions,
-  ): Promise<QueryResultResponse> {
+  ): Promise<ProductQueryResponse> {
     const signal = requestOptions?.signal
     if (signal?.aborted === true) return Promise.reject(cancelled(query.requestId))
     flight.consumers += 1
@@ -371,9 +500,9 @@ export function createQueryCache(options: { readonly client: ControlPlaneClient 
   }
 
   function cachedQuery(
-    query: QueryRequest,
+    query: ProductQueryRequest,
     requestOptions?: ControlPlaneRequestOptions,
-  ): Promise<QueryResultResponse> {
+  ): Promise<ProductQueryResponse> {
     if (closed) return Promise.reject(clientFailure(
       'QUERY_CACHE_CLOSED',
       'The query cache is closed.',
@@ -401,35 +530,48 @@ export function createQueryCache(options: { readonly client: ControlPlaneClient 
     for (const subscription of [...subscriptions]) subscription.close()
     clear()
     QUERY_CACHES.delete(client)
-    options.client.close()
+    sourceClient.close()
   }
 
-  const client: ControlPlaneClient = {
-    serverUrl: options.client.serverUrl,
+  const overrides: QueryCacheClientPort<
+    ProductSession,
+    ProductCommandRequest,
+    ProductCommandResponse,
+    ProductQueryRequest,
+    ProductQueryResponse,
+    ProductEventFrame,
+    ProductResetFrame,
+    ProductAuthorizationRevokedFrame,
+    ProductSubscription,
+    ProductSubscriptionId,
+    ProductStartAt,
+    ProductEventReadCursor
+  > = {
+    serverUrl: sourceClient.serverUrl,
     async restore(requestOptions) {
-      const session = await options.client.restore(requestOptions)
+      const session = await sourceClient.restore(requestOptions)
       clear('authorization-epoch')
       return session
     },
-    async login(bootstrapProof, credentials, requestOptions) {
-      const session = await options.client.login(bootstrapProof, credentials, requestOptions)
+    async initializeOwner(initialization, requestOptions) {
+      const session = await sourceClient.initializeOwner(initialization, requestOptions)
       clear('authorization-epoch')
       return session
     },
-    async loginWithPassword(credentials, requestOptions) {
-      const session = await options.client.loginWithPassword(credentials, requestOptions)
+    async login(credentials, requestOptions) {
+      const session = await sourceClient.login(credentials, requestOptions)
       clear('authorization-epoch')
       return session
     },
     async initializationStatus(requestOptions) {
-      return options.client.initializationStatus(requestOptions)
+      return sourceClient.initializationStatus(requestOptions)
     },
     async logout(requestOptions) {
       clear('authorization-epoch')
-      await options.client.logout(requestOptions)
+      await sourceClient.logout(requestOptions)
     },
     async command(command, requestOptions) {
-      const response = await options.client.command(command, requestOptions)
+      const response = await sourceClient.command(command, requestOptions)
       invalidate({ actor: command.actor, scope: command.scope, reason: 'command' })
       return response
     },
@@ -450,7 +592,7 @@ export function createQueryCache(options: { readonly client: ControlPlaneClient 
           invalidate({ scope, reason: 'event', ...(queries === undefined ? {} : { queries }) })
         }
       }
-      raw = options.client.subscribe({
+      raw = sourceClient.subscribe({
         ...subscriptionOptions,
         onEventQueued(frame) {
           queuedFrames.add(frame)
@@ -503,7 +645,21 @@ export function createQueryCache(options: { readonly client: ControlPlaneClient 
     close,
   }
 
-  const cache: QueryCache = {
+  const client = new Proxy(sourceClient, {
+    get(target, property, receiver) {
+      if (Reflect.has(overrides, property)) return Reflect.get(overrides, property, overrides)
+      const value: unknown = Reflect.get(target, property, receiver)
+      return typeof value === 'function' ? value.bind(target) : value
+    },
+    set(target, property, value, receiver) {
+      if (Reflect.has(overrides, property)) {
+        return Reflect.set(overrides, property, value, overrides)
+      }
+      return Reflect.set(target, property, value, receiver)
+    },
+  })
+
+  const cache: QueryCache<Client, ProductQueryRequest, ProductQueryResponse> = {
     client,
     peek(query: QueryRequest) {
       const entry = entries.get(queryCacheKey(query))

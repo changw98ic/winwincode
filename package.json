@@ -46,6 +46,9 @@
     "ajv": "8.20.0",
     "ajv-formats": "3.0.1",
     "esbuild": "0.28.2",
-    "typescript": "6.0.3"
+    "typescript": "6.0.3",
+    "@winwincode/browser-ui": "0.1.0-alpha.1",
+    "@winwincode/browser-core": "0.1.0-alpha.1",
+    "@winwincode/control-plane-client": "0.1.0-alpha.1"
   }
 }

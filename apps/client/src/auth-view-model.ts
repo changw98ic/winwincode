@@ -4,7 +4,7 @@ import {
   ControlPlaneClientError,
   type ControlPlaneClient,
   type ControlPlaneSession,
-} from './control-plane-client.js'
+} from './community-control-plane-client.js'
 
 export type AuthSessionStatus =
   | 'signed-out'

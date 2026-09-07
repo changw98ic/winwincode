@@ -1,18 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { mountWinWinCodeClient } from '/module/application.js'
-
-import {
-  loginErrorNode,
-  submitLoginInitialization,
-} from './login-bootstrap.mjs'
-import { ControlPlaneClientError } from '/module/control-plane-client.js'
+import { ControlPlaneClientError } from '/module/community-control-plane-client.js'
 
 // Deterministic first-run workspace.  The injected Control Plane facade starts
 // completely empty - no browser session, no default model route, no Chat session
 // and no Delivery - so the whole first-use vertical runs without history and
-// without a real model key.  BOOTSTRAP_PROOF is the only credential the run ever
-// handles and SECRET_MARKER is planted inside one served credential reference,
+// without a real model key. The owner credentials exist only during the
+// initialization submission, and SECRET_MARKER is planted inside one served credential reference,
 // which lets the suite prove that neither value reaches the DOM, the URL, browser
 // storage, the console, or a diagnostic artifact.
 //
@@ -26,6 +21,8 @@ const updated = '2026-09-02T08:00:00.000Z'
 const BASELINE_REVISION = '0123456789abcdef0123456789abcdef01234567'
 const BOOTSTRAP_PROOF = 'first-run-browser-bootstrap-proof'
 const REJECTED_PROOF = 'rejected-first-run-bootstrap-proof'
+const OWNER_USERNAME = 'first-run-owner'
+const OWNER_PASSWORD = 'first-run-owner-password'
 const SECRET_MARKER = 'vault-locator-secret-marker'
 const REQUIREMENT = 'Deliver the deterministic first-run vertical.'
 const DELIVERY_TITLE = 'First-run Delivery'
@@ -88,6 +85,7 @@ function loadState() {
   if (stored !== null && typeof stored === 'object') return stored
   return {
     authenticated: false,
+    initialized: false,
     availabilityReads: 0,
     settings: { revision: 1, workerConcurrencyLimit: 2, defaultModelRoute: null },
     sessions: [],
@@ -103,7 +101,7 @@ const calls = {
   queries: [],
   subscriptions: [],
   console: [],
-  submittedProofs: [],
+  ownerInitializations: 0,
 }
 
 function save() {
@@ -381,12 +379,29 @@ const controlPlane = {
     if (!state.authenticated) throw accessFailure(null, 'authentication', 'AUTH_SESSION_MISSING', false)
     return structuredClone(browserSession())
   },
-  async login(bootstrapProof) {
-    calls.submittedProofs.push(bootstrapProof)
-    if (bootstrapProof !== BOOTSTRAP_PROOF) {
-      // Mirror the real Server wire code for a rejected bootstrap proof
-      // (AUTH-100.3: wrong proof maps to 401 AUTHENTICATION_REQUIRED).
-      throw accessFailure(null, 'authentication', 'AUTHENTICATION_REQUIRED', false)
+  async initializationStatus() {
+    return { initialized: state.initialized }
+  },
+  async initializeOwner(initialization) {
+    if (
+      initialization.bootstrapProof !== BOOTSTRAP_PROOF
+      || initialization.username !== OWNER_USERNAME
+      || initialization.password !== OWNER_PASSWORD
+    ) {
+      throw accessFailure(null, 'authentication', 'BOOTSTRAP_PROOF_REJECTED', false)
+    }
+    calls.ownerInitializations += 1
+    state.initialized = true
+    state.authenticated = true
+    save()
+    return structuredClone(browserSession())
+  },
+  async login(credentials) {
+    if (
+      credentials.username !== OWNER_USERNAME
+      || credentials.password !== OWNER_PASSWORD
+    ) {
+      throw accessFailure(null, 'authentication', 'INVALID_CREDENTIALS', false)
     }
     state.authenticated = true
     save()
@@ -695,7 +710,11 @@ function secretScan() {
       storage.push(`${key}=${store.getItem(key) ?? ''}`)
     }
   }
-  const leaked = value => value.includes(BOOTSTRAP_PROOF) || value.includes(SECRET_MARKER)
+  const leaked = value => (
+    value.includes(BOOTSTRAP_PROOF)
+    || value.includes(OWNER_PASSWORD)
+    || value.includes(SECRET_MARKER)
+  )
   return {
     dom: leaked(document.body.textContent),
     url: leaked(location.href),
@@ -960,37 +979,41 @@ globalThis.firstRunSignIn = async () => {
     'missing browser session',
   )
   await waitFor(
-    () => document.querySelector('.wwc-login')?.hidden === false,
-    'first-run sign-in form',
+    () => document.querySelector('.wwc-login-initialization')?.hidden === false,
+    'first-run owner initialization form',
   )
   const unsigned = {
-    status: document.querySelector('.wwc-auth-session-status')?.textContent ?? '',
+    status: document.querySelector('.wwc-login-heading')?.textContent ?? '',
     slot: document.querySelector('.wwc-surface-slot')?.textContent ?? '',
     chatMounted: document.querySelector('.wwc-chat') !== null,
     scopeSelectorMounted: document.querySelector('#wwc-scope-organization') !== null,
     checklistHidden: document.querySelector('.wwc-readiness-root')?.hidden ?? null,
     secrets: secretScan(),
   }
-  submitLoginInitialization(document, REJECTED_PROOF)
+  const username = document.querySelector('.wwc-login-initialization-username')
+  const password = document.querySelector('.wwc-login-initialization-password')
+  const proof = document.querySelector('.wwc-login-initialization-proof')
+  username.value = OWNER_USERNAME
+  password.value = OWNER_PASSWORD
+  proof.value = REJECTED_PROOF
+  document.querySelector('.wwc-login-initialization-form').requestSubmit()
   await waitFor(
-    () => loginErrorNode(document)?.hidden === false
-      && loginErrorNode(document).textContent.includes('The bootstrap proof was rejected.'),
-    `rejected bootstrap proof; err=${JSON.stringify({
-      hidden: loginErrorNode(document)?.hidden ?? null,
-      text: loginErrorNode(document)?.textContent ?? null,
-    })}; proof=${JSON.stringify(document.querySelector('.wwc-login-initialization-proof')?.value)}; user=${JSON.stringify(document.querySelector('.wwc-login-initialization-username')?.value)}; state=${JSON.stringify(application.authSession.state.status)}`,
+    () => document.querySelector('.wwc-login-error')?.hidden === false,
+    'rejected bootstrap proof',
   )
   const rejected = {
-    status: document.querySelector('.wwc-auth-session-status')?.textContent ?? '',
-    error: loginErrorNode(document).textContent,
+    status: document.querySelector('.wwc-login-heading')?.textContent ?? '',
+    error: document.querySelector('.wwc-login-error').textContent,
     diagnosticLeak: document.body.textContent.includes('private first-run diagnostics'),
     secrets: secretScan(),
   }
-  submitLoginInitialization(document, BOOTSTRAP_PROOF)
+  password.value = OWNER_PASSWORD
+  proof.value = BOOTSTRAP_PROOF
+  document.querySelector('.wwc-login-initialization-form').requestSubmit()
   await waitFor(() => signedIn(), 'first sign-in')
   await waitFor(
     () => document.querySelector('.wwc-login')?.hidden === true,
-    'hidden sign-in form',
+    'hidden login page',
   )
   return {
     unsigned,
@@ -1045,7 +1068,8 @@ globalThis.firstRunObservation = () => ({
   console: calls.console,
   secrets: {
     bootstrapProof: BOOTSTRAP_PROOF,
+    ownerPassword: OWNER_PASSWORD,
     secretMarker: SECRET_MARKER,
-    submittedProofs: calls.submittedProofs,
+    ownerInitializations: calls.ownerInitializations,
   },
 })

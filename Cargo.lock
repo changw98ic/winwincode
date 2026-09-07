@@ -12814,7 +12814,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "winwincode-control-plane",
- "winwincode-observability",
+ "winwincode-observability-core",
  "winwincode-worker",
 ]
 
@@ -12835,13 +12835,22 @@ dependencies = [
 ]
 
 [[package]]
-name = "winwincode-observability"
+name = "winwincode-observability-core"
 version = "0.1.0-alpha.1"
 dependencies = [
- "rusqlite",
  "serde",
  "serde_json",
  "sha2 0.10.9",
+]
+
+[[package]]
+name = "winwincode-observability-sqlite"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "rusqlite",
+ "serde_json",
+ "sha2 0.10.9",
+ "winwincode-observability-core",
 ]
 
 [[package]]

@@ -12,7 +12,7 @@ publish = false
 serde.workspace = true
 serde_json.workspace = true
 winwincode-control-plane = { path = "../winwincode-control-plane" }
-winwincode-observability = { path = "../winwincode-observability" }
+winwincode-observability-core = { path = "../winwincode-observability-core" }
 winwincode-worker = { path = "../winwincode-worker" }
 
 [dev-dependencies]

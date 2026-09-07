@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import type { ControlPlaneLoginFailure } from './control-plane-client.js'
+import type { ControlPlaneLoginFailure } from './community-control-plane-client.js'
 import type {
   LoginSubmissionSource,
   LoginViewModel,
@@ -80,9 +80,17 @@ export function mountLoginPage(options: LoginPageOptions): LoginPage {
   const initializationDetail = element(document, 'p', 'wwc-login-initialization-detail')
   const initializationForm = element(document, 'form', 'wwc-login-initialization-form')
   const initializationUsernameLabel = element(document, 'label', 'wwc-login-label')
-  const initializationUsername = element(document, 'input', 'wwc-login-control wwc-login-initialization-username')
+  const initializationUsername = element(
+    document,
+    'input',
+    'wwc-login-control wwc-login-initialization-username',
+  )
   const initializationPasswordLabel = element(document, 'label', 'wwc-login-label')
-  const initializationPassword = element(document, 'input', 'wwc-login-control wwc-login-initialization-password')
+  const initializationPassword = element(
+    document,
+    'input',
+    'wwc-login-control wwc-login-initialization-password',
+  )
   const proofLabel = element(document, 'label', 'wwc-login-label')
   const proof = element(document, 'input', 'wwc-login-control wwc-login-initialization-proof')
   const initializationSubmit = element(document, 'button', 'wwc-login-initialization-submit')
@@ -156,12 +164,12 @@ export function mountLoginPage(options: LoginPageOptions): LoginPage {
   initializationSubmit.type = 'submit'
   initializationSubmit.textContent = 'Initialize owner account'
   initializationForm.append(
-    proofLabel,
-    proof,
     initializationUsernameLabel,
     initializationUsername,
     initializationPasswordLabel,
     initializationPassword,
+    proofLabel,
+    proof,
     initializationSubmit,
   )
   initialization.append(initializationHeading, initializationDetail, initializationForm)
@@ -234,12 +242,12 @@ export function mountLoginPage(options: LoginPageOptions): LoginPage {
     const submittedUsername = initializationUsername.value
     const submittedPassword = initializationPassword.value
     proof.value = ''
-    // Secret-safe submission: the password leaves the DOM before the await.
     initializationPassword.value = ''
-    void options.model.initialize(
-      submittedProof,
-      { username: submittedUsername, password: submittedPassword },
-    )
+    void options.model.initialize({
+      bootstrapProof: submittedProof,
+      username: submittedUsername,
+      password: submittedPassword,
+    })
   }
   const onEdit = () => { clearErrorDraft() }
   form.addEventListener('submit', onSignIn)

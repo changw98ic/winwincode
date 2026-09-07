@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import type { ControlPlaneUserSummary } from './control-plane-client.js'
+import type { ControlPlaneUserSummary } from './community-control-plane-client.js'
 import {
   type UserResetFailure,
   type UserStateAction,

@@ -32,7 +32,7 @@ const cache = resolve(root, '.cache/client-users-tests')
 async function cachedModule(name) {
   return import(pathToFileURL(resolve(cache, name)).href)
 }
-const facade = await cachedModule('control-plane-client.js')
+const facade = await cachedModule('community-control-plane-client.js')
 
 const {
   ControlPlaneClientError,
@@ -83,8 +83,8 @@ function baseClient(overrides = {}) {
   return {
     serverUrl: 'https://control.example',
     async restore() { throw new Error('not used') },
+    async initializeOwner() { throw new Error('not used') },
     async login() { throw new Error('not used') },
-    async loginWithPassword() { throw new Error('not used') },
     async initializationStatus() { throw new Error('not used') },
     async logout() {},
     async command() { throw new Error('not used') },

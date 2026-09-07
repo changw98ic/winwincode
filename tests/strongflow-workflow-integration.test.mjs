@@ -27,7 +27,7 @@ assert.equal(
 )
 
 const cacheRoot = resolve(root, '.cache/strongflow-workflow-tests')
-const facade = await import(pathToFileURL(resolve(cacheRoot, 'control-plane-client.js')).href)
+const facade = await import(pathToFileURL(resolve(cacheRoot, 'community-control-plane-client.js')).href)
 const strongflow = await import(pathToFileURL(resolve(cacheRoot, 'strongflow-view-model.js')).href)
 const page = await import(pathToFileURL(resolve(cacheRoot, 'strongflow-page.js')).href)
 const { createControlPlaneClient } = facade

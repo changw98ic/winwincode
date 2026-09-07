@@ -17,7 +17,7 @@
 | `device-client/lib.rs` | `crates/winwincode-device-client/src/lib.rs` |
 | `device-client/daemon.rs` | `crates/winwincode-device-client/src/daemon.rs` |
 | `device-client/http.rs` | `crates/winwincode-device-client/src/http.rs` |
-| `control-plane-client.ts` | `apps/client/src/control-plane-client.ts` |
+| `@winwincode/control-plane-client` | `packages/control-plane-client/src/index.ts` |
 
 ## 1. 部署拓扑：公网 Server + 本地 Device Client
 
@@ -27,7 +27,7 @@
 
 Device Client 是本地常驻进程，没有任何入站监听：`crates/winwincode-device-client` 中不存在 `TcpListener`；它与 Server 的唯一通道是周期性向 `POST /internal/v1/client/exchange` 发起的出站 exchange（`device-client/lib.rs` `daemon` 模块文档；`device-client/http.rs` `HttpExchangeTransport`——"Minimal std HTTP/1.1 `POST` implementation"）。一次 exchange 是一个有界批次：上行帧 + 对下行流的确认游标，响应带回下行批次；断线按指数退避恢复（`device-client/daemon.rs` `DaemonConfig`：初始退避 1 秒、上限 30 秒；`device-client/http.rs`：单次操作 10 秒 socket 超时、32 MiB 响应上限）。
 
-浏览器（DSH chat 面，`apps/client` 静态包）独立托管，通过 `runtime-config.js` 的 `serverUrl` 指向公网 Server（`docs/releasing.md` 第 4 节第 3 条）；页面内所有请求走该 origin，事件流由 `/api/v1/events` 升级为 WebSocket，`https:` 映射为 `wss:`（`control-plane-client.ts` `parseControlPlaneServerUrl`）。
+浏览器（DSH chat 面，`apps/client` 静态包）独立托管，通过 `runtime-config.js` 的 `serverUrl` 指向公网 Server（`docs/releasing.md` 第 4 节第 3 条）；页面内所有请求走该 origin，事件流由 `/api/v1/events` 升级为 WebSocket，`https:` 映射为 `wss:`（`@winwincode/control-plane-client` `parseControlPlaneServerUrl`）。
 
 ```text
 浏览器（apps/client 静态包，任意静态托管）

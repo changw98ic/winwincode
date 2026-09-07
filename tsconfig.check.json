@@ -14,7 +14,12 @@
   },
   "include": [
     "apps/client/src/**/*.ts",
+    "packages/browser-ui/src/**/*.ts",
+    "packages/control-plane-client/src/**/*.ts",
+    "packages/browser-core/src/**/*.ts",
     "packages/contracts/src/**/*.ts",
-    "packages/strongflow/src/**/*.ts"
+    "packages/strongflow/src/**/*.ts",
+    "tests/fixtures/browser-control-type-gate.ts",
+    "tests/fixtures/browser-control-assignability-gate.ts"
   ]
 }

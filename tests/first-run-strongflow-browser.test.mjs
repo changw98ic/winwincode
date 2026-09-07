@@ -41,10 +41,11 @@ const STRONGFLOW_ROUTE = new RegExp(
 const SECRET_VALUES = Object.freeze([
   'first-run-browser-bootstrap-proof',
   'rejected-first-run-bootstrap-proof',
+  'first-run-owner-password',
   'vault-locator-secret-marker',
 ])
 const ASSERTIONS = Object.freeze([
-  'the first run signs in with one bootstrap proof that is never echoed anywhere',
+  'the first run initializes one Owner with credentials that are never echoed anywhere',
   'the first run chooses an authorized repository Scope through the Scope selector',
   'the first requirement submission fails once and the Chat retry entry recovers it',
   'the first run selects an available model route before it can create a Chat',
@@ -54,7 +55,7 @@ const ASSERTIONS = Object.freeze([
   'the StrongFlow deep link survives a full reload with the same Delivery subscription',
   'the first-run readiness checklist reaches 6 of 6 complete',
   'every key command carries a fresh requestId, an exact expectedRevision, and the selected Scope',
-  'the bootstrap proof and the planted vault locator stay out of DOM, URL, storage, console and artifacts',
+  'the owner credentials, bootstrap proof, and planted vault locator stay out of DOM, URL, storage, console and artifacts',
 ])
 
 function commandCalls(observation) {
@@ -117,7 +118,8 @@ test('first-run diagnostics keep identifiers and drop every other value', () => 
     secrets: {
       bootstrapProof: 'first-run-browser-bootstrap-proof',
       secretMarker: 'vault-locator-secret-marker',
-      submittedProofs: ['first-run-browser-bootstrap-proof'],
+      ownerPassword: 'first-run-owner-password',
+      ownerInitializations: 1,
     },
   }
   const artifact = buildFirstRunDiagnostic({
@@ -288,13 +290,13 @@ test('a real browser runs the first-use vertical from sign-in into StrongFlow', 
   // First contact: no browser session exists, so the shell offers the write-only
   // sign-in form and keeps every surface closed until the proof is accepted.
   const signIn = await gate('globalThis.firstRunSignIn()', 'sign-in')
-  assert.equal(signIn.unsigned.status, 'Sign in required')
+  assert.equal(signIn.unsigned.status, 'Sign in')
   assert.equal(signIn.unsigned.slot, 'Sign in to open this workspace.')
   assert.equal(signIn.unsigned.chatMounted, false)
   assert.equal(signIn.unsigned.scopeSelectorMounted, false)
   assert.equal(signIn.unsigned.checklistHidden, true)
   assert.deepEqual(Object.values(signIn.unsigned.secrets), [false, false, false, false])
-  assert.equal(signIn.rejected.status, 'Sign in required')
+  assert.equal(signIn.rejected.status, 'Sign in')
   assert.equal(signIn.rejected.error, 'The bootstrap proof was rejected.')
   assert.equal(signIn.rejected.diagnosticLeak, false)
   assert.deepEqual(Object.values(signIn.rejected.secrets), [false, false, false, false])

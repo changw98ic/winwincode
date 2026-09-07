@@ -4,9 +4,16 @@ import type {
   ConnectionSnapshot,
   GlobalConnectionStatus,
 } from '../core/connection-state.js'
-import { mountButton, type ButtonView } from './button.js'
-import { assertMounted, removeNode, type MountedView } from './mounted-view.js'
-import { mountStatusBadge, type StatusBadgeView, type StatusTone } from './status-badge.js'
+import {
+  assertMounted,
+  mountButton,
+  mountStatusBadge,
+  removeNode,
+  type ButtonView,
+  type MountedView,
+  type StatusBadgeView,
+  type StatusTone,
+} from '@winwincode/browser-ui'
 
 export interface ConnectionBarProps {
   readonly state: ConnectionSnapshot

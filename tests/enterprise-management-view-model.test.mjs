@@ -33,7 +33,7 @@ const module = await import(`${pathToFileURL(resolve(
 )).href}`)
 const { ControlPlaneClientError } = await import(`${pathToFileURL(resolve(
   root,
-  '.cache/enterprise-management-tests/control-plane-client.js',
+  '.cache/enterprise-management-tests/community-control-plane-client.js',
 )).href}`)
 const {
   ENTERPRISE_MANAGEMENT_AREAS,
@@ -421,7 +421,7 @@ test('source and transport invariants fail closed without raw browser networking
   assert.doesNotMatch(source, /\bfetch\s*\(/u)
   assert.doesNotMatch(source, /new\s+WebSocket/u)
   assert.doesNotMatch(source, /innerHTML|console\.|localStorage|sessionStorage/u)
-  assert.equal((source.match(/\.\/control-plane-client\.js/gu) ?? []).length, 1)
+  assert.equal((source.match(/\.\/community-control-plane-client\.js/gu) ?? []).length, 1)
   assert.match(source, /import type \{[\s\S]*QueryRequest,[\s\S]*\} from '\.\/generated\/contracts\.js'/u)
   assert.match(source, /import type \{[\s\S]*QueryResultResponse,[\s\S]*\} from '\.\/generated\/contracts\.js'/u)
   assert.match(source, /import type \{[\s\S]*CommandRequest,[\s\S]*\} from '\.\/generated\/contracts\.js'/u)

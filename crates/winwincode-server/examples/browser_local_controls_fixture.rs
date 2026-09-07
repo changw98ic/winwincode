@@ -5,7 +5,7 @@ use std::env;
 use std::error::Error;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::json;
@@ -39,8 +39,8 @@ use winwincode_execution_port::generated::ApprovalRequestMessage;
 use winwincode_server::{
     AuthSessionBootstrap, AuthSessionConfig, AuthenticatedPrincipal, DurableEventHub,
     DurableEventHubConfig, DurableEventPublisher, GeneratedContractDispatcher,
-    RequestAuthenticator, ServerConfig, ServerTls, SqliteAuthSessionManager,
-    StandaloneControlPlaneApplication, UserAccountService, start_server,
+    OwnerInitializationHook, RequestAuthenticator, ServerConfig, ServerTls,
+    SqliteAuthSessionManager, StandaloneControlPlaneApplication, UserAccountService, start_server,
 };
 use winwincode_session::SessionBindingIdentity;
 use winwincode_storage::{
@@ -66,7 +66,7 @@ async fn main() {
 async fn run() -> Result<(), Box<dyn Error>> {
     let config = environment_config()?;
     let scope = repository_scope();
-    seed_once(config.data_directory())?;
+    let approval_seed = seed_once(config.data_directory())?;
 
     let hub = Arc::new(DurableEventHub::open(
         config.data_directory().join("event-hub"),
@@ -98,14 +98,16 @@ async fn run() -> Result<(), Box<dyn Error>> {
         )?,
     )?);
     let api = Arc::new(GeneratedContractDispatcher::new(application));
-    // The browser session acts as the durable Owner created at seed time, so
-    // the revocation signal must address that Owner's principal.
-    let owner_user_id = seed_owner_account(config.data_directory())?;
-    let owner_actor = Actor::UserActor(UserActor {
-        kind: UserActorKind::User,
-        id: owner_user_id.clone(),
-    });
     let accounts = Arc::new(UserAccountService::open(config.data_directory())?);
+    let initialized_owner = Arc::new(Mutex::new(accounts.active_owner_id()?));
+    let owner_hook = approval_seed.map(|(runtime, product_session_revision)| {
+        Arc::new(FixtureOwnerInitialization {
+            data_directory: config.data_directory().to_path_buf(),
+            initialized_owner: Arc::clone(&initialized_owner),
+            product_session_revision,
+            runtime,
+        }) as Arc<dyn OwnerInitializationHook>
+    });
     let sessions = Arc::new(SqliteAuthSessionManager::open(
         config.data_directory().join("auth-sessions"),
         vec![AuthSessionBootstrap::new(required_environment(
@@ -114,16 +116,9 @@ async fn run() -> Result<(), Box<dyn Error>> {
         vec![scope.clone()],
         AuthSessionConfig::new(Duration::from_mins(10), Duration::from_hours(8))?,
         accounts,
-        None,
+        owner_hook,
     )?);
     let authenticator: Arc<dyn RequestAuthenticator> = sessions.clone();
-    let principal = AuthenticatedPrincipal::new(
-        Actor::UserActor(UserActor {
-            kind: UserActorKind::User,
-            id: owner_user_id,
-        }),
-        vec![scope.clone()],
-    )?;
     let running = start_server(config, Arc::clone(&sessions), authenticator, api, None).await?;
     println!(
         "{{\"status\":\"ready\",\"port\":{}}}",
@@ -137,12 +132,19 @@ async fn run() -> Result<(), Box<dyn Error>> {
             if value.is_none() {
                 return Err("authorization revocation signal stream closed".into());
             }
+            let owner = initialized_owner
+                .lock()
+                .map_err(|_| "fixture Owner identity lock is unavailable")?
+                .clone()
+                .ok_or("fixture Owner identity is unavailable")?;
+            let actor = user_actor(owner);
+            let principal = AuthenticatedPrincipal::new(actor.clone(), vec![scope.clone()])?;
             hub.revoke_authorization(
                 &principal,
                 &scope,
                 &ControlPlaneWebSocketAuthorizationEpoch(2),
             )?;
-            sessions.replace_authorized_scopes(&owner_actor, Vec::new())?;
+            sessions.replace_authorized_scopes(&actor, Vec::new())?;
             tokio::signal::ctrl_c().await?;
         }
     }
@@ -150,23 +152,51 @@ async fn run() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn seed_once(data_directory: &std::path::Path) -> Result<(), Box<dyn Error>> {
+struct FixtureOwnerInitialization {
+    data_directory: PathBuf,
+    initialized_owner: Arc<Mutex<Option<UserId>>>,
+    product_session_revision: u64,
+    runtime: WorkerSlotAuthority,
+}
+
+impl OwnerInitializationHook for FixtureOwnerInitialization {
+    fn owner_initialized(&self, owner: &UserId) -> Result<(), String> {
+        let mut storage =
+            SqliteStorage::open(&self.data_directory).map_err(|error| error.to_string())?;
+        prepare_approval(
+            &mut storage,
+            &self.runtime,
+            self.product_session_revision,
+            owner,
+        )
+        .map_err(|error| error.to_string())?;
+        Box::new(storage)
+            .close()
+            .map_err(|error| error.to_string())?;
+        *self
+            .initialized_owner
+            .lock()
+            .map_err(|_| "fixture Owner identity lock is unavailable".to_owned())? =
+            Some(owner.clone());
+        Ok(())
+    }
+}
+
+fn seed_once(
+    data_directory: &std::path::Path,
+) -> Result<Option<(WorkerSlotAuthority, u64)>, Box<dyn Error>> {
     let marker = data_directory.join("browser-local-controls.seeded");
     if marker.exists() {
-        return Ok(());
+        return Ok(None);
     }
     std::fs::create_dir_all(data_directory)?;
     let mut storage = SqliteStorage::open(data_directory)?;
     seed_provider_and_credential(&mut storage)?;
     let runtime = prepare_runtime(&mut storage)?;
     let session_revision = prepare_product_session(&mut storage, &runtime)?;
-    // The browser signs in as the durable Owner (AUTH-100.3), so the seeded
-    // approval's authorized actor must be that Owner account.
-    let owner_user_id = seed_owner_account(data_directory)?;
-    prepare_approval(&mut storage, &runtime, session_revision, owner_user_id)?;
     Box::new(storage).close()?;
     std::fs::write(marker, b"v1\n")?;
-    Ok(())
+    Ok(Some((runtime, session_revision)))
 }
 
 fn seed_provider_and_credential(storage: &mut SqliteStorage) -> Result<(), Box<dyn Error>> {
@@ -192,7 +222,6 @@ fn seed_provider_and_credential(storage: &mut SqliteStorage) -> Result<(), Box<d
                 reasoning_efforts: vec!["high".into(), "medium".into()],
             }],
         },
-        Instant("2026-09-02T00:00:00.000Z".to_owned()),
     )?;
     CredentialReferenceService::new(storage).create(
         &CredentialReferenceCreateCommand {
@@ -406,20 +435,11 @@ fn prepare_product_session(
     Ok(receipt.record.session().revision())
 }
 
-fn seed_owner_account(data_directory: &std::path::Path) -> Result<UserId, Box<dyn Error>> {
-    let accounts = UserAccountService::open(data_directory)?;
-    if let Some(existing) = accounts.active_owner_id()? {
-        return Ok(existing);
-    }
-    let owner = accounts.initialize_owner("owner", "browser-owner-password-1", &at(0))?;
-    Ok(owner.user_id)
-}
-
 fn prepare_approval(
     storage: &mut SqliteStorage,
     runtime: &WorkerSlotAuthority,
     product_session_revision: u64,
-    authorized_user: UserId,
+    owner: &UserId,
 ) -> Result<(), Box<dyn Error>> {
     let scope_key = receipt_scope_key()?;
     let authority = GateInteractionAuthority {
@@ -455,7 +475,7 @@ fn prepare_approval(
         },
         subject: GateInteractionSubject::Approval(ApprovalId(id("apr", 1))),
         authority: authority.clone(),
-        authorized_actor: GateInteractionActor::User(authorized_user),
+        authorized_actor: GateInteractionActor::User(owner.clone()),
         expires_at: expires_at(),
         attention_decisions: Vec::new(),
     })?;
@@ -538,9 +558,13 @@ fn receipt_scope_key() -> Result<ReceiptScopeKey, Box<dyn Error>> {
 }
 
 fn actor() -> Actor {
+    user_actor(UserId(id("usr", FIXTURE_SEED)))
+}
+
+fn user_actor(id: UserId) -> Actor {
     Actor::UserActor(UserActor {
         kind: UserActorKind::User,
-        id: UserId(id("usr", FIXTURE_SEED)),
+        id,
     })
 }
 

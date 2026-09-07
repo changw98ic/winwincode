@@ -32,7 +32,7 @@ const cache = resolve(root, '.cache/client-repositories-tests')
 async function cachedModule(name) {
   return import(pathToFileURL(resolve(cache, name)).href)
 }
-const facade = await cachedModule('control-plane-client.js')
+const facade = await cachedModule('community-control-plane-client.js')
 const repositoriesViewModelModule = await cachedModule('repositories-view-model.js')
 const repositoriesPageModule = await cachedModule('repositories-page.js')
 const applicationModule = await cachedModule('application.js')
@@ -101,8 +101,8 @@ function baseClient(overrides = {}) {
   return {
     serverUrl: 'https://control.example',
     async restore() { return session() },
+    async initializeOwner() { return session() },
     async login() { return session() },
-    async loginWithPassword() { return session() },
     async initializationStatus() { return { initialized: true } },
     async logout() {},
     async command() { throw new Error('not used') },
@@ -761,10 +761,10 @@ function repositoriesFacadeFake({ expired = true, repositories = [repository()] 
       }
       return structuredClone(session())
     },
-    async login() {
+    async initializeOwner() {
       return structuredClone(session())
     },
-    async loginWithPassword() {
+    async login() {
       return structuredClone(session())
     },
     async initializationStatus() {

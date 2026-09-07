@@ -34,7 +34,7 @@ const applicationModule = await import(`${pathToFileURL(resolve(
 )).href}`)
 const facadeModule = await import(`${pathToFileURL(resolve(
   cacheRoot,
-  'control-plane-client.js',
+  'community-control-plane-client.js',
 )).href}`)
 const clientSurfaceModule = await import(`${pathToFileURL(resolve(
   cacheRoot,
@@ -449,7 +449,7 @@ test('enterprise shell uses route chunks, one generated facade, and no direct ne
   assert.match(enterprise, /import\('\.\/enterprise-resource-page\.js'\)/u)
   assert.match(enterprise, /import\('\.\/enterprise-operations-page\.js'\)/u)
   assert.equal((enterprise.match(/createEnterpriseManagementViewModel/gu) ?? []).length, 2)
-  assert.equal((application.match(/createControlPlaneClient/gu) ?? []).length, 2)
+  assert.equal((application.match(/\bcreateControlPlaneClient\b/gu) ?? []).length, 2)
   assert.doesNotMatch(`${application}\n${enterprise}`, /\bfetch\s*\(|new\s+WebSocket/u)
   assert.doesNotMatch(enterprise, /serverUrl|localStorage|sessionStorage|console\./u)
 })

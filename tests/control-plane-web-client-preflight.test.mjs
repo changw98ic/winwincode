@@ -184,7 +184,7 @@ test('preflight records the current Client, Server, Control Plane, Worker, Local
   assert.equal(rules.inventory.helper.composition.includes('helper executable'), true)
   assert.equal(
     rules.verification.singlePath,
-    'apps/client -> generated client -> winwincode-server -> winwincode-control-plane -> winwincode-worker',
+    'apps/client -> Community composition -> neutral facade -> generated client -> winwincode-server -> winwincode-control-plane -> winwincode-worker',
   )
 
   const contract = readFileSync(contractPath, 'utf8')
@@ -248,7 +248,7 @@ test('Client pages cannot hand-open transports or import Rust runtime authority'
   const rules = json(rulesPath)
   const webRoot = repositoryPath(rules.boundary.webRoot)
   const generatedRoot = repositoryPath(rules.boundary.generatedNetworkOwner)
-  const facadePath = repositoryPath(rules.boundary.facade)
+  const facadePaths = new Set(rules.boundary.facades.map(path => repositoryPath(path)))
   const sources = filesBelow(webRoot).filter(path => (
     ['.js', '.jsx', '.mjs', '.ts', '.tsx'].includes(extname(path))
   ))
@@ -271,7 +271,7 @@ test('Client pages cannot hand-open transports or import Rust runtime authority'
       [],
       `${relative(root, path)} bypasses the generated network owner`,
     )
-    if (path !== facadePath) {
+    if (!facadePaths.has(path)) {
       const literals = new Set(stringLiterals(file))
       for (const forbidden of rules.boundary.forbiddenWireLiteralsOutsideGenerated) {
         assert.equal(

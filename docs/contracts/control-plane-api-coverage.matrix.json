@@ -162,7 +162,8 @@
       "sourcePaths": [
         "apps/client/src/strongflow-page.ts",
         "apps/client/src/strongflow-view-model.ts",
-        "apps/client/src/control-plane-client.ts"
+        "packages/control-plane-client/src/index.ts",
+        "apps/client/src/community-control-plane-client.ts"
       ],
       "flowIds": [
         "client-transport",
@@ -356,7 +357,8 @@
     {
       "surfaceId": "observability",
       "observableContracts": [
-        "secret-safe runtime trace facts"
+        "secret-safe runtime trace facts and storage-neutral aggregation rules",
+        "Community SQLite replay, WAL, rollback, retention, and file permissions"
       ],
       "flowIds": [
         "chat-session-lifecycle",
@@ -579,6 +581,60 @@
       ],
       "observableContracts": [
         "deterministic read-only candidate test asset findings"
+      ]
+    },
+    {
+      "surfaceId": "browser-core",
+      "observableContracts": [
+        "product-neutral query caching and scope state"
+      ],
+      "flowIds": [
+        "client-transport"
+      ]
+    },
+    {
+      "surfaceId": "browser-ui",
+      "observableContracts": [
+        "product-neutral accessible browser components"
+      ],
+      "flowIds": [
+        "client-transport"
+      ]
+    },
+    {
+      "surfaceId": "browser-control-plane-client",
+      "observableContracts": [
+        "product-neutral authenticated browser requests through injected generated transport"
+      ],
+      "flowIds": [
+        "client-transport"
+      ]
+    },
+    {
+      "surfaceId": "client-control-port",
+      "observableContracts": [
+        "versioned device exchange frames acknowledgements replay and fencing identities"
+      ],
+      "flowIds": [
+        "local-worker-startup"
+      ]
+    },
+    {
+      "surfaceId": "device-client",
+      "observableContracts": [
+        "device-local identity repository registration durable exchange and candidate application"
+      ],
+      "flowIds": [
+        "local-worker-startup"
+      ]
+    },
+    {
+      "surfaceId": "data-export-contract",
+      "observableContracts": [
+        "canonical sorted export bytes digest domain counts and database-neutral source identities"
+      ],
+      "flowIds": [
+        "enterprise-management"
       ]
     }
   ],

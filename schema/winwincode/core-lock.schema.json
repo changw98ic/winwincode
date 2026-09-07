@@ -1,0 +1,437 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.winwincode.dev/core-lock/v1/schema.json",
+  "title": "WinWinCode Community Core Lock",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "kind",
+    "ownerRepository",
+    "consumerRepository",
+    "core"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "kind": {
+      "const": "winwincode.community-core-lock.v1"
+    },
+    "consumerRepository": {
+      "enum": [
+        "winwincode-cloud",
+        "winwincode-enterprise"
+      ]
+    },
+    "core": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "sourceCommit",
+        "sourceTag",
+        "protocolVersion",
+        "releaseManifest",
+        "cargo",
+        "npm",
+        "contracts",
+        "workerRuntimes",
+        "sbom",
+        "licenseManifest"
+      ],
+      "properties": {
+        "version": {
+          "$ref": "#/$defs/version"
+        },
+        "sourceCommit": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "sourceTag": {
+          "type": "string",
+          "pattern": "^core-v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?$"
+        },
+        "protocolVersion": {
+          "const": "winwincode/v1"
+        },
+        "releaseManifest": {
+          "$ref": "#/$defs/signedArtifact"
+        },
+        "cargo": {
+          "type": "array",
+          "prefixItems": [
+            {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/packageArtifact"
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "name": {
+                      "const": "winwincode-domain"
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/packageArtifact"
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "name": {
+                      "const": "winwincode-api"
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/packageArtifact"
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "name": {
+                      "const": "winwincode-client-port"
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/packageArtifact"
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "name": {
+                      "const": "winwincode-execution-port"
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/packageArtifact"
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "name": {
+                      "const": "winwincode-repository-context"
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/packageArtifact"
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "name": {
+                      "const": "winwincode-observability-core"
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/packageArtifact"
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "name": {
+                      "const": "winwincode-session"
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/packageArtifact"
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "name": {
+                      "const": "winwincode-delivery"
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/packageArtifact"
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "name": {
+                      "const": "winwincode-publication"
+                    }
+                  }
+                }
+              ]
+            }
+          ],
+          "items": false,
+          "minItems": 9,
+          "maxItems": 9
+        },
+        "npm": {
+          "type": "array",
+          "prefixItems": [
+            {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/packageArtifact"
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "name": {
+                      "const": "@winwincode/contracts"
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/packageArtifact"
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "name": {
+                      "const": "@winwincode/strongflow"
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/packageArtifact"
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "name": {
+                      "const": "@winwincode/browser-ui"
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/packageArtifact"
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "name": {
+                      "const": "@winwincode/control-plane-client"
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/packageArtifact"
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "name": {
+                      "const": "@winwincode/browser-core"
+                    }
+                  }
+                }
+              ]
+            }
+          ],
+          "items": false,
+          "minItems": 5,
+          "maxItems": 5
+        },
+        "contracts": {
+          "$ref": "#/$defs/artifact"
+        },
+        "workerRuntimes": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/platformArtifact"
+          },
+          "uniqueItems": true
+        },
+        "sbom": {
+          "$ref": "#/$defs/artifact"
+        },
+        "licenseManifest": {
+          "$ref": "#/$defs/artifact"
+        }
+      }
+    },
+    "ownerRepository": {
+      "const": "winwincode"
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "artifactFields": {
+      "type": "object",
+      "required": [
+        "name",
+        "version",
+        "uri",
+        "bytes",
+        "sha256",
+        "licenseSpdx"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "version": {
+          "$ref": "#/$defs/version"
+        },
+        "uri": {
+          "$ref": "#/$defs/immutableUri"
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "licenseSpdx": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "artifact": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/artifactFields"
+        }
+      ],
+      "unevaluatedProperties": false,
+      "type": "object"
+    },
+    "signedArtifact": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/artifactFields"
+        },
+        {
+          "type": "object",
+          "required": [
+            "signatureUri",
+            "signingKeySha256"
+          ],
+          "properties": {
+            "signatureUri": {
+              "$ref": "#/$defs/immutableUri"
+            },
+            "signingKeySha256": {
+              "$ref": "#/$defs/sha256"
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false,
+      "type": "object"
+    },
+    "packageArtifact": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/artifactFields"
+        },
+        {
+          "type": "object",
+          "required": [
+            "registry"
+          ],
+          "properties": {
+            "registry": {
+              "$ref": "#/$defs/immutableUri"
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false,
+      "type": "object"
+    },
+    "platformArtifact": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/artifactFields"
+        },
+        {
+          "type": "object",
+          "required": [
+            "target"
+          ],
+          "properties": {
+            "target": {
+              "enum": [
+                "aarch64-apple-darwin",
+                "x86_64-apple-darwin",
+                "aarch64-unknown-linux-gnu",
+                "x86_64-unknown-linux-gnu"
+              ]
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false,
+      "type": "object"
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?$"
+    },
+    "immutableUri": {
+      "type": "string",
+      "pattern": "^https://[^\\s]+$"
+    }
+  },
+  "$comment": "Canonical lock format for exact Community core consumption by WinWinCode Cloud and Enterprise."
+}

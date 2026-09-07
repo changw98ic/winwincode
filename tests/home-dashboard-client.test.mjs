@@ -36,7 +36,7 @@ const [
   visitsModule,
   surfaceModule,
 ] = await Promise.all([
-  load('control-plane-client.js'),
+  load('community-control-plane-client.js'),
   load('home-dashboard-view-model.js'),
   load('home-dashboard-page.js'),
   load('home-recent-visits.js'),

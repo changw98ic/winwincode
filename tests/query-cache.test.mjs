@@ -24,7 +24,7 @@ assert.equal(
 
 const { createQueryCache, createQueryCacheLifecycle, queryCacheKey } = await import(`${pathToFileURL(resolve(
   root,
-  '.cache/ui-components-tests/core/query-cache.js',
+  'packages/browser-core/dist/query-cache.js',
 )).href}`)
 
 const actor = Object.freeze({ kind: 'user', id: 'usr_00000000000000000000000001' })

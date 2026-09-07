@@ -1,0 +1,1859 @@
+{
+  "schemaVersion": 1,
+  "kind": "winwincode.infrastructure-ownership.v1",
+  "status": "proposed",
+  "source": {
+    "repository": "winwincode",
+    "commit": "f90294eb57bf10e23dfa554a5f1305f883bc0398",
+    "inspectionMode": "git-file-inventory",
+    "localIndexAvailable": false,
+    "coverage": "Every Git HEAD tracked file under the four audited crate roots is listed exactly once; no complete symbol or call graph is claimed."
+  },
+  "invariant": {
+    "repositories": [
+      "winwincode",
+      "winwincode-cloud",
+      "winwincode-enterprise"
+    ],
+    "oneActiveImplementationOwner": true,
+    "cloudToEnterpriseSourceDependencyAllowed": false,
+    "enterpriseToCloudSourceDependencyAllowed": false,
+    "crossRepositoryPathDependencyAllowed": false,
+    "downstreamPin": [
+      "exact-version",
+      "source-commit",
+      "sha256",
+      "sbom",
+      "license-manifest"
+    ],
+    "backendDatabase": {
+      "community": "sqlite",
+      "cloud": "postgresql",
+      "enterprise": "postgresql"
+    },
+    "excludedDatabases": [
+      "Codex Core SQLite",
+      "Device Client SQLite"
+    ]
+  },
+  "currentFindings": {
+    "postgres": {
+      "trackedFileCount": 9,
+      "facts": [
+        "No external PostgreSQL network driver exists in this crate.",
+        "The test uses FakePostgresProtocol.",
+        "The embedded migration SQL forces row-level security through winwincode.scope_key.",
+        "The package directly depends on audit, backup, domain, and the combined storage crate."
+      ]
+    },
+    "objectStore": {
+      "trackedFileCount": 4,
+      "facts": [
+        "The implementation performs bounded verified-TLS HTTP and multipart/range operations.",
+        "It uses Bearer workload credentials and mandatory aws:kms response/request headers rather than a product-neutral credential and encryption policy.",
+        "It directly depends on audit, backup, domain, and the combined storage crate."
+      ]
+    },
+    "observability": {
+      "trackedFileCount": 4,
+      "facts": [
+        "Neutral telemetry types, aggregation, trace, and alert logic share one file with the SQLite schema and adapter.",
+        "The package directly depends on rusqlite.",
+        "There is no PostgreSQL store or external telemetry exporter in this crate."
+      ]
+    },
+    "integration": {
+      "trackedFileCount": 24,
+      "facts": [
+        "The framework supports GitHub, Jira, Linear, Slack, Teams, and generic webhooks.",
+        "The public model uses EnterpriseIntegrationId and tenant-scoped AuditScope.",
+        "The durable framework and Slack rate-limit state directly use SQLite.",
+        "Provider files combine reusable protocol code with credentials, endpoint/TLS configuration, and product-named connectors."
+      ]
+    }
+  },
+  "cargoDependencyAudit": {
+    "winwincode-postgres": {
+      "runtime": [
+        "sha2",
+        "winwincode-audit",
+        "winwincode-backup",
+        "winwincode-domain",
+        "winwincode-storage"
+      ],
+      "development": [],
+      "blockingCoupling": [
+        "winwincode-audit",
+        "winwincode-backup",
+        "winwincode-storage"
+      ]
+    },
+    "winwincode-object-store": {
+      "runtime": [
+        "serde",
+        "serde_json",
+        "sha2",
+        "ureq",
+        "winwincode-audit",
+        "winwincode-backup",
+        "winwincode-domain",
+        "winwincode-storage"
+      ],
+      "development": [
+        "rcgen",
+        "rustls"
+      ],
+      "blockingCoupling": [
+        "winwincode-audit",
+        "winwincode-backup",
+        "winwincode-storage"
+      ]
+    },
+    "winwincode-observability": {
+      "runtime": [
+        "rusqlite",
+        "serde",
+        "serde_json",
+        "sha2"
+      ],
+      "development": [],
+      "blockingCoupling": [
+        "rusqlite"
+      ]
+    },
+    "winwincode-integration": {
+      "runtime": [
+        "hmac",
+        "rusqlite",
+        "serde",
+        "serde_json",
+        "sha2",
+        "time",
+        "ureq",
+        "winwincode-audit",
+        "winwincode-domain",
+        "winwincode-publication"
+      ],
+      "development": [
+        "jsonwebtoken",
+        "rcgen",
+        "rustls",
+        "winwincode-api",
+        "winwincode-storage"
+      ],
+      "blockingCoupling": [
+        "rusqlite",
+        "winwincode-audit",
+        "winwincode-publication"
+      ]
+    }
+  },
+  "neutralPublishedPackages": [
+    {
+      "name": "winwincode-postgres-adapter",
+      "owner": "winwincode",
+      "channel": "optional-infrastructure",
+      "consumers": [
+        "winwincode-cloud",
+        "winwincode-enterprise"
+      ],
+      "contains": [
+        "scope-neutral transaction protocol",
+        "driver trait",
+        "ProductStateStorage adapter",
+        "migration identity and digest"
+      ],
+      "excludes": [
+        "SQL migrations",
+        "DSN",
+        "pool sizing",
+        "database roles",
+        "tenant RLS policy",
+        "customer TLS configuration"
+      ],
+      "implementationBeadId": "winwincode-edition.2.4.1"
+    },
+    {
+      "name": "winwincode-s3-artifact-adapter",
+      "owner": "winwincode",
+      "channel": "optional-infrastructure",
+      "consumers": [
+        "winwincode-cloud",
+        "winwincode-enterprise"
+      ],
+      "contains": [
+        "S3-compatible byte protocol",
+        "TLS and timeout policy types",
+        "multipart and range integrity",
+        "injected identity and encryption ports"
+      ],
+      "excludes": [
+        "bucket",
+        "prefix",
+        "KMS key",
+        "credential source",
+        "region",
+        "proxy",
+        "customer CA"
+      ],
+      "implementationBeadId": "winwincode-edition.2.4.2"
+    },
+    {
+      "name": "winwincode-observability-core",
+      "owner": "winwincode",
+      "channel": "optional-infrastructure",
+      "consumers": [
+        "winwincode-cloud",
+        "winwincode-enterprise"
+      ],
+      "contains": [
+        "closed telemetry types",
+        "trace derivation",
+        "metric aggregation",
+        "alert state machine",
+        "storage and exporter ports"
+      ],
+      "excludes": [
+        "SQLite",
+        "PostgreSQL",
+        "OTLP endpoint",
+        "retention configuration",
+        "operator routing"
+      ],
+      "implementationBeadId": "winwincode-edition.2.4.3"
+    },
+    {
+      "name": "winwincode-integration-core",
+      "owner": "winwincode",
+      "channel": "optional-infrastructure",
+      "consumers": [
+        "winwincode-cloud",
+        "winwincode-enterprise"
+      ],
+      "contains": [
+        "connector identity and scope ports",
+        "authority and receipts",
+        "inbound/outbound retry state machine",
+        "storage port"
+      ],
+      "excludes": [
+        "SQLite",
+        "PostgreSQL",
+        "tenant or organization model",
+        "credentials",
+        "callback URL",
+        "egress policy"
+      ],
+      "implementationBeadId": "winwincode-edition.2.4.4"
+    },
+    {
+      "name": "winwincode-connector-github",
+      "owner": "winwincode",
+      "channel": "optional-infrastructure",
+      "consumers": [
+        "winwincode-cloud",
+        "winwincode-enterprise"
+      ],
+      "contains": [
+        "provider protocol",
+        "bounded request and response mapping",
+        "injected credential and transport ports"
+      ],
+      "excludes": [
+        "Hosted app registration",
+        "customer app registration",
+        "credential values",
+        "product callback and egress configuration"
+      ],
+      "implementationBeadId": "winwincode-edition.2.4.4"
+    },
+    {
+      "name": "winwincode-connector-jira",
+      "owner": "winwincode",
+      "channel": "optional-infrastructure",
+      "consumers": [
+        "winwincode-cloud",
+        "winwincode-enterprise"
+      ],
+      "contains": [
+        "provider protocol",
+        "bounded request and response mapping",
+        "injected credential and transport ports"
+      ],
+      "excludes": [
+        "Hosted app registration",
+        "customer app registration",
+        "credential values",
+        "product callback and egress configuration"
+      ],
+      "implementationBeadId": "winwincode-edition.2.4.4"
+    },
+    {
+      "name": "winwincode-connector-linear",
+      "owner": "winwincode",
+      "channel": "optional-infrastructure",
+      "consumers": [
+        "winwincode-cloud",
+        "winwincode-enterprise"
+      ],
+      "contains": [
+        "provider protocol",
+        "bounded request and response mapping",
+        "injected credential and transport ports"
+      ],
+      "excludes": [
+        "Hosted app registration",
+        "customer app registration",
+        "credential values",
+        "product callback and egress configuration"
+      ],
+      "implementationBeadId": "winwincode-edition.2.4.4"
+    },
+    {
+      "name": "winwincode-connector-slack",
+      "owner": "winwincode",
+      "channel": "optional-infrastructure",
+      "consumers": [
+        "winwincode-cloud",
+        "winwincode-enterprise"
+      ],
+      "contains": [
+        "provider protocol",
+        "bounded request and response mapping",
+        "injected credential and transport ports"
+      ],
+      "excludes": [
+        "Hosted app registration",
+        "customer app registration",
+        "credential values",
+        "product callback and egress configuration"
+      ],
+      "implementationBeadId": "winwincode-edition.2.4.4"
+    },
+    {
+      "name": "winwincode-connector-teams",
+      "owner": "winwincode",
+      "channel": "optional-infrastructure",
+      "consumers": [
+        "winwincode-cloud",
+        "winwincode-enterprise"
+      ],
+      "contains": [
+        "provider protocol",
+        "bounded request and response mapping",
+        "injected credential and transport ports"
+      ],
+      "excludes": [
+        "Hosted app registration",
+        "customer app registration",
+        "credential values",
+        "product callback and egress configuration"
+      ],
+      "implementationBeadId": "winwincode-edition.2.4.4"
+    },
+    {
+      "name": "winwincode-connector-webhook",
+      "owner": "winwincode",
+      "channel": "optional-infrastructure",
+      "consumers": [
+        "winwincode-cloud",
+        "winwincode-enterprise"
+      ],
+      "contains": [
+        "provider protocol",
+        "bounded request and response mapping",
+        "injected credential and transport ports"
+      ],
+      "excludes": [
+        "Hosted app registration",
+        "customer app registration",
+        "credential values",
+        "product callback and egress configuration"
+      ],
+      "implementationBeadId": "winwincode-edition.2.4.4"
+    }
+  ],
+  "communityInternalPackages": [
+    {
+      "name": "winwincode-observability-sqlite",
+      "owner": "winwincode",
+      "consumers": [
+        "WinWinCode Community"
+      ],
+      "publishedCrossRepository": false,
+      "implementationBeadId": "winwincode-edition.2.4.3"
+    },
+    {
+      "name": "winwincode-integration-sqlite",
+      "owner": "winwincode",
+      "consumers": [
+        "WinWinCode Community"
+      ],
+      "publishedCrossRepository": false,
+      "implementationBeadId": "winwincode-edition.2.4.4"
+    }
+  ],
+  "productCompositionTargets": {
+    "cloud": {
+      "repository": "winwincode-cloud",
+      "rootPaths": [
+        "crates/winwincode-cloud-postgres",
+        "crates/winwincode-cloud-object-store",
+        "crates/winwincode-cloud-observability",
+        "crates/winwincode-cloud-integrations"
+      ],
+      "hostedConfiguration": {
+        "postgres": [
+          "secret-reference DSN",
+          "managed CA",
+          "pool min/max",
+          "migration role",
+          "runtime tenant role",
+          "tenant scope transaction setting",
+          "forced RLS policy",
+          "backup role and managed destination"
+        ],
+        "objectStore": [
+          "managed endpoint",
+          "region",
+          "bucket and tenant prefix",
+          "workload identity",
+          "managed KMS key reference",
+          "retention",
+          "managed TLS"
+        ],
+        "observability": [
+          "PostgreSQL telemetry store",
+          "managed exporter destination",
+          "Hosted retention",
+          "operator alert route",
+          "tenant-safe dashboards",
+          "capacity policy"
+        ],
+        "integrations": [
+          "Hosted OAuth/app broker",
+          "tenant credential reference",
+          "public callback base URL",
+          "tenant webhook routing",
+          "egress allowlist",
+          "provider rate limits",
+          "operator alerts"
+        ]
+      },
+      "backlogCoverageAudit": {
+        "inventoryCountBeforeCreation": 47,
+        "auditResult": "no-exact-semantic-coverage",
+        "domains": {
+          "postgres": {
+            "partialCoverageBeadIds": [
+              "winwincode-cloud-ca1.5"
+            ],
+            "missingFromExistingScope": [
+              "real driver composition",
+              "role separation",
+              "managed TLS and pool policy",
+              "infrastructure lock verification"
+            ],
+            "targetBeadId": "winwincode-cloud-ca1.5.1",
+            "prerequisiteBeadIds": [
+              "winwincode-cloud-ca1.4"
+            ]
+          },
+          "objectStore": {
+            "partialCoverageBeadIds": [
+              "winwincode-cloud-ca1.8.1"
+            ],
+            "missingFromExistingScope": [
+              "workload identity",
+              "managed KMS receipt",
+              "Hosted TLS and rotation",
+              "infrastructure lock verification"
+            ],
+            "targetBeadId": "winwincode-cloud-ca1.8.4",
+            "prerequisiteBeadIds": [
+              "winwincode-cloud-ca1.4",
+              "winwincode-cloud-ca1.8.1"
+            ]
+          },
+          "observability": {
+            "partialCoverageBeadIds": [
+              "winwincode-cloud-ca1.11.4",
+              "winwincode-cloud-ca1.11.5"
+            ],
+            "missingFromExistingScope": [
+              "PostgreSQL telemetry store",
+              "Hosted retention",
+              "operator routing composition",
+              "infrastructure lock verification"
+            ],
+            "targetBeadId": "winwincode-cloud-ca1.11.10",
+            "prerequisiteBeadIds": [
+              "winwincode-cloud-ca1.4",
+              "winwincode-cloud-ca1.11.4",
+              "winwincode-cloud-ca1.11.5"
+            ]
+          },
+          "integrations": {
+            "partialCoverageBeadIds": [
+              "winwincode-cloud-ca1.6"
+            ],
+            "missingFromExistingScope": [
+              "six-provider Hosted composition",
+              "OAuth app broker",
+              "tenant callback and egress policy",
+              "infrastructure lock verification"
+            ],
+            "targetBeadId": "winwincode-cloud-ca1.6.1",
+            "prerequisiteBeadIds": [
+              "winwincode-cloud-ca1.4",
+              "winwincode-cloud-ca1.5",
+              "winwincode-cloud-ca1.9.4"
+            ]
+          }
+        }
+      }
+    },
+    "enterprise": {
+      "repository": "winwincode-enterprise",
+      "rootPaths": [
+        "crates/winwincode-enterprise-postgres",
+        "crates/winwincode-enterprise-object-store",
+        "crates/winwincode-enterprise-observability",
+        "crates/winwincode-enterprise-integrations"
+      ],
+      "customerConfiguration": {
+        "postgres": [
+          "secret/file DSN reference",
+          "customer CA",
+          "connection limits",
+          "migration role",
+          "runtime role",
+          "organization scope",
+          "backup destination",
+          "upgrade and restore evidence"
+        ],
+        "objectStore": [
+          "customer endpoint",
+          "bucket and prefix",
+          "customer CA",
+          "outbound proxy",
+          "credential provider",
+          "server-side encryption capability",
+          "offline diagnostics",
+          "retention"
+        ],
+        "observability": [
+          "customer PostgreSQL or local telemetry store",
+          "customer OTLP endpoint",
+          "customer CA/proxy",
+          "retention",
+          "alert destination",
+          "offline evidence export"
+        ],
+        "integrations": [
+          "customer app registration",
+          "secret/file credential provider",
+          "customer callback base URL",
+          "organization policy",
+          "customer CA/proxy",
+          "egress allowlist",
+          "offline disable switch"
+        ]
+      },
+      "backlogCoverageAudit": {
+        "inventoryCountBeforeCreation": 35,
+        "auditResult": "no-exact-semantic-coverage",
+        "domains": {
+          "postgres": {
+            "partialCoverageBeadIds": [
+              "enterprise-5uz.4"
+            ],
+            "missingFromExistingScope": [
+              "real driver composition",
+              "customer CA and connection policy",
+              "role separation and organization scope",
+              "infrastructure lock verification"
+            ],
+            "targetBeadId": "enterprise-5uz.4.1",
+            "prerequisiteBeadIds": [
+              "enterprise-5uz.3"
+            ]
+          },
+          "objectStore": {
+            "partialCoverageBeadIds": [
+              "enterprise-5uz.8",
+              "enterprise-5uz.12.1"
+            ],
+            "missingFromExistingScope": [
+              "customer endpoint and credential provider",
+              "customer CA/proxy",
+              "encryption capability and offline diagnostics",
+              "infrastructure lock verification"
+            ],
+            "targetBeadId": "enterprise-5uz.8.1",
+            "prerequisiteBeadIds": [
+              "enterprise-5uz.3",
+              "enterprise-5uz.4"
+            ]
+          },
+          "observability": {
+            "partialCoverageBeadIds": [
+              "enterprise-5uz.8"
+            ],
+            "missingFromExistingScope": [
+              "customer telemetry stores",
+              "OTLP CA/proxy",
+              "alert destination and offline evidence export",
+              "infrastructure lock verification"
+            ],
+            "targetBeadId": "enterprise-5uz.8.2",
+            "prerequisiteBeadIds": [
+              "enterprise-5uz.3",
+              "enterprise-5uz.4"
+            ]
+          },
+          "integrations": {
+            "partialCoverageBeadIds": [
+              "enterprise-5uz.5"
+            ],
+            "missingFromExistingScope": [
+              "six-provider customer composition",
+              "customer app and callback registration",
+              "CA/proxy and offline policy",
+              "infrastructure lock verification"
+            ],
+            "targetBeadId": "enterprise-5uz.5.1",
+            "prerequisiteBeadIds": [
+              "enterprise-5uz.3",
+              "enterprise-5uz.4"
+            ]
+          }
+        }
+      }
+    }
+  },
+  "releaseRules": {
+    "partOfCommunityCoreRelease": false,
+    "channel": "community-infrastructure-addons",
+    "manifest": "community-infrastructure-release-manifest.json",
+    "consumerLock": "infrastructure.lock.json",
+    "requiredFields": [
+      "version",
+      "sourceCommit",
+      "artifactUri",
+      "sha256",
+      "sbom",
+      "licenseManifest",
+      "signature"
+    ],
+    "exactVersionOnly": true,
+    "immutableArtifacts": true,
+    "productConfigPublishedFromWinwincode": false,
+    "implementationBeadId": "winwincode-edition.2.4.5"
+  },
+  "fileOwnership": [
+    {
+      "path": "crates/winwincode-integration/Cargo.toml",
+      "lines": 32,
+      "sha256": "06f9376c2cbe1846542e4a9e7817c6ea702c9539be88b901ce0aaced32c1a537",
+      "decision": "split-required",
+      "rationale": "The current manifest, crate exports, and documentation combine neutral framework, six providers, SQLite state, and Enterprise naming.",
+      "splitTargets": [
+        {
+          "owner": "winwincode",
+          "targetPath": "crates/winwincode-integration-core/Cargo.toml",
+          "contents": "neutral integration package metadata and exports",
+          "implementationBeadId": "winwincode-edition.2.4.4"
+        },
+        {
+          "owner": "winwincode",
+          "targetPath": "crates/winwincode-integration-sqlite/Cargo.toml",
+          "contents": "Community SQLite adapter metadata and exports",
+          "implementationBeadId": "winwincode-edition.2.4.4"
+        },
+        {
+          "owner": "winwincode-cloud",
+          "targetPath": "crates/winwincode-cloud-integrations/Cargo.toml",
+          "contents": "Hosted integration composition metadata",
+          "implementationBeadId": "winwincode-cloud-ca1.6.1"
+        },
+        {
+          "owner": "winwincode-enterprise",
+          "targetPath": "crates/winwincode-enterprise-integrations/Cargo.toml",
+          "contents": "customer integration composition metadata",
+          "implementationBeadId": "enterprise-5uz.5.1"
+        }
+      ]
+    },
+    {
+      "path": "crates/winwincode-integration/README.md",
+      "lines": 153,
+      "sha256": "7f012e5cb678403bffa5c5088b1ecf0a951ba8c3c6b90398314353f77b010433",
+      "decision": "split-required",
+      "rationale": "The current manifest, crate exports, and documentation combine neutral framework, six providers, SQLite state, and Enterprise naming.",
+      "splitTargets": [
+        {
+          "owner": "winwincode",
+          "targetPath": "crates/winwincode-integration-core/README.md",
+          "contents": "neutral integration package metadata and exports",
+          "implementationBeadId": "winwincode-edition.2.4.4"
+        },
+        {
+          "owner": "winwincode",
+          "targetPath": "crates/winwincode-integration-sqlite/README.md",
+          "contents": "Community SQLite adapter metadata and exports",
+          "implementationBeadId": "winwincode-edition.2.4.4"
+        },
+        {
+          "owner": "winwincode-cloud",
+          "targetPath": "crates/winwincode-cloud-integrations/README.md",
+          "contents": "Hosted integration composition metadata",
+          "implementationBeadId": "winwincode-cloud-ca1.6.1"
+        },
+        {
+          "owner": "winwincode-enterprise",
+          "targetPath": "crates/winwincode-enterprise-integrations/README.md",
+          "contents": "customer integration composition metadata",
+          "implementationBeadId": "enterprise-5uz.5.1"
+        }
+      ]
+    },
+    {
+      "path": "crates/winwincode-integration/src/error.rs",
+      "lines": 43,
+      "sha256": "bb4d81cb0cace2fafc3dee4a3c0a7b355d13d68ad602b50f69d33d5f946d5f19",
+      "decision": "owned",
+      "owner": "winwincode",
+      "targetPath": "crates/winwincode-integration-core/src/error.rs",
+      "rationale": "The secret-safe failures and connector call/signature ports do not select a product, provider credential source, or persistence adapter.",
+      "publication": "optional-infrastructure-package",
+      "implementationBeadId": "winwincode-edition.2.4.4"
+    },
+    {
+      "path": "crates/winwincode-integration/src/framework.rs",
+      "lines": 191,
+      "sha256": "1ab7a0244ac42772fc737455e271fd96d65977bf99e8d886026e124e7aed9c54",
+      "decision": "split-required",
+      "rationale": "The reusable connector state machine is directly expressed with EnterpriseIntegrationId, AuditScope tenant checks, and a concrete IntegrationStorage value.",
+      "splitTargets": [
+        {
+          "owner": "winwincode",
+          "targetPath": "crates/winwincode-integration-core/src/framework.rs",
+          "contents": "product-neutral integration identity, scope port, connector authority, receipts, retry state machine, and storage port",
+          "implementationBeadId": "winwincode-edition.2.4.4"
+        },
+        {
+          "owner": "winwincode-cloud",
+          "targetPath": "crates/winwincode-cloud-integrations/src/framework.rs",
+          "contents": "tenant identity mapping, Hosted audit binding, PostgreSQL store and dispatch",
+          "implementationBeadId": "winwincode-cloud-ca1.6.1"
+        },
+        {
+          "owner": "winwincode-enterprise",
+          "targetPath": "crates/winwincode-enterprise-integrations/src/framework.rs",
+          "contents": "organization identity mapping, customer audit binding, PostgreSQL store and dispatch",
+          "implementationBeadId": "enterprise-5uz.5.1"
+        }
+      ]
+    },
+    {
+      "path": "crates/winwincode-integration/src/github.rs",
+      "lines": 1548,
+      "sha256": "b497e02109e7ba46183835a2e40dcf82ca1e52a6b21b24f2b8ccc83706143e54",
+      "decision": "split-required",
+      "rationale": "The provider protocol and bounded transport are reusable, but the same file contains Enterprise-named identities/connectors, credential resolution, endpoint configuration, and in Slack a SQLite rate-limit ledger.",
+      "splitTargets": [
+        {
+          "owner": "winwincode",
+          "targetPath": "crates/winwincode-connector-github/src/lib.rs",
+          "contents": "provider protocol, request/response mapping, bounded transport, verifier, and injected credential/config ports",
+          "implementationBeadId": "winwincode-edition.2.4.4"
+        },
+        {
+          "owner": "winwincode-cloud",
+          "targetPath": "crates/winwincode-cloud-integrations/src/github.rs",
+          "contents": "Hosted OAuth/app registration, tenant credential broker, callback URL, egress and operator policy",
+          "implementationBeadId": "winwincode-cloud-ca1.6.1"
+        },
+        {
+          "owner": "winwincode-enterprise",
+          "targetPath": "crates/winwincode-enterprise-integrations/src/github.rs",
+          "contents": "customer app registration, credential file/secret provider, CA/proxy, callback URL, and organization policy",
+          "implementationBeadId": "enterprise-5uz.5.1"
+        }
+      ]
+    },
+    {
+      "path": "crates/winwincode-integration/src/jira.rs",
+      "lines": 1426,
+      "sha256": "4c2ff79f8fc900df96ff0f0a8c4e2a18089f55ca23855f628d54d93c189413bc",
+      "decision": "split-required",
+      "rationale": "The provider protocol and bounded transport are reusable, but the same file contains Enterprise-named identities/connectors, credential resolution, endpoint configuration, and in Slack a SQLite rate-limit ledger.",
+      "splitTargets": [
+        {
+          "owner": "winwincode",
+          "targetPath": "crates/winwincode-connector-jira/src/lib.rs",
+          "contents": "provider protocol, request/response mapping, bounded transport, verifier, and injected credential/config ports",
+          "implementationBeadId": "winwincode-edition.2.4.4"
+        },
+        {
+          "owner": "winwincode-cloud",
+          "targetPath": "crates/winwincode-cloud-integrations/src/jira.rs",
+          "contents": "Hosted OAuth/app registration, tenant credential broker, callback URL, egress and operator policy",
+          "implementationBeadId": "winwincode-cloud-ca1.6.1"
+        },
+        {
+          "owner": "winwincode-enterprise",
+          "targetPath": "crates/winwincode-enterprise-integrations/src/jira.rs",
+          "contents": "customer app registration, credential file/secret provider, CA/proxy, callback URL, and organization policy",
+          "implementationBeadId": "enterprise-5uz.5.1"
+        }
+      ]
+    },
+    {
+      "path": "crates/winwincode-integration/src/lib.rs",
+      "lines": 81,
+      "sha256": "192f90a11d11661704db66c42fbadad569927d791c45edf0da8d23f653ec12f6",
+      "decision": "split-required",
+      "rationale": "The current manifest, crate exports, and documentation combine neutral framework, six providers, SQLite state, and Enterprise naming.",
+      "splitTargets": [
+        {
+          "owner": "winwincode",
+          "targetPath": "crates/winwincode-integration-core/src/lib.rs",
+          "contents": "neutral integration package metadata and exports",
+          "implementationBeadId": "winwincode-edition.2.4.4"
+        },
+        {
+          "owner": "winwincode",
+          "targetPath": "crates/winwincode-integration-sqlite/src/lib.rs",
+          "contents": "Community SQLite adapter metadata and exports",
+          "implementationBeadId": "winwincode-edition.2.4.4"
+        },
+        {
+          "owner": "winwincode-cloud",
+          "targetPath": "crates/winwincode-cloud-integrations/src/lib.rs",
+          "contents": "Hosted integration composition metadata",
+          "implementationBeadId": "winwincode-cloud-ca1.6.1"
+        },
+        {
+          "owner": "winwincode-enterprise",
+          "targetPath": "crates/winwincode-enterprise-integrations/src/lib.rs",
+          "contents": "customer integration composition metadata",
+          "implementationBeadId": "enterprise-5uz.5.1"
+        }
+      ]
+    },
+    {
+      "path": "crates/winwincode-integration/src/linear.rs",
+      "lines": 1615,
+      "sha256": "adedae975bb9e1a3666f267e5519690e2c085f81dbb5594217f9890d3cb149fe",
+      "decision": "split-required",
+      "rationale": "The provider protocol and bounded transport are reusable, but the same file contains Enterprise-named identities/connectors, credential resolution, endpoint configuration, and in Slack a SQLite rate-limit ledger.",
+      "splitTargets": [
+        {
+          "owner": "winwincode",
+          "targetPath": "crates/winwincode-connector-linear/src/lib.rs",
+          "contents": "provider protocol, request/response mapping, bounded transport, verifier, and injected credential/config ports",
+          "implementationBeadId": "winwincode-edition.2.4.4"
+        },
+        {
+          "owner": "winwincode-cloud",
+          "targetPath": "crates/winwincode-cloud-integrations/src/linear.rs",
+          "contents": "Hosted OAuth/app registration, tenant credential broker, callback URL, egress and operator policy",
+          "implementationBeadId": "winwincode-cloud-ca1.6.1"
+        },
+        {
+          "owner": "winwincode-enterprise",
+          "targetPath": "crates/winwincode-enterprise-integrations/src/linear.rs",
+          "contents": "customer app registration, credential file/secret provider, CA/proxy, callback URL, and organization policy",
+          "implementationBeadId": "enterprise-5uz.5.1"
+        }
+      ]
+    },
+    {
+      "path": "crates/winwincode-integration/src/model.rs",
+      "lines": 1255,
+      "sha256": "83da1b8e00f67bda854380b0f13c9f8f64f8cf9ebf39c61ae33f8fa4ddfa7271",
+      "decision": "split-required",
+      "rationale": "The reusable connector state machine is directly expressed with EnterpriseIntegrationId, AuditScope tenant checks, and a concrete IntegrationStorage value.",
+      "splitTargets": [
+        {
+          "owner": "winwincode",
+          "targetPath": "crates/winwincode-integration-core/src/model.rs",
+          "contents": "product-neutral integration identity, scope port, connector authority, receipts, retry state machine, and storage port",
+          "implementationBeadId": "winwincode-edition.2.4.4"
+        },
+        {
+          "owner": "winwincode-cloud",
+          "targetPath": "crates/winwincode-cloud-integrations/src/framework.rs",
+          "contents": "tenant identity mapping, Hosted audit binding, PostgreSQL store and dispatch",
+          "implementationBeadId": "winwincode-cloud-ca1.6.1"
+        },
+        {
+          "owner": "winwincode-enterprise",
+          "targetPath": "crates/winwincode-enterprise-integrations/src/framework.rs",
+          "contents": "organization identity mapping, customer audit binding, PostgreSQL store and dispatch",
+          "implementationBeadId": "enterprise-5uz.5.1"
+        }
+      ]
+    },
+    {
+      "path": "crates/winwincode-integration/src/ports.rs",
+      "lines": 177,
+      "sha256": "9e6632455aae2065ef08fac9cdf103c229c43bf391fa2c419de021df6a2f0610",
+      "decision": "owned",
+      "owner": "winwincode",
+      "targetPath": "crates/winwincode-integration-core/src/ports.rs",
+      "rationale": "The secret-safe failures and connector call/signature ports do not select a product, provider credential source, or persistence adapter.",
+      "publication": "optional-infrastructure-package",
+      "implementationBeadId": "winwincode-edition.2.4.4"
+    },
+    {
+      "path": "crates/winwincode-integration/src/slack.rs",
+      "lines": 1838,
+      "sha256": "c01662c4f6e95a2de2d9ec8ec35fd9e65390c8f24a5969efcd824cf13858db20",
+      "decision": "split-required",
+      "rationale": "The provider protocol and bounded transport are reusable, but the same file contains Enterprise-named identities/connectors, credential resolution, endpoint configuration, and in Slack a SQLite rate-limit ledger.",
+      "splitTargets": [
+        {
+          "owner": "winwincode",
+          "targetPath": "crates/winwincode-connector-slack/src/lib.rs",
+          "contents": "provider protocol, request/response mapping, bounded transport, verifier, and injected credential/config ports",
+          "implementationBeadId": "winwincode-edition.2.4.4"
+        },
+        {
+          "owner": "winwincode-cloud",
+          "targetPath": "crates/winwincode-cloud-integrations/src/slack.rs",
+          "contents": "Hosted OAuth/app registration, tenant credential broker, callback URL, egress and operator policy",
+          "implementationBeadId": "winwincode-cloud-ca1.6.1"
+        },
+        {
+          "owner": "winwincode-enterprise",
+          "targetPath": "crates/winwincode-enterprise-integrations/src/slack.rs",
+          "contents": "customer app registration, credential file/secret provider, CA/proxy, callback URL, and organization policy",
+          "implementationBeadId": "enterprise-5uz.5.1"
+        },
+        {
+          "owner": "winwincode",
+          "targetPath": "crates/winwincode-integration-sqlite/src/slack_rate_limit.rs",
+          "contents": "Community SQLite rate-limit and installation ledger",
+          "implementationBeadId": "winwincode-edition.2.4.4"
+        }
+      ]
+    },
+    {
+      "path": "crates/winwincode-integration/src/storage.rs",
+      "lines": 1630,
+      "sha256": "6161b61499f6fdf22ba0aec1f39f87bb1ed4ebe7a667aba3bfebe674a0641d56",
+      "decision": "owned",
+      "owner": "winwincode",
+      "targetPath": "crates/winwincode-integration-sqlite/src/lib.rs",
+      "rationale": "This file is specifically the SQLite connector authority and retry store; it remains a Community adapter and is not consumed by Cloud or Enterprise.",
+      "publication": "community-internal-not-cross-repository",
+      "implementationBeadId": "winwincode-edition.2.4.4"
+    },
+    {
+      "path": "crates/winwincode-integration/src/teams.rs",
+      "lines": 1612,
+      "sha256": "4227bac7a5563a0b46de1d846d54b3a50cd154d1c7468592edc1367ce1d2f8af",
+      "decision": "split-required",
+      "rationale": "The provider protocol and bounded transport are reusable, but the same file contains Enterprise-named identities/connectors, credential resolution, endpoint configuration, and in Slack a SQLite rate-limit ledger.",
+      "splitTargets": [
+        {
+          "owner": "winwincode",
+          "targetPath": "crates/winwincode-connector-teams/src/lib.rs",
+          "contents": "provider protocol, request/response mapping, bounded transport, verifier, and injected credential/config ports",
+          "implementationBeadId": "winwincode-edition.2.4.4"
+        },
+        {
+          "owner": "winwincode-cloud",
+          "targetPath": "crates/winwincode-cloud-integrations/src/teams.rs",
+          "contents": "Hosted OAuth/app registration, tenant credential broker, callback URL, egress and operator policy",
+          "implementationBeadId": "winwincode-cloud-ca1.6.1"
+        },
+        {
+          "owner": "winwincode-enterprise",
+          "targetPath": "crates/winwincode-enterprise-integrations/src/teams.rs",
+          "contents": "customer app registration, credential file/secret provider, CA/proxy, callback URL, and organization policy",
+          "implementationBeadId": "enterprise-5uz.5.1"
+        }
+      ]
+    },
+    {
+      "path": "crates/winwincode-integration/src/webhook.rs",
+      "lines": 1327,
+      "sha256": "5d4468d98ca5a4607d4f409c087a431e5563a6084cec03118596c4a0df969a57",
+      "decision": "split-required",
+      "rationale": "The provider protocol and bounded transport are reusable, but the same file contains Enterprise-named identities/connectors, credential resolution, endpoint configuration, and in Slack a SQLite rate-limit ledger.",
+      "splitTargets": [
+        {
+          "owner": "winwincode",
+          "targetPath": "crates/winwincode-connector-webhook/src/lib.rs",
+          "contents": "provider protocol, request/response mapping, bounded transport, verifier, and injected credential/config ports",
+          "implementationBeadId": "winwincode-edition.2.4.4"
+        },
+        {
+          "owner": "winwincode-cloud",
+          "targetPath": "crates/winwincode-cloud-integrations/src/webhook.rs",
+          "contents": "Hosted OAuth/app registration, tenant credential broker, callback URL, egress and operator policy",
+          "implementationBeadId": "winwincode-cloud-ca1.6.1"
+        },
+        {
+          "owner": "winwincode-enterprise",
+          "targetPath": "crates/winwincode-enterprise-integrations/src/webhook.rs",
+          "contents": "customer app registration, credential file/secret provider, CA/proxy, callback URL, and organization policy",
+          "implementationBeadId": "enterprise-5uz.5.1"
+        }
+      ]
+    },
+    {
+      "path": "crates/winwincode-integration/tests/github_connector.rs",
+      "lines": 911,
+      "sha256": "96dff48b50eb355be7ace6b4a252e130d1d1c7b6c7e2680ba134b9be0cfb21da",
+      "decision": "split-required",
+      "rationale": "The test combines reusable provider or retry semantics with tenant/Enterprise identities, SQLite persistence, live credential files, or product audit/publication composition.",
+      "splitTargets": [
+        {
+          "owner": "winwincode",
+          "targetPath": "crates/winwincode-integration-core/tests/github_connector.rs",
+          "contents": "storage-neutral framework behavior or shared provider contract assertions",
+          "implementationBeadId": "winwincode-edition.2.4.4"
+        },
+        {
+          "owner": "winwincode",
+          "targetPath": "crates/winwincode-integration-sqlite/tests/github_connector.rs",
+          "contents": "Community SQLite restart, replay, rate-limit, and permission assertions when applicable",
+          "implementationBeadId": "winwincode-edition.2.4.4"
+        },
+        {
+          "owner": "winwincode-cloud",
+          "targetPath": "crates/winwincode-cloud-integrations/tests/github_connector.rs",
+          "contents": "Hosted tenant, PostgreSQL, OAuth/app broker, callback, egress, and live gate assertions",
+          "implementationBeadId": "winwincode-cloud-ca1.6.1"
+        },
+        {
+          "owner": "winwincode-enterprise",
+          "targetPath": "crates/winwincode-enterprise-integrations/tests/github_connector.rs",
+          "contents": "customer identity, PostgreSQL, CA/proxy, credential source, callback, and live gate assertions",
+          "implementationBeadId": "enterprise-5uz.5.1"
+        }
+      ]
+    },
+    {
+      "path": "crates/winwincode-integration/tests/github_live_gate.rs",
+      "lines": 2016,
+      "sha256": "469f8091a769bef2453ab17fa8b68ddf972d1dc6c4029e191c3b22db89c2d6e6",
+      "decision": "split-required",
+      "rationale": "The test combines reusable provider or retry semantics with tenant/Enterprise identities, SQLite persistence, live credential files, or product audit/publication composition.",
+      "splitTargets": [
+        {
+          "owner": "winwincode",
+          "targetPath": "crates/winwincode-integration-core/tests/github_live_gate.rs",
+          "contents": "storage-neutral framework behavior or shared provider contract assertions",
+          "implementationBeadId": "winwincode-edition.2.4.4"
+        },
+        {
+          "owner": "winwincode",
+          "targetPath": "crates/winwincode-integration-sqlite/tests/github_live_gate.rs",
+          "contents": "Community SQLite restart, replay, rate-limit, and permission assertions when applicable",
+          "implementationBeadId": "winwincode-edition.2.4.4"
+        },
+        {
+          "owner": "winwincode-cloud",
+          "targetPath": "crates/winwincode-cloud-integrations/tests/github_live_gate.rs",
+          "contents": "Hosted tenant, PostgreSQL, OAuth/app broker, callback, egress, and live gate assertions",
+          "implementationBeadId": "winwincode-cloud-ca1.6.1"
+        },
+        {
+          "owner": "winwincode-enterprise",
+          "targetPath": "crates/winwincode-enterprise-integrations/tests/github_live_gate.rs",
+          "contents": "customer identity, PostgreSQL, CA/proxy, credential source, callback, and live gate assertions",
+          "implementationBeadId": "enterprise-5uz.5.1"
+        }
+      ]
+    },
+    {
+      "path": "crates/winwincode-integration/tests/integration_framework.rs",
+      "lines": 1049,
+      "sha256": "87c99f6f5ea0a6d53a06bdca7fd6021d8863bc59d0030ac7272139424e64d2f9",
+      "decision": "split-required",
+      "rationale": "The test combines reusable provider or retry semantics with tenant/Enterprise identities, SQLite persistence, live credential files, or product audit/publication composition.",
+      "splitTargets": [
+        {
+          "owner": "winwincode",
+          "targetPath": "crates/winwincode-integration-core/tests/integration_framework.rs",
+          "contents": "storage-neutral framework behavior or shared provider contract assertions",
+          "implementationBeadId": "winwincode-edition.2.4.4"
+        },
+        {
+          "owner": "winwincode",
+          "targetPath": "crates/winwincode-integration-sqlite/tests/integration_framework.rs",
+          "contents": "Community SQLite restart, replay, rate-limit, and permission assertions when applicable",
+          "implementationBeadId": "winwincode-edition.2.4.4"
+        },
+        {
+          "owner": "winwincode-cloud",
+          "targetPath": "crates/winwincode-cloud-integrations/tests/integration_framework.rs",
+          "contents": "Hosted tenant, PostgreSQL, OAuth/app broker, callback, egress, and live gate assertions",
+          "implementationBeadId": "winwincode-cloud-ca1.6.1"
+        },
+        {
+          "owner": "winwincode-enterprise",
+          "targetPath": "crates/winwincode-enterprise-integrations/tests/integration_framework.rs",
+          "contents": "customer identity, PostgreSQL, CA/proxy, credential source, callback, and live gate assertions",
+          "implementationBeadId": "enterprise-5uz.5.1"
+        }
+      ]
+    },
+    {
+      "path": "crates/winwincode-integration/tests/jira_connector.rs",
+      "lines": 2322,
+      "sha256": "1fe689919792c3f2e2d9435ba731f08832e283d3274eedda975c3c1ca650bf4a",
+      "decision": "split-required",
+      "rationale": "The test combines reusable provider or retry semantics with tenant/Enterprise identities, SQLite persistence, live credential files, or product audit/publication composition.",
+      "splitTargets": [
+        {
+          "owner": "winwincode",
+          "targetPath": "crates/winwincode-integration-core/tests/jira_connector.rs",
+          "contents": "storage-neutral framework behavior or shared provider contract assertions",
+          "implementationBeadId": "winwincode-edition.2.4.4"
+        },
+        {
+          "owner": "winwincode",
+          "targetPath": "crates/winwincode-integration-sqlite/tests/jira_connector.rs",
+          "contents": "Community SQLite restart, replay, rate-limit, and permission assertions when applicable",
+          "implementationBeadId": "winwincode-edition.2.4.4"
+        },
+        {
+          "owner": "winwincode-cloud",
+          "targetPath": "crates/winwincode-cloud-integrations/tests/jira_connector.rs",
+          "contents": "Hosted tenant, PostgreSQL, OAuth/app broker, callback, egress, and live gate assertions",
+          "implementationBeadId": "winwincode-cloud-ca1.6.1"
+        },
+        {
+          "owner": "winwincode-enterprise",
+          "targetPath": "crates/winwincode-enterprise-integrations/tests/jira_connector.rs",
+          "contents": "customer identity, PostgreSQL, CA/proxy, credential source, callback, and live gate assertions",
+          "implementationBeadId": "enterprise-5uz.5.1"
+        }
+      ]
+    },
+    {
+      "path": "crates/winwincode-integration/tests/linear_connector.rs",
+      "lines": 989,
+      "sha256": "2811e83ced8f471f7b128cd84e6862d323d483cb51a0a92f4237ad24a8b706ef",
+      "decision": "split-required",
+      "rationale": "The test combines reusable provider or retry semantics with tenant/Enterprise identities, SQLite persistence, live credential files, or product audit/publication composition.",
+      "splitTargets": [
+        {
+          "owner": "winwincode",
+          "targetPath": "crates/winwincode-integration-core/tests/linear_connector.rs",
+          "contents": "storage-neutral framework behavior or shared provider contract assertions",
+          "implementationBeadId": "winwincode-edition.2.4.4"
+        },
+        {
+          "owner": "winwincode",
+          "targetPath": "crates/winwincode-integration-sqlite/tests/linear_connector.rs",
+          "contents": "Community SQLite restart, replay, rate-limit, and permission assertions when applicable",
+          "implementationBeadId": "winwincode-edition.2.4.4"
+        },
+        {
+          "owner": "winwincode-cloud",
+          "targetPath": "crates/winwincode-cloud-integrations/tests/linear_connector.rs",
+          "contents": "Hosted tenant, PostgreSQL, OAuth/app broker, callback, egress, and live gate assertions",
+          "implementationBeadId": "winwincode-cloud-ca1.6.1"
+        },
+        {
+          "owner": "winwincode-enterprise",
+          "targetPath": "crates/winwincode-enterprise-integrations/tests/linear_connector.rs",
+          "contents": "customer identity, PostgreSQL, CA/proxy, credential source, callback, and live gate assertions",
+          "implementationBeadId": "enterprise-5uz.5.1"
+        }
+      ]
+    },
+    {
+      "path": "crates/winwincode-integration/tests/slack.rs",
+      "lines": 1299,
+      "sha256": "7c9643f04af12c848fe71bd21269bece9c85baacbc9a7bd1133edb01f3aaa316",
+      "decision": "split-required",
+      "rationale": "The test combines reusable provider or retry semantics with tenant/Enterprise identities, SQLite persistence, live credential files, or product audit/publication composition.",
+      "splitTargets": [
+        {
+          "owner": "winwincode",
+          "targetPath": "crates/winwincode-integration-core/tests/slack.rs",
+          "contents": "storage-neutral framework behavior or shared provider contract assertions",
+          "implementationBeadId": "winwincode-edition.2.4.4"
+        },
+        {
+          "owner": "winwincode",
+          "targetPath": "crates/winwincode-integration-sqlite/tests/slack.rs",
+          "contents": "Community SQLite restart, replay, rate-limit, and permission assertions when applicable",
+          "implementationBeadId": "winwincode-edition.2.4.4"
+        },
+        {
+          "owner": "winwincode-cloud",
+          "targetPath": "crates/winwincode-cloud-integrations/tests/slack.rs",
+          "contents": "Hosted tenant, PostgreSQL, OAuth/app broker, callback, egress, and live gate assertions",
+          "implementationBeadId": "winwincode-cloud-ca1.6.1"
+        },
+        {
+          "owner": "winwincode-enterprise",
+          "targetPath": "crates/winwincode-enterprise-integrations/tests/slack.rs",
+          "contents": "customer identity, PostgreSQL, CA/proxy, credential source, callback, and live gate assertions",
+          "implementationBeadId": "enterprise-5uz.5.1"
+        }
+      ]
+    },
+    {
+      "path": "crates/winwincode-integration/tests/slack_live_gate.rs",
+      "lines": 1492,
+      "sha256": "0bb9b74c4fc7f758b8ceee962913e63a1bb7e2dfc68f92b79768867b14803ed2",
+      "decision": "split-required",
+      "rationale": "The test combines reusable provider or retry semantics with tenant/Enterprise identities, SQLite persistence, live credential files, or product audit/publication composition.",
+      "splitTargets": [
+        {
+          "owner": "winwincode",
+          "targetPath": "crates/winwincode-integration-core/tests/slack_live_gate.rs",
+          "contents": "storage-neutral framework behavior or shared provider contract assertions",
+          "implementationBeadId": "winwincode-edition.2.4.4"
+        },
+        {
+          "owner": "winwincode",
+          "targetPath": "crates/winwincode-integration-sqlite/tests/slack_live_gate.rs",
+          "contents": "Community SQLite restart, replay, rate-limit, and permission assertions when applicable",
+          "implementationBeadId": "winwincode-edition.2.4.4"
+        },
+        {
+          "owner": "winwincode-cloud",
+          "targetPath": "crates/winwincode-cloud-integrations/tests/slack_live_gate.rs",
+          "contents": "Hosted tenant, PostgreSQL, OAuth/app broker, callback, egress, and live gate assertions",
+          "implementationBeadId": "winwincode-cloud-ca1.6.1"
+        },
+        {
+          "owner": "winwincode-enterprise",
+          "targetPath": "crates/winwincode-enterprise-integrations/tests/slack_live_gate.rs",
+          "contents": "customer identity, PostgreSQL, CA/proxy, credential source, callback, and live gate assertions",
+          "implementationBeadId": "enterprise-5uz.5.1"
+        }
+      ]
+    },
+    {
+      "path": "crates/winwincode-integration/tests/slack_rate_limit_and_installation.rs",
+      "lines": 504,
+      "sha256": "4fc5aeaf6c931dad6f0bf6dfd503e6a0826be1b914c80ff25b359e30c29302fb",
+      "decision": "split-required",
+      "rationale": "The test combines reusable provider or retry semantics with tenant/Enterprise identities, SQLite persistence, live credential files, or product audit/publication composition.",
+      "splitTargets": [
+        {
+          "owner": "winwincode",
+          "targetPath": "crates/winwincode-integration-core/tests/slack_rate_limit_and_installation.rs",
+          "contents": "storage-neutral framework behavior or shared provider contract assertions",
+          "implementationBeadId": "winwincode-edition.2.4.4"
+        },
+        {
+          "owner": "winwincode",
+          "targetPath": "crates/winwincode-integration-sqlite/tests/slack_rate_limit_and_installation.rs",
+          "contents": "Community SQLite restart, replay, rate-limit, and permission assertions when applicable",
+          "implementationBeadId": "winwincode-edition.2.4.4"
+        },
+        {
+          "owner": "winwincode-cloud",
+          "targetPath": "crates/winwincode-cloud-integrations/tests/slack_rate_limit_and_installation.rs",
+          "contents": "Hosted tenant, PostgreSQL, OAuth/app broker, callback, egress, and live gate assertions",
+          "implementationBeadId": "winwincode-cloud-ca1.6.1"
+        },
+        {
+          "owner": "winwincode-enterprise",
+          "targetPath": "crates/winwincode-enterprise-integrations/tests/slack_rate_limit_and_installation.rs",
+          "contents": "customer identity, PostgreSQL, CA/proxy, credential source, callback, and live gate assertions",
+          "implementationBeadId": "enterprise-5uz.5.1"
+        }
+      ]
+    },
+    {
+      "path": "crates/winwincode-integration/tests/teams.rs",
+      "lines": 1025,
+      "sha256": "6fa0d892554f850d4b2b19e48e00667ca5b01f42fed57f99c2e19d4ee5697cd1",
+      "decision": "split-required",
+      "rationale": "The test combines reusable provider or retry semantics with tenant/Enterprise identities, SQLite persistence, live credential files, or product audit/publication composition.",
+      "splitTargets": [
+        {
+          "owner": "winwincode",
+          "targetPath": "crates/winwincode-integration-core/tests/teams.rs",
+          "contents": "storage-neutral framework behavior or shared provider contract assertions",
+          "implementationBeadId": "winwincode-edition.2.4.4"
+        },
+        {
+          "owner": "winwincode",
+          "targetPath": "crates/winwincode-integration-sqlite/tests/teams.rs",
+          "contents": "Community SQLite restart, replay, rate-limit, and permission assertions when applicable",
+          "implementationBeadId": "winwincode-edition.2.4.4"
+        },
+        {
+          "owner": "winwincode-cloud",
+          "targetPath": "crates/winwincode-cloud-integrations/tests/teams.rs",
+          "contents": "Hosted tenant, PostgreSQL, OAuth/app broker, callback, egress, and live gate assertions",
+          "implementationBeadId": "winwincode-cloud-ca1.6.1"
+        },
+        {
+          "owner": "winwincode-enterprise",
+          "targetPath": "crates/winwincode-enterprise-integrations/tests/teams.rs",
+          "contents": "customer identity, PostgreSQL, CA/proxy, credential source, callback, and live gate assertions",
+          "implementationBeadId": "enterprise-5uz.5.1"
+        }
+      ]
+    },
+    {
+      "path": "crates/winwincode-integration/tests/webhook_connector.rs",
+      "lines": 813,
+      "sha256": "a63c4a20e22136699ddebf49c38714699b5e566621adfbf52c62d01afc9c9c71",
+      "decision": "split-required",
+      "rationale": "The test combines reusable provider or retry semantics with tenant/Enterprise identities, SQLite persistence, live credential files, or product audit/publication composition.",
+      "splitTargets": [
+        {
+          "owner": "winwincode",
+          "targetPath": "crates/winwincode-integration-core/tests/webhook_connector.rs",
+          "contents": "storage-neutral framework behavior or shared provider contract assertions",
+          "implementationBeadId": "winwincode-edition.2.4.4"
+        },
+        {
+          "owner": "winwincode",
+          "targetPath": "crates/winwincode-integration-sqlite/tests/webhook_connector.rs",
+          "contents": "Community SQLite restart, replay, rate-limit, and permission assertions when applicable",
+          "implementationBeadId": "winwincode-edition.2.4.4"
+        },
+        {
+          "owner": "winwincode-cloud",
+          "targetPath": "crates/winwincode-cloud-integrations/tests/webhook_connector.rs",
+          "contents": "Hosted tenant, PostgreSQL, OAuth/app broker, callback, egress, and live gate assertions",
+          "implementationBeadId": "winwincode-cloud-ca1.6.1"
+        },
+        {
+          "owner": "winwincode-enterprise",
+          "targetPath": "crates/winwincode-enterprise-integrations/tests/webhook_connector.rs",
+          "contents": "customer identity, PostgreSQL, CA/proxy, credential source, callback, and live gate assertions",
+          "implementationBeadId": "enterprise-5uz.5.1"
+        }
+      ]
+    },
+    {
+      "path": "crates/winwincode-object-store/Cargo.toml",
+      "lines": 27,
+      "sha256": "690854e75b6125cff835b2a17b13adc716b7a26755e27b6c36cd58beb5fdb129",
+      "decision": "split-required",
+      "rationale": "The package surface and documentation currently present one deployment policy as the universal S3 adapter.",
+      "splitTargets": [
+        {
+          "owner": "winwincode",
+          "targetPath": "crates/winwincode-s3-artifact-adapter/Cargo.toml",
+          "contents": "optional neutral S3 adapter package metadata",
+          "implementationBeadId": "winwincode-edition.2.4.2"
+        },
+        {
+          "owner": "winwincode-cloud",
+          "targetPath": "crates/winwincode-cloud-object-store/Cargo.toml",
+          "contents": "Hosted object-storage composition",
+          "implementationBeadId": "winwincode-cloud-ca1.8.4"
+        },
+        {
+          "owner": "winwincode-enterprise",
+          "targetPath": "crates/winwincode-enterprise-object-store/Cargo.toml",
+          "contents": "customer object-storage composition",
+          "implementationBeadId": "enterprise-5uz.8.1"
+        }
+      ]
+    },
+    {
+      "path": "crates/winwincode-object-store/README.md",
+      "lines": 10,
+      "sha256": "4bcefa0fd7e9699cdbf4bb2770cee7655fc631b33d979e2c132f564e69c74036",
+      "decision": "split-required",
+      "rationale": "The package surface and documentation currently present one deployment policy as the universal S3 adapter.",
+      "splitTargets": [
+        {
+          "owner": "winwincode",
+          "targetPath": "crates/winwincode-s3-artifact-adapter/README.md",
+          "contents": "optional neutral S3 adapter package metadata",
+          "implementationBeadId": "winwincode-edition.2.4.2"
+        },
+        {
+          "owner": "winwincode-cloud",
+          "targetPath": "crates/winwincode-cloud-object-store/README.md",
+          "contents": "Hosted object-storage composition",
+          "implementationBeadId": "winwincode-cloud-ca1.8.4"
+        },
+        {
+          "owner": "winwincode-enterprise",
+          "targetPath": "crates/winwincode-enterprise-object-store/README.md",
+          "contents": "customer object-storage composition",
+          "implementationBeadId": "enterprise-5uz.8.1"
+        }
+      ]
+    },
+    {
+      "path": "crates/winwincode-object-store/src/lib.rs",
+      "lines": 1324,
+      "sha256": "a8a7d6da20d3e69ec1a517219875c1dbd2821c44db596fea60f2a9eeee9961b9",
+      "decision": "split-required",
+      "rationale": "One file combines reusable HTTPS/object integrity logic with a Bearer workload credential, mandatory aws:kms headers, deployment endpoint configuration, backup scope, and concrete ureq transport.",
+      "splitTargets": [
+        {
+          "owner": "winwincode",
+          "targetPath": "crates/winwincode-s3-artifact-adapter/src/lib.rs",
+          "contents": "bounded S3-compatible byte protocol, integrity receipts, TLS roots, timeouts, and injected identity/encryption ports",
+          "implementationBeadId": "winwincode-edition.2.4.2"
+        },
+        {
+          "owner": "winwincode-cloud",
+          "targetPath": "crates/winwincode-cloud-object-store/src/config.rs",
+          "contents": "Hosted bucket/prefix, managed KMS, workload identity, region, retention, and managed TLS",
+          "implementationBeadId": "winwincode-cloud-ca1.8.4"
+        },
+        {
+          "owner": "winwincode-enterprise",
+          "targetPath": "crates/winwincode-enterprise-object-store/src/config.rs",
+          "contents": "customer endpoint/bucket/prefix, customer CA, credential source, encryption capability, proxy, and offline diagnostics",
+          "implementationBeadId": "enterprise-5uz.8.1"
+        }
+      ]
+    },
+    {
+      "path": "crates/winwincode-object-store/tests/s3_artifact.rs",
+      "lines": 1237,
+      "sha256": "b1ed5fbe6f5b7f7b4f9b5718fb9fa2698465dc7a8c41229340027897e4d4cfd1",
+      "decision": "split-required",
+      "rationale": "The TLS fixture validates reusable transport, but the same test also fixes Hosted-style Bearer identity and AWS KMS deployment policy.",
+      "splitTargets": [
+        {
+          "owner": "winwincode",
+          "targetPath": "crates/winwincode-s3-artifact-adapter/tests/s3_protocol.rs",
+          "contents": "TLS, multipart, retry, ranges, digest, cleanup, and injected port tests",
+          "implementationBeadId": "winwincode-edition.2.4.2"
+        },
+        {
+          "owner": "winwincode-cloud",
+          "targetPath": "crates/winwincode-cloud-object-store/tests/hosted_s3.rs",
+          "contents": "managed identity, KMS, tenant prefix, retention, and live Hosted endpoint tests",
+          "implementationBeadId": "winwincode-cloud-ca1.8.4"
+        },
+        {
+          "owner": "winwincode-enterprise",
+          "targetPath": "crates/winwincode-enterprise-object-store/tests/customer_s3.rs",
+          "contents": "customer CA, proxy, S3-compatible endpoint, credential rotation, restore, and live customer fixture tests",
+          "implementationBeadId": "enterprise-5uz.8.1"
+        }
+      ]
+    },
+    {
+      "path": "crates/winwincode-observability/Cargo.toml",
+      "lines": 16,
+      "sha256": "9039d89cde8482ab602409eb8f8a08c9ddc7a97d1375ff8915fca41457642230",
+      "decision": "split-required",
+      "rationale": "The current single package depends directly on rusqlite, so its package boundary cannot be consumed by PostgreSQL products.",
+      "splitTargets": [
+        {
+          "owner": "winwincode",
+          "targetPath": "crates/winwincode-observability-core/Cargo.toml",
+          "contents": "optional neutral observability package metadata",
+          "implementationBeadId": "winwincode-edition.2.4.3"
+        },
+        {
+          "owner": "winwincode",
+          "targetPath": "crates/winwincode-observability-sqlite/Cargo.toml",
+          "contents": "Community-only SQLite adapter metadata",
+          "implementationBeadId": "winwincode-edition.2.4.3"
+        },
+        {
+          "owner": "winwincode-cloud",
+          "targetPath": "crates/winwincode-cloud-observability/Cargo.toml",
+          "contents": "Hosted observability product metadata",
+          "implementationBeadId": "winwincode-cloud-ca1.11.10"
+        },
+        {
+          "owner": "winwincode-enterprise",
+          "targetPath": "crates/winwincode-enterprise-observability/Cargo.toml",
+          "contents": "customer observability product metadata",
+          "implementationBeadId": "enterprise-5uz.8.2"
+        }
+      ]
+    },
+    {
+      "path": "crates/winwincode-observability/src/lib.rs",
+      "lines": 1972,
+      "sha256": "c87454cb24309128572995c86616a6d437f4ed83edf10dd576e047dcc117f35f",
+      "decision": "split-required",
+      "rationale": "The file mixes neutral observation, metric, trace, and alert rules with a concrete SQLite schema, transactions, retention, and file permissions.",
+      "splitTargets": [
+        {
+          "owner": "winwincode",
+          "targetPath": "crates/winwincode-observability-core/src/lib.rs",
+          "contents": "closed telemetry types, validation, aggregation rules, alert state machine, and storage/export ports",
+          "implementationBeadId": "winwincode-edition.2.4.3"
+        },
+        {
+          "owner": "winwincode",
+          "targetPath": "crates/winwincode-observability-sqlite/src/lib.rs",
+          "contents": "Community-only SQLite receipt, metric, trace, alert, retention, and WAL adapter",
+          "implementationBeadId": "winwincode-edition.2.4.3"
+        },
+        {
+          "owner": "winwincode-cloud",
+          "targetPath": "crates/winwincode-cloud-observability/src/lib.rs",
+          "contents": "Hosted PostgreSQL retention, managed exporter, tenant dashboards, alerts, and operator routing",
+          "implementationBeadId": "winwincode-cloud-ca1.11.10"
+        },
+        {
+          "owner": "winwincode-enterprise",
+          "targetPath": "crates/winwincode-enterprise-observability/src/lib.rs",
+          "contents": "customer PostgreSQL/local retention, customer OTLP endpoint, CA/proxy, alerts, and offline export",
+          "implementationBeadId": "enterprise-5uz.8.2"
+        }
+      ]
+    },
+    {
+      "path": "crates/winwincode-observability/tests/fixtures/alert-transitions.v1.json",
+      "lines": 58,
+      "sha256": "cb96912ce8443622be533cb2a16dfb90a000b18772b67840005f141bf6e830a8",
+      "decision": "owned",
+      "owner": "winwincode",
+      "targetPath": "crates/winwincode-observability-core/tests/fixtures/alert-transitions.v1.json",
+      "rationale": "The fixture contains product-neutral stable alert transitions without a storage or deployment configuration.",
+      "publication": "optional-infrastructure-package",
+      "implementationBeadId": "winwincode-edition.2.4.3"
+    },
+    {
+      "path": "crates/winwincode-observability/tests/observability.rs",
+      "lines": 816,
+      "sha256": "b2d9f2c77ed31e713384d79d7511941a8060ec53c83f179ebedd764fe152bd9b",
+      "decision": "split-required",
+      "rationale": "The behavioral tests cover neutral validation and alert rules together with SQLite WAL, file mode, retention, and restart behavior.",
+      "splitTargets": [
+        {
+          "owner": "winwincode",
+          "targetPath": "crates/winwincode-observability-core/tests/core.rs",
+          "contents": "closed dimensions, trace derivation, metric aggregation, and alert transition tests",
+          "implementationBeadId": "winwincode-edition.2.4.3"
+        },
+        {
+          "owner": "winwincode",
+          "targetPath": "crates/winwincode-observability-sqlite/tests/sqlite.rs",
+          "contents": "Community SQLite replay, WAL, permissions, retention, rollback, and restart tests",
+          "implementationBeadId": "winwincode-edition.2.4.3"
+        },
+        {
+          "owner": "winwincode-cloud",
+          "targetPath": "crates/winwincode-cloud-observability/tests/hosted.rs",
+          "contents": "Hosted PostgreSQL, exporter, tenant isolation, capacity, and managed alert tests",
+          "implementationBeadId": "winwincode-cloud-ca1.11.10"
+        },
+        {
+          "owner": "winwincode-enterprise",
+          "targetPath": "crates/winwincode-enterprise-observability/tests/customer.rs",
+          "contents": "customer exporter, CA/proxy, retention, offline export, and restart tests",
+          "implementationBeadId": "enterprise-5uz.8.2"
+        }
+      ]
+    },
+    {
+      "path": "crates/winwincode-postgres/Cargo.toml",
+      "lines": 20,
+      "sha256": "50c919cdb322f0c8ee779bafc8d94dc1f6d2be168857828d09480d568985efc7",
+      "decision": "split-required",
+      "rationale": "The current crate manifest, exports, and documentation describe both neutral protocol and tenant-specific product behavior and must be replaced by three clear package surfaces.",
+      "splitTargets": [
+        {
+          "owner": "winwincode",
+          "targetPath": "crates/winwincode-postgres-adapter/Cargo.toml",
+          "contents": "optional neutral PostgreSQL adapter package metadata and exports",
+          "implementationBeadId": "winwincode-edition.2.4.1"
+        },
+        {
+          "owner": "winwincode-cloud",
+          "targetPath": "crates/winwincode-cloud-postgres/Cargo.toml",
+          "contents": "Hosted PostgreSQL product composition",
+          "implementationBeadId": "winwincode-cloud-ca1.5.1"
+        },
+        {
+          "owner": "winwincode-enterprise",
+          "targetPath": "crates/winwincode-enterprise-postgres/Cargo.toml",
+          "contents": "customer PostgreSQL product composition",
+          "implementationBeadId": "enterprise-5uz.4.1"
+        }
+      ]
+    },
+    {
+      "path": "crates/winwincode-postgres/README.md",
+      "lines": 9,
+      "sha256": "6524d19f6507dde0378d4ed198243e2adca9cd91e8d9800f556df6c7b08c5406",
+      "decision": "split-required",
+      "rationale": "The current crate manifest, exports, and documentation describe both neutral protocol and tenant-specific product behavior and must be replaced by three clear package surfaces.",
+      "splitTargets": [
+        {
+          "owner": "winwincode",
+          "targetPath": "crates/winwincode-postgres-adapter/README.md",
+          "contents": "optional neutral PostgreSQL adapter package metadata and exports",
+          "implementationBeadId": "winwincode-edition.2.4.1"
+        },
+        {
+          "owner": "winwincode-cloud",
+          "targetPath": "crates/winwincode-cloud-postgres/README.md",
+          "contents": "Hosted PostgreSQL product composition",
+          "implementationBeadId": "winwincode-cloud-ca1.5.1"
+        },
+        {
+          "owner": "winwincode-enterprise",
+          "targetPath": "crates/winwincode-enterprise-postgres/README.md",
+          "contents": "customer PostgreSQL product composition",
+          "implementationBeadId": "enterprise-5uz.4.1"
+        }
+      ]
+    },
+    {
+      "path": "crates/winwincode-postgres/src/backup.rs",
+      "lines": 61,
+      "sha256": "65ea7f191c4ea56aa5b2c1b537e4e66e7977ed15555fcae2df100aca265e6c19",
+      "decision": "split-required",
+      "rationale": "The snapshot protocol is reusable, while backup scope, retention, and storage destination are product responsibilities.",
+      "splitTargets": [
+        {
+          "owner": "winwincode",
+          "targetPath": "crates/winwincode-postgres-adapter/src/backup_port.rs",
+          "contents": "secret-free PostgreSQL snapshot receipt adapter",
+          "implementationBeadId": "winwincode-edition.2.4.1"
+        },
+        {
+          "owner": "winwincode-cloud",
+          "targetPath": "crates/winwincode-cloud-postgres/src/backup.rs",
+          "contents": "Hosted backup role, schedule, retention, and managed destination binding",
+          "implementationBeadId": "winwincode-cloud-ca1.5.1"
+        },
+        {
+          "owner": "winwincode-enterprise",
+          "targetPath": "crates/winwincode-enterprise-postgres/src/backup.rs",
+          "contents": "customer backup role, destination, retention, and offline restore binding",
+          "implementationBeadId": "enterprise-5uz.4.1"
+        }
+      ]
+    },
+    {
+      "path": "crates/winwincode-postgres/src/error.rs",
+      "lines": 70,
+      "sha256": "ff2ede24f8a7d9f79c54fe6bb903e95fb5f03bb2c070614e508c1931b9a94bd8",
+      "decision": "owned",
+      "owner": "winwincode",
+      "targetPath": "crates/winwincode-postgres-adapter/src/error.rs",
+      "rationale": "The closed secret-safe error categories are independent of Hosted or customer configuration.",
+      "publication": "optional-infrastructure-package",
+      "implementationBeadId": "winwincode-edition.2.4.1"
+    },
+    {
+      "path": "crates/winwincode-postgres/src/lib.rs",
+      "lines": 19,
+      "sha256": "325aba3eac4224f429a217f4e5b8b8274bf5f5c02956eede3c298e0e0dd196d6",
+      "decision": "split-required",
+      "rationale": "The current crate manifest, exports, and documentation describe both neutral protocol and tenant-specific product behavior and must be replaced by three clear package surfaces.",
+      "splitTargets": [
+        {
+          "owner": "winwincode",
+          "targetPath": "crates/winwincode-postgres-adapter/src/lib.rs",
+          "contents": "optional neutral PostgreSQL adapter package metadata and exports",
+          "implementationBeadId": "winwincode-edition.2.4.1"
+        },
+        {
+          "owner": "winwincode-cloud",
+          "targetPath": "crates/winwincode-cloud-postgres/src/lib.rs",
+          "contents": "Hosted PostgreSQL product composition",
+          "implementationBeadId": "winwincode-cloud-ca1.5.1"
+        },
+        {
+          "owner": "winwincode-enterprise",
+          "targetPath": "crates/winwincode-enterprise-postgres/src/lib.rs",
+          "contents": "customer PostgreSQL product composition",
+          "implementationBeadId": "enterprise-5uz.4.1"
+        }
+      ]
+    },
+    {
+      "path": "crates/winwincode-postgres/src/migration.rs",
+      "lines": 277,
+      "sha256": "5d709e7c0c5f244a6fa4917b44b7f50a5108a4389bd7cee5d754f09ea65da50d",
+      "decision": "split-required",
+      "rationale": "Digest and ordered-plan logic is neutral, but the embedded SQL forces tenant row-level security and therefore cannot be the one schema for both products.",
+      "splitTargets": [
+        {
+          "owner": "winwincode",
+          "targetPath": "crates/winwincode-postgres-adapter/src/migration_plan.rs",
+          "contents": "migration identity, ordering, digest, and driver-neutral receipt",
+          "implementationBeadId": "winwincode-edition.2.4.1"
+        },
+        {
+          "owner": "winwincode-cloud",
+          "targetPath": "crates/winwincode-cloud-postgres/migrations/0001_control_plane.sql",
+          "contents": "Hosted multi-tenant schema, forced row-level security, pool role, and tenant session authority",
+          "implementationBeadId": "winwincode-cloud-ca1.5.1"
+        },
+        {
+          "owner": "winwincode-enterprise",
+          "targetPath": "crates/winwincode-enterprise-postgres/migrations/0001_control_plane.sql",
+          "contents": "customer-owned schema, organization boundary, upgrade and rollback evidence",
+          "implementationBeadId": "enterprise-5uz.4.1"
+        }
+      ]
+    },
+    {
+      "path": "crates/winwincode-postgres/src/protocol.rs",
+      "lines": 274,
+      "sha256": "0d7afe55328b5d49e3cf5a3b581c5449582e7c5f961d2056dc3be9b70664419a",
+      "decision": "split-required",
+      "rationale": "The transaction semantics are reusable, but current names and state bind every call to tenant_scope and to the existing combined storage crate.",
+      "splitTargets": [
+        {
+          "owner": "winwincode",
+          "targetPath": "crates/winwincode-postgres-adapter/src/protocol.rs",
+          "contents": "scope-neutral transaction port and ProductStateStorage adapter",
+          "implementationBeadId": "winwincode-edition.2.4.1"
+        },
+        {
+          "owner": "winwincode-cloud",
+          "targetPath": "crates/winwincode-cloud-postgres/src/driver.rs",
+          "contents": "real Hosted PostgreSQL driver, tenant transaction role, pool and TLS",
+          "implementationBeadId": "winwincode-cloud-ca1.5.1"
+        },
+        {
+          "owner": "winwincode-enterprise",
+          "targetPath": "crates/winwincode-enterprise-postgres/src/driver.rs",
+          "contents": "real customer PostgreSQL driver, organization transaction role, TLS and connection policy",
+          "implementationBeadId": "enterprise-5uz.4.1"
+        }
+      ]
+    },
+    {
+      "path": "crates/winwincode-postgres/src/storage.rs",
+      "lines": 245,
+      "sha256": "c3d7696c59601cc2c385ffbc21787f6f370f91ce28ebfb2e691ff260a157e41d",
+      "decision": "split-required",
+      "rationale": "The transaction semantics are reusable, but current names and state bind every call to tenant_scope and to the existing combined storage crate.",
+      "splitTargets": [
+        {
+          "owner": "winwincode",
+          "targetPath": "crates/winwincode-postgres-adapter/src/adapter.rs",
+          "contents": "scope-neutral transaction port and ProductStateStorage adapter",
+          "implementationBeadId": "winwincode-edition.2.4.1"
+        },
+        {
+          "owner": "winwincode-cloud",
+          "targetPath": "crates/winwincode-cloud-postgres/src/driver.rs",
+          "contents": "real Hosted PostgreSQL driver, tenant transaction role, pool and TLS",
+          "implementationBeadId": "winwincode-cloud-ca1.5.1"
+        },
+        {
+          "owner": "winwincode-enterprise",
+          "targetPath": "crates/winwincode-enterprise-postgres/src/driver.rs",
+          "contents": "real customer PostgreSQL driver, organization transaction role, TLS and connection policy",
+          "implementationBeadId": "enterprise-5uz.4.1"
+        }
+      ]
+    },
+    {
+      "path": "crates/winwincode-postgres/tests/postgres_protocol.rs",
+      "lines": 789,
+      "sha256": "2b676b3482e4829f06e1b3d12ea275ecb9fa8ac52eb9274d559b88d13195aa95",
+      "decision": "split-required",
+      "rationale": "The test proves useful atomic semantics with a fake database but also assumes one tenant RLS schema and one shared backup setup.",
+      "splitTargets": [
+        {
+          "owner": "winwincode",
+          "targetPath": "crates/winwincode-postgres-adapter/tests/protocol.rs",
+          "contents": "adapter protocol, rollback, replay, outbox, and secret-safe error tests",
+          "implementationBeadId": "winwincode-edition.2.4.1"
+        },
+        {
+          "owner": "winwincode-cloud",
+          "targetPath": "crates/winwincode-cloud-postgres/tests/live_postgres.rs",
+          "contents": "real multi-tenant RLS, pool, restart, migration, and Hosted backup tests",
+          "implementationBeadId": "winwincode-cloud-ca1.5.1"
+        },
+        {
+          "owner": "winwincode-enterprise",
+          "targetPath": "crates/winwincode-enterprise-postgres/tests/live_postgres.rs",
+          "contents": "real customer schema, upgrade, restore, TLS, and organization-isolation tests",
+          "implementationBeadId": "enterprise-5uz.4.1"
+        }
+      ]
+    }
+  ],
+  "splitOrder": [
+    "First extract storage, audit, backup, publication, identity, and scope ports required by the neutral packages.",
+    "Then split the four current crates into neutral optional packages and Community-only SQLite adapters without copying product configuration.",
+    "Publish one immutable optional-infrastructure release with exact version, source commit, SHA-256, SBOM, and license manifest.",
+    "After each target repository exists, add Cloud Hosted compositions and Enterprise customer compositions against the pinned neutral release.",
+    "Run real PostgreSQL, object-store, observability, connector, restart, isolation, secret-scan, and cross-repository path-dependency gates.",
+    "Delete the superseded combined crate paths after all three owners pass their tests; do not retain aliases or parallel runtime paths."
+  ],
+  "beads": {
+    "parentIssue": "winwincode-edition.2.4",
+    "communityImplementationTasks": {
+      "postgres": "winwincode-edition.2.4.1",
+      "objectStore": "winwincode-edition.2.4.2",
+      "observability": "winwincode-edition.2.4.3",
+      "integrations": "winwincode-edition.2.4.4",
+      "release": "winwincode-edition.2.4.5"
+    },
+    "productImplementationTasks": {
+      "cloud": {
+        "postgres": "winwincode-cloud-ca1.5.1",
+        "objectStore": "winwincode-cloud-ca1.8.4",
+        "observability": "winwincode-cloud-ca1.11.10",
+        "integrations": "winwincode-cloud-ca1.6.1"
+      },
+      "enterprise": {
+        "postgres": "enterprise-5uz.4.1",
+        "objectStore": "enterprise-5uz.8.1",
+        "observability": "enterprise-5uz.8.2",
+        "integrations": "enterprise-5uz.5.1"
+      }
+    },
+    "sourceHistoryTasks": {
+      "winwincode-cloud.2": {
+        "status": "closed",
+        "targetRepository": "winwincode-cloud",
+        "targetBeadId": "winwincode-cloud-ca1.5.1"
+      },
+      "winwincode-cloud.3": {
+        "status": "closed",
+        "targetRepository": "winwincode-cloud",
+        "targetBeadId": "winwincode-cloud-ca1.8.4"
+      },
+      "winwincode-cloud.4": {
+        "status": "closed",
+        "targetRepository": "winwincode-cloud",
+        "targetBeadId": "winwincode-cloud-ca1.11.10"
+      },
+      "winwincode-cloud.5": {
+        "status": "closed",
+        "targetRepository": "winwincode-cloud",
+        "targetBeadId": "winwincode-cloud-ca1.6.1"
+      },
+      "winwincode-private.2": {
+        "status": "closed",
+        "targetRepository": "winwincode-enterprise",
+        "targetBeadId": "enterprise-5uz.4.1"
+      },
+      "winwincode-private.3": {
+        "status": "closed",
+        "targetRepository": "winwincode-enterprise",
+        "targetBeadId": "enterprise-5uz.8.1"
+      },
+      "winwincode-private.4": {
+        "status": "closed",
+        "targetRepository": "winwincode-enterprise",
+        "targetBeadId": "enterprise-5uz.8.2"
+      },
+      "winwincode-private.5": {
+        "status": "closed",
+        "targetRepository": "winwincode-enterprise",
+        "targetBeadId": "enterprise-5uz.5.1"
+      }
+    }
+  }
+}

@@ -33,7 +33,7 @@ const module = await import(`${pathToFileURL(resolve(
 )).href}?run=${String(Date.now())}`)
 const facade = await import(`${pathToFileURL(resolve(
   root,
-  '.cache/chat-view-model-tests/control-plane-client.js',
+  '.cache/chat-view-model-tests/community-control-plane-client.js',
 )).href}`)
 
 const { createChatViewModel } = module

@@ -69,7 +69,7 @@ Helper 不读取产品状态，不监听网络，也不处理业务请求。Help
 
 ### `winwincode-local`
 
-Local 只做进程配置、数据目录、生命周期和模块组合。它的产品依赖固定为 `winwincode-control-plane`、`winwincode-worker` 与 `winwincode-observability`；业务状态、Provider 路由、工作区操作和 Kernel 适配留在对应所有者中。
+Local 只做进程配置、数据目录、生命周期和模块组合。它的产品依赖固定为 `winwincode-control-plane`、`winwincode-worker` 与中立的 `winwincode-observability-core`；Community SQLite 持久化由独立的 `winwincode-observability-sqlite` 包提供。业务状态、Provider 路由、工作区操作和 Kernel 适配留在对应所有者中。
 
 ## 会话与一次尝试
 

@@ -4,7 +4,7 @@ import { mountKeyedCollection } from './components/keyed-collection.js'
 import type {
   ControlPlaneRepositoryPermissions,
   ControlPlaneRepositorySummary,
-} from './control-plane-client.js'
+} from './community-control-plane-client.js'
 import type {
   RepositoriesViewModel,
   RepositoriesViewModelState,

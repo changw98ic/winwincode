@@ -7,7 +7,10 @@ export const PRODUCT_RELEASE_SCHEMA_VERSION = 1
 /** JavaScript packages that are part of the deployable Client surface. */
 export const PRODUCT_PACKAGE_DIRECTORIES = Object.freeze([
   'apps/client',
+  'packages/browser-core',
+  'packages/browser-ui',
   'packages/contracts',
+  'packages/control-plane-client',
   'packages/strongflow',
 ])
 

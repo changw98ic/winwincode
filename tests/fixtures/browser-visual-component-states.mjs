@@ -14,14 +14,16 @@ import {
   VISUAL_REGRESSION_FONT_STACK,
 } from '/module/visual-regression.js'
 
-import { mountButton } from '/module/components/button.js'
-import { mountStatusBadge } from '/module/components/status-badge.js'
-import { mountPageHeader } from '/module/components/page-header.js'
-import { mountPanel } from '/module/components/panel.js'
+import {
+  mountButton,
+  mountErrorState,
+  mountPageHeader,
+  mountPanel,
+  mountStatusBadge,
+} from '/browser-ui/index.js'
 import { mountMetric } from '/module/components/metric.js'
 import { mountFormField } from '/module/components/form-field.js'
 import { mountEmptyState } from '/module/components/empty-state.js'
-import { mountErrorState } from '/module/components/error-state.js'
 import { mountTabs } from '/module/components/tabs.js'
 import { mountToolbar } from '/module/components/toolbar.js'
 import { mountDrawer } from '/module/components/drawer.js'

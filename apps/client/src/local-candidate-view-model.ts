@@ -9,7 +9,7 @@ import {
   type ControlPlaneCandidateBranchOutcome,
   type ControlPlaneCandidateState,
   type ControlPlaneCandidateSummary,
-} from './control-plane-client.js'
+} from './community-control-plane-client.js'
 
 /**
  * The candidate seam the card controls consume, derived from the frozen

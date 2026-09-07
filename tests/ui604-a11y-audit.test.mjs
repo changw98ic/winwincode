@@ -49,8 +49,8 @@ const diffModule = await import(`${pathToFileURL(resolve(
   'strongflow-diff-viewer.js',
 )).href}`)
 const panelModule = await import(`${pathToFileURL(resolve(
-  cache,
-  'components/panel.js',
+  root,
+  'packages/browser-ui/dist/index.js',
 )).href}`)
 
 const { mountStrongFlowDeliveryList } = deliveryListModule

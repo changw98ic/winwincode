@@ -38,7 +38,7 @@ const pageModule = await import(`${pathToFileURL(resolve(
 )).href}`)
 const facadeModule = await import(`${pathToFileURL(resolve(
   cacheRoot,
-  'control-plane-client.js',
+  'community-control-plane-client.js',
 )).href}`)
 const { createEnterpriseManagementViewModel } = viewModelModule
 const { mountEnterpriseResourcePage } = pageModule

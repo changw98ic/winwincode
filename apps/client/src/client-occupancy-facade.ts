@@ -15,7 +15,7 @@ import {
   type ControlPlaneOccupancyStatus,
   type ControlPlaneOccupancyStatusInput,
   type ControlPlaneRequestOptions,
-} from './control-plane-client.js'
+} from './community-control-plane-client.js'
 
 // The occupancy wire contract stays canonical in control-plane-client; the
 // re-exports below let a page import the whole occupancy surface from this
@@ -28,8 +28,8 @@ export type {
   ControlPlaneOccupancyReleaseOutcome,
   ControlPlaneOccupancyStatus,
   ControlPlaneOccupancyStatusInput,
-} from './control-plane-client.js'
-export { ControlPlaneClientError } from './control-plane-client.js'
+} from './community-control-plane-client.js'
+export { ControlPlaneClientError } from './community-control-plane-client.js'
 
 /**
  * The finite, stable presentation categories an occupancy rejection maps onto.

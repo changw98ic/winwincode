@@ -23,6 +23,21 @@ function readManifest(path) {
   return manifest
 }
 
+function withProductVersion(manifest, version) {
+  const updated = { ...manifest, version }
+  for (const field of ['dependencies', 'optionalDependencies']) {
+    const dependencies = updated[field]
+    if (typeof dependencies !== 'object' || dependencies === null || Array.isArray(dependencies)) {
+      continue
+    }
+    updated[field] = Object.fromEntries(Object.entries(dependencies).map(([name, current]) => [
+      name,
+      name.startsWith('@winwincode/') ? version : current,
+    ]))
+  }
+  return updated
+}
+
 export function assertProductVersion(version) {
   if (typeof version !== 'string' || !semanticVersionPattern.test(version)) {
     throw new Error(`invalid semantic version: ${String(version)}`)
@@ -39,7 +54,7 @@ export function setProductVersion(root, version) {
     const manifest = readManifest(path)
     return Object.freeze({
       path,
-      text: `${JSON.stringify({ ...manifest, version }, null, 2)}\n`,
+      text: `${JSON.stringify(withProductVersion(manifest, version), null, 2)}\n`,
     })
   })
   const cargoManifestPath = resolve(root, 'Cargo.toml')

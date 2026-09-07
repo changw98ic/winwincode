@@ -6,7 +6,7 @@ import {
   type ControlPlaneRepositoryGrantInput,
   type ControlPlaneRepositoryGrantOutcome,
   type ControlPlaneRepositorySummary,
-} from './control-plane-client.js'
+} from './community-control-plane-client.js'
 
 /** Whether, and how, the repository list was last read. */
 export type RepositoriesLoadStatus = 'unloaded' | 'loading' | 'loaded' | 'unavailable'

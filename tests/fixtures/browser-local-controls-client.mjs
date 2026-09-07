@@ -1,9 +1,5 @@
 import { mountWinWinCodeClient } from '/module/application.js'
 
-import {
-  submitLoginInitialization,
-  submitOwnerSignIn,
-} from './login-bootstrap.mjs'
 
 const serverConfiguration = await fetch('/fixture/server-url.json', {
   cache: 'no-store',
@@ -122,10 +118,20 @@ function query(operation, parameters, limit = 100) {
   return queryWithContext(context(), operation, parameters, limit)
 }
 
-function submitProof(value) {
-  // The example pre-creates the durable Owner, so the browser signs in with
-  // Owner credentials on the login page's password form.
-  return submitOwnerSignIn(document)
+async function submitOwnerInitialization(value) {
+  const initializationStatus = await application.controlPlane.initializationStatus()
+  await waitFor(
+    () => document.querySelector('.wwc-login-initialization')?.hidden === false,
+    `owner initialization form (${JSON.stringify(initializationStatus)}; ${document.querySelector('.wwc-login')?.outerHTML ?? 'missing login'})`,
+  )
+  const username = document.querySelector('.wwc-login-initialization-username')
+  const password = document.querySelector('.wwc-login-initialization-password')
+  const proof = document.querySelector('.wwc-login-initialization-proof')
+  username.value = 'owner'
+  password.value = `${value}-owner-password`
+  proof.value = value
+  document.querySelector('.wwc-login-initialization-form').requestSubmit()
+  return { clearedPassword: password.value, clearedProof: proof.value }
 }
 
 function subscribe() {
@@ -199,19 +205,24 @@ function browserSurfaceContains(...secrets) {
 }
 
 globalThis.runLocalControlsFixture = async (proof, firstLocator, rotatedLocator) => {
-  const submittedPassword = submitProof(proof)
+  const ownerPassword = `${proof}-owner-password`
+  const submittedInitialization = await submitOwnerInitialization(proof)
   await waitFor(() => application.authSession.state.status === 'signed-in', 'browser sign-in')
   authorizedContext = context()
-  const clearedPassword = document.querySelector('.wwc-login-password').value
+  const clearedProof = document.querySelector('.wwc-login-initialization-proof').value
 
   subscribe()
-  await waitFor(() => acceptedFrameCount() === 1, 'initial subscription acceptance')
-  await waitFor(() => receivedEvents.length >= 4, 'seeded durable event replay')
+  await waitFor(() => transportFrames.some(frame => (
+    frame.type === 'transport.subscription-accepted.v1'
+    && frame.subscriptionId === id('sub', 52)
+  )), 'initial subscription acceptance')
+  await waitFor(() => receivedEvents.length >= 2, 'seeded durable event replay')
   await waitFor(() => subscription.cursor?.sequence === receivedEvents.at(-1)?.sequence, 'initial acknowledgement')
   const beforeReconnect = receivedEvents.length
   const firstCursor = subscription.cursor
+  const acceptedBeforeReconnect = acceptedFrameCount()
   subscription.reconnect()
-  await waitFor(() => acceptedFrameCount() === 2, 'explicit cursor resume')
+  await waitFor(() => acceptedFrameCount() > acceptedBeforeReconnect, 'explicit cursor resume')
   await new Promise(resolve => setTimeout(resolve, 250))
   const afterReconnect = receivedEvents.length
 
@@ -267,7 +278,7 @@ globalThis.runLocalControlsFixture = async (proof, firstLocator, rotatedLocator)
     afterReconnect,
     approval: { id: decided.result.id, state: decided.result.state },
     beforeReconnect,
-    browserSecretFound: browserSurfaceContains(proof, firstLocator, rotatedLocator),
+    browserSecretFound: browserSurfaceContains(proof, ownerPassword, firstLocator, rotatedLocator),
     credentialRevisions: [created.result.revision, rotated.result.revision, revoked.result.revision],
     credentialState: revoked.result.secretState,
     cursorSequence: subscription.cursor?.sequence ?? null,
@@ -277,8 +288,9 @@ globalThis.runLocalControlsFixture = async (proof, firstLocator, rotatedLocator)
     firstCursorSequence: firstCursor?.sequence ?? null,
     settingsConcurrency: settings.result.workerConcurrencyLimit,
     settingsRevision: settings.result.revision,
-    submittedPassword,
-    clearedPassword,
+    submittedProof: submittedInitialization.clearedProof,
+    clearedPassword: submittedInitialization.clearedPassword,
+    clearedProof,
     uniqueEventCount: uniqueEvents(),
   }
 }

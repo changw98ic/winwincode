@@ -11,6 +11,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./browser-control": {
+      "types": "./dist/browser-control.d.ts",
+      "import": "./dist/browser-control.js"
     }
   },
   "files": [

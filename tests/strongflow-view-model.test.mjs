@@ -33,11 +33,11 @@ const module = await import(`${pathToFileURL(resolve(
 )).href}`)
 const facade = await import(`${pathToFileURL(resolve(
   root,
-  '.cache/strongflow-view-model-tests/control-plane-client.js',
+  '.cache/strongflow-view-model-tests/community-control-plane-client.js',
 )).href}`)
 const queryCacheModule = await import(`${pathToFileURL(resolve(
   root,
-  '.cache/strongflow-view-model-tests/core/query-cache.js',
+  'packages/browser-core/dist/query-cache.js',
 )).href}`)
 
 const {

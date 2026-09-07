@@ -3,7 +3,7 @@
 import {
   ControlPlaneClientError,
   type ControlPlaneClient,
-} from './control-plane-client.js'
+} from './community-control-plane-client.js'
 import type {
   Actor,
   DeliveryCriterionResultProjection,

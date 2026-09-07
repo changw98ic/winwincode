@@ -3,9 +3,9 @@
 import {
   ControlPlaneClientError,
   type ControlPlaneClient,
-} from './control-plane-client.js'
+} from './community-control-plane-client.js'
 import type { GlobalConnectionStatus } from './core/connection-state.js'
-import { createQueryCacheLifecycle } from './core/query-cache.js'
+import { createQueryCacheLifecycle } from '@winwincode/browser-core/query-cache'
 import type {
   Actor,
   ModelRouteAvailabilityListResultResponse,

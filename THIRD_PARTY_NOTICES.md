@@ -74,10 +74,14 @@ This component is licensed under the MIT terms reproduced above.
 
 ## rusqlite
 
-WinWinCode vendors `rusqlite 0.39.0` from the rusqlite project and applies the
-savepoint-identifier quoting fix recorded in `upstream/sources.lock.json`. The
-preserved upstream MIT license is at
-`upstream/vendor/rusqlite-0.39.0/LICENSE`.
+WinWinCode vendors `rusqlite 0.39.0` and applies the named SAVEPOINT identifier
+quoting fix recorded in `upstream/sources.lock.json`. The preserved upstream
+license is at `upstream/vendor/rusqlite-0.39.0/LICENSE`.
+
+rusqlite
+Copyright (c) 2014 The rusqlite developers
+
+This component is licensed under the MIT terms reproduced above.
 
 ## Rust dependency notices
 

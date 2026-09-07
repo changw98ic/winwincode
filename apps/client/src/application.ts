@@ -10,7 +10,7 @@ import {
   type ControlPlaneClient,
   type ControlPlaneClientTransport,
   type ControlPlaneTaskAnchor,
-} from './control-plane-client.js'
+} from './community-control-plane-client.js'
 import { createClientOccupancyFacade } from './client-occupancy-facade.js'
 import { mountClientErrorBoundary } from './components/client-error-boundary.js'
 import { mountConnectionBar } from './components/connection-bar.js'
@@ -29,7 +29,7 @@ import {
   type ConnectionMonitor,
   type ConnectionSnapshot,
 } from './core/connection-state.js'
-import { createQueryCache } from './core/query-cache.js'
+import { createQueryCache } from '@winwincode/browser-core/query-cache'
 import {
   resolveScopeContext,
   scopeHash,
@@ -37,7 +37,7 @@ import {
   surfaceHash,
   type ScopeContextResolution,
   type ScopeRouteSelection,
-} from './core/scope-context.js'
+} from '@winwincode/browser-core/scope-context'
 import { mountAuthSessionPage, type AuthSessionPage } from './auth-page.js'
 import {
   createAuthSessionViewModel,
@@ -205,9 +205,10 @@ export type { StrongFlowEvidenceRouteState, StrongFlowRoute }
 function browserControlPlaneTransport(browser: Window): ControlPlaneClientTransport {
   const nativeFetch = browser.fetch
   if (typeof nativeFetch !== 'function') return Object.freeze({})
-  return Object.freeze({
-    fetch: nativeFetch.bind(browser) as NonNullable<ControlPlaneClientTransport['fetch']>,
-  })
+  const fetch: NonNullable<ControlPlaneClientTransport['fetch']> = (input, init) => (
+    nativeFetch.call(browser, input, init)
+  )
+  return Object.freeze({ fetch })
 }
 
 /** Mount the one browser shell. Feature modules attach to its named surface slot. */

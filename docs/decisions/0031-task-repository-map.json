@@ -1,0 +1,3135 @@
+{
+  "schemaVersion": 1,
+  "status": "accepted",
+  "decision": "docs/decisions/0031-three-product-editions.md",
+  "ownerTask": "winwincode-edition.5",
+  "generatedAt": "2026-09-05T10:15:24Z",
+  "sourceSnapshot": {
+    "auditBead": "winwincode-9c4.22",
+    "parallelBacklog": "/Users/chengwen/Downloads/winwincode-bd-parallel-backlog-main-5a3a1d9d5.md",
+    "parallelBacklogSha256": "f160933aa1d1faafa6a76ba218746eba1a2711494e206f1765735853abc5eda9",
+    "masterPlan": "/Users/chengwen/Downloads/winwincode-complete-master-plan-main-5a3a1d9d5.md",
+    "masterPlanSha256": "629ec5951ff39e3222b4658b0744be2ce719adba0d369f0642965dfc92be2f64",
+    "activeBeadsStatusIncluded": [
+      "open",
+      "in_progress"
+    ],
+    "activeBeadsCount": 68
+  },
+  "gitRepositoryIds": [
+    "winwincode",
+    "winwincode-cloud",
+    "winwincode-enterprise"
+  ],
+  "routingTargets": [
+    "winwincode",
+    "winwincode-cloud",
+    "winwincode-enterprise",
+    "cross-repository-migration"
+  ],
+  "routingRules": [
+    "winwincode owns Community product code and the versioned neutral core published to downstream repositories",
+    "winwincode-cloud owns Hosted multi-tenant identity, billing, cloud workers, object storage and operator-run SaaS operations",
+    "winwincode-enterprise owns customer-private identity, organization access, policy, audit, deployment, backup, upgrade and customer-managed workers",
+    "cross-repository-migration is a temporary task owner, not a fourth Git repository",
+    "an implementation task has exactly one owner; similar Cloud and Enterprise concepts become separately scoped product tasks rather than copied tasks",
+    "Cloud and Enterprise consume an exact Community core release and checksum; no cross-repository source path dependency is allowed",
+    "Community and Codex kernel SQLite remain; only Cloud and Enterprise product backends use PostgreSQL"
+  ],
+  "statistics": {
+    "stableTasksTotal": 178,
+    "stableTasksByAuditClassification": {
+      "EQUIVALENT": 10,
+      "EXACT": 3,
+      "GATED": 53,
+      "MISSING-FUTURE": 32,
+      "MISSING-NOW": 11,
+      "RETIRED": 38,
+      "REWRITTEN": 31
+    },
+    "stableTasksByTargetRepository": {
+      "cross-repository-migration": 5,
+      "winwincode": 124,
+      "winwincode-cloud": 32,
+      "winwincode-enterprise": 17
+    },
+    "activeBeadsTotal": 68,
+    "activeBeadsByStatus": {
+      "in_progress": 14,
+      "open": 54
+    },
+    "activeBeadsByTargetRepository": {
+      "cross-repository-migration": 14,
+      "winwincode": 51,
+      "winwincode-cloud": 1,
+      "winwincode-enterprise": 2
+    },
+    "recentlyCreatedTasksMapped": 14,
+    "postgresMigrationTasksMapped": 4,
+    "formerlyRetiredTasksRestored": 38,
+    "formerlyRetiredByTargetRepository": {
+      "winwincode-cloud": 32,
+      "winwincode-enterprise": 6
+    },
+    "targetStableTasksCreated": 49,
+    "targetStableTasksCreatedByRepository": {
+      "winwincode-cloud": 32,
+      "winwincode-enterprise": 17
+    },
+    "targetDomainEpicsCreated": 10,
+    "targetDomainEpicsCreatedByRepository": {
+      "winwincode-cloud": 6,
+      "winwincode-enterprise": 4
+    },
+    "sourceProductRecordsReconciled": 3
+  },
+  "crossRepositoryPrerequisites": [
+    {
+      "order": 1,
+      "capability": "community-core-release",
+      "sourceBead": "winwincode-edition.2",
+      "requiredOutcome": "Publish a versioned neutral core inventory, packages, schemas, SBOM, licenses and SHA-256 checksums from winwincode."
+    },
+    {
+      "order": 2,
+      "capability": "target-repository-bootstrap",
+      "sourceBeads": [
+        "winwincode-cloud.1",
+        "winwincode-private.1"
+      ],
+      "dependsOn": [
+        "community-core-release"
+      ],
+      "requiredOutcome": "Create independent Git, Beads and CI roots before creating product backlog entries."
+    },
+    {
+      "order": 3,
+      "capability": "core-version-lock",
+      "sourceBead": "winwincode-edition.3",
+      "dependsOn": [
+        "community-core-release",
+        "target-repository-bootstrap"
+      ],
+      "requiredOutcome": "Each downstream repository pins one exact core version and checksum; mismatches fail the build."
+    },
+    {
+      "order": 4,
+      "capability": "postgres-product-split",
+      "sourceBeads": [
+        "winwincode-9c4.21.1",
+        "winwincode-9c4.21.2",
+        "winwincode-9c4.21.3",
+        "winwincode-9c4.21.4"
+      ],
+      "dependsOn": [
+        "target-repository-bootstrap"
+      ],
+      "requiredOutcome": "Replace the old generic backend migration with distinct Cloud multi-tenant and Enterprise customer-private PostgreSQL scopes. Keep Codex kernel and Device SQLite."
+    },
+    {
+      "order": 5,
+      "capability": "target-beads-creation",
+      "sourceBead": "winwincode-edition.5",
+      "dependsOn": [
+        "target-repository-bootstrap",
+        "core-version-lock"
+      ],
+      "requiredOutcome": "Create each mapped task once in its owner repository, preserve source provenance, then supersede the temporary source record."
+    },
+    {
+      "order": 6,
+      "capability": "source-cleanup-and-independent-gates",
+      "sourceBeads": [
+        "winwincode-community.1",
+        "winwincode-edition.4"
+      ],
+      "dependsOn": [
+        "target-beads-creation"
+      ],
+      "requiredOutcome": "Remove Cloud and Enterprise product code from winwincode only after target acceptance, then run each repository independent release gate."
+    }
+  ],
+  "productSemanticSplits": [
+    {
+      "concept": "identity",
+      "cloudStableTaskIds": [
+        "SAAS-IAM-100.1",
+        "SAAS-IAM-100.2",
+        "SAAS-IAM-100.3",
+        "SAAS-IAM-100.8"
+      ],
+      "enterpriseStableTaskIds": [
+        "SAAS-IAM-100.4",
+        "SAAS-IAM-100.5",
+        "SAAS-IAM-100.6",
+        "SAAS-IAM-100.7"
+      ],
+      "rule": "Cloud owns Hosted tenant accounts and isolation; Enterprise owns customer identity providers, directories, device policy and customer data rules."
+    },
+    {
+      "concept": "data-protection",
+      "cloudStableTaskIds": [
+        "SAAS-DATA-100.4",
+        "SAAS-DATA-100.5",
+        "SAAS-DATA-100.8",
+        "SAAS-OPS-100.6"
+      ],
+      "enterpriseStableTaskIds": [
+        "SAAS-DATA-100.7"
+      ],
+      "transitionStableTaskIds": [
+        "SAAS-DATA-100.1",
+        "SAAS-DATA-100.2",
+        "SAAS-DATA-100.3",
+        "SAAS-DATA-100.6"
+      ],
+      "rule": "Cloud owns Hosted object storage, multi-instance coordination and regional operation; Enterprise owns customer-controlled backup and export. Generic transition tasks only freeze boundaries."
+    },
+    {
+      "concept": "release-security",
+      "cloudStableTaskIds": [
+        "SAAS-OPS-100.7"
+      ],
+      "enterpriseStableTaskIds": [
+        "SAAS-OPS-100.8"
+      ],
+      "rule": "Cloud abuse and tenant isolation controls are operator runtime work; Enterprise supply-chain checks are private release work."
+    }
+  ],
+  "preMigrationCollisionReview": [
+    {
+      "stableTaskId": "CLIENT-300.4",
+      "activeBeadIds": [
+        "winwincode-pwc",
+        "winwincode-cms.1"
+      ],
+      "requiredResolution": "Separate already-started facade work from the rewritten remaining facade scope, then keep one canonical active task."
+    },
+    {
+      "stableTaskId": "CLIENT-300.5",
+      "activeBeadIds": [
+        "winwincode-1fn",
+        "winwincode-cms.2"
+      ],
+      "requiredResolution": "Separate already-started occupancy controls from remaining rewritten UI scope, then keep one canonical active task."
+    },
+    {
+      "stableTaskId": "WORKER-200.2",
+      "activeBeadIds": [
+        "winwincode-pvo",
+        "winwincode-bxt.3"
+      ],
+      "requiredResolution": "Split credential issuance from launch-loop wiring with non-overlapping acceptance criteria before repository migration."
+    }
+  ],
+  "recentlyCreatedTaskIds": [
+    "winwincode-cms.1",
+    "winwincode-cms.2",
+    "winwincode-cms.3",
+    "winwincode-cms.4",
+    "winwincode-cms.5",
+    "winwincode-15q.3",
+    "winwincode-bxt.2",
+    "winwincode-4eo.1",
+    "winwincode-4eo.2",
+    "winwincode-4eo.3",
+    "winwincode-4eo.4",
+    "winwincode-9c4.16.13",
+    "winwincode-9c4.16.14",
+    "winwincode-9gh.1"
+  ],
+  "postgresMigrationTaskIds": [
+    "winwincode-9c4.21.1",
+    "winwincode-9c4.21.2",
+    "winwincode-9c4.21.3",
+    "winwincode-9c4.21.4"
+  ],
+  "targetCreationBatches": [
+    {
+      "order": 0,
+      "batchId": "cross-00-baseline",
+      "targetRepository": "cross-repository-migration",
+      "stableTaskIds": [
+        "INT-100.1"
+      ],
+      "taskCount": 1,
+      "executionState": "retained-as-cross-repository-migration-record"
+    },
+    {
+      "order": 1,
+      "batchId": "community-10-personal-remote-coding",
+      "targetRepository": "winwincode",
+      "stableTaskIds": [
+        "CLIENT-300.4",
+        "CLIENT-300.5",
+        "CLIENT-300.6",
+        "CLIENT-300.7",
+        "FLOW-100.1",
+        "FLOW-100.10",
+        "FLOW-100.2",
+        "FLOW-100.3",
+        "FLOW-100.4",
+        "FLOW-100.5",
+        "FLOW-100.6",
+        "FLOW-100.7",
+        "FLOW-100.8",
+        "FLOW-100.9",
+        "GIT-100.1",
+        "GIT-100.10",
+        "GIT-100.2",
+        "GIT-100.3",
+        "GIT-100.4",
+        "GIT-100.5",
+        "GIT-100.6",
+        "GIT-100.7",
+        "GIT-100.8",
+        "GIT-100.9",
+        "INT-100.2",
+        "INT-100.3",
+        "INT-100.4",
+        "REPO-100.1",
+        "REPO-100.10",
+        "REPO-100.2",
+        "REPO-100.3",
+        "REPO-100.4",
+        "REPO-100.5",
+        "REPO-100.6",
+        "REPO-100.7",
+        "REPO-100.8",
+        "REPO-100.9",
+        "WORKER-100.1",
+        "WORKER-100.2",
+        "WORKER-100.3",
+        "WORKER-100.4",
+        "WORKER-100.5",
+        "WORKER-100.6",
+        "WORKER-100.7",
+        "WORKER-100.8",
+        "WORKER-200.1",
+        "WORKER-200.2",
+        "WORKER-200.3",
+        "WORKER-200.4",
+        "WORKER-200.5",
+        "WORKER-200.6",
+        "WORKER-200.7",
+        "WORKER-200.8"
+      ],
+      "taskCount": 53,
+      "executionState": "current-repository-backlog-mapped-no-bulk-create"
+    },
+    {
+      "order": 2,
+      "batchId": "community-20-daily-driver",
+      "targetRepository": "winwincode",
+      "stableTaskIds": [
+        "INT-100.5",
+        "MODEL-100.1",
+        "MODEL-100.2",
+        "MODEL-100.3",
+        "MODEL-100.4",
+        "MODEL-100.5",
+        "MODEL-100.6",
+        "MODEL-100.7",
+        "MODEL-100.8",
+        "OPS-100.1",
+        "OPS-100.10",
+        "OPS-100.2",
+        "OPS-100.3",
+        "OPS-100.4",
+        "OPS-100.5",
+        "OPS-100.6",
+        "OPS-100.7",
+        "OPS-100.8",
+        "OPS-100.9",
+        "UX-100.1",
+        "UX-100.2",
+        "UX-100.3",
+        "UX-100.4",
+        "UX-100.5",
+        "UX-100.6",
+        "UX-100.7",
+        "UX-100.8"
+      ],
+      "taskCount": 27,
+      "executionState": "current-repository-backlog-mapped-no-bulk-create"
+    },
+    {
+      "order": 3,
+      "batchId": "community-30-harness-v2",
+      "targetRepository": "winwincode",
+      "stableTaskIds": [
+        "FUSION-100.1",
+        "FUSION-100.10",
+        "FUSION-100.2",
+        "FUSION-100.3",
+        "FUSION-100.4",
+        "FUSION-100.5",
+        "FUSION-100.6",
+        "FUSION-100.7",
+        "FUSION-100.8",
+        "FUSION-100.9",
+        "INT-100.6",
+        "INT-100.7",
+        "MEASURE-100.1",
+        "MEASURE-100.2",
+        "MEASURE-100.3",
+        "MEASURE-100.4",
+        "MEASURE-100.5",
+        "MEASURE-100.6",
+        "MEASURE-100.7",
+        "MEASURE-100.8",
+        "PLAN-100.1",
+        "PLAN-100.2",
+        "PLAN-100.3",
+        "PLAN-100.4",
+        "PLAN-100.5",
+        "PLAN-100.6",
+        "POLICY-100.1",
+        "POLICY-100.2",
+        "POLICY-100.3",
+        "POLICY-100.4",
+        "POLICY-100.5",
+        "POLICY-100.6",
+        "POLICY-100.7",
+        "POLICY-100.8",
+        "REVIEW-100.1",
+        "REVIEW-100.10",
+        "REVIEW-100.2",
+        "REVIEW-100.3",
+        "REVIEW-100.4",
+        "REVIEW-100.5",
+        "REVIEW-100.6",
+        "REVIEW-100.7",
+        "REVIEW-100.8",
+        "REVIEW-100.9"
+      ],
+      "taskCount": 44,
+      "executionState": "current-repository-backlog-mapped-no-bulk-create"
+    },
+    {
+      "order": 4,
+      "batchId": "cross-30-task-and-data-migration",
+      "targetRepository": "cross-repository-migration",
+      "stableTaskIds": [
+        "SAAS-DATA-100.1",
+        "SAAS-DATA-100.2",
+        "SAAS-DATA-100.3",
+        "SAAS-DATA-100.6"
+      ],
+      "taskCount": 4,
+      "executionState": "retained-as-cross-repository-migration-record"
+    },
+    {
+      "order": 5,
+      "batchId": "enterprise-10-team-self-hosted",
+      "targetRepository": "winwincode-enterprise",
+      "stableTaskIds": [
+        "INT-100.8",
+        "TEAM-100.1",
+        "TEAM-100.10",
+        "TEAM-100.2",
+        "TEAM-100.3",
+        "TEAM-100.4",
+        "TEAM-100.5",
+        "TEAM-100.6",
+        "TEAM-100.7",
+        "TEAM-100.8",
+        "TEAM-100.9"
+      ],
+      "taskCount": 11,
+      "executionState": "created-in-target-beads",
+      "targetBeadIds": [
+        "enterprise-5uz.11.1",
+        "enterprise-5uz.11.2",
+        "enterprise-5uz.11.3",
+        "enterprise-5uz.11.4",
+        "enterprise-5uz.11.5",
+        "enterprise-5uz.11.6",
+        "enterprise-5uz.11.7",
+        "enterprise-5uz.11.8",
+        "enterprise-5uz.11.9",
+        "enterprise-5uz.11.10",
+        "enterprise-5uz.11.11"
+      ]
+    },
+    {
+      "order": 6,
+      "batchId": "enterprise-20-customer-data-protection",
+      "targetRepository": "winwincode-enterprise",
+      "stableTaskIds": [
+        "SAAS-DATA-100.7"
+      ],
+      "taskCount": 1,
+      "executionState": "created-in-target-beads",
+      "targetBeadIds": [
+        "enterprise-5uz.12.1"
+      ]
+    },
+    {
+      "order": 7,
+      "batchId": "enterprise-30-customer-identity-and-device-policy",
+      "targetRepository": "winwincode-enterprise",
+      "stableTaskIds": [
+        "SAAS-IAM-100.4",
+        "SAAS-IAM-100.5",
+        "SAAS-IAM-100.6",
+        "SAAS-IAM-100.7"
+      ],
+      "taskCount": 4,
+      "executionState": "created-in-target-beads",
+      "targetBeadIds": [
+        "enterprise-5uz.13.1",
+        "enterprise-5uz.13.2",
+        "enterprise-5uz.13.3",
+        "enterprise-5uz.13.4"
+      ]
+    },
+    {
+      "order": 8,
+      "batchId": "enterprise-40-private-release-security",
+      "targetRepository": "winwincode-enterprise",
+      "stableTaskIds": [
+        "SAAS-OPS-100.8"
+      ],
+      "taskCount": 1,
+      "executionState": "created-in-target-beads",
+      "targetBeadIds": [
+        "enterprise-5uz.14.1"
+      ]
+    },
+    {
+      "order": 9,
+      "batchId": "cloud-10-data-plane",
+      "targetRepository": "winwincode-cloud",
+      "stableTaskIds": [
+        "SAAS-DATA-100.4",
+        "SAAS-DATA-100.5",
+        "SAAS-DATA-100.8"
+      ],
+      "taskCount": 3,
+      "executionState": "created-in-target-beads",
+      "targetBeadIds": [
+        "winwincode-cloud-ca1.8.1",
+        "winwincode-cloud-ca1.8.2",
+        "winwincode-cloud-ca1.8.3"
+      ]
+    },
+    {
+      "order": 10,
+      "batchId": "cloud-20-hosted-iam",
+      "targetRepository": "winwincode-cloud",
+      "stableTaskIds": [
+        "SAAS-IAM-100.1",
+        "SAAS-IAM-100.2",
+        "SAAS-IAM-100.3",
+        "SAAS-IAM-100.8"
+      ],
+      "taskCount": 4,
+      "executionState": "created-in-target-beads",
+      "targetBeadIds": [
+        "winwincode-cloud-ca1.9.1",
+        "winwincode-cloud-ca1.9.2",
+        "winwincode-cloud-ca1.9.3",
+        "winwincode-cloud-ca1.9.4"
+      ]
+    },
+    {
+      "order": 11,
+      "batchId": "cloud-30-billing",
+      "targetRepository": "winwincode-cloud",
+      "stableTaskIds": [
+        "BILL-100.1",
+        "BILL-100.2",
+        "BILL-100.3",
+        "BILL-100.4",
+        "BILL-100.5",
+        "BILL-100.6",
+        "BILL-100.7"
+      ],
+      "taskCount": 7,
+      "executionState": "created-in-target-beads",
+      "targetBeadIds": [
+        "winwincode-cloud-ca1.10.1",
+        "winwincode-cloud-ca1.10.2",
+        "winwincode-cloud-ca1.10.3",
+        "winwincode-cloud-ca1.10.4",
+        "winwincode-cloud-ca1.10.5",
+        "winwincode-cloud-ca1.10.6",
+        "winwincode-cloud-ca1.10.7"
+      ]
+    },
+    {
+      "order": 12,
+      "batchId": "cloud-40-hosted-operations",
+      "targetRepository": "winwincode-cloud",
+      "stableTaskIds": [
+        "SAAS-OPS-100.1",
+        "SAAS-OPS-100.10",
+        "SAAS-OPS-100.2",
+        "SAAS-OPS-100.3",
+        "SAAS-OPS-100.4",
+        "SAAS-OPS-100.5",
+        "SAAS-OPS-100.6",
+        "SAAS-OPS-100.7",
+        "SAAS-OPS-100.9"
+      ],
+      "taskCount": 9,
+      "executionState": "created-in-target-beads",
+      "targetBeadIds": [
+        "winwincode-cloud-ca1.11.1",
+        "winwincode-cloud-ca1.11.2",
+        "winwincode-cloud-ca1.11.3",
+        "winwincode-cloud-ca1.11.4",
+        "winwincode-cloud-ca1.11.5",
+        "winwincode-cloud-ca1.11.6",
+        "winwincode-cloud-ca1.11.7",
+        "winwincode-cloud-ca1.11.8",
+        "winwincode-cloud-ca1.11.9"
+      ]
+    },
+    {
+      "order": 13,
+      "batchId": "cloud-50-hosted-workers",
+      "targetRepository": "winwincode-cloud",
+      "stableTaskIds": [
+        "CLOUD-WORKER-100.1",
+        "CLOUD-WORKER-100.2",
+        "CLOUD-WORKER-100.3",
+        "CLOUD-WORKER-100.4",
+        "CLOUD-WORKER-100.5",
+        "CLOUD-WORKER-100.6",
+        "CLOUD-WORKER-100.7"
+      ],
+      "taskCount": 7,
+      "executionState": "created-in-target-beads",
+      "targetBeadIds": [
+        "winwincode-cloud-ca1.12.1",
+        "winwincode-cloud-ca1.12.2",
+        "winwincode-cloud-ca1.12.3",
+        "winwincode-cloud-ca1.12.4",
+        "winwincode-cloud-ca1.12.5",
+        "winwincode-cloud-ca1.12.6",
+        "winwincode-cloud-ca1.12.7"
+      ]
+    },
+    {
+      "order": 14,
+      "batchId": "cloud-60-release-gates",
+      "targetRepository": "winwincode-cloud",
+      "stableTaskIds": [
+        "INT-100.10",
+        "INT-100.9"
+      ],
+      "taskCount": 2,
+      "executionState": "created-in-target-beads",
+      "targetBeadIds": [
+        "winwincode-cloud-ca1.13.1",
+        "winwincode-cloud-ca1.13.2"
+      ]
+    }
+  ],
+  "stableTasks": [
+    {
+      "stableTaskId": "BILL-100.1",
+      "title": "不可变 Usage Ledger 与计量维度",
+      "auditClassification": "RETIRED",
+      "targetRepository": "winwincode-cloud",
+      "creationBatch": "cloud-30-billing",
+      "migrationDisposition": "restore-as-rewritten-target-candidate",
+      "rewrittenTargetSemantics": "恢复为 Cloud 专属候选；验收必须使用 Hosted 多租户、官方运营或云 Worker 语义",
+      "targetBeadId": "winwincode-cloud-ca1.10.1",
+      "targetCreationState": "created"
+    },
+    {
+      "stableTaskId": "BILL-100.2",
+      "title": "套餐、配额与 entitlement Engine",
+      "auditClassification": "RETIRED",
+      "targetRepository": "winwincode-cloud",
+      "creationBatch": "cloud-30-billing",
+      "migrationDisposition": "restore-as-rewritten-target-candidate",
+      "rewrittenTargetSemantics": "恢复为 Cloud 专属候选；验收必须使用 Hosted 多租户、官方运营或云 Worker 语义",
+      "targetBeadId": "winwincode-cloud-ca1.10.2",
+      "targetCreationState": "created"
+    },
+    {
+      "stableTaskId": "BILL-100.3",
+      "title": "Provider 成本、加价与缺失价格归因",
+      "auditClassification": "RETIRED",
+      "targetRepository": "winwincode-cloud",
+      "creationBatch": "cloud-30-billing",
+      "migrationDisposition": "restore-as-rewritten-target-candidate",
+      "rewrittenTargetSemantics": "恢复为 Cloud 专属候选；验收必须使用 Hosted 多租户、官方运营或云 Worker 语义",
+      "targetBeadId": "winwincode-cloud-ca1.10.3",
+      "targetCreationState": "created"
+    },
+    {
+      "stableTaskId": "BILL-100.4",
+      "title": "订阅、发票与支付 Provider Adapter",
+      "auditClassification": "RETIRED",
+      "targetRepository": "winwincode-cloud",
+      "creationBatch": "cloud-30-billing",
+      "migrationDisposition": "restore-as-rewritten-target-candidate",
+      "rewrittenTargetSemantics": "恢复为 Cloud 专属候选；验收必须使用 Hosted 多租户、官方运营或云 Worker 语义",
+      "targetBeadId": "winwincode-cloud-ca1.10.4",
+      "targetCreationState": "created"
+    },
+    {
+      "stableTaskId": "BILL-100.5",
+      "title": "Admission 中的配额和预算强制",
+      "auditClassification": "RETIRED",
+      "targetRepository": "winwincode-cloud",
+      "creationBatch": "cloud-30-billing",
+      "migrationDisposition": "restore-as-rewritten-target-candidate",
+      "rewrittenTargetSemantics": "恢复为 Cloud 专属候选；验收必须使用 Hosted 多租户、官方运营或云 Worker 语义",
+      "targetBeadId": "winwincode-cloud-ca1.10.5",
+      "targetCreationState": "created"
+    },
+    {
+      "stableTaskId": "BILL-100.6",
+      "title": "用量、配额、账单与成本 UI",
+      "auditClassification": "RETIRED",
+      "targetRepository": "winwincode-cloud",
+      "creationBatch": "cloud-30-billing",
+      "migrationDisposition": "restore-as-rewritten-target-candidate",
+      "rewrittenTargetSemantics": "恢复为 Cloud 专属候选；验收必须使用 Hosted 多租户、官方运营或云 Worker 语义",
+      "targetBeadId": "winwincode-cloud-ca1.10.6",
+      "targetCreationState": "created"
+    },
+    {
+      "stableTaskId": "BILL-100.7",
+      "title": "Billing 对账、超额与恢复纵向门禁",
+      "auditClassification": "RETIRED",
+      "targetRepository": "winwincode-cloud",
+      "creationBatch": "cloud-30-billing",
+      "migrationDisposition": "restore-as-rewritten-target-candidate",
+      "rewrittenTargetSemantics": "恢复为 Cloud 专属候选；验收必须使用 Hosted 多租户、官方运营或云 Worker 语义",
+      "targetBeadId": "winwincode-cloud-ca1.10.7",
+      "targetCreationState": "created"
+    },
+    {
+      "stableTaskId": "CLIENT-300.4",
+      "title": "占用 Browser facade 与稳定错误分类",
+      "auditClassification": "REWRITTEN",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-10-personal-remote-coding",
+      "migrationDisposition": "reconcile-rewritten-scope-before-target-creation",
+      "relatedBeadIds": [
+        "winwincode-cms.1",
+        "winwincode-pwc"
+      ]
+    },
+    {
+      "stableTaskId": "CLIENT-300.5",
+      "title": "占用设备卡、连接与释放交互",
+      "auditClassification": "REWRITTEN",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-10-personal-remote-coding",
+      "migrationDisposition": "reconcile-rewritten-scope-before-target-creation",
+      "relatedBeadIds": [
+        "winwincode-cms.2",
+        "winwincode-1fn"
+      ]
+    },
+    {
+      "stableTaskId": "CLIENT-300.6",
+      "title": "恢复窗口、Owner force-release 与 Attention 联动",
+      "auditClassification": "REWRITTEN",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-10-personal-remote-coding",
+      "migrationDisposition": "reconcile-rewritten-scope-before-target-creation"
+    },
+    {
+      "stableTaskId": "CLIENT-300.7",
+      "title": "真实 Browser + Device 占用纵向测试",
+      "auditClassification": "GATED",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-10-personal-remote-coding",
+      "migrationDisposition": "create-in-owner-repository-with-real-prerequisites"
+    },
+    {
+      "stableTaskId": "CLOUD-WORKER-100.1",
+      "title": "托管 Workspace Image 与运行时合同",
+      "auditClassification": "RETIRED",
+      "targetRepository": "winwincode-cloud",
+      "creationBatch": "cloud-50-hosted-workers",
+      "migrationDisposition": "restore-as-rewritten-target-candidate",
+      "rewrittenTargetSemantics": "恢复为 Cloud 专属候选；验收必须使用 Hosted 多租户、官方运营或云 Worker 语义",
+      "targetBeadId": "winwincode-cloud-ca1.12.1",
+      "targetCreationState": "created"
+    },
+    {
+      "stableTaskId": "CLOUD-WORKER-100.2",
+      "title": "源码 Checkout 与短期访问凭据",
+      "auditClassification": "RETIRED",
+      "targetRepository": "winwincode-cloud",
+      "creationBatch": "cloud-50-hosted-workers",
+      "migrationDisposition": "restore-as-rewritten-target-candidate",
+      "rewrittenTargetSemantics": "恢复为 Cloud 专属候选；验收必须使用 Hosted 多租户、官方运营或云 Worker 语义",
+      "targetBeadId": "winwincode-cloud-ca1.12.2",
+      "targetCreationState": "created"
+    },
+    {
+      "stableTaskId": "CLOUD-WORKER-100.3",
+      "title": "Sandbox、网络与多租户运行隔离",
+      "auditClassification": "RETIRED",
+      "targetRepository": "winwincode-cloud",
+      "creationBatch": "cloud-50-hosted-workers",
+      "migrationDisposition": "restore-as-rewritten-target-candidate",
+      "rewrittenTargetSemantics": "恢复为 Cloud 专属候选；验收必须使用 Hosted 多租户、官方运营或云 Worker 语义",
+      "targetBeadId": "winwincode-cloud-ca1.12.3",
+      "targetCreationState": "created"
+    },
+    {
+      "stableTaskId": "CLOUD-WORKER-100.4",
+      "title": "Fleet Scheduler、容量与自动扩缩",
+      "auditClassification": "RETIRED",
+      "targetRepository": "winwincode-cloud",
+      "creationBatch": "cloud-50-hosted-workers",
+      "migrationDisposition": "restore-as-rewritten-target-candidate",
+      "rewrittenTargetSemantics": "恢复为 Cloud 专属候选；验收必须使用 Hosted 多租户、官方运营或云 Worker 语义",
+      "targetBeadId": "winwincode-cloud-ca1.12.4",
+      "targetCreationState": "created"
+    },
+    {
+      "stableTaskId": "CLOUD-WORKER-100.5",
+      "title": "云 Worker 出站与工具权限策略",
+      "auditClassification": "RETIRED",
+      "targetRepository": "winwincode-cloud",
+      "creationBatch": "cloud-50-hosted-workers",
+      "migrationDisposition": "restore-as-rewritten-target-candidate",
+      "rewrittenTargetSemantics": "恢复为 Cloud 专属候选；验收必须使用 Hosted 多租户、官方运营或云 Worker 语义",
+      "targetBeadId": "winwincode-cloud-ca1.12.5",
+      "targetCreationState": "created"
+    },
+    {
+      "stableTaskId": "CLOUD-WORKER-100.6",
+      "title": "macOS/Windows 特殊 Worker 策略",
+      "auditClassification": "RETIRED",
+      "targetRepository": "winwincode-cloud",
+      "creationBatch": "cloud-50-hosted-workers",
+      "migrationDisposition": "restore-as-rewritten-target-candidate",
+      "rewrittenTargetSemantics": "恢复为 Cloud 专属候选；验收必须使用 Hosted 多租户、官方运营或云 Worker 语义",
+      "targetBeadId": "winwincode-cloud-ca1.12.6",
+      "targetCreationState": "created"
+    },
+    {
+      "stableTaskId": "CLOUD-WORKER-100.7",
+      "title": "托管执行端到端与成本门禁",
+      "auditClassification": "RETIRED",
+      "targetRepository": "winwincode-cloud",
+      "creationBatch": "cloud-50-hosted-workers",
+      "migrationDisposition": "restore-as-rewritten-target-candidate",
+      "rewrittenTargetSemantics": "恢复为 Cloud 专属候选；验收必须使用 Hosted 多租户、官方运营或云 Worker 语义",
+      "targetBeadId": "winwincode-cloud-ca1.12.7",
+      "targetCreationState": "created"
+    },
+    {
+      "stableTaskId": "FLOW-100.1",
+      "title": "DeviceExecutionBinding 与 ExecutionReservation 扩展",
+      "auditClassification": "GATED",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-10-personal-remote-coding",
+      "migrationDisposition": "create-in-owner-repository-with-real-prerequisites"
+    },
+    {
+      "stableTaskId": "FLOW-100.10",
+      "title": "StrongFlow 远程本地 Coding 真实纵向测试",
+      "auditClassification": "GATED",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-10-personal-remote-coding",
+      "migrationDisposition": "create-in-owner-repository-with-real-prerequisites"
+    },
+    {
+      "stableTaskId": "FLOW-100.2",
+      "title": "两阶段 Scheduler：选 Client/Repo 后请求 Worker",
+      "auditClassification": "GATED",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-10-personal-remote-coding",
+      "migrationDisposition": "create-in-owner-repository-with-real-prerequisites"
+    },
+    {
+      "stableTaskId": "FLOW-100.3",
+      "title": "ProductSession create/continue 的 Client/Repo 权限门",
+      "auditClassification": "GATED",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-10-personal-remote-coding",
+      "migrationDisposition": "create-in-owner-repository-with-real-prerequisites"
+    },
+    {
+      "stableTaskId": "FLOW-100.4",
+      "title": "Quick Chat 原生 Codex 连续执行路径",
+      "auditClassification": "GATED",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-10-personal-remote-coding",
+      "migrationDisposition": "create-in-owner-repository-with-real-prerequisites"
+    },
+    {
+      "stableTaskId": "FLOW-100.5",
+      "title": "StrongFlow 角色到 Device WorkerSession 的路由",
+      "auditClassification": "GATED",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-10-personal-remote-coding",
+      "migrationDisposition": "create-in-owner-repository-with-real-prerequisites"
+    },
+    {
+      "stableTaskId": "FLOW-100.6",
+      "title": "Cancel、retry、replan、replace 与 occupancy drain 语义",
+      "auditClassification": "GATED",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-10-personal-remote-coding",
+      "migrationDisposition": "create-in-owner-repository-with-real-prerequisites"
+    },
+    {
+      "stableTaskId": "FLOW-100.7",
+      "title": "Client 容量等待队列与公平性",
+      "auditClassification": "MISSING-FUTURE",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-10-personal-remote-coding",
+      "migrationDisposition": "create-in-owner-repository-after-recorded-gate"
+    },
+    {
+      "stableTaskId": "FLOW-100.8",
+      "title": "Device/Repo/Worker 本地执行状态投影",
+      "auditClassification": "GATED",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-10-personal-remote-coding",
+      "migrationDisposition": "create-in-owner-repository-with-real-prerequisites"
+    },
+    {
+      "stableTaskId": "FLOW-100.9",
+      "title": "Quick 远程本地 Coding 真实纵向测试",
+      "auditClassification": "GATED",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-10-personal-remote-coding",
+      "migrationDisposition": "create-in-owner-repository-with-real-prerequisites"
+    },
+    {
+      "stableTaskId": "FUSION-100.1",
+      "title": "冻结同题盲采样 Fusion 架构与边界",
+      "auditClassification": "MISSING-FUTURE",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-30-harness-v2",
+      "migrationDisposition": "create-in-owner-repository-after-recorded-gate"
+    },
+    {
+      "stableTaskId": "FUSION-100.10",
+      "title": "Plan/Review/Acceptance 三类 Fusion 真实基准",
+      "auditClassification": "MISSING-FUTURE",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-30-harness-v2",
+      "migrationDisposition": "create-in-owner-repository-after-recorded-gate"
+    },
+    {
+      "stableTaskId": "FUSION-100.2",
+      "title": "FusionInput 与完整答案 canonical contract",
+      "auditClassification": "REWRITTEN",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-30-harness-v2",
+      "migrationDisposition": "reconcile-rewritten-scope-before-target-creation"
+    },
+    {
+      "stableTaskId": "FUSION-100.3",
+      "title": "并行 blind Panel Runner",
+      "auditClassification": "MISSING-FUTURE",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-30-harness-v2",
+      "migrationDisposition": "create-in-owner-repository-after-recorded-gate"
+    },
+    {
+      "stableTaskId": "FUSION-100.4",
+      "title": "Fusion Answer 正规化与 Claim 抽取",
+      "auditClassification": "MISSING-FUTURE",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-30-harness-v2",
+      "migrationDisposition": "create-in-owner-repository-after-recorded-gate"
+    },
+    {
+      "stableTaskId": "FUSION-100.5",
+      "title": "Consensus、Conflict 与 Unique Claim Analyzer",
+      "auditClassification": "MISSING-FUTURE",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-30-harness-v2",
+      "migrationDisposition": "create-in-owner-repository-after-recorded-gate"
+    },
+    {
+      "stableTaskId": "FUSION-100.6",
+      "title": "高影响争议裁决器",
+      "auditClassification": "MISSING-FUTURE",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-30-harness-v2",
+      "migrationDisposition": "create-in-owner-repository-after-recorded-gate"
+    },
+    {
+      "stableTaskId": "FUSION-100.7",
+      "title": "Fusion Claim 到 Finding/Evidence 的验证门",
+      "auditClassification": "MISSING-FUTURE",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-30-harness-v2",
+      "migrationDisposition": "create-in-owner-repository-after-recorded-gate"
+    },
+    {
+      "stableTaskId": "FUSION-100.8",
+      "title": "渐进式 2→3+Judge、预算与降级策略",
+      "auditClassification": "MISSING-FUTURE",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-30-harness-v2",
+      "migrationDisposition": "create-in-owner-repository-after-recorded-gate"
+    },
+    {
+      "stableTaskId": "FUSION-100.9",
+      "title": "Fusion 共识、冲突与证据 UI",
+      "auditClassification": "MISSING-FUTURE",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-30-harness-v2",
+      "migrationDisposition": "create-in-owner-repository-after-recorded-gate"
+    },
+    {
+      "stableTaskId": "GIT-100.1",
+      "title": "Worker 清理前创建稳定 Candidate Git ref",
+      "auditClassification": "MISSING-NOW",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-10-personal-remote-coding",
+      "migrationDisposition": "move-active-work-to-owner-repository",
+      "relatedBeadIds": [
+        "winwincode-4eo.1"
+      ]
+    },
+    {
+      "stableTaskId": "GIT-100.10",
+      "title": "Candidate 本地交付真实纵向测试",
+      "auditClassification": "GATED",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-10-personal-remote-coding",
+      "migrationDisposition": "create-in-owner-repository-with-real-prerequisites"
+    },
+    {
+      "stableTaskId": "GIT-100.2",
+      "title": "Device Client Candidate 本地 registry 与恢复",
+      "auditClassification": "MISSING-NOW",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-10-personal-remote-coding",
+      "migrationDisposition": "move-active-work-to-owner-repository",
+      "relatedBeadIds": [
+        "winwincode-4eo.2"
+      ]
+    },
+    {
+      "stableTaskId": "GIT-100.3",
+      "title": "本地分支创建引擎",
+      "auditClassification": "GATED",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-10-personal-remote-coding",
+      "migrationDisposition": "create-in-owner-repository-with-real-prerequisites"
+    },
+    {
+      "stableTaskId": "GIT-100.4",
+      "title": "目标分支安全 Apply 引擎",
+      "auditClassification": "GATED",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-10-personal-remote-coding",
+      "migrationDisposition": "create-in-owner-repository-with-real-prerequisites"
+    },
+    {
+      "stableTaskId": "GIT-100.5",
+      "title": "Base stale、Dirty、冲突与特殊 Git 形态",
+      "auditClassification": "GATED",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-10-personal-remote-coding",
+      "migrationDisposition": "create-in-owner-repository-with-real-prerequisites"
+    },
+    {
+      "stableTaskId": "GIT-100.6",
+      "title": "LocalCandidate/LocalApply Receipt Server ledger",
+      "auditClassification": "MISSING-NOW",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-10-personal-remote-coding",
+      "migrationDisposition": "move-active-work-to-owner-repository",
+      "relatedBeadIds": [
+        "winwincode-4eo.3"
+      ]
+    },
+    {
+      "stableTaskId": "GIT-100.7",
+      "title": "Candidate retained/apply ClientControlPort 效果链",
+      "auditClassification": "GATED",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-10-personal-remote-coding",
+      "migrationDisposition": "create-in-owner-repository-with-real-prerequisites"
+    },
+    {
+      "stableTaskId": "GIT-100.8",
+      "title": "Candidate 本地操作 Web UI",
+      "auditClassification": "MISSING-NOW",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-10-personal-remote-coding",
+      "migrationDisposition": "move-active-work-to-owner-repository",
+      "relatedBeadIds": [
+        "winwincode-4eo.4"
+      ]
+    },
+    {
+      "stableTaskId": "GIT-100.9",
+      "title": "Candidate retention、discard 与 GC",
+      "auditClassification": "MISSING-FUTURE",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-10-personal-remote-coding",
+      "migrationDisposition": "create-in-owner-repository-after-recorded-gate"
+    },
+    {
+      "stableTaskId": "INT-100.1",
+      "title": "基线审计：对齐 main、现有 Beads 与已落地功能",
+      "auditClassification": "EXACT",
+      "targetRepository": "cross-repository-migration",
+      "creationBatch": "cross-00-baseline",
+      "migrationDisposition": "preserve-completed-provenance-in-owner-repository",
+      "relatedBeadIds": [
+        "winwincode-9c4.22"
+      ]
+    },
+    {
+      "stableTaskId": "INT-100.10",
+      "title": "M6 SaaS GA / 可选 Cloud Worker 总门禁",
+      "auditClassification": "RETIRED",
+      "targetRepository": "winwincode-cloud",
+      "creationBatch": "cloud-60-release-gates",
+      "migrationDisposition": "restore-as-rewritten-target-candidate",
+      "rewrittenTargetSemantics": "恢复为 Cloud 专属候选；验收必须使用 Hosted 多租户、官方运营或云 Worker 语义",
+      "targetBeadId": "winwincode-cloud-ca1.13.1",
+      "targetCreationState": "created"
+    },
+    {
+      "stableTaskId": "INT-100.2",
+      "title": "M1 Foundation Wave 集成：Repo/Worker/Candidate/Occupancy UI",
+      "auditClassification": "GATED",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-10-personal-remote-coding",
+      "migrationDisposition": "create-in-owner-repository-with-real-prerequisites"
+    },
+    {
+      "stableTaskId": "INT-100.3",
+      "title": "M1 Execution Wave 集成：受管 Worker、Scheduler 与本地 Apply",
+      "auditClassification": "GATED",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-10-personal-remote-coding",
+      "migrationDisposition": "create-in-owner-repository-with-real-prerequisites"
+    },
+    {
+      "stableTaskId": "INT-100.4",
+      "title": "M1 个人远程本地 Coding Alpha 综合门禁",
+      "auditClassification": "GATED",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-10-personal-remote-coding",
+      "migrationDisposition": "create-in-owner-repository-with-real-prerequisites"
+    },
+    {
+      "stableTaskId": "INT-100.5",
+      "title": "M2 Personal Daily Driver 集成与发布门禁",
+      "auditClassification": "GATED",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-20-daily-driver",
+      "migrationDisposition": "create-in-owner-repository-with-real-prerequisites"
+    },
+    {
+      "stableTaskId": "INT-100.6",
+      "title": "M3 Harness Contract/Foundation 集成门",
+      "auditClassification": "GATED",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-30-harness-v2",
+      "migrationDisposition": "create-in-owner-repository-with-real-prerequisites"
+    },
+    {
+      "stableTaskId": "INT-100.7",
+      "title": "M3 StrongFlow Harness V2 综合集成与基准门禁",
+      "auditClassification": "GATED",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-30-harness-v2",
+      "migrationDisposition": "create-in-owner-repository-with-real-prerequisites"
+    },
+    {
+      "stableTaskId": "INT-100.8",
+      "title": "M4 Team Self-hosted 综合集成与发布门禁",
+      "auditClassification": "GATED",
+      "targetRepository": "winwincode-enterprise",
+      "creationBatch": "enterprise-10-team-self-hosted",
+      "migrationDisposition": "create-in-owner-repository-with-real-prerequisites",
+      "targetBeadId": "enterprise-5uz.11.1",
+      "targetCreationState": "created"
+    },
+    {
+      "stableTaskId": "INT-100.9",
+      "title": "M5 Hosted Control Plane/BYOW SaaS Beta 综合集成",
+      "auditClassification": "RETIRED",
+      "targetRepository": "winwincode-cloud",
+      "creationBatch": "cloud-60-release-gates",
+      "migrationDisposition": "restore-as-rewritten-target-candidate",
+      "rewrittenTargetSemantics": "恢复为 Cloud 专属候选；验收必须使用 Hosted 多租户、官方运营或云 Worker 语义",
+      "targetBeadId": "winwincode-cloud-ca1.13.2",
+      "targetCreationState": "created"
+    },
+    {
+      "stableTaskId": "MEASURE-100.1",
+      "title": "扩展可解释测量的 Harness 阶段归因",
+      "auditClassification": "REWRITTEN",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-30-harness-v2",
+      "migrationDisposition": "reconcile-rewritten-scope-before-target-creation"
+    },
+    {
+      "stableTaskId": "MEASURE-100.2",
+      "title": "ModelExchange、StageRun 与并发墙钟采集",
+      "auditClassification": "REWRITTEN",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-30-harness-v2",
+      "migrationDisposition": "reconcile-rewritten-scope-before-target-creation"
+    },
+    {
+      "stableTaskId": "MEASURE-100.3",
+      "title": "Harness overhead 与执行连续性投影/API",
+      "auditClassification": "MISSING-FUTURE",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-30-harness-v2",
+      "migrationDisposition": "create-in-owner-repository-after-recorded-gate"
+    },
+    {
+      "stableTaskId": "MEASURE-100.4",
+      "title": "Native Codex 匹配基线运行器",
+      "auditClassification": "EQUIVALENT",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-30-harness-v2",
+      "migrationDisposition": "preserve-completed-provenance-in-owner-repository",
+      "relatedBeadIds": [
+        "winwincode-qv1.1.14"
+      ]
+    },
+    {
+      "stableTaskId": "MEASURE-100.5",
+      "title": "任务复杂度特征与历史匹配器",
+      "auditClassification": "MISSING-FUTURE",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-30-harness-v2",
+      "migrationDisposition": "create-in-owner-repository-after-recorded-gate"
+    },
+    {
+      "stableTaskId": "MEASURE-100.6",
+      "title": "StrongFlow 效率与可信事实 UI",
+      "auditClassification": "MISSING-FUTURE",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-30-harness-v2",
+      "migrationDisposition": "create-in-owner-repository-after-recorded-gate"
+    },
+    {
+      "stableTaskId": "MEASURE-100.7",
+      "title": "Harness 成本/延迟护栏与策略告警",
+      "auditClassification": "MISSING-FUTURE",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-30-harness-v2",
+      "migrationDisposition": "create-in-owner-repository-after-recorded-gate"
+    },
+    {
+      "stableTaskId": "MEASURE-100.8",
+      "title": "真实任务对照报告与回归门禁",
+      "auditClassification": "REWRITTEN",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-30-harness-v2",
+      "migrationDisposition": "reconcile-rewritten-scope-before-target-creation"
+    },
+    {
+      "stableTaskId": "MODEL-100.1",
+      "title": "模型路由与凭据位置 ADR",
+      "auditClassification": "EQUIVALENT",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-20-daily-driver",
+      "migrationDisposition": "preserve-completed-provenance-in-owner-repository",
+      "relatedBeadIds": [
+        "winwincode-9c4.16.5.3.1",
+        "winwincode-9c4.16.5.6.3"
+      ]
+    },
+    {
+      "stableTaskId": "MODEL-100.2",
+      "title": "Provider preset 与模型目录服务",
+      "auditClassification": "MISSING-NOW",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-20-daily-driver",
+      "migrationDisposition": "move-active-work-to-owner-repository",
+      "relatedBeadIds": [
+        "winwincode-9c4.16.13"
+      ]
+    },
+    {
+      "stableTaskId": "MODEL-100.3",
+      "title": "Credential 写入、测试、轮换的日用 API",
+      "auditClassification": "MISSING-NOW",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-20-daily-driver",
+      "migrationDisposition": "move-active-work-to-owner-repository",
+      "relatedBeadIds": [
+        "winwincode-9c4.16.14"
+      ]
+    },
+    {
+      "stableTaskId": "MODEL-100.4",
+      "title": "Route availability、额度与限流状态",
+      "auditClassification": "GATED",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-20-daily-driver",
+      "migrationDisposition": "create-in-owner-repository-with-real-prerequisites"
+    },
+    {
+      "stableTaskId": "MODEL-100.5",
+      "title": "任务级与角色级模型选择",
+      "auditClassification": "GATED",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-20-daily-driver",
+      "migrationDisposition": "create-in-owner-repository-with-real-prerequisites"
+    },
+    {
+      "stableTaskId": "MODEL-100.6",
+      "title": "Token、价格、预算与缺失事实投影",
+      "auditClassification": "EQUIVALENT",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-20-daily-driver",
+      "migrationDisposition": "preserve-completed-provenance-in-owner-repository",
+      "relatedBeadIds": [
+        "winwincode-9c4.11.4",
+        "winwincode-kqy"
+      ]
+    },
+    {
+      "stableTaskId": "MODEL-100.7",
+      "title": "模型设置与首次配置 UI",
+      "auditClassification": "GATED",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-20-daily-driver",
+      "migrationDisposition": "create-in-owner-repository-with-real-prerequisites"
+    },
+    {
+      "stableTaskId": "MODEL-100.8",
+      "title": "真实 Provider、限流与 failover 纵向评估",
+      "auditClassification": "GATED",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-20-daily-driver",
+      "migrationDisposition": "create-in-owner-repository-with-real-prerequisites"
+    },
+    {
+      "stableTaskId": "OPS-100.1",
+      "title": "Device Client 四目标构建与发布包",
+      "auditClassification": "GATED",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-20-daily-driver",
+      "migrationDisposition": "create-in-owner-repository-with-real-prerequisites"
+    },
+    {
+      "stableTaskId": "OPS-100.10",
+      "title": "个人远程 Coding Alpha/Beta 发布门禁",
+      "auditClassification": "GATED",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-20-daily-driver",
+      "migrationDisposition": "create-in-owner-repository-with-real-prerequisites"
+    },
+    {
+      "stableTaskId": "OPS-100.2",
+      "title": "launchd/systemd 安装、启动与卸载",
+      "auditClassification": "GATED",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-20-daily-driver",
+      "migrationDisposition": "create-in-owner-repository-with-real-prerequisites"
+    },
+    {
+      "stableTaskId": "OPS-100.3",
+      "title": "Client/Server/Worker 版本协商与升级门",
+      "auditClassification": "REWRITTEN",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-20-daily-driver",
+      "migrationDisposition": "reconcile-rewritten-scope-before-target-creation"
+    },
+    {
+      "stableTaskId": "OPS-100.4",
+      "title": "公网 Server 部署参考与安全默认值",
+      "auditClassification": "MISSING-NOW",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-20-daily-driver",
+      "migrationDisposition": "move-active-work-to-owner-repository",
+      "relatedBeadIds": [
+        "winwincode-9gh.1"
+      ]
+    },
+    {
+      "stableTaskId": "OPS-100.5",
+      "title": "Server/Device SQLite 备份、恢复与 repair",
+      "auditClassification": "REWRITTEN",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-20-daily-driver",
+      "migrationDisposition": "reconcile-rewritten-scope-before-target-creation"
+    },
+    {
+      "stableTaskId": "OPS-100.6",
+      "title": "Secret-safe 诊断包与支持信息",
+      "auditClassification": "GATED",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-20-daily-driver",
+      "migrationDisposition": "create-in-owner-repository-with-real-prerequisites"
+    },
+    {
+      "stableTaskId": "OPS-100.7",
+      "title": "CPU/内存/磁盘/进程槽位与资源保护",
+      "auditClassification": "GATED",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-20-daily-driver",
+      "migrationDisposition": "create-in-owner-repository-with-real-prerequisites"
+    },
+    {
+      "stableTaskId": "OPS-100.8",
+      "title": "Browser/Server/Client/Worker/网络故障矩阵",
+      "auditClassification": "GATED",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-20-daily-driver",
+      "migrationDisposition": "create-in-owner-repository-with-real-prerequisites"
+    },
+    {
+      "stableTaskId": "OPS-100.9",
+      "title": "签名、校验、SBOM 与自动更新元数据",
+      "auditClassification": "GATED",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-20-daily-driver",
+      "migrationDisposition": "create-in-owner-repository-with-real-prerequisites"
+    },
+    {
+      "stableTaskId": "PLAN-100.1",
+      "title": "冻结 Task Memory 与 Codex Context 的所有权边界",
+      "auditClassification": "MISSING-FUTURE",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-30-harness-v2",
+      "migrationDisposition": "create-in-owner-repository-after-recorded-gate"
+    },
+    {
+      "stableTaskId": "PLAN-100.2",
+      "title": "AnchorPack canonical schema 与来源绑定",
+      "auditClassification": "REWRITTEN",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-30-harness-v2",
+      "migrationDisposition": "reconcile-rewritten-scope-before-target-creation"
+    },
+    {
+      "stableTaskId": "PLAN-100.3",
+      "title": "PlanDelta、RejectedDecision 与导航状态持久化",
+      "auditClassification": "MISSING-FUTURE",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-30-harness-v2",
+      "migrationDisposition": "create-in-owner-repository-after-recorded-gate"
+    },
+    {
+      "stableTaskId": "PLAN-100.4",
+      "title": "PostCompact 与阶段边界 Anchor 注入",
+      "auditClassification": "MISSING-FUTURE",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-30-harness-v2",
+      "migrationDisposition": "create-in-owner-repository-after-recorded-gate"
+    },
+    {
+      "stableTaskId": "PLAN-100.5",
+      "title": "恢复时同一 CodexThread 的长期导航续接",
+      "auditClassification": "MISSING-FUTURE",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-30-harness-v2",
+      "migrationDisposition": "create-in-owner-repository-after-recorded-gate"
+    },
+    {
+      "stableTaskId": "PLAN-100.6",
+      "title": "长任务多次 Compact/重启/重规划真实纵向测试",
+      "auditClassification": "MISSING-FUTURE",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-30-harness-v2",
+      "migrationDisposition": "create-in-owner-repository-after-recorded-gate"
+    },
+    {
+      "stableTaskId": "POLICY-100.1",
+      "title": "用户目标模式：Fast/Cheap/Balanced/Reliable/Release",
+      "auditClassification": "REWRITTEN",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-30-harness-v2",
+      "migrationDisposition": "reconcile-rewritten-scope-before-target-creation"
+    },
+    {
+      "stableTaskId": "POLICY-100.2",
+      "title": "任务风险与复杂度特征提取",
+      "auditClassification": "MISSING-FUTURE",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-30-harness-v2",
+      "migrationDisposition": "create-in-owner-repository-after-recorded-gate"
+    },
+    {
+      "stableTaskId": "POLICY-100.3",
+      "title": "确定性 Harness Policy Engine",
+      "auditClassification": "REWRITTEN",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-30-harness-v2",
+      "migrationDisposition": "reconcile-rewritten-scope-before-target-creation"
+    },
+    {
+      "stableTaskId": "POLICY-100.4",
+      "title": "基于能力与历史结果的 Model Router",
+      "auditClassification": "REWRITTEN",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-30-harness-v2",
+      "migrationDisposition": "reconcile-rewritten-scope-before-target-creation"
+    },
+    {
+      "stableTaskId": "POLICY-100.5",
+      "title": "Review/Fusion/Verifier 动态触发器",
+      "auditClassification": "REWRITTEN",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-30-harness-v2",
+      "migrationDisposition": "reconcile-rewritten-scope-before-target-creation"
+    },
+    {
+      "stableTaskId": "POLICY-100.6",
+      "title": "任务/模型/策略历史 Outcome Store",
+      "auditClassification": "REWRITTEN",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-30-harness-v2",
+      "migrationDisposition": "reconcile-rewritten-scope-before-target-creation"
+    },
+    {
+      "stableTaskId": "POLICY-100.7",
+      "title": "策略解释、覆盖与用户控制 UI",
+      "auditClassification": "MISSING-FUTURE",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-30-harness-v2",
+      "migrationDisposition": "create-in-owner-repository-after-recorded-gate"
+    },
+    {
+      "stableTaskId": "POLICY-100.8",
+      "title": "Shadow/Canary、回滚与策略学习门禁",
+      "auditClassification": "REWRITTEN",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-30-harness-v2",
+      "migrationDisposition": "reconcile-rewritten-scope-before-target-creation"
+    },
+    {
+      "stableTaskId": "REPO-100.1",
+      "title": "Device Repository 本地存储与服务",
+      "auditClassification": "EQUIVALENT",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-10-personal-remote-coding",
+      "migrationDisposition": "preserve-completed-provenance-in-owner-repository",
+      "relatedBeadIds": [
+        "winwincode-0dg.2"
+      ]
+    },
+    {
+      "stableTaskId": "REPO-100.10",
+      "title": "多用户本地 Repository 真实纵向测试",
+      "auditClassification": "GATED",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-10-personal-remote-coding",
+      "migrationDisposition": "create-in-owner-repository-with-real-prerequisites"
+    },
+    {
+      "stableTaskId": "REPO-100.2",
+      "title": "Git Inspector、路径收敛与 Repository fingerprint",
+      "auditClassification": "EXACT",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-10-personal-remote-coding",
+      "migrationDisposition": "preserve-completed-provenance-in-owner-repository",
+      "relatedBeadIds": [
+        "winwincode-0dg.2",
+        "winwincode-c7w"
+      ]
+    },
+    {
+      "stableTaskId": "REPO-100.3",
+      "title": "wwc repo add/list/remove/init CLI",
+      "auditClassification": "EQUIVALENT",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-10-personal-remote-coding",
+      "migrationDisposition": "preserve-completed-provenance-in-owner-repository",
+      "relatedBeadIds": [
+        "winwincode-0dg.2"
+      ]
+    },
+    {
+      "stableTaskId": "REPO-100.4",
+      "title": "Repository upsert/remove/rescan 的 Device exchange 效果",
+      "auditClassification": "MISSING-NOW",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-10-personal-remote-coding",
+      "migrationDisposition": "move-active-work-to-owner-repository",
+      "relatedBeadIds": [
+        "winwincode-cms.4"
+      ]
+    },
+    {
+      "stableTaskId": "REPO-100.5",
+      "title": "Control Plane RepositoryBinding 与 RepositoryAccessGrant ledger",
+      "auditClassification": "EQUIVALENT",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-10-personal-remote-coding",
+      "migrationDisposition": "preserve-completed-provenance-in-owner-repository",
+      "relatedBeadIds": [
+        "winwincode-0dg.1"
+      ]
+    },
+    {
+      "stableTaskId": "REPO-100.6",
+      "title": "Repository public API、授权与隐私投影",
+      "auditClassification": "MISSING-NOW",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-10-personal-remote-coding",
+      "migrationDisposition": "move-active-work-to-owner-repository",
+      "relatedBeadIds": [
+        "winwincode-cms.5"
+      ]
+    },
+    {
+      "stableTaskId": "REPO-100.7",
+      "title": "Repository Web 列表、状态与授权 UI",
+      "auditClassification": "REWRITTEN",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-10-personal-remote-coding",
+      "migrationDisposition": "reconcile-rewritten-scope-before-target-creation",
+      "relatedBeadIds": [
+        "winwincode-cms.3"
+      ]
+    },
+    {
+      "stableTaskId": "REPO-100.8",
+      "title": "Worker launch 前 Repository 再验证",
+      "auditClassification": "GATED",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-10-personal-remote-coding",
+      "migrationDisposition": "create-in-owner-repository-with-real-prerequisites"
+    },
+    {
+      "stableTaskId": "REPO-100.9",
+      "title": "旧单 Repository Server 配置迁移桥",
+      "auditClassification": "REWRITTEN",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-10-personal-remote-coding",
+      "migrationDisposition": "reconcile-rewritten-scope-before-target-creation"
+    },
+    {
+      "stableTaskId": "REVIEW-100.1",
+      "title": "ReviewSnapshot 不可变身份合同",
+      "auditClassification": "REWRITTEN",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-30-harness-v2",
+      "migrationDisposition": "reconcile-rewritten-scope-before-target-creation"
+    },
+    {
+      "stableTaskId": "REVIEW-100.10",
+      "title": "Sidecar Review 速度与质量对照纵向测试",
+      "auditClassification": "MISSING-FUTURE",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-30-harness-v2",
+      "migrationDisposition": "create-in-owner-repository-after-recorded-gate"
+    },
+    {
+      "stableTaskId": "REVIEW-100.2",
+      "title": "Finding 领域模型与完整生命周期",
+      "auditClassification": "REWRITTEN",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-30-harness-v2",
+      "migrationDisposition": "reconcile-rewritten-scope-before-target-creation"
+    },
+    {
+      "stableTaskId": "REVIEW-100.3",
+      "title": "Sidecar Reviewer 快照调度器",
+      "auditClassification": "MISSING-FUTURE",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-30-harness-v2",
+      "migrationDisposition": "create-in-owner-repository-after-recorded-gate"
+    },
+    {
+      "stableTaskId": "REVIEW-100.4",
+      "title": "Finding Reconciler：旧快照问题与当前事实对账",
+      "auditClassification": "MISSING-FUTURE",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-30-harness-v2",
+      "migrationDisposition": "create-in-owner-repository-after-recorded-gate"
+    },
+    {
+      "stableTaskId": "REVIEW-100.5",
+      "title": "Finding 注入与中断策略",
+      "auditClassification": "MISSING-FUTURE",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-30-harness-v2",
+      "migrationDisposition": "create-in-owner-repository-after-recorded-gate"
+    },
+    {
+      "stableTaskId": "REVIEW-100.6",
+      "title": "可选 same-turn steer 的 Codex Adapter seam",
+      "auditClassification": "MISSING-FUTURE",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-30-harness-v2",
+      "migrationDisposition": "create-in-owner-repository-after-recorded-gate"
+    },
+    {
+      "stableTaskId": "REVIEW-100.7",
+      "title": "Remediation 提交与 Evidence 验证闭环",
+      "auditClassification": "MISSING-FUTURE",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-30-harness-v2",
+      "migrationDisposition": "create-in-owner-repository-after-recorded-gate"
+    },
+    {
+      "stableTaskId": "REVIEW-100.8",
+      "title": "Review 收敛、轮次与边际收益预算",
+      "auditClassification": "MISSING-FUTURE",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-30-harness-v2",
+      "migrationDisposition": "create-in-owner-repository-after-recorded-gate"
+    },
+    {
+      "stableTaskId": "REVIEW-100.9",
+      "title": "Finding、Review Delta 与残余风险 UI",
+      "auditClassification": "MISSING-FUTURE",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-30-harness-v2",
+      "migrationDisposition": "create-in-owner-repository-after-recorded-gate"
+    },
+    {
+      "stableTaskId": "SAAS-DATA-100.1",
+      "title": "持久化 Port 与 SQLite 语义审计",
+      "auditClassification": "REWRITTEN",
+      "targetRepository": "cross-repository-migration",
+      "creationBatch": "cross-30-task-and-data-migration",
+      "migrationDisposition": "reconcile-rewritten-scope-before-target-creation",
+      "relatedBeadIds": [
+        "winwincode-9c4.21.1"
+      ],
+      "rewrittenTargetSemantics": "只负责拆仓期间冻结后端数据库边界；Cloud 与 Enterprise 在各自仓库建立不同产品语义的 PostgreSQL 实现任务；Kernel 与 Device SQLite 不迁移"
+    },
+    {
+      "stableTaskId": "SAAS-DATA-100.2",
+      "title": "PostgreSQL schema、迁移与租户键",
+      "auditClassification": "REWRITTEN",
+      "targetRepository": "cross-repository-migration",
+      "creationBatch": "cross-30-task-and-data-migration",
+      "migrationDisposition": "reconcile-rewritten-scope-before-target-creation",
+      "relatedBeadIds": [
+        "winwincode-9c4.21.2",
+        "winwincode-9c4.21.3"
+      ],
+      "rewrittenTargetSemantics": "只负责拆仓期间冻结后端数据库边界；Cloud 与 Enterprise 在各自仓库建立不同产品语义的 PostgreSQL 实现任务；Kernel 与 Device SQLite 不迁移"
+    },
+    {
+      "stableTaskId": "SAAS-DATA-100.3",
+      "title": "Control Plane PostgreSQL Adapter",
+      "auditClassification": "REWRITTEN",
+      "targetRepository": "cross-repository-migration",
+      "creationBatch": "cross-30-task-and-data-migration",
+      "migrationDisposition": "reconcile-rewritten-scope-before-target-creation",
+      "relatedBeadIds": [
+        "winwincode-9c4.21.2",
+        "winwincode-9c4.21.3"
+      ],
+      "rewrittenTargetSemantics": "只负责拆仓期间冻结后端数据库边界；Cloud 与 Enterprise 在各自仓库建立不同产品语义的 PostgreSQL 实现任务；Kernel 与 Device SQLite 不迁移"
+    },
+    {
+      "stableTaskId": "SAAS-DATA-100.4",
+      "title": "对象存储 Artifact/Evidence Adapter",
+      "auditClassification": "RETIRED",
+      "targetRepository": "winwincode-cloud",
+      "creationBatch": "cloud-10-data-plane",
+      "migrationDisposition": "restore-as-rewritten-target-candidate",
+      "rewrittenTargetSemantics": "恢复为 Cloud 专属候选；验收必须使用 Hosted 多租户、官方运营或云 Worker 语义",
+      "targetBeadId": "winwincode-cloud-ca1.8.1",
+      "targetCreationState": "created"
+    },
+    {
+      "stableTaskId": "SAAS-DATA-100.5",
+      "title": "多实例 Outbox、调度锁与租约协调",
+      "auditClassification": "RETIRED",
+      "targetRepository": "winwincode-cloud",
+      "creationBatch": "cloud-10-data-plane",
+      "migrationDisposition": "restore-as-rewritten-target-candidate",
+      "rewrittenTargetSemantics": "恢复为 Cloud 专属候选；验收必须使用 Hosted 多租户、官方运营或云 Worker 语义",
+      "targetBeadId": "winwincode-cloud-ca1.8.2",
+      "targetCreationState": "created"
+    },
+    {
+      "stableTaskId": "SAAS-DATA-100.6",
+      "title": "SQLite→Hosted 数据迁移与导入导出",
+      "auditClassification": "REWRITTEN",
+      "targetRepository": "cross-repository-migration",
+      "creationBatch": "cross-30-task-and-data-migration",
+      "migrationDisposition": "reconcile-rewritten-scope-before-target-creation",
+      "relatedBeadIds": [
+        "winwincode-9c4.21.4"
+      ],
+      "rewrittenTargetSemantics": "只负责拆仓期间冻结后端数据库边界；Cloud 与 Enterprise 在各自仓库建立不同产品语义的 PostgreSQL 实现任务；Kernel 与 Device SQLite 不迁移"
+    },
+    {
+      "stableTaskId": "SAAS-DATA-100.7",
+      "title": "备份、恢复、PITR 与租户导出",
+      "auditClassification": "RETIRED",
+      "targetRepository": "winwincode-enterprise",
+      "creationBatch": "enterprise-20-customer-data-protection",
+      "migrationDisposition": "restore-as-rewritten-target-candidate",
+      "rewrittenTargetSemantics": "客户控制的 PostgreSQL 备份、恢复和导出；不沿用 Hosted tenant/PITR 操作模型",
+      "targetBeadId": "enterprise-5uz.12.1",
+      "targetCreationState": "created"
+    },
+    {
+      "stableTaskId": "SAAS-DATA-100.8",
+      "title": "Hosted 数据平面负载与一致性门禁",
+      "auditClassification": "RETIRED",
+      "targetRepository": "winwincode-cloud",
+      "creationBatch": "cloud-10-data-plane",
+      "migrationDisposition": "restore-as-rewritten-target-candidate",
+      "rewrittenTargetSemantics": "恢复为 Cloud 专属候选；验收必须使用 Hosted 多租户、官方运营或云 Worker 语义",
+      "targetBeadId": "winwincode-cloud-ca1.8.3",
+      "targetCreationState": "created"
+    },
+    {
+      "stableTaskId": "SAAS-IAM-100.1",
+      "title": "Hosted Tenant/Organization 账户模型",
+      "auditClassification": "RETIRED",
+      "targetRepository": "winwincode-cloud",
+      "creationBatch": "cloud-20-hosted-iam",
+      "migrationDisposition": "restore-as-rewritten-target-candidate",
+      "rewrittenTargetSemantics": "恢复为 Cloud 专属候选；验收必须使用 Hosted 多租户、官方运营或云 Worker 语义",
+      "targetBeadId": "winwincode-cloud-ca1.9.1",
+      "targetCreationState": "created"
+    },
+    {
+      "stableTaskId": "SAAS-IAM-100.2",
+      "title": "邀请、成员加入/离开与域策略",
+      "auditClassification": "RETIRED",
+      "targetRepository": "winwincode-cloud",
+      "creationBatch": "cloud-20-hosted-iam",
+      "migrationDisposition": "restore-as-rewritten-target-candidate",
+      "rewrittenTargetSemantics": "恢复为 Cloud 专属候选；验收必须使用 Hosted 多租户、官方运营或云 Worker 语义",
+      "targetBeadId": "winwincode-cloud-ca1.9.2",
+      "targetCreationState": "created"
+    },
+    {
+      "stableTaskId": "SAAS-IAM-100.3",
+      "title": "Hosted RBAC 与项目级策略",
+      "auditClassification": "RETIRED",
+      "targetRepository": "winwincode-cloud",
+      "creationBatch": "cloud-20-hosted-iam",
+      "migrationDisposition": "restore-as-rewritten-target-candidate",
+      "rewrittenTargetSemantics": "恢复为 Cloud 专属候选；验收必须使用 Hosted 多租户、官方运营或云 Worker 语义",
+      "targetBeadId": "winwincode-cloud-ca1.9.3",
+      "targetCreationState": "created"
+    },
+    {
+      "stableTaskId": "SAAS-IAM-100.4",
+      "title": "OIDC/SSO 登录与账户链接",
+      "auditClassification": "RETIRED",
+      "targetRepository": "winwincode-enterprise",
+      "creationBatch": "enterprise-30-customer-identity-and-device-policy",
+      "migrationDisposition": "restore-as-rewritten-target-candidate",
+      "rewrittenTargetSemantics": "客户身份提供方的 OIDC/SSO 接入；不依赖 WinWinCode Cloud 账户",
+      "targetBeadId": "enterprise-5uz.13.1",
+      "targetCreationState": "created"
+    },
+    {
+      "stableTaskId": "SAAS-IAM-100.5",
+      "title": "SCIM 用户与组生命周期",
+      "auditClassification": "RETIRED",
+      "targetRepository": "winwincode-enterprise",
+      "creationBatch": "enterprise-30-customer-identity-and-device-policy",
+      "migrationDisposition": "restore-as-rewritten-target-candidate",
+      "rewrittenTargetSemantics": "客户目录控制的 SCIM 用户与组生命周期",
+      "targetBeadId": "enterprise-5uz.13.2",
+      "targetCreationState": "created"
+    },
+    {
+      "stableTaskId": "SAAS-IAM-100.6",
+      "title": "Device Trust、Client 策略与企业限制",
+      "auditClassification": "RETIRED",
+      "targetRepository": "winwincode-enterprise",
+      "creationBatch": "enterprise-30-customer-identity-and-device-policy",
+      "migrationDisposition": "restore-as-rewritten-target-candidate",
+      "rewrittenTargetSemantics": "客户管理的设备信任与私有化访问限制",
+      "targetBeadId": "enterprise-5uz.13.3",
+      "targetCreationState": "created"
+    },
+    {
+      "stableTaskId": "SAAS-IAM-100.7",
+      "title": "数据保留、删除请求与租户导出",
+      "auditClassification": "RETIRED",
+      "targetRepository": "winwincode-enterprise",
+      "creationBatch": "enterprise-30-customer-identity-and-device-policy",
+      "migrationDisposition": "restore-as-rewritten-target-candidate",
+      "rewrittenTargetSemantics": "客户制定的数据保留、删除和导出规则",
+      "targetBeadId": "enterprise-5uz.13.4",
+      "targetCreationState": "created"
+    },
+    {
+      "stableTaskId": "SAAS-IAM-100.8",
+      "title": "Hosted IAM 多租户纵向门禁",
+      "auditClassification": "RETIRED",
+      "targetRepository": "winwincode-cloud",
+      "creationBatch": "cloud-20-hosted-iam",
+      "migrationDisposition": "restore-as-rewritten-target-candidate",
+      "rewrittenTargetSemantics": "恢复为 Cloud 专属候选；验收必须使用 Hosted 多租户、官方运营或云 Worker 语义",
+      "targetBeadId": "winwincode-cloud-ca1.9.4",
+      "targetCreationState": "created"
+    },
+    {
+      "stableTaskId": "SAAS-OPS-100.1",
+      "title": "Hosted 部署拓扑与基础设施即代码",
+      "auditClassification": "RETIRED",
+      "targetRepository": "winwincode-cloud",
+      "creationBatch": "cloud-40-hosted-operations",
+      "migrationDisposition": "restore-as-rewritten-target-candidate",
+      "rewrittenTargetSemantics": "恢复为 Cloud 专属候选；验收必须使用 Hosted 多租户、官方运营或云 Worker 语义",
+      "targetBeadId": "winwincode-cloud-ca1.11.1",
+      "targetCreationState": "created"
+    },
+    {
+      "stableTaskId": "SAAS-OPS-100.10",
+      "title": "SaaS GA 综合发布门禁",
+      "auditClassification": "RETIRED",
+      "targetRepository": "winwincode-cloud",
+      "creationBatch": "cloud-40-hosted-operations",
+      "migrationDisposition": "restore-as-rewritten-target-candidate",
+      "rewrittenTargetSemantics": "恢复为 Cloud 专属候选；验收必须使用 Hosted 多租户、官方运营或云 Worker 语义",
+      "targetBeadId": "winwincode-cloud-ca1.11.2",
+      "targetCreationState": "created"
+    },
+    {
+      "stableTaskId": "SAAS-OPS-100.2",
+      "title": "多实例调度、leader 与滚动接管",
+      "auditClassification": "RETIRED",
+      "targetRepository": "winwincode-cloud",
+      "creationBatch": "cloud-40-hosted-operations",
+      "migrationDisposition": "restore-as-rewritten-target-candidate",
+      "rewrittenTargetSemantics": "恢复为 Cloud 专属候选；验收必须使用 Hosted 多租户、官方运营或云 Worker 语义",
+      "targetBeadId": "winwincode-cloud-ca1.11.3",
+      "targetCreationState": "created"
+    },
+    {
+      "stableTaskId": "SAAS-OPS-100.3",
+      "title": "全栈 Metrics/Logs/Traces 与成本可观测性",
+      "auditClassification": "RETIRED",
+      "targetRepository": "winwincode-cloud",
+      "creationBatch": "cloud-40-hosted-operations",
+      "migrationDisposition": "restore-as-rewritten-target-candidate",
+      "rewrittenTargetSemantics": "恢复为 Cloud 专属候选；验收必须使用 Hosted 多租户、官方运营或云 Worker 语义",
+      "targetBeadId": "winwincode-cloud-ca1.11.4",
+      "targetCreationState": "created"
+    },
+    {
+      "stableTaskId": "SAAS-OPS-100.4",
+      "title": "SLO、告警与错误预算",
+      "auditClassification": "RETIRED",
+      "targetRepository": "winwincode-cloud",
+      "creationBatch": "cloud-40-hosted-operations",
+      "migrationDisposition": "restore-as-rewritten-target-candidate",
+      "rewrittenTargetSemantics": "恢复为 Cloud 专属候选；验收必须使用 Hosted 多租户、官方运营或云 Worker 语义",
+      "targetBeadId": "winwincode-cloud-ca1.11.5",
+      "targetCreationState": "created"
+    },
+    {
+      "stableTaskId": "SAAS-OPS-100.5",
+      "title": "滚动升级、Schema 兼容与回滚",
+      "auditClassification": "RETIRED",
+      "targetRepository": "winwincode-cloud",
+      "creationBatch": "cloud-40-hosted-operations",
+      "migrationDisposition": "restore-as-rewritten-target-candidate",
+      "rewrittenTargetSemantics": "恢复为 Cloud 专属候选；验收必须使用 Hosted 多租户、官方运营或云 Worker 语义",
+      "targetBeadId": "winwincode-cloud-ca1.11.6",
+      "targetCreationState": "created"
+    },
+    {
+      "stableTaskId": "SAAS-OPS-100.6",
+      "title": "灾备、区域故障与恢复演练",
+      "auditClassification": "RETIRED",
+      "targetRepository": "winwincode-cloud",
+      "creationBatch": "cloud-40-hosted-operations",
+      "migrationDisposition": "restore-as-rewritten-target-candidate",
+      "rewrittenTargetSemantics": "恢复为 Cloud 专属候选；验收必须使用 Hosted 多租户、官方运营或云 Worker 语义",
+      "targetBeadId": "winwincode-cloud-ca1.11.7",
+      "targetCreationState": "created"
+    },
+    {
+      "stableTaskId": "SAAS-OPS-100.7",
+      "title": "滥用检测、速率限制与租户隔离保护",
+      "auditClassification": "RETIRED",
+      "targetRepository": "winwincode-cloud",
+      "creationBatch": "cloud-40-hosted-operations",
+      "migrationDisposition": "restore-as-rewritten-target-candidate",
+      "rewrittenTargetSemantics": "恢复为 Cloud 专属候选；验收必须使用 Hosted 多租户、官方运营或云 Worker 语义",
+      "targetBeadId": "winwincode-cloud-ca1.11.8",
+      "targetCreationState": "created"
+    },
+    {
+      "stableTaskId": "SAAS-OPS-100.8",
+      "title": "供应链、安全扫描与渗透测试门禁",
+      "auditClassification": "RETIRED",
+      "targetRepository": "winwincode-enterprise",
+      "creationBatch": "enterprise-40-private-release-security",
+      "migrationDisposition": "restore-as-rewritten-target-candidate",
+      "rewrittenTargetSemantics": "私有化安装包、依赖和供应链安全发布门",
+      "targetBeadId": "enterprise-5uz.14.1",
+      "targetCreationState": "created"
+    },
+    {
+      "stableTaskId": "SAAS-OPS-100.9",
+      "title": "管理员支持、租户诊断与安全修复工具",
+      "auditClassification": "RETIRED",
+      "targetRepository": "winwincode-cloud",
+      "creationBatch": "cloud-40-hosted-operations",
+      "migrationDisposition": "restore-as-rewritten-target-candidate",
+      "rewrittenTargetSemantics": "恢复为 Cloud 专属候选；验收必须使用 Hosted 多租户、官方运营或云 Worker 语义",
+      "targetBeadId": "winwincode-cloud-ca1.11.9",
+      "targetCreationState": "created"
+    },
+    {
+      "stableTaskId": "TEAM-100.1",
+      "title": "组织、项目与成员关系收敛",
+      "auditClassification": "EQUIVALENT",
+      "targetRepository": "winwincode-enterprise",
+      "creationBatch": "enterprise-10-team-self-hosted",
+      "migrationDisposition": "preserve-completed-provenance-in-owner-repository",
+      "relatedBeadIds": [
+        "winwincode-9c4.17.1.2",
+        "winwincode-9c4.17.2.1"
+      ],
+      "targetBeadId": "enterprise-5uz.11.2",
+      "targetCreationState": "created"
+    },
+    {
+      "stableTaskId": "TEAM-100.10",
+      "title": "团队自托管多用户共享 Client 纵向门禁",
+      "auditClassification": "GATED",
+      "targetRepository": "winwincode-enterprise",
+      "creationBatch": "enterprise-10-team-self-hosted",
+      "migrationDisposition": "create-in-owner-repository-with-real-prerequisites",
+      "targetBeadId": "enterprise-5uz.11.3",
+      "targetCreationState": "created"
+    },
+    {
+      "stableTaskId": "TEAM-100.2",
+      "title": "Client/Repository/Session/Delivery/Evidence ACL",
+      "auditClassification": "GATED",
+      "targetRepository": "winwincode-enterprise",
+      "creationBatch": "enterprise-10-team-self-hosted",
+      "migrationDisposition": "create-in-owner-repository-with-real-prerequisites",
+      "targetBeadId": "enterprise-5uz.11.4",
+      "targetCreationState": "created"
+    },
+    {
+      "stableTaskId": "TEAM-100.3",
+      "title": "Client 与 Repository 分享管理 UI",
+      "auditClassification": "GATED",
+      "targetRepository": "winwincode-enterprise",
+      "creationBatch": "enterprise-10-team-self-hosted",
+      "migrationDisposition": "create-in-owner-repository-with-real-prerequisites",
+      "targetBeadId": "enterprise-5uz.11.5",
+      "targetCreationState": "created"
+    },
+    {
+      "stableTaskId": "TEAM-100.4",
+      "title": "多用户隐私与侧信道门禁",
+      "auditClassification": "GATED",
+      "targetRepository": "winwincode-enterprise",
+      "creationBatch": "enterprise-10-team-self-hosted",
+      "migrationDisposition": "create-in-owner-repository-with-real-prerequisites",
+      "targetBeadId": "enterprise-5uz.11.6",
+      "targetCreationState": "created"
+    },
+    {
+      "stableTaskId": "TEAM-100.5",
+      "title": "团队评论、提及与审查讨论",
+      "auditClassification": "GATED",
+      "targetRepository": "winwincode-enterprise",
+      "creationBatch": "enterprise-10-team-self-hosted",
+      "migrationDisposition": "create-in-owner-repository-with-real-prerequisites",
+      "targetBeadId": "enterprise-5uz.11.7",
+      "targetCreationState": "created"
+    },
+    {
+      "stableTaskId": "TEAM-100.6",
+      "title": "Client 占用等待队列、公平性与管理员调度",
+      "auditClassification": "GATED",
+      "targetRepository": "winwincode-enterprise",
+      "creationBatch": "enterprise-10-team-self-hosted",
+      "migrationDisposition": "create-in-owner-repository-with-real-prerequisites",
+      "targetBeadId": "enterprise-5uz.11.8",
+      "targetCreationState": "created"
+    },
+    {
+      "stableTaskId": "TEAM-100.7",
+      "title": "团队 Attention、审批策略与职责分离",
+      "auditClassification": "GATED",
+      "targetRepository": "winwincode-enterprise",
+      "creationBatch": "enterprise-10-team-self-hosted",
+      "migrationDisposition": "create-in-owner-repository-with-real-prerequisites",
+      "targetBeadId": "enterprise-5uz.11.9",
+      "targetCreationState": "created"
+    },
+    {
+      "stableTaskId": "TEAM-100.8",
+      "title": "团队审计查询与导出",
+      "auditClassification": "EQUIVALENT",
+      "targetRepository": "winwincode-enterprise",
+      "creationBatch": "enterprise-10-team-self-hosted",
+      "migrationDisposition": "preserve-completed-provenance-in-owner-repository",
+      "relatedBeadIds": [
+        "winwincode-9c4.17.8.1",
+        "winwincode-9c4.17.8.3"
+      ],
+      "targetBeadId": "enterprise-5uz.11.10",
+      "targetCreationState": "created"
+    },
+    {
+      "stableTaskId": "TEAM-100.9",
+      "title": "团队管理与运行概览 UI",
+      "auditClassification": "GATED",
+      "targetRepository": "winwincode-enterprise",
+      "creationBatch": "enterprise-10-team-self-hosted",
+      "migrationDisposition": "create-in-owner-repository-with-real-prerequisites",
+      "targetBeadId": "enterprise-5uz.11.11",
+      "targetCreationState": "created"
+    },
+    {
+      "stableTaskId": "UX-100.1",
+      "title": "登录后 Home/My Work 信息架构收敛",
+      "auditClassification": "EQUIVALENT",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-20-daily-driver",
+      "migrationDisposition": "preserve-completed-provenance-in-owner-repository",
+      "relatedBeadIds": [
+        "winwincode-zzl"
+      ]
+    },
+    {
+      "stableTaskId": "UX-100.2",
+      "title": "首次使用 Wizard 状态机",
+      "auditClassification": "GATED",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-20-daily-driver",
+      "migrationDisposition": "create-in-owner-repository-with-real-prerequisites"
+    },
+    {
+      "stableTaskId": "UX-100.3",
+      "title": "New Task：Client/Repo/模式/模型选择",
+      "auditClassification": "GATED",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-20-daily-driver",
+      "migrationDisposition": "create-in-owner-repository-with-real-prerequisites"
+    },
+    {
+      "stableTaskId": "UX-100.4",
+      "title": "任务详情中的本地执行与 Candidate 状态",
+      "auditClassification": "GATED",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-20-daily-driver",
+      "migrationDisposition": "create-in-owner-repository-with-real-prerequisites"
+    },
+    {
+      "stableTaskId": "UX-100.5",
+      "title": "移动端 Agent Control Surface",
+      "auditClassification": "GATED",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-20-daily-driver",
+      "migrationDisposition": "create-in-owner-repository-with-real-prerequisites"
+    },
+    {
+      "stableTaskId": "UX-100.6",
+      "title": "PWA、Web Push 与 Attention 深链",
+      "auditClassification": "MISSING-FUTURE",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-20-daily-driver",
+      "migrationDisposition": "create-in-owner-repository-after-recorded-gate"
+    },
+    {
+      "stableTaskId": "UX-100.7",
+      "title": "新增页面的可访问性与确定性视觉基线",
+      "auditClassification": "GATED",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-20-daily-driver",
+      "migrationDisposition": "create-in-owner-repository-with-real-prerequisites"
+    },
+    {
+      "stableTaskId": "UX-100.8",
+      "title": "个人 Daily Driver 真实 Browser 旅程",
+      "auditClassification": "GATED",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-20-daily-driver",
+      "migrationDisposition": "create-in-owner-repository-with-real-prerequisites"
+    },
+    {
+      "stableTaskId": "WORKER-100.1",
+      "title": "本地 Worker process registry 与 launch receipt",
+      "auditClassification": "REWRITTEN",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-10-personal-remote-coding",
+      "migrationDisposition": "reconcile-rewritten-scope-before-target-creation",
+      "relatedBeadIds": [
+        "winwincode-15q.2"
+      ]
+    },
+    {
+      "stableTaskId": "WORKER-100.2",
+      "title": "受管 Worker 配置构建与 0600 原子写入",
+      "auditClassification": "REWRITTEN",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-10-personal-remote-coding",
+      "migrationDisposition": "reconcile-rewritten-scope-before-target-creation",
+      "relatedBeadIds": [
+        "winwincode-15q.2"
+      ]
+    },
+    {
+      "stableTaskId": "WORKER-100.3",
+      "title": "SessionSupervisor spawn/stop/drain/kill",
+      "auditClassification": "REWRITTEN",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-10-personal-remote-coding",
+      "migrationDisposition": "reconcile-rewritten-scope-before-target-creation",
+      "relatedBeadIds": [
+        "winwincode-15q.2"
+      ]
+    },
+    {
+      "stableTaskId": "WORKER-100.4",
+      "title": "Client 容量、预留与 heartbeat 对账",
+      "auditClassification": "REWRITTEN",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-10-personal-remote-coding",
+      "migrationDisposition": "reconcile-rewritten-scope-before-target-creation",
+      "relatedBeadIds": [
+        "winwincode-15q.2"
+      ]
+    },
+    {
+      "stableTaskId": "WORKER-100.5",
+      "title": "Worker 子进程日志、脱敏与诊断引用",
+      "auditClassification": "MISSING-NOW",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-10-personal-remote-coding",
+      "migrationDisposition": "move-active-work-to-owner-repository",
+      "relatedBeadIds": [
+        "winwincode-15q.3"
+      ]
+    },
+    {
+      "stableTaskId": "WORKER-100.6",
+      "title": "Device Client 重启后的进程与 Session 对账",
+      "auditClassification": "REWRITTEN",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-10-personal-remote-coding",
+      "migrationDisposition": "reconcile-rewritten-scope-before-target-creation",
+      "relatedBeadIds": [
+        "winwincode-15q.2"
+      ]
+    },
+    {
+      "stableTaskId": "WORKER-100.7",
+      "title": "wwc device workers/status/doctor CLI",
+      "auditClassification": "MISSING-FUTURE",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-10-personal-remote-coding",
+      "migrationDisposition": "create-in-owner-repository-after-recorded-gate"
+    },
+    {
+      "stableTaskId": "WORKER-100.8",
+      "title": "SessionSupervisor 并发与故障矩阵",
+      "auditClassification": "GATED",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-10-personal-remote-coding",
+      "migrationDisposition": "create-in-owner-repository-with-real-prerequisites"
+    },
+    {
+      "stableTaskId": "WORKER-200.1",
+      "title": "WorkerLaunchGrant ledger 与状态机",
+      "auditClassification": "EXACT",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-10-personal-remote-coding",
+      "migrationDisposition": "preserve-completed-provenance-in-owner-repository",
+      "relatedBeadIds": [
+        "winwincode-bxt.1"
+      ]
+    },
+    {
+      "stableTaskId": "WORKER-200.2",
+      "title": "短期 Worker Session Credential 签发与撤销",
+      "auditClassification": "REWRITTEN",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-10-personal-remote-coding",
+      "migrationDisposition": "reconcile-rewritten-scope-before-target-creation",
+      "relatedBeadIds": [
+        "winwincode-bxt.1",
+        "winwincode-pvo",
+        "winwincode-bxt.3"
+      ]
+    },
+    {
+      "stableTaskId": "WORKER-200.3",
+      "title": "Server 端 Worker launch/stop orchestration",
+      "auditClassification": "REWRITTEN",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-10-personal-remote-coding",
+      "migrationDisposition": "reconcile-rewritten-scope-before-target-creation",
+      "relatedBeadIds": [
+        "winwincode-bxt.1",
+        "winwincode-bxt.3"
+      ]
+    },
+    {
+      "stableTaskId": "WORKER-200.4",
+      "title": "Device Client launch/stop handler 与 fencing ticket",
+      "auditClassification": "GATED",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-10-personal-remote-coding",
+      "migrationDisposition": "create-in-owner-repository-with-real-prerequisites"
+    },
+    {
+      "stableTaskId": "WORKER-200.5",
+      "title": "winwincode-worker --managed-session 入口",
+      "auditClassification": "EQUIVALENT",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-10-personal-remote-coding",
+      "migrationDisposition": "preserve-completed-provenance-in-owner-repository",
+      "relatedBeadIds": [
+        "winwincode-15q.1"
+      ]
+    },
+    {
+      "stableTaskId": "WORKER-200.6",
+      "title": "ExecutionPort 注册准入消费 LaunchGrant",
+      "auditClassification": "MISSING-NOW",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-10-personal-remote-coding",
+      "migrationDisposition": "move-active-work-to-owner-repository",
+      "relatedBeadIds": [
+        "winwincode-bxt.2"
+      ]
+    },
+    {
+      "stableTaskId": "WORKER-200.7",
+      "title": "Worker cancel/retry/replacement 与 grant 续接",
+      "auditClassification": "GATED",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-10-personal-remote-coding",
+      "migrationDisposition": "create-in-owner-repository-with-real-prerequisites"
+    },
+    {
+      "stableTaskId": "WORKER-200.8",
+      "title": "受管 Worker 真实端到端纵向测试",
+      "auditClassification": "GATED",
+      "targetRepository": "winwincode",
+      "creationBatch": "community-10-personal-remote-coding",
+      "migrationDisposition": "create-in-owner-repository-with-real-prerequisites"
+    }
+  ],
+  "activeBeads": [
+    {
+      "beadId": "winwincode-15q",
+      "title": "[WORKER-100] Epic：Device SessionSupervisor 与容量",
+      "status": "open",
+      "issueType": "epic",
+      "stableTaskIds": [],
+      "targetRepository": "winwincode",
+      "migrationAction": "keep-in-current-beads"
+    },
+    {
+      "beadId": "winwincode-15q.3",
+      "title": "[WORKER-100.5] Worker 子进程日志、脱敏与诊断引用",
+      "status": "open",
+      "issueType": "task",
+      "stableTaskIds": [
+        "WORKER-100.5"
+      ],
+      "targetRepository": "winwincode",
+      "migrationAction": "keep-in-current-beads"
+    },
+    {
+      "beadId": "winwincode-1fn",
+      "title": "[CLIENT-300.5] 占用设备卡、连接与释放交互",
+      "status": "in_progress",
+      "issueType": "task",
+      "stableTaskIds": [
+        "CLIENT-300.5"
+      ],
+      "targetRepository": "winwincode",
+      "migrationAction": "keep-in-current-beads"
+    },
+    {
+      "beadId": "winwincode-4eo",
+      "title": "[GIT-100] Epic：Candidate 稳定引用与本地应用",
+      "status": "open",
+      "issueType": "epic",
+      "stableTaskIds": [],
+      "targetRepository": "winwincode",
+      "migrationAction": "keep-in-current-beads"
+    },
+    {
+      "beadId": "winwincode-4eo.1",
+      "title": "[GIT-100.1] Worker 清理前创建稳定 Candidate Git ref",
+      "status": "in_progress",
+      "issueType": "task",
+      "stableTaskIds": [
+        "GIT-100.1"
+      ],
+      "targetRepository": "winwincode",
+      "migrationAction": "keep-in-current-beads"
+    },
+    {
+      "beadId": "winwincode-4eo.2",
+      "title": "[GIT-100.2] Device Client Candidate 本地 registry 与恢复",
+      "status": "open",
+      "issueType": "task",
+      "stableTaskIds": [
+        "GIT-100.2"
+      ],
+      "targetRepository": "winwincode",
+      "migrationAction": "keep-in-current-beads"
+    },
+    {
+      "beadId": "winwincode-4eo.3",
+      "title": "[GIT-100.6] LocalCandidate/LocalApply Receipt Server ledger",
+      "status": "in_progress",
+      "issueType": "task",
+      "stableTaskIds": [
+        "GIT-100.6"
+      ],
+      "targetRepository": "winwincode",
+      "migrationAction": "keep-in-current-beads"
+    },
+    {
+      "beadId": "winwincode-4eo.4",
+      "title": "[GIT-100.8] Candidate 本地操作 Web UI",
+      "status": "open",
+      "issueType": "task",
+      "stableTaskIds": [
+        "GIT-100.8"
+      ],
+      "targetRepository": "winwincode",
+      "migrationAction": "keep-in-current-beads"
+    },
+    {
+      "beadId": "winwincode-9c4",
+      "title": "拆分并交付 WinWinCode Community、Cloud 与 Enterprise",
+      "status": "open",
+      "issueType": "epic",
+      "stableTaskIds": [],
+      "targetRepository": "cross-repository-migration",
+      "migrationAction": "retain-in-current-beads-until-repository-split-finishes"
+    },
+    {
+      "beadId": "winwincode-9c4.16",
+      "title": "将 DSH 后端迁移为 Rust Control Plane 与 Execution Worker，保留 TypeScript Web",
+      "status": "open",
+      "issueType": "epic",
+      "stableTaskIds": [],
+      "targetRepository": "winwincode",
+      "migrationAction": "keep-in-current-beads"
+    },
+    {
+      "beadId": "winwincode-9c4.16.12",
+      "title": "[baseline] 拆分 client_occupancy 超长测试以恢复严格 Clippy",
+      "status": "open",
+      "issueType": "bug",
+      "stableTaskIds": [],
+      "targetRepository": "winwincode",
+      "migrationAction": "keep-in-current-beads"
+    },
+    {
+      "beadId": "winwincode-9c4.16.13",
+      "title": "[MODEL-100.2] Provider preset 与模型目录服务",
+      "status": "open",
+      "issueType": "task",
+      "stableTaskIds": [
+        "MODEL-100.2"
+      ],
+      "targetRepository": "winwincode",
+      "migrationAction": "keep-in-current-beads"
+    },
+    {
+      "beadId": "winwincode-9c4.16.14",
+      "title": "[MODEL-100.3] Credential 写入、测试、轮换的日用 API",
+      "status": "open",
+      "issueType": "task",
+      "stableTaskIds": [
+        "MODEL-100.3"
+      ],
+      "targetRepository": "winwincode",
+      "migrationAction": "keep-in-current-beads"
+    },
+    {
+      "beadId": "winwincode-9c4.16.7",
+      "title": "回移 rusqlite 命名 SAVEPOINT 修复并保持 SQLite 3.51.3",
+      "status": "in_progress",
+      "issueType": "task",
+      "stableTaskIds": [],
+      "targetRepository": "winwincode",
+      "migrationAction": "keep-in-current-beads"
+    },
+    {
+      "beadId": "winwincode-9c4.19",
+      "title": "[baseline] 修正 Enterprise 路由分块测试的数量断言",
+      "status": "open",
+      "issueType": "bug",
+      "stableTaskIds": [],
+      "targetRepository": "winwincode-enterprise",
+      "migrationAction": "closed-as-replaced-by-target-bead",
+      "replacementTargetRepository": "winwincode-enterprise",
+      "replacementTargetBeadId": "enterprise-5uz.7.4",
+      "currentSourceStatus": "closed",
+      "sourceDispositionAt": "2026-09-05T15:16:04Z"
+    },
+    {
+      "beadId": "winwincode-9c4.20",
+      "title": "[UI-608] 调查并修正原生 option 几何基线漂移",
+      "status": "open",
+      "issueType": "bug",
+      "stableTaskIds": [],
+      "targetRepository": "winwincode",
+      "migrationAction": "keep-in-current-beads"
+    },
+    {
+      "beadId": "winwincode-9c4.21",
+      "title": "仅将 WinWinCode 后端 SQLite 迁移到 PostgreSQL",
+      "status": "open",
+      "issueType": "epic",
+      "stableTaskIds": [],
+      "targetRepository": "cross-repository-migration",
+      "migrationAction": "retain-in-current-beads-until-repository-split-finishes"
+    },
+    {
+      "beadId": "winwincode-9c4.21.1",
+      "title": "[PG-000] 冻结后端数据库边界与 SQLite 表清单",
+      "status": "open",
+      "issueType": "task",
+      "stableTaskIds": [],
+      "targetRepository": "cross-repository-migration",
+      "migrationAction": "retain-in-current-beads-until-repository-split-finishes"
+    },
+    {
+      "beadId": "winwincode-9c4.21.2",
+      "title": "[PG-010] 让后端组合层不再绑定 SqliteStorage",
+      "status": "open",
+      "issueType": "task",
+      "stableTaskIds": [],
+      "targetRepository": "cross-repository-migration",
+      "migrationAction": "retain-in-current-beads-until-repository-split-finishes"
+    },
+    {
+      "beadId": "winwincode-9c4.21.3",
+      "title": "[PG-020] 接入真实 PostgreSQL 驱动与本地集成测试门",
+      "status": "open",
+      "issueType": "task",
+      "stableTaskIds": [],
+      "targetRepository": "cross-repository-migration",
+      "migrationAction": "retain-in-current-beads-until-repository-split-finishes"
+    },
+    {
+      "beadId": "winwincode-9c4.21.4",
+      "title": "[PG-030] 建立后端 SQLite 一致快照与搬迁核对工具",
+      "status": "open",
+      "issueType": "task",
+      "stableTaskIds": [],
+      "targetRepository": "cross-repository-migration",
+      "migrationAction": "retain-in-current-beads-until-repository-split-finishes"
+    },
+    {
+      "beadId": "winwincode-9gh",
+      "title": "[OPS-100] Epic：恢复语义、打包、遥测与发布门禁",
+      "status": "open",
+      "issueType": "epic",
+      "stableTaskIds": [],
+      "targetRepository": "winwincode",
+      "migrationAction": "keep-in-current-beads"
+    },
+    {
+      "beadId": "winwincode-9gh.1",
+      "title": "[OPS-100.4] 公网 Server 部署参考与安全默认值",
+      "status": "open",
+      "issueType": "task",
+      "stableTaskIds": [
+        "OPS-100.4"
+      ],
+      "targetRepository": "winwincode",
+      "migrationAction": "keep-in-current-beads"
+    },
+    {
+      "beadId": "winwincode-bxt",
+      "title": "[WORKER-200] Epic：WorkerLaunchGrant 与一 Session 一 Worker",
+      "status": "open",
+      "issueType": "epic",
+      "stableTaskIds": [],
+      "targetRepository": "winwincode",
+      "migrationAction": "keep-in-current-beads"
+    },
+    {
+      "beadId": "winwincode-bxt.2",
+      "title": "[WORKER-200.6] ExecutionPort 注册准入消费 LaunchGrant",
+      "status": "open",
+      "issueType": "task",
+      "stableTaskIds": [
+        "WORKER-200.6"
+      ],
+      "targetRepository": "winwincode",
+      "migrationAction": "keep-in-current-beads"
+    },
+    {
+      "beadId": "winwincode-bxt.3",
+      "title": "[WORKER-200.2] worker launch 回环 vertical 与 launch 下行接线",
+      "status": "in_progress",
+      "issueType": "task",
+      "stableTaskIds": [
+        "WORKER-200.2"
+      ],
+      "targetRepository": "winwincode",
+      "migrationAction": "keep-in-current-beads"
+    },
+    {
+      "beadId": "winwincode-c7w",
+      "title": "[REPO-100.2] Git Inspector、路径收敛与 Repository fingerprint",
+      "status": "open",
+      "issueType": "task",
+      "stableTaskIds": [
+        "REPO-100.2"
+      ],
+      "targetRepository": "winwincode",
+      "migrationAction": "keep-in-current-beads"
+    },
+    {
+      "beadId": "winwincode-cloud",
+      "title": "[REPO-SPLIT-200] 建立 winwincode-cloud SaaS 仓库",
+      "status": "open",
+      "issueType": "epic",
+      "stableTaskIds": [],
+      "targetRepository": "winwincode-cloud",
+      "migrationAction": "closed-as-replaced-by-target-bead",
+      "replacementTargetRepository": "winwincode-cloud",
+      "replacementTargetBeadId": "winwincode-cloud-ca1",
+      "currentSourceStatus": "closed",
+      "sourceDispositionAt": "2026-09-05T15:16:00Z"
+    },
+    {
+      "beadId": "winwincode-cloud.1",
+      "title": "[REPO-SPLIT-200.1] 创建 Cloud 仓库并迁移 SaaS 产品源码",
+      "status": "open",
+      "issueType": "task",
+      "stableTaskIds": [
+        "REPO-SPLIT-200.1"
+      ],
+      "targetRepository": "cross-repository-migration",
+      "migrationAction": "retain-in-current-beads-until-repository-split-finishes"
+    },
+    {
+      "beadId": "winwincode-cms",
+      "title": "[UI-100] Epic：登录、Client 列表、占用与仓库 UI",
+      "status": "open",
+      "issueType": "epic",
+      "stableTaskIds": [],
+      "targetRepository": "winwincode",
+      "migrationAction": "keep-in-current-beads"
+    },
+    {
+      "beadId": "winwincode-cms.1",
+      "title": "补齐 Occupancy Browser facade 与稳定错误分类",
+      "status": "open",
+      "issueType": "task",
+      "stableTaskIds": [
+        "CLIENT-300.4"
+      ],
+      "targetRepository": "winwincode",
+      "migrationAction": "keep-in-current-beads"
+    },
+    {
+      "beadId": "winwincode-cms.2",
+      "title": "补齐占用设备卡的连接、释放与排空交互",
+      "status": "open",
+      "issueType": "task",
+      "stableTaskIds": [
+        "CLIENT-300.5"
+      ],
+      "targetRepository": "winwincode",
+      "migrationAction": "keep-in-current-beads"
+    },
+    {
+      "beadId": "winwincode-cms.3",
+      "title": "补齐 Repository 授权与任务选择 UI",
+      "status": "open",
+      "issueType": "task",
+      "stableTaskIds": [
+        "REPO-100.7"
+      ],
+      "targetRepository": "winwincode",
+      "migrationAction": "keep-in-current-beads"
+    },
+    {
+      "beadId": "winwincode-cms.4",
+      "title": "接通 Repository exchange 与 rescan 下行效果",
+      "status": "open",
+      "issueType": "task",
+      "stableTaskIds": [
+        "REPO-100.4"
+      ],
+      "targetRepository": "winwincode",
+      "migrationAction": "keep-in-current-beads"
+    },
+    {
+      "beadId": "winwincode-cms.5",
+      "title": "[REPO-100.6] Repository public API、授权与隐私投影",
+      "status": "open",
+      "issueType": "task",
+      "stableTaskIds": [
+        "REPO-100.6"
+      ],
+      "targetRepository": "winwincode",
+      "migrationAction": "keep-in-current-beads"
+    },
+    {
+      "beadId": "winwincode-community",
+      "title": "[REPO-SPLIT-100] 将 winwincode 整理为 Community 个人开源仓库",
+      "status": "open",
+      "issueType": "epic",
+      "stableTaskIds": [],
+      "targetRepository": "winwincode",
+      "migrationAction": "keep-in-current-beads-and-use-current-repository-name"
+    },
+    {
+      "beadId": "winwincode-community.1",
+      "title": "[REPO-SPLIT-100.1] 清理 Community 仓库中的 Cloud 与 Enterprise 产品源码",
+      "status": "open",
+      "issueType": "task",
+      "stableTaskIds": [
+        "REPO-SPLIT-100.1"
+      ],
+      "targetRepository": "cross-repository-migration",
+      "migrationAction": "retain-in-current-beads-until-repository-split-finishes"
+    },
+    {
+      "beadId": "winwincode-duv",
+      "title": "[FLOW-100] Epic：Scheduler 与 Quick/StrongFlow 主链集成",
+      "status": "open",
+      "issueType": "epic",
+      "stableTaskIds": [],
+      "targetRepository": "winwincode",
+      "migrationAction": "keep-in-current-beads"
+    },
+    {
+      "beadId": "winwincode-edition",
+      "title": "[REPO-SPLIT-000] 将 WinWinCode 拆成三个产品仓库",
+      "status": "open",
+      "issueType": "epic",
+      "stableTaskIds": [],
+      "targetRepository": "cross-repository-migration",
+      "migrationAction": "retain-in-current-beads-until-repository-split-finishes"
+    },
+    {
+      "beadId": "winwincode-edition.2",
+      "title": "[REPO-SPLIT-000.2] 冻结并发布第一版 Community core",
+      "status": "in_progress",
+      "issueType": "task",
+      "stableTaskIds": [
+        "REPO-SPLIT-000.2"
+      ],
+      "targetRepository": "cross-repository-migration",
+      "migrationAction": "retain-in-current-beads-until-repository-split-finishes"
+    },
+    {
+      "beadId": "winwincode-edition.3",
+      "title": "[REPO-SPLIT-000.3] 建立跨仓核心版本锁与协议验收",
+      "status": "open",
+      "issueType": "task",
+      "stableTaskIds": [
+        "REPO-SPLIT-000.3"
+      ],
+      "targetRepository": "cross-repository-migration",
+      "migrationAction": "retain-in-current-beads-until-repository-split-finishes"
+    },
+    {
+      "beadId": "winwincode-edition.4",
+      "title": "[REPO-SPLIT-000.4] 建立三仓库独立 CI、安装与发布门",
+      "status": "open",
+      "issueType": "task",
+      "stableTaskIds": [
+        "REPO-SPLIT-000.4"
+      ],
+      "targetRepository": "cross-repository-migration",
+      "migrationAction": "retain-in-current-beads-until-repository-split-finishes"
+    },
+    {
+      "beadId": "winwincode-edition.5",
+      "title": "[REPO-SPLIT-000.5] 把现有 Beads 与计划迁移到各自仓库",
+      "status": "in_progress",
+      "issueType": "task",
+      "stableTaskIds": [
+        "REPO-SPLIT-000.5"
+      ],
+      "targetRepository": "cross-repository-migration",
+      "migrationAction": "retain-in-current-beads-until-repository-split-finishes"
+    },
+    {
+      "beadId": "winwincode-f02.1",
+      "title": "补齐 Codex 全工作区 V8/Bazel 工具门禁",
+      "status": "in_progress",
+      "issueType": "task",
+      "stableTaskIds": [],
+      "targetRepository": "winwincode",
+      "migrationAction": "keep-in-current-beads"
+    },
+    {
+      "beadId": "winwincode-private",
+      "title": "[REPO-SPLIT-300] 建立 winwincode-enterprise 私有化仓库",
+      "status": "open",
+      "issueType": "epic",
+      "stableTaskIds": [],
+      "targetRepository": "winwincode-enterprise",
+      "migrationAction": "closed-as-replaced-by-target-bead",
+      "replacementTargetRepository": "winwincode-enterprise",
+      "replacementTargetBeadId": "enterprise-5uz",
+      "currentSourceStatus": "closed",
+      "sourceDispositionAt": "2026-09-05T15:16:02Z"
+    },
+    {
+      "beadId": "winwincode-private.1",
+      "title": "[REPO-SPLIT-300.1] 创建 Enterprise 仓库并迁移私有化产品源码",
+      "status": "open",
+      "issueType": "task",
+      "stableTaskIds": [
+        "REPO-SPLIT-300.1"
+      ],
+      "targetRepository": "cross-repository-migration",
+      "migrationAction": "retain-in-current-beads-until-repository-split-finishes"
+    },
+    {
+      "beadId": "winwincode-pvo",
+      "title": "[WORKER-200.2] 短期 Worker Session Credential 签发与撤销",
+      "status": "in_progress",
+      "issueType": "task",
+      "stableTaskIds": [
+        "WORKER-200.2"
+      ],
+      "targetRepository": "winwincode",
+      "migrationAction": "keep-in-current-beads"
+    },
+    {
+      "beadId": "winwincode-pwc",
+      "title": "[CLIENT-300.4] 占用 Browser facade 与稳定错误分类",
+      "status": "in_progress",
+      "issueType": "task",
+      "stableTaskIds": [
+        "CLIENT-300.4"
+      ],
+      "targetRepository": "winwincode",
+      "migrationAction": "keep-in-current-beads"
+    },
+    {
+      "beadId": "winwincode-qv1",
+      "title": "实现事件委托式 ChangeBatch 与 DebugProbe 执行体系",
+      "status": "open",
+      "issueType": "epic",
+      "stableTaskIds": [],
+      "targetRepository": "winwincode",
+      "migrationAction": "keep-in-current-beads"
+    },
+    {
+      "beadId": "winwincode-qv1.1",
+      "title": "实现 DelegatedBatch 与确定性 ChangeBatch 主线",
+      "status": "open",
+      "issueType": "feature",
+      "stableTaskIds": [],
+      "targetRepository": "winwincode",
+      "migrationAction": "keep-in-current-beads"
+    },
+    {
+      "beadId": "winwincode-qv1.1.10",
+      "title": "PR9 按 Go 决策实现终止式 submit_change_batch 工具",
+      "status": "open",
+      "issueType": "task",
+      "stableTaskIds": [],
+      "targetRepository": "winwincode",
+      "migrationAction": "keep-in-current-beads"
+    },
+    {
+      "beadId": "winwincode-qv1.1.12",
+      "title": "固定 Delegated 只读工具的可执行身份并补真实纵向验证",
+      "status": "in_progress",
+      "issueType": "task",
+      "stableTaskIds": [],
+      "targetRepository": "winwincode",
+      "migrationAction": "keep-in-current-beads"
+    },
+    {
+      "beadId": "winwincode-qv1.1.13",
+      "title": "区分 Structured Output 内容修复失败与 Provider 基础设施失败",
+      "status": "in_progress",
+      "issueType": "task",
+      "stableTaskIds": [],
+      "targetRepository": "winwincode",
+      "migrationAction": "keep-in-current-beads"
+    },
+    {
+      "beadId": "winwincode-qv1.1.14",
+      "title": "[QV recovery] 在最新 main 重建并固化 PR0/PR1/PR2 canonical 基线",
+      "status": "in_progress",
+      "issueType": "task",
+      "stableTaskIds": [],
+      "targetRepository": "winwincode",
+      "migrationAction": "keep-in-current-beads"
+    },
+    {
+      "beadId": "winwincode-qv1.2",
+      "title": "实现探索性 DebugProbe 轮级反馈主线",
+      "status": "open",
+      "issueType": "feature",
+      "stableTaskIds": [],
+      "targetRepository": "winwincode",
+      "migrationAction": "keep-in-current-beads"
+    },
+    {
+      "beadId": "winwincode-qv1.2.1",
+      "title": "D1 建立 DebugProbe 合同、状态与 ExecutionMode",
+      "status": "in_progress",
+      "issueType": "task",
+      "stableTaskIds": [],
+      "targetRepository": "winwincode",
+      "migrationAction": "keep-in-current-beads"
+    },
+    {
+      "beadId": "winwincode-qv1.2.10",
+      "title": "D10 完成 DebugProbe A/B、故障注入与渐进上线门禁",
+      "status": "open",
+      "issueType": "task",
+      "stableTaskIds": [],
+      "targetRepository": "winwincode",
+      "migrationAction": "keep-in-current-beads"
+    },
+    {
+      "beadId": "winwincode-qv1.2.2",
+      "title": "D2 实现 Probe Scheduler、安全校验与资源冲突调度",
+      "status": "open",
+      "issueType": "task",
+      "stableTaskIds": [],
+      "targetRepository": "winwincode",
+      "migrationAction": "keep-in-current-beads"
+    },
+    {
+      "beadId": "winwincode-qv1.2.3",
+      "title": "D3 实现 Probe Result Normalizer 的 L0/L1 硬证据层",
+      "status": "open",
+      "issueType": "task",
+      "stableTaskIds": [],
+      "targetRepository": "winwincode",
+      "migrationAction": "keep-in-current-beads"
+    },
+    {
+      "beadId": "winwincode-qv1.2.4",
+      "title": "D4 实现 Hypothesis Ledger、证据引用与 Delta Context",
+      "status": "open",
+      "issueType": "task",
+      "stableTaskIds": [],
+      "targetRepository": "winwincode",
+      "migrationAction": "keep-in-current-beads"
+    },
+    {
+      "beadId": "winwincode-qv1.2.5",
+      "title": "D5 实现按 Revision、环境和工具版本绑定的 Probe Cache",
+      "status": "open",
+      "issueType": "task",
+      "stableTaskIds": [],
+      "targetRepository": "winwincode",
+      "migrationAction": "keep-in-current-beads"
+    },
+    {
+      "beadId": "winwincode-qv1.2.6",
+      "title": "D6 实现 Ephemeral Experiment Workspace 与 Instrumentation DSL",
+      "status": "open",
+      "issueType": "task",
+      "stableTaskIds": [],
+      "targetRepository": "winwincode",
+      "migrationAction": "keep-in-current-beads"
+    },
+    {
+      "beadId": "winwincode-qv1.2.7",
+      "title": "D7 实现复杂日志 Cheap One-shot Reducer",
+      "status": "open",
+      "issueType": "task",
+      "stableTaskIds": [],
+      "targetRepository": "winwincode",
+      "migrationAction": "keep-in-current-beads"
+    },
+    {
+      "beadId": "winwincode-qv1.2.8",
+      "title": "D8 实现 Warm Worker、Affected Check 与 Early Stop",
+      "status": "open",
+      "issueType": "task",
+      "stableTaskIds": [],
+      "targetRepository": "winwincode",
+      "migrationAction": "keep-in-current-beads"
+    },
+    {
+      "beadId": "winwincode-qv1.2.9",
+      "title": "D9 实现 React、DebugProbe、DelegatedBatch 动态模式路由",
+      "status": "open",
+      "issueType": "task",
+      "stableTaskIds": [],
+      "targetRepository": "winwincode",
+      "migrationAction": "keep-in-current-beads"
+    },
+    {
+      "beadId": "winwincode-qv1.3",
+      "title": "完成三模式统一评测、渐进上线与最终门禁",
+      "status": "open",
+      "issueType": "feature",
+      "stableTaskIds": [],
+      "targetRepository": "winwincode",
+      "migrationAction": "keep-in-current-beads"
+    },
+    {
+      "beadId": "winwincode-qv1.3.2",
+      "title": "实施 Shadow、Alert、Soft Gate 与 Hard Gate Limited 渐进上线",
+      "status": "open",
+      "issueType": "task",
+      "stableTaskIds": [],
+      "targetRepository": "winwincode",
+      "migrationAction": "keep-in-current-beads"
+    },
+    {
+      "beadId": "winwincode-qv1.3.3",
+      "title": "完成三模式 E2E、恢复、安全与最终发布门禁",
+      "status": "open",
+      "issueType": "task",
+      "stableTaskIds": [],
+      "targetRepository": "winwincode",
+      "migrationAction": "keep-in-current-beads"
+    }
+  ],
+  "validation": {
+    "stableTaskIdsUnique": true,
+    "activeBeadIdsUnique": true,
+    "stableTasksMappedExactlyOnce": true,
+    "activeBeadsMappedExactlyOnce": true,
+    "formerlyRetiredTasksMappedExactlyOnce": true,
+    "sourceTasksSuperseded": true,
+    "targetProductStableBeadsCreated": true,
+    "targetProductStableBeadCount": 49,
+    "targetDomainEpicCount": 10,
+    "allEdition5AcceptanceCriteriaSatisfied": true
+  },
+  "postgresProductTaskBlueprints": [
+    {
+      "blueprintId": "cloud-hosted-postgres-store",
+      "targetRepository": "winwincode-cloud",
+      "sourceTransitionStableTaskIds": [
+        "SAAS-DATA-100.1",
+        "SAAS-DATA-100.2",
+        "SAAS-DATA-100.3"
+      ],
+      "sourceTransitionBeadIds": [
+        "winwincode-9c4.21.1",
+        "winwincode-9c4.21.2",
+        "winwincode-9c4.21.3"
+      ],
+      "productSemantics": "Hosted multi-tenant schema, tenant keys, operator-controlled migrations, connection pooling and Cloud isolation tests.",
+      "mustNotShareImplementationWith": "enterprise-private-postgres-store"
+    },
+    {
+      "blueprintId": "enterprise-private-postgres-store",
+      "targetRepository": "winwincode-enterprise",
+      "sourceTransitionStableTaskIds": [
+        "SAAS-DATA-100.1",
+        "SAAS-DATA-100.2",
+        "SAAS-DATA-100.3"
+      ],
+      "sourceTransitionBeadIds": [
+        "winwincode-9c4.21.1",
+        "winwincode-9c4.21.2",
+        "winwincode-9c4.21.3"
+      ],
+      "productSemantics": "Customer-controlled PostgreSQL schema and migrations for one private installation; no Hosted tenant or operator dependency.",
+      "mustNotShareImplementationWith": "cloud-hosted-postgres-store"
+    },
+    {
+      "blueprintId": "cloud-hosted-data-import",
+      "targetRepository": "winwincode-cloud",
+      "sourceTransitionStableTaskIds": [
+        "SAAS-DATA-100.6"
+      ],
+      "sourceTransitionBeadIds": [
+        "winwincode-9c4.21.4"
+      ],
+      "productSemantics": "Operator-run import into Hosted tenants with tenant ownership checks and Cloud audit records.",
+      "mustNotShareImplementationWith": "enterprise-private-data-import"
+    },
+    {
+      "blueprintId": "enterprise-private-data-import",
+      "targetRepository": "winwincode-enterprise",
+      "sourceTransitionStableTaskIds": [
+        "SAAS-DATA-100.6"
+      ],
+      "sourceTransitionBeadIds": [
+        "winwincode-9c4.21.4"
+      ],
+      "productSemantics": "Customer-run one-time import into a private installation with local backup and verification; no Hosted tenant operations.",
+      "mustNotShareImplementationWith": "cloud-hosted-data-import"
+    }
+  ],
+  "updatedAt": "2026-09-05T15:17:38Z",
+  "targetDomainEpics": {
+    "winwincode-cloud": {
+      "data": "winwincode-cloud-ca1.8",
+      "iam": "winwincode-cloud-ca1.9",
+      "billing": "winwincode-cloud-ca1.10",
+      "ops": "winwincode-cloud-ca1.11",
+      "worker": "winwincode-cloud-ca1.12",
+      "integration": "winwincode-cloud-ca1.13"
+    },
+    "winwincode-enterprise": {
+      "team": "enterprise-5uz.11",
+      "data": "enterprise-5uz.12",
+      "identity": "enterprise-5uz.13",
+      "security": "enterprise-5uz.14"
+    }
+  },
+  "execution": {
+    "targetBeadsCreation": "completed",
+    "cloudStableTasksCreated": 32,
+    "enterpriseStableTasksCreated": 17,
+    "domainEpicsCreated": 10,
+    "cloudBootstrapDependencyRoot": "winwincode-cloud-ca1.4/ca1.5/ca1.6/ca1.7",
+    "enterpriseBootstrapDependencyRoot": "enterprise-5uz.5/5uz.6/5uz.7/5uz.8",
+    "sourceTasksSuperseded": true,
+    "sourceReconciledRecords": [
+      {
+        "sourceBeadId": "winwincode-cloud",
+        "targetRepository": "winwincode-cloud",
+        "targetBeadId": "winwincode-cloud-ca1",
+        "sourceStatus": "closed-as-replaced"
+      },
+      {
+        "sourceBeadId": "winwincode-private",
+        "targetRepository": "winwincode-enterprise",
+        "targetBeadId": "enterprise-5uz",
+        "sourceStatus": "closed-as-replaced"
+      },
+      {
+        "sourceBeadId": "winwincode-9c4.19",
+        "targetRepository": "winwincode-enterprise",
+        "targetBeadId": "enterprise-5uz.7.4",
+        "sourceStatus": "closed-as-replaced"
+      }
+    ],
+    "activeTaskOwnershipAudit": {
+      "auditedAt": "2026-09-05T15:17:38Z",
+      "sourceActiveBeforeReconciliation": 77,
+      "sourceActiveAfterReconciliation": 74,
+      "activeCloudOrEnterpriseProductRecordsInSource": 0,
+      "activeSourceTasksDuplicatingTargetStableTaskIds": 0
+    },
+    "retainedCrossRepositoryGates": [
+      "winwincode-cloud.1",
+      "winwincode-private.1",
+      "winwincode-community.1",
+      "winwincode-community.1.1",
+      "winwincode-community.1.2",
+      "winwincode-edition.2",
+      "winwincode-edition.3",
+      "winwincode-edition.4"
+    ],
+    "remainingConditions": []
+  }
+}
