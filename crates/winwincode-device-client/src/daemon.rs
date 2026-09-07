@@ -100,7 +100,8 @@ use winwincode_client_port::messages::{
     ClientWorkerLaunchAckPayload, CommandContext, OccupancyCommandContext,
     ServerAccessChallengePayload, ServerClientLockPayload, ServerEnrollmentAcceptedPayload,
     ServerOccupancyForceFencePayload, ServerOccupancyOfferPayload, ServerOccupancyReleasePayload,
-    ServerToClientEnvelope, ServerToClientMessage, ServerWorkerLaunchPayload,
+    ServerRepositoryRescanPayload, ServerToClientEnvelope, ServerToClientMessage,
+    ServerWorkerLaunchPayload,
 };
 
 use crate::connect_code::{self, PublishedConnectCode};
@@ -108,6 +109,7 @@ use crate::fencing::{
     FencedCommandKind, FencingGuard, FencingRejection, FencingTicket, FencingVerdict,
 };
 use crate::identity::{IdentityRecord, IssuedEnrollment, adopt_enrollment};
+use crate::repository_exchange;
 use crate::store::{
     ClientInboxCursorUpdate, ConnectCodeStateRecord, ConnectionPolicyRecord, DeviceStore,
     DeviceStoreError, DeviceStoreErrorKind, OccupancyMirrorAdvance, OccupancyMirrorRecord,
@@ -431,6 +433,10 @@ pub struct DaemonStatus {
     pub access_challenges_confirmed: u64,
     /// `client.client_lock` commands applied and acknowledged.
     pub client_lock_commands_applied: u64,
+    /// `client.repository.rescan` commands that completed a fresh local scan.
+    pub repository_rescans_applied: u64,
+    /// `client.repository.rescan` commands rejected because the binding is missing.
+    pub repository_rescans_rejected: u64,
     /// `client.occupancy.offer` frames accepted (mirror persisted, ack
     /// enqueued).
     pub occupancy_offers_acked: u64,
@@ -1282,11 +1288,14 @@ impl DeviceDaemon {
                             self.apply_worker_launch(&payload)
                                 .map_err(DownlinkFailure::Fatal)?;
                         }
+                        ServerToClientMessage::RepositoryRescan(payload) => {
+                            self.apply_repository_rescan(&payload, &envelope.message_id)
+                                .map_err(DownlinkFailure::Fatal)?;
+                        }
                         _ => {
-                            // Worker stop, candidate apply, repository,
-                            // rescan, and credential commands are owned by
-                            // later device-client lanes; the skeleton
-                            // records them without acting. The cursor has
+                            // Worker stop, candidate apply, and credential
+                            // commands are owned by later device-client lanes;
+                            // the skeleton records them without acting. The cursor has
                             // already advanced, so the skipped frame never
                             // blocks the stream.
                             self.status.unhandled_downlink_commands += 1;
@@ -1333,6 +1342,28 @@ impl DeviceDaemon {
         }
         self.status.downlink_accepted_through = self.downlink.ack_sequence();
         Ok(accepted)
+    }
+
+    fn apply_repository_rescan(
+        &mut self,
+        payload: &ServerRepositoryRescanPayload,
+        command_message_id: &str,
+    ) -> Result<(), DaemonError> {
+        let applied = repository_exchange::apply_repository_rescan(
+            &mut self.store,
+            &self.node_id,
+            &self.instance_id,
+            command_message_id,
+            payload,
+            OffsetDateTime::now_utc(),
+        )
+        .map_err(|error| DaemonError::Protocol(format!("repository rescan failed: {error}")))?;
+        if applied.revalidation.is_some() {
+            self.status.repository_rescans_applied += 1;
+        } else {
+            self.status.repository_rescans_rejected += 1;
+        }
+        Ok(())
     }
 
     /// Adopts the server-issued enrollment: identity backfill, durable

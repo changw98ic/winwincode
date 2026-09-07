@@ -110,6 +110,7 @@ pub mod http;
 pub mod identity;
 pub mod path_confinement;
 pub mod repository;
+pub mod repository_exchange;
 pub mod repository_git;
 pub mod store;
 pub mod supervisor;
@@ -163,6 +164,7 @@ pub use repository::{
     RepositoryRegistryError, RepositoryRemoval, RepositoryRevalidation, list_bindings,
     register_repository, remove_repository, repository_fingerprint, revalidate_repository,
 };
+pub use repository_exchange::{RepositoryRescanApplication, apply_repository_rescan};
 pub use repository_git::{
     DETACHED_BRANCH, GitHeadState, GitInspectError, GitInspectOptions, GitInspector, GitScan,
 };

@@ -64,6 +64,8 @@ use winwincode_client_port::domain::ClientChallengeAckStatus;
 use winwincode_client_port::domain::ClientControlMessageKind;
 use winwincode_client_port::domain::ClientPlatformTarget;
 use winwincode_client_port::domain::PresenceState;
+use winwincode_client_port::domain::RepositoryAvailability as WireRepositoryAvailability;
+use winwincode_client_port::domain::RepositoryDirtyState as WireRepositoryDirtyState;
 use winwincode_client_port::domain::WorkerLaunchAckStatus;
 use winwincode_client_port::exchange::AckCursor;
 use winwincode_client_port::exchange::CommandIdentity;
@@ -89,6 +91,9 @@ use winwincode_control_plane::ClientRegistryServiceErrorKind;
 use winwincode_control_plane::ConnectCodeService;
 use winwincode_control_plane::LocalCandidateService;
 use winwincode_control_plane::OccupancyLeaseState;
+use winwincode_control_plane::RepositoryAvailability;
+use winwincode_control_plane::RepositoryBindingService;
+use winwincode_control_plane::RepositoryDirtyState;
 use winwincode_control_plane::WorkerLaunchGrantService;
 use winwincode_domain::Instant;
 use winwincode_storage::ClientDownlinkAppend;
@@ -104,6 +109,8 @@ use winwincode_storage::LocalApplyStrategy;
 use winwincode_storage::LocalCandidateRetained;
 use winwincode_storage::OccupancyReleaseReason;
 use winwincode_storage::ProductStateStorage;
+use winwincode_storage::RepositoryBindingProjection;
+use winwincode_storage::RepositoryScanOutcome;
 use winwincode_storage::SqliteStorage;
 
 /// Default bounds and profile values of the exchange adapter.
@@ -1021,6 +1028,60 @@ fn apply_effect(
             );
             Ok(())
         }
+        ClientToServerMessage::RepositoryUpsert(payload) => {
+            let repository = &payload.repository;
+            let Ok(projection) = RepositoryBindingProjection::try_new(
+                repository.repository_binding_id.clone(),
+                node_id,
+                repository.display_name.clone(),
+                (!repository.default_branch.is_empty()).then(|| repository.default_branch.clone()),
+                (!repository.head_commit.is_empty()).then(|| repository.head_commit.clone()),
+                repository_dirty_state(repository.dirty_state),
+                repository_availability(repository.availability),
+                repository.repository_fingerprint.clone(),
+            ) else {
+                return Ok(());
+            };
+            let mut bindings = RepositoryBindingService::new(storage);
+            let _ = bindings.upsert(
+                &projection,
+                Some(&Instant(repository.last_scanned_at.clone())),
+                payload.command.expected_revision,
+                now,
+            );
+            Ok(())
+        }
+        ClientToServerMessage::RepositoryRemoved(payload) => {
+            let mut bindings = RepositoryBindingService::new(storage);
+            if let Ok(Some(binding)) = bindings.snapshot(&payload.repository_binding_id)
+                && binding.client_node_id == node_id
+            {
+                let _ = bindings.remove(&payload.repository_binding_id);
+            }
+            Ok(())
+        }
+        ClientToServerMessage::RepositoryStatus(payload) => {
+            let Ok(outcome) = RepositoryScanOutcome::try_new(
+                repository_availability(payload.availability),
+                repository_dirty_state(payload.dirty_state),
+            ) else {
+                return Ok(());
+            };
+            let mut bindings = RepositoryBindingService::new(storage);
+            let Ok(Some(binding)) = bindings.snapshot(&payload.repository_binding_id) else {
+                return Ok(());
+            };
+            if binding.client_node_id != node_id {
+                return Ok(());
+            }
+            let _ = bindings.update_availability(
+                &payload.repository_binding_id,
+                &outcome,
+                &Instant(payload.last_scanned_at.clone()),
+                binding.revision,
+            );
+            Ok(())
+        }
         ClientToServerMessage::OccupancyAck(payload) => {
             // The device persisted the occupancy mirror: the exact lease and
             // token promote `reserving -> occupied` (plan 12.2, contract
@@ -1098,8 +1159,27 @@ fn apply_effect(
             Ok(())
         }
         // The remaining kinds settle at the cursor in this lane; their
-        // Control Plane effects belong to the repository lane.
+        // Control Plane effects belong to later worker lanes.
         _ => Ok(()),
+    }
+}
+
+fn repository_availability(value: WireRepositoryAvailability) -> RepositoryAvailability {
+    match value {
+        WireRepositoryAvailability::Available => RepositoryAvailability::Available,
+        WireRepositoryAvailability::Dirty => RepositoryAvailability::Dirty,
+        WireRepositoryAvailability::Unavailable => RepositoryAvailability::Unavailable,
+        WireRepositoryAvailability::Moved => RepositoryAvailability::Moved,
+        WireRepositoryAvailability::InvalidGit => RepositoryAvailability::InvalidGit,
+        WireRepositoryAvailability::PermissionDenied => RepositoryAvailability::PermissionDenied,
+        WireRepositoryAvailability::ScanFailed => RepositoryAvailability::ScanFailed,
+    }
+}
+
+const fn repository_dirty_state(value: WireRepositoryDirtyState) -> RepositoryDirtyState {
+    match value {
+        WireRepositoryDirtyState::Clean => RepositoryDirtyState::Clean,
+        WireRepositoryDirtyState::Dirty => RepositoryDirtyState::Dirty,
     }
 }
 
@@ -1470,6 +1550,8 @@ const fn architecture_name(architecture: ClientArchitecture) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use winwincode_client_port::messages::ClientHeartbeatPayload;
     use winwincode_client_port::messages::ClientHelloPayload;
 
@@ -1799,5 +1881,132 @@ mod tests {
             .apply(None, body.as_bytes(), &now)
             .expect_err("heartbeat without a credential");
         assert!(error.is_authentication(), "{error}");
+    }
+
+    #[test]
+    fn repository_reports_are_idempotent_and_owner_fenced() {
+        let root = std::env::temp_dir().join(format!(
+            "winwincode-client-exchange-repository-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let mut storage = SqliteStorage::open(&root).expect("storage opens");
+        let node = "cnd_00000000000000000000000001";
+        let foreign_node = "cnd_00000000000000000000000002";
+        let instance = "cix_00000000000000000000000001";
+        let binding_id = "rbd_00000000000000000000000001";
+        let first = Instant("2026-09-07T00:00:00.000Z".to_owned());
+        let second = Instant("2026-09-07T00:01:00.000Z".to_owned());
+        let registration = ClientNodeRegistration::try_new(
+            node,
+            "0000000001",
+            "Fixture Device",
+            "aarch64-apple-darwin",
+            "aarch64",
+            "1.0.0",
+            None,
+            Some(instance.to_owned()),
+            1,
+        )
+        .expect("registration");
+        ClientRegistryService::new(&mut storage)
+            .register(&registration, 0, &first)
+            .expect("register client");
+
+        let envelope = |sender: &str, message_id: &str, message| ClientToServerEnvelope {
+            schema_version: CLIENT_CONTROL_PORT_SCHEMA_VERSION.to_owned(),
+            message_id: message_id.to_owned(),
+            client_node_id: sender.to_owned(),
+            client_instance_id: instance.to_owned(),
+            sequence: 1,
+            occurred_at: first.0.clone(),
+            message,
+        };
+        let upsert = envelope(
+            node,
+            "msg_repository_upsert",
+            ClientToServerMessage::RepositoryUpsert(
+                winwincode_client_port::messages::ClientRepositoryUpsertPayload {
+                    command: winwincode_client_port::messages::CommandContext {
+                        expected_revision: 0,
+                        idempotency_key: "repository-upsert".to_owned(),
+                    },
+                    repository: winwincode_client_port::domain::RepositoryBindingProjection {
+                        repository_binding_id: binding_id.to_owned(),
+                        display_name: "Fixture Repository".to_owned(),
+                        repository_kind: winwincode_client_port::domain::RepositoryKind::Git,
+                        default_branch: "main".to_owned(),
+                        head_commit: "1111111111111111111111111111111111111111".to_owned(),
+                        dirty_state: WireRepositoryDirtyState::Clean,
+                        availability: WireRepositoryAvailability::Available,
+                        repository_fingerprint: format!("sha256:{}", "a".repeat(64)),
+                        last_scanned_at: first.0.clone(),
+                    },
+                },
+            ),
+        );
+        apply_effect(&mut storage, &root, node, &upsert, &first).expect("upsert effect");
+        apply_effect(&mut storage, &root, node, &upsert, &first).expect("upsert replay");
+        let binding = RepositoryBindingService::new(&mut storage)
+            .snapshot(binding_id)
+            .expect("snapshot")
+            .expect("binding exists");
+        assert_eq!(binding.revision, 1);
+
+        let status = envelope(
+            node,
+            "msg_repository_status",
+            ClientToServerMessage::RepositoryStatus(
+                winwincode_client_port::messages::ClientRepositoryStatusPayload {
+                    repository_binding_id: binding_id.to_owned(),
+                    availability: WireRepositoryAvailability::Dirty,
+                    head_commit: binding.head_commit.clone().expect("head"),
+                    dirty_state: WireRepositoryDirtyState::Dirty,
+                    last_scanned_at: second.0.clone(),
+                },
+            ),
+        );
+        apply_effect(&mut storage, &root, node, &status, &second).expect("status effect");
+        apply_effect(&mut storage, &root, node, &status, &second).expect("status replay");
+        let binding = RepositoryBindingService::new(&mut storage)
+            .snapshot(binding_id)
+            .expect("snapshot")
+            .expect("binding exists");
+        assert_eq!(binding.revision, 2);
+        assert_eq!(binding.dirty_state, RepositoryDirtyState::Dirty);
+
+        let removed = envelope(
+            foreign_node,
+            "msg_repository_removed_foreign",
+            ClientToServerMessage::RepositoryRemoved(
+                winwincode_client_port::messages::ClientRepositoryRemovedPayload {
+                    command: winwincode_client_port::messages::CommandContext {
+                        expected_revision: 2,
+                        idempotency_key: "repository-remove".to_owned(),
+                    },
+                    repository_binding_id: binding_id.to_owned(),
+                },
+            ),
+        );
+        apply_effect(&mut storage, &root, foreign_node, &removed, &second)
+            .expect("foreign remove effect");
+        assert!(
+            RepositoryBindingService::new(&mut storage)
+                .snapshot(binding_id)
+                .expect("snapshot")
+                .is_some()
+        );
+
+        let removed = envelope(node, "msg_repository_removed", removed.message);
+        apply_effect(&mut storage, &root, node, &removed, &second).expect("remove effect");
+        apply_effect(&mut storage, &root, node, &removed, &second).expect("remove replay");
+        assert!(
+            RepositoryBindingService::new(&mut storage)
+                .snapshot(binding_id)
+                .expect("snapshot")
+                .is_none()
+        );
+        Box::new(storage).close().expect("close storage");
+        fs::remove_dir_all(root).expect("cleanup");
     }
 }

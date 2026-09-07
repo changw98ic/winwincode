@@ -2,7 +2,7 @@
 
 //! CLIENT-200.2 coverage: the dynamic connect code lifecycle (plan 11.1,
 //! 11.3) and the daemon downlink extensions — `client.access.challenge`
-//! answering, `client.client_lock` application, and skipped unknown commands.
+//! answering, `client.client_lock` application, and repository rescan commands.
 
 use std::collections::{BTreeSet, VecDeque};
 use std::fs;
@@ -782,13 +782,14 @@ fn server_client_lock_commands_persist_and_acknowledge() {
 }
 
 #[test]
-fn unknown_lane_commands_are_counted_and_skipped_without_blocking_the_cursor() {
+fn missing_repository_rescan_is_rejected_without_blocking_the_cursor() {
     let root = temporary_directory("daemon-unhandled");
     let sim = Arc::new(ServerSim::new());
     let mut daemon = started_daemon("unhandled", &root, &sim);
     daemon.publish_connect_code().expect("publication");
 
-    // A rescan command (owned by a later lane) between two challenges.
+    // An unknown binding is a handled rescan rejection between two
+    // challenge frames; it must not terminate or block the daemon.
     let published = daemon.connect_code_state().expect("state").expect("row");
     let challenge = challenge_payload(&published);
     sim.queue_downlink(vec![
@@ -814,10 +815,12 @@ fn unknown_lane_commands_are_counted_and_skipped_without_blocking_the_cursor() {
     });
 
     assert_eq!(
-        daemon.status().unhandled_downlink_commands,
+        daemon.status().repository_rescans_rejected,
         1,
-        "the later-lane command was counted without acting"
+        "the missing binding produced one handled rescan rejection"
     );
+    assert_eq!(daemon.status().repository_rescans_applied, 0);
+    assert_eq!(daemon.status().unhandled_downlink_commands, 0);
     // The cursor advanced across the skipped frame: the follow-up challenge
     // at sequence 2 was still accepted and answered.
     let cursor = daemon
@@ -829,6 +832,16 @@ fn unknown_lane_commands_are_counted_and_skipped_without_blocking_the_cursor() {
     let acks = sim.frames_with_kind("client.access.challenge_ack");
     assert_eq!(acks.len(), 1);
     assert_eq!(acks[0].frame["payload"]["status"], "confirmed");
+    let command_acks = sim.frames_with_kind("client.command_ack");
+    assert_eq!(command_acks.len(), 1);
+    assert_eq!(
+        command_acks[0].frame["payload"]["commandKind"],
+        "client.repository.rescan"
+    );
+    assert_eq!(
+        command_acks[0].frame["payload"]["status"],
+        "rejected_wrong_state"
+    );
 
     daemon.into_store().close().expect("store close");
     cleanup(&root);

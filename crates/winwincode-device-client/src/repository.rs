@@ -801,7 +801,7 @@ fn require_stream_identity(
 /// Appends one durable repository frame to the outbox
 /// (persist-before-send), using the same message-id convention as the
 /// daemon's enqueue path.
-fn enqueue_repository_frame(
+pub(crate) fn enqueue_repository_frame(
     store: &mut DeviceStore,
     client_node_id: &str,
     client_instance_id: &str,
