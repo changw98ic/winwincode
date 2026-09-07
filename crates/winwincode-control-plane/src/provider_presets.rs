@@ -35,7 +35,6 @@
 //! for this module.
 
 use std::fmt;
-use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
@@ -43,12 +42,11 @@ use crate::credential_leak_gate::{
     CredentialLeakError, CredentialLeakGate, CredentialOutputBoundary,
 };
 use crate::provider_catalog::ModelToolSupport;
+use crate::provider_https_sse::{MAX_ENDPOINT_BYTES, canonical_https_endpoint};
 
 /// Adapter implementation every preset routes through: the embedded Kernel
 /// `OpenAI`-compatible execution adapter.
 const PRESET_ADAPTER_KIND: &str = "openai-responses";
-/// Same endpoint size bound as the Provider HTTPS adapter and Vault/KMS.
-const MAX_ENDPOINT_BYTES: usize = 2_048;
 /// Same Provider identifier bound as the durable Provider catalog.
 const MAX_PROVIDER_ID_CHARS: usize = 128;
 /// Same model identifier bound as the durable Provider catalog.
@@ -408,7 +406,7 @@ pub fn resolve_provider_endpoint(
 /// Returns [`ProviderPresetsErrorKind::InvalidRequest`] for every rejected
 /// shape without echoing the input.
 pub fn validate_custom_endpoint(endpoint: &str) -> Result<(), ProviderPresetsError> {
-    if canonical_https_endpoint(endpoint) {
+    if valid_preset_endpoint(endpoint) {
         Ok(())
     } else {
         Err(ProviderPresetsError::invalid())
@@ -670,23 +668,12 @@ fn validate_token(value: &str, max_chars: usize) -> Result<(), ProviderPresetsEr
     }
 }
 
-/// Same canonical HTTPS shape as the Provider HTTPS adapter endpoint check,
-/// with the shared 2,048-byte bound.
-fn canonical_https_endpoint(value: &str) -> bool {
+/// Preset gate over the authority-owned canonical HTTPS endpoint check, with
+/// the shared 2,048-byte bound and a fragment/query pre-filter.
+fn valid_preset_endpoint(value: &str) -> bool {
     value.len() <= MAX_ENDPOINT_BYTES
         && value.trim() == value
         && !value.chars().any(char::is_control)
         && !value.contains(['?', '#'])
-        && {
-            let Ok(uri) = ureq::http::Uri::from_str(value) else {
-                return false;
-            };
-            uri.scheme_str() == Some("https")
-                && uri.authority().is_some_and(|authority| {
-                    !authority.as_str().contains('@') && !authority.host().is_empty()
-                })
-                && uri
-                    .path_and_query()
-                    .is_none_or(|path| path.query().is_none())
-        }
+        && canonical_https_endpoint(value)
 }
