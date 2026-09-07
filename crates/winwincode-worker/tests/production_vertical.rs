@@ -1523,6 +1523,7 @@ fn delegated_structured_proposal_is_retained_once_without_terminal_outcome() {
     run_on_large_stack(async {
         let root = TestDirectory::new("production-delegated-proposal");
         let mut dispatch = dispatch(&root);
+        assert_eq!(dispatch.job.execution_profile, "executor");
         dispatch.job.workspace.write_mode = ExecutionWorkspaceWriteMode::ReadOnly;
         let port = RecordedPort::default();
         let adapter = winwincode_codex::ProductionCodexAdapter::open(adapter_config_with_mode(
@@ -1569,9 +1570,126 @@ fn delegated_structured_proposal_is_retained_once_without_terminal_outcome() {
 
         setup_model(&root, &open, &dispatch.job);
         let mut app = application(&root);
-        let gateway = opened(
+        let first_gateway = opened(
             app.accept_local(&typed(ExecutionPortMessage::ModelOpenMessage(open.clone())))
                 .expect("accept delegated ModelOpen"),
+        );
+        let checkout = detached_checkout(&root);
+        let source_before = DirectorySnapshot::capture(&root.sources());
+        let checkout_before = DirectorySnapshot::capture(&root.workspaces());
+        let identity = ProviderToolIdentity::try_new(
+            ProviderToolKind::Function,
+            "shell_command".to_owned(),
+            Some("functions".to_owned()),
+        )
+        .expect("canonical delegated shell tool");
+        let call_id = "provider-delegated-read-call".to_owned();
+        let usage = ProviderTokenUsage {
+            input_tokens: 10,
+            cached_input_tokens: 0,
+            cache_write_input_tokens: 0,
+            output_tokens: 5,
+            reasoning_output_tokens: 0,
+        };
+        for chunk in provider_chunks(
+            &open,
+            &first_gateway,
+            [
+                ProviderStreamEvent::ResponseStarted {
+                    provider_response_id: "provider-delegated-read-response-1".to_owned(),
+                },
+                ProviderStreamEvent::ToolCallStarted {
+                    index: 0,
+                    provider_call_id: call_id.clone(),
+                    identity,
+                },
+                ProviderStreamEvent::ToolCallArgumentsDelta {
+                    index: 0,
+                    provider_call_id: call_id.clone(),
+                    delta: serde_json::json!({
+                        "command": "cat src/lib.rs",
+                        "workdir": checkout.to_string_lossy(),
+                        "justification": "read candidate source before proposing a ChangeBatch",
+                        "sandbox_permissions": "use_default"
+                    })
+                    .to_string(),
+                },
+                ProviderStreamEvent::ToolCallEnded {
+                    index: 0,
+                    provider_call_id: call_id,
+                },
+                ProviderStreamEvent::Usage(usage),
+                ProviderStreamEvent::Finished(ProviderFinishReason::ToolCalls),
+            ],
+            980,
+        ) {
+            worker
+                .accept_control(
+                    &ExecutionPortMessage::ModelChunkMessage(chunk),
+                    at("2030-01-01T00:00:02.000Z"),
+                )
+                .await
+                .expect("deliver delegated read tool call");
+        }
+        let second_open = poll_until_message(
+            &mut worker,
+            &port,
+            &at("2030-01-01T00:00:02.000Z"),
+            |messages| {
+                messages
+                    .iter()
+                    .filter_map(|message| match message {
+                        ExecutionPortMessage::ModelOpenMessage(open) => Some(open.clone()),
+                        _ => None,
+                    })
+                    .nth(1)
+            },
+            "delegated read did not enter its second model turn",
+        )
+        .await;
+        let second_request_bytes = STANDARD
+            .decode(&second_open.request.data_base64)
+            .expect("decode delegated second request");
+        let second_request =
+            String::from_utf8(second_request_bytes).expect("delegated second request is UTF-8");
+        let second_request_json: serde_json::Value =
+            serde_json::from_str(&second_request).expect("decode delegated second request JSON");
+        assert_ne!(
+            request["requestId"], second_request_json["requestId"],
+            "the second model turn must claim a fresh Provider request"
+        );
+        assert!(
+            second_request.contains("pub fn fixture_value() -> u64 { 1 }"),
+            "actual cat output must enter the second Core model request: {second_request}"
+        );
+        assert_eq!(
+            port.messages()
+                .iter()
+                .filter(|message| matches!(message, ExecutionPortMessage::ModelOpenMessage(_)))
+                .count(),
+            2,
+            "delegated read must produce exactly one continuation ModelOpen"
+        );
+        assert!(
+            !port.messages().iter().any(|message| {
+                matches!(
+                    message,
+                    ExecutionPortMessage::ApprovalRequestMessage(_)
+                        | ExecutionPortMessage::ActionEnforcementRequestMessage(_)
+                        | ExecutionPortMessage::ActionEnforcementReceiptMessage(_)
+                )
+            }),
+            "delegated read must not require approval or an action receipt"
+        );
+        let second_gateway = opened(
+            app.accept_local(&typed(ExecutionPortMessage::ModelOpenMessage(
+                second_open.clone(),
+            )))
+            .expect("accept delegated second ModelOpen"),
+        );
+        assert_eq!(
+            second_gateway.model_exchange_id, second_open.model_exchange_id,
+            "second Provider receipt must bind the Core exchange"
         );
         let final_message = serde_json::json!({
             "acceptanceCriteriaIds": dispatch.job.stage_input
@@ -1585,16 +1703,16 @@ fn delegated_structured_proposal_is_retained_once_without_terminal_outcome() {
             "validationProfile": "changed"
         })
         .to_string();
-        let usage = ProviderTokenUsage {
+        let final_usage = ProviderTokenUsage {
             input_tokens: 10,
             cached_input_tokens: 0,
             cache_write_input_tokens: 0,
             output_tokens: 5,
             reasoning_output_tokens: 0,
         };
-        for chunk in provider_chunks(
-            &open,
-            &gateway,
+        for (index, chunk) in provider_chunks(
+            &second_open,
+            &second_gateway,
             [
                 ProviderStreamEvent::ResponseStarted {
                     provider_response_id: "provider-delegated-response".to_owned(),
@@ -1605,18 +1723,27 @@ fn delegated_structured_proposal_is_retained_once_without_terminal_outcome() {
                     delta: final_message,
                 },
                 ProviderStreamEvent::TextEnded { index: 0 },
-                ProviderStreamEvent::Usage(usage),
+                ProviderStreamEvent::Usage(final_usage),
                 ProviderStreamEvent::Finished(ProviderFinishReason::Stop),
             ],
-            980,
-        ) {
+            1080,
+        )
+        .into_iter()
+        .enumerate()
+        {
+            let sequence = chunk.sequence.0;
+            let is_final = chunk.is_final;
             worker
                 .accept_control(
                     &ExecutionPortMessage::ModelChunkMessage(chunk),
                     at("2030-01-01T00:00:02.000Z"),
                 )
                 .await
-                .expect("deliver delegated structured output");
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "deliver delegated structured output index={index} sequence={sequence} final={is_final}: {error:?}"
+                    )
+                });
         }
 
         let mut stopped_at_writer_boundary = false;
@@ -1697,6 +1824,12 @@ fn delegated_structured_proposal_is_retained_once_without_terminal_outcome() {
                 .expect("read unchanged delegated checkout"),
             "pub fn fixture_value() -> u64 { 1 }\n"
         );
+        let source_after = DirectorySnapshot::capture(&root.sources());
+        let checkout_after = DirectorySnapshot::capture(&root.workspaces());
+        assert_eq!(source_before.files, source_after.files);
+        assert_eq!(source_before.directories, source_after.directories);
+        assert_eq!(checkout_before.files, checkout_after.files);
+        assert_eq!(checkout_before.directories, checkout_after.directories);
     });
 }
 
