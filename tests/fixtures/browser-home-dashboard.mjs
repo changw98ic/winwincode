@@ -310,6 +310,11 @@ function dashboard() {
         status: card.dataset.status ?? null,
         disabled: card.dataset.disabled ?? null,
         title: card.querySelector('.wwc-home-card-title')?.textContent ?? '',
+        action: {
+          href: card.querySelector('.wwc-home-card-action')?.getAttribute('href') ?? null,
+          disabled: card.querySelector('.wwc-home-card-action')?.getAttribute('aria-disabled')
+            ?? null,
+        },
       })),
     })),
     actions: [...page.querySelectorAll('.wwc-home-card-action')].map(node => ({

@@ -1118,30 +1118,28 @@ test('the Home page mounts one polite live region and exact deep links on every 
   const actions = descendants(rootElement)
     .filter(node => node.className === 'wwc-home-card-action')
     .map(node => node.href)
+  const scoped = `organizationId=${scope.organizationId}&workspaceId=${scope.workspaceId}`
+    + `&projectId=${scope.projectId}&repositoryId=${scope.repositoryId}`
   assert.equal(
-    actions.filter(href => href?.startsWith('#/attention?session=psn_00000000000000000000000001'))
-      .length,
+    actions.filter(href => href === `#/attention?session=${productSessionId}&${scoped}`).length,
     1,
     'the input decision opens its exact session decisions',
   )
   assert.equal(
-    actions.filter(href => href?.startsWith(
-      '#/strongflow?delivery=dlv_00000000000000000000000001&stageRun=str_00000000000000000000000001',
-    )).length,
+    actions.filter(href => href === `#/strongflow?delivery=${deliveryId}`
+      + `&stageRun=${stageRunId}&view=unified&${scoped}`).length,
     1,
     'the delivery-bound decision opens the exact Delivery context',
   )
   assert.equal(
-    actions.filter(href => href?.startsWith(
-      '#/strongflow?delivery=dlv_00000000000000000000000002&stageRun=str_00000000000000000000000001&view=unified',
-    )).length,
+    actions.filter(href => href === `#/strongflow?delivery=${executingDeliveryId}`
+      + `&stageRun=${stageRunId}&view=unified&${scoped}`).length,
     1,
     'the running card opens the exact StrongFlow StageRun',
   )
   assert.equal(
-    actions.filter(href => href?.startsWith(
-      `#/strongflow?delivery=${deliveredDeliveryId}&view=unified&organizationId=${scope.organizationId}`,
-    )).length,
+    actions.filter(href => href === `#/strongflow?delivery=${deliveredDeliveryId}`
+      + `&view=unified&${scoped}`).length,
     2,
     'the visited Delivery keeps the full canonical route in both of its sections',
   )

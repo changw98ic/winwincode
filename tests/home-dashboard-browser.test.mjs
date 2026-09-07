@@ -115,21 +115,27 @@ test('a real browser opens the Attention-first Home dashboard as the first scree
   // Every card opens its exact, Scope-complete deep link.
   const scoped = `organizationId=${identity}&workspaceId=${workspaceId}`
     + `&projectId=${projectId}&repositoryId=${repositoryOne}`
+  const strongflowStageRunHref = `#/strongflow?delivery=dlv_00000000000000000000000001`
+    + `&stageRun=str_00000000000000000000000001&view=unified&${scoped}`
+  const attentionHref = `#/attention?session=psn_00000000000000000000000001&${scoped}`
+  const decisionCards = section('decisions').cards
+  const decisionByTitle = title => decisionCards.find(card => card.title === title)
   for (const action of home.actions) {
     assert.match(action.href, new RegExp(`repositoryId=${repositoryOne}$`), action.href)
     assert.equal(action.disabled, null, action.href)
   }
   assert.equal(
-    home.actions.filter(action => action.href === `#/attention?session=psn_00000000000000000000000001&${scoped}`).length,
-    1,
-    JSON.stringify(home.actions),
+    decisionByTitle('Allow the projected repository action')?.action.href,
+    attentionHref,
+    JSON.stringify(decisionCards),
   )
   assert.equal(
-    home.actions.filter(action => action.href === `#/strongflow?delivery=dlv_00000000000000000000000001`
-      + `&stageRun=str_00000000000000000000000001&view=unified&${scoped}`).length,
-    2,
-    'the in-progress and the failing card open the exact StrongFlow StageRun',
+    decisionByTitle('Review the proposed delivery scope')?.action.href,
+    strongflowStageRunHref,
+    JSON.stringify(decisionCards),
   )
+  assert.equal(section('active').cards[0]?.action.href, strongflowStageRunHref)
+  assert.equal(section('failing').cards[0]?.action.href, strongflowStageRunHref)
   assert.equal(
     home.chatLinks.filter(href => href === `#/chat?session=psn_00000000000000000000000001&${scoped}`).length,
     1,
@@ -166,10 +172,27 @@ test('a real browser opens the Attention-first Home dashboard as the first scree
   assert.equal(switched.leak, false)
   const switchedDashboard = await evaluateInBrowser('globalThis.readDashboard()')
   assert.match(switchedDashboard.status, /Ready ·/u)
+  const switchedScoped = `organizationId=${identity}&workspaceId=${workspaceId}`
+    + `&projectId=${projectId}&repositoryId=${repositoryTwo}`
+  const switchedStrongflowStageRunHref = `#/strongflow?delivery=dlv_00000000000000000000000002`
+    + `&stageRun=str_00000000000000000000000002&view=unified&${switchedScoped}`
   assert.equal(
-    switchedDashboard.actions.every(action => (action.href ?? '').includes(repositoryTwo)),
-    true,
-    JSON.stringify(switchedDashboard.actions),
+    switchedDashboard.sections.find(section => section.id === 'active')?.cards.length,
+    1,
+  )
+  assert.equal(
+    switchedDashboard.sections.find(section => section.id === 'failing')?.cards.length,
+    1,
+  )
+  assert.equal(
+    switchedDashboard.sections.find(section => section.id === 'active')
+      ?.cards[0]?.action.href,
+    switchedStrongflowStageRunHref,
+  )
+  assert.equal(
+    switchedDashboard.sections.find(section => section.id === 'failing')
+      ?.cards[0]?.action.href,
+    switchedStrongflowStageRunHref,
   )
   assert.equal(sectionOf(switchedDashboard)('visited').cards.length, 0)
   assert.equal(switchedDashboard.liveRegions, 1)
