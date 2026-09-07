@@ -259,7 +259,7 @@ fn converge_model_settings(
     repository_scope: &RepositoryScope,
     organization_scope: &OrganizationScope,
     model_route: &LocalModelRoute,
-    _occurred_at: winwincode_domain::Instant,
+    occurred_at: winwincode_domain::Instant,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let route = model_route.as_api_route();
     let target = ModelSettingsTarget::Organization {
