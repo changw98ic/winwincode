@@ -24,6 +24,10 @@ required-features = ["test-support"]
 
 [dependencies]
 base64.workspace = true
+codex-apply-patch = { path = "../../third_party/codex/codex-rs/apply-patch" }
+codex-exec-server = { path = "../../third_party/codex/codex-rs/exec-server" }
+codex-utils-path-uri = { path = "../../third_party/codex/codex-rs/utils/path-uri" }
+futures.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -35,7 +39,6 @@ winwincode-domain = { path = "../winwincode-domain" }
 winwincode-execution-port = { path = "../winwincode-execution-port" }
 
 [dev-dependencies]
-futures.workspace = true
 rusqlite.workspace = true
 tempfile = "=3.27.0"
 winwincode-api.workspace = true

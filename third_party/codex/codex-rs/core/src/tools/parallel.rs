@@ -4,6 +4,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
+use futures::future::BoxFuture;
 use tokio::sync::RwLock;
 use tokio::task::JoinError;
 use tokio_util::either::Either;
@@ -27,6 +28,25 @@ use crate::tools::router::ToolCall;
 use crate::tools::router::ToolCallSource;
 use codex_protocol::error::CodexErr;
 use codex_protocol::models::ResponseInputItem;
+
+/// Host-owned terminal handoff produced by the delegated submit tool.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ChangeBatchHandoff {
+    pub(crate) call_id: String,
+    pub(crate) proposal: String,
+}
+
+/// Completion of a tool call after Core has admitted its response item.
+#[derive(Debug)]
+pub(crate) enum ToolCallCompletion {
+    Response(ResponseInputItem),
+    Continuation(ToolContinuation),
+}
+
+#[derive(Debug)]
+pub(crate) enum ToolContinuation {
+    YieldToHost(ChangeBatchHandoff),
+}
 
 struct ToolCallTimingGuard {
     started_at: Instant,
@@ -74,18 +94,37 @@ impl ToolCallRuntime {
         self,
         call: ToolCall,
         cancellation_token: CancellationToken,
-    ) -> impl std::future::Future<Output = Result<ResponseInputItem, CodexErr>> {
-        let error_call = call.clone();
-        let source = call.direct_source();
-        let future = self.handle_tool_call_with_source(call, source, cancellation_token);
-        async move {
-            match future.await {
-                Ok(response) => Ok(response.into_response()),
-                Err(FunctionCallError::Fatal(message)) => Err(CodexErr::Fatal(message)),
-                Err(other) => Ok(Self::failure_response(error_call, other)),
-            }
+    ) -> BoxFuture<'static, Result<ToolCallCompletion, CodexErr>> {
+        if self.step_context.turn.submit_change_batch
+            && call.tool_name.name == "submit_change_batch"
+            && let ToolPayload::Custom { input } = &call.payload
+        {
+            let handoff = ChangeBatchHandoff {
+                call_id: call.call_id.clone(),
+                proposal: input.clone(),
+            };
+            return Box::pin(async move {
+                Ok(ToolCallCompletion::Continuation(
+                    ToolContinuation::YieldToHost(handoff),
+                ))
+            });
         }
-        .in_current_span()
+
+        Box::pin(
+            async move {
+                let error_call = call.clone();
+                let source = call.direct_source();
+                let future = self.handle_tool_call_with_source(call, source, cancellation_token);
+                match future.await {
+                    Ok(response) => Ok(ToolCallCompletion::Response(response.into_response())),
+                    Err(FunctionCallError::Fatal(message)) => Err(CodexErr::Fatal(message)),
+                    Err(other) => Ok(ToolCallCompletion::Response(Self::failure_response(
+                        error_call, other,
+                    ))),
+                }
+            }
+            .in_current_span(),
+        )
     }
 
     #[instrument(level = "trace", skip_all)]
@@ -515,6 +554,37 @@ mod tests {
     }
 
     impl CoreToolRuntime for CountingHandler {}
+
+    #[tokio::test]
+    async fn delegated_submit_is_a_lazy_host_handoff() -> anyhow::Result<()> {
+        let (session, mut turn_context) = crate::session::tests::make_session_and_context().await;
+        turn_context.submit_change_batch = true;
+        let session = Arc::new(session);
+        let turn_context = Arc::new(turn_context);
+        let step_context = StepContext::for_test(Arc::clone(&turn_context));
+        let tracker = Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::new()));
+        let runtime = ToolCallRuntime::new(session, step_context, tracker);
+        let result = runtime
+            .handle_tool_call(
+                ToolCall {
+                    tool_name: codex_tools::ToolName::plain("submit_change_batch"),
+                    call_id: "batch-1".to_string(),
+                    payload: ToolPayload::Custom {
+                        input: "{\"schemaVersion\":1}".to_string(),
+                    },
+                    encrypted_function_args: None,
+                },
+                CancellationToken::new(),
+            )
+            .await?;
+        let ToolCallCompletion::Continuation(ToolContinuation::YieldToHost(handoff)) = result
+        else {
+            anyhow::bail!("delegated submit must yield to the host");
+        };
+        assert_eq!(handoff.call_id, "batch-1");
+        assert_eq!(handoff.proposal, "{\"schemaVersion\":1}");
+        Ok(())
+    }
 
     #[tokio::test]
     async fn cancellation_while_action_gate_waits_never_enters_handler() -> anyhow::Result<()> {
@@ -995,6 +1065,9 @@ mod tests {
                 success: Some(true),
             },
         };
+        let ToolCallCompletion::Response(response) = response else {
+            panic!("ordinary tool call must return a response completion");
+        };
         assert_eq!(expected_response, response);
 
         let actual = records
@@ -1063,6 +1136,9 @@ mod tests {
             .await
             .expect("timed out waiting for tool response")
             .expect("tool response task should join")?;
+        let ToolCallCompletion::Response(response) = response else {
+            anyhow::bail!("cancelled tool should return a response completion");
+        };
         let ResponseInputItem::FunctionCallOutput { output, .. } = response else {
             anyhow::bail!("cancelled tool should return function output");
         };

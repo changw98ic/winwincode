@@ -1,0 +1,5 @@
+start: "{" ws "\"acceptanceCriteriaIds\"" ws ":" ws string_array ws "," ws "\"disposition\"" ws ":" ws disposition ws "," ws "\"patch\"" ws ":" ws string ws "," ws "\"schemaVersion\"" ws ":" ws "1" ws "," ws "\"validationProfile\"" ws ":" ws string ws "}"
+string_array: "[" ws string (ws "," ws string)* ws "]"
+disposition: "\"final\"" | "\"continue\"" | "\"probe\""
+string: "\"" /([^"\\]|\\.)*/ "\""
+ws: /[ \t\r\n]*/

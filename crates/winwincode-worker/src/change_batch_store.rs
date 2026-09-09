@@ -755,15 +755,15 @@ impl ChangeBatchStore {
         if binding.active_batch_id.as_ref() != Some(&batch_id) || binding.state != expected {
             return Err(conflict());
         }
-        let checkpoint_revision = receipt
-            .result_revision
-            .clone()
-            .ok_or_else(|| invalid("ChangeBatch checkpoint has no result revision"))?;
-        let checkpoint_delta = receipt
-            .delta_digest
-            .clone()
-            .ok_or_else(|| invalid("ChangeBatch checkpoint has no exact delta"))?;
-        if !valid_revision(&checkpoint_revision) || !valid_digest(&checkpoint_delta) {
+        let checkpoint_revision = receipt.result_revision.clone();
+        let checkpoint_delta = receipt.delta_digest.clone();
+        if checkpoint_revision
+            .as_ref()
+            .is_some_and(|revision| !valid_revision(revision))
+            || checkpoint_delta
+                .as_ref()
+                .is_some_and(|digest| !valid_digest(digest))
+        {
             return Err(invalid("ChangeBatch checkpoint identity is invalid"));
         }
         let changed = transaction
@@ -777,8 +777,8 @@ impl ChangeBatchStore {
                     batch_id.0,
                     expected.as_str(),
                     next.as_str(),
-                    checkpoint_revision.0,
-                    checkpoint_delta.0,
+                    checkpoint_revision.map(|revision| revision.0),
+                    checkpoint_delta.map(|digest| digest.0),
                     now.0,
                 ],
             )
@@ -2192,8 +2192,14 @@ fn validate_receipt(
             }
         }
         ChangeBatchReceiptStatus::Rejected => {
-            if !files_empty || receipt.result_revision.is_some() || receipt.delta_digest.is_some() {
-                return Err(invalid("ChangeBatch rejected receipt binds no proven tree"));
+            if !files_empty
+                || receipt.result_revision.as_ref() != Some(base_revision)
+                || receipt.delta_digest.as_ref() != derive_delta_digest(&[]).ok().as_ref()
+                || !receipt.delta_exact
+            {
+                return Err(invalid(
+                    "ChangeBatch rejected receipt does not bind the base tree",
+                ));
             }
         }
         ChangeBatchReceiptStatus::StateUncertain => {

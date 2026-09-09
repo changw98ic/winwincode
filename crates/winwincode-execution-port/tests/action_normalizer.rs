@@ -3,8 +3,9 @@
 use serde::Deserialize;
 use winwincode_execution_port::action_normalizer::{
     ActionIntent, ActionNormalization, ActionNormalizationErrorCode, ActionObject, ActionOperation,
-    ActionPurpose, ActionRisk, ActionScope, FileAnalysis, FileOperation, FileRequest, McpRequest,
-    NetworkRequest, ShellRequest, ToolRequest, normalize_action,
+    ActionPurpose, ActionRisk, ActionScope, FileAnalysis, FileOperation, FileRequest, GitOperation,
+    GitRequest, McpRequest, NetworkRequest, ShellRequest, ToolExecutionKind, ToolRequest,
+    normalize_action,
 };
 
 #[derive(Debug, Deserialize)]
@@ -185,6 +186,47 @@ fn argv_shell_requests_are_classified_without_execution() {
     .expect("normalize shell");
     assert!(normalized.comparison.matches);
     assert_eq!(normalized.observed.objects, [ActionObject::Test]);
+}
+
+#[test]
+fn typed_tool_envelope_distinguishes_edit_git_shell_test_and_search() {
+    let shell = |program: &str, args: &[&str]| {
+        ToolRequest::Shell(ShellRequest {
+            program: program.to_owned(),
+            args: args.iter().map(|arg| (*arg).to_owned()).collect(),
+            working_directory: ".".to_owned(),
+        })
+    };
+    assert_eq!(
+        ToolRequest::File(FileRequest {
+            operation: FileOperation::Write,
+            paths: vec!["src/lib.rs".to_owned()],
+            analysis: FileAnalysis::default(),
+        })
+        .execution_kind(),
+        ToolExecutionKind::Edit
+    );
+    assert_eq!(
+        ToolRequest::Git(GitRequest {
+            operation: GitOperation::Status,
+            repository_path: ".".to_owned(),
+            refs: Vec::new(),
+        })
+        .execution_kind(),
+        ToolExecutionKind::Git
+    );
+    assert_eq!(
+        shell("node", &["script.mjs"]).execution_kind(),
+        ToolExecutionKind::Shell
+    );
+    assert_eq!(
+        shell("cargo", &["test"]).execution_kind(),
+        ToolExecutionKind::Test
+    );
+    assert_eq!(
+        shell("rg", &["needle"]).execution_kind(),
+        ToolExecutionKind::Search
+    );
 }
 
 #[test]

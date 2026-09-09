@@ -1667,6 +1667,17 @@ async fn duplicate_or_conflicting_dispatch_never_creates_a_second_thread() {
         )
         .await
         .unwrap();
+    let handoff = worker
+        .recovery_handoff_snapshot(&first.job.job_id)
+        .expect("active task handoff snapshot");
+    assert!(!handoff.canonical_fact);
+    assert_eq!(handoff.current_task.title, "Fixture Delivery");
+    assert!(handoff.progress.completed.is_empty());
+    assert!(handoff.progress.current.is_empty());
+    assert_eq!(handoff.progress.remaining.len(), 1);
+    assert!(!handoff.git_head.is_empty());
+    assert_eq!(handoff.dirty.total_entries, 0);
+    assert!(handoff.last_test.is_none());
     worker
         .accept_control(&ExecutionPortMessage::JobDispatchMessage(first), now())
         .await

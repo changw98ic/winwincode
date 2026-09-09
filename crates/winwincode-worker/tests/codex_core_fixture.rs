@@ -17,6 +17,7 @@ use winwincode_domain::{
     ProductSessionId, RepositoryId, RequestId, SchemaVersion, Sha256Digest, WorkerId,
     WorkerInstanceId,
 };
+use winwincode_execution_port::agent_config::{AgentProfileSettings, resolve_agent_session_config};
 use winwincode_execution_port::generated::{
     ArtifactAckMessage, ArtifactReference, ExecutionJob, ExecutionLeaseStamp, ExecutionLimits,
     ExecutionOutcomeStatus, ExecutionOutcomeUsage, ExecutionPortMessage, ExecutionScope,
@@ -223,6 +224,21 @@ impl CodexCoreAdapter for RealKernelAdapter {
         if let Some(thread_id) = self.runs.get(start.run_key) {
             return Ok(thread_id.clone());
         }
+        let capabilities = worker_config().capabilities;
+        let agent_config = resolve_agent_session_config(
+            start.worker_id,
+            &capabilities,
+            &start.job.execution_profile,
+            AgentProfileSettings {
+                provider: "fixture-provider".to_owned(),
+                model: "fixture-coder".to_owned(),
+                reasoning: "provider_default".to_owned(),
+                tools: vec!["worker:sandbox".to_owned()],
+                sandbox: "read-only".to_owned(),
+                instructions: None,
+            },
+        )
+        .map_err(|error| error.to_string())?;
         let session = self
             .kernel
             .create_session(SessionOptions {
@@ -230,6 +246,7 @@ impl CodexCoreAdapter for RealKernelAdapter {
                 provider: "fixture-provider".to_owned(),
                 model: "fixture-coder".to_owned(),
                 role_policy: None,
+                agent_config,
             })
             .await
             .map_err(|error| error.to_string())?;

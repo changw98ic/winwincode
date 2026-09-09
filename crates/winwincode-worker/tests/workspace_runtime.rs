@@ -15,14 +15,13 @@ use winwincode_domain::{
 use winwincode_execution_port::{
     change_batch_identity::derive_change_batch_id,
     generated::{
-        AppliedFileOperation, AppliedFileSummary, ArtifactReference, ChangeBatchIdentity,
-        ChangeBatchProgressEvent, ChangeBatchProgressState, ChangeBatchProposal,
-        ChangeBatchProposalDisposition, ChangeBatchProposalEvent, EncodedPayload, ExecutionJob,
-        ExecutionJobReplacementAuthority, ExecutionLeaseStamp, ExecutionLimits,
-        ExecutionOutcomeUsage, ExecutionScope, ExecutionWorkspace, ExecutionWorkspaceWriteMode,
-        ModelChunkMessage, ModelChunkMessageKind, ModelGatewayRoute, ModelOpenMessage,
-        ObservationReceipt, ObservationSource, ValidationProfileName, WorkRunExecutionScope,
-        WorkRunExecutionScopeKind, WorkRunInput,
+        ArtifactReference, ChangeBatchIdentity, ChangeBatchProgressEvent, ChangeBatchProgressState,
+        ChangeBatchProposal, ChangeBatchProposalDisposition, ChangeBatchProposalEvent,
+        ChangeBatchReceiptStatus, EncodedPayload, ExecutionJob, ExecutionJobReplacementAuthority,
+        ExecutionLeaseStamp, ExecutionLimits, ExecutionOutcomeUsage, ExecutionScope,
+        ExecutionWorkspace, ExecutionWorkspaceWriteMode, ModelChunkMessage, ModelChunkMessageKind,
+        ModelGatewayRoute, ModelOpenMessage, ObservationReceipt, ObservationSource,
+        ValidationProfileName, WorkRunExecutionScope, WorkRunExecutionScopeKind, WorkRunInput,
     },
     observation_contract::{derive_observation_output_digest, parse_observation_response_strict},
 };
@@ -33,10 +32,9 @@ use winwincode_worker::{
     },
     workspace::WorkspaceCloseReason,
     workspace_runtime::{
-        ChangeBatchExecutionRequest, ChangeBatchExecutionResult, ChangeBatchExecutor,
-        ChangeBatchExecutorFuture, JobWorkspaceErrorCode, JobWorkspaceRuntime,
-        ObservationModelConfiguration, ValidationArtifactError, ValidationArtifactPort,
-        ValidationArtifactRequest, ValidationArtifactStream,
+        JobWorkspaceErrorCode, JobWorkspaceRuntime, ObservationModelConfiguration,
+        ValidationArtifactError, ValidationArtifactPort, ValidationArtifactRequest,
+        ValidationArtifactStream,
     },
 };
 
@@ -87,7 +85,6 @@ impl Fixture {
         JobWorkspaceRuntime::open(&self.workspaces, &self.sources)
             .expect("open workspace runtime")
             .with_validation_artifact_port(FixtureValidationArtifacts::default())
-            .with_change_batch_executor(PatchApplyingExecutor)
     }
 
     fn repository(&self) -> PathBuf {
@@ -217,83 +214,6 @@ fn baseline_unavailable_validation_config() -> String {
             "id = \"python-check\"\nphase = \"validation\"\nlanguage = \"typescript\"\ndiagnosticParserVersion = \"typescript_v1\"\nallowedCompanionPaths = []\nargv = [\"/usr/bin/python3\", \"-B\", \"-c\", {diagnostic_command:?}]"
         ),
     )
-}
-
-/// Applies the exact Add File patch bytes through the injected executor port.
-///
-/// This is the same port seam the production deterministic delivery installs:
-/// the Worker itself never writes checkout bytes, so every re-cut fixture that
-/// exercises an executed batch installs its executor here.
-#[derive(Debug, Default)]
-struct PatchApplyingExecutor;
-
-impl PatchApplyingExecutor {
-    fn apply(request: ChangeBatchExecutionRequest<'_>) -> ChangeBatchExecutionResult {
-        let mut written: Vec<(PathBuf, Vec<u8>)> = Vec::new();
-        for line in request.patch.lines() {
-            if let Some(path) = line.strip_prefix("*** Add File: ") {
-                written.push((request.checkout.join(path.trim()), Vec::new()));
-            } else if let Some(body) = line.strip_prefix('+')
-                && let Some((_, bytes)) = written.last_mut()
-            {
-                bytes.extend_from_slice(body.as_bytes());
-                bytes.push(b'\n');
-            }
-        }
-        let files = written
-            .into_iter()
-            .map(|(path, bytes)| {
-                std::fs::write(&path, &bytes).expect("apply fixture patch bytes");
-                AppliedFileSummary {
-                    after_sha256: Some(Sha256Digest(format!(
-                        "sha256:{:x}",
-                        Sha256::digest(&bytes)
-                    ))),
-                    before_sha256: None,
-                    bytes_after: i64::try_from(bytes.len()).expect("fixture byte bound"),
-                    bytes_before: 0,
-                    mode_after: Some("0644".to_owned()),
-                    mode_before: None,
-                    move_path: None,
-                    operation: AppliedFileOperation::Create,
-                    path: path
-                        .strip_prefix(request.checkout)
-                        .expect("fixture checkout path")
-                        .to_string_lossy()
-                        .to_string(),
-                }
-            })
-            .collect();
-        ChangeBatchExecutionResult::Applied {
-            files,
-            artifact_ref: None,
-        }
-    }
-}
-
-impl ChangeBatchExecutor for PatchApplyingExecutor {
-    fn execute<'operation>(
-        &'operation mut self,
-        request: ChangeBatchExecutionRequest<'operation>,
-    ) -> ChangeBatchExecutorFuture<'operation> {
-        let result = Self::apply(request);
-        Box::pin(async move { Ok(result) })
-    }
-
-    fn recover<'operation>(
-        &'operation mut self,
-        request: ChangeBatchExecutionRequest<'operation>,
-    ) -> ChangeBatchExecutorFuture<'operation> {
-        let result = Self::apply(request);
-        Box::pin(async move { Ok(result) })
-    }
-
-    fn cancel<'operation>(
-        &'operation mut self,
-        _request: ChangeBatchExecutionRequest<'operation>,
-    ) -> ChangeBatchExecutorFuture<'operation> {
-        Box::pin(async { Ok(ChangeBatchExecutionResult::RolledBack { artifact_ref: None }) })
-    }
 }
 
 impl Drop for Fixture {
@@ -1495,6 +1415,85 @@ fn duplicate_authority_is_stable_and_foreign_authority_is_rejected() {
         .close_job(&active.job.job_id, WorkspaceCloseReason::Cancelled)
         .expect("cancel Job workspace");
     assert!(!first.parent().expect("workspace root").exists());
+}
+
+#[tokio::test]
+async fn deterministic_batch_serializes_conflicts_and_receipts_each_changed_file() {
+    let fixture = Fixture::new("deterministic-batch");
+    let active = active_job();
+    let mut runtime = fixture.runtime();
+    let checkout = runtime
+        .open_for_job(&active, None)
+        .expect("open deterministic checkout");
+    let patch = "*** Begin Patch\n*** Update File: fixture.txt\n@@\n-source\n+middle\n*** Update File: fixture.txt\n@@\n-middle\n+final\n*** Add File: independent.txt\n+created\n*** End Patch\n";
+    let proposal = batch_proposal_with_patch(
+        &active,
+        source_revision(&fixture),
+        patch,
+        "turn-deterministic",
+    );
+    let executed = Box::pin(runtime.execute_change_batch(
+        &active,
+        &proposal,
+        &Instant("2026-08-28T00:00:02.000Z".to_owned()),
+    ))
+    .await
+    .expect("execute deterministic patch");
+
+    assert_eq!(executed.receipt.status, ChangeBatchReceiptStatus::Applied);
+    assert_eq!(executed.receipt.files.len(), 2);
+    assert_eq!(
+        std::fs::read_to_string(checkout.join("fixture.txt")).expect("updated file"),
+        "final\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(checkout.join("independent.txt")).expect("created file"),
+        "created\n"
+    );
+}
+
+#[tokio::test]
+async fn rejected_batch_is_rolled_back_without_an_applied_progress_fact() {
+    let fixture = Fixture::new("rejected-batch");
+    std::fs::write(fixture.repository().join("second.txt"), b"second\n")
+        .expect("write second source file");
+    git(&fixture.repository(), &["add", "second.txt"]);
+    git(&fixture.repository(), &["commit", "-qm", "second source"]);
+    let active = active_job();
+    let mut runtime = fixture.runtime();
+    let checkout = runtime
+        .open_for_job(&active, None)
+        .expect("open rejected checkout");
+    let patch = "*** Begin Patch\n*** Update File: fixture.txt\n@@\n-source\n+changed\n*** Update File: second.txt\n@@\n-not-present\n+replacement\n*** End Patch\n";
+    let proposal =
+        batch_proposal_with_patch(&active, source_revision(&fixture), patch, "turn-rejected");
+    let executed = Box::pin(runtime.execute_change_batch(
+        &active,
+        &proposal,
+        &Instant("2026-08-28T00:00:02.000Z".to_owned()),
+    ))
+    .await
+    .expect("retain rejected patch");
+
+    assert_eq!(executed.receipt.status, ChangeBatchReceiptStatus::Rejected);
+    assert!(
+        executed
+            .progress
+            .iter()
+            .all(|event| event.state != ChangeBatchProgressState::Applied)
+    );
+    assert_eq!(
+        executed.progress.last().map(|event| &event.state),
+        Some(&ChangeBatchProgressState::RepairRequired)
+    );
+    assert_eq!(
+        std::fs::read_to_string(checkout.join("fixture.txt")).expect("original file"),
+        "source\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(checkout.join("second.txt")).expect("second original file"),
+        "second\n"
+    );
 }
 
 async fn prepare_terminal_observer_replay_fixture()

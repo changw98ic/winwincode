@@ -1431,9 +1431,15 @@ fn delegated_structured_proposal_is_retained_once_without_terminal_outcome() {
         let request: serde_json::Value =
             serde_json::from_slice(&request_bytes).expect("decode delegated request JSON");
         let format = &request["request"]["text"]["format"];
-        assert_eq!(format["type"], "json_schema", "{request:#}");
-        assert_eq!(format["strict"], true);
-        assert_eq!(format["schema"]["additionalProperties"], false);
+        assert!(format.is_null(), "{request:#}");
+        let submit_tool = request["request"]["tools"]
+            .as_array()
+            .expect("delegated tools")
+            .iter()
+            .find(|tool| tool["name"] == "submit_change_batch")
+            .expect("terminal ChangeBatch tool");
+        assert_eq!(submit_tool["type"], "custom");
+        assert_eq!(submit_tool["format"]["type"], "grammar");
 
         setup_model(&root, &open, &dispatch.job);
         let mut app = application(&root);
@@ -1442,8 +1448,6 @@ fn delegated_structured_proposal_is_retained_once_without_terminal_outcome() {
                 .expect("accept delegated ModelOpen"),
         );
         let checkout = detached_checkout(&root);
-        let source_before = DirectorySnapshot::capture(&root.sources());
-        let checkout_before = DirectorySnapshot::capture(&root.workspaces());
         let identity = ProviderToolIdentity::try_new(
             ProviderToolKind::Function,
             "shell_command".to_owned(),
@@ -1577,6 +1581,13 @@ fn delegated_structured_proposal_is_retained_once_without_terminal_outcome() {
             output_tokens: 5,
             reasoning_output_tokens: 0,
         };
+        let submit_identity = ProviderToolIdentity::try_new(
+            ProviderToolKind::Custom,
+            "submit_change_batch".to_owned(),
+            None,
+        )
+        .expect("canonical submit ChangeBatch tool");
+        let submit_call_id = "provider-submit-change-batch".to_owned();
         for (index, chunk) in provider_chunks(
             &second_open,
             &second_gateway,
@@ -1584,14 +1595,22 @@ fn delegated_structured_proposal_is_retained_once_without_terminal_outcome() {
                 ProviderStreamEvent::ResponseStarted {
                     provider_response_id: "provider-delegated-response".to_owned(),
                 },
-                ProviderStreamEvent::TextStarted { index: 0 },
-                ProviderStreamEvent::TextDelta {
+                ProviderStreamEvent::ToolCallStarted {
                     index: 0,
+                    provider_call_id: submit_call_id.clone(),
+                    identity: submit_identity,
+                },
+                ProviderStreamEvent::ToolCallArgumentsDelta {
+                    index: 0,
+                    provider_call_id: submit_call_id.clone(),
                     delta: final_message,
                 },
-                ProviderStreamEvent::TextEnded { index: 0 },
+                ProviderStreamEvent::ToolCallEnded {
+                    index: 0,
+                    provider_call_id: submit_call_id,
+                },
                 ProviderStreamEvent::Usage(final_usage),
-                ProviderStreamEvent::Finished(ProviderFinishReason::Stop),
+                ProviderStreamEvent::Finished(ProviderFinishReason::ToolCalls),
             ],
             1080,
         )
@@ -1613,28 +1632,37 @@ fn delegated_structured_proposal_is_retained_once_without_terminal_outcome() {
                 });
         }
 
-        let mut stopped_at_writer_boundary = false;
+        let journal_path = root
+            .0
+            .join(".workspaces-change-batches/change-batch.sqlite3");
+        let mut retained_receipt = false;
         for _ in 0..400 {
-            if worker
+            worker
                 .poll_codex(at("2030-01-01T00:00:02.000Z"))
                 .await
-                .is_err()
-            {
-                stopped_at_writer_boundary = true;
+                .expect("poll delegated ChangeBatch execution");
+            let connection = rusqlite::Connection::open(&journal_path)
+                .expect("open delegated ChangeBatch journal");
+            let count = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM change_batch_intent WHERE receipt_json IS NOT NULL",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("count delegated receipts");
+            if count == 1 {
+                retained_receipt = true;
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
         assert!(
-            stopped_at_writer_boundary,
-            "the PR2 proposal must stop at the unavailable writer boundary"
+            retained_receipt,
+            "the delegated proposal must retain one deterministic receipt"
         );
 
-        let journal = rusqlite::Connection::open(
-            root.0
-                .join(".workspaces-change-batches/change-batch.sqlite3"),
-        )
-        .expect("open retained ChangeBatch proposals");
+        let journal =
+            rusqlite::Connection::open(&journal_path).expect("open retained ChangeBatch proposals");
         let mut statement = journal
             .prepare("SELECT event_json FROM change_batch_intent ORDER BY batch_id")
             .expect("prepare retained proposal query");
@@ -1688,15 +1716,9 @@ fn delegated_structured_proposal_is_retained_once_without_terminal_outcome() {
         );
         assert_eq!(
             fs::read_to_string(detached_checkout(&root).join("src/lib.rs"))
-                .expect("read unchanged delegated checkout"),
-            "pub fn fixture_value() -> u64 { 1 }\n"
+                .expect("read changed delegated checkout"),
+            "pub fn fixture_value() -> u64 { 2 }\n"
         );
-        let source_after = DirectorySnapshot::capture(&root.sources());
-        let checkout_after = DirectorySnapshot::capture(&root.workspaces());
-        assert_eq!(source_before.files, source_after.files);
-        assert_eq!(source_before.directories, source_after.directories);
-        assert_eq!(checkout_before.files, checkout_after.files);
-        assert_eq!(checkout_before.directories, checkout_after.directories);
     });
 }
 
@@ -1767,6 +1789,13 @@ fn delegated_proposal_restart_replays_one_intent_without_second_composer() {
             output_tokens: 5,
             reasoning_output_tokens: 0,
         };
+        let submit_identity = ProviderToolIdentity::try_new(
+            ProviderToolKind::Custom,
+            "submit_change_batch".to_owned(),
+            None,
+        )
+        .expect("canonical submit ChangeBatch tool");
+        let submit_call_id = "provider-submit-change-batch-restart".to_owned();
         for chunk in provider_chunks(
             &open,
             &gateway,
@@ -1774,14 +1803,22 @@ fn delegated_proposal_restart_replays_one_intent_without_second_composer() {
                 ProviderStreamEvent::ResponseStarted {
                     provider_response_id: "provider-delegated-proposal-restart".to_owned(),
                 },
-                ProviderStreamEvent::TextStarted { index: 0 },
-                ProviderStreamEvent::TextDelta {
+                ProviderStreamEvent::ToolCallStarted {
                     index: 0,
+                    provider_call_id: submit_call_id.clone(),
+                    identity: submit_identity,
+                },
+                ProviderStreamEvent::ToolCallArgumentsDelta {
+                    index: 0,
+                    provider_call_id: submit_call_id.clone(),
                     delta: final_message,
                 },
-                ProviderStreamEvent::TextEnded { index: 0 },
+                ProviderStreamEvent::ToolCallEnded {
+                    index: 0,
+                    provider_call_id: submit_call_id,
+                },
                 ProviderStreamEvent::Usage(usage),
-                ProviderStreamEvent::Finished(ProviderFinishReason::Stop),
+                ProviderStreamEvent::Finished(ProviderFinishReason::ToolCalls),
             ],
             980,
         ) {
@@ -1793,26 +1830,35 @@ fn delegated_proposal_restart_replays_one_intent_without_second_composer() {
                 .await
                 .expect("deliver delegated proposal restart response");
         }
-        let mut retained_at_writer_boundary = false;
+        let journal_path = root
+            .0
+            .join(".workspaces-change-batches/change-batch.sqlite3");
+        let mut retained_receipt = false;
         for _ in 0..400 {
-            if worker
+            worker
                 .poll_codex(at("2030-01-01T00:00:02.000Z"))
                 .await
-                .is_err()
-            {
-                retained_at_writer_boundary = true;
+                .expect("poll delegated ChangeBatch before restart");
+            let connection =
+                rusqlite::Connection::open(&journal_path).expect("open delegated proposal journal");
+            let count = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM change_batch_intent WHERE receipt_json IS NOT NULL",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("count delegated proposal receipts");
+            if count == 1 {
+                retained_receipt = true;
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
         assert!(
-            retained_at_writer_boundary,
-            "delegated proposal was not retained before restart"
+            retained_receipt,
+            "delegated proposal receipt was not retained before restart"
         );
 
-        let journal_path = root
-            .0
-            .join(".workspaces-change-batches/change-batch.sqlite3");
         let retained_events = rusqlite::Connection::open(&journal_path)
             .expect("open delegated proposal store")
             .prepare("SELECT event_json FROM change_batch_intent ORDER BY batch_id")
@@ -1838,6 +1884,7 @@ fn delegated_proposal_restart_replays_one_intent_without_second_composer() {
         let replayed_thread = replay_adapter
             .ensure_thread(CodexThreadStart {
                 run_key: &run_key,
+                worker_id: &dispatch.lease.worker_id,
                 job: &dispatch.job,
                 lease: &dispatch.lease,
                 worker_session_id: &active.worker_session_id,
@@ -1917,8 +1964,8 @@ fn delegated_proposal_restart_replays_one_intent_without_second_composer() {
         );
         assert_eq!(
             fs::read_to_string(checkout.join("src/lib.rs"))
-                .expect("read unchanged delegated checkout after restart"),
-            "pub fn fixture_value() -> u64 { 1 }\n"
+                .expect("read changed delegated checkout after restart"),
+            "pub fn fixture_value() -> u64 { 2 }\n"
         );
     });
 }

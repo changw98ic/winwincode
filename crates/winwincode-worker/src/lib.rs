@@ -14,6 +14,7 @@ pub mod change_batch_store;
 pub mod context_safety;
 pub mod debug_experiment;
 pub mod debug_probe_context;
+pub mod handoff_snapshot;
 pub mod managed_session;
 mod probe_evidence;
 mod probe_process;
@@ -516,6 +517,36 @@ where
         let mut jobs = self.active.values().collect::<Vec<_>>();
         jobs.sort_by(|left, right| left.job.job_id.0.cmp(&right.job.job_id.0));
         jobs
+    }
+
+    /// Builds a bounded recovery hint for one active task.
+    ///
+    /// The returned view is explicitly non-authoritative; only Controller
+    /// facts and accepted receipts may advance product state.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an inactive Job or unavailable workspace/receipt/Git state.
+    pub fn recovery_handoff_snapshot(
+        &self,
+        job_id: &ExecutionJobId,
+    ) -> Result<handoff_snapshot::WorkerHandoffSnapshot, WorkerError> {
+        let active = self.active.get(&job_id.0).ok_or_else(|| {
+            worker_error(
+                WorkerErrorCode::InvalidLifecycle,
+                "handoff snapshot requires an active Job",
+            )
+        })?;
+        let history = self
+            .workspaces
+            .delegated_batch_history(active)
+            .map_err(|_| workspace_error())?;
+        let checkout = self
+            .workspaces
+            .checkout_for_job(active)
+            .map_err(|_| workspace_error())?;
+        handoff_snapshot::build_worker_handoff_snapshot(active, checkout, &history)
+            .map_err(|_| workspace_error())
     }
 
     /// Returns every validated delegated event in Codex poll order.
@@ -2381,6 +2412,7 @@ where
             .codex
             .ensure_thread(CodexThreadStart {
                 run_key: &run_key,
+                worker_id: &self.config.worker_id,
                 job: &dispatch.job,
                 lease: &dispatch.lease,
                 worker_session_id: &prepared.active.worker_session_id,

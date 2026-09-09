@@ -77,6 +77,9 @@ use tokio::sync::RwLock;
 use tokio::sync::mpsc;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
+use winwincode_execution_port::agent_config::{
+    AgentSessionConfigSnapshot, validate_agent_session_config,
+};
 pub use winwincode_execution_port::generated::{
     RoleExecutionMode, RoleSessionPolicy, RoleSessionPolicyRoleId, RoleSessionPolicyWorkspaceMode,
 };
@@ -507,6 +510,8 @@ pub struct SessionOptions {
     pub model: String,
     /// Optional `StrongFlow` role policy applied through Codex Core before thread startup.
     pub role_policy: Option<RoleSessionPolicy>,
+    /// Immutable Agent identity and effective configuration for this Session.
+    pub agent_config: AgentSessionConfigSnapshot,
 }
 
 /// Parses the generated canonical role envelope at the native boundary.
@@ -633,6 +638,8 @@ pub struct TurnSubmissionOptions {
     /// Exact JSON Schema passed to Codex Core for the final model output.
     /// Ordinary React turns use `None`.
     pub final_output_json_schema: Option<Value>,
+    /// Enable the terminal delegated `ChangeBatch` handoff tool.
+    pub submit_change_batch: bool,
 }
 
 /// Typed result of reconciling one host-reserved turn against durable rollout state.
@@ -1064,6 +1071,19 @@ impl Kernel {
     }
 
     fn session_config(runtime: &Runtime, options: &SessionOptions) -> KernelResult<Config> {
+        validate_agent_session_config(&options.agent_config).map_err(|_| {
+            KernelFailure::new(
+                "INVALID_AGENT_CONFIG",
+                "Agent session configuration snapshot is invalid",
+            )
+        })?;
+        let settings = &options.agent_config.profile.source.settings;
+        if settings.provider != options.provider || settings.model != options.model {
+            return Err(KernelFailure::new(
+                "INVALID_AGENT_CONFIG",
+                "Agent profile does not match the selected model route",
+            ));
+        }
         let mut config = runtime.base_config.clone();
         set_workspace(&mut config, &options.cwd)?;
         let (provider, model) = model_route(&options.provider, &options.model)?;
@@ -1071,6 +1091,15 @@ impl Kernel {
         config.model_provider_id = provider;
         config.model = Some(model);
         if let Some(policy) = &options.role_policy {
+            if options.agent_config.identity.role != role_id_name(&policy.role_id)
+                || settings.sandbox != workspace_mode_name(&policy.workspace_mode)
+                || settings.instructions.as_deref() != Some(&policy.developer_instructions)
+            {
+                return Err(KernelFailure::new(
+                    "INVALID_AGENT_CONFIG",
+                    "Agent profile does not match the role policy",
+                ));
+            }
             Self::apply_role_session_policy(&mut config, policy)?;
         }
         Ok(config)
@@ -1330,6 +1359,7 @@ impl Kernel {
                                 turn_id,
                                 thread_settings: ThreadSettingsOverrides::default(),
                                 trace: None,
+                                submit_change_batch: options.submit_change_batch,
                             })
                             .await
                     } else {
@@ -1830,6 +1860,7 @@ fn user_text_request(text: String, options: &TurnSubmissionOptions) -> TurnInput
     }])
     .on_start(TurnStartOptions {
         final_output_json_schema: options.final_output_json_schema.clone(),
+        submit_change_batch: options.submit_change_batch,
         ..TurnStartOptions::default()
     })
 }
@@ -2314,6 +2345,7 @@ mod tests {
             "return structured output".to_owned(),
             &TurnSubmissionOptions {
                 final_output_json_schema: Some(schema.clone()),
+                submit_change_batch: false,
             },
         );
         assert_eq!(request.start.final_output_json_schema, Some(schema));

@@ -12959,6 +12959,9 @@ name = "winwincode-worker"
 version = "0.1.0-alpha.1"
 dependencies = [
  "base64 0.22.1",
+ "codex-apply-patch",
+ "codex-exec-server",
+ "codex-utils-path-uri",
  "futures",
  "rusqlite",
  "serde",

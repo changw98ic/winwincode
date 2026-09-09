@@ -202,6 +202,7 @@ async fn recovery_rejects_active_turn_without_injecting_or_applying_settings() {
             approval_policy: Some(AskForApproval::Never),
             ..Default::default()
         },
+        false,
         "recovered-turn".to_string(),
     )
     .await

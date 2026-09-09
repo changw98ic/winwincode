@@ -577,6 +577,7 @@ pub enum Op {
     /// Resume an interrupted regular turn.
     RecoverTurn {
         thread_settings: ThreadSettingsOverrides,
+        submit_change_batch: bool,
         reply: oneshot::Sender<CodexResult<TurnInputSubmission>>,
     },
 

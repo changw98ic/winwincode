@@ -47,6 +47,8 @@ pub struct RecoverTurnRequest {
     pub turn_id: String,
     pub thread_settings: ThreadSettingsOverrides,
     pub trace: Option<W3cTraceContext>,
+    /// Re-advertise the host-owned terminal handoff when recovering a delegated turn.
+    pub submit_change_batch: bool,
 }
 
 impl TurnInputRequest {
@@ -134,6 +136,8 @@ pub struct TurnStartOptions {
     /// Structured-output schema for a new turn. When steering, Core rejects
     /// the input if the active turn uses a different schema.
     pub final_output_json_schema: Option<Value>,
+    /// Advertise the host-owned terminal submit_change_batch tool for this turn.
+    pub submit_change_batch: bool,
     /// Parent turn lineage recorded if this request starts a new turn.
     pub parent_turn_id: Option<String>,
     /// Causal root turn lineage recorded if this request starts a new turn.

@@ -132,6 +132,8 @@ mod tests {
 #[derive(Debug, Clone, Copy)]
 pub struct CodexThreadStart<'job> {
     pub run_key: &'job CodexRunKey,
+    /// Stable Worker identity used to derive the Session's Agent identity.
+    pub worker_id: &'job WorkerId,
     pub job: &'job ExecutionJob,
     pub lease: &'job ExecutionLeaseStamp,
     pub worker_session_id: &'job WorkerSessionId,

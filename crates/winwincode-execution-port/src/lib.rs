@@ -9,6 +9,7 @@
 pub mod action_enforcement;
 pub mod action_gateway;
 pub mod action_normalizer;
+pub mod agent_config;
 pub mod capability_adapter;
 pub mod change_batch_identity;
 pub mod change_batch_progress;

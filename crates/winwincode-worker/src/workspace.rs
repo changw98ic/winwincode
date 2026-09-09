@@ -2518,7 +2518,7 @@ fn interrupt_cleanup(
     Ok(())
 }
 
-fn controlled_path(
+pub(crate) fn controlled_path(
     root: &Path,
     relative: &Path,
     allow_missing: bool,
@@ -2757,7 +2757,7 @@ fn portable_path(path: &Path) -> Result<String, WorkspaceError> {
         .join("/"))
 }
 
-fn rev_parse(repository: &Path, revision: &str) -> Result<String, WorkspaceError> {
+pub(crate) fn rev_parse(repository: &Path, revision: &str) -> Result<String, WorkspaceError> {
     git_text(
         repository,
         &["rev-parse", "--verify", "--end-of-options", revision],
@@ -2792,7 +2792,7 @@ fn git_text(repository: &Path, arguments: &[&str]) -> Result<String, WorkspaceEr
     Ok(text.to_owned())
 }
 
-fn git_output(repository: &Path, arguments: &[&str]) -> Result<Vec<u8>, WorkspaceError> {
+pub(crate) fn git_output(repository: &Path, arguments: &[&str]) -> Result<Vec<u8>, WorkspaceError> {
     let mut command = git_command(repository);
     command.args(arguments);
     checked_output(command, "Git operation failed").map(|output| output.stdout)

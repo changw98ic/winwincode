@@ -99,12 +99,14 @@ impl PreparedTurnInputSettings {
     ) -> CodexResult<Arc<TurnContext>> {
         let TurnStartOptions {
             final_output_json_schema,
+            submit_change_batch,
             parent_turn_id,
             root_turn_id,
         } = self.start_options;
         let emit_thread_settings_applied = self.thread_settings_update.is_some();
         let mut updates = self.thread_settings_update.unwrap_or_default();
         updates.final_output_json_schema = Some(final_output_json_schema);
+        updates.submit_change_batch = Some(submit_change_batch);
 
         // new_turn_with_sub_id already emits an error event when settings are invalid.
         let turn_context = session
@@ -158,9 +160,15 @@ pub(super) async fn handle(
 pub(super) async fn handle_recovery(
     session: &Arc<Session>,
     thread_settings: ThreadSettingsOverrides,
+    submit_change_batch: bool,
     submission_id: String,
 ) -> CodexResult<TurnInputSubmission> {
-    let request = TurnInputRequest::user_input(Vec::new()).with_thread_settings(thread_settings);
+    let request = TurnInputRequest::user_input(Vec::new())
+        .with_thread_settings(thread_settings)
+        .on_start(TurnStartOptions {
+            submit_change_batch,
+            ..TurnStartOptions::default()
+        });
     start_if_idle(session, request, submission_id, /*is_recovery*/ true).await
 }
 

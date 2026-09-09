@@ -44,6 +44,9 @@ use winwincode_execution_port::{
     action_enforcement::ActionEnforcementSigningKey,
     action_gateway::{ExecutionEnvelopeToken, PostActionHook, PostActionOutcome},
     action_normalizer::{ActionOperation, ActionSource},
+    agent_config::{
+        AgentProfileSettings, AgentSessionConfigSnapshot, resolve_agent_session_config,
+    },
     capability_adapter::{CapabilityDescriptor, WorkerCapabilityCatalog},
     change_batch_identity::{derive_change_batch_id, validate_change_batch_identity_derivation},
     generated::{
@@ -57,8 +60,8 @@ use winwincode_execution_port::{
         FinalCandidateFreezeFact, InputRequestMessage, InputRequestMessageKind,
         InputResponseMessage, InputResponseMessageStatus, InteractiveInputChoice,
         JobOutcomeMessage, ModelChunkMessage, ModelGatewayRoute, RepairLoopCounters,
-        RepairLoopStopReason, RoleSessionPolicyRoleId, RuntimeEventMessage,
-        RuntimeReplayRequestMessage, WorkerCapabilitySet,
+        RepairLoopStopReason, RoleSessionPolicyRoleId, RoleSessionPolicyWorkspaceMode,
+        RuntimeEventMessage, RuntimeReplayRequestMessage, WorkerCapabilitySet,
     },
     repair_loop_context::{
         validate_final_candidate_freeze_fact, validate_repair_loop_budget,
@@ -2610,7 +2613,12 @@ impl ProductionCodexAdapter {
                 "durable Codex rollout is unavailable for exact restart",
             )
         })?;
-        let options = session_options(&self.config, workspace, role_policy);
+        let options = session_options(
+            &self.config,
+            workspace,
+            role_policy,
+            record.agent_config.clone(),
+        );
         let session = if rollout_path.is_file() {
             self.kernel
                 .resume_session(rollout_path, options)
@@ -2914,6 +2922,12 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
         validate_start(start)?;
         let job_digest = stage_product_job_digest(start.job).map_err(|_| invalid_job())?;
         let role_policy = sealed_role_session_policy(start.job)?;
+        let agent_config = production_agent_session_config(
+            &self.config,
+            start.worker_id,
+            start.job,
+            role_policy.as_ref(),
+        )?;
         let workspace = canonical_workspace(start.workspace)?;
         let run_key = start
             .run_key
@@ -2925,6 +2939,7 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
             if run.record.job_digest == job_digest
                 && run.record.workspace == workspace
                 && run.record.workspace_revision == *start.workspace_revision
+                && run.record.agent_config == agent_config
                 && run.binding.authority.lease == *start.lease
                 && run.binding.authority.worker_session_id == *start.worker_session_id
             {
@@ -2963,6 +2978,7 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
                 || (record.workspace_revision != *start.workspace_revision
                     && !delegated_workspace_advance
                     && !frozen_workspace)
+                || record.agent_config != agent_config
                 || record.role_policy != role_policy
             {
                 return Err(conflict());
@@ -2996,6 +3012,7 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
                 &self.config,
                 &workspace,
                 role_policy.clone(),
+                agent_config.clone(),
             ))
             .await
             .map_err(|_| kernel_error())?;
@@ -3007,6 +3024,7 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
             workspace,
             repository_rule_pack,
             role_policy,
+            agent_config,
             kernel_session_id: session.session_id.clone(),
             rollout_path: session.rollout_path.map(PathBuf::from),
             submission_id: Uuid::now_v7().to_string(),
@@ -4372,6 +4390,7 @@ struct StoredRun {
     workspace: PathBuf,
     repository_rule_pack: RepositoryRulePack,
     role_policy: Option<RoleSessionPolicy>,
+    agent_config: AgentSessionConfigSnapshot,
     kernel_session_id: String,
     rollout_path: Option<PathBuf>,
     submission_id: String,
@@ -4568,6 +4587,7 @@ impl StoredTerminal {
 
 fn validate_start(start: CodexThreadStart<'_>) -> Result<(), ProductionCodexError> {
     if start.run_key.job_id != start.job.job_id
+        || start.worker_id != &start.lease.worker_id
         || start.run_key.attempt != start.job.attempt
         || start.run_key.job_id != start.lease.job_id
         || start.run_key.attempt != start.lease.attempt
@@ -4610,13 +4630,65 @@ fn session_options(
     config: &ProductionCodexConfig,
     workspace: &Path,
     role_policy: Option<RoleSessionPolicy>,
+    agent_config: AgentSessionConfigSnapshot,
 ) -> SessionOptions {
     SessionOptions {
         cwd: workspace.to_path_buf(),
         provider: config.provider.clone(),
         model: config.model.clone(),
         role_policy,
+        agent_config,
     }
+}
+
+fn production_agent_session_config(
+    config: &ProductionCodexConfig,
+    worker_id: &WorkerId,
+    job: &ExecutionJob,
+    role_policy: Option<&RoleSessionPolicy>,
+) -> Result<AgentSessionConfigSnapshot, ProductionCodexError> {
+    let mut tools = config
+        .registered_capabilities
+        .features
+        .iter()
+        .map(|feature| {
+            serde_json::to_value(feature)
+                .ok()
+                .and_then(|value| value.as_str().map(|name| format!("worker:{name}")))
+                .ok_or_else(invalid_job)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    tools.extend(
+        config
+            .discovered_capabilities
+            .iter()
+            .map(|capability| capability.id().to_owned()),
+    );
+    let sandbox = role_policy.map_or_else(
+        || match job.workspace.write_mode {
+            ExecutionWorkspaceWriteMode::ReadOnly => "read-only",
+            ExecutionWorkspaceWriteMode::Candidate => "candidate",
+        },
+        |policy| match policy.workspace_mode {
+            RoleSessionPolicyWorkspaceMode::SourceReadOnly => "source-read-only",
+            RoleSessionPolicyWorkspaceMode::CandidateReadOnly => "candidate-read-only",
+            RoleSessionPolicyWorkspaceMode::CandidateWrite => "candidate-write",
+        },
+    );
+    resolve_agent_session_config(
+        worker_id,
+        &config.registered_capabilities,
+        &job.execution_profile,
+        AgentProfileSettings {
+            provider: config.provider.clone(),
+            model: config.model.clone(),
+            reasoning: "provider_default".to_owned(),
+            tools,
+            sandbox: sandbox.to_owned(),
+            instructions: role_policy.map(|policy| policy.developer_instructions.clone()),
+        },
+    )
+    .map_err(|_| invalid_job())
 }
 
 fn sealed_job_role_execution_mode(job: &ExecutionJob) -> RoleExecutionMode {
@@ -4716,6 +4788,7 @@ fn turn_submission_options(record: &StoredRun) -> TurnSubmissionOptions {
     TurnSubmissionOptions {
         final_output_json_schema: is_delegated_composer(record)
             .then(change_batch_proposal_json_schema),
+        submit_change_batch: is_delegated_composer(record),
     }
 }
 
@@ -5842,7 +5915,7 @@ mod tests {
     use super::{
         AdapterStore, ExecutionMode, HELPER_RELEASE_BINARY_MODE, MAX_HELPER_BYTES,
         ModelLeaseAuthority, ModelRunBinding, ProductionCodexErrorKind, RepositoryRulePack,
-        RoleExecutionMode, StoredRun, StoredRunPhase, TurnSubmissionOptions,
+        RoleExecutionMode, RoleSessionPolicy, StoredRun, StoredRunPhase, TurnSubmissionOptions,
         allocate_interactive_input_choice_identities, bounded_helper_handshake,
         decode_kernel_event, delegated_budget_stop, delegated_budget_stopped_counters,
         delegated_change_batch_event, interactive_input_choice_replay_keys,
@@ -5866,10 +5939,14 @@ mod tests {
         Sha256Digest, WorkContract, WorkContractId, WorkItem, WorkItemId, WorkItemState, WorkRunId,
         WorkerId, WorkerInstanceId, WorkerSessionId, WorkspaceRevision,
     };
+    use winwincode_execution_port::agent_config::{
+        AgentProfileSettings, AgentSessionConfigSnapshot, resolve_agent_session_config,
+    };
     use winwincode_execution_port::generated::{
         ExecutionJob, ExecutionLeaseStamp, ExecutionLimits, ExecutionScope, ExecutionWorkspace,
         ExecutionWorkspaceWriteMode, RepairLoopBudget, RepairLoopCounters, RepairLoopStopReason,
-        WorkRunExecutionScope, WorkRunExecutionScopeKind, WorkRunInput,
+        RoleSessionPolicyWorkspaceMode, WorkRunExecutionScope, WorkRunExecutionScopeKind,
+        WorkRunInput, WorkerCapabilityFeature, WorkerCapabilitySet, WorkerCapabilitySetPlatform,
     };
 
     #[test]
@@ -6133,6 +6210,36 @@ mod tests {
         }
     }
 
+    fn fixture_agent_config(
+        job: &ExecutionJob,
+        policy: &RoleSessionPolicy,
+    ) -> AgentSessionConfigSnapshot {
+        let sandbox = match policy.workspace_mode {
+            RoleSessionPolicyWorkspaceMode::SourceReadOnly => "source-read-only",
+            RoleSessionPolicyWorkspaceMode::CandidateReadOnly => "candidate-read-only",
+            RoleSessionPolicyWorkspaceMode::CandidateWrite => "candidate-write",
+        };
+        resolve_agent_session_config(
+            &WorkerId("wrk_00000000000000000000000001".to_owned()),
+            &WorkerCapabilitySet {
+                capability_digest: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
+                features: vec![WorkerCapabilityFeature::Sandbox],
+                max_concurrent_jobs: 1,
+                platform: WorkerCapabilitySetPlatform::Aarch64AppleDarwin,
+            },
+            &job.execution_profile,
+            AgentProfileSettings {
+                provider: "fixture-provider".to_owned(),
+                model: "fixture-model".to_owned(),
+                reasoning: "provider_default".to_owned(),
+                tools: vec!["worker:sandbox".to_owned()],
+                sandbox: sandbox.to_owned(),
+                instructions: Some(policy.developer_instructions.clone()),
+            },
+        )
+        .expect("fixture Agent config")
+    }
+
     #[cfg(unix)]
     fn helper_fixture(root: &std::path::Path) -> PathBuf {
         use std::os::unix::fs::PermissionsExt as _;
@@ -6224,6 +6331,7 @@ mod tests {
         let policy = role_session_policy(&job, RoleExecutionMode::React)
             .expect("build React policy")
             .expect("Delivery policy");
+        let agent_config = fixture_agent_config(&job, &policy);
         let record = StoredRun {
             job,
             workspace_revision: WorkspaceRevision(format!("git-tree:{}", "1".repeat(40))),
@@ -6232,6 +6340,7 @@ mod tests {
             workspace: root.join("candidate"),
             repository_rule_pack: RepositoryRulePack::project_defaults(),
             role_policy: Some(policy),
+            agent_config,
             kernel_session_id: "kernel-session-fixture".to_owned(),
             rollout_path: None,
             submission_id: "submission-fixture".to_owned(),
@@ -6340,6 +6449,7 @@ mod tests {
             final_output_json_schema: Some(
                 crate::stage_product::change_batch_proposal_json_schema(),
             ),
+            submit_change_batch: true,
         };
         let original = submission_input_digest("exact prompt", &react).expect("digest input");
         assert_eq!(
@@ -6372,9 +6482,13 @@ mod tests {
         job.workspace.write_mode = ExecutionWorkspaceWriteMode::ReadOnly;
         let thread_id = CodexThreadId("cdx_00000000000000000000000001".to_owned());
         let worker_session_id = WorkerSessionId("wss_00000000000000000000000001".to_owned());
+        let role_policy = role_session_policy(&job, RoleExecutionMode::DelegatedBatch)
+            .expect("build delegated policy")
+            .expect("delegated role policy");
+        let agent_config = fixture_agent_config(&job, &role_policy);
         let record = StoredRun {
-            role_policy: role_session_policy(&job, RoleExecutionMode::DelegatedBatch)
-                .expect("build delegated policy"),
+            role_policy: Some(role_policy),
+            agent_config,
             job,
             workspace_revision: WorkspaceRevision(format!("git-tree:{}", "1".repeat(40))),
             canonical_thread_id: thread_id.clone(),
