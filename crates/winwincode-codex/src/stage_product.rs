@@ -1339,10 +1339,8 @@ mod tests {
     );
 
     fn delivery_job(role: &str) -> ExecutionJob {
-        let candidate_role = matches!(
-            role,
-            "reviewer" | "verifier" | "adversarial-verifier" | "remediator"
-        );
+        let candidate_role =
+            ["reviewer", "verifier", "adversarial-verifier", "remediator"].contains(&role);
         let contract_id = WorkContractId("wct_00000000000000000000000001".to_owned());
         let item_id = WorkItemId("wit_00000000000000000000000001".to_owned());
         let run_id = WorkRunId("wrn_00000000000000000000000001".to_owned());
@@ -1373,6 +1371,7 @@ mod tests {
                 id: criterion_id.clone(),
                 description: "The exact fixture behavior is verified.".to_owned(),
                 required: true,
+                required_evidence_class: "machine".into(),
                 verification_method: Some("Run the exact fixture check.".to_owned()),
             }],
             id: contract_id.clone(),

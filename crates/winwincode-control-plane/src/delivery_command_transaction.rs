@@ -312,7 +312,7 @@ fn create(
         spec_facts,
         command_digest,
     )?;
-    let contract = work_contract_from_spec(&spec)?;
+    let contract = work_contract_from_spec(&spec, "none")?;
     let snapshot = DeliverySnapshot {
         schema_version: DELIVERY_SCHEMA_VERSION,
         id: payload.delivery_id.clone(),
@@ -485,6 +485,15 @@ fn update_spec(
         spec_facts,
         command_digest,
     )?;
+    let required_human_authority = snapshot
+        .work_run_aggregate
+        .contract
+        .required_human_authority
+        .clone();
+    snapshot.work_run_aggregate.contract =
+        work_contract_from_spec(&snapshot.spec, &required_human_authority)?;
+    snapshot.work_run_aggregate.items.clear();
+    snapshot.work_run_aggregate.runs.clear();
     snapshot.tasks.clear();
     snapshot.stage_runs.clear();
     snapshot.session_bindings.clear();
@@ -693,7 +702,10 @@ fn commit_mutation(
     Ok(receipt)
 }
 
-fn work_contract_from_spec(spec: &DeliverySpec) -> Result<WorkContract, StorageError> {
+fn work_contract_from_spec(
+    spec: &DeliverySpec,
+    required_human_authority: &str,
+) -> Result<WorkContract, StorageError> {
     Ok(WorkContract {
         schema_version: winwincode_domain::SchemaVersion::WinwincodeV1,
         id: WorkContractId(spec.delivery_id.0.replacen("dlv_", "wct_", 1)),
@@ -707,7 +719,7 @@ fn work_contract_from_spec(spec: &DeliverySpec) -> Result<WorkContract, StorageE
         scope: spec.scope.clone(),
         protected_scope: spec.out_of_scope.clone(),
         constraints: spec.constraints.clone(),
-        required_human_authority: "none".to_owned(),
+        required_human_authority: required_human_authority.to_owned(),
         criteria: spec
             .acceptance_criteria
             .iter()
@@ -715,6 +727,7 @@ fn work_contract_from_spec(spec: &DeliverySpec) -> Result<WorkContract, StorageE
                 id: CriterionId(criterion.id.0.clone()),
                 description: criterion.description.clone(),
                 required: criterion.required,
+                required_evidence_class: "machine".to_owned(),
                 verification_method: criterion.verification_method.clone(),
             })
             .collect(),

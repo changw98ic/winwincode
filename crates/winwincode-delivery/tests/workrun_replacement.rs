@@ -293,7 +293,28 @@ fn initial_delivery() -> Delivery {
         value[field] = serde_json::json!([]);
     }
     value["verdict"] = serde_json::Value::Null;
-    value["workRunAggregate"]["contract"] = dispatch["job"]["workInput"]["workContract"].clone();
+    let contract = dispatch["job"]["workInput"]["workContract"].clone();
+    value["spec"]["goal"] = contract["objective"].clone();
+    value["spec"]["scope"] = contract["scope"].clone();
+    value["spec"]["outOfScope"] = contract["protectedScope"].clone();
+    value["spec"]["constraints"] = contract["constraints"].clone();
+    value["spec"]["acceptanceCriteria"] = serde_json::Value::Array(
+        contract["criteria"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|criterion| {
+                serde_json::json!({
+                    "schemaVersion": 3,
+                    "id": criterion["id"],
+                    "description": criterion["description"],
+                    "verificationMethod": criterion["verificationMethod"],
+                    "required": criterion["required"]
+                })
+            })
+            .collect(),
+    );
+    value["workRunAggregate"]["contract"] = contract;
     value["workRunAggregate"]["items"] = serde_json::json!([]);
     value["workRunAggregate"]["runs"] = serde_json::json!([]);
     Delivery::decode_json(&serde_json::to_vec(&value).unwrap()).unwrap()

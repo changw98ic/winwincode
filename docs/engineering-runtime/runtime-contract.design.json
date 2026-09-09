@@ -77,7 +77,7 @@
   "currentCanonicalSources": [
     {
       "path": "schema/winwincode/v1/domain.schema.json",
-      "sha256": "cd330b29cad6936286a4129a5e62794772905af392c5f5b9f1ce83c1a87fbd00",
+      "sha256": "9073dbb5de903e94cded98cd3b75cfe3c11fd42ceb1dbd4e05d1c8e1c70c92cc",
       "facts": [
         "WorkContract",
         "WorkItem",
@@ -92,7 +92,7 @@
     },
     {
       "path": "schema/winwincode/v1/control-plane-http.schema.json",
-      "sha256": "89e943f7da8be87a2dfb184cacf17a79e0d0fe20400c38a85a15f9b48fde2733",
+      "sha256": "47e92e5b437e7d78d389db83274cf01d97537ee391c4016afd410808f80ef73a",
       "facts": [
         "HTTP command envelope",
         "candidate commands",

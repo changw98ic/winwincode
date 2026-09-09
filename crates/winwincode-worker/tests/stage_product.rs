@@ -323,6 +323,7 @@ fn active_job(repository_id: &RepositoryId, suffix: &str, role: &str) -> ActiveJ
                         description: "The exact candidate is durable.".into(),
                         id: CriterionId("crt_00000000000000000000000001".into()),
                         required: true,
+                        required_evidence_class: "machine".into(),
                         verification_method: Some("Inspect the candidate manifest.".into()),
                     }],
                     id: WorkContractId("wct_00000000000000000000000001".into()),

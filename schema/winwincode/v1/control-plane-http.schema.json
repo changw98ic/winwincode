@@ -11769,6 +11769,50 @@
       },
       "description": "Bounded detail from the fully verified durable Publication journal. Current steps and the newest 200 state revisions contain no provider request, credential, idempotency key, arbitrary URL, raw receipt, or raw actor digest."
     },
+    "WorkGraphItemState": {
+      "type": "string",
+      "enum": [
+        "ready",
+        "running",
+        "blocked",
+        "done"
+      ]
+    },
+    "WorkGraphItemProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "workItemId",
+        "state",
+        "dependencies",
+        "blockers"
+      ],
+      "properties": {
+        "workItemId": {
+          "$ref": "./domain.schema.json#/$defs/WorkItemId"
+        },
+        "state": {
+          "$ref": "#/$defs/WorkGraphItemState"
+        },
+        "dependencies": {
+          "type": "array",
+          "maxItems": 1000,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "./domain.schema.json#/$defs/WorkItemId"
+          }
+        },
+        "blockers": {
+          "type": "array",
+          "maxItems": 1000,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "./domain.schema.json#/$defs/WorkItemId"
+          }
+        }
+      },
+      "description": "Derived Work graph row. State and blockers are computed from the canonical WorkItem graph and are never persisted separately."
+    },
     "WorkRunAggregateProjection": {
       "type": "object",
       "additionalProperties": false,
@@ -11777,6 +11821,7 @@
         "contract",
         "items",
         "runs",
+        "graphItems",
         "readCursor"
       ],
       "properties": {
@@ -11798,6 +11843,13 @@
           "maxItems": 1000,
           "items": {
             "$ref": "./domain.schema.json#/$defs/WorkRun"
+          }
+        },
+        "graphItems": {
+          "type": "array",
+          "maxItems": 1000,
+          "items": {
+            "$ref": "#/$defs/WorkGraphItemProjection"
           }
         },
         "readCursor": {

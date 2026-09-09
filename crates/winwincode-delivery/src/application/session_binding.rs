@@ -4,8 +4,8 @@
 
 use winwincode_domain::{
     CodexThreadId, DeliveryId, ExecutionJobId, FencingToken, LeaseId, ProductSessionId, RequestId,
-    Revision, Sha256Digest, WorkContractId, WorkItemId, WorkRunId, WorkerId, WorkerInstanceId,
-    WorkerSessionId,
+    Revision, Sha256Digest, WorkContractId, WorkItemId, WorkItemState, WorkRunId, WorkerId,
+    WorkerInstanceId, WorkerSessionId,
 };
 use winwincode_storage::{
     ExecutionLeaseRecord, ExecutionQueueScope, ExecutionScopeReplacementAuthority,
@@ -166,11 +166,11 @@ pub fn accept_replacement_worker_session_with_authority(
     successor.codex_thread_id = None;
     successor.state = winwincode_domain::WorkRunState::Leased;
     successor.candidate_digest = None;
-    let item = snapshot
+    let item_index = snapshot
         .work_run_aggregate
         .items
-        .iter_mut()
-        .find(|item| item.id == successor.work_item_id)
+        .iter()
+        .position(|item| item.id == successor.work_item_id)
         .ok_or_else(|| replacement_conflict("successor WorkItem disappeared"))?;
     let read_only = matches!(
         snapshot.session_bindings[index]
@@ -179,18 +179,21 @@ pub fn accept_replacement_worker_session_with_authority(
         Some("reviewer" | "verifier" | "adversarial-verifier")
     );
     let expected_state = if read_only {
-        winwincode_domain::WorkItemState::CandidateReady
+        WorkItemState::CandidateReady
     } else {
-        winwincode_domain::WorkItemState::InProgress
+        WorkItemState::InProgress
     };
-    if item.state != expected_state || item.revision != successor.work_item_revision {
+    if snapshot.work_run_aggregate.items[item_index].state != expected_state
+        || snapshot.work_run_aggregate.items[item_index].revision != successor.work_item_revision
+    {
         return Err(replacement_conflict(
             "replacement requires the exact in-progress WorkItem revision from the accepted job",
         ));
     }
-    // The scheduler-sealed replacement authorizes this retry. The intermediate
-    // Ready state and successor dispatch are committed in the same snapshot.
-    let item_revision = item.revision.clone();
+    // The scheduler seal commits the intermediate Ready state and successor together.
+    let item_revision = snapshot.work_run_aggregate.items[item_index]
+        .revision
+        .clone();
     successor.work_item_revision = item_revision.clone();
     if read_only {
         snapshot
@@ -205,7 +208,10 @@ pub fn accept_replacement_worker_session_with_authority(
             replacement_conflict(format!("verification successor rejected: {error:?}"))
         })?;
     } else {
-        item.state = winwincode_domain::WorkItemState::Ready;
+        snapshot
+            .work_run_aggregate
+            .transition_item_state(&successor.work_item_id, WorkItemState::Ready)
+            .map_err(|error| replacement_conflict(format!("retry state rejected: {error:?}")))?;
         snapshot
             .work_run_aggregate
             .append_run(successor)

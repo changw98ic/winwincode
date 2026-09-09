@@ -22,7 +22,7 @@
     "acceptanceCriteria": [
       {
         "schemaVersion": 3,
-        "id": "criterion-durable",
+        "id": "crt_01J00000000000000000000002",
         "description": "Restart reconstructs the same delivery.",
         "verificationMethod": "Reopen the store and compare the projection.",
         "required": true
@@ -54,7 +54,7 @@
       "schemaVersion": "winwincode/v1",
       "id": "wct_01J00000000000000000000002",
       "revision": 1,
-      "objective": "Durable delivery",
+      "objective": "Persist one canonical Delivery without copying runtime state.",
       "scope": [
         "Delivery state"
       ],
@@ -69,6 +69,7 @@
           "id": "crt_01J00000000000000000000002",
           "description": "Restart reconstructs the same delivery.",
           "required": true,
+          "requiredEvidenceClass": "machine",
           "verificationMethod": "Reopen the store and compare the projection."
         }
       ],

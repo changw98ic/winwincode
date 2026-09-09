@@ -918,6 +918,7 @@ fn stage_job(role: &str, seed: u64, revision: &str, candidate_ref: Option<&str>)
                 id: cr.clone(),
                 description: "Every role emits its exact stage product.".to_owned(),
                 required: true,
+                required_evidence_class: "machine".into(),
                 verification_method: Some("Inspect the canonical runtime product.".to_owned()),
             }],
             id: c.clone(),

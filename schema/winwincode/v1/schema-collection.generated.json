@@ -8277,6 +8277,13 @@
         "required": {
           "type": "boolean"
         },
+        "requiredEvidenceClass": {
+          "description": "Evidence class required by the current Community verifier. Model narrative is not machine evidence.",
+          "enum": [
+            "machine"
+          ],
+          "type": "string"
+        },
         "verificationMethod": {
           "maxLength": 65536,
           "type": [
@@ -8289,6 +8296,7 @@
         "id",
         "description",
         "required",
+        "requiredEvidenceClass",
         "verificationMethod"
       ],
       "type": "object"
@@ -28696,6 +28704,50 @@
       "pattern": "^wsn_[0-9A-HJKMNP-TV-Z]{26}$",
       "type": "string"
     },
+    "WorkGraphItemProjection": {
+      "additionalProperties": false,
+      "description": "Derived Work graph row. State and blockers are computed from the canonical WorkItem graph and are never persisted separately.",
+      "properties": {
+        "blockers": {
+          "items": {
+            "$ref": "#/$defs/WorkItemId"
+          },
+          "maxItems": 1000,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "dependencies": {
+          "items": {
+            "$ref": "#/$defs/WorkItemId"
+          },
+          "maxItems": 1000,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "state": {
+          "$ref": "#/$defs/WorkGraphItemState"
+        },
+        "workItemId": {
+          "$ref": "#/$defs/WorkItemId"
+        }
+      },
+      "required": [
+        "workItemId",
+        "state",
+        "dependencies",
+        "blockers"
+      ],
+      "type": "object"
+    },
+    "WorkGraphItemState": {
+      "enum": [
+        "ready",
+        "running",
+        "blocked",
+        "done"
+      ],
+      "type": "string"
+    },
     "WorkItem": {
       "additionalProperties": false,
       "properties": {
@@ -28887,6 +28939,13 @@
         "contract": {
           "$ref": "#/$defs/WorkContract"
         },
+        "graphItems": {
+          "items": {
+            "$ref": "#/$defs/WorkGraphItemProjection"
+          },
+          "maxItems": 1000,
+          "type": "array"
+        },
         "items": {
           "items": {
             "$ref": "#/$defs/WorkItem"
@@ -28913,6 +28972,7 @@
         "contract",
         "items",
         "runs",
+        "graphItems",
         "readCursor"
       ],
       "type": "object"
@@ -29191,7 +29251,7 @@
     "https://schemas.winwincode.dev/winwincode/v1/domain.schema.json",
     "https://schemas.winwincode.dev/winwincode/v1/execution-port.schema.json"
   ],
-  "x-source-digest": "sha256:167063aa2e823f657cd936d22452a1f5a10b1d952b19e1acbb3787ebbab775c1",
+  "x-source-digest": "sha256:431cb1c2a312dfb64f2832de8c659450337bfc5fa9bbcffe66b7718dac34fee7",
   "x-winwincode-client-metadata": {
     "http": {
       "authentication": {

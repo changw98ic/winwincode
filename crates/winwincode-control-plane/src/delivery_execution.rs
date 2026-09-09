@@ -789,6 +789,7 @@ mod tests {
                 id: criterion_id.clone(),
                 description: "verified".into(),
                 required: true,
+                required_evidence_class: "machine".into(),
                 verification_method: None,
             }],
             id: contract_id.clone(),

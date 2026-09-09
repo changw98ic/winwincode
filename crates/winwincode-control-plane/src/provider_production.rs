@@ -1526,6 +1526,7 @@ mod verification_tests {
                     "description": "The candidate passes the exact check.",
                     "id": "crt_01J00000000000000000000001",
                     "required": true,
+                    "requiredEvidenceClass": "machine",
                     "verificationMethod": "Run the exact candidate check."
                 }],
                 "id": "wct_01J00000000000000000000001",

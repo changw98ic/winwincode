@@ -141,6 +141,7 @@
                 "description": "The approved candidate change passes its exact test.",
                 "id": "crt_00000000000000000000000001",
                 "required": true,
+                "requiredEvidenceClass": "machine",
                 "verificationMethod": "Run the exact candidate test."
               }
             ],

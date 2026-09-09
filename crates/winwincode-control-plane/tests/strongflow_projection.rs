@@ -1108,6 +1108,23 @@ fn bounded_projection_replay_is_deterministic() {
     next.spec.id = winwincode_delivery::domain::DeliverySpecId("delivery-spec-v2".into());
     next.updated_at_millis += 1;
     next.spec.created_at_millis = next.updated_at_millis;
+    let contract = &mut next.work_run_aggregate.contract;
+    next.spec.goal = contract.objective.clone();
+    next.spec.scope = contract.scope.clone();
+    next.spec.out_of_scope = contract.protected_scope.clone();
+    next.spec.constraints = contract.constraints.clone();
+    next.spec
+        .acceptance_criteria
+        .truncate(contract.criteria.len());
+    for (spec, criterion) in next
+        .spec
+        .acceptance_criteria
+        .iter_mut()
+        .zip(&contract.criteria)
+    {
+        spec.id = AcceptanceCriterionId(criterion.id.0.clone());
+    }
+    contract.revision = Revision(2);
     let next = Delivery::try_from_snapshot(next).expect("next revision");
     DeliveryStore::borrowed(historical.domain_journal.as_ref())
         .execute(DeliveryCommand::Append(AppendDelivery {
@@ -1477,6 +1494,14 @@ fn workrun_aggregate_bootstrap_reads_without_a_work_item_or_stage_hint() {
         f.delivery.snapshot().work_run_aggregate.runs
     );
     assert!(!response.result.items.is_empty());
+    assert_eq!(
+        response.result.graph_items.len(),
+        response.result.items.len()
+    );
+    assert_eq!(
+        response.result.graph_items[0].work_item_id,
+        response.result.items[0].id
+    );
     let run = &response.result.runs[0];
     query.parameters.work_run_id = Some(run.id.clone());
     StrongFlowProjectionQueryPort::workrun_get(&f.control_plane, &query)

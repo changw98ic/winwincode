@@ -139,6 +139,7 @@
           "description": "A valid invitation can be accepted exactly once.",
           "id": "crt_01J00000000000000000000000",
           "required": true,
+          "requiredEvidenceClass": "machine",
           "verificationMethod": "Run the invitation integration test."
         }
       ],

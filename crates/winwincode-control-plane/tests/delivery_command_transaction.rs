@@ -402,6 +402,7 @@ fn create_commits_the_canonical_empty_delivery_and_public_event() {
     assert_eq!(delivery.snapshot().spec.revision, 1);
     let contract = &delivery.snapshot().work_run_aggregate.contract;
     let spec = &delivery.snapshot().spec;
+    assert_eq!(contract.criteria[0].required_evidence_class, "machine");
     assert_eq!(contract.objective, spec.goal);
     assert_eq!(contract.scope, spec.scope);
     assert_eq!(contract.constraints, spec.constraints);
@@ -594,6 +595,12 @@ fn update_spec_replaces_only_the_canonical_spec_and_replays_the_exact_receipt() 
     assert!(delivery.snapshot().attention_items.is_empty());
     assert!(delivery.snapshot().evidence.is_empty());
     assert!(delivery.snapshot().verdict.is_none());
+    let contract = &delivery.snapshot().work_run_aggregate.contract;
+    assert_eq!(contract.revision, Revision(2));
+    assert_eq!(contract.objective, delivery.snapshot().spec.goal);
+    assert_eq!(contract.criteria[0].required_evidence_class, "machine");
+    assert!(delivery.snapshot().work_run_aggregate.items.is_empty());
+    assert!(delivery.snapshot().work_run_aggregate.runs.is_empty());
     assert_eq!(published.lock().expect("published events").len(), 2);
 
     let mut outdated_command = update_spec_command(2);

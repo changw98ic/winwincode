@@ -121,6 +121,7 @@ fn dispatch() -> JobDispatchMessage {
             description: "The local fixture behavior is verified.".to_owned(),
             id: criterion_id.clone(),
             required: true,
+            required_evidence_class: "machine".into(),
             verification_method: Some("Run the local fixture test.".to_owned()),
         }],
         id: contract_id.clone(),

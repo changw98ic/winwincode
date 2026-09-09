@@ -347,11 +347,8 @@ impl ReworkAuthorization {
             .checked_add(1)
             .ok_or_else(|| invalid_rework("producer revision overflow"))?;
         aggregate
-            .items
-            .iter_mut()
-            .find(|item| item.id == self.work_item_id)
-            .ok_or_else(|| invalid_rework("rework WorkItem is missing"))?
-            .state = winwincode_domain::WorkItemState::Ready;
+            .transition_item_state(&self.work_item_id, winwincode_domain::WorkItemState::Ready)
+            .map_err(|_| invalid_rework("rework WorkItem is not ready for another run"))?;
         aggregate
             .start_item(&self.work_item_id)
             .map_err(|_| invalid_rework("rework WorkItem is not runnable"))?;

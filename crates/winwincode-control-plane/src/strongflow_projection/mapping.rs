@@ -18,6 +18,7 @@ use winwincode_delivery::{
 use winwincode_domain::{
     Count, EvidenceId, GitHubRepositorySlug, Instant, RepositoryScope, Revision, SchemaVersion,
     SessionBindingSourceIdentity, SessionBindingSourceIdentityKind, SessionIdentity, Sha256Digest,
+    WorkItemState,
 };
 
 use super::{
@@ -42,6 +43,28 @@ pub(super) fn workrun_aggregate(
         contract: aggregate.contract.clone(),
         items: aggregate.items.clone(),
         runs: aggregate.runs.clone(),
+        graph_items: aggregate
+            .items
+            .iter()
+            .map(|item| api::WorkGraphItemProjection {
+                work_item_id: item.id.clone(),
+                state: match aggregate.effective_item_state(item) {
+                    WorkItemState::Ready => api::WorkGraphItemState::Ready,
+                    WorkItemState::Done => api::WorkGraphItemState::Done,
+                    WorkItemState::InProgress
+                    | WorkItemState::CandidateReady
+                    | WorkItemState::Validating
+                    | WorkItemState::Rework => api::WorkGraphItemState::Running,
+                    WorkItemState::Backlog
+                    | WorkItemState::WaitingDependency
+                    | WorkItemState::WaitingHuman
+                    | WorkItemState::Failed
+                    | WorkItemState::Cancelled => api::WorkGraphItemState::Blocked,
+                },
+                dependencies: item.depends_on.clone(),
+                blockers: aggregate.dependency_blockers(item),
+            })
+            .collect(),
         read_cursor,
     }
 }

@@ -1921,6 +1921,7 @@ fn validate_initial_delivery(delivery: &Delivery) -> Result<(), DeliveryStoreErr
         || !snapshot.attention_items.is_empty()
         || !snapshot.evidence.is_empty()
         || snapshot.verdict.is_some()
+        || !contract_matches_spec(&snapshot.work_run_aggregate.contract, &snapshot.spec)
         || snapshot.updated_at_millis != snapshot.created_at_millis
     {
         return Err(store_error(
@@ -1959,7 +1960,10 @@ fn validate_spec_update_delta(
         && after.attention_items.is_empty()
         && after.evidence.is_empty()
         && after.verdict.is_none()
-        && after.work_run_aggregate == before.work_run_aggregate;
+        && after.work_run_aggregate.schema_version == before.work_run_aggregate.schema_version
+        && after.work_run_aggregate.items.is_empty()
+        && after.work_run_aggregate.runs.is_empty()
+        && contract_matches_spec(&after.work_run_aggregate.contract, &after.spec);
     if valid {
         Ok(())
     } else {
@@ -1968,6 +1972,30 @@ fn validate_spec_update_delta(
             "delivery.spec.updated does not match the canonical Spec replacement delta",
         ))
     }
+}
+
+fn contract_matches_spec(
+    contract: &winwincode_domain::WorkContract,
+    spec: &crate::domain::DeliverySpec,
+) -> bool {
+    contract.id.0 == spec.delivery_id.0.replacen("dlv_", "wct_", 1)
+        && u64::try_from(contract.revision.0).ok() == Some(spec.revision)
+        && contract.objective == spec.goal
+        && contract.scope == spec.scope
+        && contract.protected_scope == spec.out_of_scope
+        && contract.constraints == spec.constraints
+        && contract.criteria.len() == spec.acceptance_criteria.len()
+        && contract
+            .criteria
+            .iter()
+            .zip(&spec.acceptance_criteria)
+            .all(|(contract, spec)| {
+                contract.id.0 == spec.id.0
+                    && contract.description == spec.description
+                    && contract.required == spec.required
+                    && contract.required_evidence_class == "machine"
+                    && contract.verification_method == spec.verification_method
+            })
 }
 
 impl DeliveryCommandPort for DeliveryStore<'_> {
@@ -2449,6 +2477,7 @@ mod tests {
             value["spec"]["id"] = format!("delivery-spec-v{revision}").into();
             value["spec"]["revision"] = revision.into();
             value["spec"]["createdAtMillis"] = (1_800_000_000_000_u64 + revision).into();
+            value["workRunAggregate"]["contract"]["revision"] = revision.into();
         }
         Delivery::decode_json(&serde_json::to_vec(&value).expect("store fixture bytes"))
             .expect("store fixture")
@@ -2741,6 +2770,21 @@ mod tests {
     }
 
     #[test]
+    fn creation_rejects_a_contract_that_does_not_match_its_spec() {
+        let mut forged = snapshot(1, "draft").into_snapshot();
+        forged.work_run_aggregate.contract.objective = "another objective".into();
+        let store = DeliveryStore::new(Arc::new(InMemoryDeliveryJournal::new()));
+        let error = store
+            .execute(DeliveryCommand::Create(CreateDelivery {
+                request_id: RequestId("mismatched-contract".into()),
+                request_digest: REQUEST_A.into(),
+                snapshot: Delivery::try_from_snapshot(forged).unwrap(),
+            }))
+            .expect_err("WorkContract must be derived from the current Spec");
+        assert_eq!(error.code(), DeliveryStoreErrorCode::InvalidStoreOptions);
+    }
+
+    #[test]
     fn operation_relabel_cannot_resolve_verdict_attention_or_enter_rework() {
         for operation in [
             DeliveryMutationOperation::DeliveryCreated,
@@ -2877,8 +2921,8 @@ mod tests {
                 .map(|record| record.digest.as_str())
                 .collect::<Vec<_>>(),
             [
-                "60906d8aa46e7821e4ba52ded5d7750a082444180b257668adc9dfbaf9193832",
-                "ca77f080d9e53a2d8f3325e72c032b712b007d8beeb381ea6273754ba72f905c",
+                "07458463be9d94c731ae515209163a002846623cb861aa1f48b477921521da20",
+                "a52dc3f54b134ba7fe886da5c1f01b582b6ca35f8949f341c42aba950a2d9ba5",
             ]
         );
     }
@@ -3063,7 +3107,7 @@ mod tests {
     }
 
     #[test]
-    fn spec_update_cannot_mutate_workrun_aggregate() {
+    fn spec_update_requires_a_contract_derived_from_the_new_spec() {
         let (_, store) = create_store();
         let next = snapshot(2, "ready");
         let mut raw = next.into_snapshot();

@@ -22,6 +22,7 @@ fn snapshot_for(delivery_id: &str, revision: u64, status: &str) -> Delivery {
             .expect("store fixture JSON");
     value["id"] = delivery_id.into();
     value["spec"]["deliveryId"] = delivery_id.into();
+    value["workRunAggregate"]["contract"]["id"] = delivery_id.replacen("dlv_", "wct_", 1).into();
     value["revision"] = revision.into();
     value["status"] = status.into();
     value["updatedAtMillis"] =
@@ -30,6 +31,7 @@ fn snapshot_for(delivery_id: &str, revision: u64, status: &str) -> Delivery {
         value["spec"]["id"] = format!("delivery-spec-v{revision}").into();
         value["spec"]["revision"] = revision.into();
         value["spec"]["createdAtMillis"] = (1_800_000_000_000_u64 + revision).into();
+        value["workRunAggregate"]["contract"]["revision"] = revision.into();
     }
     Delivery::decode_json(&serde_json::to_vec(&value).expect("store fixture bytes"))
         .expect("valid store fixture")

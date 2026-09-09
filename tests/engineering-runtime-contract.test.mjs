@@ -19,7 +19,7 @@ const identity = {
   leaseId: id('lse'), fencingToken: '1',
 }
 const samples = {
-  WorkContract: { ...common, id: id('wct'), revision: 1, scope: ['repository'], objective: 'Deliver tested change', constraints: [], protectedScope: ['credentials'], requiredHumanAuthority: 'none', criteria: [{ id: id('crt'), description: 'Test passes', required: true, verificationMethod: 'pnpm test' }], createdAt: '2026-09-08T00:00:00.000Z' },
+  WorkContract: { ...common, id: id('wct'), revision: 1, scope: ['repository'], objective: 'Deliver tested change', constraints: [], protectedScope: ['credentials'], requiredHumanAuthority: 'none', criteria: [{ id: id('crt'), description: 'Test passes', required: true, requiredEvidenceClass: 'machine', verificationMethod: 'pnpm test' }], createdAt: '2026-09-08T00:00:00.000Z' },
   WorkItem: { ...common, id: id('wit'), workContractId: id('wct'), workContractRevision: 1, revision: 1, state: 'ready', title: 'Implement change', goal: 'Deliver tested change', criterionIds: [id('crt')], dependsOn: [] },
   WorkRun: { ...common, ...contract, ...identity, id: id('wrn'), workItemId: id('wit'), workItemRevision: 1, revision: 1, state: 'leased', productSessionId: id('psn'), codexThreadId: id('cdx'), candidateDigest: null },
   Candidate: { ...common, ...contract, ...run, id: id('cnd'), candidateDigest: digest, attempt: 1, candidateRef: `refs/winwincode/candidates/${'b'.repeat(40)}`, candidateCommit: 'b'.repeat(40), candidateTree: 'c'.repeat(40) },
@@ -61,6 +61,17 @@ test('canonical states and fenced evidence reject invalid single-field changes',
     const validate = ajv.getSchema(`${schema.$id}#/$defs/${name}`)
     assert.equal(validate({ ...samples[name], ...change }), false, `${name}: ${JSON.stringify(change)}`)
   }
+})
+
+test('Criterion requires machine evidence and Work graph query has one derived four-state view', () => {
+  const criterion = ajv.getSchema(`${schema.$id}#/$defs/Criterion`)
+  assert.equal(criterion(samples.WorkContract.criteria[0]), true)
+  assert.equal(criterion({ ...samples.WorkContract.criteria[0], requiredEvidenceClass: 'model' }), false)
+
+  const http = JSON.parse(readFileSync(new URL('../schema/winwincode/v1/control-plane-http.schema.json', import.meta.url)))
+  assert.deepEqual(http.$defs.WorkGraphItemState.enum, ['ready', 'running', 'blocked', 'done'])
+  assert.equal(http.$defs.WorkRunAggregateProjection.required.includes('graphItems'), true)
+  assert.equal(http.$defs.WorkGraphItemProjection.properties.state.$ref, '#/$defs/WorkGraphItemState')
 })
 
 test('execution binding schema retains the canonical WorkRun identity', () => {

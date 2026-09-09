@@ -154,6 +154,7 @@ impl WorkRunAggregate {
             || self.contract.criteria.iter().any(|criterion| {
                 !is_canonical_prefixed_id(&criterion.id.0, "crt_")
                     || !bounded_text(&criterion.description, 1, 65_536)
+                    || criterion.required_evidence_class != "machine"
                     || criterion
                         .verification_method
                         .as_ref()
@@ -237,6 +238,44 @@ impl WorkRunAggregate {
                 return Err(invalid);
             }
         }
+        Ok(())
+    }
+
+    /// Returns the canonical item state after applying dependency truth.
+    /// Dependency readiness is derived, never stored as a second state.
+    #[must_use]
+    pub fn effective_item_state(&self, item: &WorkItem) -> WorkItemState {
+        effective_work_item_state(item, &self.items)
+    }
+
+    /// Returns incomplete direct dependencies in the `WorkItem`'s stable order.
+    #[must_use]
+    pub fn dependency_blockers(&self, item: &WorkItem) -> Vec<WorkItemId> {
+        item.depends_on
+            .iter()
+            .filter(|dependency| {
+                !self.items.iter().any(|candidate| {
+                    &candidate.id == *dependency && candidate.state == WorkItemState::Done
+                })
+            })
+            .cloned()
+            .collect()
+    }
+
+    pub(crate) fn transition_item_state(
+        &mut self,
+        id: &WorkItemId,
+        target: WorkItemState,
+    ) -> Result<(), WorkRunSchedulingError> {
+        let item = self
+            .items
+            .iter_mut()
+            .find(|item| &item.id == id)
+            .ok_or(WorkRunSchedulingError::StaleWorkItem)?;
+        if !work_item_transition_allowed(&item.state, &target) {
+            return Err(WorkRunSchedulingError::InvalidTransition);
+        }
+        item.state = target;
         Ok(())
     }
 
@@ -411,12 +450,12 @@ impl WorkRunAggregate {
         }
         let mut next = self.clone();
         if !read_only && matches!(run.state, WorkRunState::Leased | WorkRunState::Running) {
-            let started = next
-                .items
-                .iter_mut()
-                .find(|item| item.id == run.work_item_id)
-                .ok_or(WorkRunSchedulingError::StaleWorkItem)?;
-            started.state = WorkItemState::InProgress;
+            if next.items.iter().any(|item| {
+                item.id == run.work_item_id && item.state == WorkItemState::WaitingDependency
+            }) {
+                next.transition_item_state(&run.work_item_id, WorkItemState::Ready)?;
+            }
+            next.transition_item_state(&run.work_item_id, WorkItemState::InProgress)?;
         }
         next.runs.push(run);
         next.validate()?;
@@ -517,15 +556,70 @@ pub enum WorkRunSchedulingError {
     NoRunnableWorkItem,
     InvalidAttempt,
     StaleWorkItem,
+    InvalidTransition,
 }
 
 fn work_item_is_runnable(item: &WorkItem, items: &[WorkItem]) -> bool {
-    item.state == WorkItemState::Ready
-        && item.depends_on.iter().all(|dependency| {
-            items.iter().any(|candidate| {
-                candidate.id == *dependency && candidate.state == WorkItemState::Done
-            })
-        })
+    effective_work_item_state(item, items) == WorkItemState::Ready
+}
+
+fn effective_work_item_state(item: &WorkItem, items: &[WorkItem]) -> WorkItemState {
+    if matches!(
+        item.state,
+        WorkItemState::Ready | WorkItemState::WaitingDependency
+    ) && item.depends_on.iter().any(|dependency| {
+        !items
+            .iter()
+            .any(|candidate| candidate.id == *dependency && candidate.state == WorkItemState::Done)
+    }) {
+        WorkItemState::WaitingDependency
+    } else if item.state == WorkItemState::WaitingDependency {
+        WorkItemState::Ready
+    } else {
+        item.state.clone()
+    }
+}
+
+fn work_item_transition_allowed(from: &WorkItemState, to: &WorkItemState) -> bool {
+    matches!(
+        (from, to),
+        (
+            WorkItemState::Backlog
+                | WorkItemState::WaitingDependency
+                | WorkItemState::Rework
+                | WorkItemState::Failed,
+            WorkItemState::Ready | WorkItemState::Cancelled
+        ) | (
+            WorkItemState::Ready,
+            WorkItemState::InProgress | WorkItemState::Cancelled
+        ) | (
+            WorkItemState::InProgress,
+            WorkItemState::Ready
+                | WorkItemState::WaitingDependency
+                | WorkItemState::WaitingHuman
+                | WorkItemState::CandidateReady
+                | WorkItemState::Failed
+                | WorkItemState::Cancelled
+        ) | (
+            WorkItemState::WaitingHuman,
+            WorkItemState::Ready | WorkItemState::Rework | WorkItemState::Cancelled
+        ) | (
+            WorkItemState::CandidateReady,
+            WorkItemState::Ready
+                | WorkItemState::Validating
+                | WorkItemState::Done
+                | WorkItemState::Rework
+                | WorkItemState::Failed
+                | WorkItemState::Cancelled
+        ) | (
+            WorkItemState::Validating,
+            WorkItemState::Done
+                | WorkItemState::Rework
+                | WorkItemState::Failed
+                | WorkItemState::WaitingHuman
+                | WorkItemState::Cancelled
+        ) | (WorkItemState::Done, WorkItemState::Rework)
+    )
 }
 
 /// Select one unblocked item without requiring other items to be terminal.
@@ -669,9 +763,10 @@ impl WorkRunAggregate {
             .checked_add(1)
             .filter(|revision| *revision <= 9_007_199_254_740_991)
             .ok_or(WorkRunSchedulingError::StaleWorkItem)?;
+        let item_id = self.items[item_index].id.clone();
+        self.transition_item_state(&item_id, item_state)?;
         self.runs[run_index].state = run_state;
         self.runs[run_index].revision = Revision(next_run_revision);
-        self.items[item_index].state = item_state;
         // WorkItem revision identifies the accepted input, not execution status.
         // Delivery and WorkRun revisions already sequence this state transition.
         Ok(())
@@ -728,7 +823,7 @@ mod tests {
         );
         let child = item(
             "wit_01J00000000000000000000001",
-            WorkItemState::Ready,
+            WorkItemState::WaitingDependency,
             vec![dep.id.clone()],
         );
         let input = WorkRunAdvanceInput {
@@ -755,7 +850,7 @@ mod aggregate_tests {
 
     fn aggregate() -> WorkRunAggregate {
         serde_json::from_value(serde_json::json!({
-            "schemaVersion":"winwincode/v1", "contract":{"schemaVersion":"winwincode/v1","id":"wct_01J00000000000000000000000","revision":1,"objective":"objective","scope":["scope"],"protectedScope":["protected"],"constraints":["constraint"],"criteria":[{"id":"crt_01J00000000000000000000000","description":"criterion","required":true,"verificationMethod":null}],"requiredHumanAuthority":"none","createdAt":"2026-01-01T00:00:00.000Z"},
+            "schemaVersion":"winwincode/v1", "contract":{"schemaVersion":"winwincode/v1","id":"wct_01J00000000000000000000000","revision":1,"objective":"objective","scope":["scope"],"protectedScope":["protected"],"constraints":["constraint"],"criteria":[{"id":"crt_01J00000000000000000000000","description":"criterion","required":true,"requiredEvidenceClass":"machine","verificationMethod":null}],"requiredHumanAuthority":"none","createdAt":"2026-01-01T00:00:00.000Z"},
             "items":[
               {"schemaVersion":"winwincode/v1","id":"wit_01J00000000000000000000000","workContractId":"wct_01J00000000000000000000000","workContractRevision":1,"revision":1,"state":"ready","title":"one","goal":"one goal","criterionIds":["crt_01J00000000000000000000000"],"dependsOn":[]},
               {"schemaVersion":"winwincode/v1","id":"wit_01J00000000000000000000001","workContractId":"wct_01J00000000000000000000000","workContractRevision":1,"revision":1,"state":"ready","title":"two","goal":"two goal","criterionIds":["crt_01J00000000000000000000000"],"dependsOn":[]}
@@ -776,6 +871,103 @@ mod aggregate_tests {
             "productSessionId":null
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn dependency_truth_unlocks_and_reblocks_without_a_second_state() {
+        let mut value = aggregate();
+        let dependency_id = value.items[0].id.clone();
+        value.items[1].state = WorkItemState::WaitingDependency;
+        value.items[1].depends_on = vec![dependency_id.clone()];
+        assert_eq!(
+            value.effective_item_state(&value.items[1]),
+            WorkItemState::WaitingDependency
+        );
+        assert_eq!(
+            value.dependency_blockers(&value.items[1]),
+            std::slice::from_ref(&dependency_id)
+        );
+
+        value.items[0].state = WorkItemState::Done;
+        assert_eq!(
+            value.effective_item_state(&value.items[1]),
+            WorkItemState::Ready
+        );
+        assert!(value.start_item(&value.items[1].id).is_ok());
+
+        let mut dispatched = run(&value, 1);
+        dispatched.work_item_id = value.items[1].id.clone();
+        value.append_run(dispatched).unwrap();
+        assert_eq!(value.items[1].state, WorkItemState::InProgress);
+        value.runs.clear();
+        value.items[1].state = WorkItemState::WaitingDependency;
+
+        value.items[0].state = WorkItemState::Rework;
+        assert_eq!(
+            value.effective_item_state(&value.items[1]),
+            WorkItemState::WaitingDependency
+        );
+        assert_eq!(value.dependency_blockers(&value.items[1]), [dependency_id]);
+        assert!(value.start_item(&value.items[1].id).is_err());
+    }
+
+    #[test]
+    fn every_work_item_transition_is_explicitly_allowed_or_rejected() {
+        let states = [
+            WorkItemState::Backlog,
+            WorkItemState::Ready,
+            WorkItemState::InProgress,
+            WorkItemState::WaitingDependency,
+            WorkItemState::WaitingHuman,
+            WorkItemState::CandidateReady,
+            WorkItemState::Validating,
+            WorkItemState::Rework,
+            WorkItemState::Done,
+            WorkItemState::Failed,
+            WorkItemState::Cancelled,
+        ];
+        let allowed = [
+            (0, 1),
+            (0, 10),
+            (1, 2),
+            (1, 10),
+            (3, 1),
+            (3, 10),
+            (2, 1),
+            (2, 3),
+            (2, 4),
+            (2, 5),
+            (2, 9),
+            (2, 10),
+            (4, 1),
+            (4, 7),
+            (4, 10),
+            (5, 6),
+            (5, 1),
+            (5, 8),
+            (5, 7),
+            (5, 9),
+            (5, 10),
+            (6, 8),
+            (6, 7),
+            (6, 9),
+            (6, 4),
+            (6, 10),
+            (7, 1),
+            (7, 10),
+            (9, 1),
+            (9, 10),
+            (8, 7),
+        ];
+        for (from_index, from) in states.iter().enumerate() {
+            for (to_index, to) in states.iter().enumerate() {
+                assert_eq!(
+                    work_item_transition_allowed(from, to),
+                    allowed.contains(&(from_index, to_index)),
+                    "unexpected transition {from:?} -> {to:?}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -956,7 +1148,7 @@ mod aggregate_tests {
 
     #[test]
     fn canonical_scalar_boundaries_are_checked_before_scheduling() {
-        for mutation in 0..8 {
+        for mutation in 0..9 {
             let mut value = aggregate();
             match mutation {
                 0 => {
@@ -976,7 +1168,8 @@ mod aggregate_tests {
                 4 => value.items[0].id.0.clear(),
                 5 => value.contract.protected_scope = vec!["same".into(), "same".into()],
                 6 => value.contract.required_human_authority = "unrestricted".into(),
-                _ => value.contract.created_at.0 = "2026-02-30T00:00:00.000Z".into(),
+                7 => value.contract.created_at.0 = "2026-02-30T00:00:00.000Z".into(),
+                _ => value.contract.criteria[0].required_evidence_class = "model".into(),
             }
             assert!(
                 value.validate().is_err(),

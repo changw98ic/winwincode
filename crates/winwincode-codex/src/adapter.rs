@@ -5586,6 +5586,7 @@ mod tests {
                 id: criterion_id.clone(),
                 description: "The exact fixture behavior is verified.".to_owned(),
                 required: true,
+                required_evidence_class: "machine".into(),
                 verification_method: Some("Run the exact fixture check.".to_owned()),
             }],
             id: contract_id.clone(),

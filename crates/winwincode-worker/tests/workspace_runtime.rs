@@ -366,6 +366,7 @@ fn active_job() -> ActiveJob {
                         id: CriterionId("crt_00000000000000000000000001".to_owned()),
                         description: "The fixture change is present.".to_owned(),
                         required: true,
+                        required_evidence_class: "machine".into(),
                         verification_method: Some("Inspect fixture.txt".to_owned()),
                     }],
                     id: WorkContractId("wct_00000000000000000000000001".to_owned()),

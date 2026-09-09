@@ -1008,6 +1008,7 @@ fn dispatch(job_suffix: char, scope: ExecutionScope) -> JobDispatchMessage {
                         id: CriterionId("crt_00000000000000000000000001".to_owned()),
                         description: "The fixture behavior is verified.".to_owned(),
                         required: true,
+                        required_evidence_class: "machine".into(),
                         verification_method: Some("Run the fixture test.".to_owned()),
                     }],
                     id: WorkContractId("wct_00000000000000000000000001".to_owned()),
