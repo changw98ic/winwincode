@@ -12713,12 +12713,17 @@ dependencies = [
 name = "winwincode-device-client"
 version = "0.1.0-alpha.1"
 dependencies = [
+ "base64 0.22.1",
+ "futures",
  "getrandom 0.3.4",
+ "http 1.4.0",
  "rusqlite",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "time",
+ "tokio",
+ "tokio-tungstenite",
  "winwincode-client-port",
  "winwincode-worker",
 ]

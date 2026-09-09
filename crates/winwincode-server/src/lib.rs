@@ -19,6 +19,7 @@ mod identity_authenticator;
 mod login_rate_limiter;
 mod model_authority;
 mod password_hash;
+mod preview;
 mod provider_onboarding;
 mod remote_worker_transport;
 mod runtime;

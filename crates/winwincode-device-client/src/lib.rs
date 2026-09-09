@@ -109,6 +109,7 @@ pub mod fencing;
 pub mod http;
 pub mod identity;
 pub mod path_confinement;
+pub mod preview;
 pub mod repository;
 pub mod repository_exchange;
 pub mod repository_git;
@@ -159,6 +160,7 @@ pub use identity::{
     adopt_enrollment, ensure_device_identity, load_device_identity,
 };
 pub use path_confinement::{ConfinedPath, ConfinedRoot, ConfinementVerdict, PathConfinementError};
+pub use preview::{AuthorizedPreviewSource, PreviewTunnelClient, PreviewTunnelError};
 pub use repository::{
     RegistrationOptions, RegistrationRejection, RepositoryBindingSummary, RepositoryRegistration,
     RepositoryRegistryError, RepositoryRemoval, RepositoryRevalidation, list_bindings,

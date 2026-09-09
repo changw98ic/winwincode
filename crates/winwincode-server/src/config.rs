@@ -25,6 +25,7 @@ pub struct ServerConfig {
     public_url: String,
     tls: ServerTls,
     allowed_origins: BTreeSet<String>,
+    preview_public_url: Option<String>,
     data_directory: PathBuf,
     shutdown_grace: Duration,
 }
@@ -77,6 +78,7 @@ impl ServerConfig {
             public_url,
             tls,
             allowed_origins,
+            preview_public_url: None,
             data_directory,
             shutdown_grace,
         })
@@ -100,6 +102,40 @@ impl ServerConfig {
     #[must_use]
     pub const fn allowed_origins(&self) -> &BTreeSet<String> {
         &self.allowed_origins
+    }
+
+    /// Enables the isolated preview origin served by this listener.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a malformed origin, a scheme that differs from the listener,
+    /// or reuse of the main application origin.
+    pub fn with_preview_public_url(
+        mut self,
+        preview_public_url: impl Into<String>,
+    ) -> Result<Self, ServerConfigError> {
+        let preview_public_url = normalized_origin(&preview_public_url.into(), "previewPublicUrl")?;
+        let expected_scheme = match self.tls {
+            ServerTls::Disabled => "http",
+            ServerTls::Pem { .. } => "https",
+        };
+        if !preview_public_url.starts_with(&format!("{expected_scheme}://")) {
+            return Err(ServerConfigError::new(
+                "previewPublicUrl scheme must match the configured TLS mode",
+            ));
+        }
+        if preview_public_url == self.public_url {
+            return Err(ServerConfigError::new(
+                "previewPublicUrl must use an origin separate from publicUrl",
+            ));
+        }
+        self.preview_public_url = Some(preview_public_url);
+        Ok(self)
+    }
+
+    #[must_use]
+    pub fn preview_public_url(&self) -> Option<&str> {
+        self.preview_public_url.as_deref()
     }
 
     #[must_use]
@@ -171,4 +207,42 @@ fn normalized_origin(value: &str, label: &str) -> Result<String, ServerConfigErr
         )));
     }
     Ok(format!("{scheme}://{authority}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config() -> ServerConfig {
+        ServerConfig::new(
+            "127.0.0.1:0".parse().unwrap(),
+            "http://control.example",
+            ServerTls::Disabled,
+            ["http://app.example".to_owned()],
+            PathBuf::from("data"),
+            Duration::from_secs(1),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn preview_origin_is_explicit_and_separate() {
+        assert!(
+            config()
+                .with_preview_public_url("http://control.example")
+                .is_err()
+        );
+        assert!(
+            config()
+                .with_preview_public_url("https://preview.example")
+                .is_err()
+        );
+        assert_eq!(
+            config()
+                .with_preview_public_url("http://preview.example")
+                .unwrap()
+                .preview_public_url(),
+            Some("http://preview.example")
+        );
+    }
 }

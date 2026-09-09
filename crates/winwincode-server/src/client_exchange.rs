@@ -237,6 +237,19 @@ pub trait ClientExchangePort: Send + Sync {
         request_body: &[u8],
         now: Instant,
     ) -> Result<Vec<u8>, ClientExchangeError>;
+
+    /// Authenticates one already-enrolled device for a sibling internal
+    /// transport without advancing `ClientControlPort` cursors.
+    ///
+    /// # Errors
+    ///
+    /// Returns the uniform authentication failure for an unknown, revoked,
+    /// or mismatched device and unavailable when the registry cannot open.
+    fn authenticate_device(
+        &self,
+        credential: &[u8],
+        client_node_id: &str,
+    ) -> Result<(), ClientExchangeError>;
 }
 
 /// Production exchange over the Server's one product-state database
@@ -812,6 +825,39 @@ impl ClientExchangePort for ClientExchangeApplication {
     ) -> Result<Vec<u8>, ClientExchangeError> {
         let response = self.apply(credential.as_deref(), request_body, &now)?;
         serde_json::to_vec(&response).map_err(|_| ClientExchangeError::unavailable())
+    }
+
+    fn authenticate_device(
+        &self,
+        credential: &[u8],
+        client_node_id: &str,
+    ) -> Result<(), ClientExchangeError> {
+        let secret = std::str::from_utf8(credential)
+            .ok()
+            .and_then(decode_credential_secret)
+            .ok_or_else(ClientExchangeError::authentication)?;
+        if !is_canonical_client_node_id(client_node_id) {
+            return Err(ClientExchangeError::authentication());
+        }
+        let mut storage = SqliteStorage::open(&self.data_directory)
+            .map_err(|_| ClientExchangeError::unavailable())?;
+        let record = ClientRegistryService::new(&mut storage)
+            .snapshot(client_node_id)
+            .map_err(|_| ClientExchangeError::unavailable())?
+            .ok_or_else(ClientExchangeError::authentication)?;
+        let accepted = record.presence_state != ClientPresenceState::Revoked
+            && record
+                .device_credential_digest
+                .as_deref()
+                .is_some_and(|digest| credential_digest_matches(&secret, digest));
+        Box::new(storage)
+            .close()
+            .map_err(|_| ClientExchangeError::unavailable())?;
+        if accepted {
+            Ok(())
+        } else {
+            Err(ClientExchangeError::authentication())
+        }
     }
 }
 

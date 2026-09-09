@@ -10,7 +10,10 @@ publish = false
 include = ["src/**", "tests/**", "Cargo.toml"]
 
 [dependencies]
+base64.workspace = true
+futures.workspace = true
 getrandom.workspace = true
+http.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -24,6 +27,8 @@ time = { workspace = true, features = ["parsing"] }
 # `[workspace.dependencies]`, matching how `winwincode-server` and
 # `winwincode-local` reference sibling crates.
 winwincode-client-port = { path = "../winwincode-client-port" }
+tokio = { workspace = true, features = ["io-util", "net"] }
+tokio-tungstenite = { git = "https://github.com/openai-oss-forks/tokio-tungstenite", rev = "0e5b2d73aa18dd9f0a50ee9ff199d5aef7594186" }
 
 [lints]
 workspace = true

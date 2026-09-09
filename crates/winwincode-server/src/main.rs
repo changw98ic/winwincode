@@ -1163,14 +1163,19 @@ fn environment_config() -> Result<ServerConfig, Box<dyn std::error::Error>> {
         },
         _ => return Err("both TLS certificate and private key must be configured".into()),
     };
-    Ok(ServerConfig::new(
+    let config = ServerConfig::new(
         bind_address,
         public_url,
         tls,
         allowed_origins,
         data_directory,
         Duration::from_secs(30),
-    )?)
+    )?;
+    match env::var("WWC_SERVER_PREVIEW_PUBLIC_URL") {
+        Ok(origin) if !origin.is_empty() => Ok(config.with_preview_public_url(origin)?),
+        Ok(_) | Err(env::VarError::NotPresent) => Ok(config),
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn required_environment(name: &str) -> Result<String, Box<dyn std::error::Error>> {
