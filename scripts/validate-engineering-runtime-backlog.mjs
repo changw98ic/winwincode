@@ -96,7 +96,7 @@ for (const row of rows) {
   if (!record) { errors.push(`missing mapped bead: ${row.old_id}`); continue; }
   let annotation = record.metadata?.engineering_runtime_review;
   if (typeof annotation === "string") try { annotation = JSON.parse(annotation); } catch { annotation = null; }
-  if (!annotation || annotation.classification !== row.classification || annotation.audit_bead !== snapshot.audit_bead || annotation.canonical_owner !== row.canonical_owner || !isDeepStrictEqual(annotation.aligned_er_ids, row.aligned_er_ids) || annotation.decision_status !== row.decision_status) errors.push(`source metadata changed: ${row.old_id}`);
+  if (!annotation || annotation.classification !== row.classification || annotation.audit_bead !== snapshot.audit_bead || annotation.canonical_owner !== row.canonical_owner || !isDeepStrictEqual(annotation.aligned_er_ids, row.aligned_er_ids) || !["recorded_keep", "proposed_pending_adr", "applied"].includes(annotation.decision_status)) errors.push(`source metadata changed: ${row.old_id}`);
 }
 for (const [stable, id] of Object.entries(newBeads)) {
   const record = byId.get(id);
@@ -120,10 +120,11 @@ for (const record of records) {
 }
 for (const entry of planEntries) {
   const claimants = planClaims.get(entry.stable_id) ?? new Set();
-  if (claimants.size !== 1 || !claimants.has(entry.bead_id)) errors.push(`task plan owner claim conflict: ${entry.stable_id}`);
+  if (claimants.size !== 1) errors.push(`task plan owner claim conflict: ${entry.stable_id}`);
 }
 for (const entry of planEntries) {
-  const record = byId.get(entry.bead_id);
+  const owner = [...(planClaims.get(entry.stable_id) ?? [])][0];
+  const record = byId.get(owner);
   if (!record) errors.push(`task plan owner unavailable: ${entry.stable_id}`);
   if (record?.status === "closed" && !record.close_reason) errors.push(`closed task missing close_reason: ${entry.stable_id}`);
   const metadata = record?.metadata?.engineering_runtime_plan_ids;
@@ -132,9 +133,19 @@ for (const entry of planEntries) {
   if (!planIds.includes(entry.stable_id)) errors.push(`task plan metadata missing: ${entry.stable_id}`);
   if (!record?.acceptance_criteria) errors.push(`task plan acceptance missing: ${entry.stable_id}`);
   for (const dep of entry.depends_on ?? []) {
-    const dependencyOwner = planByStable.get(dep)?.bead_id;
-    if (dependencyOwner && dependencyOwner !== entry.bead_id && !blockEdges.get(entry.bead_id)?.includes(dependencyOwner)) errors.push(`missing cross-owner block: ${entry.stable_id} -> ${dep}`);
+    const dependencyOwner = [...(planClaims.get(dep) ?? [])][0];
+    if (owner && dependencyOwner && dependencyOwner !== owner && !blockEdges.get(owner)?.includes(dependencyOwner)) errors.push(`missing cross-owner block: ${entry.stable_id} -> ${dep}`);
   }
+}
+for (const record of records) {
+  const mergedInto = record.metadata?.merged_into;
+  if (!mergedInto) continue;
+  if (record.status !== "closed") errors.push(`merged record still active: ${record.id}`);
+  if (!byId.has(mergedInto)) errors.push(`merged record target missing: ${record.id} -> ${mergedInto}`);
+  const values = record.metadata?.engineering_runtime_plan_ids;
+  const claimed = Array.isArray(values) ? values : typeof values === "string" ? (() => { try { return JSON.parse(values); } catch { return []; } })() : [];
+  if (claimed.length) errors.push(`merged record still owns task plan IDs: ${record.id}`);
+  if (records.some((candidate) => candidate.status !== "closed" && candidate.dependencies?.some((dep) => dep.type === "blocks" && dep.depends_on_id === record.id))) errors.push(`active blocker points to merged record: ${record.id}`);
 }
 const visiting = new Set(), visited = new Set();
 function visit(id) {

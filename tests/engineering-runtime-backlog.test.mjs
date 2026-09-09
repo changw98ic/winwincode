@@ -48,6 +48,24 @@ function fixture() {
   }
   return { data, records }
 }
+function consolidate(data, records, stableId, targetStableId) {
+  const sourceEntry = data.task_plan.entries.find(entry => entry.stable_id === stableId)
+  const targetEntry = data.task_plan.entries.find(entry => entry.stable_id === targetStableId)
+  const source = records.find(record => record.id === sourceEntry.bead_id)
+  const target = records.find(record => record.id === targetEntry.bead_id)
+  source.metadata.engineering_runtime_plan_ids = source.metadata.engineering_runtime_plan_ids.filter(id => id !== stableId)
+  source.metadata.merged_into = target.id
+  source.status = 'closed'
+  source.close_reason = `merged into ${target.id}`
+  target.metadata.engineering_runtime_plan_ids.push(stableId)
+  target.description += ` ${stableId}`
+  for (const record of records) {
+    record.dependencies = [...new Map((record.dependencies ?? [])
+      .map(dep => dep.depends_on_id === source.id ? { ...dep, depends_on_id: target.id } : dep)
+      .filter(dep => dep.depends_on_id !== record.id)
+      .map(dep => [`${dep.type}:${dep.depends_on_id}`, dep])).values()]
+  }
+}
 function files(data, records = []) {
   const dir = mkdtempSync(join(tmpdir(), 'wwc-er-review-'))
   temporaryDirectories.push(dir)
@@ -86,7 +104,13 @@ test('live checks allow normal task progress and unrelated new tasks', () => {
   records[0].description = 'updated implementation evidence'
   records[0].status = 'in_progress'
   records[0].assignee = 'current owner'
+  records[0].metadata.engineering_runtime_review.decision_status = 'applied'
   records.push({ id: 'unrelated-follow-up', title: 'unrelated', status: 'open', metadata: {}, dependencies: [] })
+  expect(run('--mode=records', ...files(data, records)), true, /mode=records/)
+})
+test('live checks follow a stable ID to its consolidated owner', () => {
+  const { data, records } = fixture()
+  consolidate(data, records, 'WWC-ER-0102', 'WWC-ER-0101')
   expect(run('--mode=records', ...files(data, records)), true, /mode=records/)
 })
 test('rejects changed mapping ownership metadata', () => {
@@ -105,7 +129,7 @@ test('rejects task-plan omissions and owner metadata', () => {
   expect(run('--mode=records', ...files(data, records)), false, /task plan identity\/count drift/)
   const valid = fixture()
   valid.records.find(r => r.id === valid.data.task_plan.entries[0].bead_id).metadata.engineering_runtime_plan_ids = []
-  expect(run('--mode=records', ...files(valid.data, valid.records)), false, /task plan metadata missing/)
+  expect(run('--mode=records', ...files(valid.data, valid.records)), false, /owner claim conflict/)
 })
 test('rejects a task-plan owner without acceptance criteria', () => {
   const { data, records } = fixture()
@@ -140,6 +164,12 @@ test('rejects duplicate task-plan owner claims', () => {
   const entry = data.task_plan.entries[0]
   records.push({ id: 'fixture-second-owner', title: entry.stable_id, description: entry.stable_id, acceptance_criteria: 'fixture', status: 'open', metadata: { engineering_runtime_plan_ids: [entry.stable_id] }, dependencies: [] })
   expect(run('--mode=records', ...files(data, records)), false, /owner claim conflict/)
+})
+test('rejects a merged record that remains active', () => {
+  const { data, records } = fixture()
+  consolidate(data, records, 'WWC-ER-0102', 'WWC-ER-0101')
+  records.find(record => record.metadata?.merged_into).status = 'open'
+  expect(run('--mode=records', ...files(data, records)), false, /merged record still active/)
 })
 test('rejects typos, missing values, duplicate options and offline input in live mode', () => {
   for (const args of [['--mdoe=live'], ['--mode=wat'], ['--mode'], ['--mode=snapshot', '--mode=live'], ['--mode=records'], ['--mode=live', '--records=fixture.json'], ['--snapshot'], ['--records=x']]) expect(run(...args), false)
