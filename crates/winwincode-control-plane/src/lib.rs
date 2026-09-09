@@ -9,6 +9,7 @@
 mod action_policy_enforcement;
 mod artifact_enterprise_quota;
 mod artifact_transaction;
+pub mod automation_recipe;
 mod candidate_git_release;
 mod candidate_source;
 mod chat_interaction_application;

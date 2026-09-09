@@ -325,6 +325,20 @@ fn apply_resolution(
     stored_item.resolved_by = Some(input.actor);
     stored_item.resolved_at_millis = Some(input.now_millis);
 
+    if item_type == AttentionItemType::DeliveryApproval
+        && input.decision == AttentionDecision::Resolved
+    {
+        snapshot
+            .work_run_aggregate
+            .complete_current_candidate()
+            .map_err(|_| {
+                CoordinationError::new(
+                    CoordinationErrorCode::StaleAttention,
+                    "delivery approval candidate is no longer ready for completion",
+                )
+            })?;
+    }
+
     let linked_review_still_open = snapshot.attention_items.iter().any(|item| {
         target_work_run_id.is_some()
             && item.work_run_id == target_work_run_id

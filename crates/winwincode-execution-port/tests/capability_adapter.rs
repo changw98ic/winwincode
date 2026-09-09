@@ -68,6 +68,15 @@ impl PreActionDecisionRecorder<Policy> for RecordingJournal {
         self.events.borrow_mut().push("trace");
         Ok(())
     }
+
+    fn record_post_action(
+        &mut self,
+        _input: GateInput<'_, Policy>,
+        _outcome: winwincode_execution_port::action_gateway::PostActionOutcome,
+        _hooks: &[winwincode_execution_port::action_gateway::PostActionHook],
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
 }
 
 struct RecordingExecutor {

@@ -279,6 +279,47 @@ impl WorkRunAggregate {
         Ok(())
     }
 
+    /// Applies the Controller completion gate to the one current candidate.
+    pub(crate) fn complete_current_candidate(&mut self) -> Result<(), WorkRunSchedulingError> {
+        self.validate()?;
+        let mut candidates = self
+            .runs
+            .iter()
+            .enumerate()
+            .filter(|(_, run)| run.state == WorkRunState::CandidateReady);
+        let (run_index, _) = candidates
+            .next()
+            .ok_or(WorkRunSchedulingError::StaleWorkItem)?;
+        if candidates.next().is_some() {
+            return Err(WorkRunSchedulingError::StaleWorkItem);
+        }
+        let run = &self.runs[run_index];
+        let item_id = run.work_item_id.clone();
+        if !self.items.iter().any(|item| {
+            item.id == item_id
+                && item.revision == run.work_item_revision
+                && item.state == WorkItemState::CandidateReady
+        }) || self.runs.iter().any(|candidate| {
+            candidate.work_item_id == item_id
+                && matches!(
+                    candidate.state,
+                    WorkRunState::Leased | WorkRunState::Running
+                )
+        }) {
+            return Err(WorkRunSchedulingError::StaleWorkItem);
+        }
+        let revision = run
+            .revision
+            .0
+            .checked_add(1)
+            .filter(|value| valid_revision(*value))
+            .ok_or(WorkRunSchedulingError::StaleWorkItem)?;
+        self.transition_item_state(&item_id, WorkItemState::Done)?;
+        self.runs[run_index].state = WorkRunState::Settled;
+        self.runs[run_index].revision = Revision(revision);
+        self.validate()
+    }
+
     /// Selects from persisted runs/items; callers cannot supply an active-ID list.
     ///
     /// # Errors

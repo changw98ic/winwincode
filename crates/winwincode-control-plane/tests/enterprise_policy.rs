@@ -76,6 +76,7 @@ fn definition(kind: &str) -> EnterprisePolicyDefinition {
             condition_sha256: Sha256Digest(format!("sha256:{:064x}", 1)),
             effect: "deny".to_owned(),
             kind: kind.to_owned(),
+            priority: 0,
             resource_pattern: "resource/restricted".to_owned(),
         }],
     }

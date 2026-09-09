@@ -251,6 +251,8 @@ fn ready_delivery() -> (Delivery, FrozenDeliveryCandidate) {
             .expect("executor binding id");
     snapshot.session_bindings[0].work_run_id = binding_work_run_id.clone();
     snapshot.work_run_aggregate.runs[0].id = binding_work_run_id.clone();
+    snapshot.work_run_aggregate.runs[0].state = winwincode_domain::WorkRunState::CandidateReady;
+    snapshot.work_run_aggregate.items[0].state = winwincode_domain::WorkItemState::CandidateReady;
     snapshot.evidence[0].work_run_id = binding_work_run_id;
     snapshot.evidence[0].session_binding_id = snapshot.session_bindings[0].id.clone();
     for evidence in &mut snapshot.evidence {

@@ -1054,8 +1054,16 @@ fn matched_rule<'policy>(
         .rules
         .iter()
         .filter(matches)
-        .find(|rule| rule.effect == EnterprisePolicyEffect::Deny)
-        .or_else(|| policy.definition.rules.iter().find(matches))
+        .max_by(|left, right| {
+            left.priority
+                .cmp(&right.priority)
+                .then_with(|| {
+                    matches!(left.effect, EnterprisePolicyEffect::Deny)
+                        .cmp(&matches!(right.effect, EnterprisePolicyEffect::Deny))
+                })
+                .then_with(|| right.resource_pattern.cmp(&left.resource_pattern))
+                .then_with(|| right.condition_sha256.0.cmp(&left.condition_sha256.0))
+        })
 }
 
 fn resource_matches(pattern: &str, resource: &str) -> bool {

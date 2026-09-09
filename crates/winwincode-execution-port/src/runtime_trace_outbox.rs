@@ -17,7 +17,8 @@ use winwincode_domain::{
 };
 
 use crate::action_gateway::{
-    ExecutionEnvelopeToken, GateDecision, GateInput, PreActionDecisionRecorder,
+    ExecutionEnvelopeToken, GateDecision, GateInput, PostActionHook, PostActionOutcome,
+    PreActionDecisionRecorder,
 };
 use crate::action_normalizer::{
     ActionObject, ActionOperation, ActionRisk, ActionScope, ActionSource,
@@ -275,6 +276,12 @@ pub enum RuntimeTraceFact {
         source: ActionSource,
         outcome: ToolTraceOutcome,
     },
+    Hook {
+        source: ActionSource,
+        operation: ActionOperation,
+        outcome: ToolTraceOutcome,
+        actions: Vec<PostActionHook>,
+    },
     Candidate {
         digest: Sha256Digest,
     },
@@ -375,6 +382,59 @@ impl RuntimeTraceDraft {
                 decision: outcome,
                 envelope_version: input.envelope.token.version,
                 envelope_digest: input.envelope.token.digest.clone(),
+            },
+            artifacts: Vec::new(),
+        })
+    }
+
+    /// Creates the machine-derived post-action hook fact.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if its secret-safe summary cannot be built.
+    pub fn gateway_post_action<Policy>(
+        identity: RuntimeTraceIdentity,
+        input: &GateInput<'_, Policy>,
+        outcome: PostActionOutcome,
+        actions: Vec<PostActionHook>,
+    ) -> Result<Self, RuntimeTraceInputError> {
+        Self::post_action(
+            identity,
+            input.observed.source,
+            input.observed.operation,
+            outcome,
+            actions,
+        )
+    }
+
+    /// Creates a post-action fact from a trusted executor completion.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if its secret-safe summary cannot be built.
+    pub fn post_action(
+        identity: RuntimeTraceIdentity,
+        source: ActionSource,
+        operation: ActionOperation,
+        outcome: PostActionOutcome,
+        actions: Vec<PostActionHook>,
+    ) -> Result<Self, RuntimeTraceInputError> {
+        let outcome = match outcome {
+            PostActionOutcome::Succeeded => ToolTraceOutcome::Succeeded,
+            PostActionOutcome::Failed => ToolTraceOutcome::Failed,
+        };
+        let summary = SecretSafeTraceSummary::new(format!(
+            "post-action {outcome:?} for {source:?} {operation:?}"
+        ))?;
+        Ok(Self {
+            identity,
+            category: ExecutionEventCategory::Activity,
+            summary,
+            fact: RuntimeTraceFact::Hook {
+                source,
+                operation,
+                outcome,
+                actions,
             },
             artifacts: Vec::new(),
         })
@@ -633,6 +693,9 @@ fn validate_trace_fact(fact: &RuntimeTraceFact) -> Result<(), RuntimeTraceInputE
         }
         RuntimeTraceFact::Candidate { digest } if !sha256_digest(&digest.0) => {
             return Err(RuntimeTraceInputError::InvalidCandidateDigest);
+        }
+        RuntimeTraceFact::Hook { actions, .. } if actions.is_empty() => {
+            return Err(RuntimeTraceInputError::InvalidIdentity);
         }
         RuntimeTraceFact::PerformanceBaseline { report }
             if performance_values(report)
@@ -958,6 +1021,32 @@ where
             &self
                 .outbox
                 .retain(&mut self.store, &self.authority, gate)
+                .map_err(RuntimeTraceActionJournalError::Outbox)?,
+        )
+    }
+
+    fn record_post_action(
+        &mut self,
+        input: GateInput<'_, Policy>,
+        outcome: PostActionOutcome,
+        hooks: &[PostActionHook],
+    ) -> Result<(), Self::Error> {
+        if hooks.is_empty() {
+            return Ok(());
+        }
+        let identity = self
+            .identities
+            .next_identity()
+            .map_err(RuntimeTraceActionJournalError::Identity)?;
+        let trace =
+            RuntimeTraceDraft::gateway_post_action(identity, &input, outcome, hooks.to_vec())
+                .map_err(|error| {
+                    RuntimeTraceActionJournalError::Outbox(RuntimeTraceOutboxError::Input(error))
+                })?;
+        require_durably_ready(
+            &self
+                .outbox
+                .retain(&mut self.store, &self.authority, trace)
                 .map_err(RuntimeTraceActionJournalError::Outbox)?,
         )
     }

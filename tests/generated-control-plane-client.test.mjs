@@ -365,6 +365,7 @@ function approvalProjection() {
       workerSessionId: canonicalId('wsn', 1),
     },
     category: 'shell',
+    decisionEnabled: false,
     effectiveDecisionScope: 'once',
     expiresAt: '2026-08-25T00:10:00.000Z',
     id: canonicalId('apr', 1),

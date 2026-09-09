@@ -86,8 +86,20 @@ fn rule(effect: EnterprisePolicyEffect, pattern: &str, condition: u64) -> Enterp
     EnterprisePolicyRule {
         kind: EnterprisePolicyKind::Model,
         effect,
+        priority: 0,
         resource_pattern: pattern.into(),
         condition_sha256: sha(condition),
+    }
+}
+
+fn prioritized_rule(
+    effect: EnterprisePolicyEffect,
+    priority: u16,
+    condition: u64,
+) -> EnterprisePolicyRule {
+    EnterprisePolicyRule {
+        priority,
+        ..rule(effect, "model/*", condition)
     }
 }
 
@@ -269,6 +281,83 @@ fn effective_at_and_nearest_inheritance_are_deterministic_and_explainable() {
     assert_eq!(hard.outcome, EnterprisePolicyEvaluationOutcome::Deny);
     assert_eq!(hard.reason, EnterprisePolicyEvaluationReason::ExplicitDeny);
     assert!(hard.hard_invariant);
+    fs::remove_dir_all(directory).expect("remove temp directory");
+}
+
+#[test]
+fn rule_priority_and_deny_ties_are_independent_of_rule_order() {
+    let directory = temporary_directory("rule-priority");
+    fs::create_dir_all(&directory).expect("create temp directory");
+    let mut storage = SqliteStorage::open(&directory).expect("open storage");
+    let allow = prioritized_rule(EnterprisePolicyEffect::Allow, 10, 1);
+    let deny = prioritized_rule(EnterprisePolicyEffect::Deny, 5, 2);
+    let first = write_policy(
+        &mut storage,
+        PolicyWriteFixture {
+            seed: 3,
+            policy_id: 3,
+            scope: organization_scope(),
+            definition: definition(
+                EnterprisePolicyEffect::Deny,
+                vec![deny.clone(), allow.clone()],
+            ),
+            effective_at: instant(1),
+            base_version: None,
+            expected_revision: 0,
+        },
+    );
+    let evaluate = |storage: &mut SqliteStorage, at| {
+        storage
+            .enterprise_policy_evaluation_ledger()
+            .expect("open evaluation ledger")
+            .dry_run(&EnterprisePolicyEvaluationRequest {
+                input: EnterprisePolicyEvaluationInput {
+                    matched_condition_sha256: vec![sha(1), sha(2)],
+                    ..input(repository_scope(), "model/public/a", 1, at)
+                },
+                exception_id: None,
+            })
+            .expect("evaluate matching rules")
+    };
+    let before = evaluate(&mut storage, 2);
+    assert_eq!(before.outcome, EnterprisePolicyEvaluationOutcome::Allow);
+    assert_eq!(before.matched_rule.as_ref(), Some(&allow));
+
+    write_policy(
+        &mut storage,
+        PolicyWriteFixture {
+            seed: 4,
+            policy_id: 3,
+            scope: organization_scope(),
+            definition: definition(EnterprisePolicyEffect::Deny, vec![allow.clone(), deny]),
+            effective_at: instant(3),
+            base_version: None,
+            expected_revision: first.version,
+        },
+    );
+    let reordered = evaluate(&mut storage, 4);
+    assert_eq!(reordered.outcome, before.outcome);
+    assert_eq!(reordered.matched_rule, before.matched_rule);
+
+    let tied_deny = prioritized_rule(EnterprisePolicyEffect::Deny, 10, 2);
+    write_policy(
+        &mut storage,
+        PolicyWriteFixture {
+            seed: 5,
+            policy_id: 3,
+            scope: organization_scope(),
+            definition: definition(
+                EnterprisePolicyEffect::Allow,
+                vec![allow, tied_deny.clone()],
+            ),
+            effective_at: instant(5),
+            base_version: None,
+            expected_revision: 2,
+        },
+    );
+    let tied = evaluate(&mut storage, 6);
+    assert_eq!(tied.outcome, EnterprisePolicyEvaluationOutcome::Deny);
+    assert_eq!(tied.matched_rule, Some(tied_deny));
     fs::remove_dir_all(directory).expect("remove temp directory");
 }
 

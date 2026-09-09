@@ -238,6 +238,8 @@ fn rule(value: &ApiRule) -> Result<EnterprisePolicyRule, EnterprisePolicyApiErro
     Ok(EnterprisePolicyRule {
         kind: policy_kind(&value.kind)?,
         effect: effect(&value.effect)?,
+        priority: u16::try_from(value.priority)
+            .map_err(|_| invalid("enterprise Policy rule priority is invalid"))?,
         resource_pattern: value.resource_pattern.clone(),
         condition_sha256: value.condition_sha256.clone(),
     })

@@ -24,7 +24,7 @@ use winwincode_execution_port::replay::{
     ReplayAcknowledgementStore, ReplayFrame, ReplaySnapshot, ReplayStore, ReplayStreamKey,
 };
 use winwincode_execution_port::{
-    generated::{ExecutionPortMessage, ModelChunkMessage},
+    generated::{ApprovalActionSanitizedDetail, ExecutionPortMessage, ModelChunkMessage},
     runtime_trace_outbox::{ExecutionMode, ObserverMode, PerformanceBaselineReport},
     typed_replay::frame_from_message,
 };
@@ -127,6 +127,7 @@ fn initialize_schema(connection: &Connection) -> Result<(), AdapterStoreError> {
                    operation_id TEXT NOT NULL,
                    turn_id TEXT,
                    request_digest TEXT NOT NULL,
+                   detail_json BLOB NOT NULL,
                    resolution_digest TEXT,
                    state TEXT NOT NULL CHECK(state IN ('pending', 'resolved')),
                    CHECK (
@@ -1258,8 +1259,8 @@ impl AdapterStore {
                 .execute(
                     "INSERT INTO approval_operation(
                        approval_id, run_key, kernel_session_id, operation_kind,
-                       operation_id, turn_id, request_digest, resolution_digest, state
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                       operation_id, turn_id, request_digest, detail_json, resolution_digest, state
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                     params![
                         operation.approval_id,
                         operation.run_key,
@@ -1268,6 +1269,8 @@ impl AdapterStore {
                         operation.operation_id,
                         operation.turn_id,
                         operation.request_digest,
+                        serde_json::to_vec(&operation.detail)
+                            .map_err(|_| AdapterStoreError::Corrupt)?,
                         operation.resolution_digest,
                         operation.state.as_str(),
                     ],
@@ -1292,7 +1295,7 @@ impl AdapterStore {
         let mut statement = connection
             .prepare(
                 "SELECT approval_id, run_key, kernel_session_id, operation_kind,
-                        operation_id, turn_id, request_digest, resolution_digest, state
+                        operation_id, turn_id, request_digest, detail_json, resolution_digest, state
                  FROM approval_operation
                  WHERE run_key = ?1 AND state = 'pending'
                  ORDER BY approval_id",
@@ -1308,8 +1311,9 @@ impl AdapterStore {
                     row.get::<_, String>(4)?,
                     row.get::<_, Option<String>>(5)?,
                     row.get::<_, String>(6)?,
-                    row.get::<_, Option<String>>(7)?,
-                    row.get::<_, String>(8)?,
+                    row.get::<_, Vec<u8>>(7)?,
+                    row.get::<_, Option<String>>(8)?,
+                    row.get::<_, String>(9)?,
                 ))
             })
             .map_err(|_| AdapterStoreError::Unavailable)?;
@@ -1322,6 +1326,7 @@ impl AdapterStore {
                 operation_id,
                 turn_id,
                 request_digest,
+                detail_json,
                 resolution_digest,
                 state,
             ) = row.map_err(|_| AdapterStoreError::Unavailable)?;
@@ -1333,6 +1338,8 @@ impl AdapterStore {
                 operation_id,
                 turn_id,
                 request_digest,
+                detail: serde_json::from_slice(&detail_json)
+                    .map_err(|_| AdapterStoreError::Corrupt)?,
                 resolution_digest,
                 state: StoredApprovalOperationState::parse(&state)?,
             };
@@ -2137,7 +2144,7 @@ impl StoredApprovalOperationState {
 }
 
 /// Secret-free durable mapping from one public approval to the exact Kernel operation.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct StoredApprovalOperation {
     pub(crate) approval_id: String,
     pub(crate) run_key: String,
@@ -2146,6 +2153,7 @@ pub(crate) struct StoredApprovalOperation {
     pub(crate) operation_id: String,
     pub(crate) turn_id: Option<String>,
     pub(crate) request_digest: String,
+    pub(crate) detail: Option<ApprovalActionSanitizedDetail>,
     pub(crate) resolution_digest: Option<String>,
     pub(crate) state: StoredApprovalOperationState,
 }
@@ -2158,6 +2166,11 @@ impl StoredApprovalOperation {
             || self.operation_id.is_empty()
             || self.turn_id.as_ref().is_some_and(String::is_empty)
             || validate_digest(&self.request_digest).is_err()
+            || self.detail.as_ref().is_some_and(|detail| {
+                detail.request_sha256.0 != self.request_digest
+                    || detail.target_count
+                        < i64::try_from(detail.target_summaries.len()).unwrap_or(i64::MAX)
+            })
             || self
                 .resolution_digest
                 .as_deref()
@@ -2271,7 +2284,7 @@ fn load_approval_operation(
     let stored = connection
         .query_row(
             "SELECT run_key, kernel_session_id, operation_kind, operation_id,
-                    turn_id, request_digest, resolution_digest, state
+                    turn_id, request_digest, detail_json, resolution_digest, state
              FROM approval_operation WHERE approval_id = ?1",
             params![approval_id],
             |row| {
@@ -2282,8 +2295,9 @@ fn load_approval_operation(
                     row.get::<_, String>(3)?,
                     row.get::<_, Option<String>>(4)?,
                     row.get::<_, String>(5)?,
-                    row.get::<_, Option<String>>(6)?,
-                    row.get::<_, String>(7)?,
+                    row.get::<_, Vec<u8>>(6)?,
+                    row.get::<_, Option<String>>(7)?,
+                    row.get::<_, String>(8)?,
                 ))
             },
         )
@@ -2298,6 +2312,7 @@ fn load_approval_operation(
                 operation_id,
                 turn_id,
                 request_digest,
+                detail_json,
                 resolution_digest,
                 state,
             )| {
@@ -2309,6 +2324,8 @@ fn load_approval_operation(
                     operation_id,
                     turn_id,
                     request_digest,
+                    detail: serde_json::from_slice(&detail_json)
+                        .map_err(|_| AdapterStoreError::Corrupt)?,
                     resolution_digest,
                     state: StoredApprovalOperationState::parse(&state)?,
                 };
@@ -3218,6 +3235,7 @@ mod tests {
             operation_id: "call-patch".to_owned(),
             turn_id: Some("turn".to_owned()),
             request_digest: request_digest.clone(),
+            detail: None,
             resolution_digest: None,
             state: StoredApprovalOperationState::Pending,
         };
@@ -3269,6 +3287,7 @@ mod tests {
             operation_id: "call-exec".to_owned(),
             turn_id: Some("turn".to_owned()),
             request_digest: format!("sha256:{}", "1".repeat(64)),
+            detail: None,
             resolution_digest: None,
             state: StoredApprovalOperationState::Pending,
         };

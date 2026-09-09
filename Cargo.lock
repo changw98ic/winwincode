@@ -12668,6 +12668,7 @@ dependencies = [
  "aes-gcm",
  "base64 0.22.1",
  "getrandom 0.3.4",
+ "jiff",
  "rcgen",
  "rusqlite",
  "rustls",

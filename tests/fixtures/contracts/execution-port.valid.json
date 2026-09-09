@@ -610,7 +610,19 @@
       "approvalId": "apr_0000000000000000000000000F",
       "action": {
         "category": "shell",
-        "summary": "Run the approved test command."
+        "summary": "Run the approved test command.",
+        "sanitizedDetail": {
+          "kind": "available",
+          "operation": "execute",
+          "targetSummaries": [
+            "program:pnpm;argument_count:1"
+          ],
+          "targetCount": 1,
+          "workingDirectory": "workspace",
+          "riskLevel": "high",
+          "reasonCode": "sandbox_escalation",
+          "requestSha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
       },
       "expiresAt": "2026-08-24T12:10:00.000Z",
       "sessionIdentity": {

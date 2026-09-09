@@ -496,10 +496,15 @@ fn approval_request(
     Ok(serde_json::from_value(json!({
         "action": {
             "category": "shell",
-            "details": {
-                "contentType": "application/json",
-                "dataBase64": "QlJPV1NFUl9QUklWQVRFX0FDVElPTg==",
-                "payloadDigest": digest('f')
+            "sanitizedDetail": {
+                "kind": "available",
+                "operation": "execute",
+                "targetSummaries": ["program:fixture;argument_count:0"],
+                "targetCount": 1,
+                "workingDirectory": "workspace",
+                "riskLevel": "high",
+                "reasonCode": "sandbox_escalation",
+                "requestSha256": digest('f')
             },
             "summary": "Run the browser fixture action."
         },

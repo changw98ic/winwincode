@@ -180,7 +180,10 @@ function inputStateLabel(input: LocalInputDecision): string {
 }
 
 function approvalStateLabel(approval: LocalApprovalDecision): string {
-  return approval.expired ? 'Expired · decision disabled' : 'Pending'
+  if (approval.expired) return 'Expired · decision disabled'
+  return approval.projection.decisionEnabled
+    ? 'Pending'
+    : 'Trusted action detail unavailable · approval disabled'
 }
 
 function inputModeLabel(input: ChatInputInteractionProjection): string {
@@ -623,7 +626,7 @@ export function mountLocalDecisionsPage(options: LocalDecisionsPageOptions): Loc
         `Expires ${projection.expiresAt}`,
       ])
       mounted.reason.disabled = decisionDisabled
-      mounted.approve.disabled = decisionDisabled
+      mounted.approve.disabled = decisionDisabled || !projection.decisionEnabled
       mounted.reject.disabled = decisionDisabled
     },
     remove(row) {

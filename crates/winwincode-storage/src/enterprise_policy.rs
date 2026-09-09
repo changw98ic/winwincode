@@ -233,6 +233,7 @@ pub enum EnterprisePolicyInheritanceMode {
 pub struct EnterprisePolicyRule {
     pub kind: EnterprisePolicyKind,
     pub effect: EnterprisePolicyEffect,
+    pub priority: u16,
     pub resource_pattern: String,
     pub condition_sha256: Sha256Digest,
 }
@@ -1029,6 +1030,12 @@ fn validate_definition(
             return Err(error(
                 EnterprisePolicyErrorKind::InvalidInput,
                 "enterprise Policy resource pattern is invalid",
+            ));
+        }
+        if rule.priority > 10_000 {
+            return Err(error(
+                EnterprisePolicyErrorKind::InvalidInput,
+                "enterprise Policy rule priority exceeds 10000",
             ));
         }
         validate_digest(&rule.condition_sha256, "enterprise Policy condition digest")?;

@@ -231,6 +231,8 @@ fn ready_to_deliver_fixture() -> Delivery {
     .expect("canonical Delivery fixture")
     .into_snapshot();
     snapshot.revision = 1;
+    snapshot.work_run_aggregate.items[0].state = winwincode_domain::WorkItemState::CandidateReady;
+    snapshot.work_run_aggregate.runs[0].state = winwincode_domain::WorkRunState::CandidateReady;
     Delivery::try_from_snapshot(snapshot).expect("ReadyToDeliver seed")
 }
 

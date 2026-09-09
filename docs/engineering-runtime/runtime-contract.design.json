@@ -92,7 +92,7 @@
     },
     {
       "path": "schema/winwincode/v1/control-plane-http.schema.json",
-      "sha256": "47e92e5b437e7d78d389db83274cf01d97537ee391c4016afd410808f80ef73a",
+      "sha256": "164f6065c331e06770d5dded5e8017e716f42f73c70244b20f1efd1f633cfd06",
       "facts": [
         "HTTP command envelope",
         "candidate commands",
@@ -102,7 +102,7 @@
     },
     {
       "path": "schema/winwincode/v1/execution-port.schema.json",
-      "sha256": "a744ba146551752da919e79e93fe729040e4fecc4f7bf6cef09b8a62d47296e4",
+      "sha256": "4323273aad46e9539a0539f5599eeae48495a21384b715c88d618c86ad166cea",
       "facts": [
         "Worker execution transport and fenced identity"
       ]

@@ -264,6 +264,9 @@ fn delivered_with_reader(reader_open: bool, revision: u64) -> Delivery {
     .into_snapshot();
     snapshot.revision = revision;
     snapshot.status = DeliveryStatus::Delivered;
+    for item in &mut snapshot.work_run_aggregate.items {
+        item.state = winwincode_domain::WorkItemState::Done;
+    }
     snapshot.updated_at_millis = 1_800_000_000_100 + revision;
     let run = snapshot.stage_runs.first_mut().expect("reader StageRun");
     if reader_open {

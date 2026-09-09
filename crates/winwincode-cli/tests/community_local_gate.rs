@@ -583,7 +583,7 @@ fn prepare_delivery(
     producer
         .fencing_token
         .clone_from(&binding.fencing_token.as_ref().expect("fence").0);
-    producer.state = winwincode_domain::WorkRunState::Settled;
+    producer.state = winwincode_domain::WorkRunState::CandidateReady;
     (
         Delivery::try_from_snapshot(snapshot).expect("local verifying Delivery"),
         producer_id,

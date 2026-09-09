@@ -711,6 +711,88 @@
         "shell"
       ]
     },
+    "ApprovalActionOperation": {
+      "type": "string",
+      "enum": [
+        "execute",
+        "modify"
+      ]
+    },
+    "ApprovalActionRiskLevel": {
+      "type": "string",
+      "enum": [
+        "medium",
+        "high"
+      ]
+    },
+    "ApprovalActionReasonCode": {
+      "type": "string",
+      "enum": [
+        "sandbox_escalation",
+        "network_access",
+        "filesystem_write"
+      ]
+    },
+    "ApprovalActionSanitizedDetail": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "available"
+        },
+        "operation": {
+          "$ref": "#/$defs/ApprovalActionOperation"
+        },
+        "targetSummaries": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          },
+          "minItems": 1,
+          "maxItems": 20,
+          "uniqueItems": true
+        },
+        "targetCount": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10000
+        },
+        "workingDirectory": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 500
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "riskLevel": {
+          "$ref": "#/$defs/ApprovalActionRiskLevel"
+        },
+        "reasonCode": {
+          "$ref": "#/$defs/ApprovalActionReasonCode"
+        },
+        "requestSha256": {
+          "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+        }
+      },
+      "required": [
+        "kind",
+        "operation",
+        "targetSummaries",
+        "targetCount",
+        "workingDirectory",
+        "riskLevel",
+        "reasonCode",
+        "requestSha256"
+      ],
+      "description": "Bounded secret-safe facts derived from the exact trusted Core approval request. Raw argv, environment, patch content, payload, and free-form reason text are excluded."
+    },
     "ApprovalAction": {
       "type": "object",
       "additionalProperties": false,
@@ -723,8 +805,8 @@
           "minLength": 1,
           "maxLength": 2000
         },
-        "details": {
-          "$ref": "#/$defs/EncodedPayload"
+        "sanitizedDetail": {
+          "$ref": "#/$defs/ApprovalActionSanitizedDetail"
         }
       },
       "required": [

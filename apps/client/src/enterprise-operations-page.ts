@@ -584,6 +584,7 @@ function createPolicySection(
         rules: [{
           kind: ruleKind.select.value as EnterprisePolicyProjection['policyKind'],
           effect: ruleEffect.select.value as 'allow' | 'deny',
+          priority: 0,
           resourcePattern: resourcePattern.input.value,
           conditionSha256: conditionDigest.input.value as Sha256Digest,
         }],

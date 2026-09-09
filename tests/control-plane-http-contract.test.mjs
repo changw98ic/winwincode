@@ -565,6 +565,7 @@ test('Chat interaction snapshots expose one complete secret-safe binding contrac
     'subject',
     'category',
     'effectiveDecisionScope',
+    'decisionEnabled',
     'sanitizedDetail',
     'binding',
   ])
@@ -573,26 +574,24 @@ test('Chat interaction snapshots expose one complete secret-safe binding contrac
     'mcp',
     'network',
     'shell',
-    'unavailable',
   ])
   assert.deepEqual(schema.$defs.ApprovalEffectiveDecisionScope.enum, ['once'])
   assert.deepEqual(schema.$defs.ApprovalSanitizedDetailUnavailableReason.enum, [
     'producer_unavailable',
-    'encoded_payload_redacted',
-    'source_not_recorded',
   ])
-  assert.deepEqual(schema.$defs.ApprovalSanitizedDetailProjection.required, [
+  const unavailable = schema.$defs.ApprovalSanitizedDetailUnavailableProjection
+  assert.deepEqual(unavailable.required, [
     'kind',
     'reason',
   ])
-  assert.equal(schema.$defs.ApprovalSanitizedDetailProjection.properties.kind.const, 'unavailable')
-  assert.equal(schema.$defs.ApprovalSanitizedDetailProjection.properties.command, undefined)
-  assert.equal(schema.$defs.ApprovalSanitizedDetailProjection.properties.cwd, undefined)
-  assert.equal(schema.$defs.ApprovalSanitizedDetailProjection.properties.files, undefined)
-  assert.equal(schema.$defs.ApprovalSanitizedDetailProjection.properties.network, undefined)
-  assert.equal(schema.$defs.ApprovalSanitizedDetailProjection.properties.mcp, undefined)
-  assert.equal(schema.$defs.ApprovalSanitizedDetailProjection.properties.risk, undefined)
-  assert.equal(schema.$defs.ApprovalSanitizedDetailProjection.properties.reasonText, undefined)
+  assert.equal(unavailable.properties.kind.const, 'unavailable')
+  assert.equal(unavailable.properties.command, undefined)
+  assert.equal(unavailable.properties.cwd, undefined)
+  assert.equal(unavailable.properties.files, undefined)
+  assert.equal(unavailable.properties.network, undefined)
+  assert.equal(unavailable.properties.mcp, undefined)
+  assert.equal(unavailable.properties.risk, undefined)
+  assert.equal(unavailable.properties.reasonText, undefined)
   assert.ok(schema.$defs.ApprovalDecidePayload.required.includes('binding'))
   assert.equal(schema.$defs.ChatInputInteractionProjection.properties.details, undefined)
   assert.equal(schema.$defs.ChatInputInteractionProjection.properties.payload, undefined)

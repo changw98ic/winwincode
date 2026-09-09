@@ -23,6 +23,7 @@ function approval(id, overrides = {}) {
   return {
     binding: binding(),
     category: 'shell',
+    decisionEnabled: false,
     effectiveDecisionScope: 'once',
     expiresAt: expiryFuture,
     id,
@@ -30,7 +31,7 @@ function approval(id, overrides = {}) {
     revision: 3,
     sanitizedDetail: {
       kind: 'unavailable',
-      reason: 'encoded_payload_redacted',
+      reason: 'producer_unavailable',
     },
     state: 'pending',
     subject: 'git status --porcelain',
@@ -39,16 +40,29 @@ function approval(id, overrides = {}) {
 }
 
 const approvals = [
-  approval('apr_00000000000000000000000001', { subject: rawCommand }),
+  approval('apr_00000000000000000000000001', {
+    subject: rawCommand,
+    decisionEnabled: true,
+    sanitizedDetail: {
+      kind: 'available',
+      operation: 'execute',
+      targetSummaries: ['program:git;argument_count:3'],
+      targetCount: 1,
+      workingDirectory: 'workspace',
+      riskLevel: 'high',
+      reasonCode: 'sandbox_escalation',
+      requestSha256: `sha256:${'a'.repeat(64)}`,
+    },
+  }),
   approval('apr_00000000000000000000000002', {
     category: 'mcp',
     subject: 'Call the internal knowledge tool',
     sanitizedDetail: { kind: 'unavailable', reason: 'producer_unavailable' },
   }),
   approval('apr_00000000000000000000000003', {
-    category: 'unavailable',
+    category: 'shell',
     subject: 'Unclassified producer request',
-    sanitizedDetail: { kind: 'unavailable', reason: 'source_not_recorded' },
+    sanitizedDetail: { kind: 'unavailable', reason: 'producer_unavailable' },
     expiresAt: expiryPast,
   }),
 ]

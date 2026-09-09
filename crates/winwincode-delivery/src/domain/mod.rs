@@ -772,6 +772,19 @@ fn validate_delivery(snapshot: &mut DeliverySnapshot) -> Result<(), DeliveryVali
             "delivered delivery cannot retain blocking attention",
         ));
     }
+    if snapshot.status == DeliveryStatus::Delivered
+        && snapshot
+            .work_run_aggregate
+            .items
+            .iter()
+            .any(|item| item.state != winwincode_domain::WorkItemState::Done)
+    {
+        return Err(validation_error(
+            DeliveryValidationErrorCode::RelationshipMismatch,
+            "delivery.workRunAggregate.items",
+            "delivered delivery requires every WorkItem to pass the completion gate",
+        ));
+    }
     Ok(())
 }
 

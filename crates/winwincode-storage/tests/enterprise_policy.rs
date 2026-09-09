@@ -60,6 +60,7 @@ fn rule(effect: EnterprisePolicyEffect, seed: u64) -> EnterprisePolicyRule {
     EnterprisePolicyRule {
         kind: EnterprisePolicyKind::Model,
         effect,
+        priority: 0,
         resource_pattern: format!("model/{seed}"),
         condition_sha256: Sha256Digest(format!("sha256:{seed:064x}")),
     }

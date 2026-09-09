@@ -17,7 +17,8 @@ use winwincode_execution_port::action_enforcement::{
 use winwincode_execution_port::action_gateway::{
     ActionGatewayError, ActionGatewayRejectionCode, ActiveWorkerAuthority, CodexToolExecutor,
     DeterministicActionGate, ExecutionEnvelope, ExecutionEnvelopeToken, GateDecision, GateInput,
-    PreActionDecisionRecorder, WorkerActionAuthority, WorkerActionGateway, WorkerActionRequest,
+    PostActionHook, PostActionOutcome, PreActionDecisionRecorder, WorkerActionAuthority,
+    WorkerActionGateway, WorkerActionRequest,
 };
 use winwincode_execution_port::action_normalizer::{
     ActionIntent, ActionObject, ActionOperation, ActionPurpose, ActionRisk, ActionScope,
@@ -27,6 +28,9 @@ use winwincode_execution_port::action_normalizer::{
 use winwincode_execution_port::generated::{
     ActionEnforcementDecision, ActionEnforcementReceiptMessage,
     ActionEnforcementReceiptMessageKind, ExecutionLeaseStamp,
+};
+use winwincode_execution_port::repository_rule_pack::{
+    REPOSITORY_RULE_PACK_SCHEMA_VERSION, RepositoryRule, RepositoryRuleEvent, RepositoryRulePack,
 };
 
 const NOW: &str = "2027-01-15T08:00:02.000Z";
@@ -55,6 +59,7 @@ impl DeterministicActionGate<Policy> for RecordingGate {
 
 struct RecordingExecutor {
     events: Rc<RefCell<Vec<String>>>,
+    fail: bool,
 }
 
 struct RecordingDecisionRecorder {
@@ -79,6 +84,21 @@ impl PreActionDecisionRecorder<Policy> for RecordingDecisionRecorder {
             Ok(())
         }
     }
+
+    fn record_post_action(
+        &mut self,
+        input: GateInput<'_, Policy>,
+        outcome: PostActionOutcome,
+        hooks: &[PostActionHook],
+    ) -> Result<(), Self::Error> {
+        if !hooks.is_empty() {
+            self.events.borrow_mut().push(format!(
+                "post:{:?}:{outcome:?}:{hooks:?}",
+                input.observed.source
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl CodexToolExecutor for RecordingExecutor {
@@ -89,7 +109,11 @@ impl CodexToolExecutor for RecordingExecutor {
         self.events
             .borrow_mut()
             .push(format!("execute:{:?}", source_name(request)));
-        Ok("existing-codex-result".to_owned())
+        if self.fail {
+            Err("executor failed")
+        } else {
+            Ok("existing-codex-result".to_owned())
+        }
     }
 }
 
@@ -303,6 +327,7 @@ fn gateway(
         },
         RecordingExecutor {
             events: Rc::clone(events),
+            fail: false,
         },
     )
 }
@@ -346,10 +371,15 @@ fn every_tool_family_runs_the_gate_before_the_existing_codex_executor() {
 
         assert_eq!(result.output, "existing-codex-result");
         let events = events.borrow();
-        assert_eq!(events.len(), 3);
+        let expects_hook = result.normalization.observed.source
+            == winwincode_execution_port::action_normalizer::ActionSource::File;
+        assert_eq!(events.len(), if expects_hook { 4 } else { 3 });
         assert!(events[0].starts_with("gate:fixture:"));
         assert!(events[1].starts_with("record:"));
         assert!(events[2].starts_with("execute:"));
+        if expects_hook {
+            assert!(events[3].contains("RequireVerification"));
+        }
     }
 }
 
@@ -485,7 +515,70 @@ fn allow_with_watch_is_an_explicit_approval() {
     )
     .expect("allow-with-watch authorizes execution");
     assert_eq!(executed.decision, decision);
-    assert_eq!(events.borrow().len(), 3);
+    assert_eq!(events.borrow().len(), 4);
+    assert!(events.borrow()[3].contains("RequireVerification"));
+}
+
+#[test]
+fn failed_shell_execution_creates_a_machine_blocker_hook() {
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let mut gateway = WorkerActionGateway::new(
+        authority(),
+        envelope(1, 'a'),
+        RecordingGate {
+            events: Rc::clone(&events),
+            decision: GateDecision::Allow,
+        },
+        RecordingDecisionRecorder {
+            events: Rc::clone(&events),
+            fail: false,
+        },
+        RecordingExecutor {
+            events: Rc::clone(&events),
+            fail: true,
+        },
+    );
+
+    let error = execute_action(
+        &mut gateway,
+        &Instant(NOW.to_owned()),
+        &action(requests().remove(2)),
+    )
+    .expect_err("executor failure");
+    assert_eq!(error, ActionGatewayError::Executor("executor failed"));
+    assert!(events.borrow()[3].contains("CreateMachineBlocker"));
+}
+
+#[test]
+fn repository_rule_pack_replaces_the_matching_project_default() {
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let rules = RepositoryRulePack {
+        schema_version: REPOSITORY_RULE_PACK_SCHEMA_VERSION,
+        rules: vec![RepositoryRule {
+            id: "default.file-change-verification".into(),
+            version: 1,
+            event: RepositoryRuleEvent::FileChanged,
+            languages: vec!["rust".into()],
+            file_patterns: vec!["crates/*.rs".into()],
+            outcome: Some(PostActionOutcome::Succeeded),
+            actions: vec![PostActionHook::CreateMachineBlocker],
+            priority: 1_000,
+        }],
+    };
+    let mut gateway = gateway(&events, GateDecision::Allow)
+        .with_repository_rules(rules)
+        .expect("repository rule pack");
+
+    execute_action(
+        &mut gateway,
+        &Instant(NOW.to_owned()),
+        &action(requests().remove(0)),
+    )
+    .expect("approved file action");
+
+    let events = events.borrow();
+    assert!(events[3].contains("CreateMachineBlocker"));
+    assert!(!events[3].contains("RequireVerification"));
 }
 
 #[test]
@@ -504,6 +597,7 @@ fn an_outbox_failure_stops_an_allowed_action_before_the_executor() {
         },
         RecordingExecutor {
             events: Rc::clone(&events),
+            fail: false,
         },
     );
 

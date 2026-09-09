@@ -65,16 +65,17 @@ test('real Chrome shows the approval risk detail, scope, and impact before a dec
 
   const result = await evaluate(devtools, sessionId, 'runApprovalRiskScenario()')
 
-  // One risk block per approval card, and the decision form is enabled for the
-  // two current approvals.
+  // One risk block per approval card. Only the current request with complete
+  // trusted facts can be approved; rejection remains available.
   assert.equal(result.riskBlockCount, 3)
-  assert.deepEqual(result.decisions.slice(0, 2).map(node => node.disabled), [false, false])
+  assert.deepEqual(result.decisions.slice(0, 2).map(node => node.disabled), [false, true])
   for (const decision of result.decisions.slice(0, 2)) {
     assert.equal(decision.label, 'Approve')
   }
 
   // What will run: a bounded, single-line producer summary only.
-  assert.equal(result.shell.commandLength, commandLimit)
+  assert.equal(result.shell.commandText, 'program:git;argument_count:3')
+  assert.equal(result.shell.commandLength, 28)
   assert.equal(result.shell.subjectLength, commandLimit)
   assert.equal(result.shell.leaksRawCommand, false)
   assert.equal(result.shell.leaksToken, false)
@@ -88,19 +89,21 @@ test('real Chrome shows the approval risk detail, scope, and impact before a dec
   assert.match(result.shell.expiry, /Expires/u)
   assert.equal(result.shell.commandBeforeDecisionForm, true)
 
-  // Fields the secret-safe projection withholds degrade explicitly.
+  // Typed safe facts are displayed; fields outside that contract stay explicit.
   assert.equal(result.fieldKeyCount, 18)
-  for (const key of ['cwd', 'fileImpact', 'networkTargets', 'mcpTarget', 'requestedReason']) {
+  assert.equal(result.withheld.cwd[0], 'workspace')
+  assert.match(result.withheld.requestedReason[0], /sandbox_escalation · sha256:/u)
+  for (const key of ['fileImpact', 'networkTargets', 'mcpTarget']) {
     assert.equal(result.withheld[key].length, 3, key)
     for (const text of result.withheld[key]) {
       assert.match(text, /Withheld|Not reported|Not recorded/u, `${key}: ${text}`)
     }
   }
 
-  // Unknown actions and expired approvals degrade instead of guessing.
+  // Missing-detail and expired approvals remain classified but cannot be approved.
   assert.equal(result.mcpImpact, 'MCP tool call')
-  assert.equal(result.unclassified.level, 'Risk unknown')
-  assert.equal(result.unclassified.impact, 'Unclassified action')
+  assert.equal(result.unclassified.level, 'High risk')
+  assert.equal(result.unclassified.impact, 'Shell execution')
   assert.equal(result.unclassified.expiry.includes('Expired'), true)
   assert.equal(result.unclassified.cardState, 'expired')
   assert.equal(result.unclassified.approveDisabled, true)

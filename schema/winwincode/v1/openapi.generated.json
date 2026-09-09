@@ -427,8 +427,8 @@
           "category": {
             "$ref": "#/components/schemas/ApprovalActionCategory"
           },
-          "details": {
-            "$ref": "#/components/schemas/EncodedPayload"
+          "sanitizedDetail": {
+            "$ref": "#/components/schemas/ApprovalActionSanitizedDetail"
           },
           "summary": {
             "maxLength": 2000,
@@ -450,6 +450,88 @@
           "shell"
         ],
         "type": "string"
+      },
+      "ApprovalActionOperation": {
+        "enum": [
+          "execute",
+          "modify"
+        ],
+        "type": "string"
+      },
+      "ApprovalActionReasonCode": {
+        "enum": [
+          "sandbox_escalation",
+          "network_access",
+          "filesystem_write"
+        ],
+        "type": "string"
+      },
+      "ApprovalActionRiskLevel": {
+        "enum": [
+          "medium",
+          "high"
+        ],
+        "type": "string"
+      },
+      "ApprovalActionSanitizedDetail": {
+        "additionalProperties": false,
+        "description": "Bounded secret-safe facts derived from the exact trusted Core approval request. Raw argv, environment, patch content, payload, and free-form reason text are excluded.",
+        "properties": {
+          "kind": {
+            "const": "available"
+          },
+          "operation": {
+            "$ref": "#/components/schemas/ApprovalActionOperation"
+          },
+          "reasonCode": {
+            "$ref": "#/components/schemas/ApprovalActionReasonCode"
+          },
+          "requestSha256": {
+            "$ref": "#/components/schemas/Sha256Digest"
+          },
+          "riskLevel": {
+            "$ref": "#/components/schemas/ApprovalActionRiskLevel"
+          },
+          "targetCount": {
+            "maximum": 10000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "targetSummaries": {
+            "items": {
+              "maxLength": 500,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 20,
+            "minItems": 1,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "workingDirectory": {
+            "oneOf": [
+              {
+                "maxLength": 500,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "kind",
+          "operation",
+          "targetSummaries",
+          "targetCount",
+          "workingDirectory",
+          "riskLevel",
+          "reasonCode",
+          "requestSha256"
+        ],
+        "type": "object"
       },
       "ApprovalDecideCommand": {
         "allOf": [
@@ -744,6 +826,10 @@
           "category": {
             "$ref": "#/components/schemas/ApprovalProjectionCategory"
           },
+          "decisionEnabled": {
+            "description": "False when the trusted producer did not supply complete action facts; approval is then rejected server-side.",
+            "type": "boolean"
+          },
           "effectiveDecisionScope": {
             "$ref": "#/components/schemas/ApprovalEffectiveDecisionScope"
           },
@@ -786,19 +872,19 @@
           "subject",
           "category",
           "effectiveDecisionScope",
+          "decisionEnabled",
           "sanitizedDetail",
           "binding"
         ],
         "type": "object"
       },
       "ApprovalProjectionCategory": {
-        "description": "Closed, secret-safe action category. unavailable is the sole meaning for a persisted legacy source that did not record a category.",
+        "description": "Closed, secret-safe action category from the current execution producer.",
         "enum": [
           "filesystem_write",
           "mcp",
           "network",
-          "shell",
-          "unavailable"
+          "shell"
         ],
         "type": "string"
       },
@@ -858,9 +944,92 @@
         "x-authority": "lease-write",
         "x-direction": "worker-to-control-plane"
       },
-      "ApprovalSanitizedDetailProjection": {
+      "ApprovalSanitizedDetailAvailableProjection": {
         "additionalProperties": false,
-        "description": "Typed detail availability for the current producer set. Arbitrary EncodedPayload bytes and metadata are never decoded or forwarded.",
+        "properties": {
+          "kind": {
+            "const": "available"
+          },
+          "operation": {
+            "enum": [
+              "execute",
+              "modify"
+            ],
+            "type": "string"
+          },
+          "reasonCode": {
+            "enum": [
+              "sandbox_escalation",
+              "network_access",
+              "filesystem_write"
+            ],
+            "type": "string"
+          },
+          "requestSha256": {
+            "$ref": "#/components/schemas/Sha256Digest"
+          },
+          "riskLevel": {
+            "enum": [
+              "medium",
+              "high"
+            ],
+            "type": "string"
+          },
+          "targetCount": {
+            "maximum": 10000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "targetSummaries": {
+            "items": {
+              "maxLength": 500,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 20,
+            "minItems": 1,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "workingDirectory": {
+            "oneOf": [
+              {
+                "maxLength": 500,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "kind",
+          "operation",
+          "targetSummaries",
+          "targetCount",
+          "workingDirectory",
+          "riskLevel",
+          "reasonCode",
+          "requestSha256"
+        ],
+        "type": "object"
+      },
+      "ApprovalSanitizedDetailProjection": {
+        "description": "Typed, secret-safe action facts or an explicit unavailable state.",
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/ApprovalSanitizedDetailAvailableProjection"
+          },
+          {
+            "$ref": "#/components/schemas/ApprovalSanitizedDetailUnavailableProjection"
+          }
+        ]
+      },
+      "ApprovalSanitizedDetailUnavailableProjection": {
+        "additionalProperties": false,
+        "description": "Fail-closed state for a producer request without complete trusted action facts.",
         "properties": {
           "kind": {
             "const": "unavailable"
@@ -877,9 +1046,7 @@
       },
       "ApprovalSanitizedDetailUnavailableReason": {
         "enum": [
-          "producer_unavailable",
-          "encoded_payload_redacted",
-          "source_not_recorded"
+          "producer_unavailable"
         ],
         "type": "string"
       },
@@ -14435,6 +14602,11 @@
             ],
             "type": "string"
           },
+          "priority": {
+            "maximum": 10000,
+            "minimum": 0,
+            "type": "integer"
+          },
           "resourcePattern": {
             "maxLength": 2048,
             "minLength": 1,
@@ -14444,6 +14616,7 @@
         "required": [
           "kind",
           "effect",
+          "priority",
           "resourcePattern",
           "conditionSha256"
         ],
@@ -29683,7 +29856,7 @@
     "https://schemas.winwincode.dev/winwincode/v1/domain.schema.json",
     "https://schemas.winwincode.dev/winwincode/v1/execution-port.schema.json"
   ],
-  "x-source-digest": "sha256:431cb1c2a312dfb64f2832de8c659450337bfc5fa9bbcffe66b7718dac34fee7",
+  "x-source-digest": "sha256:d781a153ac675cfcee6203ae2a80c63b85647b8d8818ca7592b64b9d27a10e65",
   "x-winwincode-client-metadata": {
     "http": {
       "authentication": {

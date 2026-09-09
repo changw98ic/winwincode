@@ -166,6 +166,7 @@ fn explicit_critical_rule_denies_in_audit_mode_and_changed_reuse_fails_closed() 
             rules: vec![EnterprisePolicyRule {
                 kind: EnterprisePolicyKind::Model,
                 effect: EnterprisePolicyEffect::Deny,
+                priority: 0,
                 resource_pattern: "model:*".to_owned(),
                 condition_sha256: condition,
             }],

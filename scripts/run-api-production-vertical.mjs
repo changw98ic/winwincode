@@ -1486,14 +1486,20 @@ export async function driveDelivery(
   for (;;) {
     detail = (await client.query('delivery.get', { deliveryId: IDS.delivery })).result
     // Scheduling and completion use the current WorkRun aggregate.
-    const workRunAggregate = (await client.query('workrun.get', {
-      deliveryId: IDS.delivery,
-      workItemId: null,
-      atCursor: null,
-    })).result
-    const activeWorkRuns = Array.isArray(workRunAggregate?.runs)
-      ? workRunAggregate.runs.filter(run => ['queued', 'leased', 'running', 'candidate_ready'].includes(run.state))
-      : []
+    let workRunAggregate
+    try {
+      workRunAggregate = (await client.query('workrun.get', {
+        deliveryId: IDS.delivery,
+        workItemId: null,
+        atCursor: detail.readCursor,
+      })).result
+    } catch (error) {
+      if (error?.code === 'REVISION_CONFLICT' || error?.code === 'READ_CURSOR_EXPIRED') continue
+      throw error
+    }
+    const workRuns = Array.isArray(workRunAggregate?.runs) ? workRunAggregate.runs : []
+    const activeWorkRuns = workRuns
+      .filter(run => ['queued', 'leased', 'running'].includes(run.state))
     const observation = { revision: detail.deliveryRevision, status: detail.status }
     appendDeliveryTransition(transitionTrace, observation)
     if (detail.status === 'delivered') break
@@ -1513,19 +1519,25 @@ export async function driveDelivery(
       && detail.verdict === null
       && activeWorkRuns.length === 0
     ) {
-      command = 'delivery.submit_verdict'
-      const candidateRef = detail.currentCandidate.candidateRef
-      assert.match(
-        candidateRef ?? '',
-        /^git-candidate:sha256:[0-9a-f]{64}$/u,
-        'Delivered candidate must expose its canonical Git candidate reference',
-      )
-      payload = {
-        deliveryId: IDS.delivery,
-        // `candidateDigest` is the stale-check suffix of the immutable
-        // candidate reference.  `diffSha256` identifies the patch bytes and
-        // is deliberately a different value.
-        candidateDigest: candidateRef.slice('git-candidate:'.length),
+      const verificationProfile = ['reviewer', 'verifier'][workRuns.length - 1]
+      if (verificationProfile !== undefined) {
+        command = 'delivery.advance'
+        payload = { deliveryId: IDS.delivery, dispatchProfile: verificationProfile }
+      } else {
+        command = 'delivery.submit_verdict'
+        const candidateRef = detail.currentCandidate.candidateRef
+        assert.match(
+          candidateRef ?? '',
+          /^git-candidate:sha256:[0-9a-f]{64}$/u,
+          'Delivered candidate must expose its canonical Git candidate reference',
+        )
+        payload = {
+          deliveryId: IDS.delivery,
+          // `candidateDigest` is the stale-check suffix of the immutable
+          // candidate reference.  `diffSha256` identifies the patch bytes and
+          // is deliberately a different value.
+          candidateDigest: candidateRef.slice('git-candidate:'.length),
+        }
       }
     } else if (activeWorkRuns.length > 0) {
       // The Controller owns the active WorkRun; wait for accepted runtime facts.
@@ -1546,9 +1558,8 @@ export async function driveDelivery(
           remediation: null,
         }
       } else {
-        // WorkRun dispatch is explicit at the creation boundary. While a
-        // run is active the runner only polls; it must not manufacture a
-        // second stage/global advance request.
+        // A running WorkRun is polled above. A completed writer is followed
+        // only by the two independent verification WorkRuns above.
         await new Promise(resolvePromise => setTimeout(resolvePromise, POLL_INTERVAL_MILLIS))
         continue
       }
@@ -1662,8 +1673,11 @@ async function runtimeWorkRunEvidence(client, detail) {
     assert.equal(typeof run.id, 'string')
     assert.equal(typeof run.productSessionId, 'string')
     const response = await client.query('runtime.projection.get', {
-      kind: 'product-session',
+      kind: 'delivery-stage',
+      deliveryId: IDS.delivery,
       productSessionId: run.productSessionId,
+      workRunId: run.id,
+      atCursor: detail.readCursor,
     })
     const sessions = response.result?.sessions
     assert.ok(Array.isArray(sessions), `${run.id} runtime sessions must be an array`)

@@ -1369,6 +1369,9 @@ mod tests {
         .expect("canonical fixture");
         let mut snapshot = parsed.into_snapshot();
         snapshot.status = DeliveryStatus::Delivered;
+        for item in &mut snapshot.work_run_aggregate.items {
+            item.state = winwincode_domain::WorkItemState::Done;
+        }
         snapshot.updated_at_millis = 1_800_000_000_040;
         snapshot.stage_runs.clear();
         snapshot.attention_items.push(AttentionItem {

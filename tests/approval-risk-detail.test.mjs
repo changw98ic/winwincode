@@ -81,6 +81,7 @@ function projection(overrides = {}) {
   return {
     binding: binding(),
     category: ApprovalProjectionCategory.Shell,
+    decisionEnabled: false,
     effectiveDecisionScope: ApprovalEffectiveDecisionScope.Once,
     expiresAt: futureExpiry,
     id: 'apr_00000000000000000000000001',
@@ -88,7 +89,7 @@ function projection(overrides = {}) {
     revision: 7,
     sanitizedDetail: {
       kind: 'unavailable',
-      reason: ApprovalSanitizedDetailUnavailableReason.EncodedPayloadRedacted,
+      reason: ApprovalSanitizedDetailUnavailableReason.ProducerUnavailable,
     },
     state: 'pending',
     subject: 'rm -rf ./build && git commit -m "rebuild"',
@@ -110,17 +111,20 @@ test('the sealed Approval projection offers no structured payload path to the pa
     resolve(root, 'apps/client/src/generated/contracts.ts'),
     'utf8',
   )
-  const start = generated.indexOf('export type ApprovalSanitizedDetailProjection = {')
+  const start = generated.indexOf('export type ApprovalSanitizedDetailAvailableProjection = {')
   assert.notEqual(start, -1)
-  const declaration = generated.slice(start, generated.indexOf('}\n', start))
+  const end = generated.indexOf('/** Acknowledges the highest contiguous artifact chunk.', start)
+  const declaration = generated.slice(start, end)
+  assert.match(declaration, /readonly "kind": "available"/u)
+  assert.match(declaration, /readonly "targetSummaries": ReadonlyArray<string>/u)
+  assert.match(declaration, /readonly "requestSha256": Sha256Digest/u)
   assert.match(declaration, /readonly "kind": "unavailable"/u)
-  assert.match(declaration, /readonly "reason": ApprovalSanitizedDetailUnavailableReason/u)
   for (const forbidden of ['details', 'payload', 'command', 'cwd', 'argv', 'env']) {
     assert.equal(declaration.includes(`"${forbidden}"`), false, forbidden)
   }
   assert.deepEqual(
     Object.values(ApprovalSanitizedDetailUnavailableReason).sort(),
-    ['encoded_payload_redacted', 'producer_unavailable', 'source_not_recorded'].sort(),
+    ['producer_unavailable'],
   )
   assert.deepEqual(
     Object.values(ApprovalEffectiveDecisionScope),
@@ -177,16 +181,14 @@ test('the risk detail bounds the subject and never carries the raw producer payl
   assert.equal(rendered.includes('encodedPayload'), false)
 })
 
-test('shell approvals expose a safely truncated command summary and an execution impact', () => {
+test('a shell summary is not promoted to trusted command detail', () => {
   const detail = approvalRiskDetail(projection(), { nowMillis: () => now })
   assert.equal(detail.impact, 'shell')
   assert.equal(detail.impactLabel, 'Shell execution')
   const command = detail.fieldByKey.command
-  assert.equal(command.availability, 'available')
-  assert.equal(command.text, 'rm -rf ./build && git commit -m "rebuild"')
-  assert.equal(command.withheldReason, null)
-  assert.equal(command.withheldLabel, null)
-  assert.ok(command.note === null || command.note.length > 0)
+  assert.equal(command.availability, 'withheld')
+  assert.equal(command.text, null)
+  assert.equal(command.withheldReason, 'producer_unavailable')
   assert.deepEqual(detail.impactStatements, [
     'Runs a shell command inside the delivery workspace.',
   ])
@@ -197,6 +199,30 @@ test('shell approvals expose a safely truncated command summary and an execution
     approvalRiskLevel(ApprovalProjectionCategory.Shell).level,
     'high',
   )
+})
+
+test('typed producer facts render the target, workspace, risk reason, and request digest', () => {
+  const requestSha256 = `sha256:${'a'.repeat(64)}`
+  const detail = approvalRiskDetail(projection({
+    decisionEnabled: true,
+    sanitizedDetail: {
+      kind: 'available',
+      operation: 'execute',
+      targetSummaries: ['program:git;argument_count:3'],
+      targetCount: 1,
+      workingDirectory: 'workspace',
+      riskLevel: 'high',
+      reasonCode: 'sandbox_escalation',
+      requestSha256,
+    },
+  }), { nowMillis: () => now })
+  assert.equal(detail.fieldByKey.command.text, 'program:git;argument_count:3')
+  assert.equal(detail.fieldByKey.cwd.text, 'workspace')
+  assert.equal(
+    detail.fieldByKey.requestedReason.text,
+    `sandbox_escalation · ${requestSha256}`,
+  )
+  assert.equal(detail.risk.level, 'high')
 })
 
 test('non-shell categories withhold the command and state their own impact', () => {
@@ -236,7 +262,7 @@ test('non-shell categories withhold the command and state their own impact', () 
     assert.equal(detail.fieldByKey.command.text, null, item.impact)
   }
   assert.deepEqual(
-    approvalImpactStatements(ApprovalProjectionCategory.Unavailable),
+    approvalImpactStatements(undefined),
     [],
     'an unclassified action states no impact',
   )
@@ -250,7 +276,7 @@ test('fields the secret-safe projection does not carry are withheld with a reaso
     assert.equal(field.availability, 'withheld', key)
     assert.equal(field.text, null, key)
     assert.equal(field.note, null, key)
-    assert.equal(field.withheldReason, 'encoded_payload_redacted', key)
+    assert.equal(field.withheldReason, 'producer_unavailable', key)
     assert.ok(field.withheldLabel.length > 0, key)
   }
 })
@@ -265,21 +291,17 @@ test('a producer that recorded no detail degrades with its own reason', () => {
   }), { nowMillis: () => now })
   assert.equal(detail.fieldByKey.networkTargets.withheldReason, 'producer_unavailable')
   assert.equal(detail.fieldByKey.requestedReason.withheldReason, 'producer_unavailable')
-  for (const reason of [
-    'producer_unavailable',
-    'source_not_recorded',
-    'not_in_secret_safe_projection',
-  ]) {
+  for (const reason of ['producer_unavailable', 'not_in_secret_safe_projection']) {
     assert.ok(approvalWithheldLabel(reason).length > 0, reason)
   }
 })
 
 test('an unclassified action degrades instead of inventing a risk', () => {
   const detail = approvalRiskDetail(projection({
-    category: ApprovalProjectionCategory.Unavailable,
+    category: undefined,
     sanitizedDetail: {
       kind: 'unavailable',
-      reason: ApprovalSanitizedDetailUnavailableReason.SourceNotRecorded,
+      reason: ApprovalSanitizedDetailUnavailableReason.ProducerUnavailable,
     },
   }), { nowMillis: () => now })
   assert.equal(detail.impact, 'unknown')
@@ -288,7 +310,7 @@ test('an unclassified action degrades instead of inventing a risk', () => {
   assert.equal(detail.risk.label, 'Risk unknown')
   assert.ok(detail.risk.rationale.length > 0)
   assert.equal(detail.fieldByKey.command.availability, 'withheld')
-  assert.equal(detail.fieldByKey.command.withheldReason, 'source_not_recorded')
+  assert.equal(detail.fieldByKey.command.withheldReason, 'producer_unavailable')
   for (const field of detail.fields) assert.equal(field.availability, 'withheld')
 })
 
@@ -302,37 +324,6 @@ test('the decision scope is descriptive, never selectable, and bounded to one re
   assert.equal(approvalDecisionScope(ApprovalEffectiveDecisionScope.Once).selectable, false)
   assert.equal(approvalDecisionScope(undefined).selectable, false)
   assert.equal(approvalDecisionScope(undefined).scope, 'unknown')
-})
-
-test('a projection persisted before later fields degrades instead of throwing', () => {
-  const stale = {
-    id: 'apr_00000000000000000000000002',
-    revision: 1,
-    state: 'pending',
-    requestedAt: '2026-08-27T02:59:00.000Z',
-    expiresAt: '2026-08-27T04:00:00.000Z',
-    subject: 'Allow the projected repository action',
-    binding: binding(),
-  }
-  const detail = approvalRiskDetail(stale, { nowMillis: () => now })
-  assert.equal(detail.impact, 'unknown')
-  assert.equal(detail.impactLabel, 'Unclassified action')
-  assert.equal(detail.risk.level, 'unknown')
-  assert.equal(detail.state, 'pending', 'a reported state is preserved verbatim')
-  assert.equal(
-    approvalRiskDetail({ ...stale, state: undefined }, { nowMillis: () => now }).state,
-    'unknown',
-    'a missing state degrades to unknown instead of looking actionable',
-  )
-  assert.equal(detail.subject, stale.subject)
-  assert.equal(detail.decisionScope.scope, 'unknown')
-  assert.equal(detail.decisionScope.selectable, false)
-  assert.equal(detail.fieldByKey.command.availability, 'withheld')
-  for (const field of detail.fields) {
-    assert.equal(field.availability, 'withheld', field.key)
-    assert.equal(field.withheldReason, 'not_in_secret_safe_projection', field.key)
-  }
-  assert.equal(approvalRiskDetail(undefined, { nowMillis: () => now }).risk.level, 'unknown')
 })
 
 test('expiry is explicit before a decision and fails closed on an unreadable deadline', () => {

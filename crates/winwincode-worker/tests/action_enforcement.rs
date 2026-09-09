@@ -57,6 +57,15 @@ impl PreActionDecisionRecorder<Policy> for Journal {
     ) -> Result<(), Self::Error> {
         Ok(())
     }
+
+    fn record_post_action(
+        &mut self,
+        _input: GateInput<'_, Policy>,
+        _outcome: winwincode_execution_port::action_gateway::PostActionOutcome,
+        _hooks: &[winwincode_execution_port::action_gateway::PostActionHook],
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
 }
 
 impl CodexToolExecutor for Executor {

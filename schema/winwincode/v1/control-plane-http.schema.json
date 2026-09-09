@@ -2971,6 +2971,7 @@
         "subject",
         "category",
         "effectiveDecisionScope",
+        "decisionEnabled",
         "sanitizedDetail",
         "binding"
       ],
@@ -3006,6 +3007,10 @@
         },
         "effectiveDecisionScope": {
           "$ref": "#/$defs/ApprovalEffectiveDecisionScope"
+        },
+        "decisionEnabled": {
+          "type": "boolean",
+          "description": "False when the trusted producer did not supply complete action facts; approval is then rejected server-side."
         },
         "sanitizedDetail": {
           "$ref": "#/$defs/ApprovalSanitizedDetailProjection"
@@ -8173,6 +8178,7 @@
       "required": [
         "kind",
         "effect",
+        "priority",
         "resourcePattern",
         "conditionSha256"
       ],
@@ -8199,6 +8205,11 @@
             "allow",
             "deny"
           ]
+        },
+        "priority": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10000
         },
         "resourcePattern": {
           "type": "string",
@@ -11504,10 +11515,9 @@
         "filesystem_write",
         "mcp",
         "network",
-        "shell",
-        "unavailable"
+        "shell"
       ],
-      "description": "Closed, secret-safe action category. unavailable is the sole meaning for a persisted legacy source that did not record a category."
+      "description": "Closed, secret-safe action category from the current execution producer."
     },
     "ApprovalEffectiveDecisionScope": {
       "type": "string",
@@ -11519,12 +11529,82 @@
     "ApprovalSanitizedDetailUnavailableReason": {
       "type": "string",
       "enum": [
-        "producer_unavailable",
-        "encoded_payload_redacted",
-        "source_not_recorded"
+        "producer_unavailable"
       ]
     },
-    "ApprovalSanitizedDetailProjection": {
+    "ApprovalSanitizedDetailAvailableProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "operation",
+        "targetSummaries",
+        "targetCount",
+        "workingDirectory",
+        "riskLevel",
+        "reasonCode",
+        "requestSha256"
+      ],
+      "properties": {
+        "kind": {
+          "const": "available"
+        },
+        "operation": {
+          "type": "string",
+          "enum": [
+            "execute",
+            "modify"
+          ]
+        },
+        "targetSummaries": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          },
+          "minItems": 1,
+          "maxItems": 20,
+          "uniqueItems": true
+        },
+        "targetCount": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10000
+        },
+        "workingDirectory": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 500
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "riskLevel": {
+          "type": "string",
+          "enum": [
+            "medium",
+            "high"
+          ]
+        },
+        "reasonCode": {
+          "type": "string",
+          "enum": [
+            "sandbox_escalation",
+            "network_access",
+            "filesystem_write"
+          ]
+        },
+        "requestSha256": {
+          "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+        }
+      }
+    },
+    "ApprovalSanitizedDetailUnavailableProjection": {
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -11539,7 +11619,18 @@
           "$ref": "#/$defs/ApprovalSanitizedDetailUnavailableReason"
         }
       },
-      "description": "Typed detail availability for the current producer set. Arbitrary EncodedPayload bytes and metadata are never decoded or forwarded."
+      "description": "Fail-closed state for a producer request without complete trusted action facts."
+    },
+    "ApprovalSanitizedDetailProjection": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/ApprovalSanitizedDetailAvailableProjection"
+        },
+        {
+          "$ref": "#/$defs/ApprovalSanitizedDetailUnavailableProjection"
+        }
+      ],
+      "description": "Typed, secret-safe action facts or an explicit unavailable state."
     },
     "PublicationStepStateProjection": {
       "type": "object",

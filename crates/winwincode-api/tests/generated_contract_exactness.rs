@@ -86,6 +86,7 @@ fn generated_approval_detail_is_required_closed_and_secret_safe() {
             "workerSessionId": "wsn_00000000000000000000000000"
         },
         "category": "shell",
+        "decisionEnabled": false,
         "effectiveDecisionScope": "once",
         "expiresAt": "2026-08-24T12:10:00.000Z",
         "id": "apr_00000000000000000000000000",

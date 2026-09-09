@@ -157,13 +157,11 @@ const FIELD_LABELS: Readonly<Record<ApprovalFieldKey, string>> = Object.freeze({
   fileImpact: 'File impact',
   networkTargets: 'Network targets',
   mcpTarget: 'MCP server and tool',
-  requestedReason: 'Requested reason',
+  requestedReason: 'Risk reason and request digest',
 })
 
 const WITHHELD_LABELS: Readonly<Record<ApprovalWithheldReason, string>> = Object.freeze({
   producer_unavailable: 'Not reported by the execution producer.',
-  encoded_payload_redacted: 'Withheld · the tool payload was redacted before it was stored.',
-  source_not_recorded: 'Not recorded for this action.',
   not_in_secret_safe_projection:
     'Withheld · the secret-safe Approval projection does not carry this field.',
 })
@@ -198,7 +196,7 @@ export function boundApprovalText(value: string): ApprovalBoundText {
   })
 }
 
-export function approvalImpact(category: ApprovalProjectionCategory): ApprovalImpactKind {
+export function approvalImpact(category: ApprovalProjectionCategory | undefined): ApprovalImpactKind {
   if (category === ApprovalProjectionCategory.Shell) return 'shell'
   if (category === ApprovalProjectionCategory.FilesystemWrite) return 'filesystem_write'
   if (category === ApprovalProjectionCategory.Network) return 'network'
@@ -207,13 +205,20 @@ export function approvalImpact(category: ApprovalProjectionCategory): ApprovalIm
 }
 
 export function approvalImpactStatements(
-  category: ApprovalProjectionCategory,
+  category: ApprovalProjectionCategory | undefined,
 ): readonly string[] {
   return IMPACT_STATEMENTS[approvalImpact(category)]
 }
 
-export function approvalRiskLevel(category: ApprovalProjectionCategory): ApprovalRiskLevelView {
-  const level = RISK_LEVELS[approvalImpact(category)]
+export function approvalRiskLevel(
+  category: ApprovalProjectionCategory | undefined,
+  trustedLevel?: 'medium' | 'high',
+): ApprovalRiskLevelView {
+  const level = trustedLevel === 'high'
+    ? 'high'
+    : trustedLevel === 'medium'
+      ? 'moderate'
+      : RISK_LEVELS[approvalImpact(category)]
   return Object.freeze({
     level,
     label: RISK_LABELS[level],
@@ -282,14 +287,28 @@ function withheld(key: ApprovalFieldKey, reason: ApprovalWithheldReason): Approv
   })
 }
 
+function available(
+  key: ApprovalFieldKey,
+  value: string,
+  note: string | null = null,
+): ApprovalRiskField {
+  const text = boundApprovalText(value)
+  if (text.text === '') return withheld(key, 'not_in_secret_safe_projection')
+  return Object.freeze({
+    key,
+    label: FIELD_LABELS[key],
+    text: text.text,
+    availability: 'available',
+    note,
+    withheldReason: null,
+    withheldLabel: null,
+  })
+}
+
 /**
  * Build the one secret-safe risk snapshot an Approval card renders.  Only the
- * sealed projection fields are read: category, subject, decision scope,
- * expiry, revision, state, and binding.  No structured tool detail exists on
- * the type, so every field the producer did not summarise is reported as
- * withheld instead of being guessed.  A projection that is missing one of the
- * fields added after it was persisted degrades to the fail-closed rendering
- * instead of throwing.
+ * sealed projection fields are read. Typed producer facts are shown directly;
+ * every field absent from that closed contract is withheld instead of guessed.
  */
 export function approvalRiskDetail(
   projection: ApprovalProjection,
@@ -297,29 +316,38 @@ export function approvalRiskDetail(
 ): ApprovalRiskDetail {
   const nowMillis = (options.nowMillis ?? Date.now)()
   const summary = boundApprovalText(projection?.subject ?? '')
+  const sanitizedDetail = projection?.sanitizedDetail
+  const trustedDetail = sanitizedDetail?.kind === 'available' ? sanitizedDetail : null
   const withheldReason: ApprovalWithheldReason =
-    projection?.sanitizedDetail?.reason ?? 'not_in_secret_safe_projection'
-  const impact = approvalImpact(projection?.category ?? ApprovalProjectionCategory.Unavailable)
-  // The only command text the secret-safe projection carries is the producer
-  // summary itself, so a shell action shows that summary and nothing more.
-  const command: ApprovalRiskField = impact === 'shell' && summary.text !== ''
-    ? Object.freeze({
-      key: 'command',
-      label: FIELD_LABELS.command,
-      text: summary.text,
-      availability: 'available',
-      note: 'Producer summary. The secret-safe projection carries no parsed command.',
-      withheldReason: null,
-      withheldLabel: null,
-    })
+    sanitizedDetail?.kind === 'unavailable'
+      ? sanitizedDetail.reason
+      : 'not_in_secret_safe_projection'
+  const impact = approvalImpact(projection?.category)
+  const targets = trustedDetail === null ? '' : trustedDetail.targetSummaries.join(', ')
+  const targetNote = trustedDetail === null
+    ? null
+    : `${String(trustedDetail.targetSummaries.length)} of ${String(trustedDetail.targetCount)} target(s) shown.`
+  const command: ApprovalRiskField = impact === 'shell' && trustedDetail !== null
+    ? available('command', targets, targetNote)
     : withheld('command', withheldReason)
   const fields: readonly ApprovalRiskField[] = Object.freeze([
     command,
-    withheld('cwd', withheldReason),
-    withheld('fileImpact', withheldReason),
-    withheld('networkTargets', withheldReason),
+    trustedDetail?.workingDirectory === null || trustedDetail === null
+      ? withheld('cwd', withheldReason)
+      : available('cwd', trustedDetail.workingDirectory),
+    impact === 'filesystem_write' && trustedDetail !== null
+      ? available('fileImpact', targets, targetNote)
+      : withheld('fileImpact', withheldReason),
+    trustedDetail?.reasonCode === 'network_access'
+      ? available('networkTargets', targets, targetNote)
+      : withheld('networkTargets', withheldReason),
     withheld('mcpTarget', withheldReason),
-    withheld('requestedReason', withheldReason),
+    trustedDetail === null
+      ? withheld('requestedReason', withheldReason)
+      : available(
+        'requestedReason',
+        `${trustedDetail.reasonCode} · ${trustedDetail.requestSha256}`,
+      ),
   ])
   const workRunId = projection?.binding?.sessionIdentity?.workRunId ?? null
   // An absent deadline fails closed inside approvalExpiry as "unknown".
@@ -338,12 +366,8 @@ export function approvalRiskDetail(
     subjectTruncated: summary.truncated,
     impact,
     impactLabel: IMPACT_LABELS[impact],
-    impactStatements: approvalImpactStatements(
-      projection?.category ?? ApprovalProjectionCategory.Unavailable,
-    ),
-    risk: approvalRiskLevel(
-      projection?.category ?? ApprovalProjectionCategory.Unavailable,
-    ),
+    impactStatements: approvalImpactStatements(projection?.category),
+    risk: approvalRiskLevel(projection?.category, trustedDetail?.riskLevel),
     fields,
     fieldByKey: Object.freeze(Object.fromEntries(
       fields.map(field => [field.key, field]),

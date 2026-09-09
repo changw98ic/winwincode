@@ -689,6 +689,7 @@ fn approved_ready_to_deliver_fixture() -> (Delivery, FrozenDeliveryCandidate) {
     snapshot.session_bindings = approved.session_bindings;
     snapshot.attention_items = approved.attention_items;
     snapshot.work_run_aggregate = approved.work_run_aggregate;
+    snapshot.work_run_aggregate.runs[0].state = winwincode_domain::WorkRunState::Settled;
 
     let executor_stage_run_id = StageRunId("stage:executor".into());
     snapshot.stage_runs.push(StageRun {
@@ -713,6 +714,7 @@ fn approved_ready_to_deliver_fixture() -> (Delivery, FrozenDeliveryCandidate) {
         let mut run = snapshot.work_run_aggregate.runs[0].clone();
         let mut binding = snapshot.session_bindings[0].clone();
         run.id = WorkRunId(format!("wrn_01J000000000000000000000{suffix}"));
+        run.work_item_revision = snapshot.work_run_aggregate.items[0].revision.clone();
         run.execution_job_id = ExecutionJobId(format!("job_01J000000000000000000000{suffix}"));
         run.worker_session_id = WorkerSessionId(format!("wsn_01J000000000000000000000{suffix}"));
         run.product_session_id = Some(ProductSessionId(format!(
@@ -722,10 +724,15 @@ fn approved_ready_to_deliver_fixture() -> (Delivery, FrozenDeliveryCandidate) {
             "cdx_01J000000000000000000000{suffix}"
         )));
         run.lease_id = winwincode_domain::LeaseId(format!("lse_01J000000000000000000000{suffix}"));
-        run.state = winwincode_domain::WorkRunState::Settled;
+        run.state = if role == "executor" {
+            winwincode_domain::WorkRunState::CandidateReady
+        } else {
+            winwincode_domain::WorkRunState::Settled
+        };
         binding.id = SessionBindingId(format!("binding:{role}"));
         binding.work_run_id = run.id.clone();
         binding.execution_job_id = run.execution_job_id.clone();
+        binding.work_item_revision = run.work_item_revision.clone();
         binding.worker_session_id = Some(run.worker_session_id.clone());
         binding.product_session_id = run.product_session_id.clone().unwrap();
         binding.codex_thread_id.clone_from(&run.codex_thread_id);
@@ -735,6 +742,7 @@ fn approved_ready_to_deliver_fixture() -> (Delivery, FrozenDeliveryCandidate) {
         snapshot.work_run_aggregate.runs.push(run);
         snapshot.session_bindings.push(binding);
     }
+    snapshot.work_run_aggregate.items[0].state = winwincode_domain::WorkItemState::CandidateReady;
     snapshot.evidence[0].work_run_id = snapshot.work_run_aggregate.runs[2].id.clone();
     snapshot.evidence[0].session_binding_id = snapshot.session_bindings[2].id.clone();
     snapshot.evidence[0].created_at_millis = 1_800_000_000_069;

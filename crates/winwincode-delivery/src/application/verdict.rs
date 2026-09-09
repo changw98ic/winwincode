@@ -1342,6 +1342,75 @@ mod tests {
     }
 
     #[test]
+    fn delivery_approval_completes_the_exact_verified_candidate() {
+        let fixture = test_support::verdict_fixture(
+            &winwincode_domain::DeliveryId("dlv_01J00000000000000000000018".into()),
+            test_support::VerdictFixtureOutcome::Pass,
+        );
+        let producer_id = fixture.candidate.producer_work_run_id().clone();
+        let facts = test_support::verdict_facts_fixture(
+            &fixture.delivery,
+            &fixture.candidate,
+            test_support::VerdictFixtureOutcome::Pass,
+        );
+        let transition = compute_verdict_transition(
+            &fixture.delivery,
+            SubmitVerdictFacts {
+                expected_revision: fixture.delivery.revision(),
+                candidate: &fixture.candidate,
+                verification: facts.verification(),
+                evidence: facts.evidence(),
+                produced_at_millis: PRODUCED_AT_MILLIS,
+            },
+        )
+        .expect("passing verdict");
+        let pending = transition.delivery();
+        let approval = pending
+            .snapshot()
+            .attention_items
+            .iter()
+            .find(|item| item.item_type == crate::domain::AttentionItemType::DeliveryApproval)
+            .expect("delivery approval");
+        assert_eq!(approval.work_run_id, None);
+
+        let completed = resolve_attention(
+            pending,
+            ResolveAttentionInput {
+                expected_revision: pending.revision(),
+                attention_item_id: approval.id.clone(),
+                work_run_id: approval.work_run_id.clone(),
+                expected_context: approval.context.clone(),
+                actor: "delivery-reviewer".into(),
+                decision: AttentionDecision::Resolved,
+                resolution: "Approve the verified candidate.".into(),
+                now_millis: PRODUCED_AT_MILLIS + 1,
+            },
+        )
+        .expect("current approval completes the candidate");
+
+        assert_eq!(completed.snapshot().status, DeliveryStatus::Delivered);
+        assert!(
+            completed
+                .snapshot()
+                .work_run_aggregate
+                .items
+                .iter()
+                .all(|item| { item.state == winwincode_domain::WorkItemState::Done })
+        );
+        assert_eq!(
+            completed
+                .snapshot()
+                .work_run_aggregate
+                .runs
+                .iter()
+                .find(|run| run.id == producer_id)
+                .expect("candidate producer")
+                .state,
+            winwincode_domain::WorkRunState::Settled
+        );
+    }
+
+    #[test]
     fn inconclusive_verdict_fixture_uses_incomplete_roles_without_findings() {
         let outcome = test_support::VerdictFixtureOutcome::Inconclusive;
         let fixture = test_support::verdict_fixture(

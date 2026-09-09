@@ -158,6 +158,65 @@ test('Delivery reaches its real terminal state after more transitions than the e
   assert.deepEqual(client.commands, [], 'active WorkRuns must be polled, not advanced')
 })
 
+test('candidate-ready WorkRun dispatches independent verification before verdict', async () => {
+  let revision = 7
+  let verificationRuns = 0
+  let delivered = false
+  let requestSequence = 0
+  const commands = []
+  const client = {
+    async query(name) {
+      if (name === 'workrun.get') {
+        return {
+          result: {
+            items: [{ state: delivered ? 'done' : 'candidate_ready' }],
+            runs: Array.from({ length: verificationRuns + 1 }, (_, index) => ({
+              id: `wrn_${String(index + 1).padStart(26, '0')}`,
+              workItemId: 'wit_01J00000000000000000000001',
+              executionJobId: `job_${String(index + 1).padStart(26, '0')}`,
+              state: delivered ? 'settled' : 'candidate_ready',
+            })),
+          },
+        }
+      }
+      return {
+        result: {
+          attention: [],
+          currentCandidate: {
+            candidateRef: `git-candidate:sha256:${'a'.repeat(64)}`,
+          },
+          deliveryRevision: revision,
+          evidence: delivered ? [{ id: 'evidence-terminal' }] : [],
+          readCursor: null,
+          status: delivered ? 'delivered' : 'draft',
+          tasks: delivered ? [{ status: 'completed' }] : [],
+          verdict: delivered
+            ? { criteria: [{ verdict: 'pass' }], status: 'pass' }
+            : null,
+        },
+      }
+    },
+    async command(command, previousRevision, payload) {
+      commands.push({ command, profile: payload.dispatchProfile ?? null })
+      if (command === 'delivery.advance') verificationRuns += 1
+      if (command === 'delivery.submit_verdict') delivered = true
+      revision = previousRevision + 1
+      return { command, currentRevision: revision, outcome: 'completed', previousRevision }
+    },
+    requestId() {
+      requestSequence += 1
+      return `request-${requestSequence}`
+    },
+  }
+
+  await driveDelivery(client, 10_000)
+  assert.deepEqual(commands, [
+    { command: 'delivery.advance', profile: 'reviewer' },
+    { command: 'delivery.advance', profile: 'verifier' },
+    { command: 'delivery.submit_verdict', profile: null },
+  ])
+})
+
 test('Delivery timeout reports the total count and only the newest transition window', async () => {
   let instant = 0
 
@@ -232,7 +291,7 @@ test('API production vertical is a direct generated HTTP runner', async () => {
   assert.doesNotMatch(source, /controlUrl\.replace\('127\.0\.0\.1'/u)
   assert.match(source, /export async function runApiProductionVertical/u)
   assert.doesNotMatch(source, /approveSolutionResolution/u)
-  assert.doesNotMatch(source, /delivery-stage/u)
+  assert.match(source, /kind: 'delivery-stage'/u)
   assert.doesNotMatch(source, /\b(?:chromium|devtools|document|window|WebSocket)\b/iu)
 })
 

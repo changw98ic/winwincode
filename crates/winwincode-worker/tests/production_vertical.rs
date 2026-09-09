@@ -62,18 +62,18 @@ use winwincode_execution_port::{
     action_enforcement::{ActionEnforcementIssuer, ActionEnforcementSigningKey},
     generated::{
         ActionEnforcementDecision, ActionEnforcementReceiptMessage,
-        ActionEnforcementReceiptMessageKind, ApprovalDecisionMessage,
-        ApprovalDecisionMessageDecision, ApprovalDecisionMessageKind, ApprovalDecisionMessageScope,
-        ArtifactAckMessage, ArtifactAckMessageKind, ArtifactKind, ArtifactReference,
-        ChangeBatchProposalEvent, ExecutionEventCategory, ExecutionJob, ExecutionLeaseStamp,
-        ExecutionLimits, ExecutionOutcomeStatus, ExecutionPortErrorCode, ExecutionPortMessage,
-        ExecutionScope, ExecutionWorkspace, ExecutionWorkspaceWriteMode, InputRequestMessage,
-        InputResponseMessage, InputResponseMessageKind, InputResponseMessageStatus,
-        JobCancelMessage, JobCancelMessageKind, JobCancelMessageReason, JobDispatchMessage,
-        JobDispatchMessageKind, JobDispatchResultMessageStatus, LeaseWriteStatus,
-        ModelChunkMessage, ModelChunkMessageKind, ModelGatewayRoute, ModelOpenMessage,
-        RuntimeEventMessage, WorkerCapabilityFeature, WorkerCapabilitySet,
-        WorkerCapabilitySetPlatform, WorkerRegistrationResultMessage,
+        ActionEnforcementReceiptMessageKind, ApprovalActionOperation, ApprovalActionReasonCode,
+        ApprovalActionRiskLevel, ApprovalDecisionMessage, ApprovalDecisionMessageDecision,
+        ApprovalDecisionMessageKind, ApprovalDecisionMessageScope, ArtifactAckMessage,
+        ArtifactAckMessageKind, ArtifactKind, ArtifactReference, ChangeBatchProposalEvent,
+        ExecutionEventCategory, ExecutionJob, ExecutionLeaseStamp, ExecutionLimits,
+        ExecutionOutcomeStatus, ExecutionPortErrorCode, ExecutionPortMessage, ExecutionScope,
+        ExecutionWorkspace, ExecutionWorkspaceWriteMode, InputRequestMessage, InputResponseMessage,
+        InputResponseMessageKind, InputResponseMessageStatus, JobCancelMessage,
+        JobCancelMessageKind, JobCancelMessageReason, JobDispatchMessage, JobDispatchMessageKind,
+        JobDispatchResultMessageStatus, LeaseWriteStatus, ModelChunkMessage, ModelChunkMessageKind,
+        ModelGatewayRoute, ModelOpenMessage, RuntimeEventMessage, WorkerCapabilityFeature,
+        WorkerCapabilitySet, WorkerCapabilitySetPlatform, WorkerRegistrationResultMessage,
         WorkerRegistrationResultMessageKind, WorkerRegistrationResultMessageLeaseRecovery,
         WorkerRegistrationResultMessageStatus,
     },
@@ -5074,6 +5074,27 @@ fn real_request_user_input_resumes_after_response_loss_and_rejects_forged_replay
 fn real_shell_approval_and_action_receipt_reach_one_kernel_handler() {
     run_on_large_stack(async {
         let root = TestDirectory::new("production-shell-approval");
+        let repository = root.sources().join(id("rep", 1));
+        let _ = root.source_revision();
+        fs::create_dir_all(repository.join(".winwincode"))
+            .expect("create repository rule directory");
+        fs::write(
+            repository.join(".winwincode/rules.json"),
+            br#"{
+  "schemaVersion": 1,
+  "rules": [{
+    "id": "fixture.command-success-verification",
+    "version": 1,
+    "event": "command_finished",
+    "outcome": "succeeded",
+    "actions": ["require_verification"],
+    "priority": 10
+  }]
+}"#,
+        )
+        .expect("write repository rule pack");
+        git(&repository, &["add", ".winwincode/rules.json"]);
+        git(&repository, &["commit", "-qm", "add repository rules"]);
         let dispatch = dispatch(&root);
         let port = RecordedPort::default();
         let adapter = winwincode_codex::ProductionCodexAdapter::open(adapter_config(&root))
@@ -5191,7 +5212,20 @@ fn real_shell_approval_and_action_receipt_reach_one_kernel_handler() {
             "embedded approval request was not delivered",
         )
         .await;
-        assert!(approval.action.details.is_none());
+        let detail = approval
+            .action
+            .sanitized_detail
+            .as_ref()
+            .expect("trusted shell approval detail");
+        assert_eq!(detail.operation, ApprovalActionOperation::Execute);
+        assert_eq!(
+            detail.reason_code,
+            ApprovalActionReasonCode::SandboxEscalation
+        );
+        assert_eq!(detail.risk_level, ApprovalActionRiskLevel::High);
+        assert_eq!(detail.target_count, 1);
+        assert_eq!(detail.target_summaries, ["program:zsh;argument_count:2"]);
+        assert_eq!(detail.working_directory.as_deref(), Some("workspace"));
         let decided_at = at("2030-01-01T00:00:02.000Z");
         worker
             .accept_control(
@@ -5363,6 +5397,22 @@ fn real_shell_approval_and_action_receipt_reach_one_kernel_handler() {
             .await
             .expect("ack detached candidate final chunk");
         let messages = port.messages();
+        assert!(
+            messages.iter().any(|message| {
+                let ExecutionPortMessage::RuntimeEventMessage(event) = message else {
+                    return false;
+                };
+                runtime_payload(event).is_some_and(|payload| {
+                    payload["schemaVersion"] == "winwincode.runtime-trace.v1"
+                        && payload["fact"]["kind"] == "hook"
+                        && payload["fact"]["source"] == "shell"
+                        && payload["fact"]["operation"] == "execute"
+                        && payload["fact"]["outcome"] == "succeeded"
+                        && payload["fact"]["actions"] == serde_json::json!(["require_verification"])
+                })
+            }),
+            "the frozen repository rule pack must produce one trusted post-action hook"
+        );
         let outcome = messages
             .iter()
             .find_map(|message| match message {
