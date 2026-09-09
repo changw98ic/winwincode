@@ -449,6 +449,7 @@ function workRunAggregate(deliveryValue, selectedWorkRunId = workRunId) {
         description: 'Focused test',
         verificationMethod: null,
         required: true,
+        requiredEvidenceClass: 'machine',
       }],
       createdAt: '2026-08-27T01:00:00.000Z',
     },
@@ -482,6 +483,12 @@ function workRunAggregate(deliveryValue, selectedWorkRunId = workRunId) {
       fencingToken: '1',
       productSessionId,
       codexThreadId: 'cdx_00000000000000000000000001',
+    }],
+    graphItems: [{
+      workItemId,
+      state: 'running',
+      dependencies: [],
+      blockers: [],
     }],
     readCursor: deliveryValue.readCursor,
   }

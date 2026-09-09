@@ -386,6 +386,7 @@ function workRunAggregate() {
       description: criterion.title,
       verificationMethod: null,
       required: criterion.required,
+      requiredEvidenceClass: 'machine',
     })),
     createdAt: updated,
   }
@@ -412,6 +413,12 @@ function workRunAggregate() {
       productSessionId: stageProductSessionId,
       codexThreadId: identifier('cdx', 1),
     }] : [],
+    graphItems: state.workItems.map(item => ({
+      workItemId: item.id,
+      state: state.workRunStarted ? 'running' : 'ready',
+      dependencies: item.dependsOn,
+      blockers: [],
+    })),
     readCursor: readCursor(),
   }
 }

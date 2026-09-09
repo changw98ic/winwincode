@@ -426,7 +426,7 @@ function workRunAggregate(detail) {
       constraints: [],
       protectedScope: [],
       requiredHumanAuthority: 'none',
-      criteria: [{ id: 'crt_00000000000000000000000001', description: 'Produce evidence for the exact reviewed change.', required: true, verificationMethod: 'test' }],
+      criteria: [{ id: 'crt_00000000000000000000000001', description: 'Produce evidence for the exact reviewed change.', required: true, requiredEvidenceClass: 'machine', verificationMethod: 'test' }],
       createdAt: '2026-08-27T01:00:00.000Z',
     },
     items: [{
@@ -460,6 +460,7 @@ function workRunAggregate(detail) {
       productSessionId,
       codexThreadId: 'cdx_00000000000000000000000001',
     }],
+    graphItems: [{ workItemId, state: 'running', dependencies: [], blockers: [] }],
     readCursor: detail.readCursor,
   }
 }

@@ -199,6 +199,7 @@ function createProjection({
           id: 'crt_00000000000000000000000001',
           description: 'Keep review state',
           required: true,
+          requiredEvidenceClass: 'machine',
           verificationMethod: null,
         }],
         createdAt: '2026-09-02T09:00:00.000Z',
@@ -252,6 +253,7 @@ function createProjection({
         productSessionId: 'psn_00000000000000000000000001',
         codexThreadId: null,
       }],
+      graphItems: [{ workItemId, state: 'running', dependencies: [], blockers: [] }],
       readCursor: {},
     },
   }

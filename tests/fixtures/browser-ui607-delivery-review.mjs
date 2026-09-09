@@ -585,7 +585,7 @@ function workRunAggregate() {
       requiredHumanAuthority: 'none', createdAt: '2026-09-03T01:00:00.000Z',
       criteria: CRITERIA.map((criterion, index) => ({
         id: identifier('crt', index + 1), description: criterion.description,
-        verificationMethod: null, required: criterion.required,
+        verificationMethod: null, required: criterion.required, requiredEvidenceClass: 'machine',
       })),
     },
     items: [{
@@ -594,7 +594,9 @@ function workRunAggregate() {
       goal: 'Keep the rework inside the declared scope.', dependsOn: [],
       criterionIds: CRITERIA.map((_, index) => identifier('crt', index + 1)),
     }],
-    runs, readCursor: readCursor(),
+    runs,
+    graphItems: [{ workItemId, state: 'running', dependencies: [], blockers: [] }],
+    readCursor: readCursor(),
   }
 }
 

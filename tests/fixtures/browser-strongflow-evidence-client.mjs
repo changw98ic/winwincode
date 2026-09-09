@@ -338,6 +338,7 @@ function workRunAggregate() {
         id: criterionId,
         description: 'Open the exact Evidence detail',
         required: true,
+        requiredEvidenceClass: 'machine',
         verificationMethod: null,
       }],
       createdAt: '2026-09-02T01:00:00.000Z',
@@ -373,6 +374,7 @@ function workRunAggregate() {
       productSessionId: stageProductSessionId,
       codexThreadId: 'cdx_00000000000000000000000001',
     }],
+    graphItems: [{ workItemId, state: 'running', dependencies: [], blockers: [] }],
     readCursor: readCursor(),
   }
 }
