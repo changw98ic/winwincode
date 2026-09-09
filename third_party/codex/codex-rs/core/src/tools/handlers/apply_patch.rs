@@ -511,7 +511,6 @@ pub(crate) async fn intercept_apply_patch(
     step_context: Arc<StepContext>,
     tracker: Option<&SharedTurnDiffTracker>,
     call_id: &str,
-    tool_name: &str,
 ) -> Result<Option<FunctionToolOutput>, FunctionCallError> {
     let turn = &step_context.turn;
     let sandbox =
@@ -530,7 +529,7 @@ pub(crate) async fn intercept_apply_patch(
                 session,
                 step_context,
                 call_id: call_id.to_string(),
-                tool_name: ToolName::plain(tool_name),
+                tool_name: ToolName::plain("apply_patch"),
             };
             let content =
                 execute_verified_patch(changes, cwd, turn_environment, tracker, tool_ctx).await?;

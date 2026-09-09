@@ -416,7 +416,7 @@ fn test_apply_patch_cli_updates_file_appends_trailing_newline() -> anyhow::Resul
 }
 
 #[test]
-fn test_apply_patch_cli_failure_after_partial_success_leaves_changes() -> anyhow::Result<()> {
+fn test_apply_patch_cli_failure_rolls_back_earlier_changes() -> anyhow::Result<()> {
     let tmp = tempdir()?;
     let new_file = tmp.path().join("created.txt");
     let missing_file = resolved_under(tmp.path(), "missing.txt")?;
@@ -431,7 +431,7 @@ fn test_apply_patch_cli_failure_after_partial_success_leaves_changes() -> anyhow
             missing_file.display()
         ));
 
-    assert_eq!(fs::read_to_string(&new_file)?, "hello\n");
+    assert!(!new_file.exists());
 
     Ok(())
 }

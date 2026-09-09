@@ -815,7 +815,7 @@
       "httpCommands": [
         "delivery.create",
         "delivery.update_spec",
-          "delivery.advance",
+        "delivery.advance",
         "delivery.resolve_attention",
         "delivery.submit_verdict",
         "delivery.task_breakdown.create",

@@ -427,6 +427,8 @@ pub const CODEX_PATCH_SET: &[&str] = &[
     "upstream/patches/codex/0005-remount-split-bwrap-root-read-only.patch",
     "upstream/patches/codex/0006-tool-gate-and-exact-turn-replay.patch",
     "upstream/patches/codex/0007-bind-tool-gate-executable-identity.patch",
+    "upstream/patches/codex/0008-atomic-apply-patch.patch",
+    "upstream/patches/codex/0009-canonicalize-intercepted-apply-patch.patch",
 ];
 
 const ROLE_SESSION_POLICY_SCHEMA_VERSION: u32 = 2;
@@ -2276,6 +2278,8 @@ mod tests {
                 "upstream/patches/codex/0005-remount-split-bwrap-root-read-only.patch",
                 "upstream/patches/codex/0006-tool-gate-and-exact-turn-replay.patch",
                 "upstream/patches/codex/0007-bind-tool-gate-executable-identity.patch",
+                "upstream/patches/codex/0008-atomic-apply-patch.patch",
+                "upstream/patches/codex/0009-canonicalize-intercepted-apply-patch.patch",
             ]
         );
         assert_eq!(build.event_capacity, 16);

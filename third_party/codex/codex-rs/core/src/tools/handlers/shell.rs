@@ -148,7 +148,6 @@ async fn run_exec_like(args: RunExecLikeArgs) -> Result<FunctionToolOutput, Func
         Arc::clone(&step_context),
         Some(&tracker),
         &call_id,
-        tool_name.name.as_str(),
     )
     .await?
     {

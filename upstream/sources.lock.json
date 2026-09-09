@@ -302,6 +302,30 @@
         "codex-rs/core/src/tools/sandboxing.rs",
         "codex-rs/core/src/tools/sandboxing_tests.rs"
       ]
+    },
+    {
+      "id": "codex-atomic-apply-patch",
+      "file": "upstream/patches/codex/0008-atomic-apply-patch.patch",
+      "planned": false,
+      "patchSha256": "adcaef7e5d4fec4916fa7969c8a006574b76498287d0e524bf59d55539583f85",
+      "targets": [
+        "codex-rs/apply-patch/src/lib.rs",
+        "codex-rs/apply-patch/tests/fixtures/scenarios/015_failure_after_partial_success_leaves_changes/expected/created.txt",
+        "codex-rs/apply-patch/tests/fixtures/scenarios/015_failure_after_partial_success_leaves_changes/patch.txt",
+        "codex-rs/apply-patch/tests/fixtures/scenarios/015_failure_after_partial_success_rolls_back/patch.txt",
+        "codex-rs/apply-patch/tests/suite/tool.rs"
+      ]
+    },
+    {
+      "id": "codex-canonicalize-intercepted-apply-patch",
+      "file": "upstream/patches/codex/0009-canonicalize-intercepted-apply-patch.patch",
+      "planned": false,
+      "patchSha256": "11d0bd23e5bfb6a9545e7492aa3d5c18215842475395ddb5141df87c0b157110",
+      "targets": [
+        "codex-rs/core/src/tools/handlers/apply_patch.rs",
+        "codex-rs/core/src/tools/handlers/shell.rs",
+        "codex-rs/core/src/tools/handlers/unified_exec/exec_command.rs"
+      ]
     }
   ],
   "licenseObligations": {
