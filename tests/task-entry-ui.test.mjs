@@ -626,7 +626,7 @@ test('a form failure reaches the alert line and marks its field', async () => {
 })
 
 function identityFake() {
-  return createControlPlaneRunIdentityFake({ now: FIXED_NOW })
+  return createControlPlaneRunIdentityFake()
 }
 
 function runFixture({
@@ -634,7 +634,7 @@ function runFixture({
   byDevice,
   identity = identityFake(),
   anchor = {
-    taskId: 'tsk_00000000000000000000000042',
+    taskId: 'wit_00000000000000000000000042',
     clientId: '123456789012',
     repositoryBindingId: 'rb_10000000000000000000000001',
     baseBranch: 'main',
@@ -677,11 +677,9 @@ test('the run projection composes live facts with the fake identity zone', async
   const identity = model.state.identity
   assert.equal(identity.workerSessions.length, 1)
   assert.equal(identity.workerSessions[0].state, 'running')
-  assert.equal(identity.workerSessions[0].workerSessionId, 'wss_00000000000000000000000042')
-  assert.equal(identity.candidate.candidateRef, 'cand_00000000000000000000000042')
-  assert.equal(identity.candidate.branchName, 'winwincode/task/tsk_00000000000000000000000042')
-  assert.equal(identity.apply.result, 'branch_created')
-  assert.equal(identity.apply.targetBranch, 'winwincode/task/tsk_00000000000000000000000042')
+  assert.equal(identity.workerSessions[0].workerSessionId, 'wsn_00000000000000000000000042')
+  assert.equal(identity.candidate, null, 'a running WorkRun is not a published candidate')
+  assert.equal(identity.apply, null, 'execution alone is not an Apply receipt')
   model.close()
 })
 
@@ -732,10 +730,8 @@ test('the run page renders the six §16.7 identity rows from served facts', asyn
   assert.match(visibleText(values.get('Repository')), /WinWinCode · base main/u)
   assert.match(visibleText(values.get('Occupancy')), /Capacity 1 \/ 8/u)
   assert.match(visibleText(values.get('Worker sessions')), /Running/u)
-  assert.match(visibleText(values.get('Candidate')), /cand_00000000000000000000000042/u)
-  assert.match(visibleText(values.get('Candidate')), /Local branch created/u)
-  assert.match(visibleText(values.get('Apply')), /Local branch created/u)
-  assert.match(visibleText(values.get('Apply')), /Target winwincode\/task\/tsk_/u)
+  assert.match(visibleText(values.get('Candidate')), /No Candidate yet/u)
+  assert.match(visibleText(values.get('Apply')), /No apply attempts yet/u)
   assert.equal(
     byClass(rootElement, 'wwc-task-run-identity-notice').hidden,
     true,
@@ -794,13 +790,15 @@ test('the fake task port issues stable ids and answers describe', async () => {
   assert.equal(port.describe(first.taskId).description, 'first')
   assert.equal(port.describe('tsk_unknown'), null)
 
-  const identity = createControlPlaneRunIdentityFake({ now: FIXED_NOW })
+  const identity = createControlPlaneRunIdentityFake()
   const projection = await identity.read(first)
   assert.equal(projection.taskId, first.taskId)
-  assert.equal(projection.workerSessions.length, 1)
-  assert.equal(projection.candidate.state, 'branch_created')
-  assert.equal(projection.candidate.history.length, 1)
-  assert.equal(projection.candidate.history[0].result, 'branch_created')
+  assert.match(first.taskId, /^wit_[0-9A-HJKMNP-TV-Z]{26}$/u)
+  assert.equal(projection.workRun.workItemId, first.taskId)
+  assert.equal(projection.workRun.state, 'running')
+  assert.match(projection.workRun.id, /^wrn_[0-9A-HJKMNP-TV-Z]{26}$/u)
+  assert.equal(projection.candidate, null)
+
 })
 
 test('the run presentation helpers keep one tone and commit vocabulary', () => {

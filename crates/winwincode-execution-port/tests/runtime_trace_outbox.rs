@@ -6,8 +6,8 @@ use sha2::{Digest, Sha256};
 use winwincode_domain::{
     ArtifactId, CodexThreadId, ExecutionAckSequence, ExecutionEventId, ExecutionJobId,
     ExecutionMessageId, ExecutionSequence, FencingToken, Instant, LeaseId, ProductSessionId,
-    RequestId, SchemaVersion, SessionIdentity, Sha256Digest, StageRunId, WorkerId,
-    WorkerInstanceId, WorkerSessionId,
+    RequestId, SchemaVersion, SessionIdentity, Sha256Digest, WorkRunId, WorkerId, WorkerInstanceId,
+    WorkerSessionId,
 };
 use winwincode_execution_port::action_gateway::{
     ExecutionEnvelope, ExecutionEnvelopeToken, GateDecision, GateInput, PreActionDecisionRecorder,
@@ -58,7 +58,7 @@ fn session_identity() -> SessionIdentity {
     SessionIdentity {
         codex_thread_id: CodexThreadId(id("cdx", 'A')),
         product_session_id: ProductSessionId(id("psn", 'A')),
-        stage_run_id: Some(StageRunId(id("run", 'A'))),
+        work_run_id: Some(WorkRunId(id("wrn", 'A'))),
         worker_session_id: WorkerSessionId(id("wsn", 'A')),
     }
 }

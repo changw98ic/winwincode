@@ -109,16 +109,14 @@ fn seed_queue_lease(
     claim: &ExecutionLeaseClaim,
     seed: u64,
 ) {
-    let (product_session_id, delivery_id, stage_run_id) = match &job.scope {
+    let (product_session_id, delivery_id, work_run_id) = match &job.scope {
         winwincode_execution_port::generated::ExecutionScope::ProductSessionExecutionScope(
             scope,
         ) => (scope.product_session_id.clone(), None, None),
-        winwincode_execution_port::generated::ExecutionScope::DeliveryStageExecutionScope(
-            scope,
-        ) => (
+        winwincode_execution_port::generated::ExecutionScope::WorkRunExecutionScope(scope) => (
             scope.product_session_id.clone(),
-            Some(scope.delivery_id.clone()),
-            Some(scope.stage_run_id.clone()),
+            Some(winwincode_domain::DeliveryId(format!("dlv_{seed:026}"))),
+            Some(scope.work_run_id.clone()),
         ),
     };
     let scope = ExecutionQueueScope {
@@ -140,7 +138,7 @@ fn seed_queue_lease(
             dispatch_payload: serde_json::to_vec(job).expect("canonical job payload"),
             attempt: u64::try_from(job.attempt).expect("positive attempt"),
             dependencies: Vec::new(),
-            stage_run_id,
+            work_run_id,
             submitted_at: claim.issued_at.clone(),
         })
         .expect("queue submit");
@@ -1000,12 +998,12 @@ fn a_claim_must_join_the_exact_durable_job_identity_before_writing_a_lease() {
     ));
 
     let mut changed_scope = expected.job.clone();
-    let winwincode_execution_port::generated::ExecutionScope::DeliveryStageExecutionScope(scope) =
+    let winwincode_execution_port::generated::ExecutionScope::WorkRunExecutionScope(scope) =
         &mut changed_scope.scope
     else {
         panic!("fixture job must use a Delivery stage scope");
     };
-    scope.stage_run_id = winwincode_domain::StageRunId("run_00000000000000000000000099".to_owned());
+    scope.work_run_id = winwincode_domain::WorkRunId("wrn_00000000000000000000000099".to_owned());
     let scope_error = service
         .claim_execution_job(changed_scope, claim_from_dispatch(&expected))
         .expect_err("a changed scope must not claim the durable job");
@@ -1236,6 +1234,7 @@ fn local_and_remote_adapters_share_the_same_durable_service_outcomes() {
 }
 
 mod runtime_router_fixture {
+    use crate::seed_queue_lease;
     use std::convert::Infallible;
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -1245,9 +1244,10 @@ mod runtime_router_fixture {
     use rusqlite::{Connection, params};
     use sha2::{Digest, Sha256};
     use winwincode_api::generated::{Actor, CommandEnvelope, CommandName, Scope};
+    use winwincode_control_plane::DurableExecutionPortIngress;
     use winwincode_control_plane::delivery_execution::{
         DeliveryExecutionConfig, DeliveryExecutionPortError, ExecutionJobDispatcher,
-        PendingDeliveryExecution, prepare_delivery_advance,
+        PendingDeliveryExecution, prepare_workrun_advance,
     };
     use winwincode_control_plane::execution_port_service::{
         RuntimeEventPortRouter, RuntimeEventRoute, RuntimeEventRouteResolver,
@@ -1258,7 +1258,7 @@ mod runtime_router_fixture {
         ExecutionPortServiceError, OutboxEvent,
     };
     use winwincode_delivery::application::stage::{
-        AdvanceStageInput, NewStageIdentities, SessionBindingAuthority, advance,
+        NewStageIdentities, SessionBindingAuthority, StageAdvanceEffect,
         test_support::{active_lease_identity, session_binding_authority},
     };
     use winwincode_delivery::domain::{
@@ -1274,8 +1274,8 @@ mod runtime_router_fixture {
         ExecutionEventId, ExecutionJobId, ExecutionMessageId, ExecutionSequence, FencingToken,
         Instant, LeaseId, OrganizationId, ProductSessionId, ProjectId, RepositoryId, RequestId,
         Revision, SchemaVersion, SessionBindingSourceIdentity, SessionBindingSourceIdentityKind,
-        SessionIdentity, Sha256Digest, StageRunId, UserId, WorkerId, WorkerInstanceId,
-        WorkerSessionId, WorkspaceId,
+        SessionIdentity, Sha256Digest, StageRunId, UserId, WorkItemId, WorkItemState, WorkRunId,
+        WorkerId, WorkerInstanceId, WorkerSessionId, WorkspaceId,
     };
     use winwincode_domain::{RepositoryScope, UserActor};
     use winwincode_execution_port::action_enforcement::{
@@ -1286,6 +1286,7 @@ mod runtime_router_fixture {
         ActionEnforcementRequestMessageKind, ActionPolicyKind, ExecutionEventCategory,
         ExecutionEventRecord, ExecutionJob, ExecutionLeaseStamp, ExecutionLimits,
         ExecutionPortMessage, ExecutionScope, ExecutionWorkspace, ExecutionWorkspaceWriteMode,
+        JobDispatchResultMessage, JobDispatchResultMessageKind, JobDispatchResultMessageStatus,
         LeaseWriteStatus, RuntimeAckMessage, RuntimeEventMessage, RuntimeEventMessageKind,
         SessionBindingMessage, SessionBindingMessageKind,
     };
@@ -1341,6 +1342,16 @@ mod runtime_router_fixture {
             status: DeliveryTaskStatus::Pending,
         }];
         snapshot.stage_runs.clear();
+        snapshot.work_run_aggregate.runs.clear();
+        let item = snapshot
+            .work_run_aggregate
+            .items
+            .first_mut()
+            .expect("fixture WorkItem");
+        item.id = WorkItemId(canonical_id("wit", seed));
+        item.title = "Implement the approved task".into();
+        item.goal = "Implement the approved candidate change.".into();
+        item.state = WorkItemState::Ready;
         snapshot.session_bindings.clear();
         snapshot.attention_items.clear();
         snapshot.evidence.clear();
@@ -1351,29 +1362,60 @@ mod runtime_router_fixture {
 
     fn pending_execution(seed: u64) -> PendingDeliveryExecution {
         let delivery = delivery_before_advance(seed);
-        let result = advance(
+        let selected = delivery
+            .snapshot()
+            .work_run_aggregate
+            .start_next()
+            .expect("ready WorkItem");
+        let result = winwincode_delivery::application::stage::StageAdvanceResult::canonical_workrun_dispatch(
             &delivery,
-            AdvanceStageInput {
-                current_lease: None,
-                rework_authorization: None,
-                expected_revision: 1,
-                product_session_id: ProductSessionId(canonical_id("psn", seed)),
-                identities: NewStageIdentities {
+            None,
+            NewStageIdentities {
                     stage_run_id: StageRunId(canonical_id("run", seed)),
+                    work_contract_id: delivery.snapshot().work_run_aggregate.contract.id.clone(),
+                    work_contract_revision: delivery
+                        .snapshot()
+                        .work_run_aggregate
+                        .contract
+                        .revision
+                        .clone(),
+                    work_item_id: delivery
+                        .snapshot()
+                        .work_run_aggregate
+                        .items
+                        .first()
+                        .expect("fixture WorkItem")
+                        .id
+                        .clone(),
+                    work_item_revision: delivery
+                        .snapshot()
+                        .work_run_aggregate
+                        .items
+                        .first()
+                        .expect("fixture WorkItem")
+                        .revision
+                        .clone(),
+                    work_run_id: WorkRunId(canonical_id("wrn", seed)),
                     execution_job_id: ExecutionJobId(canonical_id("job", seed)),
                     session_binding_id: SessionBindingId::new(format!("binding-{seed}"))
                         .expect("binding id"),
                     attention_item_id: AttentionItemId(canonical_id("att", seed)),
                 },
-                review: None,
-                previous_outcome: None,
-                now_millis: 1_800_000_000_100,
-            },
-        )
-        .expect("stage advance");
-        prepare_delivery_advance(
-            RequestId(canonical_id("req", seed)),
-            result,
+            ProductSessionId(canonical_id("psn", seed)),
+            "executor".into(),
+            selected.work_item.goal.clone(),
+            u64::try_from(selected.attempt).expect("attempt"),
+            1_800_000_000_100,
+        ).expect("WorkRun dispatch");
+        let intent = match &result.effect {
+            StageAdvanceEffect::Dispatch(intent) => intent.clone(),
+            _ => panic!("fixture advance must create a dispatch intent"),
+        };
+        let job = prepare_workrun_advance(
+            &RequestId(canonical_id("req", seed)),
+            &result.delivery.snapshot().work_run_aggregate,
+            &result.delivery.snapshot().spec,
+            &intent,
             DeliveryExecutionConfig {
                 payload_digest: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
                 candidate_ref: None,
@@ -1389,7 +1431,8 @@ mod runtime_router_fixture {
                 },
             },
         )
-        .expect("pending execution")
+        .expect("pending execution");
+        PendingDeliveryExecution::from_workrun(RequestId(canonical_id("req", seed)), result, job)
     }
 
     fn delivery_advance_command(seed: u64) -> CommandEnvelope {
@@ -1400,7 +1443,7 @@ mod runtime_router_fixture {
             }),
             command: CommandName::DeliveryAdvance,
             expected_revision: Revision(1),
-            payload: serde_json::json!({"deliveryId": canonical_id("dlv", seed)}),
+            payload: serde_json::json!({"deliveryId": canonical_id("dlv", seed), "dispatchProfile": "executor"}),
             request_id: RequestId(canonical_id("req", seed)),
             schema_version: SchemaVersion::WinwincodeV1,
             scope: Scope::RepositoryScope(RepositoryScope {
@@ -1431,9 +1474,9 @@ mod runtime_router_fixture {
             worker_instance_id.clone(),
             worker_session_id.clone(),
         );
-        let (stage_run_id, product_session_id) = match &pending.job().scope {
-            ExecutionScope::DeliveryStageExecutionScope(scope) => {
-                (scope.stage_run_id.clone(), scope.product_session_id.clone())
+        let (work_run_id, product_session_id) = match &pending.job().scope {
+            ExecutionScope::WorkRunExecutionScope(scope) => {
+                (scope.work_run_id.clone(), scope.product_session_id.clone())
             }
             ExecutionScope::ProductSessionExecutionScope(_) => {
                 panic!("runtime router fixture must use a Delivery-stage job")
@@ -1442,7 +1485,7 @@ mod runtime_router_fixture {
         let session_identity = SessionIdentity {
             codex_thread_id: CodexThreadId(canonical_id("cdx", seed)),
             product_session_id: product_session_id.clone(),
-            stage_run_id: Some(stage_run_id.clone()),
+            work_run_id: Some(work_run_id.clone()),
             worker_session_id: worker_session_id.clone(),
         };
         let message = SessionBindingMessage {
@@ -1474,7 +1517,7 @@ mod runtime_router_fixture {
                 worker_instance_id,
                 worker_session_id: worker_session_id.clone(),
             },
-            stage_run_id: Some(stage_run_id),
+            work_run_id: Some(work_run_id),
             worker_id,
             worker_session_id,
         };
@@ -1491,9 +1534,9 @@ mod runtime_router_fixture {
         binding: &SessionBindingMessage,
         seed: u64,
     ) -> RuntimeEventMessage {
-        let (stage_run_id, product_session_id) = match &pending.job().scope {
-            ExecutionScope::DeliveryStageExecutionScope(scope) => {
-                (scope.stage_run_id.clone(), scope.product_session_id.clone())
+        let (work_run_id, product_session_id) = match &pending.job().scope {
+            ExecutionScope::WorkRunExecutionScope(scope) => {
+                (scope.work_run_id.clone(), scope.product_session_id.clone())
             }
             ExecutionScope::ProductSessionExecutionScope(_) => {
                 panic!("runtime router fixture must use a Delivery-stage job")
@@ -1517,7 +1560,7 @@ mod runtime_router_fixture {
             session_identity: SessionIdentity {
                 codex_thread_id: binding.codex_thread_id.clone(),
                 product_session_id,
-                stage_run_id: Some(stage_run_id),
+                work_run_id: Some(work_run_id),
                 worker_session_id: binding.worker_session_id.clone(),
             },
             worker_session_id: binding.worker_session_id.clone(),
@@ -1572,6 +1615,7 @@ mod runtime_router_fixture {
     struct GuardRecordingStorage {
         inner: SqliteStorage,
         commits: Arc<Mutex<Vec<Vec<StateRevisionGuard>>>>,
+        terminal_race: Option<String>,
     }
 
     impl ProductStateStorage for GuardRecordingStorage {
@@ -1580,6 +1624,27 @@ mod runtime_router_fixture {
                 .lock()
                 .expect("recorded commit guards lock")
                 .push(commit.state_guards().to_vec());
+            if commit.stream_id.starts_with("runtime:")
+                && let Some(stream) = self.terminal_race.take()
+            {
+                let identity = ReceiptIdentity::new(
+                    ReceiptActorKey::from_encoded(b"terminal-race-actor".to_vec())?,
+                    ReceiptScopeKey::from_encoded(b"terminal-race-scope".to_vec())?,
+                    RequestId("terminal-race".into()),
+                )?;
+                self.inner.commit(&StateCommit::new(
+                    identity,
+                    Sha256Digest(format!("sha256:{}", "f".repeat(64))),
+                    stream,
+                    0,
+                    b"{}".to_vec(),
+                    vec![NewOutboxEvent::internal(
+                        "terminal-race-event",
+                        "terminal-race",
+                        b"{}".to_vec(),
+                    )],
+                ))?;
+            }
             self.inner.commit(commit)
         }
 
@@ -1643,6 +1708,95 @@ mod runtime_router_fixture {
         }
     }
 
+    fn append_accepted_workrun(
+        root: &Path,
+        scope: &RepositoryScope,
+        pending: &PendingDeliveryExecution,
+        binding: &SessionBindingMessage,
+        seed: u64,
+    ) {
+        let mut storage = SqliteStorage::open(root).expect("accepted dispatch storage");
+        let claim = ExecutionLeaseClaim {
+            expires_at: binding.lease.expires_at.clone(),
+            fencing_token: binding.lease.fencing_token.clone(),
+            issued_at: binding.lease.issued_at.clone(),
+            job_id: binding.lease.job_id.clone(),
+            lease_id: binding.lease.lease_id.clone(),
+            message_id: binding.message_id.clone(),
+            payload_digest: pending.job().payload_digest.clone(),
+            request_id: RequestId(canonical_id("req", seed + 201)),
+            worker_id: binding.lease.worker_id.clone(),
+            worker_instance_id: binding.lease.worker_instance_id.clone(),
+            attempt: u64::try_from(binding.lease.attempt).expect("positive attempt"),
+        };
+        seed_queue_lease(&mut storage, pending.job(), &claim, seed);
+        let registration = ExecutionRegistry::new(&mut storage)
+            .expect("execution registry")
+            .register_worker(&WorkerRegistrationRequest {
+                authentication_identity:
+                    winwincode_storage::WorkerAuthenticationIdentity::LocalEmbedded {
+                        control_plane_principal: "fixture-control-plane".to_owned(),
+                    },
+                protocol_version: winwincode_storage::EXECUTION_PROTOCOL_VERSION.to_owned(),
+                platform: winwincode_storage::WorkerPlatform::Aarch64AppleDarwin,
+                capabilities: vec!["codex".to_owned()],
+                capability_digest: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
+                security_zone: "local".to_owned(),
+                max_slots: 1,
+                message_id: ExecutionMessageId(canonical_id("xmsg", seed + 198)),
+                request_id: RequestId(canonical_id("req", seed + 198)),
+                sent_at: binding.sent_at.clone(),
+                started_at: binding.sent_at.clone(),
+                worker_id: binding.lease.worker_id.clone(),
+                worker_instance_id: binding.lease.worker_instance_id.clone(),
+            })
+            .expect("worker registration");
+        assert_eq!(
+            registration.status,
+            winwincode_storage::WorkerRegistrationStatus::Accepted
+        );
+        let lease_receipt = storage
+            .execution_registry()
+            .expect("execution registry")
+            .claim_execution_job(&claim)
+            .expect("accepted dispatch lease");
+        assert_eq!(
+            lease_receipt.status,
+            winwincode_storage::LeaseWriteStatus::Accepted
+        );
+        let accepted = JobDispatchResultMessage {
+            error: None,
+            job_id: binding.lease.job_id.clone(),
+            kind: JobDispatchResultMessageKind::JobDispatchResult,
+            lease: binding.lease.clone(),
+            message_id: ExecutionMessageId(canonical_id("xmsg", seed + 200)),
+            payload_digest: pending.job().payload_digest.clone(),
+            request_id: claim.request_id.clone(),
+            schema_version: SchemaVersion::WinwincodeV1,
+            sent_at: binding.sent_at.clone(),
+            status: JobDispatchResultMessageStatus::Accepted,
+            worker_session_id: Some(binding.worker_session_id.clone()),
+        };
+        let mut control_plane = ControlPlane::start_local(
+            ControlPlaneConfig::local(root),
+            Box::new(RecordingPublisher),
+        )
+        .expect("accepted dispatch Control Plane");
+        let output = DurableExecutionPortIngress::new(
+            &mut control_plane,
+            &mut storage,
+            scope,
+            binding.sent_at.clone(),
+        )
+        .expect("accepted dispatch ingress")
+        .handle(&ExecutionPortMessage::JobDispatchResultMessage(accepted))
+        .expect("append accepted WorkRun");
+        drop(output);
+        control_plane
+            .shutdown()
+            .expect("accepted dispatch shutdown");
+    }
+
     fn runtime_fixture(seed: u64, name: &str) -> RuntimeFixture {
         let root = temporary_directory(name);
         let pending = pending_execution(seed);
@@ -1661,6 +1815,15 @@ mod runtime_router_fixture {
             .expect("Delivery execution commit");
         let (authority, binding) = lease_and_binding(&pending, seed);
         control_plane
+            .shutdown()
+            .expect("Delivery execution shutdown");
+        append_accepted_workrun(&root, &repository_scope(seed), &pending, &binding, seed);
+        let mut control_plane = ControlPlane::start_local(
+            ControlPlaneConfig::local(&root),
+            Box::new(RecordingPublisher),
+        )
+        .expect("SessionBinding Control Plane");
+        control_plane
             .commit_delivery_session_binding(&binding, &authority, &binding.sent_at)
             .expect("SessionBinding commit");
         let scope = repository_scope(seed);
@@ -1678,6 +1841,7 @@ mod runtime_router_fixture {
     fn runtime_fixture_with_guard_recorder(
         seed: u64,
         name: &str,
+        terminal_race: bool,
     ) -> (RuntimeFixture, Arc<Mutex<Vec<Vec<StateRevisionGuard>>>>) {
         let root = temporary_directory(name);
         let pending = pending_execution(seed);
@@ -1688,6 +1852,7 @@ mod runtime_router_fixture {
             Box::new(GuardRecordingStorage {
                 inner: storage,
                 commits: Arc::clone(&commits),
+                terminal_race: None,
             }),
             Box::new(RecordingPublisher),
         )
@@ -1700,6 +1865,22 @@ mod runtime_router_fixture {
             )
             .expect("Delivery execution commit");
         let (authority, binding) = lease_and_binding(&pending, seed);
+        control_plane
+            .shutdown()
+            .expect("Delivery execution shutdown");
+        append_accepted_workrun(&root, &repository_scope(seed), &pending, &binding, seed);
+        let storage = SqliteStorage::open(&root).expect("SessionBinding storage");
+        let commits_for_binding = Arc::clone(&commits);
+        let mut control_plane = ControlPlane::start(
+            Box::new(GuardRecordingStorage {
+                inner: storage,
+                commits: commits_for_binding,
+                terminal_race: terminal_race
+                    .then(|| format!("delivery-terminal-authority:{}", pending.job().job_id.0)),
+            }),
+            Box::new(RecordingPublisher),
+        )
+        .expect("SessionBinding Control Plane");
         control_plane
             .commit_delivery_session_binding(&binding, &authority, &binding.sent_at)
             .expect("SessionBinding commit");
@@ -1719,12 +1900,32 @@ mod runtime_router_fixture {
     }
 
     #[test]
+    fn terminal_report_racing_runtime_commit_rejects_the_new_event_atomically() {
+        let (mut fixture, _) =
+            runtime_fixture_with_guard_recorder(205, "terminal-runtime-race", true);
+        let before = runtime_snapshot(&fixture.root);
+        let ack = fixture
+            .control_plane
+            .accept_runtime_event(
+                &fixture.scope,
+                &fixture.runtime,
+                &fixture.authority,
+                &fixture.runtime.sent_at,
+            )
+            .expect("raced runtime rejection");
+        assert_eq!(ack.status, LeaseWriteStatus::RejectedConflict);
+        assert_runtime_snapshots_equal(&before, &runtime_snapshot(&fixture.root));
+        fixture.control_plane.shutdown().expect("shutdown");
+        fs::remove_dir_all(fixture.root).expect("release fixture");
+    }
+
+    #[test]
     fn delivery_runtime_commit_carries_the_current_delivery_revision_guard() {
         let seed = 204;
         let (mut fixture, commits) =
-            runtime_fixture_with_guard_recorder(seed, "delivery-state-guard");
+            runtime_fixture_with_guard_recorder(seed, "delivery-state-guard", false);
         let delivery_id = match &fixture.job.scope {
-            ExecutionScope::DeliveryStageExecutionScope(scope) => scope.delivery_id.clone(),
+            ExecutionScope::WorkRunExecutionScope(_) => DeliveryId(canonical_id("dlv", seed)),
             ExecutionScope::ProductSessionExecutionScope(_) => {
                 panic!("runtime fixture must use a Delivery-stage job")
             }
@@ -1753,8 +1954,8 @@ mod runtime_router_fixture {
         assert_eq!(recorded.len(), 1, "runtime ingress must issue one commit");
         assert_eq!(
             recorded[0].len(),
-            1,
-            "Delivery runtime commit must carry one guard"
+            2,
+            "Delivery runtime commit must guard both Delivery revision and absent terminal report"
         );
         assert_eq!(recorded[0][0].stream_id(), delivery_stream);
         assert_eq!(
@@ -1762,6 +1963,11 @@ mod runtime_router_fixture {
             current_delivery_revision,
             "guard must bind the Delivery revision read before ledger construction"
         );
+        assert_eq!(
+            recorded[0][1].stream_id(),
+            format!("delivery-terminal-authority:{}", fixture.job.job_id.0)
+        );
+        assert_eq!(recorded[0][1].expected_revision(), 0);
         drop(recorded);
 
         fixture
@@ -1774,7 +1980,7 @@ mod runtime_router_fixture {
     fn install_runtime_lease(
         storage: &mut SqliteStorage,
         runtime: &RuntimeEventMessage,
-        job: &ExecutionJob,
+        _job: &ExecutionJob,
         seed: u64,
     ) {
         let mut registry = ExecutionRegistry::new(storage).expect("execution registry");
@@ -1798,21 +2004,15 @@ mod runtime_router_fixture {
                 worker_instance_id: runtime.lease.worker_instance_id.clone(),
             })
             .expect("worker registration");
-        registry
-            .claim_execution_job(&ExecutionLeaseClaim {
-                expires_at: runtime.lease.expires_at.clone(),
-                fencing_token: runtime.lease.fencing_token.clone(),
-                issued_at: runtime.lease.issued_at.clone(),
-                job_id: runtime.lease.job_id.clone(),
-                lease_id: runtime.lease.lease_id.clone(),
-                message_id: ExecutionMessageId(canonical_id("xmsg", seed + 601)),
-                payload_digest: job.payload_digest.clone(),
-                request_id: RequestId(canonical_id("req", seed + 601)),
-                worker_id: runtime.lease.worker_id.clone(),
-                worker_instance_id: runtime.lease.worker_instance_id.clone(),
-                attempt: u64::try_from(runtime.lease.attempt).expect("lease attempt"),
-            })
-            .expect("execution lease claim");
+        assert!(
+            registry
+                .has_request(
+                    "claim",
+                    &runtime.lease.job_id,
+                    &RequestId(canonical_id("req", seed + 201))
+                )
+                .expect("execution lease receipt lookup")
+        );
     }
 
     fn runtime_ack(message: ExecutionPortMessage) -> RuntimeAckMessage {
@@ -2565,6 +2765,8 @@ mod runtime_router_fixture {
         control_plane
             .shutdown()
             .expect("pending fixture Control Plane shutdown");
+        let (_, binding) = lease_and_binding(&pending, seed);
+        append_accepted_workrun(&root, &repository_scope(seed), &pending, &binding, seed);
 
         let mut storage = SqliteStorage::open(&root).expect("pending storage reopen");
         let mut service = winwincode_control_plane::ExecutionPortService::new(
@@ -2576,7 +2778,7 @@ mod runtime_router_fixture {
             .expect_err("pending binding must not produce a replay frame");
         assert!(matches!(
             error,
-            ExecutionPortServiceError::AuthorityRejected("SessionBinding WorkerSession is pending")
+            ExecutionPortServiceError::AuthorityRejected("SessionBinding CodexThread is pending")
         ));
 
         drop(service);

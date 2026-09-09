@@ -901,7 +901,7 @@ fn delegated_read_only_authorization(
     let Some(workspace) = workspace else {
         return Ok(None);
     };
-    if is_request_user_input(request) {
+    if is_request_user_input(request) || is_process_output_poll(request) {
         return Ok(Some(bound_authorization(request, None)));
     }
     if let Some(executable) = explicit_read_only_shell_authorization(state, request, &workspace) {
@@ -917,6 +917,37 @@ fn is_request_user_input(request: &KernelActionRequest) -> bool {
             .as_deref()
             .is_none_or(|namespace| namespace.is_empty() || namespace == "functions")
         && matches!(request.payload, KernelActionPayload::Function { .. })
+}
+
+// Core keeps the process manager per session. Reading its output is not a new
+// command; non-empty stdin still requires an explicit action authority.
+fn is_process_output_poll(request: &KernelActionRequest) -> bool {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Poll {
+        session_id: i32,
+        #[serde(default)]
+        chars: String,
+        yield_time_ms: Option<u64>,
+        max_output_tokens: Option<usize>,
+    }
+    if request.tool_name != "write_stdin"
+        || request
+            .namespace
+            .as_deref()
+            .is_some_and(|name| !name.is_empty() && name != "functions")
+    {
+        return false;
+    }
+    let KernelActionPayload::Function { arguments } = &request.payload else {
+        return false;
+    };
+    serde_json::from_str::<Poll>(arguments).is_ok_and(|poll| {
+        poll.session_id > 0
+            && poll.chars.is_empty()
+            && poll.yield_time_ms.is_none_or(|value| value <= 300_000)
+            && poll.max_output_tokens.is_none_or(|value| value <= 100_000)
+    })
 }
 
 fn explicit_read_only_shell_authorization(
@@ -1243,6 +1274,9 @@ fn canonical_tool_requests(
     request: &KernelActionRequest,
 ) -> Result<Vec<ToolRequest>, ActionBridgeError> {
     const DEFAULT_FUNCTION_NAMESPACE: &str = "functions";
+    if is_process_output_poll(request) {
+        return Ok(Vec::new());
+    }
     // `request_user_input` is a built-in control tool.  It has no side effect
     // for the action gateway to authorize: the handler pauses the Kernel and
     // emits the durable InputRequest frame, then waits for the corresponding
@@ -1530,7 +1564,7 @@ mod tests {
                 session_identity: SessionIdentity {
                     codex_thread_id: canonical_thread_id,
                     product_session_id: ProductSessionId(id("psn", 'A')),
-                    stage_run_id: None,
+                    work_run_id: None,
                     worker_session_id,
                 },
             },
@@ -1862,6 +1896,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the read-only boundary test keeps filesystem setup and every rejection together"
+    )]
     async fn delegated_composer_allows_only_explicit_reads_before_the_action_queue() {
         let root = std::env::temp_dir().join(format!(
             "winwincode-codex-action-read-only-{}",
@@ -1896,6 +1934,35 @@ mod tests {
         gate.update_now(&Instant("2030-01-01T00:00:02.000Z".to_owned()))
             .expect("install trusted time");
 
+        let poll = KernelActionRequest {
+            session_id: binding().canonical_thread_id.0,
+            turn_id: "turn-poll".into(),
+            operation_id: "call-poll".into(),
+            namespace: Some("functions".into()),
+            tool_name: "write_stdin".into(),
+            payload: KernelActionPayload::Function {
+                arguments: r#"{"session_id":123,"chars":"","yield_time_ms":30000}"#.into(),
+            },
+        };
+        let permission = gate
+            .authorize(poll.clone())
+            .await
+            .expect("read process output");
+        gate.revalidate(poll.clone(), permission)
+            .await
+            .expect("poll stays bound to active session");
+        for arguments in [
+            r#"{"session_id":123,"chars":"rm -rf .\n"}"#,
+            r#"{"session_id":-1}"#,
+            r#"{"session_id":123,"cmd":"touch marker"}"#,
+            r#"{"session_id":123,"chars":null}"#,
+        ] {
+            let mut invalid = poll.clone();
+            invalid.payload = KernelActionPayload::Function {
+                arguments: arguments.into(),
+            };
+            assert!(gate.authorize(invalid).await.is_err(), "{arguments}");
+        }
         let read = shell_request("call-read", "cat", &["marker.txt"], &root);
         let authorization = gate
             .authorize(read.clone())

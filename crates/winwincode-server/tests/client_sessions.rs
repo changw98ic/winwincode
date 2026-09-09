@@ -1427,7 +1427,7 @@ async fn an_unanswered_grant_times_out_keeps_the_frame_and_expires() {
         assert_eq!(launch_grant_value["expiresAt"], json!(grant.expires_at.0));
         assert_eq!(launch_grant_value["state"], json!("issued"));
         assert!(launch_grant_value["productSessionId"].is_string());
-        assert!(launch_grant_value["stageRunId"].is_string());
+        assert!(launch_grant_value["workRunId"].is_null());
         // The frame never carries the raw credential material.
         assert!(
             !value.to_string().contains("workerCredential"),

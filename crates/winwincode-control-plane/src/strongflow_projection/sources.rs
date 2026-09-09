@@ -684,20 +684,47 @@ impl TrustedRuntimeProjectionReadCutReader for SqliteStorageRuntimeProjectionRea
         }
         let scope_key = crate::repository_scope_key(request.scope())
             .map_err(|_| TrustedProjectionReadError::Invalid)?;
-        let bindings = delivery
+        let mut bindings = Vec::new();
+        for binding in delivery
             .snapshot()
             .session_bindings
             .iter()
             .filter(|binding| binding.worker_session_id.is_some())
-            .collect::<Vec<_>>();
-        if bindings.iter().any(|binding| {
-            binding.codex_thread_id.is_none()
-                || binding.worker_id.is_none()
+        {
+            if binding.worker_id.is_none()
                 || binding.worker_instance_id.is_none()
                 || binding.lease_id.is_none()
                 || binding.fencing_token.is_none()
-        }) {
-            return Err(TrustedProjectionReadError::Invalid);
+            {
+                return Err(TrustedProjectionReadError::Invalid);
+            }
+            if binding.codex_thread_id.is_none() {
+                let run = delivery
+                    .snapshot()
+                    .work_run_aggregate
+                    .runs
+                    .iter()
+                    .find(|run| run.id.0 == binding.work_run_id.0)
+                    .ok_or(TrustedProjectionReadError::Invalid)?;
+                // A claimed execution has a worker session before Core reports its thread.
+                // It remains visible as Leased, but has no runtime checkpoint to read yet.
+                if run.state != winwincode_domain::WorkRunState::Leased
+                    || run.codex_thread_id.is_some()
+                    || Some(&run.worker_session_id) != binding.worker_session_id.as_ref()
+                    || run.execution_job_id != binding.execution_job_id
+                    || run.product_session_id.as_ref() != Some(&binding.product_session_id)
+                    || Some(&run.worker_id) != binding.worker_id.as_ref()
+                    || Some(&run.worker_instance_id) != binding.worker_instance_id.as_ref()
+                    || Some(&run.lease_id) != binding.lease_id.as_ref()
+                    || binding.fencing_token.as_ref().map(|token| &token.0)
+                        != Some(&run.fencing_token)
+                    || u64::try_from(run.attempt).ok() != Some(binding.attempt)
+                {
+                    return Err(TrustedProjectionReadError::Invalid);
+                }
+                continue;
+            }
+            bindings.push(binding);
         }
         let state_stream_ids = bindings
             .iter()
@@ -769,7 +796,7 @@ impl TrustedRuntimeProjectionReadCutReader for SqliteStorageRuntimeProjectionRea
         if ledger.product_session_id != *request.product_session_id()
             || ledger.delivery_id.is_some()
             || ledger.delivery_task_id.is_some()
-            || ledger.stage_run_id.is_some()
+            || ledger.work_run_id.is_some()
         {
             return Err(TrustedProjectionReadError::Invalid);
         }
@@ -841,14 +868,19 @@ fn delivery_runtime_read(
     let mut rebuilt_at = Instant("1970-01-01T00:00:00.000Z".to_owned());
     for binding in bindings {
         let loaded = load_delivery_runtime_state(delivery, binding, scope_key, cut)?;
-        let stage_run_settled = delivery
-            .snapshot()
-            .stage_runs
-            .iter()
-            .find(|run| run.id == binding.stage_run_id)
-            .ok_or(TrustedProjectionReadError::Invalid)?
-            .finished_at_millis
-            .is_some();
+        let stage_run_settled = matches!(
+            delivery
+                .snapshot()
+                .work_run_aggregate
+                .runs
+                .iter()
+                .find(|run| run.id.0 == binding.work_run_id.0)
+                .ok_or(TrustedProjectionReadError::Invalid)?
+                .state,
+            winwincode_domain::WorkRunState::Settled
+                | winwincode_domain::WorkRunState::Failed
+                | winwincode_domain::WorkRunState::Cancelled
+        );
         let settled_last_sequence = if stage_run_settled {
             if loaded.accepted_sequence == 0 {
                 return Err(TrustedProjectionReadError::Invalid);
@@ -956,8 +988,7 @@ fn load_delivery_runtime_state(
         return Err(TrustedProjectionReadError::Invalid);
     };
     if ledger.delivery_id.as_ref() != Some(delivery.id())
-        || ledger.delivery_task_id.as_ref() != binding.delivery_task_id.as_ref()
-        || ledger.stage_run_id.as_ref() != Some(&binding.stage_run_id)
+        || ledger.work_run_id.as_ref() != Some(&binding.work_run_id)
         || ledger.product_session_id != binding.product_session_id
         || ledger.execution_job_id != binding.execution_job_id
         || &ledger.worker_session_id != worker_session_id
@@ -1382,9 +1413,9 @@ mod tests {
         let accepted_sequence = i64::try_from(fixture.ledger.highest_sequence)
             .expect("fixture sequence in public range");
         let payload = if let Some(delivery_id) = &fixture.ledger.delivery_id {
-            let stage_run_id = fixture
+            let work_run_id = fixture
                 .ledger
-                .stage_run_id
+                .work_run_id
                 .clone()
                 .expect("Delivery fixture StageRun");
             serde_json::to_vec(
@@ -1402,10 +1433,10 @@ mod tests {
                     session_identity: SessionIdentity {
                         codex_thread_id: fixture.ledger.codex_thread_id.clone(),
                         product_session_id: fixture.ledger.product_session_id.clone(),
-                        stage_run_id: Some(stage_run_id.clone()),
+                        work_run_id: Some(work_run_id.clone()),
                         worker_session_id: fixture.ledger.worker_session_id.clone(),
                     },
-                    stage_run_id,
+                    work_run_id,
                     type_value:
                         ControlPlaneWebSocketDeliveryStageRuntimeProjectionInvalidatedEventTypeValue::RuntimeProjectionInvalidatedV1,
                 },
@@ -1565,7 +1596,7 @@ mod tests {
             schema_version: 1,
             delivery_id: None,
             delivery_task_id: None,
-            stage_run_id: None,
+            work_run_id: None,
             product_session_id: product_session_id.clone(),
             execution_job_id: lease.job_id.clone(),
             worker_session_id: WorkerSessionId("wsn_01J00000000000000000000000".into()),
@@ -1721,8 +1752,8 @@ mod tests {
         let ledger = RuntimeLedgerState {
             schema_version: 1,
             delivery_id: Some(delivery.id().clone()),
-            delivery_task_id: binding.delivery_task_id.clone(),
-            stage_run_id: Some(binding.stage_run_id.clone()),
+            delivery_task_id: None,
+            work_run_id: Some(binding.work_run_id.clone()),
             product_session_id: binding.product_session_id.clone(),
             execution_job_id: binding.execution_job_id.clone(),
             worker_session_id,

@@ -14,8 +14,8 @@ const COMMANDS = Object.freeze([
   'session.close',
   'delivery.create',
   'delivery.update_spec',
-  'delivery.approve_task_breakdown',
   'delivery.advance',
+  'workrun.cancel',
   'delivery.resolve_attention',
   'delivery.submit_verdict',
   'settings.update',
@@ -39,6 +39,7 @@ const COMMANDS = Object.freeze([
   'enterprise.identity.update',
   'collaboration.notification.ack',
   'collaboration.presence.update',
+  'delivery.task_breakdown.create',
 ])
 
 const QUERIES = Object.freeze([
@@ -47,6 +48,7 @@ const QUERIES = Object.freeze([
   'session.messages.list',
   'session.interactions.list',
   'runtime.projection.get',
+  'workrun.get',
   'delivery.list',
   'delivery.get',
   'candidate.list',
@@ -214,6 +216,7 @@ test('HTTP query contract covers every current read surface with an opaque stabl
     'session.messages.list': '#/$defs/ChatMessagePage',
     'session.interactions.list': '#/$defs/ChatInteractionPage',
     'runtime.projection.get': './domain.schema.json#/$defs/RuntimeProjectionSnapshot',
+    'workrun.get': '#/$defs/WorkRunAggregateProjection',
     'delivery.list': '#/$defs/DeliveryPage',
     'delivery.get': '#/$defs/DeliveryDetailProjection',
     'candidate.list': '#/$defs/CandidateHistoryPage',
@@ -783,16 +786,6 @@ test('OpenAPI 3.1 exposes one browser-session route and the canonical business r
   assert.equal(schema.$defs.AuthSessionResponse.properties.authorizedScopes.minItems, 1)
   assert.equal(schema.$defs.AuthSessionResponse.properties.authorizedScopes.maxItems, 100)
 
-  const taskApproval = schema.$defs.DeliveryApproveTaskBreakdownPayload
-  assert.deepEqual(taskApproval.required, ['deliveryId', 'reviewSetSha256'])
-  assert.equal(taskApproval.properties.tasks, undefined)
-  assert.deepEqual(schema['x-winwincode-semantics'].taskBreakdownApproval, {
-    payload: ['deliveryId', 'reviewSetSha256'],
-    authority: 'current_sealed_approved_solution_review',
-    callerTaskFieldsAllowed: false,
-    promotion: 'copy_ordered_task_proposals_field_by_field',
-    staleDigestError: 'REVISION_CONFLICT',
-  })
 })
 
 test('positive and negative samples pin retries, conflicts, cursors, and secret-safe output', async () => {
@@ -837,11 +830,6 @@ test('positive and negative samples pin retries, conflicts, cursors, and secret-
   assert.equal(examples.positive.inputRespond.payload.status, 'provided')
   assert.equal(examples.positive.sessionMessagesList.query, 'session.messages.list')
   assert.equal(examples.positive.runtimeProjectionGet.query, 'runtime.projection.get')
-  assert.deepEqual(examples.positive.deliveryApproveTaskBreakdown.payload, {
-    deliveryId: 'dlv_00000000000000000000000000',
-    reviewSetSha256:
-      'sha256:0000000000000000000000000000000000000000000000000000000000000000',
-  })
   assert.equal(examples.responses.chatMessagesPage.result.kind, 'chat_message_page')
   assert.equal(examples.responses.publicationDetail.result.kind, 'publication_detail')
   assert.equal(examples.responses.publicationDetail.result.historyTruncated, true)

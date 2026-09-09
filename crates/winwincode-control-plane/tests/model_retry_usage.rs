@@ -107,7 +107,6 @@ fn register_provider(storage: &mut SqliteStorage, seed: u64, expected_version: u
                     reasoning_efforts: vec!["high".to_owned()],
                 }],
             },
-            Instant("2026-09-02T00:00:00.000Z".to_owned()),
         )
         .expect("register Provider");
 }

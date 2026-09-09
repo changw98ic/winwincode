@@ -16,15 +16,15 @@ use winwincode_delivery::{
         verdict::test_support::{VerdictFixtureOutcome, verdict_fixture},
     },
     domain::{
-        DELIVERY_SCHEMA_VERSION, Delivery, RepositoryKind, RepositoryRef, StageRunStatus,
+        DELIVERY_SCHEMA_VERSION, Delivery, RepositoryKind, RepositoryRef,
         candidate::freeze_delivery_candidate_from_source,
     },
 };
 use winwincode_domain::{
     ArtifactId, CodexThreadId, DeliveryId, ExecutionAckSequence, ExecutionJobId,
     ExecutionMessageId, FencingToken, Instant, LeaseId, OrganizationId, ProductSessionId,
-    ProjectId, RepositoryId, RequestId, Sha256Digest, StageRunId, UserId, WorkerId,
-    WorkerInstanceId, WorkerSessionId, WorkspaceId,
+    ProjectId, RepositoryId, RequestId, Sha256Digest, UserId, WorkerId, WorkerInstanceId,
+    WorkerSessionId, WorkspaceId,
 };
 use winwincode_storage::{
     ArtifactAccess, ArtifactChunk, ArtifactMeteringAttribution, ArtifactOpen, ArtifactProvenance,
@@ -122,31 +122,44 @@ fn delivery_freezes_only_the_rebuilt_source_named_by_the_successful_worker_outco
         VerdictFixtureOutcome::Pass,
     );
     let mut snapshot = fixture.delivery.into_snapshot();
+    snapshot.stage_runs.clear();
     snapshot.spec.repository = RepositoryRef {
         schema_version: DELIVERY_SCHEMA_VERSION,
         kind: RepositoryKind::LocalGit,
         locator: "project-one".into(),
     };
     snapshot.spec.base_revision.clone_from(&base_commit);
-    let producer = snapshot
-        .stage_runs
-        .iter_mut()
-        .find(|run| run.role == "executor")
-        .expect("executor");
-    producer.id = StageRunId("run_00000000000000000000000301".into());
-    producer.status = StageRunStatus::Succeeded;
-    let finished_at = producer.finished_at_millis.expect("executor finish");
-    let producer_id = producer.id.clone();
+    let finished_at = 1_800_000_000_020_u64;
     let binding = snapshot
         .session_bindings
         .iter_mut()
-        .find(|binding| binding.id.0 == "binding-executor-1")
+        .find(|binding| binding.execution_profile.as_deref() == Some("executor"))
         .expect("executor binding");
-    binding.stage_run_id = producer_id.clone();
+    let producer_id = binding.work_run_id.clone();
     binding.product_session_id = ProductSessionId("psn_00000000000000000000000301".into());
     binding.execution_job_id = ExecutionJobId("job_00000000000000000000000301".into());
     binding.worker_session_id = Some(WorkerSessionId("wsn_00000000000000000000000301".into()));
     binding.codex_thread_id = Some(CodexThreadId("cdx_00000000000000000000000301".into()));
+    binding.lease_id = Some(LeaseId("lse_00000000000000000000000301".into()));
+    binding.fencing_token = Some(FencingToken("301".into()));
+    binding.worker_id = Some(WorkerId("wrk_00000000000000000000000301".into()));
+    binding.worker_instance_id = Some(WorkerInstanceId("wki_00000000000000000000000301".into()));
+    let producer = snapshot
+        .work_run_aggregate
+        .runs
+        .iter_mut()
+        .find(|run| run.id == producer_id)
+        .expect("executor WorkRun");
+    producer.product_session_id = Some(binding.product_session_id.clone());
+    producer.execution_job_id = binding.execution_job_id.clone();
+    producer.worker_session_id = binding.worker_session_id.clone().expect("worker session");
+    producer.codex_thread_id = binding.codex_thread_id.clone();
+    producer.lease_id = binding.lease_id.clone().expect("lease");
+    producer
+        .fencing_token
+        .clone_from(&binding.fencing_token.as_ref().expect("fence").0);
+    producer.worker_id = binding.worker_id.clone().expect("worker");
+    producer.worker_instance_id = binding.worker_instance_id.clone().expect("worker instance");
     let execution_job_id = binding.execution_job_id.clone();
     let worker_session_id = binding.worker_session_id.clone().expect("WorkerSession");
     let codex_thread_id = binding.codex_thread_id.clone();

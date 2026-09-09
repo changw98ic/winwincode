@@ -3,16 +3,16 @@
 //! `StrongFlow` role-to-Device `WorkerSession` routing (`FLOW-100.5`).
 //!
 //! Planner, Executor, Reviewer, and Verifier keep their independent roles
-//! and read/write permissions, yet every role's stage execution follows the
-//! same Device scheduling base as Quick Chat: when the Delivery stage run
+//! and read/write permissions, yet every role's `WorkRun` execution follows the
+//! same Device scheduling base as Quick Chat: when the Delivery `WorkRun`
 //! that a `delivery.advance` just committed carries a durable launch anchor —
-//! a `WorkerLaunchGrant` minted for exactly that stage run — the stage's
+//! a `WorkerLaunchGrant` minted for exactly that `WorkRun` — the `WorkRun`'s
 //! queued `ExecutionJob` executes on the Device `WorkerSession` that grant
-//! launched instead of the supervised local worker. A stage run without an
+//! launched instead of the supervised local worker. A `WorkRun` without an
 //! anchor keeps the local execution path unchanged.
 //!
-//! The per-stage anchor is what preserves the role boundaries on one shared
-//! Device: each role (and each new attempt, which always opens a new stage
+//! The per-WorkRun anchor is what preserves the role boundaries on one shared
+//! Device: each role (and each new attempt, which always opens a new `WorkRun`
 //! run) is launched as its own `WorkerSession`, one launch grant per
 //! session, so distinct roles can never reuse another role's ``CodexThread``.
 //! The role travels with the dispatch: the facts attachment stamps the
@@ -28,7 +28,7 @@
 //! 2. the acting user is judged by the FLOW-100.3 permission gate against
 //!    the anchor's occupancy and repository visibility — a denial routes
 //!    nothing;
-//! 3. the stage job is reserved under the anchor holder's admission identity
+//! 3. the `WorkRun` job is reserved under the anchor holder's admission identity
 //!    and receives its device facts through the same ledger, so the local
 //!    queue exclusion (the repository scheduler and the local driver never
 //!    claim a job carrying device facts) applies unchanged.
@@ -40,7 +40,7 @@
 
 use std::fmt;
 
-use winwincode_domain::{ExecutionJobId, Instant, RequestId, StageRunId, UserId};
+use winwincode_domain::{ExecutionJobId, Instant, RequestId, UserId, WorkRunId};
 use winwincode_execution_port::generated::{ExecutionJob, ExecutionWorkspaceWriteMode};
 use winwincode_storage::{
     DeviceExecutionBindingIssuance, DeviceExecutionBindingRecord, DeviceExecutionBindingState,
@@ -88,7 +88,7 @@ const STRONGFLOW_DEVICE_POOL_MAX_CONCURRENT: u64 = 4;
 const RESERVED_TOKENS: u64 = 1_000_000;
 const RESERVED_COST_MICROUNITS: u64 = 1_000_000;
 
-/// The canonical Delivery execution roles a stage job can dispatch as. A job
+/// The canonical Delivery execution roles a `WorkRun` job can dispatch as. A job
 /// whose profile is not in this set is not a `StrongFlow` role execution and
 /// keeps the local path.
 const STRONGFLOW_DEVICE_ROLES: [&str; 8] = [
@@ -107,7 +107,7 @@ const STRONGFLOW_DEVICE_ROLES: [&str; 8] = [
 pub enum StrongflowDeviceDispatchErrorKind {
     /// A command input violated the canonical identity bounds.
     InvalidInput,
-    /// The stage run's anchor launch grant is revoked or expired: the device
+    /// The `WorkRun`'s anchor launch grant is revoked or expired: the device
     /// worker session it launched can no longer execute work.
     AnchorNotLive,
     /// The anchor's worker session already released its execution binding.
@@ -115,7 +115,7 @@ pub enum StrongflowDeviceDispatchErrorKind {
     /// The FLOW-100.3 permission gate denied the acting user; nothing was
     /// routed. The denial carries the central wire code and HTTP status.
     GateDenied,
-    /// The stage job is already dispatched to a different launch or role, or
+    /// The `WorkRun` job is already dispatched to a different launch or role, or
     /// its admission state contradicts the dispatch.
     DispatchConflict,
     /// Execution admission rejected the reservation for an ordinary,
@@ -188,26 +188,26 @@ impl fmt::Display for StrongflowDeviceDispatchError {
 
 impl std::error::Error for StrongflowDeviceDispatchError {}
 
-/// The durable dispatch decision of one device-anchored `StrongFlow` stage.
+/// The durable dispatch decision of one device-anchored `StrongFlow` `WorkRun`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct StrongflowDeviceDispatch {
-    /// The `WorkerSession` binding the stage's launch material produced.
+    /// The `WorkerSession` binding the `WorkRun`'s launch material produced.
     pub binding: DeviceExecutionBindingRecord,
-    /// The stage job's device facts: the identity match that routes the role
+    /// The `WorkRun` job's device facts: the identity match that routes the role
     /// to the launched device worker and excludes it from local claims. The
     /// `role` field names the execution profile the facts were stamped with.
     pub facts: DeviceExecutionReservationFacts,
 }
 
-/// Routes the committed Codex job of one Delivery stage run to its Device
-/// `WorkerSession` when the stage run carries a durable launch anchor.
+/// Routes the committed Codex job of one Delivery `WorkRun` to its Device
+/// `WorkerSession` when the `WorkRun` carries a durable launch anchor.
 ///
 /// `actor_user_id` is the authenticated browser actor of the delivery
 /// command; service and system actors (`None`) never route to a device.
 ///
-/// Returns `Ok(None)` when the stage has no active job, no routable role, or
-/// no anchor: the stage keeps the supervised local execution path and
-/// nothing durable changes. Any error leaves the queued stage job untouched
+/// Returns `Ok(None)` when the `WorkRun` has no active job, no routable role, or
+/// no anchor: the `WorkRun` keeps the supervised local execution path and
+/// nothing durable changes. Any error leaves the queued `WorkRun` job untouched
 /// (its device dispatch simply did not happen yet), so an exact command
 /// replay can complete it later.
 ///
@@ -215,18 +215,18 @@ pub struct StrongflowDeviceDispatch {
 ///
 /// Returns the stable routing failure categories; nothing is decided on a
 /// storage failure.
-pub fn dispatch_stage_to_device_worker(
+pub fn dispatch_work_run_to_device_worker(
     storage: &mut SqliteStorage,
     actor_user_id: Option<&str>,
-    stage_run_id: &StageRunId,
+    work_run_id: &WorkRunId,
     now: &Instant,
 ) -> Result<Option<StrongflowDeviceDispatch>, StrongflowDeviceDispatchError> {
     let Some(actor_user_id) = actor_user_id else {
         // Service and system actors stay on the supervised local path.
         return Ok(None);
     };
-    let Some(record) = load_active_stage_job(storage, stage_run_id)? else {
-        // No active stage job (human stage, or the stage already settled):
+    let Some(record) = load_active_work_run_job(storage, work_run_id)? else {
+        // No active WorkRun job (human-only work, or the WorkRun already settled):
         // nothing is routable.
         return Ok(None);
     };
@@ -236,59 +236,60 @@ pub fn dispatch_stage_to_device_worker(
         // Not a StrongFlow role execution: keep the local path unchanged.
         return Ok(None);
     }
-    let Some(anchor) = resolve_stage_anchor(storage, actor_user_id, &record, stage_run_id)? else {
-        // No device anchor: the stage is not a device stage and keeps the
+    let Some(anchor) = resolve_work_run_anchor(storage, actor_user_id, &record, work_run_id)?
+    else {
+        // No device anchor: the WorkRun is not a device WorkRun and keeps the
         // supervised local execution path unchanged.
         return Ok(None);
     };
-    let binding = ensure_stage_binding(storage, &anchor, now)?;
-    let facts = ensure_stage_facts(storage, &record, &anchor, role, now)?;
+    let binding = ensure_work_run_binding(storage, &anchor, now)?;
+    let facts = ensure_work_run_facts(storage, &record, &anchor, role, now)?;
     Ok(Some(StrongflowDeviceDispatch { binding, facts }))
 }
 
-/// Loads the one active job of the stage run and checks its identity.
+/// Loads the one active job of the `WorkRun` and checks its identity.
 ///
-/// Returns `Ok(None)` when the stage has no active job.
-fn load_active_stage_job(
+/// Returns `Ok(None)` when the `WorkRun` has no active job.
+fn load_active_work_run_job(
     storage: &mut SqliteStorage,
-    stage_run_id: &StageRunId,
+    work_run_id: &WorkRunId,
 ) -> Result<Option<ExecutionJobRecord>, StrongflowDeviceDispatchError> {
     let record = storage
-        .load_active_execution_job_record_for_stage_run(stage_run_id)
+        .load_active_execution_job_record_for_work_run(work_run_id)
         .map_err(|_| StrongflowDeviceDispatchError::storage())?;
     let Some(record) = record else {
         return Ok(None);
     };
-    if record.stage_run_id.as_ref() != Some(stage_run_id) {
+    if record.work_run_id.as_ref() != Some(work_run_id) {
         return Err(StrongflowDeviceDispatchError::corrupt(
-            "the active stage job identity does not match the stage run",
+            "the active WorkRun job identity does not match the WorkRun",
         ));
     }
     Ok(Some(record))
 }
 
-/// Resolves one stage run's device anchor behind the permission gate: the
+/// Resolves one `WorkRun`'s device anchor behind the permission gate: the
 /// anchor's product session must match the job's scope, the grant must still
 /// be live, and the acting user must pass the FLOW-100.3 gate. Returns
-/// `Ok(None)` when the stage run carries no launch anchor.
-fn resolve_stage_anchor(
+/// `Ok(None)` when the `WorkRun` carries no launch anchor.
+fn resolve_work_run_anchor(
     storage: &mut SqliteStorage,
     actor_user_id: &str,
     record: &ExecutionJobRecord,
-    stage_run_id: &StageRunId,
+    work_run_id: &WorkRunId,
 ) -> Result<Option<WorkerLaunchGrantRecord>, StrongflowDeviceDispatchError> {
-    // The stage run's device anchor is its own launch grant, whatever its
+    // The WorkRun's device anchor is its own launch grant, whatever its
     // lifecycle state: the anchor proves the role was bound to device
     // execution and stays the permission anchor after the grant ends.
     let anchor = WorkerLaunchGrantService::new(storage)
-        .newest_grant_for_stage_run(stage_run_id.0.as_str())
+        .newest_grant_for_work_run(work_run_id.0.as_str())
         .map_err(|_| StrongflowDeviceDispatchError::storage())?;
     let Some(anchor) = anchor else {
         return Ok(None);
     };
     if anchor.product_session_id.as_deref() != Some(record.scope.product_session_id.0.as_str()) {
         return Err(StrongflowDeviceDispatchError::corrupt(
-            "the stage run's launch anchor belongs to another product session",
+            "the WorkRun's launch anchor belongs to another product session",
         ));
     }
     if !matches!(
@@ -297,7 +298,7 @@ fn resolve_stage_anchor(
     ) {
         return Err(StrongflowDeviceDispatchError::new(
             StrongflowDeviceDispatchErrorKind::AnchorNotLive,
-            "the stage run's launch anchor grant can no longer execute work",
+            "the WorkRun's launch anchor grant can no longer execute work",
         ));
     }
     // The FLOW-100.3 gate decides before anything is routed: only the
@@ -318,7 +319,7 @@ fn resolve_stage_anchor(
 /// Binds the anchor's worker session once (idempotent) and returns the
 /// binding: the launch material becomes the device session's durable
 /// `ExecutionPort` identity.
-fn ensure_stage_binding(
+fn ensure_work_run_binding(
     storage: &mut SqliteStorage,
     anchor: &WorkerLaunchGrantRecord,
     now: &Instant,
@@ -343,9 +344,9 @@ fn ensure_stage_binding(
         .binding)
 }
 
-/// Reserves the stage job's admission and attaches its device facts once
-/// (idempotent), with the stage's role stamped on them.
-fn ensure_stage_facts(
+/// Reserves the `WorkRun` job's admission and attaches its device facts once
+/// (idempotent), with the `WorkRun`'s role stamped on them.
+fn ensure_work_run_facts(
     storage: &mut SqliteStorage,
     record: &ExecutionJobRecord,
     anchor: &WorkerLaunchGrantRecord,
@@ -366,7 +367,7 @@ fn ensure_stage_facts(
         }
         return Err(StrongflowDeviceDispatchError::new(
             StrongflowDeviceDispatchErrorKind::DispatchConflict,
-            "the stage job is already dispatched to another device launch or role",
+            "the WorkRun job is already dispatched to another device launch or role",
         ));
     }
     // The dispatch reservation runs under the anchor holder's admission
@@ -411,12 +412,12 @@ fn bind_command(
         anchor.repository_binding_id.clone(),
         anchor.worker_session_id.clone(),
         anchor.product_session_id.clone(),
-        anchor.stage_run_id.clone(),
+        anchor.work_run_id.as_ref().map(|id| id.0.clone()),
     )
     .map_err(|error| StrongflowDeviceDispatchError::invalid_input(error.to_string()))
 }
 
-/// Reserves the stage job's execution admission under the `StrongFlow` device
+/// Reserves the `WorkRun` job's execution admission under the `StrongFlow` device
 /// worker pool and the anchor holder's identity when no reservation exists
 /// yet.
 fn ensure_device_admission_reservation(
@@ -438,7 +439,7 @@ fn ensure_device_admission_reservation(
             ExecutionReservationState::Released | ExecutionReservationState::Settled => {
                 Err(StrongflowDeviceDispatchError::new(
                     StrongflowDeviceDispatchErrorKind::DispatchConflict,
-                    "the stage job's execution reservation is already terminal",
+                    "the WorkRun job's execution reservation is already terminal",
                 ))
             }
         };
@@ -554,7 +555,7 @@ fn admission_boundaries(scope: &ExecutionQueueScope) -> Vec<ExecutionAdmissionBo
 }
 
 /// Ordinary admission backpressure defers the dispatch instead of failing
-/// the boundary: the stage job stays queued and an exact retry re-runs the
+/// the boundary: the `WorkRun` job stays queued and an exact retry re-runs the
 /// routing.
 fn admission_error(
     error: &winwincode_storage::ExecutionAdmissionError,

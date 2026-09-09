@@ -12,9 +12,11 @@ import { tmpdir } from 'node:os'
 import test from 'node:test'
 
 import {
+  prepareControlledRepository,
   appendDeliveryTransition,
   DELIVERY_TRANSITION_DIAGNOSTIC_CAPACITY,
   driveDelivery,
+  workItemCreatePayload,
   verifyApiProductionSourceSeal,
 } from '../scripts/run-api-production-vertical.mjs'
 
@@ -25,34 +27,37 @@ const browserGatePath = resolve(root, 'tests/browser-chat-strongflow-production.
 function deliveryDriverClient(terminalTransitionCount = null) {
   let revision = 0
   let requestSequence = 0
-  const terminalStages = ['planner', 'executor', 'reviewer', 'verifier'].map(role => {
-    const id = `stage-${role}`
-    const productSessionId = `session-${id}`
-    const workerSessionId = `worker-session-${id}`
-    const codexThreadId = `codex-${id}`
-    return {
-      actorType: 'codex',
-      attempt: 1,
-      id,
-      role,
-      sessionBinding: {
-        codexThreadId,
-        executionJobId: `job-${id}`,
-        productSessionId,
-        sessionIdentity: {
-          codexThreadId,
-          productSessionId,
-          stageRunId: id,
-          workerSessionId,
-        },
-        workerId: `worker-${id}`,
-        workerSessionId,
-      },
-      status: 'succeeded',
-    }
-  })
+  const commands = []
+  const workItem = {
+    id: 'wit_01J00000000000000000000001',
+    revision: 1,
+    state: 'in_progress',
+  }
+  const workRun = {
+    id: 'wrn_01J00000000000000000000001',
+    workItemId: workItem.id,
+    productSessionId: 'psn_01J00000000000000000000001',
+    executionJobId: 'job_01J00000000000000000000001',
+    state: 'running',
+    attempt: 1,
+  }
+  const contract = {
+    id: 'wct_01J00000000000000000000001',
+    revision: 1,
+    criteria: [{ id: 'crt_01J00000000000000000000001', required: true }],
+  }
   return {
-    async command(command, previousRevision) {
+    commands,
+    async command(command, previousRevision, payload) {
+      if (command === 'delivery.advance') {
+        assert.equal(payload.dispatchProfile, 'executor')
+      }
+      if (command === 'delivery.task_breakdown.create') {
+        assert.equal(payload.expectedRevision, previousRevision)
+        assert.equal(payload.items.length, 1)
+        assert.deepEqual(payload.items[0].criterionIds, contract.criteria.map(criterion => criterion.id))
+      }
+      commands.push({ command, previousRevision, payload })
       return {
         command,
         currentRevision: previousRevision + 1,
@@ -60,7 +65,18 @@ function deliveryDriverClient(terminalTransitionCount = null) {
         previousRevision,
       }
     },
-    async query() {
+    async query(name) {
+      if (name === 'workrun.get') {
+        const terminal = terminalTransitionCount !== null
+          && revision >= terminalTransitionCount
+        return {
+          result: {
+            contract,
+            items: [{ ...workItem, state: terminal ? 'done' : 'in_progress' }],
+            runs: [{ ...workRun, state: terminal ? 'settled' : 'running' }],
+          },
+        }
+      }
       revision += 1
       const terminal = revision === terminalTransitionCount
       return {
@@ -74,7 +90,6 @@ function deliveryDriverClient(terminalTransitionCount = null) {
             : null,
           deliveryRevision: revision,
           evidence: terminal ? [{ id: 'evidence-terminal' }] : [],
-          stages: terminal ? terminalStages : [],
           status: terminal ? 'delivered' : 'executing',
           tasks: terminal ? [{ status: 'completed' }] : [],
           verdict: terminal
@@ -89,6 +104,25 @@ function deliveryDriverClient(terminalTransitionCount = null) {
     },
   }
 }
+
+test('WorkRun contract drives canonical WorkItem creation payload', async () => {
+  const client = deliveryDriverClient()
+  const aggregate = (await client.query('workrun.get', {
+    deliveryId: 'dlv_01J00000000000000000000001',
+    workItemId: null,
+  })).result
+  const payload = workItemCreatePayload({ ...aggregate, items: [] }, 1)
+  assert.equal(payload.deliveryId, 'dlv_01J00000000000000000000001')
+  assert.equal(payload.items[0].id, 'wit_01J00000000000000000000001')
+  assert.deepEqual(payload.items[0].criterionIds, [
+    'crt_01J00000000000000000000001',
+  ])
+  await client.command('delivery.task_breakdown.create', 1, payload)
+  await client.command('delivery.advance', 2, {
+    deliveryId: payload.deliveryId,
+    dispatchProfile: 'executor',
+  })
+})
 
 test('Delivery transition evidence keeps the newest bounded window without limiting progress', () => {
   const trace = { observations: [], totalTransitionCount: 0 }
@@ -111,7 +145,8 @@ test('Delivery transition evidence keeps the newest bounded window without limit
 
 test('Delivery reaches its real terminal state after more transitions than the evidence window', async () => {
   const transitionCount = DELIVERY_TRANSITION_DIAGNOSTIC_CAPACITY + 5
-  const result = await driveDelivery(deliveryDriverClient(transitionCount), 10_000)
+  const client = deliveryDriverClient(transitionCount)
+  const result = await driveDelivery(client, 10_000)
   assert.equal(result.detail.status, 'delivered')
   assert.equal(result.totalTransitionCount, transitionCount)
   assert.equal(result.observations.length, DELIVERY_TRANSITION_DIAGNOSTIC_CAPACITY)
@@ -120,6 +155,7 @@ test('Delivery reaches its real terminal state after more transitions than the e
     revision: transitionCount,
     status: 'delivered',
   })
+  assert.deepEqual(client.commands, [], 'active WorkRuns must be polled, not advanced')
 })
 
 test('Delivery timeout reports the total count and only the newest transition window', async () => {
@@ -164,12 +200,13 @@ test('API production vertical is a direct generated HTTP runner', async () => {
     'session.cancel',
     'chat.submit',
     'delivery.create',
+    'delivery.task_breakdown.create',
     'delivery.advance',
     'delivery.resolve_attention',
-    'delivery.approve_task_breakdown',
     'delivery.submit_verdict',
     'delivery.get',
     'runtime.projection.get',
+    'workrun.get',
   ]) {
     assert.equal(source.includes(operation), true, `runner must cover ${operation}`)
   }
@@ -177,9 +214,11 @@ test('API production vertical is a direct generated HTTP runner', async () => {
   assert.match(source, /httpsRequest/u)
   assert.match(source, /CARGO_TARGET_DIR/u)
   assert.match(source, /deliveryFailureSummary/u)
-  assert.match(source, /stageRuns/u)
+  assert.match(source, /workrun\.get/u)
+  assert.match(source, /dispatchProfile/u)
   assert.match(source, /providerRoute/u)
   assert.match(source, /candidateArtifact/u)
+  assert.match(source, /delivery\.task_breakdown\.create/u)
   assert.match(source, /GIT_CONFIG_NOSYSTEM/u)
   assert.match(source, /API_SOURCE_SEAL_NAME/u)
   assert.match(source, /apiProductionSourceDigest/u)
@@ -192,6 +231,8 @@ test('API production vertical is a direct generated HTTP runner', async () => {
   assert.match(source, /WWC_WORKER_SERVER_ORIGIN: controlUrl/u)
   assert.doesNotMatch(source, /controlUrl\.replace\('127\.0\.0\.1'/u)
   assert.match(source, /export async function runApiProductionVertical/u)
+  assert.doesNotMatch(source, /approveSolutionResolution/u)
+  assert.doesNotMatch(source, /delivery-stage/u)
   assert.doesNotMatch(source, /\b(?:chromium|devtools|document|window|WebSocket)\b/iu)
 })
 
@@ -227,4 +268,16 @@ test('browser skip-build verifies the production source seal before replacing ar
   assert.notEqual(verification, -1, 'browser gate must verify the API production source seal')
   assert.ok(verification < temporaryDirectory, 'source verification must precede temporary resources')
   assert.ok(verification < artifactReplacement, 'source verification must preserve prior artifacts on failure')
+})
+
+
+test('production scenario files enter the committed repository and reject path escape', () => {
+  const directory = mkdtempSync(resolve(tmpdir(), 'wwc-ui-scenario-'))
+  try {
+    const { repository } = prepareControlledRepository({ fixtureDirectory: directory, files: { 'index.html': '<h1>UI</h1>' } })
+    assert.equal(readFileSync(resolve(repository, 'index.html'), 'utf8'), '<h1>UI</h1>')
+    assert.throws(() => prepareControlledRepository({ fixtureDirectory: resolve(directory, 'invalid'), files: { '../outside.html': 'bad' } }), /must stay inside/u)
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
+  }
 })

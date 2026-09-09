@@ -72,7 +72,7 @@ test('a real browser confirms Chat requirements then opens and restores exact St
   assert.equal(result.draft.model, 'browser-provider / browser-model')
   assert.match(
     result.created.hash,
-    /^#\/strongflow\?delivery=dlv_[0-9A-HJKMNP-TV-Z]{26}&session=psn_[0-9A-HJKMNP-TV-Z]{26}&stageRun=run_[0-9A-HJKMNP-TV-Z]{26}&view=unified$/u,
+    /^#\/strongflow\?delivery=dlv_[0-9A-HJKMNP-TV-Z]{26}&session=psn_[0-9A-HJKMNP-TV-Z]{26}&workRun=wrn_[0-9A-HJKMNP-TV-Z]{26}&view=unified$/u,
   )
   assert.equal(result.created.heading, 'Confirmed requirements Chat')
   assert.match(result.created.status, /Waiting for your input/u)
@@ -115,7 +115,7 @@ test('a real browser confirms Chat requirements then opens and restores exact St
     scope: result.scope,
     command: 'delivery.advance',
     expectedRevision: 1,
-    payload: { deliveryId: 'DELIVERY_ID' },
+    payload: { deliveryId: 'DELIVERY_ID', dispatchProfile: 'planner' },
   }])
   assert.equal(result.calls.subscriptions.some(call => (
     call.subscription.stream.kind === 'delivery'

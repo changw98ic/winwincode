@@ -1,57 +1,67 @@
 {
   "attempt": 1,
   "executionProfile": "executor",
-  "goal": "Implement the approved candidate change.",
+  "goal": "Deliver the independently verifiable invitation endpoint.",
   "jobId": "job_00000000000000000000000006",
   "limits": {
     "deadlineAt": "2026-08-25T12:00:00.000Z",
     "maxArtifactBytes": 10000000,
     "maxRuntimeSeconds": 3600
   },
-  "payloadDigest": "sha256:ee85247a694daf33a350b3acb06b84a328c49db6d8688da6d751cab4c567bd9a",
+  "payloadDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   "scope": {
-    "deliveryId": "dlv_00000000000000000000000006",
-    "deliveryTaskId": "dtk_00000000000000000000000006",
-    "kind": "delivery-stage",
+    "attempt": 1,
+    "kind": "work-run",
     "productSessionId": "psn_00000000000000000000000006",
-    "stageRunId": "run_00000000000000000000000006"
+    "workContractId": "wct_00000000000000000000000006",
+    "workContractRevision": 1,
+    "workItemId": "wit_00000000000000000000000006",
+    "workItemRevision": 1,
+    "workRunId": "wrn_00000000000000000000000006"
   },
-  "stageInput": {
-    "acceptanceCriteria": [
-      {
-        "criterionId": "criterion-required",
-        "description": "A valid invitation can be accepted exactly once.",
-        "required": true,
-        "verificationMethod": "Run the invitation integration test."
-      },
-      {
-        "criterionId": "criterion-optional",
-        "description": "The empty state remains readable at narrow widths.",
-        "required": false
-      }
-    ],
-    "constraints": [
-      "Keep the existing authentication boundary"
-    ],
+  "workInput": {
     "deliverySpecId": "delivery-spec-v1",
     "deliverySpecRevision": 1,
-    "goal": "Users can invite a teammate and verify the result.",
-    "outOfScope": [
-      "Organization billing"
-    ],
     "schemaVersion": "winwincode/v1",
-    "scope": [
-      "Invitation data and API"
-    ],
-    "task": {
-      "acceptanceCriterionIds": [
-        "criterion-required"
+    "workContract": {
+      "constraints": [
+        "Keep the existing authentication boundary"
       ],
-      "goal": "Implement the approved candidate change.",
-      "taskId": "dtk_00000000000000000000000006",
-      "title": "Implement the approved task"
+      "createdAt": "2026-01-01T00:00:00.000Z",
+      "criteria": [
+        {
+          "description": "A valid invitation can be accepted exactly once.",
+          "id": "crt_01J00000000000000000000000",
+          "required": true,
+          "verificationMethod": "Run the invitation integration test."
+        }
+      ],
+      "id": "wct_00000000000000000000000006",
+      "objective": "Implement invitation flow",
+      "protectedScope": [
+        "authentication boundary"
+      ],
+      "requiredHumanAuthority": "none",
+      "revision": 1,
+      "schemaVersion": "winwincode/v1",
+      "scope": [
+        "Invitation data and API"
+      ]
     },
-    "title": "Implement invitation flow"
+    "workItem": {
+      "criterionIds": [
+        "crt_01J00000000000000000000000"
+      ],
+      "dependsOn": [],
+      "goal": "Deliver the independently verifiable invitation endpoint.",
+      "id": "wit_00000000000000000000000006",
+      "revision": 1,
+      "schemaVersion": "winwincode/v1",
+      "state": "ready",
+      "title": "Invitation API",
+      "workContractId": "wct_00000000000000000000000006",
+      "workContractRevision": 1
+    }
   },
   "workspace": {
     "checkoutRevision": "0123456789abcdef",

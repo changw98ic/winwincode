@@ -19,9 +19,9 @@ use winwincode_control_plane::{
     RemoteWorkerPoolAdapter, RemoteWorkerPrincipal, WorkerFleetProjectionService,
 };
 use winwincode_domain::{
-    ExecutionMessageId, FencingToken, Instant, LeaseId, OpaqueCursor, OrganizationId, ProjectId,
-    RepositoryId, RequestId, SchemaVersion, Sha256Digest, SystemActorId, WorkerInstanceId,
-    WorkspaceId,
+    DeliveryId, ExecutionMessageId, FencingToken, Instant, LeaseId, OpaqueCursor, OrganizationId,
+    ProjectId, RepositoryId, RequestId, SchemaVersion, Sha256Digest, SystemActorId,
+    WorkerInstanceId, WorkspaceId,
 };
 use winwincode_domain::{RepositoryScope, RepositoryScopeKind};
 use winwincode_execution_port::{
@@ -130,14 +130,14 @@ fn claim_from_dispatch(dispatch: &JobDispatchMessage) -> ExecutionLeaseClaim {
 
 fn commit_durable_dispatch_intent(storage: &mut SqliteStorage, dispatch: &JobDispatchMessage) {
     let job = &dispatch.job;
-    let (product_session_id, delivery_id, stage_run_id) = match &job.scope {
+    let (product_session_id, delivery_id, work_run_id) = match &job.scope {
         ExecutionScope::ProductSessionExecutionScope(scope) => {
             (scope.product_session_id.clone(), None, None)
         }
-        ExecutionScope::DeliveryStageExecutionScope(scope) => (
+        ExecutionScope::WorkRunExecutionScope(scope) => (
             scope.product_session_id.clone(),
-            Some(scope.delivery_id.clone()),
-            Some(scope.stage_run_id.clone()),
+            Some(DeliveryId("dlv_00000000000000000000000000".into())),
+            Some(scope.work_run_id.clone()),
         ),
     };
     let identity = ReceiptIdentity::new(
@@ -180,7 +180,7 @@ fn commit_durable_dispatch_intent(storage: &mut SqliteStorage, dispatch: &JobDis
             dispatch_payload: serde_json::to_vec(job).expect("wire Job payload"),
             attempt: u64::try_from(job.attempt).expect("positive Job attempt"),
             dependencies: Vec::new(),
-            stage_run_id,
+            work_run_id,
             submitted_at: dispatch.sent_at.clone(),
         })
         .expect("durable scheduler Job");

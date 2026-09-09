@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { existsSync, readFileSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import test from 'node:test'
 
@@ -25,7 +25,6 @@ const deliveryStageBindingFixturePath = join(
   'contracts',
   'session-binding.delivery-stage.valid.json',
 )
-const domainSchemaId = 'https://schemas.winwincode.dev/winwincode/v1/domain.schema.json'
 
 const expectedKinds = [
   'action.enforcement_request',
@@ -65,8 +64,6 @@ const domainDefinitions = [
   'DebugExperimentId',
   'DebugHypothesisId',
   'DebugSessionId',
-  'DeliveryId',
-  'DeliveryTaskId',
   'EvidenceId',
   'ExecutionJobId',
   'InputRequestId',
@@ -83,12 +80,17 @@ const domainDefinitions = [
   'RepositoryId',
   'RepositoryScope',
   'RequestId',
+  'Revision',
   'SchemaVersion',
   'SessionBindingSourceIdentity',
   'SessionIdentity',
   'Sha256Digest',
-  'StageRunId',
   'UserActor',
+  'WorkContract',
+  'WorkContractId',
+  'WorkItem',
+  'WorkItemId',
+  'WorkRunId',
   'WorkerId',
   'WorkerInstanceId',
   'WorkerSessionId',
@@ -99,37 +101,6 @@ function json(path) {
   return JSON.parse(readFileSync(path, 'utf8'))
 }
 
-function fallbackDomainSchema() {
-  const id = prefix => ({
-    type: 'string',
-    pattern: `^${prefix}_[0-9A-HJKMNP-TV-Z]{26}$`,
-  })
-  const prefixes = {
-    ApprovalId: 'apr',
-    CodexThreadId: 'cdx',
-    DeliveryId: 'dlv',
-    DeliveryTaskId: 'dtk',
-    LeaseId: 'lse',
-    ProductSessionId: 'psn',
-    RepositoryId: 'rep',
-    RequestId: 'req',
-    StageRunId: 'run',
-    WorkerId: 'wrk',
-    WorkerSessionId: 'wsn',
-  }
-  return {
-    $schema: 'https://json-schema.org/draft/2020-12/schema',
-    $id: domainSchemaId,
-    $defs: {
-      ...Object.fromEntries(Object.entries(prefixes).map(([name, prefix]) => [name, id(prefix)])),
-      Instant: { type: 'string', format: 'date-time' },
-      SchemaVersion: { const: 'winwincode/v1' },
-      Sha256Digest: { type: 'string', pattern: '^sha256:[0-9a-f]{64}$' },
-      ObservationId: { type: 'string', pattern: '^sha256:[0-9a-f]{64}$' },
-    },
-  }
-}
-
 function validator(schema, definitionName) {
   const ajv = new Ajv2020({ allErrors: true, strict: true })
   addFormats(ajv)
@@ -138,10 +109,11 @@ function validator(schema, definitionName) {
     ['x-direction', 'string'],
     ['x-winwincode-semantics', 'object'],
     ['x-winwincode-transports', 'object'],
+    ['x-winwincode-openapi', 'object'],
   ]) {
     ajv.addKeyword({ keyword, schemaType, valid: true })
   }
-  ajv.addSchema(existsSync(domainSchemaPath) ? json(domainSchemaPath) : fallbackDomainSchema())
+  ajv.addSchema(json(domainSchemaPath))
   if (definitionName !== undefined) {
     ajv.addSchema(schema)
     return ajv.compile({ $ref: `${schema.$id}#/$defs/${definitionName}` })
@@ -228,7 +200,7 @@ test('interactive choices separate stable identity from canonical submitted valu
   assert.equal(validate(input), false)
 })
 
-test('ExecutionPort seals typed stage input only on Delivery jobs', () => {
+test('ExecutionPort seals typed WorkContract and WorkItem input only on Delivery jobs', () => {
   const validate = validator(json(schemaPath))
   const fixture = json(validFixturePath)
   const dispatch = structuredClone(
@@ -237,8 +209,8 @@ test('ExecutionPort seals typed stage input only on Delivery jobs', () => {
   assert.ok(dispatch)
 
   const missing = structuredClone(dispatch)
-  delete missing.job.stageInput
-  assert.equal(validate(missing), false, 'Delivery job requires typed stageInput')
+  delete missing.job.workInput
+  assert.equal(validate(missing), false, 'Delivery job requires typed workInput')
 
   const chatWithStageInput = structuredClone(dispatch)
   chatWithStageInput.job.scope = {
@@ -248,10 +220,10 @@ test('ExecutionPort seals typed stage input only on Delivery jobs', () => {
   assert.equal(
     validate(chatWithStageInput),
     false,
-    'ProductSession job rejects Delivery stageInput',
+    'ProductSession job rejects Delivery workInput',
   )
 
-  delete chatWithStageInput.job.stageInput
+  delete chatWithStageInput.job.workInput
   assert.equal(
     validate(chatWithStageInput),
     true,
@@ -275,6 +247,7 @@ test('ExecutionPort carries one sealed replacement lineage on replacement dispat
 
   const replacement = structuredClone(firstDispatch)
   replacement.job.attempt = 2
+  replacement.job.scope.attempt = 2
   replacement.lease = {
     ...replacement.lease,
     leaseId: 'lse_0000000000000000000000000B',
@@ -294,7 +267,7 @@ test('ExecutionPort carries one sealed replacement lineage on replacement dispat
       productSessionId: replacement.job.scope.productSessionId,
       workerSessionId: 'wsn_0000000000000000000000000E',
       codexThreadId: 'cdx_0000000000000000000000000F',
-      stageRunId: replacement.job.scope.stageRunId,
+      workRunId: replacement.job.scope.workRunId,
     },
     successorLease: replacement.lease,
     createdAt: '2026-08-24T12:11:00.000Z',
@@ -388,7 +361,7 @@ test('ExecutionPort supports default Chat jobs without inventing a Delivery', ()
 
   assert.deepEqual(scope.oneOf.map(branch => branch.$ref), [
     '#/$defs/ProductSessionExecutionScope',
-    '#/$defs/DeliveryStageExecutionScope',
+    '#/$defs/WorkRunExecutionScope',
   ])
   assert.deepEqual(schema.$defs.ProductSessionExecutionScope.required, [
     'kind',
@@ -399,19 +372,23 @@ test('ExecutionPort supports default Chat jobs without inventing a Delivery', ()
     'product-session',
   )
   assert.equal(schema.$defs.ProductSessionExecutionScope.properties.deliveryId, undefined)
-  assert.equal(schema.$defs.ProductSessionExecutionScope.properties.stageRunId, undefined)
-  assert.deepEqual(schema.$defs.DeliveryStageExecutionScope.required, [
+  assert.equal(schema.$defs.ProductSessionExecutionScope.properties.workRunId, undefined)
+  assert.deepEqual(schema.$defs.WorkRunExecutionScope.required, [
     'kind',
     'productSessionId',
-    'deliveryId',
-    'stageRunId',
+    'workContractId',
+    'workContractRevision',
+    'workItemId',
+    'workItemRevision',
+    'workRunId',
+    'attempt',
   ])
   assert.equal(
-    schema.$defs.DeliveryStageExecutionScope.properties.kind.const,
-    'delivery-stage',
+    schema.$defs.WorkRunExecutionScope.properties.kind.const,
+    'work-run',
   )
   assert.equal(
-    schema.$defs.DeliveryStageExecutionScope.properties.reworkAuthorization.$ref,
+    schema.$defs.WorkRunExecutionScope.properties.reworkAuthorization.$ref,
     '#/$defs/DeliveryReworkAuthorizationScope',
   )
   assert.deepEqual(schema.$defs.DeliveryReworkAuthorizationScope.required, [
@@ -428,9 +405,7 @@ test('ExecutionPort supports default Chat jobs without inventing a Delivery', ()
     '#/$defs/DeliveryReworkTargetScope',
   )
   assert.deepEqual(schema.$defs.DeliveryReworkTargetScope.required, [
-    'deliveryTaskId',
-    'diagramId',
-    'nodeId',
+    'workItemId',
     'filePath',
     'sourceHunkSha256',
     'evidenceRefIds',
@@ -444,7 +419,7 @@ test('ExecutionPort supports default Chat jobs without inventing a Delivery', ()
   const validate = validator(scopeSchema)
   assert.deepEqual(fixture.executionScopes.map(entry => entry.kind), [
     'product-session',
-    'delivery-stage',
+    'work-run',
   ])
   for (const sample of fixture.executionScopes) {
     assert.equal(validate(sample), true, `${sample.kind}: ${JSON.stringify(validate.errors)}`)
@@ -476,17 +451,30 @@ test('DeliveryReworkTargetScope.evidenceRefIds uses the canonical domain Evidenc
     `canonical evd_ evidenceRefIds rejected: ${JSON.stringify(validate.errors)}`,
   )
 
-  const legacyScope = deliveryReworkExecutionScope([legacyEvidenceId])
-  assert.equal(validate(legacyScope), false)
+  const legacyScope = structuredClone(canonicalScope)
+  legacyScope.reworkAuthorization.targets[0].deliveryTaskId = `dtk_${'A'.repeat(26)}`
+  delete legacyScope.reworkAuthorization.targets[0].workItemId
+  assert.equal(validate(legacyScope), false, 'legacy deliveryTaskId must be rejected')
+
+  const legacyTargetScope = structuredClone(canonicalScope)
+  legacyTargetScope.reworkAuthorization.targets[0].diagramId = 'legacy-diagram'
+  legacyTargetScope.reworkAuthorization.targets[0].nodeId = 'legacy-node'
+  assert.equal(validate(legacyTargetScope), false, 'legacy diagramId/nodeId must be rejected')
+
+  const legacyEvidenceScope = deliveryReworkExecutionScope([legacyEvidenceId])
+  assert.equal(validate(legacyEvidenceScope), false)
 })
 
 function deliveryReworkExecutionScope(evidenceRefIds) {
   return {
-    kind: 'delivery-stage',
+    kind: 'work-run',
     productSessionId: `psn_${'A'.repeat(26)}`,
-    deliveryId: `dlv_${'A'.repeat(26)}`,
-    deliveryTaskId: `dtk_${'A'.repeat(26)}`,
-    stageRunId: `run_${'A'.repeat(26)}`,
+    workContractId: `wct_${'A'.repeat(26)}`,
+    workContractRevision: 1,
+    workItemId: `wit_${'A'.repeat(26)}`,
+    workItemRevision: 1,
+    workRunId: `wrn_${'A'.repeat(26)}`,
+    attempt: 1,
     reworkAuthorization: {
       authorizationDigest: `sha256:${'a'.repeat(64)}`,
       candidateRef: `git-candidate:sha256:${'a'.repeat(64)}`,
@@ -496,9 +484,7 @@ function deliveryReworkExecutionScope(evidenceRefIds) {
       requiresFullReverification: true,
       targets: [
         {
-          deliveryTaskId: `dtk_${'A'.repeat(26)}`,
-          diagramId: 'diagrams/rework',
-          nodeId: 'node-1',
+          workItemId: `wit_${'A'.repeat(26)}`,
           filePath: 'src/lib.rs',
           sourceHunkSha256: 'a'.repeat(64),
           evidenceRefIds,
@@ -508,7 +494,7 @@ function deliveryReworkExecutionScope(evidenceRefIds) {
   }
 }
 
-test('ProductSession runtime messages carry no fabricated StageRun identity', () => {
+test('ProductSession runtime messages carry no fabricated WorkRun identity', () => {
   const schema = json(schemaPath)
   const validate = validator(schema)
   const fixture = json(validFixturePath)
@@ -517,27 +503,29 @@ test('ProductSession runtime messages carry no fabricated StageRun identity', ()
   )
 
   assert.ok(runtime)
-  delete runtime.sessionIdentity.stageRunId
+  delete runtime.sessionIdentity.workRunId
   assert.equal(
     validate(runtime),
     true,
-    `ProductSession runtime event must omit StageRun: ${JSON.stringify(validate.errors)}`,
+    `ProductSession runtime event must omit WorkRun: ${JSON.stringify(validate.errors)}`,
   )
 })
 
-test('SessionBinding carries StageRun only for DeliveryStage jobs', () => {
+test('SessionBinding carries WorkRun only for DeliveryStage jobs', () => {
   const schema = json(schemaPath)
   const validate = validator(schema)
   const productSession = json(productSessionBindingFixturePath)
   const deliveryStage = json(deliveryStageBindingFixturePath)
 
-  assert.equal(schema.$defs.SessionBindingMessage.required.includes('stageRunId'), false)
+  assert.equal(schema.$defs.SessionBindingMessage.required.includes('workRunId'), false)
   assert.equal(validate(productSession), true, JSON.stringify(validate.errors))
-  assert.equal(Object.hasOwn(productSession, 'stageRunId'), false)
-  assert.equal(Object.hasOwn(productSession.sessionIdentity, 'stageRunId'), false)
+  assert.equal(Object.hasOwn(productSession, 'workRunId'), false)
+  assert.equal(Object.hasOwn(productSession.sessionIdentity, 'workRunId'), false)
 
   assert.equal(validate(deliveryStage), true, JSON.stringify(validate.errors))
-  assert.equal(deliveryStage.stageRunId, deliveryStage.sessionIdentity.stageRunId)
+  assert.equal(deliveryStage.workRunId, deliveryStage.sessionIdentity.workRunId)
+  assert.equal(validate({ ...deliveryStage, stageRunId: 'run_00000000000000000000000009' }), false)
+  assert.equal(validate({ ...deliveryStage, workRunId: 'run_00000000000000000000000009' }), false)
 })
 
 test('ExecutionPort input response maps provided and empty terminal values exactly', () => {
@@ -605,7 +593,7 @@ test('ExecutionPort freezes retry, replay, restart, and fencing outcomes', () =>
         'productSessionId',
         'workerSessionId',
         'codexThreadId',
-        'stageRunId',
+        'workRunId',
         'executionJobId',
         'attempt',
         'workerId',
@@ -1733,4 +1721,40 @@ test('DebugProbe contracts are generated, closed, bounded, authority-bound, and 
   assert.equal(validateRolePolicy(debugPolicy), true, JSON.stringify(validateRolePolicy.errors))
   assert.equal(validateRolePolicy({ ...debugPolicy, workspaceMode: 'candidate-write' }), false)
   assert.equal(validateRolePolicy({ ...debugPolicy, executionMode: 'unknown' }), false)
+})
+
+test('HTTP rework input names a bounded canonical WorkItem and exact candidate hunks', () => {
+  const schema = json(join(root, 'schema/winwincode/v1/control-plane-http.schema.json'))
+  const validate = validator(schema, 'DeliveryAdvancePayload')
+  const target = {
+    workItemId: 'wit_01J00000000000000000000000',
+    filePath: 'src/example.rs',
+    sourceHunkSha256: 'b'.repeat(64),
+    evidenceRefIds: ['evd_01J00000000000000000000000'],
+  }
+  const valid = {
+    deliveryId: 'dlv_01J00000000000000000000000',
+    dispatchProfile: 'remediator',
+    rework: {
+      candidateRef: `git-candidate:sha256:${'a'.repeat(64)}`,
+      diffSha256: 'c'.repeat(64), targets: [target],
+    },
+  }
+  assert.equal(validate(valid), true, JSON.stringify(validate.errors))
+  for (const old of ['deliveryTaskId', 'diagramId', 'nodeId']) {
+    const wrong = structuredClone(valid)
+    wrong.rework.targets[0][old] = 'old-authority'
+    assert.equal(validate(wrong), false, old)
+  }
+  for (const change of [
+    value => { value.rework.targets = [] },
+    value => { value.rework.targets[0].workItemId = 'delivery-task-old' },
+    value => { value.rework.targets[0].evidenceRefIds = [] },
+    value => { value.rework.targets[0].sourceHunkSha256 = 'not-a-digest' },
+  ]) {
+    const wrong = structuredClone(valid)
+    change(wrong)
+    assert.equal(validate(wrong), false)
+  }
+  assert.equal(validate(valid), true)
 })

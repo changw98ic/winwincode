@@ -49,6 +49,7 @@ pub(crate) struct AdapterStore {
     connection: Arc<Mutex<Connection>>,
 }
 
+#[allow(clippy::too_many_lines)]
 fn initialize_schema(connection: &Connection) -> Result<(), AdapterStoreError> {
     connection
             .execute_batch(

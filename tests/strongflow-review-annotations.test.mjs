@@ -45,6 +45,7 @@ const { mountStrongFlowPage } = pageModule
 
 const deliveryId = 'dlv_00000000000000000000000001'
 const stageRunId = 'run_00000000000000000000000001'
+const workRunId = 'wrn_00000000000000000000000001'
 const candidateDigest = `sha256:${'3'.repeat(64)}`
 const nextCandidateDigest = `sha256:${'4'.repeat(64)}`
 const candidateRef = 'refs/winwincode/candidate/1'
@@ -118,8 +119,23 @@ function projection(overrides = {}) {
       processDiagram: diagram('process-flow'),
     },
     diagramExecution: null,
-    stage: { id: stageRunId },
-    runtime: { stageRunId, sessions: [] },
+    runtime: { workRunId, sessions: [] },
+    workRunAggregate: {
+      items: [],
+      runs: [{
+        schemaVersion: 'winwincode/v1', id: workRunId,
+        workContractId: 'wct_00000000000000000000000001', contractRevision: 1,
+        workItemId: 'wit_00000000000000000000000001', workItemRevision: 1,
+        revision: 1, state: 'settled', attempt: 1,
+        executionJobId: 'job_00000000000000000000000001',
+        workerId: 'wrk_00000000000000000000000001',
+        workerInstanceId: 'wki_00000000000000000000000001',
+        workerSessionId: 'wsn_00000000000000000000000001',
+        leaseId: 'lse_00000000000000000000000001', fencingToken: '1',
+        productSessionId: 'psn_00000000000000000000000001',
+        codexThreadId: 'cdx_00000000000000000000000001', candidateDigest: null,
+      }],
+    },
     evidence: [],
     verdict: {
       id: 'verdict:1',

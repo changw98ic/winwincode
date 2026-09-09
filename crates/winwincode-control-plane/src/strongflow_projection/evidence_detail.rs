@@ -14,7 +14,7 @@ use winwincode_api::generated::{
     QueryResultResponse, StrongFlowReadCursor,
 };
 use winwincode_delivery::domain::{EvidenceRef, VerifiedEvidenceOutcome};
-use winwincode_domain::{DeliveryId, EvidenceId, RepositoryScope, SchemaVersion};
+use winwincode_domain::{DeliveryId, EvidenceId, RepositoryScope, SchemaVersion, WorkRunId};
 
 use super::{StrongFlowProjectionError, application, mapping};
 use crate::ControlPlane;
@@ -29,14 +29,14 @@ struct BoundEvidence {
     outcome: EvidenceOutcome,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct EvidenceSelector<'query> {
     delivery_id: &'query DeliveryId,
     at_cursor: &'query StrongFlowReadCursor,
     read_page_limit: i64,
     evidence_id: &'query EvidenceId,
     candidate_ref: &'query str,
-    stage_run_id: &'query winwincode_domain::StageRunId,
+    work_run_id: WorkRunId,
     session_binding_id: &'query str,
     evidence_type: &'query str,
     source_ref: &'query str,
@@ -57,13 +57,13 @@ pub(super) fn get(
         control_plane,
         &query.actor,
         &query.scope,
-        EvidenceSelector {
+        &EvidenceSelector {
             delivery_id: &query.parameters.delivery_id,
             at_cursor: &query.parameters.at_cursor,
             read_page_limit: query.parameters.read_page_limit,
             evidence_id: &query.parameters.evidence_id,
             candidate_ref: &query.parameters.candidate_ref,
-            stage_run_id: &query.parameters.stage_run_id,
+            work_run_id: query.parameters.work_run_id.clone(),
             session_binding_id: &query.parameters.session_binding_id,
             evidence_type: &query.parameters.type_value,
             source_ref: &query.parameters.source_ref,
@@ -105,8 +105,12 @@ pub(super) fn artifact_content_get(
     }
     validate_artifact_range(query)?;
     let binding = &query.parameters.evidence;
-    let bound =
-        resolve_bound_evidence(control_plane, &query.actor, &query.scope, selector(binding))?;
+    let bound = resolve_bound_evidence(
+        control_plane,
+        &query.actor,
+        &query.scope,
+        &selector(binding),
+    )?;
 
     // Artifact ids and digests supplied by a caller are stale selectors only.
     // The producer has not retained an exact Evidence-to-Artifact link, so this
@@ -142,7 +146,7 @@ fn selector(binding: &EvidenceReadBinding) -> EvidenceSelector<'_> {
         read_page_limit: binding.read_page_limit,
         evidence_id: &binding.evidence_id,
         candidate_ref: &binding.candidate_ref,
-        stage_run_id: &binding.stage_run_id,
+        work_run_id: WorkRunId(binding.work_run_id.0.clone()),
         session_binding_id: &binding.session_binding_id,
         evidence_type: &binding.type_value,
         source_ref: &binding.source_ref,
@@ -153,7 +157,7 @@ fn resolve_bound_evidence(
     control_plane: &ControlPlane,
     actor: &Actor,
     scope: &RepositoryScope,
-    selector: EvidenceSelector<'_>,
+    selector: &EvidenceSelector<'_>,
 ) -> Result<BoundEvidence, StrongFlowProjectionError> {
     let read = application::replay_delivery_read(
         control_plane,
@@ -249,7 +253,7 @@ fn resolve_bound_evidence(
 
 fn validate_selector(
     evidence: &EvidenceRef,
-    selector: EvidenceSelector<'_>,
+    selector: &EvidenceSelector<'_>,
 ) -> Result<(), StrongFlowProjectionError> {
     let evidence_type = serde_json::to_value(evidence.evidence_type)
         .ok()
@@ -261,7 +265,7 @@ fn validate_selector(
         })?;
     if &evidence.delivery_id != selector.delivery_id
         || evidence.candidate_ref != selector.candidate_ref
-        || &evidence.stage_run_id != selector.stage_run_id
+        || selector.work_run_id.0 != evidence.work_run_id.0
         || evidence.session_binding_id.0 != selector.session_binding_id
         || evidence_type != selector.evidence_type
         || evidence.source_ref != selector.source_ref

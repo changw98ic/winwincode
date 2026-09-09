@@ -5,12 +5,11 @@
 use std::fmt;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use winwincode_delivery::{
-    application::stage::SessionBindingAuthority,
-    domain::{Delivery, StageRunStatus},
-};
+use winwincode_delivery::{application::stage::SessionBindingAuthority, domain::Delivery};
 use winwincode_domain::RepositoryScope;
-use winwincode_domain::{ExecutionAckSequence, ExecutionSequence, SchemaVersion, SessionIdentity};
+use winwincode_domain::{
+    DeliveryId, ExecutionAckSequence, ExecutionSequence, SchemaVersion, SessionIdentity,
+};
 use winwincode_execution_port::generated::{
     ArtifactAckMessage, ArtifactAckMessageKind, ArtifactChunkMessage, ArtifactKind,
     ArtifactOpenMessage, ExecutionJob, ExecutionLeaseStamp, ExecutionPortError,
@@ -256,7 +255,7 @@ fn metering_attribution(
             "Artifact storage attribution requires the authenticated User actor",
         ));
     };
-    let ExecutionScope::DeliveryStageExecutionScope(job_scope) = &job.scope else {
+    let ExecutionScope::WorkRunExecutionScope(job_scope) = &job.scope else {
         return Err(StorageError::invalid_input(
             "Artifact storage attribution requires a Delivery stage",
         ));
@@ -271,7 +270,13 @@ fn metering_attribution(
         workspace_id: scope.workspace_id.clone(),
         project_id: scope.project_id.clone(),
         repository_id: scope.repository_id.clone(),
-        delivery_id: Some(job_scope.delivery_id.clone()),
+        delivery_id: Some(DeliveryId(
+            durable
+                .stream_id()
+                .strip_prefix("delivery:")
+                .unwrap_or(durable.stream_id())
+                .to_owned(),
+        )),
         product_session_id: Some(session_identity.product_session_id.clone()),
         user_id,
     })
@@ -636,12 +641,30 @@ fn validate_current_binding(
     require_active_run: bool,
     require_authority: bool,
 ) -> Result<SessionIdentity, StorageError> {
-    let ExecutionScope::DeliveryStageExecutionScope(job_scope) = &job.scope else {
+    let ExecutionScope::WorkRunExecutionScope(job_scope) = &job.scope else {
         return Err(StorageError::invalid_input(
             "Artifact message requires a Delivery stage ExecutionJob",
         ));
     };
-    if durable.stream_id() != delivery_stream_id(&job_scope.delivery_id) {
+    if require_active_run
+        && storage
+            .load_state(
+                &crate::terminal_outcome_transaction::terminal_authority_stream_id(&job.job_id),
+            )?
+            .is_some()
+    {
+        return Err(StorageError::invalid_input(
+            "terminal WorkRun cannot create new artifacts",
+        ));
+    }
+    let delivery_id = DeliveryId(
+        durable
+            .stream_id()
+            .strip_prefix("delivery:")
+            .unwrap_or(durable.stream_id())
+            .to_owned(),
+    );
+    if durable.stream_id() != delivery_stream_id(&delivery_id) {
         return Err(StorageError::invalid_input(
             "Artifact ExecutionJob receipt identifies another Delivery",
         ));
@@ -651,21 +674,23 @@ fn validate_current_binding(
         .ok_or_else(|| StorageError::invalid_input("Artifact Delivery state does not exist"))?;
     let delivery = Delivery::decode_json(&state.payload)
         .map_err(|error| StorageError::invalid_input(error.to_string()))?;
-    let mut runs = delivery.snapshot().stage_runs.iter().filter(|run| {
-        run.id == job_scope.stage_run_id
-            && (!require_active_run
-                || matches!(
-                    run.status,
-                    StageRunStatus::Running | StageRunStatus::Waiting
-                ))
-    });
+    let mut runs = delivery
+        .snapshot()
+        .work_run_aggregate
+        .runs
+        .iter()
+        .filter(|run| {
+            run.id == job_scope.work_run_id
+                && (!require_active_run
+                    || matches!(run.state, winwincode_domain::WorkRunState::Running))
+        });
     let run = runs.next().ok_or_else(|| {
         StorageError::invalid_input("Artifact ExecutionJob StageRun is not active")
     })?;
     let attempt = u64::try_from(job.attempt).map_err(|_| {
         StorageError::invalid_input("Artifact ExecutionJob attempt is out of range")
     })?;
-    if runs.next().is_some() || run.attempt != attempt {
+    if runs.next().is_some() || run.attempt != i64::try_from(attempt).unwrap_or(-1) {
         return Err(StorageError::invalid_input(
             "Artifact ExecutionJob StageRun is ambiguous or stale",
         ));
@@ -674,7 +699,7 @@ fn validate_current_binding(
         .snapshot()
         .session_bindings
         .iter()
-        .filter(|binding| binding.stage_run_id == run.id)
+        .filter(|binding| binding.work_run_id == run.id)
         .collect::<Vec<_>>();
     let [binding] = bindings.as_slice() else {
         return Err(StorageError::invalid_input(
@@ -683,7 +708,10 @@ fn validate_current_binding(
     };
     if binding.execution_job_id != job.job_id
         || binding.product_session_id != job_scope.product_session_id
-        || binding.delivery_task_id != job_scope.delivery_task_id
+        || binding.work_contract_id != job_scope.work_contract_id
+        || binding.work_contract_revision != job_scope.work_contract_revision
+        || binding.work_item_id != job_scope.work_item_id
+        || binding.work_item_revision != job_scope.work_item_revision
         || binding.worker_session_id.as_ref() != Some(worker_session_id)
         || binding.codex_thread_id.is_none()
     {
@@ -708,7 +736,7 @@ fn validate_current_binding(
     Ok(SessionIdentity {
         codex_thread_id,
         product_session_id: binding.product_session_id.clone(),
-        stage_run_id: Some(binding.stage_run_id.clone()),
+        work_run_id: Some(binding.work_run_id.clone()),
         worker_session_id: worker_session_id.clone(),
     })
 }
@@ -827,10 +855,10 @@ fn validate_session_identity_shape(identity: &SessionIdentity) -> Result<(), Sto
         "psn_",
         "sessionIdentity.productSessionId",
     )?;
-    let stage_run_id = identity.stage_run_id.as_ref().ok_or_else(|| {
-        StorageError::invalid_input("sessionIdentity.stageRunId is required for artifacts")
+    let work_run_id = identity.work_run_id.as_ref().ok_or_else(|| {
+        StorageError::invalid_input("sessionIdentity.workRunId is required for artifacts")
     })?;
-    require_id(&stage_run_id.0, "run_", "sessionIdentity.stageRunId")?;
+    require_id(&work_run_id.0, "wrn_", "sessionIdentity.workRunId")?;
     require_id(
         &identity.worker_session_id.0,
         "wsn_",

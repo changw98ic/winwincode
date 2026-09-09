@@ -10,6 +10,8 @@ import { mountStrongFlowPage } from '/module/strongflow-page.js'
 const deliveryId = 'dlv_00000000000000000000000001'
 const productSessionId = 'psn_00000000000000000000000001'
 const stageRunId = 'run_00000000000000000000000001'
+const workRunId = 'wrn_00000000000000000000000001'
+const workItemId = 'wit_00000000000000000000000001'
 const candidateRef = `git-candidate:sha256:${'1'.repeat(64)}`
 const candidateTreeId = '2'.repeat(40)
 const candidateDiffSha256 = `sha256:${'3'.repeat(64)}`
@@ -49,7 +51,7 @@ const projection = {
   },
   solutionReview: null,
   stage: { id: stageRunId },
-  runtime: { stageRunId, sessions: [] },
+  runtime: { workRunId, workItemId, sessions: [] },
   evidence: [],
   verdict: null,
   attention: [],
@@ -62,7 +64,7 @@ const projection = {
     diffSha256: candidateDiffSha256,
     frozenAt: '2026-09-03T01:00:00.000Z',
     producerSessionBindingId: 'binding:strongflow:1',
-    producerStageRunId: stageRunId,
+    producerWorkRunId: workRunId,
   },
   publication: null,
   metadata: {
@@ -149,7 +151,7 @@ function candidateRoute(path, mode = strongFlowCandidateViewFromHash(location.ha
     ...parseStrongFlowRouteHash(location.hash),
     deliveryId,
     productSessionId,
-    stageRunId,
+    workRunId,
     candidatePath: path,
     candidateView: mode,
   },
@@ -171,6 +173,7 @@ function routeFacts() {
     'run',
     'tab',
     'evidence',
+    'line',
   ].map(name => [name, parameters.get(name)]))
 }
 

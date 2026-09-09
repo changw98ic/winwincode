@@ -47,6 +47,9 @@ const deliveryId = 'dlv_00000000000000000000000001'
 const productSessionId = 'psn_00000000000000000000000001'
 const stageRunId = 'run_00000000000000000000000001'
 const reviewStageRunId = 'run_00000000000000000000000002'
+const workRunId = 'wrn_00000000000000000000000001'
+const reviewWorkRunId = 'wrn_00000000000000000000000002'
+const workItemId = 'wit_00000000000000000000000001'
 const taskId = 'dtk_00000000000000000000000001'
 const reviewAttentionId = 'att_00000000000000000000000001'
 const reworkAttentionId = 'att_00000000000000000000000002'
@@ -92,7 +95,7 @@ function sessionBinding() {
     boundAt: '2026-08-27T01:00:00.000Z',
     executionJobId: 'job_00000000000000000000000001',
     productSessionId,
-    stageRunId,
+    workRunId,
     workerSessionId,
     codexThreadId,
     attempt: 1,
@@ -106,7 +109,7 @@ function sessionBinding() {
       workerInstanceId: 'wki_00000000000000000000000001',
       workerSessionId,
     },
-    sessionIdentity: { productSessionId, workerSessionId, codexThreadId, stageRunId },
+    sessionIdentity: { productSessionId, workerSessionId, codexThreadId, workRunId },
   }
 }
 
@@ -135,6 +138,7 @@ function review(state) {
     planningStageRunId: stageRunId,
     planningSessionBindingId: 'binding:strongflow:1',
     reviewStageRunId,
+    reviewWorkRunId,
     attentionItemId: reviewAttentionId,
     reviewSetSha256: state.reviewDigest,
     solutionId: 'solution:1',
@@ -196,7 +200,7 @@ function attention(id, type, title, status, revision) {
   return {
     id,
     deliverySpecId: 'spec:1',
-    stageRunId: type === 'decision_required' ? reviewStageRunId : stageRunId,
+    workRunId: type === 'decision_required' ? reviewWorkRunId : workRunId,
     type,
     title,
     options: [],
@@ -222,7 +226,7 @@ function candidate(digest) {
     diffSha256,
     frozenAt: `2026-08-27T01:00:0${suffix}.000Z`,
     producerSessionBindingId: 'binding:strongflow:1',
-    producerStageRunId: stageRunId,
+    producerWorkRunId: workRunId,
   }
 }
 
@@ -320,7 +324,7 @@ function deliveryDetail(state) {
       actorType: 'codex',
       attempt: 1,
       deliveryTaskId: state.tasksApproved ? taskId : null,
-      finishedAt: null,
+      finishedAt: state.tasksApproved ? '2026-08-27T01:00:04.000Z' : null,
       role: 'implementer',
       sessionBinding: sessionBinding(),
       stage: state.status === 'reworking' ? 'reworking' : 'executing',
@@ -346,7 +350,7 @@ function deliveryDetail(state) {
       status: state.status === 'reworking' ? 'active' : 'verifying',
       blockedByTaskIds: [],
       acceptanceCriterionIds: ['criterion:1'],
-      stageRunIds: [stageRunId],
+      workRunIds: [workRunId],
       evidenceRefs: state.verdictStatus === null ? [] : ['evd_00000000000000000000000001'],
     }] : [],
     attention: attentionItems,
@@ -357,7 +361,7 @@ function deliveryDetail(state) {
       deliverySpecRevision: 1,
       sessionBindingId: 'binding:strongflow:1',
       sourceRef: 'artifact:test:1',
-      stageRunId,
+      workRunId,
       type: 'test',
       createdAt: '2026-08-27T01:00:19.000Z',
     }],
@@ -370,17 +374,93 @@ function deliveryDetail(state) {
 }
 
 function runtimeProjection(detail) {
+  const cursor = detail.readCursor
   return {
     kind: 'runtime_projection',
     productSessionId,
     deliveryId,
-    stageRunId,
-    readCursor: detail.readCursor,
-    eventCursor: detail.readCursor.eventCursor,
-    lastProjectionSequence: detail.readCursor.runtimeAcceptedSequence,
-    revision: detail.readCursor.runtimeLedgerRevision,
+    workRunId,
+    readCursor: cursor,
+    eventCursor: cursor.eventCursor,
+    lastProjectionSequence: cursor.runtimeAcceptedSequence,
+    revision: cursor.runtimeLedgerRevision,
     rebuiltAt: '2026-08-27T01:00:21.000Z',
-    sessions: [],
+    sessions: [{
+      productSessionId,
+      workRunId,
+      workItemId,
+      executionJobId: 'job_00000000000000000000000001',
+      workerSessionId: 'wsn_00000000000000000000000001',
+      sessionBindingId: 'binding:strongflow:1',
+      codexThreadId: 'cdx_00000000000000000000000001',
+      attempt: 1,
+      asOfSequence: cursor.runtimeAcceptedSequence,
+      fencingToken: '1',
+      leaseId: 'lse_00000000000000000000000001',
+      agents: [],
+      agentEdges: [],
+      activities: [],
+      diffSummary: null,
+      usage: null,
+      plan: null,
+      recovery: {
+        failureCount: 0,
+        lastFailureSourceRef: null,
+        latestRecoverySourceRef: null,
+        recoveryCount: 0,
+        state: 'none',
+      },
+    }],
+  }
+}
+
+function workRunAggregate(detail) {
+  return {
+    schemaVersion,
+    contract: {
+      schemaVersion,
+      id: 'wct_00000000000000000000000001',
+      revision: 1,
+      scope: [],
+      objective: 'Execute the reviewed WorkItem.',
+      constraints: [],
+      protectedScope: [],
+      requiredHumanAuthority: 'none',
+      criteria: [{ id: 'crt_00000000000000000000000001', description: 'Produce evidence for the exact reviewed change.', required: true, verificationMethod: 'test' }],
+      createdAt: '2026-08-27T01:00:00.000Z',
+    },
+    items: [{
+      schemaVersion,
+      id: workItemId,
+      workContractId: 'wct_00000000000000000000000001',
+      workContractRevision: 1,
+      revision: 1,
+      state: 'in_progress',
+      title: 'Complete the current candidate',
+      goal: 'Produce evidence for the exact reviewed change.',
+      criterionIds: ['crt_00000000000000000000000001'],
+      dependsOn: [],
+    }],
+    runs: [{
+      schemaVersion,
+      id: workRunId,
+      workContractId: 'wct_00000000000000000000000001',
+      contractRevision: 1,
+      workItemId,
+      workItemRevision: 1,
+      revision: detail.deliveryRevision,
+      state: detail.status === 'reworking' ? 'running' : 'settled',
+      executionJobId: 'job_00000000000000000000000001',
+      attempt: 1,
+      workerId: 'wrk_00000000000000000000000001',
+      workerInstanceId: 'wki_00000000000000000000000001',
+      workerSessionId: 'wsn_00000000000000000000000001',
+      leaseId: 'lse_00000000000000000000000001',
+      fencingToken: '1',
+      productSessionId,
+      codexThreadId: 'cdx_00000000000000000000000001',
+    }],
+    readCursor: detail.readCursor,
   }
 }
 
@@ -562,6 +642,12 @@ function contractFake() {
         assert.deepEqual(request.parameters.atCursor, detail.readCursor)
         return response(200, queryResponse(request, runtimeProjection(detail)))
       }
+      if (request.query === 'workrun.get') {
+        assert.equal(request.parameters.workItemId, null)
+        assert.equal(request.parameters.workRunId, null)
+        assert.deepEqual(request.parameters.atCursor, detail.readCursor)
+        return response(200, queryResponse(request, workRunAggregate(detail)))
+      }
     }
     if (request.expectedRevision !== state.revision) {
       return response(409, terminalError(request, 'REVISION_CONFLICT', 'Delivery changed.'))
@@ -573,7 +659,7 @@ function contractFake() {
         assert.equal(decision.protocol, 'winwincode.solution-review-decision.v1')
         assert.equal(decision.deliveryId, deliveryId)
         assert.equal(decision.deliverySpecRevision, 1)
-        assert.equal(decision.reviewStageRunId, reviewStageRunId)
+        assert.equal(decision.reviewWorkRunId, reviewWorkRunId)
         assert.equal(decision.attentionItemId, reviewAttentionId)
         assert.equal(decision.reviewSetSha256, state.reviewDigest.replace(/^sha256:/u, ''))
         assert.equal(request.payload.remediation, null)
@@ -611,15 +697,6 @@ function contractFake() {
       } else {
         return response(409, terminalError(request, 'WRONG_STATE', 'Attention is stale.'))
       }
-      advanceRevision()
-      return response(200, commandResponse(request, state))
-    }
-    if (request.command === 'delivery.approve_task_breakdown') {
-      assert.equal(state.reviewStatus, 'approved')
-      assert.equal(request.payload.reviewSetSha256, state.reviewDigest)
-      state.tasksApproved = true
-      state.candidateDigest = candidateDigest1
-      state.status = 'verifying'
       advanceRevision()
       return response(200, commandResponse(request, state))
     }
@@ -662,6 +739,12 @@ function contractFake() {
       state.reviewAttentionStatus = 'open'
     },
     createUnannouncedRevision() { advanceRevision() },
+    acceptWorkRun() {
+      advanceRevision()
+      state.tasksApproved = true
+      state.candidateDigest = candidateDigest1
+      state.status = 'verifying'
+    },
     finishRework() {
       advanceRevision()
       state.eventSequence += 1
@@ -694,7 +777,7 @@ test('StrongFlow browser contract fake covers review, stale decisions, rework, f
     scope,
     deliveryId,
     productSessionId,
-    stageRunId,
+    workRunId,
     subscriptionId,
     nextRequestId() {
       requestSequence += 1
@@ -733,7 +816,7 @@ test('StrongFlow browser contract fake covers review, stale decisions, rework, f
     deliveryId,
     deliverySpecId: 'spec:1',
     deliverySpecRevision: 1,
-    reviewStageRunId,
+    reviewWorkRunId,
     attentionItemId: reviewAttentionId,
     reviewSetSha256: '1'.repeat(64),
     action: 'request_changes',
@@ -746,7 +829,7 @@ test('StrongFlow browser contract fake covers review, stale decisions, rework, f
     'deliveryId',
     'deliverySpecId',
     'deliverySpecRevision',
-    'reviewStageRunId',
+    'reviewWorkRunId',
     'attentionItemId',
     'reviewSetSha256',
     'action',
@@ -779,7 +862,7 @@ test('StrongFlow browser contract fake covers review, stale decisions, rework, f
     deliveryId,
     deliverySpecId: 'spec:1',
     deliverySpecRevision: 1,
-    reviewStageRunId,
+    reviewWorkRunId,
     attentionItemId: reviewAttentionId,
     reviewSetSha256: '2'.repeat(64),
     action: 'approve',
@@ -792,7 +875,7 @@ test('StrongFlow browser contract fake covers review, stale decisions, rework, f
     'deliveryId',
     'deliverySpecId',
     'deliverySpecRevision',
-    'reviewStageRunId',
+    'reviewWorkRunId',
     'attentionItemId',
     'reviewSetSha256',
     'action',
@@ -802,11 +885,10 @@ test('StrongFlow browser contract fake covers review, stale decisions, rework, f
   await model.refresh()
   assert.equal(model.state.projection.solutionReview.reviewStatus, 'approved')
 
-  await model.approveTaskBreakdown()
-  command = fake.requests.at(-1).request
-  assert.equal(command.command, 'delivery.approve_task_breakdown')
-  assert.equal(command.expectedRevision, 5)
-  assert.equal(command.payload.reviewSetSha256, `sha256:${'2'.repeat(64)}`)
+  const workRun = model.state.projection.workRunAggregate.runs.find(run => run.id === workRunId)
+  assert.equal(workRun?.id, workRunId)
+  assert.equal(workRun?.state, 'settled')
+  fake.acceptWorkRun()
   await model.refresh()
   assert.equal(model.state.projection.delivery.tasks[0].id, taskId)
   assert.equal(model.state.projection.currentCandidate.diffSha256, candidateDiffDigest1)

@@ -12700,9 +12700,11 @@ name = "winwincode-delivery"
 version = "0.1.0-alpha.1"
 dependencies = [
  "base64 0.22.1",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "time",
  "winwincode-domain",
  "winwincode-storage",
 ]
@@ -12907,10 +12909,12 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tokio-tungstenite",
+ "ureq",
  "winwincode-api",
  "winwincode-client-port",
  "winwincode-codex",
  "winwincode-control-plane",
+ "winwincode-delivery",
  "winwincode-device-client",
  "winwincode-domain",
  "winwincode-execution-port",
@@ -12918,17 +12922,14 @@ dependencies = [
  "winwincode-session",
  "winwincode-storage",
  "winwincode-worker",
- "ureq",
 ]
 
 [[package]]
 name = "winwincode-session"
 version = "0.1.0-alpha.1"
 dependencies = [
- "rusqlite",
  "serde",
  "serde_json",
- "sha2 0.10.9",
  "winwincode-domain",
 ]
 

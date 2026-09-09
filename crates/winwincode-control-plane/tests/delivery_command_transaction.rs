@@ -18,8 +18,8 @@ use winwincode_control_plane::{
     CommitError, ControlPlane, ControlPlaneConfig, DeliveryCommandCommitError, EventPublishError,
     EventPublisher, OutboxEvent, StateChange, StorageErrorKind,
     test_support::{
-        DeliveryRepositoryFactsFixture, DeliverySpecFactsFixture, delivery_advance_command_facts,
-        delivery_attention_command_facts, delivery_spec_command_facts,
+        DeliveryRepositoryFactsFixture, DeliverySpecFactsFixture, delivery_attention_command_facts,
+        delivery_spec_command_facts,
     },
 };
 use winwincode_delivery::store::{
@@ -27,22 +27,15 @@ use winwincode_delivery::store::{
     DeliveryStore, JournalBackendError, LoadedDeliveryJournal,
 };
 use winwincode_delivery::{
-    application::{
-        attention::{AttentionDecision, ResolveAttentionInput, resolve_attention},
-        stage::{
-            AdvanceStageInput, NewStageIdentities, ReviewAttentionSeed, StageAdvanceResult, advance,
-        },
-    },
+    application::attention::{AttentionDecision, ResolveAttentionInput, resolve_attention},
     domain::{
-        AttentionItemStatus, DELIVERY_SCHEMA_VERSION, Delivery, DeliverySourceRef, DeliveryStage,
-        DeliveryStatus, RepositoryKind, RepositoryRef, SessionBindingId, StageRunActorType,
-        StageRunStatus,
+        AttentionItemStatus, DELIVERY_SCHEMA_VERSION, Delivery, DeliverySourceRef, DeliveryStatus,
+        RepositoryKind, RepositoryRef,
     },
 };
 use winwincode_domain::{
-    AttentionItemId, DeliveryId, ExecutionJobId, OrganizationId, ProductSessionId, ProjectId,
-    RepositoryId, RequestId, Revision, SchemaVersion, Sha256Digest, StageRunId, UserId,
-    WorkspaceId,
+    DeliveryId, OrganizationId, ProjectId, RepositoryId, RequestId, Revision, SchemaVersion,
+    Sha256Digest, UserId, WorkspaceId,
 };
 use winwincode_domain::{RepositoryScope, RepositoryScopeKind, UserActor, UserActorKind};
 use winwincode_storage::{
@@ -169,16 +162,6 @@ fn facts_with_authority(
     .expect("trusted test Delivery facts")
 }
 
-fn stage_identities(seed: u64) -> NewStageIdentities {
-    NewStageIdentities {
-        stage_run_id: StageRunId(canonical_id("run", seed)),
-        execution_job_id: ExecutionJobId(canonical_id("job", seed)),
-        session_binding_id: SessionBindingId::new(format!("binding-{seed}"))
-            .expect("session binding fixture id"),
-        attention_item_id: AttentionItemId(canonical_id("att", seed)),
-    }
-}
-
 fn repository_authority(
     seed: u64,
     locator: &str,
@@ -193,32 +176,6 @@ fn repository_authority(
         },
         source_ref,
     }
-}
-
-fn human_review_transition(
-    delivery: &Delivery,
-    actor: &str,
-    now_millis: u64,
-    seed: u64,
-) -> StageAdvanceResult {
-    advance(
-        delivery,
-        AdvanceStageInput {
-            expected_revision: delivery.revision(),
-            product_session_id: ProductSessionId(canonical_id("psn", seed)),
-            identities: stage_identities(seed),
-            review: Some(ReviewAttentionSeed {
-                title: "Review the verified Delivery".into(),
-                context: "Approve or return the verified Delivery.".into(),
-                assigned_to: actor.into(),
-            }),
-            previous_outcome: None,
-            current_lease: None,
-            rework_authorization: None,
-            now_millis,
-        },
-    )
-    .expect("sealed human review transition")
 }
 
 fn command_digest(command: &CommandEnvelope) -> String {
@@ -277,8 +234,7 @@ fn ready_to_deliver_fixture() -> Delivery {
     Delivery::try_from_snapshot(snapshot).expect("ReadyToDeliver seed")
 }
 
-fn seed_ready_to_deliver(root: &PathBuf) -> Delivery {
-    let delivery = ready_to_deliver_fixture();
+fn seed_delivery(root: &PathBuf, delivery: Delivery) -> Delivery {
     let journal = CapturingJournal::default();
     DeliveryStore::borrowed(&journal)
         .execute(DeliveryCommand::SeedForTest(CreateDelivery {
@@ -336,6 +292,23 @@ fn seed_ready_to_deliver(root: &PathBuf) -> Delivery {
         .expect("seed publication ack");
     Box::new(storage).close().expect("seed storage close");
     delivery
+}
+
+fn seed_ready_to_deliver_with_approval(root: &PathBuf) -> Delivery {
+    let source = ready_to_deliver_fixture();
+    let mut snapshot = source.snapshot().clone();
+    let created_at = snapshot.updated_at_millis + 1;
+    snapshot.status = DeliveryStatus::NeedsAttention;
+    snapshot.updated_at_millis = created_at;
+    snapshot.attention_items.push(
+        winwincode_delivery::application::verdict::test_support::delivery_approval_fixture(
+            &source, created_at,
+        ),
+    );
+    seed_delivery(
+        root,
+        Delivery::try_from_snapshot(snapshot).expect("approval Attention seed"),
+    )
 }
 
 fn update_spec_command(seed: u64) -> CommandEnvelope {
@@ -427,6 +400,38 @@ fn create_commits_the_canonical_empty_delivery_and_public_event() {
     assert!(delivery.snapshot().evidence.is_empty());
     assert!(delivery.snapshot().verdict.is_none());
     assert_eq!(delivery.snapshot().spec.revision, 1);
+    let contract = &delivery.snapshot().work_run_aggregate.contract;
+    let spec = &delivery.snapshot().spec;
+    assert_eq!(contract.objective, spec.goal);
+    assert_eq!(contract.scope, spec.scope);
+    assert_eq!(contract.constraints, spec.constraints);
+    assert_eq!(contract.protected_scope, spec.out_of_scope);
+    assert_eq!(contract.criteria.len(), spec.acceptance_criteria.len());
+    for (work, source) in contract.criteria.iter().zip(&spec.acceptance_criteria) {
+        assert_eq!(
+            work.id.0, source.id.0,
+            "verification and verdict must use one criterion identity"
+        );
+        assert!(winwincode_domain::is_canonical_prefixed_id(
+            &source.id.0,
+            "crt_"
+        ));
+    }
+    assert_eq!(
+        contract.criteria[0].description,
+        spec.acceptance_criteria[0].description
+    );
+    assert_eq!(
+        contract.criteria[0].verification_method,
+        spec.acceptance_criteria[0].verification_method
+    );
+    assert_ne!(contract.created_at.0, "1970-01-01T00:00:00.000Z");
+    delivery
+        .snapshot()
+        .work_run_aggregate
+        .validate()
+        .expect("canonical contract");
+
     assert_eq!(
         delivery.snapshot().spec.repository.kind,
         RepositoryKind::LocalGit
@@ -608,7 +613,7 @@ fn update_spec_replaces_only_the_canonical_spec_and_replays_the_exact_receipt() 
 }
 
 #[test]
-fn missing_delivery_is_a_public_resource_not_found_for_every_base_mutation() {
+fn missing_delivery_is_a_public_resource_not_found_for_every_mutation() {
     let root = temporary_directory("missing-delivery");
     let mut control_plane = ControlPlane::start_local(
         ControlPlaneConfig::local(&root),
@@ -624,43 +629,39 @@ fn missing_delivery_is_a_public_resource_not_found_for_every_base_mutation() {
         .expect_err("Spec replacement requires an existing Delivery");
 
     let source = ready_to_deliver_fixture();
-    let advance = delivery_command(
-        82,
-        CommandName::DeliveryAdvance,
-        1,
-        serde_json::json!({"deliveryId": canonical_id("dlv", 82)}),
-    );
-    let advance_facts = delivery_advance_command_facts(
-        &advance,
-        repository_authority(82, "/workspace/repository", None),
-        human_review_transition(
-            &source,
-            &canonical_id("usr", 82),
-            source.snapshot().updated_at_millis + 1,
-            82,
+    let mut snapshot = source.snapshot().clone();
+    let created_at = snapshot.updated_at_millis + 1;
+    snapshot.status = DeliveryStatus::NeedsAttention;
+    snapshot.updated_at_millis = created_at;
+    snapshot.attention_items.push(
+        winwincode_delivery::application::verdict::test_support::delivery_approval_fixture(
+            &source, created_at,
         ),
-    )
-    .expect("sealed advance facts");
-    let advance_error = control_plane
-        .commit_delivery_command(&advance, &advance_facts)
-        .expect_err("human advance requires an existing Delivery");
-
-    let reviewing_transition = human_review_transition(
-        &source,
-        &canonical_id("usr", 83),
-        source.snapshot().updated_at_millis + 1,
-        83,
     );
-    let reviewing = reviewing_transition.delivery;
+    let reviewing = Delivery::try_from_snapshot(snapshot).expect("approval Attention");
     let attention = reviewing
         .snapshot()
         .attention_items
         .last()
         .expect("review Attention");
+    let resolve_transition = resolve_attention(
+        &reviewing,
+        ResolveAttentionInput {
+            expected_revision: reviewing.revision(),
+            attention_item_id: attention.id.clone(),
+            work_run_id: attention.work_run_id.clone(),
+            expected_context: attention.context.clone(),
+            actor: canonical_id("usr", 83),
+            decision: AttentionDecision::Resolved,
+            resolution: "Resolve a missing Delivery only through its public error.".into(),
+            now_millis: created_at + 1,
+        },
+    )
+    .expect("sealed Attention transition");
     let resolve = delivery_command(
         83,
         CommandName::DeliveryResolveAttention,
-        2,
+        1,
         serde_json::json!({
             "deliveryId": canonical_id("dlv", 83),
             "attentionItemId": attention.id,
@@ -669,20 +670,6 @@ fn missing_delivery_is_a_public_resource_not_found_for_every_base_mutation() {
             "remediation": null
         }),
     );
-    let resolve_transition = resolve_attention(
-        &reviewing,
-        ResolveAttentionInput {
-            expected_revision: reviewing.revision(),
-            attention_item_id: attention.id.clone(),
-            stage_run_id: attention.stage_run_id.clone().expect("review StageRun"),
-            expected_context: attention.context.clone(),
-            actor: canonical_id("usr", 83),
-            decision: AttentionDecision::Resolved,
-            resolution: "Resolve a missing Delivery only through its public error.".into(),
-            now_millis: source.snapshot().updated_at_millis + 2,
-        },
-    )
-    .expect("sealed Attention transition");
     let resolve_facts = delivery_attention_command_facts(
         &resolve,
         repository_authority(83, "/workspace/repository", None),
@@ -695,7 +682,6 @@ fn missing_delivery_is_a_public_resource_not_found_for_every_base_mutation() {
 
     for (error, delivery_id) in [
         (update_error, canonical_id("dlv", 81)),
-        (advance_error, canonical_id("dlv", 82)),
         (resolve_error, canonical_id("dlv", 83)),
     ] {
         assert_eq!(error.public_code(), ErrorCode::ResourceNotFound);
@@ -717,10 +703,9 @@ fn missing_delivery_is_a_public_resource_not_found_for_every_base_mutation() {
 
 #[test]
 #[allow(clippy::too_many_lines)]
-fn human_advance_and_attention_resolution_use_sealed_application_transitions() {
+fn human_attention_resolution_uses_sealed_application_transition() {
     let root = temporary_directory("human-review");
-    let source = seed_ready_to_deliver(&root);
-    let delivery_id = source.id().0.clone();
+    let source = seed_ready_to_deliver_with_approval(&root);
     let published = Arc::new(Mutex::new(Vec::new()));
     let mut control_plane = ControlPlane::start_local(
         ControlPlaneConfig::local(&root),
@@ -729,60 +714,20 @@ fn human_advance_and_attention_resolution_use_sealed_application_transitions() {
         }),
     )
     .expect("Control Plane start");
-    let advance_command = delivery_command(
-        30,
-        CommandName::DeliveryAdvance,
-        1,
-        serde_json::json!({"deliveryId": delivery_id}),
-    );
-    let advance_transition = human_review_transition(
-        &source,
-        &canonical_id("usr", 30),
-        source.snapshot().updated_at_millis + 1,
-        30,
-    );
-    let advance_facts = delivery_advance_command_facts(
-        &advance_command,
-        repository_authority(30, "/workspace/repository", None),
-        advance_transition,
-    )
-    .expect("sealed advance facts");
-
-    let advance_receipt = control_plane
-        .commit_delivery_command(&advance_command, &advance_facts)
-        .expect("human Delivery review advance");
-    let state = control_plane
-        .load_state(&format!("delivery:{}", source.id().0))
-        .expect("review state")
-        .expect("review Delivery");
-    let reviewing = Delivery::decode_json(&state.payload).expect("reviewing Delivery");
-    let run = reviewing.snapshot().stage_runs.last().expect("review run");
+    let reviewing = source.clone();
     let attention = reviewing
         .snapshot()
         .attention_items
         .last()
         .expect("review Attention");
 
-    assert_eq!(advance_receipt.events.len(), 1);
-    assert_eq!(reviewing.revision(), 2);
     assert_eq!(reviewing.snapshot().status, DeliveryStatus::NeedsAttention);
-    assert_eq!(run.stage, DeliveryStage::DeliveryReview);
-    assert_eq!(run.actor_type, StageRunActorType::Human);
-    assert_eq!(run.status, StageRunStatus::Waiting);
     assert_eq!(attention.status, AttentionItemStatus::Open);
-    assert_eq!(
-        attention.assigned_to.as_deref(),
-        Some(canonical_id("usr", 30).as_str())
-    );
-    assert_eq!(
-        reviewing.snapshot().session_bindings.len(),
-        source.snapshot().session_bindings.len()
-    );
 
     let mut resolve_command = delivery_command(
         30,
         CommandName::DeliveryResolveAttention,
-        2,
+        1,
         serde_json::json!({
             "deliveryId": source.id().0,
             "attentionItemId": attention.id,
@@ -803,7 +748,7 @@ fn human_advance_and_attention_resolution_use_sealed_application_transitions() {
         ResolveAttentionInput {
             expected_revision: reviewing.revision(),
             attention_item_id: attention.id.clone(),
-            stage_run_id: attention.stage_run_id.clone().expect("review StageRun"),
+            work_run_id: attention.work_run_id.clone(),
             expected_context: attention.context.clone(),
             actor: canonical_id("usr", 30),
             decision: AttentionDecision::Resolved,
@@ -828,7 +773,7 @@ fn human_advance_and_attention_resolution_use_sealed_application_transitions() {
     let delivered = Delivery::decode_json(&state.payload).expect("delivered Delivery");
 
     assert_eq!(resolve_receipt.events.len(), 1);
-    assert_eq!(delivered.revision(), 3);
+    assert_eq!(delivered.revision(), 2);
     assert_eq!(delivered.snapshot().status, DeliveryStatus::Delivered);
     assert_eq!(
         delivered
@@ -840,7 +785,7 @@ fn human_advance_and_attention_resolution_use_sealed_application_transitions() {
             .as_deref(),
         Some(canonical_id("usr", 30).as_str())
     );
-    assert_eq!(published.lock().expect("published events").len(), 2);
+    assert_eq!(published.lock().expect("published events").len(), 1);
 
     control_plane.shutdown().expect("shutdown");
     fs::remove_dir_all(root).expect("database cleanup");
@@ -848,10 +793,47 @@ fn human_advance_and_attention_resolution_use_sealed_application_transitions() {
 
 #[test]
 #[allow(clippy::too_many_lines)]
-fn foreign_repository_scope_cannot_reuse_sealed_advance_or_attention_authority() {
-    let root = temporary_directory("foreign-stage-scope");
-    let source = seed_ready_to_deliver(&root);
-    let delivery_id = source.id().clone();
+fn foreign_repository_scope_cannot_reuse_sealed_attention_authority() {
+    let root = temporary_directory("foreign-attention-scope");
+    let source = seed_ready_to_deliver_with_approval(&root);
+    let attention = source
+        .snapshot()
+        .attention_items
+        .last()
+        .expect("approval Attention");
+    let resolve_command = delivery_command(
+        30,
+        CommandName::DeliveryResolveAttention,
+        1,
+        serde_json::json!({
+            "deliveryId": source.id().0, "attentionItemId": attention.id,
+            "decision": "resolve", "resolution": "Approve this exact reviewed Delivery.",
+            "remediation": null
+        }),
+    );
+    let transition = resolve_attention(
+        &source,
+        ResolveAttentionInput {
+            expected_revision: source.revision(),
+            attention_item_id: attention.id.clone(),
+            work_run_id: attention.work_run_id.clone(),
+            expected_context: attention.context.clone(),
+            actor: canonical_id("usr", 30),
+            decision: AttentionDecision::Resolved,
+            resolution: "Approve this exact reviewed Delivery.".into(),
+            now_millis: source.snapshot().updated_at_millis + 1,
+        },
+    )
+    .expect("sealed Attention transition");
+    let facts = delivery_attention_command_facts(
+        &resolve_command,
+        repository_authority(30, "/workspace/repository", None),
+        transition,
+    )
+    .expect("sealed Attention facts");
+    let mut foreign = resolve_command.clone();
+    foreign.scope = Scope::RepositoryScope(repository_scope(31));
+    foreign.request_id = RequestId(canonical_id("req", 3_100));
     let mut control_plane = ControlPlane::start_local(
         ControlPlaneConfig::local(&root),
         Box::new(CapturingPublisher {
@@ -859,124 +841,13 @@ fn foreign_repository_scope_cannot_reuse_sealed_advance_or_attention_authority()
         }),
     )
     .expect("Control Plane start");
-    let advance_command = delivery_command(
-        30,
-        CommandName::DeliveryAdvance,
-        1,
-        serde_json::json!({"deliveryId": delivery_id}),
-    );
-    let transition = human_review_transition(
-        &source,
-        &canonical_id("usr", 30),
-        source.snapshot().updated_at_millis + 1,
-        35,
-    );
-    let advance_facts = delivery_advance_command_facts(
-        &advance_command,
-        repository_authority(30, "/workspace/repository", None),
-        transition,
-    )
-    .expect("sealed advance facts");
-    let mut foreign_advance = advance_command.clone();
-    foreign_advance.scope = Scope::RepositoryScope(repository_scope(31));
-    foreign_advance.request_id = RequestId(canonical_id("req", 3_100));
-
     let error = control_plane
-        .commit_delivery_command(&foreign_advance, &advance_facts)
-        .expect_err("foreign scope cannot reuse stage authority");
-    assert!(matches!(
-        error,
-        DeliveryCommandCommitError::Storage(ref source)
-            if source.kind() == StorageErrorKind::InvalidInput
-    ));
-    let state = control_plane
-        .load_state(&format!("delivery:{}", source.id().0))
-        .expect("state read")
-        .expect("seed state");
-    assert_eq!(state.revision, 1);
-
-    control_plane
-        .commit_delivery_command(&advance_command, &advance_facts)
-        .expect("canonical human advance");
-    let state = control_plane
-        .load_state(&format!("delivery:{}", source.id().0))
-        .expect("review state")
-        .expect("review Delivery");
-    let reviewing = Delivery::decode_json(&state.payload).expect("reviewing Delivery");
-    let attention = reviewing
-        .snapshot()
-        .attention_items
-        .last()
-        .expect("review Attention");
-    let resolve_command = delivery_command(
-        30,
-        CommandName::DeliveryResolveAttention,
-        2,
-        serde_json::json!({
-            "deliveryId": source.id().0,
-            "attentionItemId": attention.id,
-            "decision": "resolve",
-            "resolution": "Approve this exact reviewed Delivery.",
-            "remediation": null
-        }),
-    );
-    let transition = resolve_attention(
-        &reviewing,
-        ResolveAttentionInput {
-            expected_revision: 2,
-            attention_item_id: attention.id.clone(),
-            stage_run_id: attention.stage_run_id.clone().expect("StageRun"),
-            expected_context: attention.context.clone(),
-            actor: canonical_id("usr", 30),
-            decision: AttentionDecision::Resolved,
-            resolution: "Approve this exact reviewed Delivery.".into(),
-            now_millis: source.snapshot().updated_at_millis + 2,
-        },
-    )
-    .expect("sealed resolution");
-    let resolve_facts = delivery_attention_command_facts(
-        &resolve_command,
-        repository_authority(30, "/workspace/repository", None),
-        transition,
-    )
-    .expect("sealed Attention facts");
-    let mut foreign_resolve = resolve_command.clone();
-    foreign_resolve.scope = Scope::RepositoryScope(repository_scope(31));
-    foreign_resolve.request_id = RequestId(canonical_id("req", 3_101));
-
-    let error = control_plane
-        .commit_delivery_command(&foreign_resolve, &resolve_facts)
+        .commit_delivery_command(&foreign, &facts)
         .expect_err("foreign scope cannot reuse Attention authority");
-    assert!(matches!(
-        error,
-        DeliveryCommandCommitError::Storage(ref source)
-            if source.kind() == StorageErrorKind::InvalidInput
-    ));
-    let state = control_plane
-        .load_state(&format!("delivery:{}", source.id().0))
-        .expect("state read")
-        .expect("review state");
-    assert_eq!(state.revision, 2);
+    assert!(
+        matches!(error, DeliveryCommandCommitError::Storage(ref source) if source.kind() == StorageErrorKind::InvalidInput)
+    );
     control_plane.shutdown().expect("shutdown");
-
-    let connection = rusqlite::Connection::open(root.join("control-plane.sqlite3"))
-        .expect("inspection database");
-    let counts: (i64, i64, i64) = connection
-        .query_row(
-            "SELECT \
-               (SELECT COUNT(*) FROM aggregate_journal_records WHERE aggregate_id = ?1), \
-               (SELECT COUNT(*) FROM command_receipts WHERE request_id IN (?2, ?3)), \
-               (SELECT COUNT(*) FROM outbox WHERE request_id IN (?2, ?3))",
-            (
-                source.id().0.as_str(),
-                foreign_advance.request_id.0.as_str(),
-                foreign_resolve.request_id.0.as_str(),
-            ),
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )
-        .expect("foreign scope counts");
-    assert_eq!(counts, (2, 0, 0));
-    connection.close().expect("inspection close");
     fs::remove_dir_all(root).expect("database cleanup");
 }
 

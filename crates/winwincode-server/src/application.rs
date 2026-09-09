@@ -10,9 +10,11 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use winwincode_api::generated::{
-    Actor, CommandCompletedResponse, CommandRequest, ControlPlaneWebSocketClientFrame, ErrorCode,
-    QueryRequest, QueryResultResponse, Scope,
+    Actor, CommandCompletedResponse, CommandEnvelope, CommandRequest,
+    ControlPlaneWebSocketClientFrame, DeliveryAdvanceCommand, ErrorCode, QueryRequest,
+    QueryResultResponse, Scope, WorkRunCancelCommand,
 };
 use winwincode_control_plane::credential_reference::{
     CredentialReferenceError, CredentialReferenceErrorKind, CredentialReferenceService,
@@ -32,12 +34,15 @@ use winwincode_control_plane::{
     ModelSettingsErrorKind, ModelSettingsService, ProductSessionApiClock, ProductSessionApiService,
     ProductSessionExecutionConfig, ProductSessionServiceError, ProductSessionServiceErrorCode,
     PublicationCommandError, QuickDeviceDispatchError, QuickDeviceDispatchErrorKind,
-    ScopeWorkerHealthEventPort, StrongflowDeviceDispatchError, StrongflowDeviceDispatchErrorKind,
+    RepositoryExecutionScheduler, RepositoryExecutionSchedulerError, ScopeWorkerHealthEventPort,
+    StrongflowDeviceDispatchError, StrongflowDeviceDispatchErrorKind, WorkRunCancellationRequest,
     WorkerManagementService, WorkerManagementServiceError, WorkerManagementServiceErrorKind,
-    dispatch_stage_to_device_worker, dispatch_turn_to_device_worker,
+    dispatch_turn_to_device_worker, dispatch_work_run_to_device_worker, workrun_cancel_response,
 };
-use winwincode_domain::{ControlPlaneWebSocketAuthorizationEpoch, Instant, ProductSessionId};
-use winwincode_storage::{ProductStateStorage, SqliteStorage};
+use winwincode_domain::{
+    ControlPlaneWebSocketAuthorizationEpoch, Instant, ProductSessionId, Sha256Digest, WorkRunId,
+};
+use winwincode_storage::{ProductStateStorage, RepositorySchedulerScope, SqliteStorage};
 
 use crate::{
     ApiError, AuthenticatedPrincipal, CommandDispatchResponse, CommandFamily, DurableEventHub,
@@ -560,56 +565,73 @@ impl StandaloneControlPlaneApplication {
             },
             _ => None,
         };
+        let advance_command = match &request {
+            CommandRequest::DeliveryAdvanceCommand(command) => Some(command.clone()),
+            _ => None,
+        };
         let mut guard = self.state()?;
         let state = guard.as_mut().ok_or_else(service_unavailable)?;
         let response = match request {
-            CommandRequest::DeliveryCreateCommand(command) => state
-                .control_plane
-                .delivery_create(&command)
-                .map(CommandCompletedResponse::DeliveryCreateCompletedResponse),
-            CommandRequest::DeliveryUpdateSpecCommand(command) => state
-                .control_plane
-                .delivery_update_spec(&command)
-                .map(CommandCompletedResponse::DeliveryUpdateSpecCompletedResponse),
-            CommandRequest::DeliveryApproveTaskBreakdownCommand(command) => state
-                .control_plane
-                .delivery_approve_task_breakdown(&command)
-                .map(CommandCompletedResponse::DeliveryApproveTaskBreakdownCompletedResponse),
-            CommandRequest::DeliveryAdvanceCommand(command) => state
-                .control_plane
-                .delivery_advance(&command)
-                .map(CommandCompletedResponse::DeliveryAdvanceCompletedResponse),
-            CommandRequest::DeliveryResolveAttentionCommand(command) => state
-                .control_plane
-                .delivery_resolve_attention(&command)
-                .map(CommandCompletedResponse::DeliveryResolveAttentionCompletedResponse),
-            CommandRequest::DeliverySubmitVerdictCommand(command) => state
-                .control_plane
-                .delivery_submit_verdict(&command)
-                .map(CommandCompletedResponse::DeliverySubmitVerdictCompletedResponse),
-            _ => return Err(application_variant_mismatch()),
-        }
-        .map_err(|error| delivery_application_error(&error))?;
-        // FLOW-100.5: route the committed Codex stage job of the advanced
-        // Delivery stage to its Device WorkerSession. The stage's durable
+            CommandRequest::WorkRunCancelCommand(command) => {
+                cancel_workrun(&mut state.storage, &command, &dispatch_now)?
+            }
+            request => match request {
+                CommandRequest::DeliveryCreateCommand(command) => state
+                    .control_plane
+                    .delivery_create(&command)
+                    .map(CommandCompletedResponse::DeliveryCreateCompletedResponse),
+                CommandRequest::DeliveryUpdateSpecCommand(command) => state
+                    .control_plane
+                    .delivery_update_spec(&command)
+                    .map(CommandCompletedResponse::DeliveryUpdateSpecCompletedResponse),
+                CommandRequest::DeliveryTaskBreakdownCreateCommand(command) => state
+                    .control_plane
+                    .delivery_task_breakdown_create(&command)
+                    .map(CommandCompletedResponse::DeliveryTaskBreakdownCreateCompletedResponse),
+                CommandRequest::DeliveryAdvanceCommand(command) => state
+                    .control_plane
+                    .delivery_advance(&command)
+                    .map(CommandCompletedResponse::DeliveryAdvanceCompletedResponse),
+                CommandRequest::DeliveryResolveAttentionCommand(command) => state
+                    .control_plane
+                    .delivery_resolve_attention(&command)
+                    .map(CommandCompletedResponse::DeliveryResolveAttentionCompletedResponse),
+                CommandRequest::DeliverySubmitVerdictCommand(command) => state
+                    .control_plane
+                    .delivery_submit_verdict(&command)
+                    .map(CommandCompletedResponse::DeliverySubmitVerdictCompletedResponse),
+                _ => return Err(application_variant_mismatch()),
+            }
+            .map_err(|error| delivery_application_error(&error))?,
+        };
+        // FLOW-100.5: route the committed Codex WorkRun job of the advanced
+        // Delivery WorkRun to its Device WorkerSession. The WorkRun's durable
         // launch anchor decides: with an anchor, the routing glue binds the
         // launched worker session and attaches the job's device facts (after
         // the FLOW-100.3 permission gate approves the acting user); without
-        // one, the stage keeps the supervised local execution path. The
+        // one, the WorkRun keeps the supervised local execution path. The
         // durable dispatch never blocks the committed Delivery receipt on a
-        // transport action; ordinary admission backpressure keeps the stage
+        // transport action; ordinary admission backpressure keeps the WorkRun
         // job queued for the device worker.
         if let Some(user_id) = advance_actor
-            && let CommandCompletedResponse::DeliveryAdvanceCompletedResponse(completed) = &response
-            && let Some(stage_run_id) = &completed.result.active_stage_run_id
-        {
-            dispatch_stage_to_device_worker(
-                &mut state.storage,
-                Some(&user_id),
-                stage_run_id,
-                &dispatch_now,
+            && matches!(
+                response,
+                CommandCompletedResponse::DeliveryAdvanceCompletedResponse(_)
             )
-            .map_err(|error| strongflow_device_dispatch_error(&error))?;
+        {
+            let command = advance_command.as_ref().ok_or_else(|| {
+                ApiError::new(500, "INTERNAL_ERROR", "advance command identity is missing")
+            })?;
+            let work_run_id = resolve_advance_work_run(&mut state.storage, command)?;
+            if let Some(work_run_id) = work_run_id.as_ref() {
+                dispatch_work_run_to_device_worker(
+                    &mut state.storage,
+                    Some(&user_id),
+                    work_run_id,
+                    &dispatch_now,
+                )
+                .map_err(|error| strongflow_device_dispatch_error(&error))?;
+            }
         }
         self.hub
             .publish_pending(&mut state.storage)
@@ -804,6 +826,10 @@ impl StandaloneControlPlaneApplication {
                 .control_plane
                 .runtime_projection_get(&query)
                 .map_err(|error| strongflow_error(&error)),
+            QueryRequest::WorkRunGetQuery(query) => state
+                .control_plane
+                .workrun_get(&query)
+                .map_err(|error| strongflow_error(&error)),
             QueryRequest::CandidateFilesListQuery(query) => state
                 .control_plane
                 .candidate_files_list(&query)
@@ -974,6 +1000,44 @@ impl TypedControlPlaneApiPort for StandaloneControlPlaneApplication {
     }
 }
 
+fn cancel_workrun(
+    storage: &mut SqliteStorage,
+    command: &WorkRunCancelCommand,
+    requested_at: &Instant,
+) -> Result<CommandCompletedResponse, ApiError> {
+    let expected_delivery_revision = u64::try_from(command.expected_revision.0)
+        .map_err(|_| ApiError::new(400, "INVALID_REQUEST", "expectedRevision is invalid"))?;
+    let command_bytes = serde_json::to_vec(command)
+        .map_err(|_| ApiError::new(400, "INVALID_REQUEST", "command cannot be encoded"))?;
+    let public_command_digest = Sha256Digest(format!("sha256:{:x}", Sha256::digest(command_bytes)));
+    let request = WorkRunCancellationRequest {
+        scope: RepositorySchedulerScope {
+            organization_id: command.scope.organization_id.clone(),
+            workspace_id: command.scope.workspace_id.clone(),
+            project_id: command.scope.project_id.clone(),
+            repository_id: command.scope.repository_id.clone(),
+        },
+        delivery_id: command.payload.delivery_id.clone(),
+        work_run_id: command.payload.work_run_id.clone(),
+        request_id: command.request_id.clone(),
+        expected_delivery_revision,
+        requested_at: requested_at.clone(),
+        public_command_digest,
+    };
+    RepositoryExecutionScheduler::new(storage)
+        .request_cancellation_for_work_run(&request)
+        .map_err(|error| workrun_cancel_error(&error))?;
+    let state_row = storage
+        .load_state(&format!("delivery:{}", command.payload.delivery_id.0))
+        .map_err(|error| ApiError::new(500, "INTERNAL_ERROR", error.to_string()))?
+        .ok_or_else(resource_not_found)?;
+    let delivery = winwincode_delivery::domain::Delivery::decode_json(&state_row.payload)
+        .map_err(|error| ApiError::new(500, "INTERNAL_ERROR", error.to_string()))?;
+    workrun_cancel_response(command, &delivery)
+        .map(CommandCompletedResponse::WorkRunCancelCompletedResponse)
+        .map_err(|error| delivery_application_error(&error))
+}
+
 fn initial_scope(frame: &ControlPlaneWebSocketClientFrame) -> Option<&Scope> {
     match frame {
         ControlPlaneWebSocketClientFrame::ControlPlaneWebSocketSubscribeFrame(frame) => {
@@ -1089,7 +1153,7 @@ fn strongflow_device_dispatch_error(error: &StrongflowDeviceDispatchError) -> Ap
         StrongflowDeviceDispatchErrorKind::InvalidInput => ApiError::new(
             400,
             "INVALID_REQUEST",
-            "device stage dispatch request is invalid",
+            "device WorkRun dispatch request is invalid",
         ),
         StrongflowDeviceDispatchErrorKind::GateDenied => {
             let denial = error
@@ -1106,7 +1170,7 @@ fn strongflow_device_dispatch_error(error: &StrongflowDeviceDispatchError) -> Ap
         | StrongflowDeviceDispatchErrorKind::DispatchConflict => ApiError::new(
             409,
             "WRONG_STATE",
-            "the device worker session cannot execute this stage",
+            "the device worker session cannot execute this WorkRun",
         ),
         StrongflowDeviceDispatchErrorKind::AdmissionUnavailable
         | StrongflowDeviceDispatchErrorKind::CorruptState
@@ -1401,6 +1465,69 @@ fn strongflow_error(error: &StrongFlowProjectionError) -> ApiError {
     }
 }
 
+fn resolve_advance_work_run(
+    storage: &mut SqliteStorage,
+    command: &DeliveryAdvanceCommand,
+) -> Result<Option<WorkRunId>, ApiError> {
+    let envelope: CommandEnvelope =
+        serde_json::from_value(serde_json::to_value(command).map_err(|_| {
+            ApiError::new(500, "INTERNAL_ERROR", "advance command cannot be encoded")
+        })?)
+        .map_err(|_| ApiError::new(500, "INTERNAL_ERROR", "advance command identity is invalid"))?;
+    let identity = winwincode_control_plane::command_receipt_identity(
+        &envelope.actor,
+        &envelope.scope,
+        envelope.request_id.clone(),
+    )
+    .map_err(|_| ApiError::new(503, "SERVICE_UNAVAILABLE", "advance receipt is unavailable"))?;
+    let serialized = serde_json::to_vec(&envelope)
+        .map_err(|_| ApiError::new(500, "INTERNAL_ERROR", "advance command cannot be encoded"))?;
+    let digest = Sha256Digest(format!("sha256:{:x}", Sha256::digest(serialized)));
+    let receipt = storage
+        .load_receipt(&identity, &digest)
+        .map_err(|_| ApiError::new(503, "SERVICE_UNAVAILABLE", "advance receipt is unavailable"))?;
+    let Some(receipt) = receipt else {
+        return Ok(None);
+    };
+    if receipt.stream_id != format!("delivery:{}", command.payload.delivery_id.0) {
+        return Err(ApiError::new(
+            409,
+            "WRONG_STATE",
+            "advance receipt belongs to another Delivery",
+        ));
+    }
+    dispatch_work_run_from_events(&receipt.events)
+}
+
+fn dispatch_work_run_from_events(
+    events: &[winwincode_storage::OutboxEvent],
+) -> Result<Option<WorkRunId>, ApiError> {
+    for event in events {
+        if event.topic != "execution.job.dispatch" {
+            continue;
+        }
+        let job: winwincode_execution_port::generated::ExecutionJob =
+            serde_json::from_slice(&event.payload).map_err(|_| {
+                ApiError::new(
+                    503,
+                    "SERVICE_UNAVAILABLE",
+                    "advance dispatch intent is invalid",
+                )
+            })?;
+        let winwincode_execution_port::generated::ExecutionScope::WorkRunExecutionScope(scope) =
+            job.scope
+        else {
+            return Err(ApiError::new(
+                409,
+                "WRONG_STATE",
+                "advance dispatch intent is not a WorkRun",
+            ));
+        };
+        return Ok(Some(scope.work_run_id));
+    }
+    Ok(None)
+}
+
 fn collaboration_error(error: &CollaborationError) -> ApiError {
     match error.kind() {
         CollaborationErrorKind::InvalidRequest => {
@@ -1425,6 +1552,23 @@ fn collaboration_error(error: &CollaborationError) -> ApiError {
             "Collaboration read cursor is no longer valid",
         ),
         CollaborationErrorKind::Storage | CollaborationErrorKind::Corrupt => service_unavailable(),
+    }
+}
+
+fn workrun_cancel_error(error: &RepositoryExecutionSchedulerError) -> ApiError {
+    match error {
+        RepositoryExecutionSchedulerError::StaleDeliveryRevision => {
+            ApiError::new(409, "REVISION_CONFLICT", "Delivery revision changed")
+        }
+        RepositoryExecutionSchedulerError::Storage(_) => {
+            ApiError::new(409, "WRONG_STATE", "WorkRun cancellation was rejected")
+        }
+        RepositoryExecutionSchedulerError::InvalidExecutionJob(_)
+        | RepositoryExecutionSchedulerError::MissingCancellationAuthority(_) => ApiError::new(
+            409,
+            "WRONG_STATE",
+            "WorkRun cancellation authority is unavailable",
+        ),
     }
 }
 
@@ -1487,4 +1631,101 @@ fn civil_from_days(days_since_epoch: i64) -> (i64, i64, i64) {
     let month = mp + if mp < 10 { 3 } else { -9 };
     year += i64::from(month <= 2);
     (year, month, day)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::dispatch_work_run_from_events;
+    use winwincode_domain::{
+        ExecutionJobId, Instant, ProductSessionId, RepositoryId, Revision, Sha256Digest,
+        WorkContractId, WorkItemId, WorkRunId,
+    };
+    use winwincode_execution_port::generated::{
+        ExecutionJob, ExecutionLimits, ExecutionScope, ExecutionWorkspace,
+        ExecutionWorkspaceWriteMode, WorkRunExecutionScope, WorkRunExecutionScopeKind,
+    };
+    use winwincode_storage::OutboxEvent;
+
+    fn dispatch_event(job_id: &str, work_run_id: &str) -> OutboxEvent {
+        let job = ExecutionJob {
+            attempt: 1,
+            execution_profile: "requirements".to_owned(),
+            goal: "test".to_owned(),
+            job_id: ExecutionJobId(job_id.to_owned()),
+            limits: ExecutionLimits {
+                deadline_at: Instant("2027-01-15T09:00:00.000Z".to_owned()),
+                max_artifact_bytes: 1,
+                max_runtime_seconds: 1,
+            },
+            payload_digest: Sha256Digest(
+                "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+                    .to_owned(),
+            ),
+            scope: ExecutionScope::WorkRunExecutionScope(WorkRunExecutionScope {
+                attempt: 1,
+                kind: WorkRunExecutionScopeKind::WorkRun,
+                product_session_id: ProductSessionId("psn_00000000000000000000000000".to_owned()),
+                rework_authorization: None,
+                work_contract_id: WorkContractId("wct_00000000000000000000000000".to_owned()),
+                work_contract_revision: Revision(1),
+                work_item_id: WorkItemId("wit_00000000000000000000000000".to_owned()),
+                work_item_revision: Revision(1),
+                work_run_id: WorkRunId(work_run_id.to_owned()),
+            }),
+            work_input: None,
+            workspace: ExecutionWorkspace {
+                checkout_revision: "fixture".to_owned(),
+                repository_id: RepositoryId("rep_00000000000000000000000000".to_owned()),
+                write_mode: ExecutionWorkspaceWriteMode::ReadOnly,
+            },
+        };
+        OutboxEvent {
+            sequence: 1,
+            event_id: format!("event-{job_id}"),
+            topic: "execution.job.dispatch".to_owned(),
+            payload: serde_json::to_vec(&job).expect("encode dispatch job"),
+            projection_cursor: None,
+            public_context: None,
+        }
+    }
+
+    #[test]
+    fn same_delivery_jobs_keep_distinct_workrun_identity_on_replay() {
+        let first = dispatch_event(
+            "job_00000000000000000000000001",
+            "wrn_00000000000000000000000001",
+        );
+        let second = dispatch_event(
+            "job_00000000000000000000000002",
+            "wrn_00000000000000000000000002",
+        );
+        assert_eq!(
+            dispatch_work_run_from_events(std::slice::from_ref(&first)).expect("first receipt"),
+            Some(WorkRunId("wrn_00000000000000000000000001".to_owned()))
+        );
+        assert_eq!(
+            dispatch_work_run_from_events(std::slice::from_ref(&second))
+                .expect("second receipt replay"),
+            Some(WorkRunId("wrn_00000000000000000000000002".to_owned()))
+        );
+    }
+
+    #[test]
+    fn replay_ignores_a_foreign_same_delivery_job_event() {
+        let foreign = dispatch_event(
+            "job_00000000000000000000000003",
+            "wrn_00000000000000000000000003",
+        );
+        let mut own = dispatch_event(
+            "job_00000000000000000000000004",
+            "wrn_00000000000000000000000004",
+        );
+        own.topic = "execution.job.dispatch".to_owned();
+        let mut unrelated = foreign;
+        unrelated.topic = "other.internal.event".to_owned();
+        assert_eq!(
+            dispatch_work_run_from_events(&[unrelated, own]).expect("exact replay"),
+            Some(WorkRunId("wrn_00000000000000000000000004".to_owned()))
+        );
+    }
 }

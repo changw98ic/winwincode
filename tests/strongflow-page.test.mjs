@@ -58,7 +58,7 @@ const { boundedItems } = rendering
 const { parseStrongFlowRouteHash, strongFlowRouteHash } = strongFlowRoute
 const { clientSurfaceFromHash } = clientSurface
 const deliveryId = 'dlv_00000000000000000000000001'
-const stageRunId = 'run_00000000000000000000000001'
+const workRunId = 'wrn_00000000000000000000000001'
 const evidenceId = 'evd_00000000000000000000000001'
 
 function evidenceIdFor(value) {
@@ -93,7 +93,7 @@ function diagram(kind) {
 
 function projection() {
   const candidateRef = 'refs/winwincode/candidate/1'
-  return {
+  const result = {
     delivery: {
       schemaVersion: 'winwincode/v1',
       deliveryId,
@@ -115,7 +115,7 @@ function projection() {
         status: value === 1 ? 'active' : 'pending',
       })),
       stages: many(5, value => ({
-        id: value === 1 ? stageRunId : `run_${String(value).padStart(26, '0')}`,
+        id: value === 1 ? workRunId : `wrn_${String(value).padStart(26, '0')}`,
         stage: value === 1 ? 'executing' : 'verifying',
         role: 'implementer',
         status: value === 1 ? 'running' : 'waiting',
@@ -132,12 +132,12 @@ function projection() {
       processDiagram: diagram('process-flow'),
     },
     diagramExecution: null,
-    stage: { id: stageRunId },
+    stage: { id: workRunId },
     runtime: {
-      stageRunId,
+      workRunId,
       sessions: many(3, sessionValue => ({
         productSessionId: `psn_${String(sessionValue).padStart(26, '0')}`,
-        stageRunId,
+        workRunId,
         sessionBindingId: `bind:${String(sessionValue)}`,
         codexThreadId: `cdx_t${String(sessionValue).padStart(25, '0')}`,
         deliveryTaskId: `task:${String(sessionValue)}`,
@@ -184,7 +184,7 @@ function projection() {
       deliverySpecId: 'spec:1',
       deliverySpecRevision: 3,
       sessionBindingId: 'binding:1',
-      stageRunId: value === 1 ? stageRunId : `run_${String(value).padStart(26, '0')}`,
+      workRunId: value === 1 ? workRunId : `wrn_${String(value).padStart(26, '0')}`,
     })),
     verdict: {
       id: 'verdict:1',
@@ -205,6 +205,7 @@ function projection() {
       status: value === 1 ? 'open' : 'resolved',
     })),
     currentCandidate: {
+      producerWorkRunId: workRunId,
       candidateRef,
       candidateCommitId: '1111111111111111111111111111111111111111',
       candidateTreeId: '2222222222222222222222222222222222222222',
@@ -228,6 +229,43 @@ function projection() {
       readCursor: {},
     },
   }
+  result.workRunAggregate = {
+    schemaVersion: 'winwincode/v1',
+    contract: {},
+    readCursor: {},
+    items: result.delivery.tasks.map(task => ({
+      schemaVersion: 'winwincode/v1',
+      id: task.id,
+      workContractId: 'wct_00000000000000000000000001',
+      workContractRevision: 1,
+      revision: 1,
+      state: task.status === 'active' ? 'in_progress' : 'ready',
+      title: task.title,
+      goal: task.title,
+      criterionIds: [],
+      dependsOn: [],
+    })),
+    runs: result.delivery.stages.map((stage, index) => ({
+      schemaVersion: 'winwincode/v1',
+      id: stage.id,
+      workContractId: 'wct_00000000000000000000000001',
+      contractRevision: 1,
+      workItemId: `task:${String((index % 5) + 1)}`,
+      workItemRevision: 1,
+      revision: 1,
+      state: stage.status === 'running' ? 'running' : 'settled',
+      executionJobId: `job_${String(index + 1).padStart(26, '0')}`,
+      attempt: 1,
+      workerId: 'wrk_00000000000000000000000001',
+      workerInstanceId: 'wki_00000000000000000000000001',
+      workerSessionId: 'wsn_00000000000000000000000001',
+      leaseId: 'lse_00000000000000000000000001',
+      fencingToken: '1',
+      productSessionId: 'psn_00000000000000000000000001',
+      codexThreadId: 'cdx_00000000000000000000000001',
+    })),
+  }
+  return result
 }
 
 function state(overrides = {}) {
@@ -452,6 +490,7 @@ class FakeStrongFlowViewModel {
   }
   async submitVerdict() { this.calls.push(['submitVerdict']) }
   async advanceDelivery() { this.calls.push(['advanceDelivery']) }
+  async cancelWorkRun(request) { this.calls.push(['cancelWorkRun', request]) }
   cancelPending() { this.calls.push(['cancelPending']) }
   reconnect() { this.calls.push(['reconnect']) }
   close() { this.calls.push(['close']) }
@@ -552,7 +591,7 @@ function pageEvidenceClient() {
               id: binding.evidenceId,
               sessionBindingId: binding.sessionBindingId,
               sourceRef: binding.sourceRef,
-              stageRunId: binding.stageRunId,
+              workRunId: binding.workRunId,
               type: binding.type,
             },
             outcome: 'succeeded',
@@ -827,6 +866,71 @@ test('Candidate workspace renders a bounded searchable tree and linked Diff with
   mounted.close()
 })
 
+test('StrongFlow cancellation button sends the selected canonical WorkRun', () => {
+  const document = new FakeDocument()
+  const rootElement = document.createElement('main')
+  const model = new FakeStrongFlowViewModel(state())
+  const mounted = mountStrongFlowPage({
+    root: rootElement,
+    model,
+    deliveryList: fakeDeliveryList([]),
+    limits,
+    evidence: pageEvidenceOptions(),
+  })
+
+  const select = findByClass(rootElement, 'wwc-strongflow-cancel-workrun-select')
+  const button = findByClass(rootElement, 'wwc-strongflow-cancel-workrun')
+  assert.equal(select.hidden, false)
+  assert.equal(button.disabled, false)
+  assert.match(select.children[0].textContent, /running/u)
+  button.emit('click')
+
+  const cancelCall = model.calls.find(call => call[0] === 'cancelWorkRun')
+  assert.ok(cancelCall)
+  assert.deepEqual(cancelCall[1], {
+    deliveryId,
+    workRunId,
+    expectedRevision: 4,
+    requestId: 'req_00000000000000000000000001',
+  })
+  mounted.close()
+})
+
+test('StrongFlow cancellation requires and preserves an explicit second WorkRun target', () => {
+  const document = new FakeDocument()
+  const rootElement = document.createElement('main')
+  const base = projection()
+  const secondWorkRunId = 'wrn_00000000000000000000000002'
+  base.workRunAggregate.runs.push({
+    ...base.workRunAggregate.runs[0],
+    id: secondWorkRunId,
+    executionJobId: 'job_00000000000000000000000002',
+  })
+  const model = new FakeStrongFlowViewModel(state({ projection: base }))
+  const mounted = mountStrongFlowPage({
+    root: rootElement,
+    model,
+    deliveryList: fakeDeliveryList([]),
+    limits,
+    evidence: pageEvidenceOptions(),
+  })
+  const select = findByClass(rootElement, 'wwc-strongflow-cancel-workrun-select')
+  const button = findByClass(rootElement, 'wwc-strongflow-cancel-workrun')
+  assert.equal(button.disabled, true)
+  select.value = secondWorkRunId
+  select.emit('change')
+  assert.equal(button.disabled, false)
+  button.emit('click')
+  button.emit('click')
+
+  const cancelCalls = model.calls.filter(call => call[0] === 'cancelWorkRun')
+  assert.equal(cancelCalls.length, 2)
+  assert.equal(cancelCalls[0][1].workRunId, secondWorkRunId)
+  assert.equal(cancelCalls[1][1].workRunId, secondWorkRunId)
+  assert.equal(cancelCalls[1][1].requestId, cancelCalls[0][1].requestId)
+  mounted.close()
+})
+
 test('empty StrongFlow keeps one complete creation draft through command errors', () => {
   const document = new FakeDocument()
   const rootElement = document.createElement('main')
@@ -910,7 +1014,7 @@ test('default route is the Home dashboard while StrongFlow query routes stay on 
     strongFlowRouteHash({
       deliveryId,
       productSessionId: 'psn_00000000000000000000000002',
-      stageRunId: 'run_00000000000000000000000003',
+      workRunId: 'wrn_00000000000000000000000003',
       candidatePath: null,
       candidateView: 'unified',
       comparison: { status: 'none' },
@@ -919,7 +1023,7 @@ test('default route is the Home dashboard while StrongFlow query routes stay on 
     }),
     `#/strongflow?delivery=${deliveryId}`
       + '&session=psn_00000000000000000000000002'
-      + '&stageRun=run_00000000000000000000000003'
+      + '&workRun=wrn_00000000000000000000000003'
       + '&view=unified'
       + `&tab=logs&evidence=${evidenceId}`,
   )
@@ -927,7 +1031,7 @@ test('default route is the Home dashboard while StrongFlow query routes stay on 
     strongFlowRouteHash({
       deliveryId,
       productSessionId: 'psn_00000000000000000000000002',
-      stageRunId: 'run_00000000000000000000000003',
+      workRunId: 'wrn_00000000000000000000000003',
       candidatePath: 'src/current file.ts',
       candidateView: 'unified',
       comparison: { status: 'none' },
@@ -936,7 +1040,7 @@ test('default route is the Home dashboard while StrongFlow query routes stay on 
     }),
     `#/strongflow?delivery=${deliveryId}`
       + '&session=psn_00000000000000000000000002'
-      + '&stageRun=run_00000000000000000000000003'
+      + '&workRun=wrn_00000000000000000000000003'
       + '&file=src%2Fcurrent+file.ts'
       + '&view=unified',
   )
@@ -944,7 +1048,7 @@ test('default route is the Home dashboard while StrongFlow query routes stay on 
     strongFlowRouteHash({
       deliveryId,
       productSessionId: 'psn_00000000000000000000000002',
-      stageRunId: 'run_00000000000000000000000003',
+      workRunId: 'wrn_00000000000000000000000003',
       candidatePath: 'src/app.ts',
       candidateView: 'side-by-side',
       comparison: { status: 'none' },
@@ -953,7 +1057,7 @@ test('default route is the Home dashboard while StrongFlow query routes stay on 
     }),
     `#/strongflow?delivery=${deliveryId}`
       + '&session=psn_00000000000000000000000002'
-      + '&stageRun=run_00000000000000000000000003'
+      + '&workRun=wrn_00000000000000000000000003'
       + '&file=src%2Fapp.ts'
       + '&view=side-by-side',
   )
@@ -961,7 +1065,7 @@ test('default route is the Home dashboard while StrongFlow query routes stay on 
     strongFlowRouteHash({
       deliveryId,
       productSessionId: 'psn_00000000000000000000000002',
-      stageRunId: 'run_00000000000000000000000003',
+      workRunId: 'wrn_00000000000000000000000003',
       candidatePath: 'src/current file.ts',
       candidateView: 'unified',
       comparison: { status: 'none' },
@@ -975,7 +1079,7 @@ test('default route is the Home dashboard while StrongFlow query routes stay on 
     }),
     `#/strongflow?delivery=${deliveryId}`
       + '&session=psn_00000000000000000000000002'
-      + '&stageRun=run_00000000000000000000000003'
+      + '&workRun=wrn_00000000000000000000000003'
       + '&file=src%2Fcurrent+file.ts'
       + '&view=unified'
       + '&organizationId=org_00000000000000000000000001'
@@ -987,7 +1091,7 @@ test('default route is the Home dashboard while StrongFlow query routes stay on 
   const completeRoute = strongFlowRouteHash({
     deliveryId,
     productSessionId: 'psn_00000000000000000000000002',
-    stageRunId: 'run_00000000000000000000000003',
+    workRunId: 'wrn_00000000000000000000000003',
     candidatePath: 'src/current file.ts',
     candidateView: 'side-by-side',
     comparison: { status: 'none' },
@@ -1000,7 +1104,7 @@ test('default route is the Home dashboard while StrongFlow query routes stay on 
       repositoryId: 'rep_00000000000000000000000001',
   }, {
       taskId: 'task:history',
-      stageRunId: 'run_00000000000000000000000004',
+      workRunId: 'wrn_00000000000000000000000004',
   })
   const completeParameters = new URLSearchParams(completeRoute.split('?')[1])
   assert.equal(completeParameters.get('file'), 'src/current file.ts')
@@ -1008,7 +1112,7 @@ test('default route is the Home dashboard while StrongFlow query routes stay on 
   assert.equal(completeParameters.get('repositoryId'), 'rep_00000000000000000000000001')
   assert.equal(completeParameters.get('task'), 'task:history',
     'Diff route updates must retain the selected historical Task')
-  assert.equal(completeParameters.get('run'), 'run_00000000000000000000000004',
+  assert.equal(completeParameters.get('run'), 'wrn_00000000000000000000000004',
     'Diff route updates must retain the selected historical StageRun')
   assert.equal(completeParameters.get('tab'), 'logs')
   assert.equal(completeParameters.get('evidence'), evidenceId)
@@ -1016,13 +1120,13 @@ test('default route is the Home dashboard while StrongFlow query routes stay on 
     parseStrongFlowRouteHash(
       `#/strongflow?delivery=${deliveryId}`
         + '&session=psn_00000000000000000000000002'
-        + '&stageRun=run_00000000000000000000000003'
+        + '&workRun=wrn_00000000000000000000000003'
         + '&tab=bogus&evidence=',
     ),
     {
       deliveryId,
       productSessionId: 'psn_00000000000000000000000002',
-      stageRunId: 'run_00000000000000000000000003',
+      workRunId: 'wrn_00000000000000000000000003',
       candidatePath: null,
       candidateView: 'unified',
       comparison: { status: 'none' },
@@ -1036,12 +1140,12 @@ test('typed StrongFlow routes reject values outside the canonical entity identit
   assert.deepEqual(
     parseStrongFlowRouteHash(
       '#/strongflow?delivery=../../private&session=%2500'
-        + '&stageRun=not%20valid&evidence=%3Cscript%3E&tab=tests&view=bogus',
+        + '&workRun=not%20valid&evidence=%3Cscript%3E&tab=tests&view=bogus',
     ),
     {
       deliveryId: null,
       productSessionId: null,
-      stageRunId: null,
+      workRunId: null,
       candidatePath: null,
       candidateView: 'unified',
       comparison: { status: 'none' },
@@ -1534,7 +1638,7 @@ test('Attention decision drafts keep exact submissions and clear with their enti
   mounted.close()
 })
 
-test('verdict control stays hidden until all active StageRuns settle', () => {
+test('verdict control stays hidden until the candidate WorkItem has settled', () => {
   const document = new FakeDocument()
   const rootElement = document.createElement('main')
   const current = projection()
@@ -1550,8 +1654,8 @@ test('verdict control stays hidden until all active StageRuns settle', () => {
 
   assert.equal(findByClass(rootElement, 'wwc-strongflow-submit-verdict'), null)
 
-  current.delivery.stages.forEach(stage => {
-    stage.status = 'succeeded'
+  current.workRunAggregate.runs.forEach(run => {
+    run.state = 'settled'
   })
   model.publish(state({ projection: current }))
   assert.notEqual(findByClass(rootElement, 'wwc-strongflow-submit-verdict'), null)
@@ -1910,7 +2014,7 @@ test('the Candidate comparison workbench offers only this Delivery and closes wi
       diffSha256: `sha256:${'4'.repeat(64)}`,
       frozenAt: '2026-08-27T00:00:04.000Z',
       producerSessionBindingId: 'binding:1',
-      producerStageRunId: stageRunId,
+      producerWorkRunId: workRunId,
     },
     firstSeenDeliveryRevision: 1,
     isCurrentAtReadCursor: isCurrent,
@@ -2047,7 +2151,7 @@ test('returning from bounded rework defaults the comparison to the rework pair',
       diffSha256: `sha256:${'4'.repeat(64)}`,
       frozenAt: '2026-08-27T00:00:04.000Z',
       producerSessionBindingId: 'binding:1',
-      producerStageRunId: stageRunId,
+      producerWorkRunId: workRunId,
     },
     firstSeenDeliveryRevision: 1,
     isCurrentAtReadCursor: false,
@@ -2064,7 +2168,7 @@ test('returning from bounded rework defaults the comparison to the rework pair',
       diffSha256: `sha256:${'6'.repeat(64)}`,
       frozenAt: '2026-08-27T01:00:04.000Z',
       producerSessionBindingId: 'binding:2',
-      producerStageRunId: stageRunId,
+      producerWorkRunId: workRunId,
     },
     firstSeenDeliveryRevision: 4,
     isCurrentAtReadCursor: true,
@@ -2169,17 +2273,14 @@ test('the StrongFlow context pane opens with the Delivery decisions and links to
   const rootElement = document.createElement('main')
   const productSessionId = 'psn_00000000000000000000000001'
   const snapshot = state()
-  snapshot.projection.stage = {
-    id: stageRunId,
-    sessionBinding: { productSessionId, stageRunId },
-  }
+  snapshot.projection.runtime.productSessionId = productSessionId
   snapshot.projection.delivery.attention = [
     {
       id: 'atn:1',
       title: 'Verification blocked on the delivery criterion.',
       status: 'open',
       blocking: true,
-      stageRunId,
+      workRunId,
       createdAt: '2026-08-27T01:00:00.000Z',
       options: [],
     },
@@ -2188,7 +2289,7 @@ test('the StrongFlow context pane opens with the Delivery decisions and links to
       title: 'Requirement question needs an owner.',
       status: 'open',
       blocking: false,
-      stageRunId: null,
+      workRunId: null,
       createdAt: '2026-08-27T01:00:00.000Z',
       options: [],
     },
@@ -2197,7 +2298,7 @@ test('the StrongFlow context pane opens with the Delivery decisions and links to
       title: 'Already resolved.',
       status: 'resolved',
       blocking: true,
-      stageRunId: null,
+      workRunId: null,
       createdAt: '2026-08-27T01:00:00.000Z',
       options: [],
     },
@@ -2243,7 +2344,7 @@ test('the StrongFlow context pane opens with the Delivery decisions and links to
   assert.equal(link.hidden, false)
   assert.match(link.href, new RegExp(`session=${productSessionId}`, 'u'))
   assert.match(link.href, new RegExp(`delivery=${deliveryId}`, 'u'))
-  assert.match(link.href, new RegExp(`stageRun=${stageRunId}`, 'u'))
+  assert.match(link.href, new RegExp(`workRun=${workRunId}`, 'u'))
 
   mounted.close()
   assert.equal(findByClass(rootElement, 'wwc-contextual-decision'), null)
@@ -2254,7 +2355,7 @@ test('a Delivery without an open decision hides the StrongFlow decision card', (
   const rootElement = document.createElement('main')
   const snapshot = state()
   snapshot.projection.delivery.attention = [
-    { id: 'atn:9', title: 'Resolved', status: 'resolved', blocking: true, stageRunId: null },
+    { id: 'atn:9', title: 'Resolved', status: 'resolved', blocking: true, workRunId: null },
   ]
   const model = new FakeStrongFlowViewModel(snapshot)
   const mounted = mountStrongFlowPage({

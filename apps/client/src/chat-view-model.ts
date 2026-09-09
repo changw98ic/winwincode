@@ -417,7 +417,7 @@ function assertRuntime(
   if (
     runtime.productSessionId !== productSessionId
     || runtime.deliveryId !== null
-    || runtime.stageRunId !== null
+    || runtime.workRunId !== null
     || runtime.readCursor !== null
     || runtime.eventCursor.stream.kind !== 'product-session'
     || runtime.eventCursor.stream.productSessionId !== productSessionId

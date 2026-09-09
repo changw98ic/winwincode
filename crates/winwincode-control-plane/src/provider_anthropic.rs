@@ -694,10 +694,19 @@ fn translate_tool_output(
         return Err(AnthropicCodecError::invalid_request());
     }
     let output = tool_output(required(item, "output")?)?;
+    // Some Messages providers do not expose tool_use_id to the model as text.
+    // Keep the original output intact and make its transport identity copyable.
+    let mut content =
+        vec![json!({"type":"text", "text":format!("Tool call source_id: {call_id}")})];
+    match output {
+        Value::String(text) => content.push(json!({"type":"text", "text":text})),
+        Value::Array(blocks) => content.extend(blocks),
+        _ => return Err(AnthropicCodecError::invalid_request()),
+    }
     push_message_block(
         messages,
         "user",
-        json!({"type":"tool_result", "tool_use_id":call_id, "content":output}),
+        json!({"type":"tool_result", "tool_use_id":call_id, "content":content}),
     )
 }
 
@@ -1696,10 +1705,13 @@ mod tests {
         assert_eq!(body["messages"][2]["content"][0]["tool_use_id"], "call-1");
         assert_eq!(
             body["messages"][2]["content"][0]["content"],
-            "file contents"
+            json!([{"type":"text","text":"Tool call source_id: call-1"}, {"type":"text","text":"file contents"}])
         );
         assert_eq!(body["messages"][2]["content"][1]["tool_use_id"], "call-2");
-        assert_eq!(body["messages"][2]["content"][1]["content"], "Done");
+        assert_eq!(
+            body["messages"][2]["content"][1]["content"],
+            json!([{"type":"text","text":"Tool call source_id: call-2"}, {"type":"text","text":"Done"}])
+        );
         assert_eq!(body["messages"][2]["content"][2]["text"], "Continue.");
         assert_eq!(body["tools"][0]["input_schema"]["type"], "object");
         assert_eq!(body["tools"][1]["input_schema"]["required"][0], "input");

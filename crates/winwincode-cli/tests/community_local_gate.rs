@@ -14,6 +14,7 @@ use winwincode_cli::{
 };
 use winwincode_delivery::{
     application::{
+        attention::{AttentionDecision, ResolveAttentionInput, resolve_attention},
         stage::{
             TerminalArtifactReference, TerminalOutcomeStatus,
             test_support::{
@@ -28,17 +29,17 @@ use winwincode_delivery::{
     },
     domain::{
         DELIVERY_SCHEMA_VERSION, Delivery, FrozenDeliveryCandidate, RepositoryKind, RepositoryRef,
-        StageRunStatus, candidate::freeze_delivery_candidate_from_source,
+        candidate::freeze_delivery_candidate_from_source,
     },
     store::{
         CreateDelivery, DeliveryCommand, DeliveryCommandPort, DeliveryStore,
-        InMemoryDeliveryJournal, SubmitDeliveryVerdict,
+        InMemoryDeliveryJournal, ResolveDeliveryAttention, SubmitDeliveryVerdict,
     },
 };
 use winwincode_domain::{
     ArtifactId, CodexThreadId, DeliveryId, ExecutionAckSequence, ExecutionJobId,
     ExecutionMessageId, FencingToken, Instant, LeaseId, OrganizationId, ProductSessionId,
-    ProjectId, RepositoryId, RequestId, Sha256Digest, StageRunId, UserId, WorkerId,
+    ProjectId, RepositoryId, RequestId, Sha256Digest, UserId, WorkRunId, WorkerId,
     WorkerInstanceId, WorkerSessionId, WorkspaceId,
 };
 use winwincode_evidence_export::{
@@ -140,7 +141,7 @@ impl CommunityFixture {
                 snapshot: delivery,
             }))
             .expect("create deterministic Delivery journal");
-        let delivery = store
+        let mut delivery = store
             .execute(DeliveryCommand::SubmitVerdict(Box::new(
                 SubmitDeliveryVerdict {
                     request_id: RequestId("community-verdict-submit".into()),
@@ -151,6 +152,34 @@ impl CommunityFixture {
             )))
             .expect("persist computed Verdict")
             .snapshot;
+        if outcome == VerdictFixtureOutcome::Pass {
+            let attention = delivery.snapshot().attention_items[0].clone();
+            let transition = resolve_attention(
+                &delivery,
+                ResolveAttentionInput {
+                    expected_revision: delivery.revision(),
+                    attention_item_id: attention.id,
+                    work_run_id: attention.work_run_id,
+                    expected_context: attention.context,
+                    actor: "community-reviewer".into(),
+                    decision: AttentionDecision::Resolved,
+                    resolution: "accept local candidate".into(),
+                    now_millis: delivery.snapshot().updated_at_millis + 1,
+                },
+            )
+            .expect("resolve final Delivery approval");
+            delivery = store
+                .execute(DeliveryCommand::ResolveAttention(Box::new(
+                    ResolveDeliveryAttention {
+                        request_id: RequestId("community-approval-resolve".into()),
+                        request_digest: "3".repeat(64),
+                        expected_revision: delivery.revision(),
+                        transition,
+                    },
+                )))
+                .expect("persist final Delivery approval")
+                .snapshot;
+        }
 
         let (manifest, test_bindings, verdict_binding) =
             build_test_asset_bindings(&repository, &delivery, &candidate, candidate_commit);
@@ -219,11 +248,11 @@ fn build_test_asset_bindings(
         .evidence
         .iter()
         .find(|evidence| {
-            delivery
-                .snapshot()
-                .stage_runs
-                .iter()
-                .any(|stage| stage.id == evidence.stage_run_id && stage.role == "verifier")
+            delivery.snapshot().session_bindings.iter().any(|binding| {
+                binding.id == evidence.session_binding_id
+                    && binding.work_run_id == evidence.work_run_id
+                    && binding.execution_profile.as_deref() == Some("verifier")
+            })
         })
         .expect("verifier test Evidence");
     let test_source =
@@ -506,7 +535,7 @@ fn prepare_delivery(
     base_commit: &str,
 ) -> (
     Delivery,
-    StageRunId,
+    WorkRunId,
     ExecutionJobId,
     WorkerSessionId,
     Option<CodexThreadId>,
@@ -518,27 +547,43 @@ fn prepare_delivery(
         locator: "project-one".into(),
     };
     snapshot.spec.base_revision = base_commit.into();
-    let producer = snapshot
-        .stage_runs
-        .iter_mut()
-        .find(|run| run.role == "executor")
-        .expect("executor");
-    producer.id = StageRunId("run_00000000000000000000000906".into());
-    producer.status = StageRunStatus::Succeeded;
-    let producer_id = producer.id.clone();
+    let producer_id = WorkRunId("wrn_00000000000000000000000906".into());
     let binding = snapshot
         .session_bindings
         .iter_mut()
-        .find(|binding| binding.id.0 == "binding-executor-1")
+        .find(|binding| binding.execution_profile.as_deref() == Some("executor"))
         .expect("executor binding");
-    binding.stage_run_id = producer_id.clone();
+    let previous_work_run_id = binding.work_run_id.clone();
+    binding.work_run_id = producer_id.clone();
     binding.product_session_id = ProductSessionId("psn_00000000000000000000000906".into());
     binding.execution_job_id = ExecutionJobId("job_00000000000000000000000906".into());
     binding.worker_session_id = Some(WorkerSessionId("wsn_00000000000000000000000906".into()));
     binding.codex_thread_id = Some(CodexThreadId("cdx_00000000000000000000000906".into()));
+    binding.worker_id = Some(WorkerId("wrk_00000000000000000000000906".into()));
+    binding.worker_instance_id = Some(WorkerInstanceId("wki_00000000000000000000000906".into()));
+    binding.lease_id = Some(LeaseId("lse_00000000000000000000000906".into()));
+    binding.fencing_token = Some(FencingToken("906".into()));
     let execution_job_id = binding.execution_job_id.clone();
     let worker_session_id = binding.worker_session_id.clone().expect("WorkerSession");
     let codex_thread_id = binding.codex_thread_id.clone();
+    let producer = snapshot
+        .work_run_aggregate
+        .runs
+        .iter_mut()
+        .find(|run| run.id == previous_work_run_id)
+        .expect("executor WorkRun");
+    producer.id = producer_id.clone();
+    producer.execution_job_id = execution_job_id.clone();
+    producer.product_session_id = Some(binding.product_session_id.clone());
+    producer.worker_session_id = worker_session_id.clone();
+    producer.codex_thread_id.clone_from(&codex_thread_id);
+    producer.worker_id = binding.worker_id.clone().expect("Worker");
+    producer.worker_instance_id = binding.worker_instance_id.clone().expect("Worker instance");
+    producer.lease_id = binding.lease_id.clone().expect("lease");
+    producer
+        .fencing_token
+        .clone_from(&binding.fencing_token.as_ref().expect("fence").0);
+    producer.state = winwincode_domain::WorkRunState::Settled;
     (
         Delivery::try_from_snapshot(snapshot).expect("local verifying Delivery"),
         producer_id,
@@ -555,7 +600,7 @@ fn freeze_local_candidate(
     delivery: &Delivery,
     candidate_commit: &str,
     base_commit: &str,
-    producer_id: StageRunId,
+    producer_id: WorkRunId,
     execution_job_id: ExecutionJobId,
     worker_session_id: WorkerSessionId,
     codex_thread_id: Option<CodexThreadId>,
@@ -577,13 +622,7 @@ fn freeze_local_candidate(
         worker_session_id,
     )
     .expect("Artifact provenance");
-    let finished_at = delivery
-        .snapshot()
-        .stage_runs
-        .iter()
-        .find(|run| run.id == producer_id)
-        .and_then(|run| run.finished_at_millis)
-        .expect("executor finish");
+    let finished_at = 1_800_000_000_020;
     let mut artifacts = ArtifactStore::open(
         root.join("artifact-catalog"),
         Box::new(FakeArtifactObjectStore::new()),

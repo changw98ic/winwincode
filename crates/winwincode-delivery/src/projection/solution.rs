@@ -3,7 +3,7 @@
 //! Safe public projection of one validated solution review.
 
 use serde::Serialize;
-use winwincode_domain::{AttentionItemId, DeliveryId, DeliveryTaskId, StageRunId};
+use winwincode_domain::{AttentionItemId, DeliveryId, DeliveryTaskId, StageRunId, WorkRunId};
 
 use crate::{
     application::solution_review::{
@@ -312,7 +312,7 @@ pub struct SolutionReviewProjection {
     delivery_id: DeliveryId,
     delivery_spec_id: DeliverySpecId,
     delivery_spec_revision: u64,
-    planning_stage_run_id: StageRunId,
+    planning_work_run_id: WorkRunId,
     planning_session_binding_id: SessionBindingId,
     review_stage_run_id: StageRunId,
     attention_item_id: AttentionItemId,
@@ -349,8 +349,8 @@ impl SolutionReviewProjection {
         self.delivery_spec_revision
     }
     #[must_use]
-    pub fn planning_stage_run_id(&self) -> &StageRunId {
-        &self.planning_stage_run_id
+    pub fn planning_work_run_id(&self) -> &WorkRunId {
+        &self.planning_work_run_id
     }
     #[must_use]
     pub fn planning_session_binding_id(&self) -> &SessionBindingId {
@@ -442,7 +442,7 @@ pub(super) fn project_current_solution_review(
         delivery_id: view.delivery_id.clone(),
         delivery_spec_id: view.delivery_spec_id.clone(),
         delivery_spec_revision: view.delivery_spec_revision,
-        planning_stage_run_id: view.planning_stage_run_id.clone(),
+        planning_work_run_id: view.planning_work_run_id.clone(),
         planning_session_binding_id: view.planning_session_binding_id.clone(),
         review_stage_run_id: view.review_stage_run_id.clone(),
         attention_item_id: view.attention_item_id.clone(),

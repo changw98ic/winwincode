@@ -34,7 +34,9 @@ use std::{
 
 use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
-use winwincode_domain::{AttentionItemId, DeliveryId, DeliveryTaskId, StageRunId};
+use winwincode_domain::{
+    AttentionItemId, DeliveryId, DeliveryTaskId, StageRunId, WorkRunId, WorkRunState,
+};
 
 use crate::domain::{
     AcceptanceCriterionId, AttentionItem, AttentionItemStatus, AttentionItemType, Delivery,
@@ -45,7 +47,6 @@ use crate::domain::{
 const SOLUTION_REVIEW_SCHEMA_VERSION: u8 = 1;
 const SOLUTION_REVIEW_CONTEXT_PROTOCOL: &str = "winwincode.solution-review-context.v1";
 const SOLUTION_REVIEW_DECISION_PROTOCOL: &str = "winwincode.solution-review-decision.v1";
-const PLANNER_SOLUTION_PROTOCOL: &str = "winwincode.planner-solution.v1";
 const MAX_TEXT_CODE_UNITS: usize = 65_536;
 const MAX_TITLE_CODE_UNITS: usize = 256;
 const MAX_COLLECTION_ITEMS: usize = 200;
@@ -248,7 +249,7 @@ struct SolutionReviewContextV1 {
     delivery_id: DeliveryId,
     delivery_spec_id: DeliverySpecId,
     delivery_spec_revision: u64,
-    planning_stage_run_id: StageRunId,
+    planning_work_run_id: WorkRunId,
     planning_session_binding_id: SessionBindingId,
     review_stage_run_id: StageRunId,
     attention_item_id: AttentionItemId,
@@ -262,207 +263,52 @@ struct SolutionReviewContextV1 {
     review_set_sha256: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct PlannerSolutionV1 {
-    schema_version: u8,
-    protocol: String,
-    solution: SolutionWire,
-    architecture_diagram: ValidatedDiagram,
-    process_diagram: ValidatedDiagram,
-    risks: Vec<String>,
-    unresolved_items: Vec<String>,
-    task_proposals: Vec<DeliveryTaskProposal>,
-}
-
-/// One canonical plan-review transition prepared from the exact authenticated
-/// planner runtime output. Delivery, stage, binding, Attention and digest
-/// authority are reconstructed here rather than accepted from the Worker.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PreparedPlannerSolutionReview {
-    transition: crate::application::stage::StageAdvanceResult,
-    review_set_sha256: String,
-}
-
-impl PreparedPlannerSolutionReview {
-    #[must_use]
-    pub const fn transition(&self) -> &crate::application::stage::StageAdvanceResult {
-        &self.transition
-    }
-
-    #[must_use]
-    pub fn into_transition(self) -> crate::application::stage::StageAdvanceResult {
-        self.transition
-    }
-
-    #[must_use]
-    pub fn review_set_sha256(&self) -> &str {
-        &self.review_set_sha256
-    }
-}
-
 fn current_planning_authority(
-    delivery: &Delivery,
-) -> Result<(StageRunId, SessionBindingId), SolutionReviewError> {
-    let highest_attempt = delivery
-        .snapshot()
-        .stage_runs
+    snapshot: &crate::domain::DeliverySnapshot,
+    work_run_id: &WorkRunId,
+) -> Result<(WorkRunId, SessionBindingId), SolutionReviewError> {
+    let run = snapshot
+        .work_run_aggregate
+        .runs
         .iter()
-        .filter(|run| {
-            run.delivery_task_id.is_none()
-                && run.stage == DeliveryStage::Planning
-                && run.actor_type == StageRunActorType::Codex
-                && run.role == "planner"
-        })
-        .map(|run| run.attempt)
-        .max()
-        .ok_or_else(|| stale_authority("Delivery has no planning StageRun"))?;
-    let planning_runs = delivery
-        .snapshot()
-        .stage_runs
-        .iter()
-        .filter(|run| {
-            run.delivery_task_id.is_none()
-                && run.stage == DeliveryStage::Planning
-                && run.actor_type == StageRunActorType::Codex
-                && run.role == "planner"
-                && run.attempt == highest_attempt
-        })
-        .collect::<Vec<_>>();
-    let [planning] = planning_runs.as_slice() else {
-        return Err(stale_authority(
-            "Delivery does not have one exact current planning StageRun",
-        ));
-    };
-    let bindings = delivery
-        .snapshot()
+        .find(|run| &run.id == work_run_id)
+        .ok_or_else(|| stale_authority("explicit planning WorkRun is missing"))?;
+    let bindings = snapshot
         .session_bindings
         .iter()
-        .filter(|binding| binding.stage_run_id == planning.id)
+        .filter(|binding| &binding.work_run_id == work_run_id)
         .collect::<Vec<_>>();
     let [binding] = bindings.as_slice() else {
         return Err(stale_authority(
-            "current planning StageRun does not have one exact SessionBinding",
+            "planning WorkRun requires one exact SessionBinding",
         ));
     };
-    Ok((planning.id.clone(), binding.id.clone()))
-}
-
-/// Builds the only production Solution Review Attention from one canonical
-/// planner result and the current Delivery identities.
-///
-/// The planner payload is semantic content only. It cannot name a Delivery,
-/// `StageRun`, binding, Attention item, reviewer, preparation time, or review
-/// digest. Those facts are sealed from `delivery` and `input` below.
-///
-/// # Errors
-///
-/// Rejects non-canonical JSON, a foreign protocol/version, malformed semantic
-/// content, stale planning authority, or a transition that is not `PlanReview`.
-pub fn prepare_planner_solution_review(
-    delivery: &Delivery,
-    mut input: crate::application::stage::AdvanceStageInput,
-    planner_output: &[u8],
-    attention_title: String,
-    assigned_to: String,
-) -> Result<PreparedPlannerSolutionReview, crate::application::CoordinationError> {
-    use crate::application::stage::{ReviewAttentionSeed, StageAdvanceEffect, advance};
-    use crate::application::{CoordinationError, CoordinationErrorCode};
-
-    if input.review.is_some() {
-        return Err(CoordinationError::new(
-            CoordinationErrorCode::InvalidRequest,
-            "planner solution authority owns the PlanReview Attention seed",
-        ));
-    }
-    let semantic: PlannerSolutionV1 = serde_json::from_slice(planner_output).map_err(|_| {
-        CoordinationError::new(
-            CoordinationErrorCode::InvalidRequest,
-            "planner solution output is not canonical JSON",
+    if binding.delivery_id != snapshot.id
+        || binding.work_contract_id != run.work_contract_id
+        || binding.work_contract_revision != run.contract_revision
+        || binding.work_item_id != run.work_item_id
+        || binding.work_item_revision != run.work_item_revision
+        || binding.execution_job_id != run.execution_job_id
+        || i64::try_from(binding.attempt).ok() != Some(run.attempt)
+        || Some(&binding.product_session_id) != run.product_session_id.as_ref()
+        || binding.worker_id.as_ref() != Some(&run.worker_id)
+        || binding.worker_instance_id.as_ref() != Some(&run.worker_instance_id)
+        || binding.worker_session_id.as_ref() != Some(&run.worker_session_id)
+        || binding.lease_id.as_ref() != Some(&run.lease_id)
+        || binding.fencing_token.as_ref().map(|token| token.0.as_str())
+            != Some(run.fencing_token.as_str())
+        || binding.codex_thread_id != run.codex_thread_id
+        || binding.codex_thread_id.is_none()
+        || !matches!(
+            run.state,
+            WorkRunState::CandidateReady | WorkRunState::Settled
         )
-    })?;
-    let canonical = serde_json::to_vec(&semantic).map_err(|error| {
-        CoordinationError::new(
-            CoordinationErrorCode::Conflict,
-            format!("planner solution output cannot be encoded: {error}"),
-        )
-    })?;
-    if canonical != planner_output
-        || semantic.schema_version != SOLUTION_REVIEW_SCHEMA_VERSION
-        || semantic.protocol != PLANNER_SOLUTION_PROTOCOL
     {
-        return Err(CoordinationError::new(
-            CoordinationErrorCode::InvalidRequest,
-            "planner solution output is non-canonical or uses another protocol",
+        return Err(stale_authority(
+            "planning WorkRun and accepted binding disagree",
         ));
     }
-    let (planning_stage_run_id, planning_session_binding_id) = current_planning_authority(delivery)
-        .map_err(|error| CoordinationError::new(CoordinationErrorCode::Conflict, error.message))?;
-    let review_stage_run_id = input.identities.stage_run_id.clone();
-    let attention_item_id = input.identities.attention_item_id.clone();
-    let prepared_at = input.now_millis;
-    let mut context = SolutionReviewContextV1 {
-        schema_version: SOLUTION_REVIEW_SCHEMA_VERSION,
-        protocol: SOLUTION_REVIEW_CONTEXT_PROTOCOL.to_owned(),
-        delivery_id: delivery.id().clone(),
-        delivery_spec_id: delivery.snapshot().spec.id.clone(),
-        delivery_spec_revision: delivery.snapshot().spec.revision,
-        planning_stage_run_id,
-        planning_session_binding_id,
-        review_stage_run_id,
-        attention_item_id,
-        solution: semantic.solution,
-        architecture_diagram: semantic.architecture_diagram,
-        process_diagram: semantic.process_diagram,
-        risks: semantic.risks,
-        unresolved_items: semantic.unresolved_items,
-        task_proposals: semantic.task_proposals,
-        prepared_at,
-        review_set_sha256: String::new(),
-    };
-    context.review_set_sha256 = review_set_digest(&context).map_err(|error| {
-        CoordinationError::new(CoordinationErrorCode::InvalidRequest, error.to_string())
-    })?;
-    let review_set_sha256 = context.review_set_sha256.clone();
-    input.review = Some(ReviewAttentionSeed {
-        title: attention_title,
-        context: serde_json::to_string(&context).map_err(|error| {
-            CoordinationError::new(
-                CoordinationErrorCode::Conflict,
-                format!("Solution Review context cannot be encoded: {error}"),
-            )
-        })?,
-        assigned_to,
-    });
-    let transition = advance(delivery, input)?;
-    if !matches!(transition.effect, StageAdvanceEffect::Review(_)) {
-        return Err(CoordinationError::new(
-            CoordinationErrorCode::WrongState,
-            "planner solution did not advance to PlanReview",
-        ));
-    }
-    let resolved = resolve_current_solution_review(&transition.delivery)
-        .map_err(|error| {
-            CoordinationError::new(CoordinationErrorCode::InvalidRequest, error.to_string())
-        })?
-        .ok_or_else(|| {
-            CoordinationError::new(
-                CoordinationErrorCode::WrongState,
-                "prepared Delivery has no current Solution Review",
-            )
-        })?;
-    if resolved.review_status != ValidatedReviewStatus::Pending
-        || resolved.review_set_sha256 != review_set_sha256
-    {
-        return Err(CoordinationError::new(
-            CoordinationErrorCode::Conflict,
-            "prepared Solution Review lost its exact digest authority",
-        ));
-    }
-    Ok(PreparedPlannerSolutionReview {
-        transition,
-        review_set_sha256,
-    })
+    Ok((run.id.clone(), binding.id.clone()))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -501,7 +347,7 @@ struct ReviewDigestInput<'context> {
     delivery_id: &'context DeliveryId,
     delivery_spec_id: &'context DeliverySpecId,
     delivery_spec_revision: u64,
-    planning_stage_run_id: &'context StageRunId,
+    planning_work_run_id: &'context WorkRunId,
     planning_session_binding_id: &'context SessionBindingId,
     review_stage_run_id: &'context StageRunId,
     attention_item_id: &'context AttentionItemId,
@@ -519,7 +365,7 @@ pub(crate) struct ValidatedSolutionReviewSet {
     delivery_id: DeliveryId,
     delivery_spec_id: DeliverySpecId,
     delivery_spec_revision: u64,
-    planning_stage_run_id: StageRunId,
+    planning_work_run_id: WorkRunId,
     planning_session_binding_id: SessionBindingId,
     review_stage_run_id: StageRunId,
     attention_item_id: AttentionItemId,
@@ -547,7 +393,7 @@ pub(crate) struct SolutionReviewView<'review> {
     pub(crate) delivery_id: &'review DeliveryId,
     pub(crate) delivery_spec_id: &'review DeliverySpecId,
     pub(crate) delivery_spec_revision: u64,
-    pub(crate) planning_stage_run_id: &'review StageRunId,
+    pub(crate) planning_work_run_id: &'review WorkRunId,
     pub(crate) planning_session_binding_id: &'review SessionBindingId,
     pub(crate) review_stage_run_id: &'review StageRunId,
     pub(crate) attention_item_id: &'review AttentionItemId,
@@ -570,69 +416,13 @@ pub(crate) struct SolutionReviewView<'review> {
     pub(crate) reviewed_at: Option<u64>,
 }
 
-#[allow(dead_code)] // Consumed by the phase 2.5.7 sealed task-promotion transition.
-pub(crate) struct ApprovedTaskPromotion<'review> {
-    delivery_id: &'review DeliveryId,
-    delivery_spec_id: &'review DeliverySpecId,
-    delivery_spec_revision: u64,
-    planning_stage_run_id: &'review StageRunId,
-    planning_session_binding_id: &'review SessionBindingId,
-    review_stage_run_id: &'review StageRunId,
-    attention_item_id: &'review AttentionItemId,
-    reviewer_id: &'review str,
-    reviewed_at: u64,
-    review_set_sha256: &'review str,
-    task_proposals: &'review [DeliveryTaskProposal],
-}
-
-#[allow(dead_code)] // Kept narrow until the phase 2.5.7 consumer is merged.
-impl ApprovedTaskPromotion<'_> {
-    pub(crate) fn review_set_sha256(&self) -> &str {
-        self.review_set_sha256
-    }
-
-    pub(crate) fn task_proposals(&self) -> &[DeliveryTaskProposal] {
-        self.task_proposals
-    }
-
-    pub(crate) fn validate_for_delivery(
-        &self,
-        delivery: &Delivery,
-    ) -> Result<(), SolutionReviewError> {
-        let current = resolve_current_solution_review(delivery)?
-            .ok_or_else(|| stale_authority("approved task promotion has no current review"))?;
-        if current.review_status != ValidatedReviewStatus::Approved
-            || &current.delivery_id != self.delivery_id
-            || &current.delivery_spec_id != self.delivery_spec_id
-            || current.delivery_spec_revision != self.delivery_spec_revision
-            || &current.planning_stage_run_id != self.planning_stage_run_id
-            || &current.planning_session_binding_id != self.planning_session_binding_id
-            || &current.review_stage_run_id != self.review_stage_run_id
-            || &current.attention_item_id != self.attention_item_id
-            || current.reviewer_id.as_deref() != Some(self.reviewer_id)
-            || current.reviewed_at != Some(self.reviewed_at)
-            || current.review_set_sha256 != self.review_set_sha256
-            || current.task_proposals.as_slice() != self.task_proposals
-        {
-            return Err(stale_authority(
-                "approved task promotion is not the exact current review attempt",
-            ));
-        }
-        Ok(())
-    }
-}
-
 impl ValidatedSolutionReviewSet {
-    pub(crate) fn review_set_sha256(&self) -> &str {
-        &self.review_set_sha256
-    }
-
     pub(crate) fn projection_view(&self) -> SolutionReviewView<'_> {
         SolutionReviewView {
             delivery_id: &self.delivery_id,
             delivery_spec_id: &self.delivery_spec_id,
             delivery_spec_revision: self.delivery_spec_revision,
-            planning_stage_run_id: &self.planning_stage_run_id,
+            planning_work_run_id: &self.planning_work_run_id,
             planning_session_binding_id: &self.planning_session_binding_id,
             review_stage_run_id: &self.review_stage_run_id,
             attention_item_id: &self.attention_item_id,
@@ -654,26 +444,6 @@ impl ValidatedSolutionReviewSet {
             reviewer_id: self.reviewer_id.as_deref(),
             reviewed_at: self.reviewed_at,
         }
-    }
-
-    #[allow(dead_code)] // The only authority seam reserved for phase 2.5.7.
-    pub(crate) fn approved_task_promotion(&self) -> Option<ApprovedTaskPromotion<'_>> {
-        if self.review_status != ValidatedReviewStatus::Approved {
-            return None;
-        }
-        Some(ApprovedTaskPromotion {
-            delivery_id: &self.delivery_id,
-            delivery_spec_id: &self.delivery_spec_id,
-            delivery_spec_revision: self.delivery_spec_revision,
-            planning_stage_run_id: &self.planning_stage_run_id,
-            planning_session_binding_id: &self.planning_session_binding_id,
-            review_stage_run_id: &self.review_stage_run_id,
-            attention_item_id: &self.attention_item_id,
-            reviewer_id: self.reviewer_id.as_deref()?,
-            reviewed_at: self.reviewed_at?,
-            review_set_sha256: &self.review_set_sha256,
-            task_proposals: &self.task_proposals,
-        })
     }
 }
 
@@ -731,7 +501,7 @@ pub(crate) fn resolve_current_solution_review(
         delivery_id: context.delivery_id,
         delivery_spec_id: context.delivery_spec_id,
         delivery_spec_revision: context.delivery_spec_revision,
-        planning_stage_run_id: context.planning_stage_run_id,
+        planning_work_run_id: context.planning_work_run_id,
         planning_session_binding_id: context.planning_session_binding_id,
         review_stage_run_id: context.review_stage_run_id,
         attention_item_id: context.attention_item_id,
@@ -785,7 +555,11 @@ fn current_plan_review(
         .filter(|attention| {
             attention.delivery_id == snapshot.id
                 && attention.delivery_spec_id == snapshot.spec.id
-                && attention.stage_run_id.as_ref() == Some(&review_stage.id)
+                && decode_canonical_context(&attention.context).is_ok_and(|context| {
+                    context.review_stage_run_id == review_stage.id
+                        && context.attention_item_id == attention.id
+                        && attention.work_run_id.as_ref() == Some(&context.planning_work_run_id)
+                })
                 && attention.item_type == AttentionItemType::DecisionRequired
                 && attention.blocking
         })
@@ -890,7 +664,7 @@ fn validate_current_authority(
         || context.delivery_spec_revision != snapshot.spec.revision
         || context.review_stage_run_id != review_stage.id
         || context.attention_item_id != attention.id
-        || attention.stage_run_id.as_ref() != Some(&review_stage.id)
+        || attention.work_run_id.as_ref() != Some(&context.planning_work_run_id)
         || attention.created_at_millis != context.prepared_at
     {
         return Err(stale_authority(
@@ -898,48 +672,21 @@ fn validate_current_authority(
         ));
     }
 
-    let planning_stage = snapshot
-        .stage_runs
-        .iter()
-        .find(|run| run.id == context.planning_stage_run_id)
-        .ok_or_else(|| stale_authority("solution-review planning StageRun is missing"))?;
-    let planning_bindings: Vec<_> = snapshot
+    let (_, binding_id) = current_planning_authority(snapshot, &context.planning_work_run_id)?;
+    let planning_binding = snapshot
         .session_bindings
         .iter()
-        .filter(|binding| binding.stage_run_id == planning_stage.id)
-        .collect();
-    let [planning_binding] = planning_bindings.as_slice() else {
-        return Err(stale_authority(
-            "solution-review planning StageRun requires one exact SessionBinding",
-        ));
-    };
-    let review_has_binding = snapshot
-        .session_bindings
-        .iter()
-        .any(|binding| binding.stage_run_id == review_stage.id);
-    let planning_finished = planning_stage
-        .finished_at_millis
-        .ok_or_else(|| stale_authority("solution-review planning StageRun is not finished"))?;
-    if planning_stage.delivery_task_id.is_some()
-        || planning_stage.stage != DeliveryStage::Planning
-        || planning_stage.actor_type != StageRunActorType::Codex
-        || planning_stage.role != "planner"
-        || planning_stage.status != StageRunStatus::Succeeded
-        || planning_binding.id != context.planning_session_binding_id
-        || planning_binding.delivery_task_id.is_some()
-        || planning_binding.worker_session_id.is_none()
-        || planning_binding.codex_thread_id.is_none()
+        .find(|binding| binding.id == binding_id)
+        .ok_or_else(|| stale_authority("planning binding is missing"))?;
+    if binding_id != context.planning_session_binding_id
         || review_stage.delivery_task_id.is_some()
         || review_stage.actor_type != StageRunActorType::Human
         || review_stage.role != "reviewer"
-        || review_has_binding
-        || context.prepared_at < planning_stage.started_at_millis
         || context.prepared_at < planning_binding.bound_at_millis
-        || context.prepared_at > planning_finished
-        || planning_finished > review_stage.started_at_millis
+        || context.prepared_at > review_stage.started_at_millis
     {
         return Err(stale_authority(
-            "solution-review planning binding or human review lifecycle is not current",
+            "solution-review planning WorkRun or human review lifecycle is not current",
         ));
     }
     Ok(())
@@ -1395,7 +1142,7 @@ fn review_set_digest(context: &SolutionReviewContextV1) -> Result<String, Soluti
         delivery_id: &context.delivery_id,
         delivery_spec_id: &context.delivery_spec_id,
         delivery_spec_revision: context.delivery_spec_revision,
-        planning_stage_run_id: &context.planning_stage_run_id,
+        planning_work_run_id: &context.planning_work_run_id,
         planning_session_binding_id: &context.planning_session_binding_id,
         review_stage_run_id: &context.review_stage_run_id,
         attention_item_id: &context.attention_item_id,
@@ -1545,21 +1292,14 @@ fn review_error(code: SolutionReviewErrorCode, message: &str) -> SolutionReviewE
 pub mod test_support {
     use super::{
         AcceptanceCriterionId, DecisionActionWire, Delivery, DeliveryTaskId, DeliveryTaskProposal,
-        Error, SOLUTION_REVIEW_CONTEXT_PROTOCOL, SOLUTION_REVIEW_DECISION_PROTOCOL,
-        SOLUTION_REVIEW_SCHEMA_VERSION, SolutionReviewContextV1, SolutionReviewDecisionV1,
-        SolutionWire, ValidatedDiagram, ValidatedDiagramEdge, ValidatedDiagramKind,
-        ValidatedDiagramNode, ValidatedDiagramNodeKind, ValidatedReviewStatus,
-        ValidatedSolutionComponent, ValidatedSolutionComponentKind, ValidatedSolutionConnection,
-        fmt, resolve_current_solution_review, review_set_digest,
+        Error, SOLUTION_REVIEW_DECISION_PROTOCOL, SOLUTION_REVIEW_SCHEMA_VERSION,
+        SolutionReviewDecisionV1, SolutionWire, ValidatedDiagram, ValidatedDiagramEdge,
+        ValidatedDiagramKind, ValidatedDiagramNode, ValidatedDiagramNodeKind,
+        ValidatedReviewStatus, ValidatedSolutionComponent, ValidatedSolutionComponentKind,
+        ValidatedSolutionConnection, fmt, resolve_current_solution_review,
     };
-    use crate::application::{
-        attention::{
-            AttentionDecision, ResolveAttentionInput, ResolvedAttentionTransition,
-            resolve_attention,
-        },
-        stage::{
-            AdvanceStageInput, ReviewAttentionSeed, StageAdvanceEffect, StageAdvanceResult, advance,
-        },
+    use crate::application::attention::{
+        AttentionDecision, ResolveAttentionInput, ResolvedAttentionTransition, resolve_attention,
     };
     use serde::{Deserialize, Serialize};
     use sha2::{Digest, Sha256};
@@ -1724,29 +1464,6 @@ pub mod test_support {
     impl Error for SolutionReviewFixtureError {}
 
     #[derive(Debug, Clone, PartialEq, Eq)]
-    pub struct PreparedSolutionReviewFixture {
-        transition: StageAdvanceResult,
-        review_set_sha256: String,
-    }
-
-    impl PreparedSolutionReviewFixture {
-        #[must_use]
-        pub fn transition(&self) -> &StageAdvanceResult {
-            &self.transition
-        }
-
-        #[must_use]
-        pub fn into_transition(self) -> StageAdvanceResult {
-            self.transition
-        }
-
-        #[must_use]
-        pub fn review_set_sha256(&self) -> &str {
-            &self.review_set_sha256
-        }
-    }
-
-    #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct SettledSolutionReviewFixture {
         transition: ResolvedAttentionTransition,
         review_set_sha256: String,
@@ -1757,94 +1474,14 @@ pub mod test_support {
         pub fn transition(&self) -> &ResolvedAttentionTransition {
             &self.transition
         }
-
         #[must_use]
         pub fn into_transition(self) -> ResolvedAttentionTransition {
             self.transition
         }
-
         #[must_use]
         pub fn review_set_sha256(&self) -> &str {
             &self.review_set_sha256
         }
-    }
-
-    /// Builds and validates the exact current plan-review context, then calls
-    /// the production stage coordinator. Callers never encode authority JSON
-    /// or calculate a review-set digest.
-    pub fn prepare_solution_review_fixture(
-        delivery: &Delivery,
-        mut input: AdvanceStageInput,
-        fixture: SolutionReviewFixture,
-    ) -> Result<PreparedSolutionReviewFixture, SolutionReviewFixtureError> {
-        if input.review.is_some() {
-            return Err(fixture_error(
-                "solution-review fixture owns the canonical review Attention seed",
-            ));
-        }
-        let (planning_stage_run_id, planning_session_binding_id) =
-            super::current_planning_authority(delivery)
-                .map_err(|error| fixture_error(error.message()))?;
-        let review_stage_run_id = input.identities.stage_run_id.clone();
-        let attention_item_id = input.identities.attention_item_id.clone();
-        let prepared_at = input.now_millis;
-        let task_proposals = normalized_task_proposals(delivery, fixture.task_proposals)
-            .into_iter()
-            .map(DeliveryTaskProposal::from)
-            .collect();
-        let mut context = SolutionReviewContextV1 {
-            schema_version: SOLUTION_REVIEW_SCHEMA_VERSION,
-            protocol: SOLUTION_REVIEW_CONTEXT_PROTOCOL.to_owned(),
-            delivery_id: delivery.id().clone(),
-            delivery_spec_id: delivery.snapshot().spec.id.clone(),
-            delivery_spec_revision: delivery.snapshot().spec.revision,
-            planning_stage_run_id,
-            planning_session_binding_id,
-            review_stage_run_id,
-            attention_item_id,
-            solution: fixture.solution.into(),
-            architecture_diagram: fixture.architecture_diagram.into(),
-            process_diagram: fixture.process_diagram.into(),
-            risks: fixture.risks,
-            unresolved_items: fixture.unresolved_items,
-            task_proposals,
-            prepared_at,
-            review_set_sha256: String::new(),
-        };
-        context.review_set_sha256 =
-            review_set_digest(&context).map_err(|error| fixture_error(error.to_string()))?;
-        let review_set_sha256 = context.review_set_sha256.clone();
-        let encoded = serde_json::to_string(&context).map_err(|error| {
-            fixture_error(format!(
-                "canonical solution-review context encoding failed: {error}"
-            ))
-        })?;
-        input.review = Some(ReviewAttentionSeed {
-            title: fixture.attention_title,
-            context: encoded,
-            assigned_to: fixture.assigned_to,
-        });
-        let transition =
-            advance(delivery, input).map_err(|error| fixture_error(error.to_string()))?;
-        if !matches!(transition.effect, StageAdvanceEffect::Review(_)) {
-            return Err(fixture_error(
-                "solution-review fixture did not advance to a human review",
-            ));
-        }
-        let resolved = resolve_current_solution_review(&transition.delivery)
-            .map_err(|error| fixture_error(error.to_string()))?
-            .ok_or_else(|| fixture_error("prepared Delivery has no current solution review"))?;
-        if resolved.review_status != ValidatedReviewStatus::Pending
-            || resolved.review_set_sha256 != review_set_sha256
-        {
-            return Err(fixture_error(
-                "prepared solution review did not resolve to the exact pending review set",
-            ));
-        }
-        Ok(PreparedSolutionReviewFixture {
-            transition,
-            review_set_sha256,
-        })
     }
 
     /// Reconstructs an exact typed decision for the current pending review and
@@ -1920,7 +1557,7 @@ pub mod test_support {
             ResolveAttentionInput {
                 expected_revision: delivery.revision(),
                 attention_item_id,
-                stage_run_id: review_stage_run_id,
+                work_run_id: attention.work_run_id.clone(),
                 expected_context: attention.context.clone(),
                 actor: actor.to_owned(),
                 decision: attention_decision,
@@ -1981,17 +1618,6 @@ pub mod test_support {
                 };
                 vec![first, second]
             }
-        }
-    }
-
-    fn normalized_task_proposals(
-        delivery: &Delivery,
-        proposals: Vec<SolutionReviewTaskProposalFixture>,
-    ) -> Vec<SolutionReviewTaskProposalFixture> {
-        if proposals.is_empty() {
-            vec![default_task_proposal(delivery)]
-        } else {
-            proposals
         }
     }
 
@@ -2162,20 +1788,12 @@ pub mod test_support {
 }
 
 #[cfg(test)]
-pub(crate) use tests::{
-    ReviewFixtureState, duplicate_task_and_criterion_fixtures, empty_task_proposals_fixture,
-    invalid_criterion_fixtures, invalid_dependency_fixtures, ordered_task_proposals_fixture,
-    review_delivery, with_newer_review_attempt,
-};
-
-#[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
     use serde_json::{Value, json};
     use winwincode_domain::{
-        CodexThreadId, ExecutionAckSequence, ExecutionJobId, FencingToken, LeaseId,
-        ProductSessionId, RequestId, WorkerId, WorkerInstanceId, WorkerSessionId,
+        CodexThreadId, ExecutionJobId, ProductSessionId, RequestId, WorkerSessionId,
     };
 
     use super::*;
@@ -2198,7 +1816,7 @@ mod tests {
     };
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub(crate) enum ReviewFixtureState {
+    enum ReviewFixtureState {
         Pending,
         Approved,
         ChangesRequested,
@@ -2239,7 +1857,7 @@ mod tests {
 
     fn context_for_attempt(
         snapshot: &DeliverySnapshot,
-        planning_stage_run_id: StageRunId,
+        planning_work_run_id: WorkRunId,
         planning_session_binding_id: SessionBindingId,
         review_stage_run_id: StageRunId,
         attention_item_id: AttentionItemId,
@@ -2263,7 +1881,7 @@ mod tests {
             delivery_id: snapshot.id.clone(),
             delivery_spec_id: snapshot.spec.id.clone(),
             delivery_spec_revision: snapshot.spec.revision,
-            planning_stage_run_id,
+            planning_work_run_id,
             planning_session_binding_id,
             review_stage_run_id,
             attention_item_id,
@@ -2316,7 +1934,7 @@ mod tests {
     fn context_for(snapshot: &DeliverySnapshot) -> SolutionReviewContextV1 {
         context_for_attempt(
             snapshot,
-            StageRunId("stage:planning".into()),
+            snapshot.session_bindings[0].work_run_id.clone(),
             SessionBindingId("binding:planning".into()),
             StageRunId("stage:plan-review".into()),
             AttentionItemId("attention:plan-review".into()),
@@ -2357,7 +1975,7 @@ mod tests {
         }
     }
 
-    pub(crate) fn review_delivery(state: ReviewFixtureState) -> Delivery {
+    fn review_delivery(state: ReviewFixtureState) -> Delivery {
         let mut snapshot = test_fixture();
         snapshot.status = match state {
             ReviewFixtureState::Pending => DeliveryStatus::NeedsAttention,
@@ -2383,13 +2001,23 @@ mod tests {
 
         let binding = &mut snapshot.session_bindings[0];
         binding.id = SessionBindingId("binding:planning".into());
-        binding.delivery_task_id = None;
-        binding.stage_run_id = planning.id.clone();
-        binding.product_session_id = ProductSessionId("product:planning".into());
-        binding.execution_job_id = ExecutionJobId("job:planning".into());
-        binding.worker_session_id = Some(WorkerSessionId("worker-session:planning".into()));
-        binding.codex_thread_id = Some(CodexThreadId("codex-thread:planning".into()));
+        binding.product_session_id = ProductSessionId("psn_0TX3C6R3DYKRWGB41MJHQ0DSYQ".into());
+        binding.execution_job_id = ExecutionJobId("job_38GQE67TA8MBSA20F8D7RXKG8J".into());
+        binding.worker_session_id = Some(WorkerSessionId("wsn_3DJDZCGN32T993CVJE4SK8B8GD".into()));
+        binding.codex_thread_id = Some(CodexThreadId("cdx_77KEKJA0TR386RTR7TSCV2MYX1".into()));
         binding.bound_at_millis = 1_800_000_000_011;
+
+        let run = snapshot
+            .work_run_aggregate
+            .runs
+            .iter_mut()
+            .find(|run| run.id == binding.work_run_id)
+            .expect("fixture has the planning WorkRun");
+        run.product_session_id = Some(binding.product_session_id.clone());
+        run.execution_job_id = binding.execution_job_id.clone();
+        run.worker_session_id = binding.worker_session_id.clone().expect("WorkerSession");
+        run.codex_thread_id = binding.codex_thread_id.clone();
+        run.state = WorkRunState::CandidateReady;
 
         let (review_status, finished_at) = match state {
             ReviewFixtureState::Pending => (StageRunStatus::Waiting, None),
@@ -2426,7 +2054,7 @@ mod tests {
             id: context.attention_item_id.clone(),
             delivery_id: snapshot.id.clone(),
             delivery_spec_id: snapshot.spec.id.clone(),
-            stage_run_id: Some(context.review_stage_run_id.clone()),
+            work_run_id: Some(context.planning_work_run_id.clone()),
             item_type: AttentionItemType::DecisionRequired,
             title: "Review delivery solution".into(),
             context: serde_json::to_string(&context).expect("context JSON"),
@@ -2445,10 +2073,8 @@ mod tests {
         Delivery::try_from_snapshot(snapshot).expect("solution-review Delivery")
     }
 
-    pub(crate) fn with_newer_review_attempt(
-        history: Delivery,
-        current: ReviewFixtureState,
-    ) -> Delivery {
+    #[allow(clippy::too_many_lines)]
+    fn with_newer_review_attempt(history: Delivery, current: ReviewFixtureState) -> Delivery {
         let mut snapshot = history.into_snapshot();
         snapshot.status = match current {
             ReviewFixtureState::Pending => DeliveryStatus::NeedsAttention,
@@ -2457,13 +2083,13 @@ mod tests {
             ReviewFixtureState::Rejected => DeliveryStatus::Clarifying,
         };
 
-        let planning_stage_run_id = StageRunId("stage:planning-2".into());
+        let planning_work_run_id = WorkRunId("wrn_01J00000000000000000000002".into());
         let planning_session_binding_id = SessionBindingId("binding:planning-2".into());
         let review_stage_run_id = StageRunId("stage:plan-review-2".into());
         let attention_item_id = AttentionItemId("attention:plan-review-2".into());
         snapshot.stage_runs.push(StageRun {
             schema_version: crate::domain::DELIVERY_SCHEMA_VERSION,
-            id: planning_stage_run_id.clone(),
+            id: StageRunId("stage:planning-2".into()),
             delivery_id: snapshot.id.clone(),
             delivery_task_id: None,
             stage: DeliveryStage::Planning,
@@ -2479,17 +2105,49 @@ mod tests {
                 schema_version: crate::domain::DELIVERY_SCHEMA_VERSION,
                 id: planning_session_binding_id.clone(),
                 delivery_id: snapshot.id.clone(),
-                delivery_task_id: None,
-                stage_run_id: planning_stage_run_id.clone(),
-                product_session_id: ProductSessionId("product:planning-2".into()),
-                execution_job_id: ExecutionJobId("job:planning-2".into()),
-                worker_session_id: Some(WorkerSessionId("worker-session:planning-2".into())),
-                codex_thread_id: Some(CodexThreadId("codex-thread:planning-2".into())),
+                work_run_id: planning_work_run_id.clone(),
+                work_contract_id: snapshot.session_bindings[0].work_contract_id.clone(),
+                work_contract_revision: snapshot.session_bindings[0].work_contract_revision.clone(),
+                work_item_id: snapshot.session_bindings[0].work_item_id.clone(),
+                work_item_revision: snapshot.session_bindings[0].work_item_revision.clone(),
+                product_session_id: ProductSessionId("psn_0CPJ46JVA3BMNPT37E0M79DGZC".into()),
+                execution_job_id: ExecutionJobId("job_3532DBF6302AN1TGBV0XDDWV3M".into()),
+                execution_profile: None,
+                worker_session_id: Some(WorkerSessionId("wsn_440ACQ747YBNED92VDBD89QQFV".into())),
+                codex_thread_id: Some(CodexThreadId("cdx_1PG3PGNYJ32E2JCNJFD8YG746Q".into())),
                 bound_at_millis: 1_800_000_000_041,
-                ..Default::default()
+                ..snapshot.session_bindings[0].clone()
             }
             .with_test_authority("planning-session-binding-2", 2),
         );
+        let binding = snapshot
+            .session_bindings
+            .last()
+            .expect("new planning binding");
+        let planning_work_run_id = binding.work_run_id.clone();
+        let mut successor = snapshot
+            .work_run_aggregate
+            .runs
+            .iter()
+            .find(|run| run.id == snapshot.session_bindings[0].work_run_id)
+            .expect("original planning WorkRun")
+            .clone();
+        successor.id = binding.work_run_id.clone();
+        successor.attempt = 2;
+        successor.product_session_id = Some(binding.product_session_id.clone());
+        successor.execution_job_id = binding.execution_job_id.clone();
+        successor.worker_session_id = binding.worker_session_id.clone().expect("WorkerSession");
+        successor.codex_thread_id = binding.codex_thread_id.clone();
+        successor.worker_id = binding.worker_id.clone().expect("Worker");
+        successor.worker_instance_id = binding.worker_instance_id.clone().expect("Worker instance");
+        successor.lease_id = binding.lease_id.clone().expect("lease");
+        successor.fencing_token = binding.fencing_token.as_ref().expect("fence").0.clone();
+        for run in &mut snapshot.work_run_aggregate.runs {
+            if run.work_item_id == successor.work_item_id {
+                run.state = WorkRunState::Settled;
+            }
+        }
+        snapshot.work_run_aggregate.runs.push(successor);
         let (review_status, finished_at_millis) = match current {
             ReviewFixtureState::Pending => (StageRunStatus::Waiting, None),
             ReviewFixtureState::Approved => (StageRunStatus::Succeeded, Some(1_800_000_000_060)),
@@ -2513,7 +2171,7 @@ mod tests {
 
         let context = context_for_attempt(
             &snapshot,
-            planning_stage_run_id,
+            planning_work_run_id,
             planning_session_binding_id,
             review_stage_run_id.clone(),
             attention_item_id.clone(),
@@ -2525,7 +2183,7 @@ mod tests {
             id: attention_item_id,
             delivery_id: snapshot.id.clone(),
             delivery_spec_id: snapshot.spec.id.clone(),
-            stage_run_id: Some(review_stage_run_id),
+            work_run_id: Some(context.planning_work_run_id.clone()),
             item_type: AttentionItemType::DecisionRequired,
             title: "Review revised delivery solution".into(),
             context: serde_json::to_string(&context).expect("new context JSON"),
@@ -2566,7 +2224,7 @@ mod tests {
         ResolveAttentionInput {
             expected_revision: delivery.revision(),
             attention_item_id: attention.id.clone(),
-            stage_run_id: attention.stage_run_id.clone().expect("review StageRun"),
+            work_run_id: attention.work_run_id.clone(),
             expected_context: attention.context.clone(),
             actor: "alice".into(),
             decision: if state == ReviewFixtureState::Approved {
@@ -2655,27 +2313,6 @@ mod tests {
             let reviewed_at = solution_review.reviewed_at();
             assert_eq!(reviewer_id, Some("alice"));
             assert_eq!(reviewed_at, Some(1_800_000_000_030));
-        }
-    }
-
-    #[test]
-    fn only_approved_solution_review_authorizes_task_promotion() {
-        let approved_delivery = review_delivery(ReviewFixtureState::Approved);
-        let pending = review_delivery(ReviewFixtureState::Pending);
-        let changes_requested = review_delivery(ReviewFixtureState::ChangesRequested);
-        let rejected = review_delivery(ReviewFixtureState::Rejected);
-
-        let approved = resolve_current_solution_review(&approved_delivery)
-            .expect("approved resolver")
-            .expect("approved review");
-        let promotion = approved.approved_task_promotion().expect("promotion");
-        assert_eq!(promotion.review_set_sha256(), approved.review_set_sha256);
-        assert_eq!(promotion.task_proposals().len(), 1);
-        for delivery in [&pending, &changes_requested, &rejected] {
-            let review = resolve_current_solution_review(delivery)
-                .expect("review resolver")
-                .expect("review fact");
-            assert!(review.approved_task_promotion().is_none());
         }
     }
 
@@ -2770,103 +2407,6 @@ mod tests {
         assert!(resolve_current_solution_review(&stale_order).is_err());
     }
 
-    pub(crate) fn empty_task_proposals_fixture() -> Delivery {
-        rewrite_context(review_delivery(ReviewFixtureState::Pending), |context| {
-            context.task_proposals.clear();
-        })
-    }
-
-    pub(crate) fn ordered_task_proposals_fixture() -> Delivery {
-        rewrite_context(review_delivery(ReviewFixtureState::Approved), |context| {
-            let second_criterion = context.task_proposals[0]
-                .acceptance_criterion_ids
-                .pop()
-                .expect("second acceptance criterion");
-            let first_id = context.task_proposals[0].id.clone();
-            context.task_proposals.push(DeliveryTaskProposal {
-                id: DeliveryTaskId("task:verification".into()),
-                title: "Verify invitation flow".into(),
-                goal: "Run the exact acceptance checks.".into(),
-                acceptance_criterion_ids: vec![second_criterion],
-                blocked_by_task_ids: vec![first_id],
-            });
-        })
-    }
-
-    pub(crate) fn duplicate_task_and_criterion_fixtures() -> (Delivery, Delivery) {
-        let duplicate = rewrite_context(review_delivery(ReviewFixtureState::Pending), |context| {
-            context
-                .task_proposals
-                .push(context.task_proposals[0].clone());
-        });
-        let duplicate_criterion =
-            rewrite_context(review_delivery(ReviewFixtureState::Pending), |context| {
-                let criterion = context.task_proposals[0].acceptance_criterion_ids[0].clone();
-                context.task_proposals[0]
-                    .acceptance_criterion_ids
-                    .push(criterion);
-            });
-        (duplicate, duplicate_criterion)
-    }
-
-    pub(crate) fn invalid_criterion_fixtures() -> [Delivery; 3] {
-        let empty = rewrite_context(review_delivery(ReviewFixtureState::Pending), |context| {
-            context.task_proposals[0].acceptance_criterion_ids.clear();
-        });
-        let foreign = rewrite_context(review_delivery(ReviewFixtureState::Pending), |context| {
-            context.task_proposals[0].acceptance_criterion_ids =
-                vec![AcceptanceCriterionId("criterion:foreign".into())];
-        });
-        let incomplete = rewrite_context(review_delivery(ReviewFixtureState::Pending), |context| {
-            context.task_proposals[0]
-                .acceptance_criterion_ids
-                .pop()
-                .expect("second acceptance criterion");
-        });
-        [empty, foreign, incomplete]
-    }
-
-    pub(crate) fn invalid_dependency_fixtures() -> [Delivery; 4] {
-        let self_dependency =
-            rewrite_context(review_delivery(ReviewFixtureState::Pending), |context| {
-                context.task_proposals[0].blocked_by_task_ids =
-                    vec![context.task_proposals[0].id.clone()];
-            });
-        let missing = rewrite_context(review_delivery(ReviewFixtureState::Pending), |context| {
-            context.task_proposals[0].blocked_by_task_ids =
-                vec![DeliveryTaskId("task:missing".into())];
-        });
-        let duplicate = rewrite_context(review_delivery(ReviewFixtureState::Pending), |context| {
-            let dependency = DeliveryTaskProposal {
-                id: DeliveryTaskId("task:dependency".into()),
-                title: "Dependency".into(),
-                goal: "Retain current acceptance coverage.".into(),
-                acceptance_criterion_ids: context.task_proposals[0]
-                    .acceptance_criterion_ids
-                    .clone(),
-                blocked_by_task_ids: vec![],
-            };
-            context.task_proposals[0].blocked_by_task_ids =
-                vec![dependency.id.clone(), dependency.id.clone()];
-            context.task_proposals.push(dependency);
-        });
-        let cycle = rewrite_context(review_delivery(ReviewFixtureState::Pending), |context| {
-            let first_id = context.task_proposals[0].id.clone();
-            let second_id = DeliveryTaskId("task:cycle".into());
-            context.task_proposals[0].blocked_by_task_ids = vec![second_id.clone()];
-            context.task_proposals.push(DeliveryTaskProposal {
-                id: second_id,
-                title: "Cycle".into(),
-                goal: "Exercise cycle rejection.".into(),
-                acceptance_criterion_ids: context.task_proposals[0]
-                    .acceptance_criterion_ids
-                    .clone(),
-                blocked_by_task_ids: vec![first_id],
-            });
-        });
-        [self_dependency, missing, duplicate, cycle]
-    }
-
     #[test]
     fn human_solution_review_rejects_execution_session_binding() {
         let mut snapshot = review_delivery(ReviewFixtureState::Pending).into_snapshot();
@@ -2875,14 +2415,18 @@ mod tests {
                 schema_version: crate::domain::DELIVERY_SCHEMA_VERSION,
                 id: SessionBindingId("binding:forged-human-review".into()),
                 delivery_id: snapshot.id.clone(),
-                delivery_task_id: None,
-                stage_run_id: StageRunId("stage:plan-review".into()),
-                product_session_id: ProductSessionId("product:forged-human-review".into()),
-                execution_job_id: ExecutionJobId("job:forged-human-review".into()),
-                worker_session_id: Some(WorkerSessionId("worker:forged-human-review".into())),
-                codex_thread_id: Some(CodexThreadId("thread:forged-human-review".into())),
+                work_run_id: WorkRunId("wrn_01J00000000000000000000009".into()),
+                work_contract_id: snapshot.session_bindings[0].work_contract_id.clone(),
+                work_contract_revision: snapshot.session_bindings[0].work_contract_revision.clone(),
+                work_item_id: snapshot.session_bindings[0].work_item_id.clone(),
+                work_item_revision: snapshot.session_bindings[0].work_item_revision.clone(),
+                product_session_id: ProductSessionId("psn_4T2B6SEK76F8W2YMHA9WEZZ1P0".into()),
+                execution_job_id: ExecutionJobId("job_4GGPVH1YN1VQCCJ2BV9NHA0A58".into()),
+                execution_profile: None,
+                worker_session_id: Some(WorkerSessionId("wsn_6NE6N77M4VQ4JPFBH8YBSX6E72".into())),
+                codex_thread_id: Some(CodexThreadId("cdx_48QG06X0KQ083E3P6H0RV5NTPF".into())),
                 bound_at_millis: 1_800_000_000_022,
-                ..Default::default()
+                ..snapshot.session_bindings[0].clone()
             }
             .with_test_authority("forged-human-review", 1),
         );
@@ -2950,7 +2494,7 @@ mod tests {
         context.review_set_sha256 = review_set_digest(&context).expect("duplicate digest");
         let mut duplicate_attention = snapshot.attention_items[0].clone();
         duplicate_attention.id = context.attention_item_id.clone();
-        duplicate_attention.stage_run_id = Some(context.review_stage_run_id.clone());
+        duplicate_attention.work_run_id = Some(context.planning_work_run_id.clone());
         duplicate_attention.context = serde_json::to_string(&context).expect("duplicate context");
         snapshot.attention_items.push(duplicate_attention);
         let duplicate = Delivery::try_from_snapshot(snapshot).expect("duplicate review Delivery");
@@ -3004,55 +2548,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    #[test]
-    fn old_solution_review_cannot_authorize_promotion_after_a_new_attempt() {
-        let historical = review_delivery(ReviewFixtureState::Approved);
-        let old_review = resolve_current_solution_review(&historical)
-            .expect("historical approved review")
-            .expect("historical review fact");
-        let old_promotion = old_review
-            .approved_task_promotion()
-            .expect("historical promotion seal");
-        let current = with_newer_review_attempt(historical, ReviewFixtureState::Pending);
-
-        assert!(old_promotion.validate_for_delivery(&current).is_err());
-    }
-
-    #[test]
-    fn approved_task_promotion_seal_binds_the_review_actor_and_time() {
-        let historical = review_delivery(ReviewFixtureState::Approved);
-        let old_review = resolve_current_solution_review(&historical)
-            .expect("historical approved review")
-            .expect("historical review fact");
-        let old_promotion = old_review
-            .approved_task_promotion()
-            .expect("historical promotion seal");
-
-        let mut snapshot = historical.into_snapshot();
-        let changed_reviewed_at = snapshot.attention_items[0]
-            .resolved_at_millis
-            .expect("review time")
-            + 1;
-        snapshot.attention_items[0].assigned_to = Some("bob".into());
-        snapshot.attention_items[0].resolved_by = Some("bob".into());
-        snapshot.attention_items[0].resolved_at_millis = Some(changed_reviewed_at);
-        snapshot
-            .stage_runs
-            .iter_mut()
-            .find(|run| run.stage == DeliveryStage::PlanReview)
-            .expect("review StageRun")
-            .finished_at_millis = Some(changed_reviewed_at);
-        snapshot.updated_at_millis = changed_reviewed_at;
-        let changed = Delivery::try_from_snapshot(snapshot).expect("changed review settlement");
-        assert!(
-            resolve_current_solution_review(&changed)
-                .expect("changed review is internally valid")
-                .is_some()
-        );
-
-        assert!(old_promotion.validate_for_delivery(&changed).is_err());
     }
 
     #[test]
@@ -3223,361 +2718,24 @@ mod tests {
             review_set_digest(&reparsed).expect("restart digest")
         );
     }
+}
 
-    fn planning_handoff_fixture(
-        now_millis: u64,
-    ) -> (Delivery, crate::application::stage::AdvanceStageInput) {
-        use crate::application::stage::{
-            AdvanceStageInput, NewStageIdentities, TerminalOutcomeStatus,
-            test_support::{
-                active_lease_identity, terminal_outcome_metadata, terminal_worker_outcome,
-                verify_terminal_outcome,
-            },
-        };
-
-        let mut snapshot = review_delivery(ReviewFixtureState::Pending).into_snapshot();
-        snapshot.status = DeliveryStatus::Planning;
-        snapshot.stage_runs.truncate(1);
-        snapshot.stage_runs[0].status = StageRunStatus::Running;
-        snapshot.stage_runs[0].finished_at_millis = None;
-        snapshot.attention_items.clear();
-        snapshot.updated_at_millis = snapshot.stage_runs[0].started_at_millis;
-        let delivery = Delivery::try_from_snapshot(snapshot).expect("active planning Delivery");
-        let run = &delivery.snapshot().stage_runs[0];
-        let binding = &delivery.snapshot().session_bindings[0];
-        let worker_session_id = binding
-            .worker_session_id
-            .clone()
-            .expect("planning WorkerSession");
-        let lease = active_lease_identity(
-            binding.execution_job_id.clone(),
-            run.attempt,
-            LeaseId("lease:planning".into()),
-            FencingToken("1".into()),
-            WorkerId("worker:planning".into()),
-            WorkerInstanceId("worker-instance:planning".into()),
-            worker_session_id.clone(),
-        );
-        let metadata = terminal_outcome_metadata(
-            binding.codex_thread_id.clone(),
-            now_millis,
-            ExecutionAckSequence(9),
-            Vec::new(),
-        );
-        let raw = terminal_worker_outcome(
-            run.id.clone(),
-            binding.execution_job_id.clone(),
-            run.attempt,
-            lease.lease_id().clone(),
-            lease.fencing_token().clone(),
-            lease.worker_id().clone(),
-            lease.worker_instance_id().clone(),
-            worker_session_id,
-            TerminalOutcomeStatus::Succeeded,
-            metadata,
-        );
-        let terminal =
-            verify_terminal_outcome(&delivery, &lease, raw).expect("verified planning outcome");
-        let input = AdvanceStageInput {
-            expected_revision: delivery.revision(),
-            product_session_id: ProductSessionId("product:review-unused".into()),
-            identities: NewStageIdentities {
-                stage_run_id: StageRunId("stage:plan-review-fixture".into()),
-                execution_job_id: ExecutionJobId("job:review-unused".into()),
-                session_binding_id: SessionBindingId("binding:review-unused".into()),
-                attention_item_id: AttentionItemId("attention:plan-review-fixture".into()),
-            },
-            review: None,
-            previous_outcome: Some(terminal),
-            current_lease: Some(lease),
-            rework_authorization: None,
-            now_millis,
-        };
-        (delivery, input)
-    }
-
-    fn semantic_review_fixture(
-        task_proposals: Vec<test_support::SolutionReviewTaskProposalFixture>,
-    ) -> test_support::SolutionReviewFixture {
-        use test_support::{
-            SolutionComponentFixture, SolutionComponentKindFixture, SolutionConnectionFixture,
-            SolutionDiagramEdgeFixture, SolutionDiagramFixture, SolutionDiagramKindFixture,
-            SolutionDiagramNodeFixture, SolutionDiagramNodeKindFixture, SolutionFixture,
-            SolutionReviewFixture,
-        };
-
-        let diagram = |id: &str, kind| SolutionDiagramFixture {
-            id: id.to_owned(),
-            kind,
-            title: format!("{id} fixture"),
-            nodes: vec![
-                SolutionDiagramNodeFixture {
-                    id: format!("{id}:input"),
-                    label: "Input".into(),
-                    description: "Starts the fixture flow.".into(),
-                    kind: SolutionDiagramNodeKindFixture::Stage,
-                    trust_boundary: None,
-                    unresolved: false,
-                },
-                SolutionDiagramNodeFixture {
-                    id: format!("{id}:output"),
-                    label: "Output".into(),
-                    description: "Completes the fixture flow.".into(),
-                    kind: SolutionDiagramNodeKindFixture::Decision,
-                    trust_boundary: Some("fixture-review".into()),
-                    unresolved: false,
-                },
-            ],
-            edges: vec![SolutionDiagramEdgeFixture {
-                id: format!("{id}:edge"),
-                from: format!("{id}:input"),
-                to: format!("{id}:output"),
-                label: "reviews".into(),
-            }],
-        };
-        SolutionReviewFixture {
-            attention_title: "Review the fixture solution".into(),
-            assigned_to: "alice".into(),
-            solution: SolutionFixture {
-                id: "solution:fixture".into(),
-                summary: "Exercise the canonical solution-review transition.".into(),
-                approach: vec!["Preserve the exact current review set.".into()],
-                components: vec![SolutionComponentFixture {
-                    id: "component:fixture".into(),
-                    label: "Fixture".into(),
-                    responsibility: "Produces the expected Delivery result.".into(),
-                    kind: SolutionComponentKindFixture::Component,
-                    trust_boundary: Some("repository".into()),
-                    unresolved: false,
-                    repository_path_prefixes: vec!["src".into()],
-                }],
-                connections: vec![SolutionConnectionFixture {
-                    id: "connection:fixture".into(),
-                    from: "platform:codex-core".into(),
-                    to: "component:fixture".into(),
-                    label: "implements".into(),
-                }],
-            },
-            architecture_diagram: diagram(
-                "diagram:architecture-fixture",
-                SolutionDiagramKindFixture::SystemArchitecture,
-            ),
-            process_diagram: diagram(
-                "diagram:process-fixture",
-                SolutionDiagramKindFixture::ProcessFlow,
-            ),
-            risks: vec!["A stale review must be rejected.".into()],
-            unresolved_items: Vec::new(),
-            task_proposals,
-        }
-    }
-
-    fn canonical_planner_solution(delivery: &Delivery) -> Vec<u8> {
-        let fixture =
-            semantic_review_fixture(vec![test_support::SolutionReviewTaskProposalFixture {
-                id: DeliveryTaskId("dtk_00000000000000000000000001".into()),
-                title: delivery.snapshot().spec.title.clone(),
-                goal: delivery.snapshot().spec.goal.clone(),
-                acceptance_criterion_ids: delivery
-                    .snapshot()
-                    .spec
-                    .acceptance_criteria
-                    .iter()
-                    .map(|criterion| criterion.id.clone())
-                    .collect(),
-                blocked_by_task_ids: Vec::new(),
-            }]);
-        serde_json::to_vec(&PlannerSolutionV1 {
-            schema_version: SOLUTION_REVIEW_SCHEMA_VERSION,
-            protocol: PLANNER_SOLUTION_PROTOCOL.into(),
-            solution: fixture.solution.into(),
-            architecture_diagram: fixture.architecture_diagram.into(),
-            process_diagram: fixture.process_diagram.into(),
-            risks: fixture.risks,
-            unresolved_items: fixture.unresolved_items,
-            task_proposals: fixture.task_proposals.into_iter().map(Into::into).collect(),
-        })
-        .expect("canonical Planner solution")
-    }
+#[cfg(test)]
+mod explicit_workrun_authority_tests {
+    use super::*;
 
     #[test]
-    fn production_planner_solution_seals_current_authority_and_rejects_changed_bytes() {
-        let (delivery, input) = planning_handoff_fixture(1_800_000_000_020);
-        let bytes = canonical_planner_solution(&delivery);
-        let prepared = prepare_planner_solution_review(
-            &delivery,
-            input.clone(),
-            &bytes,
-            "Review the authenticated Planner result".into(),
-            "alice".into(),
-        )
-        .expect("production Planner solution review");
-        let pending = resolve_current_solution_review(&prepared.transition().delivery)
-            .expect("resolve production review")
-            .expect("pending production review");
-        assert_eq!(pending.review_status, ValidatedReviewStatus::Pending);
-        assert_eq!(pending.review_set_sha256(), prepared.review_set_sha256());
-        assert_eq!(pending.task_proposals.len(), 1);
-
-        let mut changed = bytes;
-        changed.insert(0, b' ');
-        assert!(
-            prepare_planner_solution_review(
-                &delivery,
-                input,
-                &changed,
-                "Review the authenticated Planner result".into(),
-                "alice".into(),
-            )
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn high_level_solution_review_fixture_prepares_real_sealed_stage_transition() {
-        let (delivery, input) = planning_handoff_fixture(1_800_000_000_020);
-        let prepared = test_support::prepare_solution_review_fixture(
-            &delivery,
-            input,
-            semantic_review_fixture(Vec::new()),
-        )
-        .expect("prepared solution review");
-
-        prepared
-            .transition()
-            .validate_projection()
-            .expect("sealed StageAdvanceResult");
-        assert_eq!(prepared.review_set_sha256().len(), 64);
-        let pending = resolve_current_solution_review(&prepared.transition().delivery)
-            .expect("current review")
-            .expect("pending review");
-        assert_eq!(pending.review_status, ValidatedReviewStatus::Pending);
-        assert_eq!(pending.review_set_sha256(), prepared.review_set_sha256());
-        assert_eq!(pending.task_proposals.len(), 1);
-        assert!(pending.task_proposals[0].id.0.starts_with("dtk_"));
-        assert_eq!(pending.task_proposals[0].id.0.len(), 30);
-        assert_eq!(
-            pending.task_proposals[0].title,
-            delivery.snapshot().spec.title
-        );
-        assert_eq!(
-            pending.task_proposals[0].goal,
-            delivery.snapshot().spec.goal
-        );
-        assert_eq!(
-            pending.task_proposals[0].acceptance_criterion_ids,
-            delivery
-                .snapshot()
-                .spec
-                .acceptance_criteria
-                .iter()
-                .map(|criterion| criterion.id.clone())
-                .collect::<Vec<_>>()
-        );
-    }
-
-    #[test]
-    fn high_level_solution_review_fixture_settles_and_promotes_exact_tasks() {
-        let (delivery, input) = planning_handoff_fixture(1_800_000_000_020);
-        let prepared = test_support::prepare_solution_review_fixture(
-            &delivery,
-            input,
-            semantic_review_fixture(Vec::new()),
-        )
-        .expect("prepared solution review");
-        let pending = prepared.transition().delivery.clone();
-        let digest = prepared.review_set_sha256().to_owned();
-        let settled = test_support::settle_solution_review_fixture(
-            &pending,
-            "alice",
-            1_800_000_000_021,
-            test_support::SolutionReviewDecisionFixture::Approve {
-                comments: Some("Approved exact fixture set.".into()),
-            },
-        )
-        .expect("settled solution review");
-
-        assert_eq!(settled.review_set_sha256(), digest);
-        let approved = resolve_current_solution_review(settled.transition().delivery())
-            .expect("current review")
-            .expect("approved review");
-        assert_eq!(approved.review_status, ValidatedReviewStatus::Approved);
-        let authority = approved
-            .approved_task_promotion()
-            .expect("approved promotion authority");
-        let promotion = crate::application::task_breakdown::prepare_task_breakdown_promotion(
-            settled.transition().delivery(),
-            &authority,
-        )
-        .expect("real task promotion");
-        assert_eq!(promotion.delivery().snapshot().tasks.len(), 1);
-        assert_eq!(promotion.review_set_sha256(), digest);
-    }
-
-    #[test]
-    fn high_level_solution_review_fixture_maps_non_approval_decisions() {
-        let cases = [
-            (
-                test_support::SolutionReviewDecisionFixture::RequestChanges {
-                    comments: Some("Add the missing boundary.".into()),
-                    requested_changes: vec!["Add the exact stale-review test.".into()],
-                },
-                ValidatedReviewStatus::ChangesRequested,
-                DeliveryStatus::Planning,
-            ),
-            (
-                test_support::SolutionReviewDecisionFixture::Reject { comments: None },
-                ValidatedReviewStatus::Rejected,
-                DeliveryStatus::Clarifying,
-            ),
-        ];
-        for (decision, expected_review, expected_delivery) in cases {
-            let (delivery, input) = planning_handoff_fixture(1_800_000_000_020);
-            let prepared = test_support::prepare_solution_review_fixture(
-                &delivery,
-                input,
-                semantic_review_fixture(Vec::new()),
-            )
-            .expect("prepared solution review");
-            let settled = test_support::settle_solution_review_fixture(
-                &prepared.transition().delivery,
-                "alice",
-                1_800_000_000_021,
-                decision,
-            )
-            .expect("settled solution review");
-            let current = resolve_current_solution_review(settled.transition().delivery())
-                .expect("current review")
-                .expect("settled review");
-            assert_eq!(current.review_status, expected_review);
-            assert_eq!(
-                settled.transition().delivery().snapshot().status,
-                expected_delivery
-            );
-        }
-    }
-
-    #[test]
-    fn high_level_solution_review_fixture_rejects_invalid_proposal_graphs() {
-        use test_support::InvalidTaskProposalFixture::{
-            DependencyCycle, DuplicateCriterionId, DuplicateTaskId, MissingDependency,
-        };
-
-        for invalid in [
-            DependencyCycle,
-            MissingDependency,
-            DuplicateTaskId,
-            DuplicateCriterionId,
-        ] {
-            let (delivery, input) = planning_handoff_fixture(1_800_000_000_020);
-            let proposals = test_support::invalid_task_proposals_fixture(&delivery, invalid);
-            let rejected = test_support::prepare_solution_review_fixture(
-                &delivery,
-                input,
-                semantic_review_fixture(proposals),
-            )
-            .expect_err("invalid proposal graph must not produce sealed review authority");
-            assert!(!rejected.message().is_empty());
-        }
+    fn historical_planning_stage_cannot_supply_missing_workrun_authority() {
+        let mut json: serde_json::Value =
+            serde_json::from_slice(include_bytes!("../../tests/fixtures/delivery-main.json"))
+                .expect("historical fixture");
+        json["sessionBindings"] = serde_json::json!([]);
+        json["workRunAggregate"]["runs"] = serde_json::json!([]);
+        let snapshot: crate::domain::DeliverySnapshot =
+            serde_json::from_value(json).expect("snapshot shape");
+        let missing = WorkRunId("wrn_00000000000000000000000001".into());
+        let error = current_planning_authority(&snapshot, &missing)
+            .expect_err("old planning stages must not substitute for a WorkRun");
+        assert_eq!(error.code(), SolutionReviewErrorCode::StaleAuthority);
     }
 }

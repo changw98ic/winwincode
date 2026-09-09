@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use winwincode_domain::{
     ExecutionJobId, ExecutionMessageId, ExecutionSequence, FencingToken, Instant, LeaseId,
-    RequestId, Sha256Digest, WorkerId, WorkerInstanceId, WorkerSessionId,
+    RequestId, Sha256Digest, WorkRun, WorkerId, WorkerInstanceId, WorkerSessionId,
 };
 
 use crate::{
@@ -375,6 +375,96 @@ pub struct ExecutionDispatchAuthority {
     worker_session_id: WorkerSessionId,
     dispatch_request_id: RequestId,
     accepted_at: Instant,
+}
+
+/// Proof that an accepted dispatch still matches the canonical queue Job payload.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExecutionDispatchWorkRunProof {
+    authority: ExecutionDispatchAuthority,
+    delivery_id: String,
+    work_run_id: String,
+    product_session_id: String,
+    payload: Vec<u8>,
+}
+
+impl ExecutionDispatchWorkRunProof {
+    /// Returns the validated execution profile from the private queued Job.
+    ///
+    /// The profile is read from the payload retained by the scheduler rather
+    /// than inferred from a public stage or resource name.
+    ///
+    /// # Errors
+    /// Rejects malformed payloads or a profile outside the canonical bounded
+    /// execution-profile shape.
+    pub fn execution_profile(&self) -> Result<String, StorageError> {
+        let value: serde_json::Value = serde_json::from_slice(&self.payload)
+            .map_err(|_| StorageError::invalid_input("queued Job payload is not JSON"))?;
+        let profile = value
+            .get("executionProfile")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| StorageError::invalid_input("queued Job has no execution profile"))?;
+        let valid = !profile.is_empty()
+            && profile.chars().count() <= 100
+            && profile
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-');
+        if !valid {
+            return Err(StorageError::invalid_input(
+                "queued Job execution profile is not canonical",
+            ));
+        }
+        Ok(profile.to_owned())
+    }
+
+    /// Checks the run against the accepted lease and its persisted queue scope.
+    ///
+    /// # Errors
+    /// Rejects a run or payload that differs from the accepted queue record.
+    pub fn verify_work_run(&self, run: &WorkRun, delivery_id: &str) -> Result<(), StorageError> {
+        let lease = self.authority.lease();
+        let value: serde_json::Value = serde_json::from_slice(&self.payload)
+            .map_err(|_| StorageError::invalid_input("queued Job payload is not JSON"))?;
+        let scope = value
+            .get("scope")
+            .and_then(serde_json::Value::as_object)
+            .ok_or_else(|| StorageError::invalid_input("queued Job has no canonical scope"))?;
+        let text = |name: &str| scope.get(name).and_then(serde_json::Value::as_str);
+        let number = |name: &str| scope.get(name).and_then(serde_json::Value::as_i64);
+        let valid = self.delivery_id == delivery_id
+            && self.work_run_id == run.id.0
+            && run.execution_job_id == lease.job_id
+            && u64::try_from(run.attempt).ok() == Some(lease.attempt)
+            && run.lease_id == lease.lease_id
+            && run.worker_id == lease.worker_id
+            && run.worker_instance_id == lease.worker_instance_id
+            && run.worker_session_id == *self.authority.worker_session_id()
+            && run.fencing_token == lease.fencing_token.0
+            && value.get("jobId").and_then(serde_json::Value::as_str)
+                == Some(lease.job_id.0.as_str())
+            && value
+                .get("payloadDigest")
+                .and_then(serde_json::Value::as_str)
+                == Some(lease.payload_digest.0.as_str())
+            && value.get("attempt").and_then(serde_json::Value::as_i64) == Some(run.attempt)
+            && text("kind") == Some("work-run")
+            && text("workRunId") == Some(run.id.0.as_str())
+            && text("workContractId") == Some(run.work_contract_id.0.as_str())
+            && text("workItemId") == Some(run.work_item_id.0.as_str())
+            && text("productSessionId") == Some(self.product_session_id.as_str())
+            && run
+                .product_session_id
+                .as_ref()
+                .is_some_and(|id| id.0 == self.product_session_id)
+            && number("workContractRevision") == Some(run.contract_revision.0)
+            && number("workItemRevision") == Some(run.work_item_revision.0)
+            && number("attempt") == Some(run.attempt);
+        if !valid {
+            return Err(StorageError::invalid_input(
+                "queued Job scope does not match WorkRun",
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl ExecutionDispatchAuthority {
@@ -1322,6 +1412,65 @@ impl<'storage> ExecutionRegistry<'storage> {
     pub fn load_worker(&self, worker_id: &WorkerId) -> Result<Option<WorkerRecord>, StorageError> {
         validate_id(&worker_id.0, "wrk_", "workerId")?;
         load_worker_in_transaction(self.storage.connection()?, worker_id)
+    }
+
+    /// Reads the queue Job and current accepted dispatch in one read transaction.
+    ///
+    /// # Errors
+    /// Rejects stale dispatch authority, a missing queue Job, or inconsistent scope.
+    pub fn load_dispatch_work_run_proof(
+        &self,
+        authority: &ExecutionDispatchAuthority,
+        checked_at: &Instant,
+    ) -> Result<ExecutionDispatchWorkRunProof, StorageError> {
+        validate_instant(checked_at, "checkedAt")?;
+        let lease = authority.lease();
+        if checked_at.0 < authority.accepted_at().0 || checked_at.0 >= lease.expires_at.0 {
+            return Err(StorageError::invalid_input(
+                "dispatch proof requested outside its accepted lease window",
+            ));
+        }
+        let transaction = self
+            .storage
+            .connection()?
+            .unchecked_transaction()
+            .map_err(sql_error)?;
+        if load_dispatch_authority_in_transaction(&transaction, &lease.job_id)?.as_ref()
+            != Some(authority)
+        {
+            return Err(StorageError::invalid_input(
+                "dispatch authority is no longer current",
+            ));
+        }
+        let record = transaction.query_row(
+            "SELECT payload_digest, dispatch_payload, attempt, delivery_id, work_run_id, product_session_id
+             FROM scheduler_execution_jobs WHERE job_id = ?1",
+            params![lease.job_id.0],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?,
+                row.get::<_, i64>(2)?, row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?, row.get::<_, String>(5)?)),
+        ).optional().map_err(sql_error)?
+            .ok_or_else(|| StorageError::invalid_input("accepted dispatch Job is missing"))?;
+        let (payload_digest, payload, attempt, delivery_id, work_run_id, product_session_id) =
+            record;
+        if payload_digest != lease.payload_digest.0
+            || u64::try_from(attempt).ok() != Some(lease.attempt)
+        {
+            return Err(StorageError::invalid_input(
+                "accepted dispatch does not match queued Job",
+            ));
+        }
+        let proof = ExecutionDispatchWorkRunProof {
+            authority: authority.clone(),
+            delivery_id: delivery_id
+                .ok_or_else(|| StorageError::invalid_input("Job has no Delivery scope"))?,
+            work_run_id: work_run_id
+                .ok_or_else(|| StorageError::invalid_input("Job has no WorkRun scope"))?,
+            product_session_id,
+            payload,
+        };
+        transaction.commit().map_err(sql_error)?;
+        Ok(proof)
     }
 
     /// Loads the accepted dispatch authority for one exact current Job lease.
@@ -3639,4 +3788,57 @@ fn less_decimal(left: &str, right: &str) -> bool {
 #[allow(clippy::needless_pass_by_value)]
 fn sql_error(error: rusqlite::Error) -> StorageError {
     StorageError::adapter(format!("execution registry SQLite error: {error}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn proof(payload: &str) -> ExecutionDispatchWorkRunProof {
+        ExecutionDispatchWorkRunProof {
+            authority: ExecutionDispatchAuthority {
+                lease: ExecutionLeaseRecord {
+                    job_id: ExecutionJobId("job_00000000000000000000000001".into()),
+                    lease_id: LeaseId("lse_00000000000000000000000001".into()),
+                    payload_digest: Sha256Digest(
+                        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                            .into(),
+                    ),
+                    worker_id: WorkerId("wrk_00000000000000000000000001".into()),
+                    worker_instance_id: WorkerInstanceId("wki_00000000000000000000000001".into()),
+                    attempt: 1,
+                    fencing_token: FencingToken("1".into()),
+                    issued_at: Instant("2027-01-01T00:00:00.000Z".into()),
+                    expires_at: Instant("2027-01-01T01:00:00.000Z".into()),
+                },
+                worker_session_id: WorkerSessionId("wsn_00000000000000000000000001".into()),
+                dispatch_request_id: RequestId("req_00000000000000000000000001".into()),
+                accepted_at: Instant("2027-01-01T00:00:00.000Z".into()),
+            },
+            delivery_id: "dlv_00000000000000000000000001".into(),
+            work_run_id: "wrn_00000000000000000000000001".into(),
+            product_session_id: "psn_00000000000000000000000001".into(),
+            payload: payload.as_bytes().to_vec(),
+        }
+    }
+
+    #[test]
+    fn execution_profile_reads_and_validates_the_private_payload_field() {
+        assert_eq!(
+            proof(r#"{"executionProfile":"executor"}"#)
+                .execution_profile()
+                .expect("profile"),
+            "executor"
+        );
+        assert!(
+            proof(r#"{"executionProfile":"Executor"}"#)
+                .execution_profile()
+                .is_err()
+        );
+        assert!(
+            proof(r#"{"executionProfile":null}"#)
+                .execution_profile()
+                .is_err()
+        );
+    }
 }

@@ -28,8 +28,8 @@ use winwincode_control_plane::{
     LocalSecretStoreAdapter, ModelAdmissionLimits, ModelAdmissionPolicyLayer,
     ModelRequestPoolConfig, ModelRoutePolicyDecision, ProductSessionExecutionApplication,
     ProductSessionExecutionConfig, ProviderAdmissionReservationConfig, SecretStorePort,
-    StandaloneModelExecutionApplication, StandaloneModelExecutionConfig, StandaloneProviderConfig,
-    TrustedProtocolParty, local_loopback_retry_policy,
+    StandaloneModelExecutionApplication, StandaloneModelExecutionConfig, TrustedProtocolParty,
+    local_loopback_retry_policy,
 };
 use winwincode_domain::{
     CredentialReferenceId, OrganizationId, ProjectId, RepositoryId, RepositoryScope,
@@ -424,7 +424,7 @@ async fn run_composed_server(
         worker_id.clone(),
         worker_instance_id,
         scheduler_generation,
-        Duration::from_secs(30),
+        optional_duration_seconds("WWC_SERVER_EXECUTION_LEASE_SECONDS", 30)?,
     )?
     .with_admission_identity(
         owner.as_ref().map(|owner| owner.user_id.clone()),
@@ -723,10 +723,8 @@ fn open_local_model_execution(
         StandaloneModelExecutionConfig {
             data_directory: config.data_directory().to_path_buf(),
             secret_directory: PathBuf::from(required_environment("SECRET_DIRECTORY")?),
-            providers: vec![StandaloneProviderConfig::Loopback {
-                provider_id: model_route.provider.clone(),
-            }],
-            admission: ProviderAdmissionReservationConfig::try_new(100, 10)?,
+            providers: vec![model_route.provider_config()?],
+            admission: ProviderAdmissionReservationConfig::try_new(32_000, 10)?,
             pool,
             policy: Box::new(policy),
             retry_policy: Box::new(retry_policy),

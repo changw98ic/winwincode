@@ -54,7 +54,7 @@ export type UsageHealthStatus =
   | 'error'
   | 'closed'
 
-export type UsageHealthDimension = 'delivery' | 'stage-run' | 'role' | 'model' | 'provider'
+export type UsageHealthDimension = 'delivery' | 'work-run' | 'role' | 'model' | 'provider'
 
 /**
  * Where a token total comes from. `unattributed` rows must present routing facts
@@ -68,7 +68,7 @@ export interface UsageMetricValue {
 }
 
 export interface UsageAggregate {
-  readonly dimension: 'delivery' | 'stage-run' | 'role'
+  readonly dimension: 'delivery' | 'work-run' | 'role'
   readonly attribution: 'session'
   readonly key: string
   readonly label: string
@@ -82,9 +82,9 @@ export interface UsageAggregate {
   readonly metrics: readonly UsageMetricValue[]
   readonly unknownMetrics: readonly string[]
   readonly tokensKnown: boolean
-  /** Role rows share one StageRun total across every Role that ran inside it. */
+  /** Role rows share one WorkRun total across every Role that ran inside it. */
   readonly overlaps: boolean
-  /** The runtime projection publishes no elapsed time per StageRun or Role. */
+  /** The runtime projection publishes no elapsed time per WorkRun or Role. */
   readonly durationMillis: null
   readonly durationKnown: false
   readonly asOf: Instant | null
@@ -169,7 +169,7 @@ export interface CredentialHealthRow {
 
 export interface UsageHealthErrorRow {
   readonly key: string
-  readonly origin: 'stage-run' | 'delivery'
+  readonly origin: 'work-run' | 'delivery'
   readonly label: string
   readonly failureCount: number
   readonly attentionCount: number
@@ -206,7 +206,7 @@ export interface UsageHealthViewModelState {
   readonly timeWindow: UsageHealthTimeWindow | null
   readonly truncated: boolean
   readonly byDelivery: readonly UsageAggregate[]
-  readonly byStageRun: readonly UsageAggregate[]
+  readonly byWorkRun: readonly UsageAggregate[]
   readonly byRole: readonly UsageAggregate[]
   readonly byModel: readonly ModelUsageRow[]
   readonly byProvider: readonly ProviderHealthRow[]
@@ -243,7 +243,7 @@ export interface UsageHealthViewModel {
 interface SessionObservation {
   readonly productSessionId: ProductSessionId
   readonly deliveryId: string | null
-  readonly stageRunId: string | null
+  readonly workRunId: string | null
   readonly roles: readonly (string | null)[]
   readonly metrics: readonly UsageMetricValue[]
   readonly failureCount: number
@@ -259,7 +259,7 @@ function emptyState(): UsageHealthViewModelState {
     timeWindow: null,
     truncated: false,
     byDelivery: Object.freeze([]),
-    byStageRun: Object.freeze([]),
+    byWorkRun: Object.freeze([]),
     byRole: Object.freeze([]),
     byModel: Object.freeze([]),
     byProvider: Object.freeze([]),
@@ -381,7 +381,7 @@ function sortedMetrics(metrics: ReadonlyMap<string, number>): readonly UsageMetr
 }
 
 function aggregate(input: {
-  readonly dimension: 'delivery' | 'stage-run' | 'role'
+  readonly dimension: 'delivery' | 'work-run' | 'role'
   readonly key: string
   readonly label: string
   readonly detail: string | null
@@ -499,7 +499,7 @@ function buildState(input: {
   )
 
   function groupBy(
-    dimension: 'delivery' | 'stage-run' | 'role',
+    dimension: 'delivery' | 'work-run' | 'role',
     keyOf: (observation: SessionObservation) => readonly (readonly [string, string])[],
     overlaps: boolean,
   ): readonly UsageAggregate[] {
@@ -540,11 +540,11 @@ function buildState(input: {
     ] as const],
     false,
   )
-  const byStageRun = groupBy(
-    'stage-run',
+  const byWorkRun = groupBy(
+    'work-run',
     observation => [[
-      observation.stageRunId ?? `${observation.productSessionId}/unbound`,
-      observation.stageRunId ?? 'StageRun not reported',
+      observation.workRunId ?? `${observation.productSessionId}/unbound`,
+      observation.workRunId ?? 'WorkRun not reported',
     ] as const],
     false,
   )
@@ -661,9 +661,9 @@ function buildState(input: {
     ...input.sessions
       .filter(observation => observation.failureCount > 0)
       .map(observation => Object.freeze({
-        key: `${observation.deliveryId ?? 'unassigned'}/${observation.stageRunId ?? 'unbound'}`,
-        origin: 'stage-run' as const,
-        label: observation.stageRunId ?? observation.productSessionId,
+        key: `${observation.deliveryId ?? 'unassigned'}/${observation.workRunId ?? 'unbound'}`,
+        origin: 'work-run' as const,
+        label: observation.workRunId ?? observation.productSessionId,
         failureCount: observation.failureCount,
         attentionCount: 0,
         recovered: observation.recovered,
@@ -703,7 +703,7 @@ function buildState(input: {
     timeWindow,
     truncated: input.observedSessions < input.availableSessions,
     byDelivery,
-    byStageRun,
+    byWorkRun,
     byRole,
     byModel,
     byProvider,
@@ -846,7 +846,7 @@ export function createUsageHealthViewModel(
     return Object.freeze(snapshot.sessions.map(session => Object.freeze({
       productSessionId: snapshot.productSessionId,
       deliveryId: snapshot.deliveryId,
-      stageRunId: session.stageRunId,
+      workRunId: session.workRunId,
       roles: Object.freeze(session.agents.map(agent => agent.role)),
       metrics: metricsOf(session),
       failureCount: session.recovery.failureCount,

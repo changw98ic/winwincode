@@ -17,7 +17,7 @@ use winwincode_codex::model_port_client::{
 use winwincode_domain::{
     CodexThreadId, ExecutionMessageId, ExecutionSequence, FencingToken, Instant, LeaseId,
     ModelExchangeId, ProductSessionId, RequestId, SchemaVersion, SessionIdentity, Sha256Digest,
-    StageRunId, WorkerId, WorkerInstanceId, WorkerSessionId,
+    WorkRunId, WorkerId, WorkerInstanceId, WorkerSessionId,
 };
 use winwincode_execution_port::generated::{
     EncodedPayload, ExecutionLeaseStamp, ExecutionPortError, ExecutionPortErrorCode,
@@ -315,7 +315,7 @@ fn digest(byte: char) -> Sha256Digest {
     Sha256Digest(format!("sha256:{}", byte.to_string().repeat(64)))
 }
 
-fn authority(stage: Option<u64>) -> ModelLeaseAuthority {
+fn authority(work_run: Option<u64>) -> ModelLeaseAuthority {
     let worker_session_id = WorkerSessionId(id("wsn", 1));
     ModelLeaseAuthority {
         lease: ExecutionLeaseStamp {
@@ -332,7 +332,7 @@ fn authority(stage: Option<u64>) -> ModelLeaseAuthority {
         session_identity: SessionIdentity {
             codex_thread_id: CodexThreadId(id("cdx", 1)),
             product_session_id: ProductSessionId(id("psn", 1)),
-            stage_run_id: stage.map(|value| StageRunId(id("run", value))),
+            work_run_id: work_run.map(|value| WorkRunId(id("wrn", value))),
             worker_session_id,
         },
     }
@@ -736,7 +736,7 @@ async fn namespaced_tool_payload_is_exact_across_restart_replay_and_cancellation
 }
 
 #[tokio::test]
-async fn old_lease_and_foreign_stage_streams_are_rejected_before_codex_or_ack() {
+async fn old_lease_and_foreign_work_run_streams_are_rejected_before_codex_or_ack() {
     let authority = authority(Some(1));
     let current = CurrentAuthority::new(authority.clone());
     let port = RecordingPort::default();
@@ -747,15 +747,26 @@ async fn old_lease_and_foreign_stage_streams_are_rejected_before_codex_or_ack() 
     client
         .open(open_command(&authority, 3, 30, 'a'))
         .await
-        .expect("open DeliveryStage stream");
+        .expect("open WorkRun stream");
 
-    let mut foreign_stage = chunk(&authority, 3, 1, 'b', false, None);
-    foreign_stage.session_identity.stage_run_id = Some(StageRunId(id("run", 2)));
+    let mut foreign_work_run = chunk(&authority, 3, 1, 'b', false, None);
+    foreign_work_run.session_identity.work_run_id = Some(WorkRunId(id("wrn", 2)));
     assert_eq!(
         client
-            .accept_chunk(&foreign_stage, metadata(31, 12))
+            .accept_chunk(&foreign_work_run, metadata(31, 12))
             .await
-            .expect_err("foreign StageRun")
+            .expect_err("foreign WorkRun")
+            .code(),
+        ModelPortClientErrorCode::StaleAuthority
+    );
+
+    let mut legacy_stage_run = chunk(&authority, 3, 1, 'c', false, None);
+    legacy_stage_run.session_identity.work_run_id = Some(WorkRunId(id("run", 3)));
+    assert_eq!(
+        client
+            .accept_chunk(&legacy_stage_run, metadata(31, 13))
+            .await
+            .expect_err("retired StageRun identity")
             .code(),
         ModelPortClientErrorCode::StaleAuthority
     );
@@ -792,6 +803,174 @@ async fn old_lease_and_foreign_stage_streams_are_rejected_before_codex_or_ack() 
     );
     assert_eq!(sink.released_count(), 1);
     assert_eq!(model_acks(&port).len(), 0);
+}
+
+async fn assert_restarted_terminal_stream_stays_isolated(
+    store: MemoryCursorStore,
+    first_authority: ModelLeaseAuthority,
+    first_terminal: ModelChunkMessage,
+    second_terminal: ModelChunkMessage,
+) {
+    let restart_sink = RecordingSink::default();
+    let mut restarted = WorkerModelPortClient::new(
+        RecordingPort::default(),
+        store,
+        CurrentAuthority::new(first_authority.clone()),
+        restart_sink.clone(),
+    );
+    restarted
+        .open(open_command(&first_authority, 20, 209, 'a'))
+        .await
+        .expect("reopen first WorkRun terminal stream");
+    assert!(matches!(
+        restarted
+            .accept_chunk(&first_terminal, metadata(210, 18))
+            .await
+            .expect("replay first terminal"),
+        ModelChunkDisposition::Duplicate {
+            confirmed_sequence: 1
+        }
+    ));
+    assert_eq!(restart_sink.sequences(), vec![1]);
+    assert_eq!(
+        restarted
+            .accept_chunk(&second_terminal, metadata(211, 19))
+            .await
+            .expect_err("replayed terminal from another WorkRun")
+            .code(),
+        ModelPortClientErrorCode::StaleAuthority
+    );
+    assert_eq!(restart_sink.sequences(), vec![1]);
+}
+
+#[tokio::test]
+async fn terminal_work_run_streams_are_isolated_before_sink_delivery() {
+    let first_authority = authority(Some(11));
+    let second_authority = authority(Some(12));
+    let first_port = RecordingPort::default();
+    let second_port = RecordingPort::default();
+    let first_sink = RecordingSink::default();
+    let second_sink = RecordingSink::default();
+    let store = MemoryCursorStore::default();
+
+    let mut first = WorkerModelPortClient::new(
+        first_port.clone(),
+        store.clone(),
+        CurrentAuthority::new(first_authority.clone()),
+        first_sink.clone(),
+    );
+    first
+        .open(open_command(&first_authority, 20, 200, 'a'))
+        .await
+        .expect("open first WorkRun terminal stream");
+
+    let mut second = WorkerModelPortClient::new(
+        second_port.clone(),
+        store.clone(),
+        CurrentAuthority::new(second_authority.clone()),
+        second_sink.clone(),
+    );
+    second
+        .open(open_command(&second_authority, 20, 202, 'a'))
+        .await
+        .expect("open second WorkRun terminal stream");
+
+    assert_eq!(
+        second
+            .accept_chunk(
+                &chunk(&first_authority, 20, 1, 'b', true, None),
+                metadata(203, 13),
+            )
+            .await
+            .expect_err("terminal frame from another WorkRun")
+            .code(),
+        ModelPortClientErrorCode::StaleAuthority
+    );
+    assert_eq!(
+        first
+            .accept_chunk(
+                &chunk(&second_authority, 20, 1, 'c', true, None),
+                metadata(204, 13),
+            )
+            .await
+            .expect_err("terminal frame from the other WorkRun")
+            .code(),
+        ModelPortClientErrorCode::StaleAuthority
+    );
+    assert!(first_sink.sequences().is_empty());
+    assert!(second_sink.sequences().is_empty());
+    assert!(model_acks(&first_port).is_empty());
+    assert!(model_acks(&second_port).is_empty());
+
+    let first_terminal = chunk(&first_authority, 20, 1, 'b', true, None);
+    first
+        .accept_chunk(&first_terminal, metadata(205, 14))
+        .await
+        .expect("complete first WorkRun stream");
+    let second_terminal = chunk(&second_authority, 20, 1, 'd', true, None);
+    second
+        .accept_chunk(&second_terminal, metadata(206, 15))
+        .await
+        .expect("complete second WorkRun stream");
+    assert_eq!(first_sink.sequences(), vec![1]);
+    assert_eq!(second_sink.sequences(), vec![1]);
+
+    assert!(matches!(
+        first
+            .accept_chunk(&first_terminal, metadata(207, 16))
+            .await
+            .expect("duplicate first terminal"),
+        ModelChunkDisposition::Duplicate {
+            confirmed_sequence: 1
+        }
+    ));
+    assert!(matches!(
+        second
+            .accept_chunk(&second_terminal, metadata(208, 17))
+            .await
+            .expect("duplicate second terminal"),
+        ModelChunkDisposition::Duplicate {
+            confirmed_sequence: 1
+        }
+    ));
+    assert_eq!(first_sink.sequences(), vec![1]);
+    assert_eq!(second_sink.sequences(), vec![1]);
+
+    assert_restarted_terminal_stream_stays_isolated(
+        store,
+        first_authority,
+        first_terminal,
+        second_terminal,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn wrong_work_run_terminal_frame_is_rejected_before_sink_delivery() {
+    let authority = authority(Some(21));
+    let current = CurrentAuthority::new(authority.clone());
+    let port = RecordingPort::default();
+    let store = MemoryCursorStore::default();
+    let sink = RecordingSink::default();
+    let mut client = WorkerModelPortClient::new(port.clone(), store.clone(), current, sink.clone());
+    client
+        .open(open_command(&authority, 21, 210, 'a'))
+        .await
+        .expect("open WorkRun terminal stream");
+
+    let mut wrong_run = chunk(&authority, 21, 1, 'b', true, None);
+    wrong_run.session_identity.work_run_id = Some(WorkRunId(id("wrn", 22)));
+    assert_eq!(
+        client
+            .accept_chunk(&wrong_run, metadata(211, 12))
+            .await
+            .expect_err("wrong WorkRun terminal frame")
+            .code(),
+        ModelPortClientErrorCode::StaleAuthority
+    );
+    assert!(sink.sequences().is_empty());
+    assert!(store.is_empty());
+    assert!(model_acks(&port).is_empty());
 }
 
 #[tokio::test]

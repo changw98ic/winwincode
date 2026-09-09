@@ -4,6 +4,8 @@ import { mountStrongFlowDiagramGraph } from '/module/strongflow-diagram-graph.js
 const root = document.querySelector('[data-winwincode-client-root]')
 const deliveryId = 'dlv_00000000000000000000000001'
 const stageRunId = 'run_00000000000000000000000001'
+const workRunId = 'wrn_00000000000000000000000001'
+const workItemId = 'wit_00000000000000000000000001'
 const reviewSetSha256 = `sha256:${'a'.repeat(64)}`
 
 function solutionNodes() {
@@ -140,11 +142,13 @@ const projection = {
   },
   stage: { id: stageRunId },
   runtime: {
-    stageRunId,
+    workRunId,
     sessions: [{
       sessionBindingId: 'bind:1',
       executionJobId: 'job:1',
-      deliveryTaskId: 'task:browser',
+      productSessionId: 'psn_00000000000000000000000001',
+      workRunId,
+      workItemId,
       attempt: 1,
       asOfSequence: 1,
       agents: [{

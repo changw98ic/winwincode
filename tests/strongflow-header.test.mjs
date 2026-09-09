@@ -47,13 +47,13 @@ const { mountStrongFlowPage, strongFlowPagePresentation } = pageModule
 
 const deliveryId = 'dlv_00000000000000000000000001'
 const productSessionId = 'psn_00000000000000000000000001'
-const stageRunId = 'run_00000000000000000000000001'
+const stageRunId = 'wrn_00000000000000000000000001'
 const workerId = 'wrk_00000000000000000000000001'
 const workerSessionId = 'wss_00000000000000000000000001'
 const codexThreadId = 'cdx_00000000000000000000000001'
 const executionJobId = 'job_00000000000000000000000001'
 const leaseId = 'lease_00000000000000000000000001'
-const olderRunId = 'run_00000000000000000000000002'
+const olderRunId = 'wrn_00000000000000000000000002'
 
 function attachedBinding() {
   return {
@@ -68,7 +68,7 @@ function attachedBinding() {
     sessionIdentity: {
       codexThreadId,
       productSessionId,
-      stageRunId,
+      workRunId: stageRunId,
       workerSessionId,
     },
     sourceIdentity: {
@@ -78,7 +78,7 @@ function attachedBinding() {
       workerInstanceId: 'wri_00000000000000000000000001',
       workerSessionId,
     },
-    stageRunId,
+    workRunId: stageRunId,
     workerId,
     workerSessionId,
   }
@@ -128,7 +128,7 @@ function candidate() {
     diffSha256: `sha256:${'3'.repeat(64)}`,
     frozenAt: '2026-09-03T01:00:04.000Z',
     producerSessionBindingId: 'bind_ui306_attached',
-    producerStageRunId: stageRunId,
+    producerWorkRunId: stageRunId,
   }
 }
 
@@ -173,7 +173,53 @@ function runtime() {
     rebuiltAt: '2026-09-03T01:00:05.000Z',
     revision: 8,
     sessions: [],
-    stageRunId,
+    workRunId: stageRunId,
+  }
+}
+
+function workRunAggregate(overrides = {}) {
+  const workItemId = 'wit_00000000000000000000000001'
+  return {
+    items: [{ id: workItemId }],
+    runs: [{
+      id: olderRunId,
+      workItemId,
+      attempt: 1,
+      revision: 3,
+      state: 'failed',
+      workContractId: 'wct_00000000000000000000000001',
+      contractRevision: 1,
+      workItemRevision: 1,
+      executionJobId,
+      workerId,
+      workerInstanceId: 'wki_00000000000000000000000001',
+      workerSessionId,
+      leaseId,
+      fencingToken: '1',
+      productSessionId,
+      codexThreadId,
+      schemaVersion: 'winwincode/v1',
+    }, {
+      id: stageRunId,
+      workItemId,
+      attempt: 2,
+      revision: 4,
+      state: 'running',
+      workContractId: 'wct_00000000000000000000000001',
+      contractRevision: 1,
+      workItemRevision: 1,
+      executionJobId,
+      workerId,
+      workerInstanceId: 'wki_00000000000000000000000001',
+      workerSessionId,
+      leaseId,
+      fencingToken: '1',
+      productSessionId,
+      codexThreadId,
+      schemaVersion: 'winwincode/v1',
+      ...overrides,
+    }],
+    readCursor: {},
   }
 }
 
@@ -192,6 +238,7 @@ function projection(overrides = {}) {
     },
     publication: base.publication,
     runtime: runtime(),
+    workRunAggregate: workRunAggregate(),
     solutionReview: base.solutionReview,
     diagramExecution: null,
     stage: base.stages[0],
@@ -409,12 +456,12 @@ function mountedPageModel(initial) {
     async resolveAttention() {},
     async submitVerdict() {},
     async advanceDelivery() {},
-    async loadStageRunRuntime() { return null },
+    async loadWorkRunRuntime() { return null },
     async loadCandidateFiles() { this.calls.push(['loadCandidateFiles']) },
     async loadMoreCandidateFiles() { this.calls.push(['loadMoreCandidateFiles']) },
     async selectCandidateFile() { this.calls.push(['selectCandidateFile']) },
     async loadMoreCandidateDiff() { this.calls.push(['loadMoreCandidateDiff']) },
-    async loadStageRunCandidates() { return [] },
+    async loadWorkRunCandidates() { return [] },
     async loadCandidateHistoricalReview() { return null },
     cancelPending() {},
     reconnect() {},
@@ -473,7 +520,7 @@ test('each Delivery situation answers with a distinct human status, reason, and 
     delivery: delivery({
       stages: [stage({ status: 'failed', finishedAt: '2026-09-03T01:05:00.000Z' })],
     }),
-    stage: stage({ status: 'failed', finishedAt: '2026-09-03T01:05:00.000Z' }),
+    workRunAggregate: workRunAggregate({ state: 'failed' }),
   }))
   const completed = strongFlowNextStep(projection({
     delivery: delivery({
@@ -547,9 +594,9 @@ test('blocked reasons and next steps name the exact blocking fact instead of an 
 
   const failedRun = strongFlowNextStep(projection({
     delivery: delivery({ stages: [stage({ status: 'failed' })] }),
-    stage: stage({ status: 'failed' }),
+    workRunAggregate: workRunAggregate({ state: 'failed' }),
   }))
-  assert.match(failedRun.reason, /implementer/u)
+  assert.match(failedRun.reason, /execution failed/u)
   assert.match(failedRun.nextStep, /failure/u)
 
   const failedVerdict = strongFlowNextStep(projection({
@@ -582,7 +629,7 @@ test('blocked reasons and next steps name the exact blocking fact instead of an 
   assert.match(clarifying.nextStep, /answer|question|reply/iu)
 })
 
-test('the current run summary comes only from the canonical active StageRun', () => {
+test('the current run summary comes only from the canonical active WorkRun', () => {
   const current = projection()
   current.delivery.stages = [
     stage({
@@ -595,20 +642,20 @@ test('the current run summary comes only from the canonical active StageRun', ()
   ]
   const next = strongFlowNextStep(current)
   assert.equal(next.currentRun.attempt, 2)
-  assert.equal(next.currentRun.role, 'implementer')
+  assert.equal(next.currentRun.role, null)
   assert.equal(next.currentRun.status, 'running')
-  assert.equal(next.currentRun.phase, 'executing')
+  assert.equal(next.currentRun.phase, null)
   const identity = strongFlowExecutionIdentity(current, 'subscribed')
-  assert.equal(identity.stageRunId, stageRunId)
+  assert.equal(identity.workRunId, stageRunId)
   assert.equal(identity.workerId, workerId)
   assert.equal(identity.attempt, 2)
-  assert.notEqual(identity.stageRunId, olderRunId)
+  assert.notEqual(identity.workRunId, olderRunId)
 })
 
 test('execution identity distinguishes every identity kind from exact binding facts', () => {
   const rows = strongFlowIdentityRows(strongFlowExecutionIdentity(projection(), 'subscribed'))
   assert.equal(identityValue(rows, 'ProductSession'), productSessionId)
-  assert.equal(identityValue(rows, 'StageRun'), stageRunId)
+  assert.equal(identityValue(rows, 'WorkRun'), stageRunId)
   assert.equal(identityValue(rows, 'Attempt'), '2')
   assert.equal(identityValue(rows, 'ExecutionJob'), executionJobId)
   assert.equal(identityValue(rows, 'Worker'), workerId)
@@ -623,40 +670,28 @@ test('execution identity distinguishes every identity kind from exact binding fa
   assert.equal(raw.leaseHeld, true)
 })
 
-test('absent binding facts stay explicitly unreported instead of guessed', () => {
+test('thread attachment and historical human records never invent execution facts', () => {
   const detached = projection({
-    stage: stage({
-      attempt: 1,
-      sessionBinding: unattachedBinding(),
-      status: 'waiting',
-    }),
+    workRunAggregate: workRunAggregate({ state: 'leased', codexThreadId: null }),
   })
   const rows = strongFlowIdentityRows(strongFlowExecutionIdentity(detached, 'reconnecting'))
   assert.equal(identityValue(rows, 'ProductSession'), productSessionId)
-  assert.equal(identityValue(rows, 'Worker'), STRONGFLOW_IDENTITY_NOT_REPORTED)
-  assert.equal(identityValue(rows, 'WorkerSession'), STRONGFLOW_IDENTITY_NOT_REPORTED)
+  assert.equal(identityValue(rows, 'Worker'), workerId)
+  assert.equal(identityValue(rows, 'WorkerSession'), workerSessionId)
   assert.equal(identityValue(rows, 'CodexThread'), STRONGFLOW_IDENTITY_NOT_REPORTED)
-  assert.equal(identityValue(rows, 'Lease'), STRONGFLOW_IDENTITY_NOT_REPORTED)
+  assert.equal(identityValue(rows, 'Lease'), leaseId)
   assert.equal(identityValue(rows, 'Events connection'), 'Reconnecting…')
-  const raw = strongFlowExecutionIdentity(detached, 'reconnecting')
-  assert.equal(raw.leaseHeld, false)
-  assert.equal(raw.modelRoute, null)
+  assert.equal(strongFlowExecutionIdentity(detached, 'reconnecting').leaseHeld, true)
 
   const human = projection({
-    stage: stage({
-      actorType: 'human',
-      attempt: 1,
-      id: olderRunId,
-      role: 'reviewer',
-      sessionBinding: null,
-      stage: 'plan-review',
-      status: 'waiting',
-    }),
+    delivery: delivery({ stages: [stage({ actorType: 'human', sessionBinding: null, id: olderRunId })] }),
   })
   const humanRows = strongFlowIdentityRows(strongFlowExecutionIdentity(human, 'subscribed'))
-  assert.equal(identityValue(humanRows, 'ProductSession'), STRONGFLOW_IDENTITY_NOT_REPORTED)
-  assert.equal(identityValue(humanRows, 'StageRun'), olderRunId)
-  assert.equal(identityValue(humanRows, 'Worker'), STRONGFLOW_IDENTITY_NOT_REPORTED)
+  assert.equal(identityValue(humanRows, 'ProductSession'), productSessionId)
+  assert.equal(identityValue(humanRows, 'WorkRun'), stageRunId)
+  assert.equal(identityValue(humanRows, 'Worker'), workerId)
+  const settled = projection({ workRunAggregate: workRunAggregate({ state: 'settled' }) })
+  assert.equal(strongFlowExecutionIdentity(settled, 'subscribed').leaseHeld, false)
 
   const noCandidate = projection({
     delivery: delivery({ currentCandidate: null }),
@@ -689,7 +724,7 @@ test('the header answers with human text first and keeps technical identity coll
   assert.equal(status.getAttribute('role'), 'status')
   assert.equal(status.getAttribute('aria-live'), 'polite')
   assert.match(status.textContent, /In progress/u)
-  assert.match(reason.textContent, /implementer/u)
+  assert.equal(reason.hidden, true, 'a missing execution profile is not invented from historical stages')
   assert.match(next.textContent, /Next step:/u)
   assert.doesNotMatch(status.textContent, /dlv_|psn_|run_|cdx_|wrk_|wss_|lease_/u)
   assert.doesNotMatch(next.textContent, /dlv_|psn_|run_|cdx_/u)
@@ -709,7 +744,7 @@ test('the header answers with human text first and keeps technical identity coll
     'ProductSession',
     'WorkerSession',
     'CodexThread',
-    'StageRun',
+    'WorkRun',
     'Attempt',
     'Worker',
     'Model route',
@@ -777,12 +812,12 @@ test('the mounted page keeps the human header above the workspace and presentati
     async resolveAttention() {},
     async submitVerdict() {},
     async advanceDelivery() {},
-    async loadStageRunRuntime() { return null },
+    async loadWorkRunRuntime() { return null },
     async loadCandidateFiles() {},
     async loadMoreCandidateFiles() {},
     async selectCandidateFile() {},
     async loadMoreCandidateDiff() {},
-    async loadStageRunCandidates() { return [] },
+    async loadWorkRunCandidates() { return [] },
     async loadCandidateHistoricalReview() { return null },
     cancelPending() {},
     reconnect() {},
@@ -845,21 +880,21 @@ test('an open historical review is not mistaken for the unmarked header identity
   const model = mountedPageModel(state({ projection: historical }))
   const mounted = mountStrongFlowPage({ root: rootElement, model, deliveryList: fakeDeliveryList([]) })
   const historicalButton = findAllByClass(rootElement, 'wwc-strongflow-run-button')
-    .find(node => node.dataset.stageRunId === olderRunId)
+    .find(node => node.dataset.workRunId === olderRunId)
   assert.notEqual(historicalButton, undefined)
   historicalButton.emit('click')
   model.publish(state({ projection: historical }))
   const header = findByClass(rootElement, 'wwc-strongflow-header')
   const identityList = findByClass(header, 'wwc-strongflow-identity-list')
   const stageRunRow = identityList.children.find(
-    row => row.children[0]?.textContent === 'StageRun',
+    row => row.children[0]?.textContent === 'WorkRun',
   )
   const marksCurrent = /current/iu.test(textOf(header))
   const showsReviewedRun = stageRunRow?.children[1]?.textContent === olderRunId
   assert.ok(
     marksCurrent || showsReviewedRun,
     'the header identity card reports the current run without any visible current marker '
-      + 'while a historical StageRun review is open',
+      + 'while a historical WorkRun review is open',
   )
   mounted.close()
 })

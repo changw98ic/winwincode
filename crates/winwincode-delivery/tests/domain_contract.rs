@@ -150,7 +150,16 @@ fn github_issue_identity_is_not_a_delivery_id() {
 
 #[test]
 fn delivery_spec_requires_required_acceptance_criterion() {
-    let fixture = include_bytes!("fixtures/delivery-main-no-required.json");
-    let error = Delivery::decode_json(fixture).expect_err("required criterion must be enforced");
+    let mut fixture: serde_json::Value =
+        serde_json::from_slice(include_bytes!("fixtures/delivery-main.json"))
+            .expect("canonical fixture");
+    for criterion in fixture["spec"]["acceptanceCriteria"]
+        .as_array_mut()
+        .expect("criteria")
+    {
+        criterion["required"] = false.into();
+    }
+    let error = Delivery::decode_json(&serde_json::to_vec(&fixture).expect("fixture bytes"))
+        .expect_err("required criterion must be enforced");
     assert_eq!(error.code(), DeliveryValidationErrorCode::InvalidValue);
 }

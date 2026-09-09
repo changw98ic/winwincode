@@ -26,7 +26,7 @@ import type {
   RepositoryScope,
   RequestId,
   SessionListResultResponse,
-  StageRunId,
+  WorkRunId,
 } from './generated/contracts.js'
 import {
   ControlPlaneWebSocketEventType,
@@ -79,7 +79,7 @@ export interface AttentionCenterItem {
   readonly expiresAt: Instant | null
   readonly productSessionId: ProductSessionId | null
   readonly sessionTitle: string | null
-  readonly stageRunId: StageRunId | null
+  readonly workRunId: WorkRunId | null
   readonly executionJobId: string | null
   readonly deliveryId: DeliveryId | null
   readonly deliveryTitle: string | null
@@ -96,7 +96,7 @@ export interface AttentionCenterOrigin {
   readonly deliveryId: DeliveryId
   readonly deliveryTitle: string
   readonly deliveryRevision: number
-  readonly activeStageRunId: StageRunId | null
+  readonly activeWorkRunId: WorkRunId | null
 }
 
 export interface AttentionCenterViewModelState {
@@ -284,7 +284,7 @@ function inputItem(
     expiresAt: projection.expiresAt,
     productSessionId: source.session,
     sessionTitle: source.title,
-    stageRunId: projection.binding.sessionIdentity.stageRunId ?? null,
+    workRunId: projection.binding.sessionIdentity.workRunId ?? null,
     executionJobId: projection.binding.executionJobId,
     deliveryId: null,
     deliveryTitle: null,
@@ -315,7 +315,7 @@ function approvalItem(
     expiresAt: projection.expiresAt,
     productSessionId: projection.binding.productSessionId,
     sessionTitle: titles.get(projection.binding.productSessionId) ?? null,
-    stageRunId: projection.binding.sessionIdentity.stageRunId ?? null,
+    workRunId: projection.binding.sessionIdentity.workRunId ?? null,
     executionJobId: projection.binding.executionJobId,
     deliveryId: null,
     deliveryTitle: null,
@@ -347,7 +347,7 @@ function bindingInvalidAttention(summary: DeliveryProjection): AttentionCenterIt
     expiresAt: null,
     productSessionId: null,
     sessionTitle: null,
-    stageRunId: null,
+    workRunId: null,
     executionJobId: null,
     deliveryId: null,
     deliveryTitle: null,
@@ -376,7 +376,7 @@ function attentionItems(
         expiresAt: null,
         productSessionId: null,
         sessionTitle: null,
-        stageRunId: projection.stageRunId,
+        workRunId: projection.workRunId,
         executionJobId: null,
         deliveryId: source.deliveryId,
         deliveryTitle: source.deliveryTitle,
@@ -392,7 +392,7 @@ function originsOf(summaries: readonly DeliveryProjection[]): readonly Attention
     deliveryId: summary.deliveryId,
     deliveryTitle: summary.title,
     deliveryRevision: summary.revision,
-    activeStageRunId: summary.activeStageRunId,
+    activeWorkRunId: summary.activeWorkRunId ?? null,
   })))
 }
 

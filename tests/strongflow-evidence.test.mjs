@@ -55,6 +55,7 @@ const { matchesCanonicalSchema } = generatedClient
 const schemaVersion = 'winwincode/v1'
 const deliveryId = 'dlv_00000000000000000000000001'
 const stageRunId = 'run_00000000000000000000000001'
+const workRunId = 'wrn_00000000000000000000000001'
 const sessionBindingId = 'sbd_00000000000000000000000001'
 const productSessionId = 'psn_00000000000000000000000001'
 const actor = { kind: 'user', id: 'usr_00000000000000000000000001' }
@@ -102,7 +103,7 @@ function evidenceRow(value) {
     id: evidenceId(value),
     sessionBindingId,
     sourceRef: `artifact:source:${String(value)}`,
-    stageRunId,
+    workRunId,
     type: 'test',
   }
 }
@@ -135,7 +136,7 @@ function projection(overrides = {}) {
     },
     solutionReview: null,
     stage: { id: stageRunId },
-    runtime: { stageRunId, sessions: [] },
+    runtime: { workRunId, sessions: [] },
     evidence: [
       evidenceRow(1),
       { ...evidenceRow(2), type: 'command' },
@@ -231,7 +232,7 @@ function artifactDescriptor(overrides = {}) {
       deliveryRevision: 6,
       evidenceId: evidenceId(2),
       sessionBindingId,
-      stageRunId,
+      workRunId,
     },
     sizeBytes: 26,
     ...overrides,
@@ -323,7 +324,7 @@ test('summary joins only verdict-owned criterion evidence and bounds key failure
 test('detail identity mismatch is rejected and every facade read receives a cancellable signal', async () => {
   const client = new FakeControlPlaneClient(request => evidenceGetResponse(
     request,
-    evidenceDetailResult({ evidence: { ...evidenceRow(1), stageRunId: 'run_foreign' } }),
+    evidenceDetailResult({ evidence: { ...evidenceRow(1), workRunId: 'wrn_00000000000000000000000002' } }),
   ))
   const { created } = viewModel({ client })
   await created.openEvidence(evidenceId(1))
@@ -343,7 +344,7 @@ test('detail rejects foreign Evidence, Candidate, StageRun, SessionBinding, curs
   const cases = [
     { evidence: { ...evidenceRow(1), id: foreignEvidenceId } },
     { evidence: { ...evidenceRow(1), candidateRef: supersededCandidateRef } },
-    { evidence: { ...evidenceRow(1), stageRunId: 'run_foreign' } },
+    { evidence: { ...evidenceRow(1), workRunId: 'wrn_00000000000000000000000002' } },
     { evidence: { ...evidenceRow(1), sessionBindingId: 'binding:foreign' } },
     { readCursor: readCursor({ token: 'cursor-token-foreign' }) },
     {
@@ -451,7 +452,7 @@ test('content rejects foreign Evidence, cursor, Artifact id, digest, and provena
     {
       artifact: {
         ...descriptor,
-        provenance: { ...descriptor.provenance, stageRunId: 'run_foreign' },
+        provenance: { ...descriptor.provenance, workRunId: 'wrn_00000000000000000000000002' },
       },
     },
   ]
@@ -671,7 +672,7 @@ test('opening Evidence issues one exact evidence.get with the full read binding 
     readPageLimit: 1,
     sessionBindingId,
     sourceRef: 'artifact:source:1',
-    stageRunId,
+    workRunId,
     type: 'test',
   })
   const detail = created.state.detail
@@ -753,7 +754,7 @@ test('inline text artifacts load bounded chunks with continuation and dedupe rep
         readPageLimit: 1,
         sessionBindingId,
         sourceRef: 'artifact:source:2',
-        stageRunId,
+        workRunId,
         type: 'command',
       })
       return artifactChunkResponse(request, {
@@ -1125,7 +1126,7 @@ test('the workbench renders tab navigation, bounded rows, and candidate binding 
 test('tabs own real panels and the keyed Drawer keeps one detail node with accessible state', async () => {
   const client = new FakeControlPlaneClient(request => evidenceGetResponse(
     request,
-    evidenceDetailResult({ evidence: { ...evidenceRow(1), stageRunId: 'run_foreign' } }),
+    evidenceDetailResult({ evidence: { ...evidenceRow(1), workRunId: 'wrn_00000000000000000000000002' } }),
   ))
   const { rootElement, mounted } = mountedWorkbench({ client })
   const tabs = findByClass(rootElement, 'wwc-strongflow-evidence-tabs').children

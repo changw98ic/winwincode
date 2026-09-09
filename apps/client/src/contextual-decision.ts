@@ -142,7 +142,7 @@ interface DecisionRow {
 }
 
 /**
- * Mount the bounded decision card of one Session/StageRun context.  The card is
+ * Mount the bounded decision card of one Session/WorkRun context.  The card is
  * a projection with the page's own commands behind it: it is hidden when the
  * context has no decision, and it is never a live region, so the page keeps its
  * single polite announcement channel.
@@ -333,7 +333,7 @@ export function mountContextualDecisionCard(
       updateDecisionContext(parts.context, [
         contextualDecisionKindLabel(item.kind),
         capability.stateLabel,
-        item.stageRunId === null ? 'ProductSession-bound' : 'ProductSession and StageRun-bound',
+        item.workRunId === null ? 'ProductSession-bound' : 'ProductSession and WorkRun-bound',
         item.deliveryId === null ? 'No Delivery binding' : 'Delivery-bound',
         item.expiresAt === null ? 'No expiry deadline' : `Expires ${item.expiresAt}`,
       ])

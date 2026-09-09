@@ -79,11 +79,11 @@ test('a real browser renders the Usage, Provider and Worker health summary on th
   assert.match(summary.deliveries[0].usage, /input_tokens 120/u)
   assert.match(summary.deliveries[0].usage, /total_tokens 180/u)
 
-  assert.equal(summary.stageRuns.length, 2)
+  assert.equal(summary.workRuns.length, 2)
   assert.deepEqual(
-    summary.stageRuns.map(row => row.unknown).sort(),
+    summary.workRuns.map(row => row.unknown).sort(),
     ['false', 'true'],
-    'the StageRun without usage must be the only unknown-marked row',
+    'the WorkRun without usage must be the only unknown-marked row',
   )
 
   assert.deepEqual(summary.providers.map(row => row.state).sort(), ['ready', 'unavailable'])

@@ -1,14 +1,41 @@
 import { mountStrongFlowPage } from '/module/strongflow-page.js'
+import { queryWorkRunAggregate } from '/module/community-control-plane-client.js'
 
 const root = document.querySelector('[data-winwincode-client-root]')
 const deliveryId = 'dlv_00000000000000000000000001'
-const currentRunId = 'run_00000000000000000000000002'
-const failedRunId = 'run_00000000000000000000000001'
-const planningRunId = 'run_00000000000000000000000003'
-const reviewRunId = 'run_00000000000000000000000004'
+const currentRunId = 'wrn_00000000000000000000000002'
+const secondActiveRunId = 'wrn_00000000000000000000000005'
+const failedRunId = 'wrn_00000000000000000000000001'
+const planningRunId = 'wrn_00000000000000000000000003'
+const reviewRunId = 'wrn_00000000000000000000000004'
 const candidateRef = 'refs/winwincode/candidate/browser-history'
 const historicalCandidateRef = 'refs/winwincode/candidate/attempt-1'
 const RUNTIME_EVENT_COUNT = 200
+const workItemId = 'wit_00000000000000000000000001'
+const secondWorkItemId = 'wit_00000000000000000000000002'
+const planningWorkItemId = 'wit_00000000000000000000000003'
+const scope = {
+  kind: 'repository',
+  organizationId: 'org_00000000000000000000000001',
+  workspaceId: 'wsp_00000000000000000000000001',
+  projectId: 'prj_00000000000000000000000001',
+  repositoryId: 'rep_00000000000000000000000001',
+}
+const workRunReadCursor = {
+  token: `cursor_${'0'.repeat(32)}`,
+  scope,
+  deliveryId,
+  deliveryRevision: 6,
+  runtimeLedgerRevision: 7,
+  runtimeAcceptedSequence: RUNTIME_EVENT_COUNT,
+  publicationRevision: 0,
+  eventCursor: {
+    scope,
+    stream: { kind: 'delivery', deliveryId },
+    sequence: RUNTIME_EVENT_COUNT,
+    eventId: `evt_${'0'.repeat(26)}`,
+  },
+}
 
 function diagram(kind) {
   return {
@@ -45,7 +72,7 @@ const projection = {
     },
     tasks: [
       {
-        id: 'task:browser',
+        id: workItemId,
         title: 'Verify history navigation',
         goal: 'Every attempt stays reachable.',
         status: 'active',
@@ -53,10 +80,10 @@ const projection = {
         acceptanceCriterionIds: [],
         blockedByTaskIds: [],
         evidenceRefs: [],
-        stageRunIds: [failedRunId, currentRunId],
+        workRunIds: [failedRunId, currentRunId],
       },
       {
-        id: 'task:browser2',
+        id: secondWorkItemId,
         title: 'Crossed deep-link guard',
         goal: 'A crossed task/run link normalizes onto the run association.',
         status: 'pending',
@@ -64,7 +91,18 @@ const projection = {
         acceptanceCriterionIds: [],
         blockedByTaskIds: [],
         evidenceRefs: [],
-        stageRunIds: [],
+        workRunIds: [],
+      },
+      {
+        id: planningWorkItemId,
+        title: 'Planning history',
+        goal: 'Planning remains visible as its own WorkItem.',
+        status: 'completed',
+        owner: null,
+        acceptanceCriterionIds: [],
+        blockedByTaskIds: [],
+        evidenceRefs: [],
+        workRunIds: [planningRunId],
       },
     ],
     stages: [
@@ -75,7 +113,7 @@ const projection = {
         status: 'failed',
         attempt: 1,
         actorType: 'codex',
-        deliveryTaskId: 'task:browser',
+        deliveryTaskId: workItemId,
         startedAt: '2026-09-02T08:00:00.000Z',
         finishedAt: '2026-09-02T08:10:00.000Z',
         sessionBinding: {
@@ -88,7 +126,7 @@ const projection = {
           leaseId: 'lease:1',
           sessionIdentity: null,
           sourceIdentity: null,
-          stageRunId: failedRunId,
+          workRunId: failedRunId,
           workerId: 'wrk_00000000000000000000000001',
           workerSessionId: 'wsn_00000000000000000000000001',
           attempt: 1,
@@ -101,7 +139,7 @@ const projection = {
         status: 'running',
         attempt: 2,
         actorType: 'codex',
-        deliveryTaskId: 'task:browser',
+        deliveryTaskId: workItemId,
         startedAt: '2026-09-02T08:11:00.000Z',
         finishedAt: null,
         sessionBinding: {
@@ -114,7 +152,7 @@ const projection = {
           leaseId: 'lease:2',
           sessionIdentity: null,
           sourceIdentity: null,
-          stageRunId: currentRunId,
+          workRunId: currentRunId,
           workerId: 'wrk_00000000000000000000000002',
           workerSessionId: 'wsn_00000000000000000000000002',
           attempt: 2,
@@ -127,7 +165,7 @@ const projection = {
         status: 'succeeded',
         attempt: 1,
         actorType: 'codex',
-        deliveryTaskId: null,
+        deliveryTaskId: planningWorkItemId,
         startedAt: '2026-09-02T07:50:00.000Z',
         finishedAt: '2026-09-02T07:55:00.000Z',
         sessionBinding: {
@@ -140,7 +178,7 @@ const projection = {
           leaseId: 'lease:3',
           sessionIdentity: null,
           sourceIdentity: null,
-          stageRunId: planningRunId,
+          workRunId: planningRunId,
           workerId: 'wrk_00000000000000000000000003',
           workerSessionId: 'wsn_00000000000000000000000003',
           attempt: 1,
@@ -166,7 +204,7 @@ const projection = {
         type: 'command',
         sourceRef: 'artifact:command:attempt-1',
         candidateRef: historicalCandidateRef,
-        stageRunId: failedRunId,
+        workRunId: failedRunId,
         sessionBindingId: 'bind:1',
         deliverySpecId: 'spec:1',
         deliverySpecRevision: 2,
@@ -177,7 +215,7 @@ const projection = {
         type: 'test',
         sourceRef: 'artifact:test:attempt-2',
         candidateRef,
-        stageRunId: currentRunId,
+        workRunId: currentRunId,
         sessionBindingId: 'bind:2',
         deliverySpecId: 'spec:1',
         deliverySpecRevision: 2,
@@ -194,12 +232,12 @@ const projection = {
     },
     verdict: null,
     publication: null,
-    readCursor: {},
+    readCursor: workRunReadCursor,
   },
   solutionReview: null,
   stage: { id: currentRunId },
   runtime: {
-    stageRunId: currentRunId,
+    workRunId: currentRunId,
     sessions: [],
   },
   evidence: [
@@ -208,14 +246,14 @@ const projection = {
       type: 'command',
       sourceRef: 'artifact:command:attempt-1',
       candidateRef: historicalCandidateRef,
-      stageRunId: failedRunId,
+      workRunId: failedRunId,
     },
     {
       id: 'evidence:current',
       type: 'test',
       sourceRef: 'artifact:test:attempt-2',
       candidateRef,
-      stageRunId: currentRunId,
+      workRunId: currentRunId,
     },
   ],
   verdict: null,
@@ -236,17 +274,98 @@ const projection = {
   },
 }
 
+// The browser fixture exposes the same canonical WorkItem/WorkRun aggregate as
+// production. Human review remains a Delivery history row and never becomes a
+// fabricated executable run.
+projection.workRunAggregate = {
+  schemaVersion: 'winwincode/v1',
+  contract: {
+    schemaVersion: 'winwincode/v1',
+    id: 'wct_00000000000000000000000001',
+    revision: 1,
+    scope: [],
+    objective: 'Review browser history.',
+    constraints: [],
+    protectedScope: [],
+    requiredHumanAuthority: 'none',
+    criteria: [{
+      id: 'crt_00000000000000000000000001',
+      description: 'History remains navigable.',
+      verificationMethod: null,
+      required: true,
+    }],
+    createdAt: '2026-09-02T07:45:00.000Z',
+  },
+  items: projection.delivery.tasks.map((task, index) => ({
+    schemaVersion: 'winwincode/v1',
+    id: task.id,
+    workContractId: 'wct_00000000000000000000000001',
+    workContractRevision: 1,
+    revision: index + 1,
+    state: index === 0 ? 'in_progress' : 'ready',
+    title: task.title,
+    goal: task.goal,
+    criterionIds: ['crt_00000000000000000000000001'],
+    dependsOn: [],
+  })),
+  runs: [
+    ...projection.delivery.stages
+    .filter(stage => stage.actorType === 'codex' && stage.sessionBinding?.workRunId !== null)
+    .map(stage => ({
+      schemaVersion: 'winwincode/v1',
+      id: stage.id,
+      workContractId: 'wct_00000000000000000000000001',
+      contractRevision: 1,
+      workItemId: stage.deliveryTaskId ?? workItemId,
+      workItemRevision: 1,
+      revision: stage.attempt,
+      state: stage.status === 'failed'
+        ? 'failed'
+        : stage.status === 'running' ? 'running' : 'settled',
+      executionJobId: stage.sessionBinding.executionJobId,
+      attempt: stage.attempt,
+      workerId: stage.sessionBinding.workerId,
+      workerInstanceId: 'wki_00000000000000000000000001',
+      workerSessionId: stage.sessionBinding.workerSessionId,
+      leaseId: `lse_0000000000000000000000000${stage.attempt}`,
+      fencingToken: String(stage.attempt),
+      productSessionId: stage.sessionBinding.productSessionId,
+      codexThreadId: stage.sessionBinding.codexThreadId,
+    })),
+    {
+      schemaVersion: 'winwincode/v1',
+      id: secondActiveRunId,
+      workContractId: 'wct_00000000000000000000000001',
+      contractRevision: 1,
+      workItemId: secondWorkItemId,
+      workItemRevision: 1,
+      revision: 1,
+      state: 'leased',
+      executionJobId: 'job_00000000000000000000000005',
+      attempt: 1,
+      workerId: 'wrk_00000000000000000000000005',
+      workerInstanceId: 'wki_00000000000000000000000005',
+      workerSessionId: 'wsn_00000000000000000000000005',
+      leaseId: 'lse_00000000000000000000000005',
+      fencingToken: '5',
+      productSessionId: null,
+      codexThreadId: null,
+    },
+  ],
+  readCursor: workRunReadCursor,
+}
+
 const RUNTIME_BINDING_BY_RUN = {
   [failedRunId]: ['psn_00000000000000000000000001', 'cdx_00000000000000000000000001'],
   [planningRunId]: ['psn_00000000000000000000000003', 'cdx_00000000000000000000000003'],
 }
 
-function historicalRuntimeSnapshot(stageRunId, binding) {
+function historicalRuntimeSnapshot(workRunId, binding) {
   return {
     kind: 'runtime_projection',
     productSessionId: binding[0],
     deliveryId,
-    stageRunId,
+    workRunId,
     revision: 7,
     lastProjectionSequence: 200,
     rebuiltAt: '2026-09-02T08:09:30.000Z',
@@ -254,7 +373,7 @@ function historicalRuntimeSnapshot(stageRunId, binding) {
     eventCursor: {},
     sessions: [{
       productSessionId: binding[0],
-      stageRunId,
+      workRunId,
       sessionBindingId: 'bind:1',
       executionJobId: 'job_00000000000000000000000001',
       workerSessionId: 'wsn_00000000000000000000000001',
@@ -262,7 +381,7 @@ function historicalRuntimeSnapshot(stageRunId, binding) {
       fencingToken: 'fence:1',
       leaseId: 'lease:1',
       attempt: 1,
-      deliveryTaskId: 'task:browser',
+      deliveryTaskId: workItemId,
       asOfSequence: 200,
       diffSummary: null,
       plan: null,
@@ -298,7 +417,7 @@ const historicalCandidateSummary = {
   diffSha256: `sha256:${'4'.repeat(64)}`,
   frozenAt: '2026-09-02T08:09:30.000Z',
   producerSessionBindingId: 'bind:1',
-  producerStageRunId: failedRunId,
+  producerWorkRunId: failedRunId,
 }
 
 function settled() {
@@ -329,6 +448,8 @@ function emptyCandidateFilesState() {
 }
 
 class BrowserStrongFlowModel {
+  workRunApiCalls = []
+  workRunApiReady = false
   draftScope = '["browser-strongflow-history-actor","browser-strongflow-history-scope"]'
   state = {
     status: 'ready',
@@ -340,6 +461,7 @@ class BrowserStrongFlowModel {
   }
 
   calls = []
+  cancelFailuresRemaining = 0
 
   subscribe(listener) {
     this.listener = listener
@@ -347,7 +469,29 @@ class BrowserStrongFlowModel {
     return () => { this.listener = null }
   }
 
-  async start() { this.calls.push(['start']) }
+  async start() {
+    const response = await queryWorkRunAggregate({
+      async query(request) {
+        model.workRunApiCalls.push(request)
+        return {
+          query: 'workrun.get',
+          result: projection.workRunAggregate,
+        }
+      },
+    }, {
+      actor: { kind: 'user', id: 'usr_00000000000000000000000001' },
+      scope,
+      requestId: 'req_00000000000000000000000001',
+      deliveryId,
+      workItemId,
+      workRunId: currentRunId,
+    })
+    if (response.runs.every(run => run.id !== currentRunId)) {
+      throw new Error('The browser WorkRun API fixture did not return the selected run.')
+    }
+    this.workRunApiReady = true
+    this.calls.push(['start'])
+  }
   async refresh() { this.calls.push(['refresh']) }
   async loadCandidateFiles() { this.calls.push(['loadCandidateFiles']) }
   async loadMoreCandidateFiles() { this.calls.push(['loadMoreCandidateFiles']) }
@@ -358,14 +502,38 @@ class BrowserStrongFlowModel {
   async resolveAttention() { this.calls.push(['resolveAttention']) }
   async submitVerdict() { this.calls.push(['submitVerdict']) }
   async advanceDelivery() { this.calls.push(['advanceDelivery']) }
-  async loadStageRunRuntime(stageRunId) {
-    this.calls.push(['loadStageRunRuntime', stageRunId])
-    const binding = RUNTIME_BINDING_BY_RUN[stageRunId]
-    return binding === undefined ? null : historicalRuntimeSnapshot(stageRunId, binding)
+  async cancelWorkRun(request) {
+    this.calls.push(['cancelWorkRun', request])
+    if (this.cancelFailuresRemaining > 0) {
+      this.cancelFailuresRemaining -= 1
+      this.publish({
+        ...this.state,
+        interaction: {
+          status: 'error',
+          error: {
+            kind: 'terminal',
+            code: 'TEMPORARY_TEST_FAILURE',
+            message: 'Temporary cancellation failure.',
+            requestId: request.requestId,
+            retryable: false,
+          },
+        },
+      })
+      return
+    }
+    this.publish({
+      ...this.state,
+      interaction: { status: 'waiting', error: null },
+    })
   }
-  async loadStageRunCandidates(stageRunId) {
-    this.calls.push(['loadStageRunCandidates', stageRunId])
-    return stageRunId === failedRunId
+  async loadWorkRunRuntime(workRunId) {
+    this.calls.push(['loadWorkRunRuntime', workRunId])
+    const binding = RUNTIME_BINDING_BY_RUN[workRunId]
+    return binding === undefined ? null : historicalRuntimeSnapshot(workRunId, binding)
+  }
+  async loadWorkRunCandidates(workRunId) {
+    this.calls.push(['loadWorkRunCandidates', workRunId])
+    return workRunId === failedRunId
       ? [{
         availability: 'available',
         candidate: historicalCandidateSummary,
@@ -388,7 +556,7 @@ class BrowserStrongFlowModel {
         type: 'command',
         sourceRef: 'artifact:command:attempt-1',
         candidateRef: candidate.candidateRef,
-        stageRunId: failedRunId,
+        workRunId: failedRunId,
         sessionBindingId: 'bind:1',
         deliverySpecId: 'spec:1',
         deliverySpecRevision: 2,
@@ -413,10 +581,10 @@ class BrowserStrongFlowModel {
 }
 
 const model = new BrowserStrongFlowModel()
-const baseHash = `#/strongflow?delivery=${deliveryId}&session=psn_00000000000000000000000002&stageRun=${currentRunId}`
+const baseHash = `#/strongflow?delivery=${deliveryId}&session=psn_00000000000000000000000002&workRun=${currentRunId}`
 // Start from the exact Task association owned by the historical StageRun: the
 // deep link names a real association and must survive the first render.
-history.replaceState(null, '', `/${baseHash}&task=task%3Abrowser&run=${failedRunId}`)
+history.replaceState(null, '', `/${baseHash}&task=wit_00000000000000000000000001&run=${failedRunId}`)
 const deliveryList = {
   state: {
     status: 'ready',
@@ -429,7 +597,7 @@ const deliveryList = {
       status: 'ready-to-deliver',
       updatedAt: '2026-09-02T08:12:30.000Z',
       openAttentionCount: 0,
-      activeStageRunId: null,
+      activeWorkRunId: null,
       ownership: projection.delivery.ownership,
       taskCounts: {
         total: 0,
@@ -466,6 +634,16 @@ const mounted = mountStrongFlowPage({
   root,
   model,
   deliveryList,
+  evidence: {
+    client: {
+      async query() { throw new Error('history cancellation fixture does not query Evidence') },
+    },
+    actor: { kind: 'user', id: 'usr_00000000000000000000000001' },
+    scope,
+    nextRequestId: () => 'req_00000000000000000000000001',
+    route: { tab: 'evidence', evidenceId: null },
+    onRouteChange() {},
+  },
 })
 
 function detailElement() {
@@ -480,7 +658,7 @@ function historySnapshot() {
     detailVisible: detail !== null && !detail.hidden,
     hash: location.hash,
     pressedRun: document.querySelector('.wwc-strongflow-run-button[aria-pressed="true"]')
-      ?.dataset.stageRunId ?? null,
+      ?.dataset.workRunId ?? null,
     taskExpanded: document.querySelector('.wwc-strongflow-history-toggle')
       ?.getAttribute('aria-expanded') ?? null,
   }
@@ -488,30 +666,95 @@ function historySnapshot() {
 
 globalThis.historyDeepLinkSnapshot = () => historySnapshot()
 
+globalThis.historyWorkRunApiReady = () => model.workRunApiReady
+
+globalThis.historyWorkRunApiProbe = () => ({
+  callCount: model.workRunApiCalls.length,
+  query: model.workRunApiCalls[0]?.query ?? null,
+  workItemId: model.workRunApiCalls[0]?.parameters?.workItemId ?? null,
+  workRunId: model.workRunApiCalls[0]?.parameters?.workRunId ?? null,
+  deliveryId: model.workRunApiCalls[0]?.parameters?.deliveryId ?? null,
+})
+
 globalThis.historyMutationGate = () => {
   const advance = document.querySelector('.wwc-strongflow-advance-delivery')
+  const cancel = document.querySelector('.wwc-strongflow-cancel-workrun')
   advance?.click()
+  cancel?.click()
   const note = document.querySelector('.wwc-strongflow-history-blocked')
   return {
     advanceDisabled: advance?.disabled ?? null,
+    cancelDisabled: cancel?.disabled ?? null,
     noteVisible: note !== null && !note.hidden,
     advanceCalls: model.calls
       .filter(([name]) => name === 'advanceDelivery').length,
+    cancelCalls: model.calls.filter(([name]) => name === 'cancelWorkRun').length,
+  }
+}
+
+globalThis.historyCancelProbe = async () => {
+  document.querySelector('.wwc-strongflow-current-run')?.click()
+  await settled()
+  const select = document.querySelector('.wwc-strongflow-cancel-workrun-select')
+  const cancel = document.querySelector('.wwc-strongflow-cancel-workrun')
+  const options = [...(select?.options ?? [])].map(option => ({
+    value: option.value,
+    text: option.textContent,
+  }))
+  const before = {
+    disabled: cancel?.disabled ?? null,
+    options,
+  }
+  if (select !== null) {
+    select.value = secondActiveRunId
+    select.dispatchEvent(new Event('change', { bubbles: true }))
+  }
+  await settled()
+  const enabledAfterSelection = cancel?.disabled ?? null
+  const selectedAfterSelection = select?.value ?? null
+  model.cancelFailuresRemaining = 1
+  cancel?.click()
+  await settled()
+  const first = model.calls.filter(([name]) => name === 'cancelWorkRun').at(-1)?.[1] ?? null
+  cancel?.click()
+  await settled()
+  const cancelCalls = model.calls.filter(([name]) => name === 'cancelWorkRun').map(([, request]) => request)
+  model.publish({ ...model.state, interaction: { status: 'idle', error: null } })
+  if (select !== null) {
+    select.value = currentRunId
+    select.dispatchEvent(new Event('change', { bubbles: true }))
+  }
+  await settled()
+  const firstSelectionDisabled = cancel?.disabled ?? null
+  cancel?.click()
+  await settled()
+  const firstSelectionRequest = model.calls
+    .filter(([name]) => name === 'cancelWorkRun').at(-1)?.[1] ?? null
+  return {
+    before,
+    selected: selectedAfterSelection,
+    disabledAfterSelection: enabledAfterSelection,
+    firstFailureRequest: first,
+    retryRequest: cancelCalls.at(-1) ?? null,
+    cancelCallCount: cancelCalls.length,
+    firstSelectionDisabled,
+    firstSelectionRequest,
   }
 }
 
 globalThis.historySelectTimelineRun = () => {
   document.querySelector(
-    `.wwc-strongflow-run-button[data-stage-run-id="${planningRunId}"]`,
+    `.wwc-strongflow-run-button[data-work-run-id="${planningRunId}"]`,
   )?.click()
   return historySnapshot()
 }
 
 globalThis.historySelectHumanReviewRun = () => {
-  document.querySelector(
-    `.wwc-strongflow-run-button[data-stage-run-id="${reviewRunId}"]`,
-  )?.click()
-  return historySnapshot()
+  const button = document.querySelector(
+    `.wwc-strongflow-run-button[data-work-run-id="${reviewRunId}"]`,
+  )
+  button?.click()
+  return { ...historySnapshot(), humanReviewButton: button !== null }
 }
 
 globalThis.historyReturnToCurrent = () => {
@@ -598,7 +841,7 @@ globalThis.historyKeyboardFlow = () => {
   const afterExpand = {
     expanded: toggle?.getAttribute('aria-expanded') ?? null,
     focusClass: document.activeElement?.className ?? null,
-    focusRun: document.activeElement?.dataset?.stageRunId ?? null,
+    focusRun: document.activeElement?.dataset?.workRunId ?? null,
   }
   document.activeElement?.dispatchEvent(new KeyboardEvent('keydown', {
     key: 'ArrowDown',
@@ -607,7 +850,7 @@ globalThis.historyKeyboardFlow = () => {
   }))
   const afterDown = {
     focusClass: document.activeElement?.className ?? null,
-    focusRun: document.activeElement?.dataset?.stageRunId ?? null,
+    focusRun: document.activeElement?.dataset?.workRunId ?? null,
   }
   return { before, afterExpand, afterDown }
 }
@@ -615,7 +858,7 @@ globalThis.historyKeyboardFlow = () => {
 globalThis.historyTimelineArrowLeft = () => {
   const toggle = document.querySelector('.wwc-strongflow-history-toggle')
   const timelineButton = document.querySelector(
-    `.wwc-strongflow-stage-list .wwc-strongflow-run-button[data-stage-run-id="${failedRunId}"]`,
+    `.wwc-strongflow-stage-list .wwc-strongflow-run-button[data-work-run-id="${failedRunId}"]`,
   )
   timelineButton?.focus()
   timelineButton?.dispatchEvent(new KeyboardEvent('keydown', {
@@ -625,7 +868,7 @@ globalThis.historyTimelineArrowLeft = () => {
   }))
   return {
     expanded: toggle?.getAttribute('aria-expanded') ?? null,
-    focusRun: document.activeElement?.dataset?.stageRunId ?? null,
+    focusRun: document.activeElement?.dataset?.workRunId ?? null,
   }
 }
 

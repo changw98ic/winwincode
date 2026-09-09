@@ -42,7 +42,7 @@ function response(request, result) {
   }
 }
 
-function runtimeSession(stageRunId, workerSessionId, overrides = {}) {
+function runtimeSession(workRunId, workerSessionId, overrides = {}) {
   return {
     activities: [],
     agentEdges: [],
@@ -58,7 +58,7 @@ function runtimeSession(stageRunId, workerSessionId, overrides = {}) {
     asOfSequence: 12,
     attempt: 1,
     codexThreadId: 'thr_00000000000000000000000001',
-    deliveryTaskId: null,
+    workItemId: null,
     diffSummary: null,
     executionJobId: 'job_00000000000000000000000001',
     fencingToken: '1',
@@ -73,7 +73,7 @@ function runtimeSession(stageRunId, workerSessionId, overrides = {}) {
       state: 'none',
     },
     sessionBindingId: 'binding-1',
-    stageRunId,
+    workRunId,
     usage: {
       sourceRef: 'runtime:usage-1',
       totals: [
@@ -117,7 +117,7 @@ function ok(request) {
         eventId: 'evt_00000000000000000000000001',
         kind: 'delivery',
         sequence: 12,
-        stageRunId: 'str_00000000000000000000000001',
+        workRunId: 'wrn_00000000000000000000000001',
         stream: { kind: 'delivery' },
       },
       kind: 'runtime_projection',
@@ -126,12 +126,12 @@ function ok(request) {
       readCursor: null,
       rebuiltAt: UPDATED_AT,
       revision: 3,
-      stageRunId: 'str_00000000000000000000000001',
+      workRunId: 'wrn_00000000000000000000000001',
       sessions: complete
         ? [
-            runtimeSession('str_00000000000000000000000001', 'wss_00000000000000000000000001'),
+            runtimeSession('wrn_00000000000000000000000001', 'wss_00000000000000000000000001'),
             runtimeSession(
-              'str_00000000000000000000000002',
+              'wrn_00000000000000000000000002',
               'wss_00000000000000000000000002',
               {
                 agents: [{
@@ -161,7 +161,7 @@ function ok(request) {
     kind: 'delivery_page',
     items: complete
       ? [{
-          activeStageRunId: 'str_00000000000000000000000001',
+          activeWorkRunId: 'wrn_00000000000000000000000001',
           deliveryId: 'dlv_00000000000000000000000001',
           openAttentionCount: 1,
           ownership: {
@@ -340,7 +340,7 @@ function summary() {
       key: row.dataset.key,
       usage: row.querySelector('.wwc-usage-health-row-usage')?.textContent ?? '',
     })),
-    stageRuns: [...panel.querySelectorAll('.wwc-usage-health-stage-run')].map(row => ({
+    workRuns: [...panel.querySelectorAll('.wwc-usage-health-work-run')].map(row => ({
       key: row.dataset.key,
       unknown: row.dataset.unknown,
     })),

@@ -192,6 +192,9 @@ WantedBy=multi-user.target
 | `WWC_SERVER_MODEL_PROVIDER_ID` | `winwincode-loopback` | 本地模型路由 Provider | `main.rs` `LocalModelRoute::from_environment` |
 | `WWC_SERVER_MODEL_ID` | `loopback-model` | 本地模型路由模型 | `main.rs` `LocalModelRoute::from_environment` |
 | `WWC_SERVER_MODEL_CREDENTIAL_REFERENCE_ID` | `crd_00000000000000000000000001` | 模型凭据引用 | `main.rs` `LocalModelRoute::from_environment` |
+| `WWC_SERVER_MODEL_ANTHROPIC_ENDPOINT` | 未设置 | 完整 HTTPS Anthropic Messages 地址（包括 `/v1/messages`）；设置后使用真实服务 | `model_authority.rs` `LocalModelRoute::provider_config` |
+| `WWC_SERVER_MODEL_API_KEY` | 未设置 | 真实模型服务密钥；设置上述地址时必填，启动时存入本地密钥存储 | `model_authority.rs` `store_local_credential_secret` |
+| `WWC_SERVER_EXECUTION_LEASE_SECONDS` | `30` | 单次执行的有效时长（秒）；真实模型任务应按任务耗时设置，例如 `600`，超时后仍拒绝执行请求 | `main.rs` `RepositoryRuntimeScheduler::from_application` |
 | `WWC_SERVER_ACTION_SIGNING_KEY_HEX` | `1f` x 32（开发默认） | Action Enforcement 签名密钥，64 位十六进制（32 字节），长度或字符非法即启动失败；生产必须显式替换 | `main.rs` `configured_action_signing_key`、`parse_hex_key` |
 | `WWC_SERVER_EXECUTION_ENVELOPE_DIGEST` | `sha256:` + 64 个 `a`（开发默认） | 执行信封摘要（local 组成模式读取） | `main.rs` `open_production_codex` |
 

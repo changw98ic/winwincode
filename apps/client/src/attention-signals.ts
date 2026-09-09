@@ -6,7 +6,7 @@ import type {
   DeliveryId,
   DeliveryProjection,
   ProductSessionId,
-  StageRunId,
+  WorkRunId,
 } from './generated/contracts.js'
 import { matchesCanonicalSchema } from './generated/control-plane-client.js'
 import { strongFlowRouteHash, type StrongFlowRoute } from './strongflow-route.js'
@@ -32,7 +32,7 @@ export interface AttentionSignal {
   readonly weight: number
   readonly revision: number
   readonly deliveryId: DeliveryId | null
-  readonly stageRunId: StageRunId | null
+  readonly workRunId: WorkRunId | null
   readonly productSessionId: ProductSessionId | null
 }
 
@@ -58,7 +58,7 @@ const SIGNAL_RANK: Readonly<Record<AttentionSignalKind, number>> = Object.freeze
 })
 
 function canonical<Identity extends string>(
-  schema: 'ApprovalId' | 'DeliveryId' | 'ProductSessionId' | 'StageRunId',
+  schema: 'ApprovalId' | 'DeliveryId' | 'ProductSessionId' | 'WorkRunId',
   value: Identity | null,
 ): Identity | null {
   return value !== null && matchesCanonicalSchema(schema, value) ? value : null
@@ -80,14 +80,14 @@ function deliveryContext(title: string | null): string {
 
 function originForApproval(
   projection: ApprovalProjection,
-  origins: ReadonlyMap<StageRunId, DeliveryProjection>,
+  origins: ReadonlyMap<WorkRunId, DeliveryProjection>,
 ): DeliveryProjection | null {
-  const boundStageRunId = canonical(
-    'StageRunId',
-    projection.binding.sessionIdentity.stageRunId ?? null,
+  const boundWorkRunId = canonical(
+    'WorkRunId',
+    projection.binding.sessionIdentity.workRunId ?? null,
   )
-  if (boundStageRunId === null) return null
-  return origins.get(boundStageRunId) ?? null
+  if (boundWorkRunId === null) return null
+  return origins.get(boundWorkRunId) ?? null
 }
 
 /**
@@ -96,13 +96,13 @@ function originForApproval(
  * dropped, so a notification can never link into a fabricated context.
  */
 export function attentionSignals(input: AttentionSignalInput): readonly AttentionSignal[] {
-  const origins = new Map<StageRunId, DeliveryProjection>()
+  const origins = new Map<WorkRunId, DeliveryProjection>()
   const signals: AttentionSignal[] = []
   for (const delivery of input.deliveries) {
     const deliveryId = canonical('DeliveryId', delivery.deliveryId)
     if (deliveryId === null) continue
-    const activeStageRunId = canonical('StageRunId', delivery.activeStageRunId)
-    if (activeStageRunId !== null) origins.set(activeStageRunId, delivery)
+    const activeWorkRunId = canonical<WorkRunId>('WorkRunId', delivery.activeWorkRunId ?? null)
+    if (activeWorkRunId !== null) origins.set(activeWorkRunId, delivery)
     if (delivery.status === 'needs-attention' && delivery.openAttentionCount > 0) {
       signals.push(Object.freeze({
         kind: 'attention',
@@ -113,7 +113,7 @@ export function attentionSignals(input: AttentionSignalInput): readonly Attentio
         weight: delivery.openAttentionCount,
         revision: delivery.revision,
         deliveryId,
-        stageRunId: activeStageRunId,
+        workRunId: activeWorkRunId,
         productSessionId: null,
       }))
     }
@@ -127,7 +127,7 @@ export function attentionSignals(input: AttentionSignalInput): readonly Attentio
         weight: delivery.taskCounts.failed,
         revision: delivery.revision,
         deliveryId,
-        stageRunId: activeStageRunId,
+        workRunId: activeWorkRunId,
         productSessionId: null,
       }))
     }
@@ -141,7 +141,7 @@ export function attentionSignals(input: AttentionSignalInput): readonly Attentio
         weight: 1,
         revision: delivery.revision,
         deliveryId,
-        stageRunId: activeStageRunId,
+        workRunId: activeWorkRunId,
         productSessionId: null,
       }))
     }
@@ -163,9 +163,9 @@ export function attentionSignals(input: AttentionSignalInput): readonly Attentio
       weight: 1,
       revision: projection.revision,
       deliveryId: origin === null ? null : canonical('DeliveryId', origin.deliveryId),
-      stageRunId: canonical(
-        'StageRunId',
-        projection.binding.sessionIdentity.stageRunId ?? null,
+      workRunId: canonical(
+        'WorkRunId',
+        projection.binding.sessionIdentity.workRunId ?? null,
       ),
       productSessionId,
     }))
@@ -210,7 +210,7 @@ export function attentionSignalRouteHash(
     const route: StrongFlowRoute = {
       deliveryId: signal.deliveryId,
       productSessionId: null,
-      stageRunId: signal.stageRunId,
+      workRunId: signal.workRunId,
       candidatePath: null,
       candidateView: 'unified',
       comparison: { status: 'none' },
@@ -221,9 +221,9 @@ export function attentionSignalRouteHash(
   }
   const parameters = new URLSearchParams()
   if (signal.productSessionId !== null) parameters.set('session', signal.productSessionId)
-  if (signal.kind === 'approval' && signal.deliveryId !== null && signal.stageRunId !== null) {
+  if (signal.kind === 'approval' && signal.deliveryId !== null && signal.workRunId !== null) {
     parameters.set('delivery', signal.deliveryId)
-    parameters.set('stageRun', signal.stageRunId)
+    parameters.set('workRun', signal.workRunId)
   }
   const query = parameters.toString()
   return scopeHash(query.length === 0 ? '#/attention' : `#/attention?${query}`, selection)

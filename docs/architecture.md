@@ -240,7 +240,11 @@ Server 启动先恢复持久 state、receipt、outbox、SessionBinding 和事件
 
 更多合同见 [`control-plane-web-client.md`](contracts/control-plane-web-client.md)、
 [`control-plane-storage-lifecycle.md`](contracts/control-plane-storage-lifecycle.md)、
-[`delivery-stage-coordination.md`](contracts/delivery-stage-coordination.md)、
+[Community engineering runtime](decisions/0033-community-engineering-runtime.md)、
 [`browser-chat-strongflow-production.rules.json`](contracts/browser-chat-strongflow-production.rules.json)、
 [`control-plane-api-coverage.matrix.json`](contracts/control-plane-api-coverage.matrix.json) 和
 [`ADR-0023`](decisions/0023-canonical-delivery-ownership.md)。
+
+公开通信格式见 [事件 Schema](../schema/winwincode/v1/control-plane-events.schema.json)、
+[ExecutionPort Schema](../schema/winwincode/v1/execution-port.schema.json) 和
+[WebSocket 合同](contracts/control-plane-websocket.md)。

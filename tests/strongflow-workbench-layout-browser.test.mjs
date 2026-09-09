@@ -121,7 +121,7 @@ test('real Chrome keeps the complete StrongFlow workbench reachable across layou
 
   await evaluate(devtools, sessionId, 'startStrongFlowTabSequence()')
   const keyboardFocus = []
-  for (let index = 0; index < 32; index += 1) {
+  for (let index = 0; index < 64; index += 1) {
     await pressTab(devtools, sessionId)
     const focus = await evaluate(devtools, sessionId, 'strongFlowFocusSnapshot()')
     keyboardFocus.push(focus)

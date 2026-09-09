@@ -57,7 +57,7 @@ const productSessionId = 'psn_00000000000000000000000001'
 const workerSessionId = 'wss_00000000000000000000000001'
 const executionJobId = 'job_00000000000000000000000001'
 const codexThreadId = 'cdx_00000000000000000000000001'
-const stageRunId = 'str_00000000000000000000000001'
+const workRunId = 'wrn_00000000000000000000000001'
 const now = Date.parse('2026-09-03T12:00:00.000Z')
 const futureExpiry = '2026-09-03T12:30:00.000Z'
 const pastExpiry = '2026-09-03T11:30:00.000Z'
@@ -71,7 +71,7 @@ function binding(overrides = {}) {
       productSessionId,
       workerSessionId,
       codexThreadId,
-      stageRunId,
+      workRunId,
     },
     ...overrides,
   }
@@ -373,8 +373,8 @@ test('the execution target names where the action runs', () => {
     productSessionId,
     workerSessionId,
     executionJobId,
-    stageRunId,
-    label: 'ProductSession, StageRun, ExecutionJob, and WorkerSession-bound',
+    workRunId,
+    label: 'ProductSession, WorkRun, ExecutionJob, and WorkerSession-bound',
   })
   const withoutStage = approvalRiskDetail(projection({
     binding: binding({
@@ -385,7 +385,7 @@ test('the execution target names where the action runs', () => {
       },
     }),
   }), { nowMillis: () => now })
-  assert.equal(withoutStage.executionTarget.stageRunId, null)
+  assert.equal(withoutStage.executionTarget.workRunId, null)
   assert.equal(
     withoutStage.executionTarget.label,
     'ProductSession, ExecutionJob, and WorkerSession-bound',

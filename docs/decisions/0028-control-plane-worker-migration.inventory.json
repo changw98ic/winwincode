@@ -844,7 +844,6 @@
         "crates/winwincode-control-plane/src/local_candidate.rs",
         "crates/winwincode-control-plane/src/local_secret_store.rs",
         "crates/winwincode-control-plane/src/observer_decision_service.rs",
-        "crates/winwincode-control-plane/src/planning_solution_authority.rs",
         "crates/winwincode-control-plane/src/product_session_api.rs",
         "crates/winwincode-control-plane/src/product_session_chat.rs",
         "crates/winwincode-control-plane/src/product_session_execution_application.rs",

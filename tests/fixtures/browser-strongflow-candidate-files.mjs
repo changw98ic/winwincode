@@ -4,6 +4,9 @@ import { mountStrongFlowPage } from '/module/strongflow-page.js'
 const deliveryId = 'dlv_00000000000000000000000001'
 const productSessionId = 'psn_00000000000000000000000001'
 const stageRunId = 'run_00000000000000000000000001'
+const workRunId = 'wrn_00000000000000000000000001'
+const workItemId = 'wit_00000000000000000000000001'
+const workContractId = 'wct_00000000000000000000000001'
 const candidateRef = `git-candidate:sha256:${'1'.repeat(64)}`
 const candidateTreeId = '2'.repeat(40)
 const candidateDiffSha256 = `sha256:${'3'.repeat(64)}`
@@ -64,7 +67,7 @@ const projection = {
   },
   solutionReview: null,
   stage: { id: stageRunId },
-  runtime: { stageRunId, sessions: [] },
+  runtime: { workRunId, workItemId, sessions: [] },
   evidence: [],
   verdict: null,
   attention: [],
@@ -77,13 +80,59 @@ const projection = {
     diffSha256: candidateDiffSha256,
     frozenAt: '2026-09-02T01:00:00.000Z',
     producerSessionBindingId: 'binding:strongflow:1',
-    producerStageRunId: stageRunId,
+    producerWorkRunId: workRunId,
   },
   publication: null,
   metadata: {
     source: 'control-plane-snapshot',
     updatedAt: '2026-09-02T01:00:00.000Z',
     revisions: { delivery: 4, deliverySpec: 3, runtime: 8, publication: 0 },
+    readCursor: {},
+  },
+  workRunAggregate: {
+    contract: {
+      schemaVersion: 'winwincode/v1',
+      id: workContractId,
+      revision: 1,
+      objective: 'Review Candidate files',
+      scope: [],
+      constraints: [],
+      protectedScope: [],
+      requiredHumanAuthority: 'none',
+      criteria: [],
+      createdAt: '2026-09-02T01:00:00.000Z',
+    },
+    items: [{
+      schemaVersion: 'winwincode/v1',
+      id: workItemId,
+      workContractId,
+      workContractRevision: 1,
+      title: 'Review Candidate files',
+      goal: 'Review Candidate files',
+      criterionIds: [],
+      dependsOn: [],
+      revision: 1,
+      state: 'in_progress',
+    }],
+    runs: [{
+      schemaVersion: 'winwincode/v1',
+      id: workRunId,
+      workContractId,
+      contractRevision: 1,
+      workItemId,
+      workItemRevision: 1,
+      revision: 1,
+      state: 'running',
+      attempt: 1,
+      executionJobId: 'job_00000000000000000000000001',
+      workerId: 'wrk_00000000000000000000000001',
+      workerInstanceId: 'wki_00000000000000000000000001',
+      workerSessionId: 'wsn_00000000000000000000000001',
+      leaseId: 'lse_00000000000000000000000001',
+      fencingToken: '1',
+      productSessionId,
+      codexThreadId: null,
+    }],
     readCursor: {},
   },
 }
@@ -149,9 +198,10 @@ const model = {
     location.hash = strongFlowRouteHash({
       deliveryId,
       productSessionId,
-      stageRunId,
+      workRunId,
       candidatePath: path,
       candidateView: 'unified',
+      comparison: { status: 'none' },
       evidenceTab: 'evidence',
       evidenceId: null,
     })
@@ -287,6 +337,7 @@ globalThis.runCandidateFilesScenario = async () => {
     hash: location.hash,
     diff: document.querySelector('.wwc-candidate-diff-content').textContent,
     activePath: document.activeElement?.dataset.path ?? null,
+    calls: calls.slice(),
   }
   document.querySelector('.wwc-candidate-load-more-diff').click()
 

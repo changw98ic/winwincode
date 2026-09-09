@@ -844,18 +844,68 @@ mod tests {
     }
 
     fn fixture(kind: &str) -> ExecutionPortMessage {
+        fn migrate(v: &mut serde_json::Value) {
+            match v {
+                serde_json::Value::Object(map) => {
+                    if let Some(x) = map.remove("stageRunId") {
+                        map.insert(
+                            "workRunId".into(),
+                            serde_json::Value::String(
+                                x.as_str().unwrap_or("").replacen("run_", "wrn_", 1),
+                            ),
+                        );
+                    }
+                    if map.get("kind").and_then(|x| x.as_str()) == Some("delivery-stage") {
+                        map.insert("kind".into(), serde_json::json!("work-run"));
+                        map.remove("deliveryId");
+                        map.remove("deliveryTaskId");
+                        map.insert(
+                            "workContractId".into(),
+                            serde_json::json!("wct_00000000000000000000000001"),
+                        );
+                        map.insert("workContractRevision".into(), serde_json::json!(1));
+                        map.insert(
+                            "workItemId".into(),
+                            serde_json::json!("wit_00000000000000000000000001"),
+                        );
+                        map.insert("workItemRevision".into(), serde_json::json!(1));
+                        map.insert(
+                            "workRunId".into(),
+                            serde_json::json!("wrn_00000000000000000000000009"),
+                        );
+                        map.insert("attempt".into(), serde_json::json!(1));
+                    }
+                    if let Some(old) = map.remove("stageInput") {
+                        let candidate = old.get("candidateRef").cloned().filter(|x| !x.is_null());
+                        map.insert("workInput".into(), serde_json::json!({"schemaVersion":"winwincode/v1","candidateRef":candidate,"workContract":{"schemaVersion":"winwincode/v1","id":"wct_00000000000000000000000001","revision":1,"scope":["Candidate source tree"],"objective":"Implement the approved candidate change.","constraints":[],"protectedScope":[],"requiredHumanAuthority":"none","criteria":[{"id":"crt_00000000000000000000000001","description":"The approved candidate change passes its exact test.","verificationMethod":"Run the exact candidate test.","required":true}],"createdAt":"2026-08-24T12:00:00.000Z"},"workItem":{"schemaVersion":"winwincode/v1","id":"wit_00000000000000000000000001","workContractId":"wct_00000000000000000000000001","workContractRevision":1,"revision":1,"state":"ready","title":"Implement the approved candidate","goal":"Ship the exact approved candidate change.","criterionIds":["crt_00000000000000000000000001"],"dependsOn":[]}}));
+                    }
+                    for child in map.values_mut() {
+                        migrate(child);
+                    }
+                }
+                serde_json::Value::Array(values) => {
+                    for child in values {
+                        migrate(child);
+                    }
+                }
+                _ => {}
+            }
+        }
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
             "../../../tests/fixtures/contracts/execution-port.valid.json"
         ))
         .expect("decode execution port fixtures");
-        let message = fixture["messages"]
+        let mut message = fixture["messages"]
             .as_array()
             .expect("fixture messages")
             .iter()
             .find(|message| message["kind"] == kind)
             .expect("fixture kind")
             .clone();
-        serde_json::from_value(message).expect("decode generated message")
+        migrate(&mut message);
+        let mut bytes = serde_json::to_string(&message).expect("migrated fixture");
+        bytes = bytes.replace("criterion-fixture", "crt_00000000000000000000000001");
+        serde_json::from_str(&bytes).expect("decode generated message")
     }
 
     fn runtime_pair() -> (

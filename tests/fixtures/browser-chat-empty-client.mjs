@@ -55,7 +55,7 @@ function runtime(productSessionId) {
     kind: 'runtime_projection',
     productSessionId,
     deliveryId: null,
-    stageRunId: null,
+    workRunId: null,
     readCursor: null,
     eventCursor: {
       eventId: null,

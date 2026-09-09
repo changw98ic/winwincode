@@ -247,7 +247,7 @@ pub struct LocalTraceFrame {
     #[serde(skip_serializing_if = "Option::is_none")]
     product_session_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    stage_run_id: Option<String>,
+    work_run_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     codex_thread_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -288,12 +288,12 @@ impl LocalTraceFrame {
                     &["job", "scope", "productSessionId"],
                 ],
             )?,
-            stage_run_id: safe_path(
+            work_run_id: safe_path(
                 &value,
                 &[
-                    &["stageRunId"],
-                    &["sessionIdentity", "stageRunId"],
-                    &["job", "scope", "stageRunId"],
+                    &["workRunId"],
+                    &["sessionIdentity", "workRunId"],
+                    &["job", "scope", "workRunId"],
                 ],
             )?,
             codex_thread_id: safe_path(

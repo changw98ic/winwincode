@@ -5,9 +5,9 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use winwincode_domain::{
-    ExecutionJobId, ExecutionMessageId, ExecutionSequence, Instant, OrganizationId,
-    ProductSessionId, ProjectId, RepositoryId, RequestId, Sha256Digest, WorkerId, WorkerInstanceId,
-    WorkerSessionId, WorkspaceId,
+    DeliveryId, ExecutionJobId, ExecutionMessageId, ExecutionSequence, Instant, OrganizationId,
+    ProductSessionId, ProjectId, RepositoryId, RequestId, Sha256Digest, WorkRunId, WorkerId,
+    WorkerInstanceId, WorkerSessionId, WorkspaceId,
 };
 use winwincode_storage::{
     DispatchResultRequest, DispatchResultStatus, EXECUTION_PROTOCOL_VERSION, ExecutionJobState,
@@ -70,10 +70,36 @@ fn submit(storage: &mut SqliteStorage, session: u64, job: u64, second: u64) {
             dispatch_payload: format!(r#"{{"jobId":"{}"}}"#, id("job", job)).into_bytes(),
             attempt: 1,
             dependencies: Vec::new(),
-            stage_run_id: None,
+            work_run_id: None,
             submitted_at: at(second),
         })
         .expect("submit");
+}
+
+fn submit_replacement(storage: &mut SqliteStorage, job: u64, work_run: &str, second: u64) {
+    let mut scope = queue_scope(30);
+    scope.delivery_id = Some(DeliveryId(id("dlv", 30)));
+    let work_run_id = WorkRunId(work_run.to_owned());
+    storage
+        .execution_queue()
+        .expect("queue")
+        .submit(&ExecutionJobSubmission {
+            scope,
+            job_id: ExecutionJobId(id("job", job)),
+            request_id: RequestId(id("req", job)),
+            payload_digest: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
+            dispatch_payload: format!(
+                r#"{{"attempt":1,"jobId":"{}","scope":{{"workRunId":"{}"}}}}"#,
+                id("job", job),
+                work_run
+            )
+            .into_bytes(),
+            attempt: 1,
+            dependencies: Vec::new(),
+            work_run_id: Some(work_run_id),
+            submitted_at: at(second),
+        })
+        .expect("replacement submit");
 }
 
 fn register(storage: &mut SqliteStorage) -> (WorkerId, WorkerInstanceId) {
@@ -117,6 +143,52 @@ fn register(storage: &mut SqliteStorage) -> (WorkerId, WorkerInstanceId) {
         })
         .expect("heartbeat");
     (worker_id, worker_instance_id)
+}
+
+fn register_replacement_instance(
+    storage: &mut SqliteStorage,
+    instance_seed: u64,
+) -> WorkerInstanceId {
+    let worker_id = WorkerId(id("wrk", 1));
+    let instance = WorkerInstanceId(id("wki", instance_seed));
+    storage
+        .execution_registry()
+        .expect("registry")
+        .register_worker(&WorkerRegistrationRequest {
+            authentication_identity: WorkerAuthenticationIdentity::LocalEmbedded {
+                control_plane_principal: "fixture-control-plane".into(),
+            },
+            protocol_version: EXECUTION_PROTOCOL_VERSION.into(),
+            platform: WorkerPlatform::Aarch64AppleDarwin,
+            capabilities: vec!["codex".into()],
+            capability_digest: Sha256Digest(format!("sha256:{}", "b".repeat(64))),
+            security_zone: "local".into(),
+            max_slots: 4,
+            message_id: ExecutionMessageId(id("xmsg", 10 + instance_seed)),
+            request_id: RequestId(id("req", 900 + instance_seed)),
+            sent_at: at(3),
+            started_at: at(0),
+            worker_id: worker_id.clone(),
+            worker_instance_id: instance.clone(),
+        })
+        .expect("register replacement instance");
+    storage
+        .execution_registry()
+        .expect("registry")
+        .record_heartbeat(&WorkerHeartbeatRequest {
+            active_leases: Vec::new(),
+            available_slots: 4,
+            heartbeat_sequence: ExecutionSequence(2),
+            max_slots: 4,
+            running_slots: 0,
+            message_id: ExecutionMessageId(id("xmsg", 20 + instance_seed)),
+            observed_at: at(3),
+            sent_at: at(3),
+            worker_id,
+            worker_instance_id: instance.clone(),
+        })
+        .expect("replacement heartbeat");
+    instance
 }
 
 fn claim_request(
@@ -261,6 +333,94 @@ fn rejected_registry_claim_rolls_back_queue_and_scheduler_receipts() {
     );
 
     drop(storage);
+    fs::remove_dir_all(root).expect("cleanup");
+}
+
+#[test]
+fn replacement_rotates_work_run_and_rejects_predecessor_after_restart() {
+    let root = directory("work-run-replacement");
+    let mut storage = SqliteStorage::open(&root).expect("storage");
+    submit_replacement(&mut storage, 70, "wrn_01J00000000000000000000000", 1);
+    let (worker_id, first_instance) = register(&mut storage);
+    let first = storage
+        .repository_scheduler()
+        .expect("scheduler")
+        .claim_next(&claim_request(
+            700,
+            "boot-a",
+            worker_id.clone(),
+            first_instance.clone(),
+        ))
+        .expect("claim")
+        .expect("first dispatch");
+    assert_eq!(
+        first.job.work_run_id,
+        Some(WorkRunId("wrn_01J00000000000000000000000".into()))
+    );
+    let second_instance = register_replacement_instance(&mut storage, 2);
+    let second = storage
+        .repository_scheduler()
+        .expect("scheduler")
+        .claim_next(&RepositorySchedulerClaimRequest {
+            scope: repository(),
+            request_id: RequestId(id("req", 701)),
+            scheduler_generation: "boot-b".into(),
+            worker_id: worker_id.clone(),
+            worker_instance_id: second_instance,
+            issued_at: at(51),
+            expires_at: at(59),
+        })
+        .expect("replacement claim")
+        .expect("successor dispatch");
+    assert_eq!(second.job.attempt, 2);
+    assert_ne!(second.job.work_run_id, first.job.work_run_id);
+    let old_lease = storage
+        .execution_registry()
+        .expect("registry")
+        .finish_execution_lease(&ExecutionLeaseTerminalRequest {
+            job_id: first.lease.job_id.clone(),
+            lease_id: first.lease.lease_id.clone(),
+            worker_id: first.lease.worker_id.clone(),
+            worker_instance_id: first.lease.worker_instance_id.clone(),
+            attempt: first.lease.attempt,
+            fencing_token: first.lease.fencing_token.clone(),
+            outcome: ExecutionLeaseTerminalOutcome::Completed,
+            terminal_at: at(52),
+            request_id: RequestId(id("req", 702)),
+        })
+        .expect_err("old lease must be fenced");
+    assert!(matches!(
+        old_lease.kind(),
+        StorageErrorKind::RequestConflict | StorageErrorKind::InvalidInput
+    ));
+    drop(storage);
+    let mut restarted = SqliteStorage::open(&root).expect("restart");
+    let mut current_scope = queue_scope(30);
+    current_scope.delivery_id = Some(DeliveryId(id("dlv", 30)));
+    let current = restarted
+        .execution_queue()
+        .expect("queue")
+        .load_job(&current_scope, &second.job.job_id)
+        .expect("load successor")
+        .expect("successor row");
+    assert_eq!(current.work_run_id, second.job.work_run_id);
+    let third_instance = register_replacement_instance(&mut restarted, 3);
+    let third = restarted
+        .repository_scheduler()
+        .expect("scheduler")
+        .claim_next(&RepositorySchedulerClaimRequest {
+            scope: repository(),
+            request_id: RequestId(id("req", 703)),
+            scheduler_generation: "boot-c".into(),
+            worker_id,
+            worker_instance_id: third_instance,
+            issued_at: at(60),
+            expires_at: at(69),
+        })
+        .expect("second replacement claim")
+        .expect("second successor dispatch");
+    assert_eq!(third.job.attempt, 3);
+    assert_ne!(third.job.work_run_id, second.job.work_run_id);
     fs::remove_dir_all(root).expect("cleanup");
 }
 

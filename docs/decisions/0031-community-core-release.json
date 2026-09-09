@@ -84,8 +84,7 @@
           "name": "winwincode-session",
           "manifest": "crates/winwincode-session/Cargo.toml",
           "publish": false,
-          "boundaryReady": false,
-          "blocker": "The public crate currently exports SqliteSessionIdentityMigration and directly depends on rusqlite."
+          "boundaryReady": true
         },
         {
           "name": "winwincode-delivery",
@@ -259,8 +258,7 @@
       },
       {
         "name": "winwincode-session",
-        "role": "storage-neutral product and execution session domain",
-        "requiredChangeBeforeFirstRelease": "Remove the SQLite adapter from this published crate and keep the session port as the only persistence boundary."
+        "role": "storage-neutral product and execution session domain"
       },
       {
         "name": "winwincode-delivery",
@@ -578,8 +576,8 @@
     },
     {
       "id": "STORAGE-COUPLING",
-      "impact": "Three shared domain crates would pull Community SQLite product storage into PostgreSQL products.",
-      "evidence": "winwincode-session imports rusqlite; winwincode-delivery and winwincode-publication import winwincode-storage types."
+      "impact": "Two shared domain crates would pull Community product storage into PostgreSQL products.",
+      "evidence": "winwincode-delivery and winwincode-publication still import winwincode-storage types."
     },
     {
       "id": "CODEX-PATH-DEPS",

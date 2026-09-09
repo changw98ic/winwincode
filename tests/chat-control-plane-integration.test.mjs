@@ -116,7 +116,7 @@ function runtime(id, sequence = 0) {
     kind: 'runtime_projection',
     productSessionId: id,
     deliveryId: null,
-    stageRunId: null,
+    workRunId: null,
     readCursor: null,
     eventCursor: cursor(id, sequence),
     lastProjectionSequence: sequence,

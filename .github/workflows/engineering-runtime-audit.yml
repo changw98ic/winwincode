@@ -1,0 +1,60 @@
+name: Engineering Runtime Audit
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      CI: "1"
+      COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+      - name: Install pinned Beads release
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=1.1.2
+          asset="beads_${version}_linux_amd64.tar.gz"
+          url="https://github.com/gastownhall/beads/releases/download/v${version}/${asset}"
+          expected=a72d71ed374955dc9f83a0f90b54bd7b6a0016709dd1676ae2e368651ed401c2
+          curl --fail --location --silent --show-error --retry 3 --connect-timeout 15 --max-time 120 "$url" --output /tmp/beads.tgz
+          echo "$expected  /tmp/beads.tgz" | sha256sum --check --strict
+          install_dir="$RUNNER_TEMP/beads"
+          mkdir -p "$install_dir"
+          tar -xzf /tmp/beads.tgz -C "$install_dir"
+          echo "$install_dir" >> "$GITHUB_PATH"
+          "$install_dir/bd" version | grep -F "bd version $version"
+      - name: Validate portable snapshot
+        run: node scripts/validate-engineering-runtime-backlog.mjs --mode=snapshot
+      - name: Pin and pull authoritative Dolt ref
+        shell: bash
+        env:
+          REMOTE: https://github.com/${{ github.repository }}.git
+        run: |
+          set -euo pipefail
+          remote_sha="$(git ls-remote "$REMOTE" refs/dolt/data | awk '{print $1}')"
+          test -n "$remote_sha" || { echo 'FAIL: refs/dolt/data is absent; live Beads audit is NOT_RUN.' >&2; exit 1; }
+          git fetch --no-tags "$REMOTE" refs/dolt/data
+          test "$(git rev-parse FETCH_HEAD)" = "$remote_sha"
+          echo "authoritative refs/dolt/data=$remote_sha"
+          # bd embeds its pinned Dolt engine; this creates only the ephemeral CI checkout DB.
+          bd init --non-interactive --skip-agents --skip-hooks --prefix winwincode --remote "$REMOTE"
+          bd dolt pull
+          latest_sha="$(git ls-remote "$REMOTE" refs/dolt/data | awk '{print $1}')"
+          test "$latest_sha" = "$remote_sha" || { echo "FAIL: refs/dolt/data moved during pull ($remote_sha -> $latest_sha)." >&2; exit 1; }
+          echo "pulled authoritative revision=$remote_sha"
+      - name: Run live authoritative audit
+        run: node scripts/validate-engineering-runtime-backlog.mjs --mode=live

@@ -7,7 +7,7 @@ use serde_json::json;
 use winwincode_domain::{
     CodexThreadId, ExecutionJobId, FencingToken, Instant, LeaseId, OrganizationId,
     ProductSessionId, ProjectId, RepositoryId, RepositoryScope, RepositoryScopeKind, RequestId,
-    SchemaVersion, SessionIdentity, Sha256Digest, StageRunId, UserActor, UserActorKind, UserId,
+    SchemaVersion, SessionIdentity, Sha256Digest, UserActor, UserActorKind, UserId, WorkRunId,
     WorkerId, WorkerInstanceId, WorkerSessionId, WorkspaceId,
 };
 use winwincode_execution_port::action_enforcement::{
@@ -108,7 +108,7 @@ fn session_identity(suffix: char) -> SessionIdentity {
     SessionIdentity {
         codex_thread_id: CodexThreadId(id("cdx", suffix)),
         product_session_id: ProductSessionId(id("psn", suffix)),
-        stage_run_id: Some(StageRunId(id("run", suffix))),
+        work_run_id: Some(WorkRunId(id("wrn", suffix))),
         worker_session_id: WorkerSessionId(id("wsn", suffix)),
     }
 }

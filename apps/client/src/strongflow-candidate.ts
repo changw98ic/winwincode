@@ -281,7 +281,7 @@ function candidateViewIdentity(candidate: StrongFlowProjection['currentCandidate
         candidate.diffSha256,
         candidate.frozenAt,
         candidate.producerSessionBindingId,
-        candidate.producerStageRunId,
+        candidate.producerWorkRunId,
       ].join('\n')
 }
 

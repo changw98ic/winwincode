@@ -489,7 +489,7 @@ export function mountStrongFlowCandidateComparison(
     }
     const defaults = {
       reworkBaselineDigest: props.reworkBaselineDigest,
-      reworkStage: projection.delivery.stages.some(stage => stage.stage === 'reworking'),
+      reworkStage: projection.workRunAggregate?.items.some(item => item.state === 'rework') ?? false,
     }
     // The selectors only ever offer the Candidates this Delivery exposes, so
     // the default pair is drawn from that same bounded set.

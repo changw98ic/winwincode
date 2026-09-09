@@ -107,7 +107,7 @@ function runtimeSession(overrides = {}) {
     asOfSequence: 27,
     attempt: 2,
     codexThreadId: rootThreadId,
-    deliveryTaskId: 'task:1',
+    workItemId: 'wit_00000000000000000000000001',
     diffSummary: {
       additions: 20,
       changedFileCount: 3,
@@ -128,7 +128,7 @@ function runtimeSession(overrides = {}) {
       state: 'recovered',
     },
     sessionBindingId: 'bind:1',
-    stageRunId,
+    workRunId: 'wrn_00000000000000000000000002',
     usage: {
       sourceRef: 'runtime:usage-1',
       totals: [
@@ -150,7 +150,7 @@ function evidenceRow(overrides = {}) {
     id: 'evidence:command-1',
     sessionBindingId: 'bind:1',
     sourceRef: 'runtime_event:event-1',
-    stageRunId,
+    workRunId: 'wrn_00000000000000000000000002',
     type: 'command',
     ...overrides,
   }
@@ -311,7 +311,7 @@ test('the execution graph shows parent-child agents, current activity, tools, Di
   assert.equal(sessions.length, 1)
   const session = sessions[0]
   assert.equal(session.dataset.attempt, '2')
-  assert.match(allText(findByClass(session, 'wwc-strongflow-execution-heading')), /Task task:1/u)
+  assert.match(allText(findByClass(session, 'wwc-strongflow-execution-heading')), /Task wit_00000000000000000000000001/u)
 
   const agents = findAllByClass(session, 'wwc-strongflow-agent-node')
   assert.equal(agents.length, 2)

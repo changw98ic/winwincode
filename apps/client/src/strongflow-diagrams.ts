@@ -134,7 +134,7 @@ export function mountStrongFlowDiagrams(
       || source.diffSha256 !== candidate.diffSha256
       || source.frozenAt !== candidate.frozenAt
       || details.diffSha256 !== source.diffSha256
-      || source.producerStageRunId !== details.provenance.stageRunId
+      || source.producerWorkRunId !== details.provenance.workRunId
       || source.producerSessionBindingId !== details.provenance.sessionBindingId) return null
     return details
   }
@@ -180,13 +180,11 @@ export function mountStrongFlowDiagrams(
       && item.deliverySpecId === review.deliverySpecId
     )) ? [review.attentionItemId] : []
     const provenance = details?.provenance ?? null
-    const linkedTaskId = provenance?.deliveryTaskId ?? null
+    const linkedTaskId = provenance?.workItemId ?? null
     const currentTaskId = linkedTaskId !== null && provenance !== null
-      && projection.delivery.tasks.some(task => (
-        String(task.id) === String(linkedTaskId)
-        && task.stageRunIds.some(stageRunId => (
-          String(stageRunId) === String(provenance.stageRunId)
-        ))
+      && projection.workRunAggregate.items.some(item => item.id === linkedTaskId)
+      && projection.workRunAggregate.runs.some(run => (
+        run.id === provenance.workRunId && run.workItemId === linkedTaskId
       )) ? linkedTaskId : null
     const linkedEvidenceRefIds = provenance?.evidenceRefIds.filter(evidenceRefId => (
       projection.evidence.some(evidence => (
@@ -194,7 +192,7 @@ export function mountStrongFlowDiagrams(
         && evidence.candidateRef === projection.currentCandidate?.candidateRef
         && evidence.deliverySpecId === projection.currentCandidate.deliverySpecId
         && evidence.deliverySpecRevision === projection.currentCandidate.deliverySpecRevision
-        && String(evidence.stageRunId) === String(provenance.stageRunId)
+        && String(evidence.workRunId) === String(provenance.workRunId)
         && evidence.sessionBindingId === provenance.sessionBindingId
       ))
     )) ?? []

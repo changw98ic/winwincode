@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use winwincode_domain::{
     DeliveryId, ExecutionJobId, Instant, OrganizationId, ProductSessionId, ProjectId, RepositoryId,
-    RequestId, Sha256Digest, StageRunId, WorkspaceId,
+    RequestId, Sha256Digest, WorkRunId, WorkspaceId,
 };
 
 use crate::{SqliteStorage, StorageError, sql_error};
@@ -27,7 +27,7 @@ CREATE TABLE IF NOT EXISTS scheduler_execution_jobs (
     repository_id TEXT NOT NULL,
     product_session_id TEXT NOT NULL,
     delivery_id TEXT,
-    stage_run_id TEXT,
+    work_run_id TEXT,
     submission_request_id TEXT NOT NULL,
     payload_digest TEXT NOT NULL,
     dispatch_payload BLOB NOT NULL,
@@ -69,9 +69,9 @@ CREATE INDEX IF NOT EXISTS scheduler_execution_jobs_scoped_queue
         organization_id, workspace_id, project_id, repository_id,
         product_session_id, delivery_id, state, submitted_at, job_id
     );
-CREATE UNIQUE INDEX IF NOT EXISTS scheduler_execution_jobs_active_stage_run
-    ON scheduler_execution_jobs (stage_run_id)
-    WHERE stage_run_id IS NOT NULL
+CREATE UNIQUE INDEX IF NOT EXISTS scheduler_execution_jobs_active_work_run
+    ON scheduler_execution_jobs (work_run_id)
+    WHERE work_run_id IS NOT NULL
       AND state IN ('queued', 'leased', 'running', 'cancelling');
 CREATE INDEX IF NOT EXISTS scheduler_execution_job_dependencies_dependency
     ON scheduler_execution_job_dependencies (dependency_job_id, job_id);
@@ -151,8 +151,8 @@ pub struct ExecutionJobSubmission {
     pub dispatch_payload: Vec<u8>,
     pub attempt: u64,
     pub dependencies: Vec<ExecutionJobId>,
-    /// Delivery stage reservation. `ProductSession` Chat jobs have no `StageRun`.
-    pub stage_run_id: Option<StageRunId>,
+    /// Delivery stage reservation. `ProductSession` Chat jobs have no `WorkRun`.
+    pub work_run_id: Option<WorkRunId>,
     pub submitted_at: Instant,
 }
 
@@ -190,7 +190,7 @@ pub struct ExecutionJobRecord {
     pub attempt: u64,
     pub revision: u64,
     pub dependencies: Vec<ExecutionJobId>,
-    pub stage_run_id: Option<StageRunId>,
+    pub work_run_id: Option<WorkRunId>,
     pub submitted_at: Instant,
     pub updated_at: Instant,
     pub cancellation: Option<ExecutionJobCancellationIntent>,
@@ -375,7 +375,7 @@ impl<'storage> ExecutionQueue<'storage> {
         let mut statement = connection
             .prepare(
                 "SELECT job_id, organization_id, workspace_id, project_id, repository_id,
-                        product_session_id, delivery_id, stage_run_id, submission_request_id,
+                        product_session_id, delivery_id, work_run_id, submission_request_id,
                         payload_digest, dispatch_payload, state, attempt, revision, submitted_at,
                         updated_at, cancellation_request_id, cancellation_requested_at
                  FROM scheduler_execution_jobs
@@ -482,29 +482,44 @@ pub(crate) fn ensure_execution_queue_schema(connection: &Connection) -> Result<(
         .map_err(sql_error)?
         .is_some();
     if table_exists {
-        let has_stage_run_id = {
+        let (has_work_run_id, has_legacy_stage_run_id) = {
             let mut statement = connection
                 .prepare("PRAGMA table_info(scheduler_execution_jobs)")
                 .map_err(sql_error)?;
             let columns = statement
                 .query_map([], |row| row.get::<_, String>(1))
                 .map_err(sql_error)?;
-            let mut found = false;
+            let mut found_work = false;
+            let mut found_legacy = false;
             for column in columns {
-                if column.map_err(sql_error)? == "stage_run_id" {
-                    found = true;
-                    break;
+                match column.map_err(sql_error)?.as_str() {
+                    "work_run_id" => found_work = true,
+                    "stage_run_id" => found_legacy = true,
+                    _ => {}
                 }
             }
-            found
+            (found_work, found_legacy)
         };
-        if !has_stage_run_id {
+        if !has_work_run_id {
             connection
                 .execute(
-                    "ALTER TABLE scheduler_execution_jobs ADD COLUMN stage_run_id TEXT",
+                    "ALTER TABLE scheduler_execution_jobs ADD COLUMN work_run_id TEXT",
                     [],
                 )
                 .map_err(sql_error)?;
+        }
+        if has_legacy_stage_run_id
+            && connection
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM scheduler_execution_jobs WHERE stage_run_id IS NOT NULL)",
+                    [],
+                    |row| row.get::<_, bool>(0),
+                )
+                .map_err(sql_error)?
+        {
+            return Err(StorageError::adapter(
+                "legacy StageRun queue rows require an explicit WorkRun migration",
+            ));
         }
     }
     connection
@@ -601,6 +616,7 @@ pub(crate) fn replace_execution_job_attempt_in_transaction(
     current: &ExecutionJobRecord,
     request_id: &RequestId,
     next_attempt: u64,
+    work_run_id: Option<&WorkRunId>,
     dispatch_payload: &[u8],
     occurred_at: &Instant,
 ) -> Result<ExecutionJobMutationReceipt, StorageError> {
@@ -659,13 +675,14 @@ pub(crate) fn replace_execution_job_attempt_in_transaction(
     let changed = connection
         .execute(
             "UPDATE scheduler_execution_jobs
-             SET state = 'leased', attempt = ?1, dispatch_payload = ?2,
-                 revision = revision + 1, updated_at = ?3
-             WHERE job_id = ?4 AND revision = ?5 AND attempt = ?6
-               AND state = ?7 AND cancellation_request_id IS NULL",
+             SET state = 'leased', attempt = ?1, work_run_id = ?2, dispatch_payload = ?3,
+                 revision = revision + 1, updated_at = ?4
+             WHERE job_id = ?5 AND revision = ?6 AND attempt = ?7
+               AND state = ?8 AND cancellation_request_id IS NULL",
             params![
                 i64::try_from(next_attempt)
                     .map_err(|_| StorageError::invalid_input("attempt is out of range"))?,
+                work_run_id.map(|id| id.0.as_str()),
                 dispatch_payload,
                 occurred_at.0,
                 current.job_id.0,
@@ -833,7 +850,7 @@ fn insert_submission(
         .execute(
             "INSERT INTO scheduler_execution_jobs
                 (job_id, organization_id, workspace_id, project_id, repository_id,
-                 product_session_id, delivery_id, stage_run_id, submission_request_id,
+                 product_session_id, delivery_id, work_run_id, submission_request_id,
                  payload_digest, dispatch_payload, state, attempt, revision, submitted_at,
                  updated_at, cancellation_request_id, cancellation_requested_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'queued', ?12, 1,
@@ -850,7 +867,7 @@ fn insert_submission(
                     .delivery_id
                     .as_ref()
                     .map(|value| value.0.as_str()),
-                request.stage_run_id.as_ref().map(|value| value.0.as_str()),
+                request.work_run_id.as_ref().map(|value| value.0.as_str()),
                 request.request_id.0,
                 request.payload_digest.0,
                 request.dispatch_payload,
@@ -906,7 +923,7 @@ fn require_exact_submission_receipt(
         || job.payload_digest != request.payload_digest
         || job.dispatch_payload != request.dispatch_payload
         || job.attempt != request.attempt
-        || job.stage_run_id != request.stage_run_id
+        || job.work_run_id != request.work_run_id
         || job.revision != 1
         || job.state != ExecutionJobState::Queued
         || job.dependencies != request.dependencies
@@ -941,16 +958,16 @@ fn normalized_submission(
             "execution job attempt is outside the supported range",
         ));
     }
-    if let Some(stage_run_id) = &request.stage_run_id {
-        validate_id(&stage_run_id.0, "run_", "stageRunId")?;
+    if let Some(work_run_id) = &request.work_run_id {
+        validate_id(&work_run_id.0, "wrn_", "workRunId")?;
         if request.scope.delivery_id.is_none() {
             return Err(StorageError::invalid_input(
-                "ProductSession execution job cannot reserve a StageRun",
+                "ProductSession execution job cannot reserve a WorkRun",
             ));
         }
     } else if request.scope.delivery_id.is_some() {
         return Err(StorageError::invalid_input(
-            "Delivery execution job must reserve its StageRun",
+            "Delivery execution job must reserve its WorkRun",
         ));
     }
     if request.dependencies.len() > MAX_DEPENDENCIES {
@@ -1171,7 +1188,7 @@ pub(crate) fn load_scoped_job(
     let stored = connection
         .query_row(
             "SELECT job_id, organization_id, workspace_id, project_id, repository_id,
-                    product_session_id, delivery_id, stage_run_id, submission_request_id,
+                    product_session_id, delivery_id, work_run_id, submission_request_id,
                     payload_digest, dispatch_payload, state, attempt, revision, submitted_at,
                     updated_at, cancellation_request_id, cancellation_requested_at
              FROM scheduler_execution_jobs
@@ -1204,7 +1221,7 @@ pub(crate) struct StoredJobRow {
     repository_id: String,
     product_session_id: String,
     delivery_id: Option<String>,
-    stage_run_id: Option<String>,
+    work_run_id: Option<String>,
     submission_request_id: String,
     payload_digest: String,
     dispatch_payload: Vec<u8>,
@@ -1226,7 +1243,7 @@ pub(crate) fn stored_job_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<S
         repository_id: row.get(4)?,
         product_session_id: row.get(5)?,
         delivery_id: row.get(6)?,
-        stage_run_id: row.get(7)?,
+        work_run_id: row.get(7)?,
         submission_request_id: row.get(8)?,
         payload_digest: row.get(9)?,
         dispatch_payload: row.get(10)?,
@@ -1294,7 +1311,7 @@ pub(crate) fn complete_record(
         attempt,
         revision,
         dependencies,
-        stage_run_id: stored.stage_run_id.map(StageRunId),
+        work_run_id: stored.work_run_id.map(WorkRunId),
         submitted_at: Instant(stored.submitted_at),
         updated_at: Instant(stored.updated_at),
         cancellation,
@@ -1316,13 +1333,13 @@ fn validate_stored_record(record: &ExecutionJobRecord) -> Result<(), StorageErro
     .map_err(|_| StorageError::adapter("stored submission request identity is invalid"))?;
     validate_digest(&record.payload_digest)
         .map_err(|_| StorageError::adapter("stored execution payload digest is invalid"))?;
-    if let Some(stage_run_id) = &record.stage_run_id {
-        validate_id(&stage_run_id.0, "run_", "stageRunId")
-            .map_err(|_| StorageError::adapter("stored StageRun identity is invalid"))?;
+    if let Some(work_run_id) = &record.work_run_id {
+        validate_id(&work_run_id.0, "wrn_", "workRunId")
+            .map_err(|_| StorageError::adapter("stored WorkRun identity is invalid"))?;
     }
-    if record.scope.delivery_id.is_some() != record.stage_run_id.is_some() {
+    if record.scope.delivery_id.is_some() != record.work_run_id.is_some() {
         return Err(StorageError::adapter(
-            "stored execution StageRun reservation is inconsistent",
+            "stored execution WorkRun reservation is inconsistent",
         ));
     }
     validate_instant(&record.submitted_at, "submittedAt")
@@ -1444,5 +1461,66 @@ fn validate_instant(value: &Instant, field: &str) -> Result<(), StorageError> {
         Err(StorageError::invalid_input(format!(
             "{field} is not canonical"
         )))
+    }
+}
+
+#[cfg(test)]
+mod migration_tests {
+    use rusqlite::Connection;
+
+    use super::ensure_execution_queue_schema;
+
+    #[test]
+    fn empty_legacy_queue_gets_work_run_column_once() {
+        let connection = Connection::open_in_memory().expect("sqlite");
+        connection
+            .execute(
+                "CREATE TABLE scheduler_execution_jobs (
+                    job_id TEXT, organization_id TEXT, workspace_id TEXT,
+                    project_id TEXT, repository_id TEXT, product_session_id TEXT,
+                    delivery_id TEXT, stage_run_id TEXT, submission_request_id TEXT,
+                    payload_digest TEXT, dispatch_payload BLOB, state TEXT,
+                    attempt INTEGER, revision INTEGER, submitted_at TEXT,
+                    updated_at TEXT, cancellation_request_id TEXT,
+                    cancellation_requested_at TEXT
+                )",
+                [],
+            )
+            .expect("legacy table");
+        ensure_execution_queue_schema(&connection).expect("empty legacy queue upgrades");
+        let columns = connection
+            .prepare("PRAGMA table_info(scheduler_execution_jobs)")
+            .expect("pragma")
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("columns")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("column rows");
+        assert!(columns.iter().any(|column| column == "work_run_id"));
+    }
+
+    #[test]
+    fn populated_legacy_queue_is_rejected_without_rewriting_rows() {
+        let connection = Connection::open_in_memory().expect("sqlite");
+        connection
+            .execute(
+                "CREATE TABLE scheduler_execution_jobs (stage_run_id TEXT)",
+                [],
+            )
+            .expect("legacy table");
+        connection
+            .execute(
+                "INSERT INTO scheduler_execution_jobs VALUES ('run_00000000000000000000000001')",
+                [],
+            )
+            .expect("legacy row");
+        assert!(ensure_execution_queue_schema(&connection).is_err());
+        let value: String = connection
+            .query_row(
+                "SELECT stage_run_id FROM scheduler_execution_jobs",
+                [],
+                |row| row.get(0),
+            )
+            .expect("legacy row remains");
+        assert_eq!(value, "run_00000000000000000000000001");
     }
 }

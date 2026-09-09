@@ -7,7 +7,7 @@ use winwincode_delivery::application::{
     stage::SessionBindingAuthority,
 };
 use winwincode_domain::Instant;
-use winwincode_execution_port::generated::{DeliveryStageExecutionScope, SessionBindingMessage};
+use winwincode_execution_port::generated::{SessionBindingMessage, WorkRunExecutionScope};
 use winwincode_session::{
     BindingScope, RuntimeSourceIdentity, SessionBinding, SessionBindingError,
     SessionBindingIdentity,
@@ -63,8 +63,8 @@ impl From<SessionBindingError> for SessionIdentityAdapterError {
 
 /// Accept one generated `session.binding` only when it matches the scheduler-owned authority and
 /// the durable Delivery execution scope. The scope is supplied separately because the
-/// `session.binding` wire message carries `stageRunId` and `ProductSessionId`, but deliberately
-/// does not repeat the Delivery and optional task identifiers.
+/// `session.binding` wire message carries `workRunId` and `ProductSessionId`; the durable
+/// `WorkRun` scope supplies the complete contract/item identity and revisions.
 ///
 /// # Errors
 ///
@@ -73,7 +73,8 @@ impl From<SessionBindingError> for SessionIdentityAdapterError {
 pub fn validate_session_binding<'a>(
     message: &'a SessionBindingMessage,
     authority: &'a SessionBindingAuthority,
-    scope: &DeliveryStageExecutionScope,
+    scope: &WorkRunExecutionScope,
+    delivery_id: &winwincode_domain::DeliveryId,
 ) -> Result<SessionBindingAcceptance<'a>, SessionIdentityAdapterError> {
     validate_message_discriminator(message)?;
     validate_message_identifiers(message)?;
@@ -83,10 +84,13 @@ pub fn validate_session_binding<'a>(
     validate_delivery_scope(message, authority, scope)?;
 
     let identity = SessionBindingIdentity::try_new(
-        BindingScope::DeliveryStage {
-            delivery_id: scope.delivery_id.clone(),
-            delivery_task_id: scope.delivery_task_id.clone(),
-            stage_run_id: scope.stage_run_id.clone(),
+        BindingScope::DeliveryWorkRun {
+            delivery_id: delivery_id.clone(),
+            work_contract_id: scope.work_contract_id.clone(),
+            work_contract_revision: scope.work_contract_revision.clone(),
+            work_item_id: scope.work_item_id.clone(),
+            work_item_revision: scope.work_item_revision.clone(),
+            work_run_id: scope.work_run_id.clone(),
         },
         message.product_session_id.clone(),
         message.lease.job_id.clone(),
@@ -104,9 +108,12 @@ pub fn validate_session_binding<'a>(
         Some(source),
     )?;
     let delivery_identity = DeliverySessionBindingIdentity {
-        delivery_id: scope.delivery_id.clone(),
-        delivery_task_id: scope.delivery_task_id.clone(),
-        stage_run_id: scope.stage_run_id.clone(),
+        delivery_id: delivery_id.clone(),
+        work_contract_id: scope.work_contract_id.clone(),
+        work_contract_revision: scope.work_contract_revision.clone(),
+        work_item_id: scope.work_item_id.clone(),
+        work_item_revision: scope.work_item_revision.clone(),
+        work_run_id: scope.work_run_id.clone(),
         product_session_id: message.product_session_id.clone(),
         execution_job_id: message.lease.job_id.clone(),
     };
@@ -137,11 +144,11 @@ fn validate_message_identifiers(
 ) -> Result<(), SessionIdentityAdapterError> {
     require_id(&message.message_id.0, "messageId", "xmsg_")?;
     require_id(&message.product_session_id.0, "productSessionId", "psn_")?;
-    let stage_run_id = message
-        .stage_run_id
+    let work_run_id = message
+        .work_run_id
         .as_ref()
-        .ok_or(SessionIdentityAdapterError::InvalidMessage("stageRunId"))?;
-    require_id(&stage_run_id.0, "stageRunId", "run_")?;
+        .ok_or(SessionIdentityAdapterError::InvalidMessage("workRunId"))?;
+    require_id(&work_run_id.0, "workRunId", "wrn_")?;
     require_id(&message.worker_session_id.0, "workerSessionId", "wsn_")?;
     require_id(&message.codex_thread_id.0, "codexThreadId", "cdx_")?;
     require_id(&message.worker_id.0, "workerId", "wrk_")?;
@@ -214,7 +221,7 @@ fn validate_message_authority_fields(
     if message.session_identity.product_session_id != message.product_session_id
         || message.session_identity.worker_session_id != message.worker_session_id
         || message.session_identity.codex_thread_id != message.codex_thread_id
-        || message.session_identity.stage_run_id != message.stage_run_id
+        || message.session_identity.work_run_id != message.work_run_id
     {
         return Err(SessionIdentityAdapterError::InvalidMessage(
             "sessionIdentity",
@@ -274,25 +281,23 @@ fn validate_scheduler_authority(
 fn validate_delivery_scope(
     message: &SessionBindingMessage,
     authority: &SessionBindingAuthority,
-    scope: &DeliveryStageExecutionScope,
+    scope: &WorkRunExecutionScope,
 ) -> Result<(), SessionIdentityAdapterError> {
-    if scope.kind
-        != winwincode_execution_port::generated::DeliveryStageExecutionScopeKind::DeliveryStage
-    {
+    if scope.kind != winwincode_execution_port::generated::WorkRunExecutionScopeKind::WorkRun {
         return Err(SessionIdentityAdapterError::InvalidMessage("scope.kind"));
     }
-    require_id(&scope.delivery_id.0, "scope.deliveryId", "dlv_")?;
-    if let Some(task_id) = &scope.delivery_task_id {
-        require_id(&task_id.0, "scope.deliveryTaskId", "dtk_")?;
-    }
-    require_id(&scope.stage_run_id.0, "scope.stageRunId", "run_")?;
+    require_id(&scope.work_contract_id.0, "scope.workContractId", "wct_")?;
+    validate_revision(&scope.work_contract_revision, "scope.workContractRevision")?;
+    require_id(&scope.work_item_id.0, "scope.workItemId", "wit_")?;
+    validate_revision(&scope.work_item_revision, "scope.workItemRevision")?;
+    require_id(&scope.work_run_id.0, "scope.workRunId", "wrn_")?;
     require_id(
         &scope.product_session_id.0,
         "scope.productSessionId",
         "psn_",
     )?;
     if scope.product_session_id != message.product_session_id
-        || message.stage_run_id.as_ref() != Some(&scope.stage_run_id)
+        || message.work_run_id.as_ref() != Some(&scope.work_run_id)
         || authority.active_lease().execution_job_id() != &message.lease.job_id
     {
         return Err(SessionIdentityAdapterError::ForeignAuthority(
@@ -362,6 +367,16 @@ fn require_id(
     Ok(())
 }
 
+fn validate_revision(
+    revision: &winwincode_domain::Revision,
+    field: &'static str,
+) -> Result<(), SessionIdentityAdapterError> {
+    if !(1..=9_007_199_254_740_991).contains(&revision.0) {
+        return Err(SessionIdentityAdapterError::InvalidMessage(field));
+    }
+    Ok(())
+}
+
 impl SessionBindingAcceptance<'_> {
     /// Returns the canonical session binding value.
     #[must_use]
@@ -394,17 +409,17 @@ mod tests {
         active_lease_identity, session_binding_authority,
     };
     use winwincode_domain::{
-        CodexThreadId, DeliveryId, DeliveryTaskId, ExecutionJobId, ExecutionMessageId,
-        FencingToken, Instant, LeaseId, ProductSessionId, StageRunId, WorkerId, WorkerInstanceId,
-        WorkerSessionId,
+        CodexThreadId, DeliveryId, ExecutionJobId, ExecutionMessageId, FencingToken, Instant,
+        LeaseId, ProductSessionId, Revision, WorkContractId, WorkItemId, WorkRunId, WorkerId,
+        WorkerInstanceId, WorkerSessionId,
     };
     use winwincode_domain::{
         SchemaVersion, SessionBindingSourceIdentity, SessionBindingSourceIdentityKind,
         SessionIdentity,
     };
     use winwincode_execution_port::generated::{
-        DeliveryStageExecutionScope, DeliveryStageExecutionScopeKind, ExecutionLeaseStamp,
-        SessionBindingMessage, SessionBindingMessageKind,
+        ExecutionLeaseStamp, SessionBindingMessage, SessionBindingMessageKind,
+        WorkRunExecutionScope, WorkRunExecutionScopeKind,
     };
 
     use super::{SessionIdentityAdapterError, validate_session_binding};
@@ -418,7 +433,7 @@ mod tests {
     ) -> (
         winwincode_delivery::application::stage::SessionBindingAuthority,
         SessionBindingMessage,
-        DeliveryStageExecutionScope,
+        WorkRunExecutionScope,
     ) {
         let job_id = ExecutionJobId(id("job", seed));
         let lease_id = LeaseId(id("lse", seed));
@@ -426,7 +441,9 @@ mod tests {
         let worker_instance_id = WorkerInstanceId(id("wki", seed));
         let worker_session_id = WorkerSessionId(id("wsn", seed));
         let product_session_id = ProductSessionId(id("psn", seed));
-        let stage_run_id = StageRunId(id("run", seed));
+        let work_contract_id = WorkContractId(id("wct", seed));
+        let work_item_id = WorkItemId(id("wit", seed));
+        let work_run_id = WorkRunId(id("wrn", seed));
         let fencing_token = FencingToken(seed.to_string());
         let issued_at = Instant("2027-01-15T08:00:00.200Z".into());
         let bound_at = Instant("2027-01-15T08:00:01.000Z".into());
@@ -469,7 +486,7 @@ mod tests {
             session_identity: SessionIdentity {
                 codex_thread_id: CodexThreadId(id("cdx", seed)),
                 product_session_id: product_session_id.clone(),
-                stage_run_id: Some(stage_run_id.clone()),
+                work_run_id: Some(work_run_id.clone()),
                 worker_session_id: worker_session_id.clone(),
             },
             source_identity: SessionBindingSourceIdentity {
@@ -479,17 +496,20 @@ mod tests {
                 worker_instance_id,
                 worker_session_id: worker_session_id.clone(),
             },
-            stage_run_id: Some(stage_run_id.clone()),
+            work_run_id: Some(work_run_id.clone()),
             worker_id,
             worker_session_id,
         };
-        let scope = DeliveryStageExecutionScope {
-            delivery_id: DeliveryId(id("dlv", seed)),
-            delivery_task_id: Some(DeliveryTaskId(id("dtk", seed))),
-            kind: DeliveryStageExecutionScopeKind::DeliveryStage,
+        let scope = WorkRunExecutionScope {
+            kind: WorkRunExecutionScopeKind::WorkRun,
             product_session_id,
             rework_authorization: None,
-            stage_run_id,
+            work_contract_id,
+            work_contract_revision: Revision(1),
+            work_item_id,
+            work_item_revision: Revision(1),
+            work_run_id,
+            attempt: 1,
         };
         (authority, message, scope)
     }
@@ -497,8 +517,9 @@ mod tests {
     #[test]
     fn generated_message_and_sealed_authority_produce_one_canonical_binding() {
         let (authority, message, scope) = fixture(1);
-        let accepted = validate_session_binding(&message, &authority, &scope)
-            .expect("matching generated message is accepted");
+        let accepted =
+            validate_session_binding(&message, &authority, &scope, &DeliveryId(id("dlv", 1)))
+                .expect("matching generated message is accepted");
 
         assert_eq!(
             accepted.binding().product_session_id(),
@@ -508,7 +529,7 @@ mod tests {
             accepted.binding().execution_job_id(),
             authority.active_lease().execution_job_id()
         );
-        assert_eq!(accepted.binding().stage_run_id(), Some(&scope.stage_run_id));
+        assert_eq!(accepted.binding().work_run_id(), Some(&scope.work_run_id));
         assert_eq!(
             accepted.binding().worker_session_id(),
             Some(&message.worker_session_id)
@@ -518,10 +539,13 @@ mod tests {
             Some(&message.codex_thread_id)
         );
         assert!(accepted.binding().is_complete());
-        assert_eq!(accepted.delivery_identity().delivery_id, scope.delivery_id);
         assert_eq!(
-            accepted.delivery_identity().delivery_task_id,
-            scope.delivery_task_id
+            accepted.delivery_identity().delivery_id,
+            DeliveryId(id("dlv", 1))
+        );
+        assert_eq!(
+            accepted.delivery_identity().work_item_id,
+            scope.work_item_id
         );
         assert_eq!(
             accepted.delivery_identity().execution_job_id,
@@ -536,15 +560,15 @@ mod tests {
         let (authority, mut message, scope) = fixture(2);
         message.lease.job_id = ExecutionJobId(id("job", 99));
         assert!(matches!(
-            validate_session_binding(&message, &authority, &scope),
+            validate_session_binding(&message, &authority, &scope, &DeliveryId(id("dlv", 1))),
             Err(SessionIdentityAdapterError::ForeignAuthority("lease"))
         ));
 
         let (authority, mut message, scope) = fixture(3);
-        message.stage_run_id = Some(StageRunId(id("run", 99)));
-        message.session_identity.stage_run_id = message.stage_run_id.clone();
+        message.work_run_id = Some(WorkRunId(id("wrn", 99)));
+        message.session_identity.work_run_id = message.work_run_id.clone();
         assert!(matches!(
-            validate_session_binding(&message, &authority, &scope),
+            validate_session_binding(&message, &authority, &scope, &DeliveryId(id("dlv", 1))),
             Err(SessionIdentityAdapterError::ForeignAuthority(
                 "execution scope"
             ))
@@ -554,7 +578,7 @@ mod tests {
         message.product_session_id = ProductSessionId(id("psn", 99));
         message.session_identity.product_session_id = message.product_session_id.clone();
         assert!(matches!(
-            validate_session_binding(&message, &authority, &scope),
+            validate_session_binding(&message, &authority, &scope, &DeliveryId(id("dlv", 1))),
             Err(SessionIdentityAdapterError::ForeignAuthority(
                 "execution scope"
             ))
@@ -564,12 +588,12 @@ mod tests {
     #[test]
     fn delivery_stage_binding_cannot_omit_its_stage_run() {
         let (authority, mut message, scope) = fixture(8);
-        message.stage_run_id = None;
-        message.session_identity.stage_run_id = None;
+        message.work_run_id = None;
+        message.session_identity.work_run_id = None;
 
         assert!(matches!(
-            validate_session_binding(&message, &authority, &scope),
-            Err(SessionIdentityAdapterError::InvalidMessage("stageRunId"))
+            validate_session_binding(&message, &authority, &scope, &DeliveryId(id("dlv", 1))),
+            Err(SessionIdentityAdapterError::InvalidMessage("workRunId"))
         ));
     }
 
@@ -580,7 +604,7 @@ mod tests {
         message.lease.fencing_token = message.fencing_token.clone();
         message.source_identity.lease_id = message.lease.lease_id.clone();
         assert!(matches!(
-            validate_session_binding(&message, &authority, &scope),
+            validate_session_binding(&message, &authority, &scope, &DeliveryId(id("dlv", 1))),
             Err(SessionIdentityAdapterError::ForeignAuthority("lease"))
         ));
     }
@@ -590,14 +614,14 @@ mod tests {
         let (authority, mut message, scope) = fixture(5);
         message.bound_at = Instant("2027-01-15T08:05:00.001Z".into());
         assert!(matches!(
-            validate_session_binding(&message, &authority, &scope),
+            validate_session_binding(&message, &authority, &scope, &DeliveryId(id("dlv", 1))),
             Err(SessionIdentityAdapterError::InvalidLeaseWindow(_))
         ));
 
         let (authority, mut message, scope) = fixture(6);
         message.lease.expires_at = Instant("2027-01-15T08:06:00.000Z".into());
         assert!(matches!(
-            validate_session_binding(&message, &authority, &scope),
+            validate_session_binding(&message, &authority, &scope, &DeliveryId(id("dlv", 1))),
             Err(SessionIdentityAdapterError::InvalidLeaseWindow(_))
         ));
     }

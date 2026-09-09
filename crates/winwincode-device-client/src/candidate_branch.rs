@@ -471,26 +471,7 @@ fn finish_creation(
     })
 }
 
-/// Enqueues the durable `client.candidate.apply_result` frame for one
-/// created branch.
-///
-/// The receipt is derived deterministically from the durable facts (receipt
-/// id a canonical `lar_` receipt id, the creation stamp, revision 1, expected
-/// head and resulting commit both the frozen candidate commit), so every
-/// report of the same creation encodes byte-identical receipt facts under
-/// the identical idempotency key — the Control Plane settles the replay as
-/// the same creation.
-///
-/// # Errors
-///
-/// Returns [`CandidateBranchErrorKind::NoOccupancyMirror`] when the device
-/// holds no occupancy mirror and a store failure when the outbox append
-/// fails.
-/// Deterministic canonical `lar_` receipt id for one branch-creation
-/// delivery: the first 25 uppercase hex characters of the frozen commit
-/// plus a `G` domain tag (valid Crockford symbols, matching the Server
-/// ledger validator), so repeated reports of the same creation carry one
-/// identical receipt id.
+/// Builds the deterministic canonical `lar_` receipt id for a branch event.
 fn deterministic_lar_id(candidate_id: &str, tag: char) -> String {
     let hex: String = candidate_id
         .chars()
@@ -501,6 +482,13 @@ fn deterministic_lar_id(candidate_id: &str, tag: char) -> String {
     format!("lar_{hex}{tag}")
 }
 
+/// Enqueues the durable `client.candidate.apply_result` frame for one created
+/// branch. The receipt is derived deterministically from the durable facts.
+///
+/// # Errors
+///
+/// Returns [`CandidateBranchErrorKind::NoOccupancyMirror`] when no occupancy
+/// mirror is held, or a store error when appending the outbox frame fails.
 pub fn enqueue_branch_created(
     daemon: &mut DeviceDaemon,
     record: &CandidateLocalRefRecord,

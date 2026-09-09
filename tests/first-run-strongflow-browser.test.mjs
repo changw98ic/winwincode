@@ -31,7 +31,7 @@ const IDENTIFIER = /^[a-z]{3}_[0-9A-HJKMNP-TV-Z]{26}$/u
 const STRONGFLOW_ROUTE = new RegExp(
   '^#/strongflow\\?delivery=dlv_[0-9A-HJKMNP-TV-Z]{26}'
   + '&session=psn_[0-9A-HJKMNP-TV-Z]{26}'
-  + '&stageRun=run_[0-9A-HJKMNP-TV-Z]{26}&view=unified'
+  + '&workRun=wrn_[0-9A-HJKMNP-TV-Z]{26}&view=unified'
   + '&organizationId=org_00000000000000000000000001'
   + '&workspaceId=wsp_00000000000000000000000001'
   + '&projectId=prj_00000000000000000000000001'
@@ -413,11 +413,11 @@ test('a real browser runs the first-use vertical from sign-in into StrongFlow', 
   const strongflowSessionId = new URLSearchParams(
     conversion.strongflow.hash.split('?')[1],
   ).get('session')
-  const strongflowStageRunId = new URLSearchParams(
+  const strongflowWorkRunId = new URLSearchParams(
     conversion.strongflow.hash.split('?')[1],
-  ).get('stageRun')
+  ).get('workRun')
   assert.equal(conversion.strongflow.heading, 'First-run Delivery')
-  assert.match(conversion.strongflow.status, /Waiting for your input/u)
+  assert.match(conversion.strongflow.status, /In progress/u)
   assert.deepEqual(conversion.strongflow.deliveryIds, [strongflowDeliveryId])
   await capture('first-run-strongflow.png')
 
@@ -444,9 +444,9 @@ test('a real browser runs the first-use vertical from sign-in into StrongFlow', 
   assert.equal(restoredStrongFlow.hash, conversion.strongflow.hash)
   assert.equal(restoredStrongFlow.deliveryParameter, strongflowDeliveryId)
   assert.equal(restoredStrongFlow.sessionParameter, strongflowSessionId)
-  assert.equal(restoredStrongFlow.stageRunParameter, strongflowStageRunId)
+  assert.equal(restoredStrongFlow.workRunParameter, strongflowWorkRunId)
   assert.equal(restoredStrongFlow.heading, 'First-run Delivery')
-  assert.match(restoredStrongFlow.status, /Waiting for your input/u)
+  assert.match(restoredStrongFlow.status, /In progress/u)
   assert.deepEqual(restoredStrongFlow.deliveryIds, [strongflowDeliveryId])
 
   // The first-run checklist closes once the first Chat and Delivery both exist.
@@ -464,6 +464,7 @@ test('a real browser runs the first-use vertical from sign-in into StrongFlow', 
     'chat.submit',
     'chat.submit',
     'delivery.create',
+    'delivery.task_breakdown.create',
     'delivery.advance',
   ])
   for (const item of commands) {
@@ -477,7 +478,7 @@ test('a real browser runs the first-use vertical from sign-in into StrongFlow', 
     }, item.command)
   }
   assert.equal(new Set(commands.map(item => item.requestId)).size, commands.length)
-  const [sessionCreate, failedSubmit, retrySubmit, deliveryCreate, deliveryAdvance] = commands
+  const [sessionCreate, failedSubmit, retrySubmit, deliveryCreate, workItemsCreate, deliveryAdvance] = commands
   assert.equal(sessionCreate.expectedRevision, 0)
   assert.match(sessionCreate.payload.productSessionId, IDENTIFIER)
   assert.equal(sessionCreate.payload.productSessionId, chatSessionId)
@@ -519,8 +520,13 @@ test('a real browser runs the first-use vertical from sign-in into StrongFlow', 
     title: 'First-run Delivery',
   })
   assert.deepEqual(deliveryCreate.payload.tasks, [])
-  assert.equal(deliveryAdvance.expectedRevision, 1)
-  assert.deepEqual(deliveryAdvance.payload, { deliveryId: strongflowDeliveryId })
+  assert.equal(workItemsCreate.expectedRevision, 1)
+  assert.equal(workItemsCreate.payload.deliveryId, strongflowDeliveryId)
+  assert.equal(workItemsCreate.payload.items.length, 1)
+  assert.match(workItemsCreate.payload.items[0].id, IDENTIFIER)
+  assert.equal(workItemsCreate.payload.items[0].criterionIds[0], 'crt_00000000000000000000000001')
+  assert.equal(deliveryAdvance.expectedRevision, 2)
+  assert.deepEqual(deliveryAdvance.payload, { deliveryId: strongflowDeliveryId, dispatchProfile: 'executor' })
 
   const subscriptions = observation.subscriptions.map(item => item.subscription)
   assert.ok(subscriptions.some(item => (
@@ -569,8 +575,8 @@ test('a real browser runs the first-use vertical from sign-in into StrongFlow', 
     messageCount: 1,
     submittedRequirements: 2,
     deliveryId: strongflowDeliveryId,
-    deliveryRevision: 2,
-    deliveryStatus: 'clarifying',
+    deliveryRevision: 3,
+    deliveryStatus: 'executing',
     defaultModelRoute: null,
   })
   const sessionReads = observation.queries.filter(call => call.query === 'session.get')

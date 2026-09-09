@@ -14,10 +14,11 @@ use std::sync::{Arc, Mutex};
 
 use sha2::{Digest, Sha256};
 use winwincode_domain::{
-    ArtifactId, ChangeBatchId, CodexThreadId, DeliveryId, DeliveryTaskId, ExecutionAckSequence,
-    ExecutionEventId, ExecutionJobId, ExecutionMessageId, ExecutionSequence, FencingToken, Instant,
-    LeaseId, ProductSessionId, RepositoryId, RequestId, SchemaVersion, Sha256Digest, StageRunId,
-    WorkerId, WorkerInstanceId, WorkerSessionId, WorkspaceRevision,
+    ArtifactId, ChangeBatchId, CodexThreadId, CriterionId, ExecutionAckSequence, ExecutionEventId,
+    ExecutionJobId, ExecutionMessageId, ExecutionSequence, FencingToken, Instant, LeaseId,
+    ProductSessionId, RepositoryId, RequestId, Revision, SchemaVersion, Sha256Digest, WorkContract,
+    WorkContractId, WorkItem, WorkItemId, WorkItemState, WorkRunId, WorkerId, WorkerInstanceId,
+    WorkerSessionId, WorkspaceRevision,
 };
 use winwincode_execution_port::change_batch_identity::derive_change_batch_id;
 use winwincode_execution_port::generated::{
@@ -25,9 +26,7 @@ use winwincode_execution_port::generated::{
     ArtifactChunkMessage, ArtifactChunkMessageKind, ArtifactDescriptor, ArtifactKind,
     ArtifactOpenMessage, ArtifactOpenMessageKind, ArtifactReference, ChangeBatchIdentity,
     ChangeBatchProgressEvent, ChangeBatchProgressState, ChangeBatchProposal,
-    ChangeBatchProposalDisposition, ChangeBatchProposalEvent,
-    DeliveryStageAcceptanceCriterionInput, DeliveryStageExecutionScope,
-    DeliveryStageExecutionScopeKind, DeliveryStageInput, DeliveryStageTaskInput, EncodedPayload,
+    ChangeBatchProposalDisposition, ChangeBatchProposalEvent, EncodedPayload,
     ExecutionEventCategory, ExecutionEventRecord, ExecutionJob, ExecutionJobReplacementAuthority,
     ExecutionLeaseStamp, ExecutionLimits, ExecutionOutcomeStatus, ExecutionOutcomeUsage,
     ExecutionPortMessage, ExecutionScope, ExecutionWorkspace, ExecutionWorkspaceWriteMode,
@@ -36,9 +35,10 @@ use winwincode_execution_port::generated::{
     JobDispatchResultMessageStatus, LeaseWriteStatus, ModelGatewayRoute,
     ProductSessionExecutionScope, ProductSessionExecutionScopeKind, RepairLoopCounters,
     RepairLoopStopReason, RuntimeEventMessage, RuntimeEventMessageKind, ValidationProfileName,
-    WorkerCapabilityFeature, WorkerCapabilitySet, WorkerCapabilitySetPlatform,
-    WorkerRegistrationResultMessage, WorkerRegistrationResultMessageKind,
-    WorkerRegistrationResultMessageLeaseRecovery, WorkerRegistrationResultMessageStatus,
+    WorkRunExecutionScope, WorkRunExecutionScopeKind, WorkRunInput, WorkerCapabilityFeature,
+    WorkerCapabilitySet, WorkerCapabilitySetPlatform, WorkerRegistrationResultMessage,
+    WorkerRegistrationResultMessageKind, WorkerRegistrationResultMessageLeaseRecovery,
+    WorkerRegistrationResultMessageStatus,
 };
 use winwincode_execution_port::transport::{
     ExecutionPortCore, FrameDirection, RemoteTransportAdapter, TypedFrame,
@@ -979,7 +979,7 @@ fn lease(job_suffix: char) -> ExecutionLeaseStamp {
 
 fn dispatch(job_suffix: char, scope: ExecutionScope) -> JobDispatchMessage {
     let lease = lease(job_suffix);
-    let delivery_stage = matches!(&scope, ExecutionScope::DeliveryStageExecutionScope(_));
+    let delivery_stage = matches!(&scope, ExecutionScope::WorkRunExecutionScope(_));
     let goal = "Perform the approved fixture change.";
     JobDispatchMessage {
         job: ExecutionJob {
@@ -997,23 +997,40 @@ fn dispatch(job_suffix: char, scope: ExecutionScope) -> JobDispatchMessage {
                 job_suffix.to_ascii_lowercase().to_string().repeat(64)
             )),
             scope,
-            stage_input: delivery_stage.then(|| DeliveryStageInput {
-                acceptance_criteria: vec![DeliveryStageAcceptanceCriterionInput {
-                    criterion_id: "criterion-fixture".to_owned(),
-                    description: "The fixture behavior is verified.".to_owned(),
-                    required: true,
-                    verification_method: Some("Run the fixture test.".to_owned()),
-                }],
-                candidate_ref: None,
-                constraints: Vec::new(),
-                delivery_spec_id: "spec-fixture".to_owned(),
-                delivery_spec_revision: 1,
-                goal: goal.to_owned(),
-                out_of_scope: Vec::new(),
+            work_input: delivery_stage.then(|| WorkRunInput {
+                delivery_spec_id: "spec-fixture".into(),
+                delivery_spec_revision: Revision(2),
                 schema_version: SchemaVersion::WinwincodeV1,
-                scope: vec!["Fixture source".to_owned()],
-                task: None,
-                title: "Fixture Delivery".to_owned(),
+                work_contract: WorkContract {
+                    constraints: Vec::new(),
+                    created_at: Instant("2027-01-15T08:00:00.000Z".to_owned()),
+                    criteria: vec![winwincode_domain::Criterion {
+                        id: CriterionId("crt_00000000000000000000000001".to_owned()),
+                        description: "The fixture behavior is verified.".to_owned(),
+                        required: true,
+                        verification_method: Some("Run the fixture test.".to_owned()),
+                    }],
+                    id: WorkContractId("wct_00000000000000000000000001".to_owned()),
+                    objective: goal.to_owned(),
+                    protected_scope: Vec::new(),
+                    required_human_authority: "approval".to_owned(),
+                    revision: Revision(1),
+                    schema_version: SchemaVersion::WinwincodeV1,
+                    scope: vec!["Fixture source".to_owned()],
+                },
+                work_item: WorkItem {
+                    criterion_ids: vec![CriterionId("crt_00000000000000000000000001".to_owned())],
+                    depends_on: Vec::new(),
+                    goal: goal.to_owned(),
+                    id: WorkItemId("wit_00000000000000000000000001".to_owned()),
+                    revision: Revision(1),
+                    schema_version: SchemaVersion::WinwincodeV1,
+                    state: WorkItemState::Ready,
+                    title: "Fixture Delivery".to_owned(),
+                    work_contract_id: WorkContractId("wct_00000000000000000000000001".to_owned()),
+                    work_contract_revision: Revision(1),
+                },
+                candidate_ref: None,
             }),
             workspace: ExecutionWorkspace {
                 checkout_revision: "HEAD".to_owned(),
@@ -1033,48 +1050,39 @@ fn dispatch(job_suffix: char, scope: ExecutionScope) -> JobDispatchMessage {
 
 fn writer_dispatch(job_suffix: char) -> JobDispatchMessage {
     let mut dispatch = dispatch(job_suffix, delivery_scope(job_suffix));
-    let task_id = DeliveryTaskId(id("dtk", job_suffix));
-    let criterion_id = "criterion-fixture".to_owned();
-    let ExecutionScope::DeliveryStageExecutionScope(scope) = &mut dispatch.job.scope else {
+    let ExecutionScope::WorkRunExecutionScope(_scope) = &mut dispatch.job.scope else {
         unreachable!("writer fixture is a Delivery stage")
     };
-    scope.delivery_task_id = Some(task_id.clone());
     "executor".clone_into(&mut dispatch.job.execution_profile);
     dispatch.job.workspace.write_mode = ExecutionWorkspaceWriteMode::Candidate;
     "HEAD".clone_into(&mut dispatch.job.workspace.checkout_revision);
-    let input = dispatch
-        .job
-        .stage_input
-        .as_mut()
-        .expect("writer stage input");
-    input.task = Some(DeliveryStageTaskInput {
-        acceptance_criterion_ids: vec![criterion_id],
-        goal: dispatch.job.goal.clone(),
-        task_id,
-        title: "Produce candidate".to_owned(),
-    });
+    "Produce candidate".clone_into(
+        &mut dispatch
+            .job
+            .work_input
+            .as_mut()
+            .expect("writer work input")
+            .work_item
+            .title,
+    );
     dispatch
 }
 
 fn delegated_task_dispatch(job_suffix: char) -> JobDispatchMessage {
     let mut dispatch = dispatch(job_suffix, delivery_scope(job_suffix));
     "executor".clone_into(&mut dispatch.job.execution_profile);
-    let task_id = DeliveryTaskId(id("dtk", job_suffix));
-    let ExecutionScope::DeliveryStageExecutionScope(scope) = &mut dispatch.job.scope else {
+    let ExecutionScope::WorkRunExecutionScope(_scope) = &mut dispatch.job.scope else {
         unreachable!("delegated fixture is a Delivery stage")
     };
-    scope.delivery_task_id = Some(task_id.clone());
-    dispatch
-        .job
-        .stage_input
-        .as_mut()
-        .expect("delegated stage input")
-        .task = Some(DeliveryStageTaskInput {
-        acceptance_criterion_ids: vec!["criterion-fixture".to_owned()],
-        goal: dispatch.job.goal.clone(),
-        task_id,
-        title: "Delegated task".to_owned(),
-    });
+    "Delegated task".clone_into(
+        &mut dispatch
+            .job
+            .work_input
+            .as_mut()
+            .expect("delegated work input")
+            .work_item
+            .title,
+    );
     dispatch
 }
 
@@ -1089,6 +1097,10 @@ fn replacement_dispatch(predecessor: &winwincode_worker::ActiveJob) -> JobDispat
     replacement.lease.worker_instance_id = WorkerInstanceId(id("wki", 'B'));
     replacement.message_id = ExecutionMessageId(id("msg", 'B'));
     replacement.request_id = RequestId(id("req", 'B'));
+    if let ExecutionScope::WorkRunExecutionScope(scope) = &mut replacement.job.scope {
+        scope.work_run_id = WorkRunId(id("wrn", 'B'));
+        scope.attempt = 2;
+    }
     replacement.replacement_authority = Some(ExecutionJobReplacementAuthority {
         created_at: Instant("2027-01-15T08:00:59.000Z".to_owned()),
         logical_job_digest: logical_job_digest(&replacement.job),
@@ -1096,7 +1108,7 @@ fn replacement_dispatch(predecessor: &winwincode_worker::ActiveJob) -> JobDispat
         predecessor_session_identity: Some(predecessor.session_identity.clone()),
         receipt_digest: Sha256Digest(format!("sha256:{}", "f".repeat(64))),
         receipt_id: RequestId(id("req", 'Z')),
-        scope: replacement.job.scope.clone(),
+        scope: predecessor.job.scope.clone(),
         successor_lease: replacement.lease.clone(),
     });
     replacement
@@ -1109,6 +1121,12 @@ fn logical_job_digest(job: &ExecutionJob) -> Sha256Digest {
         .expect("ExecutionJob object")
         .remove("attempt")
         .expect("ExecutionJob attempt");
+    let scope = value
+        .get_mut("scope")
+        .and_then(serde_json::Value::as_object_mut)
+        .expect("ExecutionJob scope");
+    scope.remove("attempt");
+    scope.remove("workRunId");
     Sha256Digest(format!(
         "sha256:{:x}",
         Sha256::digest(serde_json::to_vec(&value).expect("logical Job bytes"))
@@ -1116,13 +1134,16 @@ fn logical_job_digest(job: &ExecutionJob) -> Sha256Digest {
 }
 
 fn delivery_scope(suffix: char) -> ExecutionScope {
-    ExecutionScope::DeliveryStageExecutionScope(DeliveryStageExecutionScope {
-        delivery_id: DeliveryId(id("dlv", suffix)),
-        delivery_task_id: None,
-        kind: DeliveryStageExecutionScopeKind::DeliveryStage,
+    ExecutionScope::WorkRunExecutionScope(WorkRunExecutionScope {
+        kind: WorkRunExecutionScopeKind::WorkRun,
         product_session_id: ProductSessionId(id("psn", suffix)),
         rework_authorization: None,
-        stage_run_id: StageRunId(id("run", suffix)),
+        work_contract_id: WorkContractId("wct_00000000000000000000000001".to_owned()),
+        work_contract_revision: Revision(1),
+        work_item_id: WorkItemId("wit_00000000000000000000000001".to_owned()),
+        work_item_revision: Revision(1),
+        work_run_id: WorkRunId(id("wrn", suffix)),
+        attempt: 1,
     })
 }
 
@@ -1571,6 +1592,65 @@ async fn local_and_remote_frames_drive_value_identical_worker_semantics() {
 }
 
 #[tokio::test]
+async fn mismatched_work_run_input_is_rejected_before_workspace_or_codex() {
+    let (workspace_root, source_root) = test_workspace_paths();
+    let port = RecordingPort::default();
+    let messages = Rc::clone(&port.messages);
+    let codex = FakeCodex::with_threads([thread('A')]);
+    let calls = codex.clone();
+    let mut worker = WorkerMain::new(
+        worker_config(1),
+        port,
+        codex,
+        JobWorkspaceRuntime::open(&workspace_root, &source_root)
+            .expect("open fixture workspace runtime"),
+    );
+    register(&mut worker).await;
+
+    let mut dispatch = dispatch('A', delivery_scope('A'));
+    let ExecutionScope::WorkRunExecutionScope(scope) = &mut dispatch.job.scope else {
+        unreachable!("delivery fixture is a WorkRun")
+    };
+    scope.work_item_id = WorkItemId("wit_foreign_000000000000000000000".to_owned());
+    worker
+        .accept_control(&ExecutionPortMessage::JobDispatchMessage(dispatch), now())
+        .await
+        .expect("invalid WorkRun input returns a rejection result");
+
+    assert!(worker.active_jobs().is_empty());
+    assert!(
+        std::fs::read_dir(&workspace_root)
+            .expect("read workspace root")
+            .next()
+            .transpose()
+            .expect("read workspace entry")
+            .is_none(),
+        "invalid WorkRun input must not create a checkout, manifest, or owner lock"
+    );
+    assert!(
+        calls
+            .calls()
+            .iter()
+            .all(|call| !call.starts_with("ensure:"))
+    );
+    assert!(
+        calls
+            .calls()
+            .iter()
+            .all(|call| !call.starts_with("submit:"))
+    );
+    assert!(messages.borrow().iter().any(|message| matches!(
+        message,
+        ExecutionPortMessage::JobDispatchResultMessage(result)
+            if result.status == JobDispatchResultMessageStatus::RejectedCapability
+                && result.error.as_ref().is_some_and(|error| {
+                    error.code == winwincode_execution_port::generated::ExecutionPortErrorCode::CapabilityMismatch
+                        && !error.retryable
+                })
+    )));
+}
+
+#[tokio::test]
 async fn duplicate_or_conflicting_dispatch_never_creates_a_second_thread() {
     let port = RecordingPort::default();
     let messages = Rc::clone(&port.messages);
@@ -1864,6 +1944,10 @@ async fn sealed_replacement_reuses_the_writer_checkout_and_auto_emits_one_candid
         )
         .await
         .expect("accept successor registration");
+    let replacement_proof = replacement
+        .replacement_authority
+        .clone()
+        .expect("replacement proof");
     restarted
         .accept_control(
             &ExecutionPortMessage::JobDispatchMessage(replacement),
@@ -1872,6 +1956,40 @@ async fn sealed_replacement_reuses_the_writer_checkout_and_auto_emits_one_candid
         .await
         .expect("accept sealed successor dispatch");
     let successor = restarted.active_jobs()[0].clone();
+    let message_snapshot = messages.borrow().clone();
+    let successor_binding = message_snapshot
+        .iter()
+        .filter_map(|message| match message {
+            ExecutionPortMessage::SessionBindingMessage(binding) => Some(binding),
+            _ => None,
+        })
+        .next_back()
+        .unwrap_or_else(|| panic!("successor session binding; messages={message_snapshot:?}"));
+    assert_ne!(successor.worker_session_id, predecessor.worker_session_id);
+    assert_ne!(successor.codex_thread_id, predecessor.codex_thread_id);
+    assert_ne!(
+        successor.session_identity.work_run_id,
+        predecessor.session_identity.work_run_id
+    );
+    assert_eq!(
+        successor_binding.work_run_id,
+        successor.session_identity.work_run_id
+    );
+    assert_eq!(
+        successor_binding.session_identity,
+        successor.session_identity
+    );
+    assert_eq!(
+        successor_binding.worker_session_id,
+        successor.worker_session_id
+    );
+    assert_eq!(successor_binding.codex_thread_id, successor.codex_thread_id);
+    assert_eq!(successor_binding.lease, successor.lease);
+    assert_eq!(successor_binding.attempt, successor.job.attempt);
+    assert_eq!(
+        replacement_proof.predecessor_session_identity.as_ref(),
+        Some(&predecessor.session_identity)
+    );
     assert_eq!(
         successor_observer.workspace(&successor.codex_thread_id),
         predecessor_checkout
@@ -2112,7 +2230,7 @@ async fn delegated_proposal_is_executed_once_and_job_remains_active() {
                 identity: identity.clone(),
                 occurred_at: now(),
                 proposal: ChangeBatchProposal {
-                    acceptance_criteria_ids: vec!["criterion-fixture".to_owned()],
+                    acceptance_criteria_ids: vec!["crt_00000000000000000000000001".to_owned()],
                     disposition: ChangeBatchProposalDisposition::Final,
                     patch: DELEGATED_PATCH.to_owned(),
                     schema_version: 1,
@@ -2206,7 +2324,7 @@ async fn accepted_final_delegated_batch_freezes_without_another_primary_turn() {
                 identity,
                 occurred_at: now(),
                 proposal: ChangeBatchProposal {
-                    acceptance_criteria_ids: vec!["criterion-fixture".to_owned()],
+                    acceptance_criteria_ids: vec!["crt_00000000000000000000000001".to_owned()],
                     disposition: ChangeBatchProposalDisposition::Final,
                     patch: DELEGATED_PATCH.to_owned(),
                     schema_version: 1,
@@ -2317,7 +2435,7 @@ async fn delegated_freeze_before_persist_restarts_from_one_accepted_candidate() 
                 identity,
                 occurred_at: now(),
                 proposal: ChangeBatchProposal {
-                    acceptance_criteria_ids: vec!["criterion-fixture".to_owned()],
+                    acceptance_criteria_ids: vec!["crt_00000000000000000000000001".to_owned()],
                     disposition: ChangeBatchProposalDisposition::Final,
                     patch: DELEGATED_PATCH.to_owned(),
                     schema_version: 1,
@@ -2460,7 +2578,7 @@ async fn unresolved_validation_retains_one_observer_open_before_sending_it() {
                 identity,
                 occurred_at: now(),
                 proposal: ChangeBatchProposal {
-                    acceptance_criteria_ids: vec!["criterion-fixture".to_owned()],
+                    acceptance_criteria_ids: vec!["crt_00000000000000000000000001".to_owned()],
                     disposition: ChangeBatchProposalDisposition::Final,
                     patch: DELEGATED_PATCH.to_owned(),
                     schema_version: 1,
@@ -2675,7 +2793,7 @@ async fn delegated_codex_poll_rejects_foreign_authority_before_return() {
                 identity,
                 occurred_at: now(),
                 proposal: ChangeBatchProposal {
-                    acceptance_criteria_ids: vec!["criterion-fixture".to_owned()],
+                    acceptance_criteria_ids: vec!["crt_00000000000000000000000001".to_owned()],
                     disposition: ChangeBatchProposalDisposition::Final,
                     patch: DELEGATED_PATCH.to_owned(),
                     schema_version: 1,
@@ -2778,7 +2896,7 @@ async fn delegated_proposal_rejects_patch_bytes_outside_the_sealed_identity() {
                 identity,
                 occurred_at: now(),
                 proposal: ChangeBatchProposal {
-                    acceptance_criteria_ids: vec!["criterion-fixture".to_owned()],
+                    acceptance_criteria_ids: vec!["crt_00000000000000000000000001".to_owned()],
                     disposition: ChangeBatchProposalDisposition::Final,
                     patch:
                         "*** Begin Patch\n*** Add File: delegated.txt\n+changed\n*** End Patch\n"
@@ -3444,7 +3562,7 @@ async fn cancelling_delegated_job_rejects_late_batch_after_interrupt_failure() {
         identity,
         occurred_at: now(),
         proposal: ChangeBatchProposal {
-            acceptance_criteria_ids: vec!["criterion-fixture".to_owned()],
+            acceptance_criteria_ids: vec!["crt_00000000000000000000000001".to_owned()],
             disposition: ChangeBatchProposalDisposition::Final,
             patch: DELEGATED_PATCH.to_owned(),
             schema_version: 1,
@@ -3768,8 +3886,8 @@ async fn product_session_dispatch_binds_without_a_stage_run() {
             _ => None,
         })
         .expect("ProductSession dispatch emits a SessionBinding");
-    assert!(binding.stage_run_id.is_none());
-    assert!(binding.session_identity.stage_run_id.is_none());
+    assert!(binding.work_run_id.is_none());
+    assert!(binding.session_identity.work_run_id.is_none());
     assert_eq!(worker.active_jobs().len(), 1);
     assert_eq!(
         calls.calls(),

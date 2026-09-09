@@ -56,7 +56,7 @@ test('real Chrome reviews a bounded Candidate tree and drives the linked Diff by
   await devtools.send('Runtime.enable', {}, sessionId)
   await devtools.send('Page.enable', {}, sessionId)
   await devtools.send('Page.navigate', {
-    url: `https://client.localhost:${String(clientPort)}/#/strongflow?delivery=dlv_00000000000000000000000001&session=psn_00000000000000000000000001&stageRun=run_00000000000000000000000001&file=src%2Fcurrent.ts`,
+    url: `https://client.localhost:${String(clientPort)}/#/strongflow?delivery=dlv_00000000000000000000000001&session=psn_00000000000000000000000001&workRun=wrn_00000000000000000000000001&file=src%2Fcurrent.ts`,
   }, sessionId)
   await waitForGlobal(devtools, sessionId, 'runCandidateFilesScenario')
   const result = await evaluate(devtools, sessionId, 'globalThis.runCandidateFilesScenario()')
@@ -75,8 +75,9 @@ test('real Chrome reviews a bounded Candidate tree and drives the linked Diff by
 
   assert.deepEqual(result.collapsed, { expanded: 'false', containsCurrent: false })
   assert.notEqual(result.keyboard.target, 'src/current.ts')
-  assert.equal(result.keyboard.selectedPath, result.keyboard.target)
+  assert.equal(result.keyboard.selectedPath, result.keyboard.target, JSON.stringify(result.keyboard))
   assert.equal(result.keyboard.activePath, result.keyboard.target)
+  assert.deepEqual(result.keyboard.calls.at(-1), ['selectCandidateFile', result.keyboard.target])
   assert.match(
     result.keyboard.hash,
     new RegExp(`&file=${encodeURIComponent(result.keyboard.target)}&view=unified$`, 'u'),

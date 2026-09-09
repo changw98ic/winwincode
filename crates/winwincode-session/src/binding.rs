@@ -51,23 +51,26 @@
 use std::fmt;
 
 use winwincode_domain::{
-    CodexThreadId, DeliveryId, DeliveryTaskId, ExecutionJobId, LeaseId, ProductSessionId,
-    StageRunId, WorkerId, WorkerInstanceId, WorkerSessionId,
+    CodexThreadId, DeliveryId, ExecutionJobId, LeaseId, ProductSessionId, Revision, WorkContractId,
+    WorkItemId, WorkRunId, WorkerId, WorkerInstanceId, WorkerSessionId,
 };
 
 /// Execution scope carried by one binding. Chat has no hidden Delivery or
-/// `StageRun` identity.
+/// `WorkRun` identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BindingScope {
     ProductSession,
-    DeliveryStage {
+    DeliveryWorkRun {
         delivery_id: DeliveryId,
-        delivery_task_id: Option<DeliveryTaskId>,
-        stage_run_id: StageRunId,
+        work_contract_id: WorkContractId,
+        work_contract_revision: Revision,
+        work_item_id: WorkItemId,
+        work_item_revision: Revision,
+        work_run_id: WorkRunId,
     },
 }
 
-/// Immutable ProductSession/Delivery/StageRun/Job identity.
+/// Immutable ProductSession/Delivery/WorkRun/Job identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionBindingIdentity {
     scope: BindingScope,
@@ -134,16 +137,20 @@ impl BindingScope {
     fn validate(&self) -> Result<(), SessionBindingError> {
         match self {
             Self::ProductSession => Ok(()),
-            Self::DeliveryStage {
+            Self::DeliveryWorkRun {
                 delivery_id,
-                delivery_task_id,
-                stage_run_id,
+                work_contract_id,
+                work_contract_revision,
+                work_item_id,
+                work_item_revision,
+                work_run_id,
             } => {
                 validate_id(&delivery_id.0, "deliveryId", "dlv_")?;
-                if let Some(task_id) = delivery_task_id {
-                    validate_id(&task_id.0, "deliveryTaskId", "dtk_")?;
-                }
-                validate_id(&stage_run_id.0, "stageRunId", "run_")
+                validate_id(&work_contract_id.0, "workContractId", "wct_")?;
+                validate_revision(work_contract_revision, "workContractRevision")?;
+                validate_id(&work_item_id.0, "workItemId", "wit_")?;
+                validate_revision(work_item_revision, "workItemRevision")?;
+                validate_id(&work_run_id.0, "workRunId", "wrn_")
             }
         }
     }
@@ -152,25 +159,54 @@ impl BindingScope {
     pub fn delivery_id(&self) -> Option<&DeliveryId> {
         match self {
             Self::ProductSession => None,
-            Self::DeliveryStage { delivery_id, .. } => Some(delivery_id),
+            Self::DeliveryWorkRun { delivery_id, .. } => Some(delivery_id),
         }
     }
 
     #[must_use]
-    pub fn delivery_task_id(&self) -> Option<&DeliveryTaskId> {
+    pub fn work_contract_id(&self) -> Option<&WorkContractId> {
         match self {
             Self::ProductSession => None,
-            Self::DeliveryStage {
-                delivery_task_id, ..
-            } => delivery_task_id.as_ref(),
+            Self::DeliveryWorkRun {
+                work_contract_id, ..
+            } => Some(work_contract_id),
         }
     }
 
     #[must_use]
-    pub fn stage_run_id(&self) -> Option<&StageRunId> {
+    pub fn work_contract_revision(&self) -> Option<&Revision> {
         match self {
             Self::ProductSession => None,
-            Self::DeliveryStage { stage_run_id, .. } => Some(stage_run_id),
+            Self::DeliveryWorkRun {
+                work_contract_revision,
+                ..
+            } => Some(work_contract_revision),
+        }
+    }
+
+    #[must_use]
+    pub fn work_item_id(&self) -> Option<&WorkItemId> {
+        match self {
+            Self::ProductSession => None,
+            Self::DeliveryWorkRun { work_item_id, .. } => Some(work_item_id),
+        }
+    }
+
+    #[must_use]
+    pub fn work_item_revision(&self) -> Option<&Revision> {
+        match self {
+            Self::ProductSession => None,
+            Self::DeliveryWorkRun {
+                work_item_revision, ..
+            } => Some(work_item_revision),
+        }
+    }
+
+    #[must_use]
+    pub fn work_run_id(&self) -> Option<&WorkRunId> {
+        match self {
+            Self::ProductSession => None,
+            Self::DeliveryWorkRun { work_run_id, .. } => Some(work_run_id),
         }
     }
 }
@@ -189,19 +225,26 @@ impl SessionBindingIdentity {
         )
     }
 
-    /// Constructs a Delivery stage scope. A Delivery-level task is represented by `None`.
-    pub fn delivery_stage(
+    /// Constructs a Delivery `WorkRun` scope with its contract, item, and revision identities.
+    #[allow(clippy::too_many_arguments)]
+    pub fn delivery_work_run(
         delivery_id: DeliveryId,
-        delivery_task_id: Option<DeliveryTaskId>,
-        stage_run_id: StageRunId,
+        work_contract_id: WorkContractId,
+        work_contract_revision: Revision,
+        work_item_id: WorkItemId,
+        work_item_revision: Revision,
+        work_run_id: WorkRunId,
         product_session_id: ProductSessionId,
         execution_job_id: ExecutionJobId,
     ) -> Result<Self, SessionBindingError> {
         Self::try_new(
-            BindingScope::DeliveryStage {
+            BindingScope::DeliveryWorkRun {
                 delivery_id,
-                delivery_task_id,
-                stage_run_id,
+                work_contract_id,
+                work_contract_revision,
+                work_item_id,
+                work_item_revision,
+                work_run_id,
             },
             product_session_id,
             execution_job_id,
@@ -245,13 +288,28 @@ impl SessionBindingIdentity {
     }
 
     #[must_use]
-    pub fn delivery_task_id(&self) -> Option<&DeliveryTaskId> {
-        self.scope.delivery_task_id()
+    pub fn work_contract_id(&self) -> Option<&WorkContractId> {
+        self.scope.work_contract_id()
     }
 
     #[must_use]
-    pub fn stage_run_id(&self) -> Option<&StageRunId> {
-        self.scope.stage_run_id()
+    pub fn work_contract_revision(&self) -> Option<&Revision> {
+        self.scope.work_contract_revision()
+    }
+
+    #[must_use]
+    pub fn work_item_id(&self) -> Option<&WorkItemId> {
+        self.scope.work_item_id()
+    }
+
+    #[must_use]
+    pub fn work_item_revision(&self) -> Option<&Revision> {
+        self.scope.work_item_revision()
+    }
+
+    #[must_use]
+    pub fn work_run_id(&self) -> Option<&WorkRunId> {
+        self.scope.work_run_id()
     }
 }
 
@@ -421,13 +479,28 @@ impl SessionBinding {
     }
 
     #[must_use]
-    pub fn delivery_task_id(&self) -> Option<&DeliveryTaskId> {
-        self.identity.delivery_task_id()
+    pub fn work_contract_id(&self) -> Option<&WorkContractId> {
+        self.identity.work_contract_id()
     }
 
     #[must_use]
-    pub fn stage_run_id(&self) -> Option<&StageRunId> {
-        self.identity.stage_run_id()
+    pub fn work_contract_revision(&self) -> Option<&Revision> {
+        self.identity.work_contract_revision()
+    }
+
+    #[must_use]
+    pub fn work_item_id(&self) -> Option<&WorkItemId> {
+        self.identity.work_item_id()
+    }
+
+    #[must_use]
+    pub fn work_item_revision(&self) -> Option<&Revision> {
+        self.identity.work_item_revision()
+    }
+
+    #[must_use]
+    pub fn work_run_id(&self) -> Option<&WorkRunId> {
+        self.identity.work_run_id()
     }
 
     #[must_use]
@@ -490,4 +563,11 @@ fn canonical_id(value: &str, prefix: &str) -> bool {
                     )
             })
     })
+}
+
+fn validate_revision(value: &Revision, field: &'static str) -> Result<(), SessionBindingError> {
+    if !(1..=9_007_199_254_740_991).contains(&value.0) {
+        return Err(SessionBindingError::InvalidScope(field));
+    }
+    Ok(())
 }

@@ -71,7 +71,7 @@ test('a real browser opens Evidence, Preview, Tests, and Logs tabs with exact bi
     mobile: false,
   }, sessionId)
   await devtools.send('Page.navigate', {
-    url: `https://client.localhost:${String(clientPort)}/#/strongflow`,
+    url: `https://client.localhost:${String(clientPort)}/#/strongflow?delivery=dlv_00000000000000000000000002&session=psn_00000000000000000000000002&workRun=wrn_00000000000000000000000001`,
   }, sessionId)
   await waitForGlobal(devtools, sessionId, 'runEvidenceWorkbenchScenario')
   const result = await evaluate(devtools, sessionId, 'globalThis.runEvidenceWorkbenchScenario()')
@@ -180,13 +180,13 @@ test('a real browser opens Evidence, Preview, Tests, and Logs tabs with exact bi
   assert.deepEqual(reloaded.route, {
     deliveryId: 'dlv_00000000000000000000000002',
     productSessionId: 'psn_00000000000000000000000002',
-    stageRunId: 'run_00000000000000000000000001',
+    workRunId: 'wrn_00000000000000000000000001',
     evidenceId,
   })
   assert.deepEqual(reloaded.binding, {
     deliveryId: 'dlv_00000000000000000000000002',
     sessionBindingId: 'binding:strongflow:evidence-browser',
-    stageRunId: 'run_00000000000000000000000001',
+    workRunId: 'wrn_00000000000000000000000001',
     evidenceId,
   })
   assert.equal(reloaded.evidenceQueryCount >= 1, true)

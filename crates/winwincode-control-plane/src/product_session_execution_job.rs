@@ -150,7 +150,7 @@ impl ProductSessionExecutionConfig {
                 kind: ProductSessionExecutionScopeKind::ProductSession,
                 product_session_id: product_session_id.clone(),
             }),
-            stage_input: None,
+            work_input: None,
             workspace,
         };
         let dispatch_payload = serde_json::to_vec(&job).map_err(|_| {
@@ -174,7 +174,7 @@ impl ProductSessionExecutionConfig {
             dispatch_payload,
             attempt: 1,
             dependencies: Vec::new(),
-            stage_run_id: None,
+            work_run_id: None,
             submitted_at: context.occurred_at.clone(),
         };
         Ok(PreparedProductSessionExecution { job, submission })

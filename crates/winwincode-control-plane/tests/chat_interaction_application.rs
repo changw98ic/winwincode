@@ -27,7 +27,8 @@ use winwincode_domain::{
     ApprovalId, CodexThreadId, ControlPlaneEventId, CredentialReferenceId, DeliveryId,
     ExecutionJobId, ExecutionMessageId, ExecutionSequence, FencingToken, Instant, LeaseId,
     ModelExchangeId, OrganizationId, ProductSessionId, ProjectId, RepositoryId, RequestId,
-    Sha256Digest, StageRunId, UserId, WorkerId, WorkerInstanceId, WorkerSessionId, WorkspaceId,
+    Revision, Sha256Digest, UserId, WorkContractId, WorkItemId, WorkRunId, WorkerId,
+    WorkerInstanceId, WorkerSessionId, WorkspaceId,
 };
 use winwincode_domain::{RepositoryScope, RepositoryScopeKind};
 use winwincode_execution_port::action_gateway::GateDecision;
@@ -419,10 +420,13 @@ fn prepare_product_session(
         })
         .expect("create ProductSession");
     let binding_identity = if delivery {
-        SessionBindingIdentity::delivery_stage(
+        SessionBindingIdentity::delivery_work_run(
             DeliveryId(id("dlv", 1)),
-            None,
-            StageRunId(id("run", 1)),
+            WorkContractId(id("wct", 1)),
+            Revision(1),
+            WorkItemId(id("wit", 1)),
+            Revision(1),
+            WorkRunId(id("wrn", 1)),
             ProductSessionId(id("psn", 1)),
             runtime.job_id.clone(),
         )
@@ -799,7 +803,11 @@ fn gate_authority(
         execution_scope: execution_scope(false),
         worker_pool_id: pool(),
         product_session_revision,
-        stage_run_id: None,
+        work_contract_id: None,
+        work_contract_revision: None,
+        work_item_id: None,
+        work_item_revision: None,
+        work_run_id: None,
         job_revision: 2,
         worker_slot_revision: 1,
         runtime: runtime.clone(),

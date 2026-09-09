@@ -47,6 +47,9 @@ const canonicalTestFiles = Object.freeze([
   'tests/client-users-facade.test.mjs',
   'tests/client-server-separation.test.mjs',
   'tests/community-persistence-ports.test.mjs',
+  'tests/engineering-runtime-backlog.test.mjs',
+  'tests/engineering-runtime-design.test.mjs',
+  'tests/engineering-runtime-contract.test.mjs',
   'tests/contract-codegen.test.mjs',
   'tests/contextual-decision.test.mjs',
   'tests/contextual-decision-view-model.test.mjs',
@@ -153,14 +156,5 @@ function runTests(arguments_) {
 }
 
 runTests(['--test', '--test-concurrency=4', ...canonicalTestFiles])
-
-// The legacy ten-scenario oracle runs after the parallel Node suite and
-// reuses the TypeScript build already produced by test:ts.
-runTests(['scripts/export-delivery-strongflow-oracle.mjs', '--check'])
-
-// The trigger-aware Rust differential runs last so the generated contract
-// and its Rust producer stay one checked path.  Without its trigger paths
-// it validates the frozen plan contract-only instead of running Cargo.
-runTests(['scripts/run-delivery-strongflow-rust-differential.mjs', '--check'])
 
 process.stdout.write(`canonical TypeScript tests passed: ${canonicalTestFiles.length}\n`)

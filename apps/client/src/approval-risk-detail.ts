@@ -85,7 +85,7 @@ export interface ApprovalExecutionTargetView {
   readonly productSessionId: string
   readonly workerSessionId: string
   readonly executionJobId: string
-  readonly stageRunId: string | null
+  readonly workRunId: string | null
   readonly label: string
 }
 
@@ -321,7 +321,7 @@ export function approvalRiskDetail(
     withheld('mcpTarget', withheldReason),
     withheld('requestedReason', withheldReason),
   ])
-  const stageRunId = projection?.binding?.sessionIdentity?.stageRunId ?? null
+  const workRunId = projection?.binding?.sessionIdentity?.workRunId ?? null
   // An absent deadline fails closed inside approvalExpiry as "unknown".
   const expiresAt = (projection?.expiresAt ?? '') as Instant
   const expiry = options.expired === undefined
@@ -354,10 +354,10 @@ export function approvalRiskDetail(
       productSessionId: projection?.binding?.productSessionId ?? '',
       workerSessionId: projection?.binding?.workerSessionId ?? '',
       executionJobId: projection?.binding?.executionJobId ?? '',
-      stageRunId,
-      label: stageRunId === null
+      workRunId,
+      label: workRunId === null
         ? 'ProductSession, ExecutionJob, and WorkerSession-bound'
-        : 'ProductSession, StageRun, ExecutionJob, and WorkerSession-bound',
+        : 'ProductSession, WorkRun, ExecutionJob, and WorkerSession-bound',
     }),
   })
 }

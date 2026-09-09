@@ -1327,7 +1327,7 @@ fn persisted_authority_from_approval(
     if runtime != gate.runtime
         || request.lease.expires_at != gate.lease_expires_at
         || request.session_identity.product_session_id != gate.execution_scope.product_session_id
-        || request.session_identity.stage_run_id != gate.stage_run_id
+        || request.session_identity.work_run_id != gate.work_run_id
     {
         return Err(authority_mismatch(
             "Approval request runtime differs from its Gate fact",
@@ -1379,7 +1379,7 @@ fn require_current_source(
     reservation: &ExecutionReservationRecord,
     lease: &ExecutionLeaseRecord,
 ) -> Result<(), ChatInteractionServiceError> {
-    let stage_scope_matches = expected.session_identity.stage_run_id.is_some()
+    let stage_scope_matches = expected.session_identity.work_run_id.is_some()
         == expected.execution_scope.delivery_id.is_some();
     if expected.session_identity.product_session_id != expected.execution_scope.product_session_id
         || expected.session_identity.worker_session_id != expected.runtime.worker_session_id
@@ -1423,12 +1423,12 @@ fn require_product_session(
             "ProductSession identity or revision is stale",
         ));
     }
-    let stage_run_id = authority.session_identity.stage_run_id.as_ref();
+    let work_run_id = authority.session_identity.work_run_id.as_ref();
     if !record.bindings().iter().any(|durable| {
         let binding = durable.binding();
         binding.execution_job_id() == &authority.runtime.job_id
             && binding.product_session_id() == &authority.execution_scope.product_session_id
-            && binding.stage_run_id() == stage_run_id
+            && binding.work_run_id() == work_run_id
             && binding.delivery_id() == authority.execution_scope.delivery_id.as_ref()
             && binding.worker_session_id() == Some(&authority.runtime.worker_session_id)
             && binding.codex_thread_id() == Some(&authority.runtime.codex_thread_id)

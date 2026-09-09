@@ -18,6 +18,11 @@ const scope = {
   repositoryId: 'rep_00000000000000000000000001',
 }
 const productSessionId = 'psn_00000000000000000000000001'
+const modelRoute = {
+  providerId: 'audit-provider',
+  modelId: 'audit-model',
+  credentialReferenceId: 'crd_00000000000000000000000001',
+}
 const browserSession = {
   schemaVersion,
   expiresAt: '2099-09-02T00:00:00.000Z',
@@ -51,6 +56,63 @@ function session() {
   }
 }
 
+function modelRouteAvailability() {
+  return {
+    kind: 'model_route_availability_page',
+    scope,
+    settingsSource: scope,
+    settingsRevision: 1,
+    requestPoolSource: {
+      kind: 'project',
+      organizationId: scope.organizationId,
+      workspaceId: scope.workspaceId,
+      projectId: scope.projectId,
+    },
+    requestPoolRevision: 1,
+    defaultProviderId: modelRoute.providerId,
+    defaultModelId: modelRoute.modelId,
+    status: 'enabled',
+    reason: 'ready',
+    items: [{
+      route: modelRoute,
+      providerDisplayName: 'Audit Provider',
+      modelDisplayName: 'Audit Model',
+      catalogSource: scope,
+      catalogVersion: 1,
+      providerVersion: 1,
+      modelVersion: 1,
+      contextWindowTokens: 128_000,
+      maxOutputTokens: 16_000,
+      toolSupport: 'parallel',
+      reasoningEfforts: ['medium'],
+      credentialRotationVersion: 1,
+      isDefault: true,
+      status: 'enabled',
+      reason: 'ready',
+    }],
+  }
+}
+
+function runtimeProjection() {
+  return {
+    kind: 'runtime_projection',
+    productSessionId,
+    deliveryId: null,
+    workRunId: null,
+    readCursor: null,
+    eventCursor: {
+      eventId: null,
+      sequence: 0,
+      scope,
+      stream: { kind: 'product-session', productSessionId },
+    },
+    lastProjectionSequence: 0,
+    revision: 1,
+    rebuiltAt: '2026-09-02T00:00:00.000Z',
+    sessions: [],
+  }
+}
+
 const controlPlane = {
   serverUrl: 'https://control.localhost',
   async restore() { return structuredClone(browserSession) },
@@ -77,8 +139,17 @@ const controlPlane = {
       return response(request, { kind: 'product_session_page', items: [] })
     }
     if (request.query === 'session.get') return response(request, session())
+    if (request.query === 'session.messages.list') {
+      return response(request, { kind: 'chat_message_page', items: [] })
+    }
     if (request.query === 'session.interactions.list') {
       return response(request, { kind: 'chat_interaction_page', items: [] })
+    }
+    if (request.query === 'model.route.availability.list') {
+      return response(request, modelRouteAvailability())
+    }
+    if (request.query === 'runtime.projection.get') {
+      return response(request, runtimeProjection())
     }
     if (request.query === 'approval.list') {
       return response(request, { kind: 'approval_page', items: [] })

@@ -66,7 +66,7 @@ fn authority(revision: char) -> DebugProbeRoundAuthority {
         session_identity: SessionIdentity {
             codex_thread_id: CodexThreadId("cdx_00000000000000000000000000".to_owned()),
             product_session_id: ProductSessionId("psn_00000000000000000000000000".to_owned()),
-            stage_run_id: None,
+            work_run_id: None,
             worker_session_id: WorkerSessionId("wsn_00000000000000000000000000".to_owned()),
         },
         workspace_revision: WorkspaceRevision(format!(

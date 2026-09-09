@@ -267,7 +267,7 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    use winwincode_domain::Instant;
+    use winwincode_domain::{Instant, WorkRunId};
     use winwincode_storage::{
         AccessGrantIssuance, ClientNodeRegistration, ClientPresenceState, GrantPermissions,
         GrantSource, GrantTrustMode, LaunchGrantIssuance, OccupancyClaim, OccupancyLeaseState,
@@ -486,7 +486,7 @@ mod tests {
             format!("winst_{}", suffix(seed + 52)),
             "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
             Some(product_session_id.to_owned()),
-            Some(format!("run_{}", suffix(seed + 53))),
+            Some(WorkRunId(format!("wrn_{}", suffix(seed + 53)))),
             instant("2026-01-01T00:10:00.000Z"),
         )
         .expect("issuance");

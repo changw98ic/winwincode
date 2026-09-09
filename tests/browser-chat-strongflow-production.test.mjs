@@ -242,7 +242,7 @@ function normalizedUrl(value, clientOrigin, controlUrl) {
 function normalizedHash(value) {
   if (value.startsWith('#/chat')) return '#/chat?session=PRODUCT_SESSION_ID'
   if (value.startsWith('#/strongflow')) {
-    return '#/strongflow?delivery=DELIVERY_ID&session=PRODUCT_SESSION_ID&stageRun=STAGE_RUN_ID'
+    return '#/strongflow?delivery=DELIVERY_ID&session=PRODUCT_SESSION_ID&workRun=WORK_RUN_ID'
   }
   return value
 }

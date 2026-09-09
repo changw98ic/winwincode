@@ -20,8 +20,8 @@ use std::{collections::BTreeMap, error::Error, fmt};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use winwincode_domain::{
-    CodexThreadId, DeliveryId, DeliveryTaskId, ExecutionEventId, ExecutionJobId, FencingToken,
-    LeaseId, ProductSessionId, Sha256Digest, StageRunId, WorkerId, WorkerInstanceId,
+    CodexThreadId, DeliveryId, ExecutionEventId, ExecutionJobId, FencingToken, LeaseId,
+    ProductSessionId, Sha256Digest, WorkItemId, WorkRunId, WorkerId, WorkerInstanceId,
     WorkerSessionId,
 };
 
@@ -74,7 +74,7 @@ impl Error for RuntimeProjectionError {}
 #[serde(rename_all = "camelCase")]
 struct RuntimeIdentity {
     delivery_id: DeliveryId,
-    stage_run_id: StageRunId,
+    work_run_id: WorkRunId,
     product_session_id: ProductSessionId,
     worker_session_id: WorkerSessionId,
     codex_thread_id: CodexThreadId,
@@ -89,7 +89,7 @@ struct RuntimeIdentity {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AcceptedRuntimeBinding {
     session_binding_id: SessionBindingId,
-    delivery_task_id: Option<DeliveryTaskId>,
+    work_item_id: WorkItemId,
     identity: RuntimeIdentity,
     settled_last_sequence: Option<u64>,
     seal: Sha256Digest,
@@ -253,8 +253,8 @@ pub struct RuntimeRecoveryProjection {
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeSessionProjection {
     pub session_binding_id: SessionBindingId,
-    pub stage_run_id: StageRunId,
-    pub delivery_task_id: Option<DeliveryTaskId>,
+    pub work_run_id: WorkRunId,
+    pub work_item_id: WorkItemId,
     pub product_session_id: ProductSessionId,
     pub worker_session_id: WorkerSessionId,
     pub codex_thread_id: CodexThreadId,
@@ -342,8 +342,8 @@ impl RuntimeProjection {
             .iter()
             .map(|binding| RuntimeSessionProjection {
                 session_binding_id: binding.session_binding_id.clone(),
-                stage_run_id: binding.identity.stage_run_id.clone(),
-                delivery_task_id: binding.delivery_task_id.clone(),
+                work_run_id: binding.identity.work_run_id.clone(),
+                work_item_id: binding.work_item_id.clone(),
                 product_session_id: binding.identity.product_session_id.clone(),
                 worker_session_id: binding.identity.worker_session_id.clone(),
                 codex_thread_id: binding.identity.codex_thread_id.clone(),
@@ -1004,9 +1004,10 @@ fn persisted_binding(
         })?;
     let run = delivery
         .snapshot()
-        .stage_runs
+        .work_run_aggregate
+        .runs
         .iter()
-        .find(|run| run.id == binding.stage_run_id)
+        .find(|run| run.id == binding.work_run_id)
         .ok_or_else(|| {
             projection_error(
                 RuntimeProjectionErrorCode::InvalidBinding,
@@ -1027,16 +1028,21 @@ fn persisted_binding(
     })?;
     let mut accepted = AcceptedRuntimeBinding {
         session_binding_id: binding.id.clone(),
-        delivery_task_id: binding.delivery_task_id.clone(),
+        work_item_id: binding.work_item_id.clone(),
         identity: RuntimeIdentity {
             delivery_id: delivery.id().clone(),
-            stage_run_id: run.id.clone(),
+            work_run_id: run.id.clone(),
             product_session_id: binding.product_session_id.clone(),
             worker_session_id: accepted,
             codex_thread_id,
             execution_job_id: binding.execution_job_id.clone(),
             lease_id,
-            attempt: run.attempt,
+            attempt: u64::try_from(run.attempt).map_err(|_| {
+                projection_error(
+                    RuntimeProjectionErrorCode::InvalidBinding,
+                    "WorkRun attempt is out of range",
+                )
+            })?,
             fencing_token,
             worker_id,
             worker_instance_id,
@@ -1051,7 +1057,7 @@ fn persisted_binding(
 
 fn same_session_scope(left: &RuntimeIdentity, right: &RuntimeIdentity) -> bool {
     left.delivery_id == right.delivery_id
-        && left.stage_run_id == right.stage_run_id
+        && left.work_run_id == right.work_run_id
         && left.product_session_id == right.product_session_id
         && left.worker_session_id == right.worker_session_id
         && left.codex_thread_id == right.codex_thread_id
@@ -1100,22 +1106,31 @@ fn validate_binding(
         .filter(|binding| {
             binding.id == accepted.session_binding_id
                 && binding.delivery_id == accepted.identity.delivery_id
-                && binding.delivery_task_id == accepted.delivery_task_id
-                && binding.stage_run_id == accepted.identity.stage_run_id
+                && binding.work_item_id == accepted.work_item_id
+                && binding.work_run_id == accepted.identity.work_run_id
                 && binding.product_session_id == accepted.identity.product_session_id
                 && binding.execution_job_id == accepted.identity.execution_job_id
                 && binding.worker_session_id.as_ref() == Some(&accepted.identity.worker_session_id)
                 && binding.codex_thread_id.as_ref() == Some(&accepted.identity.codex_thread_id)
         });
     let binding = bindings.next();
-    let mut runs = delivery.snapshot().stage_runs.iter().filter(|run| {
-        run.id == accepted.identity.stage_run_id
-            && run.delivery_id == accepted.identity.delivery_id
-            && run.attempt == accepted.identity.attempt
-    });
+    let mut runs = delivery
+        .snapshot()
+        .work_run_aggregate
+        .runs
+        .iter()
+        .filter(|run| {
+            run.id == accepted.identity.work_run_id
+                && run.attempt == i64::try_from(accepted.identity.attempt).unwrap_or(-1)
+        });
     let run = runs.next();
     let settled_matches = run.is_some_and(|run| {
-        let settled = run.finished_at_millis.is_some();
+        let settled = matches!(
+            run.state,
+            winwincode_domain::WorkRunState::Settled
+                | winwincode_domain::WorkRunState::Failed
+                | winwincode_domain::WorkRunState::Cancelled
+        );
         settled == accepted.settled_last_sequence.is_some()
     });
     if accepted.identity.delivery_id != *delivery.id()
@@ -1137,7 +1152,7 @@ fn validate_binding(
 #[serde(rename_all = "camelCase")]
 struct BindingSeal<'binding> {
     session_binding_id: &'binding SessionBindingId,
-    delivery_task_id: Option<&'binding DeliveryTaskId>,
+    work_item_id: Option<&'binding WorkItemId>,
     identity: &'binding RuntimeIdentity,
     settled_last_sequence: Option<u64>,
 }
@@ -1145,7 +1160,7 @@ struct BindingSeal<'binding> {
 fn seal_binding(binding: &AcceptedRuntimeBinding) -> Result<Sha256Digest, RuntimeProjectionError> {
     seal(&BindingSeal {
         session_binding_id: &binding.session_binding_id,
-        delivery_task_id: binding.delivery_task_id.as_ref(),
+        work_item_id: Some(&binding.work_item_id),
         identity: &binding.identity,
         settled_last_sequence: binding.settled_last_sequence,
     })
@@ -1271,9 +1286,10 @@ pub mod test_support {
             })?;
         let run = delivery
             .snapshot()
-            .stage_runs
+            .work_run_aggregate
+            .runs
             .iter()
-            .find(|run| run.id == binding.stage_run_id)
+            .find(|run| run.id == binding.work_run_id)
             .ok_or_else(|| {
                 projection_error(
                     RuntimeProjectionErrorCode::InvalidBinding,
@@ -1282,10 +1298,10 @@ pub mod test_support {
             })?;
         let mut accepted = AcceptedRuntimeBinding {
             session_binding_id: binding.id.clone(),
-            delivery_task_id: binding.delivery_task_id.clone(),
+            work_item_id: binding.work_item_id.clone(),
             identity: RuntimeIdentity {
                 delivery_id: delivery.id().clone(),
-                stage_run_id: run.id.clone(),
+                work_run_id: run.id.clone(),
                 product_session_id: binding.product_session_id.clone(),
                 worker_session_id: binding.worker_session_id.clone().ok_or_else(|| {
                     projection_error(
@@ -1301,7 +1317,12 @@ pub mod test_support {
                 })?,
                 execution_job_id: binding.execution_job_id.clone(),
                 lease_id: authority.lease_id,
-                attempt: run.attempt,
+                attempt: u64::try_from(run.attempt).map_err(|_| {
+                    projection_error(
+                        RuntimeProjectionErrorCode::InvalidBinding,
+                        "fixture WorkRun attempt is invalid",
+                    )
+                })?,
                 fencing_token: authority.fencing_token,
                 worker_id: authority.worker_id,
                 worker_instance_id: authority.worker_instance_id,
@@ -1383,10 +1404,10 @@ mod tests {
     fn fixture() -> (Delivery, AcceptedRuntimeBinding, AcceptedRuntimeEvent) {
         let delivery = Delivery::try_from_snapshot(test_fixture()).expect("canonical Delivery");
         let session = &delivery.snapshot().session_bindings[0];
-        let run = &delivery.snapshot().stage_runs[0];
+        let run = &delivery.snapshot().work_run_aggregate.runs[0];
         let identity = RuntimeIdentity {
             delivery_id: delivery.id().clone(),
-            stage_run_id: run.id.clone(),
+            work_run_id: run.id.clone(),
             product_session_id: session.product_session_id.clone(),
             worker_session_id: session
                 .worker_session_id
@@ -1398,14 +1419,14 @@ mod tests {
                 .expect("accepted CodexThread"),
             execution_job_id: session.execution_job_id.clone(),
             lease_id: LeaseId("lease-runtime-projection".into()),
-            attempt: run.attempt,
+            attempt: u64::try_from(run.attempt).expect("fixture WorkRun attempt"),
             fencing_token: FencingToken("7".into()),
             worker_id: WorkerId("worker-runtime-projection".into()),
             worker_instance_id: WorkerInstanceId("worker-instance-runtime-projection".into()),
         };
         let mut binding = AcceptedRuntimeBinding {
             session_binding_id: session.id.clone(),
-            delivery_task_id: session.delivery_task_id.clone(),
+            work_item_id: session.work_item_id.clone(),
             identity: identity.clone(),
             settled_last_sequence: Some(1),
             seal: Sha256Digest(String::new()),
@@ -1516,7 +1537,7 @@ mod tests {
         );
 
         let mut foreign_task = binding;
-        foreign_task.delivery_task_id = Some(DeliveryTaskId("delivery-task-foreign".into()));
+        foreign_task.work_item_id = WorkItemId("wit_01J00000000000000000000099".into());
         foreign_task.seal = seal_binding(&foreign_task).expect("foreign task seal");
         let task_error = RuntimeProjection::new(&delivery, vec![foreign_task])
             .expect_err("runtime authority cannot move a SessionBinding to another task");
@@ -2329,12 +2350,12 @@ mod tests {
             actual,
             serde_json::json!({
                 "sessionBindingId": "binding-verifier-1",
-                "stageRunId": "stage-verification-1",
-                "deliveryTaskId": "delivery-task-api",
-                "productSessionId": "product-session-verifier",
-                "workerSessionId": "worker-session-verifier",
-                "codexThreadId": "codex-thread-verifier",
-                "executionJobId": "execution-job-verifier",
+                "workRunId": "wrn_01J00000000000000000000000",
+                "workItemId": "wit_01J00000000000000000000000",
+                "productSessionId": "psn_01J00000000000000000000000",
+                "workerSessionId": "wsn_01J00000000000000000000000",
+                "codexThreadId": "cdx_01J00000000000000000000000",
+                "executionJobId": "job_01J00000000000000000000000",
                 "leaseId": "lease-runtime-projection",
                 "attempt": 1,
                 "fencingToken": "7",
@@ -2348,7 +2369,7 @@ mod tests {
                     "sourceRef": "runtime:plan-wire"
                 },
                 "agents": [{
-                    "threadId": "codex-thread-verifier",
+                    "threadId": "cdx_01J00000000000000000000000",
                     "parentThreadId": null,
                     "path": "executor",
                     "nickname": null,

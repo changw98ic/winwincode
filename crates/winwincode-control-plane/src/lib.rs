@@ -62,7 +62,6 @@ mod model_route_availability;
 pub mod model_settings;
 mod model_stream_flow_control;
 mod observer_decision_service;
-mod planning_solution_authority;
 mod product_session_execution_application;
 mod product_session_service;
 mod provider_admission;
@@ -106,6 +105,7 @@ mod worker_fleet_projection;
 mod worker_interaction_outbound;
 pub mod worker_management;
 mod worker_policy;
+mod workrun_transaction;
 
 pub use action_policy_enforcement::{
     ActionPolicyEnforcementError, ActionPolicyEnforcementErrorKind,
@@ -179,6 +179,7 @@ pub use delivery_application::{
     DeliveryAdvanceAuthority, DeliveryApplicationError, DeliveryAttentionAuthority,
     DeliveryAuthorityError, DeliveryAuthorityPort, DeliveryAuthorityRequest, DeliveryAuthoritySeal,
     DeliverySpecificationAuthority, DeliveryVerdictAuthority, load_delivery_authority_seal,
+    workrun_cancel_response,
 };
 pub use delivery_command_transaction::{DeliveryCommandFacts, DeliverySpecFacts};
 pub use delivery_production_adapters::{
@@ -479,7 +480,9 @@ pub use repository_binding::{
     RepositoryBindingServiceError, RepositoryBindingServiceErrorKind, RepositoryDirtyState,
     RepositoryGrantState,
 };
-pub use repository_scheduler::{RepositoryExecutionScheduler, RepositoryExecutionSchedulerError};
+pub use repository_scheduler::{
+    RepositoryExecutionScheduler, RepositoryExecutionSchedulerError, WorkRunCancellationRequest,
+};
 pub use responsibility_assignment::{
     ResponsibilityAssignment, ResponsibilityAssignmentAction, ResponsibilityAssignmentClock,
     ResponsibilityAssignmentClockError, ResponsibilityAssignmentCommand,
@@ -503,7 +506,7 @@ pub use session_identity::{
 };
 pub use strongflow_device_execution::{
     STRONGFLOW_DEVICE_WORKER_POOL_ID, StrongflowDeviceDispatch, StrongflowDeviceDispatchError,
-    StrongflowDeviceDispatchErrorKind, dispatch_stage_to_device_worker,
+    StrongflowDeviceDispatchErrorKind, dispatch_work_run_to_device_worker,
 };
 pub use temporary_root_lease::{
     OwnedTemporaryRoot, SystemTemporaryRootLeaseRuntime, TEMPORARY_ROOT_LEASE_FILE,
@@ -599,7 +602,7 @@ pub use worker_management::{
 pub mod test_support {
     use winwincode_api::generated::CommandEnvelope;
     use winwincode_delivery::{
-        application::{attention::ResolvedAttentionTransition, stage::StageAdvanceResult},
+        application::attention::ResolvedAttentionTransition,
         domain::{DeliverySourceRef, RepositoryRef},
     };
     use winwincode_domain::RepositoryScope;
@@ -608,6 +611,23 @@ pub mod test_support {
         DeliveryCommandFacts, DeliverySpecFacts, StorageError,
         delivery_command_transaction::TrustedDeliverySpecFacts,
     };
+
+    /// Exercises the terminal storage transaction independently of local service adapters.
+    ///
+    /// # Errors
+    /// Returns the same authority, receipt, or storage error as the production transaction.
+    pub fn commit_terminal_transaction(
+        storage: &mut dyn winwincode_storage::ProductStateStorage,
+        scope: &RepositoryScope,
+        message: &winwincode_execution_port::generated::JobOutcomeMessage,
+        facts: &winwincode_delivery::application::stage::DeliveryTerminalOutcomeFacts,
+        server_time: &winwincode_domain::Instant,
+    ) -> Result<
+        super::DeliveryTerminalOutcomeCommitReceipt,
+        super::DeliveryTerminalOutcomeCommitError,
+    > {
+        super::terminal_outcome_transaction::execute_at(storage, scope, message, facts, server_time)
+    }
 
     /// Complete product-owned Spec semantics used by integration fixtures.
     #[derive(Clone, Debug, PartialEq)]
@@ -651,26 +671,6 @@ pub mod test_support {
                 max_rework_attempts: fixture.max_rework_attempts,
                 criterion_verification_methods: fixture.criterion_verification_methods,
             }),
-        )
-    }
-
-    /// Binds one production-sealed human stage transition to its exact command.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the command and adapter-confirmed repository
-    /// scope do not identify the same canonical authority.
-    pub fn delivery_advance_command_facts(
-        command: &CommandEnvelope,
-        repository: DeliveryRepositoryFactsFixture,
-        transition: StageAdvanceResult,
-    ) -> Result<DeliveryCommandFacts, StorageError> {
-        DeliveryCommandFacts::advance_from_trusted_adapter(
-            command,
-            repository.repository_scope,
-            repository.repository,
-            repository.source_ref,
-            transition,
         )
     }
 
@@ -1533,27 +1533,7 @@ impl ControlPlane {
             let storage = self
                 .storage_mut()
                 .map_err(DeliveryCommandCommitError::Storage)?;
-            delivery_command_transaction::execute(storage, command, facts, None)?
-        };
-        self.flush_outbox()
-            .map_err(|source| DeliveryCommandCommitError::PublicationPending {
-                receipt: Box::new(receipt.clone()),
-                source,
-            })?;
-        Ok(receipt)
-    }
-
-    fn commit_delivery_command_with_handoff(
-        &mut self,
-        command: &CommandEnvelope,
-        facts: &DeliveryCommandFacts,
-        handoff: &terminal_outcome_transaction::DeliveryTerminalHandoff,
-    ) -> Result<CommitReceipt, DeliveryCommandCommitError> {
-        let receipt = {
-            let storage = self
-                .storage_mut()
-                .map_err(DeliveryCommandCommitError::Storage)?;
-            delivery_command_transaction::execute(storage, command, facts, Some(handoff))?
+            delivery_command_transaction::execute(storage, command, facts)?
         };
         self.flush_outbox()
             .map_err(|source| DeliveryCommandCommitError::PublicationPending {
@@ -1582,7 +1562,7 @@ impl ControlPlane {
             let storage = self.storage_mut().map_err(|error| {
                 DeliveryExecutionError::Commit(DeliveryExecutionPortError::new(error.to_string()))
             })?;
-            delivery_transaction::execute(storage, command, pending, dispatcher, None)?
+            delivery_transaction::execute(storage, command, pending, dispatcher)?
         };
         self.flush_outbox().map_err(|source| {
             DeliveryExecutionError::ProjectionPublicationAfterDispatch {
@@ -1593,25 +1573,32 @@ impl ControlPlane {
         Ok(receipt)
     }
 
-    fn commit_delivery_execution_with_handoff(
+    /// Appends the canonical `WorkRun` after the Registry accepts its dispatch.
+    ///
+    /// The accepted scheduler authority and queue proof are both required;
+    /// Worker wire data never creates a Delivery `WorkRun` by itself.
+    pub(crate) fn commit_delivery_workrun(
         &mut self,
-        command: &CommandEnvelope,
-        pending: &PendingDeliveryExecution,
-        dispatcher: &mut dyn ExecutionJobDispatcher,
-        handoff: &terminal_outcome_transaction::DeliveryTerminalHandoff,
-    ) -> Result<DeliveryExecutionDispatchReceipt, DeliveryExecutionError> {
-        let receipt = {
-            let storage = self.storage_mut().map_err(|error| {
-                DeliveryExecutionError::Commit(DeliveryExecutionPortError::new(error.to_string()))
+        durable: &DurableOutboxEvent,
+        job: &execution_port::ExecutionJob,
+        authority: &winwincode_storage::ExecutionDispatchAuthority,
+        proof: &winwincode_storage::ExecutionDispatchWorkRunProof,
+        now_millis: u64,
+    ) -> Result<CommitReceipt, CommitError> {
+        let receipt = workrun_transaction::execute(
+            self.storage_mut().map_err(CommitError::Storage)?,
+            durable,
+            job,
+            authority,
+            proof,
+            now_millis,
+        )
+        .map_err(CommitError::Storage)?;
+        self.flush_outbox()
+            .map_err(|source| CommitError::PublicationPending {
+                receipt: Box::new(receipt.clone()),
+                source,
             })?;
-            delivery_transaction::execute(storage, command, pending, dispatcher, Some(handoff))?
-        };
-        self.flush_outbox().map_err(|source| {
-            DeliveryExecutionError::ProjectionPublicationAfterDispatch {
-                commit: Box::new(receipt.commit.clone()),
-                source: DeliveryExecutionPortError::new(source.to_string()),
-            }
-        })?;
         Ok(receipt)
     }
 
@@ -1970,12 +1957,12 @@ impl ControlPlane {
         let storage = self
             .storage_ref()
             .map_err(CandidateResolutionError::Storage)?;
-        let (_, job) = delivery_transaction::load_durable_execution_job(
+        let (durable, job) = delivery_transaction::load_durable_execution_job(
             storage,
             &acknowledgement.lease.job_id,
         )
         .map_err(CandidateResolutionError::Storage)?;
-        let ExecutionScope::DeliveryStageExecutionScope(job_scope) = &job.scope else {
+        let ExecutionScope::WorkRunExecutionScope(_job_scope) = &job.scope else {
             return Err(CandidateResolutionError::Storage(
                 StorageError::invalid_input(
                     "candidate Artifact retention requires a Delivery execution Job",
@@ -2011,7 +1998,13 @@ impl ControlPlane {
             artifacts,
             source_resolver,
             scope,
-            &job_scope.delivery_id,
+            &DeliveryId(
+                durable
+                    .stream_id()
+                    .strip_prefix("delivery:")
+                    .unwrap_or(durable.stream_id())
+                    .to_owned(),
+            ),
             &acknowledgement.artifact_id,
             receipt.record().digest(),
             receipt.record().provenance().clone(),
@@ -2415,30 +2408,6 @@ impl ControlPlane {
             let storage = self.storage_mut().map_err(CommitError::Storage)?;
             rework_transaction::execute(storage, command, transition)
                 .map_err(CommitError::Storage)?
-        };
-        self.flush_outbox()
-            .map_err(|source| CommitError::PublicationPending {
-                receipt: Box::new(receipt.clone()),
-                source,
-            })?;
-        Ok(receipt)
-    }
-
-    /// Atomically promotes the exact ordered task graph sealed by the current
-    /// approved solution review, then publishes only its committed outbox row.
-    ///
-    /// # Errors
-    ///
-    /// Returns before persistence for a stale review, changed revision, or any
-    /// failed atomic member. Publication failure retains the committed event
-    /// for replay.
-    pub fn commit_delivery_task_breakdown(
-        &mut self,
-        command: &CommandEnvelope,
-    ) -> Result<CommitReceipt, CommitError> {
-        let receipt = {
-            let storage = self.storage_mut().map_err(CommitError::Storage)?;
-            task_breakdown_transaction::execute(storage, command).map_err(CommitError::Storage)?
         };
         self.flush_outbox()
             .map_err(|source| CommitError::PublicationPending {
@@ -3071,10 +3040,11 @@ fn delivery_command(command: &CommandName) -> bool {
         command,
         CommandName::DeliveryCreate
             | CommandName::DeliveryUpdateSpec
-            | CommandName::DeliveryApproveTaskBreakdown
+            | CommandName::DeliveryTaskBreakdownCreate
             | CommandName::DeliveryAdvance
             | CommandName::DeliveryResolveAttention
             | CommandName::DeliverySubmitVerdict
+            | CommandName::WorkRunCancel
     )
 }
 

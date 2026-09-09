@@ -8,12 +8,13 @@ use sha2::{Digest, Sha256};
 use winwincode_delivery::{
     application::stage::DeliveryTerminalOutcomeFacts,
     domain::{
-        Delivery, DeliveryStage, SessionBinding, StageRun, StageRunActorType, StageRunStatus,
+        Delivery, SessionBinding,
         candidate::{
             ProductionRuntimeEvent, ProductionRuntimeEventCategory, ProductionRuntimePayload,
             ProductionVerificationRuntime, freeze_delivery_candidate_from_source,
             resolve_production_verdict,
         },
+        verification::VerificationRole,
     },
 };
 use winwincode_domain::RepositoryScope;
@@ -28,7 +29,7 @@ use crate::runtime_event_transaction::{RuntimeLedgerState, runtime_stream_id_for
 use crate::session_binding_transaction::instant_millis;
 use crate::{
     DeliveryAuthorityError, DeliveryVerdictAuthority, repository_scope_key,
-    terminal_outcome_transaction::load_settled_terminal_authority,
+    terminal_outcome_transaction::load_successful_terminal_authority,
 };
 
 const CANDIDATE_MEDIA_TYPE: &str = "application/vnd.winwincode.git-candidate+json";
@@ -50,11 +51,17 @@ pub(crate) fn resolve(
         &writer_terminal,
     )?;
     let mut verification = Vec::new();
-    for run in current_verification_runs(delivery)? {
-        let binding = exact_binding(delivery, run)?;
+    for binding in current_verification_bindings(delivery)? {
         let terminal = load_terminal(storage, delivery, &binding.execution_job_id)?;
-        let events = runtime_events(storage, scope, delivery, run, &terminal)?;
+        let events = runtime_events(storage, scope, delivery, binding, &terminal)?;
+        let role = match binding.execution_profile.as_deref().unwrap_or_default() {
+            "reviewer" => VerificationRole::Reviewer,
+            "verifier" => VerificationRole::Verifier,
+            "adversarial-verifier" => VerificationRole::AdversarialVerifier,
+            _ => return Err(DeliveryAuthorityError::new("unknown verification role")),
+        };
         verification.push(ProductionVerificationRuntime::from_durable_read_only(
+            role,
             terminal,
             writer_source.clone(),
             events,
@@ -68,7 +75,7 @@ pub(crate) fn resolve(
         candidate,
         verification,
         evidence,
-        produced_at_millis,
+        produced_at_millis: produced_at_millis.max(delivery.snapshot().updated_at_millis),
     })
 }
 
@@ -109,29 +116,26 @@ pub(crate) fn resolve_current_candidate_with_source(
     let Some(writer) = selected_current_writer(delivery)? else {
         return Ok(None);
     };
+    let run = delivery
+        .snapshot()
+        .work_run_aggregate
+        .runs
+        .iter()
+        .find(|run| run.id == writer.work_run_id)
+        .ok_or_else(|| DeliveryAuthorityError::new("current writer WorkRun is missing"))?;
+    if matches!(
+        run.state,
+        winwincode_domain::WorkRunState::Queued
+            | winwincode_domain::WorkRunState::Leased
+            | winwincode_domain::WorkRunState::Running
+    ) {
+        return Ok(None);
+    }
     let terminal = load_terminal(storage, delivery, &writer.execution_job_id)?;
     let source = source_for_terminal(artifacts, source_resolver, scope, delivery, &terminal)?;
     let candidate = freeze_delivery_candidate_from_source(delivery, &source, &terminal)
         .map_err(|error| authority_error(&error))?;
     Ok(Some((candidate, source)))
-}
-
-/// Rebuilds the executor candidate from the terminal handoff that the same
-/// `delivery.advance` transaction will consume.
-///
-/// The transition Delivery has already applied the successful executor facts,
-/// so the sealed handoff can be revalidated there without reading a terminal
-/// authority that is intentionally still pending in storage.
-pub(crate) fn resolve_pending_executor_candidate(
-    artifacts: &ArtifactStore,
-    source_resolver: &dyn GitSourceResolver,
-    scope: &RepositoryScope,
-    delivery: &Delivery,
-    terminal: &DeliveryTerminalOutcomeFacts,
-) -> Result<winwincode_delivery::domain::FrozenDeliveryCandidate, DeliveryAuthorityError> {
-    let source = source_for_terminal(artifacts, source_resolver, scope, delivery, terminal)?;
-    freeze_delivery_candidate_from_source(delivery, &source, terminal)
-        .map_err(|error| authority_error(&error))
 }
 
 fn current_writer(delivery: &Delivery) -> Result<&SessionBinding, DeliveryAuthorityError> {
@@ -143,109 +147,68 @@ fn current_writer(delivery: &Delivery) -> Result<&SessionBinding, DeliveryAuthor
 fn selected_current_writer(
     delivery: &Delivery,
 ) -> Result<Option<&SessionBinding>, DeliveryAuthorityError> {
-    let writers = delivery
-        .snapshot()
-        .stage_runs
-        .iter()
-        .filter(|run| {
-            run.actor_type == StageRunActorType::Codex
-                && matches!(
-                    run.stage,
-                    DeliveryStage::Executing | DeliveryStage::Reworking
-                )
-                && matches!(run.role.as_str(), "executor" | "remediator")
+    let bindings = &delivery.snapshot().session_bindings;
+    let writers = || {
+        bindings.iter().filter(|binding| {
+            matches!(
+                binding.execution_profile.as_deref(),
+                Some("executor" | "remediator")
+            )
         })
-        .collect::<Vec<_>>();
-    let Some(current_key) = writers
-        .iter()
-        .map(|run| (run.started_at_millis, run.attempt))
+    };
+    let Some(current_key) = writers()
+        .map(|binding| (binding.bound_at_millis, binding.attempt))
         .max()
     else {
         return Ok(None);
     };
-    let current = writers
-        .into_iter()
-        .filter(|run| (run.started_at_millis, run.attempt) == current_key)
-        .collect::<Vec<_>>();
-    let [candidate] = current.as_slice() else {
+    let mut current =
+        writers().filter(|binding| (binding.bound_at_millis, binding.attempt) == current_key);
+    let selected = current.next();
+    if current.next().is_some() {
         return Err(DeliveryAuthorityError::new(
             "current writer attempt is ambiguous",
         ));
-    };
-    if candidate.status != StageRunStatus::Succeeded {
-        return Ok(None);
     }
-    exact_binding(delivery, candidate).map(Some)
+    Ok(selected)
 }
 
-fn current_verification_runs(
+fn current_verification_bindings(
     delivery: &Delivery,
-) -> Result<Vec<&StageRun>, DeliveryAuthorityError> {
+) -> Result<Vec<&SessionBinding>, DeliveryAuthorityError> {
     let mut ordered = Vec::new();
     for role in ["reviewer", "verifier", "adversarial-verifier"] {
-        let role_runs = delivery
-            .snapshot()
-            .stage_runs
-            .iter()
-            .filter(|run| {
-                run.stage == DeliveryStage::Verifying
-                    && run.actor_type == StageRunActorType::Codex
-                    && run.role == role
-            })
-            .collect::<Vec<_>>();
-        let Some(current_attempt) = role_runs.iter().map(|run| run.attempt).max() else {
-            continue;
+        let matches = || {
+            delivery
+                .snapshot()
+                .session_bindings
+                .iter()
+                .filter(|binding| binding.execution_profile.as_deref() == Some(role))
         };
-        let current = role_runs
-            .into_iter()
-            .filter(|run| run.attempt == current_attempt)
-            .collect::<Vec<_>>();
-        let [run] = current.as_slice() else {
+        let Some(key) = matches()
+            .map(|binding| (binding.bound_at_millis, binding.attempt))
+            .max()
+        else {
+            if role == "adversarial-verifier" {
+                continue;
+            }
+            return Err(DeliveryAuthorityError::new(
+                "current independent verification roles are incomplete",
+            ));
+        };
+        let mut current =
+            matches().filter(|binding| (binding.bound_at_millis, binding.attempt) == key);
+        let binding = current
+            .next()
+            .expect("maximum was selected from these bindings");
+        if current.next().is_some() {
             return Err(DeliveryAuthorityError::new(
                 "current verification role attempt is ambiguous",
             ));
-        };
-        if run.status != StageRunStatus::Succeeded {
-            return Err(DeliveryAuthorityError::new(
-                "current independent verification role has not succeeded",
-            ));
         }
-        ordered.push(*run);
-    }
-    if !matches!(
-        ordered.as_slice(),
-        [reviewer, verifier]
-            if reviewer.role == "reviewer" && verifier.role == "verifier"
-    ) && !matches!(
-        ordered.as_slice(),
-        [reviewer, verifier, adversarial]
-            if reviewer.role == "reviewer"
-                && verifier.role == "verifier"
-                && adversarial.role == "adversarial-verifier"
-    ) {
-        return Err(DeliveryAuthorityError::new(
-            "current independent verification roles are incomplete",
-        ));
+        ordered.push(binding);
     }
     Ok(ordered)
-}
-
-fn exact_binding<'delivery>(
-    delivery: &'delivery Delivery,
-    run: &StageRun,
-) -> Result<&'delivery SessionBinding, DeliveryAuthorityError> {
-    let matching = delivery
-        .snapshot()
-        .session_bindings
-        .iter()
-        .filter(|binding| binding.stage_run_id == run.id)
-        .collect::<Vec<_>>();
-    let [binding] = matching.as_slice() else {
-        return Err(DeliveryAuthorityError::new(
-            "current StageRun does not have one exact SessionBinding",
-        ));
-    };
-    Ok(*binding)
 }
 
 fn load_terminal(
@@ -253,7 +216,7 @@ fn load_terminal(
     delivery: &Delivery,
     job_id: &ExecutionJobId,
 ) -> Result<DeliveryTerminalOutcomeFacts, DeliveryAuthorityError> {
-    load_settled_terminal_authority(storage, delivery, job_id)
+    load_successful_terminal_authority(storage, delivery, job_id)
         .map_err(|error| storage_error(&error))
 }
 
@@ -311,10 +274,9 @@ fn runtime_events(
     storage: &dyn ProductStateStorage,
     scope: &RepositoryScope,
     delivery: &Delivery,
-    run: &StageRun,
+    binding: &SessionBinding,
     terminal: &DeliveryTerminalOutcomeFacts,
 ) -> Result<Vec<ProductionRuntimeEvent>, DeliveryAuthorityError> {
-    let binding = exact_binding(delivery, run)?;
     let scope_key = repository_scope_key(scope).map_err(|error| storage_error(&error))?;
     let stream_id = runtime_stream_id_for_projection(&scope_key, &binding.execution_job_id);
     let stored = storage
@@ -335,7 +297,7 @@ fn runtime_events(
             "verification runtime ledger is non-canonical or truncated",
         ));
     }
-    validate_runtime_identity(&ledger, delivery, run, binding, terminal)?;
+    validate_runtime_identity(&ledger, delivery, binding, terminal)?;
     ledger
         .events
         .into_iter()
@@ -409,7 +371,6 @@ fn validated_runtime_payload(
 fn validate_runtime_identity(
     ledger: &RuntimeLedgerState,
     delivery: &Delivery,
-    run: &StageRun,
     binding: &SessionBinding,
     terminal: &DeliveryTerminalOutcomeFacts,
 ) -> Result<(), DeliveryAuthorityError> {
@@ -417,8 +378,11 @@ fn validate_runtime_identity(
     let terminal_sequence = u64::try_from(terminal.metadata().last_event_sequence().0)
         .map_err(|_| DeliveryAuthorityError::new("terminal runtime sequence is invalid"))?;
     let exact = ledger.delivery_id.as_ref() == Some(delivery.id())
-        && ledger.delivery_task_id == run.delivery_task_id
-        && ledger.stage_run_id.as_ref() == Some(&run.id)
+        && ledger.delivery_task_id.is_none()
+        && ledger
+            .work_run_id
+            .as_ref()
+            .is_some_and(|id| id == &binding.work_run_id)
         && ledger.product_session_id == binding.product_session_id
         && ledger.execution_job_id == binding.execution_job_id
         && binding.worker_session_id.as_ref() == Some(&ledger.worker_session_id)

@@ -1957,7 +1957,7 @@ mod tests {
                 kind: ProductSessionExecutionScopeKind::ProductSession,
                 product_session_id: ProductSessionId(fixed_id("psn_")),
             }),
-            stage_input: None,
+            work_input: None,
             workspace: ExecutionWorkspace {
                 checkout_revision: "04e7640e".to_owned(),
                 repository_id: RepositoryId(fixed_id("rep_")),
@@ -1975,7 +1975,7 @@ mod tests {
             attempt: 0,
             revision: 1,
             dependencies: Vec::new(),
-            stage_run_id: None,
+            work_run_id: None,
             submitted_at: fixed_instant("2026-09-06T00:00:00.000Z"),
             updated_at: fixed_instant("2026-09-06T00:00:00.000Z"),
             cancellation: None,

@@ -2,8 +2,8 @@
 
 use winwincode_domain::{
     ApprovalId, AttentionItemId, ExecutionJobId, FencingToken, InputRequestId, Instant, LeaseId,
-    ModelExchangeId, ProductSessionId, RequestId, Sha256Digest, StageRunId, UserId, WorkerId,
-    WorkerInstanceId, WorkerSessionId,
+    ModelExchangeId, ProductSessionId, RequestId, Revision, Sha256Digest, UserId, WorkContractId,
+    WorkItemId, WorkRunId, WorkerId, WorkerInstanceId, WorkerSessionId,
 };
 use winwincode_session::{
     AuthenticatedActor, DecisionRouteBinding, ExecutionRoute, InteractionDecision,
@@ -42,7 +42,11 @@ fn runtime(number: u64) -> RuntimeRouteAuthority {
 fn active_execution(session: u64, job: u64) -> ExecutionRoute {
     ExecutionRoute {
         product_session_id: ProductSessionId(id("psn", session)),
-        stage_run_id: Some(StageRunId(id("run", job))),
+        work_contract_id: Some(WorkContractId(id("wct", job))),
+        work_contract_revision: Some(Revision(1)),
+        work_item_id: Some(WorkItemId(id("wit", job))),
+        work_item_revision: Some(Revision(1)),
+        work_run_id: Some(WorkRunId(id("wrn", job))),
         execution_job_id: ExecutionJobId(id("job", job)),
         job_revision: 4,
         runtime: Some(runtime(job)),
@@ -54,7 +58,11 @@ fn active_execution(session: u64, job: u64) -> ExecutionRoute {
 fn queued_execution(session: u64, job: u64) -> ExecutionRoute {
     ExecutionRoute {
         product_session_id: ProductSessionId(id("psn", session)),
-        stage_run_id: None,
+        work_contract_id: None,
+        work_contract_revision: None,
+        work_item_id: None,
+        work_item_revision: None,
+        work_run_id: None,
         execution_job_id: ExecutionJobId(id("job", job)),
         job_revision: 2,
         runtime: None,
@@ -90,7 +98,7 @@ fn register(
 }
 
 #[test]
-fn approval_is_bound_to_actor_session_stage_job_lease_action_and_revision() {
+fn approval_is_bound_to_actor_session_work_run_job_lease_action_and_revision() {
     let mut router = InteractionRouter::default();
     let subject = InteractionSubject::Approval(ApprovalId(id("apr", 1)));
     let sealed = binding(1, 1, 8);
@@ -331,6 +339,7 @@ fn input_and_attention_route_only_matching_typed_decisions() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn product_session_cancel_propagates_to_exact_jobs_worker_and_model_stream() {
     let mut router = InteractionRouter::default();
     router
@@ -389,6 +398,7 @@ fn product_session_cancel_propagates_to_exact_jobs_worker_and_model_stream() {
     let active = &receipt.routes[1];
     assert_eq!(active.job.execution_job_id.0, id("job", 20));
     assert_eq!(active.job.product_session_id.0, id("psn", 1));
+    assert_eq!(active.job.work_run_id.as_ref().unwrap().0, id("wrn", 20));
     assert_eq!(active.job.expected_revision, 4);
     let worker = active
         .worker
@@ -433,6 +443,19 @@ fn product_session_cancel_propagates_to_exact_jobs_worker_and_model_stream() {
     assert_eq!(
         sibling_receipt.routes[0].job.execution_job_id.0,
         id("job", 30)
+    );
+    assert_eq!(
+        sibling_receipt.routes[0]
+            .job
+            .work_run_id
+            .as_ref()
+            .unwrap()
+            .0,
+        id("wrn", 30)
+    );
+    assert_ne!(
+        receipt.routes[1].job.work_run_id,
+        sibling_receipt.routes[0].job.work_run_id
     );
 }
 

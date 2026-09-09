@@ -494,9 +494,9 @@ export function mountLocalDecisionsPage(options: LocalDecisionsPageOptions): Loc
       updateDecisionContext(mounted.context, [
         inputModeLabel(projection),
         inputStateLabel(item),
-        projection.binding.sessionIdentity.stageRunId === undefined
+        projection.binding.sessionIdentity.workRunId === undefined
           ? 'ProductSession-bound'
-          : 'ProductSession and StageRun-bound',
+          : 'ProductSession and WorkRun-bound',
         'Execution job and Worker session-bound',
         `Revision ${String(projection.revision)}`,
         `Expires ${projection.expiresAt}`,
@@ -615,9 +615,9 @@ export function mountLocalDecisionsPage(options: LocalDecisionsPageOptions): Loc
       }))
       updateDecisionContext(mounted.context, [
         approvalStateLabel(item),
-        projection.binding.sessionIdentity.stageRunId === undefined
+        projection.binding.sessionIdentity.workRunId === undefined
           ? 'ProductSession-bound'
-          : 'ProductSession and StageRun-bound',
+          : 'ProductSession and WorkRun-bound',
         'Execution job and Worker session-bound',
         `Revision ${String(projection.revision)}`,
         `Expires ${projection.expiresAt}`,
@@ -754,7 +754,7 @@ export function mountLocalDecisionsPage(options: LocalDecisionsPageOptions): Loc
       updateDecisionContext(mounted.context, [
         attentionTypeLabel(item),
         projection.blocking ? 'Blocking' : 'Non-blocking',
-        projection.stageRunId === null ? 'Delivery-bound' : 'Delivery and StageRun-bound',
+        projection.workRunId === null ? 'Delivery-bound' : 'Delivery and WorkRun-bound',
         item.candidateDigest === null ? 'No candidate is currently bound' : 'Current candidate-bound',
         `Delivery revision ${String(item.deliveryRevision)}`,
       ])

@@ -536,7 +536,7 @@ mod tests {
             "attempt": 1, "debugSessionId": "ses_00000000000000000000000000", "environmentDigest": format!("sha256:{}", "a".repeat(64)),
             "fencingToken": "1", "jobId": "job_00000000000000000000000000", "leaseId": "lea_00000000000000000000000000", "probeExecutionId": format!("sha256:{}", "b".repeat(64)),
             "probeId": "prb_00000000000000000000000000", "repositoryId": "repo_0000000000000000000000000", "roundId": "rnd_00000000000000000000000000", "sessionIdentity": {
-              "workerSessionId":"wse_00000000000000000000000000", "productSessionId":"pse_00000000000000000000000000", "stageRunId":"run_00000000000000000000000000", "codexThreadId":"thr_00000000000000000000000000"
+              "workerSessionId":"wse_00000000000000000000000000", "productSessionId":"pse_00000000000000000000000000", "workRunId":"wrn_01J00000000000000000000000", "codexThreadId":"thr_00000000000000000000000000"
             }, "workspaceRevision": revision
         })).unwrap()
     }

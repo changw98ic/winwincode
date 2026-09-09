@@ -6,13 +6,15 @@ use std::sync::{Arc, Mutex};
 use winwincode_api::generated::{Actor, CommandEnvelope, CommandName, Scope};
 use winwincode_control_plane::delivery_execution::{
     DeliveryExecutionConfig, DeliveryExecutionPortError, ExecutionJobDispatcher,
-    PendingDeliveryExecution, prepare_delivery_advance,
+    PendingDeliveryExecution, prepare_workrun_advance,
 };
 use winwincode_control_plane::{
     CommitError, ControlPlane, ControlPlaneConfig, EventPublishError, EventPublisher, OutboxEvent,
     StateChange, StorageErrorKind,
 };
-use winwincode_delivery::application::stage::{AdvanceStageInput, NewStageIdentities, advance};
+use winwincode_delivery::application::stage::{
+    NewStageIdentities, StageAdvanceEffect, StageAdvanceResult,
+};
 use winwincode_delivery::domain::{
     DELIVERY_SCHEMA_VERSION, Delivery, DeliveryStatus, DeliveryTask, DeliveryTaskStatus,
     SessionBindingId,
@@ -27,8 +29,8 @@ use winwincode_delivery::domain::{
 use winwincode_delivery::store::{
     AtomicPublication, CreateDelivery, DeliveryCommand, DeliveryCommandPort, DeliveryJournalCodec,
     DeliveryJournalPort, DeliveryQuery, DeliveryQueryPort, DeliveryStore, InMemoryDeliveryJournal,
-    JournalBackendError, LoadedDeliveryJournal, ResolveDeliveryAttention, StartDeliveryStage,
-    SubmitDeliveryVerdict,
+    JournalBackendError, LoadedDeliveryJournal, ResolveDeliveryAttention,
+    StartDeliveryWorkRunDispatch, SubmitDeliveryVerdict,
 };
 use winwincode_domain::{
     AttentionItemId, DeliveryId, DeliveryTaskId, ExecutionJobId, Instant, OrganizationId,
@@ -82,6 +84,10 @@ fn delivery_before_advance(seed: u64) -> Delivery {
         status: DeliveryTaskStatus::Pending,
     }];
     snapshot.stage_runs.clear();
+    snapshot.work_run_aggregate.runs.clear();
+    for item in &mut snapshot.work_run_aggregate.items {
+        item.state = winwincode_domain::WorkItemState::Ready;
+    }
     snapshot.session_bindings.clear();
     snapshot.attention_items.clear();
     snapshot.evidence.clear();
@@ -92,29 +98,49 @@ fn delivery_before_advance(seed: u64) -> Delivery {
 
 fn pending_execution(seed: u64, checkout_revision: &str) -> PendingDeliveryExecution {
     let delivery = delivery_before_advance(seed);
-    let result = advance(
+    let selected = delivery
+        .snapshot()
+        .work_run_aggregate
+        .start_next()
+        .expect("ready WorkItem");
+    let result = StageAdvanceResult::canonical_workrun_dispatch(
         &delivery,
-        AdvanceStageInput {
-            current_lease: None,
-            rework_authorization: None,
-            expected_revision: 1,
-            product_session_id: ProductSessionId(canonical_id("psn", seed)),
-            identities: NewStageIdentities {
-                stage_run_id: StageRunId(canonical_id("run", seed)),
-                execution_job_id: ExecutionJobId(canonical_id("job", seed)),
-                session_binding_id: SessionBindingId::new(format!("binding-{seed}"))
-                    .expect("binding id"),
-                attention_item_id: AttentionItemId(canonical_id("att", seed)),
-            },
-            review: None,
-            previous_outcome: None,
-            now_millis: 1_800_000_000_100,
+        None,
+        NewStageIdentities {
+            stage_run_id: StageRunId(canonical_id("run", seed)),
+            work_contract_id: delivery.snapshot().work_run_aggregate.contract.id.clone(),
+            work_contract_revision: delivery
+                .snapshot()
+                .work_run_aggregate
+                .contract
+                .revision
+                .clone(),
+            work_item_id: selected.work_item.id.clone(),
+            work_item_revision: selected.work_item.revision.clone(),
+            work_run_id: winwincode_domain::WorkRunId(canonical_id("wrn", seed)),
+            execution_job_id: ExecutionJobId(canonical_id("job", seed)),
+            session_binding_id: SessionBindingId::new(format!("binding-{seed}"))
+                .expect("binding id"),
+            attention_item_id: AttentionItemId(canonical_id("att", seed)),
         },
+        ProductSessionId(canonical_id("psn", seed)),
+        "executor".into(),
+        selected.work_item.goal.clone(),
+        u64::try_from(selected.attempt).expect("positive attempt"),
+        1_800_000_000_100,
     )
-    .expect("stage advance");
-    prepare_delivery_advance(
-        RequestId(canonical_id("req", seed)),
-        result,
+    .expect("canonical WorkRun dispatch");
+    let request_id = RequestId(canonical_id("req", seed));
+    let (StageAdvanceEffect::Dispatch(intent) | StageAdvanceEffect::Resume(intent)) =
+        &result.effect
+    else {
+        panic!("execution stage dispatch intent")
+    };
+    let job = prepare_workrun_advance(
+        &request_id,
+        &result.delivery.snapshot().work_run_aggregate,
+        &result.delivery.snapshot().spec,
+        intent,
         DeliveryExecutionConfig {
             payload_digest: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
             candidate_ref: None,
@@ -131,7 +157,8 @@ fn pending_execution(seed: u64, checkout_revision: &str) -> PendingDeliveryExecu
             },
         },
     )
-    .expect("pending execution")
+    .expect("pending execution");
+    PendingDeliveryExecution::from_workrun(request_id, result, job)
 }
 
 fn delivery_advance_command(seed: u64) -> CommandEnvelope {
@@ -142,7 +169,7 @@ fn delivery_advance_command(seed: u64) -> CommandEnvelope {
         }),
         command: CommandName::DeliveryAdvance,
         expected_revision: Revision(1),
-        payload: serde_json::json!({"deliveryId": canonical_id("dlv", seed)}),
+        payload: serde_json::json!({"deliveryId": canonical_id("dlv", seed), "dispatchProfile": "executor"}),
         request_id: RequestId(canonical_id("req", seed)),
         schema_version: SchemaVersion::WinwincodeV1,
         scope: Scope::RepositoryScope(RepositoryScope {
@@ -155,8 +182,21 @@ fn delivery_advance_command(seed: u64) -> CommandEnvelope {
     }
 }
 
-fn rework_advance_command(seed: u64, expected_revision: u64) -> CommandEnvelope {
+fn rework_advance_command(seed: u64, fixture: &ReworkDispatchFixture) -> CommandEnvelope {
+    let expected_revision = fixture.source_delivery.revision();
     let mut command = delivery_advance_command(seed);
+    command.payload["dispatchProfile"] = serde_json::json!("remediator");
+    let StageAdvanceEffect::Dispatch(intent) = &fixture.transition.effect else {
+        unreachable!()
+    };
+    let auth = intent.rework_authorization().unwrap();
+    command.payload["rework"] = serde_json::json!({
+        "candidateRef": auth.candidate_ref(), "diffSha256": auth.diff_sha256(),
+        "targets": auth.targets().iter().map(|target| serde_json::json!({
+            "workItemId": target.work_item_id(), "filePath": target.file_path(),
+            "sourceHunkSha256": target.hunk_sha256(), "evidenceRefIds": target.evidence_ref_ids(),
+        })).collect::<Vec<_>>(),
+    });
     command.expected_revision = Revision(
         i64::try_from(expected_revision).expect("rework fixture revision fits transport range"),
     );
@@ -169,12 +209,21 @@ fn pending_rework(
     digest_byte: char,
     max_runtime_seconds: i64,
 ) -> PendingDeliveryExecution {
-    prepare_delivery_advance(
-        RequestId(canonical_id("req", seed)),
-        fixture.transition.clone(),
+    let request_id = RequestId(canonical_id("req", seed));
+    let transition = fixture.transition.clone();
+    let (StageAdvanceEffect::Dispatch(intent) | StageAdvanceEffect::Resume(intent)) =
+        &transition.effect
+    else {
+        panic!("rework stage dispatch intent")
+    };
+    let job = prepare_workrun_advance(
+        &request_id,
+        &transition.delivery.snapshot().work_run_aggregate,
+        &transition.delivery.snapshot().spec,
+        intent,
         DeliveryExecutionConfig {
             payload_digest: Sha256Digest(format!("sha256:{}", digest_byte.to_string().repeat(64))),
-            candidate_ref: None,
+            candidate_ref: Some(fixture.candidate_ref.clone()),
             workspace: ExecutionWorkspace {
                 checkout_revision: fixture.source_candidate_commit_id.clone(),
                 repository_id: RepositoryId(canonical_id("rep", seed)),
@@ -188,7 +237,8 @@ fn pending_rework(
             },
         },
     )
-    .expect("pending authorized rework")
+    .expect("pending authorized rework");
+    PendingDeliveryExecution::from_workrun(request_id, transition, job)
 }
 
 fn seed_rework_history(root: &PathBuf, fixture: &ReworkJournalFixture) {
@@ -472,11 +522,9 @@ fn delivery_advance_commits_every_durable_fact_before_dispatch() {
     let root = temporary_directory("commit-before-dispatch");
     let pending = pending_execution(1, "original-checkout");
     seed_delivery(&root, &delivery_before_advance(1));
-    let mut control_plane = ControlPlane::start_local(
-        ControlPlaneConfig::local(&root),
-        Box::new(RecordingPublisher),
-    )
-    .expect("Control Plane should start");
+    let publisher = Box::new(RecordingPublisher);
+    let mut control_plane = ControlPlane::start_local(ControlPlaneConfig::local(&root), publisher)
+        .expect("Control Plane should start");
     let mut dispatcher = CommitInspectingDispatcher {
         database_path: root.join("control-plane.sqlite3"),
         delivery_id: pending.delivery().id().clone(),
@@ -550,12 +598,14 @@ fn raw_borrowed_journal_can_publish_before_an_unrelated_outer_commit_fails() {
         }))
         .expect("seed raw borrowed journal");
     store
-        .execute(DeliveryCommand::StartStage(Box::new(StartDeliveryStage {
-            request_id: pending.request_id().clone(),
-            request_digest: "e".repeat(64),
-            expected_revision: 1,
-            transition: pending.stage_transition().clone(),
-        })))
+        .execute(DeliveryCommand::StartWorkRunDispatch(Box::new(
+            StartDeliveryWorkRunDispatch {
+                request_id: pending.request_id().clone(),
+                request_digest: "e".repeat(64),
+                expected_revision: 1,
+                transition: pending.stage_transition().clone(),
+            },
+        )))
         .expect("borrowed journal publishes before the outer commit");
     let outer_commit: Result<(), &'static str> = Err("injected outer commit failure");
     assert!(outer_commit.is_err());
@@ -579,7 +629,7 @@ fn generic_control_plane_commit_rejects_every_delivery_command_bypass() {
     for command_name in [
         CommandName::DeliveryCreate,
         CommandName::DeliveryUpdateSpec,
-        CommandName::DeliveryApproveTaskBreakdown,
+        CommandName::DeliveryTaskBreakdownCreate,
         CommandName::DeliveryAdvance,
         CommandName::DeliveryResolveAttention,
         CommandName::DeliverySubmitVerdict,
@@ -628,7 +678,7 @@ fn mismatched_delivery_command_payload_fails_before_storage_or_dispatch() {
     )
     .expect("Control Plane should start");
     let mut command = delivery_advance_command(8);
-    command.payload = serde_json::json!({"deliveryId": canonical_id("dlv", 9)});
+    command.payload["deliveryId"] = serde_json::json!(canonical_id("dlv", 9));
     let mut dispatcher = RecordingDispatcher::default();
 
     let error = control_plane
@@ -726,7 +776,7 @@ fn scoped_request_replay_returns_the_original_committed_job_without_redispatch()
 
 #[test]
 fn corrupted_durable_job_payload_is_rejected_without_recomputed_dispatch() {
-    for (seed, corruption) in [(70, "unknown-field"), (71, "foreign-stage-binding")] {
+    for (seed, corruption) in [(70, "unknown-field"), (71, "foreign-work-run-binding")] {
         let root = temporary_directory(corruption);
         let pending = pending_execution(seed, "durable-checkout");
         let command = delivery_advance_command(seed);
@@ -752,8 +802,8 @@ fn corrupted_durable_job_payload_is_rejected_without_recomputed_dispatch() {
                     .expect("execution job object")
                     .insert("unexpectedField".into(), serde_json::json!(true));
             }
-            "foreign-stage-binding" => {
-                corrupted["scope"]["stageRunId"] = serde_json::json!(canonical_id("run", seed + 1));
+            "foreign-work-run-binding" => {
+                corrupted["scope"]["workRunId"] = serde_json::json!(canonical_id("wrn", seed + 1));
             }
             _ => panic!("unsupported corruption fixture"),
         }
@@ -1038,8 +1088,17 @@ fn authorized_rework_commits_exact_structured_scope_and_rejects_cross_delivery_r
     let fixture = authorized_rework_dispatch(&DeliveryId(canonical_id("dlv", seed)));
     seed_rework_history(&root, &fixture.journal);
     let pending = pending_rework(seed, &fixture, 'a', 3_600);
-    let command = rework_advance_command(seed, fixture.source_delivery.revision());
-    let ExecutionScope::DeliveryStageExecutionScope(scope) = &pending.job().scope else {
+    let command = rework_advance_command(seed, &fixture);
+    assert!(
+        !pending
+            .delivery()
+            .snapshot()
+            .session_bindings
+            .iter()
+            .any(|binding| binding.execution_job_id == pending.job().job_id),
+        "dispatch must not reuse an accepted job"
+    );
+    let ExecutionScope::WorkRunExecutionScope(scope) = &pending.job().scope else {
         panic!("rework job must have Delivery stage scope");
     };
     let authorization = scope
@@ -1059,18 +1118,7 @@ fn authorized_rework_commits_exact_structured_scope_and_rejects_cross_delivery_r
     );
     assert!(authorization.requires_full_reverification);
     assert_eq!(authorization.targets.len(), 1);
-    assert_eq!(
-        authorization.targets[0].delivery_task_id,
-        scope
-            .delivery_task_id
-            .clone()
-            .expect("authorized rework task")
-    );
-    assert_eq!(
-        authorization.targets[0].diagram_id,
-        "diagram-current-verdict"
-    );
-    assert_eq!(authorization.targets[0].node_id, "node-current-failure");
+    assert_eq!(authorization.targets[0].work_item_id, scope.work_item_id);
     assert_eq!(authorization.targets[0].file_path, "src/invitation.rs");
     assert_eq!(authorization.targets[0].source_hunk_sha256, "b".repeat(64));
     assert_eq!(
@@ -1086,7 +1134,7 @@ fn authorized_rework_commits_exact_structured_scope_and_rejects_cross_delivery_r
     .expect("Control Plane should start");
     let mut dispatcher = RecordingDispatcher::default();
     let mut foreign = command.clone();
-    foreign.payload = serde_json::json!({"deliveryId": canonical_id("dlv", seed + 1)});
+    foreign.payload["deliveryId"] = serde_json::json!(canonical_id("dlv", seed + 1));
     control_plane
         .commit_delivery_execution(&foreign, &pending, &mut dispatcher)
         .expect_err("authorization cannot cross Delivery identity");
@@ -1097,6 +1145,19 @@ fn authorized_rework_commits_exact_structured_scope_and_rejects_cross_delivery_r
         .expect("source state");
     assert_eq!(unchanged.revision, fixture.source_delivery.revision());
 
+    for field in ["filePath", "sourceHunkSha256", "workItemId"] {
+        let mut foreign = command.clone();
+        foreign.payload["rework"]["targets"][0][field] = serde_json::json!(match field {
+            "filePath" => "src/foreign.rs".to_owned(),
+            "sourceHunkSha256" => "f".repeat(64),
+            "workItemId" => canonical_id("wit", 999),
+            _ => unreachable!(),
+        });
+        control_plane
+            .commit_delivery_execution(&foreign, &pending, &mut dispatcher)
+            .expect_err("request cannot borrow an authorization for another target");
+        assert!(dispatcher.jobs.is_empty());
+    }
     let receipt = control_plane
         .commit_delivery_execution(&command, &pending, &mut dispatcher)
         .expect("authorized rework transaction");
@@ -1115,15 +1176,13 @@ fn authorized_rework_commits_exact_structured_scope_and_rejects_cross_delivery_r
     assert!(committed.snapshot().evidence.is_empty());
     assert!(committed.snapshot().verdict.is_none());
     assert_eq!(
-        committed
-            .snapshot()
-            .stage_runs
-            .last()
-            .expect("remediator StageRun")
-            .delivery_task_id,
-        scope.delivery_task_id
+        committed.snapshot().stage_runs,
+        fixture.source_delivery.snapshot().stage_runs
     );
-
+    assert_eq!(
+        committed.snapshot().work_run_aggregate,
+        fixture.transition.delivery.snapshot().work_run_aggregate
+    );
     control_plane.shutdown().expect("shutdown should succeed");
     fs::remove_dir_all(root).expect("database directory release");
 }
@@ -1138,7 +1197,7 @@ fn rework_request_replay_returns_original_durable_job_not_retry_config() {
     let retry = pending_rework(seed, &fixture, 'f', 42);
     assert_ne!(original.job().payload_digest, retry.job().payload_digest);
     assert_ne!(original.job().limits, retry.job().limits);
-    let command = rework_advance_command(seed, fixture.source_delivery.revision());
+    let command = rework_advance_command(seed, &fixture);
     let mut control_plane = ControlPlane::start_local(
         ControlPlaneConfig::local(&root),
         Box::new(RecordingPublisher),
@@ -1191,7 +1250,12 @@ fn repeated_rework_replay_returns_original_receipt_before_stale_facts_or_broken_
         ReworkClarificationReason::RepeatedCriterionFailure
     );
     seed_rework_history(&root, &fixture.journal);
-    let command = rework_advance_command(seed, fixture.source_delivery.revision());
+    let mut command = delivery_advance_command(seed);
+    command.expected_revision = Revision(
+        i64::try_from(fixture.source_delivery.revision())
+            .expect("fixture revision fits wire range"),
+    );
+    command.payload["dispatchProfile"] = serde_json::json!("remediator");
     let published = Arc::new(Mutex::new(Vec::new()));
     let mut control_plane = ControlPlane::start_local(
         ControlPlaneConfig::local(&root),
@@ -1318,7 +1382,12 @@ fn clarification_failure_at_each_atomic_member_rolls_back_every_fact() {
         let root = temporary_directory(&format!("clarification-{member}-rollback"));
         let fixture = repeated_rework_clarification(&DeliveryId(canonical_id("dlv", seed)));
         seed_rework_history(&root, &fixture.journal);
-        let command = rework_advance_command(seed, fixture.source_delivery.revision());
+        let mut command = delivery_advance_command(seed);
+        command.expected_revision = Revision(
+            i64::try_from(fixture.source_delivery.revision())
+                .expect("fixture revision fits wire range"),
+        );
+        command.payload["dispatchProfile"] = serde_json::json!("remediator");
         let connection = rusqlite::Connection::open(root.join("control-plane.sqlite3"))
             .expect("failure injection database");
         connection.execute_batch(trigger).expect("failure trigger");
@@ -1407,7 +1476,7 @@ fn rework_failure_at_each_atomic_member_rolls_back_and_never_dispatches() {
         let fixture = authorized_rework_dispatch(&DeliveryId(canonical_id("dlv", seed)));
         seed_rework_history(&root, &fixture.journal);
         let pending = pending_rework(seed, &fixture, 'a', 3_600);
-        let command = rework_advance_command(seed, fixture.source_delivery.revision());
+        let command = rework_advance_command(seed, &fixture);
         let connection = rusqlite::Connection::open(root.join("control-plane.sqlite3"))
             .expect("failure injection database");
         connection.execute_batch(trigger).expect("failure trigger");
@@ -1460,5 +1529,106 @@ fn rework_failure_at_each_atomic_member_rolls_back_and_never_dispatches() {
         assert_eq!(counts, (3, 0, 0), "failure at {member}");
         connection.close().expect("inspection connection close");
         fs::remove_dir_all(root).expect("database directory release");
+    }
+}
+
+#[test]
+fn foreign_or_invalid_job_facts_are_rejected_before_any_dispatch_commit() {
+    let root = temporary_directory("invalid-job-before-commit");
+    let before = delivery_before_advance(901);
+    let pending = pending_execution(901, "checkout");
+    seed_delivery(&root, &before);
+    let mut control_plane = ControlPlane::start_local(
+        ControlPlaneConfig::local(&root),
+        Box::new(RecordingPublisher),
+    )
+    .unwrap();
+    let command = delivery_advance_command(901);
+    let mut dispatcher = RecordingDispatcher::default();
+    for field in [
+        "goal",
+        "profile",
+        "work_item",
+        "run",
+        "job",
+        "repository",
+        "limits",
+    ] {
+        let mut job = pending.job().clone();
+        match field {
+            "goal" => job.goal = "foreign goal".into(),
+            "profile" => job.execution_profile = "planner".into(),
+            "work_item" => job.work_input.as_mut().unwrap().work_item.goal = "foreign item".into(),
+            "run" => {
+                if let ExecutionScope::WorkRunExecutionScope(scope) = &mut job.scope {
+                    scope.work_run_id.0 = canonical_id("wrn", 902);
+                }
+            }
+            "job" => job.job_id.0 = canonical_id("job", 902),
+            "repository" => job.workspace.repository_id.0 = canonical_id("rep", 902),
+            "limits" => job.limits.max_runtime_seconds = 0,
+            _ => unreachable!(),
+        }
+        let foreign = PendingDeliveryExecution::from_workrun(
+            pending.request_id().clone(),
+            pending.stage_transition().clone(),
+            job,
+        );
+        control_plane
+            .commit_delivery_execution(&command, &foreign, &mut dispatcher)
+            .expect_err(field);
+        let stored = control_plane
+            .load_state(&format!("delivery:{}", before.id().0))
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.revision, before.revision(), "{field}");
+        assert_eq!(stored.payload, before.encode_json().unwrap(), "{field}");
+        assert!(dispatcher.jobs.is_empty(), "{field}");
+    }
+    control_plane
+        .commit_delivery_execution(&command, &pending, &mut dispatcher)
+        .expect("rejected jobs did not consume the request or alter its journal");
+    assert_eq!(dispatcher.jobs, [pending.job().clone()]);
+    control_plane.shutdown().unwrap();
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn prepared_dispatch_rejects_reusing_an_accepted_run_or_job() {
+    let pending = pending_execution(902, "checkout");
+    let StageAdvanceEffect::Dispatch(intent) = &pending.stage_transition().effect else {
+        panic!("dispatch")
+    };
+    let fixture = Delivery::decode_json(include_bytes!(
+        "../../winwincode-delivery/tests/fixtures/delivery-main.json"
+    ))
+    .unwrap();
+    for reuse_run in [false, true] {
+        let mut aggregate = pending.delivery().snapshot().work_run_aggregate.clone();
+        let mut accepted = fixture.snapshot().work_run_aggregate.runs[0].clone();
+        if reuse_run {
+            accepted.id = intent.work_run_id.clone();
+        } else {
+            accepted.execution_job_id = intent.execution_job_id.clone();
+        }
+        aggregate.runs.push(accepted);
+        let error = prepare_workrun_advance(
+            pending.request_id(),
+            &aggregate,
+            &pending.delivery().snapshot().spec,
+            intent,
+            DeliveryExecutionConfig {
+                payload_digest: pending.job().payload_digest.clone(),
+                candidate_ref: None,
+                workspace: pending.job().workspace.clone(),
+                limits: pending.job().limits.clone(),
+            },
+        )
+        .expect_err("accepted identity must not be reused for a new dispatch");
+        assert!(
+            error
+                .to_string()
+                .contains("reuses an accepted WorkRun or ExecutionJob")
+        );
     }
 }

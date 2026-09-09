@@ -4,12 +4,12 @@ use super::*;
 use std::process::Command;
 use winwincode_api::generated::{
     AcceptanceCriterionInput, DeliveryAdvanceCommand, DeliveryAdvanceCommandCommand,
-    DeliveryAdvancePayload, DeliveryApproveTaskBreakdownCommand,
-    DeliveryApproveTaskBreakdownCommandCommand, DeliveryApproveTaskBreakdownPayload,
-    DeliveryCreateCommand, DeliveryCreateCommandCommand, DeliveryCreatePayload,
-    DeliveryResolveAttentionCommand, DeliveryResolveAttentionCommandCommand,
+    DeliveryAdvancePayload, DeliveryCreateCommand, DeliveryCreateCommandCommand,
+    DeliveryCreatePayload, DeliveryResolveAttentionCommand, DeliveryResolveAttentionCommandCommand,
     DeliveryResolveAttentionPayload, DeliverySpecInput, DeliverySubmitVerdictCommand,
-    DeliverySubmitVerdictCommandCommand, DeliverySubmitVerdictPayload, DeliveryUpdateSpecCommand,
+    DeliverySubmitVerdictCommandCommand, DeliverySubmitVerdictPayload,
+    DeliveryTaskBreakdownCreateCommand, DeliveryTaskBreakdownCreateCommandCommand,
+    DeliveryTaskBreakdownCreateItem, DeliveryTaskBreakdownCreatePayload, DeliveryUpdateSpecCommand,
     DeliveryUpdateSpecCommandCommand, DeliveryUpdateSpecPayload,
 };
 use winwincode_control_plane::{
@@ -22,10 +22,11 @@ use winwincode_delivery::{
         reconcile_durable_terminal_outcome,
         test_support::{active_lease_identity, session_binding_authority},
     },
-    domain::{AttentionItemStatus, Delivery, DeliveryStatus, StageRunStatus},
+    domain::{AttentionItemStatus, Delivery, DeliveryStatus},
 };
 use winwincode_domain::{
     ArtifactId, ExecutionEventId, SessionBindingSourceIdentity, SessionBindingSourceIdentityKind,
+    WorkRunId,
 };
 use winwincode_execution_port::generated::{
     ArtifactChunkMessage, ArtifactChunkMessageKind, ArtifactDescriptor, ArtifactKind,
@@ -43,7 +44,6 @@ const LIVE_GATE: &str = "WINWINCODE_MIMO_LIVE_DELIVERY_GATE";
 const LIVE_EVIDENCE: &str = "WINWINCODE_MIMO_LIVE_DELIVERY_EVIDENCE";
 const LIVE_PRIVATE_INPUT: &str = "WINWINCODE_LIVE_PROVIDER_PRIVATE_INPUT_FILE";
 const UPSTREAM_MODEL: &str = "mimo-v2.5-pro";
-const PLANNER_MEDIA_TYPE: &str = "application/vnd.winwincode.planner-solution+json";
 const CANDIDATE_MEDIA_TYPE: &str = "application/vnd.winwincode.git-candidate+json";
 const CANDIDATE_EVIDENCE_MEDIA_TYPE: &str =
     "application/vnd.winwincode.provider-candidate-evidence+json";
@@ -85,7 +85,7 @@ struct LiveDeliveryRuntime {
 }
 
 struct CurrentStageFacts {
-    stage_run_id: StageRunId,
+    work_run_id: WorkRunId,
     product_session_id: ProductSessionId,
     job: ExecutionJob,
     queue_scope: ExecutionQueueScope,
@@ -99,20 +99,16 @@ fn live_mimo_completes_one_production_delivery_with_durable_evidence() {
     let evidence_path = PathBuf::from(
         std::env::var_os(LIVE_EVIDENCE).expect("configured live Delivery evidence path"),
     );
-    let (mut runtime, planner) = LiveDeliveryRuntime::start(&evidence_path);
-    let planner_result = runtime.complete_planner(&planner);
-    runtime.approve_plan_and_start_executor();
-    let executor = runtime.current_stage(200, &executor_prompt());
+    let (mut runtime, executor) = LiveDeliveryRuntime::start(&evidence_path);
     let (executor_result, candidate_commit, candidate_ref) = runtime.complete_executor(&executor);
     let (reviewer, reviewer_result) =
         runtime.complete_verification("reviewer", 300, 310, &candidate_commit, &candidate_ref);
-    runtime.advance(16, "start independent verifier");
+    runtime.advance(16, "verifier", "start independent verifier");
     let (verifier, verifier_result) =
         runtime.complete_verification("verifier", 400, 410, &candidate_commit, &candidate_ref);
     let delivered = runtime.complete_delivery(&candidate_ref);
 
     let runs = [
-        (&planner, &planner_result),
         (&executor, &executor_result),
         (&reviewer, &reviewer_result),
         (&verifier, &verifier_result),
@@ -148,8 +144,8 @@ impl LiveDeliveryRuntime {
             .expect("accept production Delivery Spec");
         let delivery = load_delivery(&delivery_cp, &delivery_id);
         delivery_cp
-            .delivery_advance(&advance_command(&scope, &delivery, 10))
-            .expect("start Planner");
+            .delivery_task_breakdown_create(&create_work_item_command(&scope, &delivery, 13))
+            .expect("create canonical WorkItem graph");
         let live_secret = fs::read(live_secret_path()).expect("read live Provider secret file");
         let private_input = fs::read_to_string(private_input_path())
             .expect("read live Provider private input file");
@@ -161,16 +157,16 @@ impl LiveDeliveryRuntime {
             std::env::var("WINWINCODE_MIMO_LIVE_PROVIDER_ID").expect("configured live Provider id");
         let endpoint = std::env::var("WINWINCODE_MIMO_LIVE_PROVIDER_ENDPOINT")
             .expect("configured live Provider endpoint");
-        let planner = prepare_current_stage(
+        let executor = prepare_current_stage(
             &root,
             &mut delivery_cp,
             &delivery_id,
-            100,
-            &planner_prompt(&private_input),
+            200,
+            &executor_prompt(),
         );
         let model_application = configure_live_model_application(
             &root,
-            &planner.model,
+            &executor.model,
             &provider_id,
             &endpoint,
             live_secret.clone(),
@@ -187,7 +183,7 @@ impl LiveDeliveryRuntime {
                 live_secret,
                 private_input,
             },
-            planner,
+            executor,
         )
     }
 
@@ -202,67 +198,6 @@ impl LiveDeliveryRuntime {
         configure_stage_model_authority(&self.root, &stage, &self.provider_id);
         assert_stage_gateway_prerequisites(&self.root, &stage, &self.provider_id);
         stage
-    }
-
-    fn complete_planner(&mut self, planner: &StageAuthority) -> ProviderResult {
-        assert_stage_gateway_prerequisites(&self.root, planner, &self.provider_id);
-        let result = run_provider(&mut self.model_application, planner);
-        accept_runtime_payload(
-            &mut self.delivery_cp,
-            &self.scope,
-            planner,
-            1,
-            ExecutionEventCategory::Activity,
-            PLANNER_MEDIA_TYPE,
-            &canonical_planner_solution(&result.text),
-        );
-        finish_model(&mut self.model_application, planner, &result);
-        commit_stage_success(
-            &mut self.delivery_cp,
-            &self.scope,
-            planner,
-            &result,
-            Vec::new(),
-            1,
-        );
-        settle_stage_resources(&self.root, planner, &result);
-        result
-    }
-
-    fn approve_plan_and_start_executor(&mut self) {
-        self.advance(11, "open canonical PlanReview");
-        let delivery = load_delivery(&self.delivery_cp, &self.delivery_id);
-        let review = delivery
-            .snapshot()
-            .attention_items
-            .iter()
-            .find(|item| item.status == AttentionItemStatus::Open)
-            .expect("PlanReview Attention");
-        let context: serde_json::Value =
-            serde_json::from_str(&review.context).expect("canonical Solution Review context");
-        let review_set = context["reviewSetSha256"]
-            .as_str()
-            .expect("review-set digest")
-            .to_owned();
-        self.delivery_cp
-            .delivery_resolve_attention(&resolve_plan_review_command(
-                &self.scope,
-                &delivery,
-                &review.id,
-                &review_set,
-                12,
-            ))
-            .expect("approve canonical Solution Review");
-        let delivery = load_delivery(&self.delivery_cp, &self.delivery_id);
-        self.delivery_cp
-            .delivery_approve_task_breakdown(&approve_tasks_command(
-                &self.scope,
-                &delivery,
-                &review_set,
-                13,
-            ))
-            .expect("promote approved task graph");
-        self.advance(14, "start executor");
     }
 
     fn complete_executor(&mut self, executor: &StageAuthority) -> (ProviderResult, String, String) {
@@ -294,7 +229,7 @@ impl LiveDeliveryRuntime {
             1,
         );
         settle_stage_resources(&self.root, executor, &result);
-        self.advance(15, "settle executor and start independent reviewer");
+        self.advance(15, "reviewer", "start independent reviewer");
         let candidate_ref = self
             .delivery_cp
             .resolve_delivery_candidate(
@@ -348,10 +283,10 @@ impl LiveDeliveryRuntime {
         (stage, result)
     }
 
-    fn advance(&mut self, seed: u64, expectation: &str) {
+    fn advance(&mut self, seed: u64, profile: &str, expectation: &str) {
         let delivery = load_delivery(&self.delivery_cp, &self.delivery_id);
         self.delivery_cp
-            .delivery_advance(&advance_command(&self.scope, &delivery, seed))
+            .delivery_advance(&advance_command(&self.scope, &delivery, seed, profile))
             .unwrap_or_else(|error| panic!("{expectation}: {error}"));
     }
 
@@ -366,11 +301,6 @@ impl LiveDeliveryRuntime {
         self.delivery_cp
             .delivery_submit_verdict(&submit_verdict_command(&self.scope, &delivery, digest, 17))
             .expect("submit production verdict");
-        let ready = load_delivery(&self.delivery_cp, &self.delivery_id);
-        assert_eq!(ready.snapshot().status, DeliveryStatus::ReadyToDeliver);
-        self.delivery_cp
-            .delivery_advance(&advance_command(&self.scope, &ready, 18))
-            .expect("open DeliveryReview");
         let review_delivery = load_delivery(&self.delivery_cp, &self.delivery_id);
         let review = review_delivery
             .snapshot()
@@ -554,13 +484,16 @@ fn advance_command(
     scope: &RepositoryScope,
     delivery: &Delivery,
     seed: u64,
+    profile: &str,
 ) -> DeliveryAdvanceCommand {
     DeliveryAdvanceCommand {
         actor: actor(),
         command: DeliveryAdvanceCommandCommand::DeliveryAdvance,
         expected_revision: Revision(i64::try_from(delivery.revision()).expect("Delivery revision")),
         payload: DeliveryAdvancePayload {
+            rework: None,
             delivery_id: delivery.id().clone(),
+            dispatch_profile: profile.into(),
         },
         request_id: RequestId(id("req", 9_000 + seed)),
         schema_version: SchemaVersion::WinwincodeV1,
@@ -578,77 +511,31 @@ fn load_delivery(control_plane: &ControlPlane, delivery_id: &DeliveryId) -> Deli
     delivery
 }
 
-fn resolve_plan_review_command(
+fn create_work_item_command(
     scope: &RepositoryScope,
     delivery: &Delivery,
-    attention_item_id: &winwincode_domain::AttentionItemId,
-    review_set: &str,
     seed: u64,
-) -> DeliveryResolveAttentionCommand {
-    #[derive(serde::Serialize)]
-    #[serde(rename_all = "camelCase")]
-    struct Decision<'a> {
-        schema_version: u8,
-        protocol: &'static str,
-        delivery_id: &'a DeliveryId,
-        delivery_spec_id: &'a winwincode_delivery::domain::DeliverySpecId,
-        delivery_spec_revision: u64,
-        review_stage_run_id: &'a StageRunId,
-        attention_item_id: &'a winwincode_domain::AttentionItemId,
-        review_set_sha256: &'a str,
-        action: &'static str,
-        comments: Option<&'static str>,
-        requested_changes: Option<Vec<String>>,
-    }
-    let review_run = delivery
-        .snapshot()
-        .stage_runs
-        .iter()
-        .find(|run| run.stage == winwincode_delivery::domain::DeliveryStage::PlanReview)
-        .expect("PlanReview run");
-    let resolution = Decision {
-        schema_version: 1,
-        protocol: "winwincode.solution-review-decision.v1",
-        delivery_id: delivery.id(),
-        delivery_spec_id: &delivery.snapshot().spec.id,
-        delivery_spec_revision: delivery.snapshot().spec.revision,
-        review_stage_run_id: &review_run.id,
-        attention_item_id,
-        review_set_sha256: review_set,
-        action: "approve",
-        comments: Some("Real Provider plan approved"),
-        requested_changes: None,
-    };
-    DeliveryResolveAttentionCommand {
+) -> DeliveryTaskBreakdownCreateCommand {
+    let contract = &delivery.snapshot().work_run_aggregate.contract;
+    DeliveryTaskBreakdownCreateCommand {
         actor: actor(),
-        command: DeliveryResolveAttentionCommandCommand::DeliveryResolveAttention,
+        command: DeliveryTaskBreakdownCreateCommandCommand::DeliveryTaskBreakdownCreate,
         expected_revision: Revision(i64::try_from(delivery.revision()).expect("revision")),
-        payload: DeliveryResolveAttentionPayload {
-            attention_item_id: attention_item_id.clone(),
-            decision: "resolve".to_owned(),
+        payload: DeliveryTaskBreakdownCreatePayload {
             delivery_id: delivery.id().clone(),
-            remediation: None,
-            resolution: serde_json::to_string(&resolution).expect("review resolution"),
-        },
-        request_id: RequestId(id("req", 9_000 + seed)),
-        schema_version: SchemaVersion::WinwincodeV1,
-        scope: scope.clone(),
-    }
-}
-
-fn approve_tasks_command(
-    scope: &RepositoryScope,
-    delivery: &Delivery,
-    review_set: &str,
-    seed: u64,
-) -> DeliveryApproveTaskBreakdownCommand {
-    DeliveryApproveTaskBreakdownCommand {
-        actor: actor(),
-        command: DeliveryApproveTaskBreakdownCommandCommand::DeliveryApproveTaskBreakdown,
-        expected_revision: Revision(i64::try_from(delivery.revision()).expect("revision")),
-        payload: DeliveryApproveTaskBreakdownPayload {
-            delivery_id: delivery.id().clone(),
-            review_set_sha256: Sha256Digest(format!("sha256:{review_set}")),
+            expected_revision: Revision(i64::try_from(delivery.revision()).expect("revision")),
+            contract_revision: contract.revision.clone(),
+            items: vec![DeliveryTaskBreakdownCreateItem {
+                id: winwincode_domain::WorkItemId(id("wit", seed)),
+                title: "Implement approved change".to_owned(),
+                goal: "Implement the approved requirement".to_owned(),
+                criterion_ids: contract
+                    .criteria
+                    .iter()
+                    .map(|criterion| criterion.id.clone())
+                    .collect(),
+                depends_on: Vec::new(),
+            }],
         },
         request_id: RequestId(id("req", 9_000 + seed)),
         schema_version: SchemaVersion::WinwincodeV1,
@@ -806,7 +693,7 @@ fn prepare_current_stage(
     prompt: &[u8],
 ) -> StageAuthority {
     let CurrentStageFacts {
-        stage_run_id,
+        work_run_id,
         product_session_id,
         job,
         queue_scope,
@@ -832,7 +719,7 @@ fn prepare_current_stage(
     let session_identity = SessionIdentity {
         codex_thread_id: codex_thread_id.clone(),
         product_session_id: product_session_id.clone(),
-        stage_run_id: Some(stage_run_id.clone()),
+        work_run_id: Some(work_run_id.clone()),
         worker_session_id: worker_session_id.clone(),
     };
     let model = ModelOpenMessage {
@@ -884,7 +771,7 @@ fn prepare_current_stage(
             worker_instance_id: worker_instance_id.clone(),
             worker_session_id: worker_session_id.clone(),
         },
-        stage_run_id: Some(stage_run_id),
+        work_run_id: Some(work_run_id),
         worker_id,
         worker_session_id,
     };
@@ -907,50 +794,40 @@ fn load_current_stage_facts(
     delivery_id: &DeliveryId,
 ) -> CurrentStageFacts {
     let delivery = load_delivery(control_plane, delivery_id);
-    let run = delivery
-        .snapshot()
-        .stage_runs
-        .iter()
-        .find(|run| {
-            matches!(
-                run.status,
-                StageRunStatus::Running | StageRunStatus::Waiting
-            )
+    assert_eq!(delivery.id(), delivery_id);
+    let repository = repository_scope();
+    let connection = rusqlite::Connection::open(root.data().join("control-plane.sqlite3"))
+        .expect("inspect public Delivery queue");
+    let records = connection
+        .prepare("SELECT dispatch_payload, submitted_at FROM scheduler_execution_jobs WHERE delivery_id = ?1 AND repository_id = ?2 AND state = 'queued'")
+        .expect("prepare queued Delivery query")
+        .query_map(rusqlite::params![delivery_id.0, repository.repository_id.0], |row| {
+            Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, String>(1)?))
         })
-        .expect("active Codex StageRun");
-    let binding = delivery
-        .snapshot()
-        .session_bindings
-        .iter()
-        .find(|binding| binding.stage_run_id == run.id)
-        .expect("pending SessionBinding");
+        .expect("read queued Delivery jobs")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("decode queue rows");
+    let [(payload, submitted_at)] = records.as_slice() else {
+        panic!("live sequential Delivery requires exactly one queued execution");
+    };
+    let job: ExecutionJob = serde_json::from_slice(payload).expect("canonical ExecutionJob");
+    let ExecutionScope::WorkRunExecutionScope(scope) = &job.scope else {
+        panic!("Delivery queue must contain a WorkRun job");
+    };
     let queue_scope = ExecutionQueueScope {
-        organization_id: repository_scope().organization_id,
-        workspace_id: repository_scope().workspace_id,
-        project_id: repository_scope().project_id,
-        repository_id: repository_scope().repository_id,
-        product_session_id: binding.product_session_id.clone(),
+        organization_id: repository.organization_id,
+        workspace_id: repository.workspace_id,
+        project_id: repository.project_id,
+        repository_id: repository.repository_id,
+        product_session_id: scope.product_session_id.clone(),
         delivery_id: Some(delivery_id.clone()),
     };
-    let mut storage = SqliteStorage::open(root.data()).expect("open stage storage");
-    let page = storage
-        .execution_queue()
-        .expect("execution queue")
-        .list_jobs(&queue_scope, &[], None, 100)
-        .expect("list Delivery Jobs");
-    let record = page
-        .jobs
-        .into_iter()
-        .find(|record| record.job_id == binding.execution_job_id)
-        .expect("current queued Delivery Job");
-    let job: ExecutionJob =
-        serde_json::from_slice(&record.dispatch_payload).expect("canonical ExecutionJob");
     CurrentStageFacts {
-        stage_run_id: run.id.clone(),
-        product_session_id: binding.product_session_id.clone(),
+        work_run_id: scope.work_run_id.clone(),
+        product_session_id: scope.product_session_id.clone(),
         job,
         queue_scope,
-        submitted_at: record.submitted_at,
+        submitted_at: Instant(submitted_at.clone()),
     }
 }
 
@@ -1408,12 +1285,11 @@ fn commit_stage_success(
     let facts = reconcile_durable_terminal_outcome(
         &load_delivery(
             control_plane,
-            match &stage.job.scope {
-                ExecutionScope::DeliveryStageExecutionScope(scope) => &scope.delivery_id,
-                ExecutionScope::ProductSessionExecutionScope(_) => {
-                    panic!("live Delivery stage must have Delivery scope")
-                }
-            },
+            stage
+                .queue_scope
+                .delivery_id
+                .as_ref()
+                .expect("Delivery queue scope"),
         ),
         DurableTerminalOutcomeInput {
             execution_job_id: stage.job.job_id.clone(),
@@ -1425,7 +1301,7 @@ fn commit_stage_success(
             worker_session_id: stage.binding.worker_session_id.clone(),
             issued_at: stage.binding.lease.issued_at.clone(),
             expires_at: stage.binding.lease.expires_at.clone(),
-            stage_run_id: stage.binding.stage_run_id.clone().expect("StageRun"),
+            work_run_id: stage.binding.work_run_id.clone().expect("StageRun"),
             status: TerminalOutcomeStatus::Succeeded,
             codex_thread_id: Some(stage.binding.codex_thread_id.clone()),
             finished_at_millis: instant_millis(&provider.terminal.settled_at),
@@ -1475,14 +1351,6 @@ fn instant_millis(value: &Instant) -> u64 {
         .expect("post-epoch timestamp")
         .saturating_mul(1_000)
         .saturating_add(fractional_millis)
-}
-
-fn planner_prompt(private_input: &str) -> Vec<u8> {
-    anthropic_prompt(
-        "planner",
-        "Design one minimal Rust source change that satisfies the Delivery criterion. Reply with a concise plain-text plan grounded in the requested repository change.",
-        Some(private_input),
-    )
 }
 
 fn executor_prompt() -> Vec<u8> {
@@ -1556,99 +1424,6 @@ fn bounded_provider_text(text: &str) -> String {
     }
 }
 
-fn canonical_planner_solution(provider_text: &str) -> Vec<u8> {
-    let summary = serde_json::to_string(&bounded_provider_text(provider_text))
-        .expect("encode Provider plan summary");
-    concat!(
-            "{\"schemaVersion\":1,",
-            "\"protocol\":\"winwincode.planner-solution.v1\",",
-            "\"solution\":{",
-            "\"id\":\"solution:live-provider\",",
-            "\"summary\":__SUMMARY__,",
-            "\"approach\":[\"Apply one reviewed source change and verify it through the canonical Delivery stages.\"],",
-            "\"components\":[{",
-            "\"id\":\"component:live-provider-candidate\",",
-            "\"label\":\"Live Provider candidate\",",
-            "\"responsibility\":\"Implements the accepted Delivery requirement in the repository.\",",
-            "\"kind\":\"component\",",
-            "\"trustBoundary\":\"repository\",",
-            "\"unresolved\":false,",
-            "\"repositoryPathPrefixes\":[\"src\"]",
-            "}],",
-            "\"connections\":[{",
-            "\"id\":\"connection:live-provider\",",
-            "\"from\":\"platform:codex-core\",",
-            "\"to\":\"component:live-provider-candidate\",",
-            "\"label\":\"executes\"",
-            "}]",
-            "},",
-            "\"architectureDiagram\":{",
-            "\"id\":\"diagram:live-architecture\",",
-            "\"kind\":\"system-architecture\",",
-            "\"title\":\"Live Provider architecture\",",
-            "\"nodes\":[{",
-            "\"id\":\"diagram:live-architecture:input\",",
-            "\"label\":\"Provider input\",",
-            "\"description\":\"Consumes the reviewed Delivery requirement.\",",
-            "\"kind\":\"stage\",",
-            "\"trustBoundary\":null,",
-            "\"unresolved\":false",
-            "},{",
-            "\"id\":\"diagram:live-architecture:output\",",
-            "\"label\":\"Candidate output\",",
-            "\"description\":\"Produces the immutable candidate for independent verification.\",",
-            "\"kind\":\"decision\",",
-            "\"trustBoundary\":\"repository\",",
-            "\"unresolved\":false",
-            "}],",
-            "\"edges\":[{",
-            "\"id\":\"diagram:live-architecture:edge\",",
-            "\"from\":\"diagram:live-architecture:input\",",
-            "\"to\":\"diagram:live-architecture:output\",",
-            "\"label\":\"implements\"",
-            "}]",
-            "},",
-            "\"processDiagram\":{",
-            "\"id\":\"diagram:live-process\",",
-            "\"kind\":\"process-flow\",",
-            "\"title\":\"Live Provider process\",",
-            "\"nodes\":[{",
-            "\"id\":\"diagram:live-process:input\",",
-            "\"label\":\"Provider input\",",
-            "\"description\":\"Consumes the reviewed Delivery requirement.\",",
-            "\"kind\":\"stage\",",
-            "\"trustBoundary\":null,",
-            "\"unresolved\":false",
-            "},{",
-            "\"id\":\"diagram:live-process:output\",",
-            "\"label\":\"Candidate output\",",
-            "\"description\":\"Produces the immutable candidate for independent verification.\",",
-            "\"kind\":\"decision\",",
-            "\"trustBoundary\":\"repository\",",
-            "\"unresolved\":false",
-            "}],",
-            "\"edges\":[{",
-            "\"id\":\"diagram:live-process:edge\",",
-            "\"from\":\"diagram:live-process:input\",",
-            "\"to\":\"diagram:live-process:output\",",
-            "\"label\":\"implements\"",
-            "}]",
-            "},",
-            "\"risks\":[\"The external Provider response must remain bound to the exact durable request.\"],",
-            "\"unresolvedItems\":[],",
-            "\"taskProposals\":[{",
-            "\"id\":\"dtk_00000000000000000000000001\",",
-            "\"title\":\"Implement the real Provider candidate\",",
-            "\"goal\":\"Complete one real Provider Delivery end to end\",",
-            "\"acceptanceCriterionIds\":[\"criterion-live-provider\"],",
-            "\"blockedByTaskIds\":[]",
-            "}]",
-            "}"
-        )
-    .replace("__SUMMARY__", &summary)
-    .into_bytes()
-}
-
 fn provider_candidate_evidence(provider_text: &str) -> Vec<u8> {
     serde_json::to_vec(&serde_json::json!({
         "schemaVersion": 1,
@@ -1695,10 +1470,11 @@ fn accept_verification_events(
 ) {
     let delivery = load_delivery(
         control_plane,
-        match &stage.job.scope {
-            ExecutionScope::DeliveryStageExecutionScope(scope) => &scope.delivery_id,
-            ExecutionScope::ProductSessionExecutionScope(_) => panic!("Delivery stage scope"),
-        },
+        stage
+            .queue_scope
+            .delivery_id
+            .as_ref()
+            .expect("Delivery queue scope"),
     );
     let criterion = delivery
         .snapshot()
@@ -1885,7 +1661,7 @@ fn live_evidence(
     root: &TestDirectory,
     repository: &Path,
     delivery: &Delivery,
-    runs: &[(&StageAuthority, &ProviderResult); 4],
+    runs: &[(&StageAuthority, &ProviderResult)],
 ) -> LiveEvidence {
     let provider_runs = runs
         .iter()

@@ -19,11 +19,11 @@ use winwincode_control_plane::{
     ProductSessionTurnState, ProductSessionTurnTerminalOutcome, SubmitChatMessageCommand,
 };
 use winwincode_domain::{
-    CodexThreadId, ControlPlaneEventId, CredentialReferenceId, DeliveryId, DeliveryTaskId,
-    ExecutionAckSequence, ExecutionJobId, ExecutionMessageId, ExecutionSequence, FencingToken,
-    Instant, LeaseId, ModelExchangeId, OrganizationId, ProductSessionId, ProjectId, RepositoryId,
-    RequestId, ServiceAccountId, Sha256Digest, StageRunId, UserId, WorkerId, WorkerInstanceId,
-    WorkerSessionId, WorkspaceId,
+    CodexThreadId, ControlPlaneEventId, CredentialReferenceId, DeliveryId, ExecutionAckSequence,
+    ExecutionJobId, ExecutionMessageId, ExecutionSequence, FencingToken, Instant, LeaseId,
+    ModelExchangeId, OrganizationId, ProductSessionId, ProjectId, RepositoryId, RequestId,
+    ServiceAccountId, Sha256Digest, UserId, WorkerId, WorkerInstanceId, WorkerSessionId,
+    WorkspaceId,
 };
 use winwincode_domain::{RepositoryScope, RepositoryScopeKind};
 use winwincode_execution_port::generated::{ExecutionOutcomeStatus, ExecutionOutcomeUsage};
@@ -621,10 +621,13 @@ fn continue_joins_exact_worker_slots_and_keeps_sibling_bindings_after_restart() 
             .expect("continue ten");
         let mut command_eleven =
             continue_command(&scope_key, 11, 21, authority_eleven.clone(), scope_eleven);
-        command_eleven.binding_identity = SessionBindingIdentity::delivery_stage(
+        command_eleven.binding_identity = SessionBindingIdentity::delivery_work_run(
             DeliveryId(id("dlv", 11)),
-            Some(DeliveryTaskId(id("dtk", 11))),
-            StageRunId(id("run", 11)),
+            winwincode_domain::WorkContractId(id("wct", 11)),
+            winwincode_domain::Revision(1),
+            winwincode_domain::WorkItemId(id("wit", 11)),
+            winwincode_domain::Revision(1),
+            winwincode_domain::WorkRunId(id("wrn", 11)),
             ProductSessionId(id("psn", 11)),
             authority_eleven.job_id.clone(),
         )
@@ -648,8 +651,8 @@ fn continue_joins_exact_worker_slots_and_keeps_sibling_bindings_after_restart() 
             Some(&authority_eleven.codex_thread_id)
         );
         assert_eq!(
-            eleven.record.bindings()[0].binding().stage_run_id(),
-            Some(&StageRunId(id("run", 11)))
+            eleven.record.bindings()[0].binding().work_run_id(),
+            Some(&winwincode_domain::WorkRunId(id("wrn", 11)))
         );
         let replay = service
             .continue_session(&command_ten)

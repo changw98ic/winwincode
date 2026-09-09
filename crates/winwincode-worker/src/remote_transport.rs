@@ -398,7 +398,11 @@ pub(crate) fn parse_origin(origin: &str) -> Result<Endpoint, RemoteWorkerPortErr
         .filter(|value| !value.contains('/') && !value.contains('@'))
         .ok_or(RemoteWorkerPortError)?;
     let (host, port) = authority.rsplit_once(':').ok_or(RemoteWorkerPortError)?;
-    if host.is_empty() || host.bytes().any(|byte| byte.is_ascii_control()) {
+    if host.is_empty()
+        || host
+            .chars()
+            .any(|character| character.is_ascii_control() || character.is_whitespace())
+    {
         return Err(RemoteWorkerPortError);
     }
     let port = port.parse::<u16>().map_err(|_| RemoteWorkerPortError)?;
@@ -424,4 +428,54 @@ fn read_private_credential(path: &Path) -> Result<Vec<u8>, RemoteWorkerPortError
         return Err(RemoteWorkerPortError);
     }
     Ok(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_http_response, parse_origin};
+
+    #[test]
+    fn origin_parser_accepts_only_a_host_and_nonzero_port() {
+        let endpoint = parse_origin("https://127.0.0.1:8443").expect("valid HTTPS origin");
+        assert_eq!(endpoint.host, "127.0.0.1");
+        assert_eq!(endpoint.port, 8443);
+    }
+
+    #[test]
+    fn origin_parser_rejects_ambiguous_or_header_shaped_authorities() {
+        for origin in [
+            "http://127.0.0.1:8443",
+            "https://127.0.0.1",
+            "https://127.0.0.1:0",
+            "https://127.0.0.1:8443/path",
+            "https://user@127.0.0.1:8443",
+            "https://127.0.0.1 bad:8443",
+            "https://127.0.0.1\nX-Injected: yes:8443",
+        ] {
+            assert!(
+                parse_origin(origin).is_err(),
+                "origin must be rejected: {origin:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn http_response_parser_requires_a_bounded_complete_success() {
+        let body = b"{}";
+        let response = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}";
+        assert_eq!(
+            parse_http_response(response).expect("complete response"),
+            body
+        );
+        for response in [
+            b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 2\r\n\r\n{}".as_slice(),
+            b"HTTP/1.1 200 OK\r\n\r\n{}".as_slice(),
+            b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\n{}".as_slice(),
+        ] {
+            assert!(
+                parse_http_response(response).is_err(),
+                "response must be rejected"
+            );
+        }
+    }
 }

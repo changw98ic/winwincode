@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use winwincode_domain::{
-    CodexThreadId, DeliveryId, DeliveryTaskId, ExecutionJobId, LeaseId, ProductSessionId,
-    StageRunId, WorkerId, WorkerInstanceId, WorkerSessionId,
+    CodexThreadId, DeliveryId, ExecutionJobId, LeaseId, ProductSessionId, Revision, WorkContractId,
+    WorkItemId, WorkRunId, WorkerId, WorkerInstanceId, WorkerSessionId,
 };
 use winwincode_session::{
     RuntimeSourceIdentity, SessionBinding, SessionBindingError, SessionBindingIdentity,
@@ -13,10 +13,13 @@ fn id(prefix: &str, tail: char) -> String {
 }
 
 fn delivery_identity() -> SessionBindingIdentity {
-    SessionBindingIdentity::delivery_stage(
+    SessionBindingIdentity::delivery_work_run(
         DeliveryId(id("dlv", '1')),
-        Some(DeliveryTaskId(id("dtk", '2'))),
-        StageRunId(id("run", '3')),
+        WorkContractId(id("wct", '2')),
+        Revision(1),
+        WorkItemId(id("wit", '3')),
+        Revision(1),
+        WorkRunId(id("wrn", '4')),
         ProductSessionId(id("psn", '4')),
         ExecutionJobId(id("job", '5')),
     )
@@ -24,7 +27,7 @@ fn delivery_identity() -> SessionBindingIdentity {
 }
 
 #[test]
-fn binding_keeps_delivery_stage_and_all_execution_identities_separate() {
+fn binding_keeps_delivery_work_run_and_all_execution_identities_separate() {
     let identity = delivery_identity();
     let binding = SessionBinding::pending(identity.clone()).expect("pending binding");
     let binding = binding
@@ -48,10 +51,11 @@ fn binding_keeps_delivery_stage_and_all_execution_identities_separate() {
     assert_eq!(binding.identity(), &identity);
     assert_eq!(binding.delivery_id(), Some(&DeliveryId(id("dlv", '1'))));
     assert_eq!(
-        binding.delivery_task_id(),
-        Some(&DeliveryTaskId(id("dtk", '2')))
+        binding.work_contract_id(),
+        Some(&WorkContractId(id("wct", '2')))
     );
-    assert_eq!(binding.stage_run_id(), Some(&StageRunId(id("run", '3'))));
+    assert_eq!(binding.work_item_id(), Some(&WorkItemId(id("wit", '3'))));
+    assert_eq!(binding.work_run_id(), Some(&WorkRunId(id("wrn", '4'))));
     assert_eq!(
         binding.product_session_id(),
         &ProductSessionId(id("psn", '4'))
@@ -70,7 +74,7 @@ fn binding_keeps_delivery_stage_and_all_execution_identities_separate() {
 }
 
 #[test]
-fn product_session_scope_does_not_invent_delivery_or_stage_run() {
+fn product_session_scope_does_not_invent_delivery_or_work_run() {
     let identity = SessionBindingIdentity::product_session(
         ProductSessionId(id("psn", '1')),
         ExecutionJobId(id("job", '2')),
@@ -79,8 +83,8 @@ fn product_session_scope_does_not_invent_delivery_or_stage_run() {
     let binding = SessionBinding::pending(identity).expect("pending Chat binding");
 
     assert_eq!(binding.delivery_id(), None);
-    assert_eq!(binding.delivery_task_id(), None);
-    assert_eq!(binding.stage_run_id(), None);
+    assert_eq!(binding.work_item_id(), None);
+    assert_eq!(binding.work_run_id(), None);
 }
 
 #[test]
@@ -119,15 +123,21 @@ fn codex_thread_requires_a_worker_session_and_rejects_conflicting_rebind() {
 
 #[test]
 fn binding_rejects_invalid_scope_relationships_and_source_values() {
-    let invalid_delivery = SessionBindingIdentity::delivery_stage(
+    let invalid_delivery = SessionBindingIdentity::delivery_work_run(
         DeliveryId(id("dlv", '1')),
-        None,
-        StageRunId(id("run", '2')),
+        WorkContractId(id("wct", '2')),
+        Revision(1),
+        WorkItemId(id("wit", '3')),
+        Revision(1),
+        WorkRunId(id("wrn", '2')),
         ProductSessionId(id("psn", '3')),
         ExecutionJobId(id("job", '4')),
     )
     .expect("Delivery-level binding without task is valid");
-    assert_eq!(invalid_delivery.delivery_task_id(), None);
+    assert_eq!(
+        invalid_delivery.work_item_id(),
+        Some(&WorkItemId(id("wit", '3')))
+    );
 
     let binding = SessionBinding::pending(delivery_identity()).expect("binding");
     assert_eq!(
@@ -155,6 +165,23 @@ fn binding_rejects_invalid_scope_relationships_and_source_values() {
 }
 
 #[test]
+fn binding_rejects_legacy_run_prefix_and_requires_work_run_identity() {
+    assert_eq!(
+        SessionBindingIdentity::delivery_work_run(
+            DeliveryId(id("dlv", '1')),
+            WorkContractId(id("wct", '2')),
+            Revision(1),
+            WorkItemId(id("wit", '3')),
+            Revision(1),
+            WorkRunId(id("run", '4')),
+            ProductSessionId(id("psn", '5')),
+            ExecutionJobId(id("job", '6')),
+        ),
+        Err(SessionBindingError::InvalidIdentity("workRunId"))
+    );
+}
+
+#[test]
 fn binding_rejects_a_source_identity_for_another_worker_session() {
     let binding = SessionBinding::pending(delivery_identity()).expect("binding");
     let binding = binding
@@ -177,17 +204,20 @@ fn binding_rejects_a_source_identity_for_another_worker_session() {
 }
 
 #[test]
-fn binding_identity_matching_is_exact_and_does_not_accept_foreign_job_or_stage() {
+fn binding_identity_matching_is_exact_and_does_not_accept_foreign_job_or_work_run() {
     let binding = SessionBinding::pending(delivery_identity()).expect("binding");
     assert!(binding.matches_identity(binding.identity()));
 
-    let foreign = SessionBindingIdentity::delivery_stage(
+    let foreign = SessionBindingIdentity::delivery_work_run(
         DeliveryId(id("dlv", '1')),
-        Some(DeliveryTaskId(id("dtk", '2'))),
-        StageRunId(id("run", '9')),
+        WorkContractId(id("wct", '2')),
+        Revision(1),
+        WorkItemId(id("wit", '3')),
+        Revision(1),
+        WorkRunId(id("wrn", '9')),
         ProductSessionId(id("psn", '4')),
         ExecutionJobId(id("job", '5')),
     )
-    .expect("foreign StageRun identity");
+    .expect("foreign WorkRun identity");
     assert!(!binding.matches_identity(&foreign));
 }

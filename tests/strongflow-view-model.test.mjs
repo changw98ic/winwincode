@@ -42,6 +42,7 @@ const queryCacheModule = await import(`${pathToFileURL(resolve(
 
 const {
   canAdvanceStrongFlowDelivery,
+  canSubmitStrongFlowVerdict,
   createStrongFlowCreateViewModel,
   createStrongFlowViewModel,
   hasUnmetStrongFlowRequiredCriterion,
@@ -59,9 +60,10 @@ const scope = {
 }
 const deliveryId = 'dlv_00000000000000000000000001'
 const productSessionId = 'psn_00000000000000000000000001'
-const stageRunId = 'run_00000000000000000000000001'
+const workRunId = 'wrn_00000000000000000000000001'
+const workItemId = 'wit_00000000000000000000000001'
 const nextProductSessionId = 'psn_00000000000000000000000002'
-const nextStageRunId = 'run_00000000000000000000000003'
+const nextWorkRunId = 'wrn_00000000000000000000000003'
 const subscriptionId = 'sub_00000000000000000000000001'
 
 function requestId(value) {
@@ -96,7 +98,7 @@ function readCursor(revision = 1, eventSequence = revision) {
 
 function sessionBinding(
   selectedProductSessionId = productSessionId,
-  selectedStageRunId = stageRunId,
+  selectedWorkRunId = workRunId,
   suffix = '01',
 ) {
   return {
@@ -104,7 +106,7 @@ function sessionBinding(
     boundAt: '2026-08-27T01:00:00.000Z',
     executionJobId: `job_000000000000000000000000${suffix}`,
     productSessionId: selectedProductSessionId,
-    stageRunId: selectedStageRunId,
+    workRunId: selectedWorkRunId,
     workerSessionId: `wsn_000000000000000000000000${suffix}`,
     codexThreadId: `cdx_000000000000000000000000${suffix}`,
     attempt: 1,
@@ -122,7 +124,7 @@ function sessionBinding(
       productSessionId: selectedProductSessionId,
       workerSessionId: `wsn_000000000000000000000000${suffix}`,
       codexThreadId: `cdx_000000000000000000000000${suffix}`,
-      stageRunId: selectedStageRunId,
+      workRunId: selectedWorkRunId,
     },
   }
 }
@@ -149,9 +151,9 @@ function solutionReview() {
     deliveryId,
     deliverySpecId: 'spec:1',
     deliverySpecRevision: 3,
-    planningStageRunId: stageRunId,
+    planningWorkRunId: workRunId,
     planningSessionBindingId: 'binding:strongflow:1',
-    reviewStageRunId: 'run_00000000000000000000000002',
+    reviewWorkRunId: 'wrn_00000000000000000000000002',
     attentionItemId: 'att_00000000000000000000000001',
     reviewSetSha256: `sha256:${'1'.repeat(64)}`,
     reviewStatus: 'approved',
@@ -239,10 +241,10 @@ function delivery(revision = 1, candidateRef = 'refs/winwincode/candidate/1') {
     solutionReview: solutionReview(),
     diagramExecution: null,
     stages: [{
-      id: stageRunId,
+      id: workRunId,
       actorType: 'codex',
       attempt: 1,
-      deliveryTaskId: 'tsk_00000000000000000000000001',
+      deliveryTaskId: 'dtk_00000000000000000000000001',
       finishedAt: null,
       role: 'implementer',
       sessionBinding: sessionBinding(),
@@ -251,20 +253,20 @@ function delivery(revision = 1, candidateRef = 'refs/winwincode/candidate/1') {
       status: 'running',
     }],
     tasks: [{
-      id: 'tsk_00000000000000000000000001',
+      id: 'dtk_00000000000000000000000001',
       title: 'Build projection',
       goal: 'Keep the UI exact.',
       owner: null,
       status: 'active',
       blockedByTaskIds: [],
       acceptanceCriterionIds: ['criterion:1'],
-      stageRunIds: [stageRunId],
+      workRunIds: [workRunId],
       evidenceRefs: ['evd_00000000000000000000000001'],
     }],
     attention: [{
       id: 'att_00000000000000000000000001',
       deliverySpecId: 'spec:1',
-      stageRunId,
+      workRunId,
       type: 'delivery_approval',
       title: 'Approve publication',
       options: [],
@@ -283,7 +285,7 @@ function delivery(revision = 1, candidateRef = 'refs/winwincode/candidate/1') {
       deliverySpecRevision: 3,
       sessionBindingId: 'binding:strongflow:1',
       sourceRef: 'artifact:test:1',
-      stageRunId,
+      workRunId,
       type: 'test',
       createdAt: '2026-08-27T01:00:04.000Z',
     }],
@@ -296,7 +298,7 @@ function delivery(revision = 1, candidateRef = 'refs/winwincode/candidate/1') {
       diffSha256: `sha256:${'2'.repeat(64)}`,
       frozenAt: '2026-08-27T01:00:03.000Z',
       producerSessionBindingId: 'binding:strongflow:1',
-      producerStageRunId: stageRunId,
+      producerWorkRunId: workRunId,
     },
     verdict,
     publication: {
@@ -366,35 +368,122 @@ function deliveryWithNextActiveStage(revision = 2) {
   }
   value.stages.push({
     ...value.stages[0],
-    id: nextStageRunId,
+    id: nextWorkRunId,
     finishedAt: null,
     role: 'reviewer',
-    sessionBinding: sessionBinding(nextProductSessionId, nextStageRunId, '02'),
+    sessionBinding: sessionBinding(nextProductSessionId, nextWorkRunId, '02'),
     stage: 'reviewing',
     startedAt: '2026-08-27T01:00:11.000Z',
     status: 'running',
   })
-  value.tasks[0].stageRunIds.push(nextStageRunId)
+  value.tasks[0].workRunIds.push(nextWorkRunId)
   return value
 }
 
 function runtime(
   deliveryValue,
   selectedProductSessionId = productSessionId,
-  selectedStageRunId = stageRunId,
+  selectedWorkRunId = workRunId,
 ) {
   const cursor = deliveryValue.readCursor
+  const run = workRunAggregate(deliveryValue).runs.find(run => run.id === selectedWorkRunId)
   return {
     kind: 'runtime_projection',
     productSessionId: selectedProductSessionId,
     deliveryId,
-    stageRunId: selectedStageRunId,
+    workRunId: selectedWorkRunId,
     readCursor: cursor,
     eventCursor: cursor.eventCursor,
     lastProjectionSequence: cursor.runtimeAcceptedSequence,
     revision: cursor.runtimeLedgerRevision,
     rebuiltAt: '2026-08-27T01:00:05.000Z',
-    sessions: [],
+    sessions: [{
+      productSessionId: selectedProductSessionId,
+      workRunId: selectedWorkRunId,
+      workItemId,
+      executionJobId: run?.executionJobId,
+      attempt: run?.attempt,
+      workerSessionId: run?.workerSessionId,
+      codexThreadId: run?.codexThreadId,
+      leaseId: run?.leaseId,
+      fencingToken: run?.fencingToken,
+    }],
+  }
+}
+
+function workRunAggregate(deliveryValue, selectedWorkRunId = workRunId) {
+  const canonicalRuns = deliveryValue.stages
+    .filter(stage => stage.actorType === 'codex' && stage.sessionBinding?.workRunId !== null)
+    .map((stage, index) => ({
+      schemaVersion,
+      id: stage.sessionBinding.workRunId,
+      workContractId: 'wct_00000000000000000000000001',
+      contractRevision: 1,
+      workItemId,
+      workItemRevision: 1,
+      revision: deliveryValue.deliveryRevision,
+      state: stage.status === 'failed' ? 'failed' : stage.status === 'succeeded' ? 'settled' : 'running',
+      executionJobId: stage.sessionBinding.executionJobId,
+      attempt: index + 1,
+      workerId: stage.sessionBinding.workerId,
+      workerInstanceId: `wki_0000000000000000000000000${String(index + 1)}`,
+      workerSessionId: stage.sessionBinding.workerSessionId,
+      leaseId: stage.sessionBinding.leaseId,
+      fencingToken: stage.sessionBinding.fencingToken ?? '1',
+      productSessionId: stage.sessionBinding.productSessionId,
+      codexThreadId: stage.sessionBinding.codexThreadId,
+    }))
+  return {
+    schemaVersion,
+    contract: {
+      schemaVersion,
+      id: 'wct_00000000000000000000000001',
+      revision: 1,
+      scope: [],
+      objective: 'Execute one bounded WorkItem.',
+      constraints: [],
+      protectedScope: [],
+      requiredHumanAuthority: 'none',
+      criteria: [{
+        id: 'crt_00000000000000000000000001',
+        description: 'Focused test',
+        verificationMethod: null,
+        required: true,
+      }],
+      createdAt: '2026-08-27T01:00:00.000Z',
+    },
+    items: [{
+      schemaVersion,
+      id: workItemId,
+      workContractId: 'wct_00000000000000000000000001',
+      workContractRevision: 1,
+      revision: 1,
+      state: 'in_progress',
+      title: 'Build projection',
+      goal: 'Keep the UI exact.',
+      criterionIds: ['crt_00000000000000000000000001'],
+      dependsOn: [],
+    }],
+    runs: canonicalRuns.length > 0 ? canonicalRuns : [{
+      schemaVersion,
+      id: selectedWorkRunId,
+      workContractId: 'wct_00000000000000000000000001',
+      contractRevision: 1,
+      workItemId,
+      workItemRevision: 1,
+      revision: deliveryValue.deliveryRevision,
+      state: 'running',
+      executionJobId: 'job_00000000000000000000000001',
+      attempt: 1,
+      workerId: 'wrk_00000000000000000000000001',
+      workerInstanceId: 'wki_00000000000000000000000001',
+      workerSessionId: 'wsn_00000000000000000000000001',
+      leaseId: 'lse_00000000000000000000000001',
+      fencingToken: '1',
+      productSessionId,
+      codexThreadId: 'cdx_00000000000000000000000001',
+    }],
+    readCursor: deliveryValue.readCursor,
   }
 }
 
@@ -414,6 +503,7 @@ class FakeClient {
     this.responses = new Map([
       ['delivery.get', response('delivery.get', deliveryValue)],
       ['runtime.projection.get', response('runtime.projection.get', runtime(deliveryValue))],
+      ['workrun.get', response('workrun.get', workRunAggregate(deliveryValue))],
     ])
   }
 
@@ -422,6 +512,7 @@ class FakeClient {
   subscription = null
   subscriptionClosed = false
   reconnects = 0
+  latestDelivery = null
 
   enqueue(query, value) {
     const queue = this.queues.get(query) ?? []
@@ -433,6 +524,18 @@ class FakeClient {
     this.calls.push(structuredClone(request))
     const queue = this.queues.get(request.query)
     const value = queue?.shift() ?? this.responses.get(request.query)
+    if (request.query === 'delivery.get' && value?.result !== undefined) {
+      this.latestDelivery = structuredClone(value.result)
+    }
+    if (request.query === 'workrun.get' && value?.result !== undefined && value === this.responses.get('workrun.get')) {
+      const aggregateDelivery = this.latestDelivery
+        ?? delivery(request.parameters.atCursor?.deliveryRevision ?? 1)
+      aggregateDelivery.readCursor = request.parameters.atCursor ?? aggregateDelivery.readCursor
+      return response('workrun.get', workRunAggregate(
+        aggregateDelivery,
+        request.parameters.workRunId ?? workRunId,
+      ))
+    }
     if (value instanceof Error) throw value
     if (typeof value === 'function') return value(request, options)
     return structuredClone(value)
@@ -466,7 +569,7 @@ function view(client = new FakeClient(), options = {}) {
       scope,
       deliveryId,
       productSessionId,
-      stageRunId,
+      workRunId,
       subscriptionId,
       nextRequestId() {
         requestSequence += 1
@@ -477,16 +580,92 @@ function view(client = new FakeClient(), options = {}) {
   }
 }
 
+test('a stage-free WorkRun opens from the canonical aggregate before thread attachment', async () => {
+  const { client, model } = view()
+  const detail = delivery()
+  const aggregate = workRunAggregate(detail)
+  const run = aggregate.runs[0]
+  run.state = 'leased'
+  run.codexThreadId = null
+  detail.stages = []
+  detail.tasks = []
+  const pending = runtime(delivery())
+  pending.sessions = []
+  client.responses.set('delivery.get', response('delivery.get', detail))
+  client.responses.set('workrun.get', () => response('workrun.get', aggregate))
+  client.responses.set('runtime.projection.get', response('runtime.projection.get', pending))
+  await model.start()
+  assert.equal(model.state.status, 'ready', model.state.error?.message)
+  assert.deepEqual(model.state.projection.delivery.stages, [])
+  assert.equal(model.state.projection.runtime.workRunId, run.id)
+  assert.equal(model.state.projection.workRunAggregate.runs[0].state, 'leased')
+  assert.deepEqual(client.calls.map(call => call.query), ['delivery.get', 'workrun.get', 'runtime.projection.get'])
+  model.close()
+})
+
+test('historical stages and unrelated WorkItems do not block the current candidate verdict', () => {
+  const detail = delivery()
+  const aggregate = workRunAggregate(detail)
+  aggregate.runs[0].state = 'settled'
+  aggregate.runs.push({ ...aggregate.runs[0], id: nextWorkRunId, workItemId: 'wit_00000000000000000000000099', state: 'running' })
+  const projection = { delivery: detail, currentCandidate: detail.currentCandidate, verdict: null, workRunAggregate: aggregate }
+  assert.equal(detail.stages[0].status, 'running')
+  assert.equal(canSubmitStrongFlowVerdict(projection), true)
+  aggregate.runs[1].workItemId = aggregate.runs[0].workItemId
+  assert.equal(canSubmitStrongFlowVerdict(projection), false)
+})
+
+test('an expired aggregate read restarts from Delivery before requesting runtime', async () => {
+  const { client, model } = view()
+  client.enqueue('workrun.get', new ControlPlaneClientError({
+    kind: 'conflict', code: 'READ_CURSOR_EXPIRED', message: 'Expired read cut.', requestId: null, retryable: true,
+  }))
+  const next = delivery(2)
+  client.enqueue('delivery.get', response('delivery.get', delivery()))
+  client.enqueue('delivery.get', response('delivery.get', next))
+  client.enqueue('runtime.projection.get', response('runtime.projection.get', runtime(next)))
+  await model.start()
+  assert.equal(model.state.status, 'ready', model.state.error?.message)
+  assert.equal(model.state.projection.metadata.revisions.delivery, 2)
+  assert.deepEqual(client.calls.map(call => call.query), ['delivery.get', 'workrun.get', 'delivery.get', 'workrun.get', 'runtime.projection.get'])
+  assert.equal(client.calls[1].page.limit, client.calls[0].page.limit)
+  assert.equal(client.calls[3].page.limit, client.calls[2].page.limit)
+  model.close()
+})
+
+test('runtime reads reject every foreign accepted WorkRun identity field', async () => {
+  for (const [field, foreign] of Object.entries({
+    workItemId: 'wit_00000000000000000000000099',
+    executionJobId: 'job_00000000000000000000000099',
+    attempt: 99,
+    workerSessionId: 'wsn_00000000000000000000000099',
+    codexThreadId: 'another-thread',
+    leaseId: 'lse_00000000000000000000000099',
+    fencingToken: '99',
+  })) {
+    const { client, model } = view()
+    const snapshot = runtime(delivery())
+    snapshot.sessions[0][field] = foreign
+    client.responses.set('runtime.projection.get', response('runtime.projection.get', snapshot))
+    await model.start()
+    assert.equal(model.state.status, 'error', field)
+    assert.equal(model.state.error.code, 'STRONGFLOW_RUNTIME_MISMATCH', field)
+    assert.equal(model.state.projection, null, field)
+    model.close()
+  }
+})
+
 test('initial bounded pair composes the complete StrongFlow projection and source metadata', async () => {
   const { client, model } = view()
   await model.start()
+
 
   assert.equal(model.state.status, 'ready')
   assert.equal(model.state.realtime, 'subscribed')
   assert.equal(model.state.projection.delivery.deliveryId, deliveryId)
   assert.equal(model.state.projection.solutionReview.reviewStatus, 'approved')
-  assert.equal(model.state.projection.stage.id, stageRunId)
-  assert.equal(model.state.projection.runtime.stageRunId, stageRunId)
+  assert.equal(model.state.projection.runtime.workRunId, workRunId)
+  assert.equal(model.state.projection.runtime.workRunId, workRunId)
   assert.deepEqual(model.state.projection.evidence.map(item => item.sourceRef), ['artifact:test:1'])
   assert.equal(model.state.projection.verdict.status, 'pass')
   assert.equal(model.state.projection.attention[0].status, 'resolved')
@@ -501,6 +680,7 @@ test('initial bounded pair composes the complete StrongFlow projection and sourc
   assert.equal(model.state.projection.metadata.updatedAt, '2026-08-27T01:00:06.000Z')
   assert.deepEqual(client.calls.map(call => call.query), [
     'delivery.get',
+    'workrun.get',
     'runtime.projection.get',
   ])
   assert.deepEqual(client.calls[1].parameters.atCursor, client.calls[0].parameters.atCursor
@@ -535,7 +715,7 @@ test('Candidate files load progressively from the exact current Candidate read c
   const currentCandidate = delivery().currentCandidate
   client.enqueue('candidate.files.list', {
     schemaVersion,
-    requestId: requestId(3),
+    requestId: requestId(4),
     query: 'candidate.files.list',
     result: {
       kind: 'candidate_file_page',
@@ -555,7 +735,7 @@ test('Candidate files load progressively from the exact current Candidate read c
   })
   client.enqueue('candidate.files.list', {
     schemaVersion,
-    requestId: requestId(4),
+    requestId: requestId(5),
     query: 'candidate.files.list',
     result: {
       kind: 'candidate_file_page',
@@ -577,9 +757,10 @@ test('Candidate files load progressively from the exact current Candidate read c
   await model.start()
   await model.loadCandidateFiles()
 
-  assert.deepEqual(client.calls[2], {
+  const candidateFilesCall = client.calls.find(call => call.query === 'candidate.files.list')
+  assert.deepEqual(candidateFilesCall, {
     schemaVersion,
-    requestId: requestId(3),
+    requestId: requestId(4),
     actor,
     scope,
     query: 'candidate.files.list',
@@ -600,7 +781,7 @@ test('Candidate files load progressively from the exact current Candidate read c
   assert.equal(model.state.candidateFiles.hasMore, true)
 
   await model.loadMoreCandidateFiles()
-  assert.equal(client.calls[3].page.cursor, 'candidate-files:2')
+  assert.equal(client.calls.filter(call => call.query === 'candidate.files.list')[1].page.cursor, 'candidate-files:2')
   assert.deepEqual(model.state.candidateFiles.items.map(file => file.path), [
     'src/app.ts',
     'src/current.ts',
@@ -626,7 +807,7 @@ test('Candidate file selection updates the deep link and loads one bounded Diff 
   }
   client.enqueue('candidate.files.list', {
     schemaVersion,
-    requestId: requestId(3),
+    requestId: requestId(4),
     query: 'candidate.files.list',
     result: {
       kind: 'candidate_file_page',
@@ -638,7 +819,7 @@ test('Candidate file selection updates the deep link and loads one bounded Diff 
   })
   client.enqueue('candidate.diff.get', {
     schemaVersion,
-    requestId: requestId(4),
+    requestId: requestId(5),
     query: 'candidate.diff.get',
     result: {
       kind: 'candidate_diff_chunk',
@@ -662,7 +843,7 @@ test('Candidate file selection updates the deep link and loads one bounded Diff 
   })
   client.enqueue('candidate.diff.get', {
     schemaVersion,
-    requestId: requestId(5),
+    requestId: requestId(6),
     query: 'candidate.diff.get',
     result: {
       kind: 'candidate_diff_chunk',
@@ -690,8 +871,8 @@ test('Candidate file selection updates the deep link and loads one bounded Diff 
   await model.selectCandidateFile(file.path)
 
   assert.deepEqual(selectedPaths, [file.path])
-  assert.equal(client.calls[3].query, 'candidate.diff.get')
-  assert.deepEqual(client.calls[3].parameters, {
+  assert.equal(client.calls[4].query, 'candidate.diff.get')
+  assert.deepEqual(client.calls[4].parameters, {
     deliveryId,
     atCursor: readCursor(),
     readPageLimit: 1,
@@ -707,7 +888,7 @@ test('Candidate file selection updates the deep link and loads one bounded Diff 
   assert.equal(model.state.candidateFiles.diff.hasMore, true)
 
   await model.loadMoreCandidateDiff()
-  assert.equal(client.calls[4].parameters.offset, 4)
+  assert.equal(client.calls[5].parameters.offset, 4)
   assert.equal(model.state.candidateFiles.diff.content, 'diff more')
   assert.equal(model.state.candidateFiles.diff.hasMore, false)
   assert.equal(model.state.candidateFiles.diff.fileDiffSha256, `sha256:${'4'.repeat(64)}`)
@@ -731,7 +912,7 @@ test('Candidate deep links select the exact file after its bounded page arrives'
   }
   client.enqueue('candidate.files.list', {
     schemaVersion,
-    requestId: requestId(3),
+    requestId: requestId(4),
     query: 'candidate.files.list',
     result: {
       kind: 'candidate_file_page',
@@ -746,7 +927,7 @@ test('Candidate deep links select the exact file after its bounded page arrives'
   })
   client.enqueue('candidate.files.list', {
     schemaVersion,
-    requestId: requestId(4),
+    requestId: requestId(5),
     query: 'candidate.files.list',
     result: {
       kind: 'candidate_file_page',
@@ -758,7 +939,7 @@ test('Candidate deep links select the exact file after its bounded page arrives'
   })
   client.enqueue('candidate.diff.get', {
     schemaVersion,
-    requestId: requestId(5),
+    requestId: requestId(6),
     query: 'candidate.diff.get',
     result: {
       kind: 'candidate_diff_chunk',
@@ -789,12 +970,13 @@ test('Candidate deep links select the exact file after its bounded page arrives'
   assert.deepEqual(pathChanges, [])
   assert.deepEqual(client.calls.map(call => call.query), [
     'delivery.get',
+    'workrun.get',
     'runtime.projection.get',
     'candidate.files.list',
     'candidate.files.list',
     'candidate.diff.get',
   ])
-  assert.equal(client.calls[3].page.cursor, 'candidate-files:deep-link')
+  assert.equal(client.calls[4].page.cursor, 'candidate-files:deep-link')
 })
 
 test('a file deep link that exhausts bounded pages without its target reports route stale without a Diff request', async () => {
@@ -804,9 +986,9 @@ test('a file deep link that exhausts bounded pages without its target reports ro
   })
   const currentCandidate = delivery().currentCandidate
   for (const [index, hasMore, nextCursor] of [
-    [3, true, 'candidate-files:route-stale-2'],
-    [4, true, 'candidate-files:route-stale-3'],
-    [5, false, null],
+    [4, true, 'candidate-files:route-stale-2'],
+    [5, true, 'candidate-files:route-stale-3'],
+    [6, false, null],
   ]) {
     client.enqueue('candidate.files.list', {
       schemaVersion,
@@ -817,7 +999,7 @@ test('a file deep link that exhausts bounded pages without its target reports ro
         candidate: currentCandidate,
         readCursor: readCursor(),
         items: [{
-          path: `src/page-${String(index - 2)}.ts`,
+          path: `src/page-${String(index - 3)}.ts`,
           oldPath: null,
           status: 'modified',
           additions: 1,
@@ -848,6 +1030,7 @@ test('a file deep link that exhausts bounded pages without its target reports ro
   ])
   assert.deepEqual(client.calls.map(call => call.query), [
     'delivery.get',
+    'workrun.get',
     'runtime.projection.get',
     'candidate.files.list',
     'candidate.files.list',
@@ -893,7 +1076,7 @@ test('binary Candidate files report an unavailable preview without a Diff reques
   }
   client.enqueue('candidate.files.list', {
     schemaVersion,
-    requestId: requestId(3),
+    requestId: requestId(4),
     query: 'candidate.files.list',
     result: {
       kind: 'candidate_file_page',
@@ -912,6 +1095,7 @@ test('binary Candidate files report an unavailable preview without a Diff reques
   assert.equal(model.state.candidateFiles.diff.unavailableReason, 'binary')
   assert.deepEqual(client.calls.map(call => call.query), [
     'delivery.get',
+    'workrun.get',
     'runtime.projection.get',
     'candidate.files.list',
   ])
@@ -922,7 +1106,7 @@ test('Candidate file metadata is discarded when the frozen Candidate identity ch
   const currentCandidate = delivery().currentCandidate
   client.enqueue('candidate.files.list', {
     schemaVersion,
-    requestId: requestId(3),
+    requestId: requestId(4),
     query: 'candidate.files.list',
     result: {
       kind: 'candidate_file_page',
@@ -971,7 +1155,7 @@ test('Candidate file pages fail closed when their Candidate digest does not matc
   }
   client.enqueue('candidate.files.list', {
     schemaVersion,
-    requestId: requestId(3),
+    requestId: requestId(4),
     query: 'candidate.files.list',
     result: {
       kind: 'candidate_file_page',
@@ -996,7 +1180,7 @@ test('large Candidate inventories page progressively into one bounded client pre
   for (let pageIndex = 0; pageIndex < 10; pageIndex += 1) {
     client.enqueue('candidate.files.list', {
       schemaVersion,
-      requestId: requestId(pageIndex + 3),
+      requestId: requestId(pageIndex + 4),
       query: 'candidate.files.list',
       result: {
         kind: 'candidate_file_page',
@@ -1041,7 +1225,7 @@ test('Candidate Diff decoding preserves UTF-8 characters split across bounded ch
     binary: false, encoding: 'utf-8',
   }
   client.enqueue('candidate.files.list', {
-    schemaVersion, requestId: requestId(3), query: 'candidate.files.list',
+    schemaVersion, requestId: requestId(4), query: 'candidate.files.list',
     result: {
       kind: 'candidate_file_page', candidate: currentCandidate,
       readCursor: readCursor(), items: [file],
@@ -1049,8 +1233,8 @@ test('Candidate Diff decoding preserves UTF-8 characters split across bounded ch
     page: page(),
   })
   for (const [request, offset, dataBase64, nextOffset] of [
-    [4, 0, 'ww==', 1],
-    [5, 1, 'qQ==', null],
+    [5, 0, 'ww==', 1],
+    [6, 1, 'qQ==', null],
   ]) {
     client.enqueue('candidate.diff.get', {
       schemaVersion, requestId: requestId(request), query: 'candidate.diff.get',
@@ -1089,7 +1273,7 @@ test('empty StrongFlow creates and advances one Delivery with exact authority an
       projectId: scope.projectId,
       repositoryId: scope.repositoryId,
     },
-    activeStageRunId: null,
+    activeWorkRunId: null,
     openAttentionCount: 0,
     taskCounts: {
       total: 0,
@@ -1105,11 +1289,44 @@ test('empty StrongFlow creates and advances one Delivery with exact authority an
     ...created,
     revision: 2,
     status: 'clarifying',
-    activeStageRunId: stageRunId,
+    activeWorkRunId: workRunId,
   }
+  let workItemsCreated = false
+  let loseWorkItemResponse = true
   const client = {
+    async query() {
+      const aggregate = workRunAggregate(delivery())
+      if (!workItemsCreated) {
+        aggregate.items = []
+        aggregate.runs = []
+      }
+      aggregate.readCursor = { ...aggregate.readCursor, deliveryRevision: workItemsCreated ? 2 : 1 }
+      return response('workrun.get', aggregate)
+    },
     async command(request) {
       calls.push(structuredClone(request))
+      if (request.command === 'delivery.task_breakdown.create') {
+        workItemsCreated = true
+        if (loseWorkItemResponse) {
+          loseWorkItemResponse = false
+          throw new ControlPlaneClientError({
+            kind: 'network',
+            code: 'NETWORK_ERROR',
+            message: 'response was lost',
+            requestId: request.requestId,
+            retryable: true,
+          })
+        }
+        return {
+          schemaVersion,
+          requestId: request.requestId,
+          command: request.command,
+          outcome: 'completed',
+          previousRevision: request.expectedRevision,
+          currentRevision: 2,
+          result: { deliveryId, deliveryRevision: 2, items: workRunAggregate(delivery()).items },
+        }
+      }
       const result = request.command === 'delivery.create' ? created : advanced
       return {
         schemaVersion,
@@ -1130,11 +1347,12 @@ test('empty StrongFlow creates and advances one Delivery with exact authority an
     actor,
     scope,
     nextDeliveryId: () => deliveryId,
+    nextWorkItemId: () => workItemId,
     nextRequestId: () => requestId(++requestSequence),
     onCreated(value) { createdIds.push(value) },
   })
 
-  await model.create({
+  const input = {
     title: '  First StrongFlow Delivery  ',
     goal: '  Enter the advanced workspace without a reload.  ',
     baseRevision: '  0123456789abcdef0123456789abcdef01234567  ',
@@ -1146,7 +1364,10 @@ test('empty StrongFlow creates and advances one Delivery with exact authority an
       '  The created Delivery is loaded from the Control Plane.  ',
       'The Delivery event stream is subscribed.',
     ],
-  })
+  }
+  await model.create(input)
+  assert.equal(model.state.error.code, 'NETWORK_ERROR')
+  await model.create(input)
 
   assert.deepEqual(calls, [{
     schemaVersion,
@@ -1181,12 +1402,50 @@ test('empty StrongFlow creates and advances one Delivery with exact authority an
     },
   }, {
     schemaVersion,
-    requestId: requestId(2),
+    requestId: requestId(3),
+    actor,
+    scope,
+    command: 'delivery.task_breakdown.create',
+    expectedRevision: 1,
+    payload: {
+      deliveryId,
+      expectedRevision: 1,
+      contractRevision: 1,
+      items: [{
+        id: workItemId,
+        title: 'First StrongFlow Delivery',
+        goal: 'Enter the advanced workspace without a reload.',
+        criterionIds: ['crt_00000000000000000000000001'],
+        dependsOn: [],
+      }],
+    },
+  }, {
+    schemaVersion,
+    requestId: requestId(3),
+    actor,
+    scope,
+    command: 'delivery.task_breakdown.create',
+    expectedRevision: 1,
+    payload: {
+      deliveryId,
+      expectedRevision: 1,
+      contractRevision: 1,
+      items: [{
+        id: workItemId,
+        title: 'First StrongFlow Delivery',
+        goal: 'Enter the advanced workspace without a reload.',
+        criterionIds: ['crt_00000000000000000000000001'],
+        dependsOn: [],
+      }],
+    },
+  }, {
+    schemaVersion,
+    requestId: requestId(4),
     actor,
     scope,
     command: 'delivery.advance',
-    expectedRevision: 1,
-    payload: { deliveryId },
+    expectedRevision: 2,
+    payload: { deliveryId, dispatchProfile: 'executor' },
   }])
   assert.deepEqual(createdIds, [deliveryId])
   assert.equal(model.state.status, 'created')
@@ -1208,7 +1467,7 @@ test('Delivery conversion retries the same create and advance requests without d
       projectId: scope.projectId,
       repositoryId: scope.repositoryId,
     },
-    activeStageRunId: null,
+    activeWorkRunId: null,
     openAttentionCount: 0,
     taskCounts: {
       total: 0,
@@ -1224,11 +1483,12 @@ test('Delivery conversion retries the same create and advance requests without d
     ...created,
     revision: 2,
     status: 'clarifying',
-    activeStageRunId: stageRunId,
+    activeWorkRunId: workRunId,
   }
   let createCalls = 0
   let advanceCalls = 0
   const client = {
+    async query() { return response('workrun.get', workRunAggregate(delivery())) },
     async command(request) {
       calls.push(structuredClone(request))
       if (request.command === 'delivery.create') {
@@ -1269,6 +1529,7 @@ test('Delivery conversion retries the same create and advance requests without d
     actor,
     scope,
     nextDeliveryId: () => deliveryId,
+    nextWorkItemId: () => workItemId,
     nextRequestId: () => requestId(++requestSequence),
     onCreated(value) { opened.push(value) },
   })
@@ -1314,7 +1575,7 @@ test('cancelling and duplicate activation retain one Delivery attempt for exact 
       projectId: scope.projectId,
       repositoryId: scope.repositoryId,
     },
-    activeStageRunId: null,
+    activeWorkRunId: null,
     openAttentionCount: 0,
     taskCounts: {
       total: 0,
@@ -1326,8 +1587,9 @@ test('cancelling and duplicate activation retain one Delivery attempt for exact 
       failed: 0,
     },
   }
-  const advanced = { ...created, revision: 2, status: 'clarifying', activeStageRunId: stageRunId }
+  const advanced = { ...created, revision: 2, status: 'clarifying', activeWorkRunId: workRunId }
   const client = {
+    async query() { return response('workrun.get', workRunAggregate(delivery())) },
     async command(request, options) {
       calls.push(structuredClone(request))
       if (first) {
@@ -1362,6 +1624,7 @@ test('cancelling and duplicate activation retain one Delivery attempt for exact 
     actor,
     scope,
     nextDeliveryId: () => deliveryId,
+    nextWorkItemId: () => workItemId,
     nextRequestId: () => requestId(++requestSequence),
     onCreated() {},
   })
@@ -1406,7 +1669,7 @@ test('an accepted Delivery command can be cancelled and retried with its exact r
       projectId: scope.projectId,
       repositoryId: scope.repositoryId,
     },
-    activeStageRunId: null,
+    activeWorkRunId: null,
     openAttentionCount: 0,
     taskCounts: {
       total: 0,
@@ -1418,9 +1681,10 @@ test('an accepted Delivery command can be cancelled and retried with its exact r
       failed: 0,
     },
   }
-  const advanced = { ...created, revision: 2, status: 'clarifying', activeStageRunId: stageRunId }
+  const advanced = { ...created, revision: 2, status: 'clarifying', activeWorkRunId: workRunId }
   let accepted = true
   const client = {
+    async query() { return response('workrun.get', workRunAggregate(delivery())) },
     async command(request) {
       calls.push(structuredClone(request))
       if (accepted) {
@@ -1451,6 +1715,7 @@ test('an accepted Delivery command can be cancelled and retried with its exact r
     actor,
     scope,
     nextDeliveryId: () => deliveryId,
+    nextWorkItemId: () => workItemId,
     nextRequestId: () => requestId(++requestSequence),
     onCreated() {},
   })
@@ -1476,34 +1741,24 @@ test('an accepted Delivery command can be cancelled and retried with its exact r
   assert.equal(model.state.status, 'created')
 })
 
-test('pending Worker attachment keeps the exact Delivery StageRun readable', async () => {
+test('pending Worker attachment retains its accepted lease and an empty runtime', async () => {
   const client = new FakeClient()
   const pending = delivery()
-  pending.stages[0].sessionBinding = {
-    ...pending.stages[0].sessionBinding,
-    attempt: null,
-    codexThreadId: null,
-    fencingToken: null,
-    leaseId: null,
-    sessionIdentity: null,
-    sourceIdentity: null,
-    stageRunId: null,
-    workerId: null,
-    workerSessionId: null,
-  }
+  pending.stages[0].sessionBinding.codexThreadId = null
+  const aggregate = workRunAggregate(pending)
+  aggregate.runs[0].state = 'leased'
+  const pendingRuntime = runtime(pending)
+  pendingRuntime.sessions = []
   client.responses.set('delivery.get', response('delivery.get', pending))
-  client.responses.set(
-    'runtime.projection.get',
-    response('runtime.projection.get', runtime(pending)),
-  )
+  client.responses.set('workrun.get', () => response('workrun.get', aggregate))
+  client.responses.set('runtime.projection.get', response('runtime.projection.get', pendingRuntime))
   const { model } = view(client)
-
   await model.start()
-
-  assert.equal(model.state.status, 'ready')
-  assert.equal(model.state.projection.stage.id, stageRunId)
-  assert.equal(model.state.projection.stage.sessionBinding.stageRunId, null)
+  assert.equal(model.state.status, 'ready', model.state.error?.message)
+  assert.equal(model.state.projection.runtime.workRunId, workRunId)
+  assert.equal(model.state.projection.workRunAggregate.runs[0].leaseId, aggregate.runs[0].leaseId)
   assert.deepEqual(model.state.projection.runtime.sessions, [])
+  model.close()
 })
 
 test('Delivery events reload one complete pair without publishing a partial revision', async () => {
@@ -1540,11 +1795,11 @@ test('Delivery events reload one complete pair without publishing a partial revi
   assert.equal(model.state.projection.verdict.candidateRef, 'refs/winwincode/candidate/2')
 })
 
-test('a newer canonical Codex StageRun atomically rebinds Runtime, projection, and route owner', async () => {
+test('a newer canonical Codex WorkRun atomically rebinds Runtime, projection, and route owner', async () => {
   const client = new FakeClient()
   const bindingChanges = []
   const { model } = view(client, {
-    onStageBindingChange(binding) {
+    onWorkRunBindingChange(binding) {
       bindingChanges.push(structuredClone(binding))
     },
   })
@@ -1553,7 +1808,7 @@ test('a newer canonical Codex StageRun atomically rebinds Runtime, projection, a
   client.enqueue('delivery.get', response('delivery.get', nextDelivery))
   client.enqueue('runtime.projection.get', response(
     'runtime.projection.get',
-    runtime(nextDelivery, nextProductSessionId, nextStageRunId),
+    runtime(nextDelivery, nextProductSessionId, nextWorkRunId),
   ))
 
   await client.subscription.onEvent({
@@ -1563,7 +1818,7 @@ test('a newer canonical Codex StageRun atomically rebinds Runtime, projection, a
       scopeKind: 'delivery-stage',
       productSessionId: nextProductSessionId,
       deliveryId,
-      stageRunId: nextStageRunId,
+      workRunId: nextWorkRunId,
       projectionRevision: 12,
       lastProjectionSequence: 22,
       reloadQueries: ['delivery.get', 'runtime.projection.get'],
@@ -1572,17 +1827,17 @@ test('a newer canonical Codex StageRun atomically rebinds Runtime, projection, a
 
   assert.deepEqual(bindingChanges, [{
     productSessionId: nextProductSessionId,
-    stageRunId: nextStageRunId,
+    workRunId: nextWorkRunId,
   }])
   assert.equal(model.state.status, 'ready')
-  assert.equal(model.state.projection.stage.id, nextStageRunId)
+  assert.equal(model.state.projection.runtime.workRunId, nextWorkRunId)
   assert.equal(model.state.projection.runtime.productSessionId, nextProductSessionId)
-  assert.equal(model.state.projection.runtime.stageRunId, nextStageRunId)
+  assert.equal(model.state.projection.runtime.workRunId, nextWorkRunId)
   assert.deepEqual(client.calls.at(-1).parameters, {
     kind: 'delivery-stage',
     productSessionId: nextProductSessionId,
     deliveryId,
-    stageRunId: nextStageRunId,
+    workRunId: nextWorkRunId,
     atCursor: nextDelivery.readCursor,
   })
 })
@@ -1595,7 +1850,7 @@ test('an older binding invalidation is absorbed by a newer Delivery read cut', a
   client.enqueue('delivery.get', response('delivery.get', nextDelivery))
   client.enqueue('runtime.projection.get', response(
     'runtime.projection.get',
-    runtime(nextDelivery, nextProductSessionId, nextStageRunId),
+    runtime(nextDelivery, nextProductSessionId, nextWorkRunId),
   ))
 
   await client.subscription.onEvent({
@@ -1605,7 +1860,7 @@ test('an older binding invalidation is absorbed by a newer Delivery read cut', a
       scopeKind: 'delivery-stage',
       productSessionId,
       deliveryId,
-      stageRunId,
+      workRunId,
       projectionRevision: 1,
       lastProjectionSequence: 1,
       reloadQueries: ['delivery.get', 'runtime.projection.get'],
@@ -1614,11 +1869,11 @@ test('an older binding invalidation is absorbed by a newer Delivery read cut', a
 
   assert.equal(model.state.status, 'ready')
   assert.equal(model.state.error, null)
-  assert.equal(model.state.projection.stage.id, nextStageRunId)
-  assert.equal(model.state.projection.runtime.stageRunId, nextStageRunId)
+  assert.equal(model.state.projection.runtime.workRunId, nextWorkRunId)
+  assert.equal(model.state.projection.runtime.workRunId, nextWorkRunId)
 })
 
-test('a superseded invalidation for a future StageRun remains fail-closed', async () => {
+test('a superseded invalidation for a future WorkRun remains fail-closed', async () => {
   const client = new FakeClient()
   const { model } = view(client)
   await model.start()
@@ -1632,7 +1887,7 @@ test('a superseded invalidation for a future StageRun remains fail-closed', asyn
       scopeKind: 'delivery-stage',
       productSessionId: nextProductSessionId,
       deliveryId,
-      stageRunId: 'run_00000000000000000000000099',
+      workRunId: 'wrn_00000000000000000000000099',
       projectionRevision: 1,
       lastProjectionSequence: 1,
       reloadQueries: ['delivery.get', 'runtime.projection.get'],
@@ -1642,7 +1897,7 @@ test('a superseded invalidation for a future StageRun remains fail-closed', asyn
   assert.equal(model.state.error.code, 'STRONGFLOW_RUNTIME_EVENT_MISMATCH')
 })
 
-test('old binding events and lower Delivery revisions fail closed after a StageRun rebind', async () => {
+test('old binding events and lower Delivery revisions fail closed after a WorkRun rebind', async () => {
   const client = new FakeClient()
   const { model } = view(client)
   await model.start()
@@ -1650,7 +1905,7 @@ test('old binding events and lower Delivery revisions fail closed after a StageR
   client.enqueue('delivery.get', response('delivery.get', nextDelivery))
   client.enqueue('runtime.projection.get', response(
     'runtime.projection.get',
-    runtime(nextDelivery, nextProductSessionId, nextStageRunId),
+    runtime(nextDelivery, nextProductSessionId, nextWorkRunId),
   ))
   await client.subscription.onEvent({
     event: {
@@ -1668,19 +1923,19 @@ test('old binding events and lower Delivery revisions fail closed after a StageR
       scopeKind: 'delivery-stage',
       productSessionId,
       deliveryId,
-      stageRunId,
+      workRunId,
       projectionRevision: 13,
       lastProjectionSequence: 23,
       reloadQueries: ['delivery.get', 'runtime.projection.get'],
     },
-  }), error => error.code === 'STRONGFLOW_RUNTIME_EVENT_MISMATCH')
+  }), error => error.code === 'STRONGFLOW_WORKRUN_ROLLBACK')
   assert.equal(model.state.projection, null)
 
   const lowerRevision = deliveryWithNextActiveStage(1)
   client.enqueue('delivery.get', response('delivery.get', lowerRevision))
   client.enqueue('runtime.projection.get', response(
     'runtime.projection.get',
-    runtime(lowerRevision, nextProductSessionId, nextStageRunId),
+    runtime(lowerRevision, nextProductSessionId, nextWorkRunId),
   ))
   await model.refresh()
   assert.equal(model.state.projection, null)
@@ -1689,17 +1944,17 @@ test('old binding events and lower Delivery revisions fail closed after a StageR
   const sameRevisionRebind = deliveryWithNextActiveStage(2)
   sameRevisionRebind.stages.push({
     ...sameRevisionRebind.stages.at(-1),
-    id: 'run_00000000000000000000000004',
+    id: 'wrn_00000000000000000000000004',
     sessionBinding: sessionBinding(
       'psn_00000000000000000000000004',
-      'run_00000000000000000000000004',
+      'wrn_00000000000000000000000004',
       '04',
     ),
   })
   client.enqueue('delivery.get', response('delivery.get', sameRevisionRebind))
   await model.refresh()
   assert.equal(model.state.projection, null)
-  assert.equal(model.state.error.code, 'STRONGFLOW_STAGE_BINDING_ROLLBACK')
+  assert.equal(model.state.error.code, 'STRONGFLOW_WORKRUN_ROLLBACK')
 })
 
 test('cross-Delivery invalidations fail before any reload query', async () => {
@@ -1768,9 +2023,11 @@ test('a transiently stale Delivery invalidation retries within the same generati
   assert.equal(model.state.projection.metadata.revisions.delivery, 2)
   assert.deepEqual(client.calls.map(call => call.query), [
     'delivery.get',
+    'workrun.get',
     'runtime.projection.get',
     'delivery.get',
     'delivery.get',
+    'workrun.get',
     'runtime.projection.get',
   ])
 })
@@ -1810,9 +2067,11 @@ test('the production QueryCache lets a StrongFlow consistency retry reach HTTP a
     assert.equal(model.state.projection.metadata.revisions.delivery, 2)
     assert.deepEqual(rawClient.calls.map(call => call.query), [
       'delivery.get',
+      'workrun.get',
       'runtime.projection.get',
       'delivery.get',
       'delivery.get',
+      'workrun.get',
       'runtime.projection.get',
     ])
   } finally {
@@ -1821,7 +2080,7 @@ test('the production QueryCache lets a StrongFlow consistency retry reach HTTP a
   }
 })
 
-test('a StageRun rebind invalidation uses its zero runtime sequence as the Delivery minimum', async () => {
+test('a WorkRun rebind invalidation uses its zero runtime sequence as the Delivery minimum', async () => {
   const { client, model } = view()
   await model.start()
   const staleDelivery = delivery(1)
@@ -1830,7 +2089,7 @@ test('a StageRun rebind invalidation uses its zero runtime sequence as the Deliv
   client.enqueue('delivery.get', response('delivery.get', currentDelivery))
   client.enqueue('runtime.projection.get', response(
     'runtime.projection.get',
-    runtime(currentDelivery, nextProductSessionId, nextStageRunId),
+    runtime(currentDelivery, nextProductSessionId, nextWorkRunId),
   ))
 
   await client.subscription.onEvent({
@@ -1840,7 +2099,7 @@ test('a StageRun rebind invalidation uses its zero runtime sequence as the Deliv
       scopeKind: 'delivery-stage',
       productSessionId: nextProductSessionId,
       deliveryId,
-      stageRunId: nextStageRunId,
+      workRunId: nextWorkRunId,
       projectionRevision: 2,
       lastProjectionSequence: 0,
       reloadQueries: ['delivery.get', 'runtime.projection.get'],
@@ -1848,8 +2107,8 @@ test('a StageRun rebind invalidation uses its zero runtime sequence as the Deliv
   })
 
   assert.equal(model.state.status, 'ready')
-  assert.equal(model.state.projection.stage.id, nextStageRunId)
-  assert.equal(model.state.projection.runtime.stageRunId, nextStageRunId)
+  assert.equal(model.state.projection.runtime.workRunId, nextWorkRunId)
+  assert.equal(model.state.projection.runtime.workRunId, nextWorkRunId)
 })
 
 test('runtime invalidation validates the exact stage and reload query set', async () => {
@@ -1868,7 +2127,7 @@ test('runtime invalidation validates the exact stage and reload query set', asyn
       scopeKind: 'delivery-stage',
       productSessionId,
       deliveryId,
-      stageRunId,
+      workRunId,
       projectionRevision: 12,
       lastProjectionSequence: 22,
       reloadQueries: ['delivery.get', 'runtime.projection.get'],
@@ -1882,7 +2141,7 @@ test('runtime invalidation validates the exact stage and reload query set', asyn
       scopeKind: 'delivery-stage',
       productSessionId,
       deliveryId,
-      stageRunId: 'run_00000000000000000000000099',
+      workRunId: 'wrn_00000000000000000000000099',
       projectionRevision: 13,
       lastProjectionSequence: 23,
       reloadQueries: ['delivery.get', 'runtime.projection.get'],
@@ -1913,12 +2172,14 @@ test('expired bounded read restarts Delivery before Runtime and never mixes cuts
   await model.start()
   assert.deepEqual(client.calls.map(call => call.query), [
     'delivery.get',
+    'workrun.get',
     'runtime.projection.get',
     'delivery.get',
+    'workrun.get',
     'runtime.projection.get',
   ])
   assert.equal(model.state.projection.metadata.revisions.delivery, 2)
-  assert.deepEqual(client.calls[3].parameters.atCursor, secondDelivery.readCursor)
+  assert.deepEqual(client.calls[4].parameters.atCursor, secondDelivery.readCursor)
 })
 
 test('the production QueryCache forces a fresh Delivery after READ_CURSOR_EXPIRED', async () => {
@@ -1949,12 +2210,14 @@ test('the production QueryCache forces a fresh Delivery after READ_CURSOR_EXPIRE
     await model.start()
     assert.deepEqual(rawClient.calls.map(call => call.query), [
       'delivery.get',
+      'workrun.get',
       'runtime.projection.get',
       'delivery.get',
+      'workrun.get',
       'runtime.projection.get',
     ])
     assert.equal(model.state.projection.metadata.revisions.delivery, 2)
-    assert.deepEqual(rawClient.calls[3].parameters.atCursor, secondDelivery.readCursor)
+    assert.deepEqual(rawClient.calls[4].parameters.atCursor, secondDelivery.readCursor)
   } finally {
     model.close()
     cache.close()
@@ -1982,8 +2245,10 @@ test('the production QueryCache discards the StrongFlow read cut on retention re
     const cursor = await rawClient.subscription.onResetRequired(null)
     assert.deepEqual(rawClient.calls.map(call => call.query), [
       'delivery.get',
+      'workrun.get',
       'runtime.projection.get',
       'delivery.get',
+      'workrun.get',
       'runtime.projection.get',
     ])
     assert.equal(model.state.projection.metadata.revisions.delivery, 2)
@@ -2024,9 +2289,9 @@ test('a retryable trusted-facts command keeps its shape while rotating request k
 
   assert.equal(attempts, 3)
   assert.deepEqual(requests.map(request => request.requestId), [
-    requestId(3),
     requestId(4),
     requestId(5),
+    requestId(6),
   ])
   const { requestId: _firstRequestId, ...firstRequest } = requests[0]
   assert.deepEqual(requests.map(({ requestId: _requestId, ...command }) => command), [
@@ -2035,7 +2300,7 @@ test('a retryable trusted-facts command keeps its shape while rotating request k
     firstRequest,
   ])
   assert.equal(requests[0].expectedRevision, 1)
-  assert.deepEqual(requests[0].payload, { deliveryId })
+  assert.deepEqual(requests[0].payload, { deliveryId, dispatchProfile: 'verifier' })
   assert.equal(model.state.interaction.status, 'waiting')
   assert.equal(model.state.interaction.error, null)
 })
@@ -2079,7 +2344,7 @@ test('submitVerdict sends the candidate reference digest, not the diff digest', 
   assert.equal(model.state.interaction.status, 'waiting')
 })
 
-test('submitVerdict waits for active StageRuns and does not send early', async () => {
+test('submitVerdict waits for active WorkRuns and does not send early', async () => {
   const client = new FakeClient()
   const currentDelivery = delivery(1, `git-candidate:sha256:${'a'.repeat(64)}`)
   currentDelivery.verdict = null
@@ -2097,7 +2362,7 @@ test('submitVerdict waits for active StageRuns and does not send early', async (
 
   assert.equal(client.calls.filter(call => 'command' in call).length, 0)
   assert.equal(model.state.interaction.status, 'error')
-  assert.equal(model.state.interaction.error.code, 'STRONGFLOW_VERDICT_STAGES_ACTIVE')
+  assert.equal(model.state.interaction.error.code, 'STRONGFLOW_VERDICT_WORKRUNS_ACTIVE')
 })
 
 test('a higher Delivery event leaves an in-flight command untouched and the published cut proves it landed', async () => {
@@ -2495,6 +2760,111 @@ test('non-retryable command failures are exposed without replay', async () => {
   assert.equal(model.state.interaction.error.code, 'REVISION_CONFLICT')
 })
 
+test('cancelWorkRun sends the exact Delivery revision, WorkRun identity, and request key', async () => {
+  const client = new FakeClient()
+  const requests = []
+  client.command = async request => {
+    requests.push(request)
+    return {
+      schemaVersion,
+      requestId: request.requestId,
+      command: 'workrun.cancel',
+      outcome: 'completed',
+      previousRevision: 1,
+      currentRevision: 2,
+      result: delivery(2),
+    }
+  }
+  const { model } = view(client)
+  await model.start()
+
+  await model.cancelWorkRun({
+    deliveryId,
+    workRunId,
+    expectedRevision: 1,
+    requestId: requestId(500),
+  })
+
+  assert.equal(requests.length, 1)
+  assert.deepEqual(requests[0], {
+    schemaVersion,
+    actor,
+    scope,
+    requestId: requestId(500),
+    command: 'workrun.cancel',
+    expectedRevision: 1,
+    payload: { deliveryId, workRunId },
+  })
+  assert.equal(model.state.interaction.status, 'waiting')
+})
+
+test('cancelWorkRun retries transient transport failure with one idempotency key', async () => {
+  const client = new FakeClient()
+  const requests = []
+  let attempts = 0
+  client.command = async request => {
+    requests.push(request)
+    attempts += 1
+    if (attempts === 1) {
+      throw new ControlPlaneClientError({
+        kind: 'server',
+        code: 'TRUSTED_FACTS_UNAVAILABLE',
+        message: 'Trusted facts are still catching up.',
+        requestId: request.requestId,
+        retryable: true,
+      })
+    }
+    return {
+      schemaVersion,
+      requestId: request.requestId,
+      command: 'workrun.cancel',
+      outcome: 'completed',
+      previousRevision: 1,
+      currentRevision: 2,
+      result: delivery(2),
+    }
+  }
+  const { model } = view(client)
+  await model.start()
+  await model.cancelWorkRun({
+    deliveryId,
+    workRunId,
+    expectedRevision: 1,
+    requestId: requestId(503),
+  })
+
+  assert.equal(attempts, 2)
+  assert.equal(requests[0].requestId, requestId(503))
+  assert.equal(requests[1].requestId, requestId(503))
+  assert.equal(model.state.interaction.status, 'waiting')
+})
+
+test('cancelWorkRun rejects a stale revision or non-active WorkRun before transport', async () => {
+  const client = new FakeClient()
+  let attempts = 0
+  client.command = async () => { attempts += 1; throw new Error('unexpected command') }
+  const { model } = view(client)
+  await model.start()
+
+  await model.cancelWorkRun({
+    deliveryId,
+    workRunId,
+    expectedRevision: 0,
+    requestId: requestId(501),
+  })
+  assert.equal(attempts, 0)
+  assert.equal(model.state.interaction.error.code, 'REVISION_CONFLICT')
+
+  await model.cancelWorkRun({
+    deliveryId,
+    workRunId: 'wrn_00000000000000000000000009',
+    expectedRevision: 1,
+    requestId: requestId(502),
+  })
+  assert.equal(attempts, 0)
+  assert.equal(model.state.interaction.error.code, 'STRONGFLOW_CANCEL_TARGET_INVALID')
+})
+
 test('an exhausted trusted-facts retry reports one terminal interaction error', async () => {
   const client = new FakeClient()
   const requests = []
@@ -2628,9 +2998,9 @@ test('StrongFlow view-model uses only the facade and never infers state from log
 })
 
 test('historical review reads go through the canonical facade at the snapshot cursor', async () => {
-  const olderRunId = 'run_00000000000000000000000009'
+  const olderRunId = 'wrn_00000000000000000000000009'
   const olderProductSessionId = 'psn_00000000000000000000000009'
-  const humanRunId = 'run_00000000000000000000000008'
+  const humanRunId = 'wrn_00000000000000000000000008'
   const olderCandidateRef = 'refs/winwincode/candidate/9'
   const { client, model } = view()
   const deliveryValue = delivery()
@@ -2651,7 +3021,7 @@ test('historical review reads go through the canonical facade at the snapshot cu
       id: olderRunId,
       actorType: 'codex',
       attempt: 1,
-      deliveryTaskId: 'tsk_00000000000000000000000001',
+      deliveryTaskId: 'dtk_00000000000000000000000001',
       finishedAt: '2026-08-27T00:57:00.000Z',
       role: 'implementer',
       sessionBinding: sessionBinding(olderProductSessionId, olderRunId, '09'),
@@ -2661,6 +3031,7 @@ test('historical review reads go through the canonical facade at the snapshot cu
     },
   )
   client.responses.set('delivery.get', response('delivery.get', deliveryValue))
+  client.responses.set('runtime.projection.get', response('runtime.projection.get', runtime(deliveryValue)))
   await model.start()
   assert.equal(model.state.status, 'ready')
 
@@ -2668,8 +3039,8 @@ test('historical review reads go through the canonical facade at the snapshot cu
     'runtime.projection.get',
     response('runtime.projection.get', runtime(deliveryValue, olderProductSessionId, olderRunId)),
   )
-  const snapshot = await model.loadStageRunRuntime(olderRunId)
-  assert.equal(snapshot.stageRunId, olderRunId)
+  const snapshot = await model.loadWorkRunRuntime(olderRunId)
+  assert.equal(snapshot.workRunId, olderRunId)
   assert.equal(snapshot.productSessionId, olderProductSessionId)
   const runtimeCall = client.calls.at(-1)
   assert.equal(runtimeCall.query, 'runtime.projection.get')
@@ -2677,15 +3048,15 @@ test('historical review reads go through the canonical facade at the snapshot cu
     kind: 'delivery-stage',
     productSessionId: olderProductSessionId,
     deliveryId,
-    stageRunId: olderRunId,
+    workRunId: olderRunId,
     atCursor: deliveryValue.readCursor,
   })
   assert.deepEqual(runtimeCall.scope, scope)
 
   // Human and unknown runs resolve to null without any facade request.
   const callsBefore = client.calls.length
-  assert.equal(await model.loadStageRunRuntime(humanRunId), null)
-  assert.equal(await model.loadStageRunRuntime('run_00000000000000000000000077'), null)
+  assert.equal(await model.loadWorkRunRuntime(humanRunId), null)
+  assert.equal(await model.loadWorkRunRuntime('wrn_00000000000000000000000077'), null)
   assert.equal(client.calls.length, callsBefore)
 
   const olderCandidate = {
@@ -2699,7 +3070,7 @@ test('historical review reads go through the canonical facade at the snapshot cu
       diffSha256: `sha256:${'9'.repeat(64)}`,
       frozenAt: '2026-08-27T00:56:00.000Z',
       producerSessionBindingId: 'binding:strongflow:09',
-      producerStageRunId: olderRunId,
+      producerWorkRunId: olderRunId,
     },
     firstSeenDeliveryRevision: 1,
     isCurrentAtReadCursor: false,
@@ -2712,7 +3083,7 @@ test('historical review reads go through the canonical facade at the snapshot cu
       ...olderCandidate.candidate,
       candidateRef: 'refs/winwincode/candidate/1',
       producerSessionBindingId: 'binding:strongflow:1',
-      producerStageRunId: stageRunId,
+      producerWorkRunId: workRunId,
     },
     isCurrentAtReadCursor: true,
   }
@@ -2721,7 +3092,7 @@ test('historical review reads go through the canonical facade at the snapshot cu
     items: [currentCandidateItem, olderCandidate],
     readCursor: deliveryValue.readCursor,
   }))
-  const items = await model.loadStageRunCandidates(olderRunId)
+  const items = await model.loadWorkRunCandidates(olderRunId)
   assert.deepEqual(items.map(item => item.candidate.candidateRef), [olderCandidateRef])
   const listCall = client.calls.at(-1)
   assert.equal(listCall.query, 'candidate.list')
@@ -2816,7 +3187,7 @@ test('a historical Candidate review from another read cut fails closed', async (
 })
 
 test('historical Candidate lookup follows canonical pages before reporting a run empty', async () => {
-  const selectedRunId = 'run_00000000000000000000000009'
+  const selectedRunId = 'wrn_00000000000000000000000009'
   const selectedSessionId = 'psn_00000000000000000000000009'
   const { client, model } = view()
   const deliveryValue = delivery()
@@ -2824,7 +3195,7 @@ test('historical Candidate lookup follows canonical pages before reporting a run
     id: selectedRunId,
     actorType: 'codex',
     attempt: 1,
-    deliveryTaskId: 'tsk_00000000000000000000000001',
+    deliveryTaskId: 'dtk_00000000000000000000000001',
     finishedAt: '2026-08-27T00:57:00.000Z',
     role: 'implementer',
     sessionBinding: sessionBinding(selectedSessionId, selectedRunId, '09'),
@@ -2833,6 +3204,7 @@ test('historical Candidate lookup follows canonical pages before reporting a run
     status: 'failed',
   })
   client.responses.set('delivery.get', response('delivery.get', deliveryValue))
+  client.responses.set('runtime.projection.get', response('runtime.projection.get', runtime(deliveryValue)))
   await model.start()
 
   const item = {
@@ -2846,7 +3218,7 @@ test('historical Candidate lookup follows canonical pages before reporting a run
       diffSha256: `sha256:${'9'.repeat(64)}`,
       frozenAt: '2026-08-27T00:56:00.000Z',
       producerSessionBindingId: 'binding:strongflow:09',
-      producerStageRunId: selectedRunId,
+      producerWorkRunId: selectedRunId,
     },
     firstSeenDeliveryRevision: 1,
     isCurrentAtReadCursor: false,
@@ -2870,7 +3242,7 @@ test('historical Candidate lookup follows canonical pages before reporting a run
     page: page(),
   })
 
-  const items = await model.loadStageRunCandidates(selectedRunId)
+  const items = await model.loadWorkRunCandidates(selectedRunId)
   assert.deepEqual(items.map(entry => entry.candidate.candidateRef), [
     item.candidate.candidateRef,
   ])
@@ -2897,7 +3269,7 @@ test('historical facade reads propagate selection cancellation to the generated 
     }, { once: true })
   }))
   const selection = new AbortController()
-  const pending = model.loadStageRunCandidates(stageRunId, selection.signal)
+  const pending = model.loadWorkRunCandidates(workRunId, selection.signal)
   await Promise.resolve()
   selection.abort()
 

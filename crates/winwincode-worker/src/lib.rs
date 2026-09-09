@@ -60,17 +60,16 @@ pub use winwincode_codex::{
 use winwincode_domain::{
     ChangeBatchId, CodexThreadId, ExecutionAckSequence, ExecutionEventId, ExecutionJobId,
     ExecutionMessageId, ExecutionSequence, Instant, ProductSessionId, RequestId, SchemaVersion,
-    SessionBindingSourceIdentity, SessionBindingSourceIdentityKind, SessionIdentity, StageRunId,
-    WorkerId, WorkerInstanceId, WorkerSessionId,
+    SessionBindingSourceIdentity, SessionBindingSourceIdentityKind, SessionIdentity, WorkerId,
+    WorkerInstanceId, WorkerSessionId,
 };
 use winwincode_execution_port::generated::{
     ActiveLeaseSummary, ApprovalDecisionMessage, ArtifactAckMessage, ArtifactKind,
     ArtifactReference, ChangeBatchIdentity, ChangeBatchProgressEvent, ChangeBatchProgressState,
     ChangeBatchProposalDisposition, ChangeBatchProposalEvent, ChangeBatchReceipt,
-    DeliveryStageExecutionScope, ExecutionEventCategory, ExecutionJob,
-    ExecutionJobReplacementAuthority, ExecutionLeaseStamp, ExecutionOutcome,
-    ExecutionOutcomeStatus, ExecutionOutcomeUsage, ExecutionPortError, ExecutionPortErrorCode,
-    ExecutionPortMessage, ExecutionScope, FinalCandidateFreezeFact,
+    ExecutionEventCategory, ExecutionJob, ExecutionJobReplacementAuthority, ExecutionLeaseStamp,
+    ExecutionOutcome, ExecutionOutcomeStatus, ExecutionOutcomeUsage, ExecutionPortError,
+    ExecutionPortErrorCode, ExecutionPortMessage, ExecutionScope, FinalCandidateFreezeFact,
     FinalCandidateFreezeFactStopReason, InputResponseMessage, JobCancelAckMessage,
     JobCancelAckMessageKind, JobCancelAckMessageStatus, JobCancelMessage, JobDispatchMessage,
     JobDispatchResultMessage, JobDispatchResultMessageKind, JobDispatchResultMessageStatus,
@@ -799,7 +798,12 @@ where
                                 result_revision: freeze.result_revision.clone(),
                             }),
                         },
-                        authority: candidate_artifact_authority(active)?,
+                        authority: candidate_artifact_authority(
+                            active,
+                            self.dispatches
+                                .get(job_id)
+                                .and_then(|record| record.replacement_authority.clone()),
+                        )?,
                         artifact: Some(freeze.candidate_artifact_ref.clone()),
                     },
                 );
@@ -1435,7 +1439,12 @@ where
                     result_revision,
                 }),
             },
-            authority: candidate_artifact_authority(&active)?,
+            authority: candidate_artifact_authority(
+                &active,
+                self.dispatches
+                    .get(job_id)
+                    .and_then(|record| record.replacement_authority.clone()),
+            )?,
             artifact: None,
         };
         if let Some(existing) = self.pending_candidates.get(job_id) {
@@ -1817,23 +1826,20 @@ where
                 "delegated proposal has no active Job authority",
             )
         })?;
-        let task_ids = active
-            .job
-            .stage_input
-            .as_ref()
-            .and_then(|stage| stage.task.as_ref())
-            .map(|task| {
-                task.acceptance_criterion_ids
-                    .iter()
-                    .map(String::as_str)
-                    .collect::<HashSet<_>>()
-            });
-        if task_ids.is_some_and(|task_ids| {
+        let criterion_ids = active.job.work_input.as_ref().map(|input| {
+            input
+                .work_item
+                .criterion_ids
+                .iter()
+                .map(|id| id.0.as_str())
+                .collect::<HashSet<_>>()
+        });
+        if criterion_ids.is_some_and(|criterion_ids| {
             !event
                 .proposal
                 .acceptance_criteria_ids
                 .iter()
-                .all(|id| task_ids.contains(id.as_str()))
+                .all(|id| criterion_ids.contains(id.as_str()))
         }) {
             return Err(worker_error(
                 WorkerErrorCode::DelegatedPollMismatch,
@@ -2295,6 +2301,27 @@ where
                 .await?;
             return Ok(());
         }
+        // Validate the complete WorkRun contract before creating a checkout or
+        // opening a Codex thread.  The input is Controller-sealed authority,
+        // not model prompt text; a scope/input mismatch must be rejected as a
+        // dispatch capability error rather than becoming an infrastructure
+        // failure after local resources have already been allocated.  Existing
+        // Job IDs are handled above so changed replays remain conflicts.
+        if winwincode_codex::stage_product::stage_product_prompt(&dispatch.job).is_err() {
+            self.send_dispatch_result(
+                dispatch,
+                JobDispatchResultMessageStatus::RejectedCapability,
+                None,
+                Some(port_error(
+                    ExecutionPortErrorCode::CapabilityMismatch,
+                    "dispatch WorkRun contract, workspace, or profile is invalid",
+                    false,
+                )),
+                now,
+            )
+            .await?;
+            return Ok(());
+        }
         let max = usize::try_from(self.config.capabilities.max_concurrent_jobs).unwrap_or(0);
         if max == 0 || self.active.len() >= max {
             self.send_dispatch_result(
@@ -2307,13 +2334,13 @@ where
             .await?;
             return Ok(());
         }
-        let (product_session_id, stage_run_id) = scope_identity(&dispatch.job.scope);
+        let (product_session_id, work_run_id) = scope_identity(&dispatch.job.scope);
         self.start_dispatch(
             dispatch,
             run_key,
             job_digest,
             product_session_id,
-            stage_run_id,
+            work_run_id,
             now,
         )
         .await
@@ -2326,14 +2353,14 @@ where
         run_key: CodexRunKey,
         job_digest: winwincode_domain::Sha256Digest,
         product_session_id: ProductSessionId,
-        stage_run_id: Option<StageRunId>,
+        work_run_id: Option<winwincode_domain::WorkRunId>,
         now: Instant,
     ) -> Result<(), WorkerError> {
         let mut prepared = match self.prepare_dispatch_workspace(
             dispatch,
             &run_key,
             product_session_id,
-            stage_run_id,
+            work_run_id,
             &now,
         ) {
             Ok(prepared) => prepared,
@@ -2492,7 +2519,7 @@ where
         dispatch: &JobDispatchMessage,
         run_key: &CodexRunKey,
         product_session_id: ProductSessionId,
-        stage_run_id: Option<StageRunId>,
+        work_run_id: Option<winwincode_domain::WorkRunId>,
         now: &Instant,
     ) -> Result<PreparedDispatch, WorkerError> {
         let worker_session_id = self.worker_session_id(dispatch, run_key)?;
@@ -2506,7 +2533,7 @@ where
             session_identity: SessionIdentity {
                 codex_thread_id: expected_thread_id.clone(),
                 product_session_id,
-                stage_run_id,
+                work_run_id,
                 worker_session_id,
             },
             codex_thread_id: expected_thread_id,
@@ -2559,7 +2586,7 @@ where
         let thread_id = active.codex_thread_id.clone();
         let session_identity = active.session_identity.clone();
         let product_session_id = session_identity.product_session_id.clone();
-        let stage_run_id = session_identity.stage_run_id.clone();
+        let work_run_id = session_identity.work_run_id.clone();
         self.active.insert(dispatch.job.job_id.0.clone(), active);
         self.dispatches.insert(
             dispatch.job.job_id.0.clone(),
@@ -2600,7 +2627,7 @@ where
                 worker_instance_id: self.config.worker_instance_id.clone(),
                 worker_session_id: worker_session_id.clone(),
             },
-            stage_run_id,
+            work_run_id,
             worker_id: self.config.worker_id.clone(),
             worker_session_id,
         };
@@ -2622,7 +2649,12 @@ where
         let active = self.active.get(job_id).ok_or_else(|| {
             candidate_artifact_error("writer completion has no active Job authority")
         })?;
-        let authority = candidate_artifact_authority(active)?;
+        let authority = candidate_artifact_authority(
+            active,
+            self.dispatches
+                .get(job_id)
+                .and_then(|record| record.replacement_authority.clone()),
+        )?;
         let pending = PendingCandidateCompletion {
             terminal_fact: CandidateTerminalFact::ReactCompletion {
                 summary: completion.summary.as_str().to_owned(),
@@ -2730,7 +2762,12 @@ where
         let pending = self.pending_candidates.get(job_id).ok_or_else(|| {
             candidate_artifact_error("Artifact acknowledgement arrived before writer completion")
         })?;
-        let active_authority = candidate_artifact_authority(active)?;
+        let active_authority = candidate_artifact_authority(
+            active,
+            self.dispatches
+                .get(job_id)
+                .and_then(|record| record.replacement_authority.clone()),
+        )?;
         let authority_matches = pending.authority == active_authority
             || self
                 .dispatches
@@ -2786,7 +2823,12 @@ where
         let Some(pending) = self.pending_candidates.get(job_id) else {
             return Ok(acknowledgement.clone());
         };
-        let active_authority = candidate_artifact_authority(active)?;
+        let active_authority = candidate_artifact_authority(
+            active,
+            self.dispatches
+                .get(job_id)
+                .and_then(|record| record.replacement_authority.clone()),
+        )?;
         if pending.authority == active_authority {
             return Ok(acknowledgement.clone());
         }
@@ -2946,7 +2988,14 @@ where
                 self.active
                     .get(&key)
                     .filter(|active| candidate_artifact_role(&active.job.execution_profile))
-                    .map(candidate_artifact_authority)
+                    .map(|active| {
+                        candidate_artifact_authority(
+                            active,
+                            self.dispatches
+                                .get(&key)
+                                .and_then(|record| record.replacement_authority.clone()),
+                        )
+                    })
                     .transpose()?
             };
             if let Some(authority) = candidate_authority {
@@ -3697,37 +3746,32 @@ fn build_delegated_sealed_context(
             "delegated loop history is empty",
         )
     })?;
-    let stage = active.job.stage_input.as_ref().ok_or_else(|| {
+    let input = active.job.work_input.as_ref().ok_or_else(|| {
         worker_error(
             WorkerErrorCode::DelegatedPollMismatch,
-            "delegated loop stage input is missing",
+            "delegated loop WorkRun input is missing",
         )
     })?;
-    let task = stage.task.as_ref().ok_or_else(|| {
-        worker_error(
-            WorkerErrorCode::DelegatedPollMismatch,
-            "delegated loop task input is missing",
-        )
-    })?;
-    let all_ids = task
-        .acceptance_criterion_ids
+    let all_ids = input
+        .work_item
+        .criterion_ids
         .iter()
         .cloned()
         .collect::<HashSet<_>>();
-    if all_ids.len() != task.acceptance_criterion_ids.len() {
+    if all_ids.len() != input.work_item.criterion_ids.len() {
         return Err(worker_error(
             WorkerErrorCode::DelegatedPollMismatch,
             "delegated loop acceptance criteria are duplicated",
         ));
     }
     let mut criteria = HashMap::new();
-    for criterion in &stage.acceptance_criteria {
-        if all_ids.contains(&criterion.criterion_id)
+    for criterion in &input.work_contract.criteria {
+        if all_ids.contains(&criterion.id)
             && criteria
                 .insert(
-                    criterion.criterion_id.clone(),
+                    criterion.id.clone(),
                     ObservationAcceptanceCriterion {
-                        id: criterion.criterion_id.clone(),
+                        id: criterion.id.0.clone(),
                         summary: delegated_bounded_summary(&criterion.description)?,
                     },
                 )
@@ -3752,7 +3796,7 @@ fn build_delegated_sealed_context(
             .proposal
             .acceptance_criteria_ids
             .iter()
-            .all(|id| all_ids.contains(id))
+            .all(|id| all_ids.contains(&winwincode_domain::CriterionId(id.clone())))
         {
             return Err(worker_error(
                 WorkerErrorCode::DelegatedPollMismatch,
@@ -3766,18 +3810,20 @@ fn build_delegated_sealed_context(
                     .proposal
                     .acceptance_criteria_ids
                     .iter()
-                    .cloned(),
+                    .map(|id| winwincode_domain::CriterionId(id.clone())),
             );
         }
     }
-    let completed_acceptance_criteria = task
-        .acceptance_criterion_ids
+    let completed_acceptance_criteria = input
+        .work_item
+        .criterion_ids
         .iter()
         .filter(|id| completed_ids.contains(*id))
         .map(|id| criteria.get(id).cloned().ok_or_else(workspace_error))
         .collect::<Result<Vec<_>, _>>()?;
-    let incomplete_acceptance_criteria = task
-        .acceptance_criterion_ids
+    let incomplete_acceptance_criteria = input
+        .work_item
+        .criterion_ids
         .iter()
         .filter(|id| !completed_ids.contains(*id))
         .map(|id| criteria.get(id).cloned().ok_or_else(workspace_error))
@@ -3849,7 +3895,7 @@ fn build_delegated_sealed_context(
         artifact_refs,
         completed_acceptance_criteria,
         context_digest: winwincode_domain::Sha256Digest(format!("sha256:{}", "0".repeat(64))),
-        goal_summary: delegated_bounded_summary(&task.goal)?,
+        goal_summary: delegated_bounded_summary(&input.work_item.goal)?,
         identity: current.proposal.identity.clone(),
         incomplete_acceptance_criteria,
         latest_observation: current.receipt.observation.clone(),
@@ -4063,17 +4109,18 @@ fn candidate_artifact_role(profile: &str) -> bool {
     candidate_writer_role(profile) || verification_artifact_role(profile)
 }
 
-fn scope_identity(scope: &ExecutionScope) -> (ProductSessionId, Option<StageRunId>) {
+fn scope_identity(
+    scope: &ExecutionScope,
+) -> (ProductSessionId, Option<winwincode_domain::WorkRunId>) {
     match scope {
         ExecutionScope::ProductSessionExecutionScope(ProductSessionExecutionScope {
             product_session_id,
             ..
         }) => (product_session_id.clone(), None),
-        ExecutionScope::DeliveryStageExecutionScope(DeliveryStageExecutionScope {
-            product_session_id,
-            stage_run_id,
-            ..
-        }) => (product_session_id.clone(), Some(stage_run_id.clone())),
+        ExecutionScope::WorkRunExecutionScope(scope) => (
+            scope.product_session_id.clone(),
+            Some(scope.work_run_id.clone()),
+        ),
     }
 }
 
@@ -4122,6 +4169,7 @@ fn dispatch_authority_rejection(
 
 fn candidate_artifact_authority(
     active: &ActiveJob,
+    replacement_authority: Option<ExecutionJobReplacementAuthority>,
 ) -> Result<CandidateArtifactAuthority, WorkerError> {
     let job_digest = winwincode_codex::stage_product::stage_product_job_digest(&active.job)
         .map_err(|_| {
@@ -4138,6 +4186,7 @@ fn candidate_artifact_authority(
         logical_job_digest,
         execution_profile: active.job.execution_profile.clone(),
         scope: active.job.scope.clone(),
+        replacement_authority,
         lease: active.lease.clone(),
         worker_session_id: active.worker_session_id.clone(),
         session_identity: active.session_identity.clone(),
@@ -4156,8 +4205,9 @@ fn replacement_candidate_authority_matches(
             predecessor.execution_profile == successor.execution_profile
                 && predecessor.logical_job_digest == replacement.logical_job_digest
                 && successor.logical_job_digest == replacement.logical_job_digest
-                && predecessor.scope == replacement.scope
-                && successor.scope == replacement.scope
+                && same_replacement_scope(&predecessor.scope, &replacement.scope)
+                && same_replacement_scope(&successor.scope, &replacement.scope)
+                && different_replacement_run(&predecessor.scope, &successor.scope)
                 && predecessor.lease == replacement.predecessor_lease
                 && predecessor.worker_session_id == session.worker_session_id
                 && predecessor.session_identity == *session
@@ -4165,6 +4215,36 @@ fn replacement_candidate_authority_matches(
                 && predecessor.lease.job_id == successor.lease.job_id
                 && predecessor.lease.attempt.saturating_add(1) == successor.lease.attempt
         })
+}
+
+/// Compare the immutable work identity while allowing the predecessor and
+/// successor to have distinct run/attempt identities.
+fn same_replacement_scope(left: &ExecutionScope, right: &ExecutionScope) -> bool {
+    match (left, right) {
+        (ExecutionScope::WorkRunExecutionScope(a), ExecutionScope::WorkRunExecutionScope(b)) => {
+            a.kind == b.kind
+                && a.product_session_id == b.product_session_id
+                && a.rework_authorization == b.rework_authorization
+                && a.work_contract_id == b.work_contract_id
+                && a.work_contract_revision == b.work_contract_revision
+                && a.work_item_id == b.work_item_id
+                && a.work_item_revision == b.work_item_revision
+        }
+        (
+            ExecutionScope::ProductSessionExecutionScope(a),
+            ExecutionScope::ProductSessionExecutionScope(b),
+        ) => a == b,
+        _ => false,
+    }
+}
+
+fn different_replacement_run(left: &ExecutionScope, right: &ExecutionScope) -> bool {
+    match (left, right) {
+        (ExecutionScope::WorkRunExecutionScope(a), ExecutionScope::WorkRunExecutionScope(b)) => {
+            a.work_run_id != b.work_run_id
+        }
+        _ => false,
+    }
 }
 
 fn port_error(code: ExecutionPortErrorCode, message: &str, retryable: bool) -> ExecutionPortError {

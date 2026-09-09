@@ -164,13 +164,13 @@ export function homeDashboardAnnouncement(state: HomeDashboardState): string {
 
 /** The exact StrongFlow route of one Delivery card and its active StageRun. */
 export function homeDeliveryHash(
-  card: Pick<HomeDeliveryCard, 'deliveryId' | 'activeStageRunId'>,
+  card: Pick<HomeDeliveryCard, 'deliveryId' | 'activeWorkRunId'>,
   scopeSelection: ScopeRouteSelection,
 ): string {
   const route: StrongFlowRoute = {
     deliveryId: card.deliveryId,
     productSessionId: null,
-    stageRunId: card.activeStageRunId,
+    workRunId: card.activeWorkRunId,
     candidatePath: null,
     candidateView: 'unified',
     comparison: { status: 'none' },
@@ -202,7 +202,7 @@ export function homeDecisionHash(
     kind: card.kind,
     id: card.id,
     productSessionId: card.productSessionId,
-    stageRunId: card.stageRunId,
+    workRunId: card.workRunId,
     deliveryId: card.deliveryId,
   }, scopeSelection, origins)
 }

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use serde::{Deserialize, Serialize};
-use winwincode_domain::{AttentionItemId, DeliveryId, StageRunId};
+use winwincode_domain::{AttentionItemId, DeliveryId, WorkRunId};
 
 use super::{
     DeliverySpecId, DeliveryValidationError, DeliveryValidationErrorCode, MAX_TEXT_LENGTH,
@@ -50,7 +50,7 @@ pub struct AttentionItem {
     pub delivery_id: DeliveryId,
     pub delivery_spec_id: DeliverySpecId,
     #[serde(deserialize_with = "super::deserialize_required_option")]
-    pub stage_run_id: Option<StageRunId>,
+    pub work_run_id: Option<WorkRunId>,
     #[serde(rename = "type")]
     pub item_type: AttentionItemType,
     pub title: String,
@@ -74,8 +74,8 @@ pub(crate) fn validate(item: &AttentionItem, path: &str) -> Result<(), DeliveryV
     portable_identifier(&item.id.0, &format!("{path}.id"))?;
     portable_identifier(&item.delivery_id.0, &format!("{path}.deliveryId"))?;
     portable_identifier(&item.delivery_spec_id.0, &format!("{path}.deliverySpecId"))?;
-    if let Some(run_id) = &item.stage_run_id {
-        portable_identifier(&run_id.0, &format!("{path}.stageRunId"))?;
+    if let Some(run_id) = &item.work_run_id {
+        portable_identifier(&run_id.0, &format!("{path}.workRunId"))?;
     }
     bounded_text(&item.title, &format!("{path}.title"), 256)?;
     bounded_text(&item.context, &format!("{path}.context"), MAX_TEXT_LENGTH)?;
@@ -153,7 +153,7 @@ mod tests {
             id: AttentionItemId("attention-blocker".into()),
             delivery_id: fixture.id,
             delivery_spec_id: fixture.spec.id,
-            stage_run_id: Some(fixture.stage_runs[0].id.clone()),
+            work_run_id: None,
             item_type: AttentionItemType::VerificationBlocked,
             title: "Resolve verification".into(),
             context: "The current verdict has a blocker.".into(),

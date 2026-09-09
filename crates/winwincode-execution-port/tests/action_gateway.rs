@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use winwincode_domain::{
     CodexThreadId, ExecutionJobId, FencingToken, Instant, LeaseId, OrganizationId,
     ProductSessionId, ProjectId, RepositoryId, RepositoryScope, RepositoryScopeKind, RequestId,
-    SchemaVersion, SessionIdentity, Sha256Digest, StageRunId, UserActor, UserActorKind, UserId,
+    SchemaVersion, SessionIdentity, Sha256Digest, UserActor, UserActorKind, UserId, WorkRunId,
     WorkerId, WorkerInstanceId, WorkerSessionId, WorkspaceId,
 };
 use winwincode_execution_port::action_enforcement::{
@@ -124,7 +124,7 @@ fn session_identity() -> SessionIdentity {
     SessionIdentity {
         codex_thread_id: CodexThreadId(id("cdx", 'A')),
         product_session_id: ProductSessionId(id("psn", 'A')),
-        stage_run_id: Some(StageRunId(id("run", 'A'))),
+        work_run_id: Some(WorkRunId(id("wrn", 'A'))),
         worker_session_id: WorkerSessionId(id("wsn", 'A')),
     }
 }

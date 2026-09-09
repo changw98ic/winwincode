@@ -101,7 +101,7 @@ test('real Chrome shows the human next-action header and the collapsible executi
   }
   const values = new Map(identity.terms.map((term, index) => [term, identity.values[index]]))
   assert.equal(values.get('ProductSession'), 'psn_00000000000000000000000007')
-  assert.equal(values.get('StageRun'), 'run_00000000000000000000000007')
+  assert.equal(values.get('StageRun'), 'wrn_00000000000000000000000007')
   assert.equal(values.get('Attempt'), '3')
   assert.equal(values.get('Worker'), 'wrk_00000000000000000000000007')
   assert.equal(values.get('WorkerSession'), 'wss_00000000000000000000000007')

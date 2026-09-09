@@ -540,7 +540,7 @@ fn dispatch(suffix: char, goal: &str) -> JobDispatchMessage {
                 kind: ProductSessionExecutionScopeKind::ProductSession,
                 product_session_id: ProductSessionId(id("psn", suffix)),
             }),
-            stage_input: None,
+            work_input: None,
             workspace: ExecutionWorkspace {
                 checkout_revision: "HEAD".to_owned(),
                 repository_id: RepositoryId(id("rpo", suffix)),

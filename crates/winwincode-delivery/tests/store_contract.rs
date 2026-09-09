@@ -17,26 +17,15 @@ fn snapshot(revision: u64, status: &str) -> Delivery {
 }
 
 fn snapshot_for(delivery_id: &str, revision: u64, status: &str) -> Delivery {
-    let template = include_str!("fixtures/delivery-store.json");
-    let text = template
-        .replace("dlv_01J00000000000000000000002", delivery_id)
-        .replace("\"revision\": 1", &format!("\"revision\": {revision}"))
-        .replace(
-            "\"status\": \"draft\"",
-            &format!("\"status\": \"{status}\""),
-        )
-        .replace(
-            "\"updatedAtMillis\": 1800000000001",
-            &format!(
-                "\"updatedAtMillis\": {}",
-                if revision == 1 {
-                    1_800_000_000_000_u64
-                } else {
-                    1_800_000_000_000_u64 + revision
-                }
-            ),
-        );
-    let mut value: serde_json::Value = serde_json::from_str(&text).expect("store fixture JSON");
+    let mut value: serde_json::Value =
+        serde_json::from_slice(include_bytes!("fixtures/delivery-store.json"))
+            .expect("store fixture JSON");
+    value["id"] = delivery_id.into();
+    value["spec"]["deliveryId"] = delivery_id.into();
+    value["revision"] = revision.into();
+    value["status"] = status.into();
+    value["updatedAtMillis"] =
+        (1_800_000_000_000_u64 + if revision == 1 { 0 } else { revision }).into();
     if revision > 1 {
         value["spec"]["id"] = format!("delivery-spec-v{revision}").into();
         value["spec"]["revision"] = revision.into();

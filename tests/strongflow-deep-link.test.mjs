@@ -33,8 +33,8 @@ const route = await import(`${pathToFileURL(resolve(
 
 const deliveryId = 'dlv_00000000000000000000000001'
 const productSessionId = 'psn_00000000000000000000000001'
-const stageRunId = 'run_00000000000000000000000001'
-const historyRunId = 'run_00000000000000000000000002'
+const workRunId = 'wrn_00000000000000000000000001'
+const historyRunId = 'wrn_00000000000000000000000002'
 const evidenceId = 'evd_00000000000000000000000001'
 const scope = {
   organizationId: 'org_00000000000000000000000001',
@@ -47,7 +47,7 @@ function fullRoute(overrides = {}) {
   return {
     deliveryId,
     productSessionId,
-    stageRunId,
+    workRunId,
     candidatePath: 'src/deep link.ts',
     candidateView: 'side-by-side',
     comparison: { status: 'none' },
@@ -65,14 +65,14 @@ test('one typed StrongFlow route round-trips Delivery, history, file, layout, an
   const hash = route.strongFlowRouteHash(
     fullRoute(),
     scope,
-    { taskId: 'dtk_portable_task', stageRunId: historyRunId },
+    { taskId: 'dtk_portable_task', workRunId: historyRunId },
   )
 
   assert.equal(
     hash,
     `#/strongflow?delivery=${deliveryId}`
       + `&session=${productSessionId}`
-      + `&stageRun=${stageRunId}`
+      + `&workRun=${workRunId}`
       + '&file=src%2Fdeep+link.ts'
       + '&view=side-by-side'
       + '&tab=logs'
@@ -150,7 +150,7 @@ test('canonical portable file paths and dtk_ task deep links stay valid', () => 
     candidatePath: 'src/app.ts',
     evidenceTab: 'evidence',
     evidenceId: null,
-  }), undefined, { taskId: 'dtk_portable_task', stageRunId: null })
+  }), undefined, { taskId: 'dtk_portable_task', workRunId: null })
   assert.equal(route.parseStrongFlowRouteHash(taskHash).candidatePath, 'src/app.ts')
   assert.ok(taskHash.includes('task=dtk_portable_task'), taskHash)
 })
@@ -172,7 +172,7 @@ test('malformed and duplicate route values fail closed per typed field', () => {
     null,
   )
   assert.equal(
-    parsed(`#/strongflow?delivery=${deliveryId}&session=%2500&stageRun=not%20valid`)
+    parsed(`#/strongflow?delivery=${deliveryId}&session=%2500&workRun=not%20valid`)
       .productSessionId,
     null,
   )
@@ -197,7 +197,7 @@ test('Evidence and layout defaults fill in without inventing a binding identity'
     route.parseStrongFlowRouteHash(`#/strongflow?delivery=${deliveryId}`),
     fullRoute({
       productSessionId: null,
-      stageRunId: null,
+      workRunId: null,
       candidatePath: null,
       candidateView: 'unified',
       evidenceTab: 'evidence',

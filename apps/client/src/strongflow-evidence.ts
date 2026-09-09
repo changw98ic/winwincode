@@ -372,7 +372,7 @@ function expectArtifactDescriptor(
     || provenance.deliveryRevision !== selected.binding.atCursor.deliveryRevision
     || provenance.evidenceId !== selected.binding.evidenceId
     || provenance.sessionBindingId !== selected.binding.sessionBindingId
-    || provenance.stageRunId !== selected.binding.stageRunId
+    || provenance.workRunId !== selected.binding.workRunId
   ) throw clientFailure(
     'STRONGFLOW_EVIDENCE_IDENTITY_MISMATCH',
     'The Evidence Artifact authority does not match the selected snapshot.',
@@ -518,7 +518,7 @@ function selectionFor(
       readPageLimit: EVIDENCE_READ_PAGE_LIMIT,
       sessionBindingId: row.sessionBindingId,
       sourceRef: row.sourceRef,
-      stageRunId: row.stageRunId,
+      workRunId: row.workRunId,
       type: row.type,
     }),
     candidateState: candidateState(row, projection),
@@ -1399,7 +1399,7 @@ export function mountStrongFlowEvidence(
       item.dataset.candidateState = value.candidateState
       record.title.textContent = `${value.row.type} · ${value.row.id}`
       record.source.textContent = `${value.row.sourceRef} · ${value.row.createdAt} · ${
-          value.row.stageRunId
+          value.row.workRunId
         }`
       record.candidate.textContent = candidateStateText(value.candidateState)
       record.criteria.textContent = value.criterionIds.length === 0
@@ -1646,7 +1646,7 @@ export function mountStrongFlowEvidence(
       'aria-busy',
       String(detail === null || detail.status === 'loading' || content?.status === 'loading'),
     )
-    bindingValue.textContent = `${selected.row.candidateRef} · ${selected.row.stageRunId} · ${
+    bindingValue.textContent = `${selected.row.candidateRef} · ${selected.row.workRunId} · ${
       selected.row.sessionBindingId
     } · Delivery ${selected.binding.deliveryId} at revision ${
       String(selected.binding.atCursor.deliveryRevision)

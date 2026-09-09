@@ -77,8 +77,8 @@ const scopeSelection = {
 const deliveryId = 'dlv_00000000000000000000000001'
 const attentionDeliveryId = 'dlv_00000000000000000000000002'
 const deliveredDeliveryId = 'dlv_00000000000000000000000003'
-const stageRunId = 'run_00000000000000000000000001'
-const approvalStageRunId = 'run_00000000000000000000000002'
+const workRunId = 'wrn_00000000000000000000000001'
+const approvalWorkRunId = 'wrn_00000000000000000000000002'
 const approvalSessionId = 'psn_00000000000000000000000002'
 const approvalId = 'apr_00000000000000000000000001'
 const workerSessionId = 'wss_00000000000000000000000001'
@@ -101,7 +101,7 @@ function requestId(value) {
 
 function deliverySummary(overrides = {}) {
   return {
-    activeStageRunId: stageRunId,
+    activeWorkRunId: workRunId,
     deliveryId,
     openAttentionCount: 0,
     ownership: {
@@ -136,7 +136,7 @@ function approval(overrides = {}) {
         productSessionId: approvalSessionId,
         workerSessionId,
         codexThreadId,
-        stageRunId: stageRunId,
+        workRunId: workRunId,
       },
     },
     ...overrides,
@@ -150,14 +150,14 @@ test('attention signals derive approval, attention, failure, and completion fact
       deliverySummary(),
       deliverySummary({
         deliveryId: attentionDeliveryId,
-        activeStageRunId: null,
+        activeWorkRunId: null,
         openAttentionCount: 3,
         status: 'needs-attention',
         title: 'Delivery waiting on a decision',
       }),
       deliverySummary({
         deliveryId: deliveredDeliveryId,
-        activeStageRunId: null,
+        activeWorkRunId: null,
         status: 'delivered',
         taskCounts: {
           active: 0, blocked: 0, completed: 4, failed: 2, pending: 0, total: 6, verifying: 0,
@@ -178,23 +178,23 @@ test('attention signals derive approval, attention, failure, and completion fact
   assert.equal(attention.id, attentionDeliveryId)
   assert.equal(attention.identity, `attention:${attentionDeliveryId}:3`)
   assert.equal(attention.weight, 3)
-  assert.equal(attention.stageRunId, null)
+  assert.equal(attention.workRunId, null)
   assert.equal(attention.context, 'Delivery · Delivery waiting on a decision')
   const failure = signals[2]
   assert.equal(failure.identity, `failure:${deliveredDeliveryId}:2`)
   assert.equal(failure.weight, 2)
   assert.equal(failure.title, 'Tasks failed')
-  assert.equal(failure.stageRunId, null)
+  assert.equal(failure.workRunId, null)
   const completion = signals[3]
   assert.equal(completion.id, deliveredDeliveryId)
   assert.equal(completion.identity, `completion:${deliveredDeliveryId}:delivered`)
-  assert.equal(completion.stageRunId, null)
+  assert.equal(completion.workRunId, null)
   assert.equal(completion.weight, 1)
   const approvalSignal = signals[1]
   assert.equal(approvalSignal.id, approvalId)
   assert.equal(approvalSignal.identity, `approval:${approvalId}:pending`)
   assert.equal(approvalSignal.productSessionId, approvalSessionId)
-  assert.equal(approvalSignal.stageRunId, stageRunId)
+  assert.equal(approvalSignal.workRunId, workRunId)
   assert.equal(approvalSignal.context, 'Delivery · Delivery under execution')
 
   const badge = attentionSignalBadge(signals)
@@ -248,14 +248,14 @@ test('notification content stays secret-safe and drops non-canonical identities'
     deliveries: [
       deliverySummary({
         deliveryId: attentionDeliveryId,
-        activeStageRunId: null,
+        activeWorkRunId: null,
         openAttentionCount: 1,
         status: 'needs-attention',
         title: 'Delivery waiting on a decision',
       }),
       deliverySummary({
         deliveryId: 'dlv_not-canonical',
-        activeStageRunId: 'run_00000000000000000000000009',
+        activeWorkRunId: 'wrn_00000000000000000000000009',
         openAttentionCount: 4,
         status: 'needs-attention',
       }),
@@ -317,7 +317,7 @@ test('signals open the exact still-canonical StrongFlow or decision context', ()
       deliverySummary({ openAttentionCount: 1, status: 'needs-attention' }),
       deliverySummary({
         deliveryId: deliveredDeliveryId,
-        activeStageRunId: null,
+        activeWorkRunId: null,
         status: 'delivered',
       }),
     ],
@@ -327,7 +327,7 @@ test('signals open the exact still-canonical StrongFlow or decision context', ()
 
   assert.equal(
     attentionSignalRouteHash(byKind.attention, scopeSelection),
-    `#/strongflow?delivery=${deliveryId}&stageRun=${stageRunId}&view=unified`
+    `#/strongflow?delivery=${deliveryId}&workRun=${workRunId}&view=unified`
       + `&organizationId=${scope.organizationId}&workspaceId=${scope.workspaceId}`
       + `&projectId=${scope.projectId}&repositoryId=${scope.repositoryId}`,
   )
@@ -339,7 +339,7 @@ test('signals open the exact still-canonical StrongFlow or decision context', ()
   )
   assert.equal(
     attentionSignalRouteHash(byKind.approval, scopeSelection),
-    `#/attention?session=${approvalSessionId}&delivery=${deliveryId}&stageRun=${stageRunId}`
+    `#/attention?session=${approvalSessionId}&delivery=${deliveryId}&workRun=${workRunId}`
       + `&organizationId=${scope.organizationId}&workspaceId=${scope.workspaceId}`
       + `&projectId=${scope.projectId}&repositoryId=${scope.repositoryId}`,
   )
@@ -726,7 +726,7 @@ test('desktop notifications stay off until the user grants them and never repeat
 
   desktop.clickHandlers[0]()
   assert.deepEqual(opened, [
-    `#/strongflow?delivery=${deliveryId}&stageRun=${stageRunId}&view=unified`
+    `#/strongflow?delivery=${deliveryId}&workRun=${workRunId}&view=unified`
       + `&organizationId=${scope.organizationId}&workspaceId=${scope.workspaceId}`
       + `&projectId=${scope.projectId}&repositoryId=${scope.repositoryId}`,
   ])
@@ -791,7 +791,7 @@ function centerItem(overrides = {}) {
     expiresAt: '2026-09-04T05:00:00.000Z',
     productSessionId: approvalSessionId,
     sessionTitle: 'Session psn_00000000000000000000000002',
-    stageRunId: approvalStageRunId,
+    workRunId: approvalWorkRunId,
     executionJobId,
     deliveryId: null,
     deliveryTitle: null,
@@ -811,7 +811,7 @@ function centerState(overrides = {}) {
         kind: 'input',
         id: 'inp_00000000000000000000000001',
         title: 'Describe the exact local change',
-        stageRunId,
+        workRunId,
         productSessionId: 'psn_00000000000000000000000001',
       }),
     ],
@@ -820,13 +820,13 @@ function centerState(overrides = {}) {
         deliveryId,
         deliveryTitle: 'Delivery under execution',
         deliveryRevision: 13,
-        activeStageRunId: stageRunId,
+        activeWorkRunId: workRunId,
       },
       {
         deliveryId: attentionDeliveryId,
         deliveryTitle: 'Delivery waiting on a decision',
         deliveryRevision: 4,
-        activeStageRunId: approvalStageRunId,
+        activeWorkRunId: approvalWorkRunId,
       },
     ],
     error: null,
@@ -865,7 +865,7 @@ test('the Attention Center carries the exact origin into the decision link and t
 
   assert.equal(
     attentionCenterItemHash(input, scopeSelection, origins),
-    `#/attention?session=psn_00000000000000000000000001&delivery=${deliveryId}&stageRun=${stageRunId}`
+    `#/attention?session=psn_00000000000000000000000001&delivery=${deliveryId}&workRun=${workRunId}`
       + `&organizationId=${scope.organizationId}&workspaceId=${scope.workspaceId}`
       + `&projectId=${scope.projectId}&repositoryId=${scope.repositoryId}`,
   )
@@ -873,13 +873,13 @@ test('the Attention Center carries the exact origin into the decision link and t
   assert.equal(
     attentionCenterItemHash(approvalItem, scopeSelection, origins),
     `#/attention?session=${approvalSessionId}&delivery=${attentionDeliveryId}`
-      + `&stageRun=${approvalStageRunId}`
+      + `&workRun=${approvalWorkRunId}`
       + `&organizationId=${scope.organizationId}&workspaceId=${scope.workspaceId}`
       + `&projectId=${scope.projectId}&repositoryId=${scope.repositoryId}`,
   )
   const unmapped = centerItem({
     id: 'apr_00000000000000000000000009',
-    stageRunId: 'run_00000000000000000000000009',
+    workRunId: 'wrn_00000000000000000000000009',
   })
   assert.equal(
     attentionCenterItemHash(unmapped, scopeSelection, origins),
@@ -912,7 +912,7 @@ test('the Attention Center card exposes its execution context without leaking se
   const origin = byClass(inputCard, 'wwc-attention-card-origin')
   assert.equal(
     origin.getAttribute('href'),
-    `#/strongflow?delivery=${deliveryId}&stageRun=${stageRunId}&view=unified`
+    `#/strongflow?delivery=${deliveryId}&workRun=${workRunId}&view=unified`
       + `&organizationId=${scope.organizationId}&workspaceId=${scope.workspaceId}`
       + `&projectId=${scope.projectId}&repositoryId=${scope.repositoryId}`,
   )
@@ -920,14 +920,14 @@ test('the Attention Center card exposes its execution context without leaking se
   const approvalCard = cards.find(card => card.dataset.kind === 'approval')
   assert.equal(
     byClass(approvalCard, 'wwc-attention-card-origin').getAttribute('href'),
-    `#/strongflow?delivery=${attentionDeliveryId}&stageRun=${approvalStageRunId}&view=unified`
+    `#/strongflow?delivery=${attentionDeliveryId}&workRun=${approvalWorkRunId}&view=unified`
       + `&organizationId=${scope.organizationId}&workspaceId=${scope.workspaceId}`
       + `&projectId=${scope.projectId}&repositoryId=${scope.repositoryId}`,
   )
 
   model.publish(centerState({
     items: [centerItem({
-      stageRunId: 'run_00000000000000000000000009',
+      workRunId: 'wrn_00000000000000000000000009',
       id: 'apr_00000000000000000000000009',
     })],
   }))
@@ -1035,12 +1035,12 @@ function decisionState(overrides = {}) {
   }
 }
 
-test('the decision surface returns to the exact Task and StageRun that raised the decision', () => {
+test('the decision surface returns to the exact Task and WorkRun that raised the decision', () => {
   const document = new FakeDocument()
   const rootElement = new FakeElement(document, 'div')
   const model = fakeModel(decisionState())
   const returnHash = `#/strongflow?delivery=${deliveryId}&session=${approvalSessionId}`
-    + `&stageRun=${approvalStageRunId}&view=unified`
+    + `&workRun=${approvalWorkRunId}&view=unified`
     + `&organizationId=${scope.organizationId}&workspaceId=${scope.workspaceId}`
     + `&projectId=${scope.projectId}&repositoryId=${scope.repositoryId}`
   const mounted = mountLocalDecisionsPage({

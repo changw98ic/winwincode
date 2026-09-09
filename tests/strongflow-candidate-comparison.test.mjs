@@ -68,6 +68,7 @@ const REWORK_DIGEST = `sha256:${'9'.repeat(64)}`
 const REWORK_REF = 'refs/winwincode/candidate/attempt-0'
 const DELIVERY_ID = 'dlv_00000000000000000000000001'
 const STAGE_RUN_ID = 'run_00000000000000000000000001'
+const WORK_RUN_ID = 'wrn_00000000000000000000000001'
 
 function candidateSummary(overrides = {}) {
   return {
@@ -678,7 +679,7 @@ function baseRoute(overrides = {}) {
   return {
     deliveryId: 'dlv_00000000000000000000000001',
     productSessionId: 'psn_00000000000000000000000001',
-    stageRunId: STAGE_RUN_ID,
+    workRunId: WORK_RUN_ID,
     candidatePath: null,
     candidateView: 'unified',
     comparison: { status: 'none' },

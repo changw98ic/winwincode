@@ -202,7 +202,7 @@ fn scheduling_request(seed: u64, fixture: &Fixture) -> DeviceWorkerSchedulingReq
         id("winst", seed + 10),
         DIGEST,
         Some(id("ps", seed + 11)),
-        Some(id("run", seed + 12)),
+        Some(id("wrn", seed + 12)),
         instant(GRANT_EXPIRES),
     )
     .expect("scheduling request")
@@ -223,7 +223,7 @@ fn scheduling_request_for(
         id("winst", seed + 10),
         DIGEST,
         Some(id("ps", seed + 11)),
-        Some(id("run", seed + 12)),
+        Some(id("wrn", seed + 12)),
         instant(GRANT_EXPIRES),
     )
     .expect("scheduling request")
@@ -314,7 +314,7 @@ fn the_two_phase_schedule_reserves_a_slot_then_issues_the_worker_request() {
     assert_eq!(receipt.worker_id, id("wkr", seed + 29));
     assert_eq!(receipt.worker_instance_id, id("winst", seed + 30));
     assert_eq!(receipt.product_session_id, Some(id("ps", seed + 31)));
-    assert_eq!(receipt.stage_run_id, Some(id("run", seed + 32)));
+    assert_eq!(receipt.work_run_id, Some(id("wrn", seed + 32)));
     assert!(!receipt.replayed);
     // Phase one left exactly one reservation and it settled onto the grant.
     let reservation = stored_reservation(&mut storage, &id("req", seed + 20)).expect("reservation");
@@ -807,4 +807,23 @@ fn the_sweep_reclaims_reservations_a_crashed_scheduler_never_settled() {
         replay.kind(),
         DeviceSchedulerServiceErrorKind::ReservationNotOpen
     );
+}
+
+#[test]
+fn scheduling_request_rejects_a_historical_stage_as_workrun() {
+    let error = DeviceWorkerSchedulingRequest::try_new(
+        id("req", 901),
+        id("usr", 901),
+        "123456789".to_owned(),
+        id("rbd", 901),
+        id("ws", 901),
+        id("wkr", 901),
+        id("winst", 901),
+        DIGEST,
+        Some(id("ps", 901)),
+        Some(id("run", 901)),
+        instant(GRANT_EXPIRES),
+    )
+    .expect_err("historical stage IDs are not executable WorkRuns");
+    assert!(error.to_string().contains("WorkRun id"), "{error}");
 }

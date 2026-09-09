@@ -292,7 +292,7 @@ fn bind_command(
         anchor.repository_binding_id.clone(),
         anchor.worker_session_id.clone(),
         anchor.product_session_id.clone(),
-        anchor.stage_run_id.clone(),
+        anchor.work_run_id.as_ref().map(|id| id.0.clone()),
     )
     .map_err(|error| QuickDeviceDispatchError::invalid_input(error.to_string()))
 }

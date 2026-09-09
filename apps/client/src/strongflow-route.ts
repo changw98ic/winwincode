@@ -4,7 +4,7 @@ import type {
   DeliveryId,
   EvidenceId,
   ProductSessionId,
-  StageRunId,
+  WorkRunId,
 } from './generated/contracts.js'
 import { matchesCanonicalSchema } from './generated/control-plane-client.js'
 import { scopeHash, type ScopeRouteSelection } from '@winwincode/browser-core/scope-context'
@@ -37,7 +37,7 @@ export interface StrongFlowEvidenceRouteState {
 export interface StrongFlowRoute {
   readonly deliveryId: DeliveryId | null
   readonly productSessionId: ProductSessionId | null
-  readonly stageRunId: StageRunId | null
+  readonly workRunId: WorkRunId | null
   readonly candidatePath: string | null
   readonly candidateView: CandidateDiffViewMode
   /** Candidate comparison requested by one shareable link. */
@@ -49,7 +49,7 @@ export interface StrongFlowRoute {
 function canonicalParameter<Identity extends string>(
   parameters: URLSearchParams,
   name: string,
-  schema: 'DeliveryId' | 'EvidenceId' | 'ProductSessionId' | 'StageRunId',
+  schema: 'DeliveryId' | 'EvidenceId' | 'ProductSessionId' | 'WorkRunId',
 ): Identity | null {
   const values = parameters.getAll(name)
   if (values.length !== 1) return null
@@ -143,7 +143,7 @@ export function parseStrongFlowRouteHash(hash: string): StrongFlowRoute {
       'session',
       'ProductSessionId',
     ),
-    stageRunId: canonicalParameter<StageRunId>(parameters, 'stageRun', 'StageRunId'),
+    workRunId: canonicalParameter<WorkRunId>(parameters, 'workRun', 'WorkRunId'),
     candidatePath: candidatePathParameter(parameters),
     candidateView: strongFlowCandidateViewFromHash(hash) ?? 'unified',
     comparison: strongFlowComparisonFromHash(hash),
@@ -161,7 +161,7 @@ export function strongFlowRouteHash(
   const parameters = new URLSearchParams()
   if (route.deliveryId !== null) parameters.set('delivery', route.deliveryId)
   if (route.productSessionId !== null) parameters.set('session', route.productSessionId)
-  if (route.stageRunId !== null) parameters.set('stageRun', route.stageRunId)
+  if (route.workRunId !== null) parameters.set('workRun', route.workRunId)
   if (route.candidatePath !== null) parameters.set('file', route.candidatePath)
   parameters.set('view', route.candidateView)
   if (route.comparison.status === 'requested') {

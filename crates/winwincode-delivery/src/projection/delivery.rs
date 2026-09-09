@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use serde::Serialize;
 use winwincode_domain::{
     AttentionItemId, CodexThreadId, DeliveryTaskId, EvidenceId, ExecutionJobId, FencingToken,
-    LeaseId, ProductSessionId, StageRunId, WorkerId, WorkerInstanceId, WorkerSessionId,
+    LeaseId, ProductSessionId, StageRunId, WorkRunId, WorkerId, WorkerInstanceId, WorkerSessionId,
 };
 
 use crate::domain::{
@@ -392,7 +392,7 @@ impl AttentionOptionProjection {
 pub struct AttentionItemProjection {
     id: AttentionItemId,
     delivery_spec_id: DeliverySpecId,
-    stage_run_id: Option<StageRunId>,
+    work_run_id: Option<WorkRunId>,
     #[serde(rename = "type")]
     item_type: AttentionItemType,
     title: String,
@@ -418,8 +418,8 @@ impl AttentionItemProjection {
     }
 
     #[must_use]
-    pub fn stage_run_id(&self) -> Option<&StageRunId> {
-        self.stage_run_id.as_ref()
+    pub fn work_run_id(&self) -> Option<&WorkRunId> {
+        self.work_run_id.as_ref()
     }
 
     #[must_use]
@@ -479,7 +479,7 @@ pub struct EvidenceProjection {
     id: EvidenceId,
     delivery_spec_id: DeliverySpecId,
     delivery_spec_revision: u64,
-    stage_run_id: StageRunId,
+    work_run_id: WorkRunId,
     session_binding_id: SessionBindingId,
     candidate_ref: String,
     #[serde(rename = "type")]
@@ -505,8 +505,8 @@ impl EvidenceProjection {
     }
 
     #[must_use]
-    pub fn stage_run_id(&self) -> &StageRunId {
-        &self.stage_run_id
+    pub fn work_run_id(&self) -> &WorkRunId {
+        &self.work_run_id
     }
 
     #[must_use]
@@ -541,7 +541,7 @@ pub struct CurrentCandidateProjection {
     candidate_ref: String,
     delivery_spec_id: DeliverySpecId,
     delivery_spec_revision: u64,
-    producer_stage_run_id: StageRunId,
+    producer_work_run_id: WorkRunId,
     producer_session_binding_id: SessionBindingId,
     candidate_commit_id: String,
     candidate_tree_id: String,
@@ -566,8 +566,8 @@ impl CurrentCandidateProjection {
     }
 
     #[must_use]
-    pub fn producer_stage_run_id(&self) -> &StageRunId {
-        &self.producer_stage_run_id
+    pub fn producer_work_run_id(&self) -> &WorkRunId {
+        &self.producer_work_run_id
     }
 
     #[must_use]
@@ -786,7 +786,7 @@ fn validate_current_candidate(
         candidate_ref: candidate.candidate_ref().into(),
         delivery_spec_id: candidate.delivery_spec_id().clone(),
         delivery_spec_revision: candidate.delivery_spec_revision(),
-        producer_stage_run_id: candidate.producer_stage_run_id().clone(),
+        producer_work_run_id: candidate.producer_work_run_id().clone(),
         producer_session_binding_id: candidate.producer_session_binding_id().clone(),
         candidate_commit_id: candidate.candidate_commit_id().into(),
         candidate_tree_id: candidate.candidate_tree_id().into(),
@@ -800,43 +800,33 @@ fn project_stages(delivery: &Delivery) -> Result<Vec<StageProjection>, Projectio
     let mut bindings_by_run: HashMap<&str, Vec<_>> = HashMap::new();
     for binding in &snapshot.session_bindings {
         bindings_by_run
-            .entry(binding.stage_run_id.0.as_str())
+            .entry(binding.work_run_id.0.as_str())
             .or_default()
             .push(binding);
     }
 
-    let mut stages = Vec::with_capacity(snapshot.stage_runs.len());
-    for run in &snapshot.stage_runs {
-        let bindings = bindings_by_run
-            .get(run.id.0.as_str())
-            .map_or(&[][..], Vec::as_slice);
-        let binding_count_is_invalid = match run.actor_type {
-            StageRunActorType::Codex => bindings.len() != 1,
-            StageRunActorType::Human => !bindings.is_empty(),
-        };
-        if binding_count_is_invalid {
+    // Session bindings belong to canonical WorkRuns, not historical StageRuns.
+    // Validate that every persisted WorkRun has exactly one binding, then leave
+    // the historical stage projection unbound: there is no safe StageRun→WorkRun
+    // inference (attempts and delivery tasks are not unique identities).
+    for work_run in &snapshot.work_run_aggregate.runs {
+        let count = bindings_by_run
+            .get(work_run.id.0.as_str())
+            .map_or(0, Vec::len);
+        if count != 1 {
             return Err(ProjectionError::new(
                 ProjectionErrorCode::InvalidSessionBinding,
                 format!(
-                    "StageRun {} does not have the exact SessionBinding count for its actor",
-                    run.id.0
+                    "WorkRun {} must have exactly one SessionBinding, found {count}",
+                    work_run.id.0
                 ),
             ));
         }
-        let session_binding = bindings.first().map(|binding| SessionBindingProjection {
-            binding_id: binding.id.clone(),
-            product_session_id: binding.product_session_id.clone(),
-            execution_job_id: binding.execution_job_id.clone(),
-            worker_session_id: binding.worker_session_id.clone(),
-            codex_thread_id: binding.codex_thread_id.clone(),
-            worker_id: binding.worker_id.clone(),
-            worker_instance_id: binding.worker_instance_id.clone(),
-            lease_id: binding.lease_id.clone(),
-            attempt: binding.attempt,
-            fencing_token: binding.fencing_token.clone(),
-            source_provenance: binding.source_provenance.clone(),
-            bound_at: binding.bound_at_millis,
-        });
+    }
+
+    let mut stages = Vec::with_capacity(snapshot.stage_runs.len());
+    for run in &snapshot.stage_runs {
+        let session_binding = None;
         stages.push(StageProjection {
             id: run.id.clone(),
             delivery_task_id: run.delivery_task_id.clone(),
@@ -876,7 +866,7 @@ fn project_current_evidence(
             id: reference.id.clone(),
             delivery_spec_id: reference.delivery_spec_id.clone(),
             delivery_spec_revision: reference.delivery_spec_revision,
-            stage_run_id: reference.stage_run_id.clone(),
+            work_run_id: reference.work_run_id.clone(),
             session_binding_id: reference.session_binding_id.clone(),
             candidate_ref: reference.candidate_ref.clone(),
             evidence_type: reference.evidence_type,
@@ -911,7 +901,7 @@ fn project_tasks(
             let owned_runs: HashSet<_> = stage_run_ids.iter().map(|id| id.0.as_str()).collect();
             let mut evidence_refs: Vec<_> = evidence
                 .iter()
-                .filter(|reference| owned_runs.contains(reference.stage_run_id.0.as_str()))
+                .filter(|reference| owned_runs.contains(reference.work_run_id.0.as_str()))
                 .map(|reference| reference.id.clone())
                 .collect();
             evidence_refs.sort_by(|left, right| left.0.cmp(&right.0));
@@ -961,7 +951,7 @@ fn project_attention(delivery: &Delivery) -> Vec<AttentionItemProjection> {
             AttentionItemProjection {
                 id: item.id.clone(),
                 delivery_spec_id: item.delivery_spec_id.clone(),
-                stage_run_id: item.stage_run_id.clone(),
+                work_run_id: item.work_run_id.clone(),
                 item_type: item.item_type,
                 title: item.title.clone(),
                 options,
@@ -1068,7 +1058,7 @@ fn inconsistent_verdict(message: &str) -> ProjectionError {
 mod tests {
     use winwincode_domain::{
         AttentionItemId, CodexThreadId, DeliveryTaskId, EvidenceId, ExecutionJobId,
-        ProductSessionId, StageRunId, WorkerSessionId,
+        ProductSessionId, StageRunId, WorkRunId, WorkerSessionId,
     };
 
     use super::*;
@@ -1108,14 +1098,10 @@ mod tests {
         let delivery = delivery_without_candidate_facts();
         let projection =
             project_delivery_detail(ProjectionInput::new(&delivery)).expect("stage projection");
-        let binding = projection.stages()[0]
-            .session_binding()
-            .expect("exact binding");
-        assert_ne!(binding.product_session_id().0, binding.execution_job_id().0);
-        assert_ne!(
-            binding.worker_session_id().expect("WorkerSession").0,
-            binding.codex_thread_id().expect("CodexThread").0
-        );
+        // Historical StageRuns are projected independently. SessionBinding
+        // identity belongs to the canonical WorkRun and is not inferred from
+        // a StageRun label or attempt.
+        assert!(projection.stages()[0].session_binding().is_none());
 
         let mut ambiguous = delivery.into_snapshot();
         let mut duplicate = ambiguous.session_bindings[0].clone();
@@ -1126,13 +1112,10 @@ mod tests {
         duplicate.codex_thread_id = Some(CodexThreadId("thread-verifier-duplicate".into()));
         duplicate = duplicate.with_test_authority("projection-verifier-duplicate", 1);
         ambiguous.session_bindings.push(duplicate);
-        let ambiguous = Delivery::try_from_snapshot(ambiguous).expect("canonical ambiguity");
-        assert_eq!(
-            project_delivery_detail(ProjectionInput::new(&ambiguous))
-                .expect_err("ambiguous StageRun binding")
-                .code(),
-            ProjectionErrorCode::InvalidSessionBinding
-        );
+        // Two bindings for one canonical WorkRun are rejected by the
+        // Delivery aggregate before projection; projection must not infer a
+        // StageRun-to-binding relationship to hide that invalid state.
+        assert!(Delivery::try_from_snapshot(ambiguous).is_err());
     }
 
     #[test]
@@ -1153,18 +1136,25 @@ mod tests {
         snapshot.stage_runs.push(run);
         let mut binding = snapshot.session_bindings[0].clone();
         binding.id = SessionBindingId("binding-ui".into());
-        binding.delivery_task_id = Some(DeliveryTaskId("delivery-task-ui".into()));
-        binding.stage_run_id = StageRunId("stage-ui".into());
+        binding.work_run_id = WorkRunId("wrn_01J00000000000000000000001".into());
         binding.product_session_id = ProductSessionId("product-ui".into());
         binding.execution_job_id = ExecutionJobId("job-ui".into());
+        binding.execution_profile = Some("verifier".into());
         binding.worker_session_id = Some(WorkerSessionId("worker-ui".into()));
         binding.codex_thread_id = Some(CodexThreadId("thread-ui".into()));
         binding.bound_at_millis += 5;
         binding = binding.with_test_authority("projection-ui", 1);
         snapshot.session_bindings.push(binding);
+        crate::domain::rebuild_test_work_runs_from_bindings(&mut snapshot);
+        let ui_work_run_id = snapshot
+            .session_bindings
+            .last()
+            .expect("UI binding")
+            .work_run_id
+            .clone();
         let mut evidence = snapshot.evidence[0].clone();
         evidence.id = EvidenceId("evidence-ui".into());
-        evidence.stage_run_id = StageRunId("stage-ui".into());
+        evidence.work_run_id = ui_work_run_id;
         evidence.session_binding_id = SessionBindingId("binding-ui".into());
         evidence.source_ref = "runtime-event:thread-ui/1".into();
         evidence.created_at_millis += 5;
@@ -1189,8 +1179,11 @@ mod tests {
             &[StageRunId("stage-verification-1".into())]
         );
         assert_eq!(ui.stage_run_ids(), &[StageRunId("stage-ui".into())]);
-        assert_eq!(api.evidence_refs(), &[EvidenceId("evidence-test-1".into())]);
-        assert_eq!(ui.evidence_refs(), &[EvidenceId("evidence-ui".into())]);
+        // Evidence ownership is canonical WorkRun-scoped. Without an
+        // explicit DeliveryTask↔WorkItem relation, projection must not infer
+        // task evidence from historical StageRun IDs.
+        assert!(api.evidence_refs().is_empty());
+        assert!(ui.evidence_refs().is_empty());
     }
 
     #[test]
@@ -1201,7 +1194,7 @@ mod tests {
             id: AttentionItemId("attention-safe".into()),
             delivery_id: snapshot.id.clone(),
             delivery_spec_id: snapshot.spec.id.clone(),
-            stage_run_id: Some(snapshot.stage_runs[0].id.clone()),
+            work_run_id: Some(snapshot.work_run_aggregate.runs[0].id.clone()),
             item_type: AttentionItemType::RequirementQuestion,
             title: "Confirm invitation copy".into(),
             context: r#"{"credential":"must-not-leak","toolPayload":"hidden"}"#.into(),
@@ -1236,10 +1229,11 @@ mod tests {
         let mut snapshot = test_fixture();
         snapshot.stage_runs[0].stage = DeliveryStage::Executing;
         snapshot.stage_runs[0].role = "executor".into();
+        snapshot.session_bindings[0].execution_profile = Some("executor".into());
         let writer = Delivery::try_from_snapshot(snapshot).expect("writer Delivery");
         let candidate = crate::domain::candidate::test_support::frozen_candidate(
             &writer,
-            &writer.snapshot().stage_runs[0].id,
+            1_800_000_000_020,
             &writer.snapshot().session_bindings[0].id,
         );
         let mut snapshot = writer.into_snapshot();

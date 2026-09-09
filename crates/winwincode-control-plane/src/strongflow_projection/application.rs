@@ -11,8 +11,7 @@ use winwincode_api::generated::{
 };
 use winwincode_delivery::{
     domain::{
-        AttentionItemStatus, AttentionItemType, Delivery, DeliveryStage, DeliveryStatus,
-        DeliveryVerdictStatus, StageRunActorType, StageRunStatus,
+        AttentionItemStatus, AttentionItemType, Delivery, DeliveryStatus, DeliveryVerdictStatus,
     },
     projection::{DeliveryProjection, ProjectionInput, project_delivery_detail},
     store::{
@@ -58,6 +57,7 @@ impl PublicationAuthorizationSnapshot {
 #[derive(Debug, Clone)]
 pub(super) struct EstablishedDeliveryRead {
     pub detail: DeliveryProjection,
+    pub workrun_aggregate: winwincode_delivery::application::workrun::WorkRunAggregate,
     pub runtime: TrustedRuntimeProjectionRead,
     pub publication: TrustedPublicationProjectionRead,
     pub cursor: BoundedReadCursor,
@@ -132,11 +132,10 @@ struct ApprovalSeal<'value> {
     delivery_revision: u64,
     delivery_spec_id: &'value winwincode_delivery::domain::DeliverySpecId,
     delivery_spec_revision: u64,
-    stage_run: &'value winwincode_delivery::domain::StageRun,
     attention_item_id: &'value winwincode_domain::AttentionItemId,
     attention_context: &'value str,
     attention_resolution: &'value str,
-    assigned_to: &'value str,
+    assigned_to: Option<&'value str>,
     resolved_by: &'value str,
     resolved_at: u64,
     candidate_ref: &'value str,
@@ -146,10 +145,9 @@ struct ApprovalSeal<'value> {
 }
 
 pub(crate) struct CurrentPublicationApproval<'delivery> {
-    pub(crate) run: &'delivery winwincode_delivery::domain::StageRun,
     pub(crate) attention: &'delivery winwincode_delivery::domain::AttentionItem,
     pub(crate) resolution: &'delivery str,
-    pub(crate) assigned_to: &'delivery str,
+    pub(crate) assigned_to: Option<&'delivery str>,
     pub(crate) resolved_by: &'delivery str,
     pub(crate) resolved_at: u64,
 }
@@ -266,7 +264,7 @@ pub(super) fn establish_delivery_read(
         .runtime
         .read_delivery_with_storage(storage, &runtime_request, &first)
         .map_err(current_source_error)?;
-    validate_runtime_read(scope, &detail, &runtime)?;
+    validate_runtime_read(scope, &first, &runtime)?;
     let event_cursor = runtime.event_cursor().cloned().ok_or_else(|| {
         StrongFlowProjectionError::TrustedFactsUnavailable(
             "the trusted runtime adapter did not return its durable event cut".to_owned(),
@@ -345,6 +343,7 @@ pub(super) fn establish_delivery_read(
     });
     Ok(EstablishedDeliveryRead {
         detail,
+        workrun_aggregate: first.snapshot().work_run_aggregate.clone(),
         runtime,
         publication,
         cursor,
@@ -434,7 +433,7 @@ pub(super) fn replay_delivery_read(
         .runtime
         .read_delivery_with_storage(storage, &runtime_request, &first)
         .map_err(cursor_source_error)?;
-    validate_runtime_read(scope, &detail, &runtime)?;
+    validate_runtime_read(scope, &first, &runtime)?;
     let event_cursor = runtime.event_cursor().cloned().ok_or_else(|| {
         StrongFlowProjectionError::TrustedFactsUnavailable(
             "the trusted runtime adapter did not return its durable event cut".to_owned(),
@@ -503,6 +502,7 @@ pub(super) fn replay_delivery_read(
     });
     Ok(EstablishedDeliveryRead {
         detail,
+        workrun_aggregate: first.snapshot().work_run_aggregate.clone(),
         runtime,
         publication,
         cursor: bounded,
@@ -807,40 +807,48 @@ impl DeliveryJournalPort for ReadOnlyJournal {
 
 fn validate_runtime_read(
     scope: &RepositoryScope,
-    detail: &DeliveryProjection,
+    delivery: &Delivery,
     runtime: &TrustedRuntimeProjectionRead,
 ) -> Result<(), StrongFlowProjectionError> {
     validate_runtime_scope(scope, runtime)?;
-    if runtime.delivery_revision() != detail.delivery_revision()
-        || runtime.snapshot().delivery_id.as_ref() != Some(detail.delivery_id())
+    if runtime.delivery_revision() != delivery.revision()
+        || runtime.snapshot().delivery_id.as_ref() != Some(delivery.id())
         || runtime.snapshot().product_session_id.is_some()
     {
         return Err(StrongFlowProjectionError::RevisionConflict(
             "runtime facts belong to another aggregate revision".to_owned(),
         ));
     }
+    let snapshot = delivery.snapshot();
     for session in &runtime.snapshot().sessions {
-        let stage = detail
-            .stages()
+        let run = snapshot
+            .work_run_aggregate
+            .runs
             .iter()
-            .find(|stage| stage.id() == &session.stage_run_id)
+            .find(|run| run.id == session.work_run_id)
             .ok_or_else(|| {
                 StrongFlowProjectionError::RevisionConflict(
-                    "runtime facts name a stage outside the current aggregate".to_owned(),
+                    "runtime facts name a WorkRun outside the current aggregate".to_owned(),
                 )
             })?;
-        let binding = stage.session_binding().ok_or_else(|| {
-            StrongFlowProjectionError::RevisionConflict(
-                "runtime facts name a stage without a current session binding".to_owned(),
-            )
-        })?;
-        if stage.delivery_task_id() != session.delivery_task_id.as_ref()
-            || stage.attempt() != session.attempt
-            || binding.binding_id() != &session.session_binding_id
-            || binding.product_session_id() != &session.product_session_id
-            || binding.execution_job_id() != &session.execution_job_id
-            || binding.worker_session_id() != Some(&session.worker_session_id)
-            || binding.codex_thread_id() != Some(&session.codex_thread_id)
+        let binding = snapshot
+            .session_bindings
+            .iter()
+            .find(|binding| binding.work_run_id == run.id)
+            .ok_or_else(|| {
+                StrongFlowProjectionError::RevisionConflict(
+                    "runtime facts name a WorkRun without a current session binding".to_owned(),
+                )
+            })?;
+        if u64::try_from(run.attempt).ok() != Some(session.attempt)
+            || run.work_item_id != session.work_item_id
+            || binding.id != session.session_binding_id
+            || binding.product_session_id != session.product_session_id
+            || binding.execution_job_id != session.execution_job_id
+            || binding.worker_session_id.as_ref() != Some(&session.worker_session_id)
+            || binding.codex_thread_id.as_ref() != Some(&session.codex_thread_id)
+            || binding.lease_id.as_ref() != Some(&session.lease_id)
+            || binding.fencing_token.as_ref() != Some(&session.fencing_token)
         {
             return Err(StrongFlowProjectionError::RevisionConflict(
                 "runtime facts no longer match the complete current binding".to_owned(),
@@ -918,14 +926,12 @@ pub(crate) fn derive_publication_binding(
     let Some(approval) = current_publication_approval(delivery)? else {
         return Ok(None);
     };
-    let run = approval.run;
     let target_sha256 = sha256_json(target)?;
     let approval_review_set_sha256 = sha256_json(&ApprovalSeal {
         delivery_id: detail.delivery_id(),
         delivery_revision: detail.delivery_revision(),
         delivery_spec_id: candidate.delivery_spec_id(),
         delivery_spec_revision: candidate.delivery_spec_revision(),
-        stage_run: run,
         attention_item_id: &approval.attention.id,
         attention_context: &approval.attention.context,
         attention_resolution: approval.resolution,
@@ -957,35 +963,7 @@ pub(crate) fn current_publication_approval(
     delivery: &Delivery,
 ) -> Result<Option<CurrentPublicationApproval<'_>>, StrongFlowProjectionError> {
     let snapshot = delivery.snapshot();
-    let max_attempt = snapshot
-        .stage_runs
-        .iter()
-        .filter(|run| run.stage == DeliveryStage::DeliveryReview)
-        .map(|run| run.attempt)
-        .max();
-    let Some(max_attempt) = max_attempt else {
-        return Ok(None);
-    };
-    let current_runs = snapshot
-        .stage_runs
-        .iter()
-        .filter(|run| run.stage == DeliveryStage::DeliveryReview && run.attempt == max_attempt)
-        .collect::<Vec<_>>();
-    let [run] = current_runs.as_slice() else {
-        return Err(StrongFlowProjectionError::RevisionConflict(
-            "the current delivery review attempt is ambiguous".to_owned(),
-        ));
-    };
-    if run.delivery_id != snapshot.id
-        || run.delivery_task_id.is_some()
-        || run.actor_type != StageRunActorType::Human
-        || run.role != "approver"
-    {
-        return Err(StrongFlowProjectionError::RevisionConflict(
-            "the current delivery review is not one human approver authority".to_owned(),
-        ));
-    }
-    if run.status != StageRunStatus::Succeeded || run.finished_at_millis.is_none() {
+    if snapshot.status != DeliveryStatus::Delivered {
         return Ok(None);
     }
     let approvals = snapshot
@@ -994,7 +972,6 @@ pub(crate) fn current_publication_approval(
         .filter(|item| {
             item.delivery_id == snapshot.id
                 && item.delivery_spec_id == snapshot.spec.id
-                && item.stage_run_id.as_ref() == Some(&run.id)
                 && item.item_type == AttentionItemType::DeliveryApproval
         })
         .collect::<Vec<_>>();
@@ -1007,30 +984,31 @@ pub(crate) fn current_publication_approval(
             ))
         };
     };
-    let (Some(resolution), Some(resolved_by), Some(resolved_at), Some(assigned_to)) = (
+    let (Some(resolution), Some(resolved_by), Some(resolved_at)) = (
         approval.resolution.as_deref(),
         approval.resolved_by.as_deref(),
         approval.resolved_at_millis,
-        approval.assigned_to.as_deref(),
     ) else {
         return Ok(None);
     };
-    if approval.status != AttentionItemStatus::Resolved
+    if approval.work_run_id.is_some()
+        || approval.status != AttentionItemStatus::Resolved
         || !approval.blocking
-        || assigned_to != resolved_by
-        || approval.created_at_millis != run.started_at_millis
+        || approval
+            .assigned_to
+            .as_deref()
+            .is_some_and(|assigned| assigned != resolved_by)
+        || resolution.trim().is_empty()
         || resolved_at < approval.created_at_millis
-        || run.finished_at_millis != Some(resolved_at)
     {
         return Err(StrongFlowProjectionError::RevisionConflict(
             "the current delivery approval actor or time is not exact".to_owned(),
         ));
     }
     Ok(Some(CurrentPublicationApproval {
-        run,
         attention: approval,
         resolution,
-        assigned_to,
+        assigned_to: approval.assigned_to.as_deref(),
         resolved_by,
         resolved_at,
     }))
@@ -1378,10 +1356,8 @@ fn canonical_cursor_token(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use winwincode_delivery::domain::{
-        AttentionItem, DeliveryPublicationTarget, StageRun, StageRunActorType, StageRunStatus,
-    };
-    use winwincode_domain::{AttentionItemId, Sha256Digest, StageRunId};
+    use winwincode_delivery::domain::{AttentionItem, DeliveryPublicationTarget};
+    use winwincode_domain::{AttentionItemId, Sha256Digest};
     use winwincode_publication::{
         PublicationAuthorization, PublicationSourceIssue, PublicationTarget,
     };
@@ -1394,26 +1370,14 @@ mod tests {
         let mut snapshot = parsed.into_snapshot();
         snapshot.status = DeliveryStatus::Delivered;
         snapshot.updated_at_millis = 1_800_000_000_040;
-        let run_id = StageRunId("stage-delivery-review-1".into());
-        snapshot.stage_runs.push(StageRun {
-            schema_version: 3,
-            id: run_id.clone(),
-            delivery_id: snapshot.id.clone(),
-            delivery_task_id: None,
-            stage: DeliveryStage::DeliveryReview,
-            actor_type: StageRunActorType::Human,
-            role: "approver".into(),
-            status: StageRunStatus::Succeeded,
-            attempt: 1,
-            started_at_millis: 1_800_000_000_030,
-            finished_at_millis: Some(1_800_000_000_040),
-        });
+        snapshot.stage_runs.clear();
         snapshot.attention_items.push(AttentionItem {
             schema_version: 3,
             id: AttentionItemId("attention-delivery-approval-1".into()),
             delivery_id: snapshot.id.clone(),
             delivery_spec_id: snapshot.spec.id.clone(),
-            stage_run_id: Some(run_id),
+            // Human approval is not a Worker execution.
+            work_run_id: None,
             item_type: AttentionItemType::DeliveryApproval,
             title: "Approve delivery".into(),
             context: "candidate-and-verdict-review-set".into(),
@@ -1435,18 +1399,22 @@ mod tests {
         let approval = current_publication_approval(&valid)
             .expect("valid authority")
             .expect("approval");
-        assert_eq!(approval.assigned_to, "usr_approver");
+        assert_eq!(approval.assigned_to, Some("usr_approver"));
         assert_eq!(approval.resolved_at, 1_800_000_000_040);
 
-        let mut wrong_actor = valid.clone().into_snapshot();
-        let review = wrong_actor.stage_runs.last_mut().expect("delivery review");
-        review.actor_type = StageRunActorType::Codex;
-        review.role = "executor".into();
-        let wrong_actor = Delivery::try_from_snapshot(wrong_actor).expect("structurally valid");
-        assert!(matches!(
-            current_publication_approval(&wrong_actor),
-            Err(StrongFlowProjectionError::RevisionConflict(_))
-        ));
+        let mut unassigned = valid.clone().into_snapshot();
+        unassigned
+            .attention_items
+            .last_mut()
+            .expect("approval")
+            .assigned_to = None;
+        let unassigned =
+            Delivery::try_from_snapshot(unassigned).expect("unassigned human approval");
+        assert!(
+            current_publication_approval(&unassigned)
+                .expect("unassigned approval")
+                .is_some()
+        );
 
         let mut wrong_reviewer = valid.clone().into_snapshot();
         wrong_reviewer
@@ -1465,22 +1433,14 @@ mod tests {
         wrong_time
             .attention_items
             .last_mut()
-            .expect("delivery approval")
-            .resolved_at_millis = Some(1_800_000_000_041);
-        wrong_time.updated_at_millis = 1_800_000_000_041;
-        let wrong_time = Delivery::try_from_snapshot(wrong_time).expect("structurally valid");
-        assert!(matches!(
-            current_publication_approval(&wrong_time),
-            Err(StrongFlowProjectionError::RevisionConflict(_))
-        ));
-
-        let valid = delivered_with_exact_approval();
-        let mut duplicate = valid.into_snapshot();
-        let mut second = duplicate
-            .attention_items
-            .last()
-            .expect("delivery approval")
-            .clone();
+            .expect("approval")
+            .resolved_at_millis = Some(1_800_000_000_029);
+        assert!(
+            Delivery::try_from_snapshot(wrong_time).is_err(),
+            "approval cannot precede its creation"
+        );
+        let mut duplicate = delivered_with_exact_approval().into_snapshot();
+        let mut second = duplicate.attention_items.last().expect("approval").clone();
         second.id = AttentionItemId("attention-delivery-approval-duplicate".into());
         duplicate.attention_items.push(second);
         let duplicate = Delivery::try_from_snapshot(duplicate).expect("structurally valid");

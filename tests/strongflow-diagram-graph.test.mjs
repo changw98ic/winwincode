@@ -52,6 +52,8 @@ const { DEFAULT_STRONGFLOW_RENDER_LIMITS } = renderingModule
 
 const deliveryId = 'dlv_00000000000000000000000001'
 const stageRunId = 'run_00000000000000000000000001'
+const workRunId = 'wrn_00000000000000000000000001'
+const workItemId = 'wit_00000000000000000000000001'
 
 function many(count, create) {
   return Array.from({ length: count }, (_, index) => create(index + 1))
@@ -759,9 +761,10 @@ function projection(overrides = {}) {
         goal: 'Render the exact approved diagrams without rebuilding unrelated DOM.',
       },
       tasks: many(2, value => ({
-        id: `task:${String(value)}`,
+        id: `wit_${String(value).padStart(26, '0')}`,
         title: `Task ${String(value)}`,
         status: value === 1 ? 'active' : 'pending',
+        workRunIds: value === 1 ? [workRunId] : [],
       })),
       stages: many(2, value => ({
         id: value === 1 ? stageRunId : `run_${String(value).padStart(26, '0')}`,
@@ -788,11 +791,15 @@ function projection(overrides = {}) {
     },
     stage: { id: stageRunId },
     runtime: {
-      stageRunId,
+      workRunId,
       sessions: many(2, value => ({
+        productSessionId: `psn_${String(value).padStart(26, '0')}`,
+        workRunId: value === 1 ? workRunId : `wrn_${String(value).padStart(26, '0')}`,
+        workItemId: value === 1 ? workItemId : `wit_${String(value).padStart(26, '0')}`,
         sessionBindingId: `bind:${String(value)}`,
         executionJobId: `job:${String(value)}`,
-        deliveryTaskId: `task:${String(value)}`,
+        workerId: `wrk_${String(value).padStart(26, '0')}`,
+        workerSessionId: `wsn_${String(value).padStart(26, '0')}`,
         attempt: 1,
         asOfSequence: value,
         agents: many(3, agentValue => ({
@@ -821,6 +828,53 @@ function projection(overrides = {}) {
       source: 'control-plane-snapshot',
       updatedAt: '2026-09-02T08:00:00.000Z',
       revisions: { delivery: 4, deliverySpec: 3, runtime: 8, publication: 1 },
+      readCursor: {},
+    },
+    workRunAggregate: {
+      schemaVersion: 'winwincode/v1',
+      contract: {
+        schemaVersion: 'winwincode/v1',
+        id: 'wct_00000000000000000000000001',
+        revision: 1,
+        scope: [],
+        objective: 'Render the exact approved diagrams.',
+        constraints: [],
+        protectedScope: [],
+        requiredHumanAuthority: 'none',
+        criteria: [],
+        createdAt: '2026-09-02T08:00:00.000Z',
+      },
+      items: many(2, value => ({
+        schemaVersion: 'winwincode/v1',
+        id: `wit_${String(value).padStart(26, '0')}`,
+        workContractId: 'wct_00000000000000000000000001',
+        workContractRevision: 1,
+        title: `Task ${String(value)}`,
+        goal: `Task ${String(value)} goal`,
+        criterionIds: [],
+        dependsOn: [],
+        revision: 1,
+        state: value === 1 ? 'in_progress' : 'pending',
+      })),
+      runs: [{
+        schemaVersion: 'winwincode/v1',
+        id: workRunId,
+        workContractId: 'wct_00000000000000000000000001',
+        contractRevision: 1,
+        workItemId,
+        workItemRevision: 1,
+        revision: 1,
+        state: 'running',
+        attempt: 1,
+        executionJobId: 'job_00000000000000000000000001',
+        workerId: 'wrk_00000000000000000000000001',
+        workerInstanceId: 'wki_00000000000000000000000001',
+        workerSessionId: 'wsn_00000000000000000000000001',
+        leaseId: 'lse_00000000000000000000000001',
+        fencingToken: '1',
+        productSessionId: 'psn_00000000000000000000000001',
+        codexThreadId: null,
+      }],
       readCursor: {},
     },
     ...overrides,
@@ -931,6 +985,7 @@ class FakeStrongFlowViewModel {
   async resolveAttention() {}
   async submitVerdict() {}
   async advanceDelivery() {}
+  async cancelWorkRun() {}
   cancelPending() {}
   reconnect() {}
   close() {}
@@ -1125,14 +1180,15 @@ test('node selection links only exact canonical Task Attention Diff and Evidence
     candidateRef,
     deliverySpecId: 'spec:1',
     deliverySpecRevision: 3,
-    producerStageRunId: stageRunId,
+    producerWorkRunId: workRunId,
     producerSessionBindingId: 'bind:1',
     candidateCommitId,
     candidateTreeId,
     diffSha256,
     frozenAt: '2026-09-02T08:00:00.000Z',
   }
-  current.delivery.tasks[0].stageRunIds = [stageRunId]
+  // Old task projections are not an execution authority, even when they disagree.
+  current.delivery.tasks[0].workRunIds = []
   current.evidence = [{
     id: evidenceId,
     type: 'diff',
@@ -1140,7 +1196,7 @@ test('node selection links only exact canonical Task Attention Diff and Evidence
     candidateRef,
     deliverySpecId: 'spec:1',
     deliverySpecRevision: 3,
-    stageRunId,
+    workRunId,
     sessionBindingId: 'bind:1',
   }]
   const executionNode = node => ({
@@ -1177,7 +1233,7 @@ test('node selection links only exact canonical Task Attention Diff and Evidence
         candidateRef,
         deliverySpecId: 'spec:1',
         deliverySpecRevision: 3,
-        producerStageRunId: stageRunId,
+        producerWorkRunId: workRunId,
         producerSessionBindingId: 'bind:1',
         candidateCommitId,
         candidateTreeId,
@@ -1187,9 +1243,9 @@ test('node selection links only exact canonical Task Attention Diff and Evidence
       diffSha256,
       files: [{ id: fileId, path: 'src/linked.ts', state: 'present', nodeIds: ['node:1'] }],
       provenance: {
-        stageRunId,
+        workRunId,
         sessionBindingId: 'bind:1',
-        deliveryTaskId: 'task:1',
+        workItemId,
         evidenceRefIds: [evidenceId],
       },
     },
@@ -1234,7 +1290,18 @@ test('node selection links only exact canonical Task Attention Diff and Evidence
   )
   assert.match(
     findByClass(architecture, 'wwc-strongflow-graph-detail').textContent,
-    /Task task:1.*Attention attention:1.*Diff src\/linked\.ts.*Evidence evidence:1/u,
+    /Task wit_00000000000000000000000001.*Attention attention:1.*Diff src\/linked\.ts.*Evidence evidence:1/u,
+  )
+  const crossed = structuredClone(current)
+  crossed.diagramExecution.details.provenance.workItemId = crossed.workRunAggregate.items[1].id
+  model.publish(state({ projection: crossed }))
+  findAllByClass(architecture, 'wwc-strongflow-graph-node')
+    .find(candidate => candidate.dataset.id === 'node:1').emit('click')
+  assert.equal(
+    [...findByClass(rootElement, 'wwc-strongflow-task-list').children]
+      .some(row => row.dataset.diagramLinked === 'true'),
+    false,
+    'an existing WorkItem belonging to a different WorkRun must not be linked',
   )
   mounted.close()
 })
@@ -1414,7 +1481,7 @@ test('two hundred runtime snapshots keep graph state and isolated session partit
   )
   assert.match(
     textContentOf(finalSessions[0]),
-    /Task task:1/u,
+    /Task wit_00000000000000000000000001/u,
     'winwincode-5nw: changed session stays in canonical snapshot order',
   )
   mounted.close()

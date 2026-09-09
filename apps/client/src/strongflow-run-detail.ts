@@ -6,7 +6,7 @@ import type {
   EvidenceId,
   RuntimeProjectionSnapshot,
   RuntimeSessionProjection,
-  StageRunId,
+  WorkRunId,
 } from './generated/contracts.js'
 import {
   boundedItems,
@@ -39,11 +39,11 @@ export interface StrongFlowHistoryCandidateIdentity {
  */
 export interface StrongFlowRunDetailLoaders {
   loadRuntime(
-    stageRunId: StageRunId,
+    workRunId: WorkRunId,
     signal: AbortSignal,
   ): Promise<RuntimeProjectionSnapshot | null>
   loadCandidates(
-    stageRunId: StageRunId,
+    workRunId: WorkRunId,
     signal: AbortSignal,
   ): Promise<readonly CandidateHistoryItemProjection[]>
   loadCandidateReview(
@@ -180,9 +180,9 @@ export function mountStrongFlowRunDetail(
   const conclusionStatus = document.createElement('strong')
   const conclusionText = document.createElement('p')
   root.hidden = true
-  root.setAttribute('aria-label', 'Historical StageRun review')
-  heading.textContent = 'Historical StageRun review'
-  note.textContent = 'Read-only history: this StageRun is not the current run.'
+  root.setAttribute('aria-label', 'Historical WorkRun review')
+  heading.textContent = 'Historical WorkRun review'
+  note.textContent = 'Read-only history: this WorkRun is not the current run.'
   runtimeHeading.textContent = 'Runtime projection'
   bindingHeading.textContent = 'Runtime binding'
   evidenceHeading.textContent = 'Evidence from this run'
@@ -190,7 +190,7 @@ export function mountStrongFlowRunDetail(
   reviewHeading.textContent = 'Historical candidate review'
   reviewHeading.hidden = true
   reviewHost.hidden = true
-  evidence.setAttribute('aria-label', 'StageRun evidence')
+  evidence.setAttribute('aria-label', 'WorkRun evidence')
   conclusion.append(conclusionStatus, conclusionText)
   root.append(
     heading,
@@ -215,7 +215,7 @@ export function mountStrongFlowRunDetail(
   const identityList = strongFlowElement(document, 'dl', 'wwc-strongflow-history-identity')
   identityHost.append(identityList)
   const identityRows = [
-    'StageRun',
+    'WorkRun',
     'Attempt',
     'Stage',
     'Role',
@@ -235,7 +235,7 @@ export function mountStrongFlowRunDetail(
     'WorkerSession',
     'CodexThread',
   ].map(term => definitionRow(document, bindingList, term))
-  bindingEmpty.textContent = 'Human review StageRun — no runtime binding.'
+  bindingEmpty.textContent = 'Human review WorkRun — no runtime binding.'
 
   const evidenceCollection = mountKeyedCollection<
     StrongFlowHistoryEvidence,
@@ -285,7 +285,7 @@ export function mountStrongFlowRunDetail(
   runtimeRetry.type = 'button'
   runtimeRetry.textContent = 'Retry runtime projection'
   runtimeRetry.hidden = true
-  runtimeEmpty.textContent = 'No runtime projection — this StageRun has no runtime binding.'
+  runtimeEmpty.textContent = 'No runtime projection — this WorkRun has no runtime binding.'
   runtimeEmpty.hidden = true
   runtimeHost.append(runtimeEmpty, runtimeList, runtimeSessions)
   const runtimeRows = ['Runtime revision', 'Accepted sequence', 'Rebuilt', 'Sessions']
@@ -299,7 +299,7 @@ export function mountStrongFlowRunDetail(
     HTMLLIElement
   >({
     parent: runtimeSessions,
-    key: session => `${session.productSessionId}:${session.stageRunId ?? 'none'}:${session.sessionBindingId}`,
+    key: session => `${session.productSessionId}:${session.workRunId ?? 'none'}:${session.sessionBindingId}`,
     create: () => {
       const item = document.createElement('li')
       const summary = document.createElement('p')
@@ -429,7 +429,7 @@ export function mountStrongFlowRunDetail(
   })
 
   let closed = false
-  let reviewTarget: StageRunId | null = null
+  let reviewTarget: WorkRunId | null = null
   let payloadKey: string | null = null
   let lastFingerprint: string | null = null
   let loadGeneration = 0
@@ -614,11 +614,11 @@ export function mountStrongFlowRunDetail(
 
   function runtimeFailure(): void {
     resetRuntimePanel('error')
-    setText(runtimeError, 'The exact runtime projection for this StageRun is unavailable.')
+    setText(runtimeError, 'The exact runtime projection for this WorkRun is unavailable.')
     runtimeError.hidden = false
   }
 
-  function loadRuntimeFor(stageRunId: StageRunId): void {
+  function loadRuntimeFor(workRunId: WorkRunId): void {
     const controller = payloadController
     if (controller === null) return
     resetRuntimePanel('loading')
@@ -627,13 +627,13 @@ export function mountStrongFlowRunDetail(
       && generation === loadGeneration
       && controller === payloadController
       && !controller.signal.aborted
-    void options.loaders.loadRuntime(stageRunId, controller.signal).then(
+    void options.loaders.loadRuntime(workRunId, controller.signal).then(
       snapshot => {
         if (!current()) return
         if (
           snapshot === null
           || snapshot.kind !== 'runtime_projection'
-          || snapshot.stageRunId !== stageRunId
+          || snapshot.workRunId !== workRunId
           || snapshot.deliveryId === null
         ) {
           runtimeFailure()
@@ -659,11 +659,11 @@ export function mountStrongFlowRunDetail(
 
   function candidatesFailure(): void {
     resetCandidatesPanel('error')
-    setText(candidatesError, 'The candidates of this StageRun could not be loaded.')
+    setText(candidatesError, 'The candidates of this WorkRun could not be loaded.')
     candidatesError.hidden = false
   }
 
-  function loadCandidatesFor(stageRunId: StageRunId): void {
+  function loadCandidatesFor(workRunId: WorkRunId): void {
     const controller = payloadController
     if (controller === null) return
     resetCandidatesPanel('loading')
@@ -672,7 +672,7 @@ export function mountStrongFlowRunDetail(
       && generation === loadGeneration
       && controller === payloadController
       && !controller.signal.aborted
-    void options.loaders.loadCandidates(stageRunId, controller.signal).then(
+    void options.loaders.loadCandidates(workRunId, controller.signal).then(
       items => {
         if (!current()) return
         candidatesPanel = 'ready'
@@ -701,16 +701,16 @@ export function mountStrongFlowRunDetail(
   function update(state: StrongFlowRunDetailState): void {
     if (closed) return
     const tree = state.tree
-    const run = tree === null || state.selection.stageRunId === null
+    const run = tree === null || state.selection.workRunId === null
       ? null
-      : tree.runs.find(candidate => candidate.stageRunId === state.selection.stageRunId) ?? null
+      : tree.runs.find(candidate => candidate.workRunId === state.selection.workRunId) ?? null
     const reviewing = tree !== null && run !== null && !run.isCurrent
-    const target = reviewing ? run.stageRunId : null
+    const target = reviewing ? run.workRunId : null
     const fingerprint = reviewing
-      ? JSON.stringify([run, tree.currentCandidateRef, taskTitleOf(tree, run.deliveryTaskId)])
+      ? JSON.stringify([run, tree.currentCandidateRef, taskTitleOf(tree, run.workItemId)])
       : null
     const nextPayloadKey = reviewing
-      ? JSON.stringify([run.stageRunId, tree.readCursor])
+      ? JSON.stringify([run.workRunId, tree.readCursor])
       : null
     if (nextPayloadKey === payloadKey && fingerprint === lastFingerprint) {
       // Equivalent snapshot: keep DOM identity, focus, and scroll untouched.
@@ -744,30 +744,30 @@ export function mountStrongFlowRunDetail(
       if (run.binding === null) {
         resetRuntimePanel('unsupported')
       } else {
-        loadRuntimeFor(run.stageRunId)
+        loadRuntimeFor(run.workRunId)
       }
-      loadCandidatesFor(run.stageRunId)
+      loadCandidatesFor(run.workRunId)
     }
     root.hidden = false
-    root.dataset.stageRunId = run.stageRunId
+    root.dataset.workRunId = run.workRunId
     if (run.attempt !== null) root.dataset.attempt = String(run.attempt)
     else delete root.dataset.attempt
     applyDefinitions(identityRows, [
-      run.stageRunId,
+      run.workRunId,
       run.attempt === null ? '—' : String(run.attempt),
-      run.stage,
-      run.role,
-      run.actorType,
-      taskTitleOf(tree, run.deliveryTaskId),
+      run.stage ?? 'Unknown',
+      run.role ?? 'Unknown',
+      run.actorType ?? 'Unknown',
+      taskTitleOf(tree, run.workItemId),
       run.status,
-      run.startedAt,
+      run.startedAt ?? 'Unknown',
       run.finishedAt ?? 'Not finished',
     ])
     bindingList.hidden = run.binding === null
     bindingEmpty.hidden = run.binding !== null
     if (run.binding !== null) {
       applyDefinitions(bindingRows, [
-        run.binding.productSessionId,
+        run.binding.productSessionId ?? '—',
         run.binding.executionJobId,
         run.binding.workerId ?? '—',
         run.binding.workerSessionId ?? '—',

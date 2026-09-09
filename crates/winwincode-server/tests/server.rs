@@ -24,10 +24,12 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use winwincode_api::generated::{
     Actor, ControlPlaneWebSocketProtocolErrorFrame, EnterpriseIdentityUpdateCommand, Error,
     ErrorDetailValue, ErrorEnvelope, OrganizationScope, OrganizationScopeKind, RetryableErrorCode,
-    Scope, TerminalErrorCode, UserActor, UserActorKind,
+    Scope, TerminalErrorCode,
 };
 use winwincode_control_plane::{EnterpriseIdentityService, generate_api_token};
-use winwincode_domain::{ApiTokenId, Instant, OrganizationId, UserAccountRole, UserId};
+use winwincode_domain::{
+    ApiTokenId, Instant, OrganizationId, UserAccountRole, UserActor, UserActorKind, UserId,
+};
 use winwincode_server::{
     ApiError, AuthSessionBootstrap, AuthSessionConfig, AuthenticatedPrincipal, ControlPlaneApiPort,
     EnterpriseRequestAuthenticator, EventSubscription, RequestAuthenticator, RunningServer,

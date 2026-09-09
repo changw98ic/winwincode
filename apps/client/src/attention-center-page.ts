@@ -13,7 +13,7 @@ import { mountEmptyState, mountToolbar } from './components/index.js'
 import { mountKeyedCollection, type KeyedCollectionView } from './components/keyed-collection.js'
 import { boundApprovalText } from './approval-risk-detail.js'
 import { scopeHash, type ScopeRouteSelection } from '@winwincode/browser-core/scope-context'
-import type { StageRunId } from './generated/contracts.js'
+import type { WorkRunId } from './generated/contracts.js'
 import type {
   AttentionNotificationControl,
   AttentionNotificationDesktopState,
@@ -204,7 +204,7 @@ function urgencyLabel(urgency: AttentionCenterItem['urgency']): string {
  */
 export type AttentionCenterItemRoute = Pick<
   AttentionCenterItem,
-  'kind' | 'id' | 'productSessionId' | 'stageRunId' | 'deliveryId'
+  'kind' | 'id' | 'productSessionId' | 'workRunId' | 'deliveryId'
 >
 
 /** Real entry point for one card: the authoritative decision or Delivery surface. */
@@ -221,7 +221,7 @@ export function attentionCenterItemHash(
     return strongFlowRouteHash({
       deliveryId: item.deliveryId,
       productSessionId: null,
-      stageRunId: item.stageRunId,
+      workRunId: item.workRunId,
       candidatePath: null,
       candidateView: 'unified',
       comparison: { status: 'none' },
@@ -231,15 +231,15 @@ export function attentionCenterItemHash(
   }
   // The decision link carries the exact execution origin so the decision
   // surface can return to the Task/StageRun that raised the decision.
-  const stageRunId = item.stageRunId
-  const origin = stageRunId === null
+  const workRunId = item.workRunId
+  const origin = workRunId === null
     ? undefined
-    : origins?.find(candidate => candidate.activeStageRunId === stageRunId)
+    : origins?.find(candidate => candidate.activeWorkRunId === workRunId)
   const parameters = [`session=${encodeURIComponent(item.productSessionId ?? '')}`]
-  if (origin !== undefined && stageRunId !== null) {
+  if (origin !== undefined && workRunId !== null) {
     parameters.push(
       `delivery=${encodeURIComponent(origin.deliveryId)}`,
-      `stageRun=${encodeURIComponent(stageRunId)}`,
+      `workRun=${encodeURIComponent(workRunId)}`,
     )
   }
   return scopeHash(`#/attention?${parameters.join('&')}`, scopeSelection)
@@ -248,13 +248,13 @@ export function attentionCenterItemHash(
 /** The exact StrongFlow context of the StageRun that raised one decision. */
 export function attentionCenterOriginHash(
   origin: AttentionCenterOrigin,
-  stageRunId: StageRunId,
+  workRunId: WorkRunId,
   scopeSelection: ScopeRouteSelection,
 ): string {
   const route: StrongFlowRoute = {
     deliveryId: origin.deliveryId,
     productSessionId: null,
-    stageRunId,
+    workRunId,
     candidatePath: null,
     candidateView: 'unified',
     comparison: { status: 'none' },
@@ -562,20 +562,20 @@ export function mountAttentionCenterPage(options: AttentionCenterPageOptions): A
         || attentionCenterPresentation(options.model.state, selection).actionsDisabled
         || item.urgency === 'expired'
         || item.urgency === 'binding-invalid'
-      const cardStageRunId = item.stageRunId
-      const origin = cardStageRunId === null
+      const cardWorkRunId = item.workRunId
+      const origin = cardWorkRunId === null
         ? undefined
-        : origins().find(candidate => candidate.activeStageRunId === cardStageRunId)
+        : origins().find(candidate => candidate.activeWorkRunId === cardWorkRunId)
       row.dataset.kind = item.kind
       row.dataset.urgency = item.urgency
       parts.kind.textContent = KIND_LABELS[item.kind]
       // Producer summaries are free-form, so the card never renders one raw.
       parts.title.textContent = boundApprovalText(item.title).text
       parts.origin.hidden = item.kind === 'attention' || origin === undefined || disabled
-      if (origin !== undefined && cardStageRunId !== null && item.kind !== 'attention' && !disabled) {
+      if (origin !== undefined && cardWorkRunId !== null && item.kind !== 'attention' && !disabled) {
         parts.origin.href = attentionCenterOriginHash(
           origin,
-          cardStageRunId,
+          cardWorkRunId,
           options.scopeSelection,
         )
         parts.origin.textContent = 'Open execution context'
@@ -591,8 +591,8 @@ export function mountAttentionCenterPage(options: AttentionCenterPageOptions): A
           ? `Delivery · ${item.deliveryTitle ?? 'unknown'}`
           : `Session · ${item.sessionTitle ?? 'unknown'}`,
         item.kind === 'attention'
-          ? (item.stageRunId === null ? 'Delivery-bound' : 'StageRun-bound')
-          : (item.stageRunId === null ? 'ProductSession-bound' : 'ProductSession and StageRun-bound'),
+          ? (item.workRunId === null ? 'Delivery-bound' : 'WorkRun-bound')
+          : (item.workRunId === null ? 'ProductSession-bound' : 'ProductSession and WorkRun-bound'),
         item.executionJobId === null ? 'No execution job' : 'Execution job-bound',
         // The Attention snapshot carries no authoritative DeliveryTask mapping, so the
         // Task field is explicitly unavailable; an ExecutionJob is never shown as a Task.

@@ -4,7 +4,7 @@
 //! reservation capacity ledger.
 //!
 //! The task-execution authority chain is: one `ProductSession` owns stage
-//! runs, the scheduler reserves one execution Job per stage run, and the
+//! runs, the scheduler reserves one execution Job per work run, and the
 //! worker that executes the Job is bound — durably, before any dispatch — to
 //! one `WorkerLaunchGrant` with its client node, occupancy lease, fencing
 //! token, and repository binding (plan 7.8, 14, 17.2). This ledger is the
@@ -69,7 +69,7 @@ CREATE TABLE IF NOT EXISTS device_execution_reservation_facts (
     worker_id TEXT NOT NULL,
     worker_instance_id TEXT NOT NULL,
     product_session_id TEXT,
-    stage_run_id TEXT,
+    work_run_id TEXT,
     attached_at TEXT NOT NULL,
     revision INTEGER NOT NULL CHECK (revision = 1),
     role TEXT,
@@ -95,7 +95,7 @@ CREATE TABLE IF NOT EXISTS device_execution_bindings (
         CHECK (occupancy_fencing_token > 0 AND occupancy_fencing_token <= 9007199254740991),
     worker_launch_grant_id TEXT NOT NULL,
     product_session_id TEXT,
-    stage_run_id TEXT,
+    work_run_id TEXT,
     state TEXT NOT NULL CHECK (state IN ('bound', 'released')),
     bound_at TEXT NOT NULL,
     released_at TEXT,
@@ -202,7 +202,7 @@ pub struct DeviceExecutionBindingIssuance {
     pub expected_repository_binding_id: String,
     pub expected_worker_session_id: String,
     pub expected_product_session_id: Option<String>,
-    pub expected_stage_run_id: Option<String>,
+    pub expected_work_run_id: Option<String>,
 }
 
 impl DeviceExecutionBindingIssuance {
@@ -225,7 +225,7 @@ impl DeviceExecutionBindingIssuance {
         expected_repository_binding_id: impl Into<String>,
         expected_worker_session_id: impl Into<String>,
         expected_product_session_id: Option<String>,
-        expected_stage_run_id: Option<String>,
+        expected_work_run_id: Option<String>,
     ) -> Result<Self, DeviceExecutionBindingStoreError> {
         let command = Self {
             device_execution_binding_id: device_execution_binding_id.into(),
@@ -239,7 +239,7 @@ impl DeviceExecutionBindingIssuance {
             expected_repository_binding_id: expected_repository_binding_id.into(),
             expected_worker_session_id: expected_worker_session_id.into(),
             expected_product_session_id,
-            expected_stage_run_id,
+            expected_work_run_id,
         };
         validate_device_execution_binding_id(&command.device_execution_binding_id)?;
         validate_request_id(&command.request_id)?;
@@ -254,8 +254,8 @@ impl DeviceExecutionBindingIssuance {
         if let Some(product) = &command.expected_product_session_id {
             validate_product_session_id(product)?;
         }
-        if let Some(stage) = &command.expected_stage_run_id {
-            validate_stage_run_id(stage)?;
+        if let Some(stage) = &command.expected_work_run_id {
+            validate_work_run_id(stage)?;
         }
         Ok(command)
     }
@@ -368,7 +368,7 @@ pub struct DeviceExecutionBindingRecord {
     pub occupancy_fencing_token: u64,
     pub worker_launch_grant_id: String,
     pub product_session_id: Option<String>,
-    pub stage_run_id: Option<String>,
+    pub work_run_id: Option<String>,
     pub state: DeviceExecutionBindingState,
     pub bound_at: Instant,
     pub released_at: Option<Instant>,
@@ -378,7 +378,7 @@ pub struct DeviceExecutionBindingRecord {
 /// Companion device facts of one execution admission reservation. Every
 /// field is copied verbatim from the backing launch grant, so the Job stays
 /// traceable to the client node, occupancy lease, repository binding,
-/// worker, and (when stamped) the `ProductSession`/`StageRun` pair.
+/// worker, and (when stamped) the `ProductSession`/`WorkRun` pair.
 #[allow(clippy::struct_field_names)]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DeviceExecutionReservationFacts {
@@ -394,7 +394,7 @@ pub struct DeviceExecutionReservationFacts {
     pub worker_id: String,
     pub worker_instance_id: String,
     pub product_session_id: Option<String>,
-    pub stage_run_id: Option<String>,
+    pub work_run_id: Option<String>,
     pub attached_at: Instant,
     /// `FLOW-100.5`: the `StrongFlow` execution role stamped on the dispatch,
     /// or `None` for the role-less Quick Chat dispatches.
@@ -523,6 +523,7 @@ impl<'storage> DeviceExecutionBindingLedger<'storage> {
         let connection = storage
             .connection()
             .map_err(|storage| storage_error(&storage))?;
+        migrate_legacy_work_run_columns(connection)?;
         connection
             .execute_batch(&binding_schema())
             .map_err(|sql| sql_error(&sql))?;
@@ -578,7 +579,7 @@ impl<'storage> DeviceExecutionBindingLedger<'storage> {
                  (device_execution_binding_id, worker_session_id, client_node_id,
                   client_instance_id, holder_user_id, repository_binding_id,
                   occupancy_lease_id, occupancy_fencing_token, worker_launch_grant_id,
-                  product_session_id, stage_run_id, state, bound_at, released_at, revision)
+                  product_session_id, work_run_id, state, bound_at, released_at, revision)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'bound', ?12, NULL, 1)",
                 params![
                     command.device_execution_binding_id,
@@ -591,7 +592,7 @@ impl<'storage> DeviceExecutionBindingLedger<'storage> {
                     sql_integer(grant.occupancy_fencing_token)?,
                     grant.worker_launch_grant_id,
                     grant.product_session_id,
-                    grant.stage_run_id,
+                    grant.work_run_id,
                     now.0,
                 ],
             )
@@ -688,7 +689,7 @@ impl<'storage> DeviceExecutionBindingLedger<'storage> {
     /// and the grant's worker session carries the `bound` binding of this
     /// grant. The stored facts are copied verbatim from the grant, so a later
     /// projection reads the authority instead of guessing. Traceability to
-    /// the `ProductSession`/`StageRun` pair is durable on both sides: the
+    /// the `ProductSession`/`WorkRun` pair is durable on both sides: the
     /// facts carry the grant's stamps, and the reservation scope carries the
     /// session identity it was reserved under.
     ///
@@ -780,7 +781,7 @@ impl<'storage> DeviceExecutionBindingLedger<'storage> {
             worker_id: grant.worker_id,
             worker_instance_id: grant.worker_instance_id,
             product_session_id: grant.product_session_id,
-            stage_run_id: grant.stage_run_id,
+            work_run_id: grant.work_run_id,
             attached_at: now.clone(),
             role: command.role.clone(),
         };
@@ -790,7 +791,7 @@ impl<'storage> DeviceExecutionBindingLedger<'storage> {
                  (job_id, client_node_id, client_instance_id, holder_user_id,
                   repository_binding_id, occupancy_lease_id, occupancy_fencing_token,
                   worker_launch_grant_id, worker_session_id, worker_id,
-                  worker_instance_id, product_session_id, stage_run_id,
+                  worker_instance_id, product_session_id, work_run_id,
                   attached_at, revision, role)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, 1, ?15)",
                 params![
@@ -806,7 +807,7 @@ impl<'storage> DeviceExecutionBindingLedger<'storage> {
                     facts.worker_id,
                     facts.worker_instance_id,
                     facts.product_session_id,
-                    facts.stage_run_id,
+                    facts.work_run_id,
                     facts.attached_at.0,
                     facts.role,
                 ],
@@ -986,7 +987,7 @@ struct LaunchGrantFact {
     worker_id: String,
     worker_instance_id: String,
     product_session_id: Option<String>,
-    stage_run_id: Option<String>,
+    work_run_id: Option<String>,
     state: String,
 }
 
@@ -999,7 +1000,7 @@ fn require_launch_grant(
             "SELECT worker_launch_grant_id, client_node_id, client_instance_id,
                     holder_user_id, occupancy_lease_id, occupancy_fencing_token,
                     repository_binding_id, worker_session_id, worker_id,
-                    worker_instance_id, product_session_id, stage_run_id, state
+                    worker_instance_id, product_session_id, work_run_id, state
              FROM worker_launch_grants WHERE worker_launch_grant_id = ?1",
             [worker_launch_grant_id],
             |row| {
@@ -1034,7 +1035,7 @@ fn require_launch_grant(
         worker_id,
         worker_instance_id,
         product_session_id,
-        stage_run_id,
+        work_run_id,
         state,
     )) = row
     else {
@@ -1058,7 +1059,7 @@ fn require_launch_grant(
         worker_id,
         worker_instance_id,
         product_session_id,
-        stage_run_id,
+        work_run_id,
         state,
     })
 }
@@ -1078,7 +1079,7 @@ fn ensure_binding_matches_grant(
         && grant.repository_binding_id == command.expected_repository_binding_id
         && grant.worker_session_id == command.expected_worker_session_id
         && grant.product_session_id == command.expected_product_session_id
-        && grant.stage_run_id == command.expected_stage_run_id;
+        && grant.work_run_id == command.expected_work_run_id;
     if consistent {
         Ok(())
     } else {
@@ -1159,7 +1160,7 @@ fn complete_binding(
         occupancy_fencing_token,
         worker_launch_grant_id,
         product_session_id,
-        stage_run_id,
+        work_run_id,
         state,
         bound_at,
         released_at,
@@ -1179,7 +1180,7 @@ fn complete_binding(
         )?,
         worker_launch_grant_id,
         product_session_id,
-        stage_run_id,
+        work_run_id,
         state: DeviceExecutionBindingState::parse(&state)?,
         bound_at: parse_stored_instant(&bound_at, "bind time")?,
         released_at: released_at
@@ -1192,7 +1193,7 @@ fn complete_binding(
 const BINDING_SELECT: &str = "SELECT device_execution_binding_id, worker_session_id,
         client_node_id, client_instance_id, holder_user_id, repository_binding_id,
         occupancy_lease_id, occupancy_fencing_token, worker_launch_grant_id,
-        product_session_id, stage_run_id, state, bound_at, released_at, revision
+        product_session_id, work_run_id, state, bound_at, released_at, revision
  FROM device_execution_bindings";
 
 fn load_binding(
@@ -1279,7 +1280,7 @@ fn complete_facts(
         worker_id,
         worker_instance_id,
         product_session_id,
-        stage_run_id,
+        work_run_id,
         attached_at,
         role,
     ) = row;
@@ -1299,7 +1300,7 @@ fn complete_facts(
         worker_id,
         worker_instance_id,
         product_session_id,
-        stage_run_id,
+        work_run_id,
         attached_at: parse_stored_instant(&attached_at, "attachment time")?,
         role,
     })
@@ -1353,7 +1354,7 @@ fn load_facts(
             "SELECT job_id, client_node_id, client_instance_id, holder_user_id,
                     repository_binding_id, occupancy_lease_id, occupancy_fencing_token,
                     worker_launch_grant_id, worker_session_id, worker_id,
-                    worker_instance_id, product_session_id, stage_run_id, attached_at,
+                    worker_instance_id, product_session_id, work_run_id, attached_at,
                     role
              FROM device_execution_reservation_facts WHERE job_id = ?1",
             [job_id],
@@ -1441,6 +1442,95 @@ fn command_digest(command: &impl Serialize) -> Result<String, DeviceExecutionBin
     Ok(format!("sha256:{:x}", Sha256::digest(&encoded)))
 }
 
+/// Migrates empty pre-WorkRun binding tables in place. Populated legacy
+/// rows are rejected so a `StageRun` value is never relabeled as a `WorkRun`.
+/// The caller must perform the explicit historical conversion before retrying.
+fn migrate_legacy_work_run_columns(
+    connection: &Connection,
+) -> Result<(), DeviceExecutionBindingStoreError> {
+    connection
+        .execute_batch("BEGIN IMMEDIATE")
+        .map_err(|sql| sql_error(&sql))?;
+    let result = migrate_legacy_work_run_columns_in_transaction(connection);
+    match result {
+        Ok(()) => match connection.execute_batch("COMMIT") {
+            Ok(()) => Ok(()),
+            Err(sql) => {
+                let _ = connection.execute_batch("ROLLBACK");
+                Err(sql_error(&sql))
+            }
+        },
+        Err(error) => {
+            let _ = connection.execute_batch("ROLLBACK");
+            Err(error)
+        }
+    }
+}
+
+fn migrate_legacy_work_run_columns_in_transaction(
+    connection: &Connection,
+) -> Result<(), DeviceExecutionBindingStoreError> {
+    let mut legacy_tables = Vec::new();
+    for table in [
+        "device_execution_bindings",
+        "device_execution_reservation_facts",
+    ] {
+        let exists = connection
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                [table],
+                |_| Ok(()),
+            )
+            .optional()
+            .map_err(|sql| sql_error(&sql))?
+            .is_some();
+        if !exists {
+            continue;
+        }
+        let columns = connection
+            .prepare(&format!("PRAGMA table_info({table})"))
+            .map_err(|sql| sql_error(&sql))?
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(|sql| sql_error(&sql))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|sql| sql_error(&sql))?;
+        if !columns.iter().any(|column| column == "stage_run_id") {
+            continue;
+        }
+        if columns.iter().any(|column| column == "work_run_id") {
+            return Err(error(
+                DeviceExecutionBindingStoreErrorKind::CorruptState,
+                format!("{table} has both legacy StageRun and WorkRun columns"),
+            ));
+        }
+        let populated = connection
+            .query_row(
+                &format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE stage_run_id IS NOT NULL)"),
+                [],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(|sql| sql_error(&sql))?;
+        if populated {
+            return Err(error(
+                DeviceExecutionBindingStoreErrorKind::Storage,
+                format!("legacy StageRun rows in {table} require an explicit WorkRun migration"),
+            ));
+        }
+        legacy_tables.push(table);
+    }
+    // All legacy tables are preflighted before any DDL, so a mixed database
+    // cannot be left half-renamed when one table contains historical rows.
+    for table in legacy_tables {
+        connection
+            .execute(
+                &format!("ALTER TABLE {table} RENAME COLUMN stage_run_id TO work_run_id"),
+                [],
+            )
+            .map_err(|sql| sql_error(&sql))?;
+    }
+    Ok(())
+}
+
 fn validate_schema(connection: &Connection) -> Result<(), DeviceExecutionBindingStoreError> {
     validate_columns(
         connection,
@@ -1456,7 +1546,7 @@ fn validate_schema(connection: &Connection) -> Result<(), DeviceExecutionBinding
             "occupancy_fencing_token",
             "worker_launch_grant_id",
             "product_session_id",
-            "stage_run_id",
+            "work_run_id",
             "state",
             "bound_at",
             "released_at",
@@ -1479,7 +1569,7 @@ fn validate_schema(connection: &Connection) -> Result<(), DeviceExecutionBinding
             "worker_id",
             "worker_instance_id",
             "product_session_id",
-            "stage_run_id",
+            "work_run_id",
             "attached_at",
             "revision",
             "role",
@@ -1641,8 +1731,8 @@ fn validate_product_session_id(value: &str) -> Result<(), DeviceExecutionBinding
     validate_crockford_id(value, "psn_", "product session id")
 }
 
-fn validate_stage_run_id(value: &str) -> Result<(), DeviceExecutionBindingStoreError> {
-    validate_crockford_id(value, "run_", "stage run id")
+fn validate_work_run_id(value: &str) -> Result<(), DeviceExecutionBindingStoreError> {
+    validate_crockford_id(value, "wrn_", "work run id")
 }
 
 fn validate_request_id(value: &str) -> Result<(), DeviceExecutionBindingStoreError> {
@@ -1844,4 +1934,73 @@ fn cas_lost(action: &str) -> DeviceExecutionBindingStoreError {
         DeviceExecutionBindingStoreErrorKind::RevisionConflict,
         format!("the {action} compare-and-swap guard lost its race"),
     )
+}
+
+#[cfg(test)]
+mod migration_tests {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use rusqlite::Connection;
+
+    use super::migrate_legacy_work_run_columns;
+
+    fn database_path(label: &str) -> std::path::PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "winwincode-device-binding-migration-{label}-{}-{nonce}.sqlite",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn empty_legacy_binding_tables_upgrade_and_survive_reopen() {
+        let path = database_path("empty");
+        {
+            let connection = Connection::open(&path).expect("sqlite");
+            connection
+                .execute_batch(
+                    "CREATE TABLE device_execution_bindings (stage_run_id TEXT);
+                     CREATE TABLE device_execution_reservation_facts (stage_run_id TEXT);",
+                )
+                .expect("legacy schema");
+            migrate_legacy_work_run_columns(&connection).expect("empty legacy upgrade");
+        }
+        {
+            let connection = Connection::open(&path).expect("reopen sqlite");
+            for table in [
+                "device_execution_bindings",
+                "device_execution_reservation_facts",
+            ] {
+                let column: String = connection
+                    .query_row(&format!("PRAGMA table_info({table})"), [], |row| row.get(1))
+                    .expect("renamed column");
+                assert_eq!(column, "work_run_id");
+            }
+        }
+        std::fs::remove_file(path).expect("remove test database");
+    }
+
+    #[test]
+    fn populated_legacy_binding_table_is_rejected_without_rewriting_rows() {
+        let connection = Connection::open_in_memory().expect("sqlite");
+        connection
+            .execute_batch(
+                "CREATE TABLE device_execution_bindings (stage_run_id TEXT);
+                 INSERT INTO device_execution_bindings VALUES ('run_legacy_unchanged');",
+            )
+            .expect("legacy row");
+        let error = migrate_legacy_work_run_columns(&connection).expect_err("legacy rejection");
+        assert!(error.to_string().contains("explicit WorkRun migration"));
+        let value: String = connection
+            .query_row(
+                "SELECT stage_run_id FROM device_execution_bindings",
+                [],
+                |row| row.get(0),
+            )
+            .expect("legacy value");
+        assert_eq!(value, "run_legacy_unchanged");
+    }
 }

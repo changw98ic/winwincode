@@ -3,6 +3,8 @@ import { mountStrongFlowPage } from '/module/strongflow-page.js'
 const root = document.querySelector('[data-winwincode-client-root]')
 const deliveryId = 'dlv_00000000000000000000000001'
 const stageRunId = 'run_00000000000000000000000001'
+const workRunId = 'wrn_00000000000000000000000001'
+const workItemId = 'wit_00000000000000000000000001'
 const candidateRef = 'refs/winwincode/candidate/browser-event'
 
 function diagram(kind) {
@@ -51,13 +53,13 @@ function createProjection({ candidateDigest = '3', runtimeSource = '1' } = {}) {
     diagramExecution: null,
     stage: { id: stageRunId },
     runtime: {
-      stageRunId,
+      workRunId,
       sessions: [{
         productSessionId: 'psn_00000000000000000000000001',
-        stageRunId,
+        workRunId,
+        workItemId,
         sessionBindingId: 'bind:1',
         codexThreadId: 'cdx_t0000000000000000000000001',
-        deliveryTaskId: 'task:browser',
         attempt: 1,
         asOfSequence: 1,
         agents: [],

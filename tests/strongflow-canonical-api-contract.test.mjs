@@ -59,7 +59,8 @@ test('delivery.get has one closed StrongFlow detail while DeliveryPage stays com
     'title',
     'status',
     'taskCounts',
-    'activeStageRunId',
+    'activeWorkRunId',
+    'workRunId',
     'openAttentionCount',
     'updatedAt',
   ]))
@@ -145,7 +146,7 @@ test('delivery.get has one closed StrongFlow detail while DeliveryPage stays com
         codexThreadId: { type: 'null' },
         workerSessionId: { type: 'null' },
         sessionIdentity: { type: 'null' },
-        stageRunId: { type: 'null' },
+        workRunId: { type: 'null' },
         workerId: { type: 'null' },
         leaseId: { type: 'null' },
         attempt: { type: 'null' },
@@ -164,8 +165,8 @@ test('delivery.get has one closed StrongFlow detail while DeliveryPage stays com
         sessionIdentity: {
           $ref: './domain.schema.json#/$defs/SessionIdentity',
         },
-        stageRunId: {
-          $ref: './domain.schema.json#/$defs/StageRunId',
+        workRunId: {
+          $ref: './domain.schema.json#/$defs/WorkRunId',
         },
         workerId: {
           $ref: './domain.schema.json#/$defs/WorkerId',
@@ -251,7 +252,7 @@ test('DeliveryStageSessionBindingProjection decodes both pending and complete br
     codexThreadId: null,
     boundAt: '2026-08-24T10:00:00.000Z',
     sessionIdentity: null,
-    stageRunId: null,
+    workRunId: null,
     workerId: null,
     leaseId: null,
     attempt: null,
@@ -268,9 +269,8 @@ test('DeliveryStageSessionBindingProjection decodes both pending and complete br
       productSessionId: pending.productSessionId,
       workerSessionId: 'wsn_00000000000000000000000000',
       codexThreadId: 'cdx_00000000000000000000000000',
-      stageRunId: 'run_00000000000000000000000000',
     },
-    stageRunId: 'run_00000000000000000000000000',
+    workRunId: 'wrn_00000000000000000000000000',
     workerId: 'wrk_00000000000000000000000000',
     leaseId: 'lse_00000000000000000000000000',
     attempt: 1,
@@ -285,7 +285,7 @@ test('DeliveryStageSessionBindingProjection decodes both pending and complete br
   }
   assert.equal(validate(complete), true, JSON.stringify(validate.errors))
 
-  const partial = { ...pending, stageRunId: complete.stageRunId }
+  const partial = { ...pending, workRunId: complete.workRunId }
   assert.equal(validate(partial), false)
   const unknown = { ...pending, legacySessionId: 'legacy' }
   assert.equal(validate(unknown), false)
@@ -375,12 +375,6 @@ test('current solution review and publication expose exact authority joins', () 
   assert.equal(review.oneOf[3].properties.comments, undefined)
   assert.equal(review.oneOf[3].properties.requestedChanges.type, 'null')
 
-  const promotion = http.$defs.DeliveryApproveTaskBreakdownPayload
-  assert.deepEqual(promotion.required, ['deliveryId', 'reviewSetSha256'])
-  assert.deepEqual(Object.keys(promotion.properties), ['deliveryId', 'reviewSetSha256'])
-  assert.equal(promotion.properties.tasks, undefined)
-  assert.equal(promotion.properties.reviewSetSha256.$ref,
-    './domain.schema.json#/$defs/Sha256Digest')
   assert.deepEqual(http['x-winwincode-semantics'].solutionReview, {
     digestIncludesOrderedTaskProposals: true,
     pendingProjectionAllowed: true,
@@ -605,8 +599,8 @@ test('runtime.projection.get returns bounded typed sessions and only a live Diff
   assert.equal(session.additionalProperties, false)
   for (const field of [
     'sessionBindingId',
-    'stageRunId',
-    'deliveryTaskId',
+    'workRunId',
+    'workItemId',
     'productSessionId',
     'workerSessionId',
     'codexThreadId',
@@ -789,7 +783,7 @@ test('Evidence detail and Artifact content contracts are exact, bounded, and sec
     'readPageLimit',
     'evidenceId',
     'candidateRef',
-    'stageRunId',
+    'workRunId',
     'sessionBindingId',
     'type',
     'sourceRef',
@@ -880,7 +874,7 @@ test('WebSocket uses invalidation and reset names both canonical reload queries'
     'scopeKind',
     'productSessionId',
     'deliveryId',
-    'stageRunId',
+    'workRunId',
     'projectionRevision',
     'lastProjectionSequence',
     'reloadQueries',
@@ -933,7 +927,7 @@ test('ExecutionPort binds one CodexThread before accepting runtime events', () =
       'productSessionId',
       'workerSessionId',
       'codexThreadId',
-      'stageRunId',
+      'workRunId',
       'executionJobId',
       'attempt',
       'workerId',
@@ -973,6 +967,11 @@ test('canonical schemas carry generated-client route and event metadata', () => 
         query: 'runtime.projection.get',
         requestDefinition: 'RuntimeProjectionGetQuery',
         resultDefinition: 'RuntimeProjectionSnapshot',
+      },
+      {
+        query: 'workrun.get',
+        requestDefinition: 'WorkRunGetQuery',
+        resultDefinition: 'WorkRunAggregateProjection',
       },
     ],
     authentication: {

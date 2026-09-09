@@ -5,16 +5,11 @@
 use sha2::{Digest, Sha256};
 use winwincode_api::generated::{
     Actor, CommandEnvelope, CommandName, ControlPlaneWebSocketDeliveryChangedEvent,
-    DeliveryAdvancePayload, DeliveryCreatePayload, DeliveryResolveAttentionPayload,
-    DeliverySpecInput, DeliveryUpdateSpecPayload, Scope,
+    DeliveryCreatePayload, DeliveryResolveAttentionPayload, DeliverySpecInput,
+    DeliveryUpdateSpecPayload, Scope,
 };
 use winwincode_delivery::{
-    application::{
-        CoordinationError, CoordinationErrorCode,
-        attention::ResolvedAttentionTransition,
-        stage::{StageAdvanceEffect, StageAdvanceResult},
-        task::validate_create_tasks_empty,
-    },
+    application::{attention::ResolvedAttentionTransition, task::validate_create_tasks_empty},
     domain::{
         AcceptanceCriterion, AcceptanceCriterionId, AttentionItemStatus, DELIVERY_SCHEMA_VERSION,
         Delivery, DeliveryPublicationTarget, DeliverySnapshot, DeliverySourceRef, DeliverySpec,
@@ -24,11 +19,13 @@ use winwincode_delivery::{
         AppendDelivery, CreateDelivery, DeliveryCommand, DeliveryCommandPort,
         DeliveryMutationOperation, DeliveryQuery, DeliveryQueryPort, DeliveryStore,
         DeliveryStoreError, DeliveryStoreErrorCode, DeliveryStoreMutationResult,
-        ResolveDeliveryAttention, StartDeliveryStage,
+        ResolveDeliveryAttention,
     },
 };
 use winwincode_domain::RepositoryScope;
-use winwincode_domain::{DeliveryId, Sha256Digest};
+use winwincode_domain::{
+    Criterion, CriterionId, DeliveryId, Sha256Digest, WorkContract, WorkContractId,
+};
 use winwincode_storage::{
     CommitReceipt, ProductStateStorage, ReceiptIdentity, StateRevisionGuard, StorageError,
 };
@@ -41,31 +38,6 @@ use crate::{
 };
 
 const CROCKFORD_BASE32: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
-
-#[derive(Clone, Copy, Default)]
-struct DeliveryCommitGuards<'authority> {
-    source_session: Option<&'authority StateRevisionGuard>,
-    terminal_handoff:
-        Option<&'authority crate::terminal_outcome_transaction::DeliveryTerminalHandoff>,
-}
-
-impl<'authority> DeliveryCommitGuards<'authority> {
-    const fn source_session(guard: Option<&'authority StateRevisionGuard>) -> Self {
-        Self {
-            source_session: guard,
-            terminal_handoff: None,
-        }
-    }
-
-    const fn terminal_handoff(
-        handoff: Option<&'authority crate::terminal_outcome_transaction::DeliveryTerminalHandoff>,
-    ) -> Self {
-        Self {
-            source_session: None,
-            terminal_handoff: handoff,
-        }
-    }
-}
 
 /// Opaque product-owned semantic facts omitted from the public Spec command.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -118,7 +90,6 @@ pub struct DeliveryCommandFacts {
 #[derive(Clone, Debug, PartialEq)]
 enum DeliveryCommandAuthority {
     Specification(Box<DeliverySpecFacts>),
-    HumanAdvance(Box<StageAdvanceResult>),
     ResolveAttention(Box<ResolvedAttentionTransition>),
 }
 
@@ -134,22 +105,6 @@ impl DeliveryCommandFacts {
             facts.repository.clone(),
             facts.source_ref.clone(),
             DeliveryCommandAuthority::Specification(Box::new(facts)),
-        )
-    }
-
-    pub(crate) fn advance_from_trusted_adapter(
-        command: &CommandEnvelope,
-        repository_scope: RepositoryScope,
-        repository: RepositoryRef,
-        source_ref: Option<DeliverySourceRef>,
-        transition: StageAdvanceResult,
-    ) -> Result<Self, StorageError> {
-        Self::from_trusted_adapter(
-            command,
-            repository_scope,
-            repository,
-            source_ref,
-            DeliveryCommandAuthority::HumanAdvance(Box::new(transition)),
         )
     }
 
@@ -218,15 +173,6 @@ impl DeliveryCommandFacts {
         Ok(facts)
     }
 
-    fn human_advance(&self) -> Result<&StageAdvanceResult, StorageError> {
-        let DeliveryCommandAuthority::HumanAdvance(transition) = &self.authority else {
-            return Err(StorageError::invalid_input(
-                "Delivery command facts do not contain a sealed human stage transition",
-            ));
-        };
-        Ok(transition)
-    }
-
     fn attention_resolution(&self) -> Result<&ResolvedAttentionTransition, StorageError> {
         let DeliveryCommandAuthority::ResolveAttention(transition) = &self.authority else {
             return Err(StorageError::invalid_input(
@@ -241,13 +187,11 @@ pub(crate) fn execute(
     storage: &mut dyn ProductStateStorage,
     command: &CommandEnvelope,
     facts: &DeliveryCommandFacts,
-    handoff: Option<&crate::terminal_outcome_transaction::DeliveryTerminalHandoff>,
 ) -> Result<CommitReceipt, DeliveryCommandCommitError> {
     if !matches!(
         command.command,
         CommandName::DeliveryCreate
             | CommandName::DeliveryUpdateSpec
-            | CommandName::DeliveryAdvance
             | CommandName::DeliveryResolveAttention
     ) {
         return Err(StorageError::invalid_input(
@@ -267,12 +211,6 @@ pub(crate) fn execute(
         return Ok(receipt);
     }
     facts.validate_for(scope, &command_digest)?;
-    if command.command != CommandName::DeliveryAdvance && handoff.is_some() {
-        return Err(StorageError::invalid_input(
-            "terminal handoff can only be consumed by delivery.advance",
-        )
-        .into());
-    }
     let parsed = parse_command(command)?;
 
     match parsed {
@@ -288,9 +226,6 @@ pub(crate) fn execute(
         ParsedCommand::UpdateSpec(payload) => {
             update_spec(storage, command, scope, payload, &command_digest, facts)
         }
-        ParsedCommand::Advance(payload) => {
-            advance_human_stage(storage, command, &payload, &command_digest, facts, handoff)
-        }
         ParsedCommand::ResolveAttention(payload) => {
             resolve_business_attention(storage, command, &payload, &command_digest, facts)
         }
@@ -300,7 +235,6 @@ pub(crate) fn execute(
 enum ParsedCommand {
     Create(DeliveryCreatePayload),
     UpdateSpec(DeliveryUpdateSpecPayload),
-    Advance(DeliveryAdvancePayload),
     ResolveAttention(DeliveryResolveAttentionPayload),
 }
 
@@ -317,11 +251,6 @@ fn parse_command(command: &CommandEnvelope) -> Result<ParsedCommand, StorageErro
             command,
             "delivery.update_spec",
         )?)),
-        CommandName::DeliveryAdvance => Ok(ParsedCommand::Advance(strict_payload::<
-            DeliveryAdvancePayload,
-        >(
-            command, "delivery.advance"
-        )?)),
         CommandName::DeliveryResolveAttention => {
             Ok(ParsedCommand::ResolveAttention(strict_payload::<
                 DeliveryResolveAttentionPayload,
@@ -336,6 +265,10 @@ fn parse_command(command: &CommandEnvelope) -> Result<ParsedCommand, StorageErro
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "Keep receipt, journal and publication validation in one atomic creation path"
+)]
 fn create(
     storage: &mut dyn ProductStateStorage,
     command: &CommandEnvelope,
@@ -372,18 +305,20 @@ fn create(
     )? {
         return Ok(receipt);
     }
+    let spec = map_spec(
+        &payload.delivery_id,
+        1,
+        payload.spec,
+        spec_facts,
+        command_digest,
+    )?;
+    let contract = work_contract_from_spec(&spec)?;
     let snapshot = DeliverySnapshot {
         schema_version: DELIVERY_SCHEMA_VERSION,
         id: payload.delivery_id.clone(),
         revision: 1,
         status: DeliveryStatus::Draft,
-        spec: map_spec(
-            &payload.delivery_id,
-            1,
-            payload.spec,
-            spec_facts,
-            command_digest,
-        )?,
+        spec,
         tasks: Vec::new(),
         stage_runs: Vec::new(),
         session_bindings: Vec::new(),
@@ -392,6 +327,12 @@ fn create(
         verdict: None,
         created_at_millis: spec_facts.now_millis,
         updated_at_millis: spec_facts.now_millis,
+        work_run_aggregate: winwincode_delivery::application::workrun::WorkRunAggregate {
+            schema_version: winwincode_domain::SchemaVersion::WinwincodeV1,
+            contract,
+            items: Vec::new(),
+            runs: Vec::new(),
+        },
     };
     let delivery = Delivery::try_from_snapshot(snapshot).map_err(storage_error)?;
     let request_digest = raw_digest(command_digest)?;
@@ -424,7 +365,7 @@ fn create(
         journal,
         &mutation,
         DeliveryChangeKind::Created,
-        DeliveryCommitGuards::source_session(spec_facts.source_session_guard.as_ref()),
+        spec_facts.source_session_guard.as_ref(),
     ) {
         Ok(receipt) => Ok(receipt),
         Err(error)
@@ -569,77 +510,7 @@ fn update_spec(
         journal,
         &mutation,
         DeliveryChangeKind::Advanced,
-        DeliveryCommitGuards::source_session(spec_facts.source_session_guard.as_ref()),
-    )?)
-}
-
-fn advance_human_stage(
-    storage: &mut dyn ProductStateStorage,
-    command: &CommandEnvelope,
-    payload: &DeliveryAdvancePayload,
-    command_digest: &Sha256Digest,
-    facts: &DeliveryCommandFacts,
-    handoff: Option<&crate::terminal_outcome_transaction::DeliveryTerminalHandoff>,
-) -> Result<CommitReceipt, DeliveryCommandCommitError> {
-    let expected_revision = expected_revision(command)?;
-    let (journal, current) = load_current(storage, &payload.delivery_id, command)?;
-    if current.revision() != expected_revision {
-        return Err(StorageError::revision_conflict(expected_revision, current.revision()).into());
-    }
-    let transition = facts.human_advance()?;
-    transition
-        .validate_projection()
-        .map_err(|error| coordination_error(&error, expected_revision, current.revision()))?;
-    let StageAdvanceEffect::Review(attention_item_id) = &transition.effect else {
-        return Err(StorageError::invalid_input(
-            "delivery.advance selected a Codex effect that requires the typed execution transaction",
-        )
-        .into());
-    };
-    let result = &transition.delivery;
-    validate_repository_scope(&current, &facts.repository, facts.source_ref.as_ref())?;
-    let attention = result
-        .snapshot()
-        .attention_items
-        .iter()
-        .find(|item| item.id == *attention_item_id)
-        .ok_or_else(|| {
-            StorageError::invalid_input(
-                "sealed human stage transition has no exact review Attention",
-            )
-        })?;
-    if result.id() != current.id()
-        || result.revision() != expected_revision.saturating_add(1)
-        || result.snapshot().spec.repository != facts.repository
-        || result.snapshot().spec.source_ref != facts.source_ref
-        || current
-            .snapshot()
-            .attention_items
-            .iter()
-            .any(|item| item.id == *attention_item_id)
-        || attention.assigned_to.as_deref() != Some(actor_id(&command.actor).as_str())
-    {
-        return Err(StorageError::invalid_input(
-            "sealed human stage transition does not match command actor, Delivery, or revision",
-        )
-        .into());
-    }
-    let mutation = DeliveryStore::borrowed(&journal)
-        .execute(DeliveryCommand::StartStage(Box::new(StartDeliveryStage {
-            request_id: command.request_id.clone(),
-            request_digest: raw_digest(command_digest)?,
-            expected_revision,
-            transition: transition.clone(),
-        })))
-        .map_err(|error| delivery_store_error(&error, &command.request_id))?;
-    Ok(commit_mutation(
-        storage,
-        command,
-        &payload.delivery_id,
-        journal,
-        &mutation,
-        DeliveryChangeKind::Advanced,
-        DeliveryCommitGuards::terminal_handoff(handoff),
+        spec_facts.source_session_guard.as_ref(),
     )?)
 }
 
@@ -671,9 +542,7 @@ fn resolve_business_attention(
                 "AttentionItem does not belong to the current scoped Delivery",
             )
         })?;
-    let stage_run_id = source_item.stage_run_id.clone().ok_or_else(|| {
-        StorageError::invalid_input("business Attention must reference its current StageRun")
-    })?;
+    let work_run_id = source_item.work_run_id.clone();
     let expected_status = match payload.decision.as_str() {
         "resolve" => AttentionItemStatus::Resolved,
         "dismiss" => AttentionItemStatus::Dismissed,
@@ -702,7 +571,7 @@ fn resolve_business_attention(
         || result.revision() != expected_revision.saturating_add(1)
         || result.snapshot().spec.repository != facts.repository
         || result.snapshot().spec.source_ref != facts.source_ref
-        || resolved.stage_run_id.as_ref() != Some(&stage_run_id)
+        || resolved.work_run_id != work_run_id
         || resolved.status != expected_status
         || resolved.resolution.as_deref() != Some(payload.resolution.as_str())
         || resolved.resolved_by.as_deref() != Some(actor.as_str())
@@ -731,7 +600,7 @@ fn resolve_business_attention(
         journal,
         &mutation,
         DeliveryChangeKind::Advanced,
-        DeliveryCommitGuards::default(),
+        None,
     )?)
 }
 
@@ -761,18 +630,6 @@ fn actor_id(actor: &Actor) -> String {
     }
 }
 
-fn coordination_error(
-    error: &CoordinationError,
-    expected_revision: u64,
-    current_revision: u64,
-) -> StorageError {
-    if error.code() == CoordinationErrorCode::RevisionConflict {
-        StorageError::revision_conflict(expected_revision, current_revision)
-    } else {
-        StorageError::invalid_input(error.to_string())
-    }
-}
-
 fn commit_mutation(
     storage: &mut dyn ProductStateStorage,
     command: &CommandEnvelope,
@@ -780,7 +637,7 @@ fn commit_mutation(
     journal: StagedDeliveryJournal,
     mutation: &DeliveryStoreMutationResult,
     change_kind: DeliveryChangeKind,
-    guards: DeliveryCommitGuards<'_>,
+    source_session_guard: Option<&StateRevisionGuard>,
 ) -> Result<CommitReceipt, StorageError> {
     let (receipt_identity, _) = command_receipt(command)?;
     if mutation.replayed {
@@ -811,7 +668,7 @@ fn commit_mutation(
             StorageError::invalid_input("new Delivery mutation did not stage a journal record")
         })?;
     commit = commit.with_journal_publication(publication);
-    if let Some(state_guard) = guards.source_session {
+    if let Some(state_guard) = source_session_guard {
         commit = commit.with_state_guard(state_guard.clone());
     }
     if change_kind == DeliveryChangeKind::Created {
@@ -824,9 +681,6 @@ fn commit_mutation(
             crate::delivery_application::delivery_catalog_mutation(scope, delivery_id)?,
         );
     }
-    if let Some(handoff) = guards.terminal_handoff {
-        commit = commit.with_state_mutation(handoff.consumption());
-    }
     let receipt = storage.commit(&commit)?;
     validate_receipt(
         &receipt,
@@ -837,6 +691,34 @@ fn commit_mutation(
         receipt.idempotent_replay,
     )?;
     Ok(receipt)
+}
+
+fn work_contract_from_spec(spec: &DeliverySpec) -> Result<WorkContract, StorageError> {
+    Ok(WorkContract {
+        schema_version: winwincode_domain::SchemaVersion::WinwincodeV1,
+        id: WorkContractId(spec.delivery_id.0.replacen("dlv_", "wct_", 1)),
+        revision: winwincode_domain::Revision(
+            i64::try_from(spec.revision).map_err(|_| {
+                StorageError::invalid_input("WorkContract revision exceeds its range")
+            })?,
+        ),
+        created_at: crate::instant_from_millis(spec.created_at_millis)?,
+        objective: spec.goal.clone(),
+        scope: spec.scope.clone(),
+        protected_scope: spec.out_of_scope.clone(),
+        constraints: spec.constraints.clone(),
+        required_human_authority: "none".to_owned(),
+        criteria: spec
+            .acceptance_criteria
+            .iter()
+            .map(|criterion| Criterion {
+                id: CriterionId(criterion.id.0.clone()),
+                description: criterion.description.clone(),
+                required: criterion.required,
+                verification_method: criterion.verification_method.clone(),
+            })
+            .collect(),
+    })
 }
 
 fn map_spec(
@@ -874,9 +756,20 @@ fn map_spec(
                     "trusted Spec facts must match acceptance criterion IDs in exact order",
                 ));
             }
+            // Normalize external labels once, before persisting either the Spec or
+            // WorkContract. Both must name the same criterion during verdict intake.
+            let id = if winwincode_domain::is_canonical_prefixed_id(&criterion.id, "crt_") {
+                criterion.id
+            } else {
+                let digest = Sha256Digest(format!(
+                    "sha256:{:x}",
+                    Sha256::digest(format!("{}:{}", delivery_id.0, criterion.id))
+                ));
+                derived_portable_id("crt", 1, &digest).replacen('-', "_", 1)
+            };
             Ok(AcceptanceCriterion {
                 schema_version: DELIVERY_SCHEMA_VERSION,
-                id: AcceptanceCriterionId::new(criterion.id).map_err(storage_error)?,
+                id: AcceptanceCriterionId::new(id).map_err(storage_error)?,
                 description: criterion.title,
                 verification_method: Some(verification_method.clone()),
                 required: criterion.required,
@@ -990,9 +883,9 @@ fn validate_replayed_receipt(
 ) -> Result<(), StorageError> {
     let expected_change_kind = match command.command {
         CommandName::DeliveryCreate => DeliveryChangeKind::Created,
-        CommandName::DeliveryUpdateSpec
-        | CommandName::DeliveryAdvance
-        | CommandName::DeliveryResolveAttention => DeliveryChangeKind::Advanced,
+        CommandName::DeliveryUpdateSpec | CommandName::DeliveryResolveAttention => {
+            DeliveryChangeKind::Advanced
+        }
         _ => {
             return Err(StorageError::invalid_input(
                 "base Delivery transaction does not own this Delivery command",

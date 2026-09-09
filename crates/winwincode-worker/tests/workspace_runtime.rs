@@ -6,23 +6,23 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
 use winwincode_domain::{
-    ArtifactId, CodexThreadId, DeliveryId, DeliveryTaskId, ExecutionAckSequence, ExecutionJobId,
+    ArtifactId, CodexThreadId, CriterionId, ExecutionAckSequence, ExecutionJobId,
     ExecutionMessageId, ExecutionSequence, FencingToken, Instant, LeaseId, ProductSessionId,
-    RepositoryId, RequestId, SchemaVersion, SessionIdentity, Sha256Digest, StageRunId, WorkerId,
-    WorkerInstanceId, WorkerSessionId, WorkspaceRevision,
+    RepositoryId, RequestId, Revision, SchemaVersion, SessionIdentity, Sha256Digest, WorkContract,
+    WorkContractId, WorkItem, WorkItemId, WorkItemState, WorkRunId, WorkerId, WorkerInstanceId,
+    WorkerSessionId, WorkspaceRevision,
 };
 use winwincode_execution_port::{
     change_batch_identity::derive_change_batch_id,
     generated::{
         AppliedFileOperation, AppliedFileSummary, ArtifactReference, ChangeBatchIdentity,
         ChangeBatchProgressEvent, ChangeBatchProgressState, ChangeBatchProposal,
-        ChangeBatchProposalDisposition, ChangeBatchProposalEvent,
-        DeliveryStageAcceptanceCriterionInput, DeliveryStageExecutionScope,
-        DeliveryStageExecutionScopeKind, DeliveryStageInput, DeliveryStageTaskInput,
-        EncodedPayload, ExecutionJob, ExecutionJobReplacementAuthority, ExecutionLeaseStamp,
-        ExecutionLimits, ExecutionOutcomeUsage, ExecutionScope, ExecutionWorkspace,
-        ExecutionWorkspaceWriteMode, ModelChunkMessage, ModelChunkMessageKind, ModelGatewayRoute,
-        ModelOpenMessage, ObservationReceipt, ObservationSource, ValidationProfileName,
+        ChangeBatchProposalDisposition, ChangeBatchProposalEvent, EncodedPayload, ExecutionJob,
+        ExecutionJobReplacementAuthority, ExecutionLeaseStamp, ExecutionLimits,
+        ExecutionOutcomeUsage, ExecutionScope, ExecutionWorkspace, ExecutionWorkspaceWriteMode,
+        ModelChunkMessage, ModelChunkMessageKind, ModelGatewayRoute, ModelOpenMessage,
+        ObservationReceipt, ObservationSource, ValidationProfileName, WorkRunExecutionScope,
+        WorkRunExecutionScopeKind, WorkRunInput,
     },
     observation_contract::{derive_observation_output_digest, parse_observation_response_strict},
 };
@@ -329,7 +329,8 @@ fn git_output(repository: &std::path::Path, args: &[&str]) -> String {
 fn active_job() -> ActiveJob {
     let worker_session_id = WorkerSessionId("wsn_00000000000000000000000001".to_owned());
     let codex_thread_id = CodexThreadId("cdx_00000000000000000000000001".to_owned());
-    let task_id = DeliveryTaskId("dtk_00000000000000000000000001".to_owned());
+    let product_session_id = ProductSessionId("psn_00000000000000000000000001".to_owned());
+    let work_run_id = WorkRunId("wrn_01J00000000000000000000001".to_owned());
     ActiveJob {
         job: ExecutionJob {
             attempt: 1,
@@ -342,36 +343,51 @@ fn active_job() -> ActiveJob {
                 max_runtime_seconds: 300,
             },
             payload_digest: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
-            scope: ExecutionScope::DeliveryStageExecutionScope(DeliveryStageExecutionScope {
-                delivery_id: DeliveryId("dlv_00000000000000000000000001".to_owned()),
-                delivery_task_id: Some(task_id.clone()),
-                kind: DeliveryStageExecutionScopeKind::DeliveryStage,
+            scope: ExecutionScope::WorkRunExecutionScope(WorkRunExecutionScope {
+                attempt: 1,
+                kind: WorkRunExecutionScopeKind::WorkRun,
                 product_session_id: ProductSessionId("psn_00000000000000000000000001".to_owned()),
                 rework_authorization: None,
-                stage_run_id: StageRunId("run_00000000000000000000000001".to_owned()),
+                work_contract_id: WorkContractId("wct_00000000000000000000000001".to_owned()),
+                work_contract_revision: Revision(1),
+                work_item_id: WorkItemId("wit_00000000000000000000000001".to_owned()),
+                work_item_revision: Revision(1),
+                work_run_id: WorkRunId("wrn_01J00000000000000000000001".to_owned()),
             }),
-            stage_input: Some(DeliveryStageInput {
-                acceptance_criteria: vec![DeliveryStageAcceptanceCriterionInput {
-                    criterion_id: "criterion-fixture".to_owned(),
-                    description: "The fixture change is present.".to_owned(),
-                    required: true,
-                    verification_method: Some("Inspect fixture.txt".to_owned()),
-                }],
+            work_input: Some(WorkRunInput {
+                delivery_spec_id: "spec-fixture".into(),
+                delivery_spec_revision: Revision(2),
                 candidate_ref: None,
-                constraints: vec!["Keep repository isolation.".to_owned()],
-                delivery_spec_id: "spec-fixture".to_owned(),
-                delivery_spec_revision: 1,
-                goal: "Implement fixture".to_owned(),
-                out_of_scope: Vec::new(),
                 schema_version: SchemaVersion::WinwincodeV1,
-                scope: vec!["fixture.txt".to_owned()],
-                task: Some(DeliveryStageTaskInput {
-                    acceptance_criterion_ids: vec!["criterion-fixture".to_owned()],
+                work_contract: WorkContract {
+                    constraints: vec!["Keep repository isolation.".to_owned()],
+                    created_at: Instant("2026-08-28T00:00:00.000Z".to_owned()),
+                    criteria: vec![winwincode_domain::Criterion {
+                        id: CriterionId("crt_00000000000000000000000001".to_owned()),
+                        description: "The fixture change is present.".to_owned(),
+                        required: true,
+                        verification_method: Some("Inspect fixture.txt".to_owned()),
+                    }],
+                    id: WorkContractId("wct_00000000000000000000000001".to_owned()),
+                    objective: "Implement fixture".to_owned(),
+                    protected_scope: vec!["fixture.txt".to_owned()],
+                    required_human_authority: "approval".to_owned(),
+                    revision: Revision(1),
+                    schema_version: SchemaVersion::WinwincodeV1,
+                    scope: vec!["fixture.txt".to_owned()],
+                },
+                work_item: WorkItem {
+                    criterion_ids: vec![CriterionId("crt_00000000000000000000000001".to_owned())],
+                    depends_on: Vec::new(),
                     goal: "Implement fixture".to_owned(),
-                    task_id,
+                    id: WorkItemId("wit_00000000000000000000000001".to_owned()),
+                    revision: Revision(1),
+                    schema_version: SchemaVersion::WinwincodeV1,
+                    state: WorkItemState::Ready,
                     title: "Implement fixture".to_owned(),
-                }),
-                title: "Fixture delivery".to_owned(),
+                    work_contract_id: WorkContractId("wct_00000000000000000000000001".to_owned()),
+                    work_contract_revision: Revision(1),
+                },
             }),
             workspace: ExecutionWorkspace {
                 checkout_revision: "HEAD".to_owned(),
@@ -392,8 +408,8 @@ fn active_job() -> ActiveJob {
         worker_session_id: worker_session_id.clone(),
         session_identity: SessionIdentity {
             codex_thread_id: codex_thread_id.clone(),
-            product_session_id: ProductSessionId("psn_00000000000000000000000001".to_owned()),
-            stage_run_id: Some(StageRunId("run_00000000000000000000000001".to_owned())),
+            product_session_id,
+            work_run_id: Some(work_run_id),
             worker_session_id,
         },
         codex_thread_id,
@@ -490,6 +506,11 @@ fn batch_proposal_with_patch(
 fn replacement_successor(predecessor: &ActiveJob) -> ActiveJob {
     let mut successor = predecessor.clone();
     successor.job.attempt = 2;
+    let work_run_id = WorkRunId("wrn_01J00000000000000000000002".to_owned());
+    if let ExecutionScope::WorkRunExecutionScope(scope) = &mut successor.job.scope {
+        scope.attempt = 2;
+        scope.work_run_id = work_run_id.clone();
+    }
     successor.lease.attempt = 2;
     successor.lease.lease_id = LeaseId("lse_00000000000000000000000002".to_owned());
     successor.lease.fencing_token = FencingToken("2".to_owned());
@@ -501,12 +522,18 @@ fn replacement_successor(predecessor: &ActiveJob) -> ActiveJob {
     successor.codex_thread_id = CodexThreadId("cdx_00000000000000000000000002".to_owned());
     successor.session_identity.worker_session_id = successor.worker_session_id.clone();
     successor.session_identity.codex_thread_id = successor.codex_thread_id.clone();
+    successor.session_identity.work_run_id = Some(work_run_id);
     successor
 }
 
 fn second_replacement_successor(predecessor: &ActiveJob) -> ActiveJob {
     let mut successor = predecessor.clone();
     successor.job.attempt = 3;
+    let work_run_id = WorkRunId("wrn_01J00000000000000000000003".to_owned());
+    if let ExecutionScope::WorkRunExecutionScope(scope) = &mut successor.job.scope {
+        scope.attempt = 3;
+        scope.work_run_id = work_run_id.clone();
+    }
     successor.lease.attempt = 3;
     successor.lease.lease_id = LeaseId("lse_00000000000000000000000003".to_owned());
     successor.lease.fencing_token = FencingToken("3".to_owned());
@@ -518,6 +545,7 @@ fn second_replacement_successor(predecessor: &ActiveJob) -> ActiveJob {
     successor.codex_thread_id = CodexThreadId("cdx_00000000000000000000000003".to_owned());
     successor.session_identity.worker_session_id = successor.worker_session_id.clone();
     successor.session_identity.codex_thread_id = successor.codex_thread_id.clone();
+    successor.session_identity.work_run_id = Some(work_run_id);
     successor
 }
 
@@ -544,6 +572,12 @@ fn logical_job_digest(job: &ExecutionJob) -> Sha256Digest {
         .expect("ExecutionJob object")
         .remove("attempt")
         .expect("ExecutionJob attempt");
+    let scope = value
+        .get_mut("scope")
+        .and_then(serde_json::Value::as_object_mut)
+        .expect("ExecutionJob scope");
+    scope.remove("attempt");
+    scope.remove("workRunId");
     Sha256Digest(format!(
         "sha256:{:x}",
         Sha256::digest(serde_json::to_vec(&value).expect("logical Job bytes"))
@@ -765,13 +799,16 @@ fn replacement_rejects_missing_changed_or_foreign_predecessor_authority() {
         JobWorkspaceErrorCode::Workspace
     );
     let mut foreign = receipt;
-    foreign.scope = ExecutionScope::DeliveryStageExecutionScope(DeliveryStageExecutionScope {
-        delivery_id: DeliveryId("dlv_00000000000000000000000009".to_owned()),
-        delivery_task_id: None,
-        kind: DeliveryStageExecutionScopeKind::DeliveryStage,
+    foreign.scope = ExecutionScope::WorkRunExecutionScope(WorkRunExecutionScope {
+        attempt: 1,
+        kind: WorkRunExecutionScopeKind::WorkRun,
         product_session_id: ProductSessionId("psn_00000000000000000000000009".to_owned()),
         rework_authorization: None,
-        stage_run_id: StageRunId("run_00000000000000000000000009".to_owned()),
+        work_contract_id: WorkContractId("wct_00000000000000000000000009".to_owned()),
+        work_contract_revision: Revision(1),
+        work_item_id: WorkItemId("wit_00000000000000000000000009".to_owned()),
+        work_item_revision: Revision(1),
+        work_run_id: WorkRunId("wrn_00000000000000000000000009".to_owned()),
     });
     assert_eq!(
         missing

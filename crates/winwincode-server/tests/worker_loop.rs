@@ -591,7 +591,7 @@ const STUB_WORKER_BODY: &str = r#"config="$2"
 for field in clientNodeId clientInstanceId occupancyLeaseId occupancyFencingToken \
              repositoryBindingId workerSessionId workerId workerInstanceId \
              sourceDirectory dataDirectory serverOrigin workerCredentialPath \
-             productSessionId stageRunId; do
+             productSessionId; do
   grep -q "\"$field\"" "$config" || exit 9
 done
 trap 'exit 0' TERM
@@ -1139,7 +1139,7 @@ async fn the_real_daemon_runs_the_full_worker_loop_over_http() {
         json!(worker_data_one.join("worker-credential").to_str().unwrap())
     );
     assert_eq!(config["productSessionId"], json!(body["productSessionId"]));
-    assert_eq!(config["stageRunId"], json!(body["stageRunId"]));
+    assert_eq!(config["workRunId"], json!(body["workRunId"]));
 
     // The heartbeat running count follows the registry.
     drive_until(
@@ -1454,7 +1454,7 @@ async fn the_real_daemon_runs_the_full_worker_loop_over_http() {
                     .product_session_id
                     .clone()
                     .unwrap_or_default(),
-                stage_run_id: grant_one_replay.stage_run_id.clone().unwrap_or_default(),
+                work_run_id: grant_one_replay.work_run_id.as_ref().map(|id| id.0.clone()),
                 worker_session_id: grant_one_replay.worker_session_id.clone(),
                 worker_id: grant_one_replay.worker_id.clone(),
                 worker_instance_id: grant_one_replay.worker_instance_id.clone(),

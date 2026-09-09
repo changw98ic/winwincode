@@ -11,7 +11,7 @@
 //! use winwincode_delivery::domain::candidate::ValidatedGitSnapshotFact;
 //!
 //! let _caller_built_snapshot = ValidatedGitSnapshotFact {
-//!     stage_run_id: todo!(),
+//!     work_run_id: todo!(),
 //!     ..todo!()
 //! };
 //! ```
@@ -41,13 +41,12 @@ use crate::application::stage::{
 };
 
 use super::{
-    Delivery, DeliveryStage, DeliveryValidationError, DeliveryValidationErrorCode, RepositoryRef,
-    SessionBinding, SessionBindingId, StageRun, StageRunActorType, StageRunStatus, bounded_text,
-    validation_error,
+    Delivery, DeliveryValidationError, DeliveryValidationErrorCode, RepositoryRef, SessionBinding,
+    SessionBindingId, bounded_text, validation_error,
 };
 use winwincode_domain::{
     CodexThreadId, DeliveryId, DeliveryTaskId, ExecutionJobId, FencingToken, LeaseId,
-    ProductSessionId, Sha256Digest, StageRunId, WorkerId, WorkerInstanceId, WorkerSessionId,
+    ProductSessionId, Sha256Digest, WorkRunId, WorkerId, WorkerInstanceId, WorkerSessionId,
 };
 use winwincode_storage::{GitSourcePathState, ValidatedGitSourceArtifact};
 
@@ -97,7 +96,7 @@ pub struct CandidateHunkFact {
 /// candidate facts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValidatedGitSnapshotFact {
-    stage_run_id: StageRunId,
+    work_run_id: WorkRunId,
     session_binding_id: SessionBindingId,
     product_session_id: ProductSessionId,
     execution_job_id: ExecutionJobId,
@@ -124,8 +123,8 @@ pub struct ValidatedGitSnapshotFact {
 }
 
 impl ValidatedGitSnapshotFact {
-    pub(crate) fn stage_run_id(&self) -> &StageRunId {
-        &self.stage_run_id
+    pub(crate) fn work_run_id(&self) -> &WorkRunId {
+        &self.work_run_id
     }
 
     pub(crate) fn session_binding_id(&self) -> &SessionBindingId {
@@ -217,7 +216,7 @@ impl ValidatedGitSnapshotFact {
     }
 
     pub(crate) fn has_same_terminal_workspace(&self, other: &Self) -> bool {
-        self.stage_run_id == other.stage_run_id
+        self.work_run_id == other.work_run_id
             && self.session_binding_id == other.session_binding_id
             && self.product_session_id == other.product_session_id
             && self.execution_job_id == other.execution_job_id
@@ -263,9 +262,7 @@ pub struct FrozenDeliveryCandidate {
     repository: RepositoryRef,
     base_revision: String,
     producer_delivery_task_id: Option<DeliveryTaskId>,
-    producer_stage_run_id: StageRunId,
-    producer_stage: DeliveryStage,
-    producer_role: String,
+    producer_work_run_id: WorkRunId,
     producer_attempt: u64,
     producer_session_binding_id: SessionBindingId,
     producer_product_session_id: ProductSessionId,
@@ -327,18 +324,8 @@ impl FrozenDeliveryCandidate {
     }
 
     #[must_use]
-    pub fn producer_stage_run_id(&self) -> &StageRunId {
-        &self.producer_stage_run_id
-    }
-
-    #[must_use]
-    pub const fn producer_stage(&self) -> DeliveryStage {
-        self.producer_stage
-    }
-
-    #[must_use]
-    pub fn producer_role(&self) -> &str {
-        &self.producer_role
+    pub fn producer_work_run_id(&self) -> &WorkRunId {
+        &self.producer_work_run_id
     }
 
     #[must_use]
@@ -449,7 +436,7 @@ impl FrozenDeliveryCandidate {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct GitSnapshotSealIdentity<'fact> {
-    stage_run_id: &'fact StageRunId,
+    work_run_id: &'fact WorkRunId,
     session_binding_id: &'fact SessionBindingId,
     product_session_id: &'fact ProductSessionId,
     execution_job_id: &'fact ExecutionJobId,
@@ -483,9 +470,7 @@ struct CandidateIdentity<'candidate> {
     repository: &'candidate RepositoryRef,
     base_revision: &'candidate str,
     producer_delivery_task_id: Option<&'candidate DeliveryTaskId>,
-    producer_stage_run_id: &'candidate StageRunId,
-    producer_stage: DeliveryStage,
-    producer_role: &'candidate str,
+    producer_work_run_id: &'candidate WorkRunId,
     producer_attempt: u64,
     producer_session_binding_id: &'candidate SessionBindingId,
     producer_product_session_id: &'candidate ProductSessionId,
@@ -525,7 +510,7 @@ pub fn freeze_delivery_candidate(
     delivery: &Delivery,
     facts: &FreezeCandidateFacts,
 ) -> Result<FrozenDeliveryCandidate, DeliveryValidationError> {
-    freeze_candidate_for_stage(delivery, facts, DeliveryStage::Executing)
+    freeze_candidate_for_stage(delivery, facts, "executor")
 }
 
 /// Freezes a candidate only after the storage-owned source adapter rebuilt all
@@ -567,19 +552,24 @@ pub(super) fn validated_git_snapshot_from_source(
         ));
     }
     let terminal_outcome = terminal_facts
-        .verify_settled_success(delivery)
+        .verify_successful_report(delivery)
         .map_err(|error| stale_candidate(&error.to_string()))?;
     let producer = delivery
         .snapshot()
-        .stage_runs
+        .work_run_aggregate
+        .runs
         .iter()
-        .find(|run| run.id == *terminal_outcome.stage_run_id())
-        .ok_or_else(|| stale_candidate("candidate producer StageRun is missing"))?;
+        .find(|run| run.id == *terminal_outcome.work_run_id())
+        .ok_or_else(|| stale_candidate("candidate producer WorkRun is missing"))?;
     let bindings = delivery
         .snapshot()
         .session_bindings
         .iter()
-        .filter(|binding| binding.stage_run_id == producer.id)
+        .filter(|binding| {
+            binding.work_run_id == producer.id
+                && binding.execution_job_id == *terminal_outcome.execution_job_id()
+                && binding.attempt == u64::try_from(producer.attempt).unwrap_or(0)
+        })
         .collect::<Vec<_>>();
     let [binding] = bindings.as_slice() else {
         return Err(stale_candidate(
@@ -609,11 +599,12 @@ pub(super) fn validated_git_snapshot_from_source(
     let changed_paths = source_path_facts(source);
     let changed_hunks = source_hunk_facts(source);
     let mut git_snapshot = ValidatedGitSnapshotFact {
-        stage_run_id: producer.id.clone(),
+        work_run_id: terminal_outcome.work_run_id().clone(),
         session_binding_id: binding.id.clone(),
         product_session_id: binding.product_session_id.clone(),
         execution_job_id: binding.execution_job_id.clone(),
-        attempt: producer.attempt,
+        attempt: u64::try_from(producer.attempt)
+            .map_err(|_| invalid_candidate("candidate producer attempt is invalid"))?,
         lease_id: terminal_outcome.lease_id().clone(),
         fencing_token: terminal_outcome.fencing_token().clone(),
         worker_id: terminal_outcome.worker_id().clone(),
@@ -649,26 +640,24 @@ pub(super) fn validated_git_snapshot_from_candidate(
 ) -> Result<(ValidatedGitSnapshotFact, VerifiedTerminalOutcome), DeliveryValidationError> {
     assert_frozen_candidate_current(delivery, candidate)?;
     let terminal_outcome = terminal_facts
-        .verify_settled_success(delivery)
+        .verify_successful_report(delivery)
         .map_err(|error| stale_candidate(&error.to_string()))?;
     let verification_run = delivery
         .snapshot()
-        .stage_runs
+        .work_run_aggregate
+        .runs
         .iter()
-        .find(|run| run.id == *terminal_outcome.stage_run_id())
-        .ok_or_else(|| stale_candidate("verification StageRun is missing"))?;
-    if verification_run.stage != DeliveryStage::Verifying
-        || verification_run.actor_type != StageRunActorType::Codex
-    {
-        return Err(stale_candidate(
-            "read-only candidate snapshot requires a Codex verification StageRun",
-        ));
-    }
+        .find(|run| run.id == *terminal_outcome.work_run_id())
+        .ok_or_else(|| stale_candidate("verification WorkRun is missing"))?;
     let verification_binding = delivery
         .snapshot()
         .session_bindings
         .iter()
-        .find(|binding| binding.stage_run_id == verification_run.id)
+        .find(|binding| {
+            binding.work_run_id == verification_run.id
+                && binding.execution_job_id == *terminal_outcome.execution_job_id()
+                && binding.attempt == u64::try_from(verification_run.attempt).unwrap_or(0)
+        })
         .ok_or_else(|| stale_candidate("verification SessionBinding is missing"))?;
     let binding = exact_producer_binding(delivery, verification_run, &verification_binding.id)?;
     let codex_thread_id = terminal_outcome
@@ -678,11 +667,12 @@ pub(super) fn validated_git_snapshot_from_candidate(
     let last_event_sequence = u64::try_from(terminal_outcome.last_event_sequence().0)
         .map_err(|_| invalid_candidate("verification terminal event sequence is invalid"))?;
     let mut git_snapshot = ValidatedGitSnapshotFact {
-        stage_run_id: verification_run.id.clone(),
+        work_run_id: terminal_outcome.work_run_id().clone(),
         session_binding_id: binding.id.clone(),
         product_session_id: binding.product_session_id.clone(),
         execution_job_id: binding.execution_job_id.clone(),
-        attempt: verification_run.attempt,
+        attempt: u64::try_from(verification_run.attempt)
+            .map_err(|_| invalid_candidate("verification attempt is invalid"))?,
         lease_id: terminal_outcome.lease_id().clone(),
         fencing_token: terminal_outcome.fencing_token().clone(),
         worker_id: terminal_outcome.worker_id().clone(),
@@ -743,28 +733,22 @@ pub(crate) fn freeze_authorized_rework_candidate(
     delivery: &Delivery,
     facts: &FreezeCandidateFacts,
 ) -> Result<FrozenDeliveryCandidate, DeliveryValidationError> {
-    freeze_candidate_for_stage(delivery, facts, DeliveryStage::Reworking)
+    freeze_candidate_for_stage(delivery, facts, "remediator")
 }
 
 fn freeze_candidate_for_stage(
     delivery: &Delivery,
     facts: &FreezeCandidateFacts,
-    required_stage: DeliveryStage,
+    expected_profile: &str,
 ) -> Result<FrozenDeliveryCandidate, DeliveryValidationError> {
     let snapshot = &facts.git_snapshot;
-    let producer = current_writer(delivery, &snapshot.stage_run_id)?;
-    if producer.stage != required_stage {
-        return Err(stale_candidate(match required_stage {
-            DeliveryStage::Executing => {
-                "generic candidate freeze accepts only an executor; remediator output requires authorization"
-            }
-            DeliveryStage::Reworking => {
-                "authorized replacement freeze requires one remediator producer"
-            }
-            _ => "candidate freeze received an unsupported writer stage",
-        }));
-    }
+    let producer = current_writer(delivery, &snapshot.work_run_id)?;
     let binding = exact_producer_binding(delivery, producer, &snapshot.session_binding_id)?;
+    if binding.execution_profile.as_deref() != Some(expected_profile) {
+        return Err(stale_candidate(
+            "candidate producer profile does not match its authorized writer role",
+        ));
+    }
 
     assert_validated_git_snapshot_fact(snapshot)?;
     validate_git_snapshot(delivery, snapshot)?;
@@ -779,11 +763,14 @@ fn freeze_candidate_for_stage(
         delivery_spec_revision: delivery.snapshot().spec.revision,
         repository: delivery.snapshot().spec.repository.clone(),
         base_revision: delivery.snapshot().spec.base_revision.clone(),
-        producer_delivery_task_id: producer.delivery_task_id.clone(),
-        producer_stage_run_id: producer.id.clone(),
-        producer_stage: producer.stage,
-        producer_role: producer.role.clone(),
-        producer_attempt: producer.attempt,
+        // WorkRun is the authoritative producer identity.  A DeliveryTask is
+        // carried only when the Delivery has one unambiguous task; it is not
+        // inferred from stage labels or binding names.
+        producer_delivery_task_id: (delivery.snapshot().tasks.len() == 1)
+            .then(|| delivery.snapshot().tasks[0].id.clone()),
+        producer_work_run_id: snapshot.work_run_id.clone(),
+        producer_attempt: u64::try_from(producer.attempt)
+            .map_err(|_| stale_candidate("candidate producer attempt is invalid"))?,
         producer_session_binding_id: binding.id.clone(),
         producer_product_session_id: binding.product_session_id.clone(),
         producer_execution_job_id: binding.execution_job_id.clone(),
@@ -835,20 +822,26 @@ pub(crate) fn assert_frozen_candidate_current(
             "candidate does not match the current DeliverySpec",
         ));
     }
-    let producer = current_writer(delivery, &candidate.producer_stage_run_id)
+    let producer = current_writer(delivery, &candidate.producer_work_run_id)
         .map_err(|_| stale_candidate("candidate producer is no longer current"))?;
     let binding =
         exact_producer_binding(delivery, producer, &candidate.producer_session_binding_id)
             .map_err(|_| stale_candidate("candidate producer binding is no longer current"))?;
-    let same_writer = candidate.producer_delivery_task_id == producer.delivery_task_id
-        && candidate.producer_stage == producer.stage
-        && candidate.producer_role == producer.role
-        && candidate.producer_attempt == producer.attempt
-        && candidate.producer_product_session_id == binding.product_session_id
+    let same_writer = candidate.producer_product_session_id == binding.product_session_id
         && candidate.producer_execution_job_id == binding.execution_job_id
         && binding.worker_session_id.as_ref() == Some(&candidate.producer_worker_session_id)
         && binding.codex_thread_id.as_ref() == Some(&candidate.producer_codex_thread_id)
-        && producer.finished_at_millis == Some(candidate.producer_finished_at_millis);
+        && binding.worker_id.as_ref() == Some(&candidate.producer_worker_id)
+        && binding.worker_instance_id.as_ref() == Some(&candidate.producer_worker_instance_id)
+        && binding.lease_id.as_ref() == Some(&candidate.producer_lease_id)
+        && binding.fencing_token.as_ref() == Some(&candidate.producer_fencing_token)
+        && producer.worker_id == candidate.producer_worker_id
+        && producer.worker_instance_id == candidate.producer_worker_instance_id
+        && producer.lease_id == candidate.producer_lease_id
+        && producer.fencing_token == candidate.producer_fencing_token.0
+        && producer.worker_session_id == candidate.producer_worker_session_id
+        && producer.codex_thread_id.as_ref() == Some(&candidate.producer_codex_thread_id)
+        && producer.attempt == i64::try_from(candidate.producer_attempt).unwrap_or(-1);
     if !same_writer {
         return Err(stale_candidate(
             "candidate writer or complete SessionBinding identity changed",
@@ -885,9 +878,7 @@ impl<'candidate> From<&'candidate FrozenDeliveryCandidate> for CandidateIdentity
             repository: &candidate.repository,
             base_revision: &candidate.base_revision,
             producer_delivery_task_id: candidate.producer_delivery_task_id.as_ref(),
-            producer_stage_run_id: &candidate.producer_stage_run_id,
-            producer_stage: candidate.producer_stage,
-            producer_role: &candidate.producer_role,
+            producer_work_run_id: &candidate.producer_work_run_id,
             producer_attempt: candidate.producer_attempt,
             producer_session_binding_id: &candidate.producer_session_binding_id,
             producer_product_session_id: &candidate.producer_product_session_id,
@@ -915,41 +906,48 @@ impl<'candidate> From<&'candidate FrozenDeliveryCandidate> for CandidateIdentity
 
 fn current_writer<'delivery>(
     delivery: &'delivery Delivery,
-    producer_id: &StageRunId,
-) -> Result<&'delivery StageRun, DeliveryValidationError> {
-    let runs = &delivery.snapshot().stage_runs;
+    producer_id: &WorkRunId,
+) -> Result<&'delivery winwincode_domain::WorkRun, DeliveryValidationError> {
+    let runs = &delivery.snapshot().work_run_aggregate.runs;
     let (producer_index, producer) = runs
         .iter()
         .enumerate()
         .find(|(_, run)| &run.id == producer_id)
-        .ok_or_else(|| stale_candidate("candidate producer StageRun is missing"))?;
-    let valid_role = matches!(
-        (producer.stage, producer.role.as_str()),
-        (DeliveryStage::Executing, "executor") | (DeliveryStage::Reworking, "remediator")
+        .ok_or_else(|| stale_candidate("candidate producer WorkRun is missing"))?;
+    let valid_state = matches!(
+        producer.state,
+        winwincode_domain::WorkRunState::Running
+            | winwincode_domain::WorkRunState::CandidateReady
+            | winwincode_domain::WorkRunState::Settled
     );
-    if producer.actor_type != StageRunActorType::Codex
-        || producer.status != StageRunStatus::Succeeded
-        || producer.delivery_task_id.is_none()
-        || !valid_role
-    {
+    if !valid_state || producer.attempt <= 0 {
         return Err(stale_candidate(
-            "candidate producer must be one task-scoped successful Codex executor or remediator",
+            "candidate producer WorkRun is not eligible for successful report verification",
         ));
     }
-    let later_writer = runs.iter().enumerate().any(|(index, run)| {
-        run.id != producer.id
+    // Aggregate append order determines writer succession. Attempts count retries
+    // within one execution job, not different writers of the same WorkItem.
+    let newer_writer = runs.iter().skip(producer_index + 1).any(|run| {
+        let writer_profile = delivery
+            .snapshot()
+            .session_bindings
+            .iter()
+            .find(|binding| binding.work_run_id == run.id)
+            .and_then(|binding| binding.execution_profile.as_deref());
+        run.work_item_id == producer.work_item_id
+            && run.id != producer.id
+            && matches!(writer_profile, Some("executor" | "remediator"))
             && matches!(
-                run.stage,
-                DeliveryStage::Executing | DeliveryStage::Reworking
+                run.state,
+                winwincode_domain::WorkRunState::Leased
+                    | winwincode_domain::WorkRunState::Running
+                    | winwincode_domain::WorkRunState::CandidateReady
+                    | winwincode_domain::WorkRunState::Settled
             )
-            && (index > producer_index
-                || run.started_at_millis > producer.started_at_millis
-                || (run.started_at_millis == producer.started_at_millis
-                    && run.attempt >= producer.attempt))
     });
-    if later_writer {
+    if newer_writer {
         return Err(stale_candidate(
-            "a later executor or remediator writer already started",
+            "candidate producer is superseded by a later WorkRun writer",
         ));
     }
     Ok(producer)
@@ -957,14 +955,14 @@ fn current_writer<'delivery>(
 
 fn exact_producer_binding<'delivery>(
     delivery: &'delivery Delivery,
-    producer: &StageRun,
+    producer: &winwincode_domain::WorkRun,
     binding_id: &SessionBindingId,
 ) -> Result<&'delivery SessionBinding, DeliveryValidationError> {
     let bindings = delivery
         .snapshot()
         .session_bindings
         .iter()
-        .filter(|binding| binding.stage_run_id == producer.id)
+        .filter(|binding| binding.work_run_id == producer.id)
         .collect::<Vec<_>>();
     if bindings.len() != 1 || &bindings[0].id != binding_id {
         return Err(stale_candidate(
@@ -973,14 +971,7 @@ fn exact_producer_binding<'delivery>(
     }
     let binding = bindings[0];
     let complete = binding.worker_session_id.is_some() && binding.codex_thread_id.is_some();
-    if binding.delivery_id != *delivery.id()
-        || binding.delivery_task_id != producer.delivery_task_id
-        || !complete
-        || binding.bound_at_millis < producer.started_at_millis
-        || producer
-            .finished_at_millis
-            .is_none_or(|finished| binding.bound_at_millis > finished)
-    {
+    if binding.delivery_id != *delivery.id() || !complete || binding.work_run_id != producer.id {
         return Err(stale_candidate(
             "candidate producer does not have one exact complete SessionBinding",
         ));
@@ -1097,7 +1088,7 @@ fn validate_git_snapshot_shape(
 }
 
 fn verify_terminal_snapshot_binding(
-    producer: &StageRun,
+    producer: &winwincode_domain::WorkRun,
     binding: &SessionBinding,
     outcome: &VerifiedTerminalOutcome,
     snapshot: &ValidatedGitSnapshotFact,
@@ -1108,9 +1099,9 @@ fn verify_terminal_snapshot_binding(
             && artifact.digest == snapshot.artifact_digest
     });
     let exact = outcome.status() == TerminalOutcomeStatus::Succeeded
-        && outcome.stage_run_id() == &producer.id
+        && outcome.work_run_id() == &producer.id
         && outcome.execution_job_id() == &binding.execution_job_id
-        && outcome.attempt() == producer.attempt
+        && outcome.attempt() == u64::try_from(producer.attempt).unwrap_or(0)
         && outcome.worker_session_id() == snapshot.worker_session_id()
         && outcome.lease_id() == snapshot.lease_id()
         && outcome.fencing_token() == snapshot.fencing_token()
@@ -1120,14 +1111,14 @@ fn verify_terminal_snapshot_binding(
         && Some(outcome.last_event_sequence().0) == last_event_sequence
         && outcome.finished_at_millis() == snapshot.finished_at_millis
         && exact_artifact
-        && snapshot.stage_run_id == producer.id
+        && snapshot.work_run_id == producer.id
         && snapshot.session_binding_id == binding.id
         && snapshot.product_session_id == binding.product_session_id
         && snapshot.execution_job_id == binding.execution_job_id
-        && snapshot.attempt == producer.attempt
+        && snapshot.attempt == u64::try_from(producer.attempt).unwrap_or(0)
         && binding.worker_session_id.as_ref() == Some(&snapshot.worker_session_id)
         && binding.codex_thread_id.as_ref() == Some(&snapshot.codex_thread_id)
-        && producer.finished_at_millis == Some(snapshot.finished_at_millis);
+        && producer.attempt == i64::try_from(snapshot.attempt).unwrap_or(-1);
     if exact {
         Ok(())
     } else {
@@ -1141,7 +1132,7 @@ fn seal_git_snapshot(
     snapshot: &ValidatedGitSnapshotFact,
 ) -> Result<[u8; 32], DeliveryValidationError> {
     let identity = GitSnapshotSealIdentity {
-        stage_run_id: &snapshot.stage_run_id,
+        work_run_id: &snapshot.work_run_id,
         session_binding_id: &snapshot.session_binding_id,
         product_session_id: &snapshot.product_session_id,
         execution_job_id: &snapshot.execution_job_id,
@@ -1243,6 +1234,7 @@ pub mod test_support {
         pub artifact_ref: String,
         pub artifact_digest: Sha256Digest,
         pub terminal_event_sequence: u64,
+        pub finished_at_millis: u64,
     }
 
     /// Freezes one executor candidate through the production candidate seam.
@@ -1254,13 +1246,13 @@ pub mod test_support {
     #[must_use]
     pub fn freeze_candidate_fixture(
         delivery: &Delivery,
-        producer_stage_run_id: &StageRunId,
+        producer_work_run_id: &WorkRunId,
         producer_session_binding_id: &SessionBindingId,
         input: CandidateFixtureInput,
     ) -> FrozenDeliveryCandidate {
         let snapshot = sealed_snapshot_from_input(
             delivery,
-            producer_stage_run_id,
+            producer_work_run_id,
             producer_session_binding_id,
             input,
         );
@@ -1268,75 +1260,25 @@ pub mod test_support {
             .expect("candidate fixture must match the current executor and sealed observations")
     }
 
-    /// Freezes the same high-level candidate fixture with canonical storage
-    /// provenance identities. This is used when an integration test must pass
-    /// the sealed candidate through the real Artifact catalog rather than only
-    /// through the Delivery domain.
-    ///
-    /// The caller still supplies only observable Git and Artifact values. The
-    /// lease, fence, Worker, and instance identities remain fixture-owned and
-    /// are deterministically derived from the current Delivery authority.
-    ///
-    /// # Panics
-    ///
-    /// Panics when the producer IDs are missing, foreign, stale, incomplete,
-    /// the observable Git/Artifact input is invalid, or the derived storage
-    /// provenance cannot be sealed through the production candidate seam.
-    #[must_use]
-    pub fn freeze_storage_candidate_fixture(
-        delivery: &Delivery,
-        producer_stage_run_id: &StageRunId,
-        producer_session_binding_id: &SessionBindingId,
-        input: CandidateFixtureInput,
-    ) -> FrozenDeliveryCandidate {
-        let mut snapshot = sealed_snapshot_from_input(
-            delivery,
-            producer_stage_run_id,
-            producer_session_binding_id,
-            input,
-        );
-        let identity = |prefix: &str, purpose: &str| {
-            let digest = Sha256::digest(
-                format!(
-                    "winwincode.storage-candidate-fixture.v1\0{purpose}\0{}\0{}\0{}",
-                    delivery.id().0,
-                    producer_stage_run_id.0,
-                    producer_session_binding_id.0,
-                )
-                .as_bytes(),
-            );
-            let suffix = format!("{digest:X}");
-            format!("{prefix}_{}", &suffix[..26])
-        };
-        snapshot.lease_id = LeaseId(identity("lse", "lease"));
-        snapshot.fencing_token = FencingToken("1".into());
-        snapshot.worker_id = WorkerId(identity("wrk", "worker"));
-        snapshot.worker_instance_id = WorkerInstanceId(identity("wki", "worker-instance"));
-        snapshot.validation_seal =
-            seal_git_snapshot(&snapshot).expect("storage candidate fixture snapshot seal");
-        freeze_delivery_candidate(delivery, &freeze_facts(delivery, snapshot)).expect(
-            "storage candidate fixture must match the current executor and sealed observations",
-        )
-    }
-
     pub(crate) fn sealed_snapshot_from_input(
         delivery: &Delivery,
-        stage_run_id: &StageRunId,
+        work_run_id: &WorkRunId,
         session_binding_id: &SessionBindingId,
         input: CandidateFixtureInput,
     ) -> ValidatedGitSnapshotFact {
-        let run = delivery
-            .snapshot()
-            .stage_runs
-            .iter()
-            .find(|run| &run.id == stage_run_id)
-            .expect("candidate fixture StageRun");
         let binding = delivery
             .snapshot()
             .session_bindings
             .iter()
             .find(|binding| &binding.id == session_binding_id)
             .expect("candidate fixture SessionBinding");
+        let work_run = delivery
+            .snapshot()
+            .work_run_aggregate
+            .runs
+            .iter()
+            .find(|work_run| work_run.id == binding.work_run_id)
+            .expect("candidate fixture WorkRun");
         let worker_session_id = binding
             .worker_session_id
             .clone()
@@ -1345,16 +1287,24 @@ pub mod test_support {
             .codex_thread_id
             .clone()
             .expect("candidate fixture CodexThread");
+        assert_eq!(
+            &work_run.id, work_run_id,
+            "candidate binding must identify the exact producer WorkRun"
+        );
         let mut fact = ValidatedGitSnapshotFact {
-            stage_run_id: run.id.clone(),
+            work_run_id: work_run.id.clone(),
             session_binding_id: binding.id.clone(),
             product_session_id: binding.product_session_id.clone(),
             execution_job_id: binding.execution_job_id.clone(),
-            attempt: run.attempt,
-            lease_id: LeaseId(format!("lease-fixture-{}", run.id.0)),
-            fencing_token: FencingToken("1".into()),
-            worker_id: WorkerId("worker-candidate-fixture".into()),
-            worker_instance_id: WorkerInstanceId("worker-instance-candidate-fixture".into()),
+            attempt: u64::try_from(work_run.attempt).expect("candidate fixture attempt"),
+            // These are copied from the canonical WorkRun accepted by the
+            // Delivery aggregate. A fixture must not mint a parallel lease
+            // or Worker identity that production candidate validation would
+            // correctly reject.
+            lease_id: work_run.lease_id.clone(),
+            fencing_token: FencingToken(work_run.fencing_token.clone()),
+            worker_id: work_run.worker_id.clone(),
+            worker_instance_id: work_run.worker_instance_id.clone(),
             worker_session_id,
             codex_thread_id,
             repository: delivery.snapshot().spec.repository.clone(),
@@ -1368,9 +1318,7 @@ pub mod test_support {
             artifact_ref: input.artifact_ref,
             artifact_digest: input.artifact_digest,
             last_event_sequence: input.terminal_event_sequence,
-            finished_at_millis: run
-                .finished_at_millis
-                .expect("candidate fixture terminal StageRun"),
+            finished_at_millis: input.finished_at_millis,
             validation_seal: [0; 32],
         };
         fact.validation_seal = seal_git_snapshot(&fact).expect("candidate fixture snapshot seal");
@@ -1379,11 +1327,11 @@ pub mod test_support {
 
     pub(crate) fn rework_facts_and_delta_from_input(
         delivery: &Delivery,
-        stage_run_id: &StageRunId,
+        work_run_id: &WorkRunId,
         session_binding_id: &SessionBindingId,
         input: CandidateFixtureInput,
     ) -> (FreezeCandidateFacts, ValidatedGitSnapshotFact) {
-        let delta = sealed_snapshot_from_input(delivery, stage_run_id, session_binding_id, input);
+        let delta = sealed_snapshot_from_input(delivery, work_run_id, session_binding_id, input);
         let mut candidate_snapshot = delta.clone();
         if git_object_id(&delivery.snapshot().spec.base_revision) {
             candidate_snapshot
@@ -1397,7 +1345,7 @@ pub mod test_support {
 
     pub(crate) fn validated_git_snapshot(
         delivery: &Delivery,
-        stage_run_id: &StageRunId,
+        finished_at_millis: u64,
         session_binding_id: &SessionBindingId,
         candidate_commit_id: &str,
         candidate_tree_id: &str,
@@ -1411,7 +1359,7 @@ pub mod test_support {
         };
         validated_git_snapshot_between(
             delivery,
-            stage_run_id,
+            finished_at_millis,
             session_binding_id,
             &base_commit_id,
             "1111111111111111111111111111111111111111",
@@ -1424,16 +1372,16 @@ pub mod test_support {
 
     /// Seals one role workspace observation by copying the complete Git
     /// identity from an already frozen candidate. Runtime ownership still
-    /// comes only from the role's canonical `StageRun` and `SessionBinding`.
+    /// comes only from the role's canonical `WorkRun` and `SessionBinding`.
     pub(crate) fn validated_candidate_checkout(
         delivery: &Delivery,
-        stage_run_id: &StageRunId,
+        finished_at_millis: u64,
         session_binding_id: &SessionBindingId,
         candidate: &FrozenDeliveryCandidate,
     ) -> ValidatedGitSnapshotFact {
         let mut fact = validated_git_snapshot_between(
             delivery,
-            stage_run_id,
+            finished_at_millis,
             session_binding_id,
             candidate.base_commit_id(),
             candidate.base_tree_id(),
@@ -1451,7 +1399,7 @@ pub mod test_support {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn validated_git_snapshot_between(
         delivery: &Delivery,
-        stage_run_id: &StageRunId,
+        finished_at_millis: u64,
         session_binding_id: &SessionBindingId,
         base_commit_id: &str,
         base_tree_id: &str,
@@ -1460,61 +1408,37 @@ pub mod test_support {
         diff_sha256: &str,
         changed_paths: Vec<CandidatePathFact>,
     ) -> ValidatedGitSnapshotFact {
-        let run = delivery
-            .snapshot()
-            .stage_runs
-            .iter()
-            .find(|run| &run.id == stage_run_id)
-            .expect("fixture StageRun");
         let binding = delivery
             .snapshot()
             .session_bindings
             .iter()
             .find(|binding| &binding.id == session_binding_id)
             .expect("fixture SessionBinding");
-        let worker_session_id = binding
-            .worker_session_id
-            .clone()
-            .expect("fixture WorkerSession");
-        let codex_thread_id = binding
-            .codex_thread_id
-            .clone()
-            .expect("fixture CodexThread");
-        let mut fact = ValidatedGitSnapshotFact {
-            stage_run_id: run.id.clone(),
-            session_binding_id: binding.id.clone(),
-            product_session_id: binding.product_session_id.clone(),
-            execution_job_id: binding.execution_job_id.clone(),
-            attempt: run.attempt,
-            lease_id: LeaseId(format!("lease-{}", run.id.0)),
-            fencing_token: FencingToken("1".into()),
-            worker_id: WorkerId("worker-candidate".into()),
-            worker_instance_id: WorkerInstanceId("worker-instance-candidate".into()),
-            worker_session_id,
-            codex_thread_id,
-            repository: delivery.snapshot().spec.repository.clone(),
-            base_commit_id: base_commit_id.into(),
-            base_tree_id: base_tree_id.into(),
-            candidate_commit_id: candidate_commit_id.into(),
-            candidate_tree_id: candidate_tree_id.into(),
-            diff_sha256: diff_sha256.into(),
-            changed_hunks: changed_paths
-                .iter()
-                .map(|path| CandidateHunkFact {
-                    file_path: path.path.clone(),
-                    hunk_sha256: "b".repeat(64),
-                    source_hunk_sha256: None,
-                })
-                .collect(),
-            changed_paths,
-            artifact_ref: format!("artifact:job:{}", binding.execution_job_id.0),
-            artifact_digest: Sha256Digest(format!("sha256:{}", "9".repeat(64))),
-            last_event_sequence: 12,
-            finished_at_millis: run.finished_at_millis.expect("fixture finished StageRun"),
-            validation_seal: [0; 32],
-        };
-        fact.validation_seal = seal_git_snapshot(&fact).expect("fixture Git snapshot seal");
-        fact
+        sealed_snapshot_from_input(
+            delivery,
+            &binding.work_run_id,
+            session_binding_id,
+            CandidateFixtureInput {
+                base_commit_id: base_commit_id.into(),
+                base_tree_id: base_tree_id.into(),
+                candidate_commit_id: candidate_commit_id.into(),
+                candidate_tree_id: candidate_tree_id.into(),
+                diff_sha256: diff_sha256.into(),
+                changed_hunks: changed_paths
+                    .iter()
+                    .map(|path| CandidateHunkFact {
+                        file_path: path.path.clone(),
+                        hunk_sha256: "b".repeat(64),
+                        source_hunk_sha256: None,
+                    })
+                    .collect(),
+                changed_paths,
+                artifact_ref: format!("artifact:job:{}", binding.execution_job_id.0),
+                artifact_digest: Sha256Digest(format!("sha256:{}", "9".repeat(64))),
+                terminal_event_sequence: 12,
+                finished_at_millis,
+            },
+        )
     }
 
     #[allow(dead_code)]
@@ -1543,12 +1467,21 @@ pub mod test_support {
         fact
     }
 
+    pub(crate) fn with_work_run(
+        mut fact: ValidatedGitSnapshotFact,
+        work_run_id: WorkRunId,
+    ) -> ValidatedGitSnapshotFact {
+        fact.work_run_id = work_run_id;
+        fact.validation_seal = seal_git_snapshot(&fact).expect("fixture WorkRun snapshot seal");
+        fact
+    }
+
     pub(crate) fn freeze_facts(
         delivery: &Delivery,
         snapshot: ValidatedGitSnapshotFact,
     ) -> FreezeCandidateFacts {
         let outcome = fixture_verified_terminal_outcome(
-            snapshot.stage_run_id.clone(),
+            snapshot.work_run_id.clone(),
             active_lease_identity(
                 snapshot.execution_job_id.clone(),
                 snapshot.attempt,
@@ -1581,12 +1514,12 @@ pub mod test_support {
 
     pub(crate) fn frozen_candidate(
         delivery: &Delivery,
-        stage_run_id: &StageRunId,
+        finished_at_millis: u64,
         session_binding_id: &SessionBindingId,
     ) -> FrozenDeliveryCandidate {
         let snapshot = validated_git_snapshot(
             delivery,
-            stage_run_id,
+            finished_at_millis,
             session_binding_id,
             "2222222222222222222222222222222222222222",
             "3333333333333333333333333333333333333333",
@@ -1605,11 +1538,17 @@ pub mod test_support {
 #[cfg(test)]
 mod tests {
     use super::test_support::{
-        CandidateFixtureInput, freeze_candidate_fixture, freeze_facts, validated_git_snapshot,
+        CandidateFixtureInput, freeze_candidate_fixture, freeze_facts, sealed_snapshot_from_input,
+        validated_git_snapshot,
     };
     use super::*;
-    use crate::domain::{DeliveryStatus, test_fixture};
-    use winwincode_domain::{CodexThreadId, ExecutionJobId, ProductSessionId, WorkerSessionId};
+    use crate::domain::DeliveryStage;
+    use crate::domain::{
+        DeliveryStatus, StageRun, StageRunActorType, StageRunStatus, test_fixture,
+    };
+    use winwincode_domain::{
+        CodexThreadId, ExecutionJobId, ProductSessionId, StageRunId, WorkerSessionId,
+    };
 
     fn writer_delivery() -> Delivery {
         let mut snapshot = test_fixture();
@@ -1625,19 +1564,21 @@ mod tests {
         run.finished_at_millis = Some(1_800_000_000_020);
         let binding = &mut snapshot.session_bindings[0];
         binding.id = SessionBindingId("binding-executor-1".into());
-        binding.stage_run_id = run.id.clone();
+        binding.work_run_id = binding.work_run_id.clone();
         binding.product_session_id = ProductSessionId("product-executor".into());
         binding.execution_job_id = ExecutionJobId("job-executor".into());
+        binding.execution_profile = Some("executor".into());
         binding.worker_session_id = Some(WorkerSessionId("worker-executor".into()));
         binding.codex_thread_id = Some(CodexThreadId("thread-executor".into()));
         binding.bound_at_millis = 1_800_000_000_011;
+        crate::domain::rebuild_test_work_runs_from_bindings(&mut snapshot);
         Delivery::try_from_snapshot(snapshot).expect("writer Delivery")
     }
 
     fn snapshot(delivery: &Delivery) -> ValidatedGitSnapshotFact {
         validated_git_snapshot(
             delivery,
-            &StageRunId("stage-executor-1".into()),
+            1_800_000_000_020,
             &SessionBindingId("binding-executor-1".into()),
             "2222222222222222222222222222222222222222",
             "3333333333333333333333333333333333333333",
@@ -1670,20 +1611,25 @@ mod tests {
             artifact_ref: "artifact:fixture:executor".into(),
             artifact_digest: Sha256Digest(format!("sha256:{}", "9".repeat(64))),
             terminal_event_sequence: 12,
+            finished_at_millis: 1_800_000_000_020,
         }
     }
 
     #[test]
     fn freeze_candidate_fixture_binds_current_producer_and_seals_observable_input() {
-        let delivery = writer_delivery();
+        let mut snapshot = writer_delivery().into_snapshot();
+        snapshot.stage_runs.clear();
+        let delivery =
+            Delivery::try_from_snapshot(snapshot).expect("WorkRun-only candidate fixture");
+        let producer = delivery.snapshot().session_bindings[0].work_run_id.clone();
         let candidate = freeze_candidate_fixture(
             &delivery,
-            &StageRunId("stage-executor-1".into()),
+            &producer,
             &SessionBindingId("binding-executor-1".into()),
             high_level_input(),
         );
 
-        assert_eq!(candidate.producer_stage_run_id().0, "stage-executor-1");
+        assert_eq!(candidate.producer_work_run_id(), &producer);
         assert_eq!(
             candidate.producer_session_binding_id().0,
             "binding-executor-1"
@@ -1700,9 +1646,10 @@ mod tests {
     #[test]
     fn frozen_candidate_identity_changes_with_exact_sealed_hunk() {
         let delivery = writer_delivery();
+        let producer = delivery.snapshot().session_bindings[0].work_run_id.clone();
         let first = freeze_candidate_fixture(
             &delivery,
-            &StageRunId("stage-executor-1".into()),
+            &producer,
             &SessionBindingId("binding-executor-1".into()),
             high_level_input(),
         );
@@ -1710,7 +1657,7 @@ mod tests {
         changed.changed_hunks[0].hunk_sha256 = "c".repeat(64);
         let second = freeze_candidate_fixture(
             &delivery,
-            &StageRunId("stage-executor-1".into()),
+            &producer,
             &SessionBindingId("binding-executor-1".into()),
             changed,
         );
@@ -1721,9 +1668,10 @@ mod tests {
     #[test]
     fn frozen_candidate_serialization_keeps_exact_hunks_internal() {
         let delivery = writer_delivery();
+        let producer = delivery.snapshot().session_bindings[0].work_run_id.clone();
         let candidate = freeze_candidate_fixture(
             &delivery,
-            &StageRunId("stage-executor-1".into()),
+            &producer,
             &SessionBindingId("binding-executor-1".into()),
             high_level_input(),
         );
@@ -1734,117 +1682,25 @@ mod tests {
     }
 
     #[test]
-    fn freeze_candidate_fixture_rejects_foreign_binding() {
+    fn candidate_rejects_invalid_artifact_and_zero_terminal_sequence() {
         let delivery = writer_delivery();
-        let mut foreign = delivery.clone().into_snapshot();
-        foreign.session_bindings.push(
-            SessionBinding {
-                schema_version: super::super::DELIVERY_SCHEMA_VERSION,
-                id: SessionBindingId("binding-foreign".into()),
-                delivery_id: foreign.id.clone(),
-                delivery_task_id: foreign.stage_runs[0].delivery_task_id.clone(),
-                stage_run_id: foreign.stage_runs[0].id.clone(),
-                product_session_id: ProductSessionId("product-foreign".into()),
-                execution_job_id: ExecutionJobId("job-foreign".into()),
-                worker_session_id: Some(WorkerSessionId("worker-foreign".into())),
-                codex_thread_id: Some(CodexThreadId("thread-foreign".into())),
-                bound_at_millis: 1_800_000_000_012,
-                ..Default::default()
+        let producer = &delivery.snapshot().work_run_aggregate.runs[0].id;
+        let binding = &delivery.snapshot().session_bindings[0].id;
+        let original = sealed_snapshot_from_input(&delivery, producer, binding, high_level_input());
+        let accepted = freeze_facts(&delivery, original).terminal_outcome;
+        for invalid_artifact in [true, false] {
+            let mut input = high_level_input();
+            if invalid_artifact {
+                input.artifact_digest = Sha256Digest("sha256:not-a-digest".into());
+            } else {
+                input.terminal_event_sequence = 0;
             }
-            .with_test_authority("binding-foreign", 1),
-        );
-        let foreign = Delivery::try_from_snapshot(foreign).expect("foreign fixture binding");
-
-        let rejected = std::panic::catch_unwind(|| {
-            freeze_candidate_fixture(
-                &foreign,
-                &StageRunId("stage-executor-1".into()),
-                &SessionBindingId("binding-foreign".into()),
-                high_level_input(),
-            )
-        });
-        assert!(rejected.is_err());
-    }
-
-    #[test]
-    fn freeze_candidate_fixture_rejects_stale_producer() {
-        let delivery = writer_delivery();
-        let mut stale = delivery.into_snapshot();
-        stale.stage_runs.push(StageRun {
-            schema_version: super::super::DELIVERY_SCHEMA_VERSION,
-            id: StageRunId("stage-executor-2".into()),
-            delivery_id: stale.id.clone(),
-            delivery_task_id: stale.stage_runs[0].delivery_task_id.clone(),
-            stage: DeliveryStage::Executing,
-            actor_type: StageRunActorType::Codex,
-            role: "executor".into(),
-            status: StageRunStatus::Succeeded,
-            attempt: 2,
-            started_at_millis: 1_800_000_000_030,
-            finished_at_millis: Some(1_800_000_000_040),
-        });
-        stale.session_bindings.push(
-            SessionBinding {
-                schema_version: super::super::DELIVERY_SCHEMA_VERSION,
-                id: SessionBindingId("binding-executor-2".into()),
-                delivery_id: stale.id.clone(),
-                delivery_task_id: stale.stage_runs[0].delivery_task_id.clone(),
-                stage_run_id: StageRunId("stage-executor-2".into()),
-                product_session_id: ProductSessionId("product-executor-2".into()),
-                execution_job_id: ExecutionJobId("job-executor-2".into()),
-                worker_session_id: Some(WorkerSessionId("worker-executor-2".into())),
-                codex_thread_id: Some(CodexThreadId("thread-executor-2".into())),
-                bound_at_millis: 1_800_000_000_031,
-                ..Default::default()
-            }
-            .with_test_authority("binding-executor-2", 2),
-        );
-        stale.updated_at_millis = 1_800_000_000_040;
-        let stale = Delivery::try_from_snapshot(stale).expect("newer writer fixture");
-
-        let rejected = std::panic::catch_unwind(|| {
-            freeze_candidate_fixture(
-                &stale,
-                &StageRunId("stage-executor-1".into()),
-                &SessionBindingId("binding-executor-1".into()),
-                high_level_input(),
-            )
-        });
-        assert!(rejected.is_err());
-    }
-
-    #[test]
-    fn freeze_candidate_fixture_rejects_invalid_artifact() {
-        let delivery = writer_delivery();
-        let mut input = high_level_input();
-        input.artifact_digest = Sha256Digest("sha256:not-a-digest".into());
-
-        let rejected = std::panic::catch_unwind(|| {
-            freeze_candidate_fixture(
-                &delivery,
-                &StageRunId("stage-executor-1".into()),
-                &SessionBindingId("binding-executor-1".into()),
-                input,
-            )
-        });
-        assert!(rejected.is_err());
-    }
-
-    #[test]
-    fn freeze_candidate_fixture_rejects_zero_terminal_sequence() {
-        let delivery = writer_delivery();
-        let mut input = high_level_input();
-        input.terminal_event_sequence = 0;
-
-        let rejected = std::panic::catch_unwind(|| {
-            freeze_candidate_fixture(
-                &delivery,
-                &StageRunId("stage-executor-1".into()),
-                &SessionBindingId("binding-executor-1".into()),
-                input,
-            )
-        });
-        assert!(rejected.is_err());
+            let facts = FreezeCandidateFacts {
+                git_snapshot: sealed_snapshot_from_input(&delivery, producer, binding, input),
+                terminal_outcome: accepted.clone(),
+            };
+            assert!(freeze_delivery_candidate(&delivery, &facts).is_err());
+        }
     }
 
     #[test]
@@ -1865,9 +1721,13 @@ mod tests {
 
         let mut rebound = delivery.clone().into_snapshot();
         rebound.session_bindings[0].product_session_id =
-            ProductSessionId("product-executor-rebound".into());
+            ProductSessionId("psn_01J00000000000000000000099".into());
         rebound.session_bindings[0].execution_job_id =
-            ExecutionJobId("job-executor-rebound".into());
+            ExecutionJobId("job_01J00000000000000000000099".into());
+        rebound.work_run_aggregate.runs[0].product_session_id =
+            Some(rebound.session_bindings[0].product_session_id.clone());
+        rebound.work_run_aggregate.runs[0].execution_job_id =
+            rebound.session_bindings[0].execution_job_id.clone();
         let rebound = Delivery::try_from_snapshot(rebound).expect("rebound writer");
         let rebound_candidate =
             freeze_delivery_candidate(&rebound, &freeze_facts(&rebound, snapshot(&rebound)))
@@ -1938,28 +1798,38 @@ mod tests {
     #[test]
     fn candidate_requires_exactly_one_writer_session_binding() {
         let delivery = writer_delivery();
-        let facts = freeze_facts(&delivery, snapshot(&delivery));
         let mut ambiguous = delivery.into_snapshot();
         ambiguous.session_bindings.push(
             SessionBinding {
                 schema_version: super::super::DELIVERY_SCHEMA_VERSION,
                 id: SessionBindingId("binding-executor-duplicate".into()),
                 delivery_id: ambiguous.id.clone(),
-                delivery_task_id: ambiguous.stage_runs[0].delivery_task_id.clone(),
-                stage_run_id: StageRunId("stage-executor-1".into()),
+                work_contract_id: winwincode_domain::WorkContractId(
+                    "wct_01J00000000000000000000000".into(),
+                ),
+                work_contract_revision: winwincode_domain::Revision(1),
+                work_item_id: winwincode_domain::WorkItemId(
+                    "wit_01J00000000000000000000000".into(),
+                ),
+                work_item_revision: winwincode_domain::Revision(1),
+                work_run_id: WorkRunId("wrn_01J00000000000000000000000".into()),
                 product_session_id: ProductSessionId("product-executor-duplicate".into()),
                 execution_job_id: ExecutionJobId("job-executor-duplicate".into()),
+                execution_profile: Some("executor".into()),
                 worker_session_id: Some(WorkerSessionId("worker-executor-duplicate".into())),
                 codex_thread_id: Some(CodexThreadId("thread-executor-duplicate".into())),
                 bound_at_millis: 1_800_000_000_012,
-                ..Default::default()
+                attempt: 1,
+                worker_id: None,
+                worker_instance_id: None,
+                lease_id: None,
+                fencing_token: None,
+                source_provenance:
+                    crate::domain::SessionBindingSourceProvenance::pending_delivery_advance(),
             }
             .with_test_authority("binding-executor-duplicate", 1),
         );
-        let ambiguous = Delivery::try_from_snapshot(ambiguous)
-            .expect("aggregate permits verification of writer binding cardinality here");
-
-        assert!(freeze_delivery_candidate(&ambiguous, &facts).is_err());
+        assert!(Delivery::try_from_snapshot(ambiguous).is_err());
     }
 
     #[test]
@@ -1972,26 +1842,29 @@ mod tests {
             taskless.stage_runs[0].stage = stage;
             taskless.stage_runs[0].role = role.into();
             taskless.stage_runs[0].delivery_task_id = None;
-            taskless.session_bindings[0].delivery_task_id = None;
             let taskless = Delivery::try_from_snapshot(taskless)
                 .expect("aggregate permits a Delivery-level run that cannot produce a candidate");
             let facts = freeze_facts(&taskless, snapshot(&taskless));
 
-            freeze_candidate_for_stage(&taskless, &facts, stage)
-                .expect_err("a candidate writer must bind one concrete DeliveryTask");
+            if role == "executor" {
+                freeze_candidate_for_stage(&taskless, &facts, role)
+                    .expect("executor WorkRun identity and terminal proof");
+            } else {
+                assert!(freeze_candidate_for_stage(&taskless, &facts, role).is_err());
+            }
         }
     }
 
     #[test]
-    fn generic_candidate_freeze_rejects_a_remediator_writer() {
+    fn generic_candidate_freeze_uses_the_authoritative_work_run_for_a_remediator_writer() {
         let mut replacement = writer_delivery().into_snapshot();
         replacement.stage_runs[0].stage = DeliveryStage::Reworking;
         replacement.stage_runs[0].role = "remediator".into();
+        replacement.session_bindings[0].execution_profile = Some("remediator".into());
         let replacement = Delivery::try_from_snapshot(replacement).expect("remediator output");
         let facts = freeze_facts(&replacement, snapshot(&replacement));
 
-        freeze_delivery_candidate(&replacement, &facts)
-            .expect_err("remediator output requires the authorization-bound replacement entry");
+        assert!(freeze_delivery_candidate(&replacement, &facts).is_err());
     }
 
     #[test]
@@ -2021,17 +1894,45 @@ mod tests {
                 schema_version: super::super::DELIVERY_SCHEMA_VERSION,
                 id: SessionBindingId("binding-executor-concurrent".into()),
                 delivery_id: ambiguous.id.clone(),
-                delivery_task_id: task_id,
-                stage_run_id: StageRunId("stage-executor-concurrent".into()),
+                work_contract_id: winwincode_domain::WorkContractId(
+                    "wct_01J00000000000000000000000".into(),
+                ),
+                work_contract_revision: winwincode_domain::Revision(1),
+                work_item_id: winwincode_domain::WorkItemId(
+                    "wit_01J00000000000000000000000".into(),
+                ),
+                work_item_revision: winwincode_domain::Revision(1),
+                work_run_id: WorkRunId("wrn_01J00000000000000000000000".into()),
                 product_session_id: ProductSessionId("product-executor-concurrent".into()),
                 execution_job_id: ExecutionJobId("job-executor-concurrent".into()),
+                execution_profile: Some("executor".into()),
                 worker_session_id: Some(WorkerSessionId("worker-executor-concurrent".into())),
                 codex_thread_id: Some(CodexThreadId("thread-executor-concurrent".into())),
                 bound_at_millis: 1_800_000_000_011,
-                ..Default::default()
+                attempt: 1,
+                worker_id: None,
+                worker_instance_id: None,
+                lease_id: None,
+                fencing_token: None,
+                source_provenance:
+                    crate::domain::SessionBindingSourceProvenance::pending_delivery_advance(),
             }
             .with_test_authority("binding-executor-concurrent", 1),
         );
+        crate::domain::rebuild_test_work_runs_from_bindings(&mut ambiguous);
+        let concurrent_run_id = ambiguous
+            .session_bindings
+            .iter()
+            .find(|binding| binding.id.0 == "binding-executor-concurrent")
+            .map(|binding| binding.work_run_id.clone())
+            .expect("concurrent WorkRun");
+        ambiguous
+            .work_run_aggregate
+            .runs
+            .iter_mut()
+            .find(|run| run.id == concurrent_run_id)
+            .expect("concurrent WorkRun")
+            .state = winwincode_domain::WorkRunState::Running;
         let ambiguous = Delivery::try_from_snapshot(ambiguous)
             .expect("aggregate permits candidate writer ambiguity check here");
 
@@ -2039,25 +1940,37 @@ mod tests {
     }
 
     #[test]
-    fn any_later_writer_stage_invalidates_the_candidate() {
+    fn a_later_writer_job_invalidates_the_candidate_even_at_attempt_one() {
         let delivery = writer_delivery();
         let candidate =
             freeze_delivery_candidate(&delivery, &freeze_facts(&delivery, snapshot(&delivery)))
                 .expect("candidate");
         let mut later = delivery.into_snapshot();
-        later.stage_runs.push(StageRun {
-            schema_version: super::super::DELIVERY_SCHEMA_VERSION,
-            id: StageRunId("stage-human-writer".into()),
-            delivery_id: later.id.clone(),
-            delivery_task_id: later.stage_runs[0].delivery_task_id.clone(),
-            stage: DeliveryStage::Executing,
-            actor_type: StageRunActorType::Human,
-            role: "executor".into(),
-            status: StageRunStatus::Running,
-            attempt: 2,
-            started_at_millis: 1_800_000_000_030,
-            finished_at_millis: None,
-        });
+        later.stage_runs.clear();
+        let mut run = later.work_run_aggregate.runs[0].clone();
+        run.id = WorkRunId("wrn_01J00000000000000000000002".into());
+        run.execution_job_id = ExecutionJobId("job_01J00000000000000000000002".into());
+        run.lease_id = LeaseId("lse_01J00000000000000000000002".into());
+        run.fencing_token = "2".into();
+        run.attempt = 1;
+        run.state = winwincode_domain::WorkRunState::Running;
+        run.candidate_digest = None;
+        run.product_session_id = Some(ProductSessionId("psn_01J00000000000000000000002".into()));
+        run.worker_session_id = WorkerSessionId("wsn_01J00000000000000000000002".into());
+        run.codex_thread_id = Some(CodexThreadId("cdx_01J00000000000000000000002".into()));
+        let mut binding = later.session_bindings[0].clone();
+        binding.id = SessionBindingId("binding-executor-later".into());
+        binding.work_run_id = run.id.clone();
+        binding.execution_job_id = run.execution_job_id.clone();
+        binding.product_session_id = run.product_session_id.clone().unwrap();
+        binding.lease_id = Some(run.lease_id.clone());
+        binding.fencing_token = Some(FencingToken(run.fencing_token.clone()));
+        binding.worker_session_id = Some(run.worker_session_id.clone());
+        binding.codex_thread_id = run.codex_thread_id.clone();
+        binding.attempt = 1;
+        binding.bound_at_millis = 1_800_000_000_030;
+        later.work_run_aggregate.runs.push(run);
+        later.session_bindings.push(binding);
         later.updated_at_millis = 1_800_000_000_030;
         let later = Delivery::try_from_snapshot(later)
             .expect("aggregate permits candidate fail-closed writer detection here");
@@ -2097,17 +2010,45 @@ mod tests {
                 schema_version: super::super::DELIVERY_SCHEMA_VERSION,
                 id: SessionBindingId("binding-remediator-1".into()),
                 delivery_id: later.id.clone(),
-                delivery_task_id: later.stage_runs[0].delivery_task_id.clone(),
-                stage_run_id: StageRunId("stage-remediator-1".into()),
+                work_contract_id: winwincode_domain::WorkContractId(
+                    "wct_01J00000000000000000000000".into(),
+                ),
+                work_contract_revision: winwincode_domain::Revision(1),
+                work_item_id: winwincode_domain::WorkItemId(
+                    "wit_01J00000000000000000000000".into(),
+                ),
+                work_item_revision: winwincode_domain::Revision(1),
+                work_run_id: WorkRunId("wrn_01J00000000000000000000000".into()),
                 product_session_id: ProductSessionId("product-remediator".into()),
                 execution_job_id: ExecutionJobId("job-remediator".into()),
+                execution_profile: Some("remediator".into()),
                 worker_session_id: Some(WorkerSessionId("worker-remediator".into())),
                 codex_thread_id: Some(CodexThreadId("thread-remediator".into())),
                 bound_at_millis: 1_800_000_000_031,
-                ..Default::default()
+                attempt: 1,
+                worker_id: None,
+                worker_instance_id: None,
+                lease_id: None,
+                fencing_token: None,
+                source_provenance:
+                    crate::domain::SessionBindingSourceProvenance::pending_delivery_advance(),
             }
             .with_test_authority("binding-remediator-1", 1),
         );
+        crate::domain::rebuild_test_work_runs_from_bindings(&mut later);
+        let remediator_run_id = later
+            .session_bindings
+            .iter()
+            .find(|binding| binding.id.0 == "binding-remediator-1")
+            .map(|binding| binding.work_run_id.clone())
+            .expect("remediator WorkRun");
+        later
+            .work_run_aggregate
+            .runs
+            .iter_mut()
+            .find(|run| run.id == remediator_run_id)
+            .expect("remediator WorkRun")
+            .state = winwincode_domain::WorkRunState::Running;
         later.updated_at_millis = 1_800_000_000_031;
         later.revision += 1;
         let later = Delivery::try_from_snapshot(later).expect("later writer");

@@ -16,8 +16,7 @@ use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
 use winwincode_api::generated::{
-    Actor, CommandRequest, OrganizationScope, OrganizationScopeKind, Scope, UserActor,
-    UserActorKind,
+    Actor, CommandRequest, OrganizationScope, OrganizationScopeKind, Scope,
 };
 use winwincode_control_plane::{
     ControlPlane, ControlPlaneConfig, DeviceExecutionBindingService,
@@ -26,7 +25,8 @@ use winwincode_control_plane::{
 };
 use winwincode_domain::{
     ExecutionJobId, ExecutionMessageId, Instant, OrganizationId, ProjectId, RepositoryId,
-    RequestId, Sha256Digest, UserId, WorkerId, WorkerInstanceId, WorkspaceId,
+    RequestId, Sha256Digest, UserActor, UserActorKind, UserId, WorkRunId, WorkerId,
+    WorkerInstanceId, WorkspaceId,
 };
 use winwincode_server::{
     ApiError, AuthenticatedPrincipal, CommandDispatchResponse, CommandFamily, DurableEventHub,
@@ -314,7 +314,7 @@ fn stage_anchor(
         worker_instance_id.clone(),
         "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
         Some(product_session_id.to_owned()),
-        Some(format!("run_{}", suffix(seed + 53))),
+        Some(WorkRunId(format!("wrn_{}", suffix(seed + 53)))),
         instant("2100-01-01T00:00:00.000Z"),
     )
     .expect("issuance");

@@ -2,9 +2,10 @@
 
 import type {
   DeliveryDetailProjection,
-  DeliveryTaskDetailProjection,
-  DeliveryTaskId,
-  StageRunId,
+  WorkRunId,
+  WorkRunAggregateProjection,
+  WorkItemId,
+  WorkItem,
 } from './generated/contracts.js'
 import type { StrongFlowProjection } from './strongflow-view-model.js'
 import type { StrongFlowHistorySelection } from './strongflow-history-selection.js'
@@ -14,11 +15,11 @@ import {
   type StrongFlowRenderLimits,
 } from './strongflow-rendering.js'
 
-/** One already-delivered Evidence row of a historical StageRun. */
+/** One already-delivered Evidence row of a historical WorkRun. */
 export type StrongFlowHistoryEvidence = DeliveryDetailProjection['evidence'][number]
 
 export interface StrongFlowHistoryBinding {
-  readonly productSessionId: string
+  readonly productSessionId: string | null
   readonly executionJobId: string
   readonly workerId: string | null
   readonly workerSessionId: string | null
@@ -26,14 +27,14 @@ export interface StrongFlowHistoryBinding {
 }
 
 export interface StrongFlowHistoryRun {
-  readonly stageRunId: StageRunId
-  readonly deliveryTaskId: DeliveryTaskId | null
-  readonly stage: string
-  readonly role: string
-  readonly actorType: 'codex' | 'human'
+  readonly workRunId: WorkRunId
+  readonly workItemId: WorkItemId
+  readonly stage: string | null
+  readonly role: string | null
+  readonly actorType: 'codex' | 'human' | null
   readonly attempt: number | null
   readonly status: string
-  readonly startedAt: string
+  readonly startedAt: string | null
   readonly finishedAt: string | null
   readonly isCurrent: boolean
   readonly producedCurrentCandidate: boolean
@@ -44,7 +45,7 @@ export interface StrongFlowHistoryRun {
 }
 
 export interface StrongFlowHistoryTaskNode {
-  readonly task: DeliveryTaskDetailProjection
+  readonly task: WorkItem
   readonly runs: readonly StrongFlowHistoryRun[]
 }
 
@@ -53,44 +54,70 @@ export interface StrongFlowHistoryTree {
   readonly tasks: readonly StrongFlowHistoryTaskNode[]
   readonly deliveryRuns: readonly StrongFlowHistoryRun[]
   readonly runs: readonly StrongFlowHistoryRun[]
-  readonly currentStageRunId: StageRunId | null
+  readonly currentWorkRunId: WorkRunId | null
   readonly currentCandidateRef: string | null
   readonly omittedTasks: number
   readonly omittedRuns: number
 }
 
-function historyRun(
-  stage: StrongFlowProjection['delivery']['stages'][number],
-  currentStageRunId: StageRunId | null,
-  currentCandidateRef: string | null,
+/** Queued or active executable WorkRuns eligible for server cancellation. */
+export function strongFlowCancellableWorkRuns(
+  projection: StrongFlowProjection,
+): readonly WorkRunAggregateProjection['runs'][number][] {
+  const aggregate = projection.workRunAggregate
+  if (aggregate === undefined) return Object.freeze([])
+  return Object.freeze(aggregate.runs.filter(run => (
+    run.state === 'queued' || run.state === 'leased' || run.state === 'running'
+  )))
+}
+
+/**
+ * Selects exactly one cancellation target. A caller must provide an explicit
+ * WorkRunId when more than one active run exists; this never falls back to a
+ * Chat ProductSession or a historical StageRun id.
+ */
+export function strongFlowCancellationTarget(
+  projection: StrongFlowProjection,
+  requestedWorkRunId: WorkRunId | null,
+): WorkRunAggregateProjection['runs'][number] | null {
+  const active = strongFlowCancellableWorkRuns(projection)
+  if (requestedWorkRunId !== null) {
+    return active.find(run => run.id === requestedWorkRunId) ?? null
+  }
+  return active.length === 1 ? active[0] ?? null : null
+}
+
+function aggregateHistoryRun(
+  run: WorkRunAggregateProjection['runs'][number],
   evidence: StrongFlowProjection['evidence'],
-  evidenceLimit: number,
+  currentWorkRunId: WorkRunId | null,
+  currentCandidateRef: string | null,
 ): StrongFlowHistoryRun {
-  const runEvidence = evidence.filter(item => item.stageRunId === stage.id)
+  const runEvidence = evidence.filter(item => item.workRunId === run.id)
   const candidateRefs = [...new Set(runEvidence.map(item => item.candidateRef))]
-  const binding = stage.sessionBinding ?? null
   return Object.freeze({
-    stageRunId: stage.id,
-    deliveryTaskId: stage.deliveryTaskId ?? null,
-    stage: stage.stage,
-    role: stage.role,
-    actorType: stage.actorType === 'human' ? 'human' : 'codex',
-    attempt: typeof stage.attempt === 'number' ? stage.attempt : null,
-    status: stage.status,
-    startedAt: stage.startedAt,
-    finishedAt: stage.finishedAt ?? null,
-    isCurrent: stage.id === currentStageRunId,
-    producedCurrentCandidate: currentCandidateRef !== null
-      && candidateRefs.includes(currentCandidateRef),
+    workRunId: run.id,
+    workItemId: run.workItemId,
+    stage: null,
+    role: null,
+    actorType: 'codex',
+    attempt: run.attempt,
+    status: run.state,
+    startedAt: null,
+    finishedAt: null,
+    isCurrent: run.id === currentWorkRunId,
+    producedCurrentCandidate: currentCandidateRef !== null && candidateRefs.includes(currentCandidateRef),
     evidenceCount: runEvidence.length,
     evidence: Object.freeze([...runEvidence]),
     candidateRefs: Object.freeze(candidateRefs),
-    binding: binding === null ? null : Object.freeze({
-      productSessionId: binding.productSessionId,
-      executionJobId: binding.executionJobId,
-      workerId: binding.workerId ?? null,
-      workerSessionId: binding.workerSessionId ?? null,
-      codexThreadId: binding.codexThreadId ?? null,
+    // WorkRun is the execution authority. StageRun bindings can enrich the
+    // display, but must never replace its job, worker, or session identities.
+    binding: Object.freeze({
+      productSessionId: run.productSessionId,
+      executionJobId: run.executionJobId,
+      workerId: run.workerId,
+      workerSessionId: run.workerSessionId,
+      codexThreadId: run.codexThreadId ?? null,
     }),
   })
 }
@@ -112,43 +139,65 @@ function boundedItemsWithPinnedIdentity<Value>(
 
 /**
  * Project one bounded Delivery snapshot onto the navigable history tree.
- * The association truth is the StageRun's own `deliveryTaskId`, so Task nodes,
- * the Delivery-level stage list, attempt numbering, and per-run Evidence all
- * derive from the same canonical snapshot instead of a second state machine.
- * Derive it once per snapshot and share it across every history view.
+ * The association truth is each WorkRun's `workItemId`. Derive it once per
+ * snapshot and share it across every history view; legacy stage rows are not
+ * consulted for execution or identity facts.
  */
 export function strongFlowHistoryTree(
   projection: StrongFlowProjection,
   limits: StrongFlowRenderLimits,
   pinnedSelection?: StrongFlowHistorySelection,
 ): StrongFlowHistoryTree {
-  const currentStageRunId = projection.stage?.id ?? null
+  // A projection without the WorkRun read is a bounded loading state; fail
+  // closed with an empty history rather than deriving runs from StageRuns.
+  const aggregate = projection.workRunAggregate
+  if (aggregate === undefined) return Object.freeze({
+    readCursor: projection.delivery.readCursor,
+    tasks: Object.freeze([]),
+    deliveryRuns: Object.freeze([]),
+    runs: Object.freeze([]),
+    currentWorkRunId: null,
+    currentCandidateRef: projection.currentCandidate?.candidateRef ?? null,
+    omittedTasks: 0,
+    omittedRuns: 0,
+  })
+  const selectedWorkRunId = projection.runtime.workRunId !== null
+    && aggregate.runs.some(run => run.id === projection.runtime.workRunId)
+    ? projection.runtime.workRunId
+    : null
+  const activeRuns = aggregate.runs.filter(run => (
+    run.state === 'queued'
+    || run.state === 'leased'
+    || run.state === 'running'
+    || run.state === 'candidate_ready'
+  ))
+  const currentWorkRunId = selectedWorkRunId
+    ?? (activeRuns.length === 1 ? activeRuns[0]?.id ?? null : null)
   const currentCandidateRef = projection.currentCandidate?.candidateRef ?? null
-  const boundedStages = boundedItemsWithPinnedIdentity(
-    projection.delivery.stages,
+  const taskIds = new Set<string>(aggregate.items.map(task => task.id))
+  const runs = boundedItemsWithPinnedIdentity(
+    aggregate.runs,
     limits.stages,
-    stage => stage.id === pinnedSelection?.stageRunId,
-  )
-  const runs = boundedStages.items.map(stage => historyRun(
-    stage,
-    currentStageRunId,
-    currentCandidateRef,
+    run => run.id === pinnedSelection?.workRunId,
+  ).items.map(run => aggregateHistoryRun(
+    run,
     projection.evidence,
-    limits.evidence,
+    currentWorkRunId,
+    currentCandidateRef,
   ))
   const runsByTask = new Map<string, StrongFlowHistoryRun[]>()
   const deliveryRuns: StrongFlowHistoryRun[] = []
   for (const run of runs) {
-    if (run.deliveryTaskId === null) {
+    if (!taskIds.has(run.workItemId)) {
       deliveryRuns.push(run)
       continue
     }
-    const owned = runsByTask.get(run.deliveryTaskId) ?? []
+    const owned = runsByTask.get(run.workItemId) ?? []
     owned.push(run)
-    runsByTask.set(run.deliveryTaskId, owned)
+    runsByTask.set(run.workItemId, owned)
   }
   const boundedTasks = boundedItemsWithPinnedIdentity(
-    projection.delivery.tasks,
+    aggregate.items,
     limits.tasks,
     task => task.id === pinnedSelection?.taskId,
   )
@@ -161,9 +210,10 @@ export function strongFlowHistoryTree(
     tasks: Object.freeze(tasks),
     deliveryRuns: Object.freeze(deliveryRuns),
     runs: Object.freeze(runs),
-    currentStageRunId,
+    currentWorkRunId,
     currentCandidateRef,
     omittedTasks: boundedTasks.omitted,
-    omittedRuns: boundedStages.omitted,
+    omittedRuns: Math.max(0, aggregate.runs.length - runs.length
+      - (currentWorkRunId !== null && !runs.some(run => run.workRunId === currentWorkRunId) ? 1 : 0)),
   })
 }

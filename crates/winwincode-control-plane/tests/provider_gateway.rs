@@ -46,18 +46,18 @@ use winwincode_control_plane::{
     StructuredOutputSupport, command_receipt_identity,
 };
 use winwincode_domain::{
-    CodexThreadId, CredentialReferenceId, DeliveryId, ExecutionAckSequence, ExecutionJobId,
-    ExecutionMessageId, FencingToken, Instant, LeaseId, ModelExchangeId, OrganizationId,
-    ProductSessionId, ProjectId, RepositoryId, RequestId, Revision, SchemaVersion, SessionIdentity,
-    Sha256Digest, StageRunId, UserId, WorkerId, WorkerInstanceId, WorkerSessionId, WorkspaceId,
+    CodexThreadId, CredentialReferenceId, ExecutionAckSequence, ExecutionJobId, ExecutionMessageId,
+    FencingToken, Instant, LeaseId, ModelExchangeId, OrganizationId, ProductSessionId, ProjectId,
+    RepositoryId, RequestId, Revision, SchemaVersion, SessionIdentity, Sha256Digest, UserId,
+    WorkContractId, WorkItemId, WorkRunId, WorkerId, WorkerInstanceId, WorkerSessionId,
+    WorkspaceId,
 };
 use winwincode_domain::{RepositoryScope, RepositoryScopeKind, UserActor, UserActorKind};
 use winwincode_execution_port::generated::{
-    DeliveryStageExecutionScope, DeliveryStageExecutionScopeKind, EncodedPayload, ExecutionJob,
-    ExecutionLeaseStamp, ExecutionLimits, ExecutionPortError, ExecutionPortErrorCode,
-    ExecutionScope, ExecutionWorkspace, ExecutionWorkspaceWriteMode, LeaseWriteStatus,
-    ModelAckMessage, ModelAckMessageKind, ModelGatewayRoute, ModelOpenMessage,
-    ModelOpenMessageKind,
+    EncodedPayload, ExecutionJob, ExecutionLeaseStamp, ExecutionLimits, ExecutionPortError,
+    ExecutionPortErrorCode, ExecutionScope, ExecutionWorkspace, ExecutionWorkspaceWriteMode,
+    LeaseWriteStatus, ModelAckMessage, ModelAckMessageKind, ModelGatewayRoute, ModelOpenMessage,
+    ModelOpenMessageKind, WorkRunExecutionScope, WorkRunExecutionScopeKind,
 };
 use winwincode_storage::{
     EnterpriseQuotaReleaseReason, EnterpriseQuotaReservationState, EnterpriseQuotaTerminal,
@@ -229,6 +229,7 @@ fn configure_session(
                 }),
                 worker_concurrency_limit: 1,
             },
+            Instant("2030-01-01T00:00:00Z".to_owned()),
         )
         .expect("configure model session fixture");
 }
@@ -274,7 +275,7 @@ fn open_message(
         session_identity: SessionIdentity {
             codex_thread_id: CodexThreadId(id("cdx", product_session_seed)),
             product_session_id: ProductSessionId(id("psn", product_session_seed)),
-            stage_run_id: None,
+            work_run_id: None,
             worker_session_id: worker_session_id.clone(),
         },
         worker_session_id,
@@ -293,19 +294,22 @@ fn commit_execution_job(storage: &mut SqliteStorage, message: &ModelOpenMessage)
             max_runtime_seconds: 300,
         },
         payload_digest: message.request.payload_digest.clone(),
-        scope: ExecutionScope::DeliveryStageExecutionScope(DeliveryStageExecutionScope {
-            delivery_id: DeliveryId(id("dlv", 31)),
-            delivery_task_id: None,
-            kind: DeliveryStageExecutionScopeKind::DeliveryStage,
+        scope: ExecutionScope::WorkRunExecutionScope(WorkRunExecutionScope {
+            attempt: 1,
+            kind: WorkRunExecutionScopeKind::WorkRun,
             product_session_id: message.session_identity.product_session_id.clone(),
             rework_authorization: None,
-            stage_run_id: message
+            work_contract_id: WorkContractId(id("wct", 31)),
+            work_contract_revision: Revision(1),
+            work_item_id: WorkItemId(id("wit", 31)),
+            work_item_revision: Revision(1),
+            work_run_id: message
                 .session_identity
-                .stage_run_id
+                .work_run_id
                 .clone()
-                .expect("stage run identity"),
+                .expect("WorkRun identity"),
         }),
-        stage_input: None,
+        work_input: None,
         workspace: ExecutionWorkspace {
             checkout_revision: "0123456789abcdef0123456789abcdef01234567".to_owned(),
             repository_id: repository_scope().repository_id,
@@ -344,7 +348,7 @@ fn setup_planner_runtime(
     create_credential(&mut storage, seed + 1, seed, "provider-a");
     configure_session(&mut storage, seed + 2, seed, "provider-a", "model-a", seed);
     let mut message = open_message(seed, seed, seed + 100, seed, payload);
-    message.session_identity.stage_run_id = Some(StageRunId(id("run", seed)));
+    message.session_identity.work_run_id = Some(WorkRunId(id("wrn", seed)));
     commit_execution_job(&mut storage, &message);
     let route_authority = retry_context(&mut storage, &message).request().plan.steps()[0]
         .authority()

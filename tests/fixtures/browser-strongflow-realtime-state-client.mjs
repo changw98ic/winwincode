@@ -8,6 +8,10 @@ import { mountStrongFlowPage } from '/module/strongflow-page.js'
 const root = document.querySelector('[data-winwincode-client-root]')
 const deliveryId = 'dlv_00000000000000000000000001'
 const stageRunId = 'run_00000000000000000000000001'
+const workRunId = 'wrn_00000000000000000000000001'
+const secondWorkRunId = 'wrn_00000000000000000000000002'
+const workItemId = 'wit_00000000000000000000000001'
+const workContractId = 'wct_00000000000000000000000001'
 const candidateRef = 'refs/winwincode/candidate/browser-state'
 const FILE_COUNT = 30
 const DIFF_LINES = 400
@@ -104,12 +108,19 @@ function createProjection({
         { id: 'task:2', title: 'Unrelated Task', status: 'pending' },
       ],
       stages: [
-        { id: stageRunId, stage: 'executing', role: 'implementer', status: 'running' },
+        {
+          id: stageRunId,
+          stage: 'executing',
+          role: 'implementer',
+          status: 'running',
+          sessionBinding: { workRunId },
+        },
         {
           id: 'run_00000000000000000000000002',
           stage: 'verifying',
           role: 'implementer',
           status: 'waiting',
+          sessionBinding: { workRunId: secondWorkRunId },
         },
       ],
       attention: [],
@@ -122,13 +133,13 @@ function createProjection({
     diagramExecution: null,
     stage: { id: stageRunId },
     runtime: {
-      stageRunId,
+      workRunId,
       sessions: [{
         productSessionId: 'psn_00000000000000000000000001',
-        stageRunId,
+        workRunId,
+        workItemId,
         sessionBindingId: 'bind:1',
         codexThreadId: 'cdx_t0000000000000000000000001',
-        deliveryTaskId: 'task:1',
         attempt: 1,
         asOfSequence: runtimeSequence,
         agents: [],
@@ -173,6 +184,76 @@ function createProjection({
       revisions: { delivery: deliveryRevision, deliverySpec: 3, runtime: 8, publication: 0 },
       readCursor: {},
     },
+    workRunAggregate: {
+      schemaVersion: 'winwincode/v1',
+      contract: {
+        schemaVersion: 'winwincode/v1',
+        id: workContractId,
+        revision: 1,
+        scope: [],
+        objective: 'Keep review work while the canonical snapshot reloads.',
+        constraints: [],
+        protectedScope: [],
+        requiredHumanAuthority: 'none',
+        criteria: [{
+          id: 'crt_00000000000000000000000001',
+          description: 'Keep review state',
+          required: true,
+          verificationMethod: null,
+        }],
+        createdAt: '2026-09-02T09:00:00.000Z',
+      },
+      items: [{
+        schemaVersion: 'winwincode/v1',
+        id: workItemId,
+        workContractId,
+        workContractRevision: 1,
+        revision: 1,
+        state: 'in_progress',
+        title: 'Expanded Task under review',
+        goal: 'Keep review work while the canonical snapshot reloads.',
+        criterionIds: ['crt_00000000000000000000000001'],
+        dependsOn: [],
+      }],
+      runs: [{
+        schemaVersion: 'winwincode/v1',
+        id: workRunId,
+        workContractId,
+        contractRevision: 1,
+        workItemId,
+        workItemRevision: 1,
+        revision: 1,
+        state: 'running',
+        executionJobId: 'job_00000000000000000000000001',
+        attempt: 1,
+        workerId: 'wrk_00000000000000000000000001',
+        workerInstanceId: 'wki_00000000000000000000000001',
+        workerSessionId: 'wsn_00000000000000000000000001',
+        leaseId: 'lse_00000000000000000000000001',
+        fencingToken: '1',
+        productSessionId: 'psn_00000000000000000000000001',
+        codexThreadId: null,
+      }, {
+        schemaVersion: 'winwincode/v1',
+        id: secondWorkRunId,
+        workContractId,
+        contractRevision: 1,
+        workItemId,
+        workItemRevision: 1,
+        revision: 1,
+        state: 'settled',
+        executionJobId: 'job_00000000000000000000000002',
+        attempt: 2,
+        workerId: 'wrk_00000000000000000000000002',
+        workerInstanceId: 'wki_00000000000000000000000002',
+        workerSessionId: 'wsn_00000000000000000000000002',
+        leaseId: 'lse_00000000000000000000000002',
+        fencingToken: '1',
+        productSessionId: 'psn_00000000000000000000000001',
+        codexThreadId: null,
+      }],
+      readCursor: {},
+    },
   }
 }
 
@@ -212,8 +293,8 @@ class RealtimeStateModel {
     this.publish(ready(this.state.projection, candidateFiles(path)))
   }
   async loadMoreCandidateDiff() { this.calls.push(['loadMoreCandidateDiff']) }
-  async loadStageRunRuntime() { return null }
-  async loadStageRunCandidates() { return [] }
+  async loadWorkRunRuntime() { return null }
+  async loadWorkRunCandidates() { return [] }
   async loadCandidateHistoricalReview() { return null }
   async decideSolutionReview() {}
   async approveTaskBreakdown() {}
@@ -330,7 +411,7 @@ globalThis.runStrongFlowRealtimeStateScenario = () => {
     selectedPath: query('.wwc-candidate-file-row[aria-selected="true"]')?.dataset.path,
     expandedTask: query('.wwc-strongflow-history-toggle')?.getAttribute('aria-expanded'),
     historicalStagePressed: queryAll('.wwc-strongflow-run-button')
-      .find(button => button.dataset.stageRunId === 'run_00000000000000000000000002')
+      .find(button => button.dataset.workRunId === 'wrn_00000000000000000000000002')
       ?.getAttribute('aria-pressed'),
     zoom: viewport.getAttribute('data-zoom'),
     boundaryExpanded: query('.wwc-strongflow-graph-boundary')?.getAttribute('aria-expanded'),
@@ -359,7 +440,7 @@ globalThis.runStrongFlowRealtimeStateScenario = () => {
     stageRowRetained: queryAll('.wwc-strongflow-stage-list li')[1] === stageRowBefore,
     taskStillExpanded: query('.wwc-strongflow-history-toggle')?.getAttribute('aria-expanded'),
     historicalStageStillPressed: queryAll('.wwc-strongflow-run-button')
-      .find(button => button.dataset.stageRunId === 'run_00000000000000000000000002')
+      .find(button => button.dataset.workRunId === 'wrn_00000000000000000000000002')
       ?.getAttribute('aria-pressed'),
     selectedTab: query('.wwc-strongflow-artifact-tab[aria-selected="true"]')?.dataset.artifactTab,
     selectedPath: query('.wwc-candidate-file-row[aria-selected="true"]')?.dataset.path,

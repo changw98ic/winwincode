@@ -87,7 +87,7 @@ fn submit(storage: &mut SqliteStorage) {
             dispatch_payload,
             attempt: 1,
             dependencies: Vec::new(),
-            stage_run_id: None,
+            work_run_id: None,
             submitted_at: at(1),
         })
         .expect("submit");

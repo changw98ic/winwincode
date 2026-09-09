@@ -47,5 +47,35 @@
   "evidence": [],
   "verdict": null,
   "createdAtMillis": 1800000000000,
-  "updatedAtMillis": 1800000000001
+  "updatedAtMillis": 1800000000001,
+  "workRunAggregate": {
+    "schemaVersion": "winwincode/v1",
+    "contract": {
+      "schemaVersion": "winwincode/v1",
+      "id": "wct_01J00000000000000000000002",
+      "revision": 1,
+      "objective": "Durable delivery",
+      "scope": [
+        "Delivery state"
+      ],
+      "protectedScope": [
+        "Codex runtime events"
+      ],
+      "constraints": [
+        "Append only"
+      ],
+      "criteria": [
+        {
+          "id": "crt_01J00000000000000000000002",
+          "description": "Restart reconstructs the same delivery.",
+          "required": true,
+          "verificationMethod": "Reopen the store and compare the projection."
+        }
+      ],
+      "requiredHumanAuthority": "none",
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    "items": [],
+    "runs": []
+  }
 }

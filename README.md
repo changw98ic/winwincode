@@ -126,7 +126,11 @@ corepack pnpm verify
 
 ```text
 apps/client/   浏览器 Client(Chat、StrongFlow、设置、企业管理)
-crates/        Rust 工作区:Server、Control Plane、Worker、Kernel 及支撑 crate
+crates/winwincode-server/         服务入口与网络接口
+crates/winwincode-control-plane/  产品状态、审批与任务调度
+crates/winwincode-worker/         任务执行与事实上报
+crates/winwincode-local/          本机服务与执行器组装
+crates/helper/                    本机权限与系统操作
 packages/      跨端共享包:contracts、strongflow
 schema/        canonical schema 与生成产物,是所有合同类型的唯一来源
 tests/         Client、Server、Worker 与合同检查

@@ -556,19 +556,16 @@ fn execution_job_authority(
     }
     let (product_session_id, delivery_id) = match &job.scope {
         ExecutionScope::ProductSessionExecutionScope(scope) => {
-            if message.session_identity.stage_run_id.is_some() {
+            if message.session_identity.work_run_id.is_some() {
                 return Err(ModelRetryPlannerError::identity());
             }
             (scope.product_session_id.clone(), None)
         }
-        ExecutionScope::DeliveryStageExecutionScope(scope) => {
-            if message.session_identity.stage_run_id.as_ref() != Some(&scope.stage_run_id) {
+        ExecutionScope::WorkRunExecutionScope(scope) => {
+            if message.session_identity.work_run_id.as_ref() != Some(&scope.work_run_id) {
                 return Err(ModelRetryPlannerError::identity());
             }
-            (
-                scope.product_session_id.clone(),
-                Some(scope.delivery_id.clone()),
-            )
+            (scope.product_session_id.clone(), None)
         }
     };
     if message.session_identity.product_session_id != product_session_id {

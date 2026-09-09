@@ -26,7 +26,7 @@ fn identity() -> ChangeBatchIdentity {
         run_key: "run-key-1".to_owned(),
         session_identity: SessionIdentity {
             product_session_id: ProductSessionId("psn_00000000000000000000000000".to_owned()),
-            stage_run_id: None,
+            work_run_id: None,
             worker_session_id: WorkerSessionId("wsn_00000000000000000000000000".to_owned()),
             codex_thread_id: CodexThreadId("cdx_00000000000000000000000000".to_owned()),
         },

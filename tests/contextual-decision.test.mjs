@@ -44,7 +44,7 @@ const {
 
 const productSessionId = 'psn_00000000000000000000000001'
 const deliveryId = 'dlv_00000000000000000000000001'
-const stageRunId = 'run_00000000000000000000000001'
+const workRunId = 'wrn_00000000000000000000000001'
 const now = Date.parse('2026-09-04T12:00:00.000Z')
 
 class FakeElement {
@@ -162,7 +162,7 @@ function binding(overrides = {}) {
       productSessionId,
       workerSessionId: 'wsn_00000000000000000000000001',
       codexThreadId: 'cdx_00000000000000000000000001',
-      stageRunId,
+      workRunId,
     },
     ...overrides,
   }
@@ -174,7 +174,7 @@ function input(overrides = {}) {
     inputRequestId: 'inp_00000000000000000000000001',
     revision: 3,
     state: 'pending',
-    prompt: 'Select the next StageRun step.',
+    prompt: 'Select the next WorkRun step.',
     binding: binding(),
     mode: 'text',
     options: [],
@@ -205,7 +205,7 @@ function attention(overrides = {}) {
       status: 'open',
       blocking: true,
       createdAt: '2026-09-04T11:30:00.000Z',
-      stageRunId,
+      workRunId,
       type: 'verification_blocked',
       options: [],
       assignedTo: null,
@@ -283,7 +283,7 @@ test('one row per decision carries the kind label and the bound producer text', 
   )
   const context = findByClass(items[0], 'wwc-contextual-decision-context')
   assert.match(context.textContent, /Tool approval/u)
-  assert.match(context.textContent, /ProductSession and StageRun-bound/u)
+  assert.match(context.textContent, /ProductSession and WorkRun-bound/u)
   assert.match(context.textContent, /Expires 2026-09-04T12:10:00\.000Z/u)
   assert.equal(items[1].dataset.kind, 'input')
 })
@@ -405,7 +405,7 @@ test('a row that this page does not decide links to the owning decision surface'
   }, {
     actions: {},
     detailHref: item => `#/attention?session=${productSessionId}`
-      + `&delivery=${item.deliveryId}&stageRun=${item.stageRunId}`,
+      + `&delivery=${item.deliveryId}&workRun=${item.workRunId}`,
   })
   const row = rows(root)[0]
   assert.equal(findByClass(row, 'wwc-contextual-decision-submit').hidden, true)
@@ -415,7 +415,7 @@ test('a row that this page does not decide links to the owning decision surface'
   assert.equal(link.hidden, false)
   assert.match(link.href, new RegExp(`^#/attention\\?session=${productSessionId}`, 'u'))
   assert.match(link.href, /delivery=dlv_00000000000000000000000001/u)
-  assert.match(link.href, /stageRun=run_00000000000000000000000001/u)
+  assert.match(link.href, /workRun=wrn_00000000000000000000000001/u)
   assert.deepEqual(actions, [])
 })
 

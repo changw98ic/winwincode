@@ -30,7 +30,7 @@
 use std::fmt;
 
 use sha2::{Digest, Sha256};
-use winwincode_domain::Instant;
+use winwincode_domain::{Instant, WorkRunId};
 use winwincode_storage::{
     DeviceSchedulerLedger, DeviceSchedulerReleaseReason, DeviceSchedulerReservationGrant,
     DeviceSchedulerReservationRecord, DeviceSchedulerReservationRelease,
@@ -160,7 +160,7 @@ pub struct DeviceWorkerSchedulingRequest {
     worker_instance_id: String,
     credential_digest: String,
     product_session_id: Option<String>,
-    stage_run_id: Option<String>,
+    work_run_id: Option<String>,
     expires_at: Instant,
 }
 
@@ -183,7 +183,7 @@ impl DeviceWorkerSchedulingRequest {
         worker_instance_id: impl Into<String>,
         credential_digest: impl Into<String>,
         product_session_id: Option<String>,
-        stage_run_id: Option<String>,
+        work_run_id: Option<String>,
         expires_at: Instant,
     ) -> Result<Self, DeviceSchedulerServiceError> {
         let request = Self {
@@ -196,7 +196,7 @@ impl DeviceWorkerSchedulingRequest {
             worker_instance_id: worker_instance_id.into(),
             credential_digest: credential_digest.into(),
             product_session_id,
-            stage_run_id,
+            work_run_id,
             expires_at,
         };
         validate_prefixed(&request.request_id, "req_", "request id")?;
@@ -214,8 +214,8 @@ impl DeviceWorkerSchedulingRequest {
         if let Some(product) = &request.product_session_id {
             validate_prefixed(product, "ps_", "product session id")?;
         }
-        if let Some(stage) = &request.stage_run_id {
-            validate_prefixed(stage, "run_", "stage run id")?;
+        if let Some(work_run) = &request.work_run_id {
+            validate_prefixed(work_run, "wrn_", "WorkRun id")?;
         }
         if request.expires_at.0.len() != 24
             || !request.expires_at.0.ends_with('Z')
@@ -251,7 +251,7 @@ pub struct DeviceWorkerSchedulingReceipt {
     pub worker_instance_id: String,
     pub worker_launch_grant_id: String,
     pub product_session_id: Option<String>,
-    pub stage_run_id: Option<String>,
+    pub work_run_id: Option<String>,
     pub expires_at: Instant,
     /// True when the attempt replayed an earlier durable outcome instead of
     /// issuing a second slot.
@@ -514,7 +514,7 @@ impl<'storage> DeviceSchedulerService<'storage> {
             request.worker_instance_id.clone(),
             request.credential_digest.clone(),
             request.product_session_id.clone(),
-            request.stage_run_id.clone(),
+            request.work_run_id.clone().map(WorkRunId),
             request.expires_at.clone(),
         )
         .map_err(|issuance_error| {
@@ -797,7 +797,7 @@ fn receipt(
         worker_instance_id: grant.worker_instance_id.clone(),
         worker_launch_grant_id: grant.worker_launch_grant_id.clone(),
         product_session_id: grant.product_session_id.clone(),
-        stage_run_id: grant.stage_run_id.clone(),
+        work_run_id: grant.work_run_id.as_ref().map(|id| id.0.clone()),
         expires_at: grant.expires_at.clone(),
         replayed,
     }

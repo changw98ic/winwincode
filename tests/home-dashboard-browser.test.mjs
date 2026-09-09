@@ -116,7 +116,7 @@ test('a real browser opens the Attention-first Home dashboard as the first scree
   const scoped = `organizationId=${identity}&workspaceId=${workspaceId}`
     + `&projectId=${projectId}&repositoryId=${repositoryOne}`
   const strongflowStageRunHref = `#/strongflow?delivery=dlv_00000000000000000000000001`
-    + `&stageRun=str_00000000000000000000000001&view=unified&${scoped}`
+    + `&workRun=wrn_00000000000000000000000001&view=unified&${scoped}`
   const attentionHref = `#/attention?session=psn_00000000000000000000000001&${scoped}`
   const decisionCards = section('decisions').cards
   const decisionByTitle = title => decisionCards.find(card => card.title === title)
@@ -175,7 +175,7 @@ test('a real browser opens the Attention-first Home dashboard as the first scree
   const switchedScoped = `organizationId=${identity}&workspaceId=${workspaceId}`
     + `&projectId=${projectId}&repositoryId=${repositoryTwo}`
   const switchedStrongflowStageRunHref = `#/strongflow?delivery=dlv_00000000000000000000000002`
-    + `&stageRun=str_00000000000000000000000002&view=unified&${switchedScoped}`
+    + `&workRun=wrn_00000000000000000000000002&view=unified&${switchedScoped}`
   assert.equal(
     switchedDashboard.sections.find(section => section.id === 'active')?.cards.length,
     1,

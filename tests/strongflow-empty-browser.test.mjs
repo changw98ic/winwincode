@@ -69,7 +69,7 @@ test('a real browser creates the first Delivery and opens subscribed StrongFlow 
   assert.match(result.empty.text, /Create the first Delivery/iu)
   assert.match(
     result.created.hash,
-    /^#\/strongflow\?delivery=dlv_[0-9A-HJKMNP-TV-Z]{26}&session=psn_[0-9A-HJKMNP-TV-Z]{26}&stageRun=run_[0-9A-HJKMNP-TV-Z]{26}&view=unified$/u,
+    /^#\/strongflow\?delivery=dlv_[0-9A-HJKMNP-TV-Z]{26}&session=psn_[0-9A-HJKMNP-TV-Z]{26}&workRun=wrn_[0-9A-HJKMNP-TV-Z]{26}&view=unified$/u,
   )
   assert.equal(result.created.heading, 'First StrongFlow Delivery')
   assert.match(result.created.status, /Waiting for your input/u)
@@ -119,7 +119,7 @@ test('a real browser creates the first Delivery and opens subscribed StrongFlow 
     scope: result.scope,
     command: 'delivery.advance',
     expectedRevision: 1,
-    payload: { deliveryId: 'DELIVERY_ID' },
+    payload: { deliveryId: 'DELIVERY_ID', dispatchProfile: 'planner' },
   }])
   assert.deepEqual(result.calls.subscriptions[0].subscription.stream, {
     kind: 'delivery',

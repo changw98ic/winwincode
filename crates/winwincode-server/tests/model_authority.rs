@@ -8,16 +8,16 @@
 
 use std::path::{Path, PathBuf};
 
-use winwincode_api::generated::{
-    Actor, OrganizationScope, OrganizationScopeKind, ProjectId, RepositoryId, RepositoryScope,
-    RepositoryScopeKind, Scope, UserActor, UserActorKind, WorkspaceId,
-};
+use winwincode_api::generated::{Actor, OrganizationScope, OrganizationScopeKind, Scope};
 use winwincode_control_plane::{
     CatalogAvailability, CredentialReferenceErrorKind, CredentialReferenceService, ModelCapability,
     ModelSettingsService, ModelSettingsTarget, ModelToolSupport, ProviderCatalogRequest,
     ProviderCatalogService, ProviderDescriptor,
 };
-use winwincode_domain::{CredentialReferenceId, Instant, OrganizationId, RequestId, UserId};
+use winwincode_domain::{
+    CredentialReferenceId, OrganizationId, ProjectId, RepositoryId, RepositoryScope,
+    RepositoryScopeKind, RequestId, UserActor, UserActorKind, UserId, WorkspaceId,
+};
 use winwincode_server::{
     LocalModelRoute, configure_local_model_authority, credential_create_command,
 };
@@ -53,6 +53,7 @@ fn route(provider: &str, model: &str, credential: &str) -> LocalModelRoute {
     LocalModelRoute {
         provider: provider.to_owned(),
         model: model.to_owned(),
+        anthropic_endpoint: None,
         credential_reference: CredentialReferenceId(credential.to_owned()),
     }
 }
@@ -217,10 +218,11 @@ fn interrupted_startup_between_catalog_and_settings_converges() {
                         context_window_tokens: 128_000,
                         max_output_tokens: 16_000,
                         tool_support: ModelToolSupport::Parallel,
+                        structured_output_support:
+                            winwincode_control_plane::StructuredOutputSupport::JsonSchemaStrict,
                         reasoning_efforts: vec!["high".to_owned(), "medium".to_owned()],
                     }],
                 },
-                Instant("2026-01-01T00:00:00.000Z".to_owned()),
             )
             .expect("interrupted catalog upsert applies");
     }
@@ -301,4 +303,23 @@ fn duplicate_submission_within_a_run_is_still_rejected() {
 
     drop(storage);
     let _ = std::fs::remove_dir_all(&data_directory);
+}
+
+#[test]
+fn external_route_validates_https_and_never_selects_loopback() {
+    let mut external = route("zhipu-glm", "glm-test", "crd_00000000000000000000000001");
+    external.anthropic_endpoint =
+        Some("https://open.bigmodel.cn/api/anthropic/v1/messages".to_owned());
+    assert!(matches!(
+        external.provider_config().expect("external config"),
+        winwincode_control_plane::StandaloneProviderConfig::HttpsSse(_)
+    ));
+    for endpoint in [
+        "http://example.com/messages",
+        "https://secret@example.com/messages",
+        "",
+    ] {
+        external.anthropic_endpoint = Some(endpoint.to_owned());
+        assert!(external.provider_config().is_err());
+    }
 }

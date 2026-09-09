@@ -97,7 +97,7 @@ const otherScopeSelection = () => ({
   projectId: otherScope.projectId,
   repositoryId: otherScope.repositoryId,
 })
-const stageRunId = 'str_00000000000000000000000001'
+const workRunId = 'wrn_00000000000000000000000001'
 const deliveryId = 'dlv_00000000000000000000000001'
 const executingDeliveryId = 'dlv_00000000000000000000000002'
 const deliveredDeliveryId = 'dlv_00000000000000000000000003'
@@ -134,7 +134,7 @@ function scopeIds(identity) {
 
 function deliverySummary(overrides = {}) {
   return {
-    activeStageRunId: null,
+    activeWorkRunId: null,
     deliveryId,
     openAttentionCount: 0,
     ownership: scopeIds(scope),
@@ -177,7 +177,7 @@ function approval(overrides = {}) {
         productSessionId,
         workerSessionId: canonicalId('wss', 1),
         codexThreadId: canonicalId('thr', 1),
-        stageRunId,
+        workRunId,
       },
     },
     ...overrides,
@@ -200,7 +200,7 @@ function deliveryDetail(delivery) {
           resolutionSummary: null,
           resolvedAt: null,
           resolvedBy: null,
-          stageRunId: delivery.activeStageRunId,
+          workRunId: delivery.activeWorkRunId,
           status: 'open',
           title: 'Review the proposed delivery scope',
           type: 'scope_change',
@@ -364,7 +364,7 @@ function usageState(overrides = {}) {
     timeWindow: null,
     truncated: false,
     byDelivery: [],
-    byStageRun: [],
+    byWorkRun: [],
     byRole: [],
     byModel: [],
     byProvider: [],
@@ -399,7 +399,7 @@ function decisionCard(overrides = {}) {
     sessionTitle: 'First Chat',
     deliveryId: null,
     deliveryTitle: null,
-    stageRunId: null,
+    workRunId: null,
     ...overrides,
   }
 }
@@ -486,7 +486,7 @@ test('recent visits keep a bounded number of records and survive unusable storag
 test('a Delivery deep link is recognised and every other route is ignored', () => {
   assert.equal(
     homeDeliveryVisitFromHash(
-      '#/strongflow?delivery=dlv_00000000000000000000000001&stageRun=str_00000000000000000000000001',
+      '#/strongflow?delivery=dlv_00000000000000000000000001&workRun=wrn_00000000000000000000000001',
     ),
     deliveryId,
   )
@@ -501,7 +501,7 @@ test('the dashboard groups Delivery projections into bounded, ordered sections',
     deliveryId: executingDeliveryId,
     title: 'Running delivery',
     status: 'executing',
-    activeStageRunId: stageRunId,
+    activeWorkRunId: workRunId,
     updatedAt: '2026-09-03T08:50:00.000Z',
   })
   const verifying = deliverySummary({
@@ -571,7 +571,7 @@ test('the dashboard groups Delivery projections into bounded, ordered sections',
     visited: 0,
   })
   assert.equal(cards.active[0]?.failedTasks, 0)
-  assert.equal(cards.active[1]?.activeStageRunId, stageRunId)
+  assert.equal(cards.active[1]?.activeWorkRunId, workRunId)
   assert.equal(DEFAULT_HOME_DASHBOARD_LIMITS.deliveries, 4)
 
   // Section limits stay bounded even when the Scope holds many Deliveries.
@@ -716,7 +716,7 @@ test('the composed view model reads every existing projection once and publishes
         deliveryId: executingDeliveryId,
         title: 'Running delivery',
         status: 'executing',
-        activeStageRunId: stageRunId,
+        activeWorkRunId: workRunId,
       }),
       deliverySummary({
         title: 'Delivery under attention',
@@ -791,13 +791,13 @@ test('a decision card links to the exact decision surface and the exact Chat ses
     sessionTitle: null,
     deliveryId,
     deliveryTitle: 'Delivery under attention',
-    stageRunId,
+    workRunId,
   })
-  const inputCard = decisionCard({ stageRunId })
+  const inputCard = decisionCard({ workRunId })
   assert.equal(
     homeDecisionHash(attentionCard, scopeSelection),
     '#/strongflow?delivery=dlv_00000000000000000000000001'
-      + '&stageRun=str_00000000000000000000000001'
+      + '&workRun=wrn_00000000000000000000000001'
       + '&view=unified'
       + '&organizationId=org_00000000000000000000000001'
       + '&workspaceId=wsp_00000000000000000000000001'
@@ -817,11 +817,11 @@ test('a decision card links to the exact decision surface and the exact Chat ses
       deliveryId,
       deliveryTitle: 'Delivery under attention',
       deliveryRevision: 3,
-      activeStageRunId: stageRunId,
+      activeWorkRunId: workRunId,
     }]),
     '#/attention?session=psn_00000000000000000000000001'
       + '&delivery=dlv_00000000000000000000000001'
-      + '&stageRun=str_00000000000000000000000001'
+      + '&workRun=wrn_00000000000000000000000001'
       + '&organizationId=org_00000000000000000000000001'
       + '&workspaceId=wsp_00000000000000000000000001'
       + '&projectId=prj_00000000000000000000000001'
@@ -837,19 +837,19 @@ test('a decision card links to the exact decision surface and the exact Chat ses
   )
 })
 
-test('a Delivery card links to the exact StrongFlow route of its active StageRun', () => {
+test('a Delivery card links to the exact StrongFlow route of its active WorkRun', () => {
   const scoped = '&organizationId=org_00000000000000000000000001'
     + '&workspaceId=wsp_00000000000000000000000001'
     + '&projectId=prj_00000000000000000000000001'
     + '&repositoryId=rep_00000000000000000000000001'
   assert.equal(
-    homeDeliveryHash({ deliveryId, activeStageRunId: stageRunId }, scopeSelection),
+    homeDeliveryHash({ deliveryId, activeWorkRunId: workRunId }, scopeSelection),
     '#/strongflow?delivery=dlv_00000000000000000000000001'
-      + '&stageRun=str_00000000000000000000000001&view=unified'
+      + '&workRun=wrn_00000000000000000000000001&view=unified'
       + scoped,
   )
   assert.equal(
-    homeDeliveryHash({ deliveryId, activeStageRunId: null }, scopeSelection),
+    homeDeliveryHash({ deliveryId, activeWorkRunId: null }, scopeSelection),
     `#/strongflow?delivery=dlv_00000000000000000000000001&view=unified${scoped}`,
   )
 })
@@ -1056,7 +1056,7 @@ test('the Home page mounts one polite live region and exact deep links on every 
         deliveryId: executingDeliveryId,
         title: 'Running delivery',
         status: 'executing',
-        activeStageRunId: stageRunId,
+        activeWorkRunId: workRunId,
       }),
       deliverySummary({
         deliveryId: deliveredDeliveryId,
@@ -1078,7 +1078,7 @@ test('the Home page mounts one polite live region and exact deep links on every 
         sessionTitle: null,
         deliveryId,
         deliveryTitle: 'Delivery under attention',
-        stageRunId,
+        workRunId,
       }),
       decisionCard({
         id: 'inp_00000000000000000000000009',
@@ -1127,15 +1127,15 @@ test('the Home page mounts one polite live region and exact deep links on every 
   )
   assert.equal(
     actions.filter(href => href === `#/strongflow?delivery=${deliveryId}`
-      + `&stageRun=${stageRunId}&view=unified&${scoped}`).length,
+      + `&workRun=${workRunId}&view=unified&${scoped}`).length,
     1,
     'the delivery-bound decision opens the exact Delivery context',
   )
   assert.equal(
     actions.filter(href => href === `#/strongflow?delivery=${executingDeliveryId}`
-      + `&stageRun=${stageRunId}&view=unified&${scoped}`).length,
+      + `&workRun=${workRunId}&view=unified&${scoped}`).length,
     1,
-    'the running card opens the exact StrongFlow StageRun',
+    'the running card opens the exact StrongFlow WorkRun',
   )
   assert.equal(
     actions.filter(href => href === `#/strongflow?delivery=${deliveredDeliveryId}`

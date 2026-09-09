@@ -88,10 +88,12 @@ import {
 import type {
   StrongFlowCreateState,
   StrongFlowCreateViewModel,
+  DeliveryCancelRequest,
   StrongFlowProjection,
   StrongFlowViewModel,
   StrongFlowViewModelState,
 } from './strongflow-view-model.js'
+import { strongFlowCancellableWorkRuns } from './strongflow-history-tree.js'
 import {
   canAdvanceStrongFlowDelivery,
   canSubmitStrongFlowVerdict,
@@ -117,7 +119,7 @@ export interface StrongFlowPageOptions {
   readonly storage?: Pick<Storage, 'getItem' | 'setItem' | 'removeItem'> | null
   readonly viewport?: StrongFlowLayoutViewport
   /**
-   * Browser history seam for the presentation-only Task/StageRun history
+   * Browser history seam for the presentation-only Task/WorkRun history
    * selection. Defaults to the page window; injection keeps tests hermetic.
    */
   readonly historyLocation?: StrongFlowHistoryLocation | null
@@ -844,11 +846,6 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
     'button',
     'wwc-strongflow-reject-solution',
   ) as HTMLButtonElement
-  const approveTasks = strongFlowElement(
-    document,
-    'button',
-    'wwc-strongflow-approve-tasks',
-  ) as HTMLButtonElement
   const submitVerdict = strongFlowElement(
     document,
     'button',
@@ -864,6 +861,13 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
     document,
     'button',
     'wwc-strongflow-advance-delivery',
+  ) as HTMLButtonElement
+  const cancelWorkRunLabel = document.createElement('label')
+  const cancelWorkRunSelect = document.createElement('select')
+  const cancelWorkRun = strongFlowElement(
+    document,
+    'button',
+    'wwc-strongflow-cancel-workrun',
   ) as HTMLButtonElement
   const historyBlockedNote = strongFlowElement(
     document,
@@ -906,12 +910,14 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
   }
   const reviewDraft = createEditableDraft<ReviewDraftValues>({ revisionSensitive: true })
   /**
-   * True while a historical (non-current) StageRun is under review. Every
+   * True while a historical (non-current) WorkRun is under review. Every
    * current-Delivery mutation control must fail closed in that state; the
    * Server stays the sole mutation authority for the live run.
    */
   let historicalReviewOpen = false
   let historyRouteUnavailable = false
+  let selectedCancelWorkRunId: string | null = null
+  const cancelRequestKeys = new Map<string, { readonly revision: number; readonly requestId: DeliveryCancelRequest['requestId'] }>()
   let candidateViewMode: CandidateDiffViewMode = options.candidateView ?? 'unified'
   let diagramSelection: StrongFlowDiagramSelection | null = null
   let candidateLine = options.candidateLine ?? null
@@ -949,16 +955,16 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
     onOpenEvidence: openEvidence,
     ...(options.copy === undefined ? {} : { copy: options.copy }),
   })
-  // UI-502: the decisions this exact Delivery and StageRun is waiting on, with
+  // UI-502: the decisions this exact Delivery and WorkRun is waiting on, with
   // one link per row into the canonical session decision surface that carries
-  // the return path to this StageRun.  The card projects this page's own
+  // the return path to this WorkRun.  The card projects this page's own
   // snapshot and owns no command, so it adds no second mutation authority.
   const decisionHost = strongFlowElement(document, 'div', 'wwc-strongflow-decision-host')
   const decisionCard: ContextualDecisionCard = mountContextualDecisionCard({
     root: decisionHost,
     id: 'wwc-strongflow-decisions',
     title: 'Decisions in this Delivery',
-    description: 'What this StageRun is waiting on and where each decision is made.',
+    description: 'What this WorkRun is waiting on and where each decision is made.',
     className: 'wwc-strongflow-contextual-decisions',
     readOnly,
     detailHref: item => {
@@ -967,15 +973,14 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       const deliveryId = item.deliveryId
         ?? options.model.state.projection?.delivery.deliveryId
         ?? null
-      const productSessionId = options.model.state.projection?.stage.sessionBinding
-        ?.productSessionId ?? null
+      const productSessionId = options.model.state.projection?.runtime.productSessionId ?? null
       if (productSessionId === null || deliveryId === null) return null
       return scopeHash(
         `#/attention?session=${encodeURIComponent(productSessionId)}`
           + `&delivery=${encodeURIComponent(deliveryId)}`
-          + (item.stageRunId === null
+          + (item.workRunId === null
             ? ''
-            : `&stageRun=${encodeURIComponent(item.stageRunId)}`),
+            : `&workRun=${encodeURIComponent(item.workRunId)}`),
         routeScope,
       )
     },
@@ -1084,12 +1089,16 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
   requestChanges.textContent = 'Request changes'
   rejectSolution.type = 'button'
   rejectSolution.textContent = 'Reject solution'
-  approveTasks.type = 'button'
-  approveTasks.textContent = 'Approve task breakdown'
   submitVerdict.type = 'button'
   submitVerdict.textContent = 'Compute current verdict'
   advanceDelivery.type = 'button'
   advanceDelivery.textContent = 'Approve final Delivery'
+  cancelWorkRunLabel.textContent = 'Active WorkRun to cancel'
+  cancelWorkRunLabel.append(cancelWorkRunSelect)
+  cancelWorkRunSelect.className = 'wwc-strongflow-cancel-workrun-select'
+  cancelWorkRunSelect.setAttribute('aria-label', 'Active WorkRun to cancel')
+  cancelWorkRun.type = 'button'
+  cancelWorkRun.textContent = 'Cancel WorkRun'
 
   const tabItems: readonly TabItem[] = STRONGFLOW_ARTIFACTS_TABS.map(tab => ({
     id: tab,
@@ -1274,7 +1283,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
   // Static guidance text: its content never mutates while visible, so it is
   // deliberately not a live region — the page's single polite status stays the
   // only live announcement while a historical review is open.
-  historyBlockedNote.textContent = 'History review is open. Return to the current StageRun to act on this Delivery.'
+  historyBlockedNote.textContent = 'History review is open. Return to the current WorkRun to act on this Delivery.'
   historyBlockedNote.hidden = true
   // Static guidance text naming the exact unmet criteria. It is not a live
   // region: the page keeps exactly one polite announcement channel.
@@ -1284,12 +1293,13 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
     historyBlockedNote,
     solutionActions,
     reviewPanel.root,
-    approveTasks,
     submitVerdict,
     attentionActions,
     actionsOmitted,
     advanceBlocked,
     advanceDelivery,
+    cancelWorkRunLabel,
+    cancelWorkRun,
   )
   navigation.append(deliveriesRoot, tasksSection, stagesSection)
   mainRegion.append(details, historyHost, actions)
@@ -1385,11 +1395,11 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
     document,
     limits,
     loaders: {
-      loadRuntime: (stageRunId, signal) => (
-        options.model.loadStageRunRuntime(stageRunId, signal)
+      loadRuntime: (workRunId, signal) => (
+        options.model.loadWorkRunRuntime(workRunId, signal)
       ),
-      loadCandidates: (stageRunId, signal) => (
-        options.model.loadStageRunCandidates(stageRunId, signal)
+      loadCandidates: (workRunId, signal) => (
+        options.model.loadWorkRunCandidates(workRunId, signal)
       ),
       loadCandidateReview: (candidate, signal) => options.model.loadCandidateHistoricalReview(
         {
@@ -1804,14 +1814,29 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       requestedChanges: [],
     })
   }
-  const onApproveTasks = () => {
-    if (!readOnly && !historicalReviewOpen) void options.model.approveTaskBreakdown()
-  }
   const onSubmitVerdict = () => {
     if (!readOnly && !historicalReviewOpen) void options.model.submitVerdict()
   }
   const onAdvanceDelivery = () => {
     if (!readOnly && !historicalReviewOpen) void options.model.advanceDelivery()
+  }
+  const onCancelWorkRun = () => {
+    if (readOnly || historicalReviewOpen) return
+    const projection = options.model.state.projection
+    const workRunId = selectedCancelWorkRunId
+    if (projection === null || workRunId === null) return
+    const revision = projection.metadata.revisions.delivery
+    const prior = cancelRequestKeys.get(workRunId)
+    const request: DeliveryCancelRequest = {
+      deliveryId: projection.delivery.deliveryId,
+      workRunId: workRunId as DeliveryCancelRequest['workRunId'],
+      expectedRevision: revision,
+      requestId: prior?.revision === revision
+        ? prior.requestId
+        : options.evidence.nextRequestId(),
+    }
+    cancelRequestKeys.set(workRunId, { revision, requestId: request.requestId })
+    void options.model.cancelWorkRun(request)
   }
   const onRetry = () => { void options.model.refresh() }
   const onReconnect = () => { options.model.reconnect() }
@@ -1830,9 +1855,13 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
   approveSolution.addEventListener('click', onApproveSolution)
   requestChanges.addEventListener('click', onRequestChanges)
   rejectSolution.addEventListener('click', onRejectSolution)
-  approveTasks.addEventListener('click', onApproveTasks)
   submitVerdict.addEventListener('click', onSubmitVerdict)
   advanceDelivery.addEventListener('click', onAdvanceDelivery)
+  cancelWorkRun.addEventListener('click', onCancelWorkRun)
+  cancelWorkRunSelect.addEventListener('change', () => {
+    selectedCancelWorkRunId = cancelWorkRunSelect.value || null
+    renderActions(options.model.state)
+  })
   retry.addEventListener('click', onRetry)
   reconnect.addEventListener('click', onReconnect)
   comments.addEventListener('input', onReviewCommentsInput)
@@ -1844,6 +1873,20 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
   function activeDeliverySummary(state: StrongFlowViewModelState): DeliveryProjection | null {
     const active = state.projection?.delivery ?? null
     if (active === null) return null
+    const currentProjection = state.projection
+    if (currentProjection === null) return null
+    const aggregate = currentProjection.workRunAggregate
+    const selected = aggregate !== undefined
+      && currentProjection.runtime.workRunId !== null
+      && aggregate.runs.some(run => run.id === currentProjection.runtime.workRunId)
+      ? currentProjection.runtime.workRunId
+      : null
+    const activeRuns = aggregate?.runs.filter(run => (
+      run.state === 'queued'
+      || run.state === 'leased'
+      || run.state === 'running'
+      || run.state === 'candidate_ready'
+    )) ?? []
     return {
       schemaVersion: active.schemaVersion,
       deliveryId: active.deliveryId,
@@ -1852,7 +1895,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       title: active.requirements.title,
       updatedAt: state.projection?.metadata.updatedAt ?? '',
       ownership: active.ownership,
-      activeStageRunId: state.projection?.stage.id ?? null,
+      activeWorkRunId: selected ?? (activeRuns.length === 1 ? activeRuns[0]?.id ?? null : null),
       openAttentionCount: active.attention.filter(item => item.status === 'open').length,
       taskCounts: {
         total: active.tasks.length,
@@ -1936,8 +1979,8 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
     historyNavigation.update(historyTree)
     const historySelection = historyNavigation.selection()
     historicalReviewOpen = historyRouteUnavailable || (
-      historySelection.stageRunId !== null
-      && projection.stage.id !== historySelection.stageRunId
+      historySelection.workRunId !== null
+      && historyTree?.currentWorkRunId !== historySelection.workRunId
     )
     runDetail.update({ tree: historyTree, selection: historySelection })
     decisionHost.hidden = false
@@ -2049,9 +2092,6 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
     rejectSolution.disabled = reviewDisabled
     keepReviewDraft.disabled = readOnly || busy || reviewInFlight || historicalReviewOpen
     useServerReview.disabled = readOnly || busy || reviewInFlight || historicalReviewOpen
-    approveTasks.hidden = review?.reviewStatus !== 'approved'
-      || (projection?.delivery.tasks.length ?? 0) > 0
-    approveTasks.disabled = readOnly || busy || historicalReviewOpen
     const verdictVisible = projection !== null && canSubmitStrongFlowVerdict(projection)
     if (verdictVisible && submitVerdict.parentNode === null) {
       actions.insertBefore(submitVerdict, attentionActions)
@@ -2075,6 +2115,45 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
         : `${unmet.join(', ')} did not pass`}. Approve a bounded rework and `
         + 'recompute the Verdict before approving this Delivery.'
     }
+    const cancellableRuns = projection === null
+      ? []
+      : strongFlowCancellableWorkRuns(projection)
+    if (selectedCancelWorkRunId !== null
+      && !cancellableRuns.some(run => run.id === selectedCancelWorkRunId)) {
+      selectedCancelWorkRunId = null
+    }
+    if (selectedCancelWorkRunId === null && cancellableRuns.length === 1) {
+      selectedCancelWorkRunId = cancellableRuns[0]?.id ?? null
+    }
+    cancelWorkRunSelect.replaceChildren()
+    if (cancellableRuns.length === 0) {
+      const emptyOption = document.createElement('option')
+      emptyOption.value = ''
+      emptyOption.textContent = 'No queued, leased, or running WorkRuns'
+      cancelWorkRunSelect.append(emptyOption)
+    } else {
+      if (selectedCancelWorkRunId === null && cancellableRuns.length > 1) {
+        const placeholder = document.createElement('option')
+        placeholder.value = ''
+        placeholder.textContent = 'Select a WorkRun'
+        placeholder.selected = true
+        cancelWorkRunSelect.append(placeholder)
+      }
+      for (const run of cancellableRuns) {
+        const option = document.createElement('option')
+        option.value = run.id
+        option.textContent = `${run.id} (${run.state})`
+        option.selected = run.id === selectedCancelWorkRunId
+        cancelWorkRunSelect.append(option)
+      }
+    }
+    cancelWorkRunLabel.hidden = cancellableRuns.length === 0
+    cancelWorkRun.hidden = cancellableRuns.length === 0
+    cancelWorkRunSelect.disabled = readOnly || busy || historicalReviewOpen
+    cancelWorkRun.disabled = readOnly
+      || busy
+      || historicalReviewOpen
+      || selectedCancelWorkRunId === null
     const nodes: readonly ReviewNode[] = review === null
       ? []
       : boundedItems(
@@ -2374,9 +2453,9 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       approveSolution.removeEventListener('click', onApproveSolution)
       requestChanges.removeEventListener('click', onRequestChanges)
       rejectSolution.removeEventListener('click', onRejectSolution)
-      approveTasks.removeEventListener('click', onApproveTasks)
       submitVerdict.removeEventListener('click', onSubmitVerdict)
       advanceDelivery.removeEventListener('click', onAdvanceDelivery)
+      cancelWorkRun.removeEventListener('click', onCancelWorkRun)
       comments.value = ''
       changes.value = ''
       reviewDraft.reset()

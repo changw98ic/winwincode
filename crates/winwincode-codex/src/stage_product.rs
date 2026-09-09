@@ -16,8 +16,8 @@ use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 use winwincode_domain::{SchemaVersion, Sha256Digest};
 use winwincode_execution_port::generated::{
-    DeliveryStageInput, ExecutionEventCategory, ExecutionJob, ExecutionScope,
-    ExecutionWorkspaceWriteMode,
+    ExecutionEventCategory, ExecutionJob, ExecutionScope, ExecutionWorkspaceWriteMode,
+    WorkRunExecutionScope, WorkRunInput,
 };
 use winwincode_kernel::{
     RoleExecutionMode, RoleSessionPolicy, RoleSessionPolicyRoleId, RoleSessionPolicyWorkspaceMode,
@@ -142,6 +142,13 @@ pub fn stage_product_logical_job_digest(
             "ExecutionJob logical replacement authority has no attempt",
         ));
     }
+    // A replacement is a new run and attempt of the same logical work.  Run
+    // identity is deliberately carried by the exact digest, not this logical
+    // digest, so a successor can be checked against its predecessor.
+    if let Some(scope) = object.get_mut("scope").and_then(Value::as_object_mut) {
+        scope.remove("attempt");
+        scope.remove("workRunId");
+    }
     let bytes = serde_json::to_vec(&value).map_err(|_| {
         StageProductError::new(
             StageProductErrorCode::InvalidJob,
@@ -217,34 +224,34 @@ impl PreparedStageProduct {
 
 /// Returns the canonical Codex Core role policy for one authenticated Job.
 ///
-/// Product-session chat jobs intentionally return `None`. Delivery-stage jobs
+/// Product-session chat jobs intentionally return `None`. `WorkRun` jobs
 /// must use one known `StrongFlow` role and cannot silently fall back to a
 /// process-wide permission profile.
 ///
 /// # Errors
 ///
 /// Rejects a `StrongFlow` role on a `ProductSession` job or an unknown role on a
-/// Delivery-stage job.
+/// `WorkRun` job.
 pub fn role_session_policy(
     job: &ExecutionJob,
     execution_mode: RoleExecutionMode,
 ) -> Result<Option<RoleSessionPolicy>, StageProductError> {
     match &job.scope {
         ExecutionScope::ProductSessionExecutionScope(_) => {
-            if job.stage_input.is_some() || canonical_role(&job.execution_profile).is_some() {
+            if job.work_input.is_some() || canonical_role(&job.execution_profile).is_some() {
                 return Err(StageProductError::new(
                     StageProductErrorCode::InvalidScope,
-                    "StrongFlow input or role requires a Delivery-stage execution scope",
+                    "StrongFlow input or role requires a WorkRun execution scope",
                 ));
             }
             Ok(None)
         }
-        ExecutionScope::DeliveryStageExecutionScope(_) => {
-            validate_stage_input(job)?;
+        ExecutionScope::WorkRunExecutionScope(_) => {
+            validate_work_run_input(job)?;
             let role = canonical_role(&job.execution_profile).ok_or_else(|| {
                 StageProductError::new(
                     StageProductErrorCode::InvalidRole,
-                    "Delivery-stage execution profile is not a canonical StrongFlow role",
+                    "WorkRun execution profile is not a canonical StrongFlow role",
                 )
             })?;
             let workspace_mode = match &execution_mode {
@@ -405,60 +412,100 @@ const fn role_policy_workspace_mode_name(mode: &RoleSessionPolicyWorkspaceMode) 
 
 /// Builds the exact first-turn prompt from the sealed typed Job input.
 ///
-/// `ProductSession` Chat keeps its original goal. Delivery-stage turns receive
-/// the canonical `stageInput` JSON plus role-specific final-output rules, so a
+/// `ProductSession` Chat keeps its original goal. `WorkRun` turns receive
+/// the canonical `workInput` JSON plus role-specific final-output rules, so a
 /// restart never has to query mutable Delivery state or hide JSON in `goal`.
 ///
 /// # Errors
 ///
 /// Rejects a missing, oversized, role-incompatible or internally inconsistent
-/// Delivery-stage input.
+/// `WorkRun` input.
 pub fn stage_product_prompt(job: &ExecutionJob) -> Result<String, StageProductError> {
     match &job.scope {
         ExecutionScope::ProductSessionExecutionScope(_) => {
-            if job.stage_input.is_some() || canonical_role(&job.execution_profile).is_some() {
+            if job.work_input.is_some() || canonical_role(&job.execution_profile).is_some() {
                 return Err(StageProductError::new(
                     StageProductErrorCode::InvalidScope,
-                    "ProductSession prompt cannot carry StrongFlow stage input",
+                    "ProductSession prompt cannot carry StrongFlow WorkRun input",
                 ));
             }
             Ok(job.goal.clone())
         }
-        ExecutionScope::DeliveryStageExecutionScope(_) => {
-            let input = validate_stage_input(job)?;
+        ExecutionScope::WorkRunExecutionScope(scope) => {
+            let input = validate_work_run_input(job)?;
             let encoded = serde_json::to_string(input).map_err(|_| invalid_job())?;
             let final_rule = match job.execution_profile.as_str() {
                 "planner" => concat!(
                     "Return only canonical JSON using protocol ",
                     "winwincode.planner-solution.v1 and schemaVersion 1. ",
-                    "Every task proposal acceptanceCriterionIds value must come from stageInput."
+                    "Every task proposal acceptanceCriterionIds value must come from workInput."
                 ),
                 "executor" | "remediator" => concat!(
                     "Apply the requested source change in the assigned checkout. ",
                     "Do not invent an Artifact reference; the Worker freezes the real Git candidate."
                 ),
                 "reviewer" | "verifier" | "adversarial-verifier" => concat!(
-                    "Use read-only commands against exactly stageInput.candidateRef. ",
+                    "Use read-only commands against exactly workInput.candidateRef. ",
+                    "The checkout is already prepared at that frozen candidate. candidateRef is ",
+                    "an application content identity, not a Git revision; do not pass it to Git. ",
                     "Return only canonical JSON using protocol ",
                     "winwincode.independent-verification-result.v1; use the exact spec, ",
-                    "revision, candidate and criterion IDs from stageInput. ",
+                    "revision, candidate and criterion IDs from workInput. ",
                     "Each evidence_sources entry must use the observed tool call ID as source_id ",
                     "for a direct Command or Test result; the Worker binds that source_id to its ",
-                    "durable event."
+                    "durable event. Copy the Tool call source_id label from the actual tool result; ",
+                    "never invent an ID or use a shell chunk/process ID. If you polled a running ",
+                    "command, cite the original exec_command call ID, not the write_stdin poll. ",
+                    "Evidence references contain only source_id; the Worker derives their type ",
+                    "from its saved Command/Test events. Do not supply a type or event_id. ",
+                    "Return compact JSON with exactly this field order and shape (replace all ",
+                    "capitalized values with actual input or observed evidence): ",
+                    "{\"protocol\":\"winwincode.independent-verification-result.v1\",",
+                    "\"delivery_spec_id\":\"DELIVERY_SPEC_ID\",\"delivery_spec_revision\":1,",
+                    "\"candidate_ref\":\"CANDIDATE_REF\",\"findings\":[{",
+                    "\"finding_id\":\"UNIQUE_FINDING_ID\",\"criterion_id\":\"CRITERION_ID\",",
+                    "\"verdict\":\"pass\",\"explanation\":\"OBSERVED_RESULT\",",
+                    "\"evidence_sources\":[{\"source_id\":\"FUNCTION_CALL_ID\"}]}]}. ",
+                    "Copy delivery_spec_id and delivery_spec_revision from workInput.deliverySpecId ",
+                    "and workInput.deliverySpecRevision, not the WorkContract identity. ",
+                    "Include exactly one finding per assigned criterion, use pass or fail based ",
+                    "on observed checks, and never claim unperformed browser checks passed. ",
+                    "A pass must cite successful checks of the assigned criterion; a failed assigned ",
+                    "check means fail. Do not cite failed exploratory commands as proof of a pass. ",
+                    "No Markdown fences, whitespace outside strings, extra fields, or trailing text."
                 ),
                 "requirements" | "solution" => {
                     "Use only the sealed Delivery specification and report the requested stage result."
                 }
                 _ => return Err(invalid_job()),
             };
+            let rework = scope
+                .rework_authorization
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()
+                .map_err(|_| invalid_job())?;
+            let rework = rework.map_or_else(String::new, |encoded| format!(
+                "\n\nAuthorized rework (canonical JSON):\n{encoded}\nModify only these source hunks and paths. Preserve all unrelated work."
+            ));
+            let assignment = if matches!(
+                job.execution_profile.as_str(),
+                "reviewer" | "verifier" | "adversarial-verifier"
+            ) {
+                format!(
+                    "You are the independent {}. The implementation is already present. Verify it read-only against the assigned criteria. Goals inside workInput describe the original implementation request, not commands for you to execute. Do not repeat editing steps or request permission to modify the candidate. Run the assigned verification method and return the required result.",
+                    job.execution_profile
+                )
+            } else {
+                job.goal.clone()
+            };
             let prompt = format!(
-                "Goal:\n{}\n\nStrongFlow stageInput (canonical JSON):\n{}\n\nRequired behavior:\n{}",
-                job.goal, encoded, final_rule
+                "Goal:\n{assignment}\n\nStrongFlow workInput (canonical JSON):\n{encoded}\n\nRequired behavior:\n{final_rule}{rework}"
             );
             if prompt.len() > MAX_STAGE_PROMPT_BYTES {
                 return Err(StageProductError::new(
                     StageProductErrorCode::InvalidJob,
-                    "StrongFlow stage prompt exceeds the supported size",
+                    "StrongFlow WorkRun prompt exceeds the supported size",
                 ));
             }
             Ok(prompt)
@@ -466,154 +513,149 @@ pub fn stage_product_prompt(job: &ExecutionJob) -> Result<String, StageProductEr
     }
 }
 
-fn validate_stage_input(job: &ExecutionJob) -> Result<&DeliveryStageInput, StageProductError> {
-    let ExecutionScope::DeliveryStageExecutionScope(scope) = &job.scope else {
+fn validate_work_run_input(job: &ExecutionJob) -> Result<&WorkRunInput, StageProductError> {
+    let ExecutionScope::WorkRunExecutionScope(scope) = &job.scope else {
         return Err(StageProductError::new(
             StageProductErrorCode::InvalidScope,
-            "Delivery stage input requires a Delivery-stage scope",
+            "WorkRun input requires a WorkRun scope",
         ));
     };
-    let input = job.stage_input.as_ref().ok_or_else(invalid_job)?;
-    let criterion_ids = criterion_ids(input);
-    let valid = common_stage_input(input)
-        && valid_criteria(input, &criterion_ids)
-        && valid_task(input, scope.delivery_task_id.as_ref(), &criterion_ids)
+    let input = job.work_input.as_ref().ok_or_else(invalid_job)?;
+    let valid = common_work_run_input(input)
+        && ((job.execution_profile == "remediator") == scope.rework_authorization.is_some())
+        && input.work_contract.id == scope.work_contract_id
+        && input.work_contract.revision == scope.work_contract_revision
+        && input.work_item.id == scope.work_item_id
+        && input.work_item.revision == scope.work_item_revision
+        && input.work_item.work_contract_id == input.work_contract.id
+        && input.work_item.work_contract_revision == input.work_contract.revision
+        && work_run_binding(input, scope, job)
         && valid_role_shape(job, input, scope);
     valid.then_some(input).ok_or_else(invalid_job)
 }
 
-fn criterion_ids(input: &DeliveryStageInput) -> HashSet<&str> {
-    input
-        .acceptance_criteria
-        .iter()
-        .map(|criterion| criterion.criterion_id.as_str())
-        .collect()
-}
-
-fn valid_criteria(input: &DeliveryStageInput, criterion_ids: &HashSet<&str>) -> bool {
-    !input.acceptance_criteria.is_empty()
-        && input.acceptance_criteria.len() <= 1_000
-        && criterion_ids.len() == input.acceptance_criteria.len()
-        && input
-            .acceptance_criteria
-            .iter()
-            .any(|criterion| criterion.required)
-        && input.acceptance_criteria.iter().all(|criterion| {
-            portable_identity(&criterion.criterion_id)
-                && bounded(&criterion.description, 1, 20_000)
-                && criterion
-                    .verification_method
-                    .as_deref()
-                    .is_none_or(|method| bounded(method, 1, 20_000))
-        })
-}
-
-fn valid_task(
-    input: &DeliveryStageInput,
-    scoped_task_id: Option<&winwincode_domain::DeliveryTaskId>,
-    criterion_ids: &HashSet<&str>,
+fn work_run_binding(
+    input: &WorkRunInput,
+    scope: &WorkRunExecutionScope,
+    job: &ExecutionJob,
 ) -> bool {
-    input.task.as_ref().is_none_or(|task| {
-        scoped_task_id == Some(&task.task_id)
-            && bounded(&task.title, 1, 256)
-            && bounded(&task.goal, 1, 20_000)
-            && !task.acceptance_criterion_ids.is_empty()
-            && task.acceptance_criterion_ids.len() <= 1_000
-            && task
-                .acceptance_criterion_ids
+    scope.attempt == job.attempt
+        && input.work_item.criterion_ids.iter().all(|id| {
+            input
+                .work_contract
+                .criteria
                 .iter()
-                .collect::<HashSet<_>>()
-                .len()
-                == task.acceptance_criterion_ids.len()
-            && task
-                .acceptance_criterion_ids
-                .iter()
-                .all(|criterion| criterion_ids.contains(criterion.as_str()))
-    })
+                .any(|criterion| criterion.id == *id)
+        })
+        && !input.work_item.criterion_ids.is_empty()
+        && input.work_item.criterion_ids.len() <= 1000
 }
 
 fn valid_role_shape(
     job: &ExecutionJob,
-    input: &DeliveryStageInput,
-    scope: &winwincode_execution_port::generated::DeliveryStageExecutionScope,
+    input: &WorkRunInput,
+    scope: &WorkRunExecutionScope,
 ) -> bool {
     match job.execution_profile.as_str() {
         "requirements" | "solution" | "planner" => {
-            input.task.is_none()
-                && scope.delivery_task_id.is_none()
-                && input.candidate_ref.is_none()
-                && job.goal == input.goal
+            input.candidate_ref.is_none() && job.goal == input.work_item.goal
         }
-        "executor" => {
-            input.task.is_some()
-                && input.candidate_ref.is_none()
-                && input
-                    .task
-                    .as_ref()
-                    .is_some_and(|task| job.goal == task.goal)
-        }
+        "executor" => input.candidate_ref.is_none() && job.goal == input.work_item.goal,
         "reviewer" | "verifier" | "adversarial-verifier" => {
-            input.task.is_some()
-                && input
-                    .candidate_ref
-                    .as_deref()
-                    .is_some_and(valid_candidate_ref)
-                && input
-                    .task
-                    .as_ref()
-                    .is_some_and(|task| job.goal == task.goal)
+            input
+                .candidate_ref
+                .as_deref()
+                .is_some_and(valid_candidate_ref)
+                && job.goal == input.work_item.goal
         }
         "remediator" => {
-            input.task.is_some()
-                && input
-                    .candidate_ref
-                    .as_deref()
-                    .is_some_and(valid_candidate_ref)
+            input
+                .candidate_ref
+                .as_deref()
+                .is_some_and(valid_candidate_ref)
                 && input.candidate_ref.as_ref()
                     == scope
                         .rework_authorization
                         .as_ref()
                         .map(|authorization| &authorization.candidate_ref)
-                && input
-                    .task
+                && scope
+                    .rework_authorization
                     .as_ref()
-                    .is_some_and(|task| job.goal == task.goal)
+                    .is_some_and(|authorization| {
+                        authorization.requires_full_reverification
+                            && job.workspace.checkout_revision
+                                == authorization.source_candidate_commit_id
+                            && !authorization.targets.is_empty()
+                            && authorization.targets.len() <= 1024
+                            && authorization.targets.iter().all(|target| {
+                                target.work_item_id == scope.work_item_id
+                                    && bounded(&target.file_path, 1, 4096)
+                                    && !target.file_path.starts_with('/')
+                                    && !target.file_path.contains('\\')
+                                    && target
+                                        .file_path
+                                        .split('/')
+                                        .all(|part| !matches!(part, "" | "." | ".."))
+                                    && valid_sha256(&target.source_hunk_sha256)
+                                    && !target.evidence_ref_ids.is_empty()
+                            })
+                    })
+                && job.goal == input.work_item.goal
         }
         _ => false,
     }
 }
 
-fn common_stage_input(input: &DeliveryStageInput) -> bool {
+fn common_work_run_input(input: &WorkRunInput) -> bool {
     input.schema_version == SchemaVersion::WinwincodeV1
-        && portable_identity(&input.delivery_spec_id)
-        && (1..=9_007_199_254_740_991).contains(&input.delivery_spec_revision)
-        && bounded(&input.title, 1, 256)
-        && bounded(&input.goal, 1, 20_000)
-        && unique_texts(&input.scope, true)
-        && unique_texts(&input.out_of_scope, false)
-        && unique_texts(&input.constraints, false)
+        && bounded_text(&input.delivery_spec_id)
+        && input.delivery_spec_revision.0 > 0
+        && input.work_contract.id == input.work_item.work_contract_id
+        && input.work_contract.revision == input.work_item.work_contract_revision
+        && !input.work_contract.criteria.is_empty()
+        && input.work_contract.criteria.len() <= 1000
+        && input
+            .work_contract
+            .criteria
+            .iter()
+            .map(|criterion| criterion.id.0.as_str())
+            .collect::<HashSet<_>>()
+            .len()
+            == input.work_contract.criteria.len()
+        && input
+            .work_contract
+            .criteria
+            .iter()
+            .any(|criterion| criterion.required)
+        && input
+            .work_contract
+            .criteria
+            .iter()
+            .all(|criterion| bounded(&criterion.description, 1, 65_536))
+        && unique_texts(&input.work_contract.scope, true)
+        && unique_texts(&input.work_contract.protected_scope, false)
+        && unique_texts(&input.work_contract.constraints, false)
+        && input.work_item.criterion_ids.len() <= 1000
+        && input
+            .work_item
+            .criterion_ids
+            .iter()
+            .collect::<HashSet<_>>()
+            .len()
+            == input.work_item.criterion_ids.len()
+        && bounded(&input.work_item.title, 1, 500)
+        && bounded(&input.work_item.goal, 1, 65_536)
 }
 
 fn invalid_job() -> StageProductError {
     StageProductError::new(
         StageProductErrorCode::InvalidJob,
-        "ExecutionJob has invalid StrongFlow stage input",
+        "ExecutionJob has invalid StrongFlow WorkRun input",
     )
 }
 
 fn bounded(value: &str, minimum: usize, maximum: usize) -> bool {
     (minimum..=maximum).contains(&value.len()) && !value.chars().any(char::is_control)
-}
-
-fn portable_identity(value: &str) -> bool {
-    let mut bytes = value.bytes();
-    value.len() <= 200
-        && bytes
-            .next()
-            .is_some_and(|byte| byte.is_ascii_alphanumeric())
-        && bytes.all(|byte| {
-            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'/' | b'@' | b'-')
-        })
 }
 
 fn unique_texts(values: &[String], required: bool) -> bool {
@@ -624,7 +666,7 @@ fn unique_texts(values: &[String], required: bool) -> bool {
 }
 
 /// Converts the Planner's exact final assistant message into the one semantic
-/// Activity consumed by `planning_solution_authority`.
+/// Structured internal planning activity emitted by the Worker.
 ///
 /// Durable event identity, sequence, occurrence time, lease, session and
 /// Worker authority are intentionally absent. The Codex outbox owns those
@@ -642,7 +684,7 @@ pub fn prepare_planner_solution_activity(
     let Some(policy) = role_session_policy(job, RoleExecutionMode::React)? else {
         return Err(StageProductError::new(
             StageProductErrorCode::InvalidScope,
-            "Planner product requires a Delivery-stage execution scope",
+            "Planner product requires a WorkRun execution scope",
         ));
     };
     if policy.role_id != RoleSessionPolicyRoleId::Planner {
@@ -659,7 +701,7 @@ pub fn prepare_planner_solution_activity(
     if product.schema_version != PLANNER_SOLUTION_SCHEMA_VERSION
         || product.protocol != PLANNER_SOLUTION_PROTOCOL
         || !product.has_required_content()
-        || !planner_matches_stage_input(&product, validate_stage_input(job)?)
+        || !planner_matches_work_run_input(&product, validate_work_run_input(job)?)
     {
         return Err(invalid_output());
     }
@@ -691,7 +733,7 @@ pub fn prepare_verification_policy_attestation(
     candidate_ref: &str,
 ) -> Result<PreparedStageProduct, StageProductError> {
     ensure_verification_role(job)?;
-    let input = validate_stage_input(job)?;
+    let input = validate_work_run_input(job)?;
     if !valid_candidate_ref(candidate_ref) || input.candidate_ref.as_deref() != Some(candidate_ref)
     {
         return Err(invalid_output());
@@ -779,7 +821,7 @@ pub fn prepare_verification_result_activity(
     let result: VerificationResultV1 =
         serde_json::from_slice(final_message).map_err(|_| invalid_output())?;
     if !result.is_structurally_valid()
-        || !verification_matches_stage_input(&result, validate_stage_input(job)?)
+        || !verification_matches_work_run_input(&result, validate_work_run_input(job)?)
     {
         return Err(invalid_output());
     }
@@ -803,7 +845,7 @@ fn ensure_verification_role(job: &ExecutionJob) -> Result<(), StageProductError>
     let Some(policy) = role_session_policy(job, RoleExecutionMode::React)? else {
         return Err(StageProductError::new(
             StageProductErrorCode::InvalidScope,
-            "verification product requires a Delivery-stage execution scope",
+            "verification product requires a WorkRun execution scope",
         ));
     };
     if !matches!(
@@ -839,25 +881,29 @@ fn prepare_json_product<T: Serialize>(
 fn valid_candidate_ref(value: &str) -> bool {
     value
         .strip_prefix("git-candidate:sha256:")
-        .is_some_and(|digest| {
-            digest.len() == 64
-                && digest
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
-        })
+        .is_some_and(valid_sha256)
 }
 
-fn planner_matches_stage_input(product: &PlannerSolutionV1, input: &DeliveryStageInput) -> bool {
+fn valid_sha256(digest: &str) -> bool {
+    digest.len() == 64
+        && digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+}
+
+fn planner_matches_work_run_input(product: &PlannerSolutionV1, input: &WorkRunInput) -> bool {
     let available = input
-        .acceptance_criteria
+        .work_contract
+        .criteria
         .iter()
-        .map(|criterion| criterion.criterion_id.as_str())
+        .map(|criterion| criterion.id.0.as_str())
         .collect::<HashSet<_>>();
     let required = input
-        .acceptance_criteria
+        .work_contract
+        .criteria
         .iter()
         .filter(|criterion| criterion.required)
-        .map(|criterion| criterion.criterion_id.as_str())
+        .map(|criterion| criterion.id.0.as_str())
         .collect::<HashSet<_>>();
     let proposal_ids = product
         .task_proposals
@@ -888,26 +934,24 @@ fn planner_matches_stage_input(product: &PlannerSolutionV1, input: &DeliveryStag
         && required.is_subset(&assigned)
 }
 
-fn verification_matches_stage_input(
+fn verification_matches_work_run_input(
     result: &VerificationResultV1,
-    input: &DeliveryStageInput,
+    input: &WorkRunInput,
 ) -> bool {
-    let Some(task) = input.task.as_ref() else {
-        return false;
-    };
-    let expected = task
-        .acceptance_criterion_ids
+    let expected = input
+        .work_item
+        .criterion_ids
         .iter()
-        .map(String::as_str)
+        .map(|id| id.0.as_str())
         .collect::<HashSet<_>>();
     let actual = result
         .findings
         .iter()
         .filter_map(|finding| finding.criterion_id.as_deref())
         .collect::<HashSet<_>>();
-    result.delivery_spec_id == input.delivery_spec_id
-        && i64::try_from(result.delivery_spec_revision).ok() == Some(input.delivery_spec_revision)
-        && input.candidate_ref.as_ref() == Some(&result.candidate_ref)
+    input.candidate_ref.as_ref() == Some(&result.candidate_ref)
+        && result.delivery_spec_id == input.delivery_spec_id
+        && i64::try_from(result.delivery_spec_revision).ok() == Some(input.delivery_spec_revision.0)
         && actual.len() == result.findings.len()
         && actual == expected
 }
@@ -1202,13 +1246,13 @@ fn bounded_text(value: &str) -> bool {
 mod tests {
     use super::*;
     use winwincode_domain::{
-        DeliveryId, DeliveryTaskId, ExecutionJobId, Instant, ProductSessionId, RepositoryId,
-        StageRunId,
+        Criterion, CriterionId, ExecutionJobId, Instant, ProductSessionId, RepositoryId, Revision,
+        WorkContract, WorkContractId, WorkItem, WorkItemId, WorkItemState, WorkRunId,
     };
     use winwincode_execution_port::generated::{
-        DeliveryReworkAuthorizationScope, DeliveryStageAcceptanceCriterionInput,
-        DeliveryStageExecutionScope, DeliveryStageExecutionScopeKind, DeliveryStageInput,
-        DeliveryStageTaskInput, ExecutionLimits, ExecutionWorkspace, ExecutionWorkspaceWriteMode,
+        DeliveryReworkAuthorizationScope, ExecutionLimits, ExecutionWorkspace,
+        ExecutionWorkspaceWriteMode, WorkRunExecutionScope, WorkRunExecutionScopeKind,
+        WorkRunInput,
     };
 
     const PLANNER_JSON: &str = concat!(
@@ -1268,7 +1312,7 @@ mod tests {
         "\"id\":\"dtk_00000000000000000000000001\",",
         "\"title\":\"Implement fixture\",",
         "\"goal\":\"Apply the accepted source change\",",
-        "\"acceptanceCriterionIds\":[\"criterion-fixture\"],",
+        "\"acceptanceCriterionIds\":[\"crt_00000000000000000000000001\"],",
         "\"blockedByTaskIds\":[]",
         "}]",
         "}"
@@ -1283,7 +1327,7 @@ mod tests {
         "\"candidate_ref\":\"git-candidate:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",",
         "\"findings\":[{",
         "\"finding_id\":\"finding-reviewer-fixture\",",
-        "\"criterion_id\":\"criterion-fixture\",",
+        "\"criterion_id\":\"crt_00000000000000000000000001\",",
         "\"verdict\":\"pass\",",
         "\"explanation\":\"The observed command completed successfully.\",",
         "\"evidence_sources\":[{",
@@ -1295,15 +1339,14 @@ mod tests {
     );
 
     fn delivery_job(role: &str) -> ExecutionJob {
-        let task_role = matches!(
-            role,
-            "executor" | "reviewer" | "verifier" | "adversarial-verifier" | "remediator"
-        );
         let candidate_role = matches!(
             role,
             "reviewer" | "verifier" | "adversarial-verifier" | "remediator"
         );
-        let task_id = DeliveryTaskId("dtk_00000000000000000000000001".to_owned());
+        let contract_id = WorkContractId("wct_00000000000000000000000001".to_owned());
+        let item_id = WorkItemId("wit_00000000000000000000000001".to_owned());
+        let run_id = WorkRunId("wrn_00000000000000000000000001".to_owned());
+        let criterion_id = CriterionId("crt_00000000000000000000000001".to_owned());
         let rework_authorization =
             (role == "remediator").then(|| DeliveryReworkAuthorizationScope {
                 authorization_digest: Sha256Digest(format!("sha256:{}", "b".repeat(64))),
@@ -1312,8 +1355,46 @@ mod tests {
                 requires_full_reverification: true,
                 source_candidate_commit_id: "d".repeat(40),
                 source_candidate_tree_id: "e".repeat(40),
-                targets: Vec::new(),
+                targets: vec![
+                    winwincode_execution_port::generated::DeliveryReworkTargetScope {
+                        work_item_id: item_id.clone(),
+                        file_path: "src/fixture.rs".into(),
+                        source_hunk_sha256: "a".repeat(64),
+                        evidence_ref_ids: vec![winwincode_domain::EvidenceId(
+                            "evd_00000000000000000000000001".into(),
+                        )],
+                    },
+                ],
             });
+        let contract = WorkContract {
+            constraints: vec!["Keep the exact repository boundary.".to_owned()],
+            created_at: Instant("2026-08-28T00:00:00Z".to_owned()),
+            criteria: vec![Criterion {
+                id: criterion_id.clone(),
+                description: "The exact fixture behavior is verified.".to_owned(),
+                required: true,
+                verification_method: Some("Run the exact fixture check.".to_owned()),
+            }],
+            id: contract_id.clone(),
+            objective: "Implement fixture".to_owned(),
+            protected_scope: vec!["Fixture source".to_owned()],
+            required_human_authority: "none".to_owned(),
+            revision: Revision(2),
+            schema_version: SchemaVersion::WinwincodeV1,
+            scope: vec!["Fixture source".to_owned()],
+        };
+        let item = WorkItem {
+            criterion_ids: vec![criterion_id],
+            depends_on: Vec::new(),
+            goal: "Implement fixture".to_owned(),
+            id: item_id.clone(),
+            revision: Revision(1),
+            schema_version: SchemaVersion::WinwincodeV1,
+            state: WorkItemState::Ready,
+            title: "Implement fixture".to_owned(),
+            work_contract_id: contract_id.clone(),
+            work_contract_revision: Revision(2),
+        };
         ExecutionJob {
             attempt: 1,
             execution_profile: role.to_owned(),
@@ -1324,43 +1405,32 @@ mod tests {
                 max_artifact_bytes: 1_048_576,
                 max_runtime_seconds: 300,
             },
-            payload_digest: Sha256Digest(
-                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                    .to_owned(),
-            ),
-            scope: ExecutionScope::DeliveryStageExecutionScope(DeliveryStageExecutionScope {
-                delivery_id: DeliveryId("dlv_00000000000000000000000001".to_owned()),
-                delivery_task_id: task_role.then(|| task_id.clone()),
-                kind: DeliveryStageExecutionScopeKind::DeliveryStage,
+            payload_digest: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
+            scope: ExecutionScope::WorkRunExecutionScope(WorkRunExecutionScope {
+                attempt: 1,
+                kind: WorkRunExecutionScopeKind::WorkRun,
                 product_session_id: ProductSessionId("ses_00000000000000000000000001".to_owned()),
                 rework_authorization,
-                stage_run_id: StageRunId("run_00000000000000000000000001".to_owned()),
+                work_contract_id: contract_id.clone(),
+                work_contract_revision: Revision(2),
+                work_item_id: item_id,
+                work_item_revision: Revision(1),
+                work_run_id: run_id,
             }),
-            stage_input: Some(DeliveryStageInput {
-                acceptance_criteria: vec![DeliveryStageAcceptanceCriterionInput {
-                    criterion_id: "criterion-fixture".to_owned(),
-                    description: "The exact fixture behavior is verified.".to_owned(),
-                    required: true,
-                    verification_method: Some("Run the exact fixture check.".to_owned()),
-                }],
+            work_input: Some(WorkRunInput {
+                delivery_spec_id: "spec-fixture".into(),
+                delivery_spec_revision: Revision(2),
                 candidate_ref: candidate_role.then(|| CANDIDATE_REF.to_owned()),
-                constraints: vec!["Keep the exact repository boundary.".to_owned()],
-                delivery_spec_id: "spec-fixture".to_owned(),
-                delivery_spec_revision: 2,
-                goal: "Implement fixture".to_owned(),
-                out_of_scope: Vec::new(),
                 schema_version: SchemaVersion::WinwincodeV1,
-                scope: vec!["Fixture source".to_owned()],
-                task: task_role.then(|| DeliveryStageTaskInput {
-                    acceptance_criterion_ids: vec!["criterion-fixture".to_owned()],
-                    goal: "Implement fixture".to_owned(),
-                    task_id,
-                    title: "Implement fixture".to_owned(),
-                }),
-                title: "Fixture Delivery".to_owned(),
+                work_contract: contract,
+                work_item: item,
             }),
             workspace: ExecutionWorkspace {
-                checkout_revision: "main".to_owned(),
+                checkout_revision: if role == "remediator" {
+                    "d".repeat(40)
+                } else {
+                    "main".into()
+                },
                 repository_id: RepositoryId("repo_00000000000000000000000001".to_owned()),
                 write_mode: if matches!(role, "executor" | "remediator") {
                     ExecutionWorkspaceWriteMode::Candidate
@@ -1582,17 +1652,44 @@ mod tests {
     }
 
     #[test]
-    fn typed_stage_input_is_the_only_delivery_prompt_source() {
+    fn remediator_prompt_preserves_exact_authorized_scope_and_rejects_foreign_work() {
+        let job = delivery_job("remediator");
+        let prompt = stage_product_prompt(&job).unwrap();
+        let ExecutionScope::WorkRunExecutionScope(scope) = &job.scope else {
+            unreachable!()
+        };
+        let encoded = serde_json::to_string(scope.rework_authorization.as_ref().unwrap()).unwrap();
+        assert!(prompt.contains(&encoded));
+        for field in ["item", "path", "checkout", "targets"] {
+            let mut wrong = job.clone();
+            let ExecutionScope::WorkRunExecutionScope(scope) = &mut wrong.scope else {
+                unreachable!()
+            };
+            let authorization = scope.rework_authorization.as_mut().unwrap();
+            match field {
+                "item" => authorization.targets[0].work_item_id.0.push('X'),
+                "path" => authorization.targets[0].file_path = "../outside.rs".into(),
+                "checkout" => wrong.workspace.checkout_revision = "f".repeat(40),
+                "targets" => authorization.targets.clear(),
+                _ => unreachable!(),
+            }
+            assert!(stage_product_prompt(&wrong).is_err(), "accepted {field}");
+        }
+        assert_eq!(stage_product_prompt(&job).unwrap(), prompt);
+    }
+
+    #[test]
+    fn typed_work_run_input_is_the_only_delivery_prompt_source() {
         let planner = delivery_job("planner");
         let prompt = stage_product_prompt(&planner).expect("typed Planner prompt");
-        let encoded = serde_json::to_string(planner.stage_input.as_ref().expect("stage input"))
-            .expect("canonical stage input JSON");
+        let encoded = serde_json::to_string(planner.work_input.as_ref().expect("WorkRun input"))
+            .expect("canonical WorkRun input JSON");
         assert!(prompt.contains(&encoded));
         assert!(prompt.contains(PLANNER_SOLUTION_PROTOCOL));
-        assert!(prompt.contains("criterion-fixture"));
+        assert!(prompt.contains("crt_00000000000000000000000001"));
 
         let mut missing = planner.clone();
-        missing.stage_input = None;
+        missing.work_input = None;
         assert_eq!(
             stage_product_prompt(&missing)
                 .expect_err("Delivery prompt requires typed input")
@@ -1610,7 +1707,7 @@ mod tests {
                 ),
             },
         );
-        chat.stage_input = None;
+        chat.work_input = None;
         assert_eq!(
             stage_product_prompt(&chat).expect("ProductSession goal"),
             chat.goal
@@ -1633,7 +1730,8 @@ mod tests {
             StageProductErrorCode::NonCanonicalOutput
         );
 
-        let foreign_criterion = PLANNER_JSON.replace("criterion-fixture", "criterion-foreign");
+        let foreign_criterion =
+            PLANNER_JSON.replace("crt_00000000000000000000000001", "criterion-foreign");
         let input_error = prepare_planner_solution_activity(
             &delivery_job("planner"),
             foreign_criterion.as_bytes(),
@@ -1668,10 +1766,11 @@ mod tests {
 
         let mut changed_input = delivery_job("planner");
         changed_input
-            .stage_input
+            .work_input
             .as_mut()
-            .expect("stage input")
-            .delivery_spec_revision += 1;
+            .expect("WorkRun input")
+            .work_contract
+            .revision = Revision(3);
         assert_ne!(
             stage_product_job_digest(&changed_input).expect("changed input digest"),
             original
@@ -1797,6 +1896,59 @@ mod tests {
                 .expect("verification result");
         assert_eq!(result.category(), &ExecutionEventCategory::Activity);
         assert_eq!(result.bytes(), VERIFICATION_RESULT_JSON.as_bytes());
+    }
+
+    #[test]
+    fn verification_prompt_supplies_result_fields_and_source_spec_identity() {
+        let mut job = delivery_job("reviewer");
+        let input = job.work_input.as_mut().expect("input");
+        input.delivery_spec_id = "actual-source-spec".into();
+        input.delivery_spec_revision = Revision(7);
+        let prompt = stage_product_prompt(&job).expect("prompt");
+        assert!(prompt.starts_with("Goal:\nYou are the independent reviewer."));
+        assert!(prompt.contains("not commands for you to execute"));
+        assert!(prompt.contains("\"deliverySpecId\":\"actual-source-spec\""));
+        assert!(prompt.contains("\"deliverySpecRevision\":7"));
+        for field in [
+            "protocol",
+            "delivery_spec_id",
+            "delivery_spec_revision",
+            "candidate_ref",
+            "findings",
+            "finding_id",
+            "criterion_id",
+            "verdict",
+            "explanation",
+            "evidence_sources",
+            "source_id",
+        ] {
+            assert!(prompt.contains(&format!("\"{field}\":")), "{field}");
+        }
+        assert!(
+            prepare_verification_result_activity(&job, VERIFICATION_RESULT_JSON.as_bytes())
+                .is_err()
+        );
+        let foreign_id = VERIFICATION_RESULT_JSON.replace("spec-fixture", "foreign-spec");
+        assert!(
+            prepare_verification_result_activity(&delivery_job("reviewer"), foreign_id.as_bytes())
+                .is_err()
+        );
+        for field in ["deliverySpecId", "deliverySpecRevision"] {
+            let mut value = serde_json::to_value(job.work_input.as_ref().unwrap()).unwrap();
+            value.as_object_mut().unwrap().remove(field);
+            assert!(
+                serde_json::from_value::<WorkRunInput>(value).is_err(),
+                "missing {field}"
+            );
+        }
+        let result = VERIFICATION_RESULT_JSON
+            .replace("spec-fixture", "actual-source-spec")
+            .replace(
+                "\"delivery_spec_revision\":2",
+                "\"delivery_spec_revision\":7",
+            );
+        prepare_verification_result_activity(&job, result.as_bytes())
+            .expect("actual source spec, not contract revision");
     }
 
     #[test]

@@ -16,13 +16,12 @@ use winwincode_domain::{
     CodexThreadId, DeliveryId, EnterprisePolicyId, ExecutionAckSequence, ExecutionJobId,
     ExecutionMessageId, ExecutionSequence, FencingToken, Instant, LeaseId, OrganizationId,
     ProductSessionId, ProjectId, RepositoryId, RequestId, SchemaVersion, SessionIdentity,
-    Sha256Digest, StageRunId, UserId, WorkerId, WorkerInstanceId, WorkerSessionId, WorkspaceId,
+    Sha256Digest, UserId, WorkerId, WorkerInstanceId, WorkerSessionId, WorkspaceId,
 };
 use winwincode_execution_port::generated::{
-    DeliveryStageExecutionScope, DeliveryStageExecutionScopeKind, ExecutionJob,
-    ExecutionLeaseStamp, ExecutionLimits, ExecutionOutcome, ExecutionOutcomeStatus,
+    ExecutionJob, ExecutionLeaseStamp, ExecutionLimits, ExecutionOutcome, ExecutionOutcomeStatus,
     ExecutionOutcomeUsage, ExecutionScope, ExecutionWorkspace, ExecutionWorkspaceWriteMode,
-    JobOutcomeMessage, JobOutcomeMessageKind,
+    JobOutcomeMessage, JobOutcomeMessageKind, WorkRunExecutionScope, WorkRunExecutionScopeKind,
 };
 use winwincode_storage::{
     AuthenticatedWorkerPlacement, EXECUTION_PROTOCOL_VERSION, EnterprisePolicyActor,
@@ -165,15 +164,18 @@ fn wire_job() -> ExecutionJob {
             max_runtime_seconds: 30,
         },
         payload_digest: digest(),
-        scope: ExecutionScope::DeliveryStageExecutionScope(DeliveryStageExecutionScope {
-            delivery_id: DeliveryId(id("dlv", 5)),
-            delivery_task_id: None,
-            kind: DeliveryStageExecutionScopeKind::DeliveryStage,
+        scope: ExecutionScope::WorkRunExecutionScope(WorkRunExecutionScope {
+            attempt: 1,
+            kind: WorkRunExecutionScopeKind::WorkRun,
             product_session_id: ProductSessionId(id("psn", 6)),
             rework_authorization: None,
-            stage_run_id: StageRunId(id("run", 25)),
+            work_contract_id: winwincode_domain::WorkContractId(id("wct", 5)),
+            work_contract_revision: winwincode_domain::Revision(1),
+            work_item_id: winwincode_domain::WorkItemId(id("wit", 5)),
+            work_item_revision: winwincode_domain::Revision(1),
+            work_run_id: winwincode_domain::WorkRunId(id("wrn", 25)),
         }),
-        stage_input: None,
+        work_input: None,
         workspace: ExecutionWorkspace {
             checkout_revision: "fixture-revision".to_owned(),
             repository_id: RepositoryId(id("rep", 4)),
@@ -243,7 +245,7 @@ fn terminal_outcome(status: ExecutionOutcomeStatus) -> JobOutcomeMessage {
         session_identity: SessionIdentity {
             codex_thread_id: CodexThreadId(id("cdx", 22)),
             product_session_id: ProductSessionId(id("psn", 6)),
-            stage_run_id: Some(StageRunId(id("run", 25))),
+            work_run_id: Some(winwincode_domain::WorkRunId(id("wrn", 25))),
             worker_session_id: worker_session_id.clone(),
         },
         worker_session_id,
@@ -348,7 +350,7 @@ fn seed(root: &PathBuf, denied: bool) {
             dispatch_payload: serde_json::to_vec(&wire_job()).expect("canonical wire Job"),
             attempt: 1,
             dependencies: Vec::new(),
-            stage_run_id: Some(StageRunId(id("run", 25))),
+            work_run_id: Some(winwincode_domain::WorkRunId(id("wrn", 25))),
             submitted_at: at(3),
         })
         .expect("job submit");

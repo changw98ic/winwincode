@@ -40,6 +40,9 @@ const { DEFAULT_STRONGFLOW_LAYOUT, normalizeStrongFlowLayoutPreferences } = pref
 
 const deliveryId = 'dlv_00000000000000000000000001'
 const stageRunId = 'run_00000000000000000000000001'
+const workRunId = 'wrn_00000000000000000000000001'
+const workItemId = 'wit_00000000000000000000000001'
+const workContractId = 'wct_00000000000000000000000001'
 
 function many(count, create) {
   return Array.from({ length: count }, (_, index) => create(index + 1))
@@ -89,18 +92,72 @@ function projection() {
         id: `task:${String(value)}`,
         title: `Task ${String(value)}`,
         status: value === 1 ? 'active' : 'pending',
+        workRunIds: value === 1 ? [workRunId] : [],
       })),
       stages: many(5, value => ({
         id: value === 1 ? stageRunId : `run_${String(value).padStart(26, '0')}`,
         stage: value === 1 ? 'executing' : 'verifying',
         role: 'implementer',
         status: value === 1 ? 'running' : 'waiting',
+        sessionBinding: value === 1 ? { workRunId } : null,
       })),
       attention: many(5, value => ({
         id: `attention:${String(value)}`,
         title: `Attention ${String(value)}`,
         status: value === 1 ? 'open' : 'resolved',
       })),
+    },
+    workRunAggregate: {
+      schemaVersion: 'winwincode/v1',
+      contract: {
+        schemaVersion: 'winwincode/v1',
+        id: workContractId,
+        revision: 1,
+        objective: 'Render the exact advanced workflow without unbounded DOM growth.',
+        scope: [],
+        constraints: [],
+        protectedScope: [],
+        requiredHumanAuthority: 'none',
+        criteria: [{
+          id: 'crt_00000000000000000000000001',
+          description: 'Keep the mounted view stable.',
+          verificationMethod: null,
+          required: true,
+        }],
+        createdAt: '2026-08-27T01:00:00.000Z',
+      },
+      items: [{
+        schemaVersion: 'winwincode/v1',
+        id: workItemId,
+        workContractId,
+        workContractRevision: 1,
+        revision: 1,
+        state: 'in_progress',
+        title: 'Task 1',
+        goal: 'Render the exact advanced workflow without unbounded DOM growth.',
+        criterionIds: ['crt_00000000000000000000000001'],
+        dependsOn: [],
+      }],
+      runs: [{
+        schemaVersion: 'winwincode/v1',
+        id: workRunId,
+        workContractId,
+        contractRevision: 1,
+        workItemId,
+        workItemRevision: 1,
+        revision: 1,
+        state: 'running',
+        executionJobId: 'job_00000000000000000000000001',
+        attempt: 1,
+        workerId: 'wrk_00000000000000000000000001',
+        workerInstanceId: 'wki_00000000000000000000000001',
+        workerSessionId: 'wsn_00000000000000000000000001',
+        leaseId: 'lse_00000000000000000000000001',
+        fencingToken: '1',
+        productSessionId: 'psn_00000000000000000000000001',
+        codexThreadId: 'cdx_t0000000000000000000000001',
+      }],
+      readCursor: {},
     },
     solutionReview: {
       reviewStatus: 'approved',
@@ -110,13 +167,13 @@ function projection() {
     diagramExecution: null,
     stage: { id: stageRunId },
     runtime: {
-      stageRunId,
+      workRunId,
       sessions: many(3, sessionValue => ({
         productSessionId: `psn_${String(sessionValue).padStart(26, '0')}`,
-        stageRunId,
+        workRunId,
+        workItemId,
         sessionBindingId: `bind:${String(sessionValue)}`,
         codexThreadId: `cdx_t${String(sessionValue).padStart(25, '0')}`,
-        deliveryTaskId: `task:${String(sessionValue)}`,
         attempt: sessionValue,
         asOfSequence: sessionValue,
         agents: many(5, agentValue => ({

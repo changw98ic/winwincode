@@ -2,7 +2,7 @@ import { mountStrongFlowPage } from '/module/strongflow-page.js'
 
 const root = document.querySelector('[data-winwincode-client-root]')
 const deliveryId = 'dlv_00000000000000000000000007'
-const currentRunId = 'run_00000000000000000000000007'
+const currentRunId = 'wrn_00000000000000000000000007'
 const productSessionId = 'psn_00000000000000000000000007'
 const workerId = 'wrk_00000000000000000000000007'
 const workerSessionId = 'wss_00000000000000000000000007'
@@ -32,7 +32,7 @@ function stage(status) {
       leaseId,
       sessionIdentity: null,
       sourceIdentity: null,
-      stageRunId: currentRunId,
+      workRunId: currentRunId,
       workerId,
       workerSessionId,
       attempt: 3,
@@ -82,7 +82,7 @@ function build(status, overrides = {}) {
       solutionReview: delivery.solutionReview,
       stage: deliveryStage,
       runtime: {
-        stageRunId: currentRunId,
+        workRunId: currentRunId,
         sessions: [],
       },
       evidence: [],
@@ -150,8 +150,8 @@ class BrowserHeaderModel {
   async resolveAttention() { this.calls.push(['resolveAttention']) }
   async submitVerdict() { this.calls.push(['submitVerdict']) }
   async advanceDelivery() { this.calls.push(['advanceDelivery']) }
-  async loadStageRunRuntime() { return null }
-  async loadStageRunCandidates() { return [] }
+  async loadWorkRunRuntime() { return null }
+  async loadWorkRunCandidates() { return [] }
   async loadCandidateHistoricalReview() { return null }
   async loadCandidateFiles() {}
   async loadMoreCandidateFiles() {}
@@ -180,7 +180,7 @@ const deliveryList = {
       status: 'executing',
       updatedAt: '2026-09-03T08:01:00.000Z',
       openAttentionCount: 0,
-      activeStageRunId: null,
+      activeWorkRunId: null,
       ownership: {
         organizationId: 'org_00000000000000000000000001',
         workspaceId: 'wsp_00000000000000000000000001',
@@ -218,7 +218,7 @@ const deliveryList = {
   async advanceDelivery() {},
   close() {},
 }
-history.replaceState(null, '', `#/strongflow?delivery=${deliveryId}&session=${productSessionId}&stageRun=${currentRunId}`)
+history.replaceState(null, '', `#/strongflow?delivery=${deliveryId}&session=${productSessionId}&workRun=${currentRunId}`)
 mountStrongFlowPage({ root, model, deliveryList })
 
 function trimmed(node) {

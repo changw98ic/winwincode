@@ -662,7 +662,7 @@
             "scopeKind": "product-session",
             "productSessionId": "psn_01J00000000000000000000009",
             "deliveryId": "dlv_01J00000000000000000000000",
-            "stageRunId": "run_01J00000000000000000000000",
+            "workRunId": "wrn_01J00000000000000000000000",
             "projectionRevision": 3,
             "lastProjectionSequence": 12,
             "reloadQueries": [

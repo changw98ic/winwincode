@@ -1117,7 +1117,7 @@ fn validate_authority_snapshot(
         || authority.repository_id != job.scope.repository_id
         || authority.repository_id != wire_job.workspace.repository_id
         || authority.session_identity.product_session_id != job.scope.product_session_id
-        || authority.session_identity.stage_run_id != job.stage_run_id
+        || authority.session_identity.work_run_id != job.work_run_id
         || authority.session_identity.worker_session_id != snapshot.worker_session_id
         || authority.workspace_revision != workspace_revision
     {
@@ -1128,15 +1128,15 @@ fn validate_authority_snapshot(
 
 fn wire_scope_matches_job(scope: &ExecutionScope, job: &ExecutionJobRecord) -> bool {
     match scope {
-        ExecutionScope::DeliveryStageExecutionScope(scope) => {
+        ExecutionScope::WorkRunExecutionScope(scope) => {
             job.scope.product_session_id == scope.product_session_id
-                && job.scope.delivery_id.as_ref() == Some(&scope.delivery_id)
-                && job.stage_run_id.as_ref() == Some(&scope.stage_run_id)
+                && job.scope.delivery_id.is_some()
+                && job.work_run_id.as_ref() == Some(&scope.work_run_id)
         }
         ExecutionScope::ProductSessionExecutionScope(scope) => {
             job.scope.product_session_id == scope.product_session_id
                 && job.scope.delivery_id.is_none()
-                && job.stage_run_id.is_none()
+                && job.work_run_id.is_none()
         }
     }
 }

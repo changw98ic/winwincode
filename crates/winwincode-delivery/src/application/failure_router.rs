@@ -3,7 +3,7 @@
 //! Deterministic classification of Delivery failures into one business action.
 //!
 //! This module validates references to the current Delivery contract, frozen
-//! candidate, Evidence, Verdict, Attention, and source `StageRun`. It returns a
+//! candidate, Evidence, Verdict, Attention, and source `WorkRun`. It returns a
 //! bounded [`FailurePacket`] plus the next business action. It deliberately
 //! does not execute retries, mutate a `Delivery`, or copy Codex/Agent state.
 
@@ -11,12 +11,12 @@ use std::{collections::HashSet, error::Error, fmt};
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use winwincode_domain::{AttentionItemId, DeliveryId, EvidenceId, StageRunId};
+use winwincode_domain::{AttentionItemId, DeliveryId, EvidenceId, WorkRunId};
 
 use crate::domain::{
-    AcceptanceCriterionId, AttentionItemStatus, Delivery, DeliverySpecId, DeliveryStage,
-    DeliveryVerdictId, FrozenDeliveryCandidate, MAX_REFERENCE_LENGTH, MAX_TEXT_LENGTH,
-    StageRunActorType, assert_frozen_candidate_current, bounded_text, safe_non_negative,
+    AcceptanceCriterionId, AttentionItemStatus, Delivery, DeliverySpecId, DeliveryVerdictId,
+    FrozenDeliveryCandidate, MAX_REFERENCE_LENGTH, MAX_TEXT_LENGTH,
+    assert_frozen_candidate_current, bounded_text, safe_non_negative,
 };
 
 /// The subsystem whose accepted fact reported the failure.
@@ -207,7 +207,7 @@ pub struct FailureCounterexample {
 pub struct FailureSource {
     signal: FailureSignal,
     source_ref: String,
-    stage_run_id: Option<StageRunId>,
+    work_run_id: Option<WorkRunId>,
 }
 
 impl FailureSource {
@@ -227,8 +227,8 @@ impl FailureSource {
     }
 
     #[must_use]
-    pub fn stage_run_id(&self) -> Option<&StageRunId> {
-        self.stage_run_id.as_ref()
+    pub fn work_run_id(&self) -> Option<&WorkRunId> {
+        self.work_run_id.as_ref()
     }
 }
 
@@ -332,7 +332,7 @@ impl FailureRoutingDecision {
 pub struct RouteFailureInput {
     pub signal: FailureSignal,
     pub source_ref: String,
-    pub stage_run_id: Option<StageRunId>,
+    pub work_run_id: Option<WorkRunId>,
     pub counterexample: FailureCounterexample,
     pub affected_criterion_ids: Vec<AcceptanceCriterionId>,
     pub evidence_ref_ids: Vec<EvidenceId>,
@@ -433,7 +433,7 @@ pub fn route_failure(
     let source = FailureSource {
         signal: input.signal,
         source_ref: input.source_ref,
-        stage_run_id: input.stage_run_id,
+        work_run_id: input.work_run_id,
     };
     let identity = FailurePacketIdentity {
         schema_version: crate::domain::DELIVERY_SCHEMA_VERSION,
@@ -522,51 +522,60 @@ fn validate_source(
     .map_err(|error| routing_error(FailureRoutingErrorCode::InvalidSource, error.to_string()))?;
 
     let source_kind = input.signal.source_kind();
-    let Some(stage_run_id) = &input.stage_run_id else {
+    let Some(work_run_id) = &input.work_run_id else {
         return if source_kind == FailureSourceKind::Observer {
             Ok(())
         } else {
             Err(routing_error(
                 FailureRoutingErrorCode::InvalidSource,
-                "Verifier, Provider, and Runtime failures require an exact StageRun",
+                "Verifier, Provider, and Runtime failures require an exact WorkRun",
             ))
         };
     };
     let run = delivery
         .snapshot()
-        .stage_runs
+        .work_run_aggregate
+        .runs
         .iter()
-        .find(|run| run.id == *stage_run_id)
+        .find(|run| run.id == *work_run_id)
         .ok_or_else(|| {
             routing_error(
                 FailureRoutingErrorCode::InvalidSource,
-                "failure source StageRun is not part of the current Delivery",
+                "failure source WorkRun is not part of the current Delivery",
             )
         })?;
-    if input.occurred_at_millis < run.started_at_millis {
+    let bindings = delivery
+        .snapshot()
+        .session_bindings
+        .iter()
+        .filter(|binding| binding.work_run_id == run.id)
+        .collect::<Vec<_>>();
+    let [binding] = bindings.as_slice() else {
+        return Err(routing_error(
+            FailureRoutingErrorCode::InvalidSource,
+            "failure source WorkRun must have one exact SessionBinding",
+        ));
+    };
+    if input.occurred_at_millis < binding.bound_at_millis {
         return Err(routing_error(
             FailureRoutingErrorCode::InvalidTime,
-            "failure report precedes its source StageRun",
+            "failure report precedes its source WorkRun binding",
         ));
     }
     let source_matches = match source_kind {
-        FailureSourceKind::Verifier => {
-            run.stage == DeliveryStage::Verifying
-                && run.actor_type == StageRunActorType::Codex
-                && matches!(
-                    run.role.as_str(),
-                    "verifier" | "reviewer" | "adversarial-verifier"
-                )
-        }
+        FailureSourceKind::Verifier => matches!(
+            binding.execution_profile.as_deref(),
+            Some("verifier" | "reviewer" | "adversarial-verifier")
+        ),
         FailureSourceKind::Observer => true,
         FailureSourceKind::Provider | FailureSourceKind::Runtime => {
-            run.actor_type == StageRunActorType::Codex
+            binding.execution_profile.is_some()
         }
     };
     if !source_matches {
         return Err(routing_error(
             FailureRoutingErrorCode::InvalidSource,
-            "failure signal does not match the source StageRun subsystem",
+            "failure signal does not match the source WorkRun profile",
         ));
     }
     Ok(())
@@ -705,7 +714,7 @@ fn routing_error(code: FailureRoutingErrorCode, message: impl Into<String>) -> F
 
 #[cfg(test)]
 mod tests {
-    use winwincode_domain::{DeliveryId, EvidenceId, StageRunId};
+    use winwincode_domain::{DeliveryId, EvidenceId};
 
     use super::*;
     use crate::{
@@ -724,17 +733,25 @@ mod tests {
     }
 
     fn route_input(delivery: &Delivery, signal: FailureSignal) -> RouteFailureInput {
-        let stage_run_id = match signal.source_kind() {
-            FailureSourceKind::Verifier => Some(StageRunId("stage-verifier-1".into())),
+        let profile = match signal.source_kind() {
+            FailureSourceKind::Verifier => Some("verifier"),
             FailureSourceKind::Observer => None,
-            FailureSourceKind::Provider | FailureSourceKind::Runtime => {
-                Some(StageRunId("stage-executor-1".into()))
-            }
+            FailureSourceKind::Provider | FailureSourceKind::Runtime => Some("executor"),
         };
+        let work_run_id = profile.map(|profile| {
+            delivery
+                .snapshot()
+                .session_bindings
+                .iter()
+                .find(|binding| binding.execution_profile.as_deref() == Some(profile))
+                .expect("failure source binding")
+                .work_run_id
+                .clone()
+        });
         RouteFailureInput {
             signal,
             source_ref: format!("failure-source:{:?}", signal.source_kind()).to_ascii_lowercase(),
-            stage_run_id,
+            work_run_id,
             counterexample: FailureCounterexample {
                 expected: "The current acceptance criterion is satisfied.".into(),
                 observed: "The accepted source fact shows a reproducible mismatch.".into(),
@@ -938,14 +955,19 @@ mod tests {
         );
         assert!(!packet.counterexample().observed.is_empty());
         assert!(!packet.source().source_ref().is_empty());
-        assert_eq!(
-            packet.source().stage_run_id(),
-            Some(&StageRunId("stage-verifier-1".into()))
-        );
+        let verifier_work_run = delivery
+            .snapshot()
+            .session_bindings
+            .iter()
+            .find(|binding| binding.execution_profile.as_deref() == Some("verifier"))
+            .expect("verifier binding")
+            .work_run_id
+            .clone();
+        assert_eq!(packet.source().work_run_id(), Some(&verifier_work_run));
     }
 
     #[test]
-    fn router_rejects_stale_candidate_foreign_refs_and_wrong_source_stage() {
+    fn router_rejects_stale_candidate_foreign_refs_and_wrong_source_work_run() {
         let fixture = fixture(VerdictFixtureOutcome::Fail);
         let mut stale_snapshot = fixture.delivery.clone().into_snapshot();
         stale_snapshot.spec.base_revision = "changed-base-revision".into();
@@ -970,14 +992,23 @@ mod tests {
             .expect_err("foreign Evidence");
         assert_eq!(foreign.code(), FailureRoutingErrorCode::ReferenceMismatch);
 
-        let mut wrong_stage = route_input(
+        let mut wrong_work_run = route_input(
             &fixture.delivery,
             FailureSignal::Verifier(VerifierFailure::CandidateCounterexample),
         );
-        wrong_stage.stage_run_id = Some(StageRunId("stage-executor-1".into()));
-        let wrong_stage = route_failure(&fixture.delivery, &fixture.candidate, wrong_stage)
-            .expect_err("non-verifier source stage");
-        assert_eq!(wrong_stage.code(), FailureRoutingErrorCode::InvalidSource);
+        wrong_work_run.work_run_id = fixture
+            .delivery
+            .snapshot()
+            .session_bindings
+            .iter()
+            .find(|binding| binding.execution_profile.as_deref() == Some("executor"))
+            .map(|binding| binding.work_run_id.clone());
+        let wrong_work_run = route_failure(&fixture.delivery, &fixture.candidate, wrong_work_run)
+            .expect_err("non-verifier source WorkRun");
+        assert_eq!(
+            wrong_work_run.code(),
+            FailureRoutingErrorCode::InvalidSource
+        );
     }
 
     #[test]

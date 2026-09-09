@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use winwincode_domain::{
     DeliveryId, ExecutionJobId, Instant, OrganizationId, ProductSessionId, ProjectId, RepositoryId,
-    RequestId, UserId, WorkspaceId,
+    RequestId, UserId, WorkRunId, WorkspaceId,
 };
 use winwincode_storage::{
     AccessGrantIssuance, ClientNodeRegistration, ClientPresenceState,
@@ -201,7 +201,7 @@ fn issue_launch_grant_for_session(
         id("winst", seed + 10),
         DIGEST,
         Some(id("ps", seed + 11)),
-        Some(id("run", seed + 12)),
+        Some(WorkRunId(id("wrn", seed + 12))),
         instant(GRANT_EXPIRES),
     )
     .expect("grant issuance");
@@ -226,7 +226,7 @@ fn bind_command(seed: u64, grant: &WorkerLaunchGrantRecord) -> DeviceExecutionBi
         &grant.repository_binding_id,
         &grant.worker_session_id,
         grant.product_session_id.clone(),
-        grant.stage_run_id.clone(),
+        grant.work_run_id.as_ref().map(|value| value.0.clone()),
     )
     .expect("bind command")
 }
@@ -345,14 +345,14 @@ fn bind_persists_a_durable_traceable_binding_across_restart() {
         let binding = &receipt.binding;
         assert_eq!(binding.state, DeviceExecutionBindingState::Bound);
         assert_eq!(binding.revision, 1);
-        // Every identity is traceable to the ProductSession/StageRun stamp.
+        // Every identity is traceable to the ProductSession/WorkRun stamp.
         assert_eq!(
             binding.product_session_id.as_deref(),
             grant.product_session_id.as_deref()
         );
         assert_eq!(
-            binding.stage_run_id.as_deref(),
-            grant.stage_run_id.as_deref()
+            binding.work_run_id.as_deref(),
+            grant.work_run_id.as_ref().map(|value| value.0.as_str())
         );
         assert_eq!(binding.worker_session_id, id("ws", 1100 + 8));
         let snapshot = ledger
@@ -406,7 +406,7 @@ fn bind_replays_idempotently_and_refuses_request_reuse() {
         &grant.repository_binding_id,
         &grant.worker_session_id,
         grant.product_session_id.clone(),
-        grant.stage_run_id.clone(),
+        grant.work_run_id.as_ref().map(|value| value.0.clone()),
     )
     .expect("conflicting command");
     let error = ledger.bind(&conflicting, &instant(T3)).expect_err("reuse");
@@ -466,7 +466,7 @@ fn bind_refuses_mismatched_facts_unknown_or_terminal_grants() {
             DeviceExecutionBindingStoreErrorKind::FieldMismatch
         );
         let mut dropped_stamp = bind_command(3202, &grant);
-        dropped_stamp.expected_stage_run_id = None;
+        dropped_stamp.expected_work_run_id = None;
         let error = ledger
             .bind(&dropped_stamp, &instant(T2))
             .expect_err("stamp");
@@ -664,7 +664,10 @@ fn attach_copies_reservation_facts_from_the_launch_grant() {
     assert_eq!(facts.worker_id, grant.worker_id);
     assert_eq!(facts.worker_instance_id, grant.worker_instance_id);
     assert_eq!(facts.product_session_id, grant.product_session_id);
-    assert_eq!(facts.stage_run_id, grant.stage_run_id);
+    assert_eq!(
+        facts.work_run_id,
+        grant.work_run_id.as_ref().map(|value| value.0.clone())
+    );
     // The durable projection round-trips, and the replay is idempotent.
     assert_eq!(ledger.facts(&job).expect("facts").expect("stored"), *facts);
     let replay = ledger.attach_facts(&command, &instant(T3)).expect("replay");

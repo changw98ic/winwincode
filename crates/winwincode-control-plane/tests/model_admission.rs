@@ -112,7 +112,6 @@ fn register_provider(storage: &mut SqliteStorage, request_seed: u64, expected_ve
                 credential_reference_id: CredentialReferenceId(id("crd", 1)),
                 models: vec![model_capability()],
             },
-            Instant("2026-09-02T00:00:00.000Z".to_owned()),
         )
         .expect("register Provider");
 }
@@ -231,7 +230,7 @@ fn admission_message(seed: u64) -> ModelOpenMessage {
         session_identity: SessionIdentity {
             codex_thread_id: CodexThreadId(id("cdx", 1)),
             product_session_id: ProductSessionId(id("psn", 1)),
-            stage_run_id: None,
+            work_run_id: None,
             worker_session_id: worker_session_id.clone(),
         },
         worker_session_id,

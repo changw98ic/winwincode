@@ -26,11 +26,11 @@ const REQUIRED_RULE_IDS = Object.freeze([
   'evidence.current_candidate',
   'evidence.current_session_binding',
   'evidence.current_spec_revision',
-  'evidence.current_stage_run',
+  'evidence.current_work_run',
   'evidence.accepted_runtime_ledger_only',
   'evidence.runtime_checkout_matches_candidate',
   'evidence.source_identity_exact',
-  'evidence.source_time_within_stage_and_terminal',
+  'evidence.source_time_within_work_run_and_terminal',
   'rework.attempt_uses_total_delivery_history',
   'rework.bounded_remediator_only',
   'rework.invalidates_previous_candidate',
@@ -52,7 +52,7 @@ const REQUIRED_RULE_IDS = Object.freeze([
   'verification.read_only_candidate_policy',
   'verification.reviewer_and_verifier_required',
   'verification.role_sessions_are_independent',
-  'verification.stage_and_runtime_terminal_agree',
+  'verification.work_run_and_runtime_terminal_agree',
   'verification.successful_candidate_write_rejected',
 ].sort())
 
@@ -67,16 +67,22 @@ const CANDIDATE_IDENTITY_FIELDS = Object.freeze([
   'deliverySpecId',
   'deliverySpecRevision',
   'diffSha256',
+  'producerArtifactDigest',
+  'producerArtifactRef',
   'producerAttempt',
   'producerCodexThreadId',
   'producerDeliveryTaskId',
   'producerExecutionJobId',
+  'producerFencingToken',
+  'producerFinishedAtMillis',
+  'producerLastEventSequence',
+  'producerLeaseId',
   'producerProductSessionId',
-  'producerRole',
   'producerSessionBindingId',
-  'producerStage',
-  'producerStageRunId',
+  'producerWorkerId',
+  'producerWorkerInstanceId',
   'producerWorkerSessionId',
+  'producerWorkRunId',
   'repository',
 ].sort())
 
@@ -87,7 +93,7 @@ const PERSISTED_EVIDENCE_BINDINGS = Object.freeze([
   'deliverySpecRevision',
   'sessionBindingId',
   'sourceRef',
-  'stageRunId',
+  'workRunId',
   'type',
 ].sort())
 
@@ -100,7 +106,7 @@ const RUNTIME_SOURCE_IDENTITY = Object.freeze([
   'productSessionId',
   'roleId',
   'sourceSequence',
-  'stageRunId',
+  'workRunId',
   'terminalLastEventSequence',
   'workerId',
   'workerInstanceId',
@@ -128,25 +134,23 @@ const ADAPTER_BACKED_RULE_IDS = Object.freeze([
   'evidence.accepted_runtime_ledger_only',
   'evidence.runtime_checkout_matches_candidate',
   'evidence.source_identity_exact',
-  'evidence.source_time_within_stage_and_terminal',
+  'evidence.source_time_within_work_run_and_terminal',
   'rework.result_stays_within_approved_scope',
   'verdict.agent_message_cannot_pass',
   'verdict.direct_evidence_controls_classification',
   'verdict.failed_check_cannot_pass',
   'verdict.pass_or_fail_requires_evidence',
-  'verification.stage_and_runtime_terminal_agree',
+  'verification.work_run_and_runtime_terminal_agree',
   'verification.successful_candidate_write_rejected',
 ].sort())
 
 const PRECISE_REWORK_BINDINGS = Object.freeze([
   'candidateRef',
-  'deliveryTaskId',
-  'diagramId',
+  'workItemId',
   'diffSha256',
   'evidenceRefIds',
   'filePath',
   'hunkSha256',
-  'nodeId',
 ].sort())
 
 function json(path) {
@@ -283,7 +287,7 @@ test('phase 2.4 rules freeze candidate, evidence, verdict, and rework behavior',
   assert.match(rules.rework.resultPolicy, /rejects any added path/u)
   assert.equal(
     rules.rework.attemptSequenceSource,
-    'all current Delivery StageRuns whose stage is reworking',
+    'distinct earlier failed candidates in the append-only current DeliverySpec verdict history',
   )
 
   const ruleIds = rules.rules.map(rule => rule.id)

@@ -18,6 +18,10 @@ const projectScope = {
 const chatProductSessionId = 'psn_00000000000000000000000001'
 const stageProductSessionId = 'psn_00000000000000000000000002'
 const stageRunId = 'run_00000000000000000000000001'
+const workRunId = 'wrn_00000000000000000000000001'
+const workItemId = 'wit_00000000000000000000000001'
+const workContractId = 'wct_00000000000000000000000001'
+const criterionId = 'crt_00000000000000000000000001'
 const credentialReferenceId = 'crd_00000000000000000000000001'
 const deliveryId = 'dlv_00000000000000000000000002'
 const sessionBindingId = 'binding:strongflow:evidence-browser'
@@ -116,13 +120,13 @@ function binding() {
     boundAt: '2026-09-02T01:00:00.000Z',
     executionJobId: 'job_00000000000000000000000001',
     productSessionId: stageProductSessionId,
-    stageRunId: null,
-    workerSessionId: null,
-    codexThreadId: null,
-    attempt: null,
-    fencingToken: null,
-    leaseId: null,
-    workerId: null,
+    workRunId,
+    workerSessionId: 'wsn_00000000000000000000000001',
+    codexThreadId: 'cdx_00000000000000000000000001',
+    attempt: 1,
+    fencingToken: '1',
+    leaseId: 'lse_00000000000000000000000001',
+    workerId: 'wrk_00000000000000000000000001',
     sourceIdentity: null,
     sessionIdentity: null,
   }
@@ -145,7 +149,7 @@ function evidenceRows() {
     id: evidenceIdFor(value),
     sessionBindingId,
     sourceRef: `artifact:source:${String(value)}`,
-    stageRunId,
+    workRunId,
     type: value === 1 ? 'test' : value === 2 ? 'command' : value === 3 ? 'runtime_event' : 'diff',
   }))
   rows.push({
@@ -156,7 +160,7 @@ function evidenceRows() {
     id: screenshotEvidenceId,
     sessionBindingId,
     sourceRef: 'artifact:source:screenshot',
-    stageRunId,
+    workRunId,
     type: 'runtime_event',
   })
   return rows
@@ -176,7 +180,7 @@ function screenshotDescriptor(row) {
       deliveryRevision,
       evidenceId: row.id,
       sessionBindingId: row.sessionBindingId,
-      stageRunId: row.stageRunId,
+      workRunId: row.workRunId,
     },
     sizeBytes: screenshotBytes.length,
   }
@@ -191,7 +195,7 @@ function summary() {
     title: 'Evidence workbench browser fixture',
     updatedAt: '2026-09-02T01:00:00.000Z',
     ownership: ownership(),
-    activeStageRunId: stageRunId,
+    activeWorkRunId: workRunId,
     openAttentionCount: 0,
     taskCounts: {
       total: 0,
@@ -254,7 +258,7 @@ function detail() {
       diffSha256: `sha256:${'3'.repeat(64)}`,
       frozenAt: '2026-09-02T01:00:01.000Z',
       producerSessionBindingId: sessionBindingId,
-      producerStageRunId: stageRunId,
+      producerWorkRunId: workRunId,
     },
     verdict: {
       id: 'verdict:evidence-browser',
@@ -283,13 +287,93 @@ function deliveryRuntime() {
     kind: 'runtime_projection',
     productSessionId: stageProductSessionId,
     deliveryId,
-    stageRunId,
+    workRunId,
     readCursor: cursor,
     eventCursor: cursor.eventCursor,
     lastProjectionSequence: 0,
     revision: 1,
     rebuiltAt: '2026-09-02T01:00:02.000Z',
-    sessions: [],
+    sessions: [{
+      productSessionId: stageProductSessionId,
+      workRunId,
+      workItemId,
+      sessionBindingId,
+      executionJobId: 'job_00000000000000000000000001',
+      workerSessionId: 'wsn_00000000000000000000000001',
+      codexThreadId: 'cdx_00000000000000000000000001',
+      fencingToken: '1',
+      leaseId: 'lse_00000000000000000000000001',
+      attempt: 1,
+      asOfSequence: 0,
+      activities: [],
+      agents: [],
+      agentEdges: [],
+      diffSummary: null,
+      plan: null,
+      usage: null,
+      recovery: {
+        failureCount: 0,
+        lastFailureSourceRef: null,
+        latestRecoverySourceRef: null,
+        recoveryCount: 0,
+        state: 'none',
+      },
+    }],
+  }
+}
+
+function workRunAggregate() {
+  return {
+    schemaVersion,
+    contract: {
+      schemaVersion,
+      id: workContractId,
+      revision: 1,
+      scope: [],
+      objective: 'Open exact Evidence detail',
+      constraints: [],
+      protectedScope: [],
+      requiredHumanAuthority: 'none',
+      criteria: [{
+        id: criterionId,
+        description: 'Open the exact Evidence detail',
+        required: true,
+        verificationMethod: null,
+      }],
+      createdAt: '2026-09-02T01:00:00.000Z',
+    },
+    items: [{
+      schemaVersion,
+      id: workItemId,
+      workContractId,
+      workContractRevision: 1,
+      revision: 1,
+      state: 'in_progress',
+      title: 'Open exact Evidence detail',
+      goal: 'Open exact Evidence detail',
+      criterionIds: [criterionId],
+      dependsOn: [],
+    }],
+    runs: [{
+      schemaVersion,
+      id: workRunId,
+      workContractId,
+      contractRevision: 1,
+      workItemId,
+      workItemRevision: 1,
+      revision: 1,
+      state: 'running',
+      executionJobId: 'job_00000000000000000000000001',
+      attempt: 1,
+      workerId: 'wrk_00000000000000000000000001',
+      workerInstanceId: 'wki_00000000000000000000000001',
+      workerSessionId: 'wsn_00000000000000000000000001',
+      leaseId: 'lse_00000000000000000000000001',
+      fencingToken: '1',
+      productSessionId: stageProductSessionId,
+      codexThreadId: 'cdx_00000000000000000000000001',
+    }],
+    readCursor: readCursor(),
   }
 }
 
@@ -316,7 +400,7 @@ function chatRuntime() {
     kind: 'runtime_projection',
     productSessionId: chatProductSessionId,
     deliveryId: null,
-    stageRunId: null,
+    workRunId: null,
     readCursor: null,
     eventCursor,
     lastProjectionSequence: 0,
@@ -334,7 +418,7 @@ function evidenceDetail(request) {
   }
   if (
     bindingParameters.candidateRef !== row.candidateRef
-    || bindingParameters.stageRunId !== row.stageRunId
+    || bindingParameters.workRunId !== row.workRunId
     || bindingParameters.sessionBindingId !== row.sessionBindingId
     || bindingParameters.sourceRef !== row.sourceRef
     || bindingParameters.type !== row.type
@@ -366,7 +450,7 @@ function evidenceDetail(request) {
       deliveryRevision,
       evidenceId: row.id,
       sessionBindingId: row.sessionBindingId,
-      stageRunId: row.stageRunId,
+      workRunId: row.workRunId,
     },
     sizeBytes: 26,
   }))
@@ -431,6 +515,7 @@ const controlPlane = {
     if (request.query === 'runtime.projection.get'
       && request.parameters.kind === 'product-session') return response(request, chatRuntime())
     if (request.query === 'delivery.get') return response(request, detail())
+    if (request.query === 'workrun.get') return response(request, workRunAggregate())
     if (request.query === 'evidence.get') return evidenceDetail(request)
     if (request.query === 'evidence.artifact.content.get') {
       const parameters = request.parameters
@@ -771,13 +856,13 @@ globalThis.runEvidenceDeepLinkReloadScenario = async () => {
     route: {
       deliveryId: parameters.get('delivery'),
       productSessionId: parameters.get('session'),
-      stageRunId: parameters.get('stageRun'),
+      workRunId: parameters.get('workRun'),
       evidenceId: parameters.get('evidence'),
     },
     binding: evidenceQuery === undefined ? null : {
       deliveryId: evidenceQuery.parameters.deliveryId,
       sessionBindingId: evidenceQuery.parameters.sessionBindingId,
-      stageRunId: evidenceQuery.parameters.stageRunId,
+      workRunId: evidenceQuery.parameters.workRunId,
       evidenceId: evidenceQuery.parameters.evidenceId,
     },
     evidenceQueryCount: evidenceQueries.length,

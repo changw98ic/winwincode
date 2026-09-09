@@ -16,32 +16,41 @@
 - 消息只引用公开 ID 和投影，不包含数据库表、存储记录、长期 Provider Credential，
   也不包含 Codex 的 Turn、Plan 或 Agent 内部对象。`codexThreadId` 只是会话绑定引用。
 
-## Chat 与 Delivery 使用不同执行 Scope
+## Chat 与 WorkRun 使用不同执行 Scope
 
 `ExecutionScope` 是两个严格分支：
 
 | `kind` | 必需身份 | 用途 |
 | --- | --- | --- |
-| `product-session` | `productSessionId` | 默认 Chat；不创建隐藏 Delivery 或 StageRun |
-| `delivery-stage` | `productSessionId`、`deliveryId`、`stageRunId` | StrongFlow 阶段执行；可附加 `deliveryTaskId` |
+| `product-session` | `productSessionId` | 默认 Chat |
+| `work-run` | `productSessionId`、`workContractId` 与版本、`workItemId` 与版本、`workRunId`、`attempt` | StrongFlow 工作项执行 |
 
-两种分支都经过相同的 Job、Attempt、Lease 和 Fencing 校验。ProductSession Chat 不能伪造
-Delivery 身份，Delivery 阶段也不能省略当前 StageRun。
+两种分支都经过相同的 Job、Attempt、Lease 和 Fencing 校验。每个工作项可以先产生候选，
+再由独立的只读 WorkRun 检查同一个候选；检查角色不创建另一个工作项。
 
-## Delivery Job 封印阶段输入
+## WorkRun Job 封印执行输入
 
-`delivery-stage` Job 必须携带结构化 `stageInput`；`product-session` Job 必须省略它。
-`stageInput` 在 Delivery authority 创建 Job 时一次封印，Scheduler 只校验并原样传递：
+`work-run` Job 必须携带结构化 `workInput`；`product-session` Job 必须省略它。
+创建 Job 时从当前 Delivery 一次封印以下信息，Scheduler 原样传递：
 
-- 当前 `deliverySpecId`、`deliverySpecRevision`、标题、目标、范围、排除项和约束；
-- 全部当前验收条件，包括稳定 ID、说明、验证方法与是否必需；
-- 执行、返工和验证阶段的当前任务及其验收条件 ID；
-- Reviewer、Verifier 和返工阶段所绑定的精确 frozen `candidateRef`。
+- `deliverySpecId`、`deliverySpecRevision`：来源规格的真实身份与版本，二者均必填；
+- `workContract`：当前执行目标、范围、约束和验收条件；
+- `workItem`：本次工作项及其验收条件 ID；
+- 独立检查和返工任务所绑定的精确 `candidateRef`。
 
-Planner 缺少 `stageInput`、验证 Job 缺少 `candidateRef`、ProductSession 携带
-`stageInput`，都在启动 Codex 前拒绝。`payloadDigest` 与 Worker/Codex 的完整 Job digest
-都覆盖这些字段；重启时任何 Spec、Criterion、Task、Role 或 Candidate 变化都会形成冲突，
-不会重新查询可变 Delivery 状态，也不会把 JSON 藏进 `goal`。
+来源规格与 WorkContract 是不同身份，禁止用 WorkContract ID 代替 `deliverySpecId`。
+验收条件则共享同一个 `crt_` ID：外部条件标签在保存规格时只转换一次，WorkContract
+原样使用已保存的 ID，最终判定不再做第二次编号。
+Worker 的完整 Job digest 覆盖这些字段；服务提交派发时用当前 Delivery 重建并比对 Job，
+任何输入身份变更都会被拒绝。重启不重新查询可变规格，也不把身份藏进 `goal`。
+
+检查角色的提示包含完整 `winwincode.independent-verification-result.v1` 返回格式。
+模型的证据引用只包含实际工具调用的 `source_id`；Worker 根据同一运行里已保存的
+直接检查事件确定 `type` 与 `event_id`，模型不再重复声明事件类型。
+只读角色的任务说明把原实现目标标为待检查内容，而不是再次执行的编辑指令；其沙箱
+升级审批为 `never`，不接受通过批准转为写入候选。
+最终接收同时核对来源规格身份、版本、候选和全部指定验收条件；命令返回成功不等于页面
+所有要求已通过，未实际执行的浏览器检查不得写成通过。
 
 ## 一份合同，两种 Adapter
 

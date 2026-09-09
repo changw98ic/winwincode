@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import type { DeliveryTaskId, EvidenceId } from './generated/contracts.js'
+import type { WorkItemId, EvidenceId } from './generated/contracts.js'
 import {
   EMPTY_SELECTION,
   sameHistorySelection,
@@ -82,7 +82,7 @@ export function mountStrongFlowHistoryNavigation(
   let selection = options.initialSelection ?? EMPTY_SELECTION
   let selectionUnavailable = false
   let currentTree: StrongFlowHistoryTree | null = null
-  const expandedTasks = new Set<DeliveryTaskId>()
+  const expandedTasks = new Set<WorkItemId>()
   const taskRows = new WeakMap<HTMLLIElement, TaskRowState>()
   const runRows = new WeakMap<HTMLLIElement, RunRowState>()
   const evidenceButtonListeners = new WeakMap<HTMLButtonElement, () => void>()
@@ -102,8 +102,8 @@ export function mountStrongFlowHistoryNavigation(
       return
     }
     applySelection(Object.freeze({
-      taskId: state.run.deliveryTaskId,
-      stageRunId: state.run.stageRunId,
+      taskId: state.run.workItemId,
+      workRunId: state.run.workRunId,
     }))
   }
 
@@ -161,9 +161,14 @@ export function mountStrongFlowHistoryNavigation(
     if (state === undefined) return
     state.run = run
     item.dataset.status = run.status
+    item.dataset.cancellable = String(
+      run.status === 'queued' || run.status === 'leased' || run.status === 'running',
+    )
+    state.button.dataset.workRunState = run.status
+    state.button.dataset.cancellable = item.dataset.cancellable
     if (run.attempt !== null) item.dataset.attempt = String(run.attempt)
     else delete item.dataset.attempt
-    state.button.dataset.stageRunId = run.stageRunId
+    state.button.dataset.workRunId = run.workRunId
     if (run.attempt !== null) state.button.dataset.attempt = String(run.attempt)
     else delete state.button.dataset.attempt
     const label = runLabel(run)
@@ -180,7 +185,7 @@ export function mountStrongFlowHistoryNavigation(
       state.button.removeAttribute('aria-current')
       state.button.setAttribute(
         'aria-pressed',
-        String(selection.stageRunId === run.stageRunId),
+        String(selection.workRunId === run.workRunId),
       )
       state.button.textContent = label
     }
@@ -192,7 +197,7 @@ export function mountStrongFlowHistoryNavigation(
   ): KeyedCollectionView<StrongFlowHistoryRun, string, HTMLLIElement> {
     return mountKeyedCollection<StrongFlowHistoryRun, string, HTMLLIElement>({
       parent,
-      key: run => run.stageRunId,
+      key: run => run.workRunId,
       create: createRunRow(context),
       update: updateRunRow,
       remove(item) {
@@ -240,10 +245,10 @@ export function mountStrongFlowHistoryNavigation(
     const state = taskRows.get(item)
     if (state === undefined) return
     state.node = node
-    item.dataset.status = node.task.status
+    item.dataset.status = node.task.state
     item.dataset.deliveryTaskId = node.task.id
     state.toggle.textContent = node.task.title
-    state.status.textContent = node.task.status
+    state.status.textContent = node.task.state
     const expanded = expandedTasks.has(node.task.id) || selection.taskId === node.task.id
     state.toggle.setAttribute('aria-expanded', String(expanded))
     state.runList.hidden = !expanded
@@ -274,7 +279,7 @@ export function mountStrongFlowHistoryNavigation(
   taskCollection = mountTaskCollection()
   timelineCollection = mountRunCollection(options.stagesParent, 'timeline')
 
-  function taskToggleOf(taskId: DeliveryTaskId): MountedTaskToggle | null {
+  function taskToggleOf(taskId: WorkItemId): MountedTaskToggle | null {
     const item = taskCollection.node(taskId)
     if (item === null) return null
     const state = taskRows.get(item)
@@ -291,13 +296,13 @@ export function mountStrongFlowHistoryNavigation(
       const taskState = taskRows.get(state.item)
       if (taskState === undefined) continue
       for (const run of node.runs) {
-        const runItem = taskState.runs.node(run.stageRunId)
+        const runItem = taskState.runs.node(run.workRunId)
         const runState = runItem === null ? undefined : runRows.get(runItem)
         if (runState !== undefined) order.push(runState.button)
       }
     }
     for (const run of currentTree?.runs ?? []) {
-      const item = timelineCollection.node(run.stageRunId)
+      const item = timelineCollection.node(run.workRunId)
       const state = item === null ? undefined : runRows.get(item)
       if (state !== undefined) order.push(state.button)
     }
@@ -308,7 +313,7 @@ export function mountStrongFlowHistoryNavigation(
     if (event.key === 'ArrowLeft' && state.context === 'task') {
       // ArrowLeft collapses only the Task list that owns this row. Timeline
       // rows must never reach into the separate Task tree.
-      const ownerTaskId = state.run.deliveryTaskId
+      const ownerTaskId = state.run.workItemId
       event.preventDefault()
       if (ownerTaskId === null) return
       expandedTasks.delete(ownerTaskId)
@@ -329,7 +334,7 @@ export function mountStrongFlowHistoryNavigation(
       }
       const firstRun = state.node.runs[0]
       if (firstRun !== undefined) {
-        const runItem = state.runs.node(firstRun.stageRunId)
+        const runItem = state.runs.node(firstRun.workRunId)
         const runState = runItem === null ? undefined : runRows.get(runItem)
         runState?.button.focus()
       }
@@ -363,16 +368,16 @@ export function mountStrongFlowHistoryNavigation(
     if (order.length === 0) return
     const active = order.find(button => button === document.activeElement)
     const preferred = active
-      ?? (selection.stageRunId === null
+      ?? (selection.workRunId === null
         ? undefined
-        : order.find(button => button.dataset.stageRunId === selection.stageRunId))
+        : order.find(button => button.dataset.workRunId === selection.workRunId))
       ?? order[0]
     for (const button of order) {
       button.tabIndex = button === preferred ? 0 : -1
     }
   }
 
-  function setExpanded(taskId: DeliveryTaskId, expanded: boolean): void {
+  function setExpanded(taskId: WorkItemId, expanded: boolean): void {
     if (expanded) {
       expandedTasks.add(taskId)
       update(currentTree)

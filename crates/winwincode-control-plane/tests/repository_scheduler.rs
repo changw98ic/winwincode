@@ -92,7 +92,7 @@ fn execution_job() -> ExecutionJob {
             kind: ProductSessionExecutionScopeKind::ProductSession,
             product_session_id: queue_scope().product_session_id,
         }),
-        stage_input: None,
+        work_input: None,
         workspace: ExecutionWorkspace {
             checkout_revision: "0123456789abcdef".into(),
             repository_id: scheduler_scope().repository_id,
@@ -314,7 +314,7 @@ fn typed_dispatch_cancel_and_restart_replay_use_only_durable_authority() {
             dispatch_payload,
             attempt: 1,
             dependencies: Vec::new(),
-            stage_run_id: None,
+            work_run_id: None,
             submitted_at: at(1),
         })
         .expect("submit");
@@ -416,7 +416,7 @@ fn typed_dispatch_cancel_and_restart_replay_use_only_durable_authority() {
         cancel.session_identity.product_session_id,
         queue_scope().product_session_id
     );
-    assert!(cancel.session_identity.stage_run_id.is_none());
+    assert!(cancel.session_identity.work_run_id.is_none());
 
     drop(storage);
     let mut restarted = SqliteStorage::open(&root).expect("restart");
@@ -445,7 +445,7 @@ fn typed_dispatch_rotates_attempt_and_lease_for_a_new_worker_process() {
             dispatch_payload: serde_json::to_vec(&job).expect("canonical job"),
             attempt: 1,
             dependencies: Vec::new(),
-            stage_run_id: None,
+            work_run_id: None,
             submitted_at: at(1),
         })
         .expect("submit");
@@ -531,7 +531,7 @@ fn typed_failed_retry_is_policy_gated_receipt_first_and_restart_exact() {
             dispatch_payload: serde_json::to_vec(&job).expect("canonical job"),
             attempt: 1,
             dependencies: Vec::new(),
-            stage_run_id: None,
+            work_run_id: None,
             submitted_at: at(1),
         })
         .expect("submit");

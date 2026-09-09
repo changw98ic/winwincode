@@ -2,8 +2,12 @@
 
 import {
   ControlPlaneClientError,
+  workRunCancelCommand,
+  queryWorkRunAggregate,
+  type DeliveryCancelRequest,
   type ControlPlaneClient,
   type ControlPlaneSubscription,
+  taskBreakdownCreateCommand,
 } from './community-control-plane-client.js'
 import { createQueryCacheLifecycle } from '@winwincode/browser-core/query-cache'
 import type {
@@ -22,15 +26,16 @@ import type {
   ControlPlaneWebSocketSubscriptionId,
   DeliveryAdvanceCompletedResponse,
   DeliveryAdvanceCommand,
-  DeliveryApproveTaskBreakdownCompletedResponse,
+  WorkRunCancelCompletedResponse,
   DeliveryCreateCommand,
   DeliveryCreateCompletedResponse,
+  DeliveryTaskBreakdownCreateCompletedResponse,
+  DeliveryTaskBreakdownCreateCommand,
   DeliveryDetailProjection,
   DeliveryGetResultResponse,
   DeliveryId,
   DeliveryProjection,
   DeliveryResolveAttentionCompletedResponse,
-  DeliveryStageProjection,
   DeliverySubmitVerdictCompletedResponse,
   DeliveryTaskId,
   EventReadCursor,
@@ -43,10 +48,14 @@ import type {
   RequestId,
   RuntimeProjectionGetResultResponse,
   RuntimeProjectionSnapshot,
-  StageRunId,
+  WorkRunId,
+  WorkRun,
+  WorkItemId,
+  WorkRunAggregateProjection,
   StrongFlowDiagramExecutionProjection,
   StrongFlowReadCursor,
 } from './generated/contracts.js'
+export type { DeliveryCancelRequest } from './community-control-plane-client.js'
 import {
   CommandName,
   ControlPlaneWebSocketEventType,
@@ -118,7 +127,6 @@ export type StrongFlowDiagramExecutionFacts = StrongFlowDiagramExecutionProjecti
 export interface StrongFlowProjection {
   readonly delivery: DeliveryDetailProjection
   readonly solutionReview: DeliveryDetailProjection['solutionReview']
-  readonly stage: DeliveryStageProjection
   readonly runtime: RuntimeProjectionSnapshot
   readonly evidence: DeliveryDetailProjection['evidence']
   readonly verdict: DeliveryDetailProjection['verdict']
@@ -127,6 +135,7 @@ export interface StrongFlowProjection {
   readonly currentCandidate: DeliveryDetailProjection['currentCandidate']
   /** Exact canonical execution-to-diagram facts at this projection boundary. */
   readonly diagramExecution: StrongFlowDiagramExecutionFacts | null
+  readonly workRunAggregate: WorkRunAggregateProjection
   readonly metadata: StrongFlowProjectionMetadata
 }
 
@@ -178,9 +187,9 @@ export interface StrongFlowCandidateDiffState {
 
 export type StrongFlowViewModelListener = (state: StrongFlowViewModelState) => void
 
-export interface StrongFlowStageBinding {
+export interface StrongFlowWorkRunBinding {
   readonly productSessionId: ProductSessionId
-  readonly stageRunId: StageRunId
+  readonly workRunId: WorkRunId
 }
 
 export interface StrongFlowViewModelOptions {
@@ -189,10 +198,10 @@ export interface StrongFlowViewModelOptions {
   readonly scope: RepositoryScope
   readonly deliveryId: DeliveryId
   readonly productSessionId: ProductSessionId
-  readonly stageRunId: StageRunId
+  readonly workRunId: WorkRunId
   readonly subscriptionId: ControlPlaneWebSocketSubscriptionId
   readonly nextRequestId: () => RequestId
-  readonly onStageBindingChange?: (binding: StrongFlowStageBinding) => void
+  readonly onWorkRunBindingChange?: (binding: StrongFlowWorkRunBinding) => void
   /** Reads the Candidate identity currently pinned by the canonical route. */
   readonly expectedCandidateRef?: () => string | null
   readonly selectedCandidatePath?: string | null
@@ -219,6 +228,7 @@ export interface StrongFlowAttentionDecisionInput {
   readonly remediation: StrongFlowAttentionRemediationInput | null
 }
 
+/** Exact public input for cancelling one active WorkRun. */
 /** Exact server identity of one historical Candidate opened for read-only review. */
 export interface StrongFlowHistoricalCandidateIdentity {
   readonly candidateRef: string
@@ -238,22 +248,22 @@ export interface StrongFlowViewModel {
   selectCandidateFile(path: string): Promise<void>
   loadMoreCandidateDiff(): Promise<void>
   decideSolutionReview(input: StrongFlowSolutionReviewDecisionInput): Promise<void>
-  approveTaskBreakdown(): Promise<void>
   resolveAttention(input: StrongFlowAttentionDecisionInput): Promise<void>
   submitVerdict(): Promise<void>
   advanceDelivery(): Promise<void>
+  cancelWorkRun(request: DeliveryCancelRequest): Promise<void>
   /**
    * Read the exact RuntimeProjection of one historical StageRun at the current
    * snapshot's read cursor. Human review runs have no runtime binding and
    * resolve to null instead of a projection.
    */
-  loadStageRunRuntime(
-    stageRunId: StageRunId,
+  loadWorkRunRuntime(
+    workRunId: WorkRunId,
     signal?: AbortSignal,
   ): Promise<RuntimeProjectionSnapshot | null>
   /** Read the exact Candidates a historical StageRun produced, from candidate.list. */
-  loadStageRunCandidates(
-    stageRunId: StageRunId,
+  loadWorkRunCandidates(
+    workRunId: WorkRunId,
     signal?: AbortSignal,
   ): Promise<readonly CandidateHistoryItemProjection[]>
   /**
@@ -274,10 +284,10 @@ export interface StrongFlowViewModel {
 }
 
 interface StrongFlowSnapshot {
-  readonly binding: StrongFlowStageBinding
+  readonly binding: StrongFlowWorkRunBinding
   readonly delivery: DeliveryDetailProjection
   readonly runtime: RuntimeProjectionSnapshot
-  readonly stage: DeliveryStageProjection
+  readonly workRunAggregate: WorkRunAggregateProjection
 }
 
 interface StrongFlowSnapshotMinimum {
@@ -285,7 +295,7 @@ interface StrongFlowSnapshotMinimum {
   readonly deliveryRevision?: number
   readonly runtimeRevision?: number
   readonly runtimeSequence?: number
-  readonly announcedBinding?: StrongFlowStageBinding
+  readonly announcedBinding?: StrongFlowWorkRunBinding
 }
 
 interface StrongFlowQueryResponses {
@@ -297,8 +307,9 @@ interface StrongFlowQueryResponses {
 
 interface StrongFlowCommandResponses {
   readonly [CommandName.DeliveryCreate]: DeliveryCreateCompletedResponse
-  readonly [CommandName.DeliveryApproveTaskBreakdown]: DeliveryApproveTaskBreakdownCompletedResponse
+  readonly [CommandName.DeliveryTaskBreakdownCreate]: DeliveryTaskBreakdownCreateCompletedResponse
   readonly [CommandName.DeliveryAdvance]: DeliveryAdvanceCompletedResponse
+  readonly [CommandName.WorkRunCancel]: WorkRunCancelCompletedResponse
   readonly [CommandName.DeliveryResolveAttention]: DeliveryResolveAttentionCompletedResponse
   readonly [CommandName.DeliverySubmitVerdict]: DeliverySubmitVerdictCompletedResponse
 }
@@ -332,6 +343,7 @@ export interface StrongFlowCreateViewModelOptions {
   readonly actor: Actor
   readonly scope: RepositoryScope
   readonly nextDeliveryId: () => DeliveryId
+  readonly nextWorkItemId: () => WorkItemId
   readonly nextRequestId: () => RequestId
   readonly onCreated: (deliveryId: DeliveryId) => void
 }
@@ -410,7 +422,7 @@ function candidateIdentity(candidate: FrozenCandidateSummaryProjection): string 
     candidate.diffSha256,
     candidate.frozenAt,
     candidate.producerSessionBindingId,
-    candidate.producerStageRunId,
+    candidate.producerWorkRunId,
   ].join('\n')
 }
 
@@ -542,7 +554,7 @@ function planReviewDecisionText(
     deliveryId: projection.delivery.deliveryId,
     deliverySpecId: review.deliverySpecId,
     deliverySpecRevision: review.deliverySpecRevision,
-    reviewStageRunId: review.reviewStageRunId,
+    reviewWorkRunId: review.reviewWorkRunId,
     attentionItemId: review.attentionItemId,
     reviewSetSha256: review.reviewSetSha256.replace(/^sha256:/u, ''),
     action: input.action,
@@ -627,10 +639,7 @@ function sameReadCursor(left: StrongFlowReadCursor | null, right: StrongFlowRead
 function assertDelivery(
   delivery: DeliveryDetailProjection,
   options: StrongFlowViewModelOptions,
-  currentBinding: StrongFlowStageBinding,
-  currentRevision: number | null,
-  announcedBinding?: StrongFlowStageBinding,
-): { readonly binding: StrongFlowStageBinding, readonly stage: DeliveryStageProjection } {
+): void {
   const cursor = delivery.readCursor
   if (
     delivery.kind !== 'delivery_detail'
@@ -647,36 +656,6 @@ function assertDelivery(
     'STRONGFLOW_DELIVERY_MISMATCH',
     'The Delivery snapshot does not match the selected StrongFlow scope.',
   )
-  if (new Set(delivery.stages.map(stage => stage.id)).size !== delivery.stages.length) {
-    throw clientFailure(
-      'STRONGFLOW_STAGE_BINDING_MISMATCH',
-      'The Delivery snapshot contains repeated StageRun identities.',
-    )
-  }
-  const currentIndex = delivery.stages.findIndex(stage => stage.id === currentBinding.stageRunId)
-  const currentStage = delivery.stages[currentIndex]
-  if (!stageMatchesBinding(currentStage, currentBinding)) throw clientFailure(
-    'STRONGFLOW_STAGE_BINDING_MISMATCH',
-    'The selected StageRun does not have the expected ProductSession binding.',
-  )
-  const activeIndex = delivery.stages.findLastIndex(stage => (
-    stage.actorType === 'codex' && stage.sessionBinding !== null
-  ))
-  const stage = delivery.stages[activeIndex]
-  if (stage === undefined || stage.actorType !== 'codex' || stage.sessionBinding === null) {
-    throw clientFailure(
-      'STRONGFLOW_STAGE_BINDING_MISMATCH',
-      'The Delivery has no canonical Codex StageRun binding.',
-    )
-  }
-  const binding = Object.freeze({
-    productSessionId: stage.sessionBinding.productSessionId,
-    stageRunId: stage.id,
-  })
-  if (!stageMatchesBinding(stage, binding)) throw clientFailure(
-    'STRONGFLOW_STAGE_BINDING_MISMATCH',
-    'The active StageRun has an inconsistent ProductSession binding.',
-  )
   const expectedCandidateRef = options.expectedCandidateRef?.() ?? null
   if (
     expectedCandidateRef !== null
@@ -685,68 +664,23 @@ function assertDelivery(
     'STRONGFLOW_CANDIDATE_ROUTE_STALE',
     'The Candidate named by this StrongFlow link has expired or is no longer current.',
   )
-  if (
-    activeIndex < currentIndex
-    || (
-      currentRevision !== null
-      && delivery.deliveryRevision === currentRevision
-      && !sameStageBinding(binding, currentBinding)
-    )
-  ) throw clientFailure(
-    'STRONGFLOW_STAGE_BINDING_ROLLBACK',
-    'The Delivery attempted to move StrongFlow back to an older StageRun binding.',
-  )
-  if (announcedBinding !== undefined && !sameStageBinding(binding, announcedBinding)) {
-    throw clientFailure(
-      'STRONGFLOW_RUNTIME_EVENT_MISMATCH',
-      'The runtime invalidation does not name the active canonical StageRun.',
-    )
-  }
-  return Object.freeze({ binding, stage })
 }
 
-function announcedBindingIndex(
-  delivery: DeliveryDetailProjection,
-  announcedBinding: StrongFlowStageBinding,
-): number {
-  const index = delivery.stages.findIndex(stage => stage.id === announcedBinding.stageRunId)
-  const stage = index < 0 ? undefined : delivery.stages[index]
-  if (!stageMatchesBinding(stage, announcedBinding)) throw clientFailure(
-    'STRONGFLOW_RUNTIME_EVENT_MISMATCH',
-    'The runtime invalidation does not name a StageRun in the current Delivery.',
-  )
-  return index
-}
-
-function sameStageBinding(left: StrongFlowStageBinding, right: StrongFlowStageBinding): boolean {
-  return left.productSessionId === right.productSessionId && left.stageRunId === right.stageRunId
-}
-
-function stageMatchesBinding(
-  stage: DeliveryStageProjection | undefined,
-  binding: StrongFlowStageBinding,
-): boolean {
-  return stage !== undefined
-    && stage.actorType === 'codex'
-    && stage.sessionBinding !== null
-    && stage.sessionBinding.productSessionId === binding.productSessionId
-    && (
-      stage.sessionBinding.stageRunId === null
-      || stage.sessionBinding.stageRunId === binding.stageRunId
-    )
+function sameWorkRunBinding(left: StrongFlowWorkRunBinding, right: StrongFlowWorkRunBinding): boolean {
+  return left.productSessionId === right.productSessionId && left.workRunId === right.workRunId
 }
 
 function assertRuntime(
   runtime: RuntimeProjectionSnapshot,
   cursor: StrongFlowReadCursor,
   options: StrongFlowViewModelOptions,
-  binding: StrongFlowStageBinding,
+  run: WorkRun,
 ): void {
   if (
     runtime.kind !== 'runtime_projection'
-    || runtime.productSessionId !== binding.productSessionId
+    || runtime.productSessionId !== run.productSessionId
     || runtime.deliveryId !== options.deliveryId
-    || runtime.stageRunId !== binding.stageRunId
+    || runtime.workRunId !== run.id
     || runtime.revision !== cursor.runtimeLedgerRevision
     || runtime.lastProjectionSequence !== cursor.runtimeAcceptedSequence
     || !sameReadCursor(runtime.readCursor, cursor)
@@ -755,9 +689,17 @@ function assertRuntime(
     || runtime.eventCursor.stream.kind !== 'delivery'
     || runtime.eventCursor.stream.deliveryId !== options.deliveryId
     || !sameScope(runtime.eventCursor.scope, options.scope)
+    || runtime.sessions.length > 1
     || runtime.sessions.some(session => (
-      session.productSessionId !== binding.productSessionId
-      || session.stageRunId !== binding.stageRunId
+      session.productSessionId !== run.productSessionId
+      || session.workRunId !== run.id
+      || session.workItemId !== run.workItemId
+      || session.executionJobId !== run.executionJobId
+      || session.attempt !== run.attempt
+      || session.workerSessionId !== run.workerSessionId
+      || session.codexThreadId !== run.codexThreadId
+      || session.leaseId !== run.leaseId
+      || session.fencingToken !== run.fencingToken
     ))
   ) throw clientFailure(
     'STRONGFLOW_RUNTIME_MISMATCH',
@@ -820,11 +762,18 @@ function candidateDigestFromReference(candidateRef: string): string | null {
   return digest !== null && /^sha256:[0-9a-f]{64}$/u.test(digest) ? digest : null
 }
 
-/** The authority exposes a verdict action only after every active StageRun settles. */
+function candidateHasActiveWorkRuns(projection: StrongFlowProjection): boolean {
+  const candidate = projection.currentCandidate
+  const producer = projection.workRunAggregate.runs.find(run => run.id === candidate?.producerWorkRunId)
+  return producer === undefined || projection.workRunAggregate.runs.some(run =>
+    run.workItemId === producer.workItemId && ['queued', 'leased', 'running', 'candidate_ready'].includes(run.state))
+}
+
+/** Only the candidate's WorkItem blocks its verdict; historical stages never do. */
 export function canSubmitStrongFlowVerdict(projection: StrongFlowProjection): boolean {
   return projection.currentCandidate !== null
     && projection.verdict === null
-    && !projection.delivery.stages.some(stage => ['running', 'waiting'].includes(stage.status))
+    && !candidateHasActiveWorkRuns(projection)
 }
 
 /**
@@ -884,7 +833,6 @@ function projectionUpdatedAt(snapshot: StrongFlowSnapshot): string {
     delivery.publication?.updatedAt,
     delivery.solutionReview?.reviewedAt,
     delivery.diagramExecution?.updatedAt,
-    ...delivery.stages.flatMap(stage => [stage.startedAt, stage.finishedAt]),
     ...delivery.evidence.map(item => item.createdAt),
     ...delivery.attention.flatMap(item => [item.createdAt, item.resolvedAt]),
   ].filter((value): value is string => value !== null && value !== undefined)
@@ -901,12 +849,11 @@ function projectionUpdatedAt(snapshot: StrongFlowSnapshot): string {
 }
 
 function projectionFromSnapshot(snapshot: StrongFlowSnapshot): StrongFlowProjection {
-  const { delivery, runtime, stage } = snapshot
+  const { delivery, runtime } = snapshot
   assertCandidateIntegrity(delivery)
   return Object.freeze({
     delivery,
     solutionReview: delivery.solutionReview,
-    stage,
     runtime,
     evidence: Object.freeze([...delivery.evidence]),
     verdict: delivery.verdict,
@@ -914,6 +861,7 @@ function projectionFromSnapshot(snapshot: StrongFlowSnapshot): StrongFlowProject
     publication: delivery.publication,
     currentCandidate: delivery.currentCandidate,
     diagramExecution: delivery.diagramExecution,
+    workRunAggregate: snapshot.workRunAggregate,
     metadata: Object.freeze({
       source: 'control-plane-snapshot',
       updatedAt: projectionUpdatedAt(snapshot),
@@ -952,6 +900,8 @@ export function createStrongFlowCreateViewModel(
     readonly inputKey: string
     readonly createRequest: DeliveryCreateCommand
     created: DeliveryProjection | null
+    workRunRequestId: RequestId | null
+    workItemRequest: DeliveryTaskBreakdownCreateCommand | null
     advanceRequest: DeliveryAdvanceCommand | null
   } | null = null
 
@@ -1073,6 +1023,8 @@ export function createStrongFlowCreateViewModel(
           },
         },
         created: null,
+        workRunRequestId: null,
+        workItemRequest: null,
         advanceRequest: null,
       }
     }
@@ -1101,16 +1053,78 @@ export function createStrongFlowCreateViewModel(
         }
         currentAttempt.created = created
       }
+      currentAttempt.workRunRequestId ??= options.nextRequestId()
+      const aggregate = await queryWorkRunAggregate(options.client, {
+        actor: options.actor,
+        scope: options.scope,
+        requestId: currentAttempt.workRunRequestId,
+        deliveryId,
+        workItemId: null,
+      }, { signal: controller.signal })
+      if (closed || active !== controller) return
+      let dispatchRevision = aggregate.readCursor.deliveryRevision
+      if (aggregate.items.length === 0 && currentAttempt.workItemRequest === null) {
+        currentAttempt.workItemRequest ??= taskBreakdownCreateCommand({
+          actor: options.actor,
+          scope: options.scope,
+          requestId: options.nextRequestId(),
+          deliveryId,
+          expectedRevision: aggregate.readCursor.deliveryRevision,
+          contractRevision: aggregate.contract.revision,
+          items: [{
+            id: options.nextWorkItemId(),
+            title,
+            goal,
+            criterionIds: aggregate.contract.criteria.map(criterion => criterion.id),
+            dependsOn: [],
+          }],
+        })
+      }
+      if (currentAttempt.workItemRequest !== null) {
+        const workItemResponse = await options.client.command(
+          currentAttempt.workItemRequest,
+          { signal: controller.signal },
+        )
+        if (closed || active !== controller) return
+        const workItemsCompleted = expectCompletedCommand(
+          workItemResponse,
+          CommandName.DeliveryTaskBreakdownCreate,
+          currentAttempt.workItemRequest.requestId,
+        )
+        if (workItemsCompleted === null) {
+          publish('waiting', null)
+          return
+        }
+        const afterWorkItems = await queryWorkRunAggregate(options.client, {
+          actor: options.actor,
+          scope: options.scope,
+          requestId: currentAttempt.workRunRequestId,
+          deliveryId,
+          workItemId: null,
+        }, { signal: controller.signal })
+        if (closed || active !== controller) return
+        if (!afterWorkItems.items.some(item => item.id === currentAttempt.workItemRequest?.payload.items[0]?.id)) {
+          throw clientFailure(
+            'STRONGFLOW_WORK_ITEM_MISSING',
+            'The Control Plane did not expose the created WorkItem.',
+          )
+        }
+        dispatchRevision = afterWorkItems.readCursor.deliveryRevision
+      }
       currentAttempt.advanceRequest ??= {
         schemaVersion: SCHEMA_VERSION,
         requestId: options.nextRequestId(),
         actor: options.actor,
         scope: options.scope,
         command: CommandName.DeliveryAdvance,
-        expectedRevision: currentAttempt.created.revision,
-        payload: { deliveryId },
+        expectedRevision: dispatchRevision,
+        payload: { deliveryId, dispatchProfile: 'executor' },
       }
       const advanceRequest = currentAttempt.advanceRequest
+      if (advanceRequest === null) throw clientFailure(
+        'STRONGFLOW_ADVANCE_REQUEST_MISSING',
+        'The Delivery advance request was not prepared.',
+      )
       const advanceResponse = await options.client.command(
         advanceRequest,
         { signal: controller.signal },
@@ -1126,7 +1140,7 @@ export function createStrongFlowCreateViewModel(
         publish('waiting', null)
         return
       }
-      if (advanced.activeStageRunId === null) throw clientFailure(
+      if (advanced.activeWorkRunId === null) throw clientFailure(
         'STRONGFLOW_CREATE_STAGE_REQUIRED',
         'The new Delivery did not expose its executable StrongFlow stage.',
       )
@@ -1218,9 +1232,9 @@ export function createStrongFlowViewModel(
   let generation = 0
   let closed = false
   const draftScope = JSON.stringify([options.actor, options.scope])
-  let activeBinding: StrongFlowStageBinding = Object.freeze({
+  let activeBinding: StrongFlowWorkRunBinding = Object.freeze({
     productSessionId: options.productSessionId,
-    stageRunId: options.stageRunId,
+    workRunId: options.workRunId,
   })
   let acceptedDeliveryRevision: number | null = null
   let candidateFilesCursor: OpaqueCursor | null = null
@@ -1729,28 +1743,59 @@ export function createStrongFlowViewModel(
           'The StrongFlow snapshot is older than its invalidation event.',
         )
       }
-      const active = assertDelivery(
-        deliveryResponse.result,
-        options,
-        activeBinding,
-        acceptedDeliveryRevision,
-        consistencyMinimum.announcedBinding,
-      )
-      if (minimum.announcedBinding !== undefined) {
-        const announcedIndex = announcedBindingIndex(
-          deliveryResponse.result,
-          minimum.announcedBinding,
-        )
-        if (
-          invalidationWasSuperseded
-          && announcedIndex > deliveryResponse.result.stages.findIndex(
-            stage => stage.id === active.binding.stageRunId,
-          )
-        ) throw clientFailure(
-          'STRONGFLOW_RUNTIME_EVENT_MISMATCH',
-          'The runtime invalidation names a future StageRun.',
-        )
+      assertDelivery(deliveryResponse.result, options)
+      let workRunAggregate: WorkRunAggregateProjection
+      try {
+        workRunAggregate = await queryWorkRunAggregate(options.client, {
+          actor: options.actor,
+          scope: options.scope,
+          requestId: options.nextRequestId(),
+          deliveryId: options.deliveryId,
+          workItemId: null,
+          atCursor: deliveryResponse.result.readCursor,
+          page: requestPage(),
+        }, { signal })
+      } catch (error) {
+        if (error instanceof ControlPlaneClientError && error.code === 'READ_CURSOR_EXPIRED'
+          && restarts < MAX_READ_CURSOR_RESTARTS) {
+          restarts += 1
+          queryCache.revalidate(deliveryRequest)
+          continue
+        }
+        throw error
       }
+      if (minimum.announcedBinding !== undefined
+        && !workRunAggregate.runs.some(run => run.id === minimum.announcedBinding?.workRunId
+          && run.productSessionId === minimum.announcedBinding.productSessionId)) throw clientFailure(
+        'STRONGFLOW_RUNTIME_EVENT_MISMATCH',
+        'The runtime invalidation names an execution absent from this Delivery read.',
+      )
+      const selected = workRunAggregate.runs.find(run => run.id === activeBinding.workRunId)
+      if (selected === undefined) throw clientFailure(
+        'STRONGFLOW_WORKRUN_MISMATCH',
+        'The selected WorkRun is absent from the Delivery.',
+      )
+      const latest = workRunAggregate.runs
+        .filter(run => run.workItemId === selected.workItemId)
+        .reduce((current, run) => run.attempt > current.attempt ? run : current, selected)
+      const announced = consistencyMinimum.announcedBinding
+      const run = announced === undefined ? latest
+        : workRunAggregate.runs.find(run => run.id === announced.workRunId
+          && run.productSessionId === announced.productSessionId)
+      if (run === undefined || run.productSessionId === null) throw clientFailure(
+        'STRONGFLOW_RUNTIME_EVENT_MISMATCH',
+        'The selected execution has no accepted WorkRun session.',
+      )
+      if (run.workItemId === selected.workItemId && run.attempt < selected.attempt) throw clientFailure(
+        'STRONGFLOW_WORKRUN_ROLLBACK',
+        'The runtime invalidation names an older execution attempt.',
+      )
+      const binding = Object.freeze({ productSessionId: run.productSessionId, workRunId: run.id })
+      if (acceptedDeliveryRevision === deliveryResponse.result.deliveryRevision
+        && !sameWorkRunBinding(binding, activeBinding)) throw clientFailure(
+        'STRONGFLOW_WORKRUN_ROLLBACK',
+        'The WorkRun binding changed without a new Delivery revision.',
+      )
       if (acceptedDeliveryRevision !== null
         && deliveryResponse.result.deliveryRevision < acceptedDeliveryRevision) throw clientFailure(
         'STRONGFLOW_SNAPSHOT_STALE',
@@ -1771,9 +1816,9 @@ export function createStrongFlowViewModel(
         query: QueryName.RuntimeProjectionGet,
         parameters: {
           kind: 'delivery-stage',
-          productSessionId: active.binding.productSessionId,
+          productSessionId: binding.productSessionId,
           deliveryId: options.deliveryId,
-          stageRunId: active.binding.stageRunId,
+          workRunId: binding.workRunId,
           atCursor: deliveryResponse.result.readCursor,
         },
         page: requestPage(),
@@ -1795,11 +1840,27 @@ export function createStrongFlowViewModel(
         }
         throw error
       }
+      const runtimeWorkRunId = runtimeResponse.result.workRunId
+      if (runtimeWorkRunId === null) throw clientFailure(
+        'STRONGFLOW_RUNTIME_MISMATCH',
+        'The runtime snapshot has no canonical WorkRun identity.',
+      )
+      const runtimeBinding = Object.freeze({
+        productSessionId: runtimeResponse.result.productSessionId,
+        workRunId: runtimeWorkRunId,
+      })
+      if (
+        consistencyMinimum.announcedBinding !== undefined
+        && !sameWorkRunBinding(runtimeBinding, consistencyMinimum.announcedBinding)
+      ) throw clientFailure(
+        'STRONGFLOW_RUNTIME_EVENT_MISMATCH',
+        'The runtime snapshot does not match the invalidation WorkRun.',
+      )
       assertRuntime(
         runtimeResponse.result,
         deliveryResponse.result.readCursor,
         options,
-        active.binding,
+        run,
       )
       if (
         (consistencyMinimum.runtimeRevision !== undefined
@@ -1814,10 +1875,10 @@ export function createStrongFlowViewModel(
         )
       }
       return Object.freeze({
-        binding: active.binding,
+        binding: runtimeBinding,
         delivery: deliveryResponse.result,
         runtime: runtimeResponse.result,
-        stage: active.stage,
+        workRunAggregate,
       })
     }
   }
@@ -1838,8 +1899,8 @@ export function createStrongFlowViewModel(
       const candidateChanged = loadedCandidateIdentity !== null
         && loadedCandidateIdentity !== nextCandidateIdentity
       if (candidateChanged) clearCandidateFileResources()
-      if (!sameStageBinding(activeBinding, snapshot.binding)) {
-        options.onStageBindingChange?.(snapshot.binding)
+      if (!sameWorkRunBinding(activeBinding, snapshot.binding)) {
+        options.onWorkRunBindingChange?.(snapshot.binding)
         activeBinding = snapshot.binding
       }
       acceptedDeliveryRevision = snapshot.delivery.deliveryRevision
@@ -1937,7 +1998,7 @@ export function createStrongFlowViewModel(
             eventSequence: frame.sequence,
             announcedBinding: Object.freeze({
               productSessionId: runtimeEvent.productSessionId,
-              stageRunId: runtimeEvent.stageRunId,
+              workRunId: runtimeEvent.workRunId,
             }),
             ...(runtimeEvent.lastProjectionSequence === 0
               ? { deliveryRevision: runtimeEvent.projectionRevision }
@@ -2084,6 +2145,8 @@ export function createStrongFlowViewModel(
     request: (projection: StrongFlowProjection, requestId: RequestId) => Parameters<
       ControlPlaneClient['command']
     >[0],
+    initialRequestId?: RequestId,
+    preserveRequestIdOnRetry = false,
   ): Promise<void> {
     if (closed) throw clientFailure(
       'STRONGFLOW_VIEW_MODEL_CLOSED',
@@ -2103,7 +2166,7 @@ export function createStrongFlowViewModel(
     if (projection === null) return
     const ownGeneration = generation
     const active = commandController()
-    let requestId = options.nextRequestId()
+    let requestId = initialRequestId ?? options.nextRequestId()
     let commandRequest = request(projection, requestId)
     const trustedFactsRetryDeadline = Date.now()
       + TRUSTED_FACTS_COMMAND_RETRY_DEADLINE_MILLIS
@@ -2129,8 +2192,10 @@ export function createStrongFlowViewModel(
           await waitForRetry(active.signal, TRUSTED_FACTS_COMMAND_RETRY_DELAY_MILLIS)
           if (active.signal.aborted) return
           if (!operationIsCurrent(ownGeneration)) throw error
-          requestId = options.nextRequestId()
-          commandRequest = { ...commandRequest, requestId }
+          if (!preserveRequestIdOnRetry) {
+            requestId = options.nextRequestId()
+            commandRequest = { ...commandRequest, requestId }
+          }
         }
       }
       if (!operationIsCurrent(ownGeneration)) return
@@ -2169,29 +2234,6 @@ export function createStrongFlowViewModel(
         decision: 'resolve',
         resolution,
         remediation: null,
-      },
-    }))
-  }
-
-  async function approveTaskBreakdown(): Promise<void> {
-    const projection = commandProjection()
-    if (projection === null) return
-    const review = projection.solutionReview
-    if (review === null || review.reviewStatus !== 'approved') {
-      interactionFailure(
-        'STRONGFLOW_APPROVED_REVIEW_REQUIRED',
-        'Approve the current solution review before promoting its task breakdown.',
-      )
-      return
-    }
-    await runCommand(CommandName.DeliveryApproveTaskBreakdown, (current, requestId) => ({
-      ...requestBase(),
-      requestId,
-      command: CommandName.DeliveryApproveTaskBreakdown,
-      expectedRevision: current.metadata.revisions.delivery,
-      payload: {
-        deliveryId: current.delivery.deliveryId,
-        reviewSetSha256: review.reviewSetSha256,
       },
     }))
   }
@@ -2261,10 +2303,10 @@ export function createStrongFlowViewModel(
       )
       return
     }
-    if (projection.delivery.stages.some(stage => ['running', 'waiting'].includes(stage.status))) {
+    if (candidateHasActiveWorkRuns(projection)) {
       interactionFailure(
-        'STRONGFLOW_VERDICT_STAGES_ACTIVE',
-        'Wait for all active verification stages to finish before requesting a verdict.',
+        'STRONGFLOW_VERDICT_WORKRUNS_ACTIVE',
+        'Wait for this candidate’s active WorkRuns to finish before requesting a verdict.',
       )
       return
     }
@@ -2318,8 +2360,42 @@ export function createStrongFlowViewModel(
       requestId,
       command: CommandName.DeliveryAdvance,
       expectedRevision: current.metadata.revisions.delivery,
-      payload: { deliveryId: current.delivery.deliveryId },
+      payload: { deliveryId: current.delivery.deliveryId, dispatchProfile: 'verifier' },
     }))
+  }
+
+  async function cancelWorkRun(request: DeliveryCancelRequest): Promise<void> {
+    const projection = commandProjection()
+    if (projection === null) return
+    if (request.deliveryId !== projection.delivery.deliveryId) {
+      interactionFailure(
+        'STRONGFLOW_CANCEL_DELIVERY_MISMATCH',
+        'Refresh StrongFlow before cancelling a WorkRun from another Delivery.',
+      )
+      return
+    }
+    if (request.expectedRevision !== projection.metadata.revisions.delivery) {
+      interactionFailure(
+        'REVISION_CONFLICT',
+        'Refresh StrongFlow before cancelling this WorkRun.',
+      )
+      return
+    }
+    const run = projection.workRunAggregate.runs.find(candidate => candidate.id === request.workRunId)
+    if (run === undefined || !['queued', 'leased', 'running'].includes(run.state)) {
+      interactionFailure(
+        'STRONGFLOW_CANCEL_TARGET_INVALID',
+        'Select a queued, leased, or running WorkRun before cancelling it.',
+      )
+      return
+    }
+    await runCommand(CommandName.WorkRunCancel, (current, requestId) => ({
+      ...workRunCancelCommand({
+        ...request,
+        deliveryId: current.delivery.deliveryId,
+        requestId,
+      }, { actor: options.actor, scope: options.scope }),
+    }), request.requestId, true)
   }
 
   /** Guard shared by the read-only historical review queries. */
@@ -2330,28 +2406,28 @@ export function createStrongFlowViewModel(
     )
   }
 
-  function historicalStage(
-    requestedStageRunId: StageRunId,
-  ): StrongFlowProjection['delivery']['stages'][number] | undefined {
+  function historicalWorkRun(
+    requestedWorkRunId: WorkRunId,
+  ): WorkRunAggregateProjection['runs'][number] | undefined {
     const projection = currentState.projection
     if (projection === null) return undefined
-    return projection.delivery.stages.find(stage => stage.id === requestedStageRunId)
+    return projection.workRunAggregate.runs.find(run => run.id === requestedWorkRunId)
   }
 
-  async function loadStageRunRuntime(
-    requestedStageRunId: StageRunId,
+  async function loadWorkRunRuntime(
+    requestedWorkRunId: WorkRunId,
     signal?: AbortSignal,
   ): Promise<RuntimeProjectionSnapshot | null> {
     requireOpenViewModel()
     const projection = currentState.projection
     if (projection === null) return null
-    const stage = historicalStage(requestedStageRunId)
-    if (stage === undefined || stage.actorType !== 'codex' || stage.sessionBinding === null) {
+    const run = historicalWorkRun(requestedWorkRunId)
+    if (run === undefined || run.productSessionId === null) {
       return null
     }
     const binding = Object.freeze({
-      productSessionId: stage.sessionBinding.productSessionId,
-      stageRunId: stage.id,
+      productSessionId: run.productSessionId,
+      workRunId: run.id,
     })
     const active = controller(signal, 'historical')
     try {
@@ -2363,12 +2439,12 @@ export function createStrongFlowViewModel(
           kind: 'delivery-stage',
           productSessionId: binding.productSessionId,
           deliveryId: options.deliveryId,
-          stageRunId: binding.stageRunId,
+          workRunId: binding.workRunId,
           atCursor: projection.delivery.readCursor,
         },
         page: requestPage(),
       }, { signal: active.signal }), QueryName.RuntimeProjectionGet)
-      assertRuntime(response.result, projection.delivery.readCursor, options, binding)
+      assertRuntime(response.result, projection.delivery.readCursor, options, run)
       return response.result
     } finally {
       releaseController(active)
@@ -2376,7 +2452,7 @@ export function createStrongFlowViewModel(
   }
 
   async function loadCandidateHistory(
-    requestedStageRunId: StageRunId | null,
+    requestedWorkRunId: WorkRunId | null,
     signal?: AbortSignal,
   ): Promise<readonly CandidateHistoryItemProjection[]> {
     requireOpenViewModel()
@@ -2420,8 +2496,8 @@ export function createStrongFlowViewModel(
           'The Candidate history does not match the current Delivery read cursor.',
         )
         items.push(...result.items.filter(
-          item => requestedStageRunId === null
-            || item.candidate.producerStageRunId === requestedStageRunId,
+          item => requestedWorkRunId === null
+            || item.candidate.producerWorkRunId === requestedWorkRunId,
         ))
         if (!response.page.hasMore) {
           if (response.page.nextCursor !== null) throw clientFailure(
@@ -2448,11 +2524,11 @@ export function createStrongFlowViewModel(
     }
   }
 
-  async function loadStageRunCandidates(
-    requestedStageRunId: StageRunId,
+  async function loadWorkRunCandidates(
+    requestedWorkRunId: WorkRunId,
     signal?: AbortSignal,
   ): Promise<readonly CandidateHistoryItemProjection[]> {
-    return loadCandidateHistory(requestedStageRunId, signal)
+    return loadCandidateHistory(requestedWorkRunId, signal)
   }
 
   async function loadDeliveryCandidates(
@@ -2534,9 +2610,6 @@ export function createStrongFlowViewModel(
     async decideSolutionReview(input) {
       await decideSolutionReview(input)
     },
-    async approveTaskBreakdown() {
-      await approveTaskBreakdown()
-    },
     async resolveAttention(input) {
       await resolveAttention(input)
     },
@@ -2546,11 +2619,14 @@ export function createStrongFlowViewModel(
     async advanceDelivery() {
       await advanceDelivery()
     },
-    async loadStageRunRuntime(stageRunId, signal) {
-      return loadStageRunRuntime(stageRunId, signal)
+    async cancelWorkRun(request) {
+      await cancelWorkRun(request)
     },
-    async loadStageRunCandidates(stageRunId, signal) {
-      return loadStageRunCandidates(stageRunId, signal)
+    async loadWorkRunRuntime(workRunId, signal) {
+      return loadWorkRunRuntime(workRunId, signal)
+    },
+    async loadWorkRunCandidates(workRunId, signal) {
+      return loadWorkRunCandidates(workRunId, signal)
     },
     async loadDeliveryCandidates(signal) {
       return loadDeliveryCandidates(signal)

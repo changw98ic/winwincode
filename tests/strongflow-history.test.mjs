@@ -53,16 +53,16 @@ const {
   strongFlowHistoryHashWithSelection,
   strongFlowHistorySelectionForTree,
 } = historySelectionModule
-const { strongFlowHistoryTree } = historyTreeModule
+const { strongFlowHistoryTree, strongFlowCancellableWorkRuns, strongFlowCancellationTarget } = historyTreeModule
 const { mountStrongFlowHistoryNavigation } = historyNavigationModule
 const { mountStrongFlowRunDetail } = runDetailModule
 const { mountStrongFlowPage } = page
 
 const deliveryId = 'dlv_00000000000000000000000001'
-const currentRunId = 'run_00000000000000000000000002'
-const failedRunId = 'run_00000000000000000000000001'
-const planningRunId = 'run_00000000000000000000000003'
-const reviewRunId = 'run_00000000000000000000000004'
+const currentRunId = 'wrn_00000000000000000000000002'
+const failedRunId = 'wrn_00000000000000000000000001'
+const planningRunId = 'wrn_00000000000000000000000003'
+const reviewRunId = 'wrn_00000000000000000000000004'
 
 const limits = {
   tasks: 100,
@@ -119,7 +119,7 @@ function fakeDeliveryList(visible) {
 }
 
 function historyProjection() {
-  return {
+  const projection = {
     delivery: {
       schemaVersion: 'winwincode/v1',
       deliveryId,
@@ -133,7 +133,7 @@ function historyProjection() {
       },
       requirements: {
         title: 'History navigation Delivery',
-        goal: 'Review every historical StageRun attempt.',
+        goal: 'Review every historical WorkRun attempt.',
         deliverySpecId: 'spec:1',
         deliverySpecRevision: 3,
       },
@@ -147,7 +147,7 @@ function historyProjection() {
           acceptanceCriterionIds: [],
           blockedByTaskIds: [],
           evidenceRefs: [],
-          stageRunIds: [failedRunId, currentRunId],
+          workRunIds: [failedRunId, currentRunId],
         },
         {
           id: 'task:2',
@@ -158,7 +158,7 @@ function historyProjection() {
           acceptanceCriterionIds: [],
           blockedByTaskIds: [],
           evidenceRefs: [],
-          stageRunIds: [],
+          workRunIds: [],
         },
       ],
       stages: [
@@ -182,7 +182,7 @@ function historyProjection() {
             leaseId: 'lease:1',
             sessionIdentity: null,
             sourceIdentity: null,
-            stageRunId: failedRunId,
+            workRunId: failedRunId,
             workerId: 'wrk_00000000000000000000000001',
             workerSessionId: 'wsn_00000000000000000000000001',
             attempt: 1,
@@ -208,7 +208,7 @@ function historyProjection() {
             leaseId: 'lease:2',
             sessionIdentity: null,
             sourceIdentity: null,
-            stageRunId: currentRunId,
+            workRunId: currentRunId,
             workerId: 'wrk_00000000000000000000000002',
             workerSessionId: 'wsn_00000000000000000000000002',
             attempt: 2,
@@ -234,7 +234,7 @@ function historyProjection() {
             leaseId: 'lease:3',
             sessionIdentity: null,
             sourceIdentity: null,
-            stageRunId: planningRunId,
+            workRunId: planningRunId,
             workerId: 'wrk_00000000000000000000000003',
             workerSessionId: 'wsn_00000000000000000000000003',
             attempt: 1,
@@ -260,7 +260,7 @@ function historyProjection() {
           type: 'command',
           sourceRef: 'artifact:command:attempt-1',
           candidateRef: 'refs/winwincode/candidate/attempt-1',
-          stageRunId: failedRunId,
+          workRunId: failedRunId,
           sessionBindingId: 'bind:1',
           deliverySpecId: 'spec:1',
           deliverySpecRevision: 3,
@@ -271,7 +271,7 @@ function historyProjection() {
           type: 'test',
           sourceRef: 'artifact:test:attempt-2',
           candidateRef: 'refs/winwincode/candidate/attempt-2',
-          stageRunId: currentRunId,
+          workRunId: currentRunId,
           sessionBindingId: 'bind:2',
           deliverySpecId: 'spec:1',
           deliverySpecRevision: 3,
@@ -295,22 +295,22 @@ function historyProjection() {
     },
     solutionReview: null,
     diagramExecution: null,
-    stage: { id: currentRunId },
-    runtime: { stageRunId: currentRunId, sessions: [] },
+    stage: { id: currentRunId, sessionBinding: { workRunId: currentRunId } },
+    runtime: { workRunId: currentRunId, sessions: [] },
     evidence: [
       {
         id: 'evidence:failed',
         type: 'command',
         sourceRef: 'artifact:command:attempt-1',
         candidateRef: 'refs/winwincode/candidate/attempt-1',
-        stageRunId: failedRunId,
+        workRunId: failedRunId,
       },
       {
         id: 'evidence:current',
         type: 'test',
         sourceRef: 'artifact:test:attempt-2',
         candidateRef: 'refs/winwincode/candidate/attempt-2',
-        stageRunId: currentRunId,
+        workRunId: currentRunId,
       },
     ],
     verdict: null,
@@ -330,64 +330,83 @@ function historyProjection() {
       readCursor: {},
     },
   }
+  projection.workRunAggregate = {
+    items: projection.delivery.tasks.map((task, index) => ({
+      schemaVersion: 'winwincode/v1', id: task.id, workContractId: 'wct_00000000000000000000000001',
+      workContractRevision: 1, revision: 1, state: index === 0 ? 'in_progress' : 'ready',
+      title: task.title, goal: task.goal, criterionIds: [], dependsOn: [],
+    })),
+    runs: projection.delivery.stages
+      .filter(stage => stage.actorType !== 'human' && stage.sessionBinding?.workRunId !== null)
+      .map((stage, index) => ({
+        id: stage.id,
+        workContractId: 'wct_00000000000000000000000001', contractRevision: 1,
+        workItemId: stage.deliveryTaskId ?? `wit_0000000000000000000000000${index + 1}`, workItemRevision: 1,
+        revision: stage.attempt, state: stage.status === 'failed' ? 'failed' : 'running',
+        executionJobId: `job_0000000000000000000000000${index + 1}`, attempt: stage.attempt,
+        workerId: 'wrk_00000000000000000000000001', workerInstanceId: 'wki_00000000000000000000000001',
+        workerSessionId: 'wsn_00000000000000000000000001', leaseId: 'lse_00000000000000000000000001',
+        codexThreadId: stage.sessionBinding?.codexThreadId ?? null,
+        fencingToken: '1', productSessionId: stage.sessionBinding?.productSessionId ?? null,
+      })),
+  }
+  return projection
 }
 
 test('history selection round-trips through presentation-only URL parameters', () => {
-  const hash = `#/strongflow?delivery=${deliveryId}&session=psn_2&stageRun=${currentRunId}`
+  const hash = `#/strongflow?delivery=${deliveryId}&session=psn_2&workRun=${currentRunId}`
   assert.deepEqual(strongFlowHistorySelectionFromHash(hash), {
     taskId: null,
-    stageRunId: null,
+    workRunId: null,
   })
   const deepLink = `${hash}&task=task%3A1&run=${failedRunId}`
   assert.deepEqual(strongFlowHistorySelectionFromHash(deepLink), {
     taskId: 'task:1',
-    stageRunId: failedRunId,
+    workRunId: failedRunId,
   })
   const updated = strongFlowHistoryHashWithSelection(hash, {
     taskId: 'task:1',
-    stageRunId: failedRunId,
+    workRunId: failedRunId,
   })
   assert.equal(updated, deepLink)
   assert.deepEqual(strongFlowHistorySelectionFromHash(updated), {
     taskId: 'task:1',
-    stageRunId: failedRunId,
+    workRunId: failedRunId,
   })
   const cleared = strongFlowHistoryHashWithSelection(deepLink, {
     taskId: null,
-    stageRunId: null,
+    workRunId: null,
   })
   assert.equal(cleared, hash)
 })
 
-test('history tree groups StageRuns by Task, keeps Delivery stages, and flags the current run', () => {
+test('history tree groups WorkRuns by Task, keeps Delivery stages, and flags the current run', () => {
   const tree = strongFlowHistoryTree(historyProjection(), limits)
   assert.equal(tree.tasks.length, 2)
   assert.equal(tree.tasks[0].task.id, 'task:1')
   assert.deepEqual(
-    tree.tasks[0].runs.map(run => run.stageRunId),
+    tree.tasks[0].runs.map(run => run.workRunId),
     [failedRunId, currentRunId],
   )
   assert.equal(tree.tasks[0].runs[0].attempt, 1)
   assert.equal(tree.tasks[0].runs[0].status, 'failed')
   assert.equal(tree.tasks[0].runs[0].isCurrent, false)
-  assert.equal(tree.tasks[0].runs[0].deliveryTaskId, 'task:1')
+  assert.equal(tree.tasks[0].runs[0].workItemId, 'task:1')
   assert.equal(tree.tasks[0].runs[1].isCurrent, true)
   assert.deepEqual(
-    tree.tasks[1].runs.map(run => run.stageRunId),
+    tree.tasks[1].runs.map(run => run.workRunId),
     [],
   )
   assert.deepEqual(
-    tree.deliveryRuns.map(run => run.stageRunId),
-    [planningRunId, reviewRunId],
+    tree.deliveryRuns.map(run => run.workRunId),
+    [planningRunId],
   )
-  assert.equal(tree.deliveryRuns[0].deliveryTaskId, null)
-  assert.equal(tree.deliveryRuns[1].actorType, 'human')
-  assert.equal(tree.deliveryRuns[1].binding, null)
+  assert.equal(tree.deliveryRuns[0].workItemId, 'wit_00000000000000000000000003')
   assert.deepEqual(
-    tree.runs.map(run => run.stageRunId),
-    [failedRunId, currentRunId, planningRunId, reviewRunId],
+    tree.runs.map(run => run.workRunId),
+    [failedRunId, currentRunId, planningRunId],
   )
-  assert.equal(tree.currentStageRunId, currentRunId)
+  assert.equal(tree.currentWorkRunId, currentRunId)
 
   const failedRun = tree.tasks[0].runs[0]
   assert.equal(failedRun.evidenceCount, 1)
@@ -400,12 +419,82 @@ test('history tree groups StageRuns by Task, keeps Delivery stages, and flags th
   assert.equal(tree.tasks[0].runs[1].producedCurrentCandidate, true)
 })
 
-test('history tree keeps the exact deep-linked Task and StageRun inside bounded navigation', () => {
+test('history grouping and binding come from canonical WorkRun facts', () => {
   const projection = historyProjection()
-  const deepRunId = 'run_00000000000000000000000005'
+  projection.delivery.stages[0].deliveryTaskId = 'task:2'
+  projection.delivery.stages[0].sessionBinding = {
+    ...projection.delivery.stages[0].sessionBinding,
+    executionJobId: 'job_stage_must_not_win',
+    workerId: 'wrk_stage_must_not_win',
+    workerSessionId: 'wsn_stage_must_not_win',
+    codexThreadId: 'cdx_stage_must_not_win',
+  }
+  const noStageRunId = 'wrn_00000000000000000000000005'
+  projection.workRunAggregate.runs.push({
+    ...projection.workRunAggregate.runs[0],
+    id: noStageRunId,
+    workItemId: 'task:2',
+    executionJobId: 'job_00000000000000000000000005',
+    workerId: 'wrk_00000000000000000000000005',
+    workerInstanceId: 'wki_00000000000000000000000005',
+    workerSessionId: 'wsn_00000000000000000000000005',
+    leaseId: 'lse_00000000000000000000000005',
+    codexThreadId: null,
+    productSessionId: null,
+  })
+  const tree = strongFlowHistoryTree(projection, limits)
+  assert.deepEqual(tree.tasks[0].runs.map(run => run.workRunId), [failedRunId, currentRunId])
+  assert.deepEqual(tree.tasks[1].runs.map(run => run.workRunId), [noStageRunId])
+  const run = tree.tasks[1].runs[0]
+  assert.equal(run.stage, null)
+  assert.equal(run.workItemId, 'task:2')
+  assert.equal(run.binding?.productSessionId, null)
+  assert.equal(run.binding?.executionJobId, 'job_00000000000000000000000005')
+  assert.equal(run.binding?.workerSessionId, 'wsn_00000000000000000000000005')
+  assert.equal(run.binding?.codexThreadId, null)
+
+  const selectedWithoutStage = structuredClone(projection)
+  selectedWithoutStage.stage = null
+  selectedWithoutStage.runtime = {
+    ...selectedWithoutStage.runtime,
+    workRunId: noStageRunId,
+  }
+  const selectedTree = strongFlowHistoryTree(selectedWithoutStage, limits)
+  assert.equal(selectedTree.currentWorkRunId, noStageRunId)
+  assert.equal(
+    selectedTree.tasks[1].runs.find(candidate => candidate.workRunId === noStageRunId)?.isCurrent,
+    true,
+  )
+})
+
+test('cancellation target selection is explicit across multiple active WorkRuns', () => {
+  const projection = historyProjection()
+  projection.workRunAggregate.runs = projection.workRunAggregate.runs.map((run, index) => ({
+    ...run,
+    state: index < 2 ? 'running' : index === 2 ? 'settled' : run.state,
+  }))
+  const active = strongFlowCancellableWorkRuns(projection)
+  assert.deepEqual(active.map(run => run.id), [failedRunId, currentRunId])
+  assert.equal(strongFlowCancellationTarget(projection, null), null)
+  assert.equal(strongFlowCancellationTarget(projection, currentRunId)?.id, currentRunId)
+  assert.equal(strongFlowCancellationTarget(projection, reviewRunId), null)
+})
+
+test('history tree keeps the exact deep-linked Task and WorkRun inside bounded navigation', () => {
+  const projection = historyProjection()
+  const deepRunId = 'wrn_00000000000000000000000005'
   const deepTaskId = 'task:deep-link-outside-first-page'
   const deepLinked = {
     ...projection,
+    workRunAggregate: {
+      ...projection.workRunAggregate,
+      items: [...projection.workRunAggregate.items, {
+        ...projection.workRunAggregate.items[1], id: deepTaskId,
+      }],
+      runs: [...projection.workRunAggregate.runs, {
+        ...projection.workRunAggregate.runs[0], id: deepRunId, workItemId: deepTaskId,
+      }],
+    },
     delivery: {
       ...projection.delivery,
       tasks: [
@@ -414,7 +503,7 @@ test('history tree keeps the exact deep-linked Task and StageRun inside bounded 
           ...projection.delivery.tasks[1],
           id: deepTaskId,
           title: 'Deep-linked task',
-          stageRunIds: [deepRunId],
+          workRunIds: [deepRunId],
         },
       ],
       stages: [
@@ -425,7 +514,7 @@ test('history tree keeps the exact deep-linked Task and StageRun inside bounded 
           deliveryTaskId: deepTaskId,
           sessionBinding: {
             ...projection.delivery.stages[0].sessionBinding,
-            stageRunId: deepRunId,
+            workRunId: deepRunId,
           },
         },
       ],
@@ -434,55 +523,56 @@ test('history tree keeps the exact deep-linked Task and StageRun inside bounded 
   const tree = strongFlowHistoryTree(
     deepLinked,
     { ...limits, tasks: 1, stages: 1 },
-    { taskId: deepTaskId, stageRunId: deepRunId },
+    { taskId: deepTaskId, workRunId: deepRunId },
   )
 
   assert.deepEqual(tree.tasks.map(node => node.task.id), [deepTaskId])
-  assert.deepEqual(tree.tasks[0].runs.map(run => run.stageRunId), [deepRunId])
-  assert.deepEqual(tree.runs.map(run => run.stageRunId), [deepRunId])
+  assert.deepEqual(tree.tasks[0].runs.map(run => run.workRunId), [deepRunId])
+  assert.deepEqual(tree.runs.map(run => run.workRunId), [deepRunId])
   assert.equal(tree.omittedTasks, 2)
-  assert.equal(tree.omittedRuns, 4)
+  assert.equal(tree.omittedRuns, 2)
 })
 
-test('history selection keeps only canonical Task→StageRun associations and drops stale identities', () => {
+test('history selection keeps only canonical Task→WorkRun associations and drops stale identities', () => {
   const tree = strongFlowHistoryTree(historyProjection(), limits)
   assert.deepEqual(
     strongFlowHistorySelectionForTree(tree, {
       taskId: 'task:1',
-      stageRunId: failedRunId,
+      workRunId: failedRunId,
     }),
-    { taskId: 'task:1', stageRunId: failedRunId },
+    { taskId: 'task:1', workRunId: failedRunId },
   )
   // A crossed task/run deep link cannot expand one Task while reviewing
-  // another Task's run: the StageRun's own deliveryTaskId is the truth.
+  // another Task's run: the WorkRun's own WorkItem is the truth.
   assert.deepEqual(
     strongFlowHistorySelectionForTree(tree, {
       taskId: 'task:2',
-      stageRunId: failedRunId,
+      workRunId: failedRunId,
     }),
-    { taskId: 'task:1', stageRunId: failedRunId },
+    { taskId: 'task:1', workRunId: failedRunId },
   )
   assert.deepEqual(
     strongFlowHistorySelectionForTree(tree, {
       taskId: 'task:missing',
-      stageRunId: failedRunId,
+      workRunId: failedRunId,
     }),
-    { taskId: 'task:1', stageRunId: failedRunId },
+    { taskId: 'task:1', workRunId: failedRunId },
   )
-  // A Delivery-level run owns no Task, so a task parameter cannot survive it.
+  // A WorkRun keeps its own WorkItem association even when no Delivery task
+  // row owns that item.
   assert.deepEqual(
     strongFlowHistorySelectionForTree(tree, {
       taskId: 'task:1',
-      stageRunId: planningRunId,
+      workRunId: planningRunId,
     }),
-    { taskId: null, stageRunId: planningRunId },
+    { taskId: 'wit_00000000000000000000000003', workRunId: planningRunId },
   )
   assert.deepEqual(
     strongFlowHistorySelectionForTree(tree, {
       taskId: 'task:1',
-      stageRunId: 'run_00000000000000000000000009',
+      workRunId: 'wrn_00000000000000000000000009',
     }),
-    { taskId: 'task:1', stageRunId: null },
+    { taskId: 'task:1', workRunId: null },
   )
 })
 
@@ -641,6 +731,35 @@ function mountNavigation(document, overrides = {}) {
   }
 }
 
+test('history navigation marks queued, leased, and running WorkRuns cancellable', () => {
+  const document = new FakeDocument()
+  const tasksParent = document.createElement('ul')
+  const stagesParent = document.createElement('ol')
+  const empty = document.createElement('p')
+  const view = mountStrongFlowHistoryNavigation({
+    document,
+    tasksParent,
+    stagesParent,
+    tasksOmitted: document.createElement('p'),
+    stagesOmitted: document.createElement('p'),
+    tasksEmpty: empty,
+    stagesEmpty: empty,
+    onSelect() {},
+    onOpenEvidence() {},
+  })
+  const projection = historyProjection()
+  projection.workRunAggregate.runs = projection.workRunAggregate.runs.map((run, index) => ({
+    ...run,
+    state: index === 0 ? 'leased' : index === 1 ? 'running' : index === 2 ? 'queued' : 'settled',
+  }))
+  const tree = strongFlowHistoryTree(projection, limits)
+  view.update(tree)
+  const rows = [...stagesParent.children]
+  assert.deepEqual(rows.map(row => row.dataset.cancellable), ['true', 'true', 'true'])
+  assert.deepEqual(rows.map(row => row.children[0].dataset.workRunState), ['leased', 'running', 'queued'])
+  view.close()
+})
+
 test('task rows expand into clickable historical attempts while the current run stays highlighted', () => {
   const document = new FakeDocument()
   const { view, tasksParent, stagesParent, selections } = mountNavigation(document)
@@ -648,8 +767,8 @@ test('task rows expand into clickable historical attempts while the current run 
 
   const taskRows = tasksParent.children
   assert.equal(taskRows.length, 2)
-  assert.equal(taskRows[0].dataset.status, 'active')
-  assert.equal(taskRows[1].dataset.status, 'pending')
+  assert.equal(taskRows[0].dataset.status, 'in_progress')
+  assert.equal(taskRows[1].dataset.status, 'ready')
   const toggle = findByClass(taskRows[0], 'wwc-strongflow-history-toggle')
   assert.equal(toggle.tagName, 'BUTTON')
   assert.equal(toggle.getAttribute('aria-expanded'), 'false')
@@ -662,36 +781,36 @@ test('task rows expand into clickable historical attempts while the current run 
   assert.equal(runList.hidden, false)
   const runButtons = findAllByClass(taskRows[0], 'wwc-strongflow-run-button')
   assert.equal(runButtons.length, 1)
-  assert.equal(runButtons[0].dataset.stageRunId, failedRunId)
+  assert.equal(runButtons[0].dataset.workRunId, failedRunId)
   assert.equal(runButtons[0].dataset.attempt, '1')
   assert.match(runButtons[0].textContent, /attempt 1/u)
   assert.match(runButtons[0].textContent, /failed/u)
   assert.equal(runButtons[0].getAttribute('aria-pressed'), 'false')
 
   runButtons[0].emit('click')
-  assert.deepEqual(selections.at(-1), { taskId: 'task:1', stageRunId: failedRunId })
+  assert.deepEqual(selections.at(-1), { taskId: 'task:1', workRunId: failedRunId })
   assert.equal(runButtons[0].getAttribute('aria-pressed'), 'true')
-  assert.equal(view.selection().stageRunId, failedRunId)
+  assert.equal(view.selection().workRunId, failedRunId)
 
   const currentMarker = findByClass(taskRows[0], 'wwc-strongflow-current-run')
   assert.notEqual(currentMarker, null)
   assert.equal(currentMarker.getAttribute('aria-current'), 'true')
-  assert.equal(currentMarker.dataset.stageRunId, currentRunId)
+  assert.equal(currentMarker.dataset.workRunId, currentRunId)
   assert.equal(
     findAllByClass(taskRows[0], 'wwc-strongflow-run-button')
-      .some(button => button.dataset.stageRunId === currentRunId),
+      .some(button => button.dataset.workRunId === currentRunId),
     false,
   )
 
   const timelineButtons = findAllByClass(stagesParent, 'wwc-strongflow-run-button')
   assert.deepEqual(
-    timelineButtons.map(button => button.dataset.stageRunId),
-    [failedRunId, planningRunId, reviewRunId],
+    timelineButtons.map(button => button.dataset.workRunId),
+    [failedRunId, planningRunId],
   )
-  assert.equal(stagesParent.children.length, 4)
+  assert.equal(stagesParent.children.length, 3)
   assert.equal(stagesParent.children[0].dataset.status, 'failed')
   const timelineCurrent = findByClass(stagesParent, 'wwc-strongflow-current-run')
-  assert.equal(timelineCurrent.dataset.stageRunId, currentRunId)
+  assert.equal(timelineCurrent.dataset.workRunId, currentRunId)
 
   toggle.emit('click')
   assert.equal(toggle.getAttribute('aria-expanded'), 'false')
@@ -733,11 +852,11 @@ test('keyboard roving focus moves through Task toggles and attempts without a mo
   view.close()
 })
 
-const historicalRuntimeSnapshot = stageRunId => ({
+const historicalRuntimeSnapshot = workRunId => ({
   kind: 'runtime_projection',
   productSessionId: 'psn_00000000000000000000000001',
   deliveryId,
-  stageRunId,
+  workRunId,
   revision: 11,
   lastProjectionSequence: 27,
   rebuiltAt: '2026-09-02T08:09:30.000Z',
@@ -745,7 +864,7 @@ const historicalRuntimeSnapshot = stageRunId => ({
   eventCursor: {},
   sessions: [{
     productSessionId: 'psn_00000000000000000000000001',
-    stageRunId,
+    workRunId,
     sessionBindingId: 'bind:1',
     executionJobId: 'job_00000000000000000000000001',
     workerSessionId: 'wsn_00000000000000000000000001',
@@ -779,7 +898,7 @@ const historicalRuntimeSnapshot = stageRunId => ({
   }],
 })
 
-const historicalCandidateItem = producerStageRunId => ({
+const historicalCandidateItem = producerWorkRunId => ({
   availability: 'available',
   candidate: {
     candidateRef: 'refs/winwincode/candidate/attempt-1',
@@ -790,7 +909,7 @@ const historicalCandidateItem = producerStageRunId => ({
     diffSha256: `sha256:${'4'.repeat(64)}`,
     frozenAt: '2026-09-02T08:09:30.000Z',
     producerSessionBindingId: 'bind:1',
-    producerStageRunId,
+    producerWorkRunId,
   },
   firstSeenDeliveryRevision: 6,
   isCurrentAtReadCursor: false,
@@ -808,7 +927,7 @@ const historicalCandidateReview = identity => ({
     type: 'command',
     sourceRef: 'artifact:command:attempt-1',
     candidateRef: identity.candidateRef,
-    stageRunId: failedRunId,
+    workRunId: failedRunId,
     sessionBindingId: 'bind:1',
     deliverySpecId: 'spec:1',
     deliverySpecRevision: 3,
@@ -824,13 +943,13 @@ const historicalCandidateReview = identity => ({
 
 function detailLoaders(records = { runtime: [], candidates: [], review: [] }) {
   return {
-    loadRuntime: async stageRunId => {
-      records.runtime.push(stageRunId)
-      return historicalRuntimeSnapshot(stageRunId)
+    loadRuntime: async workRunId => {
+      records.runtime.push(workRunId)
+      return historicalRuntimeSnapshot(workRunId)
     },
-    loadCandidates: async stageRunId => {
-      records.candidates.push(stageRunId)
-      return stageRunId === failedRunId ? [historicalCandidateItem(stageRunId)] : []
+    loadCandidates: async workRunId => {
+      records.candidates.push(workRunId)
+      return workRunId === failedRunId ? [historicalCandidateItem(workRunId)] : []
     },
     loadCandidateReview: async identity => {
       records.review.push(identity)
@@ -855,13 +974,13 @@ test('the read-only historical run detail shows exact identity, binding, runtime
   parent.append(view.root)
   const tree = strongFlowHistoryTree(historyProjection(), limits)
 
-  view.update({ tree, selection: { taskId: null, stageRunId: null } })
+  view.update({ tree, selection: { taskId: null, workRunId: null } })
   assert.equal(view.root.hidden, true)
 
-  view.update({ tree, selection: { taskId: 'task:1', stageRunId: currentRunId } })
+  view.update({ tree, selection: { taskId: 'task:1', workRunId: currentRunId } })
   assert.equal(view.root.hidden, true)
 
-  view.update({ tree, selection: { taskId: 'task:1', stageRunId: failedRunId } })
+  view.update({ tree, selection: { taskId: 'task:1', workRunId: failedRunId } })
   assert.equal(view.root.hidden, false)
   assert.deepEqual(records.runtime, [failedRunId])
   assert.deepEqual(records.candidates, [failedRunId])
@@ -869,7 +988,7 @@ test('the read-only historical run detail shows exact identity, binding, runtime
   const identity = allText(findByClass(view.root, 'wwc-strongflow-history-identity'))
   assert.match(identity, new RegExp(failedRunId, 'u'))
   assert.match(identity, /Attempt 1/u)
-  assert.match(identity, /executing/u)
+  assert.match(identity, /Status failed/u)
   assert.match(identity, /Implement the feature/u)
   const binding = allText(findByClass(view.root, 'wwc-strongflow-history-binding'))
   assert.match(binding, /psn_00000000000000000000000001/u)
@@ -882,7 +1001,7 @@ test('the read-only historical run detail shows exact identity, binding, runtime
   const conclusion = findByClass(view.root, 'wwc-strongflow-history-conclusion')
   assert.equal(conclusion.dataset.status, 'failed')
   assert.match(allText(conclusion), /failed/u)
-  assert.match(allText(conclusion), /2026-09-02T08:10:00\.000Z/u)
+  assert.match(allText(conclusion), /not finished/u)
 
   await nextTick()
   const runtime = allText(findByClass(view.root, 'wwc-strongflow-history-runtime'))
@@ -916,22 +1035,6 @@ test('the read-only historical run detail shows exact identity, binding, runtime
   const reviewEvidence = findByClass(view.root, 'wwc-strongflow-history-review-evidence')
   assert.equal(reviewEvidence.children.length, 1)
 
-  view.update({ tree, selection: { taskId: null, stageRunId: reviewRunId } })
-  await nextTick()
-  assert.equal(view.root.hidden, false)
-  assert.match(
-    allText(findByClass(view.root, 'wwc-strongflow-history-binding-host')),
-    /human|no .*binding/iu,
-  )
-  assert.match(
-    allText(findByClass(view.root, 'wwc-strongflow-history-runtime-host')),
-    /no runtime projection/iu,
-  )
-  assert.equal(
-    records.runtime.includes(reviewRunId),
-    false,
-    'a human run never asks the facade for a runtime projection',
-  )
   view.close()
 })
 
@@ -965,7 +1068,7 @@ test('historical Candidate review keeps the latest selection when responses fini
     document,
     limits,
     loaders: {
-      loadRuntime: async stageRunId => historicalRuntimeSnapshot(stageRunId),
+      loadRuntime: async workRunId => historicalRuntimeSnapshot(workRunId),
       loadCandidates: async () => [first, second],
       loadCandidateReview: (identity, signal) => {
         reviewSignals.set(identity.candidateRef, signal)
@@ -976,7 +1079,7 @@ test('historical Candidate review keeps the latest selection when responses fini
   document.createElement('section').append(view.root)
   view.update({
     tree: strongFlowHistoryTree(historyProjection(), limits),
-    selection: { taskId: 'task:1', stageRunId: failedRunId },
+    selection: { taskId: 'task:1', workRunId: failedRunId },
   })
   await nextTick()
 
@@ -1057,12 +1160,13 @@ class FakeStrongFlowViewModel {
   async resolveAttention(input) { this.calls.push(['resolveAttention', input]) }
   async submitVerdict() { this.calls.push(['submitVerdict']) }
   async advanceDelivery() { this.calls.push(['advanceDelivery']) }
-  async loadStageRunRuntime(stageRunId, signal) {
-    this.calls.push(['loadStageRunRuntime', stageRunId, signal])
+  async cancelWorkRun(request) { this.calls.push(['cancelWorkRun', request]) }
+  async loadWorkRunRuntime(workRunId, signal) {
+    this.calls.push(['loadWorkRunRuntime', workRunId, signal])
     return null
   }
-  async loadStageRunCandidates(stageRunId, signal) {
-    this.calls.push(['loadStageRunCandidates', stageRunId, signal])
+  async loadWorkRunCandidates(workRunId, signal) {
+    this.calls.push(['loadWorkRunCandidates', workRunId, signal])
     return []
   }
   async loadCandidateHistoricalReview(candidate, signal) {
@@ -1096,7 +1200,7 @@ class FakeHistoryLocation {
 test('the page restores history selection from a deep link and keeps the URL authoritative', () => {
   const document = new FakeDocument()
   const rootElement = document.createElement('main')
-  const initialHash = `#/strongflow?delivery=${deliveryId}&session=psn_2&stageRun=${currentRunId}`
+  const initialHash = `#/strongflow?delivery=${deliveryId}&session=psn_2&workRun=${currentRunId}`
   const location = new FakeHistoryLocation(`${initialHash}&task=task%3A1&run=${failedRunId}`)
   const model = new FakeStrongFlowViewModel({
     status: 'ready',
@@ -1122,7 +1226,7 @@ test('the page restores history selection from a deep link and keeps the URL aut
   })
 
   const taskRow = findByClass(rootElement, 'wwc-strongflow-task-list').children[0]
-  assert.equal(taskRow.dataset.status, 'active')
+  assert.equal(taskRow.dataset.status, 'in_progress')
   const toggle = findByClass(taskRow, 'wwc-strongflow-history-toggle')
   assert.equal(toggle.getAttribute('aria-expanded'), 'true')
   const runButtons = findAllByClass(taskRow, 'wwc-strongflow-run-button')
@@ -1134,9 +1238,9 @@ test('the page restores history selection from a deep link and keeps the URL aut
   const planningButton = findAllByClass(
     rootElement,
     'wwc-strongflow-run-button',
-  ).find(button => button.dataset.stageRunId === planningRunId)
+  ).find(button => button.dataset.workRunId === planningRunId)
   planningButton.emit('click')
-  assert.deepEqual(location.replacements.at(-1), `${initialHash}&run=${planningRunId}`)
+  assert.deepEqual(location.replacements.at(-1), `${initialHash}&task=wit_00000000000000000000000003&run=${planningRunId}`)
   assert.equal(findByClass(rootElement, 'wwc-strongflow-history').hidden, false)
   assert.match(
     allText(findByClass(rootElement, 'wwc-strongflow-history')),
@@ -1196,15 +1300,15 @@ test('historical review disables every current Delivery mutation control, double
   const rootElement = document.createElement('main')
   const current = historyProjection()
   current.delivery.status = 'ready-to-deliver'
-  // Settle the active stage so the verdict control stays mounted like the rest.
-  current.delivery.stages[1].status = 'succeeded'
+  current.workRunAggregate.runs.forEach(run => { run.state = 'settled' })
+  current.currentCandidate.producerWorkRunId = currentRunId
   const review = {
     deliveryId,
     deliverySpecId: 'spec:1',
     deliverySpecRevision: 3,
-    planningStageRunId: planningRunId,
+    planningWorkRunId: planningRunId,
     planningSessionBindingId: 'bind:3',
-    reviewStageRunId: reviewRunId,
+    reviewWorkRunId: reviewRunId,
     attentionItemId: 'att_00000000000000000000000001',
     reviewSetSha256: `sha256:${'1'.repeat(64)}`,
     reviewStatus: 'pending',
@@ -1242,7 +1346,7 @@ test('historical review disables every current Delivery mutation control, double
   const attentionRecord = {
     id: 'att_00000000000000000000000001',
     deliverySpecId: 'spec:1',
-    stageRunId: failedRunId,
+    workRunId: failedRunId,
     type: 'delivery_approval',
     title: 'Approve delivery',
     options: [],
@@ -1330,7 +1434,7 @@ test('equivalent snapshots preserve historical detail DOM identity and focus', a
   })
   const parent = document.createElement('section')
   parent.append(view.root)
-  const selection = { taskId: 'task:1', stageRunId: failedRunId }
+  const selection = { taskId: 'task:1', workRunId: failedRunId }
   view.update({ tree: strongFlowHistoryTree(historyProjection(), limits), selection })
   await nextTick()
 
@@ -1356,7 +1460,7 @@ test('equivalent snapshots preserve historical detail DOM identity and focus', a
     type: 'test',
     sourceRef: 'artifact:test:attempt-1b',
     candidateRef: 'refs/winwincode/candidate/attempt-1',
-    stageRunId: failedRunId,
+    workRunId: failedRunId,
   })
   view.update({ tree: strongFlowHistoryTree(changed, limits), selection })
   assert.equal(evidence.children.length, 2)
@@ -1374,7 +1478,7 @@ test('timeline ArrowLeft stays inside the timeline instead of collapsing the Tas
   assert.equal(toggle.getAttribute('aria-expanded'), 'true')
 
   const timelineButtons = findAllByClass(stagesParent, 'wwc-strongflow-run-button')
-  const taskOwned = timelineButtons.find(button => button.dataset.stageRunId === failedRunId)
+  const taskOwned = timelineButtons.find(button => button.dataset.workRunId === failedRunId)
   taskOwned.focus()
   taskOwned.emit('keydown', { key: 'ArrowLeft', preventDefault() {} })
   assert.equal(toggle.getAttribute('aria-expanded'), 'true', 'the Task tree stays expanded')
@@ -1385,7 +1489,7 @@ test('timeline ArrowLeft stays inside the timeline instead of collapsing the Tas
 test('a crossed task/run deep link stays unchanged and fails closed with an explicit alert', () => {
   const document = new FakeDocument()
   const rootElement = document.createElement('main')
-  const initialHash = `#/strongflow?delivery=${deliveryId}&session=psn_2&stageRun=${currentRunId}`
+  const initialHash = `#/strongflow?delivery=${deliveryId}&session=psn_2&workRun=${currentRunId}`
   const location = new FakeHistoryLocation(
     `${initialHash}&task=task%3A2&run=${failedRunId}`,
   )
@@ -1423,7 +1527,7 @@ test('a crossed task/run deep link stays unchanged and fails closed with an expl
   assert.match(allText(routeError), /Task or Attempt/u)
   assert.deepEqual(location.replacements, [], 'the crossed deep link is never rewritten')
   assert.deepEqual(
-    model.calls.filter(([name]) => name === 'loadStageRunRuntime').map(([, id]) => id),
+    model.calls.filter(([name]) => name === 'loadWorkRunRuntime').map(([, id]) => id),
     [],
   )
 
@@ -1454,15 +1558,15 @@ test('an unchanged historical selection reloads exact payloads when the snapshot
     ),
   })
   assert.equal(
-    model.calls.filter(([name]) => name === 'loadStageRunRuntime').length,
+    model.calls.filter(([name]) => name === 'loadWorkRunRuntime').length,
     1,
   )
   assert.equal(
-    model.calls.filter(([name]) => name === 'loadStageRunCandidates').length,
+    model.calls.filter(([name]) => name === 'loadWorkRunCandidates').length,
     1,
   )
-  const initialRuntimeCall = model.calls.find(([name]) => name === 'loadStageRunRuntime')
-  const initialCandidateCall = model.calls.find(([name]) => name === 'loadStageRunCandidates')
+  const initialRuntimeCall = model.calls.find(([name]) => name === 'loadWorkRunRuntime')
+  const initialCandidateCall = model.calls.find(([name]) => name === 'loadWorkRunCandidates')
 
   const advanced = structuredClone(initial)
   advanced.delivery.readCursor = { token: 'read-cut-2' }
@@ -1473,12 +1577,12 @@ test('an unchanged historical selection reloads exact payloads when the snapshot
   assert.equal(initialCandidateCall?.[2]?.aborted, true)
 
   assert.equal(
-    model.calls.filter(([name]) => name === 'loadStageRunRuntime').length,
+    model.calls.filter(([name]) => name === 'loadWorkRunRuntime').length,
     2,
     'the exact RuntimeProjection must follow the selected snapshot cut',
   )
   assert.equal(
-    model.calls.filter(([name]) => name === 'loadStageRunCandidates').length,
+    model.calls.filter(([name]) => name === 'loadWorkRunCandidates').length,
     2,
     'historical Candidate availability must follow the selected snapshot cut',
   )
@@ -1489,6 +1593,7 @@ test('the page shows empty history notes instead of dead lists', () => {
   const document = new FakeDocument()
   const rootElement = document.createElement('main')
   const projection = historyProjection()
+  projection.workRunAggregate = { items: [], runs: [] }
   projection.delivery.tasks = []
   projection.delivery.stages = [projection.delivery.stages[2]]
   const model = new FakeStrongFlowViewModel({

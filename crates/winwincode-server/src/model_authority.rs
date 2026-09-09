@@ -38,7 +38,7 @@
 //! fails with an explicit configuration error and a reference for the new
 //! Provider must be configured instead.
 
-use std::{env, path::PathBuf};
+use std::{env, path::PathBuf, time::Duration};
 
 use sha2::{Digest, Sha256};
 use winwincode_api::generated::{
@@ -47,10 +47,11 @@ use winwincode_api::generated::{
 };
 use winwincode_control_plane::{
     CatalogAvailability, CredentialReferenceErrorKind, CredentialReferenceService,
+    HttpsSseProviderConfig, HttpsSseProviderLimits, HttpsSseProviderTimeouts,
     LocalSecretStoreAdapter, ModelCapability, ModelSelection, ModelSettingsRequest,
     ModelSettingsService, ModelSettingsTarget, ModelSettingsValues, ModelToolSupport,
-    ProviderCatalogRequest, ProviderCatalogService, ProviderDescriptor, ResolvedSecret,
-    StructuredOutputSupport,
+    ProviderCatalogRequest, ProviderCatalogService, ProviderDescriptor, ProviderTokenPricing,
+    ResolvedSecret, StandaloneProviderConfig, StructuredOutputSupport,
 };
 use winwincode_domain::{
     CredentialReferenceId, RepositoryScope, RequestId, Revision, SchemaVersion, UserActor,
@@ -68,6 +69,8 @@ pub struct LocalModelRoute {
     pub provider: String,
     /// Model selected within the Provider.
     pub model: String,
+    /// Explicit HTTPS Anthropic Messages endpoint; absent selects local loopback.
+    pub anthropic_endpoint: Option<String>,
     /// Credential reference paying for the Provider route.
     pub credential_reference: CredentialReferenceId,
 }
@@ -80,14 +83,51 @@ impl LocalModelRoute {
     ///
     /// Rejects environment values that are not valid UTF-8.
     pub fn from_environment() -> Result<Self, Box<dyn std::error::Error>> {
-        Ok(Self {
+        let route = Self {
+            anthropic_endpoint: match env::var("WWC_SERVER_MODEL_ANTHROPIC_ENDPOINT") {
+                Ok(endpoint) => Some(endpoint),
+                Err(env::VarError::NotPresent) => None,
+                Err(error) => return Err(error.into()),
+            },
             provider: environment_or("WWC_SERVER_MODEL_PROVIDER_ID", "winwincode-loopback")?,
             model: environment_or("WWC_SERVER_MODEL_ID", "loopback-model")?,
             credential_reference: CredentialReferenceId(environment_or(
                 "WWC_SERVER_MODEL_CREDENTIAL_REFERENCE_ID",
                 "crd_00000000000000000000000001",
             )?),
-        })
+        };
+        route.provider_config()?;
+        Ok(route)
+    }
+
+    /// Builds the configured transport, validating external endpoint and limits.
+    ///
+    /// # Errors
+    /// Rejects unsafe HTTPS endpoints or transport limits.
+    pub fn provider_config(&self) -> Result<StandaloneProviderConfig, Box<dyn std::error::Error>> {
+        let Some(endpoint) = &self.anthropic_endpoint else {
+            return Ok(StandaloneProviderConfig::Loopback {
+                provider_id: self.provider.clone(),
+            });
+        };
+        Ok(StandaloneProviderConfig::HttpsSse(
+            HttpsSseProviderConfig::try_new(
+                self.provider.clone(),
+                endpoint.clone(),
+                HttpsSseProviderTimeouts {
+                    connect: Duration::from_secs(15),
+                    first_byte: Duration::from_secs(90),
+                    idle: Duration::from_secs(90),
+                    total: Duration::from_mins(5),
+                },
+                HttpsSseProviderLimits {
+                    response_bytes: 16 * 1024 * 1024,
+                    event_bytes: 1024 * 1024,
+                    events: 10000,
+                },
+            )?
+            .with_anthropic_messages(8192, ProviderTokenPricing::default())?,
+        ))
     }
 
     /// Returns the generated model route for projections and commands.
@@ -181,7 +221,7 @@ fn ensure_local_credential(
     }
 }
 
-/// Publishes the fixed loopback secret for the current reference resolution.
+/// Publishes the selected provider secret for the current reference resolution.
 ///
 /// # Errors
 ///
@@ -196,10 +236,14 @@ fn store_local_credential_secret(
     let credential = CredentialReferenceService::new(storage)
         .resolve(&organization, &model_route.credential_reference)?;
     let secret_store = LocalSecretStoreAdapter::open(secret_directory)?;
-    secret_store.store(
-        &credential,
-        ResolvedSecret::from_bytes(b"winwincode-local-loopback-secret".to_vec())?,
-    )?;
+    let secret = if model_route.anthropic_endpoint.is_some() {
+        env::var("WWC_SERVER_MODEL_API_KEY")
+            .map_err(|_| "WWC_SERVER_MODEL_API_KEY must be set as UTF-8")?
+            .into_bytes()
+    } else {
+        b"winwincode-local-loopback-secret".to_vec()
+    };
+    secret_store.store(&credential, ResolvedSecret::from_bytes(secret)?)?;
     Ok(())
 }
 
@@ -312,12 +356,17 @@ fn converge_model_settings(
 fn local_provider_descriptor(model_route: &LocalModelRoute) -> ProviderDescriptor {
     ProviderDescriptor {
         provider_id: model_route.provider.clone(),
-        display_name: "WinWinCode local loopback Provider".to_owned(),
-        adapter_kind: "deterministic-loopback".to_owned(),
+        display_name: model_route.provider.clone(),
+        adapter_kind: if model_route.anthropic_endpoint.is_some() {
+            "anthropic-messages"
+        } else {
+            "deterministic-loopback"
+        }
+        .to_owned(),
         credential_reference_id: model_route.credential_reference.clone(),
         models: vec![ModelCapability {
             model_id: model_route.model.clone(),
-            display_name: "WinWinCode local loopback model".to_owned(),
+            display_name: model_route.model.clone(),
             context_window_tokens: 128_000,
             max_output_tokens: 16_000,
             tool_support: ModelToolSupport::Parallel,
@@ -355,7 +404,7 @@ pub fn credential_create_command(
         credential_reference_id: model_route.credential_reference.clone(),
         display_name: "WinWinCode local model credential".to_owned(),
         provider_id: model_route.provider.clone(),
-        vault_locator: "local-production://loopback".to_owned(),
+        vault_locator: "local-production://model".to_owned(),
     };
     Ok(CredentialReferenceCreateCommand {
         actor: Actor::UserActor(UserActor {
@@ -453,6 +502,7 @@ mod tests {
         LocalModelRoute {
             provider: provider.to_owned(),
             model: model.to_owned(),
+            anthropic_endpoint: None,
             credential_reference: CredentialReferenceId(credential.to_owned()),
         }
     }
@@ -526,9 +576,7 @@ mod tests {
     }
 
     fn repository_scope() -> RepositoryScope {
-        use winwincode_api::generated::{
-            ProjectId, RepositoryId, RepositoryScopeKind, WorkspaceId,
-        };
+        use winwincode_domain::{ProjectId, RepositoryId, RepositoryScopeKind, WorkspaceId};
         RepositoryScope {
             kind: RepositoryScopeKind::Repository,
             organization_id: winwincode_domain::OrganizationId(

@@ -228,7 +228,7 @@ fn advance_after_failed_verdict(root: &PathBuf, delivery_id: &DeliveryId) -> Del
         ResolveAttentionInput {
             expected_revision: failed.revision(),
             attention_item_id: item.id,
-            stage_run_id: item.stage_run_id.expect("verification StageRun"),
+            work_run_id: Some(item.work_run_id.expect("verification WorkRun")),
             expected_context: item.context,
             actor: "delivery-reviewer".into(),
             decision: AttentionDecision::Resolved,
@@ -539,8 +539,26 @@ fn passing_verdict_enters_final_manual_delivery_review_state() {
         .expect("state read")
         .expect("committed state");
     let delivery = Delivery::decode_json(&state.payload).expect("committed Delivery");
-    assert_eq!(delivery.snapshot().status, DeliveryStatus::ReadyToDeliver);
-    assert!(delivery.snapshot().attention_items.is_empty());
+    assert_eq!(delivery.snapshot().status, DeliveryStatus::NeedsAttention);
+    assert_eq!(delivery.snapshot().attention_items.len(), 1);
+    let approval = &delivery.snapshot().attention_items[0];
+    assert_eq!(
+        approval.item_type,
+        winwincode_delivery::domain::AttentionItemType::DeliveryApproval
+    );
+    assert_eq!(
+        approval.status,
+        winwincode_delivery::domain::AttentionItemStatus::Open
+    );
+    assert!(approval.blocking);
+    assert!(
+        approval.work_run_id.is_none(),
+        "human approval is not a Worker execution"
+    );
+    assert_eq!(
+        delivery.snapshot().stage_runs,
+        fixture.delivery.snapshot().stage_runs
+    );
     assert!(
         delivery
             .snapshot()

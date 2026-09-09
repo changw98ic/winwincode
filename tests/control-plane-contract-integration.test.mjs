@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { readFileSync, statSync } from 'node:fs'
 import { dirname, join, relative, resolve } from 'node:path'
 import test from 'node:test'
 
@@ -514,7 +514,8 @@ test('strict HTTP validation covers requests, responses, errors, and negative bo
   const command = validator(ajv, httpId, 'CommandRequest')
   const query = validator(ajv, httpId, 'QueryRequest')
 
-  for (const [name, value] of Object.entries(examples.positive)) {
+  const positiveRequests = examples.positive
+  for (const [name, value] of Object.entries(positiveRequests)) {
     assertValidation(
       value.command === undefined ? query : command,
       value,
@@ -763,17 +764,6 @@ test('strict HTTP validation covers requests, responses, errors, and negative bo
   swappedId.payload.productSessionId = swappedId.payload.repositoryId
   const extraField = structuredClone(examples.positive.sessionCreate)
   extraField.secret = 'must-not-cross-the-boundary'
-  const callerAuthoredTaskBreakdown = structuredClone(
-    examples.positive.deliveryApproveTaskBreakdown,
-  )
-  callerAuthoredTaskBreakdown.payload.tasks = [{
-    id: 'dtk_01J00000000000000000000000',
-    title: 'Caller replacement',
-    goal: 'Bypass the reviewed task proposals.',
-    acceptanceCriterionIds: ['criterion:1'],
-    blockedByTaskIds: [],
-    ownerActorId: null,
-  }]
   const retiredDeliveryQuery = structuredClone(examples.positive.deliveryGet)
   retiredDeliveryQuery.parameters.deliveryId = 'delivery-main'
   for (const [name, value] of Object.entries({
@@ -782,7 +772,6 @@ test('strict HTTP validation covers requests, responses, errors, and negative bo
     nullPayload,
     swappedId,
     extraField,
-    callerAuthoredTaskBreakdown,
   })) assertValidation(command, value, false, name)
 
   assertValidation(
@@ -936,24 +925,29 @@ test('architecture and README links keep every public contract discoverable', ()
   for (const document of documents) {
     for (const target of markdownLinks(document)) {
       assert.equal(
-        readFileSync(target, 'utf8').length > 0,
+        (() => {
+          const targetStat = statSync(target)
+          return targetStat.isDirectory() || (targetStat.isFile() && readFileSync(target, 'utf8').length > 0)
+        })(),
         true,
         `${relative(root, document)} has a broken link to ${relative(root, target)}`,
       )
     }
   }
 
-  const readme = readFileSync(join(root, 'README.md'), 'utf8')
-  const architecture = readFileSync(join(root, 'docs', 'architecture.md'), 'utf8')
+  const linkedContracts = new Set([
+    ...markdownLinks(join(root, 'README.md')),
+    ...markdownLinks(join(root, 'docs', 'architecture.md')),
+  ])
   for (const target of [
-    'schema/winwincode/v1/control-plane-http.schema.json',
+    'docs/decisions/0033-community-engineering-runtime.md',
     'schema/winwincode/v1/control-plane-events.schema.json',
     'schema/winwincode/v1/execution-port.schema.json',
     'docs/contracts/control-plane-websocket.md',
     'docs/contracts/execution-port-v1.md',
   ]) {
     assert.equal(
-      readme.includes(target) || architecture.includes(target),
+      linkedContracts.has(join(root, target)),
       true,
       `public contract is not linked from README or architecture: ${target}`,
     )

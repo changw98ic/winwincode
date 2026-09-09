@@ -1377,7 +1377,7 @@ fn common_authority(left: &ModelLeaseAuthority, right: &ModelLeaseAuthority) -> 
     left.lease == right.lease
         && left.worker_session_id == right.worker_session_id
         && left.session_identity.product_session_id == right.session_identity.product_session_id
-        && left.session_identity.stage_run_id == right.session_identity.stage_run_id
+        && left.session_identity.work_run_id == right.session_identity.work_run_id
         && left.session_identity.worker_session_id == right.session_identity.worker_session_id
 }
 
@@ -1720,7 +1720,7 @@ mod tests {
             session_identity: SessionIdentity {
                 codex_thread_id: CodexThreadId(thread_id.to_owned()),
                 product_session_id: ProductSessionId(id("psn", 'A')),
-                stage_run_id: None,
+                work_run_id: None,
                 worker_session_id,
             },
         }

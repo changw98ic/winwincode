@@ -12,8 +12,7 @@ use winwincode_api::generated::{
     CredentialReferenceRevokeCommandCommand, CredentialReferenceRevokePayload, EmptyParameters,
     ModelRoute, ModelRouteAvailabilityListQuery, ModelRouteAvailabilityListQueryQuery,
     ModelRouteAvailabilityReason, ModelRouteAvailabilityStatus, OrganizationScope,
-    OrganizationScopeKind, PageRequest, ProjectScope, ProjectScopeKind, RepositoryScope,
-    RepositoryScopeKind, Scope, UserActor, UserActorKind,
+    OrganizationScopeKind, PageRequest, ProjectScope, ProjectScopeKind, Scope,
 };
 use winwincode_control_plane::{
     CredentialReferenceService, ModelCapability, ModelRequestPoolConfig,
@@ -22,8 +21,9 @@ use winwincode_control_plane::{
     ProviderCatalogRequest, ProviderCatalogService, ProviderDescriptor,
 };
 use winwincode_domain::{
-    CredentialReferenceId, OpaqueCursor, OrganizationId, ProjectId, RepositoryId, RequestId,
-    Revision, SchemaVersion, UserId, WorkspaceId,
+    CredentialReferenceId, OpaqueCursor, OrganizationId, ProjectId, RepositoryId, RepositoryScope,
+    RepositoryScopeKind, RequestId, Revision, SchemaVersion, UserActor, UserActorKind, UserId,
+    WorkspaceId,
 };
 use winwincode_storage::SqliteStorage;
 
@@ -135,6 +135,8 @@ fn register_provider(
                 context_window_tokens: 128_000,
                 max_output_tokens: 16_000,
                 tool_support: ModelToolSupport::Parallel,
+                structured_output_support:
+                    winwincode_control_plane::StructuredOutputSupport::Unsupported,
                 reasoning_efforts: vec!["high".to_owned(), "medium".to_owned()],
             })
             .collect(),
@@ -148,7 +150,6 @@ fn register_provider(
                 expected_catalog_version: 0,
             },
             &descriptor,
-            winwincode_domain::Instant("2026-09-02T00:00:00.000Z".to_owned()),
         )
         .expect("register Provider fixture");
 }
@@ -406,7 +407,6 @@ fn credential_revocation_and_catalog_disable_fail_closed_without_leaking_details
                 expected_catalog_version: 1,
             },
             "provider-main",
-            winwincode_domain::Instant("2026-09-02T00:00:00.000Z".to_owned()),
         )
         .expect("disable Provider fixture");
     let disabled = ModelRouteAvailabilityService::new(&mut storage, Some(pool_config()))

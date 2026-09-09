@@ -3,8 +3,8 @@
 //! Exact execution-session binding transitions.
 
 use winwincode_domain::{
-    CodexThreadId, DeliveryId, DeliveryTaskId, ExecutionJobId, FencingToken, LeaseId,
-    ProductSessionId, RequestId, Sha256Digest, StageRunId, WorkerId, WorkerInstanceId,
+    CodexThreadId, DeliveryId, ExecutionJobId, FencingToken, LeaseId, ProductSessionId, RequestId,
+    Revision, Sha256Digest, WorkContractId, WorkItemId, WorkRunId, WorkerId, WorkerInstanceId,
     WorkerSessionId,
 };
 use winwincode_storage::{
@@ -12,15 +12,18 @@ use winwincode_storage::{
     WorkerSlotAuthority,
 };
 
-use crate::domain::{Delivery, SessionBindingSourceProvenance, StageRunStatus};
+use crate::domain::{Delivery, SessionBindingSourceKind, SessionBindingSourceProvenance};
 
 use super::{CoordinationError, CoordinationErrorCode, require_mutation_time};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionBindingIdentity {
     pub delivery_id: DeliveryId,
-    pub delivery_task_id: Option<DeliveryTaskId>,
-    pub stage_run_id: StageRunId,
+    pub work_contract_id: WorkContractId,
+    pub work_contract_revision: Revision,
+    pub work_item_id: WorkItemId,
+    pub work_item_revision: Revision,
+    pub work_run_id: WorkRunId,
     pub product_session_id: ProductSessionId,
     pub execution_job_id: ExecutionJobId,
 }
@@ -28,7 +31,7 @@ pub struct SessionBindingIdentity {
 /// Scheduler-owned authority that may complete one pending `SessionBinding`.
 ///
 /// These values are copied into the canonical Delivery binding only after the
-/// caller has proved that they belong to the exact active `StageRun`. Once
+/// caller has proved that they belong to the exact active `WorkRun`. Once
 /// persisted, a different lease, Worker, instance, attempt, fence, or source
 /// cannot replace them.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,13 +49,13 @@ pub struct SessionBindingAuthority {
 ///
 /// Only [`Self::from_scheduler`] can construct production values. The
 /// Delivery transition revalidates the predecessor against its complete
-/// `StageRun` binding before clearing it for the exact successor attempt.
+/// `WorkRun` binding before clearing it for the exact successor attempt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeliveryExecutionAttemptReplacement {
     receipt_id: RequestId,
     receipt_digest: Sha256Digest,
     scope: ExecutionQueueScope,
-    stage_run_id: Option<StageRunId>,
+    work_run_id: Option<WorkRunId>,
     predecessor_lease: ExecutionLeaseRecord,
     predecessor_worker_session_id: Option<WorkerSessionId>,
     predecessor_slot: Option<WorkerSlotAuthority>,
@@ -67,17 +70,12 @@ impl DeliveryExecutionAttemptReplacement {
             receipt_id: authority.receipt_id().clone(),
             receipt_digest: authority.receipt_digest().clone(),
             scope: authority.scope().clone(),
-            stage_run_id: authority.stage_run_id().cloned(),
+            work_run_id: authority.work_run_id().cloned(),
             predecessor_lease: authority.predecessor_lease().clone(),
             predecessor_worker_session_id: authority.previous_worker_session_id().cloned(),
             predecessor_slot: authority.predecessor_slot().cloned(),
             successor_lease: authority.replacement_lease().clone(),
         }
-    }
-
-    #[must_use]
-    pub(crate) const fn receipt_id(&self) -> &RequestId {
-        &self.receipt_id
     }
 
     pub(crate) fn store_request_digest(&self) -> Result<String, CoordinationError> {
@@ -119,53 +117,178 @@ impl SessionBindingAuthority {
     }
 }
 
-/// Rotates one completely bound running Delivery attempt to the exact
-/// scheduler-sealed successor and leaves its binding pending.
+/// Completes a replacement after the successor `WorkerSession` has been
+/// accepted. The predecessor remains as a terminal audit run; the successor
+/// is appended with the scheduler-sealed `WorkRun` and the newly accepted
+/// session authority.
 ///
 /// # Errors
-///
-/// Rejects a stale revision, an incomplete predecessor session, a foreign
-/// scope or `StageRun`, or any mismatch between the persisted binding and the
-/// sealed predecessor/successor lineage.
-pub fn replace_execution_attempt_with_authority(
+/// Returns a conflict when the revision, predecessor, successor, lease, or
+/// worker authority does not match the scheduler-sealed replacement.
+pub fn accept_replacement_worker_session_with_authority(
     delivery: &Delivery,
     expected_revision: u64,
     identity: &SessionBindingIdentity,
     replacement: &DeliveryExecutionAttemptReplacement,
+    authority: &SessionBindingAuthority,
     now_millis: u64,
 ) -> Result<Delivery, CoordinationError> {
     require_revision(delivery, expected_revision)?;
     require_mutation_time(delivery, now_millis)?;
-    let index = exact_binding_index(delivery, identity)?;
-    let run = active_run(delivery, identity)?;
-    let binding = &delivery.snapshot().session_bindings[index];
-    validate_replacement_identity(identity, run, binding, replacement)?;
-
+    let (index, successor_id) =
+        validated_replacement_successor(delivery, identity, replacement, authority)?;
     let mut snapshot = delivery.clone().into_snapshot();
-    let run = snapshot
-        .stage_runs
+    let predecessor_run = snapshot
+        .work_run_aggregate
+        .runs
         .iter_mut()
-        .find(|run| run.id == identity.stage_run_id)
-        .ok_or_else(|| replacement_conflict("replacement StageRun disappeared"))?;
-    run.attempt = replacement.successor_lease.attempt;
-    let binding = &mut snapshot.session_bindings[index];
-    binding.worker_session_id = None;
-    binding.codex_thread_id = None;
-    binding.worker_id = None;
-    binding.worker_instance_id = None;
-    binding.lease_id = None;
-    binding.attempt = replacement.successor_lease.attempt;
-    binding.fencing_token = None;
-    binding.source_provenance = SessionBindingSourceProvenance::pending_delivery_advance();
-    binding.bound_at_millis = now_millis;
-    snapshot.revision += 1;
+        .find(|run| run.id == identity.work_run_id)
+        .ok_or_else(|| replacement_conflict("predecessor WorkRun disappeared"))?;
+    predecessor_run.state = winwincode_domain::WorkRunState::Failed;
+    predecessor_run.revision = predecessor_run
+        .revision
+        .0
+        .checked_add(1)
+        .map(Revision)
+        .ok_or_else(|| replacement_conflict("predecessor WorkRun revision overflow"))?;
+    let mut successor = predecessor_run.clone();
+    successor.id = successor_id.clone();
+    successor.revision = Revision(1);
+    successor.attempt = i64::try_from(replacement.successor_lease.attempt)
+        .map_err(|_| replacement_conflict("successor attempt is out of range"))?;
+    successor.lease_id = replacement.successor_lease.lease_id.clone();
+    successor
+        .fencing_token
+        .clone_from(&replacement.successor_lease.fencing_token.0);
+    successor.worker_id = authority.worker_id.clone();
+    successor.worker_instance_id = authority.worker_instance_id.clone();
+    successor.worker_session_id = authority.worker_session_id.clone();
+    successor.codex_thread_id = None;
+    successor.state = winwincode_domain::WorkRunState::Leased;
+    successor.candidate_digest = None;
+    let item = snapshot
+        .work_run_aggregate
+        .items
+        .iter_mut()
+        .find(|item| item.id == successor.work_item_id)
+        .ok_or_else(|| replacement_conflict("successor WorkItem disappeared"))?;
+    let read_only = matches!(
+        snapshot.session_bindings[index]
+            .execution_profile
+            .as_deref(),
+        Some("reviewer" | "verifier" | "adversarial-verifier")
+    );
+    let expected_state = if read_only {
+        winwincode_domain::WorkItemState::CandidateReady
+    } else {
+        winwincode_domain::WorkItemState::InProgress
+    };
+    if item.state != expected_state || item.revision != successor.work_item_revision {
+        return Err(replacement_conflict(
+            "replacement requires the exact in-progress WorkItem revision from the accepted job",
+        ));
+    }
+    // The scheduler-sealed replacement authorizes this retry. The intermediate
+    // Ready state and successor dispatch are committed in the same snapshot.
+    let item_revision = item.revision.clone();
+    successor.work_item_revision = item_revision.clone();
+    if read_only {
+        snapshot
+            .work_run_aggregate
+            .start_verification(&successor.work_item_id)
+            .map_err(|error| {
+                replacement_conflict(format!("verification replacement rejected: {error:?}"))
+            })?;
+        // The exact same-job successor attempt was checked against the scheduler seal above.
+        snapshot.work_run_aggregate.runs.push(successor);
+        snapshot.work_run_aggregate.validate().map_err(|error| {
+            replacement_conflict(format!("verification successor rejected: {error:?}"))
+        })?;
+    } else {
+        item.state = winwincode_domain::WorkItemState::Ready;
+        snapshot
+            .work_run_aggregate
+            .append_run(successor)
+            .map_err(|error| {
+                replacement_conflict(format!("successor WorkRun rejected: {error:?}"))
+            })?;
+    }
+    snapshot.session_bindings.push(successor_binding(
+        &snapshot.session_bindings[index],
+        &successor_id,
+        item_revision,
+        authority,
+        replacement.successor_lease.attempt,
+        now_millis,
+    ));
+    snapshot.revision = snapshot
+        .revision
+        .checked_add(1)
+        .ok_or_else(|| replacement_conflict("Delivery revision overflow"))?;
     snapshot.updated_at_millis = now_millis;
     Delivery::try_from_snapshot(snapshot).map_err(|error| replacement_conflict(error.to_string()))
 }
 
+fn validated_replacement_successor(
+    delivery: &Delivery,
+    identity: &SessionBindingIdentity,
+    replacement: &DeliveryExecutionAttemptReplacement,
+    authority: &SessionBindingAuthority,
+) -> Result<(usize, WorkRunId), CoordinationError> {
+    let index = exact_binding_index(delivery, identity)?;
+    let predecessor = active_run(delivery, identity)?;
+    let successor_id = replacement
+        .work_run_id
+        .as_ref()
+        .ok_or_else(|| replacement_conflict("replacement has no successor WorkRun"))?;
+    validate_replacement_identity(
+        identity,
+        predecessor,
+        &delivery.snapshot().session_bindings[index],
+        replacement,
+    )?;
+    let successor = &replacement.successor_lease;
+    if successor_id == &identity.work_run_id
+        || authority.lease_id != successor.lease_id
+        || authority.worker_id != successor.worker_id
+        || authority.worker_instance_id != successor.worker_instance_id
+        || authority.attempt != successor.attempt
+        || authority.fencing_token != successor.fencing_token
+    {
+        return Err(replacement_conflict(
+            "successor WorkerSession authority does not match replacement seal",
+        ));
+    }
+    Ok((index, successor_id.clone()))
+}
+
+fn successor_binding(
+    predecessor: &crate::domain::SessionBinding,
+    successor_id: &WorkRunId,
+    item_revision: Revision,
+    authority: &SessionBindingAuthority,
+    attempt: u64,
+    bound_at_millis: u64,
+) -> crate::domain::SessionBinding {
+    let mut binding = predecessor.clone();
+    binding.id = crate::domain::SessionBindingId(format!("{}:replacement:{attempt}", binding.id.0));
+    binding.work_run_id = successor_id.clone();
+    binding.work_item_revision = item_revision;
+    binding.worker_session_id = Some(authority.worker_session_id.clone());
+    binding.codex_thread_id = None;
+    binding.worker_id = Some(authority.worker_id.clone());
+    binding.worker_instance_id = Some(authority.worker_instance_id.clone());
+    binding.lease_id = Some(authority.lease_id.clone());
+    binding.attempt = authority.attempt;
+    binding.fencing_token = Some(authority.fencing_token.clone());
+    binding.source_provenance = authority.source_provenance.clone();
+    binding.bound_at_millis = bound_at_millis;
+    binding
+}
+
 fn validate_replacement_identity(
     identity: &SessionBindingIdentity,
-    run: &crate::domain::StageRun,
+    run: &winwincode_domain::WorkRun,
     binding: &crate::domain::SessionBinding,
     replacement: &DeliveryExecutionAttemptReplacement,
 ) -> Result<(), CoordinationError> {
@@ -173,12 +296,23 @@ fn validate_replacement_identity(
     let successor = &replacement.successor_lease;
     if replacement.scope.delivery_id.as_ref() != Some(&identity.delivery_id)
         || replacement.scope.product_session_id != identity.product_session_id
-        || replacement.stage_run_id.as_ref() != Some(&identity.stage_run_id)
         || predecessor.job_id != identity.execution_job_id
         || successor.job_id != identity.execution_job_id
-        || predecessor.attempt != run.attempt
+        || run.attempt != i64::try_from(predecessor.attempt).unwrap_or(-1)
+        || run.execution_job_id != predecessor.job_id
+        || run.lease_id != predecessor.lease_id
+        || run.fencing_token != predecessor.fencing_token.0
+        || run.worker_id != predecessor.worker_id
+        || run.worker_instance_id != predecessor.worker_instance_id
+        || replacement
+            .predecessor_worker_session_id
+            .as_ref()
+            .is_some_and(|session| session != &run.worker_session_id)
+        || replacement.predecessor_slot.as_ref().is_some_and(|slot| {
+            slot.worker_session_id != run.worker_session_id
+                || Some(&slot.codex_thread_id) != run.codex_thread_id.as_ref()
+        })
         || successor.attempt != predecessor.attempt.saturating_add(1)
-        || predecessor.payload_digest != successor.payload_digest
         || predecessor.worker_id != successor.worker_id
         || predecessor.worker_instance_id == successor.worker_instance_id
         || predecessor.lease_id == successor.lease_id
@@ -215,12 +349,13 @@ fn validate_replacement_identity(
         // remains the original pending placeholder; rotate only its
         // attempt and leave all runtime owners empty for the successor.
         let pending = binding.attempt == predecessor.attempt
-            && binding.worker_session_id.is_none()
+            && binding.worker_session_id.as_ref()
+                == replacement.predecessor_worker_session_id.as_ref()
             && binding.codex_thread_id.is_none()
-            && binding.worker_id.is_none()
-            && binding.worker_instance_id.is_none()
-            && binding.lease_id.is_none()
-            && binding.fencing_token.is_none();
+            && binding.worker_id.as_ref() == Some(&predecessor.worker_id)
+            && binding.worker_instance_id.as_ref() == Some(&predecessor.worker_instance_id)
+            && binding.lease_id.as_ref() == Some(&predecessor.lease_id)
+            && binding.fencing_token.as_ref() == Some(&predecessor.fencing_token);
         if !pending {
             return Err(replacement_conflict(
                 "slotless scheduler replacement requires a pending Delivery binding",
@@ -256,12 +391,7 @@ pub fn accept_worker_session_with_authority(
     require_mutation_time(delivery, now_millis)?;
     let index = exact_binding_index(delivery, identity)?;
     let run = active_run(delivery, identity)?;
-    if run.attempt != authority.attempt {
-        return Err(CoordinationError::new(
-            CoordinationErrorCode::BindingConflict,
-            "Worker authority attempt does not match the exact active StageRun",
-        ));
-    }
+    validate_run_authority(run, identity, authority, "Worker")?;
     let current = &delivery.snapshot().session_bindings[index];
     validate_authority_transition(current, authority)?;
     if delivery
@@ -328,13 +458,14 @@ pub fn report_codex_thread_with_authority(
     require_mutation_time(delivery, now_millis)?;
     let index = exact_binding_index(delivery, identity)?;
     let run = active_run(delivery, identity)?;
-    if run.attempt != authority.attempt {
+    validate_run_authority(run, identity, authority, "CodexThread")?;
+    let current = &delivery.snapshot().session_bindings[index];
+    if run.codex_thread_id != current.codex_thread_id {
         return Err(CoordinationError::new(
             CoordinationErrorCode::BindingConflict,
-            "CodexThread authority attempt does not match the exact active StageRun",
+            "persisted WorkRun and SessionBinding disagree on the CodexThread",
         ));
     }
-    let current = &delivery.snapshot().session_bindings[index];
     if current.worker_session_id.as_ref() != Some(&authority.worker_session_id) {
         return Err(CoordinationError::new(
             CoordinationErrorCode::BindingConflict,
@@ -378,7 +509,31 @@ pub fn report_codex_thread_with_authority(
     binding.attempt = authority.attempt;
     binding.fencing_token = Some(authority.fencing_token.clone());
     binding.source_provenance = authority.source_provenance.clone();
-    binding.codex_thread_id = Some(codex_thread_id);
+    binding.codex_thread_id = Some(codex_thread_id.clone());
+    let stored_run = snapshot
+        .work_run_aggregate
+        .runs
+        .iter_mut()
+        .find(|run| run.id == identity.work_run_id)
+        .ok_or_else(|| {
+            CoordinationError::new(
+                CoordinationErrorCode::BindingConflict,
+                "WorkRun disappeared during CodexThread binding",
+            )
+        })?;
+    stored_run.codex_thread_id = Some(codex_thread_id);
+    stored_run.state = winwincode_domain::WorkRunState::Running;
+    stored_run.revision.0 = stored_run
+        .revision
+        .0
+        .checked_add(1)
+        .filter(|revision| *revision <= super::super::domain::MAX_SAFE_INTEGER.cast_signed())
+        .ok_or_else(|| {
+            CoordinationError::new(
+                CoordinationErrorCode::RevisionConflict,
+                "WorkRun revision is exhausted",
+            )
+        })?;
     snapshot.revision += 1;
     snapshot.updated_at_millis = now_millis;
     Delivery::try_from_snapshot(snapshot).map_err(|error| {
@@ -408,8 +563,11 @@ fn exact_binding_index(
         .enumerate()
         .filter(|(_, binding)| {
             binding.delivery_id == identity.delivery_id
-                && binding.delivery_task_id == identity.delivery_task_id
-                && binding.stage_run_id == identity.stage_run_id
+                && binding.work_contract_id == identity.work_contract_id
+                && binding.work_contract_revision == identity.work_contract_revision
+                && binding.work_item_id == identity.work_item_id
+                && binding.work_item_revision == identity.work_item_revision
+                && WorkRunId(binding.work_run_id.0.clone()) == identity.work_run_id
                 && binding.product_session_id == identity.product_session_id
                 && binding.execution_job_id == identity.execution_job_id
         });
@@ -428,6 +586,36 @@ fn exact_binding_index(
     Ok(index)
 }
 
+fn validate_run_authority(
+    run: &winwincode_domain::WorkRun,
+    identity: &SessionBindingIdentity,
+    authority: &SessionBindingAuthority,
+    subject: &str,
+) -> Result<(), CoordinationError> {
+    let attempt = i64::try_from(authority.attempt).unwrap_or(-1);
+    let run_fence = FencingToken(run.fencing_token.clone());
+    let matches = run.id == identity.work_run_id
+        && run.work_contract_id == identity.work_contract_id
+        && run.contract_revision == identity.work_contract_revision
+        && run.work_item_id == identity.work_item_id
+        && run.work_item_revision == identity.work_item_revision
+        && run.product_session_id.as_ref() == Some(&identity.product_session_id)
+        && run.execution_job_id == identity.execution_job_id
+        && run.attempt == attempt
+        && run.lease_id == authority.lease_id
+        && run.worker_id == authority.worker_id
+        && run.worker_instance_id == authority.worker_instance_id
+        && run.worker_session_id == authority.worker_session_id
+        && run_fence == authority.fencing_token;
+    if !matches {
+        return Err(CoordinationError::new(
+            CoordinationErrorCode::BindingConflict,
+            format!("{subject} authority does not match the complete active WorkRun"),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_authority_transition(
     current: &crate::domain::SessionBinding,
     authority: &SessionBindingAuthority,
@@ -442,13 +630,17 @@ fn validate_authority_transition(
             "SessionBinding contains a partial persisted lease authority",
         ));
     }
+    let source_handoff = current.source_provenance.kind()
+        == SessionBindingSourceKind::WorkRunDispatch
+        && authority.source_provenance.kind() == SessionBindingSourceKind::ExecutionPort;
     let matches = current.worker_id.as_ref() == Some(&authority.worker_id)
         && current.worker_instance_id.as_ref() == Some(&authority.worker_instance_id)
         && current.lease_id.as_ref() == Some(&authority.lease_id)
         && current.fencing_token.as_ref() == Some(&authority.fencing_token)
         && current.attempt == authority.attempt
         && (current.worker_id.is_none()
-            || current.source_provenance == authority.source_provenance);
+            || current.source_provenance == authority.source_provenance
+            || source_handoff);
     if current.worker_id.is_some() && !matches {
         return Err(CoordinationError::new(
             CoordinationErrorCode::BindingConflict,
@@ -461,28 +653,32 @@ fn validate_authority_transition(
 fn active_run<'delivery>(
     delivery: &'delivery Delivery,
     identity: &SessionBindingIdentity,
-) -> Result<&'delivery crate::domain::StageRun, CoordinationError> {
+) -> Result<&'delivery winwincode_domain::WorkRun, CoordinationError> {
     let run = delivery
         .snapshot()
-        .stage_runs
+        .work_run_aggregate
+        .runs
         .iter()
-        .find(|run| run.id == identity.stage_run_id)
+        .find(|run| run.id == identity.work_run_id)
         .ok_or_else(|| {
             CoordinationError::new(
                 CoordinationErrorCode::BindingConflict,
-                "SessionBinding StageRun does not exist",
+                "SessionBinding WorkRun does not exist",
             )
         })?;
-    if run.delivery_id != identity.delivery_id
-        || run.delivery_task_id != identity.delivery_task_id
-        || !matches!(
-            run.status,
-            StageRunStatus::Running | StageRunStatus::Waiting
-        )
+    if !matches!(
+        run.state,
+        winwincode_domain::WorkRunState::Leased | winwincode_domain::WorkRunState::Running
+    ) || run.work_contract_id != identity.work_contract_id
+        || run.contract_revision != identity.work_contract_revision
+        || run.work_item_id != identity.work_item_id
+        || run.work_item_revision != identity.work_item_revision
+        || run.product_session_id.as_ref() != Some(&identity.product_session_id)
+        || run.execution_job_id != identity.execution_job_id
     {
         return Err(CoordinationError::new(
             CoordinationErrorCode::BindingConflict,
-            "SessionBinding does not match an active exact StageRun",
+            "SessionBinding does not match an active exact WorkRun",
         ));
     }
     Ok(run)
@@ -492,11 +688,11 @@ fn active_run<'delivery>(
 mod tests {
     use super::{
         DeliveryExecutionAttemptReplacement, SessionBindingAuthority, SessionBindingIdentity,
-        accept_worker_session_with_authority, replace_execution_attempt_with_authority,
+        accept_replacement_worker_session_with_authority, accept_worker_session_with_authority,
         report_codex_thread_with_authority,
     };
     use crate::domain::SessionBindingSourceProvenance;
-    use crate::domain::{Delivery, DeliveryStatus, StageRunStatus, test_fixture};
+    use crate::domain::{Delivery, DeliveryStatus, test_fixture};
     use winwincode_domain::{
         CodexThreadId, ExecutionMessageId, FencingToken, Instant, LeaseId, RequestId, Sha256Digest,
         WorkerId, WorkerInstanceId, WorkerSessionId,
@@ -506,19 +702,27 @@ mod tests {
     fn active_delivery() -> Delivery {
         let mut snapshot = test_fixture();
         snapshot.status = DeliveryStatus::Verifying;
-        let run = &mut snapshot.stage_runs[0];
-        run.status = StageRunStatus::Running;
-        run.finished_at_millis = None;
+        let accepted = authority("wsn_01J00000000000000000000000");
+        let run = &mut snapshot.work_run_aggregate.runs[0];
+        run.state = winwincode_domain::WorkRunState::Leased;
+        run.codex_thread_id = None;
+        run.worker_id = accepted.worker_id.clone();
+        run.worker_instance_id = accepted.worker_instance_id.clone();
+        run.worker_session_id = accepted.worker_session_id.clone();
+        run.lease_id = accepted.lease_id.clone();
+        run.fencing_token = accepted.fencing_token.0.clone();
+        run.attempt = 1;
+        snapshot.work_run_aggregate.items[0].state = winwincode_domain::WorkItemState::InProgress;
         let binding = &mut snapshot.session_bindings[0];
-        binding.worker_session_id = None;
+        binding.worker_session_id = Some(accepted.worker_session_id);
         binding.codex_thread_id = None;
-        binding.worker_id = None;
-        binding.worker_instance_id = None;
-        binding.lease_id = None;
-        binding.fencing_token = None;
-        binding.attempt = run.attempt;
-        binding.source_provenance =
-            SessionBindingSourceProvenance::delivery_advance("delivery.advance");
+        binding.worker_id = Some(accepted.worker_id);
+        binding.worker_instance_id = Some(accepted.worker_instance_id);
+        binding.lease_id = Some(accepted.lease_id);
+        binding.fencing_token = Some(accepted.fencing_token);
+        binding.attempt = 1;
+        binding.execution_profile = Some("executor".into());
+        binding.source_provenance = SessionBindingSourceProvenance::pending_work_run_dispatch();
         snapshot.evidence.clear();
         snapshot.verdict = None;
         snapshot.updated_at_millis = 1_800_000_000_100;
@@ -529,8 +733,11 @@ mod tests {
         let binding = &delivery.snapshot().session_bindings[0];
         SessionBindingIdentity {
             delivery_id: binding.delivery_id.clone(),
-            delivery_task_id: binding.delivery_task_id.clone(),
-            stage_run_id: binding.stage_run_id.clone(),
+            work_contract_id: binding.work_contract_id.clone(),
+            work_contract_revision: binding.work_contract_revision.clone(),
+            work_item_id: binding.work_item_id.clone(),
+            work_item_revision: binding.work_item_revision.clone(),
+            work_run_id: binding.work_run_id.clone(),
             product_session_id: binding.product_session_id.clone(),
             execution_job_id: binding.execution_job_id.clone(),
         }
@@ -603,7 +810,7 @@ mod tests {
                 product_session_id: binding.product_session_id.clone(),
                 delivery_id: Some(binding.delivery_id.clone()),
             },
-            stage_run_id: Some(delivery.snapshot().stage_runs[0].id.clone()),
+            work_run_id: Some(delivery.snapshot().work_run_aggregate.runs[0].id.clone()),
             predecessor_worker_session_id: binding.worker_session_id.clone(),
             predecessor_slot: Some(WorkerSlotAuthority {
                 worker_id: predecessor_lease.worker_id.clone(),
@@ -628,50 +835,6 @@ mod tests {
             },
             predecessor_lease,
         }
-    }
-
-    #[test]
-    fn sealed_running_attempt_replacement_clears_only_the_old_execution_binding() {
-        let delivery = running_bound_delivery();
-        let replacement = replacement(&delivery);
-
-        let replaced = replace_execution_attempt_with_authority(
-            &delivery,
-            delivery.revision(),
-            &identity(&delivery),
-            &replacement,
-            1_800_000_000_121,
-        )
-        .expect("sealed replacement");
-
-        let run = &replaced.snapshot().stage_runs[0];
-        let binding = &replaced.snapshot().session_bindings[0];
-        assert_eq!(run.attempt, 2);
-        assert_eq!(binding.attempt, 2);
-        assert!(binding.worker_session_id.is_none());
-        assert!(binding.codex_thread_id.is_none());
-        assert!(binding.worker_id.is_none());
-        assert!(binding.worker_instance_id.is_none());
-        assert!(binding.lease_id.is_none());
-        assert!(binding.fencing_token.is_none());
-        assert_eq!(
-            binding.source_provenance,
-            SessionBindingSourceProvenance::delivery_advance("delivery.advance")
-        );
-        assert_eq!(replaced.revision(), delivery.revision() + 1);
-
-        let mut changed = replacement;
-        changed.predecessor_lease.fencing_token = FencingToken("9".into());
-        assert!(
-            replace_execution_attempt_with_authority(
-                &delivery,
-                delivery.revision(),
-                &identity(&delivery),
-                &changed,
-                1_800_000_000_121,
-            )
-            .is_err()
-        );
     }
 
     #[test]
@@ -707,5 +870,148 @@ mod tests {
             before,
             "rejected replacement must not mutate the Delivery"
         );
+    }
+
+    #[test]
+    fn verification_replacement_keeps_candidate_and_input_unchanged() {
+        let mut snapshot = running_bound_delivery().into_snapshot();
+        snapshot.session_bindings[0].execution_profile = Some("verifier".into());
+        snapshot.work_run_aggregate.items[0].state =
+            winwincode_domain::WorkItemState::CandidateReady;
+        let mut producer = snapshot.work_run_aggregate.runs[0].clone();
+        producer.id.0 = "wrn_01J00000000000000000000008".into();
+        producer.execution_job_id.0 = "job_01J00000000000000000000008".into();
+        producer.state = winwincode_domain::WorkRunState::CandidateReady;
+        producer.worker_session_id.0 = "wsn_01J00000000000000000000008".into();
+        producer.product_session_id = Some(winwincode_domain::ProductSessionId(
+            "psn_01J00000000000000000000008".into(),
+        ));
+        producer.codex_thread_id = Some(CodexThreadId("cdx_01J00000000000000000000008".into()));
+        let mut producer_binding = snapshot.session_bindings[0].clone();
+        producer_binding.id.0 = "binding-producer".into();
+        producer_binding.lease_id.as_mut().unwrap().0 = "lse_01J00000000000000000000008".into();
+        producer_binding.work_run_id = producer.id.clone();
+        producer_binding.execution_job_id = producer.execution_job_id.clone();
+        producer_binding.execution_profile = Some("executor".into());
+        producer_binding.worker_session_id = Some(producer.worker_session_id.clone());
+        producer_binding.product_session_id = producer.product_session_id.clone().unwrap();
+        producer_binding.codex_thread_id = producer.codex_thread_id.clone();
+        snapshot.work_run_aggregate.runs.push(producer.clone());
+        snapshot.session_bindings.push(producer_binding);
+        let delivery = Delivery::try_from_snapshot(snapshot).expect("candidate and verifier");
+        let identity = identity(&delivery);
+        let mut replacement = replacement(&delivery);
+        replacement.work_run_id = Some(winwincode_domain::WorkRunId(
+            "wrn_01J00000000000000000000009".into(),
+        ));
+        let successor = &replacement.successor_lease;
+        let authority = SessionBindingAuthority::from_execution_port(
+            successor.worker_id.clone(),
+            successor.worker_instance_id.clone(),
+            successor.lease_id.clone(),
+            successor.attempt,
+            successor.fencing_token.clone(),
+            WorkerSessionId("wsn_01J00000000000000000000009".into()),
+            ExecutionMessageId("msg_01J00000000000000000000009".into()),
+        );
+        let next = accept_replacement_worker_session_with_authority(
+            &delivery,
+            delivery.revision(),
+            &identity,
+            &replacement,
+            &authority,
+            1_800_000_000_130,
+        )
+        .expect("read-only replacement");
+        assert_eq!(
+            next.snapshot().work_run_aggregate.items,
+            delivery.snapshot().work_run_aggregate.items
+        );
+        assert_eq!(next.snapshot().work_run_aggregate.runs[1], producer);
+        assert_eq!(next.snapshot().work_run_aggregate.runs[2].attempt, 2);
+        assert_eq!(
+            next.snapshot().work_run_aggregate.runs[2].state,
+            winwincode_domain::WorkRunState::Leased
+        );
+    }
+
+    #[test]
+    fn replacement_acceptance_preserves_predecessor_and_appends_successor_binding() {
+        let delivery = running_bound_delivery();
+        let identity = identity(&delivery);
+        let mut replacement = replacement(&delivery);
+        let successor_id = winwincode_domain::WorkRunId("wrn_01J00000000000000000000009".into());
+        replacement.work_run_id = Some(successor_id.clone());
+        let successor = &replacement.successor_lease;
+        let authority = SessionBindingAuthority::from_execution_port(
+            successor.worker_id.clone(),
+            successor.worker_instance_id.clone(),
+            successor.lease_id.clone(),
+            successor.attempt,
+            successor.fencing_token.clone(),
+            WorkerSessionId("wsn_01J00000000000000000000009".into()),
+            ExecutionMessageId("msg_01J00000000000000000000009".into()),
+        );
+        let next = accept_replacement_worker_session_with_authority(
+            &delivery,
+            delivery.revision(),
+            &identity,
+            &replacement,
+            &authority,
+            1_800_000_000_130,
+        )
+        .expect("successor replacement");
+        assert_eq!(next.snapshot().work_run_aggregate.runs.len(), 2);
+        assert_eq!(next.snapshot().session_bindings.len(), 2);
+        assert_eq!(
+            next.snapshot().work_run_aggregate.runs[0].id,
+            identity.work_run_id
+        );
+        assert_eq!(next.snapshot().work_run_aggregate.runs[0].attempt, 1);
+        assert_eq!(
+            next.snapshot().work_run_aggregate.runs[0].state,
+            winwincode_domain::WorkRunState::Failed
+        );
+        assert_eq!(next.snapshot().work_run_aggregate.runs[1].id, successor_id);
+        assert_eq!(next.snapshot().work_run_aggregate.runs[1].attempt, 2);
+        assert_eq!(
+            next.snapshot().session_bindings[0].work_run_id,
+            identity.work_run_id
+        );
+        assert_eq!(
+            next.snapshot().session_bindings[1].work_run_id,
+            successor_id
+        );
+
+        let mut changed_run = delivery.clone().into_snapshot();
+        changed_run.work_run_aggregate.runs[0].worker_instance_id =
+            WorkerInstanceId("wki_01J00000000000000000000008".into());
+        let changed_run = Delivery::try_from_snapshot(changed_run).expect("valid identity shape");
+        assert!(
+            accept_replacement_worker_session_with_authority(
+                &changed_run,
+                changed_run.revision(),
+                &identity,
+                &replacement,
+                &authority,
+                1_800_000_000_130,
+            )
+            .is_err(),
+            "a different persisted WorkRun instance must not borrow the binding authority"
+        );
+
+        let mut forged = replacement;
+        forged.predecessor_lease.worker_instance_id =
+            WorkerInstanceId("wki_01J00000000000000000000008".into());
+        let error = accept_replacement_worker_session_with_authority(
+            &delivery,
+            delivery.revision(),
+            &identity,
+            &forged,
+            &authority,
+            1_800_000_000_130,
+        )
+        .expect_err("foreign predecessor authority");
+        assert_eq!(error.code(), super::CoordinationErrorCode::BindingConflict);
     }
 }

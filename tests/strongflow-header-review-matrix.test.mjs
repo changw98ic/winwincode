@@ -39,13 +39,13 @@ const { strongFlowLayoutMode } = pageModule
 const { mountStrongFlowPage } = pageModule
 
 const productSessionId = 'psn_00000000000000000000000001'
-const stageRunId = 'run_00000000000000000000000001'
+const stageRunId = 'wrn_00000000000000000000000001'
 const workerId = 'wrk_00000000000000000000000001'
 const workerSessionId = 'wss_00000000000000000000000001'
 const codexThreadId = 'cdx_00000000000000000000000001'
 const executionJobId = 'job_00000000000000000000000001'
 const leaseId = 'lease_00000000000000000000000001'
-const olderRunId = 'run_00000000000000000000000002'
+const olderRunId = 'wrn_00000000000000000000000002'
 const deliveryId = 'dlv_00000000000000000000000001'
 
 function attachedBinding() {
@@ -61,7 +61,7 @@ function attachedBinding() {
     sessionIdentity: {
       codexThreadId,
       productSessionId,
-      stageRunId,
+      workRunId: stageRunId,
       workerSessionId,
     },
     sourceIdentity: {
@@ -71,7 +71,7 @@ function attachedBinding() {
       workerInstanceId: 'wri_00000000000000000000000001',
       workerSessionId,
     },
-    stageRunId,
+    workRunId: stageRunId,
     workerId,
     workerSessionId,
   }
@@ -121,7 +121,7 @@ function candidate() {
     diffSha256: `sha256:${'3'.repeat(64)}`,
     frozenAt: '2026-09-03T01:00:04.000Z',
     producerSessionBindingId: 'bind_review_attached',
-    producerStageRunId: stageRunId,
+    producerWorkRunId: stageRunId,
   }
 }
 
@@ -166,7 +166,52 @@ function runtime() {
     rebuiltAt: '2026-09-03T01:00:05.000Z',
     revision: 8,
     sessions: [],
-    stageRunId,
+    workRunId: stageRunId,
+  }
+}
+
+function workRunAggregate() {
+  const workItemId = 'wit_00000000000000000000000001'
+  return {
+    items: [{ id: workItemId }],
+    runs: [{
+      id: olderRunId,
+      workItemId,
+      attempt: 1,
+      revision: 3,
+      state: 'failed',
+      workContractId: 'wct_00000000000000000000000001',
+      contractRevision: 1,
+      workItemRevision: 1,
+      executionJobId,
+      workerId,
+      workerInstanceId: 'wki_00000000000000000000000001',
+      workerSessionId,
+      leaseId,
+      fencingToken: '1',
+      productSessionId,
+      codexThreadId,
+      schemaVersion: 'winwincode/v1',
+    }, {
+      id: stageRunId,
+      workItemId,
+      attempt: 2,
+      revision: 4,
+      state: 'running',
+      workContractId: 'wct_00000000000000000000000001',
+      contractRevision: 1,
+      workItemRevision: 1,
+      executionJobId,
+      workerId,
+      workerInstanceId: 'wki_00000000000000000000000001',
+      workerSessionId,
+      leaseId,
+      fencingToken: '1',
+      productSessionId,
+      codexThreadId,
+      schemaVersion: 'winwincode/v1',
+    }],
+    readCursor: {},
   }
 }
 
@@ -185,6 +230,7 @@ function projection(overrides = {}) {
     },
     publication: base.publication,
     runtime: runtime(),
+    workRunAggregate: workRunAggregate(),
     solutionReview: base.solutionReview,
     diagramExecution: null,
     stage: base.stages[0],
@@ -407,12 +453,12 @@ function mountedPageModel(initial) {
     async resolveAttention() {},
     async submitVerdict() {},
     async advanceDelivery() {},
-    async loadStageRunRuntime() { return null },
+    async loadWorkRunRuntime() { return null },
     async loadCandidateFiles() { this.calls.push(['loadCandidateFiles']) },
     async loadMoreCandidateFiles() { this.calls.push(['loadMoreCandidateFiles']) },
     async selectCandidateFile() { this.calls.push(['selectCandidateFile']) },
     async loadMoreCandidateDiff() { this.calls.push(['loadMoreCandidateDiff']) },
-    async loadStageRunCandidates() { return [] },
+    async loadWorkRunCandidates() { return [] },
     async loadCandidateHistoricalReview() { return null },
     cancelPending() {},
     reconnect() {},
@@ -580,7 +626,7 @@ test('a historical review keeps one polite status and the card marked current', 
   const pageState = state({ projection: historical })
   const { rootElement, model, mounted } = mountAt(pageState)
   const historicalButton = findAllByClass(rootElement, 'wwc-strongflow-run-button')
-    .find(node => node.dataset.stageRunId === olderRunId)
+    .find(node => node.dataset.workRunId === olderRunId)
   assert.notEqual(historicalButton, undefined)
   historicalButton.emit('click')
   model.publish(state({ projection: historical }))
@@ -598,12 +644,12 @@ test('a historical review keeps one polite status and the card marked current', 
   assert.match(textOf(header), /current/iu)
   const identityList = findByClass(header, 'wwc-strongflow-identity-list')
   const stageRunRow = identityList.children.find(
-    row => row.children[0]?.textContent === 'StageRun',
+    row => row.children[0]?.textContent === 'WorkRun',
   )
   assert.equal(
     stageRunRow?.children[1]?.textContent,
     stageRunId,
-    'the identity card must keep reporting the canonical current StageRun',
+    'the identity card must keep reporting the canonical current WorkRun',
   )
   mounted.close()
 })

@@ -4152,19 +4152,19 @@ fn validate_start(start: CodexThreadStart<'_>) -> Result<(), ProductionCodexErro
 }
 
 fn session_identity(start: CodexThreadStart<'_>, thread_id: CodexThreadId) -> SessionIdentity {
-    let (product_session_id, stage_run_id) = match &start.job.scope {
+    let (product_session_id, work_run_id) = match &start.job.scope {
         ExecutionScope::ProductSessionExecutionScope(scope) => {
             (scope.product_session_id.clone(), None)
         }
-        ExecutionScope::DeliveryStageExecutionScope(scope) => (
+        ExecutionScope::WorkRunExecutionScope(scope) => (
             scope.product_session_id.clone(),
-            Some(scope.stage_run_id.clone()),
+            Some(scope.work_run_id.clone()),
         ),
     };
     SessionIdentity {
         codex_thread_id: thread_id,
         product_session_id,
-        stage_run_id,
+        work_run_id,
         worker_session_id: start.worker_session_id.clone(),
     }
 }
@@ -4534,13 +4534,14 @@ fn validate_delegated_proposal(
     proposal: &ChangeBatchProposal,
 ) -> Result<(), ProductionCodexError> {
     let expected = job
-        .stage_input
+        .work_input
         .as_ref()
-        .and_then(|input| input.task.as_ref())
-        .map(|task| {
-            task.acceptance_criterion_ids
+        .map(|input| {
+            input
+                .work_item
+                .criterion_ids
                 .iter()
-                .map(String::as_str)
+                .map(|id| id.0.as_str())
                 .collect::<HashSet<_>>()
         })
         .ok_or_else(invalid_delegated_output)?;
@@ -5374,15 +5375,15 @@ mod tests {
     use std::fmt::Write as _;
     use std::path::PathBuf;
     use winwincode_domain::{
-        ChangeBatchId, CodexThreadId, DeliveryId, DeliveryTaskId, ExecutionJobId, FencingToken,
-        Instant, LeaseId, ProductSessionId, RepositoryId, SchemaVersion, SessionIdentity,
-        Sha256Digest, StageRunId, WorkerId, WorkerInstanceId, WorkerSessionId, WorkspaceRevision,
+        ChangeBatchId, CodexThreadId, Criterion, CriterionId, ExecutionJobId, FencingToken,
+        Instant, LeaseId, ProductSessionId, RepositoryId, Revision, SchemaVersion, SessionIdentity,
+        Sha256Digest, WorkContract, WorkContractId, WorkItem, WorkItemId, WorkItemState, WorkRunId,
+        WorkerId, WorkerInstanceId, WorkerSessionId, WorkspaceRevision,
     };
     use winwincode_execution_port::generated::{
-        DeliveryStageAcceptanceCriterionInput, DeliveryStageExecutionScope,
-        DeliveryStageExecutionScopeKind, DeliveryStageInput, DeliveryStageTaskInput, ExecutionJob,
-        ExecutionLeaseStamp, ExecutionLimits, ExecutionScope, ExecutionWorkspace,
+        ExecutionJob, ExecutionLeaseStamp, ExecutionLimits, ExecutionScope, ExecutionWorkspace,
         ExecutionWorkspaceWriteMode, RepairLoopBudget, RepairLoopCounters, RepairLoopStopReason,
+        WorkRunExecutionScope, WorkRunExecutionScopeKind, WorkRunInput,
     };
 
     #[test]
@@ -5575,7 +5576,38 @@ mod tests {
     }
 
     fn executor_job() -> ExecutionJob {
-        let task_id = DeliveryTaskId("dtk_00000000000000000000000001".to_owned());
+        let contract_id = WorkContractId("wct_00000000000000000000000001".to_owned());
+        let item_id = WorkItemId("wit_00000000000000000000000001".to_owned());
+        let criterion_id = CriterionId("crt_00000000000000000000000001".to_owned());
+        let contract = WorkContract {
+            constraints: vec!["Keep the exact repository boundary.".to_owned()],
+            created_at: Instant("2026-08-28T00:00:00Z".to_owned()),
+            criteria: vec![Criterion {
+                id: criterion_id.clone(),
+                description: "The exact fixture behavior is verified.".to_owned(),
+                required: true,
+                verification_method: Some("Run the exact fixture check.".to_owned()),
+            }],
+            id: contract_id.clone(),
+            objective: "Implement fixture".to_owned(),
+            protected_scope: vec!["Fixture source".to_owned()],
+            required_human_authority: "none".to_owned(),
+            revision: Revision(2),
+            schema_version: SchemaVersion::WinwincodeV1,
+            scope: vec!["Fixture source".to_owned()],
+        };
+        let item = WorkItem {
+            criterion_ids: vec![criterion_id],
+            depends_on: Vec::new(),
+            goal: "Implement fixture".to_owned(),
+            id: item_id.clone(),
+            revision: Revision(1),
+            schema_version: SchemaVersion::WinwincodeV1,
+            state: WorkItemState::Ready,
+            title: "Implement fixture".to_owned(),
+            work_contract_id: contract_id.clone(),
+            work_contract_revision: Revision(2),
+        };
         ExecutionJob {
             attempt: 1,
             execution_profile: "executor".to_owned(),
@@ -5587,36 +5619,24 @@ mod tests {
                 max_runtime_seconds: 300,
             },
             payload_digest: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
-            scope: ExecutionScope::DeliveryStageExecutionScope(DeliveryStageExecutionScope {
-                delivery_id: DeliveryId("dlv_00000000000000000000000001".to_owned()),
-                delivery_task_id: Some(task_id.clone()),
-                kind: DeliveryStageExecutionScopeKind::DeliveryStage,
+            scope: ExecutionScope::WorkRunExecutionScope(WorkRunExecutionScope {
+                attempt: 1,
+                kind: WorkRunExecutionScopeKind::WorkRun,
                 product_session_id: ProductSessionId("ses_00000000000000000000000001".to_owned()),
                 rework_authorization: None,
-                stage_run_id: StageRunId("run_00000000000000000000000001".to_owned()),
+                work_contract_id: contract_id.clone(),
+                work_contract_revision: Revision(2),
+                work_item_id: item_id,
+                work_item_revision: Revision(1),
+                work_run_id: WorkRunId("wrn_00000000000000000000000001".to_owned()),
             }),
-            stage_input: Some(DeliveryStageInput {
-                acceptance_criteria: vec![DeliveryStageAcceptanceCriterionInput {
-                    criterion_id: "criterion-fixture".to_owned(),
-                    description: "The exact fixture behavior is verified.".to_owned(),
-                    required: true,
-                    verification_method: Some("Run the exact fixture check.".to_owned()),
-                }],
+            work_input: Some(WorkRunInput {
+                delivery_spec_id: "spec-fixture".into(),
+                delivery_spec_revision: Revision(2),
                 candidate_ref: None,
-                constraints: vec!["Keep the exact repository boundary.".to_owned()],
-                delivery_spec_id: "spec-fixture".to_owned(),
-                delivery_spec_revision: 2,
-                goal: "Implement fixture".to_owned(),
-                out_of_scope: Vec::new(),
                 schema_version: SchemaVersion::WinwincodeV1,
-                scope: vec!["Fixture source".to_owned()],
-                task: Some(DeliveryStageTaskInput {
-                    acceptance_criterion_ids: vec!["criterion-fixture".to_owned()],
-                    goal: "Implement fixture".to_owned(),
-                    task_id,
-                    title: "Implement fixture".to_owned(),
-                }),
-                title: "Fixture Delivery".to_owned(),
+                work_contract: contract,
+                work_item: item,
             }),
             workspace: ExecutionWorkspace {
                 checkout_revision: "main".to_owned(),
@@ -5886,7 +5906,7 @@ mod tests {
                     product_session_id: ProductSessionId(
                         "ses_00000000000000000000000001".to_owned(),
                     ),
-                    stage_run_id: Some(StageRunId("run_00000000000000000000000001".to_owned())),
+                    work_run_id: Some(WorkRunId("wrn_00000000000000000000000001".to_owned())),
                     worker_session_id,
                 },
             },
@@ -5915,7 +5935,7 @@ mod tests {
                 .is_none()
         );
         let output = serde_json::json!({
-            "acceptanceCriteriaIds": ["criterion-fixture"],
+            "acceptanceCriteriaIds": ["crt_00000000000000000000000001"],
             "disposition": "final",
             "patch": "*** Begin Patch\n*** Update File: src/lib.rs\n@@\n-old\n+new\n*** End Patch\n",
             "schemaVersion": 1,
@@ -5999,14 +6019,14 @@ mod tests {
         let (mut record, binding) = delegated_record_and_binding();
         record
             .job
-            .stage_input
+            .work_input
             .as_mut()
-            .and_then(|input| input.task.as_mut())
-            .expect("delegated task")
-            .acceptance_criterion_ids
-            .push("criterion-second".to_owned());
+            .expect("delegated input")
+            .work_item
+            .criterion_ids
+            .push(CriterionId("crt_00000000000000000000000002".to_owned()));
         let incomplete = serde_json::json!({
-            "acceptanceCriteriaIds": ["criterion-fixture"],
+            "acceptanceCriteriaIds": ["crt_00000000000000000000000001"],
             "disposition": "final",
             "patch": "*** Begin Patch\n*** Update File: src/lib.rs\n@@\n-old\n+new\n*** End Patch\n",
             "schemaVersion": 1,
@@ -6044,7 +6064,7 @@ mod tests {
 
         let (record, binding) = delegated_record_and_binding();
         let moved_outside = serde_json::json!({
-            "acceptanceCriteriaIds": ["criterion-fixture"],
+            "acceptanceCriteriaIds": ["crt_00000000000000000000000001"],
             "disposition": "final",
             "patch": "*** Begin Patch\n*** Update File: src/lib.rs\n*** Move to: ../escape.rs\n@@\n-old\n+new\n*** End Patch\n",
             "schemaVersion": 1,

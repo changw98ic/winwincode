@@ -367,26 +367,7 @@ pub fn retain_candidate(
     })
 }
 
-/// Enqueues the durable `client.candidate.retained` frame for one retained
-/// registry row.
-///
-/// The receipt is derived deterministically from the row (receipt id
-/// a canonical `lcr_` receipt id, the retention stamps, revision 1), so every report
-/// of the same candidate encodes byte-identical receipt facts. Only rows in
-/// the `retained` state may be reported — the retained frame reports the
-/// retention event, and progressed lifecycle states belong to the later
-/// apply-result lane.
-///
-/// # Errors
-///
-/// Returns [`CandidateRegistryErrorKind::InvalidInput`] for a row outside
-/// the retained state or with divergent facts,
-/// [`CandidateRegistryErrorKind::NoOccupancyMirror`] when the device holds
-/// no occupancy mirror, and a store failure when the outbox append fails.
-/// Deterministic canonical `lcr_` receipt id for one frozen candidate: the
-/// first 25 uppercase hex characters of the commit plus a G tag (all valid
-/// Crockford symbols, matching the Server ledger's id validator), so every
-/// report of the same candidate reuses one identical receipt id.
+/// Builds the deterministic canonical `lcr_` receipt id for a candidate.
 fn deterministic_lcr_id(candidate_id: &str) -> String {
     let hex: String = candidate_id
         .chars()
@@ -397,6 +378,14 @@ fn deterministic_lcr_id(candidate_id: &str) -> String {
     format!("lcr_{hex}G")
 }
 
+/// Enqueues the durable `client.candidate.retained` frame for a retained row.
+///
+/// # Errors
+///
+/// Returns [`CandidateRegistryErrorKind::InvalidInput`] for invalid or
+/// non-retained rows, [`CandidateRegistryErrorKind::NoOccupancyMirror`] when
+/// no occupancy mirror is held, or a store error when appending the frame
+/// fails.
 pub fn enqueue_candidate_retained(
     daemon: &mut DeviceDaemon,
     record: &CandidateLocalRefRecord,

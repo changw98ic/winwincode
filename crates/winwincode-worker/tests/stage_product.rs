@@ -7,15 +7,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use sha2::{Digest as _, Sha256};
 use winwincode_domain::{
-    ArtifactId, CodexThreadId, DeliveryId, DeliveryTaskId, ExecutionAckSequence, ExecutionJobId,
-    FencingToken, Instant, LeaseId, ProductSessionId, RepositoryId, SchemaVersion, SessionIdentity,
-    Sha256Digest, StageRunId, WorkerId, WorkerInstanceId, WorkerSessionId,
+    ArtifactId, CodexThreadId, Criterion, CriterionId, ExecutionAckSequence, ExecutionJobId,
+    FencingToken, Instant, LeaseId, ProductSessionId, RepositoryId, Revision, SchemaVersion,
+    SessionIdentity, Sha256Digest, WorkContract, WorkContractId, WorkItem, WorkItemId,
+    WorkItemState, WorkRunId, WorkerId, WorkerInstanceId, WorkerSessionId,
 };
 use winwincode_execution_port::generated::{
-    ArtifactKind, DeliveryStageAcceptanceCriterionInput, DeliveryStageExecutionScope,
-    DeliveryStageExecutionScopeKind, DeliveryStageInput, DeliveryStageTaskInput, ExecutionJob,
-    ExecutionLeaseStamp, ExecutionLimits, ExecutionScope, ExecutionWorkspace,
-    ExecutionWorkspaceWriteMode,
+    ArtifactKind, ExecutionJob, ExecutionLeaseStamp, ExecutionLimits, ExecutionScope,
+    ExecutionWorkspace, ExecutionWorkspaceWriteMode, WorkRunExecutionScope,
+    WorkRunExecutionScopeKind, WorkRunInput,
 };
 use winwincode_worker::RoleExecutionMode;
 use winwincode_worker::stage_product::{
@@ -116,8 +116,8 @@ fn executor_freezes_real_checkout_into_exact_candidate_artifact() {
         active.job.job_id
     );
     assert_eq!(
-        prepared.snapshot().provenance.stage_run_id,
-        active.session_identity.stage_run_id
+        prepared.snapshot().provenance.work_run_id,
+        active.session_identity.work_run_id
     );
     assert!(
         std::str::from_utf8(prepared.bytes())
@@ -275,7 +275,7 @@ fn candidate_rejects_workspace_from_another_exact_attempt() {
 
 fn active_job(repository_id: &RepositoryId, suffix: &str, role: &str) -> ActiveJob {
     let product_session_id = ProductSessionId(format!("psn_stage_product_{suffix}"));
-    let stage_run_id = StageRunId(format!("run_stage_product_{suffix}"));
+    let work_run_id = WorkRunId(format!("run_stage_product_{suffix}"));
     let worker_session_id = WorkerSessionId(format!("wsn_stage_product_{suffix}"));
     let codex_thread_id = CodexThreadId(format!("ctx_stage_product_{suffix}"));
     let job_id = ExecutionJobId(format!("job_stage_product_{suffix}"));
@@ -289,8 +289,6 @@ fn active_job(repository_id: &RepositoryId, suffix: &str, role: &str) -> ActiveJ
         worker_id: WorkerId("wrk_stage_product".to_owned()),
         worker_instance_id: WorkerInstanceId("wki_stage_product".to_owned()),
     };
-    let criterion_id = format!("criterion-stage-product-{suffix}");
-    let task_id = DeliveryTaskId(format!("dtk_stage_product_{suffix}"));
     ActiveJob {
         job: ExecutionJob {
             attempt: 1,
@@ -303,36 +301,51 @@ fn active_job(repository_id: &RepositoryId, suffix: &str, role: &str) -> ActiveJ
                 max_runtime_seconds: 300,
             },
             payload_digest: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
-            scope: ExecutionScope::DeliveryStageExecutionScope(DeliveryStageExecutionScope {
-                delivery_id: DeliveryId(format!("dlv_stage_product_{suffix}")),
-                delivery_task_id: Some(task_id.clone()),
-                kind: DeliveryStageExecutionScopeKind::DeliveryStage,
+            scope: ExecutionScope::WorkRunExecutionScope(WorkRunExecutionScope {
+                attempt: 1,
+                kind: WorkRunExecutionScopeKind::WorkRun,
                 product_session_id: product_session_id.clone(),
                 rework_authorization: None,
-                stage_run_id: stage_run_id.clone(),
+                work_contract_id: WorkContractId("wct_00000000000000000000000001".into()),
+                work_contract_revision: Revision(1),
+                work_item_id: WorkItemId("wit_00000000000000000000000001".into()),
+                work_item_revision: Revision(1),
+                work_run_id: work_run_id.clone(),
             }),
-            stage_input: Some(DeliveryStageInput {
-                acceptance_criteria: vec![DeliveryStageAcceptanceCriterionInput {
-                    criterion_id: criterion_id.clone(),
-                    description: "The exact candidate is durable.".into(),
-                    required: true,
-                    verification_method: Some("Inspect the candidate manifest.".into()),
-                }],
-                candidate_ref: None,
-                constraints: Vec::new(),
-                delivery_spec_id: format!("spec-stage-product-{suffix}"),
-                delivery_spec_revision: 1,
-                goal: "Produce one exact candidate.".into(),
-                out_of_scope: Vec::new(),
+            work_input: Some(WorkRunInput {
+                delivery_spec_id: "spec-fixture".into(),
+                delivery_spec_revision: Revision(2),
                 schema_version: SchemaVersion::WinwincodeV1,
-                scope: vec!["Candidate workspace".into()],
-                task: Some(DeliveryStageTaskInput {
-                    acceptance_criterion_ids: vec![criterion_id],
+                work_contract: WorkContract {
+                    constraints: Vec::new(),
+                    created_at: Instant("2029-01-01T00:00:00.000Z".into()),
+                    criteria: vec![Criterion {
+                        description: "The exact candidate is durable.".into(),
+                        id: CriterionId("crt_00000000000000000000000001".into()),
+                        required: true,
+                        verification_method: Some("Inspect the candidate manifest.".into()),
+                    }],
+                    id: WorkContractId("wct_00000000000000000000000001".into()),
+                    objective: "produce one exact StrongFlow stage product".into(),
+                    protected_scope: vec!["Candidate workspace".into()],
+                    required_human_authority: "approval".into(),
+                    revision: Revision(1),
+                    schema_version: SchemaVersion::WinwincodeV1,
+                    scope: vec!["Candidate workspace".into()],
+                },
+                work_item: WorkItem {
+                    criterion_ids: vec![CriterionId("crt_00000000000000000000000001".into())],
+                    depends_on: Vec::new(),
                     goal: "produce one exact StrongFlow stage product".into(),
-                    task_id,
+                    id: WorkItemId("wit_00000000000000000000000001".into()),
+                    revision: Revision(1),
+                    schema_version: SchemaVersion::WinwincodeV1,
+                    state: WorkItemState::Ready,
                     title: "Produce candidate".into(),
-                }),
-                title: "Stage product fixture".into(),
+                    work_contract_id: WorkContractId("wct_00000000000000000000000001".into()),
+                    work_contract_revision: Revision(1),
+                },
+                candidate_ref: None,
             }),
             workspace: ExecutionWorkspace {
                 checkout_revision: "HEAD".to_owned(),
@@ -345,7 +358,7 @@ fn active_job(repository_id: &RepositoryId, suffix: &str, role: &str) -> ActiveJ
         session_identity: SessionIdentity {
             codex_thread_id: codex_thread_id.clone(),
             product_session_id,
-            stage_run_id: Some(stage_run_id),
+            work_run_id: Some(work_run_id),
             worker_session_id,
         },
         codex_thread_id,

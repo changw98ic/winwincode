@@ -6,10 +6,9 @@ use std::{collections::HashSet, fmt};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use winwincode_api::generated::{CommandEnvelope, CommandName};
 use winwincode_audit::{
     AuditAction, AuditEvent, AuditEventId, AuditExecutionIdentity, AuditExecutionSubjectKind,
-    AuditState, AuditSubject,
+    AuditSubject,
 };
 use winwincode_delivery::{
     application::stage::{
@@ -17,14 +16,14 @@ use winwincode_delivery::{
         TerminalOutcomeStatus, reconcile_durable_settled_terminal_outcome,
         reconcile_durable_terminal_outcome,
     },
-    domain::{Delivery, StageRunStatus},
+    domain::Delivery,
     store::{ApplyDeliveryTerminalOutcome, DeliveryCommand, DeliveryCommandPort, DeliveryStore},
 };
 use winwincode_domain::RepositoryScope;
 use winwincode_domain::{
     CodexThreadId, ControlPlaneEventId, DeliveryId, DeliveryTaskId, ExecutionAckSequence,
     ExecutionJobId, ExecutionMessageId, Instant, ProductSessionId, RequestId, SchemaVersion,
-    SessionIdentity, Sha256Digest, StageRunId,
+    SessionIdentity, Sha256Digest, WorkRunId,
 };
 use winwincode_execution_port::generated::{
     ArtifactReference, ExecutionJob, ExecutionOutcomeStatus, ExecutionScope, JobOutcomeMessage,
@@ -32,8 +31,8 @@ use winwincode_execution_port::generated::{
 };
 use winwincode_storage::{
     CommitReceipt, DurableOutboxEvent, NewOutboxEvent, PendingAuditEvent, ProductStateStorage,
-    PublicEventActor, PublicEventSource, ReceiptIdentity, ReceiptScopeKey, SqliteStorage,
-    StateCommit, StateMutation, StorageError, public_actor_from_receipt_key,
+    PublicEventActor, PublicEventSource, ReceiptIdentity, ReceiptScopeKey, StateCommit,
+    StateMutation, StorageError, public_actor_from_receipt_key,
 };
 
 use crate::delivery_transaction::{
@@ -48,8 +47,8 @@ use crate::session_binding_transaction::{
 use crate::worker_policy::VerifierPolicyAuthority;
 use crate::{
     ArtifactEnterpriseQuotaSagaError, DeliveryChangeKind, OutboxError,
-    delivery_changed_event_for_scope, execution_audit_event, execution_audit_event_with_state,
-    repository_scope_key, validate_delivery_changed_receipt,
+    delivery_changed_event_for_scope, execution_audit_event, repository_scope_key,
+    validate_delivery_changed_receipt,
 };
 
 const TERMINAL_PHASE: &str = "terminal-outcome";
@@ -159,12 +158,7 @@ pub(crate) fn execute_at(
         }
     };
     validate_message_authority(message, &job, &context, facts, &session_identity)?;
-    let commit = if requires_atomic_handoff(&current, &context, facts)? {
-        commit_pending_handoff
-    } else {
-        commit_terminal
-    };
-    let receipt = commit(
+    let receipt = commit_terminal(
         storage,
         message,
         facts,
@@ -212,15 +206,16 @@ pub(crate) fn verifier_policy_authority_at(
     };
     let mut runs = current
         .snapshot()
-        .stage_runs
+        .work_run_aggregate
+        .runs
         .iter()
-        .filter(|run| run.id == context.stage_run_id);
-    let run = runs.next().ok_or_else(|| {
-        StorageError::invalid_input("Verifier Policy StageRun authority is missing")
+        .filter(|run| run.id == context.work_run_id);
+    let _run = runs.next().ok_or_else(|| {
+        StorageError::invalid_input("Verifier Policy WorkRun authority is missing")
     })?;
     if runs.next().is_some() {
         return Err(StorageError::invalid_input(
-            "Verifier Policy StageRun authority is ambiguous",
+            "Verifier Policy WorkRun authority is ambiguous",
         ));
     }
     let subject_sha256 = crate::enterprise_policy_subject_sha256(&(
@@ -241,7 +236,7 @@ pub(crate) fn verifier_policy_authority_at(
             "enterprise-verifier-policy",
         )?,
         evaluated_at: message.sent_at.clone(),
-        verifier_resource: format!("verifier:{}", run.role),
+        verifier_resource: "verifier".to_owned(),
         subject_sha256,
     }))
 }
@@ -264,33 +259,6 @@ fn validate_trusted_lease_time(
         ));
     }
     Ok(())
-}
-
-fn requires_atomic_handoff(
-    delivery: &Delivery,
-    context: &TerminalContext,
-    facts: &DeliveryTerminalOutcomeFacts,
-) -> Result<bool, StorageError> {
-    if facts.status() != TerminalOutcomeStatus::Succeeded {
-        return Ok(false);
-    }
-    let mut runs = delivery
-        .snapshot()
-        .stage_runs
-        .iter()
-        .filter(|run| run.id == context.stage_run_id);
-    let run = runs.next().ok_or_else(|| {
-        StorageError::invalid_input("terminal outcome current StageRun is missing")
-    })?;
-    if runs.next().is_some() {
-        return Err(StorageError::invalid_input(
-            "terminal outcome StageRun identity is ambiguous",
-        ));
-    }
-    Ok(
-        run.stage != winwincode_delivery::domain::DeliveryStage::Verifying
-            || !matches!(run.role.as_str(), "verifier" | "adversarial-verifier"),
-    )
 }
 
 struct TerminalPhase {
@@ -329,7 +297,7 @@ struct TerminalContext {
     repository_scope: RepositoryScope,
     delivery_id: DeliveryId,
     delivery_task_id: Option<DeliveryTaskId>,
-    stage_run_id: StageRunId,
+    work_run_id: WorkRunId,
     product_session_id: ProductSessionId,
     job_event: DurableExecutionJobRef,
 }
@@ -340,14 +308,14 @@ impl TerminalContext {
         durable: &DurableOutboxEvent,
         job: &ExecutionJob,
     ) -> Result<Self, StorageError> {
-        let ExecutionScope::DeliveryStageExecutionScope(job_scope) = &job.scope else {
+        let ExecutionScope::WorkRunExecutionScope(job_scope) = &job.scope else {
             return Err(StorageError::invalid_input(
                 "terminal outcome ExecutionJob has foreign scope",
             ));
         };
         let scope_key = repository_scope_key(scope)?;
         if durable.receipt_identity().scope_key() != &scope_key
-            || durable.stream_id() != delivery_stream_id(&job_scope.delivery_id)
+            || !durable.stream_id().starts_with("delivery:")
             || durable.revision() == 0
             || job.workspace.repository_id != scope.repository_id
         {
@@ -360,9 +328,15 @@ impl TerminalContext {
         Ok(Self {
             scope_key,
             repository_scope: scope.clone(),
-            delivery_id: job_scope.delivery_id.clone(),
-            delivery_task_id: job_scope.delivery_task_id.clone(),
-            stage_run_id: job_scope.stage_run_id.clone(),
+            delivery_id: DeliveryId(
+                durable
+                    .stream_id()
+                    .strip_prefix("delivery:")
+                    .unwrap_or(durable.stream_id())
+                    .to_owned(),
+            ),
+            delivery_task_id: None,
+            work_run_id: job_scope.work_run_id.clone(),
             product_session_id: job_scope.product_session_id.clone(),
             job_event,
         })
@@ -413,7 +387,7 @@ struct TerminalAcceptedEvent {
     product_session_id: ProductSessionId,
     revision: u64,
     schema_version: u8,
-    stage_run_id: StageRunId,
+    work_run_id: WorkRunId,
 }
 
 /// Secret-safe terminal facts kept with the accepted message digest. Worker
@@ -433,7 +407,7 @@ struct AcceptedTerminalOutcome {
 struct PersistedTerminalAuthority {
     schema_version: u8,
     delivery_id: DeliveryId,
-    stage_run_id: StageRunId,
+    work_run_id: WorkRunId,
     job_id: ExecutionJobId,
     attempt: u64,
     lease_id: winwincode_domain::LeaseId,
@@ -465,24 +439,6 @@ enum PersistedTerminalDisposition {
     },
 }
 
-/// Opaque durable success fact consumed by one exact `delivery.advance` state
-/// transaction. Construction stays inside the canonical terminal adapter.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct DeliveryTerminalHandoff {
-    facts: DeliveryTerminalOutcomeFacts,
-    consumption: StateMutation,
-}
-
-impl DeliveryTerminalHandoff {
-    pub(crate) const fn facts(&self) -> &DeliveryTerminalOutcomeFacts {
-        &self.facts
-    }
-
-    pub(crate) fn consumption(&self) -> StateMutation {
-        self.consumption.clone()
-    }
-}
-
 fn persisted_terminal_authority(
     message: &JobOutcomeMessage,
     context: &TerminalContext,
@@ -491,7 +447,7 @@ fn persisted_terminal_authority(
     Ok(PersistedTerminalAuthority {
         schema_version: 1,
         delivery_id: context.delivery_id.clone(),
-        stage_run_id: context.stage_run_id.clone(),
+        work_run_id: context.work_run_id.clone(),
         job_id: message.lease.job_id.clone(),
         attempt: u64::try_from(message.lease.attempt)
             .map_err(|_| StorageError::invalid_input("terminal attempt is invalid"))?,
@@ -632,9 +588,9 @@ fn validate_message_authority(
             .all(|(trusted, reported)| {
                 trusted.artifact_id == reported.artifact_id && trusted.digest == reported.digest
             });
-    if job.job_id != message.lease.job_id
+    if facts.work_run_id() != &context.work_run_id
+        || job.job_id != message.lease.job_id
         || job.attempt != message.lease.attempt
-        || context.stage_run_id != *facts.stage_run_id()
         || active.execution_job_id() != &message.lease.job_id
         || active.attempt() != attempt
         || active.lease_id() != &message.lease.lease_id
@@ -691,17 +647,13 @@ fn validate_current_job_binding(
         .map_err(|_| StorageError::invalid_input("ExecutionJob attempt is out of range"))?;
     let matching_runs = delivery
         .snapshot()
-        .stage_runs
+        .work_run_aggregate
+        .runs
         .iter()
         .filter(|run| {
-            run.id == context.stage_run_id
-                && run.delivery_id == context.delivery_id
-                && run.delivery_task_id == context.delivery_task_id
-                && run.attempt == attempt
-                && matches!(
-                    run.status,
-                    StageRunStatus::Running | StageRunStatus::Waiting
-                )
+            run.id == context.work_run_id
+                && u64::try_from(run.attempt).ok() == Some(attempt)
+                && matches!(run.state, winwincode_domain::WorkRunState::Running)
         })
         .collect::<Vec<_>>();
     let matching_bindings = delivery
@@ -710,15 +662,14 @@ fn validate_current_job_binding(
         .iter()
         .filter(|binding| {
             binding.delivery_id == context.delivery_id
-                && binding.delivery_task_id == context.delivery_task_id
-                && binding.stage_run_id == context.stage_run_id
+                && binding.work_run_id == context.work_run_id
                 && binding.product_session_id == context.product_session_id
                 && binding.execution_job_id == job.job_id
         })
         .collect::<Vec<_>>();
     if matching_runs.len() != 1 || matching_bindings.len() != 1 {
         return Err(StorageError::invalid_input(
-            "terminal outcome ExecutionJob does not match one current StageRun and SessionBinding",
+            "terminal outcome ExecutionJob does not match one current WorkRun and SessionBinding",
         ));
     }
     let binding = matching_bindings
@@ -733,7 +684,7 @@ fn validate_current_job_binding(
     Ok(SessionIdentity {
         codex_thread_id,
         product_session_id: binding.product_session_id.clone(),
-        stage_run_id: Some(binding.stage_run_id.clone()),
+        work_run_id: Some(binding.work_run_id.clone()),
         worker_session_id,
     })
 }
@@ -784,7 +735,7 @@ fn terminal_audit_subject(
         context.product_session_id.clone(),
         active.worker_session_id().clone(),
         codex_thread_id,
-        context.stage_run_id.clone(),
+        context.work_run_id.clone(),
         active.execution_job_id().clone(),
         context.delivery_id.clone(),
         context.delivery_task_id.clone(),
@@ -806,77 +757,6 @@ const fn terminal_result_code(status: TerminalOutcomeStatus) -> &'static str {
         TerminalOutcomeStatus::InfrastructureError => "execution.terminal.infrastructure_error",
         TerminalOutcomeStatus::Cancelled => "execution.terminal.cancelled",
     }
-}
-
-fn commit_pending_handoff(
-    storage: &mut dyn ProductStateStorage,
-    message: &JobOutcomeMessage,
-    facts: &DeliveryTerminalOutcomeFacts,
-    phase: &TerminalPhase,
-    context: &TerminalContext,
-    current: &Delivery,
-    session_identity: &SessionIdentity,
-) -> Result<CommitReceipt, StorageError> {
-    let authority = persisted_terminal_authority(
-        message,
-        context,
-        PersistedTerminalDisposition::PendingHandoff,
-    )?;
-    let authority_payload = serde_json::to_vec(&authority).map_err(|error| {
-        StorageError::adapter(format!(
-            "failed to encode terminal handoff authority: {error}"
-        ))
-    })?;
-    let accepted = terminal_accepted_event(message, phase, context, current.revision())?;
-    let public_scope = crate::public_repository_scope(&context.repository_scope);
-    let public_source = PublicEventSource::SessionExecutionWorker {
-        worker_id: message.lease.worker_id.clone(),
-        worker_session_id: message.worker_session_id.clone(),
-        lease_id: message.lease.lease_id.clone(),
-        codex_thread_id: session_identity.codex_thread_id.clone(),
-        session_identity: session_identity.clone(),
-    };
-    let invalidated =
-        delivery_stage_runtime_invalidated_event(&DeliveryStageRuntimeInvalidation {
-            scope_key: &context.scope_key,
-            delivery_id: &context.delivery_id,
-            stage_run_id: &context.stage_run_id,
-            product_session_id: &context.product_session_id,
-            session_identity,
-            revision: current.revision(),
-            event_namespace: TERMINAL_RUNTIME_NAMESPACE,
-            scope: public_scope,
-            occurred_at: message.sent_at.clone(),
-            source: public_source,
-        })?;
-    let state_digest = Sha256Digest(format!("sha256:{:x}", Sha256::digest(&authority_payload)));
-    let audit_state = AuditState::changed(None, state_digest)
-        .map_err(|error| StorageError::invalid_input(error.to_string()))?;
-    let pending_audit_event = execution_audit_event_with_state(
-        AuditEventId::from_digest(&phase.command_digest)
-            .map_err(|error| StorageError::invalid_input(error.to_string()))?,
-        facts.metadata().finished_at_millis(),
-        phase.receipt_identity.request_id().clone(),
-        &context.repository_scope,
-        AuditAction::delivery_state("stage.terminal.handoff_pending")
-            .map_err(|error| StorageError::invalid_input(error.to_string()))?,
-        audit_state,
-        terminal_audit_subject(facts, context, session_identity)?,
-        terminal_result_code(facts.status()),
-    )?;
-    let commit = StateCommit::new(
-        phase.receipt_identity.clone(),
-        phase.command_digest.clone(),
-        terminal_authority_stream_id(&message.lease.job_id),
-        0,
-        authority_payload,
-        vec![accepted, invalidated],
-    )
-    .with_pending_audit_event(pending_audit_event);
-    let receipt = storage.commit(&commit)?;
-    validate_receipt(&receipt, phase, message, receipt.idempotent_replay)?;
-    validate_terminal_pending_audit_event(storage, &receipt, phase)?;
-    Ok(receipt)
 }
 
 fn commit_terminal(
@@ -935,7 +815,7 @@ fn commit_terminal(
         delivery_stage_runtime_invalidated_event(&DeliveryStageRuntimeInvalidation {
             scope_key: &context.scope_key,
             delivery_id: &context.delivery_id,
-            stage_run_id: &context.stage_run_id,
+            work_run_id: &context.work_run_id,
             product_session_id: &context.product_session_id,
             session_identity,
             revision,
@@ -984,90 +864,49 @@ fn commit_terminal(
     Ok(receipt)
 }
 
-pub(crate) fn load_active_terminal_handoff(
-    storage: &mut SqliteStorage,
+/// Reads a successful report by exact job and accepted binding without
+/// marking the `WorkItem` complete or consuming a global stage handoff.
+pub(crate) fn load_successful_terminal_authority(
+    storage: &dyn ProductStateStorage,
     delivery: &Delivery,
-    command: &CommandEnvelope,
-) -> Result<Option<DeliveryTerminalHandoff>, StorageError> {
-    if command.command != CommandName::DeliveryAdvance
-        || u64::try_from(command.expected_revision.0).ok() != Some(delivery.revision())
-    {
-        return Err(StorageError::invalid_input(
-            "terminal handoff requires the exact current delivery.advance command",
-        ));
-    }
-    let mut active_runs = delivery.snapshot().stage_runs.iter().filter(|run| {
-        matches!(
-            run.status,
-            StageRunStatus::Running | StageRunStatus::Waiting
-        )
-    });
-    let Some(run) = active_runs.next() else {
-        return Ok(None);
-    };
-    if active_runs.next().is_some() {
-        return Err(StorageError::invalid_input(
-            "Delivery has multiple active StageRuns",
-        ));
-    }
+    job_id: &ExecutionJobId,
+) -> Result<DeliveryTerminalOutcomeFacts, StorageError> {
+    let stored = storage
+        .load_state(&terminal_authority_stream_id(job_id))?
+        .ok_or_else(|| StorageError::invalid_input("successful terminal report is missing"))?;
+    let persisted = decode_terminal_authority(&stored.payload)?;
     let mut bindings = delivery
         .snapshot()
         .session_bindings
         .iter()
-        .filter(|binding| binding.stage_run_id == run.id);
-    let binding = bindings.next().ok_or_else(|| {
-        StorageError::invalid_input("active Delivery StageRun has no SessionBinding")
-    })?;
-    if bindings.next().is_some() {
-        return Err(StorageError::invalid_input(
-            "active Delivery StageRun has multiple SessionBindings",
-        ));
-    }
-    let stored = storage
-        .load_state(&terminal_authority_stream_id(&binding.execution_job_id))?
-        .ok_or_else(|| StorageError::invalid_input("active terminal handoff is missing"))?;
-    if stored.revision != 1 {
-        return Err(StorageError::invalid_input(
-            "active terminal handoff revision is invalid",
-        ));
-    }
-    let persisted = decode_terminal_authority(&stored.payload)?;
-    if persisted.schema_version != 1
+        .filter(|binding| {
+            binding.execution_job_id == *job_id && binding.work_run_id == persisted.work_run_id
+        });
+    let binding = bindings
+        .next()
+        .ok_or_else(|| StorageError::invalid_input("terminal report has no exact binding"))?;
+    if bindings.next().is_some()
+        || persisted.schema_version != 1
         || persisted.delivery_id != *delivery.id()
-        || persisted.stage_run_id != run.id
-        || persisted.job_id != binding.execution_job_id
+        || persisted.job_id != *job_id
         || persisted.status != ExecutionOutcomeStatus::Succeeded
-        || persisted.disposition != PersistedTerminalDisposition::PendingHandoff
         || !persisted_matches_binding(&persisted, binding)
     {
         return Err(StorageError::invalid_input(
-            "terminal handoff does not match the current Delivery binding",
+            "terminal report is foreign, ambiguous or unsuccessful",
         ));
     }
-    let facts = reconcile_durable_terminal_outcome(
-        delivery,
-        durable_terminal_outcome_input(persisted.clone()),
-    )
-    .map_err(|error| StorageError::invalid_input(error.to_string()))?;
-    let (_, advance_command_digest) = crate::command_receipt(command)?;
-    let mut consumed = persisted;
-    let delivery_revision = delivery.revision().checked_add(1).ok_or_else(|| {
-        StorageError::invalid_input("terminal handoff Delivery revision exceeds the durable range")
-    })?;
-    consumed.disposition = PersistedTerminalDisposition::Consumed {
-        advance_request_id: command.request_id.clone(),
-        advance_command_digest,
-        delivery_revision,
-    };
-    let payload = serde_json::to_vec(&consumed).map_err(|error| {
-        StorageError::adapter(format!(
-            "failed to encode consumed terminal authority: {error}"
-        ))
-    })?;
-    Ok(Some(DeliveryTerminalHandoff {
-        facts,
-        consumption: StateMutation::new(stored.stream_id, stored.revision, payload)?,
-    }))
+    if persisted.disposition == PersistedTerminalDisposition::PendingHandoff {
+        if stored.revision != 1 {
+            return Err(StorageError::invalid_input(
+                "terminal report revision is invalid",
+            ));
+        }
+        reconcile_durable_terminal_outcome(delivery, durable_terminal_outcome_input(persisted))
+            .map_err(|error| StorageError::invalid_input(error.to_string()))
+    } else {
+        load_settled_terminal_authority(storage, delivery, job_id)
+    }
 }
 
 pub(crate) fn load_settled_terminal_authority(
@@ -1148,7 +987,7 @@ fn durable_terminal_outcome_input(
         worker_session_id: persisted.worker_session_id,
         issued_at: persisted.issued_at,
         expires_at: persisted.expires_at,
-        stage_run_id: persisted.stage_run_id,
+        work_run_id: persisted.work_run_id,
         status: terminal_status(&persisted.status),
         codex_thread_id: persisted.codex_thread_id,
         finished_at_millis: persisted.finished_at_millis,
@@ -1164,7 +1003,7 @@ fn durable_terminal_outcome_input(
     }
 }
 
-fn terminal_authority_stream_id(job_id: &ExecutionJobId) -> String {
+pub(crate) fn terminal_authority_stream_id(job_id: &ExecutionJobId) -> String {
     format!("{TERMINAL_AUTHORITY_STREAM_PREFIX}{}", job_id.0)
 }
 
@@ -1240,7 +1079,7 @@ fn terminal_accepted_event(
         product_session_id: context.product_session_id.clone(),
         revision,
         schema_version: 1,
-        stage_run_id: context.stage_run_id.clone(),
+        work_run_id: context.work_run_id.clone(),
     };
     let payload = serde_json::to_vec(&payload).map_err(|error| {
         StorageError::adapter(format!("failed to encode terminal outcome event: {error}"))
@@ -1305,7 +1144,7 @@ fn validate_receipt(
         || payload.execution_job.event_id != format!("execution-job:{}", payload.job_id.0)
         || payload.execution_job.stream_id != delivery_stream_id(&payload.delivery_id)
         || validate_durable_job_ref(&payload.execution_job).is_err()
-        || payload.stage_run_id.0.is_empty()
+        || payload.work_run_id.0.is_empty()
         || payload.product_session_id.0.is_empty()
         || !receipt_shape_is_valid
         || event.projection_cursor.is_some()
@@ -1338,7 +1177,7 @@ fn validate_receipt(
     validate_delivery_stage_runtime_invalidation(
         receipt,
         &payload.delivery_id,
-        &payload.stage_run_id,
+        &payload.work_run_id,
         &payload.product_session_id,
         &message.session_identity,
         payload.revision,

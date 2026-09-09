@@ -979,9 +979,9 @@ pub struct WorkerLaunchGrant {
     /// Product session the launch belongs to.
     #[serde(rename = "productSessionId")]
     pub product_session_id: String,
-    /// Stage run the launch belongs to.
-    #[serde(rename = "stageRunId")]
-    pub stage_run_id: String,
+    /// Work run the launch belongs to; ProductSession Chat launches omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "workRunId")]
+    pub work_run_id: Option<String>,
     /// Worker session to start.
     #[serde(rename = "workerSessionId")]
     pub worker_session_id: String,
@@ -1310,7 +1310,7 @@ mod tests {
                 "occupancyFencingToken": "7",
                 "repositoryBindingId": "rb_01j2",
                 "productSessionId": "ps_01j2",
-                "stageRunId": "stg_01j2",
+                "workRunId": "wrn_01j2",
                 "workerSessionId": "ws_01j2",
                 "workerId": "worker_1",
                 "workerInstanceId": "winst_01j2",
@@ -1319,6 +1319,28 @@ mod tests {
                 "state": "issued",
                 "revision": 1
             }"#,
+        );
+    }
+
+    #[test]
+    fn product_session_launch_grant_omits_work_run() {
+        let grant: WorkerLaunchGrant = serde_json::from_str(
+            r#"{
+                "workerLaunchGrantId":"wlg_01j2","clientNodeId":"node_01j2",
+                "clientInstanceId":"inst_01j2","occupancyLeaseId":"lease_01j2",
+                "occupancyFencingToken":"7","repositoryBindingId":"rb_01j2",
+                "productSessionId":"ps_01j2","workerSessionId":"ws_01j2",
+                "workerId":"worker_1","workerInstanceId":"winst_01j2",
+                "credentialDigest":"sha256:dd44","expiresAt":"2026-01-02T12:10:00.000Z",
+                "state":"issued","revision":1
+            }"#,
+        )
+        .expect("ProductSession grant");
+        assert_eq!(grant.work_run_id, None);
+        assert!(
+            !serde_json::to_string(&grant)
+                .expect("encoded grant")
+                .contains("workRunId")
         );
     }
 

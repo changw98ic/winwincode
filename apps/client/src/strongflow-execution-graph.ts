@@ -17,7 +17,7 @@ import { mountKeyedCollection, type KeyedCollectionView } from './components/key
 export interface StrongFlowExecutionEvidenceLink {
   readonly id: EvidenceId
   readonly type: string
-  readonly stageRunId: string | null
+  readonly workRunId: string | null
   readonly sessionBindingId: string
 }
 
@@ -26,14 +26,14 @@ export function strongFlowExecutionEvidenceLink(
   evidence: {
     readonly id: EvidenceId
     readonly type: string
-    readonly stageRunId: string | null
+    readonly workRunId: string | null
     readonly sessionBindingId: string
   },
 ): StrongFlowExecutionEvidenceLink {
   return Object.freeze({
     id: evidence.id,
     type: evidence.type,
-    stageRunId: evidence.stageRunId,
+    workRunId: evidence.workRunId,
     sessionBindingId: evidence.sessionBindingId,
   })
 }
@@ -78,7 +78,7 @@ type RuntimeActivity = RuntimeSessionProjection['activities'][number]
 type RuntimeAgent = RuntimeSessionProjection['agents'][number]
 
 function sessionKey(session: RuntimeSessionProjection): string {
-  return `${session.productSessionId}:${session.stageRunId ?? 'none'}:${session.sessionBindingId}`
+  return `${session.productSessionId}:${session.workRunId ?? 'none'}:${session.sessionBindingId}`
 }
 
 function setText(node: HTMLElement, text: string): void {
@@ -188,7 +188,7 @@ export function mountStrongFlowActivityTimeline(options: {
   function evidenceIdFor(activity: RuntimeActivity): EvidenceId | null {
     const session = timelineSession
     if (session === null) return null
-    const key = `${String(activity.activityType)}:${session.sessionBindingId}:${session.stageRunId ?? 'none'}`
+    const key = `${String(activity.activityType)}:${session.sessionBindingId}:${session.workRunId ?? 'none'}`
     return evidenceIndex.get(key) ?? null
   }
 
@@ -379,7 +379,7 @@ export function mountStrongFlowActivityTimeline(options: {
       timelineSessionKey = sessionKey(input.session)
       evidenceIndex = new Map()
       for (const record of input.evidence) {
-        const key = `${record.type}:${record.sessionBindingId}:${record.stageRunId ?? 'none'}`
+        const key = `${record.type}:${record.sessionBindingId}:${record.workRunId ?? 'none'}`
         const current = evidenceIndex.get(key)
         if (current === undefined || record.id < current) {
           evidenceIndex.set(key, record.id)
@@ -574,9 +574,9 @@ export function mountStrongFlowExecutionGraph(
     view.section.dataset.readOnly = currentReadOnly ? 'true' : 'false'
     setText(
       view.heading,
-      session.deliveryTaskId === null
+      session.workItemId === null
         ? 'Delivery execution'
-        : `Task ${session.deliveryTaskId}`,
+        : `Task ${session.workItemId}`,
     )
     setText(
       view.metadata,

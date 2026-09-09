@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 use winwincode_domain::{
     CodexThreadId, CredentialReferenceId, DeliveryId, DeliveryTaskId, ExecutionAckSequence,
     ExecutionJobId, ExecutionMessageId, FencingToken, LeaseId, OrganizationId, ProductSessionId,
-    ProjectId, PublicationId, RepositoryId, RequestId, ServiceAccountId, Sha256Digest, StageRunId,
-    SystemActorId, UserId, WorkerId, WorkerInstanceId, WorkerSessionId, WorkspaceId,
+    ProjectId, PublicationId, RepositoryId, RequestId, ServiceAccountId, Sha256Digest,
+    SystemActorId, UserId, WorkRunId, WorkerId, WorkerInstanceId, WorkerSessionId, WorkspaceId,
 };
 
 use crate::store::AuditError;
@@ -732,7 +732,7 @@ pub struct AuditExecutionIdentity {
     product_session_id: ProductSessionId,
     worker_session_id: WorkerSessionId,
     codex_thread_id: CodexThreadId,
-    stage_run_id: StageRunId,
+    work_run_id: WorkRunId,
     execution_job_id: ExecutionJobId,
     delivery_id: DeliveryId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -765,7 +765,7 @@ impl AuditExecutionIdentity {
         product_session_id: ProductSessionId,
         worker_session_id: WorkerSessionId,
         codex_thread_id: CodexThreadId,
-        stage_run_id: StageRunId,
+        work_run_id: WorkRunId,
         execution_job_id: ExecutionJobId,
         delivery_id: DeliveryId,
         delivery_task_id: Option<DeliveryTaskId>,
@@ -780,7 +780,7 @@ impl AuditExecutionIdentity {
             product_session_id,
             worker_session_id,
             codex_thread_id,
-            stage_run_id,
+            work_run_id,
             execution_job_id,
             delivery_id,
             delivery_task_id,
@@ -808,7 +808,7 @@ impl AuditExecutionIdentity {
         product_session_id: ProductSessionId,
         worker_session_id: WorkerSessionId,
         codex_thread_id: CodexThreadId,
-        stage_run_id: StageRunId,
+        work_run_id: WorkRunId,
         execution_job_id: ExecutionJobId,
         delivery_id: DeliveryId,
         delivery_task_id: Option<DeliveryTaskId>,
@@ -823,7 +823,7 @@ impl AuditExecutionIdentity {
             product_session_id,
             worker_session_id,
             codex_thread_id,
-            stage_run_id,
+            work_run_id,
             execution_job_id,
             delivery_id,
             delivery_task_id,
@@ -855,8 +855,8 @@ impl AuditExecutionIdentity {
     }
 
     #[must_use]
-    pub const fn stage_run_id(&self) -> &StageRunId {
-        &self.stage_run_id
+    pub const fn work_run_id(&self) -> &WorkRunId {
+        &self.work_run_id
     }
 
     #[must_use]
@@ -914,7 +914,7 @@ impl AuditExecutionIdentity {
             (&self.product_session_id.0, "psn", "ProductSession"),
             (&self.worker_session_id.0, "wsn", "WorkerSession"),
             (&self.codex_thread_id.0, "cdx", "CodexThread"),
-            (&self.stage_run_id.0, "run", "StageRun"),
+            (&self.work_run_id.0, "wrn", "WorkRun"),
             (&self.execution_job_id.0, "job", "ExecutionJob"),
             (&self.delivery_id.0, "dlv", "Delivery"),
             (&self.worker_id.0, "wrk", "Worker"),
@@ -974,7 +974,7 @@ struct AuditExecutionIdentityWire {
     product_session_id: ProductSessionId,
     worker_session_id: WorkerSessionId,
     codex_thread_id: CodexThreadId,
-    stage_run_id: StageRunId,
+    work_run_id: WorkRunId,
     execution_job_id: ExecutionJobId,
     delivery_id: DeliveryId,
     #[serde(default)]
@@ -997,7 +997,7 @@ impl<'de> Deserialize<'de> for AuditExecutionIdentity {
             product_session_id,
             worker_session_id,
             codex_thread_id,
-            stage_run_id,
+            work_run_id,
             execution_job_id,
             delivery_id,
             delivery_task_id,
@@ -1014,7 +1014,7 @@ impl<'de> Deserialize<'de> for AuditExecutionIdentity {
                 product_session_id,
                 worker_session_id,
                 codex_thread_id,
-                stage_run_id,
+                work_run_id,
                 execution_job_id,
                 delivery_id,
                 delivery_task_id,
@@ -1029,7 +1029,7 @@ impl<'de> Deserialize<'de> for AuditExecutionIdentity {
                 product_session_id,
                 worker_session_id,
                 codex_thread_id,
-                stage_run_id,
+                work_run_id,
                 execution_job_id,
                 delivery_id,
                 delivery_task_id,

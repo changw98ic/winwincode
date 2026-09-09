@@ -3,6 +3,8 @@ import { mountStrongFlowPage } from '/module/strongflow-page.js'
 const root = document.querySelector('[data-winwincode-client-root]')
 const deliveryId = 'dlv_00000000000000000000000001'
 const stageRunId = 'run_00000000000000000000000001'
+const workRunId = 'wrn_00000000000000000000000001'
+const workItemId = 'wit_00000000000000000000000001'
 const candidateRef = 'refs/winwincode/candidate/browser-layout'
 
 function diagram(kind) {
@@ -39,7 +41,13 @@ const projection = {
       goal: 'Keep the complete review workflow reachable at every supported width.',
     },
     tasks: [{ id: 'task:browser', title: 'Verify responsive layout', status: 'active' }],
-    stages: [{ id: stageRunId, stage: 'executing', role: 'implementer', status: 'running' }],
+    stages: [{
+      id: stageRunId,
+      stage: 'executing',
+      role: 'implementer',
+      status: 'running',
+      sessionBinding: { workRunId },
+    }],
     attention: [{ id: 'attention:browser', title: 'Review the responsive proof', status: 'open' }],
   },
   solutionReview: {
@@ -50,13 +58,13 @@ const projection = {
   diagramExecution: null,
   stage: { id: stageRunId },
   runtime: {
-    stageRunId,
+    workRunId,
     sessions: [{
       productSessionId: 'psn_00000000000000000000000001',
-      stageRunId,
+      workRunId,
+      workItemId,
       sessionBindingId: 'bind:1',
       codexThreadId: 'cdx_t0000000000000000000000001',
-      deliveryTaskId: 'task:browser',
       attempt: 1,
       asOfSequence: 1,
       agents: [{
@@ -109,6 +117,53 @@ const projection = {
     source: 'control-plane-snapshot',
     updatedAt: '2026-09-02T08:00:00.000Z',
     revisions: { delivery: 4, deliverySpec: 3, runtime: 8, publication: 1 },
+    readCursor: {},
+  },
+  workRunAggregate: {
+    schemaVersion: 'winwincode/v1',
+    contract: {
+      schemaVersion: 'winwincode/v1',
+      id: 'wct_00000000000000000000000001',
+      revision: 1,
+      scope: [],
+      objective: 'Keep review workbench reachable across supported widths.',
+      constraints: [],
+      protectedScope: [],
+      requiredHumanAuthority: 'none',
+      criteria: [],
+      createdAt: '2026-09-02T08:00:00.000Z',
+    },
+    items: [{
+      schemaVersion: 'winwincode/v1',
+      id: workItemId,
+      workContractId: 'wct_00000000000000000000000001',
+      workContractRevision: 1,
+      title: 'Verify responsive layout',
+      goal: 'Keep the complete review workflow reachable at every supported width.',
+      criterionIds: [],
+      dependsOn: [],
+      revision: 1,
+      state: 'in_progress',
+    }],
+    runs: [{
+      schemaVersion: 'winwincode/v1',
+      id: workRunId,
+      workContractId: 'wct_00000000000000000000000001',
+      contractRevision: 1,
+      workItemId,
+      workItemRevision: 1,
+      revision: 1,
+      state: 'running',
+      attempt: 1,
+      executionJobId: 'job_00000000000000000000000001',
+      workerId: 'wrk_00000000000000000000000001',
+      workerInstanceId: 'wki_00000000000000000000000001',
+      workerSessionId: 'wsn_00000000000000000000000001',
+      leaseId: 'lse_00000000000000000000000001',
+      fencingToken: '1',
+      productSessionId: 'psn_00000000000000000000000001',
+      codexThreadId: null,
+    }],
     readCursor: {},
   },
 }
@@ -182,7 +237,7 @@ const deliveryList = {
       status: 'executing',
       updatedAt: '2026-09-02T08:12:30.000Z',
       openAttentionCount: 0,
-      activeStageRunId: null,
+      activeWorkRunId: null,
       ownership: projection.delivery.ownership,
       taskCounts: {
         total: 0,

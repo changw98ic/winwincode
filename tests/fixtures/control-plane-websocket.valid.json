@@ -446,7 +446,7 @@
               "productSessionId": "psn_01J00000000000000000000000",
               "workerSessionId": "wsn_01J00000000000000000000000",
               "codexThreadId": "cdx_01J00000000000000000000000",
-              "stageRunId": "run_01J00000000000000000000000"
+              "workRunId": "wrn_01J00000000000000000000000"
             }
           },
           "authorizationEpoch": 7,
@@ -454,7 +454,7 @@
             "type": "runtime-projection.invalidated.v1",
             "productSessionId": "psn_01J00000000000000000000000",
             "deliveryId": "dlv_01J00000000000000000000000",
-            "stageRunId": "run_01J00000000000000000000000",
+            "workRunId": "wrn_01J00000000000000000000000",
             "projectionRevision": 11,
             "lastProjectionSequence": 42,
             "reloadQueries": [
@@ -466,7 +466,7 @@
               "productSessionId": "psn_01J00000000000000000000000",
               "workerSessionId": "wsn_01J00000000000000000000000",
               "codexThreadId": "cdx_01J00000000000000000000000",
-              "stageRunId": "run_01J00000000000000000000000"
+              "workRunId": "wrn_01J00000000000000000000000"
             }
           }
         },

@@ -1,22 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type {
-  ControlPlaneCandidateApplyReceipt,
   ControlPlaneCandidateApplyResult,
   ControlPlaneCandidateApplyStrategy,
-  ControlPlaneCandidateSummary,
   ControlPlaneDeviceSummary,
   ControlPlaneRunIdentityPort,
-  ControlPlaneRunWorkerSession,
   ControlPlaneRunWorkerSessionState,
   ControlPlaneTaskAnchor,
 } from './community-control-plane-client.js'
+import type { WorkRun } from './generated/contracts.js'
 import {
-  candidateDisplayState,
-  candidateDisplayStateText,
-  candidateDisplayStateTone,
-  candidateResultText,
-  candidateResultTone,
   shortCommitText,
   type LocalCandidateTone,
 } from './local-candidate-view-model.js'
@@ -150,44 +143,47 @@ function occupancyFacts(
   })
 }
 
-function applyFacts(
-  history: readonly ControlPlaneCandidateApplyReceipt[],
-): TaskRunApplyFacts | null {
-  const latest = history[history.length - 1]
-  if (latest === undefined) return null
-  return Object.freeze({
-    result: latest.result,
-    resultText: candidateResultText(latest.result),
-    tone: candidateResultTone(latest.result),
-    strategy: latest.strategy,
-    targetBranch: latest.targetBranch,
-    resultingCommit: latest.resultingCommit,
-    recordedAt: latest.createdAt,
-  })
+function workRunSessionState(state: WorkRun['state']): ControlPlaneRunWorkerSessionState {
+  switch (state) {
+    case 'queued': return 'reserving'
+    case 'leased': return 'launching'
+    case 'running':
+    case 'candidate_ready': return 'running'
+    case 'settled': return 'stopped'
+    case 'failed': return 'failed'
+    case 'cancelled': return 'stopped'
+    default: throw new Error(`Unknown WorkRun state: ${String(state)}`)
+  }
+}
+
+function isCanonicalWorkRun(value: unknown): value is WorkRun {
+  if (value === null || typeof value !== 'object') return false
+  const run = value as Partial<WorkRun>
+  return run.schemaVersion === 'winwincode/v1'
+    && typeof run.id === 'string' && run.id.startsWith('wrn_')
+    && typeof run.workItemId === 'string' && run.workItemId.startsWith('wit_')
+    && typeof run.executionJobId === 'string' && run.executionJobId.startsWith('job_')
+    && typeof run.workerSessionId === 'string' && run.workerSessionId.startsWith('wsn_')
+    && typeof run.leaseId === 'string' && run.leaseId.startsWith('lse_')
+    && typeof run.fencingToken === 'string' && run.fencingToken !== '0'
+    && typeof run.attempt === 'number' && run.attempt > 0
 }
 
 function identityFacts(projection: {
-  readonly workerSessions: readonly ControlPlaneRunWorkerSession[]
-  readonly candidate: ControlPlaneCandidateSummary | null
+  readonly workRun: WorkRun
+  readonly candidate: import('./generated/contracts.js').Candidate | null
 }): TaskRunIdentityFacts {
-  const candidate = projection.candidate
+  const sessionState = workRunSessionState(projection.workRun.state)
   return Object.freeze({
-    workerSessions: Object.freeze(projection.workerSessions.map(session => Object.freeze({
-      workerSessionId: session.workerSessionId,
-      state: session.state,
-      stateText: runWorkerSessionStateText(session.state),
-      tone: runWorkerSessionStateTone(session.state),
-      startedAt: session.startedAt,
-    }))),
-    candidate: candidate === null
-      ? null
-      : Object.freeze({
-          candidateRef: candidate.candidateRef,
-          stateText: candidateDisplayStateText(candidateDisplayState(candidate)),
-          tone: candidateDisplayStateTone(candidateDisplayState(candidate)),
-          branchName: candidate.branchName,
-        }),
-    apply: candidate === null ? null : applyFacts(candidate.history),
+    workerSessions: Object.freeze([Object.freeze({
+      workerSessionId: projection.workRun.workerSessionId,
+      state: sessionState,
+      stateText: runWorkerSessionStateText(sessionState),
+      tone: runWorkerSessionStateTone(sessionState),
+      startedAt: null,
+    })]),
+    candidate: null,
+    apply: null,
   })
 }
 
@@ -290,6 +286,7 @@ export function createTaskRunViewModel(options: {
     try {
       const projection = await options.identity.read(options.anchor)
       if (closed || epoch !== identityEpoch) return
+      if (!isCanonicalWorkRun(projection.workRun)) throw new Error('WorkRun projection is not canonical')
       identity = identityFacts(projection)
       identityStatus = 'ready'
     } catch {

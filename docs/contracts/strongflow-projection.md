@@ -141,9 +141,9 @@ Web 只使用生成的 HTTP 和 WebSocket 客户端。页面代码可以负责�
   时间、决定和有界意见，其中只有 `changes_requested` 必须提供非空 `requestedChanges`。
   这些字段来自已校验的 typed decision，不公开原始 Attention context 或 resolution。
 - `taskProposals` 是非空有序列表，并纳入 `reviewSetSha256`。只有 `reviewStatus=approved` 时，
-  `delivery.approve_task_breakdown` 才能按原顺序逐字段提升这些任务；HTTP 调用方只提交
-  `deliveryId + reviewSetSha256`，不能另交一份 tasks。Planner 不能在 proposal 中指定 owner；
-  提升后的 owner 为 `null`、初始状态为 `pending`，后续只能通过已认证的 assignment command 修改。
+  canonical WorkItem create/dispatch 根据已验证的 WorkContract 与 acceptance criterion 建立任务；
+  调用方不能伪造任务身份或替换 reviewed contract。Planner proposal 不直接成为执行任务，
+  后续责任变更只能通过已认证的 assignment command 修改。
 - `runtime.projection.get` 返回按 SessionBinding 组织的 Plan、Agent Graph、Activity、Usage、
   Recovery 和 Diff 数量摘要。
 - `runtime-projection.invalidated.v1` 只通知页面重新读取 HTTP 快照。delivery-stage 分支执行

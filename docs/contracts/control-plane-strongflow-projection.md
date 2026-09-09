@@ -5,6 +5,30 @@
 当前状态是 implemented/enforced：阶段 2.5.6 已实现 Control Plane 组合查询、共享读取截面、
 生成 DTO 映射和持久事件 cursor；生产 HTTP/WebSocket adapter 仍由后续阶段接线。
 
+## WorkRun 页面读取
+
+页面先读取 `delivery.get`，再以返回的 `readCursor` 请求 `workrun.get`，
+最后读取所选 WorkRun 的 `runtime.projection.get`。三个请求必须使用相同的
+`page.limit`；页大小属于读取凭据的内容，改变它会导致凭据校验失败。
+
+`workrun.get.parameters` 始终包含 `deliveryId`、`workItemId` 和 `atCursor`：
+
+- `workItemId: null, workRunId: null` 读取 Delivery 的合同、任务和执行集合，
+  用于首次打开页面，不要求旧阶段记录或任务列表提供执行编号。
+- `workItemId: null, workRunId: "wrn_…"` 打开集合中的指定执行。
+- 指定 `workItemId: "wit_…"` 时，服务还会检查该任务存在，以及指定执行归属该任务。
+- 缺少必填字段、旧执行编号、其他 Delivery 的执行或任务均被拒绝。
+
+当前执行身份只取自 WorkRun。历史 StageRun 不选择当前执行、不提供租约身份，
+也不决定候选结果何时可以请求判定。Worker 已接单但尚未接入线程时，
+WorkRun 保留完整的接单身份，运行事件列表允许为空。
+非空运行记录必须逐项匹配 WorkRun 的任务、执行任务号、尝试次数、会话、线程、
+租约和围栏编号。历史阅读也使用相同检查。
+
+对应验证：`strongflow_projection` 中的无阶段启动与外来编号测试，
+以及 `tests/strongflow-view-model.test.mjs` 中的空事件读取、身份错配、
+过期读取重试和独立任务判定测试。
+
 ## 一句话边界
 
 Delivery 模块先生成内部投影，Control Plane 再把它与可信运行台账、可信发布事实组合，并且

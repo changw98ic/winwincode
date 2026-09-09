@@ -330,7 +330,7 @@ fn active_job(repository_id: &RepositoryId, suffix: &str, attempt: i64) -> Activ
                 kind: ProductSessionExecutionScopeKind::ProductSession,
                 product_session_id: product_session_id.clone(),
             }),
-            stage_input: None,
+            work_input: None,
             workspace: ExecutionWorkspace {
                 checkout_revision: "HEAD".to_owned(),
                 repository_id: repository_id.clone(),
@@ -342,7 +342,7 @@ fn active_job(repository_id: &RepositoryId, suffix: &str, attempt: i64) -> Activ
         session_identity: SessionIdentity {
             codex_thread_id: codex_thread_id.clone(),
             product_session_id,
-            stage_run_id: None,
+            work_run_id: None,
             worker_session_id,
         },
         codex_thread_id,

@@ -31,7 +31,7 @@ use winwincode_delivery::{
         verdict::test_support::{VerdictFixtureOutcome, verdict_fixture},
     },
     domain::{
-        DELIVERY_SCHEMA_VERSION, Delivery, RepositoryKind, RepositoryRef, SessionBinding, StageRun,
+        DELIVERY_SCHEMA_VERSION, Delivery, RepositoryKind, RepositoryRef, SessionBinding,
         candidate::freeze_delivery_candidate_from_source,
     },
     store::{
@@ -63,6 +63,7 @@ const CANDIDATE_MEDIA_TYPE: &str = "application/vnd.winwincode.git-candidate+jso
 #[derive(Clone, Copy)]
 enum RuntimeFixture {
     Valid,
+    ProductFailure,
     StaleCandidate,
     NonJsonEvidence,
     LaterWriterFailed,
@@ -110,7 +111,7 @@ struct SeedCatalogEntry<'entry> {
 struct SeedTerminalAuthority<'authority> {
     schema_version: u8,
     delivery_id: &'authority DeliveryId,
-    stage_run_id: &'authority winwincode_domain::StageRunId,
+    work_run_id: &'authority winwincode_domain::WorkRunId,
     job_id: &'authority winwincode_domain::ExecutionJobId,
     attempt: u64,
     lease_id: &'authority winwincode_domain::LeaseId,
@@ -140,7 +141,7 @@ struct SeedRuntimeLedger<'ledger> {
     schema_version: u8,
     delivery_id: Option<&'ledger DeliveryId>,
     delivery_task_id: Option<&'ledger winwincode_domain::DeliveryTaskId>,
-    stage_run_id: Option<&'ledger winwincode_domain::StageRunId>,
+    work_run_id: Option<&'ledger winwincode_domain::WorkRunId>,
     product_session_id: &'ledger ProductSessionId,
     execution_job_id: &'ledger winwincode_domain::ExecutionJobId,
     worker_session_id: &'ledger winwincode_domain::WorkerSessionId,
@@ -168,6 +169,7 @@ struct SeededVerdict {
     scope: RepositoryScope,
     delivery: Delivery,
     candidate_digest: Sha256Digest,
+    candidate: serde_json::Value,
 }
 
 #[test]
@@ -233,6 +235,160 @@ fn production_adapter_joins_durable_facts_replays_and_rejects_stale_sources() {
     }
 }
 
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the production rework test keeps rejection, commit, and restart replay together"
+)]
+fn production_rework_dispatch_uses_failed_candidate_and_replays_after_restart() {
+    let seeded = seed_verdict("precise-rework", RuntimeFixture::ProductFailure);
+    let mut host = start(&seeded);
+    let verdict = verdict_command(&seeded, 930);
+    host.delivery_submit_verdict(&verdict)
+        .expect("real failing verifier results");
+    let read = |host: &ControlPlane| {
+        Delivery::decode_json(
+            &host
+                .load_state(&format!("delivery:{}", seeded.delivery.id().0))
+                .unwrap()
+                .unwrap()
+                .payload,
+        )
+        .unwrap()
+    };
+    let failed = read(&host);
+    assert_eq!(
+        failed.snapshot().verdict.as_ref().unwrap().status,
+        winwincode_delivery::domain::DeliveryVerdictStatus::Fail
+    );
+    let mut evidence = failed
+        .snapshot()
+        .verdict
+        .as_ref()
+        .unwrap()
+        .criteria
+        .iter()
+        .filter(|result| result.verdict == winwincode_delivery::domain::CriterionVerdict::Fail)
+        .flat_map(|result| result.evidence_refs.clone())
+        .collect::<Vec<_>>();
+    evidence.sort_by(|a, b| a.0.cmp(&b.0));
+    evidence.dedup();
+    for (offset, attention) in failed
+        .snapshot()
+        .attention_items
+        .iter()
+        .filter(|item| item.status == winwincode_delivery::domain::AttentionItemStatus::Open)
+        .enumerate()
+    {
+        let current = read(&host);
+        let command = serde_json::from_value(json!({
+            "schemaVersion":SchemaVersion::WinwincodeV1, "requestId":canonical_id("req", 940+offset as u64),
+            "command":"delivery.resolve_attention", "scope":seeded.scope, "actor":verdict.actor,
+            "expectedRevision":current.revision(), "payload":{
+                "deliveryId":current.id(), "attentionItemId":attention.id,
+                "decision":"resolve", "resolution":"Remediate the exact failed candidate", "remediation":null
+            }
+        })).unwrap();
+        host.delivery_resolve_attention(&command)
+            .expect("resolve actual failure Attention");
+    }
+    let queued = || {
+        rusqlite::Connection::open(seeded.data.join("control-plane.sqlite3"))
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM scheduler_execution_jobs", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap()
+    };
+    assert_eq!(queued(), 0);
+    let source = read(&host);
+    let command: winwincode_api::generated::DeliveryAdvanceCommand = serde_json::from_value(json!({
+        "schemaVersion":SchemaVersion::WinwincodeV1, "requestId":canonical_id("req", 960),
+        "command":"delivery.advance", "scope":seeded.scope, "actor":verdict.actor,
+        "expectedRevision":source.revision(), "payload":{
+            "deliveryId":source.id(), "dispatchProfile":"remediator", "rework":{
+                "candidateRef":seeded.candidate["candidateRef"], "diffSha256":seeded.candidate["diffSha256"],
+                "targets":[{"workItemId":source.snapshot().session_bindings[0].work_item_id,
+                    "filePath":seeded.candidate["changedHunks"][0]["filePath"],
+                    "sourceHunkSha256":seeded.candidate["changedHunks"][0]["hunkSha256"], "evidenceRefIds":evidence}]
+            }
+        }
+    })).unwrap();
+    for field in [
+        "filePath",
+        "sourceHunkSha256",
+        "workItemId",
+        "evidenceRefIds",
+    ] {
+        let mut bad = command.clone();
+        let target = &mut bad.payload.rework.as_mut().unwrap().targets[0];
+        match field {
+            "filePath" => target.file_path = "src/foreign.rs".into(),
+            "sourceHunkSha256" => target.source_hunk_sha256 = "f".repeat(64),
+            "evidenceRefIds" => {
+                target.evidence_ref_ids =
+                    vec![winwincode_domain::EvidenceId(canonical_id("evd", 999))];
+            }
+            "workItemId" => {
+                target.work_item_id = winwincode_domain::WorkItemId(canonical_id("wit", 999));
+            }
+            _ => unreachable!(),
+        }
+        host.delivery_advance(&bad)
+            .expect_err("foreign rework scope must be rejected");
+        assert_eq!(read(&host), source);
+        assert_eq!(queued(), 0, "rejected scope must not enqueue work");
+    }
+    let accepted = host
+        .delivery_advance(&command)
+        .expect("actual production rework dispatch");
+    assert_eq!(queued(), 1);
+    let job_bytes = rusqlite::Connection::open(seeded.data.join("control-plane.sqlite3"))
+        .unwrap()
+        .query_row(
+            "SELECT dispatch_payload FROM scheduler_execution_jobs",
+            [],
+            |row| row.get::<_, Vec<u8>>(0),
+        )
+        .unwrap();
+    let job: winwincode_execution_port::generated::ExecutionJob =
+        serde_json::from_slice(&job_bytes).unwrap();
+    assert_eq!(job.execution_profile, "remediator");
+    assert_eq!(
+        job.workspace.checkout_revision,
+        seeded.candidate["candidateCommitId"].as_str().unwrap()
+    );
+    let winwincode_execution_port::generated::ExecutionScope::WorkRunExecutionScope(scope) =
+        job.scope
+    else {
+        unreachable!()
+    };
+    let authorization = scope.rework_authorization.unwrap();
+    assert_eq!(
+        authorization.candidate_ref,
+        command.payload.rework.as_ref().unwrap().candidate_ref
+    );
+    assert_eq!(authorization.targets[0].work_item_id, scope.work_item_id);
+    let committed = read(&host);
+    assert!(committed.snapshot().evidence.is_empty());
+    assert!(committed.snapshot().verdict.is_none());
+    assert_eq!(
+        committed.snapshot().stage_runs,
+        source.snapshot().stage_runs
+    );
+    host.shutdown().unwrap();
+    let mut restarted = start(&seeded);
+    assert_eq!(
+        restarted
+            .delivery_advance(&command)
+            .expect("durable replay"),
+        accepted
+    );
+    assert_eq!(queued(), 1, "replay must not enqueue a second job");
+    restarted.shutdown().unwrap();
+    cleanup(seeded);
+}
+
 fn seed_verdict(label: &str, runtime_fixture: RuntimeFixture) -> SeededVerdict {
     let root = unique_root(label);
     let data = root.join("data");
@@ -243,7 +399,7 @@ fn seed_verdict(label: &str, runtime_fixture: RuntimeFixture) -> SeededVerdict {
     let delivery = fixture_delivery(&repository, base_commit, runtime_fixture);
     fs::create_dir_all(&data).expect("data directory");
     seed_delivery(&data, &scope, &delivery);
-    let candidate_digest = seed_verdict_sources(
+    let (candidate_digest, candidate) = seed_verdict_sources(
         &data,
         &repository,
         &scope,
@@ -258,6 +414,7 @@ fn seed_verdict(label: &str, runtime_fixture: RuntimeFixture) -> SeededVerdict {
         scope,
         delivery,
         candidate_digest,
+        candidate,
     }
 }
 
@@ -286,11 +443,13 @@ fn fixture_delivery(
         RuntimeFixture::AmbiguousWriter => append_ambiguous_writer(&mut snapshot),
         RuntimeFixture::AmbiguousVerification => append_ambiguous_verifier(&mut snapshot),
         RuntimeFixture::Valid
+        | RuntimeFixture::ProductFailure
         | RuntimeFixture::StaleCandidate
         | RuntimeFixture::NonJsonEvidence => {}
     }
     for (index, binding) in snapshot.session_bindings.iter_mut().enumerate() {
         let seed = format!("production-{index}");
+        let previous_work_run_id = binding.work_run_id.clone();
         binding.execution_job_id =
             winwincode_domain::ExecutionJobId(canonical_id("job", 1_000 + index as u64));
         binding.worker_session_id = Some(winwincode_domain::WorkerSessionId(canonical_id(
@@ -317,6 +476,22 @@ fn fixture_delivery(
         binding.fencing_token = Some(winwincode_domain::FencingToken(
             (1_000 + index as u64).to_string(),
         ));
+        let run = snapshot
+            .work_run_aggregate
+            .runs
+            .iter_mut()
+            .find(|run| run.id == previous_work_run_id)
+            .expect("canonical fixture WorkRun");
+        run.id = binding.work_run_id.clone();
+        run.execution_job_id = binding.execution_job_id.clone();
+        run.product_session_id = Some(binding.product_session_id.clone());
+        run.worker_session_id = binding.worker_session_id.clone().expect("WorkerSession");
+        run.codex_thread_id.clone_from(&binding.codex_thread_id);
+        run.worker_id = binding.worker_id.clone().expect("Worker");
+        run.worker_instance_id = binding.worker_instance_id.clone().expect("Worker instance");
+        run.lease_id = binding.lease_id.clone().expect("lease");
+        run.fencing_token
+            .clone_from(&binding.fencing_token.as_ref().expect("fence").0);
     }
     Delivery::try_from_snapshot(snapshot).expect("production verdict Delivery")
 }
@@ -328,7 +503,7 @@ fn seed_verdict_sources(
     delivery: &Delivery,
     candidate_commit: &str,
     runtime_fixture: RuntimeFixture,
-) -> Sha256Digest {
+) -> (Sha256Digest, serde_json::Value) {
     let object_store =
         LocalArtifactObjectStore::open(data.join("artifacts")).expect("local Artifact objects");
     let mut artifacts = ArtifactStore::open(data.join("artifact-catalog"), Box::new(object_store))
@@ -343,10 +518,10 @@ fn seed_verdict_sources(
 
     let writer = delivery
         .snapshot()
-        .stage_runs
+        .session_bindings
         .iter()
-        .find(|run| run.role == "executor")
-        .expect("writer");
+        .find(|binding| binding.execution_profile.as_deref() == Some("executor"))
+        .expect("writer binding");
     let (writer_terminal, writer_source) = seed_terminal_and_artifact(
         &mut storage,
         &mut artifacts,
@@ -371,19 +546,19 @@ fn seed_verdict_sources(
     }
 
     for (index, role) in ["reviewer", "verifier"].into_iter().enumerate() {
-        let run = delivery
+        let binding = delivery
             .snapshot()
-            .stage_runs
+            .session_bindings
             .iter()
-            .find(|run| run.role == role)
-            .expect("verification run");
+            .find(|binding| binding.execution_profile.as_deref() == Some(role))
+            .expect("verification binding");
         seed_terminal_and_artifact(
             &mut storage,
             &mut artifacts,
             &source_resolver,
             &scope_key,
             delivery,
-            run,
+            binding,
             candidate_commit,
             1_200 + index as u64,
         );
@@ -391,7 +566,7 @@ fn seed_verdict_sources(
             &mut storage,
             &scope_key,
             delivery,
-            run,
+            binding,
             &current_candidate_ref,
             role,
             runtime_fixture,
@@ -400,7 +575,21 @@ fn seed_verdict_sources(
     }
     Box::new(storage).close().expect("storage close");
     artifacts.close().expect("Artifact close");
-    writer_candidate.map_or_else(
+    let mut candidate = writer_candidate
+        .as_ref()
+        .map_or(serde_json::Value::Null, |value| {
+            serde_json::to_value(value).unwrap()
+        });
+    if !candidate.is_null() {
+        candidate["changedHunks"] = json!(
+            writer_source
+                .changed_hunks()
+                .iter()
+                .map(|hunk| json!({"filePath":hunk.file_path(), "hunkSha256":hunk.hunk_sha256()}))
+                .collect::<Vec<_>>()
+        );
+    }
+    let digest = writer_candidate.map_or_else(
         || Sha256Digest(format!("sha256:{}", "f".repeat(64))),
         |candidate| {
             Sha256Digest(
@@ -411,102 +600,111 @@ fn seed_verdict_sources(
                     .to_owned(),
             )
         },
-    )
+    );
+    (digest, candidate)
 }
 
 fn append_failed_writer(snapshot: &mut winwincode_delivery::domain::DeliverySnapshot) {
-    let mut run = snapshot
-        .stage_runs
-        .iter()
-        .find(|run| run.role == "executor")
-        .expect("executor")
-        .clone();
-    let source_run_id = run.id.clone();
-    run.id = winwincode_domain::StageRunId(canonical_id("run", 8_001));
-    run.stage = winwincode_delivery::domain::DeliveryStage::Reworking;
-    run.role = "remediator".into();
-    run.status = winwincode_delivery::domain::StageRunStatus::Failed;
-    run.attempt = run.attempt.saturating_add(1);
-    run.started_at_millis = snapshot
-        .stage_runs
-        .iter()
-        .map(|current| current.started_at_millis)
-        .max()
-        .expect("latest run")
-        .saturating_add(10);
-    run.finished_at_millis = Some(run.started_at_millis.saturating_add(1));
-    let mut binding = snapshot
+    let source_index = snapshot
         .session_bindings
         .iter()
-        .find(|binding| binding.stage_run_id == source_run_id)
-        .expect("executor binding")
-        .clone();
+        .position(|binding| binding.execution_profile.as_deref() == Some("executor"))
+        .expect("executor binding");
+    let mut binding = snapshot.session_bindings[source_index].clone();
     binding.id = winwincode_delivery::domain::SessionBindingId(canonical_id("sbn", 8_001));
-    binding.stage_run_id = run.id.clone();
+    binding.work_run_id = winwincode_domain::WorkRunId(canonical_id("wrn", 8_001));
     binding.product_session_id = ProductSessionId(canonical_id("psn", 8_001));
     binding.execution_job_id = winwincode_domain::ExecutionJobId(canonical_id("job", 8_001));
     binding.worker_session_id = Some(winwincode_domain::WorkerSessionId(canonical_id(
         "wsn", 8_001,
     )));
     binding.codex_thread_id = Some(winwincode_domain::CodexThreadId(canonical_id("cdx", 8_001)));
-    binding.attempt = run.attempt;
-    binding.bound_at_millis = run.started_at_millis.saturating_add(1);
+    binding.attempt = 1;
+    binding.bound_at_millis = snapshot
+        .session_bindings
+        .iter()
+        .map(|current| current.bound_at_millis)
+        .max()
+        .expect("latest binding")
+        .saturating_add(10);
     snapshot.updated_at_millis = binding.bound_at_millis;
-    snapshot.stage_runs.push(run);
+    let source_binding = &snapshot.session_bindings[source_index];
+    let mut accepted = snapshot
+        .work_run_aggregate
+        .runs
+        .iter()
+        .find(|accepted| accepted.id == source_binding.work_run_id)
+        .expect("source canonical WorkRun")
+        .clone();
+    accepted.id = binding.work_run_id.clone();
+    accepted.product_session_id = Some(binding.product_session_id.clone());
+    accepted.attempt = i64::try_from(binding.attempt).expect("bounded attempt");
+    accepted.state = winwincode_domain::WorkRunState::Failed;
+    binding.execution_profile = Some("remediator".into());
+    snapshot.work_run_aggregate.runs.push(accepted);
     snapshot.session_bindings.push(binding);
 }
 
 fn append_ambiguous_verifier(snapshot: &mut winwincode_delivery::domain::DeliverySnapshot) {
-    let mut run = snapshot
-        .stage_runs
-        .iter()
-        .find(|run| run.role == "verifier")
-        .expect("verifier")
-        .clone();
-    let source_run_id = run.id.clone();
-    run.id = winwincode_domain::StageRunId(canonical_id("run", 8_002));
-    let mut binding = snapshot
+    let source_index = snapshot
         .session_bindings
         .iter()
-        .find(|binding| binding.stage_run_id == source_run_id)
-        .expect("verifier binding")
-        .clone();
+        .position(|binding| binding.execution_profile.as_deref() == Some("verifier"))
+        .expect("verifier binding");
+    let mut binding = snapshot.session_bindings[source_index].clone();
     binding.id = winwincode_delivery::domain::SessionBindingId(canonical_id("sbn", 8_002));
-    binding.stage_run_id = run.id.clone();
+    binding.work_run_id = winwincode_domain::WorkRunId(canonical_id("wrn", 8_002));
     binding.product_session_id = ProductSessionId(canonical_id("psn", 8_002));
     binding.execution_job_id = winwincode_domain::ExecutionJobId(canonical_id("job", 8_002));
     binding.worker_session_id = Some(winwincode_domain::WorkerSessionId(canonical_id(
         "wsn", 8_002,
     )));
     binding.codex_thread_id = Some(winwincode_domain::CodexThreadId(canonical_id("cdx", 8_002)));
-    snapshot.stage_runs.push(run);
+    let source_binding = &snapshot.session_bindings[source_index];
+    let mut accepted = snapshot
+        .work_run_aggregate
+        .runs
+        .iter()
+        .find(|accepted| accepted.id == source_binding.work_run_id)
+        .expect("source canonical WorkRun")
+        .clone();
+    accepted.id = binding.work_run_id.clone();
+    accepted.product_session_id = Some(binding.product_session_id.clone());
+    accepted.attempt = i64::try_from(binding.attempt).expect("bounded attempt");
+    snapshot.work_run_aggregate.runs.push(accepted);
     snapshot.session_bindings.push(binding);
 }
 
 fn append_ambiguous_writer(snapshot: &mut winwincode_delivery::domain::DeliverySnapshot) {
-    let mut run = snapshot
-        .stage_runs
-        .iter()
-        .find(|run| run.role == "executor")
-        .expect("executor")
-        .clone();
-    let source_run_id = run.id.clone();
-    run.id = winwincode_domain::StageRunId(canonical_id("run", 8_003));
-    let mut binding = snapshot
+    let source_index = snapshot
         .session_bindings
         .iter()
-        .find(|binding| binding.stage_run_id == source_run_id)
-        .expect("executor binding")
-        .clone();
+        .position(|binding| binding.execution_profile.as_deref() == Some("executor"))
+        .expect("executor binding");
+    let mut binding = snapshot.session_bindings[source_index].clone();
     binding.id = winwincode_delivery::domain::SessionBindingId(canonical_id("sbn", 8_003));
-    binding.stage_run_id = run.id.clone();
+    binding.work_run_id = winwincode_domain::WorkRunId(canonical_id("wrn", 8_003));
     binding.product_session_id = ProductSessionId(canonical_id("psn", 8_003));
     binding.execution_job_id = winwincode_domain::ExecutionJobId(canonical_id("job", 8_003));
     binding.worker_session_id = Some(winwincode_domain::WorkerSessionId(canonical_id(
         "wsn", 8_003,
     )));
     binding.codex_thread_id = Some(winwincode_domain::CodexThreadId(canonical_id("cdx", 8_003)));
-    snapshot.stage_runs.push(run);
+    let source_binding = &snapshot.session_bindings[source_index];
+    let mut accepted = snapshot
+        .work_run_aggregate
+        .runs
+        .iter()
+        .find(|accepted| accepted.id == source_binding.work_run_id)
+        .expect("source canonical WorkRun")
+        .clone();
+    // Preserve one CandidateReady producer. This fixture targets ambiguous
+    // writer bindings, not an invalid aggregate with two current candidates.
+    accepted.state = winwincode_domain::WorkRunState::Settled;
+    accepted.id = binding.work_run_id.clone();
+    accepted.product_session_id = Some(binding.product_session_id.clone());
+    accepted.attempt = i64::try_from(binding.attempt).expect("bounded attempt");
+    snapshot.work_run_aggregate.runs.push(accepted);
     snapshot.session_bindings.push(binding);
 }
 
@@ -517,21 +715,20 @@ fn seed_terminal_and_artifact(
     resolver: &LocalGitSourceResolver,
     scope: &ReceiptScopeKey,
     delivery: &Delivery,
-    run: &StageRun,
+    binding: &SessionBinding,
     candidate_commit: &str,
     seed: u64,
 ) -> (
     DeliveryTerminalOutcomeFacts,
     winwincode_storage::ValidatedGitSourceArtifact,
 ) {
-    let binding = exact_binding(delivery, run);
     let worker_session = binding.worker_session_id.clone().expect("WorkerSession");
     let codex_thread = binding.codex_thread_id.clone().expect("CodexThread");
     let lease_id = binding.lease_id.clone().expect("lease");
     let fencing_token = binding.fencing_token.clone().expect("fence");
     let worker_id = binding.worker_id.clone().expect("Worker");
     let worker_instance = binding.worker_instance_id.clone().expect("WorkerInstance");
-    let finished_at = run.finished_at_millis.expect("finished run");
+    let finished_at = binding.bound_at_millis.saturating_add(9);
     let SeededCandidateArtifact {
         artifact_id,
         digest,
@@ -561,7 +758,7 @@ fn seed_terminal_and_artifact(
             Instant("2026-08-25T01:00:00.000Z".into()),
         ),
         terminal_worker_outcome(
-            run.id.clone(),
+            binding.work_run_id.clone(),
             binding.execution_job_id.clone(),
             binding.attempt,
             lease_id,
@@ -584,7 +781,7 @@ fn seed_terminal_and_artifact(
     let persisted = SeedTerminalAuthority {
         schema_version: 1,
         delivery_id: delivery.id(),
-        stage_run_id: &run.id,
+        work_run_id: &binding.work_run_id,
         job_id: &binding.execution_job_id,
         attempt: binding.attempt,
         lease_id: binding.lease_id.as_ref().expect("lease"),
@@ -714,16 +911,16 @@ fn seed_runtime(
     storage: &mut SqliteStorage,
     scope: &ReceiptScopeKey,
     delivery: &Delivery,
-    run: &StageRun,
+    binding: &SessionBinding,
     candidate_ref: &str,
     role: &str,
     fixture: RuntimeFixture,
     seed: u64,
 ) {
-    let binding = exact_binding(delivery, run);
     let runtime_candidate = match fixture {
         RuntimeFixture::StaleCandidate => "git-candidate:stale-runtime",
         RuntimeFixture::Valid
+        | RuntimeFixture::ProductFailure
         | RuntimeFixture::NonJsonEvidence
         | RuntimeFixture::LaterWriterFailed
         | RuntimeFixture::AmbiguousWriter
@@ -732,27 +929,29 @@ fn seed_runtime(
     let cited_event = match fixture {
         RuntimeFixture::NonJsonEvidence => format!("event-{role}-binary"),
         RuntimeFixture::Valid
+        | RuntimeFixture::ProductFailure
         | RuntimeFixture::StaleCandidate
         | RuntimeFixture::LaterWriterFailed
         | RuntimeFixture::AmbiguousWriter
         | RuntimeFixture::AmbiguousVerification => format!("event-{role}-source"),
     };
     let events = runtime_events(
-        run,
+        binding.bound_at_millis.saturating_add(9),
         runtime_candidate,
         &delivery.snapshot().spec.id.0,
         delivery.snapshot().spec.revision,
         &delivery.snapshot().spec.acceptance_criteria[0].id.0,
         role,
         &cited_event,
+        matches!(fixture, RuntimeFixture::ProductFailure),
     );
     let stream = runtime_stream_id(scope, &binding.execution_job_id);
     for highest in 1..=events.len() {
         let ledger = SeedRuntimeLedger {
             schema_version: 1,
             delivery_id: Some(delivery.id()),
-            delivery_task_id: run.delivery_task_id.as_ref(),
-            stage_run_id: Some(&run.id),
+            delivery_task_id: None,
+            work_run_id: Some(&binding.work_run_id),
             product_session_id: &binding.product_session_id,
             execution_job_id: &binding.execution_job_id,
             worker_session_id: binding.worker_session_id.as_ref().expect("WorkerSession"),
@@ -775,14 +974,19 @@ fn seed_runtime(
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the runtime fixture inputs mirror one complete verification result"
+)]
 fn runtime_events(
-    run: &StageRun,
+    finished_at_millis: u64,
     candidate_ref: &str,
     delivery_spec_id: &str,
     delivery_spec_revision: u64,
     criterion_id: &str,
     role: &str,
     cited_event: &str,
+    failed: bool,
 ) -> Vec<SeedRuntimeLedgerEvent> {
     let source_id = ExecutionEventId(format!("event-{role}-source"));
     let binary = b"\0verification-binary\xff";
@@ -813,7 +1017,7 @@ fn runtime_events(
                 ExecutionEventCategory::Test
             },
             source_id,
-            encoded_json(&json!({"status": "completed", "exit_code": 0})),
+            encoded_json(&json!({"status": "completed", "exit_code": i32::from(failed)})),
         ),
         (
             ExecutionEventCategory::Activity,
@@ -826,7 +1030,7 @@ fn runtime_events(
                 "findings": [{
                     "finding_id": format!("finding-{role}"),
                     "criterion_id": criterion_id,
-                    "verdict": "pass",
+                    "verdict": if failed { "fail" } else { "pass" },
                     "explanation": format!("{role} accepted the current candidate"),
                     "evidence_sources": [{
                         "type": if role == "reviewer" { "command" } else { "test" },
@@ -841,10 +1045,7 @@ fn runtime_events(
         .enumerate()
         .map(|(index, (category, event_id, payload))| {
             let sequence = index + 1;
-            let occurred_at_millis = run
-                .finished_at_millis
-                .expect("verification finish")
-                .saturating_sub(4 - sequence as u64);
+            let occurred_at_millis = finished_at_millis.saturating_sub(4 - sequence as u64);
             let event = ExecutionEventRecord {
                 category,
                 event_id,
@@ -988,18 +1189,6 @@ fn digest(seed: u64) -> Sha256Digest {
         "sha256:{:x}",
         Sha256::digest(format!("fixture-{seed}"))
     ))
-}
-
-fn exact_binding<'delivery>(
-    delivery: &'delivery Delivery,
-    run: &StageRun,
-) -> &'delivery SessionBinding {
-    delivery
-        .snapshot()
-        .session_bindings
-        .iter()
-        .find(|binding| binding.stage_run_id == run.id)
-        .expect("exact binding")
 }
 
 fn verdict_command(seeded: &SeededVerdict, seed: u64) -> DeliverySubmitVerdictCommand {

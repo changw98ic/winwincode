@@ -497,7 +497,7 @@ export function createStrongFlowDeliveryListViewModel(
           scope,
           command: CommandName.DeliveryAdvance,
           expectedRevision,
-          payload: { deliveryId },
+          payload: { deliveryId, dispatchProfile: 'executor' },
         }, requestOptions)
       } catch (error) {
         if (superseded(ownGeneration)) return

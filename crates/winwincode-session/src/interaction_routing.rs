@@ -11,8 +11,9 @@ use std::fmt;
 
 use winwincode_domain::{
     ApprovalId, AttentionItemId, ExecutionJobId, FencingToken, InputRequestId, Instant, LeaseId,
-    ModelExchangeId, ProductSessionId, RequestId, ServiceAccountId, Sha256Digest, StageRunId,
-    SystemActorId, UserId, WorkerId, WorkerInstanceId, WorkerSessionId,
+    ModelExchangeId, ProductSessionId, RequestId, Revision, ServiceAccountId, Sha256Digest,
+    SystemActorId, UserId, WorkContractId, WorkItemId, WorkRunId, WorkerId, WorkerInstanceId,
+    WorkerSessionId,
 };
 
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
@@ -51,7 +52,11 @@ pub struct RuntimeRouteAuthority {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExecutionRoute {
     pub product_session_id: ProductSessionId,
-    pub stage_run_id: Option<StageRunId>,
+    pub work_contract_id: Option<WorkContractId>,
+    pub work_contract_revision: Option<Revision>,
+    pub work_item_id: Option<WorkItemId>,
+    pub work_item_revision: Option<Revision>,
+    pub work_run_id: Option<WorkRunId>,
     pub execution_job_id: ExecutionJobId,
     pub job_revision: u64,
     pub runtime: Option<RuntimeRouteAuthority>,
@@ -169,7 +174,11 @@ pub struct SessionCancellationRequest {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct JobCancellationRoute {
     pub product_session_id: ProductSessionId,
-    pub stage_run_id: Option<StageRunId>,
+    pub work_contract_id: Option<WorkContractId>,
+    pub work_contract_revision: Option<Revision>,
+    pub work_item_id: Option<WorkItemId>,
+    pub work_item_revision: Option<Revision>,
+    pub work_run_id: Option<WorkRunId>,
     pub execution_job_id: ExecutionJobId,
     pub expected_revision: u64,
 }
@@ -178,7 +187,11 @@ pub struct JobCancellationRoute {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkerCancellationRoute {
     pub product_session_id: ProductSessionId,
-    pub stage_run_id: Option<StageRunId>,
+    pub work_contract_id: Option<WorkContractId>,
+    pub work_contract_revision: Option<Revision>,
+    pub work_item_id: Option<WorkItemId>,
+    pub work_item_revision: Option<Revision>,
+    pub work_run_id: Option<WorkRunId>,
     pub execution_job_id: ExecutionJobId,
     pub runtime: RuntimeRouteAuthority,
     pub expected_revision: u64,
@@ -188,7 +201,11 @@ pub struct WorkerCancellationRoute {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModelStreamCancellationRoute {
     pub product_session_id: ProductSessionId,
-    pub stage_run_id: Option<StageRunId>,
+    pub work_contract_id: Option<WorkContractId>,
+    pub work_contract_revision: Option<Revision>,
+    pub work_item_id: Option<WorkItemId>,
+    pub work_item_revision: Option<Revision>,
+    pub work_run_id: Option<WorkRunId>,
     pub execution_job_id: ExecutionJobId,
     pub runtime: RuntimeRouteAuthority,
     pub model_exchange_id: ModelExchangeId,
@@ -643,7 +660,11 @@ fn interaction_receipt(
 fn cancellation_routes(execution: &ExecutionRoute) -> ExecutionCancellationRoutes {
     let job = JobCancellationRoute {
         product_session_id: execution.product_session_id.clone(),
-        stage_run_id: execution.stage_run_id.clone(),
+        work_contract_id: execution.work_contract_id.clone(),
+        work_contract_revision: execution.work_contract_revision.clone(),
+        work_item_id: execution.work_item_id.clone(),
+        work_item_revision: execution.work_item_revision.clone(),
+        work_run_id: execution.work_run_id.clone(),
         execution_job_id: execution.execution_job_id.clone(),
         expected_revision: execution.job_revision,
     };
@@ -653,7 +674,11 @@ fn cancellation_routes(execution: &ExecutionRoute) -> ExecutionCancellationRoute
         .zip(execution.worker_slot_revision)
         .map(|(runtime, expected_revision)| WorkerCancellationRoute {
             product_session_id: execution.product_session_id.clone(),
-            stage_run_id: execution.stage_run_id.clone(),
+            work_contract_id: execution.work_contract_id.clone(),
+            work_contract_revision: execution.work_contract_revision.clone(),
+            work_item_id: execution.work_item_id.clone(),
+            work_item_revision: execution.work_item_revision.clone(),
+            work_run_id: execution.work_run_id.clone(),
             execution_job_id: execution.execution_job_id.clone(),
             runtime,
             expected_revision,
@@ -665,7 +690,11 @@ fn cancellation_routes(execution: &ExecutionRoute) -> ExecutionCancellationRoute
         .map(
             |(runtime, model_exchange_id)| ModelStreamCancellationRoute {
                 product_session_id: execution.product_session_id.clone(),
-                stage_run_id: execution.stage_run_id.clone(),
+                work_contract_id: execution.work_contract_id.clone(),
+                work_contract_revision: execution.work_contract_revision.clone(),
+                work_item_id: execution.work_item_id.clone(),
+                work_item_revision: execution.work_item_revision.clone(),
+                work_run_id: execution.work_run_id.clone(),
                 execution_job_id: execution.execution_job_id.clone(),
                 runtime,
                 model_exchange_id,
@@ -697,8 +726,37 @@ fn validate_binding(binding: &DecisionRouteBinding) -> Result<(), InteractionRou
 
 fn validate_execution(execution: &ExecutionRoute) -> Result<(), InteractionRoutingError> {
     validate_id(&execution.product_session_id.0, "productSessionId", "psn_")?;
-    if let Some(stage_run_id) = &execution.stage_run_id {
-        validate_id(&stage_run_id.0, "stageRunId", "run_")?;
+    let identity = (
+        &execution.work_contract_id,
+        &execution.work_contract_revision,
+        &execution.work_item_id,
+        &execution.work_item_revision,
+        &execution.work_run_id,
+    );
+    if identity.0.is_some() != identity.1.is_some()
+        || identity.0.is_some() != identity.2.is_some()
+        || identity.0.is_some() != identity.3.is_some()
+        || identity.0.is_some() != identity.4.is_some()
+    {
+        return Err(InteractionRoutingError::InvalidField("workRunIdentity"));
+    }
+    if let Some(work_contract_id) = &execution.work_contract_id {
+        validate_id(&work_contract_id.0, "workContractId", "wct_")?;
+        validate_domain_revision(
+            execution.work_contract_revision.as_ref().expect("checked"),
+            "workContractRevision",
+        )?;
+        validate_id(
+            &execution.work_item_id.as_ref().expect("checked").0,
+            "workItemId",
+            "wit_",
+        )?;
+        validate_domain_revision(
+            execution.work_item_revision.as_ref().expect("checked"),
+            "workItemRevision",
+        )?;
+        let work_run_id = execution.work_run_id.as_ref().expect("checked");
+        validate_id(&work_run_id.0, "workRunId", "wrn_")?;
     }
     validate_id(&execution.execution_job_id.0, "executionJobId", "job_")?;
     validate_revision(execution.job_revision, "jobRevision")?;
@@ -800,6 +858,15 @@ fn validate_revision(revision: u64, field: &'static str) -> Result<(), Interacti
         return Err(InteractionRoutingError::InvalidField(field));
     }
     Ok(())
+}
+
+fn validate_domain_revision(
+    revision: &Revision,
+    field: &'static str,
+) -> Result<(), InteractionRoutingError> {
+    let revision =
+        u64::try_from(revision.0).map_err(|_| InteractionRoutingError::InvalidField(field))?;
+    validate_revision(revision, field)
 }
 
 fn next_revision(revision: u64) -> Result<u64, InteractionRoutingError> {

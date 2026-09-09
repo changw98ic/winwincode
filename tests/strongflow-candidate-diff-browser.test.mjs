@@ -61,7 +61,7 @@ async function launch(t, fixturePath) {
 const route = 'https://client.localhost:PORT/#/strongflow'
   + '?delivery=dlv_00000000000000000000000001'
   + '&session=psn_00000000000000000000000001'
-  + '&stageRun=run_00000000000000000000000001'
+  + '&workRun=wrn_00000000000000000000000001'
   + '&file=src%2Frenamed.ts&view=unified'
   + '&organizationId=org_00000000000000000000000001'
   + '&workspaceId=wsp_00000000000000000000000001'
@@ -111,6 +111,9 @@ test('real Chrome reviews the Candidate Diff in both layouts with keyboard and s
       repositoryId: routeContext.repositoryId,
       task: routeContext.task,
       run: routeContext.run,
+      tab: routeContext.tab,
+      evidence: routeContext.evidence,
+      line: null,
     },
     panel: 'true',
     file: 'src/renamed.ts',

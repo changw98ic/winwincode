@@ -11,7 +11,7 @@ use winwincode_api::generated::{
     AcceptanceCriterionInput, Actor, DeliveryAdvanceCommand, DeliveryAdvanceCommandCommand,
     DeliveryAdvancePayload, DeliveryCreateCommand, DeliveryCreateCommandCommand,
     DeliveryCreatePayload, DeliveryGetParameters, DeliveryGetQuery, DeliveryGetQueryQuery,
-    DeliverySpecInput, PageRequest, QueryResultResponse,
+    DeliverySpecInput, DeliveryTaskBreakdownCreateCommand, PageRequest, QueryResultResponse,
 };
 use winwincode_control_plane::{
     ControlPlane, ControlPlaneConfig, EventPublishError, EventPublisher,
@@ -43,10 +43,13 @@ fn startup_installs_restart_stable_empty_publication_and_rejects_corrupt_facts()
     let scope = repository_scope(41);
     let delivery_id = DeliveryId(canonical_id("dlv", 41));
     let create = create_command(&scope, &delivery_id, baseline);
-    let advance = advance_command(&scope, &delivery_id);
 
     let mut first = start(&data, &repository, &scope);
     first.delivery_create(&create).expect("create Delivery");
+    first
+        .delivery_task_breakdown_create(&task_breakdown_command(&first, &scope, &delivery_id))
+        .expect("create canonical WorkItem");
+    let advance = advance_command(&scope, &delivery_id);
     first.delivery_advance(&advance).expect("advance Delivery");
     let current_query = delivery_query(&scope, &delivery_id, None);
     let current = StrongFlowProjectionQueryPort::delivery_get(&first, &current_query)
@@ -54,7 +57,7 @@ fn startup_installs_restart_stable_empty_publication_and_rejects_corrupt_facts()
     let QueryResultResponse::DeliveryGetResultResponse(current_response) = &current else {
         panic!("delivery.get returned another response kind");
     };
-    assert_eq!(current_response.result.delivery_revision, Revision(2));
+    assert_eq!(current_response.result.delivery_revision, Revision(3));
     assert!(current_response.result.current_candidate.is_none());
     assert!(current_response.result.publication.is_none());
     let cursor = current_response.result.read_cursor.clone();
@@ -138,6 +141,10 @@ fn create_command(
                     title: "StrongFlow production read remains exact".to_owned(),
                 }],
                 base_revision: baseline,
+                constraints: vec!["tests pass".to_owned()],
+                out_of_scope: vec!["target".to_owned()],
+                scope: vec!["src".to_owned()],
+                source_product_session_id: None,
                 goal: "Preserve durable StrongFlow authority".to_owned(),
                 publication_target: None,
                 repository_id: scope.repository_id.clone(),
@@ -158,14 +165,58 @@ fn advance_command(scope: &RepositoryScope, delivery_id: &DeliveryId) -> Deliver
             kind: UserActorKind::User,
         }),
         command: DeliveryAdvanceCommandCommand::DeliveryAdvance,
-        expected_revision: Revision(1),
+        expected_revision: Revision(2),
         payload: DeliveryAdvancePayload {
+            rework: None,
             delivery_id: delivery_id.clone(),
+            dispatch_profile: "executor".to_owned(),
         },
         request_id: RequestId(canonical_id("req", 42)),
         schema_version: SchemaVersion::WinwincodeV1,
         scope: scope.clone(),
     }
+}
+
+fn task_breakdown_command(
+    control_plane: &ControlPlane,
+    scope: &RepositoryScope,
+    delivery_id: &DeliveryId,
+) -> DeliveryTaskBreakdownCreateCommand {
+    let state = control_plane
+        .load_state(&format!("delivery:{}", delivery_id.0))
+        .expect("Delivery read")
+        .expect("Delivery exists");
+    let delivery =
+        winwincode_delivery::domain::Delivery::decode_json(&state.payload).expect("Delivery JSON");
+    let criteria = delivery
+        .snapshot()
+        .work_run_aggregate
+        .contract
+        .criteria
+        .iter()
+        .map(|criterion| criterion.id.clone())
+        .collect::<Vec<_>>();
+    serde_json::from_value(serde_json::json!({
+        "actor": {"kind":"user", "id":canonical_id("usr", 41)},
+        "command":"delivery.task_breakdown.create",
+        "expectedRevision":1,
+        "payload": {
+            "contractRevision":1,
+            "deliveryId":delivery_id,
+            "expectedRevision":1,
+            "items":[{
+                "criterionIds":criteria,
+                "dependsOn":[],
+                "goal":"Preserve durable StrongFlow authority",
+                "id":"wit_00000000000000000000000001",
+                "title":"Preserve durable StrongFlow authority"
+            }]
+        },
+        "requestId":canonical_id("req", 43),
+        "schemaVersion":"winwincode/v1",
+        "scope":scope
+    }))
+    .expect("canonical WorkItem command")
 }
 
 fn initialize_repository(repository: &Path) -> String {

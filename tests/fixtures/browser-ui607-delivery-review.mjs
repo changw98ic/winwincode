@@ -37,12 +37,12 @@ const taskId = 'task:export'
 const nodeId = 'node:export-gateway'
 const specId = 'spec:ui607'
 
-const planningRunId = 'run_00000000000000000000000001'
-const planReviewRunId = 'run_00000000000000000000000002'
-const executingRunId = 'run_00000000000000000000000003'
-const verifyingRunId = 'run_00000000000000000000000004'
-const reworkRunId = 'run_00000000000000000000000005'
-const reverifyingRunId = 'run_00000000000000000000000006'
+const planningRunId = 'wrn_00000000000000000000000001'
+const planReviewRunId = 'wrn_00000000000000000000000002'
+const executingRunId = 'wrn_00000000000000000000000003'
+const verifyingRunId = 'wrn_00000000000000000000000004'
+const reworkRunId = 'wrn_00000000000000000000000005'
+const reverifyingRunId = 'wrn_00000000000000000000000006'
 
 /** Exact execution binding index per StageRun, so history reads the right one. */
 const RUN_BINDING_INDEX = new Map([
@@ -164,11 +164,11 @@ function binding(index) {
     boundAt: '2026-09-03T01:00:00.000Z',
     executionJobId: identifier('job', index),
     productSessionId: identifier('psn', index),
-    stageRunId: null,
+    workRunId: identifier('wrn', index),
     workerSessionId: identifier('wsn', index),
     codexThreadId: identifier('cdx', index),
     attempt: 1,
-    fencingToken: `fence:${suffix}`,
+    fencingToken: String(index),
     leaseId: identifier('lse', index),
     workerId: identifier('wrk', index),
     sourceIdentity: {
@@ -182,7 +182,7 @@ function binding(index) {
       productSessionId: identifier('psn', index),
       workerSessionId: identifier('wsn', index),
       codexThreadId: identifier('cdx', index),
-      stageRunId: null,
+      workRunId: null,
     },
   }
 }
@@ -192,15 +192,15 @@ function stage(id, index, overrides = {}) {
     ? binding(index)
     : overrides.sessionBinding
   return {
-    id,
+    id: identifier('run', index),
     actorType: sessionBinding === null ? 'human' : 'codex',
-    attempt: overrides.attempt ?? 1,
+    attempt: index || 1,
     deliveryTaskId: overrides.deliveryTaskId ?? null,
     finishedAt: overrides.finishedAt ?? '2026-09-03T01:05:00.000Z',
     role: overrides.role ?? 'implementer',
     sessionBinding: sessionBinding === null
       ? null
-      : { ...sessionBinding, stageRunId: id },
+      : { ...sessionBinding, workRunId: id },
     stage: overrides.stage ?? 'executing',
     startedAt: overrides.startedAt ?? '2026-09-03T01:00:00.000Z',
     status: overrides.status ?? 'succeeded',
@@ -223,7 +223,7 @@ function candidateRecord(tag) {
         ? '2026-09-03T01:08:00.000Z'
         : '2026-09-03T01:20:00.000Z',
     producerSessionBindingId: tag === 'b' ? 'binding:ui607:05' : 'binding:ui607:03',
-    producerStageRunId: attempt,
+    producerWorkRunId: attempt,
   }
 }
 
@@ -277,7 +277,7 @@ function activeVerdict() {
   }
 }
 
-function evidenceRow(id, type, sourceRef, stageRunId, createdAt) {
+function evidenceRow(id, type, sourceRef, workRunId, createdAt) {
   return {
     candidateRef: currentCandidate().candidateRef,
     createdAt,
@@ -286,7 +286,7 @@ function evidenceRow(id, type, sourceRef, stageRunId, createdAt) {
     id,
     sessionBindingId: `binding:ui607:${world.candidateTag === 'b' ? '06' : '04'}`,
     sourceRef,
-    stageRunId,
+    workRunId,
     type,
   }
 }
@@ -297,14 +297,14 @@ function deliveryEvidence() {
       first: 'evd_00000000000000000000000004',
       scan: 'evd_00000000000000000000000005',
       run: 'evd_00000000000000000000000006',
-      stageRunId: reverifyingRunId,
+      workRunId: reverifyingRunId,
       session: 'binding:ui607:06',
     }
     : {
       first: 'evd_00000000000000000000000001',
       scan: 'evd_00000000000000000000000002',
       run: 'evd_00000000000000000000000003',
-      stageRunId: verifyingRunId,
+      workRunId: verifyingRunId,
       session: 'binding:ui607:04',
     }
   return [
@@ -312,21 +312,21 @@ function deliveryEvidence() {
       preflight.first,
       'test',
       `artifact:test:${world.candidateTag}`,
-      preflight.stageRunId,
+      preflight.workRunId,
       '2026-09-03T01:05:30.000Z',
     ),
     evidenceRow(
       preflight.scan,
       'command',
       `artifact:scan:${world.candidateTag}`,
-      preflight.stageRunId,
+      preflight.workRunId,
       '2026-09-03T01:05:40.000Z',
     ),
     evidenceRow(
       preflight.run,
       'runtime_event',
       `artifact:run:${world.candidateTag}`,
-      preflight.stageRunId,
+      preflight.workRunId,
       '2026-09-03T01:05:50.000Z',
     ),
   ]
@@ -402,7 +402,7 @@ function attentionRecord() {
       : 'Bounded rework approved on the current candidate.',
     resolvedAt: open ? null : '2026-09-03T01:10:00.000Z',
     resolvedBy: open ? null : actor.id,
-    stageRunId: verifyingRunId,
+    workRunId: verifyingRunId,
     status: open ? 'open' : 'resolved',
     title: 'Verification blocked: two required criteria did not pass',
     type: 'verification_blocked',
@@ -543,7 +543,7 @@ function deliveryDetail() {
       goal: 'Keep the rework inside the declared scope.',
       id: taskId,
       owner: null,
-      stageRunIds: [
+      workRunIds: [
         executingRunId,
         verifyingRunId,
         reworkRunId,
@@ -560,24 +560,50 @@ function deliveryDetail() {
   }
 }
 
-function deliveryRuntime() {
-  const cursor = readCursor()
-  const active = stages().filter(item => item.sessionBinding !== null).at(-1)
+function workRunAggregate() {
+  const workContractId = identifier('wct', 1)
+  const workItemId = identifier('wit', 1)
+  const runs = stages().filter(stage => stage.sessionBinding !== null).map(stage => {
+    const binding = stage.sessionBinding
+    const index = RUN_BINDING_INDEX.get(binding.workRunId)
+    return {
+      schemaVersion, id: binding.workRunId, workContractId, contractRevision: 1,
+      workItemId, workItemRevision: 1, revision: world.revision,
+      state: stage.status === 'running' ? 'running' : 'settled',
+      executionJobId: binding.executionJobId, attempt: index,
+      workerId: binding.workerId, workerInstanceId: identifier('wki', index),
+      workerSessionId: binding.workerSessionId, leaseId: binding.leaseId,
+      fencingToken: binding.fencingToken, productSessionId: binding.productSessionId,
+      codexThreadId: binding.codexThreadId, candidateDigest: null,
+    }
+  })
   return {
-    kind: 'runtime_projection',
-    productSessionId: active.sessionBinding.productSessionId,
-    deliveryId,
-    stageRunId: active.id,
-    readCursor: cursor,
-    eventCursor: cursor.eventCursor,
-    lastProjectionSequence: cursor.runtimeAcceptedSequence,
-    revision: cursor.runtimeLedgerRevision,
-    rebuiltAt: '2026-09-03T01:26:00.000Z',
-    sessions: [],
+    schemaVersion,
+    contract: {
+      schemaVersion, id: workContractId, revision: 1,
+      objective: 'Review the bounded export candidate.', scope: [], constraints: [], protectedScope: [],
+      requiredHumanAuthority: 'none', createdAt: '2026-09-03T01:00:00.000Z',
+      criteria: CRITERIA.map((criterion, index) => ({
+        id: identifier('crt', index + 1), description: criterion.description,
+        verificationMethod: null, required: criterion.required,
+      })),
+    },
+    items: [{
+      schemaVersion, id: workItemId, workContractId, workContractRevision: 1,
+      revision: 1, state: 'in_progress', title: 'Ship the redacted export',
+      goal: 'Keep the rework inside the declared scope.', dependsOn: [],
+      criterionIds: CRITERIA.map((_, index) => identifier('crt', index + 1)),
+    }],
+    runs, readCursor: readCursor(),
   }
 }
 
-function historicalRuntime(stageRunId, index) {
+function deliveryRuntime() {
+  const run = workRunAggregate().runs.at(-1)
+  return historicalRuntime(run.id, RUN_BINDING_INDEX.get(run.id))
+}
+
+function historicalRuntime(workRunId, index) {
   const cursor = readCursor()
   const productSessionId = identifier('psn', index)
   const bindingId = `binding:ui607:${String(index).padStart(2, '0')}`
@@ -585,7 +611,7 @@ function historicalRuntime(stageRunId, index) {
     kind: 'runtime_projection',
     productSessionId,
     deliveryId,
-    stageRunId,
+    workRunId,
     readCursor: cursor,
     eventCursor: cursor.eventCursor,
     lastProjectionSequence: cursor.runtimeAcceptedSequence,
@@ -593,15 +619,15 @@ function historicalRuntime(stageRunId, index) {
     rebuiltAt: '2026-09-03T01:05:00.000Z',
     sessions: [{
       productSessionId,
-      stageRunId,
+      workRunId,
       sessionBindingId: bindingId,
       executionJobId: identifier('job', index),
       workerSessionId: identifier('wsn', index),
       codexThreadId: identifier('cdx', index),
-      fencingToken: 'fence:03',
+      fencingToken: String(index),
       leaseId: identifier('lse', index),
-      attempt: 1,
-      deliveryTaskId: taskId,
+      attempt: index,
+      workItemId: identifier('wit', 1),
       asOfSequence: cursor.runtimeAcceptedSequence,
       diffSummary: null,
       plan: null,
@@ -682,7 +708,7 @@ function evidenceDetail(request) {
   if (row === undefined) throw new Error(`unknown evidence ${parameters.evidenceId}`)
   if (
     parameters.candidateRef !== row.candidateRef
-    || parameters.stageRunId !== row.stageRunId
+    || parameters.workRunId !== row.workRunId
     || parameters.sessionBindingId !== row.sessionBindingId
     || parameters.sourceRef !== row.sourceRef
     || parameters.type !== row.type
@@ -709,7 +735,7 @@ function evidenceDetail(request) {
           deliveryRevision: world.revision,
           evidenceId: row.id,
           sessionBindingId: row.sessionBindingId,
-          stageRunId: row.stageRunId,
+          workRunId: row.workRunId,
         },
         sizeBytes: 64,
       }],
@@ -789,7 +815,7 @@ function deliverySummary() {
     title: 'UI-607 bounded review vertical',
     updatedAt: '2026-09-03T01:26:00.000Z',
     ownership: ownership(),
-    activeStageRunId: stages().at(-1).id,
+    activeWorkRunId: stages().at(-1).sessionBinding?.workRunId ?? null,
     openAttentionCount: attentionRecord().status === 'open' ? 1 : 0,
     taskCounts: {
       total: 1, pending: 0, active: 0, blocked: 0, verifying: 0, completed: 1, failed: 0,
@@ -814,7 +840,7 @@ function chatRuntime() {
     kind: 'runtime_projection',
     productSessionId: chatProductSessionId,
     deliveryId: null,
-    stageRunId: null,
+    workRunId: null,
     readCursor: null,
     eventCursor: {
       eventId: null,
@@ -864,6 +890,12 @@ async function publishChanged() {
 
 /** Answers one typed query from the current read model. */
 async function respond(request) {
+    if (request.query === 'workrun.get') return response(request, workRunAggregate())
+    if (request.query === 'worker.list') return response(request, { kind: 'worker_page', items: [] })
+    if (request.query === 'enterprise.organization.list') return response(request, {
+      kind: 'enterprise_organization_page', snapshotRevision: 1, items: [],
+    })
+
     if (request.query === 'delivery.list') {
       return response(request, { kind: 'delivery_page', items: [deliverySummary()] })
     }
@@ -938,8 +970,8 @@ async function respond(request) {
     }
     if (request.query === 'runtime.projection.get') {
       const active = stages().filter(entry => entry.sessionBinding !== null).at(-1)
-      const requested = request.parameters.stageRunId
-      if (request.parameters.kind === 'delivery-stage' && requested !== active.id) {
+      const requested = request.parameters.workRunId
+      if (request.parameters.kind === 'delivery-stage' && requested !== active.sessionBinding.workRunId) {
         const index = RUN_BINDING_INDEX.get(requested)
         if (index === undefined) throw new Error(`no runtime binding for ${requested}`)
         return response(request, historicalRuntime(requested, index))
@@ -1128,13 +1160,13 @@ function diagnostic() {
     error: text('.wwc-strongflow-error-text'),
     queryErrors: calls.queryErrors.slice(-4),
     historyHidden: document.querySelector('.wwc-strongflow-history')?.hidden ?? null,
-    historyPressed: document.querySelector('.wwc-strongflow-run-button[aria-pressed="true"]')?.dataset.stageRunId ?? null,
+    historyPressed: document.querySelector('.wwc-strongflow-run-button[aria-pressed="true"]')?.dataset.workRunId ?? null,
     tabs: [...document.querySelectorAll('.wwc-strongflow-artifact-tab')]
       .map(entry => `${entry.textContent}:${entry.getAttribute('aria-selected')}`),
     queries: calls.queries.slice(-8).map(entry => ({
       query: entry.query,
       kind: entry.parameters?.kind ?? null,
-      stageRunId: entry.parameters?.stageRunId ?? null,
+      workRunId: entry.parameters?.workRunId ?? null,
     })),
     commands: calls.commands.map(entry => entry.command),
   })

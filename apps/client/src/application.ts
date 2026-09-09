@@ -5,12 +5,14 @@ import {
   createControlPlaneClient,
   createControlPlaneClientDirectory,
   createControlPlaneClientUsers,
-  createControlPlaneRunIdentityFake,
-  createControlPlaneTaskFake,
+  createControlPlaneRunIdentityPort,
+  createControlPlaneTaskPort,
+  queryWorkRunAggregate,
   type ControlPlaneClient,
   type ControlPlaneClientTransport,
   type ControlPlaneTaskAnchor,
 } from './community-control-plane-client.js'
+import type { WorkItemId } from './generated/contracts.js'
 import { createClientOccupancyFacade } from './client-occupancy-facade.js'
 import { mountClientErrorBoundary } from './components/client-error-boundary.js'
 import { mountConnectionBar } from './components/connection-bar.js'
@@ -106,7 +108,7 @@ import type {
   RepositoryScope,
   RequestId,
   Scope,
-  StageRunId,
+  WorkRunId,
 } from './generated/contracts.js'
 import { matchesCanonicalSchema } from './generated/control-plane-client.js'
 import { QueryName } from './generated/contracts.js'
@@ -170,7 +172,7 @@ function element<K extends keyof HTMLElementTagNameMap>(
 const CONTRACT_ID_ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ'
 
 function contractId(
-  prefix: 'req' | 'sub' | 'psn' | 'dlv' | 'tsk',
+  prefix: 'req' | 'sub' | 'psn' | 'dlv' | 'wit',
   crypto: Crypto,
 ): string {
   const entropy = crypto.getRandomValues(new Uint8Array(26))
@@ -185,12 +187,12 @@ function routeParameters(hash: string): URLSearchParams {
   return new URLSearchParams(query < 0 ? '' : hash.slice(query + 1))
 }
 
-/** A route stage-run identity that survives the canonical StageRun schema. */
-function canonicalStageRunParameter(parameters: URLSearchParams): StageRunId | null {
-  const values = parameters.getAll('stageRun')
+/** A route WorkRun identity validated at the canonical route boundary. */
+function canonicalWorkRunParameter(parameters: URLSearchParams): WorkRunId | null {
+  const values = parameters.getAll('workRun')
   const value = values.length === 1 ? values[0] : null
-  return value !== null && matchesCanonicalSchema('StageRunId', value)
-    ? value as StageRunId
+  return value !== null && matchesCanonicalSchema('WorkRunId', value)
+    ? value as WorkRunId
     : null
 }
 
@@ -292,13 +294,59 @@ export function mountWinWinCodeClient(
   const repositoriesModel: RepositoriesViewModel = createRepositoriesViewModel({
     client: clientDirectory,
   })
-  // UI-100.2 (fake-first): the §16.6 task creation seam and the §16.7 run
-  // identity zone run on the local fakes from the one facade block until the
-  // FLOW scheduler and worker/candidate routing land and replace the ports.
-  const taskPort = createControlPlaneTaskFake({
-    nextTaskId: () => contractId('tsk', browser.crypto),
+  // UI-100.2: the browser boundary carries a canonical WorkItem anchor and
+  // reads the WorkRun projection. Server scheduling remains authoritative.
+  const taskPort = createControlPlaneTaskPort({
+    client: rawControlPlane,
+    actor: () => authSession.state.session?.actor ?? null,
+    scope: () => currentScopeResolution?.status === 'selected'
+      && currentScopeResolution.scope.kind === 'repository'
+      ? currentScopeResolution.scope
+      : null,
+    nextRequestId: () => contractId('req', browser.crypto) as RequestId,
+    nextWorkItemId: () => contractId('wit', browser.crypto) as WorkItemId,
+    deliveryContext: async () => {
+      const parameters = routeParameters(browser.location.hash)
+      const deliveryId = parameters.get('delivery')
+      if (deliveryId === null || !matchesCanonicalSchema('DeliveryId', deliveryId)) return null
+      const actor = authSession.state.session?.actor
+      const scope = currentScopeResolution?.status === 'selected'
+        && currentScopeResolution.scope.kind === 'repository'
+        ? currentScopeResolution.scope
+        : null
+      if (actor === undefined || scope === null) return null
+      const response = await rawControlPlane.query({
+        schemaVersion: 'winwincode/v1', requestId: contractId('req', browser.crypto) as RequestId,
+        actor, scope, query: 'delivery.get',
+        parameters: { deliveryId: deliveryId as import('./generated/contracts.js').DeliveryId },
+        page: { cursor: null, limit: 1 },
+      })
+      if (response.query !== 'delivery.get' || response.result.kind !== 'delivery_detail') return null
+      const criterion = response.result.requirements.acceptanceCriteria[0]
+      if (criterion === undefined || !matchesCanonicalSchema('CriterionId', criterion.id)) return null
+      return {
+        deliveryId: deliveryId as import('./generated/contracts.js').DeliveryId,
+        criterionId: criterion.id as import('./generated/contracts.js').CriterionId,
+        expectedRevision: response.result.deliveryRevision,
+        contractRevision: response.result.requirements.deliverySpecRevision,
+      }
+    },
   })
-  const runIdentityPort = createControlPlaneRunIdentityFake()
+  const runIdentityPort = createControlPlaneRunIdentityPort({
+    client: rawControlPlane,
+    actor: () => authSession.state.session?.actor ?? null,
+    scope: () => currentScopeResolution?.status === 'selected'
+      && currentScopeResolution.scope.kind === 'repository'
+      ? currentScopeResolution.scope
+      : null,
+    deliveryId: () => {
+      const value = routeParameters(browser.location.hash).get('delivery')
+      return value !== null && matchesCanonicalSchema('DeliveryId', value)
+        ? value as import('./generated/contracts.js').DeliveryId
+        : null
+    },
+    nextRequestId: () => contractId('req', browser.crypto) as RequestId,
+  })
   let lastKnownDiagnosticScope: unknown = null
   const shell = element(document, 'div', 'wwc-shell')
   const header = element(document, 'header', 'wwc-header')
@@ -887,6 +935,7 @@ export function mountWinWinCodeClient(
         actor: context.actor,
         scope: context.scope,
         nextDeliveryId: () => contractId('dlv', browser.crypto) as DeliveryId,
+        nextWorkItemId: () => contractId('wit', browser.crypto) as WorkItemId,
         nextRequestId: () => contractId('req', browser.crypto) as RequestId,
         onCreated(deliveryId) {
           if (closed || generation !== renderGeneration || controller.signal.aborted) return
@@ -1081,7 +1130,7 @@ export function mountWinWinCodeClient(
 
   /** The anchor facts a deep-linked run route must carry to be actionable. */
   function taskRunRouteAnchor(): {
-    readonly taskId: string
+    readonly taskId: WorkItemId
     readonly clientId: string
     readonly repositoryBindingId: string
   } | null {
@@ -1090,12 +1139,12 @@ export function mountWinWinCodeClient(
     const clientId = parameters.get('client')
     const repositoryBindingId = parameters.get('repository')
     if (
-      taskId === null || clientId === null || repositoryBindingId === null
+      taskId === null || !matchesCanonicalSchema('WorkItemId', taskId) || clientId === null || repositoryBindingId === null
       || taskId.length === 0 || clientId.length === 0 || repositoryBindingId.length === 0
     ) {
       return null
     }
-    return { taskId, clientId, repositoryBindingId }
+    return { taskId: taskId as WorkItemId, clientId, repositoryBindingId }
   }
 
   /**
@@ -1146,9 +1195,8 @@ export function mountWinWinCodeClient(
   }
 
   /**
-   * UI-100.2 (fake-first): the §16.7 run page.  The Client, Occupancy, and
-   * Repository rows project the live shell-owned models; the WorkerSession
-   * and Candidate/Apply rows come from the fake-first identity port.
+   * UI-100.2: the §16.7 run page. Client, Occupancy, and Repository rows are
+   * live shell facts; execution identity comes only from WorkRun.
    */
   async function renderTaskRun(generation: number): Promise<void> {
     const context = authenticatedRouteContext()
@@ -1204,7 +1252,7 @@ export function mountWinWinCodeClient(
       routeLoading('Loading session decisions…')
       try {
         const deliveryId = parameters.get('delivery') as DeliveryId | null
-        const stageRunId = canonicalStageRunParameter(parameters)
+        const workRunId = canonicalWorkRunParameter(parameters)
         const [{ createLocalDecisionsViewModel }, { mountLocalDecisionsPage }] = await Promise.all([
           import('./local-decisions-view-model.js'),
           import('./local-decisions-page.js'),
@@ -1237,15 +1285,15 @@ export function mountWinWinCodeClient(
           model,
           readOnly: activeRouteReadOnly,
           // The exact execution origin this decision came from, so handling the
-          // decision can return to the Task/StageRun that raised it.
-          ...(deliveryId === null || stageRunId === null
+          // decision can return to the Task/WorkRun that raised it.
+          ...(deliveryId === null || workRunId === null
             ? {}
             : {
                 returnTarget: {
                   hash: strongFlowRouteHash({
                     deliveryId,
                     productSessionId,
-                    stageRunId,
+                    workRunId,
                     candidatePath: null,
                     candidateView: 'unified',
                     comparison: { status: 'none' },
@@ -1347,13 +1395,14 @@ export function mountWinWinCodeClient(
           actor: context.actor,
           scope: context.scope,
           nextDeliveryId: () => contractId('dlv', browser.crypto) as DeliveryId,
+          nextWorkItemId: () => contractId('wit', browser.crypto) as WorkItemId,
           nextRequestId: () => contractId('req', browser.crypto) as RequestId,
           onCreated(createdDeliveryId) {
             if (closed || generation !== renderGeneration || controller.signal.aborted) return
             replaceHash(strongFlowRouteHash({
               deliveryId: createdDeliveryId,
               productSessionId: null,
-              stageRunId: null,
+              workRunId: null,
               candidatePath: null,
               candidateView: 'unified',
               comparison: { status: 'none' },
@@ -1396,21 +1445,38 @@ export function mountWinWinCodeClient(
         throw new Error('The StrongFlow route received another detail response.')
       }
       const detail = (detailValue as DeliveryGetResultResponse).result
-      const requestedStageRunId = route.stageRunId
+      const aggregate = await queryWorkRunAggregate(controlPlane, {
+        actor: context.actor,
+        scope: context.scope,
+        requestId: contractId('req', browser.crypto) as RequestId,
+        deliveryId,
+        workItemId: null,
+        workRunId: route.workRunId,
+        atCursor: detail.readCursor,
+        page: { cursor: null, limit: 1 },
+      }, { signal: controller.signal })
+      const run = route.workRunId === null
+        ? aggregate.runs.findLast(run => run.state === 'running' || run.state === 'leased')
+          ?? aggregate.runs.at(-1)
+        : aggregate.runs.find(run => run.id === route.workRunId)
+      const requestedWorkRunId = run?.id ?? null
       let selectedCandidatePath = route.candidatePath
       const routeCandidateView = strongFlowCandidateViewFromHash(browser.location.hash)
       const routeCandidateFile = strongFlowRawCandidateFileFromHash(browser.location.hash)
       let candidateView: CandidateDiffViewMode = route.candidateView
-      const stage = requestedStageRunId === null
-        ? [...detail.stages].reverse().find(candidate => candidate.sessionBinding !== null)
-        : detail.stages.find(candidate => candidate.id === requestedStageRunId)
-      const productSessionId = route.productSessionId
-        ?? stage?.sessionBinding?.productSessionId
-        ?? null
-      if (stage === undefined || stage.sessionBinding === null || productSessionId === null) {
+      const productSessionId = run?.productSessionId ?? null
+      if (productSessionId === null) {
         deliveryList.close()
         deliveryList = null
-        routeUnavailable('This Delivery does not have an executable StrongFlow stage yet.')
+        routeUnavailable('This Delivery has no accepted WorkRun session yet.')
+        return
+      }
+      if (route.productSessionId !== null && route.productSessionId !== productSessionId) {
+        routeUnavailable('This link names a different session from the selected WorkRun.')
+        return
+      }
+      if (requestedWorkRunId === null) {
+        routeUnavailable('This run route does not identify a canonical WorkRun.')
         return
       }
       if (closed || generation !== renderGeneration || controller.signal.aborted) {
@@ -1422,12 +1488,12 @@ export function mountWinWinCodeClient(
         ...route,
         deliveryId,
         productSessionId,
-        stageRunId: stage.id,
+        workRunId: requestedWorkRunId,
       })
       if (
         route.deliveryId === null
         || route.productSessionId === null
-        || route.stageRunId === null
+        || route.workRunId === null
         || routeCandidateView === null
         // An illegal Candidate file deep link was dropped at parse time, so the
         // URL is rewritten to the canonical route without it.
@@ -1454,7 +1520,7 @@ export function mountWinWinCodeClient(
         scope: context.scope,
         deliveryId,
         productSessionId,
-        stageRunId: stage.id,
+        workRunId: requestedWorkRunId,
         subscriptionId: contractId(
           'sub',
           browser.crypto,
@@ -1471,12 +1537,12 @@ export function mountWinWinCodeClient(
             strongFlowHistorySelectionFromHash(browser.location.hash),
           ))
         },
-        onStageBindingChange(binding) {
+        onWorkRunBindingChange(binding) {
           if (closed || generation !== renderGeneration || controller.signal.aborted) return
           currentRoute = Object.freeze({
             ...currentRoute,
             productSessionId: binding.productSessionId,
-            stageRunId: binding.stageRunId,
+            workRunId: binding.workRunId,
             evidenceId: null,
           })
           replaceHash(strongFlowRouteHash(

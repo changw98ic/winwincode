@@ -272,7 +272,7 @@ fn running_authority_fixture(storage: &mut SqliteStorage) -> RunningAuthorityFix
             dispatch_payload: br#"{"kind":"debug-probe"}"#.to_vec(),
             attempt: 1,
             dependencies: Vec::new(),
-            stage_run_id: None,
+            work_run_id: None,
             submitted_at: guard_at(1),
         })
         .expect("job submission");

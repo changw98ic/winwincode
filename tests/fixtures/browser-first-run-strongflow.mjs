@@ -78,6 +78,7 @@ const alternateModelRoute = {
 
 const stageProductSessionId = identifier('psn', 2)
 const stageRunId = identifier('run', 1)
+const workRunId = identifier('wrn', 1)
 const workerId = identifier('wrk', 1)
 
 function loadState() {
@@ -91,6 +92,8 @@ function loadState() {
     sessions: [],
     messages: [],
     delivery: null,
+    workItems: [],
+    workRunStarted: false,
     submittedRequirements: 0,
   }
 }
@@ -239,11 +242,11 @@ function deliverySummary() {
     schemaVersion,
     deliveryId: state.delivery.deliveryId,
     revision: state.delivery.revision,
-    status: state.delivery.revision === 1 ? 'draft' : 'clarifying',
+    status: state.workRunStarted ? 'executing' : 'draft',
     title: state.delivery.spec.title,
     updatedAt: updated,
     ownership: ownership(),
-    activeStageRunId: state.delivery.revision === 1 ? null : stageRunId,
+    activeWorkRunId: state.workRunStarted ? workRunId : null,
     openAttentionCount: 0,
     taskCounts: taskCounts(),
   }
@@ -251,10 +254,10 @@ function deliverySummary() {
 
 function readCursor() {
   return {
-    token: identifier('cur', 2),
+    token: identifier('cursor', 2),
     scope: chosenScope,
     deliveryId: state.delivery.deliveryId,
-    deliveryRevision: 2,
+    deliveryRevision: state.delivery.revision,
     runtimeLedgerRevision: 1,
     runtimeAcceptedSequence: 0,
     publicationRevision: 0,
@@ -273,13 +276,13 @@ function stageBinding() {
     boundAt: updated,
     executionJobId: identifier('job', 1),
     productSessionId: stageProductSessionId,
-    stageRunId: null,
-    workerSessionId: null,
-    codexThreadId: null,
-    attempt: null,
-    fencingToken: null,
-    leaseId: null,
-    workerId: null,
+    workRunId,
+    workerSessionId: identifier('wsn', 1),
+    codexThreadId: identifier('cdx', 1),
+    attempt: 1,
+    fencingToken: '1',
+    leaseId: identifier('lse', 1),
+    workerId,
     sourceIdentity: null,
     sessionIdentity: null,
   }
@@ -290,10 +293,10 @@ function deliveryDetail() {
     kind: 'delivery_detail',
     schemaVersion,
     deliveryId: state.delivery.deliveryId,
-    deliveryRevision: 2,
+    deliveryRevision: state.delivery.revision,
     readCursor: readCursor(),
     ownership: ownership(),
-    status: 'clarifying',
+    status: state.workRunStarted ? 'executing' : 'draft',
     requirements: {
       deliverySpecId: 'spec:first-run',
       deliverySpecRevision: 1,
@@ -316,18 +319,8 @@ function deliveryDetail() {
     },
     solutionReview: null,
     diagramExecution: null,
-    stages: [{
-      id: stageRunId,
-      actorType: 'codex',
-      attempt: 1,
-      deliveryTaskId: null,
-      finishedAt: null,
-      role: 'clarifier',
-      sessionBinding: stageBinding(),
-      stage: 'clarifying',
-      startedAt: updated,
-      status: 'running',
-    }],
+    // A newly created Delivery has no old stage/task projection to route through.
+    stages: [],
     tasks: [],
     attention: [],
     evidence: [],
@@ -343,13 +336,83 @@ function deliveryRuntime() {
     kind: 'runtime_projection',
     productSessionId: stageProductSessionId,
     deliveryId: state.delivery.deliveryId,
-    stageRunId,
+    workRunId,
     readCursor: cursor,
     eventCursor: cursor.eventCursor,
     lastProjectionSequence: 0,
     revision: 1,
     rebuiltAt: updated,
-    sessions: [],
+    sessions: [{
+      productSessionId: stageProductSessionId,
+      workRunId,
+      workItemId: state.workItems[0].id,
+      sessionBindingId: 'binding:first-run:browser',
+      executionJobId: identifier('job', 1),
+      workerSessionId: identifier('wsn', 1),
+      codexThreadId: identifier('cdx', 1),
+      fencingToken: '1',
+      leaseId: identifier('lse', 1),
+      attempt: 1,
+      asOfSequence: 0,
+      activities: [],
+      agents: [],
+      agentEdges: [],
+      diffSummary: null,
+      plan: null,
+      usage: null,
+      recovery: {
+        failureCount: 0,
+        lastFailureSourceRef: null,
+        latestRecoverySourceRef: null,
+        recoveryCount: 0,
+        state: 'none',
+      },
+    }],
+  }
+}
+
+function workRunAggregate() {
+  const contract = {
+    schemaVersion,
+    id: identifier('wct', 1),
+    revision: 1,
+    objective: state.delivery?.spec.goal ?? 'Execute the confirmed requirement.',
+    scope: [],
+    constraints: [],
+    protectedScope: [],
+    requiredHumanAuthority: 'none',
+    criteria: (state.delivery?.spec.acceptanceCriteria ?? []).map((criterion, index) => ({
+      id: identifier('crt', index + 1),
+      description: criterion.title,
+      verificationMethod: null,
+      required: criterion.required,
+    })),
+    createdAt: updated,
+  }
+  return {
+    schemaVersion,
+    contract,
+    items: state.workItems.map(item => ({ ...item, state: state.workRunStarted ? 'in_progress' : 'ready' })),
+    runs: state.workRunStarted ? [{
+      schemaVersion,
+      id: workRunId,
+      workContractId: contract.id,
+      contractRevision: contract.revision,
+      workItemId: state.workItems[0].id,
+      workItemRevision: 1,
+      revision: 1,
+      state: 'running',
+      executionJobId: identifier('job', 1),
+      attempt: 1,
+      workerId,
+      workerInstanceId: identifier('wki', 1),
+      workerSessionId: identifier('wsn', 1),
+      leaseId: identifier('lse', 1),
+      fencingToken: '1',
+      productSessionId: stageProductSessionId,
+      codexThreadId: identifier('cdx', 1),
+    }] : [],
+    readCursor: readCursor(),
   }
 }
 
@@ -358,7 +421,7 @@ function chatRuntime(productSessionId) {
     kind: 'runtime_projection',
     productSessionId,
     deliveryId: null,
-    stageRunId: null,
+    workRunId: null,
     readCursor: null,
     eventCursor: {
       eventId: null,
@@ -472,6 +535,33 @@ const controlPlane = {
       save()
       return completed(request, structuredClone(deliverySummary()), 0, 1)
     }
+    if (request.command === 'delivery.task_breakdown.create') {
+      if (state.delivery === null || request.payload.deliveryId !== state.delivery.deliveryId) {
+        throw accessFailure(request, 'protocol', 'RESOURCE_NOT_FOUND', false)
+      }
+      if (request.payload.expectedRevision !== state.delivery.revision
+        || request.payload.contractRevision !== 1
+        || request.payload.items.length !== 1
+        || !/^wit_[0-9A-HJKMNP-TV-Z]{26}$/u.test(request.payload.items[0].id)
+        || request.expectedRevision !== state.delivery.revision
+        || state.workItems.length !== 0
+        || request.payload.items[0].criterionIds.some(id => !workRunAggregate().contract.criteria.some(criterion => criterion.id === id))) {
+        throw accessFailure(request, 'conflict', 'REVISION_CONFLICT', false)
+      }
+      state.workItems = request.payload.items.map(item => ({
+        ...structuredClone(item), schemaVersion,
+        workContractId: workRunAggregate().contract.id,
+        workContractRevision: request.payload.contractRevision,
+        revision: 1, state: 'ready',
+      }))
+      state.delivery.revision += 1
+      save()
+      return completed(request, {
+        deliveryId: state.delivery.deliveryId,
+        deliveryRevision: state.delivery.revision,
+        items: workRunAggregate().items,
+      }, request.payload.expectedRevision, state.delivery.revision)
+    }
     if (request.command === 'delivery.advance') {
       if (state.delivery === null || state.delivery.deliveryId !== request.payload.deliveryId) {
         throw accessFailure(request, 'protocol', 'RESOURCE_NOT_FOUND', false)
@@ -479,6 +569,10 @@ const controlPlane = {
       if (request.expectedRevision !== state.delivery.revision) {
         throw accessFailure(request, 'conflict', 'REVISION_CONFLICT', false)
       }
+      if (request.payload.dispatchProfile !== 'executor' || state.workItems.length === 0 || state.workRunStarted) {
+        throw accessFailure(request, 'protocol', 'WRONG_STATE', false)
+      }
+      state.workRunStarted = true
       state.delivery.revision += 1
       save()
       return completed(
@@ -637,6 +731,9 @@ const controlPlane = {
         throw accessFailure(request, 'protocol', 'RESOURCE_NOT_FOUND', false)
       }
       return response(request, deliveryDetail())
+    }
+    if (request.query === 'workrun.get') {
+      return response(request, workRunAggregate())
     }
     if (request.query === 'runtime.projection.get') {
       return response(request, deliveryRuntime())
@@ -962,7 +1059,7 @@ async function restoreStrongFlowAfterReload() {
     hash: location.hash,
     deliveryParameter: hashParameter('delivery'),
     sessionParameter: hashParameter('session'),
-    stageRunParameter: hashParameter('stageRun'),
+    workRunParameter: hashParameter('workRun'),
     heading: document.querySelector('.wwc-strongflow-heading').textContent,
     status: document.querySelector('.wwc-strongflow-header-status')?.textContent ?? null,
     deliveryIds: [...document.querySelectorAll(

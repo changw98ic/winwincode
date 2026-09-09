@@ -14,7 +14,7 @@ import { strongFlowElement } from './strongflow-rendering.js'
  * now, what is blocking it, and what the user should do next — straight from the
  * already-delivered Delivery snapshot. Technical identities stay inside the
  * collapsible identity card, where each kind of identity gets its own labeled
- * row built only from exact SessionBinding, StageRun, runtime, and Candidate
+ * row built only from exact WorkRun, runtime, and Candidate
  * facts. Absent facts are reported as "Not reported" instead of being guessed
  * from a similar-looking identifier.
  */
@@ -48,7 +48,7 @@ const CANDIDATE_NONE = 'None frozen yet'
 
 const IDENTITY_TERMS = Object.freeze([
   'ProductSession',
-  'StageRun',
+  'WorkRun',
   'Attempt',
   'ExecutionJob',
   'Worker',
@@ -62,7 +62,7 @@ const IDENTITY_TERMS = Object.freeze([
 
 export interface StrongFlowExecutionIdentity {
   readonly productSessionId: string | null
-  readonly stageRunId: string | null
+  readonly workRunId: string | null
   readonly attempt: number | null
   readonly executionJobId: string | null
   readonly workerId: string | null
@@ -87,15 +87,14 @@ function openAttentionOf(projection: StrongFlowProjection): AttentionRecord | nu
   return open.find(item => item.blocking) ?? open[0] ?? null
 }
 
+function currentWorkRun(projection: StrongFlowProjection) {
+  return projection.workRunAggregate.runs.find(run => run.id === projection.runtime.workRunId)
+}
+
 function currentRunOf(projection: StrongFlowProjection): StrongFlowCurrentRun | null {
-  const stage = projection.stage
-  if (stage === undefined || stage === null) return null
-  return Object.freeze({
-    role: typeof stage.role === 'string' ? stage.role : null,
-    attempt: typeof stage.attempt === 'number' ? stage.attempt : null,
-    phase: typeof stage.stage === 'string' ? stage.stage : null,
-    status: typeof stage.status === 'string' ? stage.status : null,
-  })
+  const run = currentWorkRun(projection)
+  if (run === undefined) return null
+  return Object.freeze({ role: null, attempt: run.attempt, phase: null, status: run.state })
 }
 
 interface StrongFlowFailure {
@@ -120,11 +119,10 @@ function failureOf(projection: StrongFlowProjection): StrongFlowFailure | null {
       nextStep: 'Retry verification once the infrastructure error is resolved.',
     }
   }
-  const failedStage = projection.delivery.stages.find(item => item.status === 'failed')
-  if (failedStage !== undefined) {
+  if (currentWorkRun(projection)?.state === 'failed') {
     return {
-      reason: `The ${failedStage.role} run failed.`,
-      nextStep: 'Review the failed run and resolve the failure before retrying this Delivery.',
+      reason: 'The selected execution failed.',
+      nextStep: 'Review its reported failure and retry this work item.',
     }
   }
   if (projection.delivery.publication?.state === 'failed') {
@@ -234,10 +232,7 @@ export function strongFlowNextStep(
       currentRun,
     })
   }
-  const verifyingStage = projection.delivery.stages.find(item => (
-    item.stage === 'verifying' && (item.status === 'running' || item.status === 'waiting')
-  ))
-  if (status === 'verifying' || verifyingStage !== undefined) {
+  if (status === 'verifying') {
     return Object.freeze({
       category: 'verifying',
       statusLabel: 'Verifying',
@@ -287,29 +282,25 @@ export function strongFlowConnectionLabel(realtime: StrongFlowRealtimeStatus): s
 }
 
 /**
- * Exact execution identity of the canonical active StageRun. Every value is
- * copied from the delivered SessionBinding, StageRun, or Candidate projection;
- * the Delivery snapshot carries no model route, so that row stays unreported
- * instead of being guessed from a thread or worker identifier.
+ * Exact selected WorkRun identity. Historical records never supply live fields.
  */
 export function strongFlowExecutionIdentity(
   projection: StrongFlowProjection,
   realtime: StrongFlowRealtimeStatus,
 ): StrongFlowExecutionIdentity {
-  const stage = projection.stage
-  const binding = stage?.sessionBinding ?? null
+  const run = currentWorkRun(projection)
   return Object.freeze({
-    productSessionId: binding?.productSessionId ?? null,
-    stageRunId: typeof stage?.id === 'string' ? stage.id : null,
-    attempt: typeof stage?.attempt === 'number' ? stage.attempt : null,
-    executionJobId: binding?.executionJobId ?? null,
-    workerId: binding?.workerId ?? null,
-    workerSessionId: binding?.workerSessionId ?? null,
-    codexThreadId: binding?.codexThreadId ?? null,
+    productSessionId: run?.productSessionId ?? null,
+    workRunId: run?.id ?? null,
+    attempt: run?.attempt ?? null,
+    executionJobId: run?.executionJobId ?? null,
+    workerId: run?.workerId ?? null,
+    workerSessionId: run?.workerSessionId ?? null,
+    codexThreadId: run?.codexThreadId ?? null,
     modelRoute: null,
     candidateRef: projection.currentCandidate?.candidateRef ?? null,
-    leaseId: binding?.leaseId ?? null,
-    leaseHeld: (binding?.leaseId ?? null) !== null,
+    leaseId: run?.leaseId ?? null,
+    leaseHeld: run !== undefined && ['leased', 'running', 'candidate_ready'].includes(run.state),
     connection: strongFlowConnectionLabel(realtime),
   })
 }
@@ -322,7 +313,7 @@ export function strongFlowIdentityRows(
     let value: string
     switch (term) {
       case 'ProductSession': value = identity.productSessionId ?? STRONGFLOW_IDENTITY_NOT_REPORTED; break
-      case 'StageRun': value = identity.stageRunId ?? STRONGFLOW_IDENTITY_NOT_REPORTED; break
+      case 'WorkRun': value = identity.workRunId ?? STRONGFLOW_IDENTITY_NOT_REPORTED; break
       case 'Attempt':
         value = identity.attempt === null
           ? STRONGFLOW_IDENTITY_NOT_REPORTED
@@ -379,7 +370,7 @@ export function mountStrongFlowHeader(options: StrongFlowHeaderOptions): StrongF
   toggle.type = 'button'
   const list = strongFlowElement(document, 'dl', 'wwc-strongflow-identity-list')
   list.id = 'wwc-strongflow-identity-list'
-  // The card always describes the canonical current StageRun, so it carries a
+  // The card always describes the canonical current WorkRun, so it carries a
   // visible current-run marker; during a historical review the reviewed run is
   // never mistaken for these facts.
   const identityLabel = strongFlowElement(document, 'p', 'wwc-strongflow-identity-label')

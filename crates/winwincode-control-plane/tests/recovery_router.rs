@@ -10,7 +10,7 @@ use winwincode_control_plane::recovery_router::{
 };
 use winwincode_domain::{
     CodexThreadId, ExecutionJobId, ExecutionMessageId, FencingToken, Instant, LeaseId,
-    ProductSessionId, RequestId, SessionIdentity, Sha256Digest, StageRunId, WorkerId,
+    ProductSessionId, RequestId, SessionIdentity, Sha256Digest, WorkRunId, WorkerId,
     WorkerInstanceId, WorkerSessionId,
 };
 use winwincode_execution_port::generated::ExecutionLeaseStamp;
@@ -59,7 +59,7 @@ fn authority(
 fn state(capability: ThreadRecoveryCapability) -> SessionRecoveryState {
     SessionRecoveryState {
         product_session_id: ProductSessionId(id("psn", 1)),
-        stage_run_id: Some(StageRunId(id("run", 1))),
+        work_run_id: Some(WorkRunId(id("wrn", 1))),
         browser_stream_id: "product-session.events".to_owned(),
         browser_authorization_epoch: 7,
         revision: 8,
@@ -110,7 +110,7 @@ fn runtime_identity(
         session_identity: SessionIdentity {
             codex_thread_id: authority.slot.codex_thread_id.clone(),
             product_session_id: state.product_session_id.clone(),
-            stage_run_id: state.stage_run_id.clone(),
+            work_run_id: state.work_run_id.clone(),
             worker_session_id: authority.slot.worker_session_id.clone(),
         },
         codex_thread_id: authority.slot.codex_thread_id.clone(),

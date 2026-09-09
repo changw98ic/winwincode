@@ -18,6 +18,8 @@ const projectScope = {
 const chatProductSessionId = 'psn_00000000000000000000000001'
 const stageProductSessionId = 'psn_00000000000000000000000002'
 const stageRunId = 'run_00000000000000000000000001'
+const workRunId = 'wrn_00000000000000000000000001'
+const workItemId = 'wit_00000000000000000000000001'
 const credentialReferenceId = 'crd_00000000000000000000000001'
 const modelRoute = {
   providerId: 'browser-provider',
@@ -120,7 +122,7 @@ function summary() {
     title: deliverySpec.title,
     updatedAt: '2026-09-02T01:00:00.000Z',
     ownership: ownership(),
-    activeStageRunId: deliveryRevision === 1 ? null : stageRunId,
+    activeWorkRunId: deliveryRevision === 1 ? null : workRunId,
     openAttentionCount: 0,
     taskCounts: taskCounts(),
   }
@@ -150,13 +152,13 @@ function binding() {
     boundAt: '2026-09-02T01:00:00.000Z',
     executionJobId: 'job_00000000000000000000000001',
     productSessionId: stageProductSessionId,
-    stageRunId: null,
-    workerSessionId: null,
-    codexThreadId: null,
-    attempt: null,
-    fencingToken: null,
-    leaseId: null,
-    workerId: null,
+    workRunId,
+    workerSessionId: 'wsn_00000000000000000000000001',
+    codexThreadId: 'cdx_00000000000000000000000001',
+    attempt: 1,
+    fencingToken: '1',
+    leaseId: 'lse_00000000000000000000000001',
+    workerId: 'wrk_00000000000000000000000001',
     sourceIdentity: null,
     sessionIdentity: null,
   }
@@ -205,7 +207,17 @@ function detail() {
       startedAt: '2026-09-02T01:00:00.000Z',
       status: 'running',
     }],
-    tasks: [],
+    tasks: [{
+      id: 'dtk_00000000000000000000000001',
+      title: deliverySpec.title,
+      goal: deliverySpec.goal,
+      acceptanceCriterionIds: deliverySpec.acceptanceCriteria.map(criterion => criterion.id),
+      blockedByTaskIds: [],
+      owner: null,
+      status: 'active',
+      evidenceRefs: [],
+      workRunIds: [workRunId],
+    }],
     attention: [],
     evidence: [],
     currentCandidate: null,
@@ -220,13 +232,94 @@ function deliveryRuntime() {
     kind: 'runtime_projection',
     productSessionId: stageProductSessionId,
     deliveryId,
-    stageRunId,
+    workRunId,
     readCursor: cursor,
     eventCursor: cursor.eventCursor,
     lastProjectionSequence: 0,
     revision: 1,
     rebuiltAt: '2026-09-02T01:00:00.000Z',
-    sessions: [],
+    sessions: [{
+      productSessionId: stageProductSessionId,
+      workRunId,
+      workItemId,
+      sessionBindingId: 'binding:strongflow:empty-browser',
+      executionJobId: 'job_00000000000000000000000001',
+      workerSessionId: 'wsn_00000000000000000000000001',
+      codexThreadId: 'cdx_00000000000000000000000001',
+      fencingToken: '1',
+      leaseId: 'lse_00000000000000000000000001',
+      attempt: 1,
+      asOfSequence: 0,
+      activities: [],
+      agents: [],
+      agentEdges: [],
+      diffSummary: null,
+      plan: null,
+      usage: null,
+      recovery: {
+        failureCount: 0,
+        lastFailureSourceRef: null,
+        latestRecoverySourceRef: null,
+        recoveryCount: 0,
+        state: 'none',
+      },
+    }],
+  }
+}
+
+function workRunAggregate() {
+  const contract = {
+    schemaVersion,
+    id: 'wct_00000000000000000000000001',
+    revision: 1,
+    objective: deliverySpec.goal,
+    scope: [],
+    constraints: [],
+    protectedScope: [],
+    requiredHumanAuthority: 'none',
+    criteria: deliverySpec.acceptanceCriteria.map((criterion, index) => ({
+      id: `crt_${String(index + 1).padStart(26, '0')}`,
+      description: criterion.title,
+      verificationMethod: null,
+      required: criterion.required,
+    })),
+    createdAt: '2026-09-02T01:00:00.000Z',
+  }
+  return {
+    schemaVersion,
+    contract,
+    items: [{
+      schemaVersion,
+      id: workItemId,
+      workContractId: contract.id,
+      workContractRevision: 1,
+      title: contract.objective,
+      goal: contract.objective,
+      criterionIds: contract.criteria.map(criterion => criterion.id),
+      dependsOn: [],
+      revision: 1,
+      state: 'in_progress',
+    }],
+    runs: [{
+      schemaVersion,
+      id: workRunId,
+      workContractId: contract.id,
+      contractRevision: 1,
+      workItemId,
+      workItemRevision: 1,
+      revision: 1,
+      state: 'running',
+      executionJobId: 'job_00000000000000000000000001',
+      attempt: 1,
+      workerId: 'wrk_00000000000000000000000001',
+      workerInstanceId: 'wki_00000000000000000000000001',
+      workerSessionId: 'wsn_00000000000000000000000001',
+      leaseId: 'lse_00000000000000000000000001',
+      fencingToken: '1',
+      productSessionId: stageProductSessionId,
+      codexThreadId: null,
+    }],
+    readCursor: readCursor(),
   }
 }
 
@@ -275,7 +368,7 @@ function chatRuntime() {
     kind: 'runtime_projection',
     productSessionId: chatProductSessionId,
     deliveryId: null,
-    stageRunId: null,
+    workRunId: null,
     readCursor: null,
     eventCursor,
     lastProjectionSequence: 0,
@@ -341,6 +434,7 @@ const controlPlane = {
       && request.parameters.kind === 'product-session') return response(request, chatRuntime())
     if (deliveryRevision < 2) throw new Error(`unexpected pre-advance query: ${request.query}`)
     if (request.query === 'delivery.get') return response(request, detail())
+    if (request.query === 'workrun.get') return response(request, workRunAggregate())
     if (request.query === 'runtime.projection.get') return response(request, deliveryRuntime())
     throw new Error(`unexpected query: ${request.query}`)
   },

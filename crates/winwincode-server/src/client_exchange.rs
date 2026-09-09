@@ -1884,6 +1884,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the repository report test keeps replay and owner-fencing checks together"
+    )]
     fn repository_reports_are_idempotent_and_owner_fenced() {
         let root = std::env::temp_dir().join(format!(
             "winwincode-client-exchange-repository-{}",

@@ -1113,7 +1113,12 @@ impl Kernel {
             PermissionProfile::read_only()
         };
         let mut permissions = Permissions::from_approval_and_profile(
-            Constrained::allow_only(AskForApproval::OnRequest),
+            Constrained::allow_only(if canonical.workspace_write {
+                AskForApproval::OnRequest
+            } else {
+                // Independent observers must not escalate out of the frozen checkout.
+                AskForApproval::Never
+            }),
             Constrained::allow_only(permission_profile),
         )
         .map_err(|error| KernelFailure::new("ROLE_POLICY_UNAVAILABLE", error.to_string()))?;
@@ -2422,7 +2427,11 @@ mod tests {
             );
             assert_eq!(
                 config.permissions.approval_policy.value(),
-                super::AskForApproval::OnRequest,
+                if writer {
+                    super::AskForApproval::OnRequest
+                } else {
+                    super::AskForApproval::Never
+                },
                 "{role}"
             );
             assert!(config.agents_enabled, "{role}");

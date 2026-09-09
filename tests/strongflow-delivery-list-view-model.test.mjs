@@ -578,7 +578,10 @@ test('advance sends the exact delivery.advance command and applies the returned 
     .onCommand('delivery.advance', command => {
       assert.equal(command.command, 'delivery.advance')
       assert.equal(command.expectedRevision, 4)
-      assert.deepEqual(command.payload, { deliveryId: 'dlv_00000000000000000000000001' })
+      assert.deepEqual(command.payload, {
+        deliveryId: 'dlv_00000000000000000000000001',
+        dispatchProfile: 'executor',
+      })
       assert.equal(command.scope, scope)
       return {
         schemaVersion: 'winwincode/v1',

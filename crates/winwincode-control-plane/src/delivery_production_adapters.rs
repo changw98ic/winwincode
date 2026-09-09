@@ -23,19 +23,21 @@ use winwincode_api::generated::{
 use winwincode_delivery::{
     application::{
         attention::{AttentionDecision, ResolveAttentionInput, resolve_attention},
-        stage::{
-            AdvanceStageInput, NewStageIdentities, ReviewAttentionSeed, StageAdvanceEffect,
-            StageAdvanceResult, advance,
-        },
+        stage::{NewStageIdentities, StageAdvanceEffect, StageAdvanceResult},
     },
     domain::{
-        AttentionItemStatus, DELIVERY_SCHEMA_VERSION, Delivery, DeliveryStage, DeliveryStatus,
-        RepositoryKind, RepositoryRef, SessionBindingId, StageRunStatus,
+        AttentionItemStatus, DELIVERY_SCHEMA_VERSION, Delivery, RepositoryKind, RepositoryRef,
+        SessionBindingId,
+        rework::{
+            CurrentReworkScope, PreciseReworkAnnotation, ReworkDecision, decide_precise_rework,
+        },
     },
+    store::{DeliveryReworkHistoryPort, DeliveryStore},
 };
 use winwincode_domain::RepositoryScope;
 use winwincode_domain::{
-    AttentionItemId, ExecutionJobId, ProductSessionId, RequestId, Sha256Digest, StageRunId,
+    AttentionItemId, DeliveryId, ExecutionJobId, ProductSessionId, RequestId, Sha256Digest,
+    StageRunId,
 };
 use winwincode_execution_port::generated::{
     ExecutionJob, ExecutionLimits, ExecutionScope, ExecutionWorkspace, ExecutionWorkspaceWriteMode,
@@ -47,7 +49,7 @@ use winwincode_repository_context::{
 };
 use winwincode_storage::{
     ArtifactStore, ExecutionJobSubmission, ExecutionQueueScope, LocalArtifactObjectStore,
-    LocalGitSourceResolver, SqliteStorage, StorageError,
+    LocalGitSourceResolver, ProductStateStorage, SqliteStorage, StorageError,
 };
 
 use crate::{
@@ -287,44 +289,10 @@ impl LocalDeliveryAuthority {
         }
     }
 
-    fn terminal_authority(
-        &mut self,
-        delivery: &Delivery,
-        command: &winwincode_api::generated::CommandEnvelope,
-    ) -> Result<
-        Option<crate::terminal_outcome_transaction::DeliveryTerminalHandoff>,
-        DeliveryAuthorityError,
-    > {
-        let active = delivery.snapshot().stage_runs.iter().any(|run| {
-            matches!(
-                run.status,
-                StageRunStatus::Running | StageRunStatus::Waiting
-            )
-        });
-        if !active {
-            return Ok(None);
-        }
-        crate::terminal_outcome_transaction::load_active_terminal_handoff(
-            &mut self.storage,
-            delivery,
-            command,
-        )
-        .map_err(|error| storage_authority_error(&error))?
-        .map_or_else(
-            || {
-                Err(DeliveryAuthorityError::new(
-                    "active Delivery stage has no durable terminal authority",
-                ))
-            },
-            |facts| Ok(Some(facts)),
-        )
-    }
-
     fn execution_config(
         &self,
         delivery: &Delivery,
         transition: &StageAdvanceResult,
-        terminal_handoff: Option<&crate::terminal_outcome_transaction::DeliveryTerminalHandoff>,
         now_millis: u64,
     ) -> Result<Option<DeliveryExecutionConfig>, DeliveryAuthorityError> {
         let StageAdvanceEffect::Dispatch(intent) = &transition.effect else {
@@ -348,48 +316,41 @@ impl LocalDeliveryAuthority {
         ))
         .map_err(|error| DeliveryAuthorityError::new(error.to_string()))?;
         let (candidate_ref, checkout_revision) = match &transition.effect {
-            StageAdvanceEffect::Dispatch(intent) if intent.stage == DeliveryStage::Verifying => {
-                let pending_executor =
-                    terminal_handoff.filter(|handoff| pending_executor_handoff(delivery, handoff));
-                let candidate = if let Some(handoff) = pending_executor {
-                    crate::delivery_verdict_authority::resolve_pending_executor_candidate(
-                        &self.artifacts,
-                        &self.source_resolver,
-                        &self.config.repository_scope,
-                        &transition.delivery,
-                        handoff.facts(),
-                    )?
-                } else {
-                    crate::delivery_verdict_authority::resolve_current_candidate(
-                        &self.storage,
-                        &self.artifacts,
-                        &self.source_resolver,
-                        &self.config.repository_scope,
-                        &transition.delivery,
-                    )?
-                    .ok_or_else(|| {
-                        DeliveryAuthorityError::new(
-                            "verification dispatch has no exact frozen writer candidate",
-                        )
-                    })?
-                };
+            StageAdvanceEffect::Dispatch(intent)
+                if matches!(
+                    intent.role.as_str(),
+                    "reviewer" | "verifier" | "adversarial-verifier"
+                ) =>
+            {
+                let candidate = crate::delivery_verdict_authority::resolve_current_candidate(
+                    &self.storage,
+                    &self.artifacts,
+                    &self.source_resolver,
+                    &self.config.repository_scope,
+                    &transition.delivery,
+                )?
+                .ok_or_else(|| {
+                    DeliveryAuthorityError::new(
+                        "verification dispatch has no exact frozen writer candidate",
+                    )
+                })?;
                 (
                     Some(candidate.candidate_ref().to_owned()),
                     candidate.candidate_commit_id().to_owned(),
                 )
             }
-            StageAdvanceEffect::Dispatch(intent) if intent.stage == DeliveryStage::Reworking => {
+            StageAdvanceEffect::Dispatch(intent) if intent.role == "remediator" => {
                 let authorization = intent.rework_authorization().ok_or_else(|| {
                     DeliveryAuthorityError::new(
-                        "rework dispatch has no exact sealed candidate authorization",
+                        "remediator dispatch requires a sealed rework authorization",
                     )
                 })?;
                 (
-                    None,
+                    Some(authorization.candidate_ref().into()),
                     authorization
                         .previous_candidate()
                         .candidate_commit_id()
-                        .to_owned(),
+                        .into(),
                 )
             }
             _ => (None, delivery.snapshot().spec.base_revision.clone()),
@@ -423,19 +384,17 @@ impl LocalDeliveryAuthority {
     }
 }
 
-fn pending_executor_handoff(
-    delivery: &Delivery,
-    handoff: &crate::terminal_outcome_transaction::DeliveryTerminalHandoff,
-) -> bool {
-    delivery.snapshot().stage_runs.iter().any(|run| {
-        run.id == *handoff.facts().stage_run_id()
-            && run.stage == DeliveryStage::Executing
-            && run.role == "executor"
-            && matches!(
-                run.status,
-                StageRunStatus::Running | StageRunStatus::Waiting
-            )
-    })
+fn validate_dispatch_profile(profile: &str) -> Result<(), DeliveryAuthorityError> {
+    if matches!(
+        profile,
+        "executor" | "reviewer" | "verifier" | "adversarial-verifier" | "remediator"
+    ) {
+        Ok(())
+    } else {
+        Err(DeliveryAuthorityError::new(
+            "Delivery dispatch profile is not canonical",
+        ))
+    }
 }
 
 impl DeliveryAuthorityPort for LocalDeliveryAuthority {
@@ -488,6 +447,10 @@ impl DeliveryAuthorityPort for LocalDeliveryAuthority {
         })
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "Keep current candidate, history and dispatch authority selection in one boundary"
+    )]
     fn advance(
         &mut self,
         request: DeliveryAuthorityRequest<'_>,
@@ -509,87 +472,144 @@ impl DeliveryAuthorityPort for LocalDeliveryAuthority {
                 "Delivery advance does not match the configured repository",
             ));
         }
-        let active_stage = delivery.snapshot().stage_runs.iter().find(|run| {
-            matches!(
-                run.status,
-                StageRunStatus::Running | StageRunStatus::Waiting
-            )
-        });
-        let terminal_handoff = self.terminal_authority(delivery, request.command())?;
-        let previous_outcome = terminal_handoff
+        validate_dispatch_profile(&payload.dispatch_profile)?;
+        if (payload.dispatch_profile == "remediator") != payload.rework.is_some() {
+            return Err(DeliveryAuthorityError::new(
+                "remediator requires exact rework targets; other profiles reject them",
+            ));
+        }
+        let rework_authorization = if let Some(input) = &payload.rework {
+            let candidate = crate::delivery_verdict_authority::resolve_current_candidate(
+                &self.storage,
+                &self.artifacts,
+                &self.source_resolver,
+                &self.config.repository_scope,
+                delivery,
+            )?
+            .ok_or_else(|| {
+                DeliveryAuthorityError::new("rework requires a frozen current candidate")
+            })?;
+            let scope = CurrentReworkScope::from_candidate(delivery, &candidate)
+                .map_err(|error| DeliveryAuthorityError::new(error.to_string()))?;
+            let annotations = input
+                .targets
+                .iter()
+                .map(|target| PreciseReworkAnnotation {
+                    candidate_ref: input.candidate_ref.clone(),
+                    diff_sha256: input.diff_sha256.clone(),
+                    work_item_id: target.work_item_id.clone(),
+                    file_path: target.file_path.clone(),
+                    hunk_sha256: target.source_hunk_sha256.clone(),
+                    evidence_ref_ids: target.evidence_ref_ids.clone(),
+                })
+                .collect::<Vec<_>>();
+            let key = crate::delivery_transaction::delivery_journal_key(delivery.id())
+                .map_err(|error| DeliveryAuthorityError::new(error.to_string()))?;
+            let loaded = self
+                .storage
+                .load_journal(&key)
+                .map_err(|error| DeliveryAuthorityError::new(error.to_string()))?;
+            let journal = crate::delivery_transaction::StagedDeliveryJournal::new(
+                delivery.id().clone(),
+                loaded,
+            );
+            let history = DeliveryStore::borrowed(&journal)
+                .validated_rework_history(delivery)
+                .map_err(|error| DeliveryAuthorityError::new(error.to_string()))?;
+            match decide_precise_rework(delivery, &candidate, &scope, &annotations, &history)
+                .map_err(|error| DeliveryAuthorityError::new(error.to_string()))?
+            {
+                ReworkDecision::Start(authorization) => Some(authorization),
+                ReworkDecision::Clarify(_) => {
+                    return Err(DeliveryAuthorityError::new(
+                        "rework policy requires clarification before another writer",
+                    ));
+                }
+            }
+        } else {
+            None
+        };
+        let rework_aggregate = rework_authorization
             .as_ref()
-            .map(|handoff| handoff.facts().verify_active(delivery))
+            .map(|authorization| authorization.dispatch_aggregate(delivery))
             .transpose()
             .map_err(|error| DeliveryAuthorityError::new(error.to_string()))?;
-        let current_lease = terminal_handoff
+        let aggregate = rework_aggregate
             .as_ref()
-            .map(|handoff| handoff.facts().authority().active_lease().clone());
+            .unwrap_or(&delivery.snapshot().work_run_aggregate);
+        let start = match &rework_authorization {
+            Some(authorization) => aggregate.start_item(authorization.work_item_id()),
+            None if matches!(
+                payload.dispatch_profile.as_str(),
+                "reviewer" | "verifier" | "adversarial-verifier"
+            ) =>
+            {
+                let candidate = crate::delivery_verdict_authority::resolve_current_candidate(
+                    &self.storage,
+                    &self.artifacts,
+                    &self.source_resolver,
+                    &self.config.repository_scope,
+                    delivery,
+                )?
+                .ok_or_else(|| {
+                    DeliveryAuthorityError::new("verification requires a frozen current candidate")
+                })?;
+                let producer = aggregate
+                    .runs
+                    .iter()
+                    .find(|run| &run.id == candidate.producer_work_run_id())
+                    .ok_or_else(|| {
+                        DeliveryAuthorityError::new("candidate producer WorkRun is missing")
+                    })?;
+                aggregate.start_verification(&producer.work_item_id)
+            }
+            None => aggregate.start_next(),
+        }
+        .map_err(|error| DeliveryAuthorityError::new(format!("{error:?}")))?;
+        let now_millis = Self::now_millis(Some(delivery))?;
         let seed = command_seed(request.command())?;
-        let actor = actor_id(&request.command().actor);
-        let review_handoff = review_handoff(delivery, active_stage);
-        let now_millis = if review_handoff == ReviewHandoff::Plan {
-            previous_outcome.as_ref().map_or_else(
-                || Self::now_millis(Some(delivery)),
-                |outcome| Ok(outcome.finished_at_millis()),
-            )?
-        } else {
-            Self::now_millis(Some(delivery))?
+        let work_contract = &delivery.snapshot().work_run_aggregate.contract;
+        let identities = NewStageIdentities {
+            stage_run_id: StageRunId(deterministic_id("run", seed_with(&seed, b"stage"))),
+            work_contract_id: work_contract.id.clone(),
+            work_contract_revision: work_contract.revision.clone(),
+            work_item_id: start.work_item.id.clone(),
+            work_item_revision: start.work_item.revision.clone(),
+            work_run_id: winwincode_domain::WorkRunId(deterministic_id(
+                "wrn",
+                seed_with(&seed, b"work-run"),
+            )),
+            execution_job_id: ExecutionJobId(deterministic_id("job", seed_with(&seed, b"job"))),
+            session_binding_id: SessionBindingId(deterministic_id(
+                "binding",
+                seed_with(&seed, b"binding"),
+            )),
+            attention_item_id: AttentionItemId(deterministic_id(
+                "att",
+                seed_with(&seed, b"attention"),
+            )),
         };
-        let review_title = format!("Review Delivery {}", delivery.id().0);
-        let input = AdvanceStageInput {
-            expected_revision: delivery.revision(),
-            product_session_id: ProductSessionId(deterministic_id(
+        let transition = StageAdvanceResult::canonical_workrun_dispatch(
+            delivery,
+            rework_authorization,
+            identities,
+            ProductSessionId(deterministic_id(
                 "psn",
                 seed_with(&seed, b"product-session"),
             )),
-            identities: NewStageIdentities {
-                stage_run_id: StageRunId(deterministic_id("run", seed_with(&seed, b"stage"))),
-                execution_job_id: ExecutionJobId(deterministic_id("job", seed_with(&seed, b"job"))),
-                session_binding_id: SessionBindingId(deterministic_id(
-                    "binding",
-                    seed_with(&seed, b"binding"),
-                )),
-                attention_item_id: AttentionItemId(deterministic_id(
-                    "att",
-                    seed_with(&seed, b"attention"),
-                )),
-            },
-            review: (review_handoff == ReviewHandoff::Delivery).then(|| ReviewAttentionSeed {
-                title: review_title.clone(),
-                context: format!(
-                    "delivery={} revision={} spec={}",
-                    delivery.id().0,
-                    delivery.revision(),
-                    delivery.snapshot().spec.id.0
-                ),
-                assigned_to: actor,
-            }),
-            previous_outcome,
-            current_lease,
-            rework_authorization: None,
+            payload.dispatch_profile,
+            start.work_item.goal.clone(),
+            u64::try_from(start.attempt)
+                .map_err(|_| DeliveryAuthorityError::new("WorkRun attempt is invalid"))?,
             now_millis,
-        };
-        let transition = if review_handoff == ReviewHandoff::Plan {
-            crate::planning_solution_authority::prepare(
-                &self.storage,
-                &self.config.repository_scope,
-                delivery,
-                input,
-                review_title,
-                actor_id(&request.command().actor),
-            )?
-        } else {
-            advance(delivery, input)
-                .map_err(|error| DeliveryAuthorityError::new(error.to_string()))?
-        };
-        let execution =
-            self.execution_config(delivery, &transition, terminal_handoff.as_ref(), now_millis)?;
+        )
+        .map_err(|error| DeliveryAuthorityError::new(error.to_string()))?;
+        let execution = self.execution_config(delivery, &transition, now_millis)?;
         Ok(DeliveryAdvanceAuthority {
             repository: delivery.snapshot().spec.repository.clone(),
             source_ref: delivery.snapshot().spec.source_ref.clone(),
             transition,
             execution,
-            terminal_handoff,
         })
     }
 
@@ -623,9 +643,7 @@ impl DeliveryAuthorityPort for LocalDeliveryAuthority {
                 "current Attention identity is ambiguous",
             ));
         }
-        let stage_run_id = item.stage_run_id.clone().ok_or_else(|| {
-            DeliveryAuthorityError::new("current Attention item has no StageRun identity")
-        })?;
+        let work_run_id = item.work_run_id.clone();
         let decision = match payload.decision.as_str() {
             "resolve" => AttentionDecision::Resolved,
             "dismiss" => AttentionDecision::Dismissed,
@@ -640,7 +658,7 @@ impl DeliveryAuthorityPort for LocalDeliveryAuthority {
             ResolveAttentionInput {
                 expected_revision: delivery.revision(),
                 attention_item_id: payload.attention_item_id,
-                stage_run_id,
+                work_run_id,
                 expected_context: item.context.clone(),
                 actor: actor_id(&request.command().actor),
                 decision,
@@ -719,7 +737,7 @@ impl LocalExecutionJobDispatcher {
 
 impl ExecutionJobDispatcher for LocalExecutionJobDispatcher {
     fn dispatch(&mut self, job: &ExecutionJob) -> Result<(), DeliveryExecutionPortError> {
-        let ExecutionScope::DeliveryStageExecutionScope(job_scope) = &job.scope else {
+        let ExecutionScope::WorkRunExecutionScope(job_scope) = &job.scope else {
             return Err(DeliveryExecutionPortError::new(
                 "Delivery dispatcher received a foreign execution scope",
             ));
@@ -738,13 +756,31 @@ impl ExecutionJobDispatcher for LocalExecutionJobDispatcher {
             "req",
             [b"execution-queue:".as_slice(), job.job_id.0.as_bytes()].concat(),
         ));
+        // The WorkRun wire scope deliberately carries no Delivery transport
+        // field. Recover the owning Delivery from the immutable outbox intent
+        // committed by `delivery.advance`; this keeps queue scope and public
+        // WorkRun cancellation tied to the exact Delivery rather than relying
+        // on a caller-supplied or absent value.
+        let (durable, _) =
+            crate::delivery_transaction::load_durable_execution_intent(&self.storage, &job.job_id)
+                .map_err(|error| dispatch_error(&error))?;
+        let delivery_id = durable
+            .stream_id()
+            .strip_prefix("delivery:")
+            .filter(|value| !value.is_empty())
+            .map(|value| DeliveryId(value.to_owned()))
+            .ok_or_else(|| {
+                DeliveryExecutionPortError::new(
+                    "WorkRun dispatch intent is not owned by a Delivery stream",
+                )
+            })?;
         let scope = ExecutionQueueScope {
             organization_id: self.repository_scope.organization_id.clone(),
             workspace_id: self.repository_scope.workspace_id.clone(),
             project_id: self.repository_scope.project_id.clone(),
             repository_id: self.repository_scope.repository_id.clone(),
             product_session_id: job_scope.product_session_id.clone(),
-            delivery_id: Some(job_scope.delivery_id.clone()),
+            delivery_id: Some(delivery_id),
         };
         let attempt = u64::try_from(job.attempt).map_err(|_| {
             DeliveryExecutionPortError::new("ExecutionJob attempt is outside the queue range")
@@ -764,7 +800,7 @@ impl ExecutionJobDispatcher for LocalExecutionJobDispatcher {
                 && existing.dispatch_payload == dispatch_payload
                 && existing.attempt == attempt
                 && existing.dependencies.is_empty()
-                && existing.stage_run_id == Some(job_scope.stage_run_id.clone());
+                && existing.work_run_id == Some(job_scope.work_run_id.clone());
             return if exact {
                 Ok(())
             } else {
@@ -783,7 +819,7 @@ impl ExecutionJobDispatcher for LocalExecutionJobDispatcher {
                 dispatch_payload,
                 attempt,
                 dependencies: Vec::new(),
-                stage_run_id: Some(job_scope.stage_run_id.clone()),
+                work_run_id: Some(job_scope.work_run_id.clone()),
                 submitted_at,
             })
             .map_err(|error| dispatch_error(&error))?;
@@ -875,27 +911,6 @@ impl ControlPlane {
             )));
         }
         Ok(control_plane)
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ReviewHandoff {
-    None,
-    Plan,
-    Delivery,
-}
-
-fn review_handoff(
-    delivery: &Delivery,
-    active_stage: Option<&winwincode_delivery::domain::StageRun>,
-) -> ReviewHandoff {
-    match (
-        delivery.snapshot().status,
-        active_stage.map(|run| run.stage),
-    ) {
-        (DeliveryStatus::Planning, Some(_)) => ReviewHandoff::Plan,
-        (DeliveryStatus::ReadyToDeliver, None) => ReviewHandoff::Delivery,
-        _ => ReviewHandoff::None,
     }
 }
 

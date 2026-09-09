@@ -1,0 +1,191 @@
+{
+  "document": "WWC-ER-0004 runtime contract design",
+  "status": "accepted_implemented",
+  "bead": "winwincode-8xk",
+  "source": {
+    "plan": "winwincode-community-engineering-runtime-bd-backlog.md",
+    "planSha256": "4359a7084e904640a1e4383d70278101cbbbf9aabf2eb4afc2ba78ff834671f8",
+    "audit": "winwincode-dwz",
+    "baseline": "baedb1ef0849f188b800431fe1a016f0af0caa79",
+    "evidenceLevel": "canonical schema, generated Rust/TypeScript/OpenAPI and executable schema checks"
+  },
+  "decisionBoundary": {
+    "controller": "唯一命令入口；校验身份、租约/围栏、期望修订和状态转换；持久化 WorkContract/WorkItem/WorkRun 及完成门；只有 Controller 产生完成、重试或人工门禁决定。",
+    "worker": "只接受 Controller 派发的 WorkRun；在绑定的 WorkerSession、WorkspaceBinding 和 Candidate 上执行；只上报带完整执行身份的事实，不写 WorkItem 完成状态。",
+    "verifier": "只读取冻结 Candidate 和允许的只读工作区；按 VerificationPlan 计算并上报 Evidence/Findings/结果事实；不能修改产品源代码或直接写权威 Verdict。Controller 校验并持久化消费这些事实。",
+    "human": "只作为 Attention 的授权端点，通过 Controller 命令确认、驳回或补充事实，不是第四执行引擎。",
+    "planner": "降为 Worker 内部生成步骤，不再成为顶层持久化阶段或完成权威。"
+  },
+  "entities": {
+    "WorkContract": {
+      "purpose": "不可变的目标、约束、验收规则和修订链；由 Controller 创建并修订。WorkContract 不持有可变 currentCandidate/currentVerdict，也不直接拥有完成状态。",
+      "identity": "workContractId + personal/repository scope + immutable contractRevision",
+      "links": [
+        "hasMany WorkItem",
+        "hasMany VerificationPlan",
+        "references repository/workspace scope"
+      ],
+      "writeAuthority": "Controller"
+    },
+    "WorkItem": {
+      "purpose": "合同中的一个可调度工作单元；完成状态归 WorkItem/运行投影，由 Controller 派生，不由 Worker 直接写。",
+      "identity": "workItemId + workContractId + itemRevision",
+      "links": [
+        "dependsOn WorkItem",
+        "hasMany WorkRun",
+        "hasMany Candidate",
+        "hasMany Evidence/Verdict"
+      ],
+      "writeAuthority": "Controller"
+    },
+    "WorkRun": {
+      "purpose": "一次派发和执行尝试；替代旧 StageRun 顶层 planning/executing/verifying 语义。",
+      "identity": "workRunId + workItemId + runRevision",
+      "executionBinding": "exactly one execution_registry Attempt per WorkRun: executionJobId, attempt, workerId, workerInstanceId, workerSessionId, leaseId, fencingToken; productSessionId/codexThreadId when attached",
+      "writeAuthority": "Controller creates/binds; Worker reports facts; Controller settles",
+      "cardinality": "one WorkItem -> many WorkRun; one WorkRun -> exactly one Attempt/lease binding; one WorkRun -> at most one accepted Candidate; rejected candidate observations are facts, not additional accepted candidates"
+    },
+    "Candidate": {
+      "purpose": "Worker 在一个 WorkRun 的唯一 execution_registry Attempt 中产生的、绑定 WorkContract revision 的冻结代码结果；每个 WorkRun 最多一个被接受 Candidate。不同 WorkRun 即使复用同一 commit，也分别绑定自己的验证身份。",
+      "writeAuthority": "Worker creates frozen candidate fact; Controller accepts/rejects it"
+    },
+    "VerificationPlan": {
+      "purpose": "对 Candidate、Contract revision 和 acceptance criteria 的只读验证声明；固定 criterionIds、commands、permissionProfile 和 workRun 绑定。",
+      "identity": "verificationPlanId + workContractId + planRevision",
+      "writeAuthority": "Controller"
+    },
+    "Evidence": {
+      "purpose": "Verifier/Worker 上报并由 Controller 根据当前 Candidate、计划、criterion 和完整 fenced execution identity 重建的事实引用。",
+      "identity": "evidenceId + sourceEventId + candidateDigest + producer execution identity",
+      "writeAuthority": "Verifier/Worker reports; Controller accepts"
+    },
+    "Verdict": {
+      "purpose": "Controller 根据已接受 Evidence 和计划计算出的结果；Verifier 可提供结果事实，但只有 Controller 能落地权威 Verdict 或 WorkItem 完成门。",
+      "identity": "verdictId + workItemId + candidateDigest + verdictRevision",
+      "writeAuthority": "Controller"
+    }
+  },
+  "relationRules": [
+    "WorkContract owns WorkItem; WorkItem owns WorkRun and Candidate history. Contract scope is personal/repository-neutral; it does not require organizationId.",
+    "One WorkItem has many WorkRun records. Each WorkRun binds exactly one execution_registry Attempt/lease/fencing identity and accepts at most one Candidate. Separate WorkRun records may reuse the same commit, but their verification bindings remain independent.",
+    "VerificationPlan must name the exact WorkContract revision, WorkItem revision, Candidate digest and required verifier roles.",
+    "Evidence is accepted only when its producer identity, lease/fencing token, WorkRun, Candidate digest and source sequence match the current plan.",
+    "Verdict references the exact accepted Evidence set and Candidate digest; a later Candidate or contract revision invalidates the old completion claim.",
+    "No object may use planningStageRunId/reviewStageRunId as a new write identity; any old StageRun is read as migration input only.",
+    "A historical StageRun with a null task reference is non-executable history only; it cannot create a null WorkItem or be dispatched as a WorkRun."
+  ],
+  "currentCanonicalSources": [
+    {
+      "path": "schema/winwincode/v1/domain.schema.json",
+      "sha256": "cd330b29cad6936286a4129a5e62794772905af392c5f5b9f1ce83c1a87fbd00",
+      "facts": [
+        "WorkContract",
+        "WorkItem",
+        "WorkRun",
+        "Candidate",
+        "VerificationPlan",
+        "Evidence",
+        "Verdict",
+        "SessionIdentity",
+        "StageRunId (historical only)"
+      ]
+    },
+    {
+      "path": "schema/winwincode/v1/control-plane-http.schema.json",
+      "sha256": "89e943f7da8be87a2dfb184cacf17a79e0d0fe20400c38a85a15f9b48fde2733",
+      "facts": [
+        "HTTP command envelope",
+        "candidate commands",
+        "planningStageRunId/reviewStageRunId legacy fields",
+        "error responses"
+      ]
+    },
+    {
+      "path": "schema/winwincode/v1/execution-port.schema.json",
+      "sha256": "a744ba146551752da919e79e93fe729040e4fecc4f7bf6cef09b8a62d47296e4",
+      "facts": [
+        "Worker execution transport and fenced identity"
+      ]
+    },
+    {
+      "path": "crates/winwincode-delivery/src/domain/verification.rs",
+      "sha256": "c1ec2f80d998385a0647787c185d1fee610891c15c86ffdeeb70b4d07c92daf3",
+      "facts": [
+        "sealed verification facts",
+        "fenced execution identity",
+        "role and workspace restrictions"
+      ]
+    },
+    {
+      "path": "crates/winwincode-delivery/src/domain/evidence.rs",
+      "sha256": "41df73d3369cce2d61a78382340ac87676f5ff223d11dc048abcdf74c738cfad",
+      "facts": [
+        "EvidenceRef",
+        "accepted runtime source facts",
+        "candidate-bound evidence"
+      ]
+    },
+    {
+      "path": "crates/winwincode-delivery/src/domain/candidate.rs",
+      "sha256": "df55ad1e490fe253a4e14678fe7fecd77f0806384f8d03db65881cdbcfe9a315",
+      "facts": [
+        "FrozenDeliveryCandidate",
+        "validated Git snapshot"
+      ]
+    },
+    {
+      "path": "scripts/generate-contracts.mjs",
+      "sha256": "a6f11f8980f030b8d076c0399ef77d1947234b63f9fde610f0b439a5cc82d3da",
+      "facts": [
+        "canonical schema to generated Rust/TypeScript/OpenAPI chain"
+      ]
+    },
+    {
+      "path": "crates/winwincode-storage/src/execution_registry.rs",
+      "sha256": "a0bcd381c0695780d43a654695b86efc8f30471e0755bd8b815dc4612afaf037",
+      "facts": [
+        "attempt replacement",
+        "lease/fencing/worker-instance authority",
+        "restart and terminal attempt rules"
+      ]
+    }
+  ],
+  "cardinality": {
+    "WorkContract.workItems": "0..*",
+    "WorkItem.workRuns": "0..*",
+    "WorkRun.executionAttempt": "exactly 1",
+    "WorkRun.acceptedCandidate": "0..1",
+    "Candidate.workRun": "exactly 1",
+    "VerificationPlan.workItemRevision": "exactly 1",
+    "Evidence.candidateDigest": "exactly 1",
+    "Verdict.acceptedEvidence": "0..* (inconclusive may have none)",
+    "StageRun.nullTask": "historical-only; 0 executable WorkItem",
+    "Evidence.criterion": "exactly 1",
+    "WorkRun.productSession": "0..1",
+    "WorkRun.contractRevision": "exactly 1"
+  },
+  "schema": {
+    "canonicalLocation": "schema/winwincode/v1/domain.schema.json",
+    "objects": [
+      "WorkContract",
+      "WorkItem",
+      "WorkRun",
+      "Candidate",
+      "VerificationPlan",
+      "Evidence",
+      "Verdict"
+    ],
+    "generation": "scripts/generate-contracts.mjs",
+    "rustOwner": "winwincode-domain",
+    "firstConsumer": "crates/winwincode-delivery/src/workrun_migration.rs",
+    "requiredNullable": "Required nullable properties remain required in JSON and Rust deserialization.",
+    "validationBoundary": "JSON Schema checks shapes, IDs and bounded fields. Cross-object equality and write authority are enforced by the Controller; a schema-valid JSON object is not a trusted runtime fact."
+  },
+  "checks": [
+    "node scripts/generate-contracts.mjs --check",
+    "node --test tests/engineering-runtime-contract.test.mjs tests/engineering-runtime-design.test.mjs",
+    "corepack pnpm typecheck",
+    "cargo check -p winwincode-domain -p winwincode-api -p winwincode-execution-port --locked"
+  ],
+  "implementationBoundary": "E00 defines and generates the shared object relationships; later E01–E13 tasks implement production scheduling and authority validation. The offline migration does not start a second runtime."
+}

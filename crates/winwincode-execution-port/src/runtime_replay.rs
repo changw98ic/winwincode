@@ -143,9 +143,9 @@ fn runtime_stream_key(
         worker_session_id.0.as_str(),
         session_identity.product_session_id.0.as_str(),
         session_identity
-            .stage_run_id
+            .work_run_id
             .as_ref()
-            .map_or("", |stage_run_id| stage_run_id.0.as_str()),
+            .map_or("", |work_run_id| work_run_id.0.as_str()),
         session_identity.codex_thread_id.0.as_str(),
         codex_thread_id.0.as_str(),
     ] {
@@ -849,9 +849,9 @@ fn validate_identity(
         || worker_session_id.0.is_empty()
         || session_identity.product_session_id.0.is_empty()
         || session_identity
-            .stage_run_id
+            .work_run_id
             .as_ref()
-            .is_some_and(|stage_run_id| stage_run_id.0.is_empty())
+            .is_some_and(|work_run_id| work_run_id.0.is_empty())
         || session_identity.worker_session_id.0.is_empty()
         || session_identity.codex_thread_id.0.is_empty()
     {

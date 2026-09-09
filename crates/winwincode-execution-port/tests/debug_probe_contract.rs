@@ -38,7 +38,7 @@ fn authority() -> DebugProbeRoundAuthority {
         session_identity: SessionIdentity {
             codex_thread_id: CodexThreadId("cdx_00000000000000000000000000".to_owned()),
             product_session_id: ProductSessionId("psn_00000000000000000000000000".to_owned()),
-            stage_run_id: None,
+            work_run_id: None,
             worker_session_id: WorkerSessionId("wsn_00000000000000000000000000".to_owned()),
         },
         workspace_revision: WorkspaceRevision(format!("git-tree:{}", "0".repeat(40))),
@@ -675,5 +675,21 @@ fn event_and_round_ledgers_enforce_order_status_and_budget_binding() {
             }
         }
         assert!(validate_probe_round_receipt(&changed, &plan).is_err());
+    }
+}
+
+#[test]
+fn debug_probe_authority_accepts_only_canonical_workrun_identity() {
+    use winwincode_execution_port::debug_probe_contract::validate_debug_probe_round_authority;
+    let mut current = authority();
+    validate_debug_probe_round_authority(&current, &current).expect("ProductSession-only probe");
+    current.session_identity.work_run_id = Some(winwincode_domain::WorkRunId(
+        "wrn_00000000000000000000000001".into(),
+    ));
+    validate_debug_probe_round_authority(&current, &current).expect("canonical WorkRun probe");
+    for invalid in ["run_00000000000000000000000001", "wrn_invalid"] {
+        current.session_identity.work_run_id = Some(winwincode_domain::WorkRunId(invalid.into()));
+        validate_debug_probe_round_authority(&current, &current)
+            .expect_err("historical or malformed execution identity");
     }
 }
