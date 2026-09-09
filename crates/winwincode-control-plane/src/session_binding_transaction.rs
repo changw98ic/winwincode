@@ -757,12 +757,9 @@ fn binding_pending_audit_event(
         session_identity.product_session_id.clone(),
         session_identity.worker_session_id.clone(),
         session_identity.codex_thread_id.clone(),
-        session_identity
-            .work_run_id
-            .clone()
-            .ok_or_else(|| {
-                StorageError::invalid_input("SessionBinding SessionIdentity has no WorkRun")
-            })?,
+        session_identity.work_run_id.clone().ok_or_else(|| {
+            StorageError::invalid_input("SessionBinding SessionIdentity has no WorkRun")
+        })?,
         context.identity.execution_job_id.clone(),
         context.delivery_id.clone(),
         None,

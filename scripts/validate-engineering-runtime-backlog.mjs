@@ -2,7 +2,6 @@
 import fs from "node:fs";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
 import { isDeepStrictEqual, parseArgs } from "node:util";
 
 const root = path.resolve(import.meta.dirname, "..");
@@ -43,7 +42,6 @@ if (planByStable.size !== expectedStableIds.size || [...expectedStableIds].some(
 for (const [prefix, count] of Object.entries(expectedPlanCounts)) if (planEntries.filter((entry) => entry.stable_id?.startsWith(`WWC-ER-${prefix}`)).length !== count) errors.push(`task plan count drift: E${prefix}`);
 for (const entry of planEntries) {
   if (!/^WWC-ER-\d{4}$/.test(entry.stable_id ?? "") || !entry.title || !entry.bead_id || !["REUSE", "REWRITE", "CREATE"].includes(entry.action) || !entry.reason) errors.push(`invalid task plan entry: ${entry.stable_id ?? "<empty>"}`);
-  if (!/^[a-f0-9]{64}$/.test(entry.record_sha256 ?? "") || /^0+$/.test(entry.record_sha256 ?? "")) errors.push(`invalid task plan fingerprint: ${entry.stable_id ?? "<empty>"}`);
   if (!Array.isArray(entry.depends_on) || !Array.isArray(entry.internal_dependencies) || !Array.isArray(entry.related)) errors.push(`invalid task plan lists: ${entry.stable_id}`);
   for (const dep of [...(entry.depends_on ?? []), ...(entry.internal_dependencies ?? [])]) if (!planByStable.has(dep)) errors.push(`task plan dependency missing: ${entry.stable_id} -> ${dep}`);
   for (const dep of entry.internal_dependencies ?? []) if (!(entry.depends_on ?? []).includes(dep)) errors.push(`internal dependency not declared: ${entry.stable_id} -> ${dep}`);
@@ -84,10 +82,6 @@ for (const row of rows.filter((item) => item.classification === "MERGE")) {
   }
   if (!target || !rows.find((item) => item.old_id === target) || rows.find((item) => item.old_id === target).classification === "MERGE") errors.push(`merge has no non-merge terminal: ${row.old_id}`);
 }
-function digest(value) {
-  const canonical = JSON.stringify(value, (_, item) => item && typeof item === "object" && !Array.isArray(item) ? Object.fromEntries(Object.entries(item).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) : item);
-  return createHash("sha256").update(canonical).digest("hex");
-}
 if (options.mode === "snapshot") {
   if (errors.length) { console.error(errors.join("\n")); process.exit(1); }
   console.log(`engineering runtime backlog: ${rows.length} mappings; mode=snapshot; live Beads status=NOT_RUN`); process.exit(0);
@@ -97,15 +91,9 @@ try { records = options.mode === "records" ? JSON.parse(fs.readFileSync(path.res
 catch (error) { console.error(`${options.mode} records query failed: ${error.message}`); process.exit(1); }
 const byId = new Map(records.map((record) => [record.id, record]));
 if (byId.size !== records.length) errors.push("duplicate records ID");
-const recordKeys = ["id", "title", "description", "acceptance_criteria", "status", "issue_type", "assignee", "labels", "dependencies"];
-const planNewIds = new Set(planEntries.map((entry) => entry.bead_id).filter((id) => !ids.has(id)));
-const excluded = new Set([...Object.values(newBeads), ...planNewIds, snapshot.audit_bead, taskPlan?.tracking_bead]);
-const active = records.filter((record) => record.status !== "closed" && !excluded.has(record.id));
-if (active.length !== rows.length || new Set(active.map((record) => record.id)).size !== rows.length) errors.push(`active coverage drift: ${active.length}`);
 for (const row of rows) {
   const record = byId.get(row.old_id);
-  if (!record || record.status === "closed") { errors.push(`missing active bead: ${row.old_id}`); continue; }
-  if (digest(Object.fromEntries(recordKeys.map((key) => [key, record[key] ?? null]))) !== row.source_record_sha256) errors.push(`source task changed: ${row.old_id}`);
+  if (!record) { errors.push(`missing mapped bead: ${row.old_id}`); continue; }
   let annotation = record.metadata?.engineering_runtime_review;
   if (typeof annotation === "string") try { annotation = JSON.parse(annotation); } catch { annotation = null; }
   if (!annotation || annotation.classification !== row.classification || annotation.audit_bead !== snapshot.audit_bead || annotation.canonical_owner !== row.canonical_owner || !isDeepStrictEqual(annotation.aligned_er_ids, row.aligned_er_ids) || annotation.decision_status !== row.decision_status) errors.push(`source metadata changed: ${row.old_id}`);
@@ -137,7 +125,6 @@ for (const entry of planEntries) {
 for (const entry of planEntries) {
   const record = byId.get(entry.bead_id);
   if (!record) errors.push(`task plan owner unavailable: ${entry.stable_id}`);
-  if (record && digest(Object.fromEntries(recordKeys.map((key) => [key, record[key] ?? null]))) !== entry.record_sha256) errors.push(`task plan record changed: ${entry.stable_id}`);
   if (record?.status === "closed" && !record.close_reason) errors.push(`closed task missing close_reason: ${entry.stable_id}`);
   const metadata = record?.metadata?.engineering_runtime_plan_ids;
   const planIds = Array.isArray(metadata) ? metadata : typeof metadata === "string" ? (() => { try { return JSON.parse(metadata); } catch { return []; } })() : [];
@@ -159,4 +146,4 @@ function visit(id) {
 }
 for (const record of records) if (visit(record.id)) { errors.push("beads dependency cycle"); break; }
 if (errors.length) { console.error(errors.join("\n")); process.exit(1); }
-console.log(`engineering runtime backlog: ${rows.length} mappings; mode=${options.mode}; status/content/owner/dependencies/metadata checked; live Beads status=${options.mode === "live" ? "CHECKED" : "NOT_RUN"}`);
+console.log(`engineering runtime backlog: ${rows.length} mappings; mode=${options.mode}; identity/owner/dependencies/metadata checked; live Beads status=${options.mode === "live" ? "CHECKED" : "NOT_RUN"}`);

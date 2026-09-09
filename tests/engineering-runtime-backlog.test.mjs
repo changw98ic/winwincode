@@ -42,10 +42,6 @@ function fixture() {
     const owner = data.task_plan.entries.find(item => item.stable_id === dependency)?.bead_id
     if (owner && owner !== entry.bead_id) records.find(item => item.id === entry.bead_id).dependencies.push({ depends_on_id: owner, type: 'blocks' })
   }
-  for (const entry of data.task_plan.entries) {
-    const record = records.find(item => item.id === entry.bead_id)
-    entry.record_sha256 = digest(Object.fromEntries(keys.map(key => [key, record?.[key] ?? null])))
-  }
   for (const row of data.mapping) {
     const record = records.find(item => item.id === row.old_id)
     row.source_record_sha256 = digest(Object.fromEntries(keys.map(key => [key, record?.[key] ?? null])))
@@ -85,15 +81,19 @@ for (const [name, mutate, message] of [
     expect(run('--mode=snapshot', ...args.slice(0, 2)), false, message)
   })
 }
-for (const field of ['description', 'status', 'assignee', 'dependencies', 'metadata']) {
-  test(`rejects actual ${field} changes against the recorded fingerprint`, () => {
-    const { data, records } = fixture()
-    if (field === 'dependencies') records[0][field] = [{ depends_on_id: records[1].id, type: 'blocks' }]
-    else if (field === 'metadata') records[0].metadata.engineering_runtime_review.canonical_owner = records[1].id
-    else records[0][field] = field === 'status' ? 'blocked' : 'changed'
-    expect(run('--mode=records', ...files(data, records)), false, /source (task|metadata) changed/)
-  })
-}
+test('live checks allow normal task progress and unrelated new tasks', () => {
+  const { data, records } = fixture()
+  records[0].description = 'updated implementation evidence'
+  records[0].status = 'in_progress'
+  records[0].assignee = 'current owner'
+  records.push({ id: 'unrelated-follow-up', title: 'unrelated', status: 'open', metadata: {}, dependencies: [] })
+  expect(run('--mode=records', ...files(data, records)), true, /mode=records/)
+})
+test('rejects changed mapping ownership metadata', () => {
+  const { data, records } = fixture()
+  records[0].metadata.engineering_runtime_review.canonical_owner = records[1].id
+  expect(run('--mode=records', ...files(data, records)), false, /source metadata changed/)
+})
 test('rejects missing live prerequisite edges', () => {
   const { data, records } = fixture()
   records.find(r => r.id === data.new_beads['WWC-ER-0003']).dependencies = []
@@ -107,11 +107,11 @@ test('rejects task-plan omissions and owner metadata', () => {
   valid.records.find(r => r.id === valid.data.task_plan.entries[0].bead_id).metadata.engineering_runtime_plan_ids = []
   expect(run('--mode=records', ...files(valid.data, valid.records)), false, /task plan metadata missing/)
 })
-test('rejects changed task-plan owner acceptance criteria against its fingerprint', () => {
+test('rejects a task-plan owner without acceptance criteria', () => {
   const { data, records } = fixture()
   const entry = data.task_plan.entries[0]
-  records.find(record => record.id === entry.bead_id).acceptance_criteria = 'changed fixture acceptance'
-  expect(run('--mode=records', ...files(data, records)), false, /task plan record changed/)
+  records.find(record => record.id === entry.bead_id).acceptance_criteria = ''
+  expect(run('--mode=records', ...files(data, records)), false, /task plan acceptance missing/)
 })
 test('rejects task-plan dependency and cycle fixtures', () => {
   const missing = fixture()

@@ -177,7 +177,7 @@
     ],
     "generation": "scripts/generate-contracts.mjs",
     "rustOwner": "winwincode-domain",
-    "firstConsumer": "crates/winwincode-delivery/src/workrun_migration.rs",
+    "firstConsumer": "crates/winwincode-delivery/src/application/workrun.rs",
     "requiredNullable": "Required nullable properties remain required in JSON and Rust deserialization.",
     "validationBoundary": "JSON Schema checks shapes, IDs and bounded fields. Cross-object equality and write authority are enforced by the Controller; a schema-valid JSON object is not a trusted runtime fact."
   },

@@ -61,9 +61,9 @@ WorkItem 的规范状态为：`backlog → ready → in_progress → waiting_dep
 
 Worker/Codex 执行事实先写其既有本地运行时存储，再向 Controller 提交带 WorkRun、Attempt、WorkerSession、CodexThread、ExecutionLease/Fencing 的结果。ExecutionLease 的权威是 `crates/winwincode-storage/src/execution_registry.rs` 的 durable `ExecutionLeaseRecord`/`ExecutionDispatchAuthority`/terminal request；不引入 temporary-root lease 作为执行租约。Verifier 只读 Candidate/Git ref 与冻结输入，向 Controller 提交 Evidence/VerificationResult/Verdict；Controller 原子持久化并消费结果推进状态。进程崩溃恢复依赖既有 SessionBinding、ExecutionRegistry lease/fencing、SQLite/outbox 和 receipt-first replay，不新增 recovery 数据库。旧 lease/fencing 的迟到写入拒绝；安全恢复可继续同一逻辑线程，replacement 则使用新 WorkRun/Attempt/lease，并保留 AgentIdentity、WorkItem、Profile、Workspace 绑定。
 
-### 5. 迁移与旧任务唯一去向
+### 5. 直接切换与旧任务唯一去向
 
-`WWC-ER-0003`、`0005`、`0006`采用一次性数据/UI/API 迁移：先备份、转换、校验、cutover，再删除旧写入路径；需要回滚时恢复快照/事务边界，不保留旧产品兼容副本或第二套状态机。旧 `StageRun` 只作为迁移输入映射到 `WorkItem + Attempt`，新写入不依赖全局 StageRun/Plan/Execute/Verify。历史记录中合法的 `deliveryTaskId = null` 保留为不可执行历史记录，不伪造 WorkItem，也不生成可派发 WorkRun。
+当前版本仍是首个 alpha 候选，没有承诺支持的旧本地数据库升级合同。`WWC-ER-0003` 因此不发布旧 `StageRun` 到 `WorkRun` 的转换程序、迁移数据库或回执表；开发期旧数据和夹具直接按当前结构重建。`WWC-ER-0005`、`0006` 负责把 UI/API 一次切到唯一新路径并删除旧写入，不保留旧产品兼容副本或第二套状态机。旧 `StageRun` 输入不能生成可派发 `WorkRun`，新写入不依赖全局 StageRun/Plan/Execute/Verify。
 
 审计映射保持旧任务唯一 owner；KEEP 任务复用现有 Candidate、Lease/Fencing、SQLite/outbox、SessionBinding 和 Git ref 能力，只补新身份绑定；REWRITE 任务待本 ADR 与合同冻结后逐项创建最小差异；MERGE 任务合并到已有 owner；DEFER 不提前实现。不得凭 ADR 文本宣布任务完成。
 
@@ -82,7 +82,7 @@ ReAct、DebugProbe、DelegatedBatch 是 Worker 内部执行模式，不等同旧
 1. 一个 WorkItem 可有多个 WorkRun；每个 WorkRun 一次 Attempt、一个新 ExecutionLease、最多一个 accepted Candidate；同 commit 跨 run 复用但验证绑定独立。
 2. `inconclusive` 进入 `rework`；`infra_error` 按既有错误分类进入 retry、`failed` 或 `waiting_dependency`；普通机器失败不自动转 Human 授权。
 3. 恢复窗口沿用现有配置和 ADR-0030 `recovery_pending`/安全清理；same-thread resume 必须满足本文身份、revision、workspace、lease/fencing 和 SessionBinding 条件；replacement 使用新 Attempt/lease 并保留逻辑身份。
-4. 合法历史 `deliveryTaskId = null` 只保留不可执行历史记录；不生成 WorkItem 或 WorkRun。
+4. 旧 `StageRun` 数据不进入当前运行存储，也不能生成 WorkItem 或 WorkRun。
 
 ## E00 交付边界与后续验收
 
@@ -90,7 +90,7 @@ ReAct、DebugProbe、DelegatedBatch 是 Worker 内部执行模式，不等同旧
 
 - `WWC-ER-0001`：审计门——111 条旧任务具有唯一 KEEP/REWRITE/MERGE/DEFER 去向；映射与 Beads/CI 门禁由审计任务维护。
 - `WWC-ER-0002`：职责决定——本 ADR 冻结 Controller/Worker/Verifier/Planner/Human 权威及 WorkContract→WorkItem→WorkRun→Candidate→VerificationPlan→Evidence/Verdict 关系。
-- `WWC-ER-0003`：一次性迁移工具与验证——以当前 canonical DeliverySnapshot 为输入，备份、冻结、转换、校验、原子 receipt、回滚和 cutover；删除旧写入/兼容路径，不保留双写。
+- `WWC-ER-0003`：直接切换决定——首个 alpha 不维护旧数据库转换程序；删除迁移专用代码、表和测试，开发数据按当前 WorkRun 结构重建。
 - `WWC-ER-0004`：规范 schema 与生成一致性——按本 ADR 的字段、ID、关系、状态和拒绝规则更新 canonical schema，并通过 generator 生成 Rust/TypeScript/OpenAPI；不在本 ADR 中直接修改 schema 或生成物。
 
 E01–E13 的业务接线、生产实现和纵向验收继续由既有 Beads 任务承接；本 ADR 接受不等于全产品完成。

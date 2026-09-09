@@ -35,29 +35,3 @@ or copies Codex plan, agent, tool, or scheduler state.
 oracle and is normalized once inside test migration support.
 
 Project-owned code is licensed under Apache-2.0.
-
-### Offline WorkRun migration
-
-Stop source writers and export a consistent canonical Delivery snapshot first.
-Run the offline tool; it neither starts workers nor changes the original input:
-
-```bash
-cargo run -p winwincode-delivery --bin migrate_workrun --locked -- \
-  --input=/path/to/delivery.json --db=/path/to/migration.sqlite \
-  --output=/path/to/workrun.json --backup-dir=/path/to/input-backups
-```
-
-The command creates the input backup with a SHA-256 sidecar using create-new
-semantics, records the conversion atomically in SQLite, and refuses to replace
-an existing backup or output whose bytes differ. Re-running the same input
-returns the stored receipt snapshot. To restore into a new path, verify the sidecar first, then copy without replacing
-anything:
-
-```bash
-shasum -a 256 -c /path/to/input-backups/delivery.json.sha256
-cp -n /path/to/input-backups/delivery.json /path/to/restored/delivery.json
-```
-
-Keep the original input and migration receipt for audit. The restored file is a
-new offline snapshot, not a second running system. Production scheduling cutover
-is a separate operation described in ADR-0033; old leases are never reactivated.
