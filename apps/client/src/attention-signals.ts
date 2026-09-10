@@ -83,7 +83,7 @@ function originForApproval(
 ): DeliveryProjection | null {
   const boundStageRunId = canonical(
     'StageRunId',
-    projection.binding.sessionIdentity.stageRunId ?? null,
+    (projection.binding.sessionIdentity.workRunId ?? null) as StageRunId | null,
   )
   if (boundStageRunId === null) return null
   return origins.get(boundStageRunId) ?? null
@@ -100,7 +100,7 @@ export function attentionSignals(input: AttentionSignalInput): readonly Attentio
   for (const delivery of input.deliveries) {
     const deliveryId = canonical('DeliveryId', delivery.deliveryId)
     if (deliveryId === null) continue
-    const activeStageRunId = canonical('StageRunId', delivery.activeStageRunId)
+    const activeStageRunId = canonical('StageRunId', (delivery.activeWorkRunId ?? null) as StageRunId | null)
     if (activeStageRunId !== null) origins.set(activeStageRunId, delivery)
     if (delivery.status === 'needs-attention' && delivery.openAttentionCount > 0) {
       signals.push(Object.freeze({
@@ -164,7 +164,7 @@ export function attentionSignals(input: AttentionSignalInput): readonly Attentio
       deliveryId: origin === null ? null : canonical('DeliveryId', origin.deliveryId),
       stageRunId: canonical(
         'StageRunId',
-        projection.binding.sessionIdentity.stageRunId ?? null,
+        (projection.binding.sessionIdentity.workRunId ?? null) as StageRunId | null,
       ),
       productSessionId,
     }))

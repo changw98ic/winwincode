@@ -56,6 +56,7 @@ import {
   createClientsViewModel,
   type ClientsViewModel,
 } from './clients-view-model.js'
+import { matchesCanonicalSchema } from './generated/control-plane-client.js'
 import { mountClientsPage, type ClientsPage } from './clients-page.js'
 import { mountOnboardingPage, type OnboardingPage } from './onboarding-page.js'
 import {
@@ -238,9 +239,10 @@ export function mountWinWinCodeClient(
   // identity zone run on the local fakes from the one facade block until the
   // FLOW scheduler and worker/candidate routing land and replace the ports.
   const taskPort = createControlPlaneTaskFake({
-    nextTaskId: () => contractId('tsk', browser.crypto),
+    nextTaskId: () => contractId('wit', browser.crypto) as import('./generated/contracts.js').WorkItemId,
     ...(options.taskSeed === undefined ? {} : { seed: options.taskSeed }),
   })
+  const runIdentityPort = createControlPlaneRunIdentityFake()
   let lastKnownDiagnosticScope: unknown = null
   const shell = element(document, 'div', 'wwc-shell')
   const header = element(document, 'header', 'wwc-header')
@@ -894,7 +896,6 @@ export function mountWinWinCodeClient(
         actor: context.actor,
         scope: context.scope,
         nextDeliveryId: () => contractId('dlv', browser.crypto) as DeliveryId,
-        nextWorkItemId: () => contractId('wit', browser.crypto) as WorkItemId,
         nextRequestId: () => contractId('req', browser.crypto) as RequestId,
         onCreated() {
           // The page re-renders from the creator subscription; no navigation.

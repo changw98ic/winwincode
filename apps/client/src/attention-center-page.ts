@@ -204,7 +204,7 @@ function itemActionLabel(item: AttentionCenterItem): string {
  */
 export type AttentionCenterItemRoute = Pick<
   AttentionCenterItem,
-  'kind' | 'id' | 'productSessionId' | 'stageRunId' | 'deliveryId'
+  'kind' | 'id' | 'productSessionId' | 'workRunId' | 'deliveryId'
 >
 
 /**

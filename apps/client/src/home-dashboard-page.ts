@@ -183,7 +183,7 @@ export function homeDecisionHash(
     kind: card.kind,
     id: card.id,
     productSessionId: card.productSessionId,
-    stageRunId: card.stageRunId,
+    workRunId: card.workRunId,
     deliveryId: card.deliveryId,
   }, scopeSelection)
 }

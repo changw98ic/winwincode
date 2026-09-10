@@ -284,7 +284,11 @@ export function createChatDeliveryCreator(
         scope: options.scope,
         command: CommandName.DeliveryAdvance,
         expectedRevision: currentAttempt.created.revision,
-        payload: { deliveryId },
+        payload: {
+          deliveryId,
+          // 委托交付创建后先进入方案规划;调度画像由服务器策略约束。
+          dispatchProfile: 'planner',
+        },
       }
       const advanceRequest = currentAttempt.advanceRequest
       const advanceResponse = await options.client.command(
@@ -302,9 +306,9 @@ export function createChatDeliveryCreator(
         publish('waiting', null)
         return
       }
-      if (advanced.activeStageRunId === null) throw clientFailure(
-        'STRONGFLOW_CREATE_STAGE_REQUIRED',
-        'The new Delivery did not expose its executable stage.',
+      if (advanced.activeWorkRunId === null) throw clientFailure(
+        'STRONGFLOW_CREATE_WORKRUN_REQUIRED',
+        'The new Delivery did not expose its executable work run.',
       )
       publish('created', null)
       options.onCreated(deliveryId)

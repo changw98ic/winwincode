@@ -76,7 +76,7 @@ const PRESENTATION_SPEC: UsageHealthPresentation = {
   }),
   dimensionHeading: Object.freeze({
     delivery: '按交付用量',
-    'stage-run': '按 StageRun 用量',
+    'work-run': '按 WorkRun 用量',
     role: '按角色用量',
     model: '模型用量',
     provider: 'Provider 路由',
@@ -143,15 +143,15 @@ const PROVIDER_TONES: Readonly<Record<ProviderHealthState, string>> = Object.fre
   unknown: 'neutral',
 })
 
-const AGGREGATE_DIMENSIONS: readonly ('delivery' | 'stage-run' | 'role')[] = Object.freeze([
+const AGGREGATE_DIMENSIONS: readonly ('delivery' | 'work-run' | 'role')[] = Object.freeze([
   'delivery',
-  'stage-run',
+  'work-run',
   'role',
 ])
 
 function rowClassName(dimension: UsageHealthDimension): string {
   if (dimension === 'delivery') return 'wwc-usage-health-delivery'
-  if (dimension === 'stage-run') return 'wwc-usage-health-stage-run'
+  if (dimension === 'work-run') return 'wwc-usage-health-stage-run'
   if (dimension === 'role') return 'wwc-usage-health-role'
   if (dimension === 'model') return 'wwc-usage-health-model'
   return 'wwc-usage-health-provider'
@@ -236,10 +236,10 @@ export function mountUsageHealthSummary(
   }
 
   const aggregateCollections = new Map<
-    'delivery' | 'stage-run' | 'role',
+    'delivery' | 'work-run' | 'role',
     KeyedCollectionView<UsageAggregate, string, HTMLLIElement>
   >()
-  const aggregateSectionRoots = new Map<'delivery' | 'stage-run' | 'role', HTMLElement>()
+  const aggregateSectionRoots = new Map<'delivery' | 'work-run' | 'role', HTMLElement>()
 
   for (const dimension of AGGREGATE_DIMENSIONS) {
     const headingNode = element(document, 'h3', 'wwc-usage-health-section-heading')
@@ -371,7 +371,7 @@ export function mountUsageHealthSummary(
       const label = element(document, 'span', 'wwc-usage-health-error-label')
       label.textContent = row.label
       const detail = element(document, 'span', 'wwc-usage-health-error-detail')
-      detail.textContent = row.origin === 'stage-run'
+      detail.textContent = row.origin === 'work-run'
         ? `${row.failureCount} 次失败${
           row.recovered ? ' · 恢复进行中或已完成' : ''
         }${row.sourceRef === null ? '' : ` · ${row.sourceRef}`}`
@@ -479,7 +479,7 @@ export function mountUsageHealthSummary(
         }`
     }
     aggregateCollections.get('delivery')?.update(state.byDelivery)
-    aggregateCollections.get('stage-run')?.update(state.byStageRun)
+    aggregateCollections.get('work-run')?.update(state.byWorkRun)
     aggregateCollections.get('role')?.update(state.byRole)
     providerRows.update(state.byProvider)
     modelRows.update(state.byModel)

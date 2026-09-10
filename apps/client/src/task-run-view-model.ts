@@ -7,7 +7,6 @@ import type {
   ControlPlaneCandidateSummary,
   ControlPlaneDeviceSummary,
   ControlPlaneRunIdentityPort,
-  ControlPlaneRunWorkerSession,
   ControlPlaneRunWorkerSessionState,
   ControlPlaneTaskAnchor,
 } from './community-control-plane-client.js'
@@ -246,28 +245,41 @@ function applyFacts(
   })
 }
 
+// 设计稿 05:身份折叠行来自 WorkRun 运行投影(WorkRunState → 会话状态映射)。
+const WORK_RUN_STATE_TO_SESSION_STATE = Object.freeze({
+  queued: 'reserving',
+  leased: 'launching',
+  running: 'running',
+  candidate_ready: 'running',
+  settled: 'stopped',
+  failed: 'failed',
+  cancelled: 'stopped',
+})
+
 function identityFacts(projection: {
-  readonly workerSessions: readonly ControlPlaneRunWorkerSession[]
-  readonly candidate: ControlPlaneCandidateSummary | null
+  readonly workRun: import('./generated/contracts.js').WorkRun
+  readonly candidate: import('./generated/contracts.js').Candidate | null
 }): TaskRunIdentityFacts {
+  const workRun = projection.workRun
   const candidate = projection.candidate
+  const state = WORK_RUN_STATE_TO_SESSION_STATE[workRun.state] ?? ('stopped' as ControlPlaneRunWorkerSessionState)
   return Object.freeze({
-    workerSessions: Object.freeze(projection.workerSessions.map(session => Object.freeze({
-      workerSessionId: session.workerSessionId,
-      state: session.state,
-      stateText: runWorkerSessionStateText(session.state),
-      tone: runWorkerSessionStateTone(session.state),
-      startedAt: session.startedAt,
-    }))),
+    workerSessions: Object.freeze([Object.freeze({
+      workerSessionId: workRun.workerSessionId,
+      state,
+      stateText: runWorkerSessionStateText(state),
+      tone: runWorkerSessionStateTone(state),
+      startedAt: null,
+    })]),
     candidate: candidate === null
       ? null
       : Object.freeze({
           candidateRef: candidate.candidateRef,
-          stateText: candidateDisplayStateText(candidateDisplayState(candidate)),
-          tone: candidateDisplayStateTone(candidateDisplayState(candidate)),
-          branchName: candidate.branchName,
+          stateText: runWorkerSessionStateText(state),
+          tone: runWorkerSessionStateTone(state),
+          branchName: null,
         }),
-    apply: candidate === null ? null : applyFacts(candidate.history),
+    apply: candidate === null ? null : applyFacts([]),
   })
 }
 

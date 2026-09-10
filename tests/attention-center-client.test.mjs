@@ -352,7 +352,7 @@ test('attention center loads every pending decision in the exact repository Scop
   assert.equal(attentionItem.expired, false)
   assert.equal(attentionItem.bindingValid, true)
   assert.equal(attentionItem.deliveryId, deliveryId)
-  assert.equal(attentionItem.stageRunId, stageRunId)
+  assert.equal(attentionItem.workRunId, stageRunId)
   assert.equal(attentionItem.createdAt, '2026-09-03T02:58:00.000Z')
   assert.equal(attentionItem.expiresAt, null)
   const inputItem = items[1]
@@ -361,7 +361,7 @@ test('attention center loads every pending decision in the exact repository Scop
   assert.equal(inputItem.urgency, 'pending')
   assert.equal(inputItem.productSessionId, productSessionId)
   assert.equal(inputItem.sessionTitle, 'Session psn_00000000000000000000000001')
-  assert.equal(inputItem.stageRunId, stageRunId)
+  assert.equal(inputItem.workRunId, stageRunId)
   assert.equal(inputItem.createdAt, null)
   assert.equal(inputItem.expiresAt, '2026-09-03T04:00:00.000Z')
   const approvalItem = items[2]
@@ -815,7 +815,7 @@ function centerState(overrides = {}) {
         expiresAt: '2026-09-03T05:00:00.000Z',
         productSessionId: approvalSessionId,
         sessionTitle: 'Session psn_00000000000000000000000002',
-        stageRunId: null,
+        workRunId: null,
       }),
       centerItem({
         id: 'inp_00000000000000000000000009',
@@ -957,7 +957,7 @@ test('item entry links open the Chat session that raised the decision', () => {
     attentionCenterItemHash(centerItem({
       kind: 'approval',
       productSessionId: approvalSessionId,
-      stageRunId: null,
+      workRunId: null,
     }), emptyScopeSelection),
     `#/chat?session=${approvalSessionId}`
       + `&organizationId=${scope.organizationId}&workspaceId=${scope.workspaceId}`
