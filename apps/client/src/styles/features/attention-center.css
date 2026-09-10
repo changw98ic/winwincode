@@ -6,14 +6,26 @@
 
 .wwc-attention-center-back,
 .wwc-attention-center-heading,
-.wwc-attention-center-status,
-.wwc-attention-center-refresh,
 .wwc-attention-center-error,
 .wwc-attention-center-controls,
 .wwc-attention-center-items,
 .wwc-attention-center-handled,
 .wwc-attention-center-handled-detail {
   grid-column: 1 / -1;
+}
+
+/* Design page 06: the status line is the live region only; it renders
+   nowhere on the canvas. */
+.wwc-attention-center-status {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  clip-path: inset(50%);
+  overflow: hidden;
+  white-space: nowrap;
 }
 
 /* Design page 06: back to the task board above the counted title. */
@@ -30,38 +42,32 @@
   margin-right: var(--wwc-space-2);
 }
 
-/* Design page 06: the Browse panel collapses into one compact control row. */
+/* Design page 06: the counted title renders at display size, the count as a
+   smaller muted suffix. */
+.wwc-attention-center-heading .wwc-page-header-title {
+  font-size: var(--wwc-font-size-display);
+  font-weight: var(--wwc-font-weight-display);
+}
+
+.wwc-attention-center-count {
+  margin-left: var(--wwc-space-3);
+  color: var(--wwc-color-text-secondary);
+  font-size: var(--wwc-font-size-lg);
+  font-weight: var(--wwc-font-weight-regular);
+}
+
+/* Rows carry no context metadata line (design 06). */
+.wwc-attention-card-context {
+  display: none;
+}
+
+/* Design page 06: no Browse control row — the desktop-notification consent is
+   the only auxiliary control here, and only when the browser supports it. */
 .wwc-attention-center-controls {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: var(--wwc-space-2) var(--wwc-space-4);
-}
-
-.wwc-attention-center-toolbar {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--wwc-space-2) var(--wwc-space-3);
-}
-
-.wwc-attention-center-control-label {
-  display: flex;
-  align-items: center;
-  gap: var(--wwc-space-2);
-  color: var(--wwc-color-text-muted);
-  font-size: var(--wwc-font-size-sm);
-}
-
-.wwc-attention-center-kind,
-.wwc-attention-center-sort {
-  padding: var(--wwc-space-1) var(--wwc-space-2);
-  border: var(--wwc-border-width) solid var(--wwc-color-border);
-  border-radius: var(--wwc-radius-sm);
-  background: var(--wwc-color-surface);
-  color: var(--wwc-color-text);
-  font: inherit;
-  font-size: var(--wwc-font-size-sm);
 }
 
 .wwc-attention-center-desktop-status {
@@ -81,13 +87,12 @@
   list-style: none;
 }
 
-/* Design page 06: compact rows — name + status line on the left, one accent
+/* Design page 06: compact rows — title + status line on the left, one accent
    action on the right, hairline separators instead of cards. */
 .wwc-attention-card {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   grid-template-areas:
-    "kind   action"
     "title  action"
     "status action"
     "context action"
@@ -115,16 +120,10 @@
   color: var(--wwc-color-warning-text);
 }
 
-.wwc-attention-card-kind {
-  grid-area: kind;
-  color: var(--wwc-color-text-muted);
-  font-size: var(--wwc-font-size-xs);
-  letter-spacing: 0.04em;
-}
-
 .wwc-attention-card-title {
   grid-area: title;
-  margin: var(--wwc-space-1) var(--wwc-space-0) var(--wwc-space-0);
+  margin: var(--wwc-space-0);
+  font-size: var(--wwc-font-size-lg);
   font-weight: var(--wwc-font-weight-strong);
 }
 

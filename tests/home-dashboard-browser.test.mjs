@@ -27,7 +27,7 @@ const repositoryTwo = 'rep_00000000000000000000000002'
 const repositoryThree = 'rep_00000000000000000000000003'
 const SECRET_MARKER = 'vault-locator-secret-marker'
 
-test('a real browser opens the Attention-first Home dashboard as the first screen', async t => {
+test('a real browser opens 新对话 as the first screen and the board one click away', async t => {
   const chromePath = chromeBinary()
   assert.notEqual(chromePath, null, 'Chrome or Chromium is required for the Home browser test')
   command(root, 'corepack', ['pnpm', '--filter', '@winwincode/client', 'build'])
@@ -75,7 +75,8 @@ test('a real browser opens the Attention-first Home dashboard as the first scree
   await waitForGlobal(devtools, sessionId, 'homeReady')
   await waitForGlobal(devtools, sessionId, 'inspectLanding')
   const landing = await evaluateInBrowser('globalThis.inspectLanding()')
-  assert.equal(landing.surface, 'home', JSON.stringify(landing))
+  // 设计稿 03a:新对话是默认落地页。
+  assert.equal(landing.surface, 'chat', JSON.stringify(landing))
   assert.equal(landing.hash === '' || landing.hash === '#/home', true, landing.hash)
   assert.equal(landing.present, false, 'no dashboard mounts without an exact Scope')
   assert.equal(landing.leak, false)
@@ -128,13 +129,18 @@ test('a real browser opens the Attention-first Home dashboard as the first scree
     chatHref,
     JSON.stringify(decisionCards),
   )
+  // 设计稿 04/06:交付待验收的决策卡打开运行页。
   assert.equal(
     decisionByTitle('Review the proposed delivery scope')?.action.href,
-    null,
+    `#/home/task-run?organizationId=${identity}`
+      + `&workspaceId=${workspaceId}&projectId=${projectId}&repositoryId=${repositoryOne}`,
     JSON.stringify(decisionCards),
   )
-  assert.equal(section('active').cards[0]?.action.href, null)
-  assert.equal(section('failing').cards[0]?.action.href, null)
+  // 设计稿 04:交付卡的动作是「查看进度」,打开运行页。
+  const runHref = `#/home/task-run?organizationId=${identity}`
+    + `&workspaceId=${workspaceId}&projectId=${projectId}&repositoryId=${repositoryOne}`
+  assert.equal(section('active').cards[0]?.action.href, runHref)
+  assert.equal(section('failing').cards[0]?.action.href, runHref)
   assert.equal(
     home.chatLinks.filter(href => href === `#/chat?session=psn_00000000000000000000000001&${scoped}`).length,
     1,
@@ -159,15 +165,18 @@ test('a real browser opens the Attention-first Home dashboard as the first scree
     switchedDashboard.sections.find(section => section.id === 'failing')?.cards.length,
     1,
   )
+  // The switched Scope's cards keep the 查看进度 action scoped to the new repo.
+  const switchedRunHref = `#/home/task-run?organizationId=${identity}`
+    + `&workspaceId=${workspaceId}&projectId=${projectId}&repositoryId=${repositoryTwo}`
   assert.equal(
     switchedDashboard.sections.find(section => section.id === 'active')
       ?.cards[0]?.action.href,
-    null,
+    switchedRunHref,
   )
   assert.equal(
     switchedDashboard.sections.find(section => section.id === 'failing')
       ?.cards[0]?.action.href,
-    null,
+    switchedRunHref,
   )
   assert.equal(switchedDashboard.liveRegions, 1)
 

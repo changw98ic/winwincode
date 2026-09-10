@@ -1,12 +1,31 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 
-/* Settings (design pages 12-16 and 15): one page, a 设置分类 dropdown in the
-   top-right, row-style forms with hairline separators per category. */
+/* Settings (design pages 12-16): one page, a black-outlined 设置分类 button in
+   the top-right, frameless row-style forms per category. */
 
 .wwc-settings {
   display: grid;
   gap: var(--wwc-space-6);
   min-width: 0;
+}
+
+/* Design page 12: the display title stands alone at display size. */
+.wwc-settings-heading .wwc-page-header-title {
+  font-size: var(--wwc-font-size-display);
+  font-weight: var(--wwc-font-weight-display);
+}
+
+/* The status line stays the polite live region; it renders nowhere. */
+.wwc-settings-status {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  clip-path: inset(50%);
+  overflow: hidden;
+  white-space: nowrap;
 }
 
 .wwc-settings-header {
@@ -35,13 +54,16 @@
   font-weight: var(--wwc-font-weight-medium);
 }
 
+/* Design page 12: the category switcher reads as one black-outlined button. */
 .wwc-settings-category-select {
   min-height: var(--wwc-control-min-height);
-  padding: var(--wwc-space-2) var(--wwc-space-3);
-  border: var(--wwc-border-width-control) solid var(--wwc-color-border-control);
+  padding: var(--wwc-space-2) var(--wwc-space-4);
+  border: var(--wwc-border-width-control) solid var(--wwc-color-border-strong);
   border-radius: var(--wwc-radius-sm);
   background: var(--wwc-color-surface);
+  color: var(--wwc-color-text);
   font-weight: var(--wwc-font-weight-strong);
+  cursor: pointer;
 }
 
 /* Category bodies: one visible section, one row after another. */
@@ -55,14 +77,13 @@
   gap: var(--wwc-space-2);
 }
 
-/* Row-style forms: bold label left, control right, hairline between rows. */
+/* Row-style forms: bold label left, control right, no separators (design 12). */
 .wwc-settings-row {
   display: grid;
   grid-template-columns: minmax(8rem, 14rem) minmax(0, 1fr);
   gap: var(--wwc-space-2) var(--wwc-space-6);
   align-items: center;
   padding: var(--wwc-space-3) var(--wwc-space-0);
-  border-bottom: var(--wwc-border-width) solid var(--wwc-color-border-subtle);
 }
 
 .wwc-settings-row > label,
@@ -95,11 +116,10 @@
   margin: var(--wwc-space-0);
 }
 
-/* Collapsed disclosure rows (其他偏好, 权限与高级选项, …). */
+/* Collapsed disclosure rows (其他偏好, 权限与高级选项, …): chevron leads the
+   row, no separator lines. */
 .wwc-settings-collapsed {
   margin-top: var(--wwc-space-2);
-  border-top: var(--wwc-border-width) solid var(--wwc-color-border-subtle);
-  border-bottom: var(--wwc-border-width) solid var(--wwc-color-border-subtle);
 }
 
 .wwc-settings-collapsed-button {
@@ -107,7 +127,7 @@
   width: 100%;
   gap: var(--wwc-space-3);
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-start;
   padding: var(--wwc-space-3) var(--wwc-space-0);
   border: 0;
   background: transparent;
@@ -116,11 +136,12 @@
 
 .wwc-settings-collapsed-label {
   font-size: var(--wwc-font-size-lg);
-  font-weight: var(--wwc-font-weight-strong);
+  font-weight: var(--wwc-font-weight-regular);
 }
 
 .wwc-settings-collapsed-chevron {
   font-size: var(--wwc-font-size-lg);
+  line-height: 1;
   transition: rotate var(--wwc-transition-fast);
 }
 

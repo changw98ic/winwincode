@@ -180,9 +180,15 @@ test('revoked URL context is announced and network metadata failures offer retry
   assert.match(access.textContent, /已不再被授权/u)
 
   model.publish({ ...state('network-error'), error: { code: 'NETWORK_ERROR' } })
+  // 设计稿 03a:收起态只有一个下拉,重试钮随展开出现。
+  const compact = descendants(rootElement).find(node => (
+    node.className === 'wwc-scope-selector-compact'
+  ))
   const retry = descendants(rootElement).find(node => (
     node.className === 'wwc-scope-selector-retry'
   ))
+  assert.equal(retry.hidden, true)
+  compact.dispatchEvent({ type: 'click' })
   assert.equal(retry.hidden, false)
   retry.dispatchEvent({ type: 'click' })
   await new Promise(resolvePromise => setTimeout(resolvePromise, 0))

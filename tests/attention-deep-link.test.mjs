@@ -91,7 +91,7 @@ test('a decision links the Chat session that raised it, with the exact Scope', (
   )
 })
 
-test('a business Attention renders no action instead of a dead end', () => {
+test('a business Attention opens the run page for its acceptance (设计稿 06)', () => {
   assert.equal(attentionCenterItemHash(centerItem({
     kind: 'attention',
     id: 'att_00000000000000000000000001',
@@ -99,7 +99,9 @@ test('a business Attention renders no action instead of a dead end', () => {
     deliveryId,
     deliveryTitle: 'Delivery under attention',
     candidateBound: true,
-  }), scopeSelection), null)
+  }), scopeSelection), `#/home/task-run?organizationId=${scope.organizationId}`
+    + `&workspaceId=${scope.workspaceId}&projectId=${scope.projectId}`
+    + `&repositoryId=${scope.repositoryId}`)
 })
 
 test('a decision without a Session id links nothing instead of fabricating one', () => {
@@ -306,8 +308,9 @@ test('the mounted center links decisions to their Chat session and hides dead-en
   assert.equal(cardAction(decisionCard).href.startsWith('#/chat?'), true)
   assert.equal(decisionParameters.session, productSessionId)
 
-  assert.equal(cardAction(attentionCard).hidden, true)
-  assert.equal(cardAction(attentionCard).getAttribute('href'), null)
+  // 设计稿 06:待验收行保留「验收交付」动作,打开该交付的运行页。
+  assert.equal(cardAction(attentionCard).hidden, false)
+  assert.equal(cardAction(attentionCard).getAttribute('href')?.startsWith('#/home/task-run'), true)
 
   assert.equal(cardAction(expiredCard).hidden, true)
   assert.equal(cardAction(expiredCard).getAttribute('href'), null)

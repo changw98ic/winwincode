@@ -1,0 +1,180 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+
+/* Design page 08: 执行设备 — display title with the 更多 ∨ menu on the row's
+   right end, the connected device card, accessible directories, and collapsed
+   运行中的任务 / 连接记录 rows. */
+
+.wwc-device {
+  display: grid;
+  gap: var(--wwc-space-4);
+  min-width: 0;
+}
+
+.wwc-device-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--wwc-space-3);
+}
+
+.wwc-device-heading .wwc-page-header-title {
+  font-size: var(--wwc-font-size-display);
+  font-weight: var(--wwc-font-weight-display);
+}
+
+.wwc-device-more {
+  min-height: var(--wwc-control-min-height);
+  padding: var(--wwc-space-2) var(--wwc-space-4);
+  border: var(--wwc-border-width-control) solid var(--wwc-color-border-strong);
+  border-radius: var(--wwc-radius-sm);
+  background: var(--wwc-color-surface);
+  color: var(--wwc-color-text);
+  font-weight: var(--wwc-font-weight-strong);
+  cursor: pointer;
+}
+
+.wwc-device-status {
+  margin: var(--wwc-space-0);
+  color: var(--wwc-color-text-muted);
+  font-size: var(--wwc-font-size-sm);
+}
+
+.wwc-device-body {
+  display: grid;
+  gap: var(--wwc-space-5);
+  min-width: 0;
+}
+
+/* The connected device: outlined glyph, name, and one presence line. */
+.wwc-device-card {
+  display: flex;
+  align-items: center;
+  gap: var(--wwc-space-6);
+  min-width: 0;
+}
+
+.wwc-device-card-icon {
+  font-size: 2.5rem;
+  line-height: 1;
+}
+
+.wwc-device-card-info {
+  display: grid;
+  gap: var(--wwc-space-1);
+  min-width: 0;
+}
+
+.wwc-device-card-name {
+  margin: var(--wwc-space-0);
+  font-size: var(--wwc-font-size-lg);
+  font-weight: var(--wwc-font-weight-display);
+}
+
+.wwc-device-card-presence {
+  margin: var(--wwc-space-0);
+  color: var(--wwc-color-text-secondary);
+  font-size: var(--wwc-font-size-sm);
+}
+
+.wwc-device-subheading {
+  margin: var(--wwc-space-0) var(--wwc-space-0) var(--wwc-space-3);
+  font-size: var(--wwc-font-size-lg);
+  font-weight: var(--wwc-font-weight-strong);
+}
+
+.wwc-device-directories {
+  display: grid;
+  gap: var(--wwc-space-3);
+  min-width: 0;
+}
+
+.wwc-device-directory-list {
+  display: grid;
+  gap: var(--wwc-space-3);
+  margin: var(--wwc-space-0);
+  padding: var(--wwc-space-0);
+  list-style: none;
+}
+
+.wwc-device-directory-row {
+  display: flex;
+  align-items: center;
+  gap: var(--wwc-space-4);
+  min-width: 0;
+  padding: var(--wwc-space-4) var(--wwc-space-5);
+  border: var(--wwc-border-width) solid var(--wwc-color-border-subtle);
+  border-radius: var(--wwc-radius-md);
+  background: var(--wwc-color-surface);
+  font-size: var(--wwc-font-size-md);
+  overflow-wrap: anywhere;
+}
+
+.wwc-device-directory-label {
+  min-width: 0;
+}
+
+/* 管理目录: the accent primary action under the directory list. */
+.wwc-device-manage {
+  justify-self: start;
+  width: fit-content;
+  padding: var(--wwc-space-3) var(--wwc-space-6);
+  border: var(--wwc-border-width-control) solid var(--wwc-color-border);
+  border-radius: var(--wwc-radius-md);
+  color: var(--wwc-color-text);
+  background: var(--wwc-color-accent);
+  font-weight: var(--wwc-font-weight-strong);
+  text-decoration: none;
+  white-space: nowrap;
+  box-shadow: var(--wwc-shadow-hard);
+}
+
+.wwc-device-manage:hover {
+  background: var(--wwc-color-accent-strong);
+}
+
+.wwc-device-manage:active {
+  box-shadow: var(--wwc-shadow-hard-sm);
+  translate: 2px 2px;
+}
+
+/* Collapsed 运行中的任务 / 连接记录 rows: bold label + trailing ›. */
+.wwc-device-rows {
+  display: grid;
+  margin-top: var(--wwc-space-4);
+}
+
+.wwc-device-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--wwc-space-4) var(--wwc-space-2);
+  border: 0;
+  border-bottom: var(--wwc-border-width) solid var(--wwc-color-border-subtle);
+  background: transparent;
+  color: var(--wwc-color-text);
+  font: inherit;
+  font-size: var(--wwc-font-size-md);
+  font-weight: var(--wwc-font-weight-strong);
+  text-align: start;
+  cursor: pointer;
+}
+
+.wwc-device-row::after {
+  content: '›';
+  font-size: var(--wwc-font-size-lg);
+  line-height: 1;
+}
+
+.wwc-device-empty {
+  margin: var(--wwc-space-0);
+  color: var(--wwc-color-text-secondary);
+  font-size: var(--wwc-font-size-sm);
+}
+
+.wwc-device-empty-connect {
+  justify-self: start;
+  width: fit-content;
+  color: var(--wwc-color-text);
+  font-weight: var(--wwc-font-weight-strong);
+}

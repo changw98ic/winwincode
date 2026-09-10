@@ -9,6 +9,8 @@
 @import './features/settings.css' layer(features);
 @import './features/attention-center.css' layer(features);
 @import './features/home.css' layer(features);
+@import './features/projects.css' layer(features);
+@import './features/device.css' layer(features);
 @import './features/usage-health.css' layer(features);
 @import './features/contextual-decision.css' layer(features);
 @import './features/clients.css' layer(features);

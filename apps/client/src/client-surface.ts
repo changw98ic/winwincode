@@ -26,18 +26,18 @@ export interface ClientSurface {
  */
 export const CLIENT_SURFACES: readonly ClientSurface[] = Object.freeze([
   Object.freeze({
-    id: 'home',
-    path: '/home',
-    label: '任务看板',
-    description: '当前仓库的任务看板与待办',
-    default: true,
-    nav: true,
-  }),
-  Object.freeze({
     id: 'chat',
     path: '/chat',
     label: '新对话',
     description: '对话工作区',
+    default: true,
+    nav: true,
+  }),
+  Object.freeze({
+    id: 'home',
+    path: '/home',
+    label: '任务看板',
+    description: '当前仓库的任务看板与待办',
     default: false,
     nav: true,
   }),

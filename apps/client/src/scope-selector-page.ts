@@ -121,18 +121,20 @@ export function mountScopeSelectorPage(options: ScopeSelectorPageOptions): Scope
   controls.append(organization.root, workspace.root, project.root, repository.root)
   compact.type = 'button'
   compact.setAttribute('aria-expanded', 'false')
-  compact.textContent = '项目范围 ▾'
+  compact.textContent = '项目范围 ∨'
   compact.addEventListener('click', () => {
-    const expanded = compact.getAttribute('aria-expanded') === 'true'
-    compact.setAttribute('aria-expanded', expanded ? 'false' : 'true')
-    heading.hidden = !expanded
-    controls.hidden = !expanded
-    status.hidden = !expanded
-    retry.hidden = !expanded
+    // The next state is the inverse of the current one: expand when collapsed.
+    const expand = compact.getAttribute('aria-expanded') !== 'true'
+    compact.setAttribute('aria-expanded', expand ? 'true' : 'false')
+    heading.hidden = !expand
+    controls.hidden = !expand
+    status.hidden = !expand
+    retry.hidden = !expand
   })
   heading.hidden = true
   controls.hidden = true
   status.hidden = true
+  retry.hidden = true
   region.append(compact, heading, access, controls, status, retry)
   options.root.replaceChildren(region)
 
@@ -191,11 +193,11 @@ export function mountScopeSelectorPage(options: ScopeSelectorPageOptions): Scope
     region.setAttribute('aria-busy', state.status === 'loading' ? 'true' : 'false')
     status.textContent = statusMessage(state)
     // Compact label mirrors the selected repository option's display name.
-    const selected = Array.isArray(repository.select.options)
-      ? repository.select.options.find(option => option.value === repository.select.value)
-      : undefined
+    const selected = Array.from(repository.select.options ?? []).find(
+      option => option.value === repository.select.value && option.value !== '',
+    )
     if (selected !== undefined && selected.textContent) {
-      compact.textContent = `${selected.textContent} ▾`
+      compact.textContent = `${selected.textContent} ∨`
     }
   }
 

@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type { ControlPlaneClientError } from './community-control-plane-client.js'
-import { formatInstant } from './format-instant.js'
 import {
   mountButton,
   mountErrorState,
@@ -9,7 +8,7 @@ import {
   mountStatusBadge,
   type StatusTone,
 } from '@winwincode/browser-ui'
-import { mountEmptyState, mountToolbar } from './components/index.js'
+import { mountEmptyState } from './components/index.js'
 import { mountKeyedCollection, type KeyedCollectionView } from './components/keyed-collection.js'
 import { boundApprovalText } from './components/bounded-text.js'
 import { scopeHash, surfaceHash, type ScopeRouteSelection } from '@winwincode/browser-core/scope-context'
@@ -181,12 +180,6 @@ export function attentionCenterPresentation(
   })
 }
 
-const KIND_LABELS: Readonly<Record<AttentionCenterItemKind, string>> = Object.freeze({
-  input: '输入请求',
-  approval: '工具审批',
-  attention: '业务注意点',
-})
-
 /**
  * The one status line of design page 06, from the item's real kind and
  * urgency: Delivery-bound Attention entries await the hand-over, decisions
@@ -225,7 +218,11 @@ export function attentionCenterItemHash(
   item: AttentionCenterItemRoute,
   scopeSelection: ScopeRouteSelection,
 ): string | null {
-  if (item.kind === 'attention') return null
+  if (item.kind === 'attention') {
+    // 设计稿 06:交付待验收行保留「验收交付」动作;验收在交付流程中处理,
+    // 这里打开该交付的运行页。
+    return surfaceHash('/home/task-run', scopeSelection)
+  }
   if (item.productSessionId === null) return null
   return scopeHash(
     `#/chat?session=${encodeURIComponent(item.productSessionId)}`,
@@ -314,6 +311,7 @@ export function mountAttentionCenterPage(options: AttentionCenterPageOptions): A
     },
   })
   const heading = pageHeader.root
+  const count = element(document, 'span', 'wwc-attention-center-count')
   const statusBadge = mountStatusBadge({
     document,
     props: {
@@ -324,15 +322,6 @@ export function mountAttentionCenterPage(options: AttentionCenterPageOptions): A
     },
   })
   const status = statusBadge.root
-  const refreshButton = mountButton({
-    document,
-    props: {
-      label: '立即刷新',
-      className: 'wwc-attention-center-refresh',
-      onActivate: () => { void options.model.refresh() },
-    },
-  })
-  const refresh = refreshButton.root
   const retryButton = mountButton({
     document,
     props: {
@@ -364,49 +353,10 @@ export function mountAttentionCenterPage(options: AttentionCenterPageOptions): A
   const error = errorState.root
   errorState.message.className = 'wwc-attention-center-error-text'
 
-  // Design page 06: the Browse panel collapses into one compact control row
-  // (type + sort) with the desktop-notification consent beside it.
+  // Design page 06: no Browse filter row — the center reads as one urgent list.
+  // The selection logic stays a pure export; the page always renders the full
+  // snapshot in the urgency order.
   const controlsSection = element(document, 'div', 'wwc-attention-center-controls')
-  const kindLabel = element(document, 'label', 'wwc-attention-center-control-label')
-  const kindSelect = element(document, 'select', 'wwc-attention-center-kind')
-  const sortLabel = element(document, 'label', 'wwc-attention-center-control-label')
-  const sortSelect = element(document, 'select', 'wwc-attention-center-sort')
-  kindSelect.id = 'wwc-attention-center-kind'
-  kindLabel.htmlFor = kindSelect.id
-  kindLabel.textContent = '类型'
-  for (const [value, label] of [
-    ['all', '全部待办'],
-    ['input', '输入请求'],
-    ['approval', '工具审批'],
-    ['attention', '业务注意点'],
-  ] as const) {
-    const option = document.createElement('option')
-    option.value = value
-    option.textContent = label
-    kindSelect.append(option)
-  }
-  sortSelect.id = 'wwc-attention-center-sort'
-  sortLabel.htmlFor = sortSelect.id
-  sortLabel.textContent = '排序'
-  for (const [value, label] of [
-    ['urgency', '按紧急度'],
-    ['newest', '最新优先'],
-    ['expiry', '最先到期'],
-  ] as const) {
-    const option = document.createElement('option')
-    option.value = value
-    option.textContent = label
-    sortSelect.append(option)
-  }
-  const toolbar = mountToolbar({
-    document,
-    props: {
-      label: '待我处理浏览控件',
-      items: [kindLabel, kindSelect, sortLabel, sortSelect],
-      className: 'wwc-attention-center-toolbar',
-    },
-  })
-  controlsSection.append(toolbar.root)
 
   // UI-506: the browser notification permission is only ever requested from this
   // explicit control, and the state text stays a plain paragraph so the page
@@ -489,26 +439,14 @@ export function mountAttentionCenterPage(options: AttentionCenterPageOptions): A
     handledDetail.hidden = expanded
   })
 
-  layout.append(back, heading, status, refresh, error, controlsSection, itemsRoot, handled, handledDetail)
+  heading.append(count)
+  layout.append(back, heading, status, error, controlsSection, itemsRoot, handled, handledDetail)
   options.root.replaceChildren(layout)
 
   let closed = false
   let selection: AttentionCenterSelection = Object.freeze({ kind: 'all', sort: 'urgency' })
-  const onKindChange = () => {
-    const value = kindSelect.value as AttentionCenterKindFilter
-    selection = Object.freeze({ ...selection, kind: value })
-    render(options.model.state)
-  }
-  const onSortChange = () => {
-    const value = sortSelect.value as AttentionCenterSort
-    selection = Object.freeze({ kind: selection.kind, sort: value })
-    render(options.model.state)
-  }
-  kindSelect.addEventListener('change', onKindChange)
-  sortSelect.addEventListener('change', onSortChange)
 
   interface CardParts {
-    readonly kind: HTMLElement
     readonly title: HTMLElement
     readonly status: HTMLElement
     readonly context: HTMLUListElement
@@ -520,13 +458,12 @@ export function mountAttentionCenterPage(options: AttentionCenterPageOptions): A
     key: item => `${item.kind}:${item.id}`,
     create(item: AttentionCenterItem) {
       const row = element(document, 'li', 'wwc-attention-card')
-      const kind = element(document, 'span', 'wwc-attention-card-kind')
       const title = element(document, 'h4', 'wwc-attention-card-title')
       const status = element(document, 'p', 'wwc-attention-card-status')
       const context = cardContext(document, ['', '', '', ''])
       const action = element(document, 'a', 'wwc-attention-card-action')
-      row.append(kind, title, status, context, action)
-      cardParts.set(row, { kind, title, status, context, action })
+      row.append(title, status, context, action)
+      cardParts.set(row, { title, status, context, action })
       return row
     },
     update(row, item) {
@@ -538,19 +475,11 @@ export function mountAttentionCenterPage(options: AttentionCenterPageOptions): A
         || item.urgency === 'binding-invalid'
       row.dataset.kind = item.kind
       row.dataset.urgency = item.urgency
-      parts.kind.textContent = KIND_LABELS[item.kind]
       // Producer summaries are free-form, so the card never renders one raw.
       parts.title.textContent = boundApprovalText(item.title).text
       parts.status.textContent = itemStatusText(item)
-      // Absent facts and internal binding bookkeeping are omitted; the row
-      // shows the status line, human times, and its source context only.
-      updateCardContext(parts.context, [
-        item.createdAt === null ? null : `创建于 ${formatInstant(item.createdAt)}`,
-        item.expiresAt === null ? null : `过期于 ${formatInstant(item.expiresAt)}`,
-        item.kind === 'attention'
-          ? (item.deliveryTitle === null ? null : `交付 · ${item.deliveryTitle}`)
-          : (item.sessionTitle === null ? null : `会话 · ${item.sessionTitle}`),
-      ].filter((entry): entry is string => entry !== null))
+      // 设计稿 06:行 = 粗体标题 + 状态行 + 动作,没有元数据行。
+      updateCardContext(parts.context, [])
       parts.action.textContent = itemActionLabel(item)
       // A Delivery-bound Attention has no standalone acceptance surface, so it
       // renders no action instead of a dead end.
@@ -591,10 +520,11 @@ export function mountAttentionCenterPage(options: AttentionCenterPageOptions): A
             ? 'success'
             : 'neutral'
     pageHeader.update({
-      title: `待我处理 ${String(state.items.length)} 项`,
+      title: '待我处理',
       headingLevel: 2,
       className: 'wwc-attention-center-heading',
     })
+    count.textContent = `${String(state.items.length)} 项`
     statusBadge.update({
       label: presentation.statusText,
       tone,
@@ -611,12 +541,6 @@ export function mountAttentionCenterPage(options: AttentionCenterPageOptions): A
     })
     retry.hidden = !presentation.retryVisible
     reconnect.hidden = !presentation.reconnectVisible
-    refreshButton.update({
-      label: '立即刷新',
-      className: 'wwc-attention-center-refresh',
-      onActivate: () => { void options.model.refresh() },
-      disabled: presentation.actionsDisabled,
-    })
     const visible = selectAttentionCenterItems(state, selection)
     cardCollection.update(visible)
     cards.hidden = visible.length === 0
@@ -631,13 +555,9 @@ export function mountAttentionCenterPage(options: AttentionCenterPageOptions): A
       closed = true
       unsubscribe()
       unsubscribeDesktop?.()
-      kindSelect.removeEventListener('change', onKindChange)
-      sortSelect.removeEventListener('change', onSortChange)
       cardCollection.close()
       empty.close()
-      toolbar.close()
       errorState.close()
-      refreshButton.close()
       reconnectButton.close()
       retryButton.close()
       statusBadge.close()

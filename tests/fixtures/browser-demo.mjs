@@ -1,21 +1,13 @@
-// UI-608 key-page visual fixture.
-//
-// Mounts the one browser shell over a deterministic Control Plane facade and
-// reports a visual fingerprint of each key page, at whatever viewport the
-// harness has set.  The route in the URL selects which slice of fixture data is
-// served, so one fixture file covers the populated pages and the empty Chat
-// without re-mounting mid-capture.
+// Community-UI demo fixture: mounts the one browser shell over a deterministic
+// Control Plane facade whose sample data matches the design mockups
+// (docs/design/community-ui-geometric).  The 执行设备/项目 pages read the real
+// `/api/v1/clients` and `/api/v1/repositories` endpoints, which the local demo
+// server serves with the same design sample devices and repositories.
 //
 // Determinism: the shell receives a fixed clock, every served timestamp and
 // identifier is a literal, the font stack is pinned, and transitions,
 // animations, and scrollbars are switched off.
 
-import {
-  captureVisualFingerprint,
-  compareVisualFingerprints,
-  renderVisualRegressionReport,
-  VISUAL_REGRESSION_FONT_STACK,
-} from '/module/visual-regression.js'
 import { mountWinWinCodeClient } from '/module/application.js'
 
 const DETERMINISM_CSS = `
@@ -27,9 +19,6 @@ const DETERMINISM_CSS = `
 html { scrollbar-width: none; }
 ::-webkit-scrollbar { display: none; }
 `
-
-const DESKTOP_VIEWPORT = Object.freeze({ width: 1280, height: 900 })
-const NARROW_VIEWPORT = Object.freeze({ width: 420, height: 900 })
 
 const FIXED_NOW = '2026-09-02T01:00:00.000Z'
 
@@ -48,19 +37,17 @@ const scope = {
 const productSessionId = 'psn_00000000000000000000000001'
 const credentialReferenceId = 'crd_00000000000000000000000001'
 const modelRoute = {
-  providerId: 'visual-provider',
-  modelId: 'visual-model',
+  providerId: 'zhipu-provider',
+  modelId: 'glm-5.3',
   credentialReferenceId,
 }
-
-/** Which slice of fixture data this page load serves, taken from the route. */
-const route = location.hash.replace(/^#/u, '')
-const MODE = route === '/chat-empty' ? 'empty-chat' : 'populated'
-const emptyChat = MODE === 'empty-chat'
 
 function canonicalId(prefix, value) {
   return `${prefix}_${String(value).padStart(26, '0')}`
 }
+
+/** 设计稿 03a 空对话:load-time hash 里带 chat-empty 时,不提供任何会话。 */
+const emptyChat = location.hash.includes('chat-empty')
 
 function page() {
   return { hasMore: false, nextCursor: null }
@@ -86,65 +73,52 @@ function deliverySummary(index, overrides = {}) {
     revision: 4,
     schemaVersion,
     status: 'executing',
-    title: `Delivery ${String(index)}`,
+    title: `演示交付 ${String(index)}`,
     updatedAt: '2026-09-02T00:30:00.000Z',
     ownership: ownership(),
     activeStageRunId: canonicalId('str', index),
-    openAttentionCount: 1,
+    openAttentionCount: 0,
     taskCounts: { total: 4, pending: 0, active: 1, blocked: 0, verifying: 0, completed: 1, failed: 2 },
     ...overrides,
   }
 }
 
+// 设计稿 04 任务看板:两列实时卡片 + 折叠的 未开始/已完成 历史行。
 const deliveries = [
-  deliverySummary(1, { status: 'draft', activeStageRunId: null, openAttentionCount: 0 }),
-  deliverySummary(2, { status: 'clarifying' }),
-  deliverySummary(3, { status: 'executing' }),
-  deliverySummary(4, { status: 'reviewing', openAttentionCount: 0 }),
-  deliverySummary(5, { status: 'verifying', openAttentionCount: 0 }),
-  deliverySummary(6, { status: 'delivered', activeStageRunId: null, openAttentionCount: 0, taskCounts: {
-    total: 4, pending: 0, active: 0, blocked: 0, verifying: 0, completed: 4, failed: 0,
-  } }),
-  deliverySummary(7, { status: 'failed', activeStageRunId: null, taskCounts: {
-    total: 4, pending: 0, active: 0, blocked: 0, verifying: 0, completed: 2, failed: 2,
-  } }),
+  // 设计稿 04:待我处理两卡的来源(审批 + 交付注意点)。
+  deliverySummary(1, {
+    title: '修复登录回跳',
+    status: 'reviewing',
+    activeStageRunId: canonicalId('str', 1),
+    taskCounts: { total: 3, pending: 1, active: 1, blocked: 0, verifying: 0, completed: 1, failed: 0 },
+  }),
+  deliverySummary(2, {
+    title: '导出筛选结果',
+    status: 'ready-to-deliver',
+    openAttentionCount: 1,
+    taskCounts: { total: 3, pending: 0, active: 0, blocked: 0, verifying: 1, completed: 2, failed: 0 },
+  }),
+  // 设计稿 04:正在运行两卡。
+  deliverySummary(3, {
+    title: '配置迁移',
+    status: 'verifying',
+    taskCounts: { total: 4, pending: 0, active: 1, blocked: 0, verifying: 2, completed: 1, failed: 0 },
+  }),
+  deliverySummary(4, {
+    title: '修复缓存失效',
+    status: 'executing',
+    taskCounts: { total: 4, pending: 0, active: 2, blocked: 0, verifying: 0, completed: 1, failed: 0 },
+  }),
+  ...Array.from({ length: 18 }, (_, index) => deliverySummary(100 + index, {
+    title: `存档任务 ${String(index + 1)}`,
+    status: 'delivered',
+    activeStageRunId: null,
+    updatedAt: '2026-09-01T00:30:00.000Z',
+    taskCounts: { total: 4, pending: 0, active: 0, blocked: 0, verifying: 0, completed: 4, failed: 0 },
+  })),
 ]
 
-function chatSession() {
-  return {
-    id: productSessionId,
-    projectId: scope.projectId,
-    repositoryId: scope.repositoryId,
-    revision: 3,
-    state: 'idle',
-    title: 'Visual fixture Chat',
-    updatedAt: '2026-09-02T00:30:00.000Z',
-  }
-}
-
-function chatMessages() {
-  return [{
-    id: canonicalId('msg', 1),
-    productSessionId,
-    role: 'user',
-    content: 'Deliver the visual fixture requirement.',
-    sequence: 1,
-    state: 'completed',
-    createdAt: '2026-09-02T00:30:00.000Z',
-    updatedAt: '2026-09-02T00:30:00.000Z',
-  }, {
-    id: canonicalId('msg', 2),
-    productSessionId,
-    role: 'assistant',
-    content: 'The requirement is confirmed and ready for StrongFlow.',
-    sequence: 2,
-    state: 'completed',
-    createdAt: '2026-09-02T00:31:00.000Z',
-    updatedAt: '2026-09-02T00:31:00.000Z',
-  }]
-}
-
-
+// 设计稿 04:待我处理列 = 修复登录回跳(审核方案)+ 导出筛选结果(验收交付)。
 function approval(index) {
   return {
     id: canonicalId('apr', index),
@@ -152,7 +126,7 @@ function approval(index) {
     state: 'pending',
     requestedAt: '2026-09-02T00:40:00.000Z',
     expiresAt: '2099-09-02T00:00:00.000Z',
-    subject: `Allow the projected repository action ${String(index)}`,
+    subject: '修复登录回跳',
     binding: {
       productSessionId,
       executionJobId: canonicalId('job', index),
@@ -165,6 +139,60 @@ function approval(index) {
       },
     },
   }
+}
+
+function attentionItem(index, title) {
+  return {
+    id: canonicalId('att', index),
+    stageRunId: canonicalId('str', index),
+    status: 'open',
+    blocking: false,
+    title,
+    createdAt: '2026-09-02T00:30:00.000Z',
+  }
+}
+
+function chatSession() {
+  return {
+    id: productSessionId,
+    projectId: scope.projectId,
+    repositoryId: scope.repositoryId,
+    revision: 3,
+    state: 'idle',
+    title: '登录问题讨论',
+    updatedAt: '2026-09-02T00:30:00.000Z',
+  }
+}
+
+function chatMessages() {
+  return [{
+    id: canonicalId('msg', 1),
+    productSessionId,
+    role: 'user',
+    content: '修复登录成功后无法回跳的问题，按强流程推进。',
+    sequence: 1,
+    state: 'completed',
+    createdAt: '2026-09-02T00:28:00.000Z',
+    updatedAt: '2026-09-02T00:28:00.000Z',
+  }, {
+    id: canonicalId('msg', 2),
+    productSessionId,
+    role: 'assistant',
+    content: '已委托 #126「修复登录回跳」，方案正在等待审核。',
+    sequence: 2,
+    state: 'completed',
+    createdAt: '2026-09-02T00:29:00.000Z',
+    updatedAt: '2026-09-02T00:29:00.000Z',
+  }, {
+    id: canonicalId('msg', 3),
+    productSessionId,
+    role: 'user',
+    content: '我们再讨论一下导出功能的交互。',
+    sequence: 3,
+    state: 'completed',
+    createdAt: '2026-09-02T00:30:00.000Z',
+    updatedAt: '2026-09-02T00:30:00.000Z',
+  }]
 }
 
 function worker() {
@@ -181,7 +209,7 @@ function credentialReference() {
   return {
     id: credentialReferenceId,
     providerId: modelRoute.providerId,
-    displayName: 'Visual model credential',
+    displayName: '默认模型凭据',
     secretState: 'available',
     rotationVersion: 1,
     lastRotatedAt: '2026-09-02T00:00:00.000Z',
@@ -205,8 +233,8 @@ function routeAvailability() {
     reason: 'ready',
     items: [{
       route: modelRoute,
-      providerDisplayName: 'Visual Provider',
-      modelDisplayName: 'Visual Model',
+      providerDisplayName: '智谱',
+      modelDisplayName: 'GLM-5.3',
       catalogSource: scope,
       catalogVersion: 1,
       providerVersion: 1,
@@ -248,7 +276,9 @@ function deliveryDetail(delivery) {
     deliveryId: delivery.deliveryId,
     deliveryRevision: delivery.revision,
     ownership: delivery.ownership,
-    attention: delivery.openAttentionCount > 0 ? [attentionItem(1)] : [],
+    attention: delivery.openAttentionCount > 0
+      ? [attentionItem(2, '导出筛选结果')]
+      : [],
     currentCandidate: null,
     requirements: {
       repository: { kind: 'local-git', locator: 'workspace://repository' },
@@ -275,7 +305,7 @@ function serve(request) {
         items: [{
           kind: 'organization',
           id: identity.organizationId,
-          displayName: 'Visual Organization',
+          displayName: '个人组织',
           state: 'active',
         }],
         snapshotRevision: 1,
@@ -285,11 +315,11 @@ function serve(request) {
       return {
         kind: 'project_page',
         items: [
-          { kind: 'project', projectId: identity.projectId, displayName: 'Visual Project', state: 'active' },
+          { kind: 'project', projectId: identity.projectId, displayName: 'winwincode', state: 'active' },
           {
             kind: 'repository',
             repositoryId: scope.repositoryId,
-            displayName: 'Visual Repository',
+            displayName: 'winwincode',
             state: 'active',
           },
         ],
@@ -302,7 +332,7 @@ function serve(request) {
     if (request.query === 'session.list') {
       return { kind: 'product_session_page', items: emptyChat ? [] : [chatSession()] }
     }
-    if (request.query === 'session.get') return chatSession()
+    if (request.query === 'session.get') return emptyChat ? null : chatSession()
     if (request.query === 'session.messages.list') {
       return { kind: 'chat_message_page', items: chatMessages() }
     }
@@ -310,7 +340,7 @@ function serve(request) {
       return { kind: 'chat_interaction_page', items: [] }
     }
     if (request.query === 'approval.list') {
-      return { kind: 'approval_page', items: [approval(1), approval(2)] }
+      return { kind: 'approval_page', items: [approval(1)] }
     }
     if (request.query === 'worker.list') {
       return { kind: 'worker_page', items: [worker()] }
@@ -333,7 +363,7 @@ function serve(request) {
 }
 
 const controlPlane = {
-  serverUrl: 'https://control.localhost/visual-pages',
+  serverUrl: 'http://127.0.0.1:8080',
   async restore() {
     return {
       schemaVersion,
@@ -369,128 +399,29 @@ const determinism = new CSSStyleSheet()
 determinism.replaceSync(DETERMINISM_CSS)
 document.adoptedStyleSheets = [...document.adoptedStyleSheets, determinism]
 for (const token of ['--wwc-font-family', '--wwc-font-family-mono']) {
-  document.documentElement.style.setProperty(token, VISUAL_REGRESSION_FONT_STACK)
+  document.documentElement.style.setProperty(token, (
+    "'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', system-ui, sans-serif"
+  ))
 }
 
-const application = mountWinWinCodeClient({
+// 设计稿侧栏「最近对话」: seeded browser-local titles (登录问题讨论 / 架构调整讨论).
+try {
+  globalThis.localStorage?.setItem('winwincode.recentChats.v1', JSON.stringify([
+    { sessionKey: 'psn_00000000000000000000000001', title: '登录问题讨论', at: 1_787_000_000_000 },
+    { sessionKey: 'demo-arch-chat', title: '架构调整讨论', at: 1_786_900_000_000 },
+  ]))
+} catch {
+  /* best-effort seeding only */
+}
+
+mountWinWinCodeClient({
   root: document.querySelector('[data-winwincode-client-root]'),
   serverUrl: controlPlane.serverUrl,
   controlPlane,
   now: () => FIXED_NOW,
 })
 
-/** Read at capture time: the harness applies its viewport override after mount. */
-function currentViewport() {
-  return document.documentElement.clientWidth <= NARROW_VIEWPORT.width
-    ? NARROW_VIEWPORT
-    : DESKTOP_VIEWPORT
-}
-
-function waitFor(predicate, label) {
-  const deadline = Date.now() + 10_000
-  return (async () => {
-    while (!predicate()) {
-      if (Date.now() >= deadline) {
-        const visible = document.querySelector('main.wwc-main')?.textContent.slice(0, 300)
-        throw new Error(`timed out waiting for ${label}: ${JSON.stringify(visible)}`)
-      }
-      await new Promise(resolve_ => { setTimeout(resolve_, 20) })
-    }
-  })()
-}
-
-/**
- * Every key page: the route the shell serves it on, the element that says it
- * has mounted, and the status line that says its first snapshot has landed.
- */
-const PAGES = Object.freeze({
-  home: { route: '#/home', selector: '.wwc-home', status: '.wwc-home-status' },
-  chat: { route: '#/chat', selector: '.wwc-chat', status: '.wwc-chat-status' },
-  settings: {
-    route: '#/settings',
-    selector: '.wwc-settings',
-    status: '.wwc-settings-status .wwc-status-badge-label',
-  },
-  attention: {
-    route: '#/attention',
-    selector: '.wwc-attention-center',
-    status: '.wwc-attention-center-status .wwc-status-badge-label',
-  },
+globalThis.describeDemoViewport = () => ({
+  width: document.documentElement.clientWidth,
+  height: document.documentElement.clientHeight,
 })
-
-function fingerprintOf(id, kind, root) {
-  return captureVisualFingerprint({
-    document,
-    root,
-    id,
-    kind,
-    viewport: { ...currentViewport() },
-    fontStack: VISUAL_REGRESSION_FONT_STACK,
-  })
-}
-
-function viewportLabel() {
-  return currentViewport().width <= NARROW_VIEWPORT.width ? 'narrow' : 'desktop'
-}
-
-async function capturePage(name, captureId) {
-  const page_ = PAGES[name]
-  if (page_ === undefined) throw new Error(`unknown visual page: ${name}`)
-  location.hash = page_.route
-  await waitFor(() => document.querySelector(page_.selector) !== null, page_.selector)
-  await waitFor(() => {
-    const label = document.querySelector(page_.status)?.textContent ?? ''
-    return label.length > 0 && !/^Loading|^Updating/u.test(label)
-  }, `${page_.selector} status`)
-  await new Promise(resolve_ => { setTimeout(resolve_, 60) })
-  // The page is rooted at its own surface, not at `main`: the Scope selector and
-  // the readiness section are shell-level and already baselined with the shell.
-  return fingerprintOf(
-    `page/${captureId ?? name}@${viewportLabel()}`,
-    'page',
-    document.querySelector(page_.selector),
-  )
-}
-
-globalThis.captureVisualPage = capturePage
-
-globalThis.captureVisualShell = async () => {
-  await waitFor(() => document.querySelector('header.wwc-header') !== null, 'shell header')
-  const captures = [
-    fingerprintOf(`shell/header@${viewportLabel()}`, 'shell', document.querySelector('header.wwc-header')),
-  ]
-  const connection = document.querySelector('.wwc-connection-bar')
-  if (connection !== null) {
-    captures.push(fingerprintOf(
-      `shell/connection-connected@${viewportLabel()}`,
-      'shell',
-      connection,
-    ))
-  }
-  return captures
-}
-
-globalThis.captureVisualOffline = async () => {
-  application.connection.offline()
-  await waitFor(() => {
-    const badge = document.querySelector('.wwc-connection-status .wwc-status-badge-label')
-    return badge !== null && badge.textContent === '离线'
-  }, 'the offline connection presentation')
-  await new Promise(resolve_ => { setTimeout(resolve_, 60) })
-  const connection = document.querySelector('.wwc-connection-bar')
-  if (connection === null) throw new Error('the shell has no connection bar')
-  return [fingerprintOf(`shell/connection-offline@${viewportLabel()}`, 'shell', connection)]
-}
-
-
-
-globalThis.describeVisualViewport = () => ({ ...currentViewport(), mode: MODE })
-
-/** Compares one captured page against the committed baseline and renders a report. */
-globalThis.compareVisualPages = (expected, actual) => {
-  const differences = compareVisualFingerprints(expected, actual)
-  return {
-    differences,
-    report: renderVisualRegressionReport(differences, { id: actual.id }),
-  }
-}

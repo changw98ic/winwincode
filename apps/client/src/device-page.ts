@@ -41,18 +41,19 @@ export function renderDevicePage(options: DevicePageOptions): DevicePage {
   const layout = element(document, 'section', 'wwc-device')
   layout.dataset.wwcPage = 'management'
 
+  // Design page 08: the display title stands alone, the 更多 ∨ menu on the
+  // same row's right end.
   const pageHeader = mountPageHeader({
     document,
     props: {
       title: '执行设备',
-      description: '执行任务的电脑与它授权给本工作区的目录。',
       headingLevel: 2,
       className: 'wwc-device-heading',
     },
   })
   const more = element(document, 'button', 'wwc-device-more')
   more.type = 'button'
-  more.textContent = '更多 ▾'
+  more.textContent = '更多 ∨'
   const headerRow = element(document, 'div', 'wwc-device-header')
   headerRow.append(pageHeader.root, more)
 

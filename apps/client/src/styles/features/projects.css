@@ -1,0 +1,132 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+
+/* Design page 07: 项目 — display title with the accent 添加仓库 entry on the
+   row's right end, then one hairline row per repository. */
+
+.wwc-projects {
+  display: grid;
+  gap: var(--wwc-space-4);
+  min-width: 0;
+}
+
+.wwc-projects-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--wwc-space-3);
+}
+
+.wwc-projects-heading .wwc-page-header-title {
+  font-size: var(--wwc-font-size-display);
+  font-weight: var(--wwc-font-weight-display);
+}
+
+/* The accent primary action of the page, top-right beside the title. */
+.wwc-projects-add {
+  min-height: 3.5rem;
+  padding: var(--wwc-space-4) var(--wwc-space-9);
+  font-size: var(--wwc-font-size-lg);
+  border: var(--wwc-border-width-control) solid var(--wwc-color-border);
+  border-radius: var(--wwc-radius-md);
+  color: var(--wwc-color-text);
+  background: var(--wwc-color-accent);
+  font-weight: var(--wwc-font-weight-strong);
+  text-decoration: none;
+  white-space: nowrap;
+  box-shadow: var(--wwc-shadow-hard);
+}
+
+.wwc-projects-add:hover {
+  background: var(--wwc-color-accent-strong);
+}
+
+.wwc-projects-add:active {
+  box-shadow: var(--wwc-shadow-hard-sm);
+  translate: 2px 2px;
+}
+
+.wwc-projects-status {
+  margin: var(--wwc-space-0);
+  color: var(--wwc-color-text-muted);
+  font-size: var(--wwc-font-size-sm);
+}
+
+.wwc-projects-list {
+  display: grid;
+  margin: var(--wwc-space-0);
+  padding: var(--wwc-space-0);
+  list-style: none;
+  border-top: var(--wwc-border-width) solid var(--wwc-color-border-subtle);
+}
+
+.wwc-projects-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  column-gap: var(--wwc-space-6);
+  min-width: 0;
+  padding: var(--wwc-space-5) var(--wwc-space-2);
+  border-bottom: var(--wwc-border-width) solid var(--wwc-color-border-subtle);
+}
+
+.wwc-projects-row-info {
+  display: grid;
+  gap: var(--wwc-space-2);
+  min-width: 0;
+}
+
+.wwc-projects-row-name {
+  margin: var(--wwc-space-0);
+  font-size: var(--wwc-font-size-xl);
+  font-weight: var(--wwc-font-weight-display);
+  line-height: var(--wwc-line-height-tight);
+}
+
+.wwc-projects-row-source {
+  margin: var(--wwc-space-0);
+  color: var(--wwc-color-text-muted);
+  font-size: var(--wwc-font-size-md);
+  overflow-wrap: anywhere;
+}
+
+/* 新对话 keeps the outlined control look; ⋯ sits at the row's right end. */
+.wwc-projects-row-chat {
+  padding: var(--wwc-space-3) var(--wwc-space-6);
+  font-size: var(--wwc-font-size-md);
+  border: var(--wwc-border-width-control) solid var(--wwc-color-border);
+  border-radius: var(--wwc-radius-md);
+  color: var(--wwc-color-text);
+  background: var(--wwc-color-surface);
+  font-weight: var(--wwc-font-weight-strong);
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.wwc-projects-row-chat:hover {
+  background: var(--wwc-color-surface-subtle);
+}
+
+.wwc-projects-row-more {
+  min-width: var(--wwc-control-min-height);
+  padding: var(--wwc-space-2);
+  border: 0;
+  background: transparent;
+  color: var(--wwc-color-text);
+  font-size: var(--wwc-font-size-lg);
+  font-weight: var(--wwc-font-weight-strong);
+  letter-spacing: 0.1em;
+  cursor: pointer;
+}
+
+@media (max-width: 48rem) {
+  .wwc-projects-row {
+    grid-template-columns: minmax(0, 1fr);
+    row-gap: var(--wwc-space-3);
+  }
+
+  .wwc-projects-row-chat,
+  .wwc-projects-row-more {
+    justify-self: start;
+  }
+}

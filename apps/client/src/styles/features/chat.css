@@ -19,17 +19,10 @@
 .wwc-chat-page-header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-end;
   gap: var(--wwc-space-4);
-}
-
-.wwc-chat-project {
-  padding: var(--wwc-space-2) var(--wwc-space-3);
-  border: var(--wwc-border-width-control) solid var(--wwc-color-border);
-  border-radius: var(--wwc-radius-md);
-  color: inherit;
-  background: var(--wwc-color-surface);
-  font-weight: var(--wwc-font-weight-medium);
+  /* 设计稿 03b:委托 chip 与 shell 的 winwincode ∨ 下拉同一行(右上)。 */
+  margin-top: calc(-1 * (var(--wwc-control-min-height) + var(--wwc-space-6) + var(--wwc-space-4)));
 }
 
 .wwc-chat-heading {
@@ -38,10 +31,18 @@
   font-weight: var(--wwc-font-weight-display);
 }
 
+/* Design pages 03a/03b: no status line under the title — the live region
+   stays in the DOM for announcements only. */
 .wwc-chat-status {
-  margin: var(--wwc-space-0);
-  font-size: var(--wwc-font-size-sm);
-  color: var(--wwc-color-text-muted);
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  clip-path: inset(50%);
+  overflow: hidden;
+  white-space: nowrap;
 }
 
 .wwc-chat-model,

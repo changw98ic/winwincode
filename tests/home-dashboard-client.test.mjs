@@ -382,23 +382,24 @@ function decisionCard(overrides = {}) {
   }
 }
 
-test('Home is the canonical default surface and every product entry stays reachable', () => {
-  assert.equal(CLIENT_SURFACES[0]?.id, 'home')
+test('Chat is the canonical default surface and every product entry stays reachable', () => {
+  // 设计稿侧栏:新对话排首位并是默认落地页,任务看板紧随其后。
+  assert.equal(CLIENT_SURFACES[0]?.id, 'chat')
   assert.deepEqual(CLIENT_SURFACES.map(surface => surface.id), [
-    'home',
     'chat',
+    'home',
     'projects',
     'extensions',
     'device',
     'attention',
     'settings',
   ])
-  assert.equal(clientSurfaceFromHash('').id, 'home')
+  assert.equal(clientSurfaceFromHash('').id, 'chat')
   assert.equal(clientSurfaceFromHash('#/home?x=1').id, 'home')
   assert.equal(clientSurfaceFromHash('#/chat').id, 'chat')
   assert.equal(clientSurfaceFromHash('#/attention?session=psn_1').id, 'attention')
   for (const surface of CLIENT_SURFACES) {
-    assert.equal(surface.default, surface.id === 'home', surface.id)
+    assert.equal(surface.default, surface.id === 'chat', surface.id)
   }
 })
 
@@ -676,8 +677,10 @@ test('a decision card links to the exact decision surface and the exact Chat ses
   const inputCard = decisionCard({ stageRunId })
   assert.equal(
     homeDecisionHash(attentionCard, scopeSelection),
-    null,
-    'a Delivery-bound Attention renders no action instead of a dead end',
+    `#/home/task-run?organizationId=${scope.organizationId}`
+      + `&workspaceId=${scope.workspaceId}&projectId=${scope.projectId}`
+      + `&repositoryId=${scope.repositoryId}`,
+    'a Delivery-bound Attention opens the run page (设计稿 04/06 的「验收交付」)',
   )
   assert.equal(
     homeDecisionHash(inputCard, scopeSelection),
@@ -989,13 +992,13 @@ test('the Home page mounts the task board chrome, one polite live region, and ex
   assert.equal(byClass(attentionCard, 'wwc-home-card-status').textContent, '阻塞 · 需要立即决策')
   assert.equal(byClass(attentionCard, 'wwc-home-card-action').textContent, '验收交付')
 
-  // Running cards: 强流程 + the mapped status text; no dead-end action link.
+  // Running cards: 强流程 + the mapped status text; the action opens the run
+  // page (设计稿 04 的「查看进度」).
   const runningCard = allByClass(rootElement, 'wwc-home-card')
     .find(card => card.dataset.kind === 'delivery')
   assert.notEqual(runningCard, undefined)
   assert.equal(byClass(runningCard, 'wwc-home-card-status').textContent, '强流程 · 正在执行')
-  assert.equal(byClass(runningCard, 'wwc-home-card-action').textContent, '')
-  assert.equal(byClass(runningCard, 'wwc-home-card-action').getAttribute('href'), null)
+  assert.equal(byClass(runningCard, 'wwc-home-card-action').textContent, '查看进度')
 
   const actions = descendants(rootElement)
     .filter(node => node.className === 'wwc-home-card-action')
@@ -1009,8 +1012,8 @@ test('the Home page mounts the task board chrome, one polite live region, and ex
   )
   assert.equal(
     actions.filter(href => href.startsWith('#/')).length,
-    1,
-    'every other card renders no dead-end action link',
+    4,
+    'delivery cards open the run page; decisions open their exact surfaces',
   )
   const chatLinks = descendants(rootElement)
     .filter(node => node.className === 'wwc-home-card-chat' && node.hidden !== true)
@@ -1078,9 +1081,9 @@ test('the Home page stays usable when one projection is unavailable and closes i
   assert.match(visibleText(byClass(rootElement, 'wwc-home')), /待办 不可用/u)
   assert.match(visibleText(byClass(rootElement, 'wwc-home')), /用量与健康 不可用/u)
   assert.match(visibleText(byClass(rootElement, 'wwc-home')), /Running delivery/u)
+  // 设计稿 04:看板画布没有刷新控件——模型刷新只能来自生命周期,不是按钮。
+  assert.equal(model.refreshes, 1)
 
-  byClass(rootElement, 'wwc-home-refresh').dispatch('click')
-  assert.equal(model.refreshes, 2)
   mountedPage.close()
   assert.equal(rootElement.children.length, 0)
   assert.equal(model.closed, false, 'a host that owns the model closes it itself')

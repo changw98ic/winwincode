@@ -126,6 +126,10 @@ export function mountMyWorkPage(
   startChat.textContent = presentation.startChatLabel
   const start = element(document, 'div', 'wwc-my-work-start')
   start.append(startLabel, startTaskEntry, startChat)
+  // Design page 04 keeps the first screen to the task board alone: the
+  // task-start entries stay composed (tests and deep links keep working) but
+  // render nowhere; new tasks start from the board's 新建任务 entry.
+  start.hidden = true
 
   // The work sections are the existing Home dashboard page; this composition
   // reuses its live region, deep links, and first-use entry instead of a copy.
@@ -164,6 +168,9 @@ export function mountMyWorkPage(
     deviceList,
     clientsHint,
   )
+  // Design page 08 owns device presentation (执行设备 page); the composed
+  // Clients zone stays mounted for its shared model but renders nowhere.
+  clientsZone.hidden = true
 
   layout.append(start, workRoot, clientsZone)
   options.root.replaceChildren(layout)

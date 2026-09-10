@@ -22,7 +22,7 @@
 }
 
 .wwc-home-heading .wwc-page-header-title {
-  font-size: var(--wwc-font-size-xl);
+  font-size: var(--wwc-font-size-display);
   font-weight: var(--wwc-font-weight-display);
 }
 
@@ -64,12 +64,18 @@
   border-color: var(--wwc-color-text);
 }
 
+/* Design page 04: the polite status line stays for announcements but renders
+   nowhere — the board canvas carries no status banner. */
 .wwc-home-status {
-  justify-self: start;
-}
-
-.wwc-home-refresh {
-  justify-self: start;
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  clip-path: inset(50%);
+  overflow: hidden;
+  white-space: nowrap;
 }
 
 .wwc-home-unavailable {
@@ -229,9 +235,12 @@
   color: var(--wwc-color-danger-text);
 }
 
+/* Card metadata shares one quiet line under the status text. */
 .wwc-home-card-context {
-  display: grid;
-  gap: var(--wwc-space-1);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--wwc-space-1) var(--wwc-space-2);
   margin: var(--wwc-space-0);
   padding: var(--wwc-space-0);
   list-style: none;
@@ -239,10 +248,23 @@
   font-size: var(--wwc-font-size-xs);
 }
 
+.wwc-home-card-context li {
+  display: inline;
+}
+
+.wwc-home-card-context li:empty {
+  display: none;
+}
+
+.wwc-home-card-context li + li:not(:empty)::before {
+  content: '·';
+  margin-right: var(--wwc-space-2);
+  color: var(--wwc-color-text-muted);
+}
+
+/* 设计稿 04:卡面只有标题+状态行+动作钮,会话入口不占卡面。 */
 .wwc-home-card-chat {
-  justify-self: start;
-  color: var(--wwc-color-action);
-  font-size: var(--wwc-font-size-xs);
+  display: none;
 }
 
 /* Delivery cards carry the white 查看进度 action; decision cards the accent one. */

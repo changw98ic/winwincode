@@ -970,8 +970,10 @@ test('item entry links open the Chat session that raised the decision', () => {
       deliveryId,
       stageRunId,
     }), emptyScopeSelection),
-    null,
-    'a Delivery-bound Attention renders no action instead of a dead end',
+    `#/home/task-run?organizationId=${scope.organizationId}`
+      + `&workspaceId=${scope.workspaceId}&projectId=${scope.projectId}`
+      + `&repositoryId=${scope.repositoryId}`,
+    'a Delivery-bound Attention opens the run page (设计稿 06 的「验收交付」)',
   )
 })
 
@@ -989,7 +991,8 @@ test('the mounted center shows safe rows, disables fail-closed actions, and keep
   })
   assert.equal(byClass(rootElement, 'wwc-attention-center').dataset.wwcPage, 'management')
   assert.equal(byClass(rootElement, 'wwc-attention-center-heading').dataset.wwcComponent, 'page-header')
-  // Design page 06: back link, counted title, one polite status badge, refresh.
+  // Design page 06: back link, counted title, one polite status badge; the
+  // canvas carries no refresh button and no Browse filter row.
   const back = byClass(rootElement, 'wwc-attention-center-back')
   assert.equal(
     back.href,
@@ -999,13 +1002,14 @@ test('the mounted center shows safe rows, disables fail-closed actions, and keep
   )
   assert.equal(back.textContent, '返回任务看板')
   assert.equal(
-    visibleText(byClass(rootElement, 'wwc-attention-center-heading')).includes('待我处理 5 项'),
+    visibleText(byClass(rootElement, 'wwc-attention-center-heading')).includes('待我处理'),
     true,
   )
+  assert.equal(
+    byClass(rootElement, 'wwc-attention-center-count').textContent,
+    '5 项',
+  )
   assert.equal(byClass(rootElement, 'wwc-attention-center-status').dataset.wwcComponent, 'status-badge')
-  assert.equal(byClass(rootElement, 'wwc-attention-center-refresh').dataset.wwcComponent, 'button')
-  const kindSelect = byClass(rootElement, 'wwc-attention-center-kind')
-  const sortSelect = byClass(rootElement, 'wwc-attention-center-sort')
   const cards = byClass(rootElement, 'wwc-attention-center-list')
   const cardNodes = [...cards.children]
   assert.equal(cardNodes.length, 5)
@@ -1055,17 +1059,8 @@ test('the mounted center shows safe rows, disables fail-closed actions, and keep
   assert.equal(handled.getAttribute('aria-expanded'), 'false')
   assert.equal(handledDetail.hidden, true)
 
-  kindSelect.value = 'attention'
-  kindSelect.dispatch('change')
-  const visibleAfterFilter = [...byClass(rootElement, 'wwc-attention-center-list').children]
-  assert.equal(visibleAfterFilter.length, 2)
-  assert.equal(visibleAfterFilter.includes(cardNodes[0]), true, 'keyed nodes survive filtering')
-
-  kindSelect.value = 'all'
-  kindSelect.dispatch('change')
+  // Reloads keep every card in the urgency order (no filter row anymore).
   model.publish(centerState({ realtime: 'reloading' }))
-  assert.equal(byClass(rootElement, 'wwc-attention-center-kind'), kindSelect, 'filter control survives reloads')
-  assert.equal(byClass(rootElement, 'wwc-attention-center-sort'), sortSelect, 'sort control survives reloads')
   assert.equal([...byClass(rootElement, 'wwc-attention-center-list').children].includes(cardNodes[0]), true)
   mounted.close()
 })

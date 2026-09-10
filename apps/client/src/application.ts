@@ -455,7 +455,7 @@ export function mountWinWinCodeClient(
   main.id = 'wwc-main'
 
   const NAV_ICONS: Partial<Record<ClientSurfaceId, string>> = {
-    chat: '<path d="M4 5h16v11H8l-4 4z"/>',
+    chat: '<path d="M11 4H5a1 1 0 0 0-1 1v13a1 1 0 0 0 1 1h13a1 1 0 0 0 1-1v-6"/><path d="M17.5 3.5a2.1 2.1 0 0 1 3 3L12 15l-4 1 1-4Z"/>',
     home: '<rect x="4" y="4" width="7" height="7"/><rect x="13" y="4" width="7" height="7"/><rect x="4" y="13" width="7" height="7"/><rect x="13" y="13" width="7" height="7"/>',
     projects: '<path d="M3 6h6l2 2h10v11H3z"/>',
     extensions: '<path d="M10 4h4v3a2 2 0 1 0 4 0h3v4h-3a2 2 0 1 0 0 4h3v4h-4v-3a2 2 0 1 0-4 0v3H6v-4H4v-4h3a2 2 0 1 0 0-4H4V4h6z"/>',
@@ -480,6 +480,9 @@ export function mountWinWinCodeClient(
     links.set(surface.id, link)
     navigation.append(link)
   }
+  // Design sidebar footer: 设置 sits in the footer under 「Client 已连接」,
+  // not inside the top navigation group.
+  connectionBar.root.append(links.get('settings')!)
 
   // Design sidebar 「最近对话」: browser-local session titles written by the
   // Chat page; the shell only renders the titles.
@@ -490,10 +493,22 @@ export function mountWinWinCodeClient(
   recentChatsRoot.append(recentChatsLabel, recentChatsList)
   function renderRecentChats(): void {
     const entries = loadRecentChats(browser.localStorage ?? null)
+    const activeSession = new URLSearchParams(
+      browser.location.hash.split('?')[1] ?? '',
+    ).get('session')
     recentChatsList.replaceChildren(...entries.map(entry => {
       const row = element(document, 'li', 'wwc-sidebar-recent-item')
-      row.textContent = entry.title
+      const icon = element(document, 'span', 'wwc-sidebar-recent-item-icon')
+      icon.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" width="16" height="16"><path d="M4 5h16v11H8l-4 4z"/></svg>`
+      const text = element(document, 'span', 'wwc-sidebar-recent-item-text')
+      text.textContent = entry.title
+      row.append(icon, text)
       row.dataset.sessionKey = entry.sessionKey
+      // 设计稿 03b:当前打开的会话在侧栏高亮。
+      const active = entry.sessionKey.length > 0 && entry.sessionKey === activeSession
+      row.classList.toggle('wwc-sidebar-recent-item-active', active)
+      if (active) row.setAttribute('aria-current', 'page')
+      else row.removeAttribute('aria-current')
       return row
     }))
     recentChatsRoot.hidden = entries.length === 0
@@ -629,13 +644,21 @@ export function mountWinWinCodeClient(
       options.navigationCapabilities,
     )
     const visible: HTMLAnchorElement[] = []
+    const linkText = new Map<HTMLAnchorElement, HTMLElement>()
     for (const entry of projection.surfaces) {
       const link = links.get(entry.surface.id)
       if (link === undefined) continue
       link.href = surfaceHash(entry.surface.path, scopeSelectionFromHash(browser.location.hash))
       link.dataset.capability = entry.capability
       link.hidden = entry.capability === 'hidden'
-      link.textContent = entry.capability === 'read-only'
+      // The icon span from mount time must survive label updates, so only the
+      // dedicated text node is rewritten here.
+      let text = linkText.get(link)
+      if (text === undefined) {
+        text = link.lastElementChild as HTMLElement | null ?? link
+        linkText.set(link, text)
+      }
+      text.textContent = entry.capability === 'read-only'
         ? `${entry.surface.label}（只读）`
         : entry.capability === 'disabled'
           ? `${entry.surface.label}（不可用）`
@@ -653,7 +676,9 @@ export function mountWinWinCodeClient(
       }
       if (!link.hidden) visible.push(link)
     }
-    navigation.replaceChildren(...visible)
+    // The 设置 link lives in the sidebar footer (moved at mount), so the
+    // navigation group rebuild keeps only the top group.
+    navigation.replaceChildren(...visible.filter(link => link.dataset.surface !== 'settings'))
     navigation.dataset.deployment = projection.deployment
     // Rebuilding the labels also rebuilds the badge, so it is re-applied here.
     attentionMonitor?.applyBadge()
@@ -956,7 +981,6 @@ export function mountWinWinCodeClient(
     featureController = controller
     routeLoading('正在加载设置…')
     try {
-      process.stdout.write(`DEBUG renderSettings entered gen=${generation}\n`)
       const [{ createSettingsViewModel }, { mountSettingsPage }] = await Promise.all([
         import('./settings-view-model.js'),
         import('./settings-page.js'),
@@ -1004,7 +1028,6 @@ export function mountWinWinCodeClient(
         },
       })
     } catch (error) {
-      process.stdout.write(`DEBUG renderSettings failed: ${String((error as Error)?.stack ?? error)}\n`)
       if (closed || generation !== renderGeneration || controller.signal.aborted) return
       showRouteFailure(error, 'SETTINGS_ROUTE_FAILURE')
     }
@@ -1293,15 +1316,21 @@ export function mountWinWinCodeClient(
       } else {
         scopeSelectorPage.updateContextStatus(resolution.status)
       }
-      scopeRoot.hidden = false
+      // Design pages 03a/03b: the 「winwincode ∨」 Scope dropdown lives at the
+      // top-left of the Chat canvas only; other surfaces render without it
+      // unless the scope itself needs attention.
+      scopeRoot.hidden = activeSurface.id !== 'chat' && resolution.status !== 'denied'
     } else {
       scopeSelectorPage?.close()
       scopeSelectorPage = null
       scopeRoot.hidden = true
       scopeRoot.replaceChildren()
     }
-    readinessRoot.hidden = !(authSession.state.status === 'signed-in' && session !== null)
-    if (!readinessRoot.hidden) {
+    // 设计稿 16 页:没有任何页面在内联位置渲染就绪检查清单(它属于独立的
+    // 首次设置流程),因此外壳不再把这个区块压在内容上方;模型照常更新,
+    // 保证独立的就绪页与连接健康状态保持准确。
+    readinessRoot.hidden = true
+    {
       const resolution = currentScopeResolution
       const context: ReadinessContext = authSession.state.status !== 'signed-in' || session === null
         ? { status: 'signed-out' }
@@ -1314,9 +1343,21 @@ export function mountWinWinCodeClient(
               : { status: 'no-scope', reason: 'selection-required' }
       void readiness.updateContext(context)
     }
+    const chatSessionActive = activeSurface.id === 'chat'
+      && browser.location.hash.includes('session=')
+    // 路由切换会改变「当前会话」的有效性,最近对话的高亮随之重算。
+    renderRecentChats()
     for (const [id, link] of links) {
-      if (id === activeSurface.id) link.setAttribute('aria-current', 'page')
+      // 设计稿 06:待我处理属于看板上下文,任务看板保持高亮。
+      const current = id === activeSurface.id
+        || (activeSurface.id === 'attention' && id === 'home')
+      if (current) link.setAttribute('aria-current', 'page')
       else link.removeAttribute('aria-current')
+      // 设计稿 03b:会话打开时高亮的是会话行,不是「新对话」导航项。
+      link.classList.toggle(
+        'wwc-navigation-link-in-session',
+        id === 'chat' && chatSessionActive,
+      )
     }
     if (routeAccessDenied) {
       closeAttentionMonitor()

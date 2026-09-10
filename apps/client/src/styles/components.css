@@ -372,6 +372,18 @@
   gap: var(--wwc-space-2);
 }
 
+/* Design 04 sidebar footer: the connected state reads as one quiet line —
+   no badge box and no action buttons. */
+.wwc-connection-bar[data-connection-status='connected'] .wwc-connection-actions {
+  display: none;
+}
+
+.wwc-connection-bar[data-connection-status='connected'] [data-wwc-component='status-badge'] {
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
 .wwc-connection-copy-feedback,
 .wwc-client-error-copy-feedback {
   grid-column: 1 / -1;

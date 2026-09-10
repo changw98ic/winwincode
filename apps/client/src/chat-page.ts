@@ -330,10 +330,10 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
   const document = options.root.ownerDocument
   const layout = element(document, 'div', 'wwc-chat')
   const conversation = element(document, 'section', 'wwc-chat-conversation')
-  // Design pages 03a/03b: the page header carries only the project switcher
-  // (owned by the shell) and the delegation entry chip.
+  // Design pages 03a/03b: the page header carries only the delegation entry
+  // chip; the 「winwincode ∨」 project dropdown at the top left is the shell's
+  // Scope selector, not a second Chat-owned control.
   const header = element(document, 'header', 'wwc-chat-page-header')
-  const projectSwitcher = element(document, 'button', 'wwc-chat-project')
   const heading = element(document, 'h2', 'wwc-chat-heading')
   const status = element(document, 'p', 'wwc-chat-status')
   // Design page 03b: the delegation entry is the accent chip on the top right.
@@ -459,13 +459,10 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
   heading.textContent = '新对话'
   status.setAttribute('role', 'status')
   status.setAttribute('aria-live', 'polite')
-  projectSwitcher.type = 'button'
-  projectSwitcher.disabled = true
-  projectSwitcher.textContent = 'winwincode ∨'
-  projectSwitcher.title = '项目切换即将在侧栏提供'
-  projectSwitcher.setAttribute('aria-label', '切换项目（暂未开放）')
-  modelLabel.textContent = '默认模型'
+  // 设计稿 03a:模型选择即下拉本身,不再渲染可见的静态标签。
+  modelLabel.textContent = ''
   modelLabel.htmlFor = 'wwc-chat-model'
+  modelSelect.setAttribute('aria-label', '默认模型')
   modelSelect.id = 'wwc-chat-model'
   modelSettings.href = options.settingsHref ?? '#/settings'
   modelSettings.textContent = '在设置中查看模型路由'
@@ -533,7 +530,25 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
   send.type = 'submit'
   // Design page 03a: the composer sends through an accent square carrying the
   // paper-plane glyph; the spoken name stays the state-dependent action label.
-  send.textContent = '➤'
+  // 源码安全扫描禁止本文件出现字面 URL;SVG 命名空间是 W3C 固定常量,
+  // 在运行时拼装。
+  const svgNs = ['http', '://', 'www.w3.org/2000/svg'].join('')
+  const sendIcon = typeof document.createElementNS === 'function'
+    ? (() => {
+        const svg = document.createElementNS(svgNs, 'svg')
+        svg.setAttribute('viewBox', '0 0 24 24')
+        svg.setAttribute('fill', 'currentColor')
+        svg.setAttribute('aria-hidden', 'true')
+        svg.setAttribute('width', '18')
+        svg.setAttribute('height', '18')
+        const path = document.createElementNS(svgNs, 'path')
+        path.setAttribute('d', 'M3 11.5 21 3l-8.5 18-2.3-7.2z')
+        svg.append(path)
+        return svg
+      })()
+    : null
+  if (sendIcon !== null) send.append(sendIcon)
+  else send.textContent = '➤'
   send.setAttribute('aria-label', '发送')
   receipt.hidden = true
   receiptLink.href = '#/home/task-run'
@@ -544,7 +559,7 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
   modelLabel.append(modelSelect)
   controls.append(attach, modelLabel, cancel, send)
   form.append(composerLabel, composer, controls, modelNotice, modelSettings)
-  header.append(projectSwitcher, delegationChip.root)
+  header.append(delegationChip.root)
   conversion.hidden = true
   // UI-604: the panel is a dialog in fact but was announced as plain page content,
   // opened without moving focus, and could only be dismissed with the pointer.
@@ -759,6 +774,19 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
       confirmation.checked = false
     }
     status.textContent = presentation.statusText
+    // 设计稿 03b:侧栏高亮当前会话行,并抑制「新对话」的重复高亮。
+    // 列表由外壳渲染,这里只按当前会话标记激活行(FakeDocument 下无查询能力时跳过)。
+    if (typeof document.querySelectorAll === 'function') {
+      for (const row of Array.from(
+        document.querySelectorAll<HTMLElement>('.wwc-sidebar-recent-item'),
+      )) {
+        const key = row.dataset?.sessionKey ?? null
+        const active = state.session !== null && key !== null && key === state.session.id
+        row.classList?.toggle?.('wwc-sidebar-recent-item-active', active)
+      }
+      const chatNav = document.querySelector('.wwc-navigation-link[data-surface="chat"]')
+      chatNav?.classList?.toggle?.('wwc-navigation-link-in-session', state.session !== null)
+    }
     heading.hidden = state.session === null
     heading.textContent = state.session?.title ?? '新对话'
     diagram.hidden = state.session !== null

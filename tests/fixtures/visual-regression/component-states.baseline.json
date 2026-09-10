@@ -3271,10 +3271,10 @@
           "border-left-width": "0px",
           "border-right-color": "rgb(23, 23, 23)",
           "border-right-width": "0px",
-          "border-top-color": "rgb(23, 23, 23)",
+          "border-top-color": "var(--wwc-color-border-subtle)",
           "border-top-left-radius": "0px",
           "border-top-right-radius": "0px",
-          "border-top-width": "0px",
+          "border-top-width": "1px",
           "box-shadow": "none",
           "color": "rgb(23, 23, 23)",
           "cursor": "auto",
@@ -3294,7 +3294,7 @@
           "x": 0,
           "y": 0,
           "width": 724,
-          "height": 68
+          "height": 49
         }
       },
       {
@@ -3306,14 +3306,16 @@
         "state": {},
         "style": {
           "background-color": "rgb(0, 0, 0)",
+          "border-top-color": "rgb(23, 23, 23)",
+          "border-top-width": "0px",
           "cursor": "pointer",
           "display": "block"
         },
         "box": {
           "x": 16,
-          "y": 19,
-          "width": 72,
-          "height": 31
+          "y": 13,
+          "width": 113,
+          "height": 24
         }
       },
       {
@@ -3326,19 +3328,14 @@
           "data-tone": "success"
         },
         "style": {
-          "background-color": "var(--wwc-color-success-surface)",
           "border-bottom-color": "rgb(31, 122, 51)",
           "border-bottom-left-radius": "2px",
           "border-bottom-right-radius": "2px",
-          "border-bottom-width": "1px",
           "border-left-color": "rgb(31, 122, 51)",
-          "border-left-width": "1px",
           "border-right-color": "rgb(31, 122, 51)",
-          "border-right-width": "1px",
           "border-top-color": "rgb(31, 122, 51)",
           "border-top-left-radius": "2px",
           "border-top-right-radius": "2px",
-          "border-top-width": "1px",
           "color": "rgb(31, 122, 51)",
           "display": "inline-flex",
           "font-size": "14px",
@@ -3347,9 +3344,9 @@
         },
         "box": {
           "x": 16,
-          "y": 19,
-          "width": 72,
-          "height": 31
+          "y": 15,
+          "width": 113,
+          "height": 21
         }
       },
       {
@@ -3362,20 +3359,15 @@
           "aria-hidden": "true"
         },
         "style": {
-          "background-color": "rgb(0, 0, 0)",
           "border-bottom-left-radius": "0px",
           "border-bottom-right-radius": "0px",
-          "border-bottom-width": "0px",
-          "border-left-width": "0px",
-          "border-right-width": "0px",
           "border-top-left-radius": "0px",
           "border-top-right-radius": "0px",
-          "border-top-width": "0px",
           "display": "block"
         },
         "box": {
-          "x": 25,
-          "y": 24,
+          "x": 16,
+          "y": 15,
           "width": 8,
           "height": 21
         }
@@ -3385,73 +3377,20 @@
         "tag": "SPAN",
         "component": null,
         "role": null,
-        "text": "已连接",
+        "text": "Client 已连接",
         "state": {},
         "style": {
-          "background-color": "rgb(0, 0, 0)",
           "border-bottom-left-radius": "0px",
           "border-bottom-right-radius": "0px",
-          "border-bottom-width": "0px",
-          "border-left-width": "0px",
-          "border-right-width": "0px",
           "border-top-left-radius": "0px",
           "border-top-right-radius": "0px",
-          "border-top-width": "0px",
           "display": "block"
         },
         "box": {
-          "x": 37,
-          "y": 24,
-          "width": 42,
+          "x": 28,
+          "y": 15,
+          "width": 101,
           "height": 21
-        }
-      },
-      {
-        "path": "./div[1]",
-        "tag": "DIV",
-        "component": null,
-        "role": null,
-        "text": "",
-        "state": {},
-        "style": {
-          "background-color": "rgb(0, 0, 0)",
-          "display": "grid"
-        },
-        "box": {
-          "x": 96,
-          "y": 12,
-          "width": 90,
-          "height": 44
-        }
-      },
-      {
-        "path": "./div[1]/button[2]",
-        "tag": "BUTTON",
-        "component": "button",
-        "role": null,
-        "text": "复制诊断",
-        "state": {
-          "data-variant": "default"
-        },
-        "style": {
-          "background-color": "var(--wwc-color-surface)",
-          "border-bottom-left-radius": "2px",
-          "border-bottom-right-radius": "2px",
-          "border-bottom-width": "1px",
-          "border-left-width": "1px",
-          "border-right-width": "1px",
-          "border-top-left-radius": "2px",
-          "border-top-right-radius": "2px",
-          "border-top-width": "1px",
-          "cursor": "pointer",
-          "display": "block",
-          "font-weight": "600"
-        },
-        "box": {
-          "x": 96,
-          "y": 12,
-          "width": 90,
-          "height": 44
         }
       }
     ]

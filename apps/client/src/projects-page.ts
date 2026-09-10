@@ -42,11 +42,12 @@ export function renderProjectsPage(options: ProjectsPageOptions): ProjectsPage {
   const layout = element(document, 'section', 'wwc-projects')
   layout.dataset.wwcPage = 'management'
 
+  // Design page 07: the display title stands alone, the accent 添加仓库 entry
+  // on the same row's right end.
   const pageHeader = mountPageHeader({
     document,
     props: {
       title: '项目',
-      description: '已连接执行设备上的项目与仓库。',
       headingLevel: 2,
       className: 'wwc-projects-heading',
     },

@@ -219,7 +219,7 @@ const SETTINGS_CATEGORIES: readonly {
   Object.freeze({
     id: 'diagnostics',
     label: '诊断与用量',
-    title: '诊断与用量',
+    title: '运行诊断与用量',
     description: '运行状态检查与用量概览。',
   }),
 ])
@@ -271,11 +271,12 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
   let selectedCategory: SettingsCategoryId = 'general'
   const initialCategory = categoryOf(selectedCategory)
 
+  // Design page 12: the display title stands alone — no status badge copy and
+  // no description subtitle under it.
   const pageHeader = mountPageHeader({
     document,
     props: {
       title: initialCategory.title,
-      description: initialCategory.description,
       headingLevel: 2,
       className: 'wwc-settings-heading',
     },
@@ -285,14 +286,20 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
   const categorySelect = element(document, 'select', 'wwc-settings-category-select')
   categorySelect.id = 'wwc-settings-category'
   categorySelect.setAttribute('aria-label', '设置分类')
+  // 设计稿 12:收起态文案固定为「设置分类」(首选项),当前分类显示在页面标题里。
+  const CATEGORY_SELECT_LABEL = '__label__'
   fillSelect(
     document,
     categorySelect,
-    SETTINGS_CATEGORIES.map(category => ({
-      value: category.id,
-      label: category.label,
-    })),
+    [
+      { value: CATEGORY_SELECT_LABEL, label: '设置分类' },
+      ...SETTINGS_CATEGORIES.map(category => ({
+        value: category.id,
+        label: category.label,
+      })),
+    ],
   )
+  categorySelect.value = CATEGORY_SELECT_LABEL
   const headerActions = element(document, 'div', 'wwc-settings-header-actions')
   headerActions.append(categorySelect)
   const headerRow = element(document, 'div', 'wwc-settings-header')
@@ -370,12 +377,13 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
     button.id = `${id}-button`
     button.setAttribute('aria-expanded', 'false')
     button.setAttribute('aria-controls', `${id}-content`)
-    const label = element(document, 'span', 'wwc-settings-collapsed-label')
-    label.textContent = labelText
+    // Design page 12: the disclosure chevron leads the row, before the label.
     const chevron = element(document, 'span', 'wwc-settings-collapsed-chevron')
     chevron.setAttribute('aria-hidden', 'true')
     chevron.textContent = '›'
-    button.append(label, chevron)
+    const label = element(document, 'span', 'wwc-settings-collapsed-label')
+    label.textContent = labelText
+    button.append(chevron, label)
     content.id = `${id}-content`
     content.hidden = true
     button.addEventListener('click', () => {
@@ -968,11 +976,11 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
     const category = categoryOf(next)
     pageHeader.update({
       title: category.title,
-      description: category.description,
       headingLevel: 2,
       className: 'wwc-settings-heading',
     })
-    if (categorySelect.value !== next) categorySelect.value = next
+    // 收起态文案固定为「设置分类」,不回写分类名。
+    categorySelect.value = CATEGORY_SELECT_LABEL
     for (const candidate of SETTINGS_CATEGORIES) {
       const section = candidate.id === 'general'
         ? generalSection
@@ -987,6 +995,8 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
   const onCategoryChange = () => {
     const next = categorySelect.value as SettingsCategoryId
     if (SETTINGS_CATEGORIES.some(candidate => candidate.id === next)) showCategory(next)
+    // 切换完成后收起态回到「设置分类」占位文案。
+    categorySelect.value = CATEGORY_SELECT_LABEL
   }
   categorySelect.addEventListener('change', onCategoryChange)
 

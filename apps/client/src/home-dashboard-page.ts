@@ -3,7 +3,6 @@
 import { formatInstant } from './format-instant.js'
 import { attentionCenterItemHash } from './attention-center-page.js'
 import {
-  mountButton,
   mountPageHeader,
   mountStatusBadge,
   type StatusTone,
@@ -28,7 +27,6 @@ export type HomeCard = HomeDecisionCard | HomeDeliveryCard
 
 export interface HomeDashboardPresentation {
   readonly title: string
-  readonly refreshLabel: string
   readonly projectSelectLabel: string
   readonly projectSelectTitle: string
   readonly allProjectsLabel: string
@@ -54,6 +52,7 @@ export interface HomeDashboardPresentation {
   readonly reviewPlanLabel: string
   readonly acceptDeliveryLabel: string
   readonly openChatLabel: string
+  readonly deliveryProgressLabel: string
   readonly disabledLabel: string
   readonly countLabel: (count: number) => string
   readonly updatedLabel: (at: Instant) => string
@@ -65,7 +64,6 @@ export interface HomeDashboardPresentation {
 
 const PRESENTATION_SPEC: HomeDashboardPresentation = {
   title: '任务看板',
-  refreshLabel: '立即刷新',
   projectSelectLabel: '项目范围（展示）',
   projectSelectTitle: '看板已限定当前仓库 Scope;项目筛选为展示控件。',
   allProjectsLabel: '全部项目',
@@ -125,6 +123,7 @@ const PRESENTATION_SPEC: HomeDashboardPresentation = {
   reviewPlanLabel: '审核方案',
   acceptDeliveryLabel: '验收交付',
   openChatLabel: '打开对话',
+  deliveryProgressLabel: '查看进度',
   disabledLabel: '该决策已关闭。请刷新查看当前状态。',
   countLabel: count => String(count),
   updatedLabel: at => `更新于 ${formatInstant(at)}`,
@@ -301,7 +300,8 @@ export function mountHomeDashboardPage(
   const topbar = element(document, 'div', 'wwc-home-topbar')
   topbar.append(pageHeader.root, topActions)
 
-  // The dashboard keeps exactly one polite live region: the status row.
+  // Design page 04: the status line is the one polite live region; it stays in
+  // the DOM for announcements while the stylesheet keeps it off the canvas.
   const statusBadge = mountStatusBadge({
     document,
     props: {
@@ -309,14 +309,6 @@ export function mountHomeDashboardPage(
       tone: 'info',
       live: 'polite',
       className: 'wwc-home-status',
-    },
-  })
-  const refreshButton = mountButton({
-    document,
-    props: {
-      label: presentation.refreshLabel,
-      className: 'wwc-home-refresh',
-      onActivate: () => { void options.model.refresh() },
     },
   })
   const unavailable = element(document, 'p', 'wwc-home-unavailable')
@@ -402,9 +394,12 @@ export function mountHomeDashboardPage(
     parts.chat.removeAttribute('href')
     parts.chat.textContent = ''
     updateContextList(parts.context, deliveryContextEntries(card))
-    // A Delivery card is informational: the community client has no delivery
-    // workbench route, so the card carries no dead-end action link.
-    clearAction(parts)
+    // Design page 04: the running card's action opens the run page (查看进度).
+    setAction(
+      parts,
+      surfaceHash('/home/task-run', options.scopeSelection),
+      presentation.deliveryProgressLabel,
+    )
   }
 
 
@@ -510,7 +505,7 @@ export function mountHomeDashboardPage(
     return rendered === 0
   }
 
-  layout.append(topbar, statusBadge.root, refreshButton.root, unavailable, sectionsRoot)
+  layout.append(topbar, statusBadge.root, unavailable, sectionsRoot)
   options.root.replaceChildren(layout)
 
   let closed = false
@@ -533,12 +528,6 @@ export function mountHomeDashboardPage(
       className: 'wwc-home-status',
     })
     layout.setAttribute('aria-busy', String(state.status === 'loading'))
-    refreshButton.update({
-      label: presentation.refreshLabel,
-      className: 'wwc-home-refresh',
-      onActivate: () => { void options.model.refresh() },
-      disabled: state.status === 'loading' || state.status === 'closed',
-    })
     const missing = (Object.keys(state.sources) as readonly HomeDashboardSource[]).filter(
       source => state.sources[source] === 'unavailable',
     )
@@ -579,7 +568,6 @@ export function mountHomeDashboardPage(
       closed = true
       unsubscribe()
       for (const section of sections.values()) section.collection.close()
-      refreshButton.close()
       statusBadge.close()
       pageHeader.close()
       options.root.replaceChildren()

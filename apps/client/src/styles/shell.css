@@ -62,7 +62,7 @@
 
 .wwc-navigation {
   display: flex;
-  flex: 1 1 auto;
+  flex: 0 0 auto;
   flex-direction: column;
   gap: var(--wwc-space-1);
 }
@@ -90,8 +90,10 @@
 }
 
 /* The settings entry sits in the sidebar footer, as in the reference layout. */
-.wwc-navigation-link[data-surface='settings'] {
-  margin-top: auto;
+/* Design sidebar footer: the settings entry renders inside the connection-bar
+   footer row, under 「Client 已连接」. */
+.wwc-connection-bar .wwc-navigation-link {
+  margin-top: var(--wwc-space-3);
 }
 
 /* UI-506: navigation badge for entries that need the user. */
@@ -114,6 +116,7 @@
 .wwc-connection-bar {
   grid-column: 1;
   grid-row: 2;
+  border-top: var(--wwc-border-width) solid var(--wwc-color-border-subtle);
 }
 
 .wwc-main {
@@ -131,11 +134,13 @@
   margin-bottom: var(--wwc-space-6);
 }
 
+/* Design 03a: the Scope region is frameless — only the compact 「winwincode ∨」
+   dropdown shows at the top-left of the Chat canvas. */
 .wwc-scope-selector {
-  padding: var(--wwc-space-4);
-  border: var(--wwc-border-width-control) solid var(--wwc-color-border);
+  padding: var(--wwc-space-0);
+  border: 0;
   border-radius: var(--wwc-radius-lg);
-  background: var(--wwc-color-surface);
+  background: transparent;
 }
 
 .wwc-scope-selector-heading {
@@ -419,6 +424,29 @@
   margin-top: var(--wwc-space-8);
   padding-top: var(--wwc-space-4);
   border-top: var(--wwc-border-width) solid var(--wwc-color-border-subtle);
+}
+
+.wwc-sidebar-recent-item {
+  display: flex;
+  align-items: center;
+  gap: var(--wwc-space-3);
+  padding: var(--wwc-space-2) var(--wwc-space-3);
+}
+
+.wwc-sidebar-recent-item-icon {
+  display: inline-flex;
+  flex: 0 0 auto;
+}
+
+/* 设计稿 03b:当前打开的会话行使用黄色高亮。 */
+.wwc-sidebar-recent-item-active {
+  background: var(--wwc-color-accent);
+}
+
+/* 设计稿 03b:会话打开时「新对话」不再重复高亮。 */
+.wwc-navigation-link.wwc-navigation-link-in-session[aria-current='page'] {
+  background: transparent;
+  border-color: transparent;
 }
 
 .wwc-sidebar-section-label {
