@@ -100,7 +100,8 @@ export const CLIENT_SURFACES: readonly ClientSurface[] = Object.freeze([
     nav: false,
   }),
 ])
-const DEFAULT_SURFACE = CLIENT_SURFACES[0] as ClientSurface
+const DEFAULT_SURFACE = (CLIENT_SURFACES.find(surface => surface.default)
+  ?? CLIENT_SURFACES[0]) as ClientSurface
 
 export function clientSurfaceFromHash(hash: string): ClientSurface {
   const path = hash.replace(/^#/u, '').replace(/\?.*$/u, '')

@@ -358,6 +358,9 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
       label: '委托任务 0 · 待审核 ∨',
       type: 'button',
       variant: 'primary',
+      onActivate: () => {
+        decisionRoot.hidden = !decisionRoot.hidden
+      },
     },
   })
   const modelLabel = element(document, 'label', 'wwc-chat-model-label')
@@ -380,6 +383,9 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
   const flowView = element(document, 'div', 'wwc-chat-diagram-view')
   const architectureCaption = element(document, 'p', 'wwc-chat-diagram-caption')
   const flowCaption = element(document, 'p', 'wwc-chat-diagram-caption')
+  const decisionRoot = element(document, 'div', 'wwc-chat-decisions')
+  decisionRoot.hidden = true
+  decisionRoot.setAttribute('aria-hidden', 'true')
   const form = element(document, 'form', 'wwc-chat-composer')
   const composerLabel = element(document, 'label', 'wwc-chat-composer-label')
   const composer = element(document, 'textarea', 'wwc-chat-composer-input')
@@ -443,7 +449,7 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
   // The card mounts into this detached root, so a hidden card adds no node to
   // the conversation and the page layout stays byte-identical when idle.
   const decisionCard: ContextualDecisionCard = mountContextualDecisionCard({
-    root: document.createElement('div'),
+    root: decisionRoot,
     id: 'wwc-chat-decisions',
     title: '此对话中的决策',
     description: '不离开对话即可答复会话输入或批准工具调用。',
@@ -663,7 +669,7 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
     header,
     heading,
     status,
-    decisionCard.root,
+    decisionRoot,
     conversion,
     error,
     loadEarlier,

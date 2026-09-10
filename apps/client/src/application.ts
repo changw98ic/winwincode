@@ -584,6 +584,7 @@ export function mountWinWinCodeClient(
 
 
   header.append(skipLink, brand, navigation, recentChatsRoot, authRoot)
+  authRoot.hidden = true
   main.append(
     scopeRoot,
     readinessRoot,
@@ -1735,10 +1736,10 @@ export function mountWinWinCodeClient(
     currentScopeResolution = null
     activeSurface = clientSurfaceFromHash(browser.location.hash)
     recordHomeVisit(browser.location.hash)
-    // Device onboarding belongs to the My Work task-start flow, not to every
-    // surface; chat, attention, and settings render without it.
-    clientsRoot.hidden = activeSurface.id !== 'home'
-    repositoriesRoot.hidden = activeSurface.id !== 'home'
+    // Design pages 07/08: device onboarding and repository lists live on their
+    // own pages, never as panels above work surfaces.
+    clientsRoot.hidden = true
+    repositoriesRoot.hidden = true
     for (const link of links.values()) link.removeAttribute('data-route-access')
     delete slot.dataset.routeAccess
     clearRouteFailure()

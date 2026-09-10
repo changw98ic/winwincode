@@ -374,7 +374,9 @@ globalThis.runReliabilityScenario = async () => {
 
 globalThis.runFeatureNavigationScenario = async () => {
   const settings = await globalThis.inspectFeatureRoute('settings')
-  document.querySelector('.wwc-settings-local-operations-link').click()
+  // Design 12: the local-operations link moved out of the settings header;
+  // reach the operations route directly.
+  location.hash = '#/settings/runtime'
   const operations = await globalThis.inspectFeatureRoute('operations')
   const settingsSubscriptionClosed = calls.subscriptions[0]?.closed ?? false
 

@@ -270,7 +270,6 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
   })
   const heading = pageHeader.root
 
-  const localOperationsLink = element(document, 'a', 'wwc-settings-local-operations-link')
   const categorySelect = element(document, 'select', 'wwc-settings-category-select')
   categorySelect.id = 'wwc-settings-category'
   categorySelect.setAttribute('aria-label', '设置分类')
@@ -283,7 +282,7 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
     })),
   )
   const headerActions = element(document, 'div', 'wwc-settings-header-actions')
-  headerActions.append(localOperationsLink, categorySelect)
+  headerActions.append(categorySelect)
   const headerRow = element(document, 'div', 'wwc-settings-header')
   headerRow.append(heading, headerActions)
 
@@ -607,8 +606,6 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
   })
   let closed = false
 
-  localOperationsLink.href = options.localOperationsHref ?? '#/settings/runtime'
-  localOperationsLink.textContent = '打开仓库与本地 Worker 运维'
 
   credentialLabel.htmlFor = 'wwc-settings-credential'
   credentialLabel.textContent = '凭据引用'
