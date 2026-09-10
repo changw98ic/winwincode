@@ -7,7 +7,6 @@
 //! server, or an Execution Worker runtime.
 
 mod action_policy_enforcement;
-mod artifact_enterprise_quota;
 mod artifact_transaction;
 pub mod automation_recipe;
 mod candidate_git_release;
@@ -35,19 +34,6 @@ mod device_execution_binding;
 mod device_scheduler;
 pub mod device_session_gate;
 mod durable_execution_port;
-mod enterprise_hierarchy;
-mod enterprise_identity;
-mod enterprise_identity_lifecycle;
-mod enterprise_identity_protocols;
-mod enterprise_identity_verification;
-mod enterprise_policy;
-mod enterprise_policy_enforcement;
-mod enterprise_policy_evaluation;
-mod enterprise_quota;
-mod enterprise_rbac;
-mod enterprise_reporting;
-mod enterprise_scope_binding;
-mod enterprise_usage;
 pub mod execution_port_service;
 mod gate_interaction_service;
 pub mod knowledge;
@@ -71,7 +57,6 @@ mod product_session_service;
 mod provider_admission;
 mod provider_anthropic;
 pub mod provider_catalog;
-mod provider_enterprise_quota;
 pub mod provider_gateway;
 mod provider_https_sse;
 mod provider_policy;
@@ -79,9 +64,7 @@ pub mod provider_presets;
 mod provider_production;
 pub mod provider_stream;
 mod publication_application;
-mod publication_enterprise_quota;
 mod publication_policy;
-mod publication_policy_enforcement;
 mod publication_preparation;
 mod publication_production;
 mod quick_device_execution;
@@ -90,7 +73,6 @@ mod remote_worker_pool;
 mod repository_binding;
 mod repository_scheduler;
 mod responsibility_assignment;
-mod responsibility_assignment_authority;
 mod rework_transaction;
 mod runtime_event_transaction;
 mod session_binding_transaction;
@@ -103,22 +85,14 @@ mod terminal_outcome_transaction;
 mod vault_kms_network;
 mod vault_secret_store;
 mod verdict_transaction;
-mod worker_enterprise_quota;
 mod worker_execution_lifecycle;
-mod worker_fleet_projection;
 mod worker_interaction_outbound;
 pub mod worker_management;
-mod worker_policy;
 mod workrun_transaction;
 
 pub use action_policy_enforcement::{
     ActionPolicyEnforcementError, ActionPolicyEnforcementErrorKind,
     issue_action_enforcement_receipt,
-};
-pub use artifact_enterprise_quota::{
-    ArtifactEnterpriseQuotaAdmission, ArtifactEnterpriseQuotaReservation,
-    ArtifactEnterpriseQuotaSaga, ArtifactEnterpriseQuotaSagaError, ArtifactEnterpriseUsagePort,
-    DurableArtifactEnterpriseUsage,
 };
 pub use artifact_transaction::ArtifactMessageError;
 pub use candidate_git_release::CandidateGitReadsClosedReceipt;
@@ -164,9 +138,7 @@ pub use collaboration_inbox::{
     CollaborationResponsibilityEntitlement, FormalCollaborationCommandRoute,
     SystemCollaborationInboxClock,
 };
-pub use collaboration_inbox_production::{
-    DurableCollaborationInboxSource, EnterpriseCollaborationInboxAuthority,
-};
+pub use collaboration_inbox_production::DurableCollaborationInboxSource;
 pub use control_plane_instance::{
     ControlPlaneInstanceRuntime, ControlPlaneInstanceRuntimeConfig,
     ControlPlaneInstanceRuntimeError, ControlPlaneInstanceRuntimeErrorKind,
@@ -203,87 +175,6 @@ pub use device_scheduler::{
 pub use durable_execution_port::{
     DurableExecutionPortContext, DurableExecutionPortDelegate, DurableExecutionPortError,
     DurableExecutionPortIngress, DurableExecutionPortSupplement,
-};
-pub use enterprise_hierarchy::{
-    EnterpriseHierarchyCommand, EnterpriseHierarchyError, EnterpriseHierarchyErrorKind,
-    EnterpriseHierarchyReceipt, EnterpriseHierarchyService, EnvironmentId, HierarchyMutation,
-    HierarchyResource, HierarchyResourceId, HierarchyResourceKind, HierarchyResourceState,
-    HierarchyScope, ResolvedHierarchyResource,
-};
-pub use enterprise_identity::{
-    AuthenticatedEnterpriseIdentity, EnterpriseIdentityClock, EnterpriseIdentityClockError,
-    EnterpriseIdentityError, EnterpriseIdentityErrorKind, EnterpriseIdentityService,
-    GeneratedApiToken, SystemEnterpriseIdentityClock, generate_api_token,
-};
-pub use enterprise_identity_lifecycle::{
-    BrowserSessionLifecycleError, BrowserSessionLifecyclePort,
-    CanonicalEnterpriseIdentityLifecycle, DeprovisionExternalUser,
-    EnterpriseIdentityLifecycleError, EnterpriseIdentityLifecycleErrorKind,
-    EnterpriseIdentityLifecyclePort, ExternalIdentityLifecycleOutcome, ExternalIdentityPrincipal,
-    ExternalIdentityProvider, ExternalIdentityReference, ProvisionExternalUser, UpsertExternalTeam,
-    external_identity_id, membership_id,
-};
-pub use enterprise_identity_protocols::{
-    EnterpriseIdentityProtocolAdapter, EnterpriseIdentityProtocolConfig, EnterpriseProtocolClock,
-    EnterpriseProtocolClockError, EnterpriseProtocolError, EnterpriseProtocolErrorKind,
-    ExternalAuthenticationOutcome, OidcIdToken, OidcTokenVerifier, ProtocolVerificationError,
-    ProtocolVerificationErrorKind, SamlResponse, SamlResponseVerifier, ScimBearerToken,
-    ScimBearerVerifier, ScimLifecycleEvent, ScimOperation, ScimTeamUpsert, ScimUserDeprovision,
-    ScimUserProvision, SystemEnterpriseProtocolClock, TrustedProtocolParty, VerifiedOidcClaims,
-    VerifiedSamlClaims, VerifiedScimClient,
-};
-pub use enterprise_identity_verification::{
-    EnterpriseIdentityProductionVerifiers, EnterpriseIdentityVerifierConfig,
-    EnterpriseIdentityVerifierTimeouts, EnterpriseIdentityVerifierTlsRoots,
-    ProductionOidcTokenVerifier, ProductionSamlResponseVerifier, ProductionScimBearerVerifier,
-};
-pub use enterprise_policy::{
-    EnterprisePolicyApiError, EnterprisePolicyApiErrorKind, EnterprisePolicyApiService,
-    EnterprisePolicyClock,
-};
-pub use enterprise_policy_enforcement::{
-    EnterprisePolicyEnforcement, EnterprisePolicyEnforcementError,
-    EnterprisePolicyEnforcementErrorKind, EnterprisePolicyEnforcementRequest,
-    enforce_enterprise_policy, enterprise_policy_condition_sha256,
-    enterprise_policy_subject_sha256,
-};
-pub use enterprise_policy_evaluation::{
-    EnterprisePolicyDecisionClock, EnterprisePolicyEvaluationService,
-    EnterprisePolicyEvaluationTarget, EnterprisePolicyExceptionDecisionRequest,
-    EnterprisePolicyExceptionOpenRequest,
-};
-pub use enterprise_quota::{
-    DurableEnterpriseQuotaAdmission, EnterpriseQuotaAdmission, EnterpriseQuotaAdmissionPort,
-    EnterpriseQuotaPermit,
-};
-pub use enterprise_rbac::{
-    ActiveMemberContext, ActiveTeamContext, EnterpriseRbacClock, EnterpriseRbacClockError,
-    EnterpriseRbacError, EnterpriseRbacErrorKind, EnterpriseRbacService, EvaluatedRoleVersion,
-    RbacAuthoritySeal, RbacDecision, RbacDenialReason, SystemEnterpriseRbacClock,
-};
-pub use enterprise_reporting::{
-    EnterpriseReportCurrencyRule, EnterpriseReportCursor, EnterpriseReportDetail,
-    EnterpriseReportDimension, EnterpriseReportError, EnterpriseReportErrorKind,
-    EnterpriseReportExport, EnterpriseReportFormat, EnterpriseReportGroup, EnterpriseReportPage,
-    EnterpriseReportQuery, EnterpriseReportRow, EnterpriseReportTimeRule, EnterpriseReportTotals,
-    EnterpriseReportingLimits, EnterpriseReportingProjection, EnterpriseReportingService,
-};
-pub use enterprise_scope_binding::{
-    EnterpriseScopeBinding, EnterpriseScopeBindingCommand, EnterpriseScopeBindingError,
-    EnterpriseScopeBindingErrorKind, EnterpriseScopeBindingMutation, EnterpriseScopeBindingReceipt,
-    EnterpriseScopeBindingService, LocalScopeMigrationCommand, LocalScopeMigrationReceipt,
-    LocalScopeMigrationStatus, ResolvedScopeBinding, ScopeBindingSource, ScopeBindingSubject,
-    ScopeBindingSubjectKind, local_scope_inventory_digest,
-};
-pub use enterprise_usage::{
-    ProviderEnterpriseUsageError, ProviderEnterpriseUsageErrorKind,
-    ProviderEnterpriseUsageReconciler, ProviderEnterpriseUsageReconciliation,
-    PublicationEnterpriseUsageError, PublicationEnterpriseUsageErrorKind,
-    PublicationEnterpriseUsageReconciler, PublicationEnterpriseUsageReconciliation,
-    StorageEnterpriseUsageError, StorageEnterpriseUsageErrorKind, StorageEnterpriseUsageReconciler,
-    StorageEnterpriseUsageReconciliation, WorkerEnterpriseUsageError,
-    WorkerEnterpriseUsageErrorKind, WorkerEnterpriseUsageReconciler,
-    WorkerEnterpriseUsageReconciliation,
 };
 pub use execution_port_service::{
     DEFAULT_HEARTBEAT_INTERVAL_MS, ExecutionPortService, ExecutionPortServiceError,
@@ -327,10 +218,10 @@ pub use model_execution_runtime::{
     ModelExecutionRuntimeError, ModelExecutionRuntimeErrorKind,
 };
 pub use model_policy_source::{
-    EnterpriseModelPolicyCeiling, LocalModelPolicyAuthority, LocalModelPolicyAuthorityConfig,
-    ModelPolicyAuthorityError, ModelPolicyAuthorityPort, ModelPolicyAuthoritySnapshot,
-    ModelPolicyResolution, ModelPolicyResolutionError, ModelPolicyResolutionErrorKind,
-    ModelPolicyRouteKey, ProductionModelPolicySource,
+    LocalModelPolicyAuthority, LocalModelPolicyAuthorityConfig, ModelPolicyAuthorityError,
+    ModelPolicyAuthorityPort, ModelPolicyAuthoritySnapshot, ModelPolicyResolution,
+    ModelPolicyResolutionError, ModelPolicyResolutionErrorKind, ModelPolicyRouteKey,
+    ProductionModelPolicySource,
 };
 pub use model_request_pool::{
     ModelFrameAckReceipt, ModelFrameWriteReceipt, ModelFrameWriteStatus, ModelRequestAdmission,
@@ -415,13 +306,6 @@ pub use provider_catalog::{
     ProviderCatalogService, ProviderCatalogVersionEvent, ProviderDescriptor,
     ResolvedModelCapability, StructuredOutputSupport,
 };
-pub use provider_enterprise_quota::{
-    DurableProviderEnterpriseUsageSource, ProviderEnterpriseQuotaError,
-    ProviderEnterpriseQuotaErrorKind, ProviderEnterpriseQuotaOpen,
-    ProviderEnterpriseQuotaReservation, ProviderEnterpriseQuotaSaga,
-    ProviderEnterpriseUsageSourcePort, ProviderOperationalAdmissionError,
-    ProviderOperationalAdmissionPort,
-};
 pub use provider_gateway::{
     ProviderAdapterError, ProviderAdapterErrorKind, ProviderAdapterInvocation,
     ProviderAdapterOpenReceipt, ProviderAdapterPort, ProviderGateway,
@@ -439,9 +323,8 @@ pub use provider_https_sse::{
     HttpsSseProviderTimeouts, ProviderTlsRoots,
 };
 pub use provider_policy::{
-    AgentProviderPolicy, DurableProviderPolicyEnforcement, ProviderModelSelector, ProviderPolicy,
-    ProviderPolicyCandidate, ProviderPolicyError, ProviderPolicyErrorKind, ProviderPolicyReceipt,
-    ProviderPolicyRoute,
+    AgentProviderPolicy, ProviderModelSelector, ProviderPolicy, ProviderPolicyCandidate,
+    ProviderPolicyError, ProviderPolicyErrorKind, ProviderPolicyRoute,
 };
 pub use provider_presets::{
     EndpointSource, ModelCapabilityOrigin, ModelCapabilitySnapshot, ModelCapabilitySource,
@@ -462,12 +345,7 @@ pub use provider_stream::{
     ProviderStreamFailure, ProviderStreamFailureKind, ProviderTokenUsage, ProviderToolIdentity,
     ProviderToolIdentityError, ProviderToolKind,
 };
-pub use publication_enterprise_quota::PublicationEnterpriseQuotaSaga;
 pub use publication_policy::PublicationCommandError;
-pub use publication_policy_enforcement::{
-    DurablePublicationPolicyEnforcement, PublicationEnterprisePolicyError,
-    PublicationEnterprisePolicyErrorKind,
-};
 pub use publication_preparation::{PreparedPublication, PublicationPreparationError};
 pub use publication_production::{
     LocalGitHubProviderConfig, LocalPublicationAdapterConfig, LocalPublicationAdapterError,
@@ -508,10 +386,6 @@ pub use responsibility_assignment::{
     ResponsibilityReviewKind, ResponsibilityRole, ResponsibilityTarget,
     SystemResponsibilityAssignmentClock,
 };
-pub use responsibility_assignment_authority::{
-    DurableResponsibilityTargetAuthority, EnterpriseResponsibilityAuthority,
-    ResponsibilityTargetAuthorityPort, ResponsibilityTargetAuthoritySeal,
-};
 pub use runtime_event_transaction::RuntimeMessageError;
 pub use session_identity::{
     SessionBindingAcceptance, SessionIdentityAdapterError, validate_session_binding,
@@ -537,26 +411,15 @@ pub use vault_secret_store::{
     VaultKmsRewrapReceipt, VaultKmsSecretStoreAdapter, VaultLeasedSecret,
     VaultSecretCleanupReceipt, VaultSecretLeaseReceipt, VaultSecretWriteReceipt,
 };
-pub use worker_enterprise_quota::{
-    WorkerEnterpriseQuotaAuthority, WorkerEnterpriseQuotaAuthorityPort, WorkerEnterpriseQuotaClaim,
-    WorkerEnterpriseQuotaError, WorkerEnterpriseQuotaErrorKind, WorkerEnterpriseQuotaReservation,
-    WorkerEnterpriseQuotaSaga, WorkerEnterpriseUsageSourcePort, WorkerOperationalClaimPort,
-};
 pub use worker_execution_lifecycle::{
     DurableWorkerExecutionLifecycle, WorkerExecutionLifecycleError,
-    WorkerExecutionLifecycleErrorKind, WorkerExecutionRelease, WorkerExecutionTerminalReceipt,
-    WorkerExecutionUsageSettlement,
-};
-pub use worker_fleet_projection::{
-    WorkerFleetProjectionService, WorkerFleetProjectionServiceError,
-    WorkerFleetProjectionServiceErrorKind,
+    WorkerExecutionLifecycleErrorKind,
 };
 pub use worker_interaction_outbound::{
     DurableWorkerInteractionOutbound, WorkerInteractionClaim, WorkerInteractionClaimPage,
     WorkerInteractionConnectionError, WorkerInteractionConnectionErrorKind,
     WorkerInteractionPageCursor,
 };
-pub use worker_policy::{DurableWorkerPolicyEnforcement, WorkerPolicyError, WorkerPolicyErrorKind};
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -1683,40 +1546,15 @@ impl ControlPlane {
         message: &execution_port::ArtifactOpenMessage,
         authority: &winwincode_delivery::application::stage::SessionBindingAuthority,
     ) -> Result<execution_port::ArtifactAckMessage, ArtifactMessageError> {
-        let data_directory = self.enterprise_quota_data_directory()?;
-        let mut quota = DurableEnterpriseQuotaAdmission::new(
-            SqliteStorage::open(&data_directory).map_err(ArtifactMessageError::Storage)?,
-        );
-        let mut usage = DurableArtifactEnterpriseUsage::new(
-            SqliteStorage::open(&data_directory).map_err(ArtifactMessageError::Storage)?,
-        );
-        let result = {
-            let storage = self.storage.as_deref().ok_or_else(|| {
-                ArtifactMessageError::Storage(StorageError::adapter(
-                    "Control Plane storage is closed",
-                ))
-            })?;
-            let artifacts = self.artifact_store.as_mut().ok_or_else(|| {
-                ArtifactMessageError::Storage(StorageError::adapter(
-                    "Control Plane Artifact store is not configured",
-                ))
-            })?;
-            let mut enterprise_quota = ArtifactEnterpriseQuotaSaga::new(&mut quota, &mut usage);
-            artifact_transaction::accept_open(
-                storage,
-                artifacts,
-                scope,
-                message,
-                authority,
-                &mut enterprise_quota,
-            )
-        };
-        let usage_close = usage.close();
-        let quota_close = quota.close();
-        let ack = result?;
-        usage_close.map_err(ArtifactMessageError::Storage)?;
-        quota_close.map_err(ArtifactMessageError::Storage)?;
-        Ok(ack)
+        let storage = self.storage.as_deref().ok_or_else(|| {
+            ArtifactMessageError::Storage(StorageError::adapter("Control Plane storage is closed"))
+        })?;
+        let artifacts = self.artifact_store.as_mut().ok_or_else(|| {
+            ArtifactMessageError::Storage(StorageError::adapter(
+                "Control Plane Artifact store is not configured",
+            ))
+        })?;
+        artifact_transaction::accept_open(storage, artifacts, scope, message, authority)
     }
 
     /// Accepts one generated `artifact.chunk` through the same lease-scoped
@@ -1732,14 +1570,7 @@ impl ControlPlane {
         message: &execution_port::ArtifactChunkMessage,
         authority: &winwincode_delivery::application::stage::SessionBindingAuthority,
     ) -> Result<execution_port::ArtifactAckMessage, ArtifactMessageError> {
-        let data_directory = self.enterprise_quota_data_directory()?;
-        let mut quota = DurableEnterpriseQuotaAdmission::new(
-            SqliteStorage::open(&data_directory).map_err(ArtifactMessageError::Storage)?,
-        );
-        let mut usage = DurableArtifactEnterpriseUsage::new(
-            SqliteStorage::open(&data_directory).map_err(ArtifactMessageError::Storage)?,
-        );
-        let result = {
+        let ack = {
             let storage = self.storage.as_deref().ok_or_else(|| {
                 ArtifactMessageError::Storage(StorageError::adapter(
                     "Control Plane storage is closed",
@@ -1750,21 +1581,8 @@ impl ControlPlane {
                     "Control Plane Artifact store is not configured",
                 ))
             })?;
-            let mut enterprise_quota = ArtifactEnterpriseQuotaSaga::new(&mut quota, &mut usage);
-            artifact_transaction::accept_chunk(
-                storage,
-                artifacts,
-                scope,
-                message,
-                authority,
-                &mut enterprise_quota,
-            )
+            artifact_transaction::accept_chunk(storage, artifacts, scope, message, authority)?
         };
-        let usage_close = usage.close();
-        let quota_close = quota.close();
-        let ack = result?;
-        usage_close.map_err(ArtifactMessageError::Storage)?;
-        quota_close.map_err(ArtifactMessageError::Storage)?;
         if message.is_final
             && matches!(
                 ack.status,
@@ -1780,61 +1598,6 @@ impl ControlPlane {
                 })?;
         }
         Ok(ack)
-    }
-
-    fn enterprise_quota_data_directory(&self) -> Result<PathBuf, ArtifactMessageError> {
-        self.local_enterprise_quota_directory()
-            .map_err(ArtifactMessageError::Storage)
-    }
-
-    fn local_enterprise_quota_directory(&self) -> Result<PathBuf, StorageError> {
-        self.local_database_path
-            .as_deref()
-            .and_then(Path::parent)
-            .map(Path::to_path_buf)
-            .ok_or_else(|| {
-                StorageError::adapter(
-                    "enterprise quota requires canonical local Control Plane storage",
-                )
-            })
-    }
-
-    fn release_terminal_artifact_quota(
-        &mut self,
-        message: &execution_port::JobOutcomeMessage,
-        status: winwincode_delivery::application::stage::TerminalOutcomeStatus,
-    ) -> Result<(), ArtifactEnterpriseQuotaSagaError> {
-        let data_directory = self.local_enterprise_quota_directory()?;
-        let mut quota = DurableEnterpriseQuotaAdmission::new(SqliteStorage::open(&data_directory)?);
-        let mut usage = DurableArtifactEnterpriseUsage::new(SqliteStorage::open(&data_directory)?);
-        let reason = match status {
-            winwincode_delivery::application::stage::TerminalOutcomeStatus::Cancelled => {
-                winwincode_storage::EnterpriseQuotaReleaseReason::Cancelled
-            }
-            winwincode_delivery::application::stage::TerminalOutcomeStatus::Failed
-            | winwincode_delivery::application::stage::TerminalOutcomeStatus::InfrastructureError => {
-                winwincode_storage::EnterpriseQuotaReleaseReason::Failed
-            }
-            winwincode_delivery::application::stage::TerminalOutcomeStatus::Succeeded => {
-                unreachable!("successful terminal outcomes do not release Artifact quota")
-            }
-        };
-        let result = {
-            let artifacts = self.artifact_store.as_ref().ok_or_else(|| {
-                ArtifactEnterpriseQuotaSagaError::Storage(StorageError::adapter(
-                    "Control Plane Artifact store is not configured",
-                ))
-            })?;
-            ArtifactEnterpriseQuotaSaga::new(&mut quota, &mut usage)
-                .release_unfinished_job(artifacts, &message.lease.job_id, reason, &message.sent_at)
-                .map(|_| ())
-        };
-        let usage_close = usage.close();
-        let quota_close = quota.close();
-        result?;
-        usage_close?;
-        quota_close?;
-        Ok(())
     }
 
     /// Rebuilds and freezes the current Delivery candidate from one exact,
@@ -2307,75 +2070,31 @@ impl ControlPlane {
         facts: &winwincode_delivery::application::stage::DeliveryTerminalOutcomeFacts,
         server_time: &Instant,
     ) -> Result<DeliveryTerminalOutcomeCommitReceipt, DeliveryTerminalOutcomeCommitError> {
-        let verifier_policy = terminal_outcome_transaction::verifier_policy_authority_at(
-            self.storage_ref()
-                .map_err(DeliveryTerminalOutcomeCommitError::Storage)?,
-            scope,
-            message,
-            facts,
-            server_time,
-        )?;
-        if let Some(authority) = verifier_policy {
-            let directory = self.local_enterprise_quota_directory()?;
-            let mut policy = DurableWorkerPolicyEnforcement::open(directory).map_err(|_| {
-                DeliveryTerminalOutcomeCommitError::Storage(StorageError::adapter(
-                    "Verifier enterprise Policy authority is unavailable",
-                ))
-            })?;
-            let result = policy.enforce_verifier(&authority);
-            policy.close().map_err(|_| {
-                DeliveryTerminalOutcomeCommitError::Storage(StorageError::adapter(
-                    "Verifier enterprise Policy authority could not close",
-                ))
-            })?;
-            result.map_err(|error| {
-                let message = match error.kind() {
-                    WorkerPolicyErrorKind::Rejected => {
-                        "Verifier enterprise Policy denied the terminal outcome"
-                    }
-                    WorkerPolicyErrorKind::Unavailable => {
-                        "Verifier enterprise Policy authority is unavailable"
-                    }
-                };
-                DeliveryTerminalOutcomeCommitError::Storage(StorageError::adapter(message))
-            })?;
-        }
         let commit = {
             let storage = self
                 .storage_mut()
                 .map_err(DeliveryTerminalOutcomeCommitError::Storage)?;
             terminal_outcome_transaction::execute_at(storage, scope, message, facts, server_time)?
         };
-        let data_directory = self
-            .local_enterprise_quota_directory()
-            .map_err(WorkerExecutionLifecycleError::from);
-        let worker_terminal = data_directory.and_then(|data_directory| {
-            let lifecycle = DurableWorkerExecutionLifecycle::open(data_directory)?;
-            match facts.status() {
-                winwincode_delivery::application::stage::TerminalOutcomeStatus::Succeeded => {
-                    lifecycle.settle_terminal_outcome(message).map(|_| ())
-                }
-                winwincode_delivery::application::stage::TerminalOutcomeStatus::Failed
-                | winwincode_delivery::application::stage::TerminalOutcomeStatus::Cancelled
-                | winwincode_delivery::application::stage::TerminalOutcomeStatus::InfrastructureError => {
-                    lifecycle.release_terminal_outcome(message).map(|_| ())
-                }
+        if let Some(data_directory) = self.local_database_path.as_deref().and_then(Path::parent) {
+            let worker_terminal = DurableWorkerExecutionLifecycle::open(data_directory).and_then(
+                |mut lifecycle| match facts.status() {
+                    winwincode_delivery::application::stage::TerminalOutcomeStatus::Succeeded => {
+                        lifecycle.settle_terminal_outcome(message).map(|_| ())
+                    }
+                    winwincode_delivery::application::stage::TerminalOutcomeStatus::Failed
+                    | winwincode_delivery::application::stage::TerminalOutcomeStatus::Cancelled
+                    | winwincode_delivery::application::stage::TerminalOutcomeStatus::InfrastructureError => {
+                        lifecycle.release_terminal_outcome(message).map(|_| ())
+                    }
+                },
+            );
+            if let Err(source) = worker_terminal {
+                return Err(DeliveryTerminalOutcomeCommitError::WorkerResourcesPending {
+                    commit: Box::new(commit),
+                    source,
+                });
             }
-        });
-        if let Err(source) = worker_terminal {
-            return Err(DeliveryTerminalOutcomeCommitError::WorkerQuotaPending {
-                commit: Box::new(commit),
-                source,
-            });
-        }
-        if facts.status()
-            != winwincode_delivery::application::stage::TerminalOutcomeStatus::Succeeded
-            && let Err(source) = self.release_terminal_artifact_quota(message, facts.status())
-        {
-            return Err(DeliveryTerminalOutcomeCommitError::ArtifactQuotaPending {
-                commit: Box::new(commit),
-                source,
-            });
         }
         self.flush_outbox().map_err(|source| {
             DeliveryTerminalOutcomeCommitError::PublicationPending {

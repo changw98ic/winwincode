@@ -64,14 +64,6 @@ name = "publication_production"
 required-features = ["test-support"]
 
 [[test]]
-name = "publication_enterprise_usage"
-required-features = ["test-support"]
-
-[[test]]
-name = "publication_enterprise_quota"
-required-features = ["test-support"]
-
-[[test]]
 name = "product_session_execution_application"
 required-features = ["test-support"]
 

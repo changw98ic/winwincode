@@ -318,8 +318,6 @@ impl ModelRetryPreOpenPlannerPort for DurableModelRetryPreOpenPlanner<'_> {
             )
             .map_err(ModelRetryPlannerError::ledger)?,
             plan,
-            enterprise_quota_amounts: admission.enterprise_quota_amounts,
-            enterprise_quota_requested_at: message.sent_at.clone(),
         };
         let failure = PreOpenFailure::new(message, admission, &request)?;
         if load_failure(&self.storage, &failure)?.is_some() {

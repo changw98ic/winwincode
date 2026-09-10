@@ -11,7 +11,7 @@
 use std::{
     fmt,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::Mutex,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -37,7 +37,7 @@ use winwincode_api::generated::{
     CollaborationPresenceUpdateCompletedResponseOutcome,
     ControlPlaneWebSocketActivityRecordedEvent,
     ControlPlaneWebSocketActivityRecordedEventTypeValue, ControlPlaneWebSocketPresenceChangedEvent,
-    ControlPlaneWebSocketPresenceChangedEventTypeValue, EnterprisePermission, PageInfo, Scope,
+    ControlPlaneWebSocketPresenceChangedEventTypeValue, PageInfo, Scope,
 };
 use winwincode_domain::{
     ControlPlaneEventId, Instant, OpaqueCursor, RequestId, Revision, SchemaVersion, Sha256Digest,
@@ -50,8 +50,7 @@ use winwincode_storage::{
 };
 
 use crate::{
-    EnterpriseRbacService, command_receipt_identity, instant_from_millis, public_event_actor,
-    public_event_scope,
+    command_receipt_identity, instant_from_millis, public_event_actor, public_event_scope,
 };
 
 const ACTIVITY_HEAD_SCHEMA: &str = "winwincode.collaboration-activity-head.v1";
@@ -176,12 +175,11 @@ pub struct CollaborationActivityRecordRequest {
 
 /// Durable collaboration application service.
 ///
-/// Authorization always delegates to the one injected enterprise RBAC service.
+/// Authorization requires an authenticated user and an exact authenticated scope.
 /// Storage owns Activity, notification receipts, Presence leases, and their
 /// public outbox events in one canonical `SQLite` authority.
 pub struct CollaborationService {
     inner: Mutex<CollaborationInner>,
-    rbac: Arc<EnterpriseRbacService>,
     database_path: PathBuf,
 }
 
@@ -192,23 +190,18 @@ struct CollaborationInner {
 
 impl CollaborationService {
     #[must_use]
-    pub fn new(storage: SqliteStorage, rbac: Arc<EnterpriseRbacService>) -> Self {
-        Self::with_clock(storage, rbac, Box::new(SystemCollaborationClock))
+    pub fn new(storage: SqliteStorage) -> Self {
+        Self::with_clock(storage, Box::new(SystemCollaborationClock))
     }
 
     #[must_use]
-    pub fn with_clock(
-        storage: SqliteStorage,
-        rbac: Arc<EnterpriseRbacService>,
-        clock: Box<dyn CollaborationClock>,
-    ) -> Self {
+    pub fn with_clock(storage: SqliteStorage, clock: Box<dyn CollaborationClock>) -> Self {
         let database_path = storage.database_path().to_path_buf();
         Self {
             inner: Mutex::new(CollaborationInner {
                 storage: Box::new(storage),
                 clock,
             }),
-            rbac,
             database_path,
         }
     }
@@ -230,13 +223,7 @@ impl CollaborationService {
         authenticated_scopes: &[Scope],
         request: &CollaborationActivityRecordRequest,
     ) -> Result<CollaborationActivityProjection, CollaborationError> {
-        authorize(
-            &self.rbac,
-            &request.actor,
-            authenticated_scopes,
-            &request.scope,
-            &EnterprisePermission::CollaborationWrite,
-        )?;
+        authorize(&request.actor, authenticated_scopes, &request.scope)?;
         validate_activity_request(request)?;
         self.lock()?.record_activity(request)
     }
@@ -253,13 +240,7 @@ impl CollaborationService {
         query: &CollaborationActivityListQuery,
     ) -> Result<CollaborationActivityListResultResponse, CollaborationError> {
         require_schema(&query.schema_version)?;
-        authorize(
-            &self.rbac,
-            &query.actor,
-            authenticated_scopes,
-            &query.scope,
-            &EnterprisePermission::CollaborationRead,
-        )?;
+        authorize(&query.actor, authenticated_scopes, &query.scope)?;
         let filter = ActivityFilter {
             categories: query.parameters.categories.clone(),
             delivery_id: query.parameters.delivery_id.clone(),
@@ -296,13 +277,7 @@ impl CollaborationService {
         query: &CollaborationNotificationListQuery,
     ) -> Result<CollaborationNotificationListResultResponse, CollaborationError> {
         require_schema(&query.schema_version)?;
-        authorize(
-            &self.rbac,
-            &query.actor,
-            authenticated_scopes,
-            &query.scope,
-            &EnterprisePermission::CollaborationRead,
-        )?;
+        authorize(&query.actor, authenticated_scopes, &query.scope)?;
         let user_id = user_id(&query.actor)?;
         let filter = ActivityFilter {
             categories: query.parameters.categories.clone(),
@@ -367,13 +342,7 @@ impl CollaborationService {
         command: &CollaborationNotificationAckCommand,
     ) -> Result<CollaborationNotificationAckCompletedResponse, CollaborationError> {
         require_schema(&command.schema_version)?;
-        authorize(
-            &self.rbac,
-            &command.actor,
-            authenticated_scopes,
-            &command.scope,
-            &EnterprisePermission::CollaborationWrite,
-        )?;
+        authorize(&command.actor, authenticated_scopes, &command.scope)?;
         let user_id = user_id(&command.actor)?;
         self.lock()?.notification_ack(command, &user_id)
     }
@@ -390,13 +359,7 @@ impl CollaborationService {
         command: &CollaborationPresenceUpdateCommand,
     ) -> Result<CollaborationPresenceUpdateCompletedResponse, CollaborationError> {
         require_schema(&command.schema_version)?;
-        authorize(
-            &self.rbac,
-            &command.actor,
-            authenticated_scopes,
-            &command.scope,
-            &EnterprisePermission::CollaborationWrite,
-        )?;
+        authorize(&command.actor, authenticated_scopes, &command.scope)?;
         let user_id = user_id(&command.actor)?;
         self.lock()?.presence_update(command, &user_id)
     }
@@ -414,13 +377,7 @@ impl CollaborationService {
         query: &CollaborationPresenceListQuery,
     ) -> Result<CollaborationPresenceListResultResponse, CollaborationError> {
         require_schema(&query.schema_version)?;
-        authorize(
-            &self.rbac,
-            &query.actor,
-            authenticated_scopes,
-            &query.scope,
-            &EnterprisePermission::CollaborationRead,
-        )?;
+        authorize(&query.actor, authenticated_scopes, &query.scope)?;
         self.lock()?.presence_list(query)
     }
 
@@ -1167,16 +1124,11 @@ struct PresenceDirectorySnapshot {
 }
 
 fn authorize(
-    rbac: &EnterpriseRbacService,
     actor: &Actor,
     authenticated_scopes: &[Scope],
     scope: &Scope,
-    permission: &EnterprisePermission,
 ) -> Result<(), CollaborationError> {
-    let decision = rbac
-        .authorize(actor, authenticated_scopes, scope, permission)
-        .map_err(|_| storage())?;
-    if decision.allowed {
+    if matches!(actor, Actor::UserActor(_)) && authenticated_scopes.contains(scope) {
         Ok(())
     } else {
         Err(permission_denied())

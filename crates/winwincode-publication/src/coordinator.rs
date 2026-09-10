@@ -24,11 +24,6 @@ use crate::policy::{
     PublicationPolicyAudit, PublicationPolicyContext, PublicationPolicyDecision,
     PublicationPolicyEffect, RepositoryPublicationPolicy,
 };
-use crate::{
-    PublicationEnterpriseAttribution, PublicationMeteringError, PublicationRequester,
-    metering::{attribution_mutation, source_mutations, validate_stored_attribution},
-};
-
 const PUBLICATION_AGGREGATE_TYPE: &str = "publication";
 const PUBLICATION_EVENT_TOPIC: &str = "publication.state.v1";
 const INTERNAL_ACTOR_KEY: &[u8] = b"winwincode.publication.system.v1";
@@ -891,7 +886,6 @@ impl<'storage> PublicationLedger<'storage> {
         &mut self,
         context: &PublicationCommandContext,
         publication: &Publication,
-        attribution: &PublicationEnterpriseAttribution,
     ) -> Result<Publication, PublicationError> {
         let state = encode_publication(publication)?;
         let event = durable_event(publication, &state);
@@ -918,11 +912,7 @@ impl<'storage> PublicationLedger<'storage> {
             state,
             vec![event],
         )
-        .with_journal_publication(journal)
-        .with_state_mutation(
-            attribution_mutation(&publication.id, attribution)
-                .map_err(publication_metering_error)?,
-        );
+        .with_journal_publication(journal);
         match self.storage.commit(&commit) {
             Ok(receipt) => publication_from_receipt(&receipt),
             Err(error)
@@ -943,7 +933,6 @@ impl<'storage> PublicationLedger<'storage> {
         current: &Publication,
         next: &Publication,
         command_receipt: Option<(&ReceiptIdentity, &Sha256Digest)>,
-        metering_operation: Option<&PublicationOperation>,
     ) -> Result<Publication, PublicationError> {
         let state = encode_publication(next)?;
         let event = durable_event(next, &state);
@@ -973,7 +962,7 @@ impl<'storage> PublicationLedger<'storage> {
                     "publication state and journal revision differ",
                 ));
             }
-            let mut commit = StateCommit::new(
+            let commit = StateCommit::new(
                 receipt_identity.clone(),
                 command_digest.clone(),
                 publication_stream_id(&next.id),
@@ -991,18 +980,6 @@ impl<'storage> PublicationLedger<'storage> {
                     state.clone(),
                 ),
             });
-            if let Some(operation) = metering_operation {
-                for mutation in source_mutations(
-                    self.storage,
-                    &next.id,
-                    operation,
-                    millis_to_instant(next.updated_at_millis)?,
-                )
-                .map_err(publication_metering_error)?
-                {
-                    commit = commit.with_state_mutation(mutation);
-                }
-            }
             match self.storage.commit(&commit) {
                 Ok(receipt) => return publication_from_receipt(&receipt),
                 Err(error)
@@ -1014,17 +991,8 @@ impl<'storage> PublicationLedger<'storage> {
             }
         }
         Err(PublicationError::from(StorageError::adapter(
-            "Publication metering transaction retry was exhausted",
+            "Publication transaction retry was exhausted",
         )))
-    }
-
-    fn validate_attribution(
-        &self,
-        publication_id: &PublicationId,
-        expected: &PublicationEnterpriseAttribution,
-    ) -> Result<(), PublicationError> {
-        validate_stored_attribution(self.storage, publication_id, expected)
-            .map_err(publication_metering_error)
     }
 
     fn replay_or_already_exists(
@@ -1077,7 +1045,6 @@ impl<'storage, 'port, 'audit> PublicationCoordinator<'storage, 'port, 'audit> {
         context: &PublicationCommandContext,
         command: &PublicationPublishCommand,
         authorization: &PublicationAuthorization,
-        attribution: &PublicationEnterpriseAttribution,
         policy_context: &PublicationPolicyContext,
         policy: &RepositoryPublicationPolicy,
     ) -> Result<Publication, PublicationError> {
@@ -1085,12 +1052,9 @@ impl<'storage, 'port, 'audit> PublicationCoordinator<'storage, 'port, 'audit> {
             .ledger
             .replay(&context.receipt_identity, &context.command_digest)?
         {
-            self.ledger
-                .validate_attribution(publication.id(), attribution)?;
             return Ok(publication);
         }
         validate_publish(context, command, authorization)?;
-        validate_enterprise_attribution(command, authorization, attribution, policy_context)?;
         if policy_context.request_id() != context.receipt_identity().request_id()
             || policy_context.evidence().observed_at_millis() != context.occurred_at_millis()
         {
@@ -1108,7 +1072,7 @@ impl<'storage, 'port, 'audit> PublicationCoordinator<'storage, 'port, 'audit> {
         if self.ledger.exists(&publication.id)? {
             return self.replay_or_already_exists(context);
         }
-        self.ledger.create(context, &publication, attribution)
+        self.ledger.create(context, &publication)
     }
 
     /// Reads one publication only after validating its full durable journal.
@@ -1167,13 +1131,8 @@ impl<'storage, 'port, 'audit> PublicationCoordinator<'storage, 'port, 'audit> {
             })?;
             match observation {
                 PublicationPortObservation::Found { resource, .. } => {
-                    current = self.transition_found_with_metering(
-                        &current,
-                        occurred_at_millis,
-                        &operation,
-                        index,
-                        resource,
-                    )?;
+                    current =
+                        self.transition_found(&current, occurred_at_millis, index, resource)?;
                 }
                 PublicationPortObservation::Unknown { code, .. } => {
                     return self.transition(&current, occurred_at_millis, |next| {
@@ -1244,7 +1203,6 @@ impl<'storage, 'port, 'audit> PublicationCoordinator<'storage, 'port, 'audit> {
             &current,
             context.occurred_at_millis,
             Some((&context.receipt_identity, &context.command_digest)),
-            None,
             |next| {
                 next.state = PublicationState::Cancelled;
                 next.cancellation_reason = Some(command.reason.clone());
@@ -1259,29 +1217,18 @@ impl<'storage, 'port, 'audit> PublicationCoordinator<'storage, 'port, 'audit> {
         occurred_at_millis: u64,
         change: impl FnOnce(&mut Publication) -> Result<(), PublicationError>,
     ) -> Result<Publication, PublicationError> {
-        self.transition_with_receipt(current, occurred_at_millis, None, None, change)
+        self.transition_with_receipt(current, occurred_at_millis, None, change)
     }
 
-    fn transition_with_metering(
+    fn transition_found(
         &mut self,
         current: &Publication,
         occurred_at_millis: u64,
-        operation: &PublicationOperation,
-        change: impl FnOnce(&mut Publication) -> Result<(), PublicationError>,
-    ) -> Result<Publication, PublicationError> {
-        self.transition_with_receipt(current, occurred_at_millis, None, Some(operation), change)
-    }
-
-    fn transition_found_with_metering(
-        &mut self,
-        current: &Publication,
-        occurred_at_millis: u64,
-        operation: &PublicationOperation,
         index: usize,
         resource: Option<PublicationResourceFact>,
     ) -> Result<Publication, PublicationError> {
         validate_resource_target(current, resource.as_ref())?;
-        self.transition_with_metering(current, occurred_at_millis, operation, |next| {
+        self.transition(current, occurred_at_millis, |next| {
             succeed_step(next, index, resource, true)
         })
     }
@@ -1316,12 +1263,9 @@ impl<'storage, 'port, 'audit> PublicationCoordinator<'storage, 'port, 'audit> {
             } => {
                 validate_resource_target(&applying, resource.as_ref())?;
                 let next = if remote_write_performed {
-                    self.transition_with_metering(
-                        &applying,
-                        occurred_at_millis,
-                        operation,
-                        |next| succeed_step(next, index, resource, true),
-                    )?
+                    self.transition(&applying, occurred_at_millis, |next| {
+                        succeed_step(next, index, resource, true)
+                    })?
                 } else {
                     self.transition(&applying, occurred_at_millis, |next| {
                         succeed_step(next, index, resource, false)
@@ -1347,7 +1291,6 @@ impl<'storage, 'port, 'audit> PublicationCoordinator<'storage, 'port, 'audit> {
         current: &Publication,
         occurred_at_millis: u64,
         command_receipt: Option<(&ReceiptIdentity, &Sha256Digest)>,
-        metering_operation: Option<&PublicationOperation>,
         change: impl FnOnce(&mut Publication) -> Result<(), PublicationError>,
     ) -> Result<Publication, PublicationError> {
         let mut next = current.clone();
@@ -1360,8 +1303,7 @@ impl<'storage, 'port, 'audit> PublicationCoordinator<'storage, 'port, 'audit> {
         next.updated_at_millis = occurred_at_millis;
         change(&mut next)?;
         next.validate()?;
-        self.ledger
-            .append(current, &next, command_receipt, metering_operation)
+        self.ledger.append(current, &next, command_receipt)
     }
 
     fn replay_or_already_exists(
@@ -1416,38 +1358,6 @@ impl<'storage, 'port, 'audit> PublicationCoordinator<'storage, 'port, 'audit> {
             policy,
         )
     }
-}
-
-fn validate_enterprise_attribution(
-    command: &PublicationPublishCommand,
-    authorization: &PublicationAuthorization,
-    attribution: &PublicationEnterpriseAttribution,
-    policy_context: &PublicationPolicyContext,
-) -> Result<(), PublicationError> {
-    let PublicationRequester::User(requester) = policy_context.requester() else {
-        return Err(PublicationError::stale(
-            "Publication enterprise attribution requires the original User",
-        ));
-    };
-    let scope = policy_context.scope();
-    if attribution.delivery_id() != &command.delivery_id
-        || attribution.delivery_id() != authorization.binding().delivery_id()
-        || attribution.organization_id() != scope.organization_id()
-        || attribution.workspace_id() != scope.workspace_id()
-        || attribution.project_id() != scope.project_id()
-        || attribution.repository_id() != scope.repository_id()
-        || attribution.user_id() != requester
-        || authorization.repository_scope_sha256() != &scope.sha256()
-    {
-        return Err(PublicationError::stale(
-            "Publication enterprise attribution does not match the sealed authority",
-        ));
-    }
-    Ok(())
-}
-
-fn publication_metering_error(error: PublicationMeteringError) -> PublicationError {
-    PublicationError::new(PublicationErrorKind::Corrupt, error.to_string())
 }
 
 fn bounded_text(value: &str, maximum: usize) -> bool {

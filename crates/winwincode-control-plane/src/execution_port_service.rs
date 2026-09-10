@@ -43,7 +43,7 @@ use crate::delivery_transaction::{delivery_stream_id, load_durable_execution_job
 use crate::runtime_event_transaction::runtime_ack_sequence_for_replay;
 use crate::{
     ControlPlane, DurableWorkerExecutionLifecycle, RepositoryExecutionScheduler,
-    RepositoryExecutionSchedulerError, WorkerEnterpriseQuotaClaim, WorkerExecutionLifecycleError,
+    RepositoryExecutionSchedulerError, WorkerExecutionLifecycleError,
 };
 
 /// Default interval advertised to a registered Worker.
@@ -76,9 +76,7 @@ pub enum ExecutionPortServiceError {
     AuthorityRejected(&'static str),
     /// The registry rejected a scheduler claim; no dispatch was created.
     ClaimRejected(LeaseWriteStatus),
-    /// Enterprise quota rejected the authenticated Worker claim before Registry write.
-    EnterpriseQuotaRejected,
-    /// The durable Worker quota lifecycle failed before a dispatch could be built.
+    /// The durable Worker lifecycle failed before a dispatch could be built.
     WorkerLifecycle(WorkerExecutionLifecycleError),
     /// Action Policy evaluation or receipt issuance failed closed.
     ActionPolicy(crate::ActionPolicyEnforcementError),
@@ -102,9 +100,6 @@ impl fmt::Display for ExecutionPortServiceError {
             }
             Self::ClaimRejected(status) => {
                 write!(formatter, "execution lease claim rejected: {status:?}")
-            }
-            Self::EnterpriseQuotaRejected => {
-                formatter.write_str("authenticated Worker enterprise quota rejected the claim")
             }
             Self::WorkerLifecycle(error) => write!(formatter, "{error}"),
             Self::ActionPolicy(error) => write!(formatter, "{error}"),
@@ -475,17 +470,10 @@ impl<'storage> ExecutionPortService<'storage> {
                 .database_path()
                 .parent()
                 .ok_or(ExecutionPortServiceError::Protocol("storage.databasePath"))?;
-            match DurableWorkerExecutionLifecycle::open(data_directory)
+            DurableWorkerExecutionLifecycle::open(data_directory)
                 .map_err(ExecutionPortServiceError::WorkerLifecycle)?
                 .claim(&claim)
                 .map_err(ExecutionPortServiceError::WorkerLifecycle)?
-            {
-                WorkerEnterpriseQuotaClaim::Claimed { operational, .. } => operational,
-                WorkerEnterpriseQuotaClaim::Denied
-                | WorkerEnterpriseQuotaClaim::TerminalReplay(_) => {
-                    return Err(ExecutionPortServiceError::EnterpriseQuotaRejected);
-                }
-            }
         } else {
             self.registry()?.claim_execution_job(&claim)?
         };

@@ -101,16 +101,6 @@ impl ModelAdmissionLimits {
         }
         Ok(self)
     }
-
-    fn stricter(self, other: Self) -> Self {
-        Self {
-            requests_per_minute: self.requests_per_minute.min(other.requests_per_minute),
-            tokens_per_minute: self.tokens_per_minute.min(other.tokens_per_minute),
-            concurrent_requests: self.concurrent_requests.min(other.concurrent_requests),
-            token_budget: self.token_budget.min(other.token_budget),
-            cost_budget_micros: self.cost_budget_micros.min(other.cost_budget_micros),
-        }
-    }
 }
 
 /// One auditable policy layer supplied by the policy authority.
@@ -152,9 +142,7 @@ impl ModelAdmissionPolicyLayer {
     }
 }
 
-/// Effective policy obtained by intersecting the base policy with an optional
-/// enterprise ceiling. The enterprise layer can only deny a route or lower a
-/// limit; it cannot be widened by Model Settings or a session preference.
+/// Effective policy frozen from the configured Community authority.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FrozenModelAdmissionPolicy {
@@ -177,37 +165,20 @@ pub struct ModelPolicySource {
 }
 
 impl FrozenModelAdmissionPolicy {
-    /// Freezes the effective policy. Both layers must describe the same budget
-    /// period so a smaller enterprise ceiling cannot be reset independently.
+    /// Freezes the effective policy.
     ///
     /// # Errors
     ///
     /// Rejects an invalid layer or mismatched budget period.
-    pub fn freeze(
-        base: ModelAdmissionPolicyLayer,
-        enterprise: Option<ModelAdmissionPolicyLayer>,
-    ) -> Result<Self, ModelAdmissionError> {
+    pub fn freeze(base: ModelAdmissionPolicyLayer) -> Result<Self, ModelAdmissionError> {
         base.limits.validate()?;
-        let mut route_allowed = base.route_decision == ModelRoutePolicyDecision::Allow;
-        let mut limits = base.limits;
-        let mut sources = vec![ModelPolicySource {
+        let route_allowed = base.route_decision == ModelRoutePolicyDecision::Allow;
+        let limits = base.limits;
+        let sources = vec![ModelPolicySource {
             authority_id: base.authority_id.clone(),
             revision: base.revision,
             decision: base.route_decision,
         }];
-        if let Some(enterprise) = enterprise {
-            enterprise.limits.validate()?;
-            if enterprise.budget_period_id != base.budget_period_id {
-                return Err(ModelAdmissionError::invalid());
-            }
-            route_allowed &= enterprise.route_decision == ModelRoutePolicyDecision::Allow;
-            limits = limits.stricter(enterprise.limits);
-            sources.push(ModelPolicySource {
-                authority_id: enterprise.authority_id,
-                revision: enterprise.revision,
-                decision: enterprise.route_decision,
-            });
-        }
         let fingerprint_payload =
             serde_json::to_vec(&(&base.budget_period_id, route_allowed, limits, &sources))
                 .map_err(|_| ModelAdmissionError::invalid())?;
@@ -245,7 +216,7 @@ impl FrozenModelAdmissionPolicy {
         &self.budget_period_id
     }
 
-    /// Returns every auditable authority source in base-then-enterprise order.
+    /// Returns the auditable Community authority source.
     #[must_use]
     pub fn sources(&self) -> &[ModelPolicySource] {
         &self.sources
@@ -586,7 +557,7 @@ pub struct ModelReservationCompletion {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelAdmissionDenialReason {
-    /// A base or enterprise policy denied the route.
+    /// The configured policy denied the route.
     PolicyDenied,
     /// The fixed-minute request limit was exhausted.
     RequestsPerMinute,

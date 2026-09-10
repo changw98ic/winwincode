@@ -12,16 +12,16 @@ use winwincode_api::generated::{
 };
 use winwincode_control_plane::{
     CredentialReferenceResolution, CredentialReferenceService, DurableProviderGatewayAdmission,
-    EnterpriseModelPolicyCeiling, FrozenModelAdmissionPolicy, FrozenModelRouteAuthority,
-    LocalModelPolicyAuthority, LocalModelPolicyAuthorityConfig, ModelAdmissionClock,
-    ModelAdmissionClockError, ModelAdmissionDenialReason, ModelAdmissionErrorKind,
-    ModelAdmissionLimits, ModelAdmissionPolicyLayer, ModelAdmissionService, ModelCapability,
-    ModelPolicyAuthorityError, ModelPolicyAuthorityPort, ModelPolicyAuthoritySnapshot,
-    ModelPolicyResolutionErrorKind, ModelPolicyRouteKey, ModelRequestAdmission,
-    ModelReservationCompletion, ModelReservationReceipt, ModelReservationRelease,
-    ModelReservationReleaseReason, ModelReservationRequest, ModelReservationTerminalOutcome,
-    ModelRoutePolicyDecision, ModelSettingsProjection, ModelSettingsRequest, ModelSettingsService,
-    ModelSettingsTarget, ModelSettingsValues, ModelToolSupport, ProductionModelPolicySource,
+    FrozenModelAdmissionPolicy, FrozenModelRouteAuthority, LocalModelPolicyAuthority,
+    LocalModelPolicyAuthorityConfig, ModelAdmissionClock, ModelAdmissionClockError,
+    ModelAdmissionDenialReason, ModelAdmissionErrorKind, ModelAdmissionLimits,
+    ModelAdmissionPolicyLayer, ModelAdmissionService, ModelCapability, ModelPolicyAuthorityError,
+    ModelPolicyAuthorityPort, ModelPolicyAuthoritySnapshot, ModelPolicyResolutionErrorKind,
+    ModelPolicyRouteKey, ModelRequestAdmission, ModelReservationCompletion,
+    ModelReservationReceipt, ModelReservationRelease, ModelReservationReleaseReason,
+    ModelReservationRequest, ModelReservationTerminalOutcome, ModelRoutePolicyDecision,
+    ModelSettingsProjection, ModelSettingsRequest, ModelSettingsService, ModelSettingsTarget,
+    ModelSettingsValues, ModelToolSupport, ProductionModelPolicySource,
     ProviderAdmissionOpenRequest, ProviderAdmissionReservationConfig, ProviderCatalogRequest,
     ProviderCatalogService, ProviderDescriptor, ProviderGatewayAdmissionPort,
     ProviderGatewayIdentity, ProviderTokenUsage, ResolvedModelCapability, StructuredOutputSupport,
@@ -299,7 +299,6 @@ fn limits() -> ModelAdmissionLimits {
 fn policy_with(
     base_limits: ModelAdmissionLimits,
     base_decision: ModelRoutePolicyDecision,
-    enterprise: Option<(ModelAdmissionLimits, ModelRoutePolicyDecision)>,
 ) -> FrozenModelAdmissionPolicy {
     let base = ModelAdmissionPolicyLayer::try_new(
         "base-policy".to_owned(),
@@ -309,21 +308,11 @@ fn policy_with(
         base_limits,
     )
     .expect("base policy");
-    let enterprise = enterprise.map(|(limits, decision)| {
-        ModelAdmissionPolicyLayer::try_new(
-            "enterprise-policy".to_owned(),
-            11,
-            "budget-2030-01".to_owned(),
-            decision,
-            limits,
-        )
-        .expect("enterprise policy")
-    });
-    FrozenModelAdmissionPolicy::freeze(base, enterprise).expect("effective policy")
+    FrozenModelAdmissionPolicy::freeze(base).expect("effective policy")
 }
 
 fn policy(policy_limits: ModelAdmissionLimits) -> FrozenModelAdmissionPolicy {
-    policy_with(policy_limits, ModelRoutePolicyDecision::Allow, None)
+    policy_with(policy_limits, ModelRoutePolicyDecision::Allow)
 }
 
 fn reservation(
@@ -369,66 +358,6 @@ impl ModelAdmissionClock for OneShotClock {
             Ok(self.minute)
         }
     }
-}
-
-#[test]
-fn enterprise_denial_and_stricter_ceiling_apply_before_provider_invocation() {
-    let (root, mut storage, authority) = setup("policy-denial");
-    let mut enterprise_limits = limits();
-    enterprise_limits.concurrent_requests = 1;
-    let denied_policy = policy_with(
-        limits(),
-        ModelRoutePolicyDecision::Allow,
-        Some((enterprise_limits, ModelRoutePolicyDecision::Deny)),
-    );
-    assert!(!denied_policy.route_allowed());
-    assert_eq!(denied_policy.limits().concurrent_requests, 1);
-    assert_eq!(denied_policy.sources().len(), 2);
-    assert_eq!(denied_policy.sources()[1].authority_id, "enterprise-policy");
-
-    let mut provider_invocations = 0_u64;
-    let receipt = ModelAdmissionService::new(&mut storage, &FixedClock(31_556_000))
-        .reserve(
-            &authority,
-            &denied_policy,
-            &reservation(&authority, 1, 10, 2),
-        )
-        .expect("durable denial");
-    if receipt.admitted() {
-        provider_invocations += 1;
-    }
-    assert_eq!(
-        receipt.denial,
-        Some(ModelAdmissionDenialReason::PolicyDenied)
-    );
-    assert_eq!(provider_invocations, 0);
-
-    let ceiling_policy = policy_with(
-        limits(),
-        ModelRoutePolicyDecision::Allow,
-        Some((enterprise_limits, ModelRoutePolicyDecision::Allow)),
-    );
-    for seed in [2, 3] {
-        let receipt = ModelAdmissionService::new(&mut storage, &FixedClock(31_556_000))
-            .reserve(
-                &authority,
-                &ceiling_policy,
-                &reservation(&authority, seed, 10, 2),
-            )
-            .expect("enterprise concurrency decision");
-        if receipt.admitted() {
-            provider_invocations += 1;
-        } else {
-            assert_eq!(
-                receipt.denial,
-                Some(ModelAdmissionDenialReason::Concurrency)
-            );
-        }
-    }
-    assert_eq!(provider_invocations, 1);
-
-    drop(storage);
-    fs::remove_dir_all(root).expect("remove fixture");
 }
 
 #[test]
@@ -877,7 +806,6 @@ fn reservation_for_session(
 
 struct PolicyAuthorityFixture {
     base: ModelAdmissionPolicyLayer,
-    enterprise: Option<ModelAdmissionPolicyLayer>,
     returned_key: Option<ModelPolicyRouteKey>,
     unavailable: AtomicBool,
     queries: Mutex<Vec<ModelPolicyRouteKey>>,
@@ -898,7 +826,6 @@ impl ModelPolicyAuthorityPort for PolicyAuthorityFixture {
         ModelPolicyAuthoritySnapshot::freeze(
             self.returned_key.clone().unwrap_or_else(|| key.clone()),
             self.base.clone(),
-            self.enterprise.clone(),
         )
         .map_err(|_| ModelPolicyAuthorityError::unavailable())
     }
@@ -931,7 +858,6 @@ fn durable_provider_admission_replays_reserve_and_actual_completion_after_restar
             ModelRoutePolicyDecision::Allow,
             limits(),
         ),
-        enterprise_ceilings: Vec::new(),
     })
     .expect("production policy authority");
     let reservation = ProviderAdmissionReservationConfig::try_new(100, 10)
@@ -1060,15 +986,8 @@ fn frozen_route_authority_durable_json_rehydrates_only_exact_fingerprint() {
 }
 
 #[test]
-fn production_policy_source_intersects_only_auditable_base_and_enterprise_layers() {
+fn production_policy_source_uses_only_the_auditable_community_authority() {
     let (root, storage, authority) = setup("production-policy-source");
-    let enterprise_limits = ModelAdmissionLimits {
-        requests_per_minute: 40,
-        tokens_per_minute: 4_000,
-        concurrent_requests: 4,
-        token_budget: 40_000,
-        cost_budget_micros: 40_000,
-    };
     let fixture = PolicyAuthorityFixture {
         base: policy_layer(
             "base-policy-authority",
@@ -1076,12 +995,6 @@ fn production_policy_source_intersects_only_auditable_base_and_enterprise_layers
             ModelRoutePolicyDecision::Allow,
             limits(),
         ),
-        enterprise: Some(policy_layer(
-            "enterprise-policy-authority",
-            11,
-            ModelRoutePolicyDecision::Allow,
-            enterprise_limits,
-        )),
         returned_key: None,
         unavailable: AtomicBool::new(false),
         queries: Mutex::new(Vec::new()),
@@ -1089,7 +1002,7 @@ fn production_policy_source_intersects_only_auditable_base_and_enterprise_layers
     let resolution = ProductionModelPolicySource::new(&fixture)
         .resolve(&authority)
         .expect("resolve production policy");
-    assert_eq!(resolution.policy().limits(), enterprise_limits);
+    assert_eq!(resolution.policy().limits(), limits());
     assert!(resolution.policy().route_allowed());
     assert_eq!(resolution.policy().budget_period_id(), "budget-2030-01");
     assert_eq!(
@@ -1099,10 +1012,7 @@ fn production_policy_source_intersects_only_auditable_base_and_enterprise_layers
             .iter()
             .map(|source| (source.authority_id.as_str(), source.revision))
             .collect::<Vec<_>>(),
-        [
-            ("base-policy-authority", 7),
-            ("enterprise-policy-authority", 11),
-        ]
+        [("base-policy-authority", 7)]
     );
     let queries = fixture.queries.lock().expect("policy query lock");
     assert_eq!(queries.as_slice(), [resolution.key().clone()]);
@@ -1134,7 +1044,7 @@ fn production_policy_source_intersects_only_auditable_base_and_enterprise_layers
 }
 
 #[test]
-fn enterprise_deny_snapshot_mismatch_and_unavailability_fail_closed() {
+fn policy_deny_snapshot_mismatch_and_unavailability_fail_closed() {
     let (root, mut storage, route_authority) = setup("production-policy-deny");
     configure_session(&mut storage, 2);
     let other_authority = authority(&mut storage, 2);
@@ -1144,22 +1054,16 @@ fn enterprise_deny_snapshot_mismatch_and_unavailability_fail_closed() {
         base: policy_layer(
             "base-policy-authority",
             7,
-            ModelRoutePolicyDecision::Allow,
-            limits(),
-        ),
-        enterprise: Some(policy_layer(
-            "enterprise-policy-authority",
-            11,
             ModelRoutePolicyDecision::Deny,
             limits(),
-        )),
+        ),
         returned_key: None,
         unavailable: AtomicBool::new(false),
         queries: Mutex::new(Vec::new()),
     };
     let denied = ProductionModelPolicySource::new(&fixture)
         .resolve(&route_authority)
-        .expect("resolve enterprise denial");
+        .expect("resolve policy denial");
     assert!(!denied.policy().route_allowed());
 
     let mismatch = PolicyAuthorityFixture {
@@ -1187,16 +1091,8 @@ fn enterprise_deny_snapshot_mismatch_and_unavailability_fail_closed() {
 }
 
 #[test]
-fn local_production_policy_config_rejects_duplicates_and_freezes_enterprise_ceiling() {
+fn local_production_policy_config_freezes_the_community_policy() {
     let (root, storage, route_authority) = setup("local-production-policy");
-    let organization_id = OrganizationId(id("org", 1));
-    let enterprise_limits = ModelAdmissionLimits {
-        requests_per_minute: 20,
-        tokens_per_minute: 2_000,
-        concurrent_requests: 2,
-        token_budget: 20_000,
-        cost_budget_micros: 20_000,
-    };
     let local = LocalModelPolicyAuthority::try_new(LocalModelPolicyAuthorityConfig {
         base: policy_layer(
             "base-policy-authority",
@@ -1204,53 +1100,13 @@ fn local_production_policy_config_rejects_duplicates_and_freezes_enterprise_ceil
             ModelRoutePolicyDecision::Allow,
             limits(),
         ),
-        enterprise_ceilings: vec![
-            EnterpriseModelPolicyCeiling::try_new(
-                organization_id.clone(),
-                policy_layer(
-                    "enterprise-policy-authority",
-                    21,
-                    ModelRoutePolicyDecision::Allow,
-                    enterprise_limits,
-                ),
-            )
-            .expect("enterprise ceiling"),
-        ],
     })
     .expect("local production policy config");
     let resolution = ProductionModelPolicySource::new(&local)
         .resolve(&route_authority)
         .expect("local production policy");
-    assert_eq!(resolution.policy().limits(), enterprise_limits);
-    assert_eq!(resolution.policy().sources().len(), 2);
-
-    let duplicate_policy = || {
-        policy_layer(
-            "enterprise-policy-authority",
-            22,
-            ModelRoutePolicyDecision::Allow,
-            enterprise_limits,
-        )
-    };
-    let duplicate = LocalModelPolicyAuthority::try_new(LocalModelPolicyAuthorityConfig {
-        base: policy_layer(
-            "base-policy-authority",
-            20,
-            ModelRoutePolicyDecision::Allow,
-            limits(),
-        ),
-        enterprise_ceilings: vec![
-            EnterpriseModelPolicyCeiling::try_new(organization_id.clone(), duplicate_policy())
-                .expect("first duplicate"),
-            EnterpriseModelPolicyCeiling::try_new(organization_id, duplicate_policy())
-                .expect("second duplicate"),
-        ],
-    })
-    .expect_err("duplicate enterprise organization");
-    assert_eq!(
-        duplicate.kind(),
-        ModelPolicyResolutionErrorKind::InvalidAuthority
-    );
+    assert_eq!(resolution.policy().limits(), limits());
+    assert_eq!(resolution.policy().sources().len(), 1);
 
     drop(storage);
     fs::remove_dir_all(root).expect("remove fixture");

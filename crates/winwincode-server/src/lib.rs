@@ -13,7 +13,6 @@ mod client_sessions;
 mod config;
 mod dispatcher;
 mod durable_event_hub;
-mod identity_authenticator;
 mod login_rate_limiter;
 mod model_authority;
 mod password_hash;
@@ -30,8 +29,8 @@ pub use application::{
     StandaloneApplicationClock, StandaloneControlPlaneApplication, SystemStandaloneApplicationClock,
 };
 pub use auth_session::{
-    AuthSessionBootstrap, AuthSessionConfig, AuthSessionError, ExternalIdentitySessionIssuer,
-    ExternalIdentitySessionResult, OwnerInitializationHook, SqliteAuthSessionManager,
+    AuthSessionBootstrap, AuthSessionConfig, AuthSessionError, OwnerInitializationHook,
+    SqliteAuthSessionManager,
 };
 pub use client_candidates::{
     ClientCandidatesApplication, ClientCandidatesConfig, ClientCandidatesError,
@@ -67,7 +66,6 @@ pub use durable_event_hub::{
     CommittedEventContext, DurableEventHub, DurableEventHubClock, DurableEventHubConfig,
     DurableEventHubError, DurableEventHubErrorCode, DurableEventPublisher,
 };
-pub use identity_authenticator::EnterpriseRequestAuthenticator;
 pub use model_authority::{
     LocalModelRoute, configure_local_model_authority, credential_create_command,
 };

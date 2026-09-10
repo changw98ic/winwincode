@@ -26,9 +26,6 @@ use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 use winwincode_api::generated::{Actor, AuthSessionResponse, Scope};
-use winwincode_control_plane::{
-    BrowserSessionLifecycleError, BrowserSessionLifecyclePort, ExternalAuthenticationOutcome,
-};
 use winwincode_domain::{Instant, SchemaVersion, UserActor, UserActorKind, UserId};
 
 use crate::login_rate_limiter::LoginRateLimiter;
@@ -174,80 +171,6 @@ struct InitializationGate {
     proofs: Vec<String>,
     /// In-memory half of the permanent close marker.
     closed: bool,
-}
-
-/// Maps one verified external authentication outcome into the canonical
-/// browser-session authority.
-pub struct ExternalIdentitySessionIssuer {
-    sessions: Arc<SqliteAuthSessionManager>,
-}
-
-impl ExternalIdentitySessionIssuer {
-    #[must_use]
-    pub const fn new(sessions: Arc<SqliteAuthSessionManager>) -> Self {
-        Self { sessions }
-    }
-
-    /// Issues at most one cookie for a newly committed external assertion.
-    ///
-    /// # Errors
-    ///
-    /// Returns the canonical session authority failure without exposing token,
-    /// assertion, or cookie material.
-    pub fn issue(
-        &self,
-        outcome: ExternalAuthenticationOutcome,
-    ) -> Result<ExternalIdentitySessionResult, AuthSessionError> {
-        if outcome.idempotent_replay {
-            return Ok(ExternalIdentitySessionResult { issued: None });
-        }
-        let issued = self
-            .sessions
-            .issue_authenticated(outcome.principal.actor, outcome.principal.authorized_scopes)?;
-        Ok(ExternalIdentitySessionResult {
-            issued: Some(issued),
-        })
-    }
-}
-
-/// Secret-safe external login result. Cookie material remains transport-only.
-pub struct ExternalIdentitySessionResult {
-    issued: Option<IssuedBrowserSession>,
-}
-
-impl ExternalIdentitySessionResult {
-    #[must_use]
-    pub const fn is_idempotent_replay(&self) -> bool {
-        self.issued.is_none()
-    }
-
-    /// Returns the one transport-ready cookie header for a newly issued
-    /// session, or `None` for an exact assertion replay.
-    ///
-    /// # Errors
-    ///
-    /// Returns a clock conversion failure without exposing cookie material in
-    /// the error.
-    pub fn set_cookie_header(&self) -> Result<Option<String>, AuthSessionError> {
-        self.issued
-            .as_ref()
-            .map(IssuedBrowserSession::set_cookie_header)
-            .transpose()
-    }
-
-    /// Returns the secret-free canonical session response for a newly issued
-    /// session, or `None` for an exact assertion replay.
-    ///
-    /// # Errors
-    ///
-    /// Returns a clock/encoding failure without exposing assertion or cookie
-    /// material.
-    pub fn response(&self) -> Result<Option<AuthSessionResponse>, AuthSessionError> {
-        self.issued
-            .as_ref()
-            .map(IssuedBrowserSession::response)
-            .transpose()
-    }
 }
 
 impl SqliteAuthSessionManager {
@@ -792,21 +715,6 @@ impl SqliteAuthSessionManager {
     }
 }
 
-impl BrowserSessionLifecyclePort for SqliteAuthSessionManager {
-    fn replace_authorized_scopes(
-        &self,
-        actor: &Actor,
-        authorized_scopes: Vec<Scope>,
-    ) -> Result<usize, BrowserSessionLifecycleError> {
-        Self::replace_authorized_scopes(self, actor, authorized_scopes)
-            .map_err(|_| BrowserSessionLifecycleError)
-    }
-
-    fn revoke_actor_sessions(&self, actor: &Actor) -> Result<usize, BrowserSessionLifecycleError> {
-        Self::revoke_actor_sessions(self, actor).map_err(|_| BrowserSessionLifecycleError)
-    }
-}
-
 impl RequestAuthenticator for SqliteAuthSessionManager {
     fn authenticate(
         &self,
@@ -1100,8 +1008,7 @@ mod tests {
     use std::sync::atomic::{AtomicI64, AtomicU8, Ordering};
 
     use winwincode_api::generated::{OrganizationScope, OrganizationScopeKind};
-    use winwincode_control_plane::ExternalIdentityPrincipal;
-    use winwincode_domain::{ExternalIdentityId, OrganizationId, UserAccountRole};
+    use winwincode_domain::{OrganizationId, UserAccountRole};
 
     use super::*;
 
@@ -1424,97 +1331,6 @@ mod tests {
                 .actor,
             member_actor
         );
-    }
-
-    #[test]
-    fn external_identity_principal_uses_canonical_session_store_and_lifecycle_port() {
-        let directory = test_directory("external-identity");
-        let clock = Arc::new(ManualClock::new(3_000));
-        let session_manager = Arc::new(manager(
-            &directory,
-            Arc::clone(&clock),
-            "initialization-proof",
-        ));
-        let session_issuer = ExternalIdentitySessionIssuer::new(Arc::clone(&session_manager));
-        let outcome = ExternalAuthenticationOutcome {
-            principal: ExternalIdentityPrincipal {
-                actor: actor_of("usr_00000000000000000000000001"),
-                authorized_scopes: vec![scope(2), scope(1)],
-                organization_id: OrganizationId("org_00000000000000000000000001".to_owned()),
-                external_identity_id: ExternalIdentityId(
-                    "xid_00000000000000000000000001".to_owned(),
-                ),
-            },
-            idempotent_replay: false,
-        };
-        let external_session = session_issuer
-            .issue(outcome.clone())
-            .expect("issue external session");
-        assert!(!external_session.is_idempotent_replay());
-        assert!(
-            external_session
-                .response()
-                .expect("session response")
-                .is_some()
-        );
-        assert!(
-            external_session
-                .set_cookie_header()
-                .expect("cookie header")
-                .is_some()
-        );
-        let credentials = TransportCredentials::new(
-            None,
-            Some(
-                external_session
-                    .issued
-                    .as_ref()
-                    .expect("issued session")
-                    .cookie_value
-                    .clone(),
-            ),
-        );
-        let replay = session_issuer
-            .issue(ExternalAuthenticationOutcome {
-                idempotent_replay: true,
-                ..outcome
-            })
-            .expect("exact assertion replay");
-        assert!(replay.is_idempotent_replay());
-        assert!(replay.response().expect("replay response").is_none());
-        assert!(replay.set_cookie_header().expect("replay cookie").is_none());
-        assert_eq!(
-            session_manager
-                .current(&credentials)
-                .expect("external session")
-                .authorized_scopes,
-            vec![scope(1), scope(2)]
-        );
-
-        let lifecycle: &dyn BrowserSessionLifecyclePort = session_manager.as_ref();
-        assert_eq!(
-            lifecycle
-                .replace_authorized_scopes(
-                    &actor_of("usr_00000000000000000000000001"),
-                    vec![scope(2)]
-                )
-                .expect("shrink through lifecycle port"),
-            1
-        );
-        assert_eq!(
-            session_manager
-                .current(&credentials)
-                .expect("shrunk external session")
-                .authorized_scopes,
-            vec![scope(2)]
-        );
-        assert_eq!(
-            lifecycle
-                .revoke_actor_sessions(&actor_of("usr_00000000000000000000000001"))
-                .expect("revoke through lifecycle port"),
-            1
-        );
-        assert!(session_manager.current(&credentials).is_err());
     }
 
     #[test]

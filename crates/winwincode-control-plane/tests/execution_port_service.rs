@@ -391,7 +391,7 @@ fn transport_authenticated_claim_without_durable_pool_placement_fails_closed() {
         .register_worker_for_scope(
             &WorkerRegistrationRequest {
                 authentication_identity: WorkerAuthenticationIdentity::TransportPrincipal {
-                    issuer: "fixture-enterprise-worker".to_owned(),
+                    issuer: "fixture-remote-worker".to_owned(),
                     subject: "remote-worker".to_owned(),
                     credential_fingerprint: winwincode_domain::Sha256Digest(format!(
                         "sha256:{}",
@@ -405,7 +405,7 @@ fn transport_authenticated_claim_without_durable_pool_placement_fails_closed() {
                     "sha256:{}",
                     "b".repeat(64)
                 )),
-                security_zone: "enterprise-default".to_owned(),
+                security_zone: "remote-default".to_owned(),
                 max_slots: 1,
                 message_id: register.message_id,
                 request_id: register.request_id,
@@ -1242,7 +1242,6 @@ mod runtime_router_fixture {
     use std::sync::{Arc, Mutex};
 
     use rusqlite::{Connection, params};
-    use sha2::{Digest, Sha256};
     use winwincode_api::generated::{Actor, CommandEnvelope, CommandName, Scope};
     use winwincode_control_plane::DurableExecutionPortIngress;
     use winwincode_control_plane::delivery_execution::{
@@ -1270,10 +1269,10 @@ mod runtime_router_fixture {
         DeliveryJournalPort, DeliveryStore, JournalBackendError, LoadedDeliveryJournal,
     };
     use winwincode_domain::{
-        AttentionItemId, CodexThreadId, DeliveryId, EnterprisePolicyId, ExecutionAckSequence,
-        ExecutionEventId, ExecutionJobId, ExecutionMessageId, ExecutionSequence, FencingToken,
-        Instant, LeaseId, OrganizationId, ProductSessionId, ProjectId, RepositoryId, RequestId,
-        Revision, SchemaVersion, SessionBindingSourceIdentity, SessionBindingSourceIdentityKind,
+        AttentionItemId, CodexThreadId, DeliveryId, ExecutionAckSequence, ExecutionEventId,
+        ExecutionJobId, ExecutionMessageId, ExecutionSequence, FencingToken, Instant, LeaseId,
+        OrganizationId, ProductSessionId, ProjectId, RepositoryId, RequestId, Revision,
+        SchemaVersion, SessionBindingSourceIdentity, SessionBindingSourceIdentityKind,
         SessionIdentity, Sha256Digest, StageRunId, UserId, WorkItemId, WorkItemState, WorkRunId,
         WorkerId, WorkerInstanceId, WorkerSessionId, WorkspaceId,
     };
@@ -1295,14 +1294,11 @@ mod runtime_router_fixture {
     };
     use winwincode_storage::{
         AggregateJournalKey, AggregateJournalPublication, AggregateJournalRecord, CommitReceipt,
-        DurableOutboxEvent, EnterprisePolicyActor, EnterprisePolicyChildOverrideMode,
-        EnterprisePolicyDefinition, EnterprisePolicyEffect, EnterprisePolicyInheritanceMode,
-        EnterprisePolicyKind, EnterprisePolicyMode, EnterprisePolicyScope, EnterprisePolicyState,
-        EnterprisePolicyVersionSource, EnterprisePolicyWrite, ExecutionLeaseClaim,
-        ExecutionRegistry, LoadedAggregateJournal, NewOutboxEvent, PendingAuditEvent,
-        ProductStateStorage, ProjectionEventCursor, ProjectionEventStreamKey, ProjectionReadCut,
-        ReceiptActorKey, ReceiptIdentity, ReceiptScopeKey, SqliteStorage, StateCommit,
-        StateRevisionGuard, StorageError, StoredState, WorkerRegistrationRequest,
+        DurableOutboxEvent, ExecutionLeaseClaim, ExecutionRegistry, LoadedAggregateJournal,
+        NewOutboxEvent, PendingAuditEvent, ProductStateStorage, ProjectionEventCursor,
+        ProjectionEventStreamKey, ProjectionReadCut, ReceiptActorKey, ReceiptIdentity,
+        ReceiptScopeKey, SqliteStorage, StateCommit, StateRevisionGuard, StorageError, StoredState,
+        WorkerRegistrationRequest,
     };
 
     static NEXT_TEMP_DIRECTORY: AtomicU64 = AtomicU64::new(1_000);
@@ -2462,53 +2458,6 @@ mod runtime_router_fixture {
         }
     }
 
-    fn seed_action_policy(
-        storage: &mut SqliteStorage,
-        organization_id: &OrganizationId,
-        seed: u64,
-    ) {
-        let definition = EnterprisePolicyDefinition {
-            default_effect: EnterprisePolicyEffect::Allow,
-            child_override_mode: EnterprisePolicyChildOverrideMode::TightenOnly,
-            rules: Vec::new(),
-        };
-        let definition_sha256 = Sha256Digest(format!(
-            "sha256:{:x}",
-            Sha256::digest(
-                serde_json::to_vec(
-                    &serde_json::to_value(&definition).expect("Policy definition value"),
-                )
-                .expect("Policy definition"),
-            )
-        ));
-        storage
-            .enterprise_policy_ledger()
-            .expect("Policy ledger")
-            .write(&EnterprisePolicyWrite {
-                policy_id: EnterprisePolicyId(canonical_id("pol", seed)),
-                policy_kind: EnterprisePolicyKind::Tool,
-                scope: EnterprisePolicyScope::Organization {
-                    organization_id: organization_id.clone(),
-                },
-                mode: EnterprisePolicyMode::Enforce,
-                state: EnterprisePolicyState::Active,
-                definition_sha256,
-                definition,
-                effective_at: Instant("2027-01-15T07:59:00.000Z".to_owned()),
-                inheritance_mode: EnterprisePolicyInheritanceMode::Tighten,
-                base_version: None,
-                expected_revision: 0,
-                source: EnterprisePolicyVersionSource {
-                    actor: EnterprisePolicyActor::User {
-                        id: UserId(canonical_id("usr", seed)),
-                    },
-                    request_id: RequestId(canonical_id("req", seed + 702)),
-                },
-                updated_at: Instant("2027-01-15T07:59:00.000Z".to_owned()),
-            })
-            .expect("active Tool Policy");
-    }
-
     fn make_action_receipt_bytes_noncanonical(root: &Path) {
         let connection =
             Connection::open(root.join("control-plane.sqlite3")).expect("action receipt database");
@@ -2531,12 +2480,11 @@ mod runtime_router_fixture {
     }
 
     #[test]
-    fn action_receipt_binds_durable_scope_actor_policy_and_replays_after_restart() {
+    fn action_receipt_binds_durable_scope_and_actor_and_replays_after_restart() {
         let seed = 207;
         let fixture = runtime_fixture(seed, "action-enforcement");
         let root = fixture.root.clone();
         let request = action_request(&fixture, seed);
-        let organization_id = fixture.scope.organization_id.clone();
         fixture
             .control_plane
             .shutdown()
@@ -2547,7 +2495,6 @@ mod runtime_router_fixture {
         let first = {
             let mut storage = SqliteStorage::open(&root).expect("storage reopen");
             install_runtime_lease(&mut storage, &fixture.runtime, &fixture.job, seed);
-            seed_action_policy(&mut storage, &organization_id, seed);
             let mut service = winwincode_control_plane::ExecutionPortService::new(
                 &mut storage,
                 Instant("2027-01-15T08:00:01.200Z".to_owned()),
@@ -2566,12 +2513,8 @@ mod runtime_router_fixture {
             assert_eq!(receipt.job_id, fixture.job.job_id);
             assert_eq!(receipt.scope, fixture.scope);
             assert_eq!(receipt.actor.id.0, canonical_id("usr", seed));
-            let policy = receipt
-                .policy_version
-                .as_ref()
-                .expect("Policy version seal");
-            assert_eq!(policy.policy_id, canonical_id("pol", seed));
-            assert_eq!(policy.version, 1);
+            assert!(receipt.policy_version.is_none());
+            assert!(receipt.policy_mode.is_none());
             drop(service);
             Box::new(storage).close().expect("storage close");
             receipt

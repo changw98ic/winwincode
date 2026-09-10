@@ -429,11 +429,8 @@ fn model_policy() -> LocalModelPolicyAuthority {
         },
     )
     .expect("model admission policy");
-    LocalModelPolicyAuthority::try_new(LocalModelPolicyAuthorityConfig {
-        base,
-        enterprise_ceilings: Vec::new(),
-    })
-    .expect("model policy authority")
+    LocalModelPolicyAuthority::try_new(LocalModelPolicyAuthorityConfig { base })
+        .expect("model policy authority")
 }
 
 fn model_pool_config() -> ModelRequestPoolConfig {

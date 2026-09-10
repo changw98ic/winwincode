@@ -1055,11 +1055,8 @@ fn policy() -> LocalModelPolicyAuthority {
         },
     )
     .expect("model admission policy");
-    LocalModelPolicyAuthority::try_new(LocalModelPolicyAuthorityConfig {
-        base,
-        enterprise_ceilings: Vec::new(),
-    })
-    .expect("local model policy authority")
+    LocalModelPolicyAuthority::try_new(LocalModelPolicyAuthorityConfig { base })
+        .expect("local model policy authority")
 }
 
 fn application(root: &TestDirectory) -> StandaloneModelExecutionApplication {

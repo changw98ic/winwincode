@@ -20,7 +20,7 @@ use winwincode_domain::{RepositoryScope, RepositoryScopeKind};
 
 use winwincode_control_plane::{
     DurableExecutionPortDelegate, DurableExecutionPortIngress, DurableWorkerExecutionLifecycle,
-    RepositoryExecutionScheduler, WorkerEnterpriseQuotaClaim,
+    RepositoryExecutionScheduler,
 };
 use winwincode_domain::{ExecutionJobId, Instant, RequestId, UserId, WorkerId, WorkerInstanceId};
 use winwincode_execution_port::generated::{
@@ -961,18 +961,12 @@ impl RepositoryRuntimeScheduler {
                     attempt: u64::try_from(dispatch.lease.attempt)
                         .map_err(|_| scheduler_failure())?,
                 };
-                match DurableWorkerExecutionLifecycle::open(data_directory)
-                    .and_then(|lifecycle| lifecycle.claim(&claim))
+                DurableWorkerExecutionLifecycle::open(data_directory)
+                    .and_then(|mut lifecycle| lifecycle.claim(&claim))
                     .map_err(|error| {
-                        debug_scheduler_error("reserve remote Worker quota", &error);
+                        debug_scheduler_error("claim remote Worker execution", &error);
                         scheduler_failure()
-                    })? {
-                    WorkerEnterpriseQuotaClaim::Claimed { .. } => {}
-                    WorkerEnterpriseQuotaClaim::Denied
-                    | WorkerEnterpriseQuotaClaim::TerminalReplay(_) => {
-                        return Err(scheduler_failure());
-                    }
-                }
+                    })?;
             }
             let authority = self
                 .ensure_worker_slot(&mut state.storage, &dispatch, now)

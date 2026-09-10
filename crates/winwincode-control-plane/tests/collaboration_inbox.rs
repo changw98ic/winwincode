@@ -26,8 +26,8 @@ use winwincode_control_plane::{
     ResponsibilityTarget,
 };
 use winwincode_domain::{
-    ApprovalId, AttentionItemId, DeliveryId, EnterpriseTeamId, OpaqueCursor, OrganizationId,
-    ProductSessionId, ProjectId, RepositoryId, RequestId, Sha256Digest, UserId, WorkspaceId,
+    ApprovalId, AttentionItemId, DeliveryId, OpaqueCursor, OrganizationId, ProductSessionId,
+    ProjectId, RepositoryId, RequestId, Sha256Digest, UserId, WorkspaceId,
 };
 use winwincode_domain::{RepositoryScope, RepositoryScopeKind, UserActor, UserActorKind};
 use winwincode_storage::SqliteStorage;
@@ -101,7 +101,6 @@ struct Fixture {
     root: PathBuf,
     scope: RepositoryScope,
     viewer: UserId,
-    team: EnterpriseTeamId,
     clock: Arc<AtomicU64>,
     source: SharedSource,
     authority: SharedAuthority,
@@ -112,7 +111,6 @@ impl Fixture {
         let root = temporary_directory(label);
         let scope = repository_scope(1);
         let viewer = user(1);
-        let team = EnterpriseTeamId("team_01J00000000000000000000000".to_owned());
         let source_guard = seed_guard_state(&root, SOURCE_GUARD_STREAM, 80);
         let authority_guard = seed_guard_state(&root, AUTHORITY_GUARD_STREAM, 81);
         let items = vec![
@@ -134,7 +132,6 @@ impl Fixture {
         let authority = CollaborationInboxAuthoritySnapshot {
             scope: scope.clone(),
             viewer_user_id: viewer.clone(),
-            visible_team_ids: vec![team.clone()],
             assignments: vec![
                 entitlement(
                     &scope,
@@ -143,7 +140,6 @@ impl Fixture {
                         product_session_id: product_session(1),
                     },
                     ResponsibilityRole::Approver,
-                    vec![team.clone()],
                     1,
                 ),
                 entitlement(
@@ -153,7 +149,6 @@ impl Fixture {
                         product_session_id: product_session(2),
                     },
                     ResponsibilityRole::Approver,
-                    Vec::new(),
                     2,
                 ),
                 entitlement(
@@ -163,7 +158,6 @@ impl Fixture {
                         delivery_id: delivery(1),
                     },
                     ResponsibilityRole::Assignee,
-                    vec![team.clone()],
                     3,
                 ),
             ],
@@ -175,7 +169,6 @@ impl Fixture {
             root,
             scope,
             viewer,
-            team,
             clock: Arc::new(AtomicU64::new(NOW)),
             source: SharedSource(Arc::new(Mutex::new(source))),
             authority: SharedAuthority(Arc::new(Mutex::new(authority))),
@@ -238,7 +231,7 @@ impl Fixture {
 }
 
 #[test]
-fn stable_personal_and_team_pages_sort_filter_expire_and_reject_changed_cuts() {
+fn stable_personal_pages_sort_filter_expire_and_reject_changed_cuts() {
     let fixture = Fixture::new("stable-pages");
     let mut service = fixture.service();
     let first = service
@@ -280,17 +273,6 @@ fn stable_personal_and_team_pages_sort_filter_expire_and_reject_changed_cuts() {
     assert_eq!(
         refreshed.items[1].effective_state,
         CollaborationInboxItemState::Expired
-    );
-
-    let mut team = fixture.personal_list(10, None);
-    team.audience = CollaborationInboxAudience::Team(fixture.team.clone());
-    let team_page = service.list(&team).expect("Team page");
-    assert_eq!(team_page.items.len(), 2);
-    assert!(
-        team_page
-            .items
-            .iter()
-            .all(|item| item.source.id != CollaborationInboxItemId::Approval(approval(2)))
     );
 
     let mut pending = fixture.personal_list(10, None);
@@ -496,7 +478,7 @@ fn exact_candidate_annotations_cover_node_file_hunk_and_stale_candidate_is_zero_
 }
 
 #[test]
-fn cross_tenant_team_and_concurrent_claims_fail_closed_without_duplicate_business_decisions() {
+fn cross_tenant_and_concurrent_claims_fail_closed_without_duplicate_business_decisions() {
     let fixture = Fixture::new("cross-tenant-concurrency");
     let mut service = fixture.service();
     let mut foreign = fixture.personal_list(10, None);
@@ -505,15 +487,6 @@ fn cross_tenant_team_and_concurrent_claims_fail_closed_without_duplicate_busines
         service.list(&foreign).expect_err("foreign scope").kind(),
         CollaborationInboxErrorKind::Unauthorized
     );
-    let mut hidden_team = fixture.personal_list(10, None);
-    hidden_team.audience = CollaborationInboxAudience::Team(EnterpriseTeamId(
-        "team_01J99999999999999999999999".to_owned(),
-    ));
-    assert_eq!(
-        service.list(&hidden_team).expect_err("hidden Team").kind(),
-        CollaborationInboxErrorKind::Unauthorized
-    );
-
     let left = fixture.clone();
     let right = fixture.clone();
     let left_thread = std::thread::spawn(move || {
@@ -672,7 +645,6 @@ fn entitlement(
     principal: &UserId,
     target: ResponsibilityTarget,
     role: ResponsibilityRole,
-    team_ids: Vec<EnterpriseTeamId>,
     sequence: u64,
 ) -> CollaborationResponsibilityEntitlement {
     CollaborationResponsibilityEntitlement {
@@ -694,7 +666,6 @@ fn entitlement(
             rbac_revision: 1,
             rbac_sha256: digest('2'),
         },
-        team_ids,
     }
 }
 

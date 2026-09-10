@@ -5,7 +5,7 @@
 //! The live runner writes only identifiers and expected numeric Usage to a
 //! mode-0600 evidence file. This gate reopens the same product database and
 //! joins its existing Delivery, Provider, admission, pool, slot, lease, and
-//! enterprise Usage facts. It creates no parallel receipt or billing ledger.
+//! Usage facts. It creates no parallel receipt or billing ledger.
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt as _;
@@ -36,9 +36,9 @@ use winwincode_domain::{
     DeliveryId, ExecutionJobId, Instant, LeaseId, ModelExchangeId, RequestId, WorkerSessionId,
 };
 use winwincode_storage::{
-    AggregateJournalKey, EnterpriseUsageMeasure, EnterpriseUsageSource,
-    ExecutionLeaseTerminalOutcome, ExecutionLeaseTerminalRequest, ProductStateStorage,
-    ProviderExchangeState, SqliteStorage, WorkerSlotResources, WorkerSlotState,
+    AggregateJournalKey, ExecutionLeaseTerminalOutcome, ExecutionLeaseTerminalRequest,
+    ProductStateStorage, ProviderExchangeState, SqliteStorage, WorkerSlotResources,
+    WorkerSlotState,
 };
 
 const AUDIT_GATE_ENV: &str = "WINWINCODE_LIVE_PROVIDER_DELIVERY_AUDIT_GATE";
@@ -499,53 +499,6 @@ fn audit_usage(
         return Err(AuditError::durable());
     }
     audit_delivery_status_history(&storage, evidence, &delivery.delivery)?;
-    let enterprise_source = EnterpriseUsageSource::Provider {
-        provider_usage_id: usage.usage.provider_usage_id.clone(),
-        source_sequence: usage.sequence,
-        source_digest: usage.source_digest.clone(),
-        model_exchange_id: usage.model_exchange_id.clone(),
-        request_id: usage.request_id.clone(),
-        attempt: usage.usage.attempt,
-        route_authority_fingerprint: usage.route_authority_fingerprint.clone(),
-    };
-    let enterprise = storage
-        .enterprise_usage_ledger()
-        .map_err(|_| AuditError::durable())?
-        .load_source(&enterprise_source)
-        .map_err(|_| AuditError::durable())?
-        .ok_or_else(AuditError::durable)?;
-    let EnterpriseUsageMeasure::Provider {
-        input_tokens,
-        cached_input_tokens,
-        cache_write_input_tokens,
-        output_tokens,
-        reasoning_output_tokens,
-        total_tokens,
-        cost_micros,
-    } = enterprise.fact.measure
-    else {
-        return Err(AuditError::durable());
-    };
-    if enterprise.fact.source != enterprise_source
-        || enterprise.fact.attribution.organization_id != usage.attribution.organization_id
-        || enterprise.fact.attribution.workspace_id != usage.attribution.workspace_id
-        || enterprise.fact.attribution.project_id != usage.attribution.project_id
-        || enterprise.fact.attribution.repository_id != usage.attribution.repository_id
-        || enterprise.fact.attribution.delivery_id.as_ref() != Some(&evidence.delivery_id)
-        || enterprise.fact.attribution.product_session_id.as_ref()
-            != Some(&usage.attribution.product_session_id)
-        || enterprise.fact.attribution.user_id != usage.attribution.user_id
-        || input_tokens != expected.input_tokens
-        || cached_input_tokens != expected.cached_input_tokens
-        || cache_write_input_tokens != expected.cache_write_input_tokens
-        || output_tokens != expected.output_tokens
-        || reasoning_output_tokens != expected.reasoning_output_tokens
-        || total_tokens != expected.total_tokens()?
-        || cost_micros != expected.cost_micros
-        || &enterprise.fact.settled_at != settled_at
-    {
-        return Err(AuditError::durable());
-    }
     Box::new(storage).close().map_err(|_| AuditError::durable())
 }
 

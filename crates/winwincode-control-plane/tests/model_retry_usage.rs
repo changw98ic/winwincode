@@ -25,8 +25,7 @@ use winwincode_control_plane::{
     ModelRetryStep, ModelRetryUsageErrorKind, ModelRetryUsageRequest, ModelRetryUsageService,
     ModelRouteResolutionReason, ModelSettingsProjection, ModelSettingsTarget, ModelTokenPrice,
     ModelToolSupport, ModelUsageAttribution, ModelUsageFilter, ProviderCatalogRequest,
-    ProviderCatalogService, ProviderDescriptor, ProviderEnterpriseUsageErrorKind,
-    ProviderEnterpriseUsageReconciler, ProviderGatewayIdentity, ProviderGatewaySettlement,
+    ProviderCatalogService, ProviderDescriptor, ProviderGatewayIdentity, ProviderGatewaySettlement,
     ProviderGatewayTerminalOutcome, ProviderModelSelector, ProviderPolicy, ProviderPolicyCandidate,
     ProviderPolicyRoute, ProviderStreamFailureKind, ProviderTokenUsage, StructuredOutputSupport,
     UnknownCostPolicy, summarize_model_costs,
@@ -41,10 +40,9 @@ use winwincode_execution_port::agent_config::{
     AgentProfile, AgentProfileSettings, AgentProfileSource,
 };
 use winwincode_storage::{
-    AggregateJournalKey, CommitReceipt, EnterpriseUsageFilter as EnterpriseLedgerFilter,
-    LoadedAggregateJournal, OutboxEvent, ProductStateStorage, ProjectionEventCursor,
-    ProjectionEventStreamKey, ProjectionReadCut, ReceiptIdentity, SqliteStorage, StorageError,
-    StoredState,
+    AggregateJournalKey, CommitReceipt, LoadedAggregateJournal, OutboxEvent, ProductStateStorage,
+    ProjectionEventCursor, ProjectionEventStreamKey, ProjectionReadCut, ReceiptIdentity,
+    SqliteStorage, StorageError, StoredState,
 };
 
 static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(1);
@@ -292,13 +290,6 @@ fn request(
         )
         .expect("attribution"),
         plan,
-        enterprise_quota_amounts: winwincode_storage::EnterpriseQuotaAmounts {
-            tokens: 100,
-            provider_cost_micros: 10,
-            operations: 1,
-            ..winwincode_storage::EnterpriseQuotaAmounts::default()
-        },
-        enterprise_quota_requested_at: Instant("2027-08-01T00:00:00.000Z".to_owned()),
     }
 }
 
@@ -1063,81 +1054,6 @@ fn settled_source_catalog_pages_and_replays_exact_frozen_authority_after_restart
             .expect("new source snapshot")
             .snapshot_sequence,
         3
-    );
-    drop(restarted);
-    fs::remove_dir_all(fixture.root).expect("remove fixture");
-}
-
-#[test]
-fn enterprise_projection_recovers_a_post_settlement_crash_gap_exactly_once() {
-    let mut fixture = Fixture::new("enterprise-recovery");
-    let request = request(plan(fixture.primary.clone(), 1, None), 880, Some(8));
-    start(&mut fixture.storage, &request, &fixture.primary, 1, 881);
-    ModelRetryUsageService::new(&mut fixture.storage)
-        .complete_attempt(
-            &request,
-            &ModelAttemptCompletionCommand {
-                command_request_id: RequestId(id("req", 882)),
-                gateway: gateway(
-                    &fixture.primary,
-                    1,
-                    ModelReservationTerminalOutcome::Completed,
-                    None,
-                    Some(charge(88, 10, 2, 120)),
-                ),
-            },
-        )
-        .expect("source settlement");
-    fixture
-        .storage
-        .enterprise_usage_ledger()
-        .expect("prepare enterprise schema");
-    let database = fixture.root.join("control-plane.sqlite3");
-    let fault = rusqlite::Connection::open(&database).expect("fault connection");
-    fault
-        .execute_batch(
-            "CREATE TRIGGER fail_enterprise_projection
-             BEFORE INSERT ON enterprise_usage_entries
-             BEGIN SELECT RAISE(ABORT, 'injected projection crash'); END;",
-        )
-        .expect("install fault");
-    let error = ProviderEnterpriseUsageReconciler::new(&mut fixture.storage)
-        .reconcile_provider_page(None, 10)
-        .expect_err("projection insert fails");
-    assert_eq!(error.kind(), ProviderEnterpriseUsageErrorKind::Ledger);
-    assert_eq!(
-        fixture
-            .storage
-            .enterprise_usage_ledger()
-            .expect("ledger after fault")
-            .reconcile(&EnterpriseLedgerFilter::default())
-            .expect("zero enterprise totals")
-            .entries,
-        0
-    );
-    fault
-        .execute_batch("DROP TRIGGER fail_enterprise_projection;")
-        .expect("remove fault");
-    drop(fault);
-    drop(fixture.storage);
-
-    let mut restarted = SqliteStorage::open(&fixture.root).expect("restart storage");
-    let applied = ProviderEnterpriseUsageReconciler::new(&mut restarted)
-        .reconcile_provider_page(None, 10)
-        .expect("rebuild projection");
-    assert_eq!((applied.inserted_entries, applied.replayed_entries), (1, 0));
-    let replay = ProviderEnterpriseUsageReconciler::new(&mut restarted)
-        .reconcile_provider_page(None, 10)
-        .expect("exact projection replay");
-    assert_eq!((replay.inserted_entries, replay.replayed_entries), (0, 1));
-    assert_eq!(
-        restarted
-            .enterprise_usage_ledger()
-            .expect("rebuilt ledger")
-            .reconcile(&EnterpriseLedgerFilter::default())
-            .expect("rebuilt totals")
-            .entries,
-        1
     );
     drop(restarted);
     fs::remove_dir_all(fixture.root).expect("remove fixture");

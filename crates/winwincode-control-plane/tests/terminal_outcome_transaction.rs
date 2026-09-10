@@ -13,10 +13,9 @@ use sha2::{Digest, Sha256};
 use winwincode_api::generated::{Actor, CommandEnvelope, CommandName, Scope};
 use winwincode_audit::{AuditEvent, AuditExecutionSubjectKind, AuditScope};
 use winwincode_control_plane::{
-    ArtifactEnterpriseQuotaAdmission, ArtifactEnterpriseQuotaSaga, CommitError, ControlPlane,
-    ControlPlaneConfig, DeliveryTerminalOutcomeCommitError, DurableArtifactEnterpriseUsage,
-    DurableEnterpriseQuotaAdmission, DurableExecutionPortIngress, EventPublishError,
-    EventPublisher, ExecutionPortService, LocalDeliveryAdapterConfig, OutboxEvent, StateChange,
+    CommitError, ControlPlane, ControlPlaneConfig, DeliveryTerminalOutcomeCommitError,
+    DurableExecutionPortIngress, EventPublishError, EventPublisher, ExecutionPortService,
+    LocalDeliveryAdapterConfig, OutboxEvent, StateChange,
 };
 use winwincode_delivery::{
     application::{
@@ -36,11 +35,10 @@ use winwincode_delivery::{
     },
 };
 use winwincode_domain::{
-    ArtifactId, CodexThreadId, DeliveryId, EnterprisePolicyId, ExecutionAckSequence,
-    ExecutionJobId, ExecutionMessageId, ExecutionSequence, FencingToken, Instant, LeaseId,
-    OrganizationId, ProductSessionId, ProjectId, RepositoryId, RequestId, Revision, SchemaVersion,
-    SessionIdentity, Sha256Digest, UserId, WorkerId, WorkerInstanceId, WorkerSessionId,
-    WorkspaceId,
+    ArtifactId, CodexThreadId, DeliveryId, ExecutionAckSequence, ExecutionJobId,
+    ExecutionMessageId, ExecutionSequence, FencingToken, Instant, LeaseId, OrganizationId,
+    ProductSessionId, ProjectId, RepositoryId, RequestId, Revision, SchemaVersion, SessionIdentity,
+    Sha256Digest, UserId, WorkerId, WorkerInstanceId, WorkerSessionId, WorkspaceId,
 };
 use winwincode_domain::{RepositoryScope, UserActor};
 use winwincode_execution_port::generated::{
@@ -56,19 +54,15 @@ use winwincode_storage::{
     AggregateJournalKey, AggregateJournalPublication, AggregateJournalRecord, ArtifactChunk,
     ArtifactMeteringAttribution, ArtifactOpen, ArtifactProvenance, ArtifactRetention,
     ArtifactStore, AuthenticatedWorkerPlacement, CandidateSourceManifest,
-    EXECUTION_PROTOCOL_VERSION, EnterprisePolicyActor, EnterprisePolicyChildOverrideMode,
-    EnterprisePolicyDefinition, EnterprisePolicyEffect, EnterprisePolicyInheritanceMode,
-    EnterprisePolicyKind, EnterprisePolicyMode, EnterprisePolicyScope, EnterprisePolicyState,
-    EnterprisePolicyVersionSource, EnterprisePolicyWrite, EnterpriseQuotaReleaseReason,
-    EnterpriseQuotaReservationState, EnterpriseQuotaTerminal, ExecutionAdmissionBoundary,
-    ExecutionAdmissionLimits, ExecutionAdmissionPolicy, ExecutionJobState, ExecutionJobSubmission,
+    EXECUTION_PROTOCOL_VERSION, ExecutionAdmissionBoundary, ExecutionAdmissionLimits,
+    ExecutionAdmissionPolicy, ExecutionJobState, ExecutionJobSubmission,
     ExecutionJobTransitionRequest, ExecutionLeaseClaim, ExecutionQueueScope,
     ExecutionRepositoryAccess, ExecutionReservationRequest, ExecutionReservationStart,
-    FakeArtifactObjectStore, LocalArtifactObjectStore, NewOutboxEvent, ProductStateStorage,
-    PublicEventActor, ReceiptIdentity, ReceiptScopeKey, SqliteStorage, StateCommit,
-    WorkerAuthenticationIdentity, WorkerHeartbeatRequest, WorkerPlatform, WorkerPoolId,
-    WorkerRegistrationRequest, WorkerRegistryScope, WorkerSlotAuthority, WorkerSlotOpenRequest,
-    WorkerSlotResourceLimits, WorkerSlotResources,
+    LocalArtifactObjectStore, NewOutboxEvent, ProductStateStorage, PublicEventActor,
+    ReceiptIdentity, ReceiptScopeKey, SqliteStorage, StateCommit, WorkerAuthenticationIdentity,
+    WorkerHeartbeatRequest, WorkerPlatform, WorkerPoolId, WorkerRegistrationRequest,
+    WorkerRegistryScope, WorkerSlotAuthority, WorkerSlotOpenRequest, WorkerSlotResourceLimits,
+    WorkerSlotResources,
 };
 
 use winwincode_storage::{
@@ -419,46 +413,6 @@ fn seed_delivery_and_job(root: &Path, delivery: &Delivery, job: &ExecutionJob) {
     Box::new(storage).close().expect("seed close");
 }
 
-fn seed_verifier_deny_policy(root: &Path, scope: &RepositoryScope, seed: u64) {
-    let definition = EnterprisePolicyDefinition {
-        default_effect: EnterprisePolicyEffect::Deny,
-        child_override_mode: EnterprisePolicyChildOverrideMode::TightenOnly,
-        rules: Vec::new(),
-    };
-    let canonical = serde_json::to_value(&definition).expect("Policy value fixture");
-    let definition_sha256 = Sha256Digest(format!(
-        "sha256:{:x}",
-        Sha256::digest(serde_json::to_vec(&canonical).expect("serialize Policy definition"))
-    ));
-    SqliteStorage::open(root)
-        .expect("Policy storage")
-        .enterprise_policy_ledger()
-        .expect("Policy ledger")
-        .write(&EnterprisePolicyWrite {
-            policy_id: EnterprisePolicyId(canonical_id("pol", seed)),
-            policy_kind: EnterprisePolicyKind::Verifier,
-            scope: EnterprisePolicyScope::Organization {
-                organization_id: scope.organization_id.clone(),
-            },
-            mode: EnterprisePolicyMode::Enforce,
-            state: EnterprisePolicyState::Active,
-            definition_sha256,
-            definition,
-            effective_at: Instant("2027-01-15T07:00:00.000Z".into()),
-            inheritance_mode: EnterprisePolicyInheritanceMode::Tighten,
-            base_version: None,
-            expected_revision: 0,
-            source: EnterprisePolicyVersionSource {
-                actor: EnterprisePolicyActor::User {
-                    id: UserId(canonical_id("usr", seed)),
-                },
-                request_id: RequestId(canonical_id("req", seed + 8_000)),
-            },
-            updated_at: Instant("2027-01-15T07:00:00.000Z".into()),
-        })
-        .expect("write Verifier deny Policy");
-}
-
 fn seed_authenticated_worker_execution(
     root: &Path,
     scope: &RepositoryScope,
@@ -488,7 +442,7 @@ fn seed_authenticated_worker_execution(
     };
     let dispatch = ExecutionPortService::new(&mut storage, claim.issued_at.clone())
         .claim_execution_job(job.clone(), claim)
-        .expect("production enterprise dispatch");
+        .expect("production dispatch");
     let dispatch_result = JobDispatchResultMessage {
         error: None,
         job_id: dispatch.job.job_id.clone(),
@@ -667,7 +621,7 @@ fn seed_authenticated_worker_registration(
                     platform: WorkerPlatform::Aarch64AppleDarwin,
                     capabilities: vec!["codex".to_owned()],
                     capability_digest: Sha256Digest(format!("sha256:{}", "f".repeat(64))),
-                    security_zone: "enterprise-default".to_owned(),
+                    security_zone: "remote-default".to_owned(),
                     max_slots: 1,
                     message_id: ExecutionMessageId(canonical_id("xmsg", seed + 9_000)),
                     request_id: registration_request_id.clone(),
@@ -743,7 +697,7 @@ fn seed_worker_slot(storage: &mut SqliteStorage, message: &JobOutcomeMessage, se
         .expect("Worker slot open");
 }
 
-fn worker_quota_terminal_state(root: &Path, job_id: &ExecutionJobId) -> (String, String, i64) {
+fn worker_terminal_state(root: &Path, job_id: &ExecutionJobId) -> (String, i64) {
     let connection = rusqlite::Connection::open(root.join("control-plane.sqlite3"))
         .expect("Worker quota terminal inspection");
     let operational = connection
@@ -753,13 +707,6 @@ fn worker_quota_terminal_state(root: &Path, job_id: &ExecutionJobId) -> (String,
             |row| row.get(0),
         )
         .expect("operational terminal state");
-    let enterprise = connection
-        .query_row(
-            "SELECT state FROM enterprise_quota_reservations",
-            [],
-            |row| row.get(0),
-        )
-        .expect("enterprise terminal state");
     let usage_sources = connection
         .query_row(
             "SELECT COUNT(*) FROM execution_admission_settlement_sources WHERE job_id = ?1",
@@ -768,77 +715,7 @@ fn worker_quota_terminal_state(root: &Path, job_id: &ExecutionJobId) -> (String,
         )
         .expect("Worker Usage source count");
     connection.close().expect("terminal inspection close");
-    (operational, enterprise, usage_sources)
-}
-
-fn seed_unfinished_artifact_quota(
-    root: &Path,
-    scope: &RepositoryScope,
-    job: &ExecutionJob,
-    message: &JobOutcomeMessage,
-    seed: u64,
-) -> RequestId {
-    let ExecutionScope::WorkRunExecutionScope(job_scope) = &job.scope else {
-        panic!("fixture Job must have Delivery scope");
-    };
-    let request_id = RequestId(canonical_id("req", seed + 8_000));
-    let open = ArtifactOpen::new(
-        ReceiptScopeKey::from_encoded(b"repository:terminal-artifact-quota".to_vec())
-            .expect("Artifact scope"),
-        ExecutionMessageId(canonical_id("xmsg", seed + 8_000)),
-        request_id.clone(),
-        ArtifactId(canonical_id("art", seed + 8_000)),
-        "report",
-        "application/octet-stream",
-        Sha256Digest(format!("sha256:{}", "d".repeat(64))),
-        5,
-        None,
-        ArtifactProvenance::execution_job(
-            job.job_id.clone(),
-            1,
-            message.lease.lease_id.clone(),
-            message.lease.fencing_token.clone(),
-            message.lease.worker_id.clone(),
-            message.lease.worker_instance_id.clone(),
-            message.worker_session_id.clone(),
-        )
-        .expect("Artifact provenance"),
-        ArtifactMeteringAttribution {
-            organization_id: scope.organization_id.clone(),
-            workspace_id: scope.workspace_id.clone(),
-            project_id: scope.project_id.clone(),
-            repository_id: scope.repository_id.clone(),
-            delivery_id: Some(DeliveryId(canonical_id("dlv", seed))),
-            product_session_id: Some(job_scope.product_session_id.clone()),
-            user_id: UserId(canonical_id("usr", seed)),
-        },
-        ArtifactRetention::Indefinite,
-        1_800_000_000_200,
-    );
-    let mut artifacts = ArtifactStore::open(
-        root.join("artifact-catalog"),
-        Box::new(FakeArtifactObjectStore::new()),
-    )
-    .expect("Artifact catalog");
-    let mut quota = DurableEnterpriseQuotaAdmission::new(
-        SqliteStorage::open(root).expect("Artifact quota storage"),
-    );
-    let mut usage = DurableArtifactEnterpriseUsage::new(
-        SqliteStorage::open(root).expect("Artifact Usage storage"),
-    );
-    assert!(matches!(
-        ArtifactEnterpriseQuotaSaga::new(&mut quota, &mut usage)
-            .reserve_open(&open, &message.lease.issued_at)
-            .expect("Artifact quota reservation"),
-        ArtifactEnterpriseQuotaAdmission::Admitted(_)
-    ));
-    artifacts
-        .open_artifact(open)
-        .expect("unfinished Artifact catalog open");
-    artifacts.close().expect("Artifact catalog close");
-    quota.close().expect("Artifact quota close");
-    usage.close().expect("Artifact Usage close");
-    request_id
+    (operational, usage_sources)
 }
 
 fn repository_receipt_scope(scope: &RepositoryScope) -> ReceiptScopeKey {
@@ -1278,54 +1155,7 @@ fn verdict_command(
 }
 
 #[test]
-fn verifier_policy_denies_before_terminal_mutation_and_replays_one_audit() {
-    let seed = 69;
-    let root = temporary_directory("verifier-policy-denial");
-    let scope = repository_scope(seed);
-    let (delivery, _candidate) = running_final_verifier(seed);
-    let original_revision = delivery.revision();
-    let job = execution_job(&delivery, &scope);
-    let message = terminal_message(&job, &delivery, seed, ExecutionOutcomeStatus::Succeeded);
-    let facts = outcome_facts(&delivery, &message);
-    seed_delivery_and_job(&root, &delivery, &job);
-    seed_verifier_deny_policy(&root, &scope, seed);
-
-    for _ in 0..2 {
-        let mut control_plane = ControlPlane::start_local(
-            ControlPlaneConfig::local(&root),
-            Box::new(RecordingPublisher),
-        )
-        .expect("Control Plane start");
-        control_plane
-            .commit_delivery_terminal_outcome(&scope, &message, &facts, &message.sent_at)
-            .expect_err("Verifier Policy must deny before terminal commit");
-        control_plane.shutdown().expect("Control Plane shutdown");
-    }
-    let mut storage = SqliteStorage::open(&root).expect("restart Policy storage");
-    assert_eq!(
-        storage
-            .enterprise_policy_evaluation_ledger()
-            .expect("Policy audit")
-            .scan_audit(None, 10)
-            .expect("scan Policy audit")
-            .entries
-            .len(),
-        1,
-        "exact replay must not duplicate Verifier Policy audit"
-    );
-    let stored = storage
-        .load_state(&format!("delivery:{}", delivery.id().0))
-        .expect("load Delivery")
-        .expect("Delivery exists");
-    let current = Delivery::decode_json(&stored.payload).expect("decode Delivery");
-    assert_eq!(current.revision(), original_revision);
-    assert_eq!(terminal_receipt_count(&root, delivery.id()), 0);
-    drop(storage);
-    fs::remove_dir_all(root).expect("directory release");
-}
-
-#[test]
-fn authenticated_worker_terminal_quota_settles_or_releases_once_across_restart() {
+fn authenticated_worker_terminal_settles_or_releases_once_across_restart() {
     for (seed, name, status, expected_state, expected_sources) in [
         (
             70,
@@ -1363,12 +1193,8 @@ fn authenticated_worker_terminal_quota_settles_or_releases_once_across_restart()
         assert!(!first.receipt().idempotent_replay);
         control_plane.shutdown().expect("Control Plane shutdown");
         assert_eq!(
-            worker_quota_terminal_state(&root, &job.job_id),
-            (
-                expected_state.to_owned(),
-                expected_state.to_owned(),
-                expected_sources
-            )
+            worker_terminal_state(&root, &job.job_id),
+            (expected_state.to_owned(), expected_sources)
         );
 
         let mut restarted = ControlPlane::start_local(
@@ -1382,12 +1208,8 @@ fn authenticated_worker_terminal_quota_settles_or_releases_once_across_restart()
         assert!(replay.receipt().idempotent_replay);
         restarted.shutdown().expect("restart shutdown");
         assert_eq!(
-            worker_quota_terminal_state(&root, &job.job_id),
-            (
-                expected_state.to_owned(),
-                expected_state.to_owned(),
-                expected_sources
-            )
+            worker_terminal_state(&root, &job.job_id),
+            (expected_state.to_owned(), expected_sources)
         );
         fs::remove_dir_all(root).expect("directory release");
     }
@@ -1423,9 +1245,9 @@ fn successful_terminal_without_immutable_usage_is_rejected_before_commit() {
 }
 
 #[test]
-fn committed_worker_quota_pending_recovers_exactly_after_restart() {
+fn committed_worker_resources_pending_recovers_exactly_after_restart() {
     let seed = 74;
-    let root = temporary_directory("Worker-quota-pending-restart");
+    let root = temporary_directory("Worker-resources-pending-restart");
     let scope = repository_scope(seed);
     let (delivery, _candidate) = running_final_verifier(seed);
     let job = execution_job(&delivery, &scope);
@@ -1434,15 +1256,15 @@ fn committed_worker_quota_pending_recovers_exactly_after_restart() {
     seed_delivery_and_job(&root, &delivery, &job);
     seed_authenticated_worker_execution(&root, &scope, &job, &message, seed);
     let connection = rusqlite::Connection::open(root.join("control-plane.sqlite3"))
-        .expect("Worker quota failure injector");
+        .expect("Worker resource failure injector");
     connection
         .execute_batch(
-            "CREATE TRIGGER fail_worker_quota_settlement
-             BEFORE UPDATE ON enterprise_quota_reservations
-             WHEN OLD.state = 'active' AND NEW.state = 'settled'
-             BEGIN SELECT RAISE(ABORT, 'injected Worker quota settlement failure'); END;",
+            "CREATE TRIGGER fail_worker_resource_settlement
+             BEFORE UPDATE ON execution_admission_reservations
+             WHEN OLD.state = 'running' AND NEW.state = 'settled'
+             BEGIN SELECT RAISE(ABORT, 'injected Worker resource settlement failure'); END;",
         )
-        .expect("install Worker quota failure");
+        .expect("install Worker resource failure");
     connection.close().expect("failure injector close");
 
     let mut control_plane = ControlPlane::start_local(
@@ -1452,23 +1274,23 @@ fn committed_worker_quota_pending_recovers_exactly_after_restart() {
     .expect("Control Plane start");
     let error = control_plane
         .commit_delivery_terminal_outcome(&scope, &message, &facts, &message.sent_at)
-        .expect_err("committed Worker quota settlement must remain pending");
+        .expect_err("committed Worker resource settlement must remain pending");
     assert!(matches!(
         error,
-        DeliveryTerminalOutcomeCommitError::WorkerQuotaPending { .. }
+        DeliveryTerminalOutcomeCommitError::WorkerResourcesPending { .. }
     ));
     assert!(error.committed_receipt().is_some());
     control_plane.shutdown().expect("crashed process shutdown");
     assert_eq!(
-        worker_quota_terminal_state(&root, &job.job_id),
-        ("settled".to_owned(), "active".to_owned(), 1)
+        worker_terminal_state(&root, &job.job_id),
+        ("running".to_owned(), 0)
     );
 
     let connection = rusqlite::Connection::open(root.join("control-plane.sqlite3"))
-        .expect("Worker quota failure remover");
+        .expect("Worker resource failure remover");
     connection
-        .execute_batch("DROP TRIGGER fail_worker_quota_settlement;")
-        .expect("remove Worker quota failure");
+        .execute_batch("DROP TRIGGER fail_worker_resource_settlement;")
+        .expect("remove Worker resource failure");
     connection.close().expect("failure remover close");
     let mut restarted = ControlPlane::start_local(
         ControlPlaneConfig::local(&root),
@@ -1477,12 +1299,12 @@ fn committed_worker_quota_pending_recovers_exactly_after_restart() {
     .expect("Control Plane restart");
     let replay = restarted
         .commit_delivery_terminal_outcome(&scope, &message, &facts, &message.sent_at)
-        .expect("pending Worker quota recovery");
+        .expect("pending Worker resource recovery");
     assert!(replay.receipt().idempotent_replay);
     restarted.shutdown().expect("restart shutdown");
     assert_eq!(
-        worker_quota_terminal_state(&root, &job.job_id),
-        ("settled".to_owned(), "settled".to_owned(), 1)
+        worker_terminal_state(&root, &job.job_id),
+        ("settled".to_owned(), 1)
     );
     fs::remove_dir_all(root).expect("directory release");
 }
@@ -1923,13 +1745,6 @@ fn assert_one_terminal_resource_transition(
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .expect("terminal operational admission");
-    let enterprise: (String, i64) = connection
-        .query_row(
-            "SELECT state, revision FROM enterprise_quota_reservations",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .expect("terminal enterprise admission");
     let lease_terminals: (i64, String) = connection
         .query_row(
             "SELECT COUNT(*), outcome FROM execution_lease_terminals WHERE job_id = ?1",
@@ -1947,7 +1762,6 @@ fn assert_one_terminal_resource_transition(
     assert_eq!(queue, ("completed".into(), 4));
     assert_eq!(slot, ("completed".into(), 2));
     assert_eq!(operational, ("settled".into(), 3));
-    assert_eq!(enterprise, ("settled".into(), 2));
     assert_eq!(lease_terminals, (1, "completed".into()));
     assert_eq!(usage_sources, 1);
     connection.close().expect("terminal resource close");
@@ -2065,24 +1879,21 @@ fn concurrent_exact_message_returns_one_commit_and_only_durable_replays() {
 
 #[test]
 fn failed_infrastructure_and_cancelled_outcomes_settle_without_advancing_delivery() {
-    for (offset, status, expected_run, expected_release) in [
+    for (offset, status, expected_run) in [
         (
             0_u64,
             ExecutionOutcomeStatus::Failed,
             winwincode_domain::WorkRunState::Failed,
-            EnterpriseQuotaReleaseReason::Failed,
         ),
         (
             1,
             ExecutionOutcomeStatus::InfrastructureError,
             winwincode_domain::WorkRunState::Failed,
-            EnterpriseQuotaReleaseReason::Failed,
         ),
         (
             2,
             ExecutionOutcomeStatus::Cancelled,
             winwincode_domain::WorkRunState::Cancelled,
-            EnterpriseQuotaReleaseReason::Cancelled,
         ),
     ] {
         let seed = 10 + offset;
@@ -2093,8 +1904,6 @@ fn failed_infrastructure_and_cancelled_outcomes_settle_without_advancing_deliver
         let message = terminal_message(&job, &delivery, seed, status);
         let facts = outcome_facts(&delivery, &message);
         seed_delivery_and_job(&root, &delivery, &job);
-        let artifact_reservation =
-            seed_unfinished_artifact_quota(&root, &scope, &job, &message, seed);
         let mut control_plane = ControlPlane::start_local(
             ControlPlaneConfig::local(&root),
             Box::new(RecordingPublisher),
@@ -2106,7 +1915,7 @@ fn failed_infrastructure_and_cancelled_outcomes_settle_without_advancing_deliver
             .expect("unsuccessful terminal outcome");
         let replay = control_plane
             .commit_delivery_terminal_outcome(&scope, &message, &facts, &message.sent_at)
-            .expect("terminal outcome and Artifact quota release replay");
+            .expect("terminal outcome replay");
         assert!(replay.receipt().idempotent_replay);
         let stored = control_plane
             .load_state(&format!("delivery:{}", delivery.id().0))
@@ -2141,52 +1950,32 @@ fn failed_infrastructure_and_cancelled_outcomes_settle_without_advancing_deliver
                 .iter()
                 .all(|task| task.status == DeliveryTaskStatus::Verifying)
         );
-        let mut quota_storage = SqliteStorage::open(&root).expect("quota inspection storage");
-        let quota_record = quota_storage
-            .enterprise_quota_ledger()
-            .expect("enterprise quota ledger")
-            .load_reservation(&artifact_reservation)
-            .expect("Artifact reservation lookup")
-            .expect("Artifact reservation");
-        assert_eq!(
-            quota_record.state,
-            EnterpriseQuotaReservationState::Released
-        );
-        assert_eq!(quota_record.revision, 2);
-        assert!(matches!(
-            quota_record.terminal,
-            Some(EnterpriseQuotaTerminal::Released { reason, .. }) if reason == expected_release
-        ));
-        Box::new(quota_storage)
-            .close()
-            .expect("quota inspection close");
         control_plane.shutdown().expect("shutdown");
         fs::remove_dir_all(root).expect("database directory release");
     }
 }
 
 #[test]
-fn terminal_commit_restarts_and_releases_artifact_quota_after_the_release_write_crashes() {
+fn terminal_commit_restarts_and_releases_worker_resources_after_a_write_crash() {
     let seed = 13;
-    let root = temporary_directory("artifact-quota-release-restart");
+    let root = temporary_directory("worker-resource-release-restart");
     let scope = repository_scope(seed);
     let (delivery, _candidate) = running_final_verifier(seed);
     let job = execution_job(&delivery, &scope);
     let message = terminal_message(&job, &delivery, seed, ExecutionOutcomeStatus::Cancelled);
     let facts = outcome_facts(&delivery, &message);
     seed_delivery_and_job(&root, &delivery, &job);
-    let artifact_reservation = seed_unfinished_artifact_quota(&root, &scope, &job, &message, seed);
+    seed_authenticated_worker_execution(&root, &scope, &job, &message, seed);
     let connection = rusqlite::Connection::open(root.join("control-plane.sqlite3"))
-        .expect("quota release failure injector");
+        .expect("Worker resource release failure injector");
     connection
-        .execute_batch(&format!(
-            "CREATE TRIGGER fail_artifact_quota_release
-             BEFORE UPDATE ON enterprise_quota_reservations
-             WHEN OLD.reservation_id = '{}'
-             BEGIN SELECT RAISE(ABORT, 'injected Artifact quota release failure'); END;",
-            artifact_reservation.0
-        ))
-        .expect("install quota release failure");
+        .execute_batch(
+            "CREATE TRIGGER fail_worker_resource_release
+             BEFORE UPDATE ON execution_admission_reservations
+             WHEN OLD.state = 'running' AND NEW.state = 'released'
+             BEGIN SELECT RAISE(ABORT, 'injected Worker resource release failure'); END;",
+        )
+        .expect("install Worker resource release failure");
     connection.close().expect("failure injector close");
     let mut control_plane = ControlPlane::start_local(
         ControlPlaneConfig::local(&root),
@@ -2196,18 +1985,18 @@ fn terminal_commit_restarts_and_releases_artifact_quota_after_the_release_write_
 
     let error = control_plane
         .commit_delivery_terminal_outcome(&scope, &message, &facts, &message.sent_at)
-        .expect_err("terminal commit must surface pending Artifact quota release");
+        .expect_err("terminal commit must surface pending Worker resource release");
     assert!(matches!(
         &error,
-        DeliveryTerminalOutcomeCommitError::ArtifactQuotaPending { .. }
+        DeliveryTerminalOutcomeCommitError::WorkerResourcesPending { .. }
     ));
     assert!(error.committed_receipt().is_some());
     control_plane.shutdown().expect("crashed process shutdown");
     let connection = rusqlite::Connection::open(root.join("control-plane.sqlite3"))
-        .expect("quota release failure remover");
+        .expect("Worker resource release failure remover");
     connection
-        .execute_batch("DROP TRIGGER fail_artifact_quota_release;")
-        .expect("remove quota release failure");
+        .execute_batch("DROP TRIGGER fail_worker_resource_release;")
+        .expect("remove Worker resource release failure");
     connection.close().expect("failure remover close");
 
     let mut restarted = ControlPlane::start_local(
@@ -2217,20 +2006,12 @@ fn terminal_commit_restarts_and_releases_artifact_quota_after_the_release_write_
     .expect("restart Control Plane");
     let replay = restarted
         .commit_delivery_terminal_outcome(&scope, &message, &facts, &message.sent_at)
-        .expect("receipt-first retry releases Artifact quota");
+        .expect("receipt-first retry releases Worker resources");
     assert!(replay.receipt().idempotent_replay);
-    let mut quota_storage = SqliteStorage::open(&root).expect("quota inspection storage");
-    let released = quota_storage
-        .enterprise_quota_ledger()
-        .expect("enterprise quota ledger")
-        .load_reservation(&artifact_reservation)
-        .expect("reservation lookup")
-        .expect("Artifact reservation");
-    assert_eq!(released.state, EnterpriseQuotaReservationState::Released);
-    assert_eq!(released.revision, 2);
-    Box::new(quota_storage)
-        .close()
-        .expect("quota inspection close");
+    assert_eq!(
+        worker_terminal_state(&root, &job.job_id),
+        ("released".to_owned(), 0)
+    );
     restarted.shutdown().expect("restart shutdown");
     fs::remove_dir_all(root).expect("database directory release");
 }

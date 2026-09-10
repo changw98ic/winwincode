@@ -19,31 +19,30 @@ use winwincode_api::generated::{
 };
 use winwincode_control_plane::{
     CanonicalModelStreamFrame, ConfiguredModelRetryPlanAuthority, CredentialReferenceResolution,
-    CredentialReferenceService, DurableEnterpriseQuotaAdmission, DurableModelExchangeAuthority,
-    DurableModelRetryContextSource, DurableModelRetryPreOpenPlanner,
-    DurableProviderGatewayAdmission, EnterpriseQuotaAdmission, EnterpriseQuotaAdmissionPort,
-    FrozenModelRetryPlan, FrozenModelRouteAuthority, LocalModelPolicyAuthority,
-    LocalModelPolicyAuthorityConfig, ModelAdmissionClock, ModelAdmissionClockError,
-    ModelAdmissionLimits, ModelAdmissionPolicyLayer, ModelAdmissionService,
-    ModelAttemptFailureFact, ModelAttemptFailureKind, ModelAttemptStartReceipt, ModelCapability,
-    ModelExecutionCertainty, ModelExecutionOpenReceipt, ModelExecutionRuntime,
-    ModelExecutionRuntimeErrorKind, ModelPolicyAuthorityError, ModelPolicyAuthorityPort,
-    ModelPolicyAuthoritySnapshot, ModelPolicyRouteKey, ModelRequestPool, ModelRequestPoolConfig,
-    ModelReservationReceipt, ModelReservationReleaseReason, ModelReservationTerminalOutcome,
-    ModelReservationTerminalReceipt, ModelRetryPlannerError, ModelRetryPreOpenPlannerPort,
-    ModelRetrySettlementContext, ModelRetrySettlementContextError, ModelRetrySettlementContextPort,
-    ModelRetryStep, ModelRetryUsageRequest, ModelRoutePolicyDecision, ModelSettingsRequest,
-    ModelSettingsService, ModelSettingsTarget, ModelSettingsValues, ModelToolSupport,
-    ModelUsageAttribution, ProductStateStorage, ProviderAdapterError, ProviderAdapterInvocation,
-    ProviderAdapterOpenReceipt, ProviderAdapterPort, ProviderAdmissionError,
-    ProviderAdmissionOpenReceipt, ProviderAdmissionOpenRequest, ProviderAdmissionReservationConfig,
-    ProviderCatalogRequest, ProviderCatalogService, ProviderDescriptor, ProviderFinishReason,
-    ProviderGateway, ProviderGatewayAdmissionPort, ProviderGatewayErrorKind,
-    ProviderGatewayIdentity, ProviderGatewayIdentityError, ProviderGatewayIdentityPort,
-    ProviderGatewaySettlement, ProviderGatewaySettlementError, ProviderGatewaySettlementPort,
-    ProviderGatewayTerminal, ProviderStreamControlAction, ProviderStreamConverter,
-    ProviderStreamEvent, ProviderTokenUsage, ResolvedSecret, SecretStoreError, SecretStorePort,
-    StructuredOutputSupport, command_receipt_identity,
+    CredentialReferenceService, DurableModelExchangeAuthority, DurableModelRetryContextSource,
+    DurableModelRetryPreOpenPlanner, DurableProviderGatewayAdmission, FrozenModelRetryPlan,
+    FrozenModelRouteAuthority, LocalModelPolicyAuthority, LocalModelPolicyAuthorityConfig,
+    ModelAdmissionClock, ModelAdmissionClockError, ModelAdmissionLimits, ModelAdmissionPolicyLayer,
+    ModelAdmissionService, ModelAttemptFailureFact, ModelAttemptFailureKind,
+    ModelAttemptStartReceipt, ModelCapability, ModelExecutionCertainty, ModelExecutionOpenReceipt,
+    ModelExecutionRuntime, ModelExecutionRuntimeErrorKind, ModelPolicyAuthorityError,
+    ModelPolicyAuthorityPort, ModelPolicyAuthoritySnapshot, ModelPolicyRouteKey, ModelRequestPool,
+    ModelRequestPoolConfig, ModelReservationReceipt, ModelReservationReleaseReason,
+    ModelReservationTerminalOutcome, ModelReservationTerminalReceipt, ModelRetryPlannerError,
+    ModelRetryPreOpenPlannerPort, ModelRetrySettlementContext, ModelRetrySettlementContextError,
+    ModelRetrySettlementContextPort, ModelRetryStep, ModelRetryUsageRequest,
+    ModelRoutePolicyDecision, ModelSettingsRequest, ModelSettingsService, ModelSettingsTarget,
+    ModelSettingsValues, ModelToolSupport, ModelUsageAttribution, ProductStateStorage,
+    ProviderAdapterError, ProviderAdapterInvocation, ProviderAdapterOpenReceipt,
+    ProviderAdapterPort, ProviderAdmissionError, ProviderAdmissionOpenReceipt,
+    ProviderAdmissionOpenRequest, ProviderAdmissionReservationConfig, ProviderCatalogRequest,
+    ProviderCatalogService, ProviderDescriptor, ProviderFinishReason, ProviderGateway,
+    ProviderGatewayAdmissionPort, ProviderGatewayErrorKind, ProviderGatewayIdentity,
+    ProviderGatewayIdentityError, ProviderGatewayIdentityPort, ProviderGatewaySettlement,
+    ProviderGatewaySettlementError, ProviderGatewaySettlementPort, ProviderGatewayTerminal,
+    ProviderStreamControlAction, ProviderStreamConverter, ProviderStreamEvent, ProviderTokenUsage,
+    ResolvedSecret, SecretStoreError, SecretStorePort, StructuredOutputSupport,
+    command_receipt_identity,
 };
 use winwincode_domain::{
     CodexThreadId, CredentialReferenceId, ExecutionAckSequence, ExecutionJobId, ExecutionMessageId,
@@ -59,10 +58,7 @@ use winwincode_execution_port::generated::{
     LeaseWriteStatus, ModelAckMessage, ModelAckMessageKind, ModelGatewayRoute, ModelOpenMessage,
     ModelOpenMessageKind, WorkRunExecutionScope, WorkRunExecutionScopeKind,
 };
-use winwincode_storage::{
-    EnterpriseQuotaReleaseReason, EnterpriseQuotaReservationState, EnterpriseQuotaTerminal,
-    NewOutboxEvent, ProviderExchangeBegin, SqliteStorage, StateCommit,
-};
+use winwincode_storage::{NewOutboxEvent, ProviderExchangeBegin, SqliteStorage, StateCommit};
 
 static NEXT_TEMP_DIRECTORY: AtomicU64 = AtomicU64::new(1);
 
@@ -504,13 +500,6 @@ fn retry_context(
         )
         .expect("model Usage attribution"),
         plan,
-        enterprise_quota_amounts: winwincode_storage::EnterpriseQuotaAmounts {
-            tokens: 100,
-            provider_cost_micros: 10,
-            operations: 1,
-            ..winwincode_storage::EnterpriseQuotaAmounts::default()
-        },
-        enterprise_quota_requested_at: Instant("2027-08-01T00:00:00.000Z".to_owned()),
     };
     let start = ModelAttemptStartReceipt {
         request_id: request.request_id.clone(),
@@ -1420,12 +1409,6 @@ impl ProviderGatewayAdmissionPort for AdmissionProbe {
                 idempotent_replay: false,
             },
             route_authority: authority,
-            enterprise_quota_amounts: winwincode_storage::EnterpriseQuotaAmounts {
-                tokens: 100,
-                provider_cost_micros: 10,
-                operations: 1,
-                ..winwincode_storage::EnterpriseQuotaAmounts::default()
-            },
         };
         reserved.insert(request.message.model_exchange_id.0.clone(), receipt.clone());
         Ok(receipt)
@@ -2100,7 +2083,6 @@ fn production_policy_deny_and_unavailability_precede_secret_and_provider_calls()
         ProviderAdmissionReservationConfig::try_new(100, 10).expect("Provider reservation config");
     let denied_authority = LocalModelPolicyAuthority::try_new(LocalModelPolicyAuthorityConfig {
         base: admission_policy(ModelRoutePolicyDecision::Deny),
-        enterprise_ceilings: Vec::new(),
     })
     .expect("denied production policy");
     let fixture = AdmissionOrderFixture {
@@ -2162,7 +2144,6 @@ fn planner_context_failure_exact_releases_admission_without_secret_or_provider()
 
     let model_policy = LocalModelPolicyAuthority::try_new(LocalModelPolicyAuthorityConfig {
         base: admission_policy(ModelRoutePolicyDecision::Allow),
-        enterprise_ceilings: Vec::new(),
     })
     .expect("allow production policy");
     let admission_storage = SqliteStorage::open(&root).expect("open admission storage");
@@ -2253,7 +2234,6 @@ fn restart_after_reservation_before_prepare_replays_once_then_opens_provider() {
     let provider = Arc::new(AdapterProbe::default());
     let model_policy = LocalModelPolicyAuthority::try_new(LocalModelPolicyAuthorityConfig {
         base: admission_policy(ModelRoutePolicyDecision::Allow),
-        enterprise_ceilings: Vec::new(),
     })
     .expect("allow production policy");
     let mut admission = DurableProviderGatewayAdmission::new(
@@ -2916,61 +2896,11 @@ impl ProviderAdapterPort for FailingAdapter {
     }
 }
 
-fn inject_provider_quota_rollback_failure(root: &Path) {
-    Connection::open(root.join("control-plane.sqlite3"))
-        .expect("open quota rollback failure injector")
-        .execute_batch(
-            "CREATE TRIGGER fail_provider_quota_rollback
-             BEFORE UPDATE ON enterprise_quota_reservations
-             WHEN OLD.state = 'active' AND NEW.state = 'released'
-             BEGIN SELECT RAISE(FAIL, 'injected Provider quota rollback failure'); END;",
-        )
-        .expect("install quota rollback failure");
-}
-
-fn assert_enterprise_quota_replay(
-    quota: &mut DurableEnterpriseQuotaAdmission,
-    context: &FixedRetryContext,
-    fail_rollback: bool,
-) {
-    let replay = quota
-        .reserve(context.0.enterprise_quota_request())
-        .expect("replay enterprise quota reservation");
-    if fail_rollback {
-        let EnterpriseQuotaAdmission::Admitted(permit) = replay else {
-            panic!("failed rollback must leave the enterprise reservation active");
-        };
-        assert!(permit.receipt().idempotent_replay);
-        assert_eq!(
-            permit.receipt().record.state,
-            EnterpriseQuotaReservationState::Active
-        );
-        assert!(permit.receipt().record.terminal.is_none());
-    } else {
-        let EnterpriseQuotaAdmission::TerminalReplay(receipt) = replay else {
-            panic!("Provider failure must leave a terminal enterprise quota release");
-        };
-        assert!(receipt.idempotent_replay);
-        assert_eq!(
-            receipt.record.state,
-            EnterpriseQuotaReservationState::Released
-        );
-        assert!(matches!(
-            receipt.record.terminal,
-            Some(EnterpriseQuotaTerminal::Released {
-                reason: EnterpriseQuotaReleaseReason::OperationalAdmissionDenied,
-                ..
-            })
-        ));
-    }
-}
-
-fn assert_provider_error_survives_enterprise_quota_rollback(
+fn assert_provider_error_releases_admission(
     label: &str,
     seed: u64,
     adapter_error: ProviderAdapterError,
     expected: ProviderGatewayErrorKind,
-    fail_rollback: bool,
 ) {
     let root = temporary_directory(label);
     let mut storage = SqliteStorage::open(&root).expect("open quota rollback Gateway storage");
@@ -2984,7 +2914,6 @@ fn assert_provider_error_survives_enterprise_quota_rollback(
         seed,
         br#"{"prompt":"quota rollback"}"#,
     );
-    let context = FixedRetryContext(retry_context(&mut storage, &message));
     let identity = FakeIdentity {
         repository_scope: repository_scope(),
         deny: AtomicBool::new(false),
@@ -2997,19 +2926,6 @@ fn assert_provider_error_survives_enterprise_quota_rollback(
     let settlement = SettlementProbe::default();
     let mut admission = AdmissionProbe::default();
     let calls = Arc::new(AtomicU64::new(0));
-    let mut quota = DurableEnterpriseQuotaAdmission::new(
-        SqliteStorage::open(&root).expect("open enterprise quota storage"),
-    );
-    if fail_rollback {
-        let EnterpriseQuotaAdmission::Admitted(permit) = quota
-            .reserve(context.0.enterprise_quota_request())
-            .expect("seed active enterprise quota reservation")
-        else {
-            panic!("first enterprise quota reservation must be admitted");
-        };
-        assert!(!permit.receipt().idempotent_replay);
-        inject_provider_quota_rollback_failure(&root);
-    }
     {
         let mut gateway = ProviderGateway::new(
             &mut storage,
@@ -3028,32 +2944,12 @@ fn assert_provider_error_survives_enterprise_quota_rollback(
             .expect("register failing Provider adapter");
         let reservation = gateway
             .reserve_before_open(&message)
-            .expect("reserve Provider capacity before enterprise quota");
+            .expect("reserve Provider capacity");
         let error = gateway
-            .open_after_reservation_with_enterprise_quota(
-                &message,
-                &reservation,
-                &adapter_request_id(&message),
-                &context,
-                &mut quota,
-            )
-            .expect_err("Provider failure must survive enterprise quota rollback");
+            .open_after_reservation(&message, &reservation, &adapter_request_id(&message))
+            .expect_err("Provider failure must preserve its category");
         assert_eq!(error.kind(), expected);
         assert_eq!(calls.load(Ordering::Relaxed), 1);
-
-        if !fail_rollback {
-            let replay = gateway
-                .open_after_reservation_with_enterprise_quota(
-                    &message,
-                    &reservation,
-                    &adapter_request_id(&message),
-                    &context,
-                    &mut quota,
-                )
-                .expect_err("terminal quota replay must not call the Provider again");
-            assert_eq!(replay.kind(), ProviderGatewayErrorKind::AdmissionDenied);
-            assert_eq!(calls.load(Ordering::Relaxed), 1);
-        }
     }
     assert_eq!(admission.terminals.load(Ordering::Relaxed), 1);
     assert!(
@@ -3063,20 +2959,12 @@ fn assert_provider_error_survives_enterprise_quota_rollback(
             .expect("lock Provider admission reservations")
             .is_empty()
     );
-    quota.close().expect("close enterprise quota storage");
-    let mut restarted_quota = DurableEnterpriseQuotaAdmission::new(
-        SqliteStorage::open(&root).expect("restart enterprise quota storage"),
-    );
-    assert_enterprise_quota_replay(&mut restarted_quota, &context, fail_rollback);
-    restarted_quota
-        .close()
-        .expect("close restarted enterprise quota storage");
     drop(storage);
     fs::remove_dir_all(root).expect("remove quota rollback fixture");
 }
 
 #[test]
-fn enterprise_quota_rollback_preserves_every_provider_adapter_failure_category() {
+fn provider_admission_release_preserves_every_adapter_failure_category() {
     for (label, seed, error, expected) in [
         (
             "quota-adapter-rejected",
@@ -3103,19 +2991,6 @@ fn enterprise_quota_rollback_preserves_every_provider_adapter_failure_category()
             ProviderGatewayErrorKind::AdapterProtocol,
         ),
     ] {
-        assert_provider_error_survives_enterprise_quota_rollback(
-            label, seed, error, expected, false,
-        );
+        assert_provider_error_releases_admission(label, seed, error, expected);
     }
-}
-
-#[test]
-fn enterprise_quota_rollback_failure_does_not_expose_the_provider_error() {
-    assert_provider_error_survives_enterprise_quota_rollback(
-        "quota-rollback-failure",
-        341,
-        ProviderAdapterError::rejected(),
-        ProviderGatewayErrorKind::AdmissionUnavailable,
-        true,
-    );
 }

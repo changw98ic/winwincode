@@ -31,8 +31,7 @@ use winwincode_execution_port::generated::{
 };
 use winwincode_storage::{
     CommitReceipt, DurableOutboxEvent, NewOutboxEvent, PendingAuditEvent, ProductStateStorage,
-    PublicEventActor, PublicEventSource, ReceiptIdentity, ReceiptScopeKey, StateCommit,
-    StateMutation, StorageError, public_actor_from_receipt_key,
+    PublicEventSource, ReceiptIdentity, ReceiptScopeKey, StateCommit, StateMutation, StorageError,
 };
 
 use crate::delivery_transaction::{
@@ -44,9 +43,8 @@ use crate::session_binding_transaction::{
     execution_message_actor_key, execution_message_request_id, instant_millis, projection_event_id,
     require_id, validate_delivery_stage_runtime_invalidation,
 };
-use crate::worker_policy::VerifierPolicyAuthority;
 use crate::{
-    ArtifactEnterpriseQuotaSagaError, DeliveryChangeKind, OutboxError,
+    DeliveryChangeKind, OutboxError, WorkerExecutionLifecycleError,
     delivery_changed_event_for_scope, execution_audit_event, repository_scope_key,
     validate_delivery_changed_receipt,
 };
@@ -75,13 +73,9 @@ impl DeliveryTerminalOutcomeCommitReceipt {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DeliveryTerminalOutcomeCommitError {
     Storage(StorageError),
-    WorkerQuotaPending {
+    WorkerResourcesPending {
         commit: Box<DeliveryTerminalOutcomeCommitReceipt>,
-        source: crate::WorkerExecutionLifecycleError,
-    },
-    ArtifactQuotaPending {
-        commit: Box<DeliveryTerminalOutcomeCommitReceipt>,
-        source: ArtifactEnterpriseQuotaSagaError,
+        source: WorkerExecutionLifecycleError,
     },
     PublicationPending {
         commit: Box<DeliveryTerminalOutcomeCommitReceipt>,
@@ -93,8 +87,7 @@ impl DeliveryTerminalOutcomeCommitError {
     #[must_use]
     pub fn committed_receipt(&self) -> Option<&DeliveryTerminalOutcomeCommitReceipt> {
         match self {
-            Self::WorkerQuotaPending { commit, .. }
-            | Self::ArtifactQuotaPending { commit, .. }
+            Self::WorkerResourcesPending { commit, .. }
             | Self::PublicationPending { commit, .. } => Some(commit),
             Self::Storage(_) => None,
         }
@@ -107,13 +100,9 @@ impl fmt::Display for DeliveryTerminalOutcomeCommitError {
             Self::Storage(error) => {
                 write!(formatter, "terminal outcome transaction failed: {error}")
             }
-            Self::WorkerQuotaPending { source, .. } => write!(
+            Self::WorkerResourcesPending { source, .. } => write!(
                 formatter,
-                "terminal outcome committed, but Worker quota settlement remains pending: {source}"
-            ),
-            Self::ArtifactQuotaPending { source, .. } => write!(
-                formatter,
-                "terminal outcome committed, but Artifact quota release remains pending: {source}"
+                "terminal outcome committed, but Worker resources remain pending: {source}"
             ),
             Self::PublicationPending { source, .. } => write!(
                 formatter,
@@ -169,76 +158,6 @@ pub(crate) fn execute_at(
     )
     .or_else(|source| recover_raced_receipt(storage, &phase, message, source))?;
     Ok(DeliveryTerminalOutcomeCommitReceipt { receipt })
-}
-
-pub(crate) fn verifier_policy_authority_at(
-    storage: &dyn ProductStateStorage,
-    scope: &RepositoryScope,
-    message: &JobOutcomeMessage,
-    facts: &DeliveryTerminalOutcomeFacts,
-    server_time: &Instant,
-) -> Result<Option<VerifierPolicyAuthority>, StorageError> {
-    let phase = TerminalPhase::new(scope, message)?;
-    if let Some(receipt) = storage.load_receipt(&phase.receipt_identity, &phase.command_digest)? {
-        validate_receipt(&receipt, &phase, message, true)?;
-        validate_terminal_pending_audit_event(storage, &receipt, &phase)?;
-        return Ok(None);
-    }
-    validate_message_shape(message)?;
-    validate_trusted_lease_time(facts, server_time)?;
-    let (durable, job) = load_durable_execution_job(storage, &message.lease.job_id)?;
-    let context = TerminalContext::from_durable(scope, &durable, &job)?;
-    let current = load_current_delivery(storage, &context.delivery_id)?;
-    let session_identity = match validate_current_job_binding(&current, &job, &context) {
-        Ok(identity) => identity,
-        Err(source) => {
-            recover_raced_receipt(storage, &phase, message, source)?;
-            return Ok(None);
-        }
-    };
-    validate_message_authority(message, &job, &context, facts, &session_identity)?;
-    let PublicEventActor::User { id: user_id } =
-        public_actor_from_receipt_key(durable.receipt_identity().actor_key())?
-    else {
-        return Err(StorageError::invalid_input(
-            "Verifier Policy requires the authenticated User actor",
-        ));
-    };
-    let mut runs = current
-        .snapshot()
-        .work_run_aggregate
-        .runs
-        .iter()
-        .filter(|run| run.id == context.work_run_id);
-    let _run = runs.next().ok_or_else(|| {
-        StorageError::invalid_input("Verifier Policy WorkRun authority is missing")
-    })?;
-    if runs.next().is_some() {
-        return Err(StorageError::invalid_input(
-            "Verifier Policy WorkRun authority is ambiguous",
-        ));
-    }
-    let subject_sha256 = crate::enterprise_policy_subject_sha256(&(
-        &context.job_event,
-        &job,
-        message,
-        &session_identity,
-    ))
-    .map_err(|_| StorageError::adapter("Verifier Policy subject encoding failed"))?;
-    Ok(Some(VerifierPolicyAuthority {
-        organization_id: scope.organization_id.clone(),
-        workspace_id: scope.workspace_id.clone(),
-        project_id: scope.project_id.clone(),
-        repository_id: scope.repository_id.clone(),
-        user_id,
-        request_id: execution_message_request_id(
-            &message.message_id,
-            "enterprise-verifier-policy",
-        )?,
-        evaluated_at: message.sent_at.clone(),
-        verifier_resource: "verifier".to_owned(),
-        subject_sha256,
-    }))
 }
 
 fn validate_trusted_lease_time(

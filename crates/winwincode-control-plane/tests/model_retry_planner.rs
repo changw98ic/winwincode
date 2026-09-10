@@ -354,12 +354,6 @@ fn admission(
             idempotent_replay: replay,
         },
         route_authority,
-        enterprise_quota_amounts: winwincode_storage::EnterpriseQuotaAmounts {
-            tokens: 100,
-            provider_cost_micros: 10,
-            operations: 1,
-            ..winwincode_storage::EnterpriseQuotaAmounts::default()
-        },
     }
 }
 

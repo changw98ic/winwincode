@@ -170,7 +170,7 @@ impl RemoteWorkerPrincipal {
     }
 }
 
-/// Injected enterprise identity authority.
+/// Injected remote Worker identity authority.
 ///
 /// `authenticate` validates the connection proof once. `ensure_active` is
 /// called before every Worker message so revocation closes an existing
@@ -624,7 +624,6 @@ fn execution_port_error(error: &ExecutionPortServiceError) -> RemoteWorkerPoolEr
         }
         ExecutionPortServiceError::Storage(_)
         | ExecutionPortServiceError::ClaimRejected(_)
-        | ExecutionPortServiceError::EnterpriseQuotaRejected
         | ExecutionPortServiceError::WorkerLifecycle(_)
         | ExecutionPortServiceError::AuthorityRejected(_)
         | ExecutionPortServiceError::JobMismatch(_) => RemoteWorkerPoolErrorKind::Registry,

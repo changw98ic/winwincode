@@ -311,7 +311,7 @@ impl VaultKmsRewrapReceipt {
     }
 }
 
-/// Encrypted local loopback for the enterprise Vault/KMS contract.
+/// Encrypted local loopback for the remote Vault/KMS contract.
 ///
 /// This adapter deliberately performs no cloud or network call. A deployment
 /// supplies the customer-managed keyring out of band; only canonical encrypted

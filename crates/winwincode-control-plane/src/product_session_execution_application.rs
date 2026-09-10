@@ -70,7 +70,6 @@ const EXECUTION_TERMINAL_RECEIPT_NAMESPACE: &[u8] = b"execution-terminal-receipt
 pub enum ProductSessionExecutionApplicationError {
     ProductSession(ProductSessionServiceError),
     Storage(StorageError),
-    WorkerLifecycle(WorkerExecutionLifecycleError),
     InvalidCanonicalFrame,
 }
 
@@ -1147,21 +1146,19 @@ pub(crate) fn finish_execution_resources(
     let data_directory = storage
         .database_path()
         .parent()
-        .ok_or_else(|| storage_ingress("Control Plane data directory is invalid"))?
-        .to_path_buf();
-    let lifecycle = DurableWorkerExecutionLifecycle::open(data_directory)
+        .ok_or_else(|| storage_ingress("Control Plane data directory is invalid"))?;
+    let mut lifecycle = DurableWorkerExecutionLifecycle::open(data_directory)
         .map_err(|error| worker_lifecycle_ingress(&error))?;
-    let enterprise_terminal = match message.outcome.status {
-        ExecutionOutcomeStatus::Succeeded => lifecycle
-            .settle_terminal_outcome(message)
-            .map_err(|error| worker_lifecycle_ingress(&error))?,
+    let remote_terminal = match message.outcome.status {
+        ExecutionOutcomeStatus::Succeeded => lifecycle.settle_terminal_outcome(message),
         ExecutionOutcomeStatus::Cancelled
         | ExecutionOutcomeStatus::Failed
-        | ExecutionOutcomeStatus::InfrastructureError => lifecycle
-            .release_terminal_outcome(message)
-            .map_err(|error| worker_lifecycle_ingress(&error))?,
-    };
-    if enterprise_terminal.is_none() {
+        | ExecutionOutcomeStatus::InfrastructureError => {
+            lifecycle.release_terminal_outcome(message)
+        }
+    }
+    .map_err(|error| worker_lifecycle_ingress(&error))?;
+    if remote_terminal.is_none() {
         finish_local_admission(storage, message, execution_scope, worker_pool_id)?;
     }
     finish_worker_slot(storage, message, authority)?;
@@ -1900,23 +1897,20 @@ fn application_ingress(
         ProductSessionExecutionApplicationError::Storage(error) => {
             DurableExecutionPortError::Storage(error)
         }
-        ProductSessionExecutionApplicationError::WorkerLifecycle(_) => {
-            storage_ingress("Worker lifecycle failed")
-        }
         ProductSessionExecutionApplicationError::InvalidCanonicalFrame => {
             storage_ingress("canonical Provider frame is invalid")
         }
     }
 }
 
-fn worker_lifecycle_ingress(error: &WorkerExecutionLifecycleError) -> DurableExecutionPortError {
-    let _ = error;
-    storage_ingress("Worker lifecycle settlement failed")
-}
-
 fn worker_slot_storage(error: impl fmt::Display) -> DurableExecutionPortError {
     let _ = error;
     storage_ingress("Worker slot terminalization failed")
+}
+
+fn worker_lifecycle_ingress(error: &WorkerExecutionLifecycleError) -> DurableExecutionPortError {
+    let _ = error;
+    storage_ingress("Worker lifecycle settlement failed")
 }
 
 fn storage_ingress(message: &'static str) -> DurableExecutionPortError {

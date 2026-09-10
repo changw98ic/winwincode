@@ -45,10 +45,10 @@ use winwincode_domain::{
 };
 use winwincode_domain::{RepositoryScope, RepositoryScopeKind, UserActor, UserActorKind};
 use winwincode_publication::{
-    GitHubAdapterConfig, GitHubPublicationAdapter, PolicyPermission,
-    PublicationEnterpriseAttribution, PublicationPolicyContext, PublicationPolicyEvidence,
-    PublicationPolicyOrigin, PublicationRequester, PublicationResourceFact,
-    PublicationResourceKind, PublicationState, RepositoryPolicyScope, RepositoryPublicationPolicy,
+    GitHubAdapterConfig, GitHubPublicationAdapter, PolicyPermission, PublicationPolicyContext,
+    PublicationPolicyEvidence, PublicationPolicyOrigin, PublicationRequester,
+    PublicationResourceFact, PublicationResourceKind, PublicationState, RepositoryPolicyScope,
+    RepositoryPublicationPolicy,
 };
 use winwincode_storage::{
     ProductStateStorage, ReceiptActorKey, ReceiptIdentity, ReceiptScopeKey, SqliteStorage,
@@ -613,19 +613,10 @@ fn approved_delivery_recovers_one_partial_github_publication_and_audits_each_res
     )
     .expect("loopback GitHub adapter config");
     let mut adapter = GitHubPublicationAdapter::new(config, FixtureCredentialResolver);
-    let attribution = PublicationEnterpriseAttribution::try_new(
-        &repository_policy_scope(&scope),
-        prepared.authorization().binding().delivery_id().clone(),
-        candidate.producer_product_session_id().clone(),
-        requester.clone(),
-    )
-    .expect("sealed Publication enterprise attribution");
-
     let pending = control_plane
         .commit_publication_publish(
             &command,
             prepared.authorization(),
-            &attribution,
             &policy,
             &policy_evidence(&prepared, first_observed_at),
             &origin,

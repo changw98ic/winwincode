@@ -367,7 +367,6 @@ impl ModelAttemptFailureFact {
             ProviderGatewayErrorKind::AdapterUnavailable
             | ProviderGatewayErrorKind::IdentityUnavailable
             | ProviderGatewayErrorKind::RouteUnavailable
-            | ProviderGatewayErrorKind::PolicyUnavailable
             | ProviderGatewayErrorKind::AdmissionUnavailable
             | ProviderGatewayErrorKind::SettlementUnavailable
             | ProviderGatewayErrorKind::Storage => ModelAttemptFailureKind::ProviderUnavailable,
@@ -385,7 +384,6 @@ impl ModelAttemptFailureFact {
             | ProviderGatewayErrorKind::ExchangeConflict
             | ProviderGatewayErrorKind::ExchangeNotFound
             | ProviderGatewayErrorKind::TerminalConflict
-            | ProviderGatewayErrorKind::PolicyDenied
             | ProviderGatewayErrorKind::AdmissionDenied
             | ProviderGatewayErrorKind::CredentialLeak => ModelAttemptFailureKind::InvalidRequest,
             ProviderGatewayErrorKind::CredentialUnavailable
@@ -453,10 +451,6 @@ pub struct ModelRetryUsageRequest {
     pub attribution: ModelUsageAttribution,
     /// Finite retry/fallback policy.
     pub plan: FrozenModelRetryPlan,
-    /// Exact enterprise allowance frozen before Provider invocation.
-    pub enterprise_quota_amounts: winwincode_storage::EnterpriseQuotaAmounts,
-    /// Trusted request time frozen with the enterprise allowance.
-    pub enterprise_quota_requested_at: Instant,
 }
 
 /// Starts the primary or one previously authorized retry attempt.

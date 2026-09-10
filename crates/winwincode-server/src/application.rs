@@ -29,9 +29,9 @@ use winwincode_control_plane::{
     ChatInteractionApiService, ChatInteractionServiceError, ChatInteractionServiceErrorCode,
     CollaborationClock, CollaborationClockError, CollaborationError, CollaborationErrorKind,
     CollaborationService, ControlPlane, DeliveryApplicationError, DurableWorkerInteractionOutbound,
-    EnterpriseRbacService, ModelRequestPoolConfig, ModelRouteAvailabilityError,
-    ModelRouteAvailabilityErrorKind, ModelRouteAvailabilityService, ModelSettingsError,
-    ModelSettingsErrorKind, ModelSettingsService, ProductSessionApiClock, ProductSessionApiService,
+    ModelRequestPoolConfig, ModelRouteAvailabilityError, ModelRouteAvailabilityErrorKind,
+    ModelRouteAvailabilityService, ModelSettingsError, ModelSettingsErrorKind,
+    ModelSettingsService, ProductSessionApiClock, ProductSessionApiService,
     ProductSessionExecutionConfig, ProductSessionServiceError, ProductSessionServiceErrorCode,
     PublicationCommandError, QuickDeviceDispatchError, QuickDeviceDispatchErrorKind,
     RepositoryExecutionScheduler, RepositoryExecutionSchedulerError, ScopeWorkerHealthEventPort,
@@ -190,12 +190,8 @@ impl StandaloneControlPlaneApplication {
             .database_path()
             .parent()
             .ok_or_else(application_configuration_invalid)?;
-        let rbac = Arc::new(EnterpriseRbacService::new(Box::new(
-            SqliteStorage::open(data_directory).map_err(|_| application_configuration_invalid())?,
-        )));
         let collaboration = Arc::new(CollaborationService::with_clock(
             SqliteStorage::open(data_directory).map_err(|_| application_configuration_invalid())?,
-            rbac,
             Box::new(CollaborationClockAdapter(Arc::clone(&clock))),
         ));
         Self::compose(

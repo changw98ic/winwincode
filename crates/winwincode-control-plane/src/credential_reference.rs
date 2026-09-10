@@ -308,7 +308,7 @@ impl fmt::Display for SecretStoreError {
 
 impl std::error::Error for SecretStoreError {}
 
-/// Port implemented by local and enterprise secret stores.
+/// Port implemented by local and remote secret stores.
 ///
 /// The versioned, scope-bound resolution is the only accepted lookup key;
 /// adapters never receive an unscoped Credential reference ID.

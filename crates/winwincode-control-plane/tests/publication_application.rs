@@ -132,7 +132,6 @@ fn publish_maps_generated_projection_and_preserves_receipt_conflicts() {
         .commit_publication_publish(
             &command,
             fixture.authorization(),
-            fixture.attribution(),
             &policy,
             &evidence,
             &origin,
@@ -211,7 +210,6 @@ fn publish_maps_generated_projection_and_preserves_receipt_conflicts() {
         .commit_publication_publish(
             &command,
             fixture.authorization(),
-            fixture.attribution(),
             &policy,
             &evidence,
             &origin,
@@ -232,7 +230,6 @@ fn publish_maps_generated_projection_and_preserves_receipt_conflicts() {
         .commit_publication_publish(
             &changed,
             fixture.authorization(),
-            fixture.attribution(),
             &policy,
             &evidence,
             &origin,
@@ -648,7 +645,6 @@ fn publish(
         .commit_publication_publish(
             &publish_command(fixture, publication, request),
             fixture.authorization(),
-            fixture.attribution(),
             policy,
             &evidence(fixture, occurred_at),
             origin,

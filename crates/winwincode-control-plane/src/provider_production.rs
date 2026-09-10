@@ -32,22 +32,21 @@ use crate::product_session_execution_application::{
     project_product_session_model_batch, reconcile_product_session_model_frames,
 };
 use crate::{
-    ConfiguredModelRetryPlanAuthority, DurableEnterpriseQuotaAdmission,
-    DurableExecutionPortContext, DurableExecutionPortDelegate, DurableExecutionPortError,
-    DurableExecutionPortSupplement, DurableModelExchangeAuthority, DurableModelRetryContextSource,
-    DurableModelRetryPreOpenPlanner, DurableProviderGatewayAdmission,
-    DurableProviderRetrySettlement, HttpsSseProviderAdapter, HttpsSseProviderConfig,
-    HttpsSseProviderError, HttpsSseProviderErrorKind, LocalSecretStoreAdapter, ModelAdmissionClock,
-    ModelExecutionBatchReceipt, ModelExecutionOpenReceipt, ModelExecutionPortReceipt,
-    ModelExecutionRuntime, ModelExecutionRuntimeError, ModelPolicyAuthorityPort, ModelRequestPool,
-    ModelRequestPoolConfig, ModelRetryPlanAuthorityPort, ProviderAdapterError,
-    ProviderAdapterInvocation, ProviderAdapterOpenReceipt, ProviderAdapterPort,
-    ProviderAdmissionReservationConfig, ProviderFinishReason, ProviderGateway,
-    ProviderGatewayIdentity, ProviderGatewayIdentityError, ProviderGatewayIdentityPort,
-    ProviderGatewayOpenReceipt, ProviderGatewayTerminal, ProviderStreamControlAction,
-    ProviderStreamConverter, ProviderStreamEvent, ProviderStreamFailure, ProviderStreamFailureKind,
-    ProviderTokenUsage, ProviderToolIdentity, ProviderToolKind, ResolvedSecret,
-    SystemModelAdmissionClock,
+    ConfiguredModelRetryPlanAuthority, DurableExecutionPortContext, DurableExecutionPortDelegate,
+    DurableExecutionPortError, DurableExecutionPortSupplement, DurableModelExchangeAuthority,
+    DurableModelRetryContextSource, DurableModelRetryPreOpenPlanner,
+    DurableProviderGatewayAdmission, DurableProviderRetrySettlement, HttpsSseProviderAdapter,
+    HttpsSseProviderConfig, HttpsSseProviderError, HttpsSseProviderErrorKind,
+    LocalSecretStoreAdapter, ModelAdmissionClock, ModelExecutionBatchReceipt,
+    ModelExecutionOpenReceipt, ModelExecutionPortReceipt, ModelExecutionRuntime,
+    ModelExecutionRuntimeError, ModelPolicyAuthorityPort, ModelRequestPool, ModelRequestPoolConfig,
+    ModelRetryPlanAuthorityPort, ProviderAdapterError, ProviderAdapterInvocation,
+    ProviderAdapterOpenReceipt, ProviderAdapterPort, ProviderAdmissionReservationConfig,
+    ProviderFinishReason, ProviderGateway, ProviderGatewayIdentity, ProviderGatewayIdentityError,
+    ProviderGatewayIdentityPort, ProviderGatewayOpenReceipt, ProviderGatewayTerminal,
+    ProviderStreamControlAction, ProviderStreamConverter, ProviderStreamEvent,
+    ProviderStreamFailure, ProviderStreamFailureKind, ProviderTokenUsage, ProviderToolIdentity,
+    ProviderToolKind, ResolvedSecret, SystemModelAdmissionClock,
 };
 
 const LOOPBACK_RESPONSE: &str = "WinWinCode deterministic loopback response";
@@ -1240,7 +1239,6 @@ impl StandaloneModelExecutionApplication {
     ) -> Result<T, StandaloneModelExecutionError> {
         let mut gateway_storage = self.open_product_storage()?;
         let admission_storage = self.open_product_storage()?;
-        let enterprise_quota_storage = self.open_product_storage()?;
         let contexts = DurableModelRetryContextSource::open(&self.data_directory)
             .map_err(|_| dependency_unavailable())?;
         let settlement = DurableProviderRetrySettlement::open(&self.data_directory, &contexts)
@@ -1251,10 +1249,6 @@ impl StandaloneModelExecutionApplication {
             &*self.policy,
             self.admission,
         );
-        let mut enterprise_quota = DurableEnterpriseQuotaAdmission::new(enterprise_quota_storage);
-        let mut enterprise_policy =
-            crate::DurableProviderPolicyEnforcement::open(&self.data_directory)
-                .map_err(|_| dependency_unavailable())?;
         let mut planner =
             DurableModelRetryPreOpenPlanner::open(&self.data_directory, &*self.retry_policy)
                 .map_err(|_| dependency_unavailable())?;
@@ -1267,8 +1261,6 @@ impl StandaloneModelExecutionApplication {
         })?;
         if gateway_storage.database_path() != self.database_path
             || admission.database_path() != self.database_path
-            || enterprise_quota.database_path() != self.database_path
-            || enterprise_policy.database_path() != self.database_path
             || contexts.database_path() != self.database_path
             || planner.database_path() != self.database_path
             || exchanges.database_path() != self.database_path
@@ -1295,14 +1287,12 @@ impl StandaloneModelExecutionApplication {
                 .map_err(|_| invalid_configuration())?;
         }
         let result = {
-            let mut runtime = ModelExecutionRuntime::new_with_enterprise_controls(
+            let mut runtime = ModelExecutionRuntime::new(
                 &exchanges,
                 &mut planner,
                 &contexts,
                 &mut gateway,
                 &mut pool,
-                &mut enterprise_quota,
-                &mut enterprise_policy,
             );
             operation(&mut runtime)
         };
@@ -1312,8 +1302,6 @@ impl StandaloneModelExecutionApplication {
             .map_err(|_| shutdown_error())
             .and_then(|()| planner.close().map_err(|_| shutdown_error()))
             .and_then(|()| admission.close().map_err(|_| shutdown_error()))
-            .and_then(|()| enterprise_quota.close().map_err(|_| shutdown_error()))
-            .and_then(|()| enterprise_policy.close().map_err(|_| shutdown_error()))
             .and_then(|()| settlement.close().map_err(|_| shutdown_error()))
             .and_then(|()| contexts.close().map_err(|_| shutdown_error()))
             .and_then(|()| {

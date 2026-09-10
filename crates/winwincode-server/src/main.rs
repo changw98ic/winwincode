@@ -19,13 +19,12 @@ use winwincode_codex::{
 };
 use winwincode_control_plane::{
     CollaborationService, ControlPlane, ControlPlaneConfig, ControlPlaneInstanceRuntimeConfig,
-    DurableWorkerInteractionOutbound, EnterpriseIdentityService, EnterpriseRbacService,
-    LocalDeliveryAdapterConfig, LocalModelPolicyAuthority, LocalModelPolicyAuthorityConfig,
-    LocalPublicationAdapterConfig, ModelAdmissionLimits, ModelAdmissionPolicyLayer,
-    ModelRequestPoolConfig, ModelRoutePolicyDecision, ProductSessionExecutionApplication,
-    ProductSessionExecutionConfig, ProviderAdmissionReservationConfig,
-    StandaloneModelExecutionApplication, StandaloneModelExecutionConfig,
-    local_loopback_retry_policy,
+    DurableWorkerInteractionOutbound, LocalDeliveryAdapterConfig, LocalModelPolicyAuthority,
+    LocalModelPolicyAuthorityConfig, LocalPublicationAdapterConfig, ModelAdmissionLimits,
+    ModelAdmissionPolicyLayer, ModelRequestPoolConfig, ModelRoutePolicyDecision,
+    ProductSessionExecutionApplication, ProductSessionExecutionConfig,
+    ProviderAdmissionReservationConfig, StandaloneModelExecutionApplication,
+    StandaloneModelExecutionConfig, local_loopback_retry_policy,
 };
 use winwincode_domain::{
     CredentialReferenceId, OrganizationId, ProjectId, RepositoryId, RepositoryScope,
@@ -45,13 +44,12 @@ use winwincode_local::LocalLauncherConfig;
 use winwincode_server::{
     AuthSessionBootstrap, AuthSessionConfig, ClientExchangeApplication, ClientExchangeConfig,
     ClientExchangePort, DurableEventHub, DurableEventHubConfig, DurableEventPublisher,
-    EnterpriseRequestAuthenticator, FileRemoteWorkerAuthenticator, GeneratedContractDispatcher,
-    LocalModelRoute, LocalRuntimeSupervisor, OwnerInitializationHook,
-    ProductionRemoteWorkerExchange, RemoteWorkerExchangePort, RepositoryRuntimeScheduler,
-    RequestAuthenticator, ServerConfig, ServerExecutionPortCore, ServerTls,
-    SqliteAuthSessionManager, StandaloneApplicationClock, StandaloneControlPlaneApplication,
-    SystemStandaloneApplicationClock, UserAccountService, configure_local_model_authority,
-    start_server, start_server_with_remote_worker,
+    FileRemoteWorkerAuthenticator, GeneratedContractDispatcher, LocalModelRoute,
+    LocalRuntimeSupervisor, OwnerInitializationHook, ProductionRemoteWorkerExchange,
+    RemoteWorkerExchangePort, RepositoryRuntimeScheduler, RequestAuthenticator, ServerConfig,
+    ServerExecutionPortCore, ServerTls, SqliteAuthSessionManager, StandaloneApplicationClock,
+    StandaloneControlPlaneApplication, SystemStandaloneApplicationClock, UserAccountService,
+    configure_local_model_authority, start_server, start_server_with_remote_worker,
 };
 use winwincode_storage::{
     ProductStateStorage, SqliteStorage, WorkerOutboundQueueConfig, WorkerPoolId,
@@ -99,7 +97,6 @@ struct ProductionApplicationComposition {
     auth_sessions: Arc<SqliteAuthSessionManager>,
     owner: Option<UserAccount>,
     application: StandaloneControlPlaneApplication,
-    identities: Arc<EnterpriseIdentityService>,
 }
 
 /// Runs the startup-time local model authority configuration once the first
@@ -126,11 +123,6 @@ impl OwnerInitializationHook for DeferredModelAuthority {
         let _ = Box::new(storage).close();
         result.map_err(|error| error.to_string())
     }
-}
-
-struct ComposedApplication {
-    application: StandaloneControlPlaneApplication,
-    identities: Arc<EnterpriseIdentityService>,
 }
 
 fn load_production_startup() -> Result<ProductionStartup, Box<dyn std::error::Error>> {
@@ -307,10 +299,7 @@ fn open_production_application(
             return Err(Box::new(error));
         }
     };
-    let ComposedApplication {
-        application,
-        identities,
-    } = compose_production_application(
+    let application = compose_production_application(
         &config,
         control_plane,
         storage,
@@ -326,7 +315,6 @@ fn open_production_application(
         auth_sessions,
         owner,
         application,
-        identities,
     })
 }
 
@@ -367,7 +355,6 @@ async fn run_composed_server(
         auth_sessions,
         owner,
         application,
-        identities,
     } = composition;
     let model_execution = open_local_model_execution(&config, &model_route)?;
     let action_signing_key = configured_action_signing_key()?;
@@ -429,7 +416,6 @@ async fn run_composed_server(
             repository_scope,
             auth_sessions,
             application,
-            identities,
             worker_id,
             scheduler,
             execution_port,
@@ -442,7 +428,6 @@ async fn run_composed_server(
         model_route,
         auth_sessions,
         application,
-        identities,
         capabilities,
         action_signing_key,
         launcher_config,
@@ -459,7 +444,6 @@ struct LocalRuntimeComposition {
     model_route: LocalModelRoute,
     auth_sessions: Arc<SqliteAuthSessionManager>,
     application: StandaloneControlPlaneApplication,
-    identities: Arc<EnterpriseIdentityService>,
     capabilities: WorkerCapabilitySet,
     action_signing_key: ActionEnforcementSigningKey,
     launcher_config: LocalLauncherConfig,
@@ -477,7 +461,6 @@ async fn run_local_composition(
         model_route,
         auth_sessions,
         application,
-        identities,
         capabilities,
         action_signing_key,
         launcher_config,
@@ -500,9 +483,7 @@ async fn run_local_composition(
     let application =
         Arc::new(application.with_runtime_health(Arc::new(supervisor.health_handle())));
     let api = Arc::new(GeneratedContractDispatcher::new(application));
-    let authenticator: Arc<dyn RequestAuthenticator> = Arc::new(
-        EnterpriseRequestAuthenticator::new(Arc::clone(&auth_sessions), Arc::clone(&identities)),
-    );
+    let authenticator: Arc<dyn RequestAuthenticator> = auth_sessions.clone();
     serve_runtime(config, auth_sessions, authenticator, api, supervisor).await
 }
 
@@ -511,7 +492,6 @@ struct RemoteRuntimeComposition<Core> {
     repository_scope: RepositoryScope,
     auth_sessions: Arc<SqliteAuthSessionManager>,
     application: StandaloneControlPlaneApplication,
-    identities: Arc<EnterpriseIdentityService>,
     worker_id: WorkerId,
     scheduler: RepositoryRuntimeScheduler,
     execution_port: Core,
@@ -530,7 +510,6 @@ where
         repository_scope,
         auth_sessions,
         application,
-        identities,
         worker_id,
         scheduler,
         execution_port,
@@ -570,9 +549,7 @@ where
             .map_err(|error| error.to_string())?,
     );
     let api = Arc::new(GeneratedContractDispatcher::new(Arc::new(application)));
-    let authenticator: Arc<dyn RequestAuthenticator> = Arc::new(
-        EnterpriseRequestAuthenticator::new(Arc::clone(&auth_sessions), Arc::clone(&identities)),
-    );
+    let authenticator: Arc<dyn RequestAuthenticator> = auth_sessions.clone();
     serve_remote_runtime(
         config,
         auth_sessions,
@@ -653,7 +630,6 @@ fn open_local_model_execution(
                 cost_budget_micros: 10_000_000,
             },
         )?,
-        enterprise_ceilings: Vec::new(),
     })?;
     let retry_policy = local_loopback_retry_policy()?;
     let pool = local_model_request_pool_config();
@@ -878,17 +854,10 @@ fn compose_production_application(
     worker_outbound: DurableWorkerInteractionOutbound,
     hub: Arc<DurableEventHub>,
     execution_config: ProductSessionExecutionConfig,
-) -> Result<ComposedApplication, Box<dyn std::error::Error>> {
-    let identities = Arc::new(EnterpriseIdentityService::new(Box::new(
-        SqliteStorage::open(config.data_directory())?,
-    )));
-    let rbac = Arc::new(EnterpriseRbacService::new(Box::new(SqliteStorage::open(
+) -> Result<StandaloneControlPlaneApplication, Box<dyn std::error::Error>> {
+    let collaboration = Arc::new(CollaborationService::new(SqliteStorage::open(
         config.data_directory(),
-    )?)));
-    let collaboration = Arc::new(CollaborationService::new(
-        SqliteStorage::open(config.data_directory())?,
-        Arc::clone(&rbac),
-    ));
+    )?));
     let application = StandaloneControlPlaneApplication::new_with_collaboration(
         control_plane,
         storage,
@@ -898,10 +867,7 @@ fn compose_production_application(
         execution_config,
     )?
     .with_model_request_pool_config(local_model_request_pool_config())?;
-    Ok(ComposedApplication {
-        application,
-        identities,
-    })
+    Ok(application)
 }
 
 fn local_production_configs() -> Result<

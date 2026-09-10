@@ -16,7 +16,7 @@ use std::{
 use sha2::{Digest, Sha256};
 use winwincode_domain::{ModelExchangeId, RequestId};
 use winwincode_execution_port::generated::ModelOpenMessage;
-use winwincode_storage::{EnterpriseQuotaAmounts, ProductStateStorage, SqliteStorage};
+use winwincode_storage::{ProductStateStorage, SqliteStorage};
 
 use crate::{
     CredentialReferenceResolution, FrozenModelRouteAuthority, ModelAdmissionClock,
@@ -97,8 +97,6 @@ impl fmt::Debug for ProviderAdmissionOpenRequest<'_> {
 pub struct ProviderAdmissionOpenReceipt {
     pub route_authority: FrozenModelRouteAuthority,
     pub reservation: ModelReservationReceipt,
-    /// Immutable enterprise quota reserve copied from trusted deployment admission facts.
-    pub enterprise_quota_amounts: EnterpriseQuotaAmounts,
 }
 
 /// Stable Provider-admission bridge failure categories.
@@ -302,12 +300,6 @@ impl ProviderGatewayAdmissionPort for DurableProviderGatewayAdmission<'_, '_> {
         Ok(ProviderAdmissionOpenReceipt {
             route_authority: authority,
             reservation: receipt,
-            enterprise_quota_amounts: EnterpriseQuotaAmounts {
-                tokens: self.reservation.estimated_tokens,
-                provider_cost_micros: self.reservation.estimated_cost_micros,
-                operations: 1,
-                ..EnterpriseQuotaAmounts::default()
-            },
         })
     }
 

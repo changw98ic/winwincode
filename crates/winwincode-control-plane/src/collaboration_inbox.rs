@@ -18,8 +18,8 @@ use sha2::{Digest as _, Sha256};
 use winwincode_api::generated::{Actor, Scope};
 use winwincode_domain::RepositoryScope;
 use winwincode_domain::{
-    ApprovalId, AttentionItemId, DeliveryId, EnterpriseTeamId, OpaqueCursor, ProductSessionId,
-    RequestId, Sha256Digest, UserId,
+    ApprovalId, AttentionItemId, DeliveryId, OpaqueCursor, ProductSessionId, RequestId,
+    Sha256Digest, UserId,
 };
 use winwincode_storage::{
     NewOutboxEvent, ProductStateStorage, ReceiptIdentity, StateCommit, StateRevisionGuard,
@@ -233,19 +233,17 @@ pub trait CollaborationInboxSourcePort: Send {
     ) -> Result<CollaborationInboxSourceSnapshot, CollaborationInboxSourceError>;
 }
 
-/// Personal or Team view requested by the authenticated actor.
+/// Personal view requested by the authenticated actor.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case", tag = "kind", content = "id")]
 pub enum CollaborationInboxAudience {
     Personal(UserId),
-    Team(EnterpriseTeamId),
 }
 
-/// One assignment plus the Teams for which current RBAC grants visibility.
+/// One assignment visible to the current user.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CollaborationResponsibilityEntitlement {
     pub assignment: ResponsibilityAssignment,
-    pub team_ids: Vec<EnterpriseTeamId>,
 }
 
 /// Current sealed Identity/RBAC/Assignment authority for one Inbox operation.
@@ -253,7 +251,6 @@ pub struct CollaborationResponsibilityEntitlement {
 pub struct CollaborationInboxAuthoritySnapshot {
     pub scope: RepositoryScope,
     pub viewer_user_id: UserId,
-    pub visible_team_ids: Vec<EnterpriseTeamId>,
     pub assignments: Vec<CollaborationResponsibilityEntitlement>,
     pub authority_revision: u64,
     pub authority_sha256: Sha256Digest,
@@ -1042,10 +1039,6 @@ fn eligible_assignments<'authority>(
                         &assignment.principal_user_id == user_id
                             && user_id == &authority.viewer_user_id
                     }
-                    CollaborationInboxAudience::Team(team_id) => {
-                        authority.visible_team_ids.contains(team_id)
-                            && entitlement.team_ids.contains(team_id)
-                    }
                 }
         })
         .collect()
@@ -1191,7 +1184,6 @@ fn validate_authority(
         || &authority.viewer_user_id != viewer
         || !scopes.contains(&expected_scope)
         || !matches!(audience, CollaborationInboxAudience::Personal(user) if user == viewer)
-            && !matches!(audience, CollaborationInboxAudience::Team(team) if authority.visible_team_ids.contains(team))
     {
         return Err(unauthorized());
     }

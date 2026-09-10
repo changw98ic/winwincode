@@ -41,11 +41,11 @@ use winwincode_control_plane::{
     StructuredOutputSupport, local_loopback_retry_policy,
 };
 use winwincode_domain::{
-    CodexThreadId, CredentialReferenceId, DeliveryId, EnterprisePolicyId, ExecutionAckSequence,
-    ExecutionJobId, ExecutionMessageId, ExecutionSequence, FencingToken, Instant, LeaseId,
-    ModelExchangeId, OrganizationId, ProductSessionId, ProjectId, RepositoryId, RequestId,
-    Revision, SchemaVersion, SessionIdentity, Sha256Digest, UserId, WorkerId, WorkerInstanceId,
-    WorkerSessionId, WorkspaceId,
+    CodexThreadId, CredentialReferenceId, DeliveryId, ExecutionAckSequence, ExecutionJobId,
+    ExecutionMessageId, ExecutionSequence, FencingToken, Instant, LeaseId, ModelExchangeId,
+    OrganizationId, ProductSessionId, ProjectId, RepositoryId, RequestId, Revision, SchemaVersion,
+    SessionIdentity, Sha256Digest, UserId, WorkerId, WorkerInstanceId, WorkerSessionId,
+    WorkspaceId,
 };
 use winwincode_domain::{RepositoryScope, RepositoryScopeKind, UserActor, UserActorKind};
 use winwincode_execution_port::{
@@ -58,15 +58,12 @@ use winwincode_execution_port::{
     transport::{ExecutionPortCore, FrameDirection, RemoteTransportAdapter, TypedFrame},
 };
 use winwincode_storage::{
-    EXECUTION_PROTOCOL_VERSION, EnterprisePolicyActor, EnterprisePolicyChildOverrideMode,
-    EnterprisePolicyDefinition, EnterprisePolicyEffect, EnterprisePolicyInheritanceMode,
-    EnterprisePolicyKind, EnterprisePolicyMode, EnterprisePolicyScope, EnterprisePolicyState,
-    EnterprisePolicyVersionSource, EnterprisePolicyWrite, ExecutionAdmissionBoundary,
-    ExecutionAdmissionLimits, ExecutionAdmissionPolicy, ExecutionLeaseClaim, ExecutionQueueScope,
-    ExecutionRepositoryAccess, ExecutionReservationRequest, ExecutionReservationStart,
-    NewOutboxEvent, ProductStateStorage, StateCommit, WorkerAuthenticationIdentity,
-    WorkerHeartbeatRequest, WorkerPlatform, WorkerPoolId, WorkerRegistrationRequest,
-    WorkerSlotAuthority, WorkerSlotOpenRequest, WorkerSlotResourceLimits, WorkerSlotResources,
+    EXECUTION_PROTOCOL_VERSION, ExecutionAdmissionBoundary, ExecutionAdmissionLimits,
+    ExecutionAdmissionPolicy, ExecutionLeaseClaim, ExecutionQueueScope, ExecutionRepositoryAccess,
+    ExecutionReservationRequest, ExecutionReservationStart, NewOutboxEvent, ProductStateStorage,
+    StateCommit, WorkerAuthenticationIdentity, WorkerHeartbeatRequest, WorkerPlatform,
+    WorkerPoolId, WorkerRegistrationRequest, WorkerSlotAuthority, WorkerSlotOpenRequest,
+    WorkerSlotResourceLimits, WorkerSlotResources,
 };
 use winwincode_storage::{LeaseWriteStatus as StorageLeaseWriteStatus, SqliteStorage};
 
@@ -251,48 +248,6 @@ fn at(value: &str) -> Instant {
 
 fn digest(byte: char) -> Sha256Digest {
     Sha256Digest(format!("sha256:{}", byte.to_string().repeat(64)))
-}
-
-fn policy_digest(value: &impl serde::Serialize) -> Sha256Digest {
-    let canonical = serde_json::to_value(value).expect("Policy value fixture");
-    Sha256Digest(format!(
-        "sha256:{:x}",
-        Sha256::digest(serde_json::to_vec(&canonical).expect("serialize Policy fixture"))
-    ))
-}
-
-fn deny_provider_policy(storage: &mut SqliteStorage) {
-    let definition = EnterprisePolicyDefinition {
-        default_effect: EnterprisePolicyEffect::Deny,
-        child_override_mode: EnterprisePolicyChildOverrideMode::TightenOnly,
-        rules: Vec::new(),
-    };
-    storage
-        .enterprise_policy_ledger()
-        .expect("open enterprise Policy ledger")
-        .write(&EnterprisePolicyWrite {
-            policy_id: EnterprisePolicyId(id("pol", 90)),
-            policy_kind: EnterprisePolicyKind::Provider,
-            scope: EnterprisePolicyScope::Organization {
-                organization_id: OrganizationId(id("org", 1)),
-            },
-            mode: EnterprisePolicyMode::Enforce,
-            state: EnterprisePolicyState::Active,
-            definition_sha256: policy_digest(&definition),
-            definition,
-            effective_at: at("2029-12-31T00:00:00.000Z"),
-            inheritance_mode: EnterprisePolicyInheritanceMode::Tighten,
-            base_version: None,
-            expected_revision: 0,
-            source: EnterprisePolicyVersionSource {
-                actor: EnterprisePolicyActor::User {
-                    id: UserId(id("usr", 1)),
-                },
-                request_id: RequestId(id("req", 90)),
-            },
-            updated_at: at("2029-12-31T00:00:00.000Z"),
-        })
-        .expect("write Provider deny Policy");
 }
 
 fn actor() -> Actor {
@@ -717,11 +672,8 @@ fn policy() -> LocalModelPolicyAuthority {
         },
     )
     .expect("model admission policy");
-    LocalModelPolicyAuthority::try_new(LocalModelPolicyAuthorityConfig {
-        base,
-        enterprise_ceilings: Vec::new(),
-    })
-    .expect("local model policy authority")
+    LocalModelPolicyAuthority::try_new(LocalModelPolicyAuthorityConfig { base })
+        .expect("local model policy authority")
 }
 
 fn pool_config() -> ModelRequestPoolConfig {
@@ -1108,66 +1060,6 @@ fn standalone_local_remote_restart_and_terminal_ack_share_one_durable_runtime() 
 
     assert_files_omit(&root.data(), SECRET_FIXTURE);
     assert_files_omit(&root.data(), b"provider-production-private-input");
-}
-
-#[test]
-fn enterprise_provider_policy_denies_before_secret_resolution_and_replays_one_audit() {
-    let root = TestDirectory::new("enterprise-policy-denied");
-    let message = setup(&root);
-    let resolution = {
-        let mut storage = SqliteStorage::open(root.data()).expect("open Policy setup storage");
-        deny_provider_policy(&mut storage);
-        CredentialReferenceService::new(&mut storage)
-            .resolve(
-                &Scope::OrganizationScope(organization_scope()),
-                &CredentialReferenceId(id("crd", 1)),
-            )
-            .expect("resolve Credential for deletion")
-    };
-    LocalSecretStoreAdapter::open(root.secrets())
-        .expect("open SecretStore")
-        .delete(&resolution)
-        .expect("delete secret before guarded open");
-    let frame = open_frame(&message);
-    let mut app = application(&root);
-    app.accept_local(&frame)
-        .expect_err("enterprise Provider Policy must deny");
-    drop(app);
-
-    let mut storage = SqliteStorage::open(root.data()).expect("reopen denied runtime");
-    let audit = storage
-        .enterprise_policy_evaluation_ledger()
-        .expect("open Policy audit")
-        .scan_audit(None, 10)
-        .expect("scan Policy audit");
-    assert_eq!(
-        audit.entries.len(),
-        2,
-        "Model allow and Provider deny are audited"
-    );
-    assert_eq!(
-        audit.entries[1].decision.outcome,
-        winwincode_storage::EnterprisePolicyEvaluationOutcome::Deny
-    );
-    drop(storage);
-
-    let mut restarted = application(&root);
-    restarted
-        .accept_local(&frame)
-        .expect_err("exact denied replay stays denied without a secret");
-    drop(restarted);
-    let mut storage = SqliteStorage::open(root.data()).expect("reopen replayed runtime");
-    assert_eq!(
-        storage
-            .enterprise_policy_evaluation_ledger()
-            .expect("open replay audit")
-            .scan_audit(None, 10)
-            .expect("scan replay audit")
-            .entries
-            .len(),
-        2,
-        "exact replay does not duplicate Policy audit"
-    );
 }
 
 #[test]

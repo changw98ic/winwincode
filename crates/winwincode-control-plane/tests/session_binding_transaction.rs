@@ -62,8 +62,7 @@ use winwincode_execution_port::generated::{
 use winwincode_storage::{
     AggregateJournalKey, AggregateJournalPublication, AggregateJournalRecord, ArtifactErrorKind,
     CandidateGitPinReceipt, CandidateGitReleaseAuthority, CandidateGitTerminalOutcome,
-    CandidateSourceManifest, EnterpriseQuotaBoundary, EnterpriseQuotaLimits, EnterpriseQuotaPolicy,
-    EnterpriseQuotaReservationState, ExecutionQueueScope, NewOutboxEvent, ProductStateStorage,
+    CandidateSourceManifest, ExecutionQueueScope, NewOutboxEvent, ProductStateStorage,
     ReceiptActorKey, ReceiptIdentity, ReceiptScopeKey, RepositorySchedulerClaimRequest,
     RepositorySchedulerScope, SqliteStorage, StateCommit, WorkerSlotAuthority,
     WorkerSlotOpenRequest, WorkerSlotResourceLimits, WorkerSlotResources,
@@ -2229,70 +2228,6 @@ fn replay_rejects_changed_receipt_digest_or_event_membership() {
 }
 
 #[test]
-fn production_artifact_quota_denies_before_catalog_or_object_write() {
-    let seed = 1_400;
-    let (root, mut control_plane, _pending, authority, binding_message) =
-        running_fixture(seed, "artifact-quota-denial");
-    control_plane
-        .commit_delivery_session_binding(&binding_message, &authority, &binding_message.sent_at)
-        .expect("complete SessionBinding");
-    let Scope::RepositoryScope(scope) = delivery_advance_command(seed).scope else {
-        panic!("fixture must use repository scope");
-    };
-    let mut quota_storage = SqliteStorage::open(&root).expect("quota configuration storage");
-    quota_storage
-        .enterprise_quota_ledger()
-        .expect("enterprise quota ledger")
-        .put_policy(&EnterpriseQuotaPolicy {
-            boundary: EnterpriseQuotaBoundary::Organization {
-                organization_id: scope.organization_id.clone(),
-            },
-            revision: 1,
-            limits: EnterpriseQuotaLimits {
-                storage_bytes: Some(4),
-                ..EnterpriseQuotaLimits::default()
-            },
-        })
-        .expect("storage quota policy");
-    Box::new(quota_storage)
-        .close()
-        .expect("quota configuration close");
-
-    let open = artifact_open_message(seed, &binding_message);
-    assert!(matches!(
-        control_plane.accept_artifact_open(&scope, &open, &authority),
-        Err(ArtifactMessageError::EnterpriseQuotaDenied)
-    ));
-    control_plane.shutdown().expect("shutdown");
-
-    let catalog =
-        rusqlite::Connection::open(root.join("artifact-catalog/artifact-catalog.sqlite3"))
-            .expect("Artifact catalog inspection");
-    let stored: i64 = catalog
-        .query_row(
-            "SELECT COUNT(*) FROM artifacts WHERE artifact_id = ?1",
-            [&open.artifact.artifact_id.0],
-            |row| row.get(0),
-        )
-        .expect("Artifact catalog count");
-    assert_eq!(stored, 0);
-    catalog.close().expect("Artifact catalog close");
-    let mut quota_storage = SqliteStorage::open(&root).expect("quota inspection storage");
-    assert!(
-        quota_storage
-            .enterprise_quota_ledger()
-            .expect("enterprise quota ledger")
-            .load_reservation(&open.request_id)
-            .expect("quota reservation lookup")
-            .is_none()
-    );
-    Box::new(quota_storage)
-        .close()
-        .expect("quota inspection close");
-    fs::remove_dir_all(root).expect("database directory release");
-}
-
-#[test]
 #[allow(clippy::too_many_lines)]
 fn generated_artifact_messages_use_the_exact_durable_job_and_binding_authority() {
     let seed = 1_401;
@@ -2468,19 +2403,6 @@ fn generated_artifact_messages_use_the_exact_durable_job_and_binding_authority()
         .expect("exact artifact.chunk replay");
     assert_eq!(duplicate_chunk.status, LeaseWriteStatus::Duplicate);
     assert_eq!(duplicate_chunk.ack_sequence.0, 1);
-    let mut quota_storage = SqliteStorage::open(&root).expect("quota inspection storage");
-    let quota_record = quota_storage
-        .enterprise_quota_ledger()
-        .expect("enterprise quota ledger")
-        .load_reservation(&open.request_id)
-        .expect("Artifact quota reservation lookup")
-        .expect("Artifact quota reservation");
-    assert_eq!(quota_record.state, EnterpriseQuotaReservationState::Settled);
-    assert_eq!(quota_record.revision, 2);
-    Box::new(quota_storage)
-        .close()
-        .expect("quota inspection close");
-
     let mut changed_chunk_transport = chunk.clone();
     changed_chunk_transport.payload.content_type = "application/json".into();
     changed_chunk_transport.sent_at = Instant("2027-01-15T08:00:04.000Z".into());

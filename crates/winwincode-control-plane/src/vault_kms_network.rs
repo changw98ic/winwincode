@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Verified HTTPS transport for the enterprise Vault/KMS `SecretStore`.
+//! Verified HTTPS transport for remote Vault/KMS `SecretStore` implementations.
 //!
 //! The adapter resolves a short-lived workload credential for each request,
 //! sends one canonical scope-bound operation over pinned TLS, retries with the

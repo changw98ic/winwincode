@@ -4,9 +4,9 @@
 //!
 //! Policy lookup is deliberately keyed only by organization and the exact
 //! already-resolved Provider route. User and session preferences cannot enter
-//! this boundary, so they cannot widen the base policy or enterprise ceiling.
+//! this boundary, so they cannot widen the configured policy.
 
-use std::{collections::BTreeMap, fmt};
+use std::fmt;
 
 use winwincode_domain::OrganizationId;
 
@@ -90,9 +90,9 @@ impl ModelPolicyRouteKey {
     }
 }
 
-/// One atomic base-policy plus optional enterprise-ceiling authority result.
-/// Construction freezes the two layers immediately, retaining their revision,
-/// decision, and shared budget period as auditable sources.
+/// One atomic Community policy authority result.
+/// Construction freezes the layer immediately, retaining its revision and
+/// decision as auditable sources.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ModelPolicyAuthoritySnapshot {
     key: ModelPolicyRouteKey,
@@ -108,9 +108,8 @@ impl ModelPolicyAuthoritySnapshot {
     pub fn freeze(
         key: ModelPolicyRouteKey,
         base: ModelAdmissionPolicyLayer,
-        enterprise: Option<ModelAdmissionPolicyLayer>,
     ) -> Result<Self, ModelPolicyResolutionError> {
-        let policy = FrozenModelAdmissionPolicy::freeze(base, enterprise)
+        let policy = FrozenModelAdmissionPolicy::freeze(base)
             .map_err(|error| map_admission_error(&error))?;
         Ok(Self { key, policy })
     }
@@ -126,7 +125,7 @@ impl ModelPolicyAuthoritySnapshot {
     }
 }
 
-/// Stable failure returned by the external base/enterprise policy authority.
+/// Stable failure returned by the external policy authority.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ModelPolicyAuthorityError;
 
@@ -145,8 +144,8 @@ impl fmt::Display for ModelPolicyAuthorityError {
 
 impl std::error::Error for ModelPolicyAuthorityError {}
 
-/// External organization policy authority. One method returns base and
-/// enterprise facts atomically; there is no personal or session policy input.
+/// External organization policy authority. There is no personal or session
+/// policy input.
 pub trait ModelPolicyAuthorityPort: Send + Sync {
     /// Resolves the exact organization/route/version key.
     ///
@@ -159,37 +158,10 @@ pub trait ModelPolicyAuthorityPort: Send + Sync {
     ) -> Result<ModelPolicyAuthoritySnapshot, ModelPolicyAuthorityError>;
 }
 
-/// One immutable enterprise ceiling in the local production policy config.
-#[derive(Clone, Debug)]
-pub struct EnterpriseModelPolicyCeiling {
-    organization_id: OrganizationId,
-    policy: ModelAdmissionPolicyLayer,
-}
-
-impl EnterpriseModelPolicyCeiling {
-    /// Binds a validated enterprise layer to one organization.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a malformed organization identity.
-    pub fn try_new(
-        organization_id: OrganizationId,
-        policy: ModelAdmissionPolicyLayer,
-    ) -> Result<Self, ModelPolicyResolutionError> {
-        validate_organization_id(&organization_id)?;
-        Ok(Self {
-            organization_id,
-            policy,
-        })
-    }
-}
-
-/// Immutable local production configuration. It contains one mandatory base
-/// policy and at most one stricter enterprise ceiling per organization.
+/// Immutable local production configuration.
 #[derive(Clone, Debug)]
 pub struct LocalModelPolicyAuthorityConfig {
     pub base: ModelAdmissionPolicyLayer,
-    pub enterprise_ceilings: Vec<EnterpriseModelPolicyCeiling>,
 }
 
 /// Local production adapter for deployments whose audited policy snapshots
@@ -197,12 +169,10 @@ pub struct LocalModelPolicyAuthorityConfig {
 /// ledger and never accepts user or session overrides.
 pub struct LocalModelPolicyAuthority {
     base: ModelAdmissionPolicyLayer,
-    enterprise_ceilings: BTreeMap<String, ModelAdmissionPolicyLayer>,
 }
 
 impl LocalModelPolicyAuthority {
-    /// Validates and freezes every configured base/enterprise combination at
-    /// startup so a malformed budget period cannot reach Provider admission.
+    /// Validates the configured policy at startup.
     ///
     /// # Errors
     ///
@@ -210,22 +180,9 @@ impl LocalModelPolicyAuthority {
     pub fn try_new(
         config: LocalModelPolicyAuthorityConfig,
     ) -> Result<Self, ModelPolicyResolutionError> {
-        let mut enterprise_ceilings = BTreeMap::new();
-        for ceiling in config.enterprise_ceilings {
-            validate_organization_id(&ceiling.organization_id)?;
-            FrozenModelAdmissionPolicy::freeze(config.base.clone(), Some(ceiling.policy.clone()))
-                .map_err(|error| map_admission_error(&error))?;
-            if enterprise_ceilings
-                .insert(ceiling.organization_id.0, ceiling.policy)
-                .is_some()
-            {
-                return Err(ModelPolicyResolutionError::invalid());
-            }
-        }
-        Ok(Self {
-            base: config.base,
-            enterprise_ceilings,
-        })
+        FrozenModelAdmissionPolicy::freeze(config.base.clone())
+            .map_err(|error| map_admission_error(&error))?;
+        Ok(Self { base: config.base })
     }
 }
 
@@ -234,14 +191,8 @@ impl ModelPolicyAuthorityPort for LocalModelPolicyAuthority {
         &self,
         key: &ModelPolicyRouteKey,
     ) -> Result<ModelPolicyAuthoritySnapshot, ModelPolicyAuthorityError> {
-        ModelPolicyAuthoritySnapshot::freeze(
-            key.clone(),
-            self.base.clone(),
-            self.enterprise_ceilings
-                .get(&key.organization_id.0)
-                .cloned(),
-        )
-        .map_err(|_| ModelPolicyAuthorityError::unavailable())
+        ModelPolicyAuthoritySnapshot::freeze(key.clone(), self.base.clone())
+            .map_err(|_| ModelPolicyAuthorityError::unavailable())
     }
 }
 
@@ -250,10 +201,6 @@ impl fmt::Debug for LocalModelPolicyAuthority {
         formatter
             .debug_struct("LocalModelPolicyAuthority")
             .field("base", &"<validated-policy-layer>")
-            .field(
-                "enterprise_organization_count",
-                &self.enterprise_ceilings.len(),
-            )
             .finish()
     }
 }
@@ -370,18 +317,4 @@ impl fmt::Debug for ProductionModelPolicySource<'_> {
 
 fn map_admission_error(_error: &ModelAdmissionError) -> ModelPolicyResolutionError {
     ModelPolicyResolutionError::invalid()
-}
-
-fn validate_organization_id(
-    organization_id: &OrganizationId,
-) -> Result<(), ModelPolicyResolutionError> {
-    if organization_id.0.len() < 5
-        || organization_id.0.len() > 200
-        || !organization_id.0.starts_with("org_")
-        || organization_id.0.chars().any(char::is_control)
-    {
-        Err(ModelPolicyResolutionError::invalid())
-    } else {
-        Ok(())
-    }
 }
