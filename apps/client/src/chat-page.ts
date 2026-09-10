@@ -445,8 +445,8 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
   const decisionCard: ContextualDecisionCard = mountContextualDecisionCard({
     root: document.createElement('div'),
     id: 'wwc-chat-decisions',
-    title: 'Decisions in this Chat',
-    description: 'Answer this Session input or approve this tool call without leaving Chat.',
+    title: '此对话中的决策',
+    description: '不离开对话即可答复会话输入或批准工具调用。',
     readOnly,
     actions: {
       provideInput(item, value) {

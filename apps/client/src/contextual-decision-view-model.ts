@@ -328,7 +328,7 @@ export function contextualDecisionCapability(
     || item.urgency === 'expired'
     || item.urgency === 'binding-invalid'
   const stateLabel = item.urgency === 'blocking'
-    ? 'Blocking · needs a decision now'
+    ? '阻塞 · 需要立即决策'
     : item.urgency === 'pending'
       ? 'Needs a decision'
       : item.urgency === 'expired'
@@ -339,7 +339,7 @@ export function contextualDecisionCapability(
 
 /** The kind label of one decision row; never derived from producer text. */
 export function contextualDecisionKindLabel(kind: ContextualDecisionKind): string {
-  if (kind === 'input') return 'Input'
-  if (kind === 'approval') return 'Tool approval'
+  if (kind === 'input') return '输入请求'
+  if (kind === 'approval') return '工具审批'
   return 'Business Attention'
 }

@@ -44,11 +44,11 @@ const PRESENTATION_SPEC: MyWorkPresentation = {
   startChatLabel: '发起对话任务',
   startDeliveryLabel: '规划 StrongFlow 交付',
   clientsHeading: 'Clients',
-  clientsDescription: 'Connection and occupancy status of your coding devices.',
-  clientsUnavailable: 'The Clients area is unreachable right now. The devices shown keep their last known status.',
+  clientsDescription: '编码设备的连接与占用状态。',
+  clientsUnavailable: '执行设备区暂时不可达。以下设备保持最后已知状态。',
   clientsEmpty: 'No Client is connected yet. Add your first device in the Clients area below.',
   clientsHint:
-    'Connect, occupy, and manage devices in the Clients area; the Repositories area lists the repositories each device shares.',
+    '在执行设备区连接、占用和管理设备；仓库区列出各设备共享的仓库。',
   clientsCountLabel: count => (count === 1 ? '1 device' : `${String(count)} devices`),
   deviceDetailLabel: (device, heartbeat) => [
     `Capacity ${String(device.capacityUsed)} / ${String(device.capacityTotal)}`,

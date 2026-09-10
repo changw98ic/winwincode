@@ -333,8 +333,8 @@ export function mountContextualDecisionCard(
       updateDecisionContext(parts.context, [
         contextualDecisionKindLabel(item.kind),
         capability.stateLabel,
-        item.stageRunId === null ? 'ProductSession-bound' : 'ProductSession and StageRun-bound',
-        item.deliveryId === null ? 'No Delivery binding' : 'Delivery-bound',
+        item.stageRunId === null ? '绑定 ProductSession' : '绑定 ProductSession 与 StageRun',
+        item.deliveryId === null ? '未绑定交付' : '已绑定交付',
         item.expiresAt === null ? 'No expiry deadline' : `Expires ${item.expiresAt}`,
       ])
       const inline = decidesInline(item, options.actions)

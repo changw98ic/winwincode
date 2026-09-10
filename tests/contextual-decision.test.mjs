@@ -282,8 +282,8 @@ test('one row per decision carries the kind label and the bound producer text', 
     'Run the approved test command.',
   )
   const context = findByClass(items[0], 'wwc-contextual-decision-context')
-  assert.match(context.textContent, /Tool approval/u)
-  assert.match(context.textContent, /ProductSession and StageRun-bound/u)
+  assert.match(context.textContent, /工具审批/u)
+  assert.match(context.textContent, /绑定 ProductSession 与 StageRun/u)
   assert.match(context.textContent, /Expires 2026-09-04T12:10:00\.000Z/u)
   assert.equal(items[1].dataset.kind, 'input')
 })

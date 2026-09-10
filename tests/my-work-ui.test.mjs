@@ -703,7 +703,7 @@ test('device rows keep node identity across refreshes and survive an unavailable
   assert.equal(byClass(zone, 'wwc-my-work-clients-unavailable').hidden, false)
   assert.match(
     byClass(zone, 'wwc-my-work-clients-unavailable').textContent,
-    /keep their last known status/u,
+    /保持最后已知状态/u,
   )
   model.close()
 })
@@ -737,8 +737,8 @@ test('the page close clears the root once and the shared Clients model survives'
 test('the presentation copy stays fixed and names the Clients and Repositories hierarchy', () => {
   const presentation = myWorkPresentation()
   assert.equal(Object.isFrozen(presentation), true)
-  assert.match(presentation.clientsHint, /Clients area/u)
-  assert.match(presentation.clientsHint, /Repositories area/u)
+  assert.match(presentation.clientsHint, /执行设备区/u)
+  assert.match(presentation.clientsHint, /仓库区/u)
   assert.match(presentation.startChatLabel, /对话/u)
   assert.match(presentation.startDeliveryLabel, /StrongFlow/u)
 })
