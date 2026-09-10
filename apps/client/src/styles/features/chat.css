@@ -382,7 +382,6 @@
 
 .wwc-chat-composer-input {
   width: 100%;
-  border: var(--wwc-space-0);
   background: transparent;
   resize: vertical;
 }

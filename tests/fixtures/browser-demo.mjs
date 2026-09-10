@@ -155,48 +155,47 @@ function attentionItem(index, title) {
   }
 }
 
-function chatSession() {
-  return {
-    id: productSessionId,
-    projectId: scope.projectId,
-    repositoryId: scope.repositoryId,
-    revision: 3,
-    state: 'idle',
-    title: '登录问题讨论',
-    updatedAt: '2026-09-02T00:30:00.000Z',
-  }
+let activeDemoSession = {
+  id: productSessionId,
+  projectId: scope.projectId,
+  repositoryId: scope.repositoryId,
+  revision: 3,
+  state: 'idle',
+  title: '登录问题讨论',
+  updatedAt: '2026-09-02T00:30:00.000Z',
 }
 
-function chatMessages() {
-  return [{
-    id: canonicalId('msg', 1),
-    productSessionId,
-    role: 'user',
-    content: '修复登录成功后无法回跳的问题，按强流程推进。',
-    sequence: 1,
-    state: 'completed',
-    createdAt: '2026-09-02T00:28:00.000Z',
-    updatedAt: '2026-09-02T00:28:00.000Z',
-  }, {
-    id: canonicalId('msg', 2),
-    productSessionId,
-    role: 'assistant',
-    content: '已委托 #126「修复登录回跳」，方案正在等待审核。',
-    sequence: 2,
-    state: 'completed',
-    createdAt: '2026-09-02T00:29:00.000Z',
-    updatedAt: '2026-09-02T00:29:00.000Z',
-  }, {
-    id: canonicalId('msg', 3),
-    productSessionId,
-    role: 'user',
-    content: '我们再讨论一下导出功能的交互。',
-    sequence: 3,
-    state: 'completed',
-    createdAt: '2026-09-02T00:30:00.000Z',
-    updatedAt: '2026-09-02T00:30:00.000Z',
-  }]
+function chatSession() {
+  return activeDemoSession
 }
+
+let demoMessages = []
+
+function chatMessages() {
+  return demoMessages
+}
+
+function appendDemoMessage(role, content) {
+  demoMessages = demoMessages.concat({
+    id: canonicalId('msg', demoMessages.length + 1),
+    productSessionId: activeDemoSession.id,
+    role,
+    content,
+    sequence: demoMessages.length + 1,
+    state: 'completed',
+    createdAt: FIXED_NOW,
+    updatedAt: FIXED_NOW,
+  })
+}
+
+function seedDemoMessages() {
+  demoMessages = []
+  appendDemoMessage('user', '修复登录成功后无法回跳的问题，按强流程推进。')
+  appendDemoMessage('assistant', '已委托 #126「修复登录回跳」，方案正在等待审核。')
+  appendDemoMessage('user', '我们再讨论一下导出功能的交互。')
+}
+seedDemoMessages()
+
 
 function worker() {
   return {
@@ -257,7 +256,7 @@ function routeAvailability() {
 function chatRuntime() {
   return {
     kind: 'runtime_projection',
-    productSessionId,
+    productSessionId: activeDemoSession.id,
     deliveryId: null,
     stageRunId: null,
     readCursor: null,
@@ -265,7 +264,7 @@ function chatRuntime() {
       eventId: null,
       sequence: 0,
       scope,
-      stream: { kind: 'product-session', productSessionId },
+      stream: { kind: 'product-session', productSessionId: activeDemoSession.id },
     },
     lastProjectionSequence: 0,
     revision: 1,
@@ -393,7 +392,48 @@ const controlPlane = {
     }
   },
   async logout() {},
-  async command() { throw new Error('unexpected command') },
+  async command(request) {
+    if (request.command === 'session.create') {
+      activeDemoSession = {
+        id: request.payload.productSessionId,
+        projectId: scope.projectId,
+        repositoryId: scope.repositoryId,
+        revision: 1,
+        state: 'idle',
+        title: request.payload.title,
+        updatedAt: FIXED_NOW,
+      }
+      demoMessages = []
+      return {
+        schemaVersion,
+        requestId: request.requestId,
+        command: 'session.create',
+        outcome: 'completed',
+        previousRevision: 0,
+        currentRevision: 1,
+        result: activeDemoSession,
+      }
+    }
+    if (request.command === 'chat.submit') {
+      appendDemoMessage('user', request.payload.message)
+      activeDemoSession = {
+        ...activeDemoSession,
+        revision: activeDemoSession.revision + 1,
+        state: 'running',
+        updatedAt: FIXED_NOW,
+      }
+      return {
+        schemaVersion,
+        requestId: request.requestId,
+        command: 'chat.submit',
+        outcome: 'completed',
+        previousRevision: activeDemoSession.revision - 1,
+        currentRevision: activeDemoSession.revision,
+        result: activeDemoSession,
+      }
+    }
+    throw new Error(`unexpected command: ${String(request.command)}`)
+  },
   async query(request) {
     // serve() already applies the response envelope; wrapping again would hide
     // `result.items` behind a second envelope and fail every model read.

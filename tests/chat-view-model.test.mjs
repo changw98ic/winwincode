@@ -729,9 +729,9 @@ test('an empty Chat snapshot loads route availability and creates the first boun
   assert.equal(model.state.session, null)
   assert.equal(model.state.modelRouteAvailability.items[0].status, 'enabled')
   assert.deepEqual(model.state.selectedModelRoute, modelRoute)
+  // 设计稿 03a:空状态只加载模型路由,不再探测 session.list 自动续接。
   assert.deepEqual(client.calls.map(call => call.query).sort(), [
     'model.route.availability.list',
-    'session.list',
   ])
   assert.equal(client.subscription, null)
   assert.deepEqual(

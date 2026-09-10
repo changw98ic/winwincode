@@ -218,8 +218,7 @@ export function chatPagePresentation(state: ChatViewModelState): ChatPagePresent
     messageListBusy: state.status === 'loading'
       || state.status === 'refreshing'
       || state.realtime === 'reloading',
-    composerDisabled: state.session === null
-      || mutationBusy
+    composerDisabled: mutationBusy
       || state.status === 'authentication-required'
       || state.status === 'authorization-denied'
       || state.status === 'closed',
@@ -1004,7 +1003,20 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
     if (readOnly) return
     const draft = composer.value.trim()
     if (draft.length === 0) return
-    void options.model.submitMessage(draft).then(() => {
+    // 设计稿 03a:新对话空状态下,首条消息创建会话(标题取首行)后发送。
+    const sessionId = options.nextProductSessionId?.() ?? null
+    let submit: Promise<void>
+    if (options.model.state.session === null && sessionId !== null) {
+      submit = options.model
+        .createSession({
+          productSessionId: sessionId,
+          title: draft.split('\n')[0]?.trim().slice(0, 40) || '新对话',
+        })
+        .then(() => options.model.submitMessage(draft))
+    } else {
+      submit = options.model.submitMessage(draft)
+    }
+    void submit.then(() => {
       if (options.model.state.interaction.status !== 'error') {
         composer.value = ''
         render(options.model.state)

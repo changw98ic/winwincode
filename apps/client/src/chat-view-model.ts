@@ -713,35 +713,11 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
 
   async function querySnapshot(signal: AbortSignal): Promise<ChatSnapshot> {
     if (activeProductSessionId === null) {
-      const [sessionsValue, routes] = await Promise.all([
-        options.client.query({
-          ...requestBase(),
-          requestId: options.nextRequestId(),
-          query: QueryName.SessionList,
-          parameters: { states: [] },
-          page: requestPage(null, 50),
-        }, { signal }),
-        modelRouteAvailability(signal),
-      ])
-      const sessions = expectResponse(sessionsValue, QueryName.SessionList)
-      assertPage(sessions.page, sessions.query)
-      for (const item of sessions.result.items) {
-        if (
-          item.projectId !== options.scope.projectId
-          || item.repositoryId !== options.scope.repositoryId
-        ) throw clientFailure(
-          'CHAT_SESSION_LIST_SCOPE_MISMATCH',
-          'The session list contains a ProductSession from another repository.',
-        )
-      }
-      const orderedSessions = orderSessions(sessions.result.items)
-      const firstSession = orderedSessions[0]
-      if (firstSession !== undefined) {
-        activeProductSessionId = firstSession.id
-        return querySnapshot(signal)
-      }
+      // 设计稿 03a:「新对话」是空状态——不自动续接最近会话(那会经最近
+      // 对话链接或首条消息创建会话进入),只加载模型路由供 composer 使用。
+      const routes = await modelRouteAvailability(signal)
       return Object.freeze({
-        sessions: orderedSessions,
+        sessions: Object.freeze([]),
         session: null,
         messages: Object.freeze([]),
         messagePage: EMPTY_PAGE,
