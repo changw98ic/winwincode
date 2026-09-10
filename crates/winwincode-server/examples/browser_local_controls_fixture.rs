@@ -119,7 +119,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
         owner_hook,
     )?);
     let authenticator: Arc<dyn RequestAuthenticator> = sessions.clone();
-    let running = start_server(config, Arc::clone(&sessions), authenticator, api, None).await?;
+    let running = start_server(config, Arc::clone(&sessions), authenticator, api).await?;
     println!(
         "{{\"status\":\"ready\",\"port\":{}}}",
         running.local_address().port()

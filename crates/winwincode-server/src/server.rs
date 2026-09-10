@@ -59,9 +59,6 @@ use crate::client_sessions::ClientSessionsConfig;
 use crate::client_sessions::ClientSessionsError;
 use crate::client_sessions::ClientSessionsErrorKind;
 use crate::config::{ServerConfig, ServerTls};
-use crate::enterprise_identity_protocol::{
-    EnterpriseIdentityProtocolApplication, router as enterprise_identity_router,
-};
 use crate::preview::{PreviewApplication, PreviewError, PreviewErrorKind};
 use crate::remote_worker_transport::RemoteWorkerExchangePort;
 use crate::transport::{
@@ -218,18 +215,8 @@ pub async fn start_server(
     auth_sessions: Arc<SqliteAuthSessionManager>,
     authenticator: Arc<dyn RequestAuthenticator>,
     api: Arc<dyn ControlPlaneApiPort>,
-    enterprise_identity: Option<Arc<EnterpriseIdentityProtocolApplication>>,
 ) -> Result<RunningServer, ServerError> {
-    start_server_with_remote_worker(
-        config,
-        auth_sessions,
-        authenticator,
-        api,
-        enterprise_identity,
-        None,
-        None,
-    )
-    .await
+    start_server_with_remote_worker(config, auth_sessions, authenticator, api, None, None).await
 }
 
 /// Starts the public origin with the private authenticated remote Worker
@@ -245,7 +232,6 @@ pub async fn start_server_with_remote_worker(
     auth_sessions: Arc<SqliteAuthSessionManager>,
     authenticator: Arc<dyn RequestAuthenticator>,
     api: Arc<dyn ControlPlaneApiPort>,
-    enterprise_identity: Option<Arc<EnterpriseIdentityProtocolApplication>>,
     remote_worker: Option<Arc<dyn RemoteWorkerExchangePort>>,
     client_exchange: Option<Arc<dyn ClientExchangePort>>,
 ) -> Result<RunningServer, ServerError> {
@@ -355,7 +341,7 @@ pub async fn start_server_with_remote_worker(
         client_sessions,
         preview,
     };
-    let router = router(state, enterprise_identity);
+    let router = router(state);
     let handle = Handle::new();
     let task = spawn_listener(&config, router, handle.clone()).await?;
     let local_address =
@@ -421,11 +407,8 @@ async fn spawn_listener(
     Ok(task)
 }
 
-fn router(
-    state: ServerState,
-    enterprise_identity: Option<Arc<EnterpriseIdentityProtocolApplication>>,
-) -> Router {
-    let router = Router::new()
+fn router(state: ServerState) -> Router {
+    Router::new()
         .route("/health", get(health))
         .route(
             "/api/v1/auth/session",
@@ -518,11 +501,8 @@ fn router(
         )
         .route("/api/v1/sessions", post(create_session).options(preflight))
         .fallback(not_found)
-        .with_state(state);
-    let router = enterprise_identity.map_or(router.clone(), |application| {
-        router.merge(enterprise_identity_router(application))
-    });
-    router.layer(DefaultBodyLimit::max(MAX_REQUEST_BYTES))
+        .with_state(state)
+        .layer(DefaultBodyLimit::max(MAX_REQUEST_BYTES))
 }
 
 async fn preview_tunnel(

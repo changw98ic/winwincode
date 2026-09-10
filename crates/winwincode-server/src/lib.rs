@@ -13,8 +13,6 @@ mod client_sessions;
 mod config;
 mod dispatcher;
 mod durable_event_hub;
-mod enterprise_identity_protocol;
-mod enterprise_management;
 mod identity_authenticator;
 mod login_rate_limiter;
 mod model_authority;
@@ -68,11 +66,6 @@ pub use dispatcher::{
 pub use durable_event_hub::{
     CommittedEventContext, DurableEventHub, DurableEventHubClock, DurableEventHubConfig,
     DurableEventHubError, DurableEventHubErrorCode, DurableEventPublisher,
-};
-pub use enterprise_identity_protocol::EnterpriseIdentityProtocolApplication;
-pub use enterprise_management::{
-    EnterpriseIdentityManagementApplication, EnterpriseManagementApplicationPort,
-    EnterpriseRbacManagementApplication, UnavailableEnterpriseManagementApplication,
 };
 pub use identity_authenticator::EnterpriseRequestAuthenticator;
 pub use model_authority::{

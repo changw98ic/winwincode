@@ -46,8 +46,8 @@ use winwincode_storage::{ProductStateStorage, RepositorySchedulerScope, SqliteSt
 
 use crate::{
     ApiError, AuthenticatedPrincipal, CommandDispatchResponse, CommandFamily, DurableEventHub,
-    EnterpriseManagementApplicationPort, EventSubscription, HealthyRuntimeHealth, QueryFamily,
-    RuntimeHealthPort, TypedControlPlaneApiPort, UnavailableEnterpriseManagementApplication,
+    EventSubscription, HealthyRuntimeHealth, QueryFamily, RuntimeHealthPort,
+    TypedControlPlaneApiPort,
 };
 
 const AUTHORIZATION_EPOCH: i64 = 1;
@@ -108,7 +108,6 @@ pub(crate) struct ApplicationState {
 }
 
 struct ApplicationComposition {
-    enterprise: Arc<dyn EnterpriseManagementApplicationPort>,
     collaboration: Arc<CollaborationService>,
     execution_config: ProductSessionExecutionConfig,
 }
@@ -118,7 +117,6 @@ pub struct StandaloneControlPlaneApplication {
     state: Arc<Mutex<Option<ApplicationState>>>,
     hub: Arc<DurableEventHub>,
     clock: Arc<dyn StandaloneApplicationClock>,
-    enterprise: Arc<dyn EnterpriseManagementApplicationPort>,
     collaboration: Arc<CollaborationService>,
     runtime: Arc<dyn RuntimeHealthPort>,
 }
@@ -139,53 +137,26 @@ impl StandaloneControlPlaneApplication {
         hub: Arc<DurableEventHub>,
         execution_config: ProductSessionExecutionConfig,
     ) -> Result<Self, ApiError> {
-        Self::new_with_clock_and_enterprise(
+        Self::new_with_clock(
             control_plane,
             storage,
             worker_outbound,
             hub,
             Arc::new(SystemStandaloneApplicationClock),
-            Arc::new(UnavailableEnterpriseManagementApplication),
             execution_config,
         )
     }
 
-    /// Composes a canonical enterprise application behind the same generated dispatcher.
+    /// Composes a collaboration service that shares the same durable authority.
     ///
     /// # Errors
     ///
     /// Rejects the same invalid local composition as [`Self::new`].
-    pub fn new_with_enterprise(
+    pub fn new_with_collaboration(
         control_plane: ControlPlane,
         storage: SqliteStorage,
         worker_outbound: DurableWorkerInteractionOutbound,
         hub: Arc<DurableEventHub>,
-        enterprise: Arc<dyn EnterpriseManagementApplicationPort>,
-        execution_config: ProductSessionExecutionConfig,
-    ) -> Result<Self, ApiError> {
-        Self::new_with_clock_and_enterprise(
-            control_plane,
-            storage,
-            worker_outbound,
-            hub,
-            Arc::new(SystemStandaloneApplicationClock),
-            enterprise,
-            execution_config,
-        )
-    }
-
-    /// Composes enterprise and collaboration services that share the same
-    /// durable authority and current RBAC service.
-    ///
-    /// # Errors
-    ///
-    /// Rejects the same invalid local composition as [`Self::new`].
-    pub fn new_with_enterprise_and_collaboration(
-        control_plane: ControlPlane,
-        storage: SqliteStorage,
-        worker_outbound: DurableWorkerInteractionOutbound,
-        hub: Arc<DurableEventHub>,
-        enterprise: Arc<dyn EnterpriseManagementApplicationPort>,
         collaboration: Arc<CollaborationService>,
         execution_config: ProductSessionExecutionConfig,
     ) -> Result<Self, ApiError> {
@@ -196,7 +167,6 @@ impl StandaloneControlPlaneApplication {
             hub,
             Arc::new(SystemStandaloneApplicationClock),
             ApplicationComposition {
-                enterprise,
                 collaboration,
                 execution_config,
             },
@@ -214,31 +184,6 @@ impl StandaloneControlPlaneApplication {
         worker_outbound: DurableWorkerInteractionOutbound,
         hub: Arc<DurableEventHub>,
         clock: Arc<dyn StandaloneApplicationClock>,
-        execution_config: ProductSessionExecutionConfig,
-    ) -> Result<Self, ApiError> {
-        Self::new_with_clock_and_enterprise(
-            control_plane,
-            storage,
-            worker_outbound,
-            hub,
-            clock,
-            Arc::new(UnavailableEnterpriseManagementApplication),
-            execution_config,
-        )
-    }
-
-    /// Deterministic composition with an injected enterprise application port.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a service connection not opened on the expected authoritative database path.
-    pub fn new_with_clock_and_enterprise(
-        control_plane: ControlPlane,
-        storage: SqliteStorage,
-        worker_outbound: DurableWorkerInteractionOutbound,
-        hub: Arc<DurableEventHub>,
-        clock: Arc<dyn StandaloneApplicationClock>,
-        enterprise: Arc<dyn EnterpriseManagementApplicationPort>,
         execution_config: ProductSessionExecutionConfig,
     ) -> Result<Self, ApiError> {
         let data_directory = storage
@@ -260,7 +205,6 @@ impl StandaloneControlPlaneApplication {
             hub,
             clock,
             ApplicationComposition {
-                enterprise,
                 collaboration,
                 execution_config,
             },
@@ -291,7 +235,6 @@ impl StandaloneControlPlaneApplication {
             }))),
             hub,
             clock,
-            enterprise: composition.enterprise,
             collaboration: composition.collaboration,
             runtime: Arc::new(HealthyRuntimeHealth),
         })
@@ -915,7 +858,7 @@ impl TypedControlPlaneApiPort for StandaloneControlPlaneApplication {
             CommandFamily::Approval => self.interaction_command(request),
             CommandFamily::Worker => self.worker_command(request),
             CommandFamily::Publication => self.publication_command(request),
-            CommandFamily::Enterprise => self.enterprise.command(request),
+            CommandFamily::Enterprise => Err(product_operation_not_found()),
             CommandFamily::Collaboration => self.collaboration_command(principal, request),
         }
     }
@@ -940,7 +883,7 @@ impl TypedControlPlaneApiPort for StandaloneControlPlaneApplication {
             QueryFamily::Settings => self.settings_query(request),
             QueryFamily::Approval => self.interaction_query(request),
             QueryFamily::Publication => self.publication_query(request),
-            QueryFamily::Enterprise => self.enterprise.query(request),
+            QueryFamily::Enterprise => Err(product_operation_not_found()),
             QueryFamily::Collaboration => self.collaboration_query(principal, request),
         }
     }
@@ -1601,6 +1544,14 @@ fn application_variant_mismatch() -> ApiError {
         500,
         "APPLICATION_RESPONSE_INVALID",
         "generated application route does not match its request",
+    )
+}
+
+fn product_operation_not_found() -> ApiError {
+    ApiError::new(
+        404,
+        "RESOURCE_NOT_FOUND",
+        "requested operation is not part of this product",
     )
 }
 

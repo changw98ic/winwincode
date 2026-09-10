@@ -245,7 +245,7 @@ async fn start_server(
     api: Arc<dyn ControlPlaneApiPort>,
 ) -> Result<RunningServer, ServerError> {
     let authenticator: Arc<dyn RequestAuthenticator> = sessions.clone();
-    start_server_with_authenticator(config, sessions, authenticator, api, None).await
+    start_server_with_authenticator(config, sessions, authenticator, api).await
 }
 
 async fn http_request(address: SocketAddr, request: &str) -> String {
@@ -971,7 +971,6 @@ async fn enterprise_api_token_authenticates_http_and_websocket_until_revoked() {
         Arc::clone(&sessions),
         authenticator,
         api.clone(),
-        None,
     )
     .await
     .expect("start enterprise-authenticated server");
