@@ -207,7 +207,7 @@ function packageDependencies(manifest) {
   const names = []
   let section = ''
   for (const line of manifest.split(/\r?\n/u)) {
-    const header = /^\s*\[([^\]]+)\]\s*$/u.exec(line)
+    const header = /^\s*\[([^\u005d]+)\]\s*$/u.exec(line)
     if (header) {
       section = header[1]
       continue
@@ -224,7 +224,7 @@ function stripDevelopmentDependencies(manifest) {
   const output = []
   let skip = false
   for (const line of lines) {
-    const header = /^\s*\[([^\]]+)\]\s*$/u.exec(line)
+    const header = /^\s*\[([^\u005d]+)\]\s*$/u.exec(line)
     if (header) skip = header[1] === 'dev-dependencies'
     if (!skip) output.push(line)
   }
@@ -235,7 +235,7 @@ function workspaceDependencies(manifest) {
   const dependencies = new Map()
   let inWorkspaceDependencies = false
   for (const line of manifest.split(/\r?\n/u)) {
-    const header = /^\s*\[([^\]]+)\]\s*$/u.exec(line)
+    const header = /^\s*\[([^\u005d]+)\]\s*$/u.exec(line)
     if (header) {
       inWorkspaceDependencies = header[1] === 'workspace.dependencies'
       continue
