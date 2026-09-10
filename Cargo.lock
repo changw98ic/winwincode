@@ -12957,17 +12957,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "winwincode-postgres"
-version = "0.1.0-alpha.1"
-dependencies = [
- "sha2 0.10.9",
- "winwincode-audit",
- "winwincode-backup",
- "winwincode-domain",
- "winwincode-storage",
-]
-
-[[package]]
 name = "winwincode-publication"
 version = "0.1.0-alpha.1"
 dependencies = [

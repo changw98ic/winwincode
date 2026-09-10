@@ -185,12 +185,28 @@ test('every frozen port carries existing Rust behavior evidence', () => {
   }
 })
 
-test('storage dependency boundary stays product-database neutral', () => {
+test('Community keeps SQLite local and owns no PostgreSQL product runtime', () => {
   const manifest = source(inventory.dependencyBoundary.manifest)
+  assert.match(manifest, /\brusqlite\b/u)
+  assert.match(source('crates/winwincode-storage/src/lib.rs'), /\bpub struct SqliteStorage\b/u)
   assert.doesNotMatch(manifest, /\bgit\s*=/)
   assert.doesNotMatch(manifest, /winwincode-postgres|sqlx|tokio-postgres|deadpool-postgres|bb8-postgres/i)
   for (const match of manifest.matchAll(/\bpath\s*=\s*"([^"]+)"/g)) {
     const path = resolve(root, 'crates/winwincode-storage', match[1])
     assert.ok(path === root || path.startsWith(`${root}/`), `path dependency leaves this repository: ${match[1]}`)
+  }
+
+  assert.equal(existsSync(join(root, 'crates/winwincode-postgres')), false)
+  assert.doesNotMatch(source('Cargo.toml'), /winwincode-postgres/u)
+  assert.doesNotMatch(source('Cargo.lock'), /^name = "winwincode-postgres"$/mu)
+
+  const driverPattern = /\b(?:sqlx|tokio-postgres|deadpool-postgres|bb8-postgres|postgres-types|postgres-protocol)\b/iu
+  for (const path of filesBelow(join(root, 'crates')).filter(path => path.endsWith('Cargo.toml'))) {
+    assert.doesNotMatch(readFileSync(path, 'utf8'), driverPattern, `${relative(root, path)} has a PostgreSQL driver`)
+  }
+
+  const runtimePattern = /(?:postgres(?:ql)?:\/\/|\bDATABASE_URL\b|\bPGHOST\b|\bPGPORT\b|current_setting\s*\(|FORCE\s+ROW\s+LEVEL\s+SECURITY|CREATE\s+POLICY|SET\s+LOCAL\b)/iu
+  for (const path of filesBelow(join(root, 'crates')).filter(path => path.endsWith('.rs'))) {
+    assert.doesNotMatch(readFileSync(path, 'utf8'), runtimePattern, `${relative(root, path)} contains PostgreSQL runtime configuration or SQL`)
   }
 })

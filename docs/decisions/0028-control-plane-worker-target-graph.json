@@ -522,23 +522,6 @@
       ]
     },
     {
-      "id": "winwincode-postgres",
-      "kind": "rust-crate",
-      "path": "crates/winwincode-postgres",
-      "packageName": "winwincode-postgres",
-      "phase": "enterprise",
-      "zone": "control-plane",
-      "responsibilities": [
-        "provide-postgresql-migration-and-transaction-protocols-for-product-storage"
-      ],
-      "allowedInternalDependencies": [
-        "winwincode-audit",
-        "winwincode-backup",
-        "winwincode-domain",
-        "winwincode-storage"
-      ]
-    },
-    {
       "id": "winwincode-test-assets",
       "kind": "rust-crate",
       "path": "crates/winwincode-test-assets",
@@ -839,7 +822,6 @@
         "evidence-export",
         "integration-infrastructure",
         "s3-artifact-adapter",
-        "enterprise-postgres",
         "test-asset-analysis"
       ]
     }

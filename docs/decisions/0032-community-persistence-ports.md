@@ -4,6 +4,12 @@ Community 的公开持久化端口只表达数据库中立的领域行为：事�
 
 本地 SQLite 仍由 `winwincode-storage::SqliteStorage` 提供，并只在明确的本地组合入口使用。通用端口通过 `ProductStateStorage` 接收适配器，不根据目录路径重新打开数据库。
 
+## 最终数据库边界
+
+Community 只保留本地 SQLite 产品实现。旧 `winwincode-postgres` crate 已从源码、workspace 和锁文件中删除；PostgreSQL 驱动、连接配置、TLS、产品 SQL、迁移、导入、备份与恢复分别由 Cloud 和 Enterprise 仓库拥有。三仓的数据交接只使用 `winwincode-export/v1`，不读取相邻仓库源码。
+
+Cloud 与 Enterprise 已各自具备 PostgreSQL 实现，当前源码均不装配 Community SQLite，也没有跨仓 `path` 或 `git` 依赖。正式包版本、提交、摘要和供应链文件由 `winwincode-edition.2.4.5` 的发布清单统一锁定。
+
 ## Enterprise 专属持久化类型的处置
 
 七个 Enterprise 专属持久化 trait 不是 Community 边界的一部分，也不得重新出现或重新导出：
@@ -30,4 +36,4 @@ Community 的公开持久化端口只表达数据库中立的领域行为：事�
 node --test tests/community-persistence-ports.test.mjs
 ```
 
-该门已接入 canonical runner `scripts/run-ts-tests.mjs`，因此仓库测试通道会持续执行它。
+该门已接入 canonical runner `scripts/run-ts-tests.mjs`，因此仓库测试通道会持续执行它；同时会拒绝旧 PostgreSQL crate、项目直属 PostgreSQL 驱动依赖、DSN 和产品 SQL 重新进入 Community 源码。

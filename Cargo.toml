@@ -29,7 +29,6 @@ members = [
   "crates/winwincode-observability-sqlite",
   "crates/winwincode-s3-artifact-adapter",
   "crates/winwincode-publication",
-  "crates/winwincode-postgres",
   "crates/winwincode-repository-context",
   "crates/winwincode-server",
   "crates/winwincode-session",

@@ -535,17 +535,6 @@
       ]
     },
     {
-      "surfaceId": "enterprise-postgres",
-      "flowIds": [
-        "action-policy-and-collaboration",
-        "chat-session-lifecycle",
-        "publication"
-      ],
-      "observableContracts": [
-        "tenant-scoped migration transaction outbox and backup protocol facts"
-      ]
-    },
-    {
       "surfaceId": "test-asset-analysis",
       "flowIds": [
         "candidate-artifacts",

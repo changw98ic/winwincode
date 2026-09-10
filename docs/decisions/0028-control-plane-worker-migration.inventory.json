@@ -34,7 +34,6 @@
     "crates/winwincode-integration-core/src",
     "crates/winwincode-integration-sqlite/src",
     "crates/winwincode-s3-artifact-adapter/src",
-    "crates/winwincode-postgres/src",
     "crates/winwincode-test-assets/src",
     "crates/winwincode-control-plane/src",
     "crates/winwincode-codex/src",
@@ -1434,36 +1433,6 @@
       "behaviorBaselineIds": [
         "success",
         "failure"
-      ]
-    },
-    {
-      "id": "enterprise-postgres",
-      "sourcePaths": [
-        "crates/winwincode-postgres/src/backup.rs",
-        "crates/winwincode-postgres/src/error.rs",
-        "crates/winwincode-postgres/src/lib.rs",
-        "crates/winwincode-postgres/src/migration.rs",
-        "crates/winwincode-postgres/src/protocol.rs",
-        "crates/winwincode-postgres/src/storage.rs"
-      ],
-      "entrySymbols": [
-        "PostgresStorageProtocol"
-      ],
-      "targetOwners": [
-        "control-plane"
-      ],
-      "targetModules": [
-        "crates/winwincode-postgres"
-      ],
-      "phase": "enterprise",
-      "disposition": "retain",
-      "observableContracts": [
-        "tenant-scoped migration transaction outbox and backup protocol facts"
-      ],
-      "behaviorBaselineIds": [
-        "success",
-        "recovery",
-        "exact-replay"
       ]
     },
     {

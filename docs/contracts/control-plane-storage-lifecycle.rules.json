@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "status": "required-contract-not-implementation-proof",
+  "status": "accepted-current-contract",
   "decision": "docs/decisions/0028-control-plane-worker-migration.md",
   "targetGraph": "docs/decisions/0028-control-plane-worker-target-graph.json",
   "phaseTask": "winwincode-9c4.16.2.1",
@@ -111,10 +111,13 @@
       "type": "SqliteStorage",
       "status": "phase-2.1-required"
     },
-    "enterprise": {
+    "downstreamProducts": {
       "kind": "postgresql",
-      "type": "PostgresStorage",
-      "status": "future-adapter"
+      "repositories": [
+        "winwincode-cloud",
+        "winwincode-enterprise"
+      ],
+      "status": "externally-owned"
     },
     "requiredParity": [
       "transaction-boundaries",
