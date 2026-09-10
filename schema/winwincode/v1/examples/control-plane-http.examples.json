@@ -54,27 +54,6 @@
         "limit": 50
       }
     },
-    "deliveryApproveTaskBreakdown": {
-      "schemaVersion": "winwincode/v1",
-      "command": "delivery.approve_task_breakdown",
-      "actor": {
-        "kind": "user",
-        "id": "usr_00000000000000000000000000"
-      },
-      "scope": {
-        "kind": "repository",
-        "organizationId": "org_00000000000000000000000000",
-        "workspaceId": "wsp_00000000000000000000000000",
-        "projectId": "prj_00000000000000000000000000",
-        "repositoryId": "rep_00000000000000000000000000"
-      },
-      "requestId": "req_01J0000000000000000000000A",
-      "expectedRevision": 11,
-      "payload": {
-        "deliveryId": "dlv_00000000000000000000000000",
-        "reviewSetSha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
-      }
-    },
     "inputRespond": {
       "schemaVersion": "winwincode/v1",
       "command": "input.respond",
@@ -99,7 +78,7 @@
           "productSessionId": "psn_00000000000000000000000000",
           "workerSessionId": "wsn_00000000000000000000000000",
           "codexThreadId": "cdx_00000000000000000000000000",
-          "stageRunId": "run_00000000000000000000000000"
+          "workRunId": "wrn_00000000000000000000000000"
         },
         "inputRequestId": "inp_00000000000000000000000000",
         "status": "provided",
@@ -151,7 +130,6 @@
         "kind": "delivery-stage",
         "productSessionId": "psn_00000000000000000000000000",
         "deliveryId": "dlv_00000000000000000000000000",
-        "stageRunId": "run_00000000000000000000000000",
         "atCursor": {
           "token": "sfread_00000000000000000000000000000001",
           "scope": {
@@ -181,7 +159,8 @@
             "sequence": 42,
             "eventId": "evt_00000000000000000000000042"
           }
-        }
+        },
+        "workRunId": "wrn_00000000000000000000000000"
       },
       "page": {
         "cursor": null,
@@ -504,14 +483,11 @@
         },
         "productSessionId": "psn_00000000000000000000000000",
         "deliveryId": "dlv_00000000000000000000000000",
-        "stageRunId": "run_00000000000000000000000000",
         "lastProjectionSequence": 42,
         "rebuiltAt": "2026-08-24T10:00:02.000Z",
         "sessions": [
           {
             "sessionBindingId": "binding:runtime:1",
-            "stageRunId": "run_00000000000000000000000000",
-            "deliveryTaskId": null,
             "productSessionId": "psn_00000000000000000000000000",
             "workerSessionId": "wsn_00000000000000000000000000",
             "codexThreadId": "cdx_00000000000000000000000000",
@@ -578,7 +554,9 @@
               "deletions": 8,
               "detailsVisible": false,
               "sourceRef": "runtime-event:42"
-            }
+            },
+            "workRunId": "wrn_00000000000000000000000000",
+            "workItemId": "wit_00000000000000000000000000"
           }
         ],
         "eventCursor": {
@@ -595,7 +573,8 @@
           },
           "sequence": 42,
           "eventId": "evt_00000000000000000000000042"
-        }
+        },
+        "workRunId": "wrn_00000000000000000000000000"
       },
       "page": {
         "nextCursor": null,
@@ -771,9 +750,8 @@
                 "productSessionId": "psn_00000000000000000000000000",
                 "workerSessionId": "wsn_00000000000000000000000000",
                 "codexThreadId": "cdx_00000000000000000000000000",
-                "stageRunId": "run_00000000000000000000000000"
+                "workRunId": "wrn_00000000000000000000000000"
               },
-              "stageRunId": "run_00000000000000000000000000",
               "workerId": "wrk_00000000000000000000000000",
               "leaseId": "lse_00000000000000000000000000",
               "attempt": 1,
@@ -784,7 +762,8 @@
                 "workerSessionId": "wsn_00000000000000000000000000",
                 "leaseId": "lse_00000000000000000000000000",
                 "workerInstanceId": "wki_00000000000000000000000000"
-              }
+              },
+              "workRunId": "wrn_00000000000000000000000000"
             }
           },
           {
@@ -805,7 +784,6 @@
           {
             "id": "att_00000000000000000000000000",
             "deliverySpecId": "spec:current",
-            "stageRunId": "run_00000000000000000000000001",
             "type": "decision_required",
             "title": "Review the proposed solution and tasks",
             "options": [
@@ -826,7 +804,8 @@
             "resolutionSummary": null,
             "resolvedBy": null,
             "createdAt": "2026-08-24T09:01:00.000Z",
-            "resolvedAt": null
+            "resolvedAt": null,
+            "workRunId": "wrn_00000000000000000000000001"
           }
         ],
         "evidence": [],

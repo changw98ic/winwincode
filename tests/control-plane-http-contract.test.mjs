@@ -14,8 +14,8 @@ const COMMANDS = Object.freeze([
   'session.close',
   'delivery.create',
   'delivery.update_spec',
-  'delivery.approve_task_breakdown',
   'delivery.advance',
+  'workrun.cancel',
   'delivery.resolve_attention',
   'delivery.submit_verdict',
   'settings.update',
@@ -39,6 +39,7 @@ const COMMANDS = Object.freeze([
   'enterprise.identity.update',
   'collaboration.notification.ack',
   'collaboration.presence.update',
+  'delivery.task_breakdown.create',
 ])
 
 const QUERIES = Object.freeze([
@@ -47,6 +48,7 @@ const QUERIES = Object.freeze([
   'session.messages.list',
   'session.interactions.list',
   'runtime.projection.get',
+  'workrun.get',
   'delivery.list',
   'delivery.get',
   'candidate.list',
@@ -214,6 +216,7 @@ test('HTTP query contract covers every current read surface with an opaque stabl
     'session.messages.list': '#/$defs/ChatMessagePage',
     'session.interactions.list': '#/$defs/ChatInteractionPage',
     'runtime.projection.get': './domain.schema.json#/$defs/RuntimeProjectionSnapshot',
+    'workrun.get': '#/$defs/WorkRunAggregateProjection',
     'delivery.list': '#/$defs/DeliveryPage',
     'delivery.get': '#/$defs/DeliveryDetailProjection',
     'candidate.list': '#/$defs/CandidateHistoryPage',
@@ -335,14 +338,20 @@ test('HTTP query contract covers every current read surface with an opaque stabl
     'effective Provider/model catalog',
     'Credential reference lifecycle',
     'configured durable model request pool',
+    'explicit Provider runtime status',
   ])
   assert.deepEqual(schema.$defs.ModelRouteAvailabilityReason.enum, [
     'ready',
+    'rate_limited',
+    'window_exhausted',
+    'weekly_exhausted',
+    'authentication_error',
     'no_provider',
     'credential_missing_or_revoked',
     'default_route_invalid',
     'provider_or_model_disabled',
     'request_pool_unavailable',
+    'runtime_status_unknown',
   ])
   assert.equal(modelRouteAvailability.clientInferenceAllowed, false)
   assert.equal(modelRouteAvailability.secretFieldsAllowed, false)
@@ -562,6 +571,7 @@ test('Chat interaction snapshots expose one complete secret-safe binding contrac
     'subject',
     'category',
     'effectiveDecisionScope',
+    'decisionEnabled',
     'sanitizedDetail',
     'binding',
   ])
@@ -570,26 +580,24 @@ test('Chat interaction snapshots expose one complete secret-safe binding contrac
     'mcp',
     'network',
     'shell',
-    'unavailable',
   ])
   assert.deepEqual(schema.$defs.ApprovalEffectiveDecisionScope.enum, ['once'])
   assert.deepEqual(schema.$defs.ApprovalSanitizedDetailUnavailableReason.enum, [
     'producer_unavailable',
-    'encoded_payload_redacted',
-    'source_not_recorded',
   ])
-  assert.deepEqual(schema.$defs.ApprovalSanitizedDetailProjection.required, [
+  const unavailable = schema.$defs.ApprovalSanitizedDetailUnavailableProjection
+  assert.deepEqual(unavailable.required, [
     'kind',
     'reason',
   ])
-  assert.equal(schema.$defs.ApprovalSanitizedDetailProjection.properties.kind.const, 'unavailable')
-  assert.equal(schema.$defs.ApprovalSanitizedDetailProjection.properties.command, undefined)
-  assert.equal(schema.$defs.ApprovalSanitizedDetailProjection.properties.cwd, undefined)
-  assert.equal(schema.$defs.ApprovalSanitizedDetailProjection.properties.files, undefined)
-  assert.equal(schema.$defs.ApprovalSanitizedDetailProjection.properties.network, undefined)
-  assert.equal(schema.$defs.ApprovalSanitizedDetailProjection.properties.mcp, undefined)
-  assert.equal(schema.$defs.ApprovalSanitizedDetailProjection.properties.risk, undefined)
-  assert.equal(schema.$defs.ApprovalSanitizedDetailProjection.properties.reasonText, undefined)
+  assert.equal(unavailable.properties.kind.const, 'unavailable')
+  assert.equal(unavailable.properties.command, undefined)
+  assert.equal(unavailable.properties.cwd, undefined)
+  assert.equal(unavailable.properties.files, undefined)
+  assert.equal(unavailable.properties.network, undefined)
+  assert.equal(unavailable.properties.mcp, undefined)
+  assert.equal(unavailable.properties.risk, undefined)
+  assert.equal(unavailable.properties.reasonText, undefined)
   assert.ok(schema.$defs.ApprovalDecidePayload.required.includes('binding'))
   assert.equal(schema.$defs.ChatInputInteractionProjection.properties.details, undefined)
   assert.equal(schema.$defs.ChatInputInteractionProjection.properties.payload, undefined)
@@ -783,16 +791,6 @@ test('OpenAPI 3.1 exposes one browser-session route and the canonical business r
   assert.equal(schema.$defs.AuthSessionResponse.properties.authorizedScopes.minItems, 1)
   assert.equal(schema.$defs.AuthSessionResponse.properties.authorizedScopes.maxItems, 100)
 
-  const taskApproval = schema.$defs.DeliveryApproveTaskBreakdownPayload
-  assert.deepEqual(taskApproval.required, ['deliveryId', 'reviewSetSha256'])
-  assert.equal(taskApproval.properties.tasks, undefined)
-  assert.deepEqual(schema['x-winwincode-semantics'].taskBreakdownApproval, {
-    payload: ['deliveryId', 'reviewSetSha256'],
-    authority: 'current_sealed_approved_solution_review',
-    callerTaskFieldsAllowed: false,
-    promotion: 'copy_ordered_task_proposals_field_by_field',
-    staleDigestError: 'REVISION_CONFLICT',
-  })
 })
 
 test('positive and negative samples pin retries, conflicts, cursors, and secret-safe output', async () => {
@@ -837,11 +835,6 @@ test('positive and negative samples pin retries, conflicts, cursors, and secret-
   assert.equal(examples.positive.inputRespond.payload.status, 'provided')
   assert.equal(examples.positive.sessionMessagesList.query, 'session.messages.list')
   assert.equal(examples.positive.runtimeProjectionGet.query, 'runtime.projection.get')
-  assert.deepEqual(examples.positive.deliveryApproveTaskBreakdown.payload, {
-    deliveryId: 'dlv_00000000000000000000000000',
-    reviewSetSha256:
-      'sha256:0000000000000000000000000000000000000000000000000000000000000000',
-  })
   assert.equal(examples.responses.chatMessagesPage.result.kind, 'chat_message_page')
   assert.equal(examples.responses.publicationDetail.result.kind, 'publication_detail')
   assert.equal(examples.responses.publicationDetail.result.historyTruncated, true)

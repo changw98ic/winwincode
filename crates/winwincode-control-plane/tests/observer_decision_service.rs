@@ -391,7 +391,11 @@ fn prepare_running_fixture(storage: &mut SqliteStorage) -> RunningFixture {
         .expect("ProductSession continue");
     let route = ExecutionRoute {
         product_session_id: scope.product_session_id.clone(),
-        stage_run_id: None,
+        work_contract_id: None,
+        work_contract_revision: None,
+        work_item_id: None,
+        work_item_revision: None,
+        work_run_id: None,
         execution_job_id: authority.job_id.clone(),
         job_revision: 1,
         runtime: Some(RuntimeRouteAuthority {

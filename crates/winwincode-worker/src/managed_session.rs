@@ -37,7 +37,7 @@ use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
 use winwincode_domain::{
     ClientInstanceId, ClientNodeId, ClientOccupancyLeaseId, ProductSessionId, RepositoryBindingId,
-    Sha256Digest, StageRunId, WorkerId, WorkerInstanceId, WorkerSessionId,
+    Sha256Digest, WorkRunId, WorkerId, WorkerInstanceId, WorkerSessionId, is_canonical_prefixed_id,
 };
 use winwincode_execution_port::generated::ModelGatewayRoute;
 
@@ -130,8 +130,8 @@ pub struct ManagedSessionConfig {
     pub repository_binding_id: RepositoryBindingId,
     /// Optional product session scope.
     pub product_session_id: Option<ProductSessionId>,
-    /// Optional stage run scope.
-    pub stage_run_id: Option<StageRunId>,
+    /// Optional `WorkRun` scope.
+    pub work_run_id: Option<WorkRunId>,
     /// The one `WorkerSession` this process authenticates.
     pub worker_session_id: WorkerSessionId,
     /// Stable Worker identity reused across replacement boots.
@@ -162,7 +162,7 @@ struct ManagedSessionConfigFile {
     occupancy_fencing_token: Option<String>,
     repository_binding_id: Option<String>,
     product_session_id: Option<String>,
-    stage_run_id: Option<String>,
+    work_run_id: Option<String>,
     worker_session_id: Option<String>,
     worker_id: Option<String>,
     worker_instance_id: Option<String>,
@@ -245,7 +245,7 @@ impl ManagedSessionConfigFile {
         )?);
         let product_session_id =
             optional_plain_id("productSessionId", self.product_session_id)?.map(ProductSessionId);
-        let stage_run_id = optional_plain_id("stageRunId", self.stage_run_id)?.map(StageRunId);
+        let work_run_id = optional_work_run_id(self.work_run_id)?;
         let worker_session_id = WorkerSessionId(plain_id(
             "workerSessionId",
             require("workerSessionId", self.worker_session_id)?,
@@ -274,7 +274,7 @@ impl ManagedSessionConfigFile {
             occupancy_fencing_token,
             repository_binding_id,
             product_session_id,
-            stage_run_id,
+            work_run_id,
             worker_session_id,
             worker_id,
             worker_instance_id,
@@ -311,6 +311,21 @@ fn plain_id(field: &'static str, value: String) -> Result<String, ManagedSession
         ));
     }
     Ok(value)
+}
+
+fn optional_work_run_id(
+    value: Option<String>,
+) -> Result<Option<WorkRunId>, ManagedSessionConfigError> {
+    let Some(value) = optional_plain_id("workRunId", value)? else {
+        return Ok(None);
+    };
+    if !is_canonical_prefixed_id(&value, "wrn_") {
+        return Err(ManagedSessionConfigError::field_error(
+            "workRunId",
+            "must be a canonical WorkRun id",
+        ));
+    }
+    Ok(Some(WorkRunId(value)))
 }
 
 fn optional_plain_id(
@@ -547,7 +562,7 @@ mod tests {
     fn reads_the_full_managed_session_binding() {
         let raw = config_json(&[
             ("productSessionId", "\"psn_01J\""),
-            ("stageRunId", "\"stg_01J\""),
+            ("workRunId", "\"wrn_01J00000000000000000000000\""),
             (
                 "modelRoute",
                 r#"{"capability": "reasoning", "route": "embedded-canonical-remote"}"#,
@@ -572,7 +587,10 @@ mod tests {
             config.product_session_id,
             Some(ProductSessionId("psn_01J".to_owned()))
         );
-        assert_eq!(config.stage_run_id, Some(StageRunId("stg_01J".to_owned())));
+        assert_eq!(
+            config.work_run_id,
+            Some(WorkRunId("wrn_01J00000000000000000000000".to_owned()))
+        );
         assert_eq!(
             config.worker_session_id,
             WorkerSessionId("wss_01J".to_owned())
@@ -599,10 +617,20 @@ mod tests {
     }
 
     #[test]
+    fn rejects_noncanonical_work_run_identity() {
+        let error = read_config(&config_json(&[(
+            "workRunId",
+            "\"run_01J00000000000000000000000\"",
+        )]))
+        .expect_err("legacy StageRun identity must be rejected");
+        assert!(error.to_string().contains("workRunId"));
+    }
+
+    #[test]
     fn optional_fields_default_to_absent() {
         let config = read_config(&config_json(&[])).expect("minimal config parses");
         assert_eq!(config.product_session_id, None);
-        assert_eq!(config.stage_run_id, None);
+        assert_eq!(config.work_run_id, None);
         assert_eq!(config.model_route, None);
     }
 

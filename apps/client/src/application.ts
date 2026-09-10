@@ -10,6 +10,7 @@ import {
   type ControlPlaneClientTransport,
   type ControlPlaneTaskAnchor,
 } from './community-control-plane-client.js'
+import type { WorkItemId } from './generated/contracts.js'
 import { createClientOccupancyFacade } from './client-occupancy-facade.js'
 import { mountClientErrorBoundary } from './components/client-error-boundary.js'
 import { mountConnectionBar } from './components/connection-bar.js'
@@ -144,7 +145,7 @@ function element<K extends keyof HTMLElementTagNameMap>(
 const CONTRACT_ID_ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ'
 
 function contractId(
-  prefix: 'req' | 'sub' | 'psn' | 'dlv' | 'tsk',
+  prefix: 'req' | 'sub' | 'psn' | 'dlv' | 'wit',
   crypto: Crypto,
 ): string {
   const entropy = crypto.getRandomValues(new Uint8Array(26))
@@ -240,7 +241,6 @@ export function mountWinWinCodeClient(
     nextTaskId: () => contractId('tsk', browser.crypto),
     ...(options.taskSeed === undefined ? {} : { seed: options.taskSeed }),
   })
-  const runIdentityPort = createControlPlaneRunIdentityFake()
   let lastKnownDiagnosticScope: unknown = null
   const shell = element(document, 'div', 'wwc-shell')
   const header = element(document, 'header', 'wwc-header')
@@ -894,6 +894,7 @@ export function mountWinWinCodeClient(
         actor: context.actor,
         scope: context.scope,
         nextDeliveryId: () => contractId('dlv', browser.crypto) as DeliveryId,
+        nextWorkItemId: () => contractId('wit', browser.crypto) as WorkItemId,
         nextRequestId: () => contractId('req', browser.crypto) as RequestId,
         onCreated() {
           // The page re-renders from the creator subscription; no navigation.
@@ -1106,7 +1107,7 @@ export function mountWinWinCodeClient(
 
   /** The anchor facts a deep-linked run route must carry to be actionable. */
   function taskRunRouteAnchor(): {
-    readonly taskId: string
+    readonly taskId: WorkItemId
     readonly clientId: string
     readonly repositoryBindingId: string
   } | null {
@@ -1115,12 +1116,12 @@ export function mountWinWinCodeClient(
     const clientId = parameters.get('client')
     const repositoryBindingId = parameters.get('repository')
     if (
-      taskId === null || clientId === null || repositoryBindingId === null
+      taskId === null || !matchesCanonicalSchema('WorkItemId', taskId) || clientId === null || repositoryBindingId === null
       || taskId.length === 0 || clientId.length === 0 || repositoryBindingId.length === 0
     ) {
       return null
     }
-    return { taskId, clientId, repositoryBindingId }
+    return { taskId: taskId as WorkItemId, clientId, repositoryBindingId }
   }
 
   /**
@@ -1171,9 +1172,8 @@ export function mountWinWinCodeClient(
   }
 
   /**
-   * UI-100.2 (fake-first): the §16.7 run page.  The Client, Occupancy, and
-   * Repository rows project the live shell-owned models; the WorkerSession
-   * and Candidate/Apply rows come from the fake-first identity port.
+   * UI-100.2: the §16.7 run page. Client, Occupancy, and Repository rows are
+   * live shell facts; execution identity comes only from WorkRun.
    */
   async function renderTaskRun(generation: number): Promise<void> {
     const context = authenticatedRouteContext()

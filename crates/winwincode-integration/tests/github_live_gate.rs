@@ -34,8 +34,8 @@ use winwincode_api::generated::{
 use winwincode_audit::AuditScope;
 use winwincode_domain::{
     AttentionItemId, CredentialReferenceId, DeliveryId, EnterpriseIntegrationId,
-    GitHubRepositorySlug, OrganizationId, ProductSessionId, ProjectId, PublicationId, RepositoryId,
-    RequestId, Revision, SchemaVersion, Sha256Digest, SystemActorId, UserId, WorkspaceId,
+    GitHubRepositorySlug, OrganizationId, ProjectId, PublicationId, RepositoryId, RequestId,
+    Revision, SchemaVersion, Sha256Digest, SystemActorId, UserId, WorkspaceId,
 };
 use winwincode_domain::{RepositoryScope, RepositoryScopeKind};
 use winwincode_integration::{
@@ -51,12 +51,12 @@ use winwincode_integration::{
 };
 use winwincode_publication::{
     CredentialResolutionError, GitHubCredential, GitHubCredentialResolver, PolicyPermission,
-    PublicationAuthorization, PublicationCommandContext, PublicationEnterpriseAttribution,
-    PublicationFactBinding, PublicationLedger, PublicationPolicyAudit, PublicationPolicyAuditError,
-    PublicationPolicyContext, PublicationPolicyDecision, PublicationPolicyEvidence,
-    PublicationPolicyOrigin, PublicationPublishCommand, PublicationRequester,
-    PublicationResourceKind, PublicationSourceIssue, PublicationState, PublicationTarget,
-    RepositoryPolicyScope, RepositoryPublicationPolicy,
+    PublicationAuthorization, PublicationCommandContext, PublicationFactBinding, PublicationLedger,
+    PublicationPolicyAudit, PublicationPolicyAuditError, PublicationPolicyContext,
+    PublicationPolicyDecision, PublicationPolicyEvidence, PublicationPolicyOrigin,
+    PublicationPublishCommand, PublicationRequester, PublicationResourceKind,
+    PublicationSourceIssue, PublicationState, PublicationTarget, RepositoryPolicyScope,
+    RepositoryPublicationPolicy,
 };
 use winwincode_storage::{
     ProductStateStorage, ReceiptActorKey, ReceiptIdentity, ReceiptScopeKey, SqliteStorage,
@@ -277,7 +277,6 @@ struct ValidatedConfig {
     authorization: PublicationAuthorization,
     publication_command: PublicationPublishCommand,
     publication_request_id: RequestId,
-    attribution: PublicationEnterpriseAttribution,
     requester: PublicationRequester,
     policy: RepositoryPublicationPolicy,
     max_approval_age_millis: u64,
@@ -389,13 +388,6 @@ impl LiveConfigFile {
         let approved_user = UserId(self.delivery.approved_by);
         let requester = PublicationRequester::User(approved_user.clone());
         let max_approval_age_millis = self.publication.max_approval_age_millis;
-        let attribution = PublicationEnterpriseAttribution::try_new(
-            &publication_scope,
-            delivery_id,
-            ProductSessionId(self.delivery.product_session_id),
-            approved_user.clone(),
-        )
-        .map_err(|_| GateError::new(GateErrorCode::InvalidConfiguration))?;
         let policy = RepositoryPublicationPolicy::try_new(
             publication_scope.clone(),
             self.repository.clone(),
@@ -482,7 +474,6 @@ impl LiveConfigFile {
             authorization,
             publication_command,
             publication_request_id,
-            attribution,
             requester,
             policy,
             max_approval_age_millis,
@@ -1304,7 +1295,6 @@ fn publish_canonical_set(
                 &context,
                 &config.publication_command,
                 &config.authorization,
-                &config.attribution,
                 &policy_context,
                 &config.policy,
             )

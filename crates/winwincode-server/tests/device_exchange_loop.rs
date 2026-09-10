@@ -208,7 +208,6 @@ async fn start_with_client_exchange(data_directory: &Path) -> winwincode_server:
         authenticator,
         Arc::new(NoopApi),
         None,
-        None,
         Some(exchange),
     )
     .await

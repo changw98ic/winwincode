@@ -29,6 +29,7 @@ ureq = { version = "=3.1.4", default-features = false, features = ["rustls"] }
 winwincode-api.workspace = true
 winwincode-client-port = { path = "../winwincode-client-port" }
 winwincode-control-plane = { path = "../winwincode-control-plane" }
+winwincode-delivery = { path = "../winwincode-delivery" }
 winwincode-codex = { path = "../winwincode-codex" }
 winwincode-domain.workspace = true
 winwincode-execution-port.workspace = true

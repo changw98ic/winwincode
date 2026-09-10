@@ -11,8 +11,7 @@ use winwincode_api::generated::{
     Actor, ControlPlaneWebSocketModelRouteAvailabilityInvalidatedEvent,
     ControlPlaneWebSocketModelRouteAvailabilityInvalidationSource,
     CredentialReferenceCreateCommand, CredentialReferenceCreateCommandCommand,
-    CredentialReferenceCreatePayload, OrganizationScope, OrganizationScopeKind, Scope, UserActor,
-    UserActorKind,
+    CredentialReferenceCreatePayload, OrganizationScope, OrganizationScopeKind, Scope,
 };
 use winwincode_control_plane::{
     CredentialReferenceService, ModelCapability, ModelSettingsRequest, ModelSettingsService,
@@ -20,7 +19,8 @@ use winwincode_control_plane::{
     ProviderCatalogService, ProviderDescriptor,
 };
 use winwincode_domain::{
-    CredentialReferenceId, Instant, OrganizationId, RequestId, Revision, SchemaVersion, UserId,
+    CredentialReferenceId, Instant, OrganizationId, RequestId, Revision, SchemaVersion, UserActor,
+    UserActorKind, UserId,
 };
 use winwincode_storage::{ProductStateStorage, PublicEventScope, SqliteStorage};
 
@@ -106,6 +106,8 @@ fn settings_catalog_and_credential_changes_publish_closed_durable_invalidations_
             context_window_tokens: 8_192,
             max_output_tokens: 2_048,
             tool_support: ModelToolSupport::Serial,
+            structured_output_support:
+                winwincode_control_plane::StructuredOutputSupport::Unsupported,
             reasoning_efforts: vec!["medium".to_owned()],
         }],
     };
@@ -142,7 +144,7 @@ fn settings_catalog_and_credential_changes_publish_closed_durable_invalidations_
     {
         let mut storage = SqliteStorage::open(&root).expect("open storage");
         ProviderCatalogService::new(&mut storage)
-            .upsert(&provider_request, &descriptor, at())
+            .upsert(&provider_request, &descriptor)
             .expect("catalog change");
         ModelSettingsService::new(&mut storage)
             .update(&settings_request, settings.clone(), at())
@@ -152,7 +154,7 @@ fn settings_catalog_and_credential_changes_publish_closed_durable_invalidations_
             .expect("credential change");
 
         ProviderCatalogService::new(&mut storage)
-            .upsert(&provider_request, &descriptor, at())
+            .upsert(&provider_request, &descriptor)
             .expect("catalog replay");
         ModelSettingsService::new(&mut storage)
             .update(&settings_request, settings, at())
@@ -164,7 +166,7 @@ fn settings_catalog_and_credential_changes_publish_closed_durable_invalidations_
 
     let storage = SqliteStorage::open(&root).expect("restart storage");
     let invalidations = public_invalidations(&storage);
-    assert_eq!(invalidations.len(), 3);
+    assert_eq!(invalidations.len(), 2);
     let mut sources = invalidations
         .iter()
         .map(|(event, _)| event.source.clone())
@@ -174,7 +176,6 @@ fn settings_catalog_and_credential_changes_publish_closed_durable_invalidations_
         sources,
         [
             ControlPlaneWebSocketModelRouteAvailabilityInvalidationSource::CredentialReference,
-            ControlPlaneWebSocketModelRouteAvailabilityInvalidationSource::ProviderCatalog,
             ControlPlaneWebSocketModelRouteAvailabilityInvalidationSource::Settings,
         ]
     );

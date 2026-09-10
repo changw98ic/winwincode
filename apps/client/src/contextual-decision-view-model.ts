@@ -8,11 +8,11 @@ import type {
   Instant,
   InteractiveInputMode,
   ProductSessionId,
-  StageRunId,
+  WorkRunId,
 } from './generated/contracts.js'
 
 /**
- * UI-502 embeds the decisions of the current Session/StageRun context where the
+ * UI-502 embeds the decisions of the current Session/WorkRun context where the
  * user already is.  This module is a pure projection of one server snapshot: it
  * never queries, never caches, and never owns business state, so the global
  * Attention Center, Chat, and StrongFlow keep exactly one shared server truth.
@@ -66,7 +66,7 @@ export interface ContextualDecisionItem {
   readonly expiresAt: Instant | null
   readonly revision: number
   readonly productSessionId: ProductSessionId | null
-  readonly stageRunId: StageRunId | null
+  readonly workRunId: WorkRunId | null
   readonly deliveryId: DeliveryId | null
   /** Input answers only; every other kind stays null. */
   readonly mode: InteractiveInputMode | null
@@ -167,7 +167,7 @@ function inputDecision(
     expiresAt: projection.expiresAt,
     revision: projection.revision,
     productSessionId: projection.binding.productSessionId,
-    stageRunId: projection.binding.sessionIdentity.stageRunId ?? null,
+    workRunId: projection.binding.sessionIdentity.workRunId ?? null,
     deliveryId: null,
     mode: projection.mode,
     allowEmpty: projection.allowEmpty,
@@ -195,7 +195,7 @@ function approvalDecision(
     expiresAt: projection.expiresAt,
     revision: projection.revision,
     productSessionId: projection.binding.productSessionId,
-    stageRunId: projection.binding.sessionIdentity.stageRunId ?? null,
+    workRunId: projection.binding.sessionIdentity.workRunId ?? null,
     deliveryId: null,
     mode: null,
     allowEmpty: false,
@@ -226,7 +226,7 @@ function attentionDecision(
     expiresAt: null,
     revision: source.deliveryRevision,
     productSessionId: null,
-    stageRunId: projection.stageRunId,
+    workRunId: projection.workRunId,
     deliveryId: source.deliveryId,
     mode: null,
     allowEmpty: false,

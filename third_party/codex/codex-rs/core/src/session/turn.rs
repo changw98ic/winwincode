@@ -50,7 +50,10 @@ use crate::stream_events_utils::record_completed_response_item_with_finalized_fa
 use crate::tasks::emit_compact_metric;
 use crate::tools::ToolRouter;
 use crate::tools::context::SharedTurnDiffTracker;
+use crate::tools::parallel::ChangeBatchHandoff;
+use crate::tools::parallel::ToolCallCompletion;
 use crate::tools::parallel::ToolCallRuntime;
+use crate::tools::parallel::ToolContinuation;
 use crate::tools::registry::ToolArgumentDiffConsumer;
 use crate::tools::router::ToolSuggestCandidates;
 use crate::tools::router::ToolSuggestPresentation;
@@ -398,7 +401,15 @@ pub(crate) async fn run_turn(
                 let SamplingRequestResult {
                     needs_follow_up: model_needs_follow_up,
                     last_agent_message: sampling_request_last_agent_message,
+                    handoff,
                 } = sampling_request_output;
+                if let Some(handoff) = handoff {
+                    // A terminal host handoff ends this turn after all in-flight
+                    // work has drained; the adapter persists the proposal with
+                    // the following TurnComplete event.
+                    last_agent_message = Some(handoff.proposal);
+                    break;
+                }
                 if model_needs_follow_up {
                     sess.input_queue
                         .accept_mailbox_delivery_for_current_turn(
@@ -1320,9 +1331,11 @@ pub(crate) fn build_prompt(
     Prompt {
         input,
         tools: step_context.tool_router.model_visible_specs(),
-        parallel_tool_calls: true,
+        parallel_tool_calls: !turn_context.submit_change_batch,
         base_instructions,
-        output_schema: turn_context.final_output_json_schema.clone(),
+        output_schema: (!turn_context.submit_change_batch)
+            .then(|| turn_context.final_output_json_schema.clone())
+            .flatten(),
         output_schema_strict: !crate::guardian::is_guardian_reviewer_source(
             &turn_context.session_source,
         ),
@@ -1576,6 +1589,7 @@ pub(crate) async fn built_tools(
 struct SamplingRequestResult {
     needs_follow_up: bool,
     last_agent_message: Option<String>,
+    handoff: Option<ChangeBatchHandoff>,
 }
 
 /// Ephemeral per-response state for streaming a single proposed plan.
@@ -2128,15 +2142,48 @@ async fn handle_assistant_item_done_in_plan_mode(
     false
 }
 
+fn has_submit_change_batch_sibling(calls: &[crate::tools::router::ToolCall]) -> bool {
+    let submit_count = calls
+        .iter()
+        .filter(|call| call.tool_name.name == "submit_change_batch")
+        .count();
+    submit_count > 0 && (submit_count != 1 || calls.len() != 1)
+}
+
+fn rejected_change_batch_sibling_response(
+    call: &crate::tools::router::ToolCall,
+) -> ResponseInputItem {
+    let output = codex_protocol::models::FunctionCallOutputPayload {
+        body: codex_protocol::models::FunctionCallOutputBody::Text(
+            "submit_change_batch must be the only tool call in a response".to_string(),
+        ),
+        ..Default::default()
+    };
+    match &call.payload {
+        crate::tools::context::ToolPayload::Custom { .. } => {
+            ResponseInputItem::CustomToolCallOutput {
+                call_id: call.call_id.clone(),
+                name: Some(call.tool_name.name.clone()),
+                output,
+            }
+        }
+        _ => ResponseInputItem::FunctionCallOutput {
+            call_id: call.call_id.clone(),
+            output,
+        },
+    }
+}
+
 #[instrument(level = "trace", skip_all)]
 async fn drain_in_flight(
-    in_flight: &mut FuturesOrdered<BoxFuture<'static, CodexResult<ResponseInputItem>>>,
+    in_flight: &mut FuturesOrdered<BoxFuture<'static, CodexResult<ToolCallCompletion>>>,
     sess: Arc<Session>,
     turn_context: Arc<TurnContext>,
-) -> CodexResult<()> {
+) -> CodexResult<Option<ChangeBatchHandoff>> {
+    let mut handoff = None;
     while let Some(res) = in_flight.next().await {
         match res {
-            Ok(response_input) => {
+            Ok(ToolCallCompletion::Response(response_input)) => {
                 let response_item = response_input.into();
                 sess.record_conversation_items(&turn_context, std::slice::from_ref(&response_item))
                     .await;
@@ -2147,12 +2194,19 @@ async fn drain_in_flight(
                 )
                 .await;
             }
+            Ok(ToolCallCompletion::Continuation(ToolContinuation::YieldToHost(next))) => {
+                if handoff.replace(next).is_some() {
+                    return Err(CodexErr::InvalidRequest(
+                        "multiple submit_change_batch handoffs in one response".to_string(),
+                    ));
+                }
+            }
             Err(err) => {
                 error_or_panic(format!("in-flight tool future failed during drain: {err}"));
             }
         }
     }
-    Ok(())
+    Ok(handoff)
 }
 
 fn assign_missing_streamed_response_item_id(
@@ -2223,8 +2277,10 @@ async fn try_run_sampling_request(
         .instrument(trace_span!("stream_request"))
         .or_cancel(&cancellation_token)
         .await??;
-    let mut in_flight: FuturesOrdered<BoxFuture<'static, CodexResult<ResponseInputItem>>> =
+    let mut in_flight: FuturesOrdered<BoxFuture<'static, CodexResult<ToolCallCompletion>>> =
         FuturesOrdered::new();
+    let mut response_tool_calls = Vec::new();
+    let mut response_completed = false;
     let mut needs_follow_up = false;
     let mut last_agent_message: Option<String> = None;
     let mut active_item: Option<TurnItem> = None;
@@ -2390,6 +2446,9 @@ async fn try_run_sampling_request(
                         Ok(output_result) => output_result,
                         Err(err) => break Err(err),
                     };
+                if let Some(tool_call) = output_result.tool_call {
+                    response_tool_calls.push(tool_call);
+                }
                 if let Some(tool_future) = output_result.tool_future {
                     in_flight.push_back(tool_future);
                 }
@@ -2402,6 +2461,7 @@ async fn try_run_sampling_request(
                     break Ok(SamplingRequestResult {
                         needs_follow_up: true,
                         last_agent_message,
+                        handoff: None,
                     });
                 }
             }
@@ -2576,12 +2636,30 @@ async fn try_run_sampling_request(
                 if let Err(err) = budget_result {
                     break Err(err);
                 }
+                response_completed = true;
+                if has_submit_change_batch_sibling(&response_tool_calls) {
+                    in_flight.clear();
+                    for call in response_tool_calls.drain(..) {
+                        let response = rejected_change_batch_sibling_response(&call);
+                        if let Some(response_item) =
+                            crate::stream_events_utils::response_input_to_response_item(&response)
+                        {
+                            sess.record_conversation_items(
+                                &turn_context,
+                                std::slice::from_ref(&response_item),
+                            )
+                            .await;
+                        }
+                    }
+                    needs_follow_up = true;
+                }
                 if let Some(false) = end_turn {
                     needs_follow_up = true;
                 }
                 break Ok(SamplingRequestResult {
                     needs_follow_up,
                     last_agent_message,
+                    handoff: None,
                 });
             }
             ResponseEvent::OutputTextDelta(delta) => {
@@ -2748,7 +2826,13 @@ async fn try_run_sampling_request(
     } else {
         Some(turn_context.turn_timing_state.begin_tool_blocking())
     };
-    drain_in_flight(&mut in_flight, sess.clone(), turn_context.clone()).await?;
+    let handoff = if response_completed {
+        drain_in_flight(&mut in_flight, sess.clone(), turn_context.clone()).await?
+    } else {
+        // A cancelled or incomplete stream never commits a terminal handoff.
+        in_flight.clear();
+        None
+    };
     drop(tool_blocking_timing_guard);
 
     if should_emit_token_count {
@@ -2774,7 +2858,10 @@ async fn try_run_sampling_request(
         }
     }
 
-    outcome
+    outcome.map(|mut result| {
+        result.handoff = handoff;
+        result
+    })
 }
 
 pub(crate) fn get_last_assistant_message_from_turn<'a>(

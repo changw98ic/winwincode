@@ -430,29 +430,42 @@ async fn apply_hunks_with_options(
     sandbox: Option<&FileSystemSandboxContext>,
 ) -> Result<AppliedPatchDelta, ApplyPatchFailure> {
     let mut delta = AppliedPatchDelta::empty();
+    let snapshots = match snapshot_patch(hunks, cwd, fs, sandbox, options.follow_symlinks).await {
+        Ok(snapshots) => snapshots,
+        Err(error) => return report_apply_error(error, delta, stderr),
+    };
     match apply_hunks_to_files(hunks, options, cwd, fs, sandbox, &mut delta).await {
         Ok(affected_paths) => {
-            print_summary(&affected_paths, stdout).map_err(|error| {
-                ApplyPatchFailure::new(ApplyPatchError::from(error), delta.clone())
-            })?;
+            if let Err(error) = print_summary(&affected_paths, stdout) {
+                rollback_patch(&snapshots, options.follow_symlinks, fs, sandbox, &mut delta).await;
+                return Err(ApplyPatchFailure::new(ApplyPatchError::from(error), delta));
+            }
             Ok(delta)
         }
         Err(error) => {
-            let msg = error.to_string();
-            writeln!(stderr, "{msg}").map_err(|error| {
-                ApplyPatchFailure::new(ApplyPatchError::from(error), delta.clone())
-            })?;
-            let error = if let Some(io) = error.downcast_ref::<std::io::Error>() {
-                ApplyPatchError::from(io)
-            } else {
-                ApplyPatchError::IoError(IoError {
-                    context: msg,
-                    source: std::io::Error::other(error),
-                })
-            };
-            Err(ApplyPatchFailure::new(error, delta))
+            rollback_patch(&snapshots, options.follow_symlinks, fs, sandbox, &mut delta).await;
+            report_apply_error(error, delta, stderr)
         }
     }
+}
+
+fn report_apply_error(
+    error: anyhow::Error,
+    delta: AppliedPatchDelta,
+    stderr: &mut impl std::io::Write,
+) -> Result<AppliedPatchDelta, ApplyPatchFailure> {
+    let msg = error.to_string();
+    writeln!(stderr, "{msg}")
+        .map_err(|error| ApplyPatchFailure::new(ApplyPatchError::from(error), delta.clone()))?;
+    let error = if let Some(io) = error.downcast_ref::<std::io::Error>() {
+        ApplyPatchError::from(io)
+    } else {
+        ApplyPatchError::IoError(IoError {
+            context: msg,
+            source: std::io::Error::other(error),
+        })
+    };
+    Err(ApplyPatchFailure::new(error, delta))
 }
 
 /// Applies each parsed patch hunk to the filesystem.
@@ -463,6 +476,113 @@ pub struct AffectedPaths {
     pub added: Vec<PathBuf>,
     pub modified: Vec<PathBuf>,
     pub deleted: Vec<PathBuf>,
+}
+
+enum OriginalPath {
+    Missing,
+    File(Vec<u8>),
+    Other,
+}
+
+struct PathSnapshot {
+    path: PathUri,
+    original: OriginalPath,
+}
+
+async fn snapshot_patch(
+    hunks: &[Hunk],
+    cwd: &PathUri,
+    fs: &dyn ExecutorFileSystem,
+    sandbox: Option<&FileSystemSandboxContext>,
+    follow_symlinks: bool,
+) -> anyhow::Result<Vec<PathSnapshot>> {
+    let mut snapshots = Vec::new();
+    for hunk in hunks {
+        let path = hunk.resolve_path(cwd)?;
+        let reject_leaf_symlink = matches!(
+            hunk,
+            Hunk::DeleteFile { .. }
+                | Hunk::UpdateFile {
+                    move_path: Some(_),
+                    ..
+                }
+        );
+        snapshot_path(
+            path,
+            reject_leaf_symlink,
+            follow_symlinks,
+            fs,
+            sandbox,
+            &mut snapshots,
+        )
+        .await?;
+        if let Hunk::UpdateFile {
+            move_path: Some(destination),
+            ..
+        } = hunk
+        {
+            snapshot_path(
+                cwd.join(&destination.to_string_lossy())?,
+                false,
+                follow_symlinks,
+                fs,
+                sandbox,
+                &mut snapshots,
+            )
+            .await?;
+        }
+    }
+    Ok(snapshots)
+}
+
+async fn snapshot_path(
+    path: PathUri,
+    reject_leaf_symlink: bool,
+    follow_symlinks: bool,
+    fs: &dyn ExecutorFileSystem,
+    sandbox: Option<&FileSystemSandboxContext>,
+    snapshots: &mut Vec<PathSnapshot>,
+) -> anyhow::Result<()> {
+    if snapshots.iter().any(|snapshot| snapshot.path == path) {
+        return Ok(());
+    }
+    if reject_leaf_symlink
+        && fs
+            .get_metadata(
+                &path,
+                GetMetadataOptions {
+                    follow_symlinks: true,
+                },
+                sandbox,
+            )
+            .await
+            .is_ok_and(|metadata| metadata.is_symlink)
+    {
+        anyhow::bail!(
+            "Cannot atomically remove symbolic link {}",
+            path.inferred_native_path_string()
+        );
+    }
+    let original = match fs
+        .get_metadata(&path, GetMetadataOptions { follow_symlinks }, sandbox)
+        .await
+    {
+        Ok(metadata) if metadata.is_file => OriginalPath::File(
+            fs.read_file(&path, ReadFileOptions { follow_symlinks }, sandbox)
+                .await
+                .with_context(|| {
+                    format!(
+                        "Failed to snapshot file {}",
+                        path.inferred_native_path_string()
+                    )
+                })?,
+        ),
+        Ok(_) => OriginalPath::Other,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => OriginalPath::Missing,
+        Err(error) => return Err(error.into()),
+    };
+    snapshots.push(PathSnapshot { path, original });
+    Ok(())
 }
 
 /// Apply the hunks to the filesystem, returning which files were added, modified, or deleted.
@@ -723,6 +843,49 @@ async fn apply_hunks_to_files(
         modified,
         deleted,
     })
+}
+
+async fn rollback_patch(
+    snapshots: &[PathSnapshot],
+    follow_symlinks: bool,
+    fs: &dyn ExecutorFileSystem,
+    sandbox: Option<&FileSystemSandboxContext>,
+    delta: &mut AppliedPatchDelta,
+) {
+    let mut exact = true;
+    for snapshot in snapshots.iter().rev() {
+        let result = match &snapshot.original {
+            OriginalPath::Missing => fs
+                .remove(
+                    &snapshot.path,
+                    RemoveOptions {
+                        recursive: false,
+                        force: true,
+                        follow_symlinks,
+                    },
+                    sandbox,
+                )
+                .await
+                .map_err(anyhow::Error::from),
+            OriginalPath::File(contents) => {
+                write_file_with_missing_parent_retry(
+                    fs,
+                    &snapshot.path,
+                    contents.clone(),
+                    follow_symlinks,
+                    sandbox,
+                )
+                .await
+            }
+            OriginalPath::Other => Ok(()),
+        };
+        exact &= result.is_ok();
+    }
+    if exact {
+        *delta = AppliedPatchDelta::empty();
+    } else {
+        delta.exact = false;
+    }
 }
 
 async fn ensure_not_directory(
@@ -1106,7 +1269,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn test_failed_move_returns_committed_destination_delta() {
+    async fn test_failed_move_rolls_back_destination() {
         use std::os::unix::fs::PermissionsExt;
 
         let dir = tempdir().unwrap();
@@ -1142,21 +1305,9 @@ mod tests {
                 .unwrap()
                 .contains(&format!("Failed to remove original {}", src.display()))
         );
-        assert_eq!(
-            failure.delta(),
-            &AppliedPatchDelta::new(
-                vec![AppliedPatchChange {
-                    path: PathUri::from_host_native_path(&dest).expect("absolute destination path"),
-                    change: AppliedPatchFileChange::Add {
-                        content: "line2\n".to_string(),
-                        overwritten_content: None,
-                    },
-                }],
-                /*exact*/ true,
-            )
-        );
+        assert_eq!(failure.delta(), &AppliedPatchDelta::empty());
         assert_eq!(fs::read_to_string(src).unwrap(), "line\n");
-        assert_eq!(fs::read_to_string(dest).unwrap(), "line2\n");
+        assert!(!dest.exists());
     }
 
     /// Verify that a single `Update File` hunk with multiple change chunks can update different
@@ -1359,7 +1510,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn test_apply_patch_fails_on_write_error() {
+    async fn test_apply_patch_write_error_leaves_no_partial_file() {
         use std::os::unix::fs::PermissionsExt;
 
         let dir = tempdir().unwrap();
@@ -1384,7 +1535,8 @@ mod tests {
 
         fs::set_permissions(&locked_dir, fs::Permissions::from_mode(0o755)).unwrap();
 
-        assert!(!failure.delta().is_exact());
+        assert_eq!(failure.delta(), &AppliedPatchDelta::empty());
+        assert!(!locked_dir.join("new.txt").exists());
     }
 
     #[tokio::test]
@@ -1418,7 +1570,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn test_delete_symlink_returns_inexact_delta() {
+    async fn test_delete_symlink_is_rejected_without_modification() {
         use std::os::unix::fs::symlink;
 
         let dir = tempdir().unwrap();
@@ -1428,7 +1580,7 @@ mod tests {
 
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        let delta = apply_patch(
+        let failure = apply_patch(
             &patch,
             &PathUri::from_host_native_path(dir.path()).expect("absolute test path"),
             &mut stdout,
@@ -1437,8 +1589,17 @@ mod tests {
             /*sandbox*/ None,
         )
         .await
-        .unwrap();
+        .expect_err("symlink deletion cannot be rolled back");
 
-        assert!(!delta.is_exact());
+        assert_eq!(failure.delta(), &AppliedPatchDelta::empty());
+        assert!(
+            fs::symlink_metadata(dir.path().join("link.txt"))
+                .unwrap()
+                .is_symlink()
+        );
+        assert_eq!(
+            fs::read_to_string(dir.path().join("target.txt")).unwrap(),
+            "target\n"
+        );
     }
 }

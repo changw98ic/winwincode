@@ -293,22 +293,22 @@ impl<'storage> WorkerLaunchGrantService<'storage> {
             .newest_grant_for_product_session(product_session_id)?)
     }
 
-    /// Returns the newest launch grant anchored to one `StrongFlow` stage run,
-    /// if any, whatever its lifecycle state (`FLOW-100.5`): the per-stage
+    /// Returns the newest launch grant anchored to one `StrongFlow` `WorkRun`,
+    /// if any, whatever its lifecycle state (`FLOW-100.5`): the per-WorkRun
     /// anchor routes that role's job to the exact `WorkerSession` the Client
     /// launched for it.
     ///
     /// # Errors
     ///
-    /// Rejects a non-canonical stage run identity or storage failure.
-    pub fn newest_grant_for_stage_run(
+    /// Rejects a non-canonical `WorkRun` identity or storage failure.
+    pub fn newest_grant_for_work_run(
         &mut self,
-        stage_run_id: &str,
+        work_run_id: &str,
     ) -> Result<Option<WorkerLaunchGrantRecord>, WorkerLaunchGrantServiceError> {
         Ok(self
             .storage
             .worker_launch_grant_ledger()?
-            .newest_grant_for_stage_run(stage_run_id)?)
+            .newest_grant_for_work_run(work_run_id)?)
     }
 
     /// Counts the non-terminal grants of one client node — the durable
@@ -514,7 +514,10 @@ mod tests {
             format!("winst_{}", suffix(seed + 10)),
             DIGEST,
             Some(format!("ps_{}", suffix(seed + 11))),
-            Some(format!("run_{}", suffix(seed + 12))),
+            Some(winwincode_domain::WorkRunId(format!(
+                "wrn_{}",
+                suffix(seed + 12)
+            ))),
             instant("2026-01-01T01:00:00.000Z"),
         )
         .expect("issuance")

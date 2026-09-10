@@ -3,7 +3,7 @@
 use winwincode_delivery::domain::{
     AcceptanceCriterionId, CriterionResult, CriterionResultId, CriterionVerdict, DeliveryId,
     DeliverySpecId, DeliveryVerdict, DeliveryVerdictId, EvidenceId, EvidenceRef, EvidenceRefType,
-    StageRunId,
+    WorkRunId,
 };
 use winwincode_test_assets::manifest::{
     TEST_ASSET_MANIFEST_SCHEMA_VERSION, TestAsset, TestAssetAuthority, TestAssetGate,
@@ -49,7 +49,7 @@ fn evidence(evidence_type: EvidenceRefType) -> EvidenceRef {
         delivery_id: DeliveryId("dlv_01ARZ3NDEKTSV4RRFFQ69G5FAV".into()),
         delivery_spec_id: DeliverySpecId("spec-1".into()),
         delivery_spec_revision: 1,
-        stage_run_id: StageRunId("stage-run-1".into()),
+        work_run_id: WorkRunId("wrn_01ARZ3NDEKTSV4RRFFQ69G5FAV".into()),
         session_binding_id: winwincode_delivery::domain::SessionBindingId("binding-1".into()),
         candidate_ref: CANDIDATE_REF.into(),
         evidence_type,

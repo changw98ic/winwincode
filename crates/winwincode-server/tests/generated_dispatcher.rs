@@ -378,7 +378,7 @@ fn assert_command_families() {
         (CommandName::DeliveryCreate, CommandFamily::Delivery),
         (CommandName::DeliveryUpdateSpec, CommandFamily::Delivery),
         (
-            CommandName::DeliveryApproveTaskBreakdown,
+            CommandName::DeliveryTaskBreakdownCreate,
             CommandFamily::Delivery,
         ),
         (CommandName::DeliveryAdvance, CommandFamily::Delivery),
@@ -523,7 +523,10 @@ fn representative_generated_commands_reach_each_application_family() {
         command_fixture(
             "delivery.advance",
             &repository_scope(),
-            &json!({ "deliveryId": "dlv_00000000000000000000000001" }),
+            &json!({
+                "deliveryId": "dlv_00000000000000000000000001",
+                "dispatchProfile": "planner"
+            }),
         ),
         settings_command(),
         command_fixture(

@@ -18,14 +18,15 @@ use winwincode_api::generated::{
     ApprovalDecidePayload, ApprovalEffectiveDecisionScope, ApprovalGetQuery,
     ApprovalGetResultResponse, ApprovalGetResultResponseQuery, ApprovalListQuery,
     ApprovalListResultResponse, ApprovalListResultResponseQuery, ApprovalPage, ApprovalPageKind,
-    ApprovalProjection, ApprovalProjectionCategory, ApprovalSanitizedDetailProjection,
-    ApprovalSanitizedDetailProjectionKind, ApprovalSanitizedDetailUnavailableReason,
-    ChatApprovalInteractionProjection, ChatApprovalInteractionProjectionKind,
-    ChatInputInteractionProjection, ChatInputInteractionProjectionKind,
-    ChatInteractionBindingProjection, ChatInteractionListQuery, ChatInteractionListResultResponse,
-    ChatInteractionListResultResponseQuery, ChatInteractionOptionProjection, ChatInteractionPage,
-    ChatInteractionPageKind, ChatInteractionProjection,
-    ControlPlaneWebSocketApprovalListReloadQuery,
+    ApprovalProjection, ApprovalProjectionCategory, ApprovalSanitizedDetailAvailableProjection,
+    ApprovalSanitizedDetailAvailableProjectionKind, ApprovalSanitizedDetailProjection,
+    ApprovalSanitizedDetailUnavailableProjection, ApprovalSanitizedDetailUnavailableProjectionKind,
+    ApprovalSanitizedDetailUnavailableReason, ChatApprovalInteractionProjection,
+    ChatApprovalInteractionProjectionKind, ChatInputInteractionProjection,
+    ChatInputInteractionProjectionKind, ChatInteractionBindingProjection, ChatInteractionListQuery,
+    ChatInteractionListResultResponse, ChatInteractionListResultResponseQuery,
+    ChatInteractionOptionProjection, ChatInteractionPage, ChatInteractionPageKind,
+    ChatInteractionProjection, ControlPlaneWebSocketApprovalListReloadQuery,
     ControlPlaneWebSocketChatInteractionListReloadQuery,
     ControlPlaneWebSocketChatInteractionsInvalidatedEvent,
     ControlPlaneWebSocketChatInteractionsInvalidatedEventTypeValue, InputRespondPayload, PageInfo,
@@ -35,7 +36,9 @@ use winwincode_domain::{
     ProductSessionId, Revision, SchemaVersion, Sha256Digest,
 };
 use winwincode_execution_port::generated::{
-    ApprovalActionCategory, ApprovalRequestMessage, InputRequestMessage,
+    ApprovalActionCategory, ApprovalActionOperation, ApprovalActionReasonCode,
+    ApprovalActionRiskLevel, ApprovalActionSanitizedDetail, ApprovalRequestMessage,
+    InputRequestMessage,
 };
 
 /// Durable, secret-safe event used to rebuild the browser projection.
@@ -238,8 +241,8 @@ impl ChatInteractionProjectionLedger {
         })
     }
 
-    /// Records one approval request. `action.details` is intentionally never
-    /// copied; the browser receives only the public action summary.
+    /// Records one approval request. The browser receives only producer-owned,
+    /// typed safe facts; raw command and patch payloads stay private.
     pub fn record_approval_request(
         &mut self,
         request: &ApprovalRequestMessage,
@@ -256,6 +259,26 @@ impl ChatInteractionProjectionLedger {
             ));
         }
         let revision = Revision(self.next_revision()?);
+        let sanitized_detail = request
+            .action
+            .sanitized_detail
+            .as_ref()
+            .filter(|detail| valid_approval_detail(&request.action.category, detail))
+            .map_or_else(
+                || {
+                    ApprovalSanitizedDetailProjection::ApprovalSanitizedDetailUnavailableProjection(
+                        ApprovalSanitizedDetailUnavailableProjection {
+                            kind: ApprovalSanitizedDetailUnavailableProjectionKind::Unavailable,
+                            reason: ApprovalSanitizedDetailUnavailableReason::ProducerUnavailable,
+                        },
+                    )
+                },
+                project_approval_detail,
+            );
+        let decision_enabled = matches!(
+            &sanitized_detail,
+            ApprovalSanitizedDetailProjection::ApprovalSanitizedDetailAvailableProjection(_)
+        );
         let projection = ApprovalProjection {
             binding: binding_from_request(
                 &request.lease.job_id,
@@ -263,19 +286,13 @@ impl ChatInteractionProjectionLedger {
                 &request.session_identity,
             ),
             category: projection_category(&request.action.category),
+            decision_enabled,
             effective_decision_scope: ApprovalEffectiveDecisionScope::Once,
             expires_at: request.expires_at.clone(),
             id: request.approval_id.clone(),
             requested_at: request.sent_at.clone(),
             revision: revision.clone(),
-            sanitized_detail: ApprovalSanitizedDetailProjection {
-                kind: ApprovalSanitizedDetailProjectionKind::Unavailable,
-                reason: if request.action.details.is_some() {
-                    ApprovalSanitizedDetailUnavailableReason::EncodedPayloadRedacted
-                } else {
-                    ApprovalSanitizedDetailUnavailableReason::ProducerUnavailable
-                },
-            },
+            sanitized_detail,
             state: "pending".to_owned(),
             subject: request.action.summary.clone(),
         };
@@ -672,7 +689,12 @@ impl ChatInteractionProjectionLedger {
                     projection,
                 } => {
                     register_source(&mut source_messages, source_message_id, "approval")?;
-                    if projection.revision.0 <= result.revision
+                    if projection.decision_enabled
+                        != matches!(
+                            &projection.sanitized_detail,
+                            ApprovalSanitizedDetailProjection::ApprovalSanitizedDetailAvailableProjection(_)
+                        )
+                        || projection.revision.0 <= result.revision
                         || result
                             .approvals
                             .insert(projection.id.clone(), projection.clone())
@@ -791,6 +813,64 @@ fn projection_category(category: &ApprovalActionCategory) -> ApprovalProjectionC
         ApprovalActionCategory::Network => ApprovalProjectionCategory::Network,
         ApprovalActionCategory::Shell => ApprovalProjectionCategory::Shell,
     }
+}
+
+fn valid_approval_detail(
+    category: &ApprovalActionCategory,
+    detail: &ApprovalActionSanitizedDetail,
+) -> bool {
+    !detail.target_summaries.is_empty()
+        && detail.target_count >= i64::try_from(detail.target_summaries.len()).unwrap_or(i64::MAX)
+        && match category {
+            ApprovalActionCategory::FilesystemWrite => {
+                detail.operation == ApprovalActionOperation::Modify
+                    && detail.reason_code == ApprovalActionReasonCode::FilesystemWrite
+                    && detail.working_directory.is_none()
+            }
+            ApprovalActionCategory::Network => {
+                detail.operation == ApprovalActionOperation::Execute
+                    && detail.reason_code == ApprovalActionReasonCode::NetworkAccess
+            }
+            ApprovalActionCategory::Shell => {
+                detail.operation == ApprovalActionOperation::Execute
+                    && matches!(
+                        detail.reason_code,
+                        ApprovalActionReasonCode::SandboxEscalation
+                            | ApprovalActionReasonCode::NetworkAccess
+                    )
+            }
+            ApprovalActionCategory::Mcp => false,
+        }
+}
+
+fn project_approval_detail(
+    detail: &ApprovalActionSanitizedDetail,
+) -> ApprovalSanitizedDetailProjection {
+    ApprovalSanitizedDetailProjection::ApprovalSanitizedDetailAvailableProjection(
+        ApprovalSanitizedDetailAvailableProjection {
+            kind: ApprovalSanitizedDetailAvailableProjectionKind::Available,
+            operation: match detail.operation {
+                ApprovalActionOperation::Execute => "execute",
+                ApprovalActionOperation::Modify => "modify",
+            }
+            .to_owned(),
+            reason_code: match detail.reason_code {
+                ApprovalActionReasonCode::SandboxEscalation => "sandbox_escalation",
+                ApprovalActionReasonCode::NetworkAccess => "network_access",
+                ApprovalActionReasonCode::FilesystemWrite => "filesystem_write",
+            }
+            .to_owned(),
+            request_sha256: detail.request_sha256.clone(),
+            risk_level: match detail.risk_level {
+                ApprovalActionRiskLevel::Medium => "medium",
+                ApprovalActionRiskLevel::High => "high",
+            }
+            .to_owned(),
+            target_count: detail.target_count,
+            target_summaries: detail.target_summaries.clone(),
+            working_directory: detail.working_directory.clone(),
+        },
+    )
 }
 
 fn validate_pending(

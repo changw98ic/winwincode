@@ -22,19 +22,17 @@ use tokio_rustls::TlsConnector;
 use tokio_tungstenite::client_async;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use winwincode_api::generated::{
-    Actor, ControlPlaneWebSocketProtocolErrorFrame, EnterpriseIdentityUpdateCommand, Error,
-    ErrorDetailValue, ErrorEnvelope, OrganizationScope, OrganizationScopeKind, RetryableErrorCode,
-    Scope, TerminalErrorCode, UserActor, UserActorKind,
+    Actor, ControlPlaneWebSocketProtocolErrorFrame, Error, ErrorDetailValue, ErrorEnvelope,
+    OrganizationScope, OrganizationScopeKind, RetryableErrorCode, Scope, TerminalErrorCode,
 };
-use winwincode_control_plane::{EnterpriseIdentityService, generate_api_token};
-use winwincode_domain::{ApiTokenId, Instant, OrganizationId, UserAccountRole, UserId};
+use winwincode_domain::{
+    Instant, OrganizationId, UserAccountRole, UserActor, UserActorKind, UserId,
+};
 use winwincode_server::{
     ApiError, AuthSessionBootstrap, AuthSessionConfig, AuthenticatedPrincipal, ControlPlaneApiPort,
-    EnterpriseRequestAuthenticator, EventSubscription, RequestAuthenticator, RunningServer,
-    ServerConfig, ServerError, ServerTls, SqliteAuthSessionManager, UserAccountService,
-    start_server as start_server_with_authenticator,
+    EventSubscription, RequestAuthenticator, RunningServer, ServerConfig, ServerError, ServerTls,
+    SqliteAuthSessionManager, UserAccountService, start_server as start_server_with_authenticator,
 };
-use winwincode_storage::SqliteStorage;
 
 const FIXTURE_SECRET: &str = "sk-fixturecredentialleakgate1234567890";
 const BOOTSTRAP_PROOF: &str = "test-bootstrap-proof";
@@ -243,7 +241,7 @@ async fn start_server(
     api: Arc<dyn ControlPlaneApiPort>,
 ) -> Result<RunningServer, ServerError> {
     let authenticator: Arc<dyn RequestAuthenticator> = sessions.clone();
-    start_server_with_authenticator(config, sessions, authenticator, api, None).await
+    start_server_with_authenticator(config, sessions, authenticator, api).await
 }
 
 async fn http_request(address: SocketAddr, request: &str) -> String {
@@ -489,121 +487,6 @@ async fn connect_websocket_session(
         .expect("upgrade WebSocket");
     assert_eq!(response.status(), 101);
     socket
-}
-
-async fn connect_websocket_bearer(
-    address: SocketAddr,
-    bearer: &str,
-) -> tokio_tungstenite::WebSocketStream<TcpStream> {
-    let websocket_url = format!("ws://{address}/api/v1/events");
-    let mut request = websocket_url
-        .into_client_request()
-        .expect("WebSocket request");
-    request.headers_mut().insert(
-        "Authorization",
-        format!("Bearer {bearer}")
-            .parse()
-            .expect("authorization header"),
-    );
-    request.headers_mut().insert(
-        "Origin",
-        "https://client.example".parse().expect("origin header"),
-    );
-    let stream = TcpStream::connect(address)
-        .await
-        .expect("connect WebSocket");
-    let (socket, response) = client_async(request, stream)
-        .await
-        .expect("upgrade WebSocket");
-    assert_eq!(response.status(), 101);
-    socket
-}
-
-fn create_enterprise_api_token(identity: &EnterpriseIdentityService) -> (ApiTokenId, String) {
-    let account: EnterpriseIdentityUpdateCommand = serde_json::from_value(json!({
-        "schemaVersion": "winwincode/v1",
-        "command": "enterprise.identity.update",
-        "actor": {
-            "kind": "user",
-            "id": "usr_00000000000000000000000001"
-        },
-        "scope": {
-            "kind": "organization",
-            "organizationId": "org_00000000000000000000000001"
-        },
-        "requestId": "req_00000000000000000000000081",
-        "expectedRevision": 0,
-        "payload": {
-            "kind": "service_account",
-            "action": "upsert",
-            "serviceAccountId": "svc_00000000000000000000000001",
-            "displayName": "Transport fixture",
-            "authorizedScopes": [{
-                "kind": "repository",
-                "organizationId": "org_00000000000000000000000001",
-                "workspaceId": "wsp_00000000000000000000000001",
-                "projectId": "prj_00000000000000000000000001",
-                "repositoryId": "rep_00000000000000000000000001"
-            }]
-        }
-    }))
-    .expect("Service Account command");
-    identity.update(&account).expect("create Service Account");
-
-    let api_token_id = ApiTokenId("tok_00000000000000000000000001".to_owned());
-    let mut generated = generate_api_token(api_token_id.clone()).expect("generate API Token");
-    let issue: EnterpriseIdentityUpdateCommand = serde_json::from_value(json!({
-        "schemaVersion": "winwincode/v1",
-        "command": "enterprise.identity.update",
-        "actor": {
-            "kind": "user",
-            "id": "usr_00000000000000000000000001"
-        },
-        "scope": {
-            "kind": "organization",
-            "organizationId": "org_00000000000000000000000001"
-        },
-        "requestId": "req_00000000000000000000000082",
-        "expectedRevision": 0,
-        "payload": {
-            "kind": "api_token",
-            "action": "issue",
-            "apiTokenId": api_token_id,
-            "serviceAccountId": "svc_00000000000000000000000001",
-            "tokenSha256": generated.token_sha256(),
-            "expiresAt": "2030-01-01T00:00:00.000Z"
-        }
-    }))
-    .expect("API Token issue command");
-    identity.update(&issue).expect("issue API Token");
-    (
-        generated.api_token_id().clone(),
-        generated.take_raw().expect("raw Token is returned once"),
-    )
-}
-
-fn revoke_enterprise_api_token(identity: &EnterpriseIdentityService, api_token_id: &ApiTokenId) {
-    let revoke: EnterpriseIdentityUpdateCommand = serde_json::from_value(json!({
-        "schemaVersion": "winwincode/v1",
-        "command": "enterprise.identity.update",
-        "actor": {
-            "kind": "user",
-            "id": "usr_00000000000000000000000001"
-        },
-        "scope": {
-            "kind": "organization",
-            "organizationId": "org_00000000000000000000000001"
-        },
-        "requestId": "req_00000000000000000000000083",
-        "expectedRevision": 1,
-        "payload": {
-            "kind": "api_token",
-            "action": "revoke",
-            "apiTokenId": api_token_id
-        }
-    }))
-    .expect("API Token revoke command");
-    identity.update(&revoke).expect("revoke API Token");
 }
 
 async fn assert_logout_revokes(address: SocketAddr, session_cookie: &str) {
@@ -941,109 +824,6 @@ async fn live_websocket_sends_queued_revocation_before_authorization_close() {
     };
     assert_eq!(u16::from(frame.code), 4403);
     running.shutdown().await.expect("shutdown");
-}
-
-#[tokio::test]
-async fn enterprise_api_token_authenticates_http_and_websocket_until_revoked() {
-    let identity_directory = test_directory("winwincode-identity-transport-test");
-    let identity = Arc::new(EnterpriseIdentityService::new(Box::new(
-        SqliteStorage::open(&identity_directory).expect("identity storage"),
-    )));
-    let (api_token_id, raw_token) = create_enterprise_api_token(&identity);
-    let authenticated = identity
-        .authenticate_bearer(&raw_token)
-        .expect("authenticate current API Token");
-    let principal =
-        AuthenticatedPrincipal::new(authenticated.actor, authenticated.authorized_scopes)
-            .expect("authenticated principal");
-    assert_eq!(principal.subject(), "svc_00000000000000000000000001");
-    assert!(!principal.authorizes(&fixture_scope(9)));
-
-    let sessions = auth();
-    let authenticator: Arc<dyn RequestAuthenticator> = Arc::new(
-        EnterpriseRequestAuthenticator::new(Arc::clone(&sessions), Arc::clone(&identity)),
-    );
-    let api = Arc::new(FakeApi::default());
-    let running = start_server_with_authenticator(
-        config("127.0.0.1:0".parse().expect("address")),
-        Arc::clone(&sessions),
-        authenticator,
-        api.clone(),
-        None,
-    )
-    .await
-    .expect("start enterprise-authenticated server");
-    let address = running.local_address();
-
-    let query = http_request(
-        address,
-        &post(
-            "/api/v1/queries",
-            r#"{"schemaVersion":"winwincode/v1","query":"settings.get"}"#,
-            "https://client.example",
-            &raw_token,
-        ),
-    )
-    .await;
-    assert!(query.starts_with("HTTP/1.1 200 OK"), "{query}");
-    assert!(!query.contains(&raw_token));
-    assert_eq!(
-        api.queries.lock().expect("queries")[0].0,
-        "svc_00000000000000000000000001"
-    );
-
-    let mut socket = connect_websocket_bearer(address, &raw_token).await;
-    socket
-        .send(tokio_tungstenite::tungstenite::Message::Text(
-            r#"{"type":"transport.subscribe.v1"}"#.into(),
-        ))
-        .await
-        .expect("subscribe with API Token");
-    let accepted = socket
-        .next()
-        .await
-        .expect("accepted")
-        .expect("accepted frame");
-    assert!(
-        accepted
-            .to_text()
-            .expect("text")
-            .contains("subscription-accepted")
-    );
-    socket.next().await.expect("event").expect("event frame");
-
-    revoke_enterprise_api_token(&identity, &api_token_id);
-    let rejected = http_request(
-        address,
-        &post(
-            "/api/v1/queries",
-            r#"{"schemaVersion":"winwincode/v1","query":"settings.get"}"#,
-            "https://client.example",
-            &raw_token,
-        ),
-    )
-    .await;
-    assert!(
-        rejected.starts_with("HTTP/1.1 401 Unauthorized"),
-        "{rejected}"
-    );
-    assert!(!rejected.contains(&raw_token));
-    assert_eq!(api.queries.lock().expect("queries").len(), 1);
-
-    let closed = tokio::time::timeout(Duration::from_secs(2), socket.next())
-        .await
-        .expect("revoked Token close deadline")
-        .expect("revoked Token close frame")
-        .expect("valid revoked Token close frame");
-    let tokio_tungstenite::tungstenite::Message::Close(Some(frame)) = closed else {
-        panic!("revoked API Token must close WebSocket with a reason");
-    };
-    assert_eq!(u16::from(frame.code), 4403);
-
-    running.shutdown().await.expect("shutdown");
-    drop(identity);
-    drop(sessions);
-    fs::remove_dir_all(identity_directory).expect("remove identity directory");
 }
 
 #[tokio::test]

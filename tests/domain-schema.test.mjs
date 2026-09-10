@@ -46,8 +46,8 @@ const COMMAND_NAMES = Object.freeze([
   'session.close',
   'delivery.create',
   'delivery.update_spec',
-  'delivery.approve_task_breakdown',
   'delivery.advance',
+  'workrun.cancel',
   'delivery.resolve_attention',
   'delivery.submit_verdict',
   'settings.update',
@@ -71,6 +71,7 @@ const COMMAND_NAMES = Object.freeze([
   'enterprise.identity.update',
   'collaboration.notification.ack',
   'collaboration.presence.update',
+  'delivery.task_breakdown.create',
 ])
 const DELIVERY_STATUSES = Object.freeze([
   'draft',
@@ -429,7 +430,7 @@ test('DeliveryProjection exposes a minimal page view with complete repository ow
       completed: 1,
       failed: 0,
     },
-    activeStageRunId: 'run_01J00000000000000000000000',
+    activeWorkRunId: 'wrn_01J00000000000000000000000',
     openAttentionCount: 0,
     updatedAt: '2026-08-24T09:10:11.123Z',
   }
@@ -437,7 +438,7 @@ test('DeliveryProjection exposes a minimal page view with complete repository ow
   assert.deepEqual(schema.$defs.DeliveryStatus.enum, DELIVERY_STATUSES)
   assert.deepEqual(schema.$defs.DeliveryTaskStatus.enum, DELIVERY_TASK_STATUSES)
   assertValid(schema, 'DeliveryProjection', projection)
-  assertValid(schema, 'DeliveryProjection', { ...projection, activeStageRunId: null })
+  assertValid(schema, 'DeliveryProjection', { ...projection, activeWorkRunId: null })
 
   const { organizationId: _organizationId, ...incompleteOwnership } = projection.ownership
   assertInvalid(schema, 'DeliveryProjection', {
@@ -470,8 +471,8 @@ test('runtime projection scope is either Chat or one complete Delivery stage', a
   const validateSnapshot = ajvDefinitionValidator(schema, 'RuntimeProjectionSnapshot')
   const session = {
     sessionBindingId: 'binding:runtime:1',
-    stageRunId: null,
-    deliveryTaskId: null,
+    workRunId: null,
+    workItemId: null,
     productSessionId: 'psn_01J00000000000000000000000',
     workerSessionId: 'wsn_01J00000000000000000000000',
     codexThreadId: 'cdx_01J00000000000000000000000',
@@ -521,7 +522,7 @@ test('runtime projection scope is either Chat or one complete Delivery stage', a
     },
     productSessionId: session.productSessionId,
     deliveryId: null,
-    stageRunId: null,
+    workRunId: null,
     lastProjectionSequence: 1,
     sessions: [session],
     rebuiltAt: '2026-08-24T09:10:12.123Z',
@@ -537,7 +538,7 @@ test('runtime projection scope is either Chat or one complete Delivery stage', a
   }), false)
   assert.equal(validateSnapshot({
     ...snapshot,
-    stageRunId: 'run_01J00000000000000000000000',
+    workRunId: 'wrn_01J00000000000000000000000',
   }), false)
 
   const readCursor = {
@@ -569,10 +570,10 @@ test('runtime projection scope is either Chat or one complete Delivery stage', a
     readCursor,
     eventCursor: readCursor.eventCursor,
     deliveryId: readCursor.deliveryId,
-    stageRunId: 'run_01J00000000000000000000000',
+    workRunId: 'wrn_01J00000000000000000000000',
     sessions: [{
       ...session,
-      stageRunId: 'run_01J00000000000000000000000',
+      workRunId: 'wrn_01J00000000000000000000000',
     }],
   }), true, JSON.stringify(validateSnapshot.errors))
   assert.equal(validateSnapshot({ ...snapshot, readCursor }), false)
@@ -580,7 +581,7 @@ test('runtime projection scope is either Chat or one complete Delivery stage', a
     ...snapshot,
     readCursor,
     deliveryId: readCursor.deliveryId,
-    stageRunId: 'run_01J00000000000000000000000',
+    workRunId: 'wrn_01J00000000000000000000000',
     eventCursor: snapshot.eventCursor,
   }), false)
 })

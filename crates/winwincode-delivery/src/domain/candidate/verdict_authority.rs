@@ -105,6 +105,7 @@ impl ProductionRuntimePayload {
 /// Durable runtime facts for one independent verification role.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProductionVerificationRuntime {
+    role: VerificationRole,
     terminal: DeliveryTerminalOutcomeFacts,
     source: ValidatedGitSourceArtifact,
     events: Vec<ProductionRuntimeEvent>,
@@ -117,11 +118,13 @@ impl ProductionVerificationRuntime {
     /// derived from those sealed facts.
     #[must_use]
     pub fn from_durable(
+        role: VerificationRole,
         terminal: DeliveryTerminalOutcomeFacts,
         source: ValidatedGitSourceArtifact,
         events: Vec<ProductionRuntimeEvent>,
     ) -> Self {
         Self {
+            role,
             terminal,
             source,
             events,
@@ -135,11 +138,13 @@ impl ProductionVerificationRuntime {
     /// Artifact of its own.
     #[must_use]
     pub fn from_durable_read_only(
+        role: VerificationRole,
         terminal: DeliveryTerminalOutcomeFacts,
         candidate_source: ValidatedGitSourceArtifact,
         events: Vec<ProductionRuntimeEvent>,
     ) -> Self {
         Self {
+            role,
             terminal,
             source: candidate_source,
             events,
@@ -222,7 +227,7 @@ pub fn resolve_production_verdict(
         sessions.push(resolved.session);
         evidence.extend(resolved.evidence);
     }
-    let required_roles = required_roles(delivery)?;
+    let required_roles = required_roles(&roles)?;
     if roles.len() != required_roles.len()
         || required_roles.iter().any(|role| !roles.contains(role))
     {
@@ -272,30 +277,28 @@ fn resolve_verification_runtime(
         validated_git_snapshot_from_source(delivery, &runtime.source, &runtime.terminal)
     }
     .map_err(|error_value| resolution_error(&error_value))?;
-    let run = delivery
-        .snapshot()
-        .stage_runs
-        .iter()
-        .find(|run| run.id == *verified_terminal.stage_run_id())
-        .ok_or_else(|| error("verification terminal StageRun is missing"))?;
-    let role = verification_role(&run.role)?;
+    let role = runtime.role;
     let binding = delivery
         .snapshot()
         .session_bindings
         .iter()
-        .find(|binding| binding.stage_run_id == run.id)
+        .find(|binding| {
+            binding.execution_job_id == *verified_terminal.execution_job_id()
+                && binding.work_run_id == *verified_terminal.work_run_id()
+                && binding.attempt == verified_terminal.attempt()
+        })
         .ok_or_else(|| error("verification terminal SessionBinding is missing"))?;
     let terminal = if runtime.read_only_candidate_source {
         AcceptedVerificationJobOutcomeFact::from_verified_read_only_outcome(
             &verified_terminal,
             &snapshot,
-            run.role.clone(),
+            role.as_str(),
         )
     } else {
         AcceptedVerificationJobOutcomeFact::from_verified_outcome(
             &verified_terminal,
             &snapshot,
-            run.role.clone(),
+            role.as_str(),
         )
     }
     .map_err(|error_value| resolution_error(&error_value))?;
@@ -317,7 +320,7 @@ fn resolve_verification_runtime(
         role,
         session: VerificationSessionFacts {
             role,
-            stage_run_id: run.id.clone(),
+            work_run_id: binding.work_run_id.clone(),
             session_binding_id: binding.id.clone(),
             workspace_mode: VerificationWorkspaceMode::CandidateReadOnly,
             permission_profile: VerificationPermissionProfile::CandidateReadOnlyRestricted,
@@ -603,7 +606,7 @@ fn resolve_findings(
                     delivery,
                     candidate,
                     ResolveDeliveryEvidenceInput {
-                        stage_run_id: terminal.stage_run_id().clone(),
+                        work_run_id: terminal.work_run_id().clone(),
                         session_binding_id: session_binding_id.clone(),
                         source: EvidenceSource::Runtime {
                             evidence_type: source.evidence_type,
@@ -726,7 +729,7 @@ fn nested_i64(value: &Value, key: &str) -> Option<i64> {
 }
 
 fn required_roles(
-    delivery: &Delivery,
+    roles: &HashSet<VerificationRole>,
 ) -> Result<Vec<VerificationRole>, ProductionVerdictResolutionError> {
     let roles = [
         VerificationRole::Reviewer,
@@ -734,12 +737,7 @@ fn required_roles(
         VerificationRole::AdversarialVerifier,
     ]
     .into_iter()
-    .filter(|role| {
-        delivery.snapshot().stage_runs.iter().any(|run| {
-            run.stage == crate::domain::DeliveryStage::Verifying
-                && verification_role(&run.role).ok() == Some(*role)
-        })
-    })
+    .filter(|role| roles.contains(role))
     .collect::<Vec<_>>();
     if !matches!(
         roles.as_slice(),
@@ -751,19 +749,10 @@ fn required_roles(
             ]
     ) {
         return Err(error(
-            "Delivery does not contain the canonical verification roles",
+            "durable verification does not contain the canonical verification roles",
         ));
     }
     Ok(roles)
-}
-
-fn verification_role(value: &str) -> Result<VerificationRole, ProductionVerdictResolutionError> {
-    match value {
-        "reviewer" => Ok(VerificationRole::Reviewer),
-        "verifier" => Ok(VerificationRole::Verifier),
-        "adversarial-verifier" => Ok(VerificationRole::AdversarialVerifier),
-        _ => Err(error("verification StageRun role is not canonical")),
-    }
 }
 
 const fn role_order(role: VerificationRole) -> u8 {

@@ -20,22 +20,16 @@ use winwincode_execution_port::{
     generated::{
         ActionEnforcementDecision, ActionEnforcementReceiptMessage,
         ActionEnforcementReceiptMessageKind, ActionEnforcementRequestMessage,
-        ActionEnforcementRequestMessageKind, ActionPolicyKind, ActionPolicyMode,
-        ActionPolicyVersionReference,
+        ActionEnforcementRequestMessageKind,
     },
 };
 use winwincode_storage::{
-    EnterprisePolicyActor, EnterprisePolicyKind, EnterprisePolicyMode, EnterprisePolicyScope,
     NewOutboxEvent, ProductStateStorage, PublicEventActor, PublicEventScope, ReceiptIdentity,
     SqliteStorage, StateCommit, StorageError, public_actor_from_receipt_key, receipt_actor_key,
     receipt_scope_key, repository_scope_from_receipt_key,
 };
 
-use crate::{
-    EnterprisePolicyEnforcement, EnterprisePolicyEnforcementError,
-    EnterprisePolicyEnforcementRequest, enforce_enterprise_policy,
-    execution_port_service::{lease_stamp, load_runtime_replay_authority},
-};
+use crate::execution_port_service::{lease_stamp, load_runtime_replay_authority};
 
 const ACTION_RECEIPT_STREAM_PREFIX: &str = "action-enforcement-receipt:";
 const ACTION_RECEIPT_TOPIC: &str = "action.enforcement-receipt.issued";
@@ -97,12 +91,6 @@ impl From<StorageError> for ActionPolicyEnforcementError {
     }
 }
 
-impl From<EnterprisePolicyEnforcementError> for ActionPolicyEnforcementError {
-    fn from(_error: EnterprisePolicyEnforcementError) -> Self {
-        Self::new(ActionPolicyEnforcementErrorKind::Policy)
-    }
-}
-
 struct ResolvedActionAuthority {
     actor: UserId,
     scope: RepositoryScope,
@@ -140,8 +128,13 @@ pub fn issue_action_enforcement_receipt(
         return load_receipt(storage, issuer, &stream_id);
     }
 
-    let policy = evaluate_action_policy(storage, request, &authority, frozen_evaluated_at)?;
-    let receipt = build_action_receipt(issuer, request, &authority, &policy)?;
+    let receipt = build_action_receipt(
+        issuer,
+        request,
+        &authority,
+        &frozen_evaluated_at,
+        &command_digest,
+    )?;
     persist_action_receipt(
         storage,
         issuer,
@@ -221,77 +214,35 @@ fn resolve_action_authority(
     })
 }
 
-fn evaluate_action_policy(
-    storage: &mut SqliteStorage,
-    request: &ActionEnforcementRequestMessage,
-    authority: &ResolvedActionAuthority,
-    evaluated_at: winwincode_domain::Instant,
-) -> Result<EnterprisePolicyEnforcement, ActionPolicyEnforcementError> {
-    let policy_scope = EnterprisePolicyScope::Repository {
-        organization_id: authority.scope.organization_id.clone(),
-        workspace_id: authority.scope.workspace_id.clone(),
-        project_id: authority.scope.project_id.clone(),
-        repository_id: authority.scope.repository_id.clone(),
-    };
-    enforce_enterprise_policy(
-        storage,
-        &EnterprisePolicyEnforcementRequest {
-            actor: EnterprisePolicyActor::User {
-                id: authority.actor.clone(),
-            },
-            base_request_id: request.request_id.clone(),
-            scope: policy_scope,
-            policy_kind: storage_policy_kind(&request.policy_kind),
-            resource: request.resource.clone(),
-            subject_sha256: request.subject_sha256.clone(),
-            matched_condition_sha256: request.matched_condition_sha256.clone(),
-            evaluated_at,
-            exception_id: None,
-        },
-    )
-    .map_err(Into::into)
-}
-
 fn build_action_receipt(
     issuer: &ActionEnforcementIssuer,
     request: &ActionEnforcementRequestMessage,
     authority: &ResolvedActionAuthority,
-    policy: &EnterprisePolicyEnforcement,
+    evaluated_at: &winwincode_domain::Instant,
+    evaluation_sha256: &Sha256Digest,
 ) -> Result<ActionEnforcementReceiptMessage, ActionPolicyEnforcementError> {
-    let decision = &policy.receipt().audit.decision;
     let mut receipt = ActionEnforcementReceiptMessage {
         actor: UserActor {
             id: authority.actor.clone(),
             kind: UserActorKind::User,
         },
-        decision: if policy.is_permitted() {
-            ActionEnforcementDecision::Permit
-        } else {
-            ActionEnforcementDecision::Reject
-        },
-        evaluated_at: decision.evaluated_at.clone(),
-        evaluation_sha256: decision.decision_sha256.clone(),
+        decision: ActionEnforcementDecision::Permit,
+        evaluated_at: evaluated_at.clone(),
+        evaluation_sha256: evaluation_sha256.clone(),
         job_id: request.job_id.clone(),
         kind: ActionEnforcementReceiptMessageKind::ActionEnforcementReceipt,
         lease: request.lease.clone(),
         matched_condition_sha256: request.matched_condition_sha256.clone(),
         message_id: response_message_id(&request.request_id.0),
         policy_kind: request.policy_kind.clone(),
-        policy_mode: decision.policy_mode.map(action_policy_mode),
-        policy_version: decision.policy_version.as_ref().map(|version| {
-            ActionPolicyVersionReference {
-                effective_definition_sha256: version.effective_definition_sha256.clone(),
-                policy_id: version.policy_id.0.clone(),
-                version: i64::try_from(version.version).unwrap_or(i64::MAX),
-                version_digest: version.version_digest.clone(),
-            }
-        }),
+        policy_mode: None,
+        policy_version: None,
         receipt_signature: sha256(b"unsigned"),
         request_id: request.request_id.clone(),
         resource: request.resource.clone(),
         schema_version: SchemaVersion::WinwincodeV1,
         scope: authority.scope.clone(),
-        sent_at: decision.evaluated_at.clone(),
+        sent_at: evaluated_at.clone(),
         session_identity: request.session_identity.clone(),
         subject_sha256: request.subject_sha256.clone(),
         worker_session_id: request.worker_session_id.clone(),
@@ -450,21 +401,6 @@ fn validate_request_shape(
         return Err(invalid_request());
     }
     Ok(())
-}
-
-fn storage_policy_kind(kind: &ActionPolicyKind) -> EnterprisePolicyKind {
-    match kind {
-        ActionPolicyKind::Repository => EnterprisePolicyKind::Repository,
-        ActionPolicyKind::Tool => EnterprisePolicyKind::Tool,
-        ActionPolicyKind::Network => EnterprisePolicyKind::Network,
-    }
-}
-
-fn action_policy_mode(mode: EnterprisePolicyMode) -> ActionPolicyMode {
-    match mode {
-        EnterprisePolicyMode::Enforce => ActionPolicyMode::Enforce,
-        EnterprisePolicyMode::Audit => ActionPolicyMode::Audit,
-    }
 }
 
 fn receipt_stream_id(request_id: &str) -> String {

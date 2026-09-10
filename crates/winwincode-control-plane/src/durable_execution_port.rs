@@ -23,7 +23,8 @@ use winwincode_execution_port::generated::{
 };
 use winwincode_execution_port::transport::ExecutionPortCore;
 use winwincode_storage::{
-    ExecutionDispatchAuthority, ExecutionQueueScope, SqliteStorage, StorageError, StorageErrorKind,
+    DurableOutboxEvent, ExecutionDispatchAuthority, ExecutionQueueScope, ProductStateStorage,
+    SqliteStorage, StorageError, StorageErrorKind,
 };
 
 use crate::delivery_transaction::load_durable_execution_job;
@@ -272,6 +273,10 @@ impl<'application> DurableExecutionPortIngress<'application> {
     ///
     /// Returns infrastructure/composition failures. Runtime and terminal
     /// authority rejections are returned as generated acknowledgement DTOs.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "Keep the exhaustive generated-message dispatch table together"
+    )]
     pub fn handle(
         &mut self,
         message: &ExecutionPortMessage,
@@ -296,9 +301,33 @@ impl<'application> DurableExecutionPortIngress<'application> {
                 Ok(vec![response])
             }
             ExecutionPortMessage::JobDispatchResultMessage(result) => {
-                ExecutionPortService::new(self.storage, self.server_time.clone())
+                let accepted = ExecutionPortService::new(self.storage, self.server_time.clone())
                     .accept_dispatch_result(result.clone())
                     .map_err(DurableExecutionPortError::Service)?;
+                if matches!(
+                    accepted.status,
+                    winwincode_execution_port::generated::JobDispatchResultMessageStatus::Accepted
+                        | winwincode_execution_port::generated::JobDispatchResultMessageStatus::Duplicate
+                ) {
+                    // A sealed replacement is committed by the SessionBinding
+                    // transaction, which atomically fails the predecessor and
+                    // appends the successor. The ordinary append path is only
+                    // for the first dispatch; running it for a replacement
+                    // reuses the immutable predecessor Job and can duplicate
+                    // or reject the successor WorkRun.
+                    let replacement = self
+                        .storage
+                        .load_execution_scope_replacement_authority(&result.job_id)
+                        .map_err(DurableExecutionPortError::Storage)?;
+                    let replacement_is_current = replacement.as_ref().is_some_and(|seal| {
+                        u64::try_from(result.lease.attempt).ok()
+                            == Some(seal.replacement_attempt())
+                            && seal.job_id() == &result.job_id
+                    });
+                    if !replacement_is_current {
+                        self.append_workrun_after_dispatch(result)?;
+                    }
+                }
                 Ok(Vec::new())
             }
             ExecutionPortMessage::SessionBindingMessage(binding) => {
@@ -391,6 +420,38 @@ impl<'application> DurableExecutionPortIngress<'application> {
             })
     }
 
+    fn append_workrun_after_dispatch(
+        &mut self,
+        message: &winwincode_execution_port::generated::JobDispatchResultMessage,
+    ) -> Result<(), DurableExecutionPortError> {
+        let (durable, job) = crate::delivery_transaction::load_durable_execution_intent(
+            self.storage,
+            &message.job_id,
+        )
+        .map_err(DurableExecutionPortError::Storage)?;
+        let ExecutionScope::WorkRunExecutionScope(_) = &job.scope else {
+            return Ok(());
+        };
+        let authority = self.dispatch_authority(&message.job_id)?;
+        let proof = self
+            .storage
+            .execution_registry()
+            .map_err(DurableExecutionPortError::Storage)?
+            .load_dispatch_work_run_proof(&authority, &self.server_time)
+            .map_err(DurableExecutionPortError::Storage)?;
+        let now_millis =
+            instant_millis(authority.accepted_at()).map_err(DurableExecutionPortError::Storage)?;
+        self.control_plane
+            .commit_delivery_workrun(&durable, &job, &authority, &proof, now_millis)
+            .map_err(|error| match error {
+                crate::CommitError::Storage(error) => DurableExecutionPortError::Storage(error),
+                crate::CommitError::PublicationPending { source, .. } => {
+                    DurableExecutionPortError::Storage(StorageError::adapter(source.to_string()))
+                }
+            })?;
+        Ok(())
+    }
+
     fn delegate_job_scoped(
         &mut self,
         job_id: &winwincode_domain::ExecutionJobId,
@@ -451,7 +512,7 @@ impl<'application> DurableExecutionPortIngress<'application> {
         if let Some(rejection) = outcome_authority_rejection(message, &authority) {
             return Ok(outcome_output(rejection));
         }
-        let (_, job) = load_durable_execution_job(self.storage, &message.lease.job_id)
+        let (durable, job) = load_durable_execution_job(self.storage, &message.lease.job_id)
             .map_err(DurableExecutionPortError::Storage)?;
         if matches!(job.scope, ExecutionScope::ProductSessionExecutionScope(_)) {
             return self.delegate_supplement(
@@ -467,7 +528,7 @@ impl<'application> DurableExecutionPortIngress<'application> {
             Ok(replayed) => replayed,
             Err(rejection) => return Ok(outcome_output(rejection)),
         };
-        self.finish_delivery_execution_resources(message, &job, &authority)?;
+        self.finish_delivery_execution_resources(message, &job, &authority, &durable)?;
         Ok(outcome_output(outcome_success(message, replayed)))
     }
 
@@ -482,8 +543,9 @@ impl<'application> DurableExecutionPortIngress<'application> {
         message: &JobOutcomeMessage,
         job: &ExecutionJob,
         dispatch: &ExecutionDispatchAuthority,
+        durable: &DurableOutboxEvent,
     ) -> Result<(), DurableExecutionPortError> {
-        let ExecutionScope::DeliveryStageExecutionScope(job_scope) = &job.scope else {
+        let ExecutionScope::WorkRunExecutionScope(job_scope) = &job.scope else {
             return Err(DurableExecutionPortError::Storage(
                 StorageError::invalid_input("Delivery terminal owner received another Job scope"),
             ));
@@ -494,7 +556,17 @@ impl<'application> DurableExecutionPortIngress<'application> {
             project_id: self.repository_scope.project_id.clone(),
             repository_id: self.repository_scope.repository_id.clone(),
             product_session_id: job_scope.product_session_id.clone(),
-            delivery_id: Some(job_scope.delivery_id.clone()),
+            delivery_id: Some(winwincode_domain::DeliveryId(
+                durable
+                    .stream_id()
+                    .strip_prefix("delivery:")
+                    .ok_or_else(|| {
+                        DurableExecutionPortError::Storage(StorageError::invalid_input(
+                            "Delivery terminal intent has no Delivery stream",
+                        ))
+                    })?
+                    .to_owned(),
+            )),
         };
         let reservation = self
             .storage
@@ -572,7 +644,7 @@ impl<'application> DurableExecutionPortIngress<'application> {
         authority: &ExecutionDispatchAuthority,
         job: &ExecutionJob,
     ) -> Result<DeliveryTerminalOutcomeFacts, DurableExecutionPortError> {
-        let ExecutionScope::DeliveryStageExecutionScope(job_scope) = &job.scope else {
+        let ExecutionScope::WorkRunExecutionScope(job_scope) = &job.scope else {
             return Err(DurableExecutionPortError::Storage(
                 StorageError::invalid_input("Delivery terminal owner received another Job scope"),
             ));
@@ -580,7 +652,7 @@ impl<'application> DurableExecutionPortIngress<'application> {
         Ok(seal_dispatch_terminal_outcome(
             authority,
             WorkerTerminalOutcomeReport {
-                stage_run_id: job_scope.stage_run_id.clone(),
+                work_run_id: job_scope.work_run_id.clone(),
                 status: terminal_status(&message.outcome.status),
                 codex_thread_id: message.outcome.codex_thread_id.clone(),
                 finished_at_millis: instant_millis(&message.outcome.finished_at)

@@ -7,7 +7,7 @@ use sha2::{Digest, Sha256};
 use winwincode_domain::{DeliveryId, EvidenceId};
 
 use super::evidence::{ResolvedDeliveryEvidence, VerifiedEvidenceOutcome};
-use super::rework::{VerdictAttentionAction, safest_attention_transition};
+use super::rework::{VerdictAttentionAction, next_rework_attempt, safest_attention_transition};
 use super::verification::{
     IndependentVerification, VerificationFindingConclusion, VerificationJobOutcomeStatus,
     VerificationRole, VerificationRoleSettlement, VerificationSessionState,
@@ -18,9 +18,8 @@ use super::{
     CriterionResultId, Delivery, DeliverySpecId, DeliveryStatus, DeliveryTaskStatus,
     DeliveryValidationError, DeliveryValidationErrorCode, DeliveryVerdictId, EvidenceRef,
     EvidenceRefType, FrozenDeliveryCandidate, MAX_REFERENCE_LENGTH, MAX_TEXT_LENGTH,
-    StageRunActorType, StageRunStatus, assert_frozen_candidate_current, bounded_text,
-    collection_length, duplicate_ids, portable_identifier, safe_non_negative, schema_version,
-    unique_texts, validation_error,
+    assert_frozen_candidate_current, bounded_text, collection_length, duplicate_ids,
+    portable_identifier, safe_non_negative, schema_version, unique_texts, validation_error,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -258,12 +257,7 @@ pub fn compute_delivery_verdict(
     unresolved_findings.dedup();
     let status = fold_delivery_status(delivery, &criteria, &unresolved_findings);
     if status == DeliveryVerdictStatus::Fail {
-        let attempts = delivery
-            .snapshot()
-            .stage_runs
-            .iter()
-            .filter(|run| run.stage == super::DeliveryStage::Reworking)
-            .count() as u64;
+        let attempts = next_rework_attempt(delivery).saturating_sub(1);
         if attempts >= delivery.snapshot().spec.max_rework_attempts {
             actions.push(VerdictAttentionAction::ClarifyDefinition);
         } else {
@@ -341,74 +335,65 @@ fn validate_verification_is_current(
         let Some(assignment) = settlement.assignment() else {
             continue;
         };
-        let role_runs = delivery
+        let Some(run) = delivery
             .snapshot()
-            .stage_runs
+            .work_run_aggregate
+            .runs
             .iter()
-            .filter(|run| {
-                run.stage == super::DeliveryStage::Verifying
-                    && run.actor_type == StageRunActorType::Codex
-                    && run.role == role_id(settlement.role())
-            })
-            .collect::<Vec<_>>();
-        let current_attempt = role_runs.iter().map(|run| run.attempt).max();
-        let current_runs = role_runs
-            .into_iter()
-            .filter(|run| Some(run.attempt) == current_attempt)
-            .collect::<Vec<_>>();
-        if current_runs.len() != 1 || current_runs[0].id != *assignment.stage_run_id() {
+            .find(|run| run.id == *assignment.work_run_id())
+        else {
             return Err(invalid_computation(
-                "verification projection no longer owns the role's current StageRun",
+                "verification projection no longer owns the current WorkRun",
             ));
-        }
-        let current_bindings = delivery
+        };
+        let bindings = delivery
             .snapshot()
             .session_bindings
             .iter()
-            .filter(|binding| binding.stage_run_id == current_runs[0].id)
+            .filter(|binding| {
+                binding.id == *assignment.session_binding_id() && binding.work_run_id == run.id
+            })
             .collect::<Vec<_>>();
-        if current_bindings.len() != 1 {
+        if bindings.len() != 1 {
             return Err(invalid_computation(
                 "verification projection no longer has one current SessionBinding",
             ));
         }
-        let binding = current_bindings[0];
-        let binding_is_current = binding.id == *assignment.session_binding_id()
-            && binding.product_session_id == *assignment.product_session_id()
+        let binding = bindings[0];
+        let binding_is_current = binding.product_session_id == *assignment.product_session_id()
             && binding.execution_job_id == *assignment.execution_job_id()
             && binding.worker_session_id.as_ref() == Some(assignment.worker_session_id())
             && binding.codex_thread_id.as_ref() == Some(assignment.codex_thread_id())
             && assignment.repository() == candidate.repository()
-            && assignment.checkout_revision() == candidate.candidate_commit_id()
-            && current_runs[0].delivery_task_id.as_ref() == candidate.producer_delivery_task_id();
+            && assignment.checkout_revision() == candidate.candidate_commit_id();
         if !binding_is_current {
             return Err(invalid_computation(
                 "verification projection Session or candidate checkout is stale",
             ));
         }
-        if !terminal_stage_is_current(settlement, current_runs[0], binding) {
+        if !terminal_work_run_is_current(settlement, run, binding) {
             return Err(invalid_computation(
-                "verification projection terminal StageRun facts are stale",
+                "verification projection terminal WorkRun facts are stale",
             ));
         }
     }
     Ok(())
 }
 
-fn terminal_stage_is_current(
+fn terminal_work_run_is_current(
     settlement: &VerificationRoleSettlement,
-    run: &super::StageRun,
+    run: &winwincode_domain::WorkRun,
     binding: &super::SessionBinding,
 ) -> bool {
     let Some(terminal) = settlement.terminal_job_outcome() else {
         return match settlement.state() {
             VerificationSessionState::Running => matches!(
-                run.status,
-                StageRunStatus::Running | StageRunStatus::Waiting
+                run.state,
+                winwincode_domain::WorkRunState::Leased | winwincode_domain::WorkRunState::Running
             ),
             VerificationSessionState::Incomplete => !matches!(
-                run.status,
-                StageRunStatus::Running | StageRunStatus::Waiting
+                run.state,
+                winwincode_domain::WorkRunState::Leased | winwincode_domain::WorkRunState::Running
             ),
             VerificationSessionState::Missing => true,
             VerificationSessionState::Failed
@@ -416,42 +401,41 @@ fn terminal_stage_is_current(
             | VerificationSessionState::Settled => false,
         };
     };
-    let identity_is_current = terminal.stage_run_id() == &run.id
-        && terminal.role_id() == run.role
+    let identity_is_current = terminal.work_run_id() == &run.id
         && terminal.execution_job_id() == &binding.execution_job_id
         && terminal.product_session_id() == &binding.product_session_id
-        && terminal.attempt() == run.attempt
+        && terminal.attempt() == u64::try_from(run.attempt).unwrap_or(0)
         && binding.worker_session_id.as_ref() == Some(terminal.worker_session_id())
         && binding.codex_thread_id.as_ref() == Some(terminal.codex_thread_id())
-        && run.finished_at_millis == Some(terminal.finished_at_millis())
         && binding.bound_at_millis <= terminal.finished_at_millis();
     let status_is_current = matches!(
         (
             settlement.state(),
             settlement.terminal_settlement(),
-            run.status,
-            terminal.status(),
+            run.state.clone(),
+            terminal.status()
         ),
         (
             VerificationSessionState::Settled | VerificationSessionState::Incomplete,
             Some(VerificationTerminalSettlement::Settled),
-            StageRunStatus::Succeeded,
-            VerificationJobOutcomeStatus::Succeeded,
+            winwincode_domain::WorkRunState::Running
+                | winwincode_domain::WorkRunState::CandidateReady
+                | winwincode_domain::WorkRunState::Settled,
+            VerificationJobOutcomeStatus::Succeeded
         ) | (
             VerificationSessionState::Failed,
-            Some(VerificationTerminalSettlement::Failed),
-            StageRunStatus::Failed,
-            VerificationJobOutcomeStatus::Failed,
-        ) | (
-            VerificationSessionState::Failed,
-            Some(VerificationTerminalSettlement::InfrastructureError),
-            StageRunStatus::Failed,
-            VerificationJobOutcomeStatus::InfrastructureError,
+            Some(
+                VerificationTerminalSettlement::Failed
+                    | VerificationTerminalSettlement::InfrastructureError
+            ),
+            winwincode_domain::WorkRunState::Failed,
+            VerificationJobOutcomeStatus::Failed
+                | VerificationJobOutcomeStatus::InfrastructureError
         ) | (
             VerificationSessionState::Cancelled,
             Some(VerificationTerminalSettlement::Cancelled),
-            StageRunStatus::Cancelled,
-            VerificationJobOutcomeStatus::Cancelled,
+            winwincode_domain::WorkRunState::Cancelled,
+            VerificationJobOutcomeStatus::Cancelled
         )
     );
     identity_is_current && status_is_current
@@ -718,7 +702,7 @@ fn evaluate_settled_role(
             .filter(|resolved| {
                 let reference = resolved.evidence();
                 reference.source_ref == *source_ref
-                    && reference.stage_run_id == *assignment.stage_run_id()
+                    && reference.work_run_id == *assignment.work_run_id()
                     && reference.session_binding_id == *assignment.session_binding_id()
                     && reference.candidate_ref == finding.candidate_ref()
             })
@@ -1156,9 +1140,9 @@ mod tests {
         };
         let writer_binding = &mut snapshot.session_bindings[0];
         writer_binding.id = SessionBindingId("binding-executor-1".into());
-        writer_binding.stage_run_id = StageRunId("stage-executor-1".into());
         writer_binding.product_session_id = ProductSessionId("product-executor".into());
         writer_binding.execution_job_id = ExecutionJobId("job-executor".into());
+        writer_binding.execution_profile = Some("executor".into());
         writer_binding.worker_session_id = Some(WorkerSessionId("worker-executor".into()));
         writer_binding.codex_thread_id = Some(CodexThreadId("thread-executor".into()));
         writer_binding.bound_at_millis = 1_800_000_000_011;
@@ -1184,26 +1168,43 @@ mod tests {
                     schema_version: super::super::DELIVERY_SCHEMA_VERSION,
                     id: SessionBindingId(format!("binding-{role}-1")),
                     delivery_id: snapshot.id.clone(),
-                    delivery_task_id: task_id.clone(),
-                    stage_run_id,
+                    work_contract_id: winwincode_domain::WorkContractId(
+                        "wct_01J00000000000000000000000".into(),
+                    ),
+                    work_contract_revision: winwincode_domain::Revision(1),
+                    work_item_id: winwincode_domain::WorkItemId(
+                        "wit_01J00000000000000000000000".into(),
+                    ),
+                    work_item_revision: winwincode_domain::Revision(1),
+                    work_run_id: winwincode_domain::WorkRunId(
+                        "wrn_01J00000000000000000000000".into(),
+                    ),
                     product_session_id: ProductSessionId(format!("product-{role}")),
                     execution_job_id: ExecutionJobId(format!("job-{role}")),
+                    execution_profile: Some(role.into()),
                     worker_session_id: Some(WorkerSessionId(format!("worker-{role}"))),
                     codex_thread_id: Some(CodexThreadId(format!("thread-{role}"))),
                     bound_at_millis: 1_800_000_000_031 + offset,
-                    ..Default::default()
+                    attempt: 1,
+                    worker_id: None,
+                    worker_instance_id: None,
+                    lease_id: None,
+                    fencing_token: None,
+                    source_provenance:
+                        crate::domain::SessionBindingSourceProvenance::pending_delivery_advance(),
                 }
                 .with_test_authority(&format!("verdict-{role}"), 1),
             );
         }
         snapshot.updated_at_millis = 1_800_000_000_060;
+        super::super::rebuild_test_work_runs_from_bindings(&mut snapshot);
         Delivery::try_from_snapshot(snapshot).expect("verdict Delivery")
     }
 
     fn candidate(delivery: &Delivery) -> FrozenDeliveryCandidate {
         frozen_candidate(
             delivery,
-            &StageRunId("stage-executor-1".into()),
+            1_800_000_000_020,
             &SessionBindingId("binding-executor-1".into()),
         )
     }
@@ -1239,6 +1240,27 @@ mod tests {
         if matches!(status, StageRunStatus::Running | StageRunStatus::Waiting) {
             run.finished_at_millis = None;
         }
+        let role = role.to_owned();
+        let binding = snapshot
+            .session_bindings
+            .iter()
+            .filter(|binding| binding.execution_profile.as_deref() == Some(role.as_str()))
+            .max_by_key(|binding| binding.attempt)
+            .expect("role binding");
+        snapshot
+            .work_run_aggregate
+            .runs
+            .iter_mut()
+            .find(|run| run.id == binding.work_run_id)
+            .expect("role WorkRun")
+            .state = match status {
+            StageRunStatus::Running | StageRunStatus::Waiting => {
+                winwincode_domain::WorkRunState::Running
+            }
+            StageRunStatus::Succeeded => winwincode_domain::WorkRunState::Settled,
+            StageRunStatus::Cancelled => winwincode_domain::WorkRunState::Cancelled,
+            StageRunStatus::Failed => winwincode_domain::WorkRunState::Failed,
+        };
         Delivery::try_from_snapshot(snapshot).expect("Delivery with current role status")
     }
 
@@ -1419,18 +1441,33 @@ mod tests {
                 schema_version: super::super::DELIVERY_SCHEMA_VERSION,
                 id: SessionBindingId("binding-reviewer-2".into()),
                 delivery_id: snapshot.id.clone(),
-                delivery_task_id: task_id,
-                stage_run_id,
+                work_contract_id: winwincode_domain::WorkContractId(
+                    "wct_01J00000000000000000000000".into(),
+                ),
+                work_contract_revision: winwincode_domain::Revision(1),
+                work_item_id: winwincode_domain::WorkItemId(
+                    "wit_01J00000000000000000000000".into(),
+                ),
+                work_item_revision: winwincode_domain::Revision(1),
+                work_run_id: winwincode_domain::WorkRunId("wrn_01J00000000000000000000000".into()),
                 product_session_id: ProductSessionId("product-reviewer-2".into()),
                 execution_job_id: ExecutionJobId("job-reviewer-2".into()),
+                execution_profile: Some("reviewer".into()),
                 worker_session_id: Some(WorkerSessionId("worker-reviewer-2".into())),
                 codex_thread_id: Some(CodexThreadId("thread-reviewer-2".into())),
                 bound_at_millis: 1_800_000_000_071,
-                ..Default::default()
+                attempt: 1,
+                worker_id: None,
+                worker_instance_id: None,
+                lease_id: None,
+                fencing_token: None,
+                source_provenance:
+                    crate::domain::SessionBindingSourceProvenance::pending_delivery_advance(),
             }
             .with_test_authority("binding-reviewer-2", 2),
         );
         snapshot.updated_at_millis = 1_800_000_000_080;
+        super::super::rebuild_test_work_runs_from_bindings(&mut snapshot);
         let retried = Delivery::try_from_snapshot(snapshot).expect("retried verification Delivery");
 
         let error = compute_delivery_verdict(
@@ -1480,30 +1517,22 @@ mod tests {
         let candidate = candidate(&delivery);
         let (verification, evidence) = passing_inputs(&delivery, &candidate);
 
-        for mutation in ["status", "attempt", "finished-at"] {
+        for mutation in ["status", "attempt", "revision"] {
             let mut snapshot = delivery.clone().into_snapshot();
+            let binding = &mut snapshot.session_bindings[1];
             let reviewer = snapshot
-                .stage_runs
+                .work_run_aggregate
+                .runs
                 .iter_mut()
-                .find(|run| run.id.0 == "stage-reviewer-1")
-                .expect("reviewer StageRun");
+                .find(|run| run.id == binding.work_run_id)
+                .expect("reviewer WorkRun");
             match mutation {
-                "status" => reviewer.status = StageRunStatus::Failed,
+                "status" => reviewer.state = winwincode_domain::WorkRunState::Failed,
                 "attempt" => {
                     reviewer.attempt += 1;
-                    let attempt = reviewer.attempt;
-                    let binding = snapshot
-                        .session_bindings
-                        .iter_mut()
-                        .find(|binding| binding.stage_run_id == reviewer.id)
-                        .expect("reviewer SessionBinding");
-                    binding.attempt = attempt;
+                    binding.attempt += 1;
                 }
-                "finished-at" => {
-                    reviewer.finished_at_millis = reviewer
-                        .finished_at_millis
-                        .map(|finished_at_millis| finished_at_millis + 1);
-                }
+                "revision" => reviewer.revision.0 += 1,
                 _ => unreachable!(),
             }
             let changed = Delivery::try_from_snapshot(snapshot)
@@ -1720,7 +1749,9 @@ mod tests {
                 required_roles: vec![VerificationRole::Reviewer, VerificationRole::Verifier],
                 sessions: vec![VerificationSessionFacts {
                     role: VerificationRole::Reviewer,
-                    stage_run_id: StageRunId("stage-reviewer-1".into()),
+                    work_run_id: running_delivery.snapshot().session_bindings[1]
+                        .work_run_id
+                        .clone(),
                     session_binding_id: SessionBindingId("binding-reviewer-1".into()),
                     workspace_mode: VerificationWorkspaceMode::CandidateReadOnly,
                     permission_profile: VerificationPermissionProfile::CandidateReadOnlyRestricted,

@@ -8,7 +8,10 @@
 
 use std::fmt;
 
-use winwincode_domain::{Instant, RepositoryScope, SchemaVersion, SessionIdentity};
+use winwincode_delivery::domain::Delivery;
+use winwincode_domain::{
+    DeliveryId, Instant, RepositoryScope, SchemaVersion, SessionIdentity, WorkItemState, WorkRunId,
+};
 use winwincode_execution_port::generated::{
     ExecutionJob, ExecutionJobReplacementAuthority, ExecutionLeaseStamp, ExecutionScope,
     JobCancelMessage, JobCancelMessageKind, JobCancelMessageReason, JobDispatchMessage,
@@ -16,7 +19,7 @@ use winwincode_execution_port::generated::{
 };
 use winwincode_storage::{
     DispatchResultRequest, DispatchResultStatus, ExecutionJobRecord, ExecutionJobState,
-    ExecutionLeaseRecord, ExecutionScopeReplacementAuthority,
+    ExecutionLeaseRecord, ExecutionScopeReplacementAuthority, ProductStateStorage,
     RepositorySchedulerCancellationReceipt, RepositorySchedulerCancellationRequest,
     RepositorySchedulerClaimRequest, RepositorySchedulerDispatchResultReceipt,
     RepositorySchedulerDispatchResultRequest, RepositorySchedulerRetryRequest,
@@ -28,6 +31,7 @@ use winwincode_storage::{
 #[derive(Debug)]
 pub enum RepositoryExecutionSchedulerError {
     Storage(StorageError),
+    StaleDeliveryRevision,
     InvalidExecutionJob(&'static str),
     MissingCancellationAuthority(&'static str),
 }
@@ -38,6 +42,7 @@ impl fmt::Display for RepositoryExecutionSchedulerError {
             Self::Storage(error) => {
                 write!(formatter, "repository scheduler storage error: {error}")
             }
+            Self::StaleDeliveryRevision => formatter.write_str("Delivery revision is stale"),
             Self::InvalidExecutionJob(field) => {
                 write!(formatter, "durable ExecutionJob is invalid: {field}")
             }
@@ -59,6 +64,24 @@ impl From<StorageError> for RepositoryExecutionSchedulerError {
 /// Production adapter over the one canonical product storage connection.
 pub struct RepositoryExecutionScheduler<'storage> {
     storage: &'storage mut SqliteStorage,
+}
+
+/// Public Delivery cancellation command after the UI command envelope has
+/// supplied its repository scope and request identity. The expected revision
+/// is the Delivery revision; the queue revision is always read from the
+/// durable `WorkRun` job below.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkRunCancellationRequest {
+    pub scope: RepositorySchedulerScope,
+    pub delivery_id: DeliveryId,
+    pub work_run_id: WorkRunId,
+    pub request_id: winwincode_domain::RequestId,
+    pub expected_delivery_revision: u64,
+    pub requested_at: Instant,
+    /// Digest of the complete generated public command. Queue revision and
+    /// server time are deliberately kept outside this value so retries can
+    /// reconstruct the original queue request while freezing client input.
+    pub public_command_digest: winwincode_domain::Sha256Digest,
 }
 
 impl<'storage> RepositoryExecutionScheduler<'storage> {
@@ -195,6 +218,109 @@ impl<'storage> RepositoryExecutionScheduler<'storage> {
         cancel_message(self.storage, &receipt)
     }
 
+    /// Authorizes and persists cancellation for one canonical Delivery
+    /// `WorkRun`. The caller supplies the Delivery revision, while the queue
+    /// revision is obtained from the exact active `WorkRun` job so a client
+    /// cannot cancel a different attempt by guessing queue state.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a missing or stale Delivery, a `WorkRun` from another Delivery,
+    /// a cross-repository job, and any queue/storage authority failure.
+    pub fn request_cancellation_for_work_run(
+        &mut self,
+        request: &WorkRunCancellationRequest,
+    ) -> Result<Option<JobCancelMessage>, RepositoryExecutionSchedulerError> {
+        // Include terminal queue rows so an already committed cancellation can
+        // be replayed after the Delivery and queue have moved on. The storage
+        // run-aware method performs the final identity check inside its
+        // immediate transaction, closing replacement races.
+        let record = self
+            .storage
+            .repository_scheduler()?
+            .list_jobs(&request.scope, &[])?
+            .into_iter()
+            .find(|record| record.work_run_id.as_ref() == Some(&request.work_run_id))
+            .ok_or_else(|| StorageError::invalid_input("WorkRun job is missing"))?;
+        if record.scope.delivery_id.as_ref() != Some(&request.delivery_id) {
+            return Err(StorageError::invalid_input(
+                "WorkRun job does not belong to the requested Delivery",
+            )
+            .into());
+        }
+        let replay = record
+            .cancellation
+            .as_ref()
+            .is_some_and(|cancellation| cancellation.request_id == request.request_id);
+        if !replay {
+            let delivery_stream = format!("delivery:{}", request.delivery_id.0);
+            let state = self
+                .storage
+                .load_state(&delivery_stream)?
+                .ok_or_else(|| StorageError::invalid_input("Delivery state is missing"))?;
+            if state.revision != request.expected_delivery_revision {
+                return Err(RepositoryExecutionSchedulerError::StaleDeliveryRevision);
+            }
+            let delivery = Delivery::decode_json(&state.payload)
+                .map_err(|error| StorageError::invalid_input(error.to_string()))?;
+            if delivery.id() != &request.delivery_id || delivery.revision() != state.revision {
+                return Err(
+                    StorageError::invalid_input("Delivery state identity is inconsistent").into(),
+                );
+            }
+            if record.state == ExecutionJobState::Queued {
+                validate_queued_workrun_job(&record, &delivery, request)?;
+            } else {
+                let run = delivery
+                    .snapshot()
+                    .work_run_aggregate
+                    .runs
+                    .iter()
+                    .find(|run| run.id == request.work_run_id)
+                    .ok_or_else(|| {
+                        StorageError::invalid_input("WorkRun is missing from Delivery")
+                    })?;
+                if !matches!(
+                    run.state,
+                    winwincode_domain::WorkRunState::Leased
+                        | winwincode_domain::WorkRunState::Running
+                ) {
+                    return Err(StorageError::invalid_input("WorkRun is not cancellable").into());
+                }
+                if run.execution_job_id != record.job_id {
+                    return Err(StorageError::invalid_input(
+                        "WorkRun job does not match the Delivery aggregate",
+                    )
+                    .into());
+                }
+            }
+        }
+        let (expected_revision, requested_at) = match record.cancellation.as_ref() {
+            Some(cancellation) => (
+                record.revision.checked_sub(1).ok_or_else(|| {
+                    StorageError::invalid_input("cancellation revision is invalid")
+                })?,
+                cancellation.requested_at.clone(),
+            ),
+            None => (record.revision, request.requested_at.clone()),
+        };
+        let receipt = self
+            .storage
+            .repository_scheduler()?
+            .request_cancellation_for_work_run_with_command_digest(
+                &RepositorySchedulerCancellationRequest {
+                    scope: request.scope.clone(),
+                    job_id: record.job_id,
+                    request_id: request.request_id.clone(),
+                    expected_revision,
+                    requested_at,
+                },
+                &request.work_run_id,
+                &request.public_command_digest,
+            )?;
+        cancel_message(self.storage, &receipt)
+    }
+
     /// Rebuilds every outstanding exact `job.cancel` command after restart.
     ///
     /// # Errors
@@ -219,15 +345,24 @@ impl<'storage> RepositoryExecutionScheduler<'storage> {
             let expected_revision = job.revision.checked_sub(1).ok_or(
                 RepositoryExecutionSchedulerError::MissingCancellationAuthority("queue revision"),
             )?;
-            let receipt = self.storage.repository_scheduler()?.request_cancellation(
-                &RepositorySchedulerCancellationRequest {
-                    scope: scope.clone(),
-                    job_id: job.job_id,
-                    request_id: cancellation.request_id.clone(),
-                    expected_revision,
-                    requested_at: cancellation.requested_at.clone(),
-                },
-            )?;
+            let request = RepositorySchedulerCancellationRequest {
+                scope: scope.clone(),
+                job_id: job.job_id,
+                request_id: cancellation.request_id.clone(),
+                expected_revision,
+                requested_at: cancellation.requested_at.clone(),
+            };
+            let receipt = if let Some(work_run_id) = job.work_run_id.as_ref() {
+                let mut scheduler = self.storage.repository_scheduler()?;
+                match scheduler.replay_cancellation_for_work_run(&request, work_run_id)? {
+                    Some(receipt) => receipt,
+                    None => scheduler.request_cancellation_for_work_run(&request, work_run_id)?,
+                }
+            } else {
+                self.storage
+                    .repository_scheduler()?
+                    .request_cancellation(&request)?
+            };
             if let Some(message) = cancel_message(self.storage, &receipt)? {
                 messages.push(message);
             }
@@ -250,6 +385,76 @@ impl<'storage> RepositoryExecutionScheduler<'storage> {
             .settle_terminal(request)
             .map_err(Into::into)
     }
+}
+
+fn validate_queued_workrun_job(
+    record: &ExecutionJobRecord,
+    delivery: &Delivery,
+    request: &WorkRunCancellationRequest,
+) -> Result<(), RepositoryExecutionSchedulerError> {
+    let job = decode_execution_job(record)?;
+    crate::delivery_execution::validate_workrun_execution_job(&job)
+        .map_err(|_| RepositoryExecutionSchedulerError::InvalidExecutionJob("WorkRun fields"))?;
+    let ExecutionScope::WorkRunExecutionScope(scope) = &job.scope else {
+        return Err(RepositoryExecutionSchedulerError::InvalidExecutionJob(
+            "scope",
+        ));
+    };
+    if scope.work_run_id != request.work_run_id
+        || i64::try_from(record.attempt).ok() != Some(scope.attempt)
+    {
+        return Err(RepositoryExecutionSchedulerError::InvalidExecutionJob(
+            "WorkRun identity or attempt",
+        ));
+    }
+    let input =
+        job.work_input
+            .as_ref()
+            .ok_or(RepositoryExecutionSchedulerError::InvalidExecutionJob(
+                "workInput",
+            ))?;
+    let aggregate = &delivery.snapshot().work_run_aggregate;
+    if input.work_contract != aggregate.contract
+        || scope.work_contract_id != aggregate.contract.id
+        || scope.work_contract_revision != aggregate.contract.revision
+    {
+        return Err(RepositoryExecutionSchedulerError::InvalidExecutionJob(
+            "contract",
+        ));
+    }
+    let item = aggregate
+        .items
+        .iter()
+        .find(|item| item.id == scope.work_item_id)
+        .ok_or(RepositoryExecutionSchedulerError::InvalidExecutionJob(
+            "workItem",
+        ))?;
+    if item.state != WorkItemState::Ready || scope.work_item_revision != item.revision {
+        return Err(RepositoryExecutionSchedulerError::InvalidExecutionJob(
+            "workItem revision",
+        ));
+    }
+    // Depending on the producer path, the immutable dispatch may carry either
+    // the source Ready item or its InProgress execution copy while the
+    // Delivery aggregate remains Ready until accepted dispatch appends the
+    // canonical WorkRun. Compare every other item field and normalize only
+    // this intentional pre-acceptance state transition.
+    let mut input_item = input.work_item.clone();
+    if !matches!(
+        input_item.state,
+        WorkItemState::Ready | WorkItemState::InProgress
+    ) {
+        return Err(RepositoryExecutionSchedulerError::InvalidExecutionJob(
+            "workItem state",
+        ));
+    }
+    input_item.state = item.state.clone();
+    if input_item != *item {
+        return Err(RepositoryExecutionSchedulerError::InvalidExecutionJob(
+            "workItem",
+        ));
+    }
+    Ok(())
 }
 
 fn dispatch_message(
@@ -298,7 +503,7 @@ fn replacement_message(
             Some(SessionIdentity {
                 codex_thread_id: slot.codex_thread_id.clone(),
                 product_session_id: authority.scope().product_session_id.clone(),
-                stage_run_id: authority.stage_run_id().cloned(),
+                work_run_id: authority.predecessor_work_run_id().cloned(),
                 worker_session_id: slot.worker_session_id.clone(),
             })
         }
@@ -328,12 +533,12 @@ fn scope_matches_replacement(
         ExecutionScope::ProductSessionExecutionScope(scope) => {
             scope.product_session_id == authority.scope().product_session_id
                 && authority.scope().delivery_id.is_none()
-                && authority.stage_run_id().is_none()
+                && authority.work_run_id().is_none()
         }
-        ExecutionScope::DeliveryStageExecutionScope(scope) => {
+        ExecutionScope::WorkRunExecutionScope(scope) => {
             scope.product_session_id == authority.scope().product_session_id
-                && Some(&scope.delivery_id) == authority.scope().delivery_id.as_ref()
-                && Some(&scope.stage_run_id) == authority.stage_run_id()
+                && authority.scope().delivery_id.is_some()
+                && Some(&scope.work_run_id) == authority.work_run_id()
         }
     }
 }
@@ -374,11 +579,11 @@ fn decode_execution_job(
         ExecutionScope::ProductSessionExecutionScope(scope)
             if scope.product_session_id == record.scope.product_session_id
                 && record.scope.delivery_id.is_none()
-                && record.stage_run_id.is_none() => {}
-        ExecutionScope::DeliveryStageExecutionScope(scope)
+                && record.work_run_id.is_none() => {}
+        ExecutionScope::WorkRunExecutionScope(scope)
             if scope.product_session_id == record.scope.product_session_id
-                && Some(&scope.delivery_id) == record.scope.delivery_id.as_ref()
-                && Some(&scope.stage_run_id) == record.stage_run_id.as_ref() => {}
+                && record.scope.delivery_id.is_some()
+                && Some(&scope.work_run_id) == record.work_run_id.as_ref() => {}
         _ => {
             return Err(RepositoryExecutionSchedulerError::InvalidExecutionJob(
                 "scope",
@@ -389,7 +594,7 @@ fn decode_execution_job(
 }
 
 fn cancel_message(
-    storage: &mut SqliteStorage,
+    _storage: &mut SqliteStorage,
     receipt: &RepositorySchedulerCancellationReceipt,
 ) -> Result<Option<JobCancelMessage>, RepositoryExecutionSchedulerError> {
     let (Some(lease), Some(worker_session_id), Some(message_id)) = (
@@ -409,31 +614,15 @@ fn cancel_message(
             ),
         );
     };
-    let slot = storage
-        .worker_session_slots()
-        .map_err(|error| StorageError::adapter(format!("Worker slot cannot be opened: {error}")))?
-        .load(worker_session_id)
-        .map_err(|error| StorageError::adapter(format!("Worker slot cannot be read: {error}")))?
-        .ok_or(
-            RepositoryExecutionSchedulerError::MissingCancellationAuthority("WorkerSession slot"),
-        )?;
-    if slot.authority.job_id != receipt.job.job_id
-        || slot.authority.worker_session_id != *worker_session_id
-        || slot.authority.worker_id != lease.worker_id
-        || slot.authority.worker_instance_id != lease.worker_instance_id
-        || slot.authority.lease_id != lease.lease_id
-        || slot.authority.attempt != lease.attempt
-        || slot.authority.fencing_token != lease.fencing_token
-    {
-        return Err(
-            RepositoryExecutionSchedulerError::MissingCancellationAuthority(
-                "WorkerSession slot identity",
-            ),
-        );
-    }
     let cancellation = receipt.job.cancellation.as_ref().ok_or(
         RepositoryExecutionSchedulerError::MissingCancellationAuthority("cancellation receipt"),
     )?;
+    // An accepted dispatch may be cancelled before its WorkerSession binds a
+    // slot. Keep the queue receipt durable and let restart/pending-cancel
+    // orchestration emit the command once codex thread authority exists.
+    let Some(codex_thread_id) = receipt.codex_thread_id.clone() else {
+        return Ok(None);
+    };
     Ok(Some(JobCancelMessage {
         kind: JobCancelMessageKind::JobCancel,
         lease: lease_stamp(lease)?,
@@ -444,9 +633,9 @@ fn cancel_message(
         schema_version: SchemaVersion::WinwincodeV1,
         sent_at: cancellation.requested_at.clone(),
         session_identity: SessionIdentity {
-            codex_thread_id: slot.authority.codex_thread_id,
+            codex_thread_id,
             product_session_id: receipt.job.scope.product_session_id.clone(),
-            stage_run_id: receipt.job.stage_run_id.clone(),
+            work_run_id: receipt.job.work_run_id.clone(),
             worker_session_id: worker_session_id.clone(),
         },
         worker_session_id: worker_session_id.clone(),

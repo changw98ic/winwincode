@@ -59,8 +59,8 @@ Evidence、criterionResults、Verdict、Attention、Delivery status、credential
 
 - 当前 Delivery、DeliverySpec ID 和 revision；
 - 仓库与基线 revision；
-- 产出修改的 executor 或 remediator StageRun，包括 DeliveryTask、阶段、角色和 attempt；
-- 该 StageRun 的精确 SessionBinding，包括 ProductSession、ExecutionJob、WorkerSession 和 CodexThread；
+- 产出修改的 executor 或 remediator WorkRun，包括 DeliveryTask、阶段、角色和 attempt；
+- 该 WorkRun 的精确 SessionBinding，包括 ProductSession、ExecutionJob、WorkerSession 和 CodexThread；
 - base/candidate commit、tree、Diff SHA-256 和变化路径。
 
 相同事实必须得到相同 candidateRef。任何字段被改写、DeliverySpec revision 改变，或者后续 executing/reworking 写入阶段已经开始，这个 candidateRef 都不再代表当前候选。后续写入阶段即使仍在运行，也已经足以让前一个候选失效。
@@ -73,7 +73,7 @@ GitSnapshotResolver 与 Artifact adapter 必须重新读取 base/candidate commi
 
 这次 Git 读取还必须属于 producer SessionBinding 的精确成功 Worker outcome 和 Job 工作区。
 adapter 负责产生对应的 `VerifiedTerminalOutcome` 和 `ValidatedCheckoutAttestationFact`，
-Domain 负责核对它们与候选身份完全一致。仅有一个写着 `succeeded` 的 StageRun，或者拿到
+Domain 负责核对它们与候选身份完全一致。仅有一个写着 `succeeded` 的 WorkRun，或者拿到
 别的 Job、attempt、Lease、fence、Worker 实例、WorkerSession 的产物，都不能冻结当前候选。
 
 对应规则：
@@ -86,7 +86,7 @@ Domain 负责核对它们与候选身份完全一致。仅有一个写着 `succe
 ## 2. Reviewer 与 Verifier 怎样保持独立
 
 Reviewer 和 Verifier 都是必需角色。对当前候选，每个角色必须恰好解析到一个当前 assignment，
-也就是一个角色明确的 verifying StageRun 和一个完整 SessionBinding；零个或多个 assignment
+也就是一个角色明确的 verifying WorkRun 和一个完整 SessionBinding；零个或多个 assignment
 都会在读取 finding 前直接失败。两者不能复用候选写入者的 ProductSession、ExecutionJob、
 WorkerSession 或 CodexThread，也不能彼此复用这些身份。Adversarial Verifier 可以额外启用，
 但不能代替前两个角色。
@@ -97,11 +97,11 @@ Adversarial Verifier 成功写入文件、应用补丁或通过命令改变候�
 tree 和 Diff；Domain 比较这两个已验证快照。Git 快照发生变化时，即使事件种类没有被识别
 为写入，也不能使用该 Session 的结果。
 
-模型的最终回复不是验证阶段的终止事实。一个角色只有在 canonical StageRun 已经
+模型的最终回复不是验证阶段的终止事实。一个角色只有在 canonical WorkRun 已经
 `succeeded`，并且阶段 2.3 outcome adapter 已产生与当前 SessionBinding、ExecutionJob、
 attempt、Lease、fencing token、Worker、Worker 实例、WorkerSession 和 CodexThread 全部匹配
 的 `VerifiedTerminalOutcome` 后，才算完成。`turn.completed` 不能让仍为 `running` 的
-StageRun 进入通过路径。
+WorkRun 进入通过路径。
 结构化结果和全部支持来源的 sequence 还必须不大于这个 Worker outcome 的
 lastEventSequence。
 
@@ -115,7 +115,7 @@ Evidence 的来源必须通过 SessionBinding 同时匹配它们，不能继续�
 - `verification.role_sessions_are_independent`
 - `verification.read_only_candidate_policy`
 - `verification.successful_candidate_write_rejected`
-- `verification.stage_and_runtime_terminal_agree`
+- `verification.work_run_and_runtime_terminal_agree`
 
 ## 3. Evidence 怎样绑定原始事实
 
@@ -125,14 +125,14 @@ EvidenceRef 只保存有界引用，不复制命令输出、完整日志或聊�
 当前 Delivery
 + 当前 DeliverySpec ID/revision
 + 当前 candidateRef
-+ StageRun
++ WorkRun
 + SessionBinding
 + evidence type
 + sourceRef
 ```
 
 对运行来源，解析器还必须找到唯一且更早、已经被 Control Plane 接受的原始事实，并核对
-ProductSession、ExecutionJob、WorkerSession、CodexThread、StageRun、角色、attempt、Lease、
+ProductSession、ExecutionJob、WorkerSession、CodexThread、WorkRun、角色、attempt、Lease、
 fencing token、Worker、Worker 实例与来源序号。来源缺失、重复、晚于 finding、类型不符、
 属于旧 Job/Lease、别的 Session 或别的候选，都会使这项 Evidence 失效。Git commit、Diff 和
 文件来源也必须能从冻结候选精确重建。
@@ -144,7 +144,7 @@ file、diff、commit 和 finding 还必须绑定 adapter 产生的
 `ValidatedCheckoutAttestationFact`：其 commit 与 tree 必须等于当前冻结候选。仅仅时间上
 发生在验证阶段内，或者事件没有写 candidateRef，都不能证明它检查的是当前候选。
 
-原始来源自己的时间和 sequence 必须不早于 StageRun 开始与 SessionBinding 建立时间，早于
+原始来源自己的时间和 sequence 必须不早于 WorkRun 开始与 SessionBinding 建立时间，早于
 引用它的 finding 和 Verdict，并且不超过匹配 Worker outcome 的 lastEventSequence。解析器
 不能用 `max(stageStart, bindingTime, eventTime)` 抬高旧来源时间。
 
@@ -152,10 +152,10 @@ file、diff、commit 和 finding 还必须绑定 adapter 产生的
 
 - `evidence.current_spec_revision`
 - `evidence.current_candidate`
-- `evidence.current_stage_run`
+- `evidence.current_work_run`
 - `evidence.current_session_binding`
 - `evidence.source_identity_exact`
-- `evidence.source_time_within_stage_and_terminal`
+- `evidence.source_time_within_work_run_and_terminal`
 - `evidence.accepted_runtime_ledger_only`
 - `evidence.runtime_checkout_matches_candidate`
 
@@ -213,17 +213,34 @@ Delivery，Worker 的 job outcome 也不是 DeliveryVerdict。
 
 ## 5. 返工为什么必须有边界
 
-代码返工只能由 Codex remediator 执行。Control Plane 根据当前 DeliverySpec 下全部
-DeliveryTask 的 reworking StageRun 总数计算下一次 attempt，不能接受调用方自报次数，也
-不能在切换任务后从 1 重新开始；总次数不能超过当前 DeliverySpec.maxReworkAttempts。
+代码返工由 remediator 执行。Controller 从当前 DeliverySpec 的已验证候选结论历史计算
+业务返工次数，受 `maxReworkAttempts` 限制；实际执行 attempt 则取源 WorkItem 已持久保存的
+最大 attempt 加一，两者分别计算并封入授权。
 
-图上精确返工必须同时命中当前候选、Diff SHA-256、原 DeliveryTask 范围、当前图、节点、变化文件、hunk SHA-256 和当前 EvidenceRef。任一引用过期、属于别的路径或扩大任务范围，都不会启动返工。
+`delivery.advance` 在 `dispatchProfile: "remediator"` 时必须携带 `rework`：
+
+```json
+{
+  "candidateRef": "git-candidate:sha256:<64位小写十六进制>",
+  "diffSha256": "<64位小写十六进制>",
+  "targets": [{
+    "workItemId": "wit_01J00000000000000000000000",
+    "filePath": "src/example.rs",
+    "sourceHunkSha256": "<64位小写十六进制>",
+    "evidenceRefIds": ["<当前失败结论引用的EvidenceId>"]
+  }]
+}
+```
+
+Controller 从真实 Git 候选和失败 Evidence 独立重建可修改范围，再核对请求的 WorkItem、
+版本、文件和 hunk。其他执行角色拒绝 `rework`。事务提交再次核对请求与已封装授权一致；
+重复请求读取原回执，不重新派发。候选所属 WorkItem 独立选择，其他排在前面的就绪任务不受影响。
 
 启动前的标注和 prompt 不是最终边界证明。remediator 结束后，GitSnapshotResolver 与
 Artifact adapter 封装新 Git 快照，Domain 把这个已验证值与批准内容比较；新候选增加了未
 批准路径，或者改动了批准 hunk 以外的内容时，本次返工结果作废，不能冻结成下一轮候选。
 
-remediator StageRun 一开始，前一个候选就失去“当前”资格。历史 Evidence 可以留在追加记录里，但不能再授权新的通过、审核或发布。remediator 必须产生新的候选，再经过独立 Reviewer、Verifier、逐项 Evidence 和新的 DeliveryVerdict。
+返工派发与旧 Evidence/Verdict 失效在同一事务保存；接受执行后新增 WorkRun 和绑定。历史 Evidence 可以留在追加记录里，但不能再授权新的通过、审核或发布。remediator 必须产生新的候选，再经过独立 Reviewer、Verifier、逐项 Evidence 和新的 DeliveryVerdict。
 
 当已用次数达到上限，或同一条件返工后再次失败，下一步进入定义澄清，不继续自动启动代码返工。
 
@@ -276,13 +293,13 @@ adapter 负责把外部事实验证并封装。它们的生产集成不由阶段
 | `verification.role_sessions_are_independent` | 每个验证角色只有一个当前绑定，且完整身份不复用 |
 | `verification.read_only_candidate_policy` | 所有验证角色只能读取候选 |
 | `verification.successful_candidate_write_rejected` | 事件或前后 Git 快照显示写入时结果作废 |
-| `verification.stage_and_runtime_terminal_agree` | StageRun 与精确 Worker 终止事实同时完成才可结算 |
+| `verification.work_run_and_runtime_terminal_agree` | WorkRun 与精确 Worker 终止事实同时完成才可结算 |
 | `evidence.current_spec_revision` | Evidence 属于当前 Spec revision |
 | `evidence.current_candidate` | Evidence 属于当前候选 |
-| `evidence.current_stage_run` | Evidence 属于正确 StageRun |
+| `evidence.current_work_run` | Evidence 属于正确 WorkRun |
 | `evidence.current_session_binding` | Evidence 属于正确 SessionBinding |
 | `evidence.source_identity_exact` | 来源类型与 Job、Lease、fence、Worker、Session 完整身份精确一致 |
-| `evidence.source_time_within_stage_and_terminal` | 来源时间和序号位于 StageRun、绑定与终止边界内 |
+| `evidence.source_time_within_work_run_and_terminal` | 来源时间和序号位于 WorkRun、绑定与终止边界内 |
 | `evidence.accepted_runtime_ledger_only` | Evidence 只解析持久运行台账中的已接受事实 |
 | `evidence.runtime_checkout_matches_candidate` | 运行来源的 checkout commit/tree 必须等于当前候选 |
 | `verdict.pass_or_fail_requires_evidence` | pass/fail 必须有直接 Evidence |
@@ -298,7 +315,7 @@ adapter 负责把外部事实验证并封装。它们的生产集成不由阶段
 | `verdict.environment_failure_is_infra_error` | 运行环境问题不冒充产品失败 |
 | `verdict.failed_check_cannot_pass` | 失败检查不能支撑 pass |
 | `rework.precise_current_candidate_scope` | 返工只命中当前候选的精确位置 |
-| `rework.result_stays_within_approved_scope` | 返工后的新 Diff 仍受批准 task、文件和 hunk 限制 |
+| `rework.result_stays_within_approved_scope` | 返工后的新 Diff 仍受批准 WorkItem、文件和 hunk 限制 |
 | `rework.bounded_remediator_only` | 返工角色和次数由服务控制 |
 | `rework.attempt_uses_total_delivery_history` | attempt 使用当前 DeliverySpec 的全部返工历史 |
 | `rework.invalidates_previous_candidate` | 返工后必须形成新候选并完整重验 |

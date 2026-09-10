@@ -153,7 +153,7 @@ function sameScope(left: Scope, right: RepositoryScope): boolean {
 }
 
 function isReadyRoute(candidate: ModelRouteAvailabilityProjection): boolean {
-  return candidate.status === 'enabled' && candidate.reason === 'ready'
+  return candidate.status === 'available' && candidate.reason === 'ready'
 }
 
 function modelRouteReason(

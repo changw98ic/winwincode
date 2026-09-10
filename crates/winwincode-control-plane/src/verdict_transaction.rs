@@ -330,7 +330,7 @@ fn validate_replayed_event(
         if item.schema_version != DELIVERY_SCHEMA_VERSION
             || item.delivery_id != event.delivery_id
             || item.delivery_spec_id != verdict.delivery_spec_id
-            || item.stage_run_id.is_none()
+            || item.work_run_id.is_none()
             || !item.blocking
             || item.status != AttentionItemStatus::Open
             || item.resolution.is_some()

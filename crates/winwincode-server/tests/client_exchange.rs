@@ -168,7 +168,6 @@ async fn start_with_client_exchange(data_directory: &Path) -> winwincode_server:
         authenticator,
         Arc::new(NoopApi),
         None,
-        None,
         Some(exchange),
     )
     .await
@@ -874,7 +873,6 @@ async fn malformed_frames_and_unknown_routes_fail_closed() {
         sessions,
         authenticator,
         Arc::new(NoopApi),
-        None,
         None,
         None,
     )

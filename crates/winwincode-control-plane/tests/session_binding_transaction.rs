@@ -1,3 +1,7 @@
+#[path = "support/dispatch_fixture.rs"]
+mod dispatch_fixture;
+use dispatch_fixture::{attempt_time, prepare_delivery_admission, register_attempt_worker};
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -16,10 +20,6 @@ use winwincode_api::generated::{
     DeliverySubmitVerdictPayload, Scope,
 };
 use winwincode_audit::{AuditEvent, AuditExecutionSubjectKind, AuditScope};
-use winwincode_control_plane::delivery_execution::{
-    DeliveryExecutionConfig, DeliveryExecutionPortError, ExecutionJobDispatcher,
-    PendingDeliveryExecution, prepare_delivery_advance,
-};
 use winwincode_control_plane::{
     ArtifactMessageError, CandidateResolutionError, CommitError, ControlPlane, ControlPlaneConfig,
     DeliverySessionBindingCommitError, DurableExecutionPortIngress, EventPublishError,
@@ -27,8 +27,7 @@ use winwincode_control_plane::{
     StateChange, StorageErrorKind,
 };
 use winwincode_delivery::application::stage::{
-    AdvanceStageInput, NewStageIdentities, TerminalArtifactReference, TerminalOutcomeStatus,
-    advance,
+    TerminalArtifactReference, TerminalOutcomeStatus,
     test_support::{
         active_lease_identity, delivery_terminal_outcome_facts, session_binding_authority,
         terminal_outcome_metadata, terminal_worker_outcome, verify_terminal_outcome,
@@ -36,44 +35,37 @@ use winwincode_delivery::application::stage::{
 };
 use winwincode_delivery::domain::{
     DELIVERY_SCHEMA_VERSION, Delivery, DeliveryStatus, DeliveryTask, DeliveryTaskStatus,
-    SessionBindingId,
 };
 use winwincode_delivery::store::{
     AtomicPublication, CreateDelivery, DeliveryCommand, DeliveryCommandPort, DeliveryJournalPort,
     DeliveryStore, JournalBackendError, LoadedDeliveryJournal,
 };
 use winwincode_domain::{
-    ArtifactId, AttentionItemId, CodexThreadId, DeliveryId, DeliveryTaskId, ExecutionAckSequence,
-    ExecutionEventId, ExecutionJobId, ExecutionMessageId, ExecutionSequence, FencingToken, Instant,
-    LeaseId, OrganizationId, ProductSessionId, ProjectId, RepositoryId, RequestId, Revision,
-    SchemaVersion, SessionBindingSourceIdentity, SessionBindingSourceIdentityKind, SessionIdentity,
-    Sha256Digest, StageRunId, UserId, WorkerId, WorkerInstanceId, WorkerSessionId, WorkspaceId,
+    ArtifactId, CodexThreadId, DeliveryId, DeliveryTaskId, ExecutionAckSequence, ExecutionEventId,
+    ExecutionMessageId, ExecutionSequence, FencingToken, Instant, LeaseId, OrganizationId,
+    ProductSessionId, ProjectId, RepositoryId, RequestId, Revision, SchemaVersion,
+    SessionBindingSourceIdentity, SessionBindingSourceIdentityKind, SessionIdentity, Sha256Digest,
+    UserId, WorkerId, WorkerInstanceId, WorkerSessionId, WorkspaceId,
 };
 use winwincode_domain::{RepositoryScope, UserActor};
 use winwincode_execution_port::generated::{
     ArtifactChunkMessage, ArtifactChunkMessageKind, ArtifactDescriptor, ArtifactKind,
     ArtifactOpenMessage, ArtifactOpenMessageKind, ArtifactReference, EncodedPayload,
-    ExecutionEventCategory, ExecutionEventRecord, ExecutionJob, ExecutionLeaseStamp,
-    ExecutionLimits, ExecutionOutcome, ExecutionOutcomeStatus, ExecutionOutcomeUsage,
-    ExecutionPortErrorCode, ExecutionPortMessage, ExecutionScope, ExecutionWorkspace,
-    JobCancelMessage, JobCancelMessageKind, JobCancelMessageReason, JobDispatchMessage,
-    JobDispatchResultMessage, JobDispatchResultMessageKind, JobDispatchResultMessageStatus,
-    JobOutcomeAckMessageStatus, JobOutcomeMessage, JobOutcomeMessageKind, LeaseWriteStatus,
-    RuntimeEventMessage, RuntimeEventMessageKind, SessionBindingMessage, SessionBindingMessageKind,
+    ExecutionEventCategory, ExecutionEventRecord, ExecutionJob, ExecutionOutcome,
+    ExecutionOutcomeStatus, ExecutionOutcomeUsage, ExecutionPortErrorCode, ExecutionPortMessage,
+    ExecutionScope, JobCancelMessage, JobCancelMessageKind, JobCancelMessageReason,
+    JobDispatchMessage, JobDispatchResultMessage, JobDispatchResultMessageKind,
+    JobDispatchResultMessageStatus, JobOutcomeAckMessageStatus, JobOutcomeMessage,
+    JobOutcomeMessageKind, LeaseWriteStatus, RuntimeEventMessage, RuntimeEventMessageKind,
+    SessionBindingMessage, SessionBindingMessageKind,
 };
 use winwincode_storage::{
     AggregateJournalKey, AggregateJournalPublication, AggregateJournalRecord, ArtifactErrorKind,
     CandidateGitPinReceipt, CandidateGitReleaseAuthority, CandidateGitTerminalOutcome,
-    CandidateSourceManifest, EXECUTION_PROTOCOL_VERSION, EnterpriseQuotaBoundary,
-    EnterpriseQuotaLimits, EnterpriseQuotaPolicy, EnterpriseQuotaReservationState,
-    ExecutionAdmissionBoundary, ExecutionAdmissionLimits, ExecutionAdmissionPolicy,
-    ExecutionJobState, ExecutionJobSubmission, ExecutionQueueScope, ExecutionRepositoryAccess,
-    ExecutionReservationRequest, ExecutionReservationStart, LeaseRecovery, NewOutboxEvent,
-    ProductStateStorage, ReceiptActorKey, ReceiptIdentity, ReceiptScopeKey,
-    RepositorySchedulerClaimRequest, RepositorySchedulerScope, SqliteStorage, StateCommit,
-    WorkerAuthenticationIdentity, WorkerHeartbeatRequest, WorkerPlatform, WorkerPoolId,
-    WorkerRegistrationRequest, WorkerSlotAuthority, WorkerSlotOpenRequest,
-    WorkerSlotResourceLimits, WorkerSlotResources,
+    CandidateSourceManifest, ExecutionQueueScope, NewOutboxEvent, ProductStateStorage,
+    ReceiptActorKey, ReceiptIdentity, ReceiptScopeKey, RepositorySchedulerClaimRequest,
+    RepositorySchedulerScope, SqliteStorage, StateCommit, WorkerSlotAuthority,
+    WorkerSlotOpenRequest, WorkerSlotResourceLimits, WorkerSlotResources,
 };
 use winwincode_storage::{
     PublicEventActor, PublicEventScope, PublicEventSource, receipt_actor_key, receipt_scope_key,
@@ -217,6 +209,20 @@ fn delivery_before_advance(seed: u64) -> Delivery {
         owner: None,
         status: DeliveryTaskStatus::Pending,
     }];
+    // Each seeded Delivery owns a fresh canonical contract and one ready item.
+    // A settled run from the shared projection fixture is not execution authority.
+    snapshot.work_run_aggregate.contract.id =
+        winwincode_domain::WorkContractId(canonical_id("wct", seed));
+    snapshot.work_run_aggregate.contract.revision = Revision(1);
+    snapshot.work_run_aggregate.items.truncate(1);
+    let item = &mut snapshot.work_run_aggregate.items[0];
+    item.id = winwincode_domain::WorkItemId(canonical_id("wit", seed));
+    item.work_contract_id = snapshot.work_run_aggregate.contract.id.clone();
+    item.work_contract_revision = Revision(1);
+    item.revision = Revision(1);
+    item.state = winwincode_domain::WorkItemState::Ready;
+    item.depends_on.clear();
+    snapshot.work_run_aggregate.runs.clear();
     snapshot.stage_runs.clear();
     snapshot.session_bindings.clear();
     snapshot.attention_items.clear();
@@ -226,48 +232,87 @@ fn delivery_before_advance(seed: u64) -> Delivery {
     Delivery::try_from_snapshot(snapshot).expect("Delivery before advance")
 }
 
-fn pending_execution(seed: u64) -> PendingDeliveryExecution {
-    let delivery = delivery_before_advance(seed);
-    let result = advance(
-        &delivery,
-        AdvanceStageInput {
-            current_lease: None,
-            rework_authorization: None,
-            expected_revision: 1,
-            product_session_id: ProductSessionId(canonical_id("psn", seed)),
-            identities: NewStageIdentities {
-                stage_run_id: StageRunId(canonical_id("run", seed)),
-                execution_job_id: ExecutionJobId(canonical_id("job", seed)),
-                session_binding_id: SessionBindingId::new(format!("binding-{seed}"))
-                    .expect("binding id"),
-                attention_item_id: AttentionItemId(canonical_id("att", seed)),
-            },
-            review: None,
-            previous_outcome: None,
-            now_millis: 1_800_000_000_100,
-        },
+struct RecordedExecution {
+    delivery: Delivery,
+    job: ExecutionJob,
+}
+
+impl RecordedExecution {
+    fn delivery(&self) -> &Delivery {
+        &self.delivery
+    }
+    fn job(&self) -> &ExecutionJob {
+        &self.job
+    }
+}
+
+fn accept_terminal_message(
+    control_plane: &mut ControlPlane,
+    root: &Path,
+    scope: &RepositoryScope,
+    message: &JobOutcomeMessage,
+) {
+    let mut storage = SqliteStorage::open(root).expect("terminal ingress storage");
+    let output = DurableExecutionPortIngress::new(
+        control_plane,
+        &mut storage,
+        scope,
+        message.sent_at.clone(),
     )
-    .expect("stage advance");
-    prepare_delivery_advance(
-        RequestId(canonical_id("req", seed)),
-        result,
-        DeliveryExecutionConfig {
-            payload_digest: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
-            candidate_ref: None,
-            workspace: ExecutionWorkspace {
-                checkout_revision: "original-checkout".into(),
-                repository_id: RepositoryId(canonical_id("rep", seed)),
-                write_mode:
-                    winwincode_execution_port::generated::ExecutionWorkspaceWriteMode::Candidate,
-            },
-            limits: ExecutionLimits {
-                deadline_at: Instant("2027-01-15T09:00:00.000Z".into()),
-                max_artifact_bytes: 10_000_000,
-                max_runtime_seconds: 3_600,
-            },
-        },
+    .expect("same-database terminal ingress")
+    .handle(&ExecutionPortMessage::JobOutcomeMessage(message.clone()))
+    .expect("terminal outcome through production ingress");
+    let [ExecutionPortMessage::JobOutcomeAckMessage(ack)] = output.as_slice() else {
+        panic!("terminal ingress must return one acknowledgement");
+    };
+    assert_eq!(ack.status, JobOutcomeAckMessageStatus::Accepted);
+    Box::new(storage)
+        .close()
+        .expect("terminal ingress storage close");
+}
+
+fn public_execution_fixture(
+    root: &Path,
+    repository: &Path,
+    initial: &Delivery,
+    seed: u64,
+) -> (ControlPlane, RecordedExecution) {
+    let envelope = delivery_advance_command(seed);
+    let Scope::RepositoryScope(scope) = &envelope.scope else {
+        panic!("repository scope")
+    };
+    seed_delivery(root, initial);
+    seed_delivery_catalog(root, scope, initial);
+    let mut control_plane = ControlPlane::start_local_with_delivery_adapters(
+        ControlPlaneConfig::local(root),
+        Box::new(RecordingPublisher),
+        LocalDeliveryAdapterConfig::new(repository, scope.clone()),
     )
-    .expect("pending execution")
+    .expect("production Delivery adapters");
+    let command = serde_json::from_value(serde_json::to_value(&envelope).unwrap())
+        .expect("generated delivery.advance command");
+    control_plane
+        .delivery_advance(&command)
+        .expect("public Delivery advance");
+    let job = latest_queued_delivery_job(root);
+    let state = control_plane
+        .load_state(&format!("delivery:{}", initial.id().0))
+        .expect("committed Delivery")
+        .expect("Delivery state exists");
+    let delivery = Delivery::decode_json(&state.payload).expect("committed canonical Delivery");
+    (control_plane, RecordedExecution { delivery, job })
+}
+
+fn fresh_public_execution(seed: u64, name: &str) -> (PathBuf, ControlPlane, RecordedExecution) {
+    let root = temporary_directory(name);
+    let repository = root.join("repositories/project-one");
+    let (base_commit, _) = git_candidate_repository(&repository);
+    let mut snapshot = delivery_before_advance(seed).into_snapshot();
+    snapshot.spec.repository.locator = "project-one".into();
+    snapshot.spec.base_revision = base_commit;
+    let initial = Delivery::try_from_snapshot(snapshot).expect("fresh local Delivery");
+    let (control_plane, execution) = public_execution_fixture(&root, &repository, &initial, seed);
+    (root, control_plane, execution)
 }
 
 fn delivery_advance_command(seed: u64) -> CommandEnvelope {
@@ -278,7 +323,7 @@ fn delivery_advance_command(seed: u64) -> CommandEnvelope {
         }),
         command: CommandName::DeliveryAdvance,
         expected_revision: Revision(1),
-        payload: serde_json::json!({"deliveryId": canonical_id("dlv", seed)}),
+        payload: serde_json::json!({"deliveryId": canonical_id("dlv", seed), "dispatchProfile": "executor"}),
         request_id: RequestId(canonical_id("req", seed)),
         schema_version: SchemaVersion::WinwincodeV1,
         scope: Scope::RepositoryScope(RepositoryScope {
@@ -299,106 +344,6 @@ fn audit_repository_scope(seed: u64) -> RepositoryScope {
         project_id: ProjectId(canonical_id("prj", seed)),
         repository_id: RepositoryId(canonical_id("rep", seed)),
     }
-}
-
-fn lease_and_message(
-    pending: &PendingDeliveryExecution,
-    seed: u64,
-) -> (
-    winwincode_delivery::application::stage::SessionBindingAuthority,
-    SessionBindingMessage,
-) {
-    lease_and_message_for_job(pending.job(), seed)
-}
-
-fn lease_and_message_for_job(
-    job: &ExecutionJob,
-    seed: u64,
-) -> (
-    winwincode_delivery::application::stage::SessionBindingAuthority,
-    SessionBindingMessage,
-) {
-    lease_and_message_for_job_at(
-        job,
-        seed,
-        "2027-01-15T08:00:01.000Z",
-        "2027-01-15T08:00:00.200Z",
-        "2027-01-15T08:00:01.100Z",
-    )
-}
-
-fn lease_and_message_for_job_at(
-    job: &ExecutionJob,
-    seed: u64,
-    bound_at: &str,
-    issued_at: &str,
-    sent_at: &str,
-) -> (
-    winwincode_delivery::application::stage::SessionBindingAuthority,
-    SessionBindingMessage,
-) {
-    let worker_session_id = WorkerSessionId(canonical_id("wsn", seed));
-    let (stage_run_id, product_session_id) = match &job.scope {
-        ExecutionScope::DeliveryStageExecutionScope(scope) => {
-            (scope.stage_run_id.clone(), scope.product_session_id.clone())
-        }
-        ExecutionScope::ProductSessionExecutionScope(_) => {
-            panic!("fixture must use a Delivery stage job")
-        }
-    };
-    let lease = active_lease_identity(
-        job.job_id.clone(),
-        1,
-        LeaseId(canonical_id("lse", seed)),
-        FencingToken(seed.to_string()),
-        WorkerId(canonical_id("wrk", seed)),
-        WorkerInstanceId(canonical_id("wki", seed)),
-        worker_session_id.clone(),
-    );
-    let message = SessionBindingMessage {
-        attempt: 1,
-        bound_at: Instant(bound_at.into()),
-        codex_thread_id: CodexThreadId(canonical_id("cdx", seed)),
-        fencing_token: FencingToken(seed.to_string()),
-        kind: SessionBindingMessageKind::SessionBinding,
-        lease: ExecutionLeaseStamp {
-            attempt: 1,
-            expires_at: Instant("2027-01-15T08:05:00.000Z".into()),
-            fencing_token: FencingToken(seed.to_string()),
-            issued_at: Instant(issued_at.into()),
-            job_id: job.job_id.clone(),
-            lease_id: LeaseId(canonical_id("lse", seed)),
-            worker_id: WorkerId(canonical_id("wrk", seed)),
-            worker_instance_id: WorkerInstanceId(canonical_id("wki", seed)),
-        },
-        lease_id: LeaseId(canonical_id("lse", seed)),
-        message_id: ExecutionMessageId(canonical_id("xmsg", seed)),
-        product_session_id: product_session_id.clone(),
-        schema_version: SchemaVersion::WinwincodeV1,
-        sent_at: Instant(sent_at.into()),
-        session_identity: SessionIdentity {
-            codex_thread_id: CodexThreadId(canonical_id("cdx", seed)),
-            product_session_id: product_session_id.clone(),
-            stage_run_id: Some(stage_run_id.clone()),
-            worker_session_id: worker_session_id.clone(),
-        },
-        source_identity: SessionBindingSourceIdentity {
-            kind: SessionBindingSourceIdentityKind::ExecutionWorker,
-            lease_id: LeaseId(canonical_id("lse", seed)),
-            worker_id: WorkerId(canonical_id("wrk", seed)),
-            worker_instance_id: WorkerInstanceId(canonical_id("wki", seed)),
-            worker_session_id: worker_session_id.clone(),
-        },
-        stage_run_id: Some(stage_run_id),
-        worker_id: WorkerId(canonical_id("wrk", seed)),
-        worker_session_id,
-    };
-    let authority = session_binding_authority(
-        lease,
-        message.lease.issued_at.clone(),
-        message.lease.expires_at.clone(),
-    );
-    (authority, message)
 }
 
 struct RuntimeEventBatch<'a> {
@@ -571,70 +516,20 @@ fn running_fixture(
 ) -> (
     PathBuf,
     ControlPlane,
-    PendingDeliveryExecution,
+    RecordedExecution,
     winwincode_delivery::application::stage::SessionBindingAuthority,
     SessionBindingMessage,
 ) {
-    let root = temporary_directory(name);
-    let pending = pending_execution(seed);
-    seed_delivery(&root, &delivery_before_advance(seed));
-    let mut control_plane = ControlPlane::start_local(
-        ControlPlaneConfig::local(&root),
-        Box::new(RecordingPublisher),
-    )
-    .expect("Control Plane start");
-    control_plane
-        .commit_delivery_execution(
-            &delivery_advance_command(seed),
-            &pending,
-            &mut RecordingDispatcher,
-        )
-        .expect("Delivery execution commit");
-    let (authority, message) = lease_and_message(&pending, seed);
+    let (root, control_plane, pending) = fresh_public_execution(seed, name);
+    let (authority, message) = claim_running_delivery_attempt(&root, &pending, seed, 1, "initial");
     (root, control_plane, pending, authority, message)
 }
 
-fn scheduler_delivery_fixture(seed: u64, name: &str) -> (PathBuf, PendingDeliveryExecution) {
-    let root = temporary_directory(name);
-    let pending = pending_execution(seed);
-    seed_delivery(&root, &delivery_before_advance(seed));
-    let mut control_plane = ControlPlane::start_local(
-        ControlPlaneConfig::local(&root),
-        Box::new(RecordingPublisher),
-    )
-    .expect("scheduler fixture Control Plane");
-    control_plane
-        .commit_delivery_execution(
-            &delivery_advance_command(seed),
-            &pending,
-            &mut RecordingDispatcher,
-        )
-        .expect("scheduler fixture Delivery execution");
+fn scheduler_delivery_fixture(seed: u64, name: &str) -> (PathBuf, RecordedExecution) {
+    let (root, control_plane, pending) = fresh_public_execution(seed, name);
     control_plane
         .shutdown()
         .expect("scheduler fixture shutdown");
-    let mut storage = SqliteStorage::open(&root).expect("scheduler queue storage");
-    let job = pending.job();
-    let stage_run_id = match &job.scope {
-        ExecutionScope::DeliveryStageExecutionScope(scope) => Some(scope.stage_run_id.clone()),
-        ExecutionScope::ProductSessionExecutionScope(_) => None,
-    };
-    storage
-        .execution_queue()
-        .expect("scheduler queue")
-        .submit(&ExecutionJobSubmission {
-            scope: execution_queue_scope(seed, &pending),
-            job_id: job.job_id.clone(),
-            request_id: RequestId(canonical_id("req", seed + 220)),
-            payload_digest: job.payload_digest.clone(),
-            dispatch_payload: serde_json::to_vec(job).expect("canonical queued job"),
-            attempt: 1,
-            dependencies: Vec::new(),
-            stage_run_id,
-            submitted_at: attempt_time(1, 1),
-        })
-        .expect("scheduler job submit");
-    Box::new(storage).close().expect("scheduler queue close");
     (root, pending)
 }
 
@@ -647,8 +542,8 @@ fn scheduler_scope(seed: u64) -> RepositorySchedulerScope {
     }
 }
 
-fn execution_queue_scope(seed: u64, pending: &PendingDeliveryExecution) -> ExecutionQueueScope {
-    let ExecutionScope::DeliveryStageExecutionScope(scope) = &pending.job().scope else {
+fn execution_queue_scope(seed: u64, pending: &RecordedExecution) -> ExecutionQueueScope {
+    let ExecutionScope::WorkRunExecutionScope(scope) = &pending.job().scope else {
         panic!("scheduler fixture requires a Delivery execution");
     };
     let repository = scheduler_scope(seed);
@@ -658,7 +553,7 @@ fn execution_queue_scope(seed: u64, pending: &PendingDeliveryExecution) -> Execu
         project_id: repository.project_id,
         repository_id: repository.repository_id,
         product_session_id: scope.product_session_id.clone(),
-        delivery_id: Some(scope.delivery_id.clone()),
+        delivery_id: Some(pending.delivery().id().clone()),
     }
 }
 
@@ -673,161 +568,25 @@ fn scheduler_repository_scope(seed: u64) -> RepositoryScope {
     }
 }
 
-fn attempt_time(attempt: u64, second: u64) -> Instant {
-    Instant(format!(
-        "2027-01-15T08:{:02}:{second:02}.000Z",
-        attempt.saturating_sub(1)
-    ))
-}
-
-fn register_attempt_worker(
-    storage: &mut SqliteStorage,
-    seed: u64,
-    attempt: u64,
-) -> (WorkerId, WorkerInstanceId) {
-    let worker_id = WorkerId(canonical_id("wrk", seed + 100));
-    let worker_instance_id = WorkerInstanceId(canonical_id("wki", seed + 100 + attempt));
-    let receipt = storage
-        .execution_registry()
-        .expect("scheduler Registry")
-        .register_worker(&WorkerRegistrationRequest {
-            authentication_identity: WorkerAuthenticationIdentity::LocalEmbedded {
-                control_plane_principal: "replacement-fixture".into(),
-            },
-            protocol_version: EXECUTION_PROTOCOL_VERSION.into(),
-            platform: WorkerPlatform::Aarch64AppleDarwin,
-            capabilities: vec!["codex".into()],
-            capability_digest: Sha256Digest(format!("sha256:{}", "c".repeat(64))),
-            security_zone: "local".into(),
-            max_slots: 1,
-            message_id: ExecutionMessageId(canonical_id("xmsg", seed + 200 + attempt * 10)),
-            request_id: RequestId(canonical_id("req", seed + 200 + attempt * 10)),
-            sent_at: attempt_time(attempt, 1),
-            started_at: attempt_time(attempt, 0),
-            worker_id: worker_id.clone(),
-            worker_instance_id: worker_instance_id.clone(),
-        })
-        .expect("register attempt Worker");
-    assert_eq!(
-        receipt.lease_recovery,
-        if attempt == 1 {
-            LeaseRecovery::NoActiveLeases
-        } else {
-            LeaseRecovery::ReacquireRequired
-        }
-    );
-    storage
-        .execution_registry()
-        .expect("scheduler Registry")
-        .record_heartbeat(&WorkerHeartbeatRequest {
-            active_leases: Vec::new(),
-            available_slots: 1,
-            heartbeat_sequence: ExecutionSequence(1),
-            max_slots: 1,
-            running_slots: 0,
-            message_id: ExecutionMessageId(canonical_id("xmsg", seed + 201 + attempt * 10)),
-            observed_at: attempt_time(attempt, 2),
-            sent_at: attempt_time(attempt, 2),
-            worker_id: worker_id.clone(),
-            worker_instance_id: worker_instance_id.clone(),
-        })
-        .expect("attempt heartbeat");
-    (worker_id, worker_instance_id)
-}
-
-fn prepare_delivery_admission(
-    storage: &mut SqliteStorage,
-    seed: u64,
-    pending: &PendingDeliveryExecution,
-) {
-    let scope = execution_queue_scope(seed, pending);
-    let worker_pool_id = WorkerPoolId(canonical_id("wpl", seed));
-    let limits = ExecutionAdmissionLimits {
-        max_concurrent: 2,
-        max_queued: 2,
-        token_budget: 10_000,
-        cost_budget_microunits: 100_000,
-        max_runtime_millis: 60_000,
-    };
-    let boundaries = [
-        ExecutionAdmissionBoundary::Organization {
-            organization_id: scope.organization_id.clone(),
-        },
-        ExecutionAdmissionBoundary::Project {
-            organization_id: scope.organization_id.clone(),
-            project_id: scope.project_id.clone(),
-        },
-        ExecutionAdmissionBoundary::Repository {
-            organization_id: scope.organization_id.clone(),
-            project_id: scope.project_id.clone(),
-            repository_id: scope.repository_id.clone(),
-        },
-        ExecutionAdmissionBoundary::ProductSession {
-            organization_id: scope.organization_id.clone(),
-            project_id: scope.project_id.clone(),
-            product_session_id: scope.product_session_id.clone(),
-        },
-        ExecutionAdmissionBoundary::Delivery {
-            organization_id: scope.organization_id.clone(),
-            delivery_id: scope.delivery_id.clone().expect("Delivery queue scope"),
-        },
-        ExecutionAdmissionBoundary::WorkerPool {
-            organization_id: scope.organization_id.clone(),
-            worker_pool_id: worker_pool_id.clone(),
-        },
-    ];
-    let mut admission = storage.execution_admission().expect("execution admission");
-    for boundary in boundaries {
-        admission
-            .configure_policy(&ExecutionAdmissionPolicy { boundary, limits })
-            .expect("admission policy");
-    }
-    admission
-        .reserve(&ExecutionReservationRequest {
-            scope: scope.clone(),
-            user_id: UserId(canonical_id("usr", seed)),
-            worker_pool_id: worker_pool_id.clone(),
-            job_id: pending.job().job_id.clone(),
-            request_id: RequestId(canonical_id("req", seed + 230)),
-            repository_access: ExecutionRepositoryAccess::IsolatedWrite {
-                worktree_key: pending.job().job_id.0.clone(),
-            },
-            reserved_tokens: 100,
-            reserved_cost_microunits: 1_000,
-            runtime_limit_millis: 30_000,
-            submitted_at: attempt_time(1, 1),
-        })
-        .expect("admission reserve");
-    admission
-        .start(&ExecutionReservationStart {
-            scope,
-            worker_pool_id,
-            job_id: pending.job().job_id.clone(),
-            request_id: RequestId(canonical_id("req", seed + 231)),
-            expected_revision: 1,
-            started_at: attempt_time(1, 2),
-        })
-        .expect("admission start");
-}
-
 fn binding_for_dispatch(
-    pending: &PendingDeliveryExecution,
+    pending: &RecordedExecution,
     dispatch: &JobDispatchMessage,
     seed: u64,
     attempt: u64,
+    clock: u64,
 ) -> (
     winwincode_delivery::application::stage::SessionBindingAuthority,
     SessionBindingMessage,
 ) {
-    let ExecutionScope::DeliveryStageExecutionScope(scope) = &dispatch.job.scope else {
+    let ExecutionScope::WorkRunExecutionScope(scope) = &dispatch.job.scope else {
         panic!("dispatch must be a Delivery stage");
     };
     assert_eq!(dispatch.job.job_id, pending.job().job_id);
     let worker_session_id = WorkerSessionId(canonical_id("wsn", seed + attempt * 10));
     let codex_thread_id = CodexThreadId(canonical_id("cdx", seed + attempt * 10));
     let message_id = ExecutionMessageId(canonical_id("xmsg", seed + 240 + attempt * 10));
-    let bound_at = attempt_time(attempt, 5);
-    let sent_at = attempt_time(attempt, 6);
+    let bound_at = attempt_time(clock, 5);
+    let sent_at = attempt_time(clock, 6);
     let message = SessionBindingMessage {
         attempt: dispatch.lease.attempt,
         bound_at,
@@ -843,7 +602,7 @@ fn binding_for_dispatch(
         session_identity: SessionIdentity {
             codex_thread_id: codex_thread_id.clone(),
             product_session_id: scope.product_session_id.clone(),
-            stage_run_id: Some(scope.stage_run_id.clone()),
+            work_run_id: Some(scope.work_run_id.clone()),
             worker_session_id: worker_session_id.clone(),
         },
         source_identity: SessionBindingSourceIdentity {
@@ -853,7 +612,7 @@ fn binding_for_dispatch(
             worker_instance_id: dispatch.lease.worker_instance_id.clone(),
             worker_session_id: worker_session_id.clone(),
         },
-        stage_run_id: Some(scope.stage_run_id.clone()),
+        work_run_id: Some(scope.work_run_id.clone()),
         worker_id: dispatch.lease.worker_id.clone(),
         worker_session_id: worker_session_id.clone(),
     };
@@ -876,9 +635,10 @@ fn binding_for_dispatch(
 
 fn claim_delivery_attempt_with_slot(
     root: &Path,
-    pending: &PendingDeliveryExecution,
+    pending: &RecordedExecution,
     seed: u64,
-    attempt: u64,
+    identity_seed: u64,
+    (attempt, clock): (u64, u64),
     generation: &str,
     open_slot: bool,
 ) -> (
@@ -886,26 +646,32 @@ fn claim_delivery_attempt_with_slot(
     SessionBindingMessage,
 ) {
     let mut storage = SqliteStorage::open(root).expect("scheduler attempt storage");
-    let (worker_id, worker_instance_id) = register_attempt_worker(&mut storage, seed, attempt);
+    let (worker_id, worker_instance_id) =
+        register_attempt_worker(&mut storage, identity_seed, attempt, clock);
     let dispatch = RepositoryExecutionScheduler::new(&mut storage)
         .claim_next(&RepositorySchedulerClaimRequest {
             scope: scheduler_scope(seed),
-            request_id: RequestId(canonical_id("req", seed + 250 + attempt * 10)),
+            request_id: RequestId(canonical_id("req", identity_seed + 250 + attempt * 10)),
             scheduler_generation: generation.into(),
             worker_id,
             worker_instance_id,
-            issued_at: attempt_time(attempt, 3),
-            expires_at: attempt_time(attempt, 50),
+            issued_at: attempt_time(clock, 3),
+            expires_at: attempt_time(clock, 50),
         })
         .expect("scheduler claim")
         .expect("typed dispatch");
-    assert_eq!(
-        dispatch.job.attempt,
-        i64::try_from(attempt).expect("attempt")
-    );
+    let expected_attempt = i64::try_from(attempt).expect("attempt");
+    assert_eq!(dispatch.job.attempt, expected_attempt);
     if attempt == 1 {
         assert!(dispatch.replacement_authority.is_none());
-        prepare_delivery_admission(&mut storage, seed, pending);
+        prepare_delivery_admission(
+            &mut storage,
+            seed,
+            execution_queue_scope(seed, pending),
+            pending.job(),
+            identity_seed,
+            clock,
+        );
     } else {
         let replacement = dispatch
             .replacement_authority
@@ -913,28 +679,34 @@ fn claim_delivery_attempt_with_slot(
             .expect("typed replacement authority");
         assert_eq!(replacement.successor_lease, dispatch.lease);
     }
-    let (authority, message) = binding_for_dispatch(pending, &dispatch, seed, attempt);
-    let running = RepositoryExecutionScheduler::new(&mut storage)
-        .record_dispatch_result(
-            &scheduler_repository_scope(seed),
-            &JobDispatchResultMessage {
-                error: None,
-                job_id: dispatch.job.job_id.clone(),
-                kind: JobDispatchResultMessageKind::JobDispatchResult,
-                lease: dispatch.lease.clone(),
-                message_id: ExecutionMessageId(canonical_id("xmsg", seed + 251 + attempt * 10)),
-                payload_digest: dispatch.job.payload_digest.clone(),
-                request_id: RequestId(canonical_id("req", seed + 251 + attempt * 10)),
-                schema_version: SchemaVersion::WinwincodeV1,
-                sent_at: attempt_time(attempt, 4),
-                status: JobDispatchResultMessageStatus::Accepted,
-                worker_session_id: Some(message.worker_session_id.clone()),
-            },
-            &attempt_time(attempt, 4),
-        )
-        .expect("accepted dispatch result");
-    assert!(running.accepted);
-    assert_eq!(running.job.state, ExecutionJobState::Running);
+    let (authority, message) =
+        binding_for_dispatch(pending, &dispatch, identity_seed, attempt, clock);
+    let result = JobDispatchResultMessage {
+        error: None,
+        job_id: dispatch.job.job_id.clone(),
+        kind: JobDispatchResultMessageKind::JobDispatchResult,
+        lease: dispatch.lease.clone(),
+        message_id: ExecutionMessageId(canonical_id("xmsg", identity_seed + 251 + attempt * 10)),
+        payload_digest: dispatch.job.payload_digest.clone(),
+        request_id: RequestId(canonical_id("req", identity_seed + 251 + attempt * 10)),
+        schema_version: SchemaVersion::WinwincodeV1,
+        sent_at: attempt_time(clock, 4),
+        status: JobDispatchResultMessageStatus::Accepted,
+        worker_session_id: Some(message.worker_session_id.clone()),
+    };
+    let publisher = Box::new(RecordingPublisher);
+    let mut control_plane = ControlPlane::start_local(ControlPlaneConfig::local(root), publisher)
+        .expect("dispatch ingress Control Plane");
+    DurableExecutionPortIngress::new(
+        &mut control_plane,
+        &mut storage,
+        &scheduler_repository_scope(seed),
+        attempt_time(clock, 4),
+    )
+    .expect("same-database ingress")
+    .handle(&ExecutionPortMessage::JobDispatchResultMessage(result))
+    .expect("accepted dispatch creates canonical WorkRun");
+    control_plane.shutdown().expect("dispatch ingress shutdown");
     let slot_authority = WorkerSlotAuthority {
         worker_id: dispatch.lease.worker_id.clone(),
         worker_instance_id: dispatch.lease.worker_instance_id.clone(),
@@ -966,8 +738,8 @@ fn claim_delivery_attempt_with_slot(
                     disk_bytes: 10,
                     process_slots: 1,
                 },
-                request_id: RequestId(canonical_id("req", seed + 252 + attempt * 10)),
-                opened_at: attempt_time(attempt, 5),
+                request_id: RequestId(canonical_id("req", identity_seed + 252 + attempt * 10)),
+                opened_at: attempt_time(clock, 5),
             })
             .expect("Worker slot");
     }
@@ -977,7 +749,7 @@ fn claim_delivery_attempt_with_slot(
 
 fn claim_delivery_attempt(
     root: &Path,
-    pending: &PendingDeliveryExecution,
+    pending: &RecordedExecution,
     seed: u64,
     attempt: u64,
     generation: &str,
@@ -985,12 +757,20 @@ fn claim_delivery_attempt(
     winwincode_delivery::application::stage::SessionBindingAuthority,
     SessionBindingMessage,
 ) {
-    claim_delivery_attempt_with_slot(root, pending, seed, attempt, generation, true)
+    claim_delivery_attempt_with_slot(
+        root,
+        pending,
+        seed,
+        seed,
+        (attempt, attempt),
+        generation,
+        true,
+    )
 }
 
 fn claim_delivery_attempt_without_slot(
     root: &Path,
-    pending: &PendingDeliveryExecution,
+    pending: &RecordedExecution,
     seed: u64,
     attempt: u64,
     generation: &str,
@@ -998,12 +778,20 @@ fn claim_delivery_attempt_without_slot(
     winwincode_delivery::application::stage::SessionBindingAuthority,
     SessionBindingMessage,
 ) {
-    claim_delivery_attempt_with_slot(root, pending, seed, attempt, generation, false)
+    claim_delivery_attempt_with_slot(
+        root,
+        pending,
+        seed,
+        seed,
+        (attempt, attempt),
+        generation,
+        false,
+    )
 }
 
 fn claim_running_delivery_attempt(
     root: &Path,
-    pending: &PendingDeliveryExecution,
+    pending: &RecordedExecution,
     seed: u64,
     attempt: u64,
     generation: &str,
@@ -1016,7 +804,7 @@ fn claim_running_delivery_attempt(
 
 fn claim_replacement_delivery_attempt(
     root: &Path,
-    pending: &PendingDeliveryExecution,
+    pending: &RecordedExecution,
     seed: u64,
     attempt: u64,
     generation: &str,
@@ -1087,7 +875,7 @@ fn stale_delivery_cancel(message: &SessionBindingMessage, seed: u64) -> JobCance
 
 fn delivery_authority_bytes(
     storage: &mut SqliteStorage,
-    pending: &PendingDeliveryExecution,
+    pending: &RecordedExecution,
     seed: u64,
     sessions: &[&WorkerSessionId],
 ) -> Vec<u8> {
@@ -1131,7 +919,7 @@ fn assert_stale_delivery_ingress_is_read_only(
     control_plane: &mut ControlPlane,
     storage: &mut SqliteStorage,
     repository_scope: &RepositoryScope,
-    pending: &PendingDeliveryExecution,
+    pending: &RecordedExecution,
     seed: u64,
     sessions: &[&WorkerSessionId],
     message: &ExecutionPortMessage,
@@ -1171,7 +959,7 @@ fn assert_stale_delivery_ingress_is_read_only(
 fn assert_delivery_predecessor_is_fenced(
     root: &Path,
     control_plane: &mut ControlPlane,
-    pending: &PendingDeliveryExecution,
+    pending: &RecordedExecution,
     seed: u64,
     old_message: &SessionBindingMessage,
     replacement_message: &SessionBindingMessage,
@@ -1209,9 +997,9 @@ fn artifact_open_message(seed: u64, binding: &SessionBindingMessage) -> Artifact
             digest: Sha256Digest(
                 "sha256:2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824".into(),
             ),
-            file_name: Some("candidate.json".into()),
-            kind: ArtifactKind::Candidate,
-            media_type: "application/vnd.winwincode.git-candidate+json".into(),
+            file_name: Some("command-output.txt".into()),
+            kind: ArtifactKind::CommandOutput,
+            media_type: "text/plain".into(),
             size_bytes: 5,
         },
         kind: ArtifactOpenMessageKind::ArtifactOpen,
@@ -1219,7 +1007,7 @@ fn artifact_open_message(seed: u64, binding: &SessionBindingMessage) -> Artifact
         message_id: ExecutionMessageId(canonical_id("xmsg", seed + 1)),
         request_id: RequestId(canonical_id("req", seed + 1)),
         schema_version: SchemaVersion::WinwincodeV1,
-        sent_at: Instant("2027-01-15T08:00:02.000Z".into()),
+        sent_at: Instant("2027-01-15T08:00:07.000Z".into()),
         session_identity: binding.session_identity.clone(),
         worker_session_id: binding.worker_session_id.clone(),
     }
@@ -1454,15 +1242,6 @@ impl EventPublisher for RecordingPublisher {
     }
 }
 
-#[derive(Default)]
-struct RecordingDispatcher;
-
-impl ExecutionJobDispatcher for RecordingDispatcher {
-    fn dispatch(&mut self, _job: &ExecutionJob) -> Result<(), DeliveryExecutionPortError> {
-        Ok(())
-    }
-}
-
 #[test]
 #[allow(clippy::too_many_lines)]
 fn exact_session_binding_message_commits_two_consecutive_durable_mutations() {
@@ -1470,13 +1249,25 @@ fn exact_session_binding_message_commits_two_consecutive_durable_mutations() {
     let (root, mut control_plane, pending, authority, message) =
         running_fixture(seed, "two-consecutive-mutations");
     let worker_session_id = message.worker_session_id.clone();
+    let before_revision = control_plane
+        .load_state(&format!("delivery:{}", pending.delivery().id().0))
+        .expect("Delivery before binding")
+        .expect("Delivery exists")
+        .revision;
+    let before_audit_count = audit_event_count(&root);
 
     let committed = control_plane
         .commit_delivery_session_binding(&message, &authority, &message.sent_at)
         .expect("typed SessionBinding transaction");
 
-    assert_eq!(committed.worker_session_receipt().revision, 3);
-    assert_eq!(committed.codex_thread_receipt().revision, 4);
+    assert_eq!(
+        committed.worker_session_receipt().revision,
+        before_revision + 1
+    );
+    assert_eq!(
+        committed.codex_thread_receipt().revision,
+        before_revision + 2
+    );
     assert!(!committed.worker_session_receipt().idempotent_replay);
     assert!(!committed.codex_thread_receipt().idempotent_replay);
     for receipt in [
@@ -1518,7 +1309,7 @@ fn exact_session_binding_message_commits_two_consecutive_durable_mutations() {
         .load_state(&format!("delivery:{}", pending.delivery().id().0))
         .expect("Delivery state read")
         .expect("Delivery state");
-    assert_eq!(state.revision, 4);
+    assert_eq!(state.revision, before_revision + 2);
     let delivery = Delivery::decode_json(&state.payload).expect("Delivery snapshot");
     let binding = delivery
         .snapshot()
@@ -1533,7 +1324,7 @@ fn exact_session_binding_message_commits_two_consecutive_durable_mutations() {
     );
 
     let audit_event = audit_event_for_receipt(&root, committed.codex_thread_receipt());
-    assert_eq!(audit_event_count(&root), 1);
+    assert_eq!(audit_event_count(&root), before_audit_count + 1);
     assert_eq!(
         audit_event.subject().execution_kind(),
         Some(AuditExecutionSubjectKind::AcceptedBinding)
@@ -1545,7 +1336,7 @@ fn exact_session_binding_message_commits_two_consecutive_durable_mutations() {
     assert_eq!(identity.product_session_id(), &message.product_session_id);
     assert_eq!(identity.worker_session_id(), &message.worker_session_id);
     assert_eq!(identity.codex_thread_id(), &message.codex_thread_id);
-    assert_eq!(Some(identity.stage_run_id()), message.stage_run_id.as_ref());
+    assert_eq!(Some(identity.work_run_id()), message.work_run_id.as_ref());
     assert_eq!(identity.execution_job_id(), &pending.job().job_id);
     assert_eq!(identity.delivery_id(), pending.delivery().id());
     assert!(identity.source_sequence().is_none());
@@ -1596,6 +1387,10 @@ fn exact_session_binding_message_commits_two_consecutive_durable_mutations() {
 }
 
 #[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the replacement transaction keeps ownership, fencing, and restart checks together"
+)]
 fn running_scheduler_replacement_rotates_the_delivery_owner_before_new_binding() {
     let seed = 31;
     let (root, pending) = scheduler_delivery_fixture(seed, "running-owner-replacement");
@@ -1609,7 +1404,7 @@ fn running_scheduler_replacement_rotates_the_delivery_owner_before_new_binding()
     let old = control_plane
         .commit_delivery_session_binding(&old_message, &old_authority, &old_message.sent_at)
         .expect("old running binding");
-    assert_eq!(old.codex_thread_receipt().revision, 4);
+    assert_eq!(old.codex_thread_receipt().revision, 5);
     control_plane.shutdown().expect("old binding shutdown");
 
     let (replacement_authority, replacement_message) =
@@ -1637,8 +1432,32 @@ fn running_scheduler_replacement_rotates_the_delivery_owner_before_new_binding()
         .snapshot()
         .session_bindings
         .iter()
-        .find(|binding| binding.execution_job_id == pending.job().job_id)
+        .find(|binding| Some(&binding.work_run_id) == replacement_message.work_run_id.as_ref())
         .expect("replacement binding");
+    let predecessor = delivery
+        .snapshot()
+        .session_bindings
+        .iter()
+        .find(|binding| Some(&binding.work_run_id) == old_message.work_run_id.as_ref())
+        .expect("immutable predecessor binding");
+    assert_ne!(predecessor.work_run_id, binding.work_run_id);
+    assert_eq!(predecessor.attempt, 1);
+    assert_eq!(
+        predecessor.worker_session_id.as_ref(),
+        Some(&old_message.worker_session_id)
+    );
+    assert_eq!(
+        predecessor.codex_thread_id.as_ref(),
+        Some(&old_message.codex_thread_id)
+    );
+    let old_run = delivery
+        .snapshot()
+        .work_run_aggregate
+        .runs
+        .iter()
+        .find(|run| run.id == predecessor.work_run_id)
+        .expect("retained predecessor WorkRun");
+    assert_eq!(old_run.state, winwincode_domain::WorkRunState::Failed);
     assert_eq!(binding.attempt, 2);
     assert_eq!(
         binding.worker_session_id.as_ref(),
@@ -1750,8 +1569,8 @@ fn exact_message_replay_returns_both_original_receipts_without_new_writes() {
         .commit_delivery_session_binding(&message, &authority, &message.sent_at)
         .expect("receipt-first replay");
 
-    assert_eq!(replay.worker_session_receipt().revision, 3);
-    assert_eq!(replay.codex_thread_receipt().revision, 4);
+    assert_eq!(replay.worker_session_receipt().revision, 4);
+    assert_eq!(replay.codex_thread_receipt().revision, 5);
     assert!(replay.worker_session_receipt().idempotent_replay);
     assert!(replay.codex_thread_receipt().idempotent_replay);
     assert_eq!(
@@ -1766,7 +1585,7 @@ fn exact_message_replay_returns_both_original_receipts_without_new_writes() {
         .load_state(&format!("delivery:{}", pending.delivery().id().0))
         .expect("state read")
         .expect("state");
-    assert_eq!(state.revision, 4);
+    assert_eq!(state.revision, 5);
 
     control_plane.shutdown().expect("shutdown");
     let connection = rusqlite::Connection::open(root.join("control-plane.sqlite3"))
@@ -1785,7 +1604,7 @@ fn exact_message_replay_returns_both_original_receipts_without_new_writes() {
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .expect("durable counts");
-    assert_eq!(counts, (4, 4, 7));
+    assert_eq!(counts, (5, 5, 8));
     connection.close().expect("inspection close");
     fs::remove_dir_all(root).expect("database directory release");
 }
@@ -1851,7 +1670,7 @@ fn trusted_server_time_is_checked_only_after_session_binding_receipt_resolution(
         .load_state(&format!("delivery:{}", pending.delivery().id().0))
         .expect("state read")
         .expect("state");
-    assert_eq!(state.revision, 4);
+    assert_eq!(state.revision, 5);
     control_plane.shutdown().expect("restart shutdown");
     fs::remove_dir_all(root).expect("database directory release");
 }
@@ -1871,14 +1690,14 @@ fn scheduler_authority_rejects_a_worker_supplied_lease_window_before_writes() {
         .load_state(&format!("delivery:{}", pending.delivery().id().0))
         .expect("state read")
         .expect("state");
-    assert_eq!(state.revision, 2);
+    assert_eq!(state.revision, 3);
     assert_eq!(audit_event_count(&root), 0);
     control_plane.shutdown().expect("shutdown");
     let connection = rusqlite::Connection::open(root.join("control-plane.sqlite3"))
         .expect("inspection database");
     let phase_receipts: i64 = connection
         .query_row(
-            "SELECT COUNT(*) FROM command_receipts WHERE revision > 2",
+            "SELECT COUNT(*) FROM command_receipts WHERE revision > 3",
             [],
             |row| row.get(0),
         )
@@ -1953,7 +1772,7 @@ fn concurrent_exact_session_binding_messages_all_resolve_to_the_two_durable_phas
     );
     assert_eq!(
         durable_binding_counts(&root, pending.delivery().id()),
-        (4, 4, 2, 4)
+        (5, 5, 3, 5)
     );
     fs::remove_dir_all(root).expect("database directory release");
 }
@@ -1967,7 +1786,7 @@ fn retry_continues_from_the_durable_worker_session_receipt_after_phase_two_failu
     connection
         .execute_batch(
             "CREATE TRIGGER fail_codex_thread_state BEFORE UPDATE ON product_state \
-             WHEN NEW.stream_id LIKE 'delivery:%' AND NEW.revision = 4 \
+             WHEN NEW.stream_id LIKE 'delivery:%' AND NEW.revision = 5 \
              BEGIN SELECT RAISE(ABORT, 'injected CodexThread phase failure'); END;",
         )
         .expect("phase-two failure trigger");
@@ -1979,13 +1798,13 @@ fn retry_continues_from_the_durable_worker_session_receipt_after_phase_two_failu
     let worker_receipt = error
         .committed_worker_session_receipt()
         .expect("phase-one durable receipt");
-    assert_eq!(worker_receipt.revision, 3);
+    assert_eq!(worker_receipt.revision, 4);
     assert!(!worker_receipt.idempotent_replay);
     let partial = control_plane
         .load_state(&format!("delivery:{}", pending.delivery().id().0))
         .expect("partial state read")
         .expect("partial state");
-    assert_eq!(partial.revision, 3);
+    assert_eq!(partial.revision, 4);
     let partial_delivery = Delivery::decode_json(&partial.payload).expect("partial Delivery");
     let partial_binding = partial_delivery
         .snapshot()
@@ -2009,7 +1828,7 @@ fn retry_continues_from_the_durable_worker_session_receipt_after_phase_two_failu
         .expect("receipt-first retry should finish phase two");
     assert!(resumed.worker_session_receipt().idempotent_replay);
     assert!(!resumed.codex_thread_receipt().idempotent_replay);
-    assert_eq!(resumed.codex_thread_receipt().revision, 4);
+    assert_eq!(resumed.codex_thread_receipt().revision, 5);
 
     control_plane.shutdown().expect("shutdown");
     fs::remove_dir_all(root).expect("database directory release");
@@ -2056,8 +1875,8 @@ fn complete_replay_uses_sealed_receipts_before_replacement_authority_or_current_
 
     assert!(replay.worker_session_receipt().idempotent_replay);
     assert!(replay.codex_thread_receipt().idempotent_replay);
-    assert_eq!(replay.worker_session_receipt().revision, 3);
-    assert_eq!(replay.codex_thread_receipt().revision, 4);
+    assert_eq!(replay.worker_session_receipt().revision, 4);
+    assert_eq!(replay.codex_thread_receipt().revision, 5);
     control_plane.shutdown().expect("shutdown");
     fs::remove_dir_all(root).expect("database directory release");
 }
@@ -2101,7 +1920,7 @@ fn complete_replay_rejects_non_canonical_or_foreign_durable_execution_job_facts(
                 .expect("state read")
                 .expect("state")
                 .revision,
-            4,
+            5,
             "{corruption}"
         );
 
@@ -2138,7 +1957,7 @@ fn the_same_session_binding_message_identity_with_changed_payload_is_a_request_c
             .expect("state read")
             .expect("state")
             .revision,
-        4
+        5
     );
 
     control_plane.shutdown().expect("shutdown");
@@ -2151,7 +1970,7 @@ fn generic_control_plane_commit_cannot_bypass_the_typed_session_binding_transact
         running_fixture(6, "generic-bypass");
     let mut command = delivery_advance_command(6);
     command.command = CommandName::SessionCancel;
-    command.expected_revision = Revision(2);
+    command.expected_revision = Revision(3);
     command.request_id = RequestId(canonical_id("req", 600));
 
     let error = control_plane
@@ -2177,7 +1996,7 @@ fn generic_control_plane_commit_cannot_bypass_the_typed_session_binding_transact
         .load_state(&format!("delivery:{}", pending.delivery().id().0))
         .expect("state read")
         .expect("state");
-    assert_eq!(state.revision, 2);
+    assert_eq!(state.revision, 3);
     control_plane.shutdown().expect("shutdown");
     fs::remove_dir_all(root).expect("database directory release");
 }
@@ -2216,8 +2035,8 @@ fn missing_wrong_topic_corrupt_or_foreign_execution_job_event_is_rejected_before
                         .expect("job object")
                         .insert("unknownField".into(), serde_json::json!(true));
                 } else {
-                    value["scope"]["stageRunId"] =
-                        serde_json::json!(canonical_id("run", seed + 100));
+                    value["scope"]["workRunId"] =
+                        serde_json::json!(canonical_id("wrn", seed + 100));
                 }
                 connection
                     .execute(
@@ -2240,7 +2059,7 @@ fn missing_wrong_topic_corrupt_or_foreign_execution_job_event_is_rejected_before
             .load_state(&format!("delivery:{}", pending.delivery().id().0))
             .expect("state read")
             .expect("state");
-        assert_eq!(state.revision, 2, "{corruption}");
+        assert_eq!(state.revision, 3, "{corruption}");
         control_plane.shutdown().expect("shutdown");
         fs::remove_dir_all(root).expect("database directory release");
     }
@@ -2295,7 +2114,7 @@ fn foreign_lease_job_session_and_time_identities_are_rejected_before_writes() {
         .load_state(&format!("delivery:{}", pending.delivery().id().0))
         .expect("state read")
         .expect("state");
-    assert_eq!(state.revision, 2);
+    assert_eq!(state.revision, 3);
     assert_eq!(audit_event_count(&root), 0);
     control_plane.shutdown().expect("shutdown");
     fs::remove_dir_all(root).expect("database directory release");
@@ -2303,7 +2122,7 @@ fn foreign_lease_job_session_and_time_identities_are_rejected_before_writes() {
 
 #[test]
 fn every_atomic_member_rolls_back_within_each_session_binding_phase() {
-    for (phase_offset, target_revision) in [(0_u64, 3_u64), (100_u64, 4_u64)] {
+    for (phase_offset, target_revision) in [(0_u64, 4_u64), (100_u64, 5_u64)] {
         for (member_offset, member) in ["state", "journal", "receipt", "outbox"]
             .into_iter()
             .enumerate()
@@ -2319,14 +2138,14 @@ fn every_atomic_member_rolls_back_within_each_session_binding_phase() {
                 .commit_delivery_session_binding(&message, &authority, &message.sent_at)
                 .expect_err("injected atomic member failure");
 
-            if target_revision == 3 {
+            if target_revision == 4 {
                 assert!(
                     error.committed_worker_session_receipt().is_none(),
                     "{member}"
                 );
                 assert_eq!(
                     durable_binding_counts(&root, pending.delivery().id()),
-                    (2, 2, 0, 0),
+                    (3, 3, 1, 1),
                     "{member}"
                 );
                 assert_eq!(audit_event_count(&root), 0, "{member}");
@@ -2336,12 +2155,12 @@ fn every_atomic_member_rolls_back_within_each_session_binding_phase() {
                         .committed_worker_session_receipt()
                         .expect("phase-one receipt")
                         .revision,
-                    3,
+                    4,
                     "{member}"
                 );
                 assert_eq!(
                     durable_binding_counts(&root, pending.delivery().id()),
-                    (3, 3, 1, 2),
+                    (4, 4, 2, 3),
                     "{member}"
                 );
                 assert_eq!(audit_event_count(&root), 0, "{member}");
@@ -2367,7 +2186,7 @@ fn replay_rejects_changed_receipt_digest_or_event_membership() {
             connection
                 .execute(
                     "UPDATE command_receipts SET command_digest = ?1 \
-                     WHERE stream_id = ?2 AND revision = 3",
+                     WHERE stream_id = ?2 AND revision = 4",
                     rusqlite::params![
                         format!("sha256:{}", "f".repeat(64)),
                         format!("delivery:{}", pending.delivery().id().0)
@@ -2378,9 +2197,9 @@ fn replay_rejects_changed_receipt_digest_or_event_membership() {
             connection
                 .execute(
                     "UPDATE outbox SET request_id = \
-                       (SELECT request_id FROM command_receipts WHERE stream_id = ?1 AND revision = 4) \
+                       (SELECT request_id FROM command_receipts WHERE stream_id = ?1 AND revision = 5) \
                      WHERE topic = 'runtime-projection.invalidated.v1' AND request_id = \
-                       (SELECT request_id FROM command_receipts WHERE stream_id = ?1 AND revision = 3)",
+                       (SELECT request_id FROM command_receipts WHERE stream_id = ?1 AND revision = 4)",
                     [format!("delivery:{}", pending.delivery().id().0)],
                 )
                 .expect("move event to foreign phase receipt");
@@ -2401,75 +2220,11 @@ fn replay_rejects_changed_receipt_digest_or_event_membership() {
                 .expect("state read")
                 .expect("state")
                 .revision,
-            4
+            5
         );
         control_plane.shutdown().expect("shutdown");
         fs::remove_dir_all(root).expect("database directory release");
     }
-}
-
-#[test]
-fn production_artifact_quota_denies_before_catalog_or_object_write() {
-    let seed = 1_400;
-    let (root, mut control_plane, _pending, authority, binding_message) =
-        running_fixture(seed, "artifact-quota-denial");
-    control_plane
-        .commit_delivery_session_binding(&binding_message, &authority, &binding_message.sent_at)
-        .expect("complete SessionBinding");
-    let Scope::RepositoryScope(scope) = delivery_advance_command(seed).scope else {
-        panic!("fixture must use repository scope");
-    };
-    let mut quota_storage = SqliteStorage::open(&root).expect("quota configuration storage");
-    quota_storage
-        .enterprise_quota_ledger()
-        .expect("enterprise quota ledger")
-        .put_policy(&EnterpriseQuotaPolicy {
-            boundary: EnterpriseQuotaBoundary::Organization {
-                organization_id: scope.organization_id.clone(),
-            },
-            revision: 1,
-            limits: EnterpriseQuotaLimits {
-                storage_bytes: Some(4),
-                ..EnterpriseQuotaLimits::default()
-            },
-        })
-        .expect("storage quota policy");
-    Box::new(quota_storage)
-        .close()
-        .expect("quota configuration close");
-
-    let open = artifact_open_message(seed, &binding_message);
-    assert!(matches!(
-        control_plane.accept_artifact_open(&scope, &open, &authority),
-        Err(ArtifactMessageError::EnterpriseQuotaDenied)
-    ));
-    control_plane.shutdown().expect("shutdown");
-
-    let catalog =
-        rusqlite::Connection::open(root.join("artifact-catalog/artifact-catalog.sqlite3"))
-            .expect("Artifact catalog inspection");
-    let stored: i64 = catalog
-        .query_row(
-            "SELECT COUNT(*) FROM artifacts WHERE artifact_id = ?1",
-            [&open.artifact.artifact_id.0],
-            |row| row.get(0),
-        )
-        .expect("Artifact catalog count");
-    assert_eq!(stored, 0);
-    catalog.close().expect("Artifact catalog close");
-    let mut quota_storage = SqliteStorage::open(&root).expect("quota inspection storage");
-    assert!(
-        quota_storage
-            .enterprise_quota_ledger()
-            .expect("enterprise quota ledger")
-            .load_reservation(&open.request_id)
-            .expect("quota reservation lookup")
-            .is_none()
-    );
-    Box::new(quota_storage)
-        .close()
-        .expect("quota inspection close");
-    fs::remove_dir_all(root).expect("database directory release");
 }
 
 #[test]
@@ -2536,22 +2291,6 @@ fn generated_artifact_messages_use_the_exact_durable_job_and_binding_authority()
         ExecutionPortErrorCode::MessageConflict
     );
 
-    let mut stale_fence_open = open.clone();
-    stale_fence_open.message_id = ExecutionMessageId(canonical_id("xmsg", seed + 22));
-    stale_fence_open.request_id = RequestId(canonical_id("req", seed + 22));
-    stale_fence_open.lease.fencing_token = FencingToken("1".into());
-    let stale_fence = control_plane
-        .accept_artifact_open(&scope, &stale_fence_open, &authority)
-        .expect("stale fencing token acknowledgement");
-    assert_eq!(
-        stale_fence.status,
-        LeaseWriteStatus::RejectedStaleFencingToken
-    );
-    assert_eq!(
-        stale_fence.error.expect("stale fence error").code,
-        ExecutionPortErrorCode::StaleFencingToken
-    );
-
     let mut replaced_worker_open = open.clone();
     replaced_worker_open.message_id = ExecutionMessageId(canonical_id("xmsg", seed + 23));
     replaced_worker_open.request_id = RequestId(canonical_id("req", seed + 23));
@@ -2611,7 +2350,7 @@ fn generated_artifact_messages_use_the_exact_durable_job_and_binding_authority()
             payload_digest: digest,
         },
         schema_version: SchemaVersion::WinwincodeV1,
-        sent_at: Instant("2027-01-15T08:00:03.000Z".into()),
+        sent_at: Instant("2027-01-15T08:00:08.000Z".into()),
         sequence: ExecutionSequence(1),
         session_identity: binding_message.session_identity.clone(),
         worker_session_id: binding_message.worker_session_id.clone(),
@@ -2664,19 +2403,6 @@ fn generated_artifact_messages_use_the_exact_durable_job_and_binding_authority()
         .expect("exact artifact.chunk replay");
     assert_eq!(duplicate_chunk.status, LeaseWriteStatus::Duplicate);
     assert_eq!(duplicate_chunk.ack_sequence.0, 1);
-    let mut quota_storage = SqliteStorage::open(&root).expect("quota inspection storage");
-    let quota_record = quota_storage
-        .enterprise_quota_ledger()
-        .expect("enterprise quota ledger")
-        .load_reservation(&open.request_id)
-        .expect("Artifact quota reservation lookup")
-        .expect("Artifact quota reservation");
-    assert_eq!(quota_record.state, EnterpriseQuotaReservationState::Settled);
-    assert_eq!(quota_record.revision, 2);
-    Box::new(quota_storage)
-        .close()
-        .expect("quota inspection close");
-
     let mut changed_chunk_transport = chunk.clone();
     changed_chunk_transport.payload.content_type = "application/json".into();
     changed_chunk_transport.sent_at = Instant("2027-01-15T08:00:04.000Z".into());
@@ -2739,67 +2465,15 @@ fn control_plane_rebuilds_the_candidate_from_its_exact_artifact_and_successful_o
     let mut initial_snapshot = delivery_before_advance(seed).into_snapshot();
     initial_snapshot.spec.repository.locator = "project-one".into();
     initial_snapshot.spec.base_revision.clone_from(&base_commit);
+
     let initial = Delivery::try_from_snapshot(initial_snapshot).expect("local Git Delivery");
-    let first_transition = advance(
-        &initial,
-        AdvanceStageInput {
-            current_lease: None,
-            rework_authorization: None,
-            expected_revision: initial.revision(),
-            product_session_id: ProductSessionId(canonical_id("psn", seed)),
-            identities: NewStageIdentities {
-                stage_run_id: StageRunId(canonical_id("run", seed)),
-                execution_job_id: ExecutionJobId(canonical_id("job", seed)),
-                session_binding_id: SessionBindingId::new(format!("binding-{seed}"))
-                    .expect("binding id"),
-                attention_item_id: AttentionItemId(canonical_id("att", seed)),
-            },
-            review: None,
-            previous_outcome: None,
-            now_millis: 1_800_000_000_100,
-        },
-    )
-    .expect("executor advance");
-    let first_request_id = RequestId(canonical_id("req", seed));
-    let first_pending = prepare_delivery_advance(
-        first_request_id,
-        first_transition,
-        DeliveryExecutionConfig {
-            payload_digest: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
-            candidate_ref: None,
-            workspace: ExecutionWorkspace {
-                checkout_revision: base_commit.clone(),
-                repository_id: RepositoryId(canonical_id("rep", seed)),
-                write_mode:
-                    winwincode_execution_port::generated::ExecutionWorkspaceWriteMode::Candidate,
-            },
-            limits: ExecutionLimits {
-                deadline_at: Instant("2027-01-15T09:00:00.000Z".into()),
-                max_artifact_bytes: 10_000_000,
-                max_runtime_seconds: 3_600,
-            },
-        },
-    )
-    .expect("pending executor");
-    seed_delivery(&root, &initial);
     let Scope::RepositoryScope(scope) = delivery_advance_command(seed).scope.clone() else {
         panic!("fixture must use repository scope");
     };
-    seed_delivery_catalog(&root, &scope, &initial);
-    let mut control_plane = ControlPlane::start_local_with_delivery_adapters(
-        ControlPlaneConfig::local(&root),
-        Box::new(RecordingPublisher),
-        LocalDeliveryAdapterConfig::new(&repository, scope.clone()),
-    )
-    .expect("Control Plane start");
-    control_plane
-        .commit_delivery_execution(
-            &delivery_advance_command(seed),
-            &first_pending,
-            &mut RecordingDispatcher,
-        )
-        .expect("executor dispatch commit");
-    let (authority, binding_message) = lease_and_message(&first_pending, seed);
+    let (mut control_plane, first_pending) =
+        public_execution_fixture(&root, &repository, &initial, seed);
+    let (authority, binding_message) =
+        claim_running_delivery_attempt(&root, &first_pending, seed, 1, "initial");
     control_plane
         .commit_delivery_session_binding(&binding_message, &authority, &binding_message.sent_at)
         .expect("complete SessionBinding");
@@ -2824,7 +2498,7 @@ fn control_plane_rebuilds_the_candidate_from_its_exact_artifact_and_successful_o
         message_id: ExecutionMessageId(canonical_id("xmsg", seed + 1)),
         request_id: RequestId(canonical_id("req", seed + 1)),
         schema_version: SchemaVersion::WinwincodeV1,
-        sent_at: Instant("2027-01-15T08:00:02.000Z".into()),
+        sent_at: Instant("2027-01-15T08:00:07.000Z".into()),
         session_identity: binding_message.session_identity.clone(),
         worker_session_id: binding_message.worker_session_id.clone(),
     };
@@ -2843,7 +2517,7 @@ fn control_plane_rebuilds_the_candidate_from_its_exact_artifact_and_successful_o
             payload_digest: digest.clone(),
         },
         schema_version: SchemaVersion::WinwincodeV1,
-        sent_at: Instant("2027-01-15T08:00:03.000Z".into()),
+        sent_at: Instant("2027-01-15T08:00:08.000Z".into()),
         sequence: ExecutionSequence(1),
         session_identity: binding_message.session_identity.clone(),
         worker_session_id: binding_message.worker_session_id.clone(),
@@ -2996,7 +2670,7 @@ fn control_plane_rebuilds_the_candidate_from_its_exact_artifact_and_successful_o
         .expect("active Delivery exists");
     let terminal_metadata = terminal_outcome_metadata(
         Some(binding_message.codex_thread_id.clone()),
-        1_800_000_001_000,
+        1_800_000_009_000,
         ExecutionAckSequence(12),
         vec![TerminalArtifactReference {
             artifact_id: artifact_id.clone(),
@@ -3004,7 +2678,11 @@ fn control_plane_rebuilds_the_candidate_from_its_exact_artifact_and_successful_o
         }],
     );
     let terminal = terminal_worker_outcome(
-        StageRunId(canonical_id("run", seed)),
+        binding_message
+            .session_identity
+            .work_run_id
+            .clone()
+            .expect("bound WorkRun"),
         first_pending.job().job_id.clone(),
         1,
         binding_message.lease.lease_id.clone(),
@@ -3029,29 +2707,36 @@ fn control_plane_rebuilds_the_candidate_from_its_exact_artifact_and_successful_o
             }],
             codex_thread_id: Some(binding_message.codex_thread_id.clone()),
             error: None,
-            finished_at: Instant("2027-01-15T08:00:01.000Z".into()),
+            finished_at: Instant("2027-01-15T08:00:09.000Z".into()),
             last_event_sequence: ExecutionAckSequence(12),
             status: ExecutionOutcomeStatus::Succeeded,
             summary: "executor completed".into(),
             usage: Some(ExecutionOutcomeUsage {
                 cost_microunits: 100,
-                runtime_millis: 60_000,
+                runtime_millis: 2_000,
                 tokens: 20,
             }),
         },
         schema_version: SchemaVersion::WinwincodeV1,
-        sent_at: Instant("2027-01-15T08:00:01.200Z".into()),
+        sent_at: Instant("2027-01-15T08:00:09.200Z".into()),
         session_identity: binding_message.session_identity.clone(),
         worker_session_id: binding_message.worker_session_id.clone(),
     };
-    control_plane
-        .commit_delivery_terminal_outcome(
-            &scope,
-            &outcome_message,
-            &terminal_facts,
-            &outcome_message.sent_at,
-        )
-        .expect("persist successful executor handoff");
+    accept_terminal_message(&mut control_plane, &root, &scope, &outcome_message);
+    let reported_state = control_plane
+        .load_state(&format!("delivery:{}", initial.id().0))
+        .expect("Delivery after Worker terminal report")
+        .expect("reported Delivery exists");
+    let reported = Delivery::decode_json(&reported_state.payload).expect("reported Delivery");
+    assert_eq!(
+        reported.snapshot().work_run_aggregate.items[0].state,
+        winwincode_domain::WorkItemState::CandidateReady
+    );
+    assert_eq!(
+        &reported.snapshot().work_run_aggregate.items[1..],
+        &active.snapshot().work_run_aggregate.items[1..]
+    );
+    assert_eq!(reported.revision(), active.revision() + 1);
     let next_request_id = RequestId(canonical_id("req", seed + 3));
     let next_command = winwincode_api::generated::DeliveryAdvanceCommand {
         actor: Actor::UserActor(UserActor {
@@ -3059,9 +2744,11 @@ fn control_plane_rebuilds_the_candidate_from_its_exact_artifact_and_successful_o
             kind: winwincode_domain::UserActorKind::User,
         }),
         command: winwincode_api::generated::DeliveryAdvanceCommandCommand::DeliveryAdvance,
-        expected_revision: Revision(i64::try_from(active.revision()).expect("revision")),
+        expected_revision: Revision(i64::try_from(reported.revision()).expect("revision")),
         payload: winwincode_api::generated::DeliveryAdvancePayload {
+            rework: None,
             delivery_id: initial.id().clone(),
+            dispatch_profile: "reviewer".into(),
         },
         request_id: next_request_id,
         schema_version: SchemaVersion::WinwincodeV1,
@@ -3070,20 +2757,43 @@ fn control_plane_rebuilds_the_candidate_from_its_exact_artifact_and_successful_o
     control_plane
         .delivery_advance(&next_command)
         .expect("production authority must resolve the exact frozen candidate");
+    let pending_query = serde_json::from_value(serde_json::json!({
+        "schemaVersion":"winwincode/v1", "requestId":canonical_id("req", seed + 9000),
+        "actor":{"kind":"user","id":canonical_id("usr",seed)}, "scope":scope,
+        "query":"delivery.get", "parameters":{"deliveryId":initial.id(),"atCursor":null},
+        "page":{"cursor":null,"limit":20}
+    }))
+    .expect("current candidate query");
+    winwincode_control_plane::strongflow_projection::StrongFlowProjectionQueryPort::delivery_get(
+        &control_plane,
+        &pending_query,
+    )
+    .expect("pending verification must keep the real candidate page readable");
     let verifying_state = control_plane
         .load_state(&format!("delivery:{}", initial.id().0))
         .expect("Verifying state")
         .expect("Verifying Delivery");
     let verifying = Delivery::decode_json(&verifying_state.payload).expect("Verifying Delivery");
-    assert_eq!(verifying.snapshot().status, DeliveryStatus::Verifying);
+    assert_eq!(verifying.snapshot().work_run_aggregate.items.len(), 1);
     let verification_job = latest_queued_delivery_job(&root);
-    let (verification_authority, verification_binding) = lease_and_message_for_job_at(
-        &verification_job,
-        seed + 5,
-        "2027-01-15T08:00:01.001Z",
-        "2027-01-15T08:00:01.000Z",
-        "2027-01-15T08:00:01.002Z",
+    let verification_execution = RecordedExecution {
+        delivery: verifying.clone(),
+        job: verification_job.clone(),
+    };
+    let (verification_authority, verification_binding) = claim_delivery_attempt_with_slot(
+        &root,
+        &verification_execution,
+        seed,
+        seed + 5_000,
+        (1, 2),
+        "verification",
+        true,
     );
+    winwincode_control_plane::strongflow_projection::StrongFlowProjectionQueryPort::delivery_get(
+        &control_plane,
+        &pending_query,
+    )
+    .expect("leased verification without a Codex thread must remain readable");
     control_plane
         .commit_delivery_session_binding(
             &verification_binding,
@@ -3091,6 +2801,11 @@ fn control_plane_rebuilds_the_candidate_from_its_exact_artifact_and_successful_o
             &verification_binding.sent_at,
         )
         .expect("bind the real verification Worker session");
+    winwincode_control_plane::strongflow_projection::StrongFlowProjectionQueryPort::delivery_get(
+        &control_plane,
+        &pending_query,
+    )
+    .expect("running verification must keep the real candidate page readable");
     let verifying = control_plane
         .load_state(&format!("delivery:{}", initial.id().0))
         .expect("Verifying state after binding")
@@ -3099,7 +2814,7 @@ fn control_plane_rebuilds_the_candidate_from_its_exact_artifact_and_successful_o
         })
         .expect("Verifying Delivery after binding");
     let verification_stage_run_id = match &verification_job.scope {
-        ExecutionScope::DeliveryStageExecutionScope(scope) => scope.stage_run_id.clone(),
+        ExecutionScope::WorkRunExecutionScope(scope) => scope.work_run_id.clone(),
         ExecutionScope::ProductSessionExecutionScope(_) => {
             panic!("verification Job must use a Delivery StageRun")
         }
@@ -3131,12 +2846,12 @@ fn control_plane_rebuilds_the_candidate_from_its_exact_artifact_and_successful_o
         delivery_spec_revision: initial.snapshot().spec.revision,
         criterion_id: &initial.snapshot().spec.acceptance_criteria[0].id.0,
         finding_id: "finding-reviewer",
-        occurred_at: "2027-01-15T08:00:01.001Z",
-        sent_at: "2027-01-15T08:00:01.002Z",
+        occurred_at: "2027-01-15T08:01:05.000Z",
+        sent_at: "2027-01-15T08:01:06.000Z",
     });
     let verification_metadata = terminal_outcome_metadata(
         Some(verification_binding.codex_thread_id.clone()),
-        1_800_000_001_002,
+        1_800_000_069_000,
         ExecutionAckSequence(12),
         vec![TerminalArtifactReference {
             artifact_id: verification_artifact_id.clone(),
@@ -3161,8 +2876,6 @@ fn control_plane_rebuilds_the_candidate_from_its_exact_artifact_and_successful_o
         verification_terminal.clone(),
     )
     .expect("successful verification Worker outcome");
-    let verification_facts =
-        delivery_terminal_outcome_facts(verification_authority.clone(), verification_terminal);
     let verification_outcome = JobOutcomeMessage {
         kind: JobOutcomeMessageKind::JobOutcome,
         lease: verification_binding.lease.clone(),
@@ -3174,38 +2887,33 @@ fn control_plane_rebuilds_the_candidate_from_its_exact_artifact_and_successful_o
             }],
             codex_thread_id: Some(verification_binding.codex_thread_id.clone()),
             error: None,
-            finished_at: Instant("2027-01-15T08:00:01.002Z".into()),
+            finished_at: Instant("2027-01-15T08:01:09.000Z".into()),
             last_event_sequence: ExecutionAckSequence(12),
             status: ExecutionOutcomeStatus::Succeeded,
             summary: "verification completed".into(),
             usage: Some(ExecutionOutcomeUsage {
                 cost_microunits: 100,
-                runtime_millis: 60_000,
+                runtime_millis: 2_000,
                 tokens: 20,
             }),
         },
         schema_version: SchemaVersion::WinwincodeV1,
-        sent_at: Instant("2027-01-15T08:00:01.003Z".into()),
+        sent_at: Instant("2027-01-15T08:01:09.200Z".into()),
         session_identity: verification_binding.session_identity.clone(),
         worker_session_id: verification_binding.worker_session_id.clone(),
     };
-    control_plane
-        .commit_delivery_terminal_outcome(
-            &scope,
-            &verification_outcome,
-            &verification_facts,
-            &verification_outcome.sent_at,
-        )
-        .expect("persist successful verification outcome");
+    accept_terminal_message(&mut control_plane, &root, &scope, &verification_outcome);
     let review_advance = winwincode_api::generated::DeliveryAdvanceCommand {
         actor: Actor::UserActor(UserActor {
             id: UserId(canonical_id("usr", seed)),
             kind: winwincode_domain::UserActorKind::User,
         }),
         command: winwincode_api::generated::DeliveryAdvanceCommandCommand::DeliveryAdvance,
-        expected_revision: Revision(i64::try_from(verifying.revision()).expect("revision")),
+        expected_revision: Revision(i64::try_from(verifying.revision() + 1).expect("revision")),
         payload: winwincode_api::generated::DeliveryAdvancePayload {
+            rework: None,
             delivery_id: initial.id().clone(),
+            dispatch_profile: "verifier".into(),
         },
         request_id: RequestId(canonical_id("req", seed + 6)),
         schema_version: SchemaVersion::WinwincodeV1,
@@ -3221,17 +2929,24 @@ fn control_plane_rebuilds_the_candidate_from_its_exact_artifact_and_successful_o
     let second_verifying =
         Delivery::decode_json(&second_verifying_state.payload).expect("second Verifying Delivery");
     assert_eq!(
-        second_verifying.snapshot().status,
-        DeliveryStatus::Verifying
+        second_verifying.snapshot().work_run_aggregate.items.len(),
+        1
     );
     let second_verification_job = latest_queued_delivery_job(&root);
-    let (second_verification_authority, second_verification_binding) = lease_and_message_for_job_at(
-        &second_verification_job,
-        seed + 1_000,
-        "2027-01-15T08:00:01.002Z",
-        "2027-01-15T08:00:01.001Z",
-        "2027-01-15T08:00:01.003Z",
-    );
+    let second_verification_execution = RecordedExecution {
+        delivery: second_verifying.clone(),
+        job: second_verification_job.clone(),
+    };
+    let (second_verification_authority, second_verification_binding) =
+        claim_delivery_attempt_with_slot(
+            &root,
+            &second_verification_execution,
+            seed,
+            seed + 10_000,
+            (1, 3),
+            "second_verification",
+            true,
+        );
     control_plane
         .commit_delivery_session_binding(
             &second_verification_binding,
@@ -3247,7 +2962,7 @@ fn control_plane_rebuilds_the_candidate_from_its_exact_artifact_and_successful_o
         })
         .expect("second Verifying Delivery after binding");
     let second_stage_run_id = match &second_verification_job.scope {
-        ExecutionScope::DeliveryStageExecutionScope(scope) => scope.stage_run_id.clone(),
+        ExecutionScope::WorkRunExecutionScope(scope) => scope.work_run_id.clone(),
         ExecutionScope::ProductSessionExecutionScope(_) => {
             panic!("second verification Job must use a Delivery StageRun")
         }
@@ -3263,8 +2978,8 @@ fn control_plane_rebuilds_the_candidate_from_its_exact_artifact_and_successful_o
         delivery_spec_revision: initial.snapshot().spec.revision,
         criterion_id: &initial.snapshot().spec.acceptance_criteria[0].id.0,
         finding_id: "finding-verifier",
-        occurred_at: "2027-01-15T08:00:01.002Z",
-        sent_at: "2027-01-15T08:00:01.003Z",
+        occurred_at: "2027-01-15T08:02:05.000Z",
+        sent_at: "2027-01-15T08:02:06.000Z",
     });
     let second_verification_artifact_id = ArtifactId(canonical_id("art", seed + 60));
     accept_verification_artifact(
@@ -3289,7 +3004,7 @@ fn control_plane_rebuilds_the_candidate_from_its_exact_artifact_and_successful_o
         TerminalOutcomeStatus::Succeeded,
         terminal_outcome_metadata(
             Some(second_verification_binding.codex_thread_id.clone()),
-            1_800_000_001_003,
+            1_800_000_129_000,
             ExecutionAckSequence(12),
             vec![TerminalArtifactReference {
                 artifact_id: second_verification_artifact_id.clone(),
@@ -3303,10 +3018,6 @@ fn control_plane_rebuilds_the_candidate_from_its_exact_artifact_and_successful_o
         second_verification_terminal.clone(),
     )
     .expect("second successful verification Worker outcome");
-    let second_verification_facts = delivery_terminal_outcome_facts(
-        second_verification_authority.clone(),
-        second_verification_terminal,
-    );
     let second_verification_outcome = JobOutcomeMessage {
         kind: JobOutcomeMessageKind::JobOutcome,
         lease: second_verification_binding.lease.clone(),
@@ -3318,29 +3029,27 @@ fn control_plane_rebuilds_the_candidate_from_its_exact_artifact_and_successful_o
             }],
             codex_thread_id: Some(second_verification_binding.codex_thread_id.clone()),
             error: None,
-            finished_at: Instant("2027-01-15T08:00:01.003Z".into()),
+            finished_at: Instant("2027-01-15T08:02:09.000Z".into()),
             last_event_sequence: ExecutionAckSequence(12),
             status: ExecutionOutcomeStatus::Succeeded,
             summary: "second verification completed".into(),
             usage: Some(ExecutionOutcomeUsage {
                 cost_microunits: 100,
-                runtime_millis: 60_000,
+                runtime_millis: 2_000,
                 tokens: 20,
             }),
         },
         schema_version: SchemaVersion::WinwincodeV1,
-        sent_at: Instant("2027-01-15T08:00:01.004Z".into()),
+        sent_at: Instant("2027-01-15T08:02:09.200Z".into()),
         session_identity: second_verification_binding.session_identity.clone(),
         worker_session_id: second_verification_binding.worker_session_id.clone(),
     };
-    control_plane
-        .commit_delivery_terminal_outcome(
-            &scope,
-            &second_verification_outcome,
-            &second_verification_facts,
-            &second_verification_outcome.sent_at,
-        )
-        .expect("persist second successful verification outcome");
+    accept_terminal_message(
+        &mut control_plane,
+        &root,
+        &scope,
+        &second_verification_outcome,
+    );
     let current_verdict_state = control_plane
         .load_state(&format!("delivery:{}", initial.id().0))
         .expect("current Delivery state")
@@ -3370,31 +3079,6 @@ fn control_plane_rebuilds_the_candidate_from_its_exact_artifact_and_successful_o
     control_plane
         .delivery_submit_verdict(&submit_verdict)
         .expect("compute and persist the production Delivery verdict");
-    let verdict_state = control_plane
-        .load_state(&format!("delivery:{}", initial.id().0))
-        .expect("Delivery state after verdict")
-        .expect("Delivery state after verdict exists");
-    let verdict_delivery =
-        Delivery::decode_json(&verdict_state.payload).expect("Delivery after verdict");
-    let delivery_review_advance = winwincode_api::generated::DeliveryAdvanceCommand {
-        actor: Actor::UserActor(UserActor {
-            id: UserId(canonical_id("usr", seed)),
-            kind: winwincode_domain::UserActorKind::User,
-        }),
-        command: winwincode_api::generated::DeliveryAdvanceCommandCommand::DeliveryAdvance,
-        expected_revision: Revision(
-            i64::try_from(verdict_delivery.revision()).expect("second review revision"),
-        ),
-        payload: winwincode_api::generated::DeliveryAdvancePayload {
-            delivery_id: initial.id().clone(),
-        },
-        request_id: RequestId(canonical_id("req", seed + 8)),
-        schema_version: SchemaVersion::WinwincodeV1,
-        scope: scope.clone(),
-    };
-    control_plane
-        .delivery_advance(&delivery_review_advance)
-        .expect("advance all successful verification into Delivery review");
     let candidate = control_plane
         .resolve_delivery_candidate(&scope, initial.id(), &artifact_id, &digest, &terminal_facts)
         .expect("candidate resolution from the pinned Artifact and canonical Git root");
@@ -3608,4 +3292,142 @@ fn control_plane_rebuilds_the_candidate_from_its_exact_artifact_and_successful_o
 
     control_plane.shutdown().expect("shutdown");
     fs::remove_dir_all(root).expect("database directory release");
+}
+
+#[test]
+fn artifact_from_an_older_real_scheduler_fence_is_rejected() {
+    let seed = 1701;
+    let (root, pending) = scheduler_delivery_fixture(seed, "artifact-old-fence");
+    let (first_authority, first_message) =
+        claim_running_delivery_attempt(&root, &pending, seed, 1, "first");
+    let mut control_plane = ControlPlane::start_local(
+        ControlPlaneConfig::local(&root),
+        Box::new(RecordingPublisher),
+    )
+    .unwrap();
+    control_plane
+        .commit_delivery_session_binding(&first_message, &first_authority, &first_message.sent_at)
+        .unwrap();
+    control_plane.shutdown().unwrap();
+    let (authority, binding) =
+        claim_replacement_delivery_attempt(&root, &pending, seed, 2, "successor");
+    let mut control_plane = ControlPlane::start_local(
+        ControlPlaneConfig::local(&root),
+        Box::new(RecordingPublisher),
+    )
+    .unwrap();
+    control_plane
+        .commit_delivery_session_binding(&binding, &authority, &binding.sent_at)
+        .unwrap();
+    assert!(
+        first_message.lease.fencing_token.0.parse::<u64>().unwrap()
+            < binding.lease.fencing_token.0.parse::<u64>().unwrap()
+    );
+    let mut open = artifact_open_message(seed, &binding);
+    open.sent_at = attempt_time(2, 7);
+    open.lease.fencing_token = first_message.lease.fencing_token;
+    let rejected = control_plane
+        .accept_artifact_open(&scheduler_repository_scope(seed), &open, &authority)
+        .unwrap();
+    assert_eq!(rejected.status, LeaseWriteStatus::RejectedStaleFencingToken);
+    assert_eq!(
+        rejected.error.unwrap().code,
+        ExecutionPortErrorCode::StaleFencingToken
+    );
+    control_plane.shutdown().unwrap();
+    let connection =
+        rusqlite::Connection::open(root.join("artifact-catalog/artifact-catalog.sqlite3")).unwrap();
+    let count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM artifacts WHERE artifact_id = ?1",
+            [&open.artifact.artifact_id.0],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 0);
+    connection.close().unwrap();
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn public_dispatch_starts_a_second_ready_work_item_while_the_first_is_running() {
+    let seed = 86_000;
+    let root = temporary_directory("parallel-work-items");
+    let repository = root.join("repositories/project-one");
+    let (base_commit, _) = git_candidate_repository(&repository);
+    let mut snapshot = delivery_before_advance(seed).into_snapshot();
+    snapshot.status = DeliveryStatus::Planning; // Historical label is not a scheduling gate.
+    snapshot.spec.repository.locator = "project-one".into();
+    snapshot.spec.base_revision = base_commit;
+    let mut second_item = snapshot.work_run_aggregate.items[0].clone();
+    second_item.id = winwincode_domain::WorkItemId(canonical_id("wit", seed + 1));
+    snapshot.work_run_aggregate.items.push(second_item);
+    let initial = Delivery::try_from_snapshot(snapshot).expect("two independent ready WorkItems");
+    let (mut control_plane, first) = public_execution_fixture(&root, &repository, &initial, seed);
+    let (authority, binding) =
+        claim_delivery_attempt_with_slot(&root, &first, seed, seed, (1, 1), "parallel-first", true);
+    control_plane
+        .commit_delivery_session_binding(&binding, &authority, &binding.sent_at)
+        .expect("first WorkRun bound to its accepted Worker");
+    let state = control_plane
+        .load_state(&format!("delivery:{}", initial.id().0))
+        .unwrap()
+        .unwrap();
+    let first_running = Delivery::decode_json(&state.payload).unwrap();
+    assert_eq!(first_running.snapshot().work_run_aggregate.runs.len(), 1);
+    assert_eq!(
+        first_running.snapshot().work_run_aggregate.runs[0].state,
+        winwincode_domain::WorkRunState::Running
+    );
+    let mut command = delivery_advance_command(seed);
+    command.request_id = RequestId(canonical_id("req", seed + 1));
+    command.expected_revision = Revision(i64::try_from(state.revision).unwrap());
+    let command = serde_json::from_value(serde_json::to_value(command).unwrap()).unwrap();
+    control_plane
+        .delivery_advance(&command)
+        .expect("a running WorkItem must not block another independent ready WorkItem");
+    let state = control_plane
+        .load_state(&format!("delivery:{}", initial.id().0))
+        .unwrap()
+        .unwrap();
+    let second = RecordedExecution {
+        delivery: Delivery::decode_json(&state.payload).unwrap(),
+        job: latest_queued_delivery_job(&root),
+    };
+    assert_ne!(first.job.job_id, second.job.job_id);
+    let (authority, binding) = claim_delivery_attempt_with_slot(
+        &root,
+        &second,
+        seed,
+        seed + 10_000,
+        (1, 2),
+        "parallel-second",
+        true,
+    );
+    control_plane
+        .commit_delivery_session_binding(&binding, &authority, &binding.sent_at)
+        .expect("second WorkRun bound to its accepted Worker");
+    let state = control_plane
+        .load_state(&format!("delivery:{}", initial.id().0))
+        .unwrap()
+        .unwrap();
+    let active = Delivery::decode_json(&state.payload).unwrap();
+    assert!(
+        active.snapshot().stage_runs.is_empty(),
+        "dispatch must not write the old stage state"
+    );
+    assert_eq!(active.snapshot().status, initial.snapshot().status);
+    let runs = &active.snapshot().work_run_aggregate.runs;
+    assert_eq!(runs.len(), 2);
+    assert_ne!(runs[0].work_item_id, runs[1].work_item_id);
+    assert!(
+        runs.iter()
+            .all(|run| run.state == winwincode_domain::WorkRunState::Running)
+    );
+    assert_eq!(
+        &runs[0],
+        &first_running.snapshot().work_run_aggregate.runs[0]
+    );
+    control_plane.shutdown().expect("close Control Plane");
+    fs::remove_dir_all(root).expect("remove fixture");
 }

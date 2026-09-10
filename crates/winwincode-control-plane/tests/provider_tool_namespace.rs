@@ -167,12 +167,6 @@ impl ProviderGatewayAdmissionPort for Admission {
                 idempotent_replay: false,
             },
             route_authority: authority,
-            enterprise_quota_amounts: winwincode_storage::EnterpriseQuotaAmounts {
-                tokens: 100,
-                provider_cost_micros: 10,
-                operations: 1,
-                ..winwincode_storage::EnterpriseQuotaAmounts::default()
-            },
         })
     }
 
@@ -258,7 +252,7 @@ fn open_message() -> ModelOpenMessage {
         session_identity: SessionIdentity {
             codex_thread_id: CodexThreadId(id("cdx", 1)),
             product_session_id: ProductSessionId(id("psn", 1)),
-            stage_run_id: None,
+            work_run_id: None,
             worker_session_id: worker_session_id.clone(),
         },
         worker_session_id,
@@ -297,7 +291,6 @@ fn configure_storage(storage: &mut SqliteStorage) {
                     reasoning_efforts: vec!["high".to_owned()],
                 }],
             },
-            Instant("2026-09-02T00:00:00.000Z".to_owned()),
         )
         .expect("register namespace fixture Provider");
     CredentialReferenceService::new(storage)

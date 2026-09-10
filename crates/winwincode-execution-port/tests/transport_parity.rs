@@ -157,7 +157,7 @@ fn product_session_and_delivery_stage_bindings_round_trip_identically_locally_an
         (PRODUCT_SESSION_BINDING_FIXTURE, None),
         (
             DELIVERY_STAGE_BINDING_FIXTURE,
-            Some("run_00000000000000000000000009"),
+            Some("wrn_00000000000000000000000009"),
         ),
     ] {
         let message: ExecutionPortMessage =
@@ -166,13 +166,13 @@ fn product_session_and_delivery_stage_bindings_round_trip_identically_locally_an
             panic!("fixture must decode as SessionBindingMessage");
         };
         assert_eq!(
-            binding.stage_run_id.as_ref().map(|id| id.0.as_str()),
+            binding.work_run_id.as_ref().map(|id| id.0.as_str()),
             expected_stage_run
         );
         assert_eq!(
             binding
                 .session_identity
-                .stage_run_id
+                .work_run_id
                 .as_ref()
                 .map(|id| id.0.as_str()),
             expected_stage_run,

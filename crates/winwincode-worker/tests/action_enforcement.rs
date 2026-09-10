@@ -5,8 +5,8 @@ use std::{cell::Cell, fs, rc::Rc};
 use winwincode_domain::{
     CodexThreadId, ExecutionJobId, ExecutionMessageId, FencingToken, Instant, LeaseId,
     OrganizationId, ProductSessionId, ProjectId, RepositoryId, RepositoryScope,
-    RepositoryScopeKind, RequestId, SchemaVersion, SessionIdentity, Sha256Digest, StageRunId,
-    UserActor, UserActorKind, UserId, WorkerId, WorkerInstanceId, WorkerSessionId, WorkspaceId,
+    RepositoryScopeKind, RequestId, SchemaVersion, SessionIdentity, Sha256Digest, UserActor,
+    UserActorKind, UserId, WorkRunId, WorkerId, WorkerInstanceId, WorkerSessionId, WorkspaceId,
 };
 use winwincode_execution_port::{
     action_enforcement::{
@@ -57,6 +57,15 @@ impl PreActionDecisionRecorder<Policy> for Journal {
     ) -> Result<(), Self::Error> {
         Ok(())
     }
+
+    fn record_post_action(
+        &mut self,
+        _input: GateInput<'_, Policy>,
+        _outcome: winwincode_execution_port::action_gateway::PostActionOutcome,
+        _hooks: &[winwincode_execution_port::action_gateway::PostActionHook],
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
 }
 
 impl CodexToolExecutor for Executor {
@@ -86,7 +95,7 @@ fn session() -> SessionIdentity {
     SessionIdentity {
         codex_thread_id: CodexThreadId(id("cdx", 'A')),
         product_session_id: ProductSessionId(id("psn", 'A')),
-        stage_run_id: Some(StageRunId(id("run", 'A'))),
+        work_run_id: Some(WorkRunId(id("wrn", 'A'))),
         worker_session_id: WorkerSessionId(id("wsn", 'A')),
     }
 }

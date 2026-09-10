@@ -41,6 +41,16 @@ import type {
   ControlPlaneWebSocketSubscribeStartAt,
   ErrorDetails,
   EventReadCursor,
+  Actor,
+  PageRequest,
+  RepositoryScope,
+  WorkItemId,
+  DeliveryId,
+  DeliveryTaskBreakdownCreateCommand,
+  DeliveryTaskBreakdownCreateItem,
+  WorkRunCancelCommand,
+  WorkRunAggregateProjection,
+  WorkRunId,
   QueryRequest,
   QueryResultResponse,
   RequestId,
@@ -219,6 +229,128 @@ export function createControlPlaneClient(options: ControlPlaneClientOptions): Co
     ...options,
     generated: generatedTransport,
   })
+}
+
+export interface WorkRunAggregateQueryInput {
+  readonly actor: Actor
+  readonly scope: RepositoryScope
+  readonly requestId: RequestId
+  readonly workItemId: WorkItemId | null
+  readonly deliveryId: DeliveryId
+  readonly atCursor?: import('./generated/contracts.js').StrongFlowReadCursor | null
+  readonly workRunId?: WorkRunId | null
+  readonly page?: PageRequest
+}
+
+export interface TaskBreakdownCreateInput {
+  readonly actor: Actor
+  readonly scope: RepositoryScope
+  readonly requestId: RequestId
+  readonly deliveryId: DeliveryId
+  readonly expectedRevision: number
+  readonly contractRevision: number
+  readonly items: readonly DeliveryTaskBreakdownCreateItem[]
+}
+
+/** Exact public input for cancelling one active WorkRun. */
+export interface DeliveryCancelRequest {
+  readonly deliveryId: DeliveryId
+  readonly workRunId: WorkRunId
+  readonly expectedRevision: number
+  readonly requestId: RequestId
+}
+
+/** Builds the canonical WorkRun cancellation command. */
+export function workRunCancelCommand(
+  input: DeliveryCancelRequest,
+  context: { readonly actor: Actor; readonly scope: RepositoryScope },
+): WorkRunCancelCommand {
+  return {
+    schemaVersion: 'winwincode/v1',
+    command: 'workrun.cancel',
+    actor: context.actor,
+    scope: context.scope,
+    requestId: input.requestId,
+    expectedRevision: input.expectedRevision,
+    payload: {
+      deliveryId: input.deliveryId,
+      workRunId: input.workRunId,
+    },
+  }
+}
+
+
+/** Builds the canonical task-breakdown command; the server owns graph checks. */
+export function taskBreakdownCreateCommand(
+  input: TaskBreakdownCreateInput,
+): DeliveryTaskBreakdownCreateCommand {
+  return {
+    schemaVersion: 'winwincode/v1',
+    command: 'delivery.task_breakdown.create',
+    actor: input.actor,
+    scope: input.scope,
+    requestId: input.requestId,
+    expectedRevision: input.expectedRevision,
+    payload: {
+      deliveryId: input.deliveryId,
+      expectedRevision: input.expectedRevision,
+      contractRevision: input.contractRevision,
+      items: input.items,
+    },
+  }
+}
+
+/** Reads the canonical WorkRun aggregate used by StrongFlow active views. */
+export async function queryWorkRunAggregate(
+  client: ControlPlaneClient,
+  input: WorkRunAggregateQueryInput,
+  requestOptions?: ControlPlaneRequestOptions,
+): Promise<WorkRunAggregateProjection> {
+  const response = await client.query({
+    schemaVersion: 'winwincode/v1',
+    requestId: input.requestId,
+    actor: input.actor,
+    scope: input.scope,
+    query: 'workrun.get',
+    parameters: {
+      workItemId: input.workItemId,
+      deliveryId: input.deliveryId,
+      atCursor: input.atCursor ?? null,
+      workRunId: input.workRunId ?? null,
+    },
+    page: input.page ?? { limit: 100, cursor: null },
+  }, requestOptions)
+  if (response.query !== 'workrun.get' || !matchesCanonicalSchema('WorkRunAggregateProjection', response.result)
+    || response.result.readCursor.deliveryId !== input.deliveryId
+    || response.result.readCursor.eventCursor.stream.deliveryId !== input.deliveryId
+    || (['kind', 'organizationId', 'workspaceId', 'projectId', 'repositoryId'] as const).some(key =>
+      response.result.readCursor.scope[key] !== input.scope[key]
+      || response.result.readCursor.eventCursor.scope[key] !== input.scope[key])
+    || (input.workItemId !== null && !response.result.items.some(item => item.id === input.workItemId))
+    || response.result.items.some(item => item.workContractId !== response.result.contract.id)
+    || response.result.runs.some(run => run.workContractId !== response.result.contract.id
+      || !response.result.items.some(item => item.id === run.workItemId))
+    || (input.workRunId !== undefined && input.workRunId !== null
+      && !response.result.runs.some(run => run.id === input.workRunId && (input.workItemId === null || run.workItemId === input.workItemId)))
+    || (input.atCursor !== undefined && input.atCursor !== null
+      && ((['token', 'deliveryId', 'deliveryRevision', 'runtimeLedgerRevision', 'runtimeAcceptedSequence', 'publicationRevision'] as const)
+        .some(key => response.result.readCursor[key] !== input.atCursor?.[key])
+        || (['kind', 'organizationId', 'workspaceId', 'projectId', 'repositoryId'] as const).some(key =>
+          response.result.readCursor.scope[key] !== input.atCursor?.scope[key]
+          || response.result.readCursor.eventCursor.scope[key] !== input.atCursor?.eventCursor.scope[key])
+        || response.result.readCursor.eventCursor.eventId !== input.atCursor.eventCursor.eventId
+        || response.result.readCursor.eventCursor.sequence !== input.atCursor.eventCursor.sequence
+        || response.result.readCursor.eventCursor.stream.kind !== input.atCursor.eventCursor.stream.kind
+        || response.result.readCursor.eventCursor.stream.deliveryId !== input.atCursor.eventCursor.stream.deliveryId))) {
+    throw new ControlPlaneClientError({
+      kind: 'protocol',
+      code: 'INVALID_WORKRUN_PROJECTION',
+      message: 'The Control Plane returned an invalid WorkRun projection.',
+      requestId: input.requestId,
+      retryable: false,
+    })
+  }
+  return response.result
 }
 
 const CONTROL_PLANE_SCHEMA_VERSION = 'winwincode/v1'
@@ -3186,12 +3318,11 @@ export interface ControlPlaneTaskCreateInput {
 }
 
 /**
- * The started-task anchor.  `taskId` is the shareable identity that names the
- * run route; the remaining fields let the run page reconstruct the task
- * context without parsing form values out of the URL (ADR-0029).
+ * The started WorkItem anchor. `taskId` is retained as the route field name
+ * at the browser boundary, but its value is the canonical WorkItemId.
  */
 export interface ControlPlaneTaskAnchor {
-  readonly taskId: string
+  readonly taskId: import('./generated/contracts.js').WorkItemId
   readonly clientId: string
   readonly repositoryBindingId: string
   readonly baseBranch: string
@@ -3213,13 +3344,69 @@ export interface ControlPlaneTaskPort {
   describe(taskId: string): ControlPlaneTaskAnchor | null
 }
 
+/** Production task port: submits the canonical breakdown command and retains
+ * only the returned WorkItem anchor for the current browser session. */
+export function createControlPlaneTaskPort(options: {
+  readonly client: ControlPlaneClient
+  readonly actor: () => Actor | null
+  readonly scope: () => RepositoryScope | null
+  readonly nextRequestId: () => RequestId
+  readonly nextWorkItemId: () => import('./generated/contracts.js').WorkItemId
+  readonly deliveryContext: () => Promise<{
+    readonly deliveryId: DeliveryId
+    readonly expectedRevision: number
+    readonly contractRevision: number
+    readonly criterionId: import('./generated/contracts.js').CriterionId
+  } | null>
+}): ControlPlaneTaskPort {
+  const anchors = new Map<string, ControlPlaneTaskAnchor>()
+  return Object.freeze({
+    async create(input: ControlPlaneTaskCreateInput): Promise<ControlPlaneTaskAnchor> {
+      const context = await options.deliveryContext()
+      if (context === null) throw new Error('Select a Delivery before creating a WorkItem.')
+      const actor = options.actor()
+      const scope = options.scope()
+      if (actor === null || scope === null) throw new Error('Sign in and select a repository Scope before creating a WorkItem.')
+      const taskId = options.nextWorkItemId()
+      const command = taskBreakdownCreateCommand({
+        actor,
+        scope,
+        requestId: options.nextRequestId(),
+        deliveryId: context.deliveryId,
+        expectedRevision: context.expectedRevision,
+        contractRevision: context.contractRevision,
+        items: [{
+          id: taskId,
+          title: input.description.slice(0, 500),
+          goal: input.description,
+          criterionIds: [context.criterionId],
+          dependsOn: [],
+        }],
+      })
+      const response = await options.client.command(command)
+      if (!('result' in response) || response.outcome !== 'completed') {
+        throw new Error('The Control Plane did not complete WorkItem creation.')
+      }
+      if (!('items' in response.result)) throw new Error('The Control Plane returned an unexpected command result.')
+      const item = response.result.items.find(candidate => candidate.id === taskId)
+      if (item === undefined) throw new Error('The Control Plane returned no created WorkItem.')
+      const anchor = Object.freeze({ ...input, taskId })
+      anchors.set(taskId, anchor)
+      return anchor
+    },
+    describe(taskId: string): ControlPlaneTaskAnchor | null {
+      return anchors.get(taskId) ?? null
+    },
+  })
+}
+
 /**
  * Fake task store: creates monotonic task ids and remembers every anchor it
  * issued, so a reloaded run page still names its task.  FLOW task creation
  * replaces this port without changing the interface.
  */
 export function createControlPlaneTaskFake(options?: {
-  readonly nextTaskId?: () => string
+  readonly nextTaskId?: () => import('./generated/contracts.js').WorkItemId
   /** 演示/假优先种子:预置的锚点可直接被运行页 describe 命中。 */
   readonly seed?: readonly ControlPlaneTaskAnchor[]
 }): ControlPlaneTaskPort {
@@ -3232,7 +3419,10 @@ export function createControlPlaneTaskFake(options?: {
       sequence += 1
       const taskId = nextTaskId !== undefined
         ? nextTaskId()
-        : `tsk_${String(sequence).padStart(26, '0')}`
+        : `wit_${String(sequence).padStart(26, '0')}` as import('./generated/contracts.js').WorkItemId
+      if (!/^wit_[0-9A-HJKMNP-TV-Z]{26}$/u.test(taskId)) {
+        throw new Error('task creation requires a canonical WorkItemId')
+      }
       const anchor: ControlPlaneTaskAnchor = Object.freeze({
         taskId,
         clientId: input.clientId,
@@ -3260,82 +3450,90 @@ export type ControlPlaneRunWorkerSessionState =
   | 'failed'
 
 /** One WorkerSession row of the run-page identity zone. */
-export interface ControlPlaneRunWorkerSession {
-  readonly workerSessionId: string
-  readonly state: ControlPlaneRunWorkerSessionState
-  readonly startedAt: string | null
-}
-
 /**
- * The run-page local identity projection beyond the live Client, Repository,
- * and Occupancy facts the shell models already own: the task's WorkerSessions
- * and its latest Candidate with the apply ledger history.
+ * The run-page identity projection beyond live Client, Repository, and
+ * Occupancy facts. WorkRun is the sole executable runtime record; historical
+ * StageRun records are not exposed as a writable or executable view.
  */
 export interface ControlPlaneRunIdentityProjection {
-  readonly taskId: string
-  readonly workerSessions: readonly ControlPlaneRunWorkerSession[]
-  readonly candidate: ControlPlaneCandidateSummary | null
+  readonly taskId: import('./generated/contracts.js').WorkItemId
+  /** The only executable run projection. Historical StageRun rows are never returned here. */
+  readonly workRun: import('./generated/contracts.js').WorkRun
+  readonly candidate: import('./generated/contracts.js').Candidate | null
 }
 
-/** The run-page identity seam the run view model consumes. */
+/** The run-page identity seam; it reads the canonical WorkRun projection. */
 export interface ControlPlaneRunIdentityPort {
   read(anchor: ControlPlaneTaskAnchor): Promise<ControlPlaneRunIdentityProjection>
 }
 
-const RUN_WORKER_SESSION_FAKE_COMMIT = 'f00dcafef00dcafef00dcafef00dcafef00dcafe'
-
-/**
- * Fake run identity: one running WorkerSession and one consistently staged
- * candidate (local branch created, one ledger receipt, nothing applied yet)
- * derived deterministically from the anchor.  FLOW worker/candidate
- * projections replace this port without changing the interface.
- */
-export function createControlPlaneRunIdentityFake(options?: {
-  readonly now?: () => string
+/** Production run identity reader backed by the canonical WorkRun aggregate. */
+export function createControlPlaneRunIdentityPort(options: {
+  readonly client: ControlPlaneClient
+  readonly actor: () => Actor | null
+  readonly scope: () => RepositoryScope | null
+  readonly deliveryId: () => DeliveryId | null
+  readonly nextRequestId: () => RequestId
 }): ControlPlaneRunIdentityPort {
-  const now = options?.now ?? (() => new Date().toISOString())
+  return Object.freeze({
+    async read(anchor: ControlPlaneTaskAnchor): Promise<ControlPlaneRunIdentityProjection> {
+      const actor = options.actor()
+      const scope = options.scope()
+      const deliveryId = options.deliveryId()
+      if (actor === null || scope === null || deliveryId === null) {
+        throw new Error('Sign in, select a repository Scope, and open a Delivery before reading a WorkRun.')
+      }
+      const aggregate = await queryWorkRunAggregate(options.client, {
+        actor,
+        scope,
+        requestId: options.nextRequestId(),
+        deliveryId,
+        workItemId: anchor.taskId,
+      })
+      const workRun = aggregate.runs
+        .filter(run => run.workItemId === anchor.taskId)
+        .sort((left, right) => right.attempt - left.attempt || right.revision - left.revision)[0]
+      if (workRun === undefined) throw new Error('The Delivery has no WorkRun for this WorkItem.')
+      // The aggregate exposes the authoritative candidate digest on the run;
+      // full Candidate metadata is intentionally obtained by the candidate
+      // history query rather than fabricated in this identity response.
+      return Object.freeze({ taskId: anchor.taskId, workRun, candidate: null })
+    },
+  })
+}
+
+/** Deterministic local fixture for the canonical WorkRun read seam. */
+export function createControlPlaneRunIdentityFake(): ControlPlaneRunIdentityPort {
   return Object.freeze({
     async read(
       anchor: ControlPlaneTaskAnchor,
     ): Promise<ControlPlaneRunIdentityProjection> {
-      const startedAt = now()
       const suffix = anchor.taskId.slice(4) || '00000000000000000000000000'
-      const workerSession: ControlPlaneRunWorkerSession = Object.freeze({
-        workerSessionId: `wss_${suffix}`,
+      const workItemId = `wit_${suffix}` as import('./generated/contracts.js').WorkItemId
+      const workRun = Object.freeze({
+        schemaVersion: 'winwincode/v1',
+        id: `wrn_${suffix}`,
+        workContractId: `wct_${suffix}`,
+        contractRevision: 1,
+        workItemId,
+        workItemRevision: 1,
+        revision: 1,
         state: 'running',
-        startedAt,
-      })
-      const candidateRef = `cand_${suffix}`
-      const branchName = `winwincode/task/${anchor.taskId}`
-      const receipt: ControlPlaneCandidateApplyReceipt = Object.freeze({
-        localApplyReceiptId: `lar_${suffix}`,
-        candidateRef,
-        repositoryBindingId: anchor.repositoryBindingId,
-        targetBranch: branchName,
-        expectedHead: RUN_WORKER_SESSION_FAKE_COMMIT,
-        strategy: 'create_branch',
-        result: 'branch_created',
-        resultingCommit: RUN_WORKER_SESSION_FAKE_COMMIT,
-        conflictArtifactRef: null,
-        createdAt: startedAt,
-        revision: 1,
-      })
-      const candidate: ControlPlaneCandidateSummary = Object.freeze({
-        localCandidateReceiptId: `lcr_${suffix}`,
-        candidateRef,
-        repositoryBindingId: anchor.repositoryBindingId,
-        candidateCommit: RUN_WORKER_SESSION_FAKE_COMMIT,
-        localRefName: `refs/winwincode/candidates/${candidateRef}`,
-        state: 'branch_created',
-        createdAt: startedAt,
-        revision: 1,
-        branchName,
-        history: Object.freeze([receipt]),
-      })
+        executionJobId: `job_${suffix}`,
+        attempt: 1,
+        workerId: `wrk_${suffix}`,
+        workerInstanceId: `wki_${suffix}`,
+        workerSessionId: `wsn_${suffix}`,
+        leaseId: `lse_${suffix}`,
+        fencingToken: '1',
+        productSessionId: `psn_${suffix}`,
+        codexThreadId: null,
+        candidateDigest: null,
+      }) as import('./generated/contracts.js').WorkRun
       return Object.freeze({
         taskId: anchor.taskId,
-        workerSessions: Object.freeze([workerSession]),
-        candidate,
+        workRun,
+        candidate: null,
       })
     },
   })

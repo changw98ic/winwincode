@@ -15,9 +15,8 @@ use std::process::Command;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use winwincode_delivery::domain::{
-    CriterionVerdict, DELIVERY_SCHEMA_VERSION, Delivery, DeliveryStage, DeliveryStatus,
-    EvidenceRef, EvidenceRefType, FrozenDeliveryCandidate, RepositoryKind, StageRunActorType,
-    StageRunStatus,
+    CriterionVerdict, DELIVERY_SCHEMA_VERSION, Delivery, DeliveryStatus, EvidenceRef,
+    EvidenceRefType, FrozenDeliveryCandidate, RepositoryKind,
 };
 use winwincode_evidence_export::{
     ArtifactSource, DocumentKind, EvidenceDocument, EvidenceErrorKind, EvidenceManifest,
@@ -544,13 +543,12 @@ fn validate_independent_test_evidence(
                 "test Evidence belongs to another type or candidate",
             ));
         }
-        let (stage, binding) = evidence_authority(snapshot, evidence)
+        let (run, binding) = evidence_authority(snapshot, evidence)
             .ok_or_else(|| independent_error("test Evidence authority is incomplete"))?;
-        let independent = stage.stage == DeliveryStage::Verifying
-            && stage.actor_type == StageRunActorType::Codex
-            && stage.status == StageRunStatus::Succeeded
-            && matches!(stage.role.as_str(), "reviewer" | "verifier")
-            && stage.id != *request.candidate.producer_stage_run_id()
+        let role = binding.execution_profile.as_deref();
+        let independent = run.state == winwincode_domain::WorkRunState::Settled
+            && matches!(role, Some("reviewer" | "verifier"))
+            && run.id != *request.candidate.producer_work_run_id()
             && binding.execution_job_id != *request.candidate.producer_execution_job_id()
             && binding.worker_session_id.as_ref()
                 != Some(request.candidate.producer_worker_session_id())
@@ -561,7 +559,7 @@ fn validate_independent_test_evidence(
                 "test Evidence reuses or fails to prove an independent verification identity",
             ));
         }
-        has_verifier |= stage.role == "verifier";
+        has_verifier |= role == Some("verifier");
         has_blocking |= test_binding.blocks_delivery();
     }
     if !has_verifier || !has_blocking {
@@ -576,18 +574,19 @@ fn evidence_authority<'snapshot>(
     snapshot: &'snapshot winwincode_delivery::domain::DeliverySnapshot,
     evidence: &EvidenceRef,
 ) -> Option<(
-    &'snapshot winwincode_delivery::domain::StageRun,
+    &'snapshot winwincode_domain::WorkRun,
     &'snapshot winwincode_delivery::domain::SessionBinding,
 )> {
-    let stage = snapshot
-        .stage_runs
+    let run = snapshot
+        .work_run_aggregate
+        .runs
         .iter()
-        .find(|stage| stage.id == evidence.stage_run_id)?;
+        .find(|run| run.id == evidence.work_run_id)?;
     let binding = snapshot
         .session_bindings
         .iter()
         .find(|binding| binding.id == evidence.session_binding_id)?;
-    (binding.stage_run_id == stage.id).then_some((stage, binding))
+    (binding.work_run_id == run.id).then_some((run, binding))
 }
 
 fn trace_records(

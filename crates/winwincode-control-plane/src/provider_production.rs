@@ -17,7 +17,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use winwincode_domain::{Instant, ModelExchangeId};
 use winwincode_execution_port::{
-    generated::{ExecutionPortMessage, ModelOpenMessage},
+    generated::{ExecutionPortMessage, ModelOpenMessage, WorkRunInput},
     transport::{
         AdapterError, EndpointSide, ExecutionPortCore, LocalWorkerAdapter, RemoteTransportAdapter,
         TypedFrame,
@@ -32,33 +32,32 @@ use crate::product_session_execution_application::{
     project_product_session_model_batch, reconcile_product_session_model_frames,
 };
 use crate::{
-    ConfiguredModelRetryPlanAuthority, DurableEnterpriseQuotaAdmission,
-    DurableExecutionPortContext, DurableExecutionPortDelegate, DurableExecutionPortError,
-    DurableExecutionPortSupplement, DurableModelExchangeAuthority, DurableModelRetryContextSource,
-    DurableModelRetryPreOpenPlanner, DurableProviderGatewayAdmission,
-    DurableProviderRetrySettlement, HttpsSseProviderAdapter, HttpsSseProviderConfig,
-    HttpsSseProviderError, HttpsSseProviderErrorKind, LocalSecretStoreAdapter, ModelAdmissionClock,
-    ModelExecutionBatchReceipt, ModelExecutionOpenReceipt, ModelExecutionPortReceipt,
-    ModelExecutionRuntime, ModelExecutionRuntimeError, ModelPolicyAuthorityPort, ModelRequestPool,
-    ModelRequestPoolConfig, ModelRetryPlanAuthorityPort, ProviderAdapterError,
-    ProviderAdapterInvocation, ProviderAdapterOpenReceipt, ProviderAdapterPort,
-    ProviderAdmissionReservationConfig, ProviderFinishReason, ProviderGateway,
-    ProviderGatewayIdentity, ProviderGatewayIdentityError, ProviderGatewayIdentityPort,
-    ProviderGatewayOpenReceipt, ProviderGatewayTerminal, ProviderStreamControlAction,
-    ProviderStreamConverter, ProviderStreamEvent, ProviderStreamFailure, ProviderStreamFailureKind,
-    ProviderTokenUsage, ProviderToolIdentity, ProviderToolKind, ResolvedSecret,
-    SystemModelAdmissionClock,
+    ConfiguredModelRetryPlanAuthority, DurableExecutionPortContext, DurableExecutionPortDelegate,
+    DurableExecutionPortError, DurableExecutionPortSupplement, DurableModelExchangeAuthority,
+    DurableModelRetryContextSource, DurableModelRetryPreOpenPlanner,
+    DurableProviderGatewayAdmission, DurableProviderRetrySettlement, HttpsSseProviderAdapter,
+    HttpsSseProviderConfig, HttpsSseProviderError, HttpsSseProviderErrorKind,
+    LocalSecretStoreAdapter, ModelAdmissionClock, ModelExecutionBatchReceipt,
+    ModelExecutionOpenReceipt, ModelExecutionPortReceipt, ModelExecutionRuntime,
+    ModelExecutionRuntimeError, ModelPolicyAuthorityPort, ModelRequestPool, ModelRequestPoolConfig,
+    ModelRetryPlanAuthorityPort, ProviderAdapterError, ProviderAdapterInvocation,
+    ProviderAdapterOpenReceipt, ProviderAdapterPort, ProviderAdmissionReservationConfig,
+    ProviderFinishReason, ProviderGateway, ProviderGatewayIdentity, ProviderGatewayIdentityError,
+    ProviderGatewayIdentityPort, ProviderGatewayOpenReceipt, ProviderGatewayTerminal,
+    ProviderStreamControlAction, ProviderStreamConverter, ProviderStreamEvent,
+    ProviderStreamFailure, ProviderStreamFailureKind, ProviderTokenUsage, ProviderToolIdentity,
+    ProviderToolKind, ResolvedSecret, SystemModelAdmissionClock,
 };
 
 const LOOPBACK_RESPONSE: &str = "WinWinCode deterministic loopback response";
 const PLANNER_PROTOCOL: &str = "winwincode.planner-solution.v1";
 const VERIFICATION_PROTOCOL: &str = "winwincode.independent-verification-result.v1";
-const STAGE_INPUT_MARKER: &str = "StrongFlow stageInput (canonical JSON):\n";
+const WORK_INPUT_MARKER: &str = "StrongFlow workInput (canonical JSON):\n";
 const REQUIRED_BEHAVIOR_MARKER: &str = "\n\nRequired behavior:";
 const EXECUTOR_BEHAVIOR_MARKER: &str =
     "Apply the requested source change in the assigned checkout.";
 const VERIFICATION_BEHAVIOR_MARKER: &str =
-    "Use read-only commands against exactly stageInput.candidateRef.";
+    "Use read-only commands against exactly workInput.candidateRef.";
 
 /// The deterministic local Provider has to honor the same output contract as
 /// an actual model.  A Delivery planner is not allowed to complete with the
@@ -83,7 +82,6 @@ enum LoopbackResponseProfile {
         /// product cannot claim `pass` merely because a tool-output item
         /// exists.
         verification_outcome: LoopbackVerificationOutcome,
-        evidence_type: &'static str,
         delivery_spec_id: String,
         delivery_spec_revision: u64,
         candidate_ref: String,
@@ -99,7 +97,7 @@ enum LoopbackVerificationOutcome {
 }
 
 #[derive(Clone, Debug)]
-struct LoopbackStageInput {
+struct LoopbackWorkInput {
     delivery_spec_id: String,
     delivery_spec_revision: u64,
     candidate_ref: Option<String>,
@@ -128,8 +126,6 @@ struct LoopbackVerificationFinding {
 
 #[derive(Serialize)]
 struct LoopbackVerificationEvidenceSource {
-    #[serde(rename = "type")]
-    evidence_type: &'static str,
     source_id: &'static str,
 }
 
@@ -247,39 +243,37 @@ fn loopback_profile_from_request(request: &serde_json::Value) -> LoopbackRespons
     }
 
     if find_text_value(request, VERIFICATION_BEHAVIOR_MARKER).is_some() {
-        let Some(stage_input) = stage_input_from_request(request) else {
+        let Some(work_input) = work_input_from_request(request) else {
             return LoopbackResponseProfile::PlainText;
         };
-        let Some(candidate_ref) = stage_input.candidate_ref else {
+        let Some(candidate_ref) = work_input.candidate_ref else {
             return LoopbackResponseProfile::PlainText;
         };
         // The production loopback emits direct shell-command evidence for
         // this verifier turn.  Keep the model response bound to that exact
         // event category so the Worker can resolve the source by identity;
         // the Server only routes the resulting typed frame.
-        let evidence_type = "command";
         return LoopbackResponseProfile::Verification {
             completed,
             verification_outcome: loopback_verification_outcome(request),
-            evidence_type,
-            delivery_spec_id: stage_input.delivery_spec_id,
-            delivery_spec_revision: stage_input.delivery_spec_revision,
+            delivery_spec_id: work_input.delivery_spec_id,
+            delivery_spec_revision: work_input.delivery_spec_revision,
             candidate_ref,
-            acceptance_criterion_ids: stage_input.acceptance_criterion_ids,
+            acceptance_criterion_ids: work_input.acceptance_criterion_ids,
         };
     }
 
     if find_text_value(request, PLANNER_PROTOCOL).is_none() {
         return LoopbackResponseProfile::PlainText;
     }
-    let Some(stage_input) = stage_input_from_request(request) else {
+    let Some(work_input) = work_input_from_request(request) else {
         return LoopbackResponseProfile::PlainText;
     };
-    if stage_input.acceptance_criterion_ids.is_empty() {
+    if work_input.acceptance_criterion_ids.is_empty() {
         LoopbackResponseProfile::PlainText
     } else {
         LoopbackResponseProfile::Planner {
-            acceptance_criterion_ids: stage_input.acceptance_criterion_ids,
+            acceptance_criterion_ids: work_input.acceptance_criterion_ids,
         }
     }
 }
@@ -354,45 +348,52 @@ fn parse_process_exit_code(text: &str) -> Option<i64> {
     })
 }
 
-fn stage_input_from_request(request: &serde_json::Value) -> Option<LoopbackStageInput> {
-    let instructions = find_text_value(request, STAGE_INPUT_MARKER)?;
+fn work_input_from_request(request: &serde_json::Value) -> Option<LoopbackWorkInput> {
+    let instructions = find_text_value(request, WORK_INPUT_MARKER)?;
     let start = instructions
-        .find(STAGE_INPUT_MARKER)?
-        .checked_add(STAGE_INPUT_MARKER.len())?;
+        .find(WORK_INPUT_MARKER)?
+        .checked_add(WORK_INPUT_MARKER.len())?;
     let end = instructions[start..]
         .find(REQUIRED_BEHAVIOR_MARKER)?
         .checked_add(start)?;
-    let stage_input = serde_json::from_str::<serde_json::Value>(&instructions[start..end]).ok()?;
-    let delivery_spec_id = stage_input
-        .get("deliverySpecId")
-        .and_then(serde_json::Value::as_str)
-        .filter(|value| !value.trim().is_empty())?
-        .to_owned();
-    let delivery_spec_revision = stage_input
-        .get("deliverySpecRevision")
-        .and_then(serde_json::Value::as_u64)?;
-    let candidate_ref = stage_input
-        .get("candidateRef")
-        .and_then(serde_json::Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-        .map(ToOwned::to_owned);
-    let criteria = stage_input
-        .get("acceptanceCriteria")
-        .and_then(serde_json::Value::as_array)?;
-    let mut acceptance_criterion_ids = Vec::with_capacity(criteria.len());
-    for criterion in criteria {
-        let id = criterion
-            .get("criterionId")
-            .and_then(serde_json::Value::as_str)
-            .filter(|id| !id.trim().is_empty())?;
-        if !acceptance_criterion_ids
-            .iter()
-            .any(|existing| existing == id)
-        {
-            acceptance_criterion_ids.push(id.to_owned());
-        }
+    let work_input = serde_json::from_str::<WorkRunInput>(&instructions[start..end]).ok()?;
+    if work_input.work_item.work_contract_id != work_input.work_contract.id
+        || work_input.work_item.work_contract_revision != work_input.work_contract.revision
+        || work_input.work_contract.criteria.is_empty()
+        || work_input.work_item.criterion_ids.is_empty()
+    {
+        return None;
     }
-    Some(LoopbackStageInput {
+    let mut contract_criterion_ids = Vec::with_capacity(work_input.work_contract.criteria.len());
+    for criterion in &work_input.work_contract.criteria {
+        if contract_criterion_ids.contains(&criterion.id.0.as_str()) {
+            return None;
+        }
+        contract_criterion_ids.push(criterion.id.0.as_str());
+    }
+    let delivery_spec_id = work_input.delivery_spec_id.clone();
+    let delivery_spec_revision = u64::try_from(work_input.delivery_spec_revision.0).ok()?;
+    let candidate_ref = work_input
+        .candidate_ref
+        .clone()
+        .filter(|value| !value.trim().is_empty());
+    let mut acceptance_criterion_ids = Vec::with_capacity(work_input.work_item.criterion_ids.len());
+    for criterion_id in &work_input.work_item.criterion_ids {
+        let id = criterion_id.0.clone();
+        if !work_input
+            .work_contract
+            .criteria
+            .iter()
+            .any(|criterion| criterion.id.0 == id)
+        {
+            return None;
+        }
+        if acceptance_criterion_ids.contains(&id) {
+            return None;
+        }
+        acceptance_criterion_ids.push(id);
+    }
+    Some(LoopbackWorkInput {
         delivery_spec_id,
         delivery_spec_revision,
         candidate_ref,
@@ -542,7 +543,6 @@ fn loopback_verification_response(profile: &LoopbackResponseProfile) -> Option<S
     let LoopbackResponseProfile::Verification {
         completed: true,
         verification_outcome,
-        evidence_type,
         delivery_spec_id,
         delivery_spec_revision,
         candidate_ref,
@@ -578,7 +578,6 @@ fn loopback_verification_response(profile: &LoopbackResponseProfile) -> Option<S
             verdict,
             explanation,
             evidence_sources: vec![LoopbackVerificationEvidenceSource {
-                evidence_type,
                 source_id: "loopback-verification-command",
             }],
         })
@@ -1240,7 +1239,6 @@ impl StandaloneModelExecutionApplication {
     ) -> Result<T, StandaloneModelExecutionError> {
         let mut gateway_storage = self.open_product_storage()?;
         let admission_storage = self.open_product_storage()?;
-        let enterprise_quota_storage = self.open_product_storage()?;
         let contexts = DurableModelRetryContextSource::open(&self.data_directory)
             .map_err(|_| dependency_unavailable())?;
         let settlement = DurableProviderRetrySettlement::open(&self.data_directory, &contexts)
@@ -1251,10 +1249,6 @@ impl StandaloneModelExecutionApplication {
             &*self.policy,
             self.admission,
         );
-        let mut enterprise_quota = DurableEnterpriseQuotaAdmission::new(enterprise_quota_storage);
-        let mut enterprise_policy =
-            crate::DurableProviderPolicyEnforcement::open(&self.data_directory)
-                .map_err(|_| dependency_unavailable())?;
         let mut planner =
             DurableModelRetryPreOpenPlanner::open(&self.data_directory, &*self.retry_policy)
                 .map_err(|_| dependency_unavailable())?;
@@ -1267,8 +1261,6 @@ impl StandaloneModelExecutionApplication {
         })?;
         if gateway_storage.database_path() != self.database_path
             || admission.database_path() != self.database_path
-            || enterprise_quota.database_path() != self.database_path
-            || enterprise_policy.database_path() != self.database_path
             || contexts.database_path() != self.database_path
             || planner.database_path() != self.database_path
             || exchanges.database_path() != self.database_path
@@ -1295,14 +1287,12 @@ impl StandaloneModelExecutionApplication {
                 .map_err(|_| invalid_configuration())?;
         }
         let result = {
-            let mut runtime = ModelExecutionRuntime::new_with_enterprise_controls(
+            let mut runtime = ModelExecutionRuntime::new(
                 &exchanges,
                 &mut planner,
                 &contexts,
                 &mut gateway,
                 &mut pool,
-                &mut enterprise_quota,
-                &mut enterprise_policy,
             );
             operation(&mut runtime)
         };
@@ -1312,8 +1302,6 @@ impl StandaloneModelExecutionApplication {
             .map_err(|_| shutdown_error())
             .and_then(|()| planner.close().map_err(|_| shutdown_error()))
             .and_then(|()| admission.close().map_err(|_| shutdown_error()))
-            .and_then(|()| enterprise_quota.close().map_err(|_| shutdown_error()))
-            .and_then(|()| enterprise_policy.close().map_err(|_| shutdown_error()))
             .and_then(|()| settlement.close().map_err(|_| shutdown_error()))
             .and_then(|()| contexts.close().map_err(|_| shutdown_error()))
             .and_then(|()| {
@@ -1509,16 +1497,46 @@ mod verification_tests {
 
     use super::{
         LoopbackResponseProfile, LoopbackVerificationOutcome, REQUIRED_BEHAVIOR_MARKER,
-        STAGE_INPUT_MARKER, VERIFICATION_BEHAVIOR_MARKER, loopback_profile_from_request,
+        VERIFICATION_BEHAVIOR_MARKER, WORK_INPUT_MARKER, loopback_profile_from_request,
         loopback_verification_response,
     };
 
     fn request_with_output(output: Option<Value>) -> Value {
-        let stage_input = json!({
-            "deliverySpecId": "spec-test",
-            "deliverySpecRevision": 1,
-            "candidateRef": "git-candidate:sha256:test",
-            "acceptanceCriteria": [{"criterionId": "criterion-test"}],
+        let work_input = json!({
+            "schemaVersion": "winwincode/v1",
+            "deliverySpecId": "spec-source",
+            "deliverySpecRevision": 3,
+            "candidateRef": "git-candidate:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "workContract": {
+                "constraints": [],
+                "createdAt": "2026-01-01T00:00:00.000Z",
+                "criteria": [{
+                    "description": "The candidate passes the exact check.",
+                    "id": "crt_01J00000000000000000000001",
+                    "required": true,
+                    "requiredEvidenceClass": "machine",
+                    "verificationMethod": "Run the exact candidate check."
+                }],
+                "id": "wct_01J00000000000000000000001",
+                "objective": "Verify the candidate.",
+                "protectedScope": [],
+                "requiredHumanAuthority": "none",
+                "revision": 1,
+                "schemaVersion": "winwincode/v1",
+                "scope": []
+            },
+            "workItem": {
+                "criterionIds": ["crt_01J00000000000000000000001"],
+                "dependsOn": [],
+                "goal": "Verify the candidate.",
+                "id": "wit_01J00000000000000000000001",
+                "revision": 1,
+                "schemaVersion": "winwincode/v1",
+                "state": "ready",
+                "title": "Verify candidate",
+                "workContractId": "wct_01J00000000000000000000001",
+                "workContractRevision": 1
+            }
         });
         let mut input = vec![json!({
             "type": "message",
@@ -1530,7 +1548,7 @@ mod verification_tests {
         }
         json!({
             "instructions": format!(
-                "{STAGE_INPUT_MARKER}{stage_input}{REQUIRED_BEHAVIOR_MARKER}\n{VERIFICATION_BEHAVIOR_MARKER}"
+                "{WORK_INPUT_MARKER}{work_input}{REQUIRED_BEHAVIOR_MARKER}\n{VERIFICATION_BEHAVIOR_MARKER}"
             ),
             "input": input,
         })
@@ -1562,6 +1580,31 @@ mod verification_tests {
     }
 
     #[test]
+    fn canonical_work_input_binds_contract_item_and_candidate() {
+        let profile = loopback_profile_from_request(&request_with_output(None));
+        let LoopbackResponseProfile::Verification {
+            delivery_spec_id,
+            delivery_spec_revision,
+            candidate_ref,
+            acceptance_criterion_ids,
+            ..
+        } = profile
+        else {
+            panic!("expected verification profile from canonical WorkRunInput");
+        };
+        assert_eq!(delivery_spec_id, "spec-source");
+        assert_eq!(delivery_spec_revision, 3);
+        assert_eq!(
+            candidate_ref,
+            "git-candidate:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
+        assert_eq!(
+            acceptance_criterion_ids,
+            vec!["crt_01J00000000000000000000001"]
+        );
+    }
+
+    #[test]
     fn verification_profile_binds_fail_to_nonzero_exit_code() {
         let profile = loopback_profile_from_request(&request_with_output(Some(output_item(
             "Exit code: 124\nWall time: 1.0s\nOutput:\ntimeout",
@@ -1579,7 +1622,6 @@ mod verification_tests {
         let response = loopback_verification_response(&LoopbackResponseProfile::Verification {
             completed: true,
             verification_outcome,
-            evidence_type: "command",
             delivery_spec_id: "spec-test".to_owned(),
             delivery_spec_revision: 1,
             candidate_ref: "git-candidate:sha256:test".to_owned(),
@@ -1605,5 +1647,66 @@ mod verification_tests {
         };
         assert!(completed);
         assert_eq!(verification_outcome, LoopbackVerificationOutcome::Unknown);
+    }
+
+    #[test]
+    fn legacy_stage_input_marker_is_not_a_loopback_work_input() {
+        let request = json!({
+            "instructions": format!(
+                "StrongFlow stageInput (canonical JSON):\n{{}}{REQUIRED_BEHAVIOR_MARKER}\n{VERIFICATION_BEHAVIOR_MARKER}"
+            )
+        });
+        assert!(matches!(
+            loopback_profile_from_request(&request),
+            LoopbackResponseProfile::PlainText
+        ));
+    }
+
+    #[test]
+    fn work_input_rejects_criterion_outside_its_contract() {
+        let mut request = request_with_output(None);
+        let instructions = request["instructions"]
+            .as_str()
+            .expect("canonical WorkRun prompt")
+            .replace(
+                "\"criterionIds\":[\"crt_01J00000000000000000000001\"]",
+                "\"criterionIds\":[\"crt_01J00000000000000000000002\"]",
+            );
+        request["instructions"] = Value::String(instructions);
+        assert!(matches!(
+            loopback_profile_from_request(&request),
+            LoopbackResponseProfile::PlainText
+        ));
+    }
+
+    #[test]
+    fn work_input_rejects_item_bound_to_a_different_contract_revision() {
+        let mut request = request_with_output(None);
+        let instructions = request["instructions"]
+            .as_str()
+            .expect("canonical WorkRun prompt")
+            .replace("\"workContractRevision\":1", "\"workContractRevision\":2");
+        request["instructions"] = Value::String(instructions);
+        assert!(matches!(
+            loopback_profile_from_request(&request),
+            LoopbackResponseProfile::PlainText
+        ));
+    }
+
+    #[test]
+    fn work_input_rejects_duplicate_item_criteria() {
+        let mut request = request_with_output(None);
+        let instructions = request["instructions"]
+            .as_str()
+            .expect("canonical WorkRun prompt")
+            .replace(
+                "\"criterionIds\":[\"crt_01J00000000000000000000001\"]",
+                "\"criterionIds\":[\"crt_01J00000000000000000000001\",\"crt_01J00000000000000000000001\"]",
+            );
+        request["instructions"] = Value::String(instructions);
+        assert!(matches!(
+            loopback_profile_from_request(&request),
+            LoopbackResponseProfile::PlainText
+        ));
     }
 }

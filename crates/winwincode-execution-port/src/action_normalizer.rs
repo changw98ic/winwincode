@@ -275,6 +275,43 @@ pub enum ToolRequest {
     Mcp(McpRequest),
 }
 
+/// Runtime category of one typed tool request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolExecutionKind {
+    Edit,
+    Git,
+    Shell,
+    Test,
+    Search,
+    Network,
+    Mcp,
+}
+
+impl ToolRequest {
+    /// Returns the execution category without inspecting model prose.
+    #[must_use]
+    pub fn execution_kind(&self) -> ToolExecutionKind {
+        match self {
+            Self::File(_) => ToolExecutionKind::Edit,
+            Self::Git(_) => ToolExecutionKind::Git,
+            Self::Network(_) => ToolExecutionKind::Network,
+            Self::Mcp(_) => ToolExecutionKind::Mcp,
+            Self::Shell(request) => {
+                let program = basename(&request.program).to_ascii_lowercase();
+                let args = request.args.iter().map(String::as_str).collect::<Vec<_>>();
+                if matches!(program.as_str(), "fd" | "find" | "grep" | "rg") {
+                    ToolExecutionKind::Search
+                } else if classify_shell(&program, &args).0 == ActionObject::Test {
+                    ToolExecutionKind::Test
+                } else {
+                    ToolExecutionKind::Shell
+                }
+            }
+        }
+    }
+}
+
 /// Gateway source which produced the observed action.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

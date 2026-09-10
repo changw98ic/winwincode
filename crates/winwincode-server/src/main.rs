@@ -4,14 +4,13 @@
 
 use std::collections::BTreeSet;
 use std::env;
-use std::fs;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use winwincode_api::generated::{
-    Actor, OrganizationScope, OrganizationScopeKind, ProjectScope, ProjectScopeKind, Scope,
+    OrganizationScope, OrganizationScopeKind, ProjectScope, ProjectScopeKind, Scope,
     WorkspaceScope, WorkspaceScopeKind,
 };
 use winwincode_codex::{
@@ -19,22 +18,18 @@ use winwincode_codex::{
     ProductionCodexConfig, ProductionCodexOptions,
 };
 use winwincode_control_plane::{
-    CanonicalEnterpriseIdentityLifecycle, CollaborationService, ControlPlane, ControlPlaneConfig,
-    ControlPlaneInstanceRuntimeConfig, DurableWorkerInteractionOutbound,
-    EnterpriseIdentityProductionVerifiers, EnterpriseIdentityProtocolAdapter,
-    EnterpriseIdentityProtocolConfig, EnterpriseIdentityService, EnterpriseIdentityVerifierConfig,
-    EnterpriseIdentityVerifierTimeouts, EnterpriseRbacService, LocalDeliveryAdapterConfig,
-    LocalModelPolicyAuthority, LocalModelPolicyAuthorityConfig, LocalPublicationAdapterConfig,
-    LocalSecretStoreAdapter, ModelAdmissionLimits, ModelAdmissionPolicyLayer,
-    ModelRequestPoolConfig, ModelRoutePolicyDecision, ProductSessionExecutionApplication,
-    ProductSessionExecutionConfig, ProviderAdmissionReservationConfig, SecretStorePort,
-    StandaloneModelExecutionApplication, StandaloneModelExecutionConfig, StandaloneProviderConfig,
-    TrustedProtocolParty, local_loopback_retry_policy,
+    CollaborationService, ControlPlane, ControlPlaneConfig, ControlPlaneInstanceRuntimeConfig,
+    DurableWorkerInteractionOutbound, LocalDeliveryAdapterConfig, LocalModelPolicyAuthority,
+    LocalModelPolicyAuthorityConfig, LocalPublicationAdapterConfig, ModelAdmissionLimits,
+    ModelAdmissionPolicyLayer, ModelRequestPoolConfig, ModelRoutePolicyDecision,
+    ProductSessionExecutionApplication, ProductSessionExecutionConfig,
+    ProviderAdmissionReservationConfig, StandaloneModelExecutionApplication,
+    StandaloneModelExecutionConfig, local_loopback_retry_policy,
 };
 use winwincode_domain::{
     CredentialReferenceId, OrganizationId, ProjectId, RepositoryId, RepositoryScope,
-    RepositoryScopeKind, Sha256Digest, UserAccount, UserAccountRole, UserAccountState, UserActor,
-    UserActorKind, UserId, WorkerId, WorkerInstanceId, WorkspaceId,
+    RepositoryScopeKind, Sha256Digest, UserAccount, UserAccountRole, UserAccountState, UserId,
+    WorkerId, WorkerInstanceId, WorkspaceId,
 };
 use winwincode_execution_port::{
     action_enforcement::{ActionEnforcementIssuer, ActionEnforcementSigningKey},
@@ -49,14 +44,11 @@ use winwincode_local::LocalLauncherConfig;
 use winwincode_server::{
     AuthSessionBootstrap, AuthSessionConfig, ClientExchangeApplication, ClientExchangeConfig,
     ClientExchangePort, DurableEventHub, DurableEventHubConfig, DurableEventPublisher,
-    EnterpriseIdentityManagementApplication, EnterpriseIdentityProtocolApplication,
-    EnterpriseRbacManagementApplication, EnterpriseRequestAuthenticator,
     FileRemoteWorkerAuthenticator, GeneratedContractDispatcher, LocalModelRoute,
     LocalRuntimeSupervisor, OwnerInitializationHook, ProductionRemoteWorkerExchange,
     RemoteWorkerExchangePort, RepositoryRuntimeScheduler, RequestAuthenticator, ServerConfig,
     ServerExecutionPortCore, ServerTls, SqliteAuthSessionManager, StandaloneApplicationClock,
-    StandaloneControlPlaneApplication, SystemStandaloneApplicationClock,
-    UnavailableEnterpriseManagementApplication, UserAccountService,
+    StandaloneControlPlaneApplication, SystemStandaloneApplicationClock, UserAccountService,
     configure_local_model_authority, start_server, start_server_with_remote_worker,
 };
 use winwincode_storage::{
@@ -105,8 +97,6 @@ struct ProductionApplicationComposition {
     auth_sessions: Arc<SqliteAuthSessionManager>,
     owner: Option<UserAccount>,
     application: StandaloneControlPlaneApplication,
-    identities: Arc<EnterpriseIdentityService>,
-    rbac: Arc<EnterpriseRbacService>,
 }
 
 /// Runs the startup-time local model authority configuration once the first
@@ -133,12 +123,6 @@ impl OwnerInitializationHook for DeferredModelAuthority {
         let _ = Box::new(storage).close();
         result.map_err(|error| error.to_string())
     }
-}
-
-struct ComposedApplication {
-    application: StandaloneControlPlaneApplication,
-    identities: Arc<EnterpriseIdentityService>,
-    rbac: Arc<EnterpriseRbacService>,
 }
 
 fn load_production_startup() -> Result<ProductionStartup, Box<dyn std::error::Error>> {
@@ -315,11 +299,7 @@ fn open_production_application(
             return Err(Box::new(error));
         }
     };
-    let ComposedApplication {
-        application,
-        identities,
-        rbac,
-    } = compose_production_application(
+    let application = compose_production_application(
         &config,
         control_plane,
         storage,
@@ -335,8 +315,6 @@ fn open_production_application(
         auth_sessions,
         owner,
         application,
-        identities,
-        rbac,
     })
 }
 
@@ -377,8 +355,6 @@ async fn run_composed_server(
         auth_sessions,
         owner,
         application,
-        identities,
-        rbac,
     } = composition;
     let model_execution = open_local_model_execution(&config, &model_route)?;
     let action_signing_key = configured_action_signing_key()?;
@@ -424,7 +400,7 @@ async fn run_composed_server(
         worker_id.clone(),
         worker_instance_id,
         scheduler_generation,
-        Duration::from_secs(30),
+        optional_duration_seconds("WWC_SERVER_EXECUTION_LEASE_SECONDS", 30)?,
     )?
     .with_admission_identity(
         owner.as_ref().map(|owner| owner.user_id.clone()),
@@ -439,10 +415,7 @@ async fn run_composed_server(
             config,
             repository_scope,
             auth_sessions,
-            owner,
             application,
-            identities,
-            rbac,
             worker_id,
             scheduler,
             execution_port,
@@ -452,13 +425,9 @@ async fn run_composed_server(
     }
     Box::pin(run_local_composition(LocalRuntimeComposition {
         config,
-        repository_scope,
         model_route,
         auth_sessions,
-        owner,
         application,
-        identities,
-        rbac,
         capabilities,
         action_signing_key,
         launcher_config,
@@ -472,13 +441,9 @@ async fn run_composed_server(
 
 struct LocalRuntimeComposition {
     config: ServerConfig,
-    repository_scope: RepositoryScope,
     model_route: LocalModelRoute,
     auth_sessions: Arc<SqliteAuthSessionManager>,
-    owner: Option<UserAccount>,
     application: StandaloneControlPlaneApplication,
-    identities: Arc<EnterpriseIdentityService>,
-    rbac: Arc<EnterpriseRbacService>,
     capabilities: WorkerCapabilitySet,
     action_signing_key: ActionEnforcementSigningKey,
     launcher_config: LocalLauncherConfig,
@@ -493,13 +458,9 @@ async fn run_local_composition(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let LocalRuntimeComposition {
         config,
-        repository_scope,
         model_route,
         auth_sessions,
-        owner,
         application,
-        identities,
-        rbac,
         capabilities,
         action_signing_key,
         launcher_config,
@@ -522,36 +483,15 @@ async fn run_local_composition(
     let application =
         Arc::new(application.with_runtime_health(Arc::new(supervisor.health_handle())));
     let api = Arc::new(GeneratedContractDispatcher::new(application));
-    let authenticator: Arc<dyn RequestAuthenticator> = Arc::new(
-        EnterpriseRequestAuthenticator::new(Arc::clone(&auth_sessions), Arc::clone(&identities)),
-    );
-    let enterprise_identity = compose_enterprise_identity_protocol(
-        &config,
-        owner.as_ref(),
-        &repository_scope.organization_id,
-        Arc::clone(&auth_sessions),
-        identities,
-        rbac,
-    )?;
-    serve_runtime(
-        config,
-        auth_sessions,
-        authenticator,
-        api,
-        enterprise_identity,
-        supervisor,
-    )
-    .await
+    let authenticator: Arc<dyn RequestAuthenticator> = auth_sessions.clone();
+    serve_runtime(config, auth_sessions, authenticator, api, supervisor).await
 }
 
 struct RemoteRuntimeComposition<Core> {
     config: ServerConfig,
     repository_scope: RepositoryScope,
     auth_sessions: Arc<SqliteAuthSessionManager>,
-    owner: Option<UserAccount>,
     application: StandaloneControlPlaneApplication,
-    identities: Arc<EnterpriseIdentityService>,
-    rbac: Arc<EnterpriseRbacService>,
     worker_id: WorkerId,
     scheduler: RepositoryRuntimeScheduler,
     execution_port: Core,
@@ -569,10 +509,7 @@ where
         config,
         repository_scope,
         auth_sessions,
-        owner,
         application,
-        identities,
-        rbac,
         worker_id,
         scheduler,
         execution_port,
@@ -612,23 +549,12 @@ where
             .map_err(|error| error.to_string())?,
     );
     let api = Arc::new(GeneratedContractDispatcher::new(Arc::new(application)));
-    let authenticator: Arc<dyn RequestAuthenticator> = Arc::new(
-        EnterpriseRequestAuthenticator::new(Arc::clone(&auth_sessions), Arc::clone(&identities)),
-    );
-    let enterprise_identity = compose_enterprise_identity_protocol(
-        &config,
-        owner.as_ref(),
-        &repository_scope.organization_id,
-        Arc::clone(&auth_sessions),
-        identities,
-        rbac,
-    )?;
+    let authenticator: Arc<dyn RequestAuthenticator> = auth_sessions.clone();
     serve_remote_runtime(
         config,
         auth_sessions,
         authenticator,
         api,
-        enterprise_identity,
         exchange,
         client_exchange,
     )
@@ -640,7 +566,6 @@ async fn serve_remote_runtime(
     auth_sessions: Arc<SqliteAuthSessionManager>,
     authenticator: Arc<dyn RequestAuthenticator>,
     api: Arc<GeneratedContractDispatcher>,
-    enterprise_identity: Option<Arc<EnterpriseIdentityProtocolApplication>>,
     exchange: Arc<dyn RemoteWorkerExchangePort>,
     client_exchange: Arc<dyn ClientExchangePort>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -649,7 +574,6 @@ async fn serve_remote_runtime(
         auth_sessions,
         authenticator,
         api,
-        enterprise_identity,
         Some(exchange),
         Some(client_exchange),
     )
@@ -664,18 +588,9 @@ async fn serve_runtime(
     auth_sessions: Arc<SqliteAuthSessionManager>,
     authenticator: Arc<dyn RequestAuthenticator>,
     api: Arc<GeneratedContractDispatcher>,
-    enterprise_identity: Option<Arc<EnterpriseIdentityProtocolApplication>>,
     supervisor: ProductionSupervisor,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut running = match start_server(
-        config,
-        auth_sessions,
-        authenticator,
-        api,
-        enterprise_identity,
-    )
-    .await
-    {
+    let mut running = match start_server(config, auth_sessions, authenticator, api).await {
         Ok(running) => running,
         Err(error) => {
             let _ = Box::pin(supervisor.shutdown()).await;
@@ -715,7 +630,6 @@ fn open_local_model_execution(
                 cost_budget_micros: 10_000_000,
             },
         )?,
-        enterprise_ceilings: Vec::new(),
     })?;
     let retry_policy = local_loopback_retry_policy()?;
     let pool = local_model_request_pool_config();
@@ -723,10 +637,8 @@ fn open_local_model_execution(
         StandaloneModelExecutionConfig {
             data_directory: config.data_directory().to_path_buf(),
             secret_directory: PathBuf::from(required_environment("SECRET_DIRECTORY")?),
-            providers: vec![StandaloneProviderConfig::Loopback {
-                provider_id: model_route.provider.clone(),
-            }],
-            admission: ProviderAdmissionReservationConfig::try_new(100, 10)?,
+            providers: vec![model_route.provider_config()?],
+            admission: ProviderAdmissionReservationConfig::try_new(32_000, 10)?,
             pool,
             policy: Box::new(policy),
             retry_policy: Box::new(retry_policy),
@@ -942,170 +854,20 @@ fn compose_production_application(
     worker_outbound: DurableWorkerInteractionOutbound,
     hub: Arc<DurableEventHub>,
     execution_config: ProductSessionExecutionConfig,
-) -> Result<ComposedApplication, Box<dyn std::error::Error>> {
-    let identities = Arc::new(EnterpriseIdentityService::new(Box::new(
-        SqliteStorage::open(config.data_directory())?,
-    )));
-    let rbac = Arc::new(EnterpriseRbacService::new(Box::new(SqliteStorage::open(
+) -> Result<StandaloneControlPlaneApplication, Box<dyn std::error::Error>> {
+    let collaboration = Arc::new(CollaborationService::new(SqliteStorage::open(
         config.data_directory(),
-    )?)));
-    let collaboration = Arc::new(CollaborationService::new(
-        SqliteStorage::open(config.data_directory())?,
-        Arc::clone(&rbac),
-    ));
-    let rbac_application = Arc::new(EnterpriseRbacManagementApplication::new(
-        Arc::clone(&rbac),
-        Arc::new(UnavailableEnterpriseManagementApplication),
-    ));
-    let enterprise = Arc::new(EnterpriseIdentityManagementApplication::new(
-        Arc::clone(&identities),
-        rbac_application,
-    ));
-    let application = StandaloneControlPlaneApplication::new_with_enterprise_and_collaboration(
+    )?));
+    let application = StandaloneControlPlaneApplication::new_with_collaboration(
         control_plane,
         storage,
         worker_outbound,
         hub,
-        enterprise,
         collaboration,
         execution_config,
     )?
     .with_model_request_pool_config(local_model_request_pool_config())?;
-    Ok(ComposedApplication {
-        application,
-        identities,
-        rbac,
-    })
-}
-
-fn compose_enterprise_identity_protocol(
-    config: &ServerConfig,
-    owner: Option<&UserAccount>,
-    organization_id: &OrganizationId,
-    auth_sessions: Arc<SqliteAuthSessionManager>,
-    identities: Arc<EnterpriseIdentityService>,
-    rbac: Arc<EnterpriseRbacService>,
-) -> Result<Option<Arc<EnterpriseIdentityProtocolApplication>>, Box<dyn std::error::Error>> {
-    if !enterprise_identity_mode_enabled()? {
-        return Ok(None);
-    }
-    // The enterprise identity management actor keeps its single-subject
-    // semantics only under the durable first Owner account.
-    let owner = owner.ok_or(
-        "enterprise identity mode requires an initialized Owner account; complete server initialization first",
-    )?;
-    let tls_root = fs::read(required_environment(
-        "WWC_SERVER_IDENTITY_VERIFIER_TLS_ROOT_DER_FILE",
-    )?)?;
-    let verifier_config = EnterpriseIdentityVerifierConfig::try_new(
-        required_environment("WWC_SERVER_IDENTITY_VERIFIER_ENDPOINT")?,
-        EnterpriseIdentityVerifierTimeouts {
-            connect: Duration::from_secs(5),
-            response: Duration::from_secs(10),
-            total: Duration::from_secs(30),
-        },
-        64 * 1024,
-    )?
-    .with_specific_tls_roots(vec![tls_root])?;
-    let scope = Scope::OrganizationScope(OrganizationScope {
-        kind: OrganizationScopeKind::Organization,
-        organization_id: organization_id.clone(),
-    });
-    let secret_store: Arc<dyn SecretStorePort> = Arc::new(LocalSecretStoreAdapter::open(
-        required_environment("SECRET_DIRECTORY")?,
-    )?);
-    let verifiers = EnterpriseIdentityProductionVerifiers::try_new(
-        verifier_config,
-        Box::new(SqliteStorage::open(config.data_directory())?),
-        secret_store,
-        scope,
-        CredentialReferenceId(required_environment(
-            "WWC_SERVER_IDENTITY_VERIFIER_CREDENTIAL_REFERENCE_ID",
-        )?),
-    )?;
-    let (oidc, saml, scim) = verifiers.into_verifiers();
-    let management_actor = Actor::UserActor(UserActor {
-        kind: UserActorKind::User,
-        id: owner.user_id.clone(),
-    });
-    let lifecycle = CanonicalEnterpriseIdentityLifecycle::new(
-        identities,
-        rbac,
-        auth_sessions.clone(),
-        management_actor.clone(),
-    );
-    let protocols = EnterpriseIdentityProtocolAdapter::new(
-        Box::new(SqliteStorage::open(config.data_directory())?),
-        Box::new(lifecycle),
-        Box::new(oidc),
-        Box::new(saml),
-        Box::new(scim),
-        EnterpriseIdentityProtocolConfig {
-            organization_id: organization_id.clone(),
-            management_actor,
-            oidc: TrustedProtocolParty {
-                issuer: required_environment("WWC_SERVER_OIDC_ISSUER")?,
-                audience: required_environment("WWC_SERVER_OIDC_AUDIENCE")?,
-            },
-            saml: TrustedProtocolParty {
-                issuer: required_environment("WWC_SERVER_SAML_ISSUER")?,
-                audience: required_environment("WWC_SERVER_SAML_AUDIENCE")?,
-            },
-            scim: TrustedProtocolParty {
-                issuer: required_environment("WWC_SERVER_SCIM_ISSUER")?,
-                audience: required_environment("WWC_SERVER_SCIM_AUDIENCE")?,
-            },
-            max_clock_skew_millis: required_environment(
-                "WWC_SERVER_IDENTITY_MAX_CLOCK_SKEW_MILLIS",
-            )?
-            .parse()?,
-            max_assertion_age_millis: required_environment(
-                "WWC_SERVER_IDENTITY_MAX_ASSERTION_AGE_MILLIS",
-            )?
-            .parse()?,
-        },
-    )?;
-    Ok(Some(Arc::new(EnterpriseIdentityProtocolApplication::new(
-        Arc::new(protocols),
-        auth_sessions,
-    ))))
-}
-
-fn enterprise_identity_mode_enabled() -> Result<bool, Box<dyn std::error::Error>> {
-    const MODE: &str = "WWC_SERVER_ENTERPRISE_IDENTITY_MODE";
-    const CONFIGURATION_NAMES: &[&str] = &[
-        "WWC_SERVER_IDENTITY_VERIFIER_ENDPOINT",
-        "WWC_SERVER_IDENTITY_VERIFIER_TLS_ROOT_DER_FILE",
-        "WWC_SERVER_IDENTITY_VERIFIER_CREDENTIAL_REFERENCE_ID",
-        "WWC_SERVER_OIDC_ISSUER",
-        "WWC_SERVER_OIDC_AUDIENCE",
-        "WWC_SERVER_SAML_ISSUER",
-        "WWC_SERVER_SAML_AUDIENCE",
-        "WWC_SERVER_SCIM_ISSUER",
-        "WWC_SERVER_SCIM_AUDIENCE",
-        "WWC_SERVER_IDENTITY_MAX_CLOCK_SKEW_MILLIS",
-        "WWC_SERVER_IDENTITY_MAX_ASSERTION_AGE_MILLIS",
-    ];
-    let mode = match env::var(MODE) {
-        Ok(mode) => mode,
-        Err(env::VarError::NotPresent)
-            if CONFIGURATION_NAMES
-                .iter()
-                .all(|name| env::var_os(name).is_none()) =>
-        {
-            return Ok(false);
-        }
-        Err(env::VarError::NotPresent) => {
-            return Err(
-                format!("{MODE} is required when enterprise identity is configured").into(),
-            );
-        }
-        Err(error) => return Err(error.into()),
-    };
-    if mode != "https-verifier" {
-        return Err(format!("{MODE} must be https-verifier").into());
-    }
-    Ok(true)
+    Ok(application)
 }
 
 fn local_production_configs() -> Result<
@@ -1165,14 +927,19 @@ fn environment_config() -> Result<ServerConfig, Box<dyn std::error::Error>> {
         },
         _ => return Err("both TLS certificate and private key must be configured".into()),
     };
-    Ok(ServerConfig::new(
+    let config = ServerConfig::new(
         bind_address,
         public_url,
         tls,
         allowed_origins,
         data_directory,
         Duration::from_secs(30),
-    )?)
+    )?;
+    match env::var("WWC_SERVER_PREVIEW_PUBLIC_URL") {
+        Ok(origin) if !origin.is_empty() => Ok(config.with_preview_public_url(origin)?),
+        Ok(_) | Err(env::VarError::NotPresent) => Ok(config),
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn required_environment(name: &str) -> Result<String, Box<dyn std::error::Error>> {

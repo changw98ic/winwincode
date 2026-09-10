@@ -302,6 +302,58 @@
         "codex-rs/core/src/tools/sandboxing.rs",
         "codex-rs/core/src/tools/sandboxing_tests.rs"
       ]
+    },
+    {
+      "id": "codex-atomic-apply-patch",
+      "file": "upstream/patches/codex/0008-atomic-apply-patch.patch",
+      "planned": false,
+      "patchSha256": "adcaef7e5d4fec4916fa7969c8a006574b76498287d0e524bf59d55539583f85",
+      "targets": [
+        "codex-rs/apply-patch/src/lib.rs",
+        "codex-rs/apply-patch/tests/fixtures/scenarios/015_failure_after_partial_success_leaves_changes/expected/created.txt",
+        "codex-rs/apply-patch/tests/fixtures/scenarios/015_failure_after_partial_success_leaves_changes/patch.txt",
+        "codex-rs/apply-patch/tests/fixtures/scenarios/015_failure_after_partial_success_rolls_back/patch.txt",
+        "codex-rs/apply-patch/tests/suite/tool.rs"
+      ]
+    },
+    {
+      "id": "codex-canonicalize-intercepted-apply-patch",
+      "file": "upstream/patches/codex/0009-canonicalize-intercepted-apply-patch.patch",
+      "planned": false,
+      "patchSha256": "11d0bd23e5bfb6a9545e7492aa3d5c18215842475395ddb5141df87c0b157110",
+      "targets": [
+        "codex-rs/core/src/tools/handlers/apply_patch.rs",
+        "codex-rs/core/src/tools/handlers/shell.rs",
+        "codex-rs/core/src/tools/handlers/unified_exec/exec_command.rs"
+      ]
+    },
+    {
+      "id": "codex-submit-change-batch-handoff",
+      "file": "upstream/patches/codex/0010-submit-change-batch-handoff.patch",
+      "planned": false,
+      "patchSha256": "2577e4cb5324afd3f33fad44780c6b95d979b29392d325048f57c608a2694f0c",
+      "targets": [
+        "codex-rs/core/src/codex_delegate.rs",
+        "codex-rs/core/src/codex_thread.rs",
+        "codex-rs/core/src/guardian/review_session.rs",
+        "codex-rs/core/src/session/handlers.rs",
+        "codex-rs/core/src/session/mod.rs",
+        "codex-rs/core/src/session/review.rs",
+        "codex-rs/core/src/session/session.rs",
+        "codex-rs/core/src/session/turn.rs",
+        "codex-rs/core/src/session/turn_context.rs",
+        "codex-rs/core/src/session/turn_input.rs",
+        "codex-rs/core/src/session/turn_input_tests.rs",
+        "codex-rs/core/src/stream_events_utils.rs",
+        "codex-rs/core/src/tools/handlers/mod.rs",
+        "codex-rs/core/src/tools/handlers/submit_change_batch.lark",
+        "codex-rs/core/src/tools/handlers/submit_change_batch.rs",
+        "codex-rs/core/src/tools/parallel.rs",
+        "codex-rs/core/src/tools/spec_plan.rs",
+        "codex-rs/core/tests/suite/turn_input_submission.rs",
+        "codex-rs/protocol/src/protocol.rs",
+        "codex-rs/protocol/src/turn_input.rs"
+      ]
     }
   ],
   "licenseObligations": {

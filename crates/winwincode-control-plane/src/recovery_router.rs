@@ -13,7 +13,7 @@ use std::fmt;
 
 use winwincode_domain::{
     CodexThreadId, ExecutionMessageId, Instant, ProductSessionId, RequestId, SessionIdentity,
-    Sha256Digest, StageRunId,
+    Sha256Digest, WorkRunId,
 };
 use winwincode_execution_port::generated::ExecutionLeaseStamp;
 use winwincode_execution_port::replay::{
@@ -51,7 +51,7 @@ pub enum ThreadRecoveryCapability {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionRecoveryState {
     pub product_session_id: ProductSessionId,
-    pub stage_run_id: Option<StageRunId>,
+    pub work_run_id: Option<WorkRunId>,
     pub browser_stream_id: String,
     pub browser_authorization_epoch: u64,
     pub revision: u64,
@@ -545,8 +545,8 @@ fn worker_replacement(
 
 fn validate_state(state: &SessionRecoveryState) -> Result<(), RecoveryRoutingError> {
     validate_id(&state.product_session_id.0, "productSessionId", "psn_")?;
-    if let Some(stage_run_id) = &state.stage_run_id {
-        validate_id(&stage_run_id.0, "stageRunId", "run_")?;
+    if let Some(work_run_id) = &state.work_run_id {
+        validate_id(&work_run_id.0, "workRunId", "wrn_")?;
     }
     if state.browser_stream_id.is_empty()
         || state.browser_stream_id.len() > 200
@@ -660,7 +660,7 @@ fn runtime_identity(
         session_identity: SessionIdentity {
             codex_thread_id: state.authority.slot.codex_thread_id.clone(),
             product_session_id: state.product_session_id.clone(),
-            stage_run_id: state.stage_run_id.clone(),
+            work_run_id: state.work_run_id.clone(),
             worker_session_id: state.authority.slot.worker_session_id.clone(),
         },
         codex_thread_id: state.authority.slot.codex_thread_id.clone(),

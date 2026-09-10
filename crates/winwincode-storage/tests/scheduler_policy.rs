@@ -1,6 +1,6 @@
 use winwincode_domain::{
     DeliveryId, ExecutionJobId, Instant, OrganizationId, ProductSessionId, ProjectId, RepositoryId,
-    RequestId, Sha256Digest, StageRunId, WorkspaceId,
+    RequestId, Sha256Digest, WorkRunId, WorkspaceId,
 };
 use winwincode_storage::{
     ExecutionJobRecord, ExecutionJobState, ExecutionQueueScope, SchedulerCancellationTarget,
@@ -43,7 +43,7 @@ fn record(
             .iter()
             .map(|dependency| ExecutionJobId(id("job", *dependency)))
             .collect(),
-        stage_run_id: Some(StageRunId(id("run", job))),
+        work_run_id: Some(WorkRunId(id("wrn", job))),
         submitted_at: Instant("2027-02-15T08:00:00.000Z".into()),
         updated_at: Instant("2027-02-15T08:00:00.000Z".into()),
         cancellation: None,
@@ -52,7 +52,7 @@ fn record(
 
 struct Fixture {
     record: ExecutionJobRecord,
-    stage_run_id: StageRunId,
+    work_run_id: WorkRunId,
     priority: SchedulerPriority,
     enqueued_at_tick: u64,
     eligible_at_tick: u64,
@@ -69,7 +69,7 @@ impl Fixture {
     ) -> Self {
         Self {
             record: record(job, scope, ExecutionJobState::Queued, 1, &[]),
-            stage_run_id: StageRunId(id("run", job)),
+            work_run_id: WorkRunId(id("wrn", job)),
             priority,
             enqueued_at_tick,
             eligible_at_tick: enqueued_at_tick,
@@ -80,7 +80,7 @@ impl Fixture {
     fn candidate(&self) -> SchedulerCandidate<'_> {
         SchedulerCandidate {
             record: &self.record,
-            stage_run_id: Some(&self.stage_run_id),
+            work_run_id: Some(&self.work_run_id),
             priority: self.priority,
             enqueued_at_tick: self.enqueued_at_tick,
             eligible_at_tick: self.eligible_at_tick,
@@ -117,8 +117,8 @@ fn explicit_priority_wins_until_starvation_protection_promotes_old_work() {
         .expect("priority selection")
         .expect("dispatch");
     assert_eq!(selected.job_id, ExecutionJobId(id("job", 2)));
-    assert!(scheduler.release_stage_run(
-        selected.stage_run_id.as_ref().expect("Delivery StageRun"),
+    assert!(scheduler.release_work_run(
+        selected.work_run_id.as_ref().expect("Delivery WorkRun"),
         &selected.job_id
     ));
 
@@ -276,8 +276,8 @@ fn dependencies_release_only_after_successful_uncancelled_completion() {
 }
 
 #[test]
-fn one_stage_run_never_has_two_active_dispatches() {
-    let shared_stage = StageRunId(id("run", 70));
+fn one_work_run_never_has_two_active_dispatches() {
+    let shared_stage = WorkRunId(id("wrn", 70));
     let mut first = Fixture::new(
         70,
         scope(7, 7, 7),
@@ -285,8 +285,8 @@ fn one_stage_run_never_has_two_active_dispatches() {
         0,
         SchedulerWeights::EQUAL,
     );
-    first.stage_run_id = shared_stage.clone();
-    first.record.stage_run_id = Some(shared_stage.clone());
+    first.work_run_id = shared_stage.clone();
+    first.record.work_run_id = Some(shared_stage.clone());
     let mut second = Fixture::new(
         71,
         scope(7, 7, 7),
@@ -294,8 +294,8 @@ fn one_stage_run_never_has_two_active_dispatches() {
         0,
         SchedulerWeights::EQUAL,
     );
-    second.stage_run_id = shared_stage;
-    second.record.stage_run_id = Some(second.stage_run_id.clone());
+    second.work_run_id = shared_stage;
+    second.record.work_run_id = Some(second.work_run_id.clone());
     let fixtures = [first, second];
     let candidates = candidates(&fixtures);
     let mut scheduler = SchedulerPolicy::new(100);

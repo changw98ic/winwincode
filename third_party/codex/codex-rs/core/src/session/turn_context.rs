@@ -180,6 +180,7 @@ pub struct TurnContext {
     pub(crate) available_models: Vec<ModelPreset>,
     pub(crate) unified_exec_shell_mode: UnifiedExecShellMode,
     pub(crate) final_output_json_schema: Option<Value>,
+    pub(crate) submit_change_batch: bool,
     pub(crate) dynamic_tools: Vec<DynamicToolSpec>,
     pub(crate) turn_metadata_state: Arc<TurnMetadataState>,
     pub(crate) extension_data: Arc<codex_extension_api::ExtensionData>,
@@ -433,6 +434,7 @@ impl TurnContext {
             available_models,
             unified_exec_shell_mode: self.unified_exec_shell_mode.clone(),
             final_output_json_schema: self.final_output_json_schema.clone(),
+            submit_change_batch: self.submit_change_batch,
             dynamic_tools: self.dynamic_tools.clone(),
             turn_metadata_state: self.turn_metadata_state.clone(),
             extension_data: Arc::clone(&self.extension_data),
@@ -723,6 +725,7 @@ impl Session {
             available_models,
             unified_exec_shell_mode,
             final_output_json_schema: None,
+            submit_change_batch: false,
             dynamic_tools: session_configuration.dynamic_tools.clone(),
             turn_metadata_state,
             extension_data,
@@ -817,6 +820,7 @@ impl Session {
                 sub_id,
                 session_configuration,
                 updates.final_output_json_schema,
+                updates.submit_change_batch,
             )
             .await)
     }
@@ -826,11 +830,13 @@ impl Session {
         sub_id: String,
         session_configuration: SessionConfiguration,
         final_output_json_schema: Option<Option<Value>>,
+        submit_change_batch: Option<bool>,
     ) -> Arc<TurnContext> {
         self.new_turn_context_from_configuration(
             sub_id,
             session_configuration,
             final_output_json_schema,
+            submit_change_batch,
             TurnMultiAgentRuntime::ResolveAndStore,
             self.git_enrichment_policy,
         )
@@ -846,6 +852,7 @@ impl Session {
             sub_id,
             session_configuration,
             /*final_output_json_schema*/ None,
+            /*submit_change_batch*/ None,
             TurnMultiAgentRuntime::Preview,
             GitEnrichmentPolicy::Skip,
         )
@@ -858,6 +865,7 @@ impl Session {
         sub_id: String,
         session_configuration: SessionConfiguration,
         final_output_json_schema: Option<Option<Value>>,
+        submit_change_batch: Option<bool>,
         multi_agent_runtime: TurnMultiAgentRuntime,
         git_enrichment_policy: GitEnrichmentPolicy,
     ) -> Arc<TurnContext> {
@@ -955,6 +963,9 @@ impl Session {
         if let Some(final_schema) = final_output_json_schema {
             turn_context.final_output_json_schema = final_schema;
         }
+        if let Some(submit_change_batch) = submit_change_batch {
+            turn_context.submit_change_batch = submit_change_batch;
+        }
         let turn_context = Arc::new(turn_context);
         if git_enrichment_policy == GitEnrichmentPolicy::Fresh
             && turn_context
@@ -1015,6 +1026,7 @@ impl Session {
             sub_id,
             session_configuration,
             /*final_output_json_schema*/ None,
+            /*submit_change_batch*/ None,
         )
         .await
     }

@@ -174,11 +174,7 @@ fn revoke_credential() -> CredentialReferenceRevokeCommand {
 
 fn configure(storage: &mut SqliteStorage) {
     ProviderCatalogService::new(storage)
-        .upsert(
-            &catalog_request(1, 0),
-            &descriptor(1),
-            Instant("2026-09-02T00:00:00.000Z".to_owned()),
-        )
+        .upsert(&catalog_request(1, 0), &descriptor(1))
         .expect("create Provider catalog");
     CredentialReferenceService::new(storage)
         .create(&create_credential(), 1_800_000_000_000)
@@ -238,7 +234,7 @@ fn open_message(seed: u64) -> ModelOpenMessage {
         session_identity: SessionIdentity {
             codex_thread_id: CodexThreadId(id("cdx", 1)),
             product_session_id: ProductSessionId(id("psn", 1)),
-            stage_run_id: None,
+            work_run_id: None,
             worker_session_id: worker_session_id.clone(),
         },
         worker_session_id,
@@ -362,12 +358,6 @@ impl ProviderGatewayAdmissionPort for Admission {
                 idempotent_replay: false,
             },
             route_authority: authority,
-            enterprise_quota_amounts: winwincode_storage::EnterpriseQuotaAmounts {
-                tokens: 100,
-                provider_cost_micros: 10,
-                operations: 1,
-                ..winwincode_storage::EnterpriseQuotaAmounts::default()
-            },
         })
     }
 
@@ -475,11 +465,7 @@ fn apply_hot_update_and_reject_invalid(storage: &mut SqliteStorage) {
         .rotate(&rotate_credential(), 1_800_000_001_000)
         .expect("rotate Credential reference");
     ProviderCatalogService::new(storage)
-        .upsert(
-            &catalog_request(5, 1),
-            &descriptor(2),
-            Instant("2026-09-02T00:00:00.000Z".to_owned()),
-        )
+        .upsert(&catalog_request(5, 1), &descriptor(2))
         .expect("hot-update Provider catalog");
     let last_good = ProviderCatalogService::new(storage)
         .project(&Scope::OrganizationScope(organization_scope()))
@@ -488,11 +474,7 @@ fn apply_hot_update_and_reject_invalid(storage: &mut SqliteStorage) {
     let mut invalid = descriptor(3);
     invalid.models.push(model(999_999));
     let rejected = ProviderCatalogService::new(storage)
-        .upsert(
-            &catalog_request(50, 2),
-            &invalid,
-            Instant("2026-09-02T00:00:00.000Z".to_owned()),
-        )
+        .upsert(&catalog_request(50, 2), &invalid)
         .expect_err("duplicate model update is invalid");
     assert_eq!(rejected.kind(), ProviderCatalogErrorKind::InvalidRequest);
     assert_eq!(

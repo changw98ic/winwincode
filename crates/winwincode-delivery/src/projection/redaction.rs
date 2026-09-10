@@ -6,11 +6,11 @@ use std::{collections::HashSet, error::Error, fmt};
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use winwincode_domain::{DeliveryId, Sha256Digest};
+use winwincode_domain::{DeliveryId, Sha256Digest, WorkRunState};
 
 use crate::domain::{
-    CandidatePathFact, Delivery, FrozenDeliveryCandidate, StageRunStatus,
-    assert_frozen_candidate_current, candidate::CandidateHunkFact,
+    CandidatePathFact, Delivery, FrozenDeliveryCandidate, assert_frozen_candidate_current,
+    candidate::CandidateHunkFact,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -278,19 +278,23 @@ pub fn project_frozen_candidate_details(
     })?;
     let producer = delivery
         .snapshot()
-        .stage_runs
+        .work_run_aggregate
+        .runs
         .iter()
-        .find(|run| run.id == *candidate.producer_stage_run_id())
+        .find(|run| run.id == *candidate.producer_work_run_id())
         .ok_or_else(|| {
             redaction_error(
                 ProjectionRedactionErrorCode::StaleCandidate,
-                "frozen candidate producer StageRun is missing",
+                "frozen candidate producer WorkRun is missing",
             )
         })?;
-    if producer.status != StageRunStatus::Succeeded || producer.finished_at_millis.is_none() {
+    if !matches!(
+        producer.state,
+        WorkRunState::CandidateReady | WorkRunState::Settled
+    ) {
         return Err(redaction_error(
             ProjectionRedactionErrorCode::StaleCandidate,
-            "frozen candidate producer StageRun is not settled successfully",
+            "frozen candidate producer WorkRun is not settled successfully",
         ));
     }
 
@@ -521,12 +525,14 @@ mod tests {
         run.finished_at_millis = Some(1_800_000_000_020);
         let binding = &mut snapshot.session_bindings[0];
         binding.id = SessionBindingId("binding-executor-details".into());
-        binding.stage_run_id = run.id.clone();
+        binding.work_run_id = binding.work_run_id.clone();
         binding.product_session_id = ProductSessionId("product-executor-details".into());
         binding.execution_job_id = ExecutionJobId("job-executor-details".into());
+        binding.execution_profile = Some("executor".into());
         binding.worker_session_id = Some(WorkerSessionId("worker-executor-details".into()));
         binding.codex_thread_id = Some(CodexThreadId("thread-executor-details".into()));
         binding.bound_at_millis = 1_800_000_000_011;
+        crate::domain::rebuild_test_work_runs_from_bindings(&mut snapshot);
         Delivery::try_from_snapshot(snapshot).expect("writer Delivery")
     }
 
@@ -567,7 +573,7 @@ mod tests {
         let delivery = writer_delivery();
         let candidate = frozen_candidate(
             &delivery,
-            &StageRunId("stage-executor-details".into()),
+            1_800_000_000_020,
             &SessionBindingId("binding-executor-details".into()),
         );
         let details = test_support::accepted_frozen_candidate_details(
@@ -618,6 +624,15 @@ mod tests {
             started_at_millis: 1_800_000_000_030,
             finished_at_millis: None,
         });
+        let mut later_binding = later.session_bindings[0].clone();
+        later_binding.id = SessionBindingId("binding-later-writer".into());
+        later_binding.work_run_id =
+            winwincode_domain::WorkRunId("wrn_01J00000000000000000000001".into());
+        later_binding.execution_job_id = ExecutionJobId("job-later-writer".into());
+        later_binding.execution_profile = Some("executor".into());
+        later_binding = later_binding.with_test_authority("later-writer", 2);
+        later.session_bindings.push(later_binding);
+        crate::domain::rebuild_test_work_runs_from_bindings(&mut later);
         later.updated_at_millis = 1_800_000_000_030;
         let later = Delivery::try_from_snapshot(later).expect("later active writer");
         assert_eq!(

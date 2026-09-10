@@ -21,9 +21,9 @@
     "productSessionId": "psn_00000000000000000000000006",
     "workerSessionId": "wsn_00000000000000000000000005",
     "codexThreadId": "cdx_0000000000000000000000000G",
-    "stageRunId": "run_00000000000000000000000009"
+    "workRunId": "wrn_00000000000000000000000009"
   },
-  "stageRunId": "run_00000000000000000000000009",
+  "workRunId": "wrn_00000000000000000000000009",
   "workerId": "wrk_00000000000000000000000001",
   "sourceIdentity": {
     "kind": "execution-worker",

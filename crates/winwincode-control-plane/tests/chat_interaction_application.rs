@@ -27,7 +27,8 @@ use winwincode_domain::{
     ApprovalId, CodexThreadId, ControlPlaneEventId, CredentialReferenceId, DeliveryId,
     ExecutionJobId, ExecutionMessageId, ExecutionSequence, FencingToken, Instant, LeaseId,
     ModelExchangeId, OrganizationId, ProductSessionId, ProjectId, RepositoryId, RequestId,
-    Sha256Digest, StageRunId, UserId, WorkerId, WorkerInstanceId, WorkerSessionId, WorkspaceId,
+    Revision, Sha256Digest, UserId, WorkContractId, WorkItemId, WorkRunId, WorkerId,
+    WorkerInstanceId, WorkerSessionId, WorkspaceId,
 };
 use winwincode_domain::{RepositoryScope, RepositoryScopeKind};
 use winwincode_execution_port::action_gateway::GateDecision;
@@ -419,10 +420,13 @@ fn prepare_product_session(
         })
         .expect("create ProductSession");
     let binding_identity = if delivery {
-        SessionBindingIdentity::delivery_stage(
+        SessionBindingIdentity::delivery_work_run(
             DeliveryId(id("dlv", 1)),
-            None,
-            StageRunId(id("run", 1)),
+            WorkContractId(id("wct", 1)),
+            Revision(1),
+            WorkItemId(id("wit", 1)),
+            Revision(1),
+            WorkRunId(id("wrn", 1)),
             ProductSessionId(id("psn", 1)),
             runtime.job_id.clone(),
         )
@@ -799,7 +803,11 @@ fn gate_authority(
         execution_scope: execution_scope(false),
         worker_pool_id: pool(),
         product_session_revision,
-        stage_run_id: None,
+        work_contract_id: None,
+        work_contract_revision: None,
+        work_item_id: None,
+        work_item_revision: None,
+        work_run_id: None,
         job_revision: 2,
         worker_slot_revision: 1,
         runtime: runtime.clone(),
@@ -844,10 +852,15 @@ fn approval_request(runtime: &WorkerSlotAuthority) -> ApprovalRequestMessage {
     serde_json::from_value(json!({
         "action": {
             "category": "shell",
-            "details": {
-                "contentType": "application/json",
-                "dataBase64": "U0VDUkVUX0FDVElPTl9QQVlMT0FE",
-                "payloadDigest": digest('f')
+            "sanitizedDetail": {
+                "kind": "available",
+                "operation": "execute",
+                "targetSummaries": ["program:fixture;argument_count:0"],
+                "targetCount": 1,
+                "workingDirectory": "workspace",
+                "riskLevel": "high",
+                "reasonCode": "sandbox_escalation",
+                "requestSha256": digest('f')
             },
             "summary": "Run the sealed fixture action."
         },
@@ -970,154 +983,39 @@ fn assert_pending(storage: &mut SqliteStorage, scope: &ReceiptScopeKey) {
 }
 
 #[test]
-fn legacy_approval_projection_has_one_canonical_unavailable_read_semantic() {
-    let (directory, mut storage, scope, runtime, session_revision) =
-        setup_input("approval-legacy-read");
-    let authority = gate_authority(&runtime, session_revision);
-    register_approval(&mut storage, &scope, &authority);
+fn approval_without_trusted_action_detail_cannot_be_approved() {
+    let (_directory, mut storage, scope, runtime, session_revision) =
+        setup_input("approval-disabled");
+    register_approval(
+        &mut storage,
+        &scope,
+        &gate_authority(&runtime, session_revision),
+    );
+    let mut request = approval_request(&runtime);
+    request.action.sanitized_detail = None;
     ChatInteractionService::new(&mut storage)
         .record_approval(&RecordApprovalInteractionCommand {
             public_scope: public_scope(1),
-            request: approval_request(&runtime),
+            request,
         })
-        .expect("record Approval request");
+        .expect("record disabled Approval");
+    let projection = ChatInteractionService::new(&mut storage)
+        .approval_get(&scope, &approval_get_query(), &at(20))
+        .expect("read disabled Approval")
+        .result;
+    assert!(!projection.decision_enabled);
 
-    let mut foreign_query = approval_get_query();
-    foreign_query.scope.repository_id = RepositoryId(id("rep", 2));
-    let mut foreign_clock = FixtureClock(VecDeque::from([at(20)]));
+    let mut clock = FixtureClock(VecDeque::from([at(21)]));
     let mut outbound = CapturingOutbound::default();
     assert_eq!(
-        ChatInteractionApiService::new(&mut storage, &mut foreign_clock, &mut outbound)
-            .approval_get(&foreign_query)
-            .expect_err("foreign repository Approval is isolated")
+        ChatInteractionApiService::new(&mut storage, &mut clock, &mut outbound)
+            .decide_approval(approval_decide_command(610, 1, 1, "DETAIL_REQUIRED"))
+            .expect_err("missing trusted facts must disable approval")
             .code(),
-        ChatInteractionServiceErrorCode::NotFound
+        ChatInteractionServiceErrorCode::InvalidInput
     );
-    let command = approval_decide_command(610, 1, 1, "LEGACY_RECEIPT_SECRET_REASON");
-    let mut decision_clock = FixtureClock(VecDeque::from([at(21)]));
-    let decided = ChatInteractionApiService::new(&mut storage, &mut decision_clock, &mut outbound)
-        .decide_approval(command.clone())
-        .expect("decide Approval before legacy restart");
-    assert_eq!(
-        serde_json::to_value(&decided.result).expect("new Approval projection")["category"],
-        "shell"
-    );
-    drop(storage);
-
-    let connection =
-        Connection::open(directory.0.join("control-plane.sqlite3")).expect("legacy state database");
-    let payload: Vec<u8> = connection
-        .query_row(
-            "SELECT payload FROM product_state WHERE stream_id LIKE 'chat-interactions:%'",
-            [],
-            |row| row.get(0),
-        )
-        .expect("persisted Chat catalog");
-    let mut catalog: serde_json::Value = serde_json::from_slice(&payload).expect("catalog JSON");
-    let events = catalog["snapshot"]["events"]
-        .as_array_mut()
-        .expect("persisted interaction events");
-    let projection = events
-        .iter_mut()
-        .find(|event| event["kind"] == "approval_recorded")
-        .and_then(|event| event.get_mut("projection"))
-        .and_then(serde_json::Value::as_object_mut)
-        .expect("persisted Approval projection");
-    assert!(projection.remove("category").is_some());
-    assert!(projection.remove("effectiveDecisionScope").is_some());
-    assert!(projection.remove("sanitizedDetail").is_some());
-    connection
-        .execute(
-            "UPDATE product_state SET payload = ?1 WHERE stream_id LIKE 'chat-interactions:%'",
-            [serde_json::to_vec(&catalog).expect("encode incomplete current catalog")],
-        )
-        .expect("install incomplete current catalog fixture");
-    let mut incomplete = SqliteStorage::open(&directory.0).expect("open incomplete current state");
-    assert_eq!(
-        ChatInteractionService::new(&mut incomplete)
-            .approval_get(&scope, &approval_get_query(), &at(20))
-            .expect_err("current schema cannot omit Approval read detail")
-            .code(),
-        ChatInteractionServiceErrorCode::CorruptState
-    );
-    drop(incomplete);
-
-    catalog["schemaVersion"] = json!(1);
-    connection
-        .execute(
-            "UPDATE product_state SET payload = ?1 WHERE stream_id LIKE 'chat-interactions:%'",
-            [serde_json::to_vec(&catalog).expect("encode legacy catalog")],
-        )
-        .expect("install legacy catalog fixture");
-
-    let receipt_rows = {
-        let mut statement = connection
-            .prepare(
-                "SELECT sequence, payload FROM outbox
-                 WHERE topic = 'chat-interaction.receipt.internal.v1' ORDER BY sequence",
-            )
-            .expect("legacy receipt rows query");
-        statement
-            .query_map([], |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
-            })
-            .expect("legacy receipt rows")
-            .collect::<Result<Vec<_>, _>>()
-            .expect("legacy receipt row values")
-    };
-    let (sequence, mut receipt) = receipt_rows
-        .into_iter()
-        .find_map(|(sequence, payload)| {
-            let value: serde_json::Value = serde_json::from_slice(&payload).ok()?;
-            value["approval"].is_object().then_some((sequence, value))
-        })
-        .expect("Approval decision receipt");
-    let receipt_approval = receipt["approval"]
-        .as_object_mut()
-        .expect("persisted receipt Approval");
-    assert!(receipt_approval.remove("category").is_some());
-    assert!(receipt_approval.remove("effectiveDecisionScope").is_some());
-    assert!(receipt_approval.remove("sanitizedDetail").is_some());
-    receipt["schemaVersion"] = json!(1);
-    connection
-        .execute(
-            "UPDATE outbox SET payload = ?1 WHERE sequence = ?2",
-            rusqlite::params![
-                serde_json::to_vec(&receipt).expect("encode legacy receipt"),
-                sequence
-            ],
-        )
-        .expect("install legacy Approval receipt fixture");
-    drop(connection);
-
-    let mut reopened = SqliteStorage::open(&directory.0).expect("restart storage");
-    let projection = ChatInteractionService::new(&mut reopened)
-        .approval_get(&scope, &approval_get_query(), &at(20))
-        .expect("legacy Approval read migration")
-        .result;
-    let public = serde_json::to_value(&projection).expect("canonical Approval JSON");
-    assert_eq!(public["category"], "unavailable");
-    assert_eq!(public["effectiveDecisionScope"], "once");
-    assert_eq!(
-        public["sanitizedDetail"],
-        json!({
-            "kind": "unavailable",
-            "reason": "source_not_recorded"
-        })
-    );
-    let mut replay_clock = FixtureClock(VecDeque::from([at(30)]));
-    let mut replay_outbound = CapturingOutbound::default();
-    let replay =
-        ChatInteractionApiService::new(&mut reopened, &mut replay_clock, &mut replay_outbound)
-            .decide_approval(command)
-            .expect("legacy Approval receipt replay");
-    assert_eq!(replay.result, projection);
-    assert_eq!(replay_outbound.frames.len(), 1);
-    assert!(
-        !serde_json::to_string(&replay.result)
-            .expect("replayed Approval JSON")
-            .contains("LEGACY_RECEIPT_SECRET_REASON")
-    );
+    assert!(outbound.frames.is_empty());
+    assert_pending(&mut storage, &scope);
 }
 
 #[test]
@@ -1284,11 +1182,18 @@ fn approval_decision_is_atomic_restart_stable_and_replay_delivered() {
     let detail = serde_json::to_value(&get.result).expect("canonical Approval projection");
     assert_eq!(detail["category"], "shell");
     assert_eq!(detail["effectiveDecisionScope"], "once");
+    assert_eq!(detail["decisionEnabled"], true);
     assert_eq!(
         detail["sanitizedDetail"],
         json!({
-            "kind": "unavailable",
-            "reason": "encoded_payload_redacted"
+            "kind": "available",
+            "operation": "execute",
+            "targetSummaries": ["program:fixture;argument_count:0"],
+            "targetCount": 1,
+            "workingDirectory": "workspace",
+            "riskLevel": "high",
+            "reasonCode": "sandbox_escalation",
+            "requestSha256": digest('f')
         })
     );
     assert!(detail.get("command").is_none());

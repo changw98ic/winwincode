@@ -20,7 +20,6 @@
       "session.close",
       "delivery.create",
       "delivery.update_spec",
-      "delivery.approve_task_breakdown",
       "delivery.advance",
       "delivery.resolve_attention",
       "delivery.submit_verdict",
@@ -44,7 +43,9 @@
       "enterprise.integration.update",
       "enterprise.identity.update",
       "collaboration.notification.ack",
-      "collaboration.presence.update"
+      "collaboration.presence.update",
+      "delivery.task_breakdown.create",
+      "workrun.cancel"
     ],
     "httpQueries": [
       "session.list",
@@ -83,7 +84,8 @@
       "enterprise.identity.list",
       "collaboration.activity.list",
       "collaboration.notification.list",
-      "collaboration.presence.list"
+      "collaboration.presence.list",
+      "workrun.get"
     ],
     "websocketEvents": [
       "product-session.changed.v1",
@@ -804,23 +806,26 @@
       "currentObservableOperations": [
         "create and update a DeliverySpec with revision and request identity",
         "display the current pending or settled solution review without raw Attention protocol data",
-        "approve the exact sealed review digest and promote its ordered task proposals without caller-authored tasks",
-        "read Delivery and runtime at one server-issued StrongFlow cursor and advance the one legal next stage",
+        "create bounded WorkItems under the current WorkContract without caller-authored tasks",
+        "read Delivery and WorkRun runtime at one server-issued StrongFlow cursor; dispatch an explicit execution profile and cancel an exact accepted WorkRun",
         "resolve business Attention with bounded remediation",
-        "request server-computed verdicts for one candidate stale-check digest and rebuild the Delivery view"
+        "request server-computed verdicts for one candidate stale-check digest and rebuild the Delivery view",
+        "create bounded WorkItems under the current WorkContract and query their accepted WorkRuns"
       ],
       "httpCommands": [
         "delivery.create",
         "delivery.update_spec",
-        "delivery.approve_task_breakdown",
         "delivery.advance",
         "delivery.resolve_attention",
-        "delivery.submit_verdict"
+        "delivery.submit_verdict",
+        "delivery.task_breakdown.create",
+        "workrun.cancel"
       ],
       "httpQueries": [
         "delivery.list",
         "delivery.get",
-        "runtime.projection.get"
+        "runtime.projection.get",
+        "workrun.get"
       ],
       "websocketEvents": [
         "delivery.changed.v1",

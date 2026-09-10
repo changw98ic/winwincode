@@ -1092,7 +1092,7 @@
         "scopeKind",
         "productSessionId",
         "deliveryId",
-        "stageRunId",
+        "workRunId",
         "projectionRevision",
         "lastProjectionSequence",
         "reloadQueries",
@@ -1110,9 +1110,6 @@
         },
         "deliveryId": {
           "$ref": "./domain.schema.json#/$defs/DeliveryId"
-        },
-        "stageRunId": {
-          "$ref": "./domain.schema.json#/$defs/StageRunId"
         },
         "projectionRevision": {
           "$ref": "./domain.schema.json#/$defs/Revision"
@@ -1138,9 +1135,12 @@
         },
         "sessionIdentity": {
           "$ref": "./domain.schema.json#/$defs/SessionIdentity"
+        },
+        "workRunId": {
+          "$ref": "./domain.schema.json#/$defs/WorkRunId"
         }
       },
-      "description": "Delivery-stage invalidation. The browser reloads Delivery first and replays runtime at the exact returned StrongFlowReadCursor."
+      "description": "WorkRun invalidation. The browser reloads Delivery first and replays runtime at the exact returned StrongFlowReadCursor."
     },
     "ControlPlaneWebSocketSubscribeOrigin": {
       "type": "string",
@@ -1532,7 +1532,8 @@
         "settings",
         "provider_catalog",
         "credential_reference",
-        "request_pool"
+        "request_pool",
+        "runtime_status"
       ]
     },
     "ControlPlaneWebSocketModelRouteAvailabilityInvalidatedEvent": {

@@ -20,7 +20,6 @@ export * from './delivery-verdict.js'
 export * from './delivery-attention.js'
 export * from './plan-review.js'
 export * from './local-git-delivery-workspace.js'
-export * from './delivery-stage-coordinator.js'
 export * from './github-publication.js'
 
 export const strongFlowSurface: SurfaceDescriptor = Object.freeze({

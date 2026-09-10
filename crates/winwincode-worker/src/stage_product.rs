@@ -313,7 +313,7 @@ fn candidate_workspace_provenance(
     active: &ActiveJob,
     workspace: &WorkerWorkspace,
 ) -> Result<WorkspaceProvenance, CandidateProductError> {
-    let ExecutionScope::DeliveryStageExecutionScope(scope) = &active.job.scope else {
+    let ExecutionScope::WorkRunExecutionScope(scope) = &active.job.scope else {
         return Err(CandidateProductError::new(
             CandidateProductErrorCode::InvalidScope,
             "candidate product requires a Delivery-stage execution scope",
@@ -326,7 +326,7 @@ fn candidate_workspace_provenance(
         )
     })?;
     if scope.product_session_id != active.session_identity.product_session_id
-        || active.session_identity.stage_run_id.as_ref() != Some(&scope.stage_run_id)
+        || active.session_identity.work_run_id.as_ref() != Some(&scope.work_run_id)
         || workspace.provenance() != &expected
     {
         return Err(CandidateProductError::new(

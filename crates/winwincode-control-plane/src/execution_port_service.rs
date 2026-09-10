@@ -10,7 +10,7 @@
 use std::fmt;
 
 use winwincode_delivery::application::stage::SessionBindingAuthority;
-use winwincode_delivery::domain::{Delivery, SessionBindingSourceKind, StageRunStatus};
+use winwincode_delivery::domain::{Delivery, SessionBindingSourceKind};
 use winwincode_domain::RepositoryScope;
 use winwincode_domain::{
     ExecutionJobId, ExecutionMessageId, Instant, RequestId, SchemaVersion, SessionIdentity,
@@ -43,7 +43,7 @@ use crate::delivery_transaction::{delivery_stream_id, load_durable_execution_job
 use crate::runtime_event_transaction::runtime_ack_sequence_for_replay;
 use crate::{
     ControlPlane, DurableWorkerExecutionLifecycle, RepositoryExecutionScheduler,
-    RepositoryExecutionSchedulerError, WorkerEnterpriseQuotaClaim, WorkerExecutionLifecycleError,
+    RepositoryExecutionSchedulerError, WorkerExecutionLifecycleError,
 };
 
 /// Default interval advertised to a registered Worker.
@@ -76,9 +76,7 @@ pub enum ExecutionPortServiceError {
     AuthorityRejected(&'static str),
     /// The registry rejected a scheduler claim; no dispatch was created.
     ClaimRejected(LeaseWriteStatus),
-    /// Enterprise quota rejected the authenticated Worker claim before Registry write.
-    EnterpriseQuotaRejected,
-    /// The durable Worker quota lifecycle failed before a dispatch could be built.
+    /// The durable Worker lifecycle failed before a dispatch could be built.
     WorkerLifecycle(WorkerExecutionLifecycleError),
     /// Action Policy evaluation or receipt issuance failed closed.
     ActionPolicy(crate::ActionPolicyEnforcementError),
@@ -102,9 +100,6 @@ impl fmt::Display for ExecutionPortServiceError {
             }
             Self::ClaimRejected(status) => {
                 write!(formatter, "execution lease claim rejected: {status:?}")
-            }
-            Self::EnterpriseQuotaRejected => {
-                formatter.write_str("authenticated Worker enterprise quota rejected the claim")
             }
             Self::WorkerLifecycle(error) => write!(formatter, "{error}"),
             Self::ActionPolicy(error) => write!(formatter, "{error}"),
@@ -475,17 +470,10 @@ impl<'storage> ExecutionPortService<'storage> {
                 .database_path()
                 .parent()
                 .ok_or(ExecutionPortServiceError::Protocol("storage.databasePath"))?;
-            match DurableWorkerExecutionLifecycle::open(data_directory)
+            DurableWorkerExecutionLifecycle::open(data_directory)
                 .map_err(ExecutionPortServiceError::WorkerLifecycle)?
                 .claim(&claim)
                 .map_err(ExecutionPortServiceError::WorkerLifecycle)?
-            {
-                WorkerEnterpriseQuotaClaim::Claimed { operational, .. } => operational,
-                WorkerEnterpriseQuotaClaim::Denied
-                | WorkerEnterpriseQuotaClaim::TerminalReplay(_) => {
-                    return Err(ExecutionPortServiceError::EnterpriseQuotaRejected);
-                }
-            }
         } else {
             self.registry()?.claim_execution_job(&claim)?
         };
@@ -813,7 +801,7 @@ pub(crate) fn load_runtime_replay_authority(
     job: &ExecutionJob,
     now: &Instant,
 ) -> Result<DurableRuntimeReplayAuthority, ExecutionPortServiceError> {
-    let ExecutionScope::DeliveryStageExecutionScope(job_scope) = &job.scope else {
+    let ExecutionScope::WorkRunExecutionScope(job_scope) = &job.scope else {
         return Err(ExecutionPortServiceError::AuthorityRejected(
             "runtime replay requires a Delivery-stage ExecutionJob",
         ));
@@ -824,7 +812,13 @@ pub(crate) fn load_runtime_replay_authority(
         return Err(ExecutionPortServiceError::AuthorityRejected("job attempt"));
     }
 
-    let stream_id = delivery_stream_id(&job_scope.delivery_id);
+    let job_record = storage.load_execution_job_record(&job.job_id)?.ok_or(
+        ExecutionPortServiceError::AuthorityRejected("durable ExecutionJob record is missing"),
+    )?;
+    let delivery_id = job_record.scope.delivery_id.clone().ok_or(
+        ExecutionPortServiceError::AuthorityRejected("WorkRun ExecutionJob has no Delivery scope"),
+    )?;
+    let stream_id = delivery_stream_id(&delivery_id);
     let state =
         storage
             .load_state(&stream_id)?
@@ -839,7 +833,7 @@ pub(crate) fn load_runtime_replay_authority(
     let delivery = Delivery::decode_json(&state.payload).map_err(|_| {
         ExecutionPortServiceError::AuthorityRejected("current Delivery state is invalid")
     })?;
-    if state.revision != delivery.revision() || delivery.id() != &job_scope.delivery_id {
+    if state.revision != delivery.revision() || delivery.id() != &delivery_id {
         return Err(ExecutionPortServiceError::AuthorityRejected(
             "current Delivery state is stale or foreign",
         ));
@@ -850,9 +844,12 @@ pub(crate) fn load_runtime_replay_authority(
         .session_bindings
         .iter()
         .filter(|binding| {
-            binding.delivery_id == job_scope.delivery_id
-                && binding.delivery_task_id == job_scope.delivery_task_id
-                && binding.stage_run_id == job_scope.stage_run_id
+            binding.delivery_id == delivery_id
+                && binding.work_contract_id == job_scope.work_contract_id
+                && binding.work_contract_revision == job_scope.work_contract_revision
+                && binding.work_item_id == job_scope.work_item_id
+                && binding.work_item_revision == job_scope.work_item_revision
+                && binding.work_run_id == job_scope.work_run_id
                 && binding.product_session_id == job_scope.product_session_id
                 && binding.execution_job_id == job.job_id
         });
@@ -869,25 +866,24 @@ pub(crate) fn load_runtime_replay_authority(
 
     let mut runs = delivery
         .snapshot()
-        .stage_runs
+        .work_run_aggregate
+        .runs
         .iter()
-        .filter(|run| run.id == job_scope.stage_run_id);
+        .filter(|run| run.id == job_scope.work_run_id);
     let Some(run) = runs.next() else {
         return Err(ExecutionPortServiceError::AuthorityRejected(
-            "current StageRun is missing",
+            "current WorkRun is missing",
         ));
     };
     if runs.next().is_some()
-        || run.delivery_id != job_scope.delivery_id
-        || run.delivery_task_id != job_scope.delivery_task_id
-        || run.attempt != attempt
-        || !matches!(
-            run.status,
-            StageRunStatus::Running | StageRunStatus::Waiting
-        )
+        || run.work_contract_id != job_scope.work_contract_id
+        || run.contract_revision != job_scope.work_contract_revision
+        || run.work_item_id != job_scope.work_item_id
+        || run.work_item_revision != job_scope.work_item_revision
+        || run.attempt != i64::try_from(attempt).unwrap_or(-1)
     {
         return Err(ExecutionPortServiceError::AuthorityRejected(
-            "current StageRun is stale or foreign",
+            "current WorkRun is stale or foreign",
         ));
     }
 
@@ -905,6 +901,11 @@ pub(crate) fn load_runtime_replay_authority(
             .ok_or(ExecutionPortServiceError::AuthorityRejected(
                 "SessionBinding CodexThread is pending",
             ))?;
+    if !matches!(run.state, winwincode_domain::WorkRunState::Running) {
+        return Err(ExecutionPortServiceError::AuthorityRejected(
+            "current WorkRun is stale or foreign",
+        ));
+    }
     let worker_id =
         binding
             .worker_id
@@ -972,7 +973,7 @@ pub(crate) fn load_runtime_replay_authority(
         session_identity: SessionIdentity {
             codex_thread_id,
             product_session_id: job_scope.product_session_id.clone(),
-            stage_run_id: Some(job_scope.stage_run_id.clone()),
+            work_run_id: Some(job_scope.work_run_id.clone()),
             worker_session_id: worker_session_id.clone(),
         },
         worker_session_id,
@@ -1314,6 +1315,9 @@ fn repository_scheduler_error(
     match error {
         RepositoryExecutionSchedulerError::Storage(error) => {
             ExecutionPortServiceError::Storage(error)
+        }
+        RepositoryExecutionSchedulerError::StaleDeliveryRevision => {
+            ExecutionPortServiceError::Protocol("Delivery revision is stale")
         }
         RepositoryExecutionSchedulerError::InvalidExecutionJob(field) => {
             ExecutionPortServiceError::Protocol(field)

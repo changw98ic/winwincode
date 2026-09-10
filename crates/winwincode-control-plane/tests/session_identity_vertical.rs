@@ -1,3 +1,6 @@
+#[path = "support/dispatch_fixture.rs"]
+mod dispatch_fixture;
+
 mod session_binding_fixture {
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -8,15 +11,14 @@ mod session_binding_fixture {
     use winwincode_api::generated::{Actor, CommandEnvelope, CommandName, Scope};
     use winwincode_audit::{AuditEvent, AuditExecutionSubjectKind, AuditScope};
     use winwincode_control_plane::delivery_execution::{
-        DeliveryExecutionConfig, DeliveryExecutionPortError, ExecutionJobDispatcher,
-        PendingDeliveryExecution, prepare_delivery_advance,
+        DeliveryExecutionConfig, PendingDeliveryExecution, prepare_workrun_advance,
     };
     use winwincode_control_plane::{
         CommitError, ControlPlane, ControlPlaneConfig, EventPublishError, EventPublisher,
-        OutboxEvent, StateChange, StorageErrorKind,
+        LocalExecutionJobDispatcher, OutboxEvent, StateChange, StorageErrorKind,
     };
     use winwincode_delivery::application::stage::{
-        AdvanceStageInput, NewStageIdentities, advance,
+        NewStageIdentities, StageAdvanceEffect, StageAdvanceResult,
         test_support::{active_lease_identity, session_binding_authority},
     };
     use winwincode_delivery::domain::{
@@ -32,8 +34,8 @@ mod session_binding_fixture {
         ExecutionJobId, ExecutionMessageId, ExecutionSequence, FencingToken, Instant, LeaseId,
         OrganizationId, ProductSessionId, ProjectId, RepositoryId, RequestId, Revision,
         SchemaVersion, SessionBindingSourceIdentity, SessionBindingSourceIdentityKind,
-        SessionIdentity, Sha256Digest, StageRunId, UserId, WorkerId, WorkerInstanceId,
-        WorkerSessionId, WorkspaceId,
+        SessionIdentity, Sha256Digest, StageRunId, UserId, WorkContractId, WorkItemId, WorkRunId,
+        WorkerId, WorkerInstanceId, WorkerSessionId, WorkspaceId,
     };
     use winwincode_domain::{RepositoryScope, UserActor};
     use winwincode_execution_port::generated::{
@@ -99,6 +101,18 @@ mod session_binding_fixture {
             owner: None,
             status: DeliveryTaskStatus::Pending,
         }];
+        let contract_id = WorkContractId(canonical_id("wct", seed));
+        snapshot.work_run_aggregate.contract.id = contract_id.clone();
+        snapshot.work_run_aggregate.contract.revision = Revision(1);
+        snapshot.work_run_aggregate.runs.clear();
+        snapshot.work_run_aggregate.items.truncate(1);
+        let item = &mut snapshot.work_run_aggregate.items[0];
+        item.id = WorkItemId(canonical_id("wit", seed));
+        item.work_contract_id = contract_id;
+        item.work_contract_revision = Revision(1);
+        item.revision = Revision(1);
+        item.state = winwincode_domain::WorkItemState::Ready;
+        item.depends_on.clear();
         snapshot.stage_runs.clear();
         snapshot.session_bindings.clear();
         snapshot.attention_items.clear();
@@ -110,29 +124,42 @@ mod session_binding_fixture {
 
     fn pending_execution(seed: u64) -> PendingDeliveryExecution {
         let delivery = delivery_before_advance(seed);
-        let result = advance(
+        let selected = delivery
+            .snapshot()
+            .work_run_aggregate
+            .start_next()
+            .expect("ready WorkItem");
+        let result = StageAdvanceResult::canonical_workrun_dispatch(
             &delivery,
-            AdvanceStageInput {
-                current_lease: None,
-                rework_authorization: None,
-                expected_revision: 1,
-                product_session_id: ProductSessionId(canonical_id("psn", seed)),
-                identities: NewStageIdentities {
-                    stage_run_id: StageRunId(canonical_id("run", seed)),
-                    execution_job_id: ExecutionJobId(canonical_id("job", seed)),
-                    session_binding_id: SessionBindingId::new(format!("binding-{seed}"))
-                        .expect("binding id"),
-                    attention_item_id: AttentionItemId(canonical_id("att", seed)),
-                },
-                review: None,
-                previous_outcome: None,
-                now_millis: 1_800_000_000_100,
+            None,
+            NewStageIdentities {
+                stage_run_id: StageRunId(canonical_id("run", seed)),
+                work_contract_id: delivery.snapshot().work_run_aggregate.contract.id.clone(),
+                work_contract_revision: Revision(1),
+                work_item_id: selected.work_item.id.clone(),
+                work_item_revision: selected.work_item.revision.clone(),
+                work_run_id: WorkRunId(canonical_id("wrn", seed)),
+                execution_job_id: ExecutionJobId(canonical_id("job", seed)),
+                session_binding_id: SessionBindingId::new(format!("binding-{seed}"))
+                    .expect("binding id"),
+                attention_item_id: AttentionItemId(canonical_id("att", seed)),
             },
+            ProductSessionId(canonical_id("psn", seed)),
+            "executor".into(),
+            selected.work_item.goal.clone(),
+            u64::try_from(selected.attempt).expect("positive attempt"),
+            1_800_000_000_100,
         )
-        .expect("stage advance");
-        prepare_delivery_advance(
-            RequestId(canonical_id("req", seed)),
-            result,
+        .expect("canonical WorkRun dispatch");
+        let request_id = RequestId(canonical_id("req", seed));
+        let StageAdvanceEffect::Dispatch(intent) = &result.effect else {
+            panic!("canonical dispatch intent");
+        };
+        let job = prepare_workrun_advance(
+            &request_id,
+            &result.delivery.snapshot().work_run_aggregate,
+            &result.delivery.snapshot().spec,
+            intent,
             DeliveryExecutionConfig {
                 payload_digest: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
                 candidate_ref: None,
@@ -148,7 +175,8 @@ mod session_binding_fixture {
                 },
             },
         )
-        .expect("pending execution")
+        .expect("prepared WorkRun job");
+        PendingDeliveryExecution::from_workrun(request_id, result, job)
     }
 
     fn delivery_advance_command(seed: u64) -> CommandEnvelope {
@@ -159,7 +187,7 @@ mod session_binding_fixture {
             }),
             command: CommandName::DeliveryAdvance,
             expected_revision: Revision(1),
-            payload: serde_json::json!({"deliveryId": canonical_id("dlv", seed)}),
+            payload: serde_json::json!({"deliveryId": canonical_id("dlv", seed), "dispatchProfile": "executor"}),
             request_id: RequestId(canonical_id("req", seed)),
             schema_version: SchemaVersion::WinwincodeV1,
             scope: Scope::RepositoryScope(RepositoryScope {
@@ -172,18 +200,91 @@ mod session_binding_fixture {
         }
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the fixture creates one complete scheduler lease, accepted dispatch, and binding"
+    )]
     fn lease_and_message(
+        root: &Path,
+        control_plane: &mut ControlPlane,
         pending: &PendingDeliveryExecution,
         seed: u64,
     ) -> (
         winwincode_delivery::application::stage::SessionBindingAuthority,
         SessionBindingMessage,
     ) {
+        use super::dispatch_fixture::{
+            attempt_time, prepare_delivery_admission, register_attempt_worker,
+        };
+        use winwincode_control_plane::{DurableExecutionPortIngress, RepositoryExecutionScheduler};
+        use winwincode_execution_port::generated::{
+            ExecutionPortMessage, JobDispatchResultMessage, JobDispatchResultMessageKind,
+            JobDispatchResultMessageStatus,
+        };
+        use winwincode_storage::{
+            ExecutionQueueScope, RepositorySchedulerClaimRequest, RepositorySchedulerScope,
+        };
         let worker_session_id = WorkerSessionId(canonical_id("wsn", seed));
-        let worker_id = WorkerId(canonical_id("wrk", seed));
-        let worker_instance_id = WorkerInstanceId(canonical_id("wki", seed));
-        let lease_id = LeaseId(canonical_id("lse", seed));
-        let fencing_token = FencingToken(seed.to_string());
+        let mut storage = SqliteStorage::open(root).expect("dispatch storage");
+        let (worker_id, worker_instance_id) = register_attempt_worker(&mut storage, seed, 1, 1);
+        let scope = repository_scope(seed);
+        let dispatch = RepositoryExecutionScheduler::new(&mut storage)
+            .claim_next(&RepositorySchedulerClaimRequest {
+                scope: RepositorySchedulerScope {
+                    organization_id: scope.organization_id.clone(),
+                    workspace_id: scope.workspace_id.clone(),
+                    project_id: scope.project_id.clone(),
+                    repository_id: scope.repository_id.clone(),
+                },
+                request_id: RequestId(canonical_id("req", seed + 260)),
+                scheduler_generation: "vertical".into(),
+                worker_id: worker_id.clone(),
+                worker_instance_id: worker_instance_id.clone(),
+                issued_at: attempt_time(1, 3),
+                expires_at: attempt_time(1, 50),
+            })
+            .expect("scheduler claim")
+            .expect("queued dispatch");
+        assert_eq!(dispatch.job, *pending.job());
+        let ExecutionScope::WorkRunExecutionScope(work_scope) = &dispatch.job.scope else {
+            panic!("WorkRun scope")
+        };
+        prepare_delivery_admission(
+            &mut storage,
+            seed,
+            ExecutionQueueScope {
+                organization_id: scope.organization_id.clone(),
+                workspace_id: scope.workspace_id.clone(),
+                project_id: scope.project_id.clone(),
+                repository_id: scope.repository_id.clone(),
+                product_session_id: work_scope.product_session_id.clone(),
+                delivery_id: Some(pending.delivery().id().clone()),
+            },
+            &dispatch.job,
+            seed,
+            1,
+        );
+        DurableExecutionPortIngress::new(control_plane, &mut storage, &scope, attempt_time(1, 4))
+            .expect("same-database ingress")
+            .handle(&ExecutionPortMessage::JobDispatchResultMessage(
+                JobDispatchResultMessage {
+                    error: None,
+                    job_id: dispatch.job.job_id.clone(),
+                    kind: JobDispatchResultMessageKind::JobDispatchResult,
+                    lease: dispatch.lease.clone(),
+                    message_id: ExecutionMessageId(canonical_id("xmsg", seed + 261)),
+                    payload_digest: dispatch.job.payload_digest.clone(),
+                    request_id: RequestId(canonical_id("req", seed + 261)),
+                    schema_version: SchemaVersion::WinwincodeV1,
+                    sent_at: attempt_time(1, 4),
+                    status: JobDispatchResultMessageStatus::Accepted,
+                    worker_session_id: Some(worker_session_id.clone()),
+                },
+            ))
+            .expect("Worker acceptance creates canonical WorkRun");
+        Box::new(storage).close().expect("dispatch storage close");
+        let lease_id = dispatch.lease.lease_id.clone();
+        let fencing_token = dispatch.lease.fencing_token.clone();
         let lease = active_lease_identity(
             pending.job().job_id.clone(),
             1,
@@ -193,9 +294,9 @@ mod session_binding_fixture {
             worker_instance_id.clone(),
             worker_session_id.clone(),
         );
-        let (stage_run_id, product_session_id) = match &pending.job().scope {
-            ExecutionScope::DeliveryStageExecutionScope(scope) => {
-                (scope.stage_run_id.clone(), scope.product_session_id.clone())
+        let (work_run_id, product_session_id) = match &pending.job().scope {
+            ExecutionScope::WorkRunExecutionScope(scope) => {
+                (scope.work_run_id.clone(), scope.product_session_id.clone())
             }
             ExecutionScope::ProductSessionExecutionScope(_) => {
                 panic!("vertical fixture must use a Delivery-stage job")
@@ -204,30 +305,21 @@ mod session_binding_fixture {
         let session_identity = SessionIdentity {
             codex_thread_id: CodexThreadId(canonical_id("cdx", seed)),
             product_session_id: product_session_id.clone(),
-            stage_run_id: Some(stage_run_id.clone()),
+            work_run_id: Some(work_run_id.clone()),
             worker_session_id: worker_session_id.clone(),
         };
         let message = SessionBindingMessage {
             attempt: 1,
-            bound_at: Instant("2027-01-15T08:00:01.000Z".into()),
+            bound_at: Instant("2027-01-15T08:00:06.000Z".into()),
             codex_thread_id: session_identity.codex_thread_id.clone(),
             fencing_token: fencing_token.clone(),
             kind: SessionBindingMessageKind::SessionBinding,
-            lease: ExecutionLeaseStamp {
-                attempt: 1,
-                expires_at: Instant("2027-01-15T08:05:00.000Z".into()),
-                fencing_token: fencing_token.clone(),
-                issued_at: Instant("2027-01-15T08:00:00.200Z".into()),
-                job_id: pending.job().job_id.clone(),
-                lease_id: lease_id.clone(),
-                worker_id: worker_id.clone(),
-                worker_instance_id: worker_instance_id.clone(),
-            },
+            lease: dispatch.lease,
             lease_id: lease_id.clone(),
             message_id: ExecutionMessageId(canonical_id("xmsg", seed)),
             product_session_id,
             schema_version: SchemaVersion::WinwincodeV1,
-            sent_at: Instant("2027-01-15T08:00:01.100Z".into()),
+            sent_at: Instant("2027-01-15T08:00:06.100Z".into()),
             session_identity,
             source_identity: SessionBindingSourceIdentity {
                 kind: SessionBindingSourceIdentityKind::ExecutionWorker,
@@ -236,7 +328,7 @@ mod session_binding_fixture {
                 worker_instance_id,
                 worker_session_id: worker_session_id.clone(),
             },
-            stage_run_id: Some(stage_run_id),
+            work_run_id: Some(work_run_id),
             worker_id,
             worker_session_id,
         };
@@ -270,10 +362,11 @@ mod session_binding_fixture {
             .commit_delivery_execution(
                 &delivery_advance_command(seed),
                 &pending,
-                &mut RecordingDispatcher,
+                &mut LocalExecutionJobDispatcher::open(&root, repository_scope(seed))
+                    .expect("durable dispatcher"),
             )
             .expect("Delivery execution commit");
-        let (authority, message) = lease_and_message(&pending, seed);
+        let (authority, message) = lease_and_message(&root, &mut control_plane, &pending, seed);
         (root, control_plane, pending, authority, message)
     }
 
@@ -519,23 +612,14 @@ mod session_binding_fixture {
         }
     }
 
-    #[derive(Default)]
-    struct RecordingDispatcher;
-
-    impl ExecutionJobDispatcher for RecordingDispatcher {
-        fn dispatch(&mut self, _job: &ExecutionJob) -> Result<(), DeliveryExecutionPortError> {
-            Ok(())
-        }
-    }
-
     fn runtime_message(
         pending: &PendingDeliveryExecution,
         binding: &SessionBindingMessage,
         seed: u64,
     ) -> RuntimeEventMessage {
-        let (stage_run_id, product_session_id) = match &pending.job().scope {
-            ExecutionScope::DeliveryStageExecutionScope(scope) => {
-                (scope.stage_run_id.clone(), scope.product_session_id.clone())
+        let (work_run_id, product_session_id) = match &pending.job().scope {
+            ExecutionScope::WorkRunExecutionScope(scope) => {
+                (scope.work_run_id.clone(), scope.product_session_id.clone())
             }
             ExecutionScope::ProductSessionExecutionScope(_) => {
                 panic!("vertical fixture must use a Delivery-stage job")
@@ -546,7 +630,7 @@ mod session_binding_fixture {
             event: ExecutionEventRecord {
                 category: ExecutionEventCategory::Lifecycle,
                 event_id: ExecutionEventId(canonical_id("xevt", seed + 100)),
-                occurred_at: Instant("2027-01-15T08:00:01.050Z".into()),
+                occurred_at: Instant("2027-01-15T08:00:06.050Z".into()),
                 payload: None,
                 sequence: ExecutionSequence(1),
                 summary: "worker session started".into(),
@@ -555,11 +639,11 @@ mod session_binding_fixture {
             lease: binding.lease.clone(),
             message_id: ExecutionMessageId(canonical_id("xmsg", seed + 100)),
             schema_version: SchemaVersion::WinwincodeV1,
-            sent_at: Instant("2027-01-15T08:00:01.100Z".into()),
+            sent_at: Instant("2027-01-15T08:00:06.100Z".into()),
             session_identity: SessionIdentity {
                 codex_thread_id: binding.codex_thread_id.clone(),
                 product_session_id,
-                stage_run_id: Some(stage_run_id),
+                work_run_id: Some(work_run_id),
                 worker_session_id: binding.worker_session_id.clone(),
             },
             worker_session_id: binding.worker_session_id.clone(),
@@ -1132,18 +1216,22 @@ mod session_binding_fixture {
             .commit_delivery_execution(
                 &delivery_advance_command(seed_a),
                 &pending_a,
-                &mut RecordingDispatcher,
+                &mut LocalExecutionJobDispatcher::open(&root, repository_scope(seed_a))
+                    .expect("durable dispatcher"),
             )
             .expect("first Delivery execution commit");
         control_plane
             .commit_delivery_execution(
                 &delivery_advance_command(seed_b),
                 &pending_b,
-                &mut RecordingDispatcher,
+                &mut LocalExecutionJobDispatcher::open(&root, repository_scope(seed_b))
+                    .expect("durable dispatcher"),
             )
             .expect("second Delivery execution commit");
-        let (authority_a, binding_a) = lease_and_message(&pending_a, seed_a);
-        let (authority_b, binding_b) = lease_and_message(&pending_b, seed_b);
+        let (authority_a, binding_a) =
+            lease_and_message(&root, &mut control_plane, &pending_a, seed_a);
+        let (authority_b, binding_b) =
+            lease_and_message(&root, &mut control_plane, &pending_b, seed_b);
         control_plane
             .commit_delivery_session_binding(&binding_a, &authority_a, &binding_a.sent_at)
             .expect("first SessionBinding");
@@ -1180,15 +1268,27 @@ mod session_binding_fixture {
         assert_eq!(identity.worker_session_id(), &runtime_a.worker_session_id);
         assert_eq!(identity.codex_thread_id(), &runtime_a.codex_thread_id);
         assert_eq!(
-            Some(identity.stage_run_id()),
-            runtime_a.session_identity.stage_run_id.as_ref()
+            Some(identity.work_run_id()),
+            runtime_a.session_identity.work_run_id.as_ref()
         );
         assert_eq!(identity.execution_job_id(), &runtime_a.lease.job_id);
         assert_eq!(identity.delivery_id(), pending_a.delivery().id());
-        if let ExecutionScope::DeliveryStageExecutionScope(job_scope) = &pending_a.job().scope {
+        if let ExecutionScope::WorkRunExecutionScope(job_scope) = &pending_a.job().scope {
+            assert_eq!(identity.work_run_id(), &job_scope.work_run_id);
+            assert_eq!(
+                pending_a
+                    .job()
+                    .work_input
+                    .as_ref()
+                    .expect("canonical WorkInput")
+                    .work_item
+                    .id,
+                job_scope.work_item_id
+            );
             assert_eq!(
                 identity.delivery_task_id(),
-                job_scope.delivery_task_id.as_ref()
+                None,
+                "canonical execution does not invent a legacy task identity"
             );
         }
         assert_eq!(identity.worker_id(), &runtime_a.lease.worker_id);
@@ -1298,10 +1398,11 @@ mod session_binding_fixture {
             .commit_delivery_execution(
                 &delivery_advance_command(seed),
                 &pending,
-                &mut RecordingDispatcher,
+                &mut LocalExecutionJobDispatcher::open(&root, repository_scope(seed))
+                    .expect("durable dispatcher"),
             )
             .expect("Delivery execution commit");
-        let (authority, binding) = lease_and_message(&pending, seed);
+        let (authority, binding) = lease_and_message(&root, &mut control_plane, &pending, seed);
         control_plane
             .commit_delivery_session_binding(&binding, &authority, &binding.sent_at)
             .expect("SessionBinding");
@@ -1446,7 +1547,7 @@ mod session_binding_fixture {
                 kind: ProductSessionExecutionScopeKind::ProductSession,
                 product_session_id: product_session_id.clone(),
             }),
-            stage_input: None,
+            work_input: None,
             workspace: ExecutionWorkspace {
                 checkout_revision: "product-session-checkout".into(),
                 repository_id: scope.repository_id.clone(),
@@ -1494,7 +1595,7 @@ mod session_binding_fixture {
             event: ExecutionEventRecord {
                 category: ExecutionEventCategory::Lifecycle,
                 event_id: ExecutionEventId(canonical_id("xevt", seed + 100)),
-                occurred_at: Instant("2027-01-15T08:00:01.050Z".into()),
+                occurred_at: Instant("2027-01-15T08:00:06.050Z".into()),
                 payload: None,
                 sequence: ExecutionSequence(1),
                 summary: "product session worker started".into(),
@@ -1503,11 +1604,11 @@ mod session_binding_fixture {
             lease,
             message_id: ExecutionMessageId(canonical_id("xmsg", seed + 100)),
             schema_version: SchemaVersion::WinwincodeV1,
-            sent_at: Instant("2027-01-15T08:00:01.100Z".into()),
+            sent_at: Instant("2027-01-15T08:00:06.100Z".into()),
             session_identity: SessionIdentity {
                 codex_thread_id,
                 product_session_id: product_session_id.clone(),
-                stage_run_id: None,
+                work_run_id: None,
                 worker_session_id: worker_session_id.clone(),
             },
             worker_session_id,
@@ -1522,7 +1623,7 @@ mod session_binding_fixture {
             accepted.error
         );
         assert_eq!(accepted.ack_sequence, ExecutionAckSequence(1));
-        assert!(accepted.session_identity.stage_run_id.is_none());
+        assert!(accepted.session_identity.work_run_id.is_none());
 
         let captured = events.lock().expect("captured events lock");
         let invalidations = captured
@@ -1562,7 +1663,7 @@ mod session_binding_fixture {
             .expect("ProductSession runtime replay");
         assert_eq!(replay.status, LeaseWriteStatus::Duplicate);
         assert_eq!(replay.ack_sequence, ExecutionAckSequence(1));
-        assert!(replay.session_identity.stage_run_id.is_none());
+        assert!(replay.session_identity.work_run_id.is_none());
 
         restarted.shutdown().expect("second shutdown");
         fs::remove_dir_all(root).expect("database directory release");

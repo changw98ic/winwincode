@@ -3,7 +3,7 @@
 use serde_json::{Value, json};
 use winwincode_api::generated::{
     ApprovalDecidePayload, ApprovalEffectiveDecisionScope, ApprovalProjectionCategory,
-    ApprovalSanitizedDetailProjectionKind, ApprovalSanitizedDetailUnavailableReason,
+    ApprovalSanitizedDetailProjection, ApprovalSanitizedDetailUnavailableReason,
     ChatInteractionListQuery, ChatInteractionProjection, InputRespondPayload,
 };
 use winwincode_control_plane::chat_interaction_projection::{
@@ -12,9 +12,7 @@ use winwincode_control_plane::chat_interaction_projection::{
 use winwincode_domain::{
     Instant, InteractiveInputChoiceId, InteractiveInputValue, ProductSessionId, Revision,
 };
-use winwincode_execution_port::generated::{
-    ApprovalRequestMessage, EncodedPayload, InputRequestMessage,
-};
+use winwincode_execution_port::generated::{ApprovalRequestMessage, InputRequestMessage};
 
 fn worker_messages() -> (InputRequestMessage, ApprovalRequestMessage) {
     let fixture: Value = serde_json::from_str(include_str!(
@@ -63,13 +61,8 @@ fn query(product_session_id: &ProductSessionId, states: &[&str]) -> ChatInteract
 }
 
 #[test]
-fn restart_rebuilds_pending_input_and_approval_without_private_details() {
-    let (input, mut approval) = worker_messages();
-    approval.action.details = Some(EncodedPayload {
-        content_type: "application/json".to_owned(),
-        data_base64: "PRIVATE_PAYLOAD".to_owned(),
-        payload_digest: winwincode_domain::Sha256Digest(format!("sha256:{}", "a".repeat(64))),
-    });
+fn restart_rebuilds_pending_input_and_approval_with_only_sanitized_details() {
+    let (input, approval) = worker_messages();
     let mut ledger = ChatInteractionProjectionLedger::default();
     assert_eq!(
         ledger
@@ -95,19 +88,18 @@ fn restart_rebuilds_pending_input_and_approval_without_private_details() {
     let mut conflicting_approval = approval.clone();
     conflicting_approval
         .action
-        .details
+        .sanitized_detail
         .as_mut()
-        .expect("private details")
-        .data_base64 = "CHANGED_PRIVATE_PAYLOAD".to_owned();
+        .expect("sanitized details")
+        .target_summaries = vec!["program:cargo;argument_count:1".to_owned()];
     assert_eq!(
         ledger.record_approval_request(&conflicting_approval),
         Err(ChatInteractionProjectionError::SourceMessageConflict)
     );
 
     let serialized = serde_json::to_string(&ledger.snapshot()).expect("safe snapshot JSON");
-    assert!(!serialized.contains("PRIVATE_PAYLOAD"));
     assert!(!serialized.contains("data_base64"));
-    assert!(!serialized.contains("details"));
+    assert!(!serialized.contains("argv"));
     let restored = ChatInteractionProjectionLedger::restore(
         serde_json::from_str(&serialized).expect("durable safe snapshot"),
     )
@@ -129,14 +121,14 @@ fn restart_rebuilds_pending_input_and_approval_without_private_details() {
                     value.approval.effective_decision_scope,
                     ApprovalEffectiveDecisionScope::Once
                 );
-                assert_eq!(
-                    value.approval.sanitized_detail.kind,
-                    ApprovalSanitizedDetailProjectionKind::Unavailable
-                );
-                assert_eq!(
-                    value.approval.sanitized_detail.reason,
-                    ApprovalSanitizedDetailUnavailableReason::EncodedPayloadRedacted
-                );
+                assert!(value.approval.decision_enabled);
+                let ApprovalSanitizedDetailProjection::ApprovalSanitizedDetailAvailableProjection(
+                    detail,
+                ) = value.approval.sanitized_detail
+                else {
+                    panic!("trusted detail must remain available")
+                };
+                assert_eq!(detail.target_summaries, ["program:pnpm;argument_count:1"]);
                 value.approval.binding
             }
         };
@@ -151,9 +143,9 @@ fn restart_rebuilds_pending_input_and_approval_without_private_details() {
 }
 
 #[test]
-fn approval_without_typed_producer_detail_is_explicitly_unavailable() {
-    let (_, approval) = worker_messages();
-    assert!(approval.action.details.is_none());
+fn approval_without_typed_producer_detail_is_disabled_and_explicitly_unavailable() {
+    let (_, mut approval) = worker_messages();
+    approval.action.sanitized_detail = None;
     let mut ledger = ChatInteractionProjectionLedger::default();
     ledger
         .record_approval_request(&approval)
@@ -166,8 +158,14 @@ fn approval_without_typed_producer_detail_is_explicitly_unavailable() {
         .expect("read approval")
         .expect("approval projection");
     assert_eq!(projection.category, ApprovalProjectionCategory::Shell);
+    assert!(!projection.decision_enabled);
+    let ApprovalSanitizedDetailProjection::ApprovalSanitizedDetailUnavailableProjection(detail) =
+        projection.sanitized_detail
+    else {
+        panic!("missing trusted detail must be unavailable")
+    };
     assert_eq!(
-        projection.sanitized_detail.reason,
+        detail.reason,
         ApprovalSanitizedDetailUnavailableReason::ProducerUnavailable
     );
 }

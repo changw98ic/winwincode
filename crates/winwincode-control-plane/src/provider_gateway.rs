@@ -26,16 +26,13 @@ use winwincode_storage::{ProductStateStorage, StorageError};
 
 use crate::{
     CredentialLeakError, CredentialLeakGate, CredentialOutputBoundary, CredentialReferenceError,
-    CredentialReferenceErrorKind, CredentialReferenceService, EnterpriseQuotaAdmissionPort,
-    FrozenModelRouteAuthority, ModelAttemptCharge, ModelAttemptFailureFact,
-    ModelAttemptFailureKind, ModelExecutionCertainty, ModelReservationReleaseReason,
-    ModelReservationTerminalReceipt, ModelRetrySettlementContextPort, ModelSettingsError,
+    CredentialReferenceErrorKind, CredentialReferenceService, FrozenModelRouteAuthority,
+    ModelAttemptCharge, ModelAttemptFailureFact, ModelAttemptFailureKind, ModelExecutionCertainty,
+    ModelReservationReleaseReason, ModelReservationTerminalReceipt, ModelSettingsError,
     ModelSettingsErrorKind, ModelSettingsService, ModelSettingsTarget, ProviderAdmissionError,
     ProviderAdmissionErrorKind, ProviderAdmissionOpenRequest, ProviderCatalogError,
-    ProviderCatalogErrorKind, ProviderCatalogService, ProviderEnterpriseQuotaErrorKind,
-    ProviderEnterpriseQuotaOpen, ProviderEnterpriseQuotaSaga, ProviderGatewayAdmissionPort,
-    ProviderOperationalAdmissionError, ProviderOperationalAdmissionPort, ProviderTokenUsage,
-    ResolvedSecret, SecretStoreError, SecretStorePort,
+    ProviderCatalogErrorKind, ProviderCatalogService, ProviderGatewayAdmissionPort,
+    ProviderTokenUsage, ResolvedSecret, SecretStoreError, SecretStorePort,
 };
 
 const MAX_PROVIDER_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
@@ -64,8 +61,6 @@ pub enum ProviderGatewayErrorKind {
     ExchangeConflict,
     ExchangeNotFound,
     TerminalConflict,
-    PolicyDenied,
-    PolicyUnavailable,
     AdmissionDenied,
     AdmissionUnavailable,
     SettlementUnavailable,
@@ -89,20 +84,6 @@ impl ProviderGatewayError {
         Self::new(
             ProviderGatewayErrorKind::Storage,
             "Provider Gateway durable progress operation failed",
-        )
-    }
-
-    pub(crate) const fn policy_denied() -> Self {
-        Self::new(
-            ProviderGatewayErrorKind::PolicyDenied,
-            "Provider enterprise Policy denied the request",
-        )
-    }
-
-    pub(crate) const fn policy_unavailable() -> Self {
-        Self::new(
-            ProviderGatewayErrorKind::PolicyUnavailable,
-            "Provider enterprise Policy authority is unavailable",
         )
     }
 
@@ -906,38 +887,6 @@ struct ExchangeRecord {
     terminal: Option<(ProviderGatewayTerminal, ProviderGatewayTerminalReceipt)>,
 }
 
-struct GatewayQuotaOperational<'gateway, 'storage> {
-    gateway: &'gateway mut ProviderGateway<'storage>,
-    message: &'gateway ModelOpenMessage,
-    reservation: &'gateway crate::ProviderAdmissionOpenReceipt,
-    adapter_request_id: &'gateway str,
-    failure: Option<ProviderGatewayError>,
-}
-
-impl ProviderOperationalAdmissionPort for GatewayQuotaOperational<'_, '_> {
-    type Receipt = ProviderGatewayOpenReceipt;
-
-    fn reserve(&mut self) -> Result<Self::Receipt, ProviderOperationalAdmissionError> {
-        match self.gateway.open_after_reservation(
-            self.message,
-            self.reservation,
-            self.adapter_request_id,
-        ) {
-            Ok(receipt) => Ok(receipt),
-            Err(error) => {
-                let kind = match error.kind() {
-                    ProviderGatewayErrorKind::AdmissionDenied => {
-                        ProviderOperationalAdmissionError::Denied
-                    }
-                    _ => ProviderOperationalAdmissionError::Unavailable,
-                };
-                self.failure = Some(error);
-                Err(kind)
-            }
-        }
-    }
-}
-
 struct ResolvedProviderOpen {
     route: ModelRoute,
     reference: crate::CredentialReferenceResolution,
@@ -1228,58 +1177,6 @@ impl<'a> ProviderGateway<'a> {
             },
         );
         Ok(receipt)
-    }
-
-    /// Replays the durable enterprise quota request before resolving a secret
-    /// or invoking the existing Provider adapter.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an unavailable, denied, or terminal enterprise quota result
-    /// before any Provider side effect.
-    pub fn open_after_reservation_with_enterprise_quota(
-        &mut self,
-        message: &ModelOpenMessage,
-        reservation: &crate::ProviderAdmissionOpenReceipt,
-        adapter_request_id: &str,
-        contexts: &dyn ModelRetrySettlementContextPort,
-        enterprise_quota: &mut dyn EnterpriseQuotaAdmissionPort,
-    ) -> Result<ProviderGatewayOpenReceipt, ProviderGatewayError> {
-        let mut operational = GatewayQuotaOperational {
-            gateway: self,
-            message,
-            reservation,
-            adapter_request_id,
-            failure: None,
-        };
-        match ProviderEnterpriseQuotaSaga::new(enterprise_quota).reserve_durable_then_admit(
-            contexts,
-            &message.model_exchange_id,
-            &mut operational,
-        ) {
-            Ok(ProviderEnterpriseQuotaOpen::Admitted { operational, .. }) => Ok(operational),
-            Ok(
-                ProviderEnterpriseQuotaOpen::Denied
-                | ProviderEnterpriseQuotaOpen::TerminalReplay(_),
-            ) => Err(ProviderGatewayError::new(
-                ProviderGatewayErrorKind::AdmissionDenied,
-                "Provider enterprise quota did not admit this exchange",
-            )),
-            Err(error)
-                if error.kind() == ProviderEnterpriseQuotaErrorKind::OperationalAdmission =>
-            {
-                Err(operational.failure.take().unwrap_or_else(|| {
-                    ProviderGatewayError::new(
-                        ProviderGatewayErrorKind::AdmissionUnavailable,
-                        "Provider operational admission failed without a bounded cause",
-                    )
-                }))
-            }
-            Err(_) => Err(ProviderGatewayError::new(
-                ProviderGatewayErrorKind::AdmissionUnavailable,
-                "Provider enterprise quota operation failed",
-            )),
-        }
     }
 
     /// Durably reserves the current route before retry context persistence.

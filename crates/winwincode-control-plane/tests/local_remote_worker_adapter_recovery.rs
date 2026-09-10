@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Local/remote Worker transport parity and browser-visible Fleet recovery.
+//! Local/remote Worker transport parity and recovery.
 
 use std::{
     fs,
@@ -9,19 +9,14 @@ use std::{
 };
 
 use serde_json::{Value, from_value};
-use winwincode_api::generated::{
-    Actor, EnterpriseFleetListParameters, EnterpriseFleetListQuery, EnterpriseFleetListQueryQuery,
-    PageRequest, Scope, SystemActor, SystemActorKind,
-};
 use winwincode_control_plane::{
     ExecutionPortService, RemoteWorkerAuthenticationError, RemoteWorkerAuthenticator,
     RemoteWorkerConnection, RemoteWorkerConnectionState, RemoteWorkerCredential,
-    RemoteWorkerPoolAdapter, RemoteWorkerPrincipal, WorkerFleetProjectionService,
+    RemoteWorkerPoolAdapter, RemoteWorkerPrincipal,
 };
 use winwincode_domain::{
-    ExecutionMessageId, FencingToken, Instant, LeaseId, OpaqueCursor, OrganizationId, ProjectId,
-    RepositoryId, RequestId, SchemaVersion, Sha256Digest, SystemActorId, WorkerInstanceId,
-    WorkspaceId,
+    DeliveryId, ExecutionMessageId, FencingToken, Instant, LeaseId, OrganizationId, ProjectId,
+    RepositoryId, RequestId, Sha256Digest, WorkerInstanceId, WorkspaceId,
 };
 use winwincode_domain::{RepositoryScope, RepositoryScopeKind};
 use winwincode_execution_port::{
@@ -130,14 +125,14 @@ fn claim_from_dispatch(dispatch: &JobDispatchMessage) -> ExecutionLeaseClaim {
 
 fn commit_durable_dispatch_intent(storage: &mut SqliteStorage, dispatch: &JobDispatchMessage) {
     let job = &dispatch.job;
-    let (product_session_id, delivery_id, stage_run_id) = match &job.scope {
+    let (product_session_id, delivery_id, work_run_id) = match &job.scope {
         ExecutionScope::ProductSessionExecutionScope(scope) => {
             (scope.product_session_id.clone(), None, None)
         }
-        ExecutionScope::DeliveryStageExecutionScope(scope) => (
+        ExecutionScope::WorkRunExecutionScope(scope) => (
             scope.product_session_id.clone(),
-            Some(scope.delivery_id.clone()),
-            Some(scope.stage_run_id.clone()),
+            Some(DeliveryId("dlv_00000000000000000000000000".into())),
+            Some(scope.work_run_id.clone()),
         ),
     };
     let identity = ReceiptIdentity::new(
@@ -180,7 +175,7 @@ fn commit_durable_dispatch_intent(storage: &mut SqliteStorage, dispatch: &JobDis
             dispatch_payload: serde_json::to_vec(job).expect("wire Job payload"),
             attempt: u64::try_from(job.attempt).expect("positive Job attempt"),
             dependencies: Vec::new(),
-            stage_run_id,
+            work_run_id,
             submitted_at: dispatch.sent_at.clone(),
         })
         .expect("durable scheduler Job");
@@ -464,51 +459,6 @@ fn connect_and_register(
     (connection, response)
 }
 
-fn fleet_query(scope: &RepositoryScope, request: u64) -> EnterpriseFleetListQuery {
-    EnterpriseFleetListQuery {
-        actor: Actor::SystemActor(SystemActor {
-            id: SystemActorId(format!("sys_{request:026}")),
-            kind: SystemActorKind::System,
-        }),
-        page: PageRequest {
-            cursor: Option::<OpaqueCursor>::None,
-            limit: 10,
-        },
-        parameters: EnterpriseFleetListParameters { states: Vec::new() },
-        query: EnterpriseFleetListQueryQuery::EnterpriseFleetList,
-        request_id: RequestId(format!("req_{request:026}")),
-        schema_version: SchemaVersion::WinwincodeV1,
-        scope: Scope::RepositoryScope(scope.clone()),
-    }
-}
-
-fn assert_public_fleet(
-    storage: &mut SqliteStorage,
-    scope: &RepositoryScope,
-    observed_at: &Instant,
-    state: &str,
-    active_leases: i64,
-    available_capacity: i64,
-) {
-    let response = WorkerFleetProjectionService::with_stale_after_ms(storage, 5_000)
-        .list(&fleet_query(scope, 950), observed_at)
-        .expect("generated Fleet projection");
-    assert_eq!(response.result.items.len(), 1);
-    let pool = &response.result.items[0];
-    assert_eq!(pool.state, state);
-    assert_eq!(pool.active_leases, active_leases);
-    assert_eq!(pool.available_capacity, available_capacity);
-    assert_eq!(pool.registered_workers, 1);
-    assert!(response.result.snapshot_revision.0 >= 1);
-    let public = serde_json::to_value(&response).expect("public Fleet JSON");
-    assert_eq!(public["result"]["items"][0]["state"], state);
-    assert_eq!(public["result"]["items"][0]["activeLeases"], active_leases);
-    assert_eq!(
-        public["result"]["items"][0]["availableCapacity"],
-        available_capacity
-    );
-}
-
 fn heartbeat_for(
     registration: &WorkerRegisterMessage,
     sequence: i64,
@@ -623,20 +573,10 @@ fn activate_remote_worker(
 fn disconnect_and_replace(
     storage: &mut SqliteStorage,
     authenticator: &FixedAuthenticator,
-    scope: &RepositoryScope,
     connection: &mut RemoteWorkerConnection,
     replacement: &WorkerRegisterMessage,
     lease: &ExecutionLeaseClaim,
 ) -> RemoteWorkerConnection {
-    assert_public_fleet(
-        storage,
-        scope,
-        &Instant("2026-08-24T12:00:02.000Z".to_owned()),
-        "healthy",
-        1,
-        3,
-    );
-
     assert!(
         RemoteWorkerPoolAdapter::new(storage, authenticator)
             .disconnect(connection)
@@ -646,15 +586,6 @@ fn disconnect_and_replace(
         connection.state(),
         RemoteWorkerConnectionState::Disconnected
     );
-    assert_public_fleet(
-        storage,
-        scope,
-        &Instant("2026-08-24T12:00:03.000Z".to_owned()),
-        "offline",
-        1,
-        0,
-    );
-
     let (replacement_connection, replacement_result) =
         connect_and_register(storage, authenticator, replacement);
     let ExecutionPortMessage::WorkerRegistrationResultMessage(replacement_result) =
@@ -728,7 +659,7 @@ fn finish_and_report_capacity(
 }
 
 #[test]
-fn remote_disconnect_replacement_and_terminal_restore_browser_fleet_after_restart() {
+fn remote_disconnect_replacement_and_terminal_recover_after_restart() {
     let root = TestDirectory::new("remote-fleet");
     let scope = repository_scope();
     let authenticator = remote_authenticator(&scope);
@@ -743,7 +674,6 @@ fn remote_disconnect_replacement_and_terminal_restore_browser_fleet_after_restar
     let mut replacement_connection = disconnect_and_replace(
         &mut storage,
         &authenticator,
-        &scope,
         &mut connection,
         &replacement,
         &lease,
@@ -764,13 +694,5 @@ fn remote_disconnect_replacement_and_terminal_restore_browser_fleet_after_restar
             .expect("execution Registry")
             .finish_execution_lease(&terminal)
             .expect("exact terminal replay")
-    );
-    assert_public_fleet(
-        &mut restarted,
-        &scope,
-        &Instant("2026-08-24T12:00:06.000Z".to_owned()),
-        "healthy",
-        0,
-        4,
     );
 }

@@ -311,13 +311,13 @@ impl ModelRetryPreOpenPlannerPort for DurableModelRetryPreOpenPlanner<'_> {
             request_id: message.request_id.clone(),
             attribution: ModelUsageAttribution::from_request_authority(
                 &admission.route_authority,
-                authority.delivery_id,
+                authority.delivery_id.clone(),
+                authority.execution_job_id.clone(),
+                authority.execution_profile.clone(),
                 &authority.actor,
             )
             .map_err(ModelRetryPlannerError::ledger)?,
             plan,
-            enterprise_quota_amounts: admission.enterprise_quota_amounts,
-            enterprise_quota_requested_at: message.sent_at.clone(),
         };
         let failure = PreOpenFailure::new(message, admission, &request)?;
         if load_failure(&self.storage, &failure)?.is_some() {
@@ -509,6 +509,8 @@ fn failure_receipt(
 
 struct ExecutionJobAuthority {
     actor: Actor,
+    execution_job_id: ExecutionJobId,
+    execution_profile: String,
     repository_scope: RepositoryScope,
     product_session_id: ProductSessionId,
     delivery_id: Option<DeliveryId>,
@@ -556,19 +558,16 @@ fn execution_job_authority(
     }
     let (product_session_id, delivery_id) = match &job.scope {
         ExecutionScope::ProductSessionExecutionScope(scope) => {
-            if message.session_identity.stage_run_id.is_some() {
+            if message.session_identity.work_run_id.is_some() {
                 return Err(ModelRetryPlannerError::identity());
             }
             (scope.product_session_id.clone(), None)
         }
-        ExecutionScope::DeliveryStageExecutionScope(scope) => {
-            if message.session_identity.stage_run_id.as_ref() != Some(&scope.stage_run_id) {
+        ExecutionScope::WorkRunExecutionScope(scope) => {
+            if message.session_identity.work_run_id.as_ref() != Some(&scope.work_run_id) {
                 return Err(ModelRetryPlannerError::identity());
             }
-            (
-                scope.product_session_id.clone(),
-                Some(scope.delivery_id.clone()),
-            )
+            (scope.product_session_id.clone(), None)
         }
     };
     if message.session_identity.product_session_id != product_session_id {
@@ -576,6 +575,8 @@ fn execution_job_authority(
     }
     Ok(ExecutionJobAuthority {
         actor,
+        execution_job_id: job.job_id.clone(),
+        execution_profile: job.execution_profile.clone(),
         repository_scope,
         product_session_id,
         delivery_id,

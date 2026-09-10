@@ -426,8 +426,8 @@
         "category": {
           "$ref": "#/$defs/ApprovalActionCategory"
         },
-        "details": {
-          "$ref": "#/$defs/EncodedPayload"
+        "sanitizedDetail": {
+          "$ref": "#/$defs/ApprovalActionSanitizedDetail"
         },
         "summary": {
           "maxLength": 2000,
@@ -449,6 +449,88 @@
         "shell"
       ],
       "type": "string"
+    },
+    "ApprovalActionOperation": {
+      "enum": [
+        "execute",
+        "modify"
+      ],
+      "type": "string"
+    },
+    "ApprovalActionReasonCode": {
+      "enum": [
+        "sandbox_escalation",
+        "network_access",
+        "filesystem_write"
+      ],
+      "type": "string"
+    },
+    "ApprovalActionRiskLevel": {
+      "enum": [
+        "medium",
+        "high"
+      ],
+      "type": "string"
+    },
+    "ApprovalActionSanitizedDetail": {
+      "additionalProperties": false,
+      "description": "Bounded secret-safe facts derived from the exact trusted Core approval request. Raw argv, environment, patch content, payload, and free-form reason text are excluded.",
+      "properties": {
+        "kind": {
+          "const": "available"
+        },
+        "operation": {
+          "$ref": "#/$defs/ApprovalActionOperation"
+        },
+        "reasonCode": {
+          "$ref": "#/$defs/ApprovalActionReasonCode"
+        },
+        "requestSha256": {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "riskLevel": {
+          "$ref": "#/$defs/ApprovalActionRiskLevel"
+        },
+        "targetCount": {
+          "maximum": 10000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "targetSummaries": {
+          "items": {
+            "maxLength": 500,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 20,
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "workingDirectory": {
+          "oneOf": [
+            {
+              "maxLength": 500,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "operation",
+        "targetSummaries",
+        "targetCount",
+        "workingDirectory",
+        "riskLevel",
+        "reasonCode",
+        "requestSha256"
+      ],
+      "type": "object"
     },
     "ApprovalDecideCommand": {
       "allOf": [
@@ -743,6 +825,10 @@
         "category": {
           "$ref": "#/$defs/ApprovalProjectionCategory"
         },
+        "decisionEnabled": {
+          "description": "False when the trusted producer did not supply complete action facts; approval is then rejected server-side.",
+          "type": "boolean"
+        },
         "effectiveDecisionScope": {
           "$ref": "#/$defs/ApprovalEffectiveDecisionScope"
         },
@@ -785,19 +871,19 @@
         "subject",
         "category",
         "effectiveDecisionScope",
+        "decisionEnabled",
         "sanitizedDetail",
         "binding"
       ],
       "type": "object"
     },
     "ApprovalProjectionCategory": {
-      "description": "Closed, secret-safe action category. unavailable is the sole meaning for a persisted legacy source that did not record a category.",
+      "description": "Closed, secret-safe action category from the current execution producer.",
       "enum": [
         "filesystem_write",
         "mcp",
         "network",
-        "shell",
-        "unavailable"
+        "shell"
       ],
       "type": "string"
     },
@@ -857,9 +943,92 @@
       "x-authority": "lease-write",
       "x-direction": "worker-to-control-plane"
     },
-    "ApprovalSanitizedDetailProjection": {
+    "ApprovalSanitizedDetailAvailableProjection": {
       "additionalProperties": false,
-      "description": "Typed detail availability for the current producer set. Arbitrary EncodedPayload bytes and metadata are never decoded or forwarded.",
+      "properties": {
+        "kind": {
+          "const": "available"
+        },
+        "operation": {
+          "enum": [
+            "execute",
+            "modify"
+          ],
+          "type": "string"
+        },
+        "reasonCode": {
+          "enum": [
+            "sandbox_escalation",
+            "network_access",
+            "filesystem_write"
+          ],
+          "type": "string"
+        },
+        "requestSha256": {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "riskLevel": {
+          "enum": [
+            "medium",
+            "high"
+          ],
+          "type": "string"
+        },
+        "targetCount": {
+          "maximum": 10000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "targetSummaries": {
+          "items": {
+            "maxLength": 500,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 20,
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "workingDirectory": {
+          "oneOf": [
+            {
+              "maxLength": 500,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "operation",
+        "targetSummaries",
+        "targetCount",
+        "workingDirectory",
+        "riskLevel",
+        "reasonCode",
+        "requestSha256"
+      ],
+      "type": "object"
+    },
+    "ApprovalSanitizedDetailProjection": {
+      "description": "Typed, secret-safe action facts or an explicit unavailable state.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/ApprovalSanitizedDetailAvailableProjection"
+        },
+        {
+          "$ref": "#/$defs/ApprovalSanitizedDetailUnavailableProjection"
+        }
+      ]
+    },
+    "ApprovalSanitizedDetailUnavailableProjection": {
+      "additionalProperties": false,
+      "description": "Fail-closed state for a producer request without complete trusted action facts.",
       "properties": {
         "kind": {
           "const": "unavailable"
@@ -876,9 +1045,7 @@
     },
     "ApprovalSanitizedDetailUnavailableReason": {
       "enum": [
-        "producer_unavailable",
-        "encoded_payload_redacted",
-        "source_not_recorded"
+        "producer_unavailable"
       ],
       "type": "string"
     },
@@ -1208,6 +1375,76 @@
       ],
       "type": "object"
     },
+    "Candidate": {
+      "additionalProperties": false,
+      "properties": {
+        "attempt": {
+          "maximum": 1000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "baseCommit": {
+          "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$",
+          "type": "string"
+        },
+        "candidateCommit": {
+          "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$",
+          "type": "string"
+        },
+        "candidateDigest": {
+          "$ref": "#/$defs/CandidateDigest"
+        },
+        "candidateRef": {
+          "pattern": "^refs/winwincode/candidates/(?:[0-9a-f]{40}|[0-9a-f]{64})$",
+          "type": "string"
+        },
+        "candidateTree": {
+          "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$",
+          "type": "string"
+        },
+        "contractRevision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "diffDigest": {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "id": {
+          "$ref": "#/$defs/CandidateId"
+        },
+        "producerWorkerSessionId": {
+          "$ref": "#/$defs/WorkerSessionId"
+        },
+        "schemaVersion": {
+          "$ref": "#/$defs/SchemaVersion"
+        },
+        "workContractId": {
+          "$ref": "#/$defs/WorkContractId"
+        },
+        "workItemId": {
+          "$ref": "#/$defs/WorkItemId"
+        },
+        "workRunId": {
+          "$ref": "#/$defs/WorkRunId"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "id",
+        "candidateDigest",
+        "workContractId",
+        "contractRevision",
+        "workItemId",
+        "workRunId",
+        "attempt",
+        "producerWorkerSessionId",
+        "baseCommit",
+        "diffDigest",
+        "candidateRef",
+        "candidateCommit",
+        "candidateTree"
+      ],
+      "type": "object"
+    },
     "CandidateAvailability": {
       "description": "Authoritative candidate Git retention state. Released candidates retain display facts only.",
       "enum": [
@@ -1411,6 +1648,10 @@
           "type": "object"
         }
       ]
+    },
+    "CandidateDigest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
     },
     "CandidateFileEncoding": {
       "enum": [
@@ -1895,6 +2136,10 @@
         "items"
       ],
       "type": "object"
+    },
+    "CandidateId": {
+      "pattern": "^cnd_[0-9A-HJKMNP-TV-Z]{26}$",
+      "type": "string"
     },
     "CandidateRef": {
       "description": "Stable local git ref that survives worktree cleanup.",
@@ -5957,10 +6202,10 @@
           "$ref": "#/$defs/DeliveryUpdateSpecCompletedResponse"
         },
         {
-          "$ref": "#/$defs/DeliveryApproveTaskBreakdownCompletedResponse"
+          "$ref": "#/$defs/DeliveryAdvanceCompletedResponse"
         },
         {
-          "$ref": "#/$defs/DeliveryAdvanceCompletedResponse"
+          "$ref": "#/$defs/WorkRunCancelCompletedResponse"
         },
         {
           "$ref": "#/$defs/DeliveryResolveAttentionCompletedResponse"
@@ -6030,6 +6275,9 @@
         },
         {
           "$ref": "#/$defs/CollaborationPresenceUpdateCompletedResponse"
+        },
+        {
+          "$ref": "#/$defs/DeliveryTaskBreakdownCreateCompletedResponse"
         }
       ]
     },
@@ -6079,8 +6327,8 @@
         "session.close",
         "delivery.create",
         "delivery.update_spec",
-        "delivery.approve_task_breakdown",
         "delivery.advance",
+        "workrun.cancel",
         "delivery.resolve_attention",
         "delivery.submit_verdict",
         "settings.update",
@@ -6103,7 +6351,8 @@
         "enterprise.integration.update",
         "enterprise.identity.update",
         "collaboration.notification.ack",
-        "collaboration.presence.update"
+        "collaboration.presence.update",
+        "delivery.task_breakdown.create"
       ],
       "type": "string"
     },
@@ -6131,10 +6380,10 @@
           "$ref": "#/$defs/DeliveryUpdateSpecCommand"
         },
         {
-          "$ref": "#/$defs/DeliveryApproveTaskBreakdownCommand"
+          "$ref": "#/$defs/DeliveryAdvanceCommand"
         },
         {
-          "$ref": "#/$defs/DeliveryAdvanceCommand"
+          "$ref": "#/$defs/WorkRunCancelCommand"
         },
         {
           "$ref": "#/$defs/DeliveryResolveAttentionCommand"
@@ -6204,6 +6453,9 @@
         },
         {
           "$ref": "#/$defs/CollaborationPresenceUpdateCommand"
+        },
+        {
+          "$ref": "#/$defs/DeliveryTaskBreakdownCreateCommand"
         }
       ]
     },
@@ -6596,7 +6848,7 @@
     },
     "ControlPlaneWebSocketDeliveryStageRuntimeProjectionInvalidatedEvent": {
       "additionalProperties": false,
-      "description": "Delivery-stage invalidation. The browser reloads Delivery first and replays runtime at the exact returned StrongFlowReadCursor.",
+      "description": "WorkRun invalidation. The browser reloads Delivery first and replays runtime at the exact returned StrongFlowReadCursor.",
       "properties": {
         "deliveryId": {
           "$ref": "#/$defs/DeliveryId"
@@ -6632,11 +6884,11 @@
         "sessionIdentity": {
           "$ref": "#/$defs/SessionIdentity"
         },
-        "stageRunId": {
-          "$ref": "#/$defs/StageRunId"
-        },
         "type": {
           "const": "runtime-projection.invalidated.v1"
+        },
+        "workRunId": {
+          "$ref": "#/$defs/WorkRunId"
         }
       },
       "required": [
@@ -6644,7 +6896,7 @@
         "scopeKind",
         "productSessionId",
         "deliveryId",
-        "stageRunId",
+        "workRunId",
         "projectionRevision",
         "lastProjectionSequence",
         "reloadQueries",
@@ -7237,7 +7489,8 @@
         "settings",
         "provider_catalog",
         "credential_reference",
-        "request_pool"
+        "request_pool",
+        "runtime_status"
       ],
       "type": "string"
     },
@@ -8190,6 +8443,48 @@
         "vaultLocator"
       ],
       "type": "object"
+    },
+    "Criterion": {
+      "additionalProperties": false,
+      "properties": {
+        "description": {
+          "maxLength": 65536,
+          "minLength": 1,
+          "type": "string"
+        },
+        "id": {
+          "$ref": "#/$defs/CriterionId"
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "requiredEvidenceClass": {
+          "description": "Evidence class required by the current Community verifier. Model narrative is not machine evidence.",
+          "enum": [
+            "machine"
+          ],
+          "type": "string"
+        },
+        "verificationMethod": {
+          "maxLength": 65536,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "description",
+        "required",
+        "requiredEvidenceClass",
+        "verificationMethod"
+      ],
+      "type": "object"
+    },
+    "CriterionId": {
+      "pattern": "^crt_[0-9A-HJKMNP-TV-Z]{26}$",
+      "type": "string"
     },
     "DebugConfirmedFact": {
       "additionalProperties": false,
@@ -10075,67 +10370,27 @@
       "properties": {
         "deliveryId": {
           "$ref": "#/$defs/DeliveryId"
-        }
-      },
-      "required": [
-        "deliveryId"
-      ],
-      "type": "object"
-    },
-    "DeliveryApproveTaskBreakdownCommand": {
-      "allOf": [
-        {
-          "$ref": "#/$defs/CommandEnvelope"
         },
-        {
-          "properties": {
-            "command": {
-              "const": "delivery.approve_task_breakdown"
-            },
-            "payload": {
-              "$ref": "#/$defs/DeliveryApproveTaskBreakdownPayload"
-            },
-            "scope": {
-              "$ref": "#/$defs/RepositoryScope"
-            }
-          },
-          "type": "object"
-        }
-      ]
-    },
-    "DeliveryApproveTaskBreakdownCompletedResponse": {
-      "allOf": [
-        {
-          "$ref": "#/$defs/CommandCompletedEnvelope"
+        "dispatchProfile": {
+          "description": "Requested execution profile, validated and frozen by the Controller before dispatch. WorkItem selection and execution identities are Controller-owned.",
+          "enum": [
+            "planner",
+            "executor",
+            "reviewer",
+            "verifier",
+            "adversarial-verifier",
+            "remediator"
+          ],
+          "type": "string"
         },
-        {
-          "properties": {
-            "command": {
-              "const": "delivery.approve_task_breakdown"
-            },
-            "result": {
-              "$ref": "#/$defs/DeliveryProjection"
-            }
-          },
-          "type": "object"
-        }
-      ]
-    },
-    "DeliveryApproveTaskBreakdownPayload": {
-      "additionalProperties": false,
-      "description": "Promotes the ordered task proposals from the exact sealed approved review set. The caller cannot submit or replace task fields.",
-      "properties": {
-        "deliveryId": {
-          "$ref": "#/$defs/DeliveryId"
-        },
-        "reviewSetSha256": {
-          "$ref": "#/$defs/Sha256Digest",
-          "description": "Stale-check assertion for the current sealed approved SolutionReviewProjection; it is not caller-authored task content."
+        "rework": {
+          "$ref": "#/$defs/DeliveryReworkInput",
+          "description": "Required only for remediator dispatch; rejected for every other profile."
         }
       },
       "required": [
         "deliveryId",
-        "reviewSetSha256"
+        "dispatchProfile"
       ],
       "type": "object"
     },
@@ -10234,16 +10489,6 @@
             }
           ]
         },
-        "stageRunId": {
-          "oneOf": [
-            {
-              "$ref": "#/$defs/StageRunId"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
         "status": {
           "enum": [
             "open",
@@ -10266,12 +10511,22 @@
             "delivery_approval"
           ],
           "type": "string"
+        },
+        "workRunId": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/WorkRunId"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
         "id",
         "deliverySpecId",
-        "stageRunId",
+        "workRunId",
         "type",
         "title",
         "options",
@@ -10633,9 +10888,6 @@
           "minLength": 1,
           "type": "string"
         },
-        "stageRunId": {
-          "$ref": "#/$defs/StageRunId"
-        },
         "type": {
           "enum": [
             "test",
@@ -10648,13 +10900,16 @@
             "review_finding"
           ],
           "type": "string"
+        },
+        "workRunId": {
+          "$ref": "#/$defs/WorkRunId"
         }
       },
       "required": [
         "id",
         "deliverySpecId",
         "deliverySpecRevision",
-        "stageRunId",
+        "workRunId",
         "sessionBindingId",
         "candidateRef",
         "type",
@@ -10826,10 +11081,10 @@
     "DeliveryProjection": {
       "additionalProperties": false,
       "properties": {
-        "activeStageRunId": {
-          "anyOf": [
+        "activeWorkRunId": {
+          "oneOf": [
             {
-              "$ref": "#/$defs/StageRunId"
+              "$ref": "#/$defs/WorkRunId"
             },
             {
               "type": "null"
@@ -10864,6 +11119,16 @@
         },
         "updatedAt": {
           "$ref": "#/$defs/Instant"
+        },
+        "workRunId": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/WorkRunId"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -10874,7 +11139,6 @@
         "title",
         "status",
         "taskCounts",
-        "activeStageRunId",
         "openAttentionCount",
         "updatedAt"
       ],
@@ -11151,18 +11415,70 @@
       ],
       "type": "object"
     },
+    "DeliveryReworkInput": {
+      "additionalProperties": false,
+      "description": "Exact requested subset of the current failed candidate. The Controller independently verifies WorkItem ownership, sealed Git hunks, current failed Evidence and durable rework history.",
+      "properties": {
+        "candidateRef": {
+          "pattern": "^git-candidate:sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "diffSha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "targets": {
+          "items": {
+            "$ref": "#/$defs/DeliveryReworkTargetInput"
+          },
+          "maxItems": 1024,
+          "minItems": 1,
+          "type": "array"
+        }
+      },
+      "required": [
+        "candidateRef",
+        "diffSha256",
+        "targets"
+      ],
+      "type": "object"
+    },
+    "DeliveryReworkTargetInput": {
+      "additionalProperties": false,
+      "properties": {
+        "evidenceRefIds": {
+          "items": {
+            "$ref": "#/$defs/EvidenceId"
+          },
+          "maxItems": 1024,
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "filePath": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "type": "string"
+        },
+        "sourceHunkSha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "workItemId": {
+          "$ref": "#/$defs/WorkItemId"
+        }
+      },
+      "required": [
+        "workItemId",
+        "filePath",
+        "sourceHunkSha256",
+        "evidenceRefIds"
+      ],
+      "type": "object"
+    },
     "DeliveryReworkTargetScope": {
       "additionalProperties": false,
       "properties": {
-        "deliveryTaskId": {
-          "$ref": "#/$defs/DeliveryTaskId"
-        },
-        "diagramId": {
-          "maxLength": 200,
-          "minLength": 1,
-          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]*$",
-          "type": "string"
-        },
         "evidenceRefIds": {
           "items": {
             "$ref": "#/$defs/EvidenceId"
@@ -11177,21 +11493,16 @@
           "minLength": 1,
           "type": "string"
         },
-        "nodeId": {
-          "maxLength": 200,
-          "minLength": 1,
-          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]*$",
-          "type": "string"
-        },
         "sourceHunkSha256": {
           "pattern": "^[0-9a-f]{64}$",
           "type": "string"
+        },
+        "workItemId": {
+          "$ref": "#/$defs/WorkItemId"
         }
       },
       "required": [
-        "deliveryTaskId",
-        "diagramId",
-        "nodeId",
+        "workItemId",
         "filePath",
         "sourceHunkSha256",
         "evidenceRefIds"
@@ -11316,153 +11627,6 @@
         "sourceProductSessionId",
         "acceptanceCriteria",
         "publicationTarget"
-      ],
-      "type": "object"
-    },
-    "DeliveryStageAcceptanceCriterionInput": {
-      "additionalProperties": false,
-      "properties": {
-        "criterionId": {
-          "maxLength": 200,
-          "minLength": 1,
-          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]*$",
-          "type": "string"
-        },
-        "description": {
-          "maxLength": 20000,
-          "minLength": 1,
-          "type": "string"
-        },
-        "required": {
-          "type": "boolean"
-        },
-        "verificationMethod": {
-          "maxLength": 20000,
-          "minLength": 1,
-          "type": "string"
-        }
-      },
-      "required": [
-        "criterionId",
-        "description",
-        "required"
-      ],
-      "type": "object"
-    },
-    "DeliveryStageExecutionScope": {
-      "additionalProperties": false,
-      "properties": {
-        "deliveryId": {
-          "$ref": "#/$defs/DeliveryId"
-        },
-        "deliveryTaskId": {
-          "$ref": "#/$defs/DeliveryTaskId"
-        },
-        "kind": {
-          "const": "delivery-stage"
-        },
-        "productSessionId": {
-          "$ref": "#/$defs/ProductSessionId"
-        },
-        "reworkAuthorization": {
-          "$ref": "#/$defs/DeliveryReworkAuthorizationScope"
-        },
-        "stageRunId": {
-          "$ref": "#/$defs/StageRunId"
-        }
-      },
-      "required": [
-        "kind",
-        "productSessionId",
-        "deliveryId",
-        "stageRunId"
-      ],
-      "type": "object"
-    },
-    "DeliveryStageInput": {
-      "additionalProperties": false,
-      "properties": {
-        "acceptanceCriteria": {
-          "items": {
-            "$ref": "#/$defs/DeliveryStageAcceptanceCriterionInput"
-          },
-          "maxItems": 1000,
-          "minItems": 1,
-          "type": "array"
-        },
-        "candidateRef": {
-          "pattern": "^git-candidate:sha256:[0-9a-f]{64}$",
-          "type": "string"
-        },
-        "constraints": {
-          "items": {
-            "maxLength": 20000,
-            "minLength": 1,
-            "type": "string"
-          },
-          "maxItems": 1000,
-          "type": "array",
-          "uniqueItems": true
-        },
-        "deliverySpecId": {
-          "maxLength": 200,
-          "minLength": 1,
-          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]*$",
-          "type": "string"
-        },
-        "deliverySpecRevision": {
-          "maximum": 9007199254740991,
-          "minimum": 1,
-          "type": "integer"
-        },
-        "goal": {
-          "maxLength": 20000,
-          "minLength": 1,
-          "type": "string"
-        },
-        "outOfScope": {
-          "items": {
-            "maxLength": 20000,
-            "minLength": 1,
-            "type": "string"
-          },
-          "maxItems": 1000,
-          "type": "array",
-          "uniqueItems": true
-        },
-        "schemaVersion": {
-          "$ref": "#/$defs/SchemaVersion"
-        },
-        "scope": {
-          "items": {
-            "maxLength": 20000,
-            "minLength": 1,
-            "type": "string"
-          },
-          "maxItems": 1000,
-          "minItems": 1,
-          "type": "array",
-          "uniqueItems": true
-        },
-        "task": {
-          "$ref": "#/$defs/DeliveryStageTaskInput"
-        },
-        "title": {
-          "maxLength": 256,
-          "minLength": 1,
-          "type": "string"
-        }
-      },
-      "required": [
-        "schemaVersion",
-        "deliverySpecId",
-        "deliverySpecRevision",
-        "title",
-        "goal",
-        "scope",
-        "outOfScope",
-        "constraints",
-        "acceptanceCriteria"
       ],
       "type": "object"
     },
@@ -11597,15 +11761,15 @@
         "productSessionId": {
           "$ref": "#/$defs/ProductSessionId"
         },
-        "stageRunId": {
-          "$ref": "#/$defs/StageRunId"
+        "workRunId": {
+          "$ref": "#/$defs/WorkRunId"
         }
       },
       "required": [
         "kind",
         "productSessionId",
         "deliveryId",
-        "stageRunId",
+        "workRunId",
         "atCursor"
       ],
       "type": "object"
@@ -11634,13 +11798,13 @@
             "sourceIdentity": {
               "type": "null"
             },
-            "stageRunId": {
-              "type": "null"
-            },
             "workerId": {
               "type": "null"
             },
             "workerSessionId": {
+              "type": "null"
+            },
+            "workRunId": {
               "type": "null"
             }
           }
@@ -11670,14 +11834,14 @@
             "sourceIdentity": {
               "$ref": "#/$defs/SessionBindingSourceIdentity"
             },
-            "stageRunId": {
-              "$ref": "#/$defs/StageRunId"
-            },
             "workerId": {
               "$ref": "#/$defs/WorkerId"
             },
             "workerSessionId": {
               "$ref": "#/$defs/WorkerSessionId"
+            },
+            "workRunId": {
+              "$ref": "#/$defs/WorkRunId"
             }
           }
         }
@@ -11763,16 +11927,6 @@
             }
           ]
         },
-        "stageRunId": {
-          "oneOf": [
-            {
-              "$ref": "#/$defs/StageRunId"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
         "workerId": {
           "oneOf": [
             {
@@ -11792,6 +11946,16 @@
               "type": "null"
             }
           ]
+        },
+        "workRunId": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/WorkRunId"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -11802,49 +11966,12 @@
         "codexThreadId",
         "boundAt",
         "sessionIdentity",
-        "stageRunId",
+        "workRunId",
         "workerId",
         "leaseId",
         "attempt",
         "fencingToken",
         "sourceIdentity"
-      ],
-      "type": "object"
-    },
-    "DeliveryStageTaskInput": {
-      "additionalProperties": false,
-      "properties": {
-        "acceptanceCriterionIds": {
-          "items": {
-            "maxLength": 200,
-            "minLength": 1,
-            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]*$",
-            "type": "string"
-          },
-          "maxItems": 1000,
-          "minItems": 1,
-          "type": "array",
-          "uniqueItems": true
-        },
-        "goal": {
-          "maxLength": 20000,
-          "minLength": 1,
-          "type": "string"
-        },
-        "taskId": {
-          "$ref": "#/$defs/DeliveryTaskId"
-        },
-        "title": {
-          "maxLength": 256,
-          "minLength": 1,
-          "type": "string"
-        }
-      },
-      "required": [
-        "taskId",
-        "title",
-        "goal",
-        "acceptanceCriterionIds"
       ],
       "type": "object"
     },
@@ -11919,6 +12046,142 @@
       "required": [
         "deliveryId",
         "candidateDigest"
+      ],
+      "type": "object"
+    },
+    "DeliveryTaskBreakdownCreateCommand": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/CommandEnvelope"
+        },
+        {
+          "properties": {
+            "command": {
+              "const": "delivery.task_breakdown.create"
+            },
+            "payload": {
+              "$ref": "#/$defs/DeliveryTaskBreakdownCreatePayload"
+            },
+            "scope": {
+              "$ref": "#/$defs/RepositoryScope"
+            }
+          },
+          "type": "object"
+        }
+      ]
+    },
+    "DeliveryTaskBreakdownCreateCompletedResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/CommandCompletedEnvelope"
+        },
+        {
+          "properties": {
+            "command": {
+              "const": "delivery.task_breakdown.create"
+            },
+            "result": {
+              "$ref": "#/$defs/DeliveryTaskBreakdownCreateResult"
+            }
+          },
+          "type": "object"
+        }
+      ]
+    },
+    "DeliveryTaskBreakdownCreateItem": {
+      "additionalProperties": false,
+      "properties": {
+        "criterionIds": {
+          "items": {
+            "$ref": "#/$defs/CriterionId"
+          },
+          "maxItems": 1000,
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "dependsOn": {
+          "items": {
+            "$ref": "#/$defs/WorkItemId"
+          },
+          "maxItems": 1000,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "goal": {
+          "maxLength": 65536,
+          "minLength": 1,
+          "type": "string"
+        },
+        "id": {
+          "$ref": "#/$defs/WorkItemId"
+        },
+        "title": {
+          "maxLength": 500,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "goal",
+        "criterionIds",
+        "dependsOn"
+      ],
+      "type": "object"
+    },
+    "DeliveryTaskBreakdownCreatePayload": {
+      "additionalProperties": false,
+      "properties": {
+        "contractRevision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "deliveryId": {
+          "$ref": "#/$defs/DeliveryId"
+        },
+        "expectedRevision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "items": {
+          "items": {
+            "$ref": "#/$defs/DeliveryTaskBreakdownCreateItem"
+          },
+          "maxItems": 1000,
+          "minItems": 1,
+          "type": "array"
+        }
+      },
+      "required": [
+        "deliveryId",
+        "expectedRevision",
+        "contractRevision",
+        "items"
+      ],
+      "type": "object"
+    },
+    "DeliveryTaskBreakdownCreateResult": {
+      "additionalProperties": false,
+      "properties": {
+        "deliveryId": {
+          "$ref": "#/$defs/DeliveryId"
+        },
+        "deliveryRevision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "items": {
+          "items": {
+            "$ref": "#/$defs/WorkItem"
+          },
+          "maxItems": 1000,
+          "minItems": 1,
+          "type": "array"
+        }
+      },
+      "required": [
+        "deliveryId",
+        "deliveryRevision",
+        "items"
       ],
       "type": "object"
     },
@@ -12009,14 +12272,6 @@
             }
           ]
         },
-        "stageRunIds": {
-          "items": {
-            "$ref": "#/$defs/StageRunId"
-          },
-          "maxItems": 1000,
-          "type": "array",
-          "uniqueItems": true
-        },
         "status": {
           "$ref": "#/$defs/DeliveryTaskStatus"
         },
@@ -12024,6 +12279,14 @@
           "maxLength": 500,
           "minLength": 1,
           "type": "string"
+        },
+        "workRunIds": {
+          "items": {
+            "$ref": "#/$defs/WorkRunId"
+          },
+          "maxItems": 1000,
+          "type": "array",
+          "uniqueItems": true
         }
       },
       "required": [
@@ -12034,7 +12297,7 @@
         "blockedByTaskIds",
         "owner",
         "status",
-        "stageRunIds",
+        "workRunIds",
         "evidenceRefs"
       ],
       "type": "object"
@@ -14352,6 +14615,11 @@
           ],
           "type": "string"
         },
+        "priority": {
+          "maximum": 10000,
+          "minimum": 0,
+          "type": "integer"
+        },
         "resourcePattern": {
           "maxLength": 2048,
           "minLength": 1,
@@ -14361,6 +14629,7 @@
       "required": [
         "kind",
         "effect",
+        "priority",
         "resourcePattern",
         "conditionSha256"
       ],
@@ -15811,6 +16080,91 @@
         }
       ]
     },
+    "Evidence": {
+      "additionalProperties": false,
+      "properties": {
+        "candidateDigest": {
+          "$ref": "#/$defs/CandidateDigest"
+        },
+        "contractRevision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "criterionId": {
+          "$ref": "#/$defs/CriterionId"
+        },
+        "id": {
+          "$ref": "#/$defs/EvidenceId"
+        },
+        "outcome": {
+          "enum": [
+            "observed",
+            "succeeded",
+            "failed",
+            "timed_out",
+            "policy_denied",
+            "infrastructure_failed",
+            "cancelled"
+          ],
+          "type": "string"
+        },
+        "planRevision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "producer": {
+          "enum": [
+            "worker",
+            "verifier"
+          ],
+          "type": "string"
+        },
+        "producerExecutionIdentity": {
+          "$ref": "#/$defs/ExecutionFactIdentity"
+        },
+        "schemaVersion": {
+          "$ref": "#/$defs/SchemaVersion"
+        },
+        "sourceEventId": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        "sourceSequence": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "verificationPlanId": {
+          "$ref": "#/$defs/VerificationPlanId"
+        },
+        "workContractId": {
+          "$ref": "#/$defs/WorkContractId"
+        },
+        "workItemId": {
+          "$ref": "#/$defs/WorkItemId"
+        },
+        "workRunId": {
+          "$ref": "#/$defs/WorkRunId"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "id",
+        "workContractId",
+        "contractRevision",
+        "verificationPlanId",
+        "planRevision",
+        "criterionId",
+        "workItemId",
+        "workRunId",
+        "candidateDigest",
+        "producer",
+        "producerExecutionIdentity",
+        "sourceEventId",
+        "sourceSequence",
+        "outcome"
+      ],
+      "type": "object"
+    },
     "EvidenceArtifactAccessProjection": {
       "oneOf": [
         {
@@ -16176,14 +16530,14 @@
           "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$",
           "type": "string"
         },
-        "stageRunId": {
-          "$ref": "#/$defs/StageRunId"
+        "workRunId": {
+          "$ref": "#/$defs/WorkRunId"
         }
       },
       "required": [
         "deliveryId",
         "deliveryRevision",
-        "stageRunId",
+        "workRunId",
         "sessionBindingId",
         "candidateRef",
         "evidenceId"
@@ -16328,9 +16682,6 @@
           "minLength": 1,
           "type": "string"
         },
-        "stageRunId": {
-          "$ref": "#/$defs/StageRunId"
-        },
         "type": {
           "enum": [
             "test",
@@ -16343,6 +16694,9 @@
             "review_finding"
           ],
           "type": "string"
+        },
+        "workRunId": {
+          "$ref": "#/$defs/WorkRunId"
         }
       },
       "required": [
@@ -16351,7 +16705,7 @@
         "readPageLimit",
         "evidenceId",
         "candidateRef",
-        "stageRunId",
+        "workRunId",
         "sessionBindingId",
         "type",
         "sourceRef"
@@ -16414,6 +16768,65 @@
       ],
       "type": "object"
     },
+    "ExecutionFactIdentity": {
+      "additionalProperties": false,
+      "properties": {
+        "attempt": {
+          "maximum": 1000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "codexThreadId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CodexThreadId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "executionJobId": {
+          "$ref": "#/$defs/ExecutionJobId"
+        },
+        "fencingToken": {
+          "pattern": "^[1-9][0-9]{0,19}$",
+          "type": "string"
+        },
+        "leaseId": {
+          "$ref": "#/$defs/LeaseId"
+        },
+        "productSessionId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProductSessionId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "workerId": {
+          "$ref": "#/$defs/WorkerId"
+        },
+        "workerInstanceId": {
+          "$ref": "#/$defs/WorkerInstanceId"
+        },
+        "workerSessionId": {
+          "$ref": "#/$defs/WorkerSessionId"
+        }
+      },
+      "required": [
+        "executionJobId",
+        "attempt",
+        "leaseId",
+        "fencingToken",
+        "workerId",
+        "workerInstanceId",
+        "workerSessionId"
+      ],
+      "type": "object"
+    },
     "ExecutionJob": {
       "additionalProperties": false,
       "allOf": [
@@ -16421,7 +16834,7 @@
           "if": {
             "properties": {
               "scope": {
-                "$ref": "#/$defs/DeliveryStageExecutionScope"
+                "$ref": "#/$defs/WorkRunExecutionScope"
               }
             },
             "required": [
@@ -16430,12 +16843,12 @@
           },
           "then": {
             "properties": {
-              "stageInput": {
-                "$ref": "#/$defs/DeliveryStageInput"
+              "workInput": {
+                "$ref": "#/$defs/WorkRunInput"
               }
             },
             "required": [
-              "stageInput"
+              "workInput"
             ]
           }
         },
@@ -16452,13 +16865,8 @@
           },
           "then": {
             "not": {
-              "properties": {
-                "stageInput": {
-                  "$ref": "#/$defs/DeliveryStageInput"
-                }
-              },
               "required": [
-                "stageInput"
+                "workInput"
               ]
             }
           }
@@ -16492,8 +16900,8 @@
         "scope": {
           "$ref": "#/$defs/ExecutionScope"
         },
-        "stageInput": {
-          "$ref": "#/$defs/DeliveryStageInput"
+        "workInput": {
+          "$ref": "#/$defs/WorkRunInput"
         },
         "workspace": {
           "$ref": "#/$defs/ExecutionWorkspace"
@@ -16885,7 +17293,7 @@
           "$ref": "#/$defs/ProductSessionExecutionScope"
         },
         {
-          "$ref": "#/$defs/DeliveryStageExecutionScope"
+          "$ref": "#/$defs/WorkRunExecutionScope"
         }
       ]
     },
@@ -17028,15 +17436,15 @@
           "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$",
           "type": "string"
         },
-        "producerStageRunId": {
-          "$ref": "#/$defs/StageRunId"
+        "producerWorkRunId": {
+          "$ref": "#/$defs/WorkRunId"
         }
       },
       "required": [
         "candidateRef",
         "deliverySpecId",
         "deliverySpecRevision",
-        "producerStageRunId",
+        "producerWorkRunId",
         "producerSessionBindingId",
         "candidateCommitId",
         "candidateTreeId",
@@ -18596,19 +19004,29 @@
       "description": "Closed, secret-safe reason for the route or page readiness result.",
       "enum": [
         "ready",
+        "rate_limited",
+        "window_exhausted",
+        "weekly_exhausted",
+        "authentication_error",
         "no_provider",
         "credential_missing_or_revoked",
         "default_route_invalid",
         "provider_or_model_disabled",
-        "request_pool_unavailable"
+        "request_pool_unavailable",
+        "runtime_status_unknown"
       ],
       "type": "string"
     },
     "ModelRouteAvailabilityStatus": {
       "description": "Closed readiness status derived only by the server.",
       "enum": [
-        "enabled",
-        "disabled"
+        "available",
+        "rate_limited",
+        "window_exhausted",
+        "weekly_exhausted",
+        "auth_error",
+        "disabled",
+        "unknown"
       ],
       "type": "string"
     },
@@ -22726,6 +23144,7 @@
         "session.messages.list",
         "session.interactions.list",
         "runtime.projection.get",
+        "workrun.get",
         "delivery.list",
         "delivery.get",
         "candidate.list",
@@ -22777,6 +23196,9 @@
         },
         {
           "$ref": "#/$defs/RuntimeProjectionGetQuery"
+        },
+        {
+          "$ref": "#/$defs/WorkRunGetQuery"
         },
         {
           "$ref": "#/$defs/DeliveryListQuery"
@@ -22920,6 +23342,9 @@
         },
         {
           "$ref": "#/$defs/RuntimeProjectionGetResultResponse"
+        },
+        {
+          "$ref": "#/$defs/WorkRunGetResultResponse"
         },
         {
           "$ref": "#/$defs/DeliveryListResultResponse"
@@ -24322,7 +24747,7 @@
             "readCursor": {
               "type": "null"
             },
-            "stageRunId": {
+            "workRunId": {
               "type": "null"
             }
           }
@@ -24338,8 +24763,8 @@
             "readCursor": {
               "$ref": "#/$defs/StrongFlowReadCursor"
             },
-            "stageRunId": {
-              "$ref": "#/$defs/StageRunId"
+            "workRunId": {
+              "$ref": "#/$defs/WorkRunId"
             }
           }
         }
@@ -24393,10 +24818,10 @@
           "maxItems": 256,
           "type": "array"
         },
-        "stageRunId": {
+        "workRunId": {
           "oneOf": [
             {
-              "$ref": "#/$defs/StageRunId"
+              "$ref": "#/$defs/WorkRunId"
             },
             {
               "type": "null"
@@ -24411,7 +24836,7 @@
         "eventCursor",
         "productSessionId",
         "deliveryId",
-        "stageRunId",
+        "workRunId",
         "lastProjectionSequence",
         "sessions",
         "rebuiltAt"
@@ -24565,16 +24990,6 @@
         "codexThreadId": {
           "$ref": "#/$defs/CodexThreadId"
         },
-        "deliveryTaskId": {
-          "oneOf": [
-            {
-              "$ref": "#/$defs/DeliveryTaskId"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
         "diffSummary": {
           "oneOf": [
             {
@@ -24617,16 +25032,6 @@
           "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$",
           "type": "string"
         },
-        "stageRunId": {
-          "oneOf": [
-            {
-              "$ref": "#/$defs/StageRunId"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
         "usage": {
           "oneOf": [
             {
@@ -24639,12 +25044,32 @@
         },
         "workerSessionId": {
           "$ref": "#/$defs/WorkerSessionId"
+        },
+        "workItemId": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/WorkItemId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "workRunId": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/WorkRunId"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
         "sessionBindingId",
-        "stageRunId",
-        "deliveryTaskId",
+        "workRunId",
+        "workItemId",
         "productSessionId",
         "workerSessionId",
         "codexThreadId",
@@ -24840,7 +25265,7 @@
     },
     "SessionBindingMessage": {
       "additionalProperties": false,
-      "description": "Authoritative WorkerSession-to-CodexThread binding for one exact active Job lease. Delivery-stage bindings carry the exact StageRun; ProductSession Chat bindings omit it.",
+      "description": "Authoritative WorkerSession-to-CodexThread binding for one exact active Job lease. Delivery WorkRun bindings carry the exact WorkRun; ProductSession Chat bindings omit it.",
       "properties": {
         "attempt": {
           "maximum": 1000,
@@ -24883,15 +25308,15 @@
         "sourceIdentity": {
           "$ref": "#/$defs/SessionBindingSourceIdentity"
         },
-        "stageRunId": {
-          "$ref": "#/$defs/StageRunId",
-          "description": "Exact Delivery StageRun identity. ProductSession Chat bindings omit this field."
-        },
         "workerId": {
           "$ref": "#/$defs/WorkerId"
         },
         "workerSessionId": {
           "$ref": "#/$defs/WorkerSessionId"
+        },
+        "workRunId": {
+          "$ref": "#/$defs/WorkRunId",
+          "description": "Exact WorkRun identity. ProductSession Chat bindings omit this field."
         }
       },
       "required": [
@@ -25175,7 +25600,7 @@
     },
     "SessionIdentity": {
       "additionalProperties": false,
-      "description": "Identity of one executable session. Delivery-stage sessions carry StageRun; ProductSession Chat sessions omit it.",
+      "description": "Identity of one executable session. WorkRun sessions carry WorkRunId; ProductSession Chat sessions omit it.",
       "properties": {
         "codexThreadId": {
           "$ref": "#/$defs/CodexThreadId"
@@ -25183,11 +25608,11 @@
         "productSessionId": {
           "$ref": "#/$defs/ProductSessionId"
         },
-        "stageRunId": {
-          "$ref": "#/$defs/StageRunId"
-        },
         "workerSessionId": {
           "$ref": "#/$defs/WorkerSessionId"
+        },
+        "workRunId": {
+          "$ref": "#/$defs/WorkRunId"
         }
       },
       "required": [
@@ -25867,6 +26292,16 @@
         "planningStageRunId": {
           "$ref": "#/$defs/StageRunId"
         },
+        "planningWorkRunId": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/WorkRunId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "processDiagram": {
           "$ref": "#/$defs/SolutionReviewDiagramProjection"
         },
@@ -25915,6 +26350,16 @@
         },
         "reviewStatus": {
           "$ref": "#/$defs/SolutionReviewStatus"
+        },
+        "reviewWorkRunId": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/WorkRunId"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "risks": {
           "items": {
@@ -26210,16 +26655,6 @@
     "StrongFlowDiagramExecutionProvenanceProjection": {
       "additionalProperties": false,
       "properties": {
-        "deliveryTaskId": {
-          "oneOf": [
-            {
-              "$ref": "#/$defs/DeliveryTaskId"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
         "evidenceRefIds": {
           "items": {
             "$ref": "#/$defs/EvidenceId"
@@ -26234,14 +26669,17 @@
           "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$",
           "type": "string"
         },
-        "stageRunId": {
-          "$ref": "#/$defs/StageRunId"
+        "workItemId": {
+          "$ref": "#/$defs/WorkItemId"
+        },
+        "workRunId": {
+          "$ref": "#/$defs/WorkRunId"
         }
       },
       "required": [
-        "stageRunId",
+        "workRunId",
         "sessionBindingId",
-        "deliveryTaskId",
+        "workItemId",
         "evidenceRefIds"
       ],
       "type": "object"
@@ -27472,6 +27910,246 @@
       ],
       "type": "string"
     },
+    "Verdict": {
+      "additionalProperties": false,
+      "properties": {
+        "candidateDigest": {
+          "$ref": "#/$defs/CandidateDigest"
+        },
+        "contractRevision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "evidenceIds": {
+          "items": {
+            "$ref": "#/$defs/EvidenceId"
+          },
+          "maxItems": 100,
+          "minItems": 0,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "id": {
+          "pattern": "^vdt_[0-9A-HJKMNP-TV-Z]{26}$",
+          "type": "string"
+        },
+        "planRevision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "revision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "schemaVersion": {
+          "$ref": "#/$defs/SchemaVersion"
+        },
+        "status": {
+          "enum": [
+            "pass",
+            "fail",
+            "inconclusive",
+            "infra_error"
+          ],
+          "type": "string"
+        },
+        "verificationPlanId": {
+          "$ref": "#/$defs/VerificationPlanId"
+        },
+        "workContractId": {
+          "$ref": "#/$defs/WorkContractId"
+        },
+        "workItemId": {
+          "$ref": "#/$defs/WorkItemId"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "id",
+        "workContractId",
+        "contractRevision",
+        "verificationPlanId",
+        "planRevision",
+        "workItemId",
+        "candidateDigest",
+        "status",
+        "evidenceIds",
+        "revision"
+      ],
+      "type": "object"
+    },
+    "VerificationPlan": {
+      "additionalProperties": false,
+      "properties": {
+        "candidateDigest": {
+          "$ref": "#/$defs/CandidateDigest"
+        },
+        "commands": {
+          "items": {
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 100,
+          "minItems": 1,
+          "type": "array"
+        },
+        "contractRevision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "criterionIds": {
+          "items": {
+            "$ref": "#/$defs/CriterionId"
+          },
+          "maxItems": 100,
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "id": {
+          "$ref": "#/$defs/VerificationPlanId"
+        },
+        "permissionProfile": {
+          "enum": [
+            "candidate_read_only_restricted"
+          ],
+          "type": "string"
+        },
+        "planRevision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "requiredRoles": {
+          "items": {
+            "enum": [
+              "reviewer",
+              "verifier",
+              "adversarial-verifier"
+            ],
+            "type": "string"
+          },
+          "maxItems": 3,
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "schemaVersion": {
+          "$ref": "#/$defs/SchemaVersion"
+        },
+        "workContractId": {
+          "$ref": "#/$defs/WorkContractId"
+        },
+        "workItemId": {
+          "$ref": "#/$defs/WorkItemId"
+        },
+        "workItemRevision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "workRunId": {
+          "$ref": "#/$defs/WorkRunId"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "id",
+        "workContractId",
+        "contractRevision",
+        "planRevision",
+        "workItemId",
+        "workItemRevision",
+        "workRunId",
+        "candidateDigest",
+        "criterionIds",
+        "requiredRoles",
+        "commands",
+        "permissionProfile"
+      ],
+      "type": "object"
+    },
+    "VerificationPlanId": {
+      "pattern": "^vpl_[0-9A-HJKMNP-TV-Z]{26}$",
+      "type": "string"
+    },
+    "WorkContract": {
+      "additionalProperties": false,
+      "properties": {
+        "constraints": {
+          "items": {
+            "maxLength": 65536,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 1000,
+          "type": "array"
+        },
+        "createdAt": {
+          "$ref": "#/$defs/Instant"
+        },
+        "criteria": {
+          "items": {
+            "$ref": "#/$defs/Criterion"
+          },
+          "maxItems": 1000,
+          "minItems": 1,
+          "type": "array"
+        },
+        "id": {
+          "$ref": "#/$defs/WorkContractId"
+        },
+        "objective": {
+          "maxLength": 65536,
+          "minLength": 1,
+          "type": "string"
+        },
+        "protectedScope": {
+          "items": {
+            "maxLength": 65536,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 1000,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "requiredHumanAuthority": {
+          "enum": [
+            "none",
+            "approval",
+            "attention"
+          ],
+          "type": "string"
+        },
+        "revision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "schemaVersion": {
+          "$ref": "#/$defs/SchemaVersion"
+        },
+        "scope": {
+          "items": {
+            "maxLength": 65536,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 1000,
+          "type": "array",
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "id",
+        "revision",
+        "scope",
+        "objective",
+        "constraints",
+        "protectedScope",
+        "requiredHumanAuthority",
+        "criteria",
+        "createdAt"
+      ],
+      "type": "object"
+    },
+    "WorkContractId": {
+      "pattern": "^wct_[0-9A-HJKMNP-TV-Z]{26}$",
+      "type": "string"
+    },
     "WorkerCapabilitiesMessage": {
       "additionalProperties": false,
       "description": "Replaces the registered capability snapshot for the current Worker instance.",
@@ -28223,6 +28901,513 @@
       "pattern": "^wsn_[0-9A-HJKMNP-TV-Z]{26}$",
       "type": "string"
     },
+    "WorkGraphItemProjection": {
+      "additionalProperties": false,
+      "description": "Derived Work graph row. State and blockers are computed from the canonical WorkItem graph and are never persisted separately.",
+      "properties": {
+        "blockers": {
+          "items": {
+            "$ref": "#/$defs/WorkItemId"
+          },
+          "maxItems": 1000,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "dependencies": {
+          "items": {
+            "$ref": "#/$defs/WorkItemId"
+          },
+          "maxItems": 1000,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "state": {
+          "$ref": "#/$defs/WorkGraphItemState"
+        },
+        "workItemId": {
+          "$ref": "#/$defs/WorkItemId"
+        }
+      },
+      "required": [
+        "workItemId",
+        "state",
+        "dependencies",
+        "blockers"
+      ],
+      "type": "object"
+    },
+    "WorkGraphItemState": {
+      "enum": [
+        "ready",
+        "running",
+        "blocked",
+        "done"
+      ],
+      "type": "string"
+    },
+    "WorkItem": {
+      "additionalProperties": false,
+      "properties": {
+        "criterionIds": {
+          "items": {
+            "$ref": "#/$defs/CriterionId"
+          },
+          "maxItems": 1000,
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "dependsOn": {
+          "items": {
+            "$ref": "#/$defs/WorkItemId"
+          },
+          "maxItems": 1000,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "goal": {
+          "maxLength": 65536,
+          "minLength": 1,
+          "type": "string"
+        },
+        "id": {
+          "$ref": "#/$defs/WorkItemId"
+        },
+        "revision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "schemaVersion": {
+          "$ref": "#/$defs/SchemaVersion"
+        },
+        "state": {
+          "$ref": "#/$defs/WorkItemState"
+        },
+        "title": {
+          "maxLength": 500,
+          "minLength": 1,
+          "type": "string"
+        },
+        "workContractId": {
+          "$ref": "#/$defs/WorkContractId"
+        },
+        "workContractRevision": {
+          "$ref": "#/$defs/Revision"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "id",
+        "workContractId",
+        "workContractRevision",
+        "revision",
+        "state",
+        "title",
+        "goal",
+        "criterionIds",
+        "dependsOn"
+      ],
+      "type": "object"
+    },
+    "WorkItemId": {
+      "pattern": "^wit_[0-9A-HJKMNP-TV-Z]{26}$",
+      "type": "string"
+    },
+    "WorkItemState": {
+      "enum": [
+        "backlog",
+        "ready",
+        "in_progress",
+        "waiting_dependency",
+        "waiting_human",
+        "candidate_ready",
+        "validating",
+        "rework",
+        "done",
+        "failed",
+        "cancelled"
+      ],
+      "type": "string"
+    },
+    "WorkRun": {
+      "additionalProperties": false,
+      "properties": {
+        "attempt": {
+          "maximum": 1000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "candidateDigest": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CandidateDigest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "codexThreadId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CodexThreadId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "contractRevision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "executionJobId": {
+          "$ref": "#/$defs/ExecutionJobId"
+        },
+        "fencingToken": {
+          "pattern": "^[1-9][0-9]{0,19}$",
+          "type": "string"
+        },
+        "id": {
+          "$ref": "#/$defs/WorkRunId"
+        },
+        "leaseId": {
+          "$ref": "#/$defs/LeaseId"
+        },
+        "productSessionId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProductSessionId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "revision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "schemaVersion": {
+          "$ref": "#/$defs/SchemaVersion"
+        },
+        "state": {
+          "$ref": "#/$defs/WorkRunState"
+        },
+        "workContractId": {
+          "$ref": "#/$defs/WorkContractId"
+        },
+        "workerId": {
+          "$ref": "#/$defs/WorkerId"
+        },
+        "workerInstanceId": {
+          "$ref": "#/$defs/WorkerInstanceId"
+        },
+        "workerSessionId": {
+          "$ref": "#/$defs/WorkerSessionId"
+        },
+        "workItemId": {
+          "$ref": "#/$defs/WorkItemId"
+        },
+        "workItemRevision": {
+          "$ref": "#/$defs/Revision"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "id",
+        "workContractId",
+        "contractRevision",
+        "workItemId",
+        "workItemRevision",
+        "revision",
+        "state",
+        "executionJobId",
+        "attempt",
+        "workerId",
+        "workerInstanceId",
+        "workerSessionId",
+        "leaseId",
+        "fencingToken",
+        "productSessionId"
+      ],
+      "type": "object"
+    },
+    "WorkRunAggregateProjection": {
+      "additionalProperties": false,
+      "properties": {
+        "contract": {
+          "$ref": "#/$defs/WorkContract"
+        },
+        "graphItems": {
+          "items": {
+            "$ref": "#/$defs/WorkGraphItemProjection"
+          },
+          "maxItems": 1000,
+          "type": "array"
+        },
+        "items": {
+          "items": {
+            "$ref": "#/$defs/WorkItem"
+          },
+          "maxItems": 1000,
+          "type": "array"
+        },
+        "readCursor": {
+          "$ref": "#/$defs/StrongFlowReadCursor"
+        },
+        "runs": {
+          "items": {
+            "$ref": "#/$defs/WorkRun"
+          },
+          "maxItems": 1000,
+          "type": "array"
+        },
+        "schemaVersion": {
+          "$ref": "#/$defs/SchemaVersion"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "contract",
+        "items",
+        "runs",
+        "graphItems",
+        "readCursor"
+      ],
+      "type": "object"
+    },
+    "WorkRunCancelCommand": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/CommandEnvelope"
+        },
+        {
+          "properties": {
+            "command": {
+              "const": "workrun.cancel"
+            },
+            "payload": {
+              "$ref": "#/$defs/WorkRunCancelPayload"
+            },
+            "scope": {
+              "$ref": "#/$defs/RepositoryScope"
+            }
+          },
+          "type": "object"
+        }
+      ]
+    },
+    "WorkRunCancelCompletedResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/CommandCompletedEnvelope"
+        },
+        {
+          "properties": {
+            "command": {
+              "const": "workrun.cancel"
+            },
+            "result": {
+              "$ref": "#/$defs/DeliveryProjection"
+            }
+          },
+          "type": "object"
+        }
+      ]
+    },
+    "WorkRunCancelPayload": {
+      "additionalProperties": false,
+      "properties": {
+        "deliveryId": {
+          "$ref": "#/$defs/DeliveryId"
+        },
+        "workRunId": {
+          "$ref": "#/$defs/WorkRunId"
+        }
+      },
+      "required": [
+        "deliveryId",
+        "workRunId"
+      ],
+      "type": "object"
+    },
+    "WorkRunExecutionScope": {
+      "additionalProperties": false,
+      "properties": {
+        "attempt": {
+          "maximum": 1000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "kind": {
+          "const": "work-run"
+        },
+        "productSessionId": {
+          "$ref": "#/$defs/ProductSessionId"
+        },
+        "reworkAuthorization": {
+          "$ref": "#/$defs/DeliveryReworkAuthorizationScope"
+        },
+        "workContractId": {
+          "$ref": "#/$defs/WorkContractId"
+        },
+        "workContractRevision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "workItemId": {
+          "$ref": "#/$defs/WorkItemId"
+        },
+        "workItemRevision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "workRunId": {
+          "$ref": "#/$defs/WorkRunId"
+        }
+      },
+      "required": [
+        "kind",
+        "productSessionId",
+        "workContractId",
+        "workContractRevision",
+        "workItemId",
+        "workItemRevision",
+        "workRunId",
+        "attempt"
+      ],
+      "type": "object"
+    },
+    "WorkRunGetParameters": {
+      "additionalProperties": false,
+      "properties": {
+        "atCursor": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/StrongFlowReadCursor"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "deliveryId": {
+          "$ref": "#/$defs/DeliveryId"
+        },
+        "workItemId": {
+          "description": "Null selects the Delivery aggregate; a WorkItem identity constrains the exact read.",
+          "oneOf": [
+            {
+              "$ref": "#/$defs/WorkItemId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "workRunId": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/WorkRunId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "deliveryId",
+        "workItemId",
+        "atCursor"
+      ],
+      "type": "object"
+    },
+    "WorkRunGetQuery": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/QueryEnvelope"
+        },
+        {
+          "properties": {
+            "parameters": {
+              "$ref": "#/$defs/WorkRunGetParameters"
+            },
+            "query": {
+              "const": "workrun.get"
+            },
+            "scope": {
+              "$ref": "#/$defs/RepositoryScope"
+            }
+          },
+          "type": "object"
+        }
+      ]
+    },
+    "WorkRunGetResultResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/QueryResultEnvelope"
+        },
+        {
+          "properties": {
+            "query": {
+              "const": "workrun.get"
+            },
+            "result": {
+              "$ref": "#/$defs/WorkRunAggregateProjection"
+            }
+          },
+          "type": "object"
+        }
+      ]
+    },
+    "WorkRunId": {
+      "pattern": "^wrn_[0-9A-HJKMNP-TV-Z]{26}$",
+      "type": "string"
+    },
+    "WorkRunInput": {
+      "additionalProperties": false,
+      "properties": {
+        "candidateRef": {
+          "pattern": "^git-candidate:sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "deliverySpecId": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        "deliverySpecRevision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "schemaVersion": {
+          "$ref": "#/$defs/SchemaVersion"
+        },
+        "workContract": {
+          "$ref": "#/$defs/WorkContract"
+        },
+        "workItem": {
+          "$ref": "#/$defs/WorkItem"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "deliverySpecId",
+        "deliverySpecRevision",
+        "workContract",
+        "workItem"
+      ],
+      "type": "object"
+    },
+    "WorkRunState": {
+      "enum": [
+        "queued",
+        "leased",
+        "running",
+        "candidate_ready",
+        "settled",
+        "failed",
+        "cancelled"
+      ],
+      "type": "string"
+    },
     "WorkspaceId": {
       "pattern": "^wsp_[0-9A-HJKMNP-TV-Z]{26}$",
       "type": "string"
@@ -28263,7 +29448,7 @@
     "https://schemas.winwincode.dev/winwincode/v1/domain.schema.json",
     "https://schemas.winwincode.dev/winwincode/v1/execution-port.schema.json"
   ],
-  "x-source-digest": "sha256:8c5257d07754b59015ee3a36e33326a8104d6ccaafad47d37d0d772945e77c9a",
+  "x-source-digest": "sha256:050324bdacb73cff3bb46d027ad9bb5987c547c74c712d947751df41e7794b07",
   "x-winwincode-client-metadata": {
     "http": {
       "authentication": {
@@ -28292,6 +29477,11 @@
           "query": "runtime.projection.get",
           "requestDefinition": "RuntimeProjectionGetQuery",
           "resultDefinition": "RuntimeProjectionSnapshot"
+        },
+        {
+          "query": "workrun.get",
+          "requestDefinition": "WorkRunGetQuery",
+          "resultDefinition": "WorkRunAggregateProjection"
         }
       ],
       "queryEndpoint": "/api/v1/queries",

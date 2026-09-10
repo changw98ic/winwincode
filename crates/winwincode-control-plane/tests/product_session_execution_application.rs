@@ -347,7 +347,6 @@ fn configure_model_provider(fixture: &mut Fixture, seed: u64) {
                     reasoning_efforts: vec!["high".to_owned()],
                 }],
             },
-            Instant("2026-09-02T00:00:00.000Z".to_owned()),
         )
         .expect("register fixture Provider");
     CredentialReferenceService::new(&mut fixture.storage)
@@ -430,11 +429,8 @@ fn model_policy() -> LocalModelPolicyAuthority {
         },
     )
     .expect("model admission policy");
-    LocalModelPolicyAuthority::try_new(LocalModelPolicyAuthorityConfig {
-        base,
-        enterprise_ceilings: Vec::new(),
-    })
-    .expect("model policy authority")
+    LocalModelPolicyAuthority::try_new(LocalModelPolicyAuthorityConfig { base })
+        .expect("model policy authority")
 }
 
 fn model_pool_config() -> ModelRequestPoolConfig {
@@ -872,7 +868,7 @@ fn session_identity(fixture: &Fixture, runtime: &RuntimeAuthority) -> SessionIde
     SessionIdentity {
         codex_thread_id: runtime.slot.codex_thread_id.clone(),
         product_session_id: fixture.product_session_id.clone(),
-        stage_run_id: None,
+        work_run_id: None,
         worker_session_id: runtime.slot.worker_session_id.clone(),
     }
 }
@@ -904,7 +900,7 @@ fn binding_message(
         worker_instance_id: runtime.lease.worker_instance_id.clone(),
         worker_session_id: runtime.slot.worker_session_id.clone(),
     };
-    message.stage_run_id = None;
+    message.work_run_id = None;
     message.worker_id = runtime.lease.worker_id.clone();
     message.worker_session_id = runtime.slot.worker_session_id.clone();
     message

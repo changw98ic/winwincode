@@ -24,7 +24,7 @@ use winwincode_delivery::{
         },
         stage::SessionBindingAuthority as SchedulerSessionBindingAuthority,
     },
-    domain::{Delivery, StageRunStatus},
+    domain::Delivery,
     store::{
         AcceptDeliveryWorkerSession, DeliveryCommand, DeliveryCommandPort, DeliveryStore,
         ReplaceDeliveryExecutionAttempt, ReportDeliveryCodexThread,
@@ -35,8 +35,8 @@ use winwincode_domain::{
     SchemaVersion, SessionIdentity, Sha256Digest,
 };
 use winwincode_execution_port::generated::{
-    DeliveryStageExecutionScope, ExecutionJob, ExecutionScope, SessionBindingMessage,
-    SessionBindingMessageKind,
+    ExecutionJob, ExecutionScope, SessionBindingMessage, SessionBindingMessageKind,
+    WorkRunExecutionScope,
 };
 use winwincode_storage::{
     CommitReceipt, DurableOutboxEvent, ExecutionScopeReplacementAuthority, NewOutboxEvent,
@@ -162,7 +162,11 @@ pub(crate) fn execute_at(
         worker_replay =
             storage.load_receipt(&worker_phase.receipt_identity, &worker_phase.command_digest)?;
     }
-    let bound_at_millis = validate_message_shape(message)?;
+    // `boundAt`/`sentAt` are Worker causal facts. Delivery mutation and audit
+    // timestamps use the trusted ingress clock so a replay cannot backdate a
+    // replacement or make its revision ordering depend on the message clock.
+    let _message_bound_at_millis = validate_message_shape(message)?;
+    let mutation_time_millis = instant_millis(server_time)?;
     // A complete receipt replay still has to identify the current attempt.
     // Once the scheduler has sealed a successor, an exact old-attempt phase
     // receipt is historical evidence, not permission to bind the fenced
@@ -189,13 +193,17 @@ pub(crate) fn execute_at(
         // permits replay after a successor replacement or a damaged current
         // snapshot, as long as the original receipts and audit event remain
         // intact.
-        let mut context = BindingContext::from_durable(&durable, &immutable_job, bound_at_millis)?;
-        context.job_revision = worker_session_receipt
-            .revision
-            .checked_sub(1)
-            .ok_or_else(|| {
-                StorageError::invalid_input("SessionBinding replay revision is invalid")
-            })?;
+        let mut context =
+            BindingContext::from_durable(&durable, &immutable_job, mutation_time_millis)?;
+        if let Some(replacement) =
+            storage.load_execution_scope_replacement_authority(&message.lease.job_id)?
+        {
+            context.identity.work_run_id = replacement
+                .work_run_id()
+                .ok_or_else(|| StorageError::invalid_input("replacement has no successor WorkRun"))?
+                .clone();
+            context.attempt = replacement.replacement_attempt();
+        }
         let expected_identity = expected_session_identity(&context, message);
         validate_complete_replay(
             worker_session_receipt,
@@ -216,7 +224,7 @@ pub(crate) fn execute_at(
     // and replacement seal. Only these paths consult mutable queue state.
     let (_, job) = load_durable_execution_job(storage, &message.lease.job_id)?;
     validate_durable_job(&durable, &job, message)?;
-    let mut context = BindingContext::from_durable(&durable, &job, bound_at_millis)?;
+    let mut context = BindingContext::from_durable(&durable, &job, mutation_time_millis)?;
     // Validate the frame's internal identity before applying the scheduler
     // replacement owner phase. A malformed frame must not advance Delivery
     // merely because it carries the current attempt number.
@@ -225,27 +233,34 @@ pub(crate) fn execute_at(
 
     // Validate scheduler authority before applying a replacement owner phase.
     // Partial/new binding paths are the only paths that may mutate Delivery.
-    let acceptance = validate_session_binding(message, authority, delivery_scope(&job)?)
-        .map_err(|error| StorageError::invalid_input(error.to_string()))?;
-    if let Some(replacement) = replacement {
-        context.job_revision =
-            ensure_delivery_replacement_applied(storage, &context, &replacement)?;
-    }
-    let expected_identity = expected_session_identity(&context, message);
-
-    // A partially committed binding already has an owner receipt and must be
-    // able to finish after response loss. Only a genuinely new binding is
-    // authorized by the Server clock captured at ingress.
+    let acceptance = validate_session_binding(
+        message,
+        authority,
+        delivery_scope(&job)?,
+        &context.delivery_id,
+    )
+    .map_err(|error| StorageError::invalid_input(error.to_string()))?;
+    // Validate the ingress lease window before any replacement mutation.
     if worker_replay.is_none() && codex_replay.is_none() {
         validate_trusted_lease_time(message, server_time)?;
     }
+    let successor_authority = delivery_authority(&acceptance)?;
+    if let Some(replacement) = replacement.as_ref() {
+        let successor_run_id = replacement
+            .work_run_id()
+            .ok_or_else(|| StorageError::invalid_input("replacement has no successor WorkRun"))?
+            .clone();
+        context.identity.work_run_id = successor_run_id;
+        context.attempt = replacement.replacement_attempt();
+    }
+    let expected_identity = expected_session_identity(&context, message);
 
     let worker_session_receipt = if let Some(receipt) = worker_replay {
         validate_phase_receipt(
             &receipt,
             &context,
             &worker_phase,
-            context.job_revision + 1,
+            receipt.revision,
             true,
             &expected_identity,
         )?;
@@ -257,27 +272,53 @@ pub(crate) fn execute_at(
             )
             .into());
         }
-        commit_worker_session(storage, message, &context, &worker_phase, &acceptance).or_else(
-            |source| {
+        if let Some(replacement) = replacement.as_ref() {
+            commit_replacement_worker_session(
+                storage,
+                message,
+                &context,
+                &worker_phase,
+                replacement,
+                &successor_authority,
+            )
+            .or_else(|source| {
                 recover_raced_phase_receipt(
                     storage,
                     &context,
                     &worker_phase,
-                    context.job_revision + 1,
                     &expected_identity,
                     source,
                 )
-            },
-        )?
+            })?
+        } else {
+            commit_worker_session(storage, message, &context, &worker_phase, &acceptance).or_else(
+                |source| {
+                    recover_raced_phase_receipt(
+                        storage,
+                        &context,
+                        &worker_phase,
+                        &expected_identity,
+                        source,
+                    )
+                },
+            )?
+        }
     };
 
     let codex_thread_receipt = match codex_replay {
         Some(receipt) => {
+            let expected_revision =
+                next_phase_revision(worker_session_receipt.revision).map_err(|source| {
+                    DeliverySessionBindingCommitError::CodexThreadPhase {
+                        worker_session_receipt: Box::new(worker_session_receipt.clone()),
+                        source,
+                    }
+                })?;
             validate_phase_receipt(
                 &receipt,
                 &context,
                 &codex_phase,
-                context.job_revision + 2,
+                expected_revision,
                 true,
                 &expected_identity,
             )
@@ -296,23 +337,23 @@ pub(crate) fn execute_at(
                 )?;
             receipt
         }
-        None => commit_codex_thread(storage, message, &context, &codex_phase, &acceptance)
-            .or_else(|source| {
-                recover_raced_phase_receipt(
-                    storage,
-                    &context,
-                    &codex_phase,
-                    context.job_revision + 2,
-                    &expected_identity,
-                    source,
-                )
-            })
-            .map_err(
-                |source| DeliverySessionBindingCommitError::CodexThreadPhase {
-                    worker_session_receipt: Box::new(worker_session_receipt.clone()),
-                    source,
-                },
-            )?,
+        None => commit_codex_thread(
+            storage,
+            message,
+            &context,
+            &codex_phase,
+            &acceptance,
+            worker_session_receipt.revision,
+        )
+        .or_else(|source| {
+            recover_raced_phase_receipt(storage, &context, &codex_phase, &expected_identity, source)
+        })
+        .map_err(
+            |source| DeliverySessionBindingCommitError::CodexThreadPhase {
+                worker_session_receipt: Box::new(worker_session_receipt.clone()),
+                source,
+            },
+        )?,
     };
 
     validate_binding_pending_audit_event(storage, &codex_thread_receipt, &codex_phase, message)
@@ -329,21 +370,28 @@ pub(crate) fn execute_at(
     })
 }
 
+#[derive(Clone)]
 struct BindingContext {
     scope_key: ReceiptScopeKey,
     repository_scope: winwincode_domain::RepositoryScope,
     delivery_id: DeliveryId,
     identity: SessionBindingIdentity,
-    job_revision: u64,
     attempt: u64,
     bound_at_millis: u64,
 }
 
-fn delivery_scope(job: &ExecutionJob) -> Result<&DeliveryStageExecutionScope, StorageError> {
+fn delivery_stream_id_from_job(
+    stream: &str,
+    _work_run_id: &winwincode_domain::WorkRunId,
+) -> String {
+    stream.to_owned()
+}
+
+fn delivery_scope(job: &ExecutionJob) -> Result<&WorkRunExecutionScope, StorageError> {
     match &job.scope {
-        ExecutionScope::DeliveryStageExecutionScope(scope) => Ok(scope),
+        ExecutionScope::WorkRunExecutionScope(scope) => Ok(scope),
         ExecutionScope::ProductSessionExecutionScope(_) => Err(StorageError::invalid_input(
-            "SessionBinding ExecutionJob is not a Delivery stage job",
+            "SessionBinding ExecutionJob is not a Delivery WorkRun job",
         )),
     }
 }
@@ -354,15 +402,15 @@ impl BindingContext {
         job: &ExecutionJob,
         bound_at_millis: u64,
     ) -> Result<Self, StorageError> {
-        let ExecutionScope::DeliveryStageExecutionScope(scope) = &job.scope else {
+        let ExecutionScope::WorkRunExecutionScope(scope) = &job.scope else {
             return Err(StorageError::invalid_input(
-                "SessionBinding ExecutionJob is not a Delivery stage job",
+                "SessionBinding ExecutionJob is not a Delivery WorkRun job",
             ));
         };
         let attempt = u64::try_from(job.attempt).map_err(|_| {
             StorageError::invalid_input("SessionBinding ExecutionJob attempt is out of range")
         })?;
-        let stream_id = delivery_stream_id(&scope.delivery_id);
+        let stream_id = delivery_stream_id_from_job(durable.stream_id(), &scope.work_run_id);
         if durable.stream_id() != stream_id || durable.revision() == 0 {
             return Err(StorageError::invalid_input(
                 "SessionBinding ExecutionJob receipt does not identify its Delivery state",
@@ -373,15 +421,27 @@ impl BindingContext {
             repository_scope: repository_scope_from_receipt_key(
                 durable.receipt_identity().scope_key(),
             )?,
-            delivery_id: scope.delivery_id.clone(),
+            delivery_id: DeliveryId(
+                stream_id
+                    .strip_prefix("delivery:")
+                    .unwrap_or(&stream_id)
+                    .to_owned(),
+            ),
             identity: SessionBindingIdentity {
-                delivery_id: scope.delivery_id.clone(),
-                delivery_task_id: scope.delivery_task_id.clone(),
-                stage_run_id: scope.stage_run_id.clone(),
+                delivery_id: DeliveryId(
+                    stream_id
+                        .strip_prefix("delivery:")
+                        .unwrap_or(&stream_id)
+                        .to_owned(),
+                ),
+                work_contract_id: scope.work_contract_id.clone(),
+                work_contract_revision: scope.work_contract_revision.clone(),
+                work_item_id: scope.work_item_id.clone(),
+                work_item_revision: scope.work_item_revision.clone(),
+                work_run_id: scope.work_run_id.clone(),
                 product_session_id: scope.product_session_id.clone(),
                 execution_job_id: job.job_id.clone(),
             },
-            job_revision: durable.revision(),
             attempt,
             bound_at_millis,
         })
@@ -407,117 +467,94 @@ fn replacement_for_job(
     Ok(Some(replacement))
 }
 
-fn ensure_delivery_replacement_applied(
+fn commit_replacement_worker_session(
     storage: &mut dyn ProductStateStorage,
+    message: &SessionBindingMessage,
     context: &BindingContext,
+    phase: &Phase,
     replacement: &ExecutionScopeReplacementAuthority,
-) -> Result<u64, StorageError> {
-    let phase = ReplacementPhase::new(context, replacement)?;
-    if let Some(receipt) = storage.load_receipt(&phase.receipt_identity, &phase.command_digest)? {
-        validate_replacement_receipt(&receipt, context, &phase, true)?;
-        return Ok(receipt.revision);
-    }
+    authority: &DeliverySessionBindingAuthority,
+) -> Result<CommitReceipt, StorageError> {
     let current = load_current_delivery_state(storage, context)?;
+    let predecessor_work_run_id = replacement
+        .predecessor_work_run_id()
+        .ok_or_else(|| StorageError::invalid_input("replacement has no predecessor WorkRun"))?;
+    let predecessor = current
+        .snapshot()
+        .session_bindings
+        .iter()
+        .find(|binding| {
+            binding.delivery_id == context.delivery_id
+                && binding.product_session_id == context.identity.product_session_id
+                && binding.work_run_id == *predecessor_work_run_id
+                && binding.attempt == replacement.previous_attempt()
+                && binding.worker_session_id.as_ref() == replacement.previous_worker_session_id()
+                && binding.worker_id.as_ref() == Some(&replacement.predecessor_lease().worker_id)
+                && binding.worker_instance_id.as_ref()
+                    == Some(&replacement.predecessor_lease().worker_instance_id)
+                && binding.lease_id.as_ref() == Some(replacement.previous_lease_id())
+                && binding.fencing_token.as_ref()
+                    == Some(&replacement.predecessor_lease().fencing_token)
+        })
+        .ok_or_else(|| StorageError::invalid_input("replacement predecessor binding is missing"))?;
+    let predecessor_identity = SessionBindingIdentity {
+        delivery_id: predecessor.delivery_id.clone(),
+        work_contract_id: predecessor.work_contract_id.clone(),
+        work_contract_revision: predecessor.work_contract_revision.clone(),
+        work_item_id: predecessor.work_item_id.clone(),
+        work_item_revision: predecessor.work_item_revision.clone(),
+        work_run_id: predecessor.work_run_id.clone(),
+        product_session_id: predecessor.product_session_id.clone(),
+        execution_job_id: predecessor.execution_job_id.clone(),
+    };
     let journal_key = delivery_journal_key(&context.delivery_id)?;
-    let loaded = storage.load_journal(&journal_key)?;
-    let journal = StagedDeliveryJournal::new(context.delivery_id.clone(), loaded);
+    let journal = StagedDeliveryJournal::new(
+        context.delivery_id.clone(),
+        storage.load_journal(&journal_key)?,
+    );
     let mutation = DeliveryStore::borrowed(&journal)
         .execute(DeliveryCommand::ReplaceExecutionAttempt(Box::new(
             ReplaceDeliveryExecutionAttempt {
+                request_id: phase.receipt_identity.request_id().clone(),
+                request_digest: phase.request_digest()?,
                 expected_revision: current.revision(),
-                identity: context.identity.clone(),
+                identity: predecessor_identity,
                 replacement: DeliveryExecutionAttemptReplacement::from_scheduler(replacement),
-                now_millis: instant_millis(replacement.created_at())?,
+                successor_authority: authority.clone(),
+                now_millis: context.bound_at_millis,
             },
         )))
         .map_err(|error| StorageError::invalid_input(error.to_string()))?;
-    if mutation.replayed {
-        return Err(StorageError::invalid_input(
-            "Delivery replacement journal replay has no matching owner receipt",
-        ));
-    }
     let publication = journal
         .into_publication()
-        .map_err(|error| StorageError::adapter(error.to_string()))?
-        .ok_or_else(|| {
-            StorageError::invalid_input(
-                "execution.attempt.replaced did not stage a journal publication",
-            )
-        })?;
-    let commit = StateCommit::new(
+        .map_err(|error| StorageError::adapter(error.to_string()))?;
+    let revision = mutation.snapshot.revision();
+    let session_identity = expected_session_identity(context, message);
+    let events = phase_events(context, revision, &session_identity, message)?;
+    let mut commit = StateCommit::new(
         phase.receipt_identity.clone(),
         phase.command_digest.clone(),
         delivery_stream_id(&context.delivery_id),
         current.revision(),
-        mutation.snapshot.encode_json().map_err(|error| {
-            StorageError::invalid_input(format!(
-                "failed to encode replaced Delivery snapshot: {error}"
-            ))
-        })?,
-        vec![NewOutboxEvent::internal(
-            phase.event_id.clone(),
-            "execution.scope-replacement.applied.v1",
-            serde_json::to_vec(&serde_json::json!({
-                "deliveryId": context.delivery_id,
-                "executionJobId": replacement.job_id(),
-                "replacementAttempt": replacement.replacement_attempt(),
-                "stageRunId": context.identity.stage_run_id,
-            }))
-            .map_err(|error| StorageError::adapter(error.to_string()))?,
-        )],
-    )
-    .with_journal_publication(publication);
+        mutation
+            .snapshot
+            .encode_json()
+            .map_err(|error| StorageError::invalid_input(error.to_string()))?,
+        events,
+    );
+    if let Some(publication) = publication {
+        commit = commit.with_journal_publication(publication);
+    }
     let receipt = storage.commit(&commit)?;
-    validate_replacement_receipt(&receipt, context, &phase, receipt.idempotent_replay)?;
-    Ok(receipt.revision)
-}
-
-struct ReplacementPhase {
-    receipt_identity: ReceiptIdentity,
-    command_digest: Sha256Digest,
-    event_id: String,
-}
-
-impl ReplacementPhase {
-    fn new(
-        context: &BindingContext,
-        replacement: &ExecutionScopeReplacementAuthority,
-    ) -> Result<Self, StorageError> {
-        let mut actor = Vec::new();
-        actor.extend_from_slice(b"winwincode.execution-replacement-owner.v1\0");
-        append_phase_fact(&mut actor, replacement.job_id().0.as_bytes());
-        Ok(Self {
-            receipt_identity: ReceiptIdentity::new(
-                ReceiptActorKey::from_encoded(actor)?,
-                context.scope_key.clone(),
-                replacement.receipt_id().clone(),
-            )?,
-            command_digest: replacement.receipt_digest().clone(),
-            event_id: format!("execution-replacement-owner:{}", replacement.receipt_id().0),
-        })
-    }
-}
-
-fn validate_replacement_receipt(
-    receipt: &CommitReceipt,
-    context: &BindingContext,
-    phase: &ReplacementPhase,
-    expected_replay: bool,
-) -> Result<(), StorageError> {
-    if receipt.receipt_identity != phase.receipt_identity
-        || receipt.command_digest != phase.command_digest
-        || receipt.idempotent_replay != expected_replay
-        || receipt.stream_id != delivery_stream_id(&context.delivery_id)
-        || receipt.revision == 0
-        || receipt.events.len() != 1
-        || receipt.events[0].event_id != phase.event_id
-        || receipt.events[0].topic != "execution.scope-replacement.applied.v1"
-    {
-        return Err(StorageError::invalid_input(
-            "Delivery replacement owner receipt is incomplete or foreign",
-        ));
-    }
-    Ok(())
+    validate_phase_receipt(
+        &receipt,
+        context,
+        phase,
+        revision,
+        receipt.idempotent_replay,
+        &session_identity,
+    )?;
+    Ok(receipt)
 }
 
 fn load_current_delivery_state(
@@ -578,7 +615,12 @@ fn commit_worker_session(
     phase: &Phase,
     acceptance: &SessionBindingAcceptance<'_>,
 ) -> Result<CommitReceipt, StorageError> {
-    let current = load_current_delivery(storage, context, context.job_revision)?;
+    // The immutable Job revision only identifies the outbox intent.  Delivery
+    // may have appended the canonical WorkRun (and other durable facts) after
+    // that intent was published, so bind against the actual current snapshot;
+    // the StateCommit CAS below turns that read into the authoritative phase
+    // revision and the receipt records it for the next phase.
+    let current = load_current_delivery_state(storage, context)?;
     validate_current_binding(&current, context, message, BindingProgress::Pending)?;
     let session_identity = session_identity_for_current_binding(&current, context, message)?;
     let authority = delivery_authority(acceptance)?;
@@ -601,11 +643,8 @@ fn commit_codex_thread(
     context: &BindingContext,
     phase: &Phase,
     acceptance: &SessionBindingAcceptance<'_>,
+    expected_revision: u64,
 ) -> Result<CommitReceipt, StorageError> {
-    let expected_revision = context
-        .job_revision
-        .checked_add(1)
-        .ok_or_else(|| StorageError::invalid_input("Delivery revision overflow"))?;
     let current = load_current_delivery(storage, context, expected_revision)?;
     validate_current_binding(&current, context, message, BindingProgress::WorkerAccepted)?;
     let session_identity = session_identity_for_current_binding(&current, context, message)?;
@@ -636,10 +675,14 @@ fn session_identity_for_current_binding(
         .iter()
         .filter(|binding| {
             binding.delivery_id == context.identity.delivery_id
-                && binding.delivery_task_id == context.identity.delivery_task_id
-                && binding.stage_run_id == context.identity.stage_run_id
+                && binding.work_contract_id == context.identity.work_contract_id
+                && binding.work_contract_revision == context.identity.work_contract_revision
+                && binding.work_item_id == context.identity.work_item_id
+                && binding.work_item_revision == context.identity.work_item_revision
+                && binding.work_run_id == context.identity.work_run_id
                 && binding.product_session_id == context.identity.product_session_id
                 && binding.execution_job_id == context.identity.execution_job_id
+                && binding.attempt == context.attempt
         })
         .collect::<Vec<_>>();
     let [binding] = matches.as_slice() else {
@@ -664,7 +707,7 @@ fn session_identity_for_current_binding(
     Ok(SessionIdentity {
         codex_thread_id: message.codex_thread_id.clone(),
         product_session_id: binding.product_session_id.clone(),
-        stage_run_id: Some(binding.stage_run_id.clone()),
+        work_run_id: Some(binding.work_run_id.clone()),
         worker_session_id: message.worker_session_id.clone(),
     })
 }
@@ -676,7 +719,7 @@ fn expected_session_identity(
     SessionIdentity {
         codex_thread_id: message.codex_thread_id.clone(),
         product_session_id: context.identity.product_session_id.clone(),
-        stage_run_id: Some(context.identity.stage_run_id.clone()),
+        work_run_id: Some(context.identity.work_run_id.clone()),
         worker_session_id: message.worker_session_id.clone(),
     }
 }
@@ -714,12 +757,12 @@ fn binding_pending_audit_event(
         session_identity.product_session_id.clone(),
         session_identity.worker_session_id.clone(),
         session_identity.codex_thread_id.clone(),
-        session_identity.stage_run_id.clone().ok_or_else(|| {
-            StorageError::invalid_input("SessionBinding SessionIdentity has no StageRun")
+        session_identity.work_run_id.clone().ok_or_else(|| {
+            StorageError::invalid_input("SessionBinding SessionIdentity has no WorkRun")
         })?,
         context.identity.execution_job_id.clone(),
         context.delivery_id.clone(),
-        context.identity.delivery_task_id.clone(),
+        None,
         message.lease.worker_id.clone(),
         message.lease.worker_instance_id.clone(),
         message.lease.lease_id.clone(),
@@ -884,7 +927,6 @@ fn recover_raced_phase_receipt(
     storage: &dyn ProductStateStorage,
     context: &BindingContext,
     phase: &Phase,
-    expected_revision: u64,
     expected_identity: &SessionIdentity,
     source: StorageError,
 ) -> Result<CommitReceipt, StorageError> {
@@ -900,11 +942,17 @@ fn recover_raced_phase_receipt(
         &receipt,
         context,
         phase,
-        expected_revision,
+        receipt.revision,
         true,
         expected_identity,
     )?;
     Ok(receipt)
+}
+
+fn next_phase_revision(revision: u64) -> Result<u64, StorageError> {
+    revision
+        .checked_add(1)
+        .ok_or_else(|| StorageError::invalid_input("SessionBinding phase revision overflow"))
 }
 
 fn load_current_delivery(
@@ -951,10 +999,14 @@ fn validate_current_binding(
         .iter()
         .filter(|binding| {
             binding.delivery_id == context.identity.delivery_id
-                && binding.delivery_task_id == context.identity.delivery_task_id
-                && binding.stage_run_id == context.identity.stage_run_id
+                && binding.work_contract_id == context.identity.work_contract_id
+                && binding.work_contract_revision == context.identity.work_contract_revision
+                && binding.work_item_id == context.identity.work_item_id
+                && binding.work_item_revision == context.identity.work_item_revision
+                && binding.work_run_id == context.identity.work_run_id
                 && binding.product_session_id == context.identity.product_session_id
                 && binding.execution_job_id == context.identity.execution_job_id
+                && binding.attempt == context.attempt
         })
         .collect::<Vec<_>>();
     let [binding] = matches.as_slice() else {
@@ -964,27 +1016,29 @@ fn validate_current_binding(
     };
     let run = delivery
         .snapshot()
-        .stage_runs
+        .work_run_aggregate
+        .runs
         .iter()
-        .find(|run| run.id == context.identity.stage_run_id)
-        .ok_or_else(|| StorageError::invalid_input("SessionBinding StageRun is missing"))?;
-    if run.delivery_id != context.delivery_id
-        || run.delivery_task_id != context.identity.delivery_task_id
-        || run.attempt != context.attempt
+        .find(|run| run.id == context.identity.work_run_id)
+        .ok_or_else(|| StorageError::invalid_input("SessionBinding WorkRun is missing"))?;
+    if u64::try_from(run.attempt).ok() != Some(context.attempt)
         || !matches!(
-            run.status,
-            StageRunStatus::Running | StageRunStatus::Waiting
+            run.state,
+            winwincode_domain::WorkRunState::Leased | winwincode_domain::WorkRunState::Running
         )
-        || context.bound_at_millis < run.started_at_millis
         || context.bound_at_millis < binding.bound_at_millis
     {
         return Err(StorageError::invalid_input(
-            "SessionBinding message does not match the current active StageRun",
+            "SessionBinding message does not match the current active WorkRun",
         ));
     }
     let exact_progress = match progress {
         BindingProgress::Pending => {
-            binding.worker_session_id.is_none() && binding.codex_thread_id.is_none()
+            binding
+                .worker_session_id
+                .as_ref()
+                .is_none_or(|worker_session_id| worker_session_id == &message.worker_session_id)
+                && binding.codex_thread_id.is_none()
         }
         BindingProgress::WorkerAccepted => {
             binding.worker_session_id.as_ref() == Some(&message.worker_session_id)
@@ -1068,7 +1122,7 @@ fn validate_message_session_identity(message: &SessionBindingMessage) -> Result<
     if message.session_identity.product_session_id != message.product_session_id
         || message.session_identity.worker_session_id != message.worker_session_id
         || message.session_identity.codex_thread_id != message.codex_thread_id
-        || message.session_identity.stage_run_id != message.stage_run_id
+        || message.session_identity.work_run_id != message.work_run_id
     {
         return Err(StorageError::invalid_input(
             "SessionBinding message SessionIdentity is internally inconsistent",
@@ -1082,7 +1136,7 @@ fn validate_durable_job(
     job: &ExecutionJob,
     message: &SessionBindingMessage,
 ) -> Result<(), StorageError> {
-    let ExecutionScope::DeliveryStageExecutionScope(scope) = &job.scope else {
+    let ExecutionScope::WorkRunExecutionScope(scope) = &job.scope else {
         return Err(StorageError::invalid_input(
             "SessionBinding durable job has foreign scope",
         ));
@@ -1090,7 +1144,7 @@ fn validate_durable_job(
     if job.job_id != message.lease.job_id
         || job.attempt != message.lease.attempt
         || scope.product_session_id != message.product_session_id
-        || message.stage_run_id.as_ref() != Some(&scope.stage_run_id)
+        || message.work_run_id.as_ref() != Some(&scope.work_run_id)
     {
         return Err(StorageError::invalid_input(
             "SessionBinding message does not match the durable ExecutionJob",
@@ -1107,14 +1161,15 @@ fn validate_complete_replay(
     codex_phase: &Phase,
     expected_identity: &SessionIdentity,
 ) -> Result<(), StorageError> {
-    let worker_revision = context
-        .job_revision
-        .checked_add(1)
-        .ok_or_else(|| StorageError::invalid_input("SessionBinding replay revision overflow"))?;
+    // Receipt revisions are the durable phase facts.  Never reconstruct them
+    // from the immutable outbox revision: a replacement, an unrelated
+    // Delivery append, or a recovery retry may have advanced the stream
+    // before this exact pair is replayed.
+    let worker_revision = worker_receipt.revision;
     let codex_revision = worker_revision
         .checked_add(1)
         .ok_or_else(|| StorageError::invalid_input("SessionBinding replay revision overflow"))?;
-    if worker_receipt.revision != worker_revision || codex_receipt.revision != codex_revision {
+    if worker_revision == 0 || codex_receipt.revision != codex_revision {
         return Err(StorageError::invalid_input(
             "SessionBinding replay receipts are not consecutive",
         ));
@@ -1182,7 +1237,7 @@ fn runtime_invalidated_event(
     delivery_stage_runtime_invalidated_event(&DeliveryStageRuntimeInvalidation {
         scope_key: &context.scope_key,
         delivery_id: &context.delivery_id,
-        stage_run_id: &context.identity.stage_run_id,
+        work_run_id: &context.identity.work_run_id,
         product_session_id: &context.identity.product_session_id,
         session_identity,
         revision,
@@ -1196,7 +1251,7 @@ fn runtime_invalidated_event(
 pub(crate) struct DeliveryStageRuntimeInvalidation<'facts> {
     pub scope_key: &'facts ReceiptScopeKey,
     pub delivery_id: &'facts DeliveryId,
-    pub stage_run_id: &'facts winwincode_domain::StageRunId,
+    pub work_run_id: &'facts winwincode_domain::WorkRunId,
     pub product_session_id: &'facts winwincode_domain::ProductSessionId,
     pub session_identity: &'facts SessionIdentity,
     pub revision: u64,
@@ -1224,7 +1279,7 @@ pub(crate) fn delivery_stage_runtime_invalidated_event(
         scope_kind:
             ControlPlaneWebSocketDeliveryStageRuntimeProjectionInvalidatedEventScopeKind::DeliveryStage,
         session_identity: facts.session_identity.clone(),
-        stage_run_id: facts.stage_run_id.clone(),
+        work_run_id: facts.work_run_id.clone(),
         type_value:
             ControlPlaneWebSocketDeliveryStageRuntimeProjectionInvalidatedEventTypeValue::RuntimeProjectionInvalidatedV1,
     };
@@ -1271,7 +1326,7 @@ fn validate_phase_receipt(
     validate_delivery_stage_runtime_invalidation(
         receipt,
         &context.delivery_id,
-        &context.identity.stage_run_id,
+        &context.identity.work_run_id,
         &context.identity.product_session_id,
         expected_identity,
         expected_revision,
@@ -1282,7 +1337,7 @@ fn validate_phase_receipt(
 pub(crate) fn validate_delivery_stage_runtime_invalidation(
     receipt: &CommitReceipt,
     delivery_id: &DeliveryId,
-    stage_run_id: &winwincode_domain::StageRunId,
+    work_run_id: &winwincode_domain::WorkRunId,
     product_session_id: &winwincode_domain::ProductSessionId,
     expected_identity: &SessionIdentity,
     expected_revision: u64,
@@ -1311,11 +1366,11 @@ pub(crate) fn validate_delivery_stage_runtime_invalidation(
     })?;
     if canonical != event.payload
         || payload.delivery_id != *delivery_id
-        || payload.stage_run_id != *stage_run_id
+        || payload.work_run_id != *work_run_id
         || payload.product_session_id != *product_session_id
         || payload.session_identity.codex_thread_id != expected_identity.codex_thread_id
         || payload.session_identity.product_session_id != expected_identity.product_session_id
-        || payload.session_identity.stage_run_id != expected_identity.stage_run_id
+        || payload.session_identity.work_run_id != expected_identity.work_run_id
         || payload.session_identity.worker_session_id != expected_identity.worker_session_id
         || payload.projection_revision.0 != expected_revision
         || payload.last_projection_sequence != 0
@@ -1341,7 +1396,7 @@ pub(crate) fn validate_delivery_stage_runtime_invalidation(
             .0
     {
         return Err(StorageError::invalid_input(
-            "runtime projection invalidation does not match durable Delivery stage facts",
+            "runtime projection invalidation does not match durable Delivery WorkRun facts",
         ));
     }
     Ok(())

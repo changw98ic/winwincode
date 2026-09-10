@@ -68,10 +68,10 @@ fn submission(
             .iter()
             .map(|dependency| ExecutionJobId(id("job", *dependency)))
             .collect(),
-        stage_run_id: scope
+        work_run_id: scope
             .delivery_id
             .as_ref()
-            .map(|_| winwincode_domain::StageRunId(id("run", job))),
+            .map(|_| winwincode_domain::WorkRunId(id("wrn", job))),
         submitted_at: FrozenClock::at(second).now(),
     }
 }

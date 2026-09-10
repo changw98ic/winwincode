@@ -17,6 +17,7 @@ pub mod stage;
 pub mod task;
 pub mod task_breakdown;
 pub mod verdict;
+pub mod workrun;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CoordinationErrorCode {

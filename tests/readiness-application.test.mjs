@@ -77,7 +77,7 @@ function availabilityPage(request, ready) {
     settingsSource: request.scope,
     defaultProviderId: ready ? 'openai' : null,
     defaultModelId: ready ? 'gpt-5' : null,
-    status: ready ? 'enabled' : 'disabled',
+    status: ready ? 'available' : 'disabled',
     reason: ready ? 'ready' : 'no_provider',
     items: ready
       ? [{
@@ -86,7 +86,7 @@ function availabilityPage(request, ready) {
             modelId: 'gpt-5',
             credentialReferenceId: 'crd_00000000000000000000000001',
           },
-          status: 'enabled',
+          status: 'available',
           reason: 'ready',
           isDefault: true,
           providerDisplayName: 'OpenAI',

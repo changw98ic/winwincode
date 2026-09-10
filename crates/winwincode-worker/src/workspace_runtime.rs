@@ -15,15 +15,23 @@
 //! exact revision gate.
 
 use std::{
-    collections::HashMap,
-    fmt,
+    collections::{HashMap, HashSet},
+    fmt, fs,
     future::Future,
+    io::ErrorKind,
+    os::unix::fs::PermissionsExt as _,
     path::{Path, PathBuf},
     pin::Pin,
     process::Stdio,
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use codex_apply_patch::{
+    ApplyPatchFileUpdateMode, ApplyPatchOptions, Hunk, apply_patch_with_options, parse_patch,
+};
+use codex_exec_server::LOCAL_FS;
+use codex_utils_path_uri::PathUri;
+use futures::future::join_all;
 use sha2::{Digest as _, Sha256};
 use tokio::io::AsyncReadExt as _;
 use tokio::process::Command;
@@ -38,19 +46,19 @@ use winwincode_execution_port::diagnostic_parser::{
     parse_diagnostics,
 };
 use winwincode_execution_port::generated::{
-    AppliedFileSummary, ArtifactReference, ChangeBatchIdentity, ChangeBatchProgressEvent,
-    ChangeBatchProgressState, ChangeBatchProposalEvent, ChangeBatchReceipt,
-    ChangeBatchReceiptStatus, DiagnosticBaseline, DiagnosticCategory, DiagnosticChangeStatus,
-    EncodedPayload, ExecutionJobReplacementAuthority, ExecutionOutcomeUsage, ModelChunkMessage,
-    ModelGatewayRoute, ModelOpenMessage, ModelOpenMessageKind, ObservationAcceptanceCriterion,
-    ObservationDataEgressPolicy, ObservationDecision, ObservationDeltaSummary,
-    ObservationFailedTestSummary, ObservationIntent, ObservationPromptInjectionScan,
-    ObservationPromptInjectionStatus, ObservationReasonCode, ObservationReceipt,
-    ObservationRequest, ObservationResponse, ObservationSecretScan, ObservationSecretScanStatus,
-    ObservationSource, ObservationUntrustedInput, ObservationUntrustedInputTrustLevel,
-    RepairLoopCounters, ValidationCheckStatus, ValidationCheckSummary, ValidationCommandPhase,
-    ValidationCommandSpec, ValidationProfileName, ValidationProfileSelection, ValidationReceipt,
-    ValidationReceiptStatus,
+    AppliedFileOperation, AppliedFileSummary, ArtifactReference, ChangeBatchIdentity,
+    ChangeBatchProgressEvent, ChangeBatchProgressState, ChangeBatchProposalEvent,
+    ChangeBatchReceipt, ChangeBatchReceiptStatus, DiagnosticBaseline, DiagnosticCategory,
+    DiagnosticChangeStatus, EncodedPayload, ExecutionJobReplacementAuthority,
+    ExecutionOutcomeUsage, ModelChunkMessage, ModelGatewayRoute, ModelOpenMessage,
+    ModelOpenMessageKind, ObservationAcceptanceCriterion, ObservationDataEgressPolicy,
+    ObservationDecision, ObservationDeltaSummary, ObservationFailedTestSummary, ObservationIntent,
+    ObservationPromptInjectionScan, ObservationPromptInjectionStatus, ObservationReasonCode,
+    ObservationReceipt, ObservationRequest, ObservationResponse, ObservationSecretScan,
+    ObservationSecretScanStatus, ObservationSource, ObservationUntrustedInput,
+    ObservationUntrustedInputTrustLevel, RepairLoopCounters, ValidationCheckStatus,
+    ValidationCheckSummary, ValidationCommandPhase, ValidationCommandSpec, ValidationProfileName,
+    ValidationProfileSelection, ValidationReceipt, ValidationReceiptStatus,
 };
 use winwincode_execution_port::observation_contract::{
     derive_observation_content_digest, derive_observation_id, derive_observation_input_digest,
@@ -79,7 +87,7 @@ use crate::{
     validation_diagnostics::{ValidationDiagnosticDisposition, decide_validation_diagnostics},
     workspace::{
         WorkerWorkspace, WorkspaceCleanupReport, WorkspaceCloseReason, WorkspaceError,
-        WorkspaceManager, WorkspaceProvenance,
+        WorkspaceManager, WorkspaceProvenance, controlled_path,
     },
 };
 
@@ -215,6 +223,7 @@ impl From<ChangeBatchStoreError> for JobWorkspaceError {
 #[derive(Clone, Copy)]
 pub struct ChangeBatchExecutionRequest<'request> {
     pub active: &'request ActiveJob,
+    pub base_revision: &'request WorkspaceRevision,
     pub checkout: &'request Path,
     /// Exact patch bytes whose canonical digest is bound to the batch identity.
     pub patch: &'request str,
@@ -316,8 +325,7 @@ pub type ChangeBatchExecutorFuture<'operation> = Pin<
     >,
 >;
 
-/// Explicit mutation port. Production defaults to a fail-closed implementation
-/// until the real deterministic delivery adapter is installed.
+/// Explicit mutation port for deterministic checkout changes.
 pub trait ChangeBatchExecutor: fmt::Debug + Send {
     /// Starts one new deterministic execution.
     ///
@@ -351,29 +359,431 @@ pub trait ChangeBatchExecutor: fmt::Debug + Send {
 }
 
 #[derive(Debug, Default)]
-struct UnavailableChangeBatchExecutor;
+struct DeterministicChangeBatchExecutor;
 
-impl ChangeBatchExecutor for UnavailableChangeBatchExecutor {
+impl ChangeBatchExecutor for DeterministicChangeBatchExecutor {
     fn execute<'operation>(
         &'operation mut self,
-        _request: ChangeBatchExecutionRequest<'operation>,
+        request: ChangeBatchExecutionRequest<'operation>,
     ) -> ChangeBatchExecutorFuture<'operation> {
-        Box::pin(async { Err(ChangeBatchExecutorError) })
+        Box::pin(execute_deterministic_patch(request))
     }
 
     fn recover<'operation>(
         &'operation mut self,
-        _request: ChangeBatchExecutionRequest<'operation>,
+        request: ChangeBatchExecutionRequest<'operation>,
     ) -> ChangeBatchExecutorFuture<'operation> {
-        Box::pin(async { Err(ChangeBatchExecutorError) })
+        Box::pin(async move {
+            if resolve_checkout_tree(request.checkout).ok().as_ref() == Some(request.base_revision)
+            {
+                execute_deterministic_patch(request).await
+            } else {
+                Ok(uncertain_execution())
+            }
+        })
     }
 
     fn cancel<'operation>(
         &'operation mut self,
-        _request: ChangeBatchExecutionRequest<'operation>,
+        request: ChangeBatchExecutionRequest<'operation>,
     ) -> ChangeBatchExecutorFuture<'operation> {
-        Box::pin(async { Err(ChangeBatchExecutorError) })
+        Box::pin(async move {
+            Ok(
+                if resolve_checkout_tree(request.checkout).ok().as_ref()
+                    == Some(request.base_revision)
+                {
+                    ChangeBatchExecutionResult::RolledBack { artifact_ref: None }
+                } else {
+                    uncertain_execution()
+                },
+            )
+        })
     }
+}
+
+#[derive(Debug)]
+struct PatchPlan {
+    hunks: Vec<Hunk>,
+    patches: Vec<String>,
+    paths: Vec<PathBuf>,
+    moves: Vec<(PathBuf, PathBuf)>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct FileSnapshot {
+    contents: Vec<u8>,
+    digest: Sha256Digest,
+    bytes: i64,
+    mode: String,
+}
+
+async fn execute_deterministic_patch(
+    request: ChangeBatchExecutionRequest<'_>,
+) -> Result<ChangeBatchExecutionResult, ChangeBatchExecutorError> {
+    let Some(plan) = PatchPlan::parse(request.checkout, request.patch) else {
+        return Ok(ChangeBatchExecutionResult::RolledBack { artifact_ref: None });
+    };
+    let Some(before) = capture_patch_state(request.checkout, &plan.paths) else {
+        return Ok(ChangeBatchExecutionResult::RolledBack { artifact_ref: None });
+    };
+    if !plan.valid_initial_state(&before) {
+        return Ok(ChangeBatchExecutionResult::RolledBack { artifact_ref: None });
+    }
+    let Ok(cwd) = PathUri::from_host_native_path(request.checkout) else {
+        return Ok(ChangeBatchExecutionResult::RolledBack { artifact_ref: None });
+    };
+    let results = join_all(plan.patches.iter().map(|patch| {
+        let cwd = &cwd;
+        async move {
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            apply_patch_with_options(
+                patch,
+                ApplyPatchOptions {
+                    update_file_mode: ApplyPatchFileUpdateMode::PreserveLineEndings,
+                    follow_symlinks: false,
+                },
+                cwd,
+                &mut stdout,
+                &mut stderr,
+                LOCAL_FS.as_ref(),
+                None,
+            )
+            .await
+        }
+    }))
+    .await;
+    let Some(after) = capture_patch_state(request.checkout, &plan.paths) else {
+        return Ok(uncertain_execution());
+    };
+    if results.iter().all(Result::is_ok) {
+        let Some(files) = plan.summaries(&before, &after) else {
+            return Ok(
+                if restore_patch_state(request.checkout, &before)
+                    && capture_patch_state(request.checkout, &plan.paths).as_ref() == Some(&before)
+                {
+                    ChangeBatchExecutionResult::RolledBack { artifact_ref: None }
+                } else {
+                    uncertain_execution()
+                },
+            );
+        };
+        return Ok(if files.is_empty() {
+            ChangeBatchExecutionResult::RolledBack { artifact_ref: None }
+        } else {
+            ChangeBatchExecutionResult::Applied {
+                files,
+                artifact_ref: None,
+            }
+        });
+    }
+    let exact = results.iter().all(|result| match result {
+        Ok(delta) => delta.is_exact(),
+        Err(failure) => failure.delta().is_exact(),
+    });
+    Ok(
+        if exact
+            && restore_patch_state(request.checkout, &before)
+            && capture_patch_state(request.checkout, &plan.paths).as_ref() == Some(&before)
+        {
+            ChangeBatchExecutionResult::RolledBack { artifact_ref: None }
+        } else {
+            uncertain_execution()
+        },
+    )
+}
+
+const fn uncertain_execution() -> ChangeBatchExecutionResult {
+    ChangeBatchExecutionResult::StateUncertain {
+        files: Vec::new(),
+        artifact_ref: None,
+    }
+}
+
+impl PatchPlan {
+    fn parse(checkout: &Path, patch: &str) -> Option<Self> {
+        let hunks = parse_patch(patch).ok()?.hunks;
+        if hunks.is_empty() || hunks.len() > 20 {
+            return None;
+        }
+        let mut paths = Vec::new();
+        let mut seen = HashSet::new();
+        let mut path_counts = HashMap::new();
+        let mut moves = Vec::new();
+        for hunk in &hunks {
+            let (source, destination) = match hunk {
+                Hunk::AddFile { path, .. } | Hunk::DeleteFile { path } => (path, None),
+                Hunk::UpdateFile {
+                    path, move_path, ..
+                } => (path, move_path.as_ref()),
+            };
+            for path in std::iter::once(source).chain(destination) {
+                controlled_path(checkout, path, true).ok()?;
+                *path_counts.entry(path.clone()).or_insert(0_usize) += 1;
+                if seen.insert(path.clone()) {
+                    paths.push(path.clone());
+                }
+            }
+            if let Some(destination) = destination {
+                moves.push((source.clone(), destination.clone()));
+            }
+        }
+        if paths.len() > 20 {
+            return None;
+        }
+        if moves.iter().any(|(source, destination)| {
+            path_counts.get(source).copied().unwrap_or(0) != 1
+                || path_counts.get(destination).copied().unwrap_or(0) != 1
+        }) {
+            return None;
+        }
+        let patches = parallel_patch_groups(patch, &hunks)?;
+        Some(Self {
+            hunks,
+            patches,
+            paths,
+            moves,
+        })
+    }
+
+    fn valid_initial_state(&self, state: &HashMap<PathBuf, Option<FileSnapshot>>) -> bool {
+        let mut exists = state
+            .iter()
+            .map(|(path, snapshot)| (path.clone(), snapshot.is_some()))
+            .collect::<HashMap<_, _>>();
+        for hunk in &self.hunks {
+            let valid = match hunk {
+                Hunk::AddFile { path, .. } => {
+                    let available = !exists.get(path).copied().unwrap_or(false);
+                    exists.insert(path.clone(), true);
+                    available
+                }
+                Hunk::DeleteFile { path } => {
+                    let available = exists.get(path).copied().unwrap_or(false);
+                    exists.insert(path.clone(), false);
+                    available
+                }
+                Hunk::UpdateFile {
+                    path,
+                    move_path: None,
+                    ..
+                } => exists.get(path).copied().unwrap_or(false),
+                Hunk::UpdateFile {
+                    path,
+                    move_path: Some(destination),
+                    ..
+                } => {
+                    let available = exists.get(path).copied().unwrap_or(false)
+                        && !exists.get(destination).copied().unwrap_or(false);
+                    exists.insert(path.clone(), false);
+                    exists.insert(destination.clone(), true);
+                    available
+                }
+            };
+            if !valid {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn summaries(
+        &self,
+        before: &HashMap<PathBuf, Option<FileSnapshot>>,
+        after: &HashMap<PathBuf, Option<FileSnapshot>>,
+    ) -> Option<Vec<AppliedFileSummary>> {
+        let mut files = Vec::new();
+        let mut moved = HashSet::new();
+        for (source, destination) in &self.moves {
+            let source_before = before.get(source)?.as_ref()?;
+            if after.get(source)?.is_some() || before.get(destination)?.is_some() {
+                return None;
+            }
+            let destination_after = after.get(destination)?.as_ref()?;
+            files.push(applied_summary(
+                source,
+                Some(destination),
+                AppliedFileOperation::MoveValue,
+                Some(source_before),
+                Some(destination_after),
+            )?);
+            moved.insert(source);
+            moved.insert(destination);
+        }
+        for path in &self.paths {
+            if moved.contains(path) {
+                continue;
+            }
+            let before = before.get(path)?.as_ref();
+            let after = after.get(path)?.as_ref();
+            let operation = match (before, after) {
+                (None, Some(_)) => AppliedFileOperation::Create,
+                (Some(_), None) => AppliedFileOperation::Delete,
+                (Some(left), Some(right)) if left != right => AppliedFileOperation::Update,
+                (None, None) | (Some(_), Some(_)) => continue,
+            };
+            files.push(applied_summary(path, None, operation, before, after)?);
+        }
+        Some(files)
+    }
+}
+
+fn parallel_patch_groups(patch: &str, hunks: &[Hunk]) -> Option<Vec<String>> {
+    let lines = patch.trim().lines().collect::<Vec<_>>();
+    if lines.first()?.trim() != "*** Begin Patch" || lines.last()?.trim() != "*** End Patch" {
+        return None;
+    }
+    let mut metadata = Vec::new();
+    let mut blocks: Vec<Vec<&str>> = Vec::new();
+    for line in &lines[1..lines.len().saturating_sub(1)] {
+        let hunk_header = line.starts_with("*** Add File: ")
+            || line.starts_with("*** Delete File: ")
+            || line.starts_with("*** Update File: ");
+        if hunk_header {
+            blocks.push(vec![line]);
+        } else if let Some(block) = blocks.last_mut() {
+            block.push(line);
+        } else {
+            metadata.push(*line);
+        }
+    }
+    if blocks.len() != hunks.len() {
+        return None;
+    }
+    let touches = hunks
+        .iter()
+        .map(|hunk| {
+            let mut paths = HashSet::new();
+            match hunk {
+                Hunk::AddFile { path, .. } | Hunk::DeleteFile { path } => {
+                    paths.insert(path.clone());
+                }
+                Hunk::UpdateFile {
+                    path, move_path, ..
+                } => {
+                    paths.insert(path.clone());
+                    paths.extend(move_path.iter().cloned());
+                }
+            }
+            paths
+        })
+        .collect::<Vec<_>>();
+    let mut assigned = vec![false; hunks.len()];
+    let mut groups = Vec::new();
+    for first in 0..hunks.len() {
+        if assigned[first] {
+            continue;
+        }
+        assigned[first] = true;
+        let mut stack = vec![first];
+        let mut indices = Vec::new();
+        while let Some(index) = stack.pop() {
+            indices.push(index);
+            for candidate in 0..hunks.len() {
+                if !assigned[candidate] && !touches[index].is_disjoint(&touches[candidate]) {
+                    assigned[candidate] = true;
+                    stack.push(candidate);
+                }
+            }
+        }
+        indices.sort_unstable();
+        let mut group = String::from("*** Begin Patch\n");
+        for line in &metadata {
+            group.push_str(line);
+            group.push('\n');
+        }
+        for index in indices {
+            for line in &blocks[index] {
+                group.push_str(line);
+                group.push('\n');
+            }
+        }
+        group.push_str("*** End Patch\n");
+        parse_patch(&group).ok()?;
+        groups.push(group);
+    }
+    Some(groups)
+}
+
+fn restore_patch_state(checkout: &Path, before: &HashMap<PathBuf, Option<FileSnapshot>>) -> bool {
+    let mut restored = true;
+    for (relative, snapshot) in before {
+        let current = controlled_path(checkout, relative, true)
+            .ok()
+            .is_some_and(|path| match snapshot {
+                Some(snapshot) => path.parent().is_some_and(|parent| {
+                    u32::from_str_radix(&snapshot.mode, 8)
+                        .ok()
+                        .is_some_and(|mode| {
+                            fs::create_dir_all(parent).is_ok()
+                                && fs::write(&path, &snapshot.contents).is_ok()
+                                && fs::set_permissions(&path, fs::Permissions::from_mode(mode))
+                                    .is_ok()
+                        })
+                }),
+                None => match fs::symlink_metadata(&path) {
+                    Ok(metadata) if metadata.file_type().is_file() => fs::remove_file(path).is_ok(),
+                    Err(error) if error.kind() == ErrorKind::NotFound => true,
+                    Ok(_) | Err(_) => false,
+                },
+            });
+        restored &= current;
+    }
+    restored
+}
+
+fn capture_patch_state(
+    checkout: &Path,
+    paths: &[PathBuf],
+) -> Option<HashMap<PathBuf, Option<FileSnapshot>>> {
+    paths
+        .iter()
+        .map(|relative| {
+            let path = controlled_path(checkout, relative, true).ok()?;
+            Some((relative.clone(), snapshot_file(&path).ok()?))
+        })
+        .collect()
+}
+
+fn snapshot_file(path: &Path) -> Result<Option<FileSnapshot>, ()> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(()),
+    };
+    if !metadata.file_type().is_file() {
+        return Err(());
+    }
+    let bytes = fs::read(path).map_err(|_| ())?;
+    Ok(Some(FileSnapshot {
+        contents: bytes.clone(),
+        digest: Sha256Digest(format!("sha256:{:x}", Sha256::digest(&bytes))),
+        bytes: i64::try_from(bytes.len()).map_err(|_| ())?,
+        mode: format!("{:04o}", metadata.permissions().mode() & 0o7777),
+    }))
+}
+
+fn applied_summary(
+    path: &Path,
+    move_path: Option<&PathBuf>,
+    operation: AppliedFileOperation,
+    before: Option<&FileSnapshot>,
+    after: Option<&FileSnapshot>,
+) -> Option<AppliedFileSummary> {
+    Some(AppliedFileSummary {
+        after_sha256: after.map(|snapshot| snapshot.digest.clone()),
+        before_sha256: before.map(|snapshot| snapshot.digest.clone()),
+        bytes_after: after.map_or(0, |snapshot| snapshot.bytes),
+        bytes_before: before.map_or(0, |snapshot| snapshot.bytes),
+        mode_after: after.map(|snapshot| snapshot.mode.clone()),
+        mode_before: before.map(|snapshot| snapshot.mode.clone()),
+        move_path: match move_path {
+            Some(path) => Some(path.to_str()?.to_owned()),
+            None => None,
+        },
+        operation,
+        path: path.to_str()?.to_owned(),
+    })
 }
 
 /// Terminal evidence of one executed or replayed delegated proposal.
@@ -426,7 +836,7 @@ impl JobWorkspaceRuntime {
         Ok(Self {
             manager: WorkspaceManager::open(root, source_root)?,
             active: HashMap::new(),
-            change_batch_executor: Box::new(UnavailableChangeBatchExecutor),
+            change_batch_executor: Box::new(DeterministicChangeBatchExecutor),
             validation_artifacts: Box::new(UnavailableValidationArtifactPort),
             change_batch_store,
         })
@@ -908,6 +1318,7 @@ impl JobWorkspaceRuntime {
         }
         let request = ChangeBatchExecutionRequest {
             active,
+            base_revision: &accepted_revision,
             checkout: &checkout,
             patch: &event.proposal.patch,
         };
@@ -918,26 +1329,136 @@ impl JobWorkspaceRuntime {
             retention,
         )
         .await;
+        if let ChangeBatchExecutionResult::RolledBack { artifact_ref } = &result {
+            append_progress_state(
+                &mut self.change_batch_store,
+                &mut progress,
+                event,
+                ChangeBatchProgressState::RollbackStarted,
+                "ChangeBatch rollback started",
+                Vec::new(),
+                now,
+            )?;
+            append_progress_state(
+                &mut self.change_batch_store,
+                &mut progress,
+                event,
+                ChangeBatchProgressState::RolledBack,
+                "ChangeBatch rollback completed",
+                Vec::new(),
+                now,
+            )?;
+            let receipt = exact_receipt(
+                event,
+                &accepted_revision,
+                Some(&accepted_revision),
+                Vec::new(),
+                artifact_ref.clone(),
+                ChangeBatchReceiptStatus::Rejected,
+            )?;
+            let terminal = next_progress(
+                &progress,
+                event,
+                ChangeBatchProgressState::RepairRequired,
+                "ChangeBatch was rolled back and requires repair",
+                Vec::new(),
+                now,
+            );
+            self.change_batch_store.retain_terminal_workspace_receipt(
+                &workspace_id,
+                &terminal,
+                &receipt,
+                BatchState::Applying,
+                BatchState::RepairRequired,
+                now,
+            )?;
+            progress.push(terminal);
+            return Ok(ExecutedChangeBatch {
+                progress,
+                receipt,
+                observation_request: None,
+                replayed: retention == StoreRetention::Replay,
+            });
+        }
+        if let ChangeBatchExecutionResult::StateUncertain { artifact_ref, .. } = &result {
+            let receipt = exact_receipt(
+                event,
+                &accepted_revision,
+                None,
+                Vec::new(),
+                artifact_ref.clone(),
+                ChangeBatchReceiptStatus::StateUncertain,
+            )?;
+            let terminal = next_progress(
+                &progress,
+                event,
+                ChangeBatchProgressState::InfrastructureFailed,
+                "ChangeBatch result state is uncertain",
+                Vec::new(),
+                now,
+            );
+            self.change_batch_store.retain_terminal_workspace_receipt(
+                &workspace_id,
+                &terminal,
+                &receipt,
+                BatchState::Applying,
+                BatchState::Quarantined,
+                now,
+            )?;
+            progress.push(terminal);
+            return Ok(ExecutedChangeBatch {
+                progress,
+                receipt,
+                observation_request: None,
+                replayed: retention == StoreRetention::Replay,
+            });
+        }
         let applied_files = match &result {
             ChangeBatchExecutionResult::Applied { files, .. }
-            | ChangeBatchExecutionResult::PartiallyApplied { files, .. }
-            | ChangeBatchExecutionResult::StateUncertain { files, .. } => files.clone(),
-            ChangeBatchExecutionResult::RolledBack { .. } => Vec::new(),
+            | ChangeBatchExecutionResult::PartiallyApplied { files, .. } => files.clone(),
+            ChangeBatchExecutionResult::RolledBack { .. }
+            | ChangeBatchExecutionResult::StateUncertain { .. } => unreachable!(),
         };
         let files = canonical_applied_file_summaries(&applied_files)?;
         let result_revision = resolve_checkout_tree(&checkout)?;
+        let status = receipt_status(&result);
         let mut receipt = exact_receipt(
             event,
             &accepted_revision,
-            &result_revision,
+            Some(&result_revision),
             files,
             executor_artifact_ref(&result),
-            receipt_status(&result),
+            status.clone(),
         )?;
         if receipt_delta_digest(&receipt)? != derive_delta_digest(&receipt.files)? {
             return Err(change_batch_error(
                 "ChangeBatch executor result does not bind an exact delta",
             ));
+        }
+        if status == ChangeBatchReceiptStatus::PartiallyApplied {
+            let terminal = next_progress(
+                &progress,
+                event,
+                ChangeBatchProgressState::InfrastructureFailed,
+                "ChangeBatch was only partially applied",
+                Vec::new(),
+                now,
+            );
+            self.change_batch_store.retain_terminal_workspace_receipt(
+                &workspace_id,
+                &terminal,
+                &receipt,
+                BatchState::Applying,
+                BatchState::Quarantined,
+                now,
+            )?;
+            progress.push(terminal);
+            return Ok(ExecutedChangeBatch {
+                progress,
+                receipt,
+                observation_request: None,
+                replayed: retention == StoreRetention::Replay,
+            });
         }
         let applied = next_progress(
             &progress,
@@ -1354,6 +1875,17 @@ impl JobWorkspaceRuntime {
     #[must_use]
     pub fn contains(&self, job_id: &ExecutionJobId) -> bool {
         self.active.contains_key(&job_id.0)
+    }
+
+    pub(crate) fn checkout_for_job(&self, active: &ActiveJob) -> Result<&Path, JobWorkspaceError> {
+        let workspace = self
+            .active
+            .get(&active.job.job_id.0)
+            .ok_or_else(authority_error)?;
+        if !same_authority(workspace.provenance(), active) {
+            return Err(authority_error());
+        }
+        Ok(workspace.layout().checkout())
     }
 
     /// Returns the currently accepted tree that authorizes the next batch.
@@ -2022,7 +2554,7 @@ fn load_validation_configuration(
     JobWorkspaceError,
 > {
     let path = checkout.join(VALIDATION_CONFIGURATION_PATH);
-    let Ok(bytes) = std::fs::read(&path) else {
+    let Ok(bytes) = fs::read(&path) else {
         return Ok(None);
     };
     if bytes.len() > MAX_VALIDATION_CONFIGURATION_BYTES {
@@ -2415,22 +2947,28 @@ fn exact_delta_digest(files: &[AppliedFileSummary]) -> Result<Sha256Digest, JobW
 fn exact_receipt(
     proposal: &ChangeBatchProposalEvent,
     base_revision: &WorkspaceRevision,
-    result_revision: &WorkspaceRevision,
+    result_revision: Option<&WorkspaceRevision>,
     files: Vec<AppliedFileSummary>,
     artifact_ref: Option<ArtifactReference>,
     status: ChangeBatchReceiptStatus,
 ) -> Result<ChangeBatchReceipt, JobWorkspaceError> {
-    let delta_digest = exact_delta_digest(&files)?;
+    let exact = matches!(
+        status,
+        ChangeBatchReceiptStatus::Applied
+            | ChangeBatchReceiptStatus::Rejected
+            | ChangeBatchReceiptStatus::PartiallyApplied
+    );
+    let delta_digest = exact.then(|| exact_delta_digest(&files)).transpose()?;
     Ok(ChangeBatchReceipt {
         artifact_ref,
         base_revision: base_revision.clone(),
-        delta_digest: Some(delta_digest),
-        delta_exact: true,
+        delta_digest,
+        delta_exact: exact,
         files,
         identity: proposal.identity.clone(),
         normalizer: None,
         observation: None,
-        result_revision: Some(result_revision.clone()),
+        result_revision: result_revision.cloned(),
         status,
         validation: None,
     })

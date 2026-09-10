@@ -78,7 +78,7 @@ function modelRouteOption(route = modelRoute, overrides = {}) {
     reasoningEfforts: ['medium', 'high'],
     credentialRotationVersion: 1,
     isDefault: route === modelRoute,
-    status: 'enabled',
+    status: 'available',
     reason: 'ready',
     ...overrides,
   }
@@ -94,7 +94,7 @@ function modelRouteAvailability(items = [modelRouteOption()], overrides = {}) {
     requestPoolRevision: 5,
     defaultProviderId: modelRoute.providerId,
     defaultModelId: modelRoute.modelId,
-    status: 'enabled',
+    status: 'available',
     reason: 'ready',
     items,
     ...overrides,
@@ -475,6 +475,24 @@ test('presentation explains first-Chat model setup and bounded creation failures
   }))
   assert.equal(noModel.statusText, '需要先配置模型')
   assert.match(noModel.emptyText, /模型路由/u)
+
+  for (const [status, reason, pattern] of [
+    ['rate_limited', 'rate_limited', /rate limited/iu],
+    ['window_exhausted', 'window_exhausted', /window is exhausted/iu],
+    ['weekly_exhausted', 'weekly_exhausted', /weekly usage is exhausted/iu],
+    ['auth_error', 'authentication_error', /rejected its credential/iu],
+    ['unknown', 'runtime_status_unknown', /status is unknown/iu],
+  ]) {
+    const unavailable = chatPagePresentation(state({
+      activeProductSessionId: null,
+      sessions: [],
+      session: null,
+      messages: [],
+      modelRouteAvailability: modelRouteAvailability([], { status, reason }),
+      selectedModelRoute: null,
+    }))
+    assert.match(unavailable.emptyText, pattern)
+  }
 
   const errors = [
     ['IDEMPOTENCY_CONFLICT', /冲突/u],

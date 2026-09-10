@@ -10,7 +10,7 @@ use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 
-use winwincode_domain::{ExecutionJobId, OrganizationId, ProductSessionId, ProjectId, StageRunId};
+use winwincode_domain::{ExecutionJobId, OrganizationId, ProductSessionId, ProjectId, WorkRunId};
 
 use crate::{ExecutionJobRecord, ExecutionJobState, ExecutionQueueScope};
 
@@ -46,8 +46,8 @@ impl SchedulerWeights {
 #[derive(Clone, Copy, Debug)]
 pub struct SchedulerCandidate<'record> {
     pub record: &'record ExecutionJobRecord,
-    /// Delivery jobs reserve one `StageRun`; `ProductSession` Chat jobs use `None`.
-    pub stage_run_id: Option<&'record StageRunId>,
+    /// Delivery jobs reserve one `WorkRun`; `ProductSession` Chat jobs use `None`.
+    pub work_run_id: Option<&'record WorkRunId>,
     pub priority: SchedulerPriority,
     /// Monotonic scheduler tick when the job entered this queue tier.
     pub enqueued_at_tick: u64,
@@ -61,7 +61,7 @@ pub struct SchedulerCandidate<'record> {
 pub struct SchedulerDispatch {
     pub scope: ExecutionQueueScope,
     pub job_id: ExecutionJobId,
-    pub stage_run_id: Option<StageRunId>,
+    pub work_run_id: Option<WorkRunId>,
     pub attempt: u64,
     pub expected_revision: u64,
 }
@@ -137,12 +137,12 @@ enum FairnessKey {
 }
 
 /// Stateful deterministic scheduler. Dispatch counters retain fair-share
-/// history while active stage-run reservations prevent concurrent duplicates.
+/// history while active `WorkRun` reservations prevent concurrent duplicates.
 #[derive(Debug)]
 pub struct SchedulerPolicy {
     starvation_threshold_ticks: u64,
     dispatch_counts: HashMap<FairnessKey, u64>,
-    active_stage_runs: HashMap<String, ExecutionJobId>,
+    active_work_runs: HashMap<String, ExecutionJobId>,
 }
 
 impl SchedulerPolicy {
@@ -153,7 +153,7 @@ impl SchedulerPolicy {
         Self {
             starvation_threshold_ticks,
             dispatch_counts: HashMap::new(),
-            active_stage_runs: HashMap::new(),
+            active_work_runs: HashMap::new(),
         }
     }
 
@@ -163,20 +163,20 @@ impl SchedulerPolicy {
     /// product session.
     ///
     /// The returned revision must be used for the durable lease transition.
-    /// Until [`Self::release_stage_run`] is called or a terminal snapshot is
-    /// observed, the policy will not select a second job for that stage run.
+    /// Until [`Self::release_work_run`] is called or a terminal snapshot is
+    /// observed, the policy will not select a second job for that `WorkRun`.
     ///
     /// # Errors
     ///
-    /// Rejects duplicate records, zero/inconsistent weights, empty stage-run
-    /// identities, and snapshots containing two active jobs for one stage run.
+    /// Rejects duplicate records, zero/inconsistent weights, empty `WorkRun`
+    /// identities, and snapshots containing two active jobs for one `WorkRun`.
     pub fn select(
         &mut self,
         now_tick: u64,
         candidates: &[SchedulerCandidate<'_>],
     ) -> Result<Option<SchedulerDispatch>, SchedulerPolicyError> {
         let weights = validate_candidates(candidates)?;
-        self.synchronize_active_stage_runs(candidates)?;
+        self.synchronize_active_work_runs(candidates)?;
 
         let records = candidates
             .iter()
@@ -185,7 +185,7 @@ impl SchedulerPolicy {
         let mut ready = candidates
             .iter()
             .filter(|candidate| {
-                ready_for_dispatch(candidate, now_tick, &records, &self.active_stage_runs)
+                ready_for_dispatch(candidate, now_tick, &records, &self.active_work_runs)
             })
             .collect::<Vec<_>>();
         if ready.is_empty() {
@@ -220,26 +220,22 @@ impl SchedulerPolicy {
         Ok(Some(SchedulerDispatch {
             scope: selected.record.scope.clone(),
             job_id: selected.record.job_id.clone(),
-            stage_run_id: selected.stage_run_id.cloned(),
+            work_run_id: selected.work_run_id.cloned(),
             attempt: selected.record.attempt,
             expected_revision: selected.record.revision,
         }))
     }
 
-    /// Releases an in-memory stage-run reservation only when both identities
+    /// Releases an in-memory `WorkRun` reservation only when both identities
     /// match the reservation created by [`Self::select`].
     #[must_use]
-    pub fn release_stage_run(
-        &mut self,
-        stage_run_id: &StageRunId,
-        job_id: &ExecutionJobId,
-    ) -> bool {
+    pub fn release_work_run(&mut self, work_run_id: &WorkRunId, job_id: &ExecutionJobId) -> bool {
         if self
-            .active_stage_runs
-            .get(&stage_run_id.0)
+            .active_work_runs
+            .get(&work_run_id.0)
             .is_some_and(|active| active == job_id)
         {
-            self.active_stage_runs.remove(&stage_run_id.0);
+            self.active_work_runs.remove(&work_run_id.0);
             true
         } else {
             false
@@ -296,13 +292,13 @@ impl SchedulerPolicy {
         ] {
             *self.dispatch_counts.entry(key).or_default() += 1;
         }
-        if let Some(stage_run_id) = candidate.stage_run_id {
-            self.active_stage_runs
-                .insert(stage_run_id.0.clone(), candidate.record.job_id.clone());
+        if let Some(work_run_id) = candidate.work_run_id {
+            self.active_work_runs
+                .insert(work_run_id.0.clone(), candidate.record.job_id.clone());
         }
     }
 
-    fn synchronize_active_stage_runs(
+    fn synchronize_active_work_runs(
         &mut self,
         candidates: &[SchedulerCandidate<'_>],
     ) -> Result<(), SchedulerPolicyError> {
@@ -310,7 +306,7 @@ impl SchedulerPolicy {
             .iter()
             .map(|candidate| candidate.record.job_id.0.as_str())
             .collect::<HashSet<_>>();
-        self.active_stage_runs
+        self.active_work_runs
             .retain(|_, job_id| present_jobs.contains(job_id.0.as_str()));
 
         for candidate in candidates {
@@ -320,30 +316,30 @@ impl SchedulerPolicy {
                     | ExecutionJobState::Running
                     | ExecutionJobState::Cancelling
             ) {
-                let Some(stage_run_id) = candidate.stage_run_id else {
+                let Some(work_run_id) = candidate.work_run_id else {
                     continue;
                 };
-                if let Some(active_job) = self.active_stage_runs.get(&stage_run_id.0) {
+                if let Some(active_job) = self.active_work_runs.get(&work_run_id.0) {
                     if active_job != &candidate.record.job_id {
                         return Err(SchedulerPolicyError::invalid(
-                            "one stage run has multiple active execution jobs",
+                            "one WorkRun has multiple active execution jobs",
                         ));
                     }
                 } else {
-                    self.active_stage_runs
-                        .insert(stage_run_id.0.clone(), candidate.record.job_id.clone());
+                    self.active_work_runs
+                        .insert(work_run_id.0.clone(), candidate.record.job_id.clone());
                 }
-            } else if let Some(stage_run_id) = candidate.stage_run_id
+            } else if let Some(work_run_id) = candidate.work_run_id
                 && matches!(
                     candidate.record.state,
                     ExecutionJobState::Completed | ExecutionJobState::Failed
                 )
                 && self
-                    .active_stage_runs
-                    .get(&stage_run_id.0)
+                    .active_work_runs
+                    .get(&work_run_id.0)
                     .is_some_and(|job_id| job_id == &candidate.record.job_id)
             {
-                self.active_stage_runs.remove(&stage_run_id.0);
+                self.active_work_runs.remove(&work_run_id.0);
             }
         }
         Ok(())
@@ -446,14 +442,14 @@ fn validate_candidates(
             ));
         }
         if candidate
-            .stage_run_id
-            .is_some_and(|stage_run_id| stage_run_id.0.is_empty())
+            .work_run_id
+            .is_some_and(|work_run_id| work_run_id.0.is_empty())
         {
             return Err(SchedulerPolicyError::invalid(
-                "scheduler candidate stage-run identity is empty",
+                "scheduler candidate WorkRun identity is empty",
             ));
         }
-        if candidate.record.stage_run_id.as_ref() != candidate.stage_run_id {
+        if candidate.record.work_run_id.as_ref() != candidate.work_run_id {
             return Err(SchedulerPolicyError::invalid(
                 "scheduler candidate reservation differs from its durable job",
             ));
@@ -494,14 +490,14 @@ fn ready_for_dispatch(
     candidate: &SchedulerCandidate<'_>,
     now_tick: u64,
     records: &HashMap<&String, &ExecutionJobRecord>,
-    active_stage_runs: &HashMap<String, ExecutionJobId>,
+    active_work_runs: &HashMap<String, ExecutionJobId>,
 ) -> bool {
     candidate.record.state == ExecutionJobState::Queued
         && candidate.record.cancellation.is_none()
         && candidate.eligible_at_tick <= now_tick
         && candidate
-            .stage_run_id
-            .is_none_or(|stage_run_id| !active_stage_runs.contains_key(&stage_run_id.0))
+            .work_run_id
+            .is_none_or(|work_run_id| !active_work_runs.contains_key(&work_run_id.0))
         && candidate.record.dependencies.iter().all(|dependency| {
             records.get(&dependency.0).is_some_and(|record| {
                 record.state == ExecutionJobState::Completed && record.cancellation.is_none()

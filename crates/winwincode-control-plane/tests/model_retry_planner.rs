@@ -20,16 +20,16 @@ use winwincode_control_plane::{
     ProviderDescriptor, ProviderGatewayIdentity, StructuredOutputSupport, command_receipt_identity,
 };
 use winwincode_domain::{
-    CodexThreadId, CredentialReferenceId, DeliveryId, ExecutionJobId, ExecutionMessageId,
-    FencingToken, Instant, LeaseId, ModelExchangeId, OrganizationId, ProductSessionId, ProjectId,
-    RepositoryId, RequestId, Revision, SchemaVersion, ServiceAccountId, SessionIdentity,
-    Sha256Digest, StageRunId, UserId, WorkerId, WorkerInstanceId, WorkerSessionId, WorkspaceId,
+    CodexThreadId, CredentialReferenceId, ExecutionJobId, ExecutionMessageId, FencingToken,
+    Instant, LeaseId, ModelExchangeId, OrganizationId, ProductSessionId, ProjectId, RepositoryId,
+    RequestId, Revision, SchemaVersion, ServiceAccountId, SessionIdentity, Sha256Digest, UserId,
+    WorkerId, WorkerInstanceId, WorkerSessionId, WorkspaceId,
 };
 use winwincode_domain::{RepositoryScope, RepositoryScopeKind, UserActor, UserActorKind};
 use winwincode_execution_port::generated::{
-    DeliveryStageExecutionScope, DeliveryStageExecutionScopeKind, EncodedPayload, ExecutionJob,
-    ExecutionLeaseStamp, ExecutionLimits, ExecutionScope, ExecutionWorkspace,
-    ExecutionWorkspaceWriteMode, ModelGatewayRoute, ModelOpenMessage, ModelOpenMessageKind,
+    EncodedPayload, ExecutionJob, ExecutionLeaseStamp, ExecutionLimits, ExecutionScope,
+    ExecutionWorkspace, ExecutionWorkspaceWriteMode, ModelGatewayRoute, ModelOpenMessage,
+    ModelOpenMessageKind,
 };
 use winwincode_storage::{NewOutboxEvent, ProductStateStorage, SqliteStorage, StateCommit};
 
@@ -102,7 +102,6 @@ fn register_provider(storage: &mut SqliteStorage) {
                     reasoning_efforts: vec!["high".to_owned()],
                 }],
             },
-            Instant("2026-09-02T00:00:00.000Z".to_owned()),
         )
         .expect("register Provider");
     CredentialReferenceService::new(storage)
@@ -186,7 +185,6 @@ fn alternate_authority(root: &std::path::Path) -> FrozenModelRouteAuthority {
                     reasoning_efforts: vec!["medium".to_owned()],
                 }],
             },
-            Instant("2026-09-02T00:00:00.000Z".to_owned()),
         )
         .expect("register alternate Provider");
     CredentialReferenceService::new(&mut storage)
@@ -252,15 +250,20 @@ fn execution_job(seed: u64, repository_seed: u64) -> ExecutionJob {
             max_runtime_seconds: 240,
         },
         payload_digest: Sha256Digest(format!("sha256:{seed:064x}")),
-        scope: ExecutionScope::DeliveryStageExecutionScope(DeliveryStageExecutionScope {
-            delivery_id: DeliveryId(id("dlv", 1)),
-            delivery_task_id: None,
-            kind: DeliveryStageExecutionScopeKind::DeliveryStage,
-            product_session_id: ProductSessionId(id("psn", 1)),
-            rework_authorization: None,
-            stage_run_id: StageRunId(id("run", 1)),
-        }),
-        stage_input: None,
+        scope: ExecutionScope::WorkRunExecutionScope(
+            winwincode_execution_port::generated::WorkRunExecutionScope {
+                attempt: 1,
+                kind: winwincode_execution_port::generated::WorkRunExecutionScopeKind::WorkRun,
+                product_session_id: ProductSessionId(id("psn", 1)),
+                rework_authorization: None,
+                work_contract_id: winwincode_domain::WorkContractId(id("wct", 1)),
+                work_contract_revision: Revision(1),
+                work_item_id: winwincode_domain::WorkItemId(id("wit", 1)),
+                work_item_revision: Revision(1),
+                work_run_id: winwincode_domain::WorkRunId(id("wrn", 1)),
+            },
+        ),
+        work_input: None,
         workspace: ExecutionWorkspace {
             checkout_revision: "0123456789abcdef0123456789abcdef01234567".to_owned(),
             repository_id: RepositoryId(id("rep", repository_seed)),
@@ -329,7 +332,7 @@ fn message() -> ModelOpenMessage {
         session_identity: SessionIdentity {
             codex_thread_id: CodexThreadId(id("cdx", 1)),
             product_session_id: ProductSessionId(id("psn", 1)),
-            stage_run_id: Some(StageRunId(id("run", 1))),
+            work_run_id: Some(winwincode_domain::WorkRunId(id("wrn", 1))),
             worker_session_id: worker_session_id.clone(),
         },
         worker_session_id,
@@ -351,12 +354,6 @@ fn admission(
             idempotent_replay: replay,
         },
         route_authority,
-        enterprise_quota_amounts: winwincode_storage::EnterpriseQuotaAmounts {
-            tokens: 100,
-            provider_cost_micros: 10,
-            operations: 1,
-            ..winwincode_storage::EnterpriseQuotaAmounts::default()
-        },
     }
 }
 
@@ -410,7 +407,7 @@ fn authenticated_execution_job_freezes_full_context_before_open_and_replays_afte
         attribution.product_session_id,
         ProductSessionId(id("psn", 1))
     );
-    assert_eq!(attribution.delivery_id, Some(DeliveryId(id("dlv", 1))));
+    assert_eq!(attribution.delivery_id, None);
     assert_eq!(attribution.user_id, UserId(id("usr", 7)));
     let bytes = context.encode_json().expect("context bytes");
     let replay = planner

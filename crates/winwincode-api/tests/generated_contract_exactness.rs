@@ -86,6 +86,7 @@ fn generated_approval_detail_is_required_closed_and_secret_safe() {
             "workerSessionId": "wsn_00000000000000000000000000"
         },
         "category": "shell",
+        "decisionEnabled": false,
         "effectiveDecisionScope": "once",
         "expiresAt": "2026-08-24T12:10:00.000Z",
         "id": "apr_00000000000000000000000000",
@@ -147,7 +148,7 @@ fn generated_rust_dtos_preserve_object_level_one_of_constraints() {
         "codexThreadId": null,
         "boundAt": "2026-08-24T10:00:00.000Z",
         "sessionIdentity": null,
-        "stageRunId": null,
+        "workRunId": null,
         "workerId": null,
         "leaseId": null,
         "attempt": null,
@@ -167,7 +168,7 @@ fn generated_rust_dtos_preserve_object_level_one_of_constraints() {
     assert!(serde_json::from_value::<DeliveryStageProjection>(forged_human_stage).is_err());
 
     let mut runtime = examples["responses"]["runtimeProjection"]["result"].clone();
-    runtime["stageRunId"] = Value::Null;
+    runtime["workRunId"] = Value::Null;
     assert!(serde_json::from_value::<RuntimeProjectionSnapshot>(runtime).is_err());
 
     let mut empty_changes =

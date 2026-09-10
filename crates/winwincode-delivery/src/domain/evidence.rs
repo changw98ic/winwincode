@@ -15,16 +15,15 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use winwincode_domain::{
     CodexThreadId, DeliveryId, EvidenceId, ExecutionEventId, ExecutionJobId, FencingToken, LeaseId,
-    ProductSessionId, StageRunId, WorkerId, WorkerInstanceId, WorkerSessionId,
+    ProductSessionId, WorkRunId, WorkerId, WorkerInstanceId, WorkerSessionId,
 };
 
 use super::verification::AcceptedVerificationJobOutcomeFact;
 use super::{
-    CandidatePathState, Delivery, DeliverySpecId, DeliveryStage, DeliveryValidationError,
-    FrozenDeliveryCandidate, MAX_REFERENCE_LENGTH, MAX_SAFE_INTEGER, RepositoryRef, SessionBinding,
-    SessionBindingId, StageRun, StageRunActorType, ValidatedGitSnapshotFact,
-    assert_frozen_candidate_current, bounded_text, portable_identifier, positive,
-    safe_non_negative, schema_version,
+    CandidatePathState, Delivery, DeliverySpecId, DeliveryValidationError, FrozenDeliveryCandidate,
+    MAX_REFERENCE_LENGTH, MAX_SAFE_INTEGER, RepositoryRef, SessionBinding, SessionBindingId,
+    ValidatedGitSnapshotFact, assert_frozen_candidate_current, bounded_text, portable_identifier,
+    positive, safe_non_negative, schema_version,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -55,7 +54,7 @@ pub struct EvidenceRef {
     pub delivery_id: DeliveryId,
     pub delivery_spec_id: DeliverySpecId,
     pub delivery_spec_revision: u64,
-    pub stage_run_id: StageRunId,
+    pub work_run_id: WorkRunId,
     pub session_binding_id: SessionBindingId,
     pub candidate_ref: String,
     #[serde(rename = "type")]
@@ -88,7 +87,7 @@ pub enum VerifiedEvidenceOutcome {
 pub(crate) struct ValidatedCheckoutAttestationFact {
     product_session_id: ProductSessionId,
     execution_job_id: ExecutionJobId,
-    stage_run_id: StageRunId,
+    work_run_id: WorkRunId,
     role_id: String,
     attempt: u64,
     lease_id: LeaseId,
@@ -114,7 +113,7 @@ pub(crate) struct AcceptedRuntimeSourceFact {
     execution_job_id: ExecutionJobId,
     worker_session_id: WorkerSessionId,
     codex_thread_id: CodexThreadId,
-    stage_run_id: StageRunId,
+    work_run_id: WorkRunId,
     role_id: String,
     attempt: u64,
     lease_id: LeaseId,
@@ -134,7 +133,7 @@ pub(crate) fn checkout_attestation_from_snapshot(
     ValidatedCheckoutAttestationFact {
         product_session_id: terminal.product_session_id().clone(),
         execution_job_id: terminal.execution_job_id().clone(),
-        stage_run_id: terminal.stage_run_id().clone(),
+        work_run_id: terminal.work_run_id().clone(),
         role_id: terminal.role_id().into(),
         attempt: terminal.attempt(),
         lease_id: terminal.lease_id().clone(),
@@ -166,7 +165,7 @@ pub(crate) fn accepted_runtime_source(
         execution_job_id: terminal.execution_job_id().clone(),
         worker_session_id: terminal.worker_session_id().clone(),
         codex_thread_id: terminal.codex_thread_id().clone(),
-        stage_run_id: terminal.stage_run_id().clone(),
+        work_run_id: terminal.work_run_id().clone(),
         role_id: terminal.role_id().into(),
         attempt: terminal.attempt(),
         lease_id: terminal.lease_id().clone(),
@@ -187,7 +186,7 @@ pub(crate) fn accepted_runtime_source(
 struct FencedExecutionIdentity {
     product_session_id: ProductSessionId,
     execution_job_id: ExecutionJobId,
-    stage_run_id: StageRunId,
+    work_run_id: WorkRunId,
     role_id: String,
     attempt: u64,
     lease_id: LeaseId,
@@ -225,7 +224,7 @@ pub(crate) enum EvidenceSource<'facts> {
 
 #[derive(Debug)]
 pub(crate) struct ResolveDeliveryEvidenceInput<'facts> {
-    pub stage_run_id: StageRunId,
+    pub work_run_id: WorkRunId,
     pub session_binding_id: SessionBindingId,
     pub source: EvidenceSource<'facts>,
     pub created_at_millis: u64,
@@ -289,7 +288,7 @@ struct EvidenceIdentity<'identity> {
     delivery_spec_id: &'identity DeliverySpecId,
     delivery_spec_revision: u64,
     candidate_ref: &'identity str,
-    stage_run_id: &'identity StageRunId,
+    work_run_id: &'identity WorkRunId,
     session_binding_id: &'identity SessionBindingId,
     evidence_type: EvidenceRefType,
     source_ref: &'identity str,
@@ -337,7 +336,6 @@ impl ResolvedDeliveryEvidence {
 pub(crate) enum EvidenceResolutionErrorCode {
     InvalidEvidence,
     CandidateStale,
-    StageMismatch,
     SessionMismatch,
     SourceMissing,
     SourceAmbiguous,
@@ -391,7 +389,7 @@ fn resolution_error(
 ///
 /// # Errors
 ///
-/// Rejects a stale candidate, foreign `StageRun` or `SessionBinding`, missing or
+/// Rejects a stale candidate, foreign `WorkRun` or `SessionBinding`, missing or
 /// ambiguous source facts, identity/type/candidate drift, and sources that do
 /// not strictly precede the resulting Evidence.
 #[allow(
@@ -409,7 +407,7 @@ pub(crate) fn resolve_delivery_evidence(
             format!("frozen candidate is not current: {error}"),
         )
     })?;
-    let (stage_run, binding, producer) = evidence_stage_and_binding(delivery, candidate, &input)?;
+    let (work_run, binding, producer) = evidence_work_run_and_binding(delivery, candidate, &input)?;
 
     let source = match &input.source {
         EvidenceSource::Runtime {
@@ -420,7 +418,7 @@ pub(crate) fn resolve_delivery_evidence(
             checkout,
         } => resolve_runtime_source(
             candidate,
-            stage_run,
+            work_run,
             binding,
             *evidence_type,
             source_event_id,
@@ -431,11 +429,11 @@ pub(crate) fn resolve_delivery_evidence(
         )?,
         direct => resolve_direct_candidate_source(
             candidate,
-            stage_run,
+            work_run,
             binding,
             producer,
-            direct,
             input.created_at_millis,
+            direct,
         )?,
     };
 
@@ -444,7 +442,7 @@ pub(crate) fn resolve_delivery_evidence(
         delivery_spec_id: &delivery.snapshot().spec.id,
         delivery_spec_revision: delivery.snapshot().spec.revision,
         candidate_ref: candidate.candidate_ref(),
-        stage_run_id: &stage_run.id,
+        work_run_id: &work_run.id,
         session_binding_id: &binding.id,
         evidence_type: source.evidence_type,
         source_ref: &source.source_ref,
@@ -456,7 +454,7 @@ pub(crate) fn resolve_delivery_evidence(
         delivery_id: delivery.id().clone(),
         delivery_spec_id: delivery.snapshot().spec.id.clone(),
         delivery_spec_revision: delivery.snapshot().spec.revision,
-        stage_run_id: stage_run.id.clone(),
+        work_run_id: work_run.id.clone(),
         session_binding_id: binding.id.clone(),
         candidate_ref: candidate.candidate_ref().into(),
         evidence_type: source.evidence_type,
@@ -514,15 +512,15 @@ fn canonical_evidence_id(digest: [u8; 32]) -> String {
 
 fn resolve_direct_candidate_source(
     candidate: &FrozenDeliveryCandidate,
-    stage_run: &StageRun,
+    work_run: &winwincode_domain::WorkRun,
     binding: &SessionBinding,
-    producer: &StageRun,
-    source: &EvidenceSource<'_>,
+    producer: &winwincode_domain::WorkRun,
     evidence_created_at_millis: u64,
+    source: &EvidenceSource<'_>,
 ) -> Result<ResolvedEvidenceSource, EvidenceResolutionError> {
     assert_direct_candidate_producer(
         candidate,
-        stage_run,
+        work_run,
         binding,
         producer,
         evidence_created_at_millis,
@@ -590,27 +588,33 @@ fn resolve_direct_candidate_file(
 
 fn assert_direct_candidate_producer(
     candidate: &FrozenDeliveryCandidate,
-    stage_run: &StageRun,
+    work_run: &winwincode_domain::WorkRun,
     binding: &SessionBinding,
-    producer: &StageRun,
+    producer: &winwincode_domain::WorkRun,
     evidence_created_at_millis: u64,
 ) -> Result<(), EvidenceResolutionError> {
-    if stage_run.id != producer.id
-        || stage_run.id != *candidate.producer_stage_run_id()
+    if work_run.id != producer.id
+        || work_run.id != *candidate.producer_work_run_id()
         || binding.id != *candidate.producer_session_binding_id()
     {
         return Err(resolution_error(
             EvidenceResolutionErrorCode::SessionMismatch,
-            "direct candidate evidence must retain its producer StageRun and SessionBinding",
+            "direct candidate evidence must retain its producer WorkRun and SessionBinding",
         ));
     }
-    if producer
-        .finished_at_millis
-        .is_none_or(|finished| evidence_created_at_millis < finished)
-    {
+    if !matches!(
+        producer.state,
+        winwincode_domain::WorkRunState::CandidateReady | winwincode_domain::WorkRunState::Settled
+    ) {
         return Err(resolution_error(
             EvidenceResolutionErrorCode::SourceTimeMismatch,
-            "direct candidate evidence cannot predate its producer result",
+            "direct candidate evidence requires a settled producer WorkRun",
+        ));
+    }
+    if evidence_created_at_millis < candidate.producer_finished_at_millis() {
+        return Err(resolution_error(
+            EvidenceResolutionErrorCode::SourceTimeMismatch,
+            "direct candidate evidence must follow the producer WorkRun terminal time",
         ));
     }
     Ok(())
@@ -636,27 +640,28 @@ fn encode_uri_component(value: &str) -> String {
     encoded
 }
 
-fn evidence_stage_and_binding<'delivery>(
+fn evidence_work_run_and_binding<'delivery>(
     delivery: &'delivery Delivery,
     candidate: &FrozenDeliveryCandidate,
     input: &ResolveDeliveryEvidenceInput<'_>,
 ) -> Result<
     (
-        &'delivery StageRun,
+        &'delivery winwincode_domain::WorkRun,
         &'delivery SessionBinding,
-        &'delivery StageRun,
+        &'delivery winwincode_domain::WorkRun,
     ),
     EvidenceResolutionError,
 > {
-    let stage_run = delivery
+    let work_run = delivery
         .snapshot()
-        .stage_runs
+        .work_run_aggregate
+        .runs
         .iter()
-        .find(|run| run.id == input.stage_run_id && run.actor_type == StageRunActorType::Codex)
+        .find(|run| run.id == input.work_run_id)
         .ok_or_else(|| {
             resolution_error(
-                EvidenceResolutionErrorCode::StageMismatch,
-                "evidence StageRun is missing or is not owned by Codex",
+                EvidenceResolutionErrorCode::SessionMismatch,
+                "evidence WorkRun is missing",
             )
         })?;
     let binding = delivery
@@ -671,55 +676,55 @@ fn evidence_stage_and_binding<'delivery>(
             )
         })?;
     if binding.delivery_id != *delivery.id()
-        || binding.stage_run_id != stage_run.id
-        || binding.delivery_task_id != stage_run.delivery_task_id
+        || binding.work_run_id != work_run.id
+        || binding.attempt != u64::try_from(work_run.attempt).unwrap_or(0)
         || binding.worker_session_id.is_none()
         || binding.codex_thread_id.is_none()
-        || binding.bound_at_millis < stage_run.started_at_millis
         || input.created_at_millis < binding.bound_at_millis
-        || input.created_at_millis < stage_run.started_at_millis
     {
         return Err(resolution_error(
             EvidenceResolutionErrorCode::SessionMismatch,
-            "evidence does not match one complete current SessionBinding",
+            "evidence does not match one complete current WorkRun SessionBinding",
         ));
     }
     let producer = delivery
         .snapshot()
-        .stage_runs
+        .work_run_aggregate
+        .runs
         .iter()
-        .find(|run| run.id == *candidate.producer_stage_run_id())
+        .find(|run| run.id == *candidate.producer_work_run_id())
         .ok_or_else(|| {
             resolution_error(
                 EvidenceResolutionErrorCode::CandidateStale,
-                "candidate producer StageRun is missing",
+                "candidate producer WorkRun is missing",
             )
         })?;
-    if stage_run.id != producer.id {
-        let producer_finished = producer.finished_at_millis.ok_or_else(|| {
-            resolution_error(
-                EvidenceResolutionErrorCode::CandidateStale,
-                "candidate producer StageRun did not finish",
-            )
-        })?;
-        if stage_run.stage != DeliveryStage::Verifying
-            || stage_run.delivery_task_id != producer.delivery_task_id
-            || stage_run.started_at_millis < producer_finished
-            || binding.bound_at_millis < producer_finished
-        {
-            return Err(resolution_error(
-                EvidenceResolutionErrorCode::CandidateMismatch,
-                "evidence StageRun does not consume the current candidate task scope",
-            ));
-        }
+    // Independent reader WorkItems consume a candidate through the sealed
+    // runtime terminal and checkout facts validated below, not by sharing the
+    // producer's mutable WorkItem identity. Direct evidence remains producer-scoped.
+    let independent_reader = matches!(&input.source, EvidenceSource::Runtime { .. })
+        && matches!(
+            binding.execution_profile.as_deref(),
+            Some("reviewer" | "verifier" | "adversarial-verifier")
+        )
+        && work_run.work_contract_id == producer.work_contract_id
+        && work_run.contract_revision == producer.contract_revision;
+    if work_run.id != producer.id
+        && work_run.work_item_id != producer.work_item_id
+        && !independent_reader
+    {
+        return Err(resolution_error(
+            EvidenceResolutionErrorCode::CandidateMismatch,
+            "evidence WorkRun does not consume the current candidate task scope",
+        ));
     }
-    Ok((stage_run, binding, producer))
+    Ok((work_run, binding, producer))
 }
 
 #[allow(clippy::too_many_arguments)]
 fn resolve_runtime_source(
     candidate: &FrozenDeliveryCandidate,
-    stage_run: &StageRun,
+    work_run: &winwincode_domain::WorkRun,
     binding: &SessionBinding,
     evidence_type: EvidenceRefType,
     source_event_id: &ExecutionEventId,
@@ -742,7 +747,7 @@ fn resolve_runtime_source(
     })?;
     let expected_identity = validate_runtime_terminal(
         candidate,
-        stage_run,
+        work_run,
         binding,
         terminal,
         evidence_created_at_millis,
@@ -785,7 +790,7 @@ fn resolve_runtime_source(
     }
     validate_runtime_source_position(
         fact,
-        stage_run,
+        work_run,
         binding,
         terminal,
         evidence_created_at_millis,
@@ -816,7 +821,7 @@ fn resolve_runtime_source(
 
 fn validate_runtime_terminal(
     candidate: &FrozenDeliveryCandidate,
-    stage_run: &StageRun,
+    work_run: &winwincode_domain::WorkRun,
     binding: &SessionBinding,
     terminal: &AcceptedVerificationJobOutcomeFact,
     evidence_created_at_millis: u64,
@@ -830,9 +835,8 @@ fn validate_runtime_terminal(
         || terminal.execution_job_id() != &binding.execution_job_id
         || terminal.worker_session_id() != worker_session_id
         || terminal.codex_thread_id() != codex_thread_id
-        || terminal.stage_run_id() != &stage_run.id
-        || terminal.role_id() != stage_run.role
-        || terminal.attempt() != stage_run.attempt
+        || terminal.work_run_id() != &work_run.id
+        || terminal.attempt() != u64::try_from(work_run.attempt).unwrap_or(0)
     {
         return Err(resolution_error(
             EvidenceResolutionErrorCode::SessionMismatch,
@@ -849,20 +853,18 @@ fn validate_runtime_terminal(
     if terminal_sequence == 0
         || terminal_sequence > MAX_SAFE_INTEGER
         || terminal.finished_at_millis() > MAX_SAFE_INTEGER
-        || stage_run.finished_at_millis != Some(terminal.finished_at_millis())
-        || terminal.finished_at_millis() < stage_run.started_at_millis
         || terminal.finished_at_millis() < binding.bound_at_millis
         || evidence_created_at_millis < terminal.finished_at_millis()
     {
         return Err(resolution_error(
             EvidenceResolutionErrorCode::SourceTimeMismatch,
-            "runtime terminal result must close this StageRun before Evidence is created",
+            "runtime terminal result must close this WorkRun before Evidence is created",
         ));
     }
     Ok(FencedExecutionIdentity {
         product_session_id: terminal.product_session_id().clone(),
         execution_job_id: terminal.execution_job_id().clone(),
-        stage_run_id: terminal.stage_run_id().clone(),
+        work_run_id: terminal.work_run_id().clone(),
         role_id: terminal.role_id().into(),
         attempt: terminal.attempt(),
         lease_id: terminal.lease_id().clone(),
@@ -901,7 +903,7 @@ fn runtime_source_identity(fact: &AcceptedRuntimeSourceFact) -> FencedExecutionI
     FencedExecutionIdentity {
         product_session_id: fact.product_session_id.clone(),
         execution_job_id: fact.execution_job_id.clone(),
-        stage_run_id: fact.stage_run_id.clone(),
+        work_run_id: fact.work_run_id.clone(),
         role_id: fact.role_id.clone(),
         attempt: fact.attempt,
         lease_id: fact.lease_id.clone(),
@@ -917,7 +919,7 @@ fn terminal_identity(terminal: &AcceptedVerificationJobOutcomeFact) -> FencedExe
     FencedExecutionIdentity {
         product_session_id: terminal.product_session_id().clone(),
         execution_job_id: terminal.execution_job_id().clone(),
-        stage_run_id: terminal.stage_run_id().clone(),
+        work_run_id: terminal.work_run_id().clone(),
         role_id: terminal.role_id().into(),
         attempt: terminal.attempt(),
         lease_id: terminal.lease_id().clone(),
@@ -933,7 +935,7 @@ fn checkout_identity(fact: &ValidatedCheckoutAttestationFact) -> FencedExecution
     FencedExecutionIdentity {
         product_session_id: fact.product_session_id.clone(),
         execution_job_id: fact.execution_job_id.clone(),
-        stage_run_id: fact.stage_run_id.clone(),
+        work_run_id: fact.work_run_id.clone(),
         role_id: fact.role_id.clone(),
         attempt: fact.attempt,
         lease_id: fact.lease_id.clone(),
@@ -947,19 +949,18 @@ fn checkout_identity(fact: &ValidatedCheckoutAttestationFact) -> FencedExecution
 
 fn validate_runtime_source_position(
     fact: &AcceptedRuntimeSourceFact,
-    stage_run: &StageRun,
+    _work_run: &winwincode_domain::WorkRun,
     binding: &SessionBinding,
     terminal: &AcceptedVerificationJobOutcomeFact,
     evidence_created_at_millis: u64,
 ) -> Result<(), EvidenceResolutionError> {
-    if fact.source_sequence == 0
-        || fact.source_sequence > MAX_SAFE_INTEGER
-        || fact.occurred_at_millis > MAX_SAFE_INTEGER
-        || fact.occurred_at_millis < stage_run.started_at_millis
-        || fact.occurred_at_millis < binding.bound_at_millis
-        || fact.source_sequence > accepted_terminal_sequence(terminal)
-        || fact.occurred_at_millis > terminal.finished_at_millis()
-        || fact.occurred_at_millis >= evidence_created_at_millis
+    if !(fact.source_sequence != 0
+        && fact.source_sequence <= MAX_SAFE_INTEGER
+        && fact.occurred_at_millis <= MAX_SAFE_INTEGER
+        && fact.occurred_at_millis >= binding.bound_at_millis
+        && fact.source_sequence <= accepted_terminal_sequence(terminal)
+        && fact.occurred_at_millis <= terminal.finished_at_millis()
+        && fact.occurred_at_millis < evidence_created_at_millis)
     {
         return Err(resolution_error(
             EvidenceResolutionErrorCode::SourceTimeMismatch,
@@ -986,7 +987,7 @@ pub(crate) fn validate(evidence: &EvidenceRef, path: &str) -> Result<(), Deliver
         evidence.delivery_spec_revision,
         &format!("{path}.deliverySpecRevision"),
     )?;
-    portable_identifier(&evidence.stage_run_id.0, &format!("{path}.stageRunId"))?;
+    portable_identifier(&evidence.work_run_id.0, &format!("{path}.workRunId"))?;
     portable_identifier(
         &evidence.session_binding_id.0,
         &format!("{path}.sessionBindingId"),
@@ -1096,7 +1097,10 @@ pub(crate) mod test_support {
             .snapshot()
             .session_bindings
             .iter()
-            .find(|binding| binding.stage_run_id == *terminal.stage_run_id())
+            .find(|binding| {
+                binding.execution_job_id == *terminal.execution_job_id()
+                    && binding.attempt == terminal.attempt()
+            })
             .expect("fixture role SessionBinding");
         let finished_at_millis = terminal.finished_at_millis();
         let source_event_id = ExecutionEventId(format!("event-evidence-{}", evidence_id.0));
@@ -1107,7 +1111,7 @@ pub(crate) mod test_support {
             execution_job_id: terminal.execution_job_id().clone(),
             worker_session_id: terminal.worker_session_id().clone(),
             codex_thread_id: terminal.codex_thread_id().clone(),
-            stage_run_id: terminal.stage_run_id().clone(),
+            work_run_id: terminal.work_run_id().clone(),
             role_id: terminal.role_id().into(),
             attempt: terminal.attempt(),
             lease_id: terminal.lease_id().clone(),
@@ -1122,7 +1126,7 @@ pub(crate) mod test_support {
         let checkout = ValidatedCheckoutAttestationFact {
             product_session_id: terminal.product_session_id().clone(),
             execution_job_id: terminal.execution_job_id().clone(),
-            stage_run_id: terminal.stage_run_id().clone(),
+            work_run_id: terminal.work_run_id().clone(),
             role_id: terminal.role_id().into(),
             attempt: terminal.attempt(),
             lease_id: terminal.lease_id().clone(),
@@ -1142,7 +1146,7 @@ pub(crate) mod test_support {
             delivery,
             candidate,
             ResolveDeliveryEvidenceInput {
-                stage_run_id: terminal.stage_run_id().clone(),
+                work_run_id: terminal.work_run_id().clone(),
                 session_binding_id: binding.id.clone(),
                 source: EvidenceSource::Runtime {
                     evidence_type,
@@ -1162,7 +1166,7 @@ pub(crate) mod test_support {
 mod tests {
     use winwincode_domain::{
         CodexThreadId, ExecutionEventId, ExecutionJobId, FencingToken, LeaseId, ProductSessionId,
-        StageRunId, WorkerId, WorkerInstanceId, WorkerSessionId,
+        StageRunId, WorkRunId, WorkerId, WorkerInstanceId, WorkerSessionId,
     };
 
     use super::*;
@@ -1174,6 +1178,7 @@ mod tests {
         verification::test_support::{VerificationFixtureState, independent_verification},
     };
 
+    #[allow(clippy::too_many_lines)]
     fn evidence_delivery() -> Delivery {
         let mut snapshot = test_fixture();
         snapshot.status = DeliveryStatus::Verifying;
@@ -1193,9 +1198,10 @@ mod tests {
 
         let producer_binding = &mut snapshot.session_bindings[0];
         producer_binding.id = SessionBindingId("binding-executor-1".into());
-        producer_binding.stage_run_id = StageRunId("stage-executor-1".into());
+        producer_binding.work_run_id = producer_binding.work_run_id.clone();
         producer_binding.product_session_id = ProductSessionId("product-executor".into());
         producer_binding.execution_job_id = ExecutionJobId("job-executor".into());
+        producer_binding.execution_profile = Some("executor".into());
         producer_binding.worker_session_id = Some(WorkerSessionId("worker-executor".into()));
         producer_binding.codex_thread_id = Some(CodexThreadId("thread-executor".into()));
         producer_binding.bound_at_millis = 1_800_000_000_011;
@@ -1231,14 +1237,28 @@ mod tests {
                 schema_version: super::super::DELIVERY_SCHEMA_VERSION,
                 id: SessionBindingId("binding-verifier-1".into()),
                 delivery_id: snapshot.id.clone(),
-                delivery_task_id: producer_task_id.clone(),
-                stage_run_id: StageRunId("stage-verifier-1".into()),
+                work_contract_id: winwincode_domain::WorkContractId(
+                    "wct_01J00000000000000000000000".into(),
+                ),
+                work_contract_revision: winwincode_domain::Revision(1),
+                work_item_id: winwincode_domain::WorkItemId(
+                    "wit_01J00000000000000000000000".into(),
+                ),
+                work_item_revision: winwincode_domain::Revision(1),
+                work_run_id: winwincode_domain::WorkRunId("wrn_01J00000000000000000000001".into()),
                 product_session_id: ProductSessionId("product-verifier".into()),
                 execution_job_id: ExecutionJobId("job-verifier".into()),
+                execution_profile: Some("verifier".into()),
                 worker_session_id: Some(WorkerSessionId("worker-verifier".into())),
                 codex_thread_id: Some(CodexThreadId("thread-verifier".into())),
                 bound_at_millis: 1_800_000_000_031,
-                ..Default::default()
+                attempt: 1,
+                worker_id: None,
+                worker_instance_id: None,
+                lease_id: None,
+                fencing_token: None,
+                source_provenance:
+                    crate::domain::SessionBindingSourceProvenance::pending_delivery_advance(),
             }
             .with_test_authority("binding-verifier-1", 1),
         );
@@ -1247,25 +1267,40 @@ mod tests {
                 schema_version: super::super::DELIVERY_SCHEMA_VERSION,
                 id: SessionBindingId("binding-reviewer-1".into()),
                 delivery_id: snapshot.id.clone(),
-                delivery_task_id: producer_task_id,
-                stage_run_id: StageRunId("stage-reviewer-1".into()),
+                work_contract_id: winwincode_domain::WorkContractId(
+                    "wct_01J00000000000000000000000".into(),
+                ),
+                work_contract_revision: winwincode_domain::Revision(1),
+                work_item_id: winwincode_domain::WorkItemId(
+                    "wit_01J00000000000000000000000".into(),
+                ),
+                work_item_revision: winwincode_domain::Revision(1),
+                work_run_id: winwincode_domain::WorkRunId("wrn_01J00000000000000000000002".into()),
                 product_session_id: ProductSessionId("product-reviewer".into()),
                 execution_job_id: ExecutionJobId("job-reviewer".into()),
+                execution_profile: Some("reviewer".into()),
                 worker_session_id: Some(WorkerSessionId("worker-reviewer".into())),
                 codex_thread_id: Some(CodexThreadId("thread-reviewer".into())),
                 bound_at_millis: 1_800_000_000_031,
-                ..Default::default()
+                attempt: 1,
+                worker_id: None,
+                worker_instance_id: None,
+                lease_id: None,
+                fencing_token: None,
+                source_provenance:
+                    crate::domain::SessionBindingSourceProvenance::pending_delivery_advance(),
             }
             .with_test_authority("binding-reviewer-1", 1),
         );
         snapshot.updated_at_millis = 1_800_000_000_050;
+        crate::domain::rebuild_test_work_runs_from_bindings(&mut snapshot);
         Delivery::try_from_snapshot(snapshot).expect("evidence Delivery")
     }
 
     fn candidate(delivery: &Delivery) -> FrozenDeliveryCandidate {
         frozen_candidate(
             delivery,
-            &StageRunId("stage-executor-1".into()),
+            1_800_000_000_020,
             &SessionBindingId("binding-executor-1".into()),
         )
     }
@@ -1277,7 +1312,7 @@ mod tests {
         let current = candidate(delivery);
         let snapshot = validated_git_snapshot(
             delivery,
-            current.producer_stage_run_id(),
+            1_800_000_000_020,
             current.producer_session_binding_id(),
             current.candidate_commit_id(),
             candidate_tree_id,
@@ -1299,7 +1334,7 @@ mod tests {
             execution_job_id: terminal.execution_job_id().clone(),
             worker_session_id: terminal.worker_session_id().clone(),
             codex_thread_id: terminal.codex_thread_id().clone(),
-            stage_run_id: terminal.stage_run_id().clone(),
+            work_run_id: terminal.work_run_id().clone(),
             role_id: terminal.role_id().into(),
             attempt: terminal.attempt(),
             lease_id: terminal.lease_id().clone(),
@@ -1320,7 +1355,7 @@ mod tests {
         ValidatedCheckoutAttestationFact {
             product_session_id: terminal.product_session_id().clone(),
             execution_job_id: terminal.execution_job_id().clone(),
-            stage_run_id: terminal.stage_run_id().clone(),
+            work_run_id: terminal.work_run_id().clone(),
             role_id: terminal.role_id().into(),
             attempt: terminal.attempt(),
             lease_id: terminal.lease_id().clone(),
@@ -1368,7 +1403,7 @@ mod tests {
         checkout: &'facts ValidatedCheckoutAttestationFact,
     ) -> ResolveDeliveryEvidenceInput<'facts> {
         ResolveDeliveryEvidenceInput {
-            stage_run_id: StageRunId("stage-verifier-1".into()),
+            work_run_id: terminal.work_run_id().clone(),
             session_binding_id: SessionBindingId("binding-verifier-1".into()),
             source: EvidenceSource::Runtime {
                 evidence_type: EvidenceRefType::Test,
@@ -1381,9 +1416,18 @@ mod tests {
         }
     }
 
-    fn direct_input(source: EvidenceSource<'static>) -> ResolveDeliveryEvidenceInput<'static> {
+    fn direct_input(
+        delivery: &Delivery,
+        source: EvidenceSource<'static>,
+    ) -> ResolveDeliveryEvidenceInput<'static> {
+        let binding = delivery
+            .snapshot()
+            .session_bindings
+            .iter()
+            .find(|binding| binding.id.0 == "binding-executor-1")
+            .expect("candidate producer binding");
         ResolveDeliveryEvidenceInput {
-            stage_run_id: StageRunId("stage-executor-1".into()),
+            work_run_id: binding.work_run_id.clone(),
             session_binding_id: SessionBindingId("binding-executor-1".into()),
             source,
             created_at_millis: 1_800_000_000_025,
@@ -1409,7 +1453,7 @@ mod tests {
         let error = resolve_delivery_evidence(
             &revised,
             &candidate,
-            direct_input(EvidenceSource::CandidateCommit),
+            direct_input(&delivery, EvidenceSource::CandidateCommit),
         )
         .expect_err("stale candidate");
 
@@ -1417,19 +1461,19 @@ mod tests {
     }
 
     #[test]
-    fn evidence_matches_current_stage_run() {
+    fn evidence_matches_current_work_run() {
         let delivery = evidence_delivery();
         let candidate = candidate(&delivery);
         let terminal = terminal(&delivery, &candidate);
         let accepted_sources = [accepted_runtime_fact(&candidate, &terminal)];
         let checkout = checkout_attestation(&candidate, &terminal);
         let mut input = runtime_input(&accepted_sources, &terminal, &checkout);
-        input.stage_run_id = StageRunId("stage-foreign".into());
+        input.work_run_id = WorkRunId("stage-foreign".into());
 
         let error =
-            resolve_delivery_evidence(&delivery, &candidate, input).expect_err("foreign StageRun");
+            resolve_delivery_evidence(&delivery, &candidate, input).expect_err("foreign WorkRun");
 
-        assert_eq!(error.code(), EvidenceResolutionErrorCode::StageMismatch);
+        assert_eq!(error.code(), EvidenceResolutionErrorCode::SessionMismatch);
     }
 
     #[test]
@@ -1449,14 +1493,14 @@ mod tests {
     }
 
     #[test]
-    fn evidence_matches_existing_stage_run() {
+    fn evidence_matches_existing_work_run() {
         let mut fixture = test_fixture();
-        fixture.evidence[0].stage_run_id = StageRunId("foreign".into());
+        fixture.evidence[0].work_run_id = WorkRunId("foreign".into());
         assert!(Delivery::try_from_snapshot(fixture).is_err());
     }
 
     #[test]
-    fn evidence_matches_stage_run_session_binding() {
+    fn evidence_matches_work_run_session_binding() {
         let mut fixture = test_fixture();
         fixture.evidence[0].session_binding_id = SessionBindingId("foreign".into());
         assert!(Delivery::try_from_snapshot(fixture).is_err());
@@ -1499,7 +1543,7 @@ mod tests {
             evidence.delivery_spec_revision,
             delivery.snapshot().spec.revision
         );
-        assert_eq!(evidence.stage_run_id.0, "stage-verifier-1");
+        assert_eq!(evidence.work_run_id, *terminal.work_run_id());
         assert_eq!(evidence.session_binding_id.0, "binding-verifier-1");
         assert_eq!(evidence.candidate_ref, candidate.candidate_ref());
         assert_eq!(evidence.evidence_type, EvidenceRefType::Test);
@@ -1533,13 +1577,13 @@ mod tests {
         let first = resolve_delivery_evidence(
             &delivery,
             &candidate,
-            direct_input(EvidenceSource::CandidateCommit),
+            direct_input(&delivery, EvidenceSource::CandidateCommit),
         )
         .expect("first candidate commit evidence");
         let replay = resolve_delivery_evidence(
             &delivery,
             &candidate,
-            direct_input(EvidenceSource::CandidateCommit),
+            direct_input(&delivery, EvidenceSource::CandidateCommit),
         )
         .expect("replayed candidate commit evidence");
 
@@ -1553,13 +1597,13 @@ mod tests {
         let commit = resolve_delivery_evidence(
             &delivery,
             &candidate,
-            direct_input(EvidenceSource::CandidateCommit),
+            direct_input(&delivery, EvidenceSource::CandidateCommit),
         )
         .expect("candidate commit evidence");
         let diff = resolve_delivery_evidence(
             &delivery,
             &candidate,
-            direct_input(EvidenceSource::CandidateDiff),
+            direct_input(&delivery, EvidenceSource::CandidateDiff),
         )
         .expect("candidate diff evidence");
 
@@ -1620,15 +1664,15 @@ mod tests {
     }
 
     #[test]
-    fn rejects_source_before_stage_or_binding_and_after_terminal_sequence() {
+    fn rejects_source_before_work_run_or_binding_and_after_terminal_sequence() {
         let delivery = evidence_delivery();
         let candidate = candidate(&delivery);
         let terminal = terminal(&delivery, &candidate);
         let checkout = checkout_attestation(&candidate, &terminal);
         let valid = accepted_runtime_fact(&candidate, &terminal);
 
-        let mut before_stage = valid.clone();
-        before_stage.occurred_at_millis = 1_800_000_000_029;
+        let mut before_work_run = valid.clone();
+        before_work_run.occurred_at_millis = 1_800_000_000_029;
         let mut before_binding = valid.clone();
         before_binding.occurred_at_millis = 1_800_000_000_030;
         let mut after_terminal_sequence = valid.clone();
@@ -1637,7 +1681,7 @@ mod tests {
         after_terminal_time.occurred_at_millis = terminal.finished_at_millis() + 1;
 
         for source in [
-            before_stage,
+            before_work_run,
             before_binding,
             after_terminal_sequence,
             after_terminal_time,
@@ -1677,7 +1721,7 @@ mod tests {
         thread.codex_thread_id = CodexThreadId("thread-foreign".into());
         cases.push((thread, EvidenceResolutionErrorCode::SessionMismatch));
         let mut stage = valid.clone();
-        stage.stage_run_id = StageRunId("stage-foreign".into());
+        stage.work_run_id = WorkRunId("stage-foreign".into());
         cases.push((stage, EvidenceResolutionErrorCode::SessionMismatch));
         let mut role = valid.clone();
         role.role_id = "reviewer".into();
@@ -1774,7 +1818,7 @@ mod tests {
         product.product_session_id = ProductSessionId("product-foreign".into());
         cases.push(product);
         let mut stage = valid.clone();
-        stage.stage_run_id = StageRunId("stage-foreign".into());
+        stage.work_run_id = WorkRunId("stage-foreign".into());
         cases.push(stage);
         let mut role = valid.clone();
         role.role_id = "reviewer".into();
@@ -1882,7 +1926,7 @@ mod tests {
         let resolved = resolve_delivery_evidence(
             &delivery,
             &candidate,
-            direct_input(EvidenceSource::CandidateCommit),
+            direct_input(&delivery, EvidenceSource::CandidateCommit),
         )
         .expect("candidate commit evidence");
 
@@ -1909,7 +1953,7 @@ mod tests {
         let resolved = resolve_delivery_evidence(
             &delivery,
             &candidate,
-            direct_input(EvidenceSource::CandidateDiff),
+            direct_input(&delivery, EvidenceSource::CandidateDiff),
         )
         .expect("candidate diff evidence");
 
@@ -1935,9 +1979,12 @@ mod tests {
         let resolved = resolve_delivery_evidence(
             &delivery,
             &candidate,
-            direct_input(EvidenceSource::CandidateFile {
-                path: "src/invitation.rs".into(),
-            }),
+            direct_input(
+                &delivery,
+                EvidenceSource::CandidateFile {
+                    path: "src/invitation.rs".into(),
+                },
+            ),
         )
         .expect("candidate file evidence");
 
@@ -1968,22 +2015,25 @@ mod tests {
         let missing = resolve_delivery_evidence(
             &delivery,
             &candidate,
-            direct_input(EvidenceSource::CandidateFile {
-                path: "src/missing.rs".into(),
-            }),
+            direct_input(
+                &delivery,
+                EvidenceSource::CandidateFile {
+                    path: "src/missing.rs".into(),
+                },
+            ),
         )
         .expect_err("missing candidate path");
         assert_eq!(missing.code(), EvidenceResolutionErrorCode::SourceMissing);
 
-        let mut foreign_stage = direct_input(EvidenceSource::CandidateCommit);
-        foreign_stage.stage_run_id = StageRunId("stage-verifier-1".into());
+        let mut foreign_stage = direct_input(&delivery, EvidenceSource::CandidateCommit);
+        foreign_stage.work_run_id = WorkRunId("stage-verifier-1".into());
         foreign_stage.session_binding_id = SessionBindingId("binding-verifier-1".into());
         foreign_stage.created_at_millis = 1_800_000_000_060;
         let foreign = resolve_delivery_evidence(&delivery, &candidate, foreign_stage)
             .expect_err("foreign direct Git producer");
         assert_eq!(foreign.code(), EvidenceResolutionErrorCode::SessionMismatch);
 
-        let mut early = direct_input(EvidenceSource::CandidateDiff);
+        let mut early = direct_input(&delivery, EvidenceSource::CandidateDiff);
         early.created_at_millis = 1_800_000_000_019;
         let early = resolve_delivery_evidence(&delivery, &candidate, early)
             .expect_err("early direct Git evidence");

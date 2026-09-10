@@ -36,8 +36,9 @@ impl CommandFamily {
             | CommandName::SessionClose => Self::Session,
             CommandName::DeliveryCreate
             | CommandName::DeliveryUpdateSpec
-            | CommandName::DeliveryApproveTaskBreakdown
+            | CommandName::DeliveryTaskBreakdownCreate
             | CommandName::DeliveryAdvance
+            | CommandName::WorkRunCancel
             | CommandName::DeliveryResolveAttention
             | CommandName::DeliverySubmitVerdict => Self::Delivery,
             CommandName::SettingsUpdate => Self::Settings,
@@ -86,7 +87,7 @@ impl QueryFamily {
             | QueryName::SessionGet
             | QueryName::SessionMessagesList
             | QueryName::SessionInteractionsList => Self::Session,
-            QueryName::RuntimeProjectionGet => Self::Runtime,
+            QueryName::RuntimeProjectionGet | QueryName::WorkRunGet => Self::Runtime,
             QueryName::DeliveryList
             | QueryName::DeliveryGet
             | QueryName::CandidateList

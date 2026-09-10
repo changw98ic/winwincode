@@ -58,7 +58,7 @@ function selection(repository) {
 function deliveryFor(repository, overrides = {}) {
   const index = Number(repository.repositoryId.slice(-2))
   return {
-    activeStageRunId: canonicalId('str', index),
+    activeWorkRunId: canonicalId('wrn', index),
     deliveryId: canonicalId('dlv', index),
     openAttentionCount: 1,
     ownership: {
@@ -80,7 +80,7 @@ function deliveryFor(repository, overrides = {}) {
 function deliveredFor(repository) {
   const index = Number(repository.repositoryId.slice(-2))
   return deliveryFor(repository, {
-    activeStageRunId: null,
+    activeWorkRunId: null,
     deliveryId: canonicalId('dlv', index + 10),
     openAttentionCount: 0,
     status: 'delivered',
@@ -105,7 +105,7 @@ function deliveryDetail(delivery) {
           resolutionSummary: null,
           resolvedAt: null,
           resolvedBy: null,
-          stageRunId: delivery.activeStageRunId,
+          workRunId: delivery.activeWorkRunId,
           status: 'open',
           title: 'Review the proposed delivery scope',
           type: 'scope_change',
@@ -145,12 +145,12 @@ function approvalFor(repository) {
     binding: {
       productSessionId,
       executionJobId: canonicalId('job', index),
-      workerSessionId: canonicalId('wss', index),
+      workerSessionId: canonicalId('wsn', index),
       sessionIdentity: {
         productSessionId,
-        workerSessionId: canonicalId('wss', index),
+        workerSessionId: canonicalId('wsn', index),
         codexThreadId: canonicalId('thr', index),
-        stageRunId: canonicalId('str', index),
+        workRunId: canonicalId('wrn', index),
       },
     },
   }

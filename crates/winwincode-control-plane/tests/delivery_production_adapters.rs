@@ -9,7 +9,7 @@ use rusqlite::Connection;
 use winwincode_api::generated::{
     AcceptanceCriterionInput, Actor, DeliveryAdvanceCommand, DeliveryAdvanceCommandCommand,
     DeliveryAdvancePayload, DeliveryCreateCommand, DeliveryCreateCommandCommand,
-    DeliveryCreatePayload, DeliverySpecInput,
+    DeliveryCreatePayload, DeliverySpecInput, DeliveryTaskBreakdownCreateCommand,
 };
 use winwincode_control_plane::{
     ControlPlane, ControlPlaneConfig, EventPublishError, EventPublisher,
@@ -42,7 +42,7 @@ fn local_authority_dispatches_once_and_restart_replays_exact_command() {
     let scope = scope(1);
     let delivery_id = DeliveryId(canonical_id("dlv", 1));
     let create = create_command(scope.clone(), delivery_id.clone(), baseline, 1);
-    let advance = advance_command(scope.clone(), delivery_id, 1, 2);
+    let advance = advance_command(scope.clone(), delivery_id.clone(), 2, 2);
 
     let mut first = start_with_execution_mode(
         &data,
@@ -62,8 +62,40 @@ fn local_authority_dispatches_once_and_restart_replays_exact_command() {
     );
     let created = first.delivery_create(&create).expect("create Delivery");
     assert_eq!(created.current_revision, Revision(1));
+    let mut foreign_items = task_breakdown_command(&scope, &delivery_id, 3, &data);
+    foreign_items.scope.repository_id = RepositoryId(canonical_id("rep", 999));
+    first
+        .delivery_task_breakdown_create(&foreign_items)
+        .expect_err("a different repository must not create this Delivery's WorkItems");
+    first
+        .delivery_task_breakdown_create(&task_breakdown_command(&scope, &delivery_id, 3, &data))
+        .expect("create canonical WorkItem");
+    {
+        use winwincode_storage::{ProductStateStorage, SqliteStorage};
+        let storage = SqliteStorage::open(&data).expect("inspect published WorkItem event");
+        assert!(
+            storage
+                .pending_events()
+                .expect("pending notifications")
+                .is_empty(),
+            "successful WorkItem creation must publish its notification before returning"
+        );
+        Box::new(storage)
+            .close()
+            .expect("close notification inspector");
+    }
+    let mut planner = advance.clone();
+    planner.payload.dispatch_profile = "planner".into();
+    first
+        .delivery_advance(&planner)
+        .expect_err("Planner is internal, not a top-level dispatch profile");
+    assert_eq!(
+        queued_jobs(&data),
+        0,
+        "rejected Planner must not queue work"
+    );
     let advanced = first.delivery_advance(&advance).expect("advance Delivery");
-    assert_eq!(advanced.current_revision, Revision(2));
+    assert_eq!(advanced.current_revision, Revision(3));
     first.shutdown().expect("shutdown first host");
 
     assert_eq!(queued_jobs(&data), 1);
@@ -103,13 +135,21 @@ fn local_authority_dispatches_each_released_execution_mode_without_write_widenin
             baseline,
             seed,
         );
-        let advance = advance_command(repository_scope.clone(), delivery_id, 1, seed + 100);
+        let advance = advance_command(repository_scope.clone(), delivery_id.clone(), 2, seed + 100);
         let mut control_plane =
-            start_with_execution_mode(&data, &repository, repository_scope, mode);
+            start_with_execution_mode(&data, &repository, repository_scope.clone(), mode);
 
         control_plane
             .delivery_create(&create)
             .expect("create Delivery");
+        control_plane
+            .delivery_task_breakdown_create(&task_breakdown_command(
+                &repository_scope,
+                &delivery_id,
+                seed + 101,
+                &data,
+            ))
+            .expect("create canonical WorkItem");
         control_plane
             .delivery_advance(&advance)
             .expect("advance Delivery");
@@ -117,7 +157,11 @@ fn local_authority_dispatches_each_released_execution_mode_without_write_widenin
 
         assert_eq!(
             queued_job(&data).workspace.write_mode,
-            ExecutionWorkspaceWriteMode::ReadOnly,
+            if mode == ExecutionMode::DelegatedPatch {
+                ExecutionWorkspaceWriteMode::ReadOnly
+            } else {
+                ExecutionWorkspaceWriteMode::Candidate
+            },
             "mode={mode:?}"
         );
         std::fs::remove_dir_all(root).expect("remove fixture");
@@ -295,7 +339,7 @@ fn create_command(
             delivery_id,
             spec: DeliverySpecInput {
                 acceptance_criteria: vec![AcceptanceCriterionInput {
-                    id: "criterion-1".to_owned(),
+                    id: canonical_id("crt", 1),
                     required: true,
                     title: "Repository tests pass".to_owned(),
                 }],
@@ -317,6 +361,45 @@ fn create_command(
     }
 }
 
+fn task_breakdown_command(
+    scope: &RepositoryScope,
+    delivery_id: &DeliveryId,
+    seed: u64,
+    data: &Path,
+) -> DeliveryTaskBreakdownCreateCommand {
+    use winwincode_storage::{ProductStateStorage, SqliteStorage};
+    let storage = SqliteStorage::open(data).expect("read accepted WorkContract");
+    let state = storage
+        .load_state(&format!("delivery:{}", delivery_id.0))
+        .expect("Delivery read")
+        .expect("Delivery exists");
+    let delivery =
+        winwincode_delivery::domain::Delivery::decode_json(&state.payload).expect("Delivery JSON");
+    let criteria = delivery
+        .snapshot()
+        .work_run_aggregate
+        .contract
+        .criteria
+        .iter()
+        .map(|criterion| criterion.id.clone())
+        .collect::<Vec<_>>();
+    Box::new(storage).close().expect("close contract reader");
+    serde_json::from_value(serde_json::json!({
+        "schemaVersion":"winwincode/v1",
+        "requestId":canonical_id("req", seed),
+        "actor":{"kind":"user", "id":canonical_id("usr", seed)},
+        "scope":scope,
+        "command":"delivery.task_breakdown.create",
+        "expectedRevision":1,
+        "payload":{
+            "deliveryId":delivery_id,
+            "expectedRevision":1,
+            "contractRevision":1,
+            "items":[{"id":canonical_id("wit", seed),"title":"Implement task","goal":"Implement task","criterionIds":criteria,"dependsOn":[]}]
+        }
+    })).expect("canonical WorkItem command")
+}
+
 fn advance_command(
     scope: RepositoryScope,
     delivery_id: DeliveryId,
@@ -327,7 +410,11 @@ fn advance_command(
         actor: actor(seed),
         command: DeliveryAdvanceCommandCommand::DeliveryAdvance,
         expected_revision: Revision(revision),
-        payload: DeliveryAdvancePayload { delivery_id },
+        payload: DeliveryAdvancePayload {
+            rework: None,
+            delivery_id,
+            dispatch_profile: "executor".to_owned(),
+        },
         request_id: RequestId(canonical_id("req", seed)),
         schema_version: SchemaVersion::WinwincodeV1,
         scope,

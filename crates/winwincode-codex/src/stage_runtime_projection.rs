@@ -158,7 +158,7 @@ impl StageRuntimeProjector {
         }
         validate_source_id(turn_id)?;
         let candidate_ref = job
-            .stage_input
+            .work_input
             .as_ref()
             .and_then(|input| input.candidate_ref.as_deref())
             .unwrap_or_default();
@@ -507,10 +507,9 @@ fn bind_verification_evidence<AuthorityError, StoreError>(
                 .map(|source| {
                     let evidence = catalog
                         .get(&source.source_id)
-                        .filter(|evidence| evidence.kind == source.evidence_type)
                         .ok_or(StageRuntimeProjectionError::InvalidEvidence)?;
                     Ok(BoundVerificationEvidenceSource {
-                        evidence_type: source.evidence_type,
+                        evidence_type: evidence.kind,
                         event_id: evidence.event_id.clone(),
                     })
                 })
@@ -557,8 +556,6 @@ struct ModelVerificationFinding {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct ModelVerificationEvidenceSource {
-    #[serde(rename = "type")]
-    evidence_type: EvidenceKind,
     source_id: String,
 }
 
@@ -723,14 +720,14 @@ mod tests {
     use std::collections::BTreeMap;
 
     use winwincode_domain::{
-        CodexThreadId, DeliveryId, DeliveryTaskId, ExecutionJobId, FencingToken, LeaseId,
-        ProductSessionId, RepositoryId, StageRunId, WorkerId, WorkerInstanceId,
+        CodexThreadId, Criterion, CriterionId, ExecutionJobId, FencingToken, LeaseId,
+        ProductSessionId, RepositoryId, Revision, WorkContract, WorkContractId, WorkItem,
+        WorkItemId, WorkItemState, WorkRunId, WorkerId, WorkerInstanceId,
     };
     use winwincode_execution_port::{
         generated::{
-            DeliveryStageAcceptanceCriterionInput, DeliveryStageExecutionScope,
-            DeliveryStageExecutionScopeKind, DeliveryStageInput, DeliveryStageTaskInput,
             ExecutionLimits, ExecutionScope, ExecutionWorkspace, ExecutionWorkspaceWriteMode,
+            WorkRunExecutionScope, WorkRunExecutionScopeKind, WorkRunInput,
         },
         replay::{ReplayFrame, ReplayStreamKey},
     };
@@ -796,7 +793,7 @@ mod tests {
         "\"id\":\"dtk_00000000000000000000000001\",",
         "\"title\":\"Implement fixture\",",
         "\"goal\":\"Implement fixture\",",
-        "\"acceptanceCriterionIds\":[\"criterion-fixture\"],",
+        "\"acceptanceCriterionIds\":[\"crt_00000000000000000000000001\"],",
         "\"blockedByTaskIds\":[]",
         "}]",
         "}"
@@ -808,12 +805,12 @@ mod tests {
         "\"candidate_ref\":\"git-candidate:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",",
         "\"findings\":[{",
         "\"finding_id\":\"finding-fixture\",",
-        "\"criterion_id\":\"criterion-fixture\",",
+        "\"criterion_id\":\"crt_00000000000000000000000001\",",
         "\"verdict\":\"pass\",",
         "\"explanation\":\"Direct command and test evidence passed.\",",
         "\"evidence_sources\":[",
-        "{\"type\":\"test\",\"source_id\":\"call-test\"},",
-        "{\"type\":\"command\",\"source_id\":\"call-command\"}",
+        "{\"source_id\":\"call-test\"},",
+        "{\"source_id\":\"call-command\"}",
         "]",
         "}]",
         "}"
@@ -901,7 +898,7 @@ mod tests {
             session_identity: SessionIdentity {
                 codex_thread_id: CodexThreadId("cdx_00000000000000000000000001".to_owned()),
                 product_session_id: ProductSessionId("psn_00000000000000000000000001".to_owned()),
-                stage_run_id: Some(StageRunId("run_00000000000000000000000001".to_owned())),
+                work_run_id: Some(WorkRunId("wrn_00000000000000000000000001".to_owned())),
                 worker_session_id: worker_session_id.clone(),
             },
             worker_session_id,
@@ -911,8 +908,39 @@ mod tests {
     }
 
     fn job(role: &str) -> ExecutionJob {
-        let task_role = role != "planner";
-        let task_id = DeliveryTaskId("dtk_00000000000000000000000001".to_owned());
+        let contract_id = WorkContractId("wct_00000000000000000000000001".to_owned());
+        let item_id = WorkItemId("wit_00000000000000000000000001".to_owned());
+        let criterion_id = CriterionId("crt_00000000000000000000000001".to_owned());
+        let contract = WorkContract {
+            constraints: vec!["Keep the exact repository boundary.".to_owned()],
+            created_at: Instant("2026-08-28T00:00:00.000Z".to_owned()),
+            criteria: vec![Criterion {
+                id: criterion_id.clone(),
+                description: "The exact fixture behavior is verified.".to_owned(),
+                required: true,
+                required_evidence_class: "machine".into(),
+                verification_method: Some("Run the exact fixture check.".to_owned()),
+            }],
+            id: contract_id.clone(),
+            objective: "Implement fixture".to_owned(),
+            protected_scope: vec!["Fixture source".to_owned()],
+            required_human_authority: "none".to_owned(),
+            revision: Revision(2),
+            schema_version: SchemaVersion::WinwincodeV1,
+            scope: vec!["Fixture source".to_owned()],
+        };
+        let item = WorkItem {
+            criterion_ids: vec![criterion_id],
+            depends_on: Vec::new(),
+            goal: "Implement fixture".to_owned(),
+            id: item_id.clone(),
+            revision: Revision(1),
+            schema_version: SchemaVersion::WinwincodeV1,
+            state: WorkItemState::Ready,
+            title: "Fixture task".to_owned(),
+            work_contract_id: contract_id.clone(),
+            work_contract_revision: Revision(2),
+        };
         ExecutionJob {
             attempt: 1,
             execution_profile: role.to_owned(),
@@ -924,36 +952,24 @@ mod tests {
                 max_runtime_seconds: 300,
             },
             payload_digest: Sha256Digest(format!("sha256:{}", "b".repeat(64))),
-            scope: ExecutionScope::DeliveryStageExecutionScope(DeliveryStageExecutionScope {
-                delivery_id: DeliveryId("dlv_00000000000000000000000001".to_owned()),
-                delivery_task_id: task_role.then(|| task_id.clone()),
-                kind: DeliveryStageExecutionScopeKind::DeliveryStage,
+            scope: ExecutionScope::WorkRunExecutionScope(WorkRunExecutionScope {
+                attempt: 1,
+                kind: WorkRunExecutionScopeKind::WorkRun,
                 product_session_id: ProductSessionId("psn_00000000000000000000000001".to_owned()),
                 rework_authorization: None,
-                stage_run_id: StageRunId("run_00000000000000000000000001".to_owned()),
+                work_contract_id: contract_id.clone(),
+                work_contract_revision: Revision(2),
+                work_item_id: item_id,
+                work_item_revision: Revision(1),
+                work_run_id: WorkRunId("wrn_00000000000000000000000001".to_owned()),
             }),
-            stage_input: Some(DeliveryStageInput {
-                acceptance_criteria: vec![DeliveryStageAcceptanceCriterionInput {
-                    criterion_id: "criterion-fixture".to_owned(),
-                    description: "The exact fixture behavior is verified.".to_owned(),
-                    required: true,
-                    verification_method: Some("Run the exact fixture check.".to_owned()),
-                }],
-                candidate_ref: task_role.then(|| CANDIDATE_REF.to_owned()),
-                constraints: vec!["Keep the exact repository boundary.".to_owned()],
-                delivery_spec_id: "spec-fixture".to_owned(),
-                delivery_spec_revision: 2,
-                goal: "Implement fixture".to_owned(),
-                out_of_scope: Vec::new(),
+            work_input: Some(WorkRunInput {
+                delivery_spec_id: "spec-fixture".into(),
+                delivery_spec_revision: Revision(2),
+                candidate_ref: (role != "planner").then(|| CANDIDATE_REF.to_owned()),
                 schema_version: SchemaVersion::WinwincodeV1,
-                scope: vec!["Fixture source".to_owned()],
-                task: task_role.then(|| DeliveryStageTaskInput {
-                    acceptance_criterion_ids: vec!["criterion-fixture".to_owned()],
-                    goal: "Implement fixture".to_owned(),
-                    task_id,
-                    title: "Fixture task".to_owned(),
-                }),
-                title: "Fixture Delivery".to_owned(),
+                work_contract: contract,
+                work_item: item,
             }),
             workspace: ExecutionWorkspace {
                 checkout_revision: "main".to_owned(),
@@ -1136,6 +1152,13 @@ mod tests {
         let sources = json["findings"][0]["evidence_sources"]
             .as_array()
             .expect("evidence sources");
+        assert_eq!(sources[0]["type"], "test");
+        assert_eq!(sources[1]["type"], "command");
+        let invented_type = VERIFICATION_RESULT.replace(
+            "\"source_id\":\"call-test\"",
+            "\"type\":\"command\",\"source_id\":\"call-test\"",
+        );
+        assert!(serde_json::from_str::<ModelVerificationResult>(&invented_type).is_err());
         assert_eq!(sources[0]["event_id"], test.event.event_id.0);
         assert_eq!(sources[1]["event_id"], command.event.event_id.0);
         assert!(

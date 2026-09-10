@@ -10,28 +10,24 @@ use std::{
 };
 
 use winwincode_api::generated::{
-    Actor, ActorId, CollaborationActivityCategory, CommandRequest,
-    EnterpriseMembershipUpdateCommand, EnterpriseMembershipUpdateCommandCommand,
-    EnterpriseMembershipUpdatePayload, EnterpriseOrganizationUpdateCommand,
+    Actor, CollaborationActivityCategory, CommandRequest, EnterpriseOrganizationUpdateCommand,
     EnterpriseOrganizationUpdateCommandCommand, EnterpriseOrganizationUpdatePayload,
-    EnterprisePermission, EnterpriseRoleAssignment, EnterpriseRolePermissionRule,
-    EnterpriseRoleUpdateCommand, EnterpriseRoleUpdateCommandCommand, EnterpriseRoleUpdatePayload,
     OrganizationScope, OrganizationScopeKind, QueryRequest, Scope,
 };
 use winwincode_control_plane::{
     CollaborationActivityRecordRequest, CollaborationService, ControlPlane, ControlPlaneConfig,
-    DurableWorkerInteractionOutbound, EnterpriseRbacService, EventPublishError, EventPublisher,
-    OutboxEvent, ProductSessionExecutionConfig,
+    DurableWorkerInteractionOutbound, EventPublishError, EventPublisher, OutboxEvent,
+    ProductSessionExecutionConfig,
 };
 use winwincode_domain::{
-    EnterpriseMembershipId, EnterpriseRoleId, EnterpriseRoleVersion, Instant, OrganizationId,
-    ProjectId, RepositoryId, RequestId, Revision, SchemaVersion, Sha256Digest, UserId, WorkspaceId,
+    Instant, OrganizationId, ProjectId, RepositoryId, RequestId, Revision, SchemaVersion,
+    Sha256Digest, UserId, WorkspaceId,
 };
 use winwincode_domain::{RepositoryScope, RepositoryScopeKind, UserActor, UserActorKind};
 use winwincode_server::{
     AuthenticatedPrincipal, CommandDispatchResponse, CommandFamily, DurableEventHub,
     DurableEventHubConfig, DurableEventPublisher, QueryFamily, StandaloneControlPlaneApplication,
-    TypedControlPlaneApiPort, UnavailableEnterpriseManagementApplication,
+    TypedControlPlaneApiPort,
 };
 use winwincode_storage::{SqliteStorage, WorkerOutboundQueueConfig};
 
@@ -46,15 +42,10 @@ impl EventPublisher for RecordingPublisher {
 }
 
 #[test]
-fn generated_collaboration_routes_use_rbac_storage_and_durable_hub() {
+fn generated_collaboration_routes_use_local_scope_and_durable_hub() {
     let fixture = Fixture::new("routes");
-    fixture.seed_rbac();
-    let rbac = Arc::new(EnterpriseRbacService::new(Box::new(
-        SqliteStorage::open(&fixture.root).expect("open RBAC service"),
-    )));
     let collaboration = Arc::new(CollaborationService::new(
         SqliteStorage::open(&fixture.root).expect("open Collaboration service"),
-        rbac,
     ));
     collaboration
         .record_activity(
@@ -152,19 +143,14 @@ fn composition_rejects_a_foreign_collaboration_database() {
         )
         .expect("open hub"),
     );
-    let foreign_rbac = Arc::new(EnterpriseRbacService::new(Box::new(
-        SqliteStorage::open(&foreign_root).expect("open foreign RBAC"),
-    )));
     let collaboration = Arc::new(CollaborationService::new(
         SqliteStorage::open(&foreign_root).expect("open foreign Collaboration"),
-        foreign_rbac,
     ));
-    let error = StandaloneControlPlaneApplication::new_with_enterprise_and_collaboration(
+    let error = StandaloneControlPlaneApplication::new_with_collaboration(
         control_plane,
         storage,
         outbound,
         hub,
-        Arc::new(UnavailableEnterpriseManagementApplication),
         collaboration,
         fixed_execution_config(),
     )
@@ -173,6 +159,45 @@ fn composition_rejects_a_foreign_collaboration_database() {
     assert_eq!(error.code(), "APPLICATION_CONFIGURATION_INVALID");
     fs::remove_dir_all(application_root).expect("remove application root");
     fs::remove_dir_all(foreign_root).expect("remove foreign root");
+}
+
+#[test]
+fn community_application_rejects_enterprise_management_operations() {
+    let fixture = Fixture::new("no-enterprise-management");
+    let collaboration = Arc::new(CollaborationService::new(
+        SqliteStorage::open(&fixture.root).expect("open Collaboration service"),
+    ));
+    let application = fixture.application(collaboration);
+    let principal = fixture.principal();
+
+    let command_error = application
+        .command(
+            &principal,
+            CommandFamily::Enterprise,
+            CommandRequest::EnterpriseOrganizationUpdateCommand(organization_command(&fixture)),
+        )
+        .expect_err("Community must not execute Enterprise management commands");
+    assert_eq!(command_error.status(), 404);
+    assert_eq!(command_error.code(), "RESOURCE_NOT_FOUND");
+
+    let query: QueryRequest = serde_json::from_value(serde_json::json!({
+        "schemaVersion": "winwincode/v1",
+        "requestId": request(20),
+        "query": "enterprise.organization.list",
+        "actor": fixture.actor(),
+        "scope": fixture.organization_scope(),
+        "parameters": {"states": []},
+        "page": {"cursor": null, "limit": 20}
+    }))
+    .expect("generated Enterprise query");
+    let query_error = application
+        .query(&principal, QueryFamily::Enterprise, query)
+        .expect_err("Community must not execute Enterprise management queries");
+    assert_eq!(query_error.status(), 404);
+    assert_eq!(query_error.code(), "RESOURCE_NOT_FOUND");
+
+    application.shutdown().expect("shutdown application");
+    fs::remove_dir_all(&fixture.root).expect("remove fixture root");
 }
 
 struct Fixture {
@@ -245,21 +270,6 @@ impl Fixture {
         AuthenticatedPrincipal::new(self.actor(), vec![self.scope()]).expect("principal")
     }
 
-    fn seed_rbac(&self) {
-        let service = EnterpriseRbacService::new(Box::new(
-            SqliteStorage::open(&self.root).expect("open RBAC seed storage"),
-        ));
-        service
-            .update_organization(&organization_command(self))
-            .expect("create Organization");
-        service
-            .update_role(&role_command(self))
-            .expect("create collaboration Role");
-        service
-            .update_membership(&membership_command(self))
-            .expect("create membership");
-    }
-
     fn application(
         &self,
         collaboration: Arc<CollaborationService>,
@@ -278,12 +288,11 @@ impl Fixture {
             WorkerOutboundQueueConfig::default(),
         )
         .expect("open outbound authority");
-        StandaloneControlPlaneApplication::new_with_enterprise_and_collaboration(
+        StandaloneControlPlaneApplication::new_with_collaboration(
             control_plane,
             SqliteStorage::open(&self.root).expect("open application storage"),
             outbound,
             hub,
-            Arc::new(UnavailableEnterpriseManagementApplication),
             collaboration,
             self.execution_config(),
         )
@@ -305,60 +314,6 @@ fn organization_command(fixture: &Fixture) -> EnterpriseOrganizationUpdateComman
         request_id: request(1),
         schema_version: SchemaVersion::WinwincodeV1,
         scope: Scope::OrganizationScope(fixture.organization_scope()),
-    }
-}
-
-fn role_command(fixture: &Fixture) -> EnterpriseRoleUpdateCommand {
-    EnterpriseRoleUpdateCommand {
-        actor: fixture.actor(),
-        command: EnterpriseRoleUpdateCommandCommand::EnterpriseRoleUpdate,
-        expected_revision: Revision(1),
-        payload: EnterpriseRoleUpdatePayload {
-            conflicting_role_ids: Vec::new(),
-            display_name: "Collaborator".to_owned(),
-            inherited_roles: Vec::new(),
-            role_id: role(),
-            rules: vec![
-                EnterpriseRolePermissionRule {
-                    effect: "allow".to_owned(),
-                    permission: EnterprisePermission::CollaborationRead,
-                },
-                EnterpriseRolePermissionRule {
-                    effect: "allow".to_owned(),
-                    permission: EnterprisePermission::CollaborationWrite,
-                },
-            ],
-            state: "active".to_owned(),
-        },
-        request_id: request(2),
-        schema_version: SchemaVersion::WinwincodeV1,
-        scope: fixture.organization_scope(),
-    }
-}
-
-fn membership_command(fixture: &Fixture) -> EnterpriseMembershipUpdateCommand {
-    EnterpriseMembershipUpdateCommand {
-        actor: fixture.actor(),
-        command: EnterpriseMembershipUpdateCommandCommand::EnterpriseMembershipUpdate,
-        expected_revision: Revision(2),
-        payload: EnterpriseMembershipUpdatePayload {
-            actor_id: ActorId::UserId(fixture.user_id.clone()),
-            display_name: "Collaborator".to_owned(),
-            membership_id: EnterpriseMembershipId(id("mem", 7)),
-            role_assignments: vec![EnterpriseRoleAssignment {
-                expires_at: None,
-                not_before: None,
-                role_id: role(),
-                role_version: EnterpriseRoleVersion(1),
-                scope: fixture.scope(),
-                scope_mode: "exact".to_owned(),
-            }],
-            state: "active".to_owned(),
-            team_ids: Vec::new(),
-        },
-        request_id: request(3),
-        schema_version: SchemaVersion::WinwincodeV1,
-        scope: fixture.organization_scope(),
     }
 }
 
@@ -439,10 +394,6 @@ fn id(prefix: &str, number: u64) -> String {
 
 fn request(number: u64) -> RequestId {
     RequestId(id("req", number))
-}
-
-fn role() -> EnterpriseRoleId {
-    EnterpriseRoleId(id("rol", 6))
 }
 
 fn fixed_execution_config() -> ProductSessionExecutionConfig {

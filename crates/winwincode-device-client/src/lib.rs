@@ -109,6 +109,7 @@ pub mod fencing;
 pub mod http;
 pub mod identity;
 pub mod path_confinement;
+pub mod preview;
 pub mod repository;
 pub mod repository_exchange;
 pub mod repository_git;
@@ -118,7 +119,10 @@ pub mod worker_logs;
 
 pub use apply_engine::{
     CandidateApplyError, CandidateApplyErrorKind, CandidateApplyOutcome, CandidateApplyRequest,
-    apply_candidate_to_branch,
+    CandidateIntegrationConflict, CandidateIntegrationOutcome, CandidateIntegrationRequest,
+    CandidateRecoveryGuidance, GitRecoveryCommand, INTEGRATION_REF_PREFIX,
+    PreparedCandidateIntegration, RecoveryCommandDirectory, apply_candidate_to_branch,
+    candidate_recovery_guidance, integrate_candidates_for_verification,
 };
 pub use candidate_branch::{
     BranchCreationFacts, BranchCreationOutcome, BranchCreationReport, CandidateBranchError,
@@ -159,6 +163,7 @@ pub use identity::{
     adopt_enrollment, ensure_device_identity, load_device_identity,
 };
 pub use path_confinement::{ConfinedPath, ConfinedRoot, ConfinementVerdict, PathConfinementError};
+pub use preview::{AuthorizedPreviewSource, PreviewTunnelClient, PreviewTunnelError};
 pub use repository::{
     RegistrationOptions, RegistrationRejection, RepositoryBindingSummary, RepositoryRegistration,
     RepositoryRegistryError, RepositoryRemoval, RepositoryRevalidation, list_bindings,

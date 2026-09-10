@@ -28,6 +28,7 @@ use crate::tools::handlers::SendUserMessageAsyncHandler;
 use crate::tools::handlers::ShellCommandHandler;
 use crate::tools::handlers::ShellCommandHandlerOptions;
 use crate::tools::handlers::SleepHandler;
+use crate::tools::handlers::SubmitChangeBatchHandler;
 use crate::tools::handlers::TestSyncHandler;
 use crate::tools::handlers::ToolSearchHandlerCache;
 use crate::tools::handlers::ViewImageHandler;
@@ -144,6 +145,9 @@ pub(crate) fn build_tool_router(
     };
     let mut registry = ToolRegistry::default();
     add_core_tool_sources(&context, &mut registry);
+    if turn_context.submit_change_batch {
+        registry.add(SubmitChangeBatchHandler);
+    }
 
     let hosted_specs = if crate::guardian::is_guardian_reviewer_source(&turn_context.session_source)
     {
@@ -270,6 +274,9 @@ pub(crate) fn build_core_tool_registry(
     };
     let mut registry = ToolRegistry::default();
     add_core_tool_sources(&context, &mut registry);
+    if turn_context.submit_change_batch {
+        registry.add(SubmitChangeBatchHandler);
+    }
     registry
 }
 

@@ -17,8 +17,8 @@ use winwincode_control_plane::{
     },
 };
 use winwincode_domain::{
-    ArtifactId, CodexThreadId, DebugHypothesisId, DebugSessionId, Instant, ProbeId, ProbeRoundId,
-    RequestId, SessionIdentity, Sha256Digest, WorkspaceRevision,
+    ArtifactId, CodexThreadId, DebugHypothesisId, DebugSessionId, DeliveryId, Instant, ProbeId,
+    ProbeRoundId, RequestId, SessionIdentity, Sha256Digest, WorkspaceRevision,
 };
 use winwincode_execution_port::{
     debug_hypothesis_ledger::{
@@ -311,11 +311,9 @@ fn commit_dispatch_intent(storage: &mut SqliteStorage, job: &ExecutionJob) {
         .expect("dispatch intent");
 }
 
-fn queue_scope(job: &ExecutionJob) -> (ExecutionQueueScope, Option<winwincode_domain::StageRunId>) {
+fn queue_scope(job: &ExecutionJob) -> (ExecutionQueueScope, Option<winwincode_domain::WorkRunId>) {
     match &job.scope {
-        winwincode_execution_port::generated::ExecutionScope::DeliveryStageExecutionScope(
-            scope,
-        ) => (
+        winwincode_execution_port::generated::ExecutionScope::WorkRunExecutionScope(scope) => (
             ExecutionQueueScope {
                 organization_id: winwincode_domain::OrganizationId(
                     "org_00000000000000000000000001".to_owned(),
@@ -328,9 +326,9 @@ fn queue_scope(job: &ExecutionJob) -> (ExecutionQueueScope, Option<winwincode_do
                 ),
                 repository_id: job.workspace.repository_id.clone(),
                 product_session_id: scope.product_session_id.clone(),
-                delivery_id: Some(scope.delivery_id.clone()),
+                delivery_id: Some(DeliveryId("dlv_00000000000000000000000001".to_owned())),
             },
-            Some(scope.stage_run_id.clone()),
+            Some(scope.work_run_id.clone()),
         ),
         winwincode_execution_port::generated::ExecutionScope::ProductSessionExecutionScope(
             scope,
@@ -369,7 +367,7 @@ fn seed_authority_with_write_mode(
     dispatch.job.workspace.write_mode = write_mode;
     commit_dispatch_intent(storage, &dispatch.job);
     let claim = claim_from_dispatch(&dispatch);
-    let (scope, stage_run_id) = queue_scope(&dispatch.job);
+    let (scope, work_run_id) = queue_scope(&dispatch.job);
     let submitted = storage
         .execution_queue()
         .expect("queue")
@@ -381,7 +379,7 @@ fn seed_authority_with_write_mode(
             dispatch_payload: serde_json::to_vec(&dispatch.job).expect("job payload"),
             attempt: 1,
             dependencies: Vec::new(),
-            stage_run_id,
+            work_run_id,
             submitted_at: claim.issued_at.clone(),
         })
         .expect("queue submit");
@@ -433,7 +431,7 @@ fn round_authority(
     job: &ExecutionJob,
     debug_session: u64,
 ) -> DebugProbeRoundAuthority {
-    let stage_run_id = guard.expected_job().stage_run_id.clone();
+    let work_run_id = guard.expected_job().work_run_id.clone();
     DebugProbeRoundAuthority {
         attempt: job.attempt,
         debug_session_id: DebugSessionId(format!("dbg_{debug_session:026}")),
@@ -446,7 +444,7 @@ fn round_authority(
         session_identity: SessionIdentity {
             codex_thread_id: CodexThreadId(format!("cdx_{debug_session:026}")),
             product_session_id: guard.expected_job().scope.product_session_id.clone(),
-            stage_run_id,
+            work_run_id,
             worker_session_id: guard.expected_dispatch().worker_session_id().clone(),
         },
         workspace_revision: WorkspaceRevision(format!(
@@ -584,6 +582,7 @@ fn sealed_round(authority: DebugProbeRoundAuthority) -> RoundFixture {
         schema_version: 1,
         started_at: Instant("2026-09-07T08:00:01.000Z".to_owned()),
         status: ProbeRoundReceiptStatus::Completed,
+        reducer: None,
         usage: ProbeRoundBudgetUsage {
             budget_digest: plan.plan().budget.budget_digest.clone(),
             elapsed_millis: 3_000,

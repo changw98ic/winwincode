@@ -979,7 +979,7 @@ fn create_failure_after_secret_store_rejection_leaves_no_reference() {
 }
 
 #[test]
-fn custom_endpoints_pass_canonical_https_validation_before_any_write() {
+fn custom_endpoints_accept_https_and_exact_local_loopback_before_any_write() {
     let model = vec![ModelCapability {
         model_id: "relay-large".to_owned(),
         display_name: "Relay Large".to_owned(),
@@ -1009,6 +1009,17 @@ fn custom_endpoints_pass_canonical_https_validation_before_any_write() {
         onboarded.route.provider_id, "relay-custom",
         "the route is established from the verified report"
     );
+    let local = service
+        .create_credential_reference(CreateCredentialRequest {
+            actor: actor(),
+            organization_scope: organization_scope(),
+            provider_id: "local-openai".to_owned(),
+            custom_endpoint: Some("http://127.0.0.1:11434/v1".to_owned()),
+            secret: secret(USER_SECRET),
+        })
+        .expect("exact local loopback endpoint is accepted");
+    assert_eq!(local.endpoint, "http://127.0.0.1:11434/v1");
+
     let catalog = ProviderCatalogService::new(&mut storage)
         .project(&scope())
         .expect("catalog projects");
@@ -1018,7 +1029,7 @@ fn custom_endpoints_pass_canonical_https_validation_before_any_write() {
     assert_eq!(provider.adapter_kind, "openai-responses");
     assert_eq!(provider.display_name, "relay-custom");
 
-    // Non-HTTPS endpoints are rejected before any state is written.
+    // Plaintext non-loopback endpoints are rejected before any state is written.
     let rejected_store = secret_store(&harness);
     let mut rejected =
         ProviderOnboardingService::new(&mut storage, &rejected_store, &harness.probe);

@@ -526,6 +526,7 @@ function typescriptEnumVariant(value, used) {
     .filter(Boolean)
     .map(part => {
       const normalized = part === part.toUpperCase() ? part.toLowerCase() : part
+      if (normalized.toLowerCase() === 'workrun') return 'WorkRun'
       return `${normalized.slice(0, 1).toUpperCase()}${normalized.slice(1)}`
     })
     .join('') || 'Value'
@@ -733,7 +734,7 @@ import type {
   RepositoryScope,
   RequestId,
   RuntimeProjectionSnapshot,
-  StageRunId,
+  WorkRunId,
   StrongFlowReadCursor,
 } from './contracts.js'
 
@@ -1985,7 +1986,7 @@ export interface StrongFlowProjectionSubscriptionOptions
   extends ProjectionSubscriptionTransportOptions {
   readonly scope: RepositoryScope
   readonly deliveryId: DeliveryId
-  readonly stageRunId: StageRunId
+  readonly workRunId: WorkRunId
   readonly onSnapshot: (snapshot: StrongFlowProjectionSnapshot) => Promise<void> | void
 }
 
@@ -2120,7 +2121,7 @@ export function createStrongFlowProjectionSubscription(
             kind: 'delivery-stage',
             productSessionId: options.productSessionId,
             deliveryId: options.deliveryId,
-            stageRunId: options.stageRunId,
+            workRunId: options.workRunId,
             atCursor: candidateCursor,
           },
           page: { cursor: null, limit: 1 },
@@ -2144,7 +2145,7 @@ export function createStrongFlowProjectionSubscription(
         || runtime.kind !== 'runtime_projection'
         || runtime.productSessionId !== options.productSessionId
         || runtime.deliveryId !== options.deliveryId
-        || runtime.stageRunId !== options.stageRunId
+        || runtime.workRunId !== options.workRunId
         || stableIdentity(runtime.readCursor) !== stableIdentity(candidateCursor)
         || stableIdentity(runtime.eventCursor) !== stableIdentity(candidateCursor.eventCursor)
       ) throw invalidResponse(runtimeRequestId)
@@ -2200,7 +2201,7 @@ export function createStrongFlowProjectionSubscription(
       event.scopeKind !== 'delivery-stage'
       || event.productSessionId !== options.productSessionId
       || event.deliveryId !== options.deliveryId
-      || event.stageRunId !== options.stageRunId
+      || event.workRunId !== options.workRunId
       || stableIdentity(event.reloadQueries) !== stableIdentity([
         'delivery.get',
         'runtime.projection.get',
@@ -2328,7 +2329,7 @@ export function createProductSessionRuntimeProjectionSubscription(
       || runtime.kind !== 'runtime_projection'
       || runtime.productSessionId !== options.productSessionId
       || runtime.deliveryId !== null
-      || runtime.stageRunId !== null
+      || runtime.workRunId !== null
       || runtime.readCursor !== null
       || !isRecord(runtime.eventCursor)
       || stableIdentity(runtime.eventCursor.scope) !== stableIdentity(options.scope)
@@ -2570,6 +2571,16 @@ function rustSharedDefinitionNamesForExecutionPort(context) {
       .map(entry => entry.name),
   )
   const pending = [...context.registry.values()].filter(isExecutionPortDefinition)
+  // Public engineering-runtime objects are database-neutral domain values. Keep
+  // their single Rust ownership in winwincode-domain; API only references them.
+  for (const name of [
+    'Candidate', 'CandidateDigest', 'Criterion', 'ExecutionFactIdentity', 'WorkContractId', 'WorkItemId', 'WorkRunId', 'VerificationPlanId',
+    'WorkItemState', 'WorkRunState', 'WorkContract', 'WorkItem', 'WorkRun',
+    'VerificationPlan', 'Evidence', 'Verdict',
+  ]) {
+    const entry = context.registry.get(name)
+    if (entry?.document.fileName === 'domain.schema.json') names.add(name)
+  }
   const visited = new Set()
 
   while (pending.length > 0) {
@@ -3318,6 +3329,15 @@ function renderRustDomain(context, digest) {
     '#![allow(clippy::doc_markdown)]',
     '',
     '//! Shared identifiers and value objects generated from the canonical schemas.',
+    '',
+    '#[allow(clippy::missing_errors_doc)]',
+    "fn deserialize_required_nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>",
+    'where',
+    "    D: serde::Deserializer<'de>,",
+    "    T: serde::Deserialize<'de>,",
+    '{',
+    '    <Option<T> as serde::Deserialize>::deserialize(deserializer)',
+    '}',
     '',
     ...declarations.flatMap(declaration => [declaration, '']),
   ].join('\n')

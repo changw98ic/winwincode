@@ -17,7 +17,8 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use winwincode_domain::{DeliveryId, RequestId};
+use winwincode_domain::{DeliveryId, FencingToken, RequestId, WorkRun};
+use winwincode_storage::{ExecutionDispatchAuthority, ExecutionDispatchWorkRunProof};
 
 use crate::{
     application::{
@@ -25,22 +26,18 @@ use crate::{
         attention::ResolvedAttentionTransition,
         session_binding::{
             DeliveryExecutionAttemptReplacement, SessionBindingAuthority, SessionBindingIdentity,
-            accept_worker_session_with_authority, replace_execution_attempt_with_authority,
+            accept_replacement_worker_session_with_authority, accept_worker_session_with_authority,
             report_codex_thread_with_authority,
         },
-        solution_review::resolve_current_solution_review,
         stage::{
-            DeliveryTerminalOutcomeFacts, StageAdvanceResult,
+            DeliveryTerminalOutcomeFacts, StageAdvanceEffect, StageAdvanceResult,
             apply_terminal_outcome as settle_terminal_outcome,
-        },
-        task_breakdown::{
-            DeliveryTaskBreakdownApprovedEvent, TaskBreakdownPromotionTransition,
-            prepare_task_breakdown_promotion, restore_task_breakdown_event,
         },
         verdict::ComputedVerdictTransition,
     },
     domain::{
-        Delivery, DeliveryStatus, portable_identifier, request_identifier,
+        Delivery, DeliveryStatus, SessionBinding, SessionBindingId, SessionBindingSourceProvenance,
+        portable_identifier, request_identifier,
         rework::{ValidatedReworkHistoryFact, derive_validated_rework_history},
         safe_non_negative,
     },
@@ -56,6 +53,8 @@ pub enum DeliveryMutationOperation {
     DeliverySpecUpdated,
     #[serde(rename = "stage.started")]
     StageStarted,
+    #[serde(rename = "workrun.dispatch.started")]
+    WorkRunDispatchStarted,
     #[serde(rename = "stage.terminal")]
     StageTerminal,
     #[serde(rename = "session.bound")]
@@ -70,6 +69,10 @@ pub enum DeliveryMutationOperation {
     ReworkClarified,
     #[serde(rename = "delivery.task_breakdown.approved")]
     TaskBreakdownApproved,
+    #[serde(rename = "workrun.appended")]
+    WorkRunAppended,
+    #[serde(rename = "workitems.created")]
+    WorkItemsCreated,
 }
 
 impl FromStr for DeliveryMutationOperation {
@@ -80,6 +83,7 @@ impl FromStr for DeliveryMutationOperation {
             "delivery.created" => Ok(Self::DeliveryCreated),
             "delivery.spec.updated" => Ok(Self::DeliverySpecUpdated),
             "stage.started" => Ok(Self::StageStarted),
+            "workrun.dispatch.started" => Ok(Self::WorkRunDispatchStarted),
             "stage.terminal" => Ok(Self::StageTerminal),
             "session.bound" => Ok(Self::SessionBound),
             "execution.attempt.replaced" => Ok(Self::ExecutionAttemptReplaced),
@@ -87,6 +91,8 @@ impl FromStr for DeliveryMutationOperation {
             "verdict.submitted" => Ok(Self::VerdictSubmitted),
             "rework.clarified" => Ok(Self::ReworkClarified),
             "delivery.task_breakdown.approved" => Ok(Self::TaskBreakdownApproved),
+            "workrun.appended" => Ok(Self::WorkRunAppended),
+            "workitems.created" => Ok(Self::WorkItemsCreated),
             _ => Err(store_error(
                 DeliveryStoreErrorCode::InvalidStoreOptions,
                 "delivery mutation operation is unsupported",
@@ -219,7 +225,6 @@ pub struct StoredDelivery {
 pub struct DeliveryStoreMutationResult {
     pub snapshot: Delivery,
     pub replayed: bool,
-    pub task_breakdown_event: Option<DeliveryTaskBreakdownApprovedEvent>,
 }
 
 #[derive(Debug, Clone)]
@@ -268,22 +273,37 @@ pub struct ReportDeliveryCodexThread {
 /// Scheduler-sealed replacement of one fully bound running Delivery attempt.
 #[derive(Debug, Clone)]
 pub struct ReplaceDeliveryExecutionAttempt {
+    pub request_id: RequestId,
+    pub request_digest: String,
     pub expected_revision: u64,
     pub identity: SessionBindingIdentity,
     pub replacement: DeliveryExecutionAttemptReplacement,
+    pub successor_authority: SessionBindingAuthority,
     pub now_millis: u64,
 }
 
-/// Specialized task-promotion append. The command contains only durable
-/// request identity and the approved review digest; the Store rebuilds the
-/// exact task graph from the current canonical Delivery.
+/// Creates an initial batch of controller-owned work items in the current contract.
 #[derive(Debug, Clone)]
-pub struct ApproveDeliveryTaskBreakdown {
+pub struct CreateDeliveryWorkItems {
     pub delivery_id: DeliveryId,
     pub request_id: RequestId,
     pub request_digest: String,
     pub expected_revision: u64,
-    pub review_set_sha256: String,
+    pub contract_revision: i64,
+    pub items: Vec<winwincode_domain::WorkItem>,
+    pub now_millis: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct AppendDeliveryWorkRun {
+    pub delivery_id: DeliveryId,
+    pub request_id: RequestId,
+    pub request_digest: String,
+    pub expected_revision: u64,
+    pub run: WorkRun,
+    pub authority: ExecutionDispatchAuthority,
+    pub proof: ExecutionDispatchWorkRunProof,
+    pub now_millis: u64,
 }
 
 /// Specialized verdict append that can be created only by the application
@@ -296,9 +316,11 @@ pub struct SubmitDeliveryVerdict {
     pub transition: ComputedVerdictTransition,
 }
 
-/// Specialized stage-start append created only from [`crate::application::stage::advance`].
+/// Specialized canonical `WorkRun` dispatch append.  Unlike a stage start it
+/// changes no historical stage projection; it only seals the Delivery
+/// revision before the scheduler accepts the immutable job.
 #[derive(Debug, Clone)]
-pub struct StartDeliveryStage {
+pub struct StartDeliveryWorkRunDispatch {
     pub request_id: RequestId,
     pub request_digest: String,
     pub expected_revision: u64,
@@ -346,12 +368,13 @@ pub enum DeliveryCommand {
     AcceptWorkerSession(Box<AcceptDeliveryWorkerSession>),
     ReportCodexThread(Box<ReportDeliveryCodexThread>),
     ReplaceExecutionAttempt(Box<ReplaceDeliveryExecutionAttempt>),
-    StartStage(Box<StartDeliveryStage>),
+    StartWorkRunDispatch(Box<StartDeliveryWorkRunDispatch>),
     ApplyTerminalOutcome(Box<ApplyDeliveryTerminalOutcome>),
     ResolveAttention(Box<ResolveDeliveryAttention>),
     SubmitVerdict(Box<SubmitDeliveryVerdict>),
     ClarifyRework(Box<ClarifyDeliveryRework>),
-    ApproveTaskBreakdown(Box<ApproveDeliveryTaskBreakdown>),
+    AppendWorkRun(Box<AppendDeliveryWorkRun>),
+    CreateWorkItems(Box<CreateDeliveryWorkItems>),
 }
 
 #[derive(Debug, Clone)]
@@ -654,7 +677,6 @@ impl<'journal> DeliveryStore<'journal> {
             Ok(()) => Ok(DeliveryStoreMutationResult {
                 snapshot: record.snapshot,
                 replayed: false,
-                task_breakdown_event: None,
             }),
             Err(error) if error.code == JournalBackendErrorCode::AlreadyExists => {
                 let stored = self.read(&record.delivery_id)?;
@@ -681,7 +703,6 @@ impl<'journal> DeliveryStore<'journal> {
                 Ok(DeliveryStoreMutationResult {
                     snapshot: first.snapshot.clone(),
                     replayed: true,
-                    task_breakdown_event: None,
                 })
             }
             Err(error) => Err(map_backend_error(error)),
@@ -696,11 +717,13 @@ impl<'journal> DeliveryStore<'journal> {
         if matches!(
             command.operation,
             DeliveryMutationOperation::StageStarted
+                | DeliveryMutationOperation::WorkRunDispatchStarted
                 | DeliveryMutationOperation::StageTerminal
                 | DeliveryMutationOperation::AttentionResolved
                 | DeliveryMutationOperation::VerdictSubmitted
                 | DeliveryMutationOperation::ReworkClarified
                 | DeliveryMutationOperation::TaskBreakdownApproved
+                | DeliveryMutationOperation::WorkRunAppended
         ) {
             return Err(store_error(
                 DeliveryStoreErrorCode::InvalidStoreOptions,
@@ -836,8 +859,9 @@ impl<'journal> DeliveryStore<'journal> {
         &self,
         command: ReplaceDeliveryExecutionAttempt,
     ) -> Result<DeliveryStoreMutationResult, DeliveryStoreError> {
-        let request_id = command.replacement.receipt_id().clone();
-        let request_digest = command
+        let request_id = command.request_id.clone();
+        let request_digest = command.request_digest.clone();
+        command
             .replacement
             .store_request_digest()
             .map_err(|error| {
@@ -855,6 +879,36 @@ impl<'journal> DeliveryStore<'journal> {
             DeliveryMutationOperation::ExecutionAttemptReplaced,
             command.expected_revision,
         )? {
+            let before = stored
+                .records
+                .iter()
+                .find(|record| record.snapshot.revision() == command.expected_revision)
+                .ok_or_else(|| {
+                    store_error(
+                        DeliveryStoreErrorCode::InvalidStoreOptions,
+                        "replacement replay predecessor is missing",
+                    )
+                })?;
+            let expected = accept_replacement_worker_session_with_authority(
+                &before.snapshot,
+                command.expected_revision,
+                &command.identity,
+                &command.replacement,
+                &command.successor_authority,
+                command.now_millis,
+            )
+            .map_err(|error| {
+                store_error(
+                    DeliveryStoreErrorCode::InvalidStoreOptions,
+                    error.to_string(),
+                )
+            })?;
+            if expected != replayed.snapshot {
+                return Err(store_error(
+                    DeliveryStoreErrorCode::InvalidStoreOptions,
+                    "replacement replay differs from its original successor authority",
+                ));
+            }
             return Ok(replayed);
         }
         if command.expected_revision != stored.snapshot.revision() {
@@ -864,11 +918,12 @@ impl<'journal> DeliveryStore<'journal> {
                 "delivery revision changed before execution attempt replacement",
             ));
         }
-        let next = replace_execution_attempt_with_authority(
+        let next = accept_replacement_worker_session_with_authority(
             &stored.snapshot,
             command.expected_revision,
             &command.identity,
             &command.replacement,
+            &command.successor_authority,
             command.now_millis,
         )
         .map_err(|error| {
@@ -897,24 +952,34 @@ impl<'journal> DeliveryStore<'journal> {
             AppendAuthority::ExecutionAttemptReplacement {
                 identity: command.identity,
                 replacement: Box::new(command.replacement),
+                successor_authority: command.successor_authority,
                 now_millis: command.now_millis,
             },
         )
     }
 
-    fn start_stage(
+    fn start_workrun_dispatch(
         &self,
-        command: StartDeliveryStage,
+        command: StartDeliveryWorkRunDispatch,
     ) -> Result<DeliveryStoreMutationResult, DeliveryStoreError> {
+        if !command.transition.is_canonical_workrun_dispatch() {
+            return Err(store_error(
+                DeliveryStoreErrorCode::InvalidStoreOptions,
+                "WorkRun dispatch requires its canonical transition",
+            ));
+        }
         let append = AppendDelivery {
             delivery_id: command.transition.delivery.id().clone(),
             request_id: command.request_id,
             request_digest: command.request_digest,
-            operation: DeliveryMutationOperation::StageStarted,
+            operation: DeliveryMutationOperation::WorkRunDispatchStarted,
             expected_revision: command.expected_revision,
             snapshot: command.transition.delivery.clone(),
         };
-        self.append_authorized(append, AppendAuthority::Stage(&command.transition))
+        self.append_authorized(
+            append,
+            AppendAuthority::WorkRunDispatch(&command.transition),
+        )
     }
 
     fn apply_terminal_outcome(
@@ -993,110 +1058,167 @@ impl<'journal> DeliveryStore<'journal> {
         )
     }
 
-    fn approve_task_breakdown(
+    fn create_work_items(
         &self,
-        command: ApproveDeliveryTaskBreakdown,
+        command: CreateDeliveryWorkItems,
     ) -> Result<DeliveryStoreMutationResult, DeliveryStoreError> {
         validate_request(&command.request_id, &command.request_digest)?;
-        validate_digest(
-            &command.review_set_sha256,
-            DeliveryStoreErrorCode::InvalidStoreOptions,
-            "reviewSetSha256",
-        )?;
         let stored = self.read(&command.delivery_id)?;
-
-        if let Some((index, prior)) = stored
-            .records
-            .iter()
-            .enumerate()
-            .find(|(_, record)| record.request_id == command.request_id)
-        {
-            let prior_expected_revision =
-                prior.snapshot.revision().checked_sub(1).ok_or_else(|| {
-                    store_error(
-                        DeliveryStoreErrorCode::StoreCorrupt,
-                        "task-breakdown record cannot have revision zero",
-                    )
-                })?;
-            if prior.request_digest != command.request_digest
-                || prior.operation != DeliveryMutationOperation::TaskBreakdownApproved
-                || prior_expected_revision != command.expected_revision
-            {
-                return Err(store_error(
-                    DeliveryStoreErrorCode::RequestConflict,
-                    format!(
-                        "request {} was already used for another delivery mutation",
-                        command.request_id.0
-                    ),
-                ));
-            }
-            let source = index
-                .checked_sub(1)
-                .and_then(|source_index| {
-                    stored
-                        .records
-                        .get(source_index)
-                        .map(|record| &record.snapshot)
-                })
+        if let Some(replayed) = replayed_append(
+            &stored,
+            &command.request_id,
+            &command.request_digest,
+            DeliveryMutationOperation::WorkItemsCreated,
+            command.expected_revision,
+        )? {
+            let before = stored
+                .records
+                .iter()
+                .find(|record| record.snapshot.revision() == command.expected_revision)
                 .ok_or_else(|| {
                     store_error(
                         DeliveryStoreErrorCode::StoreCorrupt,
-                        "task-breakdown record has no source Delivery revision",
+                        "WorkItem receipt has no source snapshot",
                     )
                 })?;
-            let event =
-                restore_task_breakdown_event(source, &prior.snapshot, &command.review_set_sha256)
-                    .map_err(|error| map_task_breakdown_error(&error))?;
-            return Ok(DeliveryStoreMutationResult {
-                snapshot: prior.snapshot.clone(),
-                replayed: true,
-                task_breakdown_event: Some(event),
-            });
+            let expected = create_work_items_snapshot(
+                &before.snapshot,
+                command.contract_revision,
+                &command.items,
+                replayed.snapshot.snapshot().updated_at_millis,
+            )
+            .map_err(|_| {
+                store_error(
+                    DeliveryStoreErrorCode::RequestConflict,
+                    "WorkItem replay changed its input",
+                )
+            })?;
+            if expected != replayed.snapshot {
+                return Err(store_error(
+                    DeliveryStoreErrorCode::RequestConflict,
+                    "WorkItem replay changed its input",
+                ));
+            }
+            return Ok(replayed);
         }
-
         if command.expected_revision != stored.snapshot.revision() {
             return Err(revision_conflict(
                 command.expected_revision,
                 stored.snapshot.revision(),
-                "delivery revision changed before task-breakdown promotion",
+                "delivery revision changed before WorkItem creation",
             ));
         }
-        let review = resolve_current_solution_review(&stored.snapshot)
+        let next = create_work_items_snapshot(
+            &stored.snapshot,
+            command.contract_revision,
+            &command.items,
+            command.now_millis,
+        )?;
+        self.append_authorized(
+            AppendDelivery {
+                delivery_id: command.delivery_id,
+                request_id: command.request_id,
+                request_digest: command.request_digest,
+                operation: DeliveryMutationOperation::WorkItemsCreated,
+                expected_revision: command.expected_revision,
+                snapshot: next,
+            },
+            AppendAuthority::WorkItems {
+                items: &command.items,
+                contract_revision: command.contract_revision,
+            },
+        )
+    }
+
+    fn append_work_run(
+        &self,
+        command: AppendDeliveryWorkRun,
+    ) -> Result<DeliveryStoreMutationResult, DeliveryStoreError> {
+        validate_request(&command.request_id, &command.request_digest)?;
+        let stored = self.read(&command.delivery_id)?;
+        validate_work_run_authority(&command.run, &command.authority)?;
+        command
+            .proof
+            .verify_work_run(&command.run, &command.delivery_id.0)
             .map_err(|error| {
                 store_error(
                     DeliveryStoreErrorCode::InvalidStoreOptions,
                     error.to_string(),
                 )
-            })?
-            .ok_or_else(|| {
-                store_error(
-                    DeliveryStoreErrorCode::InvalidStoreOptions,
-                    "task-breakdown promotion requires a current solution review",
-                )
             })?;
-        if review.review_set_sha256() != command.review_set_sha256 {
-            return Err(store_error(
-                DeliveryStoreErrorCode::ReviewSetStale,
-                "reviewSetSha256 no longer identifies the current solution review",
-            ));
-        }
-        let approved = review.approved_task_promotion().ok_or_else(|| {
+        let execution_profile = command.proof.execution_profile().map_err(|error| {
             store_error(
                 DeliveryStoreErrorCode::InvalidStoreOptions,
-                "task-breakdown promotion requires the current approved solution review",
+                error.to_string(),
             )
         })?;
-        let transition = prepare_task_breakdown_promotion(&stored.snapshot, &approved)
-            .map_err(|error| map_task_breakdown_error(&error))?;
-        let append = AppendDelivery {
-            delivery_id: command.delivery_id,
-            request_id: command.request_id,
-            request_digest: command.request_digest,
-            operation: DeliveryMutationOperation::TaskBreakdownApproved,
-            expected_revision: command.expected_revision,
-            snapshot: transition.delivery().clone(),
-        };
-        self.append_authorized(append, AppendAuthority::TaskBreakdown(&transition))
+        if let Some(replayed) = replayed_append(
+            &stored,
+            &command.request_id,
+            &command.request_digest,
+            DeliveryMutationOperation::WorkRunAppended,
+            command.expected_revision,
+        )? {
+            if replayed
+                .snapshot
+                .snapshot()
+                .work_run_aggregate
+                .runs
+                .iter()
+                .any(|run| run == &command.run)
+                && replayed
+                    .snapshot
+                    .snapshot()
+                    .session_bindings
+                    .iter()
+                    .any(|binding| {
+                        binding.work_run_id == command.run.id
+                            && binding.source_provenance.kind()
+                                == crate::domain::SessionBindingSourceKind::WorkRunDispatch
+                            && binding.worker_session_id.as_ref()
+                                == Some(&command.run.worker_session_id)
+                            && binding.codex_thread_id.is_none()
+                            && binding.worker_id.as_ref() == Some(&command.run.worker_id)
+                            && binding.worker_instance_id.as_ref()
+                                == Some(&command.run.worker_instance_id)
+                            && binding.lease_id.as_ref() == Some(&command.run.lease_id)
+                            && u64::try_from(command.run.attempt).ok() == Some(binding.attempt)
+                            && binding.fencing_token.as_ref()
+                                == Some(&FencingToken(command.run.fencing_token.clone()))
+                    })
+            {
+                return Ok(replayed);
+            }
+            return Err(store_error(
+                DeliveryStoreErrorCode::RequestConflict,
+                "replayed WorkRun request changed its canonical run payload",
+            ));
+        }
+        if command.expected_revision != stored.snapshot.revision() {
+            return Err(revision_conflict(
+                command.expected_revision,
+                stored.snapshot.revision(),
+                "delivery revision changed before WorkRun append",
+            ));
+        }
+        let next = append_work_run_snapshot(
+            &stored.snapshot,
+            command.expected_revision,
+            &command.run,
+            command.now_millis,
+            &execution_profile,
+        )?;
+        self.append_authorized(
+            AppendDelivery {
+                delivery_id: command.delivery_id,
+                request_id: command.request_id,
+                request_digest: command.request_digest,
+                operation: DeliveryMutationOperation::WorkRunAppended,
+                expected_revision: command.expected_revision,
+                snapshot: next,
+            },
+            AppendAuthority::WorkRun(&command.run, &command.authority, &command.proof),
+        )
     }
 
     #[allow(clippy::too_many_lines)]
@@ -1113,23 +1235,19 @@ impl<'journal> DeliveryStore<'journal> {
             ));
         }
         let stored = self.read(&command.delivery_id)?;
-        let task_breakdown_event = authority.clone().task_breakdown_event();
         if command.snapshot.id() != &command.delivery_id {
             return Err(store_error(
                 DeliveryStoreErrorCode::DeliveryIdMismatch,
                 "delivery mutation snapshot belongs to another delivery",
             ));
         }
-        if let Some(mut replayed) = replayed_append(
+        if let Some(replayed) = replayed_append(
             &stored,
             &command.request_id,
             &command.request_digest,
             command.operation,
             command.expected_revision,
         )? {
-            replayed
-                .task_breakdown_event
-                .clone_from(&task_breakdown_event);
             return Ok(replayed);
         }
         if command.expected_revision != stored.snapshot.revision()
@@ -1142,12 +1260,32 @@ impl<'journal> DeliveryStore<'journal> {
             ));
         }
         match authority {
-            AppendAuthority::Generic => {
-                validate_generic_append_delta(
+            AppendAuthority::Generic => validate_generic_append_delta(
+                command.operation,
+                &stored.snapshot,
+                &command.snapshot,
+            )?,
+            AppendAuthority::WorkItems {
+                items,
+                contract_revision,
+            } => {
+                validate_authorized_operation(
                     command.operation,
-                    &stored.snapshot,
-                    &command.snapshot,
+                    DeliveryMutationOperation::WorkItemsCreated,
+                    "workitems.created",
                 )?;
+                let expected = create_work_items_snapshot(
+                    &stored.snapshot,
+                    contract_revision,
+                    items,
+                    command.snapshot.snapshot().updated_at_millis,
+                )?;
+                if expected != command.snapshot {
+                    return Err(store_error(
+                        DeliveryStoreErrorCode::InvalidStoreOptions,
+                        "WorkItem command differs from its aggregate transition",
+                    ));
+                }
             }
             AppendAuthority::WorkerSession {
                 identity,
@@ -1204,6 +1342,7 @@ impl<'journal> DeliveryStore<'journal> {
             AppendAuthority::ExecutionAttemptReplacement {
                 identity,
                 replacement,
+                successor_authority,
                 now_millis,
             } => {
                 validate_authorized_operation(
@@ -1211,11 +1350,12 @@ impl<'journal> DeliveryStore<'journal> {
                     DeliveryMutationOperation::ExecutionAttemptReplaced,
                     "execution.attempt.replaced",
                 )?;
-                let expected = replace_execution_attempt_with_authority(
+                let expected = accept_replacement_worker_session_with_authority(
                     &stored.snapshot,
                     command.expected_revision,
                     &identity,
                     &replacement,
+                    &successor_authority,
                     now_millis,
                 )
                 .map_err(|error| map_transition_error(&error, &command, &stored.snapshot))?;
@@ -1226,15 +1366,60 @@ impl<'journal> DeliveryStore<'journal> {
                     ));
                 }
             }
-            AppendAuthority::Stage(transition) => {
+            AppendAuthority::WorkRunDispatch(transition) => {
                 validate_authorized_operation(
                     command.operation,
-                    DeliveryMutationOperation::StageStarted,
-                    "stage.started",
+                    DeliveryMutationOperation::WorkRunDispatchStarted,
+                    "workrun.dispatch.started",
                 )?;
+                if !transition.is_canonical_workrun_dispatch()
+                    || !matches!(transition.effect, StageAdvanceEffect::Dispatch(_))
+                {
+                    return Err(store_error(
+                        DeliveryStoreErrorCode::InvalidStoreOptions,
+                        "invalid canonical WorkRun dispatch transition",
+                    ));
+                }
                 transition
                     .validate_start_source(&stored.snapshot)
                     .map_err(|error| map_transition_error(&error, &command, &stored.snapshot))?;
+                let before = stored.snapshot.snapshot();
+                let after = transition.delivery.snapshot();
+                let expected_aggregate = match &transition.effect {
+                    StageAdvanceEffect::Dispatch(intent) => intent
+                        .rework_authorization()
+                        .map(|authorization| authorization.dispatch_aggregate(&stored.snapshot))
+                        .transpose()
+                        .map_err(|error| {
+                            store_error(
+                                DeliveryStoreErrorCode::InvalidStoreOptions,
+                                error.to_string(),
+                            )
+                        })?,
+                    _ => None,
+                };
+                if before.stage_runs != after.stage_runs
+                    || before.tasks != after.tasks
+                    || expected_aggregate
+                        .as_ref()
+                        .unwrap_or(&before.work_run_aggregate)
+                        != &after.work_run_aggregate
+                    || before.session_bindings != after.session_bindings
+                    || before.attention_items != after.attention_items
+                    || match &transition.effect {
+                        StageAdvanceEffect::Dispatch(intent)
+                            if intent.rework_authorization().is_some() =>
+                        {
+                            !after.evidence.is_empty() || after.verdict.is_some()
+                        }
+                        _ => before.evidence != after.evidence || before.verdict != after.verdict,
+                    }
+                {
+                    return Err(store_error(
+                        DeliveryStoreErrorCode::InvalidStoreOptions,
+                        "canonical WorkRun dispatch changed non-dispatch Delivery state",
+                    ));
+                }
             }
             AppendAuthority::Terminal(facts) => {
                 validate_authorized_operation(
@@ -1289,21 +1474,43 @@ impl<'journal> DeliveryStore<'journal> {
                     .validate_rework_clarification_source(&stored.snapshot)
                     .map_err(|error| map_transition_error(&error, &command, &stored.snapshot))?;
             }
-            AppendAuthority::TaskBreakdown(transition) => {
+            AppendAuthority::WorkRun(run, authority, proof) => {
+                validate_work_run_authority(run, authority)?;
+                proof
+                    .verify_work_run(run, &command.delivery_id.0)
+                    .map_err(|error| {
+                        store_error(
+                            DeliveryStoreErrorCode::InvalidStoreOptions,
+                            error.to_string(),
+                        )
+                    })?;
                 validate_authorized_operation(
                     command.operation,
-                    DeliveryMutationOperation::TaskBreakdownApproved,
-                    "delivery.task_breakdown.approved",
+                    DeliveryMutationOperation::WorkRunAppended,
+                    "workrun.appended",
                 )?;
-                transition
-                    .validate_source(&stored.snapshot)
-                    .map_err(|error| map_task_breakdown_error(&error))?;
-                if transition.delivery() != &command.snapshot
-                    || transition.review_set_sha256() != transition.event().review_set_sha256
-                {
+                let expected = append_work_run_snapshot(
+                    &stored.snapshot,
+                    command.expected_revision,
+                    run,
+                    command.snapshot.snapshot().updated_at_millis,
+                    &proof.execution_profile().map_err(|error| {
+                        store_error(
+                            DeliveryStoreErrorCode::InvalidStoreOptions,
+                            error.to_string(),
+                        )
+                    })?,
+                )
+                .map_err(|error| {
+                    store_error(
+                        DeliveryStoreErrorCode::InvalidStoreOptions,
+                        error.message().to_owned(),
+                    )
+                })?;
+                if expected != command.snapshot {
                     return Err(store_error(
                         DeliveryStoreErrorCode::InvalidStoreOptions,
-                        "task-breakdown command does not match its sealed transition",
+                        "WorkRun command differs from its aggregate transition",
                     ));
                 }
             }
@@ -1346,7 +1553,6 @@ impl<'journal> DeliveryStore<'journal> {
             Ok(()) => Ok(DeliveryStoreMutationResult {
                 snapshot: record.snapshot,
                 replayed: false,
-                task_breakdown_event,
             }),
             Err(error) if error.code == JournalBackendErrorCode::Conflict => {
                 let raced = self.read(&command.delivery_id)?;
@@ -1354,13 +1560,11 @@ impl<'journal> DeliveryStore<'journal> {
                     .records
                     .iter()
                     .find(|entry| entry.request_id == command.request_id)
-                    && prior.request_digest == command.request_digest
-                    && prior.operation == command.operation
+                    && prior == &record
                 {
                     return Ok(DeliveryStoreMutationResult {
                         snapshot: prior.snapshot.clone(),
                         replayed: true,
-                        task_breakdown_event,
                     });
                 }
                 Err(revision_conflict(
@@ -1429,13 +1633,16 @@ fn replayed_append(
     Ok(Some(DeliveryStoreMutationResult {
         snapshot: prior.snapshot.clone(),
         replayed: true,
-        task_breakdown_event: None,
     }))
 }
 
 #[derive(Clone)]
 enum AppendAuthority<'transition> {
     Generic,
+    WorkItems {
+        items: &'transition [winwincode_domain::WorkItem],
+        contract_revision: i64,
+    },
     WorkerSession {
         identity: SessionBindingIdentity,
         authority: SessionBindingAuthority,
@@ -1450,31 +1657,19 @@ enum AppendAuthority<'transition> {
     ExecutionAttemptReplacement {
         identity: SessionBindingIdentity,
         replacement: Box<DeliveryExecutionAttemptReplacement>,
+        successor_authority: SessionBindingAuthority,
         now_millis: u64,
     },
-    Stage(&'transition StageAdvanceResult),
+    WorkRunDispatch(&'transition StageAdvanceResult),
     Terminal(&'transition DeliveryTerminalOutcomeFacts),
     Attention(&'transition ResolvedAttentionTransition),
     Verdict(&'transition ComputedVerdictTransition),
     ReworkClarification(&'transition StageAdvanceResult),
-    TaskBreakdown(&'transition TaskBreakdownPromotionTransition),
-}
-
-impl AppendAuthority<'_> {
-    fn task_breakdown_event(self) -> Option<DeliveryTaskBreakdownApprovedEvent> {
-        match self {
-            Self::TaskBreakdown(transition) => Some(transition.event().clone()),
-            Self::Generic
-            | Self::WorkerSession { .. }
-            | Self::CodexThread { .. }
-            | Self::ExecutionAttemptReplacement { .. }
-            | Self::Stage(_)
-            | Self::Terminal(_)
-            | Self::Attention(_)
-            | Self::Verdict(_)
-            | Self::ReworkClarification(_) => None,
-        }
-    }
+    WorkRun(
+        &'transition WorkRun,
+        &'transition ExecutionDispatchAuthority,
+        &'transition ExecutionDispatchWorkRunProof,
+    ),
 }
 
 fn validate_authorized_operation(
@@ -1530,14 +1725,157 @@ fn map_terminal_outcome_error(
     }
 }
 
-fn map_task_breakdown_error(
-    error: &crate::application::task_breakdown::TaskBreakdownPromotionError,
-) -> DeliveryStoreError {
-    let code = error.code();
-    store_error(
-        DeliveryStoreErrorCode::InvalidStoreOptions,
-        format!("{code:?}: {}", error.message()),
-    )
+fn create_work_items_snapshot(
+    before: &Delivery,
+    contract_revision: i64,
+    items: &[winwincode_domain::WorkItem],
+    now_millis: u64,
+) -> Result<Delivery, DeliveryStoreError> {
+    if contract_revision != before.snapshot().work_run_aggregate.contract.revision.0
+        || items.is_empty()
+        || items.len() > 1000
+        || now_millis < before.snapshot().updated_at_millis
+        || items.iter().any(|item| {
+            item.revision.0 != 1
+                || !matches!(
+                    item.state,
+                    winwincode_domain::WorkItemState::Ready
+                        | winwincode_domain::WorkItemState::WaitingDependency
+                )
+        })
+    {
+        return Err(store_error(
+            DeliveryStoreErrorCode::InvalidStoreOptions,
+            "WorkItem contract, initial state, revision, batch size, or time is invalid",
+        ));
+    }
+    let mut raw = before.snapshot().clone();
+    raw.revision = raw.revision.checked_add(1).ok_or_else(|| {
+        store_error(
+            DeliveryStoreErrorCode::InvalidStoreOptions,
+            "revision overflow",
+        )
+    })?;
+    raw.updated_at_millis = now_millis;
+    raw.work_run_aggregate.items.extend_from_slice(items);
+    raw.work_run_aggregate.validate().map_err(|error| {
+        store_error(
+            DeliveryStoreErrorCode::InvalidStoreOptions,
+            format!("{error:?}"),
+        )
+    })?;
+    Delivery::try_from_snapshot(raw).map_err(|error| {
+        store_error(
+            DeliveryStoreErrorCode::InvalidStoreOptions,
+            error.to_string(),
+        )
+    })
+}
+
+fn validate_work_run_authority(
+    run: &WorkRun,
+    authority: &ExecutionDispatchAuthority,
+) -> Result<(), DeliveryStoreError> {
+    let lease = authority.lease();
+    let valid = run.execution_job_id == lease.job_id
+        && run.lease_id == lease.lease_id
+        && run.worker_id == lease.worker_id
+        && run.worker_instance_id == lease.worker_instance_id
+        && run.worker_session_id == *authority.worker_session_id()
+        && run.attempt == i64::try_from(lease.attempt).unwrap_or_default()
+        && run.fencing_token == lease.fencing_token.0;
+    if valid {
+        Ok(())
+    } else {
+        Err(store_error(
+            DeliveryStoreErrorCode::InvalidStoreOptions,
+            "WorkRun identity does not match accepted dispatch authority",
+        ))
+    }
+}
+
+fn append_work_run_snapshot(
+    before: &Delivery,
+    expected_revision: u64,
+    run: &WorkRun,
+    now_millis: u64,
+    execution_profile: &str,
+) -> Result<Delivery, DeliveryStoreError> {
+    if expected_revision != before.revision()
+        || now_millis < before.snapshot().updated_at_millis
+        || run.revision != winwincode_domain::Revision(1)
+        || run.state != winwincode_domain::WorkRunState::Leased
+        || run.codex_thread_id.is_some()
+        || run.candidate_digest.is_some()
+    {
+        return Err(store_error(
+            DeliveryStoreErrorCode::InvalidStoreOptions,
+            "invalid initial WorkRun state, identity, timestamp, or revision",
+        ));
+    }
+    let mut snapshot = before.snapshot().clone();
+    snapshot.revision = expected_revision.checked_add(1).ok_or_else(|| {
+        store_error(
+            DeliveryStoreErrorCode::InvalidStoreOptions,
+            "revision overflow",
+        )
+    })?;
+    snapshot.updated_at_millis = now_millis;
+    let append = if matches!(
+        execution_profile,
+        "reviewer" | "verifier" | "adversarial-verifier"
+    ) {
+        snapshot
+            .work_run_aggregate
+            .append_verification_run(run.clone())
+    } else {
+        snapshot.work_run_aggregate.append_run(run.clone())
+    };
+    append.map_err(|error| {
+        store_error(
+            DeliveryStoreErrorCode::InvalidStoreOptions,
+            format!("{error:?}"),
+        )
+    })?;
+    let product_session_id = run.product_session_id.clone().ok_or_else(|| {
+        store_error(
+            DeliveryStoreErrorCode::InvalidStoreOptions,
+            "WorkRun append requires a ProductSession",
+        )
+    })?;
+    snapshot.session_bindings.push(SessionBinding {
+        schema_version: crate::domain::DELIVERY_SCHEMA_VERSION,
+        id: SessionBindingId(format!("binding:{}", run.id.0)),
+        delivery_id: snapshot.id.clone(),
+        work_contract_id: run.work_contract_id.clone(),
+        work_contract_revision: run.contract_revision.clone(),
+        work_item_id: run.work_item_id.clone(),
+        work_item_revision: run.work_item_revision.clone(),
+        work_run_id: run.id.clone(),
+        product_session_id,
+        execution_job_id: run.execution_job_id.clone(),
+        execution_profile: Some(execution_profile.to_owned()),
+        worker_session_id: Some(run.worker_session_id.clone()),
+        codex_thread_id: None,
+        worker_id: Some(run.worker_id.clone()),
+        worker_instance_id: Some(run.worker_instance_id.clone()),
+        lease_id: Some(run.lease_id.clone()),
+        attempt: u64::try_from(run.attempt).map_err(|_| {
+            store_error(
+                DeliveryStoreErrorCode::InvalidStoreOptions,
+                "WorkRun attempt is outside the Delivery range",
+            )
+        })?,
+        fencing_token: Some(FencingToken(run.fencing_token.clone())),
+        source_provenance: SessionBindingSourceProvenance::pending_work_run_dispatch(),
+        bound_at_millis: now_millis,
+    });
+    Delivery::try_from_snapshot(snapshot).map_err(|error| {
+        store_error(
+            DeliveryStoreErrorCode::InvalidStoreOptions,
+            error.to_string(),
+        )
+    })
 }
 
 fn validate_generic_append_delta(
@@ -1561,7 +1899,10 @@ fn validate_generic_append_delta(
         | DeliveryMutationOperation::AttentionResolved
         | DeliveryMutationOperation::VerdictSubmitted
         | DeliveryMutationOperation::ReworkClarified
-        | DeliveryMutationOperation::TaskBreakdownApproved => Err(store_error(
+        | DeliveryMutationOperation::TaskBreakdownApproved
+        | DeliveryMutationOperation::WorkRunDispatchStarted
+        | DeliveryMutationOperation::WorkRunAppended
+        | DeliveryMutationOperation::WorkItemsCreated => Err(store_error(
             DeliveryStoreErrorCode::InvalidStoreOptions,
             "this Delivery operation requires its dedicated application command",
         )),
@@ -1574,10 +1915,13 @@ fn validate_initial_delivery(delivery: &Delivery) -> Result<(), DeliveryStoreErr
         || snapshot.status != DeliveryStatus::Draft
         || !snapshot.tasks.is_empty()
         || !snapshot.stage_runs.is_empty()
+        || !snapshot.work_run_aggregate.items.is_empty()
+        || !snapshot.work_run_aggregate.runs.is_empty()
         || !snapshot.session_bindings.is_empty()
         || !snapshot.attention_items.is_empty()
         || !snapshot.evidence.is_empty()
         || snapshot.verdict.is_some()
+        || !contract_matches_spec(&snapshot.work_run_aggregate.contract, &snapshot.spec)
         || snapshot.updated_at_millis != snapshot.created_at_millis
     {
         return Err(store_error(
@@ -1615,7 +1959,11 @@ fn validate_spec_update_delta(
         && after.session_bindings.is_empty()
         && after.attention_items.is_empty()
         && after.evidence.is_empty()
-        && after.verdict.is_none();
+        && after.verdict.is_none()
+        && after.work_run_aggregate.schema_version == before.work_run_aggregate.schema_version
+        && after.work_run_aggregate.items.is_empty()
+        && after.work_run_aggregate.runs.is_empty()
+        && contract_matches_spec(&after.work_run_aggregate.contract, &after.spec);
     if valid {
         Ok(())
     } else {
@@ -1624,6 +1972,30 @@ fn validate_spec_update_delta(
             "delivery.spec.updated does not match the canonical Spec replacement delta",
         ))
     }
+}
+
+fn contract_matches_spec(
+    contract: &winwincode_domain::WorkContract,
+    spec: &crate::domain::DeliverySpec,
+) -> bool {
+    contract.id.0 == spec.delivery_id.0.replacen("dlv_", "wct_", 1)
+        && u64::try_from(contract.revision.0).ok() == Some(spec.revision)
+        && contract.objective == spec.goal
+        && contract.scope == spec.scope
+        && contract.protected_scope == spec.out_of_scope
+        && contract.constraints == spec.constraints
+        && contract.criteria.len() == spec.acceptance_criteria.len()
+        && contract
+            .criteria
+            .iter()
+            .zip(&spec.acceptance_criteria)
+            .all(|(contract, spec)| {
+                contract.id.0 == spec.id.0
+                    && contract.description == spec.description
+                    && contract.required == spec.required
+                    && contract.required_evidence_class == "machine"
+                    && contract.verification_method == spec.verification_method
+            })
 }
 
 impl DeliveryCommandPort for DeliveryStore<'_> {
@@ -1641,12 +2013,13 @@ impl DeliveryCommandPort for DeliveryStore<'_> {
             DeliveryCommand::ReplaceExecutionAttempt(command) => {
                 self.replace_execution_attempt(*command)
             }
-            DeliveryCommand::StartStage(start) => self.start_stage(*start),
+            DeliveryCommand::StartWorkRunDispatch(start) => self.start_workrun_dispatch(*start),
             DeliveryCommand::ApplyTerminalOutcome(outcome) => self.apply_terminal_outcome(*outcome),
             DeliveryCommand::ResolveAttention(resolve) => self.resolve_attention(*resolve),
             DeliveryCommand::SubmitVerdict(submit) => self.submit_verdict(*submit),
             DeliveryCommand::ClarifyRework(clarify) => self.clarify_rework(*clarify),
-            DeliveryCommand::ApproveTaskBreakdown(approve) => self.approve_task_breakdown(*approve),
+            DeliveryCommand::AppendWorkRun(command) => self.append_work_run(*command),
+            DeliveryCommand::CreateWorkItems(command) => self.create_work_items(*command),
         }
     }
 }
@@ -2081,7 +2454,6 @@ mod tests {
     use crate::application::session_binding::{
         SessionBindingAuthority, SessionBindingIdentity, accept_worker_session_with_authority,
     };
-    use crate::application::stage::{AdvanceStageInput, NewStageIdentities, advance};
     use crate::application::verdict::{
         SubmitVerdictFacts, compute_verdict_transition,
         test_support::{VerdictFixtureOutcome, verdict_fixture},
@@ -2105,6 +2477,7 @@ mod tests {
             value["spec"]["id"] = format!("delivery-spec-v{revision}").into();
             value["spec"]["revision"] = revision.into();
             value["spec"]["createdAtMillis"] = (1_800_000_000_000_u64 + revision).into();
+            value["workRunAggregate"]["contract"]["revision"] = revision.into();
         }
         Delivery::decode_json(&serde_json::to_vec(&value).expect("store fixture bytes"))
             .expect("store fixture")
@@ -2194,35 +2567,35 @@ mod tests {
         pending.revision = 1;
         pending.status = DeliveryStatus::Verifying;
         pending.updated_at_millis = 1_800_000_000_020;
-        pending.stage_runs[0].status = crate::domain::StageRunStatus::Running;
-        pending.stage_runs[0].finished_at_millis = None;
-        pending.session_bindings[0].worker_session_id = None;
+        let run = &mut pending.work_run_aggregate.runs[0];
+        run.state = winwincode_domain::WorkRunState::Leased;
+        run.codex_thread_id = None;
+        let authority = SessionBindingAuthority::from_execution_port(
+            run.worker_id.clone(),
+            run.worker_instance_id.clone(),
+            run.lease_id.clone(),
+            u64::try_from(run.attempt).expect("attempt"),
+            FencingToken(run.fencing_token.clone()),
+            run.worker_session_id.clone(),
+            winwincode_domain::ExecutionMessageId("xmsg_01J00000000000000000000000".into()),
+        );
+        pending.work_run_aggregate.items[0].state = winwincode_domain::WorkItemState::InProgress;
+        pending.session_bindings[0].execution_profile = Some("executor".into());
         pending.session_bindings[0].codex_thread_id = None;
-        pending.session_bindings[0].worker_id = None;
-        pending.session_bindings[0].worker_instance_id = None;
-        pending.session_bindings[0].lease_id = None;
-        pending.session_bindings[0].fencing_token = None;
-        pending.session_bindings[0].attempt = pending.stage_runs[0].attempt;
         pending.session_bindings[0].source_provenance =
-            crate::domain::SessionBindingSourceProvenance::delivery_advance("delivery.advance");
+            SessionBindingSourceProvenance::pending_work_run_dispatch();
         let before = Delivery::try_from_snapshot(pending).expect("pending Delivery");
         let binding = &before.snapshot().session_bindings[0];
         let identity = SessionBindingIdentity {
             delivery_id: binding.delivery_id.clone(),
-            delivery_task_id: binding.delivery_task_id.clone(),
-            stage_run_id: binding.stage_run_id.clone(),
+            work_contract_id: binding.work_contract_id.clone(),
+            work_contract_revision: binding.work_contract_revision.clone(),
+            work_item_id: binding.work_item_id.clone(),
+            work_item_revision: binding.work_item_revision.clone(),
+            work_run_id: binding.work_run_id.clone(),
             product_session_id: binding.product_session_id.clone(),
             execution_job_id: binding.execution_job_id.clone(),
         };
-        let authority = SessionBindingAuthority::from_execution_port(
-            winwincode_domain::WorkerId("wrk-test-store".into()),
-            winwincode_domain::WorkerInstanceId("wki-test-store".into()),
-            winwincode_domain::LeaseId("lse-test-store".into()),
-            1,
-            winwincode_domain::FencingToken("1".into()),
-            winwincode_domain::WorkerSessionId("wsn-test-store".into()),
-            winwincode_domain::ExecutionMessageId("msg-test-store".into()),
-        );
         let after = accept_worker_session_with_authority(
             &before,
             before.revision(),
@@ -2261,7 +2634,7 @@ mod tests {
         reason = "one scenario proves raw rejection, typed resolution, and typed rework persistence"
     )]
     fn attention_resolution_requires_its_sealed_operation_specific_command() {
-        let (store, failed, candidate) = create_store_with_failed_verdict();
+        let (store, failed, _) = create_store_with_failed_verdict();
         let item = failed
             .snapshot()
             .attention_items
@@ -2273,7 +2646,7 @@ mod tests {
             ResolveAttentionInput {
                 expected_revision: failed.revision(),
                 attention_item_id: item.id,
-                stage_run_id: item.stage_run_id.expect("verification StageRun"),
+                work_run_id: Some(item.work_run_id.expect("verification WorkRun")),
                 expected_context: item.context,
                 actor: "delivery-reviewer".into(),
                 decision: AttentionDecision::Resolved,
@@ -2313,57 +2686,11 @@ mod tests {
             DeliveryStatus::Reworking
         );
 
-        let authorization =
-            crate::domain::rework::test_support::precise_rework_authorization_fixture(
-                &resolved.snapshot,
-                &candidate,
-            );
-        let stage = advance(
-            &resolved.snapshot,
-            AdvanceStageInput {
-                expected_revision: resolved.snapshot.revision(),
-                product_session_id: winwincode_domain::ProductSessionId(
-                    "product-session-bounded-rework".into(),
-                ),
-                identities: NewStageIdentities {
-                    stage_run_id: winwincode_domain::StageRunId("stage-run-bounded-rework".into()),
-                    execution_job_id: winwincode_domain::ExecutionJobId(
-                        "execution-job-bounded-rework".into(),
-                    ),
-                    session_binding_id: crate::domain::SessionBindingId(
-                        "session-binding-bounded-rework".into(),
-                    ),
-                    attention_item_id: winwincode_domain::AttentionItemId(
-                        "attention-unused-bounded-rework".into(),
-                    ),
-                },
-                review: None,
-                previous_outcome: None,
-                current_lease: None,
-                rework_authorization: Some(Box::new(authorization)),
-                now_millis: resolved.snapshot.snapshot().updated_at_millis + 1,
-            },
-        )
-        .expect("authorized rework stage");
-        let reworking = store
-            .execute(DeliveryCommand::StartStage(Box::new(StartDeliveryStage {
-                request_id: RequestId("sealed-start-bounded-rework".into()),
-                request_digest: "1".repeat(64),
-                expected_revision: resolved.snapshot.revision(),
-                transition: stage,
-            })))
-            .expect("typed rework stage persists")
-            .snapshot;
         assert_eq!(
-            reworking
-                .snapshot()
-                .stage_runs
-                .last()
-                .map(|run| run.role.as_str()),
-            Some("remediator")
+            resolved.snapshot.snapshot().stage_runs,
+            failed.snapshot().stage_runs,
+            "resolving Attention does not start a historical stage"
         );
-        assert!(reworking.snapshot().evidence.is_empty());
-        assert!(reworking.snapshot().verdict.is_none());
     }
 
     #[test]
@@ -2439,6 +2766,21 @@ mod tests {
             }))
             .expect_err("delivery.created cannot carry a precomputed pass");
 
+        assert_eq!(error.code(), DeliveryStoreErrorCode::InvalidStoreOptions);
+    }
+
+    #[test]
+    fn creation_rejects_a_contract_that_does_not_match_its_spec() {
+        let mut forged = snapshot(1, "draft").into_snapshot();
+        forged.work_run_aggregate.contract.objective = "another objective".into();
+        let store = DeliveryStore::new(Arc::new(InMemoryDeliveryJournal::new()));
+        let error = store
+            .execute(DeliveryCommand::Create(CreateDelivery {
+                request_id: RequestId("mismatched-contract".into()),
+                request_digest: REQUEST_A.into(),
+                snapshot: Delivery::try_from_snapshot(forged).unwrap(),
+            }))
+            .expect_err("WorkContract must be derived from the current Spec");
         assert_eq!(error.code(), DeliveryStoreErrorCode::InvalidStoreOptions);
     }
 
@@ -2579,8 +2921,8 @@ mod tests {
                 .map(|record| record.digest.as_str())
                 .collect::<Vec<_>>(),
             [
-                "be85db816694f0d825833958b5e2237d07796e8e2162ce2f7803cbee5a4a368a",
-                "f4c1a4226f21462a34ca98d613cbf82b4fb8bfd4ef7880622b5ccb0cf36397ac",
+                "07458463be9d94c731ae515209163a002846623cb861aa1f48b477921521da20",
+                "a52dc3f54b134ba7fe886da5c1f01b582b6ca35f8949f341c42aba950a2d9ba5",
             ]
         );
     }
@@ -2741,5 +3083,60 @@ mod tests {
             }))
             .expect("transaction-scoped create");
         assert_eq!(result.snapshot.revision(), 1);
+    }
+
+    #[test]
+    fn generic_append_cannot_forge_workrun_operation() {
+        let (_, store) = create_store();
+        let current = snapshot(1, "draft");
+        let result = store.append(AppendDelivery {
+            delivery_id: current.id().clone(),
+            request_id: RequestId("forged-workrun".into()),
+            request_digest: REQUEST_B.into(),
+            operation: DeliveryMutationOperation::WorkRunAppended,
+            expected_revision: 1,
+            snapshot: snapshot(2, "ready"),
+        });
+        assert_eq!(
+            result
+                .expect_err("generic append must not forge WorkRun authority")
+                .code(),
+            DeliveryStoreErrorCode::InvalidStoreOptions
+        );
+        assert_eq!(store.read(current.id()).unwrap().snapshot.revision(), 1);
+    }
+
+    #[test]
+    fn spec_update_requires_a_contract_derived_from_the_new_spec() {
+        let (_, store) = create_store();
+        let next = snapshot(2, "ready");
+        let mut raw = next.into_snapshot();
+        raw.work_run_aggregate
+            .contract
+            .objective
+            .push_str(" tampered");
+        let next = Delivery::try_from_snapshot(raw).unwrap();
+        let result = store.append(AppendDelivery {
+            delivery_id: DeliveryId("dlv_01J00000000000000000000002".into()),
+            request_id: RequestId("aggregate-tamper".into()),
+            request_digest: REQUEST_B.into(),
+            operation: DeliveryMutationOperation::DeliverySpecUpdated,
+            expected_revision: 1,
+            snapshot: next,
+        });
+        assert_eq!(
+            result
+                .expect_err("aggregate mutation must be rejected")
+                .code(),
+            DeliveryStoreErrorCode::InvalidStoreOptions
+        );
+        assert_eq!(
+            store
+                .read(snapshot(1, "draft").id())
+                .unwrap()
+                .snapshot
+                .revision(),
+            1
+        );
     }
 }

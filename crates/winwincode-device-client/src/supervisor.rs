@@ -190,8 +190,8 @@ pub struct SpawnRequest<'a> {
     /// Product session scope from the grant (optional config
     /// `productSessionId`).
     pub product_session_id: Option<&'a str>,
-    /// Stage run scope from the grant (optional config `stageRunId`).
-    pub stage_run_id: Option<&'a str>,
+    /// Work run scope from the grant (optional config `workRunId`).
+    pub work_run_id: Option<&'a str>,
     /// Local source root — the only Worker-visible filesystem path the
     /// Device Client writes into the config (`sourceDirectory`).
     pub source_directory: &'a Path,
@@ -1159,7 +1159,7 @@ fn validate_request(request: SpawnRequest<'_>) -> Result<(), SupervisorError> {
     }
     for (value, label) in [
         (request.product_session_id, "product session id"),
-        (request.stage_run_id, "stage run id"),
+        (request.work_run_id, "work run id"),
     ] {
         if value.is_some_and(str::is_empty) {
             return Err(SupervisorError::invalid(format!(
@@ -1233,7 +1233,7 @@ fn write_private_file(path: &Path, contents: &[u8]) -> Result<(), SupervisorErro
 /// Builds the managed-session config: field-for-field the camelCase shape
 /// `winwincode-worker --managed-session` reads (unknown fields are refused
 /// by the reader, so this writes exactly the known fields, carrying the
-/// optional `productSessionId`/`stageRunId` scopes when the launch grant
+/// optional `productSessionId`/`workRunId` scopes when the launch grant
 /// provides them).
 fn managed_session_config_json(
     config: &SupervisorConfig,
@@ -1264,8 +1264,8 @@ fn managed_session_config_json(
     if let Some(product_session_id) = request.product_session_id {
         object["productSessionId"] = serde_json::Value::String(product_session_id.to_owned());
     }
-    if let Some(stage_run_id) = request.stage_run_id {
-        object["stageRunId"] = serde_json::Value::String(stage_run_id.to_owned());
+    if let Some(work_run_id) = request.work_run_id {
+        object["workRunId"] = serde_json::Value::String(work_run_id.to_owned());
     }
     if let Some(route) = &config.model_route {
         object["modelRoute"] = serde_json::json!({
@@ -1646,7 +1646,7 @@ mod tests {
             repository_binding_id: "rbn_TESTREPO",
             launch_grant_id: "wlg_TESTGRANT",
             product_session_id: None,
-            stage_run_id: None,
+            work_run_id: None,
             source_directory,
             data_directory,
             worker_root,
@@ -1705,7 +1705,7 @@ mod tests {
         "occupancyFencingToken",
         "repositoryBindingId",
         "productSessionId",
-        "stageRunId",
+        "workRunId",
         "workerSessionId",
         "workerId",
         "workerInstanceId",
@@ -1715,6 +1715,30 @@ mod tests {
         "workerCredentialPath",
         "modelRoute",
     ];
+
+    #[test]
+    fn managed_config_preserves_optional_workrun_identity() {
+        let path = Path::new("/workspace");
+        for work_run_id in [None, Some("wrn_01J00000000000000000000009")] {
+            let mut request = spawn_request("wss_ONE", WORKER_INSTANCE, path, path, path);
+            request.work_run_id = work_run_id;
+            let encoded = managed_session_config_json(
+                &test_config(path),
+                request,
+                WORKER_ID,
+                WORKER_INSTANCE,
+                Path::new("/workspace/credential"),
+            )
+            .expect("managed config");
+            let value: serde_json::Value = serde_json::from_str(&encoded).expect("JSON");
+            assert_eq!(
+                value.get("workRunId").and_then(serde_json::Value::as_str),
+                work_run_id
+            );
+            assert_eq!(value.get("workRunId").is_some(), work_run_id.is_some());
+            assert!(value.get("stageRunId").is_none());
+        }
+    }
 
     #[test]
     // The end-to-end spawn lifecycle asserts registry, config contract, file

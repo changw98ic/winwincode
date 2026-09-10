@@ -36,13 +36,13 @@
         "factType": "VerifiedTerminalOutcome",
         "owner": "Phase 2.3 stage coordinator and Worker outcome adapter",
         "availability": "phase-4-adapter-gate",
-        "produces": "A sealed terminal outcome matched to StageRun, ExecutionJob, attempt, Lease, fencing token, Worker, Worker instance, WorkerSession, CodexThread, status, and lastEventSequence.",
+        "produces": "A sealed terminal outcome matched to WorkRun, ExecutionJob, attempt, Lease, fencing token, Worker, Worker instance, WorkerSession, CodexThread, status, and lastEventSequence.",
         "integrationGate": "accepts_only_the_exact_fenced_terminal_outcome_with_last_event_sequence",
         "ruleIds": [
           "candidate.producer_outcome_artifact_exact",
-          "verification.stage_and_runtime_terminal_agree",
+          "verification.work_run_and_runtime_terminal_agree",
           "evidence.source_identity_exact",
-          "evidence.source_time_within_stage_and_terminal"
+          "evidence.source_time_within_work_run_and_terminal"
         ]
       },
       {
@@ -53,7 +53,7 @@
         "integrationGate": "rejects_unpersisted_reordered_or_caller_supplied_runtime_facts",
         "ruleIds": [
           "evidence.source_identity_exact",
-          "evidence.source_time_within_stage_and_terminal",
+          "evidence.source_time_within_work_run_and_terminal",
           "evidence.accepted_runtime_ledger_only",
           "verdict.pass_or_fail_requires_evidence",
           "verdict.agent_message_cannot_pass",
@@ -83,15 +83,21 @@
       "repository",
       "baseRevision",
       "producerDeliveryTaskId",
-      "producerStageRunId",
-      "producerStage",
-      "producerRole",
+      "producerWorkRunId",
       "producerAttempt",
       "producerSessionBindingId",
       "producerProductSessionId",
       "producerExecutionJobId",
       "producerWorkerSessionId",
       "producerCodexThreadId",
+      "producerLeaseId",
+      "producerFencingToken",
+      "producerWorkerId",
+      "producerWorkerInstanceId",
+      "producerArtifactRef",
+      "producerArtifactDigest",
+      "producerLastEventSequence",
+      "producerFinishedAtMillis",
       "baseCommitId",
       "baseTreeId",
       "candidateCommitId",
@@ -112,7 +118,7 @@
       "deliverySpecId",
       "deliverySpecRevision",
       "candidateRef",
-      "stageRunId",
+      "workRunId",
       "sessionBindingId",
       "type",
       "sourceRef"
@@ -122,7 +128,7 @@
       "executionJobId",
       "workerSessionId",
       "codexThreadId",
-      "stageRunId",
+      "workRunId",
       "roleId",
       "attempt",
       "leaseId",
@@ -132,7 +138,7 @@
       "sourceSequence",
       "terminalLastEventSequence"
     ],
-    "sourcePolicy": "EvidenceRef stores a bounded source reference. Resolution must find one unique earlier accepted source fact whose type, role, ProductSession, ExecutionJob, WorkerSession, CodexThread, StageRun, attempt, lease, fence, Worker instance, source sequence, and candidate all match canonical Control Plane state; it never copies complete logs or command output.",
+    "sourcePolicy": "EvidenceRef stores a bounded source reference. Resolution must find one unique earlier accepted source fact whose type, role, ProductSession, ExecutionJob, WorkerSession, CodexThread, WorkRun, attempt, lease, fence, Worker instance, source sequence, and candidate all match canonical Control Plane state; it never copies complete logs or command output.",
     "candidateCheckoutPolicy": "Runtime test, command, file, diff, commit, and review evidence can support a candidate only when the phase 2.4 domain receives a sealed ValidatedCheckoutAttestationFact whose commit and tree match that frozen candidate. The Worker/Artifact adapter creates that proof; Stage timing or an optional candidateRef string is not proof of the checkout.",
     "ledgerPolicy": "Verdict commands reference already persisted source positions. They do not carry caller-provided runtime event bodies, timestamps, outcomes, or source sequences. The runtime-ledger adapter loads and seals AcceptedRuntimeSourceFact values; the phase 2.4 domain only validates and derives from those facts."
   },
@@ -142,10 +148,10 @@
       "verifier"
     ],
     "workspaceMode": "candidate-read-only",
-    "assignmentPolicy": "For the current candidate, every required role resolves to exactly one current assignment consisting of one role-scoped StageRun and one complete SessionBinding. Zero or multiple assignments for a role fail closed before findings are considered.",
-    "sessionPolicy": "Reviewer and Verifier each use exactly one current role-scoped StageRun and exactly one complete SessionBinding, distinct from the candidate writer and from one another. Ambiguous current runs or bindings fail closed.",
+    "assignmentPolicy": "For the current candidate, every required role resolves to exactly one current assignment consisting of one role-scoped WorkRun and one complete SessionBinding. Zero or multiple assignments for a role fail closed before findings are considered.",
+    "sessionPolicy": "Reviewer and Verifier each use exactly one current role-scoped WorkRun and exactly one complete SessionBinding, distinct from the candidate writer and from one another. Ambiguous current runs or bindings fail closed.",
     "candidateIntegrityPolicy": "Every verification run starts and ends on the same frozen candidate commit, tree, and diff. The GitSnapshotResolver/Artifact adapter seals the pre/post facts; the phase 2.4 domain compares them and invalidates a changed snapshot even when no recognized file-write event was emitted.",
-    "terminalPolicy": "A role settles only when its canonical StageRun succeeded and the phase 2.4 domain receives a sealed VerifiedTerminalOutcome that matches its SessionBinding, ExecutionJob, attempt, lease, fence, Worker, instance, WorkerSession, and CodexThread. The structured result and every supporting source sequence must not exceed the outcome lastEventSequence. A runtime final message cannot settle a running StageRun."
+    "terminalPolicy": "A role settles only when its canonical WorkRun succeeded and the phase 2.4 domain receives a sealed VerifiedTerminalOutcome that matches its SessionBinding, ExecutionJob, attempt, lease, fence, Worker, instance, WorkerSession, and CodexThread. The structured result and every supporting source sequence must not exceed the outcome lastEventSequence. A runtime final message cannot settle a running WorkRun."
   },
   "verdict": {
     "acceptedCriterionOutcomes": [
@@ -190,21 +196,19 @@
     "preciseBindings": [
       "candidateRef",
       "diffSha256",
-      "deliveryTaskId",
-      "diagramId",
-      "nodeId",
+      "workItemId",
       "filePath",
       "hunkSha256",
       "evidenceRefIds"
     ],
     "afterWriterStarts": "The previous candidate immediately stops being current. Historical evidence may remain append-only, but it cannot authorize a new pass, review, or publication.",
     "resultPolicy": "The remediator replacement candidate must remain inside the approved DeliveryTask, file, and hunk boundaries. The GitSnapshotResolver/Artifact adapter seals the resulting snapshot; the phase 2.4 domain compares it with the authorization and rejects any added path or out-of-bound hunk. Prompt wording alone is not enforcement.",
-    "attemptSequenceSource": "all current Delivery StageRuns whose stage is reworking"
+    "attemptSequenceSource": "distinct earlier failed candidates in the append-only current DeliverySpec verdict history"
   },
   "rules": [
     {
       "id": "candidate.freeze_exact_writer_facts",
-      "statement": "A frozen candidate is a deterministic derived value bound to the current DeliverySpec, repository baseline, one succeeded executor or remediator StageRun including task, stage, role, and attempt, its exact complete ProductSession/ExecutionJob/WorkerSession/CodexThread SessionBinding, and exact Git commit, tree, diff, and changed-path facts.",
+      "statement": "A frozen candidate is a deterministic derived value bound to the current DeliverySpec, repository baseline, one succeeded executor or remediator WorkRun including task, stage, role, and attempt, its exact complete ProductSession/ExecutionJob/WorkerSession/CodexThread SessionBinding, and exact Git commit, tree, diff, and changed-path facts.",
       "adrRefs": [
         "docs/decisions/0023-canonical-delivery-ownership.md",
         "docs/decisions/0025-live-delivery-evaluation.md",
@@ -228,7 +232,7 @@
             "name": "freezes exact producer Git facts without creating another persisted domain object"
           }
         ],
-        "gap": "The old candidate identity hashes the producer StageRun and SessionBinding IDs but not the writer task, stage, role, attempt, ProductSession, ExecutionJob, WorkerSession, or CodexThread values. Mutating a binding behind the same ID can therefore leave the old candidateRef unchanged; Rust must include the complete canonical writer identity."
+        "gap": "The old candidate identity hashes the producer WorkRun and SessionBinding IDs but not the writer task, stage, role, attempt, ProductSession, ExecutionJob, WorkerSession, or CodexThread values. Mutating a binding behind the same ID can therefore leave the old candidateRef unchanged; Rust must include the complete canonical writer identity."
       },
       "rust": {
         "module": "domain/candidate.rs",
@@ -265,7 +269,7 @@
     },
     {
       "id": "candidate.producer_outcome_artifact_exact",
-      "statement": "Candidate freezing requires the exact accepted successful Worker outcome for the producer SessionBinding and a Git snapshot read from that outcome Job workspace. A succeeded StageRun flag, a caller snapshot, or an artifact from another job, attempt, lease, fence, Worker instance, or WorkerSession is insufficient.",
+      "statement": "Candidate freezing requires the exact accepted successful Worker outcome for the producer SessionBinding and a Git snapshot read from that outcome Job workspace. A succeeded WorkRun flag, a caller snapshot, or an artifact from another job, attempt, lease, fence, Worker instance, or WorkerSession is insufficient.",
       "adrRefs": [
         "docs/decisions/0025-live-delivery-evaluation.md",
         "docs/decisions/0028-control-plane-worker-migration.md"
@@ -284,7 +288,7 @@
             "name": "freezes exact producer Git facts without creating another persisted domain object"
           }
         ],
-        "gap": "The old freezer checks that the producer StageRun says succeeded and that a DSH/Codex binding exists, but its API has no accepted Worker outcome or job-scoped artifact proof. The Worker/Artifact adapter must seal the outcome-bound snapshot; phase 2.4 must reject a missing or mismatched sealed proof."
+        "gap": "The old freezer checks that the producer WorkRun says succeeded and that a DSH/Codex binding exists, but its API has no accepted Worker outcome or job-scoped artifact proof. The Worker/Artifact adapter must seal the outcome-bound snapshot; phase 2.4 must reject a missing or mismatched sealed proof."
       },
       "rust": {
         "module": "domain/candidate.rs",
@@ -293,7 +297,7 @@
     },
     {
       "id": "candidate.invalidated_by_spec_or_writer_change",
-      "statement": "A frozen candidate is stale after its spec identity or facts change, or as soon as a later executing or reworking writer StageRun starts, whether that writer is running or finished.",
+      "statement": "A frozen candidate is stale after its spec identity or facts change, or as soon as a later executing or reworking writer WorkRun starts, whether that writer is running or finished.",
       "adrRefs": [
         "docs/decisions/0023-canonical-delivery-ownership.md",
         "docs/decisions/0028-control-plane-worker-migration.md"
@@ -349,7 +353,7 @@
     },
     {
       "id": "verification.role_sessions_are_independent",
-      "statement": "Reviewer and Verifier each bind exactly one current role-scoped verification StageRun to exactly one complete SessionBinding; both are distinct from the candidate writer and from one another, and ambiguous duplicate runs or bindings fail closed.",
+      "statement": "Reviewer and Verifier each bind exactly one current role-scoped verification WorkRun to exactly one complete SessionBinding; both are distinct from the candidate writer and from one another, and ambiguous duplicate runs or bindings fail closed.",
       "adrRefs": [
         "docs/decisions/0023-canonical-delivery-ownership.md",
         "docs/decisions/0028-control-plane-worker-migration.md"
@@ -440,8 +444,8 @@
       }
     },
     {
-      "id": "verification.stage_and_runtime_terminal_agree",
-      "statement": "A verification role settles only after its canonical StageRun succeeded and one accepted terminal Worker outcome matches the complete current SessionBinding and fenced job attempt; a completed model turn cannot settle a still-running StageRun.",
+      "id": "verification.work_run_and_runtime_terminal_agree",
+      "statement": "A verification role settles only after its canonical WorkRun succeeded and one accepted terminal Worker outcome matches the complete current SessionBinding and fenced job attempt; a completed model turn cannot settle a still-running WorkRun.",
       "adrRefs": [
         "docs/decisions/0023-canonical-delivery-ownership.md",
         "docs/decisions/0028-control-plane-worker-migration.md"
@@ -460,11 +464,11 @@
             "name": "keeps missing, running, and optional adversarial settlements visible"
           }
         ],
-        "gap": "The old projector keeps a turn without a terminal event visible as running, but a turn.completed event can mark the session settled even while the canonical StageRun status is still running. The phase 2.3 outcome adapter must seal the exact terminal fact; phase 2.4 must require that proof together with canonical stage success."
+        "gap": "The old projector keeps a turn without a terminal event visible as running, but a turn.completed event can mark the session settled even while the canonical WorkRun status is still running. The phase 2.3 outcome adapter must seal the exact terminal fact; phase 2.4 must require that proof together with canonical stage success."
       },
       "rust": {
         "module": "domain/verification.rs",
-        "testName": "requires_succeeded_stage_and_sealed_matching_terminal_outcome"
+        "testName": "requires_terminal_work_run_and_sealed_matching_outcome"
       }
     },
     {
@@ -536,8 +540,8 @@
       }
     },
     {
-      "id": "evidence.current_stage_run",
-      "statement": "Every EvidenceRef identifies one existing Codex StageRun in the same Delivery, and a verification source must consume the producer candidate for the same DeliveryTask scope.",
+      "id": "evidence.current_work_run",
+      "statement": "Every EvidenceRef identifies one existing Codex WorkRun in the same Delivery, and a verification source must consume the producer candidate for the same DeliveryTask scope.",
       "adrRefs": [
         "docs/decisions/0023-canonical-delivery-ownership.md",
         "docs/decisions/0028-control-plane-worker-migration.md"
@@ -560,12 +564,12 @@
       },
       "rust": {
         "module": "domain/evidence.rs",
-        "testName": "evidence_matches_current_stage_run"
+        "testName": "evidence_matches_current_work_run"
       }
     },
     {
       "id": "evidence.current_session_binding",
-      "statement": "Every EvidenceRef identifies one SessionBinding for its StageRun, with complete session identities and a binding time that does not follow the evidence or predate the run.",
+      "statement": "Every EvidenceRef identifies one SessionBinding for its WorkRun, with complete session identities and a binding time that does not follow the evidence or predate the run.",
       "adrRefs": [
         "docs/decisions/0023-canonical-delivery-ownership.md",
         "docs/decisions/0028-control-plane-worker-migration.md"
@@ -597,7 +601,7 @@
     },
     {
       "id": "evidence.source_identity_exact",
-      "statement": "A runtime EvidenceRef resolves to exactly one earlier accepted source fact whose source type, ProductSession, ExecutionJob, WorkerSession, CodexThread, StageRun, role, attempt, lease, fencing token, Worker, Worker instance, source sequence, and candidate identity all agree with canonical Control Plane state.",
+      "statement": "A runtime EvidenceRef resolves to exactly one earlier accepted source fact whose source type, ProductSession, ExecutionJob, WorkerSession, CodexThread, WorkRun, role, attempt, lease, fencing token, Worker, Worker instance, source sequence, and candidate identity all agree with canonical Control Plane state.",
       "adrRefs": [
         "docs/decisions/0023-canonical-delivery-ownership.md",
         "docs/decisions/0028-control-plane-worker-migration.md"
@@ -628,8 +632,8 @@
       }
     },
     {
-      "id": "evidence.source_time_within_stage_and_terminal",
-      "statement": "The persisted source occurrence time and sequence must be at or after the StageRun start and SessionBinding time, earlier than its finding and verdict, and no later than the accepted terminal Worker outcome lastEventSequence. Callers cannot replace or raise the source time.",
+      "id": "evidence.source_time_within_work_run_and_terminal",
+      "statement": "The persisted source occurrence time and sequence must be at or after the WorkRun start and SessionBinding time, earlier than its finding and verdict, and no later than the accepted terminal Worker outcome lastEventSequence. Callers cannot replace or raise the source time.",
       "adrRefs": [
         "docs/decisions/0023-canonical-delivery-ownership.md",
         "docs/decisions/0028-control-plane-worker-migration.md"
@@ -652,7 +656,7 @@
       },
       "rust": {
         "module": "domain/evidence.rs",
-        "testName": "rejects_source_before_stage_or_binding_and_after_terminal_sequence"
+        "testName": "rejects_source_before_work_run_or_binding_and_after_terminal_sequence"
       }
     },
     {
@@ -693,7 +697,7 @@
     },
     {
       "id": "evidence.runtime_checkout_matches_candidate",
-      "statement": "A runtime test, command, file, diff, commit, or finding can support the current candidate only when its accepted ExecutionJob checkout commit and tree attestation exactly match that candidate; sharing a StageRun time window or omitting candidateRef never establishes candidate provenance.",
+      "statement": "A runtime test, command, file, diff, commit, or finding can support the current candidate only when its accepted ExecutionJob checkout commit and tree attestation exactly match that candidate; sharing a WorkRun time window or omitting candidateRef never establishes candidate provenance.",
       "adrRefs": [
         "docs/decisions/0025-live-delivery-evaluation.md",
         "docs/decisions/0028-control-plane-worker-migration.md"
@@ -1202,7 +1206,7 @@
     },
     {
       "id": "rework.bounded_remediator_only",
-      "statement": "A rework writer is a Codex remediator, the Control Plane derives its next attempt from all current-Delivery reworking StageRuns, and the number of rework StageRuns never exceeds the approved DeliverySpec maximum.",
+      "statement": "A rework writer is a Codex remediator, the Control Plane derives its next attempt from all current-Delivery reworking WorkRuns, and the number of rework WorkRuns never exceeds the approved DeliverySpec maximum.",
       "adrRefs": [
         "docs/decisions/0023-canonical-delivery-ownership.md",
         "docs/decisions/0028-control-plane-worker-migration.md"
@@ -1234,7 +1238,7 @@
     },
     {
       "id": "rework.attempt_uses_total_delivery_history",
-      "statement": "The next remediator attempt is one plus the total number of reworking StageRuns in the current DeliverySpec, across DeliveryTasks. Callers and per-task counters cannot restart the sequence at one.",
+      "statement": "The next business rework ordinal is one plus the number of distinct earlier failed candidates in the append-only current DeliverySpec verdict history, across WorkItems. Execution retries and historical WorkRuns do not reset or increment that business ordinal; the history proof must match the exact Delivery revision.",
       "adrRefs": [
         "docs/decisions/0023-canonical-delivery-ownership.md",
         "docs/decisions/0028-control-plane-worker-migration.md"
@@ -1262,7 +1266,7 @@
     },
     {
       "id": "rework.invalidates_previous_candidate",
-      "statement": "Starting a new remediator writer immediately makes the previous frozen candidate non-current; the replacement binds a new StageRun and SessionBinding and must repeat Reviewer, Verifier, evidence, and verdict computation.",
+      "statement": "Starting a new remediator writer immediately makes the previous frozen candidate non-current; the replacement binds a new WorkRun and SessionBinding and must repeat Reviewer, Verifier, evidence, and verdict computation.",
       "adrRefs": [
         "docs/decisions/0023-canonical-delivery-ownership.md",
         "docs/decisions/0028-control-plane-worker-migration.md"
@@ -1285,8 +1289,8 @@
             "name": "invalidates prior acceptance and candidate identities after definition or writer changes"
           },
           {
-            "path": "tests/delivery-stage-coordinator.test.mjs",
-            "name": "one browser action per role drives approved spec through both human review gates"
+            "path": "tests/strongflow-workflow-integration.test.mjs",
+            "name": "StrongFlow browser contract fake covers review, stale decisions, rework, final review, and cursor recovery"
           }
         ],
         "gap": ""

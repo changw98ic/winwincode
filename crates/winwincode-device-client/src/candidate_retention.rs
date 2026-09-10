@@ -502,25 +502,7 @@ pub fn discard_candidate(
     })
 }
 
-/// Enqueues the durable `client.candidate.apply_result` frame for one
-/// discarded candidate.
-///
-/// The receipt is derived deterministically from the registry row and the
-/// durable discard record (receipt id a canonical `lar_` id, the
-/// first discard stamp, revision 1, expected head the frozen candidate
-/// commit, no resulting commit), so every report of the same discard encodes
-/// byte-identical receipt facts under the identical idempotency key — the
-/// Control Plane settles the replay as the same discard.
-///
-/// # Errors
-///
-/// Returns [`CandidateRetentionErrorKind::NoOccupancyMirror`] when the
-/// device holds no occupancy mirror and a store failure when the outbox
-/// append fails.
-/// Deterministic canonical `lar_` receipt id for one discard delivery: the
-/// first 25 uppercase hex characters of the candidate commit plus an `H`
-/// domain tag (distinct from the branch-creation `G` receipt for the same
-/// candidate), so discard replays stay byte-identical.
+/// Builds the deterministic canonical `lar_` receipt id for a discard event.
 fn deterministic_lar_id(candidate_id: &str, tag: char) -> String {
     let hex: String = candidate_id
         .chars()
@@ -531,6 +513,14 @@ fn deterministic_lar_id(candidate_id: &str, tag: char) -> String {
     format!("lar_{hex}{tag}")
 }
 
+/// Enqueues the durable `client.candidate.apply_result` frame for a discarded
+/// candidate.
+///
+/// # Errors
+///
+/// Returns [`CandidateRetentionErrorKind::NoOccupancyMirror`] when no
+/// occupancy mirror is held, or a store error when appending the outbox frame
+/// fails.
 pub fn enqueue_candidate_discarded(
     daemon: &mut DeviceDaemon,
     record: &CandidateLocalRefRecord,

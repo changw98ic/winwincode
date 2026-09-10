@@ -727,7 +727,7 @@ fn validate_common(
     lease: &ExecutionLeaseStamp,
     worker_session_id: &winwincode_domain::WorkerSessionId,
     session_identity: &SessionIdentity,
-    stage_run_required: bool,
+    work_run_required: bool,
 ) -> Result<(), TypedReplayMappingError> {
     if *schema_version != SchemaVersion::WinwincodeV1 {
         return Err(TypedReplayMappingError::UnsupportedSchema);
@@ -739,15 +739,15 @@ fn validate_common(
         || worker_session_id.0.is_empty()
         || session_identity.product_session_id.0.is_empty()
         || session_identity
-            .stage_run_id
+            .work_run_id
             .as_ref()
-            .is_some_and(|stage_run_id| stage_run_id.0.is_empty())
+            .is_some_and(|work_run_id| work_run_id.0.is_empty())
         || session_identity.worker_session_id.0.is_empty()
         || session_identity.codex_thread_id.0.is_empty()
     {
         return Err(TypedReplayMappingError::EmptyIdentity);
     }
-    if stage_run_required && session_identity.stage_run_id.is_none() {
+    if work_run_required && session_identity.work_run_id.is_none() {
         return Err(TypedReplayMappingError::EmptyIdentity);
     }
     if session_identity.worker_session_id != *worker_session_id {
@@ -815,9 +815,9 @@ fn lease_components(
         worker_session_id.0.clone(),
         session_identity.product_session_id.0.clone(),
         session_identity
-            .stage_run_id
+            .work_run_id
             .as_ref()
-            .map_or_else(String::new, |stage_run_id| stage_run_id.0.clone()),
+            .map_or_else(String::new, |work_run_id| work_run_id.0.clone()),
         session_identity.codex_thread_id.0.clone(),
         resource_id.to_owned(),
     ]

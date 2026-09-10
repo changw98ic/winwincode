@@ -68,7 +68,7 @@ schema。生成文件带统一来源摘要，重复生成相同输入不会改�
 | 产品范围 | Command |
 | --- | --- |
 | Chat | `session.create`、`chat.submit`、`input.respond`、`session.cancel`、`session.close` |
-| Delivery / StrongFlow | `delivery.create`、`delivery.update_spec`、`delivery.approve_task_breakdown`、`delivery.advance`、`delivery.resolve_attention`、`delivery.submit_verdict` |
+| Delivery / StrongFlow | `delivery.create`、`delivery.update_spec`、`delivery.task_breakdown.create`、`delivery.advance`、`delivery.resolve_attention`、`delivery.submit_verdict` |
 | 设置 | `settings.update` |
 | 凭据引用 | `credential.reference.create`、`credential.reference.rotate`、`credential.reference.revoke`、`credential.reference.delete` |
 | 审批 | `approval.decide` |

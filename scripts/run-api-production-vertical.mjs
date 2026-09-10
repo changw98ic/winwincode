@@ -107,6 +107,7 @@ const IDS = Object.freeze({
   repeatSession: 'psn_01J00000000000000000000002',
   cancelSession: 'psn_01J00000000000000000000003',
   delivery: 'dlv_01J00000000000000000000001',
+  workItem: 'wit_01J00000000000000000000001',
   credential: 'crd_01J00000000000000000000001',
   remoteWorker: 'wrk_00000000000000000000000001',
   remoteWorkerInstance: 'wki_00000000000000000000000001',
@@ -794,7 +795,8 @@ class ApiClient {
     })
     if (response.status < 200 || response.status >= 300) {
       const code = response.json?.error?.code ?? 'HTTP_ERROR'
-      const error = new Error(`${query} returned HTTP ${response.status} (${code})`)
+      const message = response.json?.error?.message
+      const error = new Error(`${query} returned HTTP ${response.status} (${code})${message === undefined ? '' : `: ${message}`}`)
       error.code = code
       error.status = response.status
       throw error
@@ -817,13 +819,13 @@ function assertCompleted(response, command, previousRevision = undefined) {
   }
 }
 
-function assertRuntimeSession(session, { productSessionId, stageRunId = undefined } = {}) {
+function assertRuntimeSession(session, { productSessionId, workRunId = undefined } = {}) {
   assert.equal(typeof session.executionJobId, 'string')
   assert.equal(typeof session.workerSessionId, 'string')
   assert.equal(typeof session.codexThreadId, 'string')
   assert.equal(session.productSessionId, productSessionId)
   assert.ok(Number.isInteger(session.asOfSequence) && session.asOfSequence > 0)
-  if (stageRunId !== undefined) assert.equal(session.stageRunId, stageRunId)
+  if (workRunId !== undefined) assert.equal(session.workRunId, workRunId)
 }
 
 function stageBindingReady(stage) {
@@ -919,7 +921,7 @@ function sourceRevision() {
   return result.stdout.trim()
 }
 
-export function prepareControlledRepository({ fixtureDirectory }) {
+export function prepareControlledRepository({ fixtureDirectory, files = {} }) {
   const sourceRoot = resolve(fixtureDirectory, 'source-repositories')
   const repository = join(sourceRoot, IDS.repository)
   mkdirSync(sourceRoot, { recursive: true })
@@ -942,6 +944,13 @@ export function prepareControlledRepository({ fixtureDirectory }) {
     join(repository, '.winwincode-api-candidate'),
     'deterministic StrongFlow candidate baseline\n',
   )
+  for (const [name, contents] of Object.entries(files)) {
+    const destination = resolve(repository, name)
+    assert.ok(destination.startsWith(`${repository}/`) && !name.split('/').includes('.git'),
+      'scenario files must stay inside the source repository')
+    mkdirSync(dirname(destination), { recursive: true })
+    writeFileSync(destination, contents)
+  }
   const environment = {
     ...process.env,
     GIT_CONFIG_NOSYSTEM: '1',
@@ -1353,22 +1362,27 @@ function deliverySpec(baseRevision) {
   }
 }
 
-function approveSolutionResolution(detail) {
-  const review = detail.solutionReview
-  assert.notEqual(review, null, 'solution review must be present before approval')
-  return JSON.stringify({
-    schemaVersion: 1,
-    protocol: 'winwincode.solution-review-decision.v1',
-    deliveryId: detail.deliveryId,
-    deliverySpecId: review.deliverySpecId,
-    deliverySpecRevision: review.deliverySpecRevision,
-    reviewStageRunId: review.reviewStageRunId,
-    attentionItemId: review.attentionItemId,
-    reviewSetSha256: review.reviewSetSha256.replace(/^sha256:/, ''),
-    action: 'approve',
-    comments: 'Approve the current bounded solution review through the API.',
-    requestedChanges: null,
-  })
+export function workItemCreatePayload(workRunAggregate, expectedRevision) {
+  const contract = workRunAggregate?.contract
+  assert.ok(contract !== null && typeof contract === 'object',
+    'workrun.get must return the canonical WorkContract')
+  assert.ok(Array.isArray(contract.criteria) && contract.criteria.length > 0,
+    'WorkContract must expose at least one acceptance criterion')
+  const items = workRunAggregate.items
+  assert.ok(Array.isArray(items), 'workrun.get must return canonical WorkItems')
+  if (items.length > 0) return null
+  return {
+    deliveryId: IDS.delivery,
+    expectedRevision,
+    contractRevision: contract.revision,
+    items: [{
+      id: IDS.workItem,
+      title: 'Execute the accepted API delivery',
+      goal: 'Reach the terminal API delivery state from the accepted contract.',
+      criterionIds: contract.criteria.map(criterion => criterion.id),
+      dependsOn: [],
+    }],
+  }
 }
 
 function candidateArtifactSummary(candidate) {
@@ -1378,7 +1392,7 @@ function candidateArtifactSummary(candidate) {
     candidateCommitId: candidate.candidateCommitId ?? null,
     candidateTreeId: candidate.candidateTreeId ?? null,
     diffSha256: candidate.diffSha256 ?? null,
-    producerStageRunId: candidate.producerStageRunId ?? null,
+    producerWorkRunId: candidate.producerWorkRunId ?? null,
     producerSessionBindingId: candidate.producerSessionBindingId ?? null,
     frozenAt: candidate.frozenAt ?? null,
   }
@@ -1471,6 +1485,21 @@ export async function driveDelivery(
   let terminalCommand = null
   for (;;) {
     detail = (await client.query('delivery.get', { deliveryId: IDS.delivery })).result
+    // Scheduling and completion use the current WorkRun aggregate.
+    let workRunAggregate
+    try {
+      workRunAggregate = (await client.query('workrun.get', {
+        deliveryId: IDS.delivery,
+        workItemId: null,
+        atCursor: detail.readCursor,
+      })).result
+    } catch (error) {
+      if (error?.code === 'REVISION_CONFLICT' || error?.code === 'READ_CURSOR_EXPIRED') continue
+      throw error
+    }
+    const workRuns = Array.isArray(workRunAggregate?.runs) ? workRunAggregate.runs : []
+    const activeWorkRuns = workRuns
+      .filter(run => ['queued', 'leased', 'running'].includes(run.state))
     const observation = { revision: detail.deliveryRevision, status: detail.status }
     appendDeliveryTransition(transitionTrace, observation)
     if (detail.status === 'delivered') break
@@ -1485,40 +1514,38 @@ export async function driveDelivery(
 
     let command = null
     let payload = null
-    if (detail.solutionReview?.reviewStatus === 'pending') {
-      command = 'delivery.resolve_attention'
-      payload = {
-        deliveryId: IDS.delivery,
-        attentionItemId: detail.solutionReview.attentionItemId,
-        decision: 'resolve',
-        resolution: approveSolutionResolution(detail),
-        remediation: null,
-      }
-    } else if (detail.solutionReview?.reviewStatus === 'approved' && detail.tasks.length === 0) {
-      command = 'delivery.approve_task_breakdown'
-      payload = {
-        deliveryId: IDS.delivery,
-        reviewSetSha256: detail.solutionReview.reviewSetSha256,
-      }
-    } else if (
+    if (
       detail.currentCandidate !== null
       && detail.verdict === null
-      && !detail.stages.some(stage => ['running', 'waiting'].includes(stage.status))
+      && activeWorkRuns.length === 0
     ) {
-      command = 'delivery.submit_verdict'
-      const candidateRef = detail.currentCandidate.candidateRef
-      assert.match(
-        candidateRef ?? '',
-        /^git-candidate:sha256:[0-9a-f]{64}$/u,
-        'Delivered candidate must expose its canonical Git candidate reference',
-      )
-      payload = {
-        deliveryId: IDS.delivery,
-        // `candidateDigest` is the stale-check suffix of the immutable
-        // candidate reference.  `diffSha256` identifies the patch bytes and
-        // is deliberately a different value.
-        candidateDigest: candidateRef.slice('git-candidate:'.length),
+      const verificationProfile = ['reviewer', 'verifier'][workRuns.length - 1]
+      if (verificationProfile !== undefined) {
+        command = 'delivery.advance'
+        payload = { deliveryId: IDS.delivery, dispatchProfile: verificationProfile }
+      } else {
+        command = 'delivery.submit_verdict'
+        const candidateRef = detail.currentCandidate.candidateRef
+        assert.match(
+          candidateRef ?? '',
+          /^git-candidate:sha256:[0-9a-f]{64}$/u,
+          'Delivered candidate must expose its canonical Git candidate reference',
+        )
+        payload = {
+          deliveryId: IDS.delivery,
+          // `candidateDigest` is the stale-check suffix of the immutable
+          // candidate reference.  `diffSha256` identifies the patch bytes and
+          // is deliberately a different value.
+          candidateDigest: candidateRef.slice('git-candidate:'.length),
+        }
       }
+    } else if (activeWorkRuns.length > 0) {
+      // The Controller owns the active WorkRun; wait for accepted runtime facts.
+      // Do not resolve Attention or issue another dispatch while it runs.
+      await new Promise(resolvePromise => setTimeout(resolvePromise, POLL_INTERVAL_MILLIS))
+      continue
+    } else if (detail.solutionReview?.reviewStatus === 'pending') {
+      fail('Delivery requires an external Solution Review decision')
     } else {
       const attention = detail.attention.find(item => item.status === 'open')
       if (attention !== undefined) {
@@ -1531,8 +1558,10 @@ export async function driveDelivery(
           remediation: null,
         }
       } else {
-        command = 'delivery.advance'
-        payload = { deliveryId: IDS.delivery }
+        // A running WorkRun is polled above. A completed writer is followed
+        // only by the two independent verification WorkRuns above.
+        await new Promise(resolvePromise => setTimeout(resolvePromise, POLL_INTERVAL_MILLIS))
+        continue
       }
     }
 
@@ -1589,17 +1618,25 @@ export async function driveDelivery(
   assert.equal(terminal.verdict?.status, 'pass', 'Delivered projection must contain a passing verdict')
   assert.equal(terminal.attention.filter(item => item.status === 'open').length, 0)
   assert.ok(terminal.evidence.length > 0, 'Delivered projection must expose canonical evidence')
-  assert.ok(terminal.stages.length > 0, 'Delivered projection must expose canonical stages')
-  for (const role of ['planner', 'executor', 'reviewer', 'verifier']) {
-    const stage = terminal.stages.find(candidate => (
-      candidate.role.toLowerCase() === role
-      && candidate.status === 'succeeded'
-      && stageBindingReady(candidate)
-    ))
-    assert.notEqual(stage, undefined, `missing succeeded bound ${role} StageRun`)
+  const terminalWorkRunAggregate = (await client.query('workrun.get', {
+    deliveryId: IDS.delivery,
+    workItemId: null,
+    atCursor: terminal.readCursor ?? null,
+  })).result
+  assert.ok(Array.isArray(terminalWorkRunAggregate.items)
+    && terminalWorkRunAggregate.items.length > 0,
+  'Delivered projection must contain canonical WorkItems')
+  assert.ok(terminalWorkRunAggregate.items.every(item => item.state === 'done'),
+    'Delivered requires every canonical WorkItem to be done')
+  assert.ok(Array.isArray(terminalWorkRunAggregate.runs)
+    && terminalWorkRunAggregate.runs.length > 0,
+  'Delivered projection must contain canonical WorkRuns')
+  for (const run of terminalWorkRunAggregate.runs) {
+    assert.equal(typeof run.id, 'string')
+    assert.equal(typeof run.workItemId, 'string')
+    assert.equal(typeof run.executionJobId, 'string')
+    assert.equal(typeof run.state, 'string')
   }
-  assert.ok(terminal.tasks.length > 0, 'Delivered projection must contain promoted tasks')
-  assert.equal(terminal.tasks.every(task => task.status === 'completed'), true)
   assert.equal(terminal.verdict.criteria.every(criterion => criterion.verdict === 'pass'), true)
   return {
     actions,
@@ -1623,29 +1660,35 @@ async function commandEventually(client, command, expectedRevision, payload, tim
   }
 }
 
-async function runtimeStageEvidence(client, detail) {
-  const stageRuns = detail.stages.filter(stage => stageBindingReady(stage))
+async function runtimeWorkRunEvidence(client, detail) {
+  const workRunAggregate = (await client.query('workrun.get', {
+    deliveryId: IDS.delivery,
+    workItemId: null,
+    atCursor: detail.readCursor ?? null,
+  })).result
+  const runs = Array.isArray(workRunAggregate?.runs) ? workRunAggregate.runs : []
+  assert.ok(runs.length > 0, 'WorkRun projection must expose runtime runs')
   const snapshots = []
-  for (const stage of stageRuns) {
-    const binding = stage.sessionBinding
+  for (const run of runs) {
+    assert.equal(typeof run.id, 'string')
+    assert.equal(typeof run.productSessionId, 'string')
     const response = await client.query('runtime.projection.get', {
       kind: 'delivery-stage',
       deliveryId: IDS.delivery,
-      productSessionId: binding.productSessionId,
-      stageRunId: stage.id,
+      productSessionId: run.productSessionId,
+      workRunId: run.id,
       atCursor: detail.readCursor,
     })
     const sessions = response.result?.sessions
-    assert.ok(Array.isArray(sessions), `${stage.role} runtime sessions must be an array`)
-    const session = sessions.find(candidate => candidate.stageRunId === stage.id)
-    assert.notEqual(session, undefined, `${stage.role} runtime session must be present`)
+    assert.ok(Array.isArray(sessions), `${run.id} runtime sessions must be an array`)
+    const session = sessions.find(candidate => candidate.workRunId === run.id)
+    assert.notEqual(session, undefined, `${run.id} runtime session must be present`)
     assertRuntimeSession(session, {
-      productSessionId: binding.productSessionId,
-      stageRunId: stage.id,
+      productSessionId: run.productSessionId,
+      workRunId: run.id,
     })
     snapshots.push({
-      role: stage.role.toLowerCase(),
-      stageRunId: stage.id,
+      workRunId: run.id,
       session,
     })
   }
@@ -1666,6 +1709,7 @@ export async function runApiProductionVertical({
   repeat = true,
   includeStrongFlow = true,
   serverEnvironment = {},
+  scenario = null,
   timeoutMillis = DEFAULT_TIMEOUT_MILLIS,
 } = {}) {
   const modelRoute = configuredModelRoute(serverEnvironment)
@@ -1684,6 +1728,7 @@ export async function runApiProductionVertical({
     }
     const result = spawnSync('cargo', [
       'build', '-p', 'winwincode-server', '--bin', 'winwincode-server',
+      '-p', 'winwincode-kernel-helper', '--bin', 'winwincode-kernel-helper',
       '--locked', '--offline',
     ], { cwd: root, encoding: 'utf8', env: buildEnvironment, stdio: 'inherit' })
     assert.equal(result.status, 0, 'winwincode-server production binary build failed')
@@ -1694,18 +1739,19 @@ export async function runApiProductionVertical({
       ], { cwd: root, encoding: 'utf8', env: buildEnvironment, stdio: 'inherit' })
       assert.equal(workerResult.status, 0, 'winwincode-worker production binary build failed')
     }
-    // The production adapter intentionally rejects oversized debug helpers.
-    // Build the compact release helper, then co-locate it with the debug
-    // Server so the runner exercises the same signed helper boundary as the
-    // packaged application without creating a second target directory.
-    const helperResult = spawnSync('cargo', [
-      'build', '--release', '-p', 'winwincode-kernel-helper', '--locked', '--offline',
-    ], { cwd: root, encoding: 'utf8', env: buildEnvironment, stdio: 'inherit' })
-    assert.equal(helperResult.status, 0, 'winwincode-kernel-helper release build failed')
-    const releaseHelper = resolve(serverTargetDirectory(root), 'release/winwincode-kernel-helper')
+    // Prefer the freshly built compact helper; oversized development builds
+    // still require release compilation to satisfy the signed helper boundary.
+    const debugHelper = resolve(serverTargetDirectory(root), 'debug/winwincode-kernel-helper')
+    let builtHelper = debugHelper
+    if (lstatSync(debugHelper).size > 64 * 1024 * 1024) {
+      const helperResult = spawnSync('cargo', [
+        'build', '--release', '-p', 'winwincode-kernel-helper', '--locked', '--offline',
+      ], { cwd: root, encoding: 'utf8', env: buildEnvironment, stdio: 'inherit' })
+      assert.equal(helperResult.status, 0, 'winwincode-kernel-helper release build failed')
+      builtHelper = resolve(serverTargetDirectory(root), 'release/winwincode-kernel-helper')
+    }
     const colocatedHelper = resolve(dirname(binary), 'winwincode-kernel-helper')
-    assert.equal(existsSync(releaseHelper), true, `release helper is missing: ${releaseHelper}`)
-    if (releaseHelper !== colocatedHelper) copyFileSync(releaseHelper, colocatedHelper)
+    if (builtHelper !== colocatedHelper) copyFileSync(builtHelper, colocatedHelper)
     chmodSync(colocatedHelper, 0o755)
   }
   assert.equal(existsSync(binary), true, `server binary is missing: ${binary}`)
@@ -1756,9 +1802,10 @@ export async function runApiProductionVertical({
         WWC_SERVER_REMOTE_WORKER_EXPIRES_AT: '2099-01-01T00:00:00Z',
       }
   const proof = randomBytes(32).toString('base64url')
-  const proofs = [proof]
+  const proofs = [proof, serverEnvironment.WWC_SERVER_MODEL_API_KEY].filter(Boolean)
   const controlledRepository = prepareControlledRepository({
     fixtureDirectory,
+    files: scenario?.files,
   })
   const baseline = controlledRepository.revision
   let started = null
@@ -1833,6 +1880,10 @@ export async function runApiProductionVertical({
       remoteWorkerHeartbeatAt = readyWorker.lastHeartbeatAt
     }
 
+    if (scenario !== null) {
+      report.flow.scenario = await scenario.run({ api, repository: controlledRepository.repository, baseline, modelRoute })
+      return report
+    }
     const chat = await runChat(api, timeoutMillis, { modelRoute })
     report.flow.chat = {
       assistant: {
@@ -1904,17 +1955,56 @@ export async function runApiProductionVertical({
         tasks: [],
       }, timeoutMillis)
       assertCompleted(deliveryCreated, 'delivery.create', 0)
+      const workRunBeforeDispatch = await api.query('workrun.get', {
+        deliveryId: IDS.delivery,
+        workItemId: null,
+        atCursor: null,
+      })
+      const workItemPayload = workItemCreatePayload(
+        workRunBeforeDispatch.result,
+        deliveryCreated.currentRevision,
+      )
+      if (workItemPayload !== null) {
+        const workItemsCreated = await commandEventually(
+          api,
+          'delivery.task_breakdown.create',
+          deliveryCreated.currentRevision,
+          workItemPayload,
+          timeoutMillis,
+        )
+        assertCompleted(
+          workItemsCreated,
+          'delivery.task_breakdown.create',
+          deliveryCreated.currentRevision,
+        )
+        assert.equal(workItemsCreated.result.items.length, 1)
+        assert.equal(workItemsCreated.result.items[0].id, IDS.workItem)
+        assert.deepEqual(
+          workItemsCreated.result.items[0].criterionIds,
+          workItemPayload.items[0].criterionIds,
+        )
+      }
+      const deliveryBeforeDispatch = await api.query('delivery.get', {
+        deliveryId: IDS.delivery,
+      })
       const deliveryAdvanced = await commandEventually(
         api,
         'delivery.advance',
-        1,
-        { deliveryId: IDS.delivery },
+        deliveryBeforeDispatch.result.deliveryRevision,
+        {
+          deliveryId: IDS.delivery,
+          dispatchProfile: 'executor',
+        },
         timeoutMillis,
       )
-      assertCompleted(deliveryAdvanced, 'delivery.advance', 1)
+      assertCompleted(
+        deliveryAdvanced,
+        'delivery.advance',
+        deliveryBeforeDispatch.result.deliveryRevision,
+      )
       assert.equal(deliveryAdvanced.result.deliveryId, IDS.delivery)
       delivery = await driveDelivery(api, timeoutMillis, modelRoute)
-      const stageRuntime = await runtimeStageEvidence(api, delivery.detail)
+      const workRunRuntime = await runtimeWorkRunEvidence(api, delivery.detail)
       report.flow.strongflow = {
         actions: delivery.actions,
         deliveryId: IDS.delivery,
@@ -1925,9 +2015,8 @@ export async function runApiProductionVertical({
         totalTransitionCount: delivery.totalTransitionCount,
         stageRuns: delivery.detail.stages.map(stage => stageRunSummary(stage, modelRoute)),
         stageRoles: delivery.detail.stages.map(stage => stage.role.toLowerCase()).toSorted(),
-        stageRuntime: stageRuntime.map(item => ({
-          role: item.role,
-          stageRunId: item.stageRunId,
+        workRunRuntime: workRunRuntime.map(item => ({
+          workRunId: item.workRunId,
           asOfSequence: item.session.asOfSequence,
           executionJobId: item.session.executionJobId,
           workerSessionId: item.session.workerSessionId,

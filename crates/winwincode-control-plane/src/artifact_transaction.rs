@@ -5,12 +5,11 @@
 use std::fmt;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use winwincode_delivery::{
-    application::stage::SessionBindingAuthority,
-    domain::{Delivery, StageRunStatus},
-};
+use winwincode_delivery::{application::stage::SessionBindingAuthority, domain::Delivery};
 use winwincode_domain::RepositoryScope;
-use winwincode_domain::{ExecutionAckSequence, ExecutionSequence, SchemaVersion, SessionIdentity};
+use winwincode_domain::{
+    DeliveryId, ExecutionAckSequence, ExecutionSequence, SchemaVersion, SessionIdentity,
+};
 use winwincode_execution_port::generated::{
     ArtifactAckMessage, ArtifactAckMessageKind, ArtifactChunkMessage, ArtifactKind,
     ArtifactOpenMessage, ExecutionJob, ExecutionLeaseStamp, ExecutionPortError,
@@ -19,14 +18,9 @@ use winwincode_execution_port::generated::{
 use winwincode_storage::{
     ArtifactChunk, ArtifactError, ArtifactErrorKind, ArtifactMeteringAttribution, ArtifactOpen,
     ArtifactProvenance, ArtifactRetention, ArtifactStore, ArtifactWriteReceipt, DurableOutboxEvent,
-    EnterpriseQuotaReservationState, ProductStateStorage, PublicEventActor, StorageError,
-    public_actor_from_receipt_key,
+    ProductStateStorage, PublicEventActor, StorageError, public_actor_from_receipt_key,
 };
 
-use crate::artifact_enterprise_quota::{
-    ArtifactEnterpriseQuotaAdmission, ArtifactEnterpriseQuotaReservation,
-    ArtifactEnterpriseQuotaSaga, ArtifactEnterpriseQuotaSagaError,
-};
 use crate::delivery_transaction::{delivery_stream_id, load_durable_execution_job};
 use crate::repository_scope_key;
 use crate::session_binding_transaction::{instant_millis, require_id};
@@ -38,8 +32,6 @@ const MAX_ENCODED_PAYLOAD_BYTES: usize = 16_777_216;
 pub enum ArtifactMessageError {
     Storage(StorageError),
     Artifact(ArtifactError),
-    EnterpriseQuota(ArtifactEnterpriseQuotaSagaError),
-    EnterpriseQuotaDenied,
 }
 
 impl fmt::Display for ArtifactMessageError {
@@ -47,8 +39,6 @@ impl fmt::Display for ArtifactMessageError {
         match self {
             Self::Storage(error) => write!(formatter, "Artifact authority failed: {error}"),
             Self::Artifact(error) => write!(formatter, "Artifact storage failed: {error}"),
-            Self::EnterpriseQuota(error) => write!(formatter, "Artifact quota failed: {error}"),
-            Self::EnterpriseQuotaDenied => formatter.write_str("Artifact quota denied the write"),
         }
     }
 }
@@ -67,19 +57,12 @@ impl From<ArtifactError> for ArtifactMessageError {
     }
 }
 
-impl From<ArtifactEnterpriseQuotaSagaError> for ArtifactMessageError {
-    fn from(error: ArtifactEnterpriseQuotaSagaError) -> Self {
-        Self::EnterpriseQuota(error)
-    }
-}
-
 pub(crate) fn accept_open(
     storage: &dyn ProductStateStorage,
     artifacts: &mut ArtifactStore,
     scope: &RepositoryScope,
     message: &ArtifactOpenMessage,
     authority: &SessionBindingAuthority,
-    enterprise_quota: &mut ArtifactEnterpriseQuotaSaga<'_, '_>,
 ) -> Result<ArtifactAckMessage, ArtifactMessageError> {
     validate_open_shape(message)?;
     let context = ArtifactMessageContext::from_authority(
@@ -104,10 +87,7 @@ pub(crate) fn accept_open(
     )?;
     let open = frozen_artifact_open(scope, message, &context, &durable, &job, &replay_identity)?;
     match artifacts.replay_open(&open) {
-        Ok(Some(receipt)) => {
-            require_replay_quota(enterprise_quota, &open, &message.sent_at)?;
-            return ack_open(message, &receipt, &replay_identity);
-        }
+        Ok(Some(receipt)) => return ack_open(message, &receipt, &replay_identity),
         Ok(None) => {}
         Err(error) if error.kind() == ArtifactErrorKind::Conflict => {
             return ack_open_conflict(
@@ -145,18 +125,12 @@ pub(crate) fn accept_open(
             &session_identity,
         );
     }
-    let reservation = reserve_artifact_open(enterprise_quota, &open, &message.sent_at)?;
     match artifacts.open_artifact(open.clone()) {
         Ok(receipt) => ack_open(message, &receipt, &session_identity),
         Err(error) if error.kind() == ArtifactErrorKind::Conflict => {
             if let Some(receipt) = artifacts.replay_open(&open)? {
                 return ack_open(message, &receipt, &session_identity);
             }
-            enterprise_quota.release(
-                &reservation,
-                winwincode_storage::EnterpriseQuotaReleaseReason::Failed,
-                &message.sent_at,
-            )?;
             ack_open_conflict(
                 artifacts,
                 &context.scope_key,
@@ -165,14 +139,7 @@ pub(crate) fn accept_open(
                 &session_identity,
             )
         }
-        Err(error) => {
-            enterprise_quota.release(
-                &reservation,
-                winwincode_storage::EnterpriseQuotaReleaseReason::Failed,
-                &message.sent_at,
-            )?;
-            Err(error.into())
-        }
+        Err(error) => Err(error.into()),
     }
 }
 
@@ -203,47 +170,6 @@ fn frozen_artifact_open(
     ))
 }
 
-fn reserve_artifact_open(
-    enterprise_quota: &mut ArtifactEnterpriseQuotaSaga<'_, '_>,
-    open: &ArtifactOpen,
-    requested_at: &winwincode_domain::Instant,
-) -> Result<ArtifactEnterpriseQuotaReservation, ArtifactMessageError> {
-    match enterprise_quota.reserve_open(open, requested_at)? {
-        ArtifactEnterpriseQuotaAdmission::Admitted(reservation) => Ok(reservation),
-        ArtifactEnterpriseQuotaAdmission::TerminalReplay(_) => {
-            Err(ArtifactMessageError::EnterpriseQuota(
-                ArtifactEnterpriseQuotaSagaError::UnexpectedTerminalReservation,
-            ))
-        }
-        ArtifactEnterpriseQuotaAdmission::Denied(_) => {
-            Err(ArtifactMessageError::EnterpriseQuotaDenied)
-        }
-    }
-}
-
-fn require_replay_quota(
-    enterprise_quota: &mut ArtifactEnterpriseQuotaSaga<'_, '_>,
-    open: &ArtifactOpen,
-    requested_at: &winwincode_domain::Instant,
-) -> Result<(), ArtifactMessageError> {
-    match enterprise_quota.reserve_open(open, requested_at)? {
-        ArtifactEnterpriseQuotaAdmission::Admitted(_) => Ok(()),
-        ArtifactEnterpriseQuotaAdmission::TerminalReplay(receipt)
-            if receipt.record.state == EnterpriseQuotaReservationState::Settled =>
-        {
-            Ok(())
-        }
-        ArtifactEnterpriseQuotaAdmission::TerminalReplay(_) => {
-            Err(ArtifactMessageError::EnterpriseQuota(
-                ArtifactEnterpriseQuotaSagaError::UnexpectedTerminalReservation,
-            ))
-        }
-        ArtifactEnterpriseQuotaAdmission::Denied(_) => {
-            Err(ArtifactMessageError::EnterpriseQuotaDenied)
-        }
-    }
-}
-
 fn metering_attribution(
     scope: &RepositoryScope,
     durable: &DurableOutboxEvent,
@@ -256,7 +182,7 @@ fn metering_attribution(
             "Artifact storage attribution requires the authenticated User actor",
         ));
     };
-    let ExecutionScope::DeliveryStageExecutionScope(job_scope) = &job.scope else {
+    let ExecutionScope::WorkRunExecutionScope(job_scope) = &job.scope else {
         return Err(StorageError::invalid_input(
             "Artifact storage attribution requires a Delivery stage",
         ));
@@ -271,7 +197,13 @@ fn metering_attribution(
         workspace_id: scope.workspace_id.clone(),
         project_id: scope.project_id.clone(),
         repository_id: scope.repository_id.clone(),
-        delivery_id: Some(job_scope.delivery_id.clone()),
+        delivery_id: Some(DeliveryId(
+            durable
+                .stream_id()
+                .strip_prefix("delivery:")
+                .unwrap_or(durable.stream_id())
+                .to_owned(),
+        )),
         product_session_id: Some(session_identity.product_session_id.clone()),
         user_id,
     })
@@ -283,7 +215,6 @@ pub(crate) fn accept_chunk(
     scope: &RepositoryScope,
     message: &ArtifactChunkMessage,
     authority: &SessionBindingAuthority,
-    enterprise_quota: &mut ArtifactEnterpriseQuotaSaga<'_, '_>,
 ) -> Result<ArtifactAckMessage, ArtifactMessageError> {
     validate_chunk_shape(message)?;
     let context = ArtifactMessageContext::from_authority(
@@ -329,12 +260,7 @@ pub(crate) fn accept_chunk(
         session_claim,
     )?;
     match artifacts.replay_chunk(&chunk) {
-        Ok(Some(receipt)) => {
-            if message.is_final {
-                enterprise_quota.recover_final(&message.artifact_id, artifacts)?;
-            }
-            return ack_chunk(message, &receipt, &replay_identity);
-        }
+        Ok(Some(receipt)) => return ack_chunk(message, &receipt, &replay_identity),
         Ok(None) => {}
         Err(error) => {
             return ack_chunk_error(
@@ -369,12 +295,7 @@ pub(crate) fn accept_chunk(
         );
     }
     match artifacts.append_chunk(&chunk) {
-        Ok(receipt) => {
-            if message.is_final {
-                enterprise_quota.recover_final(&message.artifact_id, artifacts)?;
-            }
-            ack_chunk(message, &receipt, &session_identity)
-        }
+        Ok(receipt) => ack_chunk(message, &receipt, &session_identity),
         Err(error) => ack_chunk_error(
             artifacts,
             &context.scope_key,
@@ -636,12 +557,30 @@ fn validate_current_binding(
     require_active_run: bool,
     require_authority: bool,
 ) -> Result<SessionIdentity, StorageError> {
-    let ExecutionScope::DeliveryStageExecutionScope(job_scope) = &job.scope else {
+    let ExecutionScope::WorkRunExecutionScope(job_scope) = &job.scope else {
         return Err(StorageError::invalid_input(
             "Artifact message requires a Delivery stage ExecutionJob",
         ));
     };
-    if durable.stream_id() != delivery_stream_id(&job_scope.delivery_id) {
+    if require_active_run
+        && storage
+            .load_state(
+                &crate::terminal_outcome_transaction::terminal_authority_stream_id(&job.job_id),
+            )?
+            .is_some()
+    {
+        return Err(StorageError::invalid_input(
+            "terminal WorkRun cannot create new artifacts",
+        ));
+    }
+    let delivery_id = DeliveryId(
+        durable
+            .stream_id()
+            .strip_prefix("delivery:")
+            .unwrap_or(durable.stream_id())
+            .to_owned(),
+    );
+    if durable.stream_id() != delivery_stream_id(&delivery_id) {
         return Err(StorageError::invalid_input(
             "Artifact ExecutionJob receipt identifies another Delivery",
         ));
@@ -651,21 +590,23 @@ fn validate_current_binding(
         .ok_or_else(|| StorageError::invalid_input("Artifact Delivery state does not exist"))?;
     let delivery = Delivery::decode_json(&state.payload)
         .map_err(|error| StorageError::invalid_input(error.to_string()))?;
-    let mut runs = delivery.snapshot().stage_runs.iter().filter(|run| {
-        run.id == job_scope.stage_run_id
-            && (!require_active_run
-                || matches!(
-                    run.status,
-                    StageRunStatus::Running | StageRunStatus::Waiting
-                ))
-    });
+    let mut runs = delivery
+        .snapshot()
+        .work_run_aggregate
+        .runs
+        .iter()
+        .filter(|run| {
+            run.id == job_scope.work_run_id
+                && (!require_active_run
+                    || matches!(run.state, winwincode_domain::WorkRunState::Running))
+        });
     let run = runs.next().ok_or_else(|| {
         StorageError::invalid_input("Artifact ExecutionJob StageRun is not active")
     })?;
     let attempt = u64::try_from(job.attempt).map_err(|_| {
         StorageError::invalid_input("Artifact ExecutionJob attempt is out of range")
     })?;
-    if runs.next().is_some() || run.attempt != attempt {
+    if runs.next().is_some() || run.attempt != i64::try_from(attempt).unwrap_or(-1) {
         return Err(StorageError::invalid_input(
             "Artifact ExecutionJob StageRun is ambiguous or stale",
         ));
@@ -674,7 +615,7 @@ fn validate_current_binding(
         .snapshot()
         .session_bindings
         .iter()
-        .filter(|binding| binding.stage_run_id == run.id)
+        .filter(|binding| binding.work_run_id == run.id)
         .collect::<Vec<_>>();
     let [binding] = bindings.as_slice() else {
         return Err(StorageError::invalid_input(
@@ -683,7 +624,10 @@ fn validate_current_binding(
     };
     if binding.execution_job_id != job.job_id
         || binding.product_session_id != job_scope.product_session_id
-        || binding.delivery_task_id != job_scope.delivery_task_id
+        || binding.work_contract_id != job_scope.work_contract_id
+        || binding.work_contract_revision != job_scope.work_contract_revision
+        || binding.work_item_id != job_scope.work_item_id
+        || binding.work_item_revision != job_scope.work_item_revision
         || binding.worker_session_id.as_ref() != Some(worker_session_id)
         || binding.codex_thread_id.is_none()
     {
@@ -708,7 +652,7 @@ fn validate_current_binding(
     Ok(SessionIdentity {
         codex_thread_id,
         product_session_id: binding.product_session_id.clone(),
-        stage_run_id: Some(binding.stage_run_id.clone()),
+        work_run_id: Some(binding.work_run_id.clone()),
         worker_session_id: worker_session_id.clone(),
     })
 }
@@ -827,10 +771,10 @@ fn validate_session_identity_shape(identity: &SessionIdentity) -> Result<(), Sto
         "psn_",
         "sessionIdentity.productSessionId",
     )?;
-    let stage_run_id = identity.stage_run_id.as_ref().ok_or_else(|| {
-        StorageError::invalid_input("sessionIdentity.stageRunId is required for artifacts")
+    let work_run_id = identity.work_run_id.as_ref().ok_or_else(|| {
+        StorageError::invalid_input("sessionIdentity.workRunId is required for artifacts")
     })?;
-    require_id(&stage_run_id.0, "run_", "sessionIdentity.stageRunId")?;
+    require_id(&work_run_id.0, "wrn_", "sessionIdentity.workRunId")?;
     require_id(
         &identity.worker_session_id.0,
         "wsn_",

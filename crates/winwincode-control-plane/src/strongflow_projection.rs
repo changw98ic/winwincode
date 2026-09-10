@@ -21,7 +21,8 @@ use winwincode_api::generated::{
     CandidateHistoryListQuery, DeliveryGetQuery, DeliveryGetResultResponse,
     DeliveryGetResultResponseQuery, ErrorCode, EvidenceArtifactContentGetQuery, EvidenceGetQuery,
     PageInfo, QueryResultResponse, RuntimeProjectionGetParameters, RuntimeProjectionGetQuery,
-    RuntimeProjectionGetResultResponse, RuntimeProjectionGetResultResponseQuery,
+    RuntimeProjectionGetResultResponse, RuntimeProjectionGetResultResponseQuery, WorkRunGetQuery,
+    WorkRunGetResultResponse, WorkRunGetResultResponseQuery,
 };
 use winwincode_domain::{SchemaVersion, is_canonical_delivery_id};
 
@@ -132,6 +133,16 @@ pub trait StrongFlowProjectionQueryPort {
     fn runtime_projection_get(
         &self,
         query: &RuntimeProjectionGetQuery,
+    ) -> Result<QueryResultResponse, StrongFlowProjectionError>;
+
+    /// Returns the exact `WorkRun` aggregate at one Delivery read cut.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed on a foreign, stale, gapped, or unavailable source cut.
+    fn workrun_get(
+        &self,
+        query: &WorkRunGetQuery,
     ) -> Result<QueryResultResponse, StrongFlowProjectionError>;
 
     /// Returns one stable page of exact current-Candidate changed files.
@@ -284,7 +295,7 @@ impl StrongFlowProjectionQueryPort for ControlPlane {
                 }
                 mapping::runtime_snapshot_for_delivery(
                     &read,
-                    &parameters.stage_run_id,
+                    &parameters.work_run_id,
                     &parameters.product_session_id,
                 )?
             }
@@ -309,6 +320,84 @@ impl StrongFlowProjectionQueryPort for ControlPlane {
                 request_id: query.request_id.clone(),
                 query: RuntimeProjectionGetResultResponseQuery::RuntimeProjectionGet,
                 result: snapshot,
+                page: page(),
+            },
+        ))
+    }
+
+    fn workrun_get(
+        &self,
+        query: &WorkRunGetQuery,
+    ) -> Result<QueryResultResponse, StrongFlowProjectionError> {
+        application::validate_scope(&query.scope)?;
+        if query.page.cursor.is_some() {
+            return Err(StrongFlowProjectionError::invalid_request(
+                "WorkRun exact reads use atCursor rather than page cursor",
+            ));
+        }
+        let read = match &query.parameters.at_cursor {
+            Some(cursor) => application::replay_delivery_read(
+                self,
+                &query.actor,
+                &query.scope,
+                &query.parameters.delivery_id,
+                cursor,
+                query.page.limit,
+            )?,
+            None => application::establish_delivery_read(
+                self,
+                &query.actor,
+                &query.scope,
+                &query.parameters.delivery_id,
+                query.page.limit,
+            )?,
+        };
+        let read_cursor = mapping::cursor(&read)?;
+        if query
+            .parameters
+            .at_cursor
+            .as_ref()
+            .is_some_and(|expected| expected != &read_cursor)
+        {
+            return Err(StrongFlowProjectionError::RevisionConflict(
+                "WorkRun read cursor does not match the requested Delivery cut".to_owned(),
+            ));
+        }
+        let aggregate = &read.workrun_aggregate;
+        if let Some(item_id) = query.parameters.work_item_id.as_ref()
+            && !aggregate.items.iter().any(|item| &item.id == item_id)
+        {
+            return Err(StrongFlowProjectionError::ResourceNotFound(
+                "WorkItem is not in the Delivery WorkRun aggregate".to_owned(),
+            ));
+        }
+        if let Some(run_id) = query.parameters.work_run_id.as_ref() {
+            let run = aggregate
+                .runs
+                .iter()
+                .find(|run| &run.id == run_id)
+                .ok_or_else(|| {
+                    StrongFlowProjectionError::ResourceNotFound(
+                        "WorkRun is not in the Delivery WorkRun aggregate".to_owned(),
+                    )
+                })?;
+            if query
+                .parameters
+                .work_item_id
+                .as_ref()
+                .is_some_and(|item_id| &run.work_item_id != item_id)
+            {
+                return Err(StrongFlowProjectionError::InvalidRequest(
+                    "WorkRun does not belong to the requested WorkItem".to_owned(),
+                ));
+            }
+        }
+        Ok(QueryResultResponse::WorkRunGetResultResponse(
+            WorkRunGetResultResponse {
+                schema_version: SchemaVersion::WinwincodeV1,
+                request_id: query.request_id.clone(),
+                query: WorkRunGetResultResponseQuery::WorkRunGet,
+                result: mapping::workrun_aggregate(aggregate, read_cursor),
                 page: page(),
             },
         ))

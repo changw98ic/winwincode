@@ -20,7 +20,7 @@ use winwincode_domain::{RepositoryScope, RepositoryScopeKind};
 
 use winwincode_control_plane::{
     DurableExecutionPortDelegate, DurableExecutionPortIngress, DurableWorkerExecutionLifecycle,
-    RepositoryExecutionScheduler, WorkerEnterpriseQuotaClaim,
+    RepositoryExecutionScheduler,
 };
 use winwincode_domain::{ExecutionJobId, Instant, RequestId, UserId, WorkerId, WorkerInstanceId};
 use winwincode_execution_port::generated::{
@@ -961,18 +961,12 @@ impl RepositoryRuntimeScheduler {
                     attempt: u64::try_from(dispatch.lease.attempt)
                         .map_err(|_| scheduler_failure())?,
                 };
-                match DurableWorkerExecutionLifecycle::open(data_directory)
-                    .and_then(|lifecycle| lifecycle.claim(&claim))
+                DurableWorkerExecutionLifecycle::open(data_directory)
+                    .and_then(|mut lifecycle| lifecycle.claim(&claim))
                     .map_err(|error| {
-                        debug_scheduler_error("reserve remote Worker quota", &error);
+                        debug_scheduler_error("claim remote Worker execution", &error);
                         scheduler_failure()
-                    })? {
-                    WorkerEnterpriseQuotaClaim::Claimed { .. } => {}
-                    WorkerEnterpriseQuotaClaim::Denied
-                    | WorkerEnterpriseQuotaClaim::TerminalReplay(_) => {
-                        return Err(scheduler_failure());
-                    }
-                }
+                    })?;
             }
             let authority = self
                 .ensure_worker_slot(&mut state.storage, &dispatch, now)
@@ -1957,7 +1951,7 @@ mod tests {
                 kind: ProductSessionExecutionScopeKind::ProductSession,
                 product_session_id: ProductSessionId(fixed_id("psn_")),
             }),
-            stage_input: None,
+            work_input: None,
             workspace: ExecutionWorkspace {
                 checkout_revision: "04e7640e".to_owned(),
                 repository_id: RepositoryId(fixed_id("rep_")),
@@ -1975,7 +1969,7 @@ mod tests {
             attempt: 0,
             revision: 1,
             dependencies: Vec::new(),
-            stage_run_id: None,
+            work_run_id: None,
             submitted_at: fixed_instant("2026-09-06T00:00:00.000Z"),
             updated_at: fixed_instant("2026-09-06T00:00:00.000Z"),
             cancellation: None,

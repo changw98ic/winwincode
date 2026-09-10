@@ -127,7 +127,6 @@ fn configure(storage: &mut SqliteStorage) {
                 expected_catalog_version: 0,
             },
             &descriptor(),
-            Instant("2026-09-02T00:00:00.000Z".to_owned()),
         )
         .expect("create Provider catalog");
     CredentialReferenceService::new(storage)
@@ -204,7 +203,7 @@ fn open_message(seed: u64) -> ModelOpenMessage {
         session_identity: SessionIdentity {
             codex_thread_id: CodexThreadId(id("cdx", 1)),
             product_session_id: ProductSessionId(id("psn", 1)),
-            stage_run_id: None,
+            work_run_id: None,
             worker_session_id: worker_session_id.clone(),
         },
         worker_session_id,
@@ -350,12 +349,6 @@ impl ProviderGatewayAdmissionPort for AdmissionProbe {
                 idempotent_replay: false,
             },
             route_authority: authority,
-            enterprise_quota_amounts: winwincode_storage::EnterpriseQuotaAmounts {
-                tokens: 100,
-                provider_cost_micros: 10,
-                operations: 1,
-                ..winwincode_storage::EnterpriseQuotaAmounts::default()
-            },
         };
         self.reserved
             .lock()

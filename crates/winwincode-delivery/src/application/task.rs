@@ -55,7 +55,7 @@ pub fn transition_task_status(
 /// # Errors
 ///
 /// Rejects every non-empty task list; task proposals enter only through
-/// [`super::task_breakdown::prepare_task_breakdown_promotion`].
+/// The task graph is supplied by the canonical delivery journal.
 pub fn validate_create_tasks_empty(tasks: &[DeliveryTask]) -> Result<(), CoordinationError> {
     if tasks.is_empty() {
         Ok(())

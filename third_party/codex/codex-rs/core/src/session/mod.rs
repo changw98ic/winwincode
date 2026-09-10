@@ -893,12 +893,14 @@ impl SessionIo {
         thread_settings: ThreadSettingsOverrides,
         trace: Option<W3cTraceContext>,
         turn_id: String,
+        submit_change_batch: bool,
     ) -> CodexResult<TurnInputSubmission> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.submit_with_id(Submission {
             id: turn_id,
             op: Op::RecoverTurn {
                 thread_settings,
+                submit_change_batch,
                 reply: reply_tx,
             },
             trace,

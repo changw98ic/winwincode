@@ -229,7 +229,7 @@ pub fn project_delivery_detail(
 #[cfg(test)]
 mod tests {
     use winwincode_domain::{
-        CodexThreadId, DeliveryTaskId, ExecutionJobId, ProductSessionId, StageRunId,
+        CodexThreadId, DeliveryTaskId, ExecutionJobId, ProductSessionId, StageRunId, WorkRunId,
         WorkerSessionId,
     };
 
@@ -257,8 +257,7 @@ mod tests {
 
         let mut second_binding = first.session_bindings[0].clone();
         second_binding.id = SessionBindingId("binding-verifier-2".into());
-        second_binding.delivery_task_id = Some(DeliveryTaskId("delivery-task-ui".into()));
-        second_binding.stage_run_id = StageRunId("stage-verification-2".into());
+        second_binding.work_run_id = WorkRunId("wrn_01J00000000000000000000001".into());
         second_binding.product_session_id = ProductSessionId("product-session-verifier-2".into());
         second_binding.execution_job_id = ExecutionJobId("execution-job-verifier-2".into());
         second_binding.worker_session_id =
@@ -266,7 +265,9 @@ mod tests {
         second_binding.codex_thread_id = Some(CodexThreadId("codex-thread-verifier-2".into()));
         second_binding.bound_at_millis += 100;
         second_binding = second_binding.with_test_authority("projection-verifier-2", 1);
+        second_binding.execution_profile = Some("verifier".into());
         first.session_bindings.push(second_binding);
+        crate::domain::rebuild_test_work_runs_from_bindings(&mut first);
 
         let first = Delivery::try_from_snapshot(first).expect("first Delivery");
         let mut second = first.clone().into_snapshot();

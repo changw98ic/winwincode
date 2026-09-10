@@ -11,20 +11,19 @@ use std::sync::{Arc, Mutex};
 use winwincode_control_plane::ControlPlaneInstanceRuntimeConfig;
 use winwincode_local::{LocalLauncher, LocalLauncherConfig, LocalRuntimeTrace};
 use winwincode_worker::composition::domain::{
-    CodexThreadId, DeliveryId, ExecutionAckSequence, ExecutionEventId, ExecutionJobId,
+    CodexThreadId, Criterion, CriterionId, ExecutionAckSequence, ExecutionEventId, ExecutionJobId,
     ExecutionMessageId, FencingToken, Instant, LeaseId, ProductSessionId, RepositoryId, RequestId,
-    SchemaVersion, SessionIdentity, Sha256Digest, StageRunId, WorkerId, WorkerInstanceId,
-    WorkerSessionId,
+    Revision, SchemaVersion, SessionIdentity, Sha256Digest, WorkContract, WorkContractId, WorkItem,
+    WorkItemId, WorkItemState, WorkRunId, WorkerId, WorkerInstanceId, WorkerSessionId,
 };
 use winwincode_worker::composition::generated::{
-    ArtifactAckMessage, ArtifactReference, DeliveryStageAcceptanceCriterionInput,
-    DeliveryStageExecutionScope, DeliveryStageExecutionScopeKind, DeliveryStageInput,
-    ExecutionEventCategory, ExecutionEventRecord, ExecutionJob, ExecutionLeaseStamp,
-    ExecutionLimits, ExecutionOutcomeUsage, ExecutionPortMessage, ExecutionScope,
-    ExecutionWorkspace, ExecutionWorkspaceWriteMode, JobDispatchMessage, JobDispatchMessageKind,
-    JobOutcomeAckMessage, JobOutcomeAckMessageKind, JobOutcomeAckMessageStatus, LeaseWriteStatus,
-    RuntimeAckMessage, RuntimeAckMessageKind, RuntimeEventMessage, RuntimeEventMessageKind,
-    WorkerCapabilityFeature, WorkerCapabilitySet, WorkerCapabilitySetPlatform,
+    ArtifactAckMessage, ArtifactReference, ExecutionEventCategory, ExecutionEventRecord,
+    ExecutionJob, ExecutionLeaseStamp, ExecutionLimits, ExecutionOutcomeUsage,
+    ExecutionPortMessage, ExecutionScope, ExecutionWorkspace, ExecutionWorkspaceWriteMode,
+    JobDispatchMessage, JobDispatchMessageKind, JobOutcomeAckMessage, JobOutcomeAckMessageKind,
+    JobOutcomeAckMessageStatus, LeaseWriteStatus, RuntimeAckMessage, RuntimeAckMessageKind,
+    RuntimeEventMessage, RuntimeEventMessageKind, WorkRunExecutionScope, WorkRunExecutionScopeKind,
+    WorkRunInput, WorkerCapabilityFeature, WorkerCapabilitySet, WorkerCapabilitySetPlatform,
     WorkerRegisterMessage, WorkerRegistrationResultMessage, WorkerRegistrationResultMessageKind,
     WorkerRegistrationResultMessageLeaseRecovery, WorkerRegistrationResultMessageStatus,
 };
@@ -112,6 +111,39 @@ fn worker_config() -> WorkerConfig {
 
 fn dispatch() -> JobDispatchMessage {
     let goal = format!("execute without retaining {SECRET}");
+    let criterion_id = CriterionId(id("crt", 'L'));
+    let contract_id = WorkContractId(id("wct", 'L'));
+    let item_id = WorkItemId(id("wit", 'L'));
+    let contract = WorkContract {
+        constraints: Vec::new(),
+        created_at: now(),
+        criteria: vec![Criterion {
+            description: "The local fixture behavior is verified.".to_owned(),
+            id: criterion_id.clone(),
+            required: true,
+            required_evidence_class: "machine".into(),
+            verification_method: Some("Run the local fixture test.".to_owned()),
+        }],
+        id: contract_id.clone(),
+        objective: goal.clone(),
+        protected_scope: Vec::new(),
+        required_human_authority: "none".to_owned(),
+        revision: Revision(1),
+        schema_version: SchemaVersion::WinwincodeV1,
+        scope: vec!["Local fixture source".to_owned()],
+    };
+    let item = WorkItem {
+        criterion_ids: vec![criterion_id],
+        depends_on: Vec::new(),
+        goal: goal.clone(),
+        id: item_id.clone(),
+        revision: Revision(1),
+        schema_version: SchemaVersion::WinwincodeV1,
+        state: WorkItemState::Ready,
+        title: "Local Fixture Delivery".to_owned(),
+        work_contract_id: contract_id.clone(),
+        work_contract_revision: Revision(1),
+    };
     let lease = ExecutionLeaseStamp {
         attempt: 1,
         expires_at: Instant("2032-01-02T03:09:05.000Z".to_owned()),
@@ -134,31 +166,24 @@ fn dispatch() -> JobDispatchMessage {
                 max_runtime_seconds: 180,
             },
             payload_digest: Sha256Digest(format!("sha256:{}", "b".repeat(64))),
-            scope: ExecutionScope::DeliveryStageExecutionScope(DeliveryStageExecutionScope {
-                delivery_id: DeliveryId(id("dlv", 'L')),
-                delivery_task_id: None,
-                kind: DeliveryStageExecutionScopeKind::DeliveryStage,
+            scope: ExecutionScope::WorkRunExecutionScope(WorkRunExecutionScope {
+                attempt: 1,
+                kind: WorkRunExecutionScopeKind::WorkRun,
                 product_session_id: ProductSessionId(id("psn", 'L')),
                 rework_authorization: None,
-                stage_run_id: StageRunId(id("run", 'L')),
+                work_contract_id: contract_id,
+                work_contract_revision: Revision(1),
+                work_item_id: item_id,
+                work_item_revision: Revision(1),
+                work_run_id: WorkRunId(id("wrn", 'L')),
             }),
-            stage_input: Some(DeliveryStageInput {
-                acceptance_criteria: vec![DeliveryStageAcceptanceCriterionInput {
-                    criterion_id: "criterion-local-fixture".to_owned(),
-                    description: "The local fixture behavior is verified.".to_owned(),
-                    required: true,
-                    verification_method: Some("Run the local fixture test.".to_owned()),
-                }],
+            work_input: Some(WorkRunInput {
                 candidate_ref: None,
-                constraints: Vec::new(),
                 delivery_spec_id: "spec-local-fixture".to_owned(),
-                delivery_spec_revision: 1,
-                goal,
-                out_of_scope: Vec::new(),
+                delivery_spec_revision: Revision(1),
                 schema_version: SchemaVersion::WinwincodeV1,
-                scope: vec!["Local fixture source".to_owned()],
-                task: None,
-                title: "Local Fixture Delivery".to_owned(),
+                work_contract: contract,
+                work_item: item,
             }),
             workspace: ExecutionWorkspace {
                 checkout_revision: "HEAD".to_owned(),
@@ -416,10 +441,10 @@ impl CodexCoreAdapter for FixtureCodex {
             .run_key
             .canonical_thread_id()
             .expect("canonical local thread");
-        let (product_session_id, stage_run_id) = match &start.job.scope {
-            ExecutionScope::DeliveryStageExecutionScope(scope) => (
+        let (product_session_id, work_run_id) = match &start.job.scope {
+            ExecutionScope::WorkRunExecutionScope(scope) => (
                 scope.product_session_id.clone(),
-                Some(scope.stage_run_id.clone()),
+                Some(scope.work_run_id.clone()),
             ),
             ExecutionScope::ProductSessionExecutionScope(scope) => {
                 (scope.product_session_id.clone(), None)
@@ -434,8 +459,8 @@ impl CodexCoreAdapter for FixtureCodex {
             session_identity: SessionIdentity {
                 codex_thread_id: thread_id.clone(),
                 product_session_id,
-                stage_run_id,
                 worker_session_id: start.worker_session_id.clone(),
+                work_run_id,
             },
             worker_session_id: start.worker_session_id.clone(),
             codex_thread_id: thread_id.clone(),
@@ -756,7 +781,7 @@ async fn same_process_launcher_starts_runs_and_cleans_up_with_reproducible_secre
     assert_eq!(outcome["jobId"], id("job", 'L'));
     assert_eq!(outcome["leaseId"], id("lse", 'L'));
     assert_eq!(outcome["productSessionId"], id("psn", 'L'));
-    assert_eq!(outcome["stageRunId"], id("run", 'L'));
+    assert_eq!(outcome["workRunId"], id("wrn", 'L'));
     assert_eq!(outcome["codexThreadId"], thread().0);
     assert_eq!(
         first.1,

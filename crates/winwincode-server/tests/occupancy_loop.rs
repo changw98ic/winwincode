@@ -210,7 +210,6 @@ async fn start_server(data_directory: &Path) -> winwincode_server::RunningServer
         authenticator,
         Arc::new(NoopApi),
         None,
-        None,
         Some(exchange),
     )
     .await

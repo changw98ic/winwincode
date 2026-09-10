@@ -23,7 +23,7 @@ use super::{
     ProductSessionId, ProductSessionMutationReceipt, ProductSessionRecord, ProductSessionService,
     ProductSessionServiceError, ProductSessionServiceErrorCode, ProductSessionState,
     PublicEventActor, PublicEventScope, ReceiptScopeKey, RouteWriteStatus, RuntimeRouteAuthority,
-    SessionBindingIdentity, SessionCancellationRequest, SessionCancellationSnapshot, StageRunId,
+    SessionBindingIdentity, SessionCancellationRequest, SessionCancellationSnapshot,
     WorkerCancellationRoute, WorkerPoolId, WorkerSessionId, WorkerSlotAuthority, WorkerSlotRecord,
     WorkerSlotState, binding_mismatch, canonical_id, command_digest, context_digest_fields,
     corrupt, domain_error, inspect_public_output, not_found, product_session_command_context,
@@ -445,7 +445,11 @@ impl PersistedRuntimeRouteAuthority {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct PersistedExecutionCancellationRoutes {
     product_session_id: ProductSessionId,
-    stage_run_id: Option<StageRunId>,
+    work_contract_id: Option<winwincode_domain::WorkContractId>,
+    work_contract_revision: Option<winwincode_domain::Revision>,
+    work_item_id: Option<winwincode_domain::WorkItemId>,
+    work_item_revision: Option<winwincode_domain::Revision>,
+    work_run_id: Option<winwincode_domain::WorkRunId>,
     execution_job_id: ExecutionJobId,
     job_revision: u64,
     worker_authority: Option<PersistedRuntimeRouteAuthority>,
@@ -457,7 +461,11 @@ impl PersistedExecutionCancellationRoutes {
     fn from_domain(routes: &ExecutionCancellationRoutes) -> Self {
         Self {
             product_session_id: routes.job.product_session_id.clone(),
-            stage_run_id: routes.job.stage_run_id.clone(),
+            work_contract_id: routes.job.work_contract_id.clone(),
+            work_contract_revision: routes.job.work_contract_revision.clone(),
+            work_item_id: routes.job.work_item_id.clone(),
+            work_item_revision: routes.job.work_item_revision.clone(),
+            work_run_id: routes.job.work_run_id.clone(),
             execution_job_id: routes.job.execution_job_id.clone(),
             job_revision: routes.job.expected_revision,
             worker_authority: routes
@@ -498,7 +506,11 @@ impl PersistedExecutionCancellationRoutes {
             .zip(self.worker_slot_revision)
             .map(|(authority, expected_revision)| WorkerCancellationRoute {
                 product_session_id: self.product_session_id.clone(),
-                stage_run_id: self.stage_run_id.clone(),
+                work_contract_id: self.work_contract_id.clone(),
+                work_contract_revision: self.work_contract_revision.clone(),
+                work_item_id: self.work_item_id.clone(),
+                work_item_revision: self.work_item_revision.clone(),
+                work_run_id: self.work_run_id.clone(),
                 execution_job_id: self.execution_job_id.clone(),
                 runtime: authority.to_domain(),
                 expected_revision,
@@ -511,7 +523,11 @@ impl PersistedExecutionCancellationRoutes {
                     .as_ref()
                     .map(|authority| ModelStreamCancellationRoute {
                         product_session_id: self.product_session_id.clone(),
-                        stage_run_id: self.stage_run_id.clone(),
+                        work_contract_id: self.work_contract_id.clone(),
+                        work_contract_revision: self.work_contract_revision.clone(),
+                        work_item_id: self.work_item_id.clone(),
+                        work_item_revision: self.work_item_revision.clone(),
+                        work_run_id: self.work_run_id.clone(),
                         execution_job_id: self.execution_job_id.clone(),
                         runtime: authority.to_domain(),
                         model_exchange_id: model_exchange_id.clone(),
@@ -520,7 +536,11 @@ impl PersistedExecutionCancellationRoutes {
         Ok(ExecutionCancellationRoutes {
             job: winwincode_session::JobCancellationRoute {
                 product_session_id: self.product_session_id.clone(),
-                stage_run_id: self.stage_run_id.clone(),
+                work_contract_id: self.work_contract_id.clone(),
+                work_contract_revision: self.work_contract_revision.clone(),
+                work_item_id: self.work_item_id.clone(),
+                work_item_revision: self.work_item_revision.clone(),
+                work_run_id: self.work_run_id.clone(),
                 execution_job_id: self.execution_job_id.clone(),
                 expected_revision: self.job_revision,
             },
@@ -1184,7 +1204,11 @@ impl ProductSessionService<'_> {
         let identity = binding.identity.to_domain()?;
         Ok(vec![ExecutionRoute {
             product_session_id: persisted.session.id().clone(),
-            stage_run_id: identity.stage_run_id().cloned(),
+            work_contract_id: identity.work_contract_id().cloned(),
+            work_contract_revision: identity.work_contract_revision().cloned(),
+            work_item_id: identity.work_item_id().cloned(),
+            work_item_revision: identity.work_item_revision().cloned(),
+            work_run_id: identity.work_run_id().cloned(),
             execution_job_id: binding.slot.authority.job_id.clone(),
             job_revision: current.1.revision,
             runtime: Some(runtime_route(&current.0.authority)),
@@ -1248,7 +1272,11 @@ impl ProductSessionService<'_> {
         }
         Ok(vec![ExecutionRoute {
             product_session_id: persisted.session.id().clone(),
-            stage_run_id: None,
+            work_contract_id: None,
+            work_contract_revision: None,
+            work_item_id: None,
+            work_item_revision: None,
+            work_run_id: None,
             execution_job_id: job.job_id,
             job_revision: job.revision,
             runtime: None,

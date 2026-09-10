@@ -19,12 +19,13 @@ use winwincode_delivery::{
         verdict::test_support::{VerdictFixtureOutcome, verdict_fixture},
     },
     domain::{
-        DELIVERY_SCHEMA_VERSION, Delivery, RepositoryKind, RepositoryRef, StageRun,
+        DELIVERY_SCHEMA_VERSION, Delivery, RepositoryKind, RepositoryRef, SessionBinding,
         candidate::{
             ProductionRuntimeEvent, ProductionRuntimeEventCategory, ProductionRuntimePayload,
             ProductionVerificationRuntime, freeze_delivery_candidate_from_source,
             resolve_production_verdict,
         },
+        verification::VerificationRole,
     },
 };
 use winwincode_domain::{
@@ -58,6 +59,7 @@ fn durable_sources_resolve_one_replay_stable_production_verdict() {
         VerdictFixtureOutcome::Pass,
     );
     let mut snapshot = fixture.delivery.into_snapshot();
+    snapshot.stage_runs.clear();
     snapshot.spec.repository = RepositoryRef {
         schema_version: DELIVERY_SCHEMA_VERSION,
         kind: RepositoryKind::LocalGit,
@@ -78,6 +80,20 @@ fn durable_sources_resolve_one_replay_stable_production_verdict() {
             "wki", seed,
         )));
         binding.attempt = 1;
+        let run = snapshot
+            .work_run_aggregate
+            .runs
+            .iter_mut()
+            .find(|run| run.id == binding.work_run_id)
+            .expect("bound WorkRun");
+        run.execution_job_id = binding.execution_job_id.clone();
+        run.worker_session_id = binding.worker_session_id.clone().expect("worker session");
+        run.codex_thread_id = binding.codex_thread_id.clone();
+        run.lease_id = binding.lease_id.clone().expect("lease");
+        run.fencing_token
+            .clone_from(&binding.fencing_token.as_ref().expect("fence").0);
+        run.worker_id = binding.worker_id.clone().expect("worker");
+        run.worker_instance_id = binding.worker_instance_id.clone().expect("worker instance");
     }
     let delivery = Delivery::try_from_snapshot(snapshot).expect("production Delivery");
     let scope = ReceiptScopeKey::from_encoded(b"repository:project-one".to_vec()).expect("scope");
@@ -90,9 +106,9 @@ fn durable_sources_resolve_one_replay_stable_production_verdict() {
 
     let writer = delivery
         .snapshot()
-        .stage_runs
+        .session_bindings
         .iter()
-        .find(|run| run.role == "executor")
+        .find(|run| run.execution_profile.as_deref() == Some("executor"))
         .expect("writer");
     let writer_source = settled_source(
         &delivery,
@@ -116,9 +132,9 @@ fn durable_sources_resolve_one_replay_stable_production_verdict() {
         .map(|(index, role)| {
             let run = delivery
                 .snapshot()
-                .stage_runs
+                .session_bindings
                 .iter()
-                .find(|run| run.role == role)
+                .find(|run| run.execution_profile.as_deref() == Some(role))
                 .expect("verification run");
             let settled = settled_source(
                 &delivery,
@@ -233,13 +249,18 @@ fn durable_sources_resolve_one_replay_stable_production_verdict() {
 
 fn verification_runtime(
     delivery: &Delivery,
-    run: &StageRun,
+    run: &SessionBinding,
     settled: &SettledSource,
     candidate_ref: &str,
     role: &str,
     evidence_event_override: Option<&str>,
 ) -> ProductionVerificationRuntime {
     ProductionVerificationRuntime::from_durable(
+        match role {
+            "reviewer" => VerificationRole::Reviewer,
+            "verifier" => VerificationRole::Verifier,
+            _ => panic!("unexpected role"),
+        },
         settled.terminal.clone(),
         settled.source.clone(),
         runtime_events(
@@ -260,37 +281,32 @@ fn verification_runtime(
 )]
 fn settled_source(
     delivery: &Delivery,
-    run: &StageRun,
+    run: &SessionBinding,
     candidate_commit: &str,
     scope: &ReceiptScopeKey,
     artifacts: &mut ArtifactStore,
     resolver: &LocalGitSourceResolver,
     seed: u64,
 ) -> SettledSource {
-    let binding = delivery
-        .snapshot()
-        .session_bindings
-        .iter()
-        .find(|binding| binding.stage_run_id == run.id)
-        .expect("run binding");
+    let binding = run;
     let worker_session = binding.worker_session_id.clone().expect("WorkerSession");
     let codex_thread = binding.codex_thread_id.clone().expect("CodexThread");
     let lease_id = binding
         .lease_id
         .clone()
-        .unwrap_or_else(|| winwincode_domain::LeaseId(canonical_id("lse", seed)));
+        .expect("accepted binding authority");
     let fencing_token = binding
         .fencing_token
         .clone()
-        .unwrap_or_else(|| winwincode_domain::FencingToken(seed.to_string()));
+        .expect("accepted binding fence");
     let worker_id = binding
         .worker_id
         .clone()
-        .unwrap_or_else(|| winwincode_domain::WorkerId(canonical_id("wrk", seed)));
+        .expect("accepted binding authority");
     let worker_instance = binding
         .worker_instance_id
         .clone()
-        .unwrap_or_else(|| winwincode_domain::WorkerInstanceId(canonical_id("wki", seed)));
+        .expect("accepted binding authority");
     let provenance = ArtifactProvenance::execution_job(
         binding.execution_job_id.clone(),
         run.attempt,
@@ -307,7 +323,7 @@ fn settled_source(
         .encode()
         .expect("manifest encode");
     let digest = Sha256Digest(format!("sha256:{:x}", Sha256::digest(&manifest)));
-    let finished_at = run.finished_at_millis.expect("finished run");
+    let finished_at = run.bound_at_millis + 9;
     artifacts
         .open_artifact(ArtifactOpen::new(
             scope.clone(),
@@ -378,7 +394,7 @@ fn settled_source(
     let terminal = delivery_terminal_outcome_facts(
         authority,
         terminal_worker_outcome(
-            run.id.clone(),
+            run.work_run_id.clone(),
             binding.execution_job_id.clone(),
             run.attempt,
             lease_id,
@@ -402,7 +418,7 @@ fn settled_source(
 }
 
 fn runtime_events(
-    run: &StageRun,
+    run: &SessionBinding,
     candidate_ref: &str,
     delivery_spec_id: &str,
     delivery_spec_revision: u64,
@@ -410,7 +426,7 @@ fn runtime_events(
     role: &str,
     evidence_event_override: Option<&str>,
 ) -> Vec<ProductionRuntimeEvent> {
-    let finished = run.finished_at_millis.expect("finish");
+    let finished = run.bound_at_millis + 9;
     let source_id = ExecutionEventId(format!("event-{role}-source"));
     let category = if role == "reviewer" {
         ProductionRuntimeEventCategory::Command

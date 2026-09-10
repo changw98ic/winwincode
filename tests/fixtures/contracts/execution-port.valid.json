@@ -107,13 +107,6 @@
         "jobId": "job_00000000000000000000000003",
         "attempt": 1,
         "payloadDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
-        "scope": {
-          "kind": "delivery-stage",
-          "productSessionId": "psn_00000000000000000000000006",
-          "deliveryId": "dlv_00000000000000000000000007",
-          "deliveryTaskId": "dtk_00000000000000000000000008",
-          "stageRunId": "run_00000000000000000000000009"
-        },
         "workspace": {
           "repositoryId": "rep_0000000000000000000000000A",
           "checkoutRevision": "0123456789abcdef",
@@ -121,38 +114,63 @@
         },
         "executionProfile": "executor",
         "goal": "Implement the approved candidate change.",
-        "stageInput": {
-          "schemaVersion": "winwincode/v1",
-          "deliverySpecId": "delivery-spec-fixture",
-          "deliverySpecRevision": 1,
-          "title": "Implement the approved candidate",
-          "goal": "Ship the exact approved candidate change.",
-          "scope": [
-            "Candidate source tree"
-          ],
-          "outOfScope": [],
-          "constraints": [],
-          "acceptanceCriteria": [
-            {
-              "criterionId": "criterion-fixture",
-              "description": "The approved candidate change passes its exact test.",
-              "verificationMethod": "Run the exact candidate test.",
-              "required": true
-            }
-          ],
-          "task": {
-            "taskId": "dtk_00000000000000000000000008",
-            "title": "Implement the candidate",
-            "goal": "Implement the approved candidate change.",
-            "acceptanceCriterionIds": [
-              "criterion-fixture"
-            ]
-          }
-        },
         "limits": {
           "deadlineAt": "2026-08-24T12:10:00.000Z",
           "maxRuntimeSeconds": 600,
           "maxArtifactBytes": 10485760
+        },
+        "scope": {
+          "kind": "work-run",
+          "productSessionId": "psn_00000000000000000000000006",
+          "workContractId": "wct_00000000000000000000000001",
+          "workContractRevision": 1,
+          "workItemId": "wit_00000000000000000000000001",
+          "workItemRevision": 1,
+          "workRunId": "wrn_00000000000000000000000009",
+          "attempt": 1
+        },
+        "workInput": {
+          "deliverySpecId": "spec-fixture",
+          "deliverySpecRevision": 2,
+          "schemaVersion": "winwincode/v1",
+          "workContract": {
+            "constraints": [],
+            "createdAt": "2026-08-24T12:00:00.000Z",
+            "criteria": [
+              {
+                "description": "The approved candidate change passes its exact test.",
+                "id": "crt_00000000000000000000000001",
+                "required": true,
+                "requiredEvidenceClass": "machine",
+                "verificationMethod": "Run the exact candidate test."
+              }
+            ],
+            "id": "wct_00000000000000000000000001",
+            "objective": "Ship the exact approved candidate change.",
+            "protectedScope": [
+              "Candidate source tree"
+            ],
+            "requiredHumanAuthority": "approval",
+            "revision": 1,
+            "schemaVersion": "winwincode/v1",
+            "scope": [
+              "Candidate source tree"
+            ]
+          },
+          "workItem": {
+            "criterionIds": [
+              "crt_00000000000000000000000001"
+            ],
+            "dependsOn": [],
+            "goal": "Ship the exact approved candidate change.",
+            "id": "wit_00000000000000000000000001",
+            "revision": 1,
+            "schemaVersion": "winwincode/v1",
+            "state": "ready",
+            "title": "Implement the approved candidate",
+            "workContractId": "wct_00000000000000000000000001",
+            "workContractRevision": 1
+          }
         }
       },
       "lease": {
@@ -211,9 +229,8 @@
         "productSessionId": "psn_00000000000000000000000006",
         "workerSessionId": "wsn_00000000000000000000000005",
         "codexThreadId": "cdx_0000000000000000000000000G",
-        "stageRunId": "run_00000000000000000000000009"
+        "workRunId": "wrn_00000000000000000000000009"
       },
-      "stageRunId": "run_00000000000000000000000009",
       "workerId": "wrk_00000000000000000000000001",
       "sourceIdentity": {
         "kind": "execution-worker",
@@ -224,7 +241,8 @@
       },
       "leaseId": "lse_00000000000000000000000004",
       "attempt": 1,
-      "fencingToken": "42"
+      "fencingToken": "42",
+      "workRunId": "wrn_00000000000000000000000009"
     },
     {
       "kind": "lease.renew",
@@ -272,7 +290,7 @@
         "productSessionId": "psn_00000000000000000000000006",
         "workerSessionId": "wsn_00000000000000000000000005",
         "codexThreadId": "cdx_0000000000000000000000000G",
-        "stageRunId": "run_00000000000000000000000009"
+        "workRunId": "wrn_00000000000000000000000009"
       }
     },
     {
@@ -297,7 +315,7 @@
         "productSessionId": "psn_00000000000000000000000006",
         "workerSessionId": "wsn_00000000000000000000000005",
         "codexThreadId": "cdx_0000000000000000000000000G",
-        "stageRunId": "run_00000000000000000000000009"
+        "workRunId": "wrn_00000000000000000000000009"
       }
     },
     {
@@ -323,7 +341,7 @@
         "productSessionId": "psn_00000000000000000000000006",
         "workerSessionId": "wsn_00000000000000000000000005",
         "codexThreadId": "cdx_0000000000000000000000000G",
-        "stageRunId": "run_00000000000000000000000009"
+        "workRunId": "wrn_00000000000000000000000009"
       }
     },
     {
@@ -355,7 +373,7 @@
         "productSessionId": "psn_00000000000000000000000006",
         "workerSessionId": "wsn_00000000000000000000000005",
         "codexThreadId": "cdx_0000000000000000000000000G",
-        "stageRunId": "run_00000000000000000000000009"
+        "workRunId": "wrn_00000000000000000000000009"
       }
     },
     {
@@ -386,7 +404,7 @@
         "productSessionId": "psn_00000000000000000000000006",
         "workerSessionId": "wsn_00000000000000000000000005",
         "codexThreadId": "cdx_0000000000000000000000000G",
-        "stageRunId": "run_00000000000000000000000009"
+        "workRunId": "wrn_00000000000000000000000009"
       }
     },
     {
@@ -412,7 +430,7 @@
         "productSessionId": "psn_00000000000000000000000006",
         "workerSessionId": "wsn_00000000000000000000000005",
         "codexThreadId": "cdx_0000000000000000000000000G",
-        "stageRunId": "run_00000000000000000000000009"
+        "workRunId": "wrn_00000000000000000000000009"
       }
     },
     {
@@ -446,7 +464,7 @@
         "productSessionId": "psn_00000000000000000000000006",
         "workerSessionId": "wsn_00000000000000000000000005",
         "codexThreadId": "cdx_0000000000000000000000000G",
-        "stageRunId": "run_00000000000000000000000009"
+        "workRunId": "wrn_00000000000000000000000009"
       }
     },
     {
@@ -477,7 +495,7 @@
         "productSessionId": "psn_00000000000000000000000006",
         "workerSessionId": "wsn_00000000000000000000000005",
         "codexThreadId": "cdx_0000000000000000000000000G",
-        "stageRunId": "run_00000000000000000000000009"
+        "workRunId": "wrn_00000000000000000000000009"
       }
     },
     {
@@ -503,7 +521,7 @@
         "productSessionId": "psn_00000000000000000000000006",
         "workerSessionId": "wsn_00000000000000000000000005",
         "codexThreadId": "cdx_0000000000000000000000000G",
-        "stageRunId": "run_00000000000000000000000009"
+        "workRunId": "wrn_00000000000000000000000009"
       }
     },
     {
@@ -539,7 +557,7 @@
         "productSessionId": "psn_00000000000000000000000006",
         "workerSessionId": "wsn_00000000000000000000000005",
         "codexThreadId": "cdx_0000000000000000000000000G",
-        "stageRunId": "run_00000000000000000000000009"
+        "workRunId": "wrn_00000000000000000000000009"
       }
     },
     {
@@ -569,7 +587,7 @@
         "productSessionId": "psn_00000000000000000000000006",
         "workerSessionId": "wsn_00000000000000000000000005",
         "codexThreadId": "cdx_0000000000000000000000000G",
-        "stageRunId": "run_00000000000000000000000009"
+        "workRunId": "wrn_00000000000000000000000009"
       }
     },
     {
@@ -592,14 +610,26 @@
       "approvalId": "apr_0000000000000000000000000F",
       "action": {
         "category": "shell",
-        "summary": "Run the approved test command."
+        "summary": "Run the approved test command.",
+        "sanitizedDetail": {
+          "kind": "available",
+          "operation": "execute",
+          "targetSummaries": [
+            "program:pnpm;argument_count:1"
+          ],
+          "targetCount": 1,
+          "workingDirectory": "workspace",
+          "riskLevel": "high",
+          "reasonCode": "sandbox_escalation",
+          "requestSha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
       },
       "expiresAt": "2026-08-24T12:10:00.000Z",
       "sessionIdentity": {
         "productSessionId": "psn_00000000000000000000000006",
         "workerSessionId": "wsn_00000000000000000000000005",
         "codexThreadId": "cdx_0000000000000000000000000G",
-        "stageRunId": "run_00000000000000000000000009"
+        "workRunId": "wrn_00000000000000000000000009"
       }
     },
     {
@@ -626,7 +656,7 @@
         "productSessionId": "psn_00000000000000000000000006",
         "workerSessionId": "wsn_00000000000000000000000005",
         "codexThreadId": "cdx_0000000000000000000000000G",
-        "stageRunId": "run_00000000000000000000000009"
+        "workRunId": "wrn_00000000000000000000000009"
       }
     },
     {
@@ -652,7 +682,7 @@
         "productSessionId": "psn_00000000000000000000000006",
         "workerSessionId": "wsn_00000000000000000000000005",
         "codexThreadId": "cdx_0000000000000000000000000G",
-        "stageRunId": "run_00000000000000000000000009"
+        "workRunId": "wrn_00000000000000000000000009"
       }
     },
     {
@@ -677,7 +707,7 @@
         "productSessionId": "psn_00000000000000000000000006",
         "workerSessionId": "wsn_00000000000000000000000005",
         "codexThreadId": "cdx_0000000000000000000000000G",
-        "stageRunId": "run_00000000000000000000000009"
+        "workRunId": "wrn_00000000000000000000000009"
       }
     },
     {
@@ -702,7 +732,7 @@
         "productSessionId": "psn_00000000000000000000000006",
         "workerSessionId": "wsn_00000000000000000000000005",
         "codexThreadId": "cdx_0000000000000000000000000G",
-        "stageRunId": "run_00000000000000000000000009"
+        "workRunId": "wrn_00000000000000000000000009"
       },
       "policyKind": "tool",
       "resource": "action:shell:cwd:.",
@@ -733,7 +763,7 @@
         "productSessionId": "psn_00000000000000000000000006",
         "workerSessionId": "wsn_00000000000000000000000005",
         "codexThreadId": "cdx_0000000000000000000000000G",
-        "stageRunId": "run_00000000000000000000000009"
+        "workRunId": "wrn_00000000000000000000000009"
       },
       "scope": {
         "kind": "repository",
@@ -802,7 +832,7 @@
         "productSessionId": "psn_00000000000000000000000006",
         "workerSessionId": "wsn_00000000000000000000000005",
         "codexThreadId": "cdx_0000000000000000000000000G",
-        "stageRunId": "run_00000000000000000000000009"
+        "workRunId": "wrn_00000000000000000000000009"
       }
     },
     {
@@ -826,7 +856,7 @@
         "productSessionId": "psn_00000000000000000000000006",
         "workerSessionId": "wsn_00000000000000000000000005",
         "codexThreadId": "cdx_0000000000000000000000000G",
-        "stageRunId": "run_00000000000000000000000009"
+        "workRunId": "wrn_00000000000000000000000009"
       }
     }
   ],
@@ -836,11 +866,14 @@
       "productSessionId": "psn_00000000000000000000000006"
     },
     {
-      "kind": "delivery-stage",
+      "kind": "work-run",
       "productSessionId": "psn_00000000000000000000000006",
-      "deliveryId": "dlv_00000000000000000000000007",
-      "deliveryTaskId": "dtk_00000000000000000000000008",
-      "stageRunId": "run_00000000000000000000000009"
+      "workContractId": "wct_00000000000000000000000001",
+      "workContractRevision": 1,
+      "workItemId": "wit_00000000000000000000000001",
+      "workItemRevision": 1,
+      "workRunId": "wrn_00000000000000000000000009",
+      "attempt": 1
     }
   ]
 }

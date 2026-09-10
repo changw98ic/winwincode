@@ -20,12 +20,16 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use winwincode_client_port::domain::{
     ApplyResult, ApplyStrategy, ClientArchitecture, ClientCapacityReport, ClientPlatformTarget,
-    LocalCandidateState,
+    LocalApplyReceipt, LocalCandidateState,
 };
 use winwincode_client_port::messages::{
     ClientCandidateApplyResultPayload, ClientToServerEnvelope, ClientToServerMessage,
 };
-use winwincode_device_client::apply_engine::{CandidateApplyRequest, apply_candidate_to_branch};
+use winwincode_device_client::apply_engine::{
+    CandidateApplyRequest, CandidateIntegrationOutcome, CandidateIntegrationRequest,
+    RecoveryCommandDirectory, apply_candidate_to_branch, candidate_recovery_guidance,
+    integrate_candidates_for_verification,
+};
 use winwincode_device_client::{
     CandidateApplyErrorKind, CandidateRetention, DaemonConfig, DeviceDaemon, DeviceIdentitySeed,
     DeviceStore, ExchangeTransport, ExchangeTransportError, FencingRejection, IdentityRecord,
@@ -431,7 +435,6 @@ fn fast_forward_applies_the_candidate_commit_to_the_target_branch() {
     assert_eq!(receipt.conflict_artifact_ref, None);
     assert_eq!(receipt.revision, 1);
     assert!(receipt.local_apply_receipt_id.starts_with("lar_"));
-
     // The target branch really moved; the user's checkout did not.
     assert_eq!(git(&repo, &["rev-parse", "main"]), candidate);
     user_tree_is_untouched(&repo, &workspace_head, &workspace_content);
@@ -486,6 +489,129 @@ fn fast_forward_applies_the_candidate_commit_to_the_target_branch() {
         );
     }
     store.close().expect("store should close");
+    cleanup(&root);
+    cleanup(&integration_root);
+    cleanup(&repo);
+}
+
+#[test]
+fn applied_receipts_produce_reset_free_reverse_candidate_guidance() {
+    let expected_head = "a".repeat(40);
+    let receipt = LocalApplyReceipt {
+        local_apply_receipt_id: "lar_01J2RECOVERY".into(),
+        candidate_ref: format!("refs/winwincode/candidates/{}", "b".repeat(40)),
+        repository_binding_id: BINDING.into(),
+        target_branch: "main".into(),
+        expected_head: expected_head.clone(),
+        strategy: ApplyStrategy::Merge,
+        result: ApplyResult::Applied,
+        resulting_commit: Some("c".repeat(40)),
+        conflict_artifact_ref: None,
+        created_at: STAMP.into(),
+        revision: 1,
+    };
+    let recovery = candidate_recovery_guidance(&receipt)
+        .expect("the applied receipt is valid")
+        .expect("an applied receipt has recovery guidance");
+    assert_eq!(
+        recovery.recovery_branch,
+        "winwincode/recovery/lar_01j2recovery"
+    );
+    assert_eq!(recovery.commands.len(), 4);
+    assert_eq!(
+        recovery.commands[0].directory,
+        RecoveryCommandDirectory::Repository
+    );
+    assert_eq!(
+        recovery.commands[2].arguments,
+        ["read-tree", "--reset", "-u", expected_head.as_str()]
+    );
+    assert!(
+        recovery
+            .commands
+            .iter()
+            .flat_map(|command| &command.arguments)
+            .all(|argument| argument != "--hard" && argument != "--force"),
+        "recovery creates a reverse commit and never rewrites history"
+    );
+}
+
+#[test]
+fn peer_candidates_combine_into_a_stable_ref_that_requires_fresh_verification() {
+    let (repo, base) = init_repository("peer-integration");
+    let integration_root = temporary_directory("peer-integration-root");
+
+    fs::write(repo.join("peer-a.txt"), "peer A\n").expect("peer A file");
+    let candidate_a = commit_everything(&repo, "peer A candidate");
+    write_candidate_ref(&repo, &candidate_a);
+    git(&repo, &["reset", "-q", "--hard", &base]);
+    fs::write(repo.join("peer-b.txt"), "peer B\n").expect("peer B file");
+    let candidate_b = commit_everything(&repo, "peer B candidate");
+    write_candidate_ref(&repo, &candidate_b);
+    git(&repo, &["reset", "-q", "--hard", &base]);
+    let workspace_content = fs::read_to_string(repo.join("file.txt")).expect("workspace file");
+
+    let root = temporary_directory("peer-integration-store");
+    let mut daemon = started_daemon("peer-integration", &root);
+    bind(daemon.store_mut(), &repo);
+    retain_candidate(daemon.store_mut(), &candidate_a);
+    retain_candidate(daemon.store_mut(), &candidate_b);
+
+    let outcome = integrate_candidates_for_verification(
+        &mut daemon,
+        &CandidateIntegrationRequest {
+            repository_binding_id: BINDING.to_owned(),
+            source_candidate_refs: vec![
+                format!("refs/winwincode/candidates/{candidate_a}"),
+                format!("refs/winwincode/candidates/{candidate_b}"),
+            ],
+            expected_head: base.clone(),
+            occupancy_lease_id: LEASE.to_owned(),
+            occupancy_fencing_token: TOKEN,
+        },
+        &integration_root,
+    )
+    .expect("the independent peer changes should combine");
+    let CandidateIntegrationOutcome::Prepared(prepared) = outcome else {
+        panic!("independent peer candidates must not conflict")
+    };
+    assert!(prepared.requires_integration_verification);
+    assert!(!prepared.task_level_verdicts_authorize_delivery);
+    assert_eq!(
+        git(&repo, &["rev-parse", &prepared.integration_ref]),
+        prepared.integration_commit,
+        "the combined result remains checkoutable after worktree cleanup"
+    );
+    assert_eq!(
+        git(
+            &repo,
+            &[
+                "show",
+                &format!("{}:peer-a.txt", prepared.integration_commit)
+            ]
+        ),
+        "peer A"
+    );
+    assert_eq!(
+        git(
+            &repo,
+            &[
+                "show",
+                &format!("{}:peer-b.txt", prepared.integration_commit)
+            ]
+        ),
+        "peer B"
+    );
+    assert!(prepared.integration_digest.starts_with("sha256:"));
+    assert_eq!(prepared.integration_digest.len(), 71);
+    user_tree_is_untouched(&repo, &base, &workspace_content);
+    assert!(
+        candidate_local_ref(daemon.store_mut(), &prepared.integration_commit)
+            .expect("registry read")
+            .is_none(),
+        "the combined result cannot enter the applyable registry before verification"
+    );
+
     cleanup(&root);
     cleanup(&integration_root);
     cleanup(&repo);

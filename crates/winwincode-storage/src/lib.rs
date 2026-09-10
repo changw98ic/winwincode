@@ -17,11 +17,6 @@ mod client_registry;
 mod control_plane_instances;
 mod device_execution_binding;
 mod device_scheduler;
-mod enterprise_policy;
-mod enterprise_policy_evaluation;
-mod enterprise_quota;
-mod enterprise_usage;
-mod enterprise_worker_placement;
 mod execution_admission;
 mod execution_queue;
 mod execution_registry;
@@ -96,50 +91,6 @@ pub use device_scheduler::{
     DeviceSchedulerReservationRequest, DeviceSchedulerReservationState,
     DeviceSchedulerReserveOutcome, DeviceSchedulerStoreError, DeviceSchedulerStoreErrorKind,
 };
-pub use enterprise_policy::{
-    EnterprisePolicyActor, EnterprisePolicyChildOverrideMode, EnterprisePolicyCursor,
-    EnterprisePolicyDefinition, EnterprisePolicyEffect, EnterprisePolicyError,
-    EnterprisePolicyErrorKind, EnterprisePolicyFilter, EnterprisePolicyInheritanceMode,
-    EnterprisePolicyKind, EnterprisePolicyLedger, EnterprisePolicyMode, EnterprisePolicyPage,
-    EnterprisePolicyRule, EnterprisePolicyScope, EnterprisePolicyState, EnterprisePolicyVersion,
-    EnterprisePolicyVersionReference, EnterprisePolicyVersionSource, EnterprisePolicyWrite,
-    EnterprisePolicyWriteReceipt,
-};
-pub use enterprise_policy_evaluation::{
-    EnterprisePolicyEvaluation, EnterprisePolicyEvaluationAudit,
-    EnterprisePolicyEvaluationAuditCursor, EnterprisePolicyEvaluationAuditPage,
-    EnterprisePolicyEvaluationCommand, EnterprisePolicyEvaluationError,
-    EnterprisePolicyEvaluationErrorKind, EnterprisePolicyEvaluationInput,
-    EnterprisePolicyEvaluationLedger, EnterprisePolicyEvaluationOutcome,
-    EnterprisePolicyEvaluationReason, EnterprisePolicyEvaluationReceipt,
-    EnterprisePolicyEvaluationRequest, EnterprisePolicyExceptionDecision,
-    EnterprisePolicyExceptionDecisionCommand, EnterprisePolicyExceptionId,
-    EnterprisePolicyExceptionReceipt, EnterprisePolicyExceptionReference,
-    EnterprisePolicyExceptionRequest, EnterprisePolicyExceptionState,
-    EnterprisePolicyExceptionVersion,
-};
-pub use enterprise_quota::{
-    EnterpriseQuotaAmounts, EnterpriseQuotaBoundary, EnterpriseQuotaDecision,
-    EnterpriseQuotaDenial, EnterpriseQuotaDimension, EnterpriseQuotaError,
-    EnterpriseQuotaErrorKind, EnterpriseQuotaLedger, EnterpriseQuotaLimits, EnterpriseQuotaPolicy,
-    EnterpriseQuotaPolicyReceipt, EnterpriseQuotaPolicySeal, EnterpriseQuotaRelease,
-    EnterpriseQuotaReleaseReason, EnterpriseQuotaReservationReceipt,
-    EnterpriseQuotaReservationRecord, EnterpriseQuotaReservationRequest,
-    EnterpriseQuotaReservationState, EnterpriseQuotaSettlement, EnterpriseQuotaSourceSeal,
-    EnterpriseQuotaTerminal,
-};
-pub use enterprise_usage::{
-    EnterpriseUsageAttribution, EnterpriseUsageCursor, EnterpriseUsageEntry, EnterpriseUsageError,
-    EnterpriseUsageErrorKind, EnterpriseUsageFilter, EnterpriseUsageLedger, EnterpriseUsageMeasure,
-    EnterpriseUsagePage, EnterpriseUsageReceipt, EnterpriseUsageSource, EnterpriseUsageSourceKind,
-    EnterpriseUsageTotals, SettledEnterpriseUsage,
-};
-pub use enterprise_worker_placement::{
-    EnterpriseWorkerLeaseClaim, EnterpriseWorkerPlacementCandidate,
-    EnterpriseWorkerPlacementDecision, EnterpriseWorkerPlacementRequest,
-    EnterpriseWorkerPlacementSelection, EnterpriseWorkerPoolProfile, EnterpriseWorkerSecurityTier,
-    claim_enterprise_worker_selection, place_enterprise_worker_batch,
-};
 pub use execution_admission::{
     ExecutionAdmission, ExecutionAdmissionBoundary, ExecutionAdmissionError,
     ExecutionAdmissionErrorCode, ExecutionAdmissionLimits, ExecutionAdmissionPolicy,
@@ -157,11 +108,12 @@ pub use execution_queue::{
 pub use execution_registry::{
     ActiveLeaseSummary, AuthenticatedWorkerPlacement, DispatchResultError, DispatchResultErrorCode,
     DispatchResultReceipt, DispatchResultRequest, DispatchResultStatus, ExecutionDispatchAuthority,
-    ExecutionLeaseClaim, ExecutionLeasePlacement, ExecutionLeaseReceipt, ExecutionLeaseRecord,
-    ExecutionLeaseRenewal, ExecutionLeaseTerminalOutcome, ExecutionLeaseTerminalRequest,
-    ExecutionRegistry, LeaseRecovery, LeaseWriteStatus, WorkerHeartbeatReceipt,
-    WorkerHeartbeatRequest, WorkerManagementCommand, WorkerManagementReceipt, WorkerRecord,
-    WorkerRegistrationReceipt, WorkerRegistrationRequest, WorkerRegistrationStatus,
+    ExecutionDispatchWorkRunProof, ExecutionLeaseClaim, ExecutionLeasePlacement,
+    ExecutionLeaseReceipt, ExecutionLeaseRecord, ExecutionLeaseRenewal,
+    ExecutionLeaseTerminalOutcome, ExecutionLeaseTerminalRequest, ExecutionRegistry, LeaseRecovery,
+    LeaseWriteStatus, WorkerHeartbeatReceipt, WorkerHeartbeatRequest, WorkerManagementCommand,
+    WorkerManagementReceipt, WorkerRecord, WorkerRegistrationReceipt, WorkerRegistrationRequest,
+    WorkerRegistrationStatus,
 };
 pub use execution_scope_replacement::ExecutionScopeReplacementAuthority;
 pub use git_candidate_retention::{
@@ -266,7 +218,7 @@ use sha2::{Digest, Sha256};
 use winwincode_domain::{
     CodexThreadId, ControlPlaneEventId, DeliveryId, ExecutionJobId, Instant, LeaseId,
     OrganizationId, ProductSessionId, ProjectId, RepositoryId, RequestId, ServiceAccountId,
-    SessionIdentity, Sha256Digest, StageRunId, SystemActorId, UserId, WorkerId, WorkerSessionId,
+    SessionIdentity, Sha256Digest, SystemActorId, UserId, WorkRunId, WorkerId, WorkerSessionId,
     WorkspaceId, is_canonical_delivery_id,
 };
 
@@ -551,8 +503,8 @@ fn validate_public_source(source: &PublicEventSource) -> Result<(), StorageError
                 "psn_",
                 "source productSessionId",
             )?;
-            if let Some(stage_run_id) = &session_identity.stage_run_id {
-                require_canonical_public_id(&stage_run_id.0, "run_", "source stageRunId")?;
+            if let Some(work_run_id) = &session_identity.work_run_id {
+                require_canonical_public_id(&work_run_id.0, "wrn_", "source workRunId")?;
             }
         }
     }
@@ -2161,9 +2113,9 @@ pub trait ProductStateStorage: Send {
     /// # Errors
     ///
     /// Returns storage corruption or adapter failures.
-    fn load_active_execution_job_record_for_stage_run(
+    fn load_active_execution_job_record_for_work_run(
         &self,
-        _stage_run_id: &StageRunId,
+        _work_run_id: &WorkRunId,
     ) -> Result<Option<ExecutionJobRecord>, StorageError> {
         Ok(None)
     }
@@ -2671,14 +2623,11 @@ impl ProductStateStorage for SqliteStorage {
         repository_scheduler::load_execution_job_by_id(self.connection()?, job_id)
     }
 
-    fn load_active_execution_job_record_for_stage_run(
+    fn load_active_execution_job_record_for_work_run(
         &self,
-        stage_run_id: &StageRunId,
+        work_run_id: &WorkRunId,
     ) -> Result<Option<ExecutionJobRecord>, StorageError> {
-        repository_scheduler::load_active_execution_job_by_stage_run(
-            self.connection()?,
-            stage_run_id,
-        )
+        repository_scheduler::load_active_execution_job_by_work_run(self.connection()?, work_run_id)
     }
 
     fn load_execution_scope_replacement_authority(

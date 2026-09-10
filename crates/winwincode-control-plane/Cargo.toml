@@ -18,6 +18,7 @@ test-support = ["winwincode-publication/test-support"]
 aes-gcm = "=0.10.3"
 base64.workspace = true
 getrandom.workspace = true
+jiff.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -60,14 +61,6 @@ required-features = ["test-support"]
 
 [[test]]
 name = "publication_production"
-required-features = ["test-support"]
-
-[[test]]
-name = "publication_enterprise_usage"
-required-features = ["test-support"]
-
-[[test]]
-name = "publication_enterprise_quota"
 required-features = ["test-support"]
 
 [[test]]

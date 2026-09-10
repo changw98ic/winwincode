@@ -9,6 +9,7 @@
 pub mod action_enforcement;
 pub mod action_gateway;
 pub mod action_normalizer;
+pub mod agent_config;
 pub mod capability_adapter;
 pub mod change_batch_identity;
 pub mod change_batch_progress;
@@ -23,6 +24,7 @@ pub mod performance_comparison;
 pub mod probe_result_normalizer;
 pub mod repair_loop_context;
 pub mod replay;
+pub mod repository_rule_pack;
 pub mod runtime_replay;
 pub mod runtime_trace_outbox;
 pub mod transport;

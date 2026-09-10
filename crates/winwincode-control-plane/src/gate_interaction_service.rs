@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use winwincode_domain::{
     ApprovalId, AttentionItemId, ControlPlaneEventId, Instant, RequestId, ServiceAccountId,
-    Sha256Digest, StageRunId, SystemActorId, UserId,
+    Sha256Digest, SystemActorId, UserId,
 };
 use winwincode_execution_port::action_gateway::GateDecision;
 use winwincode_session::{
@@ -179,7 +179,11 @@ pub struct GateInteractionAuthority {
     pub execution_scope: ExecutionQueueScope,
     pub worker_pool_id: WorkerPoolId,
     pub product_session_revision: u64,
-    pub stage_run_id: Option<StageRunId>,
+    pub work_contract_id: Option<winwincode_domain::WorkContractId>,
+    pub work_contract_revision: Option<winwincode_domain::Revision>,
+    pub work_item_id: Option<winwincode_domain::WorkItemId>,
+    pub work_item_revision: Option<winwincode_domain::Revision>,
+    pub work_run_id: Option<winwincode_domain::WorkRunId>,
     pub job_revision: u64,
     pub worker_slot_revision: u64,
     pub runtime: WorkerSlotAuthority,
@@ -212,7 +216,11 @@ impl GateInteractionAuthority {
             execution_scope: source.execution_scope.clone(),
             worker_pool_id: source.worker_pool_id.clone(),
             product_session_revision: source.product_session_revision,
-            stage_run_id: source.stage_run_id.clone(),
+            work_contract_id: source.work_contract_id.clone(),
+            work_contract_revision: source.work_contract_revision.clone(),
+            work_item_id: source.work_item_id.clone(),
+            work_item_revision: source.work_item_revision.clone(),
+            work_run_id: source.work_run_id.clone(),
             job_revision: source.job_revision,
             worker_slot_revision: source.worker_slot_revision,
             runtime: WorkerSlotAuthority {
@@ -921,7 +929,11 @@ fn require_product_session(
         let binding = durable.binding();
         binding.product_session_id() == &authority.execution_scope.product_session_id
             && binding.execution_job_id() == &authority.runtime.job_id
-            && binding.stage_run_id() == authority.stage_run_id.as_ref()
+            && binding.work_contract_id() == authority.work_contract_id.as_ref()
+            && binding.work_contract_revision() == authority.work_contract_revision.as_ref()
+            && binding.work_item_id() == authority.work_item_id.as_ref()
+            && binding.work_item_revision() == authority.work_item_revision.as_ref()
+            && binding.work_run_id() == authority.work_run_id.as_ref()
             && binding.delivery_id() == authority.execution_scope.delivery_id.as_ref()
             && binding.worker_session_id() == Some(&authority.runtime.worker_session_id)
             && binding.codex_thread_id() == Some(&authority.runtime.codex_thread_id)
@@ -929,7 +941,7 @@ fn require_product_session(
     });
     if !exact_binding {
         return Err(authority_mismatch(
-            "ProductSession has no exact StageRun, Job, WorkerSession, or CodexThread binding",
+            "ProductSession has no exact WorkRun, Job, WorkerSession, or CodexThread binding",
         ));
     }
     Ok(())
@@ -1086,7 +1098,11 @@ fn to_binding(authority: &GateInteractionAuthority) -> DecisionRouteBinding {
     DecisionRouteBinding {
         execution: ExecutionRoute {
             product_session_id: authority.execution_scope.product_session_id.clone(),
-            stage_run_id: authority.stage_run_id.clone(),
+            work_contract_id: authority.work_contract_id.clone(),
+            work_contract_revision: authority.work_contract_revision.clone(),
+            work_item_id: authority.work_item_id.clone(),
+            work_item_revision: authority.work_item_revision.clone(),
+            work_run_id: authority.work_run_id.clone(),
             execution_job_id: authority.runtime.job_id.clone(),
             job_revision: authority.job_revision,
             runtime: Some(RuntimeRouteAuthority {

@@ -9,12 +9,7 @@ composition crate.
 Binding values are validated domain facts, not wire DTOs. The Control Plane
 acceptance adapter joins a generated `session.binding` message to its one
 scheduler-owned sealed lease and then creates the canonical binding values.
-Lease authority is never created or restored in this crate.
-
-Legacy Delivery snapshots enter through the single
-`migration::migrate_legacy_delivery_json` conversion. The
-`SqliteSessionIdentityMigration` adapter durably records its source marker,
-canonical snapshot, and consumed marker in one transaction, so a restart reads
-the first result instead of applying the old source again.
+Lease authority is never created or restored in this crate. Storage adapters
+and old snapshot conversion are outside this domain crate.
 
 Project-owned code is licensed under Apache-2.0.

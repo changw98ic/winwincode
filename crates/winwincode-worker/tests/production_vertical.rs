@@ -24,7 +24,7 @@ use winwincode_api::generated::{
 use winwincode_codex::CodexCoreAdapter as _;
 use winwincode_control_plane::delivery_execution::{
     DeliveryExecutionConfig, DeliveryExecutionPortError, ExecutionJobDispatcher,
-    PendingDeliveryExecution, prepare_delivery_advance,
+    PendingDeliveryExecution, prepare_workrun_advance,
 };
 use winwincode_control_plane::{
     ControlPlane, ControlPlaneConfig, CreateProductSessionCommand, CredentialReferenceService,
@@ -43,21 +43,18 @@ use winwincode_control_plane::{
     product_session_command_context,
 };
 use winwincode_delivery::{
-    application::stage::{AdvanceStageInput, NewStageIdentities, advance},
-    domain::{
-        DELIVERY_SCHEMA_VERSION, Delivery, DeliveryStage, DeliveryStatus, DeliveryTask,
-        DeliveryTaskStatus, SessionBindingId, StageRun, StageRunActorType, StageRunStatus,
-    },
+    application::stage::{NewStageIdentities, StageAdvanceEffect, StageAdvanceResult},
+    domain::{Delivery, DeliveryStatus, SessionBindingId},
     store::{
         AtomicPublication, CreateDelivery, DeliveryCommand, DeliveryCommandPort,
         DeliveryJournalPort, DeliveryStore, JournalBackendError, LoadedDeliveryJournal,
     },
 };
 use winwincode_domain::{
-    ControlPlaneEventId, CredentialReferenceId, DeliveryId, DeliveryTaskId, ExecutionJobId,
-    ExecutionMessageId, ExecutionSequence, FencingToken, Instant, InteractiveInputMode,
-    InteractiveInputValue, LeaseId, OrganizationId, ProductSessionId, ProjectId, RepositoryId,
-    RequestId, Revision, SchemaVersion, Sha256Digest, StageRunId, UserId, WorkerId,
+    ControlPlaneEventId, CredentialReferenceId, DeliveryId, ExecutionJobId, ExecutionMessageId,
+    ExecutionSequence, FencingToken, Instant, InteractiveInputMode, InteractiveInputValue, LeaseId,
+    OrganizationId, ProductSessionId, ProjectId, RepositoryId, RequestId, Revision, SchemaVersion,
+    Sha256Digest, StageRunId, UserId, WorkItemState, WorkRunId, WorkRunState, WorkerId,
     WorkerInstanceId, WorkspaceId,
 };
 use winwincode_domain::{RepositoryScope, RepositoryScopeKind, UserActor, UserActorKind};
@@ -65,18 +62,18 @@ use winwincode_execution_port::{
     action_enforcement::{ActionEnforcementIssuer, ActionEnforcementSigningKey},
     generated::{
         ActionEnforcementDecision, ActionEnforcementReceiptMessage,
-        ActionEnforcementReceiptMessageKind, ApprovalDecisionMessage,
-        ApprovalDecisionMessageDecision, ApprovalDecisionMessageKind, ApprovalDecisionMessageScope,
-        ArtifactAckMessage, ArtifactAckMessageKind, ArtifactKind, ArtifactReference,
-        ChangeBatchProposalEvent, ExecutionEventCategory, ExecutionJob, ExecutionLeaseStamp,
-        ExecutionLimits, ExecutionOutcomeStatus, ExecutionPortErrorCode, ExecutionPortMessage,
-        ExecutionScope, ExecutionWorkspace, ExecutionWorkspaceWriteMode, InputRequestMessage,
-        InputResponseMessage, InputResponseMessageKind, InputResponseMessageStatus,
-        JobCancelMessage, JobCancelMessageKind, JobCancelMessageReason, JobDispatchMessage,
-        JobDispatchMessageKind, JobDispatchResultMessageStatus, LeaseWriteStatus,
-        ModelChunkMessage, ModelChunkMessageKind, ModelGatewayRoute, ModelOpenMessage,
-        RuntimeEventMessage, WorkerCapabilityFeature, WorkerCapabilitySet,
-        WorkerCapabilitySetPlatform, WorkerRegistrationResultMessage,
+        ActionEnforcementReceiptMessageKind, ApprovalActionOperation, ApprovalActionReasonCode,
+        ApprovalActionRiskLevel, ApprovalDecisionMessage, ApprovalDecisionMessageDecision,
+        ApprovalDecisionMessageKind, ApprovalDecisionMessageScope, ArtifactAckMessage,
+        ArtifactAckMessageKind, ArtifactKind, ArtifactReference, ChangeBatchProposalEvent,
+        ExecutionEventCategory, ExecutionJob, ExecutionLeaseStamp, ExecutionLimits,
+        ExecutionOutcomeStatus, ExecutionPortErrorCode, ExecutionPortMessage, ExecutionScope,
+        ExecutionWorkspace, ExecutionWorkspaceWriteMode, InputRequestMessage, InputResponseMessage,
+        InputResponseMessageKind, InputResponseMessageStatus, JobCancelMessage,
+        JobCancelMessageKind, JobCancelMessageReason, JobDispatchMessage, JobDispatchMessageKind,
+        JobDispatchResultMessageStatus, LeaseWriteStatus, ModelChunkMessage, ModelChunkMessageKind,
+        ModelGatewayRoute, ModelOpenMessage, RuntimeEventMessage, WorkerCapabilityFeature,
+        WorkerCapabilitySet, WorkerCapabilitySetPlatform, WorkerRegistrationResultMessage,
         WorkerRegistrationResultMessageKind, WorkerRegistrationResultMessageLeaseRecovery,
         WorkerRegistrationResultMessageStatus,
     },
@@ -444,10 +441,8 @@ fn commit_execution_queue(storage: &mut SqliteStorage, job: &ExecutionJob) {
             dispatch_payload: dispatch_payload.clone(),
             attempt: u64::try_from(job.attempt).expect("positive Job attempt"),
             dependencies: Vec::new(),
-            stage_run_id: match &job.scope {
-                ExecutionScope::DeliveryStageExecutionScope(scope) => {
-                    Some(scope.stage_run_id.clone())
-                }
+            work_run_id: match &job.scope {
+                ExecutionScope::WorkRunExecutionScope(scope) => Some(scope.work_run_id.clone()),
                 ExecutionScope::ProductSessionExecutionScope(_) => None,
             },
             submitted_at: at("2029-12-31T23:59:56.000Z"),
@@ -516,17 +511,8 @@ fn lease_product_session_execution_queue(storage: &mut SqliteStorage, job: &Exec
 }
 
 fn seed_delivery_job(root: &TestDirectory, job: &ExecutionJob) {
-    let (pending, source) = if job.execution_profile == "planner" {
-        (
-            pending_planning_execution(&job.workspace.checkout_revision),
-            delivery_before_planning(),
-        )
-    } else {
-        (
-            pending_delivery_execution(&job.workspace.checkout_revision),
-            delivery_before_execution(),
-        )
-    };
+    let (source, pending) =
+        pending_workrun_execution(&job.workspace.checkout_revision, &job.execution_profile);
     assert_eq!(
         pending.job(),
         job,
@@ -555,7 +541,7 @@ fn seed_pending_delivery_job(
                 expected_revision: Revision(
                     i64::try_from(source.revision()).expect("Delivery revision fits API"),
                 ),
-                payload: serde_json::json!({"deliveryId": source.id().0}),
+                payload: serde_json::json!({"deliveryId": source.id().0, "dispatchProfile": pending.job().execution_profile}),
                 request_id: pending.request_id().clone(),
                 schema_version: SchemaVersion::WinwincodeV1,
                 scope: Scope::RepositoryScope(repository_scope()),
@@ -678,7 +664,7 @@ impl ExecutionJobDispatcher for RecordingDispatcher {
     }
 }
 
-fn delivery_before_execution() -> Delivery {
+fn delivery_before_execution(read_only: bool) -> Delivery {
     let mut snapshot = Delivery::decode_json(include_bytes!(
         "../../winwincode-delivery/tests/fixtures/delivery-main.json"
     ))
@@ -689,17 +675,21 @@ fn delivery_before_execution() -> Delivery {
     snapshot.spec.delivery_id = delivery_id.clone();
     snapshot.revision = 1;
     snapshot.status = DeliveryStatus::Executing;
-    snapshot.tasks = vec![DeliveryTask {
-        schema_version: DELIVERY_SCHEMA_VERSION,
-        id: DeliveryTaskId(id("dtk", 1)),
-        delivery_id,
-        title: "Run embedded production Codex".to_owned(),
-        goal: "Reply with the deterministic loopback result.".to_owned(),
-        acceptance_criterion_ids: vec![snapshot.spec.acceptance_criteria[0].id.clone()],
-        blocked_by_task_ids: Vec::new(),
-        owner: None,
-        status: DeliveryTaskStatus::Pending,
-    }];
+    snapshot.tasks.clear();
+    snapshot.work_run_aggregate.items.truncate(1);
+    let item = &mut snapshot.work_run_aggregate.items[0];
+    item.state = if read_only {
+        WorkItemState::CandidateReady
+    } else {
+        WorkItemState::Ready
+    };
+    "Reply with the deterministic loopback result.".clone_into(&mut item.goal);
+    if read_only {
+        snapshot.work_run_aggregate.runs.truncate(1);
+        snapshot.work_run_aggregate.runs[0].state = WorkRunState::CandidateReady;
+    } else {
+        snapshot.work_run_aggregate.runs.clear();
+    }
     snapshot.stage_runs.clear();
     snapshot.session_bindings.clear();
     snapshot.attention_items.clear();
@@ -709,97 +699,68 @@ fn delivery_before_execution() -> Delivery {
     Delivery::try_from_snapshot(snapshot).expect("Delivery before execution")
 }
 
-fn delivery_before_verification(role: &str) -> Delivery {
-    assert!(matches!(role, "reviewer" | "verifier"));
-    let mut snapshot = delivery_before_execution().into_snapshot();
-    snapshot.status = DeliveryStatus::Verifying;
-    snapshot.tasks[0].status = DeliveryTaskStatus::Verifying;
-    let delivery_id = snapshot.id.clone();
-    let task_id = snapshot.tasks[0].id.clone();
-    snapshot.stage_runs = vec![StageRun {
-        schema_version: DELIVERY_SCHEMA_VERSION,
-        id: StageRunId("run-production-executor".to_owned()),
-        delivery_id: delivery_id.clone(),
-        delivery_task_id: Some(task_id.clone()),
-        stage: DeliveryStage::Executing,
-        actor_type: StageRunActorType::Codex,
-        role: "executor".to_owned(),
-        status: StageRunStatus::Succeeded,
-        attempt: 1,
-        started_at_millis: 1_893_455_999_000,
-        finished_at_millis: Some(1_893_455_999_100),
-    }];
-    if role == "verifier" {
-        snapshot.stage_runs.push(StageRun {
-            schema_version: DELIVERY_SCHEMA_VERSION,
-            id: StageRunId("run-production-reviewer".to_owned()),
-            delivery_id,
-            delivery_task_id: Some(task_id),
-            stage: DeliveryStage::Verifying,
-            actor_type: StageRunActorType::Codex,
-            role: "reviewer".to_owned(),
-            status: StageRunStatus::Succeeded,
-            attempt: 1,
-            started_at_millis: 1_893_455_999_200,
-            finished_at_millis: Some(1_893_455_999_300),
-        });
-    }
-    Delivery::try_from_snapshot(snapshot).expect("Delivery before verification")
-}
-
-fn delivery_before_planning() -> Delivery {
-    let mut snapshot = Delivery::decode_json(include_bytes!(
-        "../../winwincode-delivery/tests/fixtures/delivery-main.json"
-    ))
-    .expect("canonical planning Delivery fixture")
-    .into_snapshot();
-    let delivery_id = DeliveryId(id("dlv", 1));
-    snapshot.id = delivery_id.clone();
-    snapshot.spec.delivery_id = delivery_id;
-    snapshot.revision = 1;
-    snapshot.status = DeliveryStatus::Ready;
-    snapshot.tasks.clear();
-    snapshot.stage_runs.clear();
-    snapshot.session_bindings.clear();
-    snapshot.attention_items.clear();
-    snapshot.evidence.clear();
-    snapshot.verdict = None;
-    snapshot.updated_at_millis = snapshot.created_at_millis;
-    Delivery::try_from_snapshot(snapshot).expect("Delivery before planning")
-}
-
-fn pending_delivery_execution(checkout_revision: &str) -> PendingDeliveryExecution {
-    let delivery = delivery_before_execution();
-    let advanced = advance(
+fn pending_workrun_execution(
+    checkout_revision: &str,
+    profile: &str,
+) -> (Delivery, PendingDeliveryExecution) {
+    let read_only = matches!(profile, "reviewer" | "verifier");
+    let delivery = delivery_before_execution(read_only);
+    let aggregate = &delivery.snapshot().work_run_aggregate;
+    let selected = if read_only {
+        aggregate
+            .start_verification(&aggregate.items[0].id)
+            .expect("candidate-ready canonical WorkItem")
+    } else {
+        aggregate.start_next().expect("ready canonical WorkItem")
+    };
+    let seed = match profile {
+        "reviewer" => 21,
+        "verifier" => 22,
+        "executor" => 1,
+        _ => panic!("unsupported fixture profile"),
+    };
+    let transition = StageAdvanceResult::canonical_workrun_dispatch(
         &delivery,
-        AdvanceStageInput {
-            current_lease: None,
-            rework_authorization: None,
-            expected_revision: 1,
-            product_session_id: ProductSessionId(id("psn", 1)),
-            identities: NewStageIdentities {
-                stage_run_id: StageRunId(id("run", 1)),
-                execution_job_id: ExecutionJobId(id("job", 1)),
-                session_binding_id: SessionBindingId::new("binding-production-vertical".to_owned())
-                    .expect("SessionBinding id"),
-                attention_item_id: winwincode_domain::AttentionItemId(id("att", 1)),
-            },
-            review: None,
-            previous_outcome: None,
-            now_millis: 1_893_455_999_000,
+        None,
+        NewStageIdentities {
+            stage_run_id: StageRunId(id("run", seed)),
+            work_contract_id: aggregate.contract.id.clone(),
+            work_contract_revision: aggregate.contract.revision.clone(),
+            work_item_id: selected.work_item.id.clone(),
+            work_item_revision: selected.work_item.revision.clone(),
+            work_run_id: WorkRunId(id("wrn", seed)),
+            execution_job_id: ExecutionJobId(id("job", seed)),
+            session_binding_id: SessionBindingId::new(format!("binding-production-{profile}"))
+                .expect("binding identity"),
+            attention_item_id: winwincode_domain::AttentionItemId(id("att", seed)),
         },
+        ProductSessionId(id("psn", seed)),
+        profile.to_owned(),
+        selected.work_item.goal,
+        u64::try_from(selected.attempt).expect("positive attempt"),
+        1_893_455_999_400,
     )
-    .expect("advance production Delivery");
-    prepare_delivery_advance(
-        RequestId(id("req", 13)),
-        advanced,
+    .expect("canonical WorkRun dispatch");
+    let StageAdvanceEffect::Dispatch(intent) = &transition.effect else {
+        panic!("expected dispatch")
+    };
+    let request_id = RequestId(id("req", if seed == 1 { 13 } else { seed }));
+    let job = prepare_workrun_advance(
+        &request_id,
+        aggregate,
+        &transition.delivery.snapshot().spec,
+        intent,
         DeliveryExecutionConfig {
             payload_digest: digest('b'),
-            candidate_ref: None,
+            candidate_ref: read_only.then(|| FIXTURE_CANDIDATE_REF.to_owned()),
             workspace: ExecutionWorkspace {
                 checkout_revision: checkout_revision.to_owned(),
                 repository_id: RepositoryId(id("rep", 1)),
-                write_mode: ExecutionWorkspaceWriteMode::Candidate,
+                write_mode: if read_only {
+                    ExecutionWorkspaceWriteMode::ReadOnly
+                } else {
+                    ExecutionWorkspaceWriteMode::Candidate
+                },
             },
             limits: ExecutionLimits {
                 deadline_at: at("2030-01-01T00:04:30.000Z"),
@@ -808,109 +769,31 @@ fn pending_delivery_execution(checkout_revision: &str) -> PendingDeliveryExecuti
             },
         },
     )
-    .expect("prepare canonical Delivery execution")
+    .expect("prepare canonical WorkRun job");
+    (
+        delivery,
+        PendingDeliveryExecution::from_workrun(request_id, transition, job),
+    )
+}
+
+fn pending_delivery_execution(checkout_revision: &str) -> PendingDeliveryExecution {
+    pending_workrun_execution(checkout_revision, "executor").1
 }
 
 fn pending_verification_execution(
     checkout_revision: &str,
     role: &str,
 ) -> (Delivery, PendingDeliveryExecution) {
-    let delivery = delivery_before_verification(role);
-    let suffix = role;
-    let identity_seed = if role == "reviewer" { 21 } else { 22 };
-    let advanced = advance(
-        &delivery,
-        AdvanceStageInput {
-            current_lease: None,
-            rework_authorization: None,
-            expected_revision: delivery.revision(),
-            product_session_id: ProductSessionId(id("psn", identity_seed)),
-            identities: NewStageIdentities {
-                stage_run_id: StageRunId(id("run", identity_seed)),
-                execution_job_id: ExecutionJobId(id("job", identity_seed)),
-                session_binding_id: SessionBindingId::new(format!("binding-production-{suffix}"))
-                    .expect("verification SessionBinding id"),
-                attention_item_id: winwincode_domain::AttentionItemId(id("att", identity_seed)),
-            },
-            review: None,
-            previous_outcome: None,
-            now_millis: 1_893_455_999_400,
-        },
-    )
-    .expect("advance production verification Delivery");
-    let pending = prepare_delivery_advance(
-        RequestId(id("req", if role == "reviewer" { 21 } else { 22 })),
-        advanced,
-        DeliveryExecutionConfig {
-            payload_digest: digest('f'),
-            candidate_ref: Some(FIXTURE_CANDIDATE_REF.to_owned()),
-            workspace: ExecutionWorkspace {
-                checkout_revision: checkout_revision.to_owned(),
-                repository_id: RepositoryId(id("rep", 1)),
-                write_mode: ExecutionWorkspaceWriteMode::ReadOnly,
-            },
-            limits: ExecutionLimits {
-                deadline_at: at("2030-01-01T00:04:30.000Z"),
-                max_artifact_bytes: 1_000_000,
-                max_runtime_seconds: 240,
-            },
-        },
-    )
-    .expect("prepare canonical verification execution");
-    (delivery, pending)
-}
-
-fn pending_planning_execution(checkout_revision: &str) -> PendingDeliveryExecution {
-    let delivery = delivery_before_planning();
-    let advanced = advance(
-        &delivery,
-        AdvanceStageInput {
-            current_lease: None,
-            rework_authorization: None,
-            expected_revision: 1,
-            product_session_id: ProductSessionId(id("psn", 1)),
-            identities: NewStageIdentities {
-                stage_run_id: StageRunId(id("run", 1)),
-                execution_job_id: ExecutionJobId(id("job", 1)),
-                session_binding_id: SessionBindingId::new(
-                    "binding-production-planning-vertical".to_owned(),
-                )
-                .expect("planning SessionBinding id"),
-                attention_item_id: winwincode_domain::AttentionItemId(id("att", 1)),
-            },
-            review: None,
-            previous_outcome: None,
-            now_millis: 1_893_455_999_000,
-        },
-    )
-    .expect("advance production planning Delivery");
-    prepare_delivery_advance(
-        RequestId(id("req", 13)),
-        advanced,
-        DeliveryExecutionConfig {
-            payload_digest: digest('d'),
-            candidate_ref: None,
-            workspace: ExecutionWorkspace {
-                checkout_revision: checkout_revision.to_owned(),
-                repository_id: RepositoryId(id("rep", 1)),
-                write_mode: ExecutionWorkspaceWriteMode::ReadOnly,
-            },
-            limits: ExecutionLimits {
-                deadline_at: at("2030-01-01T00:04:30.000Z"),
-                max_artifact_bytes: 1_000_000,
-                max_runtime_seconds: 240,
-            },
-        },
-    )
-    .expect("prepare canonical planning execution")
+    assert!(matches!(role, "reviewer" | "verifier"));
+    pending_workrun_execution(checkout_revision, role)
 }
 
 fn execution_scope(job: &ExecutionJob) -> ExecutionQueueScope {
     let scope = repository_scope();
     let (product_session_id, delivery_id) = match &job.scope {
-        ExecutionScope::DeliveryStageExecutionScope(stage) => (
+        ExecutionScope::WorkRunExecutionScope(stage) => (
             stage.product_session_id.clone(),
-            Some(stage.delivery_id.clone()),
+            Some(DeliveryId(id("dlv", 1))),
         ),
         ExecutionScope::ProductSessionExecutionScope(session) => {
             (session.product_session_id.clone(), None)
@@ -1115,7 +998,7 @@ fn slot_authority(message: &ModelOpenMessage) -> WorkerSlotAuthority {
 }
 
 fn setup(root: &TestDirectory, message: &ModelOpenMessage, job: &ExecutionJob) {
-    if matches!(&job.scope, ExecutionScope::DeliveryStageExecutionScope(_)) {
+    if matches!(&job.scope, ExecutionScope::WorkRunExecutionScope(_)) {
         seed_delivery_job(root, job);
     }
     setup_model(root, message, job);
@@ -1172,11 +1055,8 @@ fn policy() -> LocalModelPolicyAuthority {
         },
     )
     .expect("model admission policy");
-    LocalModelPolicyAuthority::try_new(LocalModelPolicyAuthorityConfig {
-        base,
-        enterprise_ceilings: Vec::new(),
-    })
-    .expect("local model policy authority")
+    LocalModelPolicyAuthority::try_new(LocalModelPolicyAuthorityConfig { base })
+        .expect("local model policy authority")
 }
 
 fn application(root: &TestDirectory) -> StandaloneModelExecutionApplication {
@@ -1458,22 +1338,6 @@ fn verification_dispatch(root: &TestDirectory, role: &str) -> JobDispatchMessage
     dispatch_for_job(job.clone(), lease_for_job(&job, role))
 }
 
-fn planning_dispatch(root: &TestDirectory) -> JobDispatchMessage {
-    let lease = ExecutionLeaseStamp {
-        attempt: 1,
-        expires_at: at("2030-01-01T00:05:00.000Z"),
-        fencing_token: FencingToken("1".to_owned()),
-        issued_at: at("2030-01-01T00:00:00.000Z"),
-        job_id: ExecutionJobId(id("job", 1)),
-        lease_id: LeaseId(id("lse", 1)),
-        worker_id: WorkerId(id("wrk", 1)),
-        worker_instance_id: WorkerInstanceId(id("wki", 1)),
-    };
-    let revision = root.source_revision();
-    let job = pending_planning_execution(&revision).job().clone();
-    dispatch_for_job(job, lease)
-}
-
 fn dispatch_for_job(job: ExecutionJob, lease: ExecutionLeaseStamp) -> JobDispatchMessage {
     JobDispatchMessage {
         job,
@@ -1564,9 +1428,15 @@ fn delegated_structured_proposal_is_retained_once_without_terminal_outcome() {
         let request: serde_json::Value =
             serde_json::from_slice(&request_bytes).expect("decode delegated request JSON");
         let format = &request["request"]["text"]["format"];
-        assert_eq!(format["type"], "json_schema", "{request:#}");
-        assert_eq!(format["strict"], true);
-        assert_eq!(format["schema"]["additionalProperties"], false);
+        assert!(format.is_null(), "{request:#}");
+        let submit_tool = request["request"]["tools"]
+            .as_array()
+            .expect("delegated tools")
+            .iter()
+            .find(|tool| tool["name"] == "submit_change_batch")
+            .expect("terminal ChangeBatch tool");
+        assert_eq!(submit_tool["type"], "custom");
+        assert_eq!(submit_tool["format"]["type"], "grammar");
 
         setup_model(&root, &open, &dispatch.job);
         let mut app = application(&root);
@@ -1575,8 +1445,6 @@ fn delegated_structured_proposal_is_retained_once_without_terminal_outcome() {
                 .expect("accept delegated ModelOpen"),
         );
         let checkout = detached_checkout(&root);
-        let source_before = DirectorySnapshot::capture(&root.sources());
-        let checkout_before = DirectorySnapshot::capture(&root.workspaces());
         let identity = ProviderToolIdentity::try_new(
             ProviderToolKind::Function,
             "shell_command".to_owned(),
@@ -1692,11 +1560,11 @@ fn delegated_structured_proposal_is_retained_once_without_terminal_outcome() {
             "second Provider receipt must bind the Core exchange"
         );
         let final_message = serde_json::json!({
-            "acceptanceCriteriaIds": dispatch.job.stage_input
+            "acceptanceCriteriaIds": dispatch.job.work_input
                 .as_ref()
-                .and_then(|input| input.task.as_ref())
-                .expect("delegated task")
-                .acceptance_criterion_ids,
+                .expect("delegated work input")
+                .work_item
+                .criterion_ids,
             "disposition": "final",
             "patch": "*** Begin Patch\n*** Update File: src/lib.rs\n@@\n-pub fn fixture_value() -> u64 { 1 }\n+pub fn fixture_value() -> u64 { 2 }\n*** End Patch\n",
             "schemaVersion": 1,
@@ -1710,6 +1578,13 @@ fn delegated_structured_proposal_is_retained_once_without_terminal_outcome() {
             output_tokens: 5,
             reasoning_output_tokens: 0,
         };
+        let submit_identity = ProviderToolIdentity::try_new(
+            ProviderToolKind::Custom,
+            "submit_change_batch".to_owned(),
+            None,
+        )
+        .expect("canonical submit ChangeBatch tool");
+        let submit_call_id = "provider-submit-change-batch".to_owned();
         for (index, chunk) in provider_chunks(
             &second_open,
             &second_gateway,
@@ -1717,14 +1592,22 @@ fn delegated_structured_proposal_is_retained_once_without_terminal_outcome() {
                 ProviderStreamEvent::ResponseStarted {
                     provider_response_id: "provider-delegated-response".to_owned(),
                 },
-                ProviderStreamEvent::TextStarted { index: 0 },
-                ProviderStreamEvent::TextDelta {
+                ProviderStreamEvent::ToolCallStarted {
                     index: 0,
+                    provider_call_id: submit_call_id.clone(),
+                    identity: submit_identity,
+                },
+                ProviderStreamEvent::ToolCallArgumentsDelta {
+                    index: 0,
+                    provider_call_id: submit_call_id.clone(),
                     delta: final_message,
                 },
-                ProviderStreamEvent::TextEnded { index: 0 },
+                ProviderStreamEvent::ToolCallEnded {
+                    index: 0,
+                    provider_call_id: submit_call_id,
+                },
                 ProviderStreamEvent::Usage(final_usage),
-                ProviderStreamEvent::Finished(ProviderFinishReason::Stop),
+                ProviderStreamEvent::Finished(ProviderFinishReason::ToolCalls),
             ],
             1080,
         )
@@ -1746,28 +1629,37 @@ fn delegated_structured_proposal_is_retained_once_without_terminal_outcome() {
                 });
         }
 
-        let mut stopped_at_writer_boundary = false;
+        let journal_path = root
+            .0
+            .join(".workspaces-change-batches/change-batch.sqlite3");
+        let mut retained_receipt = false;
         for _ in 0..400 {
-            if worker
+            worker
                 .poll_codex(at("2030-01-01T00:00:02.000Z"))
                 .await
-                .is_err()
-            {
-                stopped_at_writer_boundary = true;
+                .expect("poll delegated ChangeBatch execution");
+            let connection = rusqlite::Connection::open(&journal_path)
+                .expect("open delegated ChangeBatch journal");
+            let count = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM change_batch_intent WHERE receipt_json IS NOT NULL",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("count delegated receipts");
+            if count == 1 {
+                retained_receipt = true;
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
         assert!(
-            stopped_at_writer_boundary,
-            "the PR2 proposal must stop at the unavailable writer boundary"
+            retained_receipt,
+            "the delegated proposal must retain one deterministic receipt"
         );
 
-        let journal = rusqlite::Connection::open(
-            root.0
-                .join(".workspaces-change-batches/change-batch.sqlite3"),
-        )
-        .expect("open retained ChangeBatch proposals");
+        let journal =
+            rusqlite::Connection::open(&journal_path).expect("open retained ChangeBatch proposals");
         let mut statement = journal
             .prepare("SELECT event_json FROM change_batch_intent ORDER BY batch_id")
             .expect("prepare retained proposal query");
@@ -1821,15 +1713,9 @@ fn delegated_structured_proposal_is_retained_once_without_terminal_outcome() {
         );
         assert_eq!(
             fs::read_to_string(detached_checkout(&root).join("src/lib.rs"))
-                .expect("read unchanged delegated checkout"),
-            "pub fn fixture_value() -> u64 { 1 }\n"
+                .expect("read changed delegated checkout"),
+            "pub fn fixture_value() -> u64 { 2 }\n"
         );
-        let source_after = DirectorySnapshot::capture(&root.sources());
-        let checkout_after = DirectorySnapshot::capture(&root.workspaces());
-        assert_eq!(source_before.files, source_after.files);
-        assert_eq!(source_before.directories, source_after.directories);
-        assert_eq!(checkout_before.files, checkout_after.files);
-        assert_eq!(checkout_before.directories, checkout_after.directories);
     });
 }
 
@@ -1882,11 +1768,11 @@ fn delegated_proposal_restart_replays_one_intent_without_second_composer() {
                 .expect("accept initial delegated proposal open"),
         );
         let final_message = serde_json::json!({
-            "acceptanceCriteriaIds": dispatch.job.stage_input
+            "acceptanceCriteriaIds": dispatch.job.work_input
                 .as_ref()
-                .and_then(|input| input.task.as_ref())
-                .expect("delegated task")
-                .acceptance_criterion_ids,
+                .expect("delegated work input")
+                .work_item
+                .criterion_ids,
             "disposition": "continue",
             "patch": "*** Begin Patch\n*** Update File: src/lib.rs\n@@\n-pub fn fixture_value() -> u64 { 1 }\n+pub fn fixture_value() -> u64 { 2 }\n*** End Patch\n",
             "schemaVersion": 1,
@@ -1900,6 +1786,13 @@ fn delegated_proposal_restart_replays_one_intent_without_second_composer() {
             output_tokens: 5,
             reasoning_output_tokens: 0,
         };
+        let submit_identity = ProviderToolIdentity::try_new(
+            ProviderToolKind::Custom,
+            "submit_change_batch".to_owned(),
+            None,
+        )
+        .expect("canonical submit ChangeBatch tool");
+        let submit_call_id = "provider-submit-change-batch-restart".to_owned();
         for chunk in provider_chunks(
             &open,
             &gateway,
@@ -1907,14 +1800,22 @@ fn delegated_proposal_restart_replays_one_intent_without_second_composer() {
                 ProviderStreamEvent::ResponseStarted {
                     provider_response_id: "provider-delegated-proposal-restart".to_owned(),
                 },
-                ProviderStreamEvent::TextStarted { index: 0 },
-                ProviderStreamEvent::TextDelta {
+                ProviderStreamEvent::ToolCallStarted {
                     index: 0,
+                    provider_call_id: submit_call_id.clone(),
+                    identity: submit_identity,
+                },
+                ProviderStreamEvent::ToolCallArgumentsDelta {
+                    index: 0,
+                    provider_call_id: submit_call_id.clone(),
                     delta: final_message,
                 },
-                ProviderStreamEvent::TextEnded { index: 0 },
+                ProviderStreamEvent::ToolCallEnded {
+                    index: 0,
+                    provider_call_id: submit_call_id,
+                },
                 ProviderStreamEvent::Usage(usage),
-                ProviderStreamEvent::Finished(ProviderFinishReason::Stop),
+                ProviderStreamEvent::Finished(ProviderFinishReason::ToolCalls),
             ],
             980,
         ) {
@@ -1926,26 +1827,35 @@ fn delegated_proposal_restart_replays_one_intent_without_second_composer() {
                 .await
                 .expect("deliver delegated proposal restart response");
         }
-        let mut retained_at_writer_boundary = false;
+        let journal_path = root
+            .0
+            .join(".workspaces-change-batches/change-batch.sqlite3");
+        let mut retained_receipt = false;
         for _ in 0..400 {
-            if worker
+            worker
                 .poll_codex(at("2030-01-01T00:00:02.000Z"))
                 .await
-                .is_err()
-            {
-                retained_at_writer_boundary = true;
+                .expect("poll delegated ChangeBatch before restart");
+            let connection =
+                rusqlite::Connection::open(&journal_path).expect("open delegated proposal journal");
+            let count = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM change_batch_intent WHERE receipt_json IS NOT NULL",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("count delegated proposal receipts");
+            if count == 1 {
+                retained_receipt = true;
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
         assert!(
-            retained_at_writer_boundary,
-            "delegated proposal was not retained before restart"
+            retained_receipt,
+            "delegated proposal receipt was not retained before restart"
         );
 
-        let journal_path = root
-            .0
-            .join(".workspaces-change-batches/change-batch.sqlite3");
         let retained_events = rusqlite::Connection::open(&journal_path)
             .expect("open delegated proposal store")
             .prepare("SELECT event_json FROM change_batch_intent ORDER BY batch_id")
@@ -1971,6 +1881,7 @@ fn delegated_proposal_restart_replays_one_intent_without_second_composer() {
         let replayed_thread = replay_adapter
             .ensure_thread(CodexThreadStart {
                 run_key: &run_key,
+                worker_id: &dispatch.lease.worker_id,
                 job: &dispatch.job,
                 lease: &dispatch.lease,
                 worker_session_id: &active.worker_session_id,
@@ -2050,8 +1961,8 @@ fn delegated_proposal_restart_replays_one_intent_without_second_composer() {
         );
         assert_eq!(
             fs::read_to_string(checkout.join("src/lib.rs"))
-                .expect("read unchanged delegated checkout after restart"),
-            "pub fn fixture_value() -> u64 { 1 }\n"
+                .expect("read changed delegated checkout after restart"),
+            "pub fn fixture_value() -> u64 { 2 }\n"
         );
     });
 }
@@ -3151,16 +3062,12 @@ fn assert_verification_products(messages: &[ExecutionPortMessage], role: &str, c
         }),
         "{role} must retain its read-only policy before command/test evidence"
     );
-    let expected_category = if role == "reviewer" {
-        ExecutionEventCategory::Command
-    } else {
-        ExecutionEventCategory::Test
-    };
     assert!(
-        runtime_events
-            .iter()
-            .any(|event| event.event.category == expected_category),
-        "{role} must retain direct command/test evidence"
+        runtime_events.iter().any(|event| matches!(
+            event.event.category,
+            ExecutionEventCategory::Command | ExecutionEventCategory::Test
+        )),
+        "{role} must retain direct command or test evidence"
     );
     let result = runtime_events.iter().find_map(|event| {
         (event.event.category == ExecutionEventCategory::Activity).then(|| {
@@ -3180,7 +3087,7 @@ fn assert_verification_products(messages: &[ExecutionPortMessage], role: &str, c
     );
 }
 
-async fn run_verification_stage(root: &TestDirectory, role: &str, command: &str) {
+async fn run_verification_work_run(root: &TestDirectory, role: &str, command: &str) {
     let dispatch = verification_dispatch(root, role);
     let port = RecordedPort::default();
     let adapter = winwincode_codex::ProductionCodexAdapter::open(adapter_config(root))
@@ -3259,9 +3166,7 @@ async fn run_verification_stage(root: &TestDirectory, role: &str, command: &str)
                 provider_call_id: call_id.clone(),
                 delta: serde_json::json!({
                     "command": command,
-                    "workdir": checkout.to_string_lossy(),
-                    "justification": "collect direct verification evidence",
-                    "sandbox_permissions": "require_escalated"
+                    "workdir": checkout.to_string_lossy()
                 })
                 .to_string(),
             },
@@ -3283,40 +3188,7 @@ async fn run_verification_stage(root: &TestDirectory, role: &str, command: &str)
             .await
             .expect("deliver verification tool-call chunk");
     }
-    let approval = poll_until_message(
-        &mut worker,
-        &port,
-        &at("2030-01-01T00:00:02.000Z"),
-        |messages| {
-            messages.iter().find_map(|message| match message {
-                ExecutionPortMessage::ApprovalRequestMessage(request) => Some(request.clone()),
-                _ => None,
-            })
-        },
-        "verification command approval was not delivered",
-    )
-    .await;
     let decided_at = at("2030-01-01T00:00:02.000Z");
-    worker
-        .accept_control(
-            &ExecutionPortMessage::ApprovalDecisionMessage(ApprovalDecisionMessage {
-                approval_id: approval.approval_id.clone(),
-                decided_at: decided_at.clone(),
-                decision: ApprovalDecisionMessageDecision::Approved,
-                kind: ApprovalDecisionMessageKind::ApprovalDecision,
-                lease: approval.lease.clone(),
-                message_id: ExecutionMessageId(id("xmsg", 920)),
-                reason: None,
-                schema_version: SchemaVersion::WinwincodeV1,
-                scope: ApprovalDecisionMessageScope::Once,
-                sent_at: decided_at.clone(),
-                session_identity: approval.session_identity.clone(),
-                worker_session_id: approval.worker_session_id.clone(),
-            }),
-            decided_at.clone(),
-        )
-        .await
-        .expect("approve exact verification command");
     let action = poll_until_message(
         &mut worker,
         &port,
@@ -3329,7 +3201,7 @@ async fn run_verification_stage(root: &TestDirectory, role: &str, command: &str)
                 _ => None,
             })
         },
-        "verification action request was not delivered after approval",
+        "verification action request was not delivered",
     )
     .await;
     let mut receipt = ActionEnforcementReceiptMessage {
@@ -3384,33 +3256,31 @@ async fn run_verification_stage(root: &TestDirectory, role: &str, command: &str)
         "verification action did not enter its final model turn",
     )
     .await;
+    assert!(
+        port.messages()
+            .iter()
+            .all(|message| !matches!(message, ExecutionPortMessage::ApprovalRequestMessage(_)))
+    );
     let input = dispatch
         .job
-        .stage_input
+        .work_input
         .as_ref()
-        .expect("verification stage input");
-    let task = input.task.as_ref().expect("verification task input");
-    let evidence_type = if role == "reviewer" {
-        "command"
-    } else {
-        "test"
-    };
+        .expect("verification work input");
     // The adapter accepts only the exact field order emitted by the
     // canonical verification-result serializer.  serde_json::json! stores
     // object keys in sorted order in this build, so build the fixture with
     // escaped scalar values while retaining the protocol's field order.
     let final_message = format!(
-        "{{\"protocol\":\"winwincode.independent-verification-result.v1\",\"delivery_spec_id\":{},\"delivery_spec_revision\":{},\"candidate_ref\":{},\"findings\":[{{\"finding_id\":{},\"criterion_id\":{},\"verdict\":\"pass\",\"explanation\":{},\"evidence_sources\":[{{\"type\":\"{}\",\"source_id\":{}}}]}}]}}",
+        "{{\"protocol\":\"winwincode.independent-verification-result.v1\",\"delivery_spec_id\":{},\"delivery_spec_revision\":{},\"candidate_ref\":{},\"findings\":[{{\"finding_id\":{},\"criterion_id\":{},\"verdict\":\"pass\",\"explanation\":{},\"evidence_sources\":[{{\"source_id\":{}}}]}}]}}",
         serde_json::to_string(&input.delivery_spec_id).expect("verification spec JSON"),
-        input.delivery_spec_revision,
+        input.delivery_spec_revision.0,
         serde_json::to_string(&input.candidate_ref).expect("verification candidate JSON"),
         serde_json::to_string(&format!("finding-{role}-fixture"))
             .expect("verification finding JSON"),
-        serde_json::to_string(&task.acceptance_criterion_ids[0])
+        serde_json::to_string(&input.work_item.criterion_ids[0])
             .expect("verification criterion JSON"),
         serde_json::to_string(&format!("{role} observed the exact direct evidence."))
             .expect("verification explanation JSON"),
-        evidence_type,
         serde_json::to_string(&call_id).expect("verification source JSON"),
     );
     let second_gateway = opened(
@@ -3446,7 +3316,12 @@ async fn run_verification_stage(root: &TestDirectory, role: &str, command: &str)
             .expect("deliver canonical verification result");
     }
     let outcome = poll_until_candidate_outcome(&mut worker, &port, &decided_at).await;
-    assert_eq!(outcome.outcome.status, ExecutionOutcomeStatus::Succeeded);
+    assert_eq!(
+        outcome.outcome.status,
+        ExecutionOutcomeStatus::Succeeded,
+        "{:?}",
+        outcome.outcome.error
+    );
     assert_eq!(outcome.outcome.artifacts.len(), 1);
     assert_verification_products(&port.messages(), role, &call_id);
     worker
@@ -3456,12 +3331,12 @@ async fn run_verification_stage(root: &TestDirectory, role: &str, command: &str)
 }
 
 #[test]
-fn production_worker_reviewer_and_verifier_emit_bound_stage_products() {
+fn production_worker_reviewer_and_verifier_emit_bound_work_run_products() {
     run_on_large_stack(async {
-        let reviewer_root = TestDirectory::new("production-reviewer-stage");
-        run_verification_stage(&reviewer_root, "reviewer", "git diff --check").await;
-        let verifier_root = TestDirectory::new("production-verifier-stage");
-        run_verification_stage(&verifier_root, "verifier", "cargo test --quiet").await;
+        let reviewer_root = TestDirectory::new("production-reviewer-work-run");
+        run_verification_work_run(&reviewer_root, "reviewer", "cat fixture.txt").await;
+        let verifier_root = TestDirectory::new("production-verifier-work-run");
+        run_verification_work_run(&verifier_root, "verifier", "cat fixture.txt").await;
     });
 }
 
@@ -3651,21 +3526,11 @@ fn exact_rollout_terminal(root: &TestDirectory) -> Option<serde_json::Value> {
     })
 }
 
-fn assert_planner_final_message(message: &serde_json::Value) {
-    let text = message
-        .as_str()
-        .expect("Planner final message is retained as UTF-8 text");
-    let product: serde_json::Value =
-        serde_json::from_str(text).expect("Planner final message is canonical JSON");
+fn assert_executor_final_message(message: &serde_json::Value) {
     assert_eq!(
-        product["protocol"], "winwincode.planner-solution.v1",
-        "deterministic loopback must honor the strict Planner protocol"
-    );
-    assert_eq!(product["schemaVersion"], 1);
-    assert!(
-        product["taskProposals"]
-            .as_array()
-            .is_some_and(|proposals| !proposals.is_empty())
+        message.as_str(),
+        Some("The requested stage action completed."),
+        "the exact executor result must survive the Core rollout and adapter restart"
     );
 }
 
@@ -3832,12 +3697,12 @@ async fn capture_rollout_before_adapter_terminal<'root>(
             .await
             .expect("poll until completed Provider response is delivered");
         gateway.drive(&port, &mut worker).await;
-        if gateway.open_count == 1 {
+        if gateway.open_count == 2 {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
-    assert_eq!(gateway.open_count, 1);
+    assert_eq!(gateway.open_count, 2);
     assert_eq!(gateway.idempotent_replays, 0);
     for _ in 0..400 {
         if exact_rollout_terminal(root).is_some() {
@@ -3852,7 +3717,7 @@ async fn capture_rollout_before_adapter_terminal<'root>(
     match terminal_fixture {
         RolloutTerminalFixture::Completed => {
             assert!(terminal["error"].is_null());
-            assert_planner_final_message(&terminal["last_agent_message"]);
+            assert_executor_final_message(&terminal["last_agent_message"]);
         }
         RolloutTerminalFixture::Failed => assert!(terminal["error"].is_object()),
     }
@@ -3862,12 +3727,18 @@ async fn capture_rollout_before_adapter_terminal<'root>(
         Some("submission_intent" | "runtime_started")
     ));
     assert!(run["terminal"].is_null());
+    // A crash preserves the writer checkout and Git worktree registration;
+    // graceful shutdown removes them, so restore all three durable roots.
     let crash_snapshot = DirectorySnapshot::capture(&root.worker());
+    let workspace_snapshot = DirectorySnapshot::capture(&root.workspaces());
+    let source_snapshot = DirectorySnapshot::capture(&root.sources());
     worker
         .shutdown(at("2030-01-01T00:00:02.000Z"))
         .await
         .expect("quiesce completed-rollout crash runtime");
     drop(worker);
+    source_snapshot.restore(&root.sources());
+    workspace_snapshot.restore(&root.workspaces());
     crash_snapshot.restore(&root.worker());
     gateway.cursor = 0;
     gateway.open_count = 0;
@@ -3894,7 +3765,7 @@ fn production_worker_kernel_gateway_loopback_and_restart_replay_are_exact() {
             )
         );
 
-        let dispatch = planning_dispatch(&root);
+        let dispatch = dispatch(&root);
         let first_port = RecordedPort::default();
         let adapter = winwincode_codex::ProductionCodexAdapter::open(adapter_config(&root))
             .expect("open production embedded adapter and Kernel RuntimePaths");
@@ -3915,7 +3786,7 @@ fn production_worker_kernel_gateway_loopback_and_restart_replay_are_exact() {
         let mut gateway = GatewayDriver::new(&root, dispatch.job.clone(), true);
         run_until_outcome(&mut first, &first_port, &mut gateway).await;
         gateway.drive(&first_port, &mut first).await;
-        assert_eq!(gateway.open_count, 1);
+        assert_eq!(gateway.open_count, 2);
         let first_messages = first_port.messages();
         assert!(
             first_messages
@@ -3934,7 +3805,7 @@ fn production_worker_kernel_gateway_loopback_and_restart_replay_are_exact() {
                 .iter()
                 .filter(|message| matches!(message, ExecutionPortMessage::RuntimeEventMessage(_)))
                 .count(),
-            4
+            3
         );
         let baseline = first_terminal_facts
             .iter()
@@ -3950,22 +3821,22 @@ fn production_worker_kernel_gateway_loopback_and_restart_replay_are_exact() {
         assert_eq!(baseline["fact"]["kind"], "performance_baseline");
         assert_eq!(baseline["fact"]["report"]["executionMode"], "react");
         assert_eq!(baseline["fact"]["report"]["observerMode"], "off");
-        assert_eq!(baseline["fact"]["report"]["primaryModelCallCount"], 1);
-        assert_eq!(baseline["fact"]["report"]["primaryModelInputTokens"], 10);
+        assert_eq!(baseline["fact"]["report"]["primaryModelCallCount"], 2);
+        assert_eq!(baseline["fact"]["report"]["primaryModelInputTokens"], 20);
         assert_eq!(baseline["fact"]["report"]["primaryModelCachedTokens"], 0);
-        assert_eq!(baseline["fact"]["report"]["primaryModelOutputTokens"], 5);
+        assert_eq!(baseline["fact"]["report"]["primaryModelOutputTokens"], 10);
         assert_eq!(baseline["fact"]["report"]["turnCount"], 1);
         let first_performance_evidence =
             winwincode_codex::performance_evidence::export_performance_v0_evidence(&root.worker())
                 .expect("export production performance evidence");
         assert_eq!(first_performance_evidence.runs.len(), 1);
-        assert_eq!(first_performance_evidence.model_calls.len(), 1);
+        assert_eq!(first_performance_evidence.model_calls.len(), 2);
         let comparison = first_performance_evidence
             .summarize()
             .expect("summarize production performance evidence");
         assert_eq!(comparison.react.sample_count, 1);
-        assert_eq!(comparison.react.strong_model_call_count, 1);
-        assert_eq!(comparison.react.total_tokens, 15);
+        assert_eq!(comparison.react.strong_model_call_count, 2);
+        assert_eq!(comparison.react.total_tokens, 30);
         let outcome = first_terminal_facts
             .iter()
             .find_map(|message| match message {
@@ -4047,7 +3918,7 @@ fn submission_intent_crash_boundaries_restart_with_one_exact_turn() {
     ] {
         run_on_large_stack(async move {
             let root = TestDirectory::new(&format!("production-submission-{label}"));
-            let dispatch = planning_dispatch(&root);
+            let dispatch = dispatch(&root);
             capture_submission_boundary(&root, &dispatch, fault).await;
 
             let port = RecordedPort::default();
@@ -4069,7 +3940,7 @@ fn submission_intent_crash_boundaries_restart_with_one_exact_turn() {
                 .expect("accept exact submission-boundary replay");
             let mut gateway = GatewayDriver::new(&root, dispatch.job, true);
             run_until_outcome(&mut worker, &port, &mut gateway).await;
-            assert_eq!(gateway.open_count, 1);
+            assert_eq!(gateway.open_count, 2);
             assert_eq!(gateway.idempotent_replays, 0);
             assert_eq!(
                 port.messages()
@@ -4090,7 +3961,7 @@ fn submission_intent_crash_boundaries_restart_with_one_exact_turn() {
 fn completed_rollout_before_adapter_terminal_restarts_without_provider_work() {
     run_on_large_stack(async {
         let root = TestDirectory::new("production-completed-rollout-crash");
-        let dispatch = planning_dispatch(&root);
+        let dispatch = dispatch(&root);
         let mut gateway = capture_rollout_before_adapter_terminal(
             &root,
             &dispatch,
@@ -4128,14 +3999,21 @@ fn completed_rollout_before_adapter_terminal_restarts_without_provider_work() {
         assert_eq!(outcomes.len(), 1);
         assert_eq!(
             outcomes[0].outcome.status,
-            ExecutionOutcomeStatus::Succeeded
+            ExecutionOutcomeStatus::Succeeded,
+            "recovered writer outcome: {:?}",
+            outcomes[0].outcome
         );
         assert_eq!(
             outcomes[0].outcome.usage.as_ref().map(|usage| usage.tokens),
             Some(15)
         );
+        assert_eq!(
+            outcomes[0].outcome.artifacts.len(),
+            1,
+            "the recovered writer must publish its original checkout as one candidate"
+        );
         let run = stored_run_json(&root);
-        assert_planner_final_message(&run["terminal"]["final_message"]);
+        assert_executor_final_message(&run["terminal"]["final_message"]);
         replay
             .shutdown(at("2030-01-01T00:00:03.000Z"))
             .await
@@ -4147,7 +4025,7 @@ fn completed_rollout_before_adapter_terminal_restarts_without_provider_work() {
 fn failed_rollout_before_adapter_terminal_restarts_without_provider_work() {
     run_on_large_stack(async {
         let root = TestDirectory::new("production-failed-rollout-crash");
-        let dispatch = planning_dispatch(&root);
+        let dispatch = dispatch(&root);
         let mut gateway = capture_rollout_before_adapter_terminal(
             &root,
             &dispatch,
@@ -4227,7 +4105,7 @@ fn production_event_poll_faults_retain_one_terminal_before_restart() {
     ] {
         run_on_large_stack(async move {
             let root = TestDirectory::new(&format!("production-event-{label}"));
-            let dispatch = planning_dispatch(&root);
+            let dispatch = dispatch(&root);
             let first_port = RecordedPort::default();
             let adapter = winwincode_codex::ProductionCodexAdapter::open(
                 adapter_config(&root).with_test_event_poll_fault(fault),
@@ -4313,7 +4191,7 @@ fn production_event_poll_faults_retain_one_terminal_before_restart() {
 fn pre_start_cancellation_restarts_with_one_exact_stopped_outcome() {
     run_on_large_stack(async {
         let root = TestDirectory::new("production-pre-start-cancel");
-        let dispatch = planning_dispatch(&root);
+        let dispatch = dispatch(&root);
         let first_port = RecordedPort::default();
         let adapter = winwincode_codex::ProductionCodexAdapter::open(adapter_config(&root))
             .expect("open pre-start cancellation adapter");
@@ -5240,6 +5118,27 @@ fn real_request_user_input_resumes_after_response_loss_and_rejects_forged_replay
 fn real_shell_approval_and_action_receipt_reach_one_kernel_handler() {
     run_on_large_stack(async {
         let root = TestDirectory::new("production-shell-approval");
+        let repository = root.sources().join(id("rep", 1));
+        let _ = root.source_revision();
+        fs::create_dir_all(repository.join(".winwincode"))
+            .expect("create repository rule directory");
+        fs::write(
+            repository.join(".winwincode/rules.json"),
+            br#"{
+  "schemaVersion": 1,
+  "rules": [{
+    "id": "fixture.command-success-verification",
+    "version": 1,
+    "event": "command_finished",
+    "outcome": "succeeded",
+    "actions": ["require_verification"],
+    "priority": 10
+  }]
+}"#,
+        )
+        .expect("write repository rule pack");
+        git(&repository, &["add", ".winwincode/rules.json"]);
+        git(&repository, &["commit", "-qm", "add repository rules"]);
         let dispatch = dispatch(&root);
         let port = RecordedPort::default();
         let adapter = winwincode_codex::ProductionCodexAdapter::open(adapter_config(&root))
@@ -5357,7 +5256,20 @@ fn real_shell_approval_and_action_receipt_reach_one_kernel_handler() {
             "embedded approval request was not delivered",
         )
         .await;
-        assert!(approval.action.details.is_none());
+        let detail = approval
+            .action
+            .sanitized_detail
+            .as_ref()
+            .expect("trusted shell approval detail");
+        assert_eq!(detail.operation, ApprovalActionOperation::Execute);
+        assert_eq!(
+            detail.reason_code,
+            ApprovalActionReasonCode::SandboxEscalation
+        );
+        assert_eq!(detail.risk_level, ApprovalActionRiskLevel::High);
+        assert_eq!(detail.target_count, 1);
+        assert_eq!(detail.target_summaries, ["program:zsh;argument_count:2"]);
+        assert_eq!(detail.working_directory.as_deref(), Some("workspace"));
         let decided_at = at("2030-01-01T00:00:02.000Z");
         worker
             .accept_control(
@@ -5529,6 +5441,22 @@ fn real_shell_approval_and_action_receipt_reach_one_kernel_handler() {
             .await
             .expect("ack detached candidate final chunk");
         let messages = port.messages();
+        assert!(
+            messages.iter().any(|message| {
+                let ExecutionPortMessage::RuntimeEventMessage(event) = message else {
+                    return false;
+                };
+                runtime_payload(event).is_some_and(|payload| {
+                    payload["schemaVersion"] == "winwincode.runtime-trace.v1"
+                        && payload["fact"]["kind"] == "hook"
+                        && payload["fact"]["source"] == "shell"
+                        && payload["fact"]["operation"] == "execute"
+                        && payload["fact"]["outcome"] == "succeeded"
+                        && payload["fact"]["actions"] == serde_json::json!(["require_verification"])
+                })
+            }),
+            "the frozen repository rule pack must produce one trusted post-action hook"
+        );
         let outcome = messages
             .iter()
             .find_map(|message| match message {

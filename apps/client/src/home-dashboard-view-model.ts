@@ -27,7 +27,7 @@ import type {
   OpaqueCursor,
   RepositoryScope,
   RequestId,
-  StageRunId,
+  WorkRunId,
 } from './generated/contracts.js'
 import { DeliveryStatus as DeliveryStatusVocabulary, QueryName } from './generated/contracts.js'
 
@@ -228,7 +228,7 @@ export interface HomeDeliveryCard {
   readonly revision: number
   readonly updatedAt: Instant
   readonly openAttentionCount: number
-  readonly activeStageRunId: StageRunId | null
+  readonly activeWorkRunId: WorkRunId | null
   readonly failedTasks: number
   readonly blockedTasks: number
   readonly activeTasks: number
@@ -251,7 +251,7 @@ export interface HomeDecisionCard {
   readonly sessionTitle: string | null
   readonly deliveryId: AttentionCenterItem['deliveryId']
   readonly deliveryTitle: string | null
-  readonly stageRunId: AttentionCenterItem['stageRunId']
+  readonly workRunId: AttentionCenterItem['workRunId']
 }
 
 export interface HomeDashboardCounts {
@@ -370,7 +370,7 @@ export function homeDeliveryCards(
     revision: delivery.revision,
     updatedAt: delivery.updatedAt,
     openAttentionCount: delivery.openAttentionCount,
-    activeStageRunId: delivery.activeStageRunId,
+    activeWorkRunId: delivery.activeWorkRunId ?? null,
     failedTasks: delivery.taskCounts.failed,
     blockedTasks: delivery.taskCounts.blocked,
     activeTasks: delivery.taskCounts.active,
@@ -455,7 +455,7 @@ export function homeDashboardState(input: {
       sessionTitle: item.sessionTitle,
       deliveryId: item.deliveryId,
       deliveryTitle: item.deliveryTitle,
-      stageRunId: item.stageRunId,
+      workRunId: item.workRunId,
     }))),
     active: Object.freeze(active.slice(0, limits.deliveries)),
     failing: Object.freeze(failing.slice(0, limits.deliveries)),

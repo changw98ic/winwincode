@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use winwincode_domain::{
     DeliveryId, ExecutionJobId, LeaseId, ProductSessionId, PublicationId, RepositoryId,
-    Sha256Digest, StageRunId, WorkerId, WorkspaceId,
+    Sha256Digest, WorkRunId, WorkerId, WorkspaceId,
 };
 use winwincode_domain::{OrganizationId, ProjectId};
 
@@ -120,7 +120,7 @@ enum SubjectIdentity {
     Lease(LeaseId),
     Publication(PublicationId),
     ExecutionJob(ExecutionJobId),
-    StageRun(StageRunId),
+    WorkRun(WorkRunId),
     Worker(WorkerId),
 }
 
@@ -175,13 +175,13 @@ impl AuditSubjectFilter {
         Self::typed("job", SubjectIdentity::ExecutionJob(id))
     }
 
-    /// Builds an exact `StageRun` filter.
+    /// Builds an exact `WorkRun` filter.
     ///
     /// # Errors
     ///
-    /// Rejects a non-canonical `StageRun` identity.
-    pub fn stage_run(id: StageRunId) -> Result<Self, AuditExportError> {
-        Self::typed("run", SubjectIdentity::StageRun(id))
+    /// Rejects a non-canonical `WorkRun` identity.
+    pub fn stage_run(id: WorkRunId) -> Result<Self, AuditExportError> {
+        Self::typed("run", SubjectIdentity::WorkRun(id))
     }
 
     /// Builds an exact Worker filter.
@@ -200,7 +200,7 @@ impl AuditSubjectFilter {
             SubjectIdentity::Lease(value) => &value.0,
             SubjectIdentity::Publication(value) => &value.0,
             SubjectIdentity::ExecutionJob(value) => &value.0,
-            SubjectIdentity::StageRun(value) => &value.0,
+            SubjectIdentity::WorkRun(value) => &value.0,
             SubjectIdentity::Worker(value) => &value.0,
         };
         if !canonical_id(value, prefix) {
@@ -242,10 +242,10 @@ impl AuditSubjectFilter {
                     .map(crate::AuditExecutionIdentity::execution_job_id)
                     == Some(id)
             }
-            SubjectIdentity::StageRun(id) => {
+            SubjectIdentity::WorkRun(id) => {
                 subject
                     .execution()
-                    .map(crate::AuditExecutionIdentity::stage_run_id)
+                    .map(crate::AuditExecutionIdentity::work_run_id)
                     == Some(id)
             }
             SubjectIdentity::Worker(id) => {
@@ -264,7 +264,7 @@ impl AuditSubjectFilter {
             SubjectIdentity::Lease(_) => "lse",
             SubjectIdentity::Publication(_) => "pub",
             SubjectIdentity::ExecutionJob(_) => "job",
-            SubjectIdentity::StageRun(_) => "run",
+            SubjectIdentity::WorkRun(_) => "run",
             SubjectIdentity::Worker(_) => "wrk",
         };
         Self::typed(prefix, self.0.clone()).map(drop)

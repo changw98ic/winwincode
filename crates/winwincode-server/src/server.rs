@@ -10,7 +10,7 @@ use axum::Json;
 use axum::Router;
 use axum::body::{Body, Bytes, to_bytes};
 use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{ConnectInfo, DefaultBodyLimit, State};
+use axum::extract::{ConnectInfo, DefaultBodyLimit, Path, State};
 use axum::http::header::{
     ACCESS_CONTROL_ALLOW_CREDENTIALS, ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS,
     ACCESS_CONTROL_ALLOW_ORIGIN, AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, COOKIE, ORIGIN,
@@ -18,7 +18,7 @@ use axum::http::header::{
 };
 use axum::http::{HeaderMap, HeaderValue, Request, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{any, get, post};
 use axum_server::Handle;
 use axum_server::tls_rustls::RustlsConfig;
 use futures::StreamExt;
@@ -59,9 +59,7 @@ use crate::client_sessions::ClientSessionsConfig;
 use crate::client_sessions::ClientSessionsError;
 use crate::client_sessions::ClientSessionsErrorKind;
 use crate::config::{ServerConfig, ServerTls};
-use crate::enterprise_identity_protocol::{
-    EnterpriseIdentityProtocolApplication, router as enterprise_identity_router,
-};
+use crate::preview::{PreviewApplication, PreviewError, PreviewErrorKind};
 use crate::remote_worker_transport::RemoteWorkerExchangePort;
 use crate::transport::{
     ApiError, AuthenticatedPrincipal, ControlPlaneApiPort, RequestAuthenticator,
@@ -134,6 +132,7 @@ struct ServerState {
     client_occupancy: Option<Arc<ClientOccupancyApplication>>,
     client_repositories: Option<Arc<ClientRepositoriesApplication>>,
     client_sessions: Option<Arc<ClientSessionsApplication>>,
+    preview: Option<Arc<PreviewApplication>>,
 }
 
 /// Running standalone listener with deterministic graceful shutdown.
@@ -216,18 +215,8 @@ pub async fn start_server(
     auth_sessions: Arc<SqliteAuthSessionManager>,
     authenticator: Arc<dyn RequestAuthenticator>,
     api: Arc<dyn ControlPlaneApiPort>,
-    enterprise_identity: Option<Arc<EnterpriseIdentityProtocolApplication>>,
 ) -> Result<RunningServer, ServerError> {
-    start_server_with_remote_worker(
-        config,
-        auth_sessions,
-        authenticator,
-        api,
-        enterprise_identity,
-        None,
-        None,
-    )
-    .await
+    start_server_with_remote_worker(config, auth_sessions, authenticator, api, None, None).await
 }
 
 /// Starts the public origin with the private authenticated remote Worker
@@ -243,13 +232,25 @@ pub async fn start_server_with_remote_worker(
     auth_sessions: Arc<SqliteAuthSessionManager>,
     authenticator: Arc<dyn RequestAuthenticator>,
     api: Arc<dyn ControlPlaneApiPort>,
-    enterprise_identity: Option<Arc<EnterpriseIdentityProtocolApplication>>,
     remote_worker: Option<Arc<dyn RemoteWorkerExchangePort>>,
     client_exchange: Option<Arc<dyn ClientExchangePort>>,
 ) -> Result<RunningServer, ServerError> {
     if remote_worker.is_some() && matches!(config.tls(), ServerTls::Disabled) {
         return Err(ServerError::new(
             "remote Worker exchange requires the Server TLS listener",
+        ));
+    }
+    if config.preview_public_url().is_some() && client_exchange.is_none() {
+        return Err(ServerError::new(
+            "preview origin requires the authenticated Device Client exchange",
+        ));
+    }
+    if config.preview_public_url().is_some()
+        && matches!(config.tls(), ServerTls::Disabled)
+        && !config.bind_address().ip().is_loopback()
+    {
+        return Err(ServerError::new(
+            "remote preview requires TLS unless the listener is loopback-only",
         ));
     }
     let config = Arc::new(config);
@@ -305,6 +306,10 @@ pub async fn start_server_with_remote_worker(
         // Servers without a Client surface keep the launch routes absent.
         None => None,
     };
+    let preview = config.preview_public_url().and_then(|origin| {
+        PreviewApplication::open(config.data_directory().to_path_buf(), origin.to_owned())
+            .map(Arc::new)
+    });
     // The periodic offline sweep projects heartbeat-stale devices to
     // `offline` and their active occupancy leases to `recovery_pending`
     // (plan 12.5). Each iteration opens and closes its own storage
@@ -334,8 +339,9 @@ pub async fn start_server_with_remote_worker(
         client_occupancy,
         client_repositories,
         client_sessions,
+        preview,
     };
-    let router = router(state, enterprise_identity);
+    let router = router(state);
     let handle = Handle::new();
     let task = spawn_listener(&config, router, handle.clone()).await?;
     let local_address =
@@ -401,11 +407,8 @@ async fn spawn_listener(
     Ok(task)
 }
 
-fn router(
-    state: ServerState,
-    enterprise_identity: Option<Arc<EnterpriseIdentityProtocolApplication>>,
-) -> Router {
-    let router = Router::new()
+fn router(state: ServerState) -> Router {
+    Router::new()
         .route("/health", get(health))
         .route(
             "/api/v1/auth/session",
@@ -438,6 +441,17 @@ fn router(
             "/internal/v1/client/exchange",
             post(client_control_exchange),
         )
+        .route("/internal/v1/preview/tunnel", get(preview_tunnel))
+        .route(
+            "/api/v1/previews",
+            post(create_preview_access).options(preflight),
+        )
+        .route(
+            "/api/v1/previews/{access_id}",
+            axum::routing::delete(revoke_preview_access).options(preflight),
+        )
+        .route("/p/{access_id}/{token}", any(preview_root))
+        .route("/p/{access_id}/{token}/{*path}", any(preview_path))
         .route("/api/v1/clients", get(list_clients).options(preflight))
         .route(
             "/api/v1/clients/connections",
@@ -487,11 +501,215 @@ fn router(
         )
         .route("/api/v1/sessions", post(create_session).options(preflight))
         .fallback(not_found)
-        .with_state(state);
-    let router = enterprise_identity.map_or(router.clone(), |application| {
-        router.merge(enterprise_identity_router(application))
-    });
-    router.layer(DefaultBodyLimit::max(MAX_REQUEST_BYTES))
+        .with_state(state)
+        .layer(DefaultBodyLimit::max(MAX_REQUEST_BYTES))
+}
+
+async fn preview_tunnel(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    uri: Uri,
+    upgrade: WebSocketUpgrade,
+) -> Response {
+    let (Some(preview), Some(exchange)) = (&state.preview, &state.client_exchange) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    if preview.matches_origin(&headers) || uri.query().is_some() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    if headers.get_all(AUTHORIZATION).iter().count() != 1
+        || headers
+            .get_all("x-winwincode-client-node-id")
+            .iter()
+            .count()
+            != 1
+    {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let Some(credential) = headers
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .filter(|value| !value.is_empty())
+    else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let Some(client_node_id) = headers
+        .get("x-winwincode-client-node-id")
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+    else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    if exchange
+        .authenticate_device(credential.as_bytes(), &client_node_id)
+        .is_err()
+    {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let preview = Arc::clone(preview);
+    upgrade
+        .on_upgrade(move |socket| async move {
+            preview.serve_tunnel(client_node_id, socket).await;
+        })
+        .into_response()
+}
+
+async fn create_preview_access(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    uri: Uri,
+    request: Request<Body>,
+) -> Response {
+    let Some(preview) = &state.preview else {
+        return not_found().await;
+    };
+    let origin = match allowed_origin(&state, &headers) {
+        Ok(origin) => origin,
+        Err(error) => return error.into_response(),
+    };
+    if uri.query().is_some() {
+        return BoundaryError::new(
+            StatusCode::BAD_REQUEST,
+            "QUERY_PARAMETERS_FORBIDDEN",
+            "credentials and routing values are not accepted in the URL query",
+            origin,
+        )
+        .into_response();
+    }
+    let body = match parse_json_body(request, origin.clone()).await {
+        Ok(body) => body,
+        Err(error) => return error.into_response(),
+    };
+    let (principal, origin, _) = match authorize(&state, &headers, &uri) {
+        Ok(authorized) => authorized,
+        Err(error) => return error.into_response(),
+    };
+    let Some(user_id) = principal.actor_user_id() else {
+        return connect_error_response(
+            StatusCode::FORBIDDEN,
+            "PERMISSION_DENIED",
+            "a signed-in user is required",
+            origin.as_ref(),
+        );
+    };
+    match preview.grant(&user_id.0, &body) {
+        Ok(body) => json_response(StatusCode::CREATED, body, origin.as_ref()),
+        Err(error) => preview_error_response(&error, origin.as_ref()),
+    }
+}
+
+async fn revoke_preview_access(
+    State(state): State<ServerState>,
+    Path(access_id): Path<String>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Response {
+    let Some(preview) = &state.preview else {
+        return not_found().await;
+    };
+    let (principal, origin, _) = match authorize(&state, &headers, &uri) {
+        Ok(authorized) => authorized,
+        Err(error) => return error.into_response(),
+    };
+    let Some(user_id) = principal.actor_user_id() else {
+        return connect_error_response(
+            StatusCode::FORBIDDEN,
+            "PERMISSION_DENIED",
+            "a signed-in user is required",
+            origin.as_ref(),
+        );
+    };
+    match preview.revoke(&user_id.0, &access_id) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => preview_error_response(&error, origin.as_ref()),
+    }
+}
+
+async fn preview_root(
+    State(state): State<ServerState>,
+    Path((access_id, token)): Path<(String, String)>,
+    headers: HeaderMap,
+    request: Request<Body>,
+) -> Response {
+    proxy_preview(state, access_id, token, "/".to_owned(), headers, request).await
+}
+
+async fn preview_path(
+    State(state): State<ServerState>,
+    Path((access_id, token, path)): Path<(String, String, String)>,
+    headers: HeaderMap,
+    request: Request<Body>,
+) -> Response {
+    proxy_preview(
+        state,
+        access_id,
+        token,
+        format!("/{path}"),
+        headers,
+        request,
+    )
+    .await
+}
+
+async fn proxy_preview(
+    state: ServerState,
+    access_id: String,
+    token: String,
+    mut target: String,
+    headers: HeaderMap,
+    request: Request<Body>,
+) -> Response {
+    let Some(preview) = &state.preview else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    if !preview.matches_origin(&headers) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    if let Some(query) = request.uri().query() {
+        target.push('?');
+        target.push_str(query);
+    }
+    let method = request.method().clone();
+    let Ok(body) = to_bytes(request.into_body(), MAX_REQUEST_BYTES).await else {
+        return StatusCode::PAYLOAD_TOO_LARGE.into_response();
+    };
+    match preview
+        .forward(&access_id, &token, &method, &target, &headers, &body)
+        .await
+    {
+        Ok(forwarded) => {
+            let mut response = Response::builder().status(forwarded.status);
+            if let Some(response_headers) = response.headers_mut() {
+                for (name, value) in &forwarded.headers {
+                    response_headers.append(name, value.clone());
+                }
+                response_headers.insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+                response_headers.insert("referrer-policy", HeaderValue::from_static("no-referrer"));
+                response_headers.insert(
+                    "x-content-type-options",
+                    HeaderValue::from_static("nosniff"),
+                );
+            }
+            response
+                .body(Body::from(forwarded.body))
+                .unwrap_or_else(|_| StatusCode::BAD_GATEWAY.into_response())
+        }
+        Err(error) => preview_error_response(&error, None),
+    }
+}
+
+fn preview_error_response(error: &PreviewError, origin: Option<&HeaderValue>) -> Response {
+    let (status, code) = match error.kind() {
+        PreviewErrorKind::InvalidRequest => (StatusCode::BAD_REQUEST, "INVALID_REQUEST"),
+        PreviewErrorKind::NotFound => (StatusCode::NOT_FOUND, "RESOURCE_NOT_FOUND"),
+        PreviewErrorKind::Forbidden => (StatusCode::FORBIDDEN, "PERMISSION_DENIED"),
+        PreviewErrorKind::Conflict => (StatusCode::CONFLICT, "WRONG_STATE"),
+        PreviewErrorKind::Timeout => (StatusCode::GATEWAY_TIMEOUT, "PREVIEW_TIMEOUT"),
+        PreviewErrorKind::Unavailable => (StatusCode::BAD_GATEWAY, "PREVIEW_UNAVAILABLE"),
+    };
+    connect_error_response(status, code, error.message(), origin)
 }
 
 async fn remote_worker_exchange(
@@ -1044,7 +1262,7 @@ async fn force_release_client_occupancy(
 /// `occupied-by-other` privacy projection for everyone else (plan §16.4).
 async fn client_occupancy_status(
     State(state): State<ServerState>,
-    axum::extract::Path(client_id): axum::extract::Path<String>,
+    Path(client_id): Path<String>,
     headers: HeaderMap,
     uri: Uri,
 ) -> Response {
@@ -1167,7 +1385,7 @@ fn occupancy_flow_error(error: &ClientOccupancyError, origin: Option<&HeaderValu
 /// visibility check.
 async fn list_client_candidates(
     State(state): State<ServerState>,
-    axum::extract::Path(client_id): axum::extract::Path<String>,
+    Path(client_id): Path<String>,
     headers: HeaderMap,
     uri: Uri,
 ) -> Response {

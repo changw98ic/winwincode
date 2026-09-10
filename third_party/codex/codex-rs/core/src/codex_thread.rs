@@ -448,10 +448,11 @@ impl CodexThread {
             turn_id,
             thread_settings,
             trace,
+            submit_change_batch,
         } = request;
         match self
             .io
-            .submit_recover_turn(thread_settings, trace, turn_id)
+            .submit_recover_turn(thread_settings, trace, turn_id, submit_change_batch)
             .await?
         {
             TurnInputSubmission::Started { turn_id } => {

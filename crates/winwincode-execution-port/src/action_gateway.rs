@@ -21,6 +21,10 @@ use crate::action_normalizer::{
     ToolRequest, normalize_action,
 };
 use crate::generated::{ActionEnforcementReceiptMessage, ExecutionLeaseStamp};
+pub use crate::repository_rule_pack::{PostActionHook, PostActionOutcome};
+use crate::repository_rule_pack::{
+    RepositoryRuleEvent, RepositoryRuleFact, RepositoryRulePack, language_for_path,
+};
 use winwincode_domain::SessionIdentity;
 
 /// Version and digest bound into a Worker's execution token.
@@ -140,6 +144,71 @@ pub trait PreActionDecisionRecorder<Policy> {
         input: GateInput<'_, Policy>,
         decision: &GateDecision,
     ) -> Result<(), Self::Error>;
+
+    /// Persists deterministic hooks derived from the observed request and the
+    /// executor result.
+    ///
+    /// # Errors
+    ///
+    /// Returns the recorder's durable-write error.
+    fn record_post_action(
+        &mut self,
+        input: GateInput<'_, Policy>,
+        outcome: PostActionOutcome,
+        hooks: &[PostActionHook],
+    ) -> Result<(), Self::Error>;
+}
+
+/// Derives post-action work from trusted normalized facts, never model text.
+#[must_use]
+pub fn post_action_hooks(
+    observed: &ObservedAction,
+    outcome: PostActionOutcome,
+) -> Vec<PostActionHook> {
+    post_action_hooks_with_rules(&RepositoryRulePack::project_defaults(), observed, outcome)
+}
+
+fn post_action_hooks_with_rules(
+    rules: &RepositoryRulePack,
+    observed: &ObservedAction,
+    outcome: PostActionOutcome,
+) -> Vec<PostActionHook> {
+    let event = match observed.source {
+        crate::action_normalizer::ActionSource::File
+            if observed.operation != crate::action_normalizer::ActionOperation::Execute =>
+        {
+            RepositoryRuleEvent::FileChanged
+        }
+        crate::action_normalizer::ActionSource::Shell
+        | crate::action_normalizer::ActionSource::Git => RepositoryRuleEvent::CommandFinished,
+        crate::action_normalizer::ActionSource::Network
+        | crate::action_normalizer::ActionSource::Mcp
+        | crate::action_normalizer::ActionSource::File => return Vec::new(),
+    };
+    let targets = if event == RepositoryRuleEvent::FileChanged {
+        observed
+            .targets
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+    } else {
+        vec![""]
+    };
+    targets
+        .into_iter()
+        .flat_map(|path| {
+            rules
+                .dry_run(&RepositoryRuleFact {
+                    event,
+                    language: language_for_path(path),
+                    path: (!path.is_empty()).then_some(path),
+                    outcome: Some(outcome),
+                })
+                .map_or_else(|_| Vec::new(), |evaluation| evaluation.actions)
+        })
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 /// The existing Codex Core tool runtime seam.
@@ -226,6 +295,8 @@ pub enum ActionGatewayError<RecorderError, ExecutorError> {
     ReceiptUse(ActionReceiptUseError),
     /// The gate decided, but its control event was not durably retained.
     DecisionRecord(RecorderError),
+    /// The tool returned, but its machine-derived post-action hook was not retained.
+    PostActionRecord(RecorderError),
     /// The authorized request reached Codex Core and its existing runtime failed.
     Executor(ExecutorError),
 }
@@ -236,7 +307,10 @@ impl<RecorderError, ExecutorError> ActionGatewayError<RecorderError, ExecutorErr
     pub const fn rejection_code(&self) -> Option<ActionGatewayRejectionCode> {
         match self {
             Self::Rejected { code, .. } => Some(*code),
-            Self::Normalization(_) | Self::DecisionRecord(_) | Self::Executor(_) => None,
+            Self::Normalization(_)
+            | Self::DecisionRecord(_)
+            | Self::PostActionRecord(_)
+            | Self::Executor(_) => None,
             Self::ActionEnforcement(_) => Some(ActionGatewayRejectionCode::InvalidActionReceipt),
             Self::ReceiptUse(ActionReceiptUseError::Conflict) => {
                 Some(ActionGatewayRejectionCode::ActionReceiptConflict)
@@ -272,6 +346,12 @@ impl<RecorderError: fmt::Display, ExecutorError: fmt::Display> fmt::Display
             Self::DecisionRecord(error) => {
                 write!(formatter, "gate decision was not durably recorded: {error}")
             }
+            Self::PostActionRecord(error) => {
+                write!(
+                    formatter,
+                    "post-action hook was not durably recorded: {error}"
+                )
+            }
             Self::Executor(error) => write!(formatter, "Codex tool execution failed: {error}"),
         }
     }
@@ -292,6 +372,7 @@ pub struct WorkerActionGateway<Policy, Gate, Recorder, Executor> {
     gate: Gate,
     recorder: Recorder,
     executor: Executor,
+    rules: RepositoryRulePack,
 }
 
 impl<Policy, Gate, Recorder, Executor> WorkerActionGateway<Policy, Gate, Recorder, Executor>
@@ -315,7 +396,21 @@ where
             gate,
             recorder,
             executor,
+            rules: RepositoryRulePack::project_defaults(),
         }
+    }
+
+    /// Adds a repository-local pack to the project defaults.
+    ///
+    /// # Errors
+    ///
+    /// Rejects invalid rules before the gateway can execute an action.
+    pub fn with_repository_rules(
+        mut self,
+        rules: RepositoryRulePack,
+    ) -> Result<Self, crate::repository_rule_pack::RepositoryRulePackError> {
+        self.rules = rules.with_project_defaults()?;
+        Ok(self)
     }
 
     /// Atomically replaces the authority used for all subsequent actions.
@@ -398,10 +493,35 @@ where
                 ));
             }
         }
-        let output = self
-            .executor
-            .execute(&action.request)
-            .map_err(ActionGatewayError::Executor)?;
+        let input = GateInput {
+            envelope: &self.envelope,
+            intent: &normalization.intent,
+            observed: &normalization.observed,
+        };
+        let output = match self.executor.execute(&action.request) {
+            Ok(output) => {
+                let hooks = post_action_hooks_with_rules(
+                    &self.rules,
+                    input.observed,
+                    PostActionOutcome::Succeeded,
+                );
+                self.recorder
+                    .record_post_action(input, PostActionOutcome::Succeeded, &hooks)
+                    .map_err(ActionGatewayError::PostActionRecord)?;
+                output
+            }
+            Err(error) => {
+                let hooks = post_action_hooks_with_rules(
+                    &self.rules,
+                    input.observed,
+                    PostActionOutcome::Failed,
+                );
+                self.recorder
+                    .record_post_action(input, PostActionOutcome::Failed, &hooks)
+                    .map_err(ActionGatewayError::PostActionRecord)?;
+                return Err(ActionGatewayError::Executor(error));
+            }
+        };
         Ok(ExecutedAction {
             normalization,
             decision,

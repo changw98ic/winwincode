@@ -1,8 +1,9 @@
 # winwincode-server
 
-The standalone public network boundary for the embedded Control Plane. One
-configured origin serves health, HTTP commands, HTTP queries, and WebSocket
-events. Worker execution and provider addresses are not part of this router.
+The standalone public network boundary for the embedded Control Plane. The
+main configured origin serves health, HTTP commands, HTTP queries, and
+WebSocket events; an optional separate origin serves short-lived previews.
+Worker execution and provider addresses are not part of this router.
 
 Runtime configuration is supplied through `ServerConfig`. TLS certificate and
 key paths, allowed browser origins, bind address, public URL, storage path, and
@@ -54,6 +55,12 @@ request; HTTP publication commands do not supply policy or provider facts.
 `WWC_SERVER_BOOTSTRAP_WINDOW_SECONDS` optionally changes the ten-minute
 initialization window, and `WWC_SERVER_SESSION_TTL_SECONDS` optionally changes
 the eight-hour browser-session lifetime (live sessions renew while in use).
+`WWC_SERVER_PREVIEW_PUBLIC_URL` optionally enables the separate preview origin.
+It must differ from `WWC_SERVER_PUBLIC_URL` and use the same TLS scheme. Preview
+access is issued for five minutes to the current Client occupancy holder and
+can be revoked immediately; the Device Client initiates the authenticated
+tunnel and maps each opaque source ID to one exact loopback service, so browser
+requests never select a device host or port.
 The Client sends the proof only in the Authorization header of
 `POST /api/v1/auth/session` while the Server is uninitialized; every later
 session request carries `username` and `password` in that request body.

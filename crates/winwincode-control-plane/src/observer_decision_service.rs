@@ -16,7 +16,7 @@ use sha2::{Digest, Sha256};
 use winwincode_delivery::application::failure_router::{FailureRoute, FailureRoutingDecision};
 use winwincode_domain::{
     CodexThreadId, ControlPlaneEventId, EvidenceId, ExecutionEventId, ExecutionJobId, FencingToken,
-    Instant, LeaseId, ModelExchangeId, ProductSessionId, Sha256Digest, StageRunId, WorkerId,
+    Instant, LeaseId, ModelExchangeId, ProductSessionId, Sha256Digest, WorkRunId, WorkerId,
     WorkerInstanceId, WorkerSessionId,
 };
 use winwincode_execution_port::action_gateway::GateDecision;
@@ -304,7 +304,11 @@ pub struct ObserverRuntimeTraceRef {
 pub struct ObserverExecutionSource {
     pub product_session_id: ProductSessionId,
     pub product_session_revision: u64,
-    pub stage_run_id: Option<StageRunId>,
+    pub work_contract_id: Option<winwincode_domain::WorkContractId>,
+    pub work_contract_revision: Option<winwincode_domain::Revision>,
+    pub work_item_id: Option<winwincode_domain::WorkItemId>,
+    pub work_item_revision: Option<winwincode_domain::Revision>,
+    pub work_run_id: Option<WorkRunId>,
     pub execution_job_id: ExecutionJobId,
     pub job_revision: u64,
     pub worker_id: WorkerId,
@@ -350,7 +354,11 @@ impl ObserverExecutionSource {
         Ok(Self {
             product_session_id: route.product_session_id.clone(),
             product_session_revision,
-            stage_run_id: route.stage_run_id.clone(),
+            work_contract_id: route.work_contract_id.clone(),
+            work_contract_revision: route.work_contract_revision.clone(),
+            work_item_id: route.work_item_id.clone(),
+            work_item_revision: route.work_item_revision.clone(),
+            work_run_id: route.work_run_id.clone(),
             execution_job_id: route.execution_job_id.clone(),
             job_revision: route.job_revision,
             worker_id: runtime.worker_id.clone(),
@@ -1097,8 +1105,8 @@ fn validate_source_shape(
     validate_id(&source.worker_session_id.0, "workerSessionId")?;
     validate_id(&source.codex_thread_id.0, "codexThreadId")?;
     validate_id(&source.lease_id.0, "leaseId")?;
-    if let Some(stage_run_id) = &source.stage_run_id {
-        validate_id(&stage_run_id.0, "stageRunId")?;
+    if let Some(work_run_id) = &source.work_run_id {
+        validate_id(&work_run_id.0, "workRunId")?;
     }
     if source.product_session_revision == 0
         || source.product_session_revision > MAX_SAFE_INTEGER
@@ -1109,7 +1117,18 @@ fn validate_source_shape(
         || source.attempt == 0
         || source.attempt > 1_000
         || source.execution_scope.product_session_id != source.product_session_id
-        || source.stage_run_id.is_some() != source.execution_scope.delivery_id.is_some()
+        || source.work_run_id.is_some() != source.execution_scope.delivery_id.is_some()
+        || source.work_run_id.is_some() != source.work_contract_id.is_some()
+        || source.work_run_id.is_some() != source.work_contract_revision.is_some()
+        || source.work_run_id.is_some() != source.work_item_id.is_some()
+        || source.work_run_id.is_some() != source.work_item_revision.is_some()
+        || [&source.work_contract_revision, &source.work_item_revision]
+            .into_iter()
+            .flatten()
+            .any(|revision| {
+                u64::try_from(revision.0)
+                    .map_or(true, |value| !(1..=MAX_SAFE_INTEGER).contains(&value))
+            })
     {
         return Err(observer_error(
             ObserverDecisionServiceErrorCode::SourceMismatch,
@@ -1143,7 +1162,11 @@ fn validate_product_session_binding(
             let slot = durable.slot();
             binding.execution_job_id() == &source.execution_job_id
                 && binding.product_session_id() == &source.product_session_id
-                && binding.stage_run_id() == source.stage_run_id.as_ref()
+                && binding.work_contract_id() == source.work_contract_id.as_ref()
+                && binding.work_contract_revision() == source.work_contract_revision.as_ref()
+                && binding.work_item_id() == source.work_item_id.as_ref()
+                && binding.work_item_revision() == source.work_item_revision.as_ref()
+                && binding.work_run_id() == source.work_run_id.as_ref()
                 && binding.worker_session_id() == Some(&source.worker_session_id)
                 && binding.codex_thread_id() == Some(&source.codex_thread_id)
                 && slot.authority.worker_id == source.worker_id

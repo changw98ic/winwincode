@@ -39,7 +39,7 @@
 //! use winwincode_delivery::application::stage::TerminalWorkerOutcome;
 //!
 //! let _caller_built_outcome = TerminalWorkerOutcome {
-//!     stage_run_id: todo!(),
+//!     work_run_id: todo!(),
 //!     execution_job_id: todo!(),
 //!     attempt: 1,
 //!     lease_id: todo!(),
@@ -78,25 +78,30 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use winwincode_domain::{
     ArtifactId, AttentionItemId, CodexThreadId, DeliveryId, DeliveryTaskId, ExecutionAckSequence,
-    ExecutionJobId, FencingToken, Instant, LeaseId, ProductSessionId, Sha256Digest, StageRunId,
-    WorkerId, WorkerInstanceId, WorkerSessionId,
+    ExecutionJobId, FencingToken, Instant, LeaseId, ProductSessionId, Revision, Sha256Digest,
+    StageRunId, WorkContractId, WorkItemId, WorkRunId, WorkerId, WorkerInstanceId, WorkerSessionId,
 };
 use winwincode_storage::ExecutionDispatchAuthority;
 
 use crate::domain::{
-    AttentionItem, AttentionItemStatus, AttentionItemType, DELIVERY_SCHEMA_VERSION, Delivery,
-    DeliverySnapshot, DeliveryStage, DeliveryStatus, DeliveryTaskStatus, SessionBinding,
+    AttentionItemStatus, Delivery, DeliverySnapshot, DeliveryStage, DeliveryStatus, SessionBinding,
     SessionBindingId, StageRun, StageRunActorType, StageRunStatus,
     rework::{ReworkAuthorization, ReworkClarificationReason, ReworkDecision},
 };
 use crate::domain::{MAX_COLLECTION_LENGTH, MAX_SAFE_INTEGER};
 
-use super::task::{TaskFact, runnable_task, transition_task_status};
+use super::workrun::WorkRunAggregate;
 use super::{CoordinationError, CoordinationErrorCode, require_mutation_time};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewStageIdentities {
+    /// Historical stage projection identity; canonical binding uses `work_run_id`.
     pub stage_run_id: StageRunId,
+    pub work_contract_id: WorkContractId,
+    pub work_contract_revision: Revision,
+    pub work_item_id: WorkItemId,
+    pub work_item_revision: Revision,
+    pub work_run_id: WorkRunId,
     pub execution_job_id: ExecutionJobId,
     pub session_binding_id: SessionBindingId,
     pub attention_item_id: AttentionItemId,
@@ -246,7 +251,7 @@ pub struct DurableTerminalOutcomeInput {
     pub worker_session_id: WorkerSessionId,
     pub issued_at: Instant,
     pub expires_at: Instant,
-    pub stage_run_id: StageRunId,
+    pub work_run_id: WorkRunId,
     pub status: TerminalOutcomeStatus,
     pub codex_thread_id: Option<CodexThreadId>,
     pub finished_at_millis: u64,
@@ -261,7 +266,7 @@ pub struct DurableTerminalOutcomeInput {
 /// dispatch record when [`seal_dispatch_terminal_outcome`] is called.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkerTerminalOutcomeReport {
-    pub stage_run_id: StageRunId,
+    pub work_run_id: WorkRunId,
     pub status: TerminalOutcomeStatus,
     pub codex_thread_id: Option<CodexThreadId>,
     pub finished_at_millis: u64,
@@ -292,7 +297,7 @@ pub fn seal_dispatch_terminal_outcome(
         worker_session_id: dispatch.worker_session_id().clone(),
         issued_at: lease.issued_at.clone(),
         expires_at: lease.expires_at.clone(),
-        stage_run_id: report.stage_run_id,
+        work_run_id: report.work_run_id,
         status: report.status,
         codex_thread_id: report.codex_thread_id,
         finished_at_millis: report.finished_at_millis,
@@ -308,8 +313,8 @@ impl DeliveryTerminalOutcomeFacts {
     }
 
     #[must_use]
-    pub const fn stage_run_id(&self) -> &StageRunId {
-        &self.outcome.stage_run_id
+    pub const fn work_run_id(&self) -> &WorkRunId {
+        &self.outcome.work_run_id
     }
 
     #[must_use]
@@ -346,58 +351,52 @@ impl DeliveryTerminalOutcomeFacts {
         self.verify(delivery)
     }
 
+    /// Revalidates a successful report for read-only candidate derivation,
+    /// without requiring the Controller to have settled the `WorkItem` yet.
+    pub(crate) fn verify_successful_report(
+        &self,
+        delivery: &Delivery,
+    ) -> Result<VerifiedTerminalOutcome, CoordinationError> {
+        if self.outcome.status != TerminalOutcomeStatus::Succeeded {
+            return Err(CoordinationError::new(
+                CoordinationErrorCode::WrongState,
+                "candidate source requires a successful terminal outcome",
+            ));
+        }
+        let running = delivery
+            .snapshot()
+            .work_run_aggregate
+            .runs
+            .iter()
+            .any(|run| {
+                run.id == self.outcome.work_run_id
+                    && run.state == winwincode_domain::WorkRunState::Running
+            });
+        if running {
+            self.verify_active(delivery)
+        } else {
+            self.verify_settled_success(delivery)
+        }
+    }
+
     /// Revalidates one already-settled successful Worker outcome for derived
     /// candidate/source reads. This does not mutate or re-settle Delivery.
     pub(crate) fn verify_settled_success(
         &self,
         delivery: &Delivery,
     ) -> Result<VerifiedTerminalOutcome, CoordinationError> {
-        let mut runs = delivery
-            .snapshot()
-            .stage_runs
-            .iter()
-            .filter(|run| run.id == self.outcome.stage_run_id);
-        let run = runs.next().ok_or_else(|| {
-            CoordinationError::new(
-                CoordinationErrorCode::WrongState,
-                "settled terminal outcome StageRun is missing",
-            )
-        })?;
-        if runs.next().is_some()
-            || run.status != StageRunStatus::Succeeded
-            || run.finished_at_millis != Some(self.outcome.metadata.finished_at_millis)
-            || self.outcome.status != TerminalOutcomeStatus::Succeeded
-        {
+        if self.outcome.status != TerminalOutcomeStatus::Succeeded {
             return Err(CoordinationError::new(
                 CoordinationErrorCode::WrongState,
-                "candidate source requires one exact successful terminal StageRun",
+                "candidate source requires a successful terminal outcome",
             ));
         }
-        let binding = exact_binding(delivery, run, true)?;
-        validate_terminal_metadata(run, binding, &self.outcome.metadata)?;
-        let lease = self.authority.active_lease();
-        let exact = self.outcome.execution_job_id == binding.execution_job_id
-            && self.outcome.execution_job_id == lease.execution_job_id
-            && self.outcome.attempt == run.attempt
-            && self.outcome.attempt == lease.attempt
-            && binding.worker_session_id.as_ref() == Some(&self.outcome.worker_session_id)
-            && self.outcome.worker_session_id == lease.worker_session_id
-            && self.outcome.lease_id == lease.lease_id
-            && self.outcome.fencing_token == lease.fencing_token
-            && self.outcome.worker_id == lease.worker_id
-            && self.outcome.worker_instance_id == lease.worker_instance_id;
-        if !exact {
-            return Err(CoordinationError::new(
-                CoordinationErrorCode::BindingConflict,
-                "settled Worker outcome does not match its StageRun lease and SessionBinding",
-            ));
-        }
-        Ok(VerifiedTerminalOutcome {
-            stage_run_id: self.outcome.stage_run_id.clone(),
-            lease_identity: lease.clone(),
-            status: self.outcome.status,
-            metadata: self.outcome.metadata.clone(),
-        })
+        verify_work_run_terminal(
+            delivery,
+            self.authority.active_lease(),
+            self.outcome.clone(),
+            true,
+        )
     }
 }
 
@@ -406,7 +405,7 @@ impl DeliveryTerminalOutcomeFacts {
 ///
 /// # Errors
 ///
-/// Fails closed when any input differs from the active `StageRun` and its
+/// Fails closed when any input differs from the active `WorkRun` and its
 /// complete `SessionBinding`, or when the terminal metadata is invalid.
 pub fn reconcile_durable_terminal_outcome(
     delivery: &Delivery,
@@ -417,12 +416,12 @@ pub fn reconcile_durable_terminal_outcome(
     Ok(facts)
 }
 
-/// Reconciles a persisted successful outcome after its `StageRun` was settled by
+/// Reconciles a persisted successful outcome after its `WorkRun` was settled by
 /// the same atomic handoff transaction.
 ///
 /// # Errors
 ///
-/// Fails closed when the successful `StageRun`, binding, lease identity,
+/// Fails closed when the successful `WorkRun`, binding, lease identity,
 /// terminal metadata, or finish time no longer matches the Delivery.
 pub fn reconcile_durable_settled_terminal_outcome(
     delivery: &Delivery,
@@ -449,7 +448,7 @@ fn terminal_outcome_facts(input: DurableTerminalOutcomeInput) -> DeliveryTermina
         expires_at: input.expires_at,
     };
     let outcome = TerminalWorkerOutcome {
-        stage_run_id: input.stage_run_id,
+        work_run_id: input.work_run_id,
         execution_job_id: input.execution_job_id,
         attempt: input.attempt,
         lease_id: input.lease_id,
@@ -488,7 +487,7 @@ impl SessionBindingAuthority {
 /// Terminal fact reported by Worker through `ExecutionPort`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TerminalWorkerOutcome {
-    stage_run_id: StageRunId,
+    work_run_id: WorkRunId,
     execution_job_id: ExecutionJobId,
     attempt: u64,
     lease_id: LeaseId,
@@ -543,7 +542,7 @@ pub struct TerminalArtifactReference {
 /// scheduler lease/fencing identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedTerminalOutcome {
-    stage_run_id: StageRunId,
+    work_run_id: WorkRunId,
     lease_identity: ActiveLeaseIdentity,
     status: TerminalOutcomeStatus,
     metadata: TerminalOutcomeMetadata,
@@ -551,8 +550,8 @@ pub struct VerifiedTerminalOutcome {
 
 impl VerifiedTerminalOutcome {
     #[must_use]
-    pub fn stage_run_id(&self) -> &StageRunId {
-        &self.stage_run_id
+    pub fn work_run_id(&self) -> &WorkRunId {
+        &self.work_run_id
     }
 
     #[must_use]
@@ -618,13 +617,13 @@ impl VerifiedTerminalOutcome {
 
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) fn fixture_verified_terminal_outcome(
-    stage_run_id: StageRunId,
+    work_run_id: WorkRunId,
     lease_identity: ActiveLeaseIdentity,
     status: TerminalOutcomeStatus,
     metadata: TerminalOutcomeMetadata,
 ) -> VerifiedTerminalOutcome {
     VerifiedTerminalOutcome {
-        stage_run_id,
+        work_run_id,
         lease_identity,
         status,
         metadata,
@@ -642,44 +641,95 @@ pub(crate) fn verify_terminal_outcome(
     lease: &ActiveLeaseIdentity,
     outcome: TerminalWorkerOutcome,
 ) -> Result<VerifiedTerminalOutcome, CoordinationError> {
-    let mut active = delivery
-        .snapshot()
-        .stage_runs
-        .iter()
-        .filter(|run| is_active(run));
-    let run = active.next().ok_or_else(|| {
+    verify_work_run_terminal(delivery, lease, outcome, false)
+}
+
+fn verify_work_run_terminal(
+    delivery: &Delivery,
+    lease: &ActiveLeaseIdentity,
+    outcome: TerminalWorkerOutcome,
+    settled: bool,
+) -> Result<VerifiedTerminalOutcome, CoordinationError> {
+    use winwincode_domain::WorkRunState;
+    let snapshot = delivery.snapshot();
+    snapshot.work_run_aggregate.validate().map_err(|_| {
         CoordinationError::new(
-            CoordinationErrorCode::WrongState,
-            "terminal outcome has no active StageRun",
+            CoordinationErrorCode::BindingConflict,
+            "invalid WorkRun aggregate",
         )
     })?;
-    if active.next().is_some() {
+    let run = snapshot
+        .work_run_aggregate
+        .runs
+        .iter()
+        .find(|run| run.id == outcome.work_run_id)
+        .ok_or_else(|| {
+            CoordinationError::new(
+                CoordinationErrorCode::WrongState,
+                "terminal outcome WorkRun is missing",
+            )
+        })?;
+    if if settled {
+        !matches!(
+            run.state,
+            WorkRunState::CandidateReady | WorkRunState::Settled
+        )
+    } else {
+        run.state != WorkRunState::Running
+    } {
         return Err(CoordinationError::new(
-            CoordinationErrorCode::Conflict,
-            "terminal outcome cannot choose among multiple active StageRuns",
+            CoordinationErrorCode::WrongState,
+            "terminal outcome WorkRun has the wrong state",
         ));
     }
-    let binding = exact_binding(delivery, run, true)?;
-    validate_terminal_metadata(run, binding, &outcome.metadata)?;
-    let exact = outcome.stage_run_id == run.id
-        && outcome.execution_job_id == binding.execution_job_id
+    let mut bindings = snapshot
+        .session_bindings
+        .iter()
+        .filter(|binding| binding.work_run_id == run.id);
+    let binding = bindings.next().ok_or_else(|| {
+        CoordinationError::new(
+            CoordinationErrorCode::BindingConflict,
+            "terminal WorkRun binding is missing",
+        )
+    })?;
+    let exact = bindings.next().is_none()
+        && binding.delivery_id == snapshot.id
+        && binding.work_contract_id == run.work_contract_id
+        && binding.work_contract_revision == run.contract_revision
+        && binding.work_item_id == run.work_item_id
+        && binding.work_item_revision == run.work_item_revision
+        && Some(&binding.product_session_id) == run.product_session_id.as_ref()
+        && binding.execution_job_id == run.execution_job_id
+        && binding.attempt == lease.attempt
+        && binding.worker_id.as_ref() == Some(&run.worker_id)
+        && binding.worker_instance_id.as_ref() == Some(&run.worker_instance_id)
+        && binding.worker_session_id.as_ref() == Some(&run.worker_session_id)
+        && binding.lease_id.as_ref() == Some(&run.lease_id)
+        && binding.fencing_token.as_ref().map(|token| &token.0) == Some(&run.fencing_token)
+        && binding.codex_thread_id == run.codex_thread_id
+        && run.execution_job_id == lease.execution_job_id
+        && u64::try_from(run.attempt).ok() == Some(lease.attempt)
+        && run.worker_id == lease.worker_id
+        && run.worker_instance_id == lease.worker_instance_id
+        && run.worker_session_id == lease.worker_session_id
+        && run.lease_id == lease.lease_id
+        && run.fencing_token == lease.fencing_token.0
         && outcome.execution_job_id == lease.execution_job_id
-        && outcome.attempt == run.attempt
         && outcome.attempt == lease.attempt
-        && binding.worker_session_id.as_ref() == Some(&outcome.worker_session_id)
+        && outcome.worker_id == lease.worker_id
+        && outcome.worker_instance_id == lease.worker_instance_id
         && outcome.worker_session_id == lease.worker_session_id
         && outcome.lease_id == lease.lease_id
-        && outcome.fencing_token == lease.fencing_token
-        && outcome.worker_id == lease.worker_id
-        && outcome.worker_instance_id == lease.worker_instance_id;
+        && outcome.fencing_token == lease.fencing_token;
     if !exact {
         return Err(CoordinationError::new(
             CoordinationErrorCode::BindingConflict,
-            "terminal Worker outcome does not match the active StageRun lease and SessionBinding",
+            "terminal outcome does not match exact WorkRun, binding, and lease",
         ));
     }
+    validate_terminal_metadata(binding, &outcome.metadata)?;
     Ok(VerifiedTerminalOutcome {
-        stage_run_id: outcome.stage_run_id,
+        work_run_id: outcome.work_run_id,
         lease_identity: lease.clone(),
         status: outcome.status,
         metadata: outcome.metadata,
@@ -694,9 +744,9 @@ pub mod test_support {
     use super::{
         ActiveLeaseIdentity, CodexThreadId, CoordinationError, Delivery,
         DeliveryTerminalOutcomeFacts, ExecutionAckSequence, ExecutionJobId, FencingToken, Instant,
-        LeaseId, SessionBindingAuthority, Sha256Digest, StageRunId, TerminalArtifactReference,
+        LeaseId, SessionBindingAuthority, Sha256Digest, TerminalArtifactReference,
         TerminalOutcomeMetadata, TerminalOutcomeStatus, TerminalWorkerOutcome,
-        VerifiedTerminalOutcome, WorkerId, WorkerInstanceId, WorkerSessionId,
+        VerifiedTerminalOutcome, WorkRunId, WorkerId, WorkerInstanceId, WorkerSessionId,
     };
 
     #[allow(clippy::too_many_arguments)]
@@ -765,7 +815,7 @@ pub mod test_support {
     #[allow(clippy::too_many_arguments)]
     #[must_use]
     pub fn terminal_worker_outcome(
-        stage_run_id: StageRunId,
+        work_run_id: WorkRunId,
         execution_job_id: ExecutionJobId,
         attempt: u64,
         lease_id: LeaseId,
@@ -777,7 +827,7 @@ pub mod test_support {
         metadata: TerminalOutcomeMetadata,
     ) -> TerminalWorkerOutcome {
         TerminalWorkerOutcome {
-            stage_run_id,
+            work_run_id,
             execution_job_id,
             attempt,
             lease_id,
@@ -841,13 +891,11 @@ pub mod test_support {
 }
 
 fn validate_terminal_metadata(
-    run: &StageRun,
     binding: &SessionBinding,
     metadata: &TerminalOutcomeMetadata,
 ) -> Result<(), CoordinationError> {
     let max_sequence = i64::try_from(MAX_SAFE_INTEGER).unwrap_or(i64::MAX);
     if metadata.finished_at_millis > MAX_SAFE_INTEGER
-        || metadata.finished_at_millis < run.started_at_millis
         || metadata.finished_at_millis < binding.bound_at_millis
         || !(0..=max_sequence).contains(&metadata.last_event_sequence.0)
         || metadata.codex_thread_id != binding.codex_thread_id
@@ -908,6 +956,11 @@ pub struct ExecutionIntent {
     pub delivery_id: DeliveryId,
     pub delivery_task_id: Option<DeliveryTaskId>,
     pub stage_run_id: StageRunId,
+    pub work_contract_id: WorkContractId,
+    pub work_contract_revision: Revision,
+    pub work_item_id: WorkItemId,
+    pub work_item_revision: Revision,
+    pub work_run_id: WorkRunId,
     pub stage: DeliveryStage,
     pub role: String,
     pub attempt: u64,
@@ -925,6 +978,11 @@ struct ExecutionIntentSealIdentity<'intent> {
     delivery_id: &'intent DeliveryId,
     delivery_task_id: Option<&'intent DeliveryTaskId>,
     stage_run_id: &'intent StageRunId,
+    work_contract_id: &'intent WorkContractId,
+    work_contract_revision: &'intent Revision,
+    work_item_id: &'intent WorkItemId,
+    work_item_revision: &'intent Revision,
+    work_run_id: &'intent WorkRunId,
     stage: DeliveryStage,
     role: &'intent str,
     attempt: u64,
@@ -990,12 +1048,120 @@ pub struct StageAdvanceResult {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StageAdvanceKind {
-    Start,
     Resume,
     Clarify,
+    WorkRunDispatch,
 }
 
 impl StageAdvanceResult {
+    /// Creates the canonical `WorkRun` dispatch seal without consulting the
+    /// historical Delivery stage state. This never adds a `StageRun` or changes
+    /// accepted input. Sealed rework retires its candidate producer and reopens
+    /// that item. `WorkRun` and `SessionBinding` are added only after scheduler
+    /// acceptance. Authorized rework invalidates the previous Evidence/Verdict
+    /// atomically with the new immutable dispatch intent.
+    ///
+    /// # Errors
+    ///
+    /// Rejects stale revisions, non-runnable items, invalid identities, or a
+    /// mutation timestamp older than the current Delivery.
+    #[allow(clippy::too_many_arguments)]
+    pub fn canonical_workrun_dispatch(
+        source: &Delivery,
+        rework_authorization: Option<Box<ReworkAuthorization>>,
+        identities: NewStageIdentities,
+        product_session_id: ProductSessionId,
+        profile: String,
+        goal: String,
+        attempt: u64,
+        now_millis: u64,
+    ) -> Result<Self, CoordinationError> {
+        let rework_aggregate = rework_authorization
+            .as_ref()
+            .map(|authorization| authorization.dispatch_aggregate(source))
+            .transpose()
+            .map_err(|error| {
+                CoordinationError::new(CoordinationErrorCode::Conflict, error.to_string())
+            })?;
+        let aggregate = rework_aggregate
+            .as_ref()
+            .unwrap_or(&source.snapshot().work_run_aggregate);
+        validate_workrun_dispatch(
+            source,
+            aggregate,
+            rework_authorization.as_deref(),
+            &identities,
+            &profile,
+            &goal,
+            attempt,
+        )?;
+        if source
+            .snapshot()
+            .attention_items
+            .iter()
+            .any(|item| item.blocking && item.status == AttentionItemStatus::Open)
+        {
+            return Err(CoordinationError::new(
+                CoordinationErrorCode::AttentionRequired,
+                "resolve blocking Attention before dispatch",
+            ));
+        }
+        if source.revision() == MAX_SAFE_INTEGER || now_millis < source.snapshot().updated_at_millis
+        {
+            return Err(CoordinationError::new(
+                CoordinationErrorCode::RevisionConflict,
+                "WorkRun dispatch timestamp or Delivery revision is stale",
+            ));
+        }
+        let mut snapshot = source.clone().into_snapshot();
+        snapshot.revision += 1;
+        snapshot.updated_at_millis = now_millis;
+        if let Some(aggregate) = rework_aggregate {
+            snapshot.work_run_aggregate = aggregate;
+            crate::domain::rework::invalidate_candidate_authorization_for_writer_start(
+                &mut snapshot,
+            );
+        }
+        let mut intent = ExecutionIntent {
+            execution_job_id: identities.execution_job_id.clone(),
+            product_session_id,
+            delivery_id: source.id().clone(),
+            delivery_task_id: None,
+            stage_run_id: identities.stage_run_id,
+            work_contract_id: identities.work_contract_id,
+            work_contract_revision: identities.work_contract_revision,
+            work_item_id: identities.work_item_id,
+            work_item_revision: identities.work_item_revision,
+            work_run_id: identities.work_run_id,
+            stage: DeliveryStage::Executing,
+            role: profile,
+            attempt,
+            goal,
+            rework_authorization,
+            validation_seal: Sha256Digest(String::new()),
+        };
+        intent.validation_seal = seal_execution_intent(&snapshot, &intent)?;
+        let effect = StageAdvanceEffect::Dispatch(intent);
+        let delivery = Delivery::try_from_snapshot(snapshot).map_err(|error| {
+            CoordinationError::new(CoordinationErrorCode::Conflict, error.to_string())
+        })?;
+        Ok(Self {
+            delivery: delivery.clone(),
+            effect: effect.clone(),
+            source_delivery: source.clone(),
+            sealed_delivery: delivery,
+            sealed_effect: effect,
+            kind: StageAdvanceKind::WorkRunDispatch,
+        })
+    }
+
+    /// Returns whether this transition is the stage-free canonical `WorkRun`
+    /// dispatch seal.
+    #[must_use]
+    pub const fn is_canonical_workrun_dispatch(&self) -> bool {
+        matches!(self.kind, StageAdvanceKind::WorkRunDispatch)
+    }
+
     /// Checks that the public projection still matches the application-owned
     /// transition. Callers may inspect the projection, but cannot turn an
     /// edited copy into stage-start authority.
@@ -1003,7 +1169,7 @@ impl StageAdvanceResult {
     /// # Errors
     ///
     /// Returns a conflict when either the Delivery or execution effect was
-    /// changed after [`advance`] created this result.
+    /// changed after [`Self::canonical_workrun_dispatch`] created this result.
     pub fn validate_projection(&self) -> Result<(), CoordinationError> {
         if self.delivery != self.sealed_delivery || self.effect != self.sealed_effect {
             return Err(CoordinationError::new(
@@ -1019,10 +1185,10 @@ impl StageAdvanceResult {
         current: &Delivery,
     ) -> Result<(), CoordinationError> {
         self.validate_projection()?;
-        if self.kind != StageAdvanceKind::Start {
+        if !matches!(self.kind, StageAdvanceKind::WorkRunDispatch) {
             return Err(CoordinationError::new(
                 CoordinationErrorCode::WrongState,
-                "only a newly selected stage can be committed as stage.started",
+                "only a canonical WorkRun dispatch can be committed",
             ));
         }
         if self.source_delivery != *current {
@@ -1074,9 +1240,66 @@ impl StageAdvanceResult {
     }
 }
 
+fn validate_workrun_dispatch(
+    source: &Delivery,
+    aggregate: &WorkRunAggregate,
+    rework_authorization: Option<&ReworkAuthorization>,
+    identities: &NewStageIdentities,
+    profile: &str,
+    goal: &str,
+    attempt: u64,
+) -> Result<(), CoordinationError> {
+    let selected = match rework_authorization {
+        Some(authorization) => aggregate.start_item(authorization.work_item_id()),
+        None if matches!(profile, "reviewer" | "verifier" | "adversarial-verifier") => {
+            aggregate.start_verification(&identities.work_item_id)
+        }
+        None => aggregate.start_next(),
+    }
+    .map_err(|error| {
+        CoordinationError::new(CoordinationErrorCode::WrongState, format!("{error:?}"))
+    })?;
+    if identities.work_contract_id != aggregate.contract.id
+        || identities.work_contract_revision != aggregate.contract.revision
+        || identities.work_item_id != selected.work_item.id
+        || identities.work_item_revision != selected.work_item.revision
+        || i64::try_from(attempt).ok() != Some(selected.attempt)
+        || goal != selected.work_item.goal
+        || !matches!(
+            profile,
+            "executor" | "reviewer" | "verifier" | "adversarial-verifier" | "remediator"
+        )
+    {
+        return Err(CoordinationError::new(
+            CoordinationErrorCode::WrongState,
+            "WorkRun dispatch must match the selected WorkItem, contract, attempt and profile",
+        ));
+    }
+    if (profile == "remediator") != rework_authorization.is_some() {
+        return Err(CoordinationError::new(
+            CoordinationErrorCode::WrongState,
+            "remediator dispatch requires exactly one sealed rework authorization",
+        ));
+    }
+    if let Some(authorization) = rework_authorization {
+        authorization
+            .validate_for_dispatch(source)
+            .map_err(|error| {
+                CoordinationError::new(CoordinationErrorCode::Conflict, error.to_string())
+            })?;
+        if i64::try_from(attempt).ok() != Some(authorization.work_run_attempt()) {
+            return Err(CoordinationError::new(
+                CoordinationErrorCode::Conflict,
+                "rework must dispatch the exact failed candidate WorkItem and revision",
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CancelIntent {
-    pub stage_run_id: StageRunId,
+    pub work_run_id: WorkRunId,
     pub execution_job_id: ExecutionJobId,
     pub attempt: u64,
     pub product_session_id: ProductSessionId,
@@ -1085,7 +1308,7 @@ pub struct CancelIntent {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CancelAcknowledgement {
-    pub stage_run_id: StageRunId,
+    pub work_run_id: WorkRunId,
     pub execution_job_id: ExecutionJobId,
     pub attempt: u64,
     pub worker_session_id: WorkerSessionId,
@@ -1128,69 +1351,12 @@ pub fn validate_stage_executor(
     }
 }
 
-/// Selects and starts the only legal next Delivery stage.
-///
-/// The caller supplies fresh identities but cannot supply a stage or attempt.
-///
-/// # Errors
-///
-/// Returns a stable coordination error when the revision or Delivery state is
-/// not valid for one next stage.
-pub fn advance(
-    delivery: &Delivery,
-    input: AdvanceStageInput,
-) -> Result<StageAdvanceResult, CoordinationError> {
-    let next = select_next_stage(delivery, &input)?;
-    let run = StageRun {
-        schema_version: DELIVERY_SCHEMA_VERSION,
-        id: input.identities.stage_run_id.clone(),
-        delivery_id: delivery.id().clone(),
-        delivery_task_id: next.delivery_task_id.clone(),
-        stage: next.stage,
-        actor_type: next.actor_type,
-        role: next.role.to_owned(),
-        status: if next.actor_type == StageRunActorType::Human {
-            StageRunStatus::Waiting
-        } else {
-            StageRunStatus::Running
-        },
-        attempt: next.attempt,
-        started_at_millis: input.now_millis,
-        finished_at_millis: None,
-    };
-    let mut snapshot = delivery.clone().into_snapshot();
-    snapshot.revision += 1;
-    snapshot.status = next.next_status;
-    settle_previous_run(
-        &mut snapshot,
-        next.previous,
-        input.previous_outcome.as_ref(),
-    )?;
-    start_selected_task(&mut snapshot, &next)?;
-    if next.stage == DeliveryStage::Reworking {
-        crate::domain::rework::invalidate_candidate_authorization_for_writer_start(&mut snapshot);
-    }
-    snapshot.stage_runs.push(run);
-    snapshot.updated_at_millis = input.now_millis;
-    let effect = append_stage_effect(delivery, &mut snapshot, &next, input)?;
-    let advanced_delivery = Delivery::try_from_snapshot(snapshot).map_err(|error| {
-        CoordinationError::new(CoordinationErrorCode::Conflict, error.to_string())
-    })?;
-    Ok(StageAdvanceResult {
-        source_delivery: delivery.clone(),
-        sealed_delivery: advanced_delivery.clone(),
-        sealed_effect: effect.clone(),
-        delivery: advanced_delivery,
-        effect,
-        kind: StageAdvanceKind::Start,
-    })
-}
-
 /// Consumes the sealed precise-rework decision instead of letting a caller
 /// choose a task or silently ignore a clarification result.
 ///
-/// A start decision delegates to [`advance`] with the exact authorization. A
-/// bounded/repeated failure changes the Delivery to `Clarifying` without
+/// Start decisions are rejected here: they require
+/// [`StageAdvanceResult::canonical_workrun_dispatch`]. A bounded/repeated failure
+/// changes the Delivery to `Clarifying` without
 /// creating a remediator `StageRun`, `SessionBinding`, or `ExecutionJob`.
 ///
 /// # Errors
@@ -1200,7 +1366,7 @@ pub fn advance(
 /// terminal/review facts with the sealed decision.
 pub fn advance_rework(
     delivery: &Delivery,
-    mut input: AdvanceStageInput,
+    input: &AdvanceStageInput,
     decision: ReworkDecision,
 ) -> Result<StageAdvanceResult, CoordinationError> {
     if input.rework_authorization.is_some() {
@@ -1211,8 +1377,18 @@ pub fn advance_rework(
     }
     match decision {
         ReworkDecision::Start(authorization) => {
-            input.rework_authorization = Some(authorization);
-            advance(delivery, input)
+            authorization
+                .validate_for_dispatch(delivery)
+                .map_err(|error| {
+                    CoordinationError::new(
+                        CoordinationErrorCode::Conflict,
+                        format!("rework dispatch authorization is stale: {error}"),
+                    )
+                })?;
+            Err(CoordinationError::new(
+                CoordinationErrorCode::WrongState,
+                "rework dispatch requires the canonical WorkRun dispatch path",
+            ))
         }
         ReworkDecision::Clarify(clarification) => {
             clarification
@@ -1264,340 +1440,6 @@ pub fn advance_rework(
     }
 }
 
-struct NextStage<'delivery> {
-    previous: Option<&'delivery StageRun>,
-    stage: DeliveryStage,
-    next_status: DeliveryStatus,
-    actor_type: StageRunActorType,
-    delivery_task_id: Option<DeliveryTaskId>,
-    role: &'static str,
-    attempt: u64,
-}
-
-fn select_next_stage<'delivery>(
-    delivery: &'delivery Delivery,
-    input: &AdvanceStageInput,
-) -> Result<NextStage<'delivery>, CoordinationError> {
-    if delivery.revision() != input.expected_revision {
-        return Err(CoordinationError::new(
-            CoordinationErrorCode::RevisionConflict,
-            "Delivery revision changed before stage advance",
-        ));
-    }
-    require_mutation_time(delivery, input.now_millis)?;
-    if delivery
-        .snapshot()
-        .attention_items
-        .iter()
-        .any(|item| item.blocking && item.status == AttentionItemStatus::Open)
-    {
-        return Err(CoordinationError::new(
-            CoordinationErrorCode::AttentionRequired,
-            "an open blocking AttentionItem must be resolved before stage advance",
-        ));
-    }
-    let mut active = delivery
-        .snapshot()
-        .stage_runs
-        .iter()
-        .filter(|run| is_active(run));
-    let previous = active.next();
-    if active.next().is_some() {
-        return Err(CoordinationError::new(
-            CoordinationErrorCode::Conflict,
-            "Delivery has more than one active StageRun",
-        ));
-    }
-    if let Some(previous) = previous {
-        validate_stage_executor(previous.stage, previous.actor_type, &previous.role)?;
-    }
-    let (stage, next_status, actor_type) =
-        legal_transition(delivery.snapshot().status, previous.map(|run| run.stage))?;
-    validate_previous_outcome(
-        delivery,
-        previous,
-        input.previous_outcome.as_ref(),
-        input.current_lease.as_ref(),
-        input.now_millis,
-    )?;
-    let rework_authorization = validate_rework_authorization(delivery, stage, input)?;
-    let delivery_task_id = select_task_id(delivery, stage, previous, rework_authorization)?;
-    let role = role_for_stage(delivery, stage, previous, delivery_task_id.as_ref())?;
-    validate_stage_executor(stage, actor_type, role)?;
-    let attempt = rework_authorization.map_or_else(
-        || {
-            delivery
-                .snapshot()
-                .stage_runs
-                .iter()
-                .filter(|run| {
-                    run.stage == stage
-                        && run.role == role
-                        && run.delivery_task_id == delivery_task_id
-                })
-                .count() as u64
-                + 1
-        },
-        ReworkAuthorization::next_attempt,
-    );
-    Ok(NextStage {
-        previous,
-        stage,
-        next_status,
-        actor_type,
-        delivery_task_id,
-        role,
-        attempt,
-    })
-}
-
-fn validate_rework_authorization<'input>(
-    delivery: &Delivery,
-    stage: DeliveryStage,
-    input: &'input AdvanceStageInput,
-) -> Result<Option<&'input ReworkAuthorization>, CoordinationError> {
-    match (stage, input.rework_authorization.as_deref()) {
-        (DeliveryStage::Reworking, Some(authorization)) => {
-            authorization
-                .validate_for_dispatch(delivery)
-                .map_err(|error| {
-                    CoordinationError::new(
-                        CoordinationErrorCode::Conflict,
-                        format!("rework dispatch authorization is stale: {error}"),
-                    )
-                })?;
-            Ok(Some(authorization))
-        }
-        (DeliveryStage::Reworking, None) => Err(CoordinationError::new(
-            CoordinationErrorCode::AttentionRequired,
-            "rework dispatch requires a sealed current-candidate authorization",
-        )),
-        (_, Some(_)) => Err(CoordinationError::new(
-            CoordinationErrorCode::InvalidRequest,
-            "rework authorization cannot be attached to a non-reworking stage",
-        )),
-        (_, None) => Ok(None),
-    }
-}
-
-fn validate_previous_outcome(
-    delivery: &Delivery,
-    previous: Option<&StageRun>,
-    outcome: Option<&VerifiedTerminalOutcome>,
-    current_lease: Option<&ActiveLeaseIdentity>,
-    handoff_at_millis: u64,
-) -> Result<(), CoordinationError> {
-    let Some(previous) = previous else {
-        return if outcome.is_none() && current_lease.is_none() {
-            Ok(())
-        } else {
-            Err(CoordinationError::new(
-                CoordinationErrorCode::InvalidRequest,
-                "a terminal outcome or lease was supplied without an active StageRun",
-            ))
-        };
-    };
-    let binding = exact_binding(delivery, previous, true)?;
-    let outcome = outcome.ok_or_else(|| {
-        CoordinationError::new(
-            CoordinationErrorCode::WrongState,
-            "an active StageRun requires a verified terminal Worker outcome before handoff",
-        )
-    })?;
-    let current_lease = current_lease.ok_or_else(|| {
-        CoordinationError::new(
-            CoordinationErrorCode::BindingConflict,
-            "an active StageRun handoff requires the authoritative current lease identity",
-        )
-    })?;
-    if outcome.lease_identity != *current_lease {
-        return Err(CoordinationError::new(
-            CoordinationErrorCode::BindingConflict,
-            "successful terminal outcome no longer matches the authoritative current lease",
-        ));
-    }
-    let exact = outcome.stage_run_id == previous.id
-        && outcome.lease_identity.execution_job_id == binding.execution_job_id
-        && binding.worker_session_id.as_ref() == Some(&outcome.lease_identity.worker_session_id)
-        && binding.codex_thread_id.as_ref() == outcome.codex_thread_id()
-        && outcome.lease_identity.attempt == previous.attempt
-        && outcome.finished_at_millis() >= previous.started_at_millis
-        && outcome.finished_at_millis() <= handoff_at_millis
-        && outcome.status == TerminalOutcomeStatus::Succeeded;
-    if exact {
-        Ok(())
-    } else {
-        Err(CoordinationError::new(
-            CoordinationErrorCode::WrongState,
-            "only the exact matching successful terminal outcome permits stage handoff",
-        ))
-    }
-}
-
-fn settle_previous_run(
-    snapshot: &mut DeliverySnapshot,
-    previous: Option<&StageRun>,
-    outcome: Option<&VerifiedTerminalOutcome>,
-) -> Result<(), CoordinationError> {
-    if let Some(previous) = previous {
-        let finished_at_millis = outcome
-            .filter(|outcome| outcome.stage_run_id() == &previous.id)
-            .map(VerifiedTerminalOutcome::finished_at_millis)
-            .ok_or_else(|| {
-                CoordinationError::new(
-                    CoordinationErrorCode::WrongState,
-                    "the previous StageRun has no exact verified finish time",
-                )
-            })?;
-        let stored = snapshot
-            .stage_runs
-            .iter_mut()
-            .find(|run| run.id == previous.id)
-            .ok_or_else(|| {
-                CoordinationError::new(
-                    CoordinationErrorCode::Conflict,
-                    "the active StageRun disappeared while preparing the handoff",
-                )
-            })?;
-        stored.status = StageRunStatus::Succeeded;
-        stored.finished_at_millis = Some(finished_at_millis);
-    }
-    Ok(())
-}
-
-fn start_selected_task(
-    snapshot: &mut DeliverySnapshot,
-    next: &NextStage<'_>,
-) -> Result<(), CoordinationError> {
-    let Some(task_id) = &next.delivery_task_id else {
-        return Ok(());
-    };
-    let task = snapshot
-        .tasks
-        .iter_mut()
-        .find(|task| &task.id == task_id)
-        .ok_or_else(|| {
-            CoordinationError::new(
-                CoordinationErrorCode::Conflict,
-                "selected DeliveryTask disappeared while preparing the stage",
-            )
-        })?;
-    let fact = match next.stage {
-        DeliveryStage::Executing => TaskFact::StartExecuting,
-        DeliveryStage::Verifying => TaskFact::StartVerifying,
-        DeliveryStage::Reworking => TaskFact::StartReworking,
-        _ => {
-            return Err(CoordinationError::new(
-                CoordinationErrorCode::Conflict,
-                "a Delivery-level stage unexpectedly selected a task",
-            ));
-        }
-    };
-    task.status = transition_task_status(task.status, fact)?;
-    Ok(())
-}
-
-fn append_stage_effect(
-    delivery: &Delivery,
-    snapshot: &mut DeliverySnapshot,
-    next: &NextStage<'_>,
-    input: AdvanceStageInput,
-) -> Result<StageAdvanceEffect, CoordinationError> {
-    if next.actor_type == StageRunActorType::Human {
-        append_review_effect(delivery, snapshot, next.stage, input)
-    } else {
-        append_execution_effect(delivery, snapshot, next, input)
-    }
-}
-
-fn append_review_effect(
-    delivery: &Delivery,
-    snapshot: &mut DeliverySnapshot,
-    stage: DeliveryStage,
-    input: AdvanceStageInput,
-) -> Result<StageAdvanceEffect, CoordinationError> {
-    let review = input.review.ok_or_else(|| {
-        CoordinationError::new(
-            CoordinationErrorCode::AttentionRequired,
-            "a human review stage requires frozen linked Attention",
-        )
-    })?;
-    let item_type = match stage {
-        DeliveryStage::PlanReview => AttentionItemType::DecisionRequired,
-        DeliveryStage::DeliveryReview => AttentionItemType::DeliveryApproval,
-        _ => {
-            return Err(CoordinationError::new(
-                CoordinationErrorCode::Conflict,
-                "a non-review stage was assigned to a human actor",
-            ));
-        }
-    };
-    snapshot.attention_items.push(AttentionItem {
-        schema_version: DELIVERY_SCHEMA_VERSION,
-        id: input.identities.attention_item_id.clone(),
-        delivery_id: delivery.id().clone(),
-        delivery_spec_id: snapshot.spec.id.clone(),
-        stage_run_id: Some(input.identities.stage_run_id),
-        item_type,
-        title: review.title,
-        context: review.context,
-        options: Vec::new(),
-        assigned_to: Some(review.assigned_to),
-        blocking: true,
-        status: AttentionItemStatus::Open,
-        resolution: None,
-        resolved_by: None,
-        created_at_millis: input.now_millis,
-        resolved_at_millis: None,
-    });
-    Ok(StageAdvanceEffect::Review(
-        input.identities.attention_item_id,
-    ))
-}
-
-fn append_execution_effect(
-    delivery: &Delivery,
-    snapshot: &mut DeliverySnapshot,
-    next: &NextStage<'_>,
-    input: AdvanceStageInput,
-) -> Result<StageAdvanceEffect, CoordinationError> {
-    if input.review.is_some() {
-        return Err(CoordinationError::new(
-            CoordinationErrorCode::InvalidRequest,
-            "Codex stages do not create business review Attention",
-        ));
-    }
-    snapshot.session_bindings.push(SessionBinding {
-        schema_version: DELIVERY_SCHEMA_VERSION,
-        id: input.identities.session_binding_id,
-        delivery_id: delivery.id().clone(),
-        delivery_task_id: next.delivery_task_id.clone(),
-        stage_run_id: input.identities.stage_run_id.clone(),
-        product_session_id: input.product_session_id.clone(),
-        execution_job_id: input.identities.execution_job_id.clone(),
-        worker_session_id: None,
-        codex_thread_id: None,
-        bound_at_millis: input.now_millis,
-        attempt: next.attempt,
-        ..Default::default()
-    });
-    let mut intent = ExecutionIntent {
-        execution_job_id: input.identities.execution_job_id,
-        product_session_id: input.product_session_id,
-        delivery_id: delivery.id().clone(),
-        delivery_task_id: next.delivery_task_id.clone(),
-        stage_run_id: input.identities.stage_run_id,
-        stage: next.stage,
-        role: next.role.to_owned(),
-        attempt: next.attempt,
-        goal: goal_for_task(delivery, next.delivery_task_id.as_ref()),
-        rework_authorization: input.rework_authorization,
-        validation_seal: Sha256Digest(String::new()),
-    };
-    intent.validation_seal = seal_execution_intent(snapshot, &intent)?;
-    Ok(StageAdvanceEffect::Dispatch(intent))
-}
-
 fn seal_execution_intent(
     delivery: &DeliverySnapshot,
     intent: &ExecutionIntent,
@@ -1609,6 +1451,11 @@ fn seal_execution_intent(
         delivery_id: &intent.delivery_id,
         delivery_task_id: intent.delivery_task_id.as_ref(),
         stage_run_id: &intent.stage_run_id,
+        work_contract_id: &intent.work_contract_id,
+        work_contract_revision: &intent.work_contract_revision,
+        work_item_id: &intent.work_item_id,
+        work_item_revision: &intent.work_item_revision,
+        work_run_id: &intent.work_run_id,
         stage: intent.stage,
         role: &intent.role,
         attempt: intent.attempt,
@@ -1628,21 +1475,6 @@ fn seal_execution_intent(
         "sha256:{:x}",
         Sha256::digest(encoded)
     )))
-}
-
-fn goal_for_task(delivery: &Delivery, task_id: Option<&DeliveryTaskId>) -> String {
-    task_id
-        .and_then(|task_id| {
-            delivery
-                .snapshot()
-                .tasks
-                .iter()
-                .find(|task| &task.id == task_id)
-        })
-        .map_or_else(
-            || delivery.snapshot().spec.goal.clone(),
-            |task| task.goal.clone(),
-        )
 }
 
 /// Rebuilds the immutable `ExecutionIntent` for the one active Codex `StageRun`.
@@ -1690,6 +1522,18 @@ pub fn resume_active(
         ));
     }
     let binding = exact_binding(delivery, run, false)?;
+    let work_run = delivery
+        .snapshot()
+        .work_run_aggregate
+        .runs
+        .iter()
+        .find(|candidate| candidate.execution_job_id == binding.execution_job_id)
+        .ok_or_else(|| {
+            CoordinationError::new(
+                CoordinationErrorCode::WrongState,
+                "active Codex StageRun has no canonical WorkRun",
+            )
+        })?;
     let goal = run
         .delivery_task_id
         .as_ref()
@@ -1710,6 +1554,16 @@ pub fn resume_active(
         delivery_id: run.delivery_id.clone(),
         delivery_task_id: run.delivery_task_id.clone(),
         stage_run_id: run.id.clone(),
+        work_contract_id: delivery.snapshot().work_run_aggregate.contract.id.clone(),
+        work_contract_revision: delivery
+            .snapshot()
+            .work_run_aggregate
+            .contract
+            .revision
+            .clone(),
+        work_item_id: work_run.work_item_id.clone(),
+        work_item_revision: work_run.work_item_revision.clone(),
+        work_run_id: work_run.id.clone(),
         stage: run.stage,
         role: run.role.clone(),
         attempt: run.attempt,
@@ -1729,18 +1583,15 @@ pub fn resume_active(
     })
 }
 
-/// Creates the durable cancellation intent for the current exact job.
-///
-/// The returned value is a pending effect: a Control Plane transaction must
-/// commit it to the outbox before any `ExecutionPort` adapter sends it.
+/// Creates cancellation intent for one explicitly selected active `WorkRun`.
+/// The Control Plane must persist this effect before sending it to the Worker.
 ///
 /// # Errors
-///
-/// Fails closed on stale revision, ambiguous active state, or incomplete
-/// `SessionBinding`.
+/// Rejects stale revisions, inactive runs, or incomplete accepted bindings.
 pub fn request_cancel(
     delivery: &Delivery,
     expected_revision: u64,
+    work_run_id: &WorkRunId,
 ) -> Result<CancelIntent, CoordinationError> {
     if delivery.revision() != expected_revision {
         return Err(CoordinationError::new(
@@ -1748,85 +1599,121 @@ pub fn request_cancel(
             "Delivery revision changed before cancellation",
         ));
     }
-    let mut active = delivery
+    let run = delivery
         .snapshot()
-        .stage_runs
+        .work_run_aggregate
+        .runs
         .iter()
-        .filter(|run| is_active(run));
-    let run = active.next().ok_or_else(|| {
-        CoordinationError::new(
-            CoordinationErrorCode::WrongState,
-            "Delivery has no active Codex StageRun to cancel",
-        )
-    })?;
-    if active.next().is_some() {
-        return Err(CoordinationError::new(
-            CoordinationErrorCode::Conflict,
-            "Delivery has more than one active StageRun",
-        ));
-    }
-    let binding = exact_binding(delivery, run, true)?;
-    let worker_session_id = binding.worker_session_id.clone().ok_or_else(|| {
+        .find(|run| {
+            &run.id == work_run_id
+                && matches!(
+                    run.state,
+                    winwincode_domain::WorkRunState::Leased
+                        | winwincode_domain::WorkRunState::Running
+                )
+        })
+        .ok_or_else(|| {
+            CoordinationError::new(
+                CoordinationErrorCode::WrongState,
+                "cancellation requires the selected active WorkRun",
+            )
+        })?;
+    let mut bindings = delivery
+        .snapshot()
+        .session_bindings
+        .iter()
+        .filter(|binding| &binding.work_run_id == work_run_id);
+    let binding = bindings.next().ok_or_else(|| {
         CoordinationError::new(
             CoordinationErrorCode::BindingConflict,
-            "the active job has no accepted WorkerSession",
+            "cancellation WorkRun has no binding",
         )
     })?;
+    if bindings.next().is_some()
+        || binding.delivery_id != *delivery.id()
+        || binding.work_contract_id != run.work_contract_id
+        || binding.work_contract_revision != run.contract_revision
+        || binding.work_item_id != run.work_item_id
+        || binding.work_item_revision != run.work_item_revision
+        || binding.execution_job_id != run.execution_job_id
+        || i64::try_from(binding.attempt).ok() != Some(run.attempt)
+        || Some(&binding.product_session_id) != run.product_session_id.as_ref()
+        || binding.worker_session_id.as_ref() != Some(&run.worker_session_id)
+        || binding.worker_id.as_ref() != Some(&run.worker_id)
+        || binding.worker_instance_id.as_ref() != Some(&run.worker_instance_id)
+        || binding.lease_id.as_ref() != Some(&run.lease_id)
+        || binding.fencing_token.as_ref().map(|token| token.0.as_str())
+            != Some(run.fencing_token.as_str())
+        || binding.codex_thread_id != run.codex_thread_id
+    {
+        return Err(CoordinationError::new(
+            CoordinationErrorCode::BindingConflict,
+            "cancellation requires the exact accepted WorkRun binding",
+        ));
+    }
     Ok(CancelIntent {
-        stage_run_id: run.id.clone(),
-        execution_job_id: binding.execution_job_id.clone(),
-        attempt: run.attempt,
+        work_run_id: run.id.clone(),
+        execution_job_id: run.execution_job_id.clone(),
+        attempt: binding.attempt,
         product_session_id: binding.product_session_id.clone(),
-        worker_session_id,
+        worker_session_id: run.worker_session_id.clone(),
     })
 }
 
-/// Validates a Worker cancellation acknowledgement without settling Delivery.
-///
-/// `job.cancel_ack` only proves receipt of the request. The returned Delivery
-/// is byte-for-byte unchanged; only a verified terminal `job.outcome` may end
-/// the `StageRun`.
+/// Validates receipt of cancellation without settling the `WorkRun`.
+/// Only a verified terminal outcome may finish execution.
 ///
 /// # Errors
-///
-/// Fails closed when the acknowledgement identifies another run or job.
+/// Rejects another run, a replaced attempt, or a changed current binding.
 pub fn acknowledge_cancel(
     delivery: &Delivery,
     intent: &CancelIntent,
     acknowledgement: &CancelAcknowledgement,
 ) -> Result<Delivery, CoordinationError> {
-    if acknowledgement.stage_run_id != intent.stage_run_id
+    if acknowledgement.work_run_id != intent.work_run_id
         || acknowledgement.execution_job_id != intent.execution_job_id
         || acknowledgement.attempt != intent.attempt
         || acknowledgement.worker_session_id != intent.worker_session_id
+        || request_cancel(delivery, delivery.revision(), &intent.work_run_id)? != *intent
     {
         return Err(CoordinationError::new(
             CoordinationErrorCode::BindingConflict,
-            "cancellation acknowledgement does not match the requested job",
-        ));
-    }
-    let run = delivery
-        .snapshot()
-        .stage_runs
-        .iter()
-        .find(|run| run.id == intent.stage_run_id && is_active(run))
-        .ok_or_else(|| {
-            CoordinationError::new(
-                CoordinationErrorCode::WrongState,
-                "cancellation acknowledgement does not match an active StageRun",
-            )
-        })?;
-    let binding = exact_binding(delivery, run, true)?;
-    if binding.execution_job_id != intent.execution_job_id
-        || binding.worker_session_id.as_ref() != Some(&intent.worker_session_id)
-        || run.attempt != intent.attempt
-    {
-        return Err(CoordinationError::new(
-            CoordinationErrorCode::BindingConflict,
-            "cancellation request no longer matches the active binding",
+            "cancellation acknowledgement does not match the current requested WorkRun",
         ));
     }
     Ok(delivery.clone())
+}
+
+fn revalidate_terminal_outcome(
+    delivery: &Delivery,
+    active_lease: &ActiveLeaseIdentity,
+    outcome: &VerifiedTerminalOutcome,
+) -> Result<VerifiedTerminalOutcome, CoordinationError> {
+    if &outcome.lease_identity != active_lease {
+        return Err(CoordinationError::new(
+            CoordinationErrorCode::BindingConflict,
+            "terminal outcome was verified for another active lease",
+        ));
+    }
+    // Recheck the complete persisted WorkRun and binding, not just the lease
+    // copied into a previously verified result.
+    verify_work_run_terminal(
+        delivery,
+        active_lease,
+        TerminalWorkerOutcome {
+            work_run_id: outcome.work_run_id.clone(),
+            execution_job_id: outcome.execution_job_id().clone(),
+            attempt: outcome.attempt(),
+            lease_id: outcome.lease_id().clone(),
+            fencing_token: outcome.fencing_token().clone(),
+            worker_id: outcome.worker_id().clone(),
+            worker_instance_id: outcome.worker_instance_id().clone(),
+            worker_session_id: outcome.worker_session_id().clone(),
+            status: outcome.status,
+            metadata: outcome.metadata.clone(),
+        },
+        false,
+    )
 }
 
 /// Applies one verified terminal Worker outcome to its still-current lease.
@@ -1854,270 +1741,44 @@ pub fn apply_terminal_outcome(
         ));
     }
     require_mutation_time(delivery, outcome.finished_at_millis())?;
-    if &outcome.lease_identity != active_lease {
-        return Err(CoordinationError::new(
-            CoordinationErrorCode::BindingConflict,
-            "terminal outcome was verified for another active lease",
-        ));
-    }
-    let run = delivery
-        .snapshot()
-        .stage_runs
-        .iter()
-        .find(|run| run.id == outcome.stage_run_id && is_active(run))
-        .ok_or_else(|| {
-            CoordinationError::new(
-                CoordinationErrorCode::WrongState,
-                "terminal outcome does not match the active StageRun",
-            )
-        })?;
-    if outcome.status == TerminalOutcomeStatus::Succeeded
-        && (run.stage != DeliveryStage::Verifying
-            || !matches!(run.role.as_str(), "verifier" | "adversarial-verifier"))
-    {
-        return Err(CoordinationError::new(
-            CoordinationErrorCode::WrongState,
-            "ordinary successful outcomes settle only in the atomic next-stage handoff",
-        ));
-    }
-    let binding = exact_binding(delivery, run, false)?;
-    if run.attempt != outcome.lease_identity.attempt
-        || binding.execution_job_id != outcome.lease_identity.execution_job_id
-        || binding.worker_session_id.as_ref() != Some(&outcome.lease_identity.worker_session_id)
-        || binding.codex_thread_id.as_ref() != outcome.codex_thread_id()
-        || outcome.finished_at_millis() < run.started_at_millis
-    {
-        return Err(CoordinationError::new(
-            CoordinationErrorCode::BindingConflict,
-            "terminal outcome no longer matches the active StageRun, job, and WorkerSession",
-        ));
-    }
-
-    let run_id = run.id.clone();
-    let run_stage = run.stage;
-    let task_id = run.delivery_task_id.clone();
+    let verified = revalidate_terminal_outcome(delivery, active_lease, outcome)?;
     let mut snapshot = delivery.clone().into_snapshot();
-    let stored_run = snapshot
-        .stage_runs
-        .iter_mut()
-        .find(|stored| stored.id == run_id)
+    let read_only = snapshot.session_bindings.iter().any(|binding| {
+        binding.work_run_id == *verified.work_run_id()
+            && binding.execution_job_id == *verified.execution_job_id()
+            && matches!(
+                binding.execution_profile.as_deref(),
+                Some("reviewer" | "verifier" | "adversarial-verifier")
+            )
+    });
+    let settlement = if read_only {
+        snapshot
+            .work_run_aggregate
+            .settle_verification_outcome(&verified)
+    } else {
+        snapshot
+            .work_run_aggregate
+            .settle_verified_outcome(&verified)
+    };
+    settlement.map_err(|error| {
+        CoordinationError::new(
+            CoordinationErrorCode::BindingConflict,
+            format!("terminal WorkRun settlement rejected: {error:?}"),
+        )
+    })?;
+    snapshot.revision = snapshot
+        .revision
+        .checked_add(1)
+        .filter(|revision| *revision <= MAX_SAFE_INTEGER)
         .ok_or_else(|| {
             CoordinationError::new(
-                CoordinationErrorCode::Conflict,
-                "the active StageRun disappeared while applying terminal outcome",
+                CoordinationErrorCode::RevisionConflict,
+                "Delivery revision is exhausted",
             )
         })?;
-    stored_run.status = match outcome.status {
-        TerminalOutcomeStatus::Succeeded => StageRunStatus::Succeeded,
-        TerminalOutcomeStatus::Failed | TerminalOutcomeStatus::InfrastructureError => {
-            StageRunStatus::Failed
-        }
-        TerminalOutcomeStatus::Cancelled => StageRunStatus::Cancelled,
-    };
-    stored_run.finished_at_millis = Some(outcome.finished_at_millis());
-    if outcome.status != TerminalOutcomeStatus::Succeeded
-        && let Some(task_id) = task_id
-    {
-        restore_task_after_unsuccessful_outcome(&mut snapshot, &task_id, run_stage)?;
-    }
-    snapshot.revision += 1;
     snapshot.updated_at_millis = outcome.finished_at_millis();
     Delivery::try_from_snapshot(snapshot)
         .map_err(|error| CoordinationError::new(CoordinationErrorCode::Conflict, error.to_string()))
-}
-
-fn restore_task_after_unsuccessful_outcome(
-    snapshot: &mut DeliverySnapshot,
-    task_id: &DeliveryTaskId,
-    run_stage: DeliveryStage,
-) -> Result<(), CoordinationError> {
-    let task = snapshot
-        .tasks
-        .iter_mut()
-        .find(|task| &task.id == task_id)
-        .ok_or_else(|| {
-            CoordinationError::new(
-                CoordinationErrorCode::Conflict,
-                "terminal StageRun task disappeared",
-            )
-        })?;
-    let (expected, next) = match run_stage {
-        DeliveryStage::Executing => (DeliveryTaskStatus::Active, DeliveryTaskStatus::Pending),
-        DeliveryStage::Verifying => (DeliveryTaskStatus::Verifying, DeliveryTaskStatus::Verifying),
-        DeliveryStage::Reworking => (DeliveryTaskStatus::Active, DeliveryTaskStatus::Failed),
-        _ => {
-            return Err(CoordinationError::new(
-                CoordinationErrorCode::Conflict,
-                "a Delivery-level StageRun unexpectedly targeted a task",
-            ));
-        }
-    };
-    if task.status != expected {
-        return Err(CoordinationError::new(
-            CoordinationErrorCode::WrongState,
-            "DeliveryTask changed before terminal outcome",
-        ));
-    }
-    task.status = next;
-    Ok(())
-}
-
-fn legal_transition(
-    delivery_status: DeliveryStatus,
-    active_stage: Option<DeliveryStage>,
-) -> Result<(DeliveryStage, DeliveryStatus, StageRunActorType), CoordinationError> {
-    let transition = match (delivery_status, active_stage) {
-        (DeliveryStatus::Draft | DeliveryStatus::Clarifying, None) => (
-            DeliveryStage::Clarifying,
-            DeliveryStatus::Clarifying,
-            StageRunActorType::Codex,
-        ),
-        (DeliveryStatus::Clarifying, Some(DeliveryStage::Clarifying))
-        | (DeliveryStatus::Ready | DeliveryStatus::Planning, None) => (
-            DeliveryStage::Planning,
-            DeliveryStatus::Planning,
-            StageRunActorType::Codex,
-        ),
-        (DeliveryStatus::Planning, Some(DeliveryStage::Planning)) => (
-            DeliveryStage::PlanReview,
-            DeliveryStatus::NeedsAttention,
-            StageRunActorType::Human,
-        ),
-        (DeliveryStatus::Executing, None) => (
-            DeliveryStage::Executing,
-            DeliveryStatus::Executing,
-            StageRunActorType::Codex,
-        ),
-        (DeliveryStatus::Executing, Some(DeliveryStage::Executing))
-        | (DeliveryStatus::Verifying, None | Some(DeliveryStage::Verifying))
-        | (DeliveryStatus::Reworking, Some(DeliveryStage::Reworking)) => (
-            DeliveryStage::Verifying,
-            DeliveryStatus::Verifying,
-            StageRunActorType::Codex,
-        ),
-        (DeliveryStatus::Reworking, None) => (
-            DeliveryStage::Reworking,
-            DeliveryStatus::Reworking,
-            StageRunActorType::Codex,
-        ),
-        (DeliveryStatus::ReadyToDeliver, None) => (
-            DeliveryStage::DeliveryReview,
-            DeliveryStatus::NeedsAttention,
-            StageRunActorType::Human,
-        ),
-        _ => {
-            return Err(CoordinationError::new(
-                CoordinationErrorCode::WrongState,
-                "Delivery status and active StageRun do not have one legal next stage",
-            ));
-        }
-    };
-    Ok(transition)
-}
-
-fn select_task_id(
-    delivery: &Delivery,
-    stage: DeliveryStage,
-    previous: Option<&StageRun>,
-    rework_authorization: Option<&ReworkAuthorization>,
-) -> Result<Option<DeliveryTaskId>, CoordinationError> {
-    if !matches!(
-        stage,
-        DeliveryStage::Executing | DeliveryStage::Verifying | DeliveryStage::Reworking
-    ) {
-        return Ok(None);
-    }
-    if delivery.snapshot().tasks.is_empty() {
-        return Err(CoordinationError::new(
-            CoordinationErrorCode::WrongState,
-            "execution requires a non-empty approved DeliveryTask graph",
-        ));
-    }
-    if stage == DeliveryStage::Verifying
-        && let Some(previous) = previous
-    {
-        return previous.delivery_task_id.clone().map(Some).ok_or_else(|| {
-            CoordinationError::new(
-                CoordinationErrorCode::Conflict,
-                "task verification cannot follow a Delivery-level writer",
-            )
-        });
-    }
-    if stage == DeliveryStage::Reworking {
-        return rework_authorization
-            .map(|authorization| Some(authorization.delivery_task_id().clone()))
-            .ok_or_else(|| {
-                CoordinationError::new(
-                    CoordinationErrorCode::AttentionRequired,
-                    "rework task selection requires the sealed authorization",
-                )
-            });
-    }
-    Ok(Some(runnable_task(delivery, stage)?.id.clone()))
-}
-
-fn role_for_stage(
-    delivery: &Delivery,
-    stage: DeliveryStage,
-    previous: Option<&StageRun>,
-    delivery_task_id: Option<&DeliveryTaskId>,
-) -> Result<&'static str, CoordinationError> {
-    let fixed = match stage {
-        DeliveryStage::Clarifying => Some("requirements"),
-        DeliveryStage::Planning => Some("planner"),
-        DeliveryStage::PlanReview => Some("reviewer"),
-        DeliveryStage::Executing => Some("executor"),
-        DeliveryStage::Reworking => Some("remediator"),
-        DeliveryStage::DeliveryReview => Some("approver"),
-        DeliveryStage::Verifying => None,
-    };
-    if let Some(role) = fixed {
-        return Ok(role);
-    }
-    if let Some(previous) = previous {
-        return match (previous.stage, previous.role.as_str()) {
-            (DeliveryStage::Executing | DeliveryStage::Reworking, _) => Ok("reviewer"),
-            (DeliveryStage::Verifying, "reviewer") => Ok("verifier"),
-            (DeliveryStage::Verifying, "verifier" | "adversarial-verifier") => {
-                Err(CoordinationError::new(
-                    CoordinationErrorCode::WrongState,
-                    "all required verification roles completed; submit a DeliveryVerdict",
-                ))
-            }
-            _ => Err(CoordinationError::new(
-                CoordinationErrorCode::Conflict,
-                "verification progress contains an unexpected role",
-            )),
-        };
-    }
-    let last_writer_index = delivery.snapshot().stage_runs.iter().rposition(|run| {
-        matches!(
-            run.stage,
-            DeliveryStage::Executing | DeliveryStage::Reworking
-        ) && run.delivery_task_id.as_ref() == delivery_task_id
-    });
-    let completed_roles = delivery
-        .snapshot()
-        .stage_runs
-        .iter()
-        .enumerate()
-        .filter(|(index, run)| {
-            last_writer_index.is_none_or(|writer| *index > writer)
-                && run.stage == DeliveryStage::Verifying
-                && run.delivery_task_id.as_ref() == delivery_task_id
-                && run.status == StageRunStatus::Succeeded
-        })
-        .map(|(_, run)| run.role.as_str())
-        .collect::<Vec<_>>();
-    ["reviewer", "verifier"]
-        .into_iter()
-        .find(|role| !completed_roles.contains(role))
-        .ok_or_else(|| {
-            CoordinationError::new(
-                CoordinationErrorCode::WrongState,
-                "all required verification roles completed; submit a DeliveryVerdict",
-            )
-        })
 }
 
 fn exact_binding<'delivery>(
@@ -2136,7 +1797,16 @@ fn exact_binding<'delivery>(
         .snapshot()
         .session_bindings
         .iter()
-        .filter(|binding| binding.stage_run_id == run.id);
+        .filter(|binding| {
+            binding.delivery_id == run.delivery_id
+                && binding.attempt == run.attempt
+                && delivery
+                    .snapshot()
+                    .work_run_aggregate
+                    .runs
+                    .iter()
+                    .any(|work_run| work_run.id == binding.work_run_id)
+        });
     let binding = bindings.next().ok_or_else(|| {
         CoordinationError::new(
             CoordinationErrorCode::BindingConflict,
@@ -2145,7 +1815,6 @@ fn exact_binding<'delivery>(
     })?;
     if bindings.next().is_some()
         || binding.delivery_id != run.delivery_id
-        || binding.delivery_task_id != run.delivery_task_id
         || (require_worker_session && binding.worker_session_id.is_none())
     {
         return Err(CoordinationError::new(
@@ -2161,4 +1830,94 @@ fn is_active(run: &StageRun) -> bool {
         run.status,
         StageRunStatus::Running | StageRunStatus::Waiting
     )
+}
+
+#[cfg(test)]
+mod canonical_terminal_authority_tests {
+    use super::*;
+
+    #[test]
+    fn terminal_authority_uses_explicit_workrun_and_rejects_changed_lease() {
+        let mut snapshot = crate::domain::test_fixture();
+        snapshot.evidence.clear();
+        snapshot.verdict = None;
+        snapshot.attention_items.clear();
+        snapshot.status = DeliveryStatus::Draft;
+        snapshot.work_run_aggregate.runs[0].state = winwincode_domain::WorkRunState::Running;
+        snapshot.work_run_aggregate.items[0].state = winwincode_domain::WorkItemState::InProgress;
+        let delivery = Delivery::try_from_snapshot(snapshot).expect("valid canonical fixture");
+        let run = &delivery.snapshot().work_run_aggregate.runs[0];
+        let binding = &delivery.snapshot().session_bindings[0];
+        let lease = ActiveLeaseIdentity {
+            execution_job_id: run.execution_job_id.clone(),
+            attempt: u64::try_from(run.attempt).expect("positive attempt"),
+            lease_id: run.lease_id.clone(),
+            fencing_token: FencingToken(run.fencing_token.clone()),
+            worker_id: run.worker_id.clone(),
+            worker_instance_id: run.worker_instance_id.clone(),
+            worker_session_id: run.worker_session_id.clone(),
+        };
+        let outcome = TerminalWorkerOutcome {
+            work_run_id: run.id.clone(),
+            execution_job_id: lease.execution_job_id.clone(),
+            attempt: lease.attempt,
+            lease_id: lease.lease_id.clone(),
+            fencing_token: lease.fencing_token.clone(),
+            worker_id: lease.worker_id.clone(),
+            worker_instance_id: lease.worker_instance_id.clone(),
+            worker_session_id: lease.worker_session_id.clone(),
+            status: TerminalOutcomeStatus::Succeeded,
+            metadata: TerminalOutcomeMetadata {
+                codex_thread_id: binding.codex_thread_id.clone(),
+                finished_at_millis: delivery
+                    .snapshot()
+                    .updated_at_millis
+                    .max(binding.bound_at_millis)
+                    + 1,
+                last_event_sequence: ExecutionAckSequence(1),
+                artifacts: Vec::new(),
+            },
+        };
+        let verified = verify_terminal_outcome(&delivery, &lease, outcome.clone())
+            .expect("exact WorkRun terminal authority");
+        assert_eq!(verified.work_run_id(), &run.id);
+        let mut changed_binding = delivery.clone().into_snapshot();
+        changed_binding.session_bindings[0].lease_id =
+            Some(LeaseId("lse_01J00000000000000000000999".into()));
+        let changed_binding = Delivery::try_from_snapshot(changed_binding)
+            .expect("valid shape, mismatched authority");
+        let before = changed_binding.clone();
+        assert!(
+            apply_terminal_outcome(
+                &changed_binding,
+                changed_binding.revision(),
+                &lease,
+                &verified
+            )
+            .is_err()
+        );
+        assert_eq!(changed_binding, before);
+        let settled = apply_terminal_outcome(&delivery, delivery.revision(), &lease, &verified)
+            .expect("settle the exact WorkRun");
+        assert_eq!(
+            settled.snapshot().work_run_aggregate.runs[0].state,
+            winwincode_domain::WorkRunState::CandidateReady
+        );
+        assert_eq!(
+            settled.snapshot().work_run_aggregate.items[0].state,
+            winwincode_domain::WorkItemState::CandidateReady
+        );
+        assert_eq!(
+            settled.snapshot().stage_runs,
+            delivery.snapshot().stage_runs
+        );
+        assert!(apply_terminal_outcome(&settled, settled.revision(), &lease, &verified).is_err());
+
+        let mut wrong_run = outcome.clone();
+        wrong_run.work_run_id = WorkRunId("wrn_01J00000000000000000000999".into());
+        assert!(verify_terminal_outcome(&delivery, &lease, wrong_run).is_err());
+        let mut stale_lease = lease;
+        stale_lease.fencing_token = FencingToken("999".into());
+        assert!(verify_terminal_outcome(&delivery, &stale_lease, outcome).is_err());
+    }
 }

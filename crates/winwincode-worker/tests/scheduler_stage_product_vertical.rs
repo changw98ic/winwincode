@@ -37,22 +37,23 @@ use winwincode_codex::stage_product::{
 };
 use winwincode_control_plane::RepositoryExecutionScheduler;
 use winwincode_domain::{
-    ArtifactId, CodexThreadId, DeliveryId, DeliveryTaskId, ExecutionEventId, ExecutionJobId,
+    ArtifactId, CodexThreadId, Criterion, CriterionId, ExecutionEventId, ExecutionJobId,
     ExecutionMessageId, ExecutionSequence, Instant, OrganizationId, ProductSessionId, ProjectId,
-    RepositoryId, RepositoryScope, RepositoryScopeKind, RequestId, SchemaVersion, SessionIdentity,
-    Sha256Digest, StageRunId, UserId, WorkerId, WorkerInstanceId, WorkerSessionId, WorkspaceId,
+    RepositoryId, RepositoryScope, RepositoryScopeKind, RequestId, Revision, SchemaVersion,
+    SessionIdentity, Sha256Digest, UserId, WorkContract, WorkContractId, WorkItem, WorkItemId,
+    WorkItemState, WorkRunId, WorkerId, WorkerInstanceId, WorkerSessionId, WorkspaceId,
 };
 use winwincode_execution_port::generated::{
-    ArtifactAckMessage, ArtifactReference, DeliveryStageAcceptanceCriterionInput,
-    DeliveryStageExecutionScope, DeliveryStageExecutionScopeKind, DeliveryStageInput,
-    DeliveryStageTaskInput, EncodedPayload, ExecutionEventCategory, ExecutionEventRecord,
-    ExecutionJob, ExecutionLeaseStamp, ExecutionLimits, ExecutionOutcomeStatus,
-    ExecutionPortMessage, ExecutionScope, ExecutionWorkspace, ExecutionWorkspaceWriteMode,
-    JobCancelAckMessageStatus, JobDispatchResultMessage, JobDispatchResultMessageStatus,
-    JobOutcomeMessage, RuntimeEventMessage, RuntimeEventMessageKind, SessionBindingMessage,
-    WorkerCapabilityFeature, WorkerCapabilitySet, WorkerCapabilitySetPlatform,
-    WorkerRegisterMessage, WorkerRegistrationResultMessage, WorkerRegistrationResultMessageKind,
-    WorkerRegistrationResultMessageLeaseRecovery, WorkerRegistrationResultMessageStatus,
+    ArtifactAckMessage, ArtifactReference, EncodedPayload, ExecutionEventCategory,
+    ExecutionEventRecord, ExecutionJob, ExecutionLeaseStamp, ExecutionLimits,
+    ExecutionOutcomeStatus, ExecutionPortMessage, ExecutionScope, ExecutionWorkspace,
+    ExecutionWorkspaceWriteMode, JobCancelAckMessageStatus, JobDispatchResultMessage,
+    JobDispatchResultMessageStatus, JobOutcomeMessage, RuntimeEventMessage,
+    RuntimeEventMessageKind, SessionBindingMessage, WorkRunExecutionScope,
+    WorkRunExecutionScopeKind, WorkRunInput, WorkerCapabilityFeature, WorkerCapabilitySet,
+    WorkerCapabilitySetPlatform, WorkerRegisterMessage, WorkerRegistrationResultMessage,
+    WorkerRegistrationResultMessageKind, WorkerRegistrationResultMessageLeaseRecovery,
+    WorkerRegistrationResultMessageStatus,
 };
 use winwincode_storage::{
     EXECUTION_PROTOCOL_VERSION, ExecutionAdmissionBoundary, ExecutionAdmissionLimits,
@@ -137,7 +138,7 @@ fn queue_scope() -> ExecutionQueueScope {
         project_id: scope.project_id,
         repository_id: scope.repository_id,
         product_session_id: ProductSessionId(id("psn", 5)),
-        delivery_id: Some(DeliveryId(id("dlv", 6))),
+        delivery_id: Some(winwincode_domain::DeliveryId(id("dlv", 6))),
     }
 }
 
@@ -377,7 +378,7 @@ const PLANNER_JSON: &str = concat!(
     "\"id\":\"task_scheduler_vertical\",",
     "\"title\":\"Run the stage composition\",",
     "\"goal\":\"Exercise the scheduler and Worker boundary\",",
-    "\"acceptanceCriterionIds\":[\"criterion-scheduler-vertical\"],",
+    "\"acceptanceCriterionIds\":[\"crt_00000000000000000000000001\"],",
     "\"blockedByTaskIds\":[]",
     "}]",
     "}"
@@ -385,7 +386,7 @@ const PLANNER_JSON: &str = concat!(
 
 fn verification_json(candidate_ref: &str, role: &str) -> Vec<u8> {
     format!(
-        "{{\"protocol\":\"winwincode.independent-verification-result.v1\",\"delivery_spec_id\":\"spec-scheduler-vertical\",\"delivery_spec_revision\":1,\"candidate_ref\":\"{candidate_ref}\",\"findings\":[{{\"finding_id\":\"finding-{role}-vertical\",\"criterion_id\":\"criterion-scheduler-vertical\",\"verdict\":\"pass\",\"explanation\":\"The observed stage evidence completed successfully.\",\"evidence_sources\":[{{\"type\":\"command\",\"event_id\":\"evidence-{role}\"}}]}}]}}"
+        "{{\"protocol\":\"winwincode.independent-verification-result.v1\",\"delivery_spec_id\":\"spec-scheduler-vertical\",\"delivery_spec_revision\":1,\"candidate_ref\":\"{candidate_ref}\",\"findings\":[{{\"finding_id\":\"finding-{role}-vertical\",\"criterion_id\":\"crt_00000000000000000000000001\",\"verdict\":\"pass\",\"explanation\":\"The observed stage evidence completed successfully.\",\"evidence_sources\":[{{\"type\":\"command\",\"event_id\":\"evidence-{role}\"}}]}}]}}"
     )
     .into_bytes()
 }
@@ -413,7 +414,7 @@ fn products_for_job(job: &ExecutionJob) -> Result<Vec<SemanticEvent>, ()> {
         }
         "reviewer" | "verifier" => {
             let candidate_ref = job
-                .stage_input
+                .work_input
                 .as_ref()
                 .and_then(|input| input.candidate_ref.as_deref())
                 .ok_or(())?;
@@ -508,16 +509,16 @@ impl CodexCoreAdapter for ScriptedStageProductAdapter {
                         session_identity: SessionIdentity {
                             codex_thread_id: thread_id.clone(),
                             product_session_id: match &start.job.scope {
-                                ExecutionScope::DeliveryStageExecutionScope(scope) => {
+                                ExecutionScope::WorkRunExecutionScope(scope) => {
                                     scope.product_session_id.clone()
                                 }
                                 ExecutionScope::ProductSessionExecutionScope(scope) => {
                                     scope.product_session_id.clone()
                                 }
                             },
-                            stage_run_id: match &start.job.scope {
-                                ExecutionScope::DeliveryStageExecutionScope(scope) => {
-                                    Some(scope.stage_run_id.clone())
+                            work_run_id: match &start.job.scope {
+                                ExecutionScope::WorkRunExecutionScope(scope) => {
+                                    Some(scope.work_run_id.clone())
                                 }
                                 ExecutionScope::ProductSessionExecutionScope(_) => None,
                             },
@@ -657,7 +658,6 @@ impl CodexCoreAdapter for ScriptedStageProductAdapter {
     ) -> Result<DurableExecutionDelivery, Self::Error> {
         let value = serde_json::to_value(message).map_err(|_| ())?;
         let Some(delivery_id) = value["messageId"].as_str() else {
-            eprintln!("scripted adapter could not find messageId in {value:?}");
             return Err(());
         };
         let delivery_id = delivery_id.to_owned();
@@ -689,6 +689,18 @@ impl CodexCoreAdapter for ScriptedStageProductAdapter {
             .collect::<Vec<_>>();
         deliveries.sort_by(|left, right| left.delivery_id.cmp(&right.delivery_id));
         Ok(deliveries)
+    }
+
+    fn recovered_message_sequence(&mut self) -> Result<u64, Self::Error> {
+        Ok(self
+            .state
+            .lock()
+            .expect("adapter state")
+            .deliveries
+            .keys()
+            .filter_map(|id| id.strip_prefix("xmsg_")?.parse::<u64>().ok())
+            .max()
+            .unwrap_or(0))
     }
 
     fn record_execution_delivery_sent(&mut self, delivery_id: &str) -> Result<(), Self::Error> {
@@ -880,38 +892,55 @@ fn worker_config(
 fn stage_job(role: &str, seed: u64, revision: &str, candidate_ref: Option<&str>) -> ExecutionJob {
     let job_id = ExecutionJobId(id("job", 100 + seed));
     let goal = format!("Run the scheduler stage-product vertical for {role}.");
-    let task_id = DeliveryTaskId(id("dtk", 100 + seed));
-    let has_task = matches!(role, "executor" | "reviewer" | "verifier");
-    let scope = ExecutionScope::DeliveryStageExecutionScope(DeliveryStageExecutionScope {
-        delivery_id: queue_scope().delivery_id.expect("delivery scope"),
-        delivery_task_id: has_task.then(|| task_id.clone()),
-        kind: DeliveryStageExecutionScopeKind::DeliveryStage,
-        product_session_id: queue_scope().product_session_id,
+    let c = WorkContractId("wct_00000000000000000000000001".to_owned());
+    let i = WorkItemId("wit_00000000000000000000000001".to_owned());
+    let cr = CriterionId("crt_00000000000000000000000001".to_owned());
+    let scope = ExecutionScope::WorkRunExecutionScope(WorkRunExecutionScope {
+        attempt: 1,
+        kind: WorkRunExecutionScopeKind::WorkRun,
+        product_session_id: queue_scope().product_session_id.clone(),
         rework_authorization: None,
-        stage_run_id: StageRunId(id("run", 100 + seed)),
+        work_contract_id: c.clone(),
+        work_contract_revision: Revision(1),
+        work_item_id: i.clone(),
+        work_item_revision: Revision(1),
+        work_run_id: WorkRunId(format!("wrn_01J000000000000000000000{:02}", seed % 100)),
     });
-    let stage_input = DeliveryStageInput {
-        acceptance_criteria: vec![DeliveryStageAcceptanceCriterionInput {
-            criterion_id: "criterion-scheduler-vertical".to_owned(),
-            description: "Every role emits its exact stage product.".to_owned(),
-            required: true,
-            verification_method: Some("Inspect the canonical runtime product.".to_owned()),
-        }],
+    let input = WorkRunInput {
+        delivery_spec_id: "spec-scheduler-vertical".into(),
+        delivery_spec_revision: Revision(1),
         candidate_ref: candidate_ref.map(str::to_owned),
-        constraints: vec!["Keep the repository boundary exact.".to_owned()],
-        delivery_spec_id: "spec-scheduler-vertical".to_owned(),
-        delivery_spec_revision: 1,
-        goal: goal.clone(),
-        out_of_scope: Vec::new(),
         schema_version: SchemaVersion::WinwincodeV1,
-        scope: vec!["scheduler-to-stage-product".to_owned()],
-        task: has_task.then(|| DeliveryStageTaskInput {
-            acceptance_criterion_ids: vec!["criterion-scheduler-vertical".to_owned()],
+        work_contract: WorkContract {
+            constraints: vec!["Keep the repository boundary exact.".to_owned()],
+            created_at: at(1),
+            criteria: vec![Criterion {
+                id: cr.clone(),
+                description: "Every role emits its exact stage product.".to_owned(),
+                required: true,
+                required_evidence_class: "machine".into(),
+                verification_method: Some("Inspect the canonical runtime product.".to_owned()),
+            }],
+            id: c.clone(),
+            objective: goal.clone(),
+            protected_scope: vec!["scheduler-to-stage-product".to_owned()],
+            required_human_authority: "approval".to_owned(),
+            revision: Revision(1),
+            schema_version: SchemaVersion::WinwincodeV1,
+            scope: vec!["scheduler-to-stage-product".to_owned()],
+        },
+        work_item: WorkItem {
+            criterion_ids: vec![cr],
+            depends_on: Vec::new(),
             goal: goal.clone(),
-            task_id,
+            id: i,
+            revision: Revision(1),
+            schema_version: SchemaVersion::WinwincodeV1,
+            state: WorkItemState::Ready,
             title: format!("Run {role}"),
-        }),
-        title: "Scheduler stage-product vertical".to_owned(),
+            work_contract_id: c,
+            work_contract_revision: Revision(1),
+        },
     };
     let payload = format!("scheduler-stage-product-{seed}-{role}");
     ExecutionJob {
@@ -926,7 +955,7 @@ fn stage_job(role: &str, seed: u64, revision: &str, candidate_ref: Option<&str>)
         },
         payload_digest: Sha256Digest(format!("sha256:{:x}", Sha256::digest(payload.as_bytes()))),
         scope,
-        stage_input: Some(stage_input),
+        work_input: Some(input),
         workspace: ExecutionWorkspace {
             checkout_revision: revision.to_owned(),
             repository_id: queue_scope().repository_id,
@@ -1075,8 +1104,8 @@ fn submit_job(storage: &mut SqliteStorage, job: &ExecutionJob, seed: u64) {
             dispatch_payload: serde_json::to_vec(job).expect("canonical job"),
             attempt: 1,
             dependencies: Vec::new(),
-            stage_run_id: Some(match &job.scope {
-                ExecutionScope::DeliveryStageExecutionScope(scope) => scope.stage_run_id.clone(),
+            work_run_id: Some(match &job.scope {
+                ExecutionScope::WorkRunExecutionScope(scope) => scope.work_run_id.clone(),
                 ExecutionScope::ProductSessionExecutionScope(_) => unreachable!("stage job"),
             }),
             submitted_at: at(5 + seed),
@@ -1500,10 +1529,9 @@ fn scheduler_stage_product_roles_cancel_restart_and_old_attempt_are_exact() {
             assert_eq!(binding.lease, dispatch.lease);
             assert_eq!(binding.product_session_id, queue_scope().product_session_id);
             assert_eq!(
-                binding.stage_run_id,
+                binding.work_run_id,
                 Some(match &job.scope {
-                    ExecutionScope::DeliveryStageExecutionScope(scope) =>
-                        scope.stage_run_id.clone(),
+                    ExecutionScope::WorkRunExecutionScope(scope) => scope.work_run_id.clone(),
                     _ => unreachable!("delivery stage"),
                 })
             );
@@ -1776,7 +1804,14 @@ fn scheduler_stage_product_roles_cancel_restart_and_old_attempt_are_exact() {
             replacement_binding.product_session_id,
             old_binding.product_session_id
         );
-        assert_eq!(replacement_binding.stage_run_id, old_binding.stage_run_id);
+        assert_eq!(
+            replacement_binding.work_run_id,
+            match &replacement_dispatch.job.scope {
+                ExecutionScope::WorkRunExecutionScope(scope) => Some(scope.work_run_id.clone()),
+                _ => unreachable!("replacement must remain a WorkRun"),
+            }
+        );
+        assert_ne!(replacement_binding.work_run_id, old_binding.work_run_id);
         assert_eq!(
             replacement_binding.session_identity.worker_session_id,
             replacement_binding.worker_session_id

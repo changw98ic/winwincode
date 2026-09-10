@@ -105,10 +105,10 @@ fn principal_with_fingerprint(digit: char) -> RemoteWorkerPrincipal {
         WorkerId("wrk_00000000000000000000000001".to_owned()),
         WorkerPoolId("wpl_00000000000000000000000001".to_owned()),
         WorkerRegistryScope::local_default(),
-        "enterprise-worker-identity".to_owned(),
+        "remote-worker-identity".to_owned(),
         "remote-worker-01".to_owned(),
         Sha256Digest(format!("sha256:{}", digit.to_string().repeat(64))),
-        "enterprise-default".to_owned(),
+        "remote-default".to_owned(),
     )
     .expect("valid remote principal")
 }
@@ -239,7 +239,7 @@ fn repeat_registration_is_idempotent_and_disconnect_updates_exact_health() {
         worker.management_scope,
         WorkerRegistryScope::local_default()
     );
-    assert_eq!(worker.security_zone, "enterprise-default");
+    assert_eq!(worker.security_zone, "remote-default");
     assert!(matches!(
         worker.authentication_identity,
         WorkerAuthenticationIdentity::TransportPrincipal { .. }

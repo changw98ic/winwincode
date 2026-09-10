@@ -25,11 +25,12 @@ use winwincode_api::generated::{
     Scope,
 };
 use winwincode_domain::{
-    ControlPlaneEventId, Instant, OpaqueCursor, RepositoryScope, Revision, SchemaVersion,
+    ControlPlaneEventId, Instant, OpaqueCursor, RepositoryScope, RequestId, Revision,
+    SchemaVersion, Sha256Digest,
 };
 use winwincode_storage::{
-    NewOutboxEvent, ProductStateStorage, ProjectionEventStream, PublicEventSource, SqliteStorage,
-    StorageError,
+    NewOutboxEvent, ProductStateStorage, ProjectionEventStream, PublicEventSource, ReceiptIdentity,
+    SqliteStorage, StateCommit, StorageError,
 };
 
 use crate::credential_leak_gate::{
@@ -44,19 +45,60 @@ use crate::provider_catalog::{
     CatalogAvailability, ModelToolSupport as CatalogModelToolSupport, ProviderCatalogError,
     ProviderCatalogService,
 };
-use crate::{public_event_actor, public_event_scope, receipt_actor_key, repository_scope_key};
+use crate::{
+    public_event_actor, public_event_scope, receipt_actor_key, receipt_scope_key,
+    repository_scope_key,
+};
 
 const CURSOR_VERSION: u8 = 1;
 pub(crate) const MODEL_ROUTE_AVAILABILITY_INVALIDATED_TOPIC: &str =
     "model-route-availability.invalidated.v1";
 const INVALIDATION_EVENT_COMPONENT: &str = "model-route-availability";
 const POOL_READINESS_STREAM_PREFIX: &str = "model-request-pool-readiness:";
+const RUNTIME_STATUS_SCHEMA: &str = "winwincode.model-route-runtime-status.v1";
+const RUNTIME_STATUS_STREAM_PREFIX: &str = "model-route-runtime-status:";
+const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+
+/// Trusted runtime observation for one exact repository route.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ModelRouteRuntimeStatusCommand {
+    pub actor: Actor,
+    pub scope: RepositoryScope,
+    pub route: ModelRoute,
+    pub request_id: RequestId,
+    pub expected_revision: u64,
+    pub status: ModelRouteAvailabilityStatus,
+    pub source: String,
+    pub source_revision: u64,
+}
+
+/// Durable result of one runtime-status update.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ModelRouteRuntimeStatusReceipt {
+    pub revision: u64,
+    pub status: ModelRouteAvailabilityStatus,
+    pub idempotent_replay: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ModelRouteRuntimeStatusState {
+    schema: String,
+    scope: RepositoryScope,
+    route: ModelRoute,
+    status: ModelRouteAvailabilityStatus,
+    source: String,
+    source_revision: u64,
+    observed_at: Instant,
+    revision: u64,
+}
 
 pub(crate) fn model_request_pool_readiness_stream_id(
     project_scope: &ProjectScope,
 ) -> Result<String, StorageError> {
     let scope = Scope::ProjectScope(project_scope.clone());
-    crate::receipt_scope_key(&scope)?;
+    receipt_scope_key(&scope)?;
     let scope_json = serde_json::to_vec(project_scope).map_err(|error| {
         StorageError::adapter(format!(
             "failed to encode ModelRoute request-pool scope: {error}"
@@ -249,6 +291,87 @@ impl<'storage> ModelRouteAvailabilityService<'storage> {
         }
     }
 
+    /// Persists one explicit Provider/runtime observation. Quota states are
+    /// accepted only as reported facts; this service never estimates them.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for malformed, conflicting, or unpersistable facts.
+    pub fn record_runtime_status(
+        &mut self,
+        command: &ModelRouteRuntimeStatusCommand,
+        observed_at: Instant,
+    ) -> Result<ModelRouteRuntimeStatusReceipt, ModelRouteAvailabilityError> {
+        validate_runtime_status_command(command)?;
+        validate_instant(&observed_at)?;
+        let scope = Scope::RepositoryScope(command.scope.clone());
+        let identity = ReceiptIdentity::new(
+            receipt_actor_key(&command.actor)
+                .map_err(|_| ModelRouteAvailabilityError::invalid())?,
+            receipt_scope_key(&scope).map_err(|_| ModelRouteAvailabilityError::scope_denied())?,
+            command.request_id.clone(),
+        )
+        .map_err(|_| ModelRouteAvailabilityError::invalid())?;
+        let command_bytes =
+            serde_json::to_vec(command).map_err(|_| ModelRouteAvailabilityError::invalid())?;
+        let digest = Sha256Digest(format!("sha256:{:x}", Sha256::digest(&command_bytes)));
+        if let Some(receipt) = self
+            .storage
+            .load_receipt(&identity, &digest)
+            .map_err(|_| ModelRouteAvailabilityError::storage())?
+        {
+            return Ok(ModelRouteRuntimeStatusReceipt {
+                revision: receipt.revision,
+                status: command.status.clone(),
+                idempotent_replay: true,
+            });
+        }
+        let revision = command
+            .expected_revision
+            .checked_add(1)
+            .filter(|revision| *revision <= MAX_SAFE_INTEGER)
+            .ok_or_else(ModelRouteAvailabilityError::invalid)?;
+        let state = ModelRouteRuntimeStatusState {
+            schema: RUNTIME_STATUS_SCHEMA.to_owned(),
+            scope: command.scope.clone(),
+            route: command.route.clone(),
+            status: command.status.clone(),
+            source: command.source.clone(),
+            source_revision: command.source_revision,
+            observed_at: observed_at.clone(),
+            revision,
+        };
+        let state_payload =
+            serde_json::to_vec(&state).map_err(|_| ModelRouteAvailabilityError::invalid())?;
+        CredentialLeakGate::default()
+            .inspect_json_bytes(CredentialOutputBoundary::Persistence, &state_payload)?;
+        let invalidation = model_route_availability_invalidated_event(
+            &command.actor,
+            &scope,
+            ControlPlaneWebSocketModelRouteAvailabilityInvalidationSource::RuntimeStatus,
+            revision,
+            observed_at,
+            command.request_id.0.as_bytes(),
+        )
+        .map_err(|_| ModelRouteAvailabilityError::storage())?;
+        let receipt = self
+            .storage
+            .commit(&StateCommit::new(
+                identity,
+                digest,
+                runtime_status_stream_id(&command.scope, &command.route)?,
+                command.expected_revision,
+                state_payload,
+                vec![invalidation],
+            ))
+            .map_err(|_| ModelRouteAvailabilityError::storage())?;
+        Ok(ModelRouteRuntimeStatusReceipt {
+            revision: receipt.revision,
+            status: command.status.clone(),
+            idempotent_replay: receipt.idempotent_replay,
+        })
+    }
+
     /// Returns one stable page of server-joined `ModelRoute` values.
     ///
     /// # Errors
@@ -321,11 +444,13 @@ impl<'storage> ModelRouteAvailabilityService<'storage> {
                         ModelRequestRouteKey::from_repository_scope(&query.scope, &route)
                             .is_ok_and(|route_key| pool.is_route_ready(&route_key))
                     });
+                    let runtime_status = self.runtime_status(&query.scope, &route)?;
                     let (status, reason) = candidate_status(
                         provider.availability,
                         model.availability,
                         credential_ready,
                         pool_ready,
+                        runtime_status,
                     );
                     candidates.push(ModelRouteAvailabilityProjection {
                         catalog_source: catalog_scope.clone(),
@@ -406,6 +531,39 @@ impl<'storage> ModelRouteAvailabilityService<'storage> {
                 .map_err(|_| ModelRouteAvailabilityError::storage())?;
         }
         Ok(Some(pool))
+    }
+
+    fn runtime_status(
+        &self,
+        scope: &RepositoryScope,
+        route: &ModelRoute,
+    ) -> Result<Option<ModelRouteAvailabilityStatus>, ModelRouteAvailabilityError> {
+        let stream_id = runtime_status_stream_id(scope, route)?;
+        let Some(stored) = self
+            .storage
+            .load_state(&stream_id)
+            .map_err(|_| ModelRouteAvailabilityError::storage())?
+        else {
+            return Ok(None);
+        };
+        let state: ModelRouteRuntimeStatusState = serde_json::from_slice(&stored.payload)
+            .map_err(|_| ModelRouteAvailabilityError::storage())?;
+        if serde_json::to_vec(&state).map_err(|_| ModelRouteAvailabilityError::storage())?
+            != stored.payload
+            || state.schema != RUNTIME_STATUS_SCHEMA
+            || state.scope != *scope
+            || state.route != *route
+            || state.revision != stored.revision
+            || state.source_revision == 0
+            || state.source_revision > MAX_SAFE_INTEGER
+            || state.source.trim().is_empty()
+            || state.source.chars().count() > 200
+            || state.source.chars().any(char::is_control)
+            || validate_instant(&state.observed_at).is_err()
+        {
+            return Err(ModelRouteAvailabilityError::storage());
+        }
+        Ok(Some(state.status))
     }
 }
 
@@ -509,11 +667,73 @@ fn validate_query(
     Ok(())
 }
 
+fn validate_runtime_status_command(
+    command: &ModelRouteRuntimeStatusCommand,
+) -> Result<(), ModelRouteAvailabilityError> {
+    receipt_actor_key(&command.actor).map_err(|_| ModelRouteAvailabilityError::invalid())?;
+    repository_scope_key(&command.scope)
+        .map_err(|_| ModelRouteAvailabilityError::scope_denied())?;
+    ModelRequestRouteKey::from_repository_scope(&command.scope, &command.route)
+        .map_err(|_| ModelRouteAvailabilityError::invalid())?;
+    if !command.request_id.0.starts_with("req_")
+        || command.request_id.0.len() > 200
+        || command
+            .request_id
+            .0
+            .bytes()
+            .any(|byte| byte.is_ascii_control())
+        || command.expected_revision > MAX_SAFE_INTEGER
+        || command.source_revision == 0
+        || command.source_revision > MAX_SAFE_INTEGER
+        || command.source.trim().is_empty()
+        || command.source.chars().count() > 200
+        || command.source.chars().any(char::is_control)
+    {
+        return Err(ModelRouteAvailabilityError::invalid());
+    }
+    Ok(())
+}
+
+fn validate_instant(value: &Instant) -> Result<(), ModelRouteAvailabilityError> {
+    let bytes = value.0.as_bytes();
+    let valid = bytes.len() == 24
+        && bytes[4] == b'-'
+        && bytes[7] == b'-'
+        && bytes[10] == b'T'
+        && bytes[13] == b':'
+        && bytes[16] == b':'
+        && bytes[19] == b'.'
+        && bytes[23] == b'Z'
+        && bytes.iter().enumerate().all(|(index, byte)| {
+            matches!(index, 4 | 7 | 10 | 13 | 16 | 19 | 23) || byte.is_ascii_digit()
+        });
+    if valid {
+        Ok(())
+    } else {
+        Err(ModelRouteAvailabilityError::invalid())
+    }
+}
+
+fn runtime_status_stream_id(
+    scope: &RepositoryScope,
+    route: &ModelRoute,
+) -> Result<String, ModelRouteAvailabilityError> {
+    ModelRequestRouteKey::from_repository_scope(scope, route)
+        .map_err(|_| ModelRouteAvailabilityError::invalid())?;
+    let bytes =
+        serde_json::to_vec(&(scope, route)).map_err(|_| ModelRouteAvailabilityError::invalid())?;
+    Ok(format!(
+        "{RUNTIME_STATUS_STREAM_PREFIX}{:x}",
+        Sha256::digest(bytes)
+    ))
+}
+
 fn candidate_status(
     provider: CatalogAvailability,
     model: CatalogAvailability,
     credential_ready: bool,
     pool_ready: bool,
+    runtime_status: Option<ModelRouteAvailabilityStatus>,
 ) -> (ModelRouteAvailabilityStatus, ModelRouteAvailabilityReason) {
     if provider == CatalogAvailability::Disabled || model == CatalogAvailability::Disabled {
         return (
@@ -523,20 +743,46 @@ fn candidate_status(
     }
     if !credential_ready {
         return (
-            ModelRouteAvailabilityStatus::Disabled,
+            ModelRouteAvailabilityStatus::AuthError,
             ModelRouteAvailabilityReason::CredentialMissingOrRevoked,
         );
     }
+    if let Some(status) = runtime_status
+        && status != ModelRouteAvailabilityStatus::Available
+    {
+        let reason = runtime_reason(&status);
+        return (status, reason);
+    }
     if !pool_ready {
         return (
-            ModelRouteAvailabilityStatus::Disabled,
+            ModelRouteAvailabilityStatus::Unknown,
             ModelRouteAvailabilityReason::RequestPoolUnavailable,
         );
     }
     (
-        ModelRouteAvailabilityStatus::Enabled,
+        ModelRouteAvailabilityStatus::Available,
         ModelRouteAvailabilityReason::Ready,
     )
+}
+
+fn runtime_reason(status: &ModelRouteAvailabilityStatus) -> ModelRouteAvailabilityReason {
+    match status {
+        ModelRouteAvailabilityStatus::Available => ModelRouteAvailabilityReason::Ready,
+        ModelRouteAvailabilityStatus::RateLimited => ModelRouteAvailabilityReason::RateLimited,
+        ModelRouteAvailabilityStatus::WindowExhausted => {
+            ModelRouteAvailabilityReason::WindowExhausted
+        }
+        ModelRouteAvailabilityStatus::WeeklyExhausted => {
+            ModelRouteAvailabilityReason::WeeklyExhausted
+        }
+        ModelRouteAvailabilityStatus::AuthError => {
+            ModelRouteAvailabilityReason::AuthenticationError
+        }
+        ModelRouteAvailabilityStatus::Disabled => {
+            ModelRouteAvailabilityReason::ProviderOrModelDisabled
+        }
+        ModelRouteAvailabilityStatus::Unknown => ModelRouteAvailabilityReason::RuntimeStatusUnknown,
+    }
 }
 
 fn page_status(

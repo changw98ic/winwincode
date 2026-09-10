@@ -1074,9 +1074,9 @@ fn validate_authority_shape(
         || !prefixed_ulid(&session.worker_session_id.0, "wsn_")
         || !prefixed_ulid(&session.codex_thread_id.0, "cdx_")
         || session
-            .stage_run_id
+            .work_run_id
             .as_ref()
-            .is_some_and(|identity| !prefixed_ulid(&identity.0, "run_"))
+            .is_some_and(|identity| !prefixed_ulid(&identity.0, "wrn_"))
         || !prefixed_ulid(&authority.repository_id.0, "rep_")
         || !prefixed_ulid(&authority.round_id.0, "prn_")
         || !canonical_workspace_revision(&authority.workspace_revision.0)
@@ -1101,7 +1101,7 @@ fn hash_round_authority(
     digest.optional_text(
         authority
             .session_identity
-            .stage_run_id
+            .work_run_id
             .as_ref()
             .map(|identity| identity.0.as_str()),
     )?;

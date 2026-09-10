@@ -460,7 +460,7 @@ mod tests {
     use tempfile::TempDir;
     use winwincode_domain::{
         CodexThreadId, ExecutionJobId, FencingToken, LeaseId, ProductSessionId, RepositoryId,
-        SessionIdentity, Sha256Digest, StageRunId, WorkerSessionId, WorkspaceRevision,
+        SessionIdentity, Sha256Digest, WorkRunId, WorkerSessionId, WorkspaceRevision,
     };
     use winwincode_execution_port::{
         change_batch_identity::derive_change_batch_id, generated::ChangeBatchIdentity,
@@ -557,7 +557,7 @@ mod tests {
             session_identity: SessionIdentity {
                 codex_thread_id: CodexThreadId("thr_00000000000000000000000001".to_owned()),
                 product_session_id: ProductSessionId("psn_00000000000000000000000001".to_owned()),
-                stage_run_id: Some(StageRunId("run_00000000000000000000000001".to_owned())),
+                work_run_id: Some(WorkRunId("wrn_00000000000000000000000001".to_owned())),
                 worker_session_id: WorkerSessionId("wss_00000000000000000000000001".to_owned()),
             },
             turn_id,

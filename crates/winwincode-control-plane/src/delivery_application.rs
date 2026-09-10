@@ -10,10 +10,7 @@ use sha2::{Digest, Sha256};
 use winwincode_api::generated::{
     Actor, CommandEnvelope, CommandName, DeliveryAdvanceCommand, DeliveryAdvanceCompletedResponse,
     DeliveryAdvanceCompletedResponseCommand, DeliveryAdvanceCompletedResponseOutcome,
-    DeliveryApproveTaskBreakdownCommand, DeliveryApproveTaskBreakdownCompletedResponse,
-    DeliveryApproveTaskBreakdownCompletedResponseCommand,
-    DeliveryApproveTaskBreakdownCompletedResponseOutcome, DeliveryCreateCommand,
-    DeliveryCreateCompletedResponse, DeliveryCreateCompletedResponseCommand,
+    DeliveryCreateCommand, DeliveryCreateCompletedResponse, DeliveryCreateCompletedResponseCommand,
     DeliveryCreateCompletedResponseOutcome, DeliveryListQuery, DeliveryListResultResponse,
     DeliveryListResultResponseQuery, DeliveryOwnershipProjection, DeliveryPage, DeliveryPageKind,
     DeliveryProjection, DeliveryResolveAttentionCommand, DeliveryResolveAttentionCompletedResponse,
@@ -21,10 +18,14 @@ use winwincode_api::generated::{
     DeliveryResolveAttentionCompletedResponseOutcome, DeliverySpecInput,
     DeliveryStatus as ApiDeliveryStatus, DeliverySubmitVerdictCommand,
     DeliverySubmitVerdictCompletedResponse, DeliverySubmitVerdictCompletedResponseCommand,
-    DeliverySubmitVerdictCompletedResponseOutcome, DeliveryTaskCountsProjection,
-    DeliveryUpdateSpecCommand, DeliveryUpdateSpecCompletedResponse,
+    DeliverySubmitVerdictCompletedResponseOutcome, DeliveryTaskBreakdownCreateCommand,
+    DeliveryTaskBreakdownCreateCompletedResponse,
+    DeliveryTaskBreakdownCreateCompletedResponseCommand,
+    DeliveryTaskBreakdownCreateCompletedResponseOutcome, DeliveryTaskBreakdownCreateResult,
+    DeliveryTaskCountsProjection, DeliveryUpdateSpecCommand, DeliveryUpdateSpecCompletedResponse,
     DeliveryUpdateSpecCompletedResponseCommand, DeliveryUpdateSpecCompletedResponseOutcome,
-    ErrorCode, PageInfo, Scope,
+    ErrorCode, PageInfo, Scope, WorkRunCancelCommand, WorkRunCancelCompletedResponse,
+    WorkRunCancelCompletedResponseCommand, WorkRunCancelCompletedResponseOutcome,
 };
 use winwincode_delivery::{
     application::{
@@ -34,7 +35,7 @@ use winwincode_delivery::{
     },
     domain::{
         AttentionItemStatus, Delivery, DeliverySourceRef, DeliveryStatus, DeliveryTaskStatus,
-        FrozenDeliveryCandidate, RepositoryRef, StageRunStatus, evidence::ResolvedDeliveryEvidence,
+        FrozenDeliveryCandidate, RepositoryRef, evidence::ResolvedDeliveryEvidence,
         verification::IndependentVerification,
     },
     store::{DeliveryQuery, DeliveryQueryPort, DeliveryStore},
@@ -56,7 +57,7 @@ use crate::{
     delivery_command_transaction::TrustedDeliverySpecFacts,
     delivery_execution::{
         DeliveryExecutionConfig, DeliveryExecutionError, ExecutionJobDispatcher,
-        prepare_delivery_advance,
+        PendingDeliveryExecution, prepare_workrun_advance,
     },
     delivery_transaction::{StagedDeliveryJournal, delivery_journal_key, delivery_stream_id},
     load_product_session_authority_seal, public_event_actor, repository_scope_key,
@@ -181,8 +182,6 @@ pub struct DeliveryAdvanceAuthority {
     pub source_ref: Option<DeliverySourceRef>,
     pub transition: StageAdvanceResult,
     pub execution: Option<DeliveryExecutionConfig>,
-    pub(crate) terminal_handoff:
-        Option<crate::terminal_outcome_transaction::DeliveryTerminalHandoff>,
 }
 
 /// Sealed current-Attention transition returned by the review authority.
@@ -493,45 +492,52 @@ impl ControlPlane {
         update_response(command, &receipt, &delivery)
     }
 
-    /// Promotes only the task graph already sealed by the durable approved
-    /// Solution Review; no caller or authority adapter supplies task fields.
+    /// Creates canonical work items and publishes the durable result.
     ///
     /// # Errors
-    ///
-    /// Returns a stable application error when validation, durable promotion,
-    /// or projection publication fails.
-    pub fn delivery_approve_task_breakdown(
+    /// Rejects invalid scope or revisions and reports storage or publication failures.
+    pub fn delivery_task_breakdown_create(
         &mut self,
-        command: &DeliveryApproveTaskBreakdownCommand,
-    ) -> Result<DeliveryApproveTaskBreakdownCompletedResponse, DeliveryApplicationError> {
-        let mapped = map_command(
-            &command.actor,
-            CommandName::DeliveryApproveTaskBreakdown,
-            command.expected_revision.clone(),
-            &command.payload,
-            &command.request_id,
-            &command.schema_version,
-            &command.scope,
-        )?;
-        if let Some((receipt, delivery)) =
-            self.delivery_replay(&mapped, &command.scope, &command.payload.delivery_id)?
-        {
-            return task_breakdown_response(command, &receipt, &delivery);
-        }
+        command: &DeliveryTaskBreakdownCreateCommand,
+    ) -> Result<DeliveryTaskBreakdownCreateCompletedResponse, DeliveryApplicationError> {
+        let envelope: CommandEnvelope = serde_json::from_value(
+            serde_json::to_value(command)
+                .map_err(|e| DeliveryApplicationError::InvalidRequest(e.to_string()))?,
+        )
+        .map_err(|e| DeliveryApplicationError::InvalidRequest(e.to_string()))?;
         ensure_catalog_membership(
             self.storage_ref()?,
             &command.scope,
             &command.payload.delivery_id,
         )?;
-        let receipt = self
-            .commit_delivery_task_breakdown(&mapped)
-            .map_err(DeliveryApplicationError::Commit)?;
+        let receipt =
+            crate::task_breakdown_transaction::execute_create(self.storage_mut()?, &envelope)
+                .map_err(|error| DeliveryApplicationError::Commit(CommitError::Storage(error)))?;
+        self.flush_outbox().map_err(|source| {
+            DeliveryApplicationError::Commit(CommitError::PublicationPending {
+                receipt: Box::new(receipt.clone()),
+                source,
+            })
+        })?;
         let delivery = load_delivery_revision(
             self.storage_ref()?,
             &command.payload.delivery_id,
             receipt.revision,
         )?;
-        task_breakdown_response(command, &receipt, &delivery)
+        Ok(DeliveryTaskBreakdownCreateCompletedResponse {
+            command:
+                DeliveryTaskBreakdownCreateCompletedResponseCommand::DeliveryTaskBreakdownCreate,
+            current_revision: revision(receipt.revision)?,
+            outcome: DeliveryTaskBreakdownCreateCompletedResponseOutcome::Completed,
+            previous_revision: command.payload.expected_revision.clone(),
+            request_id: command.request_id.clone(),
+            result: DeliveryTaskBreakdownCreateResult {
+                delivery_id: command.payload.delivery_id.clone(),
+                delivery_revision: revision(receipt.revision)?,
+                items: delivery.snapshot().work_run_aggregate.items.clone(),
+            },
+            schema_version: command.schema_version.clone(),
+        })
     }
 
     /// Executes one generated `delivery.advance` from an authority-sealed
@@ -583,63 +589,44 @@ impl ControlPlane {
         authority: DeliveryAdvanceAuthority,
     ) -> Result<u64, DeliveryApplicationError> {
         let DeliveryAdvanceAuthority {
-            repository,
-            source_ref,
             transition,
             execution,
-            terminal_handoff,
+            ..
         } = authority;
-        let Scope::RepositoryScope(scope) = &command.scope else {
+        let Scope::RepositoryScope(_) = &command.scope else {
             return Err(DeliveryApplicationError::InvalidRequest(
                 "Delivery advance requires repository scope".to_owned(),
             ));
         };
         match &transition.effect {
-            StageAdvanceEffect::Review(_) => {
-                if execution.is_some() {
-                    return Err(DeliveryApplicationError::TrustedFactsUnavailable(
-                        "human Delivery stage unexpectedly carried execution configuration"
-                            .to_owned(),
-                    ));
-                }
-                let facts = DeliveryCommandFacts::advance_from_trusted_adapter(
-                    command,
-                    scope.clone(),
-                    repository,
-                    source_ref,
-                    transition,
-                )?;
-                let commit = if let Some(handoff) = &terminal_handoff {
-                    self.commit_delivery_command_with_handoff(command, &facts, handoff)
-                } else {
-                    self.commit_delivery_command(command, &facts)
-                };
-                Ok(commit.map_err(DeliveryApplicationError::Command)?.revision)
-            }
-            StageAdvanceEffect::Dispatch(_) => {
+            StageAdvanceEffect::Review(_) => Err(DeliveryApplicationError::InvalidRequest(
+                "human approval uses the Attention command, not execution dispatch".to_owned(),
+            )),
+            StageAdvanceEffect::Dispatch(intent) => {
                 let config = execution.ok_or_else(|| {
                     DeliveryApplicationError::TrustedFactsUnavailable(
                         "Codex Delivery stage has no trusted execution configuration".to_owned(),
                     )
                 })?;
-                let pending =
-                    prepare_delivery_advance(command.request_id.clone(), transition, config)
-                        .map_err(DeliveryApplicationError::Execution)?;
+                let workrun_job = prepare_workrun_advance(
+                    &command.request_id,
+                    &transition.delivery.snapshot().work_run_aggregate,
+                    &transition.delivery.snapshot().spec,
+                    intent,
+                    config.clone(),
+                )
+                .map_err(DeliveryApplicationError::Execution)?;
+                let pending = PendingDeliveryExecution::from_workrun(
+                    command.request_id.clone(),
+                    transition,
+                    workrun_job,
+                );
                 let mut dispatcher = self.delivery_dispatcher.take().ok_or_else(|| {
                     DeliveryApplicationError::TrustedFactsUnavailable(
                         "Delivery execution dispatcher is not installed".to_owned(),
                     )
                 })?;
-                let result = if let Some(handoff) = &terminal_handoff {
-                    self.commit_delivery_execution_with_handoff(
-                        command,
-                        &pending,
-                        dispatcher.as_mut(),
-                        handoff,
-                    )
-                } else {
-                    self.commit_delivery_execution(command, &pending, dispatcher.as_mut())
-                };
+                let result = self.commit_delivery_execution(command, &pending, dispatcher.as_mut());
                 self.delivery_dispatcher = Some(dispatcher);
                 Ok(result
                     .map_err(DeliveryApplicationError::Execution)?
@@ -647,7 +634,7 @@ impl ControlPlane {
                     .committed_revision)
             }
             StageAdvanceEffect::Clarify(_) => {
-                if execution.is_some() || terminal_handoff.is_some() {
+                if execution.is_some() {
                     return Err(DeliveryApplicationError::TrustedFactsUnavailable(
                         "clarification transition unexpectedly carried execution configuration"
                             .to_owned(),
@@ -1169,22 +1156,6 @@ fn update_response(
     })
 }
 
-fn task_breakdown_response(
-    command: &DeliveryApproveTaskBreakdownCommand,
-    receipt: &CommitReceipt,
-    delivery: &Delivery,
-) -> Result<DeliveryApproveTaskBreakdownCompletedResponse, DeliveryApplicationError> {
-    Ok(DeliveryApproveTaskBreakdownCompletedResponse {
-        command: DeliveryApproveTaskBreakdownCompletedResponseCommand::DeliveryApproveTaskBreakdown,
-        current_revision: revision(receipt.revision)?,
-        outcome: DeliveryApproveTaskBreakdownCompletedResponseOutcome::Completed,
-        previous_revision: previous_revision(receipt.revision)?,
-        request_id: command.request_id.clone(),
-        result: delivery_projection(delivery, &command.scope)?,
-        schema_version: SchemaVersion::WinwincodeV1,
-    })
-}
-
 fn advance_response(
     command: &DeliveryAdvanceCommand,
     committed_revision: u64,
@@ -1195,6 +1166,28 @@ fn advance_response(
         current_revision: revision(committed_revision)?,
         outcome: DeliveryAdvanceCompletedResponseOutcome::Completed,
         previous_revision: previous_revision(committed_revision)?,
+        request_id: command.request_id.clone(),
+        result: delivery_projection(delivery, &command.scope)?,
+        schema_version: SchemaVersion::WinwincodeV1,
+    })
+}
+
+/// Builds the response for queue-authorized `WorkRun` cancellation. The queue
+/// transition is durable immediately; the Delivery revision advances only
+/// when the Worker later submits its verified terminal outcome.
+///
+/// # Errors
+/// Rejects an invalid revision or a projection that does not match the command scope.
+pub fn workrun_cancel_response(
+    command: &WorkRunCancelCommand,
+    delivery: &Delivery,
+) -> Result<WorkRunCancelCompletedResponse, DeliveryApplicationError> {
+    let current = revision(delivery.revision())?;
+    Ok(WorkRunCancelCompletedResponse {
+        command: WorkRunCancelCompletedResponseCommand::WorkRunCancel,
+        current_revision: current.clone(),
+        outcome: WorkRunCancelCompletedResponseOutcome::Completed,
+        previous_revision: current,
         request_id: command.request_id.clone(),
         result: delivery_projection(delivery, &command.scope)?,
         schema_version: SchemaVersion::WinwincodeV1,
@@ -1250,14 +1243,17 @@ fn delivery_projection(
     scope: &RepositoryScope,
 ) -> Result<DeliveryProjection, DeliveryApplicationError> {
     let snapshot = delivery.snapshot();
-    let active_stage_run_id = snapshot
-        .stage_runs
+    let active_work_run_id = snapshot
+        .work_run_aggregate
+        .runs
         .iter()
         .rev()
         .find(|run| {
             matches!(
-                run.status,
-                StageRunStatus::Waiting | StageRunStatus::Running
+                run.state,
+                winwincode_domain::WorkRunState::Queued
+                    | winwincode_domain::WorkRunState::Leased
+                    | winwincode_domain::WorkRunState::Running
             )
         })
         .map(|run| run.id.clone());
@@ -1283,7 +1279,8 @@ fn delivery_projection(
         }
     }
     Ok(DeliveryProjection {
-        active_stage_run_id,
+        active_work_run_id,
+        work_run_id: None,
         delivery_id: delivery.id().clone(),
         open_attention_count: count(open_attention)?,
         ownership: DeliveryOwnershipProjection {

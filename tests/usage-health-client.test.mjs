@@ -59,9 +59,9 @@ const deliveryTwo = 'dlv_00000000000000000000000002'
 const productSessionOne = 'psn_00000000000000000000000001'
 const productSessionTwo = 'psn_00000000000000000000000002'
 const productSessionOutside = 'psn_00000000000000000000000009'
-const stageRunOne = 'str_00000000000000000000000001'
-const stageRunTwo = 'str_00000000000000000000000002'
-const stageRunThree = 'str_00000000000000000000000003'
+const workRunOne = 'wrn_00000000000000000000000001'
+const workRunTwo = 'wrn_00000000000000000000000002'
+const workRunThree = 'wrn_00000000000000000000000003'
 // Planted marker: if any secret-unsafe field reaches the panel this string becomes
 // readable page text and the assertion below fails.
 const SECRET_MARKER = 'vault-locator-secret-marker'
@@ -104,7 +104,7 @@ function agent(role, index) {
   }
 }
 
-function runtimeSession(stageRunId, overrides = {}) {
+function runtimeSession(workRunId, overrides = {}) {
   return {
     activities: [],
     agentEdges: [],
@@ -112,7 +112,7 @@ function runtimeSession(stageRunId, overrides = {}) {
     asOfSequence: 12,
     attempt: 1,
     codexThreadId: canonicalId('thr', 1),
-    deliveryTaskId: null,
+    workItemId: null,
     diffSummary: null,
     executionJobId: canonicalId('job', 1),
     fencingToken: '1',
@@ -127,7 +127,7 @@ function runtimeSession(stageRunId, overrides = {}) {
       state: 'none',
     },
     sessionBindingId: 'binding-1',
-    stageRunId,
+    workRunId,
     usage: usage(['input_tokens', 100], ['cached_input_tokens', 20], ['output_tokens', 50], [
       'total_tokens',
       170,
@@ -137,7 +137,7 @@ function runtimeSession(stageRunId, overrides = {}) {
   }
 }
 
-function runtimeSnapshot(productSessionId, deliveryId, stageRunId, sessions, rebuiltAt) {
+function runtimeSnapshot(productSessionId, deliveryId, workRunId, sessions, rebuiltAt) {
   return {
     deliveryId,
     eventCursor: {
@@ -145,7 +145,7 @@ function runtimeSnapshot(productSessionId, deliveryId, stageRunId, sessions, reb
       eventId: canonicalId('evt', 1),
       kind: 'delivery',
       sequence: 12,
-      stageRunId,
+      workRunId,
       stream: { kind: 'delivery' },
     },
     kind: 'runtime_projection',
@@ -155,13 +155,13 @@ function runtimeSnapshot(productSessionId, deliveryId, stageRunId, sessions, reb
     rebuiltAt,
     revision: 3,
     sessions,
-    stageRunId,
+    workRunId,
   }
 }
 
 function delivery(overrides = {}) {
   return {
-    activeStageRunId: stageRunOne,
+    activeWorkRunId: workRunOne,
     deliveryId: deliveryOne,
     openAttentionCount: 0,
     ownership: {
@@ -187,7 +187,7 @@ function modelRoute(providerId, modelId, overrides = {}) {
       modelId,
       credentialReferenceId: canonicalId('crd', 1),
     },
-    status: 'enabled',
+    status: 'available',
     reason: 'ready',
     isDefault: false,
     providerDisplayName: `${providerId} display`,
@@ -273,8 +273,8 @@ function baselineFixtures() {
     'runtime.projection.get': (request) => {
       const id = request.parameters.productSessionId
       if (id === productSessionOne) {
-        return runtimeSnapshot(productSessionOne, deliveryOne, stageRunOne, [
-          runtimeSession(stageRunOne, {
+        return runtimeSnapshot(productSessionOne, deliveryOne, workRunOne, [
+          runtimeSession(workRunOne, {
             agents: [agent('planner', 1), agent('implementer', 2)],
             recovery: {
               failureCount: 2,
@@ -284,7 +284,7 @@ function baselineFixtures() {
               state: 'recovered',
             },
           }),
-          runtimeSession(stageRunTwo, {
+          runtimeSession(workRunTwo, {
             agents: [agent(null, 3)],
             executionJobId: canonicalId('job', 2),
             usage: usage(['input_tokens', 10], ['output_tokens', 5], ['schema_version', 1]),
@@ -293,8 +293,8 @@ function baselineFixtures() {
         ], '2026-09-03T08:30:00.000Z')
       }
       if (id === productSessionTwo) {
-        return runtimeSnapshot(productSessionTwo, deliveryTwo, stageRunThree, [
-          runtimeSession(stageRunThree, {
+        return runtimeSnapshot(productSessionTwo, deliveryTwo, workRunThree, [
+          runtimeSession(workRunThree, {
             agents: [agent('reviewer', 4)],
             executionJobId: canonicalId('job', 3),
             productSessionId: productSessionTwo,
@@ -310,7 +310,7 @@ function baselineFixtures() {
       items: [
         delivery(),
         delivery({
-          activeStageRunId: null,
+          activeWorkRunId: null,
           deliveryId: deliveryTwo,
           openAttentionCount: 3,
           status: 'needs-attention',
@@ -333,7 +333,7 @@ function baselineFixtures() {
       settingsSource: scope,
       defaultProviderId: 'openai',
       defaultModelId: 'gpt-5',
-      status: 'enabled',
+      status: 'available',
       reason: 'ready',
       items: [
         modelRoute('openai', 'gpt-5', { isDefault: true }),
@@ -574,22 +574,22 @@ test('usage is aggregated per Delivery from runtime token totals', async () => {
   assert.equal(second.sessionCount, 1)
 })
 
-test('usage is aggregated per StageRun including the session that reported no usage', async () => {
+test('usage is aggregated per WorkRun including the session that reported no usage', async () => {
   const { model } = await started()
-  const keys = model.state.byStageRun.map(row => row.key)
-  assert.deepEqual(keys, [stageRunOne, stageRunTwo, stageRunThree])
-  const first = model.state.byStageRun[0]
+  const keys = model.state.byWorkRun.map(row => row.key)
+  assert.deepEqual(keys, [workRunOne, workRunTwo, workRunThree])
+  const first = model.state.byWorkRun[0]
   assert.equal(first.inputTokens, 100)
   assert.equal(first.totalTokens, 170)
-  const reported = model.state.byStageRun[1]
+  const reported = model.state.byWorkRun[1]
   assert.equal(reported.inputTokens, 10)
   assert.deepEqual(reported.unknownMetrics, ['schema_version'])
-  const missing = model.state.byStageRun[2]
+  const missing = model.state.byWorkRun[2]
   assert.equal(missing.tokensKnown, false)
   assert.equal(missing.durationKnown, false)
 })
 
-test('usage per Role overlaps StageRun usage and marks unlabelled agents as unknown', async () => {
+test('usage per Role overlaps WorkRun usage and marks unlabelled agents as unknown', async () => {
   const { model } = await started()
   const planner = model.state.byRole.find(row => row.key === 'planner')
   assert.equal(planner.overlaps, true)
@@ -726,8 +726,8 @@ test('unknown and stale facts carry explicit non-color markers', async () => {
   assert.equal(marked.length > 0, true)
   for (const value of marked) assert.equal(value, 'true')
 
-  const missingUsage = rows(rootElement, 'wwc-usage-health-stage-run')
-    .find(node => node.dataset.key === stageRunThree)
+  const missingUsage = rows(rootElement, 'wwc-usage-health-work-run')
+    .find(node => node.dataset.key === workRunThree)
   assert.equal(missingUsage.dataset.unknown, 'true')
 
   const noUsageNote = rows(rootElement, 'wwc-usage-health-note')
@@ -752,7 +752,7 @@ test('credential lifecycle rows carry rotation facts and never credential identi
 test('recent execution errors and open Delivery attention are listed separately', async () => {
   const { model, rootElement } = await started()
   assert.deepEqual(model.state.errors.map(row => row.key), [
-    `${deliveryOne}/${stageRunOne}`,
+    `${deliveryOne}/${workRunOne}`,
     deliveryTwo,
   ])
   const recovered = model.state.errors[0]

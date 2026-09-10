@@ -25,32 +25,13 @@ use winwincode_control_plane::{
     ControlPlaneConfig, EventPublishError, EventPublisher, NewOutboxEvent, OutboxEvent,
     PreparedPublication,
 };
-use winwincode_delivery::application::{
-    attention::{AttentionDecision, ResolveAttentionInput, resolve_attention},
-    solution_review::test_support::{
-        SolutionComponentFixture, SolutionComponentKindFixture, SolutionConnectionFixture,
-        SolutionDiagramEdgeFixture, SolutionDiagramFixture, SolutionDiagramKindFixture,
-        SolutionDiagramNodeFixture, SolutionDiagramNodeKindFixture, SolutionFixture,
-        SolutionReviewDecisionFixture, SolutionReviewFixture, SolutionReviewTaskProposalFixture,
-        prepare_solution_review_fixture, settle_solution_review_fixture,
-    },
-    stage::{
-        AdvanceStageInput, NewStageIdentities, ReviewAttentionSeed, TerminalOutcomeStatus, advance,
-        test_support::{
-            active_lease_identity, terminal_outcome_metadata, terminal_worker_outcome,
-            verify_terminal_outcome,
-        },
-    },
-};
 use winwincode_delivery::domain::{
-    AcceptanceCriterionId, CandidatePathFact, CandidatePathState, Delivery, DeliveryStage,
-    DeliveryStatus, DeliveryTask, DeliveryTaskStatus, FrozenDeliveryCandidate,
-    GitHubIssueSourceRef, GitHubPullRequestTargetRef, RepositoryKind, RepositoryRef,
-    SessionBinding, SessionBindingId, SessionBindingSourceProvenance, StageRun, StageRunActorType,
-    StageRunStatus,
+    CandidatePathFact, CandidatePathState, Delivery, DeliveryStage, DeliveryStatus,
+    DeliveryTaskStatus, FrozenDeliveryCandidate, GitHubIssueSourceRef, GitHubPullRequestTargetRef,
+    RepositoryKind, RepositoryRef,
     candidate::{
         CandidateHunkFact,
-        test_support::{CandidateFixtureInput, freeze_storage_candidate_fixture},
+        test_support::{CandidateFixtureInput, freeze_candidate_fixture},
     },
     delivery_id_for_github_issue_source,
 };
@@ -59,18 +40,15 @@ use winwincode_delivery::store::{
     DeliveryStore, JournalBackendError, LoadedDeliveryJournal,
 };
 use winwincode_domain::{
-    AttentionItemId, CodexThreadId, CredentialReferenceId, DeliveryId, DeliveryTaskId,
-    ExecutionAckSequence, ExecutionJobId, ExecutionMessageId, FencingToken, LeaseId,
-    OrganizationId, ProductSessionId, ProjectId, PublicationId, RepositoryId, RequestId, Revision,
-    SchemaVersion, Sha256Digest, StageRunId, UserId, WorkerId, WorkerInstanceId, WorkerSessionId,
-    WorkspaceId,
+    CredentialReferenceId, DeliveryId, OrganizationId, ProjectId, PublicationId, RepositoryId,
+    RequestId, Revision, SchemaVersion, Sha256Digest, UserId, WorkspaceId,
 };
 use winwincode_domain::{RepositoryScope, RepositoryScopeKind, UserActor, UserActorKind};
 use winwincode_publication::{
-    GitHubAdapterConfig, GitHubPublicationAdapter, PolicyPermission,
-    PublicationEnterpriseAttribution, PublicationPolicyContext, PublicationPolicyEvidence,
-    PublicationPolicyOrigin, PublicationRequester, PublicationResourceFact,
-    PublicationResourceKind, PublicationState, RepositoryPolicyScope, RepositoryPublicationPolicy,
+    GitHubAdapterConfig, GitHubPublicationAdapter, PolicyPermission, PublicationPolicyContext,
+    PublicationPolicyEvidence, PublicationPolicyOrigin, PublicationRequester,
+    PublicationResourceFact, PublicationResourceKind, PublicationState, RepositoryPolicyScope,
+    RepositoryPublicationPolicy,
 };
 use winwincode_storage::{
     ProductStateStorage, ReceiptActorKey, ReceiptIdentity, ReceiptScopeKey, SqliteStorage,
@@ -215,102 +193,29 @@ fn audit_access(scope: &RepositoryScope) -> winwincode_audit::AuditAccess {
     .into_access()
 }
 
-fn semantic_review(task_id: DeliveryTaskId, assigned_to: &str) -> SolutionReviewFixture {
-    let diagram = |id: &str, kind| SolutionDiagramFixture {
-        id: id.to_owned(),
-        kind,
-        title: format!("{id} publication review"),
-        nodes: vec![
-            SolutionDiagramNodeFixture {
-                id: format!("{id}:delivery"),
-                label: "Delivery".into(),
-                description: "Owns the reviewed publication facts.".into(),
-                kind: SolutionDiagramNodeKindFixture::DeliveryControl,
-                trust_boundary: Some("control-plane".into()),
-                unresolved: false,
-            },
-            SolutionDiagramNodeFixture {
-                id: format!("{id}:github"),
-                label: "GitHub".into(),
-                description: "Receives the approved pull request.".into(),
-                kind: SolutionDiagramNodeKindFixture::External,
-                trust_boundary: Some("provider".into()),
-                unresolved: false,
-            },
-        ],
-        edges: vec![SolutionDiagramEdgeFixture {
-            id: format!("{id}:publish"),
-            from: format!("{id}:delivery"),
-            to: format!("{id}:github"),
-            label: "publishes".into(),
-        }],
-    };
-    SolutionReviewFixture {
-        attention_title: "Review the GitHub publication plan".into(),
-        assigned_to: assigned_to.into(),
-        solution: SolutionFixture {
-            id: "solution:publication-cutover".into(),
-            summary: "Publish one exact reviewed Delivery candidate.".into(),
-            approach: vec![
-                "Freeze the candidate and independent verdict.".into(),
-                "Publish only the sealed review package.".into(),
-            ],
-            components: vec![SolutionComponentFixture {
-                id: "component:publication".into(),
-                label: "Publication".into(),
-                responsibility: "Binds the reviewed Delivery to one pull request.".into(),
-                kind: SolutionComponentKindFixture::Component,
-                trust_boundary: Some("control-plane".into()),
-                unresolved: false,
-                repository_path_prefixes: vec!["crates".into()],
-            }],
-            connections: vec![SolutionConnectionFixture {
-                id: "connection:publication-github".into(),
-                from: "platform:codex-core".into(),
-                to: "component:publication".into(),
-                label: "prepares reviewed operations".into(),
-            }],
-        },
-        architecture_diagram: diagram(
-            "diagram:publication-architecture",
-            SolutionDiagramKindFixture::SystemArchitecture,
-        ),
-        process_diagram: diagram(
-            "diagram:publication-process",
-            SolutionDiagramKindFixture::ProcessFlow,
-        ),
-        risks: vec!["A stale candidate must never reach GitHub.".into()],
-        unresolved_items: Vec::new(),
-        task_proposals: vec![SolutionReviewTaskProposalFixture {
-            id: task_id,
-            title: "Prepare the reviewed candidate".into(),
-            goal: "Satisfy every current acceptance criterion.".into(),
-            acceptance_criterion_ids: vec![
-                AcceptanceCriterionId("criterion-required".into()),
-                AcceptanceCriterionId("criterion-optional".into()),
-            ],
-            blocked_by_task_ids: Vec::new(),
-        }],
-    }
-}
-
-fn planning_delivery() -> Delivery {
-    let source = GitHubIssueSourceRef {
+fn ready_delivery() -> (Delivery, FrozenDeliveryCandidate) {
+    let mut snapshot = Delivery::decode_json(include_bytes!(
+        "../../winwincode-delivery/tests/fixtures/delivery-main.json"
+    ))
+    .expect("canonical ready Delivery fixture")
+    .into_snapshot();
+    let delivery_id = delivery_id_for_github_issue_source(&GitHubIssueSourceRef {
         schema_version: 3,
         provider: "github".into(),
         kind: "issue".into(),
         repository: "example/widget".into(),
         number: 7,
-    };
-    let delivery_id = delivery_id_for_github_issue_source(&source).expect("GitHub Delivery id");
-    let mut snapshot = Delivery::decode_json(include_bytes!(
-        "../../winwincode-delivery/tests/fixtures/delivery-approved-solution-review.json"
-    ))
-    .expect("solution-review source fixture")
-    .into_snapshot();
+    })
+    .expect("GitHub Delivery id");
     snapshot.id = delivery_id.clone();
     snapshot.spec.delivery_id = delivery_id.clone();
-    snapshot.spec.source_ref = Some(source);
+    snapshot.spec.source_ref = Some(GitHubIssueSourceRef {
+        schema_version: 3,
+        provider: "github".into(),
+        kind: "issue".into(),
+        repository: "example/widget".into(),
+        number: 7,
+    });
     snapshot.spec.publication_target = Some(GitHubPullRequestTargetRef {
         schema_version: 3,
         provider: "github".into(),
@@ -326,214 +231,47 @@ fn planning_delivery() -> Delivery {
         locator: "example/widget".into(),
     };
     snapshot.revision = 1;
-    snapshot.status = DeliveryStatus::Planning;
-    snapshot.tasks.clear();
-    snapshot.stage_runs.truncate(1);
-    snapshot.stage_runs[0].delivery_id = delivery_id.clone();
-    snapshot.stage_runs[0].status = StageRunStatus::Running;
-    snapshot.stage_runs[0].finished_at_millis = None;
-    snapshot.session_bindings.truncate(1);
-    snapshot.session_bindings[0].delivery_id = delivery_id;
-    snapshot.attention_items.clear();
-    snapshot.evidence.clear();
-    snapshot.verdict = None;
-    snapshot.updated_at_millis = snapshot.stage_runs[0].started_at_millis;
-    Delivery::try_from_snapshot(snapshot).expect("active GitHub planning Delivery")
-}
-
-fn approved_solution_review() -> (Delivery, DeliveryTaskId) {
-    let delivery = planning_delivery();
-    let run = &delivery.snapshot().stage_runs[0];
-    let binding = &delivery.snapshot().session_bindings[0];
-    let worker_session_id = binding
-        .worker_session_id
-        .clone()
-        .expect("planning WorkerSession");
-    let lease = active_lease_identity(
-        binding.execution_job_id.clone(),
-        run.attempt,
-        LeaseId(canonical_id("lse", 301)),
-        FencingToken("301".into()),
-        WorkerId(canonical_id("wrk", 301)),
-        WorkerInstanceId(canonical_id("wki", 301)),
-        worker_session_id.clone(),
-    );
-    let finished_at = 1_800_000_000_020;
-    let terminal = terminal_worker_outcome(
-        run.id.clone(),
-        binding.execution_job_id.clone(),
-        run.attempt,
-        lease.lease_id().clone(),
-        lease.fencing_token().clone(),
-        lease.worker_id().clone(),
-        lease.worker_instance_id().clone(),
-        worker_session_id,
-        TerminalOutcomeStatus::Succeeded,
-        terminal_outcome_metadata(
-            binding.codex_thread_id.clone(),
-            finished_at,
-            ExecutionAckSequence(9),
-            Vec::new(),
-        ),
-    );
-    let verified = verify_terminal_outcome(&delivery, &lease, terminal)
-        .expect("verified planning terminal outcome");
-    let reviewer = canonical_id("usr", 302);
-    let task_id = DeliveryTaskId(canonical_id("dtk", 301));
-    let prepared = prepare_solution_review_fixture(
-        &delivery,
-        AdvanceStageInput {
-            expected_revision: delivery.revision(),
-            product_session_id: ProductSessionId(canonical_id("psn", 302)),
-            identities: NewStageIdentities {
-                stage_run_id: StageRunId(canonical_id("run", 302)),
-                execution_job_id: ExecutionJobId(canonical_id("job", 302)),
-                session_binding_id: SessionBindingId::new("binding-publication-review")
-                    .expect("review binding id"),
-                attention_item_id: AttentionItemId(canonical_id("att", 302)),
-            },
-            review: None,
-            previous_outcome: Some(verified),
-            current_lease: Some(lease),
-            rework_authorization: None,
-            now_millis: finished_at,
-        },
-        semantic_review(task_id.clone(), &reviewer),
-    )
-    .expect("prepared solution review");
-    let settled = settle_solution_review_fixture(
-        &prepared.transition().delivery,
-        &reviewer,
-        finished_at + 1,
-        SolutionReviewDecisionFixture::Approve {
-            comments: Some("Approved for the exact GitHub target.".into()),
-        },
-    )
-    .expect("approved solution review");
-    (settled.into_transition().into_delivery(), task_id)
-}
-
-#[allow(clippy::too_many_lines)]
-fn ready_delivery() -> (Delivery, FrozenDeliveryCandidate) {
-    let (approved, task_id) = approved_solution_review();
-    let approved_snapshot = approved.snapshot();
-    let mut snapshot = Delivery::decode_json(include_bytes!(
-        "../../winwincode-delivery/tests/fixtures/delivery-main.json"
-    ))
-    .expect("passing Delivery fixture")
-    .into_snapshot();
-    snapshot.id = approved.id().clone();
-    snapshot.spec = approved_snapshot.spec.clone();
-    snapshot.tasks = vec![DeliveryTask {
-        schema_version: 3,
-        id: task_id.clone(),
-        delivery_id: approved.id().clone(),
-        title: "Prepare the reviewed candidate".into(),
-        goal: "Satisfy every current acceptance criterion.".into(),
-        acceptance_criterion_ids: vec![
-            AcceptanceCriterionId("criterion-required".into()),
-            AcceptanceCriterionId("criterion-optional".into()),
-        ],
-        blocked_by_task_ids: Vec::new(),
-        owner: None,
-        status: DeliveryTaskStatus::Completed,
-    }];
-    snapshot
-        .stage_runs
-        .clone_from(&approved_snapshot.stage_runs);
-    snapshot
-        .session_bindings
-        .clone_from(&approved_snapshot.session_bindings);
-    snapshot
-        .attention_items
-        .clone_from(&approved_snapshot.attention_items);
-
-    let executor_stage_run_id = StageRunId(canonical_id("run", 303));
-    let executor_binding_id =
-        SessionBindingId::new("binding-publication-executor").expect("executor binding id");
-    snapshot.stage_runs.push(StageRun {
-        schema_version: 3,
-        id: executor_stage_run_id.clone(),
-        delivery_id: approved.id().clone(),
-        delivery_task_id: Some(task_id.clone()),
-        stage: DeliveryStage::Executing,
-        actor_type: StageRunActorType::Codex,
-        role: "executor".into(),
-        status: StageRunStatus::Succeeded,
-        attempt: 1,
-        started_at_millis: 1_800_000_000_040,
-        finished_at_millis: Some(1_800_000_000_050),
-    });
-    snapshot.session_bindings.push(SessionBinding {
-        schema_version: 3,
-        id: executor_binding_id.clone(),
-        delivery_id: approved.id().clone(),
-        delivery_task_id: Some(task_id.clone()),
-        stage_run_id: executor_stage_run_id.clone(),
-        product_session_id: ProductSessionId(canonical_id("psn", 303)),
-        execution_job_id: ExecutionJobId(canonical_id("job", 303)),
-        worker_session_id: Some(WorkerSessionId(canonical_id("wsn", 303))),
-        codex_thread_id: Some(CodexThreadId(canonical_id("cdx", 303))),
-        worker_id: Some(WorkerId(canonical_id("wrk", 303))),
-        worker_instance_id: Some(WorkerInstanceId(canonical_id("wki", 303))),
-        lease_id: Some(LeaseId(canonical_id("lse", 303))),
-        attempt: 1,
-        fencing_token: Some(FencingToken("303".into())),
-        source_provenance: SessionBindingSourceProvenance::execution_port(ExecutionMessageId(
-            canonical_id("msg", 303),
-        )),
-        bound_at_millis: 1_800_000_000_041,
-    });
-
-    let mut verifier = Delivery::decode_json(include_bytes!(
-        "../../winwincode-delivery/tests/fixtures/delivery-main.json"
-    ))
-    .expect("verification fixture")
-    .into_snapshot();
-    let mut verifier_run = verifier.stage_runs.remove(0);
-    verifier_run.delivery_id = approved.id().clone();
-    verifier_run.delivery_task_id = Some(task_id.clone());
-    verifier_run.id = StageRunId(canonical_id("run", 304));
-    verifier_run.started_at_millis = 1_800_000_000_060;
-    verifier_run.finished_at_millis = Some(1_800_000_000_070);
-    let mut verifier_binding = verifier.session_bindings.remove(0);
-    verifier_binding.delivery_id = approved.id().clone();
-    verifier_binding.delivery_task_id = Some(task_id);
-    verifier_binding.id =
-        SessionBindingId::new("binding-publication-verifier").expect("verifier binding id");
-    verifier_binding.stage_run_id = verifier_run.id.clone();
-    verifier_binding.product_session_id = ProductSessionId(canonical_id("psn", 304));
-    verifier_binding.execution_job_id = ExecutionJobId(canonical_id("job", 304));
-    verifier_binding.worker_session_id = Some(WorkerSessionId(canonical_id("wsn", 304)));
-    verifier_binding.codex_thread_id = Some(CodexThreadId(canonical_id("cdx", 304)));
-    verifier_binding.bound_at_millis = 1_800_000_000_061;
-    snapshot.stage_runs.push(verifier_run.clone());
-    snapshot.session_bindings.push(verifier_binding.clone());
-    snapshot.evidence = verifier.evidence;
-    for evidence in &mut snapshot.evidence {
-        evidence.delivery_id = approved.id().clone();
-        evidence.stage_run_id = verifier_run.id.clone();
-        evidence.session_binding_id = verifier_binding.id.clone();
-        evidence.created_at_millis = 1_800_000_000_069;
-    }
-    snapshot.verdict = verifier.verdict;
-    let verdict = snapshot.verdict.as_mut().expect("passing verdict");
-    verdict.delivery_id = approved.id().clone();
-    for result in &mut verdict.criteria {
-        result.delivery_id = approved.id().clone();
-        result.evaluated_at_millis = 1_800_000_000_071;
-    }
-    verdict.produced_at_millis = 1_800_000_000_072;
-    snapshot.revision = 1;
     snapshot.status = DeliveryStatus::ReadyToDeliver;
-    snapshot.updated_at_millis = 1_800_000_000_073;
-
-    let pre_candidate = Delivery::try_from_snapshot(snapshot).expect("candidate lifecycle facts");
-    let candidate = freeze_storage_candidate_fixture(
-        &pre_candidate,
-        &executor_stage_run_id,
-        &executor_binding_id,
+    for task in &mut snapshot.tasks {
+        task.delivery_id = delivery_id.clone();
+        task.status = DeliveryTaskStatus::Completed;
+    }
+    for run in &mut snapshot.stage_runs {
+        run.delivery_id = delivery_id.clone();
+        run.stage = DeliveryStage::Executing;
+        run.role = "executor".into();
+    }
+    for binding in &mut snapshot.session_bindings {
+        binding.delivery_id = delivery_id.clone();
+        binding.execution_profile = Some("executor".into());
+    }
+    let binding_work_run_id = winwincode_domain::WorkRunId(canonical_id("wrn", 303));
+    snapshot.session_bindings[0].id =
+        winwincode_delivery::domain::SessionBindingId::new("binding-executor-publication")
+            .expect("executor binding id");
+    snapshot.session_bindings[0].work_run_id = binding_work_run_id.clone();
+    snapshot.work_run_aggregate.runs[0].id = binding_work_run_id.clone();
+    snapshot.work_run_aggregate.runs[0].state = winwincode_domain::WorkRunState::CandidateReady;
+    snapshot.work_run_aggregate.items[0].state = winwincode_domain::WorkItemState::CandidateReady;
+    snapshot.evidence[0].work_run_id = binding_work_run_id;
+    snapshot.evidence[0].session_binding_id = snapshot.session_bindings[0].id.clone();
+    for evidence in &mut snapshot.evidence {
+        evidence.delivery_id = delivery_id.clone();
+    }
+    let verdict = snapshot.verdict.as_mut().expect("passing verdict");
+    verdict.delivery_id = delivery_id.clone();
+    for result in &mut verdict.criteria {
+        result.delivery_id = delivery_id.clone();
+    }
+    let delivery = Delivery::try_from_snapshot(snapshot).expect("canonical ready Delivery");
+    let run_id = delivery.snapshot().session_bindings[0].work_run_id.clone();
+    let binding_id = delivery.snapshot().session_bindings[0].id.clone();
+    let candidate = freeze_candidate_fixture(
+        &delivery,
+        &run_id,
+        &binding_id,
         CandidateFixtureInput {
+            finished_at_millis: 1_800_000_000_020,
             base_commit_id: "0123456789012345678901234567890123456789".into(),
             base_tree_id: "1".repeat(40),
             candidate_commit_id: "a".repeat(40),
@@ -554,79 +292,58 @@ fn ready_delivery() -> (Delivery, FrozenDeliveryCandidate) {
             terminal_event_sequence: 12,
         },
     );
-    let mut snapshot = pre_candidate.into_snapshot();
+    let mut snapshot = delivery.into_snapshot();
+    let verdict = snapshot.verdict.as_mut().expect("current verdict");
+    verdict.candidate_ref = candidate.candidate_ref().into();
+    for criterion in &mut verdict.criteria {
+        criterion.candidate_ref = candidate.candidate_ref().into();
+    }
     for evidence in &mut snapshot.evidence {
         evidence.candidate_ref = candidate.candidate_ref().into();
     }
-    let verdict = snapshot.verdict.as_mut().expect("passing verdict");
-    verdict.candidate_ref = candidate.candidate_ref().into();
-    for result in &mut verdict.criteria {
-        result.candidate_ref = candidate.candidate_ref().into();
-    }
-    (
-        Delivery::try_from_snapshot(snapshot).expect("ready publication Delivery"),
-        candidate,
+    snapshot.stage_runs.clear();
+    let delivery = Delivery::try_from_snapshot(snapshot).expect("exact candidate verdict");
+    winwincode_delivery::projection::project_delivery_detail(
+        winwincode_delivery::projection::ProjectionInput::new(&delivery).with_candidate(&candidate),
     )
+    .expect("ready candidate projection");
+    (delivery, candidate)
 }
 
 fn delivered_fixture() -> (Delivery, FrozenDeliveryCandidate) {
+    use winwincode_delivery::application::attention::{
+        AttentionDecision, ResolveAttentionInput, resolve_attention,
+    };
     let (ready, candidate) = ready_delivery();
-    let approver = canonical_id("usr", 305);
-    let advanced = advance(
-        &ready,
-        AdvanceStageInput {
-            expected_revision: ready.revision(),
-            product_session_id: ProductSessionId(canonical_id("psn", 305)),
-            identities: NewStageIdentities {
-                stage_run_id: StageRunId(canonical_id("run", 305)),
-                execution_job_id: ExecutionJobId(canonical_id("job", 305)),
-                session_binding_id: SessionBindingId::new("binding-delivery-review-unused")
-                    .expect("review binding id"),
-                attention_item_id: AttentionItemId(canonical_id("att", 305)),
-            },
-            review: Some(ReviewAttentionSeed {
-                title: "Approve the exact publication package".into(),
-                context: "candidate-verdict-and-target".into(),
-                assigned_to: approver.clone(),
-            }),
-            previous_outcome: None,
-            current_lease: None,
-            rework_authorization: None,
-            now_millis: 1_800_000_000_080,
-        },
-    )
-    .expect("DeliveryReview advance");
-    let review = advanced.delivery;
-    let attention = review
-        .snapshot()
-        .attention_items
-        .iter()
-        .find(|item| {
-            item.item_type == winwincode_delivery::domain::AttentionItemType::DeliveryApproval
-        })
-        .expect("Delivery approval Attention");
-    let delivered = resolve_attention(
-        &review,
+    let approval =
+        winwincode_delivery::application::verdict::test_support::delivery_approval_fixture(
+            &ready,
+            1_800_000_000_080,
+        );
+    assert!(approval.work_run_id.is_none());
+    let mut snapshot = ready.into_snapshot();
+    snapshot.attention_items.push(approval.clone());
+    snapshot.status = DeliveryStatus::NeedsAttention;
+    let pending = Delivery::try_from_snapshot(snapshot).expect("pending canonical approval");
+    let settled = resolve_attention(
+        &pending,
         ResolveAttentionInput {
-            expected_revision: review.revision(),
-            attention_item_id: attention.id.clone(),
-            stage_run_id: attention.stage_run_id.clone().expect("DeliveryReview run"),
-            expected_context: attention.context.clone(),
-            actor: approver,
+            expected_revision: pending.revision(),
+            attention_item_id: approval.id,
+            work_run_id: None,
+            expected_context: approval.context,
+            actor: canonical_id("usr", 305),
             decision: AttentionDecision::Resolved,
             resolution: "approved exact candidate, verdict, package, and target".into(),
             now_millis: 1_800_000_000_081,
         },
     )
-    .expect("Delivery approval settlement")
+    .expect("resolve canonical publication approval")
     .into_delivery();
-    assert_eq!(delivered.snapshot().status, DeliveryStatus::Delivered);
-    let mut snapshot = delivered.into_snapshot();
+    let mut snapshot = settled.into_snapshot();
     snapshot.revision = 1;
-    (
-        Delivery::try_from_snapshot(snapshot).expect("seedable delivered fixture"),
-        candidate,
-    )
+    let delivery = Delivery::try_from_snapshot(snapshot).expect("seedable delivered fixture");
+    (delivery, candidate)
 }
 
 #[derive(Default)]
@@ -817,6 +534,50 @@ fn publication_preparation_rejects_an_unapproved_delivery_before_creating_an_art
 }
 
 #[test]
+fn publication_rejects_ambiguous_or_foreign_approval_without_an_artifact() {
+    for invalid in ["foreign-assignee", "ambiguous", "execution-bound"] {
+        let root = temporary_root();
+        let scope = repository_scope();
+        let (delivery, candidate) = delivered_fixture();
+        assert!(
+            delivery.snapshot().stage_runs.is_empty(),
+            "publication has no stage authority"
+        );
+        let mut snapshot = delivery.into_snapshot();
+        let approval = snapshot.attention_items.last_mut().expect("approval");
+        if invalid == "ambiguous" {
+            let mut duplicate = approval.clone();
+            duplicate.id = winwincode_domain::AttentionItemId(canonical_id("att", 999));
+            snapshot.attention_items.push(duplicate);
+        } else if invalid == "execution-bound" {
+            approval.work_run_id = Some(snapshot.work_run_aggregate.runs[0].id.clone());
+        } else {
+            approval.assigned_to = Some(canonical_id("usr", 999));
+        }
+        let delivery = Delivery::try_from_snapshot(snapshot)
+            .expect("valid snapshot with conflicting approval");
+        seed_delivery(&root, &delivery);
+        let mut plane = ControlPlane::start_local(
+            ControlPlaneConfig::local(&root),
+            Box::new(RecordingPublisher),
+        )
+        .expect("start");
+        plane
+            .prepare_publication(&scope, &candidate, &UserId(canonical_id("usr", 306)))
+            .expect_err("approval ambiguity or foreign assignee must be rejected");
+        plane.shutdown().expect("shutdown");
+        let db = Connection::open(root.join("artifact-catalog/artifact-catalog.sqlite3"))
+            .expect("catalog");
+        let count: i64 = db
+            .query_row("SELECT COUNT(*) FROM artifacts", [], |row| row.get(0))
+            .expect("artifact count");
+        assert_eq!(count, 0);
+        drop(db);
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+}
+
+#[test]
 fn approved_delivery_recovers_one_partial_github_publication_and_audits_each_result() {
     let root = temporary_root();
     let scope = repository_scope();
@@ -852,19 +613,10 @@ fn approved_delivery_recovers_one_partial_github_publication_and_audits_each_res
     )
     .expect("loopback GitHub adapter config");
     let mut adapter = GitHubPublicationAdapter::new(config, FixtureCredentialResolver);
-    let attribution = PublicationEnterpriseAttribution::try_new(
-        &repository_policy_scope(&scope),
-        prepared.authorization().binding().delivery_id().clone(),
-        candidate.producer_product_session_id().clone(),
-        requester.clone(),
-    )
-    .expect("sealed Publication enterprise attribution");
-
     let pending = control_plane
         .commit_publication_publish(
             &command,
             prepared.authorization(),
-            &attribution,
             &policy,
             &policy_evidence(&prepared, first_observed_at),
             &origin,

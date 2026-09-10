@@ -73,6 +73,7 @@ use winwincode_control_plane::{
     ProviderCatalogErrorKind, ProviderCatalogRequest, ProviderCatalogService, ProviderDescriptor,
     ProviderPresetsError, ProviderPresetsErrorKind, ResolvedSecret, SecretStoreError,
     SecretStoreErrorKind, SecretStorePort, find_provider_preset, resolve_provider_endpoint,
+    validate_custom_endpoint,
 };
 use winwincode_domain::{CredentialReferenceId, Revision, SchemaVersion};
 use winwincode_storage::SqliteStorage;
@@ -342,9 +343,9 @@ impl ConnectionProbe for HttpsConnectionProbe {
         endpoint: &str,
         credential: &ResolvedSecret,
     ) -> ProbeOutcome {
-        // Endpoints are canonical-HTTPS validated before a probe is called;
-        // this guard is defense in depth for direct port users.
-        if !endpoint.starts_with("https://") {
+        // Revalidate at the transport boundary, including the exact local
+        // loopback exception accepted for private model servers.
+        if validate_custom_endpoint(endpoint).is_err() {
             return ProbeOutcome::unreachable();
         }
         let Ok(credential_text) = std::str::from_utf8(credential.expose()) else {
@@ -460,8 +461,8 @@ pub struct CreateCredentialRequest {
     /// Preset Provider identifier, or any stable custom Provider identity
     /// when `custom_endpoint` is supplied.
     pub provider_id: String,
-    /// Validated `https` custom endpoint; when absent, the endpoint comes
-    /// from the preset.
+    /// Validated HTTPS or local-loopback HTTP endpoint; when absent, the
+    /// endpoint comes from the preset.
     pub custom_endpoint: Option<String>,
     /// The one-time write-only user secret.
     pub secret: ResolvedSecret,

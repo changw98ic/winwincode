@@ -22,9 +22,9 @@ use winwincode_api::generated::{
 };
 use winwincode_domain::RepositoryScope;
 use winwincode_domain::{
-    ChatMessageId, ControlPlaneEventId, DeliveryId, DeliveryTaskId, ExecutionJobId, Instant,
-    ModelExchangeId, ProductSessionId, ProjectId, RepositoryId, RequestId, Revision, Sha256Digest,
-    StageRunId, WorkerSessionId,
+    ChatMessageId, ControlPlaneEventId, DeliveryId, ExecutionJobId, Instant, ModelExchangeId,
+    ProductSessionId, ProjectId, RepositoryId, RequestId, Revision, Sha256Digest, WorkContractId,
+    WorkItemId, WorkRunId, WorkerSessionId,
 };
 use winwincode_session::{
     AuthenticatedActor, BindingScope, ExecutionCancellationRoutes, ExecutionRoute,
@@ -1332,10 +1332,13 @@ enum PersistedBindingIdentity {
         product_session_id: ProductSessionId,
         execution_job_id: ExecutionJobId,
     },
-    DeliveryStage {
+    DeliveryWorkRun {
         delivery_id: DeliveryId,
-        delivery_task_id: Option<DeliveryTaskId>,
-        stage_run_id: StageRunId,
+        work_contract_id: WorkContractId,
+        work_contract_revision: Revision,
+        work_item_id: WorkItemId,
+        work_item_revision: Revision,
+        work_run_id: WorkRunId,
         product_session_id: ProductSessionId,
         execution_job_id: ExecutionJobId,
     },
@@ -1348,14 +1351,20 @@ impl PersistedBindingIdentity {
                 product_session_id: identity.product_session_id().clone(),
                 execution_job_id: identity.execution_job_id().clone(),
             },
-            BindingScope::DeliveryStage {
+            BindingScope::DeliveryWorkRun {
                 delivery_id,
-                delivery_task_id,
-                stage_run_id,
-            } => Self::DeliveryStage {
+                work_contract_id,
+                work_contract_revision,
+                work_item_id,
+                work_item_revision,
+                work_run_id,
+            } => Self::DeliveryWorkRun {
                 delivery_id: delivery_id.clone(),
-                delivery_task_id: delivery_task_id.clone(),
-                stage_run_id: stage_run_id.clone(),
+                work_contract_id: work_contract_id.clone(),
+                work_contract_revision: work_contract_revision.clone(),
+                work_item_id: work_item_id.clone(),
+                work_item_revision: work_item_revision.clone(),
+                work_run_id: work_run_id.clone(),
                 product_session_id: identity.product_session_id().clone(),
                 execution_job_id: identity.execution_job_id().clone(),
             },
@@ -1371,16 +1380,22 @@ impl PersistedBindingIdentity {
                 product_session_id.clone(),
                 execution_job_id.clone(),
             ),
-            Self::DeliveryStage {
+            Self::DeliveryWorkRun {
                 delivery_id,
-                delivery_task_id,
-                stage_run_id,
+                work_contract_id,
+                work_contract_revision,
+                work_item_id,
+                work_item_revision,
+                work_run_id,
                 product_session_id,
                 execution_job_id,
-            } => SessionBindingIdentity::delivery_stage(
+            } => SessionBindingIdentity::delivery_work_run(
                 delivery_id.clone(),
-                delivery_task_id.clone(),
-                stage_run_id.clone(),
+                work_contract_id.clone(),
+                work_contract_revision.clone(),
+                work_item_id.clone(),
+                work_item_revision.clone(),
+                work_run_id.clone(),
                 product_session_id.clone(),
                 execution_job_id.clone(),
             ),
@@ -1402,7 +1417,7 @@ fn validate_continue_shape(
     }
     match command.binding_identity.scope() {
         BindingScope::ProductSession if command.execution_scope.delivery_id.is_none() => Ok(()),
-        BindingScope::DeliveryStage { delivery_id, .. }
+        BindingScope::DeliveryWorkRun { delivery_id, .. }
             if command.execution_scope.delivery_id.as_ref() == Some(delivery_id) =>
         {
             Ok(())
@@ -1421,7 +1436,7 @@ fn validate_replacement_shape(
         || command.binding_identity.execution_job_id() != &command.runtime_authority.job_id
         || command.replacement.job_id() != &command.runtime_authority.job_id
         || command.replacement.scope() != &command.execution_scope
-        || command.replacement.stage_run_id().is_some()
+        || command.replacement.work_run_id().is_some()
         || command.replacement.replacement_attempt() != command.runtime_authority.attempt
         || command.replacement.previous_attempt().checked_add(1)
             != Some(command.runtime_authority.attempt)

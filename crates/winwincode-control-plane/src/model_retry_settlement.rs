@@ -12,20 +12,18 @@ use std::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use winwincode_domain::{ModelExchangeId, RequestId};
-use winwincode_storage::{
-    EnterpriseQuotaReservationRequest, EnterpriseQuotaSourceSeal, EnterpriseUsageAttribution,
-    ProductStateStorage, SqliteStorage,
-};
+use winwincode_storage::{ProductStateStorage, SqliteStorage};
 
 use crate::{
     FrozenModelRetryPlan, FrozenModelRouteAuthority, ModelAttemptCompletionCommand,
     ModelAttemptFailureCommand, ModelAttemptStartReceipt, ModelRetryDecisionReceipt,
     ModelRetryStep, ModelRetryUsageError, ModelRetryUsageRequest, ModelRetryUsageService,
-    ModelUsageAttribution, ModelUsageSettlementReceipt, ProviderGatewaySettlement,
-    ProviderGatewaySettlementError, ProviderGatewaySettlementPort, ProviderGatewayTerminalOutcome,
+    ModelRouteResolutionTrace, ModelUsageAttribution, ModelUsageSettlementReceipt,
+    ProviderGatewaySettlement, ProviderGatewaySettlementError, ProviderGatewaySettlementPort,
+    ProviderGatewayTerminalOutcome,
 };
 
-const CONTEXT_SCHEMA: &str = "winwincode.model-retry-settlement-context.v2";
+const CONTEXT_SCHEMA: &str = "winwincode.model-retry-settlement-context.v3";
 
 /// Stable context dependency failure category.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -169,7 +167,6 @@ impl ModelRetrySettlementContextPort for DurableModelRetryContextSource {
 pub struct ModelRetrySettlementContext {
     request: ModelRetryUsageRequest,
     start_receipt: ModelAttemptStartReceipt,
-    enterprise_quota_request: EnterpriseQuotaReservationRequest,
     request_fingerprint: String,
     context_fingerprint: String,
 }
@@ -187,14 +184,11 @@ impl ModelRetrySettlementContext {
         crate::model_retry_usage::validate_request(&request)
             .map_err(ModelRetrySettlementError::ledger)?;
         validate_start(&request, &start_receipt)?;
-        let enterprise_quota_request =
-            Self::build_enterprise_quota_request(&request, &start_receipt)?;
-        let request_fingerprint = request_fingerprint(&request, &enterprise_quota_request)?;
+        let request_fingerprint = request_fingerprint(&request)?;
         let context_fingerprint = context_fingerprint(&request_fingerprint, &start_receipt)?;
         Ok(Self {
             request,
             start_receipt,
-            enterprise_quota_request,
             request_fingerprint,
             context_fingerprint,
         })
@@ -238,8 +232,13 @@ impl ModelRetrySettlementContext {
                     .map_err(ModelRetrySettlementError::ledger)?,
             );
         }
-        let plan = FrozenModelRetryPlan::freeze(stored.policy_id, stored.policy_revision, steps)
-            .map_err(ModelRetrySettlementError::ledger)?;
+        let plan = FrozenModelRetryPlan::freeze_resolved(
+            stored.policy_id,
+            stored.policy_revision,
+            stored.resolution,
+            steps,
+        )
+        .map_err(ModelRetrySettlementError::ledger)?;
         if plan.fingerprint() != stored.plan_fingerprint {
             return Err(ModelRetrySettlementError::corrupt_context());
         }
@@ -248,13 +247,10 @@ impl ModelRetrySettlementContext {
                 request_id: stored.request_id,
                 attribution: stored.attribution,
                 plan,
-                enterprise_quota_amounts: stored.enterprise_quota_request.reserved,
-                enterprise_quota_requested_at: stored.enterprise_quota_request.requested_at.clone(),
             },
             stored.start_receipt,
         )?;
-        if context.enterprise_quota_request != stored.enterprise_quota_request
-            || context.request_fingerprint != stored.request_fingerprint
+        if context.request_fingerprint != stored.request_fingerprint
             || context.context_fingerprint != stored.context_fingerprint
             || context.encode_json()?.as_slice() != bytes
         {
@@ -271,44 +267,6 @@ impl ModelRetrySettlementContext {
     #[must_use]
     pub const fn start_receipt(&self) -> &ModelAttemptStartReceipt {
         &self.start_receipt
-    }
-
-    /// Returns the full immutable enterprise quota request sealed into this context.
-    #[must_use]
-    pub const fn enterprise_quota_request(&self) -> &EnterpriseQuotaReservationRequest {
-        &self.enterprise_quota_request
-    }
-
-    fn build_enterprise_quota_request(
-        request: &ModelRetryUsageRequest,
-        start: &ModelAttemptStartReceipt,
-    ) -> Result<EnterpriseQuotaReservationRequest, ModelRetrySettlementError> {
-        if request.enterprise_quota_amounts.operations == 0
-            || request.enterprise_quota_amounts.tokens == 0
-            || request.enterprise_quota_requested_at.0.is_empty()
-        {
-            return Err(ModelRetrySettlementError::corrupt_context());
-        }
-        Ok(EnterpriseQuotaReservationRequest {
-            reservation_id: start.reservation_request_id.clone(),
-            attribution: EnterpriseUsageAttribution {
-                organization_id: request.attribution.organization_id.clone(),
-                workspace_id: request.attribution.workspace_id.clone(),
-                project_id: request.attribution.project_id.clone(),
-                repository_id: request.attribution.repository_id.clone(),
-                delivery_id: request.attribution.delivery_id.clone(),
-                product_session_id: Some(request.attribution.product_session_id.clone()),
-                user_id: request.attribution.user_id.clone(),
-            },
-            source_seal: EnterpriseQuotaSourceSeal::Provider {
-                model_exchange_id: start.model_exchange_id.clone(),
-                request_id: request.request_id.clone(),
-                attempt: start.attempt,
-                route_authority_fingerprint: start.route_fingerprint.clone(),
-            },
-            reserved: request.enterprise_quota_amounts,
-            requested_at: request.enterprise_quota_requested_at.clone(),
-        })
     }
 
     #[must_use]
@@ -331,12 +289,12 @@ struct StoredSettlementContext {
     attribution: ModelUsageAttribution,
     policy_id: String,
     policy_revision: u64,
+    resolution: ModelRouteResolutionTrace,
     plan_fingerprint: String,
     request_fingerprint: String,
     context_fingerprint: String,
     steps: Vec<StoredRetryStep>,
     start_receipt: ModelAttemptStartReceipt,
-    enterprise_quota_request: EnterpriseQuotaReservationRequest,
 }
 
 impl StoredSettlementContext {
@@ -349,6 +307,7 @@ impl StoredSettlementContext {
             attribution: context.request.attribution.clone(),
             policy_id: context.request.plan.policy_id().to_owned(),
             policy_revision: context.request.plan.policy_revision(),
+            resolution: context.request.plan.resolution().clone(),
             plan_fingerprint: context.request.plan.fingerprint().to_owned(),
             request_fingerprint: context.request_fingerprint.clone(),
             context_fingerprint: context.context_fingerprint.clone(),
@@ -370,7 +329,6 @@ impl StoredSettlementContext {
                 })
                 .collect::<Result<Vec<_>, ModelRetrySettlementError>>()?,
             start_receipt: context.start_receipt.clone(),
-            enterprise_quota_request: context.enterprise_quota_request.clone(),
         })
     }
 }
@@ -549,15 +507,6 @@ impl<'a> DurableProviderRetrySettlement<'a> {
                     .map_err(ModelRetrySettlementError::ledger),
             }?
         };
-        if settlement.outcome == ProviderGatewayTerminalOutcome::Succeeded {
-            crate::ProviderEnterpriseUsageReconciler::new(&mut storage)
-                .reconcile_provider_page(None, 200)
-                .map_err(|_| {
-                    ModelRetrySettlementError::new(
-                        ModelRetrySettlementErrorKind::StorageUnavailable,
-                    )
-                })?;
-        }
         Ok(result)
     }
 }
@@ -627,7 +576,6 @@ fn validate_settlement(
 
 fn request_fingerprint(
     request: &ModelRetryUsageRequest,
-    enterprise_quota_request: &EnterpriseQuotaReservationRequest,
 ) -> Result<String, ModelRetrySettlementError> {
     let bytes = serde_json::to_vec(&(
         &request.request_id,
@@ -635,7 +583,6 @@ fn request_fingerprint(
         request.plan.policy_id(),
         request.plan.policy_revision(),
         request.plan.fingerprint(),
-        enterprise_quota_request,
     ))
     .map_err(|_| ModelRetrySettlementError::corrupt_context())?;
     Ok(format!("sha256:{:x}", Sha256::digest(bytes)))

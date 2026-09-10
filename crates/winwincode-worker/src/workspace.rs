@@ -17,8 +17,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use winwincode_domain::{
     CodexThreadId, ExecutionJobId, FencingToken, Instant, LeaseId, ProductSessionId, RepositoryId,
-    RequestId, Sha256Digest, StageRunId, WorkerId, WorkerInstanceId, WorkerSessionId,
-    WorkspaceRevision,
+    RequestId, Sha256Digest, WorkerId, WorkerInstanceId, WorkerSessionId, WorkspaceRevision,
 };
 use winwincode_execution_port::generated::{
     ExecutionJob, ExecutionJobReplacementAuthority, ExecutionLeaseStamp, ExecutionScope,
@@ -209,7 +208,7 @@ pub struct WorkspaceProvenance {
     pub worker_instance_id: WorkerInstanceId,
     pub worker_session_id: WorkerSessionId,
     pub product_session_id: ProductSessionId,
-    pub stage_run_id: Option<StageRunId>,
+    pub work_run_id: Option<winwincode_domain::WorkRunId>,
     pub codex_thread_id: CodexThreadId,
 }
 
@@ -261,7 +260,7 @@ impl WorkspaceProvenance {
             worker_instance_id: active.lease.worker_instance_id.clone(),
             worker_session_id: active.worker_session_id.clone(),
             product_session_id: active.session_identity.product_session_id.clone(),
-            stage_run_id: active.session_identity.stage_run_id.clone(),
+            work_run_id: active.session_identity.work_run_id.clone(),
             codex_thread_id: active.codex_thread_id.clone(),
         })
     }
@@ -283,6 +282,13 @@ fn logical_execution_job_digest(job: &ExecutionJob) -> Result<Sha256Digest, Work
             "logical ExecutionJob authority has no attempt",
         ));
     }
+    if let Some(scope) = object
+        .get_mut("scope")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        scope.remove("attempt");
+        scope.remove("workRunId");
+    }
     let bytes = serde_json::to_vec(&value).map_err(|error| {
         WorkspaceError::io("logical ExecutionJob authority cannot be encoded", error)
     })?;
@@ -300,7 +306,7 @@ fn validate_replacement_authority(
     bounded_identity(&replacement.receipt_id.0, "replacement receipt")?;
     if !valid_sha256_digest(&replacement.receipt_digest)
         || replacement.successor_lease != active.lease
-        || replacement.scope != active.job.scope
+        || !same_replacement_scope(&replacement.scope, &active.job.scope)
         || replacement.logical_job_digest != current.logical_execution_job_digest
         || replacement.predecessor_lease.job_id != active.job.job_id
         || replacement.successor_lease.job_id != active.job.job_id
@@ -326,6 +332,25 @@ fn validate_replacement_authority(
         successor_lease: replacement.successor_lease.clone(),
         created_at: replacement.created_at.clone(),
     }))
+}
+
+fn same_replacement_scope(left: &ExecutionScope, right: &ExecutionScope) -> bool {
+    match (left, right) {
+        (ExecutionScope::WorkRunExecutionScope(a), ExecutionScope::WorkRunExecutionScope(b)) => {
+            a.kind == b.kind
+                && a.product_session_id == b.product_session_id
+                && a.rework_authorization == b.rework_authorization
+                && a.work_contract_id == b.work_contract_id
+                && a.work_contract_revision == b.work_contract_revision
+                && a.work_item_id == b.work_item_id
+                && a.work_item_revision == b.work_item_revision
+        }
+        (
+            ExecutionScope::ProductSessionExecutionScope(a),
+            ExecutionScope::ProductSessionExecutionScope(b),
+        ) => a == b,
+        _ => false,
+    }
 }
 
 fn validate_replacement_predecessor(
@@ -369,7 +394,7 @@ fn provenance_matches_session(
     session.is_some_and(|session| {
         provenance.worker_session_id == session.worker_session_id
             && provenance.product_session_id == session.product_session_id
-            && provenance.stage_run_id == session.stage_run_id
+            && provenance.work_run_id == session.work_run_id
             && provenance.codex_thread_id == session.codex_thread_id
     })
 }
@@ -2493,7 +2518,7 @@ fn interrupt_cleanup(
     Ok(())
 }
 
-fn controlled_path(
+pub(crate) fn controlled_path(
     root: &Path,
     relative: &Path,
     allow_missing: bool,
@@ -2732,7 +2757,7 @@ fn portable_path(path: &Path) -> Result<String, WorkspaceError> {
         .join("/"))
 }
 
-fn rev_parse(repository: &Path, revision: &str) -> Result<String, WorkspaceError> {
+pub(crate) fn rev_parse(repository: &Path, revision: &str) -> Result<String, WorkspaceError> {
     git_text(
         repository,
         &["rev-parse", "--verify", "--end-of-options", revision],
@@ -2767,7 +2792,7 @@ fn git_text(repository: &Path, arguments: &[&str]) -> Result<String, WorkspaceEr
     Ok(text.to_owned())
 }
 
-fn git_output(repository: &Path, arguments: &[&str]) -> Result<Vec<u8>, WorkspaceError> {
+pub(crate) fn git_output(repository: &Path, arguments: &[&str]) -> Result<Vec<u8>, WorkspaceError> {
     let mut command = git_command(repository);
     command.args(arguments);
     checked_output(command, "Git operation failed").map(|output| output.stdout)

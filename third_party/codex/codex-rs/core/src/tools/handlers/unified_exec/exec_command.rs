@@ -320,7 +320,6 @@ impl ExecCommandHandler {
             Arc::clone(&context.step_context),
             Some(&tracker),
             &context.call_id,
-            "exec_command",
         )
         .await;
         // Keep the reservation when interception returns `Ok(None)`: the normal command below

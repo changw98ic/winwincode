@@ -44,13 +44,13 @@ pub struct CandidateArtifactUpload {
     pub logical_job_digest: Sha256Digest,
     pub execution_profile: String,
     pub scope: ExecutionScope,
+    pub replacement_authority: Option<ExecutionJobReplacementAuthority>,
     pub lease: ExecutionLeaseStamp,
     pub worker_session_id: WorkerSessionId,
     pub session_identity: winwincode_domain::SessionIdentity,
     pub bytes: Vec<u8>,
     pub digest: Sha256Digest,
     pub created_at: Instant,
-    pub replacement_authority: Option<ExecutionJobReplacementAuthority>,
 }
 
 impl CandidateArtifactUpload {
@@ -62,6 +62,7 @@ impl CandidateArtifactUpload {
             logical_job_digest: self.logical_job_digest.clone(),
             execution_profile: self.execution_profile.clone(),
             scope: self.scope.clone(),
+            replacement_authority: self.replacement_authority.clone(),
             lease: self.lease.clone(),
             worker_session_id: self.worker_session_id.clone(),
             session_identity: self.session_identity.clone(),
@@ -76,6 +77,7 @@ pub struct CandidateArtifactAuthority {
     pub logical_job_digest: Sha256Digest,
     pub execution_profile: String,
     pub scope: ExecutionScope,
+    pub replacement_authority: Option<ExecutionJobReplacementAuthority>,
     pub lease: ExecutionLeaseStamp,
     pub worker_session_id: WorkerSessionId,
     pub session_identity: winwincode_domain::SessionIdentity,
@@ -126,7 +128,12 @@ impl CandidateArtifactOutbox {
         &self,
         upload: &CandidateArtifactUpload,
     ) -> Result<RetainedCandidateArtifact, AdapterStoreError> {
-        let record = StoredCandidateArtifact::from_upload(upload)?;
+        let record = match StoredCandidateArtifact::from_upload(upload) {
+            Ok(record) => record,
+            Err(error) => {
+                return Err(error);
+            }
+        };
         self.store.transaction(|transaction| {
             if let Some(existing) = load_by_authority(transaction, &record.authority_key)? {
                 existing.validate()?;
@@ -143,7 +150,12 @@ impl CandidateArtifactOutbox {
                     already_accepted: existing.final_ack.is_some(),
                 });
             }
-            if let Some(existing) = replacement_record(transaction, upload)? {
+            if let Some(existing) = match replacement_record(transaction, upload) {
+                Ok(value) => value,
+                Err(error) => {
+                    return Err(error);
+                }
+            } {
                 return Ok(RetainedCandidateArtifact {
                     artifact: existing.reference(),
                     authority: existing.authority(),
@@ -286,7 +298,13 @@ impl CandidateArtifactOutbox {
             if (exact_authority && record.job_digest != authority.job_digest)
                 || record.logical_job_digest != authority.logical_job_digest
                 || record.execution_profile != authority.execution_profile
-                || record.scope != authority.scope
+                || !same_work_contract_item_scope(
+                    &record.scope,
+                    authority
+                        .replacement_authority
+                        .as_ref()
+                        .map_or(&authority.scope, |proof| &proof.scope),
+                )
                 || record.final_ack.is_some()
             {
                 return Err(AdapterStoreError::Conflict);
@@ -351,7 +369,13 @@ impl CandidateArtifactOutbox {
             if (exact_authority && record.job_digest != authority.job_digest)
                 || record.logical_job_digest != authority.logical_job_digest
                 || record.execution_profile != authority.execution_profile
-                || record.scope != authority.scope
+                || !same_work_contract_item_scope(
+                    &record.scope,
+                    authority
+                        .replacement_authority
+                        .as_ref()
+                        .map_or(&authority.scope, |proof| &proof.scope),
+                )
                 || record.final_ack.is_some()
             {
                 return Err(AdapterStoreError::Conflict);
@@ -555,7 +579,8 @@ impl StoredCandidateArtifact {
                 || replacement.predecessor_lease.worker_instance_id
                     == self.open_message.lease.worker_instance_id
                 || replacement.logical_job_digest != self.logical_job_digest
-                || replacement.scope != self.scope
+                || !same_work_contract_item_scope(&replacement.scope, &self.scope)
+                || !different_work_run(&replacement.scope, &self.scope)
                 || !lowercase_sha256(&replacement.receipt_digest.0)
                 || !lowercase_sha256(&replacement.logical_job_digest.0)
             {
@@ -563,10 +588,9 @@ impl StoredCandidateArtifact {
             }
             if let Some(predecessor_session) = replacement.predecessor_session_identity.as_ref()
                 && (predecessor_session.worker_session_id == self.open_message.worker_session_id
-                    || predecessor_session.stage_run_id
-                        != self.open_message.session_identity.stage_run_id
-                    || predecessor_session.product_session_id
-                        != self.open_message.session_identity.product_session_id)
+                    || !same_predecessor_session_scope(predecessor_session, &replacement.scope)
+                    || predecessor_session.work_run_id
+                        == self.open_message.session_identity.work_run_id)
             {
                 return Err(AdapterStoreError::Corrupt);
             }
@@ -674,6 +698,7 @@ impl StoredCandidateArtifact {
             logical_job_digest: self.logical_job_digest.clone(),
             execution_profile: self.execution_profile.clone(),
             scope: self.scope.clone(),
+            replacement_authority: self.replacement_authority.clone(),
             lease: self.open_message.lease.clone(),
             worker_session_id: self.open_message.worker_session_id.clone(),
             session_identity: self.open_message.session_identity.clone(),
@@ -706,7 +731,7 @@ fn replacement_record(
     }
     if record.logical_job_digest != upload.logical_job_digest
         || record.execution_profile != upload.execution_profile
-        || record.scope != upload.scope
+        || !same_work_run_identity(&record.scope, &upload.scope)
         || record.bytes != upload.bytes
         || record.descriptor.digest != upload.digest
     {
@@ -715,14 +740,74 @@ fn replacement_record(
     Ok(Some(record))
 }
 
+fn same_work_contract_item_scope(left: &ExecutionScope, right: &ExecutionScope) -> bool {
+    match (left, right) {
+        (ExecutionScope::WorkRunExecutionScope(a), ExecutionScope::WorkRunExecutionScope(b)) => {
+            a.product_session_id == b.product_session_id
+                && a.work_contract_id == b.work_contract_id
+                && a.work_contract_revision == b.work_contract_revision
+                && a.work_item_id == b.work_item_id
+                && a.work_item_revision == b.work_item_revision
+        }
+        (
+            ExecutionScope::ProductSessionExecutionScope(a),
+            ExecutionScope::ProductSessionExecutionScope(b),
+        ) => a == b,
+        _ => false,
+    }
+}
+
+fn different_work_run(left: &ExecutionScope, right: &ExecutionScope) -> bool {
+    match (left, right) {
+        (ExecutionScope::WorkRunExecutionScope(a), ExecutionScope::WorkRunExecutionScope(b)) => {
+            a.work_run_id != b.work_run_id
+        }
+        _ => false,
+    }
+}
+
+fn same_predecessor_session_scope(
+    session: &winwincode_domain::SessionIdentity,
+    scope: &ExecutionScope,
+) -> bool {
+    match scope {
+        ExecutionScope::WorkRunExecutionScope(scope) => {
+            session.product_session_id == scope.product_session_id
+                && session.work_run_id.as_ref() == Some(&scope.work_run_id)
+        }
+        ExecutionScope::ProductSessionExecutionScope(scope) => {
+            session.product_session_id == scope.product_session_id && session.work_run_id.is_none()
+        }
+    }
+}
+
+fn same_work_run_identity(left: &ExecutionScope, right: &ExecutionScope) -> bool {
+    match (left, right) {
+        (
+            ExecutionScope::ProductSessionExecutionScope(a),
+            ExecutionScope::ProductSessionExecutionScope(b),
+        ) => a == b,
+        (ExecutionScope::WorkRunExecutionScope(a), ExecutionScope::WorkRunExecutionScope(b)) => {
+            a.product_session_id == b.product_session_id
+                && a.work_contract_id == b.work_contract_id
+                && a.work_contract_revision == b.work_contract_revision
+                && a.work_item_id == b.work_item_id
+                && a.work_item_revision == b.work_item_revision
+                && a.work_run_id != b.work_run_id
+        }
+        _ => false,
+    }
+}
+
 fn validate_upload(upload: &CandidateArtifactUpload) -> Result<(), AdapterStoreError> {
     let actual_digest = format!("sha256:{:x}", Sha256::digest(&upload.bytes));
+    let valid_scope = scope_matches_session(&upload.scope, &upload.session_identity);
     if !candidate_artifact_role(&upload.execution_profile)
         || upload.bytes.is_empty()
         || upload.digest.0 != actual_digest
         || !lowercase_sha256(&upload.job_digest.0)
         || !lowercase_sha256(&upload.logical_job_digest.0)
-        || !scope_matches_session(&upload.scope, &upload.session_identity)
+        || !valid_scope
         || upload.lease.attempt <= 0
         || upload.worker_session_id != upload.session_identity.worker_session_id
         || upload.created_at.0 < upload.lease.issued_at.0
@@ -743,7 +828,7 @@ fn validate_replacement_upload(
         || replacement.predecessor_lease.worker_id != upload.lease.worker_id
         || replacement.predecessor_lease.worker_instance_id == upload.lease.worker_instance_id
         || replacement.logical_job_digest != upload.logical_job_digest
-        || replacement.scope != upload.scope
+        || !same_work_run_identity(&replacement.scope, &upload.scope)
         || !lowercase_sha256(&replacement.receipt_digest.0)
         || !lowercase_sha256(&replacement.logical_job_digest.0)
     {
@@ -765,11 +850,11 @@ fn scope_matches_session(
 ) -> bool {
     match scope {
         ExecutionScope::ProductSessionExecutionScope(scope) => {
-            session.product_session_id == scope.product_session_id && session.stage_run_id.is_none()
+            session.product_session_id == scope.product_session_id && session.work_run_id.is_none()
         }
-        ExecutionScope::DeliveryStageExecutionScope(scope) => {
+        ExecutionScope::WorkRunExecutionScope(scope) => {
             session.product_session_id == scope.product_session_id
-                && session.stage_run_id.as_ref() == Some(&scope.stage_run_id)
+                && session.work_run_id.as_ref() == Some(&scope.work_run_id)
         }
     }
 }
@@ -860,34 +945,39 @@ fn load_cancel_record(
     if let Some(record) = load_by_authority(transaction, &exact_key)? {
         return Ok(Some((record, true)));
     }
-
-    let mut statement = transaction
-        .prepare("SELECT record_json FROM candidate_artifact_upload ORDER BY authority_key")
-        .map_err(|_| AdapterStoreError::Unavailable)?;
-    let rows = statement
-        .query_map([], |row| row.get::<_, Vec<u8>>(0))
-        .map_err(|_| AdapterStoreError::Unavailable)?;
-    let mut match_record = None;
-    for row in rows {
-        let bytes = row.map_err(|_| AdapterStoreError::Unavailable)?;
-        let Some(record) = decode_record(Some(bytes))? else {
-            return Err(AdapterStoreError::Corrupt);
-        };
-        record.validate()?;
-        let predecessor_lease = &record.open_message.lease;
-        if predecessor_lease.job_id == authority.lease.job_id
-            && record.logical_job_digest == authority.logical_job_digest
-            && record.execution_profile == authority.execution_profile
-            && record.scope == authority.scope
-            && predecessor_lease.attempt.saturating_add(1) == authority.lease.attempt
-            && predecessor_lease.worker_id == authority.lease.worker_id
-            && predecessor_lease.worker_instance_id != authority.lease.worker_instance_id
-            && match_record.replace(record).is_some()
-        {
-            return Err(AdapterStoreError::Conflict);
-        }
+    let Some(proof) = authority.replacement_authority.as_ref() else {
+        return Ok(None);
+    };
+    let Some(predecessor_session) = proof.predecessor_session_identity.as_ref() else {
+        return Ok(None);
+    };
+    if proof.successor_lease != authority.lease
+        || proof.logical_job_digest != authority.logical_job_digest
+        || proof.predecessor_lease.attempt.saturating_add(1) != authority.lease.attempt
+        || proof.predecessor_lease.worker_id != authority.lease.worker_id
+        || proof.predecessor_lease.worker_instance_id == authority.lease.worker_instance_id
+    {
+        return Err(AdapterStoreError::Conflict);
     }
-    Ok(match_record.map(|record| (record, false)))
+    let predecessor_key = authority_key(
+        &proof.predecessor_lease,
+        &predecessor_session.worker_session_id,
+        predecessor_session,
+    )?;
+    let Some(record) = load_by_authority(transaction, &predecessor_key)? else {
+        return Ok(None);
+    };
+    record.validate()?;
+    if record.logical_job_digest != authority.logical_job_digest
+        || record.execution_profile != authority.execution_profile
+        || record.scope != proof.scope
+        || record.open_message.lease != proof.predecessor_lease
+        || record.open_message.worker_session_id != predecessor_session.worker_session_id
+        || record.open_message.session_identity != *predecessor_session
+    {
+        return Err(AdapterStoreError::Conflict);
+    }
+    Ok(Some((record, false)))
 }
 
 fn load_by_artifact(
@@ -1021,13 +1111,13 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use winwincode_domain::{
-        ArtifactId, CodexThreadId, DeliveryId, ExecutionAckSequence, ExecutionMessageId,
-        FencingToken, LeaseId, ProductSessionId, RequestId, Sha256Digest, StageRunId,
-        WorkerInstanceId, WorkerSessionId,
+        ArtifactId, CodexThreadId, ExecutionAckSequence, ExecutionMessageId, FencingToken, LeaseId,
+        RequestId, Revision, Sha256Digest, WorkContractId, WorkItemId, WorkRunId, WorkerInstanceId,
+        WorkerSessionId,
     };
     use winwincode_execution_port::generated::{
-        ArtifactAckMessageKind, DeliveryStageExecutionScope, DeliveryStageExecutionScopeKind,
-        ExecutionPortError, ExecutionPortErrorCode,
+        ArtifactAckMessageKind, ExecutionPortError, ExecutionPortErrorCode, WorkRunExecutionScope,
+        WorkRunExecutionScopeKind,
     };
 
     use super::*;
@@ -1044,27 +1134,54 @@ mod tests {
     }
 
     fn artifact_open_fixture() -> ArtifactOpenMessage {
+        fn rename(v: &mut serde_json::Value) {
+            match v {
+                serde_json::Value::Object(map) => {
+                    if let Some(x) = map.remove("stageRunId") {
+                        map.insert("workRunId".into(), x);
+                    }
+                    if let Some(x) = map.remove("stageInput") {
+                        map.insert("workInput".into(), x);
+                    }
+                    for child in map.values_mut() {
+                        rename(child);
+                    }
+                }
+                serde_json::Value::Array(values) => {
+                    for child in values {
+                        rename(child);
+                    }
+                }
+                _ => {}
+            }
+        }
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
             "../../../tests/fixtures/contracts/execution-port.valid.json"
         ))
         .expect("execution fixture");
-        let value = fixture["messages"]
+        let mut value = fixture["messages"]
             .as_array()
             .expect("messages")
             .iter()
             .find(|message| message["kind"] == "artifact.open")
             .expect("artifact.open")
             .clone();
+        rename(&mut value);
+        if let Some(scope) = value.pointer_mut("/scope") {
+            *scope = serde_json::json!({
+                "kind":"work-run", "productSessionId":"psn_00000000000000000000000001",
+                "workContractId":"wct_00000000000000000000000001", "workContractRevision":2,
+                "workItemId":"wit_00000000000000000000000001", "workItemRevision":1,
+                "workRunId":"wrn_00000000000000000000000009", "attempt":1
+            });
+        }
         serde_json::from_value(value).expect("generated artifact.open")
     }
 
     fn upload(bytes: Vec<u8>) -> CandidateArtifactUpload {
-        let open = artifact_open_fixture();
-        let stage_run_id = open
-            .session_identity
-            .stage_run_id
-            .clone()
-            .expect("Delivery stage fixture");
+        let mut open = artifact_open_fixture();
+        let work_run_id = WorkRunId("wrn_00000000000000000000000009".to_owned());
+        open.session_identity.work_run_id = Some(work_run_id.clone());
         CandidateArtifactUpload {
             job_digest: Sha256Digest(format!("sha256:{:x}", Sha256::digest(b"exact job"))),
             logical_job_digest: Sha256Digest(format!(
@@ -1072,15 +1189,16 @@ mod tests {
                 Sha256::digest(b"logical job")
             )),
             execution_profile: "executor".into(),
-            scope: ExecutionScope::DeliveryStageExecutionScope(DeliveryStageExecutionScope {
-                delivery_id: DeliveryId("dlv_00000000000000000000000001".to_owned()),
-                delivery_task_id: None,
-                kind: DeliveryStageExecutionScopeKind::DeliveryStage,
-                product_session_id: ProductSessionId(
-                    open.session_identity.product_session_id.0.clone(),
-                ),
+            scope: ExecutionScope::WorkRunExecutionScope(WorkRunExecutionScope {
+                attempt: 1,
+                kind: WorkRunExecutionScopeKind::WorkRun,
+                product_session_id: open.session_identity.product_session_id.clone(),
                 rework_authorization: None,
-                stage_run_id: StageRunId(stage_run_id.0.clone()),
+                work_contract_id: WorkContractId("wct_00000000000000000000000001".to_owned()),
+                work_contract_revision: Revision(2),
+                work_item_id: WorkItemId("wit_00000000000000000000000001".to_owned()),
+                work_item_revision: Revision(1),
+                work_run_id,
             }),
             lease: open.lease,
             worker_session_id: open.worker_session_id,
@@ -1139,13 +1257,18 @@ mod tests {
             WorkerInstanceId("wki_00000000000000000000000003".to_owned());
         successor.worker_session_id = WorkerSessionId("wsn_00000000000000000000000006".to_owned());
         successor.session_identity.worker_session_id = successor.worker_session_id.clone();
+        successor.session_identity.work_run_id =
+            Some(WorkRunId("wrn_0000000000000000000000000A".to_owned()));
         successor.session_identity.codex_thread_id =
             CodexThreadId("cdx_0000000000000000000000000H".to_owned());
-        let stage_run_id = predecessor
-            .session_identity
-            .stage_run_id
-            .clone()
-            .expect("Delivery stage fixture");
+        if let ExecutionScope::WorkRunExecutionScope(scope) = &mut successor.scope {
+            scope.attempt = successor.lease.attempt;
+            scope.work_run_id = successor
+                .session_identity
+                .work_run_id
+                .clone()
+                .expect("WorkRun fixture");
+        }
         successor.replacement_authority = Some(ExecutionJobReplacementAuthority {
             created_at: predecessor.created_at.clone(),
             logical_job_digest: Sha256Digest(format!(
@@ -1156,14 +1279,7 @@ mod tests {
             predecessor_session_identity: Some(predecessor.session_identity.clone()),
             receipt_digest: Sha256Digest(format!("sha256:{}", "e".repeat(64))),
             receipt_id: RequestId("req_00000000000000000000000010".to_owned()),
-            scope: ExecutionScope::DeliveryStageExecutionScope(DeliveryStageExecutionScope {
-                delivery_id: DeliveryId("dlv_00000000000000000000000001".to_owned()),
-                delivery_task_id: None,
-                kind: DeliveryStageExecutionScopeKind::DeliveryStage,
-                product_session_id: predecessor.session_identity.product_session_id.clone(),
-                rework_authorization: None,
-                stage_run_id,
-            }),
+            scope: predecessor.scope.clone(),
             successor_lease: successor.lease.clone(),
         });
         successor
@@ -1487,6 +1603,18 @@ mod tests {
         assert_eq!(accepted.artifact, original.artifact);
         assert_eq!(accepted.authority, predecessor.authority());
         assert!(accepted.already_accepted);
+        assert_eq!(
+            candidate
+                .accepted_reference(&predecessor.authority())
+                .expect("predecessor accepted reference"),
+            Some(original.artifact.clone())
+        );
+        assert_eq!(
+            candidate
+                .accepted_reference(&successor.authority())
+                .expect("successor accepted reference stays exact"),
+            None
+        );
         std::fs::remove_dir_all(root).expect("remove fixture");
     }
 

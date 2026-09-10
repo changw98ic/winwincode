@@ -20,19 +20,17 @@ use winwincode_domain::{
 use winwincode_publication::{
     CredentialResolutionError, GitHubAdapterConfig, GitHubCredential, GitHubCredentialResolver,
     GitHubPublicationAdapter, PolicyPermission, PublicationAuthorization,
-    PublicationEnterpriseAttribution, PublicationPolicyEvidence, PublicationPolicyOrigin,
-    PublicationPort, PublicationReadLedger, PublicationRequester, RepositoryPolicyScope,
-    RepositoryPublicationPolicy,
+    PublicationPolicyEvidence, PublicationPolicyOrigin, PublicationPort, PublicationReadLedger,
+    PublicationRequester, RepositoryPolicyScope, RepositoryPublicationPolicy,
 };
-use winwincode_storage::{ProductStateStorage, SqliteStorage};
+use winwincode_storage::SqliteStorage;
 
 use crate::{
     ControlPlane, CredentialReferenceErrorKind, CredentialReferenceService,
     CredentialSecretResolutionError, EventPublisher, LocalDeliveryAdapterConfig,
-    LocalSecretStoreAdapter, PublicationCommandError, PublicationEnterpriseQuotaSaga,
-    PublicationEnterpriseUsageReconciler, SecretStoreErrorKind, StartError, command_receipt,
+    LocalSecretStoreAdapter, PublicationCommandError, SecretStoreErrorKind, StartError,
+    command_receipt,
     publication_application::{checked_response, publication_projection},
-    publication_enterprise_quota::publication_quota_requested_at,
     strongflow_projection::load_current_publication_read,
 };
 
@@ -43,7 +41,6 @@ const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 pub struct PublicationAuthorityRequest<'request> {
     command: &'request PublicationPublishCommand,
     authorization: &'request PublicationAuthorization,
-    attribution: &'request PublicationEnterpriseAttribution,
     observed_at_millis: u64,
 }
 
@@ -51,13 +48,11 @@ impl<'request> PublicationAuthorityRequest<'request> {
     pub(crate) const fn new(
         command: &'request PublicationPublishCommand,
         authorization: &'request PublicationAuthorization,
-        attribution: &'request PublicationEnterpriseAttribution,
         observed_at_millis: u64,
     ) -> Self {
         Self {
             command,
             authorization,
-            attribution,
             observed_at_millis,
         }
     }
@@ -73,11 +68,6 @@ impl<'request> PublicationAuthorityRequest<'request> {
     }
 
     #[must_use]
-    pub const fn attribution(&self) -> &PublicationEnterpriseAttribution {
-        self.attribution
-    }
-
-    #[must_use]
     pub const fn observed_at_millis(&self) -> u64 {
         self.observed_at_millis
     }
@@ -86,7 +76,6 @@ impl<'request> PublicationAuthorityRequest<'request> {
 /// Opaque policy facts consumed by the Publication coordinator.
 pub struct PublicationAuthorityFacts {
     authorization: PublicationAuthorization,
-    attribution: PublicationEnterpriseAttribution,
     policy: RepositoryPublicationPolicy,
     evidence: PublicationPolicyEvidence,
     origin: PublicationPolicyOrigin,
@@ -96,11 +85,6 @@ impl PublicationAuthorityFacts {
     #[must_use]
     pub const fn authorization(&self) -> &PublicationAuthorization {
         &self.authorization
-    }
-
-    #[must_use]
-    pub const fn attribution(&self) -> &PublicationEnterpriseAttribution {
-        &self.attribution
     }
 
     #[must_use]
@@ -272,7 +256,6 @@ impl PublicationAuthorityPort for LocalPublicationAuthority {
     ) -> Result<PublicationAuthorityFacts, PublicationAuthorityError> {
         let command = request.command();
         let authorization = request.authorization();
-        let attribution = request.attribution();
         let scope = RepositoryPolicyScope::try_new(
             command.scope.organization_id.clone(),
             command.scope.workspace_id.clone(),
@@ -290,16 +273,6 @@ impl PublicationAuthorityPort for LocalPublicationAuthority {
             || command.payload.target.provider != PublicationTargetProvider::Github
             || request.observed_at_millis() < authorization.approved_at_millis()
             || request.observed_at_millis() > MAX_SAFE_INTEGER
-            || attribution.organization_id() != scope.organization_id()
-            || attribution.workspace_id() != scope.workspace_id()
-            || attribution.project_id() != scope.project_id()
-            || attribution.repository_id() != scope.repository_id()
-            || attribution.delivery_id() != authorization.binding().delivery_id()
-            || !matches!(
-                &command.actor,
-                winwincode_api::generated::Actor::UserActor(actor)
-                    if &actor.id == attribution.user_id()
-            )
         {
             return Err(PublicationAuthorityError::trusted_facts_unavailable());
         }
@@ -312,7 +285,6 @@ impl PublicationAuthorityPort for LocalPublicationAuthority {
         .map_err(|_| PublicationAuthorityError::trusted_facts_unavailable())?;
         Ok(PublicationAuthorityFacts {
             authorization: authorization.clone(),
-            attribution: attribution.clone(),
             policy: self.policy.clone(),
             evidence,
             origin: self.origin.clone(),
@@ -752,25 +724,9 @@ impl ControlPlane {
             .prepare_publication(&command.scope, &candidate, &user_id)
             .map_err(|_| PublicationAuthorityError::trusted_facts_unavailable())?;
         let observed_at_millis = publication_now_millis()?;
-        let policy_scope = RepositoryPolicyScope::try_new(
-            command.scope.organization_id.clone(),
-            command.scope.workspace_id.clone(),
-            command.scope.project_id.clone(),
-            command.scope.repository_id.clone(),
-        )
-        .map_err(PublicationCommandError::InvalidInput)?;
-        let attribution = PublicationEnterpriseAttribution::try_new(
-            &policy_scope,
-            command.payload.delivery_id.clone(),
-            candidate.producer_product_session_id().clone(),
-            user_id,
-        )
-        .map_err(|_| PublicationAuthorityError::trusted_facts_unavailable())?;
-
         self.commit_resolved_publication_publish(
             command,
             prepared.authorization(),
-            &attribution,
             observed_at_millis,
         )
     }
@@ -779,7 +735,6 @@ impl ControlPlane {
         &mut self,
         command: &PublicationPublishCommand,
         authorization: &PublicationAuthorization,
-        attribution: &PublicationEnterpriseAttribution,
         observed_at_millis: u64,
     ) -> Result<PublicationPublishCompletedResponse, PublicationCommandError> {
         let mut authority = self
@@ -789,39 +744,10 @@ impl ControlPlane {
         let facts = authority.resolve(PublicationAuthorityRequest::new(
             command,
             authorization,
-            attribution,
             observed_at_millis,
         ));
         self.publication_authority = Some(authority);
         let facts = facts?;
-
-        let quota_directory = self
-            .local_database_path()
-            .and_then(Path::parent)
-            .map(Path::to_path_buf)
-            .ok_or_else(|| {
-                PublicationCommandError::Publication(
-                    winwincode_publication::PublicationError::from(
-                        winwincode_storage::StorageError::adapter(
-                            "local Publication quota database is unavailable",
-                        ),
-                    ),
-                )
-            })?;
-        let quota_storage = SqliteStorage::open(&quota_directory).map_err(|error| {
-            PublicationCommandError::Publication(winwincode_publication::PublicationError::from(
-                error,
-            ))
-        })?;
-        let mut quota = crate::DurableEnterpriseQuotaAdmission::new(quota_storage);
-        let requested_at = publication_quota_requested_at(authorization.approved_at_millis())
-            .map_err(|error| {
-                PublicationCommandError::Publication(
-                    winwincode_publication::PublicationError::from(error),
-                )
-            })?;
-
-        enforce_publication_policy(&quota_directory, command, authorization, attribution)?;
 
         let mut providers = self
             .publication_providers
@@ -831,77 +757,16 @@ impl ControlPlane {
         self.publication_providers = Some(providers);
         let mut session = session?;
 
-        let publication = {
-            let mut guarded = PublicationEnterpriseQuotaSaga::new(
-                &mut quota,
-                session.port(),
-                facts.attribution(),
-                &command.payload.publication_id,
-                requested_at,
-            );
-            self.commit_publication_publish(
-                command,
-                facts.authorization(),
-                facts.attribution(),
-                facts.policy(),
-                facts.evidence(),
-                facts.origin(),
-                &mut guarded,
-            )?
-        };
-        quota.close().map_err(|error| {
-            PublicationCommandError::Publication(winwincode_publication::PublicationError::from(
-                error,
-            ))
-        })?;
-        let mut usage_storage = SqliteStorage::open(&quota_directory).map_err(|error| {
-            PublicationCommandError::Publication(winwincode_publication::PublicationError::from(
-                error,
-            ))
-        })?;
-        let reconciliation = PublicationEnterpriseUsageReconciler::new(&mut usage_storage)
-            .reconcile_exact_publication(&command.payload.publication_id)
-            .map_err(|_| {
-                PublicationCommandError::Publication(
-                    winwincode_publication::PublicationError::from(
-                        winwincode_storage::StorageError::adapter(
-                            "Publication enterprise Usage reconciliation failed",
-                        ),
-                    ),
-                )
-            });
-        let close = Box::new(usage_storage).close();
-        reconciliation?;
-        close.map_err(|error| {
-            PublicationCommandError::Publication(winwincode_publication::PublicationError::from(
-                error,
-            ))
-        })?;
+        let publication = self.commit_publication_publish(
+            command,
+            facts.authorization(),
+            facts.policy(),
+            facts.evidence(),
+            facts.origin(),
+            session.port(),
+        )?;
         publish_response(command, &publication)
     }
-}
-
-fn enforce_publication_policy(
-    quota_directory: &Path,
-    command: &PublicationPublishCommand,
-    authorization: &PublicationAuthorization,
-    attribution: &PublicationEnterpriseAttribution,
-) -> Result<(), PublicationCommandError> {
-    let mut enterprise_policy =
-        crate::DurablePublicationPolicyEnforcement::open(quota_directory)
-            .map_err(|_| PublicationCommandError::EnterprisePolicyUnavailable)?;
-    let result = enterprise_policy.enforce(command, authorization, attribution);
-    enterprise_policy
-        .close()
-        .map_err(|_| PublicationCommandError::EnterprisePolicyUnavailable)?;
-    result.map(|_| ()).map_err(|error| match error.kind() {
-        crate::PublicationEnterprisePolicyErrorKind::Rejected => {
-            PublicationCommandError::EnterprisePolicyDenied
-        }
-        crate::PublicationEnterprisePolicyErrorKind::Unavailable => {
-            PublicationCommandError::EnterprisePolicyUnavailable
-        }
-    })
 }
 
 fn validate_publish_command(
@@ -1034,25 +899,16 @@ mod tests {
         thread,
     };
 
-    use sha2::{Digest, Sha256};
     use winwincode_api::generated::{
         Actor, PublicationPublishCommandCommand, PublicationPublishPayload,
     };
-    use winwincode_domain::{
-        EnterprisePolicyId, Instant, RepositoryScopeKind, RequestId, UserActor, UserActorKind,
-    };
+    use winwincode_domain::{RepositoryScopeKind, RequestId, UserActor, UserActorKind};
     use winwincode_publication::{
         PublicationOperation, PublicationPortError, PublicationPortMutation,
         PublicationPortObservation, PublicationRequester,
         test_support::{
             CurrentPublicationFixture, current_publication_fixture, current_publication_operations,
         },
-    };
-    use winwincode_storage::{
-        EnterprisePolicyActor, EnterprisePolicyChildOverrideMode, EnterprisePolicyDefinition,
-        EnterprisePolicyEffect, EnterprisePolicyInheritanceMode, EnterprisePolicyKind,
-        EnterprisePolicyMode, EnterprisePolicyScope, EnterprisePolicyState,
-        EnterprisePolicyVersionSource, EnterprisePolicyWrite,
     };
 
     use super::*;
@@ -1087,7 +943,6 @@ mod tests {
             .resolve(PublicationAuthorityRequest::new(
                 &command,
                 fixture.authorization(),
-                fixture.attribution(),
                 observed_at,
             ))
             .expect("exact sealed authority");
@@ -1099,7 +954,6 @@ mod tests {
         let Err(error) = authority.resolve(PublicationAuthorityRequest::new(
             &foreign,
             fixture.authorization(),
-            fixture.attribution(),
             observed_at,
         )) else {
             panic!("foreign target must fail closed");
@@ -1185,7 +1039,7 @@ mod tests {
     }
 
     #[test]
-    fn local_production_publish_opens_the_quota_port_and_injected_host_fails_closed() {
+    fn local_production_publish_uses_the_resolved_provider_once() {
         let fixture = current_publication_fixture();
         let requester = UserId("usr_00000000000000000000000002".to_owned());
         let scope = repository_scope();
@@ -1212,136 +1066,12 @@ mod tests {
             .commit_resolved_publication_publish(
                 &command,
                 fixture.authorization(),
-                fixture.attribution(),
                 fixture.authorization().approved_at_millis() + 1,
             )
-            .expect("local host opens the quota connection before publication commit");
+            .expect("local publication commit");
         assert_eq!(local_calls.load(Ordering::Relaxed), 1);
         local.shutdown().expect("shutdown local Control Plane");
-
-        let injected_calls = Arc::new(AtomicU64::new(0));
-        let storage = SqliteStorage::open(&root).expect("open injected storage");
-        let mut injected = ControlPlane::start(Box::new(storage), Box::new(SilentPublisher))
-            .expect("start injected Control Plane");
-        injected.publication_authority = Some(Box::new(
-            fixture_authority(&fixture, &requester).expect("injected authority"),
-        ));
-        injected.publication_providers = Some(Box::new(CountingProviderRegistry {
-            calls: Arc::clone(&injected_calls),
-        }));
-        let error = injected
-            .commit_resolved_publication_publish(
-                &command,
-                fixture.authorization(),
-                fixture.attribution(),
-                fixture.authorization().approved_at_millis() + 1,
-            )
-            .expect_err("injected host has no local quota database identity");
-        assert_eq!(
-            error.public_code(),
-            winwincode_api::generated::ErrorCode::ServiceUnavailable
-        );
-        assert_eq!(injected_calls.load(Ordering::Relaxed), 0);
-        injected
-            .shutdown()
-            .expect("shutdown injected Control Plane");
         std::fs::remove_dir_all(root).expect("remove fixture");
-    }
-
-    #[test]
-    fn enterprise_publication_policy_denies_before_provider_resolution_and_replays_one_audit() {
-        let fixture = current_publication_fixture();
-        let requester = UserId("usr_00000000000000000000000002".to_owned());
-        let scope = repository_scope();
-        let command = publish_command(&fixture, scope.clone(), requester.clone());
-        let root = std::env::temp_dir().join(format!(
-            "winwincode-publication-enterprise-policy-{}-{}",
-            std::process::id(),
-            NEXT_ROOT.fetch_add(1, Ordering::Relaxed)
-        ));
-        let calls = Arc::new(AtomicU64::new(0));
-        let mut control_plane = ControlPlane::start_local(
-            crate::ControlPlaneConfig::local(&root),
-            Box::new(SilentPublisher),
-        )
-        .expect("start local Control Plane");
-        control_plane.publication_authority = Some(Box::new(
-            fixture_authority(&fixture, &requester).expect("local authority"),
-        ));
-        control_plane.publication_providers = Some(Box::new(CountingProviderRegistry {
-            calls: Arc::clone(&calls),
-        }));
-        seed_publication_deny_policy(&root, &scope, &requester);
-
-        for _ in 0..2 {
-            let error = control_plane
-                .commit_resolved_publication_publish(
-                    &command,
-                    fixture.authorization(),
-                    fixture.attribution(),
-                    fixture.authorization().approved_at_millis() + 1,
-                )
-                .expect_err("enterprise Publication Policy must deny");
-            assert_eq!(
-                error.public_code(),
-                winwincode_api::generated::ErrorCode::PermissionDenied
-            );
-        }
-        assert_eq!(calls.load(Ordering::Relaxed), 0);
-        let mut audit_storage = SqliteStorage::open(&root).expect("open Policy audit storage");
-        assert_eq!(
-            audit_storage
-                .enterprise_policy_evaluation_ledger()
-                .expect("open Policy audit")
-                .scan_audit(None, 10)
-                .expect("scan Policy audit")
-                .entries
-                .len(),
-            1
-        );
-        drop(audit_storage);
-        control_plane.shutdown().expect("shutdown Control Plane");
-        std::fs::remove_dir_all(root).expect("remove fixture");
-    }
-
-    fn seed_publication_deny_policy(root: &Path, scope: &RepositoryScope, requester: &UserId) {
-        let definition = EnterprisePolicyDefinition {
-            default_effect: EnterprisePolicyEffect::Deny,
-            child_override_mode: EnterprisePolicyChildOverrideMode::TightenOnly,
-            rules: Vec::new(),
-        };
-        let canonical = serde_json::to_value(&definition).expect("Policy value fixture");
-        let definition_sha256 = winwincode_domain::Sha256Digest(format!(
-            "sha256:{:x}",
-            Sha256::digest(serde_json::to_vec(&canonical).expect("serialize Policy definition"))
-        ));
-        SqliteStorage::open(root)
-            .expect("open Policy storage")
-            .enterprise_policy_ledger()
-            .expect("open Policy ledger")
-            .write(&EnterprisePolicyWrite {
-                policy_id: EnterprisePolicyId("pol_00000000000000000000000090".to_owned()),
-                policy_kind: EnterprisePolicyKind::Publication,
-                scope: EnterprisePolicyScope::Organization {
-                    organization_id: scope.organization_id.clone(),
-                },
-                mode: EnterprisePolicyMode::Enforce,
-                state: EnterprisePolicyState::Active,
-                definition_sha256,
-                definition,
-                effective_at: Instant("1970-01-01T00:00:00.000Z".to_owned()),
-                inheritance_mode: EnterprisePolicyInheritanceMode::Tighten,
-                base_version: None,
-                expected_revision: 0,
-                source: EnterprisePolicyVersionSource {
-                    actor: EnterprisePolicyActor::User {
-                        id: requester.clone(),
-                    },
-                    request_id: RequestId("req_00000000000000000000000090".to_owned()),
-                },
-                updated_at: Instant("2020-01-01T00:00:00.000Z".to_owned()),
-            })
-            .expect("write Publication deny Policy");
     }
 
     fn assert_provider_failure_has_zero_writes(kind: PublicationProviderRegistryErrorKind) {
@@ -1386,7 +1116,6 @@ mod tests {
             .commit_resolved_publication_publish(
                 &command,
                 fixture.authorization(),
-                fixture.attribution(),
                 fixture.authorization().approved_at_millis() + 1,
             )
             .expect_err("provider failure must precede the Publication commit");

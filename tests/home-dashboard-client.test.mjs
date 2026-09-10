@@ -33,11 +33,13 @@ const [
   { ControlPlaneClientError },
   viewModelModule,
   pageModule,
+  visitsModule,
   surfaceModule,
 ] = await Promise.all([
   load('community-control-plane-client.js'),
   load('home-dashboard-view-model.js'),
   load('home-dashboard-page.js'),
+  load('home-recent-visits.js'),
   load('client-surface.js'),
 ])
 
@@ -55,8 +57,16 @@ const {
   homeDashboardAnnouncement,
   homeDashboardPresentation,
   homeDecisionHash,
+  homeDeliveryHash,
   mountHomeDashboardPage,
 } = pageModule
+const {
+  DEFAULT_HOME_VISIT_LIMIT,
+  HOME_VISIT_STORAGE_KEY,
+  createHomeRecentVisitStore,
+  homeDeliveryVisitFromHash,
+  homeVisitScopeKey,
+} = visitsModule
 const { CLIENT_SURFACES, clientSurfaceFromHash } = surfaceModule
 
 const schemaVersion = 'winwincode/v1'
@@ -87,7 +97,7 @@ const otherScopeSelection = () => ({
   projectId: otherScope.projectId,
   repositoryId: otherScope.repositoryId,
 })
-const stageRunId = 'str_00000000000000000000000001'
+const workRunId = 'wrn_00000000000000000000000001'
 const deliveryId = 'dlv_00000000000000000000000001'
 const executingDeliveryId = 'dlv_00000000000000000000000002'
 const deliveredDeliveryId = 'dlv_00000000000000000000000003'
@@ -98,6 +108,8 @@ const inputRequestId = 'inp_00000000000000000000000001'
 const attentionItemId = 'att_00000000000000000000000001'
 const subscriptionId = 'sub_00000000000000000000000001'
 const NOW = Date.parse('2026-09-03T09:00:00.000Z')
+const SCOPED_STRONGFLOW = '#/strongflow'
+const SCOPED_CHAT = '#/chat'
 
 function canonicalId(prefix, value) {
   return `${prefix}_${String(value).padStart(26, '0')}`
@@ -122,7 +134,7 @@ function scopeIds(identity) {
 
 function deliverySummary(overrides = {}) {
   return {
-    activeStageRunId: null,
+    activeWorkRunId: null,
     deliveryId,
     openAttentionCount: 0,
     ownership: scopeIds(scope),
@@ -165,7 +177,7 @@ function approval(overrides = {}) {
         productSessionId,
         workerSessionId: canonicalId('wss', 1),
         codexThreadId: canonicalId('thr', 1),
-        stageRunId,
+        workRunId,
       },
     },
     ...overrides,
@@ -188,7 +200,7 @@ function deliveryDetail(delivery) {
           resolutionSummary: null,
           resolvedAt: null,
           resolvedBy: null,
-          stageRunId: delivery.activeStageRunId,
+          workRunId: delivery.activeWorkRunId,
           status: 'open',
           title: 'Review the proposed delivery scope',
           type: 'scope_change',
@@ -293,6 +305,15 @@ function contractFake(state = {}) {
   }
 }
 
+function memoryStorage(initial = {}) {
+  const values = new Map(Object.entries(initial))
+  return {
+    values,
+    getItem: key => (values.has(key) ? values.get(key) : null),
+    setItem: (key, value) => { values.set(key, String(value)) },
+    removeItem: key => { values.delete(key) },
+  }
+}
 
 function homeModel(client, options = {}) {
   let nextRequest = 0
@@ -305,6 +326,7 @@ function homeModel(client, options = {}) {
       nextRequest += 1
       return requestId(nextRequest)
     },
+    visits: createHomeRecentVisitStore({ storage: memoryStorage() }),
     ...options,
   })
 }
@@ -342,7 +364,7 @@ function usageState(overrides = {}) {
     timeWindow: null,
     truncated: false,
     byDelivery: [],
-    byStageRun: [],
+    byWorkRun: [],
     byRole: [],
     byModel: [],
     byProvider: [],
@@ -377,42 +399,109 @@ function decisionCard(overrides = {}) {
     sessionTitle: 'First Chat',
     deliveryId: null,
     deliveryTitle: null,
-    stageRunId: null,
+    workRunId: null,
     ...overrides,
   }
 }
 
-test('Chat is the canonical default surface and every product entry stays reachable', () => {
-  // 设计稿侧栏:新对话排首位并是默认落地页,任务看板紧随其后。
-  assert.equal(CLIENT_SURFACES[0]?.id, 'chat')
+test('Home is the canonical default surface and every product entry stays reachable', () => {
+  assert.equal(CLIENT_SURFACES[0]?.id, 'home')
   assert.deepEqual(CLIENT_SURFACES.map(surface => surface.id), [
-    'chat',
     'home',
-    'projects',
-    'extensions',
-    'device',
-    'attention',
+    'chat',
+    'strongflow',
     'settings',
-    'onboarding',
+    'attention',
+    'enterprise',
   ])
-  assert.equal(clientSurfaceFromHash('').id, 'chat')
+  assert.equal(clientSurfaceFromHash('').id, 'home')
   assert.equal(clientSurfaceFromHash('#/home?x=1').id, 'home')
   assert.equal(clientSurfaceFromHash('#/chat').id, 'chat')
-  assert.equal(clientSurfaceFromHash('#/attention?session=psn_1').id, 'attention')
+  assert.equal(clientSurfaceFromHash('#/strongflow?delivery=dlv_1').id, 'strongflow')
   for (const surface of CLIENT_SURFACES) {
-    assert.equal(surface.default, surface.id === 'chat', surface.id)
+    assert.equal(surface.default, surface.id === 'home', surface.id)
   }
 })
 
+test('recent Delivery visits stay browser-local, scope scoped, recency ordered and bounded', () => {
+  const storage = memoryStorage()
+  const store = createHomeRecentVisitStore({ storage })
+  const older = Date.parse('2026-09-02T09:00:00.000Z')
+  const newer = Date.parse('2026-09-03T08:00:00.000Z')
+  store.record(deliveryId, scopeSelection, older)
+  store.record(executingDeliveryId, scopeSelection, newer)
+  store.record(deliveredDeliveryId, scopeSelection, older)
+  // A repeated visit moves the Delivery to the front instead of duplicating it.
+  store.record(deliveryId, scopeSelection, Date.parse('2026-09-03T08:30:00.000Z'))
+  // A visit in another repository Scope never leaks into this Scope.
+  store.record(blockedDeliveryId, otherScopeSelection(), newer)
 
+  assert.deepEqual(store.visits(scopeSelection, NOW).map(visit => visit.deliveryId), [
+    deliveryId,
+    executingDeliveryId,
+    deliveredDeliveryId,
+  ])
+  assert.deepEqual(store.visits(otherScopeSelection(), NOW).map(visit => visit.deliveryId), [
+    blockedDeliveryId,
+  ])
+  assert.deepEqual(store.visits(scopeSelection, NOW + 31 * 24 * 3_600_000), [])
+  assert.equal(homeVisitScopeKey(scopeSelection), homeVisitScopeKey({ ...scopeSelection }))
+  assert.notEqual(homeVisitScopeKey(scopeSelection), homeVisitScopeKey(otherScopeSelection()))
 
+  const persisted = JSON.parse(storage.values.get(HOME_VISIT_STORAGE_KEY))
+  assert.deepEqual(Object.keys(persisted), ['version', 'visits'])
+  for (const entry of persisted.visits) {
+    assert.deepEqual(Object.keys(entry).sort(), ['at', 'deliveryId', 'kind', 'scope'])
+    assert.equal(entry.kind, 'delivery')
+    assert.match(
+      entry.scope,
+      /^org_[a-z0-9]{26}\/wsp_[a-z0-9]{26}\/prj_[a-z0-9]{26}\/rep_[a-z0-9]{26}$/u,
+    )
+  }
+})
+
+test('recent visits keep a bounded number of records and survive unusable storage', () => {
+  const storage = memoryStorage()
+  const store = createHomeRecentVisitStore({ storage, keepLimit: 2 })
+  store.record(canonicalId('dlv', 1), scopeSelection, 1)
+  store.record(canonicalId('dlv', 2), scopeSelection, 2)
+  store.record(canonicalId('dlv', 3), scopeSelection, 3)
+  assert.equal(JSON.parse(storage.values.get(HOME_VISIT_STORAGE_KEY)).visits.length, 2)
+  assert.deepEqual(store.visits(scopeSelection, 4).map(visit => visit.deliveryId), [
+    canonicalId('dlv', 3),
+    canonicalId('dlv', 2),
+  ])
+  assert.equal(DEFAULT_HOME_VISIT_LIMIT, 4)
+
+  const throwing = {
+    getItem() { throw new Error('storage blocked') },
+    setItem() { throw new Error('storage blocked') },
+    removeItem() { throw new Error('storage blocked') },
+  }
+  const blocked = createHomeRecentVisitStore({ storage: throwing })
+  blocked.record(deliveryId, scopeSelection, NOW)
+  assert.deepEqual(blocked.visits(scopeSelection, NOW), [])
+})
+
+test('a Delivery deep link is recognised and every other route is ignored', () => {
+  assert.equal(
+    homeDeliveryVisitFromHash(
+      '#/strongflow?delivery=dlv_00000000000000000000000001&workRun=wrn_00000000000000000000000001',
+    ),
+    deliveryId,
+  )
+  assert.equal(homeDeliveryVisitFromHash('#/chat?session=psn_00000000000000000000000001'), null)
+  assert.equal(homeDeliveryVisitFromHash('#/strongflow?delivery=not-a-delivery'), null)
+  assert.equal(homeDeliveryVisitFromHash('#/strongflow?delivery='), null)
+  assert.equal(homeDeliveryVisitFromHash('#/home'), null)
+})
 
 test('the dashboard groups Delivery projections into bounded, ordered sections', () => {
   const running = deliverySummary({
     deliveryId: executingDeliveryId,
     title: 'Running delivery',
     status: 'executing',
-    activeStageRunId: stageRunId,
+    activeWorkRunId: workRunId,
     updatedAt: '2026-09-03T08:50:00.000Z',
   })
   const verifying = deliverySummary({
@@ -458,6 +547,7 @@ test('the dashboard groups Delivery projections into bounded, ordered sections',
     ]),
     attention: attentionState([]),
     usage: usageState(),
+    visits: [],
   })
 
   assert.equal(cards.status, 'ready')
@@ -478,9 +568,10 @@ test('the dashboard groups Delivery projections into bounded, ordered sections',
     active: 3,
     failing: 1,
     completed: 2,
+    visited: 0,
   })
   assert.equal(cards.active[0]?.failedTasks, 0)
-  assert.equal(cards.active[1]?.activeStageRunId, stageRunId)
+  assert.equal(cards.active[1]?.activeWorkRunId, workRunId)
   assert.equal(DEFAULT_HOME_DASHBOARD_LIMITS.deliveries, 4)
 
   // Section limits stay bounded even when the Scope holds many Deliveries.
@@ -495,7 +586,8 @@ test('the dashboard groups Delivery projections into bounded, ordered sections',
     ]),
     attention: attentionState([]),
     usage: usageState(),
-    limits: { decisions: 1, deliveries: 1 },
+    visits: [],
+    limits: { decisions: 1, deliveries: 1, visits: 1 },
   })
   assert.equal(bounded.active.length, 1)
   assert.equal(bounded.completed.length, 1)
@@ -558,6 +650,7 @@ test('an empty first-use Scope reports an explicit empty dashboard', () => {
     deliveries: deliveryState([]),
     attention: attentionState([]),
     usage: usageState(),
+    visits: [],
   })
   assert.equal(state.firstUse, true)
   assert.equal(state.status, 'ready')
@@ -566,6 +659,7 @@ test('an empty first-use Scope reports an explicit empty dashboard', () => {
     active: 0,
     failing: 0,
     completed: 0,
+    visited: 0,
   })
 
   // A failed Attention read hides the first-use claim: the dashboard cannot
@@ -574,6 +668,7 @@ test('an empty first-use Scope reports an explicit empty dashboard', () => {
     deliveries: deliveryState([]),
     attention: attentionState([], { status: 'error' }),
     usage: usageState(),
+    visits: [],
   })
   assert.equal(uncertain.firstUse, false)
   assert.equal(uncertain.status, 'partial')
@@ -587,10 +682,32 @@ test('an empty first-use Scope reports an explicit empty dashboard', () => {
     deliveries: deliveryState([], { status: 'error' }),
     attention: attentionState([], { status: 'error' }),
     usage: usageState({ status: 'error' }),
+    visits: [],
   })
   assert.equal(failed.status, 'error')
 })
 
+test('the dashboard carries resolved recent visits with their visited time', () => {
+  const state = homeDashboardState({
+    deliveries: deliveryState([deliverySummary({ title: 'Visited delivery' })]),
+    attention: attentionState([]),
+    usage: usageState(),
+    visits: [{ kind: 'delivery', deliveryId, at: '2026-09-03T08:59:00.000Z' }],
+  })
+  assert.equal(state.visited.length, 1)
+  assert.equal(state.visited[0]?.title, 'Visited delivery')
+  assert.equal(state.visited[0]?.visitedAt, '2026-09-03T08:59:00.000Z')
+  assert.equal(state.counts.visited, 1)
+
+  // A visit whose Delivery left the Scope is dropped instead of showing a raw id.
+  const dropped = homeDashboardState({
+    deliveries: deliveryState([]),
+    attention: attentionState([]),
+    usage: usageState(),
+    visits: [{ kind: 'delivery', deliveryId: deliveredDeliveryId, at: '2026-09-03T08:59:00.000Z' }],
+  })
+  assert.deepEqual(dropped.visited, [])
+})
 
 test('the composed view model reads every existing projection once and publishes one bounded dashboard', async () => {
   const client = contractFake({
@@ -599,7 +716,7 @@ test('the composed view model reads every existing projection once and publishes
         deliveryId: executingDeliveryId,
         title: 'Running delivery',
         status: 'executing',
-        activeStageRunId: stageRunId,
+        activeWorkRunId: workRunId,
       }),
       deliverySummary({
         title: 'Delivery under attention',
@@ -643,6 +760,7 @@ test('the composed view model reads every existing projection once and publishes
     active: 1,
     failing: 1,
     completed: 0,
+    visited: 0,
   })
   assert.deepEqual(model.state.decisions.map(card => card.kind), ['attention', 'approval'])
   assert.equal(model.state.decisions[0]?.title, 'Review the proposed delivery scope')
@@ -673,19 +791,37 @@ test('a decision card links to the exact decision surface and the exact Chat ses
     sessionTitle: null,
     deliveryId,
     deliveryTitle: 'Delivery under attention',
-    stageRunId,
+    workRunId,
   })
-  const inputCard = decisionCard({ stageRunId })
+  const inputCard = decisionCard({ workRunId })
   assert.equal(
     homeDecisionHash(attentionCard, scopeSelection),
-    `#/home/task-run?organizationId=${scope.organizationId}`
-      + `&workspaceId=${scope.workspaceId}&projectId=${scope.projectId}`
-      + `&repositoryId=${scope.repositoryId}`,
-    'a Delivery-bound Attention opens the run page (设计稿 04/06 的「验收交付」)',
+    '#/strongflow?delivery=dlv_00000000000000000000000001'
+      + '&workRun=wrn_00000000000000000000000001'
+      + '&view=unified'
+      + '&organizationId=org_00000000000000000000000001'
+      + '&workspaceId=wsp_00000000000000000000000001'
+      + '&projectId=prj_00000000000000000000000001'
+      + '&repositoryId=rep_00000000000000000000000001',
   )
   assert.equal(
     homeDecisionHash(inputCard, scopeSelection),
-    '#/chat?session=psn_00000000000000000000000001'
+    '#/attention?session=psn_00000000000000000000000001'
+      + '&organizationId=org_00000000000000000000000001'
+      + '&workspaceId=wsp_00000000000000000000000001'
+      + '&projectId=prj_00000000000000000000000001'
+      + '&repositoryId=rep_00000000000000000000000001',
+  )
+  assert.equal(
+    homeDecisionHash(inputCard, scopeSelection, [{
+      deliveryId,
+      deliveryTitle: 'Delivery under attention',
+      deliveryRevision: 3,
+      activeWorkRunId: workRunId,
+    }]),
+    '#/attention?session=psn_00000000000000000000000001'
+      + '&delivery=dlv_00000000000000000000000001'
+      + '&workRun=wrn_00000000000000000000000001'
       + '&organizationId=org_00000000000000000000000001'
       + '&workspaceId=wsp_00000000000000000000000001'
       + '&projectId=prj_00000000000000000000000001'
@@ -701,6 +837,22 @@ test('a decision card links to the exact decision surface and the exact Chat ses
   )
 })
 
+test('a Delivery card links to the exact StrongFlow route of its active WorkRun', () => {
+  const scoped = '&organizationId=org_00000000000000000000000001'
+    + '&workspaceId=wsp_00000000000000000000000001'
+    + '&projectId=prj_00000000000000000000000001'
+    + '&repositoryId=rep_00000000000000000000000001'
+  assert.equal(
+    homeDeliveryHash({ deliveryId, activeWorkRunId: workRunId }, scopeSelection),
+    '#/strongflow?delivery=dlv_00000000000000000000000001'
+      + '&workRun=wrn_00000000000000000000000001&view=unified'
+      + scoped,
+  )
+  assert.equal(
+    homeDeliveryHash({ deliveryId, activeWorkRunId: null }, scopeSelection),
+    `#/strongflow?delivery=dlv_00000000000000000000000001&view=unified${scoped}`,
+  )
+})
 
 test('the dashboard announcement names every section count and its gaps', () => {
   assert.ok(homeDashboardPresentation().sectionHeading.decisions.length > 0)
@@ -708,27 +860,32 @@ test('the dashboard announcement names every section count and its gaps', () => 
     deliveries: deliveryState([]),
     attention: attentionState([]),
     usage: usageState(),
-  })), /^就绪 · 0 项待决策/u)
+    visits: [],
+  })), /^Ready · 0 items need a decision · 0 in progress/u)
   assert.match(homeDashboardAnnouncement(homeDashboardState({
     deliveries: deliveryState([deliverySummary()]),
     attention: attentionState([decisionCard()]),
     usage: usageState(),
-  })), /1 项待决策 · 1 个运行中 · 0 个失败或阻塞 · 0 个已完成/u)
+    visits: [],
+  })), /1 item needs a decision · 1 in progress · 0 failed or blocked · 0 completed/u)
   assert.match(homeDashboardAnnouncement(homeDashboardState({
     deliveries: deliveryState([]),
     attention: attentionState([], { status: 'error' }),
     usage: usageState({ status: 'error' }),
-  })), /^就绪（部分缺省）/u)
+    visits: [],
+  })), /^Ready with gaps/u)
   assert.match(homeDashboardAnnouncement(homeDashboardState({
     deliveries: deliveryState([], { status: 'loading' }),
     attention: attentionState([], { status: 'loading' }),
     usage: usageState({ status: 'loading' }),
-  })), /^正在读取看板/u)
+    visits: [],
+  })), /^Reading the dashboard/u)
   assert.match(homeDashboardAnnouncement(homeDashboardState({
     deliveries: deliveryState([], { status: 'error' }),
     attention: attentionState([], { status: 'error' }),
     usage: usageState({ status: 'error' }),
-  })), /^看板读取失败/u)
+    visits: [],
+  })), /^The dashboard could not be read/u)
 })
 
 class FakeElement {
@@ -890,7 +1047,7 @@ function fakeHomeModel(states) {
   return model
 }
 
-test('the Home page mounts the task board chrome, one polite live region, and exact deep links', () => {
+test('the Home page mounts one polite live region and exact deep links on every card', () => {
   const document = new FakeDocument()
   const rootElement = new FakeElement(document, 'div')
   const state = homeDashboardState({
@@ -899,7 +1056,7 @@ test('the Home page mounts the task board chrome, one polite live region, and ex
         deliveryId: executingDeliveryId,
         title: 'Running delivery',
         status: 'executing',
-        activeStageRunId: stageRunId,
+        activeWorkRunId: workRunId,
       }),
       deliverySummary({
         deliveryId: deliveredDeliveryId,
@@ -921,7 +1078,7 @@ test('the Home page mounts the task board chrome, one polite live region, and ex
         sessionTitle: null,
         deliveryId,
         deliveryTitle: 'Delivery under attention',
-        stageRunId,
+        workRunId,
       }),
       decisionCard({
         id: 'inp_00000000000000000000000009',
@@ -932,47 +1089,21 @@ test('the Home page mounts the task board chrome, one polite live region, and ex
       }),
     ]),
     usage: usageState(),
+    visits: [{ kind: 'delivery', deliveryId: deliveredDeliveryId, at: '2026-09-03T08:59:00.000Z' }],
   })
   const model = fakeHomeModel([state])
   const mountedPage = mountHomeDashboardPage({ root: rootElement, model, scopeSelection })
 
   const page = byClass(rootElement, 'wwc-home')
   assert.equal(page.dataset.wwcPage, 'home')
-
-  // Design page 04: big title, display-only Scope select, and the new-task
-  // entry that deep links the §16.6 form.
-  assert.match(visibleText(byClass(rootElement, 'wwc-home-heading')), /任务看板/u)
-  const projectSelect = byClass(rootElement, 'wwc-home-project-select')
-  assert.equal(projectSelect.disabled, true)
-  assert.match(visibleText(projectSelect), /全部项目/u)
-  assert.match(visibleText(projectSelect), /当前仓库/u)
-  const newTask = byClass(rootElement, 'wwc-home-new-task')
-  assert.equal(newTask.textContent, '新建任务')
-  assert.equal(
-    newTask.href,
-    `#/home/new-task?organizationId=${scope.organizationId}`
-      + `&workspaceId=${scope.workspaceId}&projectId=${scope.projectId}`
-      + `&repositoryId=${scope.repositoryId}`,
-  )
-
   const liveRegions = descendants(page).filter(
     node => node.getAttribute('aria-live') === 'polite',
   )
   assert.equal(liveRegions.length, 1, 'the Home page keeps exactly one polite live region')
   assert.match(
     visibleText(liveRegions[0]),
-    /就绪 · 3 项待决策 · 1 个运行中 · 0 个失败或阻塞 · 1 个已完成/u,
+    /Ready · 3 items need a decision · 1 in progress · 0 failed or blocked · 1 completed/u,
   )
-
-  // The two live columns: Running left, Needs-you right, bold + gray count.
-  const activeSection = descendants(page).find(node => node.dataset?.section === 'active')
-  assert.notEqual(activeSection, undefined)
-  assert.equal(byClass(activeSection, 'wwc-home-section-heading').textContent, '正在运行')
-  assert.equal(byClass(activeSection, 'wwc-home-section-count').textContent, '1')
-  const decisionsSection = descendants(page).find(node => node.dataset?.section === 'decisions')
-  assert.notEqual(decisionsSection, undefined)
-  assert.equal(byClass(decisionsSection, 'wwc-home-section-heading').textContent, '待我处理')
-  assert.equal(byClass(decisionsSection, 'wwc-home-section-count').textContent, '3')
 
   const decisionCards = allByClass(rootElement, 'wwc-home-card')
     .filter(card => card.dataset.kind === 'decision')
@@ -983,23 +1114,6 @@ test('the Home page mounts the task board chrome, one polite live region, and ex
   assert.equal(disabledAction.getAttribute('href'), null)
   assert.equal(disabledAction.getAttribute('aria-disabled'), 'true')
   assert.equal(disabledAction.tabIndex, -1)
-  assert.match(visibleText(disabled), /已过期 · 操作禁用/u)
-
-  // Pending cards: status line by kind, one accent action per decision class.
-  const inputCard = decisionCards.find(card => card.dataset.urgency === 'pending')
-  assert.equal(byClass(inputCard, 'wwc-home-card-status').textContent, '方案待审核')
-  assert.equal(byClass(inputCard, 'wwc-home-card-action').textContent, '审核方案')
-  const attentionCard = decisionCards.find(card => card.dataset.urgency === 'blocking')
-  assert.equal(byClass(attentionCard, 'wwc-home-card-status').textContent, '阻塞 · 需要立即决策')
-  assert.equal(byClass(attentionCard, 'wwc-home-card-action').textContent, '验收交付')
-
-  // Running cards: 强流程 + the mapped status text; the action opens the run
-  // page (设计稿 04 的「查看进度」).
-  const runningCard = allByClass(rootElement, 'wwc-home-card')
-    .find(card => card.dataset.kind === 'delivery')
-  assert.notEqual(runningCard, undefined)
-  assert.equal(byClass(runningCard, 'wwc-home-card-status').textContent, '强流程 · 正在执行')
-  assert.equal(byClass(runningCard, 'wwc-home-card-action').textContent, '查看进度')
 
   const actions = descendants(rootElement)
     .filter(node => node.className === 'wwc-home-card-action')
@@ -1007,14 +1121,27 @@ test('the Home page mounts the task board chrome, one polite live region, and ex
   const scoped = `organizationId=${scope.organizationId}&workspaceId=${scope.workspaceId}`
     + `&projectId=${scope.projectId}&repositoryId=${scope.repositoryId}`
   assert.equal(
-    actions.filter(href => href === `#/chat?session=${productSessionId}&${scoped}`).length,
+    actions.filter(href => href === `#/attention?session=${productSessionId}&${scoped}`).length,
     1,
-    'the input decision opens its exact Chat session',
+    'the input decision opens its exact session decisions',
   )
   assert.equal(
-    actions.filter(href => href.startsWith('#/')).length,
-    4,
-    'delivery cards open the run page; decisions open their exact surfaces',
+    actions.filter(href => href === `#/strongflow?delivery=${deliveryId}`
+      + `&workRun=${workRunId}&view=unified&${scoped}`).length,
+    1,
+    'the delivery-bound decision opens the exact Delivery context',
+  )
+  assert.equal(
+    actions.filter(href => href === `#/strongflow?delivery=${executingDeliveryId}`
+      + `&workRun=${workRunId}&view=unified&${scoped}`).length,
+    1,
+    'the running card opens the exact StrongFlow WorkRun',
+  )
+  assert.equal(
+    actions.filter(href => href === `#/strongflow?delivery=${deliveredDeliveryId}`
+      + `&view=unified&${scoped}`).length,
+    2,
+    'the visited Delivery keeps the full canonical route in both of its sections',
   )
   const chatLinks = descendants(rootElement)
     .filter(node => node.className === 'wwc-home-card-chat' && node.hidden !== true)
@@ -1023,35 +1150,17 @@ test('the Home page mounts the task board chrome, one polite live region, and ex
     descendants(rootElement)
       .filter(node => node.className === 'wwc-home-card-chat' && node.hidden === true)
       .map(node => node.href),
-    ['', '', '', ''],
+    ['', '', '', '', ''],
     'cards without a Chat session expose no chat link at all',
   )
   assert.deepEqual(chatLinks, [homeChatHash(productSessionId, scopeSelection)])
 
-  // Design page 04: the Usage panel and the first-use block are gone; the
-  // history groups render as collapsed hairline rows.
-  assert.equal(allByClass(rootElement, 'wwc-usage-health').length, 0)
-  assert.equal(allByClass(rootElement, 'wwc-home-first-use').length, 0)
-  for (const id of ['failing', 'completed']) {
-    const section = descendants(page).find(node => node.dataset?.section === id)
-    assert.notEqual(section, undefined)
-    const toggle = byClass(section, 'wwc-home-section-toggle')
-    assert.equal(toggle.getAttribute('aria-expanded'), 'false')
-    const cards = byClass(section, 'wwc-home-cards')
-    assert.equal(cards.hidden, true, `${id} stays collapsed`)
-    assert.equal(allByClass(section, 'wwc-home-card').length > 0 || id === 'failing', true)
-    if (id === 'completed') {
-      assert.equal(byClass(section, 'wwc-home-section-heading').textContent, '已完成')
-      toggle.dispatch('click')
-      assert.equal(toggle.getAttribute('aria-expanded'), 'true')
-      assert.equal(cards.hidden, false, 'the completed row expands in place')
-      assert.equal(allByClass(section, 'wwc-home-card').length, 1)
-      toggle.dispatch('click')
-      assert.equal(toggle.getAttribute('aria-expanded'), 'false')
-      assert.equal(cards.hidden, true)
-    }
-  }
   assert.match(visibleText(byClass(rootElement, 'wwc-home-sections')), /Running delivery/u)
+  assert.match(
+    visibleText(byClass(rootElement, 'wwc-usage-health')),
+    /Usage, Provider and Worker health/u,
+  )
+  assert.equal(byClass(rootElement, 'wwc-home-first-use').hidden, true)
 
   mountedPage.close()
   assert.equal(rootElement.children.length, 0)
@@ -1065,11 +1174,13 @@ test('the Home page stays usable when one projection is unavailable and closes i
     deliveries: deliveryState([deliverySummary({ title: 'Running delivery' })]),
     attention: attentionState([]),
     usage: usageState(),
+    visits: [],
   })
   const partial = homeDashboardState({
     deliveries: deliveryState([deliverySummary({ title: 'Running delivery' })]),
     attention: attentionState([], { status: 'error' }),
     usage: usageState({ status: 'error' }),
+    visits: [],
   })
   const model = fakeHomeModel([ready, partial])
   const mountedPage = mountHomeDashboardPage({
@@ -1079,24 +1190,25 @@ test('the Home page stays usable when one projection is unavailable and closes i
     ownsModel: false,
   })
   model.refresh()
-  assert.match(visibleText(byClass(rootElement, 'wwc-home')), /待办 不可用/u)
-  assert.match(visibleText(byClass(rootElement, 'wwc-home')), /用量与健康 不可用/u)
+  assert.match(visibleText(byClass(rootElement, 'wwc-home')), /Attention is unavailable/u)
+  assert.match(visibleText(byClass(rootElement, 'wwc-home')), /Usage and health is unavailable/u)
   assert.match(visibleText(byClass(rootElement, 'wwc-home')), /Running delivery/u)
-  // 设计稿 04:看板画布没有刷新控件——模型刷新只能来自生命周期,不是按钮。
-  assert.equal(model.refreshes, 1)
 
+  byClass(rootElement, 'wwc-home-refresh').dispatch('click')
+  assert.equal(model.refreshes, 2)
   mountedPage.close()
   assert.equal(rootElement.children.length, 0)
   assert.equal(model.closed, false, 'a host that owns the model closes it itself')
 })
 
-test('an empty Scope stays honest without the first-use block or usage panel', () => {
+test('the Home page shows the first-use entry instead of an empty dashboard', () => {
   const document = new FakeDocument()
   const rootElement = new FakeElement(document, 'div')
   const empty = homeDashboardState({
     deliveries: deliveryState([]),
     attention: attentionState([]),
     usage: usageState(),
+    visits: [],
   })
   const model = fakeHomeModel([empty])
   const mountedPage = mountHomeDashboardPage({
@@ -1105,21 +1217,22 @@ test('an empty Scope stays honest without the first-use block or usage panel', (
     scopeSelection,
     ownsModel: false,
   })
-  // Design page 04 removes the first-use block and the Usage panel; the empty
-  // columns keep their explicit notes and the new-task entry stays reachable.
-  assert.equal(allByClass(rootElement, 'wwc-home-first-use').length, 0)
-  assert.equal(allByClass(rootElement, 'wwc-usage-health').length, 0)
-  const decisionsSection = descendants(rootElement)
-    .find(node => node.dataset?.section === 'decisions')
-  assert.equal(byClass(decisionsSection, 'wwc-home-section-empty').hidden, false)
-  assert.match(
-    byClass(decisionsSection, 'wwc-home-section-empty').textContent,
-    /现在没有需要决策的事项/u,
+  const emptyState = byClass(rootElement, 'wwc-home-first-use')
+  assert.equal(emptyState.hidden, false)
+  const text = visibleText(emptyState)
+  assert.match(text, /Create your first Delivery/u)
+  assert.match(text, /Start your first Chat/u)
+  assert.deepEqual(
+    descendants(emptyState).filter(node => node.tagName === 'A').map(node => node.href),
+    [
+      `${SCOPED_STRONGFLOW}?organizationId=${scope.organizationId}`
+        + `&workspaceId=${scope.workspaceId}&projectId=${scope.projectId}`
+        + `&repositoryId=${scope.repositoryId}`,
+      `${SCOPED_CHAT}?organizationId=${scope.organizationId}`
+        + `&workspaceId=${scope.workspaceId}&projectId=${scope.projectId}`
+        + `&repositoryId=${scope.repositoryId}`,
+    ],
   )
-  const activeSection = descendants(rootElement)
-    .find(node => node.dataset?.section === 'active')
-  assert.equal(byClass(activeSection, 'wwc-home-section-empty').hidden, false)
-  assert.equal(byClass(rootElement, 'wwc-home-new-task').textContent, '新建任务')
   mountedPage.close()
 })
 

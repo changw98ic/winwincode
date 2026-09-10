@@ -12668,6 +12668,7 @@ dependencies = [
  "aes-gcm",
  "base64 0.22.1",
  "getrandom 0.3.4",
+ "jiff",
  "rcgen",
  "rusqlite",
  "rustls",
@@ -12703,6 +12704,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "time",
  "winwincode-domain",
  "winwincode-storage",
 ]
@@ -12711,12 +12713,17 @@ dependencies = [
 name = "winwincode-device-client"
 version = "0.1.0-alpha.1"
 dependencies = [
+ "base64 0.22.1",
+ "futures",
  "getrandom 0.3.4",
+ "http 1.4.0",
  "rusqlite",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "time",
+ "tokio",
+ "tokio-tungstenite",
  "winwincode-client-port",
  "winwincode-worker",
 ]
@@ -12907,10 +12914,12 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tokio-tungstenite",
+ "ureq",
  "winwincode-api",
  "winwincode-client-port",
  "winwincode-codex",
  "winwincode-control-plane",
+ "winwincode-delivery",
  "winwincode-device-client",
  "winwincode-domain",
  "winwincode-execution-port",
@@ -12918,17 +12927,14 @@ dependencies = [
  "winwincode-session",
  "winwincode-storage",
  "winwincode-worker",
- "ureq",
 ]
 
 [[package]]
 name = "winwincode-session"
 version = "0.1.0-alpha.1"
 dependencies = [
- "rusqlite",
  "serde",
  "serde_json",
- "sha2 0.10.9",
  "winwincode-domain",
 ]
 
@@ -12958,6 +12964,9 @@ name = "winwincode-worker"
 version = "0.1.0-alpha.1"
 dependencies = [
  "base64 0.22.1",
+ "codex-apply-patch",
+ "codex-exec-server",
+ "codex-utils-path-uri",
  "futures",
  "rusqlite",
  "serde",

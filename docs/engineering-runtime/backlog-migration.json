@@ -1,0 +1,3111 @@
+{
+  "schema_version": 1,
+  "audit_bead": "winwincode-dwz",
+  "created_at": "2026-09-07T16:20:35.990525+00:00",
+  "source_plan_sha256": "4359a7084e904640a1e4383d70278101cbbbf9aabf2eb4afc2ba78ff834671f8",
+  "baseline_head": "baedb1ef0849f188b800431fe1a016f0af0caa79",
+  "scope": "all non-closed local Community beads, including blocked; excluding this audit and newly-created ER beads",
+  "evidence_level": "Beads descriptions, acceptance, notes and closed task receipts; no fresh runtime/source acceptance",
+  "active_snapshot_count": 111,
+  "counts": {
+    "REWRITE": 47,
+    "KEEP": 59,
+    "DEFER": 3,
+    "MERGE": 2
+  },
+  "source_plan": "winwincode-community-engineering-runtime-bd-backlog.md",
+  "new_beads": {
+    "WWC-ER-0001": "winwincode-dwz",
+    "WWC-ER-0002": "winwincode-hrw",
+    "WWC-ER-0003": "winwincode-0kt",
+    "WWC-ER-0004": "winwincode-8xk"
+  },
+  "mapping": [
+    {
+      "old_id": "winwincode-72t",
+      "classification": "REWRITE",
+      "canonical_owner": "winwincode-72t",
+      "aligned_er_ids": [
+        "WWC-ER-0002"
+      ],
+      "reason": "保留扩展任务容器，运行与完成语义改为新三方职责；非额外实现 owner",
+      "status_at_audit": "open",
+      "source_record_sha256": "665c4add29a9051943c4bea94e7b62fba23ea79487682728b04d304c369228ae",
+      "decision_status": "proposed_pending_adr",
+      "original_source_record_sha256": "665c4add29a9051943c4bea94e7b62fba23ea79487682728b04d304c369228ae"
+    },
+    {
+      "old_id": "winwincode-72t.1",
+      "classification": "KEEP",
+      "canonical_owner": "winwincode-72t.1",
+      "aligned_er_ids": [],
+      "reason": "许可证和来源预检继续复用，非新执行状态机",
+      "status_at_audit": "in_progress",
+      "source_record_sha256": "179b27e1acaf13c09fbff6dc6009f66027951723d09875aaba6b7160ceb87611",
+      "decision_status": "recorded_keep",
+      "original_source_record_sha256": "179b27e1acaf13c09fbff6dc6009f66027951723d09875aaba6b7160ceb87611"
+    },
+    {
+      "old_id": "winwincode-72t.10",
+      "classification": "REWRITE",
+      "canonical_owner": "winwincode-72t.10",
+      "aligned_er_ids": [
+        "WWC-ER-0002"
+      ],
+      "reason": "旧基线总门需按新职责边界复核，不替代新 ADR 的裁决",
+      "status_at_audit": "in_progress",
+      "source_record_sha256": "e6d33362e5820a97dfed47da4229b66147acddcff5d32e3c8db9a7f36bf81794",
+      "decision_status": "proposed_pending_adr",
+      "original_source_record_sha256": "e6d33362e5820a97dfed47da4229b66147acddcff5d32e3c8db9a7f36bf81794"
+    },
+    {
+      "old_id": "winwincode-72t.11",
+      "classification": "KEEP",
+      "canonical_owner": "winwincode-72t.11",
+      "aligned_er_ids": [
+        "WWC-ER-0403"
+      ],
+      "reason": "技能来源与安全安装独立能力保留，不新建重复安装任务",
+      "status_at_audit": "open",
+      "source_record_sha256": "1da9dc8d03c327f337c7eed777e13d0849cac88b685644dafb5c2fb186421b79",
+      "decision_status": "recorded_keep",
+      "original_source_record_sha256": "1da9dc8d03c327f337c7eed777e13d0849cac88b685644dafb5c2fb186421b79"
+    },
+    {
+      "old_id": "winwincode-72t.12",
+      "classification": "KEEP",
+      "canonical_owner": "winwincode-72t.12",
+      "aligned_er_ids": [
+        "WWC-ER-0405"
+      ],
+      "reason": "MCP/CLI 生命周期及凭据边界复用，跨工具版本不等于保留旧产品状态机",
+      "status_at_audit": "open",
+      "source_record_sha256": "5487fc35f1317e4f08cebfd7ac9648a3c6bfd785eba7c70eec56de74e11ee049",
+      "decision_status": "recorded_keep",
+      "original_source_record_sha256": "5487fc35f1317e4f08cebfd7ac9648a3c6bfd785eba7c70eec56de74e11ee049"
+    },
+    {
+      "old_id": "winwincode-72t.13",
+      "classification": "REWRITE",
+      "canonical_owner": "winwincode-72t.13",
+      "aligned_er_ids": [
+        "WWC-ER-0101",
+        "WWC-ER-0106"
+      ],
+      "reason": "Spec 草稿保留为交互面，底层统一 WorkContract 修订，避免两套验收条件",
+      "status_at_audit": "open",
+      "source_record_sha256": "61317ad48ffc10c529042c732063dee34cd17270a4387789ced0d8e45ada9d0c",
+      "decision_status": "proposed_pending_adr",
+      "original_source_record_sha256": "f6944475bff5a96b234601014fc15aa348db4314077195d632531654da1ae93e"
+    },
+    {
+      "old_id": "winwincode-72t.14",
+      "classification": "REWRITE",
+      "canonical_owner": "winwincode-72t.14",
+      "aligned_er_ids": [
+        "WWC-ER-0903"
+      ],
+      "reason": "页面批注为建议事实，转返工/Attention 由 Controller 决定",
+      "status_at_audit": "open",
+      "source_record_sha256": "2df7ca458d20a123bd786ef0cd40c4912577a7ea23f7506c52532a1d3d7411b2",
+      "decision_status": "proposed_pending_adr",
+      "original_source_record_sha256": "2df7ca458d20a123bd786ef0cd40c4912577a7ea23f7506c52532a1d3d7411b2"
+    },
+    {
+      "old_id": "winwincode-72t.15",
+      "classification": "KEEP",
+      "canonical_owner": "winwincode-72t.15",
+      "aligned_er_ids": [
+        "WWC-ER-1104",
+        "WWC-ER-1107"
+      ],
+      "reason": "已有模型可用性与预算任务继续承接，按新会话身份补绑定",
+      "status_at_audit": "open",
+      "source_record_sha256": "2412637f8ee4cfd7318f8c21180669ecee2a4d9011f6f79781c87d9f5b3b8a8f",
+      "decision_status": "recorded_keep",
+      "original_source_record_sha256": "bf7cf2746928e67b77154101f6e9da8af43db7bdcf8b9e18cc97d6fe7d6109bf"
+    },
+    {
+      "old_id": "winwincode-72t.16",
+      "classification": "KEEP",
+      "canonical_owner": "winwincode-72t.16",
+      "aligned_er_ids": [
+        "WWC-ER-0306"
+      ],
+      "reason": "模板和验证包是规则输入，不接管 Controller 的完成判定",
+      "status_at_audit": "open",
+      "source_record_sha256": "b573a12081a54270ce0a3cf138787fc2c565e188330a7c20d047f119b6f04655",
+      "decision_status": "recorded_keep",
+      "original_source_record_sha256": "b573a12081a54270ce0a3cf138787fc2c565e188330a7c20d047f119b6f04655"
+    },
+    {
+      "old_id": "winwincode-72t.17",
+      "classification": "KEEP",
+      "canonical_owner": "winwincode-72t.17",
+      "aligned_er_ids": [
+        "WWC-ER-1008"
+      ],
+      "reason": "可信产物查看器保留，复用原任务而非另建页面",
+      "status_at_audit": "open",
+      "source_record_sha256": "9e233fb9c07a40644093924d1e85c344049b95fc9c151358b1484cfa780efe21",
+      "decision_status": "recorded_keep",
+      "original_source_record_sha256": "9e233fb9c07a40644093924d1e85c344049b95fc9c151358b1484cfa780efe21"
+    },
+    {
+      "old_id": "winwincode-72t.18",
+      "classification": "KEEP",
+      "canonical_owner": "winwincode-72t.18",
+      "aligned_er_ids": [
+        "WWC-ER-0408"
+      ],
+      "reason": "环境能力预检保留，不能视作已实现自动恢复",
+      "status_at_audit": "open",
+      "source_record_sha256": "62b38cb984efc5d880db23be3452e0f9bbd4f26c6d11aa116e6a6ebb143a5a45",
+      "decision_status": "recorded_keep",
+      "original_source_record_sha256": "12ace5fba074af413b9f2e2db67071e4df9587572b34953eb172abb05068cc26"
+    },
+    {
+      "old_id": "winwincode-72t.19",
+      "classification": "REWRITE",
+      "canonical_owner": "winwincode-72t.19",
+      "aligned_er_ids": [
+        "WWC-ER-1003"
+      ],
+      "reason": "澄清和验收编辑展示新 WorkContract，不写旧阶段状态",
+      "status_at_audit": "open",
+      "source_record_sha256": "699b65ca15aa8a545fbff0db9bf5c6258556bd75a4516557cd6074d02ec88139",
+      "decision_status": "proposed_pending_adr",
+      "original_source_record_sha256": "699b65ca15aa8a545fbff0db9bf5c6258556bd75a4516557cd6074d02ec88139"
+    },
+    {
+      "old_id": "winwincode-72t.2",
+      "classification": "REWRITE",
+      "canonical_owner": "winwincode-72t.2",
+      "aligned_er_ids": [
+        "WWC-ER-0706"
+      ],
+      "reason": "证据关联由 stage 改为 WorkRun/attempt/contract/candidate，保留可信来源",
+      "status_at_audit": "in_progress",
+      "source_record_sha256": "4761256d3a9d0b36ba491a0dc655365f526224b4f74caa667a25791f1f2b6d13",
+      "decision_status": "proposed_pending_adr",
+      "original_source_record_sha256": "4761256d3a9d0b36ba491a0dc655365f526224b4f74caa667a25791f1f2b6d13"
+    },
+    {
+      "old_id": "winwincode-72t.20",
+      "classification": "KEEP",
+      "canonical_owner": "winwincode-72t.20",
+      "aligned_er_ids": [
+        "WWC-ER-0805"
+      ],
+      "reason": "候选比较与锚点处理复用，组合后仍需重新验证",
+      "status_at_audit": "open",
+      "source_record_sha256": "290b85020e2013f229dbf0fd3234771ea22041ba05659f25d31ed6aaf296269e",
+      "decision_status": "recorded_keep",
+      "original_source_record_sha256": "290b85020e2013f229dbf0fd3234771ea22041ba05659f25d31ed6aaf296269e"
+    },
+    {
+      "old_id": "winwincode-72t.21",
+      "classification": "KEEP",
+      "canonical_owner": "winwincode-72t.21",
+      "aligned_er_ids": [
+        "WWC-ER-0407"
+      ],
+      "reason": "知识来源索引仍有独立价值，不等同于恢复权威事实",
+      "status_at_audit": "open",
+      "source_record_sha256": "fa9098760aec367b34c929cdd524683d9f53b51aacabe5321803572931a296cf",
+      "decision_status": "recorded_keep",
+      "original_source_record_sha256": "fa9098760aec367b34c929cdd524683d9f53b51aacabe5321803572931a296cf"
+    },
+    {
+      "old_id": "winwincode-72t.22",
+      "classification": "KEEP",
+      "canonical_owner": "winwincode-72t.22",
+      "aligned_er_ids": [
+        "WWC-ER-0408"
+      ],
+      "reason": "受管应用运行隔离复用，避免另造运行管理器",
+      "status_at_audit": "open",
+      "source_record_sha256": "7c274610ee5e5f3d704f7b8c1aee81edfd73da71d37d75f2fb9b7668a59d6ade",
+      "decision_status": "recorded_keep",
+      "original_source_record_sha256": "7c274610ee5e5f3d704f7b8c1aee81edfd73da71d37d75f2fb9b7668a59d6ade"
+    },
+    {
+      "old_id": "winwincode-72t.23",
+      "classification": "REWRITE",
+      "canonical_owner": "winwincode-72t.23",
+      "aligned_er_ids": [],
+      "reason": "保留个人/仓库知识授权与删除；团队 ACL 部分移出 Community 范围",
+      "status_at_audit": "open",
+      "source_record_sha256": "9ba5635517b4dee10018d5f3612fbf3ad864499b7b3ab36206e14d5d8299804e",
+      "decision_status": "proposed_pending_adr",
+      "original_source_record_sha256": "9ba5635517b4dee10018d5f3612fbf3ad864499b7b3ab36206e14d5d8299804e"
+    },
+    {
+      "old_id": "winwincode-72t.24",
+      "classification": "REWRITE",
+      "canonical_owner": "winwincode-72t.24",
+      "aligned_er_ids": [
+        "WWC-ER-0101"
+      ],
+      "reason": "模板实例化生成新 WorkContract/WorkItem，不创建旧阶段流程",
+      "status_at_audit": "open",
+      "source_record_sha256": "870de0e16c22556756830984e05b1bff0dc4fff33fe89b64d14b5d576df827f9",
+      "decision_status": "proposed_pending_adr",
+      "original_source_record_sha256": "870de0e16c22556756830984e05b1bff0dc4fff33fe89b64d14b5d576df827f9"
+    },
+    {
+      "old_id": "winwincode-72t.25",
+      "classification": "REWRITE",
+      "canonical_owner": "winwincode-72t.25",
+      "aligned_er_ids": [
+        "WWC-ER-0404"
+      ],
+      "reason": "保留个人/仓库/Client 配置管理，团队策略后置到产品仓",
+      "status_at_audit": "open",
+      "source_record_sha256": "1d7ef8e34b5bcf555c090a50d09ad7ade6b2a089d174aedaae333ea49b043562",
+      "decision_status": "proposed_pending_adr",
+      "original_source_record_sha256": "1d7ef8e34b5bcf555c090a50d09ad7ade6b2a089d174aedaae333ea49b043562"
+    },
+    {
+      "old_id": "winwincode-72t.26",
+      "classification": "KEEP",
+      "canonical_owner": "winwincode-72t.26",
+      "aligned_er_ids": [
+        "WWC-ER-0704"
+      ],
+      "reason": "影响分析展示仍由原任务负责，不把文件级覆盖声明为符号图",
+      "status_at_audit": "open",
+      "source_record_sha256": "e8b6f6130864817f6c33ceaef42e41c2149647b601d56b25b2ad12dfe1b3b4e5",
+      "decision_status": "recorded_keep",
+      "original_source_record_sha256": "e8b6f6130864817f6c33ceaef42e41c2149647b601d56b25b2ad12dfe1b3b4e5"
+    },
+    {
+      "old_id": "winwincode-72t.27",
+      "classification": "REWRITE",
+      "canonical_owner": "winwincode-72t.27",
+      "aligned_er_ids": [
+        "WWC-ER-1007",
+        "WWC-ER-1009"
+      ],
+      "reason": "站内通知与移动深链统一消费新任务/Attention 投影",
+      "status_at_audit": "open",
+      "source_record_sha256": "0065e82749aaa5b3d2e48e2f7a13b29fe223eee44a0687736d92e4f8f6509809",
+      "decision_status": "proposed_pending_adr",
+      "original_source_record_sha256": "bdffa3d4c3b96ec2cde24fe03fdd2caefc48568834989e0aea1e8444de4b1936"
+    },
+    {
+      "old_id": "winwincode-72t.28",
+      "classification": "DEFER",
+      "canonical_owner": "winwincode-72t.28",
+      "aligned_er_ids": [],
+      "reason": "飞书渠道是外部连接扩展，不作为 Engineering Runtime 1.0 前置",
+      "status_at_audit": "open",
+      "source_record_sha256": "e0713aaf9c61f8ee65939f26a99c8650bb280ccf585ed51c5a79a7a020d30cdf",
+      "decision_status": "proposed_pending_adr",
+      "original_source_record_sha256": "e0713aaf9c61f8ee65939f26a99c8650bb280ccf585ed51c5a79a7a020d30cdf"
+    },
+    {
+      "old_id": "winwincode-72t.29",
+      "classification": "DEFER",
+      "canonical_owner": "winwincode-72t.29",
+      "aligned_er_ids": [],
+      "reason": "GitHub 对象导入是外部连接扩展，不作为 Engineering Runtime 1.0 前置",
+      "status_at_audit": "open",
+      "source_record_sha256": "261b98f1772a5de5f543d4370bbb2fc7cbe76031ee2184ea6907ba005b85a680",
+      "decision_status": "proposed_pending_adr",
+      "original_source_record_sha256": "261b98f1772a5de5f543d4370bbb2fc7cbe76031ee2184ea6907ba005b85a680"
+    },
+    {
+      "old_id": "winwincode-72t.3",
+      "classification": "REWRITE",
+      "canonical_owner": "winwincode-72t.3",
+      "aligned_er_ids": [
+        "WWC-ER-1106"
+      ],
+      "reason": "用量事实关联 AgentIdentity/Session/WorkItem，保留费用来源与未知值",
+      "status_at_audit": "in_progress",
+      "source_record_sha256": "5c0cd31bf714b3ee349a60412d5e3cb3d66c05bf1f9324b8c47415c3d228daaa",
+      "decision_status": "proposed_pending_adr",
+      "original_source_record_sha256": "5c0cd31bf714b3ee349a60412d5e3cb3d66c05bf1f9324b8c47415c3d228daaa"
+    },
+    {
+      "old_id": "winwincode-72t.30",
+      "classification": "KEEP",
+      "canonical_owner": "winwincode-72t.30",
+      "aligned_er_ids": [],
+      "reason": "预览通道安全独立于状态机，保留原 owner",
+      "status_at_audit": "open",
+      "source_record_sha256": "d8155ef4bf82e5f460317d55bef070b902ddfb1b6147ba593d61c574913f5962",
+      "decision_status": "recorded_keep",
+      "original_source_record_sha256": "d8155ef4bf82e5f460317d55bef070b902ddfb1b6147ba593d61c574913f5962"
+    },
+    {
+      "old_id": "winwincode-72t.31",
+      "classification": "REWRITE",
+      "canonical_owner": "winwincode-72t.31",
+      "aligned_er_ids": [
+        "WWC-ER-0504",
+        "WWC-ER-0505"
+      ],
+      "reason": "预览进程清理与恢复需服从 Controller 新租约，不代替完整任务接手",
+      "status_at_audit": "open",
+      "source_record_sha256": "37c9b63a681f52128aa0786522e66918f3d686bb95ab855be4faf01de345b23b",
+      "decision_status": "proposed_pending_adr",
+      "original_source_record_sha256": "3482af9c96eeb9f4b936a65c71dd19fb23a53a6a7218b16d66aca602176d7af0"
+    },
+    {
+      "old_id": "winwincode-72t.32",
+      "classification": "KEEP",
+      "canonical_owner": "winwincode-72t.32",
+      "aligned_er_ids": [
+        "WWC-ER-0703"
+      ],
+      "reason": "复用浏览器隔离测试能力，不新建平行浏览器执行器",
+      "status_at_audit": "open",
+      "source_record_sha256": "7e2945f7e280ac12d8b5e3ed152a14cb7465bd5cc2e75c42abe024782155ab15",
+      "decision_status": "recorded_keep",
+      "original_source_record_sha256": "7e2945f7e280ac12d8b5e3ed152a14cb7465bd5cc2e75c42abe024782155ab15"
+    },
+    {
+      "old_id": "winwincode-72t.33",
+      "classification": "MERGE",
+      "canonical_owner": "winwincode-72t.1",
+      "aligned_er_ids": [],
+      "reason": "两项原描述的 Scope 完全相同：样本、许可证、适配矩阵与受限查看器边界。以已在途的 .1 作为唯一承接者；ADR 确认后合并历史，有限查看器若有净新增实现再单列差异。",
+      "status_at_audit": "open",
+      "source_record_sha256": "a32290e7be1fc7757c56e8bea429a979b198a7eba265f82febacfa5cf3f2c25a",
+      "decision_status": "proposed_pending_adr",
+      "original_source_record_sha256": "a32290e7be1fc7757c56e8bea429a979b198a7eba265f82febacfa5cf3f2c25a"
+    },
+    {
+      "old_id": "winwincode-72t.34",
+      "classification": "KEEP",
+      "canonical_owner": "winwincode-72t.34",
+      "aligned_er_ids": [
+        "WWC-ER-0307"
+      ],
+      "reason": "日历调度规则保留，不与运行时事实规则引擎混为一套状态",
+      "status_at_audit": "open",
+      "source_record_sha256": "59b4b073c0a2d3029d6b777334f02116b1335bdf529ade816e19ebcbfa6e01fd",
+      "decision_status": "recorded_keep",
+      "original_source_record_sha256": "59b4b073c0a2d3029d6b777334f02116b1335bdf529ade816e19ebcbfa6e01fd"
+    },
+    {
+      "old_id": "winwincode-72t.35",
+      "classification": "REWRITE",
+      "canonical_owner": "winwincode-72t.35",
+      "aligned_er_ids": [
+        "WWC-ER-0906"
+      ],
+      "reason": "消息批准只能提交绑定候选的授权证据，由 Controller 判定有效性",
+      "status_at_audit": "open",
+      "source_record_sha256": "3ef87aa434f58dd347440336b9269ee8ae7987330f54c136a5184ba9b2c8fa9c",
+      "decision_status": "proposed_pending_adr",
+      "original_source_record_sha256": "3ef87aa434f58dd347440336b9269ee8ae7987330f54c136a5184ba9b2c8fa9c"
+    },
+    {
+      "old_id": "winwincode-72t.36",
+      "classification": "REWRITE",
+      "canonical_owner": "winwincode-72t.36",
+      "aligned_er_ids": [
+        "WWC-ER-1003"
+      ],
+      "reason": "候选预览 UI 改读新任务/attempt 投影，不生成完成状态",
+      "status_at_audit": "open",
+      "source_record_sha256": "5dce057f47cb82ef05d83840f7fdf9df0ad9327d7998a2d5c642b49c461d0ab6",
+      "decision_status": "proposed_pending_adr",
+      "original_source_record_sha256": "5dce057f47cb82ef05d83840f7fdf9df0ad9327d7998a2d5c642b49c461d0ab6"
+    },
+    {
+      "old_id": "winwincode-72t.37",
+      "classification": "REWRITE",
+      "canonical_owner": "winwincode-72t.37",
+      "aligned_er_ids": [
+        "WWC-ER-0703",
+        "WWC-ER-0706"
+      ],
+      "reason": "测试事实生产复用，移除 stage 作为必需关联并绑定冻结候选和验证计划",
+      "status_at_audit": "open",
+      "source_record_sha256": "fe0b87a88f589f9c253342c317b47f9a2c227be0b15c4416b826b764e5e45520",
+      "decision_status": "proposed_pending_adr",
+      "original_source_record_sha256": "fe0b87a88f589f9c253342c317b47f9a2c227be0b15c4416b826b764e5e45520"
+    },
+    {
+      "old_id": "winwincode-72t.38",
+      "classification": "REWRITE",
+      "canonical_owner": "winwincode-72t.38",
+      "aligned_er_ids": [
+        "WWC-ER-0407"
+      ],
+      "reason": "阶段摘要改为 Working Plan/ExecutionAttempt 交接提示，不当作权威事实",
+      "status_at_audit": "open",
+      "source_record_sha256": "de226ac131c948bdd4a0985880abb0d5cc7c354fdb280ed62f55221c8057a61f",
+      "decision_status": "proposed_pending_adr",
+      "original_source_record_sha256": "de226ac131c948bdd4a0985880abb0d5cc7c354fdb280ed62f55221c8057a61f"
+    },
+    {
+      "old_id": "winwincode-72t.39",
+      "classification": "REWRITE",
+      "canonical_owner": "winwincode-72t.39",
+      "aligned_er_ids": [
+        "WWC-ER-0204"
+      ],
+      "reason": "自动化只提交幂等 WorkItem 派发意图，复用唯一 Controller outbox",
+      "status_at_audit": "open",
+      "source_record_sha256": "677c797095d6f8239465c543212a174570538c1c5557474d6d6170aaa8cce2d9",
+      "decision_status": "proposed_pending_adr",
+      "original_source_record_sha256": "6f5c2367604a8daa2e0c69103a907363682f98872bbae4f8f7865186bcf95f70"
+    },
+    {
+      "old_id": "winwincode-72t.4",
+      "classification": "KEEP",
+      "canonical_owner": "winwincode-72t.4",
+      "aligned_er_ids": [
+        "WWC-ER-0403"
+      ],
+      "reason": "受管扩展锁版继续由原任务负责，不等同于完整 AgentProfile",
+      "status_at_audit": "in_progress",
+      "source_record_sha256": "9d8cbb11ba269c0cb312685ecd4aa089b9126859798657f15af717a9169f5b89",
+      "decision_status": "recorded_keep",
+      "original_source_record_sha256": "9d8cbb11ba269c0cb312685ecd4aa089b9126859798657f15af717a9169f5b89"
+    },
+    {
+      "old_id": "winwincode-72t.40",
+      "classification": "REWRITE",
+      "canonical_owner": "winwincode-72t.40",
+      "aligned_er_ids": [
+        "WWC-ER-1307"
+      ],
+      "reason": "预览验收门复用，加入新运行绑定与可信验证检查",
+      "status_at_audit": "open",
+      "source_record_sha256": "68f534ebffc81b3d68976496380c8da0858faaf51203930a31e1d2530b1b4d7b",
+      "decision_status": "proposed_pending_adr",
+      "original_source_record_sha256": "68f534ebffc81b3d68976496380c8da0858faaf51203930a31e1d2530b1b4d7b"
+    },
+    {
+      "old_id": "winwincode-72t.41",
+      "classification": "REWRITE",
+      "canonical_owner": "winwincode-72t.41",
+      "aligned_er_ids": [
+        "WWC-ER-0701",
+        "WWC-ER-0702"
+      ],
+      "reason": "已有验证配置任务承接 VerificationPlan 的冻结输入及只读权限增量",
+      "status_at_audit": "open",
+      "source_record_sha256": "e67d020e1caa9be45743df2f3a2dc1fa2426944c550fcdc6d45501d72f87a52c",
+      "decision_status": "proposed_pending_adr",
+      "original_source_record_sha256": "707fb934053ec60f6b837240284633b2479c321a83786d9b6d8fa99374ff1a43"
+    },
+    {
+      "old_id": "winwincode-72t.42",
+      "classification": "KEEP",
+      "canonical_owner": "winwincode-72t.42",
+      "aligned_er_ids": [],
+      "reason": "页面拾取与截图功能保留；只提交批注，不写完成状态",
+      "status_at_audit": "open",
+      "source_record_sha256": "695c9c9fc7ed9a69de4307cc6dd31250a6399febae289b50ffb0b6a7c44faa44",
+      "decision_status": "recorded_keep",
+      "original_source_record_sha256": "695c9c9fc7ed9a69de4307cc6dd31250a6399febae289b50ffb0b6a7c44faa44"
+    },
+    {
+      "old_id": "winwincode-72t.43",
+      "classification": "REWRITE",
+      "canonical_owner": "winwincode-72t.43",
+      "aligned_er_ids": [
+        "WWC-ER-0407"
+      ],
+      "reason": "保留知识工作台，移出团队授权；交接提示与事实分开显示",
+      "status_at_audit": "open",
+      "source_record_sha256": "1a9d18771c96598a49ee2a85c657f9a5aace16bd438fba6b958d0c00fca89c19",
+      "decision_status": "proposed_pending_adr",
+      "original_source_record_sha256": "1a9d18771c96598a49ee2a85c657f9a5aace16bd438fba6b958d0c00fca89c19"
+    },
+    {
+      "old_id": "winwincode-72t.44",
+      "classification": "KEEP",
+      "canonical_owner": "winwincode-72t.44",
+      "aligned_er_ids": [
+        "WWC-ER-1106"
+      ],
+      "reason": "压缩遥测与上下文展示保留，缺失数据保持未知",
+      "status_at_audit": "open",
+      "source_record_sha256": "83166f4475e2a57266f7ecf3db38b34db6129d41a086fdea559cfccbd8e578a6",
+      "decision_status": "recorded_keep",
+      "original_source_record_sha256": "80e66db4bf0f85a81009e60acfb7f391e2a7a99a1a1c125b428d32b668300efc"
+    },
+    {
+      "old_id": "winwincode-72t.45",
+      "classification": "REWRITE",
+      "canonical_owner": "winwincode-72t.45",
+      "aligned_er_ids": [
+        "WWC-ER-0207"
+      ],
+      "reason": "自动化补跑统一使用 Controller 重试预算及副作用回执",
+      "status_at_audit": "open",
+      "source_record_sha256": "75daba237356dc575f94601f9feb780d0e33289a2e8cc91e97c90ef9dca55bcd",
+      "decision_status": "proposed_pending_adr",
+      "original_source_record_sha256": "dfc41bbc714aacbdcc7875cb0c168a7d3e789eee71a1a231814c6bbbe1cd8f66"
+    },
+    {
+      "old_id": "winwincode-72t.46",
+      "classification": "REWRITE",
+      "canonical_owner": "winwincode-72t.46",
+      "aligned_er_ids": [
+        "WWC-ER-0307"
+      ],
+      "reason": "自动化工作台改读 WorkItem/规则回执，不创建另一套任务生命周期",
+      "status_at_audit": "open",
+      "source_record_sha256": "2ac08ece5532ca4cd4d4051bc3ab40477700689cf5f03e538b5b4b93d207a5c3",
+      "decision_status": "proposed_pending_adr",
+      "original_source_record_sha256": "2ac08ece5532ca4cd4d4051bc3ab40477700689cf5f03e538b5b4b93d207a5c3"
+    },
+    {
+      "old_id": "winwincode-72t.47",
+      "classification": "REWRITE",
+      "canonical_owner": "winwincode-72t.47",
+      "aligned_er_ids": [
+        "WWC-ER-1309"
+      ],
+      "reason": "成本指标改按 Agent/Session/WorkItem 聚合，工作计划进度与验收进度分离",
+      "status_at_audit": "open",
+      "source_record_sha256": "58619c189574209e4e2809c8787b3903a30d36f01fabd5dfdd1e31ca22bfd727",
+      "decision_status": "proposed_pending_adr",
+      "original_source_record_sha256": "58619c189574209e4e2809c8787b3903a30d36f01fabd5dfdd1e31ca22bfd727"
+    },
+    {
+      "old_id": "winwincode-72t.48",
+      "classification": "KEEP",
+      "canonical_owner": "winwincode-72t.48",
+      "aligned_er_ids": [
+        "WWC-ER-0306"
+      ],
+      "reason": "六类开发配方仍可复用，留在后续配方扩展计划",
+      "status_at_audit": "open",
+      "source_record_sha256": "297946f34f2c9a3168b7b7058eca4789801b81bfa693cc36caad54642a04b1c2",
+      "decision_status": "recorded_keep",
+      "original_source_record_sha256": "297946f34f2c9a3168b7b7058eca4789801b81bfa693cc36caad54642a04b1c2"
+    },
+    {
+      "old_id": "winwincode-72t.49",
+      "classification": "REWRITE",
+      "canonical_owner": "winwincode-72t.49",
+      "aligned_er_ids": [
+        "WWC-ER-1008"
+      ],
+      "reason": "原验收 UI 承接逐 Criterion 证据与 Verdict，不让 LLM PASS 覆盖机器失败",
+      "status_at_audit": "open",
+      "source_record_sha256": "ad48beac4eac6ec5f178ad055c845c88d1e76f4b53ca16a1ebb2847f4139f4d7",
+      "decision_status": "proposed_pending_adr",
+      "original_source_record_sha256": "1588a644af0902675b0d503c2161611edd044b0fba1253d6508ed5ff9e061eaa"
+    },
+    {
+      "old_id": "winwincode-72t.5",
+      "classification": "REWRITE",
+      "canonical_owner": "winwincode-72t.5",
+      "aligned_er_ids": [
+        "WWC-ER-0801"
+      ],
+      "reason": "预览配置复用，候选需绑定新 WorkItem 与 Contract revision",
+      "status_at_audit": "in_progress",
+      "source_record_sha256": "087a9038ab648b50b4aeea4d5133b34cfe4e002cdba7ddca13c08e6c44f8b4d9",
+      "decision_status": "proposed_pending_adr",
+      "original_source_record_sha256": "087a9038ab648b50b4aeea4d5133b34cfe4e002cdba7ddca13c08e6c44f8b4d9"
+    },
+    {
+      "old_id": "winwincode-72t.50",
+      "classification": "DEFER",
+      "canonical_owner": "winwincode-72t.50",
+      "aligned_er_ids": [],
+      "reason": "外部 CI/PR 导入 UI 后置；本地 Verifier 发布验证不依赖连接器",
+      "status_at_audit": "open",
+      "source_record_sha256": "5c4195ac2202940c144c3ca64fcfd197d0deef17e2c2da3d6d403622ca17a9d8",
+      "decision_status": "proposed_pending_adr",
+      "original_source_record_sha256": "5c4195ac2202940c144c3ca64fcfd197d0deef17e2c2da3d6d403622ca17a9d8"
+    },
+    {
+      "old_id": "winwincode-72t.51",
+      "classification": "REWRITE",
+      "canonical_owner": "winwincode-72t.51",
+      "aligned_er_ids": [
+        "WWC-ER-0103"
+      ],
+      "reason": "批量模板生成独立 WorkItem，复用 Controller 并发而非全局串行阶段",
+      "status_at_audit": "open",
+      "source_record_sha256": "c0e8e9b803e027744dc0584980df7e316adb1faf2008a5ec48ce8a5485c770d5",
+      "decision_status": "proposed_pending_adr",
+      "original_source_record_sha256": "c0e8e9b803e027744dc0584980df7e316adb1faf2008a5ec48ce8a5485c770d5"
+    },
+    {
+      "old_id": "winwincode-72t.52",
+      "classification": "REWRITE",
+      "canonical_owner": "winwincode-72t.52",
+      "aligned_er_ids": [
+        "WWC-ER-0206"
+      ],
+      "reason": "批注返工由确定性 Controller 路由，复用原候选与历史证据",
+      "status_at_audit": "open",
+      "source_record_sha256": "54b182269f0eefdaea6e71b29d82e1827b0ebdfae05af1bc7e019d488bf07f79",
+      "decision_status": "proposed_pending_adr",
+      "original_source_record_sha256": "af822c911df631daf77e11919ed73b0485a997e89f4a0ab000c3fb12fa14e9a9"
+    },
+    {
+      "old_id": "winwincode-72t.53",
+      "classification": "REWRITE",
+      "canonical_owner": "winwincode-72t.53",
+      "aligned_er_ids": [
+        "WWC-ER-1308"
+      ],
+      "reason": "原真实对照保留，改为新职责体系下的任务级可复核指标",
+      "status_at_audit": "open",
+      "source_record_sha256": "f2fa85a8c8fc6ba3b5217cefc042d99bd3c3a0502a050d8bd6faf63e886f8faa",
+      "decision_status": "proposed_pending_adr",
+      "original_source_record_sha256": "f2fa85a8c8fc6ba3b5217cefc042d99bd3c3a0502a050d8bd6faf63e886f8faa"
+    },
+    {
+      "old_id": "winwincode-72t.54",
+      "classification": "REWRITE",
+      "canonical_owner": "winwincode-72t.54",
+      "aligned_er_ids": [
+        "WWC-ER-1307"
+      ],
+      "reason": "批注/验收总门改为 Controller 决定 done/rework 的完整流程",
+      "status_at_audit": "open",
+      "source_record_sha256": "9d015196999080c8000f8316ff4cb439c68954ad386d8c4bca4a029956aa1f2d",
+      "decision_status": "proposed_pending_adr",
+      "original_source_record_sha256": "9d015196999080c8000f8316ff4cb439c68954ad386d8c4bca4a029956aa1f2d"
+    },
+    {
+      "old_id": "winwincode-72t.55",
+      "classification": "KEEP",
+      "canonical_owner": "winwincode-72t.55",
+      "aligned_er_ids": [],
+      "reason": "知识扩展总门保留为后续增强，非新的 Runtime 1.0 硬前置",
+      "status_at_audit": "open",
+      "source_record_sha256": "ebdf3378d8d37faa3d47b3e380db77e922bc176dafcee1f47792d0c19ee50543",
+      "decision_status": "recorded_keep",
+      "original_source_record_sha256": "ebdf3378d8d37faa3d47b3e380db77e922bc176dafcee1f47792d0c19ee50543"
+    },
+    {
+      "old_id": "winwincode-72t.56",
+      "classification": "REWRITE",
+      "canonical_owner": "winwincode-72t.56",
+      "aligned_er_ids": [],
+      "reason": "自动化总门移出外部渠道硬依赖，改读新派发和回执",
+      "status_at_audit": "open",
+      "source_record_sha256": "41faa57f006bbd886b42ad06283c9f7c85a5ebba37d8c1701425650293df29d2",
+      "decision_status": "proposed_pending_adr",
+      "original_source_record_sha256": "41faa57f006bbd886b42ad06283c9f7c85a5ebba37d8c1701425650293df29d2"
+    },
+    {
+      "old_id": "winwincode-72t.57",
+      "classification": "REWRITE",
+      "canonical_owner": "winwincode-72t.57",
+      "aligned_er_ids": [
+        "WWC-ER-0404"
+      ],
+      "reason": "保留个人/仓库配置优先级；团队维护者/审核者授权不纳入 Community",
+      "status_at_audit": "open",
+      "source_record_sha256": "0611d5a4c5b0a7d470dbd652ad288d1cb499434c077b865b64ba5fbd3ad6df29",
+      "decision_status": "proposed_pending_adr",
+      "original_source_record_sha256": "0611d5a4c5b0a7d470dbd652ad288d1cb499434c077b865b64ba5fbd3ad6df29"
+    },
+    {
+      "old_id": "winwincode-72t.58",
+      "classification": "REWRITE",
+      "canonical_owner": "winwincode-72t.58",
+      "aligned_er_ids": [
+        "WWC-ER-1208"
+      ],
+      "reason": "安全矩阵复用，补假 Worker/Verifier/人工授权与旧租约拒绝",
+      "status_at_audit": "open",
+      "source_record_sha256": "e7b2a45f332399001116e84a56f8c0c4ccea9577b4e84075e698b1bd6ebd9f42",
+      "decision_status": "proposed_pending_adr",
+      "original_source_record_sha256": "e69a0b34a2a1b32974bc6ff05b0466903555bb9eb573830f783cb94621b1785a"
+    },
+    {
+      "old_id": "winwincode-72t.59",
+      "classification": "MERGE",
+      "canonical_owner": "winwincode-9gh.3",
+      "aligned_er_ids": [
+        "WWC-ER-1308"
+      ],
+      "reason": "首次使用、设备仓库、统一检索、看板与移动验收范围重复（仅 DSH/Quick 名称不同）。由既有 9gh.3 承接；20+ dogfood 和指标的真实差异另按 1308/1309 审核，不重复创建首次使用验收。",
+      "status_at_audit": "open",
+      "source_record_sha256": "a601a04cd21b91360db37c37c40a071d129f366909d33faf393fc8087f28a8e6",
+      "decision_status": "proposed_pending_adr",
+      "original_source_record_sha256": "5678aaf5d585a9d9db559b8b71533ca7697d2124e965116d1be3605fad4ddcee"
+    },
+    {
+      "old_id": "winwincode-72t.6",
+      "classification": "REWRITE",
+      "canonical_owner": "winwincode-72t.6",
+      "aligned_er_ids": [
+        "WWC-ER-0903"
+      ],
+      "reason": "交互协议保留，Agent 只提交 claim，人工介入由 Controller 路由",
+      "status_at_audit": "in_progress",
+      "source_record_sha256": "7e314f7e6d442d1aef6281eb45ca556da75fd6b3f20d63dbe8856fc192f7804b",
+      "decision_status": "proposed_pending_adr",
+      "original_source_record_sha256": "7e314f7e6d442d1aef6281eb45ca556da75fd6b3f20d63dbe8856fc192f7804b"
+    },
+    {
+      "old_id": "winwincode-72t.60",
+      "classification": "REWRITE",
+      "canonical_owner": "winwincode-72t.60",
+      "aligned_er_ids": [
+        "WWC-ER-1310"
+      ],
+      "reason": "文档改写为唯一新路径；保留升级回滚边界而非长期旧产品兼容层",
+      "status_at_audit": "open",
+      "source_record_sha256": "32d3742c1284afe54d78daebf3d4696a810e41200dd24a096f2407de9818c44a",
+      "decision_status": "proposed_pending_adr",
+      "original_source_record_sha256": "41babd5cd92e1d56598c2bdc00b0ebff79312b0ad85d0ca55e68a974c44959b0"
+    },
+    {
+      "old_id": "winwincode-72t.61",
+      "classification": "REWRITE",
+      "canonical_owner": "winwincode-72t.61",
+      "aligned_er_ids": [
+        "WWC-ER-1307"
+      ],
+      "reason": "扩展发布汇总保留，由新的核心验收口径驱动，先校准再关闭",
+      "status_at_audit": "open",
+      "source_record_sha256": "370f191d04559ed9721b0fe738424938973b2e6089c08d27bb08387618898476",
+      "decision_status": "proposed_pending_adr",
+      "original_source_record_sha256": "370f191d04559ed9721b0fe738424938973b2e6089c08d27bb08387618898476"
+    },
+    {
+      "old_id": "winwincode-72t.7",
+      "classification": "REWRITE",
+      "canonical_owner": "winwincode-72t.7",
+      "aligned_er_ids": [
+        "WWC-ER-0304"
+      ],
+      "reason": "审批投影保留，执行前授权精确绑定操作摘要",
+      "status_at_audit": "in_progress",
+      "source_record_sha256": "8e5bf512f0cf98c0855adce7cf6f04efa647bbbc6d1deef325eb52eca4b70116",
+      "decision_status": "proposed_pending_adr",
+      "original_source_record_sha256": "2e0fe80940d0f89a5dd3e4687b4524981f206cfa306397df643094c4e3ef762e"
+    },
+    {
+      "old_id": "winwincode-72t.8",
+      "classification": "KEEP",
+      "canonical_owner": "winwincode-72t.8",
+      "aligned_er_ids": [
+        "WWC-ER-0704"
+      ],
+      "reason": "已有影响分析查询承接 Verifier 输入，未知覆盖继续保守处理",
+      "status_at_audit": "in_progress",
+      "source_record_sha256": "f5566648d068bd73fa9e90a8669d5d4babd921de9a1819cd273bbcc2c691e0e2",
+      "decision_status": "recorded_keep",
+      "original_source_record_sha256": "a0e499b6aab6df530084b54629d49be1e7cc984440c55c50f980bc4639f94a93"
+    },
+    {
+      "old_id": "winwincode-72t.9",
+      "classification": "REWRITE",
+      "canonical_owner": "winwincode-72t.9",
+      "aligned_er_ids": [
+        "WWC-ER-0905"
+      ],
+      "reason": "通知只消费 Controller Attention 事实，不让通知或 Agent 创建权威状态",
+      "status_at_audit": "in_progress",
+      "source_record_sha256": "3a159bd06e8b215ae67a3ecad3e125a77613bcd6c55580845c382b37f577a810",
+      "decision_status": "proposed_pending_adr",
+      "original_source_record_sha256": "438cdc4df1960c80b79bf21756dad2638a61d52e9df3946e4a57be011f0de43b"
+    },
+    {
+      "old_id": "winwincode-9c4",
+      "classification": "KEEP",
+      "canonical_owner": "winwincode-9c4",
+      "aligned_er_ids": [],
+      "reason": "三仓产品边界总容器继续保留，不视为独立编码任务",
+      "status_at_audit": "open",
+      "source_record_sha256": "310dac008e00b170aa39fc6ff5bd7260e7299ca75b43fc6f9005553aa3b792c3",
+      "decision_status": "recorded_keep",
+      "original_source_record_sha256": "310dac008e00b170aa39fc6ff5bd7260e7299ca75b43fc6f9005553aa3b792c3"
+    },
+    {
+      "old_id": "winwincode-9c4.16",
+      "classification": "REWRITE",
+      "canonical_owner": "winwincode-9c4.16",
+      "aligned_er_ids": [
+        "WWC-ER-0002"
+      ],
+      "reason": "Rust/Web 分工保留，旧阶段协调汇总改为 Controller/Worker/Verifier",
+      "status_at_audit": "open",
+      "source_record_sha256": "53c84731e42bd90d11f4bf349cb0570069136a0c1d6a3cc75c77b94617c56df1",
+      "decision_status": "proposed_pending_adr",
+      "original_source_record_sha256": "53c84731e42bd90d11f4bf349cb0570069136a0c1d6a3cc75c77b94617c56df1"
+    },
+    {
+      "old_id": "winwincode-9gh",
+      "classification": "REWRITE",
+      "canonical_owner": "winwincode-9gh",
+      "aligned_er_ids": [
+        "WWC-ER-1307"
+      ],
+      "reason": "保留安装恢复发布总门，移出多用户共享 Client 和旧产品兼容路径",
+      "status_at_audit": "open",
+      "source_record_sha256": "99328807f1c3a6ee2ead95a590e4ec32268328f7fb8ee1ebb131dbaa4da15be5",
+      "decision_status": "proposed_pending_adr",
+      "original_source_record_sha256": "99328807f1c3a6ee2ead95a590e4ec32268328f7fb8ee1ebb131dbaa4da15be5"
+    },
+    {
+      "old_id": "winwincode-9gh.3",
+      "classification": "REWRITE",
+      "canonical_owner": "winwincode-9gh.3",
+      "aligned_er_ids": [
+        "WWC-ER-1305"
+      ],
+      "reason": "已有首次使用验收继续复用，改按单用户首个 WorkItem 全流程核验",
+      "status_at_audit": "open",
+      "source_record_sha256": "74ef4f7e0cb9a727b93d13cf3f51c9e59bf5383bdf08d1f761ddd5f3c6722c6b",
+      "decision_status": "proposed_pending_adr",
+      "original_source_record_sha256": "74ef4f7e0cb9a727b93d13cf3f51c9e59bf5383bdf08d1f761ddd5f3c6722c6b"
+    },
+    {
+      "old_id": "winwincode-cloud.1",
+      "classification": "KEEP",
+      "canonical_owner": "winwincode-cloud.1",
+      "aligned_er_ids": [],
+      "reason": "保留现有三仓拆分/公共核心任务：[REPO-SPLIT-200.1] 创建 Cloud 仓库并迁移 SaaS 产品源码；不因新运行时计划跳过目标验收和源代码删除许可",
+      "status_at_audit": "open",
+      "source_record_sha256": "91b828e98280f9e72b36acb486b9de29755485292dba02deb218c6a9d47519b4",
+      "decision_status": "recorded_keep",
+      "original_source_record_sha256": "91b828e98280f9e72b36acb486b9de29755485292dba02deb218c6a9d47519b4"
+    },
+    {
+      "old_id": "winwincode-community",
+      "classification": "KEEP",
+      "canonical_owner": "winwincode-community",
+      "aligned_er_ids": [],
+      "reason": "保留现有三仓拆分/公共核心任务：[REPO-SPLIT-100] 将 winwincode 整理为 Community 个人开源仓库；不因新运行时计划跳过目标验收和源代码删除许可",
+      "status_at_audit": "open",
+      "source_record_sha256": "5563c008b3381057a0b7c466c24f0447a899f63e36650f57794b1c9ac8cc0ff4",
+      "decision_status": "recorded_keep",
+      "original_source_record_sha256": "5563c008b3381057a0b7c466c24f0447a899f63e36650f57794b1c9ac8cc0ff4"
+    },
+    {
+      "old_id": "winwincode-community.1",
+      "classification": "KEEP",
+      "canonical_owner": "winwincode-community.1",
+      "aligned_er_ids": [],
+      "reason": "保留现有三仓拆分/公共核心任务：[REPO-SPLIT-100.1] 清理 Community 仓库中的 Cloud 与 Enterprise 产品源码；不因新运行时计划跳过目标验收和源代码删除许可",
+      "status_at_audit": "open",
+      "source_record_sha256": "7ba8340dc3ae31e2f978b781ed3f45e016bdd37be5d37b970656700c1d745ff5",
+      "decision_status": "recorded_keep",
+      "original_source_record_sha256": "7ba8340dc3ae31e2f978b781ed3f45e016bdd37be5d37b970656700c1d745ff5"
+    },
+    {
+      "old_id": "winwincode-community.1.1",
+      "classification": "KEEP",
+      "canonical_owner": "winwincode-community.1.1",
+      "aligned_er_ids": [],
+      "reason": "保留现有三仓拆分/公共核心任务：[REPO-SPLIT-100.1.1] 冻结 Community 裁剪清单与删除许可；不因新运行时计划跳过目标验收和源代码删除许可",
+      "status_at_audit": "open",
+      "source_record_sha256": "0a1074ba70c2d3fce14f2189fcdbd709a377c9a763d8c2b318df630636e18f15",
+      "decision_status": "recorded_keep",
+      "original_source_record_sha256": "0a1074ba70c2d3fce14f2189fcdbd709a377c9a763d8c2b318df630636e18f15"
+    },
+    {
+      "old_id": "winwincode-community.1.2",
+      "classification": "KEEP",
+      "canonical_owner": "winwincode-community.1.2",
+      "aligned_er_ids": [],
+      "reason": "保留现有三仓拆分/公共核心任务：[REPO-SPLIT-100.1.2] 执行 Community 裁剪并做干净检出验收；不因新运行时计划跳过目标验收和源代码删除许可",
+      "status_at_audit": "open",
+      "source_record_sha256": "91c950ec06afbfd9580fd447fd80ee3b9b4e05981457e518f32004c486c9ddbc",
+      "decision_status": "recorded_keep",
+      "original_source_record_sha256": "91c950ec06afbfd9580fd447fd80ee3b9b4e05981457e518f32004c486c9ddbc"
+    },
+    {
+      "old_id": "winwincode-duv",
+      "classification": "REWRITE",
+      "canonical_owner": "winwincode-duv",
+      "aligned_er_ids": [
+        "WWC-ER-0201"
+      ],
+      "reason": "移出多用户占用和强制 Planner 角色，保留个人多会话派发",
+      "status_at_audit": "open",
+      "source_record_sha256": "24dfafc2de32ec173d7b1794389940cfcce37e91947081c76965689096518ea7",
+      "decision_status": "proposed_pending_adr",
+      "original_source_record_sha256": "24dfafc2de32ec173d7b1794389940cfcce37e91947081c76965689096518ea7"
+    },
+    {
+      "old_id": "winwincode-duv.10",
+      "classification": "REWRITE",
+      "canonical_owner": "winwincode-duv.10",
+      "aligned_er_ids": [
+        "WWC-ER-0508"
+      ],
+      "reason": "成功失败重启验收改测自动接手，不能以旧阶段纵向测试代替",
+      "status_at_audit": "open",
+      "source_record_sha256": "f0d373b4242cc482fdd74a720851bc9332e9dee29ae20ff88c3f07f31cb77687",
+      "decision_status": "proposed_pending_adr",
+      "original_source_record_sha256": "f0d373b4242cc482fdd74a720851bc9332e9dee29ae20ff88c3f07f31cb77687"
+    },
+    {
+      "old_id": "winwincode-duv.6",
+      "classification": "REWRITE",
+      "canonical_owner": "winwincode-duv.6",
+      "aligned_er_ids": [
+        "WWC-ER-0401"
+      ],
+      "reason": "去掉规划先于执行的硬阶段要求，保留会话/角色隔离和真实容量",
+      "status_at_audit": "open",
+      "source_record_sha256": "a26c597dccead91b7df263bf4ce21e9cf1008daa5047217048f7fa7d0b407e5d",
+      "decision_status": "proposed_pending_adr",
+      "original_source_record_sha256": "a26c597dccead91b7df263bf4ce21e9cf1008daa5047217048f7fa7d0b407e5d"
+    },
+    {
+      "old_id": "winwincode-duv.7",
+      "classification": "REWRITE",
+      "canonical_owner": "winwincode-duv.7",
+      "aligned_er_ids": [
+        "WWC-ER-0202"
+      ],
+      "reason": "原取消/替换/重试任务继续拥有新 WorkItem 的旧租约拒绝增量",
+      "status_at_audit": "open",
+      "source_record_sha256": "15deeebf71d41d546ef9cc6a213dc70a2afce903d7a58aa784ede905d8fb3f2a",
+      "decision_status": "proposed_pending_adr",
+      "original_source_record_sha256": "65cdf50b8998d3facbd3cb94eab8ab84d0e9f8682c0f1af19748e442962a0ea2"
+    },
+    {
+      "old_id": "winwincode-duv.8",
+      "classification": "REWRITE",
+      "canonical_owner": "winwincode-duv.8",
+      "aligned_er_ids": [
+        "WWC-ER-0203"
+      ],
+      "reason": "保留公平排队和容量保护，调度对象统一 WorkItem，等待人工释放槽位",
+      "status_at_audit": "open",
+      "source_record_sha256": "562a4b5dec8cdea2f5438a2efc2691f9b34c4f9b391b4cd410e6453d8e029e6f",
+      "decision_status": "proposed_pending_adr",
+      "original_source_record_sha256": "3b2d823cc74a2cb694357abaf8f7f827468139125f2050744095dfae3a3fde2d"
+    },
+    {
+      "old_id": "winwincode-duv.9",
+      "classification": "REWRITE",
+      "canonical_owner": "winwincode-duv.9",
+      "aligned_er_ids": [
+        "WWC-ER-1003"
+      ],
+      "reason": "运行页改为 WorkItem/ExecutionAttempt 唯一投影",
+      "status_at_audit": "open",
+      "source_record_sha256": "1bc8cfbf789c835c2115ba85616f2f88dae8226af7505eac2595ceeb5a92a0f4",
+      "decision_status": "proposed_pending_adr",
+      "original_source_record_sha256": "1bc8cfbf789c835c2115ba85616f2f88dae8226af7505eac2595ceeb5a92a0f4"
+    },
+    {
+      "old_id": "winwincode-edition",
+      "classification": "KEEP",
+      "canonical_owner": "winwincode-edition",
+      "aligned_er_ids": [],
+      "reason": "保留现有三仓拆分/公共核心任务：[REPO-SPLIT-000] 将 WinWinCode 拆成三个产品仓库；不因新运行时计划跳过目标验收和源代码删除许可",
+      "status_at_audit": "open",
+      "source_record_sha256": "8141cc331252e14fa57193b9be601818fcab303fd59be6c8e820c080a66bd1d5",
+      "decision_status": "recorded_keep",
+      "original_source_record_sha256": "8141cc331252e14fa57193b9be601818fcab303fd59be6c8e820c080a66bd1d5"
+    },
+    {
+      "old_id": "winwincode-edition.2",
+      "classification": "KEEP",
+      "canonical_owner": "winwincode-edition.2",
+      "aligned_er_ids": [],
+      "reason": "保留现有三仓拆分/公共核心任务：[REPO-SPLIT-000.2] 冻结并发布第一版 Community core；不因新运行时计划跳过目标验收和源代码删除许可",
+      "status_at_audit": "in_progress",
+      "source_record_sha256": "7d564729ddbbe45ba2748dd1dd623644a88b608a8964b5829c35e0238d4f2071",
+      "decision_status": "recorded_keep",
+      "original_source_record_sha256": "7d564729ddbbe45ba2748dd1dd623644a88b608a8964b5829c35e0238d4f2071"
+    },
+    {
+      "old_id": "winwincode-edition.2.1",
+      "classification": "KEEP",
+      "canonical_owner": "winwincode-edition.2.1",
+      "aligned_er_ids": [],
+      "reason": "保留现有三仓拆分/公共核心任务：[REPO-SPLIT-000.2.1] 拆分公共与产品专属 schema 和生成代码；不因新运行时计划跳过目标验收和源代码删除许可",
+      "status_at_audit": "in_progress",
+      "source_record_sha256": "255fc4523e7146c9b750a5a5f86bdea89f56b83c11379176d7e298b3d9eb8c00",
+      "decision_status": "recorded_keep",
+      "original_source_record_sha256": "255fc4523e7146c9b750a5a5f86bdea89f56b83c11379176d7e298b3d9eb8c00"
+    },
+    {
+      "old_id": "winwincode-edition.2.2",
+      "classification": "KEEP",
+      "canonical_owner": "winwincode-edition.2.2",
+      "aligned_er_ids": [],
+      "reason": "保留现有三仓拆分/公共核心任务：[REPO-SPLIT-000.2.2] 拆分 Community、Cloud 与 Enterprise Web application；不因新运行时计划跳过目标验收和源代码删除许可",
+      "status_at_audit": "blocked",
+      "source_record_sha256": "e689834637ca98d18d9a4551288259fe7455c93ff36aed9e93345229c56db01c",
+      "decision_status": "recorded_keep",
+      "original_source_record_sha256": "e689834637ca98d18d9a4551288259fe7455c93ff36aed9e93345229c56db01c"
+    },
+    {
+      "old_id": "winwincode-edition.2.3",
+      "classification": "KEEP",
+      "canonical_owner": "winwincode-edition.2.3",
+      "aligned_er_ids": [],
+      "reason": "保留现有三仓拆分/公共核心任务：[REPO-SPLIT-000.2.3] 拆分 Control Plane、Storage 与 Server 产品模块；不因新运行时计划跳过目标验收和源代码删除许可",
+      "status_at_audit": "in_progress",
+      "source_record_sha256": "2dbf029c4effbe6302acf87558558667e4f2f94fe5e37c07dc386fa1c335d9c1",
+      "decision_status": "recorded_keep",
+      "original_source_record_sha256": "2dbf029c4effbe6302acf87558558667e4f2f94fe5e37c07dc386fa1c335d9c1"
+    },
+    {
+      "old_id": "winwincode-edition.2.3.2",
+      "classification": "KEEP",
+      "canonical_owner": "winwincode-edition.2.3.2",
+      "aligned_er_ids": [],
+      "reason": "保留现有三仓拆分/公共核心任务：[REPO-SPLIT-000.2.3.2] 迁出 Storage 的 Enterprise policy/quota/usage 持久化模块；不因新运行时计划跳过目标验收和源代码删除许可",
+      "status_at_audit": "open",
+      "source_record_sha256": "1d906c7a16fdd694b98c5598d3b80dccda4abea420822e8d5e157cc2bdff22a7",
+      "decision_status": "recorded_keep",
+      "original_source_record_sha256": "1d906c7a16fdd694b98c5598d3b80dccda4abea420822e8d5e157cc2bdff22a7"
+    },
+    {
+      "old_id": "winwincode-edition.2.3.3",
+      "classification": "KEEP",
+      "canonical_owner": "winwincode-edition.2.3.3",
+      "aligned_er_ids": [],
+      "reason": "保留现有三仓拆分/公共核心任务：[REPO-SPLIT-000.2.3.3] 迁出 Control Plane 的 Enterprise 产品组合模块；不因新运行时计划跳过目标验收和源代码删除许可",
+      "status_at_audit": "blocked",
+      "source_record_sha256": "4a0a24755ea24638ce9c885ae38d8d282fbf596e59f6c5e0aa5f2e0ebb169c83",
+      "decision_status": "recorded_keep",
+      "original_source_record_sha256": "4a0a24755ea24638ce9c885ae38d8d282fbf596e59f6c5e0aa5f2e0ebb169c83"
+    },
+    {
+      "old_id": "winwincode-edition.2.3.4",
+      "classification": "KEEP",
+      "canonical_owner": "winwincode-edition.2.3.4",
+      "aligned_er_ids": [],
+      "reason": "保留现有三仓拆分/公共核心任务：[REPO-SPLIT-000.2.3.4] 迁出 Server 的 Enterprise identity 与 management 组合；不因新运行时计划跳过目标验收和源代码删除许可",
+      "status_at_audit": "blocked",
+      "source_record_sha256": "788af07b33157946c74d1e3b32c282db30f06682851cb80edb12ad253dd78ca7",
+      "decision_status": "recorded_keep",
+      "original_source_record_sha256": "788af07b33157946c74d1e3b32c282db30f06682851cb80edb12ad253dd78ca7"
+    },
+    {
+      "old_id": "winwincode-edition.2.3.5",
+      "classification": "KEEP",
+      "canonical_owner": "winwincode-edition.2.3.5",
+      "aligned_er_ids": [],
+      "reason": "保留现有三仓拆分/公共核心任务：[REPO-SPLIT-000.2.3.5] 固化 Community core 产品模块导出门禁；不因新运行时计划跳过目标验收和源代码删除许可",
+      "status_at_audit": "open",
+      "source_record_sha256": "8f889270fe0d7bb79a26a2317b2df51921f6a386ad140c970044aee89f7036c3",
+      "decision_status": "recorded_keep",
+      "original_source_record_sha256": "8f889270fe0d7bb79a26a2317b2df51921f6a386ad140c970044aee89f7036c3"
+    },
+    {
+      "old_id": "winwincode-edition.2.4",
+      "classification": "KEEP",
+      "canonical_owner": "winwincode-edition.2.4",
+      "aligned_er_ids": [],
+      "reason": "保留现有三仓拆分/公共核心任务：[REPO-SPLIT-000.2.4] 确定 PostgreSQL、对象存储、可观测性与集成框架的跨仓所有权；不因新运行时计划跳过目标验收和源代码删除许可",
+      "status_at_audit": "in_progress",
+      "source_record_sha256": "cd8d4d0c09411e1696066a660a5eded0681fa7324aaea64e408e725eb23e024c",
+      "decision_status": "recorded_keep",
+      "original_source_record_sha256": "cd8d4d0c09411e1696066a660a5eded0681fa7324aaea64e408e725eb23e024c"
+    },
+    {
+      "old_id": "winwincode-edition.2.4.1",
+      "classification": "KEEP",
+      "canonical_owner": "winwincode-edition.2.4.1",
+      "aligned_er_ids": [],
+      "reason": "保留现有三仓拆分/公共核心任务：[REPO-SPLIT-000.2.4.1] 发布数据库中立持久化接口并冻结产品数据库边界；不因新运行时计划跳过目标验收和源代码删除许可",
+      "status_at_audit": "open",
+      "source_record_sha256": "e53280b20f4195eea9dd2060a667fe39a568ae2237dc97fe3b85fe133375139d",
+      "decision_status": "recorded_keep",
+      "original_source_record_sha256": "e53280b20f4195eea9dd2060a667fe39a568ae2237dc97fe3b85fe133375139d"
+    },
+    {
+      "old_id": "winwincode-edition.2.4.1.3",
+      "classification": "KEEP",
+      "canonical_owner": "winwincode-edition.2.4.1.3",
+      "aligned_er_ids": [],
+      "reason": "保留现有三仓拆分/公共核心任务：[PERSISTENCE-BOUNDARY-030] 验收 Community 与产品数据库最终发布边界；不因新运行时计划跳过目标验收和源代码删除许可",
+      "status_at_audit": "open",
+      "source_record_sha256": "be62a50f778408aeca84c28170dddabee2e16e723b71adc43c38828c11f5a8b0",
+      "decision_status": "recorded_keep",
+      "original_source_record_sha256": "be62a50f778408aeca84c28170dddabee2e16e723b71adc43c38828c11f5a8b0"
+    },
+    {
+      "old_id": "winwincode-edition.2.4.2",
+      "classification": "KEEP",
+      "canonical_owner": "winwincode-edition.2.4.2",
+      "aligned_er_ids": [],
+      "reason": "保留现有三仓拆分/公共核心任务：[REPO-SPLIT-000.2.4.2] 拆出中立 S3 Artifact adapter 与部署配置；不因新运行时计划跳过目标验收和源代码删除许可",
+      "status_at_audit": "open",
+      "source_record_sha256": "807b3d6ebbdb85d12b5753e09fcc629383da071709148e826a9fe34c93362d64",
+      "decision_status": "recorded_keep",
+      "original_source_record_sha256": "807b3d6ebbdb85d12b5753e09fcc629383da071709148e826a9fe34c93362d64"
+    },
+    {
+      "old_id": "winwincode-edition.2.4.4",
+      "classification": "KEEP",
+      "canonical_owner": "winwincode-edition.2.4.4",
+      "aligned_er_ids": [],
+      "reason": "保留现有三仓拆分/公共核心任务：[REPO-SPLIT-000.2.4.4] 拆分 Integration core、provider adapters 与 SQLite store；不因新运行时计划跳过目标验收和源代码删除许可",
+      "status_at_audit": "open",
+      "source_record_sha256": "88e27d4ca608d135a1f75acda344b9564ffeef56ec154103580cf2b8fd90eda4",
+      "decision_status": "recorded_keep",
+      "original_source_record_sha256": "88e27d4ca608d135a1f75acda344b9564ffeef56ec154103580cf2b8fd90eda4"
+    },
+    {
+      "old_id": "winwincode-edition.2.4.5",
+      "classification": "KEEP",
+      "canonical_owner": "winwincode-edition.2.4.5",
+      "aligned_er_ids": [],
+      "reason": "保留现有三仓拆分/公共核心任务：[REPO-SPLIT-000.2.4.5] 发布数据库中立 infrastructure core 与锁文件合同；不因新运行时计划跳过目标验收和源代码删除许可",
+      "status_at_audit": "open",
+      "source_record_sha256": "2f03be9a2e75ec457215bb3854be7f05aa45bd107f1a380dbdd3dba92696acc6",
+      "decision_status": "recorded_keep",
+      "original_source_record_sha256": "2f03be9a2e75ec457215bb3854be7f05aa45bd107f1a380dbdd3dba92696acc6"
+    },
+    {
+      "old_id": "winwincode-edition.2.5",
+      "classification": "KEEP",
+      "canonical_owner": "winwincode-edition.2.5",
+      "aligned_er_ids": [],
+      "reason": "保留现有三仓拆分/公共核心任务：[REPO-SPLIT-000.2.5] 拆分三个仓库的构建、版本与发布脚本；不因新运行时计划跳过目标验收和源代码删除许可",
+      "status_at_audit": "open",
+      "source_record_sha256": "4a9b59f9188285c7ce648cc5ebc061c28089cb859f18d958c0f47b46adbe9a69",
+      "decision_status": "recorded_keep",
+      "original_source_record_sha256": "4a9b59f9188285c7ce648cc5ebc061c28089cb859f18d958c0f47b46adbe9a69"
+    },
+    {
+      "old_id": "winwincode-edition.2.6",
+      "classification": "KEEP",
+      "canonical_owner": "winwincode-edition.2.6",
+      "aligned_er_ids": [],
+      "reason": "保留现有三仓拆分/公共核心任务：[REPO-SPLIT-000.2.6] 按三仓边界重建 API coverage 清单与测试；不因新运行时计划跳过目标验收和源代码删除许可",
+      "status_at_audit": "open",
+      "source_record_sha256": "968f856319f217b9614a41e249a108df1f4a7046be6f89e40959094b6f4f65e0",
+      "decision_status": "recorded_keep",
+      "original_source_record_sha256": "968f856319f217b9614a41e249a108df1f4a7046be6f89e40959094b6f4f65e0"
+    },
+    {
+      "old_id": "winwincode-edition.2.7",
+      "classification": "KEEP",
+      "canonical_owner": "winwincode-edition.2.7",
+      "aligned_er_ids": [],
+      "reason": "保留现有三仓拆分/公共核心任务：[REPO-SPLIT-000.2.7] 切断 Community 对 Enterprise 管理合同的生成与消费；不因新运行时计划跳过目标验收和源代码删除许可",
+      "status_at_audit": "open",
+      "source_record_sha256": "1c0f7b2ede21b431cc3e54c6a23b4b2b8ddcc778a40e7d3995efd5dcbbbc89a3",
+      "decision_status": "recorded_keep",
+      "original_source_record_sha256": "1c0f7b2ede21b431cc3e54c6a23b4b2b8ddcc778a40e7d3995efd5dcbbbc89a3"
+    },
+    {
+      "old_id": "winwincode-edition.3",
+      "classification": "KEEP",
+      "canonical_owner": "winwincode-edition.3",
+      "aligned_er_ids": [],
+      "reason": "保留现有三仓拆分/公共核心任务：[REPO-SPLIT-000.3] 建立跨仓核心版本锁与协议验收；不因新运行时计划跳过目标验收和源代码删除许可",
+      "status_at_audit": "open",
+      "source_record_sha256": "cc798c125077020835c1411de74b6d4ca7a8a644a0d6e61588689c2d85c090cd",
+      "decision_status": "recorded_keep",
+      "original_source_record_sha256": "cc798c125077020835c1411de74b6d4ca7a8a644a0d6e61588689c2d85c090cd"
+    },
+    {
+      "old_id": "winwincode-edition.4",
+      "classification": "KEEP",
+      "canonical_owner": "winwincode-edition.4",
+      "aligned_er_ids": [],
+      "reason": "保留现有三仓拆分/公共核心任务：[REPO-SPLIT-000.4] 建立三仓库独立 CI、安装与发布门；不因新运行时计划跳过目标验收和源代码删除许可",
+      "status_at_audit": "open",
+      "source_record_sha256": "2b31ea356e2e4e6f8e8ca235c268a4b339c9452a370347d71cc3011189336320",
+      "decision_status": "recorded_keep",
+      "original_source_record_sha256": "2b31ea356e2e4e6f8e8ca235c268a4b339c9452a370347d71cc3011189336320"
+    },
+    {
+      "old_id": "winwincode-f02.1",
+      "classification": "KEEP",
+      "canonical_owner": "winwincode-f02.1",
+      "aligned_er_ids": [
+        "WWC-ER-1307"
+      ],
+      "reason": "工具链检查仍需完成，非新运行时重构实现任务",
+      "status_at_audit": "in_progress",
+      "source_record_sha256": "aa85a54c4ef30ca02119232509e9376ca32d4cc34ff208dcbb99f838d1ab839b",
+      "decision_status": "recorded_keep",
+      "original_source_record_sha256": "aa85a54c4ef30ca02119232509e9376ca32d4cc34ff208dcbb99f838d1ab839b"
+    },
+    {
+      "old_id": "winwincode-huw",
+      "classification": "KEEP",
+      "canonical_owner": "winwincode-huw",
+      "aligned_er_ids": [],
+      "reason": "跨仓集成协调继续保留，目标 PostgreSQL 接收验证仍是删除前置",
+      "status_at_audit": "in_progress",
+      "source_record_sha256": "591a7309dda84cd542d08ea20e94eb8d998b8bd0f3c7280fa3b6406152b0cc39",
+      "decision_status": "recorded_keep",
+      "original_source_record_sha256": "591a7309dda84cd542d08ea20e94eb8d998b8bd0f3c7280fa3b6406152b0cc39"
+    },
+    {
+      "old_id": "winwincode-private.1",
+      "classification": "KEEP",
+      "canonical_owner": "winwincode-private.1",
+      "aligned_er_ids": [],
+      "reason": "保留现有三仓拆分/公共核心任务：[REPO-SPLIT-300.1] 创建 Enterprise 仓库并迁移私有化产品源码；不因新运行时计划跳过目标验收和源代码删除许可",
+      "status_at_audit": "open",
+      "source_record_sha256": "59553bff736c3a81555c55d9a9ab8e9ce4bb4afd3a219860821a64ec0a0683ea",
+      "decision_status": "recorded_keep",
+      "original_source_record_sha256": "59553bff736c3a81555c55d9a9ab8e9ce4bb4afd3a219860821a64ec0a0683ea"
+    },
+    {
+      "old_id": "winwincode-qv1",
+      "classification": "KEEP",
+      "canonical_owner": "winwincode-qv1",
+      "aligned_er_ids": [
+        "WWC-ER-0406"
+      ],
+      "reason": "事件委托及 DebugProbe 属 Worker 内部执行机制，不是产品顶级状态机",
+      "status_at_audit": "open",
+      "source_record_sha256": "89071d74821f1344cc4cb4488e6b51bb1d28c237905a78d01b01551261e356ae",
+      "decision_status": "recorded_keep",
+      "original_source_record_sha256": "89071d74821f1344cc4cb4488e6b51bb1d28c237905a78d01b01551261e356ae"
+    },
+    {
+      "old_id": "winwincode-qv1.1",
+      "classification": "KEEP",
+      "canonical_owner": "winwincode-qv1.1",
+      "aligned_er_ids": [
+        "WWC-ER-0406"
+      ],
+      "reason": "ChangeBatch 汇总保留，不再创建同目标批量执行任务",
+      "status_at_audit": "open",
+      "source_record_sha256": "a991edd2eecced2d3494ac75c11c8f41cf8fec24b276341a79844531da6334ea",
+      "decision_status": "recorded_keep",
+      "original_source_record_sha256": "a991edd2eecced2d3494ac75c11c8f41cf8fec24b276341a79844531da6334ea"
+    },
+    {
+      "old_id": "winwincode-qv1.1.10",
+      "classification": "KEEP",
+      "canonical_owner": "winwincode-qv1.1.10",
+      "aligned_er_ids": [
+        "WWC-ER-0406"
+      ],
+      "reason": "终止式批量工具属于嵌入 Codex Core 工具边界，保留在途实现",
+      "status_at_audit": "in_progress",
+      "source_record_sha256": "f97106362440744a0a0c2fa809343a95fdc363e9686b9c435866c2f5ef360f6e",
+      "decision_status": "recorded_keep",
+      "original_source_record_sha256": "201934e0cc9bf31e9e9090364a9fc533f2d6948b1442de00007cf04fc63cd4cb"
+    },
+    {
+      "old_id": "winwincode-qv1.2",
+      "classification": "KEEP",
+      "canonical_owner": "winwincode-qv1.2",
+      "aligned_er_ids": [
+        "WWC-ER-0406"
+      ],
+      "reason": "DebugProbe 内部探索能力保留，不替代独立 Verifier",
+      "status_at_audit": "open",
+      "source_record_sha256": "59e48789b0ae63b5843ee96ef15b4cb7cb290798513373d721d8429aaac89b9b",
+      "decision_status": "recorded_keep",
+      "original_source_record_sha256": "59e48789b0ae63b5843ee96ef15b4cb7cb290798513373d721d8429aaac89b9b"
+    },
+    {
+      "old_id": "winwincode-qv1.2.10",
+      "classification": "KEEP",
+      "canonical_owner": "winwincode-qv1.2.10",
+      "aligned_er_ids": [
+        "WWC-ER-0406"
+      ],
+      "reason": "真实 DebugProbe A/B 与故障验证继续复用，未验收不标 DONE",
+      "status_at_audit": "in_progress",
+      "source_record_sha256": "c218290cc10b22f6adb012d9c34f86b50f38e85919b67efd2e0a94c739a8f2f5",
+      "decision_status": "recorded_keep",
+      "original_source_record_sha256": "c218290cc10b22f6adb012d9c34f86b50f38e85919b67efd2e0a94c739a8f2f5"
+    },
+    {
+      "old_id": "winwincode-qv1.2.5",
+      "classification": "KEEP",
+      "canonical_owner": "winwincode-qv1.2.5",
+      "aligned_er_ids": [
+        "WWC-ER-0406"
+      ],
+      "reason": "精确版本绑定的 Probe Cache 在新 Worker 内仍有效",
+      "status_at_audit": "in_progress",
+      "source_record_sha256": "bb647014416f04bb62e5f51c92650591872f27bd1376b351730b611b8369eba4",
+      "decision_status": "recorded_keep",
+      "original_source_record_sha256": "bb647014416f04bb62e5f51c92650591872f27bd1376b351730b611b8369eba4"
+    },
+    {
+      "old_id": "winwincode-qv1.2.8",
+      "classification": "KEEP",
+      "canonical_owner": "winwincode-qv1.2.8",
+      "aligned_er_ids": [
+        "WWC-ER-0406"
+      ],
+      "reason": "Warm Worker 与有限提前停止仍由既有任务负责，不能删安全清理",
+      "status_at_audit": "in_progress",
+      "source_record_sha256": "dcb2bcceeed3bec5f13748377f68aa112ebcec87402b5921d9aafea4ee7125d1",
+      "decision_status": "recorded_keep",
+      "original_source_record_sha256": "dcb2bcceeed3bec5f13748377f68aa112ebcec87402b5921d9aafea4ee7125d1"
+    },
+    {
+      "old_id": "winwincode-qv1.2.9",
+      "classification": "KEEP",
+      "canonical_owner": "winwincode-qv1.2.9",
+      "aligned_er_ids": [
+        "WWC-ER-0406"
+      ],
+      "reason": "ReAct/DebugProbe/DelegatedBatch 是内部模式，不是要淘汰的产品三阶段",
+      "status_at_audit": "in_progress",
+      "source_record_sha256": "f0cd8ccd6dc09908301baee100043f23b3e89921ec38b06ac076911ccd234196",
+      "decision_status": "recorded_keep",
+      "original_source_record_sha256": "f0cd8ccd6dc09908301baee100043f23b3e89921ec38b06ac076911ccd234196"
+    },
+    {
+      "old_id": "winwincode-qv1.3",
+      "classification": "KEEP",
+      "canonical_owner": "winwincode-qv1.3",
+      "aligned_er_ids": [
+        "WWC-ER-0406"
+      ],
+      "reason": "内部三种执行模式评测保留；与旧 planning/executing/verifying 三阶段不同",
+      "status_at_audit": "open",
+      "source_record_sha256": "7a8cd4b1274330da6d513fdf3c76de9bbdce3a0d999b8035ae997080f6609e23",
+      "decision_status": "recorded_keep",
+      "original_source_record_sha256": "7a8cd4b1274330da6d513fdf3c76de9bbdce3a0d999b8035ae997080f6609e23"
+    },
+    {
+      "old_id": "winwincode-qv1.3.2",
+      "classification": "KEEP",
+      "canonical_owner": "winwincode-qv1.3.2",
+      "aligned_er_ids": [
+        "WWC-ER-0406"
+      ],
+      "reason": "内部模式分阶段启用不构成旧产品兼容状态机，保留既有 owner",
+      "status_at_audit": "in_progress",
+      "source_record_sha256": "50fa664a2748e9b88e763277380344e2b2f09ccf4f2a8f5ea9418b9f96f3a289",
+      "decision_status": "recorded_keep",
+      "original_source_record_sha256": "50fa664a2748e9b88e763277380344e2b2f09ccf4f2a8f5ea9418b9f96f3a289"
+    },
+    {
+      "old_id": "winwincode-qv1.3.3",
+      "classification": "REWRITE",
+      "canonical_owner": "winwincode-qv1.3.3",
+      "aligned_er_ids": [
+        "WWC-ER-1307"
+      ],
+      "reason": "既有三模式最终验收补新 WorkItem 完成权威检查；保留内部模式安全门",
+      "status_at_audit": "in_progress",
+      "source_record_sha256": "f895cac3582a1b6a08fe1cd41472227bba7a559a923555956dcb9c5d1e41c28f",
+      "decision_status": "proposed_pending_adr",
+      "original_source_record_sha256": "c6fd919fa898ebd4666935ebf737223edb80724e55798bfed7d0bc84537e164a"
+    }
+  ],
+  "duplicate_scope_groups": [
+    {
+      "source": "winwincode-72t.33",
+      "target": "winwincode-72t.1",
+      "resolution": "MERGE_PROPOSED"
+    },
+    {
+      "source": "winwincode-72t.59",
+      "target": "winwincode-9gh.3",
+      "resolution": "MERGE_PROPOSED"
+    }
+  ],
+  "new_bead_prerequisites": {
+    "WWC-ER-0002": "WWC-ER-0001",
+    "WWC-ER-0003": "WWC-ER-0002",
+    "WWC-ER-0004": "WWC-ER-0002"
+  },
+  "mapping_semantics": "mapping/counts保留初次旧任务审计建议；original_source_record_sha256保留初次证据，source_record_sha256为本轮改写后的实际内容。文档稳定项的最终唯一实施归属以task_plan为准，不把旧建议或关联项算成另一实施owner。",
+  "task_plan": {
+    "tracking_bead": "winwincode-ds4",
+    "source_count": 111,
+    "canonical_bead_count": 104,
+    "counts": {
+      "REUSE": 4,
+      "CREATE": 79,
+      "REWRITE": 28
+    },
+    "scope": "逐项任务落实，不是产品功能实施完成。REWRITE保留21个旧task的ID/负责人/状态，承接28个文档稳定项；依赖范围展开，发布门排除自身。同任务内部依赖明确为验收顺序。",
+    "entries": [
+      {
+        "stable_id": "WWC-ER-0001",
+        "title": "审计现有任务并建立 Engineering Runtime 迁移映射",
+        "bead_id": "winwincode-dwz",
+        "action": "REUSE",
+        "reason": "复用本轮已实施验收并关闭的E00任务，不重复建项。",
+        "depends_on": [],
+        "internal_dependencies": [],
+        "related": []
+      },
+      {
+        "stable_id": "WWC-ER-0002",
+        "title": "冻结 Controller / Worker / Verifier 职责与迁移 ADR",
+        "bead_id": "winwincode-hrw",
+        "action": "REUSE",
+        "reason": "复用本轮已实施验收并关闭的E00任务，不重复建项。",
+        "depends_on": [
+          "WWC-ER-0001"
+        ],
+        "internal_dependencies": [],
+        "related": []
+      },
+      {
+        "stable_id": "WWC-ER-0003",
+        "title": "删除未使用的 StageRun 到 WorkRun 迁移子系统",
+        "bead_id": "winwincode-0kt",
+        "action": "REUSE",
+        "reason": "复用既有任务删除首个 alpha 不需要的转换程序、迁移数据库和专用测试；直接使用唯一 WorkRun 路径。",
+        "depends_on": [
+          "WWC-ER-0002"
+        ],
+        "internal_dependencies": [],
+        "related": []
+      },
+      {
+        "stable_id": "WWC-ER-0004",
+        "title": "按新职责统一 WorkContract / WorkItem / WorkRun 数据结构及生成代码",
+        "bead_id": "winwincode-8xk",
+        "action": "REUSE",
+        "reason": "复用本轮已实施验收并关闭的E00任务，不重复建项。",
+        "depends_on": [
+          "WWC-ER-0002"
+        ],
+        "internal_dependencies": [],
+        "related": []
+      },
+      {
+        "stable_id": "WWC-ER-0005",
+        "title": "把 StrongFlow 页面和 API 一次迁移到 WorkRun 唯一投影",
+        "bead_id": "winwincode-er0005",
+        "action": "CREATE",
+        "reason": "旧任务未独立承接WorkRun单路径页面迁移与全局三阶段硬依赖删除；按Accepted ADR补建上线切换增量。",
+        "depends_on": [
+          "WWC-ER-0003",
+          "WWC-ER-0004"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-duv.9",
+          "winwincode-0kt",
+          "winwincode-8xk"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-0006",
+        "title": "删除/冻结新代码对旧三阶段状态的硬依赖",
+        "bead_id": "winwincode-er0006",
+        "action": "CREATE",
+        "reason": "旧任务未独立承接WorkRun单路径页面迁移与全局三阶段硬依赖删除；按Accepted ADR补建上线切换增量。",
+        "depends_on": [
+          "WWC-ER-0003",
+          "WWC-ER-0004"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-duv.9",
+          "winwincode-0kt",
+          "winwincode-8xk"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-0101",
+        "title": "WorkContract 领域模型",
+        "bead_id": "winwincode-72t.13",
+        "action": "REWRITE",
+        "reason": "现有 Spec/条件修订只覆盖交互草稿；需改为不可变 WorkContract revision，并保留模板实例化的关联。",
+        "depends_on": [
+          "WWC-ER-0004"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-72t.13",
+          "winwincode-72t.24"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-0102",
+        "title": "AcceptanceCriterion 可验证契约",
+        "bead_id": "winwincode-er0102",
+        "action": "CREATE",
+        "reason": "没有未关闭任务同时覆盖 evidence class、四态结果及禁止 LLM 自述作为 machine evidence。",
+        "depends_on": [
+          "WWC-ER-0101"
+        ],
+        "internal_dependencies": [],
+        "related": []
+      },
+      {
+        "stable_id": "WWC-ER-0103",
+        "title": "WorkItem 领域状态机",
+        "bead_id": "winwincode-er0103",
+        "action": "CREATE",
+        "reason": "现有批量模板任务没有 Controller-only WorkItem 状态机或非法跳转测试；沿旧任务 owner 改写。",
+        "depends_on": [
+          "WWC-ER-0101"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-72t.51"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-0104",
+        "title": "WorkDependency DAG",
+        "bead_id": "winwincode-er0104",
+        "action": "CREATE",
+        "reason": "未关闭映射没有 DAG 自依赖、循环、解锁和回滚阻塞的完整验收。",
+        "depends_on": [
+          "WWC-ER-0103"
+        ],
+        "internal_dependencies": [],
+        "related": []
+      },
+      {
+        "stable_id": "WWC-ER-0105",
+        "title": "动态 Working Plan 投影",
+        "bead_id": "winwincode-er0105",
+        "action": "CREATE",
+        "reason": "未发现可承接动态 Working Plan 投影且明确不参与完成判定的未关闭叶子任务。",
+        "depends_on": [
+          "WWC-ER-0103"
+        ],
+        "internal_dependencies": [],
+        "related": []
+      },
+      {
+        "stable_id": "WWC-ER-0106",
+        "title": "Contract Revision / Change Request",
+        "bead_id": "winwincode-72t.13",
+        "action": "REWRITE",
+        "reason": "条件修订任务可承接 change request，但必须补 Worker 无权改 AC、revision 后证据过期/重评估。",
+        "depends_on": [
+          "WWC-ER-0101"
+        ],
+        "internal_dependencies": [
+          "WWC-ER-0101"
+        ],
+        "related": [
+          "winwincode-72t.13"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-0107",
+        "title": "Work Graph Query Projection",
+        "bead_id": "winwincode-er0107",
+        "action": "CREATE",
+        "reason": "未发现同时覆盖 ready/running/blocked/done、blocker/dependency 查询且不建第二状态的任务。",
+        "depends_on": [
+          "WWC-ER-0103",
+          "WWC-ER-0104"
+        ],
+        "internal_dependencies": [],
+        "related": []
+      },
+      {
+        "stable_id": "WWC-ER-0201",
+        "title": "Controller command authority 收口",
+        "bead_id": "winwincode-er0201",
+        "action": "CREATE",
+        "reason": "现有主链 epic 覆盖调度接线，但未冻结 Controller 对 WorkItem/Blocker/Attention/Verdict 的唯一写权。",
+        "depends_on": [
+          "WWC-ER-0002"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-duv"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-0202",
+        "title": "Work Reservation / Lease",
+        "bead_id": "winwincode-duv.7",
+        "action": "REWRITE",
+        "reason": "cancel/replace/retry 任务已有旧 lease 拒绝方向，需补 lease id、attempt、fencing 和过期提交拒绝。",
+        "depends_on": [
+          "WWC-ER-0201"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-duv.7"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-0203",
+        "title": "单 Client 多 WorkerSession 调度",
+        "bead_id": "winwincode-duv.8",
+        "action": "REWRITE",
+        "reason": "容量排队任务可承接多 WorkerSession，但需补个人并发、CPU/RAM/策略限流、公平性和等待任务不占满 slot。",
+        "depends_on": [
+          "WWC-ER-0202"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-duv.8"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-0204",
+        "title": "Controller durable outbox",
+        "bead_id": "winwincode-72t.39",
+        "action": "REWRITE",
+        "reason": "幂等触发任务覆盖重复投递和未知外部结果，但需改成 state+dispatch intent 原子 outbox、崩溃不重复 Job、可重放。",
+        "depends_on": [
+          "WWC-ER-0201"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-72t.39"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-0205",
+        "title": "Completion Gate",
+        "bead_id": "winwincode-er0205",
+        "action": "CREATE",
+        "reason": "未关闭任务没有完整 CandidateReady/证据/阻塞 finding/人工决策完成门。",
+        "depends_on": [
+          "WWC-ER-0102",
+          "WWC-ER-0201"
+        ],
+        "internal_dependencies": [],
+        "related": []
+      },
+      {
+        "stable_id": "WWC-ER-0206",
+        "title": "Rework Router",
+        "bead_id": "winwincode-72t.52",
+        "action": "REWRITE",
+        "reason": "返工产品接线可承接 verifier fail、原 session 恢复/replacement 和返工预算；需收口为 Controller 路由语义。",
+        "depends_on": [
+          "WWC-ER-0205"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-72t.52"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-0207",
+        "title": "Retry / Backoff / Failure Budget",
+        "bead_id": "winwincode-72t.45",
+        "action": "REWRITE",
+        "reason": "离线补跑任务已有 retry/new attempt 与异常对账，但需补 infra/product 分类、预算、幂等副作用。",
+        "depends_on": [
+          "WWC-ER-0201"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-72t.45"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-0208",
+        "title": "Controller invariant test suite",
+        "bead_id": "winwincode-er0208",
+        "action": "CREATE",
+        "reason": "没有现有未关闭叶子任务覆盖 crash、duplicate、stale lease、并发 claim、candidate/rework race 和 property/black-box 套件。",
+        "depends_on": [
+          "WWC-ER-0202",
+          "WWC-ER-0203",
+          "WWC-ER-0204",
+          "WWC-ER-0205",
+          "WWC-ER-0206",
+          "WWC-ER-0207"
+        ],
+        "internal_dependencies": [],
+        "related": []
+      },
+      {
+        "stable_id": "WWC-ER-0301",
+        "title": "Runtime Event Normalizer",
+        "bead_id": "winwincode-er0301",
+        "action": "CREATE",
+        "reason": "未发现覆盖七类 RuntimeEvent、版本、幂等及连续 sequence 的未关闭任务。",
+        "depends_on": [
+          "WWC-ER-0201"
+        ],
+        "internal_dependencies": [],
+        "related": []
+      },
+      {
+        "stable_id": "WWC-ER-0302",
+        "title": "Deterministic Fact Store",
+        "bead_id": "winwincode-er0302",
+        "action": "CREATE",
+        "reason": "未发现从 event 派生可重建 fact 且拒绝 LLM 直写 fact 的未关闭任务。",
+        "depends_on": [
+          "WWC-ER-0301"
+        ],
+        "internal_dependencies": [],
+        "related": []
+      },
+      {
+        "stable_id": "WWC-ER-0303",
+        "title": "Rule DSL / Rule Model",
+        "bead_id": "winwincode-er0303",
+        "action": "CREATE",
+        "reason": "未发现同时覆盖 match/scope/action/priority/version、确定性和冲突策略的 Rule DSL 任务。",
+        "depends_on": [
+          "WWC-ER-0302"
+        ],
+        "internal_dependencies": [],
+        "related": []
+      },
+      {
+        "stable_id": "WWC-ER-0304",
+        "title": "Pre-action Hook",
+        "bead_id": "winwincode-72t.7",
+        "action": "REWRITE",
+        "reason": "受信执行请求审批投影可复用，但需绑定 destructive/tool policy 与 command digest 的 pre-action 拦截。",
+        "depends_on": [
+          "WWC-ER-0303"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-72t.7"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-0305",
+        "title": "Post-action Hook",
+        "bead_id": "winwincode-er0305",
+        "action": "CREATE",
+        "reason": "未发现覆盖文件变化触发 verification、命令失败生成 machine blocker 且不依赖自报的任务。",
+        "depends_on": [
+          "WWC-ER-0303"
+        ],
+        "internal_dependencies": [],
+        "related": []
+      },
+      {
+        "stable_id": "WWC-ER-0306",
+        "title": "Repository Rule Pack",
+        "bead_id": "winwincode-er0306",
+        "action": "CREATE",
+        "reason": "模板配置/导入任务仅部分涉及 repo defaults；需改写为语言/文件 pattern、repo config、project defaults 和 rule lint。",
+        "depends_on": [
+          "WWC-ER-0303"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-72t.16",
+          "winwincode-72t.48"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-0307",
+        "title": "Rule Dry Run / Explain",
+        "bead_id": "winwincode-er0307",
+        "action": "CREATE",
+        "reason": "规则配置任务可承接 dry-run，但现有 acceptance 是 occurrence/时区；需补命中原因、actions 展示且不执行。",
+        "depends_on": [
+          "WWC-ER-0303"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-72t.34",
+          "winwincode-72t.46"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-0308",
+        "title": "Rule Engine replay / determinism tests",
+        "bead_id": "winwincode-er0308",
+        "action": "CREATE",
+        "reason": "未发现 replay determinism、restart replay 和 order-sensitive bug 的规则引擎测试任务。",
+        "depends_on": [
+          "WWC-ER-0303"
+        ],
+        "internal_dependencies": [],
+        "related": []
+      },
+      {
+        "stable_id": "WWC-ER-0401",
+        "title": "Worker Runtime Contract v2",
+        "bead_id": "winwincode-er0401",
+        "action": "CREATE",
+        "reason": "会话连续性/角色隔离任务可承接 Worker runtime 输入输出边界，但需明确 WorkContract+Workspace+Profile 和 typed RuntimeEvent。",
+        "depends_on": [
+          "WWC-ER-0002"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-duv.6"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-0402",
+        "title": "AgentIdentity",
+        "bead_id": "winwincode-er0402",
+        "action": "CREATE",
+        "reason": "未关闭任务未单独定义独立于 Session 的稳定 AgentIdentity、capabilities、role/name 和 restart 不变。",
+        "depends_on": [
+          "WWC-ER-0401"
+        ],
+        "internal_dependencies": [],
+        "related": []
+      },
+      {
+        "stable_id": "WWC-ER-0403",
+        "title": "AgentProfile",
+        "bead_id": "winwincode-er0403",
+        "action": "CREATE",
+        "reason": "受管来源与任务锁版任务有配置版本基础，但需改为 provider/model/reasoning/tool/sandbox/instructions 的 revisioned AgentProfile。",
+        "depends_on": [
+          "WWC-ER-0402"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-72t.4",
+          "winwincode-72t.11"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-0404",
+        "title": "Session Config Resolver",
+        "bead_id": "winwincode-er0404",
+        "action": "CREATE",
+        "reason": "配置继承任务可承接 resolver，但需补 defaults→repository→profile→task→emergency precedence、可复现 snapshot 和自动承接身份。",
+        "depends_on": [
+          "WWC-ER-0403"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-72t.25",
+          "winwincode-72t.57"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-0405",
+        "title": "Worker tool execution envelope",
+        "bead_id": "winwincode-er0405",
+        "action": "CREATE",
+        "reason": "MCP/CLI 生命周期任务可承接工具边界，但需统一 shell/edit/git/test/search typed envelope、pre/post hook、timeout/cancel、receipt。",
+        "depends_on": [
+          "WWC-ER-0401",
+          "WWC-ER-0304"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-72t.12"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-0406",
+        "title": "Batch / Parallel deterministic executor",
+        "bead_id": "winwincode-qv1.1.10",
+        "action": "REWRITE",
+        "reason": "现有 ChangeBatch/DelegatedBatch 任务覆盖部分并行与独立 receipt，但需改写为文件独立并行、冲突串行、逐 operation receipt、批量失败不伪成功。",
+        "depends_on": [
+          "WWC-ER-0405"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-qv1",
+          "winwincode-qv1.1",
+          "winwincode-qv1.1.10",
+          "winwincode-qv1.2",
+          "winwincode-qv1.2.5",
+          "winwincode-qv1.2.8",
+          "winwincode-qv1.2.9"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-0407",
+        "title": "Worker self-check / handoff snapshot",
+        "bead_id": "winwincode-er0407",
+        "action": "CREATE",
+        "reason": "上下文选择工作台可承接 handoff snapshot，但需只记录任务进度、git head/dirty、last test，并明确仅恢复提示非 canonical fact。",
+        "depends_on": [
+          "WWC-ER-0401"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-72t.21",
+          "winwincode-72t.38",
+          "winwincode-72t.43"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-0408",
+        "title": "Worker isolation & resource limits",
+        "bead_id": "winwincode-er0408",
+        "action": "CREATE",
+        "reason": "环境诊断任务覆盖 cwd/环境失败提示，需补 symlink escape、进程资源限制和 secret boundary；运行隔离任务作为关联。",
+        "depends_on": [
+          "WWC-ER-0405"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-72t.18",
+          "winwincode-72t.22"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-0501",
+        "title": "Durable WorkerSession record",
+        "bead_id": "winwincode-er0501",
+        "action": "CREATE",
+        "reason": "根复核：旧任务是相关调用方、配置/展示或专项交付，非本文领域实现的同一写入路径；保留旧目标，以独立增量任务承接本文验收。现有运行清理/重启任务承接会话连续性，但需按ADR补齐Durable WorkerSession与AgentIdentity/WorkItem/Workspace/Attempt字段；其余持久运行事实复用既有WorkerSession/ExecutionRegistry。",
+        "depends_on": [
+          "WWC-ER-0401"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-72t.31",
+          "winwincode-bxt.5"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-0502",
+        "title": "WorkspaceBinding identity",
+        "bead_id": "winwincode-er0502",
+        "action": "CREATE",
+        "reason": "根复核：旧任务是相关调用方、配置/展示或专项交付，非本文领域实现的同一写入路径；保留旧目标，以独立增量任务承接本文验收。运行配置任务已有仓库、commit、任务和attempt绑定；改写为Canonical WorkspaceBinding，绝对路径仍只留Device Client，并由运行配置任务内部承接。",
+        "depends_on": [
+          "WWC-ER-0501"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-72t.5",
+          "winwincode-4eo.2"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-0503",
+        "title": "Checkpoint capability abstraction",
+        "bead_id": "winwincode-er0503",
+        "action": "CREATE",
+        "reason": "旧映射没有未关闭的checkpoint能力owner；需新建最小能力声明、可转移/进程本地分类和digest，禁止猜测恢复能力。",
+        "depends_on": [
+          "WWC-ER-0501"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-9c4.16.6.5.1.1.6.1",
+          "winwincode-9c4.16.6.5.1.1.1.3"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-0504",
+        "title": "Client startup recovery scan",
+        "bead_id": "winwincode-72t.31",
+        "action": "REWRITE",
+        "reason": "运行清理与重启对账是现有未关闭承接者；补Client启动自动扫描、Client/Repository归属校验和不依赖用户resume，复用既有durable runtime facts。",
+        "depends_on": [
+          "WWC-ER-0202",
+          "WWC-ER-0501"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-72t.31",
+          "winwincode-bxt.5"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-0505",
+        "title": "Recovery claim / replacement attempt",
+        "bead_id": "winwincode-72t.31",
+        "action": "REWRITE",
+        "reason": "同一运行恢复容器已有lease/重启范围，但需按ExecutionRegistry建立新lease/fencing、竞争失败关闭和旧Worker拒写；不新造租约系统。",
+        "depends_on": [
+          "WWC-ER-0504"
+        ],
+        "internal_dependencies": [
+          "WWC-ER-0504"
+        ],
+        "related": [
+          "winwincode-72t.31",
+          "winwincode-bxt.5",
+          "winwincode-duv.7"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-0506",
+        "title": "Same-thread resume",
+        "bead_id": "winwincode-72t.31",
+        "action": "REWRITE",
+        "reason": "会话连续性与重启对账任务可承接同线程恢复；补checkpoint sequence replay、重复event抑制和当前lease校验，保留Codex thread权威。",
+        "depends_on": [
+          "WWC-ER-0503",
+          "WWC-ER-0505"
+        ],
+        "internal_dependencies": [
+          "WWC-ER-0505"
+        ],
+        "related": [
+          "winwincode-72t.31",
+          "winwincode-9c4.16.6.5.1.1.3"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-0507",
+        "title": "Fresh-session takeover",
+        "bead_id": "winwincode-72t.31",
+        "action": "REWRITE",
+        "reason": "恢复任务覆盖replacement但未冻结fresh-session接管字段；补AgentIdentity/WorkItem/Profile/Workspace保留、Provider重新解析及Git/Task/Test reconcile。",
+        "depends_on": [
+          "WWC-ER-0505",
+          "WWC-ER-0407"
+        ],
+        "internal_dependencies": [
+          "WWC-ER-0505"
+        ],
+        "related": [
+          "winwincode-72t.31",
+          "winwincode-bxt.5",
+          "winwincode-duv.10"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-0508",
+        "title": "Power-loss E2E recovery suite",
+        "bead_id": "winwincode-er0508",
+        "action": "CREATE",
+        "reason": "根依赖复核：该验收与旧任务组合会形成循环；保留旧任务独立范围，本项补建并单向依赖原能力。现有DSH/StrongFlow设备成功失败重启纵向任务直接承接E2E场景；增加断电、dirty worktree、side-effect crash、幂等和UI解释，不把历史关闭证据冒充本轮验收。",
+        "depends_on": [
+          "WWC-ER-0504",
+          "WWC-ER-0505",
+          "WWC-ER-0506",
+          "WWC-ER-0507"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-duv.10",
+          "winwincode-bxt.4",
+          "winwincode-72t.31"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-0601",
+        "title": "CollaborationRequest domain",
+        "bead_id": "winwincode-er0601",
+        "action": "CREATE",
+        "reason": "没有未关闭旧任务可作为该独立能力的本轮owner；新建最小typed durable CollaborationRequest域模型，复用相关已完成身份/收据/投影能力，仅作related依据。",
+        "depends_on": [
+          "WWC-ER-0402"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-9c4.17.3.2.1"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-0602",
+        "title": "Agent Directory",
+        "bead_id": "winwincode-er0602",
+        "action": "CREATE",
+        "reason": "没有未关闭旧任务可作为该独立能力的本轮owner；新建最小按AgentIdentity/capability查找的Directory，复用相关已完成身份/收据/投影能力，仅作related依据。",
+        "depends_on": [
+          "WWC-ER-0402"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-9c4.17.3.1.1"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-0603",
+        "title": "Durable Inbox / Outbox",
+        "bead_id": "winwincode-er0603",
+        "action": "CREATE",
+        "reason": "没有未关闭旧任务可作为该独立能力的本轮owner；新建最小协作Inbox/Outbox durable receipt，复用相关已完成身份/收据/投影能力，仅作related依据。",
+        "depends_on": [
+          "WWC-ER-0601"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-9c4.17.3.2.1",
+          "winwincode-9c4.16.4.6.11"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-0604",
+        "title": "Ask / Consult",
+        "bead_id": "winwincode-er0604",
+        "action": "CREATE",
+        "reason": "没有未关闭旧任务可作为该独立能力的本轮owner；新建最小Ask/Consult上下文与EvidenceRef回流，复用相关已完成身份/收据/投影能力，仅作related依据。",
+        "depends_on": [
+          "WWC-ER-0602",
+          "WWC-ER-0603"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-9c4.17.3.2.1",
+          "winwincode-72t.37"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-0605",
+        "title": "Delegate Work",
+        "bead_id": "winwincode-er0605",
+        "action": "CREATE",
+        "reason": "没有未关闭旧任务可作为该独立能力的本轮owner；新建最小Delegate独立WorkItem及结果回流，复用相关已完成身份/收据/投影能力，仅作related依据。",
+        "depends_on": [
+          "WWC-ER-0603",
+          "WWC-ER-0103"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-9c4.17.3.1.1",
+          "winwincode-duv"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-0606",
+        "title": "Review Request",
+        "bead_id": "winwincode-er0606",
+        "action": "CREATE",
+        "reason": "没有未关闭旧任务可作为该独立能力的本轮owner；新建最小candidate digest绑定的Review Request，复用相关已完成身份/收据/投影能力，仅作related依据。",
+        "depends_on": [
+          "WWC-ER-0603"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-72t.41",
+          "winwincode-72t.20"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-0607",
+        "title": "Collaboration loop / spam controls",
+        "bead_id": "winwincode-er0607",
+        "action": "CREATE",
+        "reason": "没有未关闭旧任务可作为该独立能力的本轮owner；新建最小协作hop/duplicate/ping-pong/rate控制，复用相关已完成身份/收据/投影能力，仅作related依据。",
+        "depends_on": [
+          "WWC-ER-0604",
+          "WWC-ER-0605",
+          "WWC-ER-0606"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-9c4.17.3.2.1",
+          "winwincode-72t.35"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-0608",
+        "title": "Peer collaboration UI projection",
+        "bead_id": "winwincode-er0608",
+        "action": "CREATE",
+        "reason": "没有未关闭旧任务可作为该独立能力的本轮owner；新建最小协作Inbox/Delegated UI只读projection，复用相关已完成身份/收据/投影能力，仅作related依据。",
+        "depends_on": [
+          "WWC-ER-0603"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-duv.9",
+          "winwincode-9c4.17.3.2.1"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-0701",
+        "title": "VerificationPlan domain",
+        "bead_id": "winwincode-72t.41",
+        "action": "REWRITE",
+        "reason": "现有验证配置、角色权限和Criterion映射任务直接承接VerificationPlan；补Contract revision、diff/impact/risk输入和Worker不得缩小required checks。",
+        "depends_on": [
+          "WWC-ER-0102"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-72t.41"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-0702",
+        "title": "Candidate freeze for verification",
+        "bead_id": "winwincode-72t.41",
+        "action": "REWRITE",
+        "reason": "现有冻结候选与独立角色范围承接Verifier输入冻结；补immutable candidate digest和验证中变更失效，与Candidate身份任务协同。",
+        "depends_on": [
+          "WWC-ER-0801"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-72t.41",
+          "winwincode-4eo.1"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-0703",
+        "title": "Trusted command/test runner",
+        "bead_id": "winwincode-er0703",
+        "action": "CREATE",
+        "reason": "根复核：旧任务是相关调用方、配置/展示或专项交付，非本文领域实现的同一写入路径；保留旧目标，以独立增量任务承接本文验收。浏览器适配/隔离上下文任务可承接受控验证执行入口；补固定command spec、environment/exit code/output边界及Evidence provenance，不另造执行器。",
+        "depends_on": [
+          "WWC-ER-0701"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-72t.32",
+          "winwincode-72t.37"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-0704",
+        "title": "Changed scope / impact analyzer",
+        "bead_id": "winwincode-72t.8",
+        "action": "REWRITE",
+        "reason": "现有影响范围与测试建议查询任务正在承接索引/影响分析；补direct/transitive impact和unknown impact保守升级。",
+        "depends_on": [
+          "WWC-ER-0701"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-72t.8",
+          "winwincode-72t.26"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-0705",
+        "title": "Regression selector",
+        "bead_id": "winwincode-er0705",
+        "action": "CREATE",
+        "reason": "根复核：旧任务是相关调用方、配置/展示或专项交付，非本文领域实现的同一写入路径；保留旧目标，以独立增量任务承接本文验收。影响范围任务已有验证范围建议；补affected/mandatory/high-risk test选择和可解释rationale，依赖0704内部顺序。",
+        "depends_on": [
+          "WWC-ER-0704",
+          "WWC-ER-0303"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-72t.26",
+          "winwincode-72t.8"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-0706",
+        "title": "Evidence Store",
+        "bead_id": "winwincode-er0706",
+        "action": "CREATE",
+        "reason": "根依赖复核：该验收与旧任务组合会形成循环；保留旧任务独立范围，本项补建并单向依赖原能力。可信Evidence与Artifact生产关联任务在途，直接承接Evidence Store；补immutable provenance、Candidate/Contract/Plan绑定和retention。",
+        "depends_on": [
+          "WWC-ER-0703"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-72t.2",
+          "winwincode-72t.37"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-0707",
+        "title": "Criterion Evaluator",
+        "bead_id": "winwincode-er0707",
+        "action": "CREATE",
+        "reason": "根复核：旧任务是相关调用方、配置/展示或专项交付，非本文领域实现的同一写入路径；保留旧目标，以独立增量任务承接本文验收。Criterion映射已有验证配置owner；补逐Criterion结论、缺证据不PASS及infra_error/fail分类，并消费0706证据。",
+        "depends_on": [
+          "WWC-ER-0102",
+          "WWC-ER-0706"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-72t.41",
+          "winwincode-72t.2"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-0708",
+        "title": "Regression baseline / flaky classification",
+        "bead_id": "winwincode-er0708",
+        "action": "CREATE",
+        "reason": "没有未关闭旧owner明确覆盖baseline/new failure/flaky分类；新建小型分类能力，复用既有测试门禁和bounded rerun，不把rerun当PASS。",
+        "depends_on": [
+          "WWC-ER-0703"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-72t.37",
+          "winwincode-qv1.1.11"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-0709",
+        "title": "Independent semantic reviewer",
+        "bead_id": "winwincode-er0709",
+        "action": "CREATE",
+        "reason": "没有未关闭旧owner能满足独立只读semantic review与producer chain隔离；新建Verifier reviewer能力，复用验证配置和Evidence引用。",
+        "depends_on": [
+          "WWC-ER-0706"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-72t.41",
+          "winwincode-72t.49"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-0710",
+        "title": "Final Verdict",
+        "bead_id": "winwincode-er0710",
+        "action": "CREATE",
+        "reason": "根复核：旧任务是相关调用方、配置/展示或专项交付，非本文领域实现的同一写入路径；保留旧目标，以独立增量任务承接本文验收。验证配置任务承接最终Criterion/角色门；补pass/fail/inconclusive/infra_error、blocker/residual risk，并明确Verdict事实由Controller持久化消费。",
+        "depends_on": [
+          "WWC-ER-0707",
+          "WWC-ER-0709"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-72t.41",
+          "winwincode-72t.37"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-0801",
+        "title": "Candidate identity",
+        "bead_id": "winwincode-er0801",
+        "action": "CREATE",
+        "reason": "根复核：旧任务是相关调用方、配置/展示或专项交付，非本文领域实现的同一写入路径；保留旧目标，以独立增量任务承接本文验收。运行配置与候选模式任务在途，已有commit/tree/task/attempt版本绑定；补base/head/diff digest、producer session和Contract revision。",
+        "depends_on": [
+          "WWC-ER-0502"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-72t.5",
+          "winwincode-4eo.1"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-0802",
+        "title": "Candidate stable Git ref",
+        "bead_id": "winwincode-er0802",
+        "action": "CREATE",
+        "reason": "根复核：旧任务是相关调用方、配置/展示或专项交付，非本文领域实现的同一写入路径；保留旧目标，以独立增量任务承接本文验收。现有Candidate稳定ref能力已在历史GIT-100.1关闭，但不能冒充本轮验收；由在途运行/候选合同任务承接稳定ref字段、checkout与GC约束，历史能力仅related。",
+        "depends_on": [
+          "WWC-ER-0801"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-72t.5",
+          "winwincode-4eo.1",
+          "winwincode-4eo.2"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-0803",
+        "title": "Safe Apply CAS",
+        "bead_id": "winwincode-er0803",
+        "action": "CREATE",
+        "reason": "根复核：旧任务是相关调用方、配置/展示或专项交付，非本文领域实现的同一写入路径；保留旧目标，以独立增量任务承接本文验收。运行候选合同任务承接Apply前身份与expectedHead；补CAS、dirty target、receipt和fail-closed，复用历史Apply引擎但不把关闭证据当本轮验收。",
+        "depends_on": [
+          "WWC-ER-0802"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-72t.5",
+          "winwincode-4eo.6",
+          "winwincode-4eo.8"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-0804",
+        "title": "Integration worktree",
+        "bead_id": "winwincode-er0804",
+        "action": "CREATE",
+        "reason": "没有未关闭旧owner直接覆盖隔离integration worktree；新建最小隔离集成能力，复用历史Safe Apply引擎并禁止用户worktree半冲突。",
+        "depends_on": [
+          "WWC-ER-0803"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-4eo.6",
+          "winwincode-72t.20"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-0805",
+        "title": "Multi-candidate integration",
+        "bead_id": "winwincode-er0805",
+        "action": "CREATE",
+        "reason": "根复核：旧任务是相关调用方、配置/展示或专项交付，非本文领域实现的同一写入路径；保留旧目标，以独立增量任务承接本文验收。现有两候选比较/冲突隔离任务在途，扩展为多Peer candidate组合、重新integration verification和task pass不等于Delivery pass。",
+        "depends_on": [
+          "WWC-ER-0804"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-72t.20",
+          "winwincode-4eo.6"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-0806",
+        "title": "Candidate discard / retention / GC",
+        "bead_id": "winwincode-er0806",
+        "action": "CREATE",
+        "reason": "历史GIT-100.9已关闭但无未关闭本轮owner；新建GC/retention能力并复用稳定ref/registry，明确pinned Evidence Candidate不得删除。",
+        "depends_on": [
+          "WWC-ER-0802"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-4eo.9",
+          "winwincode-4eo.1",
+          "winwincode-4eo.2"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-0807",
+        "title": "Apply / rollback guidance",
+        "bead_id": "winwincode-er0807",
+        "action": "CREATE",
+        "reason": "没有未关闭旧owner直接覆盖Apply/rollback guidance；新建只读操作指导与reverse-candidate边界，复用历史Apply/retention实现，不自动改写历史。",
+        "depends_on": [
+          "WWC-ER-0803"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-4eo.6",
+          "winwincode-4eo.9"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-0901",
+        "title": "Blocker taxonomy",
+        "bead_id": "winwincode-er0901",
+        "action": "CREATE",
+        "reason": "现有批注/诊断任务已有阻塞来源，补齐分类与 owner type，不重复建状态源。",
+        "depends_on": [
+          "WWC-ER-0103"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-72t.14"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-0902",
+        "title": "Deterministic blocker detectors",
+        "bead_id": "winwincode-72t.18",
+        "action": "REWRITE",
+        "reason": "复用能力预检和测试报告任务，补确定性检测产物。",
+        "depends_on": [
+          "WWC-ER-0305",
+          "WWC-ER-0901"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-72t.18"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-0903",
+        "title": "Agent unresolved-issue claim",
+        "bead_id": "winwincode-er0903",
+        "action": "CREATE",
+        "reason": "复用批注与澄清任务，补 claim 范围和证据引用。",
+        "depends_on": [
+          "WWC-ER-0901"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-72t.6"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-0904",
+        "title": "Authority policy router",
+        "bead_id": "winwincode-er0904",
+        "action": "CREATE",
+        "reason": "现有动作白名单/规则任务承接路由，补 human authority 分界。",
+        "depends_on": [
+          "WWC-ER-0901",
+          "WWC-ER-0303"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-72t.6"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-0905",
+        "title": "Attention lifecycle",
+        "bead_id": "winwincode-72t.9",
+        "action": "REWRITE",
+        "reason": "复用通知 outbox，补 Attention 生命周期和 candidate digest。",
+        "depends_on": [
+          "WWC-ER-0904"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-72t.9"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-0906",
+        "title": "Human Evidence",
+        "bead_id": "winwincode-er0906",
+        "action": "CREATE",
+        "reason": "现有批注/验证产物任务承接 reviewer evidence，补 stale 规则。",
+        "depends_on": [
+          "WWC-ER-0905",
+          "WWC-ER-0706"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-72t.35"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-0907",
+        "title": "Waiting work does not pin Worker slot",
+        "bead_id": "winwincode-er0907",
+        "action": "CREATE",
+        "reason": "根依赖复核：该验收与旧任务组合会形成循环；保留旧任务独立范围，本项补建并单向依赖原能力。复用运行清理与调度任务，补 waiting_human 释放槽位。",
+        "depends_on": [
+          "WWC-ER-0203",
+          "WWC-ER-0905"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-72t.31"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-1001",
+        "title": "Home / My Work",
+        "bead_id": "winwincode-er1001",
+        "action": "CREATE",
+        "reason": "复用运行预览与来源 UI，补 Controller canonical 只读投影。",
+        "depends_on": [
+          "WWC-ER-0107"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-72t.36"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-1002",
+        "title": "Personal Kanban v2",
+        "bead_id": "winwincode-er1002",
+        "action": "CREATE",
+        "reason": "复用来源 UI/看板任务，补拖拽规则与多仓库。",
+        "depends_on": [
+          "WWC-ER-0107"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-72t.50"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-1003",
+        "title": "WorkItem Detail",
+        "bead_id": "winwincode-er1003",
+        "action": "CREATE",
+        "reason": "根依赖复核：该验收与旧任务组合会形成循环；保留旧任务独立范围，本项补建并单向依赖原能力。多个运行/证据任务需合并为单一详情 owner。",
+        "depends_on": [
+          "WWC-ER-0101",
+          "WWC-ER-0107"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-duv.9"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-1004",
+        "title": "Session / Agent Team Panel",
+        "bead_id": "winwincode-er1004",
+        "action": "CREATE",
+        "reason": "根复核：旧任务是相关调用方、配置/展示或专项交付，非本文领域实现的同一写入路径；保留旧目标，以独立增量任务承接本文验收。复用真实纵向任务，补 AgentIdentity 与恢复状态展示。",
+        "depends_on": [
+          "WWC-ER-0402",
+          "WWC-ER-0501"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-9gh.3"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-1005",
+        "title": "Progress model",
+        "bead_id": "winwincode-er1005",
+        "action": "CREATE",
+        "reason": "复用验收报告 UI，分离计划进度与条件进度。",
+        "depends_on": [
+          "WWC-ER-0105",
+          "WWC-ER-0707"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-72t.49"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-1006",
+        "title": "Recovery UX",
+        "bead_id": "winwincode-er1006",
+        "action": "CREATE",
+        "reason": "根复核：旧任务是相关调用方、配置/展示或专项交付，非本文领域实现的同一写入路径；保留旧目标，以独立增量任务承接本文验收。复用运行清理/恢复任务，补自动恢复 UX。",
+        "depends_on": [
+          "WWC-ER-0508"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-72t.31"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-1007",
+        "title": "Attention Center",
+        "bead_id": "winwincode-72t.27",
+        "action": "REWRITE",
+        "reason": "复用通知 Attention 任务，补 approve/change/reject 与 stale。",
+        "depends_on": [
+          "WWC-ER-0905"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-72t.27"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-1008",
+        "title": "Evidence / Verdict UI",
+        "bead_id": "winwincode-72t.49",
+        "action": "REWRITE",
+        "reason": "复用真实产物/验收报告任务，补 AC-by-AC 证据展示。",
+        "depends_on": [
+          "WWC-ER-0710"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-72t.49"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-1009",
+        "title": "Responsive / mobile approval flow",
+        "bead_id": "winwincode-72t.27",
+        "action": "REWRITE",
+        "reason": "复用移动深链任务，补页面关闭不停止 Worker。",
+        "depends_on": [
+          "WWC-ER-1007"
+        ],
+        "internal_dependencies": [
+          "WWC-ER-1007"
+        ],
+        "related": [
+          "winwincode-72t.27"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-1101",
+        "title": "Provider catalog",
+        "bead_id": "winwincode-er1101",
+        "action": "CREATE",
+        "reason": "复用 Provider/运行配置工作，补 catalog capability 元数据。",
+        "depends_on": [
+          "WWC-ER-0403"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-9gh.3"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-1102",
+        "title": "Credential reference store",
+        "bead_id": "winwincode-er1102",
+        "action": "CREATE",
+        "reason": "根复核：旧任务是相关调用方、配置/展示或专项交付，非本文领域实现的同一写入路径；保留旧目标，以独立增量任务承接本文验收。复用 MCP/CLI 凭据边界，补 write-only、rotation、revoke。",
+        "depends_on": [
+          "WWC-ER-1101"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-72t.12"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-1103",
+        "title": "ProviderPolicy",
+        "bead_id": "winwincode-er1103",
+        "action": "CREATE",
+        "reason": "根复核：旧任务是相关调用方、配置/展示或专项交付，非本文领域实现的同一写入路径；保留旧目标，以独立增量任务承接本文验收。复用运行配置与 Provider 路由任务，补 policy 选择规则。",
+        "depends_on": [
+          "WWC-ER-0403",
+          "WWC-ER-1101"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-72t.5"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-1104",
+        "title": "Runtime route availability",
+        "bead_id": "winwincode-72t.15",
+        "action": "REWRITE",
+        "reason": "已有 provider route/usage 任务直接承接状态投影。",
+        "depends_on": [
+          "WWC-ER-1103"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-72t.15"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-1105",
+        "title": "New session re-resolution",
+        "bead_id": "winwincode-er1105",
+        "action": "CREATE",
+        "reason": "根复核：旧任务是相关调用方、配置/展示或专项交付，非本文领域实现的同一写入路径；保留旧目标，以独立增量任务承接本文验收。复用运行配置任务，补新 session 重新解析。",
+        "depends_on": [
+          "WWC-ER-0404",
+          "WWC-ER-1104"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-72t.5"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-1106",
+        "title": "Usage & cost facts",
+        "bead_id": "winwincode-72t.44",
+        "action": "REWRITE",
+        "reason": "已有用量费用任务承接 token/price facts。",
+        "depends_on": [
+          "WWC-ER-1101"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-72t.44"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-1107",
+        "title": "Budget enforcement",
+        "bead_id": "winwincode-72t.15",
+        "action": "REWRITE",
+        "reason": "复用用量与运行配置任务，补 soft/hard budget。",
+        "depends_on": [
+          "WWC-ER-1106"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-72t.15",
+          "winwincode-72t.3"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-1201",
+        "title": "Runtime event journal v2",
+        "bead_id": "winwincode-er1201",
+        "action": "CREATE",
+        "reason": "复用测试报告/Trace 事实任务，补 append-only journal v2。",
+        "depends_on": [
+          "WWC-ER-0301"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-72t.37"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-1202",
+        "title": "Event backpressure / batching",
+        "bead_id": "winwincode-er1202",
+        "action": "CREATE",
+        "reason": "复用 Trace 任务，补 batching/backpressure 与 payload 分离。",
+        "depends_on": [
+          "WWC-ER-1201"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-72t.37"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-1203",
+        "title": "Sensitive data redaction",
+        "bead_id": "winwincode-er1203",
+        "action": "CREATE",
+        "reason": "根复核：旧任务是相关调用方、配置/展示或专项交付，非本文领域实现的同一写入路径；保留旧目标，以独立增量任务承接本文验收。复用安全矩阵任务，补敏感字段清理规则。",
+        "depends_on": [
+          "WWC-ER-1201"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-72t.58"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-1204",
+        "title": "Artifact storage",
+        "bead_id": "winwincode-er1204",
+        "action": "CREATE",
+        "reason": "根依赖复核：该验收与旧任务组合会形成循环；保留旧任务独立范围，本项补建并单向依赖原能力。复用可信 Evidence/Artifact 任务，补 retention/integrity。",
+        "depends_on": [
+          "WWC-ER-0706"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-72t.2"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-1205",
+        "title": "SQLite durable Community store",
+        "bead_id": "winwincode-er1205",
+        "action": "CREATE",
+        "reason": "根复核：旧任务是相关调用方、配置/展示或专项交付，非本文领域实现的同一写入路径；保留旧目标，以独立增量任务承接本文验收。复用 Community SQLite 边界任务，补核心表事务与 fail-closed。",
+        "depends_on": [
+          "WWC-ER-0101",
+          "WWC-ER-0501",
+          "WWC-ER-0706"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-edition.2.4.1"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-1206",
+        "title": "Backup / Restore",
+        "bead_id": "winwincode-er1206",
+        "action": "CREATE",
+        "reason": "根复核：旧任务是相关调用方、配置/展示或专项交付，非本文领域实现的同一写入路径；保留旧目标，以独立增量任务承接本文验收。复用运行手册/SQLite 任务，补一致性备份恢复。",
+        "depends_on": [
+          "WWC-ER-1205"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-72t.60"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-1207",
+        "title": "Audit ledger",
+        "bead_id": "winwincode-er1207",
+        "action": "CREATE",
+        "reason": "复用 Trace/审计任务，补 tamper-evident ledger。",
+        "depends_on": [
+          "WWC-ER-1201"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-72t.37"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-1208",
+        "title": "Security abuse tests",
+        "bead_id": "winwincode-72t.58",
+        "action": "REWRITE",
+        "reason": "已有安全矩阵覆盖攻击场景，补逐项自动化验证。",
+        "depends_on": [
+          "WWC-ER-0304",
+          "WWC-ER-0408",
+          "WWC-ER-1203"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-72t.58"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-1301",
+        "title": "Device Client executable product",
+        "bead_id": "winwincode-er1301",
+        "action": "CREATE",
+        "reason": "复用 OPS 发布容器，补四目标 Device Client 可执行包。",
+        "depends_on": [
+          "WWC-ER-0508"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-9gh"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-1302",
+        "title": "Community Backend package",
+        "bead_id": "winwincode-er1302",
+        "action": "CREATE",
+        "reason": "复用 Community 发布任务，补 backend binary/OCI/health。",
+        "depends_on": [
+          "WWC-ER-1205"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-9gh"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-1303",
+        "title": "Web dist production packaging",
+        "bead_id": "winwincode-er1303",
+        "action": "CREATE",
+        "reason": "复用 Web/UI 发布任务，补 static dist 与 CSP。",
+        "depends_on": [
+          "WWC-ER-1001",
+          "WWC-ER-1002",
+          "WWC-ER-1003",
+          "WWC-ER-1004",
+          "WWC-ER-1005",
+          "WWC-ER-1006",
+          "WWC-ER-1007",
+          "WWC-ER-1008"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-cms.3"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-1304",
+        "title": "Community docker-compose",
+        "bead_id": "winwincode-er1304",
+        "action": "CREATE",
+        "reason": "复用发布任务，补 compose 数据与 Client 边界。",
+        "depends_on": [
+          "WWC-ER-1302",
+          "WWC-ER-1303"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-9gh"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-1305",
+        "title": "First-run onboarding",
+        "bead_id": "winwincode-er1305",
+        "action": "CREATE",
+        "reason": "根依赖复核：该验收与旧任务组合会形成循环；保留旧任务独立范围，本项补建并单向依赖原能力。已有首次使用验收承接 onboarding，补 owner/enrollment/provider/task 链。",
+        "depends_on": [
+          "WWC-ER-1301",
+          "WWC-ER-1302",
+          "WWC-ER-1303",
+          "WWC-ER-1304"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-9gh.3"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-1306",
+        "title": "Upgrade / rollback",
+        "bead_id": "winwincode-er1306",
+        "action": "CREATE",
+        "reason": "复用 OPS 发布与 SQLite 任务，补升级回滚边界。",
+        "depends_on": [
+          "WWC-ER-1205",
+          "WWC-ER-1301",
+          "WWC-ER-1302"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-9gh"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-1307",
+        "title": "Release gate",
+        "bead_id": "winwincode-qv1.3.3",
+        "action": "REWRITE",
+        "reason": "已有发布门与验证门承接，不另建总门。",
+        "depends_on": [
+          "WWC-ER-0001",
+          "WWC-ER-0002",
+          "WWC-ER-0003",
+          "WWC-ER-0004",
+          "WWC-ER-0006",
+          "WWC-ER-0101",
+          "WWC-ER-0102",
+          "WWC-ER-0103",
+          "WWC-ER-0104",
+          "WWC-ER-0201",
+          "WWC-ER-0202",
+          "WWC-ER-0203",
+          "WWC-ER-0204",
+          "WWC-ER-0205",
+          "WWC-ER-0206",
+          "WWC-ER-0208",
+          "WWC-ER-0301",
+          "WWC-ER-0302",
+          "WWC-ER-0303",
+          "WWC-ER-0304",
+          "WWC-ER-0305",
+          "WWC-ER-0308",
+          "WWC-ER-0401",
+          "WWC-ER-0402",
+          "WWC-ER-0403",
+          "WWC-ER-0404",
+          "WWC-ER-0405",
+          "WWC-ER-0501",
+          "WWC-ER-0502",
+          "WWC-ER-0503",
+          "WWC-ER-0504",
+          "WWC-ER-0505",
+          "WWC-ER-0506",
+          "WWC-ER-0507",
+          "WWC-ER-0508",
+          "WWC-ER-0701",
+          "WWC-ER-0702",
+          "WWC-ER-0703",
+          "WWC-ER-0704",
+          "WWC-ER-0705",
+          "WWC-ER-0706",
+          "WWC-ER-0707",
+          "WWC-ER-0710",
+          "WWC-ER-0801",
+          "WWC-ER-0802",
+          "WWC-ER-0803",
+          "WWC-ER-0804",
+          "WWC-ER-1205",
+          "WWC-ER-1208"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-qv1.3.3"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-1308",
+        "title": "Dogfood benchmark corpus",
+        "bead_id": "winwincode-72t.59",
+        "action": "REWRITE",
+        "reason": "已有 dogfood/真实回归任务承接 corpus，补 20+ 分层任务。",
+        "depends_on": [
+          "WWC-ER-1307"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-72t.59"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-1309",
+        "title": "Product metrics",
+        "bead_id": "winwincode-er1309",
+        "action": "CREATE",
+        "reason": "根依赖复核：该验收与旧任务组合会形成循环；保留旧任务独立范围，本项补建并单向依赖原能力。已有指标工作台承接五组指标。",
+        "depends_on": [
+          "WWC-ER-1308"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-72t.47"
+        ]
+      },
+      {
+        "stable_id": "WWC-ER-1310",
+        "title": "Community 1.0 documentation",
+        "bead_id": "winwincode-72t.60",
+        "action": "REWRITE",
+        "reason": "已有运行手册承接文档清单，补 verifier/provider/security 内容。",
+        "depends_on": [
+          "WWC-ER-1307"
+        ],
+        "internal_dependencies": [],
+        "related": [
+          "winwincode-72t.60"
+        ]
+      }
+    ]
+  }
+}

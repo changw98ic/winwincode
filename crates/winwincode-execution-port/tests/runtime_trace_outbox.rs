@@ -6,8 +6,8 @@ use sha2::{Digest, Sha256};
 use winwincode_domain::{
     ArtifactId, CodexThreadId, ExecutionAckSequence, ExecutionEventId, ExecutionJobId,
     ExecutionMessageId, ExecutionSequence, FencingToken, Instant, LeaseId, ProductSessionId,
-    RequestId, SchemaVersion, SessionIdentity, Sha256Digest, StageRunId, WorkerId,
-    WorkerInstanceId, WorkerSessionId,
+    RequestId, SchemaVersion, SessionIdentity, Sha256Digest, WorkRunId, WorkerId, WorkerInstanceId,
+    WorkerSessionId,
 };
 use winwincode_execution_port::action_gateway::{
     ExecutionEnvelope, ExecutionEnvelopeToken, GateDecision, GateInput, PreActionDecisionRecorder,
@@ -58,7 +58,7 @@ fn session_identity() -> SessionIdentity {
     SessionIdentity {
         codex_thread_id: CodexThreadId(id("cdx", 'A')),
         product_session_id: ProductSessionId(id("psn", 'A')),
-        stage_run_id: Some(StageRunId(id("run", 'A'))),
+        work_run_id: Some(WorkRunId(id("wrn", 'A'))),
         worker_session_id: WorkerSessionId(id("wsn", 'A')),
     }
 }
@@ -697,6 +697,7 @@ fn the_concrete_gateway_journal_durably_retains_the_decision() {
         FixtureIdentities(VecDeque::from([
             trace_identity(1, 'A'),
             trace_identity(2, 'B'),
+            trace_identity(3, 'C'),
         ])),
     );
     journal
@@ -711,8 +712,19 @@ fn the_concrete_gateway_journal_durably_retains_the_decision() {
             },
         )
         .expect("journal decision");
+    journal
+        .record_post_action(
+            GateInput {
+                envelope: &envelope,
+                intent: &intent,
+                observed: &observed,
+            },
+            winwincode_execution_port::action_gateway::PostActionOutcome::Failed,
+            &[winwincode_execution_port::action_gateway::PostActionHook::CreateMachineBlocker],
+        )
+        .expect("journal post-action hook");
     let (store, _, _) = journal.into_parts();
-    assert_eq!(store.writes, 2);
+    assert_eq!(store.writes, 3);
     let events = &store.snapshots.values().next().expect("snapshot").events;
     let action_message: winwincode_execution_port::generated::RuntimeEventMessage =
         serde_json::from_slice(&events[0].frame).expect("action message");
@@ -720,6 +732,19 @@ fn the_concrete_gateway_journal_durably_retains_the_decision() {
         &action_message.event.payload.expect("payload").data_base64,
     ))
     .expect("action payload");
+    let hook_message: winwincode_execution_port::generated::RuntimeEventMessage =
+        serde_json::from_slice(&events[2].frame).expect("hook message");
+    let hook_payload: RuntimeTracePayload = serde_json::from_slice(&decode_base64(
+        &hook_message.event.payload.expect("payload").data_base64,
+    ))
+    .expect("hook payload");
+    assert!(matches!(
+        hook_payload.fact,
+        RuntimeTraceFact::Hook {
+            actions,
+            ..
+        } if actions == vec![winwincode_execution_port::action_gateway::PostActionHook::CreateMachineBlocker]
+    ));
     assert!(matches!(
         action_payload.fact,
         RuntimeTraceFact::Action { .. }

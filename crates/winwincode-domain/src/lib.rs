@@ -18,7 +18,14 @@ pub use user_account::{
 /// public schema.
 #[must_use]
 pub fn is_canonical_delivery_id(value: &str) -> bool {
-    value.strip_prefix("dlv_").is_some_and(|identifier| {
+    is_canonical_prefixed_id(value, "dlv_")
+}
+
+/// Checks the schema's uppercase Crockford identifier under an expected prefix.
+/// Callers supply the fixed prefix of the identifier type they accept.
+#[must_use]
+pub fn is_canonical_prefixed_id(value: &str, prefix: &str) -> bool {
+    value.strip_prefix(prefix).is_some_and(|identifier| {
         identifier.len() == 26
             && identifier.bytes().all(|byte| {
                 byte.is_ascii_digit()

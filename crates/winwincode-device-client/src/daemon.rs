@@ -1907,7 +1907,7 @@ impl DeviceDaemon {
             repository_binding_id: &grant.repository_binding_id,
             launch_grant_id: &grant.worker_launch_grant_id,
             product_session_id: non_empty(&grant.product_session_id),
-            stage_run_id: non_empty(&grant.stage_run_id),
+            work_run_id: grant.work_run_id.as_deref().and_then(non_empty),
             source_directory: &directories.source_directory,
             data_directory: &directories.data_directory,
             worker_root: &directories.worker_root,

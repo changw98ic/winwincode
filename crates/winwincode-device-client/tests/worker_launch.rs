@@ -77,7 +77,7 @@ const WORKER_INSTANCE: &str = "winst_TESTINSTANCE000000001";
 const WORKER_CREDENTIAL: &str = "wsc-launch-test-material";
 const BINDING: &str = "rbd_TESTBINDING00000000000001";
 const PRODUCT_SESSION: &str = "ps_TESTPRODUCT000000000000001";
-const STAGE_RUN: &str = "run_TESTSTAGE000000000000001";
+const WORK_RUN: &str = "wrn_01J00000000000000000000001";
 
 fn worker_credential_digest() -> String {
     format!("sha256:{:x}", Sha256::digest(ISSUED_SECRET))
@@ -374,7 +374,7 @@ fn grant(client_instance_id: &str, lease: &str, token: u64) -> WorkerLaunchGrant
         occupancy_fencing_token: token,
         repository_binding_id: BINDING.to_owned(),
         product_session_id: PRODUCT_SESSION.to_owned(),
-        stage_run_id: STAGE_RUN.to_owned(),
+        work_run_id: Some(WORK_RUN.to_owned()),
         worker_session_id: WORKER_SESSION.to_owned(),
         worker_id: WORKER_ID.to_owned(),
         worker_instance_id: WORKER_INSTANCE.to_owned(),
@@ -792,6 +792,17 @@ fn the_written_config_is_accepted_by_the_real_worker_entry_reader() {
 
     let directories = lane.directories();
     let config_path = directories.data_directory.join("managed-session.json");
+    let raw_config = fs::read_to_string(&config_path).expect("managed config read");
+    let raw_config_json: Value = serde_json::from_str(&raw_config).expect("managed config JSON");
+    assert_eq!(
+        raw_config_json["workRunId"],
+        json_str(WORK_RUN),
+        "the canonical WorkRun from the grant must reach the managed config"
+    );
+    assert!(
+        raw_config_json.get("stageRunId").is_none(),
+        "active managed config must not retain the retired stageRunId field"
+    );
     let config = ManagedSessionConfig::read(&config_path).expect("the real reader accepts");
     assert_eq!(config.client_node_id.0, ASSIGNED_NODE);
     assert_eq!(config.client_instance_id.0, instance_id);
@@ -807,8 +818,8 @@ fn the_written_config_is_accepted_by_the_real_worker_entry_reader() {
         Some(PRODUCT_SESSION)
     );
     assert_eq!(
-        config.stage_run_id.as_ref().map(|v| v.0.clone()).as_deref(),
-        Some(STAGE_RUN)
+        config.work_run_id.as_ref().map(|v| v.0.clone()).as_deref(),
+        Some(WORK_RUN)
     );
     assert_eq!(config.worker_session_id.0, WORKER_SESSION);
     assert_eq!(config.worker_id.0, WORKER_ID);

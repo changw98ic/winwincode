@@ -1,0 +1,834 @@
+diff --git a/codex-rs/core/src/codex_delegate.rs b/codex-rs/core/src/codex_delegate.rs
+index fe80ccf0..2bff2d17 100644
+--- a/codex-rs/core/src/codex_delegate.rs
++++ b/codex-rs/core/src/codex_delegate.rs
+@@ -213,6 +213,7 @@ pub(crate) async fn run_codex_thread_one_shot(
+         .submit_turn_input(
+             TurnInputRequest::user_input(input).on_start(TurnStartOptions {
+                 final_output_json_schema,
++                submit_change_batch: false,
+                 parent_turn_id: Some(parent_turn_id),
+                 root_turn_id,
+             }),
+diff --git a/codex-rs/core/src/codex_thread.rs b/codex-rs/core/src/codex_thread.rs
+index 1f51305b..696d7799 100644
+--- a/codex-rs/core/src/codex_thread.rs
++++ b/codex-rs/core/src/codex_thread.rs
+@@ -448,10 +448,11 @@ impl CodexThread {
+             turn_id,
+             thread_settings,
+             trace,
++            submit_change_batch,
+         } = request;
+         match self
+             .io
+-            .submit_recover_turn(thread_settings, trace, turn_id)
++            .submit_recover_turn(thread_settings, trace, turn_id, submit_change_batch)
+             .await?
+         {
+             TurnInputSubmission::Started { turn_id } => {
+diff --git a/codex-rs/core/src/guardian/review_session.rs b/codex-rs/core/src/guardian/review_session.rs
+index 3ed0584e..fc9490b6 100644
+--- a/codex-rs/core/src/guardian/review_session.rs
++++ b/codex-rs/core/src/guardian/review_session.rs
+@@ -1180,6 +1180,7 @@ async fn run_review_on_session(
+             })
+             .on_start(TurnStartOptions {
+                 final_output_json_schema: Some(params.schema.clone()),
++                submit_change_batch: false,
+                 parent_turn_id: Some(parent_turn.sub_id.clone()),
+                 root_turn_id: parent_turn.turn_metadata_state.root_turn_id(),
+             }),
+diff --git a/codex-rs/core/src/session/handlers.rs b/codex-rs/core/src/session/handlers.rs
+index a928090c..d8c2ea88 100644
+--- a/codex-rs/core/src/session/handlers.rs
++++ b/codex-rs/core/src/session/handlers.rs
+@@ -578,10 +578,16 @@ pub(super) async fn submission_loop(
+                 }
+                 Op::RecoverTurn {
+                     thread_settings,
++                    submit_change_batch,
+                     reply,
+                 } => {
+-                    let result =
+-                        turn_input::handle_recovery(&sess, thread_settings, sub.id.clone()).await;
++                    let result = turn_input::handle_recovery(
++                        &sess,
++                        thread_settings,
++                        submit_change_batch,
++                        sub.id.clone(),
++                    )
++                    .await;
+                     let _ = reply.send(result);
+                     false
+                 }
+diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
+index 1a4b0f88..c7622573 100644
+--- a/codex-rs/core/src/session/mod.rs
++++ b/codex-rs/core/src/session/mod.rs
+@@ -893,12 +893,14 @@ impl SessionIo {
+         thread_settings: ThreadSettingsOverrides,
+         trace: Option<W3cTraceContext>,
+         turn_id: String,
++        submit_change_batch: bool,
+     ) -> CodexResult<TurnInputSubmission> {
+         let (reply_tx, reply_rx) = oneshot::channel();
+         self.submit_with_id(Submission {
+             id: turn_id,
+             op: Op::RecoverTurn {
+                 thread_settings,
++                submit_change_batch,
+                 reply: reply_tx,
+             },
+             trace,
+diff --git a/codex-rs/core/src/session/review.rs b/codex-rs/core/src/session/review.rs
+index d431e602..e1bc0b8a 100644
+--- a/codex-rs/core/src/session/review.rs
++++ b/codex-rs/core/src/session/review.rs
+@@ -165,6 +165,7 @@ pub(super) async fn spawn_review_thread(
+         #[allow(deprecated)]
+         cwd: parent_turn_context.cwd.clone(),
+         final_output_json_schema: None,
++        submit_change_batch: false,
+         dynamic_tools: parent_turn_context.dynamic_tools.clone(),
+         turn_metadata_state,
+         extension_data,
+diff --git a/codex-rs/core/src/session/session.rs b/codex-rs/core/src/session/session.rs
+index 797991d3..2a4ee991 100644
+--- a/codex-rs/core/src/session/session.rs
++++ b/codex-rs/core/src/session/session.rs
+@@ -597,6 +597,7 @@ pub(crate) struct SessionSettingsUpdate {
+     pub(crate) reasoning_summary: Option<ReasoningSummaryConfig>,
+     pub(crate) service_tier: Option<Option<String>>,
+     pub(crate) final_output_json_schema: Option<Option<Value>>,
++    pub(crate) submit_change_batch: Option<bool>,
+     pub(crate) personality: Option<Personality>,
+     pub(crate) app_server_client_name: Option<String>,
+     pub(crate) app_server_client_version: Option<String>,
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index c7d7c634..54700a3a 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -50,7 +50,10 @@ use crate::stream_events_utils::record_completed_response_item_with_finalized_fa
+ use crate::tasks::emit_compact_metric;
+ use crate::tools::ToolRouter;
+ use crate::tools::context::SharedTurnDiffTracker;
++use crate::tools::parallel::ChangeBatchHandoff;
++use crate::tools::parallel::ToolCallCompletion;
+ use crate::tools::parallel::ToolCallRuntime;
++use crate::tools::parallel::ToolContinuation;
+ use crate::tools::registry::ToolArgumentDiffConsumer;
+ use crate::tools::router::ToolSuggestCandidates;
+ use crate::tools::router::ToolSuggestPresentation;
+@@ -398,7 +401,15 @@ pub(crate) async fn run_turn(
+                 let SamplingRequestResult {
+                     needs_follow_up: model_needs_follow_up,
+                     last_agent_message: sampling_request_last_agent_message,
++                    handoff,
+                 } = sampling_request_output;
++                if let Some(handoff) = handoff {
++                    // A terminal host handoff ends this turn after all in-flight
++                    // work has drained; the adapter persists the proposal with
++                    // the following TurnComplete event.
++                    last_agent_message = Some(handoff.proposal);
++                    break;
++                }
+                 if model_needs_follow_up {
+                     sess.input_queue
+                         .accept_mailbox_delivery_for_current_turn(
+@@ -1320,9 +1331,11 @@ pub(crate) fn build_prompt(
+     Prompt {
+         input,
+         tools: step_context.tool_router.model_visible_specs(),
+-        parallel_tool_calls: true,
++        parallel_tool_calls: !turn_context.submit_change_batch,
+         base_instructions,
+-        output_schema: turn_context.final_output_json_schema.clone(),
++        output_schema: (!turn_context.submit_change_batch)
++            .then(|| turn_context.final_output_json_schema.clone())
++            .flatten(),
+         output_schema_strict: !crate::guardian::is_guardian_reviewer_source(
+             &turn_context.session_source,
+         ),
+@@ -1576,6 +1589,7 @@ pub(crate) async fn built_tools(
+ struct SamplingRequestResult {
+     needs_follow_up: bool,
+     last_agent_message: Option<String>,
++    handoff: Option<ChangeBatchHandoff>,
+ }
+ 
+ /// Ephemeral per-response state for streaming a single proposed plan.
+@@ -2128,15 +2142,48 @@ async fn handle_assistant_item_done_in_plan_mode(
+     false
+ }
+ 
++fn has_submit_change_batch_sibling(calls: &[crate::tools::router::ToolCall]) -> bool {
++    let submit_count = calls
++        .iter()
++        .filter(|call| call.tool_name.name == "submit_change_batch")
++        .count();
++    submit_count > 0 && (submit_count != 1 || calls.len() != 1)
++}
++
++fn rejected_change_batch_sibling_response(
++    call: &crate::tools::router::ToolCall,
++) -> ResponseInputItem {
++    let output = codex_protocol::models::FunctionCallOutputPayload {
++        body: codex_protocol::models::FunctionCallOutputBody::Text(
++            "submit_change_batch must be the only tool call in a response".to_string(),
++        ),
++        ..Default::default()
++    };
++    match &call.payload {
++        crate::tools::context::ToolPayload::Custom { .. } => {
++            ResponseInputItem::CustomToolCallOutput {
++                call_id: call.call_id.clone(),
++                name: Some(call.tool_name.name.clone()),
++                output,
++            }
++        }
++        _ => ResponseInputItem::FunctionCallOutput {
++            call_id: call.call_id.clone(),
++            output,
++        },
++    }
++}
++
+ #[instrument(level = "trace", skip_all)]
+ async fn drain_in_flight(
+-    in_flight: &mut FuturesOrdered<BoxFuture<'static, CodexResult<ResponseInputItem>>>,
++    in_flight: &mut FuturesOrdered<BoxFuture<'static, CodexResult<ToolCallCompletion>>>,
+     sess: Arc<Session>,
+     turn_context: Arc<TurnContext>,
+-) -> CodexResult<()> {
++) -> CodexResult<Option<ChangeBatchHandoff>> {
++    let mut handoff = None;
+     while let Some(res) = in_flight.next().await {
+         match res {
+-            Ok(response_input) => {
++            Ok(ToolCallCompletion::Response(response_input)) => {
+                 let response_item = response_input.into();
+                 sess.record_conversation_items(&turn_context, std::slice::from_ref(&response_item))
+                     .await;
+@@ -2147,12 +2194,19 @@ async fn drain_in_flight(
+                 )
+                 .await;
+             }
++            Ok(ToolCallCompletion::Continuation(ToolContinuation::YieldToHost(next))) => {
++                if handoff.replace(next).is_some() {
++                    return Err(CodexErr::InvalidRequest(
++                        "multiple submit_change_batch handoffs in one response".to_string(),
++                    ));
++                }
++            }
+             Err(err) => {
+                 error_or_panic(format!("in-flight tool future failed during drain: {err}"));
+             }
+         }
+     }
+-    Ok(())
++    Ok(handoff)
+ }
+ 
+ fn assign_missing_streamed_response_item_id(
+@@ -2223,8 +2277,10 @@ async fn try_run_sampling_request(
+         .instrument(trace_span!("stream_request"))
+         .or_cancel(&cancellation_token)
+         .await??;
+-    let mut in_flight: FuturesOrdered<BoxFuture<'static, CodexResult<ResponseInputItem>>> =
++    let mut in_flight: FuturesOrdered<BoxFuture<'static, CodexResult<ToolCallCompletion>>> =
+         FuturesOrdered::new();
++    let mut response_tool_calls = Vec::new();
++    let mut response_completed = false;
+     let mut needs_follow_up = false;
+     let mut last_agent_message: Option<String> = None;
+     let mut active_item: Option<TurnItem> = None;
+@@ -2390,6 +2446,9 @@ async fn try_run_sampling_request(
+                         Ok(output_result) => output_result,
+                         Err(err) => break Err(err),
+                     };
++                if let Some(tool_call) = output_result.tool_call {
++                    response_tool_calls.push(tool_call);
++                }
+                 if let Some(tool_future) = output_result.tool_future {
+                     in_flight.push_back(tool_future);
+                 }
+@@ -2402,6 +2461,7 @@ async fn try_run_sampling_request(
+                     break Ok(SamplingRequestResult {
+                         needs_follow_up: true,
+                         last_agent_message,
++                        handoff: None,
+                     });
+                 }
+             }
+@@ -2576,12 +2636,30 @@ async fn try_run_sampling_request(
+                 if let Err(err) = budget_result {
+                     break Err(err);
+                 }
++                response_completed = true;
++                if has_submit_change_batch_sibling(&response_tool_calls) {
++                    in_flight.clear();
++                    for call in response_tool_calls.drain(..) {
++                        let response = rejected_change_batch_sibling_response(&call);
++                        if let Some(response_item) =
++                            crate::stream_events_utils::response_input_to_response_item(&response)
++                        {
++                            sess.record_conversation_items(
++                                &turn_context,
++                                std::slice::from_ref(&response_item),
++                            )
++                            .await;
++                        }
++                    }
++                    needs_follow_up = true;
++                }
+                 if let Some(false) = end_turn {
+                     needs_follow_up = true;
+                 }
+                 break Ok(SamplingRequestResult {
+                     needs_follow_up,
+                     last_agent_message,
++                    handoff: None,
+                 });
+             }
+             ResponseEvent::OutputTextDelta(delta) => {
+@@ -2748,7 +2826,13 @@ async fn try_run_sampling_request(
+     } else {
+         Some(turn_context.turn_timing_state.begin_tool_blocking())
+     };
+-    drain_in_flight(&mut in_flight, sess.clone(), turn_context.clone()).await?;
++    let handoff = if response_completed {
++        drain_in_flight(&mut in_flight, sess.clone(), turn_context.clone()).await?
++    } else {
++        // A cancelled or incomplete stream never commits a terminal handoff.
++        in_flight.clear();
++        None
++    };
+     drop(tool_blocking_timing_guard);
+ 
+     if should_emit_token_count {
+@@ -2774,7 +2858,10 @@ async fn try_run_sampling_request(
+         }
+     }
+ 
+-    outcome
++    outcome.map(|mut result| {
++        result.handoff = handoff;
++        result
++    })
+ }
+ 
+ pub(crate) fn get_last_assistant_message_from_turn<'a>(
+diff --git a/codex-rs/core/src/session/turn_context.rs b/codex-rs/core/src/session/turn_context.rs
+index 728749a4..382d8640 100644
+--- a/codex-rs/core/src/session/turn_context.rs
++++ b/codex-rs/core/src/session/turn_context.rs
+@@ -180,6 +180,7 @@ pub struct TurnContext {
+     pub(crate) available_models: Vec<ModelPreset>,
+     pub(crate) unified_exec_shell_mode: UnifiedExecShellMode,
+     pub(crate) final_output_json_schema: Option<Value>,
++    pub(crate) submit_change_batch: bool,
+     pub(crate) dynamic_tools: Vec<DynamicToolSpec>,
+     pub(crate) turn_metadata_state: Arc<TurnMetadataState>,
+     pub(crate) extension_data: Arc<codex_extension_api::ExtensionData>,
+@@ -433,6 +434,7 @@ impl TurnContext {
+             available_models,
+             unified_exec_shell_mode: self.unified_exec_shell_mode.clone(),
+             final_output_json_schema: self.final_output_json_schema.clone(),
++            submit_change_batch: self.submit_change_batch,
+             dynamic_tools: self.dynamic_tools.clone(),
+             turn_metadata_state: self.turn_metadata_state.clone(),
+             extension_data: Arc::clone(&self.extension_data),
+@@ -723,6 +725,7 @@ impl Session {
+             available_models,
+             unified_exec_shell_mode,
+             final_output_json_schema: None,
++            submit_change_batch: false,
+             dynamic_tools: session_configuration.dynamic_tools.clone(),
+             turn_metadata_state,
+             extension_data,
+@@ -817,6 +820,7 @@ impl Session {
+                 sub_id,
+                 session_configuration,
+                 updates.final_output_json_schema,
++                updates.submit_change_batch,
+             )
+             .await)
+     }
+@@ -826,11 +830,13 @@ impl Session {
+         sub_id: String,
+         session_configuration: SessionConfiguration,
+         final_output_json_schema: Option<Option<Value>>,
++        submit_change_batch: Option<bool>,
+     ) -> Arc<TurnContext> {
+         self.new_turn_context_from_configuration(
+             sub_id,
+             session_configuration,
+             final_output_json_schema,
++            submit_change_batch,
+             TurnMultiAgentRuntime::ResolveAndStore,
+             self.git_enrichment_policy,
+         )
+@@ -846,6 +852,7 @@ impl Session {
+             sub_id,
+             session_configuration,
+             /*final_output_json_schema*/ None,
++            /*submit_change_batch*/ None,
+             TurnMultiAgentRuntime::Preview,
+             GitEnrichmentPolicy::Skip,
+         )
+@@ -858,6 +865,7 @@ impl Session {
+         sub_id: String,
+         session_configuration: SessionConfiguration,
+         final_output_json_schema: Option<Option<Value>>,
++        submit_change_batch: Option<bool>,
+         multi_agent_runtime: TurnMultiAgentRuntime,
+         git_enrichment_policy: GitEnrichmentPolicy,
+     ) -> Arc<TurnContext> {
+@@ -955,6 +963,9 @@ impl Session {
+         if let Some(final_schema) = final_output_json_schema {
+             turn_context.final_output_json_schema = final_schema;
+         }
++        if let Some(submit_change_batch) = submit_change_batch {
++            turn_context.submit_change_batch = submit_change_batch;
++        }
+         let turn_context = Arc::new(turn_context);
+         if git_enrichment_policy == GitEnrichmentPolicy::Fresh
+             && turn_context
+@@ -1015,6 +1026,7 @@ impl Session {
+             sub_id,
+             session_configuration,
+             /*final_output_json_schema*/ None,
++            /*submit_change_batch*/ None,
+         )
+         .await
+     }
+diff --git a/codex-rs/core/src/session/turn_input.rs b/codex-rs/core/src/session/turn_input.rs
+index 23d37135..71d97069 100644
+--- a/codex-rs/core/src/session/turn_input.rs
++++ b/codex-rs/core/src/session/turn_input.rs
+@@ -99,12 +99,14 @@ impl PreparedTurnInputSettings {
+     ) -> CodexResult<Arc<TurnContext>> {
+         let TurnStartOptions {
+             final_output_json_schema,
++            submit_change_batch,
+             parent_turn_id,
+             root_turn_id,
+         } = self.start_options;
+         let emit_thread_settings_applied = self.thread_settings_update.is_some();
+         let mut updates = self.thread_settings_update.unwrap_or_default();
+         updates.final_output_json_schema = Some(final_output_json_schema);
++        updates.submit_change_batch = Some(submit_change_batch);
+ 
+         // new_turn_with_sub_id already emits an error event when settings are invalid.
+         let turn_context = session
+@@ -158,9 +160,15 @@ pub(super) async fn handle(
+ pub(super) async fn handle_recovery(
+     session: &Arc<Session>,
+     thread_settings: ThreadSettingsOverrides,
++    submit_change_batch: bool,
+     submission_id: String,
+ ) -> CodexResult<TurnInputSubmission> {
+-    let request = TurnInputRequest::user_input(Vec::new()).with_thread_settings(thread_settings);
++    let request = TurnInputRequest::user_input(Vec::new())
++        .with_thread_settings(thread_settings)
++        .on_start(TurnStartOptions {
++            submit_change_batch,
++            ..TurnStartOptions::default()
++        });
+     start_if_idle(session, request, submission_id, /*is_recovery*/ true).await
+ }
+ 
+diff --git a/codex-rs/core/src/session/turn_input_tests.rs b/codex-rs/core/src/session/turn_input_tests.rs
+index b1eb5f07..7d61bb96 100644
+--- a/codex-rs/core/src/session/turn_input_tests.rs
++++ b/codex-rs/core/src/session/turn_input_tests.rs
+@@ -202,6 +202,7 @@ async fn recovery_rejects_active_turn_without_injecting_or_applying_settings() {
+             approval_policy: Some(AskForApproval::Never),
+             ..Default::default()
+         },
++        false,
+         "recovered-turn".to_string(),
+     )
+     .await
+diff --git a/codex-rs/core/src/stream_events_utils.rs b/codex-rs/core/src/stream_events_utils.rs
+index affdc921..8b456151 100644
+--- a/codex-rs/core/src/stream_events_utils.rs
++++ b/codex-rs/core/src/stream_events_utils.rs
+@@ -12,7 +12,9 @@ use crate::function_tool::FunctionCallError;
+ use crate::parse_turn_item;
+ use crate::session::session::Session;
+ use crate::session::turn_context::TurnContext;
++use crate::tools::parallel::ToolCallCompletion;
+ use crate::tools::parallel::ToolCallRuntime;
++use crate::tools::router::ToolCall;
+ use crate::tools::router::ToolRouter;
+ use crate::tools::router::tool_log_payload;
+ use codex_memories_read::citations::parse_memory_citation;
+@@ -190,13 +192,14 @@ async fn record_stage1_output_usage_for_memory_citation(
+ /// queuing any tool execution futures. This records items immediately so
+ /// history and rollout stay in sync even if the turn is later cancelled.
+ pub(crate) type InFlightFuture<'f> =
+-    Pin<Box<dyn Future<Output = Result<ResponseInputItem>> + Send + 'f>>;
++    Pin<Box<dyn Future<Output = Result<ToolCallCompletion>> + Send + 'f>>;
+ 
+ #[derive(Default)]
+ pub(crate) struct OutputItemResult {
+     pub last_agent_message: Option<String>,
+     pub needs_follow_up: bool,
+     pub tool_future: Option<InFlightFuture<'static>>,
++    pub tool_call: Option<ToolCall>,
+ }
+ 
+ pub(crate) struct HandleOutputCtx {
+@@ -315,6 +318,7 @@ pub(crate) async fn handle_output_item_done(
+             record_completed_response_item(ctx.sess.as_ref(), ctx.turn_context.as_ref(), &item)
+                 .await;
+ 
++            let tool_call = call.clone();
+             let cancellation_token = ctx.cancellation_token.child_token();
+             let tool_future: InFlightFuture<'static> = Box::pin(
+                 ctx.tool_runtime
+@@ -323,6 +327,7 @@ pub(crate) async fn handle_output_item_done(
+             );
+ 
+             output.needs_follow_up = true;
++            output.tool_call = Some(tool_call);
+             output.tool_future = Some(tool_future);
+         }
+         // No tool call: convert messages/reasoning into turn items and mark them as complete.
+diff --git a/codex-rs/core/src/tools/handlers/mod.rs b/codex-rs/core/src/tools/handlers/mod.rs
+index 07f19201..416f1c41 100644
+--- a/codex-rs/core/src/tools/handlers/mod.rs
++++ b/codex-rs/core/src/tools/handlers/mod.rs
+@@ -27,6 +27,7 @@ mod send_user_message_async;
+ mod shell;
+ pub(crate) mod shell_spec;
+ mod sleep;
++pub(crate) mod submit_change_batch;
+ mod test_sync;
+ pub(crate) mod test_sync_spec;
+ mod tool_search;
+@@ -73,6 +74,7 @@ pub use send_user_message_async::SendUserMessageAsyncHandler;
+ pub use shell::ShellCommandHandler;
+ pub(crate) use shell::ShellCommandHandlerOptions;
+ pub use sleep::SleepHandler;
++pub(crate) use submit_change_batch::SubmitChangeBatchHandler;
+ pub use test_sync::TestSyncHandler;
+ pub(crate) use tool_search::ToolSearchHandlerCache;
+ pub use unified_exec::ExecCommandHandler;
+diff --git a/codex-rs/core/src/tools/handlers/submit_change_batch.lark b/codex-rs/core/src/tools/handlers/submit_change_batch.lark
+new file mode 100644
+index 00000000..f97e7ef0
+--- /dev/null
++++ b/codex-rs/core/src/tools/handlers/submit_change_batch.lark
+@@ -0,0 +1,5 @@
++start: "{" ws "\"acceptanceCriteriaIds\"" ws ":" ws string_array ws "," ws "\"disposition\"" ws ":" ws disposition ws "," ws "\"patch\"" ws ":" ws string ws "," ws "\"schemaVersion\"" ws ":" ws "1" ws "," ws "\"validationProfile\"" ws ":" ws string ws "}"
++string_array: "[" ws string (ws "," ws string)* ws "]"
++disposition: "\"final\"" | "\"continue\"" | "\"probe\""
++string: "\"" /([^"\\]|\\.)*/ "\""
++ws: /[ \t\r\n]*/
+diff --git a/codex-rs/core/src/tools/handlers/submit_change_batch.rs b/codex-rs/core/src/tools/handlers/submit_change_batch.rs
+new file mode 100644
+index 00000000..4a17b371
+--- /dev/null
++++ b/codex-rs/core/src/tools/handlers/submit_change_batch.rs
+@@ -0,0 +1,75 @@
++use crate::function_tool::FunctionCallError;
++use crate::tools::context::ToolInvocation;
++use crate::tools::context::ToolPayload;
++use crate::tools::registry::CoreToolRuntime;
++use crate::tools::registry::ToolExecutor;
++use codex_tools::FreeformTool;
++use codex_tools::FreeformToolFormat;
++use codex_tools::ToolName;
++use codex_tools::ToolSpec;
++
++pub(crate) const SUBMIT_CHANGE_BATCH_TOOL_NAME: &str = "submit_change_batch";
++const SUBMIT_CHANGE_BATCH_GRAMMAR: &str = include_str!("submit_change_batch.lark");
++
++/// The terminal delegated tool is advertised only on turns explicitly opted
++/// into host handoff. Its runtime is intercepted by Core before dispatch; a
++/// direct handler is deliberately fail-closed so it cannot mutate a workspace.
++pub(crate) struct SubmitChangeBatchHandler;
++
++impl ToolExecutor<ToolInvocation> for SubmitChangeBatchHandler {
++    fn tool_name(&self) -> ToolName {
++        ToolName::plain(SUBMIT_CHANGE_BATCH_TOOL_NAME)
++    }
++
++    fn spec(&self) -> ToolSpec {
++        ToolSpec::Freeform(FreeformTool {
++            name: SUBMIT_CHANGE_BATCH_TOOL_NAME.to_string(),
++            description: "Submit one bounded ChangeBatch proposal to the host. This terminal tool only hands off the proposal; it does not modify files or run validation.".to_string(),
++            defer_loading: None,
++            format: FreeformToolFormat {
++                r#type: "grammar".to_string(),
++                syntax: "lark".to_string(),
++                definition: SUBMIT_CHANGE_BATCH_GRAMMAR.to_string(),
++            },
++        })
++    }
++
++    fn handle(&self, _invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
++        Box::pin(async {
++            Err(FunctionCallError::Fatal(
++                "submit_change_batch must be handled by the host handoff boundary".to_string(),
++            ))
++        })
++    }
++}
++
++impl CoreToolRuntime for SubmitChangeBatchHandler {
++    fn matches_kind(&self, payload: &ToolPayload) -> bool {
++        matches!(payload, ToolPayload::Custom { .. })
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::SUBMIT_CHANGE_BATCH_GRAMMAR;
++
++    #[test]
++    fn grammar_uses_the_canonical_closed_field_order() {
++        assert!(
++            SUBMIT_CHANGE_BATCH_GRAMMAR
++                .starts_with("start: \"{\" ws \"\\\"acceptanceCriteriaIds\\\"\"")
++        );
++        for field in [
++            "acceptanceCriteriaIds",
++            "disposition",
++            "patch",
++            "schemaVersion",
++            "validationProfile",
++        ] {
++            assert!(SUBMIT_CHANGE_BATCH_GRAMMAR.contains(field));
++        }
++        assert!(SUBMIT_CHANGE_BATCH_GRAMMAR.contains("\\\"final\\\""));
++        assert!(SUBMIT_CHANGE_BATCH_GRAMMAR.contains("\\\"continue\\\""));
++        assert!(SUBMIT_CHANGE_BATCH_GRAMMAR.contains("\\\"probe\\\""));
++    }
++}
+diff --git a/codex-rs/core/src/tools/parallel.rs b/codex-rs/core/src/tools/parallel.rs
+index 5d1ae08c..b1f67555 100644
+--- a/codex-rs/core/src/tools/parallel.rs
++++ b/codex-rs/core/src/tools/parallel.rs
+@@ -4,6 +4,7 @@ use std::sync::atomic::AtomicBool;
+ use std::sync::atomic::Ordering;
+ use std::time::Instant;
+ 
++use futures::future::BoxFuture;
+ use tokio::sync::RwLock;
+ use tokio::task::JoinError;
+ use tokio_util::either::Either;
+@@ -28,6 +29,25 @@ use crate::tools::router::ToolCallSource;
+ use codex_protocol::error::CodexErr;
+ use codex_protocol::models::ResponseInputItem;
+ 
++/// Host-owned terminal handoff produced by the delegated submit tool.
++#[derive(Clone, Debug, Eq, PartialEq)]
++pub(crate) struct ChangeBatchHandoff {
++    pub(crate) call_id: String,
++    pub(crate) proposal: String,
++}
++
++/// Completion of a tool call after Core has admitted its response item.
++#[derive(Debug)]
++pub(crate) enum ToolCallCompletion {
++    Response(ResponseInputItem),
++    Continuation(ToolContinuation),
++}
++
++#[derive(Debug)]
++pub(crate) enum ToolContinuation {
++    YieldToHost(ChangeBatchHandoff),
++}
++
+ struct ToolCallTimingGuard {
+     started_at: Instant,
+     execution_started_at: Arc<OnceLock<Instant>>,
+@@ -74,18 +94,37 @@ impl ToolCallRuntime {
+         self,
+         call: ToolCall,
+         cancellation_token: CancellationToken,
+-    ) -> impl std::future::Future<Output = Result<ResponseInputItem, CodexErr>> {
+-        let error_call = call.clone();
+-        let source = call.direct_source();
+-        let future = self.handle_tool_call_with_source(call, source, cancellation_token);
+-        async move {
+-            match future.await {
+-                Ok(response) => Ok(response.into_response()),
+-                Err(FunctionCallError::Fatal(message)) => Err(CodexErr::Fatal(message)),
+-                Err(other) => Ok(Self::failure_response(error_call, other)),
+-            }
++    ) -> BoxFuture<'static, Result<ToolCallCompletion, CodexErr>> {
++        if self.step_context.turn.submit_change_batch
++            && call.tool_name.name == "submit_change_batch"
++            && let ToolPayload::Custom { input } = &call.payload
++        {
++            let handoff = ChangeBatchHandoff {
++                call_id: call.call_id.clone(),
++                proposal: input.clone(),
++            };
++            return Box::pin(async move {
++                Ok(ToolCallCompletion::Continuation(
++                    ToolContinuation::YieldToHost(handoff),
++                ))
++            });
+         }
+-        .in_current_span()
++
++        Box::pin(
++            async move {
++                let error_call = call.clone();
++                let source = call.direct_source();
++                let future = self.handle_tool_call_with_source(call, source, cancellation_token);
++                match future.await {
++                    Ok(response) => Ok(ToolCallCompletion::Response(response.into_response())),
++                    Err(FunctionCallError::Fatal(message)) => Err(CodexErr::Fatal(message)),
++                    Err(other) => Ok(ToolCallCompletion::Response(Self::failure_response(
++                        error_call, other,
++                    ))),
++                }
++            }
++            .in_current_span(),
++        )
+     }
+ 
+     #[instrument(level = "trace", skip_all)]
+@@ -516,6 +555,37 @@ mod tests {
+ 
+     impl CoreToolRuntime for CountingHandler {}
+ 
++    #[tokio::test]
++    async fn delegated_submit_is_a_lazy_host_handoff() -> anyhow::Result<()> {
++        let (session, mut turn_context) = crate::session::tests::make_session_and_context().await;
++        turn_context.submit_change_batch = true;
++        let session = Arc::new(session);
++        let turn_context = Arc::new(turn_context);
++        let step_context = StepContext::for_test(Arc::clone(&turn_context));
++        let tracker = Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::new()));
++        let runtime = ToolCallRuntime::new(session, step_context, tracker);
++        let result = runtime
++            .handle_tool_call(
++                ToolCall {
++                    tool_name: codex_tools::ToolName::plain("submit_change_batch"),
++                    call_id: "batch-1".to_string(),
++                    payload: ToolPayload::Custom {
++                        input: "{\"schemaVersion\":1}".to_string(),
++                    },
++                    encrypted_function_args: None,
++                },
++                CancellationToken::new(),
++            )
++            .await?;
++        let ToolCallCompletion::Continuation(ToolContinuation::YieldToHost(handoff)) = result
++        else {
++            anyhow::bail!("delegated submit must yield to the host");
++        };
++        assert_eq!(handoff.call_id, "batch-1");
++        assert_eq!(handoff.proposal, "{\"schemaVersion\":1}");
++        Ok(())
++    }
++
+     #[tokio::test]
+     async fn cancellation_while_action_gate_waits_never_enters_handler() -> anyhow::Result<()> {
+         let (session, turn_context) = crate::session::tests::make_session_and_context().await;
+@@ -995,6 +1065,9 @@ mod tests {
+                 success: Some(true),
+             },
+         };
++        let ToolCallCompletion::Response(response) = response else {
++            panic!("ordinary tool call must return a response completion");
++        };
+         assert_eq!(expected_response, response);
+ 
+         let actual = records
+@@ -1063,6 +1136,9 @@ mod tests {
+             .await
+             .expect("timed out waiting for tool response")
+             .expect("tool response task should join")?;
++        let ToolCallCompletion::Response(response) = response else {
++            anyhow::bail!("cancelled tool should return a response completion");
++        };
+         let ResponseInputItem::FunctionCallOutput { output, .. } = response else {
+             anyhow::bail!("cancelled tool should return function output");
+         };
+diff --git a/codex-rs/core/src/tools/spec_plan.rs b/codex-rs/core/src/tools/spec_plan.rs
+index 2141f3d3..d942bdac 100644
+--- a/codex-rs/core/src/tools/spec_plan.rs
++++ b/codex-rs/core/src/tools/spec_plan.rs
+@@ -28,6 +28,7 @@ use crate::tools::handlers::SendUserMessageAsyncHandler;
+ use crate::tools::handlers::ShellCommandHandler;
+ use crate::tools::handlers::ShellCommandHandlerOptions;
+ use crate::tools::handlers::SleepHandler;
++use crate::tools::handlers::SubmitChangeBatchHandler;
+ use crate::tools::handlers::TestSyncHandler;
+ use crate::tools::handlers::ToolSearchHandlerCache;
+ use crate::tools::handlers::ViewImageHandler;
+@@ -144,6 +145,9 @@ pub(crate) fn build_tool_router(
+     };
+     let mut registry = ToolRegistry::default();
+     add_core_tool_sources(&context, &mut registry);
++    if turn_context.submit_change_batch {
++        registry.add(SubmitChangeBatchHandler);
++    }
+ 
+     let hosted_specs = if crate::guardian::is_guardian_reviewer_source(&turn_context.session_source)
+     {
+@@ -270,6 +274,9 @@ pub(crate) fn build_core_tool_registry(
+     };
+     let mut registry = ToolRegistry::default();
+     add_core_tool_sources(&context, &mut registry);
++    if turn_context.submit_change_batch {
++        registry.add(SubmitChangeBatchHandler);
++    }
+     registry
+ }
+ 
+diff --git a/codex-rs/core/tests/suite/turn_input_submission.rs b/codex-rs/core/tests/suite/turn_input_submission.rs
+index 1d73073f..d4452ab2 100644
+--- a/codex-rs/core/tests/suite/turn_input_submission.rs
++++ b/codex-rs/core/tests/suite/turn_input_submission.rs
+@@ -269,6 +269,7 @@ async fn recover_turn_if_idle_preserves_id_and_resumes_plan_mode() {
+                 ..Default::default()
+             },
+             trace: None,
++            submit_change_batch: false,
+         })
+         .await
+         .expect("recovered turn should start");
+diff --git a/codex-rs/protocol/src/protocol.rs b/codex-rs/protocol/src/protocol.rs
+index b2230b0a..66030436 100644
+--- a/codex-rs/protocol/src/protocol.rs
++++ b/codex-rs/protocol/src/protocol.rs
+@@ -577,6 +577,7 @@ pub enum Op {
+     /// Resume an interrupted regular turn.
+     RecoverTurn {
+         thread_settings: ThreadSettingsOverrides,
++        submit_change_batch: bool,
+         reply: oneshot::Sender<CodexResult<TurnInputSubmission>>,
+     },
+ 
+diff --git a/codex-rs/protocol/src/turn_input.rs b/codex-rs/protocol/src/turn_input.rs
+index bc5adbe8..3aacbff7 100644
+--- a/codex-rs/protocol/src/turn_input.rs
++++ b/codex-rs/protocol/src/turn_input.rs
+@@ -47,6 +47,8 @@ pub struct RecoverTurnRequest {
+     pub turn_id: String,
+     pub thread_settings: ThreadSettingsOverrides,
+     pub trace: Option<W3cTraceContext>,
++    /// Re-advertise the host-owned terminal handoff when recovering a delegated turn.
++    pub submit_change_batch: bool,
+ }
+ 
+ impl TurnInputRequest {
+@@ -134,6 +136,8 @@ pub struct TurnStartOptions {
+     /// Structured-output schema for a new turn. When steering, Core rejects
+     /// the input if the active turn uses a different schema.
+     pub final_output_json_schema: Option<Value>,
++    /// Advertise the host-owned terminal submit_change_batch tool for this turn.
++    pub submit_change_batch: bool,
+     /// Parent turn lineage recorded if this request starts a new turn.
+     pub parent_turn_id: Option<String>,
+     /// Causal root turn lineage recorded if this request starts a new turn.

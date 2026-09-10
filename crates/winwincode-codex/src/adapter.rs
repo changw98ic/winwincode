@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::fs::OpenOptions;
 use std::io::{Read as _, Write as _};
@@ -26,7 +26,7 @@ use crate::{
 use codex_apply_patch::{Hunk, parse_patch};
 use codex_protocol::approvals::{ApplyPatchApprovalRequestEvent, ExecApprovalRequestEvent};
 use codex_protocol::models::MessagePhase;
-use codex_protocol::protocol::{Event as CodexEvent, EventMsg as CodexEventMsg};
+use codex_protocol::protocol::{Event as CodexEvent, EventMsg as CodexEventMsg, FileChange};
 use codex_protocol::request_user_input::{
     RequestUserInputAnswer, RequestUserInputEvent, RequestUserInputQuestion,
     RequestUserInputResponse,
@@ -42,26 +42,36 @@ use winwincode_domain::{
 };
 use winwincode_execution_port::{
     action_enforcement::ActionEnforcementSigningKey,
-    action_gateway::ExecutionEnvelopeToken,
+    action_gateway::{ExecutionEnvelopeToken, PostActionHook, PostActionOutcome},
+    action_normalizer::{ActionOperation, ActionSource},
+    agent_config::{
+        AgentProfileSettings, AgentSessionConfigSnapshot, resolve_agent_session_config,
+    },
     capability_adapter::{CapabilityDescriptor, WorkerCapabilityCatalog},
     change_batch_identity::{derive_change_batch_id, validate_change_batch_identity_derivation},
     generated::{
-        ApprovalAction, ApprovalActionCategory, ApprovalDecisionMessage,
-        ApprovalDecisionMessageDecision, ApprovalDecisionMessageScope, ApprovalRequestMessage,
-        ApprovalRequestMessageKind, ArtifactAckMessage, ArtifactReference, ChangeBatchIdentity,
-        ChangeBatchProposal, ChangeBatchProposalDisposition, ChangeBatchProposalEvent,
-        ExecutionEventCategory, ExecutionJob, ExecutionOutcomeUsage, ExecutionPortMessage,
-        ExecutionScope, ExecutionWorkspaceWriteMode, FinalCandidateFreezeFact, InputRequestMessage,
-        InputRequestMessageKind, InputResponseMessage, InputResponseMessageStatus,
-        InteractiveInputChoice, JobOutcomeMessage, ModelChunkMessage, ModelGatewayRoute,
-        RepairLoopCounters, RepairLoopStopReason, RoleSessionPolicyRoleId, RuntimeEventMessage,
-        RuntimeReplayRequestMessage, WorkerCapabilitySet,
+        ApprovalAction, ApprovalActionCategory, ApprovalActionOperation, ApprovalActionReasonCode,
+        ApprovalActionRiskLevel, ApprovalActionSanitizedDetail, ApprovalActionSanitizedDetailKind,
+        ApprovalDecisionMessage, ApprovalDecisionMessageDecision, ApprovalDecisionMessageScope,
+        ApprovalRequestMessage, ApprovalRequestMessageKind, ArtifactAckMessage, ArtifactReference,
+        ChangeBatchIdentity, ChangeBatchProposal, ChangeBatchProposalDisposition,
+        ChangeBatchProposalEvent, ExecutionEventCategory, ExecutionJob, ExecutionOutcomeUsage,
+        ExecutionPortMessage, ExecutionScope, ExecutionWorkspaceWriteMode,
+        FinalCandidateFreezeFact, InputRequestMessage, InputRequestMessageKind,
+        InputResponseMessage, InputResponseMessageStatus, InteractiveInputChoice,
+        JobOutcomeMessage, ModelChunkMessage, ModelGatewayRoute, RepairLoopCounters,
+        RepairLoopStopReason, RoleSessionPolicyRoleId, RoleSessionPolicyWorkspaceMode,
+        RuntimeEventMessage, RuntimeReplayRequestMessage, WorkerCapabilitySet,
     },
     repair_loop_context::{
         validate_final_candidate_freeze_fact, validate_repair_loop_budget,
         validate_repair_loop_context_pack, validate_repair_loop_counters,
     },
     replay::ReplayStore,
+    repository_rule_pack::{
+        REPOSITORY_RULE_PACK_PATH, RepositoryRuleEvent, RepositoryRuleFact, RepositoryRulePack,
+        language_for_path,
+    },
     runtime_replay::RuntimeReplayIdentity,
     runtime_trace_outbox::{
         ExecutionMode, ObserverMode, RuntimeTraceDraft, RuntimeTraceFact, RuntimeTraceIdentity,
@@ -103,6 +113,7 @@ const FORMAT_REPAIR_PROMPT: &str = "Return only one corrected JSON object matchi
 
 const DEFAULT_EVENT_POLL_MILLIS: u64 = 25;
 const KERNEL_HOME_DIRECTORY: &str = "kernel-home";
+const MAX_REPOSITORY_RULE_PACK_BYTES: u64 = 64 * 1024;
 const ROLE_POLICY_V2_MIGRATION: &str = "role-session-policy-v1-to-v2";
 
 /// Unvalidated caller-owned production options.
@@ -597,6 +608,152 @@ impl ProductionCodexAdapter {
                 Err(unavailable())
             }
         }
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        reason = "post-action source retention and its replay marker form one crash-safe transition"
+    )]
+    fn retain_post_action_trace(
+        &mut self,
+        run_key: &str,
+        source_key: &str,
+        source: ActionSource,
+        operation: ActionOperation,
+        outcome: PostActionOutcome,
+        mut actions: Vec<PostActionHook>,
+        occurred_at: &Instant,
+    ) -> Result<Option<RuntimeEventMessage>, ProductionCodexError> {
+        actions.sort_unstable();
+        actions.dedup();
+        if actions.is_empty() {
+            return Ok(None);
+        }
+        if !safe_approval_text(source_key) {
+            return Err(conflict());
+        }
+        let existing = self
+            .runs
+            .get(run_key)
+            .ok_or_else(unknown_thread)?
+            .record
+            .post_action_traces
+            .iter()
+            .find(|trace| trace.source_key == source_key)
+            .cloned();
+        if let Some(existing) = existing.as_ref() {
+            if existing.source != source
+                || existing.operation != operation
+                || existing.outcome != outcome
+                || existing.actions != actions
+            {
+                return Err(conflict());
+            }
+            if existing.retained {
+                return Ok(None);
+            }
+        } else {
+            let run = self.runs.get(run_key).ok_or_else(unknown_thread)?;
+            let identity = RuntimeReplayIdentity {
+                lease: run.binding.authority.lease.clone(),
+                worker_session_id: run.binding.authority.worker_session_id.clone(),
+                session_identity: run.binding.authority.session_identity.clone(),
+                codex_thread_id: run.binding.canonical_thread_id.clone(),
+            };
+            let sequence = ReplayStore::load(&mut self.store, &identity.stream_key())
+                .map_err(map_store_error)?
+                .unwrap_or_default()
+                .highest_sequence
+                .checked_add(1)
+                .ok_or_else(unavailable)?;
+            let trace = StoredPostActionTrace {
+                source_key: source_key.to_owned(),
+                event_id: ExecutionEventId(canonical_id(
+                    "xevt",
+                    b"codex-post-action-event",
+                    run_key,
+                    sequence,
+                )),
+                sequence: ExecutionSequence(i64::try_from(sequence).map_err(|_| unavailable())?),
+                source,
+                operation,
+                outcome,
+                actions: actions.clone(),
+                occurred_at: occurred_at.clone(),
+                retained: false,
+            };
+            self.runs
+                .get_mut(run_key)
+                .ok_or_else(unknown_thread)?
+                .record
+                .post_action_traces
+                .push(trace);
+            self.persist_run(run_key)?;
+        }
+        let trace = self
+            .runs
+            .get(run_key)
+            .ok_or_else(unknown_thread)?
+            .record
+            .post_action_traces
+            .iter()
+            .find(|trace| trace.source_key == source_key)
+            .cloned()
+            .ok_or_else(unavailable)?;
+        let run = self.runs.get(run_key).ok_or_else(unknown_thread)?;
+        let identity = RuntimeTraceIdentity {
+            lease: run.binding.authority.lease.clone(),
+            worker_session_id: run.binding.authority.worker_session_id.clone(),
+            session_identity: run.binding.authority.session_identity.clone(),
+            message_id: ExecutionMessageId(canonical_id(
+                "xmsg",
+                b"codex-post-action-message",
+                run_key,
+                u64::try_from(trace.sequence.0).map_err(|_| unavailable())?,
+            )),
+            event_id: trace.event_id.clone(),
+            sequence: trace.sequence,
+            occurred_at: trace.occurred_at.clone(),
+            sent_at: trace.occurred_at.clone(),
+        };
+        let draft = RuntimeTraceDraft::post_action(
+            identity,
+            trace.source,
+            trace.operation,
+            trace.outcome,
+            trace.actions.clone(),
+        )
+        .map_err(|_| unavailable())?;
+        let (message, duplicate) = match self
+            .installation
+            .runtime_trace_outbox
+            .retain(&mut self.store, &self.bridge.authority(), draft)
+            .map_err(|_| unavailable())?
+        {
+            RuntimeTraceRetention::Ready {
+                message, duplicate, ..
+            } => (*message, duplicate),
+            RuntimeTraceRetention::Gap { .. } | RuntimeTraceRetention::Conflict { .. } => {
+                return Err(conflict());
+            }
+        };
+        if !duplicate {
+            self.outbox
+                .retain(&ExecutionPortMessage::RuntimeEventMessage(message.clone()))
+                .map_err(map_store_error)?;
+        }
+        self.runs
+            .get_mut(run_key)
+            .ok_or_else(unknown_thread)?
+            .record
+            .post_action_traces
+            .iter_mut()
+            .find(|stored| stored.source_key == source_key)
+            .ok_or_else(unavailable)?
+            .retained = true;
+        self.persist_run(run_key)?;
+        Ok((!duplicate).then_some(message))
     }
 
     fn retain_stage_projection(
@@ -1106,6 +1263,16 @@ impl ProductionCodexAdapter {
         event: CodexEvent,
         now: &Instant,
     ) -> Result<CodexPoll, ProductionCodexError> {
+        if let CodexEventMsg::PatchApplyEnd(patch) = &event.msg {
+            self.record_patch_completion(run_key, patch, now)?;
+            return self
+                .retain_patch_post_action(run_key, patch, now)
+                .map(|message| {
+                    message.map_or(CodexPoll::Pending, |message| {
+                        CodexPoll::RuntimeTrace(Box::new(message))
+                    })
+                });
+        }
         if self.record_standalone_performance_event(run_key, &event.msg, now)? {
             return Ok(CodexPoll::Pending);
         }
@@ -1210,7 +1377,6 @@ impl ProductionCodexAdapter {
             CodexEventMsg::PatchApplyBegin(call) => {
                 self.record_patch_start(run_key, &call.call_id, now)
             }
-            CodexEventMsg::PatchApplyEnd(call) => self.record_patch_completion(run_key, call, now),
             CodexEventMsg::McpToolCallBegin(call) => {
                 self.record_tool_start(run_key, &call.call_id, now)
             }
@@ -1683,9 +1849,114 @@ impl ProductionCodexAdapter {
         let Ok(stage) = self.retain_stage_command_end(run_key, command_end, now) else {
             return self.retain_stage_failure(run_key, now);
         };
+        let hook = self.retain_command_post_action(run_key, command_end, now)?;
+        if let Some(hook) = hook {
+            if stage.is_some() {
+                self.runs
+                    .get_mut(run_key)
+                    .ok_or_else(unknown_thread)?
+                    .replay
+                    .push_back(hook);
+            } else {
+                return Ok(CodexPoll::RuntimeTrace(Box::new(hook)));
+            }
+        }
         Ok(stage.map_or(CodexPoll::Pending, |stage| {
             CodexPoll::RuntimeTrace(Box::new(stage))
         }))
+    }
+
+    fn retain_command_post_action(
+        &mut self,
+        run_key: &str,
+        command_end: &codex_protocol::protocol::ExecCommandEndEvent,
+        now: &Instant,
+    ) -> Result<Option<RuntimeEventMessage>, ProductionCodexError> {
+        let outcome = match command_end.status {
+            codex_protocol::protocol::ExecCommandStatus::Completed
+                if command_end.exit_code == 0 =>
+            {
+                PostActionOutcome::Succeeded
+            }
+            codex_protocol::protocol::ExecCommandStatus::Failed => PostActionOutcome::Failed,
+            codex_protocol::protocol::ExecCommandStatus::Completed
+            | codex_protocol::protocol::ExecCommandStatus::Declined => return Ok(None),
+        };
+        let actions = self
+            .runs
+            .get(run_key)
+            .ok_or_else(unknown_thread)?
+            .record
+            .repository_rule_pack
+            .dry_run(&RepositoryRuleFact {
+                event: RepositoryRuleEvent::CommandFinished,
+                language: None,
+                path: None,
+                outcome: Some(outcome),
+            })
+            .map_err(|_| unavailable())?
+            .actions;
+        self.retain_post_action_trace(
+            run_key,
+            &canonical_parts_id(
+                "hook",
+                b"codex-command-post-action-source",
+                &[
+                    command_end.turn_id.as_bytes(),
+                    command_end.call_id.as_bytes(),
+                ],
+            ),
+            ActionSource::Shell,
+            ActionOperation::Execute,
+            outcome,
+            actions,
+            now,
+        )
+    }
+
+    fn retain_patch_post_action(
+        &mut self,
+        run_key: &str,
+        patch: &codex_protocol::protocol::PatchApplyEndEvent,
+        now: &Instant,
+    ) -> Result<Option<RuntimeEventMessage>, ProductionCodexError> {
+        if !patch.success {
+            return Ok(None);
+        }
+        let rules = &self
+            .runs
+            .get(run_key)
+            .ok_or_else(unknown_thread)?
+            .record
+            .repository_rule_pack;
+        let mut actions = BTreeSet::new();
+        for path in patch.changes.keys() {
+            let changed_path = path.to_str().ok_or_else(unavailable)?;
+            actions.extend(
+                rules
+                    .dry_run(&RepositoryRuleFact {
+                        event: RepositoryRuleEvent::FileChanged,
+                        language: language_for_path(changed_path),
+                        path: Some(changed_path),
+                        outcome: Some(PostActionOutcome::Succeeded),
+                    })
+                    .map_err(|_| unavailable())?
+                    .actions,
+            );
+        }
+        self.retain_post_action_trace(
+            run_key,
+            &canonical_parts_id(
+                "hook",
+                b"codex-patch-post-action-source",
+                &[patch.turn_id.as_bytes(), patch.call_id.as_bytes()],
+            ),
+            ActionSource::File,
+            ActionOperation::Modify,
+            PostActionOutcome::Succeeded,
+            actions.into_iter().collect(),
+            now,
+        )
     }
 
     fn record_performance_start(
@@ -1971,9 +2242,13 @@ impl ProductionCodexAdapter {
         }))
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "restart validation installs one run only after all durable identities reconcile"
+    )]
     fn install_active_run(
         &mut self,
-        run_key: String,
+        run_key: &str,
         mut record: StoredRun,
         binding: ModelRunBinding,
         kernel_live: bool,
@@ -1986,6 +2261,46 @@ impl ProductionCodexAdapter {
                 .retain(&ExecutionPortMessage::RuntimeEventMessage(message.clone()))
                 .map_err(map_store_error)?;
         }
+        record.repository_rule_pack.lint().map_err(|_| conflict())?;
+        let mut post_action_sources = HashSet::new();
+        for trace in &mut record.post_action_traces {
+            if !post_action_sources.insert(trace.source_key.as_str())
+                || trace.actions.is_empty()
+                || !safe_approval_text(&trace.source_key)
+            {
+                return Err(conflict());
+            }
+            if !trace.retained
+                && let Some(message) = replay.iter().find(|message| {
+                    message.event.event_id == trace.event_id
+                        && message.event.sequence == trace.sequence
+                })
+            {
+                let expected = format!(
+                    "post-action {:?} for {:?} {:?}",
+                    match trace.outcome {
+                        PostActionOutcome::Succeeded => {
+                            winwincode_execution_port::runtime_trace_outbox::ToolTraceOutcome::Succeeded
+                        }
+                        PostActionOutcome::Failed => {
+                            winwincode_execution_port::runtime_trace_outbox::ToolTraceOutcome::Failed
+                        }
+                    },
+                    trace.source,
+                    trace.operation
+                );
+                if message.event.summary != expected {
+                    return Err(conflict());
+                }
+                trace.retained = true;
+            }
+        }
+        let pending_post_actions = record
+            .post_action_traces
+            .iter()
+            .filter(|trace| !trace.retained)
+            .cloned()
+            .collect::<Vec<_>>();
         if record.phase == StoredRunPhase::TerminalTracePending
             && let Some(terminal_trace) = record.terminal_trace.as_mut()
             && let Some(message) = replay.iter().find(|message| {
@@ -2023,7 +2338,7 @@ impl ProductionCodexAdapter {
             validate_stored_batch_intent(&record, &binding, intent)?;
         }
         self.store
-            .save_run(&run_key, &record)
+            .save_run(run_key, &record)
             .map_err(map_store_error)?;
         self.bridge
             .install_binding(binding.clone())
@@ -2041,7 +2356,7 @@ impl ProductionCodexAdapter {
         if record.terminal.is_none() {
             for operation in self
                 .store
-                .list_pending_approval_operations(&run_key)
+                .list_pending_approval_operations(run_key)
                 .map_err(map_store_error)?
             {
                 if operation.run_key != run_key
@@ -2057,9 +2372,9 @@ impl ProductionCodexAdapter {
             }
         }
         self.thread_to_run
-            .insert(thread_id.0.clone(), run_key.clone());
+            .insert(thread_id.0.clone(), run_key.to_owned());
         self.runs.insert(
-            run_key,
+            run_key.to_owned(),
             ActiveRun {
                 record,
                 binding,
@@ -2070,6 +2385,23 @@ impl ProductionCodexAdapter {
                 format_repair_reconciliation: OneShotState::Ready,
             },
         );
+        for trace in pending_post_actions {
+            if let Some(message) = self.retain_post_action_trace(
+                run_key,
+                &trace.source_key,
+                trace.source,
+                trace.operation,
+                trace.outcome,
+                trace.actions,
+                &trace.occurred_at,
+            )? {
+                self.runs
+                    .get_mut(run_key)
+                    .ok_or_else(unknown_thread)?
+                    .replay
+                    .push_back(message);
+            }
+        }
         Ok(thread_id)
     }
 
@@ -2083,12 +2415,16 @@ impl ProductionCodexAdapter {
             .clone()
             .unwrap_or_else(|| request.call_id.clone());
         let turn_id = non_empty(request.turn_id.clone());
+        let request_digest =
+            private_payload_digest(b"winwincode.exec-approval-request.v1", request)?;
+        let detail = exec_approval_detail(request, &request_digest);
         self.retain_approval_request(
             run_key,
             StoredApprovalOperationKind::Exec,
             operation_id,
             turn_id,
-            private_payload_digest(b"winwincode.exec-approval-request.v1", request)?,
+            request_digest,
+            detail,
         )
     }
 
@@ -2097,12 +2433,16 @@ impl ProductionCodexAdapter {
         run_key: &str,
         request: &ApplyPatchApprovalRequestEvent,
     ) -> Result<ApprovalRequestMessage, ProductionCodexError> {
+        let request_digest =
+            private_payload_digest(b"winwincode.patch-approval-request.v1", request)?;
+        let detail = patch_approval_detail(request, &request_digest);
         self.retain_approval_request(
             run_key,
             StoredApprovalOperationKind::Patch,
             request.call_id.clone(),
             non_empty(request.turn_id.clone()),
-            private_payload_digest(b"winwincode.patch-approval-request.v1", request)?,
+            request_digest,
+            detail,
         )
     }
 
@@ -2113,6 +2453,7 @@ impl ProductionCodexAdapter {
         operation_id: String,
         turn_id: Option<String>,
         request_digest: String,
+        detail: Option<ApprovalActionSanitizedDetail>,
     ) -> Result<ApprovalRequestMessage, ProductionCodexError> {
         let run = self.runs.get(run_key).ok_or_else(unknown_thread)?;
         let kind = match operation_kind {
@@ -2137,6 +2478,7 @@ impl ProductionCodexAdapter {
             operation_id,
             turn_id,
             request_digest,
+            detail,
             resolution_digest: None,
             state: StoredApprovalOperationState::Pending,
         };
@@ -2151,6 +2493,7 @@ impl ProductionCodexAdapter {
                 || existing.operation_id != operation.operation_id
                 || existing.turn_id != operation.turn_id
                 || existing.request_digest != operation.request_digest
+                || existing.detail != operation.detail
             {
                 return Err(conflict());
             }
@@ -2270,7 +2613,12 @@ impl ProductionCodexAdapter {
                 "durable Codex rollout is unavailable for exact restart",
             )
         })?;
-        let options = session_options(&self.config, workspace, role_policy);
+        let options = session_options(
+            &self.config,
+            workspace,
+            role_policy,
+            record.agent_config.clone(),
+        );
         let session = if rollout_path.is_file() {
             self.kernel
                 .resume_session(rollout_path, options)
@@ -2574,6 +2922,12 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
         validate_start(start)?;
         let job_digest = stage_product_job_digest(start.job).map_err(|_| invalid_job())?;
         let role_policy = sealed_role_session_policy(start.job)?;
+        let agent_config = production_agent_session_config(
+            &self.config,
+            start.worker_id,
+            start.job,
+            role_policy.as_ref(),
+        )?;
         let workspace = canonical_workspace(start.workspace)?;
         let run_key = start
             .run_key
@@ -2585,6 +2939,7 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
             if run.record.job_digest == job_digest
                 && run.record.workspace == workspace
                 && run.record.workspace_revision == *start.workspace_revision
+                && run.record.agent_config == agent_config
                 && run.binding.authority.lease == *start.lease
                 && run.binding.authority.worker_session_id == *start.worker_session_id
             {
@@ -2623,6 +2978,7 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
                 || (record.workspace_revision != *start.workspace_revision
                     && !delegated_workspace_advance
                     && !frozen_workspace)
+                || record.agent_config != agent_config
                 || record.role_policy != role_policy
             {
                 return Err(conflict());
@@ -2646,27 +3002,50 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
                 authority,
                 opened_at: record.last_activity_at.clone(),
             };
-            let result = self.install_active_run(run_key, record, binding, kernel_live, true);
+            let result = self.install_active_run(&run_key, record, binding, kernel_live, true);
             return result;
         }
+        let repository_rule_pack = load_repository_rule_pack(&workspace)?;
         let session = self
             .kernel
             .create_session(session_options(
                 &self.config,
                 &workspace,
                 role_policy.clone(),
+                agent_config.clone(),
             ))
             .await
             .map_err(|_| kernel_error())?;
-        let record = prepared_stored_run(
-            &start,
-            thread_id.clone(),
+        let record = StoredRun {
+            job: start.job.clone(),
+            workspace_revision: start.workspace_revision.clone(),
+            canonical_thread_id: thread_id.clone(),
             job_digest,
             workspace,
+            repository_rule_pack,
             role_policy,
-            session.session_id.clone(),
-            session.rollout_path.map(PathBuf::from),
-        );
+            agent_config,
+            kernel_session_id: session.session_id.clone(),
+            rollout_path: session.rollout_path.map(PathBuf::from),
+            submission_id: Uuid::now_v7().to_string(),
+            submission_digest: None,
+            phase: StoredRunPhase::Prepared,
+            last_tokens: 0,
+            last_runtime_millis: 0,
+            last_activity_at: start.lease.issued_at.clone(),
+            terminal: None,
+            terminal_trace: None,
+            current_turn_id: None,
+            last_agent_message: None,
+            stage_product_sources: Vec::new(),
+            batch_intent: None,
+            format_repair: None,
+            delegated_transitions: Vec::new(),
+            final_candidate_freeze: None,
+            delegated_stop: None,
+            terminal_message_id: None,
+            post_action_traces: Vec::new(),
+        };
         self.store
             .save_run(&run_key, &record)
             .map_err(map_store_error)?;
@@ -2677,7 +3056,7 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
             authority,
             opened_at: start.lease.issued_at.clone(),
         };
-        self.install_active_run(run_key, record, binding, true, false)
+        self.install_active_run(&run_key, record, binding, true, false)
     }
 
     #[allow(clippy::too_many_lines)]
@@ -3804,21 +4183,28 @@ fn approval_request_message(
     operation: &StoredApprovalOperation,
     authority: &ModelLeaseAuthority,
 ) -> ApprovalRequestMessage {
-    let (category, summary) = match operation.operation_kind {
-        StoredApprovalOperationKind::Exec => (
-            ApprovalActionCategory::Shell,
-            "Approve embedded shell execution.",
-        ),
-        StoredApprovalOperationKind::Patch => (
+    let (category, summary) = match (&operation.operation_kind, operation.detail.as_ref()) {
+        (StoredApprovalOperationKind::Exec, Some(detail))
+            if detail.reason_code == ApprovalActionReasonCode::NetworkAccess =>
+        {
+            (
+                ApprovalActionCategory::Network,
+                "Review outbound network access.",
+            )
+        }
+        (StoredApprovalOperationKind::Exec, _) => {
+            (ApprovalActionCategory::Shell, "Review shell execution.")
+        }
+        (StoredApprovalOperationKind::Patch, _) => (
             ApprovalActionCategory::FilesystemWrite,
-            "Approve embedded file changes.",
+            "Review filesystem changes.",
         ),
     };
     let approval_id = &operation.approval_id;
     ApprovalRequestMessage {
         action: ApprovalAction {
             category,
-            details: None,
+            sanitized_detail: operation.detail.clone(),
             summary: summary.to_owned(),
         },
         approval_id: ApprovalId(approval_id.clone()),
@@ -3842,6 +4228,96 @@ fn approval_request_message(
     }
 }
 
+fn exec_approval_detail(
+    request: &ExecApprovalRequestEvent,
+    request_digest: &str,
+) -> Option<ApprovalActionSanitizedDetail> {
+    let executable = request
+        .command
+        .first()
+        .and_then(|value| Path::new(value).file_name())
+        .and_then(|value| value.to_str())
+        .filter(|value| safe_approval_text(value))?;
+    let (target, reason_code) = if let Some(network) = &request.network_approval_context {
+        if !safe_approval_text(&network.host) {
+            return None;
+        }
+        (
+            format!("network:{:?}:{}", network.protocol, network.host).to_ascii_lowercase(),
+            ApprovalActionReasonCode::NetworkAccess,
+        )
+    } else {
+        (
+            format!(
+                "program:{executable};argument_count:{}",
+                request.command.len().saturating_sub(1)
+            ),
+            ApprovalActionReasonCode::SandboxEscalation,
+        )
+    };
+    Some(ApprovalActionSanitizedDetail {
+        kind: ApprovalActionSanitizedDetailKind::Available,
+        operation: ApprovalActionOperation::Execute,
+        reason_code,
+        request_sha256: Sha256Digest(request_digest.to_owned()),
+        risk_level: ApprovalActionRiskLevel::High,
+        target_count: 1,
+        target_summaries: vec![target],
+        working_directory: Some("workspace".to_owned()),
+    })
+}
+
+fn patch_approval_detail(
+    request: &ApplyPatchApprovalRequestEvent,
+    request_digest: &str,
+) -> Option<ApprovalActionSanitizedDetail> {
+    let mut targets = request
+        .changes
+        .iter()
+        .filter_map(|(path, change)| {
+            let path = safe_relative_approval_path(path)?;
+            let operation = match change {
+                FileChange::Add { .. } => "create",
+                FileChange::Delete { .. } => "delete",
+                FileChange::Update { .. } => "modify",
+            };
+            Some(format!("{operation}:{path}"))
+        })
+        .collect::<Vec<_>>();
+    targets.sort_unstable();
+    targets.dedup();
+    if targets.is_empty() {
+        return None;
+    }
+    targets.truncate(20);
+    Some(ApprovalActionSanitizedDetail {
+        kind: ApprovalActionSanitizedDetailKind::Available,
+        operation: ApprovalActionOperation::Modify,
+        reason_code: ApprovalActionReasonCode::FilesystemWrite,
+        request_sha256: Sha256Digest(request_digest.to_owned()),
+        risk_level: ApprovalActionRiskLevel::Medium,
+        target_count: i64::try_from(request.changes.len()).ok()?.min(10_000),
+        target_summaries: targets,
+        working_directory: None,
+    })
+}
+
+fn safe_relative_approval_path(path: &Path) -> Option<String> {
+    if path.is_absolute()
+        || path
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return None;
+    }
+    let value = path.to_str()?;
+    (safe_approval_text(value) && value.len() <= 480).then(|| value.to_owned())
+}
+
+fn safe_approval_text(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 253 && !value.chars().any(char::is_control)
+}
+
 struct ActiveRun {
     record: StoredRun,
     binding: ModelRunBinding,
@@ -3856,44 +4332,6 @@ struct ActiveRun {
 enum OneShotState {
     Ready,
     Consumed,
-}
-
-fn prepared_stored_run(
-    start: &CodexThreadStart<'_>,
-    canonical_thread_id: CodexThreadId,
-    job_digest: Sha256Digest,
-    workspace: PathBuf,
-    role_policy: Option<RoleSessionPolicy>,
-    kernel_session_id: String,
-    rollout_path: Option<PathBuf>,
-) -> StoredRun {
-    StoredRun {
-        job: start.job.clone(),
-        workspace_revision: start.workspace_revision.clone(),
-        canonical_thread_id,
-        job_digest,
-        workspace,
-        role_policy,
-        kernel_session_id,
-        rollout_path,
-        submission_id: Uuid::now_v7().to_string(),
-        submission_digest: None,
-        phase: StoredRunPhase::Prepared,
-        last_tokens: 0,
-        last_runtime_millis: 0,
-        last_activity_at: start.lease.issued_at.clone(),
-        terminal: None,
-        terminal_trace: None,
-        current_turn_id: None,
-        last_agent_message: None,
-        stage_product_sources: Vec::new(),
-        batch_intent: None,
-        format_repair: None,
-        delegated_transitions: Vec::new(),
-        final_candidate_freeze: None,
-        delegated_stop: None,
-        terminal_message_id: None,
-    }
 }
 
 fn load_stored_run(
@@ -3950,7 +4388,9 @@ struct StoredRun {
     canonical_thread_id: CodexThreadId,
     job_digest: Sha256Digest,
     workspace: PathBuf,
+    repository_rule_pack: RepositoryRulePack,
     role_policy: Option<RoleSessionPolicy>,
+    agent_config: AgentSessionConfigSnapshot,
     kernel_session_id: String,
     rollout_path: Option<PathBuf>,
     submission_id: String,
@@ -3988,6 +4428,8 @@ struct StoredRun {
     /// compaction so exact terminal replay does not allocate a new id.
     #[serde(default)]
     terminal_message_id: Option<ExecutionMessageId>,
+    #[serde(default)]
+    post_action_traces: Vec<StoredPostActionTrace>,
 }
 
 fn terminal_performance_runtime(
@@ -4049,6 +4491,20 @@ enum StoredDelegatedTransitionState {
 struct StoredTerminalTrace {
     event_id: ExecutionEventId,
     sequence: ExecutionSequence,
+    retained: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct StoredPostActionTrace {
+    source_key: String,
+    event_id: ExecutionEventId,
+    sequence: ExecutionSequence,
+    source: ActionSource,
+    operation: ActionOperation,
+    outcome: PostActionOutcome,
+    actions: Vec<PostActionHook>,
+    occurred_at: Instant,
     retained: bool,
 }
 
@@ -4131,6 +4587,7 @@ impl StoredTerminal {
 
 fn validate_start(start: CodexThreadStart<'_>) -> Result<(), ProductionCodexError> {
     if start.run_key.job_id != start.job.job_id
+        || start.worker_id != &start.lease.worker_id
         || start.run_key.attempt != start.job.attempt
         || start.run_key.job_id != start.lease.job_id
         || start.run_key.attempt != start.lease.attempt
@@ -4152,19 +4609,19 @@ fn validate_start(start: CodexThreadStart<'_>) -> Result<(), ProductionCodexErro
 }
 
 fn session_identity(start: CodexThreadStart<'_>, thread_id: CodexThreadId) -> SessionIdentity {
-    let (product_session_id, stage_run_id) = match &start.job.scope {
+    let (product_session_id, work_run_id) = match &start.job.scope {
         ExecutionScope::ProductSessionExecutionScope(scope) => {
             (scope.product_session_id.clone(), None)
         }
-        ExecutionScope::DeliveryStageExecutionScope(scope) => (
+        ExecutionScope::WorkRunExecutionScope(scope) => (
             scope.product_session_id.clone(),
-            Some(scope.stage_run_id.clone()),
+            Some(scope.work_run_id.clone()),
         ),
     };
     SessionIdentity {
         codex_thread_id: thread_id,
         product_session_id,
-        stage_run_id,
+        work_run_id,
         worker_session_id: start.worker_session_id.clone(),
     }
 }
@@ -4173,13 +4630,65 @@ fn session_options(
     config: &ProductionCodexConfig,
     workspace: &Path,
     role_policy: Option<RoleSessionPolicy>,
+    agent_config: AgentSessionConfigSnapshot,
 ) -> SessionOptions {
     SessionOptions {
         cwd: workspace.to_path_buf(),
         provider: config.provider.clone(),
         model: config.model.clone(),
         role_policy,
+        agent_config,
     }
+}
+
+fn production_agent_session_config(
+    config: &ProductionCodexConfig,
+    worker_id: &WorkerId,
+    job: &ExecutionJob,
+    role_policy: Option<&RoleSessionPolicy>,
+) -> Result<AgentSessionConfigSnapshot, ProductionCodexError> {
+    let mut tools = config
+        .registered_capabilities
+        .features
+        .iter()
+        .map(|feature| {
+            serde_json::to_value(feature)
+                .ok()
+                .and_then(|value| value.as_str().map(|name| format!("worker:{name}")))
+                .ok_or_else(invalid_job)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    tools.extend(
+        config
+            .discovered_capabilities
+            .iter()
+            .map(|capability| capability.id().to_owned()),
+    );
+    let sandbox = role_policy.map_or_else(
+        || match job.workspace.write_mode {
+            ExecutionWorkspaceWriteMode::ReadOnly => "read-only",
+            ExecutionWorkspaceWriteMode::Candidate => "candidate",
+        },
+        |policy| match policy.workspace_mode {
+            RoleSessionPolicyWorkspaceMode::SourceReadOnly => "source-read-only",
+            RoleSessionPolicyWorkspaceMode::CandidateReadOnly => "candidate-read-only",
+            RoleSessionPolicyWorkspaceMode::CandidateWrite => "candidate-write",
+        },
+    );
+    resolve_agent_session_config(
+        worker_id,
+        &config.registered_capabilities,
+        &job.execution_profile,
+        AgentProfileSettings {
+            provider: config.provider.clone(),
+            model: config.model.clone(),
+            reasoning: "provider_default".to_owned(),
+            tools,
+            sandbox: sandbox.to_owned(),
+            instructions: role_policy.map(|policy| policy.developer_instructions.clone()),
+        },
+    )
+    .map_err(|_| invalid_job())
 }
 
 fn sealed_job_role_execution_mode(job: &ExecutionJob) -> RoleExecutionMode {
@@ -4279,6 +4788,7 @@ fn turn_submission_options(record: &StoredRun) -> TurnSubmissionOptions {
     TurnSubmissionOptions {
         final_output_json_schema: is_delegated_composer(record)
             .then(change_batch_proposal_json_schema),
+        submit_change_batch: is_delegated_composer(record),
     }
 }
 
@@ -4534,13 +5044,14 @@ fn validate_delegated_proposal(
     proposal: &ChangeBatchProposal,
 ) -> Result<(), ProductionCodexError> {
     let expected = job
-        .stage_input
+        .work_input
         .as_ref()
-        .and_then(|input| input.task.as_ref())
-        .map(|task| {
-            task.acceptance_criterion_ids
+        .map(|input| {
+            input
+                .work_item
+                .criterion_ids
                 .iter()
-                .map(String::as_str)
+                .map(|id| id.0.as_str())
                 .collect::<HashSet<_>>()
         })
         .ok_or_else(invalid_delegated_output)?;
@@ -4581,6 +5092,55 @@ fn canonical_workspace(workspace: &Path) -> Result<PathBuf, ProductionCodexError
     }
     workspace
         .canonicalize()
+        .map_err(|_| invalid_configuration())
+}
+
+fn load_repository_rule_pack(workspace: &Path) -> Result<RepositoryRulePack, ProductionCodexError> {
+    let directory = workspace.join(".winwincode");
+    match std::fs::symlink_metadata(&directory) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(RepositoryRulePack::project_defaults());
+        }
+        Err(_) => return Err(invalid_configuration()),
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            return Err(invalid_configuration());
+        }
+        Ok(_) => {}
+    }
+    let path = workspace.join(REPOSITORY_RULE_PACK_PATH);
+    let metadata = match std::fs::symlink_metadata(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(RepositoryRulePack::project_defaults());
+        }
+        Err(_) => return Err(invalid_configuration()),
+        Ok(metadata) => metadata,
+    };
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.len() > MAX_REPOSITORY_RULE_PACK_BYTES
+    {
+        return Err(invalid_configuration());
+    }
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    options.custom_flags(if cfg!(target_os = "macos") {
+        0x100
+    } else {
+        0x20_000
+    });
+    let mut bytes = Vec::new();
+    options
+        .open(path)
+        .map_err(|_| invalid_configuration())?
+        .take(MAX_REPOSITORY_RULE_PACK_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| invalid_configuration())?;
+    if bytes.len() as u64 > MAX_REPOSITORY_RULE_PACK_BYTES {
+        return Err(invalid_configuration());
+    }
+    RepositoryRulePack::from_json(&bytes)
+        .and_then(RepositoryRulePack::with_project_defaults)
         .map_err(|_| invalid_configuration())
 }
 
@@ -5354,18 +5914,18 @@ fn map_bridge_error(_: BridgeError) -> ProductionCodexError {
 mod tests {
     use super::{
         AdapterStore, ExecutionMode, HELPER_RELEASE_BINARY_MODE, MAX_HELPER_BYTES,
-        ModelLeaseAuthority, ModelRunBinding, ProductionCodexErrorKind, RoleExecutionMode,
-        StoredRun, StoredRunPhase, TurnSubmissionOptions,
+        ModelLeaseAuthority, ModelRunBinding, ProductionCodexErrorKind, RepositoryRulePack,
+        RoleExecutionMode, RoleSessionPolicy, StoredRun, StoredRunPhase, TurnSubmissionOptions,
         allocate_interactive_input_choice_identities, bounded_helper_handshake,
         decode_kernel_event, delegated_budget_stop, delegated_budget_stopped_counters,
-        delegated_change_batch_event, interactive_input_choice_replay_keys, load_stored_run,
-        migrate_stored_run_role_policies_v1_to_v2, performance_execution_mode,
-        performance_execution_mode_for_role, project_helper, project_interactive_input_choices,
-        read_helper_bytes, released_production_execution_mode_required, role_session_policy,
-        seal_helper, sealed_job_role_execution_mode, submission_input_digest,
-        terminate_helper_process_group, turn_submission_options, validate_delegated_patch,
-        validate_delegated_patch_path, validate_helper_image, validate_sealed_helper,
-        validate_stored_batch_intent,
+        delegated_change_batch_event, interactive_input_choice_replay_keys,
+        load_repository_rule_pack, load_stored_run, migrate_stored_run_role_policies_v1_to_v2,
+        performance_execution_mode, performance_execution_mode_for_role, project_helper,
+        project_interactive_input_choices, read_helper_bytes,
+        released_production_execution_mode_required, role_session_policy, seal_helper,
+        sealed_job_role_execution_mode, submission_input_digest, terminate_helper_process_group,
+        turn_submission_options, validate_delegated_patch, validate_delegated_patch_path,
+        validate_helper_image, validate_sealed_helper, validate_stored_batch_intent,
     };
     use crate::helper_release::HelperReleaseManifest;
     use codex_protocol::request_user_input::{
@@ -5374,15 +5934,19 @@ mod tests {
     use std::fmt::Write as _;
     use std::path::PathBuf;
     use winwincode_domain::{
-        ChangeBatchId, CodexThreadId, DeliveryId, DeliveryTaskId, ExecutionJobId, FencingToken,
-        Instant, LeaseId, ProductSessionId, RepositoryId, SchemaVersion, SessionIdentity,
-        Sha256Digest, StageRunId, WorkerId, WorkerInstanceId, WorkerSessionId, WorkspaceRevision,
+        ChangeBatchId, CodexThreadId, Criterion, CriterionId, ExecutionJobId, FencingToken,
+        Instant, LeaseId, ProductSessionId, RepositoryId, Revision, SchemaVersion, SessionIdentity,
+        Sha256Digest, WorkContract, WorkContractId, WorkItem, WorkItemId, WorkItemState, WorkRunId,
+        WorkerId, WorkerInstanceId, WorkerSessionId, WorkspaceRevision,
+    };
+    use winwincode_execution_port::agent_config::{
+        AgentProfileSettings, AgentSessionConfigSnapshot, resolve_agent_session_config,
     };
     use winwincode_execution_port::generated::{
-        DeliveryStageAcceptanceCriterionInput, DeliveryStageExecutionScope,
-        DeliveryStageExecutionScopeKind, DeliveryStageInput, DeliveryStageTaskInput, ExecutionJob,
-        ExecutionLeaseStamp, ExecutionLimits, ExecutionScope, ExecutionWorkspace,
+        ExecutionJob, ExecutionLeaseStamp, ExecutionLimits, ExecutionScope, ExecutionWorkspace,
         ExecutionWorkspaceWriteMode, RepairLoopBudget, RepairLoopCounters, RepairLoopStopReason,
+        RoleSessionPolicyWorkspaceMode, WorkRunExecutionScope, WorkRunExecutionScopeKind,
+        WorkRunInput, WorkerCapabilityFeature, WorkerCapabilitySet, WorkerCapabilitySetPlatform,
     };
 
     #[test]
@@ -5575,7 +6139,39 @@ mod tests {
     }
 
     fn executor_job() -> ExecutionJob {
-        let task_id = DeliveryTaskId("dtk_00000000000000000000000001".to_owned());
+        let contract_id = WorkContractId("wct_00000000000000000000000001".to_owned());
+        let item_id = WorkItemId("wit_00000000000000000000000001".to_owned());
+        let criterion_id = CriterionId("crt_00000000000000000000000001".to_owned());
+        let contract = WorkContract {
+            constraints: vec!["Keep the exact repository boundary.".to_owned()],
+            created_at: Instant("2026-08-28T00:00:00Z".to_owned()),
+            criteria: vec![Criterion {
+                id: criterion_id.clone(),
+                description: "The exact fixture behavior is verified.".to_owned(),
+                required: true,
+                required_evidence_class: "machine".into(),
+                verification_method: Some("Run the exact fixture check.".to_owned()),
+            }],
+            id: contract_id.clone(),
+            objective: "Implement fixture".to_owned(),
+            protected_scope: vec!["Fixture source".to_owned()],
+            required_human_authority: "none".to_owned(),
+            revision: Revision(2),
+            schema_version: SchemaVersion::WinwincodeV1,
+            scope: vec!["Fixture source".to_owned()],
+        };
+        let item = WorkItem {
+            criterion_ids: vec![criterion_id],
+            depends_on: Vec::new(),
+            goal: "Implement fixture".to_owned(),
+            id: item_id.clone(),
+            revision: Revision(1),
+            schema_version: SchemaVersion::WinwincodeV1,
+            state: WorkItemState::Ready,
+            title: "Implement fixture".to_owned(),
+            work_contract_id: contract_id.clone(),
+            work_contract_revision: Revision(2),
+        };
         ExecutionJob {
             attempt: 1,
             execution_profile: "executor".to_owned(),
@@ -5587,36 +6183,24 @@ mod tests {
                 max_runtime_seconds: 300,
             },
             payload_digest: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
-            scope: ExecutionScope::DeliveryStageExecutionScope(DeliveryStageExecutionScope {
-                delivery_id: DeliveryId("dlv_00000000000000000000000001".to_owned()),
-                delivery_task_id: Some(task_id.clone()),
-                kind: DeliveryStageExecutionScopeKind::DeliveryStage,
+            scope: ExecutionScope::WorkRunExecutionScope(WorkRunExecutionScope {
+                attempt: 1,
+                kind: WorkRunExecutionScopeKind::WorkRun,
                 product_session_id: ProductSessionId("ses_00000000000000000000000001".to_owned()),
                 rework_authorization: None,
-                stage_run_id: StageRunId("run_00000000000000000000000001".to_owned()),
+                work_contract_id: contract_id.clone(),
+                work_contract_revision: Revision(2),
+                work_item_id: item_id,
+                work_item_revision: Revision(1),
+                work_run_id: WorkRunId("wrn_00000000000000000000000001".to_owned()),
             }),
-            stage_input: Some(DeliveryStageInput {
-                acceptance_criteria: vec![DeliveryStageAcceptanceCriterionInput {
-                    criterion_id: "criterion-fixture".to_owned(),
-                    description: "The exact fixture behavior is verified.".to_owned(),
-                    required: true,
-                    verification_method: Some("Run the exact fixture check.".to_owned()),
-                }],
+            work_input: Some(WorkRunInput {
+                delivery_spec_id: "spec-fixture".into(),
+                delivery_spec_revision: Revision(2),
                 candidate_ref: None,
-                constraints: vec!["Keep the exact repository boundary.".to_owned()],
-                delivery_spec_id: "spec-fixture".to_owned(),
-                delivery_spec_revision: 2,
-                goal: "Implement fixture".to_owned(),
-                out_of_scope: Vec::new(),
                 schema_version: SchemaVersion::WinwincodeV1,
-                scope: vec!["Fixture source".to_owned()],
-                task: Some(DeliveryStageTaskInput {
-                    acceptance_criterion_ids: vec!["criterion-fixture".to_owned()],
-                    goal: "Implement fixture".to_owned(),
-                    task_id,
-                    title: "Implement fixture".to_owned(),
-                }),
-                title: "Fixture Delivery".to_owned(),
+                work_contract: contract,
+                work_item: item,
             }),
             workspace: ExecutionWorkspace {
                 checkout_revision: "main".to_owned(),
@@ -5624,6 +6208,36 @@ mod tests {
                 write_mode: ExecutionWorkspaceWriteMode::Candidate,
             },
         }
+    }
+
+    fn fixture_agent_config(
+        job: &ExecutionJob,
+        policy: &RoleSessionPolicy,
+    ) -> AgentSessionConfigSnapshot {
+        let sandbox = match policy.workspace_mode {
+            RoleSessionPolicyWorkspaceMode::SourceReadOnly => "source-read-only",
+            RoleSessionPolicyWorkspaceMode::CandidateReadOnly => "candidate-read-only",
+            RoleSessionPolicyWorkspaceMode::CandidateWrite => "candidate-write",
+        };
+        resolve_agent_session_config(
+            &WorkerId("wrk_00000000000000000000000001".to_owned()),
+            &WorkerCapabilitySet {
+                capability_digest: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
+                features: vec![WorkerCapabilityFeature::Sandbox],
+                max_concurrent_jobs: 1,
+                platform: WorkerCapabilitySetPlatform::Aarch64AppleDarwin,
+            },
+            &job.execution_profile,
+            AgentProfileSettings {
+                provider: "fixture-provider".to_owned(),
+                model: "fixture-model".to_owned(),
+                reasoning: "provider_default".to_owned(),
+                tools: vec!["worker:sandbox".to_owned()],
+                sandbox: sandbox.to_owned(),
+                instructions: Some(policy.developer_instructions.clone()),
+            },
+        )
+        .expect("fixture Agent config")
     }
 
     #[cfg(unix)]
@@ -5669,6 +6283,34 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[test]
+    fn repository_rule_pack_is_read_once_without_following_symlinks() {
+        let root = test_root("repository-rule-pack");
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(workspace.join(".winwincode")).expect("create rule-pack fixture");
+        let path = workspace.join(".winwincode/rules.json");
+        std::fs::write(
+            &path,
+            br#"{"schemaVersion":1,"rules":[{"id":"fixture","version":1,"event":"command_finished","outcome":"succeeded","actions":["require_verification"],"priority":1}]}"#,
+        )
+        .expect("write rule-pack fixture");
+        let pack = load_repository_rule_pack(&workspace).expect("load exact rule pack");
+        assert_eq!(pack.rules.len(), 3, "repository rule plus two defaults");
+
+        let outside = root.join("outside.json");
+        std::fs::write(&outside, b"{}").expect("write outside fixture");
+        std::fs::remove_file(&path).expect("remove regular rule pack");
+        std::os::unix::fs::symlink(&outside, &path).expect("link outside rule pack");
+        assert_eq!(
+            load_repository_rule_pack(&workspace)
+                .expect_err("rule-pack symlink must fail closed")
+                .kind(),
+            ProductionCodexErrorKind::InvalidConfiguration
+        );
+        std::fs::remove_dir_all(root).expect("remove rule-pack fixture");
+    }
+
+    #[cfg(unix)]
     fn test_root(name: &str) -> PathBuf {
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -5689,13 +6331,16 @@ mod tests {
         let policy = role_session_policy(&job, RoleExecutionMode::React)
             .expect("build React policy")
             .expect("Delivery policy");
+        let agent_config = fixture_agent_config(&job, &policy);
         let record = StoredRun {
             job,
             workspace_revision: WorkspaceRevision(format!("git-tree:{}", "1".repeat(40))),
             canonical_thread_id: CodexThreadId("cdx_00000000000000000000000001".to_owned()),
             job_digest: Sha256Digest(format!("sha256:{}", "b".repeat(64))),
             workspace: root.join("candidate"),
+            repository_rule_pack: RepositoryRulePack::project_defaults(),
             role_policy: Some(policy),
+            agent_config,
             kernel_session_id: "kernel-session-fixture".to_owned(),
             rollout_path: None,
             submission_id: "submission-fixture".to_owned(),
@@ -5715,6 +6360,7 @@ mod tests {
             final_candidate_freeze: None,
             delegated_stop: None,
             terminal_message_id: None,
+            post_action_traces: Vec::new(),
         };
         let mut legacy = serde_json::to_value(record).expect("encode stored run");
         let role_policy = legacy
@@ -5803,6 +6449,7 @@ mod tests {
             final_output_json_schema: Some(
                 crate::stage_product::change_batch_proposal_json_schema(),
             ),
+            submit_change_batch: true,
         };
         let original = submission_input_digest("exact prompt", &react).expect("digest input");
         assert_eq!(
@@ -5835,14 +6482,19 @@ mod tests {
         job.workspace.write_mode = ExecutionWorkspaceWriteMode::ReadOnly;
         let thread_id = CodexThreadId("cdx_00000000000000000000000001".to_owned());
         let worker_session_id = WorkerSessionId("wss_00000000000000000000000001".to_owned());
+        let role_policy = role_session_policy(&job, RoleExecutionMode::DelegatedBatch)
+            .expect("build delegated policy")
+            .expect("delegated role policy");
+        let agent_config = fixture_agent_config(&job, &role_policy);
         let record = StoredRun {
-            role_policy: role_session_policy(&job, RoleExecutionMode::DelegatedBatch)
-                .expect("build delegated policy"),
+            role_policy: Some(role_policy),
+            agent_config,
             job,
             workspace_revision: WorkspaceRevision(format!("git-tree:{}", "1".repeat(40))),
             canonical_thread_id: thread_id.clone(),
             job_digest: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
             workspace: PathBuf::from("/tmp/delegated-candidate"),
+            repository_rule_pack: RepositoryRulePack::project_defaults(),
             kernel_session_id: "kernel-session-fixture".to_owned(),
             rollout_path: None,
             submission_id: "submission-fixture".to_owned(),
@@ -5862,6 +6514,7 @@ mod tests {
             final_candidate_freeze: None,
             delegated_stop: None,
             terminal_message_id: None,
+            post_action_traces: Vec::new(),
         };
         let binding = ModelRunBinding {
             run_key: format!("sha256:{}", "b".repeat(64)),
@@ -5886,7 +6539,7 @@ mod tests {
                     product_session_id: ProductSessionId(
                         "ses_00000000000000000000000001".to_owned(),
                     ),
-                    stage_run_id: Some(StageRunId("run_00000000000000000000000001".to_owned())),
+                    work_run_id: Some(WorkRunId("wrn_00000000000000000000000001".to_owned())),
                     worker_session_id,
                 },
             },
@@ -5915,7 +6568,7 @@ mod tests {
                 .is_none()
         );
         let output = serde_json::json!({
-            "acceptanceCriteriaIds": ["criterion-fixture"],
+            "acceptanceCriteriaIds": ["crt_00000000000000000000000001"],
             "disposition": "final",
             "patch": "*** Begin Patch\n*** Update File: src/lib.rs\n@@\n-old\n+new\n*** End Patch\n",
             "schemaVersion": 1,
@@ -5999,14 +6652,14 @@ mod tests {
         let (mut record, binding) = delegated_record_and_binding();
         record
             .job
-            .stage_input
+            .work_input
             .as_mut()
-            .and_then(|input| input.task.as_mut())
-            .expect("delegated task")
-            .acceptance_criterion_ids
-            .push("criterion-second".to_owned());
+            .expect("delegated input")
+            .work_item
+            .criterion_ids
+            .push(CriterionId("crt_00000000000000000000000002".to_owned()));
         let incomplete = serde_json::json!({
-            "acceptanceCriteriaIds": ["criterion-fixture"],
+            "acceptanceCriteriaIds": ["crt_00000000000000000000000001"],
             "disposition": "final",
             "patch": "*** Begin Patch\n*** Update File: src/lib.rs\n@@\n-old\n+new\n*** End Patch\n",
             "schemaVersion": 1,
@@ -6044,7 +6697,7 @@ mod tests {
 
         let (record, binding) = delegated_record_and_binding();
         let moved_outside = serde_json::json!({
-            "acceptanceCriteriaIds": ["criterion-fixture"],
+            "acceptanceCriteriaIds": ["crt_00000000000000000000000001"],
             "disposition": "final",
             "patch": "*** Begin Patch\n*** Update File: src/lib.rs\n*** Move to: ../escape.rs\n@@\n-old\n+new\n*** End Patch\n",
             "schemaVersion": 1,

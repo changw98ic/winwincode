@@ -11,12 +11,11 @@ use winwincode_delivery::domain::Delivery;
 use winwincode_delivery::store::{
     AtomicPublication, DeliveryCommand, DeliveryCommandPort, DeliveryJournalPort, DeliveryStore,
     JournalBackendError, JournalBackendErrorCode, JournalEntryState, JournalRecordBytes,
-    LoadedDeliveryJournal, StartDeliveryStage,
+    LoadedDeliveryJournal, StartDeliveryWorkRunDispatch,
 };
 use winwincode_domain::{DeliveryId, ExecutionJobId, Sha256Digest};
 use winwincode_execution_port::generated::{
-    DeliveryStageExecutionScope, DeliveryStageExecutionScopeKind, ExecutionJob, ExecutionScope,
-    ProductSessionExecutionScope, ProductSessionExecutionScopeKind,
+    ExecutionJob, ExecutionScope, ProductSessionExecutionScope, ProductSessionExecutionScopeKind,
 };
 use winwincode_storage::{
     AggregateJournalKey, AggregateJournalPublication, AggregateJournalRecord, DurableOutboxEvent,
@@ -44,20 +43,14 @@ pub(crate) fn execute(
     command: &CommandEnvelope,
     pending: &PendingDeliveryExecution,
     dispatcher: &mut dyn ExecutionJobDispatcher,
-    handoff: Option<&crate::terminal_outcome_transaction::DeliveryTerminalHandoff>,
 ) -> Result<DeliveryExecutionDispatchReceipt, DeliveryExecutionError> {
-    let mut transaction = AtomicDeliveryExecutionTransaction {
-        storage,
-        command,
-        handoff,
-    };
+    let mut transaction = AtomicDeliveryExecutionTransaction { storage, command };
     commit_and_dispatch(pending, &mut transaction, dispatcher)
 }
 
 struct AtomicDeliveryExecutionTransaction<'storage, 'command> {
     storage: &'storage mut dyn ProductStateStorage,
     command: &'command CommandEnvelope,
-    handoff: Option<&'command crate::terminal_outcome_transaction::DeliveryTerminalHandoff>,
 }
 
 impl DeliveryExecutionTransaction for AtomicDeliveryExecutionTransaction<'_, '_> {
@@ -106,13 +99,15 @@ impl DeliveryExecutionTransaction for AtomicDeliveryExecutionTransaction<'_, '_>
         let expected_revision = u64::try_from(self.command.expected_revision.0).map_err(|_| {
             DeliveryExecutionPortError::new("Delivery expectedRevision must not be negative")
         })?;
-        let mutation = DeliveryStore::borrowed(&journal)
-            .execute(DeliveryCommand::StartStage(Box::new(StartDeliveryStage {
+        let command =
+            DeliveryCommand::StartWorkRunDispatch(Box::new(StartDeliveryWorkRunDispatch {
                 request_id: pending.request_id().clone(),
                 request_digest,
                 expected_revision,
                 transition: pending.stage_transition().clone(),
-            })))
+            }));
+        let mutation = DeliveryStore::borrowed(&journal)
+            .execute(command)
             .map_err(port_error)?;
         commit.state = mutation.snapshot.encode_json().map_err(port_error)?;
         if mutation.replayed {
@@ -130,12 +125,9 @@ impl DeliveryExecutionTransaction for AtomicDeliveryExecutionTransaction<'_, '_>
                 "new Delivery mutation did not stage a journal publication",
             ));
         }
-        if let Some(handoff) = self.handoff {
-            commit = commit.with_state_mutation(handoff.consumption());
-        }
 
         let receipt = self.storage.commit(&commit).map_err(port_error)?;
-        committed_delivery_receipt(self.storage, &receipt, &stream_id)
+        committed_delivery_receipt(self.storage, &receipt, &stream_id, pending)
     }
 
     fn mark_job_dispatched(
@@ -148,6 +140,10 @@ impl DeliveryExecutionTransaction for AtomicDeliveryExecutionTransaction<'_, '_>
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "Keep all request-to-sealed-intent comparisons in one validation boundary"
+)]
 fn validate_command(
     command: &CommandEnvelope,
     pending: &PendingDeliveryExecution,
@@ -175,6 +171,79 @@ fn validate_command(
             "delivery.advance payload does not identify the pending Delivery exactly",
         ));
     }
+    pending
+        .stage_transition()
+        .validate_projection()
+        .map_err(port_error)?;
+    let winwincode_delivery::application::stage::StageAdvanceEffect::Dispatch(intent) =
+        &pending.stage_transition().effect
+    else {
+        return Err(DeliveryExecutionPortError::new(
+            "new execution requires a sealed dispatch intent",
+        ));
+    };
+    let expected_rework = intent.rework_authorization().map(|authorization| {
+        winwincode_api::generated::DeliveryReworkInput {
+            candidate_ref: authorization.candidate_ref().into(),
+            diff_sha256: authorization.diff_sha256().into(),
+            targets: authorization
+                .targets()
+                .iter()
+                .map(
+                    |target| winwincode_api::generated::DeliveryReworkTargetInput {
+                        work_item_id: target.work_item_id().clone(),
+                        file_path: target.file_path().into(),
+                        source_hunk_sha256: target.hunk_sha256().into(),
+                        evidence_ref_ids: target.evidence_ref_ids().to_vec(),
+                    },
+                )
+                .collect(),
+        }
+    });
+    let mut requested_rework = payload.rework.clone();
+    if let Some(input) = &mut requested_rework {
+        for target in &mut input.targets {
+            target
+                .evidence_ref_ids
+                .sort_by(|left, right| left.0.cmp(&right.0));
+        }
+    }
+    if requested_rework != expected_rework {
+        return Err(DeliveryExecutionPortError::new(
+            "requested rework scope differs from the sealed dispatch authorization",
+        ));
+    }
+    let expected_job = crate::delivery_execution::prepare_workrun_advance(
+        pending.request_id(),
+        &pending.delivery().snapshot().work_run_aggregate,
+        &pending.delivery().snapshot().spec,
+        intent,
+        crate::delivery_execution::DeliveryExecutionConfig {
+            payload_digest: pending.job().payload_digest.clone(),
+            candidate_ref: pending
+                .job()
+                .work_input
+                .as_ref()
+                .and_then(|input| input.candidate_ref.clone()),
+            workspace: pending.job().workspace.clone(),
+            limits: pending.job().limits.clone(),
+        },
+    )
+    .map_err(port_error)?;
+    let winwincode_api::generated::Scope::RepositoryScope(repository) = &command.scope else {
+        return Err(DeliveryExecutionPortError::new(
+            "WorkRun dispatch requires repository scope",
+        ));
+    };
+    if expected_job != *pending.job()
+        || pending.job().workspace.repository_id != repository.repository_id
+        || serde_json::to_value(&payload.dispatch_profile).map_err(port_error)?
+            != Value::String(pending.job().execution_profile.clone())
+    {
+        return Err(DeliveryExecutionPortError::new(
+            "ExecutionJob does not match its sealed dispatch and command",
+        ));
+    }
     let expected_revision = u64::try_from(command.expected_revision.0).map_err(|_| {
         DeliveryExecutionPortError::new("Delivery expectedRevision must not be negative")
     })?;
@@ -183,14 +252,19 @@ fn validate_command(
             "pending Delivery revision does not follow command expectedRevision",
         ));
     }
-    let ExecutionScope::DeliveryStageExecutionScope(scope) = &pending.job().scope else {
+    let ExecutionScope::WorkRunExecutionScope(scope) = &pending.job().scope else {
         return Err(DeliveryExecutionPortError::new(
             "pending job is not a Delivery stage execution",
         ));
     };
-    if scope.delivery_id != *pending.delivery().id() {
+    if pending
+        .job()
+        .work_input
+        .as_ref()
+        .is_none_or(|input| input.work_contract.id != scope.work_contract_id)
+    {
         return Err(DeliveryExecutionPortError::new(
-            "pending job belongs to another Delivery",
+            "pending WorkRun input does not match its scope",
         ));
     }
     Ok(())
@@ -200,6 +274,7 @@ fn committed_delivery_receipt(
     storage: &dyn ProductStateStorage,
     receipt: &winwincode_storage::CommitReceipt,
     expected_stream_id: &str,
+    pending: &PendingDeliveryExecution,
 ) -> Result<DeliveryExecutionCommitReceipt, DeliveryExecutionPortError> {
     if receipt.stream_id != expected_stream_id {
         return Err(DeliveryExecutionPortError::new(
@@ -237,22 +312,27 @@ fn committed_delivery_receipt(
             "durable execution job event id does not match its job",
         ));
     }
-    let ExecutionScope::DeliveryStageExecutionScope(scope) = &job.scope else {
+    if job.job_id != pending.job().job_id || job.scope != pending.job().scope {
+        return Err(DeliveryExecutionPortError::new(
+            "durable execution job does not match the committed Delivery binding",
+        ));
+    }
+    let ExecutionScope::WorkRunExecutionScope(_scope) = &job.scope else {
         return Err(DeliveryExecutionPortError::new(
             "durable execution job is not a Delivery stage job",
         ));
     };
-    if scope.delivery_id != *delivery.id()
-        || !delivery.snapshot().session_bindings.iter().any(|binding| {
-            binding.execution_job_id == job.job_id
-                && binding.delivery_id == scope.delivery_id
-                && binding.delivery_task_id == scope.delivery_task_id
-                && binding.stage_run_id == scope.stage_run_id
-                && binding.product_session_id == scope.product_session_id
-        })
+    // The WorkRun and SessionBinding are intentionally absent at this point.
+    // They are appended only after the scheduler accepts this immutable job
+    // and the ExecutionPort verifies its dispatch authority.
+    if delivery
+        .snapshot()
+        .session_bindings
+        .iter()
+        .any(|binding| binding.execution_job_id == job.job_id)
     {
         return Err(DeliveryExecutionPortError::new(
-            "durable execution job does not match the committed Delivery binding",
+            "durable execution job was already bound before dispatch acceptance",
         ));
     }
     validate_delivery_changed_receipt(
@@ -280,14 +360,15 @@ pub(crate) fn strict_execution_job(
         .get("scope")
         .ok_or_else(|| DeliveryExecutionPortError::new("durable execution job scope is missing"))?
         .clone();
-    let scope: DeliveryStageExecutionScope = serde_json::from_value(scope_value)
-        .map_err(|_| DeliveryExecutionPortError::new(NON_CANONICAL_EXECUTION_JOB))?;
-    if scope.kind != DeliveryStageExecutionScopeKind::DeliveryStage {
+    let scope: winwincode_execution_port::generated::WorkRunExecutionScope =
+        serde_json::from_value(scope_value)
+            .map_err(|_| DeliveryExecutionPortError::new(NON_CANONICAL_EXECUTION_JOB))?;
+    if scope.kind != winwincode_execution_port::generated::WorkRunExecutionScopeKind::WorkRun {
         return Err(DeliveryExecutionPortError::new(
             "durable execution job scope kind is not delivery-stage",
         ));
     }
-    job.scope = ExecutionScope::DeliveryStageExecutionScope(scope);
+    job.scope = ExecutionScope::WorkRunExecutionScope(scope);
     let canonical = serde_json::to_value(&job).map_err(port_error)?;
     if value != canonical {
         return Err(DeliveryExecutionPortError::new(NON_CANONICAL_EXECUTION_JOB));
@@ -330,6 +411,24 @@ pub(crate) fn load_durable_execution_job(
     }
     let mut immutable = current.clone();
     immutable.attempt = original.attempt;
+    match (&mut immutable.scope, &original.scope) {
+        (
+            ExecutionScope::WorkRunExecutionScope(current_scope),
+            ExecutionScope::WorkRunExecutionScope(original_scope),
+        ) => {
+            current_scope.attempt = original_scope.attempt;
+            current_scope.work_run_id = original_scope.work_run_id.clone();
+        }
+        (
+            ExecutionScope::ProductSessionExecutionScope(_),
+            ExecutionScope::ProductSessionExecutionScope(_),
+        ) => {}
+        _ => {
+            return Err(StorageError::adapter(
+                "scheduled replacement changed ExecutionJob scope kind",
+            ));
+        }
+    }
     if immutable != original {
         return Err(StorageError::adapter(
             "scheduled replacement changed immutable ExecutionJob fields",
@@ -388,12 +487,11 @@ fn strict_scheduled_execution_job(
         ExecutionScope::ProductSessionExecutionScope(scope) => {
             scope.product_session_id == record.scope.product_session_id
                 && record.scope.delivery_id.is_none()
-                && record.stage_run_id.is_none()
+                && record.work_run_id.is_none()
         }
-        ExecutionScope::DeliveryStageExecutionScope(scope) => {
+        ExecutionScope::WorkRunExecutionScope(scope) => {
             scope.product_session_id == record.scope.product_session_id
-                && Some(&scope.delivery_id) == record.scope.delivery_id.as_ref()
-                && Some(&scope.stage_run_id) == record.stage_run_id.as_ref()
+                && Some(&scope.work_run_id) == record.work_run_id.as_ref()
         }
     };
     if !scope_matches {
@@ -411,6 +509,10 @@ fn logical_job_digest(payload: &[u8]) -> Result<Sha256Digest, StorageError> {
         .as_object_mut()
         .and_then(|object| object.remove("attempt"))
         .ok_or_else(|| StorageError::adapter("scheduled ExecutionJob attempt is missing"))?;
+    if let Some(scope) = value.get_mut("scope").and_then(Value::as_object_mut) {
+        scope.remove("attempt");
+        scope.remove("workRunId");
+    }
     let encoded = serde_json::to_vec(&value)
         .map_err(|_| StorageError::adapter("scheduled logical Job cannot encode"))?;
     Ok(Sha256Digest(format!(
@@ -432,13 +534,16 @@ fn strict_any_execution_job(payload: &[u8]) -> Result<ExecutionJob, DeliveryExec
         .and_then(Value::as_str)
         .ok_or_else(|| DeliveryExecutionPortError::new(NON_CANONICAL_EXECUTION_JOB))?;
     job.scope = match kind {
-        "delivery-stage" => {
-            let scope: DeliveryStageExecutionScope = serde_json::from_value(scope_value)
-                .map_err(|_| DeliveryExecutionPortError::new(NON_CANONICAL_EXECUTION_JOB))?;
-            if scope.kind != DeliveryStageExecutionScopeKind::DeliveryStage {
+        "work-run" => {
+            let scope: winwincode_execution_port::generated::WorkRunExecutionScope =
+                serde_json::from_value(scope_value)
+                    .map_err(|_| DeliveryExecutionPortError::new(NON_CANONICAL_EXECUTION_JOB))?;
+            if scope.kind
+                != winwincode_execution_port::generated::WorkRunExecutionScopeKind::WorkRun
+            {
                 return Err(DeliveryExecutionPortError::new(NON_CANONICAL_EXECUTION_JOB));
             }
-            ExecutionScope::DeliveryStageExecutionScope(scope)
+            ExecutionScope::WorkRunExecutionScope(scope)
         }
         "product-session" => {
             let scope: ProductSessionExecutionScope = serde_json::from_value(scope_value)

@@ -16,7 +16,7 @@ use winwincode_delivery::{
 };
 use winwincode_domain::RepositoryScope;
 use winwincode_domain::{
-    ArtifactId, AttentionItemId, ExecutionMessageId, RequestId, Sha256Digest, StageRunId, UserId,
+    ArtifactId, AttentionItemId, ExecutionMessageId, RequestId, Sha256Digest, UserId, WorkRunId,
 };
 use winwincode_publication::{
     PublicationAuthorization, PublicationFactBinding, PublicationSourceIssue, PublicationTarget,
@@ -164,7 +164,7 @@ struct ReviewPackageCandidate<'facts> {
     candidate_ref: &'facts str,
     delivery_spec_id: &'facts str,
     delivery_spec_revision: u64,
-    producer_stage_run_id: &'facts StageRunId,
+    producer_work_run_id: &'facts WorkRunId,
     candidate_commit_id: &'facts str,
     candidate_tree_id: &'facts str,
     diff_sha256: &'facts str,
@@ -176,7 +176,6 @@ struct ReviewPackageCandidate<'facts> {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ReviewPackageApproval<'facts> {
-    stage_run_id: &'facts StageRunId,
     attention_item_id: &'facts AttentionItemId,
     approved_by: &'facts str,
     approved_at_millis: u64,
@@ -189,7 +188,6 @@ struct CurrentPublicationFacts {
     target: PublicationTarget,
     policy_scope: RepositoryPolicyScope,
     scope_key: ReceiptScopeKey,
-    approval_stage_run_id: StageRunId,
     approval_attention_item_id: AttentionItemId,
     approved_by: String,
     approved_at_millis: u64,
@@ -247,7 +245,6 @@ impl CurrentPublicationFacts {
             )
             .map_err(PublicationPreparationError::InvalidFacts)?,
             scope_key: repository_scope_key(scope)?,
-            approval_stage_run_id: approval.run.id.clone(),
             approval_attention_item_id: approval.attention.id.clone(),
             approved_by: approval.resolved_by.to_owned(),
             approved_at_millis: approval.resolved_at,
@@ -271,7 +268,7 @@ impl CurrentPublicationFacts {
                 candidate_ref: candidate.candidate_ref(),
                 delivery_spec_id: &candidate.delivery_spec_id().0,
                 delivery_spec_revision: candidate.delivery_spec_revision(),
-                producer_stage_run_id: candidate.producer_stage_run_id(),
+                producer_work_run_id: candidate.producer_work_run_id(),
                 candidate_commit_id: candidate.candidate_commit_id(),
                 candidate_tree_id: candidate.candidate_tree_id(),
                 diff_sha256: candidate.diff_sha256(),
@@ -280,7 +277,6 @@ impl CurrentPublicationFacts {
                 source_artifact_digest: candidate.producer_artifact_digest(),
             },
             approval: ReviewPackageApproval {
-                stage_run_id: &self.approval_stage_run_id,
                 attention_item_id: &self.approval_attention_item_id,
                 approved_by: &self.approved_by,
                 approved_at_millis: self.approved_at_millis,

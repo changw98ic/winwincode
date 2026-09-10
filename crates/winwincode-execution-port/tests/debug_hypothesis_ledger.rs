@@ -76,7 +76,7 @@ fn authority(round: usize) -> DebugProbeRoundAuthority {
         session_identity: SessionIdentity {
             codex_thread_id: CodexThreadId("cdx_00000000000000000000000000".to_owned()),
             product_session_id: ProductSessionId("psn_00000000000000000000000000".to_owned()),
-            stage_run_id: None,
+            work_run_id: None,
             worker_session_id: WorkerSessionId("wsn_00000000000000000000000000".to_owned()),
         },
         workspace_revision: WorkspaceRevision(format!("git-tree:{}", "0".repeat(40))),
@@ -282,6 +282,7 @@ fn build_round_receipt(
         finished_at: timestamp(round * 10 + 4),
         plan_digest: plan.plan().plan_digest.clone(),
         probe_receipts: receipts,
+        reducer: None,
         schema_version: 1,
         started_at: timestamp(round * 10 + 1),
         status: ProbeRoundReceiptStatus::Completed,

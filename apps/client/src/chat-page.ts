@@ -114,7 +114,7 @@ function stateLabel(state: ChatViewModelState): string {
 }
 
 function modelRouteReady(candidate: ModelRouteAvailabilityProjection): boolean {
-  return candidate.status === ModelRouteAvailabilityStatus.Enabled
+  return candidate.status === ModelRouteAvailabilityStatus.Available
     && candidate.reason === ModelRouteAvailabilityReason.Ready
 }
 
@@ -126,6 +126,11 @@ function readyModelRoutes(
 
 function modelRouteReasonLabel(reason: ModelRouteAvailabilityReason): string {
   if (reason === ModelRouteAvailabilityReason.Ready) return '就绪'
+  if (reason === ModelRouteAvailabilityReason.RateLimited) return '速率受限'
+  if (reason === ModelRouteAvailabilityReason.WindowExhausted) return '用量窗口已用尽'
+  if (reason === ModelRouteAvailabilityReason.WeeklyExhausted) return '周用量已用尽'
+  if (reason === ModelRouteAvailabilityReason.AuthenticationError) return 'Provider 认证失败'
+  if (reason === ModelRouteAvailabilityReason.RuntimeStatusUnknown) return 'Provider 状态未知'
   if (reason === ModelRouteAvailabilityReason.NoProvider) return '没有可用的 Provider'
   if (reason === ModelRouteAvailabilityReason.CredentialMissingOrRevoked) {
     return '凭据缺失或已撤销'
@@ -178,6 +183,21 @@ function errorLabel(error: ControlPlaneClientError | null): string | null {
 
 function modelRouteEmptyText(state: ChatViewModelState): string {
   const reason = state.modelRouteAvailability?.reason
+  if (reason === ModelRouteAvailabilityReason.RateLimited) {
+    return 'The selected Provider is rate limited. Retry later or choose another model.'
+  }
+  if (reason === ModelRouteAvailabilityReason.WindowExhausted) {
+    return 'The selected Provider usage window is exhausted. Retry after the window resets.'
+  }
+  if (reason === ModelRouteAvailabilityReason.WeeklyExhausted) {
+    return 'The selected Provider weekly usage is exhausted. Retry after the weekly reset.'
+  }
+  if (reason === ModelRouteAvailabilityReason.AuthenticationError) {
+    return 'The selected Provider rejected its credential. Rotate or replace it in Settings.'
+  }
+  if (reason === ModelRouteAvailabilityReason.RuntimeStatusUnknown) {
+    return 'The selected Provider status is unknown. Retry, or explicitly choose another route.'
+  }
   if (reason === ModelRouteAvailabilityReason.CredentialMissingOrRevoked) {
     return '配置的模型凭据缺失或已被撤销。请检查设置。'
   }

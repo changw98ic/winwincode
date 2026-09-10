@@ -70,7 +70,6 @@ const EXECUTION_TERMINAL_RECEIPT_NAMESPACE: &[u8] = b"execution-terminal-receipt
 pub enum ProductSessionExecutionApplicationError {
     ProductSession(ProductSessionServiceError),
     Storage(StorageError),
-    WorkerLifecycle(WorkerExecutionLifecycleError),
     InvalidCanonicalFrame,
 }
 
@@ -174,7 +173,7 @@ fn project_verified_product_session_chunks(
         let Some(public_text_delta) = public_text_delta(chunk)? else {
             continue;
         };
-        if chunk.session_identity.stage_run_id.is_some() {
+        if chunk.session_identity.work_run_id.is_some() {
             continue;
         }
         let Some(staged) = find_staged_binding_for_projection(storage, &chunk.lease.job_id)? else {
@@ -731,7 +730,7 @@ where
                     return Ok(Vec::new());
                 }
                 if let ExecutionPortMessage::ModelOpenMessage(open) = message
-                    && open.session_identity.stage_run_id.is_none()
+                    && open.session_identity.work_run_id.is_none()
                 {
                     attach_model_exchange(&mut context, dispatch, open)?;
                 }
@@ -816,7 +815,7 @@ fn product_interaction_authority(
             "Worker interaction belongs to another Job scope",
         ));
     };
-    if session_identity.stage_run_id.is_some()
+    if session_identity.work_run_id.is_some()
         || session_identity.product_session_id != job_scope.product_session_id
         || worker_session_id != dispatch.worker_session_id()
         || session_identity.worker_session_id != *worker_session_id
@@ -980,7 +979,7 @@ fn attach_model_exchange(
     if staged.runtime_authority.job_id != message.lease.job_id
         || staged.runtime_authority.worker_session_id != message.worker_session_id
         || staged.product_session_id != message.session_identity.product_session_id
-        || message.session_identity.stage_run_id.is_some()
+        || message.session_identity.work_run_id.is_some()
     {
         return Err(storage_ingress(
             "model.open differs from staged Chat binding",
@@ -1147,21 +1146,19 @@ pub(crate) fn finish_execution_resources(
     let data_directory = storage
         .database_path()
         .parent()
-        .ok_or_else(|| storage_ingress("Control Plane data directory is invalid"))?
-        .to_path_buf();
-    let lifecycle = DurableWorkerExecutionLifecycle::open(data_directory)
+        .ok_or_else(|| storage_ingress("Control Plane data directory is invalid"))?;
+    let mut lifecycle = DurableWorkerExecutionLifecycle::open(data_directory)
         .map_err(|error| worker_lifecycle_ingress(&error))?;
-    let enterprise_terminal = match message.outcome.status {
-        ExecutionOutcomeStatus::Succeeded => lifecycle
-            .settle_terminal_outcome(message)
-            .map_err(|error| worker_lifecycle_ingress(&error))?,
+    let remote_terminal = match message.outcome.status {
+        ExecutionOutcomeStatus::Succeeded => lifecycle.settle_terminal_outcome(message),
         ExecutionOutcomeStatus::Cancelled
         | ExecutionOutcomeStatus::Failed
-        | ExecutionOutcomeStatus::InfrastructureError => lifecycle
-            .release_terminal_outcome(message)
-            .map_err(|error| worker_lifecycle_ingress(&error))?,
-    };
-    if enterprise_terminal.is_none() {
+        | ExecutionOutcomeStatus::InfrastructureError => {
+            lifecycle.release_terminal_outcome(message)
+        }
+    }
+    .map_err(|error| worker_lifecycle_ingress(&error))?;
+    if remote_terminal.is_none() {
         finish_local_admission(storage, message, execution_scope, worker_pool_id)?;
     }
     finish_worker_slot(storage, message, authority)?;
@@ -1385,8 +1382,8 @@ fn staged_binding(
     };
     if message.product_session_id != job_scope.product_session_id
         || message.session_identity.product_session_id != job_scope.product_session_id
-        || message.stage_run_id.is_some()
-        || message.session_identity.stage_run_id.is_some()
+        || message.work_run_id.is_some()
+        || message.session_identity.work_run_id.is_some()
         || message.codex_thread_id != message.session_identity.codex_thread_id
         || message.worker_session_id != *dispatch.worker_session_id()
     {
@@ -1470,7 +1467,7 @@ fn require_staged_replacement(
     })?;
     if !replacement.authorizes_successor(dispatch)
         || replacement.scope() != &successor.execution_scope
-        || replacement.stage_run_id().is_some()
+        || replacement.work_run_id().is_some()
         || previous.product_session_id != successor.product_session_id
         || previous.execution_scope != successor.execution_scope
         || previous.execution_job_id != successor.execution_job_id
@@ -1565,7 +1562,7 @@ fn validate_provider_source(
         || source.chunk.lease.job_id != staged.execution_job_id
         || source.chunk.model_exchange_id != source.model_exchange_id
         || source.chunk.session_identity.product_session_id != staged.product_session_id
-        || source.chunk.session_identity.stage_run_id.is_some()
+        || source.chunk.session_identity.work_run_id.is_some()
         || source.chunk.worker_session_id != staged.runtime_authority.worker_session_id
         || source.chunk.session_identity.worker_session_id
             != staged.runtime_authority.worker_session_id
@@ -1601,7 +1598,7 @@ fn validate_chunk_binding(
         || chunk.session_identity.codex_thread_id != authority.codex_thread_id
         || chunk.session_identity.product_session_id
             != *binding.binding().identity().product_session_id()
-        || chunk.session_identity.stage_run_id.is_some()
+        || chunk.session_identity.work_run_id.is_some()
         || chunk.model_exchange_id != *binding.model_exchange_id()
     {
         return Err(storage_failure(StorageError::invalid_input(
@@ -1900,23 +1897,20 @@ fn application_ingress(
         ProductSessionExecutionApplicationError::Storage(error) => {
             DurableExecutionPortError::Storage(error)
         }
-        ProductSessionExecutionApplicationError::WorkerLifecycle(_) => {
-            storage_ingress("Worker lifecycle failed")
-        }
         ProductSessionExecutionApplicationError::InvalidCanonicalFrame => {
             storage_ingress("canonical Provider frame is invalid")
         }
     }
 }
 
-fn worker_lifecycle_ingress(error: &WorkerExecutionLifecycleError) -> DurableExecutionPortError {
-    let _ = error;
-    storage_ingress("Worker lifecycle settlement failed")
-}
-
 fn worker_slot_storage(error: impl fmt::Display) -> DurableExecutionPortError {
     let _ = error;
     storage_ingress("Worker slot terminalization failed")
+}
+
+fn worker_lifecycle_ingress(error: &WorkerExecutionLifecycleError) -> DurableExecutionPortError {
+    let _ = error;
+    storage_ingress("Worker lifecycle settlement failed")
 }
 
 fn storage_ingress(message: &'static str) -> DurableExecutionPortError {

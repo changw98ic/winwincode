@@ -14,8 +14,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use winwincode_api::generated::Actor;
 use winwincode_domain::{
-    DeliveryId, Instant, ModelExchangeId, OrganizationId, ProductSessionId, ProjectId,
-    RepositoryId, RequestId, Sha256Digest, UserId, WorkspaceId,
+    DeliveryId, ExecutionJobId, Instant, ModelExchangeId, OrganizationId, ProductSessionId,
+    ProjectId, RepositoryId, RequestId, Sha256Digest, UserId, WorkspaceId,
 };
 use winwincode_storage::{
     CommitReceipt, NewOutboxEvent, ProductStateStorage, ReceiptActorKey, ReceiptIdentity,
@@ -29,13 +29,13 @@ use crate::{
     ProviderTokenUsage,
 };
 
-const STATE_SCHEMA: &str = "winwincode.model-retry-usage.v1";
+const STATE_SCHEMA: &str = "winwincode.model-retry-usage.v2";
 const EVENT_SCHEMA: &str = "winwincode.model-retry-usage-event.v1";
 const STREAM_PREFIX: &str = "model-retry-usage:";
 const USAGE_ID_PREFIX: &str = "model-usage-id:";
 const USAGE_ENTRY_PREFIX: &str = "model-usage-entry:";
 const USAGE_CATALOG_STREAM: &str = "model-usage-catalog:v1";
-const USAGE_ENTRY_SCHEMA: &str = "winwincode.model-usage-entry.v2";
+const USAGE_ENTRY_SCHEMA: &str = "winwincode.model-usage-entry.v3";
 const USAGE_CATALOG_SCHEMA: &str = "winwincode.model-usage-catalog.v2";
 const RETRY_CONTEXT_PREFIX: &str = "model-retry-context:";
 const EVENT_TOPIC: &str = "model.retry-usage.changed.v1";
@@ -61,6 +61,10 @@ pub struct ModelUsageAttribution {
     pub repository_id: RepositoryId,
     /// Exact Product Session.
     pub product_session_id: ProductSessionId,
+    /// Exact execution job used as the task-cost boundary.
+    pub execution_job_id: ExecutionJobId,
+    /// Execution role used to keep verifier cost separate.
+    pub execution_profile: String,
     /// Optional exact Delivery when the model request belongs to one.
     pub delivery_id: Option<DeliveryId>,
     /// Original authenticated user responsible for the request.
@@ -77,17 +81,27 @@ impl ModelUsageAttribution {
     pub fn from_request_authority(
         authority: &FrozenModelRouteAuthority,
         delivery_id: Option<DeliveryId>,
+        execution_job_id: ExecutionJobId,
+        execution_profile: String,
         actor: &Actor,
     ) -> Result<Self, ModelRetryUsageError> {
         let Actor::UserActor(actor) = actor else {
             return Err(ModelRetryUsageError::identity_mismatch());
         };
-        Self::from_verified_user(authority, delivery_id, actor.id.clone())
+        Self::from_verified_user(
+            authority,
+            delivery_id,
+            execution_job_id,
+            execution_profile,
+            actor.id.clone(),
+        )
     }
 
     fn from_verified_user(
         authority: &FrozenModelRouteAuthority,
         delivery_id: Option<DeliveryId>,
+        execution_job_id: ExecutionJobId,
+        execution_profile: String,
         user_id: UserId,
     ) -> Result<Self, ModelRetryUsageError> {
         if let Some(delivery_id) = &delivery_id {
@@ -111,6 +125,8 @@ impl ModelUsageAttribution {
             project_id: repository_scope.project_id.clone(),
             repository_id: repository_scope.repository_id.clone(),
             product_session_id: product_session_id.clone(),
+            execution_job_id,
+            execution_profile,
             delivery_id,
             user_id,
         })
@@ -162,7 +178,28 @@ pub struct FrozenModelRetryPlan {
     policy_id: String,
     policy_revision: u64,
     steps: Vec<ModelRetryStep>,
+    resolution: ModelRouteResolutionTrace,
     fingerprint: String,
+}
+
+/// Why a new or replacement Session selected its actual first route.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelRouteResolutionReason {
+    PrimarySelected,
+    FallbackSelected,
+    ReplacementRetained,
+    ReplacementReselected,
+}
+
+/// Secret-free route-resolution trace frozen into the retry plan.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ModelRouteResolutionTrace {
+    pub source_fingerprint: Sha256Digest,
+    pub selected_route_fingerprint: String,
+    pub previous_route_fingerprint: Option<String>,
+    pub reason: ModelRouteResolutionReason,
 }
 
 impl FrozenModelRetryPlan {
@@ -174,6 +211,31 @@ impl FrozenModelRetryPlan {
     pub fn freeze(
         policy_id: String,
         policy_revision: u64,
+        steps: Vec<ModelRetryStep>,
+    ) -> Result<Self, ModelRetryUsageError> {
+        let Some(first) = steps.first() else {
+            return Err(ModelRetryUsageError::invalid());
+        };
+        let source = serde_json::to_vec(&(policy_id.as_str(), policy_revision, "configured"))
+            .map_err(|_| ModelRetryUsageError::invalid())?;
+        let resolution = ModelRouteResolutionTrace {
+            source_fingerprint: Sha256Digest(format!("sha256:{:x}", Sha256::digest(source))),
+            selected_route_fingerprint: first.authority.fingerprint().to_owned(),
+            previous_route_fingerprint: None,
+            reason: ModelRouteResolutionReason::PrimarySelected,
+        };
+        Self::freeze_resolved(policy_id, policy_revision, resolution, steps)
+    }
+
+    /// Freezes a bounded route sequence with its exact Session-resolution trace.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed, duplicate, cross-scope, or oversized plans.
+    pub fn freeze_resolved(
+        policy_id: String,
+        policy_revision: u64,
+        resolution: ModelRouteResolutionTrace,
         steps: Vec<ModelRetryStep>,
     ) -> Result<Self, ModelRetryUsageError> {
         validate_token(&policy_id, 200)?;
@@ -197,13 +259,25 @@ impl FrozenModelRetryPlan {
         {
             return Err(ModelRetryUsageError::invalid());
         }
+        validate_sha256(&resolution.source_fingerprint.0)?;
+        validate_sha256(&resolution.selected_route_fingerprint)?;
+        if resolution.selected_route_fingerprint != steps[0].authority.fingerprint()
+            || resolution
+                .previous_route_fingerprint
+                .as_deref()
+                .is_some_and(|fingerprint| validate_sha256(fingerprint).is_err())
+        {
+            return Err(ModelRetryUsageError::invalid());
+        }
         let snapshots = steps.iter().map(step_snapshot).collect::<Vec<_>>();
-        let payload = serde_json::to_vec(&(policy_id.as_str(), policy_revision, snapshots))
-            .map_err(|_| ModelRetryUsageError::invalid())?;
+        let payload =
+            serde_json::to_vec(&(policy_id.as_str(), policy_revision, &resolution, snapshots))
+                .map_err(|_| ModelRetryUsageError::invalid())?;
         Ok(Self {
             policy_id,
             policy_revision,
             steps,
+            resolution,
             fingerprint: format!("sha256:{:x}", Sha256::digest(payload)),
         })
     }
@@ -230,6 +304,12 @@ impl FrozenModelRetryPlan {
     #[must_use]
     pub fn steps(&self) -> &[ModelRetryStep] {
         &self.steps
+    }
+
+    /// Returns the immutable reason and source for the selected first route.
+    #[must_use]
+    pub const fn resolution(&self) -> &ModelRouteResolutionTrace {
+        &self.resolution
     }
 }
 
@@ -287,7 +367,6 @@ impl ModelAttemptFailureFact {
             ProviderGatewayErrorKind::AdapterUnavailable
             | ProviderGatewayErrorKind::IdentityUnavailable
             | ProviderGatewayErrorKind::RouteUnavailable
-            | ProviderGatewayErrorKind::PolicyUnavailable
             | ProviderGatewayErrorKind::AdmissionUnavailable
             | ProviderGatewayErrorKind::SettlementUnavailable
             | ProviderGatewayErrorKind::Storage => ModelAttemptFailureKind::ProviderUnavailable,
@@ -305,7 +384,6 @@ impl ModelAttemptFailureFact {
             | ProviderGatewayErrorKind::ExchangeConflict
             | ProviderGatewayErrorKind::ExchangeNotFound
             | ProviderGatewayErrorKind::TerminalConflict
-            | ProviderGatewayErrorKind::PolicyDenied
             | ProviderGatewayErrorKind::AdmissionDenied
             | ProviderGatewayErrorKind::CredentialLeak => ModelAttemptFailureKind::InvalidRequest,
             ProviderGatewayErrorKind::CredentialUnavailable
@@ -373,10 +451,6 @@ pub struct ModelRetryUsageRequest {
     pub attribution: ModelUsageAttribution,
     /// Finite retry/fallback policy.
     pub plan: FrozenModelRetryPlan,
-    /// Exact enterprise allowance frozen before Provider invocation.
-    pub enterprise_quota_amounts: winwincode_storage::EnterpriseQuotaAmounts,
-    /// Trusted request time frozen with the enterprise allowance.
-    pub enterprise_quota_requested_at: Instant,
 }
 
 /// Starts the primary or one previously authorized retry attempt.
@@ -483,6 +557,8 @@ pub struct ModelUsageFilter {
     pub project_id: Option<ProjectId>,
     pub repository_id: Option<RepositoryId>,
     pub product_session_id: Option<ProductSessionId>,
+    pub execution_job_id: Option<ExecutionJobId>,
+    pub execution_profile: Option<String>,
     pub delivery_id: Option<DeliveryId>,
     pub user_id: Option<UserId>,
     pub provider_id: Option<String>,
@@ -672,6 +748,7 @@ struct RetryUsageState {
     attribution: ModelUsageAttribution,
     policy_id: String,
     policy_revision: u64,
+    resolution: ModelRouteResolutionTrace,
     plan_fingerprint: String,
     steps: Vec<RouteSnapshot>,
     revision: u64,
@@ -1169,6 +1246,8 @@ pub(crate) fn validate_request(
     let expected = ModelUsageAttribution::from_verified_user(
         request.plan.steps[0].authority(),
         request.attribution.delivery_id.clone(),
+        request.attribution.execution_job_id.clone(),
+        request.attribution.execution_profile.clone(),
         request.attribution.user_id.clone(),
     )?;
     if expected != request.attribution {
@@ -1475,6 +1554,7 @@ fn new_state(request: &ModelRetryUsageRequest) -> RetryUsageState {
         attribution: request.attribution.clone(),
         policy_id: request.plan.policy_id.clone(),
         policy_revision: request.plan.policy_revision,
+        resolution: request.plan.resolution.clone(),
         plan_fingerprint: request.plan.fingerprint.clone(),
         steps: request.plan.steps.iter().map(step_snapshot).collect(),
         revision: 0,
@@ -1492,6 +1572,7 @@ fn decode_state(
     let state = decode_unbound_state(stored)?;
     if state.request_id != request.request_id
         || state.attribution != request.attribution
+        || state.resolution != request.plan.resolution
         || state.plan_fingerprint != request.plan.fingerprint
         || state.steps
             != request
@@ -1525,6 +1606,7 @@ fn validate_retry_state(state: &RetryUsageState) -> Result<(), ModelRetryUsageEr
     validate_request_id(&state.request_id)?;
     validate_attribution(&state.attribution)?;
     validate_token(&state.policy_id, 200)?;
+    validate_resolution(&state.resolution, &state.steps)?;
     validate_sha256(&state.plan_fingerprint)?;
     if state.policy_revision == 0
         || state.policy_revision > MAX_SAFE_INTEGER
@@ -2208,6 +2290,12 @@ fn validate_filter(filter: &ModelUsageFilter) -> Result<(), ModelRetryUsageError
     if let Some(id) = &filter.product_session_id {
         validate_prefixed_id(&id.0, "psn_")?;
     }
+    if let Some(id) = &filter.execution_job_id {
+        validate_prefixed_id(&id.0, "job_")?;
+    }
+    if let Some(profile) = &filter.execution_profile {
+        validate_token(profile, 100)?;
+    }
     if let Some(id) = &filter.delivery_id {
         validate_prefixed_id(&id.0, "dlv_")?;
     }
@@ -2241,6 +2329,14 @@ fn attribution_matches(attribution: &ModelUsageAttribution, filter: &ModelUsageF
             .product_session_id
             .as_ref()
             .is_none_or(|id| id == &attribution.product_session_id)
+        && filter
+            .execution_job_id
+            .as_ref()
+            .is_none_or(|id| id == &attribution.execution_job_id)
+        && filter
+            .execution_profile
+            .as_ref()
+            .is_none_or(|profile| profile == &attribution.execution_profile)
         && filter
             .delivery_id
             .as_ref()
@@ -2362,10 +2458,30 @@ fn validate_attribution(attribution: &ModelUsageAttribution) -> Result<(), Model
     validate_prefixed_id(&attribution.project_id.0, "prj_")?;
     validate_prefixed_id(&attribution.repository_id.0, "rep_")?;
     validate_prefixed_id(&attribution.product_session_id.0, "psn_")?;
+    validate_prefixed_id(&attribution.execution_job_id.0, "job_")?;
+    validate_token(&attribution.execution_profile, 100)?;
     if let Some(delivery_id) = &attribution.delivery_id {
         validate_prefixed_id(&delivery_id.0, "dlv_")?;
     }
     validate_prefixed_id(&attribution.user_id.0, "usr_")
+}
+
+fn validate_resolution(
+    resolution: &ModelRouteResolutionTrace,
+    steps: &[RouteSnapshot],
+) -> Result<(), ModelRetryUsageError> {
+    validate_sha256(&resolution.source_fingerprint.0)?;
+    validate_sha256(&resolution.selected_route_fingerprint)?;
+    if steps.first().map(|step| step.fingerprint.as_str())
+        != Some(resolution.selected_route_fingerprint.as_str())
+        || resolution
+            .previous_route_fingerprint
+            .as_deref()
+            .is_some_and(|fingerprint| validate_sha256(fingerprint).is_err())
+    {
+        return Err(ModelRetryUsageError::corrupt());
+    }
+    Ok(())
 }
 
 fn validate_instant(value: &Instant) -> Result<(), ModelRetryUsageError> {

@@ -116,7 +116,7 @@ function runtime(id, sequence = 0) {
     kind: 'runtime_projection',
     productSessionId: id,
     deliveryId: null,
-    stageRunId: null,
+    workRunId: null,
     readCursor: null,
     eventCursor: cursor(id, sequence),
     lastProjectionSequence: sequence,
@@ -163,10 +163,17 @@ function approval(state = 'pending', revision = 1, id = productSessionId) {
     state,
     subject: 'Allow one bounded tool call',
     category: 'shell',
+    decisionEnabled: true,
     effectiveDecisionScope: 'once',
     sanitizedDetail: {
-      kind: 'unavailable',
-      reason: 'producer_unavailable',
+      kind: 'available',
+      operation: 'execute',
+      targetSummaries: ['program:fixture;argument_count:0'],
+      targetCount: 1,
+      workingDirectory: 'workspace',
+      riskLevel: 'high',
+      reasonCode: 'sandbox_escalation',
+      requestSha256: `sha256:${'9'.repeat(64)}`,
     },
     binding: binding(id),
   }
@@ -359,7 +366,7 @@ function contractFake() {
           requestPoolRevision: 5,
           defaultProviderId: 'provider',
           defaultModelId: 'model',
-          status: 'enabled',
+          status: 'available',
           reason: 'ready',
           items: [{
             route: {
@@ -379,7 +386,7 @@ function contractFake() {
             reasoningEfforts: ['medium', 'high'],
             credentialRotationVersion: 1,
             isDefault: true,
-            status: 'enabled',
+            status: 'available',
             reason: 'ready',
           }],
         }))

@@ -125,7 +125,7 @@ function readyServer() {
         settingsSource: repositoryScope,
         defaultProviderId: 'openai',
         defaultModelId: 'gpt-5',
-        status: 'enabled',
+        status: 'available',
         reason: 'ready',
         items: [{
           route: {
@@ -133,7 +133,7 @@ function readyServer() {
             modelId: 'gpt-5',
             credentialReferenceId: 'crd_00000000000000000000000001',
           },
-          status: 'enabled',
+          status: 'available',
           reason: 'ready',
           isDefault: true,
           providerDisplayName: 'OpenAI',

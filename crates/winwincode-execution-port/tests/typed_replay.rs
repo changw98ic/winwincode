@@ -55,10 +55,10 @@ fn runtime_artifact_and_model_chunks_map_to_one_replay_frame_shape() {
                 "sha256:2749ae4e612d3fa1eccb3b67ddcdc763a4c0b7dcc66fa4750841dec273efeb7f"
             }
             "artifact.chunk" => {
-                "sha256:8337cee3c579e17ac238effde1c69d408c92fe555582a08e77e079622338218f"
+                "sha256:bf5e7612a5d39483ac10fcd905897df7e1b0a8e6693e331b63517bccc0a381a5"
             }
             "model.chunk" => {
-                "sha256:df0c732d96ee0c394404992c17469ffc8d4f453ed2a436088ad47254d34b0317"
+                "sha256:bd13f25e609067ab40fbc0921dcb8eb53d23d492c1c23756e4abc96d668ddb93"
             }
             _ => unreachable!("covered above"),
         };
@@ -172,13 +172,13 @@ fn unsequenced_control_messages_are_not_silently_stored_as_replay_frames() {
 }
 
 #[test]
-fn product_session_model_messages_share_a_stream_without_stage_run() {
+fn product_session_model_messages_share_a_stream_without_work_run() {
     let keys = ["model.open", "model.chunk", "model.ack"].map(|kind| {
         let mut message = fixture_value(kind);
         message["sessionIdentity"]
             .as_object_mut()
             .expect("model session identity")
-            .remove("stageRunId");
+            .remove("workRunId");
         stream_key_from_message(
             &serde_json::from_value::<ExecutionPortMessage>(message)
                 .expect("ProductSession model fixture"),
@@ -191,38 +191,38 @@ fn product_session_model_messages_share_a_stream_without_stage_run() {
 }
 
 #[test]
-fn delivery_stage_model_stream_key_rejects_missing_or_foreign_stage_binding() {
+fn delivery_stage_model_stream_key_rejects_missing_or_foreign_work_run_binding() {
     let open = stream_key_from_message(&fixture_message("model.open"))
         .expect("DeliveryStage model open")
         .stream;
 
-    let mut missing_stage = fixture_value("model.chunk");
-    missing_stage["sessionIdentity"]
+    let mut missing_work_run = fixture_value("model.chunk");
+    missing_work_run["sessionIdentity"]
         .as_object_mut()
         .expect("model session identity")
-        .remove("stageRunId");
-    let missing_stage = stream_key_from_message(
-        &serde_json::from_value::<ExecutionPortMessage>(missing_stage)
+        .remove("workRunId");
+    let missing_work_run = stream_key_from_message(
+        &serde_json::from_value::<ExecutionPortMessage>(missing_work_run)
             .expect("shape-valid ProductSession chunk"),
     )
     .expect("ProductSession chunk maps independently")
     .stream;
     assert_ne!(
-        missing_stage, open,
-        "a chunk without the opened Delivery StageRun cannot enter that stream"
+        missing_work_run, open,
+        "a chunk without the opened Delivery WorkRun cannot enter that stream"
     );
 
-    let mut foreign_stage = fixture_value("model.chunk");
-    foreign_stage["sessionIdentity"]["stageRunId"] =
-        Value::String("run_01J0000000000000000000000ZZ".to_owned());
-    let foreign_stage = stream_key_from_message(
-        &serde_json::from_value::<ExecutionPortMessage>(foreign_stage)
-            .expect("foreign StageRun chunk"),
+    let mut foreign_work_run = fixture_value("model.chunk");
+    foreign_work_run["sessionIdentity"]["workRunId"] =
+        Value::String("wrn_01J0000000000000000000000ZZ".to_owned());
+    let foreign_work_run = stream_key_from_message(
+        &serde_json::from_value::<ExecutionPortMessage>(foreign_work_run)
+            .expect("foreign WorkRun chunk"),
     )
-    .expect("foreign StageRun maps to its own stream")
+    .expect("foreign WorkRun maps to its own stream")
     .stream;
     assert_ne!(
-        foreign_stage, open,
-        "a foreign Delivery StageRun cannot enter the opened stream"
+        foreign_work_run, open,
+        "a foreign Delivery WorkRun cannot enter the opened stream"
     );
 }

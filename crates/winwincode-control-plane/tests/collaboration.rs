@@ -10,7 +10,7 @@ use std::{
 };
 
 use winwincode_api::generated::{
-    Actor, ActorId, CollaborationActivityCategory, CollaborationActivityListParameters,
+    Actor, CollaborationActivityCategory, CollaborationActivityListParameters,
     CollaborationActivityListQuery, CollaborationActivityListQueryQuery,
     CollaborationNotificationAckCommand, CollaborationNotificationAckCommandCommand,
     CollaborationNotificationAckPayload, CollaborationNotificationListParameters,
@@ -18,23 +18,16 @@ use winwincode_api::generated::{
     CollaborationNotificationState, CollaborationPresenceListParameters,
     CollaborationPresenceListQuery, CollaborationPresenceListQueryQuery,
     CollaborationPresenceState, CollaborationPresenceUpdateCommand,
-    CollaborationPresenceUpdateCommandCommand, CollaborationPresenceUpdatePayload,
-    EnterpriseMembershipUpdateCommand, EnterpriseMembershipUpdateCommandCommand,
-    EnterpriseMembershipUpdatePayload, EnterpriseOrganizationUpdateCommand,
-    EnterpriseOrganizationUpdateCommandCommand, EnterpriseOrganizationUpdatePayload,
-    EnterprisePermission, EnterpriseRoleAssignment, EnterpriseRolePermissionRule,
-    EnterpriseRoleUpdateCommand, EnterpriseRoleUpdateCommandCommand, EnterpriseRoleUpdatePayload,
-    OrganizationScope, OrganizationScopeKind, PageRequest, Scope,
+    CollaborationPresenceUpdateCommandCommand, CollaborationPresenceUpdatePayload, PageRequest,
+    Scope,
 };
 use winwincode_control_plane::{
     CollaborationActivityRecordRequest, CollaborationClock, CollaborationClockError,
-    CollaborationErrorKind, CollaborationService, EnterpriseRbacClock, EnterpriseRbacClockError,
-    EnterpriseRbacService,
+    CollaborationErrorKind, CollaborationService,
 };
 use winwincode_domain::{
-    DeliveryId, EnterpriseMembershipId, EnterpriseRoleId, EnterpriseRoleVersion, Instant,
-    OrganizationId, ProductSessionId, ProjectId, RepositoryId, RequestId, Revision, SchemaVersion,
-    Sha256Digest, UserId, WorkspaceId,
+    DeliveryId, Instant, OrganizationId, ProductSessionId, ProjectId, RepositoryId, RequestId,
+    Revision, SchemaVersion, Sha256Digest, UserId, WorkspaceId,
 };
 use winwincode_domain::{RepositoryScope, RepositoryScopeKind, UserActor, UserActorKind};
 use winwincode_storage::{ProductStateStorage, SqliteStorage};
@@ -47,12 +40,6 @@ struct SharedClock(Arc<AtomicU64>);
 
 impl CollaborationClock for SharedClock {
     fn now_millis(&mut self) -> Result<u64, CollaborationClockError> {
-        Ok(self.0.load(Ordering::SeqCst))
-    }
-}
-
-impl EnterpriseRbacClock for SharedClock {
-    fn now_millis(&mut self) -> Result<u64, EnterpriseRbacClockError> {
         Ok(self.0.load(Ordering::SeqCst))
     }
 }
@@ -127,7 +114,7 @@ fn activity_deduplicates_out_of_order_sources_and_keeps_a_fixed_restart_page() {
     foreign_query.scope.clone_from(&foreign);
     assert_eq!(
         restarted
-            .activity_list(&[foreign], &foreign_query)
+            .activity_list(&fixture.authenticated_scopes(), &foreign_query)
             .expect_err("cross-tenant read must be denied")
             .kind(),
         CollaborationErrorKind::PermissionDenied
@@ -309,17 +296,10 @@ fn presence_expires_reconnects_replays_and_revalidates_revocation() {
             .len(),
         1
     );
-    fixture
-        .rbac
-        .update_membership(&membership_command(&fixture, 45, 3, "disabled"))
-        .expect("revoke membership");
     assert_eq!(
         restarted
-            .presence_list(
-                &fixture.authenticated_scopes(),
-                &presence_query(&fixture, 46, Vec::new()),
-            )
-            .expect_err("revocation is checked on every read")
+            .presence_list(&[], &presence_query(&fixture, 46, Vec::new()),)
+            .expect_err("authentication is checked on every read")
             .kind(),
         CollaborationErrorKind::PermissionDenied
     );
@@ -328,7 +308,6 @@ fn presence_expires_reconnects_replays_and_revalidates_revocation() {
 struct Fixture {
     root: PathBuf,
     clock: Arc<AtomicU64>,
-    rbac: Arc<EnterpriseRbacService>,
     organization_id: OrganizationId,
     workspace_id: WorkspaceId,
     project_id: ProjectId,
@@ -350,40 +329,20 @@ impl Fixture {
         let project_id = ProjectId(format!("prj_{}", suffix(3)));
         let repository_id = RepositoryId(format!("rep_{}", suffix(4)));
         let user_id = UserId(format!("usr_{}", suffix(5)));
-        let rbac = Arc::new(EnterpriseRbacService::with_clock(
-            Box::new(SqliteStorage::open(&root).expect("open RBAC storage")),
-            Box::new(SharedClock(Arc::clone(&clock))),
-        ));
-        let fixture = Self {
+        Self {
             root,
             clock,
-            rbac,
             organization_id,
             workspace_id,
             project_id,
             repository_id,
             user_id,
-        };
-        fixture.seed_rbac();
-        fixture
-    }
-
-    fn seed_rbac(&self) {
-        self.rbac
-            .update_organization(&organization_command(self, 1, 0))
-            .expect("create Organization");
-        self.rbac
-            .update_role(&role_command(self, 2, 1))
-            .expect("create collaboration Role");
-        self.rbac
-            .update_membership(&membership_command(self, 3, 2, "active"))
-            .expect("create active membership");
+        }
     }
 
     fn collaboration(&self) -> CollaborationService {
         CollaborationService::with_clock(
             SqliteStorage::open(&self.root).expect("open collaboration storage"),
-            Arc::clone(&self.rbac),
             Box::new(SharedClock(Arc::clone(&self.clock))),
         )
     }
@@ -405,99 +364,8 @@ impl Fixture {
         })
     }
 
-    fn organization_scope(&self) -> OrganizationScope {
-        OrganizationScope {
-            kind: OrganizationScopeKind::Organization,
-            organization_id: self.organization_id.clone(),
-        }
-    }
-
     fn authenticated_scopes(&self) -> Vec<Scope> {
         vec![self.scope()]
-    }
-}
-
-fn organization_command(
-    fixture: &Fixture,
-    request_number: u8,
-    expected_revision: i64,
-) -> EnterpriseOrganizationUpdateCommand {
-    EnterpriseOrganizationUpdateCommand {
-        actor: fixture.actor(),
-        command: EnterpriseOrganizationUpdateCommandCommand::EnterpriseOrganizationUpdate,
-        expected_revision: Revision(expected_revision),
-        payload: EnterpriseOrganizationUpdatePayload {
-            display_name: "Collaboration Organization".to_owned(),
-            organization_id: fixture.organization_id.clone(),
-            slug: "collaboration-organization".to_owned(),
-            state: "active".to_owned(),
-        },
-        request_id: request(request_number),
-        schema_version: SchemaVersion::WinwincodeV1,
-        scope: Scope::OrganizationScope(fixture.organization_scope()),
-    }
-}
-
-fn role_command(
-    fixture: &Fixture,
-    request_number: u8,
-    expected_revision: i64,
-) -> EnterpriseRoleUpdateCommand {
-    EnterpriseRoleUpdateCommand {
-        actor: fixture.actor(),
-        command: EnterpriseRoleUpdateCommandCommand::EnterpriseRoleUpdate,
-        expected_revision: Revision(expected_revision),
-        payload: EnterpriseRoleUpdatePayload {
-            conflicting_role_ids: Vec::new(),
-            display_name: "Collaborator".to_owned(),
-            inherited_roles: Vec::new(),
-            role_id: role(),
-            rules: vec![
-                EnterpriseRolePermissionRule {
-                    effect: "allow".to_owned(),
-                    permission: EnterprisePermission::CollaborationRead,
-                },
-                EnterpriseRolePermissionRule {
-                    effect: "allow".to_owned(),
-                    permission: EnterprisePermission::CollaborationWrite,
-                },
-            ],
-            state: "active".to_owned(),
-        },
-        request_id: request(request_number),
-        schema_version: SchemaVersion::WinwincodeV1,
-        scope: fixture.organization_scope(),
-    }
-}
-
-fn membership_command(
-    fixture: &Fixture,
-    request_number: u8,
-    expected_revision: i64,
-    state: &str,
-) -> EnterpriseMembershipUpdateCommand {
-    EnterpriseMembershipUpdateCommand {
-        actor: fixture.actor(),
-        command: EnterpriseMembershipUpdateCommandCommand::EnterpriseMembershipUpdate,
-        expected_revision: Revision(expected_revision),
-        payload: EnterpriseMembershipUpdatePayload {
-            actor_id: ActorId::UserId(fixture.user_id.clone()),
-            display_name: "Collaborator".to_owned(),
-            membership_id: EnterpriseMembershipId(format!("mem_{}", suffix(7))),
-            role_assignments: vec![EnterpriseRoleAssignment {
-                expires_at: None,
-                not_before: None,
-                role_id: role(),
-                role_version: EnterpriseRoleVersion(1),
-                scope: fixture.scope(),
-                scope_mode: "exact".to_owned(),
-            }],
-            state: state.to_owned(),
-            team_ids: Vec::new(),
-        },
-        request_id: request(request_number),
-        schema_version: SchemaVersion::WinwincodeV1,
-        scope: fixture.organization_scope(),
     }
 }
 
@@ -643,10 +511,6 @@ fn instant(millis: u64) -> Instant {
         .filter(|offset| *offset < 1_000)
         .expect("fixture millis stay within one second");
     Instant(format!("2023-11-14T22:13:20.{offset:03}Z"))
-}
-
-fn role() -> EnterpriseRoleId {
-    EnterpriseRoleId(format!("rol_{}", suffix(6)))
 }
 
 fn request(number: u8) -> RequestId {

@@ -64,6 +64,31 @@ test('a real browser can create the first Chat from an empty repository without 
   await waitForGlobal(devtools, sessionId, 'runEmptyChatScenario')
   const result = await evaluate(devtools, sessionId, 'globalThis.runEmptyChatScenario()')
 
+  for (const width of [360, 1440]) {
+    await devtools.send('Emulation.setDeviceMetricsOverride', {
+      width, height: 900, deviceScaleFactor: 1, mobile: false,
+    }, sessionId)
+    const layout = await evaluate(devtools, sessionId, `(() => {
+      const chat = document.querySelector('.wwc-chat')
+      const input = document.querySelector('.wwc-chat-composer-input')
+      input.focus()
+      const style = getComputedStyle(input)
+      return {
+        pageWidth: document.documentElement.scrollWidth,
+        chatWidth: chat.clientWidth, chatScroll: chat.scrollWidth,
+        sessionButtonHeight: document.querySelector('.wwc-chat-session-list button').getBoundingClientRect().height,
+        focused: document.activeElement === input,
+        outlineWidth: parseFloat(style.outlineWidth),
+        outlineStyle: style.outlineStyle,
+      }
+    })()`)
+    assert.ok(layout.pageWidth <= width, `page overflows at ${width}px`)
+    assert.ok(layout.chatScroll <= layout.chatWidth, `Chat overflows at ${width}px`)
+    assert.ok(layout.sessionButtonHeight >= 48, `session button is too small at ${width}px`)
+    assert.equal(layout.focused, true)
+    assert.ok(layout.outlineWidth > 0 && layout.outlineStyle !== 'none', 'visible composer focus')
+  }
+
   assert.equal(result.empty.hash, '#/chat')
   assert.equal(result.empty.newChatDisabled, false)
   assert.match(result.empty.text, /first Chat/iu)

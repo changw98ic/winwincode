@@ -82,12 +82,10 @@
       "schemaVersion": 3,
       "id": "binding-verifier-1",
       "deliveryId": "dlv_01J00000000000000000000000",
-      "deliveryTaskId": "delivery-task-api",
-      "stageRunId": "stage-verification-1",
-      "productSessionId": "product-session-verifier",
-      "executionJobId": "execution-job-verifier",
-      "workerSessionId": "worker-session-verifier",
-      "codexThreadId": "codex-thread-verifier",
+      "productSessionId": "psn_01J00000000000000000000000",
+      "executionJobId": "job_01J00000000000000000000000",
+      "workerSessionId": "wsn_01J00000000000000000000000",
+      "codexThreadId": "cdx_01J00000000000000000000000",
       "boundAtMillis": 1800000000011,
       "workerId": "wrk_01J00000000000000000000000",
       "workerInstanceId": "wki_01J00000000000000000000000",
@@ -97,7 +95,12 @@
       "sourceProvenance": {
         "kind": "execution-port",
         "reference": "msg_01J00000000000000000000000"
-      }
+      },
+      "workContractId": "wct_01J00000000000000000000000",
+      "workContractRevision": 1,
+      "workItemId": "wit_01J00000000000000000000000",
+      "workItemRevision": 1,
+      "workRunId": "wrn_01J00000000000000000000000"
     }
   ],
   "attentionItems": [],
@@ -108,12 +111,12 @@
       "deliveryId": "dlv_01J00000000000000000000000",
       "deliverySpecId": "delivery-spec-v1",
       "deliverySpecRevision": 1,
-      "stageRunId": "stage-verification-1",
       "sessionBindingId": "binding-verifier-1",
       "candidateRef": "git-tree:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "type": "test",
       "sourceRef": "runtime-event:codex-session-verifier/42",
-      "createdAtMillis": 1800000000019
+      "createdAtMillis": 1800000000019,
+      "workRunId": "wrn_01J00000000000000000000000"
     }
   ],
   "verdict": {
@@ -155,5 +158,71 @@
     "producedAtMillis": 1800000000022
   },
   "createdAtMillis": 1800000000000,
-  "updatedAtMillis": 1800000000023
+  "updatedAtMillis": 1800000000023,
+  "workRunAggregate": {
+    "schemaVersion": "winwincode/v1",
+    "contract": {
+      "schemaVersion": "winwincode/v1",
+      "id": "wct_01J00000000000000000000000",
+      "revision": 1,
+      "objective": "Implement invitation flow",
+      "scope": [
+        "Invitation data and API"
+      ],
+      "protectedScope": [
+        "authentication boundary"
+      ],
+      "constraints": [
+        "Keep the existing authentication boundary"
+      ],
+      "criteria": [
+        {
+          "id": "crt_01J00000000000000000000000",
+          "description": "A valid invitation can be accepted exactly once.",
+          "required": true,
+          "requiredEvidenceClass": "machine",
+          "verificationMethod": "Run the invitation integration test."
+        }
+      ],
+      "requiredHumanAuthority": "none",
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    "items": [
+      {
+        "schemaVersion": "winwincode/v1",
+        "id": "wit_01J00000000000000000000000",
+        "workContractId": "wct_01J00000000000000000000000",
+        "workContractRevision": 1,
+        "revision": 1,
+        "state": "ready",
+        "title": "Invitation API",
+        "goal": "Deliver the independently verifiable invitation endpoint.",
+        "criterionIds": [
+          "crt_01J00000000000000000000000"
+        ],
+        "dependsOn": []
+      }
+    ],
+    "runs": [
+      {
+        "schemaVersion": "winwincode/v1",
+        "id": "wrn_01J00000000000000000000000",
+        "workContractId": "wct_01J00000000000000000000000",
+        "contractRevision": 1,
+        "workItemId": "wit_01J00000000000000000000000",
+        "workItemRevision": 1,
+        "revision": 1,
+        "state": "settled",
+        "executionJobId": "job_01J00000000000000000000000",
+        "attempt": 1,
+        "workerId": "wrk_01J00000000000000000000000",
+        "workerInstanceId": "wki_01J00000000000000000000000",
+        "workerSessionId": "wsn_01J00000000000000000000000",
+        "leaseId": "lse_01J00000000000000000000000",
+        "fencingToken": "7",
+        "productSessionId": "psn_01J00000000000000000000000",
+        "codexThreadId": "cdx_01J00000000000000000000000"
+      }
+    ]
+  }
 }

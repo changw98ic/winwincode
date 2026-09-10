@@ -290,7 +290,7 @@ mod tests {
 
     use winwincode_domain::{
         DeliveryId, ExecutionJobId, Instant, OrganizationId, ProductSessionId, ProjectId,
-        RepositoryId, RequestId, UserId, WorkspaceId,
+        RepositoryId, RequestId, UserId, WorkRunId, WorkspaceId,
     };
     use winwincode_storage::{
         AccessGrantIssuance, ClientNodeRegistration, ClientPresenceState,
@@ -472,7 +472,7 @@ mod tests {
             id("winst", seed + 10),
             DIGEST,
             Some(id("ps", seed + 11)),
-            Some(id("run", seed + 12)),
+            Some(WorkRunId(format!("wrn_{:026}", seed + 12))),
             instant(GRANT_EXPIRES),
         )
         .expect("grant issuance");
@@ -497,7 +497,7 @@ mod tests {
             &grant.repository_binding_id,
             &grant.worker_session_id,
             grant.product_session_id.clone(),
-            grant.stage_run_id.clone(),
+            grant.work_run_id.clone().map(|id| id.0),
         )
         .expect("bind command")
     }

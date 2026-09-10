@@ -75,7 +75,7 @@ fn submission(seed: u64) -> ExecutionJobSubmission {
         dispatch_payload: format!(r#"{{"jobId":"{}"}}"#, id("job", seed)).into_bytes(),
         attempt: 1,
         dependencies: Vec::new(),
-        stage_run_id: None,
+        work_run_id: None,
         submitted_at: Instant("2027-08-28T10:00:00.000Z".into()),
     }
 }

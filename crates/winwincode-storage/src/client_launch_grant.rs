@@ -36,7 +36,7 @@
 use std::fmt;
 
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
-use winwincode_domain::Instant;
+use winwincode_domain::{Instant, WorkRunId};
 
 use crate::{SqliteStorage, StorageError};
 
@@ -60,7 +60,7 @@ CREATE TABLE IF NOT EXISTS worker_launch_grants (
     credential_digest TEXT NOT NULL
         CHECK (length(credential_digest) = 71 AND credential_digest LIKE 'sha256:%'),
     product_session_id TEXT,
-    stage_run_id TEXT,
+    work_run_id TEXT,
     expires_at TEXT NOT NULL,
     state TEXT NOT NULL CHECK (state IN ('issued', 'consumed', 'revoked', 'expired')),
     consumed_at TEXT,
@@ -203,7 +203,7 @@ pub struct LaunchGrantIssuance {
     worker_instance_id: String,
     credential_digest: String,
     product_session_id: Option<String>,
-    stage_run_id: Option<String>,
+    work_run_id: Option<WorkRunId>,
     expires_at: Instant,
 }
 
@@ -229,7 +229,7 @@ impl LaunchGrantIssuance {
         worker_instance_id: impl Into<String>,
         credential_digest: impl Into<String>,
         product_session_id: Option<String>,
-        stage_run_id: Option<String>,
+        work_run_id: Option<WorkRunId>,
         expires_at: Instant,
     ) -> Result<Self, WorkerLaunchGrantStoreError> {
         let issuance = Self {
@@ -245,7 +245,7 @@ impl LaunchGrantIssuance {
             worker_instance_id: worker_instance_id.into(),
             credential_digest: credential_digest.into(),
             product_session_id,
-            stage_run_id,
+            work_run_id,
             expires_at,
         };
         validate_worker_launch_grant_id(&issuance.worker_launch_grant_id)?;
@@ -262,8 +262,8 @@ impl LaunchGrantIssuance {
         if let Some(product) = &issuance.product_session_id {
             validate_product_session_id(product)?;
         }
-        if let Some(stage) = &issuance.stage_run_id {
-            validate_stage_run_id(stage)?;
+        if let Some(work_run) = &issuance.work_run_id {
+            validate_work_run_id(work_run)?;
         }
         validate_instant(&issuance.expires_at, "grant expiry")?;
         Ok(issuance)
@@ -430,8 +430,8 @@ pub struct WorkerLaunchGrantRecord {
     pub credential_digest: String,
     /// Product session the launch belongs to, when known.
     pub product_session_id: Option<String>,
-    /// Stage run the launch belongs to, when known.
-    pub stage_run_id: Option<String>,
+    /// `WorkRun` the launch belongs to, when known.
+    pub work_run_id: Option<WorkRunId>,
     /// Deadline after which the grant may no longer be consumed.
     pub expires_at: Instant,
     /// Lifecycle state.
@@ -540,9 +540,7 @@ impl<'storage> WorkerLaunchGrantLedger<'storage> {
         let connection = storage
             .connection()
             .map_err(|storage| storage_error(&storage))?;
-        connection
-            .execute_batch(WORKER_LAUNCH_GRANT_SCHEMA)
-            .map_err(|sql| sql_error(&sql))?;
+        ensure_worker_launch_grant_schema(connection)?;
         validate_schema(connection)?;
         Ok(Self { storage })
     }
@@ -580,7 +578,7 @@ impl<'storage> WorkerLaunchGrantLedger<'storage> {
                   holder_user_id, occupancy_lease_id, occupancy_fencing_token,
                   repository_binding_id, worker_session_id, worker_id,
                   worker_instance_id, credential_digest, product_session_id,
-                  stage_run_id, expires_at, state, consumed_at, ended_at,
+                  work_run_id, expires_at, state, consumed_at, ended_at,
                   created_at, revision)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
                          ?14, 'issued', NULL, NULL, ?15, 1)",
@@ -597,7 +595,7 @@ impl<'storage> WorkerLaunchGrantLedger<'storage> {
                     issuance.worker_instance_id,
                     issuance.credential_digest,
                     issuance.product_session_id,
-                    issuance.stage_run_id,
+                    issuance.work_run_id.as_ref().map(|value| value.0.as_str()),
                     issuance.expires_at.0,
                     now.0,
                 ],
@@ -895,27 +893,27 @@ impl<'storage> WorkerLaunchGrantLedger<'storage> {
         }
     }
 
-    /// Returns the newest launch grant anchored to one `StrongFlow` stage run,
-    /// if any, regardless of its lifecycle state (`FLOW-100.5`): the per-stage
+    /// Returns the newest launch grant anchored to one `StrongFlow` `WorkRun`,
+    /// if any, regardless of its lifecycle state (`FLOW-100.5`): the per-WorkRun
     /// anchor routes that role's job to the exact `WorkerSession` the Client
     /// launched for it, so distinct roles never share a `CodexThread`.
     ///
     /// # Errors
     ///
-    /// Rejects a non-canonical stage run identity, a corrupt stored row, or
+    /// Rejects a non-canonical `WorkRun` identity, a corrupt stored row, or
     /// storage failure.
-    pub fn newest_grant_for_stage_run(
+    pub fn newest_grant_for_work_run(
         &self,
-        stage_run_id: &str,
+        work_run_id: &str,
     ) -> Result<Option<WorkerLaunchGrantRecord>, WorkerLaunchGrantStoreError> {
-        validate_stage_run_id(stage_run_id)?;
+        validate_work_run_id(&WorkRunId(work_run_id.to_owned()))?;
         let connection = self.connection()?;
         let grant_id = connection
             .query_row(
                 "SELECT worker_launch_grant_id FROM worker_launch_grants
-                 WHERE stage_run_id = ?1
+                 WHERE work_run_id = ?1
                  ORDER BY created_at DESC, worker_launch_grant_id DESC LIMIT 1",
-                [stage_run_id],
+                [work_run_id],
                 |row| row.get::<_, String>(0),
             )
             .optional()
@@ -1005,6 +1003,44 @@ impl<'storage> WorkerLaunchGrantLedger<'storage> {
             .connection()
             .map_err(|storage| storage_error(&storage))
     }
+}
+
+fn ensure_worker_launch_grant_schema(
+    connection: &rusqlite::Connection,
+) -> Result<(), WorkerLaunchGrantStoreError> {
+    let columns = connection
+        .prepare("PRAGMA table_info(worker_launch_grants)")
+        .map_err(|sql| sql_error(&sql))?
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|sql| sql_error(&sql))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|sql| sql_error(&sql))?;
+    if !columns.is_empty() && !columns.iter().any(|column| column == "work_run_id") {
+        connection
+            .execute(
+                "ALTER TABLE worker_launch_grants ADD COLUMN work_run_id TEXT",
+                [],
+            )
+            .map_err(|sql| sql_error(&sql))?;
+    }
+    if columns.iter().any(|column| column == "stage_run_id")
+        && connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM worker_launch_grants WHERE stage_run_id IS NOT NULL)",
+                [],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(|sql| sql_error(&sql))?
+    {
+        return Err(error(
+            WorkerLaunchGrantStoreErrorKind::Storage,
+            "legacy StageRun grants require an explicit WorkRun migration",
+        ));
+    }
+    connection
+        .execute_batch(WORKER_LAUNCH_GRANT_SCHEMA)
+        .map_err(|sql| sql_error(&sql))?;
+    Ok(())
 }
 
 /// One launch audit row.
@@ -1375,7 +1411,7 @@ fn load_launch_grant(
                     holder_user_id, occupancy_lease_id, occupancy_fencing_token,
                     repository_binding_id, worker_session_id, worker_id,
                     worker_instance_id, credential_digest, product_session_id,
-                    stage_run_id, expires_at, state, consumed_at, ended_at,
+                    work_run_id, expires_at, state, consumed_at, ended_at,
                     created_at, revision
              FROM worker_launch_grants WHERE worker_launch_grant_id = ?1",
             [worker_launch_grant_id],
@@ -1446,7 +1482,7 @@ fn launch_grant_record_from_row(
         worker_instance_id,
         credential_digest,
         product_session_id,
-        stage_run_id,
+        work_run_id,
         expires_at,
         state,
         consumed_at,
@@ -1477,7 +1513,7 @@ fn launch_grant_record_from_row(
         worker_instance_id,
         credential_digest,
         product_session_id,
-        stage_run_id,
+        work_run_id: work_run_id.map(WorkRunId),
         expires_at: parse_stored_instant(&expires_at, "grant expiry")?,
         state: WorkerLaunchGrantState::parse(&state)?,
         consumed_at: parse_optional(consumed_at, "consumed at")?,
@@ -1504,7 +1540,7 @@ fn validate_schema(connection: &rusqlite::Connection) -> Result<(), WorkerLaunch
             "worker_instance_id",
             "credential_digest",
             "product_session_id",
-            "stage_run_id",
+            "work_run_id",
             "expires_at",
             "state",
             "consumed_at",
@@ -1632,8 +1668,8 @@ fn validate_product_session_id(value: &str) -> Result<(), WorkerLaunchGrantStore
     validate_crockford_id(value, "psn_", "product session id")
 }
 
-fn validate_stage_run_id(value: &str) -> Result<(), WorkerLaunchGrantStoreError> {
-    validate_crockford_id(value, "run_", "stage run id")
+fn validate_work_run_id(value: &WorkRunId) -> Result<(), WorkerLaunchGrantStoreError> {
+    validate_crockford_id(&value.0, "wrn_", "WorkRun id")
 }
 
 /// Validates the canonical `sha256:` + 64 lowercase hex digest shape.
@@ -2058,7 +2094,7 @@ mod tests {
             format!("winst_{}", crockford(session_seed + 2)),
             DIGEST,
             Some(format!("ps_{}", crockford(session_seed + 3))),
-            Some(format!("run_{}", crockford(session_seed + 4))),
+            Some(WorkRunId(format!("wrn_{}", crockford(session_seed + 4)))),
             unit_instant("2026-01-01T01:00:00.000Z"),
         )
         .expect("issuance")
@@ -2862,5 +2898,69 @@ mod tests {
             )
             .is_ok()
         );
+    }
+
+    #[test]
+    fn existing_empty_grant_table_adds_work_run_column() {
+        let connection = rusqlite::Connection::open_in_memory().expect("sqlite");
+        connection
+            .execute_batch(WORKER_LAUNCH_GRANT_SCHEMA)
+            .expect("schema");
+        connection
+            .execute(
+                "ALTER TABLE worker_launch_grants RENAME COLUMN work_run_id TO stage_run_id",
+                [],
+            )
+            .expect("legacy column");
+        ensure_worker_launch_grant_schema(&connection).expect("upgrade empty table");
+        let columns = connection
+            .prepare("PRAGMA table_info(worker_launch_grants)")
+            .expect("pragma")
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("columns")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("rows");
+        assert!(columns.iter().any(|column| column == "work_run_id"));
+    }
+
+    #[test]
+    fn existing_stage_run_grant_is_rejected_without_rewriting_data() {
+        let connection = rusqlite::Connection::open_in_memory().expect("sqlite");
+        connection
+            .execute_batch(WORKER_LAUNCH_GRANT_SCHEMA)
+            .expect("schema");
+        connection
+            .execute(
+                "ALTER TABLE worker_launch_grants RENAME COLUMN work_run_id TO stage_run_id",
+                [],
+            )
+            .expect("legacy column");
+        connection
+            .execute_batch("PRAGMA foreign_keys=OFF;")
+            .expect("foreign keys");
+        connection
+            .execute(
+                "INSERT INTO worker_launch_grants
+                 (worker_launch_grant_id,client_node_id,client_instance_id,holder_user_id,
+                  occupancy_lease_id,occupancy_fencing_token,repository_binding_id,worker_session_id,
+                  worker_id,worker_instance_id,credential_digest,product_session_id,stage_run_id,
+                  expires_at,state,created_at,revision)
+                 VALUES ('wlg_00000000000000000000000001','cln_00000000000000000000000001',
+                         'cli_00000000000000000000000001','usr_00000000000000000000000001',
+                         'ols_00000000000000000000000001',1,'rbd_00000000000000000000000001',
+                         'wsn_00000000000000000000000001','wrk_00000000000000000000000001',
+                         'wki_00000000000000000000000001','sha256:'||printf('%064d',0),
+                         NULL,'run_00000000000000000000000001','2027-01-15T08:05:00.000Z',
+                         'issued','2027-01-15T08:00:00.000Z',1)",
+                [],
+            )
+            .expect("legacy grant");
+        assert!(ensure_worker_launch_grant_schema(&connection).is_err());
+        let value: String = connection
+            .query_row("SELECT stage_run_id FROM worker_launch_grants", [], |row| {
+                row.get(0)
+            })
+            .expect("legacy value");
+        assert_eq!(value, "run_00000000000000000000000001");
     }
 }

@@ -147,7 +147,7 @@ impl ProjectionFixture {
             session_identity: SessionIdentity {
                 codex_thread_id: self.authority.codex_thread_id.clone(),
                 product_session_id: self.product_session_id.clone(),
-                stage_run_id: None,
+                work_run_id: None,
                 worker_session_id: self.authority.worker_session_id.clone(),
             },
             worker_session_id: self.authority.worker_session_id.clone(),

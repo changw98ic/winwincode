@@ -12,18 +12,18 @@ use winwincode_api::generated::{
     CredentialReferenceRevokeCommandCommand, CredentialReferenceRevokePayload, EmptyParameters,
     ModelRoute, ModelRouteAvailabilityListQuery, ModelRouteAvailabilityListQueryQuery,
     ModelRouteAvailabilityReason, ModelRouteAvailabilityStatus, OrganizationScope,
-    OrganizationScopeKind, PageRequest, ProjectScope, ProjectScopeKind, RepositoryScope,
-    RepositoryScopeKind, Scope, UserActor, UserActorKind,
+    OrganizationScopeKind, PageRequest, ProjectScope, ProjectScopeKind, Scope,
 };
 use winwincode_control_plane::{
     CredentialReferenceService, ModelCapability, ModelRequestPoolConfig,
-    ModelRouteAvailabilityErrorKind, ModelRouteAvailabilityService, ModelSettingsRequest,
-    ModelSettingsService, ModelSettingsTarget, ModelSettingsValues, ModelToolSupport,
-    ProviderCatalogRequest, ProviderCatalogService, ProviderDescriptor,
+    ModelRouteAvailabilityErrorKind, ModelRouteAvailabilityService, ModelRouteRuntimeStatusCommand,
+    ModelSettingsRequest, ModelSettingsService, ModelSettingsTarget, ModelSettingsValues,
+    ModelToolSupport, ProviderCatalogRequest, ProviderCatalogService, ProviderDescriptor,
 };
 use winwincode_domain::{
-    CredentialReferenceId, OpaqueCursor, OrganizationId, ProjectId, RepositoryId, RequestId,
-    Revision, SchemaVersion, UserId, WorkspaceId,
+    CredentialReferenceId, Instant, OpaqueCursor, OrganizationId, ProjectId, RepositoryId,
+    RepositoryScope, RepositoryScopeKind, RequestId, Revision, SchemaVersion, UserActor,
+    UserActorKind, UserId, WorkspaceId,
 };
 use winwincode_storage::SqliteStorage;
 
@@ -135,6 +135,8 @@ fn register_provider(
                 context_window_tokens: 128_000,
                 max_output_tokens: 16_000,
                 tool_support: ModelToolSupport::Parallel,
+                structured_output_support:
+                    winwincode_control_plane::StructuredOutputSupport::Unsupported,
                 reasoning_efforts: vec!["high".to_owned(), "medium".to_owned()],
             })
             .collect(),
@@ -148,7 +150,6 @@ fn register_provider(
                 expected_catalog_version: 0,
             },
             &descriptor,
-            winwincode_domain::Instant("2026-09-02T00:00:00.000Z".to_owned()),
         )
         .expect("register Provider fixture");
 }
@@ -179,7 +180,7 @@ fn configure_default(
                 }),
                 worker_concurrency_limit: 1,
             },
-            winwincode_domain::Instant("2026-09-02T00:00:00.000Z".to_owned()),
+            Instant("2026-09-02T00:00:00.000Z".to_owned()),
         )
         .expect("configure default ModelRoute fixture");
 }
@@ -250,13 +251,13 @@ fn inherited_sources_multiple_routes_pagination_and_tenant_boundaries_are_determ
         first.result.settings_source,
         Some(Scope::OrganizationScope(organization_scope(1)))
     );
-    assert_eq!(first.result.status, ModelRouteAvailabilityStatus::Enabled);
+    assert_eq!(first.result.status, ModelRouteAvailabilityStatus::Available);
     assert_eq!(first.result.reason, ModelRouteAvailabilityReason::Ready);
     assert_eq!(first.result.items.len(), 1);
     assert_eq!(first.result.items[0].route.model_id, "model-alpha");
     assert_eq!(
         first.result.items[0].status,
-        ModelRouteAvailabilityStatus::Enabled
+        ModelRouteAvailabilityStatus::Available
     );
     assert_eq!(
         first.result.items[0].reason,
@@ -406,7 +407,6 @@ fn credential_revocation_and_catalog_disable_fail_closed_without_leaking_details
                 expected_catalog_version: 1,
             },
             "provider-main",
-            winwincode_domain::Instant("2026-09-02T00:00:00.000Z".to_owned()),
         )
         .expect("disable Provider fixture");
     let disabled = ModelRouteAvailabilityService::new(&mut storage, Some(pool_config()))
@@ -425,5 +425,51 @@ fn credential_revocation_and_catalog_disable_fail_closed_without_leaking_details
     assert!(!encoded.contains("revokedAt"));
     assert!(!encoded.contains("vault"));
     assert!(!encoded.contains("activeCount"));
+    fs::remove_dir_all(root).expect("remove availability fixture");
+}
+
+#[test]
+fn runtime_status_uses_the_complete_closed_state_set_without_inventing_quota() {
+    let root = temporary_directory("runtime-states");
+    let mut storage = SqliteStorage::open(&root).expect("open availability storage");
+    seed_ready_routes(&mut storage, 5, &["model-main"], "model-main");
+    let scope = repository_scope(5);
+    let route = ModelRoute {
+        provider_id: "provider-main".to_owned(),
+        model_id: "model-main".to_owned(),
+        credential_reference_id: CredentialReferenceId(id("crd", 5)),
+    };
+    let states = [
+        ModelRouteAvailabilityStatus::Available,
+        ModelRouteAvailabilityStatus::RateLimited,
+        ModelRouteAvailabilityStatus::WindowExhausted,
+        ModelRouteAvailabilityStatus::WeeklyExhausted,
+        ModelRouteAvailabilityStatus::AuthError,
+        ModelRouteAvailabilityStatus::Disabled,
+        ModelRouteAvailabilityStatus::Unknown,
+    ];
+    for (index, status) in states.into_iter().enumerate() {
+        let expected_revision = u64::try_from(index).expect("runtime revision");
+        let receipt = ModelRouteAvailabilityService::new(&mut storage, Some(pool_config()))
+            .record_runtime_status(
+                &ModelRouteRuntimeStatusCommand {
+                    actor: actor(1),
+                    scope: scope.clone(),
+                    route: route.clone(),
+                    request_id: RequestId(id("req", 500 + expected_revision)),
+                    expected_revision,
+                    status: status.clone(),
+                    source: "provider-runtime".to_owned(),
+                    source_revision: expected_revision + 1,
+                },
+                Instant(format!("2026-09-02T00:00:0{index}.000Z")),
+            )
+            .expect("record exact runtime status");
+        assert_eq!(receipt.status, status);
+        let listed = ModelRouteAvailabilityService::new(&mut storage, Some(pool_config()))
+            .list(&query(600 + expected_revision, scope.clone(), 20, None))
+            .expect("list exact runtime status");
+        assert_eq!(listed.result.status, status);
+    }
     fs::remove_dir_all(root).expect("remove availability fixture");
 }

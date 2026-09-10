@@ -33,28 +33,26 @@ use winwincode_execution_port::{
     transport::ExecutionPortCore,
 };
 use winwincode_storage::{
-    EnterpriseQuotaReleaseReason, ProductStateStorage, ProviderExchangeBegin,
-    ProviderExchangeFailure, ProviderExchangeFinalAck, ProviderExchangeOpened,
-    ProviderExchangeSnapshot, ProviderExchangeState, ProviderExchangeStoreError,
-    ProviderExchangeStoreErrorCode, ProviderExchangeTerminal, ProviderExchangeTerminalProgress,
-    ProviderExchangeTerminalStage, SqliteStorage, StateCommit,
+    ProductStateStorage, ProviderExchangeBegin, ProviderExchangeFailure, ProviderExchangeFinalAck,
+    ProviderExchangeOpened, ProviderExchangeSnapshot, ProviderExchangeState,
+    ProviderExchangeStoreError, ProviderExchangeStoreErrorCode, ProviderExchangeTerminal,
+    ProviderExchangeTerminalProgress, ProviderExchangeTerminalStage, SqliteStorage, StateCommit,
 };
 
 use crate::{
-    CanonicalModelStreamFrame, DurableProviderPolicyEnforcement, EnterpriseQuotaAdmissionPort,
-    FrozenModelRouteAuthority, ModelAttemptFailureFact, ModelExecutionCertainty,
-    ModelFrameAckReceipt, ModelFrameWriteReceipt, ModelFrameWriteStatus, ModelRequestAdmission,
-    ModelRequestAdmissionReceipt, ModelRequestAdmissionStatus, ModelRequestPool,
-    ModelRequestPoolConfig, ModelRequestState, ModelRequestTerminalOutcome, ModelRetryPlannerError,
-    ModelRetryPlannerErrorKind, ModelRetryPreOpenPlannerPort, ModelRetrySettlementContext,
-    ModelRetrySettlementContextPort, ModelStreamFlowAckReceipt, ModelStreamFlowCancellationReceipt,
-    ModelStreamFlowCoordinator, ModelStreamFlowError, ModelStreamFlowWriteReceipt,
-    ModelStreamReadControl, ProviderAdmissionOpenReceipt, ProviderEnterpriseQuotaSaga,
+    CanonicalModelStreamFrame, FrozenModelRouteAuthority, ModelAttemptFailureFact,
+    ModelExecutionCertainty, ModelFrameAckReceipt, ModelFrameWriteReceipt, ModelFrameWriteStatus,
+    ModelRequestAdmission, ModelRequestAdmissionReceipt, ModelRequestAdmissionStatus,
+    ModelRequestPool, ModelRequestPoolConfig, ModelRequestState, ModelRequestTerminalOutcome,
+    ModelRetryPlannerError, ModelRetryPlannerErrorKind, ModelRetryPreOpenPlannerPort,
+    ModelRetrySettlementContext, ModelRetrySettlementContextPort, ModelStreamFlowAckReceipt,
+    ModelStreamFlowCancellationReceipt, ModelStreamFlowCoordinator, ModelStreamFlowError,
+    ModelStreamFlowWriteReceipt, ModelStreamReadControl, ProviderAdmissionOpenReceipt,
     ProviderGateway, ProviderGatewayDurableExchange, ProviderGatewayError,
     ProviderGatewayErrorKind, ProviderGatewayOpenReceipt, ProviderGatewayTerminal,
     ProviderGatewayTerminalOutcome, ProviderGatewayTerminalProgress,
     ProviderGatewayTerminalProgressPort, ProviderGatewayTerminalProgressStage,
-    ProviderGatewayTerminalReceipt, ProviderPolicyErrorKind, command_receipt_identity,
+    ProviderGatewayTerminalReceipt, command_receipt_identity,
     model_route_availability::{
         model_request_pool_readiness_stream_id, model_route_availability_invalidated_event,
     },
@@ -728,8 +726,6 @@ pub struct ModelExecutionRuntime<'a, 'storage> {
     planned_contexts: &'a dyn ModelRetrySettlementContextPort,
     gateway: &'a mut ProviderGateway<'storage>,
     pool: &'a mut ModelRequestPool,
-    enterprise_quota: Option<&'a mut dyn EnterpriseQuotaAdmissionPort>,
-    enterprise_policy: Option<&'a mut DurableProviderPolicyEnforcement>,
 }
 
 struct RuntimeOpenContext {
@@ -753,52 +749,6 @@ impl<'a, 'storage> ModelExecutionRuntime<'a, 'storage> {
             planned_contexts,
             gateway,
             pool,
-            enterprise_quota: None,
-            enterprise_policy: None,
-        }
-    }
-
-    /// Creates a production runtime with the unique enterprise quota port.
-    #[must_use]
-    pub const fn new_with_enterprise_quota(
-        exchanges: &'a DurableModelExchangeAuthority,
-        planner: &'a mut dyn ModelRetryPreOpenPlannerPort,
-        planned_contexts: &'a dyn ModelRetrySettlementContextPort,
-        gateway: &'a mut ProviderGateway<'storage>,
-        pool: &'a mut ModelRequestPool,
-        enterprise_quota: &'a mut dyn EnterpriseQuotaAdmissionPort,
-    ) -> Self {
-        Self {
-            exchanges,
-            planner,
-            planned_contexts,
-            gateway,
-            pool,
-            enterprise_quota: Some(enterprise_quota),
-            enterprise_policy: None,
-        }
-    }
-
-    /// Creates the production runtime with the unique enterprise Policy and
-    /// quota authorities installed before Provider access.
-    #[must_use]
-    pub const fn new_with_enterprise_controls(
-        exchanges: &'a DurableModelExchangeAuthority,
-        planner: &'a mut dyn ModelRetryPreOpenPlannerPort,
-        planned_contexts: &'a dyn ModelRetrySettlementContextPort,
-        gateway: &'a mut ProviderGateway<'storage>,
-        pool: &'a mut ModelRequestPool,
-        enterprise_quota: &'a mut dyn EnterpriseQuotaAdmissionPort,
-        enterprise_policy: &'a mut DurableProviderPolicyEnforcement,
-    ) -> Self {
-        Self {
-            exchanges,
-            planner,
-            planned_contexts,
-            gateway,
-            pool,
-            enterprise_quota: Some(enterprise_quota),
-            enterprise_policy: Some(enterprise_policy),
         }
     }
 
@@ -926,33 +876,8 @@ impl<'a, 'storage> ModelExecutionRuntime<'a, 'storage> {
         reservation: &ProviderAdmissionOpenReceipt,
         adapter_request_id: &str,
     ) -> Result<ProviderGatewayOpenReceipt, ProviderGatewayError> {
-        if let Some(policy) = self.enterprise_policy.as_deref_mut() {
-            let context = self
-                .planned_contexts
-                .load_context(&message.model_exchange_id)
-                .map_err(|_| ProviderGatewayError::policy_unavailable())?
-                .ok_or_else(ProviderGatewayError::policy_unavailable)?;
-            policy
-                .enforce(&context)
-                .map_err(|error| match error.kind() {
-                    ProviderPolicyErrorKind::Rejected => ProviderGatewayError::policy_denied(),
-                    ProviderPolicyErrorKind::Unavailable => {
-                        ProviderGatewayError::policy_unavailable()
-                    }
-                })?;
-        }
-        if let Some(enterprise_quota) = self.enterprise_quota.as_deref_mut() {
-            self.gateway.open_after_reservation_with_enterprise_quota(
-                message,
-                reservation,
-                adapter_request_id,
-                self.planned_contexts,
-                enterprise_quota,
-            )
-        } else {
-            self.gateway
-                .open_after_reservation(message, reservation, adapter_request_id)
-        }
+        self.gateway
+            .open_after_reservation(message, reservation, adapter_request_id)
     }
 
     fn open_context(
@@ -1506,32 +1431,6 @@ impl<'a, 'storage> ModelExecutionRuntime<'a, 'storage> {
         Ok(())
     }
 
-    fn release_failed_enterprise_quota(
-        &mut self,
-        model_exchange_id: &ModelExchangeId,
-        command: ProviderGatewayTerminal,
-        settled_at: &Instant,
-    ) -> Result<(), ModelExecutionRuntimeError> {
-        let reason = match command {
-            ProviderGatewayTerminal::Completed { .. } => return Ok(()),
-            ProviderGatewayTerminal::Failed { .. } => EnterpriseQuotaReleaseReason::Failed,
-            ProviderGatewayTerminal::Cancelled => EnterpriseQuotaReleaseReason::Cancelled,
-        };
-        if let Some(quota) = self.enterprise_quota.as_deref_mut() {
-            ProviderEnterpriseQuotaSaga::new(quota)
-                .release_durable_terminal(
-                    self.planned_contexts,
-                    model_exchange_id,
-                    reason,
-                    settled_at.clone(),
-                )
-                .map_err(|_| {
-                    ModelExecutionRuntimeError::new(ModelExecutionRuntimeErrorKind::Gateway)
-                })?;
-        }
-        Ok(())
-    }
-
     fn persist_terminal(
         &mut self,
         model_exchange_id: &ModelExchangeId,
@@ -1545,7 +1444,6 @@ impl<'a, 'storage> ModelExecutionRuntime<'a, 'storage> {
             .pool
             .project_scope_for_exchange(model_exchange_id)
             .map_err(|_| ModelExecutionRuntimeError::new(ModelExecutionRuntimeErrorKind::Flow))?;
-        self.release_failed_enterprise_quota(model_exchange_id, command, settled_at)?;
         self.exchanges.terminal_with_pool_authority(
             model_exchange_id,
             &ProviderExchangeTerminal::new(
@@ -1979,8 +1877,6 @@ fn gateway_kind(kind: ProviderGatewayErrorKind) -> &'static str {
         ProviderGatewayErrorKind::ExchangeConflict => "exchange_conflict",
         ProviderGatewayErrorKind::ExchangeNotFound => "exchange_not_found",
         ProviderGatewayErrorKind::TerminalConflict => "terminal_conflict",
-        ProviderGatewayErrorKind::PolicyDenied => "policy_denied",
-        ProviderGatewayErrorKind::PolicyUnavailable => "policy_unavailable",
         ProviderGatewayErrorKind::AdmissionDenied => "admission_denied",
         ProviderGatewayErrorKind::AdmissionUnavailable => "admission_unavailable",
         ProviderGatewayErrorKind::SettlementUnavailable => "settlement_unavailable",

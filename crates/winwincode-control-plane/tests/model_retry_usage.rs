@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -8,33 +9,40 @@ use std::thread;
 
 use winwincode_api::generated::{
     Actor, CredentialReferenceCreateCommand, CredentialReferenceCreateCommandCommand,
-    CredentialReferenceCreatePayload, ModelRoute, OrganizationScope, OrganizationScopeKind, Scope,
+    CredentialReferenceCreatePayload, ModelRoute, ModelRouteAvailabilityStatus, OrganizationScope,
+    OrganizationScopeKind, Scope,
 };
 use winwincode_control_plane::{
-    CredentialReferenceService, DurableProviderRetrySettlement, FrozenModelRetryPlan,
-    FrozenModelRouteAuthority, ModelAttemptCharge, ModelAttemptCompletionCommand,
-    ModelAttemptFailureCommand, ModelAttemptFailureFact, ModelAttemptFailureKind,
-    ModelAttemptStartCommand, ModelAttemptStartReceipt, ModelCapability, ModelExecutionCertainty,
+    AgentProviderPolicy, CredentialReferenceService, DurableProviderRetrySettlement,
+    FrozenModelRetryPlan, FrozenModelRouteAuthority, ModelAttemptCharge,
+    ModelAttemptCompletionCommand, ModelAttemptFailureCommand, ModelAttemptFailureFact,
+    ModelAttemptFailureKind, ModelAttemptStartCommand, ModelAttemptStartReceipt, ModelBudgetAction,
+    ModelBudgetPolicy, ModelBudgetState, ModelCapability, ModelCostClass, ModelCostFact,
+    ModelExecutionCertainty, ModelPriceCatalog, ModelPriceEntry, ModelPriceReference,
     ModelReservationReceipt, ModelReservationTerminalOutcome, ModelReservationTerminalReceipt,
     ModelRetryAction, ModelRetrySettlementContext, ModelRetrySettlementContextError,
     ModelRetrySettlementContextPort, ModelRetrySettlementErrorKind, ModelRetrySettlementReceipt,
     ModelRetryStep, ModelRetryUsageErrorKind, ModelRetryUsageRequest, ModelRetryUsageService,
-    ModelSettingsProjection, ModelSettingsTarget, ModelToolSupport, ModelUsageAttribution,
-    ModelUsageFilter, ProviderCatalogRequest, ProviderCatalogService, ProviderDescriptor,
-    ProviderEnterpriseUsageErrorKind, ProviderEnterpriseUsageReconciler, ProviderGatewayIdentity,
-    ProviderGatewaySettlement, ProviderGatewayTerminalOutcome, ProviderStreamFailureKind,
-    ProviderTokenUsage, StructuredOutputSupport,
+    ModelRouteResolutionReason, ModelSettingsProjection, ModelSettingsTarget, ModelTokenPrice,
+    ModelToolSupport, ModelUsageAttribution, ModelUsageFilter, ProviderCatalogRequest,
+    ProviderCatalogService, ProviderDescriptor, ProviderGatewayIdentity, ProviderGatewaySettlement,
+    ProviderGatewayTerminalOutcome, ProviderModelSelector, ProviderPolicy, ProviderPolicyCandidate,
+    ProviderPolicyRoute, ProviderStreamFailureKind, ProviderTokenUsage, StructuredOutputSupport,
+    UnknownCostPolicy, summarize_model_costs,
 };
 use winwincode_domain::{
-    CredentialReferenceId, DeliveryId, Instant, ModelExchangeId, OrganizationId, ProductSessionId,
-    ProjectId, RepositoryId, RequestId, Revision, SchemaVersion, Sha256Digest, UserId, WorkspaceId,
+    CredentialReferenceId, DeliveryId, ExecutionJobId, Instant, ModelExchangeId, OrganizationId,
+    ProductSessionId, ProjectId, RepositoryId, RequestId, Revision, SchemaVersion, Sha256Digest,
+    UserId, WorkspaceId,
 };
 use winwincode_domain::{RepositoryScope, RepositoryScopeKind, UserActor, UserActorKind};
+use winwincode_execution_port::agent_config::{
+    AgentProfile, AgentProfileSettings, AgentProfileSource,
+};
 use winwincode_storage::{
-    AggregateJournalKey, CommitReceipt, EnterpriseUsageFilter as EnterpriseLedgerFilter,
-    LoadedAggregateJournal, OutboxEvent, ProductStateStorage, ProjectionEventCursor,
-    ProjectionEventStreamKey, ProjectionReadCut, ReceiptIdentity, SqliteStorage, StorageError,
-    StoredState,
+    AggregateJournalKey, CommitReceipt, LoadedAggregateJournal, OutboxEvent, ProductStateStorage,
+    ProjectionEventCursor, ProjectionEventStreamKey, ProjectionReadCut, ReceiptIdentity,
+    SqliteStorage, StorageError, StoredState,
 };
 
 static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(1);
@@ -107,7 +115,6 @@ fn register_provider(storage: &mut SqliteStorage, seed: u64, expected_version: u
                     reasoning_efforts: vec!["high".to_owned()],
                 }],
             },
-            Instant("2026-09-02T00:00:00.000Z".to_owned()),
         )
         .expect("register Provider");
 }
@@ -277,17 +284,12 @@ fn request(
         attribution: ModelUsageAttribution::from_request_authority(
             plan.steps()[0].authority(),
             delivery_seed.map(|seed| DeliveryId(id("dlv", seed))),
+            ExecutionJobId(id("job", seed)),
+            "executor".to_owned(),
             &actor(),
         )
         .expect("attribution"),
         plan,
-        enterprise_quota_amounts: winwincode_storage::EnterpriseQuotaAmounts {
-            tokens: 100,
-            provider_cost_micros: 10,
-            operations: 1,
-            ..winwincode_storage::EnterpriseQuotaAmounts::default()
-        },
-        enterprise_quota_requested_at: Instant("2027-08-01T00:00:00.000Z".to_owned()),
     }
 }
 
@@ -362,6 +364,50 @@ fn charge(
             reasoning_output_tokens: 0,
         },
         cost_micros,
+    }
+}
+
+fn selector(seed: u64) -> ProviderModelSelector {
+    ProviderModelSelector {
+        provider_id: format!("provider-{seed}"),
+        model_id: format!("model-{seed}"),
+    }
+}
+
+fn agent_profile() -> AgentProfile {
+    AgentProfile {
+        revision: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
+        source: AgentProfileSource {
+            execution_profile: "executor".to_owned(),
+            worker_capability_digest: Sha256Digest(format!("sha256:{}", "b".repeat(64))),
+            settings: AgentProfileSettings {
+                provider: "provider-1".to_owned(),
+                model: "model-1".to_owned(),
+                reasoning: "high".to_owned(),
+                tools: Vec::new(),
+                sandbox: "candidate".to_owned(),
+                instructions: None,
+            },
+        },
+    }
+}
+
+fn price_entry(seed: u64, version: &str, semantics: &str) -> ModelPriceEntry {
+    ModelPriceEntry {
+        model: selector(seed),
+        reference: ModelPriceReference {
+            source: "fixture-price-book".to_owned(),
+            version: version.to_owned(),
+            currency: "USD".to_owned(),
+            billing_semantics: semantics.to_owned(),
+        },
+        micros_per_million_tokens: ModelTokenPrice {
+            input: 1_000_000,
+            cached_input: 1_000_000,
+            cache_write_input: 1_000_000,
+            output: 1_000_000,
+            reasoning_output: 1_000_000,
+        },
     }
 }
 
@@ -622,6 +668,247 @@ fn record_fallback_and_charged_failure(fixture: &mut Fixture) {
 }
 
 #[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one E11 acceptance flow covers policy, cost, and budget joins"
+)]
+fn provider_policy_re_resolves_and_versioned_costs_remain_auditable() {
+    let mut fixture = Fixture::new("provider-policy-cost");
+    let profile = agent_profile();
+    let base_policy = AgentProviderPolicy {
+        primary: ProviderPolicyRoute {
+            selector: selector(1),
+            max_attempts: 1,
+        },
+        fallbacks: vec![ProviderPolicyRoute {
+            selector: selector(2),
+            max_attempts: 1,
+        }],
+        allowed_models: BTreeSet::from([selector(1), selector(2)]),
+        allowed_reasoning_efforts: BTreeSet::from(["high".to_owned()]),
+        allow_unknown_availability: false,
+    };
+    let policy = ProviderPolicy::try_new(
+        "community-provider-policy".to_owned(),
+        1,
+        BTreeMap::from([("executor".to_owned(), base_policy.clone())]),
+    )
+    .expect("valid per-Agent Provider policy");
+    let initial = policy
+        .resolve(
+            &profile,
+            &[
+                ProviderPolicyCandidate {
+                    authority: fixture.primary.clone(),
+                    availability: ModelRouteAvailabilityStatus::RateLimited,
+                },
+                ProviderPolicyCandidate {
+                    authority: fixture.fallback.clone(),
+                    availability: ModelRouteAvailabilityStatus::Available,
+                },
+            ],
+            None,
+        )
+        .expect("fallback is selected from current availability");
+    assert_eq!(
+        initial.resolution().reason,
+        ModelRouteResolutionReason::FallbackSelected
+    );
+    assert_eq!(initial.steps()[0].authority(), &fixture.fallback);
+
+    let initial_request = request(initial.clone(), 900, None);
+    let started = start(
+        &mut fixture.storage,
+        &initial_request,
+        &fixture.fallback,
+        90,
+        901,
+    );
+    let context = ModelRetrySettlementContext::try_new(initial_request, started)
+        .expect("freeze route-resolution trace");
+    let restored = ModelRetrySettlementContext::decode_json(
+        &context.encode_json().expect("encode route trace"),
+    )
+    .expect("restore route trace");
+    assert_eq!(restored.request().plan.resolution(), initial.resolution());
+
+    let replacement = policy
+        .resolve(
+            &profile,
+            &[
+                ProviderPolicyCandidate {
+                    authority: fixture.primary.clone(),
+                    availability: ModelRouteAvailabilityStatus::Available,
+                },
+                ProviderPolicyCandidate {
+                    authority: fixture.fallback.clone(),
+                    availability: ModelRouteAvailabilityStatus::Available,
+                },
+            ],
+            Some(initial.resolution()),
+        )
+        .expect("replacement Session re-resolves under inherited policy");
+    assert_eq!(replacement.steps()[0].authority(), &fixture.primary);
+    assert_eq!(
+        replacement.resolution().reason,
+        ModelRouteResolutionReason::ReplacementReselected
+    );
+    assert_ne!(
+        initial.resolution().source_fingerprint,
+        replacement.resolution().source_fingerprint,
+        "the trace source changes with current availability evidence"
+    );
+    assert!(
+        policy
+            .resolve(
+                &profile,
+                &[
+                    ProviderPolicyCandidate {
+                        authority: fixture.primary.clone(),
+                        availability: ModelRouteAvailabilityStatus::Available,
+                    },
+                    ProviderPolicyCandidate {
+                        authority: fixture.primary.clone(),
+                        availability: ModelRouteAvailabilityStatus::RateLimited,
+                    },
+                ],
+                None,
+            )
+            .is_err(),
+        "contradictory duplicate route evidence fails closed"
+    );
+    assert!(
+        policy
+            .resolve(
+                &profile,
+                &[ProviderPolicyCandidate {
+                    authority: fixture.primary.clone(),
+                    availability: ModelRouteAvailabilityStatus::Unknown,
+                }],
+                None,
+            )
+            .is_err(),
+        "unknown capacity is not free by default"
+    );
+    let mut explicit_unknown = base_policy;
+    explicit_unknown.allow_unknown_availability = true;
+    ProviderPolicy::try_new(
+        "community-provider-policy".to_owned(),
+        2,
+        BTreeMap::from([("executor".to_owned(), explicit_unknown)]),
+    )
+    .expect("explicit unknown policy")
+    .resolve(
+        &profile,
+        &[ProviderPolicyCandidate {
+            authority: fixture.primary.clone(),
+            availability: ModelRouteAvailabilityStatus::Unknown,
+        }],
+        None,
+    )
+    .expect("explicit policy may continue with unknown capacity");
+
+    record_fallback_and_charged_failure(&mut fixture);
+    let entries = ModelRetryUsageService::new(&mut fixture.storage)
+        .scan_usage_sources(&ModelUsageFilter::default(), None, 20)
+        .expect("read immutable Usage sources")
+        .entries;
+    assert_eq!(entries.len(), 2);
+    let partial = ModelPriceCatalog::try_new(vec![price_entry(2, "v1", "token-v1")])
+        .expect("partial price catalog");
+    let unknown = partial.project(&entries[1]).expect("project missing price");
+    assert_eq!(unknown.cost, ModelCostFact::Unknown);
+
+    let complete = ModelPriceCatalog::try_new(vec![
+        price_entry(1, "v2", "token-v2"),
+        price_entry(2, "v2", "token-v2"),
+    ])
+    .expect("backfilled price catalog");
+    let projections = entries
+        .iter()
+        .map(|entry| complete.project(entry).expect("known price"))
+        .collect::<Vec<_>>();
+    assert!(matches!(projections[1].cost, ModelCostFact::Known { .. }));
+    assert_eq!(
+        unknown.cost,
+        ModelCostFact::Unknown,
+        "old price view is retained"
+    );
+
+    let mut classified = entries.clone();
+    classified[0].attribution.execution_profile = "verifier".to_owned();
+    let summary = summarize_model_costs(&classified, &complete).expect("separate verifier cost");
+    assert_eq!(summary.execution_by_task.len(), 1);
+    assert_eq!(summary.verification_by_task.len(), 1);
+    assert!(summary.unknown_usage_ids.is_empty());
+
+    let mixed = ModelPriceCatalog::try_new(vec![
+        price_entry(1, "v2", "provider-a-token"),
+        price_entry(2, "v2", "provider-b-token"),
+    ])
+    .expect("mixed billing catalog");
+    let mixed_summary = summarize_model_costs(&entries, &mixed).expect("group unlike semantics");
+    assert_eq!(
+        mixed_summary
+            .execution_by_session
+            .values()
+            .next()
+            .map(Vec::len),
+        Some(2),
+        "unlike billing semantics stay in separate buckets"
+    );
+
+    let partial_projections = entries
+        .iter()
+        .map(|entry| partial.project(entry).expect("partial price projection"))
+        .collect::<Vec<_>>();
+    let unknown_budget = ModelBudgetPolicy {
+        reference: price_entry(2, "v1", "token-v1").reference,
+        soft_limit_micros: 30,
+        hard_limit_micros: 40,
+        unknown_cost: UnknownCostPolicy::Stop,
+    }
+    .evaluate(&partial_projections, ModelCostClass::Execution)
+    .expect("unknown budget decision");
+    assert_eq!(unknown_budget.state, ModelBudgetState::UnknownCost);
+    assert_eq!(unknown_budget.action, ModelBudgetAction::StopAtSafePoint);
+    let unknown_continue = ModelBudgetPolicy {
+        reference: price_entry(2, "v1", "token-v1").reference,
+        soft_limit_micros: 30,
+        hard_limit_micros: 40,
+        unknown_cost: UnknownCostPolicy::Continue,
+    }
+    .evaluate(&partial_projections, ModelCostClass::Execution)
+    .expect("explicitly continue with unknown cost");
+    assert_eq!(unknown_continue.state, ModelBudgetState::UnknownCost);
+    assert_eq!(unknown_continue.action, ModelBudgetAction::Continue);
+
+    let reference = price_entry(1, "v2", "token-v2").reference;
+    let soft = ModelBudgetPolicy {
+        reference: reference.clone(),
+        soft_limit_micros: 30,
+        hard_limit_micros: 40,
+        unknown_cost: UnknownCostPolicy::Stop,
+    }
+    .evaluate(&projections, ModelCostClass::Execution)
+    .expect("soft budget decision");
+    assert_eq!(soft.state, ModelBudgetState::SoftLimitReached);
+    assert_eq!(soft.action, ModelBudgetAction::Continue);
+    let hard = ModelBudgetPolicy {
+        reference,
+        soft_limit_micros: 1,
+        hard_limit_micros: 35,
+        unknown_cost: UnknownCostPolicy::Stop,
+    }
+    .evaluate(&projections, ModelCostClass::Execution)
+    .expect("hard budget decision");
+    assert_eq!(hard.state, ModelBudgetState::HardLimitReached);
+    assert_eq!(hard.action, ModelBudgetAction::StopAtSafePoint);
+    assert!(!hard.task_failed);
+    fixture.cleanup();
+}
+
+#[test]
 fn fallback_and_charged_failures_reconcile_once_across_every_dimension_after_restart() {
     let mut fixture = Fixture::new("reconcile-restart");
     record_fallback_and_charged_failure(&mut fixture);
@@ -767,81 +1054,6 @@ fn settled_source_catalog_pages_and_replays_exact_frozen_authority_after_restart
             .expect("new source snapshot")
             .snapshot_sequence,
         3
-    );
-    drop(restarted);
-    fs::remove_dir_all(fixture.root).expect("remove fixture");
-}
-
-#[test]
-fn enterprise_projection_recovers_a_post_settlement_crash_gap_exactly_once() {
-    let mut fixture = Fixture::new("enterprise-recovery");
-    let request = request(plan(fixture.primary.clone(), 1, None), 880, Some(8));
-    start(&mut fixture.storage, &request, &fixture.primary, 1, 881);
-    ModelRetryUsageService::new(&mut fixture.storage)
-        .complete_attempt(
-            &request,
-            &ModelAttemptCompletionCommand {
-                command_request_id: RequestId(id("req", 882)),
-                gateway: gateway(
-                    &fixture.primary,
-                    1,
-                    ModelReservationTerminalOutcome::Completed,
-                    None,
-                    Some(charge(88, 10, 2, 120)),
-                ),
-            },
-        )
-        .expect("source settlement");
-    fixture
-        .storage
-        .enterprise_usage_ledger()
-        .expect("prepare enterprise schema");
-    let database = fixture.root.join("control-plane.sqlite3");
-    let fault = rusqlite::Connection::open(&database).expect("fault connection");
-    fault
-        .execute_batch(
-            "CREATE TRIGGER fail_enterprise_projection
-             BEFORE INSERT ON enterprise_usage_entries
-             BEGIN SELECT RAISE(ABORT, 'injected projection crash'); END;",
-        )
-        .expect("install fault");
-    let error = ProviderEnterpriseUsageReconciler::new(&mut fixture.storage)
-        .reconcile_provider_page(None, 10)
-        .expect_err("projection insert fails");
-    assert_eq!(error.kind(), ProviderEnterpriseUsageErrorKind::Ledger);
-    assert_eq!(
-        fixture
-            .storage
-            .enterprise_usage_ledger()
-            .expect("ledger after fault")
-            .reconcile(&EnterpriseLedgerFilter::default())
-            .expect("zero enterprise totals")
-            .entries,
-        0
-    );
-    fault
-        .execute_batch("DROP TRIGGER fail_enterprise_projection;")
-        .expect("remove fault");
-    drop(fault);
-    drop(fixture.storage);
-
-    let mut restarted = SqliteStorage::open(&fixture.root).expect("restart storage");
-    let applied = ProviderEnterpriseUsageReconciler::new(&mut restarted)
-        .reconcile_provider_page(None, 10)
-        .expect("rebuild projection");
-    assert_eq!((applied.inserted_entries, applied.replayed_entries), (1, 0));
-    let replay = ProviderEnterpriseUsageReconciler::new(&mut restarted)
-        .reconcile_provider_page(None, 10)
-        .expect("exact projection replay");
-    assert_eq!((replay.inserted_entries, replay.replayed_entries), (0, 1));
-    assert_eq!(
-        restarted
-            .enterprise_usage_ledger()
-            .expect("rebuilt ledger")
-            .reconcile(&EnterpriseLedgerFilter::default())
-            .expect("rebuilt totals")
-            .entries,
-        1
     );
     drop(restarted);
     fs::remove_dir_all(fixture.root).expect("remove fixture");

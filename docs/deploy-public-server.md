@@ -17,15 +17,16 @@
 | `device-client/lib.rs` | `crates/winwincode-device-client/src/lib.rs` |
 | `device-client/daemon.rs` | `crates/winwincode-device-client/src/daemon.rs` |
 | `device-client/http.rs` | `crates/winwincode-device-client/src/http.rs` |
+| `device-client/preview.rs` | `crates/winwincode-device-client/src/preview.rs` |
 | `@winwincode/control-plane-client` | `packages/control-plane-client/src/index.ts` |
 
 ## 1. 部署拓扑：公网 Server + 本地 Device Client
 
-### 1.1 出站 exchange 模型
+### 1.1 仅出站连接模型
 
 只有 Server 暴露公网。Server 绑定一个地址（`main.rs` `environment_config` 读取 `WWC_SERVER_BIND`），以一条 HTTP/HTTPS origin 服务全部流量（`server.rs` `start_server` 的文档："Start the one public HTTP/HTTPS origin"；`crates/winwincode-server/README.md`："Worker execution and provider addresses are not part of this router"）。
 
-Device Client 是本地常驻进程，没有任何入站监听：`crates/winwincode-device-client` 中不存在 `TcpListener`；它与 Server 的唯一通道是周期性向 `POST /internal/v1/client/exchange` 发起的出站 exchange（`device-client/lib.rs` `daemon` 模块文档；`device-client/http.rs` `HttpExchangeTransport`——"Minimal std HTTP/1.1 `POST` implementation"）。一次 exchange 是一个有界批次：上行帧 + 对下行流的确认游标，响应带回下行批次；断线按指数退避恢复（`device-client/daemon.rs` `DaemonConfig`：初始退避 1 秒、上限 30 秒；`device-client/http.rs`：单次操作 10 秒 socket 超时、32 MiB 响应上限）。
+Device Client 是本地常驻进程，生产代码不开放入站监听。控制消息由它周期性向 `POST /internal/v1/client/exchange` 发起出站 exchange（`device-client/lib.rs` `daemon` 模块文档；`device-client/http.rs` `HttpExchangeTransport`）。启用预览时，它再主动连接 `GET /internal/v1/preview/tunnel` WebSocket，并把已授权的单个本机回环服务映射到不含主机和端口的来源 ID（`device-client/preview.rs` `PreviewTunnelClient`、`AuthorizedPreviewSource`）。
 
 浏览器（DSH chat 面，`apps/client` 静态包）独立托管，通过 `runtime-config.js` 的 `serverUrl` 指向公网 Server（`docs/releasing.md` 第 4 节第 3 条）；页面内所有请求走该 origin，事件流由 `/api/v1/events` 升级为 WebSocket，`https:` 映射为 `wss:`（`@winwincode/control-plane-client` `parseControlPlaneServerUrl`）。
 
@@ -35,7 +36,7 @@ Device Client 是本地常驻进程，没有任何入站监听：`crates/winwinc
     ▼
 公网 ──► winwincode-server（唯一公网入口，TLS 由 Server 终结）
              ▲
-             │  出站 POST /internal/v1/client/exchange（Bearer Device Credential）
+             │  出站 POST exchange + WSS preview tunnel（Bearer Device Credential）
              │
 本地 Device Client（零入站端口；本机 SQLite、本机 Worker）
 ```
@@ -49,6 +50,8 @@ Device Client 是本地常驻进程，没有任何入站监听：`crates/winwinc
 | `GET /api/v1/server/initialization` | 浏览器 | Origin 允许列表；无凭据；只发布一个布尔值 | `server.rs` `server_initialization` |
 | `/api/v1/commands`、`/queries`、`/events`、`/users`、`/users/state`、`/users/password`、`/clients/*`、`/repositories`、`/sessions` | 浏览器 | `wwc_session` cookie 会话 + Origin 允许列表；管理路由要求 Owner 角色 | `server.rs` `router`、`authorize`、`require_owner` |
 | `POST /internal/v1/client/exchange` | Device Client | Bearer Device Credential；统一 401 | `server.rs` `client_control_exchange` |
+| `GET /internal/v1/preview/tunnel` | Device Client | Bearer Device Credential；Client 主动建立 WebSocket | `server.rs` `preview_tunnel`；`device-client/preview.rs` `PreviewTunnelClient` |
+| `POST/DELETE /api/v1/previews/*`、`/p/*` | 浏览器预览 | 当前占用者签发/撤销五分钟访问地址；公开内容只在独立 Preview origin 提供 | `server.rs` `create_preview_access`、`revoke_preview_access`、`proxy_preview` |
 | `POST /internal/v1/execution-port/exchange` | 远程 Worker | Bearer 注册凭据；统一 401 | `server.rs` `remote_worker_exchange`；`remote_worker_transport.rs` `FileRemoteWorkerAuthenticator` |
 
 未挂载对应应用时 `/internal` 路由返回 404：本地组成模式（`WWC_SERVER_WORKER_MODE=local`，默认值）调用 `start_server` 时不附带 remote Worker 与 client exchange，两个 `/internal` 路由都不可达（`main.rs` `run_local_composition`、`serve_runtime`；`server.rs` `remote_worker_exchange`、`client_control_exchange` 的 `let Some(...) = ... else { 404 }`）。Device Client 拓扑要求 `WWC_SERVER_WORKER_MODE=remote`，此时两个 `/internal` 路由随同挂载（`main.rs` `run_remote_composition`）。
@@ -115,7 +118,7 @@ WantedBy=multi-user.target
 
 | # | 核查项 | 默认行为 | 代码依据 |
 | --- | --- | --- | --- |
-| 1 | 仅 Server 暴露公网 | Server 是唯一公网入口（一条 origin、一个端口）；Device Client 仅出站 exchange，零入站端口 | `server.rs` `start_server`；`device-client/lib.rs` `daemon`；`device-client/http.rs` `HttpExchangeTransport` |
+| 1 | 仅 Server 暴露公网 | Server 是唯一公网入口（一个监听端口；管理与可选 Preview 使用不同 origin）；Device Client 仅发起出站连接，零入站端口 | `server.rs` `start_server`；`device-client/http.rs` `HttpExchangeTransport`；`device-client/preview.rs` `PreviewTunnelClient` |
 | 2 | TLS 必开（Device Client 拓扑） | `remote` 模式 + TLS 关闭 → 拒绝启动；证书/私钥只配一个 → 启动失败；`publicUrl` scheme 必须匹配 TLS 模式；证书加载失败 → 启动失败 | `server.rs` `start_server_with_remote_worker`；`main.rs` `environment_config`；`config.rs` `ServerConfig::new`；`server.rs` `spawn_listener` |
 | 3 | Cookie 属性 | `wwc_session=<43+ 字符随机值>; Path=/; HttpOnly; Secure; SameSite=None; Max-Age=<TTL>`；登出下发同属性空值 `Max-Age=0`；HttpOnly 阻断脚本读取，Secure 强制 HTTPS，SameSite=None 配合 CORS 允许源回显支持独立托管的浏览器面 | `auth_session.rs` `set_cookie_header`、`cleared_session_cookie_header`；`server.rs` `apply_cors` |
 | 4 | 会话只存摘要 | 库中仅存令牌 SHA-256（64 位十六进制）与主体、时间、吊销状态；原始令牌与 bootstrap proof 不落库、不回显；会话目录 0700、库文件 0600 | `auth_session.rs` `session_digest`、`issue_principal`、`open_with_dependencies`；令牌不落库的测试 `initialization_persists_digest_and_secret_free_context_then_revokes` |
@@ -140,6 +143,7 @@ WantedBy=multi-user.target
 | `WWC_SERVER_PUBLIC_URL` | 对外 origin（仅 scheme://authority，须匹配 TLS 模式） | `main.rs` `environment_config`；`config.rs` `normalized_origin` |
 | `WWC_SERVER_DATA_DIRECTORY` | 数据目录 | `main.rs` `environment_config` |
 | `WWC_SERVER_ALLOWED_ORIGINS` | 浏览器 Origin 允许列表（逗号分隔，至少一个） | `main.rs` `environment_config` |
+| `WWC_SERVER_PREVIEW_PUBLIC_URL` | 可选的独立 Preview origin；必须与主 origin 不同并使用相同 TLS scheme | `main.rs` `environment_config`；`config.rs` `with_preview_public_url` |
 | `WWC_SERVER_CHECKOUT_REVISION` | 执行配置绑定的 checkout revision | `main.rs` `load_production_startup` |
 | `WWC_SERVER_BOOTSTRAP_PROOF` | 一次性初始化凭据（初始化完成后可移除，见第 4 节） | `main.rs` `load_production_startup` |
 | `WWC_SERVER_REPOSITORY_ROOT` | Delivery 仓库根 | `main.rs` `local_production_configs` |
@@ -192,6 +196,9 @@ WantedBy=multi-user.target
 | `WWC_SERVER_MODEL_PROVIDER_ID` | `winwincode-loopback` | 本地模型路由 Provider | `main.rs` `LocalModelRoute::from_environment` |
 | `WWC_SERVER_MODEL_ID` | `loopback-model` | 本地模型路由模型 | `main.rs` `LocalModelRoute::from_environment` |
 | `WWC_SERVER_MODEL_CREDENTIAL_REFERENCE_ID` | `crd_00000000000000000000000001` | 模型凭据引用 | `main.rs` `LocalModelRoute::from_environment` |
+| `WWC_SERVER_MODEL_ANTHROPIC_ENDPOINT` | 未设置 | 完整 HTTPS Anthropic Messages 地址（包括 `/v1/messages`）；设置后使用真实服务 | `model_authority.rs` `LocalModelRoute::provider_config` |
+| `WWC_SERVER_MODEL_API_KEY` | 未设置 | 真实模型服务密钥；设置上述地址时必填，启动时存入本地密钥存储 | `model_authority.rs` `store_local_credential_secret` |
+| `WWC_SERVER_EXECUTION_LEASE_SECONDS` | `30` | 单次执行的有效时长（秒）；真实模型任务应按任务耗时设置，例如 `600`，超时后仍拒绝执行请求 | `main.rs` `RepositoryRuntimeScheduler::from_application` |
 | `WWC_SERVER_ACTION_SIGNING_KEY_HEX` | `1f` x 32（开发默认） | Action Enforcement 签名密钥，64 位十六进制（32 字节），长度或字符非法即启动失败；生产必须显式替换 | `main.rs` `configured_action_signing_key`、`parse_hex_key` |
 | `WWC_SERVER_EXECUTION_ENVELOPE_DIGEST` | `sha256:` + 64 个 `a`（开发默认） | 执行信封摘要（local 组成模式读取） | `main.rs` `open_production_codex` |
 

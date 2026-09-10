@@ -11,10 +11,10 @@
 //! later integration — and [`ModelCatalogService`] reports unknown
 //! capabilities rather than inventing defaults.
 //!
-//! Custom endpoints are accepted only after the same canonical HTTPS
-//! validation used by the Provider HTTPS adapter: the endpoint must be a
-//! trimmed `https` URI without embedded userinfo, query, or fragment, so a
-//! credential can never hide inside the URL. This module never accepts,
+//! Custom endpoints are accepted only after canonical endpoint validation:
+//! public/private hosts require HTTPS, while plaintext HTTP is limited to the
+//! exact loopback hosts used by local model servers. Embedded userinfo, query,
+//! and fragment data are rejected, so a credential can never hide inside the URL. This module never accepts,
 //! stores, or emits credential material, and every serializable output passes
 //! the [`crate::credential_leak_gate`].
 //!
@@ -394,9 +394,8 @@ pub fn resolve_provider_endpoint(
     Ok(resolved)
 }
 
-/// Accepts a custom `OpenAI`-compatible endpoint only after the same
-/// canonical HTTPS validation the Provider HTTPS adapter applies: a trimmed
-/// `https` URI with a host, no embedded userinfo, no query, and no fragment.
+/// Accepts a custom `OpenAI`-compatible endpoint after canonical HTTPS
+/// validation, or canonical HTTP only for `localhost`, `127.0.0.1`, and `::1`.
 ///
 /// Embedded userinfo is rejected outright, so a credential can never be
 /// smuggled through the endpoint string.
@@ -675,5 +674,33 @@ fn valid_preset_endpoint(value: &str) -> bool {
         && value.trim() == value
         && !value.chars().any(char::is_control)
         && !value.contains(['?', '#'])
-        && canonical_https_endpoint(value)
+        && (canonical_https_endpoint(value) || canonical_loopback_http_endpoint(value))
+}
+
+fn canonical_loopback_http_endpoint(value: &str) -> bool {
+    let Some(remainder) = value.strip_prefix("http://") else {
+        return false;
+    };
+    let authority = remainder.split('/').next().unwrap_or_default();
+    if authority.is_empty() || authority.contains('@') {
+        return false;
+    }
+    if let Some(port) = authority.strip_prefix("[::1]") {
+        return valid_optional_port(port);
+    }
+    if let Some((host, port)) = authority.rsplit_once(':') {
+        matches!(host, "localhost" | "127.0.0.1") && valid_port(port)
+    } else {
+        matches!(authority, "localhost" | "127.0.0.1")
+    }
+}
+
+fn valid_optional_port(value: &str) -> bool {
+    value.is_empty() || value.strip_prefix(':').is_some_and(valid_port)
+}
+
+fn valid_port(value: &str) -> bool {
+    value
+        .parse::<u16>()
+        .is_ok_and(|port| port != 0 && port.to_string() == value)
 }

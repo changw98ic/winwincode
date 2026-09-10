@@ -7,7 +7,7 @@ use winwincode_audit::{
 };
 use winwincode_domain::{
     CodexThreadId, DeliveryId, DeliveryTaskId, ExecutionAckSequence, ExecutionJobId,
-    ExecutionMessageId, FencingToken, LeaseId, ProductSessionId, StageRunId, WorkerId,
+    ExecutionMessageId, FencingToken, LeaseId, ProductSessionId, WorkRunId, WorkerId,
     WorkerInstanceId, WorkerSessionId,
 };
 
@@ -20,7 +20,7 @@ fn execution_identity() -> AuditExecutionIdentity {
         ProductSessionId(id("psn", '1')),
         WorkerSessionId(id("wsn", '2')),
         CodexThreadId(id("cdx", '3')),
-        StageRunId(id("run", '4')),
+        WorkRunId(id("wrn", '4')),
         ExecutionJobId(id("job", '5')),
         DeliveryId(id("dlv", '6')),
         Some(DeliveryTaskId(id("dtk", '7'))),
@@ -39,7 +39,7 @@ fn accepted_binding_identity() -> AuditExecutionIdentity {
         ProductSessionId(id("psn", '1')),
         WorkerSessionId(id("wsn", '2')),
         CodexThreadId(id("cdx", '3')),
-        StageRunId(id("run", '4')),
+        WorkRunId(id("wrn", '4')),
         ExecutionJobId(id("job", '5')),
         DeliveryId(id("dlv", '6')),
         Some(DeliveryTaskId(id("dtk", '7'))),
@@ -87,7 +87,7 @@ fn execution_subject_variants_are_closed_and_locate_every_identity() {
         assert_eq!(execution.product_session_id().0, id("psn", '1'));
         assert_eq!(execution.worker_session_id().0, id("wsn", '2'));
         assert_eq!(execution.codex_thread_id().0, id("cdx", '3'));
-        assert_eq!(execution.stage_run_id().0, id("run", '4'));
+        assert_eq!(execution.work_run_id().0, id("wrn", '4'));
         assert_eq!(execution.execution_job_id().0, id("job", '5'));
         assert_eq!(execution.delivery_id().0, id("dlv", '6'));
         assert_eq!(
@@ -112,7 +112,7 @@ fn execution_subject_variants_are_closed_and_locate_every_identity() {
         assert_eq!(encoded["product_session_id"], id("psn", '1'));
         assert_eq!(encoded["worker_session_id"], id("wsn", '2'));
         assert_eq!(encoded["codex_thread_id"], id("cdx", '3'));
-        assert_eq!(encoded["stage_run_id"], id("run", '4'));
+        assert_eq!(encoded["work_run_id"], id("wrn", '4'));
         assert_eq!(encoded["execution_job_id"], id("job", '5'));
         assert_eq!(encoded["delivery_id"], id("dlv", '6'));
         assert_eq!(encoded["delivery_task_id"], id("dtk", '7'));
@@ -151,7 +151,7 @@ fn execution_subject_rejects_incomplete_or_cross_branch_shapes() {
             ProductSessionId(id("psn", '1')),
             WorkerSessionId(id("wsn", '2')),
             CodexThreadId(id("cdx", '3')),
-            StageRunId(id("run", '4')),
+            WorkRunId(id("wrn", '4')),
             ExecutionJobId(id("job", '5')),
             DeliveryId(id("dlv", '6')),
             None,

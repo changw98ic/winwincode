@@ -10,6 +10,7 @@ import {
   validateEditionContract,
   validateRepositoryIdentity,
 } from '../scripts/check-product-repository-boundary.mjs'
+import { forbiddenCoreProductExports } from '../scripts/source-boundary-lint.mjs'
 
 const ROOT = resolve(import.meta.dirname, '..')
 const SCRIPT = join(ROOT, 'scripts/check-product-repository-boundary.mjs')
@@ -117,5 +118,21 @@ test('cross-repository npm and Cargo paths are rejected while same-repository pa
       target: '../winwincode-enterprise/crates/private',
       message: 'Cargo path resolves outside this repository',
     },
+  ])
+})
+
+test('Community core rejects product modules and exports without matching prose', () => {
+  assert.deepEqual(forbiddenCoreProductExports(`
+//! Enterprise is a downstream product.
+mod execution_admission;
+pub use execution_admission::ExecutionAdmission;
+`), [])
+
+  assert.deepEqual(forbiddenCoreProductExports(`
+mod enterprise_policy;
+pub use hosted_runtime::HostedRuntime;
+`), [
+    { marker: 'forbidden-core-product-module', name: 'enterprise_policy', line: 2 },
+    { marker: 'forbidden-core-product-export', name: 'hosted_runtime', line: 3 },
   ])
 })

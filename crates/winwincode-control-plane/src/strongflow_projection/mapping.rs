@@ -5,6 +5,7 @@
 use sha2::{Digest, Sha256};
 use winwincode_api::generated as api;
 use winwincode_delivery::{
+    application::workrun::WorkRunAggregate,
     domain::{
         AttentionItemStatus, AttentionItemType, CandidatePathFact, CandidatePathState,
         CriterionVerdict, DeliveryStage, DeliveryStatus as DomainDeliveryStatus,
@@ -17,6 +18,7 @@ use winwincode_delivery::{
 use winwincode_domain::{
     Count, EvidenceId, GitHubRepositorySlug, Instant, RepositoryScope, Revision, SchemaVersion,
     SessionBindingSourceIdentity, SessionBindingSourceIdentityKind, SessionIdentity, Sha256Digest,
+    WorkItemState,
 };
 
 use super::{
@@ -30,6 +32,41 @@ pub(super) fn cursor(
     read: &EstablishedDeliveryRead,
 ) -> Result<api::StrongFlowReadCursor, StrongFlowProjectionError> {
     super::application::generated_cursor(&read.cursor)
+}
+
+pub(super) fn workrun_aggregate(
+    aggregate: &WorkRunAggregate,
+    read_cursor: api::StrongFlowReadCursor,
+) -> api::WorkRunAggregateProjection {
+    api::WorkRunAggregateProjection {
+        schema_version: aggregate.schema_version.clone(),
+        contract: aggregate.contract.clone(),
+        items: aggregate.items.clone(),
+        runs: aggregate.runs.clone(),
+        graph_items: aggregate
+            .items
+            .iter()
+            .map(|item| api::WorkGraphItemProjection {
+                work_item_id: item.id.clone(),
+                state: match aggregate.effective_item_state(item) {
+                    WorkItemState::Ready => api::WorkGraphItemState::Ready,
+                    WorkItemState::Done => api::WorkGraphItemState::Done,
+                    WorkItemState::InProgress
+                    | WorkItemState::CandidateReady
+                    | WorkItemState::Validating
+                    | WorkItemState::Rework => api::WorkGraphItemState::Running,
+                    WorkItemState::Backlog
+                    | WorkItemState::WaitingDependency
+                    | WorkItemState::WaitingHuman
+                    | WorkItemState::Failed
+                    | WorkItemState::Cancelled => api::WorkGraphItemState::Blocked,
+                },
+                dependencies: item.depends_on.clone(),
+                blockers: aggregate.dependency_blockers(item),
+            })
+            .collect(),
+        read_cursor,
+    }
 }
 
 pub(super) fn delivery_detail(
@@ -207,10 +244,7 @@ fn diagram_execution(
     } else {
         "before-execution"
     };
-    let process_node_id = if candidate
-        .is_some_and(|value| value.producer_stage() == DeliveryStage::Reworking)
-        || delivery.status() == DomainDeliveryStatus::Reworking
-    {
+    let process_node_id = if delivery.status() == DomainDeliveryStatus::Reworking {
         "process:reworking"
     } else {
         "process:executing"
@@ -225,7 +259,7 @@ fn diagram_execution(
                     evidence.candidate_ref() == value.candidate_ref()
                         && evidence.delivery_spec_id() == value.delivery_spec_id()
                         && evidence.delivery_spec_revision() == value.delivery_spec_revision()
-                        && evidence.stage_run_id() == value.producer_stage_run_id()
+                        && evidence.work_run_id() == value.producer_work_run_id()
                         && evidence.session_binding_id() == value.producer_session_binding_id()
                 })
                 .map(|evidence| public_evidence_id(evidence.id()))
@@ -235,9 +269,20 @@ fn diagram_execution(
                 diff_sha256: digest(value.diff_sha256())?,
                 files: files.clone(),
                 provenance: api::StrongFlowDiagramExecutionProvenanceProjection {
-                    stage_run_id: value.producer_stage_run_id().clone(),
+                    work_run_id: value.producer_work_run_id().clone(),
                     session_binding_id: value.producer_session_binding_id().0.clone(),
-                    delivery_task_id: value.producer_delivery_task_id().cloned(),
+                    work_item_id: read
+                        .workrun_aggregate
+                        .runs
+                        .iter()
+                        .find(|run| &run.id == value.producer_work_run_id())
+                        .ok_or_else(|| {
+                            StrongFlowProjectionError::TrustedFactsUnavailable(
+                                "Candidate producer WorkRun is missing from the read cut.".into(),
+                            )
+                        })?
+                        .work_item_id
+                        .clone(),
                     evidence_ref_ids,
                 },
             })
@@ -396,7 +441,7 @@ fn session_binding(
             product_session_id: source.product_session_id().clone(),
             session_identity: None,
             source_identity: None,
-            stage_run_id: None,
+            work_run_id: None,
             worker_id: None,
             worker_session_id: None,
         });
@@ -426,7 +471,9 @@ fn session_binding(
             worker_instance_id,
             worker_session_id: worker_session_id.clone(),
         },
-        SessionBindingSourceKind::DeliveryAdvance | SessionBindingSourceKind::LegacyMigration => {
+        SessionBindingSourceKind::DeliveryAdvance
+        | SessionBindingSourceKind::WorkRunDispatch
+        | SessionBindingSourceKind::LegacyMigration => {
             return Err(StrongFlowProjectionError::TrustedFactsUnavailable(
                 "SessionBinding source is not an accepted execution-worker authority".to_owned(),
             ));
@@ -435,7 +482,7 @@ fn session_binding(
     let session_identity = SessionIdentity {
         codex_thread_id: codex_thread_id.clone(),
         product_session_id: source.product_session_id().clone(),
-        stage_run_id: Some(stage_run_id.clone()),
+        work_run_id: Some(winwincode_domain::WorkRunId(stage_run_id.0.clone())),
         worker_session_id: worker_session_id.clone(),
     };
     Ok(api::DeliveryStageSessionBindingProjection {
@@ -449,7 +496,7 @@ fn session_binding(
         product_session_id: source.product_session_id().clone(),
         session_identity: Some(session_identity),
         source_identity: Some(source_identity),
-        stage_run_id: Some(stage_run_id.clone()),
+        work_run_id: Some(winwincode_domain::WorkRunId(stage_run_id.0.clone())),
         worker_id: Some(worker_id),
         worker_session_id: Some(worker_session_id),
     })
@@ -475,7 +522,11 @@ fn task(source: &delivery_projection::DeliveryTaskProjection) -> api::DeliveryTa
             DomainTaskStatus::Completed => api::DeliveryTaskStatus::Completed,
             DomainTaskStatus::Failed => api::DeliveryTaskStatus::Failed,
         },
-        stage_run_ids: source.stage_run_ids().to_vec(),
+        work_run_ids: source
+            .stage_run_ids()
+            .iter()
+            .map(|id| winwincode_domain::WorkRunId(id.0.clone()))
+            .collect(),
         evidence_refs: source
             .evidence_refs()
             .iter()
@@ -490,7 +541,7 @@ fn attention(
     Ok(api::DeliveryAttentionProjection {
         id: source.id().clone(),
         delivery_spec_id: source.delivery_spec_id().0.clone(),
-        stage_run_id: source.stage_run_id().cloned(),
+        work_run_id: source.work_run_id().cloned(),
         type_value: match source.item_type() {
             AttentionItemType::RequirementQuestion => "requirement_question",
             AttentionItemType::DecisionRequired => "decision_required",
@@ -534,7 +585,7 @@ pub(super) fn evidence(
             source.delivery_spec_revision(),
             "evidence spec revision",
         )?,
-        stage_run_id: source.stage_run_id().clone(),
+        work_run_id: source.work_run_id().clone(),
         session_binding_id: source.session_binding_id().0.clone(),
         candidate_ref: source.candidate_ref().to_owned(),
         type_value: match source.evidence_type() {
@@ -563,7 +614,7 @@ pub(super) fn candidate(
             source.delivery_spec_revision(),
             "candidate spec revision",
         )?,
-        producer_stage_run_id: source.producer_stage_run_id().clone(),
+        producer_work_run_id: source.producer_work_run_id().clone(),
         producer_session_binding_id: source.producer_session_binding_id().0.clone(),
         candidate_commit_id: source.candidate_commit_id().to_owned(),
         candidate_tree_id: source.candidate_tree_id().to_owned(),
@@ -582,7 +633,7 @@ pub(super) fn frozen_candidate(
             source.delivery_spec_revision(),
             "historical candidate spec revision",
         )?,
-        producer_stage_run_id: source.producer_stage_run_id().clone(),
+        producer_work_run_id: source.producer_work_run_id().clone(),
         producer_session_binding_id: source.producer_session_binding_id().0.clone(),
         candidate_commit_id: source.candidate_commit_id().to_owned(),
         candidate_tree_id: source.candidate_tree_id().to_owned(),
@@ -601,7 +652,7 @@ pub(super) fn historical_evidence(
             source.delivery_spec_revision,
             "historical evidence spec revision",
         )?,
-        stage_run_id: source.stage_run_id.clone(),
+        work_run_id: source.work_run_id.clone(),
         session_binding_id: source.session_binding_id.0.clone(),
         candidate_ref: source.candidate_ref.clone(),
         type_value: match source.evidence_type {
@@ -738,9 +789,15 @@ fn solution_review(
             source.delivery_spec_revision(),
             "solution spec revision",
         )?,
-        planning_stage_run_id: source.planning_stage_run_id().clone(),
+        planning_stage_run_id: winwincode_domain::StageRunId(
+            source.planning_work_run_id().0.clone(),
+        ),
+        planning_work_run_id: Some(source.planning_work_run_id().clone()),
         planning_session_binding_id: source.planning_session_binding_id().0.clone(),
         review_stage_run_id: source.review_stage_run_id().clone(),
+        review_work_run_id: Some(winwincode_domain::WorkRunId(
+            source.review_stage_run_id().0.clone(),
+        )),
         attention_item_id: source.attention_item_id().clone(),
         review_set_sha256: digest(source.review_set_sha256())?,
         solution_id: source.solution_id().to_owned(),
@@ -1016,24 +1073,20 @@ fn publication_target(
 
 pub(super) fn runtime_snapshot_for_delivery(
     read: &EstablishedDeliveryRead,
-    stage_run_id: &winwincode_domain::StageRunId,
+    work_run_id: &winwincode_domain::WorkRunId,
     product_session_id: &winwincode_domain::ProductSessionId,
 ) -> Result<api::RuntimeProjectionSnapshot, StrongFlowProjectionError> {
-    let stage = read
-        .detail
-        .stages()
+    let run = read
+        .workrun_aggregate
+        .runs
         .iter()
-        .find(|stage| stage.id() == stage_run_id)
+        .find(|run| &run.id == work_run_id)
         .ok_or_else(|| {
             StrongFlowProjectionError::ResourceNotFound(
-                "the exact StageRun was not found at this read cut".to_owned(),
+                "the exact WorkRun was not found at this read cut".to_owned(),
             )
         })?;
-    if stage.actor_type() != StageRunActorType::Codex
-        || stage
-            .session_binding()
-            .is_none_or(|binding| binding.product_session_id() != product_session_id)
-    {
+    if run.product_session_id.as_ref() != Some(product_session_id) {
         return Err(StrongFlowProjectionError::ResourceNotFound(
             "the exact ProductSession binding was not found at this read cut".to_owned(),
         ));
@@ -1044,14 +1097,13 @@ pub(super) fn runtime_snapshot_for_delivery(
         .sessions
         .iter()
         .filter(|session| {
-            &session.stage_run_id == stage_run_id
-                && &session.product_session_id == product_session_id
+            &session.work_run_id == work_run_id && &session.product_session_id == product_session_id
         })
         .map(runtime_session)
         .collect::<Result<Vec<_>, _>>()?;
     if sessions.len() > 1 {
         return Err(StrongFlowProjectionError::TrustedFactsUnavailable(
-            "multiple runtime sessions matched one Delivery StageRun at this read cut".to_owned(),
+            "multiple runtime sessions matched one WorkRun at this read cut".to_owned(),
         ));
     }
     Ok(api::RuntimeProjectionSnapshot {
@@ -1063,7 +1115,7 @@ pub(super) fn runtime_snapshot_for_delivery(
         read_cursor: Some(cursor(read)?),
         product_session_id: product_session_id.clone(),
         delivery_id: Some(read.detail.delivery_id().clone()),
-        stage_run_id: Some(stage_run_id.clone()),
+        work_run_id: Some(work_run_id.clone()),
         last_projection_sequence: integer(
             read.runtime.accepted_sequence(),
             "runtime accepted sequence",
@@ -1094,7 +1146,7 @@ pub(super) fn runtime_snapshot_for_product_session(
         read_cursor: None,
         product_session_id: product_session_id.clone(),
         delivery_id: None,
-        stage_run_id: None,
+        work_run_id: None,
         last_projection_sequence: integer(
             read.runtime.accepted_sequence(),
             "runtime accepted sequence",
@@ -1118,7 +1170,6 @@ fn runtime_product_session(
         as_of_sequence: integer(source.as_of_sequence, "session sequence")?,
         attempt: integer(source.attempt, "runtime attempt")?,
         codex_thread_id: source.codex_thread_id.clone(),
-        delivery_task_id: None,
         diff_summary: None,
         execution_job_id: source.execution_job_id.clone(),
         fencing_token: source.fencing_token.0.clone(),
@@ -1133,7 +1184,8 @@ fn runtime_product_session(
             latest_recovery_source_ref: None,
         },
         session_binding_id: format!("product-session-runtime:{}", source.execution_job_id.0),
-        stage_run_id: None,
+        work_item_id: None,
+        work_run_id: None,
         usage: None,
         worker_session_id: source.worker_session_id.clone(),
     })
@@ -1145,8 +1197,8 @@ fn runtime_session(
 ) -> Result<api::RuntimeSessionProjection, StrongFlowProjectionError> {
     Ok(api::RuntimeSessionProjection {
         session_binding_id: source.session_binding_id.0.clone(),
-        stage_run_id: Some(source.stage_run_id.clone()),
-        delivery_task_id: source.delivery_task_id.clone(),
+        work_item_id: Some(source.work_item_id.clone()),
+        work_run_id: Some(source.work_run_id.clone()),
         product_session_id: source.product_session_id.clone(),
         worker_session_id: source.worker_session_id.clone(),
         codex_thread_id: source.codex_thread_id.clone(),
@@ -1495,7 +1547,7 @@ mod tests {
     }
 
     #[test]
-    fn pending_session_binding_maps_to_the_closed_nullable_branch() {
+    fn canonical_workrun_binding_is_not_inferred_onto_a_historical_stage() {
         let parsed = winwincode_delivery::domain::Delivery::decode_json(include_bytes!(
             "../../../winwincode-delivery/tests/fixtures/delivery-main.json"
         ))
@@ -1527,16 +1579,7 @@ mod tests {
 
         let source = projected.stages().first().expect("fixture StageRun");
         let mapped = stage(source).expect("generated stage projection");
-        let binding = mapped.session_binding.expect("Codex stage SessionBinding");
-        assert_eq!(binding.worker_session_id, None);
-        assert_eq!(binding.codex_thread_id, None);
-        assert_eq!(binding.stage_run_id, None);
-        assert_eq!(binding.worker_id, None);
-        assert_eq!(binding.lease_id, None);
-        assert_eq!(binding.attempt, None);
-        assert_eq!(binding.fencing_token, None);
-        assert_eq!(binding.session_identity, None);
-        assert_eq!(binding.source_identity, None);
+        assert!(mapped.session_binding.is_none());
     }
 
     #[test]

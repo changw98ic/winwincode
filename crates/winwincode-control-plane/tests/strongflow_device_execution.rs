@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! The `FLOW-100.5` `StrongFlow` role-to-Device `WorkerSession` routing over the
-//! real durable ledgers: every Delivery role stage run whose launch anchor
+//! real durable ledgers: every Delivery role `WorkRun` whose launch anchor
 //! exists dispatches to its own launched Device `WorkerSession` with its role
 //! stamped on the reservation facts, concurrent role dispatches stay within
-//! the Client's worker-session capacity, and a stage run without an anchor
+//! the Client's worker-session capacity, and a `WorkRun` without an anchor
 //! (or with a dead anchor, or a denied actor) keeps or restores the exact
 //! supervised local behavior — including the local queue exclusion reuse.
 
@@ -13,16 +13,16 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use winwincode_control_plane::{
     DeviceExecutionBindingService, RepositoryExecutionScheduler, StrongflowDeviceDispatchErrorKind,
-    WorkerLaunchGrantService, dispatch_stage_to_device_worker,
+    WorkerLaunchGrantService, dispatch_work_run_to_device_worker,
 };
 use winwincode_domain::{
     DeliveryId, ExecutionJobId, ExecutionMessageId, Instant, OrganizationId, ProductSessionId,
-    ProjectId, RepositoryId, RequestId, Sha256Digest, StageRunId, UserId, WorkerId,
-    WorkerInstanceId, WorkspaceId,
+    ProjectId, RepositoryId, RequestId, Sha256Digest, UserId, WorkerId, WorkerInstanceId,
+    WorkspaceId,
 };
 use winwincode_execution_port::generated::{
-    DeliveryStageExecutionScope, DeliveryStageExecutionScopeKind, ExecutionJob, ExecutionLimits,
-    ExecutionScope, ExecutionWorkspace, ExecutionWorkspaceWriteMode,
+    ExecutionJob, ExecutionLimits, ExecutionScope, ExecutionWorkspace, ExecutionWorkspaceWriteMode,
+    WorkRunExecutionScope, WorkRunExecutionScopeKind,
 };
 use winwincode_storage::{
     AccessGrantIssuance, ClientNodeRegistration, ClientPresenceState, EXECUTION_PROTOCOL_VERSION,
@@ -43,11 +43,18 @@ const HOLDER: &str = "usr_00000000000000000000000001";
 const MEMBER: &str = "usr_00000000000000000000000002";
 
 fn temporary_root(label: &str) -> PathBuf {
-    let suffix = NEXT_ROOT.fetch_add(1, Ordering::Relaxed);
-    std::env::temp_dir().join(format!(
-        "winwincode-strongflow-device-execution-{label}-{}-{suffix}",
-        std::process::id()
-    ))
+    loop {
+        let suffix = NEXT_ROOT.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "winwincode-strongflow-device-execution-{label}-{}-{suffix}",
+            std::process::id()
+        ));
+        match std::fs::create_dir(&root) {
+            Ok(()) => return root,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => panic!("create isolated test directory: {error}"),
+        }
+    }
 }
 
 fn canonical_id(prefix: &str, seed: u64) -> String {
@@ -89,7 +96,7 @@ fn repository_scope(seed: u64) -> RepositorySchedulerScope {
 /// Seeds node, client grant, visible repository binding, and the
 /// device-confirmed occupancy lease; returns the node, its client instance,
 /// the lease identity, fencing token, and the binding.
-fn stage_device_fixture(
+fn work_run_device_fixture(
     storage: &mut SqliteStorage,
     seed: u64,
     user: &str,
@@ -190,16 +197,16 @@ fn stage_device_fixture(
     (node, instance, lease_id, fencing_token, binding)
 }
 
-/// The device identities one staged stage-run anchor exposes to the test.
-struct StageAnchor {
+/// The device identities one staged `WorkRun` anchor exposes to the test.
+struct WorkRunAnchor {
     worker_launch_grant_id: String,
     worker_session_id: String,
 }
 
 /// Issues one live launch grant anchored to the exact (product session,
-/// stage run) pair, exactly as the Client's two-phase scheduler would.
+/// `WorkRun`) pair, exactly as the Client's two-phase scheduler would.
 #[allow(clippy::too_many_arguments)]
-fn stage_anchor(
+fn work_run_anchor(
     storage: &mut SqliteStorage,
     seed: u64,
     node: &str,
@@ -209,8 +216,8 @@ fn stage_anchor(
     fencing_token: u64,
     binding: &str,
     product_session_id: &str,
-    stage_run_id: &str,
-) -> StageAnchor {
+    work_run_id: &str,
+) -> WorkRunAnchor {
     let issuance = LaunchGrantIssuance::try_new(
         ulid_id("wlg", seed),
         node,
@@ -224,39 +231,42 @@ fn stage_anchor(
         ulid_id("winst", seed + 3),
         DIGEST,
         Some(product_session_id.to_owned()),
-        Some(stage_run_id.to_owned()),
+        Some(winwincode_domain::WorkRunId(work_run_id.to_owned())),
         instant("2100-01-01T00:00:00.000Z"),
     )
     .expect("issuance");
     let grant = WorkerLaunchGrantService::new(storage)
         .issue(&issuance, &instant(T0))
         .unwrap_or_else(|error| panic!("issue anchor grant (seed {seed}): {error:?}"));
-    StageAnchor {
+    WorkRunAnchor {
         worker_launch_grant_id: grant.worker_launch_grant_id,
         worker_session_id: grant.worker_session_id,
     }
 }
 
-// ---- Delivery stage job staging (what the dispatcher commits) --------------
+// ---- Delivery WorkRun job staging (what the dispatcher commits) --------------
 
-/// Submits one Delivery stage job exactly like the canonical
+/// Submits one Delivery `WorkRun` job exactly like the canonical
 /// `LocalExecutionJobDispatcher`: the immutable generated `ExecutionJob` in
-/// the dispatch payload, the delivery scope, and the stage run reservation.
+/// the dispatch payload, the delivery scope, and the `WorkRun` reservation.
 #[allow(clippy::too_many_arguments)]
-fn stage_role_job(
+fn work_run_role_job(
     storage: &mut SqliteStorage,
     seed: u64,
     role: &str,
     write_mode: ExecutionWorkspaceWriteMode,
-) -> (ExecutionJobId, StageRunId, ProductSessionId) {
-    let delivery_id = DeliveryId(ulid_id("dlv", seed));
-    let stage_run_id = StageRunId(ulid_id("run", seed + 1));
+) -> (
+    ExecutionJobId,
+    winwincode_domain::WorkRunId,
+    ProductSessionId,
+) {
+    let work_run_id = winwincode_domain::WorkRunId(ulid_id("wrn", seed + 1));
     let product_session_id = ProductSessionId(ulid_id("psn", seed + 2));
     let job_id = ExecutionJobId(ulid_id("job", seed + 3));
     let job = ExecutionJob {
         attempt: 1,
         execution_profile: role.to_owned(),
-        goal: "Execute the exact sealed stage goal.".to_owned(),
+        goal: "Execute the exact sealed WorkRun goal.".to_owned(),
         job_id: job_id.clone(),
         limits: ExecutionLimits {
             deadline_at: instant("2026-09-05T12:00:00.000Z"),
@@ -264,15 +274,18 @@ fn stage_role_job(
             max_runtime_seconds: 3_600,
         },
         payload_digest: Sha256Digest(format!("sha256:{seed:064}")),
-        scope: ExecutionScope::DeliveryStageExecutionScope(DeliveryStageExecutionScope {
-            delivery_id,
-            delivery_task_id: None,
-            kind: DeliveryStageExecutionScopeKind::DeliveryStage,
+        scope: ExecutionScope::WorkRunExecutionScope(WorkRunExecutionScope {
+            attempt: 1,
+            kind: WorkRunExecutionScopeKind::WorkRun,
             product_session_id: product_session_id.clone(),
             rework_authorization: None,
-            stage_run_id: stage_run_id.clone(),
+            work_contract_id: winwincode_domain::WorkContractId(ulid_id("wct", seed)),
+            work_contract_revision: winwincode_domain::Revision(1),
+            work_item_id: winwincode_domain::WorkItemId(ulid_id("wit", seed)),
+            work_item_revision: winwincode_domain::Revision(1),
+            work_run_id: work_run_id.clone(),
         }),
-        stage_input: None,
+        work_input: None,
         workspace: ExecutionWorkspace {
             checkout_revision: "0123456789abcdef0123456789abcdef01234567".to_owned(),
             repository_id: RepositoryId(canonical_id("rep", 1)),
@@ -296,15 +309,15 @@ fn stage_role_job(
         dispatch_payload,
         attempt: 1,
         dependencies: Vec::new(),
-        stage_run_id: Some(stage_run_id.clone()),
+        work_run_id: Some(work_run_id.clone()),
         submitted_at: instant(T0),
     };
     storage
         .execution_queue()
         .expect("queue")
         .submit(&submission)
-        .expect("submit stage job");
-    (job_id, stage_run_id, product_session_id)
+        .expect("submit WorkRun job");
+    (job_id, work_run_id, product_session_id)
 }
 
 fn register_local_worker(storage: &mut SqliteStorage, seed: u64) -> (WorkerId, WorkerInstanceId) {
@@ -373,29 +386,29 @@ fn queued_jobs(storage: &mut SqliteStorage) -> Vec<ExecutionJobId> {
 fn every_role_dispatches_to_its_own_device_worker_session_within_capacity() {
     let mut storage = SqliteStorage::open(temporary_root("role-matrix")).expect("storage");
     let (node, instance, lease_id, fencing_token, binding) =
-        stage_device_fixture(&mut storage, 100, HOLDER);
-    // One role stage job per Delivery role with its canonical write mode:
+        work_run_device_fixture(&mut storage, 100, HOLDER);
+    // One role WorkRun job per Delivery role with its canonical write mode:
     // writer roles execute on an isolated candidate, read-only roles on a
     // frozen read-only workspace.
-    let planner = stage_role_job(
+    let planner = work_run_role_job(
         &mut storage,
         200,
         "planner",
         ExecutionWorkspaceWriteMode::ReadOnly,
     );
-    let executor = stage_role_job(
+    let executor = work_run_role_job(
         &mut storage,
         210,
         "executor",
         ExecutionWorkspaceWriteMode::Candidate,
     );
-    let reviewer = stage_role_job(
+    let reviewer = work_run_role_job(
         &mut storage,
         220,
         "reviewer",
         ExecutionWorkspaceWriteMode::ReadOnly,
     );
-    let verifier = stage_role_job(
+    let verifier = work_run_role_job(
         &mut storage,
         230,
         "verifier",
@@ -407,11 +420,11 @@ fn every_role_dispatches_to_its_own_device_worker_session_within_capacity() {
         ("reviewer", &reviewer),
         ("verifier", &verifier),
     ];
-    // The Client launches one WorkerSession per role stage run, and the
+    // The Client launches one WorkerSession per role WorkRun, and the
     // routing dispatches each job to exactly its own session.
-    for (index, (role, (job_id, stage_run_id, product_session_id))) in roles.iter().enumerate() {
+    for (index, (role, (job_id, work_run_id, product_session_id))) in roles.iter().enumerate() {
         let seed = 300 + u64::try_from(index).expect("index") * 10;
-        let anchor = stage_anchor(
+        let anchor = work_run_anchor(
             &mut storage,
             seed,
             &node,
@@ -421,15 +434,15 @@ fn every_role_dispatches_to_its_own_device_worker_session_within_capacity() {
             fencing_token,
             &binding,
             product_session_id.0.as_str(),
-            stage_run_id.0.as_str(),
+            work_run_id.0.as_str(),
         );
         let now = instant("2026-09-04T12:05:00.000Z");
         let dispatch =
-            dispatch_stage_to_device_worker(&mut storage, Some(HOLDER), stage_run_id, &now)
+            dispatch_work_run_to_device_worker(&mut storage, Some(HOLDER), work_run_id, &now)
                 .expect("role dispatch")
-                .expect("device-anchored stage dispatches");
+                .expect("device-anchored WorkRun dispatches");
         // The role identity travels on the facts, together with the exact
-        // device worker identities of this stage's own launch.
+        // device worker identities of this WorkRun's own launch.
         assert_eq!(dispatch.facts.role.as_deref(), Some(*role));
         assert_eq!(dispatch.facts.worker_session_id, anchor.worker_session_id);
         assert_eq!(
@@ -442,10 +455,10 @@ fn every_role_dispatches_to_its_own_device_worker_session_within_capacity() {
             Some(product_session_id.0.as_str())
         );
         assert_eq!(
-            dispatch.facts.stage_run_id.as_deref(),
-            Some(stage_run_id.0.as_str())
+            dispatch.facts.work_run_id.as_deref(),
+            Some(work_run_id.0.as_str())
         );
-        // The binding is the stage's own WorkerSession, bound once.
+        // The binding is the WorkRun's own WorkerSession, bound once.
         assert_eq!(dispatch.binding.worker_session_id, anchor.worker_session_id);
         assert_eq!(dispatch.binding.state.as_str(), "bound");
         // The reservation runs under the StrongFlow device pool and stays
@@ -501,25 +514,25 @@ fn every_role_dispatches_to_its_own_device_worker_session_within_capacity() {
 }
 
 #[test]
-fn device_routed_stage_jobs_are_excluded_from_local_claims() {
+fn device_routed_work_run_jobs_are_excluded_from_local_claims() {
     let mut storage = SqliteStorage::open(temporary_root("local-exclusion")).expect("storage");
     let (node, instance, lease_id, fencing_token, binding) =
-        stage_device_fixture(&mut storage, 400, HOLDER);
-    // One anchored executor stage and one unanchored reviewer stage in the
+        work_run_device_fixture(&mut storage, 400, HOLDER);
+    // One anchored executor WorkRun and one unanchored reviewer WorkRun in the
     // same repository scope.
-    let (job_id, stage_run_id, product_session_id) = stage_role_job(
+    let (job_id, work_run_id, product_session_id) = work_run_role_job(
         &mut storage,
         500,
         "executor",
         ExecutionWorkspaceWriteMode::Candidate,
     );
-    let (_, unanchored_stage_run, _) = stage_role_job(
+    let (_, unanchored_work_run, _) = work_run_role_job(
         &mut storage,
         510,
         "reviewer",
         ExecutionWorkspaceWriteMode::ReadOnly,
     );
-    let anchor = stage_anchor(
+    let anchor = work_run_anchor(
         &mut storage,
         600,
         &node,
@@ -529,33 +542,33 @@ fn device_routed_stage_jobs_are_excluded_from_local_claims() {
         fencing_token,
         &binding,
         product_session_id.0.as_str(),
-        stage_run_id.0.as_str(),
+        work_run_id.0.as_str(),
     );
-    // The anchored stage routes to the launched device WorkerSession; the
-    // unanchored stage keeps the supervised local path unchanged.
-    let dispatch = dispatch_stage_to_device_worker(
+    // The anchored WorkRun routes to the launched device WorkerSession; the
+    // unanchored WorkRun keeps the supervised local path unchanged.
+    let dispatch = dispatch_work_run_to_device_worker(
         &mut storage,
         Some(HOLDER),
-        &stage_run_id,
+        &work_run_id,
         &instant("2026-09-04T12:05:00.000Z"),
     )
-    .expect("anchored stage dispatches")
+    .expect("anchored WorkRun dispatches")
     .expect("device dispatch");
     assert_eq!(dispatch.facts.worker_session_id, anchor.worker_session_id);
     assert_eq!(dispatch.facts.role.as_deref(), Some("executor"));
     assert!(
-        dispatch_stage_to_device_worker(
+        dispatch_work_run_to_device_worker(
             &mut storage,
             Some(HOLDER),
-            &unanchored_stage_run,
+            &unanchored_work_run,
             &instant("2026-09-04T12:05:00.000Z"),
         )
-        .expect("unanchored stage keeps the local path")
+        .expect("unanchored WorkRun keeps the local path")
         .is_none(),
-        "a stage run without an anchor must not dispatch"
+        "a WorkRun without an anchor must not dispatch"
     );
     // The local queue exclusion (FLOW-100.4) applies unchanged: the local
-    // embedded worker claims exactly the unanchored stage job and can never
+    // embedded worker claims exactly the unanchored WorkRun job and can never
     // claim the device-owned one.
     let (worker_id, worker_instance_id) = register_local_worker(&mut storage, 700);
     let first_claim = claim_locally(&mut storage, 701, &worker_id, &worker_instance_id);
@@ -563,7 +576,7 @@ fn device_routed_stage_jobs_are_excluded_from_local_claims() {
     let local_job = claim_locally(&mut storage, 702, &worker_id, &worker_instance_id);
     assert!(
         local_job.iter().all(|claimed| claimed.0 != job_id.0),
-        "the device-owned stage job must stay unclaimable locally"
+        "the device-owned WorkRun job must stay unclaimable locally"
     );
     // The device-owned job still waits for its device worker, not for a
     // local slot.
@@ -575,14 +588,14 @@ fn device_routed_stage_jobs_are_excluded_from_local_claims() {
 fn a_dead_anchor_refuses_the_dispatch_without_binding() {
     let mut storage = SqliteStorage::open(temporary_root("dead-anchor")).expect("storage");
     let (node, instance, lease_id, fencing_token, binding) =
-        stage_device_fixture(&mut storage, 800, HOLDER);
-    let (job_id, stage_run_id, product_session_id) = stage_role_job(
+        work_run_device_fixture(&mut storage, 800, HOLDER);
+    let (job_id, work_run_id, product_session_id) = work_run_role_job(
         &mut storage,
         900,
         "verifier",
         ExecutionWorkspaceWriteMode::ReadOnly,
     );
-    let anchor = stage_anchor(
+    let anchor = work_run_anchor(
         &mut storage,
         1000,
         &node,
@@ -592,7 +605,7 @@ fn a_dead_anchor_refuses_the_dispatch_without_binding() {
         fencing_token,
         &binding,
         product_session_id.0.as_str(),
-        stage_run_id.0.as_str(),
+        work_run_id.0.as_str(),
     );
     // The launch is revoked before the device ever accepted it.
     WorkerLaunchGrantService::new(&mut storage)
@@ -604,10 +617,10 @@ fn a_dead_anchor_refuses_the_dispatch_without_binding() {
         )
         .expect("revoke anchor grant");
 
-    let error = dispatch_stage_to_device_worker(
+    let error = dispatch_work_run_to_device_worker(
         &mut storage,
         Some(HOLDER),
-        &stage_run_id,
+        &work_run_id,
         &instant("2026-09-04T12:05:00.000Z"),
     )
     .expect_err("a dead launch anchor must refuse the dispatch");
@@ -635,14 +648,14 @@ fn a_dead_anchor_refuses_the_dispatch_without_binding() {
 fn a_gate_denial_routes_nothing() {
     let mut storage = SqliteStorage::open(temporary_root("gate-denial")).expect("storage");
     let (node, instance, lease_id, fencing_token, binding) =
-        stage_device_fixture(&mut storage, 1100, HOLDER);
-    let (job_id, stage_run_id, product_session_id) = stage_role_job(
+        work_run_device_fixture(&mut storage, 1100, HOLDER);
+    let (job_id, work_run_id, product_session_id) = work_run_role_job(
         &mut storage,
         1200,
         "planner",
         ExecutionWorkspaceWriteMode::ReadOnly,
     );
-    let anchor = stage_anchor(
+    let anchor = work_run_anchor(
         &mut storage,
         1300,
         &node,
@@ -652,14 +665,14 @@ fn a_gate_denial_routes_nothing() {
         fencing_token,
         &binding,
         product_session_id.0.as_str(),
-        stage_run_id.0.as_str(),
+        work_run_id.0.as_str(),
     );
     // A non-holder may not dispatch to the holder's device: the gate denial
     // carries the central wire code and routes nothing.
-    let error = dispatch_stage_to_device_worker(
+    let error = dispatch_work_run_to_device_worker(
         &mut storage,
         Some(MEMBER),
-        &stage_run_id,
+        &work_run_id,
         &instant("2026-09-04T12:05:00.000Z"),
     )
     .expect_err("a non-holder must be refused");
@@ -679,11 +692,11 @@ fn a_gate_denial_routes_nothing() {
             .expect("facts lookup")
             .is_none()
     );
-    // The holder dispatches the same stage afterwards.
-    let dispatch = dispatch_stage_to_device_worker(
+    // The holder dispatches the same WorkRun afterwards.
+    let dispatch = dispatch_work_run_to_device_worker(
         &mut storage,
         Some(HOLDER),
-        &stage_run_id,
+        &work_run_id,
         &instant("2026-09-04T12:06:00.000Z"),
     )
     .expect("holder dispatch")
@@ -695,14 +708,14 @@ fn a_gate_denial_routes_nothing() {
 fn the_dispatch_replays_exactly_without_new_facts() {
     let mut storage = SqliteStorage::open(temporary_root("dispatch-replay")).expect("storage");
     let (node, instance, lease_id, fencing_token, binding) =
-        stage_device_fixture(&mut storage, 1400, HOLDER);
-    let (job_id, stage_run_id, product_session_id) = stage_role_job(
+        work_run_device_fixture(&mut storage, 1400, HOLDER);
+    let (job_id, work_run_id, product_session_id) = work_run_role_job(
         &mut storage,
         1500,
         "executor",
         ExecutionWorkspaceWriteMode::Candidate,
     );
-    let anchor = stage_anchor(
+    let anchor = work_run_anchor(
         &mut storage,
         1600,
         &node,
@@ -712,12 +725,12 @@ fn the_dispatch_replays_exactly_without_new_facts() {
         fencing_token,
         &binding,
         product_session_id.0.as_str(),
-        stage_run_id.0.as_str(),
+        work_run_id.0.as_str(),
     );
-    let first = dispatch_stage_to_device_worker(
+    let first = dispatch_work_run_to_device_worker(
         &mut storage,
         Some(HOLDER),
-        &stage_run_id,
+        &work_run_id,
         &instant("2026-09-04T12:05:00.000Z"),
     )
     .expect("first dispatch")
@@ -725,10 +738,10 @@ fn the_dispatch_replays_exactly_without_new_facts() {
     assert_eq!(first.facts.worker_session_id, anchor.worker_session_id);
     // An exact command replay re-runs the routing and finds its durable
     // receipts: same binding, same facts, nothing new.
-    let replay = dispatch_stage_to_device_worker(
+    let replay = dispatch_work_run_to_device_worker(
         &mut storage,
         Some(HOLDER),
-        &stage_run_id,
+        &work_run_id,
         &instant("2026-09-04T12:07:00.000Z"),
     )
     .expect("replay dispatch")
@@ -739,7 +752,7 @@ fn the_dispatch_replays_exactly_without_new_facts() {
     assert_eq!(
         queued_jobs(&mut storage),
         vec![job_id],
-        "the replay must not duplicate the stage job"
+        "the replay must not duplicate the WorkRun job"
     );
 }
 
@@ -747,16 +760,16 @@ fn the_dispatch_replays_exactly_without_new_facts() {
 fn an_anchor_of_another_product_session_is_refused_as_corrupt() {
     let mut storage = SqliteStorage::open(temporary_root("foreign-session")).expect("storage");
     let (node, instance, lease_id, fencing_token, binding) =
-        stage_device_fixture(&mut storage, 1700, HOLDER);
-    let (job_id, stage_run_id, _) = stage_role_job(
+        work_run_device_fixture(&mut storage, 1700, HOLDER);
+    let (job_id, work_run_id, _) = work_run_role_job(
         &mut storage,
         1800,
         "reviewer",
         ExecutionWorkspaceWriteMode::ReadOnly,
     );
-    // The grant anchors the right stage run but a foreign product session:
+    // The grant anchors the right WorkRun but a foreign product session:
     // the identity join must refuse instead of routing.
-    let anchor = stage_anchor(
+    let anchor = work_run_anchor(
         &mut storage,
         1900,
         &node,
@@ -766,12 +779,12 @@ fn an_anchor_of_another_product_session_is_refused_as_corrupt() {
         fencing_token,
         &binding,
         &canonical_id("psn", 987_654),
-        stage_run_id.0.as_str(),
+        work_run_id.0.as_str(),
     );
-    let error = dispatch_stage_to_device_worker(
+    let error = dispatch_work_run_to_device_worker(
         &mut storage,
         Some(HOLDER),
-        &stage_run_id,
+        &work_run_id,
         &instant("2026-09-04T12:05:00.000Z"),
     )
     .expect_err("a foreign session anchor must be refused");
@@ -818,7 +831,7 @@ fn the_role_column_migrates_a_preexisting_facts_table() {
                     worker_id TEXT NOT NULL,
                     worker_instance_id TEXT NOT NULL,
                     product_session_id TEXT,
-                    stage_run_id TEXT,
+                    work_run_id TEXT,
                     attached_at TEXT NOT NULL,
                     revision INTEGER NOT NULL CHECK (revision = 1)
                 );",
@@ -829,14 +842,14 @@ fn the_role_column_migrates_a_preexisting_facts_table() {
     // appends the `role` column exactly where the fresh schema declares it.
     let mut storage = SqliteStorage::open(&root).expect("storage");
     let (node, instance, lease_id, fencing_token, binding) =
-        stage_device_fixture(&mut storage, 2000, HOLDER);
-    let (job_id, stage_run_id, product_session_id) = stage_role_job(
+        work_run_device_fixture(&mut storage, 2000, HOLDER);
+    let (job_id, work_run_id, product_session_id) = work_run_role_job(
         &mut storage,
         2100,
         "executor",
         ExecutionWorkspaceWriteMode::Candidate,
     );
-    let anchor = stage_anchor(
+    let anchor = work_run_anchor(
         &mut storage,
         2200,
         &node,
@@ -846,12 +859,12 @@ fn the_role_column_migrates_a_preexisting_facts_table() {
         fencing_token,
         &binding,
         product_session_id.0.as_str(),
-        stage_run_id.0.as_str(),
+        work_run_id.0.as_str(),
     );
-    let dispatch = dispatch_stage_to_device_worker(
+    let dispatch = dispatch_work_run_to_device_worker(
         &mut storage,
         Some(HOLDER),
-        &stage_run_id,
+        &work_run_id,
         &instant("2026-09-04T12:05:00.000Z"),
     )
     .expect("dispatch over the migrated facts table")

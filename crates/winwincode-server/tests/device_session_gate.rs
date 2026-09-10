@@ -16,15 +16,14 @@ use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
 use winwincode_api::generated::{
-    Actor, CommandRequest, OrganizationScope, OrganizationScopeKind, Scope, UserActor,
-    UserActorKind,
+    Actor, CommandRequest, OrganizationScope, OrganizationScopeKind, Scope,
 };
 use winwincode_control_plane::device_session_gate::DeviceSessionGateDenialKind;
 use winwincode_control_plane::{
     ControlPlane, ControlPlaneConfig, DurableWorkerInteractionOutbound, EventPublishError,
     EventPublisher, OutboxEvent, ProductSessionExecutionConfig, WorkerLaunchGrantService,
 };
-use winwincode_domain::{Instant, UserId};
+use winwincode_domain::{Instant, UserActor, UserActorKind, UserId, WorkRunId};
 use winwincode_server::{
     ApiError, AuthenticatedPrincipal, CommandDispatchResponse, CommandFamily, DurableEventHub,
     DurableEventHubConfig, StandaloneApplicationClock, StandaloneControlPlaneApplication,
@@ -293,7 +292,7 @@ fn stage_anchor(
         format!("winst_{}", suffix(seed + 52)),
         "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
         Some(product_session_id.to_owned()),
-        Some(format!("run_{}", suffix(seed + 53))),
+        Some(WorkRunId(format!("wrn_{}", suffix(seed + 53)))),
         instant("2100-01-01T00:00:00.000Z"),
     )
     .expect("issuance");

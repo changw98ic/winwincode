@@ -52,7 +52,7 @@
           "completed": 1,
           "failed": 0
         },
-        "activeStageRunId": null,
+        "activeWorkRunId": null,
         "openAttentionCount": 0,
         "updatedAt": "2026-08-24T09:10:11.123Z"
       }
@@ -186,7 +186,7 @@
           "completed": 1,
           "failed": 0
         },
-        "activeStageRunId": null,
+        "activeWorkRunId": null,
         "openAttentionCount": 0,
         "updatedAt": "2026-08-24T09:10:11.123Z"
       }
@@ -216,7 +216,7 @@
           "completed": 1,
           "failed": 0
         },
-        "activeStageRunId": null,
+        "activeWorkRunId": null,
         "openAttentionCount": 0,
         "updatedAt": "2026-08-24T09:10:11.123Z"
       }

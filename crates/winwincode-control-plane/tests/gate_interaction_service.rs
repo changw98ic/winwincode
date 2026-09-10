@@ -20,7 +20,7 @@ use winwincode_domain::{
     ApprovalId, AttentionItemId, CodexThreadId, ControlPlaneEventId, CredentialReferenceId,
     DeliveryId, ExecutionJobId, ExecutionMessageId, ExecutionSequence, FencingToken, Instant,
     LeaseId, ModelExchangeId, OrganizationId, ProductSessionId, ProjectId, RepositoryId, RequestId,
-    Sha256Digest, StageRunId, UserId, WorkerId, WorkerInstanceId, WorkerSessionId, WorkspaceId,
+    Sha256Digest, UserId, WorkerId, WorkerInstanceId, WorkerSessionId, WorkspaceId,
 };
 use winwincode_execution_port::action_gateway::GateDecision;
 use winwincode_session::SessionBindingIdentity;
@@ -379,10 +379,13 @@ fn prepare_product_session(
         })
         .expect("create ProductSession");
     let binding_identity = if delivery {
-        SessionBindingIdentity::delivery_stage(
+        SessionBindingIdentity::delivery_work_run(
             DeliveryId(id("dlv", 1)),
-            None,
-            StageRunId(id("run", 1)),
+            winwincode_domain::WorkContractId(id("wct", 1)),
+            winwincode_domain::Revision(1),
+            winwincode_domain::WorkItemId(id("wit", 1)),
+            winwincode_domain::Revision(1),
+            winwincode_domain::WorkRunId(id("wrn", 1)),
             ProductSessionId(id("psn", 1)),
             runtime.job_id.clone(),
         )
@@ -436,7 +439,11 @@ fn authority(
         execution_scope: execution_scope(delivery),
         worker_pool_id: pool(),
         product_session_revision,
-        stage_run_id: delivery.then(|| StageRunId(id("run", 1))),
+        work_contract_id: delivery.then(|| winwincode_domain::WorkContractId(id("wct", 1))),
+        work_contract_revision: delivery.then_some(winwincode_domain::Revision(1)),
+        work_item_id: delivery.then(|| winwincode_domain::WorkItemId(id("wit", 1))),
+        work_item_revision: delivery.then_some(winwincode_domain::Revision(1)),
+        work_run_id: delivery.then(|| winwincode_domain::WorkRunId(id("wrn", 1))),
         job_revision: 2,
         worker_slot_revision: 1,
         runtime,
@@ -510,7 +517,7 @@ fn plan_delta_routes_to_approval_and_replays_across_restart() {
         .register(&registration)
         .expect("register Approval");
     assert_eq!(registered.record.state, GateInteractionState::Pending);
-    assert_eq!(registered.record.authority.stage_run_id, None);
+    assert_eq!(registered.record.authority.work_run_id, None);
 
     let replay = GateInteractionService::new(&mut storage)
         .register(&registration)
@@ -786,10 +793,7 @@ fn expiry_is_deterministic_and_delivery_stage_remains_exact() {
         .respond(&response_at_deadline)
         .expect("deadline response expires");
     assert_eq!(expired.record.state, GateInteractionState::Expired);
-    assert_eq!(
-        expired.record.authority.stage_run_id,
-        Some(StageRunId(id("run", 1)))
-    );
+    assert_eq!(expired.record.authority.work_run_id, authority.work_run_id);
     assert!(
         GateInteractionService::new(&mut storage)
             .respond(&response_at_deadline)
@@ -810,4 +814,58 @@ fn expiry_is_deterministic_and_delivery_stage_remains_exact() {
             .code(),
         GateInteractionServiceErrorCode::AlreadyResolved
     );
+}
+
+#[test]
+fn workrun_gate_rejects_foreign_contract_and_item_before_writing() {
+    let (_directory, mut storage, scope, authority) = setup(
+        "workrun-identity",
+        true,
+        &GateDecision::ReplanRequired {
+            reason: "candidate changed".into(),
+        },
+    );
+    for field in [
+        "contract",
+        "contract_revision",
+        "item",
+        "item_revision",
+        "missing_contract",
+    ] {
+        let mut foreign = authority.clone();
+        match field {
+            "contract" => {
+                foreign.work_contract_id = Some(winwincode_domain::WorkContractId(id("wct", 2)));
+            }
+            "contract_revision" => {
+                foreign.work_contract_revision = Some(winwincode_domain::Revision(2));
+            }
+            "item" => foreign.work_item_id = Some(winwincode_domain::WorkItemId(id("wit", 2))),
+            "item_revision" => foreign.work_item_revision = Some(winwincode_domain::Revision(2)),
+            "missing_contract" => foreign.work_contract_id = None,
+            _ => unreachable!(),
+        }
+        assert_eq!(
+            GateInteractionService::new(&mut storage)
+                .register(&register_command(&scope, &attention(), foreign, 150))
+                .expect_err(field)
+                .code(),
+            GateInteractionServiceErrorCode::AuthorityMismatch
+        );
+    }
+    let registered = GateInteractionService::new(&mut storage)
+        .register(&register_command(
+            &scope,
+            &attention(),
+            authority.clone(),
+            150,
+        ))
+        .expect("rejected identities left the request and interaction unused");
+    assert!(!registered.replayed);
+    assert_eq!(registered.record.authority, authority);
+    let replay = GateInteractionService::new(&mut storage)
+        .register(&register_command(&scope, &attention(), authority, 150))
+        .expect("exact canonical replay");
+    assert!(replay.replayed);
+    assert_eq!(replay.record, registered.record);
 }

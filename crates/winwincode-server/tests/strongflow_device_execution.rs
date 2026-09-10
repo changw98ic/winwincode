@@ -2,10 +2,10 @@
 
 //! The `FLOW-100.5` `StrongFlow` role-to-Device `WorkerSession` routing over the
 //! real composed Server application with its production-local Delivery
-//! authority: the `delivery.advance` that commits a Codex stage's
-//! `ExecutionJob` routes that job to the stage's launched Device
+//! authority: the `delivery.advance` that commits a Codex `WorkRun`'s
+//! `ExecutionJob` routes that job to the `WorkRun`'s launched Device
 //! `WorkerSession` when a durable launch anchor exists (after the
-//! FLOW-100.3 permission gate approves the acting user), while a stage run
+//! FLOW-100.3 permission gate approves the acting user), while a `WorkRun`
 //! without an anchor keeps the supervised local execution path unchanged —
 //! and a gate denial routes nothing.
 
@@ -16,10 +16,8 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
-use winwincode_api::generated::RepositoryScope;
 use winwincode_api::generated::{
-    Actor, CommandRequest, OrganizationScope, OrganizationScopeKind, Scope, UserActor,
-    UserActorKind,
+    Actor, CommandRequest, OrganizationScope, OrganizationScopeKind, Scope,
 };
 use winwincode_control_plane::{
     ControlPlane, ControlPlaneConfig, DeviceExecutionBindingService,
@@ -29,7 +27,8 @@ use winwincode_control_plane::{
 };
 use winwincode_domain::{
     ExecutionJobId, ExecutionMessageId, Instant, OrganizationId, ProjectId, RepositoryId,
-    RequestId, Sha256Digest, UserId, WorkerId, WorkerInstanceId, WorkspaceId,
+    RepositoryScope, RepositoryScopeKind, RequestId, Sha256Digest, UserActor, UserActorKind,
+    UserId, WorkerId, WorkerInstanceId, WorkspaceId,
 };
 use winwincode_server::{
     ApiError, AuthenticatedPrincipal, CommandDispatchResponse, CommandFamily, DurableEventHub,
@@ -48,11 +47,16 @@ use winwincode_storage::{
 
 static NEXT_ROOT: AtomicU64 = AtomicU64::new(1);
 
-struct RecordingPublisher;
+struct HubPublisher {
+    hub: Arc<DurableEventHub>,
+}
 
-impl EventPublisher for RecordingPublisher {
-    fn publish(&mut self, _event: &OutboxEvent) -> Result<(), EventPublishError> {
-        Ok(())
+impl EventPublisher for HubPublisher {
+    fn publish(&mut self, event: &OutboxEvent) -> Result<(), EventPublishError> {
+        self.hub
+            .publish_committed(event)
+            .map(|_| ())
+            .map_err(|error| EventPublishError::new(error.to_string()))
     }
 }
 
@@ -101,7 +105,7 @@ fn instant(value: &str) -> Instant {
 
 fn api_scope() -> RepositoryScope {
     RepositoryScope {
-        kind: winwincode_api::generated::RepositoryScopeKind::Repository,
+        kind: RepositoryScopeKind::Repository,
         organization_id: OrganizationId(canonical_id("org", 1)),
         workspace_id: WorkspaceId(canonical_id("wsp", 1)),
         project_id: ProjectId(canonical_id("prj", 1)),
@@ -197,7 +201,9 @@ fn compose_application(root: &Path) -> StandaloneControlPlaneApplication {
     );
     let control_plane = ControlPlane::start_local_with_delivery_adapters(
         ControlPlaneConfig::local(root),
-        Box::new(RecordingPublisher),
+        Box::new(HubPublisher {
+            hub: Arc::clone(&hub),
+        }),
         LocalDeliveryAdapterConfig::new(root.join("repository"), api_scope()),
     )
     .expect("open Control Plane with the local Delivery authority");
@@ -229,7 +235,7 @@ fn compose_application(root: &Path) -> StandaloneControlPlaneApplication {
 // ---- durable staging over the same product-state database ------------------
 
 #[allow(clippy::too_many_lines)]
-fn stage_device_fixture(
+fn work_run_device_fixture(
     root: &Path,
     seed: u64,
     user: &str,
@@ -337,7 +343,7 @@ fn stage_device_fixture(
     (node, instance, lease_id, fencing_token, binding)
 }
 
-/// The device identities one staged stage-run anchor exposes to the test.
+/// The device identities one staged `WorkRun` anchor exposes to the test.
 #[allow(clippy::struct_field_names)]
 struct AnchorLaunch {
     worker_launch_grant_id: String,
@@ -346,10 +352,10 @@ struct AnchorLaunch {
     worker_instance_id: String,
 }
 
-/// Stages the launch anchor of one Delivery stage run exactly as the Client's
+/// Stages the launch anchor of one Delivery `WorkRun` exactly as the Client's
 /// two-phase scheduler would after the user asked the device to run it.
 #[allow(clippy::too_many_arguments)]
-fn stage_anchor(
+fn work_run_anchor(
     root: &Path,
     seed: u64,
     node: &str,
@@ -359,7 +365,7 @@ fn stage_anchor(
     fencing_token: u64,
     binding: &str,
     product_session_id: &str,
-    stage_run_id: &str,
+    work_run_id: &str,
 ) -> AnchorLaunch {
     let mut storage = SqliteStorage::open(root).expect("open staging storage");
     let worker_launch_grant_id = ulid_id("wlg", seed);
@@ -379,7 +385,7 @@ fn stage_anchor(
         worker_instance_id.clone(),
         "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
         Some(product_session_id.to_owned()),
-        Some(stage_run_id.to_owned()),
+        Some(winwincode_domain::WorkRunId(work_run_id.to_owned())),
         instant("2100-01-01T00:00:00.000Z"),
     )
     .expect("issuance");
@@ -437,7 +443,7 @@ fn delivery_create_request(
             "deliveryId": ulid_id("dlv", delivery),
             "spec": {
                 "acceptanceCriteria": [
-                    { "id": "criterion-1", "required": true, "title": "Repository tests pass" }
+                    { "id": canonical_id("crt", 1), "required": true, "title": "Repository tests pass" }
                 ],
                 "baseRevision": baseline,
                 "constraints": ["tests pass"],
@@ -468,9 +474,37 @@ fn delivery_advance_request(
         "actor": { "kind": "user", "id": user },
         "scope": repository_scope_json(),
         "expectedRevision": expected_revision,
-        "payload": { "deliveryId": ulid_id("dlv", delivery) }
+        "payload": {
+            "deliveryId": ulid_id("dlv", delivery),
+            "dispatchProfile": "executor"
+        }
     }))
     .expect("generated delivery.advance command")
+}
+
+fn delivery_task_breakdown_request(request: u64, delivery: u64, user: &str) -> CommandRequest {
+    let command = serde_json::from_value(serde_json::json!({
+        "schemaVersion": "winwincode/v1",
+        "requestId": canonical_id("req", request),
+        "command": "delivery.task_breakdown.create",
+        "actor": { "kind": "user", "id": user },
+        "scope": repository_scope_json(),
+        "expectedRevision": 1,
+        "payload": {
+            "deliveryId": ulid_id("dlv", delivery),
+            "expectedRevision": 1,
+            "contractRevision": 1,
+            "items": [{
+                "criterionIds": ["crt_00000000000000000000000001"],
+                "dependsOn": [],
+                "goal": "Ship the exact repository change",
+                "id": "wit_00000000000000000000000001",
+                "title": "Ship the exact repository change"
+            }]
+        }
+    }))
+    .expect("generated delivery.task_breakdown.create command");
+    CommandRequest::DeliveryTaskBreakdownCreateCommand(command)
 }
 
 fn completed(response: CommandDispatchResponse) -> serde_json::Value {
@@ -555,14 +589,14 @@ fn claim_locally(
 }
 
 #[test]
-fn a_device_anchored_stage_run_is_dispatched_to_its_launched_worker_session() {
-    let root = temporary_root("anchored-stage-dispatch");
+fn a_device_anchored_work_run_is_dispatched_to_its_launched_worker_session() {
+    let root = temporary_root("anchored-work-run-dispatch");
     std::fs::create_dir_all(root.join("repository")).expect("repository directory");
     let baseline = initialize_repository(&root.join("repository"));
     let application = compose_application(&root);
     let holder = canonical_id("usr", 1);
     // The holder creates the Delivery and advances it once: the first Codex
-    // stage's job (the requirements role) is committed with no device anchor
+    // WorkRun's job (the requirements role) is committed with no device anchor
     // yet.
     application
         .command(
@@ -575,28 +609,31 @@ fn a_device_anchored_stage_run_is_dispatched_to_its_launched_worker_session() {
         .command(
             &principal(&holder),
             CommandFamily::Delivery,
-            delivery_advance_request(11, 1, &holder, 1),
+            delivery_task_breakdown_request(12, 1, &holder),
+        )
+        .expect("create canonical WorkItem");
+    application
+        .command(
+            &principal(&holder),
+            CommandFamily::Delivery,
+            delivery_advance_request(11, 1, &holder, 2),
         )
         .expect("advance Delivery");
-    let (job_id, stage_run_id, product_session_id) = {
+    let (job_id, work_run_id, product_session_id) = {
         let mut storage = open_storage(&root);
         let job_id = queued_job_id(&mut storage);
         let record = storage
             .load_execution_job_record(&job_id)
             .expect("job record")
             .expect("queued job");
-        let stage_run_id = record.stage_run_id.clone().expect("Delivery stage run");
-        (
-            job_id,
-            stage_run_id,
-            record.scope.product_session_id.clone(),
-        )
+        let work_run_id = record.work_run_id.clone().expect("Delivery WorkRun");
+        (job_id, work_run_id, record.scope.product_session_id.clone())
     };
-    // The Client launches this role's WorkerSession for exactly this stage
+    // The Client launches this role's WorkerSession for exactly this WorkRun
     // run, and the control plane settles the launch acknowledgement.
     let (node, instance, lease_id, fencing_token, binding) =
-        stage_device_fixture(&root, 100, &holder);
-    let anchor = stage_anchor(
+        work_run_device_fixture(&root, 100, &holder);
+    let anchor = work_run_anchor(
         &root,
         104,
         &node,
@@ -606,7 +643,7 @@ fn a_device_anchored_stage_run_is_dispatched_to_its_launched_worker_session() {
         fencing_token,
         &binding,
         product_session_id.0.as_str(),
-        stage_run_id.0.as_str(),
+        work_run_id.0.as_str(),
     );
     settle_launch(&root, &anchor, &lease_id, fencing_token);
     // The exact advance replay re-runs the routing: the anchor now exists,
@@ -615,14 +652,14 @@ fn a_device_anchored_stage_run_is_dispatched_to_its_launched_worker_session() {
         .command(
             &principal(&holder),
             CommandFamily::Delivery,
-            delivery_advance_request(11, 1, &holder, 1),
+            delivery_advance_request(11, 1, &holder, 2),
         )
         .expect("receipt-first advance replay completes the dispatch");
     let facts = {
         let mut storage = open_storage(&root);
         // The launch material is the device session's durable ExecutionPort
-        // identity, and the stage job carries the exact device facts with the
-        // stage's role stamped on them.
+        // identity, and the WorkRun job carries the exact device facts with the
+        // WorkRun's role stamped on them.
         let bound = binding_snapshot(&mut storage, &anchor.worker_session_id)
             .expect("the device session is bound");
         assert_eq!(bound.state.as_str(), "bound");
@@ -633,15 +670,15 @@ fn a_device_anchored_stage_run_is_dispatched_to_its_launched_worker_session() {
         let facts = DeviceExecutionBindingService::new(&mut storage)
             .facts(job_id.0.as_str())
             .expect("facts lookup")
-            .expect("the stage job carries device facts");
-        assert_eq!(facts.role.as_deref(), Some("requirements"));
+            .expect("the WorkRun job carries device facts");
+        assert_eq!(facts.role.as_deref(), Some("executor"));
         assert_eq!(facts.worker_session_id, anchor.worker_session_id);
         assert_eq!(facts.holder_user_id, holder);
         assert_eq!(
             facts.product_session_id.as_deref(),
             Some(product_session_id.0.as_str())
         );
-        assert_eq!(facts.stage_run_id.as_deref(), Some(stage_run_id.0.as_str()));
+        assert_eq!(facts.work_run_id.as_deref(), Some(work_run_id.0.as_str()));
         // The job itself stays queued for the device worker.
         let record = storage
             .load_execution_job_record(&job_id)
@@ -650,7 +687,7 @@ fn a_device_anchored_stage_run_is_dispatched_to_its_launched_worker_session() {
         assert_eq!(record.state, ExecutionJobState::Queued);
         facts
     };
-    // The local embedded worker cannot claim the device-owned stage job: the
+    // The local embedded worker cannot claim the device-owned WorkRun job: the
     // queue selection excludes it, so a local drive finds nothing.
     {
         let mut storage = open_storage(&root);
@@ -670,8 +707,8 @@ fn a_device_anchored_stage_run_is_dispatched_to_its_launched_worker_session() {
 }
 
 #[test]
-fn an_unanchored_stage_run_keeps_the_local_execution_path() {
-    let root = temporary_root("stage-local-path");
+fn an_unanchored_work_run_keeps_the_local_execution_path() {
+    let root = temporary_root("work-run-local-path");
     std::fs::create_dir_all(root.join("repository")).expect("repository directory");
     let baseline = initialize_repository(&root.join("repository"));
     let application = compose_application(&root);
@@ -687,7 +724,14 @@ fn an_unanchored_stage_run_keeps_the_local_execution_path() {
         .command(
             &principal(&user),
             CommandFamily::Delivery,
-            delivery_advance_request(61, 1, &user, 1),
+            delivery_task_breakdown_request(62, 1, &user),
+        )
+        .expect("create canonical WorkItem");
+    application
+        .command(
+            &principal(&user),
+            CommandFamily::Delivery,
+            delivery_advance_request(61, 1, &user, 2),
         )
         .expect("advance Delivery");
     let mut storage = open_storage(&root);
@@ -697,10 +741,10 @@ fn an_unanchored_stage_run_keeps_the_local_execution_path() {
             .facts(job_id.0.as_str())
             .expect("facts lookup")
             .is_none(),
-        "an unanchored stage job must not carry device facts"
+        "an unanchored WorkRun job must not carry device facts"
     );
     assert!(binding_snapshot(&mut storage, &ulid_id("ws", 105)).is_none());
-    // The local embedded worker claims the stage job exactly as before.
+    // The local embedded worker claims the WorkRun job exactly as before.
     let (worker_id, worker_instance_id) = register_local_worker(&mut storage, 700);
     assert_eq!(
         claim_locally(&mut storage, 701, &worker_id, &worker_instance_id),
@@ -713,14 +757,14 @@ fn an_unanchored_stage_run_keeps_the_local_execution_path() {
 
 #[test]
 fn a_gate_denial_dispatches_nothing() {
-    let root = temporary_root("stage-gate-denial");
+    let root = temporary_root("work-run-gate-denial");
     std::fs::create_dir_all(root.join("repository")).expect("repository directory");
     let baseline = initialize_repository(&root.join("repository"));
     let application = compose_application(&root);
     let holder = canonical_id("usr", 1);
     let member = canonical_id("usr", 2);
     // The member drives their own Delivery: the advance that commits the
-    // first Codex stage's job carries no device anchor yet.
+    // first Codex WorkRun's job carries no device anchor yet.
     application
         .command(
             &principal(&member),
@@ -728,7 +772,14 @@ fn a_gate_denial_dispatches_nothing() {
             delivery_create_request(80, 1, &member, &baseline),
         )
         .expect("create Delivery");
-    let advance = delivery_advance_request(81, 1, &member, 1);
+    application
+        .command(
+            &principal(&member),
+            CommandFamily::Delivery,
+            delivery_task_breakdown_request(82, 1, &member),
+        )
+        .expect("create canonical WorkItem");
+    let advance = delivery_advance_request(81, 1, &member, 2);
     application
         .command(
             &principal(&member),
@@ -736,7 +787,7 @@ fn a_gate_denial_dispatches_nothing() {
             advance.clone(),
         )
         .expect("advance Delivery");
-    let (stage_run_id, product_session_id) = {
+    let (work_run_id, product_session_id) = {
         let mut storage = open_storage(&root);
         let job_id = queued_job_id(&mut storage);
         let record = storage
@@ -744,14 +795,14 @@ fn a_gate_denial_dispatches_nothing() {
             .expect("job record")
             .expect("queued job");
         (
-            record.stage_run_id.clone().expect("Delivery stage run"),
+            record.work_run_id.clone().expect("Delivery WorkRun"),
             record.scope.product_session_id.clone(),
         )
     };
-    // The stage's launch anchor belongs to the holder's occupied device.
+    // The WorkRun's launch anchor belongs to the holder's occupied device.
     let (node, instance, lease_id, fencing_token, binding) =
-        stage_device_fixture(&root, 800, &holder);
-    let anchor = stage_anchor(
+        work_run_device_fixture(&root, 800, &holder);
+    let anchor = work_run_anchor(
         &root,
         804,
         &node,
@@ -761,7 +812,7 @@ fn a_gate_denial_dispatches_nothing() {
         fencing_token,
         &binding,
         product_session_id.0.as_str(),
-        stage_run_id.0.as_str(),
+        work_run_id.0.as_str(),
     );
     // The member's exact replay commits as a receipt-first replay, but the
     // FLOW-100.3 gate denies the device dispatch with the central gate wire
@@ -784,7 +835,7 @@ fn a_gate_denial_dispatches_nothing() {
                 .facts(job.job_id.0.as_str())
                 .expect("facts lookup")
                 .is_none(),
-            "a denied stage job must not carry device facts"
+            "a denied WorkRun job must not carry device facts"
         );
     }
 
@@ -793,8 +844,8 @@ fn a_gate_denial_dispatches_nothing() {
 }
 
 #[test]
-fn the_stage_dispatch_replays_exactly_without_new_facts() {
-    let root = temporary_root("stage-dispatch-replay");
+fn the_work_run_dispatch_replays_exactly_without_new_facts() {
+    let root = temporary_root("work-run-dispatch-replay");
     std::fs::create_dir_all(root.join("repository")).expect("repository directory");
     let baseline = initialize_repository(&root.join("repository"));
     let application = compose_application(&root);
@@ -806,7 +857,14 @@ fn the_stage_dispatch_replays_exactly_without_new_facts() {
             delivery_create_request(50, 1, &holder, &baseline),
         )
         .expect("create Delivery");
-    let advance = delivery_advance_request(51, 1, &holder, 1);
+    application
+        .command(
+            &principal(&holder),
+            CommandFamily::Delivery,
+            delivery_task_breakdown_request(52, 1, &holder),
+        )
+        .expect("create canonical WorkItem");
+    let advance = delivery_advance_request(51, 1, &holder, 2);
     application
         .command(
             &principal(&holder),
@@ -814,7 +872,7 @@ fn the_stage_dispatch_replays_exactly_without_new_facts() {
             advance.clone(),
         )
         .expect("advance Delivery");
-    let (job_id, stage_run_id, product_session_id) = {
+    let (job_id, work_run_id, product_session_id) = {
         let mut storage = open_storage(&root);
         let job_id = queued_job_id(&mut storage);
         let record = storage
@@ -823,13 +881,13 @@ fn the_stage_dispatch_replays_exactly_without_new_facts() {
             .expect("queued job");
         (
             job_id,
-            record.stage_run_id.clone().expect("Delivery stage run"),
+            record.work_run_id.clone().expect("Delivery WorkRun"),
             record.scope.product_session_id.clone(),
         )
     };
     let (node, instance, lease_id, fencing_token, binding) =
-        stage_device_fixture(&root, 500, &holder);
-    let anchor = stage_anchor(
+        work_run_device_fixture(&root, 500, &holder);
+    let anchor = work_run_anchor(
         &root,
         504,
         &node,
@@ -839,7 +897,7 @@ fn the_stage_dispatch_replays_exactly_without_new_facts() {
         fencing_token,
         &binding,
         product_session_id.0.as_str(),
-        stage_run_id.0.as_str(),
+        work_run_id.0.as_str(),
     );
     settle_launch(&root, &anchor, &lease_id, fencing_token);
     let first = completed(
@@ -861,8 +919,8 @@ fn the_stage_dispatch_replays_exactly_without_new_facts() {
     let facts = DeviceExecutionBindingService::new(&mut storage)
         .facts(job_id.0.as_str())
         .expect("facts lookup")
-        .expect("the stage job carries device facts");
-    assert_eq!(facts.role.as_deref(), Some("requirements"));
+        .expect("the WorkRun job carries device facts");
+    assert_eq!(facts.role.as_deref(), Some("executor"));
     assert_eq!(facts.worker_session_id, anchor.worker_session_id);
     assert_eq!(facts.attached_at, instant("2027-01-15T08:00:00.000Z"));
     assert_eq!(queued_job_id(&mut storage), job_id);

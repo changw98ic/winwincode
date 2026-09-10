@@ -373,15 +373,21 @@
         "effective model settings selection",
         "effective Provider/model catalog",
         "Credential reference lifecycle",
-        "configured durable model request pool"
+        "configured durable model request pool",
+        "explicit Provider runtime status"
       ],
       "reasons": [
         "ready",
+        "rate_limited",
+        "window_exhausted",
+        "weekly_exhausted",
+        "authentication_error",
         "no_provider",
         "credential_missing_or_revoked",
         "default_route_invalid",
         "provider_or_model_disabled",
-        "request_pool_unavailable"
+        "request_pool_unavailable",
+        "runtime_status_unknown"
       ],
       "clientInferenceAllowed": false,
       "secretFieldsAllowed": false,
@@ -458,10 +464,10 @@
           "$ref": "#/$defs/DeliveryUpdateSpecCommand"
         },
         {
-          "$ref": "#/$defs/DeliveryApproveTaskBreakdownCommand"
+          "$ref": "#/$defs/DeliveryAdvanceCommand"
         },
         {
-          "$ref": "#/$defs/DeliveryAdvanceCommand"
+          "$ref": "#/$defs/WorkRunCancelCommand"
         },
         {
           "$ref": "#/$defs/DeliveryResolveAttentionCommand"
@@ -531,6 +537,9 @@
         },
         {
           "$ref": "#/$defs/CollaborationPresenceUpdateCommand"
+        },
+        {
+          "$ref": "#/$defs/DeliveryTaskBreakdownCreateCommand"
         }
       ]
     },
@@ -550,6 +559,9 @@
         },
         {
           "$ref": "#/$defs/RuntimeProjectionGetQuery"
+        },
+        {
+          "$ref": "#/$defs/WorkRunGetQuery"
         },
         {
           "$ref": "#/$defs/DeliveryListQuery"
@@ -657,6 +669,7 @@
         "session.messages.list",
         "session.interactions.list",
         "runtime.projection.get",
+        "workrun.get",
         "delivery.list",
         "delivery.get",
         "candidate.list",
@@ -808,10 +821,10 @@
           "$ref": "#/$defs/DeliveryUpdateSpecCompletedResponse"
         },
         {
-          "$ref": "#/$defs/DeliveryApproveTaskBreakdownCompletedResponse"
+          "$ref": "#/$defs/DeliveryAdvanceCompletedResponse"
         },
         {
-          "$ref": "#/$defs/DeliveryAdvanceCompletedResponse"
+          "$ref": "#/$defs/WorkRunCancelCompletedResponse"
         },
         {
           "$ref": "#/$defs/DeliveryResolveAttentionCompletedResponse"
@@ -881,6 +894,9 @@
         },
         {
           "$ref": "#/$defs/CollaborationPresenceUpdateCompletedResponse"
+        },
+        {
+          "$ref": "#/$defs/DeliveryTaskBreakdownCreateCompletedResponse"
         }
       ],
       "description": "Exact command/result response union. Relabeling a result under another command is invalid."
@@ -933,6 +949,9 @@
         },
         {
           "$ref": "#/$defs/RuntimeProjectionGetResultResponse"
+        },
+        {
+          "$ref": "#/$defs/WorkRunGetResultResponse"
         },
         {
           "$ref": "#/$defs/DeliveryListResultResponse"
@@ -1604,33 +1623,32 @@
         }
       }
     },
-    "DeliveryApproveTaskBreakdownPayload": {
+    "DeliveryAdvancePayload": {
       "type": "object",
       "additionalProperties": false,
       "required": [
         "deliveryId",
-        "reviewSetSha256"
+        "dispatchProfile"
       ],
       "properties": {
         "deliveryId": {
           "$ref": "./domain.schema.json#/$defs/DeliveryId"
         },
-        "reviewSetSha256": {
-          "$ref": "./domain.schema.json#/$defs/Sha256Digest",
-          "description": "Stale-check assertion for the current sealed approved SolutionReviewProjection; it is not caller-authored task content."
-        }
-      },
-      "description": "Promotes the ordered task proposals from the exact sealed approved review set. The caller cannot submit or replace task fields."
-    },
-    "DeliveryAdvancePayload": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "deliveryId"
-      ],
-      "properties": {
-        "deliveryId": {
-          "$ref": "./domain.schema.json#/$defs/DeliveryId"
+        "dispatchProfile": {
+          "type": "string",
+          "enum": [
+            "planner",
+            "executor",
+            "reviewer",
+            "verifier",
+            "adversarial-verifier",
+            "remediator"
+          ],
+          "description": "Requested execution profile, validated and frozen by the Controller before dispatch. WorkItem selection and execution identities are Controller-owned."
+        },
+        "rework": {
+          "$ref": "#/$defs/DeliveryReworkInput",
+          "description": "Required only for remediator dispatch; rejected for every other profile."
         }
       }
     },
@@ -1960,7 +1978,7 @@
         "kind",
         "productSessionId",
         "deliveryId",
-        "stageRunId",
+        "workRunId",
         "atCursor"
       ],
       "properties": {
@@ -1973,11 +1991,11 @@
         "deliveryId": {
           "$ref": "./domain.schema.json#/$defs/DeliveryId"
         },
-        "stageRunId": {
-          "$ref": "./domain.schema.json#/$defs/StageRunId"
-        },
         "atCursor": {
           "$ref": "./domain.schema.json#/$defs/StrongFlowReadCursor"
+        },
+        "workRunId": {
+          "$ref": "./domain.schema.json#/$defs/WorkRunId"
         }
       }
     },
@@ -2310,27 +2328,6 @@
             },
             "payload": {
               "$ref": "#/$defs/DeliveryUpdateSpecPayload"
-            },
-            "scope": {
-              "$ref": "./domain.schema.json#/$defs/RepositoryScope"
-            }
-          }
-        }
-      ]
-    },
-    "DeliveryApproveTaskBreakdownCommand": {
-      "allOf": [
-        {
-          "$ref": "./domain.schema.json#/$defs/CommandEnvelope"
-        },
-        {
-          "type": "object",
-          "properties": {
-            "command": {
-              "const": "delivery.approve_task_breakdown"
-            },
-            "payload": {
-              "$ref": "#/$defs/DeliveryApproveTaskBreakdownPayload"
             },
             "scope": {
               "$ref": "./domain.schema.json#/$defs/RepositoryScope"
@@ -2980,6 +2977,7 @@
         "subject",
         "category",
         "effectiveDecisionScope",
+        "decisionEnabled",
         "sanitizedDetail",
         "binding"
       ],
@@ -3015,6 +3013,10 @@
         },
         "effectiveDecisionScope": {
           "$ref": "#/$defs/ApprovalEffectiveDecisionScope"
+        },
+        "decisionEnabled": {
+          "type": "boolean",
+          "description": "False when the trusted producer did not supply complete action facts; approval is then rejected server-side."
         },
         "sanitizedDetail": {
           "$ref": "#/$defs/ApprovalSanitizedDetailProjection"
@@ -4067,6 +4069,26 @@
           "maxItems": 200,
           "uniqueItems": true,
           "description": "Canonical order is part of reviewSetSha256 and is preserved during task promotion."
+        },
+        "planningWorkRunId": {
+          "oneOf": [
+            {
+              "$ref": "./domain.schema.json#/$defs/WorkRunId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reviewWorkRunId": {
+          "oneOf": [
+            {
+              "$ref": "./domain.schema.json#/$defs/WorkRunId"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "oneOf": [
@@ -4170,7 +4192,7 @@
         "codexThreadId",
         "boundAt",
         "sessionIdentity",
-        "stageRunId",
+        "workRunId",
         "workerId",
         "leaseId",
         "attempt",
@@ -4217,16 +4239,6 @@
           "oneOf": [
             {
               "$ref": "./domain.schema.json#/$defs/SessionIdentity"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "stageRunId": {
-          "oneOf": [
-            {
-              "$ref": "./domain.schema.json#/$defs/StageRunId"
             },
             {
               "type": "null"
@@ -4287,6 +4299,16 @@
               "type": "null"
             }
           ]
+        },
+        "workRunId": {
+          "oneOf": [
+            {
+              "$ref": "./domain.schema.json#/$defs/WorkRunId"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "oneOf": [
@@ -4299,9 +4321,6 @@
               "type": "null"
             },
             "sessionIdentity": {
-              "type": "null"
-            },
-            "stageRunId": {
               "type": "null"
             },
             "workerId": {
@@ -4318,6 +4337,9 @@
             },
             "sourceIdentity": {
               "type": "null"
+            },
+            "workRunId": {
+              "type": "null"
             }
           }
         },
@@ -4331,9 +4353,6 @@
             },
             "sessionIdentity": {
               "$ref": "./domain.schema.json#/$defs/SessionIdentity"
-            },
-            "stageRunId": {
-              "$ref": "./domain.schema.json#/$defs/StageRunId"
             },
             "workerId": {
               "$ref": "./domain.schema.json#/$defs/WorkerId"
@@ -4354,6 +4373,9 @@
             },
             "sourceIdentity": {
               "$ref": "./domain.schema.json#/$defs/SessionBindingSourceIdentity"
+            },
+            "workRunId": {
+              "$ref": "./domain.schema.json#/$defs/WorkRunId"
             }
           }
         }
@@ -4487,7 +4509,7 @@
         "blockedByTaskIds",
         "owner",
         "status",
-        "stageRunIds",
+        "workRunIds",
         "evidenceRefs"
       ],
       "properties": {
@@ -4539,18 +4561,18 @@
         "status": {
           "$ref": "./domain.schema.json#/$defs/DeliveryTaskStatus"
         },
-        "stageRunIds": {
-          "type": "array",
-          "items": {
-            "$ref": "./domain.schema.json#/$defs/StageRunId"
-          },
-          "maxItems": 1000,
-          "uniqueItems": true
-        },
         "evidenceRefs": {
           "type": "array",
           "items": {
             "$ref": "./domain.schema.json#/$defs/EvidenceId"
+          },
+          "maxItems": 1000,
+          "uniqueItems": true
+        },
+        "workRunIds": {
+          "type": "array",
+          "items": {
+            "$ref": "./domain.schema.json#/$defs/WorkRunId"
           },
           "maxItems": 1000,
           "uniqueItems": true
@@ -4590,7 +4612,7 @@
       "required": [
         "id",
         "deliverySpecId",
-        "stageRunId",
+        "workRunId",
         "type",
         "title",
         "options",
@@ -4611,16 +4633,6 @@
           "minLength": 1,
           "maxLength": 200,
           "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$"
-        },
-        "stageRunId": {
-          "oneOf": [
-            {
-              "$ref": "./domain.schema.json#/$defs/StageRunId"
-            },
-            {
-              "type": "null"
-            }
-          ]
         },
         "type": {
           "type": "string",
@@ -4699,6 +4711,16 @@
               "type": "null"
             }
           ]
+        },
+        "workRunId": {
+          "oneOf": [
+            {
+              "$ref": "./domain.schema.json#/$defs/WorkRunId"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "description": "Safe Attention projection. Canonical protocol context is never returned."
@@ -4710,7 +4732,7 @@
         "id",
         "deliverySpecId",
         "deliverySpecRevision",
-        "stageRunId",
+        "workRunId",
         "sessionBindingId",
         "candidateRef",
         "type",
@@ -4729,9 +4751,6 @@
         },
         "deliverySpecRevision": {
           "$ref": "./domain.schema.json#/$defs/Revision"
-        },
-        "stageRunId": {
-          "$ref": "./domain.schema.json#/$defs/StageRunId"
         },
         "sessionBindingId": {
           "type": "string",
@@ -4763,6 +4782,9 @@
         },
         "createdAt": {
           "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "workRunId": {
+          "$ref": "./domain.schema.json#/$defs/WorkRunId"
         }
       },
       "description": "Evidence stores a bounded source reference, never copied runtime logs or command output."
@@ -4774,7 +4796,7 @@
         "candidateRef",
         "deliverySpecId",
         "deliverySpecRevision",
-        "producerStageRunId",
+        "producerWorkRunId",
         "producerSessionBindingId",
         "candidateCommitId",
         "candidateTreeId",
@@ -4795,9 +4817,6 @@
         "deliverySpecRevision": {
           "$ref": "./domain.schema.json#/$defs/Revision"
         },
-        "producerStageRunId": {
-          "$ref": "./domain.schema.json#/$defs/StageRunId"
-        },
         "producerSessionBindingId": {
           "type": "string",
           "minLength": 1,
@@ -4817,6 +4836,9 @@
         },
         "frozenAt": {
           "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "producerWorkRunId": {
+          "$ref": "./domain.schema.json#/$defs/WorkRunId"
         }
       },
       "description": "Bounded current candidate identity. Changed paths, hunks, and diff bytes require a separate authorized detail endpoint."
@@ -5055,30 +5077,17 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "stageRunId",
+        "workRunId",
         "sessionBindingId",
-        "deliveryTaskId",
+        "workItemId",
         "evidenceRefIds"
       ],
       "properties": {
-        "stageRunId": {
-          "$ref": "./domain.schema.json#/$defs/StageRunId"
-        },
         "sessionBindingId": {
           "type": "string",
           "minLength": 1,
           "maxLength": 200,
           "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$"
-        },
-        "deliveryTaskId": {
-          "oneOf": [
-            {
-              "$ref": "./domain.schema.json#/$defs/DeliveryTaskId"
-            },
-            {
-              "type": "null"
-            }
-          ]
         },
         "evidenceRefIds": {
           "type": "array",
@@ -5087,6 +5096,12 @@
           },
           "maxItems": 1000,
           "uniqueItems": true
+        },
+        "workRunId": {
+          "$ref": "./domain.schema.json#/$defs/WorkRunId"
+        },
+        "workItemId": {
+          "$ref": "./domain.schema.json#/$defs/WorkItemId"
         }
       }
     },
@@ -5465,24 +5480,6 @@
           "properties": {
             "command": {
               "const": "delivery.update_spec"
-            },
-            "result": {
-              "$ref": "./domain.schema.json#/$defs/DeliveryProjection"
-            }
-          },
-          "type": "object"
-        }
-      ]
-    },
-    "DeliveryApproveTaskBreakdownCompletedResponse": {
-      "allOf": [
-        {
-          "$ref": "#/$defs/CommandCompletedEnvelope"
-        },
-        {
-          "properties": {
-            "command": {
-              "const": "delivery.approve_task_breakdown"
             },
             "result": {
               "$ref": "./domain.schema.json#/$defs/DeliveryProjection"
@@ -8187,6 +8184,7 @@
       "required": [
         "kind",
         "effect",
+        "priority",
         "resourcePattern",
         "conditionSha256"
       ],
@@ -8213,6 +8211,11 @@
             "allow",
             "deny"
           ]
+        },
+        "priority": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10000
         },
         "resourcePattern": {
           "type": "string",
@@ -10729,7 +10732,7 @@
         "readPageLimit",
         "evidenceId",
         "candidateRef",
-        "stageRunId",
+        "workRunId",
         "sessionBindingId",
         "type",
         "sourceRef"
@@ -10754,9 +10757,6 @@
           "type": "string",
           "pattern": "^git-candidate:sha256:[0-9a-f]{64}$"
         },
-        "stageRunId": {
-          "$ref": "./domain.schema.json#/$defs/StageRunId"
-        },
         "sessionBindingId": {
           "type": "string",
           "minLength": 1,
@@ -10780,6 +10780,9 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 1024
+        },
+        "workRunId": {
+          "$ref": "./domain.schema.json#/$defs/WorkRunId"
         }
       },
       "description": "A stale-check selector for one Evidence already returned at the exact Delivery read cursor. No field is bearer authorization."
@@ -10802,7 +10805,7 @@
       "required": [
         "deliveryId",
         "deliveryRevision",
-        "stageRunId",
+        "workRunId",
         "sessionBindingId",
         "candidateRef",
         "evidenceId"
@@ -10813,9 +10816,6 @@
         },
         "deliveryRevision": {
           "$ref": "./domain.schema.json#/$defs/Revision"
-        },
-        "stageRunId": {
-          "$ref": "./domain.schema.json#/$defs/StageRunId"
         },
         "sessionBindingId": {
           "type": "string",
@@ -10829,6 +10829,9 @@
         },
         "evidenceId": {
           "$ref": "./domain.schema.json#/$defs/EvidenceId"
+        },
+        "workRunId": {
+          "$ref": "./domain.schema.json#/$defs/WorkRunId"
         }
       },
       "description": "Public provenance only. Worker, lease, fence, object key, path, and credential facts stay server-owned."
@@ -11231,8 +11234,13 @@
     "ModelRouteAvailabilityStatus": {
       "type": "string",
       "enum": [
-        "enabled",
-        "disabled"
+        "available",
+        "rate_limited",
+        "window_exhausted",
+        "weekly_exhausted",
+        "auth_error",
+        "disabled",
+        "unknown"
       ],
       "description": "Closed readiness status derived only by the server."
     },
@@ -11240,11 +11248,16 @@
       "type": "string",
       "enum": [
         "ready",
+        "rate_limited",
+        "window_exhausted",
+        "weekly_exhausted",
+        "authentication_error",
         "no_provider",
         "credential_missing_or_revoked",
         "default_route_invalid",
         "provider_or_model_disabled",
-        "request_pool_unavailable"
+        "request_pool_unavailable",
+        "runtime_status_unknown"
       ],
       "description": "Closed, secret-safe reason for the route or page readiness result."
     },
@@ -11518,10 +11531,9 @@
         "filesystem_write",
         "mcp",
         "network",
-        "shell",
-        "unavailable"
+        "shell"
       ],
-      "description": "Closed, secret-safe action category. unavailable is the sole meaning for a persisted legacy source that did not record a category."
+      "description": "Closed, secret-safe action category from the current execution producer."
     },
     "ApprovalEffectiveDecisionScope": {
       "type": "string",
@@ -11533,12 +11545,82 @@
     "ApprovalSanitizedDetailUnavailableReason": {
       "type": "string",
       "enum": [
-        "producer_unavailable",
-        "encoded_payload_redacted",
-        "source_not_recorded"
+        "producer_unavailable"
       ]
     },
-    "ApprovalSanitizedDetailProjection": {
+    "ApprovalSanitizedDetailAvailableProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "operation",
+        "targetSummaries",
+        "targetCount",
+        "workingDirectory",
+        "riskLevel",
+        "reasonCode",
+        "requestSha256"
+      ],
+      "properties": {
+        "kind": {
+          "const": "available"
+        },
+        "operation": {
+          "type": "string",
+          "enum": [
+            "execute",
+            "modify"
+          ]
+        },
+        "targetSummaries": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          },
+          "minItems": 1,
+          "maxItems": 20,
+          "uniqueItems": true
+        },
+        "targetCount": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10000
+        },
+        "workingDirectory": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 500
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "riskLevel": {
+          "type": "string",
+          "enum": [
+            "medium",
+            "high"
+          ]
+        },
+        "reasonCode": {
+          "type": "string",
+          "enum": [
+            "sandbox_escalation",
+            "network_access",
+            "filesystem_write"
+          ]
+        },
+        "requestSha256": {
+          "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+        }
+      }
+    },
+    "ApprovalSanitizedDetailUnavailableProjection": {
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -11553,7 +11635,18 @@
           "$ref": "#/$defs/ApprovalSanitizedDetailUnavailableReason"
         }
       },
-      "description": "Typed detail availability for the current producer set. Arbitrary EncodedPayload bytes and metadata are never decoded or forwarded."
+      "description": "Fail-closed state for a producer request without complete trusted action facts."
+    },
+    "ApprovalSanitizedDetailProjection": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/ApprovalSanitizedDetailAvailableProjection"
+        },
+        {
+          "$ref": "#/$defs/ApprovalSanitizedDetailUnavailableProjection"
+        }
+      ],
+      "description": "Typed, secret-safe action facts or an explicit unavailable state."
     },
     "PublicationStepStateProjection": {
       "type": "object",
@@ -11782,6 +11875,430 @@
         }
       },
       "description": "Bounded detail from the fully verified durable Publication journal. Current steps and the newest 200 state revisions contain no provider request, credential, idempotency key, arbitrary URL, raw receipt, or raw actor digest."
+    },
+    "WorkGraphItemState": {
+      "type": "string",
+      "enum": [
+        "ready",
+        "running",
+        "blocked",
+        "done"
+      ]
+    },
+    "WorkGraphItemProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "workItemId",
+        "state",
+        "dependencies",
+        "blockers"
+      ],
+      "properties": {
+        "workItemId": {
+          "$ref": "./domain.schema.json#/$defs/WorkItemId"
+        },
+        "state": {
+          "$ref": "#/$defs/WorkGraphItemState"
+        },
+        "dependencies": {
+          "type": "array",
+          "maxItems": 1000,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "./domain.schema.json#/$defs/WorkItemId"
+          }
+        },
+        "blockers": {
+          "type": "array",
+          "maxItems": 1000,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "./domain.schema.json#/$defs/WorkItemId"
+          }
+        }
+      },
+      "description": "Derived Work graph row. State and blockers are computed from the canonical WorkItem graph and are never persisted separately."
+    },
+    "WorkRunAggregateProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "contract",
+        "items",
+        "runs",
+        "graphItems",
+        "readCursor"
+      ],
+      "properties": {
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "contract": {
+          "$ref": "./domain.schema.json#/$defs/WorkContract"
+        },
+        "items": {
+          "type": "array",
+          "maxItems": 1000,
+          "items": {
+            "$ref": "./domain.schema.json#/$defs/WorkItem"
+          }
+        },
+        "runs": {
+          "type": "array",
+          "maxItems": 1000,
+          "items": {
+            "$ref": "./domain.schema.json#/$defs/WorkRun"
+          }
+        },
+        "graphItems": {
+          "type": "array",
+          "maxItems": 1000,
+          "items": {
+            "$ref": "#/$defs/WorkGraphItemProjection"
+          }
+        },
+        "readCursor": {
+          "$ref": "./domain.schema.json#/$defs/StrongFlowReadCursor"
+        }
+      }
+    },
+    "WorkRunGetParameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "deliveryId",
+        "workItemId",
+        "atCursor"
+      ],
+      "properties": {
+        "workItemId": {
+          "description": "Null selects the Delivery aggregate; a WorkItem identity constrains the exact read.",
+          "oneOf": [
+            {
+              "$ref": "./domain.schema.json#/$defs/WorkItemId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "workRunId": {
+          "oneOf": [
+            {
+              "$ref": "./domain.schema.json#/$defs/WorkRunId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "deliveryId": {
+          "$ref": "./domain.schema.json#/$defs/DeliveryId"
+        },
+        "atCursor": {
+          "oneOf": [
+            {
+              "$ref": "./domain.schema.json#/$defs/StrongFlowReadCursor"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "WorkRunGetQuery": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/QueryEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "query": {
+              "const": "workrun.get"
+            },
+            "parameters": {
+              "$ref": "#/$defs/WorkRunGetParameters"
+            },
+            "scope": {
+              "$ref": "./domain.schema.json#/$defs/RepositoryScope"
+            }
+          }
+        }
+      ]
+    },
+    "WorkRunGetResultResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/QueryResultEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "query": {
+              "const": "workrun.get"
+            },
+            "result": {
+              "$ref": "#/$defs/WorkRunAggregateProjection"
+            }
+          }
+        }
+      ]
+    },
+    "DeliveryTaskBreakdownCreateItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "title",
+        "goal",
+        "criterionIds",
+        "dependsOn"
+      ],
+      "properties": {
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "goal": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 65536
+        },
+        "criterionIds": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1000,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "./domain.schema.json#/$defs/CriterionId"
+          }
+        },
+        "dependsOn": {
+          "type": "array",
+          "maxItems": 1000,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "./domain.schema.json#/$defs/WorkItemId"
+          }
+        },
+        "id": {
+          "$ref": "./domain.schema.json#/$defs/WorkItemId"
+        }
+      }
+    },
+    "DeliveryTaskBreakdownCreatePayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "deliveryId",
+        "expectedRevision",
+        "contractRevision",
+        "items"
+      ],
+      "properties": {
+        "deliveryId": {
+          "$ref": "./domain.schema.json#/$defs/DeliveryId"
+        },
+        "expectedRevision": {
+          "$ref": "./domain.schema.json#/$defs/Revision"
+        },
+        "contractRevision": {
+          "$ref": "./domain.schema.json#/$defs/Revision"
+        },
+        "items": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1000,
+          "items": {
+            "$ref": "#/$defs/DeliveryTaskBreakdownCreateItem"
+          }
+        }
+      }
+    },
+    "DeliveryTaskBreakdownCreateCommand": {
+      "allOf": [
+        {
+          "$ref": "./domain.schema.json#/$defs/CommandEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "command": {
+              "const": "delivery.task_breakdown.create"
+            },
+            "payload": {
+              "$ref": "#/$defs/DeliveryTaskBreakdownCreatePayload"
+            },
+            "scope": {
+              "$ref": "./domain.schema.json#/$defs/RepositoryScope"
+            }
+          }
+        }
+      ]
+    },
+    "DeliveryTaskBreakdownCreateResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "deliveryId",
+        "deliveryRevision",
+        "items"
+      ],
+      "properties": {
+        "deliveryId": {
+          "$ref": "./domain.schema.json#/$defs/DeliveryId"
+        },
+        "deliveryRevision": {
+          "$ref": "./domain.schema.json#/$defs/Revision"
+        },
+        "items": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1000,
+          "items": {
+            "$ref": "./domain.schema.json#/$defs/WorkItem"
+          }
+        }
+      }
+    },
+    "DeliveryTaskBreakdownCreateCompletedResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/CommandCompletedEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "command": {
+              "const": "delivery.task_breakdown.create"
+            },
+            "result": {
+              "$ref": "#/$defs/DeliveryTaskBreakdownCreateResult"
+            }
+          }
+        }
+      ]
+    },
+    "WorkRunCancelPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "deliveryId",
+        "workRunId"
+      ],
+      "properties": {
+        "deliveryId": {
+          "$ref": "./domain.schema.json#/$defs/DeliveryId"
+        },
+        "workRunId": {
+          "$ref": "./domain.schema.json#/$defs/WorkRunId"
+        }
+      }
+    },
+    "WorkRunCancelCommand": {
+      "allOf": [
+        {
+          "$ref": "./domain.schema.json#/$defs/CommandEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "command": {
+              "const": "workrun.cancel"
+            },
+            "payload": {
+              "$ref": "#/$defs/WorkRunCancelPayload"
+            },
+            "scope": {
+              "$ref": "./domain.schema.json#/$defs/RepositoryScope"
+            }
+          }
+        }
+      ]
+    },
+    "WorkRunCancelCompletedResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/CommandCompletedEnvelope"
+        },
+        {
+          "properties": {
+            "command": {
+              "const": "workrun.cancel"
+            },
+            "result": {
+              "$ref": "./domain.schema.json#/$defs/DeliveryProjection"
+            }
+          },
+          "type": "object"
+        }
+      ]
+    },
+    "DeliveryReworkTargetInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "workItemId",
+        "filePath",
+        "sourceHunkSha256",
+        "evidenceRefIds"
+      ],
+      "properties": {
+        "workItemId": {
+          "$ref": "./domain.schema.json#/$defs/WorkItemId"
+        },
+        "filePath": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "sourceHunkSha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "evidenceRefIds": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1024,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "./domain.schema.json#/$defs/EvidenceId"
+          }
+        }
+      }
+    },
+    "DeliveryReworkInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "candidateRef",
+        "diffSha256",
+        "targets"
+      ],
+      "properties": {
+        "candidateRef": {
+          "type": "string",
+          "pattern": "^git-candidate:sha256:[0-9a-f]{64}$"
+        },
+        "diffSha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "targets": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1024,
+          "items": {
+            "$ref": "#/$defs/DeliveryReworkTargetInput"
+          }
+        }
+      },
+      "description": "Exact requested subset of the current failed candidate. The Controller independently verifies WorkItem ownership, sealed Git hunks, current failed Evidence and durable rework history."
     }
   },
   "x-winwincode-openapi": {
@@ -12230,6 +12747,11 @@
           "query": "runtime.projection.get",
           "requestDefinition": "RuntimeProjectionGetQuery",
           "resultDefinition": "RuntimeProjectionSnapshot"
+        },
+        {
+          "query": "workrun.get",
+          "requestDefinition": "WorkRunGetQuery",
+          "resultDefinition": "WorkRunAggregateProjection"
         }
       ],
       "authentication": {

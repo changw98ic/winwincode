@@ -216,7 +216,6 @@ async fn start_server(
         authenticator,
         Arc::new(NoopApi),
         None,
-        None,
         Some(exchange),
     )
     .await

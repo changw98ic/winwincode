@@ -10,8 +10,9 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use winwincode_domain::{
-    ExecutionJobId, ExecutionMessageId, FencingToken, Instant, LeaseId, OrganizationId, ProjectId,
-    RepositoryId, RequestId, StageRunId, WorkerId, WorkerInstanceId, WorkerSessionId, WorkspaceId,
+    CodexThreadId, ExecutionJobId, ExecutionMessageId, FencingToken, Instant, LeaseId,
+    OrganizationId, ProjectId, RepositoryId, RequestId, Sha256Digest, WorkRunId, WorkerId,
+    WorkerInstanceId, WorkerSessionId, WorkspaceId,
 };
 
 use crate::execution_queue::{
@@ -181,13 +182,17 @@ pub struct RepositorySchedulerCancellationRequest {
     pub requested_at: Instant,
 }
 
-/// Durable cancellation result. `worker_session_id` and `message_id` are both
-/// present only when the accepted dispatch must receive `job.cancel`.
+/// Durable cancellation result. Accepted dispatches always retain the exact
+/// Worker session and cancel-message authority; `codex_thread_id` is filled
+/// when that Worker session binds its slot and is absent only while the
+/// cancellation is pending.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct RepositorySchedulerCancellationReceipt {
     pub job: ExecutionJobRecord,
     pub lease: Option<ExecutionLeaseRecord>,
     pub worker_session_id: Option<WorkerSessionId>,
+    #[serde(default)]
+    pub codex_thread_id: Option<CodexThreadId>,
     pub message_id: Option<ExecutionMessageId>,
     pub request_id: RequestId,
     pub replayed: bool,
@@ -496,9 +501,107 @@ impl<'storage> RepositoryScheduler<'storage> {
         &mut self,
         request: &RepositorySchedulerCancellationRequest,
     ) -> Result<RepositorySchedulerCancellationReceipt, StorageError> {
+        self.request_cancellation_checked(request, None, None)
+    }
+
+    /// Persists cancellation only when the queue row still belongs to the
+    /// supplied `WorkRun`.  This closes the lookup-to-cancel race during
+    /// predecessor/successor replacement while reusing the same receipt and
+    /// outbox transaction as ordinary cancellation.
+    ///
+    /// # Errors
+    ///
+    /// Rejects changed replay bodies, stale revisions, a missing or mismatched
+    /// `WorkRun`, cross-repository jobs, corrupt lease/dispatch or
+    /// `WorkerSession` slot authority, and `SQLite` failures.
+    pub fn request_cancellation_for_work_run(
+        &mut self,
+        request: &RepositorySchedulerCancellationRequest,
+        work_run_id: &WorkRunId,
+    ) -> Result<RepositorySchedulerCancellationReceipt, StorageError> {
+        self.request_cancellation_checked(request, Some(work_run_id), None)
+    }
+
+    /// Same run-aware cancellation path with the canonical public command
+    /// digest included in the durable idempotency body. The queue request
+    /// contains server-derived revision/time values, while this digest freezes
+    /// the client-visible scope, payload, actor, request, and Delivery
+    /// revision across response-loss retries.
+    ///
+    /// # Errors
+    /// Rejects invalid authority, conflicting request bodies, or a failed storage transaction.
+    pub fn request_cancellation_for_work_run_with_command_digest(
+        &mut self,
+        request: &RepositorySchedulerCancellationRequest,
+        work_run_id: &WorkRunId,
+        command_digest: &Sha256Digest,
+    ) -> Result<RepositorySchedulerCancellationReceipt, StorageError> {
+        self.request_cancellation_checked(request, Some(work_run_id), Some(command_digest))
+    }
+
+    /// Replays a previously committed `WorkRun` cancellation for restart
+    /// orchestration. The queue receipt already contains the original
+    /// request's immutable authority, so recovery does not invent a new
+    /// revision or timestamp digest.
+    ///
+    /// # Errors
+    /// Rejects invalid requests, foreign run receipts, or a failed storage transaction.
+    pub fn replay_cancellation_for_work_run(
+        &mut self,
+        request: &RepositorySchedulerCancellationRequest,
+        work_run_id: &WorkRunId,
+    ) -> Result<Option<RepositorySchedulerCancellationReceipt>, StorageError> {
         validate_cancellation_request(request)?;
         let scope_key = repository_scope_key(&request.scope);
-        let request_digest = digest(request)?;
+        let transaction = self
+            .storage
+            .connection_mut()?
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sql_error)?;
+        let Some(mut receipt) =
+            load_cancel_receipt_by_request(&transaction, &scope_key, &request.request_id)?
+        else {
+            transaction.commit().map_err(sql_error)?;
+            return Ok(None);
+        };
+        if receipt.job.job_id != request.job_id
+            || receipt.job.work_run_id.as_ref() != Some(work_run_id)
+        {
+            return Err(StorageError::invalid_input(
+                "cancellation replay WorkRun does not match its original receipt",
+            ));
+        }
+        receipt = hydrate_cancel_receipt(
+            &transaction,
+            &scope_key,
+            &request.request_id,
+            &request.scope,
+            receipt,
+        )?;
+        transaction.commit().map_err(sql_error)?;
+        Ok(Some(receipt))
+    }
+
+    fn request_cancellation_checked(
+        &mut self,
+        request: &RepositorySchedulerCancellationRequest,
+        expected_work_run_id: Option<&WorkRunId>,
+        public_command_digest: Option<&Sha256Digest>,
+    ) -> Result<RepositorySchedulerCancellationReceipt, StorageError> {
+        validate_cancellation_request(request)?;
+        let scope_key = repository_scope_key(&request.scope);
+        let request_digest = match public_command_digest {
+            // Queue revision/time are derived from the current row and may
+            // differ after restart. Public command retries use only the
+            // immutable scope/job/WorkRun plus the frozen command digest.
+            Some(command_digest) => digest(&(
+                &request.scope,
+                &request.job_id,
+                expected_work_run_id,
+                command_digest,
+            ))?,
+            None => digest(request)?,
+        };
         let transaction = self
             .storage
             .connection_mut()?
@@ -510,11 +613,36 @@ impl<'storage> RepositoryScheduler<'storage> {
             &request.request_id,
             &request_digest,
         )? {
-            receipt.replayed = true;
+            if expected_work_run_id
+                .is_some_and(|work_run_id| receipt.job.work_run_id.as_ref() != Some(work_run_id))
+            {
+                return Err(StorageError::invalid_input(
+                    "cancellation replay WorkRun does not match its original receipt",
+                ));
+            }
+            receipt = hydrate_cancel_receipt(
+                &transaction,
+                &scope_key,
+                &request.request_id,
+                &request.scope,
+                receipt,
+            )?;
             transaction.commit().map_err(sql_error)?;
             return Ok(receipt);
         }
         let current = load_repository_job(&transaction, &request.scope, &request.job_id)?;
+        if let Some(work_run_id) = expected_work_run_id
+            && current.work_run_id.as_ref() != Some(work_run_id)
+        {
+            return Err(StorageError::invalid_input(
+                "cancellation WorkRun does not match the durable execution job",
+            ));
+        }
+        // Resolve the slot while this immediate transaction still holds the
+        // queue write lock. A missing slot is a valid accepted-dispatch race:
+        // the receipt remains pending until the Worker binds its session.
+        // Any present slot is checked before the queue transition commits.
+        let codex_thread_id = cancellation_slot_codex_thread(&transaction, &current)?;
         let source_state = current.state;
         let cancelled = cancel_execution_job_in_transaction(
             &transaction,
@@ -526,7 +654,13 @@ impl<'storage> RepositoryScheduler<'storage> {
                 requested_at: request.requested_at.clone(),
             },
         )?;
-        let receipt = cancellation_result(&transaction, request, source_state, cancelled.job)?;
+        let receipt = cancellation_result(
+            &transaction,
+            request,
+            source_state,
+            cancelled.job,
+            codex_thread_id,
+        )?;
         insert_cancel_receipt(
             &transaction,
             &scope_key,
@@ -688,7 +822,7 @@ fn load_repository_job(
     let stored = connection
         .query_row(
             "SELECT job_id, organization_id, workspace_id, project_id, repository_id,
-                    product_session_id, delivery_id, stage_run_id, submission_request_id,
+                    product_session_id, delivery_id, work_run_id, submission_request_id,
                     payload_digest, dispatch_payload, state, attempt, revision, submitted_at,
                     updated_at, cancellation_request_id, cancellation_requested_at
              FROM scheduler_execution_jobs
@@ -717,7 +851,7 @@ pub(crate) fn load_execution_job_by_id(
     connection
         .query_row(
             "SELECT job_id, organization_id, workspace_id, project_id, repository_id,
-                    product_session_id, delivery_id, stage_run_id, submission_request_id,
+                    product_session_id, delivery_id, work_run_id, submission_request_id,
                     payload_digest, dispatch_payload, state, attempt, revision, submitted_at,
                     updated_at, cancellation_request_id, cancellation_requested_at
              FROM scheduler_execution_jobs WHERE job_id = ?1",
@@ -730,25 +864,25 @@ pub(crate) fn load_execution_job_by_id(
         .transpose()
 }
 
-/// `FLOW-100.5`: resolves the one active (non-terminal) Job of a Delivery
-/// stage run — the active-job unique index guarantees at most one — so the
-/// `StrongFlow` device routing can anchor exactly that stage's work.
-pub(crate) fn load_active_execution_job_by_stage_run(
+/// Resolves the one active (non-terminal) Job of a canonical Delivery
+/// `WorkRun`. The `WorkRun` index guarantees at most one active attempt so
+/// routing and cancellation can anchor exactly that run.
+pub(crate) fn load_active_execution_job_by_work_run(
     connection: &Connection,
-    stage_run_id: &StageRunId,
+    work_run_id: &WorkRunId,
 ) -> Result<Option<ExecutionJobRecord>, StorageError> {
     ensure_execution_queue_schema(connection)?;
     connection
         .query_row(
             "SELECT job_id, organization_id, workspace_id, project_id, repository_id,
-                    product_session_id, delivery_id, stage_run_id, submission_request_id,
+                    product_session_id, delivery_id, work_run_id, submission_request_id,
                     payload_digest, dispatch_payload, state, attempt, revision, submitted_at,
                     updated_at, cancellation_request_id, cancellation_requested_at
              FROM scheduler_execution_jobs
-             WHERE stage_run_id = ?1
+             WHERE work_run_id = ?1
                AND state IN ('queued', 'leased', 'running', 'cancelling')
              ORDER BY job_id LIMIT 1",
-            [stage_run_id.0.as_str()],
+            [work_run_id.0.as_str()],
             stored_job_from_row,
         )
         .optional()
@@ -757,11 +891,63 @@ pub(crate) fn load_active_execution_job_by_stage_run(
         .transpose()
 }
 
+fn cancellation_slot_codex_thread(
+    connection: &Connection,
+    job: &ExecutionJobRecord,
+) -> Result<Option<CodexThreadId>, StorageError> {
+    let Some(authority) = load_dispatch_authority_in_transaction(connection, &job.job_id)? else {
+        return Ok(None);
+    };
+    ensure_worker_session_slot_schema(connection).map_err(|error| {
+        StorageError::adapter(format!("Worker slot schema cannot be opened: {error}"))
+    })?;
+    let Some(slot) = load_slot_in_transaction(connection, authority.worker_session_id())
+        .map_err(|error| StorageError::adapter(format!("Worker slot cannot be read: {error}")))?
+    else {
+        return Ok(None);
+    };
+    let lease = authority.lease();
+    if slot.authority.job_id != job.job_id
+        || slot.authority.worker_session_id != *authority.worker_session_id()
+        || slot.authority.worker_id != lease.worker_id
+        || slot.authority.worker_instance_id != lease.worker_instance_id
+        || slot.authority.lease_id != lease.lease_id
+        || slot.authority.attempt != lease.attempt
+        || slot.authority.fencing_token != lease.fencing_token
+    {
+        return Err(StorageError::invalid_input(
+            "accepted cancellation WorkerSession slot identity does not match the lease",
+        ));
+    }
+    Ok(Some(slot.authority.codex_thread_id))
+}
+
+fn cancellation_receipt_matches_current_authority(
+    connection: &Connection,
+    receipt: &RepositorySchedulerCancellationReceipt,
+    current: &ExecutionJobRecord,
+) -> Result<bool, StorageError> {
+    if receipt.job != *current {
+        return Ok(false);
+    }
+    let (Some(lease), Some(worker_session_id)) =
+        (receipt.lease.as_ref(), receipt.worker_session_id.as_ref())
+    else {
+        return Ok(false);
+    };
+    let Some(authority) = load_dispatch_authority_in_transaction(connection, &current.job_id)?
+    else {
+        return Ok(false);
+    };
+    Ok(authority.lease() == lease && authority.worker_session_id() == worker_session_id)
+}
+
 fn cancellation_result(
     connection: &Connection,
     request: &RepositorySchedulerCancellationRequest,
     source_state: ExecutionJobState,
     cancelling: ExecutionJobRecord,
+    codex_thread_id: Option<CodexThreadId>,
 ) -> Result<RepositorySchedulerCancellationReceipt, StorageError> {
     if let Some(authority) = load_dispatch_authority_in_transaction(connection, &cancelling.job_id)?
     {
@@ -771,6 +957,7 @@ fn cancellation_result(
             job: cancelling,
             lease: Some(lease),
             worker_session_id: Some(authority.worker_session_id().clone()),
+            codex_thread_id,
             message_id: Some(derived_message_id(
                 CANCEL_MESSAGE_ID_NAMESPACE,
                 cancellation_identity(request).as_bytes(),
@@ -825,6 +1012,7 @@ fn cancellation_result(
         job: terminal.job,
         lease,
         worker_session_id: None,
+        codex_thread_id: None,
         message_id: None,
         request_id: request.request_id.clone(),
         replayed: false,
@@ -885,6 +1073,47 @@ fn replay_cancel_receipt(
         .map_err(|_| StorageError::adapter("scheduler cancellation receipt is corrupt"))
 }
 
+fn hydrate_cancel_receipt(
+    connection: &Connection,
+    scope_key: &str,
+    request_id: &RequestId,
+    scope: &RepositorySchedulerScope,
+    mut receipt: RepositorySchedulerCancellationReceipt,
+) -> Result<RepositorySchedulerCancellationReceipt, StorageError> {
+    if receipt.codex_thread_id.is_none() && receipt.worker_session_id.is_some() {
+        let current = load_repository_job(connection, scope, &receipt.job.job_id)?;
+        if cancellation_receipt_matches_current_authority(connection, &receipt, &current)?
+            && let Some(codex_thread_id) = cancellation_slot_codex_thread(connection, &current)?
+        {
+            receipt.codex_thread_id = Some(codex_thread_id);
+            update_cancel_receipt(connection, scope_key, request_id, &receipt)?;
+        }
+    }
+    receipt.replayed = true;
+    Ok(receipt)
+}
+
+fn load_cancel_receipt_by_request(
+    connection: &Connection,
+    scope_key: &str,
+    request_id: &RequestId,
+) -> Result<Option<RepositorySchedulerCancellationReceipt>, StorageError> {
+    connection
+        .query_row(
+            "SELECT response_json FROM repository_scheduler_cancel_receipts
+             WHERE scope_key = ?1 AND request_id = ?2",
+            params![scope_key, request_id.0],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(sql_error)?
+        .map(|response_json| {
+            serde_json::from_str(&response_json)
+                .map_err(|_| StorageError::adapter("scheduler cancellation receipt is corrupt"))
+        })
+        .transpose()
+}
+
 fn insert_cancel_receipt(
     connection: &Connection,
     scope_key: &str,
@@ -892,7 +1121,7 @@ fn insert_cancel_receipt(
     request_digest: &str,
     response: &RepositorySchedulerCancellationReceipt,
 ) -> Result<(), StorageError> {
-    connection
+    let changed = connection
         .execute(
             "INSERT INTO repository_scheduler_cancel_receipts
                 (scope_key, request_id, request_digest, response_json)
@@ -907,6 +1136,39 @@ fn insert_cancel_receipt(
             ],
         )
         .map_err(sql_error)?;
+    if changed != 1 {
+        return Err(StorageError::adapter(
+            "scheduler cancellation receipt insert changed an unexpected number of rows",
+        ));
+    }
+    Ok(())
+}
+
+fn update_cancel_receipt(
+    connection: &Connection,
+    scope_key: &str,
+    request_id: &RequestId,
+    response: &RepositorySchedulerCancellationReceipt,
+) -> Result<(), StorageError> {
+    let changed = connection
+        .execute(
+            "UPDATE repository_scheduler_cancel_receipts
+             SET response_json = ?1
+             WHERE scope_key = ?2 AND request_id = ?3",
+            params![
+                serde_json::to_string(response).map_err(|_| {
+                    StorageError::adapter("scheduler cancellation receipt encode failed")
+                })?,
+                scope_key,
+                request_id.0,
+            ],
+        )
+        .map_err(sql_error)?;
+    if changed != 1 {
+        return Err(StorageError::adapter(
+            "scheduler cancellation receipt disappeared during hydration",
+        ));
+    }
     Ok(())
 }
 
@@ -1103,6 +1365,7 @@ fn replacement_receipt(
         job,
         &queue_request_id,
         replacement.attempt,
+        replacement.work_run_id.as_ref(),
         &replacement.bytes,
         &request.issued_at,
     )?
@@ -1138,7 +1401,8 @@ fn replacement_receipt(
             receipt_id: &queue_request_id,
             logical_job_digest: &logical_job_digest,
             scope: &job.scope,
-            stage_run_id: job.stage_run_id.as_ref(),
+            work_run_id: replacement.work_run_id.as_ref(),
+            predecessor_work_run_id: job.work_run_id.as_ref(),
             predecessor_lease: previous_lease,
             predecessor_worker_session_id: predecessor_worker_session_id.as_ref(),
             predecessor_slot: predecessor_slot.as_ref(),
@@ -1208,6 +1472,7 @@ fn retry_failed_receipt(
         job,
         &queue_request_id,
         next_attempt,
+        replacement.work_run_id.as_ref(),
         &replacement.bytes,
         &request.issued_at,
     )?
@@ -1246,7 +1511,8 @@ fn retry_failed_receipt(
             receipt_id: &queue_request_id,
             logical_job_digest: &logical_job_digest,
             scope: &job.scope,
-            stage_run_id: job.stage_run_id.as_ref(),
+            work_run_id: replacement.work_run_id.as_ref(),
+            predecessor_work_run_id: job.work_run_id.as_ref(),
             predecessor_lease: &predecessor_lease,
             predecessor_worker_session_id: predecessor_worker_session_id.as_ref(),
             predecessor_slot: predecessor_slot.as_ref(),
@@ -1272,7 +1538,7 @@ fn select_ready_job(
     let stored = connection
         .query_row(
             "SELECT j.job_id, j.organization_id, j.workspace_id, j.project_id, j.repository_id,
-                    j.product_session_id, j.delivery_id, j.stage_run_id,
+                    j.product_session_id, j.delivery_id, j.work_run_id,
                     j.submission_request_id, j.payload_digest, j.dispatch_payload, j.state,
                     j.attempt, j.revision, j.submitted_at, j.updated_at,
                     j.cancellation_request_id, j.cancellation_requested_at
@@ -1480,7 +1746,7 @@ fn list_repository_jobs(
     let mut statement = connection
         .prepare(
             "SELECT job_id, organization_id, workspace_id, project_id, repository_id,
-                    product_session_id, delivery_id, stage_run_id, submission_request_id,
+                    product_session_id, delivery_id, work_run_id, submission_request_id,
                     payload_digest, dispatch_payload, state, attempt, revision, submitted_at,
                     updated_at, cancellation_request_id, cancellation_requested_at
              FROM scheduler_execution_jobs

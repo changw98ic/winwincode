@@ -43,7 +43,7 @@ const {
 
 const productSessionId = 'psn_00000000000000000000000001'
 const deliveryId = 'dlv_00000000000000000000000001'
-const stageRunId = 'run_00000000000000000000000001'
+const workRunId = 'wrn_00000000000000000000000001'
 const now = Date.parse('2026-09-04T12:00:00.000Z')
 
 function binding(overrides = {}) {
@@ -55,7 +55,7 @@ function binding(overrides = {}) {
       productSessionId,
       workerSessionId: 'wsn_00000000000000000000000001',
       codexThreadId: 'cdx_00000000000000000000000001',
-      stageRunId,
+      workRunId,
     },
     ...overrides,
   }
@@ -67,7 +67,7 @@ function input(overrides = {}) {
     inputRequestId: 'inp_00000000000000000000000001',
     revision: 3,
     state: 'pending',
-    prompt: 'Select the next StageRun step.',
+    prompt: 'Select the next WorkRun step.',
     binding: binding(),
     mode: 'single_choice',
     options: [
@@ -101,7 +101,7 @@ function attention(overrides = {}) {
       status: 'open',
       blocking: true,
       createdAt: '2026-09-04T11:30:00.000Z',
-      stageRunId,
+      workRunId,
       type: 'verification_blocked',
       options: [],
       assignedTo: null,
@@ -142,7 +142,7 @@ test('the card projects the session inputs and approvals of one snapshot', () =>
   const approvalItem = view.items[0]
   assert.equal(approvalItem.id, 'apr_00000000000000000000000001')
   assert.equal(approvalItem.requiresNote, true)
-  assert.equal(approvalItem.stageRunId, stageRunId)
+  assert.equal(approvalItem.workRunId, workRunId)
   assert.equal(approvalItem.productSessionId, productSessionId)
   const inputItem = view.items[1]
   assert.equal(inputItem.mode, 'single_choice')

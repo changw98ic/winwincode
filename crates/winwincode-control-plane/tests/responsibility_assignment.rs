@@ -30,7 +30,7 @@ use winwincode_storage::{
 };
 
 const NOW: u64 = 1_700_000_000_000;
-const RBAC_GUARD_STREAM: &str = "enterprise-rbac:test-authority";
+const RBAC_GUARD_STREAM: &str = "responsibility:test-authority";
 const TARGET_GUARD_STREAM: &str = "responsibility-target:test-authority";
 
 #[derive(Clone)]

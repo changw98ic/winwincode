@@ -7,7 +7,7 @@
 //! whole aggregate. `Delivery` exposes no mutable access, so every value that
 //! crosses the command or store seam keeps the aggregate invariants.
 
-mod attention;
+pub(crate) mod attention;
 pub mod candidate;
 pub mod evidence;
 pub mod rework;
@@ -26,6 +26,8 @@ use std::{
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use winwincode_domain::is_canonical_delivery_id;
+#[cfg(any(test, feature = "test-support"))]
+use winwincode_domain::is_canonical_prefixed_id;
 
 pub use attention::{AttentionItem, AttentionItemStatus, AttentionItemType, AttentionOption};
 pub(crate) use candidate::assert_frozen_candidate_current;
@@ -48,7 +50,9 @@ pub use verdict::{
     ComputedDeliveryVerdict, CriterionResult, CriterionVerdict, DeliveryVerdict,
     DeliveryVerdictStatus, compute_delivery_verdict,
 };
-pub use winwincode_domain::{AttentionItemId, DeliveryId, DeliveryTaskId, EvidenceId, StageRunId};
+pub use winwincode_domain::{
+    AttentionItemId, DeliveryId, DeliveryTaskId, EvidenceId, StageRunId, WorkRunId,
+};
 
 pub const DELIVERY_SCHEMA_VERSION: u8 = 3;
 pub const MAX_DELIVERY_REWORK_ATTEMPTS: u64 = 100;
@@ -354,6 +358,8 @@ pub struct DeliverySnapshot {
     pub verdict: Option<DeliveryVerdict>,
     pub created_at_millis: u64,
     pub updated_at_millis: u64,
+    #[serde(rename = "workRunAggregate")]
+    pub work_run_aggregate: crate::application::workrun::WorkRunAggregate,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -444,6 +450,13 @@ impl<'de> Deserialize<'de> for Delivery {
 
 #[allow(clippy::too_many_lines)]
 fn validate_delivery(snapshot: &mut DeliverySnapshot) -> Result<(), DeliveryValidationError> {
+    snapshot.work_run_aggregate.validate().map_err(|error| {
+        validation_error(
+            DeliveryValidationErrorCode::RelationshipMismatch,
+            "delivery.workRunAggregate",
+            format!("invalid WorkRun aggregate: {error:?}"),
+        )
+    })?;
     schema_version(snapshot.schema_version, "delivery.schemaVersion")?;
     canonical_delivery_id(&snapshot.id.0, "delivery.id")?;
     positive(snapshot.revision, "delivery.revision")?;
@@ -508,9 +521,19 @@ fn validate_delivery(snapshot: &mut DeliverySnapshot) -> Result<(), DeliveryVali
         snapshot
             .session_bindings
             .iter()
-            .map(|binding| binding.execution_job_id.0.as_str()),
-        "delivery.sessionBindings.executionJobId",
+            .map(|binding| binding.work_run_id.0.as_str()),
+        "delivery.sessionBindings.workRunId",
     )?;
+    let mut execution_attempts = HashSet::new();
+    for binding in &snapshot.session_bindings {
+        if !execution_attempts.insert((binding.execution_job_id.0.as_str(), binding.attempt)) {
+            return Err(validation_error(
+                DeliveryValidationErrorCode::RelationshipMismatch,
+                "delivery.sessionBindings.executionJobIdAttempt",
+                "a WorkerSession binding already uses this ExecutionJob and attempt",
+            ));
+        }
+    }
     duplicate_ids(
         snapshot
             .session_bindings
@@ -527,7 +550,7 @@ fn validate_delivery(snapshot: &mut DeliverySnapshot) -> Result<(), DeliveryVali
             .map(|thread_id| thread_id.0.as_str()),
         "delivery.sessionBindings.codexThreadId",
     )?;
-    // A long-lived local Worker process may execute sequential StageRuns. Its
+    // A long-lived local Worker process may execute sequential WorkRuns. Its
     // process-generation and fencing identities are intentionally reused;
     // WorkerSession, CodexThread, and lease identities remain per execution.
     duplicate_ids(
@@ -564,8 +587,9 @@ fn validate_delivery(snapshot: &mut DeliverySnapshot) -> Result<(), DeliveryVali
         .iter()
         .map(|task| task.id.0.as_str())
         .collect();
-    let runs_by_id: HashMap<&str, &StageRun> = snapshot
-        .stage_runs
+    let work_runs_by_id: HashMap<&str, &winwincode_domain::WorkRun> = snapshot
+        .work_run_aggregate
+        .runs
         .iter()
         .map(|run| (run.id.0.as_str(), run))
         .collect();
@@ -633,20 +657,23 @@ fn validate_delivery(snapshot: &mut DeliverySnapshot) -> Result<(), DeliveryVali
     }
 
     for (index, binding) in snapshot.session_bindings.iter().enumerate() {
-        let run = runs_by_id.get(binding.stage_run_id.0.as_str());
+        let run = work_runs_by_id.get(binding.work_run_id.0.as_str());
         if binding.delivery_id != snapshot.id
             || run.is_none()
             || run.is_some_and(|run| {
-                run.actor_type != StageRunActorType::Codex
-                    || run.delivery_task_id != binding.delivery_task_id
-                    || run.attempt != binding.attempt
-                    || binding.bound_at_millis < run.started_at_millis
+                run.work_contract_id != binding.work_contract_id
+                    || run.contract_revision != binding.work_contract_revision
+                    || run.work_item_id != binding.work_item_id
+                    || run.work_item_revision != binding.work_item_revision
+                    || run.product_session_id.as_ref() != Some(&binding.product_session_id)
+                    || run.execution_job_id != binding.execution_job_id
+                    || run.attempt != i64::try_from(binding.attempt).unwrap_or(-1)
             })
         {
             return Err(validation_error(
                 DeliveryValidationErrorCode::RelationshipMismatch,
                 format!("delivery.sessionBindings[{index}]"),
-                "session binding does not exactly match its Delivery, task, Codex StageRun, or start time",
+                "session binding does not exactly match its Delivery WorkRun and execution identity",
             ));
         }
     }
@@ -655,20 +682,20 @@ fn validate_delivery(snapshot: &mut DeliverySnapshot) -> Result<(), DeliveryVali
         if item.delivery_id != snapshot.id
             || item.delivery_spec_id != snapshot.spec.id
             || item
-                .stage_run_id
+                .work_run_id
                 .as_ref()
-                .is_some_and(|run_id| !runs_by_id.contains_key(run_id.0.as_str()))
+                .is_some_and(|run_id| !work_runs_by_id.contains_key(run_id.0.as_str()))
         {
             return Err(validation_error(
                 DeliveryValidationErrorCode::RelationshipMismatch,
                 format!("delivery.attentionItems[{index}]"),
-                "attention item does not match its delivery, current spec, or stage run",
+                "attention item does not match its delivery, current spec, or WorkRun",
             ));
         }
     }
 
     for (index, reference) in snapshot.evidence.iter().enumerate() {
-        let run = runs_by_id.get(reference.stage_run_id.0.as_str());
+        let run = work_runs_by_id.get(reference.work_run_id.0.as_str());
         let binding = bindings_by_id.get(reference.session_binding_id.0.as_str());
         let valid = reference.delivery_id == snapshot.id
             && reference.delivery_spec_id == snapshot.spec.id
@@ -677,15 +704,15 @@ fn validate_delivery(snapshot: &mut DeliverySnapshot) -> Result<(), DeliveryVali
             && binding.is_some()
             && binding.is_some_and(|binding| {
                 binding.delivery_id == snapshot.id
-                    && binding.stage_run_id == reference.stage_run_id
+                    && binding.work_run_id == reference.work_run_id
                     && reference.created_at_millis >= binding.bound_at_millis
             })
-            && run.is_some_and(|run| reference.created_at_millis >= run.started_at_millis);
+            && run.is_some();
         if !valid {
             return Err(validation_error(
                 DeliveryValidationErrorCode::RelationshipMismatch,
                 format!("delivery.evidence[{index}]"),
-                "evidence does not match its delivery, current spec revision, stage run, session binding, or binding time",
+                "evidence does not match its delivery, current spec revision, WorkRun, session binding, or binding time",
             ));
         }
     }
@@ -743,6 +770,19 @@ fn validate_delivery(snapshot: &mut DeliverySnapshot) -> Result<(), DeliveryVali
             DeliveryValidationErrorCode::RelationshipMismatch,
             "delivery.attentionItems",
             "delivered delivery cannot retain blocking attention",
+        ));
+    }
+    if snapshot.status == DeliveryStatus::Delivered
+        && snapshot
+            .work_run_aggregate
+            .items
+            .iter()
+            .any(|item| item.state != winwincode_domain::WorkItemState::Done)
+    {
+        return Err(validation_error(
+            DeliveryValidationErrorCode::RelationshipMismatch,
+            "delivery.workRunAggregate.items",
+            "delivered delivery requires every WorkItem to pass the completion gate",
         ));
     }
     Ok(())
@@ -857,6 +897,91 @@ fn validate_verdict_relationships(
 pub(crate) fn test_fixture() -> DeliverySnapshot {
     serde_json::from_slice(include_bytes!("../../tests/fixtures/delivery-main.json"))
         .expect("checked Delivery fixture shape")
+}
+
+/// Seals deterministic runtime authority and rebuilds test `WorkRun` records.
+///
+/// The binding profile and attempt are explicit fixture input. This performs
+/// no role guessing, attempt promotion, or `StageRun` translation.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn rebuild_test_work_runs_from_bindings(snapshot: &mut DeliverySnapshot) {
+    let Some(template) = snapshot.work_run_aggregate.runs.first().cloned() else {
+        return;
+    };
+    let source_bindings = snapshot.session_bindings.clone();
+    let previous = snapshot.work_run_aggregate.runs.clone();
+    snapshot.session_bindings = source_bindings
+        .iter()
+        .map(|binding| {
+            let complete = is_canonical_prefixed_id(&binding.work_run_id.0, "wrn_")
+                && is_canonical_prefixed_id(&binding.product_session_id.0, "psn_")
+                && is_canonical_prefixed_id(&binding.execution_job_id.0, "job_")
+                && binding
+                    .worker_id
+                    .as_ref()
+                    .is_some_and(|id| is_canonical_prefixed_id(&id.0, "wrk_"))
+                && binding
+                    .worker_instance_id
+                    .as_ref()
+                    .is_some_and(|id| is_canonical_prefixed_id(&id.0, "wki_"))
+                && binding
+                    .worker_session_id
+                    .as_ref()
+                    .is_some_and(|id| is_canonical_prefixed_id(&id.0, "wsn_"))
+                && binding
+                    .lease_id
+                    .as_ref()
+                    .is_some_and(|id| is_canonical_prefixed_id(&id.0, "lse_"));
+            if complete {
+                binding.clone()
+            } else {
+                binding
+                    .clone()
+                    .with_test_authority(&binding.id.0, binding.attempt)
+            }
+        })
+        .collect();
+    snapshot.work_run_aggregate.runs = snapshot
+        .session_bindings
+        .iter()
+        .zip(source_bindings)
+        .map(|(binding, source_binding)| {
+            let mut run = template.clone();
+            run.id = binding.work_run_id.clone();
+            run.work_contract_id = binding.work_contract_id.clone();
+            run.contract_revision = binding.work_contract_revision.clone();
+            run.work_item_id = binding.work_item_id.clone();
+            run.work_item_revision = binding.work_item_revision.clone();
+            run.product_session_id = Some(binding.product_session_id.clone());
+            run.execution_job_id = binding.execution_job_id.clone();
+            run.attempt = i64::try_from(binding.attempt).expect("test attempt fits WorkRun");
+            if let Some(worker_id) = &binding.worker_id {
+                run.worker_id = worker_id.clone();
+            }
+            if let Some(worker_instance_id) = &binding.worker_instance_id {
+                run.worker_instance_id = worker_instance_id.clone();
+            }
+            if let Some(worker_session_id) = &binding.worker_session_id {
+                run.worker_session_id = worker_session_id.clone();
+            }
+            if let Some(lease_id) = &binding.lease_id {
+                run.lease_id = lease_id.clone();
+            }
+            if let Some(fencing_token) = &binding.fencing_token {
+                run.fencing_token.clone_from(&fencing_token.0);
+            }
+            run.codex_thread_id.clone_from(&binding.codex_thread_id);
+            run.state = previous
+                .iter()
+                .find(|existing| {
+                    existing.id == source_binding.work_run_id || existing.id == binding.work_run_id
+                })
+                .map_or(winwincode_domain::WorkRunState::Settled, |existing| {
+                    existing.state.clone()
+                });
+            run
+        })
+        .collect();
 }
 
 #[cfg(test)]

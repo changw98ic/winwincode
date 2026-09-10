@@ -170,7 +170,7 @@ struct PreparedLaunch {
     /// the launch response once and never enters durable state.
     worker_credential: String,
     product_session_id: String,
-    stage_run_id: String,
+    work_run_id: Option<String>,
 }
 
 /// The outcome of one poll of a pending launch grant.
@@ -314,7 +314,10 @@ impl ClientSessionsApplication {
         let worker_id = generate_prefixed_id("wkr_")?;
         let worker_instance_id = generate_prefixed_id("winst_")?;
         let product_session_id = generate_prefixed_id("ps_")?;
-        let stage_run_id = generate_prefixed_id("run_")?;
+        // This endpoint starts a ProductSession Chat worker; no Delivery
+        // WorkRun exists here. A Delivery launch must enter through the CP
+        // scheduler with an already-created WorkRun identity.
+        let work_run_id = None;
         let worker_launch_grant_id = generate_prefixed_id("wlg_")?;
         let credential_material =
             issue_credential_material().map_err(|_| ClientSessionsError::unavailable())?;
@@ -336,7 +339,7 @@ impl ClientSessionsApplication {
             worker_instance_id.clone(),
             credential_material.credential_digest().to_owned(),
             Some(product_session_id.clone()),
-            Some(stage_run_id.clone()),
+            work_run_id.clone(),
             expires_at,
         )
         .map_err(|_| ClientSessionsError::unavailable())?;
@@ -391,7 +394,7 @@ impl ClientSessionsApplication {
                     occupancy_fencing_token: lease.fencing_token,
                     repository_binding_id: grant.repository_binding_id.clone(),
                     product_session_id: grant.product_session_id.clone().unwrap_or_default(),
-                    stage_run_id: grant.stage_run_id.clone().unwrap_or_default(),
+                    work_run_id: grant.work_run_id.as_ref().map(|id| id.0.clone()),
                     worker_session_id: grant.worker_session_id.clone(),
                     worker_id: grant.worker_id.clone(),
                     worker_instance_id: grant.worker_instance_id.clone(),
@@ -411,7 +414,7 @@ impl ClientSessionsApplication {
             grant,
             worker_credential,
             product_session_id,
-            stage_run_id,
+            work_run_id: work_run_id.map(|id| id.0),
         })
     }
 
@@ -562,7 +565,7 @@ fn session_body(prepared: &PreparedLaunch) -> Value {
         "workerId": prepared.grant.worker_id,
         "workerInstanceId": prepared.grant.worker_instance_id,
         "productSessionId": prepared.product_session_id,
-        "stageRunId": prepared.stage_run_id,
+        "workRunId": prepared.work_run_id,
         "credentialDigest": prepared.grant.credential_digest,
         "workerCredential": prepared.worker_credential,
         "expiresAt": prepared.grant.expires_at.0,

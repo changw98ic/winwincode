@@ -119,7 +119,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
         owner_hook,
     )?);
     let authenticator: Arc<dyn RequestAuthenticator> = sessions.clone();
-    let running = start_server(config, Arc::clone(&sessions), authenticator, api, None).await?;
+    let running = start_server(config, Arc::clone(&sessions), authenticator, api).await?;
     println!(
         "{{\"status\":\"ready\",\"port\":{}}}",
         running.local_address().port()
@@ -446,7 +446,11 @@ fn prepare_approval(
         execution_scope: execution_scope(),
         worker_pool_id: pool(),
         product_session_revision,
-        stage_run_id: None,
+        work_contract_id: None,
+        work_contract_revision: None,
+        work_item_id: None,
+        work_item_revision: None,
+        work_run_id: None,
         job_revision: 2,
         worker_slot_revision: 1,
         runtime: runtime.clone(),
@@ -492,10 +496,15 @@ fn approval_request(
     Ok(serde_json::from_value(json!({
         "action": {
             "category": "shell",
-            "details": {
-                "contentType": "application/json",
-                "dataBase64": "QlJPV1NFUl9QUklWQVRFX0FDVElPTg==",
-                "payloadDigest": digest('f')
+            "sanitizedDetail": {
+                "kind": "available",
+                "operation": "execute",
+                "targetSummaries": ["program:fixture;argument_count:0"],
+                "targetCount": 1,
+                "workingDirectory": "workspace",
+                "riskLevel": "high",
+                "reasonCode": "sandbox_escalation",
+                "requestSha256": digest('f')
             },
             "summary": "Run the browser fixture action."
         },
