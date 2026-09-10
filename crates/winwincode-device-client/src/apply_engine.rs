@@ -61,12 +61,14 @@
 //! device-local reference (validated server-side to never be a filesystem
 //! path).
 
+use std::collections::HashSet;
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use rusqlite::params;
+use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use winwincode_client_port::domain::{
@@ -106,6 +108,12 @@ const CONFLICT_SUMMARY_FILE: &str = "conflict.json";
 
 /// Subdirectory of one attempt holding the integration worktree itself.
 const WORKTREE_DIRECTORY: &str = "worktree";
+const INTEGRATION_DIRECTORY: &str = "candidate-integrations";
+
+/// Stable refs created for multi-candidate verification. They are deliberately
+/// outside the applyable candidate namespace: only a fresh verifier pass may
+/// promote the combined commit to `refs/winwincode/candidates/*`.
+pub const INTEGRATION_REF_PREFIX: &str = "refs/winwincode/integrations/";
 
 const MAX_ID_BYTES: usize = 200;
 const MAX_BRANCH_BYTES: usize = 200;
@@ -243,6 +251,65 @@ pub struct CandidateApplyOutcome {
     pub frame_sequence: u64,
 }
 
+/// One local composition request for independently produced Peer candidates.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CandidateIntegrationRequest {
+    pub repository_binding_id: String,
+    /// Ordered stable candidate refs. Order is part of the integration digest.
+    pub source_candidate_refs: Vec<String>,
+    /// Exact commit on which the combined candidate is built.
+    pub expected_head: String,
+    pub occupancy_lease_id: String,
+    pub occupancy_fencing_token: u64,
+}
+
+/// A combined commit that is stable and checkoutable but not yet applyable.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PreparedCandidateIntegration {
+    pub integration_ref: String,
+    pub integration_commit: String,
+    pub integration_digest: String,
+    pub source_candidate_refs: Vec<String>,
+    /// Always true. The verifier must inspect the combined commit itself.
+    pub requires_integration_verification: bool,
+    /// Always false. Per-task verdicts cannot settle the combined delivery.
+    pub task_level_verdicts_authorize_delivery: bool,
+}
+
+/// A conflict is preserved only under the device-local integration root.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CandidateIntegrationConflict {
+    pub conflict_artifact_ref: String,
+    pub conflicting_candidate_ref: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CandidateIntegrationOutcome {
+    Prepared(PreparedCandidateIntegration),
+    Conflict(CandidateIntegrationConflict),
+}
+
+/// Where an operator runs one recovery command.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RecoveryCommandDirectory {
+    Repository,
+    IsolatedRecoveryWorktree,
+}
+
+/// One argv-safe Git command. Callers render arguments without a shell.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GitRecoveryCommand {
+    pub directory: RecoveryCommandDirectory,
+    pub arguments: Vec<String>,
+}
+
+/// Reset-free recovery plan for a successful apply receipt.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CandidateRecoveryGuidance {
+    pub recovery_branch: String,
+    pub commands: Vec<GitRecoveryCommand>,
+}
+
 /// What one settled attempt concluded. A settled attempt always becomes
 /// exactly one receipt.
 struct SettledAttempt {
@@ -345,10 +412,346 @@ pub fn apply_candidate_to_branch(
     })
 }
 
+/// Combines two or more retained Peer candidates in a detached worktree.
+///
+/// The resulting ref is stable and can be checked out by the verifier, but it
+/// is intentionally not entered into the candidate registry. Consequently the
+/// apply engine rejects it until independent integration verification freezes
+/// and retains a fresh canonical candidate.
+///
+/// # Errors
+///
+/// Rejects malformed or duplicate refs, stale occupancy, missing/drifted
+/// candidates, an unknown base commit, and Git/storage failures. A Git content
+/// conflict is returned as [`CandidateIntegrationOutcome::Conflict`] so the
+/// isolated artifact can be inspected without touching the user's worktree.
+pub fn integrate_candidates_for_verification(
+    daemon: &mut DeviceDaemon,
+    request: &CandidateIntegrationRequest,
+    integration_root: &Path,
+) -> Result<CandidateIntegrationOutcome, CandidateApplyError> {
+    validate_integration_request(request)?;
+    let ticket = authorize_integration_fencing(daemon, request)?;
+    let repository = resolve_binding_checkout(daemon.store_mut(), &request.repository_binding_id)
+        .map_err(|settled| CandidateApplyError::store(settled.detail))?;
+    let records = load_integration_candidates(daemon.store_mut(), request, &repository)?;
+    if read_git_ref(&repository, &request.expected_head)
+        .map_err(|failure| CandidateApplyError::store(failure.detail))?
+        .as_deref()
+        != Some(request.expected_head.as_str())
+    {
+        return Err(CandidateApplyError::invalid(
+            "the integration base commit does not exist in the bound repository",
+        ));
+    }
+
+    let guard = FencingGuard::from_store(daemon.store_mut())?;
+    guard
+        .verify_ticket(&ticket)
+        .map_err(CandidateApplyError::fencing)?;
+
+    execute_candidate_integration(&repository, request, &records, integration_root)
+}
+
+fn execute_candidate_integration(
+    repository: &Path,
+    request: &CandidateIntegrationRequest,
+    records: &[CandidateLocalRefRecord],
+    integration_root: &Path,
+) -> Result<CandidateIntegrationOutcome, CandidateApplyError> {
+    let integration_id = generate_prefixed_id("cit_")
+        .map_err(|error| CandidateApplyError::store(format!("integration id: {error}")))?;
+    let attempt_directory = integration_root
+        .join(INTEGRATION_DIRECTORY)
+        .join(&integration_id);
+    let worktree = attempt_directory.join(WORKTREE_DIRECTORY);
+    attach_integration_worktree(
+        repository,
+        &attempt_directory,
+        &worktree,
+        &request.expected_head,
+    )?;
+    if let Some(conflict) = combine_candidate_refs(
+        repository,
+        &attempt_directory,
+        &worktree,
+        request,
+        records,
+        &integration_id,
+    )? {
+        return Ok(CandidateIntegrationOutcome::Conflict(conflict));
+    }
+    let integration_commit = integration_head(repository, &attempt_directory, &worktree)?;
+    let integration_ref = pin_integration_ref(
+        repository,
+        &attempt_directory,
+        &worktree,
+        &integration_commit,
+    )?;
+    cleanup_attempt(repository, &attempt_directory, &worktree);
+    Ok(CandidateIntegrationOutcome::Prepared(
+        PreparedCandidateIntegration {
+            integration_digest: candidate_integration_digest(
+                &request.expected_head,
+                &request.source_candidate_refs,
+                &integration_commit,
+            ),
+            integration_ref,
+            integration_commit,
+            source_candidate_refs: request.source_candidate_refs.clone(),
+            requires_integration_verification: true,
+            task_level_verdicts_authorize_delivery: false,
+        },
+    ))
+}
+
+fn attach_integration_worktree(
+    repository: &Path,
+    attempt_directory: &Path,
+    worktree: &Path,
+    expected_head: &str,
+) -> Result<(), CandidateApplyError> {
+    fs::create_dir_all(attempt_directory).map_err(|error| {
+        CandidateApplyError::store(format!(
+            "the integration directory cannot be created: {error}"
+        ))
+    })?;
+    let attached = git_command(repository)
+        .args(["worktree", "add", "--quiet", "--detach", "--"])
+        .arg(worktree)
+        .arg(expected_head)
+        .output();
+    match attached {
+        Ok(output) if output.status.success() => Ok(()),
+        Ok(output) => {
+            cleanup_attempt(repository, attempt_directory, worktree);
+            Err(CandidateApplyError::store(format!(
+                "the integration worktree cannot be created: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )))
+        }
+        Err(error) => {
+            cleanup_attempt(repository, attempt_directory, worktree);
+            Err(CandidateApplyError::store(format!(
+                "git cannot create the integration worktree: {error}"
+            )))
+        }
+    }
+}
+
+fn combine_candidate_refs(
+    repository: &Path,
+    attempt_directory: &Path,
+    worktree: &Path,
+    request: &CandidateIntegrationRequest,
+    records: &[CandidateLocalRefRecord],
+    integration_id: &str,
+) -> Result<Option<CandidateIntegrationConflict>, CandidateApplyError> {
+    for record in records {
+        let mut command = git_command(worktree);
+        command.env("GIT_COMMITTER_NAME", COMMITTER_NAME);
+        command.env("GIT_COMMITTER_EMAIL", COMMITTER_EMAIL);
+        command.args(["cherry-pick", "--", &record.candidate_ref]);
+        let output = match command.output() {
+            Ok(output) => output,
+            Err(error) => {
+                cleanup_attempt(repository, attempt_directory, worktree);
+                return Err(CandidateApplyError::store(format!(
+                    "git cannot combine a candidate: {error}"
+                )));
+            }
+        };
+        if output.status.success() {
+            continue;
+        }
+        if unmerged_paths(worktree).is_ok_and(|paths| !paths.is_empty()) {
+            let summary = serde_json::json!({
+                "expectedHead": request.expected_head,
+                "sourceCandidateRefs": request.source_candidate_refs,
+                "conflictingCandidateRef": record.candidate_ref,
+            });
+            fs::write(
+                attempt_directory.join(CONFLICT_SUMMARY_FILE),
+                summary.to_string(),
+            )
+            .map_err(|error| {
+                CandidateApplyError::store(format!(
+                    "the integration conflict summary cannot be written: {error}"
+                ))
+            })?;
+            return Ok(Some(CandidateIntegrationConflict {
+                conflict_artifact_ref: format!("{INTEGRATION_DIRECTORY}/{integration_id}"),
+                conflicting_candidate_ref: record.candidate_ref.clone(),
+            }));
+        }
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        cleanup_attempt(repository, attempt_directory, worktree);
+        return Err(CandidateApplyError::store(format!(
+            "the candidate integration failed: {detail}"
+        )));
+    }
+    Ok(None)
+}
+
+fn integration_head(
+    repository: &Path,
+    attempt_directory: &Path,
+    worktree: &Path,
+) -> Result<String, CandidateApplyError> {
+    match read_git_ref(worktree, "HEAD") {
+        Ok(Some(commit)) => Ok(commit),
+        Ok(None) => {
+            cleanup_attempt(repository, attempt_directory, worktree);
+            Err(CandidateApplyError::store("the combined commit is missing"))
+        }
+        Err(failure) => {
+            cleanup_attempt(repository, attempt_directory, worktree);
+            Err(CandidateApplyError::store(failure.detail))
+        }
+    }
+}
+
+fn pin_integration_ref(
+    repository: &Path,
+    attempt_directory: &Path,
+    worktree: &Path,
+    integration_commit: &str,
+) -> Result<String, CandidateApplyError> {
+    let integration_ref = format!("{INTEGRATION_REF_PREFIX}{integration_commit}");
+    match read_git_ref(repository, &integration_ref) {
+        Ok(Some(existing)) if existing == integration_commit => return Ok(integration_ref),
+        Ok(Some(_)) => {
+            cleanup_attempt(repository, attempt_directory, worktree);
+            return Err(CandidateApplyError::store(
+                "the integration ref already exists with a different commit",
+            ));
+        }
+        Ok(None) => {}
+        Err(failure) => {
+            cleanup_attempt(repository, attempt_directory, worktree);
+            return Err(CandidateApplyError::store(failure.detail));
+        }
+    }
+    let published = git_command(repository)
+        .args(["update-ref", "--create-reflog", "--", &integration_ref])
+        .arg(integration_commit)
+        .arg("")
+        .output();
+    match published {
+        Ok(output) if output.status.success() => Ok(integration_ref),
+        Ok(output) => {
+            cleanup_attempt(repository, attempt_directory, worktree);
+            Err(CandidateApplyError::store(format!(
+                "the integration ref cannot be pinned: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )))
+        }
+        Err(error) => {
+            cleanup_attempt(repository, attempt_directory, worktree);
+            Err(CandidateApplyError::store(format!(
+                "git cannot pin the integration ref: {error}"
+            )))
+        }
+    }
+}
+
+/// Builds explicit recovery steps without moving or rewriting any ref.
+///
+/// `git read-tree` runs only in a newly created isolated worktree and the
+/// final command creates a new reverse commit whose tree matches the pre-apply
+/// `expectedHead` tree.
+///
+/// # Errors
+///
+/// Rejects malformed facts on a successful receipt. Non-success receipts need
+/// no recovery and return `None`.
+pub fn candidate_recovery_guidance(
+    receipt: &LocalApplyReceipt,
+) -> Result<Option<CandidateRecoveryGuidance>, CandidateApplyError> {
+    if receipt.result != ApplyResult::Applied {
+        return Ok(None);
+    }
+    validate_target_branch(&receipt.target_branch)?;
+    validate_commit_sha(&receipt.expected_head, "expected head")?;
+    let resulting_commit = receipt.resulting_commit.as_deref().ok_or_else(|| {
+        CandidateApplyError::invalid("an applied receipt must name its resulting commit")
+    })?;
+    validate_commit_sha(resulting_commit, "resulting commit")?;
+    require_non_empty(
+        &receipt.local_apply_receipt_id,
+        "local apply receipt id",
+        MAX_ID_BYTES,
+    )?;
+    if !receipt
+        .local_apply_receipt_id
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    {
+        return Err(CandidateApplyError::invalid(
+            "local apply receipt id is not safe for a recovery branch",
+        ));
+    }
+    let recovery_branch = format!(
+        "winwincode/recovery/{}",
+        receipt.local_apply_receipt_id.to_ascii_lowercase()
+    );
+    let message = format!(
+        "Reverse WinWinCode apply {}",
+        receipt.local_apply_receipt_id
+    );
+    Ok(Some(CandidateRecoveryGuidance {
+        recovery_branch: recovery_branch.clone(),
+        commands: vec![
+            GitRecoveryCommand {
+                directory: RecoveryCommandDirectory::Repository,
+                arguments: vec![
+                    "worktree".into(),
+                    "add".into(),
+                    "--detach".into(),
+                    "RECOVERY_PATH".into(),
+                    resulting_commit.into(),
+                ],
+            },
+            GitRecoveryCommand {
+                directory: RecoveryCommandDirectory::IsolatedRecoveryWorktree,
+                arguments: vec!["switch".into(), "-c".into(), recovery_branch],
+            },
+            GitRecoveryCommand {
+                directory: RecoveryCommandDirectory::IsolatedRecoveryWorktree,
+                arguments: vec![
+                    "read-tree".into(),
+                    "--reset".into(),
+                    "-u".into(),
+                    receipt.expected_head.clone(),
+                ],
+            },
+            GitRecoveryCommand {
+                directory: RecoveryCommandDirectory::IsolatedRecoveryWorktree,
+                arguments: vec!["commit".into(), "-m".into(), message],
+            },
+        ],
+    }))
+}
+
 /// Authorizes the command's occupancy stamp against the durable mirror.
 fn authorize_fencing(
     daemon: &mut DeviceDaemon,
     request: &CandidateApplyRequest,
+) -> Result<FencingTicket, CandidateApplyError> {
+    let guard = FencingGuard::from_store(daemon.store_mut())?;
+    match guard.authorize_command(
+        FencedCommandKind::CandidateApply,
+        &request.occupancy_lease_id,
+        request.occupancy_fencing_token,
+    ) {
+        FencingVerdict::Authorized(ticket) => Ok(ticket),
+        FencingVerdict::Rejected(rejection) => Err(CandidateApplyError::fencing(rejection)),
+    }
+}
+
+fn authorize_integration_fencing(
+    daemon: &mut DeviceDaemon,
+    request: &CandidateIntegrationRequest,
 ) -> Result<FencingTicket, CandidateApplyError> {
     let guard = FencingGuard::from_store(daemon.store_mut())?;
     match guard.authorize_command(
@@ -368,19 +771,30 @@ fn load_candidate_for_request(
     store: &mut DeviceStore,
     request: &CandidateApplyRequest,
 ) -> Result<CandidateLocalRefRecord, CandidateApplyError> {
-    let candidate_id = candidate_id_from_ref(&request.candidate_ref)?;
+    load_candidate_for_ref(
+        store,
+        &request.repository_binding_id,
+        &request.candidate_ref,
+    )
+}
+
+fn load_candidate_for_ref(
+    store: &mut DeviceStore,
+    repository_binding_id: &str,
+    candidate_ref: &str,
+) -> Result<CandidateLocalRefRecord, CandidateApplyError> {
+    let candidate_id = candidate_id_from_ref(candidate_ref)?;
     let Some(record) = crate::candidate_registry::candidate_local_ref(store, &candidate_id)? else {
         return Err(CandidateApplyError::unknown_candidate(format!(
-            "no retained candidate exists for {}",
-            request.candidate_ref
+            "no retained candidate exists for {candidate_ref}"
         )));
     };
-    if record.candidate_ref != request.candidate_ref {
+    if record.candidate_ref != candidate_ref {
         return Err(CandidateApplyError::unknown_candidate(
             "the stored candidate reference does not match the request",
         ));
     }
-    if record.repository_binding_id != request.repository_binding_id {
+    if record.repository_binding_id != repository_binding_id {
         return Err(CandidateApplyError::invalid(
             "the candidate is retained against a different repository binding",
         ));
@@ -395,6 +809,26 @@ fn load_candidate_for_request(
         )));
     }
     Ok(record)
+}
+
+fn load_integration_candidates(
+    store: &mut DeviceStore,
+    request: &CandidateIntegrationRequest,
+    repository: &Path,
+) -> Result<Vec<CandidateLocalRefRecord>, CandidateApplyError> {
+    let mut records = Vec::with_capacity(request.source_candidate_refs.len());
+    for candidate_ref in &request.source_candidate_refs {
+        let record = load_candidate_for_ref(store, &request.repository_binding_id, candidate_ref)?;
+        let resolved = read_git_ref(repository, candidate_ref)
+            .map_err(|failure| CandidateApplyError::store(failure.detail))?;
+        if resolved.as_deref() != Some(record.candidate_commit.as_str()) {
+            return Err(CandidateApplyError::unknown_candidate(format!(
+                "the candidate ref {candidate_ref} is missing or drifted"
+            )));
+        }
+        records.push(record);
+    }
+    Ok(records)
 }
 
 /// Runs the preflight checks and, when they pass, the isolated integration
@@ -1082,6 +1516,54 @@ fn validate_request(request: &CandidateApplyRequest) -> Result<(), CandidateAppl
         ));
     }
     Ok(())
+}
+
+fn validate_integration_request(
+    request: &CandidateIntegrationRequest,
+) -> Result<(), CandidateApplyError> {
+    require_non_empty(
+        &request.repository_binding_id,
+        "repository binding id",
+        MAX_ID_BYTES,
+    )?;
+    validate_commit_sha(&request.expected_head, "expected head")?;
+    require_non_empty(
+        &request.occupancy_lease_id,
+        "occupancy lease id",
+        MAX_ID_BYTES,
+    )?;
+    if !(2..=100).contains(&request.source_candidate_refs.len()) {
+        return Err(CandidateApplyError::invalid(
+            "candidate integration requires between 2 and 100 source candidates",
+        ));
+    }
+    let mut unique = HashSet::with_capacity(request.source_candidate_refs.len());
+    for candidate_ref in &request.source_candidate_refs {
+        candidate_id_from_ref(candidate_ref)?;
+        if !unique.insert(candidate_ref) {
+            return Err(CandidateApplyError::invalid(
+                "candidate integration source refs must be unique",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn candidate_integration_digest(
+    expected_head: &str,
+    source_candidate_refs: &[String],
+    integration_commit: &str,
+) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"winwincode.candidate-integration.v1\0");
+    digest.update(expected_head.as_bytes());
+    for candidate_ref in source_candidate_refs {
+        digest.update(b"\0");
+        digest.update(candidate_ref.as_bytes());
+    }
+    digest.update(b"\0");
+    digest.update(integration_commit.as_bytes());
+    format!("sha256:{:x}", digest.finalize())
 }
 
 /// Extracts the candidate id (the frozen commit) from the canonical

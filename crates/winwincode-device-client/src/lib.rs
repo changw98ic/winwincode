@@ -119,7 +119,10 @@ pub mod worker_logs;
 
 pub use apply_engine::{
     CandidateApplyError, CandidateApplyErrorKind, CandidateApplyOutcome, CandidateApplyRequest,
-    apply_candidate_to_branch,
+    CandidateIntegrationConflict, CandidateIntegrationOutcome, CandidateIntegrationRequest,
+    CandidateRecoveryGuidance, GitRecoveryCommand, INTEGRATION_REF_PREFIX,
+    PreparedCandidateIntegration, RecoveryCommandDirectory, apply_candidate_to_branch,
+    candidate_recovery_guidance, integrate_candidates_for_verification,
 };
 pub use candidate_branch::{
     BranchCreationFacts, BranchCreationOutcome, BranchCreationReport, CandidateBranchError,

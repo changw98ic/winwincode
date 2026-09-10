@@ -1384,6 +1384,10 @@
             "minimum": 1,
             "type": "integer"
           },
+          "baseCommit": {
+            "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$",
+            "type": "string"
+          },
           "candidateCommit": {
             "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$",
             "type": "string"
@@ -1402,8 +1406,14 @@
           "contractRevision": {
             "$ref": "#/components/schemas/Revision"
           },
+          "diffDigest": {
+            "$ref": "#/components/schemas/Sha256Digest"
+          },
           "id": {
             "$ref": "#/components/schemas/CandidateId"
+          },
+          "producerWorkerSessionId": {
+            "$ref": "#/components/schemas/WorkerSessionId"
           },
           "schemaVersion": {
             "$ref": "#/components/schemas/SchemaVersion"
@@ -1427,6 +1437,9 @@
           "workItemId",
           "workRunId",
           "attempt",
+          "producerWorkerSessionId",
+          "baseCommit",
+          "diffDigest",
           "candidateRef",
           "candidateCommit",
           "candidateTree"
@@ -29856,7 +29869,7 @@
     "https://schemas.winwincode.dev/winwincode/v1/domain.schema.json",
     "https://schemas.winwincode.dev/winwincode/v1/execution-port.schema.json"
   ],
-  "x-source-digest": "sha256:d781a153ac675cfcee6203ae2a80c63b85647b8d8818ca7592b64b9d27a10e65",
+  "x-source-digest": "sha256:a48e91325817fc29f43faf8ff249e8bbadfbce65416c32143258f6f9f6ee466b",
   "x-winwincode-client-metadata": {
     "http": {
       "authentication": {
