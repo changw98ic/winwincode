@@ -59,7 +59,7 @@ const PRESENTATION: Readonly<Record<GlobalConnectionStatus, ConnectionPresentati
     detail: '当前视图与未保存内容保持不变。',
     tone: 'warning',
     live: 'polite',
-    recoveryLabel: 'Reconnect now',
+    recoveryLabel: '立即重新连接',
     recoverVisible: true,
   }),
   offline: Object.freeze({
@@ -67,7 +67,7 @@ const PRESENTATION: Readonly<Record<GlobalConnectionStatus, ConnectionPresentati
     detail: '网络恢复前保留当前视图。',
     tone: 'warning',
     live: 'assertive',
-    recoveryLabel: 'Try reconnecting',
+    recoveryLabel: '立即重新连接',
     recoverVisible: true,
   }),
   'refresh-required': Object.freeze({
@@ -75,7 +75,7 @@ const PRESENTATION: Readonly<Record<GlobalConnectionStatus, ConnectionPresentati
     detail: '实时更新出现缺口。请从服务器快照重新加载此路由。',
     tone: 'warning',
     live: 'assertive',
-    recoveryLabel: 'Refresh route',
+    recoveryLabel: '刷新当前路由',
     recoverVisible: true,
   }),
   'authentication-required': Object.freeze({

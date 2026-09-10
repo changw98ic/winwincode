@@ -42,7 +42,7 @@
 
 .wwc-device-body {
   display: grid;
-  gap: var(--wwc-space-5);
+  gap: var(--wwc-space-4);
   min-width: 0;
 }
 
@@ -102,7 +102,7 @@
   align-items: center;
   gap: var(--wwc-space-4);
   min-width: 0;
-  padding: var(--wwc-space-4) var(--wwc-space-5);
+  padding: var(--wwc-space-4) var(--wwc-space-4);
   border: var(--wwc-border-width) solid var(--wwc-color-border-subtle);
   border-radius: var(--wwc-radius-md);
   background: var(--wwc-color-surface);

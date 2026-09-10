@@ -208,7 +208,7 @@ const SETTINGS_CATEGORIES: readonly {
     id: 'execution',
     label: '执行与强流程',
     title: '执行与强流程',
-    description: '对新委托的任务生效。',
+    description: '对新委托的任务生效',
   }),
   Object.freeze({
     id: 'storage',
@@ -520,6 +520,10 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
   const routeSection = routePanel.root
   const routeHeading = routePanel.title
   routeHeading.className = 'wwc-settings-section-heading'
+  // 设计稿 13:面板描述即下拉下方的灰说明,不在标题下。
+  if (routePanel.description !== undefined) {
+    routePanel.description.className = 'wwc-settings-section-note'
+  }
   const defaultModel = element(document, 'select', 'wwc-settings-default-model')
   defaultModel.id = 'wwc-settings-default-model'
   const routeForm = element(document, 'form', 'wwc-settings-route-form')
@@ -552,7 +556,7 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
       id: 'wwc-settings-provider-list',
       headingLevel: 3,
       title: 'Provider 列表',
-      description: '来自当前凭据引用;状态只反映本地密钥可用性。',
+      description: '',
       className: 'wwc-settings-provider-list',
     },
   })
@@ -567,6 +571,7 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
   addProvider.dataset.wwcComponent = 'button'
   addProvider.dataset.variant = 'primary'
   addProvider.textContent = '添加 Provider'
+  providerListPanel.content.append(providerListRows, providerListEmpty, addProvider)
 
   const createPanel = mountPanel({
     document,
@@ -658,7 +663,13 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
     routeConflict,
     routeControls,
   )
-  routePanel.content.append(defaultModel, routeForm)
+  // 设计稿 13:页面只保留「新会话默认模型」下拉与 Provider 列表;完整路由
+  // 表单(Provider/模型/凭据/并发)是该契约的真实编辑面,不在稿内——由样式表
+  // 折叠(DOM 保留,契约测试照常驱动)。
+  const routeNote = routePanel.description
+  routePanel.content.append(defaultModel)
+  if (routeNote !== undefined) routePanel.content.append(routeNote)
+  routePanel.content.append(routeForm)
 
   // 设计稿 13:「添加 Provider」指向真实的添加凭据引用表单,不假造新增动作。
   addProvider.addEventListener('click', () => {
@@ -767,7 +778,7 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
       id: 'wwc-settings-storage',
       headingLevel: 3,
       title: '备份与恢复',
-      description: '备份内容:会话、任务记录与设置。',
+      description: '备份内容：会话、任务记录与设置。',
       className: 'wwc-settings-storage',
     },
   })
@@ -779,7 +790,7 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
   storageSection.dataset.category = 'storage'
   storageSection.hidden = true
   const storageLastBackup = element(document, 'p', 'wwc-settings-storage-last-backup')
-  storageLastBackup.textContent = '上次备份:尚未创建'
+  storageLastBackup.textContent = '上次备份：尚未创建'
   const storageActions = element(document, 'div', 'wwc-settings-storage-actions')
   const backupCreate = element(document, 'button', 'wwc-settings-backup-create')
   backupCreate.type = 'button'
@@ -791,7 +802,7 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
   const backupRestore = element(document, 'button', 'wwc-settings-backup-restore')
   backupRestore.type = 'button'
   backupRestore.dataset.wwcComponent = 'button'
-  backupRestore.dataset.variant = 'default'
+  backupRestore.dataset.variant = 'ghost'
   backupRestore.textContent = '从备份恢复'
   backupRestore.disabled = true
   backupRestore.title = NO_CONTRACT_TITLE
@@ -971,11 +982,15 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
     if (next === 'usage') onUsageFirstOpen()
   }
 
+  // 设计稿差异:仅「执行与强流程」(14)在标题下带副标题;12/13/15/16 均无。
+  const CATEGORIES_WITH_DESCRIPTION: ReadonlySet<SettingsCategoryId> = new Set(['execution'])
+
   function showCategory(next: SettingsCategoryId): void {
     selectedCategory = next
     const category = categoryOf(next)
     pageHeader.update({
       title: category.title,
+      ...(CATEGORIES_WITH_DESCRIPTION.has(next) ? { description: category.description } : {}),
       headingLevel: 2,
       className: 'wwc-settings-heading',
     })

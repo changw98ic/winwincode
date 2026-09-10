@@ -25,7 +25,7 @@
 /* The accent primary action of the page, top-right beside the title. */
 .wwc-projects-add {
   min-height: 3.5rem;
-  padding: var(--wwc-space-4) var(--wwc-space-9);
+  padding: var(--wwc-space-4) var(--wwc-space-8);
   font-size: var(--wwc-font-size-lg);
   border: var(--wwc-border-width-control) solid var(--wwc-color-border);
   border-radius: var(--wwc-radius-md);
@@ -66,7 +66,7 @@
   align-items: center;
   column-gap: var(--wwc-space-6);
   min-width: 0;
-  padding: var(--wwc-space-5) var(--wwc-space-2);
+  padding: var(--wwc-space-4) var(--wwc-space-2);
   border-bottom: var(--wwc-border-width) solid var(--wwc-color-border-subtle);
 }
 

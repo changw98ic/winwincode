@@ -9,6 +9,7 @@
 // animations, and scrollbars are switched off.
 
 import { mountWinWinCodeClient } from '/module/application.js'
+import { ControlPlaneClientError } from '/module/community-control-plane-client.js'
 
 const DETERMINISM_CSS = `
 *, *::before, *::after {
@@ -48,6 +49,8 @@ function canonicalId(prefix, value) {
 
 /** 设计稿 03a 空对话:load-time hash 里带 chat-empty 时,不提供任何会话。 */
 const emptyChat = location.hash.includes('chat-empty')
+/** 设计稿 01 登录页:URL 带 mode=login 时不恢复会话,展示登录页。 */
+const loginMode = location.search.includes('mode=login')
 
 function page() {
   return { hasMore: false, nextCursor: null }
@@ -365,6 +368,15 @@ function serve(request) {
 const controlPlane = {
   serverUrl: 'http://127.0.0.1:8080',
   async restore() {
+    if (loginMode) {
+      throw new ControlPlaneClientError({
+        kind: 'authentication',
+        code: 'AUTHENTICATION_REQUIRED',
+        message: 'demo: signed out on purpose',
+        requestId: null,
+        retryable: false,
+      })
+    }
     return {
       schemaVersion,
       expiresAt: '2099-09-02T00:00:00.000Z',
@@ -414,11 +426,23 @@ try {
   /* best-effort seeding only */
 }
 
+// 设计稿 05 任务详情的演示锚点(假优先任务端口种子)。
 mountWinWinCodeClient({
   root: document.querySelector('[data-winwincode-client-root]'),
   serverUrl: controlPlane.serverUrl,
   controlPlane,
   now: () => FIXED_NOW,
+  taskSeed: [{
+    taskId: 'tsk_00000000000000000000000001',
+    clientId: '00000000000000000000000001',
+    repositoryBindingId: 'rbn_000000000000000000000DEM01',
+    baseBranch: 'main',
+    title: '修复登录回跳',
+    description: '修复登录后的回跳逻辑，保留现有鉴权方式。',
+    changes: '改动：登录状态、回跳路由。',
+    acceptance: '验收：成功登录返回原页面；失败登录不跳转。',
+    modelRouteId: '',
+  }],
 })
 
 globalThis.describeDemoViewport = () => ({

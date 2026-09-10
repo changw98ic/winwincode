@@ -77,13 +77,18 @@
   gap: var(--wwc-space-2);
 }
 
-/* Row-style forms: bold label left, control right, no separators (design 12). */
+/* Row-style forms: bold label left, control right. 设计稿逐页差异:
+   12(通用与个人)无行分隔线;14(执行与强流程)行间有发丝线。 */
 .wwc-settings-row {
   display: grid;
   grid-template-columns: minmax(8rem, 14rem) minmax(0, 1fr);
   gap: var(--wwc-space-2) var(--wwc-space-6);
   align-items: center;
   padding: var(--wwc-space-3) var(--wwc-space-0);
+}
+
+.wwc-settings-execution .wwc-settings-row {
+  border-bottom: var(--wwc-border-width) solid var(--wwc-color-border-subtle);
 }
 
 .wwc-settings-row > label,
@@ -373,6 +378,42 @@
 
 .wwc-settings [data-variant='destructive'] {
   justify-self: start;
+}
+
+/* 设计稿 13:小节说明为下拉下方的灰字。 */
+.wwc-settings-section-note {
+  margin: var(--wwc-space-0);
+  color: var(--wwc-color-text-muted);
+  font-size: var(--wwc-font-size-sm);
+}
+
+.wwc-settings-route-form {
+  display: none;
+}
+
+/* 设计稿 13/16:小节为素色平铺,无卡片描边;13 稿外的凭据编辑面折叠。 */
+.wwc-settings [data-wwc-component='panel'] {
+  padding: var(--wwc-space-0);
+  border: 0;
+  background: transparent;
+}
+
+.wwc-settings-create-credential,
+.wwc-settings-credentials {
+  display: none;
+}
+
+/* 设计稿 16:从备份恢复为素色文字动作;选择范围靠行尾。 */
+.wwc-settings-backup-restore[data-wwc-component='button'] {
+  border: 0;
+  background: transparent;
+  font-weight: var(--wwc-font-weight-strong);
+}
+
+.wwc-settings-export-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
 }
 
 /* 数据与存储: honest disabled backup/restore/export actions. */

@@ -632,11 +632,16 @@
   grid-template-columns: minmax(0, 1fr);
 }
 
+.wwc-shell:has(.wwc-login:not([hidden])) {
+  min-height: 100vh;
+}
+
 .wwc-shell:has(.wwc-login:not([hidden])) .wwc-navigation,
 .wwc-shell:has(.wwc-login:not([hidden])) .wwc-connection-bar,
 .wwc-shell:has(.wwc-login:not([hidden])) .wwc-surface-title,
 .wwc-shell:has(.wwc-login:not([hidden])) .wwc-surface-description,
 .wwc-shell:has(.wwc-login:not([hidden])) .wwc-auth-session-root,
+.wwc-shell:has(.wwc-login:not([hidden])) .wwc-recent-chats,
 .wwc-shell:has(.wwc-login:not([hidden])) .wwc-authenticated-context-required {
   display: none;
 }
@@ -646,6 +651,25 @@
   grid-row: 1;
   display: grid;
   align-content: center;
+}
+
+/* Design page 02: the first-run onboarding renders on the bare canvas —
+   no sidebar, no connection strip. Same layer rationale as the login block. */
+.wwc-shell:has([data-winwincode-surface='onboarding']) {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.wwc-shell:has([data-winwincode-surface='onboarding']) .wwc-header,
+.wwc-shell:has([data-winwincode-surface='onboarding']) .wwc-connection-bar,
+.wwc-shell:has([data-winwincode-surface='onboarding']) .wwc-surface-title,
+.wwc-shell:has([data-winwincode-surface='onboarding']) .wwc-surface-description {
+  display: none;
+}
+
+.wwc-shell:has([data-winwincode-surface='onboarding']) .wwc-main {
+  grid-column: 1;
+  grid-row: 1;
+  display: block;
 }
 
 /* The signed-out shell keeps only the brand in the header, as page 01 does. */

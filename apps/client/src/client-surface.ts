@@ -8,6 +8,7 @@ export type ClientSurfaceId =
   | 'device'
   | 'settings'
   | 'attention'
+  | 'onboarding'
 
 export interface ClientSurface {
   readonly id: ClientSurfaceId
@@ -80,6 +81,14 @@ export const CLIENT_SURFACES: readonly ClientSurface[] = Object.freeze([
     description: '个人与工作区设置',
     default: false,
     nav: true,
+  }),
+  Object.freeze({
+    id: 'onboarding',
+    path: '/onboarding',
+    label: '首次设置',
+    description: '连接执行设备与首次配置',
+    default: false,
+    nav: false,
   }),
 ])
 const DEFAULT_SURFACE = (CLIENT_SURFACES.find(surface => surface.default)

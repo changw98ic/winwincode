@@ -67,6 +67,18 @@ interface McpEntry {
   readonly connected: boolean
 }
 
+/** 设计稿 11:连接行的图形图标(内联 SVG,随条目 id 选择)。 */
+const MCP_ICONS: Readonly<Record<string, string>> = Object.freeze({
+  github: '<path d="M12 2a10 10 0 0 0-3.16 19.49c.5.09.68-.22.68-.48v-1.7c-2.78.6-3.37-1.34-3.37-1.34-.45-1.16-1.11-1.47-1.11-1.47-.91-.62.07-.6.07-.6 1 .07 1.53 1.03 1.53 1.03.9 1.52 2.34 1.08 2.91.83.09-.65.35-1.09.63-1.34-2.22-.25-4.55-1.11-4.55-4.94 0-1.09.39-1.98 1.03-2.68-.1-.25-.45-1.27.1-2.64 0 0 .84-.27 2.75 1.02a9.58 9.58 0 0 1 5 0c1.91-1.29 2.75-1.02 2.75-1.02.55 1.37.2 2.39.1 2.64.64.7 1.03 1.59 1.03 2.68 0 3.84-2.34 4.68-4.57 4.93.36.31.68.92.68 1.85V21c0 .27.18.58.69.48A10 10 0 0 0 12 2z"/>',
+  filesystem: '<path d="M3 6a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
+  postgres: '<ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v6c0 1.66 3.58 3 8 3s8-1.34 8-3V5"/><path d="M4 11v6c0 1.66 3.58 3 8 3s8-1.34 8-3v-6"/>',
+})
+
+function mcpIconSvg(id: string): string {
+  const path = MCP_ICONS[id] ?? MCP_ICONS.filesystem
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" width="28" height="28">${path}</svg>`
+}
+
 interface InstructionEntry {
   readonly id: string
   readonly name: string
@@ -75,12 +87,23 @@ interface InstructionEntry {
 
 /**
  * Page-local inventory models. The control plane does not expose plugin,
- * skill, MCP, or project-instruction contracts yet, so every list starts
- * empty and the render path below is the only writer: no sample rows.
+ * skill, MCP, or project-instruction contracts yet, so the rows mirror the
+ * design mockups (pages 09-11) as presentation sample data; actions that
+ * would need a backend stay disabled with the honest title.
  */
-const PLUGINS: readonly PluginEntry[] = Object.freeze([])
-const SKILLS: readonly SkillEntry[] = Object.freeze([])
-const MCP_CONNECTIONS: readonly McpEntry[] = Object.freeze([])
+const PLUGINS: readonly PluginEntry[] = Object.freeze([
+  { id: 'archify', name: 'Archify', description: '将项目结构整理成架构图' },
+  { id: 'file-preview', name: '文件预览', description: '在工作区里预览常见文件类型' },
+])
+const SKILLS: readonly SkillEntry[] = Object.freeze([
+  { id: 'archify', name: '架构与流程图', command: '/archify', description: '将项目结构整理成图' },
+  { id: 'review', name: '代码审查', command: '/review', description: '检查当前改动与潜在回归' },
+])
+const MCP_CONNECTIONS: readonly McpEntry[] = Object.freeze([
+  { id: 'github', name: 'GitHub', connected: true },
+  { id: 'filesystem', name: '文件系统', connected: true },
+  { id: 'postgres', name: 'Postgres', connected: false },
+])
 const PROJECT_INSTRUCTIONS: readonly InstructionEntry[] = Object.freeze([])
 
 const PLUGIN_STATE_STORAGE_KEY = 'winwincode.extensions.plugin-state.v1'
@@ -489,7 +512,7 @@ export function mountExtensionsPage(options: ExtensionsPageOptions): ExtensionsP
   function updateMcpRow(item: HTMLLIElement, connection: McpEntry): void {
     const row = mcpRows.get(item)
     if (row === undefined) return
-    row.icon.textContent = connection.name.charAt(0).toUpperCase()
+    row.icon.innerHTML = mcpIconSvg(connection.id)
     row.name.textContent = connection.name
     row.state.textContent = connection.connected ? '🟢 已连接' : '⚪ 已停用'
     item.dataset.connected = connection.connected ? 'true' : 'false'
@@ -532,7 +555,7 @@ export function mountExtensionsPage(options: ExtensionsPageOptions): ExtensionsP
     pluginCollection.update(PLUGINS)
     skillCollection.update(SKILLS)
     instructionCollection.update(PROJECT_INSTRUCTIONS)
-    mcpCollection.update(MCP_CONNECTIONS)
+    mcpCollection.update(MCP_CONNECTIONS.filter(connection => connection.connected))
     disabledMcpCollection.update(MCP_CONNECTIONS.filter(connection => !connection.connected))
     pluginList.hidden = PLUGINS.length === 0
     pluginsEmpty.root.hidden = PLUGINS.length !== 0

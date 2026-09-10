@@ -16,6 +16,12 @@ export interface TaskRunPageOptions {
   readonly model: TaskRunViewModel
   /** The task-board deep link, so the running task is never a dead end. */
   readonly homeHref?: string
+  /** 已知锚点(假优先种子/表单创建):提供设计稿 05 的任务名与改动/验收两行。 */
+  readonly anchor?: {
+    readonly title?: string
+    readonly changes?: string
+    readonly acceptance?: string
+  }
 }
 
 export interface TaskRunPage {
@@ -67,6 +73,9 @@ export function mountTaskRunPage(options: TaskRunPageOptions): TaskRunPage {
   const heading = element(document, 'h2', 'wwc-task-run-heading')
   const statusLine = element(document, 'p', 'wwc-task-run-status')
   const description = element(document, 'p', 'wwc-task-run-description')
+  // 设计稿 05:描述段下方的「改动：…」「验收：…」两行。
+  const changesLine = element(document, 'p', 'wwc-task-run-scope-line')
+  const acceptanceLine = element(document, 'p', 'wwc-task-run-scope-line')
   const zone = element(document, 'section', 'wwc-task-run-identity')
   // Design page 05: the full identity table stays collapsed behind one row;
   // the stage the user acts on stays up front.
@@ -81,7 +90,7 @@ export function mountTaskRunPage(options: TaskRunPageOptions): TaskRunPage {
 
   section.setAttribute('aria-label', '运行中的任务')
   heading.id = 'wwc-task-run-heading'
-  heading.textContent = '运行中的任务'
+  heading.textContent = options.anchor?.title ?? '运行中的任务'
   section.setAttribute('aria-labelledby', heading.id)
   statusLine.textContent = statusLineText(options.model.state)
   description.hidden = true
@@ -160,7 +169,11 @@ export function mountTaskRunPage(options: TaskRunPageOptions): TaskRunPage {
   topbarActions.append(recordSlot, separator, moreSlot)
   topbar.append(back, topbarActions)
   actions.append(approve, requestChange)
-  section.append(topbar, heading, statusLine, description, zone, actions)
+  changesLine.textContent = options.anchor?.changes ?? ''
+  changesLine.hidden = options.anchor?.changes === undefined
+  acceptanceLine.textContent = options.anchor?.acceptance ?? ''
+  acceptanceLine.hidden = options.anchor?.acceptance === undefined
+  section.append(topbar, heading, statusLine, description, changesLine, acceptanceLine, zone, actions)
   options.root.replaceChildren(section)
 
   function renderBadge(refs: RowRefs, text: string | null, tone: string | null): void {

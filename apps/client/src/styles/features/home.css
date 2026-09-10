@@ -578,15 +578,23 @@
   gap: var(--wwc-space-4);
 }
 
-.wwc-task-run-approve {
-  padding: var(--wwc-space-3) var(--wwc-space-5);
+/* 设计稿 05:主 CTA 为大号黄底黑边硬阴影按钮。 */
+.wwc-task-run-actions .wwc-task-run-approve {
+  min-height: 3.25rem;
+  padding: var(--wwc-space-4) var(--wwc-space-6);
   border: var(--wwc-border-width-control) solid var(--wwc-color-text);
   border-radius: var(--wwc-radius-md);
   background: var(--wwc-color-accent);
   color: var(--wwc-color-text);
   font: inherit;
-  font-size: var(--wwc-font-size-sm);
+  font-size: var(--wwc-font-size-md);
   font-weight: var(--wwc-font-weight-strong);
+  box-shadow: var(--wwc-shadow-hard);
+}
+
+.wwc-task-run-actions .wwc-task-run-approve:active:not(:disabled) {
+  box-shadow: var(--wwc-shadow-hard-sm);
+  translate: 2px 2px;
 }
 
 .wwc-task-run-request-change {

@@ -393,6 +393,7 @@ test('Chat is the canonical default surface and every product entry stays reacha
     'device',
     'attention',
     'settings',
+    'onboarding',
   ])
   assert.equal(clientSurfaceFromHash('').id, 'chat')
   assert.equal(clientSurfaceFromHash('#/home?x=1').id, 'home')

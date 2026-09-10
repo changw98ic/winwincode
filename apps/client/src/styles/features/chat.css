@@ -33,6 +33,17 @@
 
 /* Design pages 03a/03b: no status line under the title — the live region
    stays in the DOM for announcements only. */
+/* 设计稿 03a:空对话画布占满内容区,composer 贴近视口底边。 */
+.wwc-chat-conversation {
+  min-height: calc(100dvh - 2 * var(--wwc-space-12));
+  display: flex;
+  flex-direction: column;
+}
+
+.wwc-chat-conversation > .wwc-chat-composer {
+  margin-top: auto;
+}
+
 .wwc-chat-status {
   position: absolute;
   width: 1px;

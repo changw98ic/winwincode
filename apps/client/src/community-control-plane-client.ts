@@ -3197,6 +3197,10 @@ export interface ControlPlaneTaskAnchor {
   readonly baseBranch: string
   readonly description: string
   readonly modelRouteId: string
+  /** 设计稿 05:任务名/改动/验收为演示锚点的可选展示字段。 */
+  readonly title?: string
+  readonly changes?: string
+  readonly acceptance?: string
 }
 
 /**
@@ -3216,10 +3220,13 @@ export interface ControlPlaneTaskPort {
  */
 export function createControlPlaneTaskFake(options?: {
   readonly nextTaskId?: () => string
+  /** 演示/假优先种子:预置的锚点可直接被运行页 describe 命中。 */
+  readonly seed?: readonly ControlPlaneTaskAnchor[]
 }): ControlPlaneTaskPort {
   const nextTaskId = options?.nextTaskId
   let sequence = 0
   const anchors = new Map<string, ControlPlaneTaskAnchor>()
+  for (const anchor of options?.seed ?? []) anchors.set(anchor.taskId, anchor)
   return Object.freeze({
     async create(input: ControlPlaneTaskCreateInput): Promise<ControlPlaneTaskAnchor> {
       sequence += 1

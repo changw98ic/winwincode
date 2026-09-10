@@ -56,6 +56,7 @@ import {
   type ClientsViewModel,
 } from './clients-view-model.js'
 import { mountClientsPage, type ClientsPage } from './clients-page.js'
+import { mountOnboardingPage, type OnboardingPage } from './onboarding-page.js'
 import {
   clientOccupancyPortFromFacade,
   createClientOccupancyViewModel,
@@ -110,6 +111,8 @@ export interface WinWinCodeClientApplicationOptions {
   readonly now?: () => string
   /** Server/deployment facts projected into navigation presentation only. */
   readonly navigationCapabilities?: Readonly<NavigationCapabilityFacts>
+  /** 假优先任务锚点种子(演示 fixture 用,设计稿 05 的任务详情内容)。 */
+  readonly taskSeed?: readonly ControlPlaneTaskAnchor[]
 }
 
 export interface WinWinCodeClientApplication {
@@ -235,6 +238,7 @@ export function mountWinWinCodeClient(
   // FLOW scheduler and worker/candidate routing land and replace the ports.
   const taskPort = createControlPlaneTaskFake({
     nextTaskId: () => contractId('tsk', browser.crypto),
+    ...(options.taskSeed === undefined ? {} : { seed: options.taskSeed }),
   })
   const runIdentityPort = createControlPlaneRunIdentityFake()
   let lastKnownDiagnosticScope: unknown = null
@@ -1194,6 +1198,7 @@ export function mountWinWinCodeClient(
         root: slot,
         model,
         homeHref: surfaceHash('/home', scopeSelectionFromHash(browser.location.hash)),
+        ...(knownAnchor === null ? {} : { anchor: knownAnchor }),
       })
       await model.start()
     } catch (error) {
@@ -1404,6 +1409,55 @@ export function mountWinWinCodeClient(
       launchRoute(renderSettings(generation), generation, 'SETTINGS_ROUTE_FAILURE')
     } else if (activeSurface.id === 'attention') {
       launchRoute(renderAttention(generation), generation, 'ATTENTION_ROUTE_FAILURE')
+    } else if (activeSurface.id === 'onboarding') {
+      launchRoute(Promise.resolve(renderOnboarding(generation)), generation, 'ONBOARDING_ROUTE_FAILURE')
+    }
+  }
+
+  /** 设计稿 02:首次设置第 1 步——连接执行设备(裸画布流程页)。 */
+  function renderOnboarding(generation: number): void {
+    featureController?.abort()
+    activeFeature?.close()
+    activeFeature = null
+    if (closed || generation !== renderGeneration) return
+    let page: OnboardingPage | null = null
+    try {
+      page = mountOnboardingPage({
+        root: slot,
+        connect: async connectionCode => {
+          const clients = await clientDirectory.listClients()
+          const target = clients[0]?.clientId
+          if (target === undefined) {
+            throw new Error('尚未发现待连接的执行设备。请在 Client 窗口确认设备后重试。')
+          }
+          await clientDirectory.addClient({
+            clientId: target,
+            connectionCode,
+          })
+          browser.location.hash = `#/device?${new URLSearchParams({
+            organizationId: currentScopeResolution?.status === 'selected'
+              && currentScopeResolution.scope.kind === 'repository'
+              ? currentScopeResolution.scope.organizationId
+              : '',
+            workspaceId: currentScopeResolution?.status === 'selected'
+              && currentScopeResolution.scope.kind === 'repository'
+              ? currentScopeResolution.scope.workspaceId
+              : '',
+            projectId: currentScopeResolution?.status === 'selected'
+              && currentScopeResolution.scope.kind === 'repository'
+                ? currentScopeResolution.scope.projectId
+                : '',
+            repositoryId: currentScopeResolution?.status === 'selected'
+              && currentScopeResolution.scope.kind === 'repository'
+              ? currentScopeResolution.scope.repositoryId
+              : '',
+          }).toString()}`
+        },
+        onSignOut: () => { void authSession.logout() },
+      })
+      activeFeature = page
+    } catch (error) {
+      showRouteFailure(error, 'ONBOARDING_ROUTE_FAILURE')
     }
   }
 
@@ -1473,6 +1527,7 @@ export function mountWinWinCodeClient(
       || activeSurface.id === 'extensions'
       || activeSurface.id === 'settings'
       || activeSurface.id === 'attention'
+      || activeSurface.id === 'onboarding'
     )) render()
   })
   render()
