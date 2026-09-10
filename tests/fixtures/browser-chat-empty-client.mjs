@@ -85,7 +85,7 @@ function availabilityItem(route, overrides = {}) {
     reasoningEfforts: ['medium', 'high'],
     credentialRotationVersion: 1,
     isDefault: route === modelRoute,
-    status: 'enabled',
+    status: 'available',
     reason: 'ready',
     ...overrides,
   }
@@ -121,7 +121,7 @@ function routeAvailability() {
     requestPoolRevision: 5,
     defaultProviderId: modelRoute.providerId,
     defaultModelId: modelRoute.modelId,
-    status: disabled ? 'disabled' : 'enabled',
+    status: disabled ? 'disabled' : 'available',
     reason: disabled ? 'credential_missing_or_revoked' : 'ready',
     items: [
       availabilityItem(modelRoute, disabled ? {

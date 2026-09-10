@@ -7490,7 +7490,8 @@
           "settings",
           "provider_catalog",
           "credential_reference",
-          "request_pool"
+          "request_pool",
+          "runtime_status"
         ],
         "type": "string"
       },
@@ -19004,19 +19005,29 @@
         "description": "Closed, secret-safe reason for the route or page readiness result.",
         "enum": [
           "ready",
+          "rate_limited",
+          "window_exhausted",
+          "weekly_exhausted",
+          "authentication_error",
           "no_provider",
           "credential_missing_or_revoked",
           "default_route_invalid",
           "provider_or_model_disabled",
-          "request_pool_unavailable"
+          "request_pool_unavailable",
+          "runtime_status_unknown"
         ],
         "type": "string"
       },
       "ModelRouteAvailabilityStatus": {
         "description": "Closed readiness status derived only by the server.",
         "enum": [
-          "enabled",
-          "disabled"
+          "available",
+          "rate_limited",
+          "window_exhausted",
+          "weekly_exhausted",
+          "auth_error",
+          "disabled",
+          "unknown"
         ],
         "type": "string"
       },
@@ -29869,7 +29880,7 @@
     "https://schemas.winwincode.dev/winwincode/v1/domain.schema.json",
     "https://schemas.winwincode.dev/winwincode/v1/execution-port.schema.json"
   ],
-  "x-source-digest": "sha256:a48e91325817fc29f43faf8ff249e8bbadfbce65416c32143258f6f9f6ee466b",
+  "x-source-digest": "sha256:050324bdacb73cff3bb46d027ad9bb5987c547c74c712d947751df41e7794b07",
   "x-winwincode-client-metadata": {
     "http": {
       "authentication": {

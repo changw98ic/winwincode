@@ -186,7 +186,7 @@ function availableRoute(route = modelRoute, overrides = {}) {
     reasoningEfforts: ['medium', 'high'],
     credentialRotationVersion: 1,
     isDefault: true,
-    status: 'enabled',
+    status: 'available',
     reason: 'ready',
     ...overrides,
   }
@@ -202,7 +202,7 @@ function routeAvailability(items = [availableRoute()], overrides = {}) {
     requestPoolRevision: 5,
     defaultProviderId: modelRoute.providerId,
     defaultModelId: modelRoute.modelId,
-    status: 'enabled',
+    status: 'available',
     reason: 'ready',
     items,
     ...overrides,
@@ -366,7 +366,7 @@ test('initial HTTP snapshot publishes one stable Chat state before subscribing a
   assert.equal(model.state.realtime, 'subscribed')
   assert.equal(model.state.session.state, 'running')
   assert.deepEqual(model.state.messages.map(item => item.sequence), [1, 2])
-  assert.equal(model.state.modelRouteAvailability.items[0].status, 'enabled')
+  assert.equal(model.state.modelRouteAvailability.items[0].status, 'available')
   assert.equal(model.state.modelRouteAvailability.items[0].reason, 'ready')
   assert.deepEqual(model.state.modelRouteAvailability.items[0].catalogSource, scope)
   assert.deepEqual(model.state.selectedModelRoute, modelRoute)
@@ -727,7 +727,7 @@ test('an empty Chat snapshot loads route availability and creates the first boun
   assert.equal(model.state.realtime, 'inactive')
   assert.equal(model.state.activeProductSessionId, null)
   assert.equal(model.state.session, null)
-  assert.equal(model.state.modelRouteAvailability.items[0].status, 'enabled')
+  assert.equal(model.state.modelRouteAvailability.items[0].status, 'available')
   assert.deepEqual(model.state.selectedModelRoute, modelRoute)
   assert.deepEqual(client.calls.map(call => call.query).sort(), [
     'model.route.availability.list',
@@ -820,7 +820,7 @@ test('refresh preserves a disabled selected route reason and creation fails clos
   const { model } = view(client, { productSessionId: null })
   await model.start()
 
-  assert.equal(model.state.modelRouteAvailability.items[0].status, 'enabled')
+  assert.equal(model.state.modelRouteAvailability.items[0].status, 'available')
   assert.deepEqual(model.state.selectedModelRoute, modelRoute)
 
   client.enqueue('session.list', client.responses.get('session.list'))
@@ -852,7 +852,7 @@ test('refresh preserves a disabled selected route reason and creation fails clos
     client.responses.get('model.route.availability.list'),
   )
   await model.refresh()
-  assert.equal(model.state.modelRouteAvailability.items[0].status, 'enabled')
+  assert.equal(model.state.modelRouteAvailability.items[0].status, 'available')
   assert.equal(model.state.selectedModelRoute, null, 'refresh must not silently replace a lost route')
   assert.equal(model.state.modelRouteSelectionIssue, 'credential_missing_or_revoked')
   model.selectModelRoute(model.state.modelRouteAvailability.items[0].route)
@@ -942,7 +942,7 @@ test('availability invalidation reloads only routes and never switches to anothe
   )
   assert.equal(model.state.selectedModelRoute, null)
   assert.equal(model.state.modelRouteSelectionIssue, 'request_pool_unavailable')
-  assert.equal(model.state.modelRouteAvailability.items[1].status, 'enabled')
+  assert.equal(model.state.modelRouteAvailability.items[1].status, 'available')
   assert.equal(observedStatuses.includes('refreshing'), true)
 })
 

@@ -924,7 +924,7 @@ async function respond(request) {
           reasoningEfforts: ['medium'],
           credentialRotationVersion: 1,
           isDefault: true,
-          status: 'enabled',
+          status: 'available',
           reason: 'ready',
         }],
       })

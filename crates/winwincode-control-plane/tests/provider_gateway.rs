@@ -495,8 +495,14 @@ fn retry_context(
     .expect("freeze retry plan");
     let request = ModelRetryUsageRequest {
         request_id: RequestId(id("req", 990)),
-        attribution: ModelUsageAttribution::from_request_authority(&authority, None, &actor())
-            .expect("model Usage attribution"),
+        attribution: ModelUsageAttribution::from_request_authority(
+            &authority,
+            None,
+            ExecutionJobId(id("job", 990)),
+            "executor".to_owned(),
+            &actor(),
+        )
+        .expect("model Usage attribution"),
         plan,
         enterprise_quota_amounts: winwincode_storage::EnterpriseQuotaAmounts {
             tokens: 100,

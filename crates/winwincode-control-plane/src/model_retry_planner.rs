@@ -311,7 +311,9 @@ impl ModelRetryPreOpenPlannerPort for DurableModelRetryPreOpenPlanner<'_> {
             request_id: message.request_id.clone(),
             attribution: ModelUsageAttribution::from_request_authority(
                 &admission.route_authority,
-                authority.delivery_id,
+                authority.delivery_id.clone(),
+                authority.execution_job_id.clone(),
+                authority.execution_profile.clone(),
                 &authority.actor,
             )
             .map_err(ModelRetryPlannerError::ledger)?,
@@ -509,6 +511,8 @@ fn failure_receipt(
 
 struct ExecutionJobAuthority {
     actor: Actor,
+    execution_job_id: ExecutionJobId,
+    execution_profile: String,
     repository_scope: RepositoryScope,
     product_session_id: ProductSessionId,
     delivery_id: Option<DeliveryId>,
@@ -573,6 +577,8 @@ fn execution_job_authority(
     }
     Ok(ExecutionJobAuthority {
         actor,
+        execution_job_id: job.job_id.clone(),
+        execution_profile: job.execution_profile.clone(),
         repository_scope,
         product_session_id,
         delivery_id,

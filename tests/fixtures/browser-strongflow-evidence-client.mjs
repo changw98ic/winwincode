@@ -81,7 +81,7 @@ function routeAvailability() {
       reasoningEfforts: ['medium', 'high'],
       credentialRotationVersion: 1,
       isDefault: true,
-      status: 'enabled',
+      status: 'available',
       reason: 'ready',
     }],
   }

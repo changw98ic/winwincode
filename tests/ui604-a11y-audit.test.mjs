@@ -334,7 +334,7 @@ function modelRouteOption() {
     reasoningEfforts: ['medium', 'high'],
     credentialRotationVersion: 1,
     isDefault: true,
-    status: 'enabled',
+    status: 'available',
     reason: 'ready',
   }
 }
@@ -378,7 +378,7 @@ function chatState(overrides = {}) {
       requestPoolRevision: 1,
       defaultProviderId: modelRoute.providerId,
       defaultModelId: modelRoute.modelId,
-      status: 'enabled',
+      status: 'available',
       reason: 'ready',
       items: [modelRouteOption()],
     },

@@ -441,6 +441,11 @@ function workerState(
 
 const REASON_ORDER: readonly ModelRouteAvailabilityReason[] = Object.freeze([
   ModelRouteAvailabilityReason.CredentialMissingOrRevoked,
+  ModelRouteAvailabilityReason.AuthenticationError,
+  ModelRouteAvailabilityReason.WindowExhausted,
+  ModelRouteAvailabilityReason.WeeklyExhausted,
+  ModelRouteAvailabilityReason.RateLimited,
+  ModelRouteAvailabilityReason.RuntimeStatusUnknown,
   ModelRouteAvailabilityReason.RequestPoolUnavailable,
   ModelRouteAvailabilityReason.ProviderOrModelDisabled,
   ModelRouteAvailabilityReason.DefaultRouteInvalid,
@@ -460,7 +465,7 @@ function providerState(
   routes: readonly ModelRouteAvailabilityProjection[],
 ): { readonly state: ProviderHealthState; readonly reason: string | null } {
   if (routes.length === 0) return { state: 'unknown', reason: null }
-  const ready = routes.find(route => route.status === ModelRouteAvailabilityStatus.Enabled
+  const ready = routes.find(route => route.status === ModelRouteAvailabilityStatus.Available
     && route.reason === ModelRouteAvailabilityReason.Ready)
   if (ready !== undefined) return { state: 'ready', reason: null }
   const blocking = routes.find(route => route.status === ModelRouteAvailabilityStatus.Disabled)
@@ -474,7 +479,7 @@ function providerState(
 }
 
 function isReadyRoute(route: ModelRouteAvailabilityProjection): boolean {
-  return route.status === ModelRouteAvailabilityStatus.Enabled
+  return route.status === ModelRouteAvailabilityStatus.Available
     && route.reason === ModelRouteAvailabilityReason.Ready
 }
 

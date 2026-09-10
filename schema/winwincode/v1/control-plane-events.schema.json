@@ -1532,7 +1532,8 @@
         "settings",
         "provider_catalog",
         "credential_reference",
-        "request_pool"
+        "request_pool",
+        "runtime_status"
       ]
     },
     "ControlPlaneWebSocketModelRouteAvailabilityInvalidatedEvent": {

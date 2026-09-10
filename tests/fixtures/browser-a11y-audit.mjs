@@ -71,7 +71,7 @@ function modelRouteAvailability() {
     requestPoolRevision: 1,
     defaultProviderId: modelRoute.providerId,
     defaultModelId: modelRoute.modelId,
-    status: 'enabled',
+    status: 'available',
     reason: 'ready',
     items: [{
       route: modelRoute,
@@ -87,7 +87,7 @@ function modelRouteAvailability() {
       reasoningEfforts: ['medium'],
       credentialRotationVersion: 1,
       isDefault: true,
-      status: 'enabled',
+      status: 'available',
       reason: 'ready',
     }],
   }

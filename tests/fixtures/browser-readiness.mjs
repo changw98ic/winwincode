@@ -88,7 +88,7 @@ function ok(request) {
     settingsSource: request.scope,
     defaultProviderId: complete ? 'openai' : null,
     defaultModelId: complete ? 'gpt-5' : null,
-    status: complete ? 'enabled' : 'disabled',
+    status: complete ? 'available' : 'disabled',
     reason: complete ? 'ready' : 'no_provider',
     items: complete
       ? [{
@@ -97,7 +97,7 @@ function ok(request) {
             modelId: 'gpt-5',
             credentialReferenceId: 'crd_00000000000000000000000001',
           },
-          status: 'enabled',
+          status: 'available',
           reason: 'ready',
           isDefault: true,
           providerDisplayName: 'OpenAI',

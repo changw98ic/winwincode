@@ -187,7 +187,7 @@ function modelRoute(providerId, modelId, overrides = {}) {
       modelId,
       credentialReferenceId: canonicalId('crd', 1),
     },
-    status: 'enabled',
+    status: 'available',
     reason: 'ready',
     isDefault: false,
     providerDisplayName: `${providerId} display`,
@@ -333,7 +333,7 @@ function baselineFixtures() {
       settingsSource: scope,
       defaultProviderId: 'openai',
       defaultModelId: 'gpt-5',
-      status: 'enabled',
+      status: 'available',
       reason: 'ready',
       items: [
         modelRoute('openai', 'gpt-5', { isDefault: true }),

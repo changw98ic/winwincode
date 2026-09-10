@@ -1047,7 +1047,7 @@ test('generated HTTP client reads only the server-joined secret-safe ModelRoute 
         requestPoolRevision: 6,
         defaultProviderId: 'provider-main',
         defaultModelId: 'model-main',
-        status: 'enabled',
+        status: 'available',
         reason: 'ready',
         items: [{
           route: {
@@ -1070,7 +1070,7 @@ test('generated HTTP client reads only the server-joined secret-safe ModelRoute 
           reasoningEfforts: ['high', 'medium'],
           credentialRotationVersion: 2,
           isDefault: true,
-          status: 'enabled',
+          status: 'available',
           reason: 'ready',
         }],
       }))
@@ -1091,7 +1091,7 @@ test('generated HTTP client reads only the server-joined secret-safe ModelRoute 
   assert.deepEqual(captured[0].scope, scope)
   assert.deepEqual(captured[0].parameters, {})
   assert.equal(result.result.items.length, 1)
-  assert.equal(result.result.items[0].status, 'enabled')
+  assert.equal(result.result.items[0].status, 'available')
   assert.equal(result.result.items[0].reason, 'ready')
   assert.deepEqual(result.result.requestPoolSource, projectScope)
   assert.equal(result.result.requestPoolRevision, 6)

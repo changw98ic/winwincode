@@ -127,7 +127,7 @@ function stateLabel(state: ChatViewModelState): string {
 }
 
 function modelRouteReady(candidate: ModelRouteAvailabilityProjection): boolean {
-  return candidate.status === ModelRouteAvailabilityStatus.Enabled
+  return candidate.status === ModelRouteAvailabilityStatus.Available
     && candidate.reason === ModelRouteAvailabilityReason.Ready
 }
 
@@ -139,6 +139,11 @@ function readyModelRoutes(
 
 function modelRouteReasonLabel(reason: ModelRouteAvailabilityReason): string {
   if (reason === ModelRouteAvailabilityReason.Ready) return 'Ready'
+  if (reason === ModelRouteAvailabilityReason.RateLimited) return 'Rate limited'
+  if (reason === ModelRouteAvailabilityReason.WindowExhausted) return 'Usage window exhausted'
+  if (reason === ModelRouteAvailabilityReason.WeeklyExhausted) return 'Weekly usage exhausted'
+  if (reason === ModelRouteAvailabilityReason.AuthenticationError) return 'Provider authentication failed'
+  if (reason === ModelRouteAvailabilityReason.RuntimeStatusUnknown) return 'Provider status unknown'
   if (reason === ModelRouteAvailabilityReason.NoProvider) return 'No Provider'
   if (reason === ModelRouteAvailabilityReason.CredentialMissingOrRevoked) {
     return 'Credential missing or revoked'
@@ -191,6 +196,21 @@ function errorLabel(error: ControlPlaneClientError | null): string | null {
 
 function modelRouteEmptyText(state: ChatViewModelState): string {
   const reason = state.modelRouteAvailability?.reason
+  if (reason === ModelRouteAvailabilityReason.RateLimited) {
+    return 'The selected Provider is rate limited. Retry later or choose another model.'
+  }
+  if (reason === ModelRouteAvailabilityReason.WindowExhausted) {
+    return 'The selected Provider usage window is exhausted. Retry after the window resets.'
+  }
+  if (reason === ModelRouteAvailabilityReason.WeeklyExhausted) {
+    return 'The selected Provider weekly usage is exhausted. Retry after the weekly reset.'
+  }
+  if (reason === ModelRouteAvailabilityReason.AuthenticationError) {
+    return 'The selected Provider rejected its credential. Rotate or replace it in Settings.'
+  }
+  if (reason === ModelRouteAvailabilityReason.RuntimeStatusUnknown) {
+    return 'The selected Provider status is unknown. Retry, or explicitly choose another route.'
+  }
   if (reason === ModelRouteAvailabilityReason.CredentialMissingOrRevoked) {
     return 'The configured model credential is missing or revoked. Review Settings.'
   }

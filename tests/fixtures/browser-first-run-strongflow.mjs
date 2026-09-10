@@ -186,7 +186,7 @@ function availabilityItem(route, providerDisplayName, modelDisplayName) {
     reasoningEfforts: ['medium', 'high'],
     credentialRotationVersion: 1,
     isDefault: false,
-    status: 'enabled',
+    status: 'available',
     reason: 'ready',
   }
 }
@@ -206,7 +206,7 @@ function availability(scope) {
     requestPoolRevision: 1,
     defaultProviderId: state.settings.defaultModelRoute?.providerId ?? null,
     defaultModelId: state.settings.defaultModelRoute?.modelId ?? null,
-    status: 'enabled',
+    status: 'available',
     reason: 'ready',
     items: [
       availabilityItem(primaryModelRoute, 'Primary Provider', 'Primary Model'),

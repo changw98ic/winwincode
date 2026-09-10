@@ -636,7 +636,7 @@ test('ModelRoute invalidation exposes only a closed source and the one reload qu
   assert.deepEqual(validateSchemaNode(invalidation, schema), [])
   assert.deepEqual(
     schema.$defs.ControlPlaneWebSocketModelRouteAvailabilityInvalidationSource.enum,
-    ['settings', 'provider_catalog', 'credential_reference', 'request_pool'],
+    ['settings', 'provider_catalog', 'credential_reference', 'request_pool', 'runtime_status'],
   )
   assert.deepEqual(invalidation.event.reloadQueries, ['model.route.availability.list'])
   assert.deepEqual(Object.keys(invalidation.event).sort(), [

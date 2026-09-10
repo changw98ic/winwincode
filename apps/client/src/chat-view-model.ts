@@ -405,7 +405,7 @@ function modelRouteIdentity(route: ModelRoute): string {
 }
 
 function isReadyModelRoute(candidate: ModelRouteAvailabilityProjection): boolean {
-  return candidate.status === ModelRouteAvailabilityStatus.Enabled
+  return candidate.status === ModelRouteAvailabilityStatus.Available
     && candidate.reason === ModelRouteAvailabilityReason.Ready
 }
 

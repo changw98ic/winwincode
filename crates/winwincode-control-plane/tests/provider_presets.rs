@@ -256,7 +256,7 @@ fn list_preset_models_rejects_unknown_and_malformed_providers() {
 }
 
 #[test]
-fn custom_endpoint_accepts_canonical_https() {
+fn custom_endpoint_accepts_https_and_exact_local_loopback_http() {
     for accepted in [
         "https://api.example.com/v1",
         "https://api.example.com",
@@ -264,6 +264,9 @@ fn custom_endpoint_accepts_canonical_https() {
         "https://gateway.internal.corp/v1/openai",
         "https://api.example.com/v1/",
         "https://llm.team.example:8443/v1",
+        "http://localhost:11434/v1",
+        "http://127.0.0.1:8080/v1",
+        "http://[::1]:8080/v1",
     ] {
         validate_custom_endpoint(accepted)
             .unwrap_or_else(|error| panic!("endpoint {accepted} must be accepted: {error}"));
@@ -284,6 +287,10 @@ fn custom_endpoint_rejects_insecure_credential_bearing_and_malformed_urls() {
     let too_long = format!("{accepted_boundary}a");
     for rejected in [
         "http://api.example.com/v1",
+        "http://localhost.evil.example/v1",
+        "http://localhost:/v1",
+        "http://127.0.0.1.evil:8080/v1",
+        "http://[::2]:8080/v1",
         "ftp://api.example.com",
         "https://user:credential@api.example.com/v1",
         "https://token@api.example.com/v1",

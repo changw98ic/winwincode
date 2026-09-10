@@ -21,11 +21,12 @@ use crate::{
     FrozenModelRetryPlan, FrozenModelRouteAuthority, ModelAttemptCompletionCommand,
     ModelAttemptFailureCommand, ModelAttemptStartReceipt, ModelRetryDecisionReceipt,
     ModelRetryStep, ModelRetryUsageError, ModelRetryUsageRequest, ModelRetryUsageService,
-    ModelUsageAttribution, ModelUsageSettlementReceipt, ProviderGatewaySettlement,
-    ProviderGatewaySettlementError, ProviderGatewaySettlementPort, ProviderGatewayTerminalOutcome,
+    ModelRouteResolutionTrace, ModelUsageAttribution, ModelUsageSettlementReceipt,
+    ProviderGatewaySettlement, ProviderGatewaySettlementError, ProviderGatewaySettlementPort,
+    ProviderGatewayTerminalOutcome,
 };
 
-const CONTEXT_SCHEMA: &str = "winwincode.model-retry-settlement-context.v2";
+const CONTEXT_SCHEMA: &str = "winwincode.model-retry-settlement-context.v3";
 
 /// Stable context dependency failure category.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -238,8 +239,13 @@ impl ModelRetrySettlementContext {
                     .map_err(ModelRetrySettlementError::ledger)?,
             );
         }
-        let plan = FrozenModelRetryPlan::freeze(stored.policy_id, stored.policy_revision, steps)
-            .map_err(ModelRetrySettlementError::ledger)?;
+        let plan = FrozenModelRetryPlan::freeze_resolved(
+            stored.policy_id,
+            stored.policy_revision,
+            stored.resolution,
+            steps,
+        )
+        .map_err(ModelRetrySettlementError::ledger)?;
         if plan.fingerprint() != stored.plan_fingerprint {
             return Err(ModelRetrySettlementError::corrupt_context());
         }
@@ -331,6 +337,7 @@ struct StoredSettlementContext {
     attribution: ModelUsageAttribution,
     policy_id: String,
     policy_revision: u64,
+    resolution: ModelRouteResolutionTrace,
     plan_fingerprint: String,
     request_fingerprint: String,
     context_fingerprint: String,
@@ -349,6 +356,7 @@ impl StoredSettlementContext {
             attribution: context.request.attribution.clone(),
             policy_id: context.request.plan.policy_id().to_owned(),
             policy_revision: context.request.plan.policy_revision(),
+            resolution: context.request.plan.resolution().clone(),
             plan_fingerprint: context.request.plan.fingerprint().to_owned(),
             request_fingerprint: context.request_fingerprint.clone(),
             context_fingerprint: context.context_fingerprint.clone(),

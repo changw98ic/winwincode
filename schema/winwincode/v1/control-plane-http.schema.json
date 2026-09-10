@@ -373,15 +373,21 @@
         "effective model settings selection",
         "effective Provider/model catalog",
         "Credential reference lifecycle",
-        "configured durable model request pool"
+        "configured durable model request pool",
+        "explicit Provider runtime status"
       ],
       "reasons": [
         "ready",
+        "rate_limited",
+        "window_exhausted",
+        "weekly_exhausted",
+        "authentication_error",
         "no_provider",
         "credential_missing_or_revoked",
         "default_route_invalid",
         "provider_or_model_disabled",
-        "request_pool_unavailable"
+        "request_pool_unavailable",
+        "runtime_status_unknown"
       ],
       "clientInferenceAllowed": false,
       "secretFieldsAllowed": false,
@@ -11228,8 +11234,13 @@
     "ModelRouteAvailabilityStatus": {
       "type": "string",
       "enum": [
-        "enabled",
-        "disabled"
+        "available",
+        "rate_limited",
+        "window_exhausted",
+        "weekly_exhausted",
+        "auth_error",
+        "disabled",
+        "unknown"
       ],
       "description": "Closed readiness status derived only by the server."
     },
@@ -11237,11 +11248,16 @@
       "type": "string",
       "enum": [
         "ready",
+        "rate_limited",
+        "window_exhausted",
+        "weekly_exhausted",
+        "authentication_error",
         "no_provider",
         "credential_missing_or_revoked",
         "default_route_invalid",
         "provider_or_model_disabled",
-        "request_pool_unavailable"
+        "request_pool_unavailable",
+        "runtime_status_unknown"
       ],
       "description": "Closed, secret-safe reason for the route or page readiness result."
     },

@@ -201,7 +201,7 @@ function ok(request) {
     settingsSource: request.scope,
     defaultProviderId: complete ? 'openai' : null,
     defaultModelId: complete ? 'gpt-5' : null,
-    status: complete ? 'enabled' : 'disabled',
+    status: complete ? 'available' : 'disabled',
     reason: complete ? 'ready' : 'no_provider',
     items: complete
       ? [{
@@ -210,7 +210,7 @@ function ok(request) {
             modelId: 'gpt-5',
             credentialReferenceId: CREDENTIAL_MARKER,
           },
-          status: 'enabled',
+          status: 'available',
           reason: 'ready',
           isDefault: true,
           providerDisplayName: 'OpenAI',
@@ -230,7 +230,7 @@ function ok(request) {
             modelId: 'mistral-large',
             credentialReferenceId: CREDENTIAL_MARKER,
           },
-          status: 'enabled',
+          status: 'available',
           reason: 'request_pool_unavailable',
           isDefault: false,
           providerDisplayName: 'Mistral',

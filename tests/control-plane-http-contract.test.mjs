@@ -338,14 +338,20 @@ test('HTTP query contract covers every current read surface with an opaque stabl
     'effective Provider/model catalog',
     'Credential reference lifecycle',
     'configured durable model request pool',
+    'explicit Provider runtime status',
   ])
   assert.deepEqual(schema.$defs.ModelRouteAvailabilityReason.enum, [
     'ready',
+    'rate_limited',
+    'window_exhausted',
+    'weekly_exhausted',
+    'authentication_error',
     'no_provider',
     'credential_missing_or_revoked',
     'default_route_invalid',
     'provider_or_model_disabled',
     'request_pool_unavailable',
+    'runtime_status_unknown',
   ])
   assert.equal(modelRouteAvailability.clientInferenceAllowed, false)
   assert.equal(modelRouteAvailability.secretFieldsAllowed, false)

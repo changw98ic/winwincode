@@ -73,7 +73,7 @@ function modelRouteOption(route, isDefault) {
     reasoningEfforts: ['medium', 'high'],
     credentialRotationVersion: 1,
     isDefault,
-    status: 'enabled',
+    status: 'available',
     reason: 'ready',
   }
 }
@@ -137,7 +137,7 @@ function pageState(update = 0) {
       requestPoolRevision: 1,
       defaultProviderId: firstRoute.providerId,
       defaultModelId: firstRoute.modelId,
-      status: 'enabled',
+      status: 'available',
       reason: 'ready',
       items: [
         modelRouteOption(firstRoute, true),

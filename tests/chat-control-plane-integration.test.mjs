@@ -366,7 +366,7 @@ function contractFake() {
           requestPoolRevision: 5,
           defaultProviderId: 'provider',
           defaultModelId: 'model',
-          status: 'enabled',
+          status: 'available',
           reason: 'ready',
           items: [{
             route: {
@@ -386,7 +386,7 @@ function contractFake() {
             reasoningEfforts: ['medium', 'high'],
             credentialRotationVersion: 1,
             isDefault: true,
-            status: 'enabled',
+            status: 'available',
             reason: 'ready',
           }],
         }))

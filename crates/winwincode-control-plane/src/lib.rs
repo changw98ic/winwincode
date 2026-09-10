@@ -54,6 +54,7 @@ pub mod knowledge;
 mod local_candidate;
 pub mod local_secret_store;
 mod model_admission;
+mod model_cost;
 mod model_execution_runtime;
 mod model_policy_source;
 mod model_request_pool;
@@ -314,6 +315,12 @@ pub use model_admission::{
     ModelReservationRequest, ModelReservationTerminalOutcome, ModelReservationTerminalReceipt,
     ModelRoutePolicyDecision,
 };
+pub use model_cost::{
+    ModelBudgetAction, ModelBudgetDecision, ModelBudgetPolicy, ModelBudgetState, ModelCostBucket,
+    ModelCostClass, ModelCostError, ModelCostFact, ModelCostProjection, ModelCostSummary,
+    ModelPriceCatalog, ModelPriceEntry, ModelPriceReference, ModelTokenPrice, UnknownCostPolicy,
+    summarize_model_costs,
+};
 pub use model_execution_runtime::{
     DurableModelExchangeAuthority, ModelExecutionAckReceipt, ModelExecutionBatchReceipt,
     ModelExecutionOpenReceipt, ModelExecutionPortReceipt, ModelExecutionRuntime,
@@ -348,12 +355,14 @@ pub use model_retry_usage::{
     ModelAttemptFailureCommand, ModelAttemptFailureFact, ModelAttemptFailureKind,
     ModelAttemptStartCommand, ModelAttemptStartReceipt, ModelExecutionCertainty, ModelRetryAction,
     ModelRetryDecisionReceipt, ModelRetryStep, ModelRetryUsageError, ModelRetryUsageErrorKind,
-    ModelRetryUsageRequest, ModelRetryUsageService, ModelUsageAttribution, ModelUsageFilter,
-    ModelUsageReconciliation, ModelUsageSettlementReceipt, ModelUsageSourceCursor,
-    ModelUsageSourceEntry, ModelUsageSourcePage, ModelUsageTotals, SettledModelUsage,
+    ModelRetryUsageRequest, ModelRetryUsageService, ModelRouteResolutionReason,
+    ModelRouteResolutionTrace, ModelUsageAttribution, ModelUsageFilter, ModelUsageReconciliation,
+    ModelUsageSettlementReceipt, ModelUsageSourceCursor, ModelUsageSourceEntry,
+    ModelUsageSourcePage, ModelUsageTotals, SettledModelUsage,
 };
 pub use model_route_availability::{
     ModelRouteAvailabilityError, ModelRouteAvailabilityErrorKind, ModelRouteAvailabilityService,
+    ModelRouteRuntimeStatusCommand, ModelRouteRuntimeStatusReceipt,
 };
 pub use model_settings::{
     DEFAULT_WORKER_CONCURRENCY_LIMIT, ModelSelection, ModelSettingsChange, ModelSettingsError,
@@ -400,12 +409,11 @@ pub use provider_admission::{
 pub use provider_anthropic::ProviderTokenPricing;
 pub use provider_catalog::{
     CatalogAvailability, ModelCapability, ModelCapabilityProjection, ModelCatalogVersion,
-    ModelToolSupport, PROVIDER_CATALOG_MIGRATION_EVENT_TOPIC, PROVIDER_CATALOG_VERSION_EVENT_TOPIC,
-    ProviderCatalogChange, ProviderCatalogEntryProjection, ProviderCatalogError,
-    ProviderCatalogErrorKind, ProviderCatalogMigrationReport, ProviderCatalogMutationReceipt,
-    ProviderCatalogProjection, ProviderCatalogRequest, ProviderCatalogService,
-    ProviderCatalogVersionEvent, ProviderDescriptor, ResolvedModelCapability,
-    StructuredOutputSupport, migrate_provider_catalogs_v1_to_v2,
+    ModelToolSupport, PROVIDER_CATALOG_VERSION_EVENT_TOPIC, ProviderCatalogChange,
+    ProviderCatalogEntryProjection, ProviderCatalogError, ProviderCatalogErrorKind,
+    ProviderCatalogMutationReceipt, ProviderCatalogProjection, ProviderCatalogRequest,
+    ProviderCatalogService, ProviderCatalogVersionEvent, ProviderDescriptor,
+    ResolvedModelCapability, StructuredOutputSupport,
 };
 pub use provider_enterprise_quota::{
     DurableProviderEnterpriseUsageSource, ProviderEnterpriseQuotaError,
@@ -431,8 +439,9 @@ pub use provider_https_sse::{
     HttpsSseProviderTimeouts, ProviderTlsRoots,
 };
 pub use provider_policy::{
-    DurableProviderPolicyEnforcement, ProviderPolicyError, ProviderPolicyErrorKind,
-    ProviderPolicyReceipt,
+    AgentProviderPolicy, DurableProviderPolicyEnforcement, ProviderModelSelector, ProviderPolicy,
+    ProviderPolicyCandidate, ProviderPolicyError, ProviderPolicyErrorKind, ProviderPolicyReceipt,
+    ProviderPolicyRoute,
 };
 pub use provider_presets::{
     EndpointSource, ModelCapabilityOrigin, ModelCapabilitySnapshot, ModelCapabilitySource,
@@ -1131,7 +1140,7 @@ impl ControlPlane {
                 )));
             }
         };
-        let mut storage = match SqliteStorage::open(&data_directory) {
+        let storage = match SqliteStorage::open(&data_directory) {
             Ok(storage) => storage,
             Err(error) => {
                 let mut cleanup_failures = Vec::new();
@@ -1150,24 +1159,6 @@ impl ControlPlane {
                 )));
             }
         };
-        if let Err(error) = migrate_provider_catalogs_v1_to_v2(&mut storage) {
-            let mut cleanup_failures = Vec::new();
-            if let Err(close_error) = Box::new(storage).close() {
-                cleanup_failures.push(format!("storage close also failed: {close_error}"));
-            }
-            if let Err(close_error) = publisher.close() {
-                cleanup_failures.push(format!("event publisher close also failed: {close_error}"));
-            }
-            if let Err(release_error) = temporary_root.release() {
-                cleanup_failures.push(format!(
-                    "temporary root release also failed: {release_error}"
-                ));
-            }
-            return Err(StartError::new(format!(
-                "failed to migrate Provider catalog state: {error}{}",
-                cleanup_suffix(&cleanup_failures)
-            )));
-        }
         let audit_store = match AuditStore::open(data_directory.join("audit")) {
             Ok(store) => store,
             Err(error) => {
