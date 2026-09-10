@@ -102,7 +102,7 @@
     },
     {
       "path": "schema/winwincode/v1/execution-port.schema.json",
-      "sha256": "b810d0ffdfa1ff7b5729d0d35abf236f71a02a75ac42e7f2282d6344894a3676",
+      "sha256": "eb37e9622c520bbc196304abe579d46fffba39bc0574f6749c586fa29c42a2bc",
       "facts": [
         "Worker execution transport and fenced identity"
       ]

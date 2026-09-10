@@ -35,7 +35,7 @@
     },
     "ActionEnforcementReceiptMessage": {
       "additionalProperties": false,
-      "description": "Immutable Control Plane-issued action receipt bound to tenant, actor, Policy version, invocation, action digest, and current Worker authority.",
+      "description": "Immutable Control Plane-issued action receipt bound to repository scope, actor, Policy version, invocation, action digest, and current Worker authority.",
       "properties": {
         "actor": {
           "$ref": "#/$defs/UserActor"
@@ -25735,7 +25735,7 @@
     "https://schemas.winwincode.dev/winwincode/v1/domain.schema.json",
     "https://schemas.winwincode.dev/winwincode/v1/execution-port.schema.json"
   ],
-  "x-source-digest": "sha256:f16058b1158a91c5066440533208253bd7edcbd0dc22c4834e6632314abd2fe6",
+  "x-source-digest": "sha256:1f673034ec9d986fd08d7ce2f4154a27f9cb83f8a56884e4c51efa5a60598b41",
   "x-winwincode-client-metadata": {
     "http": {
       "authentication": {

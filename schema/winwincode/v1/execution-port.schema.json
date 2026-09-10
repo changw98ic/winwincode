@@ -2985,7 +2985,7 @@
         "receiptSignature"
       ],
       "title": "action.enforcement_receipt",
-      "description": "Immutable Control Plane-issued action receipt bound to tenant, actor, Policy version, invocation, action digest, and current Worker authority.",
+      "description": "Immutable Control Plane-issued action receipt bound to repository scope, actor, Policy version, invocation, action digest, and current Worker authority.",
       "x-direction": "control-plane-to-worker",
       "x-authority": "control-command"
     },
