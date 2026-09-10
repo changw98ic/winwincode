@@ -5,7 +5,7 @@ import {
   readdirSync,
   readFileSync,
 } from 'node:fs'
-import { join, relative, resolve } from 'node:path'
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 
 const root = resolve(import.meta.dirname, '..')
 const gateFile = relative(root, new URL(import.meta.url).pathname)
@@ -164,6 +164,45 @@ function markerFindings(files, markers) {
   return results
 }
 
+export function forbiddenCoreProductExports(source) {
+  const findings = []
+  const productName = /(?:^|_)(?:enterprise|tenant|billing|hosted)(?:_|$)/iu
+  const declarations = [
+    ['forbidden-core-product-module', /^[ \t]*(?:pub(?:\([^)]*\))?[ \t]+)?mod[ \t]+([A-Za-z0-9_]+)[ \t]*[;{]/gmu],
+    ['forbidden-core-product-export', /^[ \t]*pub[ \t]+use[ \t]+(?:(?:crate|self|super)::)?([A-Za-z0-9_]+)/gmu],
+  ]
+  for (const [marker, pattern] of declarations) {
+    for (const match of source.matchAll(pattern)) {
+      if (productName.test(match[1])) {
+        findings.push(Object.freeze({ marker, name: match[1], line: lineNumber(source, match.index) }))
+      }
+    }
+  }
+  return findings
+}
+
+function coreProductExportFindings() {
+  return walk(join(root, 'crates'), { skip: ignoredSourceDirectoryNames })
+    .filter(path => path.endsWith('/src/lib.rs'))
+    .flatMap(path => forbiddenCoreProductExports(readText(path) ?? '')
+      .map(value => finding(path, value.marker, value.line)))
+}
+
+function crossRepositoryCargoPathFindings(manifests) {
+  const findings = []
+  for (const path of manifests.filter(value => value.endsWith('/Cargo.toml'))) {
+    const source = readText(path)
+    if (source === null) continue
+    for (const match of source.matchAll(/\bpath\s*=\s*["']([^"']+)["']/gu)) {
+      const targetRelative = relative(root, resolve(dirname(path), match[1]))
+      if (targetRelative === '..' || targetRelative.startsWith('../') || isAbsolute(targetRelative)) {
+        findings.push(finding(path, 'cross-repository-cargo-path', lineNumber(source, match.index)))
+      }
+    }
+  }
+  return findings
+}
+
 function uniqueFindings(values) {
   const seen = new Set()
   return values.filter(value => {
@@ -314,6 +353,8 @@ export function sourceBoundaryReport() {
       gate('legacy-directories', forbiddenDirectoryFindings()),
       gate('source-legacy-identifiers', markerFindings(source, forbiddenMarkers)),
       gate('manifest-lock-dependencies', markerFindings(manifests, forbiddenMarkers)),
+      gate('core-product-exports', coreProductExportFindings()),
+      gate('cargo-repository-boundary', crossRepositoryCargoPathFindings(manifests)),
       gate('package-artifacts', artifacts),
       gate('dist-artifact-content', distLegacy),
       gate('canonical-client-facade', canonicalFacadeFindings()),
