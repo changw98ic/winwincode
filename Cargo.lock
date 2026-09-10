@@ -12925,7 +12925,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "winwincode-object-store"
+name = "winwincode-s3-artifact-adapter"
 version = "0.1.0-alpha.1"
 dependencies = [
  "rcgen",
@@ -12934,10 +12934,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "ureq",
- "winwincode-audit",
- "winwincode-backup",
  "winwincode-domain",
- "winwincode-storage",
 ]
 
 [[package]]

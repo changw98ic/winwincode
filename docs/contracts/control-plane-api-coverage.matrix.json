@@ -525,13 +525,13 @@
       ]
     },
     {
-      "surfaceId": "enterprise-object-store",
+      "surfaceId": "s3-artifact-adapter",
       "flowIds": [
         "action-policy-and-collaboration",
         "candidate-artifacts"
       ],
       "observableContracts": [
-        "verified encrypted artifact object storage receipts"
+        "verified S3-compatible Artifact byte receipts"
       ]
     },
     {

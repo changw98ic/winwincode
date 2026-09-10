@@ -31,7 +31,7 @@ const TARGET_SOURCE_ROOTS = Object.freeze([
   'crates/winwincode-connector-webhook/src',
   'crates/winwincode-integration-core/src',
   'crates/winwincode-integration-sqlite/src',
-  'crates/winwincode-object-store/src',
+  'crates/winwincode-s3-artifact-adapter/src',
   'crates/winwincode-postgres/src',
   'crates/winwincode-test-assets/src',
   'crates/winwincode-control-plane/src',

@@ -508,20 +508,17 @@
       ]
     },
     {
-      "id": "winwincode-object-store",
+      "id": "winwincode-s3-artifact-adapter",
       "kind": "rust-crate",
-      "path": "crates/winwincode-object-store",
-      "packageName": "winwincode-object-store",
+      "path": "crates/winwincode-s3-artifact-adapter",
+      "packageName": "winwincode-s3-artifact-adapter",
       "phase": "enterprise",
       "zone": "control-plane",
       "responsibilities": [
-        "provide-verified-s3-compatible-artifact-object-storage"
+        "provide-product-neutral-verified-s3-compatible-artifact-byte-transport"
       ],
       "allowedInternalDependencies": [
-        "winwincode-audit",
-        "winwincode-backup",
-        "winwincode-domain",
-        "winwincode-storage"
+        "winwincode-domain"
       ]
     },
     {
@@ -841,7 +838,7 @@
         "recovery-drill",
         "evidence-export",
         "integration-infrastructure",
-        "enterprise-object-store",
+        "s3-artifact-adapter",
         "enterprise-postgres",
         "test-asset-analysis"
       ]

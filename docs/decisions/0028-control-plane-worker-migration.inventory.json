@@ -33,7 +33,7 @@
     "crates/winwincode-connector-webhook/src",
     "crates/winwincode-integration-core/src",
     "crates/winwincode-integration-sqlite/src",
-    "crates/winwincode-object-store/src",
+    "crates/winwincode-s3-artifact-adapter/src",
     "crates/winwincode-postgres/src",
     "crates/winwincode-test-assets/src",
     "crates/winwincode-control-plane/src",
@@ -1413,23 +1413,23 @@
       ]
     },
     {
-      "id": "enterprise-object-store",
+      "id": "s3-artifact-adapter",
       "sourcePaths": [
-        "crates/winwincode-object-store/src/lib.rs"
+        "crates/winwincode-s3-artifact-adapter/src/lib.rs"
       ],
       "entrySymbols": [
-        "S3ArtifactObjectStore"
+        "S3ArtifactAdapter"
       ],
       "targetOwners": [
         "control-plane"
       ],
       "targetModules": [
-        "crates/winwincode-object-store"
+        "crates/winwincode-s3-artifact-adapter"
       ],
       "phase": "enterprise",
       "disposition": "retain",
       "observableContracts": [
-        "verified encrypted artifact object storage receipts"
+        "verified S3-compatible Artifact byte receipts"
       ],
       "behaviorBaselineIds": [
         "success",
