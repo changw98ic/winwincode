@@ -487,7 +487,7 @@ export async function buildInfrastructureRelease({ root, contractPath, outputDir
 
     const privateKey = createPrivateKey(await readFile(signingKeyPath))
     const publicKey = createPublicKey(privateKey)
-    const publicKeyBytes = publicKey.export({ type: 'spki', format: 'pem' })
+    const publicKeyBytes = Buffer.from(publicKey.export({ type: 'spki', format: 'pem' }))
     const publicKeySha256 = sha256(publicKey.export({ type: 'spki', format: 'der' }))
     if (publicKeySha256 !== contract.signing.publicKeySha256) fail('SIGNING_KEY_MISMATCH', 'private key does not match the release contract')
     const committedPublicKey = await readFile(join(sourceRoot, contract.signing.publicKey))
