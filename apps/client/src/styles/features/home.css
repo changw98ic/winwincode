@@ -64,6 +64,30 @@
   border-color: var(--wwc-color-text);
 }
 
+/* 设计评审 P0-1:仅看待处理筛选开关,与项目范围/新建任务同排。 */
+.wwc-home-attention-only {
+  padding: var(--wwc-space-2) var(--wwc-space-3);
+  border: var(--wwc-border-width-control) solid var(--wwc-color-border);
+  border-radius: var(--wwc-radius-md);
+  background: var(--wwc-color-surface);
+  color: var(--wwc-color-text);
+  font: inherit;
+  font-size: var(--wwc-font-size-sm);
+  font-weight: var(--wwc-font-weight-strong);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.wwc-home-attention-only:hover {
+  border-color: var(--wwc-color-text);
+}
+
+.wwc-home-attention-only[aria-pressed='true'],
+.wwc-home-attention-only[data-active='true'] {
+  background: var(--wwc-color-accent);
+  border-color: var(--wwc-color-border);
+}
+
 /* Design page 04: the polite status line stays for announcements but renders
    nowhere — the board canvas carries no status banner. */
 .wwc-home-status {

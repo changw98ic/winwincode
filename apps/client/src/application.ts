@@ -97,7 +97,6 @@ import {
   type SurfaceCapability,
 } from './navigation-capability.js'
 import type {
-  AttentionNotificationControl,
   AttentionNotificationMonitor,
 } from './attention-notifications.js'
 
@@ -754,11 +753,6 @@ export function mountWinWinCodeClient(
     attentionMonitorScope = null
   }
 
-  /** The shell-owned control the Attention Center consent button binds to. */
-  function notificationsControl(): { readonly notifications: AttentionNotificationControl } | {} {
-    return attentionMonitor === null ? {} : { notifications: attentionMonitor }
-  }
-
   /**
    * Keep exactly one shell-owned notification monitor for the selected
    * repository Scope.  It opens no event subscription of its own, so the
@@ -777,7 +771,7 @@ export function mountWinWinCodeClient(
     })
     if (attentionMonitor !== null && attentionMonitorScope === identity) return
     closeAttentionMonitor()
-    const badgeTarget = links.get('attention')
+    const badgeTarget = links.get('home')
     if (badgeTarget === undefined) return
     const notifications = await import('./attention-notifications.js')
     if (closed || generation !== renderGeneration) return
@@ -1219,47 +1213,6 @@ export function mountWinWinCodeClient(
     }
   }
 
-  async function renderAttention(generation: number): Promise<void> {
-    const context = authenticatedRouteContext()
-    if (context === null) return
-    // Design page 06: the Attention Center is the one unified inbox for every
-    // entry that needs the user.  Legacy `?session=` deep links land here too;
-    // each card carries its own follow-up link.
-    const controller = new AbortController()
-    featureController = controller
-    routeLoading('正在加载待我处理…')
-    try {
-      const [{ createAttentionCenterViewModel }, { mountAttentionCenterPage }] = await Promise.all([
-        import('./attention-center-view-model.js'),
-        import('./attention-center-page.js'),
-      ])
-      if (closed || generation !== renderGeneration || controller.signal.aborted) return
-      const model = createAttentionCenterViewModel({
-        client: controlPlane,
-        actor: context.actor,
-        scope: context.scope,
-        subscriptionId: contractId(
-          'sub',
-          browser.crypto,
-        ) as ControlPlaneWebSocketSubscriptionId,
-        nextRequestId: () => contractId('req', browser.crypto) as RequestId,
-      })
-      activeFeature = mountAttentionCenterPage({
-        root: slot,
-        model,
-        scopeSelection: scopeSelectionFromHash(browser.location.hash),
-        // The page owns the Attention Center snapshot; the shell notification
-        // monitor is a separate, lighter projection for badges and alerts.
-        ownsModel: true,
-        ...notificationsControl(),
-        readOnly: activeRouteReadOnly,
-      })
-    } catch (error) {
-      if (closed || generation !== renderGeneration || controller.signal.aborted) return
-      showRouteFailure(error, 'ATTENTION_ROUTE_FAILURE')
-    }
-  }
-
   function performRender(scopeSelectorMode: ScopeSelectorRenderMode = 'replace'): void {
     renderGeneration += 1
     const generation = renderGeneration
@@ -1365,9 +1318,7 @@ export function mountWinWinCodeClient(
     // 路由切换会改变「当前会话」的有效性,最近对话的高亮随之重算。
     renderRecentChats()
     for (const [id, link] of links) {
-      // 设计稿 06:待我处理属于看板上下文,任务看板保持高亮。
       const current = id === activeSurface.id
-        || (activeSurface.id === 'attention' && id === 'home')
       if (current) link.setAttribute('aria-current', 'page')
       else link.removeAttribute('aria-current')
       // 设计稿 03b:会话打开时高亮的是会话行,不是「新对话」导航项。
@@ -1419,8 +1370,6 @@ export function mountWinWinCodeClient(
       launchRoute(renderDevice(generation), generation, 'DEVICE_ROUTE_FAILURE')
     } else if (activeSurface.id === 'settings') {
       launchRoute(renderSettings(generation), generation, 'SETTINGS_ROUTE_FAILURE')
-    } else if (activeSurface.id === 'attention') {
-      launchRoute(renderAttention(generation), generation, 'ATTENTION_ROUTE_FAILURE')
     } else if (activeSurface.id === 'onboarding') {
       launchRoute(Promise.resolve(renderOnboarding(generation)), generation, 'ONBOARDING_ROUTE_FAILURE')
     }
@@ -1538,7 +1487,6 @@ export function mountWinWinCodeClient(
       || activeSurface.id === 'device'
       || activeSurface.id === 'extensions'
       || activeSurface.id === 'settings'
-      || activeSurface.id === 'attention'
       || activeSurface.id === 'onboarding'
     )) render()
   })

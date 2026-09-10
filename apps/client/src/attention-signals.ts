@@ -197,13 +197,12 @@ export function attentionSignalsTitle(base: string, badge: AttentionSignalBadge)
 }
 
 /**
- * The exact still-authorized context for one signal: the Attention Center
- * (design page 06) is the one unified inbox for every entry that needs the
- * user, so each notification deep links there and the card carries its own
- * follow-up link.
+ * The exact still-authorized context for one signal: the task board is the
+ * one inbox for every entry that needs the user, so each notification deep
+ * links there with the attention-only filter on.
  */
 export function attentionSignalRouteHash(selection: ScopeRouteSelection): string {
-  return scopeHash('#/attention', selection)
+  return scopeHash('#/home?filter=attention', selection)
 }
 
 export interface AttentionSignalGate {

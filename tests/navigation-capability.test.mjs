@@ -90,7 +90,7 @@ const SIGNED_OUT = { status: 'signed-out', session: null, error: null }
 test('signed-out and restoring sessions hide every navigation entry', () => {
   for (const status of ['signed-out', 'restoring']) {
     const capabilities = capabilityMap(status)
-    for (const surface of ['home', 'chat', 'projects', 'extensions', 'device', 'settings', 'attention']) {
+    for (const surface of ['home', 'chat', 'projects', 'extensions', 'device', 'settings']) {
       assert.equal(
         capabilities[surface].capability,
         'hidden',
@@ -181,18 +181,13 @@ test('runtime revocation moves every entry back to hidden', () => {
 })
 
 test('surfaceCapabilityForHash resolves the exact surface a URL will enter', () => {
-  assert.equal(surfaceCapabilityForHash('#/attention', {
-    status: 'signed-in',
-    session: sessionWith([organizationScope, repositoryScope]),
-    error: null,
-  }).surface.id, 'attention')
   assert.equal(surfaceCapabilityForHash('#/chat?session=psn_1', {
     status: 'signed-in',
     session: sessionWith([repositoryScope]),
     error: null,
   }).surface.id, 'chat')
-  // UI-504: an address without a product path, and an unknown path, both enter
-  // the canonical Home dashboard instead of an arbitrary product area.
+  // UI-504: an address without a product path, an unknown path, and the retired
+  // /attention route all enter the canonical Home dashboard.
   assert.equal(surfaceCapabilityForHash('', {
     status: 'signed-in',
     session: sessionWith([repositoryScope]),
@@ -201,6 +196,11 @@ test('surfaceCapabilityForHash resolves the exact surface a URL will enter', () 
   assert.equal(surfaceCapabilityForHash('#/unknown-route', {
     status: 'signed-in',
     session: sessionWith([repositoryScope]),
+    error: null,
+  }).surface.id, 'home')
+  assert.equal(surfaceCapabilityForHash('#/attention', {
+    status: 'signed-in',
+    session: sessionWith([organizationScope, repositoryScope]),
     error: null,
   }).surface.id, 'home')
 })
