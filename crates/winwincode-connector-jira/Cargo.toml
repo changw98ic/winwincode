@@ -6,7 +6,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-include = ["src/**", "tests/**", "Cargo.toml", "README.md"]
+include = ["src/**", "Cargo.toml", "README.md"]
 
 [dependencies]
 hmac = "=0.12.1"

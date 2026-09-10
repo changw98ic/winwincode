@@ -12925,19 +12925,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "winwincode-s3-artifact-adapter"
-version = "0.1.0-alpha.1"
-dependencies = [
- "rcgen",
- "rustls",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "ureq",
- "winwincode-domain",
-]
-
-[[package]]
 name = "winwincode-observability-core"
 version = "0.1.0-alpha.1"
 dependencies = [
@@ -12975,6 +12962,19 @@ version = "0.1.0-alpha.1"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "winwincode-s3-artifact-adapter"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "rcgen",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "ureq",
+ "winwincode-domain",
 ]
 
 [[package]]

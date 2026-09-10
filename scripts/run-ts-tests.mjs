@@ -47,6 +47,7 @@ const canonicalTestFiles = Object.freeze([
   'tests/client-users-facade.test.mjs',
   'tests/client-server-separation.test.mjs',
   'tests/community-persistence-ports.test.mjs',
+  'tests/community-infrastructure-release.test.mjs',
   'tests/engineering-runtime-backlog.test.mjs',
   'tests/engineering-runtime-design.test.mjs',
   'tests/engineering-runtime-contract.test.mjs',

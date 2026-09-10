@@ -52,13 +52,13 @@ use winwincode_integration_core::{
 };
 use winwincode_integration_sqlite::IntegrationStorage;
 use winwincode_publication::{
-    CredentialResolutionError, GitHubCredential, GitHubCredentialResolver, PolicyPermission,
-    PublicationAuthorization, PublicationCommandContext, PublicationFactBinding, PublicationLedger,
-    PublicationPolicyAudit, PublicationPolicyAuditError, PublicationPolicyContext,
-    PublicationPolicyDecision, PublicationPolicyEvidence, PublicationPolicyOrigin,
-    PublicationPublishCommand, PublicationRequester, PublicationResourceKind,
-    PublicationSourceIssue, PublicationState, PublicationTarget, RepositoryPolicyScope,
-    RepositoryPublicationPolicy,
+    CredentialResolutionError, GitHubAdapterConfig, GitHubCredential, GitHubCredentialResolver,
+    GitHubPublicationAdapter, PolicyPermission, PublicationAuthorization,
+    PublicationCommandContext, PublicationFactBinding, PublicationLedger, PublicationPolicyAudit,
+    PublicationPolicyAuditError, PublicationPolicyContext, PublicationPolicyDecision,
+    PublicationPolicyEvidence, PublicationPolicyOrigin, PublicationPublishCommand,
+    PublicationRequester, PublicationResourceKind, PublicationSourceIssue, PublicationState,
+    PublicationTarget, RepositoryPolicyScope, RepositoryPublicationPolicy,
 };
 use winwincode_storage::{
     ProductStateStorage, ReceiptActorKey, ReceiptIdentity, ReceiptScopeKey, SqliteStorage,
@@ -1278,10 +1278,12 @@ fn publish_canonical_set(
     let publication_root = state_directory.join("publication");
     let mut storage = SqliteStorage::open(&publication_root)
         .map_err(|_| GateError::new(GateErrorCode::DurableState))?;
-    let mut adapter = config
-        .connector
-        .publication_adapter(broker)
-        .map_err(|_| GateError::new(GateErrorCode::CanonicalPath))?;
+    let publication_config = GitHubAdapterConfig::try_new(
+        config.connector.credential_reference_id().clone(),
+        config.connector.api_base_url().to_owned(),
+    )
+    .map_err(|_| GateError::new(GateErrorCode::CanonicalPath))?;
+    let mut adapter = GitHubPublicationAdapter::new(publication_config, broker);
     {
         let mut coordinator = winwincode_publication::PublicationCoordinator::new(
             PublicationLedger::new(&mut storage),

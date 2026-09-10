@@ -32,7 +32,8 @@ use winwincode_integration_core::{
 };
 use winwincode_integration_sqlite::IntegrationStorage;
 use winwincode_publication::{
-    CredentialResolutionError, GitHubCredential, GitHubCredentialResolver,
+    CredentialResolutionError, GitHubAdapterConfig, GitHubCredential, GitHubCredentialResolver,
+    GitHubPublicationAdapter,
 };
 
 const WEBHOOK_SECRET: &[u8] = b"github-webhook-secret-fixture";
@@ -902,8 +903,11 @@ impl GitHubCredentialResolver for NeverPublicationCredential {
 #[test]
 fn publication_adapter_reuses_the_same_credential_reference_and_api_boundary() {
     let config = base_config("https://api.github.com".to_owned(), GitHubTlsRoots::WebPki);
-    let adapter = config
-        .publication_adapter(NeverPublicationCredential)
-        .expect("canonical Publication adapter");
+    let publication_config = GitHubAdapterConfig::try_new(
+        config.credential_reference_id().clone(),
+        config.api_base_url().to_owned(),
+    )
+    .expect("canonical Publication configuration");
+    let adapter = GitHubPublicationAdapter::new(publication_config, NeverPublicationCredential);
     let _resolver = adapter.into_credential_resolver();
 }

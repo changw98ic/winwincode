@@ -13,10 +13,6 @@ use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use winwincode_domain::{CredentialReferenceId, GitHubRepositorySlug, IntegrationId, Sha256Digest};
-use winwincode_publication::{
-    GitHubAdapterConfig, GitHubCredentialResolver, GitHubPublicationAdapter,
-};
-
 use winwincode_integration_core::model::{MAX_SAFE_INTEGER, validate_integration_id};
 use winwincode_integration_core::{
     ConnectorAuthority, ConnectorCallError, ConnectorCallErrorKind, ConnectorPort,
@@ -200,22 +196,9 @@ impl GitHubConnectorConfig {
         &self.repository
     }
 
-    /// Builds the existing canonical Publication adapter against the same
-    /// credential reference and GitHub.com/GHES API boundary.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a configuration not accepted by the Publication adapter.
-    pub fn publication_adapter<Resolver: GitHubCredentialResolver>(
-        &self,
-        resolver: Resolver,
-    ) -> Result<GitHubPublicationAdapter<Resolver>, IntegrationError> {
-        let config = GitHubAdapterConfig::try_new(
-            self.credential_reference_id.clone(),
-            self.api_base_url.clone(),
-        )
-        .map_err(|_| invalid("GitHub Publication configuration is invalid"))?;
-        Ok(GitHubPublicationAdapter::new(config, resolver))
+    #[must_use]
+    pub fn api_base_url(&self) -> &str {
+        &self.api_base_url
     }
 }
 
