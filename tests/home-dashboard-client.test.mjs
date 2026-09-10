@@ -33,13 +33,11 @@ const [
   { ControlPlaneClientError },
   viewModelModule,
   pageModule,
-  visitsModule,
   surfaceModule,
 ] = await Promise.all([
   load('community-control-plane-client.js'),
   load('home-dashboard-view-model.js'),
   load('home-dashboard-page.js'),
-  load('home-recent-visits.js'),
   load('client-surface.js'),
 ])
 
@@ -57,16 +55,8 @@ const {
   homeDashboardAnnouncement,
   homeDashboardPresentation,
   homeDecisionHash,
-  homeDeliveryHash,
   mountHomeDashboardPage,
 } = pageModule
-const {
-  DEFAULT_HOME_VISIT_LIMIT,
-  HOME_VISIT_STORAGE_KEY,
-  createHomeRecentVisitStore,
-  homeDeliveryVisitFromHash,
-  homeVisitScopeKey,
-} = visitsModule
 const { CLIENT_SURFACES, clientSurfaceFromHash } = surfaceModule
 
 const schemaVersion = 'winwincode/v1'
@@ -303,15 +293,6 @@ function contractFake(state = {}) {
   }
 }
 
-function memoryStorage(initial = {}) {
-  const values = new Map(Object.entries(initial))
-  return {
-    values,
-    getItem: key => (values.has(key) ? values.get(key) : null),
-    setItem: (key, value) => { values.set(key, String(value)) },
-    removeItem: key => { values.delete(key) },
-  }
-}
 
 function homeModel(client, options = {}) {
   let nextRequest = 0
@@ -324,7 +305,6 @@ function homeModel(client, options = {}) {
       nextRequest += 1
       return requestId(nextRequest)
     },
-    visits: createHomeRecentVisitStore({ storage: memoryStorage() }),
     ...options,
   })
 }
@@ -410,92 +390,20 @@ test('Home is the canonical default surface and every product entry stays reacha
     'projects',
     'extensions',
     'device',
-    'strongflow',
     'attention',
     'settings',
-    'enterprise',
   ])
   assert.equal(clientSurfaceFromHash('').id, 'home')
   assert.equal(clientSurfaceFromHash('#/home?x=1').id, 'home')
   assert.equal(clientSurfaceFromHash('#/chat').id, 'chat')
-  assert.equal(clientSurfaceFromHash('#/strongflow?delivery=dlv_1').id, 'strongflow')
+  assert.equal(clientSurfaceFromHash('#/attention?session=psn_1').id, 'attention')
   for (const surface of CLIENT_SURFACES) {
     assert.equal(surface.default, surface.id === 'home', surface.id)
   }
 })
 
-test('recent Delivery visits stay browser-local, scope scoped, recency ordered and bounded', () => {
-  const storage = memoryStorage()
-  const store = createHomeRecentVisitStore({ storage })
-  const older = Date.parse('2026-09-02T09:00:00.000Z')
-  const newer = Date.parse('2026-09-03T08:00:00.000Z')
-  store.record(deliveryId, scopeSelection, older)
-  store.record(executingDeliveryId, scopeSelection, newer)
-  store.record(deliveredDeliveryId, scopeSelection, older)
-  // A repeated visit moves the Delivery to the front instead of duplicating it.
-  store.record(deliveryId, scopeSelection, Date.parse('2026-09-03T08:30:00.000Z'))
-  // A visit in another repository Scope never leaks into this Scope.
-  store.record(blockedDeliveryId, otherScopeSelection(), newer)
 
-  assert.deepEqual(store.visits(scopeSelection, NOW).map(visit => visit.deliveryId), [
-    deliveryId,
-    executingDeliveryId,
-    deliveredDeliveryId,
-  ])
-  assert.deepEqual(store.visits(otherScopeSelection(), NOW).map(visit => visit.deliveryId), [
-    blockedDeliveryId,
-  ])
-  assert.deepEqual(store.visits(scopeSelection, NOW + 31 * 24 * 3_600_000), [])
-  assert.equal(homeVisitScopeKey(scopeSelection), homeVisitScopeKey({ ...scopeSelection }))
-  assert.notEqual(homeVisitScopeKey(scopeSelection), homeVisitScopeKey(otherScopeSelection()))
 
-  const persisted = JSON.parse(storage.values.get(HOME_VISIT_STORAGE_KEY))
-  assert.deepEqual(Object.keys(persisted), ['version', 'visits'])
-  for (const entry of persisted.visits) {
-    assert.deepEqual(Object.keys(entry).sort(), ['at', 'deliveryId', 'kind', 'scope'])
-    assert.equal(entry.kind, 'delivery')
-    assert.match(
-      entry.scope,
-      /^org_[a-z0-9]{26}\/wsp_[a-z0-9]{26}\/prj_[a-z0-9]{26}\/rep_[a-z0-9]{26}$/u,
-    )
-  }
-})
-
-test('recent visits keep a bounded number of records and survive unusable storage', () => {
-  const storage = memoryStorage()
-  const store = createHomeRecentVisitStore({ storage, keepLimit: 2 })
-  store.record(canonicalId('dlv', 1), scopeSelection, 1)
-  store.record(canonicalId('dlv', 2), scopeSelection, 2)
-  store.record(canonicalId('dlv', 3), scopeSelection, 3)
-  assert.equal(JSON.parse(storage.values.get(HOME_VISIT_STORAGE_KEY)).visits.length, 2)
-  assert.deepEqual(store.visits(scopeSelection, 4).map(visit => visit.deliveryId), [
-    canonicalId('dlv', 3),
-    canonicalId('dlv', 2),
-  ])
-  assert.equal(DEFAULT_HOME_VISIT_LIMIT, 4)
-
-  const throwing = {
-    getItem() { throw new Error('storage blocked') },
-    setItem() { throw new Error('storage blocked') },
-    removeItem() { throw new Error('storage blocked') },
-  }
-  const blocked = createHomeRecentVisitStore({ storage: throwing })
-  blocked.record(deliveryId, scopeSelection, NOW)
-  assert.deepEqual(blocked.visits(scopeSelection, NOW), [])
-})
-
-test('a Delivery deep link is recognised and every other route is ignored', () => {
-  assert.equal(
-    homeDeliveryVisitFromHash(
-      '#/strongflow?delivery=dlv_00000000000000000000000001&stageRun=str_00000000000000000000000001',
-    ),
-    deliveryId,
-  )
-  assert.equal(homeDeliveryVisitFromHash('#/chat?session=psn_00000000000000000000000001'), null)
-  assert.equal(homeDeliveryVisitFromHash('#/strongflow?delivery=not-a-delivery'), null)
-  assert.equal(homeDeliveryVisitFromHash('#/strongflow?delivery='), null)
-  assert.equal(homeDeliveryVisitFromHash('#/home'), null)
-})
 
 test('the dashboard groups Delivery projections into bounded, ordered sections', () => {
   const running = deliverySummary({
@@ -548,7 +456,6 @@ test('the dashboard groups Delivery projections into bounded, ordered sections',
     ]),
     attention: attentionState([]),
     usage: usageState(),
-    visits: [],
   })
 
   assert.equal(cards.status, 'ready')
@@ -569,7 +476,6 @@ test('the dashboard groups Delivery projections into bounded, ordered sections',
     active: 3,
     failing: 1,
     completed: 2,
-    visited: 0,
   })
   assert.equal(cards.active[0]?.failedTasks, 0)
   assert.equal(cards.active[1]?.activeStageRunId, stageRunId)
@@ -587,8 +493,7 @@ test('the dashboard groups Delivery projections into bounded, ordered sections',
     ]),
     attention: attentionState([]),
     usage: usageState(),
-    visits: [],
-    limits: { decisions: 1, deliveries: 1, visits: 1 },
+    limits: { decisions: 1, deliveries: 1 },
   })
   assert.equal(bounded.active.length, 1)
   assert.equal(bounded.completed.length, 1)
@@ -651,7 +556,6 @@ test('an empty first-use Scope reports an explicit empty dashboard', () => {
     deliveries: deliveryState([]),
     attention: attentionState([]),
     usage: usageState(),
-    visits: [],
   })
   assert.equal(state.firstUse, true)
   assert.equal(state.status, 'ready')
@@ -660,7 +564,6 @@ test('an empty first-use Scope reports an explicit empty dashboard', () => {
     active: 0,
     failing: 0,
     completed: 0,
-    visited: 0,
   })
 
   // A failed Attention read hides the first-use claim: the dashboard cannot
@@ -669,7 +572,6 @@ test('an empty first-use Scope reports an explicit empty dashboard', () => {
     deliveries: deliveryState([]),
     attention: attentionState([], { status: 'error' }),
     usage: usageState(),
-    visits: [],
   })
   assert.equal(uncertain.firstUse, false)
   assert.equal(uncertain.status, 'partial')
@@ -683,32 +585,10 @@ test('an empty first-use Scope reports an explicit empty dashboard', () => {
     deliveries: deliveryState([], { status: 'error' }),
     attention: attentionState([], { status: 'error' }),
     usage: usageState({ status: 'error' }),
-    visits: [],
   })
   assert.equal(failed.status, 'error')
 })
 
-test('the dashboard carries resolved recent visits with their visited time', () => {
-  const state = homeDashboardState({
-    deliveries: deliveryState([deliverySummary({ title: 'Visited delivery' })]),
-    attention: attentionState([]),
-    usage: usageState(),
-    visits: [{ kind: 'delivery', deliveryId, at: '2026-09-03T08:59:00.000Z' }],
-  })
-  assert.equal(state.visited.length, 1)
-  assert.equal(state.visited[0]?.title, 'Visited delivery')
-  assert.equal(state.visited[0]?.visitedAt, '2026-09-03T08:59:00.000Z')
-  assert.equal(state.counts.visited, 1)
-
-  // A visit whose Delivery left the Scope is dropped instead of showing a raw id.
-  const dropped = homeDashboardState({
-    deliveries: deliveryState([]),
-    attention: attentionState([]),
-    usage: usageState(),
-    visits: [{ kind: 'delivery', deliveryId: deliveredDeliveryId, at: '2026-09-03T08:59:00.000Z' }],
-  })
-  assert.deepEqual(dropped.visited, [])
-})
 
 test('the composed view model reads every existing projection once and publishes one bounded dashboard', async () => {
   const client = contractFake({
@@ -761,7 +641,6 @@ test('the composed view model reads every existing projection once and publishes
     active: 1,
     failing: 1,
     completed: 0,
-    visited: 0,
   })
   assert.deepEqual(model.state.decisions.map(card => card.kind), ['attention', 'approval'])
   assert.equal(model.state.decisions[0]?.title, 'Review the proposed delivery scope')
@@ -797,32 +676,12 @@ test('a decision card links to the exact decision surface and the exact Chat ses
   const inputCard = decisionCard({ stageRunId })
   assert.equal(
     homeDecisionHash(attentionCard, scopeSelection),
-    '#/strongflow?delivery=dlv_00000000000000000000000001'
-      + '&stageRun=str_00000000000000000000000001'
-      + '&view=unified'
-      + '&organizationId=org_00000000000000000000000001'
-      + '&workspaceId=wsp_00000000000000000000000001'
-      + '&projectId=prj_00000000000000000000000001'
-      + '&repositoryId=rep_00000000000000000000000001',
+    null,
+    'a Delivery-bound Attention renders no action instead of a dead end',
   )
   assert.equal(
     homeDecisionHash(inputCard, scopeSelection),
-    '#/attention?session=psn_00000000000000000000000001'
-      + '&organizationId=org_00000000000000000000000001'
-      + '&workspaceId=wsp_00000000000000000000000001'
-      + '&projectId=prj_00000000000000000000000001'
-      + '&repositoryId=rep_00000000000000000000000001',
-  )
-  assert.equal(
-    homeDecisionHash(inputCard, scopeSelection, [{
-      deliveryId,
-      deliveryTitle: 'Delivery under attention',
-      deliveryRevision: 3,
-      activeStageRunId: stageRunId,
-    }]),
-    '#/attention?session=psn_00000000000000000000000001'
-      + '&delivery=dlv_00000000000000000000000001'
-      + '&stageRun=str_00000000000000000000000001'
+    '#/chat?session=psn_00000000000000000000000001'
       + '&organizationId=org_00000000000000000000000001'
       + '&workspaceId=wsp_00000000000000000000000001'
       + '&projectId=prj_00000000000000000000000001'
@@ -838,22 +697,6 @@ test('a decision card links to the exact decision surface and the exact Chat ses
   )
 })
 
-test('a Delivery card links to the exact StrongFlow route of its active StageRun', () => {
-  const scoped = '&organizationId=org_00000000000000000000000001'
-    + '&workspaceId=wsp_00000000000000000000000001'
-    + '&projectId=prj_00000000000000000000000001'
-    + '&repositoryId=rep_00000000000000000000000001'
-  assert.equal(
-    homeDeliveryHash({ deliveryId, activeStageRunId: stageRunId }, scopeSelection),
-    '#/strongflow?delivery=dlv_00000000000000000000000001'
-      + '&stageRun=str_00000000000000000000000001&view=unified'
-      + scoped,
-  )
-  assert.equal(
-    homeDeliveryHash({ deliveryId, activeStageRunId: null }, scopeSelection),
-    `#/strongflow?delivery=dlv_00000000000000000000000001&view=unified${scoped}`,
-  )
-})
 
 test('the dashboard announcement names every section count and its gaps', () => {
   assert.ok(homeDashboardPresentation().sectionHeading.decisions.length > 0)
@@ -861,31 +704,26 @@ test('the dashboard announcement names every section count and its gaps', () => 
     deliveries: deliveryState([]),
     attention: attentionState([]),
     usage: usageState(),
-    visits: [],
   })), /^就绪 · 0 项待决策/u)
   assert.match(homeDashboardAnnouncement(homeDashboardState({
     deliveries: deliveryState([deliverySummary()]),
     attention: attentionState([decisionCard()]),
     usage: usageState(),
-    visits: [],
   })), /1 项待决策 · 1 个运行中 · 0 个失败或阻塞 · 0 个已完成/u)
   assert.match(homeDashboardAnnouncement(homeDashboardState({
     deliveries: deliveryState([]),
     attention: attentionState([], { status: 'error' }),
     usage: usageState({ status: 'error' }),
-    visits: [],
   })), /^就绪（部分缺省）/u)
   assert.match(homeDashboardAnnouncement(homeDashboardState({
     deliveries: deliveryState([], { status: 'loading' }),
     attention: attentionState([], { status: 'loading' }),
     usage: usageState({ status: 'loading' }),
-    visits: [],
   })), /^正在读取看板/u)
   assert.match(homeDashboardAnnouncement(homeDashboardState({
     deliveries: deliveryState([], { status: 'error' }),
     attention: attentionState([], { status: 'error' }),
     usage: usageState({ status: 'error' }),
-    visits: [],
   })), /^看板读取失败/u)
 })
 
@@ -1090,7 +928,6 @@ test('the Home page mounts the task board chrome, one polite live region, and ex
       }),
     ]),
     usage: usageState(),
-    visits: [{ kind: 'delivery', deliveryId: deliveredDeliveryId, at: '2026-09-03T08:59:00.000Z' }],
   })
   const model = fakeHomeModel([state])
   const mountedPage = mountHomeDashboardPage({ root: rootElement, model, scopeSelection })
@@ -1152,12 +989,13 @@ test('the Home page mounts the task board chrome, one polite live region, and ex
   assert.equal(byClass(attentionCard, 'wwc-home-card-status').textContent, '阻塞 · 需要立即决策')
   assert.equal(byClass(attentionCard, 'wwc-home-card-action').textContent, '验收交付')
 
-  // Running cards: 强流程 + the mapped status text, with the white progress action.
+  // Running cards: 强流程 + the mapped status text; no dead-end action link.
   const runningCard = allByClass(rootElement, 'wwc-home-card')
     .find(card => card.dataset.kind === 'delivery')
   assert.notEqual(runningCard, undefined)
   assert.equal(byClass(runningCard, 'wwc-home-card-status').textContent, '强流程 · 正在执行')
-  assert.equal(byClass(runningCard, 'wwc-home-card-action').textContent, '查看进度')
+  assert.equal(byClass(runningCard, 'wwc-home-card-action').textContent, '')
+  assert.equal(byClass(runningCard, 'wwc-home-card-action').getAttribute('href'), null)
 
   const actions = descendants(rootElement)
     .filter(node => node.className === 'wwc-home-card-action')
@@ -1165,27 +1003,14 @@ test('the Home page mounts the task board chrome, one polite live region, and ex
   const scoped = `organizationId=${scope.organizationId}&workspaceId=${scope.workspaceId}`
     + `&projectId=${scope.projectId}&repositoryId=${scope.repositoryId}`
   assert.equal(
-    actions.filter(href => href === `#/attention?session=${productSessionId}&${scoped}`).length,
+    actions.filter(href => href === `#/chat?session=${productSessionId}&${scoped}`).length,
     1,
-    'the input decision opens its exact session decisions',
+    'the input decision opens its exact Chat session',
   )
   assert.equal(
-    actions.filter(href => href === `#/strongflow?delivery=${deliveryId}`
-      + `&stageRun=${stageRunId}&view=unified&${scoped}`).length,
+    actions.filter(href => href.startsWith('#/')).length,
     1,
-    'the delivery-bound decision opens the exact Delivery context',
-  )
-  assert.equal(
-    actions.filter(href => href === `#/strongflow?delivery=${executingDeliveryId}`
-      + `&stageRun=${stageRunId}&view=unified&${scoped}`).length,
-    1,
-    'the running card opens the exact StrongFlow StageRun',
-  )
-  assert.equal(
-    actions.filter(href => href === `#/strongflow?delivery=${deliveredDeliveryId}`
-      + `&view=unified&${scoped}`).length,
-    2,
-    'the visited Delivery keeps the full canonical route in both of its sections',
+    'every other card renders no dead-end action link',
   )
   const chatLinks = descendants(rootElement)
     .filter(node => node.className === 'wwc-home-card-chat' && node.hidden !== true)
@@ -1194,7 +1019,7 @@ test('the Home page mounts the task board chrome, one polite live region, and ex
     descendants(rootElement)
       .filter(node => node.className === 'wwc-home-card-chat' && node.hidden === true)
       .map(node => node.href),
-    ['', '', '', '', ''],
+    ['', '', '', ''],
     'cards without a Chat session expose no chat link at all',
   )
   assert.deepEqual(chatLinks, [homeChatHash(productSessionId, scopeSelection)])
@@ -1203,7 +1028,7 @@ test('the Home page mounts the task board chrome, one polite live region, and ex
   // history groups render as collapsed hairline rows.
   assert.equal(allByClass(rootElement, 'wwc-usage-health').length, 0)
   assert.equal(allByClass(rootElement, 'wwc-home-first-use').length, 0)
-  for (const id of ['failing', 'completed', 'visited']) {
+  for (const id of ['failing', 'completed']) {
     const section = descendants(page).find(node => node.dataset?.section === id)
     assert.notEqual(section, undefined)
     const toggle = byClass(section, 'wwc-home-section-toggle')
@@ -1236,13 +1061,11 @@ test('the Home page stays usable when one projection is unavailable and closes i
     deliveries: deliveryState([deliverySummary({ title: 'Running delivery' })]),
     attention: attentionState([]),
     usage: usageState(),
-    visits: [],
   })
   const partial = homeDashboardState({
     deliveries: deliveryState([deliverySummary({ title: 'Running delivery' })]),
     attention: attentionState([], { status: 'error' }),
     usage: usageState({ status: 'error' }),
-    visits: [],
   })
   const model = fakeHomeModel([ready, partial])
   const mountedPage = mountHomeDashboardPage({
@@ -1270,7 +1093,6 @@ test('an empty Scope stays honest without the first-use block or usage panel', (
     deliveries: deliveryState([]),
     attention: attentionState([]),
     usage: usageState(),
-    visits: [],
   })
   const model = fakeHomeModel([empty])
   const mountedPage = mountHomeDashboardPage({

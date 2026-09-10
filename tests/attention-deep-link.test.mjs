@@ -1,6 +1,7 @@
-// [UI-100.3] Attention entry deep links: every card opens the authoritative
-// run page / StageRun context through the canonical typed route boundary, and
-// a decision link carries the exact execution origin with it.
+// [UI-100.3] Attention entry deep links: input and approval decisions open the
+// Chat session that raised them; a Delivery-bound business Attention renders no
+// action instead of a dead end, because the community client has no standalone
+// delivery acceptance surface.
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { pathToFileURL } from 'node:url'
@@ -39,7 +40,6 @@ const pageModule = await cachedModule('attention-center-page.js')
 
 const {
   attentionCenterItemHash,
-  attentionCenterOriginHash,
   mountAttentionCenterPage,
 } = pageModule
 
@@ -53,8 +53,6 @@ const scopeSelection = { ...scope }
 const productSessionId = 'psn_00000000000000000000000001'
 const deliveryId = 'dlv_00000000000000000000000001'
 const stageRunId = 'str_00000000000000000000000001'
-const otherDeliveryId = 'dlv_00000000000000000000000009'
-const otherStageRunId = 'str_00000000000000000000000009'
 
 function centerItem(overrides = {}) {
   return {
@@ -79,93 +77,36 @@ function centerItem(overrides = {}) {
   }
 }
 
-function origin(overrides = {}) {
-  return {
-    deliveryId,
-    deliveryTitle: 'Delivery under attention',
-    deliveryRevision: 12,
-    activeStageRunId: stageRunId,
-    ...overrides,
-  }
-}
-
 function parametersOf(hash) {
   const query = hash.slice(hash.indexOf('?') + 1)
   return Object.fromEntries(new URLSearchParams(query))
 }
 
-test('a business Attention opens the run page through the typed StrongFlow route', () => {
-  const hash = attentionCenterItemHash(centerItem({
+test('a decision links the Chat session that raised it, with the exact Scope', () => {
+  assert.equal(
+    attentionCenterItemHash(centerItem(), scopeSelection),
+    `#/chat?session=${productSessionId}`
+      + `&organizationId=${scope.organizationId}&workspaceId=${scope.workspaceId}`
+      + `&projectId=${scope.projectId}&repositoryId=${scope.repositoryId}`,
+  )
+})
+
+test('a business Attention renders no action instead of a dead end', () => {
+  assert.equal(attentionCenterItemHash(centerItem({
     kind: 'attention',
     id: 'att_00000000000000000000000001',
     productSessionId: null,
     deliveryId,
     deliveryTitle: 'Delivery under attention',
     candidateBound: true,
-  }), scopeSelection)
-  assert.match(hash, /^#\/strongflow\?/u)
-  const parameters = parametersOf(hash)
-  assert.equal(parameters.delivery, deliveryId, 'the Delivery identity is present')
-  assert.equal(parameters.stageRun, stageRunId, 'the StageRun identity is present')
-  assert.equal(parameters.view, 'unified', 'the canonical route formats the view itself')
-  assert.equal(parameters.repositoryId, scope.repositoryId, 'the exact Scope is preserved')
-  assert.equal(parameters.session, undefined, 'a business Attention fabricates no Session id')
+  }), scopeSelection), null)
 })
 
-test('a StageRun-bound Attention links the run page; a Delivery-bound one stays Delivery-level', () => {
-  const withStageRun = parametersOf(attentionCenterItemHash(centerItem({
-    kind: 'attention',
-    deliveryId,
-    stageRunId,
-  }), scopeSelection))
-  assert.equal(withStageRun.stageRun, stageRunId)
-  const deliveryBound = parametersOf(attentionCenterItemHash(centerItem({
-    kind: 'attention',
-    deliveryId,
-    stageRunId: null,
-  }), scopeSelection))
-  assert.equal(deliveryBound.delivery, deliveryId)
-  assert.equal(deliveryBound.stageRun, undefined, 'no StageRun identity is invented')
-})
-
-test('a fail-closed Attention carries no fabricated Delivery or StageRun identity', () => {
-  const parameters = parametersOf(attentionCenterItemHash(centerItem({
-    kind: 'attention',
-    bindingValid: false,
-    urgency: 'binding-invalid',
-    deliveryId: null,
-    deliveryTitle: null,
-    stageRunId: null,
-  }), scopeSelection))
-  assert.equal(parameters.delivery, undefined)
-  assert.equal(parameters.stageRun, undefined)
-})
-
-test('decision links carry the exact StageRun origin and survive a missing origin honestly', () => {
-  const origins = [origin()]
-  assert.equal(
-    attentionCenterItemHash(centerItem(), scopeSelection, origins),
-    `#/attention?session=${productSessionId}&delivery=${deliveryId}&stageRun=${stageRunId}`
-      + `&organizationId=${scope.organizationId}&workspaceId=${scope.workspaceId}`
-      + `&projectId=${scope.projectId}&repositoryId=${scope.repositoryId}`,
-  )
-  const unmapped = centerItem({ stageRunId: otherStageRunId })
-  assert.equal(
-    attentionCenterItemHash(unmapped, scopeSelection, origins),
-    `#/attention?session=${productSessionId}`
-      + `&organizationId=${scope.organizationId}&workspaceId=${scope.workspaceId}`
-      + `&projectId=${scope.projectId}&repositoryId=${scope.repositoryId}`,
-    'a StageRun with no loaded Delivery origin links the decision surface only',
-  )
-})
-
-test('the execution-origin link stays the exact typed run-page route', () => {
-  assert.equal(
-    attentionCenterOriginHash(origin(), stageRunId, scopeSelection),
-    `#/strongflow?delivery=${deliveryId}&stageRun=${stageRunId}&view=unified`
-      + `&organizationId=${scope.organizationId}&workspaceId=${scope.workspaceId}`
-      + `&projectId=${scope.projectId}&repositoryId=${scope.repositoryId}`,
-  )
+test('a decision without a Session id links nothing instead of fabricating one', () => {
+  assert.equal(attentionCenterItemHash(centerItem({
+    productSessionId: null,
+    sessionTitle: null,
+  }), scopeSelection), null)
 })
 
 class FakeElement {
@@ -309,16 +250,16 @@ function cardAction(card) {
   return allByClass(card, 'wwc-attention-card-action')[0]
 }
 
-test('the mounted center links every actionable card to its run-page context', () => {
+test('the mounted center links decisions to their Chat session and hides dead-end actions', () => {
   const document = new FakeDocument()
   const rootElement = new FakeElement(document, 'div')
   const state = {
     status: 'ready',
     realtime: 'subscribed',
     items: [
-      // A decision bound to the StageRun that is active in the one origin.
+      // A decision raised inside one Chat session.
       centerItem(),
-      // A business Attention bound to the same Delivery and StageRun.
+      // A business Attention bound to a Delivery: no acceptance surface exists.
       centerItem({
         kind: 'attention',
         id: 'att_00000000000000000000000001',
@@ -344,7 +285,7 @@ test('the mounted center links every actionable card to its run-page context', (
         expiresAt: '2026-09-03T02:00:00.000Z',
       }),
     ],
-    origins: [origin()],
+    origins: [],
     error: null,
   }
   const model = fakeModel(state)
@@ -361,60 +302,18 @@ test('the mounted center links every actionable card to its run-page context', (
   const attentionCard = cards.find(node => node.dataset.kind === 'attention')
   const expiredCard = cards.find(node => node.dataset.urgency === 'expired')
 
-  // UI-100.3 wiring: the card action passes the loaded origins, so the decision
-  // link returns to the Task/StageRun that raised it.
   const decisionParameters = parametersOf(cardAction(decisionCard).href)
+  assert.equal(cardAction(decisionCard).href.startsWith('#/chat?'), true)
   assert.equal(decisionParameters.session, productSessionId)
-  assert.equal(decisionParameters.delivery, deliveryId)
-  assert.equal(decisionParameters.stageRun, stageRunId)
 
-  const attentionParameters = parametersOf(cardAction(attentionCard).href)
-  assert.match(cardAction(attentionCard).href, /^#\/strongflow\?/u)
-  assert.equal(attentionParameters.delivery, deliveryId)
-  assert.equal(attentionParameters.stageRun, stageRunId)
-  assert.equal(attentionParameters.view, 'unified')
+  assert.equal(cardAction(attentionCard).hidden, true)
+  assert.equal(cardAction(attentionCard).getAttribute('href'), null)
 
+  assert.equal(cardAction(expiredCard).hidden, true)
   assert.equal(cardAction(expiredCard).getAttribute('href'), null)
-  assert.equal(cardAction(expiredCard).getAttribute('aria-disabled'), 'true')
 
-  // The execution-context entry stays the typed run-page route.
-  const originLink = allByClass(decisionCard, 'wwc-attention-card-origin')[0]
-  assert.notEqual(originLink, undefined)
-  assert.equal(
-    originLink.href,
-    attentionCenterOriginHash(origin(), stageRunId, scopeSelection),
-  )
+  // No execution-origin link exists without a delivery workbench surface.
+  assert.equal(allByClass(decisionCard, 'wwc-attention-card-origin').length, 0)
   mounted.close()
   assert.equal(model.closeCalls, 1)
-})
-
-test('a live origins update rewrites the decision links without recreating the cards', () => {
-  const document = new FakeDocument()
-  const rootElement = new FakeElement(document, 'div')
-  const state = {
-    status: 'ready',
-    realtime: 'subscribed',
-    items: [centerItem()],
-    origins: [],
-    error: null,
-  }
-  const model = fakeModel(state)
-  const mounted = mountAttentionCenterPage({
-    root: rootElement,
-    model,
-    scopeSelection,
-    ownsModel: true,
-  })
-  const card = mountedCards(rootElement)[0]
-  assert.equal(parametersOf(cardAction(card).href).stageRun, undefined)
-
-  model.publish({
-    ...state,
-    origins: [origin({ deliveryId: otherDeliveryId })],
-  })
-  assert.equal(mountedCards(rootElement)[0], card, 'the update keeps the node identity')
-  const parameters = parametersOf(cardAction(card).href)
-  assert.equal(parameters.delivery, otherDeliveryId)
-  assert.equal(parameters.stageRun, stageRunId)
-  mounted.close()
 })

@@ -95,7 +95,6 @@ test('a real browser opens the Attention-first Home dashboard as the first scree
     'active',
     'failing',
     'completed',
-    'visited',
   ])
   const sectionOf = dashboard => id => dashboard.sections.find(
     candidate => candidate.id === id,
@@ -105,7 +104,6 @@ test('a real browser opens the Attention-first Home dashboard as the first scree
   assert.equal(section('active').cards.length, 1)
   assert.equal(section('failing').cards.length, 1)
   assert.equal(section('completed').cards.length, 1)
-  assert.equal(section('visited').cards.length, 0)
   assert.equal(section('decisions').cards[0].title, 'Review the proposed delivery scope')
   assert.match(section('active').cards[0].title, /repository 1/u)
   assert.equal(home.firstUse.hidden, true)
@@ -113,55 +111,35 @@ test('a real browser opens the Attention-first Home dashboard as the first scree
   assert.equal(home.usage.present, false)
   assert.deepEqual(home.unavailableNotes, [])
 
-  // Every card opens its exact, Scope-complete deep link.
+  // Every actionable card opens its exact, Scope-complete deep link; Delivery
+  // and business-Attention cards render no dead-end action link at all.
   const scoped = `organizationId=${identity}&workspaceId=${workspaceId}`
     + `&projectId=${projectId}&repositoryId=${repositoryOne}`
-  const strongflowStageRunHref = `#/strongflow?delivery=dlv_00000000000000000000000001`
-    + `&stageRun=str_00000000000000000000000001&view=unified&${scoped}`
-  const attentionHref = `#/attention?session=psn_00000000000000000000000001&${scoped}`
+  const chatHref = `#/chat?session=psn_00000000000000000000000001&${scoped}`
   const decisionCards = section('decisions').cards
   const decisionByTitle = title => decisionCards.find(card => card.title === title)
   for (const action of home.actions) {
+    if (action.href === null) continue
     assert.match(action.href, new RegExp(`repositoryId=${repositoryOne}$`), action.href)
     assert.equal(action.disabled, null, action.href)
   }
   assert.equal(
     decisionByTitle('Allow the projected repository action')?.action.href,
-    attentionHref,
+    chatHref,
     JSON.stringify(decisionCards),
   )
   assert.equal(
     decisionByTitle('Review the proposed delivery scope')?.action.href,
-    strongflowStageRunHref,
+    null,
     JSON.stringify(decisionCards),
   )
-  assert.equal(section('active').cards[0]?.action.href, strongflowStageRunHref)
-  assert.equal(section('failing').cards[0]?.action.href, strongflowStageRunHref)
+  assert.equal(section('active').cards[0]?.action.href, null)
+  assert.equal(section('failing').cards[0]?.action.href, null)
   assert.equal(
     home.chatLinks.filter(href => href === `#/chat?session=psn_00000000000000000000000001&${scoped}`).length,
     1,
     JSON.stringify(home.chatLinks),
   )
-
-  // No visit exists yet, because no Delivery has been opened in this browser.
-  const visitsBefore = await evaluateInBrowser('globalThis.readRecentVisits()')
-  assert.equal(visitsBefore.stored, false, JSON.stringify(visitsBefore))
-
-  // Opening a card records one browser-local visit and shows the Delivery in the
-  // "recently opened" section when the user comes back.
-  await evaluateInBrowser("document.querySelector('.wwc-home-card-action').click()")
-  await evaluateInBrowser('globalThis.waitUntil(() => '
-    + 'globalThis.readRecentVisits().entries.length === 1)')
-  const visits = await evaluateInBrowser('globalThis.readRecentVisits()')
-  assert.equal(visits.entries.length, 1, JSON.stringify(visits))
-  assert.deepEqual(Object.keys(visits.entries[0]).sort(), ['at', 'deliveryId', 'kind', 'scope'])
-  assert.equal(visits.entries[0].deliveryId, 'dlv_00000000000000000000000001')
-  assert.equal(JSON.stringify(visits).includes(SECRET_MARKER), false)
-  const homeAgain = await evaluateInBrowser(`globalThis.openHome('#/home?organizationId=${identity}`
-    + `&workspaceId=${workspaceId}&projectId=${projectId}&repositoryId=${repositoryOne}')`)
-  assert.equal(homeAgain.liveRegions, 1)
-  assert.equal(sectionOf(homeAgain)('visited').cards.length, 1, JSON.stringify(homeAgain.sections))
-  assert.match(sectionOf(homeAgain)('visited').cards[0].title, /repository 1/u)
 
   // A Scope switch re-reads every projection and re-renders in isolation.
   const switched = await evaluateInBrowser('globalThis.switchRepositoryScope()')
@@ -173,10 +151,6 @@ test('a real browser opens the Attention-first Home dashboard as the first scree
   assert.equal(switched.leak, false)
   const switchedDashboard = await evaluateInBrowser('globalThis.readDashboard()')
   assert.match(switchedDashboard.status, /就绪 ·/u)
-  const switchedScoped = `organizationId=${identity}&workspaceId=${workspaceId}`
-    + `&projectId=${projectId}&repositoryId=${repositoryTwo}`
-  const switchedStrongflowStageRunHref = `#/strongflow?delivery=dlv_00000000000000000000000002`
-    + `&stageRun=str_00000000000000000000000002&view=unified&${switchedScoped}`
   assert.equal(
     switchedDashboard.sections.find(section => section.id === 'active')?.cards.length,
     1,
@@ -188,14 +162,13 @@ test('a real browser opens the Attention-first Home dashboard as the first scree
   assert.equal(
     switchedDashboard.sections.find(section => section.id === 'active')
       ?.cards[0]?.action.href,
-    switchedStrongflowStageRunHref,
+    null,
   )
   assert.equal(
     switchedDashboard.sections.find(section => section.id === 'failing')
       ?.cards[0]?.action.href,
-    switchedStrongflowStageRunHref,
+    null,
   )
-  assert.equal(sectionOf(switchedDashboard)('visited').cards.length, 0)
   assert.equal(switchedDashboard.liveRegions, 1)
 
   // Design page 04: an unused Scope shows the 新建任务 entry instead of the

@@ -12,20 +12,100 @@ import type {
   ControlPlaneTaskAnchor,
 } from './community-control-plane-client.js'
 import {
-  candidateDisplayState,
-  candidateDisplayStateText,
-  candidateDisplayStateTone,
-  candidateResultText,
-  candidateResultTone,
-  shortCommitText,
-  type LocalCandidateTone,
-} from './local-candidate-view-model.js'
-import {
   deviceStateText,
   deviceStateTone,
   type ClientsViewModel,
 } from './clients-view-model.js'
 import type { RepositoriesViewModel } from './repositories-view-model.js'
+
+/** The one presentation tone of a state or result badge (ADR-0029). */
+type CandidateTone = 'info' | 'success' | 'warning' | 'danger' | 'neutral'
+
+/** The displayed candidate states the run page's Candidate row renders. */
+type CandidateDisplayState =
+  | 'retained'
+  | 'branch_created'
+  | 'applied'
+  | 'conflict'
+  | 'discarded'
+  | 'failed'
+
+/**
+ * Derive the displayed state from the Server projection alone: a live merge
+ * conflict rises above the retained states, everything else keeps its honest
+ * lifecycle name.
+ */
+function candidateDisplayState(
+  candidate: ControlPlaneCandidateSummary,
+): CandidateDisplayState {
+  if (candidate.state === 'applied') return 'applied'
+  if (candidate.state === 'discarded') return 'discarded'
+  if (candidate.state === 'failed') return 'failed'
+  for (let index = candidate.history.length - 1; index >= 0; index -= 1) {
+    const entry = candidate.history[index]
+    if (entry !== undefined && entry.result === 'merge_conflict') return 'conflict'
+  }
+  return candidate.state
+}
+
+/** The one copy per displayed state; every badge also carries the tone. */
+function candidateDisplayStateText(state: CandidateDisplayState): string {
+  switch (state) {
+    case 'retained': return 'Retained on the device'
+    case 'branch_created': return 'Local branch created'
+    case 'applied': return 'Applied to the target branch'
+    case 'conflict': return 'Apply conflict needs attention'
+    case 'discarded': return 'Discarded'
+    case 'failed': return 'Retention failed'
+  }
+}
+
+function candidateDisplayStateTone(state: CandidateDisplayState): CandidateTone {
+  switch (state) {
+    case 'retained': return 'info'
+    case 'branch_created': return 'info'
+    case 'applied': return 'success'
+    case 'conflict': return 'warning'
+    case 'discarded': return 'neutral'
+    case 'failed': return 'danger'
+  }
+}
+
+/** The one copy per terminal apply result. */
+function candidateResultText(result: ControlPlaneCandidateApplyResult): string {
+  switch (result) {
+    case 'retained': return 'Still retained locally.'
+    case 'branch_created': return 'Local branch created.'
+    case 'applied': return 'Applied to the target branch.'
+    case 'base_stale': return 'The target branch moved ahead. Refresh the expected HEAD and retry.'
+    case 'working_tree_dirty': return 'The target worktree has uncommitted changes. Settle them first.'
+    case 'merge_conflict': return 'Conflicts must be resolved before this apply can land.'
+    case 'candidate_missing': return 'The candidate ref is gone from the device.'
+    case 'permission_denied': return 'You lack permission for the target repository.'
+    case 'discarded': return 'The candidate was discarded.'
+    case 'failed': return 'The apply failed. Check the device and try again.'
+  }
+}
+
+function candidateResultTone(result: ControlPlaneCandidateApplyResult): CandidateTone {
+  switch (result) {
+    case 'retained': return 'info'
+    case 'branch_created': return 'info'
+    case 'applied': return 'success'
+    case 'base_stale': return 'warning'
+    case 'working_tree_dirty': return 'warning'
+    case 'merge_conflict': return 'warning'
+    case 'candidate_missing': return 'danger'
+    case 'permission_denied': return 'danger'
+    case 'discarded': return 'neutral'
+    case 'failed': return 'danger'
+  }
+}
+
+/** The short commit form the Apply row shows; the full SHA stays in the title. */
+function shortCommitText(commit: string): string {
+  return commit.slice(0, 7)
+}
 
 /** The Client row of the §16.7 run-page identity zone. */
 export interface TaskRunClientFacts {
@@ -52,7 +132,7 @@ export interface TaskRunWorkerSessionFacts {
   readonly workerSessionId: string
   readonly state: ControlPlaneRunWorkerSessionState
   readonly stateText: string
-  readonly tone: LocalCandidateTone
+  readonly tone: CandidateTone
   readonly startedAt: string | null
 }
 
@@ -60,7 +140,7 @@ export interface TaskRunWorkerSessionFacts {
 export interface TaskRunCandidateFacts {
   readonly candidateRef: string
   readonly stateText: string
-  readonly tone: LocalCandidateTone
+  readonly tone: CandidateTone
   readonly branchName: string | null
 }
 
@@ -68,7 +148,7 @@ export interface TaskRunCandidateFacts {
 export interface TaskRunApplyFacts {
   readonly result: ControlPlaneCandidateApplyResult
   readonly resultText: string
-  readonly tone: LocalCandidateTone
+  readonly tone: CandidateTone
   readonly strategy: ControlPlaneCandidateApplyStrategy
   readonly targetBranch: string
   readonly resultingCommit: string | null
@@ -119,7 +199,7 @@ export function runWorkerSessionStateText(state: ControlPlaneRunWorkerSessionSta
 /** Non-color tone of a WorkerSession state badge (ADR-0029). */
 export function runWorkerSessionStateTone(
   state: ControlPlaneRunWorkerSessionState,
-): LocalCandidateTone {
+): CandidateTone {
   switch (state) {
     case 'reserving': return 'info'
     case 'launching': return 'info'

@@ -414,14 +414,14 @@ test('the shell mounts the first-run checklist and reuses the shared query cache
   const serialized = JSON.stringify(readinessSection(fixture.rootElement).textContent)
   assert.equal(serialized.includes('crd_'), false)
 
-  fixture.browser.location.hash = '#/strongflow'
+  fixture.browser.location.hash = '#/home'
   fixture.browser.emit('hashchange')
   await waitFor(
     () => descendants(fixture.rootElement).some(node => (
       typeof node.className === 'string'
-      && node.className.split(' ').includes('wwc-strongflow')
+      && node.className.split(' ').includes('wwc-my-work')
     )),
-    'strongflow create page',
+    'task board page',
   )
   await waitFor(() => readinessItems(fixture.rootElement).length === 6, 'checklist re-render')
   // The closed Settings feature discards its Scope snapshot by contract, so the
@@ -487,38 +487,3 @@ test('recheck after completing the steps reports ready and issues fresh reads', 
   fixture.application.close()
 })
 
-test('the local diagnostics page reopens a collapsed checklist', async () => {
-  const fixture = mount('#/settings/runtime')
-  await waitFor(() => readinessSection(fixture.rootElement) !== null, 'checklist section')
-  await waitFor(
-    () => descendants(fixture.rootElement).some(node => (
-      node.className === 'wwc-local-operations'
-    )),
-    'local diagnostics page',
-  )
-  await waitFor(() => readinessItems(fixture.rootElement).length === 6, 'checklist items')
-
-  const toggle = descendants(readinessSection(fixture.rootElement)).find(node => (
-    node.className === 'wwc-readiness-toggle'
-  ))
-  toggle.dispatchEvent({ type: 'click' })
-  await waitFor(
-    () => descendants(readinessSection(fixture.rootElement)).find(node => (
-      node.className === 'wwc-readiness-items'
-    ))?.hidden === true,
-    'collapsed checklist',
-  )
-
-  const open = descendants(fixture.rootElement).find(node => (
-    node.className === 'wwc-local-readiness-open'
-  ))
-  assert.notEqual(open, undefined, 'diagnostics page needs the reopen entry')
-  open.dispatchEvent({ type: 'click' })
-  await waitFor(
-    () => descendants(readinessSection(fixture.rootElement)).find(node => (
-      node.className === 'wwc-readiness-items'
-    ))?.hidden === false,
-    'reopened checklist',
-  )
-  fixture.application.close()
-})

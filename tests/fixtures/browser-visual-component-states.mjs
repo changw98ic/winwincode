@@ -32,8 +32,6 @@ import { mountActionBar } from '/module/components/action-bar.js'
 import { mountConnectionBar } from '/module/components/connection-bar.js'
 import { mountClientErrorBoundary } from '/module/components/client-error-boundary.js'
 import { mountWindowedList } from '/module/components/windowed-list.js'
-import { mountCandidateDiffViewer } from '/module/strongflow-diff-viewer.js'
-import { mountStrongFlowDeliveryList } from '/module/strongflow-delivery-list-page.js'
 
 const FONT_OVERRIDE = `
 *, *::before, *::after {
@@ -94,21 +92,6 @@ const selectedDiffContent = [
   '',
 ].join('\n')
 
-function diffState(overrides = {}) {
-  return {
-    status: 'ready',
-    path: 'src/app.ts',
-    content: selectedDiffContent,
-    loadedBytes: 220,
-    totalBytes: 220,
-    hasMore: false,
-    previewLimited: false,
-    fileDiffSha256: `sha256:${'4'.repeat(64)}`,
-    unavailableReason: null,
-    error: null,
-    ...overrides,
-  }
-}
 
 // ---------------------------------------------------------------------------
 // Gallery entries.  Every entry mounts the production component and returns the
@@ -419,98 +402,6 @@ const ENTRIES = Object.freeze([
     return view.root
   }]),
 
-  // The Candidate Diff viewer: unified, empty, and error presentations.
-  ['strongflow-diff/unified', document => {
-    const view = mountCandidateDiffViewer({
-      document,
-      onLoadMoreDiff() {},
-      onViewModeChange() {},
-    })
-    view.update({
-      diff: diffState(),
-      selectedPath: 'src/app.ts',
-      viewMode: 'unified',
-      candidateDigest: `sha256:${'3'.repeat(64)}`,
-      selectedLine: null,
-    })
-    register(view)
-    return view.root
-  }],
-
-  ['strongflow-diff/no-selection', document => {
-    const view = mountCandidateDiffViewer({
-      document,
-      onLoadMoreDiff() {},
-      onViewModeChange() {},
-    })
-    view.update({
-      diff: diffState({ status: 'idle', path: null, content: null, fileDiffSha256: null }),
-      selectedPath: null,
-      viewMode: 'unified',
-      candidateDigest: `sha256:${'3'.repeat(64)}`,
-      selectedLine: null,
-    })
-    register(view)
-    return view.root
-  }],
-
-  ['strongflow-diff/error', document => {
-    const view = mountCandidateDiffViewer({
-      document,
-      onLoadMoreDiff() {},
-      onViewModeChange() {},
-    })
-    view.update({
-      diff: diffState({
-        status: 'error',
-        path: 'src/app.ts',
-        content: null,
-        fileDiffSha256: null,
-        error: { code: 'candidate.diff_unavailable', message: 'The Candidate Diff is unavailable.' },
-      }),
-      selectedPath: 'src/app.ts',
-      viewMode: 'unified',
-      candidateDigest: `sha256:${'3'.repeat(64)}`,
-      selectedLine: null,
-    })
-    register(view)
-    return view.root
-  }],
-
-  ['strongflow-delivery-list/list', document => {
-    const root = document.createElement('section')
-    const page = mountStrongFlowDeliveryList({ root, model: deliveryListModel(), view: 'list' })
-    register(page)
-    return root
-  }],
-
-  ['strongflow-delivery-list/kanban', document => {
-    const root = document.createElement('section')
-    const page = mountStrongFlowDeliveryList({ root, model: deliveryListModel(), view: 'kanban' })
-    register(page)
-    return root
-  }],
-
-  ['strongflow-delivery-list/error', document => {
-    const root = document.createElement('section')
-    const page = mountStrongFlowDeliveryList({
-      root,
-      model: deliveryListModel({
-        status: 'error',
-        visible: [],
-        error: {
-          kind: 'server',
-          code: 'delivery.list_failed',
-          message: 'The Delivery list could not be loaded.',
-          requestId: 'req_00000000000000000000000004',
-        },
-      }),
-      view: 'list',
-    })
-    register(page)
-    return root
-  }],
-
   ['windowed-list/window', document => {
     const scroller = document.createElement('div')
     scroller.className = 'wwc-visual-scroller'
@@ -570,32 +461,6 @@ const stageDeliveries = STAGES.map((status, index) => ({
 }))
 
 /** A ready list model.  The gallery changes no state, so nothing else is needed. */
-function deliveryListModel(overrides = {}) {
-  return {
-    state: {
-      status: 'ready',
-      filters: { search: '', status: null, attentionOnly: false, order: 'recent' },
-      visible: stageDeliveries,
-      loadedCount: stageDeliveries.length,
-      hasMore: false,
-      loadingMore: false,
-      moreFailure: null,
-      error: null,
-      advance: { deliveryId: null, failure: null },
-      ...overrides,
-    },
-    subscribe() { return () => {} },
-    async start() {},
-    async refresh() {},
-    async loadMore() {},
-    setSearch() {},
-    async setStatusFilter() {},
-    setAttentionOnly() {},
-    setOrder() {},
-    async advanceDelivery() {},
-    close() {},
-  }
-}
 
 function textParagraph(document, text) {  const node = document.createElement('p')
   node.textContent = text

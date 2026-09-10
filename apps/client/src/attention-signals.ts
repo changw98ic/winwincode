@@ -9,7 +9,6 @@ import type {
   StageRunId,
 } from './generated/contracts.js'
 import { matchesCanonicalSchema } from './generated/control-plane-client.js'
-import { strongFlowRouteHash, type StrongFlowRoute } from './strongflow-route.js'
 
 /**
  * UI-506 derives notification-worthy facts from the projections that already
@@ -198,35 +197,13 @@ export function attentionSignalsTitle(base: string, badge: AttentionSignalBadge)
 }
 
 /**
- * The exact still-authorized context for one signal: execution facts open the
- * StrongFlow StageRun that raised them, an Approval opens the authoritative
- * decision surface and carries the origin with it.
+ * The exact still-authorized context for one signal: the Attention Center
+ * (design page 06) is the one unified inbox for every entry that needs the
+ * user, so each notification deep links there and the card carries its own
+ * follow-up link.
  */
-export function attentionSignalRouteHash(
-  signal: AttentionSignal,
-  selection: ScopeRouteSelection,
-): string {
-  if (signal.kind !== 'approval' && signal.deliveryId !== null) {
-    const route: StrongFlowRoute = {
-      deliveryId: signal.deliveryId,
-      productSessionId: null,
-      stageRunId: signal.stageRunId,
-      candidatePath: null,
-      candidateView: 'unified',
-      comparison: { status: 'none' },
-      evidenceTab: 'evidence',
-      evidenceId: null,
-    }
-    return strongFlowRouteHash(route, selection)
-  }
-  const parameters = new URLSearchParams()
-  if (signal.productSessionId !== null) parameters.set('session', signal.productSessionId)
-  if (signal.kind === 'approval' && signal.deliveryId !== null && signal.stageRunId !== null) {
-    parameters.set('delivery', signal.deliveryId)
-    parameters.set('stageRun', signal.stageRunId)
-  }
-  const query = parameters.toString()
-  return scopeHash(query.length === 0 ? '#/attention' : `#/attention?${query}`, selection)
+export function attentionSignalRouteHash(selection: ScopeRouteSelection): string {
+  return scopeHash('#/attention', selection)
 }
 
 export interface AttentionSignalGate {

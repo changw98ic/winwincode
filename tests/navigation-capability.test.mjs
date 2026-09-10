@@ -90,7 +90,7 @@ const SIGNED_OUT = { status: 'signed-out', session: null, error: null }
 test('signed-out and restoring sessions hide every navigation entry', () => {
   for (const status of ['signed-out', 'restoring']) {
     const capabilities = capabilityMap(status)
-    for (const surface of ['home', 'chat', 'strongflow', 'settings', 'attention', 'enterprise']) {
+    for (const surface of ['home', 'chat', 'projects', 'extensions', 'device', 'settings', 'attention']) {
       assert.equal(
         capabilities[surface].capability,
         'hidden',
@@ -101,50 +101,45 @@ test('signed-out and restoring sessions hide every navigation entry', () => {
   }
 })
 
-test('a personal repository-only session trims Enterprise and keeps product areas available', () => {
+test('a personal repository-only session keeps every product area available', () => {
   const capabilities = capabilityMap('signed-in', sessionWith([repositoryScope]))
-  assert.equal(capabilities.chat.capability, 'available')
-  assert.equal(capabilities.strongflow.capability, 'available')
-  assert.equal(capabilities.settings.capability, 'available')
-  assert.equal(capabilities.attention.capability, 'available')
-  assert.equal(capabilities.enterprise.capability, 'hidden')
-  assert.equal(capabilities.chat.reason, 'authorized-scope')
-  assert.equal(capabilities.enterprise.reason, 'no-enterprise-scope')
+  for (const surface of ['home', 'chat', 'projects', 'extensions', 'device', 'settings', 'attention']) {
+    assert.equal(capabilities[surface].capability, 'available', surface)
+    assert.equal(capabilities[surface].reason, 'authorized-scope', surface)
+  }
 })
 
-test('an enterprise-hierarchy scope makes Enterprise enterable', () => {
+test('an enterprise-hierarchy scope projects the enterprise deployment fact', () => {
   for (const scope of [organizationScope, workspaceScope, projectScope]) {
-    const capabilities = capabilityMap('signed-in', sessionWith([scope, repositoryScope]))
-    assert.equal(capabilities.enterprise.capability, 'available', scope.kind)
-    assert.equal(capabilities.enterprise.reason, 'enterprise-scope')
-    assert.equal(capabilities.chat.capability, 'available')
+    assert.equal(
+      projection('signed-in', sessionWith([scope, repositoryScope])).deployment,
+      'enterprise',
+      scope.kind,
+    )
   }
 })
 
 test('known enterprise deployment keeps missing permissions visible as disabled', () => {
-  const capabilities = capabilityMap(
-    'signed-in',
-    sessionWith([repositoryScope]),
-    null,
-    { deployment: 'enterprise' },
-  )
-  assert.equal(capabilities.chat.capability, 'available')
-  assert.equal(capabilities.enterprise.capability, 'disabled')
-  assert.equal(capabilities.enterprise.reason, 'no-enterprise-scope')
+  const capabilities = capabilityMap('signed-in', sessionWith([repositoryScope]), {
+    deployment: 'enterprise',
+    surfaceAccess: { home: 'denied' },
+  })
+  assert.equal(capabilities.home.capability, 'disabled')
+  assert.equal(capabilities.home.reason, 'capability-denied')
 })
 
 test('query capability facts distinguish read-only and denied entries', () => {
   const session = sessionWith([organizationScope, repositoryScope])
   const readOnly = capabilityMap('signed-in', session, null, {
-    surfaceAccess: { enterprise: 'read-only' },
+    surfaceAccess: { home: 'read-only' },
   })
   const denied = capabilityMap('signed-in', session, null, {
-    surfaceAccess: { enterprise: 'denied' },
+    surfaceAccess: { home: 'denied' },
   })
-  assert.equal(readOnly.enterprise.capability, 'read-only')
-  assert.equal(readOnly.enterprise.reason, 'read-only-capability')
-  assert.equal(denied.enterprise.capability, 'disabled')
-  assert.equal(denied.enterprise.reason, 'capability-denied')
+  assert.equal(readOnly.home.capability, 'read-only')
+  assert.equal(readOnly.home.reason, 'read-only-capability')
+  assert.equal(denied.home.capability, 'disabled')
+  assert.equal(denied.home.reason, 'capability-denied')
 })
 
 test('deployment projection distinguishes personal from enterprise sessions', () => {
@@ -165,7 +160,7 @@ test('deployment projection distinguishes personal from enterprise sessions', ()
 
 test('a session without any scope hides product areas without crashing', () => {
   const capabilities = capabilityMap('signed-in', sessionWith([]))
-  for (const surface of ['home', 'chat', 'strongflow', 'settings', 'attention', 'enterprise']) {
+  for (const surface of ['home', 'chat', 'projects', 'extensions', 'device', 'settings', 'attention']) {
     assert.equal(capabilities[surface].capability, 'hidden', surface)
   }
 })
@@ -180,17 +175,17 @@ test('runtime revocation moves every entry back to hidden', () => {
   })
   for (const status of ['authentication-required', 'signed-out', 'error']) {
     const capabilities = capabilityMap(status, null, revoked)
-    assert.equal(capabilities.enterprise.capability, 'hidden', status)
+    assert.equal(capabilities.home.capability, 'hidden', status)
     assert.equal(capabilities.chat.capability, 'hidden', status)
   }
 })
 
 test('surfaceCapabilityForHash resolves the exact surface a URL will enter', () => {
-  assert.equal(surfaceCapabilityForHash('#/enterprise/resources', {
+  assert.equal(surfaceCapabilityForHash('#/attention', {
     status: 'signed-in',
-    session: sessionWith([organizationScope]),
+    session: sessionWith([organizationScope, repositoryScope]),
     error: null,
-  }).surface.id, 'enterprise')
+  }).surface.id, 'attention')
   assert.equal(surfaceCapabilityForHash('#/chat?session=psn_1', {
     status: 'signed-in',
     session: sessionWith([repositoryScope]),

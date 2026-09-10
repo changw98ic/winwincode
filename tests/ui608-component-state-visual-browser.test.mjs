@@ -120,8 +120,6 @@ test('every component state renders exactly the committed visual baseline', asyn
     'client-error-boundary/error',
     'connection-bar/reconnecting',
     'connection-bar/offline',
-    'strongflow-diff/unified',
-    'strongflow-diff/error',
   ]) assert.equal(ids.has(required), true, `${required} must be part of the component-state lane`)
 
   // The capture is reviewed in CI, so it must carry no credential material.

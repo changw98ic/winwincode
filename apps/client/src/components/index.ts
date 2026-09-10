@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 export * from './action-bar.js'
+export * from './bounded-text.js'
 export * from './client-error-boundary.js'
 export * from './connection-bar.js'
 export * from './drawer.js'

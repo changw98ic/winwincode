@@ -275,12 +275,10 @@ globalThis.clickModelRouteFix = async () => {
 }
 
 globalThis.openFromDiagnostics = async () => {
-  location.hash = '#/settings/runtime'
-  await waitFor(() => document.querySelector('.wwc-local-operations') !== null, 'diagnostics page')
-  await waitFor(() => inspect().present, 'checklist on diagnostics page')
-  const reopen = document.querySelector('.wwc-local-readiness-open')
-  if (reopen === null) throw new Error('missing diagnostics reopen entry')
-  reopen.click()
+  location.hash = '#/home'
+  await waitFor(() => document.querySelector('.wwc-my-work') !== null, 'task board page')
+  await waitFor(() => inspect().present, 'checklist on task board page')
+  click('wwc-readiness-toggle')
   await waitFor(() => inspect().itemsHidden === false, 'reopened checklist')
   return { ...inspect(), reopenPresent: true }
 }

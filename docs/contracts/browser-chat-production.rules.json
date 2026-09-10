@@ -1,0 +1,26 @@
+{
+  "schemaVersion": "winwincode.browser-chat-production.v1",
+  "browser": "Chrome DevTools Protocol over a real headless Chrome or Chromium process",
+  "client": "apps/client production-built modules and production CSS served from a standalone HTTPS origin with one browser-gate entry module",
+  "server": "winwincode-server production binary served from a separate HTTPS origin",
+  "assertions": [
+    "the default Client surface is Chat and mounts the canonical Chat page",
+    "Chat creates one ProductSession and refreshes from its real Control Plane event stream",
+    "Chat reaches Completed with a non-empty completed assistant message produced by the local Worker and provider path",
+    "the Chat terminal projection survives a deep-link navigation and a full browser reload byte-for-byte",
+    "Chat opens real WebSocket subscriptions only to the configured Control Plane origin",
+    "all browser traffic is confined to the standalone Client origin and configured Control Plane origin",
+    "no Host or DSH backend request is issued",
+    "the bootstrap proof is absent from URL, DOM, browser storage, cookie visibility, console, network URLs, and Server output",
+    "initial and terminal Chat screenshots plus one bounded normalized trace are written under test-results/browser-chat-production"
+  ],
+  "forbiddenRequestPathPatterns": [
+    "(?:/dsh(?:/|$))",
+    "(?:/host(?:/|$))"
+  ],
+  "artifacts": [
+    "test-results/browser-chat-production/chat-initial.png",
+    "test-results/browser-chat-production/chat-terminal.png",
+    "test-results/browser-chat-production/trace.json"
+  ]
+}

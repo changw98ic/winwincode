@@ -355,9 +355,11 @@ globalThis.openHome = async path => {
     if (!next.present) return false
     if (repositoryId === null) return true
     // The dashboard of the requested Scope is on screen only once every card
-    // link carries its repository identity.
+    // link carries its repository identity. Delivery cards render no action
+    // link at all, so only non-null hrefs are checked.
     return next.firstUse.hidden === false
-      || next.actions.every(action => (action.href ?? '').includes(repositoryId))
+      || next.actions.every(action => action.href === null
+        || action.href.includes(repositoryId))
   }, 'dashboard of the requested Scope')
   await waitFor(
     () => dashboard().sections.some(section => section.cards.length > 0)
@@ -382,9 +384,8 @@ globalThis.switchRepositoryScope = async () => {
     + `&repositoryId=${repositoryTwo.repositoryId}`
   await waitFor(() => {
     const next = dashboard()
-    return next.present && next.actions.some(action => (action.href ?? '').includes(
-      repositoryTwo.repositoryId,
-    ))
+    return next.present && next.actions.every(action => action.href === null
+      || action.href.includes(repositoryTwo.repositoryId))
   }, 'dashboard of the second Scope')
   const after = dashboard()
   return {
@@ -399,12 +400,6 @@ globalThis.switchRepositoryScope = async () => {
   }
 }
 
-globalThis.readRecentVisits = () => {
-  const raw = localStorage.getItem('winwincode.home.visits.v1')
-  if (raw === null) return { stored: false, entries: [] }
-  const parsed = JSON.parse(raw)
-  return { stored: true, entries: parsed.visits }
-}
 
 globalThis.readDashboard = dashboard
 

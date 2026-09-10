@@ -21,7 +21,7 @@ import {
 const root = resolve(import.meta.dirname, '..')
 const productSessionId = 'psn_00000000000000000000000001'
 
-test('real browser routes mount Settings, the Attention Center, session decisions, and Local Operations without empty slots', async t => {
+test('real browser routes mount Settings and the Attention Center without empty slots', async t => {
   const chromePath = chromeBinary()
   assert.notEqual(chromePath, null, 'Chrome or Chromium is required for the Client route browser test')
   command(root, 'corepack', ['pnpm', '--filter', '@winwincode/client', 'build'])
@@ -79,9 +79,6 @@ test('real browser routes mount Settings, the Attention Center, session decision
   )
   assert.equal(navigation.settings.hash, '#/settings')
   assert.match(navigation.settings.status, /^Ready/iu)
-  assert.match(navigation.operations.hash, /^#\/settings\/runtime/iu)
-  assert.match(navigation.operations.status, /^Ready/iu)
-  assert.equal(navigation.settingsSubscriptionClosed, true)
   assert.equal(navigation.attentionCenter.hash, '#/attention')
   assert.match(navigation.attentionCenter.status, /^Ready/iu)
   assert.match(navigation.denied, /do not have access/iu)
@@ -108,7 +105,7 @@ test('real browser routes mount Settings, the Attention Center, session decision
   const focus = await evaluate(
     devtools,
     sessionId,
-    'globalThis.inspectManagementFocus(".wwc-settings-local-operations-link")',
+    'globalThis.inspectManagementFocus("#wwc-settings-category")',
   )
   assert.equal(focus.active, true)
   assert.equal(focus.outlineStyle, 'solid')
@@ -145,6 +142,7 @@ test('real browser routes mount Settings, the Attention Center, session decision
   assert.equal(compactCenter.emptyCount, 1)
   assert.equal(compactCenter.noHorizontalOverflow, true)
 
+  // Legacy `?session=` decision deep links land on the same Attention Center.
   await open(`#/attention?session=${productSessionId}`, 'attention-session')
   const sessionDecisions = await evaluate(
     devtools,
@@ -158,33 +156,7 @@ test('real browser routes mount Settings, the Attention Center, session decision
     sessionId,
     'globalThis.inspectManagementPresentation("attention-session")',
   )
-  assert.equal(compactDecisions.panelCount, 3)
-  assert.equal(compactDecisions.emptyCount, 3)
+  assert.equal(compactDecisions.panelCount, 2)
+  assert.equal(compactDecisions.emptyCount, 1)
   assert.equal(compactDecisions.noHorizontalOverflow, true)
-
-  await open('#/settings/runtime', 'operations')
-  const directOperations = await evaluate(
-    devtools,
-    sessionId,
-    'globalThis.inspectFeatureRoute("operations")',
-  )
-  assert.equal(directOperations.hash, '#/settings/runtime')
-  await devtools.send('Page.reload', {}, sessionId)
-  await waitForGlobal(devtools, sessionId, 'inspectFeatureRoute')
-  const restoredOperations = await evaluate(
-    devtools,
-    sessionId,
-    'globalThis.inspectFeatureRoute("operations")',
-  )
-  assert.equal(restoredOperations.hash, '#/settings/runtime')
-  assert.match(restoredOperations.status, /^Ready/iu)
-  const compactOperations = await evaluate(
-    devtools,
-    sessionId,
-    'globalThis.inspectManagementPresentation("operations")',
-  )
-  assert.equal(compactOperations.panelCount, 3)
-  assert.equal(compactOperations.emptyCount, 1)
-  assert.equal(compactOperations.noHorizontalOverflow, true)
-  assert.equal(compactOperations.panelWithinPage, true)
 })

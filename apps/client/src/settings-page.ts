@@ -25,10 +25,22 @@ import type {
   SettingsViewModelState,
 } from './settings-view-model.js'
 
+/** One mounted Usage & health panel inside the 用量 tab. */
+export interface SettingsUsagePanel {
+  close(): void
+}
+
 export interface SettingsPageOptions {
   readonly root: HTMLElement
   readonly model: SettingsViewModel
-  readonly localOperationsHref?: string
+  /**
+   * Mounts the live Usage & health panel into the 用量 tab.  Wired by the
+   * shell; invoked once when the tab is first opened, and the returned
+   * binding is closed with the page.
+   */
+  readonly mountUsagePanel?: (
+    root: HTMLElement,
+  ) => Promise<SettingsUsagePanel | null> | SettingsUsagePanel | null
   /** Presentation-only capability; Server authorization remains authoritative. */
   readonly readOnly?: boolean
 }
@@ -909,27 +921,27 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
   usagePanel.setAttribute('aria-label', '用量')
   usagePanel.tabIndex = -1
   usagePanel.hidden = true
-  const usageIntro = element(document, 'p', 'wwc-settings-usage-intro')
-  usageIntro.textContent = '用量与健康数据的实时面板在本地运维页提供。'
-  const usageLink = element(document, 'a', 'wwc-settings-usage-link')
-  usageLink.href = options.localOperationsHref ?? '#/settings/runtime'
-  usageLink.textContent = '打开本地运维'
-  const usageSections = element(document, 'div', 'wwc-settings-usage-sections')
-  for (const [title, detail] of [
-    ['用量按交付', '按 Delivery 汇总的 token 用量与 StageRun 会话数。'],
-    ['用量按 StageRun', '按 StageRun 汇总的 token 用量与观测时间。'],
-    ['Provider 路由', 'Provider、模型与凭据的路由事实。'],
-    ['Worker 容量', 'Worker 容量、心跳与可达性。'],
-  ] as const) {
-    const section = element(document, 'section', 'wwc-settings-usage-section')
-    const headingNode = element(document, 'h3', 'wwc-settings-usage-heading')
-    headingNode.textContent = title
-    const detailNode = element(document, 'p', 'wwc-settings-usage-detail')
-    detailNode.textContent = detail
-    section.append(headingNode, detailNode)
-    usageSections.append(section)
+  // Design page 15: the 用量 tab hosts the one live Usage/Provider/Worker
+  // health summary panel.  The shell mounts it (lazily, on first open) so the
+  // settings route only pays for the usage projection when it is viewed.
+  const usageSlot = element(document, 'div', 'wwc-settings-usage-slot')
+  usagePanel.append(usageSlot)
+  let usageBinding: SettingsUsagePanel | null = null
+  let usageMountStarted = false
+  const onUsageFirstOpen = (): void => {
+    if (usageMountStarted || options.mountUsagePanel === undefined) return
+    usageMountStarted = true
+    void Promise.resolve(options.mountUsagePanel(usageSlot)).then(binding => {
+      if (binding === null) return
+      if (closed) {
+        binding.close()
+        return
+      }
+      usageBinding = binding
+    }).catch(() => {
+      // The tab keeps its empty slot when only this panel fails to mount.
+    })
   }
-  usagePanel.append(usageIntro, usageLink, usageSections)
 
   diagnosticsSection.append(diagnosticsTabs.root, runPanel, usagePanel)
 
@@ -948,6 +960,7 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
     })
     runPanel.hidden = next !== 'run'
     usagePanel.hidden = next !== 'usage'
+    if (next === 'usage') onUsageFirstOpen()
   }
 
   function showCategory(next: SettingsCategoryId): void {
@@ -1698,6 +1711,7 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
       createPanel.close()
       routePanel.close()
       storagePanel.close()
+      usageBinding?.close()
       statusBadge.close()
       retryButton.close()
       reconnectButton.close()

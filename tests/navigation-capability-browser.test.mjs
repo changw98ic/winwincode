@@ -32,7 +32,7 @@ async function waitForMode(devtools, sessionId, mode) {
   throw new Error(`navigation browser fixture did not load ${mode}`)
 }
 
-test('real Chrome projects personal, enterprise, disabled, and read-only navigation', async t => {
+test('real Chrome projects personal, organization, disabled, and read-only navigation', async t => {
   const chromePath = chromeBinary()
   assert.notEqual(chromePath, null, 'Chrome or Chromium is required for navigation validation')
   command(root, 'corepack', ['pnpm', '--filter', '@winwincode/client', 'build'])
@@ -84,45 +84,24 @@ test('real Chrome projects personal, enterprise, disabled, and read-only navigat
   assert.deepEqual(Object.keys(personal.entries).sort(), [
     'chat', 'extensions', 'home', 'projects', 'settings',
   ])
-  const directDenial = await evaluate(
-    devtools,
-    sessionId,
-    'globalThis.openDeniedEnterpriseRoute()',
-  )
-  assert.equal(directDenial.alertRole, 'alert')
-  assert.equal(directDenial.enterpriseQueries, 0)
-  assert.equal(directDenial.focused, true)
-  assert.equal(directDenial.safeHref, '#/chat')
-  assert.match(directDenial.text, /无法使用.*返回新对话/u)
-
-  const enterprise = await navigate('enterprise')
-  assert.equal(enterprise.deployment, 'enterprise')
-  assert.deepEqual(Object.keys(enterprise.entries).sort(), [
+  // An organization-hierarchy Scope projects the enterprise deployment fact;
+  // the community client still renders no management surface for it.
+  const organization = await navigate('enterprise')
+  assert.equal(organization.deployment, 'enterprise')
+  assert.deepEqual(Object.keys(organization.entries).sort(), [
     'chat', 'extensions', 'home', 'projects', 'settings',
   ])
-  assert.equal(enterprise.entries.enterprise, undefined)
-  const websocketRevoked = await evaluate(
-    devtools,
-    sessionId,
-    'globalThis.revokeEnterpriseSubscription()',
-  )
-  assert.equal(websocketRevoked.subscriptionClosed, true)
-  assert.equal(websocketRevoked.safeHref, '#/chat')
-  assert.equal(websocketRevoked.subscriptionClosed, true)
+  assert.equal(organization.entries.enterprise, undefined)
 
-  await navigate('enterprise')
-  const revoked = await evaluate(devtools, sessionId, 'globalThis.revokeEnterpriseRoute()')
-  assert.equal(revoked.subscriptionClosed, true)
-  assert.equal(revoked.visibleEntries, 0)
-  assert.match(revoked.routeText, /Sign in/iu)
-
-  // Design shell: denied/read-only enterprise areas render no navigation
-  // entry; capability facts are covered by the unit lane.
+  // Design shell: denied/read-only entries render their capability instead of
+  // pretending the area is usable; the unit lane covers the reason mapping.
   const disabled = await navigate('disabled')
-  assert.equal(disabled.entries.enterprise, undefined)
   assert.equal(disabled.deployment, 'enterprise')
+  assert.equal(disabled.entries.home.capability, 'disabled')
+  assert.equal(disabled.entries.home.ariaDisabled, 'true')
 
   const readOnly = await navigate('read-only')
-  assert.equal(readOnly.entries.enterprise, undefined)
   assert.equal(readOnly.deployment, 'enterprise')
+  assert.equal(readOnly.entries.home.capability, 'read-only')
+  assert.match(readOnly.entries.home.label, /只读/u)
 })

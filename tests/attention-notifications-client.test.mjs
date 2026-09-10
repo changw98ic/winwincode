@@ -38,10 +38,6 @@ const centerPageModule = await import(`${pathToFileURL(resolve(
   root,
   '.cache/attention-notifications-tests/attention-center-page.js',
 )).href}`)
-const decisionsPageModule = await import(`${pathToFileURL(resolve(
-  root,
-  '.cache/attention-notifications-tests/local-decisions-page.js',
-)).href}`)
 
 const {
   attentionSignalBadge,
@@ -57,7 +53,6 @@ const {
   attentionCenterItemHash,
   mountAttentionCenterPage,
 } = centerPageModule
-const { mountLocalDecisionsPage } = decisionsPageModule
 
 const schemaVersion = 'winwincode/v1'
 const actor = { kind: 'user', id: 'usr_00000000000000000000000001' }
@@ -310,7 +305,7 @@ test('one event identity notifies once and a changed state notifies again', () =
   )
 })
 
-test('signals open the exact still-canonical StrongFlow or decision context', () => {
+test('signals open the Attention Center, the one unified inbox for the user', () => {
   const signals = attentionSignals({
     approvals: [approval()],
     deliveries: [
@@ -323,48 +318,12 @@ test('signals open the exact still-canonical StrongFlow or decision context', ()
     ],
     nowMillis: now,
   })
-  const byKind = Object.fromEntries(signals.map(signal => [signal.kind, signal]))
-
-  assert.equal(
-    attentionSignalRouteHash(byKind.attention, scopeSelection),
-    `#/strongflow?delivery=${deliveryId}&stageRun=${stageRunId}&view=unified`
-      + `&organizationId=${scope.organizationId}&workspaceId=${scope.workspaceId}`
-      + `&projectId=${scope.projectId}&repositoryId=${scope.repositoryId}`,
-  )
-  assert.equal(
-    attentionSignalRouteHash(byKind.completion, scopeSelection),
-    `#/strongflow?delivery=${deliveredDeliveryId}&view=unified`
-      + `&organizationId=${scope.organizationId}&workspaceId=${scope.workspaceId}`
-      + `&projectId=${scope.projectId}&repositoryId=${scope.repositoryId}`,
-  )
-  assert.equal(
-    attentionSignalRouteHash(byKind.approval, scopeSelection),
-    `#/attention?session=${approvalSessionId}&delivery=${deliveryId}&stageRun=${stageRunId}`
-      + `&organizationId=${scope.organizationId}&workspaceId=${scope.workspaceId}`
-      + `&projectId=${scope.projectId}&repositoryId=${scope.repositoryId}`,
-  )
-  const unmapped = attentionSignals({
-    approvals: [approval({
-      binding: {
-        productSessionId: approvalSessionId,
-        executionJobId,
-        workerSessionId,
-        sessionIdentity: {
-          productSessionId: approvalSessionId,
-          workerSessionId,
-          codexThreadId,
-        },
-      },
-    })],
-    deliveries: [],
-    nowMillis: now,
-  })[0]
-  assert.equal(
-    attentionSignalRouteHash(unmapped, scopeSelection),
-    `#/attention?session=${approvalSessionId}`
-      + `&organizationId=${scope.organizationId}&workspaceId=${scope.workspaceId}`
-      + `&projectId=${scope.projectId}&repositoryId=${scope.repositoryId}`,
-  )
+  const expectedHash = `#/attention`
+    + `?organizationId=${scope.organizationId}&workspaceId=${scope.workspaceId}`
+    + `&projectId=${scope.projectId}&repositoryId=${scope.repositoryId}`
+  assert.equal(attentionSignalRouteHash(scopeSelection), expectedHash)
+  assert.equal(attentionSignalRouteHash(scopeSelection), expectedHash)
+  assert.equal(attentionSignalRouteHash(scopeSelection), expectedHash)
 })
 
 function descendants(node) {
@@ -726,8 +685,8 @@ test('desktop notifications stay off until the user grants them and never repeat
 
   desktop.clickHandlers[0]()
   assert.deepEqual(opened, [
-    `#/strongflow?delivery=${deliveryId}&stageRun=${stageRunId}&view=unified`
-      + `&organizationId=${scope.organizationId}&workspaceId=${scope.workspaceId}`
+    `#/attention`
+      + `?organizationId=${scope.organizationId}&workspaceId=${scope.workspaceId}`
       + `&projectId=${scope.projectId}&repositoryId=${scope.repositoryId}`,
   ])
   monitor.close()
@@ -858,44 +817,36 @@ function fakeModel(initialStateValue) {
   }
 }
 
-test('the Attention Center carries the exact origin into the decision link and the execution link', () => {
+test('Attention Center decision links open the Chat session that raised them', () => {
   const state = centerState()
   const input = state.items[1]
-  const origins = state.origins
 
   assert.equal(
-    attentionCenterItemHash(input, scopeSelection, origins),
-    `#/attention?session=psn_00000000000000000000000001&delivery=${deliveryId}&stageRun=${stageRunId}`
+    attentionCenterItemHash(input, scopeSelection),
+    `#/chat?session=psn_00000000000000000000000001`
       + `&organizationId=${scope.organizationId}&workspaceId=${scope.workspaceId}`
       + `&projectId=${scope.projectId}&repositoryId=${scope.repositoryId}`,
   )
   const approvalItem = state.items[0]
   assert.equal(
-    attentionCenterItemHash(approvalItem, scopeSelection, origins),
-    `#/attention?session=${approvalSessionId}&delivery=${attentionDeliveryId}`
-      + `&stageRun=${approvalStageRunId}`
+    attentionCenterItemHash(approvalItem, scopeSelection),
+    `#/chat?session=${approvalSessionId}`
       + `&organizationId=${scope.organizationId}&workspaceId=${scope.workspaceId}`
       + `&projectId=${scope.projectId}&repositoryId=${scope.repositoryId}`,
   )
-  const unmapped = centerItem({
+  const sessionless = centerItem({
     id: 'apr_00000000000000000000000009',
     stageRunId: 'run_00000000000000000000000009',
+    productSessionId: null,
   })
   assert.equal(
-    attentionCenterItemHash(unmapped, scopeSelection, origins),
-    `#/attention?session=${approvalSessionId}`
-      + `&organizationId=${scope.organizationId}&workspaceId=${scope.workspaceId}`
-      + `&projectId=${scope.projectId}&repositoryId=${scope.repositoryId}`,
-  )
-  assert.equal(
-    attentionCenterItemHash(unmapped, scopeSelection),
-    `#/attention?session=${approvalSessionId}`
-      + `&organizationId=${scope.organizationId}&workspaceId=${scope.workspaceId}`
-      + `&projectId=${scope.projectId}&repositoryId=${scope.repositoryId}`,
+    attentionCenterItemHash(sessionless, scopeSelection),
+    null,
+    'a decision without a Session id links nothing instead of fabricating one',
   )
 })
 
-test('the Attention Center card exposes its execution context without leaking secrets', () => {
+test('the Attention Center cards render no execution-context link and never leak secrets', () => {
   const document = new FakeDocument()
   const rootElement = new FakeElement(document, 'div')
   const model = fakeModel(centerState())
@@ -908,33 +859,15 @@ test('the Attention Center card exposes its execution context without leaking se
   })
   const cards = [...byClass(rootElement, 'wwc-attention-center-list').children]
   assert.equal(cards.length, 2)
-  const inputCard = cards.find(card => card.dataset.kind === 'input')
-  const origin = byClass(inputCard, 'wwc-attention-card-origin')
-  assert.equal(
-    origin.getAttribute('href'),
-    `#/strongflow?delivery=${deliveryId}&stageRun=${stageRunId}&view=unified`
-      + `&organizationId=${scope.organizationId}&workspaceId=${scope.workspaceId}`
-      + `&projectId=${scope.projectId}&repositoryId=${scope.repositoryId}`,
-  )
-  assert.equal(origin.textContent, '打开执行上下文')
-  const approvalCard = cards.find(card => card.dataset.kind === 'approval')
-  assert.equal(
-    byClass(approvalCard, 'wwc-attention-card-origin').getAttribute('href'),
-    `#/strongflow?delivery=${attentionDeliveryId}&stageRun=${approvalStageRunId}&view=unified`
-      + `&organizationId=${scope.organizationId}&workspaceId=${scope.workspaceId}`
-      + `&projectId=${scope.projectId}&repositoryId=${scope.repositoryId}`,
-  )
-
-  model.publish(centerState({
-    items: [centerItem({
-      stageRunId: 'run_00000000000000000000000009',
-      id: 'apr_00000000000000000000000009',
-    })],
-  }))
-  const unmappedCard = [...byClass(rootElement, 'wwc-attention-center-list').children][0]
-  const unmappedOrigin = byClass(unmappedCard, 'wwc-attention-card-origin')
-  assert.equal(unmappedOrigin.hidden, true, 'an unmapped decision exposes no execution link')
-  assert.equal(unmappedOrigin.getAttribute('href'), null)
+  for (const card of cards) {
+    assert.equal(
+      allByClass(card, 'wwc-attention-card-origin').length,
+      0,
+      'no execution-origin link exists without a delivery workbench surface',
+    )
+    const action = byClass(card, 'wwc-attention-card-action')
+    assert.match(action.getAttribute('href'), /^#\/chat\?/u)
+  }
 
   const text = visibleText(rootElement)
   for (const secret of [repositoryLocator, candidateDigest, executionJobId, workerSessionId, codexThreadId]) {
@@ -1021,51 +954,4 @@ test('the desktop control stays hidden when the shell offers no notification con
   mounted.close()
 })
 
-function decisionState(overrides = {}) {
-  return {
-    status: 'ready',
-    realtime: 'subscribed',
-    session: null,
-    inputs: [],
-    approvals: [],
-    attention: [],
-    interaction: { status: 'idle', operation: null, targetId: null, error: null },
-    error: null,
-    ...overrides,
-  }
-}
 
-test('the decision surface returns to the exact Task and StageRun that raised the decision', () => {
-  const document = new FakeDocument()
-  const rootElement = new FakeElement(document, 'div')
-  const model = fakeModel(decisionState())
-  const returnHash = `#/strongflow?delivery=${deliveryId}&session=${approvalSessionId}`
-    + `&stageRun=${approvalStageRunId}&view=unified`
-    + `&organizationId=${scope.organizationId}&workspaceId=${scope.workspaceId}`
-    + `&projectId=${scope.projectId}&repositoryId=${scope.repositoryId}`
-  const mounted = mountLocalDecisionsPage({
-    root: rootElement,
-    model,
-    readOnly: false,
-    returnTarget: { hash: returnHash, label: 'Return to execution context' },
-  })
-  const returnLink = byClass(rootElement, 'wwc-local-decisions-return')
-  assert.equal(returnLink.getAttribute('href'), returnHash)
-  assert.equal(returnLink.textContent, 'Return to execution context')
-  assert.equal(allByClass(rootElement, 'wwc-local-decisions-return').length, 1)
-
-  mounted.close()
-  const remounted = new FakeElement(document, 'div')
-  const withoutReturn = mountLocalDecisionsPage({
-    root: remounted,
-    model,
-    readOnly: false,
-  })
-  assert.equal(allByClass(remounted, 'wwc-local-decisions-return').length, 1)
-  assert.equal(
-    byClass(remounted, 'wwc-local-decisions-return').hidden,
-    true,
-    'no return entry without an execution origin in the route',
-  )
-  withoutReturn.close()
-})

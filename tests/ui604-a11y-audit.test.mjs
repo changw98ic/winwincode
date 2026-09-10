@@ -36,26 +36,16 @@ assert.equal(
 )
 
 const cache = resolve(root, '.cache/ui604-a11y-tests')
-const deliveryListModule = await import(`${pathToFileURL(resolve(
-  cache,
-  'strongflow-delivery-list-page.js',
-)).href}`)
 const chatModule = await import(`${pathToFileURL(resolve(
   cache,
   'chat-page.js',
-)).href}`)
-const diffModule = await import(`${pathToFileURL(resolve(
-  cache,
-  'strongflow-diff-viewer.js',
 )).href}`)
 const panelModule = await import(`${pathToFileURL(resolve(
   root,
   'packages/browser-ui/dist/index.js',
 )).href}`)
 
-const { mountStrongFlowDeliveryList } = deliveryListModule
 const { mountChatPage } = chatModule
-const { mountCandidateDiffViewer } = diffModule
 const { mountPanel } = panelModule
 
 class FakeElement {
@@ -174,7 +164,7 @@ function findAllByClass(node, className, matches = []) {
   return matches
 }
 
-// --- Delivery Kanban keyboard advance (audit finding A3) ---------------------
+// --- Chat conversion dialog focus and Escape (audit finding A4) --------------
 
 const scopeSelection = {
   organizationId: 'org_00000000000000000000000001',
@@ -182,136 +172,6 @@ const scopeSelection = {
   projectId: 'prj_00000000000000000000000001',
   repositoryId: 'rep_00000000000000000000000001',
 }
-
-function kanbanSummary(index, overrides = {}) {
-  return {
-    schemaVersion: 'winwincode/v1',
-    deliveryId: `dlv_${String(index).padStart(26, '0')}`,
-    revision: index + 1,
-    status: index === 0 ? 'plan-review' : 'executing',
-    title: `Keyboard delivery ${String(index)}`,
-    updatedAt: `2026-01-0${String((index % 9) + 1)}T00:00:00Z`,
-    openAttentionCount: 0,
-    activeStageRunId: null,
-    ownership: { ...scopeSelection },
-    taskCounts: {
-      total: 0, pending: 0, active: 0, blocked: 0, verifying: 0, completed: 0, failed: 0,
-    },
-    ...overrides,
-  }
-}
-
-function kanbanState(overrides = {}) {
-  const visible = overrides.visible ?? [
-    kanbanSummary(1),
-    kanbanSummary(2, { status: 'executing' }),
-  ]
-  return {
-    status: 'ready',
-    filters: { search: '', status: null, attentionOnly: false, order: 'recent' },
-    visible,
-    loadedCount: visible.length,
-    hasMore: false,
-    loadingMore: false,
-    moreFailure: null,
-    error: null,
-    advance: { deliveryId: null, failure: null },
-  }
-}
-
-class FakeListModel {
-  constructor(initialState) { this.state = initialState }
-
-  calls = []
-  listener = null
-
-  subscribe(listener) {
-    this.listener = listener
-    listener(this.state)
-    return () => { this.listener = null }
-  }
-
-  publish(next) {
-    this.state = next
-    this.listener?.(next)
-  }
-
-  async start() {}
-  async refresh() {}
-  async loadMore() {}
-  setSearch() {}
-  async setStatusFilter() {}
-  setAttentionOnly() {}
-  setOrder() {}
-  async advanceDelivery(id, revision) {
-    this.calls.push(['advanceDelivery', id, revision])
-  }
-  close() {}
-}
-
-function mountedKanban(state, options = {}) {
-  const document = new FakeDocument()
-  const rootElement = new FakeElement(document, 'div')
-  const model = new FakeListModel(state)
-  const page = mountStrongFlowDeliveryList({
-    root: rootElement,
-    model,
-    view: 'kanban',
-    ...options,
-  })
-  return { document, rootElement, model, page }
-}
-
-test('A3 every Kanban card exposes a keyboard advance control beside drag and drop', () => {
-  const { rootElement, page } = mountedKanban(kanbanState())
-  const cards = findAllByClass(rootElement, 'wwc-delivery-kanban-card')
-  assert.equal(cards.length, 2, 'the fixture renders two Kanban cards')
-  for (const card of cards) {
-    const advance = findByClass(card, 'wwc-delivery-kanban-advance')
-    assert.notEqual(
-      advance,
-      null,
-      'a Kanban card must offer the same advance action drag and drop offers',
-    )
-    assert.equal(advance.tagName, 'BUTTON', 'the advance control must be a real button')
-    assert.equal(advance.type, 'button')
-    assert.equal(advance.disabled, false)
-    assert.equal(advance.hidden, false)
-    const title = findByClass(card, 'wwc-delivery-kanban-card-link')?.textContent
-      ?? card.children[0]?.textContent
-      ?? ''
-    assert.match(
-      advance.getAttribute('aria-label') ?? '',
-      new RegExp(String(title).replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'), 'u'),
-      'the advance control must name the Delivery it advances',
-    )
-  }
-  page.close()
-})
-
-test('A3 activating the keyboard advance control routes through delivery.advance', async () => {
-  const { rootElement, model, page } = mountedKanban(kanbanState())
-  const card = findAllByClass(rootElement, 'wwc-delivery-kanban-card')[1]
-  const advance = findByClass(card, 'wwc-delivery-kanban-advance')
-  advance.focus()
-  advance.click()
-  await new Promise(resolveTick => setTimeout(resolveTick, 0))
-  assert.deepEqual(model.calls, [['advanceDelivery', 'dlv_00000000000000000000000002', 3]])
-  page.close()
-})
-
-test('A3 read-only Kanban hides the advance control instead of leaving a dead button', () => {
-  const { rootElement, page } = mountedKanban(kanbanState(), { readOnly: true })
-  for (const card of findAllByClass(rootElement, 'wwc-delivery-kanban-card')) {
-    const advance = findByClass(card, 'wwc-delivery-kanban-advance')
-    assert.notEqual(advance, null)
-    assert.equal(advance.hidden, true, 'read-only cards must not offer advancing')
-  }
-  page.close()
-})
-
-// --- Chat conversion dialog focus and Escape (audit finding A4) --------------
-
 const productSessionId = 'psn_00000000000000000000000001'
 const modelRoute = {
   providerId: 'browser-provider',
@@ -461,7 +321,7 @@ function mountedChat(stateOverrides = {}) {
 
 test('A4 the Chat conversion panel is a named dialog tied to its trigger', () => {
   const { rootElement, page } = mountedChat()
-  const trigger = findByClass(rootElement, 'wwc-chat-convert-delivery')
+  const trigger = findByClass(rootElement, 'wwc-chat-delegation-chip')
   assert.equal(trigger.getAttribute('aria-expanded'), 'false')
   assert.notEqual(trigger.getAttribute('aria-controls'), null)
 
@@ -482,7 +342,7 @@ test('A4 the Chat conversion panel is a named dialog tied to its trigger', () =>
 
 test('A4 opening the conversion dialog moves focus into its first field', () => {
   const { document, rootElement, page } = mountedChat()
-  const trigger = findByClass(rootElement, 'wwc-chat-convert-delivery')
+  const trigger = findByClass(rootElement, 'wwc-chat-delegation-chip')
   trigger.focus()
   trigger.click()
   const title = findByClass(rootElement, 'wwc-chat-convert-title')
@@ -496,7 +356,7 @@ test('A4 opening the conversion dialog moves focus into its first field', () => 
 
 test('A4 Escape closes the conversion dialog and returns focus to the trigger', () => {
   const { document, rootElement, page } = mountedChat()
-  const trigger = findByClass(rootElement, 'wwc-chat-convert-delivery')
+  const trigger = findByClass(rootElement, 'wwc-chat-delegation-chip')
   trigger.focus()
   trigger.click()
   const dialog = findByClass(rootElement, 'wwc-chat-convert')
@@ -530,87 +390,4 @@ test('A6 panels can nest one level below the single page heading', () => {
   })
   assert.equal(nested.title.tagName, 'H3')
   assert.equal(nested.root.getAttribute('aria-labelledby'), nested.title.id)
-})
-
-// --- Diff table headers (audit finding A7) -----------------------------------
-
-const diffContent = [
-  'diff --git a/src/app.ts b/src/app.ts',
-  'index 1111111..2222222 100644',
-  '--- a/src/app.ts',
-  '+++ b/src/app.ts',
-  '@@ -1,4 +1,5 @@',
-  ' const one = 1',
-  '-const two = 2',
-  '+const two = 22',
-  ' const four = 4',
-  '',
-].join('\n')
-
-function diffState(overrides = {}) {
-  return {
-    status: 'ready',
-    path: 'src/app.ts',
-    content: diffContent,
-    loadedBytes: 200,
-    totalBytes: 200,
-    hasMore: false,
-    previewLimited: false,
-    fileDiffSha256: `sha256:${'4'.repeat(64)}`,
-    unavailableReason: null,
-    error: null,
-    ...overrides,
-  }
-}
-
-function mountedViewer(stateOverrides = {}, propsOverrides = {}) {
-  const document = new FakeDocument()
-  const viewer = mountCandidateDiffViewer({
-    document,
-    onLoadMoreDiff() {},
-    onViewModeChange() {},
-    ...propsOverrides,
-  })
-  document.activeElement = viewer.root
-  viewer.update({
-    diff: diffState(stateOverrides),
-    selectedPath: stateOverrides.selectedPath ?? 'src/app.ts',
-    viewMode: stateOverrides.viewMode ?? 'unified',
-    candidateDigest: `sha256:${'3'.repeat(64)}`,
-  })
-  return { document, viewer }
-}
-
-test('A7 the Diff table names itself and declares its columns', () => {
-  const { viewer } = mountedViewer()
-  const table = findByClass(viewer.root, 'wwc-candidate-diff-table')
-  const caption = findByClass(table, 'wwc-candidate-diff-caption')
-  assert.notEqual(caption, null, 'the Diff table needs a caption for screen readers')
-  assert.match(caption.textContent, /src\/app\.ts/u)
-  const head = findByClass(table, 'wwc-candidate-diff-head')
-  assert.notEqual(head, null, 'the Diff table needs a header row')
-  const headers = findAllByClass(head, 'wwc-candidate-diff-column')
-  assert.equal(headers.length, 3)
-  assert.equal(headers[0].tagName, 'TH')
-  assert.equal(headers[0].getAttribute('scope'), 'col')
-  assert.deepEqual(headers.map(header => header.textContent), [
-    'Old line',
-    'New line',
-    'Line content',
-  ])
-})
-
-test('A7 the Diff header row follows the active layout', () => {
-  const { viewer } = mountedViewer({ viewMode: 'side-by-side' })
-  const table = findByClass(viewer.root, 'wwc-candidate-diff-table')
-  assert.equal(table.getAttribute('data-columns'), '4')
-  const head = findByClass(table, 'wwc-candidate-diff-head')
-  const headers = findAllByClass(head, 'wwc-candidate-diff-column')
-  assert.deepEqual(headers.map(header => header.textContent), [
-    'Old line',
-    'Removed content',
-    'New line',
-    'Added content',
-  ])
-  for (const header of headers) assert.equal(header.getAttribute('scope'), 'col')
 })

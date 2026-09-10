@@ -327,8 +327,10 @@ globalThis.usageHealthReady = () => true
 function summary() {
   const panel = document.querySelector('.wwc-usage-health')
   if (panel === null) return { present: false }
-  const leak = document.body.textContent.includes(SECRET_MARKER)
-    || document.body.textContent.includes(CREDENTIAL_MARKER)
+  // The panel is the secret boundary. The host settings page legitimately
+  // renders credential references, so only the panel text is scanned.
+  const leak = panel.textContent.includes(SECRET_MARKER)
+    || panel.textContent.includes(CREDENTIAL_MARKER)
   return {
     present: true,
     heading: panel.querySelector('.wwc-usage-health-heading')?.textContent ?? '',
@@ -368,8 +370,12 @@ function summary() {
 globalThis.inspectUsageHealth = () => summary()
 
 globalThis.openDiagnosticsUsageHealth = async () => {
-  location.hash = '#/settings/runtime'
-  await waitFor(() => document.querySelector('.wwc-local-operations') !== null, 'diagnostics page')
+  location.hash = '#/settings'
+  await waitFor(() => document.querySelector('.wwc-settings') !== null, 'settings page')
+  const usageTab = [...document.querySelectorAll('[role="tab"]')]
+    .find(node => node.textContent.trim() === '用量')
+  if (usageTab === undefined) throw new Error('missing settings usage tab')
+  usageTab.click()
   await waitFor(() => summary().present, 'usage and health summary')
   await waitFor(() => summary().deliveries.length > 0, 'usage rows')
   return summary()
@@ -385,12 +391,12 @@ globalThis.blockProviderRead = async () => {
     models: [...panel.querySelectorAll('.wwc-usage-health-model')].length,
     providerSectionUnavailable: [...panel.querySelectorAll('.wwc-usage-health-unavailable')]
       .some(node => node.hidden === false
-        && /This section is unavailable/u.test(node.textContent)),
+        && /此分区不可用/u.test(node.textContent)),
     visibleUnavailableNotes: [...panel.querySelectorAll('.wwc-usage-health-unavailable')]
       .filter(node => node.hidden === false).length,
     deliveryRowsStillPresent: panel.querySelectorAll('.wwc-usage-health-delivery').length > 0,
-    leak: document.body.textContent.includes(SECRET_MARKER)
-      || document.body.textContent.includes(CREDENTIAL_MARKER),
+    leak: panel.textContent.includes(SECRET_MARKER)
+      || panel.textContent.includes(CREDENTIAL_MARKER),
   }
 }
 

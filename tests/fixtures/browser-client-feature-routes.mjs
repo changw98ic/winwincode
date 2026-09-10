@@ -193,14 +193,12 @@ async function settled(selector, statusSelector) {
 
 globalThis.inspectFeatureRoute = async name => {
   if (name === 'settings') return settled('.wwc-settings', '.wwc-settings-status')
-  if (name === 'operations') {
-    return settled('.wwc-local-operations', '.wwc-local-operations-status')
-  }
   if (name === 'attention') {
     return settled('.wwc-attention-center', '.wwc-attention-center-status')
   }
+  // Legacy `?session=` decision deep links land on the same Attention Center.
   if (name === 'attention-session') {
-    return settled('.wwc-local-decisions', '.wwc-local-decisions-status')
+    return settled('.wwc-attention-center', '.wwc-attention-center-status')
   }
   throw new Error(`unknown feature route: ${name}`)
 }
@@ -208,13 +206,9 @@ globalThis.inspectFeatureRoute = async name => {
 globalThis.inspectManagementPresentation = name => {
   const selector = name === 'settings'
     ? '.wwc-settings'
-    : name === 'operations'
-      ? '.wwc-local-operations'
-      : name === 'attention'
-        ? '.wwc-attention-center'
-        : name === 'attention-session'
-          ? '.wwc-local-decisions'
-          : null
+    : name === 'attention' || name === 'attention-session'
+      ? '.wwc-attention-center'
+      : null
   if (selector === null) throw new Error(`unknown management page: ${name}`)
   const pageRoot = document.querySelector(selector)
   const status = pageRoot?.querySelector('[data-wwc-component="status-badge"]')
@@ -292,7 +286,7 @@ globalThis.runReliabilityScenario = async () => {
 
   async function failureState(mode, expectedStatus) {
     failureMode = mode
-    location.hash = `#/settings/runtime?fixture=${mode}`
+    location.hash = `#/settings?fixture=${mode}`
     await waitFor(
       () => document.querySelector('.wwc-connection-bar')?.dataset.connectionStatus
         === expectedStatus,
@@ -374,11 +368,6 @@ globalThis.runReliabilityScenario = async () => {
 
 globalThis.runFeatureNavigationScenario = async () => {
   const settings = await globalThis.inspectFeatureRoute('settings')
-  // Design 12: the local-operations link moved out of the settings header;
-  // reach the operations route directly.
-  location.hash = '#/settings/runtime'
-  const operations = await globalThis.inspectFeatureRoute('operations')
-  const settingsSubscriptionClosed = calls.subscriptions[0]?.closed ?? false
 
   // Design shell: 待我处理 has no nav entry; it is reached by direct route.
   location.hash = '#/attention'
@@ -398,15 +387,15 @@ globalThis.runFeatureNavigationScenario = async () => {
   const denied = document.querySelector('.wwc-settings-error-text').textContent
 
   failureMode = 'network'
-  location.hash = '#/settings/runtime?fixture=network'
+  location.hash = '#/settings?fixture=network'
   await waitFor(
     () => document.querySelector(
-      '.wwc-local-operations-status .wwc-status-badge-label',
+      '.wwc-settings-status .wwc-status-badge-label',
     )?.textContent
       === 'Reconnecting…',
-    'Local Operations network failure',
+    'Settings network failure',
   )
-  const network = document.querySelector('.wwc-local-operations-error-text').textContent
+  const network = document.querySelector('.wwc-settings-error-text').textContent
 
   failureMode = null
   blockedQuery = 'settings.get'
@@ -415,8 +404,8 @@ globalThis.runFeatureNavigationScenario = async () => {
     () => calls.queries.at(-1)?.query === 'settings.get',
     'pending Settings query',
   )
-  location.hash = '#/settings/runtime?fixture=after-cancel'
-  const afterCancellation = await globalThis.inspectFeatureRoute('operations')
+  location.hash = '#/attention?fixture=after-cancel'
+  const afterCancellation = await globalThis.inspectFeatureRoute('attention')
   await waitFor(() => calls.abortedQueries.includes('settings.get'), 'cancelled Settings query')
 
   return {
@@ -424,9 +413,7 @@ globalThis.runFeatureNavigationScenario = async () => {
     denied,
     network,
     attentionCenter,
-    operations,
     settings,
-    settingsSubscriptionClosed,
     calls,
   }
 }

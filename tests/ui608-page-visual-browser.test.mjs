@@ -42,9 +42,7 @@ const ARTIFACT_CAPTURE = 'pages.capture.json'
 const DESKTOP = Object.freeze({ width: 1280, height: 900 })
 const NARROW = Object.freeze({ width: 420, height: 900 })
 
-const POPULATED_PAGES = Object.freeze([
-  'home', 'chat', 'settings', 'attention', 'decisions', 'operations',
-])
+const POPULATED_PAGES = Object.freeze(['home', 'chat', 'settings', 'attention'])
 /**
  * One page load per fixture-data slice.  Inside a load the shell routes on the
  * hash, so every populated page is captured from a single mount.

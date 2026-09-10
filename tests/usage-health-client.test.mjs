@@ -710,7 +710,7 @@ test('the observed data window, coverage and last update are presented', async (
   assert.equal(bounded.model.state.truncated, true)
   assert.match(
     findByClass(bounded.rootElement, 'wwc-usage-health-window').textContent,
-    /1 of 2/u,
+    /2 个会话中的 1 个/u,
   )
 })
 
@@ -744,7 +744,7 @@ test('credential lifecycle rows carry rotation facts and never credential identi
   assert.equal(model.state.credentials[0].rotationVersion, 3)
   const text = rootElement.textContent
   assert.match(text, /Primary provider key/u)
-  assert.match(text, /revoked/u)
+  assert.match(text, /已吊销/u)
   assert.equal(text.includes('crd_'), false)
   assert.equal(text.includes(SECRET_MARKER), false)
 })
@@ -768,7 +768,7 @@ test('cost is never presented as an exact amount without a price source', async 
   const { rootElement } = await started()
   const text = rootElement.textContent
   assert.equal(/(?:\$|€|£)\s?\d/u.test(text), false)
-  assert.match(text, /unit prices are not published/u)
+  assert.match(text, /不发布单价/u)
 })
 
 test('the summary opens no second live region and reuses row identity across equivalent reads', async () => {
@@ -779,7 +779,7 @@ test('the summary opens no second live region and reuses row identity across equ
   assert.deepEqual(liveRegions, [])
   assert.match(
     findByClass(rootElement, 'wwc-usage-health-updated').textContent,
-    /Last updated/u,
+    /更新于/u,
   )
 
   const before = rows(rootElement, 'wwc-usage-health-delivery')
@@ -838,7 +838,7 @@ test('one unavailable projection marks only its own section', async () => {
   const visible = notes.filter(node => node.hidden === false)
   assert.equal(visible.length, 1)
   assert.match(visible[0].textContent, /CONTROL_PLANE_UNAVAILABLE/u)
-  assert.match(visible[0].textContent, /This section is unavailable/u)
+  assert.match(visible[0].textContent, /此分区不可用/u)
   assert.equal(rows(rootElement, 'wwc-usage-health-delivery').length > 0, true)
   assert.equal(findByClass(rootElement, 'wwc-usage-health-capacity').dataset.capacityState, 'unknown')
 })

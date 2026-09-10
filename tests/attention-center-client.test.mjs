@@ -946,10 +946,10 @@ test('presentation filters by kind, keeps fail-closed labels, and never hides st
   assert.equal(denied.actionsDisabled, true)
 })
 
-test('item entry links open the authoritative source context with the exact Scope preserved', () => {
+test('item entry links open the Chat session that raised the decision', () => {
   assert.equal(
     attentionCenterItemHash(centerItem(), emptyScopeSelection),
-    `#/attention?session=${productSessionId}`
+    `#/chat?session=${productSessionId}`
       + `&organizationId=${scope.organizationId}&workspaceId=${scope.workspaceId}`
       + `&projectId=${scope.projectId}&repositoryId=${scope.repositoryId}`,
   )
@@ -959,19 +959,20 @@ test('item entry links open the authoritative source context with the exact Scop
       productSessionId: approvalSessionId,
       stageRunId: null,
     }), emptyScopeSelection),
-    `#/attention?session=${approvalSessionId}`
+    `#/chat?session=${approvalSessionId}`
       + `&organizationId=${scope.organizationId}&workspaceId=${scope.workspaceId}`
       + `&projectId=${scope.projectId}&repositoryId=${scope.repositoryId}`,
   )
-  const strongflowHash = attentionCenterItemHash(centerItem({
-    kind: 'attention',
-    deliveryId,
-    stageRunId,
-  }), emptyScopeSelection)
-  assert.match(strongflowHash, /^#\/strongflow\?/u)
-  assert.match(strongflowHash, new RegExp(`delivery=${deliveryId}`), 'delivery id must be present')
-  assert.match(strongflowHash, /stageRun=str_00000000000000000000000001/u)
-  assert.match(strongflowHash, /repositoryId=rep_00000000000000000000000001/u)
+  assert.equal(
+    attentionCenterItemHash(centerItem({
+      kind: 'attention',
+      productSessionId: null,
+      deliveryId,
+      stageRunId,
+    }), emptyScopeSelection),
+    null,
+    'a Delivery-bound Attention renders no action instead of a dead end',
+  )
 })
 
 test('the mounted center shows safe rows, disables fail-closed actions, and keeps drafts and controls across reloads', () => {
@@ -1033,11 +1034,11 @@ test('the mounted center shows safe rows, disables fail-closed actions, and keep
   const invalidCard = cardNodes.find(node => node.dataset.urgency === 'binding-invalid')
   assert.notEqual(invalidCard, undefined)
   assert.equal(byClass(invalidCard, 'wwc-attention-card-status').textContent, '绑定失效 · 操作禁用')
-  assert.equal(byClass(invalidCard, 'wwc-attention-card-action').getAttribute('aria-disabled'), 'true')
+  assert.equal(byClass(invalidCard, 'wwc-attention-card-action').hidden, true)
   assert.equal(byClass(invalidCard, 'wwc-attention-card-action').getAttribute('href'), null)
   const expiredCard = cardNodes.find(node => node.dataset.urgency === 'expired')
   assert.equal(byClass(expiredCard, 'wwc-attention-card-status').textContent, '已过期 · 操作禁用')
-  assert.equal(byClass(expiredCard, 'wwc-attention-card-action').getAttribute('aria-disabled'), 'true')
+  assert.equal(byClass(expiredCard, 'wwc-attention-card-action').hidden, true)
   assert.equal(byClass(expiredCard, 'wwc-attention-card-action').getAttribute('href'), null)
   assert.equal(byClass(pendingCard, 'wwc-attention-card-action').getAttribute('aria-disabled'), null)
 
@@ -1082,7 +1083,7 @@ test('read-only centers and failures present explicit, non-actionable states', (
   })
   const pendingCard = [...byClass(rootElement, 'wwc-attention-center-list').children]
     .find(node => node.dataset.urgency === 'pending')
-  assert.equal(byClass(pendingCard, 'wwc-attention-card-action').getAttribute('aria-disabled'), 'true')
+  assert.equal(byClass(pendingCard, 'wwc-attention-card-action').hidden, true)
   assert.equal(byClass(pendingCard, 'wwc-attention-card-action').getAttribute('href'), null)
   mounted.close()
 

@@ -7,20 +7,10 @@ import {
   type AttentionCenterViewModel,
   type AttentionCenterViewModelState,
 } from './attention-center-view-model.js'
-import type { ControlPlaneClient } from './community-control-plane-client.js'
-import type { ScopeRouteSelection } from '@winwincode/browser-core/scope-context'
 import {
-  DEFAULT_HOME_VISIT_LIMIT,
-  browserHomeVisitStorage,
-  createHomeRecentVisitStore,
-  type HomeRecentVisitStore,
-  type HomeVisit,
-} from './home-recent-visits.js'
-import {
-  createStrongFlowDeliveryListViewModel,
-  type StrongFlowDeliveryListState,
-  type StrongFlowDeliveryListViewModel,
-} from './strongflow-delivery-list-view-model.js'
+  ControlPlaneClientError,
+  type ControlPlaneClient,
+} from './community-control-plane-client.js'
 import {
   createUsageHealthViewModel,
   type UsageHealthViewModel,
@@ -30,14 +20,16 @@ import type {
   Actor,
   ControlPlaneWebSocketSubscriptionId,
   DeliveryId,
+  DeliveryListResultResponse,
   DeliveryProjection,
   DeliveryStatus,
   Instant,
+  OpaqueCursor,
   RepositoryScope,
   RequestId,
   StageRunId,
 } from './generated/contracts.js'
-import { DeliveryStatus as DeliveryStatusVocabulary } from './generated/contracts.js'
+import { DeliveryStatus as DeliveryStatusVocabulary, QueryName } from './generated/contracts.js'
 
 /**
  * UI-504 composes the projections that already exist - the Attention Center,
@@ -50,6 +42,183 @@ export type HomeDashboardStatus = 'loading' | 'ready' | 'partial' | 'error' | 'c
 export type HomeDashboardSource = 'delivery' | 'attention' | 'usage'
 
 export type HomeDashboardSourceState = 'loading' | 'ok' | 'unavailable'
+
+/** One bounded server page of the board's Delivery list projection. */
+const DELIVERY_LIST_PAGE_LIMIT = 50
+const DELIVERY_LIST_MAX_PAGES = 10
+
+export type HomeDeliveryListStatus = 'loading' | 'ready' | 'refreshing' | 'error'
+
+/**
+ * The one Delivery read model the board mounts: a bounded, recent-first window
+ * of the Scope's Deliveries.  A first load that fails has nothing to show
+ * (`error`); a failed refresh keeps the loaded window.
+ */
+export interface HomeDeliveryListState {
+  readonly status: HomeDeliveryListStatus
+  readonly visible: readonly DeliveryProjection[]
+  readonly loadedCount: number
+}
+
+export interface HomeDeliveryListViewModel {
+  readonly state: HomeDeliveryListState
+  subscribe(listener: (state: HomeDeliveryListState) => void): () => void
+  start(): Promise<void>
+  refresh(): Promise<void>
+  close(): void
+}
+
+interface HomeDeliveryListOptions {
+  readonly client: ControlPlaneClient
+  readonly actor: Actor
+  readonly scope: RepositoryScope
+  readonly nextRequestId: () => RequestId
+}
+
+/**
+ * Load one consistent recent-first snapshot through bounded server pages.
+ * Refresh swaps the whole loaded window only after the rebuild completes; a
+ * first load publishes growing prefixes of the same page chain.
+ */
+function createHomeDeliveryListViewModel(
+  options: HomeDeliveryListOptions,
+): HomeDeliveryListViewModel {
+  let listener: ((state: HomeDeliveryListState) => void) | null = null
+  let loaded: readonly DeliveryProjection[] = []
+  let status: HomeDeliveryListStatus = 'loading'
+  let generation = 0
+  let closed = false
+  let rebuildChain: Promise<void> = Promise.resolve()
+
+  function snapshot(): HomeDeliveryListState {
+    return Object.freeze({
+      status,
+      visible: loaded,
+      loadedCount: loaded.length,
+    })
+  }
+
+  function publish(): void {
+    listener?.(snapshot())
+  }
+
+  function failLoad(): void {
+    status = 'error'
+    publish()
+  }
+
+  async function rebuild(ownGeneration: number, firstLoad: boolean): Promise<void> {
+    const collected: DeliveryProjection[] = []
+    const seenIds = new Set<string>()
+    const seenCursors = new Set<string>()
+    let pageCursor: OpaqueCursor | null = null
+    for (let pageIndex = 0; ; pageIndex += 1) {
+      if (pageIndex >= DELIVERY_LIST_MAX_PAGES) {
+        if (firstLoad) loaded = collected
+        failLoad()
+        return
+      }
+      let response: DeliveryListResultResponse
+      try {
+        response = await options.client.query({
+          schemaVersion: 'winwincode/v1',
+          requestId: options.nextRequestId(),
+          actor: options.actor,
+          scope: options.scope,
+          query: QueryName.DeliveryList,
+          parameters: { states: [] },
+          page: { cursor: pageCursor, limit: DELIVERY_LIST_PAGE_LIMIT },
+        }) as DeliveryListResultResponse
+      } catch {
+        if (superseded(ownGeneration)) return
+        if (firstLoad) loaded = collected
+        failLoad()
+        return
+      }
+      if (superseded(ownGeneration)) return
+      if (response.query !== QueryName.DeliveryList) {
+        if (firstLoad) loaded = collected
+        failLoad()
+        return
+      }
+      for (const item of response.result.items) {
+        if (seenIds.has(item.deliveryId)) continue
+        seenIds.add(item.deliveryId)
+        collected.push(item)
+      }
+      const page = response.page
+      if (!page.hasMore) {
+        pageCursor = null
+      } else if (page.nextCursor !== null && !seenCursors.has(page.nextCursor)) {
+        pageCursor = page.nextCursor
+        seenCursors.add(pageCursor)
+      } else {
+        if (firstLoad) loaded = collected
+        failLoad()
+        return
+      }
+      if (firstLoad) {
+        loaded = collected
+        publish()
+      }
+      if (pageCursor === null) break
+    }
+    loaded = collected
+    status = 'ready'
+    publish()
+  }
+
+  function superseded(ownGeneration: number): boolean {
+    return closed || ownGeneration !== generation
+  }
+
+  function scheduleRebuild(nextStatus: 'loading' | 'refreshing'): Promise<void> {
+    generation += 1
+    status = nextStatus
+    publish()
+    const firstLoad = nextStatus === 'loading'
+    const chain = rebuildChain
+    const run = (async () => {
+      await chain.catch(() => undefined)
+      if (superseded(generation)) return
+      await rebuild(generation, firstLoad)
+    })()
+    rebuildChain = run
+    return run
+  }
+
+  return {
+    get state() {
+      return snapshot()
+    },
+    subscribe(nextListener) {
+      listener = nextListener
+      nextListener(snapshot())
+      return () => {
+        if (listener === nextListener) listener = null
+      }
+    },
+    start() {
+      if (closed) return Promise.resolve()
+      return scheduleRebuild('loading')
+    },
+    refresh() {
+      if (closed) return Promise.resolve()
+      return scheduleRebuild('refreshing')
+    },
+    close() {
+      if (closed) return
+      closed = true
+      generation += 1
+      listener = null
+    },
+  }
+}
+
+function deliveryListSourceState(status: string): HomeDashboardSourceState {
+  return status === 'loading' ? 'loading' : status === 'error' ? 'unavailable' : 'ok'
+}
+
 
 /** One Delivery card: the exact identity the StrongFlow deep link opens. */
 export interface HomeDeliveryCard {
@@ -66,11 +235,6 @@ export interface HomeDeliveryCard {
   readonly verifyingTasks: number
   readonly completedTasks: number
   readonly totalTasks: number
-}
-
-/** One Delivery the user opened recently, resolved against the loaded window. */
-export interface HomeVisitedCard extends HomeDeliveryCard {
-  readonly visitedAt: Instant
 }
 
 /** One pending decision: an input, a tool approval, or a business Attention. */
@@ -95,7 +259,6 @@ export interface HomeDashboardCounts {
   readonly active: number
   readonly failing: number
   readonly completed: number
-  readonly visited: number
 }
 
 export interface HomeDashboardState {
@@ -104,7 +267,6 @@ export interface HomeDashboardState {
   readonly active: readonly HomeDeliveryCard[]
   readonly failing: readonly HomeDeliveryCard[]
   readonly completed: readonly HomeDeliveryCard[]
-  readonly visited: readonly HomeVisitedCard[]
   readonly counts: HomeDashboardCounts
   readonly sources: Readonly<Record<HomeDashboardSource, HomeDashboardSourceState>>
   /** True only when every projection proves the Scope was never used. */
@@ -114,13 +276,11 @@ export interface HomeDashboardState {
 export interface HomeDashboardLimits {
   readonly decisions: number
   readonly deliveries: number
-  readonly visits: number
 }
 
 export const DEFAULT_HOME_DASHBOARD_LIMITS: HomeDashboardLimits = Object.freeze({
   decisions: 4,
   deliveries: 4,
-  visits: DEFAULT_HOME_VISIT_LIMIT,
 })
 
 export interface HomeDashboardViewModelOptions {
@@ -130,8 +290,6 @@ export interface HomeDashboardViewModelOptions {
   /** One scope event subscription, opened by the Attention projection. */
   readonly subscriptionId: ControlPlaneWebSocketSubscriptionId
   readonly nextRequestId: () => RequestId
-  /** Browser-only recent Delivery visits; defaults to the local storage store. */
-  readonly visits?: HomeRecentVisitStore
   readonly limits?: HomeDashboardLimits
   readonly nowMillis?: () => number
 }
@@ -230,8 +388,8 @@ function sourceState(
   return failed.includes(status) ? 'unavailable' : 'ok'
 }
 
-function deliverySourceState(state: StrongFlowDeliveryListState): HomeDashboardSourceState {
-  return sourceState(state.status, ['error'])
+function deliverySourceState(state: HomeDeliveryListState): HomeDashboardSourceState {
+  return deliveryListSourceState(state.status)
 }
 
 function attentionSourceState(state: AttentionCenterViewModelState): HomeDashboardSourceState {
@@ -261,28 +419,14 @@ function dashboardStatus(
   return values.includes('unavailable') ? 'partial' : 'ready'
 }
 
-function visitedCards(
-  cards: ReadonlyMap<DeliveryId, HomeDeliveryCard>,
-  visits: readonly HomeVisit[],
-): readonly HomeVisitedCard[] {
-  const visited: HomeVisitedCard[] = []
-  for (const visit of visits) {
-    const card = cards.get(visit.deliveryId)
-    if (card === undefined) continue
-    visited.push(Object.freeze({ ...card, visitedAt: visit.at }))
-  }
-  return Object.freeze(visited)
-}
-
 /**
  * Project the three read models into one dashboard snapshot.  Pure, so the
  * section order, bounds and the first-use claim stay testable without a browser.
  */
 export function homeDashboardState(input: {
-  readonly deliveries: StrongFlowDeliveryListState
+  readonly deliveries: HomeDeliveryListState
   readonly attention: AttentionCenterViewModelState
   readonly usage: UsageHealthViewModelState
-  readonly visits: readonly HomeVisit[]
   readonly limits?: HomeDashboardLimits
 }): HomeDashboardState {
   const limits = input.limits ?? DEFAULT_HOME_DASHBOARD_LIMITS
@@ -292,7 +436,6 @@ export function homeDashboardState(input: {
   const failing = orderedHomeFailingCards(cards)
   const completed = orderedHomeCompletedCards(cards)
   const decisions = orderedAttentionCenterItems(input.attention.items)
-  const visited = visitedCards(byId, input.visits)
   const sources: Readonly<Record<HomeDashboardSource, HomeDashboardSourceState>> = Object.freeze({
     delivery: deliverySourceState(input.deliveries),
     attention: attentionSourceState(input.attention),
@@ -317,13 +460,11 @@ export function homeDashboardState(input: {
     active: Object.freeze(active.slice(0, limits.deliveries)),
     failing: Object.freeze(failing.slice(0, limits.deliveries)),
     completed: Object.freeze(completed.slice(0, limits.deliveries)),
-    visited: Object.freeze(visited.slice(0, limits.visits)),
     counts: Object.freeze({
       decisions: decisions.length,
       active: active.length,
       failing: failing.length,
       completed: completed.length,
-      visited: visited.length,
     }),
     sources,
     // First use is a claim about this Scope, so every projection that could
@@ -342,13 +483,11 @@ function emptyState(): HomeDashboardState {
     active: Object.freeze([]),
     failing: Object.freeze([]),
     completed: Object.freeze([]),
-    visited: Object.freeze([]),
     counts: Object.freeze({
       decisions: 0,
       active: 0,
       failing: 0,
       completed: 0,
-      visited: 0,
     }),
     sources: Object.freeze({
       delivery: 'loading',
@@ -371,25 +510,12 @@ function closedState(): HomeDashboardState {
   })
 }
 
-function scopeSelection(scope: RepositoryScope): ScopeRouteSelection {
-  return Object.freeze({
-    organizationId: scope.organizationId,
-    workspaceId: scope.workspaceId,
-    projectId: scope.projectId,
-    repositoryId: scope.repositoryId,
-  })
-}
-
 /** Compose the existing Attention, Delivery and Usage projections into one dashboard. */
 export function createHomeDashboardViewModel(
   options: HomeDashboardViewModelOptions,
 ): HomeDashboardViewModel {
   const limits = options.limits ?? DEFAULT_HOME_DASHBOARD_LIMITS
   const nowMillis = options.nowMillis ?? Date.now
-  const selection = scopeSelection(options.scope)
-  const visits = options.visits ?? createHomeRecentVisitStore({
-    storage: browserHomeVisitStorage(typeof window === 'undefined' ? null : window),
-  })
   const attention = createAttentionCenterViewModel({
     client: options.client,
     actor: options.actor,
@@ -398,7 +524,7 @@ export function createHomeDashboardViewModel(
     nextRequestId: options.nextRequestId,
     ...(options.nowMillis === undefined ? {} : { nowMillis: options.nowMillis }),
   })
-  const deliveries = createStrongFlowDeliveryListViewModel({
+  const deliveries = createHomeDeliveryListViewModel({
     client: options.client,
     actor: options.actor,
     scope: options.scope,
@@ -426,7 +552,6 @@ export function createHomeDashboardViewModel(
       deliveries: deliveries.state,
       attention: attention.state,
       usage: usage.state,
-      visits: visits.visits(selection, nowMillis()),
       limits,
     }))
   }

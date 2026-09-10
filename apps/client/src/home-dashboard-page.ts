@@ -2,7 +2,6 @@
 
 import { formatInstant } from './format-instant.js'
 import { attentionCenterItemHash } from './attention-center-page.js'
-import type { AttentionCenterOrigin } from './attention-center-view-model.js'
 import {
   mountButton,
   mountPageHeader,
@@ -20,14 +19,12 @@ import type {
   HomeDashboardViewModel,
   HomeDecisionCard,
   HomeDeliveryCard,
-  HomeVisitedCard,
 } from './home-dashboard-view-model.js'
-import { strongFlowRouteHash, type StrongFlowRoute } from './strongflow-route.js'
 
-export type HomeSectionId = 'decisions' | 'active' | 'failing' | 'completed' | 'visited'
+export type HomeSectionId = 'decisions' | 'active' | 'failing' | 'completed'
 
-/** One card as the dashboard renders it: a decision, a Delivery, or a visit. */
-export type HomeCard = HomeDecisionCard | HomeDeliveryCard | HomeVisitedCard
+/** One card as the dashboard renders it: a decision or a Delivery. */
+export type HomeCard = HomeDecisionCard | HomeDeliveryCard
 
 export interface HomeDashboardPresentation {
   readonly title: string
@@ -44,7 +41,7 @@ export interface HomeDashboardPresentation {
   readonly sourceLabel: Readonly<Record<HomeDashboardSource, string>>
   readonly sectionHeading: Readonly<Record<HomeSectionId, string>>
   readonly sectionEmpty: Readonly<Record<HomeSectionId, string>>
-  /** The collapsed history rows of design page 04 (failing/completed/visited). */
+  /** The collapsed history rows of design page 04 (failing/completed). */
   readonly collapsibleSections: readonly HomeSectionId[]
   readonly expandLabel: string
   readonly collapseLabel: string
@@ -56,12 +53,10 @@ export interface HomeDashboardPresentation {
   readonly blockingDecisionLabel: string
   readonly reviewPlanLabel: string
   readonly acceptDeliveryLabel: string
-  readonly viewProgressLabel: string
   readonly openChatLabel: string
   readonly disabledLabel: string
   readonly countLabel: (count: number) => string
   readonly updatedLabel: (at: Instant) => string
-  readonly visitedLabel: (at: Instant) => string
   readonly taskLabel: (card: Pick<
     HomeDeliveryCard,
     'activeTasks' | 'verifyingTasks' | 'failedTasks' | 'blockedTasks' | 'completedTasks'
@@ -96,16 +91,14 @@ const PRESENTATION_SPEC: HomeDashboardPresentation = {
     active: '正在运行',
     failing: '失败或阻塞',
     completed: '已完成',
-    visited: '最近打开',
   }),
   sectionEmpty: Object.freeze({
     decisions: '现在没有需要决策的事项。',
     active: '没有进行中的交付。',
     failing: '没有失败或阻塞的交付。',
     completed: '还没有已完成的交付。',
-    visited: '你还没有从这个浏览器打开过交付。',
   }),
-  collapsibleSections: Object.freeze(['failing', 'completed', 'visited']),
+  collapsibleSections: Object.freeze(['failing', 'completed']),
   expandLabel: '展开',
   collapseLabel: '收起',
   strongFlowLabel: '强流程',
@@ -131,12 +124,10 @@ const PRESENTATION_SPEC: HomeDashboardPresentation = {
   blockingDecisionLabel: '阻塞 · 需要立即决策',
   reviewPlanLabel: '审核方案',
   acceptDeliveryLabel: '验收交付',
-  viewProgressLabel: '查看进度',
   openChatLabel: '打开对话',
   disabledLabel: '该决策已关闭。请刷新查看当前状态。',
   countLabel: count => String(count),
   updatedLabel: at => `更新于 ${formatInstant(at)}`,
-  visitedLabel: at => `打开于 ${formatInstant(at)}`,
   taskLabel: card => [
     card.failedTasks > 0 ? `${String(card.failedTasks)} 个失败` : null,
     card.blockedTasks > 0 ? `${String(card.blockedTasks)} 个阻塞` : null,
@@ -169,25 +160,9 @@ export function homeDashboardAnnouncement(state: HomeDashboardState): string {
     : `${PRESENTATION.statusLabel.ready} · ${summary}`
 }
 
-/** The exact StrongFlow route of one Delivery card and its active StageRun. */
-export function homeDeliveryHash(
-  card: Pick<HomeDeliveryCard, 'deliveryId' | 'activeStageRunId'>,
-  scopeSelection: ScopeRouteSelection,
-): string {
-  const route: StrongFlowRoute = {
-    deliveryId: card.deliveryId,
-    productSessionId: null,
-    stageRunId: card.activeStageRunId,
-    candidatePath: null,
-    candidateView: 'unified',
-    comparison: { status: 'none' },
-    evidenceTab: 'evidence',
-    evidenceId: null,
-  }
-  return strongFlowRouteHash(route, scopeSelection)
-}
-
-/** The exact Chat session one decision came from. */
+/**
+ * The exact Chat session one decision came from.
+ */
 export function homeChatHash(
   productSessionId: ProductSessionId,
   scopeSelection: ScopeRouteSelection,
@@ -196,22 +171,22 @@ export function homeChatHash(
 }
 
 /**
- * The authoritative target of one decision card: a Delivery-bound Attention
- * opens its execution context, every other decision opens the decision surface
- * and carries the exact origin with it.
+ * The authoritative target of one decision card: an input or approval opens
+ * the Chat session that raised it.  A Delivery-bound Attention has no
+ * standalone acceptance surface in the community client, so it renders no
+ * action (`null`) instead of a dead end.
  */
 export function homeDecisionHash(
   card: HomeDecisionCard,
   scopeSelection: ScopeRouteSelection,
-  origins?: readonly AttentionCenterOrigin[],
-): string {
+): string | null {
   return attentionCenterItemHash({
     kind: card.kind,
     id: card.id,
     productSessionId: card.productSessionId,
     stageRunId: card.stageRunId,
     deliveryId: card.deliveryId,
-  }, scopeSelection, origins)
+  }, scopeSelection)
 }
 
 /** The one status line of a pending-decision card, from its real kind/urgency. */
@@ -237,8 +212,6 @@ export interface HomeDashboardPageOptions {
   readonly model: HomeDashboardViewModel
   /** The exact Scope path prefixed onto every deep link on the dashboard. */
   readonly scopeSelection: ScopeRouteSelection
-  /** Execution origins used to link a decision back to its StageRun. */
-  readonly origins?: readonly AttentionCenterOrigin[]
   /**
    * Lifecycle ownership: `true` (the default composition) lets the page close
    * the model it mounted; a host that shares this model passes `false` and
@@ -263,10 +236,6 @@ function element<K extends keyof HTMLElementTagNameMap>(
 
 function isDecision(card: HomeCard): card is HomeDecisionCard {
   return 'kind' in card
-}
-
-function isVisited(card: HomeCard): card is HomeVisitedCard {
-  return 'visitedAt' in card
 }
 
 function cardKey(card: HomeCard): string {
@@ -301,7 +270,6 @@ export function mountHomeDashboardPage(
 ): HomeDashboardPage {
   const document = options.root.ownerDocument
   const presentation = PRESENTATION
-  const origins = options.origins ?? []
 
   const layout = element(document, 'section', 'wwc-home')
   layout.dataset.wwcPage = 'home'
@@ -374,11 +342,11 @@ export function mountHomeDashboardPage(
     parts.action.title = ''
   }
 
-  function disableAction(parts: CardParts, label: string): void {
+  function disableAction(parts: CardParts, label: string, title?: string): void {
     parts.action.removeAttribute('href')
     parts.action.setAttribute('aria-disabled', 'true')
     parts.action.tabIndex = -1
-    parts.action.title = presentation.disabledLabel
+    parts.action.title = title ?? presentation.disabledLabel
     parts.action.textContent = label
   }
 
@@ -401,12 +369,25 @@ export function mountHomeDashboardPage(
     }
     if (card.actionDisabled) disableAction(parts, homeDecisionActionLabel(card))
     else {
-      setAction(
-        parts,
-        homeDecisionHash(card, options.scopeSelection, origins),
-        homeDecisionActionLabel(card),
-      )
+      const hash = homeDecisionHash(card, options.scopeSelection)
+      // A Delivery-bound Attention has no standalone acceptance surface; the
+      // card keeps its status line instead of a dead-end action.
+      if (hash === null) {
+        disableAction(
+          parts,
+          homeDecisionActionLabel(card),
+          '验收在交付流程中处理；当前版本没有独立验收入口。',
+        )
+      } else setAction(parts, hash, homeDecisionActionLabel(card))
     }
+  }
+
+  function clearAction(parts: CardParts): void {
+    parts.action.removeAttribute('href')
+    parts.action.removeAttribute('aria-disabled')
+    parts.action.tabIndex = -1
+    parts.action.title = ''
+    parts.action.textContent = ''
   }
 
   function fillDeliveryCard(parts: CardParts, card: HomeDeliveryCard): void {
@@ -421,26 +402,11 @@ export function mountHomeDashboardPage(
     parts.chat.removeAttribute('href')
     parts.chat.textContent = ''
     updateContextList(parts.context, deliveryContextEntries(card))
-    setAction(parts, homeDeliveryHash(card, options.scopeSelection), presentation.viewProgressLabel)
+    // A Delivery card is informational: the community client has no delivery
+    // workbench route, so the card carries no dead-end action link.
+    clearAction(parts)
   }
 
-  function fillVisitedCard(parts: CardParts, card: HomeVisitedCard): void {
-    parts.node.dataset.kind = 'visited'
-    parts.node.dataset.status = card.status
-    parts.node.dataset.urgency = ''
-    delete parts.node.dataset.disabled
-    parts.title.textContent = card.title
-    parts.status.textContent = `${presentation.strongFlowLabel} · ${
-      presentation.deliveryStatusText[card.status]}`
-    parts.chat.hidden = true
-    parts.chat.removeAttribute('href')
-    parts.chat.textContent = ''
-    updateContextList(parts.context, [
-      ...deliveryContextEntries(card),
-      presentation.visitedLabel(card.visitedAt),
-    ])
-    setAction(parts, homeDeliveryHash(card, options.scopeSelection), presentation.viewProgressLabel)
-  }
 
   function createCard(): HTMLLIElement {
     const node = element(document, 'li', 'wwc-home-card')
@@ -461,8 +427,7 @@ export function mountHomeDashboardPage(
   function updateCard(node: HTMLLIElement, card: HomeCard): void {
     const parts = cardParts.get(node)
     if (parts === undefined) return
-    if (isVisited(card)) fillVisitedCard(parts, card)
-    else if (isDecision(card)) fillDecisionCard(parts, card)
+    if (isDecision(card)) fillDecisionCard(parts, card)
     else fillDeliveryCard(parts, card)
   }
 
@@ -477,7 +442,7 @@ export function mountHomeDashboardPage(
   const sections = new Map<HomeSectionId, SectionParts>()
   const sectionsRoot = element(document, 'div', 'wwc-home-sections')
 
-  for (const id of ['decisions', 'active', 'failing', 'completed', 'visited'] as const) {
+  for (const id of ['decisions', 'active', 'failing', 'completed'] as const) {
     const headingRow = element(document, 'header', 'wwc-home-section-header')
     const heading = element(document, 'h3', 'wwc-home-section-heading')
     heading.textContent = presentation.sectionHeading[id]
@@ -541,9 +506,7 @@ export function mountHomeDashboardPage(
         ? state.active.length
         : id === 'failing'
           ? state.failing.length
-          : id === 'completed'
-            ? state.completed.length
-            : state.visited.length
+          : state.completed.length
     return rendered === 0
   }
 
@@ -588,7 +551,6 @@ export function mountHomeDashboardPage(
     sections.get('active')?.collection.update(state.active)
     sections.get('failing')?.collection.update(state.failing)
     sections.get('completed')?.collection.update(state.completed)
-    sections.get('visited')?.collection.update(state.visited)
     for (const [id, section] of sections) {
       const total = id === 'decisions'
         ? state.counts.decisions
@@ -598,7 +560,7 @@ export function mountHomeDashboardPage(
             ? state.counts.failing
             : id === 'completed'
               ? state.counts.completed
-              : state.counts.visited
+              : state.counts.completed
       section.count.textContent = presentation.countLabel(total)
       // A collapsed row keeps its empty note hidden with its cards; an open
       // column shows the honest empty state.

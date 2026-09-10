@@ -20,7 +20,7 @@ import {
 
 const root = resolve(import.meta.dirname, '..')
 
-test('a real browser renders the Usage, Provider and Worker health summary on the diagnostics page', async t => {
+test('a real browser renders the Usage, Provider and Worker health summary in the settings usage tab', async t => {
   const chromePath = chromeBinary()
   assert.notEqual(chromePath, null, 'Chrome or Chromium is required for usage health validation')
   command(root, 'corepack', ['pnpm', '--filter', '@winwincode/client', 'build'])
@@ -65,10 +65,10 @@ test('a real browser renders the Usage, Provider and Worker health summary on th
 
   const summary = await evaluate(devtools, sessionId, 'globalThis.openDiagnosticsUsageHealth()')
   assert.equal(summary.present, true)
-  assert.match(summary.heading, /Usage, Provider and Worker health/u)
-  assert.match(summary.updated, /Last updated \d{4}-\d{2}-\d{2}T/u)
+  assert.match(summary.heading, /用量、Provider 与 Worker 健康/u)
+  assert.match(summary.updated, /更新于 \d{4}-\d{2}-\d{2}T/u)
   assert.match(summary.window, /\d{4}-\d{2}-\d{2}T/u)
-  assert.match(summary.window, /1 of 1 sessions/u)
+  assert.match(summary.window, /1 个会话中的 1 个/u)
   assert.equal(
     summary.liveRegions,
     0,
@@ -96,17 +96,17 @@ test('a real browser renders the Usage, Provider and Worker health summary on th
     'offline',
   ])
   assert.deepEqual(new Set(summary.workers.map(row => row.tone)).size, 3)
-  assert.match(summary.workers[0].label, /Online, accepting work/u)
-  assert.match(summary.workers[1].label, /Draining/u)
-  assert.match(summary.workers[2].label, /Offline/u)
+  assert.match(summary.workers[0].label, /在线 · 接受任务/u)
+  assert.match(summary.workers[1].label, /正在排空/u)
+  assert.match(summary.workers[2].label, /离线/u)
 
-  assert.match(summary.capacityState, /sufficient/u)
-  assert.match(summary.credentials.join(' '), /Credential available · rotation 3/u)
+  assert.equal(summary.capacityState, 'sufficient')
+  assert.match(summary.credentials.join(' '), /凭据可用 · 轮换 3/u)
 
   assert.equal(summary.errors.length, 2)
-  assert.match(summary.errors.join(' '), /2 failures/u)
-  assert.match(summary.errors.join(' '), /recovery in progress or complete/u)
-  assert.match(summary.errors.join(' '), /1 open attention items/u)
+  assert.match(summary.errors.join(' '), /2 次失败/u)
+  assert.match(summary.errors.join(' '), /恢复进行中或已完成/u)
+  assert.match(summary.errors.join(' '), /1 个未关闭注意点/u)
 
   assert.equal(summary.leak, false, 'no secret material or credential id may reach the summary')
 

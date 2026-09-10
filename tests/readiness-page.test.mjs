@@ -135,7 +135,7 @@ function fixTarget(single) {
   if (single.id === 'first-chat-delivery') {
     return { href: '#/chat?repositoryId=rep_one', label: 'Start your first Chat' }
   }
-  return { href: '#/settings/runtime?repositoryId=rep_one', label: 'Open local diagnostics' }
+  return { href: '#/settings?repositoryId=rep_one', label: 'Open run diagnostics' }
 }
 
 function descendants(node) {

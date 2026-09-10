@@ -356,7 +356,7 @@ test('switching an active Scope closes old subscriptions before the next context
 })
 
 test('switching Scope aborts an in-flight old repository route request', async () => {
-  const hash = '#/strongflow'
+  const hash = '#/home'
     + `?organizationId=${repositoryOne.organizationId}`
     + `&workspaceId=${repositoryOne.workspaceId}`
     + `&projectId=${repositoryOne.projectId}`
@@ -375,7 +375,7 @@ test('switching Scope aborts an in-flight old repository route request', async (
 
   await waitFor(() => oldRead.signal.aborted, 'old route cancellation')
   assert.equal(
-    descendants(fixture.rootElement).some(node => node.className === 'wwc-strongflow-page'),
+    descendants(fixture.rootElement).some(node => node.className === 'wwc-my-work'),
     false,
   )
   fixture.application.close()

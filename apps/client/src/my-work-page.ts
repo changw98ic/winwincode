@@ -28,7 +28,6 @@ export interface MyWorkPresentation {
   readonly startLabel: string
   readonly startTaskEntryLabel: string
   readonly startChatLabel: string
-  readonly startDeliveryLabel: string
   readonly clientsHeading: string
   readonly clientsDescription: string
   readonly clientsUnavailable: string
@@ -42,7 +41,6 @@ const PRESENTATION_SPEC: MyWorkPresentation = {
   startLabel: '开始新任务',
   startTaskEntryLabel: '在你的设备上启动任务',
   startChatLabel: '发起对话任务',
-  startDeliveryLabel: '规划 StrongFlow 交付',
   clientsHeading: 'Clients',
   clientsDescription: '编码设备的连接与占用状态。',
   clientsUnavailable: '执行设备区暂时不可达。以下设备保持最后已知状态。',
@@ -126,11 +124,8 @@ export function mountMyWorkPage(
   const startChat = element(document, 'a', 'wwc-my-work-start-chat')
   startChat.href = surfaceHash('/chat', options.scopeSelection)
   startChat.textContent = presentation.startChatLabel
-  const startDelivery = element(document, 'a', 'wwc-my-work-start-delivery')
-  startDelivery.href = surfaceHash('/strongflow', options.scopeSelection)
-  startDelivery.textContent = presentation.startDeliveryLabel
   const start = element(document, 'div', 'wwc-my-work-start')
-  start.append(startLabel, startTaskEntry, startChat, startDelivery)
+  start.append(startLabel, startTaskEntry, startChat)
 
   // The work sections are the existing Home dashboard page; this composition
   // reuses its live region, deep links, and first-use entry instead of a copy.

@@ -78,15 +78,11 @@ test('independent Client build produces one deterministic target-neutral applica
     assert.equal(asset.bytes, bytes.length, asset.path)
     assert.equal(asset.sha256, createHash('sha256').update(bytes).digest('hex'), asset.path)
   }
-  for (const routeChunk of [
-    'enterprise-application-',
-    'enterprise-resource-page-',
-    'enterprise-operations-page-',
-  ]) {
+  for (const forbidden of ['enterprise-application-', 'strongflow-']) {
     assert.equal(
-      assetManifest.assets.some(asset => asset.path.startsWith(`assets/${routeChunk}`)),
-      true,
-      `${routeChunk} route chunk`,
+      assetManifest.assets.some(asset => asset.path.startsWith(`assets/${forbidden}`)),
+      false,
+      `${forbidden} route chunk must be gone`,
     )
   }
 })
@@ -105,16 +101,8 @@ test('deployable Client files contain only browser assets and runtime serverUrl 
     'dist/module/chat-view-model.d.ts',
     'dist/module/chat-page.js',
     'dist/module/chat-page.d.ts',
-    'dist/module/strongflow-view-model.js',
-    'dist/module/strongflow-view-model.d.ts',
-    'dist/module/strongflow-page.js',
-    'dist/module/strongflow-page.d.ts',
-    'dist/module/strongflow-diagrams.js',
-    'dist/module/strongflow-candidate.js',
-    'dist/module/enterprise-application.js',
-    'dist/module/enterprise-application.d.ts',
-    'dist/module/enterprise-resource-page.js',
-    'dist/module/enterprise-operations-page.js',
+    'dist/module/chat-delivery-creator.js',
+    'dist/module/chat-delivery-creator.d.ts',
     'dist/public/index.html',
     'dist/public/runtime-config.js',
     'dist/public/version.json',
@@ -151,7 +139,7 @@ test('Client shell has one facade and the six canonical product entries with Hom
     join(clientRoot, 'src', 'community-control-plane-client.ts'),
     'utf8',
   )
-  for (const surface of ['home', 'chat', 'strongflow', 'settings', 'attention', 'enterprise']) {
+  for (const surface of ['home', 'chat', 'projects', 'extensions', 'device', 'settings', 'attention']) {
     assert.match(surfaces, new RegExp(`id: '${surface}'`, 'u'))
   }
   // UI-504: the Attention-first dashboard is the canonical first screen, so a

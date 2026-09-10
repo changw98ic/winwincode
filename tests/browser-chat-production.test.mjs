@@ -42,9 +42,9 @@ import {
 import { boundedRemoteObjectText } from './fixtures/bounded-browser-diagnostics.mjs'
 
 const root = resolve(import.meta.dirname, '..')
-const artifactDirectory = resolve(root, 'test-results/browser-chat-strongflow-production')
+const artifactDirectory = resolve(root, 'test-results/browser-chat-production')
 const rules = JSON.parse(readFileSync(
-  resolve(root, 'docs/contracts/browser-chat-strongflow-production.rules.json'),
+  resolve(root, 'docs/contracts/browser-chat-production.rules.json'),
   'utf8',
 ))
 const expectedBrowserRule = 'Chrome DevTools Protocol over a real headless Chrome or Chromium process'
@@ -55,28 +55,21 @@ const expectedAssertions = [
   'Chat creates one ProductSession and refreshes from its real Control Plane event stream',
   'Chat reaches Completed with a non-empty completed assistant message produced by the local Worker and provider path',
   'the Chat terminal projection survives a deep-link navigation and a full browser reload byte-for-byte',
-  'StrongFlow starts from the canonical clarifying Delivery revision and uses its generated StageRun binding',
-  'StrongFlow waits for scheduler updates and clicks only the visible production solution, task, verdict, Attention, and final Delivery controls',
-  'every clicked StrongFlow control is followed by a higher Delivery revision rendered from the real event subscription',
-  'StrongFlow reaches delivered with a frozen candidate, a passing verdict, completed tasks, no open Attention, and planner, executor, reviewer, and verifier stages',
-  'the delivered StrongFlow deep link survives a full browser reload with the same revision and authenticated session',
-  'Chat and StrongFlow open real WebSocket subscriptions only to the configured Control Plane origin',
+  'Chat opens real WebSocket subscriptions only to the configured Control Plane origin',
   'all browser traffic is confined to the standalone Client origin and configured Control Plane origin',
   'no Host or DSH backend request is issued',
   'the bootstrap proof is absent from URL, DOM, browser storage, cookie visibility, console, network URLs, and Server output',
-  'initial and terminal Chat and StrongFlow screenshots plus one bounded normalized trace are written under test-results/browser-chat-strongflow-production',
+  'initial and terminal Chat screenshots plus one bounded normalized trace are written under test-results/browser-chat-production',
 ]
 const expectedArtifacts = [
-  'test-results/browser-chat-strongflow-production/chat-initial.png',
-  'test-results/browser-chat-strongflow-production/chat-terminal.png',
-  'test-results/browser-chat-strongflow-production/strongflow-initial.png',
-  'test-results/browser-chat-strongflow-production/strongflow-terminal.png',
-  'test-results/browser-chat-strongflow-production/trace.json',
+  'test-results/browser-chat-production/chat-initial.png',
+  'test-results/browser-chat-production/chat-terminal.png',
+  'test-results/browser-chat-production/trace.json',
 ]
 assert.equal(rules.browser, expectedBrowserRule)
 assert.equal(rules.client, expectedClientRule)
 assert.equal(rules.server, expectedServerRule)
-assert.equal(rules.schemaVersion, 'winwincode.browser-chat-strongflow-production.v2')
+assert.equal(rules.schemaVersion, 'winwincode.browser-chat-production.v1')
 assert.deepEqual(rules.assertions, expectedAssertions)
 assert.deepEqual(rules.artifacts, expectedArtifacts)
 assert.deepEqual(rules.forbiddenRequestPathPatterns, [
@@ -241,9 +234,6 @@ function normalizedUrl(value, clientOrigin, controlUrl) {
 
 function normalizedHash(value) {
   if (value.startsWith('#/chat')) return '#/chat?session=PRODUCT_SESSION_ID'
-  if (value.startsWith('#/strongflow')) {
-    return '#/strongflow?delivery=DELIVERY_ID&session=PRODUCT_SESSION_ID&stageRun=STAGE_RUN_ID'
-  }
   return value
 }
 
@@ -257,11 +247,7 @@ function hasTerminalAssistant(messages) {
 
 function canonicalTrace({
   setup,
-  strongflowInitial,
   chatTerminal,
-  strongflowTerminal,
-  strongflowReload,
-  chatAfterStrongFlowReload,
   chatReload,
   requests,
   webSockets,
@@ -281,47 +267,11 @@ function canonicalTrace({
         chatHeading: setup.chatHeading,
         chatMessages: setup.chatMessages,
         chatStatus: setup.chatStatus,
-        deliveryRevision: setup.deliveryRevision,
-        deliveryStatus: setup.deliveryStatus,
-      },
-      strongflowInitial: {
-        deliveryHeading: strongflowInitial.deliveryHeading,
-        deliveryStatus: strongflowInitial.deliveryStatus,
-        revision: strongflowInitial.revision,
-        stageCount: strongflowInitial.stageCount,
-        status: strongflowInitial.status,
-        hash: normalizedHash(strongflowInitial.hash),
       },
       chatTerminal: {
         messages: chatTerminal.messages,
         status: chatTerminal.status,
         hash: normalizedHash(chatTerminal.hash),
-      },
-      strongflowTerminal: {
-        actions: strongflowTerminal.actions,
-        candidatePresent: strongflowTerminal.candidatePresent,
-        deliveryStatus: strongflowTerminal.deliveryStatus,
-        observations: strongflowTerminal.observations,
-        openAttentionCount: strongflowTerminal.openAttentionCount,
-        revision: strongflowTerminal.revision,
-        stageRoles: strongflowTerminal.stageRoles,
-        status: strongflowTerminal.status,
-        taskStatuses: strongflowTerminal.taskStatuses,
-        transportFailures: strongflowTerminal.transportFailures,
-        verdictCriteria: strongflowTerminal.verdictCriteria,
-        verdictStatus: strongflowTerminal.verdictStatus,
-        hash: normalizedHash(strongflowTerminal.hash),
-      },
-      strongflowReload: {
-        deliveryStatus: strongflowReload.deliveryStatus,
-        revision: strongflowReload.revision,
-        status: strongflowReload.status,
-        hash: normalizedHash(strongflowReload.hash),
-      },
-      chatAfterStrongFlowReload: {
-        messages: chatAfterStrongFlowReload.messages,
-        status: chatAfterStrongFlowReload.status,
-        hash: normalizedHash(chatAfterStrongFlowReload.hash),
       },
       chatReload: {
         messages: chatReload.messages,
@@ -337,7 +287,7 @@ function canonicalTrace({
   }
 }
 
-test('real browser runs default Chat and StrongFlow through the production Client and Server', async t => {
+test('real browser runs default Chat through the production Client and Server', async t => {
   const chromePath = chromeBinary()
   assert.notEqual(chromePath, null, 'Chrome or Chromium is required for the real-browser product gate')
   if (process.env.WWC_BROWSER_SKIP_BUILD !== '1') {
@@ -379,7 +329,7 @@ test('real browser runs default Chat and StrongFlow through the production Clien
   let clientServer = staticClientServer({
     root,
     certificateFiles,
-    fixturePath: 'tests/fixtures/browser-chat-strongflow-client.mjs',
+    fixturePath: 'tests/fixtures/browser-chat-client.mjs',
     configuration: () => ({
       forbiddenRequestPathPatterns: rules.forbiddenRequestPathPatterns,
       repositoryBaseline: controlledRepository.revision,
@@ -552,7 +502,7 @@ test('real browser runs default Chat and StrongFlow through the production Clien
     mobile: false,
   }, sessionId)
   await devtools.send('Page.navigate', { url: clientOrigin }, sessionId)
-  await waitForGlobal(devtools, sessionId, 'runChatStrongFlowSetup')
+  await waitForGlobal(devtools, sessionId, 'runChatProductionSetup')
 
   async function evaluateGate(expression) {
     try {
@@ -595,7 +545,7 @@ test('real browser runs default Chat and StrongFlow through the production Clien
   }
 
   const setup = await evaluateGate(
-    `globalThis.runChatStrongFlowSetup(${JSON.stringify(proof)})`,
+    `globalThis.runChatProductionSetup(${JSON.stringify(proof)})`,
   )
   authenticationEstablished = true
   assert.equal(setup.chatHash, '#/chat?session=psn_01J00000000000000000000001')
@@ -606,33 +556,9 @@ test('real browser runs default Chat and StrongFlow through the production Clien
     && message.role === 'user'
     && message.state === 'completed'
   )), JSON.stringify(setup))
-  assert.equal(setup.deliveryRevision, 2)
-  assert.equal(setup.deliveryStatus, 'clarifying')
   assert.equal(setup.legacyBackendRequests.length, 0)
   assert.equal(Object.values(await proofLeakScan()).some(value => value.includes(proof)), false)
   await capture('chat-initial.png')
-
-  const strongflowInitial = await evaluateGate(
-    'globalThis.openStrongFlowBrowserFixture()',
-  )
-  assert.equal(
-    strongflowInitial.deliveryHeading,
-    'Browser production StrongFlow',
-    JSON.stringify(strongflowInitial),
-  )
-  assert.equal(strongflowInitial.error, '')
-  assert.equal(strongflowInitial.status, 'Waiting for your input')
-  assert.equal(strongflowInitial.deliveryStatus, 'clarifying')
-  assert.ok(strongflowInitial.revision >= setup.deliveryRevision)
-  const [strongflowRoute, strongflowQuery = ''] = strongflowInitial.hash.split('?', 2)
-  const strongflowParameters = new URLSearchParams(strongflowQuery)
-  assert.equal(strongflowRoute, '#/strongflow')
-  assert.equal(strongflowParameters.get('delivery'), setup.deliveryId)
-  assert.match(strongflowParameters.get('session') ?? '', /^psn_[0-9A-HJKMNP-TV-Z]{26}$/u)
-  assert.match(strongflowParameters.get('stageRun') ?? '', /^run_[0-9A-HJKMNP-TV-Z]{26}$/u)
-  assert.ok(strongflowInitial.stageCount >= 1, JSON.stringify(strongflowInitial))
-  assert.equal(strongflowInitial.legacyBackendRequests.length, 0)
-  await capture('strongflow-initial.png')
 
   const chatTerminal = await evaluateGate(
     'globalThis.waitForTerminalChatBrowserFixture()',
@@ -649,75 +575,6 @@ test('real browser runs default Chat and StrongFlow through the production Clien
   )), JSON.stringify(chatTerminal.runtimeSessions))
   assert.equal(chatTerminal.legacyBackendRequests.length, 0)
   await capture('chat-terminal.png')
-
-  const strongflowTerminal = await evaluateGate(
-    'globalThis.runStrongFlowToDelivered()',
-  )
-  assert.equal(strongflowTerminal.deliveryHeading, 'Browser production StrongFlow')
-  assert.equal(strongflowTerminal.status, 'Completed')
-  assert.equal(strongflowTerminal.deliveryStatus, 'delivered')
-  assert.equal(strongflowTerminal.candidatePresent, true)
-  assert.equal(strongflowTerminal.verdictStatus, 'pass')
-  assert.ok(strongflowTerminal.verdictCriteria.length > 0, JSON.stringify(strongflowTerminal))
-  assert.equal(strongflowTerminal.verdictCriteria.every(status => status === 'pass'), true)
-  assert.equal(strongflowTerminal.openAttentionCount, 0)
-  assert.ok(strongflowTerminal.taskStatuses.length > 0, JSON.stringify(strongflowTerminal))
-  assert.equal(strongflowTerminal.taskStatuses.every(status => status === 'completed'), true)
-  for (const role of ['executor', 'planner', 'reviewer', 'verifier']) {
-    assert.ok(strongflowTerminal.stageRoles.includes(role), `missing ${role}: ${JSON.stringify(
-      strongflowTerminal.stageRoles,
-    )}`)
-    assert.ok(strongflowTerminal.stageProvenance.some(stage => (
-      stage.role === role
-      && stage.actorType === 'codex'
-      && stage.status === 'succeeded'
-      && stage.bindingReady
-    )), `missing succeeded bound ${role}: ${JSON.stringify(strongflowTerminal.stageProvenance)}`)
-  }
-  const candidateProducer = strongflowTerminal.stageProvenance.find(stage => (
-    stage.id === strongflowTerminal.candidateProducerStageRunId
-  ))
-  assert.equal(candidateProducer?.role, 'executor')
-  assert.equal(candidateProducer?.status, 'succeeded')
-  assert.equal(candidateProducer?.bindingReady, true)
-  for (const action of [
-    'approve-solution',
-    'approve-tasks',
-    'submit-verdict',
-    'advance-delivery',
-    'resolve-attention',
-  ]) {
-    assert.ok(strongflowTerminal.actions.some(item => item.action === action), `missing ${action}`)
-  }
-  assert.equal(strongflowTerminal.actions.every(action => (
-    action.toRevision > action.fromRevision
-  )), true)
-  assert.equal(strongflowTerminal.legacyBackendRequests.length, 0)
-  await capture('strongflow-terminal.png')
-  assert.equal(Object.values(await proofLeakScan()).some(value => value.includes(proof)), false)
-
-  await devtools.send('Page.reload', { ignoreCache: true }, sessionId)
-  await waitForGlobal(devtools, sessionId, 'inspectTerminalStrongFlowAfterReload')
-  const strongflowReload = await evaluateGate(
-    'globalThis.inspectTerminalStrongFlowAfterReload()',
-  )
-  assert.equal(strongflowReload.status, 'Completed')
-  assert.equal(strongflowReload.deliveryStatus, 'delivered')
-  assert.equal(strongflowReload.revision, strongflowTerminal.revision)
-  assert.equal(strongflowReload.hash, strongflowTerminal.hash)
-  assert.equal(strongflowReload.authSessionBytes, setup.authSessionBytes)
-  assert.equal(strongflowReload.canonicalDeliveryBytes, strongflowTerminal.canonicalDeliveryBytes)
-  assert.equal(strongflowReload.legacyBackendRequests.length, 0)
-
-  const chatAfterStrongFlowReload = await evaluateGate(
-    'globalThis.openTerminalChatAfterStrongFlowReload()',
-  )
-  assert.ok(['就绪', '已完成'].includes(chatAfterStrongFlowReload.status))
-  assert.equal(hasTerminalAssistant(chatAfterStrongFlowReload.messages), true)
-  assert.deepEqual(chatAfterStrongFlowReload.messages, chatTerminal.messages)
-  assert.equal(chatAfterStrongFlowReload.authSessionBytes, setup.authSessionBytes)
-  assert.equal(chatAfterStrongFlowReload.canonicalMessagesBytes, chatTerminal.canonicalMessagesBytes)
-  assert.equal(chatAfterStrongFlowReload.legacyBackendRequests.length, 0)
 
   await devtools.send('Page.reload', { ignoreCache: true }, sessionId)
   await waitForGlobal(devtools, sessionId, 'inspectTerminalChatAfterReload')
@@ -741,21 +598,6 @@ test('real browser runs default Chat and StrongFlow through the production Clien
   assert.equal(browserDiagnosticLeakDetected, false)
   assert.equal(uncaughtExceptionCount, 0, diagnosticText(uncaughtExceptions.values()))
   assert.equal(skippedRemoteDiagnosticReads, 0, 'browser diagnostic inspection fell behind')
-  assert.equal(strongflowTerminal.transportFailures.every(failure => (
-    failure.operation === 'command'
-      ? failure.code === 'TRUSTED_FACTS_UNAVAILABLE'
-        && failure.kind === 'server'
-      : failure.operation === 'query'
-        ? failure.code === 'READ_CURSOR_EXPIRED'
-          && failure.kind === 'server'
-        : false
-  )), true, JSON.stringify(strongflowTerminal.transportFailures))
-  const expectedCommandErrorLogs = strongflowTerminal.transportFailures.filter(failure => (
-    failure.operation === 'command'
-  )).length
-  const expectedQueryErrorLogs = strongflowTerminal.transportFailures.filter(failure => (
-    failure.operation === 'query'
-  )).length
   const transientErrorLogEntries = errorLogEntries.filter(({ beforeAuthentication, entry }) => {
     if (beforeAuthentication || entry.source !== 'network') return false
     try {
@@ -767,16 +609,6 @@ test('real browser runs default Chat and StrongFlow through the production Clien
       return false
     }
   })
-  assert.ok(
-    transientErrorLogEntries.filter(({ entry }) => (
-      new URL(entry.url).pathname === '/api/v1/commands'
-    )).length >= expectedCommandErrorLogs,
-  )
-  assert.ok(
-    transientErrorLogEntries.filter(({ entry }) => (
-      new URL(entry.url).pathname === '/api/v1/queries'
-    )).length >= expectedQueryErrorLogs,
-  )
   const unexpectedErrorLogEntries = errorLogEntries.filter(({ beforeAuthentication, entry }) => {
     if (transientErrorLogEntries.some(candidate => candidate.entry === entry)) return false
     if (!beforeAuthentication || entry.source !== 'network' || !/\b401\b/u.test(entry.text ?? '')) {
@@ -793,11 +625,7 @@ test('real browser runs default Chat and StrongFlow through the production Clien
   assert.equal(webSocketLeakDetected, false)
   const resourceUrls = [
     ...setup.resources,
-    ...strongflowInitial.resources,
     ...chatTerminal.resources,
-    ...strongflowTerminal.resources,
-    ...strongflowReload.resources,
-    ...chatAfterStrongFlowReload.resources,
     ...chatReload.resources,
   ]
   assert.equal(forbiddenNetworkRequestDetected, false)
@@ -810,11 +638,7 @@ test('real browser runs default Chat and StrongFlow through the production Clien
 
   const trace = canonicalTrace({
     setup,
-    strongflowInitial,
     chatTerminal,
-    strongflowTerminal,
-    strongflowReload,
-    chatAfterStrongFlowReload,
     chatReload,
     requests,
     webSockets,

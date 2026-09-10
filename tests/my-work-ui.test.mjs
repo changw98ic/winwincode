@@ -622,14 +622,6 @@ test('the My Work page mounts the start entry, the reused work sections, and the
       + '&projectId=prj_00000000000000000000000001'
       + '&repositoryId=rep_00000000000000000000000001',
   )
-  const delivery = byClass(start, 'wwc-my-work-start-delivery')
-  assert.equal(
-    delivery.href,
-    '#/strongflow?organizationId=org_00000000000000000000000001'
-      + '&workspaceId=wsp_00000000000000000000000001'
-      + '&projectId=prj_00000000000000000000000001'
-      + '&repositoryId=rep_00000000000000000000000001',
-  )
 
   const work = byClass(rootElement, 'wwc-my-work-work')
   const liveRegions = descendants(work).filter(
@@ -740,5 +732,4 @@ test('the presentation copy stays fixed and names the Clients and Repositories h
   assert.match(presentation.clientsHint, /执行设备区/u)
   assert.match(presentation.clientsHint, /仓库区/u)
   assert.match(presentation.startChatLabel, /对话/u)
-  assert.match(presentation.startDeliveryLabel, /StrongFlow/u)
 })

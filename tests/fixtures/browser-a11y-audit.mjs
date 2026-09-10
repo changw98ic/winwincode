@@ -119,9 +119,7 @@ async function waitFor(predicate, label) {
 const PAGE_SELECTOR = {
   chat: '.wwc-chat',
   settings: '.wwc-settings',
-  operations: '.wwc-local-operations',
   attention: '.wwc-attention-center',
-  decisions: '.wwc-local-decisions',
 }
 
 // UI-604: the audit keeps one explicit allow-list of live regions.  Anything
@@ -135,7 +133,6 @@ const LIVE_REGION_ALLOWLIST = Object.freeze([
   'wwc-scope-selector-status',
   'wwc-readiness-summary',
   'wwc-client-error-copy-feedback',
-  'wwc-enterprise-route-status',
   // chat
   'wwc-chat-status',
   'wwc-chat-model-notice',
@@ -144,10 +141,7 @@ const LIVE_REGION_ALLOWLIST = Object.freeze([
   'wwc-chat-convert-error',
   // management surfaces: exactly one polite status line per page
   'wwc-settings-status',
-  'wwc-local-operations-status',
-  'wwc-local-resource-status',
   'wwc-attention-center-status',
-  'wwc-local-decisions-status',
 ])
 
 function classNameOf(node) {
@@ -195,9 +189,7 @@ function landmarks() {
 const STATUS_SELECTOR = {
   chat: '.wwc-chat-status',
   settings: '.wwc-settings-status .wwc-status-badge-label',
-  operations: '.wwc-local-operations-status .wwc-status-badge-label',
   attention: '.wwc-attention-center-status .wwc-status-badge-label',
-  decisions: '.wwc-local-decisions-status .wwc-status-badge-label',
 }
 
 async function settled(name) {

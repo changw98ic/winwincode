@@ -43,14 +43,10 @@ const scope = Object.freeze({
   repositoryId: 'rep_00000000000000000000000001',
 })
 
-test('all six feature view-models use the one cache-only lifecycle seam', () => {
+test('every feature view-model uses the one cache-only lifecycle seam', () => {
   const files = [
     'chat-view-model.ts',
-    'enterprise-management-view-model.ts',
-    'local-decisions-view-model.ts',
-    'local-operations-view-model.ts',
     'settings-view-model.ts',
-    'strongflow-view-model.ts',
   ]
   for (const file of files) {
     const source = readFileSync(resolve(root, 'apps/client/src', file), 'utf8')

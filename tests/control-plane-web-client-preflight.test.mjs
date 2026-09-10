@@ -350,10 +350,11 @@ test('StrongFlow diagram execution crosses the generated Control Plane boundary 
     undefined,
     'the browser must not add a second internal contract path',
   )
-  const viewModel = readFileSync(
-    join(root, 'apps', 'client', 'src', 'strongflow-view-model.ts'),
-    'utf8',
-  )
-  assert.doesNotMatch(viewModel, /from '@winwincode\/contracts'/u)
-  assert.match(viewModel, /diagramExecution: delivery\.diagramExecution/u)
+  for (const file of [
+    join(root, 'apps', 'client', 'src', 'home-dashboard-view-model.ts'),
+    join(root, 'apps', 'client', 'src', 'chat-delivery-creator.ts'),
+  ]) {
+    const viewModel = readFileSync(file, 'utf8')
+    assert.doesNotMatch(viewModel, /from '@winwincode\/contracts'/u)
+  }
 })

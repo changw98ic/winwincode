@@ -11,9 +11,8 @@ import {
 } from '@winwincode/browser-ui'
 import { mountEmptyState, mountToolbar } from './components/index.js'
 import { mountKeyedCollection, type KeyedCollectionView } from './components/keyed-collection.js'
-import { boundApprovalText } from './approval-risk-detail.js'
+import { boundApprovalText } from './components/bounded-text.js'
 import { scopeHash, surfaceHash, type ScopeRouteSelection } from '@winwincode/browser-core/scope-context'
-import type { StageRunId } from './generated/contracts.js'
 import type {
   AttentionNotificationControl,
   AttentionNotificationDesktopState,
@@ -21,12 +20,10 @@ import type {
 import type {
   AttentionCenterItem,
   AttentionCenterItemKind,
-  AttentionCenterOrigin,
   AttentionCenterViewModel,
   AttentionCenterViewModelState,
 } from './attention-center-view-model.js'
 import { orderedAttentionCenterItems } from './attention-center-view-model.js'
-import { strongFlowRouteHash, type StrongFlowRoute } from './strongflow-route.js'
 
 export interface AttentionCenterPageOptions {
   readonly root: HTMLElement
@@ -202,7 +199,7 @@ function itemStatusText(item: AttentionCenterItem): string {
   return item.kind === 'attention' ? '交付待验收' : '待决策'
 }
 
-/** Decision-class entries open the review, Delivery-bound ones the hand-over. */
+/** Decision-class entries open their Chat session; Delivery-bound ones stay read-only here. */
 function itemActionLabel(item: AttentionCenterItem): string {
   return item.kind === 'attention' ? '验收交付' : '审核方案'
 }
@@ -217,61 +214,23 @@ export type AttentionCenterItemRoute = Pick<
   'kind' | 'id' | 'productSessionId' | 'stageRunId' | 'deliveryId'
 >
 
-/** Real entry point for one card: the authoritative decision or Delivery surface. */
+/**
+ * Real entry point for one card.  Input and approval decisions are handled in
+ * the Chat session that raised them (design page 03b), so the link opens that
+ * session.  A Delivery-bound business Attention has no standalone acceptance
+ * surface in the community client, so it renders no action link (`null`)
+ * instead of a dead end.
+ */
 export function attentionCenterItemHash(
   item: AttentionCenterItemRoute,
   scopeSelection: ScopeRouteSelection,
-  origins?: readonly AttentionCenterOrigin[],
-): string {
-  if (item.kind === 'attention') {
-    // The run page is the one authoritative Delivery/StageRun surface, so a
-    // business Attention deep link goes through the same typed StrongFlow
-    // route boundary every other run-page entry uses (parse and format stay
-    // one canonical shape), instead of a hand-built query string.
-    return strongFlowRouteHash({
-      deliveryId: item.deliveryId,
-      productSessionId: null,
-      stageRunId: item.stageRunId,
-      candidatePath: null,
-      candidateView: 'unified',
-      comparison: { status: 'none' },
-      evidenceTab: 'evidence',
-      evidenceId: null,
-    }, scopeSelection)
-  }
-  // The decision link carries the exact execution origin so the decision
-  // surface can return to the Task/StageRun that raised the decision.
-  const stageRunId = item.stageRunId
-  const origin = stageRunId === null
-    ? undefined
-    : origins?.find(candidate => candidate.activeStageRunId === stageRunId)
-  const parameters = [`session=${encodeURIComponent(item.productSessionId ?? '')}`]
-  if (origin !== undefined && stageRunId !== null) {
-    parameters.push(
-      `delivery=${encodeURIComponent(origin.deliveryId)}`,
-      `stageRun=${encodeURIComponent(stageRunId)}`,
-    )
-  }
-  return scopeHash(`#/attention?${parameters.join('&')}`, scopeSelection)
-}
-
-/** The exact StrongFlow context of the StageRun that raised one decision. */
-export function attentionCenterOriginHash(
-  origin: AttentionCenterOrigin,
-  stageRunId: StageRunId,
-  scopeSelection: ScopeRouteSelection,
-): string {
-  const route: StrongFlowRoute = {
-    deliveryId: origin.deliveryId,
-    productSessionId: null,
-    stageRunId,
-    candidatePath: null,
-    candidateView: 'unified',
-    comparison: { status: 'none' },
-    evidenceTab: 'evidence',
-    evidenceId: null,
-  }
-  return strongFlowRouteHash(route, scopeSelection)
+): string | null {
+  if (item.kind === 'attention') return null
+  if (item.productSessionId === null) return null
+  return scopeHash(
+    `#/chat?session=${encodeURIComponent(item.productSessionId)}`,
+    scopeSelection,
+  )
 }
 
 function element<K extends keyof HTMLElementTagNameMap>(
@@ -553,11 +512,9 @@ export function mountAttentionCenterPage(options: AttentionCenterPageOptions): A
     readonly title: HTMLElement
     readonly status: HTMLElement
     readonly context: HTMLUListElement
-    readonly origin: HTMLAnchorElement
     readonly action: HTMLAnchorElement
   }
   const cardParts = new WeakMap<HTMLLIElement, CardParts>()
-  const origins = (): readonly AttentionCenterOrigin[] => options.model.state.origins
   const cardCollection: KeyedCollectionView<AttentionCenterItem, string, HTMLLIElement> = mountKeyedCollection({
     parent: cards,
     key: item => `${item.kind}:${item.id}`,
@@ -567,11 +524,9 @@ export function mountAttentionCenterPage(options: AttentionCenterPageOptions): A
       const title = element(document, 'h4', 'wwc-attention-card-title')
       const status = element(document, 'p', 'wwc-attention-card-status')
       const context = cardContext(document, ['', '', '', ''])
-      const origin = element(document, 'a', 'wwc-attention-card-origin')
-      origin.hidden = true
       const action = element(document, 'a', 'wwc-attention-card-action')
-      row.append(kind, title, status, context, origin, action)
-      cardParts.set(row, { kind, title, status, context, origin, action })
+      row.append(kind, title, status, context, action)
+      cardParts.set(row, { kind, title, status, context, action })
       return row
     },
     update(row, item) {
@@ -581,28 +536,12 @@ export function mountAttentionCenterPage(options: AttentionCenterPageOptions): A
         || attentionCenterPresentation(options.model.state, selection).actionsDisabled
         || item.urgency === 'expired'
         || item.urgency === 'binding-invalid'
-      const cardStageRunId = item.stageRunId
-      const origin = cardStageRunId === null
-        ? undefined
-        : origins().find(candidate => candidate.activeStageRunId === cardStageRunId)
       row.dataset.kind = item.kind
       row.dataset.urgency = item.urgency
       parts.kind.textContent = KIND_LABELS[item.kind]
       // Producer summaries are free-form, so the card never renders one raw.
       parts.title.textContent = boundApprovalText(item.title).text
       parts.status.textContent = itemStatusText(item)
-      parts.origin.hidden = item.kind === 'attention' || origin === undefined || disabled
-      if (origin !== undefined && cardStageRunId !== null && item.kind !== 'attention' && !disabled) {
-        parts.origin.href = attentionCenterOriginHash(
-          origin,
-          cardStageRunId,
-          options.scopeSelection,
-        )
-        parts.origin.textContent = '打开执行上下文'
-      } else {
-        parts.origin.removeAttribute('href')
-        parts.origin.textContent = ''
-      }
       // Absent facts and internal binding bookkeeping are omitted; the row
       // shows the status line, human times, and its source context only.
       updateCardContext(parts.context, [
@@ -613,13 +552,18 @@ export function mountAttentionCenterPage(options: AttentionCenterPageOptions): A
           : (item.sessionTitle === null ? null : `会话 · ${item.sessionTitle}`),
       ].filter((entry): entry is string => entry !== null))
       parts.action.textContent = itemActionLabel(item)
-      if (disabled) {
+      // A Delivery-bound Attention has no standalone acceptance surface, so it
+      // renders no action instead of a dead end.
+      const actionHash = disabled
+        ? null
+        : attentionCenterItemHash(item, options.scopeSelection)
+      if (actionHash === null) {
+        parts.action.hidden = true
         parts.action.removeAttribute('href')
-        parts.action.setAttribute('aria-disabled', 'true')
-        parts.action.tabIndex = -1
-        parts.action.title = '该条目已禁用。请刷新查看当前状态。'
+        parts.action.removeAttribute('aria-disabled')
       } else {
-        parts.action.href = attentionCenterItemHash(item, options.scopeSelection, origins())
+        parts.action.hidden = false
+        parts.action.href = actionHash
         parts.action.removeAttribute('aria-disabled')
         parts.action.tabIndex = 0
         parts.action.title = ''
@@ -629,7 +573,6 @@ export function mountAttentionCenterPage(options: AttentionCenterPageOptions): A
       const parts = cardParts.get(row)
       if (parts !== undefined) {
         parts.action.removeAttribute('href')
-        parts.origin.removeAttribute('href')
         cardParts.delete(row)
       }
     },

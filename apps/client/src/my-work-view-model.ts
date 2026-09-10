@@ -10,7 +10,6 @@ import {
   type HomeDashboardState,
   type HomeDashboardViewModel,
 } from './home-dashboard-view-model.js'
-import type { HomeRecentVisitStore } from './home-recent-visits.js'
 import type {
   Actor,
   ControlPlaneWebSocketSubscriptionId,
@@ -182,8 +181,6 @@ export interface MyWorkViewModelOptions {
    * trigger one first read, but never closes or replaces it.
    */
   readonly clients: ClientsViewModel
-  /** Browser-only recent Delivery visits; defaults to the local storage store. */
-  readonly visits?: HomeRecentVisitStore
 }
 
 export interface MyWorkViewModel {
@@ -206,7 +203,6 @@ export function createMyWorkViewModel(
     scope: options.scope,
     subscriptionId: options.subscriptionId,
     nextRequestId: options.nextRequestId,
-    ...(options.visits === undefined ? {} : { visits: options.visits }),
   })
   const clients = options.clients
 

@@ -26,31 +26,17 @@ import {
   mountContextualDecisionCard,
   type ContextualDecisionCard,
 } from './contextual-decision.js'
+import type {
+  ChatDeliveryCreateInput,
+  ChatDeliveryCreator,
+  ChatDeliveryCreatorState,
+} from './chat-delivery-creator.js'
 
-export interface ChatDeliveryCreateInput {
-  readonly title: string
-  readonly goal: string
-  readonly baseRevision: string
-  readonly scope: readonly string[]
-  readonly outOfScope: readonly string[]
-  readonly constraints: readonly string[]
-  readonly sourceProductSessionId: ProductSessionId | null
-  readonly acceptanceCriteria: readonly string[]
-}
-
-export interface ChatDeliveryCreatorState {
-  readonly status: 'idle' | 'submitting' | 'waiting' | 'created' | 'error' | 'closed'
-  readonly error: ControlPlaneClientError | null
-}
-
-/** Structural composition seam; Chat does not import the StrongFlow feature model. */
-export interface ChatDeliveryCreator {
-  readonly state: ChatDeliveryCreatorState
-  subscribe(listener: (state: ChatDeliveryCreatorState) => void): () => void
-  create(input: ChatDeliveryCreateInput): Promise<void>
-  cancelPending(): void
-  close(): void
-}
+export type {
+  ChatDeliveryCreateInput,
+  ChatDeliveryCreator,
+  ChatDeliveryCreatorState,
+} from './chat-delivery-creator.js'
 
 export interface ChatPageOptions {
   readonly root: HTMLElement
@@ -550,7 +536,7 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
   send.textContent = '➤'
   send.setAttribute('aria-label', '发送')
   receipt.hidden = true
-  receiptLink.href = '#/strongflow'
+  receiptLink.href = '#/home/task-run'
   receiptLink.textContent = '查看'
   receipt.append(receiptText, receiptLink)
 
@@ -885,7 +871,7 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
     messageCollection.update(state.messages)
 
     // Design page 03b: a created Delivery surfaces as an in-flow receipt line
-    // pointing at the StrongFlow surface for review.
+    // pointing at the task detail for review.
     const deliveryCreated = options.deliveryCreator?.state.status === 'created'
     receipt.hidden = !deliveryCreated || state.session === null
     receiptText.textContent = deliveryCreated && state.session !== null

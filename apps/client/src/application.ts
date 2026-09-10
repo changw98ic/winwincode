@@ -4,9 +4,8 @@ import {
   ControlPlaneClientError,
   createControlPlaneClient,
   createControlPlaneClientDirectory,
-  createControlPlaneClientUsers,
-  createControlPlaneRunIdentityFake,
   createControlPlaneTaskFake,
+  createControlPlaneRunIdentityFake,
   type ControlPlaneClient,
   type ControlPlaneClientTransport,
   type ControlPlaneTaskAnchor,
@@ -58,11 +57,6 @@ import {
 } from './clients-view-model.js'
 import { mountClientsPage, type ClientsPage } from './clients-page.js'
 import {
-  createUserManagementViewModel,
-  type UserManagementViewModel,
-} from './user-management-view-model.js'
-import { mountUsersPage, type UsersPage } from './users-page.js'
-import {
   clientOccupancyPortFromFacade,
   createClientOccupancyViewModel,
   type ClientOccupancyViewModel,
@@ -81,39 +75,18 @@ import {
   mountReadinessPage,
   type ReadinessFixTarget,
 } from './readiness-page.js'
-import type { EnterpriseApplication } from './enterprise-application.js'
 import {
   mountScopeSelectorPage,
   type ScopeSelectorPage,
 } from './scope-selector-page.js'
 import { createScopeSelectorViewModel } from './scope-selector-view-model.js'
 import type {
-  CandidateComparisonRouteSelection,
-  CandidateDiffViewMode,
-} from './strongflow-diff-model.js'
-import {
-  strongFlowHistorySelectionFromHash,
-} from './strongflow-history-selection.js'
-import {
-  parseStrongFlowRouteHash,
-  strongFlowCandidateViewFromHash,
-  strongFlowRawCandidateFileFromHash,
-  strongFlowRouteHash,
-  type StrongFlowEvidenceRouteState,
-  type StrongFlowRoute,
-} from './strongflow-route.js'
-import type {
   ControlPlaneWebSocketSubscriptionId,
-  DeliveryGetResultResponse,
   DeliveryId,
   ProductSessionId,
   RepositoryScope,
   RequestId,
-  Scope,
-  StageRunId,
 } from './generated/contracts.js'
-import { matchesCanonicalSchema } from './generated/control-plane-client.js'
-import { QueryName } from './generated/contracts.js'
 import {
   projectionForSession,
   surfaceCapabilityForHash,
@@ -125,12 +98,6 @@ import type {
   AttentionNotificationControl,
   AttentionNotificationMonitor,
 } from './attention-notifications.js'
-import {
-  browserHomeVisitStorage,
-  createHomeRecentVisitStore,
-  homeDeliveryVisitFromHash,
-  type HomeRecentVisitStore,
-} from './home-recent-visits.js'
 
 export interface WinWinCodeClientApplicationOptions {
   readonly serverUrl: string
@@ -189,23 +156,6 @@ function routeParameters(hash: string): URLSearchParams {
   return new URLSearchParams(query < 0 ? '' : hash.slice(query + 1))
 }
 
-/** A route stage-run identity that survives the canonical StageRun schema. */
-function canonicalStageRunParameter(parameters: URLSearchParams): StageRunId | null {
-  const values = parameters.getAll('stageRun')
-  const value = values.length === 1 ? values[0] : null
-  return value !== null && matchesCanonicalSchema('StageRunId', value)
-    ? value as StageRunId
-    : null
-}
-
-export {
-  parseStrongFlowRouteHash,
-  strongFlowCandidateViewFromHash,
-  strongFlowRawCandidateFileFromHash,
-  strongFlowRouteHash,
-}
-export type { StrongFlowEvidenceRouteState, StrongFlowRoute }
-
 function browserControlPlaneTransport(browser: Window): ControlPlaneClientTransport {
   const nativeFetch = browser.fetch
   if (typeof nativeFetch !== 'function') return Object.freeze({})
@@ -231,12 +181,12 @@ export function mountWinWinCodeClient(
   let onRouteAuthorizationRevoked: (() => void) | null = null
   const browserTransport = browserControlPlaneTransport(browser)
   const rawControlPlane = options.controlPlane ?? createControlPlaneClient({
-      serverUrl: options.serverUrl,
-      transport: browserTransport,
-      onAccessFailure(error) {
-        accessFailureSession?.authenticationRequired(error)
-      },
-    })
+    serverUrl: options.serverUrl,
+    transport: browserTransport,
+    onAccessFailure(error) {
+      accessFailureSession?.authenticationRequired(error)
+    },
+  })
   const observedControlPlane = observeControlPlaneClient({
     client: rawControlPlane,
     monitor: connection,
@@ -259,10 +209,6 @@ export function mountWinWinCodeClient(
     client: rawControlPlane,
     transport: browserTransport,
   })
-  const clientUsers = createControlPlaneClientUsers({
-    client: rawControlPlane,
-    transport: browserTransport,
-  })
   const clientsModel: ClientsViewModel = createClientsViewModel({
     client: clientDirectory,
   })
@@ -278,18 +224,6 @@ export function mountWinWinCodeClient(
   const occupancyModel: ClientOccupancyViewModel = createClientOccupancyViewModel({
     port: clientOccupancyPortFromFacade(clientOccupancy),
     clients: clientsModel,
-  })
-  // UI-100.1: the Owner user management area talks to the real user
-  // endpoints; the self-service password form stays disabled until the
-  // signed-in account id is exposed by the session model.
-  const usersRoot = element(document, 'div', 'wwc-users-root')
-  const usersModel: UserManagementViewModel = createUserManagementViewModel({
-    port: {
-      listUsers: () => clientUsers.listUsers(),
-      create: input => clientUsers.createUser(input),
-      setState: input => clientUsers.setUserState(input),
-      resetPassword: input => clientUsers.resetUserPassword(input),
-    },
   })
   // REPO-100.3: the repository list talks to the same directory facade; the
   // list is a Server snapshot read, so expected failures stay inside the area.
@@ -324,7 +258,7 @@ export function mountWinWinCodeClient(
   const slot = element(document, 'section', 'wwc-surface-slot')
   const links = new Map<ClientSurfaceId, HTMLAnchorElement>()
   let activeSurface = clientSurfaceFromHash(browser.location.hash)
-  let activeFeature: EnterpriseApplication | MountedClientFeature | null = null
+  let activeFeature: MountedClientFeature | null = null
   let scopeSelectorPage: ScopeSelectorPage | null = null
   let currentScopeResolution: ScopeContextResolution | null = null
   let featureController: AbortController | null = null
@@ -336,19 +270,6 @@ export function mountWinWinCodeClient(
   // UI-506: one shell-owned notification monitor for the selected repository Scope.
   let attentionMonitor: AttentionNotificationMonitor | null = null
   let attentionMonitorScope: string | null = null
-  // UI-504: one browser-local history of opened Deliveries, keyed by Scope, that
-  // the Home dashboard renders as its "recently opened" section.
-  const homeVisits: HomeRecentVisitStore = createHomeRecentVisitStore({
-    storage: browserHomeVisitStorage(browser),
-  })
-
-  /** Records one Delivery visit; every other route leaves the history alone. */
-  function recordHomeVisit(hash: string): void {
-    const deliveryId = homeDeliveryVisitFromHash(hash)
-    if (deliveryId === null) return
-    homeVisits.record(deliveryId, scopeSelectionFromHash(hash), Date.now())
-  }
-
   function selectionIdentity(selection: ScopeRouteSelection): string {
     return [
       selection.organizationId ?? '',
@@ -375,7 +296,7 @@ export function mountWinWinCodeClient(
     const resolution = resolveScopeContext(
       session.authorizedScopes,
       browser.location.hash,
-      activeSurface.id === 'enterprise' ? 'scope' : 'repository',
+      'repository',
     )
     const scope = resolution.status === 'selected' ? resolution.scope : null
     lastKnownDiagnosticScope = scope
@@ -620,10 +541,6 @@ export function mountWinWinCodeClient(
     root: repositoriesRoot,
     model: repositoriesModel,
   })
-  const usersPage: UsersPage = mountUsersPage({
-    root: usersRoot,
-    model: usersModel,
-  })
 
   /**
    * The login page is the unauthenticated surface. It appears on sign-out and
@@ -679,15 +596,15 @@ export function mountWinWinCodeClient(
     }
     if (item.id === 'server-worker-health' || item.id === 'helper-availability') {
       return {
-        href: surfaceHash('/settings/runtime', selection),
-        label: '打开本地运维诊断',
+        href: surfaceHash('/settings', selection),
+        label: '打开运行诊断',
       }
     }
     if (item.id === 'first-chat-delivery') {
       return item.reason === 'no-delivery'
         ? {
-            href: surfaceHash('/strongflow', selection),
-            label: '创建你的第一个交付',
+            href: surfaceHash('/home/new-task', selection),
+            label: '创建你的第一个任务',
           }
         : { href: surfaceHash('/chat', selection), label: '开始你的第一次对话' }
     }
@@ -903,11 +820,11 @@ export function mountWinWinCodeClient(
       const [
         { createChatViewModel },
         { mountChatPage },
-        { createStrongFlowCreateViewModel },
+        { createChatDeliveryCreator },
       ] = await Promise.all([
         import('./chat-view-model.js'),
         import('./chat-page.js'),
-        import('./strongflow-view-model.js'),
+        import('./chat-delivery-creator.js'),
       ])
       if (closed || generation !== renderGeneration || controller.signal.aborted) return
       const model = createChatViewModel({
@@ -928,19 +845,17 @@ export function mountWinWinCodeClient(
           ))
         },
       })
-      const deliveryCreator = createStrongFlowCreateViewModel({
+      // Design page 03b: a confirmed draft becomes the first Delivery; the
+      // receipt line inside the conversation carries the follow-up link, so
+      // creation itself never navigates away from the session.
+      const deliveryCreator = createChatDeliveryCreator({
         client: controlPlane,
         actor: context.actor,
         scope: context.scope,
         nextDeliveryId: () => contractId('dlv', browser.crypto) as DeliveryId,
         nextRequestId: () => contractId('req', browser.crypto) as RequestId,
-        onCreated(deliveryId) {
-          if (closed || generation !== renderGeneration || controller.signal.aborted) return
-          replaceHash(scopeHash(
-            `#/strongflow?delivery=${encodeURIComponent(deliveryId)}`,
-            scopeSelectionFromHash(browser.location.hash),
-          ))
-          render()
+        onCreated() {
+          // The page re-renders from the creator subscription; no navigation.
         },
       })
       activeFeature = mountChatPage({
@@ -1039,76 +954,9 @@ export function mountWinWinCodeClient(
     if (context === null) return
     const controller = new AbortController()
     featureController = controller
-    const operationsRoute = browser.location.hash
-      .replace(/^#/u, '')
-      .replace(/\?.*$/u, '') === '/settings/runtime'
-    routeLoading(operationsRoute ? '正在加载本地运维…' : '正在加载设置…')
+    routeLoading('正在加载设置…')
     try {
-      if (operationsRoute) {
-        const [
-          { createLocalOperationsViewModel },
-          { mountLocalOperationsPage },
-          { createUsageHealthViewModel },
-          { mountUsageHealthSummary },
-        ] = await Promise.all([
-          import('./local-operations-view-model.js'),
-          import('./local-operations-page.js'),
-          import('./usage-health-view-model.js'),
-          import('./usage-health-page.js'),
-        ])
-        if (closed || generation !== renderGeneration || controller.signal.aborted) return
-        const model = createLocalOperationsViewModel({
-          client: controlPlane,
-          actor: context.actor,
-          scope: context.scope,
-          subscriptionId: contractId(
-            'sub',
-            browser.crypto,
-          ) as ControlPlaneWebSocketSubscriptionId,
-          nextRequestId: () => contractId('req', browser.crypto) as RequestId,
-        })
-        const operationsPage = mountLocalOperationsPage({
-          root: slot,
-          model,
-          readOnly: activeRouteReadOnly,
-          onOpenReadiness() {
-            if (!closed) readiness.setCollapsed(false)
-          },
-        })
-        // UI-505: the diagnostics route also carries the read-only Usage, Provider,
-        // Credential and Worker health summary next to the local operations panel.
-        let mountedHealth: { close(): void } | null = null
-        try {
-          const healthRoot = element(document, 'div', 'wwc-usage-health-root')
-          slot.append(healthRoot)
-          const healthModel = createUsageHealthViewModel({
-            client: controlPlane,
-            actor: context.actor,
-            scope: context.scope,
-            nextRequestId: () => contractId('req', browser.crypto) as RequestId,
-          })
-          const healthSummary = mountUsageHealthSummary({
-            root: healthRoot,
-            model: healthModel,
-          })
-          void healthModel.start().catch(() => {})
-          mountedHealth = {
-            close() {
-              healthSummary.close()
-              healthModel.close()
-            },
-          }
-        } catch {
-          // The local operations panel stays usable when only this summary fails to mount.
-        }
-        activeFeature = {
-          close() {
-            mountedHealth?.close()
-            operationsPage.close()
-          },
-        }
-        return
-      }
+      process.stdout.write(`DEBUG renderSettings entered gen=${generation}\n`)
       const [{ createSettingsViewModel }, { mountSettingsPage }] = await Promise.all([
         import('./settings-view-model.js'),
         import('./settings-page.js'),
@@ -1127,17 +975,38 @@ export function mountWinWinCodeClient(
       activeFeature = mountSettingsPage({
         root: slot,
         model,
-        localOperationsHref: scopeHash(
-          '#/settings/runtime',
-          scopeSelectionFromHash(browser.location.hash),
-        ),
         readOnly: activeRouteReadOnly,
+        // Design page 15: the 用量 tab lazily mounts the live Usage/Provider/
+        // Worker health summary, so the settings route only pays for the usage
+        // projection when the tab is opened.
+        mountUsagePanel: async usageRoot => {
+          const [{ createUsageHealthViewModel }, { mountUsageHealthSummary }] = await Promise.all([
+            import('./usage-health-view-model.js'),
+            import('./usage-health-page.js'),
+          ])
+          const healthModel = createUsageHealthViewModel({
+            client: controlPlane,
+            actor: context.actor,
+            scope: context.scope,
+            nextRequestId: () => contractId('req', browser.crypto) as RequestId,
+          })
+          const healthSummary = mountUsageHealthSummary({
+            root: usageRoot,
+            model: healthModel,
+          })
+          void healthModel.start().catch(() => {})
+          return {
+            close() {
+              healthSummary.close()
+              healthModel.close()
+            },
+          }
+        },
       })
     } catch (error) {
+      process.stdout.write(`DEBUG renderSettings failed: ${String((error as Error)?.stack ?? error)}\n`)
       if (closed || generation !== renderGeneration || controller.signal.aborted) return
-      showRouteFailure(error, operationsRoute
-        ? 'LOCAL_OPERATIONS_ROUTE_FAILURE'
-        : 'SETTINGS_ROUTE_FAILURE')
+      showRouteFailure(error, 'SETTINGS_ROUTE_FAILURE')
     }
   }
 
@@ -1171,7 +1040,6 @@ export function mountWinWinCodeClient(
         // The Clients zone reuses the one shell-owned Clients area model, so
         // the first screen never grows a second device-list state.
         clients: clientsModel,
-        visits: homeVisits,
       })
       // The page owns the composed model: its close chain also closes the
       // Attention, Delivery and Usage projections it mounted.
@@ -1191,7 +1059,9 @@ export function mountWinWinCodeClient(
   function homeSubRoute(): 'my-work' | 'task-entry' | 'task-run' {
     const path = browser.location.hash.replace(/^#/u, '').replace(/\?.*$/u, '')
     if (path === '/home/new-task') return 'task-entry'
-    if (path === '/home/run') return 'task-run'
+    // `/home/run` is the canonical sub-route; `/home/task-run` is the same
+    // task-detail page under its design-page name.
+    if (path === '/home/run' || path === '/home/task-run') return 'task-run'
     return 'my-work'
   }
 
@@ -1271,7 +1141,7 @@ export function mountWinWinCodeClient(
     if (context === null) return
     const anchorFacts = taskRunRouteAnchor()
     if (anchorFacts === null) {
-      routeUnavailable('This task link is incomplete. Start a task from My Work.')
+      routeUnavailable('任务链接不完整。请从任务看板发起新任务，或在对话中委托任务。')
       return
     }
     const controller = new AbortController()
@@ -1312,72 +1182,9 @@ export function mountWinWinCodeClient(
   async function renderAttention(generation: number): Promise<void> {
     const context = authenticatedRouteContext()
     if (context === null) return
-    const parameters = routeParameters(browser.location.hash)
-    const productSessionId = parameters.get('session') as ProductSessionId | null
-    if (productSessionId !== null) {
-      const controller = new AbortController()
-      featureController = controller
-      routeLoading('正在加载会话决策…')
-      try {
-        const deliveryId = parameters.get('delivery') as DeliveryId | null
-        const stageRunId = canonicalStageRunParameter(parameters)
-        const [{ createLocalDecisionsViewModel }, { mountLocalDecisionsPage }] = await Promise.all([
-          import('./local-decisions-view-model.js'),
-          import('./local-decisions-page.js'),
-        ])
-        if (closed || generation !== renderGeneration || controller.signal.aborted) return
-        const model = createLocalDecisionsViewModel({
-          client: controlPlane,
-          actor: context.actor,
-          scope: context.scope,
-          productSessionId,
-          interactionSubscriptionId: contractId(
-            'sub',
-            browser.crypto,
-          ) as ControlPlaneWebSocketSubscriptionId,
-          ...(deliveryId === null
-            ? {}
-            : {
-                delivery: {
-                  deliveryId,
-                  subscriptionId: contractId(
-                    'sub',
-                    browser.crypto,
-                  ) as ControlPlaneWebSocketSubscriptionId,
-                },
-              }),
-          nextRequestId: () => contractId('req', browser.crypto) as RequestId,
-        })
-        activeFeature = mountLocalDecisionsPage({
-          root: slot,
-          model,
-          readOnly: activeRouteReadOnly,
-          // The exact execution origin this decision came from, so handling the
-          // decision can return to the Task/StageRun that raised it.
-          ...(deliveryId === null || stageRunId === null
-            ? {}
-            : {
-                returnTarget: {
-                  hash: strongFlowRouteHash({
-                    deliveryId,
-                    productSessionId,
-                    stageRunId,
-                    candidatePath: null,
-                    candidateView: 'unified',
-                    comparison: { status: 'none' },
-                    evidenceTab: 'evidence',
-                    evidenceId: null,
-                  }, scopeSelectionFromHash(browser.location.hash)),
-                  label: 'Return to execution context',
-                },
-              }),
-        })
-      } catch (error) {
-        if (closed || generation !== renderGeneration || controller.signal.aborted) return
-        showRouteFailure(error, 'ATTENTION_ROUTE_FAILURE')
-      }
-      return
-    }
+    // Design page 06: the Attention Center is the one unified inbox for every
+    // entry that needs the user.  Legacy `?session=` deep links land here too;
+    // each card carries its own follow-up link.
     const controller = new AbortController()
     featureController = controller
     routeLoading('正在加载待我处理…')
@@ -1413,315 +1220,6 @@ export function mountWinWinCodeClient(
     }
   }
 
-  async function renderStrongFlow(generation: number): Promise<void> {
-    const routeContext = authenticatedRouteContext()
-    if (routeContext === null) return
-    const context = routeContext
-    const controller = new AbortController()
-    featureController = controller
-    routeLoading('正在加载 StrongFlow…')
-    let deliveryList: Awaited<ReturnType<typeof createStrongFlowDeliveryList>> | null = null
-    async function createStrongFlowDeliveryList() {
-      const { createStrongFlowDeliveryListViewModel } = await import(
-        './strongflow-delivery-list-view-model.js'
-      )
-      const list = createStrongFlowDeliveryListViewModel({
-        client: controlPlane,
-        actor: context.actor,
-        scope: context.scope,
-        nextRequestId: () => contractId('req', browser.crypto) as RequestId,
-        signal: controller.signal,
-      })
-      await list.start()
-      return list
-    }
-    try {
-      const route = parseStrongFlowRouteHash(browser.location.hash)
-      deliveryList = await createStrongFlowDeliveryList()
-      if (closed || generation !== renderGeneration || controller.signal.aborted) {
-        deliveryList.close()
-        deliveryList = null
-        return
-      }
-      // A failed first page leaves no honest fallback selection: fail the route
-      // instead of showing the empty-repository create surface.
-      if (route.deliveryId === null && deliveryList.state.error !== null) {
-        throw new Error('The Delivery list could not be loaded for this repository.')
-      }
-      const deliveries = deliveryList.state.visible
-      const deliveryId = route.deliveryId ?? deliveries[0]?.deliveryId ?? null
-      if (deliveryId === null) {
-        deliveryList.close()
-        deliveryList = null
-        const [{ createStrongFlowCreateViewModel }, { mountStrongFlowCreatePage }] = await Promise.all([
-          import('./strongflow-view-model.js'),
-          import('./strongflow-page.js'),
-        ])
-        if (closed || generation !== renderGeneration || controller.signal.aborted) return
-        const model = createStrongFlowCreateViewModel({
-          client: controlPlane,
-          actor: context.actor,
-          scope: context.scope,
-          nextDeliveryId: () => contractId('dlv', browser.crypto) as DeliveryId,
-          nextRequestId: () => contractId('req', browser.crypto) as RequestId,
-          onCreated(createdDeliveryId) {
-            if (closed || generation !== renderGeneration || controller.signal.aborted) return
-            replaceHash(strongFlowRouteHash({
-              deliveryId: createdDeliveryId,
-              productSessionId: null,
-              stageRunId: null,
-              candidatePath: null,
-              candidateView: 'unified',
-              comparison: { status: 'none' },
-              evidenceTab: 'evidence',
-              evidenceId: null,
-            }, scopeSelectionFromHash(browser.location.hash)))
-            render()
-          },
-        })
-        activeFeature = mountStrongFlowCreatePage({
-          root: slot,
-          model,
-          scope: context.scope,
-          readOnly: activeRouteReadOnly,
-        })
-        return
-      }
-      let detailValue
-      try {
-        detailValue = await controlPlane.query({
-          schemaVersion: 'winwincode/v1',
-          requestId: contractId('req', browser.crypto) as RequestId,
-          actor: context.actor,
-          scope: context.scope,
-          query: QueryName.DeliveryGet,
-          parameters: { deliveryId },
-          page: { cursor: null, limit: 1 },
-        }, { signal: controller.signal })
-      } catch (error) {
-        if (error instanceof ControlPlaneClientError && error.code === 'RESOURCE_NOT_FOUND') {
-          const unavailable = element(document, 'p', 'wwc-feature-route-unavailable')
-          unavailable.setAttribute('role', 'alert')
-          unavailable.textContent = 'This StrongFlow link no longer names an available Delivery.'
-          slot.replaceChildren(unavailable)
-          return
-        }
-        throw error
-      }
-      if (detailValue.query !== QueryName.DeliveryGet) {
-        throw new Error('The StrongFlow route received another detail response.')
-      }
-      const detail = (detailValue as DeliveryGetResultResponse).result
-      const requestedStageRunId = route.stageRunId
-      let selectedCandidatePath = route.candidatePath
-      const routeCandidateView = strongFlowCandidateViewFromHash(browser.location.hash)
-      const routeCandidateFile = strongFlowRawCandidateFileFromHash(browser.location.hash)
-      let candidateView: CandidateDiffViewMode = route.candidateView
-      const stage = requestedStageRunId === null
-        ? [...detail.stages].reverse().find(candidate => candidate.sessionBinding !== null)
-        : detail.stages.find(candidate => candidate.id === requestedStageRunId)
-      const productSessionId = route.productSessionId
-        ?? stage?.sessionBinding?.productSessionId
-        ?? null
-      if (stage === undefined || stage.sessionBinding === null || productSessionId === null) {
-        deliveryList.close()
-        deliveryList = null
-        routeUnavailable('This Delivery does not have an executable StrongFlow stage yet.')
-        return
-      }
-      if (closed || generation !== renderGeneration || controller.signal.aborted) {
-        deliveryList.close()
-        deliveryList = null
-        return
-      }
-      let currentRoute: StrongFlowRoute = Object.freeze({
-        ...route,
-        deliveryId,
-        productSessionId,
-        stageRunId: stage.id,
-      })
-      if (
-        route.deliveryId === null
-        || route.productSessionId === null
-        || route.stageRunId === null
-        || routeCandidateView === null
-        // An illegal Candidate file deep link was dropped at parse time, so the
-        // URL is rewritten to the canonical route without it.
-        || routeCandidateFile !== currentRoute.candidatePath
-      ) {
-        replaceHash(strongFlowRouteHash(
-          currentRoute,
-          scopeSelectionFromHash(browser.location.hash),
-          strongFlowHistorySelectionFromHash(browser.location.hash),
-        ))
-      }
-      const [{ createStrongFlowViewModel }, { mountStrongFlowPage }] = await Promise.all([
-        import('./strongflow-view-model.js'),
-        import('./strongflow-page.js'),
-      ])
-      if (closed || generation !== renderGeneration || controller.signal.aborted) {
-        deliveryList.close()
-        deliveryList = null
-        return
-      }
-      const model = createStrongFlowViewModel({
-        client: controlPlane,
-        actor: context.actor,
-        scope: context.scope,
-        deliveryId,
-        productSessionId,
-        stageRunId: stage.id,
-        subscriptionId: contractId(
-          'sub',
-          browser.crypto,
-        ) as ControlPlaneWebSocketSubscriptionId,
-        nextRequestId: () => contractId('req', browser.crypto) as RequestId,
-        selectedCandidatePath,
-        onCandidatePathChange(path) {
-          if (closed || generation !== renderGeneration || controller.signal.aborted) return
-          selectedCandidatePath = path
-          currentRoute = Object.freeze({ ...currentRoute, candidatePath: path })
-          replaceHash(strongFlowRouteHash(
-            currentRoute,
-            scopeSelectionFromHash(browser.location.hash),
-            strongFlowHistorySelectionFromHash(browser.location.hash),
-          ))
-        },
-        onStageBindingChange(binding) {
-          if (closed || generation !== renderGeneration || controller.signal.aborted) return
-          currentRoute = Object.freeze({
-            ...currentRoute,
-            productSessionId: binding.productSessionId,
-            stageRunId: binding.stageRunId,
-            evidenceId: null,
-          })
-          replaceHash(strongFlowRouteHash(
-            currentRoute,
-            scopeSelectionFromHash(browser.location.hash),
-            strongFlowHistorySelectionFromHash(browser.location.hash),
-          ))
-        },
-      })
-      activeFeature = mountStrongFlowPage({
-        root: slot,
-        model,
-        deliveryList,
-        candidateView,
-        comparison: currentRoute.comparison,
-        onComparisonSelectionChange(request) {
-          if (closed || generation !== renderGeneration || controller.signal.aborted) return
-          const comparison: CandidateComparisonRouteSelection = {
-            status: 'requested',
-            request,
-          }
-          currentRoute = Object.freeze({ ...currentRoute, comparison })
-          replaceHash(strongFlowRouteHash(
-            currentRoute,
-            scopeSelectionFromHash(browser.location.hash),
-            strongFlowHistorySelectionFromHash(browser.location.hash),
-          ))
-        },
-        onCandidateViewModeChange(mode) {
-          if (closed || generation !== renderGeneration || controller.signal.aborted) return
-          candidateView = mode
-          currentRoute = Object.freeze({ ...currentRoute, candidateView: mode })
-          replaceHash(strongFlowRouteHash(
-            currentRoute,
-            scopeSelectionFromHash(browser.location.hash),
-            strongFlowHistorySelectionFromHash(browser.location.hash),
-          ))
-        },
-        evidence: {
-          client: controlPlane,
-          actor: context.actor,
-          scope: context.scope,
-          nextRequestId: () => contractId('req', browser.crypto) as RequestId,
-          route: {
-            tab: currentRoute.evidenceTab,
-            evidenceId: currentRoute.evidenceId,
-          },
-          onRouteChange(next) {
-            if (closed || generation !== renderGeneration || controller.signal.aborted) return
-            currentRoute = Object.freeze({
-              ...currentRoute,
-              evidenceTab: next.tab,
-              evidenceId: next.evidenceId,
-            })
-            replaceHash(strongFlowRouteHash(
-              currentRoute,
-              scopeSelectionFromHash(browser.location.hash),
-              strongFlowHistorySelectionFromHash(browser.location.hash),
-            ))
-          },
-        },
-        routeScope: scopeSelectionFromHash(browser.location.hash),
-        readOnly: activeRouteReadOnly,
-      })
-      deliveryList = null
-    } catch (error) {
-      deliveryList?.close()
-      deliveryList = null
-      if (closed || generation !== renderGeneration || controller.signal.aborted) return
-      showRouteFailure(error, 'STRONGFLOW_ROUTE_FAILURE')
-    }
-  }
-
-  async function renderEnterprise(generation: number): Promise<void> {
-    const session = authSession.state.session
-    const resolution = currentScopeResolution
-    if (
-      authSession.state.status !== 'signed-in'
-      || session === null
-      || resolution?.status !== 'selected'
-    ) {
-      const unavailable = element(document, 'p', 'wwc-enterprise-context-required')
-      unavailable.setAttribute('role', resolution?.status === 'denied' ? 'alert' : 'status')
-      unavailable.textContent = authSession.state.status === 'restoring'
-        ? 'Restoring enterprise identity and organization access…'
-        : resolution?.status === 'denied'
-          ? 'The enterprise Scope in this URL is not authorized. Choose another Scope.'
-          : resolution?.status === 'selection-required'
-            ? 'Choose an authorized Scope to load enterprise management.'
-        : 'Sign in to load enterprise management.'
-      slot.replaceChildren(unavailable)
-      return
-    }
-    const scope: Scope = resolution.scope
-    const loading = element(document, 'p', 'wwc-enterprise-route-loading')
-    loading.setAttribute('role', 'status')
-    loading.textContent = 'Loading enterprise management…'
-    slot.replaceChildren(loading)
-    const controller = new AbortController()
-    featureController = controller
-    try {
-      const enterprise = await import('./enterprise-application.js')
-      if (closed || generation !== renderGeneration || controller.signal.aborted) return
-      const mounted = await enterprise.mountEnterpriseApplication({
-        root: slot,
-        client: controlPlane,
-        hash: browser.location.hash,
-        signal: controller.signal,
-        actor: session.actor,
-        scope,
-        subscriptionId: contractId(
-          'sub',
-          browser.crypto,
-        ) as ControlPlaneWebSocketSubscriptionId,
-        nextRequestId: () => contractId('req', browser.crypto) as RequestId,
-        readOnly: activeRouteReadOnly,
-      })
-      if (mounted === null) return
-      if (closed || generation !== renderGeneration || controller.signal.aborted) {
-        mounted.close()
-        return
-      }
-      activeFeature = mounted
-    } catch (error) {
-      if (closed || generation !== renderGeneration || controller.signal.aborted) return
-      showRouteFailure(error, 'ENTERPRISE_ROUTE_FAILURE')
-    }
-  }
-
   function performRender(scopeSelectorMode: ScopeSelectorRenderMode = 'replace'): void {
     renderGeneration += 1
     const generation = renderGeneration
@@ -1735,7 +1233,6 @@ export function mountWinWinCodeClient(
     }
     currentScopeResolution = null
     activeSurface = clientSurfaceFromHash(browser.location.hash)
-    recordHomeVisit(browser.location.hash)
     // Design pages 07/08: device onboarding and repository lists live on their
     // own pages, never as panels above work surfaces.
     clientsRoot.hidden = true
@@ -1761,7 +1258,7 @@ export function mountWinWinCodeClient(
       const resolved = resolveScopeContext(
         session.authorizedScopes,
         browser.location.hash,
-        activeSurface.id === 'enterprise' ? 'scope' : 'repository',
+        'repository',
       )
       const resolution: ScopeContextResolution = resolved.status === 'selected'
         && selectionIdentity(resolved.selection) === revokedScopeIdentity
@@ -1803,11 +1300,7 @@ export function mountWinWinCodeClient(
       scopeRoot.hidden = true
       scopeRoot.replaceChildren()
     }
-    readinessRoot.hidden = !(
-      authSession.state.status === 'signed-in'
-      && session !== null
-      && activeSurface.id !== 'enterprise'
-    )
+    readinessRoot.hidden = !(authSession.state.status === 'signed-in' && session !== null)
     if (!readinessRoot.hidden) {
       const resolution = currentScopeResolution
       const context: ReadinessContext = authSession.state.status !== 'signed-in' || session === null
@@ -1866,14 +1359,10 @@ export function mountWinWinCodeClient(
       launchRoute(renderProjects(generation), generation, 'PROJECTS_ROUTE_FAILURE')
     } else if (activeSurface.id === 'device') {
       launchRoute(renderDevice(generation), generation, 'DEVICE_ROUTE_FAILURE')
-    } else if (activeSurface.id === 'strongflow') {
-      launchRoute(renderStrongFlow(generation), generation, 'STRONGFLOW_ROUTE_FAILURE')
     } else if (activeSurface.id === 'settings') {
       launchRoute(renderSettings(generation), generation, 'SETTINGS_ROUTE_FAILURE')
     } else if (activeSurface.id === 'attention') {
       launchRoute(renderAttention(generation), generation, 'ATTENTION_ROUTE_FAILURE')
-    } else if (activeSurface.id === 'enterprise') {
-      launchRoute(renderEnterprise(generation), generation, 'ENTERPRISE_ROUTE_FAILURE')
     }
   }
 
@@ -1941,10 +1430,8 @@ export function mountWinWinCodeClient(
       || activeSurface.id === 'projects'
       || activeSurface.id === 'device'
       || activeSurface.id === 'extensions'
-      || activeSurface.id === 'strongflow'
       || activeSurface.id === 'settings'
       || activeSurface.id === 'attention'
-      || activeSurface.id === 'enterprise'
     )) render()
   })
   render()

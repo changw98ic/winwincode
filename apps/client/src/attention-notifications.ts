@@ -326,7 +326,7 @@ export function createAttentionNotificationMonitor(
         title: signal.title,
         body: signal.context,
       }, () => {
-        options.onOpenTarget?.(attentionSignalRouteHash(signal, {
+        options.onOpenTarget?.(attentionSignalRouteHash({
           organizationId: options.scope.organizationId,
           workspaceId: options.scope.workspaceId,
           projectId: options.scope.projectId,

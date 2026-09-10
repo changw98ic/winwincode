@@ -45,61 +45,60 @@ export interface UsageHealthPresentation {
 
 const PRESENTATION_SPEC: UsageHealthPresentation = {
   statusLabel: Object.freeze({
-    idle: 'Not read yet',
-    loading: 'Reading usage and health…',
-    ready: 'Usage and health current',
-    refreshing: 'Refreshing usage and health…',
-    'authentication-required': 'Sign in to read usage and health',
-    'authorization-denied': 'This Scope is not authorized for usage and health',
-    cancelled: 'Read cancelled',
-    error: 'Last read failed',
-    closed: 'Summary closed',
+    idle: '尚未读取',
+    loading: '正在读取用量与健康…',
+    ready: '用量与健康已更新',
+    refreshing: '正在刷新用量与健康…',
+    'authentication-required': '登录后查看用量与健康',
+    'authorization-denied': '当前范围无权查看用量与健康',
+    cancelled: '读取已取消',
+    error: '上次读取失败',
+    closed: '面板已关闭',
   }),
   workerStateLabel: Object.freeze({
-    online: 'Online, accepting work',
-    'no-capacity': 'Online, no free capacity',
-    draining: 'Draining',
-    offline: 'Offline',
-    'heartbeat-stale': 'Online, heartbeat stale',
-    'heartbeat-unknown': 'Online, no heartbeat reported',
+    online: '在线 · 接受任务',
+    'no-capacity': '在线 · 无空闲容量',
+    draining: '正在排空',
+    offline: '离线',
+    'heartbeat-stale': '在线 · 心跳滞后',
+    'heartbeat-unknown': '在线 · 未上报心跳',
   }),
   providerStateLabel: Object.freeze({
-    ready: 'Route ready',
-    disabled: 'Provider or model disabled',
-    unavailable: 'Provider unavailable',
-    unknown: 'Provider state unknown',
+    ready: '路由就绪',
+    disabled: 'Provider 或模型已禁用',
+    unavailable: 'Provider 不可用',
+    unknown: 'Provider 状态未知',
   }),
   credentialStateLabel: Object.freeze({
-    available: 'Credential available',
-    missing: 'Credential missing',
-    revoked: 'Credential revoked',
+    available: '凭据可用',
+    missing: '凭据缺失',
+    revoked: '凭据已吊销',
   }),
   dimensionHeading: Object.freeze({
-    delivery: 'Usage by Delivery',
-    'stage-run': 'Usage by StageRun',
-    role: 'Usage by Role',
-    model: 'Usage by Model',
-    provider: 'Provider routing',
+    delivery: '按交付用量',
+    'stage-run': '按 StageRun 用量',
+    role: '按角色用量',
+    model: '模型用量',
+    provider: 'Provider 路由',
   }),
-  unknownLabel: 'Unknown',
-  unattributedLabel: 'Token usage not attributed',
-  durationNote: 'The runtime projection publishes no elapsed time per StageRun or Role.',
-  overlapNote: 'A StageRun total is counted for every Role that ran inside it, so Role rows overlap.',
-  unattributedNote:
-    'The runtime attributes token usage to the StageRun, so Provider and Model rows carry routing facts only.',
-  priceSourceNote:
-    'Cost is not shown: the published projections carry no price list, so unit prices are not published here.',
-  coverageLabel: window => `${window.observedSessions} of ${window.availableSessions} sessions`,
-  unavailableLabel: 'This section is unavailable',
-  emptyLabel: 'Nothing reported in this Scope yet.',
-  refreshLabel: 'Refresh',
-  headingLabel: 'Usage, Provider and Worker health',
-  windowLabel: 'Observed data window',
-  updatedLabel: 'Last updated',
+  unknownLabel: '未知',
+  unattributedLabel: 'Token 用量未归因',
+  durationNote: '运行时投影未发布每个 StageRun 或角色的耗时。',
+  overlapNote: '一个 StageRun 的总量会计入其中运行的每个角色，因此角色行之间存在重叠。',
+  unattributedNote: '运行时把 token 用量归因到 StageRun，因此 Provider 与模型行仅携带路由事实。',
+  priceSourceNote: '不展示费用：已发布的投影不含价目表，因此此处不发布单价。',
+  coverageLabel: window => `${String(window.availableSessions)} 个会话中的 ${
+    String(window.observedSessions)} 个`,
+  unavailableLabel: '此分区不可用',
+  emptyLabel: '此范围暂无上报数据。',
+  refreshLabel: '刷新',
+  headingLabel: '用量、Provider 与 Worker 健康',
+  windowLabel: '观测数据窗口',
+  updatedLabel: '更新于',
   capacityLabel: Object.freeze({
-    sufficient: 'Worker capacity covers the configured concurrency limit',
-    short: 'Worker capacity is below the configured concurrency limit',
-    unknown: 'No concurrency limit is configured',
+    sufficient: 'Worker 容量满足配置的并发上限',
+    short: 'Worker 容量低于配置的并发上限',
+    unknown: '未配置并发上限',
   }),
 }
 
@@ -159,7 +158,7 @@ function rowClassName(dimension: UsageHealthDimension): string {
 }
 
 function asOfText(asOf: string | null, known: boolean): string {
-  if (!known || asOf === null) return `${PRESENTATION.unknownLabel} observation time`
+  if (!known || asOf === null) return `${PRESENTATION.unknownLabel} 观测时间`
   return `${PRESENTATION.updatedLabel} ${asOf}`
 }
 
@@ -224,7 +223,7 @@ export function mountUsageHealthSummary(
       ? row.metrics.map(metric => `${metric.name} ${metric.value}`).join(' · ')
       : presentation.unknownLabel
     const detail = element(document, 'span', 'wwc-usage-health-row-detail')
-    detail.textContent = `${row.sessionCount} StageRun sessions`
+    detail.textContent = `${row.sessionCount} 个 StageRun 会话`
     const asOf = element(document, 'span', 'wwc-usage-health-row-asof')
     asOf.textContent = asOfText(row.asOf, row.asOfKnown)
     node.replaceChildren(...withMarkers([
@@ -281,7 +280,7 @@ export function mountUsageHealthSummary(
       const label = element(document, 'span', 'wwc-usage-health-worker-label')
       label.textContent = row.label
       const state = element(document, 'span', 'wwc-usage-health-worker-state')
-      state.textContent = `${presentation.workerStateLabel[row.state]} · capacity ${row.capacity}`
+      state.textContent = `${presentation.workerStateLabel[row.state]} · 容量 ${row.capacity}`
       const heartbeat = element(document, 'span', 'wwc-usage-health-worker-heartbeat')
       heartbeat.textContent = asOfText(row.lastHeartbeatAt, row.heartbeatKnown)
       node.replaceChildren(...withMarkers([
@@ -308,14 +307,14 @@ export function mountUsageHealthSummary(
         row.state === 'ready' ? '' : row.reason === null ? '' : ` · ${row.reason}`
       }`
       const routes = element(document, 'span', 'wwc-usage-health-provider-routes')
-      routes.textContent = `${row.routeCount} routes${
-        row.isDefault ? ' · default' : ''
+      routes.textContent = `${String(row.routeCount)} 条路由${
+        row.isDefault ? ' · 默认' : ''
       } · ${presentation.unattributedLabel}`
       node.replaceChildren(...withMarkers([
         label,
         state,
         routes,
-        unknownMarker(false, `${presentation.unknownLabel} observation time`),
+        unknownMarker(false, `${presentation.unknownLabel} 观测时间`),
       ]))
     },
   })
@@ -335,7 +334,7 @@ export function mountUsageHealthSummary(
       const detail = element(document, 'span', 'wwc-usage-health-model-detail')
       detail.textContent = `${row.detail} · ${row.status}${
         row.reason === null ? '' : ` · ${row.reason}`
-      } · ${row.contextWindowTokens} context tokens`
+      } · 上下文 ${row.contextWindowTokens} tokens`
       node.replaceChildren(...withMarkers([
         label,
         detail,
@@ -354,7 +353,7 @@ export function mountUsageHealthSummary(
       const label = element(document, 'span', 'wwc-usage-health-credential-label')
       label.textContent = row.label
       const state = element(document, 'span', 'wwc-usage-health-credential-state')
-      state.textContent = `${presentation.credentialStateLabel[row.secretState]} · rotation ${
+      state.textContent = `${presentation.credentialStateLabel[row.secretState]} · 轮换 ${
         row.rotationVersion
       }`
       const asOf = element(document, 'span', 'wwc-usage-health-credential-asof')
@@ -373,10 +372,10 @@ export function mountUsageHealthSummary(
       label.textContent = row.label
       const detail = element(document, 'span', 'wwc-usage-health-error-detail')
       detail.textContent = row.origin === 'stage-run'
-        ? `${row.failureCount} failures${
-          row.recovered ? ' · recovery in progress or complete' : ''
+        ? `${row.failureCount} 次失败${
+          row.recovered ? ' · 恢复进行中或已完成' : ''
         }${row.sourceRef === null ? '' : ` · ${row.sourceRef}`}`
-        : `${row.attentionCount} open attention items`
+        : `${row.attentionCount} 个未关闭注意点`
       node.replaceChildren(label, detail)
     },
   })
@@ -415,7 +414,7 @@ export function mountUsageHealthSummary(
     ),
     subSection(
       'worker',
-      'Worker capacity and reachability',
+      'Worker 容量与可达性',
       presentation.priceSourceNote,
       ['worker'],
       capacity,
@@ -423,14 +422,14 @@ export function mountUsageHealthSummary(
     ),
     subSection(
       'credential',
-      'Credential lifecycle',
+      '凭据生命周期',
       presentation.unattributedNote,
       ['credential'],
       credentialRows.root,
     ),
     subSection(
       'error',
-      'Recent errors',
+      '近期错误',
       presentation.durationNote,
       ['delivery', 'usage'],
       errorRows.root,
@@ -447,9 +446,9 @@ export function mountUsageHealthSummary(
     capacity.dataset.capacityState = stateName
     capacity.textContent = summary === null
       ? presentation.emptyLabel
-      : `${presentation.capacityLabel[stateName]} · reported ${summary.reportedCapacity}${
-        summary.limit === null ? '' : ` of limit ${summary.limit}`
-      } · draining ${summary.drainingCapacity}`
+      : `${presentation.capacityLabel[stateName]} · 上报容量 ${summary.reportedCapacity}${
+        summary.limit === null ? '' : ` / 上限 ${summary.limit}`
+      } · 排空中 ${summary.drainingCapacity}`
   }
 
   function render(state: UsageHealthViewModelState): void {
@@ -463,7 +462,7 @@ export function mountUsageHealthSummary(
       state.timeWindow === null
         ? presentation.emptyLabel
         : presentation.coverageLabel(state.timeWindow)
-    }${state.truncated ? ' · partial coverage' : ''}`
+    }${state.truncated ? ' · 覆盖不完整' : ''}`
     errorBanner.hidden = state.error === null
     errorBanner.textContent = state.error === null
       ? ''

@@ -398,8 +398,6 @@ function waitFor(predicate, label) {
 /**
  * Every key page: the route the shell serves it on, the element that says it
  * has mounted, and the status line that says its first snapshot has landed.
- * `decisions` is the Attention item's own route, which is where the shell puts
- * the repository's decision list.
  */
 const PAGES = Object.freeze({
   home: { route: '#/home', selector: '.wwc-home', status: '.wwc-home-status' },
@@ -413,16 +411,6 @@ const PAGES = Object.freeze({
     route: '#/attention',
     selector: '.wwc-attention-center',
     status: '.wwc-attention-center-status .wwc-status-badge-label',
-  },
-  decisions: {
-    route: `#/attention?session=${productSessionId}`,
-    selector: '.wwc-local-decisions',
-    status: '.wwc-local-decisions-status .wwc-status-badge-label',
-  },
-  operations: {
-    route: '#/settings/runtime',
-    selector: '.wwc-local-operations',
-    status: '.wwc-local-operations-status .wwc-status-badge-label',
   },
 })
 

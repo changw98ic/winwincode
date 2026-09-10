@@ -855,7 +855,7 @@ test('Chat confirms one editable requirement draft before converting it to Stron
     findByClass(rootElement, 'wwc-chat-delegation-receipt-text').textContent,
     /已委托 「Primary Chat」/u,
   )
-  assert.equal(findByClass(rootElement, 'wwc-chat-delegation-receipt-link').href, '#/strongflow')
+  assert.equal(findByClass(rootElement, 'wwc-chat-delegation-receipt-link').href, '#/home/task-run')
 
   deliveryCreator.publish({
     status: 'error',

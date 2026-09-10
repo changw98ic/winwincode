@@ -236,11 +236,11 @@ Server 启动先恢复持久 state、receipt、outbox、SessionBinding 和事件
 | Publication 以 receipt 保护外部写入 | [`crates/winwincode-publication/src/coordinator.rs`](../crates/winwincode-publication/src/coordinator.rs) | [`crates/winwincode-publication/tests/publication_coordinator.rs`](../crates/winwincode-publication/tests/publication_coordinator.rs) |
 | Audit 保存摘要链和 retention | [`crates/winwincode-audit/src/lib.rs`](../crates/winwincode-audit/src/lib.rs) | [`crates/winwincode-audit/tests/audit_store.rs`](../crates/winwincode-audit/tests/audit_store.rs) |
 | Storage 原子写入 state、receipt 和 outbox | [`crates/winwincode-storage/src/lib.rs`](../crates/winwincode-storage/src/lib.rs) | [`crates/winwincode-storage/tests/execution_registry.rs`](../crates/winwincode-storage/tests/execution_registry.rs) |
-| 独立角色生成逐项证据和 Verdict | [`apps/client/src/strongflow-view-model.ts`](../apps/client/src/strongflow-view-model.ts) | [`tests/api-production-vertical.test.mjs`](../tests/api-production-vertical.test.mjs) |
+| 独立角色生成逐项证据和 Verdict | [`scripts/run-api-production-vertical.mjs`](../scripts/run-api-production-vertical.mjs) | [`tests/api-production-vertical.test.mjs`](../tests/api-production-vertical.test.mjs) |
 
 更多合同见 [`control-plane-web-client.md`](contracts/control-plane-web-client.md)、
 [`control-plane-storage-lifecycle.md`](contracts/control-plane-storage-lifecycle.md)、
 [`delivery-stage-coordination.md`](contracts/delivery-stage-coordination.md)、
-[`browser-chat-strongflow-production.rules.json`](contracts/browser-chat-strongflow-production.rules.json)、
+[`browser-chat-production.rules.json`](contracts/browser-chat-production.rules.json)、
 [`control-plane-api-coverage.matrix.json`](contracts/control-plane-api-coverage.matrix.json) 和
 [`ADR-0023`](decisions/0023-canonical-delivery-ownership.md)。

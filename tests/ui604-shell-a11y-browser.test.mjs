@@ -22,7 +22,7 @@ import {
 
 const root = resolve(import.meta.dirname, '..')
 
-const SURFACES = ['chat', 'settings', 'attention', 'operations', 'decisions']
+const SURFACES = ['chat', 'settings', 'attention']
 
 test('a real browser keeps one page heading, one live-region channel per page, and a keyboard bypass on every surface', async t => {
   const chromePath = chromeBinary()
@@ -70,9 +70,7 @@ test('a real browser keeps one page heading, one live-region channel per page, a
   }
 
   for (const surface of SURFACES) {
-    await open(`#/${surface === 'chat' ? 'chat' : surface === 'decisions'
-      ? `attention?session=psn_00000000000000000000000001`
-      : surface === 'operations' ? 'settings/runtime' : surface}`)
+    await open(`#/${surface}`)
     const audit = await evaluate(
       devtools,
       sessionId,
@@ -154,10 +152,6 @@ test('a real browser keeps one page heading, one live-region channel per page, a
       ['H3', '凭据引用'],
       ['H3', '暂无凭据引用'],
       ['H3', '备份与恢复'],
-      ['H3', '用量按交付'],
-      ['H3', '用量按 StageRun'],
-      ['H3', 'Provider 路由'],
-      ['H3', 'Worker 容量'],
     ],
     'Settings must nest its page title above its panels without skipping a level',
   )

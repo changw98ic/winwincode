@@ -20,7 +20,7 @@ import {
 
 const root = resolve(import.meta.dirname, '..')
 const runnerPath = resolve(root, 'scripts/run-api-production-vertical.mjs')
-const browserGatePath = resolve(root, 'tests/browser-chat-strongflow-production.test.mjs')
+const browserGatePath = resolve(root, 'tests/browser-chat-production.test.mjs')
 
 function deliveryDriverClient(terminalTransitionCount = null) {
   let revision = 0

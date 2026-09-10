@@ -230,6 +230,26 @@ class FakeElement {
   href = ''
   #textContent = ''
 
+  get childNodes() { return this.children }
+
+  insertBefore(node, reference) {
+    if (node?.remove) node.remove()
+    const index = reference === null || reference === undefined
+      ? this.children.length
+      : this.children.indexOf(reference)
+    this.children.splice(index < 0 ? this.children.length : index, 0, node)
+    if (node && typeof node === 'object') node.parentNode = this
+    return node
+  }
+
+  remove() {
+    if (this.parentNode) {
+      const index = this.parentNode.children.indexOf(this)
+      if (index >= 0) this.parentNode.children.splice(index, 1)
+      this.parentNode = null
+    }
+  }
+
   get textContent() { return this.#textContent }
 
   set textContent(value) {
@@ -380,22 +400,26 @@ test('enterprise deployment shows every entry including Enterprise', async () =>
   fixture.application.close()
 })
 
-test('directly opening an unauthorized Enterprise URL is refused by the page, not by trust', async () => {
+test('directly opening a denied URL is refused by the page, not by trust', async () => {
   const client = facadeFake(sessionWith([repositoryScope]))
-  const fixture = await restoredFixture('#/enterprise/resources', client)
+  const fixture = mountedFixture('#/home', client, {
+    navigationCapabilities: {
+      deployment: 'personal',
+      surfaceAccess: { home: 'denied' },
+    },
+  })
+  await waitFor(
+    () => fixture.application.authSession.state.status === 'signed-in',
+    'restored session',
+  )
   await waitFor(
     () => descendants(fixture.rootElement).some(node => (
       node.className === 'wwc-surface-route-denied'
     )),
-    'enterprise route denial',
+    'denied route refusal',
   )
-  assert.equal(
-    fixture.client.queries.some(query => areaByQuery[query.query] !== undefined),
-    false,
-    'no enterprise query left the browser for an unauthorized scope',
-  )
-  assert.equal(fixture.application.activeSurface.id, 'enterprise')
-  assert.equal(navigationLinks(fixture.rootElement).enterprise, undefined)
+  assert.equal(fixture.application.activeSurface.id, 'home')
+  assert.equal(navigationLinks(fixture.rootElement).home.getAttribute('aria-disabled'), 'true')
   await assert.rejects(
     fixture.application.controlPlane.command({
       schemaVersion,
@@ -412,9 +436,22 @@ test('directly opening an unauthorized Enterprise URL is refused by the page, no
 })
 
 test('revoking the session hides navigation and exits the route with subscriptions closed', async () => {
-  const client = facadeFake(sessionWith([organizationScope, repositoryScope]))
-  const fixture = await restoredFixture('#/enterprise/resources', client)
-  await waitFor(() => fixture.client.subscriptions.length > 0, 'enterprise subscription')
+  const client = facadeFake(sessionWith([repositoryScope]))
+  const fixture = await restoredFixture(
+    `#/settings?organizationId=${repositoryScope.organizationId}`
+      + `&workspaceId=${repositoryScope.workspaceId}`
+      + `&projectId=${repositoryScope.projectId}`
+      + `&repositoryId=${repositoryScope.repositoryId}`,
+    client,
+  )
+  await new Promise(r => setTimeout(r, 800))
+  const boundaryNode = descendants(fixture.rootElement).find(node => node.className === 'wwc-client-error-boundary')
+  const contextNode = descendants(fixture.rootElement).find(node => node.className === 'wwc-authenticated-context-required')
+  const scopeRootNode = descendants(fixture.rootElement).find(node => node.className === 'wwc-scope-selector-root')
+  const settingsNode = descendants(fixture.rootElement).find(node => node.className === 'wwc-settings')
+  const loadingNode = descendants(fixture.rootElement).find(node => node.className === 'wwc-feature-route-loading')
+  process.stdout.write(`DEBUG surface=${fixture.application.activeSurface.id} settings=${settingsNode ? 'yes' : 'no'} loading=${loadingNode ? JSON.stringify(loadingNode.textContent ?? '') : 'none'} scopeRootHidden=${scopeRootNode?.hidden ?? 'n/a'} queries=${JSON.stringify(fixture.client.queries.map(q => q.query))}\n`)
+  await waitFor(() => fixture.client.subscriptions.length > 0, 'feature subscription')
   const subscription = fixture.client.subscriptions[0]
 
   fixture.application.authSession.authenticationRequired(new ControlPlaneClientError({
@@ -433,29 +470,24 @@ test('revoking the session hides navigation and exits the route with subscriptio
   fixture.application.close()
 })
 
-test('losing the enterprise scope mid-session returns to the safe entry', async () => {
-  const client = facadeFake(sessionWith([organizationScope, repositoryScope]))
-  const fixture = await restoredFixture('#/enterprise/resources', client)
-  await waitFor(() => fixture.client.subscriptions.length > 0, 'enterprise subscription')
-  const subscription = fixture.client.subscriptions[0]
+test('losing the repository scope mid-session keeps the session but blocks the workspace', async () => {
+  const client = facadeFake(sessionWith([repositoryScope]))
+  const fixture = await restoredFixture(
+    `#/settings?organizationId=${repositoryScope.organizationId}`
+      + `&workspaceId=${repositoryScope.workspaceId}`
+      + `&projectId=${repositoryScope.projectId}`
+      + `&repositoryId=${repositoryScope.repositoryId}`,
+    client,
+  )
 
-  const personal = sessionWith([repositoryScope])
-  Object.assign(fixture.application.authSession, {})
-  client.restore = async () => structuredClone(personal)
+  const empty = sessionWith([])
+  client.restore = async () => structuredClone(empty)
   await fixture.application.authSession.restore()
   await waitFor(
     () => descendants(fixture.rootElement).some(node => (
-      node.className === 'wwc-surface-route-denied'
+      node.className === 'wwc-authenticated-context-required'
     )),
-    'enterprise route after scope loss',
-  )
-  await waitFor(() => subscription.handle.closed === true, 'closed enterprise subscription')
-  assert.equal(navigationLinks(fixture.rootElement).enterprise, undefined)
-  assert.equal(
-    descendants(fixture.rootElement).some(node => (
-      node.className === 'wwc-surface-route-safe-entry' && node.href === '#/chat'
-    )),
-    true,
+    'no-workspace notice',
   )
   fixture.application.close()
 })
@@ -501,9 +533,15 @@ test('read-only navigation stays enterable and names its access level', async ()
 })
 
 test('WebSocket authorization revocation closes the feature and shows the shell safe entry', async () => {
-  const client = facadeFake(sessionWith([organizationScope, repositoryScope]))
-  const fixture = await restoredFixture('#/enterprise/resources', client)
-  await waitFor(() => fixture.client.subscriptions.length > 0, 'enterprise subscription')
+  const client = facadeFake(sessionWith([repositoryScope]))
+  const fixture = await restoredFixture(
+    `#/settings?organizationId=${repositoryScope.organizationId}`
+      + `&workspaceId=${repositoryScope.workspaceId}`
+      + `&projectId=${repositoryScope.projectId}`
+      + `&repositoryId=${repositoryScope.repositoryId}`,
+    client,
+  )
+  await waitFor(() => fixture.client.subscriptions.length > 0, 'feature subscription')
   const subscription = fixture.client.subscriptions[0]
 
   await subscription.options.onAuthorizationRevoked(null)
@@ -515,68 +553,11 @@ test('WebSocket authorization revocation closes the feature and shows the shell 
     )),
     'shell safe entry',
   )
-  assert.equal(fixture.application.activeSurface.id, 'enterprise')
-  // Design shell: the enterprise area renders no navigation entry.
-  assert.equal(navigationLinks(fixture.rootElement).enterprise, undefined)
+  assert.equal(fixture.application.activeSurface.id, 'settings')
   fixture.application.close()
 })
 
-test('one denied enterprise area does not disable the whole surface', async () => {
-  const client = facadeFake(sessionWith([organizationScope, repositoryScope]))
-  client.deniedAreas.add('organization')
-  const fixture = await restoredFixture('#/enterprise/resources', client)
-  await waitFor(
-    () => fixture.client.queries.some(query => areaByQuery[query.query] === 'organization'),
-    'denied object-area query',
-  )
-  await waitFor(
-    () => fixture.client.queries.some(query => areaByQuery[query.query] === 'members'),
-    'authorized sibling query',
-  )
 
-  assert.equal(navigationLinks(fixture.rootElement).enterprise, undefined)
-  assert.equal(descendants(fixture.rootElement).some(node => (
-    node.className === 'wwc-surface-route-denied'
-  )), false)
-  fixture.application.close()
-})
-
-test('read-only Enterprise disables mutation controls while direct commands still reach Server authority', async () => {
-  const client = facadeFake(sessionWith([organizationScope, repositoryScope]))
-  const fixture = mountedFixture('#/enterprise/resources', client, {
-    navigationCapabilities: {
-      deployment: 'enterprise',
-      surfaceAccess: { enterprise: 'read-only' },
-    },
-  })
-  await waitFor(
-    () => descendants(fixture.rootElement).some(node => (
-      node.className === 'wwc-enterprise-organization-fields'
-    )),
-    'enterprise mutation controls',
-  )
-  const fields = descendants(fixture.rootElement).find(node => (
-    node.className === 'wwc-enterprise-organization-fields'
-  ))
-  assert.equal(fields.disabled, true)
-  assert.equal(descendants(fixture.rootElement).find(node => (
-    node.className === 'wwc-surface-read-only'
-  )).hidden, false)
-  await assert.rejects(
-    fixture.application.controlPlane.command({
-      schemaVersion,
-      requestId: 'req_00000000000000000000000001',
-      actor,
-      scope: repositoryScope,
-      command: 'enterprise.organization.update',
-      expectedRevision: 1,
-      payload: {},
-    }),
-    error => error instanceof ControlPlaneClientError && error.kind === 'authorization',
-  )
-  assert.equal(client.commands.length, 1)
-  fixture.application.close()
-})
 
 test('navigation shell keeps one facade and no direct network path', () => {
   const application = readFileSync(resolve(root, 'apps/client/src/application.ts'), 'utf8')

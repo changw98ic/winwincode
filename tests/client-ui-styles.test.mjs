@@ -12,18 +12,13 @@ const sourceFiles = [
   'components.css',
   'features/chat.css',
   'features/extensions.css',
-  'features/strongflow.css',
   'features/settings.css',
-  'features/local-operations.css',
-  'features/local-decisions.css',
   'features/attention-center.css',
   'features/home.css',
-  'features/enterprise.css',
   'features/usage-health.css',
   'features/contextual-decision.css',
   'features/clients.css',
   'features/repositories.css',
-  'features/users.css',
 ]
 
 function source(path) {
@@ -66,7 +61,7 @@ test('Client CSS has one deterministic tokens, base, shell, components, and feat
   ]) assert.match(tokens, new RegExp(`${token}:`, 'u'))
 
   const responsive = `${source('components.css')}\n${source('features/chat.css')}\n${
-    source('features/strongflow.css')}`
+    source('features/home.css')}`
   assert.match(responsive, /@media \(max-width: 48rem\)/u)
   assert.match(responsive, /@media \(max-width: 64rem\)/u)
 
@@ -91,9 +86,6 @@ test('management pages share panels, bounded text, empty states, and compact lay
   const componentCss = source('components.css')
   const featureCss = [
     'features/settings.css',
-    'features/local-decisions.css',
-    'features/local-operations.css',
-    'features/enterprise.css',
   ].map(source).join('\n')
   assert.match(componentCss, /\[data-wwc-page='management'\]/u)
   assert.match(componentCss, /overflow-wrap:\s*anywhere/u)

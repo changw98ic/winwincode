@@ -27,17 +27,6 @@ const session = {
   actor,
   authorizedScopes: scopes,
 }
-const areaByQuery = Object.freeze({
-  'enterprise.organization.list': 'enterprise_organization_page',
-  'enterprise.membership.list': 'enterprise_membership_page',
-  'enterprise.project.list': 'enterprise_project_repository_page',
-  'enterprise.policy.list': 'enterprise_policy_page',
-  'enterprise.fleet.list': 'enterprise_fleet_page',
-  'enterprise.usage.list': 'enterprise_usage_page',
-  'enterprise.audit.list': 'enterprise_audit_page',
-  'enterprise.integration.list': 'enterprise_integration_page',
-})
-
 function response(request, result) {
   return {
     schemaVersion,
@@ -58,10 +47,6 @@ const controlPlane = {
     if (request.query === 'session.list') {
       return response(request, { kind: 'product_session_page', items: [] })
     }
-    const kind = areaByQuery[request.query]
-    if (kind !== undefined) {
-      return response(request, { kind, snapshotRevision: 1, items: [] })
-    }
     throw new Error(`unexpected query: ${request.query}`)
   },
   async command() { throw new Error('unexpected command') },
@@ -80,9 +65,9 @@ const controlPlane = {
 }
 
 const navigationCapabilities = mode === 'disabled'
-  ? { deployment: 'enterprise', surfaceAccess: { enterprise: 'denied' } }
+  ? { deployment: 'enterprise', surfaceAccess: { home: 'denied' } }
   : mode === 'read-only'
-    ? { deployment: 'enterprise', surfaceAccess: { enterprise: 'read-only' } }
+    ? { deployment: 'enterprise', surfaceAccess: { home: 'read-only' } }
     : {}
 const root = document.querySelector('[data-winwincode-client-root]')
 const application = mountWinWinCodeClient({
@@ -98,7 +83,9 @@ async function waitFor(predicate, label) {
     if (predicate()) return
     await new Promise(resolve => { setTimeout(resolve, 20) })
   }
-  throw new Error(`timed out waiting for ${label}`)
+  throw new Error(`timed out waiting for ${label}: href=${location.href} subs=${
+    subscriptions.length} bodyLen=${document.body?.innerHTML?.length ?? -1} text=${
+    document.body.textContent.slice(0, 300)}`)
 }
 
 function navigationState() {
@@ -123,65 +110,27 @@ globalThis.inspectNavigationCapability = async () => {
   return navigationState()
 }
 
-globalThis.openDeniedEnterpriseRoute = async () => {
-  const enterpriseQueriesBefore = queries.filter(query => query.query.startsWith('enterprise.')).length
-  location.hash = '#/enterprise/resources'
+globalThis.openDeniedRoute = async () => {
+  location.hash = '#/home'
   await waitFor(() => document.querySelector('.wwc-surface-route-denied') !== null,
-    'Enterprise route denial')
+    'route denial')
   const denial = document.querySelector('.wwc-surface-route-denied')
   const safeEntry = denial.querySelector('.wwc-surface-route-safe-entry')
   safeEntry.focus()
   return {
     alertRole: denial.getAttribute('role'),
-    enterpriseQueries: queries.filter(query => query.query.startsWith('enterprise.')).length
-      - enterpriseQueriesBefore,
     focused: document.activeElement === safeEntry,
     safeHref: safeEntry.getAttribute('href'),
     text: denial.textContent,
   }
 }
 
-globalThis.tryDisabledEnterpriseEntry = async () => {
-  const entry = document.querySelector('[data-surface="enterprise"]')
+globalThis.tryDisabledHomeEntry = async () => {
+  const entry = document.querySelector('[data-surface="home"]')
   const before = location.hash
   entry.click()
   await Promise.resolve()
   return { after: location.hash, before, state: navigationState() }
 }
 
-globalThis.revokeEnterpriseRoute = async () => {
-  location.hash = '#/enterprise/resources'
-  await waitFor(() => subscriptions.length > 0, 'Enterprise subscription')
-  const subscription = subscriptions.at(-1).handle
-  application.authSession.authenticationRequired(new ControlPlaneClientError({
-    kind: 'authentication',
-    code: 'AUTHENTICATION_REQUIRED',
-    message: 'private revoked navigation payload',
-    requestId: null,
-    retryable: false,
-  }))
-  await waitFor(() => subscription.closed, 'revoked subscription cleanup')
-  await waitFor(() => document.querySelectorAll('.wwc-navigation-link').length === 0,
-    'revoked navigation cleanup')
-  return {
-    routeText: document.querySelector('.wwc-enterprise-context-required')?.textContent ?? '',
-    subscriptionClosed: subscription.closed,
-    visibleEntries: document.querySelectorAll('.wwc-navigation-link').length,
-  }
-}
 
-globalThis.revokeEnterpriseSubscription = async () => {
-  location.hash = '#/enterprise/resources'
-  await waitFor(() => subscriptions.length > 0, 'Enterprise subscription')
-  const subscription = subscriptions.at(-1)
-  await subscription.options.onAuthorizationRevoked(null)
-  await waitFor(() => subscription.handle.closed, 'revoked subscription cleanup')
-  await waitFor(() => document.querySelector('.wwc-surface-route-safe-entry') !== null,
-    'shell safe entry')
-  // Design shell: the enterprise area renders no navigation entry, so only
-  // the subscription and safe-entry facts are observable here.
-  return {
-    safeHref: document.querySelector('.wwc-surface-route-safe-entry')?.getAttribute('href') ?? null,
-    subscriptionClosed: subscription.handle.closed,
-  }
-}

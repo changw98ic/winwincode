@@ -138,7 +138,7 @@
           "x": 16,
           "y": 116,
           "width": 238,
-          "height": 511
+          "height": 653
         }
       },
       {
@@ -263,87 +263,9 @@
         },
         "box": {
           "x": 16,
-          "y": 585,
+          "y": 727,
           "width": 238,
           "height": 42
-        }
-      },
-      {
-        "path": "./div[2]",
-        "tag": "DIV",
-        "component": null,
-        "role": null,
-        "text": "",
-        "state": {},
-        "style": {
-          "background-color": "rgb(0, 0, 0)",
-          "border-right-width": "0px",
-          "display": "block"
-        },
-        "box": {
-          "x": 16,
-          "y": 659,
-          "width": 238,
-          "height": 110
-        }
-      },
-      {
-        "path": "./div[2]/section[1]",
-        "tag": "SECTION",
-        "component": null,
-        "role": null,
-        "text": "",
-        "state": {},
-        "style": {},
-        "box": {
-          "x": 16,
-          "y": 675,
-          "width": 238,
-          "height": 94
-        }
-      },
-      {
-        "path": "./div[2]/section[1]/p[1]",
-        "tag": "P",
-        "component": null,
-        "role": "status",
-        "text": "已登录，有效期至 2099-09-02 08:00",
-        "state": {},
-        "style": {},
-        "box": {
-          "x": 16,
-          "y": 675,
-          "width": 238,
-          "height": 48
-        }
-      },
-      {
-        "path": "./div[2]/section[1]/button[1]",
-        "tag": "BUTTON",
-        "component": null,
-        "role": null,
-        "text": "退出登录",
-        "state": {},
-        "style": {
-          "background-color": "rgb(239, 239, 239)",
-          "border-bottom-color": "rgb(0, 0, 0)",
-          "border-bottom-width": "2px",
-          "border-left-color": "rgb(0, 0, 0)",
-          "border-left-width": "2px",
-          "border-right-color": "rgb(0, 0, 0)",
-          "border-right-width": "2px",
-          "border-top-color": "rgb(0, 0, 0)",
-          "border-top-width": "2px",
-          "color": "rgb(0, 0, 0)",
-          "cursor": "default",
-          "display": "inline-block",
-          "outline-color": "rgb(0, 0, 0)"
-        },
-        "box": {
-          "x": 16,
-          "y": 739,
-          "width": 80,
-          "height": 30
         }
       }
     ]
@@ -611,7 +533,7 @@
           "x": 0,
           "y": 0,
           "width": 880,
-          "height": 498
+          "height": 427
         }
       },
       {
@@ -732,7 +654,7 @@
         },
         "box": {
           "x": -336,
-          "y": -1481,
+          "y": -1024,
           "width": 0,
           "height": 0
         }
@@ -757,7 +679,7 @@
         },
         "box": {
           "x": -336,
-          "y": -1481,
+          "y": -1024,
           "width": 0,
           "height": 0
         }
@@ -952,7 +874,7 @@
           "x": 0,
           "y": 217,
           "width": 880,
-          "height": 281
+          "height": 210
         }
       },
       {
@@ -1392,108 +1314,6 @@
           "width": 44,
           "height": 28
         }
-      },
-      {
-        "path": "./div[2]/section[5]",
-        "tag": "SECTION",
-        "component": null,
-        "role": null,
-        "text": "",
-        "state": {},
-        "style": {
-          "border-bottom-color": "var(--wwc-color-border-subtle)",
-          "border-bottom-width": "1px"
-        },
-        "box": {
-          "x": 0,
-          "y": 443,
-          "width": 880,
-          "height": 55
-        }
-      },
-      {
-        "path": "./div[2]/section[5]/header[1]",
-        "tag": "HEADER",
-        "component": null,
-        "role": null,
-        "text": "",
-        "state": {},
-        "style": {
-          "border-bottom-color": "rgb(23, 23, 23)",
-          "border-bottom-width": "0px",
-          "display": "flex"
-        },
-        "box": {
-          "x": 8,
-          "y": 455,
-          "width": 864,
-          "height": 30
-        }
-      },
-      {
-        "path": "./div[2]/section[5]/header[1]/h3[1]",
-        "tag": "H3",
-        "component": null,
-        "role": null,
-        "text": "最近打开",
-        "state": {},
-        "style": {
-          "display": "block",
-          "font-size": "20px",
-          "font-weight": "700"
-        },
-        "box": {
-          "x": 8,
-          "y": 458,
-          "width": 80,
-          "height": 25
-        }
-      },
-      {
-        "path": "./div[2]/section[5]/header[1]/span[1]",
-        "tag": "SPAN",
-        "component": null,
-        "role": null,
-        "text": "0",
-        "state": {},
-        "style": {
-          "border-bottom-color": "var(--wwc-color-text-muted)",
-          "border-left-color": "var(--wwc-color-text-muted)",
-          "border-right-color": "var(--wwc-color-text-muted)",
-          "border-top-color": "var(--wwc-color-text-muted)",
-          "color": "var(--wwc-color-text-muted)",
-          "display": "block",
-          "font-size": "20px",
-          "font-weight": "700",
-          "outline-color": "var(--wwc-color-text-muted)"
-        },
-        "box": {
-          "x": 100,
-          "y": 455,
-          "width": 32,
-          "height": 30
-        }
-      },
-      {
-        "path": "./div[2]/section[5]/header[1]/button[1]",
-        "tag": "BUTTON",
-        "component": null,
-        "role": null,
-        "text": "",
-        "state": {
-          "aria-expanded": "false"
-        },
-        "style": {
-          "cursor": "default",
-          "display": "block",
-          "font-size": "20px"
-        },
-        "box": {
-          "x": 828,
-          "y": 456,
-          "width": 44,
-          "height": 28
-        }
       }
     ]
   },
@@ -1635,7 +1455,7 @@
         }
       },
       {
-        "path": "./section[1]/div[1]",
+        "path": "./section[1]/div[2]",
         "tag": "DIV",
         "component": null,
         "role": "alert",
@@ -1667,7 +1487,7 @@
         }
       },
       {
-        "path": "./section[1]/div[1]/span[1]",
+        "path": "./section[1]/div[2]/span[1]",
         "tag": "SPAN",
         "component": null,
         "role": null,
@@ -1697,7 +1517,7 @@
         }
       },
       {
-        "path": "./section[1]/div[1]/button[1]",
+        "path": "./section[1]/div[2]/button[1]",
         "tag": "BUTTON",
         "component": null,
         "role": null,
@@ -1730,7 +1550,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]",
+        "path": "./section[1]/div[3]",
         "tag": "DIV",
         "component": null,
         "role": null,
@@ -1747,7 +1567,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]/div[1]",
+        "path": "./section[1]/div[3]/div[1]",
         "tag": "DIV",
         "component": null,
         "role": "tablist",
@@ -1764,7 +1584,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]/div[1]/button[1]",
+        "path": "./section[1]/div[3]/div[1]/button[1]",
         "tag": "BUTTON",
         "component": null,
         "role": "tab",
@@ -1788,7 +1608,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]/div[1]/button[2]",
+        "path": "./section[1]/div[3]/div[1]/button[2]",
         "tag": "BUTTON",
         "component": null,
         "role": "tab",
@@ -1817,7 +1637,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]/div[2]",
+        "path": "./section[1]/div[3]/div[2]",
         "tag": "DIV",
         "component": null,
         "role": "tabpanel",
@@ -1832,7 +1652,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]/div[2]/div[1]",
+        "path": "./section[1]/div[3]/div[2]/div[1]",
         "tag": "DIV",
         "component": null,
         "role": null,
@@ -1849,7 +1669,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]/div[2]/div[1]/div[1]",
+        "path": "./section[1]/div[3]/div[2]/div[1]/div[1]",
         "tag": "DIV",
         "component": null,
         "role": null,
@@ -1875,7 +1695,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]/div[2]/div[1]/div[1]/div[1]",
+        "path": "./section[1]/div[3]/div[2]/div[1]/div[1]/div[1]",
         "tag": "DIV",
         "component": null,
         "role": null,
@@ -1902,7 +1722,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]/div[2]/div[1]/div[1]/span[1]",
+        "path": "./section[1]/div[3]/div[2]/div[1]/div[1]/span[1]",
         "tag": "SPAN",
         "component": null,
         "role": null,
@@ -1929,7 +1749,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]/div[2]/div[1]/div[2]",
+        "path": "./section[1]/div[3]/div[2]/div[1]/div[2]",
         "tag": "DIV",
         "component": null,
         "role": null,
@@ -1947,7 +1767,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]/div[2]/div[1]/div[3]",
+        "path": "./section[1]/div[3]/div[2]/div[1]/div[3]",
         "tag": "DIV",
         "component": null,
         "role": null,
@@ -1973,7 +1793,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]/div[2]/div[1]/div[3]/div[1]",
+        "path": "./section[1]/div[3]/div[2]/div[1]/div[3]/div[1]",
         "tag": "DIV",
         "component": null,
         "role": null,
@@ -2000,7 +1820,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]/div[2]/div[1]/div[3]/span[1]",
+        "path": "./section[1]/div[3]/div[2]/div[1]/div[3]/span[1]",
         "tag": "SPAN",
         "component": null,
         "role": null,
@@ -2027,7 +1847,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]/div[2]/div[1]/div[4]",
+        "path": "./section[1]/div[3]/div[2]/div[1]/div[4]",
         "tag": "DIV",
         "component": null,
         "role": null,
@@ -2045,7 +1865,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]/div[2]/div[1]/div[5]",
+        "path": "./section[1]/div[3]/div[2]/div[1]/div[5]",
         "tag": "DIV",
         "component": null,
         "role": null,
@@ -2071,7 +1891,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]/div[2]/div[1]/div[5]/div[1]",
+        "path": "./section[1]/div[3]/div[2]/div[1]/div[5]/div[1]",
         "tag": "DIV",
         "component": null,
         "role": null,
@@ -2098,7 +1918,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]/div[2]/div[1]/div[5]/span[1]",
+        "path": "./section[1]/div[3]/div[2]/div[1]/div[5]/span[1]",
         "tag": "SPAN",
         "component": null,
         "role": null,
@@ -2125,7 +1945,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]/div[2]/div[1]/div[6]",
+        "path": "./section[1]/div[3]/div[2]/div[1]/div[6]",
         "tag": "DIV",
         "component": null,
         "role": null,
@@ -2143,7 +1963,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]/div[2]/div[1]/div[7]",
+        "path": "./section[1]/div[3]/div[2]/div[1]/div[7]",
         "tag": "DIV",
         "component": null,
         "role": null,
@@ -2169,7 +1989,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]/div[2]/div[1]/div[7]/div[1]",
+        "path": "./section[1]/div[3]/div[2]/div[1]/div[7]/div[1]",
         "tag": "DIV",
         "component": null,
         "role": null,
@@ -2196,7 +2016,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]/div[2]/div[1]/div[7]/span[1]",
+        "path": "./section[1]/div[3]/div[2]/div[1]/div[7]/span[1]",
         "tag": "SPAN",
         "component": null,
         "role": null,
@@ -2223,7 +2043,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]/div[2]/p[1]",
+        "path": "./section[1]/div[3]/div[2]/p[1]",
         "tag": "P",
         "component": null,
         "role": null,
@@ -2613,7 +2433,7 @@
           "x": 0,
           "y": 0,
           "width": 880,
-          "height": 918
+          "height": 826
         }
       },
       {
@@ -2630,7 +2450,7 @@
           "x": 24,
           "y": 24,
           "width": 832,
-          "height": 150
+          "height": 58
         }
       },
       {
@@ -2701,30 +2521,10 @@
         "state": {},
         "style": {},
         "box": {
-          "x": 24,
-          "y": 94,
-          "width": 414,
-          "height": 80
-        }
-      },
-      {
-        "path": "./div[1]/div[1]/a[1]",
-        "tag": "A",
-        "component": null,
-        "role": null,
-        "text": "打开仓库与本地 Worker 运维",
-        "state": {},
-        "style": {
-          "cursor": "pointer",
-          "display": "block",
-          "font-weight": "600",
-          "text-decoration-line": "underline"
-        },
-        "box": {
-          "x": 217,
-          "y": 94,
-          "width": 221,
-          "height": 24
+          "x": 675,
+          "y": 24,
+          "width": 181,
+          "height": 44
         }
       },
       {
@@ -2749,9 +2549,9 @@
           "font-weight": "700"
         },
         "box": {
-          "x": 24,
-          "y": 130,
-          "width": 414,
+          "x": 675,
+          "y": 24,
+          "width": 181,
           "height": 44
         }
       },
@@ -2916,7 +2716,7 @@
         },
         "box": {
           "x": 24,
-          "y": 198,
+          "y": 106,
           "width": 140,
           "height": 31
         }
@@ -2944,7 +2744,7 @@
         },
         "box": {
           "x": 33,
-          "y": 203,
+          "y": 111,
           "width": 8,
           "height": 21
         }
@@ -2970,7 +2770,7 @@
         },
         "box": {
           "x": 45,
-          "y": 203,
+          "y": 111,
           "width": 110,
           "height": 21
         }
@@ -3003,7 +2803,7 @@
         },
         "box": {
           "x": 24,
-          "y": 253,
+          "y": 161,
           "width": 832,
           "height": 202
         }
@@ -3031,7 +2831,7 @@
         },
         "box": {
           "x": 49,
-          "y": 278,
+          "y": 186,
           "width": 10,
           "height": 152
         }
@@ -3056,7 +2856,7 @@
         },
         "box": {
           "x": 67,
-          "y": 278,
+          "y": 186,
           "width": 722,
           "height": 152
         }
@@ -3075,7 +2875,7 @@
         },
         "box": {
           "x": 67,
-          "y": 278,
+          "y": 186,
           "width": 722,
           "height": 36
         }
@@ -3092,7 +2892,7 @@
         },
         "box": {
           "x": 67,
-          "y": 338,
+          "y": 246,
           "width": 722,
           "height": 24
         }
@@ -3107,7 +2907,7 @@
         "style": {},
         "box": {
           "x": 67,
-          "y": 386,
+          "y": 294,
           "width": 722,
           "height": 44
         }
@@ -3143,7 +2943,7 @@
         },
         "box": {
           "x": 67,
-          "y": 386,
+          "y": 294,
           "width": 138,
           "height": 44
         }
@@ -3158,7 +2958,7 @@
         "style": {},
         "box": {
           "x": 24,
-          "y": 479,
+          "y": 387,
           "width": 832,
           "height": 415
         }
@@ -3176,7 +2976,7 @@
         },
         "box": {
           "x": 24,
-          "y": 479,
+          "y": 387,
           "width": 832,
           "height": 67
         }
@@ -3196,7 +2996,7 @@
         },
         "box": {
           "x": 24,
-          "y": 500,
+          "y": 408,
           "width": 224,
           "height": 24
         }
@@ -3223,7 +3023,7 @@
         },
         "box": {
           "x": 272,
-          "y": 491,
+          "y": 399,
           "width": 448,
           "height": 42
         }
@@ -3241,7 +3041,7 @@
         },
         "box": {
           "x": 24,
-          "y": 554,
+          "y": 462,
           "width": 832,
           "height": 64
         }
@@ -3261,7 +3061,7 @@
         },
         "box": {
           "x": 24,
-          "y": 574,
+          "y": 482,
           "width": 224,
           "height": 24
         }
@@ -3288,7 +3088,7 @@
         },
         "box": {
           "x": 272,
-          "y": 566,
+          "y": 474,
           "width": 448,
           "height": 39
         }
@@ -3356,7 +3156,7 @@
         },
         "box": {
           "x": 24,
-          "y": 626,
+          "y": 534,
           "width": 832,
           "height": 64
         }
@@ -3376,7 +3176,7 @@
         },
         "box": {
           "x": 24,
-          "y": 646,
+          "y": 554,
           "width": 224,
           "height": 24
         }
@@ -3403,7 +3203,7 @@
         },
         "box": {
           "x": 272,
-          "y": 638,
+          "y": 546,
           "width": 448,
           "height": 39
         }
@@ -3496,7 +3296,7 @@
         },
         "box": {
           "x": 24,
-          "y": 698,
+          "y": 606,
           "width": 832,
           "height": 64
         }
@@ -3516,7 +3316,7 @@
         },
         "box": {
           "x": 24,
-          "y": 718,
+          "y": 626,
           "width": 224,
           "height": 24
         }
@@ -3543,7 +3343,7 @@
         },
         "box": {
           "x": 272,
-          "y": 710,
+          "y": 618,
           "width": 448,
           "height": 39
         }
@@ -3614,7 +3414,7 @@
         },
         "box": {
           "x": 24,
-          "y": 778,
+          "y": 686,
           "width": 832,
           "height": 56
         }
@@ -3642,7 +3442,7 @@
         },
         "box": {
           "x": 24,
-          "y": 779,
+          "y": 687,
           "width": 832,
           "height": 54
         }
@@ -3661,7 +3461,7 @@
         },
         "box": {
           "x": 24,
-          "y": 791,
+          "y": 699,
           "width": 80,
           "height": 30
         }
@@ -3681,7 +3481,7 @@
         },
         "box": {
           "x": 844,
-          "y": 791,
+          "y": 699,
           "width": 12,
           "height": 30
         }
@@ -3698,7 +3498,7 @@
         },
         "box": {
           "x": 24,
-          "y": 850,
+          "y": 758,
           "width": 102,
           "height": 44
         }
@@ -3729,7 +3529,7 @@
         },
         "box": {
           "x": 24,
-          "y": 850,
+          "y": 758,
           "width": 90,
           "height": 44
         }
@@ -3753,7 +3553,7 @@
         },
         "box": {
           "x": 126,
-          "y": 865,
+          "y": 773,
           "width": 0,
           "height": 14
         }
@@ -4649,2588 +4449,6 @@
   },
   {
     "schemaVersion": 1,
-    "id": "page/decisions@desktop",
-    "kind": "page",
-    "viewport": {
-      "width": 1280,
-      "height": 900
-    },
-    "fontStack": "'wwc-visual-regression', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
-    "nodes": [
-      {
-        "path": ".",
-        "tag": "SECTION",
-        "component": null,
-        "role": null,
-        "text": "",
-        "state": {
-          "aria-busy": "false"
-        },
-        "style": {
-          "background-color": "rgb(0, 0, 0)",
-          "border-bottom-color": "rgb(23, 23, 23)",
-          "border-bottom-left-radius": "0px",
-          "border-bottom-right-radius": "0px",
-          "border-bottom-width": "0px",
-          "border-left-color": "rgb(23, 23, 23)",
-          "border-left-width": "0px",
-          "border-right-color": "rgb(23, 23, 23)",
-          "border-right-width": "0px",
-          "border-top-color": "rgb(23, 23, 23)",
-          "border-top-left-radius": "0px",
-          "border-top-right-radius": "0px",
-          "border-top-width": "0px",
-          "box-shadow": "none",
-          "color": "rgb(23, 23, 23)",
-          "cursor": "auto",
-          "display": "grid",
-          "font-size": "16px",
-          "font-weight": "400",
-          "opacity": "1",
-          "outline-color": "rgb(23, 23, 23)",
-          "outline-style": "none",
-          "outline-width": "3px",
-          "position": "static",
-          "text-decoration-line": "none",
-          "visibility": "visible",
-          "z-index": "auto"
-        },
-        "box": {
-          "x": 0,
-          "y": 0,
-          "width": 880,
-          "height": 1132
-        }
-      },
-      {
-        "path": "./header[1]",
-        "tag": "HEADER",
-        "component": "page-header",
-        "role": null,
-        "text": "",
-        "state": {},
-        "style": {},
-        "box": {
-          "x": 24,
-          "y": 24,
-          "width": 768,
-          "height": 104
-        }
-      },
-      {
-        "path": "./header[1]/p[1]",
-        "tag": "P",
-        "component": null,
-        "role": null,
-        "text": "Approvals and attention",
-        "state": {},
-        "style": {
-          "display": "block",
-          "font-size": "12px",
-          "font-weight": "700"
-        },
-        "box": {
-          "x": 24,
-          "y": 24,
-          "width": 768,
-          "height": 18
-        }
-      },
-      {
-        "path": "./header[1]/h2[1]",
-        "tag": "H2",
-        "component": null,
-        "role": null,
-        "text": "Local decisions",
-        "state": {},
-        "style": {
-          "display": "block",
-          "font-size": "24px",
-          "font-weight": "700"
-        },
-        "box": {
-          "x": 24,
-          "y": 46,
-          "width": 768,
-          "height": 30
-        }
-      },
-      {
-        "path": "./header[1]/p[2]",
-        "tag": "P",
-        "component": null,
-        "role": null,
-        "text": "Review pending inputs, tool approvals, and business Attention with current revision bindings.",
-        "state": {},
-        "style": {
-          "border-bottom-color": "var(--wwc-color-text-muted)",
-          "border-left-color": "var(--wwc-color-text-muted)",
-          "border-right-color": "var(--wwc-color-text-muted)",
-          "border-top-color": "var(--wwc-color-text-muted)",
-          "color": "var(--wwc-color-text-muted)",
-          "display": "block",
-          "outline-color": "var(--wwc-color-text-muted)"
-        },
-        "box": {
-          "x": 24,
-          "y": 80,
-          "width": 768,
-          "height": 48
-        }
-      },
-      {
-        "path": "./p[1]",
-        "tag": "P",
-        "component": null,
-        "role": null,
-        "text": "Inputs include exact current choices such as Plan Delta or Replan. Submitted responses are cleared immediately.",
-        "state": {},
-        "style": {
-          "border-bottom-color": "var(--wwc-color-text-muted)",
-          "border-left-color": "var(--wwc-color-text-muted)",
-          "border-right-color": "var(--wwc-color-text-muted)",
-          "border-top-color": "var(--wwc-color-text-muted)",
-          "color": "var(--wwc-color-text-muted)",
-          "display": "block",
-          "outline-color": "var(--wwc-color-text-muted)"
-        },
-        "box": {
-          "x": 24,
-          "y": 152,
-          "width": 768,
-          "height": 48
-        }
-      },
-      {
-        "path": "./span[1]",
-        "tag": "SPAN",
-        "component": "status-badge",
-        "role": "status",
-        "text": "",
-        "state": {
-          "data-tone": "danger"
-        },
-        "style": {
-          "background-color": "var(--wwc-color-danger-surface)",
-          "border-bottom-color": "rgb(179, 38, 30)",
-          "border-bottom-left-radius": "2px",
-          "border-bottom-right-radius": "2px",
-          "border-bottom-width": "1px",
-          "border-left-color": "rgb(179, 38, 30)",
-          "border-left-width": "1px",
-          "border-right-color": "rgb(179, 38, 30)",
-          "border-right-width": "1px",
-          "border-top-color": "rgb(179, 38, 30)",
-          "border-top-left-radius": "2px",
-          "border-top-right-radius": "2px",
-          "border-top-width": "1px",
-          "color": "rgb(179, 38, 30)",
-          "display": "flex",
-          "font-size": "14px",
-          "font-weight": "600",
-          "outline-color": "rgb(179, 38, 30)"
-        },
-        "box": {
-          "x": 24,
-          "y": 224,
-          "width": 140,
-          "height": 31
-        }
-      },
-      {
-        "path": "./span[1]/span[1]",
-        "tag": "SPAN",
-        "component": null,
-        "role": null,
-        "text": "×",
-        "state": {
-          "aria-hidden": "true"
-        },
-        "style": {
-          "background-color": "rgb(0, 0, 0)",
-          "border-bottom-left-radius": "0px",
-          "border-bottom-right-radius": "0px",
-          "border-bottom-width": "0px",
-          "border-left-width": "0px",
-          "border-right-width": "0px",
-          "border-top-left-radius": "0px",
-          "border-top-right-radius": "0px",
-          "border-top-width": "0px",
-          "display": "block"
-        },
-        "box": {
-          "x": 33,
-          "y": 229,
-          "width": 8,
-          "height": 21
-        }
-      },
-      {
-        "path": "./span[1]/span[2]",
-        "tag": "SPAN",
-        "component": null,
-        "role": null,
-        "text": "Reconnecting…",
-        "state": {},
-        "style": {
-          "background-color": "rgb(0, 0, 0)",
-          "border-bottom-left-radius": "0px",
-          "border-bottom-right-radius": "0px",
-          "border-bottom-width": "0px",
-          "border-left-width": "0px",
-          "border-right-width": "0px",
-          "border-top-left-radius": "0px",
-          "border-top-right-radius": "0px",
-          "border-top-width": "0px",
-          "display": "block"
-        },
-        "box": {
-          "x": 45,
-          "y": 229,
-          "width": 110,
-          "height": 21
-        }
-      },
-      {
-        "path": "./section[1]",
-        "tag": "SECTION",
-        "component": "error-state",
-        "role": "alert",
-        "text": "",
-        "state": {
-          "data-tone": "danger"
-        },
-        "style": {
-          "background-color": "var(--wwc-color-danger-surface)",
-          "border-bottom-color": "rgb(179, 38, 30)",
-          "border-bottom-left-radius": "3px",
-          "border-bottom-right-radius": "3px",
-          "border-bottom-width": "1px",
-          "border-left-color": "rgb(179, 38, 30)",
-          "border-left-width": "1px",
-          "border-right-color": "rgb(179, 38, 30)",
-          "border-right-width": "1px",
-          "border-top-color": "rgb(179, 38, 30)",
-          "border-top-left-radius": "3px",
-          "border-top-right-radius": "3px",
-          "border-top-width": "1px",
-          "color": "rgb(179, 38, 30)",
-          "outline-color": "rgb(179, 38, 30)"
-        },
-        "box": {
-          "x": 24,
-          "y": 279,
-          "width": 832,
-          "height": 202
-        }
-      },
-      {
-        "path": "./section[1]/span[1]",
-        "tag": "SPAN",
-        "component": null,
-        "role": null,
-        "text": "×",
-        "state": {
-          "aria-hidden": "true"
-        },
-        "style": {
-          "background-color": "rgb(0, 0, 0)",
-          "border-bottom-left-radius": "0px",
-          "border-bottom-right-radius": "0px",
-          "border-bottom-width": "0px",
-          "border-left-width": "0px",
-          "border-right-width": "0px",
-          "border-top-left-radius": "0px",
-          "border-top-right-radius": "0px",
-          "border-top-width": "0px",
-          "display": "block"
-        },
-        "box": {
-          "x": 49,
-          "y": 304,
-          "width": 10,
-          "height": 152
-        }
-      },
-      {
-        "path": "./section[1]/div[1]",
-        "tag": "DIV",
-        "component": null,
-        "role": null,
-        "text": "",
-        "state": {},
-        "style": {
-          "background-color": "rgb(0, 0, 0)",
-          "border-bottom-left-radius": "0px",
-          "border-bottom-right-radius": "0px",
-          "border-bottom-width": "0px",
-          "border-left-width": "0px",
-          "border-right-width": "0px",
-          "border-top-left-radius": "0px",
-          "border-top-right-radius": "0px",
-          "border-top-width": "0px"
-        },
-        "box": {
-          "x": 67,
-          "y": 304,
-          "width": 703,
-          "height": 152
-        }
-      },
-      {
-        "path": "./section[1]/div[1]/h2[1]",
-        "tag": "H2",
-        "component": null,
-        "role": null,
-        "text": "Local decisions unavailable",
-        "state": {},
-        "style": {
-          "display": "block",
-          "font-size": "24px",
-          "font-weight": "700"
-        },
-        "box": {
-          "x": 67,
-          "y": 304,
-          "width": 703,
-          "height": 36
-        }
-      },
-      {
-        "path": "./section[1]/div[1]/p[1]",
-        "tag": "P",
-        "component": null,
-        "role": null,
-        "text": "Local decisions could not be updated. Retry, or review the server status.",
-        "state": {},
-        "style": {
-          "display": "block"
-        },
-        "box": {
-          "x": 67,
-          "y": 364,
-          "width": 703,
-          "height": 24
-        }
-      },
-      {
-        "path": "./section[1]/div[1]/div[1]",
-        "tag": "DIV",
-        "component": null,
-        "role": null,
-        "text": "",
-        "state": {},
-        "style": {},
-        "box": {
-          "x": 67,
-          "y": 412,
-          "width": 703,
-          "height": 44
-        }
-      },
-      {
-        "path": "./section[1]/div[1]/div[1]/button[2]",
-        "tag": "BUTTON",
-        "component": "button",
-        "role": null,
-        "text": "Reconnect events",
-        "state": {
-          "data-variant": "default"
-        },
-        "style": {
-          "background-color": "var(--wwc-color-surface)",
-          "border-bottom-color": "rgb(23, 23, 23)",
-          "border-bottom-left-radius": "2px",
-          "border-bottom-right-radius": "2px",
-          "border-bottom-width": "1px",
-          "border-left-color": "rgb(23, 23, 23)",
-          "border-left-width": "1px",
-          "border-right-color": "rgb(23, 23, 23)",
-          "border-right-width": "1px",
-          "border-top-color": "rgb(23, 23, 23)",
-          "border-top-left-radius": "2px",
-          "border-top-right-radius": "2px",
-          "border-top-width": "1px",
-          "color": "rgb(23, 23, 23)",
-          "cursor": "pointer",
-          "display": "block",
-          "font-weight": "600",
-          "outline-color": "rgb(23, 23, 23)"
-        },
-        "box": {
-          "x": 67,
-          "y": 412,
-          "width": 180,
-          "height": 44
-        }
-      },
-      {
-        "path": "./section[2]",
-        "tag": "SECTION",
-        "component": "panel",
-        "role": null,
-        "text": "",
-        "state": {},
-        "style": {
-          "background-color": "var(--wwc-color-surface)",
-          "border-bottom-left-radius": "3px",
-          "border-bottom-right-radius": "3px",
-          "border-bottom-width": "1px",
-          "border-left-width": "1px",
-          "border-right-width": "1px",
-          "border-top-left-radius": "3px",
-          "border-top-right-radius": "3px",
-          "border-top-width": "1px",
-          "display": "block"
-        },
-        "box": {
-          "x": 24,
-          "y": 505,
-          "width": 404,
-          "height": 326
-        }
-      },
-      {
-        "path": "./section[2]/header[1]",
-        "tag": "HEADER",
-        "component": null,
-        "role": null,
-        "text": "",
-        "state": {},
-        "style": {
-          "background-color": "rgb(0, 0, 0)",
-          "border-bottom-left-radius": "0px",
-          "border-bottom-right-radius": "0px",
-          "border-bottom-width": "0px",
-          "border-left-width": "0px",
-          "border-right-width": "0px",
-          "border-top-left-radius": "0px",
-          "border-top-right-radius": "0px",
-          "border-top-width": "0px",
-          "display": "grid"
-        },
-        "box": {
-          "x": 41,
-          "y": 522,
-          "width": 370,
-          "height": 118
-        }
-      },
-      {
-        "path": "./section[2]/header[1]/h3[1]",
-        "tag": "H3",
-        "component": null,
-        "role": null,
-        "text": "Pending inputs",
-        "state": {},
-        "style": {
-          "display": "block",
-          "font-size": "18.72px",
-          "font-weight": "700"
-        },
-        "box": {
-          "x": 41,
-          "y": 541,
-          "width": 370,
-          "height": 28
-        }
-      },
-      {
-        "path": "./section[2]/header[1]/p[1]",
-        "tag": "P",
-        "component": null,
-        "role": null,
-        "text": "Responses remain bound to the current ProductSession and execution identity.",
-        "state": {},
-        "style": {
-          "border-bottom-color": "var(--wwc-color-text-muted)",
-          "border-left-color": "var(--wwc-color-text-muted)",
-          "border-right-color": "var(--wwc-color-text-muted)",
-          "border-top-color": "var(--wwc-color-text-muted)",
-          "color": "var(--wwc-color-text-muted)",
-          "display": "block",
-          "outline-color": "var(--wwc-color-text-muted)"
-        },
-        "box": {
-          "x": 41,
-          "y": 592,
-          "width": 370,
-          "height": 48
-        }
-      },
-      {
-        "path": "./section[2]/div[1]",
-        "tag": "DIV",
-        "component": null,
-        "role": null,
-        "text": "",
-        "state": {},
-        "style": {
-          "background-color": "rgb(0, 0, 0)",
-          "border-bottom-left-radius": "0px",
-          "border-bottom-right-radius": "0px",
-          "border-bottom-width": "0px",
-          "border-left-width": "0px",
-          "border-right-width": "0px",
-          "border-top-left-radius": "0px",
-          "border-top-right-radius": "0px",
-          "border-top-width": "0px"
-        },
-        "box": {
-          "x": 41,
-          "y": 656,
-          "width": 370,
-          "height": 158
-        }
-      },
-      {
-        "path": "./section[2]/div[1]/section[1]",
-        "tag": "SECTION",
-        "component": "empty-state",
-        "role": "status",
-        "text": "",
-        "state": {},
-        "style": {
-          "background-color": "var(--wwc-color-surface)",
-          "border-bottom-left-radius": "3px",
-          "border-bottom-right-radius": "3px",
-          "border-bottom-width": "1px",
-          "border-left-width": "1px",
-          "border-right-width": "1px",
-          "border-top-left-radius": "3px",
-          "border-top-right-radius": "3px",
-          "border-top-width": "1px",
-          "display": "grid"
-        },
-        "box": {
-          "x": 41,
-          "y": 656,
-          "width": 370,
-          "height": 158
-        }
-      },
-      {
-        "path": "./section[2]/div[1]/section[1]/h3[1]",
-        "tag": "H3",
-        "component": null,
-        "role": null,
-        "text": "No pending inputs",
-        "state": {},
-        "style": {
-          "background-color": "rgb(0, 0, 0)",
-          "border-bottom-left-radius": "0px",
-          "border-bottom-right-radius": "0px",
-          "border-bottom-width": "0px",
-          "border-left-width": "0px",
-          "border-right-width": "0px",
-          "border-top-left-radius": "0px",
-          "border-top-right-radius": "0px",
-          "border-top-width": "0px",
-          "display": "block",
-          "font-size": "18.72px",
-          "font-weight": "700"
-        },
-        "box": {
-          "x": 66,
-          "y": 681,
-          "width": 192,
-          "height": 28
-        }
-      },
-      {
-        "path": "./section[2]/div[1]/section[1]/p[1]",
-        "tag": "P",
-        "component": null,
-        "role": null,
-        "text": "New input requests will appear here when a session needs a response.",
-        "state": {},
-        "style": {
-          "background-color": "rgb(0, 0, 0)",
-          "border-bottom-color": "var(--wwc-color-text-muted)",
-          "border-bottom-left-radius": "0px",
-          "border-bottom-right-radius": "0px",
-          "border-bottom-width": "0px",
-          "border-left-color": "var(--wwc-color-text-muted)",
-          "border-left-width": "0px",
-          "border-right-color": "var(--wwc-color-text-muted)",
-          "border-right-width": "0px",
-          "border-top-color": "var(--wwc-color-text-muted)",
-          "border-top-left-radius": "0px",
-          "border-top-right-radius": "0px",
-          "border-top-width": "0px",
-          "color": "var(--wwc-color-text-muted)",
-          "display": "block",
-          "outline-color": "var(--wwc-color-text-muted)"
-        },
-        "box": {
-          "x": 66,
-          "y": 717,
-          "width": 320,
-          "height": 72
-        }
-      },
-      {
-        "path": "./section[3]",
-        "tag": "SECTION",
-        "component": "panel",
-        "role": null,
-        "text": "",
-        "state": {},
-        "style": {
-          "background-color": "var(--wwc-color-surface)",
-          "border-bottom-left-radius": "3px",
-          "border-bottom-right-radius": "3px",
-          "border-bottom-width": "1px",
-          "border-left-width": "1px",
-          "border-right-width": "1px",
-          "border-top-left-radius": "3px",
-          "border-top-right-radius": "3px",
-          "border-top-width": "1px",
-          "display": "block"
-        },
-        "box": {
-          "x": 452,
-          "y": 505,
-          "width": 404,
-          "height": 326
-        }
-      },
-      {
-        "path": "./section[3]/header[1]",
-        "tag": "HEADER",
-        "component": null,
-        "role": null,
-        "text": "",
-        "state": {},
-        "style": {
-          "background-color": "rgb(0, 0, 0)",
-          "border-bottom-left-radius": "0px",
-          "border-bottom-right-radius": "0px",
-          "border-bottom-width": "0px",
-          "border-left-width": "0px",
-          "border-right-width": "0px",
-          "border-top-left-radius": "0px",
-          "border-top-right-radius": "0px",
-          "border-top-width": "0px",
-          "display": "grid"
-        },
-        "box": {
-          "x": 469,
-          "y": 522,
-          "width": 370,
-          "height": 118
-        }
-      },
-      {
-        "path": "./section[3]/header[1]/h3[1]",
-        "tag": "H3",
-        "component": null,
-        "role": null,
-        "text": "Tool approvals",
-        "state": {},
-        "style": {
-          "display": "block",
-          "font-size": "18.72px",
-          "font-weight": "700"
-        },
-        "box": {
-          "x": 469,
-          "y": 541,
-          "width": 370,
-          "height": 28
-        }
-      },
-      {
-        "path": "./section[3]/header[1]/p[1]",
-        "tag": "P",
-        "component": null,
-        "role": null,
-        "text": "Each decision is submitted with the current session identity and revision.",
-        "state": {},
-        "style": {
-          "border-bottom-color": "var(--wwc-color-text-muted)",
-          "border-left-color": "var(--wwc-color-text-muted)",
-          "border-right-color": "var(--wwc-color-text-muted)",
-          "border-top-color": "var(--wwc-color-text-muted)",
-          "color": "var(--wwc-color-text-muted)",
-          "display": "block",
-          "outline-color": "var(--wwc-color-text-muted)"
-        },
-        "box": {
-          "x": 469,
-          "y": 592,
-          "width": 370,
-          "height": 48
-        }
-      },
-      {
-        "path": "./section[3]/div[1]",
-        "tag": "DIV",
-        "component": null,
-        "role": null,
-        "text": "",
-        "state": {},
-        "style": {
-          "background-color": "rgb(0, 0, 0)",
-          "border-bottom-left-radius": "0px",
-          "border-bottom-right-radius": "0px",
-          "border-bottom-width": "0px",
-          "border-left-width": "0px",
-          "border-right-width": "0px",
-          "border-top-left-radius": "0px",
-          "border-top-right-radius": "0px",
-          "border-top-width": "0px"
-        },
-        "box": {
-          "x": 469,
-          "y": 656,
-          "width": 370,
-          "height": 134
-        }
-      },
-      {
-        "path": "./section[3]/div[1]/section[1]",
-        "tag": "SECTION",
-        "component": "empty-state",
-        "role": "status",
-        "text": "",
-        "state": {},
-        "style": {
-          "background-color": "var(--wwc-color-surface)",
-          "border-bottom-left-radius": "3px",
-          "border-bottom-right-radius": "3px",
-          "border-bottom-width": "1px",
-          "border-left-width": "1px",
-          "border-right-width": "1px",
-          "border-top-left-radius": "3px",
-          "border-top-right-radius": "3px",
-          "border-top-width": "1px",
-          "display": "grid"
-        },
-        "box": {
-          "x": 469,
-          "y": 656,
-          "width": 370,
-          "height": 134
-        }
-      },
-      {
-        "path": "./section[3]/div[1]/section[1]/h3[1]",
-        "tag": "H3",
-        "component": null,
-        "role": null,
-        "text": "No pending tool approvals",
-        "state": {},
-        "style": {
-          "background-color": "rgb(0, 0, 0)",
-          "border-bottom-left-radius": "0px",
-          "border-bottom-right-radius": "0px",
-          "border-bottom-width": "0px",
-          "border-left-width": "0px",
-          "border-right-width": "0px",
-          "border-top-left-radius": "0px",
-          "border-top-right-radius": "0px",
-          "border-top-width": "0px",
-          "display": "block",
-          "font-size": "18.72px",
-          "font-weight": "700"
-        },
-        "box": {
-          "x": 494,
-          "y": 681,
-          "width": 282,
-          "height": 28
-        }
-      },
-      {
-        "path": "./section[3]/div[1]/section[1]/p[1]",
-        "tag": "P",
-        "component": null,
-        "role": null,
-        "text": "Tool requests that require a decision will appear here.",
-        "state": {},
-        "style": {
-          "background-color": "rgb(0, 0, 0)",
-          "border-bottom-color": "var(--wwc-color-text-muted)",
-          "border-bottom-left-radius": "0px",
-          "border-bottom-right-radius": "0px",
-          "border-bottom-width": "0px",
-          "border-left-color": "var(--wwc-color-text-muted)",
-          "border-left-width": "0px",
-          "border-right-color": "var(--wwc-color-text-muted)",
-          "border-right-width": "0px",
-          "border-top-color": "var(--wwc-color-text-muted)",
-          "border-top-left-radius": "0px",
-          "border-top-right-radius": "0px",
-          "border-top-width": "0px",
-          "color": "var(--wwc-color-text-muted)",
-          "display": "block",
-          "outline-color": "var(--wwc-color-text-muted)"
-        },
-        "box": {
-          "x": 494,
-          "y": 717,
-          "width": 320,
-          "height": 48
-        }
-      },
-      {
-        "path": "./section[4]",
-        "tag": "SECTION",
-        "component": "panel",
-        "role": null,
-        "text": "",
-        "state": {},
-        "style": {
-          "background-color": "var(--wwc-color-surface)",
-          "border-bottom-left-radius": "3px",
-          "border-bottom-right-radius": "3px",
-          "border-bottom-width": "1px",
-          "border-left-width": "1px",
-          "border-right-width": "1px",
-          "border-top-left-radius": "3px",
-          "border-top-right-radius": "3px",
-          "border-top-width": "1px",
-          "display": "block"
-        },
-        "box": {
-          "x": 24,
-          "y": 855,
-          "width": 832,
-          "height": 254
-        }
-      },
-      {
-        "path": "./section[4]/header[1]",
-        "tag": "HEADER",
-        "component": null,
-        "role": null,
-        "text": "",
-        "state": {},
-        "style": {
-          "background-color": "rgb(0, 0, 0)",
-          "border-bottom-left-radius": "0px",
-          "border-bottom-right-radius": "0px",
-          "border-bottom-width": "0px",
-          "border-left-width": "0px",
-          "border-right-width": "0px",
-          "border-top-left-radius": "0px",
-          "border-top-right-radius": "0px",
-          "border-top-width": "0px",
-          "display": "grid"
-        },
-        "box": {
-          "x": 41,
-          "y": 872,
-          "width": 798,
-          "height": 94
-        }
-      },
-      {
-        "path": "./section[4]/header[1]/h3[1]",
-        "tag": "H3",
-        "component": null,
-        "role": null,
-        "text": "Business Attention",
-        "state": {},
-        "style": {
-          "display": "block",
-          "font-size": "18.72px",
-          "font-weight": "700"
-        },
-        "box": {
-          "x": 41,
-          "y": 890,
-          "width": 798,
-          "height": 28
-        }
-      },
-      {
-        "path": "./section[4]/header[1]/p[1]",
-        "tag": "P",
-        "component": null,
-        "role": null,
-        "text": "Resolve Delivery questions and blockers against the current Delivery revision.",
-        "state": {},
-        "style": {
-          "border-bottom-color": "var(--wwc-color-text-muted)",
-          "border-left-color": "var(--wwc-color-text-muted)",
-          "border-right-color": "var(--wwc-color-text-muted)",
-          "border-top-color": "var(--wwc-color-text-muted)",
-          "color": "var(--wwc-color-text-muted)",
-          "display": "block",
-          "outline-color": "var(--wwc-color-text-muted)"
-        },
-        "box": {
-          "x": 41,
-          "y": 941,
-          "width": 798,
-          "height": 24
-        }
-      },
-      {
-        "path": "./section[4]/div[1]",
-        "tag": "DIV",
-        "component": null,
-        "role": null,
-        "text": "",
-        "state": {},
-        "style": {
-          "background-color": "rgb(0, 0, 0)",
-          "border-bottom-left-radius": "0px",
-          "border-bottom-right-radius": "0px",
-          "border-bottom-width": "0px",
-          "border-left-width": "0px",
-          "border-right-width": "0px",
-          "border-top-left-radius": "0px",
-          "border-top-right-radius": "0px",
-          "border-top-width": "0px"
-        },
-        "box": {
-          "x": 41,
-          "y": 981,
-          "width": 798,
-          "height": 110
-        }
-      },
-      {
-        "path": "./section[4]/div[1]/section[1]",
-        "tag": "SECTION",
-        "component": "empty-state",
-        "role": "status",
-        "text": "",
-        "state": {},
-        "style": {
-          "background-color": "var(--wwc-color-surface)",
-          "border-bottom-left-radius": "3px",
-          "border-bottom-right-radius": "3px",
-          "border-bottom-width": "1px",
-          "border-left-width": "1px",
-          "border-right-width": "1px",
-          "border-top-left-radius": "3px",
-          "border-top-right-radius": "3px",
-          "border-top-width": "1px",
-          "display": "grid"
-        },
-        "box": {
-          "x": 41,
-          "y": 981,
-          "width": 798,
-          "height": 110
-        }
-      },
-      {
-        "path": "./section[4]/div[1]/section[1]/h3[1]",
-        "tag": "H3",
-        "component": null,
-        "role": null,
-        "text": "No open business Attention",
-        "state": {},
-        "style": {
-          "background-color": "rgb(0, 0, 0)",
-          "border-bottom-left-radius": "0px",
-          "border-bottom-right-radius": "0px",
-          "border-bottom-width": "0px",
-          "border-left-width": "0px",
-          "border-right-width": "0px",
-          "border-top-left-radius": "0px",
-          "border-top-right-radius": "0px",
-          "border-top-width": "0px",
-          "display": "block",
-          "font-size": "18.72px",
-          "font-weight": "700"
-        },
-        "box": {
-          "x": 66,
-          "y": 1006,
-          "width": 293,
-          "height": 28
-        }
-      },
-      {
-        "path": "./section[4]/div[1]/section[1]/p[1]",
-        "tag": "P",
-        "component": null,
-        "role": null,
-        "text": "Delivery questions and blocking decisions will appear here.",
-        "state": {},
-        "style": {
-          "background-color": "rgb(0, 0, 0)",
-          "border-bottom-color": "var(--wwc-color-text-muted)",
-          "border-bottom-left-radius": "0px",
-          "border-bottom-right-radius": "0px",
-          "border-bottom-width": "0px",
-          "border-left-color": "var(--wwc-color-text-muted)",
-          "border-left-width": "0px",
-          "border-right-color": "var(--wwc-color-text-muted)",
-          "border-right-width": "0px",
-          "border-top-color": "var(--wwc-color-text-muted)",
-          "border-top-left-radius": "0px",
-          "border-top-right-radius": "0px",
-          "border-top-width": "0px",
-          "color": "var(--wwc-color-text-muted)",
-          "display": "block",
-          "outline-color": "var(--wwc-color-text-muted)"
-        },
-        "box": {
-          "x": 66,
-          "y": 1042,
-          "width": 568,
-          "height": 24
-        }
-      }
-    ]
-  },
-  {
-    "schemaVersion": 1,
-    "id": "page/operations@desktop",
-    "kind": "page",
-    "viewport": {
-      "width": 1280,
-      "height": 900
-    },
-    "fontStack": "'wwc-visual-regression', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
-    "nodes": [
-      {
-        "path": ".",
-        "tag": "SECTION",
-        "component": null,
-        "role": null,
-        "text": "",
-        "state": {
-          "aria-busy": "false"
-        },
-        "style": {
-          "background-color": "rgb(0, 0, 0)",
-          "border-bottom-color": "rgb(23, 23, 23)",
-          "border-bottom-left-radius": "0px",
-          "border-bottom-right-radius": "0px",
-          "border-bottom-width": "0px",
-          "border-left-color": "rgb(23, 23, 23)",
-          "border-left-width": "0px",
-          "border-right-color": "rgb(23, 23, 23)",
-          "border-right-width": "0px",
-          "border-top-color": "rgb(23, 23, 23)",
-          "border-top-left-radius": "0px",
-          "border-top-right-radius": "0px",
-          "border-top-width": "0px",
-          "box-shadow": "none",
-          "color": "rgb(23, 23, 23)",
-          "cursor": "auto",
-          "display": "grid",
-          "font-size": "16px",
-          "font-weight": "400",
-          "opacity": "1",
-          "outline-color": "rgb(23, 23, 23)",
-          "outline-style": "none",
-          "outline-width": "3px",
-          "position": "static",
-          "text-decoration-line": "none",
-          "visibility": "visible",
-          "z-index": "auto"
-        },
-        "box": {
-          "x": 0,
-          "y": 0,
-          "width": 880,
-          "height": 1433
-        }
-      },
-      {
-        "path": "./header[1]",
-        "tag": "HEADER",
-        "component": "page-header",
-        "role": null,
-        "text": "",
-        "state": {},
-        "style": {},
-        "box": {
-          "x": 24,
-          "y": 24,
-          "width": 768,
-          "height": 104
-        }
-      },
-      {
-        "path": "./header[1]/p[1]",
-        "tag": "P",
-        "component": null,
-        "role": null,
-        "text": "Local diagnostics",
-        "state": {},
-        "style": {
-          "display": "block",
-          "font-size": "12px",
-          "font-weight": "700"
-        },
-        "box": {
-          "x": 24,
-          "y": 24,
-          "width": 768,
-          "height": 18
-        }
-      },
-      {
-        "path": "./header[1]/h2[1]",
-        "tag": "H2",
-        "component": null,
-        "role": null,
-        "text": "Repository and local Worker operations",
-        "state": {},
-        "style": {
-          "display": "block",
-          "font-size": "24px",
-          "font-weight": "700"
-        },
-        "box": {
-          "x": 24,
-          "y": 46,
-          "width": 768,
-          "height": 30
-        }
-      },
-      {
-        "path": "./header[1]/p[2]",
-        "tag": "P",
-        "component": null,
-        "role": null,
-        "text": "Inspect secret-safe repository signals, reported capacity, and local Worker state.",
-        "state": {},
-        "style": {
-          "border-bottom-color": "var(--wwc-color-text-muted)",
-          "border-left-color": "var(--wwc-color-text-muted)",
-          "border-right-color": "var(--wwc-color-text-muted)",
-          "border-top-color": "var(--wwc-color-text-muted)",
-          "color": "var(--wwc-color-text-muted)",
-          "display": "block",
-          "outline-color": "var(--wwc-color-text-muted)"
-        },
-        "box": {
-          "x": 24,
-          "y": 80,
-          "width": 768,
-          "height": 48
-        }
-      },
-      {
-        "path": "./button[1]",
-        "tag": "BUTTON",
-        "component": "button",
-        "role": null,
-        "text": "Open first-run readiness",
-        "state": {
-          "data-variant": "default"
-        },
-        "style": {
-          "background-color": "var(--wwc-color-surface)",
-          "border-bottom-left-radius": "2px",
-          "border-bottom-right-radius": "2px",
-          "border-bottom-width": "1px",
-          "border-left-width": "1px",
-          "border-right-width": "1px",
-          "border-top-left-radius": "2px",
-          "border-top-right-radius": "2px",
-          "border-top-width": "1px",
-          "cursor": "pointer",
-          "display": "block",
-          "font-weight": "600"
-        },
-        "box": {
-          "x": 24,
-          "y": 152,
-          "width": 404,
-          "height": 44
-        }
-      },
-      {
-        "path": "./span[1]",
-        "tag": "SPAN",
-        "component": "status-badge",
-        "role": "status",
-        "text": "",
-        "state": {
-          "data-tone": "danger"
-        },
-        "style": {
-          "background-color": "var(--wwc-color-danger-surface)",
-          "border-bottom-color": "rgb(179, 38, 30)",
-          "border-bottom-left-radius": "2px",
-          "border-bottom-right-radius": "2px",
-          "border-bottom-width": "1px",
-          "border-left-color": "rgb(179, 38, 30)",
-          "border-left-width": "1px",
-          "border-right-color": "rgb(179, 38, 30)",
-          "border-right-width": "1px",
-          "border-top-color": "rgb(179, 38, 30)",
-          "border-top-left-radius": "2px",
-          "border-top-right-radius": "2px",
-          "border-top-width": "1px",
-          "color": "rgb(179, 38, 30)",
-          "display": "flex",
-          "font-size": "14px",
-          "font-weight": "600",
-          "outline-color": "rgb(179, 38, 30)"
-        },
-        "box": {
-          "x": 24,
-          "y": 220,
-          "width": 140,
-          "height": 31
-        }
-      },
-      {
-        "path": "./span[1]/span[1]",
-        "tag": "SPAN",
-        "component": null,
-        "role": null,
-        "text": "×",
-        "state": {
-          "aria-hidden": "true"
-        },
-        "style": {
-          "background-color": "rgb(0, 0, 0)",
-          "border-bottom-left-radius": "0px",
-          "border-bottom-right-radius": "0px",
-          "border-bottom-width": "0px",
-          "border-left-width": "0px",
-          "border-right-width": "0px",
-          "border-top-left-radius": "0px",
-          "border-top-right-radius": "0px",
-          "border-top-width": "0px",
-          "display": "block"
-        },
-        "box": {
-          "x": 33,
-          "y": 225,
-          "width": 8,
-          "height": 21
-        }
-      },
-      {
-        "path": "./span[1]/span[2]",
-        "tag": "SPAN",
-        "component": null,
-        "role": null,
-        "text": "Reconnecting…",
-        "state": {},
-        "style": {
-          "background-color": "rgb(0, 0, 0)",
-          "border-bottom-left-radius": "0px",
-          "border-bottom-right-radius": "0px",
-          "border-bottom-width": "0px",
-          "border-left-width": "0px",
-          "border-right-width": "0px",
-          "border-top-left-radius": "0px",
-          "border-top-right-radius": "0px",
-          "border-top-width": "0px",
-          "display": "block"
-        },
-        "box": {
-          "x": 45,
-          "y": 225,
-          "width": 110,
-          "height": 21
-        }
-      },
-      {
-        "path": "./section[1]",
-        "tag": "SECTION",
-        "component": "error-state",
-        "role": "alert",
-        "text": "",
-        "state": {
-          "data-tone": "danger"
-        },
-        "style": {
-          "background-color": "var(--wwc-color-danger-surface)",
-          "border-bottom-color": "rgb(179, 38, 30)",
-          "border-bottom-left-radius": "3px",
-          "border-bottom-right-radius": "3px",
-          "border-bottom-width": "1px",
-          "border-left-color": "rgb(179, 38, 30)",
-          "border-left-width": "1px",
-          "border-right-color": "rgb(179, 38, 30)",
-          "border-right-width": "1px",
-          "border-top-color": "rgb(179, 38, 30)",
-          "border-top-left-radius": "3px",
-          "border-top-right-radius": "3px",
-          "border-top-width": "1px",
-          "color": "rgb(179, 38, 30)",
-          "outline-color": "rgb(179, 38, 30)"
-        },
-        "box": {
-          "x": 24,
-          "y": 275,
-          "width": 832,
-          "height": 202
-        }
-      },
-      {
-        "path": "./section[1]/span[1]",
-        "tag": "SPAN",
-        "component": null,
-        "role": null,
-        "text": "×",
-        "state": {
-          "aria-hidden": "true"
-        },
-        "style": {
-          "background-color": "rgb(0, 0, 0)",
-          "border-bottom-left-radius": "0px",
-          "border-bottom-right-radius": "0px",
-          "border-bottom-width": "0px",
-          "border-left-width": "0px",
-          "border-right-width": "0px",
-          "border-top-left-radius": "0px",
-          "border-top-right-radius": "0px",
-          "border-top-width": "0px",
-          "display": "block"
-        },
-        "box": {
-          "x": 49,
-          "y": 300,
-          "width": 10,
-          "height": 152
-        }
-      },
-      {
-        "path": "./section[1]/div[1]",
-        "tag": "DIV",
-        "component": null,
-        "role": null,
-        "text": "",
-        "state": {},
-        "style": {
-          "background-color": "rgb(0, 0, 0)",
-          "border-bottom-left-radius": "0px",
-          "border-bottom-right-radius": "0px",
-          "border-bottom-width": "0px",
-          "border-left-width": "0px",
-          "border-right-width": "0px",
-          "border-top-left-radius": "0px",
-          "border-top-right-radius": "0px",
-          "border-top-width": "0px"
-        },
-        "box": {
-          "x": 67,
-          "y": 300,
-          "width": 713,
-          "height": 152
-        }
-      },
-      {
-        "path": "./section[1]/div[1]/h2[1]",
-        "tag": "H2",
-        "component": null,
-        "role": null,
-        "text": "Local operations unavailable",
-        "state": {},
-        "style": {
-          "display": "block",
-          "font-size": "24px",
-          "font-weight": "700"
-        },
-        "box": {
-          "x": 67,
-          "y": 300,
-          "width": 713,
-          "height": 36
-        }
-      },
-      {
-        "path": "./section[1]/div[1]/p[1]",
-        "tag": "P",
-        "component": null,
-        "role": null,
-        "text": "Local operations could not be updated. Retry, or review the server status.",
-        "state": {},
-        "style": {
-          "display": "block"
-        },
-        "box": {
-          "x": 67,
-          "y": 360,
-          "width": 713,
-          "height": 24
-        }
-      },
-      {
-        "path": "./section[1]/div[1]/div[1]",
-        "tag": "DIV",
-        "component": null,
-        "role": null,
-        "text": "",
-        "state": {},
-        "style": {},
-        "box": {
-          "x": 67,
-          "y": 408,
-          "width": 713,
-          "height": 44
-        }
-      },
-      {
-        "path": "./section[1]/div[1]/div[1]/button[2]",
-        "tag": "BUTTON",
-        "component": "button",
-        "role": null,
-        "text": "Reconnect events",
-        "state": {
-          "data-variant": "default"
-        },
-        "style": {
-          "background-color": "var(--wwc-color-surface)",
-          "border-bottom-color": "rgb(23, 23, 23)",
-          "border-bottom-left-radius": "2px",
-          "border-bottom-right-radius": "2px",
-          "border-bottom-width": "1px",
-          "border-left-color": "rgb(23, 23, 23)",
-          "border-left-width": "1px",
-          "border-right-color": "rgb(23, 23, 23)",
-          "border-right-width": "1px",
-          "border-top-color": "rgb(23, 23, 23)",
-          "border-top-left-radius": "2px",
-          "border-top-right-radius": "2px",
-          "border-top-width": "1px",
-          "color": "rgb(23, 23, 23)",
-          "cursor": "pointer",
-          "display": "block",
-          "font-weight": "600",
-          "outline-color": "rgb(23, 23, 23)"
-        },
-        "box": {
-          "x": 67,
-          "y": 408,
-          "width": 180,
-          "height": 44
-        }
-      },
-      {
-        "path": "./section[2]",
-        "tag": "SECTION",
-        "component": "panel",
-        "role": null,
-        "text": "",
-        "state": {},
-        "style": {
-          "background-color": "var(--wwc-color-surface)",
-          "border-bottom-left-radius": "3px",
-          "border-bottom-right-radius": "3px",
-          "border-bottom-width": "1px",
-          "border-left-width": "1px",
-          "border-right-width": "1px",
-          "border-top-left-radius": "3px",
-          "border-top-right-radius": "3px",
-          "border-top-width": "1px",
-          "display": "block"
-        },
-        "box": {
-          "x": 24,
-          "y": 501,
-          "width": 404,
-          "height": 631
-        }
-      },
-      {
-        "path": "./section[2]/header[1]",
-        "tag": "HEADER",
-        "component": null,
-        "role": null,
-        "text": "",
-        "state": {},
-        "style": {
-          "background-color": "rgb(0, 0, 0)",
-          "border-bottom-left-radius": "0px",
-          "border-bottom-right-radius": "0px",
-          "border-bottom-width": "0px",
-          "border-left-width": "0px",
-          "border-right-width": "0px",
-          "border-top-left-radius": "0px",
-          "border-top-right-radius": "0px",
-          "border-top-width": "0px",
-          "display": "grid"
-        },
-        "box": {
-          "x": 41,
-          "y": 518,
-          "width": 370,
-          "height": 142
-        }
-      },
-      {
-        "path": "./section[2]/header[1]/h3[1]",
-        "tag": "H3",
-        "component": null,
-        "role": null,
-        "text": "Repository diagnostics",
-        "state": {},
-        "style": {
-          "display": "block",
-          "font-size": "18.72px",
-          "font-weight": "700"
-        },
-        "box": {
-          "x": 41,
-          "y": 537,
-          "width": 370,
-          "height": 28
-        }
-      },
-      {
-        "path": "./section[2]/header[1]/p[1]",
-        "tag": "P",
-        "component": null,
-        "role": null,
-        "text": "Repository paths stay hidden; only bounded identity and Git-risk signals are shown.",
-        "state": {},
-        "style": {
-          "border-bottom-color": "var(--wwc-color-text-muted)",
-          "border-left-color": "var(--wwc-color-text-muted)",
-          "border-right-color": "var(--wwc-color-text-muted)",
-          "border-top-color": "var(--wwc-color-text-muted)",
-          "color": "var(--wwc-color-text-muted)",
-          "display": "block",
-          "outline-color": "var(--wwc-color-text-muted)"
-        },
-        "box": {
-          "x": 41,
-          "y": 588,
-          "width": 370,
-          "height": 72
-        }
-      },
-      {
-        "path": "./section[2]/div[1]",
-        "tag": "DIV",
-        "component": null,
-        "role": null,
-        "text": "",
-        "state": {},
-        "style": {
-          "background-color": "rgb(0, 0, 0)",
-          "border-bottom-left-radius": "0px",
-          "border-bottom-right-radius": "0px",
-          "border-bottom-width": "0px",
-          "border-left-width": "0px",
-          "border-right-width": "0px",
-          "border-top-left-radius": "0px",
-          "border-top-right-radius": "0px",
-          "border-top-width": "0px"
-        },
-        "box": {
-          "x": 41,
-          "y": 676,
-          "width": 370,
-          "height": 336
-        }
-      },
-      {
-        "path": "./section[2]/div[1]/div[1]",
-        "tag": "DIV",
-        "component": null,
-        "role": null,
-        "text": "",
-        "state": {},
-        "style": {},
-        "box": {
-          "x": 41,
-          "y": 676,
-          "width": 370,
-          "height": 336
-        }
-      },
-      {
-        "path": "./section[2]/div[1]/div[1]/dl[1]",
-        "tag": "DL",
-        "component": null,
-        "role": null,
-        "text": "",
-        "state": {},
-        "style": {
-          "display": "grid"
-        },
-        "box": {
-          "x": 41,
-          "y": 676,
-          "width": 370,
-          "height": 336
-        }
-      },
-      {
-        "path": "./section[2]/div[1]/div[1]/dl[1]/dt[1]",
-        "tag": "DT",
-        "component": null,
-        "role": null,
-        "text": "Repository",
-        "state": {},
-        "style": {
-          "display": "block",
-          "font-weight": "600"
-        },
-        "box": {
-          "x": 41,
-          "y": 676,
-          "width": 177,
-          "height": 48
-        }
-      },
-      {
-        "path": "./section[2]/div[1]/div[1]/dl[1]/dd[1]",
-        "tag": "DD",
-        "component": null,
-        "role": null,
-        "text": "No repository projection",
-        "state": {},
-        "style": {
-          "display": "block"
-        },
-        "box": {
-          "x": 234,
-          "y": 676,
-          "width": 177,
-          "height": 48
-        }
-      },
-      {
-        "path": "./section[2]/div[1]/div[1]/dl[1]/dt[2]",
-        "tag": "DT",
-        "component": null,
-        "role": null,
-        "text": "Kind",
-        "state": {},
-        "style": {
-          "display": "block",
-          "font-weight": "600"
-        },
-        "box": {
-          "x": 41,
-          "y": 732,
-          "width": 177,
-          "height": 24
-        }
-      },
-      {
-        "path": "./section[2]/div[1]/div[1]/dl[1]/dd[2]",
-        "tag": "DD",
-        "component": null,
-        "role": null,
-        "text": "Not reported",
-        "state": {},
-        "style": {
-          "display": "block"
-        },
-        "box": {
-          "x": 234,
-          "y": 732,
-          "width": 177,
-          "height": 24
-        }
-      },
-      {
-        "path": "./section[2]/div[1]/div[1]/dl[1]/dt[3]",
-        "tag": "DT",
-        "component": null,
-        "role": null,
-        "text": "Latest Delivery baseline",
-        "state": {},
-        "style": {
-          "display": "block",
-          "font-weight": "600"
-        },
-        "box": {
-          "x": 41,
-          "y": 764,
-          "width": 177,
-          "height": 48
-        }
-      },
-      {
-        "path": "./section[2]/div[1]/div[1]/dl[1]/dd[3]",
-        "tag": "DD",
-        "component": null,
-        "role": null,
-        "text": "Not reported",
-        "state": {},
-        "style": {
-          "display": "block"
-        },
-        "box": {
-          "x": 234,
-          "y": 764,
-          "width": 177,
-          "height": 48
-        }
-      },
-      {
-        "path": "./section[2]/div[1]/div[1]/dl[1]/dt[4]",
-        "tag": "DT",
-        "component": null,
-        "role": null,
-        "text": "Candidate/worktree",
-        "state": {},
-        "style": {
-          "display": "block",
-          "font-weight": "600"
-        },
-        "box": {
-          "x": 41,
-          "y": 820,
-          "width": 177,
-          "height": 48
-        }
-      },
-      {
-        "path": "./section[2]/div[1]/div[1]/dl[1]/dd[4]",
-        "tag": "DD",
-        "component": null,
-        "role": null,
-        "text": "Not reported by Control Plane",
-        "state": {},
-        "style": {
-          "display": "block"
-        },
-        "box": {
-          "x": 234,
-          "y": 820,
-          "width": 177,
-          "height": 48
-        }
-      },
-      {
-        "path": "./section[2]/div[1]/div[1]/dl[1]/dt[5]",
-        "tag": "DT",
-        "component": null,
-        "role": null,
-        "text": "Latest Delivery Git risk",
-        "state": {},
-        "style": {
-          "display": "block",
-          "font-weight": "600"
-        },
-        "box": {
-          "x": 41,
-          "y": 876,
-          "width": 177,
-          "height": 48
-        }
-      },
-      {
-        "path": "./section[2]/div[1]/div[1]/dl[1]/dd[5]",
-        "tag": "DD",
-        "component": null,
-        "role": null,
-        "text": "No current risk projection",
-        "state": {},
-        "style": {
-          "display": "block"
-        },
-        "box": {
-          "x": 234,
-          "y": 876,
-          "width": 177,
-          "height": 48
-        }
-      },
-      {
-        "path": "./section[2]/div[1]/div[1]/dl[1]/dt[6]",
-        "tag": "DT",
-        "component": null,
-        "role": null,
-        "text": "Open Attention",
-        "state": {},
-        "style": {
-          "display": "block",
-          "font-weight": "600"
-        },
-        "box": {
-          "x": 41,
-          "y": 932,
-          "width": 177,
-          "height": 24
-        }
-      },
-      {
-        "path": "./section[2]/div[1]/div[1]/dl[1]/dd[6]",
-        "tag": "DD",
-        "component": null,
-        "role": null,
-        "text": "0",
-        "state": {},
-        "style": {
-          "display": "block"
-        },
-        "box": {
-          "x": 234,
-          "y": 932,
-          "width": 177,
-          "height": 24
-        }
-      },
-      {
-        "path": "./section[2]/div[1]/div[1]/dl[1]/dt[7]",
-        "tag": "DT",
-        "component": null,
-        "role": null,
-        "text": "Path policy",
-        "state": {},
-        "style": {
-          "display": "block",
-          "font-weight": "600"
-        },
-        "box": {
-          "x": 41,
-          "y": 964,
-          "width": 177,
-          "height": 48
-        }
-      },
-      {
-        "path": "./section[2]/div[1]/div[1]/dl[1]/dd[7]",
-        "tag": "DD",
-        "component": null,
-        "role": null,
-        "text": "Repository paths hidden",
-        "state": {},
-        "style": {
-          "display": "block"
-        },
-        "box": {
-          "x": 234,
-          "y": 964,
-          "width": 177,
-          "height": 48
-        }
-      },
-      {
-        "path": "./section[3]",
-        "tag": "SECTION",
-        "component": "panel",
-        "role": null,
-        "text": "",
-        "state": {},
-        "style": {
-          "background-color": "var(--wwc-color-surface)",
-          "border-bottom-left-radius": "3px",
-          "border-bottom-right-radius": "3px",
-          "border-bottom-width": "1px",
-          "border-left-width": "1px",
-          "border-right-width": "1px",
-          "border-top-left-radius": "3px",
-          "border-top-right-radius": "3px",
-          "border-top-width": "1px",
-          "display": "block"
-        },
-        "box": {
-          "x": 452,
-          "y": 501,
-          "width": 404,
-          "height": 631
-        }
-      },
-      {
-        "path": "./section[3]/header[1]",
-        "tag": "HEADER",
-        "component": null,
-        "role": null,
-        "text": "",
-        "state": {},
-        "style": {
-          "background-color": "rgb(0, 0, 0)",
-          "border-bottom-left-radius": "0px",
-          "border-bottom-right-radius": "0px",
-          "border-bottom-width": "0px",
-          "border-left-width": "0px",
-          "border-right-width": "0px",
-          "border-top-left-radius": "0px",
-          "border-top-right-radius": "0px",
-          "border-top-width": "0px",
-          "display": "grid"
-        },
-        "box": {
-          "x": 469,
-          "y": 518,
-          "width": 370,
-          "height": 142
-        }
-      },
-      {
-        "path": "./section[3]/header[1]/h3[1]",
-        "tag": "H3",
-        "component": null,
-        "role": null,
-        "text": "Local resources",
-        "state": {},
-        "style": {
-          "display": "block",
-          "font-size": "18.72px",
-          "font-weight": "700"
-        },
-        "box": {
-          "x": 469,
-          "y": 537,
-          "width": 370,
-          "height": 28
-        }
-      },
-      {
-        "path": "./section[3]/header[1]/p[1]",
-        "tag": "P",
-        "component": null,
-        "role": null,
-        "text": "Reported capacity is kept separate from code and infrastructure failure signals.",
-        "state": {},
-        "style": {
-          "border-bottom-color": "var(--wwc-color-text-muted)",
-          "border-left-color": "var(--wwc-color-text-muted)",
-          "border-right-color": "var(--wwc-color-text-muted)",
-          "border-top-color": "var(--wwc-color-text-muted)",
-          "color": "var(--wwc-color-text-muted)",
-          "display": "block",
-          "outline-color": "var(--wwc-color-text-muted)"
-        },
-        "box": {
-          "x": 469,
-          "y": 588,
-          "width": 370,
-          "height": 72
-        }
-      },
-      {
-        "path": "./section[3]/div[1]",
-        "tag": "DIV",
-        "component": null,
-        "role": null,
-        "text": "",
-        "state": {},
-        "style": {
-          "background-color": "rgb(0, 0, 0)",
-          "border-bottom-left-radius": "0px",
-          "border-bottom-right-radius": "0px",
-          "border-bottom-width": "0px",
-          "border-left-width": "0px",
-          "border-right-width": "0px",
-          "border-top-left-radius": "0px",
-          "border-top-right-radius": "0px",
-          "border-top-width": "0px"
-        },
-        "box": {
-          "x": 469,
-          "y": 676,
-          "width": 370,
-          "height": 439
-        }
-      },
-      {
-        "path": "./section[3]/div[1]/span[1]",
-        "tag": "SPAN",
-        "component": "status-badge",
-        "role": "status",
-        "text": "",
-        "state": {
-          "data-tone": "danger"
-        },
-        "style": {
-          "background-color": "var(--wwc-color-danger-surface)",
-          "border-bottom-color": "rgb(179, 38, 30)",
-          "border-bottom-left-radius": "2px",
-          "border-bottom-right-radius": "2px",
-          "border-bottom-width": "1px",
-          "border-left-color": "rgb(179, 38, 30)",
-          "border-left-width": "1px",
-          "border-right-color": "rgb(179, 38, 30)",
-          "border-right-width": "1px",
-          "border-top-color": "rgb(179, 38, 30)",
-          "border-top-left-radius": "2px",
-          "border-top-right-radius": "2px",
-          "border-top-width": "1px",
-          "color": "rgb(179, 38, 30)",
-          "display": "inline-flex",
-          "font-size": "14px",
-          "font-weight": "600",
-          "outline-color": "rgb(179, 38, 30)"
-        },
-        "box": {
-          "x": 469,
-          "y": 676,
-          "width": 309,
-          "height": 31
-        }
-      },
-      {
-        "path": "./section[3]/div[1]/span[1]/span[1]",
-        "tag": "SPAN",
-        "component": null,
-        "role": null,
-        "text": "×",
-        "state": {
-          "aria-hidden": "true"
-        },
-        "style": {
-          "background-color": "rgb(0, 0, 0)",
-          "border-bottom-left-radius": "0px",
-          "border-bottom-right-radius": "0px",
-          "border-bottom-width": "0px",
-          "border-left-width": "0px",
-          "border-right-width": "0px",
-          "border-top-left-radius": "0px",
-          "border-top-right-radius": "0px",
-          "border-top-width": "0px",
-          "display": "block"
-        },
-        "box": {
-          "x": 478,
-          "y": 681,
-          "width": 8,
-          "height": 21
-        }
-      },
-      {
-        "path": "./section[3]/div[1]/span[1]/span[2]",
-        "tag": "SPAN",
-        "component": null,
-        "role": null,
-        "text": "No current failure classification",
-        "state": {},
-        "style": {
-          "background-color": "rgb(0, 0, 0)",
-          "border-bottom-left-radius": "0px",
-          "border-bottom-right-radius": "0px",
-          "border-bottom-width": "0px",
-          "border-left-width": "0px",
-          "border-right-width": "0px",
-          "border-top-left-radius": "0px",
-          "border-top-right-radius": "0px",
-          "border-top-width": "0px",
-          "display": "block"
-        },
-        "box": {
-          "x": 490,
-          "y": 681,
-          "width": 278,
-          "height": 21
-        }
-      },
-      {
-        "path": "./section[3]/div[1]/div[1]",
-        "tag": "DIV",
-        "component": null,
-        "role": null,
-        "text": "",
-        "state": {},
-        "style": {},
-        "box": {
-          "x": 469,
-          "y": 723,
-          "width": 370,
-          "height": 392
-        }
-      },
-      {
-        "path": "./section[3]/div[1]/div[1]/dl[1]",
-        "tag": "DL",
-        "component": null,
-        "role": null,
-        "text": "",
-        "state": {},
-        "style": {
-          "display": "grid"
-        },
-        "box": {
-          "x": 469,
-          "y": 723,
-          "width": 370,
-          "height": 392
-        }
-      },
-      {
-        "path": "./section[3]/div[1]/div[1]/dl[1]/dt[1]",
-        "tag": "DT",
-        "component": null,
-        "role": null,
-        "text": "Failure classification",
-        "state": {},
-        "style": {
-          "display": "block",
-          "font-weight": "600"
-        },
-        "box": {
-          "x": 469,
-          "y": 723,
-          "width": 177,
-          "height": 48
-        }
-      },
-      {
-        "path": "./section[3]/div[1]/div[1]/dl[1]/dd[1]",
-        "tag": "DD",
-        "component": null,
-        "role": null,
-        "text": "No current failure classification",
-        "state": {},
-        "style": {
-          "display": "block"
-        },
-        "box": {
-          "x": 662,
-          "y": 723,
-          "width": 177,
-          "height": 48
-        }
-      },
-      {
-        "path": "./section[3]/div[1]/div[1]/dl[1]/dt[2]",
-        "tag": "DT",
-        "component": null,
-        "role": null,
-        "text": "Reported Workers",
-        "state": {},
-        "style": {
-          "display": "block",
-          "font-weight": "600"
-        },
-        "box": {
-          "x": 469,
-          "y": 779,
-          "width": 177,
-          "height": 24
-        }
-      },
-      {
-        "path": "./section[3]/div[1]/div[1]/dl[1]/dd[2]",
-        "tag": "DD",
-        "component": null,
-        "role": null,
-        "text": "0",
-        "state": {},
-        "style": {
-          "display": "block"
-        },
-        "box": {
-          "x": 662,
-          "y": 779,
-          "width": 177,
-          "height": 24
-        }
-      },
-      {
-        "path": "./section[3]/div[1]/div[1]/dl[1]/dt[3]",
-        "tag": "DT",
-        "component": null,
-        "role": null,
-        "text": "Enabled Workers",
-        "state": {},
-        "style": {
-          "display": "block",
-          "font-weight": "600"
-        },
-        "box": {
-          "x": 469,
-          "y": 811,
-          "width": 177,
-          "height": 24
-        }
-      },
-      {
-        "path": "./section[3]/div[1]/div[1]/dl[1]/dd[3]",
-        "tag": "DD",
-        "component": null,
-        "role": null,
-        "text": "0",
-        "state": {},
-        "style": {
-          "display": "block"
-        },
-        "box": {
-          "x": 662,
-          "y": 811,
-          "width": 177,
-          "height": 24
-        }
-      },
-      {
-        "path": "./section[3]/div[1]/div[1]/dl[1]/dt[4]",
-        "tag": "DT",
-        "component": null,
-        "role": null,
-        "text": "Reported capacity slots",
-        "state": {},
-        "style": {
-          "display": "block",
-          "font-weight": "600"
-        },
-        "box": {
-          "x": 469,
-          "y": 843,
-          "width": 177,
-          "height": 48
-        }
-      },
-      {
-        "path": "./section[3]/div[1]/div[1]/dl[1]/dd[4]",
-        "tag": "DD",
-        "component": null,
-        "role": null,
-        "text": "0",
-        "state": {},
-        "style": {
-          "display": "block"
-        },
-        "box": {
-          "x": 662,
-          "y": 843,
-          "width": 177,
-          "height": 48
-        }
-      },
-      {
-        "path": "./section[3]/div[1]/div[1]/dl[1]/dt[5]",
-        "tag": "DT",
-        "component": null,
-        "role": null,
-        "text": "CPU",
-        "state": {},
-        "style": {
-          "display": "block",
-          "font-weight": "600"
-        },
-        "box": {
-          "x": 469,
-          "y": 899,
-          "width": 177,
-          "height": 48
-        }
-      },
-      {
-        "path": "./section[3]/div[1]/div[1]/dl[1]/dd[5]",
-        "tag": "DD",
-        "component": null,
-        "role": null,
-        "text": "Not reported by Control Plane",
-        "state": {},
-        "style": {
-          "display": "block"
-        },
-        "box": {
-          "x": 662,
-          "y": 899,
-          "width": 177,
-          "height": 48
-        }
-      },
-      {
-        "path": "./section[3]/div[1]/div[1]/dl[1]/dt[6]",
-        "tag": "DT",
-        "component": null,
-        "role": null,
-        "text": "Memory",
-        "state": {},
-        "style": {
-          "display": "block",
-          "font-weight": "600"
-        },
-        "box": {
-          "x": 469,
-          "y": 955,
-          "width": 177,
-          "height": 48
-        }
-      },
-      {
-        "path": "./section[3]/div[1]/div[1]/dl[1]/dd[6]",
-        "tag": "DD",
-        "component": null,
-        "role": null,
-        "text": "Not reported by Control Plane",
-        "state": {},
-        "style": {
-          "display": "block"
-        },
-        "box": {
-          "x": 662,
-          "y": 955,
-          "width": 177,
-          "height": 48
-        }
-      },
-      {
-        "path": "./section[3]/div[1]/div[1]/dl[1]/dt[7]",
-        "tag": "DT",
-        "component": null,
-        "role": null,
-        "text": "Disk",
-        "state": {},
-        "style": {
-          "display": "block",
-          "font-weight": "600"
-        },
-        "box": {
-          "x": 469,
-          "y": 1011,
-          "width": 177,
-          "height": 48
-        }
-      },
-      {
-        "path": "./section[3]/div[1]/div[1]/dl[1]/dd[7]",
-        "tag": "DD",
-        "component": null,
-        "role": null,
-        "text": "Not reported by Control Plane",
-        "state": {},
-        "style": {
-          "display": "block"
-        },
-        "box": {
-          "x": 662,
-          "y": 1011,
-          "width": 177,
-          "height": 48
-        }
-      },
-      {
-        "path": "./section[3]/div[1]/div[1]/dl[1]/dt[8]",
-        "tag": "DT",
-        "component": null,
-        "role": null,
-        "text": "Cleanup",
-        "state": {},
-        "style": {
-          "display": "block",
-          "font-weight": "600"
-        },
-        "box": {
-          "x": 469,
-          "y": 1067,
-          "width": 177,
-          "height": 48
-        }
-      },
-      {
-        "path": "./section[3]/div[1]/div[1]/dl[1]/dd[8]",
-        "tag": "DD",
-        "component": null,
-        "role": null,
-        "text": "Not reported by Control Plane",
-        "state": {},
-        "style": {
-          "display": "block"
-        },
-        "box": {
-          "x": 662,
-          "y": 1067,
-          "width": 177,
-          "height": 48
-        }
-      },
-      {
-        "path": "./section[4]",
-        "tag": "SECTION",
-        "component": "panel",
-        "role": null,
-        "text": "",
-        "state": {},
-        "style": {
-          "background-color": "var(--wwc-color-surface)",
-          "border-bottom-left-radius": "3px",
-          "border-bottom-right-radius": "3px",
-          "border-bottom-width": "1px",
-          "border-left-width": "1px",
-          "border-right-width": "1px",
-          "border-top-left-radius": "3px",
-          "border-top-right-radius": "3px",
-          "border-top-width": "1px",
-          "display": "block"
-        },
-        "box": {
-          "x": 24,
-          "y": 1156,
-          "width": 832,
-          "height": 254
-        }
-      },
-      {
-        "path": "./section[4]/header[1]",
-        "tag": "HEADER",
-        "component": null,
-        "role": null,
-        "text": "",
-        "state": {},
-        "style": {
-          "background-color": "rgb(0, 0, 0)",
-          "border-bottom-left-radius": "0px",
-          "border-bottom-right-radius": "0px",
-          "border-bottom-width": "0px",
-          "border-left-width": "0px",
-          "border-right-width": "0px",
-          "border-top-left-radius": "0px",
-          "border-top-right-radius": "0px",
-          "border-top-width": "0px",
-          "display": "grid"
-        },
-        "box": {
-          "x": 41,
-          "y": 1173,
-          "width": 798,
-          "height": 94
-        }
-      },
-      {
-        "path": "./section[4]/header[1]/h3[1]",
-        "tag": "H3",
-        "component": null,
-        "role": null,
-        "text": "Local Workers",
-        "state": {},
-        "style": {
-          "display": "block",
-          "font-size": "18.72px",
-          "font-weight": "700"
-        },
-        "box": {
-          "x": 41,
-          "y": 1191,
-          "width": 798,
-          "height": 28
-        }
-      },
-      {
-        "path": "./section[4]/header[1]/p[1]",
-        "tag": "P",
-        "component": null,
-        "role": null,
-        "text": "Drain or enable a reported Worker without exposing host or repository paths.",
-        "state": {},
-        "style": {
-          "border-bottom-color": "var(--wwc-color-text-muted)",
-          "border-left-color": "var(--wwc-color-text-muted)",
-          "border-right-color": "var(--wwc-color-text-muted)",
-          "border-top-color": "var(--wwc-color-text-muted)",
-          "color": "var(--wwc-color-text-muted)",
-          "display": "block",
-          "outline-color": "var(--wwc-color-text-muted)"
-        },
-        "box": {
-          "x": 41,
-          "y": 1242,
-          "width": 798,
-          "height": 24
-        }
-      },
-      {
-        "path": "./section[4]/div[1]",
-        "tag": "DIV",
-        "component": null,
-        "role": null,
-        "text": "",
-        "state": {},
-        "style": {
-          "background-color": "rgb(0, 0, 0)",
-          "border-bottom-left-radius": "0px",
-          "border-bottom-right-radius": "0px",
-          "border-bottom-width": "0px",
-          "border-left-width": "0px",
-          "border-right-width": "0px",
-          "border-top-left-radius": "0px",
-          "border-top-right-radius": "0px",
-          "border-top-width": "0px"
-        },
-        "box": {
-          "x": 41,
-          "y": 1282,
-          "width": 798,
-          "height": 110
-        }
-      },
-      {
-        "path": "./section[4]/div[1]/section[1]",
-        "tag": "SECTION",
-        "component": "empty-state",
-        "role": "status",
-        "text": "",
-        "state": {},
-        "style": {
-          "background-color": "var(--wwc-color-surface)",
-          "border-bottom-left-radius": "3px",
-          "border-bottom-right-radius": "3px",
-          "border-bottom-width": "1px",
-          "border-left-width": "1px",
-          "border-right-width": "1px",
-          "border-top-left-radius": "3px",
-          "border-top-right-radius": "3px",
-          "border-top-width": "1px",
-          "display": "grid"
-        },
-        "box": {
-          "x": 41,
-          "y": 1282,
-          "width": 768,
-          "height": 110
-        }
-      },
-      {
-        "path": "./section[4]/div[1]/section[1]/h3[1]",
-        "tag": "H3",
-        "component": null,
-        "role": null,
-        "text": "No local Workers reported",
-        "state": {},
-        "style": {
-          "background-color": "rgb(0, 0, 0)",
-          "border-bottom-left-radius": "0px",
-          "border-bottom-right-radius": "0px",
-          "border-bottom-width": "0px",
-          "border-left-width": "0px",
-          "border-right-width": "0px",
-          "border-top-left-radius": "0px",
-          "border-top-right-radius": "0px",
-          "border-top-width": "0px",
-          "display": "block",
-          "font-size": "18.72px",
-          "font-weight": "700"
-        },
-        "box": {
-          "x": 66,
-          "y": 1307,
-          "width": 282,
-          "height": 28
-        }
-      },
-      {
-        "path": "./section[4]/div[1]/section[1]/p[1]",
-        "tag": "P",
-        "component": null,
-        "role": null,
-        "text": "A local Worker will appear here after the Control Plane reports it.",
-        "state": {},
-        "style": {
-          "background-color": "rgb(0, 0, 0)",
-          "border-bottom-color": "var(--wwc-color-text-muted)",
-          "border-bottom-left-radius": "0px",
-          "border-bottom-right-radius": "0px",
-          "border-bottom-width": "0px",
-          "border-left-color": "var(--wwc-color-text-muted)",
-          "border-left-width": "0px",
-          "border-right-color": "var(--wwc-color-text-muted)",
-          "border-right-width": "0px",
-          "border-top-color": "var(--wwc-color-text-muted)",
-          "border-top-left-radius": "0px",
-          "border-top-right-radius": "0px",
-          "border-top-width": "0px",
-          "color": "var(--wwc-color-text-muted)",
-          "display": "block",
-          "outline-color": "var(--wwc-color-text-muted)"
-        },
-        "box": {
-          "x": 66,
-          "y": 1343,
-          "width": 645,
-          "height": 24
-        }
-      }
-    ]
-  },
-  {
-    "schemaVersion": 1,
     "id": "shell/connection-offline@desktop",
     "kind": "shell",
     "viewport": {
@@ -7620,7 +4838,7 @@
         }
       },
       {
-        "path": "./section[1]/div[1]",
+        "path": "./section[1]/div[2]",
         "tag": "DIV",
         "component": null,
         "role": "alert",
@@ -7652,7 +4870,7 @@
         }
       },
       {
-        "path": "./section[1]/div[1]/span[1]",
+        "path": "./section[1]/div[2]/span[1]",
         "tag": "SPAN",
         "component": null,
         "role": null,
@@ -7682,7 +4900,7 @@
         }
       },
       {
-        "path": "./section[1]/div[1]/button[1]",
+        "path": "./section[1]/div[2]/button[1]",
         "tag": "BUTTON",
         "component": null,
         "role": null,
@@ -7715,7 +4933,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]",
+        "path": "./section[1]/div[3]",
         "tag": "DIV",
         "component": null,
         "role": null,
@@ -7732,7 +4950,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]/div[1]",
+        "path": "./section[1]/div[3]/div[1]",
         "tag": "DIV",
         "component": null,
         "role": "tablist",
@@ -7749,7 +4967,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]/div[1]/button[1]",
+        "path": "./section[1]/div[3]/div[1]/button[1]",
         "tag": "BUTTON",
         "component": null,
         "role": "tab",
@@ -7773,7 +4991,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]/div[1]/button[2]",
+        "path": "./section[1]/div[3]/div[1]/button[2]",
         "tag": "BUTTON",
         "component": null,
         "role": "tab",
@@ -7802,7 +5020,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]/div[2]",
+        "path": "./section[1]/div[3]/div[2]",
         "tag": "DIV",
         "component": null,
         "role": "tabpanel",
@@ -7817,7 +5035,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]/div[2]/div[1]",
+        "path": "./section[1]/div[3]/div[2]/div[1]",
         "tag": "DIV",
         "component": null,
         "role": null,
@@ -7834,7 +5052,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]/div[2]/div[1]/div[1]",
+        "path": "./section[1]/div[3]/div[2]/div[1]/div[1]",
         "tag": "DIV",
         "component": null,
         "role": null,
@@ -7860,7 +5078,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]/div[2]/div[1]/div[1]/div[1]",
+        "path": "./section[1]/div[3]/div[2]/div[1]/div[1]/div[1]",
         "tag": "DIV",
         "component": null,
         "role": null,
@@ -7887,7 +5105,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]/div[2]/div[1]/div[1]/span[1]",
+        "path": "./section[1]/div[3]/div[2]/div[1]/div[1]/span[1]",
         "tag": "SPAN",
         "component": null,
         "role": null,
@@ -7914,7 +5132,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]/div[2]/div[1]/div[2]",
+        "path": "./section[1]/div[3]/div[2]/div[1]/div[2]",
         "tag": "DIV",
         "component": null,
         "role": null,
@@ -7932,7 +5150,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]/div[2]/div[1]/div[3]",
+        "path": "./section[1]/div[3]/div[2]/div[1]/div[3]",
         "tag": "DIV",
         "component": null,
         "role": null,
@@ -7958,7 +5176,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]/div[2]/div[1]/div[3]/div[1]",
+        "path": "./section[1]/div[3]/div[2]/div[1]/div[3]/div[1]",
         "tag": "DIV",
         "component": null,
         "role": null,
@@ -7985,7 +5203,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]/div[2]/div[1]/div[3]/span[1]",
+        "path": "./section[1]/div[3]/div[2]/div[1]/div[3]/span[1]",
         "tag": "SPAN",
         "component": null,
         "role": null,
@@ -8012,7 +5230,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]/div[2]/div[1]/div[4]",
+        "path": "./section[1]/div[3]/div[2]/div[1]/div[4]",
         "tag": "DIV",
         "component": null,
         "role": null,
@@ -8030,7 +5248,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]/div[2]/div[1]/div[5]",
+        "path": "./section[1]/div[3]/div[2]/div[1]/div[5]",
         "tag": "DIV",
         "component": null,
         "role": null,
@@ -8056,7 +5274,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]/div[2]/div[1]/div[5]/div[1]",
+        "path": "./section[1]/div[3]/div[2]/div[1]/div[5]/div[1]",
         "tag": "DIV",
         "component": null,
         "role": null,
@@ -8083,7 +5301,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]/div[2]/div[1]/div[5]/span[1]",
+        "path": "./section[1]/div[3]/div[2]/div[1]/div[5]/span[1]",
         "tag": "SPAN",
         "component": null,
         "role": null,
@@ -8110,7 +5328,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]/div[2]/div[1]/div[6]",
+        "path": "./section[1]/div[3]/div[2]/div[1]/div[6]",
         "tag": "DIV",
         "component": null,
         "role": null,
@@ -8128,7 +5346,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]/div[2]/div[1]/div[7]",
+        "path": "./section[1]/div[3]/div[2]/div[1]/div[7]",
         "tag": "DIV",
         "component": null,
         "role": null,
@@ -8154,7 +5372,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]/div[2]/div[1]/div[7]/div[1]",
+        "path": "./section[1]/div[3]/div[2]/div[1]/div[7]/div[1]",
         "tag": "DIV",
         "component": null,
         "role": null,
@@ -8181,7 +5399,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]/div[2]/div[1]/div[7]/span[1]",
+        "path": "./section[1]/div[3]/div[2]/div[1]/div[7]/span[1]",
         "tag": "SPAN",
         "component": null,
         "role": null,
@@ -8208,7 +5426,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]/div[2]/p[1]",
+        "path": "./section[1]/div[3]/div[2]/p[1]",
         "tag": "P",
         "component": null,
         "role": null,
@@ -8596,7 +5814,7 @@
           "x": 0,
           "y": 0,
           "width": 420,
-          "height": 238
+          "height": 140
         }
       },
       {
@@ -8620,7 +5838,7 @@
         },
         "box": {
           "x": 8,
-          "y": 97,
+          "y": 48,
           "width": 106,
           "height": 42
         }
@@ -8813,84 +6031,6 @@
           "y": 84,
           "width": 58,
           "height": 42
-        }
-      },
-      {
-        "path": "./div[2]",
-        "tag": "DIV",
-        "component": null,
-        "role": null,
-        "text": "",
-        "state": {},
-        "style": {
-          "background-color": "rgb(0, 0, 0)",
-          "border-bottom-width": "0px",
-          "display": "block"
-        },
-        "box": {
-          "x": 16,
-          "y": 138,
-          "width": 292,
-          "height": 86
-        }
-      },
-      {
-        "path": "./div[2]/section[1]",
-        "tag": "SECTION",
-        "component": null,
-        "role": null,
-        "text": "",
-        "state": {},
-        "style": {},
-        "box": {
-          "x": 16,
-          "y": 154,
-          "width": 292,
-          "height": 70
-        }
-      },
-      {
-        "path": "./div[2]/section[1]/p[1]",
-        "tag": "P",
-        "component": null,
-        "role": "status",
-        "text": "已登录，有效期至 2099-09-02 08:00",
-        "state": {},
-        "style": {},
-        "box": {
-          "x": 16,
-          "y": 154,
-          "width": 292,
-          "height": 24
-        }
-      },
-      {
-        "path": "./div[2]/section[1]/button[1]",
-        "tag": "BUTTON",
-        "component": null,
-        "role": null,
-        "text": "退出登录",
-        "state": {},
-        "style": {
-          "background-color": "rgb(239, 239, 239)",
-          "border-bottom-color": "rgb(0, 0, 0)",
-          "border-bottom-width": "2px",
-          "border-left-color": "rgb(0, 0, 0)",
-          "border-left-width": "2px",
-          "border-right-color": "rgb(0, 0, 0)",
-          "border-right-width": "2px",
-          "border-top-color": "rgb(0, 0, 0)",
-          "border-top-width": "2px",
-          "color": "rgb(0, 0, 0)",
-          "cursor": "default",
-          "display": "inline-block",
-          "outline-color": "rgb(0, 0, 0)"
-        },
-        "box": {
-          "x": 16,
-          "y": 194,
-          "width": 80,
-          "height": 30
         }
       }
     ]
@@ -9159,7 +6299,7 @@
           "x": 0,
           "y": 0,
           "width": 388,
-          "height": 565
+          "height": 498
         }
       },
       {
@@ -9280,7 +6420,7 @@
         },
         "box": {
           "x": -16,
-          "y": -1997,
+          "y": -1426,
           "width": 0,
           "height": 0
         }
@@ -9305,7 +6445,7 @@
         },
         "box": {
           "x": -16,
-          "y": -1997,
+          "y": -1426,
           "width": 0,
           "height": 0
         }
@@ -9500,7 +6640,7 @@
           "x": 0,
           "y": 217,
           "width": 388,
-          "height": 348
+          "height": 281
         }
       },
       {
@@ -9940,108 +7080,6 @@
           "width": 44,
           "height": 28
         }
-      },
-      {
-        "path": "./div[2]/section[5]",
-        "tag": "SECTION",
-        "component": null,
-        "role": null,
-        "text": "",
-        "state": {},
-        "style": {
-          "border-bottom-color": "var(--wwc-color-border-subtle)",
-          "border-bottom-width": "1px"
-        },
-        "box": {
-          "x": 0,
-          "y": 510,
-          "width": 388,
-          "height": 55
-        }
-      },
-      {
-        "path": "./div[2]/section[5]/header[1]",
-        "tag": "HEADER",
-        "component": null,
-        "role": null,
-        "text": "",
-        "state": {},
-        "style": {
-          "border-bottom-color": "rgb(23, 23, 23)",
-          "border-bottom-width": "0px",
-          "display": "flex"
-        },
-        "box": {
-          "x": 8,
-          "y": 522,
-          "width": 372,
-          "height": 30
-        }
-      },
-      {
-        "path": "./div[2]/section[5]/header[1]/h3[1]",
-        "tag": "H3",
-        "component": null,
-        "role": null,
-        "text": "最近打开",
-        "state": {},
-        "style": {
-          "display": "block",
-          "font-size": "20px",
-          "font-weight": "700"
-        },
-        "box": {
-          "x": 8,
-          "y": 525,
-          "width": 80,
-          "height": 25
-        }
-      },
-      {
-        "path": "./div[2]/section[5]/header[1]/span[1]",
-        "tag": "SPAN",
-        "component": null,
-        "role": null,
-        "text": "0",
-        "state": {},
-        "style": {
-          "border-bottom-color": "var(--wwc-color-text-muted)",
-          "border-left-color": "var(--wwc-color-text-muted)",
-          "border-right-color": "var(--wwc-color-text-muted)",
-          "border-top-color": "var(--wwc-color-text-muted)",
-          "color": "var(--wwc-color-text-muted)",
-          "display": "block",
-          "font-size": "20px",
-          "font-weight": "700",
-          "outline-color": "var(--wwc-color-text-muted)"
-        },
-        "box": {
-          "x": 100,
-          "y": 522,
-          "width": 32,
-          "height": 30
-        }
-      },
-      {
-        "path": "./div[2]/section[5]/header[1]/button[1]",
-        "tag": "BUTTON",
-        "component": null,
-        "role": null,
-        "text": "",
-        "state": {
-          "aria-expanded": "false"
-        },
-        "style": {
-          "cursor": "default",
-          "display": "block",
-          "font-size": "20px"
-        },
-        "box": {
-          "x": 336,
-          "y": 523,
-          "width": 44,
-          "height": 28
-        }
       }
     ]
   },
@@ -10183,7 +7221,7 @@
         }
       },
       {
-        "path": "./section[1]/div[1]",
+        "path": "./section[1]/div[2]",
         "tag": "DIV",
         "component": null,
         "role": "alert",
@@ -10215,7 +7253,7 @@
         }
       },
       {
-        "path": "./section[1]/div[1]/span[1]",
+        "path": "./section[1]/div[2]/span[1]",
         "tag": "SPAN",
         "component": null,
         "role": null,
@@ -10245,7 +7283,7 @@
         }
       },
       {
-        "path": "./section[1]/div[1]/button[1]",
+        "path": "./section[1]/div[2]/button[1]",
         "tag": "BUTTON",
         "component": null,
         "role": null,
@@ -10278,7 +7316,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]",
+        "path": "./section[1]/div[3]",
         "tag": "DIV",
         "component": null,
         "role": null,
@@ -10295,7 +7333,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]/div[1]",
+        "path": "./section[1]/div[3]/div[1]",
         "tag": "DIV",
         "component": null,
         "role": "tablist",
@@ -10312,7 +7350,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]/div[1]/button[1]",
+        "path": "./section[1]/div[3]/div[1]/button[1]",
         "tag": "BUTTON",
         "component": null,
         "role": "tab",
@@ -10336,7 +7374,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]/div[1]/button[2]",
+        "path": "./section[1]/div[3]/div[1]/button[2]",
         "tag": "BUTTON",
         "component": null,
         "role": "tab",
@@ -10365,7 +7403,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]/div[2]",
+        "path": "./section[1]/div[3]/div[2]",
         "tag": "DIV",
         "component": null,
         "role": "tabpanel",
@@ -10380,7 +7418,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]/div[2]/div[1]",
+        "path": "./section[1]/div[3]/div[2]/div[1]",
         "tag": "DIV",
         "component": null,
         "role": null,
@@ -10397,7 +7435,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]/div[2]/div[1]/div[1]",
+        "path": "./section[1]/div[3]/div[2]/div[1]/div[1]",
         "tag": "DIV",
         "component": null,
         "role": null,
@@ -10423,7 +7461,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]/div[2]/div[1]/div[1]/div[1]",
+        "path": "./section[1]/div[3]/div[2]/div[1]/div[1]/div[1]",
         "tag": "DIV",
         "component": null,
         "role": null,
@@ -10450,7 +7488,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]/div[2]/div[1]/div[1]/span[1]",
+        "path": "./section[1]/div[3]/div[2]/div[1]/div[1]/span[1]",
         "tag": "SPAN",
         "component": null,
         "role": null,
@@ -10477,7 +7515,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]/div[2]/div[1]/div[2]",
+        "path": "./section[1]/div[3]/div[2]/div[1]/div[2]",
         "tag": "DIV",
         "component": null,
         "role": null,
@@ -10495,7 +7533,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]/div[2]/div[1]/div[3]",
+        "path": "./section[1]/div[3]/div[2]/div[1]/div[3]",
         "tag": "DIV",
         "component": null,
         "role": null,
@@ -10521,7 +7559,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]/div[2]/div[1]/div[3]/div[1]",
+        "path": "./section[1]/div[3]/div[2]/div[1]/div[3]/div[1]",
         "tag": "DIV",
         "component": null,
         "role": null,
@@ -10548,7 +7586,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]/div[2]/div[1]/div[3]/span[1]",
+        "path": "./section[1]/div[3]/div[2]/div[1]/div[3]/span[1]",
         "tag": "SPAN",
         "component": null,
         "role": null,
@@ -10575,7 +7613,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]/div[2]/div[1]/div[4]",
+        "path": "./section[1]/div[3]/div[2]/div[1]/div[4]",
         "tag": "DIV",
         "component": null,
         "role": null,
@@ -10593,7 +7631,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]/div[2]/div[1]/div[5]",
+        "path": "./section[1]/div[3]/div[2]/div[1]/div[5]",
         "tag": "DIV",
         "component": null,
         "role": null,
@@ -10619,7 +7657,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]/div[2]/div[1]/div[5]/div[1]",
+        "path": "./section[1]/div[3]/div[2]/div[1]/div[5]/div[1]",
         "tag": "DIV",
         "component": null,
         "role": null,
@@ -10646,7 +7684,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]/div[2]/div[1]/div[5]/span[1]",
+        "path": "./section[1]/div[3]/div[2]/div[1]/div[5]/span[1]",
         "tag": "SPAN",
         "component": null,
         "role": null,
@@ -10673,7 +7711,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]/div[2]/div[1]/div[6]",
+        "path": "./section[1]/div[3]/div[2]/div[1]/div[6]",
         "tag": "DIV",
         "component": null,
         "role": null,
@@ -10691,7 +7729,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]/div[2]/div[1]/div[7]",
+        "path": "./section[1]/div[3]/div[2]/div[1]/div[7]",
         "tag": "DIV",
         "component": null,
         "role": null,
@@ -10717,7 +7755,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]/div[2]/div[1]/div[7]/div[1]",
+        "path": "./section[1]/div[3]/div[2]/div[1]/div[7]/div[1]",
         "tag": "DIV",
         "component": null,
         "role": null,
@@ -10744,7 +7782,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]/div[2]/div[1]/div[7]/span[1]",
+        "path": "./section[1]/div[3]/div[2]/div[1]/div[7]/span[1]",
         "tag": "SPAN",
         "component": null,
         "role": null,
@@ -10771,7 +7809,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]/div[2]/p[1]",
+        "path": "./section[1]/div[3]/div[2]/p[1]",
         "tag": "P",
         "component": null,
         "role": null,
@@ -11041,7 +8079,7 @@
         },
         "box": {
           "x": -16,
-          "y": -1428,
+          "y": -1330,
           "width": 0,
           "height": 0
         }
@@ -11161,7 +8199,7 @@
           "x": 0,
           "y": 0,
           "width": 388,
-          "height": 1102
+          "height": 1066
         }
       },
       {
@@ -11178,7 +8216,7 @@
           "x": 16,
           "y": 16,
           "width": 356,
-          "height": 174
+          "height": 138
         }
       },
       {
@@ -11251,28 +8289,8 @@
         "box": {
           "x": 16,
           "y": 110,
-          "width": 356,
-          "height": 80
-        }
-      },
-      {
-        "path": "./div[1]/div[1]/a[1]",
-        "tag": "A",
-        "component": null,
-        "role": null,
-        "text": "打开仓库与本地 Worker 运维",
-        "state": {},
-        "style": {
-          "cursor": "pointer",
-          "display": "block",
-          "font-weight": "600",
-          "text-decoration-line": "underline"
-        },
-        "box": {
-          "x": 16,
-          "y": 110,
-          "width": 221,
-          "height": 24
+          "width": 181,
+          "height": 44
         }
       },
       {
@@ -11298,8 +8316,8 @@
         },
         "box": {
           "x": 16,
-          "y": 146,
-          "width": 356,
+          "y": 110,
+          "width": 181,
           "height": 44
         }
       },
@@ -11324,7 +8342,7 @@
         },
         "box": {
           "x": -16,
-          "y": -1428,
+          "y": -1330,
           "width": 0,
           "height": 0
         }
@@ -11350,7 +8368,7 @@
         },
         "box": {
           "x": -16,
-          "y": -1428,
+          "y": -1330,
           "width": 0,
           "height": 0
         }
@@ -11376,7 +8394,7 @@
         },
         "box": {
           "x": -16,
-          "y": -1428,
+          "y": -1330,
           "width": 0,
           "height": 0
         }
@@ -11402,7 +8420,7 @@
         },
         "box": {
           "x": -16,
-          "y": -1428,
+          "y": -1330,
           "width": 0,
           "height": 0
         }
@@ -11428,7 +8446,7 @@
         },
         "box": {
           "x": -16,
-          "y": -1428,
+          "y": -1330,
           "width": 0,
           "height": 0
         }
@@ -11464,7 +8482,7 @@
         },
         "box": {
           "x": 16,
-          "y": 214,
+          "y": 178,
           "width": 140,
           "height": 31
         }
@@ -11492,7 +8510,7 @@
         },
         "box": {
           "x": 25,
-          "y": 219,
+          "y": 183,
           "width": 8,
           "height": 21
         }
@@ -11518,7 +8536,7 @@
         },
         "box": {
           "x": 37,
-          "y": 219,
+          "y": 183,
           "width": 110,
           "height": 21
         }
@@ -11551,7 +8569,7 @@
         },
         "box": {
           "x": 16,
-          "y": 269,
+          "y": 233,
           "width": 356,
           "height": 250
         }
@@ -11579,7 +8597,7 @@
         },
         "box": {
           "x": 41,
-          "y": 294,
+          "y": 258,
           "width": 10,
           "height": 200
         }
@@ -11604,7 +8622,7 @@
         },
         "box": {
           "x": 59,
-          "y": 294,
+          "y": 258,
           "width": 288,
           "height": 200
         }
@@ -11623,7 +8641,7 @@
         },
         "box": {
           "x": 59,
-          "y": 294,
+          "y": 258,
           "width": 288,
           "height": 36
         }
@@ -11640,7 +8658,7 @@
         },
         "box": {
           "x": 59,
-          "y": 354,
+          "y": 318,
           "width": 288,
           "height": 72
         }
@@ -11655,7 +8673,7 @@
         "style": {},
         "box": {
           "x": 59,
-          "y": 450,
+          "y": 414,
           "width": 288,
           "height": 44
         }
@@ -11691,7 +8709,7 @@
         },
         "box": {
           "x": 59,
-          "y": 450,
+          "y": 414,
           "width": 138,
           "height": 44
         }
@@ -11706,7 +8724,7 @@
         "style": {},
         "box": {
           "x": 16,
-          "y": 543,
+          "y": 507,
           "width": 356,
           "height": 543
         }
@@ -11724,7 +8742,7 @@
         },
         "box": {
           "x": 16,
-          "y": 543,
+          "y": 507,
           "width": 356,
           "height": 99
         }
@@ -11744,7 +8762,7 @@
         },
         "box": {
           "x": 16,
-          "y": 555,
+          "y": 519,
           "width": 356,
           "height": 24
         }
@@ -11771,7 +8789,7 @@
         },
         "box": {
           "x": 16,
-          "y": 587,
+          "y": 551,
           "width": 356,
           "height": 42
         }
@@ -11789,7 +8807,7 @@
         },
         "box": {
           "x": 16,
-          "y": 650,
+          "y": 614,
           "width": 356,
           "height": 96
         }
@@ -11809,7 +8827,7 @@
         },
         "box": {
           "x": 16,
-          "y": 662,
+          "y": 626,
           "width": 356,
           "height": 24
         }
@@ -11836,7 +8854,7 @@
         },
         "box": {
           "x": 16,
-          "y": 694,
+          "y": 658,
           "width": 356,
           "height": 39
         }
@@ -11861,7 +8879,7 @@
         },
         "box": {
           "x": -16,
-          "y": -1428,
+          "y": -1330,
           "width": 0,
           "height": 0
         }
@@ -11886,7 +8904,7 @@
         },
         "box": {
           "x": -16,
-          "y": -1428,
+          "y": -1330,
           "width": 0,
           "height": 0
         }
@@ -11904,7 +8922,7 @@
         },
         "box": {
           "x": 16,
-          "y": 754,
+          "y": 718,
           "width": 356,
           "height": 96
         }
@@ -11924,7 +8942,7 @@
         },
         "box": {
           "x": 16,
-          "y": 766,
+          "y": 730,
           "width": 356,
           "height": 24
         }
@@ -11951,7 +8969,7 @@
         },
         "box": {
           "x": 16,
-          "y": 798,
+          "y": 762,
           "width": 356,
           "height": 39
         }
@@ -11976,7 +8994,7 @@
         },
         "box": {
           "x": -16,
-          "y": -1428,
+          "y": -1330,
           "width": 0,
           "height": 0
         }
@@ -12001,7 +9019,7 @@
         },
         "box": {
           "x": -16,
-          "y": -1428,
+          "y": -1330,
           "width": 0,
           "height": 0
         }
@@ -12026,7 +9044,7 @@
         },
         "box": {
           "x": -16,
-          "y": -1428,
+          "y": -1330,
           "width": 0,
           "height": 0
         }
@@ -12044,7 +9062,7 @@
         },
         "box": {
           "x": 16,
-          "y": 858,
+          "y": 822,
           "width": 356,
           "height": 96
         }
@@ -12064,7 +9082,7 @@
         },
         "box": {
           "x": 16,
-          "y": 870,
+          "y": 834,
           "width": 356,
           "height": 24
         }
@@ -12091,7 +9109,7 @@
         },
         "box": {
           "x": 16,
-          "y": 902,
+          "y": 866,
           "width": 356,
           "height": 39
         }
@@ -12116,7 +9134,7 @@
         },
         "box": {
           "x": -16,
-          "y": -1428,
+          "y": -1330,
           "width": 0,
           "height": 0
         }
@@ -12141,7 +9159,7 @@
         },
         "box": {
           "x": -16,
-          "y": -1428,
+          "y": -1330,
           "width": 0,
           "height": 0
         }
@@ -12162,7 +9180,7 @@
         },
         "box": {
           "x": 16,
-          "y": 970,
+          "y": 934,
           "width": 356,
           "height": 56
         }
@@ -12190,7 +9208,7 @@
         },
         "box": {
           "x": 16,
-          "y": 971,
+          "y": 935,
           "width": 356,
           "height": 54
         }
@@ -12209,7 +9227,7 @@
         },
         "box": {
           "x": 16,
-          "y": 983,
+          "y": 947,
           "width": 80,
           "height": 30
         }
@@ -12229,7 +9247,7 @@
         },
         "box": {
           "x": 360,
-          "y": 983,
+          "y": 947,
           "width": 12,
           "height": 30
         }
@@ -12246,7 +9264,7 @@
         },
         "box": {
           "x": 16,
-          "y": 1042,
+          "y": 1006,
           "width": 102,
           "height": 44
         }
@@ -12277,7 +9295,7 @@
         },
         "box": {
           "x": 16,
-          "y": 1042,
+          "y": 1006,
           "width": 90,
           "height": 44
         }
@@ -12301,7 +9319,7 @@
         },
         "box": {
           "x": 118,
-          "y": 1057,
+          "y": 1021,
           "width": 0,
           "height": 14
         }
@@ -12815,7 +9833,7 @@
         },
         "box": {
           "x": -16,
-          "y": -1428,
+          "y": -1330,
           "width": 0,
           "height": 0
         }
@@ -12840,7 +9858,7 @@
         },
         "box": {
           "x": -16,
-          "y": -1428,
+          "y": -1330,
           "width": 0,
           "height": 0
         }
@@ -12865,7 +9883,7 @@
         },
         "box": {
           "x": -16,
-          "y": -1428,
+          "y": -1330,
           "width": 0,
           "height": 0
         }
@@ -12890,7 +9908,7 @@
         },
         "box": {
           "x": -16,
-          "y": -1428,
+          "y": -1330,
           "width": 0,
           "height": 0
         }
@@ -12968,7 +9986,7 @@
         },
         "box": {
           "x": -16,
-          "y": -1428,
+          "y": -1330,
           "width": 0,
           "height": 0
         }
@@ -12993,7 +10011,7 @@
         },
         "box": {
           "x": -16,
-          "y": -1428,
+          "y": -1330,
           "width": 0,
           "height": 0
         }
@@ -13018,7 +10036,7 @@
         },
         "box": {
           "x": -16,
-          "y": -1428,
+          "y": -1330,
           "width": 0,
           "height": 0
         }
@@ -13191,2588 +10209,6 @@
           "y": 748,
           "width": 27,
           "height": 24
-        }
-      }
-    ]
-  },
-  {
-    "schemaVersion": 1,
-    "id": "page/decisions@narrow",
-    "kind": "page",
-    "viewport": {
-      "width": 420,
-      "height": 900
-    },
-    "fontStack": "'wwc-visual-regression', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
-    "nodes": [
-      {
-        "path": ".",
-        "tag": "SECTION",
-        "component": null,
-        "role": null,
-        "text": "",
-        "state": {
-          "aria-busy": "false"
-        },
-        "style": {
-          "background-color": "rgb(0, 0, 0)",
-          "border-bottom-color": "rgb(23, 23, 23)",
-          "border-bottom-left-radius": "0px",
-          "border-bottom-right-radius": "0px",
-          "border-bottom-width": "0px",
-          "border-left-color": "rgb(23, 23, 23)",
-          "border-left-width": "0px",
-          "border-right-color": "rgb(23, 23, 23)",
-          "border-right-width": "0px",
-          "border-top-color": "rgb(23, 23, 23)",
-          "border-top-left-radius": "0px",
-          "border-top-right-radius": "0px",
-          "border-top-width": "0px",
-          "box-shadow": "none",
-          "color": "rgb(23, 23, 23)",
-          "cursor": "auto",
-          "display": "grid",
-          "font-size": "16px",
-          "font-weight": "400",
-          "opacity": "1",
-          "outline-color": "rgb(23, 23, 23)",
-          "outline-style": "none",
-          "outline-width": "3px",
-          "position": "static",
-          "text-decoration-line": "none",
-          "visibility": "visible",
-          "z-index": "auto"
-        },
-        "box": {
-          "x": 0,
-          "y": 0,
-          "width": 388,
-          "height": 1750
-        }
-      },
-      {
-        "path": "./header[1]",
-        "tag": "HEADER",
-        "component": "page-header",
-        "role": null,
-        "text": "",
-        "state": {},
-        "style": {},
-        "box": {
-          "x": 16,
-          "y": 16,
-          "width": 356,
-          "height": 128
-        }
-      },
-      {
-        "path": "./header[1]/p[1]",
-        "tag": "P",
-        "component": null,
-        "role": null,
-        "text": "Approvals and attention",
-        "state": {},
-        "style": {
-          "display": "block",
-          "font-size": "12px",
-          "font-weight": "700"
-        },
-        "box": {
-          "x": 16,
-          "y": 16,
-          "width": 356,
-          "height": 18
-        }
-      },
-      {
-        "path": "./header[1]/h2[1]",
-        "tag": "H2",
-        "component": null,
-        "role": null,
-        "text": "Local decisions",
-        "state": {},
-        "style": {
-          "display": "block",
-          "font-size": "24px",
-          "font-weight": "700"
-        },
-        "box": {
-          "x": 16,
-          "y": 38,
-          "width": 356,
-          "height": 30
-        }
-      },
-      {
-        "path": "./header[1]/p[2]",
-        "tag": "P",
-        "component": null,
-        "role": null,
-        "text": "Review pending inputs, tool approvals, and business Attention with current revision bindings.",
-        "state": {},
-        "style": {
-          "border-bottom-color": "var(--wwc-color-text-muted)",
-          "border-left-color": "var(--wwc-color-text-muted)",
-          "border-right-color": "var(--wwc-color-text-muted)",
-          "border-top-color": "var(--wwc-color-text-muted)",
-          "color": "var(--wwc-color-text-muted)",
-          "display": "block",
-          "outline-color": "var(--wwc-color-text-muted)"
-        },
-        "box": {
-          "x": 16,
-          "y": 72,
-          "width": 356,
-          "height": 72
-        }
-      },
-      {
-        "path": "./p[1]",
-        "tag": "P",
-        "component": null,
-        "role": null,
-        "text": "Inputs include exact current choices such as Plan Delta or Replan. Submitted responses are cleared immediately.",
-        "state": {},
-        "style": {
-          "border-bottom-color": "var(--wwc-color-text-muted)",
-          "border-left-color": "var(--wwc-color-text-muted)",
-          "border-right-color": "var(--wwc-color-text-muted)",
-          "border-top-color": "var(--wwc-color-text-muted)",
-          "color": "var(--wwc-color-text-muted)",
-          "display": "block",
-          "outline-color": "var(--wwc-color-text-muted)"
-        },
-        "box": {
-          "x": 16,
-          "y": 160,
-          "width": 356,
-          "height": 96
-        }
-      },
-      {
-        "path": "./span[1]",
-        "tag": "SPAN",
-        "component": "status-badge",
-        "role": "status",
-        "text": "",
-        "state": {
-          "data-tone": "danger"
-        },
-        "style": {
-          "background-color": "var(--wwc-color-danger-surface)",
-          "border-bottom-color": "rgb(179, 38, 30)",
-          "border-bottom-left-radius": "2px",
-          "border-bottom-right-radius": "2px",
-          "border-bottom-width": "1px",
-          "border-left-color": "rgb(179, 38, 30)",
-          "border-left-width": "1px",
-          "border-right-color": "rgb(179, 38, 30)",
-          "border-right-width": "1px",
-          "border-top-color": "rgb(179, 38, 30)",
-          "border-top-left-radius": "2px",
-          "border-top-right-radius": "2px",
-          "border-top-width": "1px",
-          "color": "rgb(179, 38, 30)",
-          "display": "flex",
-          "font-size": "14px",
-          "font-weight": "600",
-          "outline-color": "rgb(179, 38, 30)"
-        },
-        "box": {
-          "x": 16,
-          "y": 272,
-          "width": 140,
-          "height": 31
-        }
-      },
-      {
-        "path": "./span[1]/span[1]",
-        "tag": "SPAN",
-        "component": null,
-        "role": null,
-        "text": "×",
-        "state": {
-          "aria-hidden": "true"
-        },
-        "style": {
-          "background-color": "rgb(0, 0, 0)",
-          "border-bottom-left-radius": "0px",
-          "border-bottom-right-radius": "0px",
-          "border-bottom-width": "0px",
-          "border-left-width": "0px",
-          "border-right-width": "0px",
-          "border-top-left-radius": "0px",
-          "border-top-right-radius": "0px",
-          "border-top-width": "0px",
-          "display": "block"
-        },
-        "box": {
-          "x": 25,
-          "y": 277,
-          "width": 8,
-          "height": 21
-        }
-      },
-      {
-        "path": "./span[1]/span[2]",
-        "tag": "SPAN",
-        "component": null,
-        "role": null,
-        "text": "Reconnecting…",
-        "state": {},
-        "style": {
-          "background-color": "rgb(0, 0, 0)",
-          "border-bottom-left-radius": "0px",
-          "border-bottom-right-radius": "0px",
-          "border-bottom-width": "0px",
-          "border-left-width": "0px",
-          "border-right-width": "0px",
-          "border-top-left-radius": "0px",
-          "border-top-right-radius": "0px",
-          "border-top-width": "0px",
-          "display": "block"
-        },
-        "box": {
-          "x": 37,
-          "y": 277,
-          "width": 110,
-          "height": 21
-        }
-      },
-      {
-        "path": "./section[1]",
-        "tag": "SECTION",
-        "component": "error-state",
-        "role": "alert",
-        "text": "",
-        "state": {
-          "data-tone": "danger"
-        },
-        "style": {
-          "background-color": "var(--wwc-color-danger-surface)",
-          "border-bottom-color": "rgb(179, 38, 30)",
-          "border-bottom-left-radius": "3px",
-          "border-bottom-right-radius": "3px",
-          "border-bottom-width": "1px",
-          "border-left-color": "rgb(179, 38, 30)",
-          "border-left-width": "1px",
-          "border-right-color": "rgb(179, 38, 30)",
-          "border-right-width": "1px",
-          "border-top-color": "rgb(179, 38, 30)",
-          "border-top-left-radius": "3px",
-          "border-top-right-radius": "3px",
-          "border-top-width": "1px",
-          "color": "rgb(179, 38, 30)",
-          "outline-color": "rgb(179, 38, 30)"
-        },
-        "box": {
-          "x": 16,
-          "y": 319,
-          "width": 356,
-          "height": 286
-        }
-      },
-      {
-        "path": "./section[1]/span[1]",
-        "tag": "SPAN",
-        "component": null,
-        "role": null,
-        "text": "×",
-        "state": {
-          "aria-hidden": "true"
-        },
-        "style": {
-          "background-color": "rgb(0, 0, 0)",
-          "border-bottom-left-radius": "0px",
-          "border-bottom-right-radius": "0px",
-          "border-bottom-width": "0px",
-          "border-left-width": "0px",
-          "border-right-width": "0px",
-          "border-top-left-radius": "0px",
-          "border-top-right-radius": "0px",
-          "border-top-width": "0px",
-          "display": "block"
-        },
-        "box": {
-          "x": 41,
-          "y": 344,
-          "width": 10,
-          "height": 236
-        }
-      },
-      {
-        "path": "./section[1]/div[1]",
-        "tag": "DIV",
-        "component": null,
-        "role": null,
-        "text": "",
-        "state": {},
-        "style": {
-          "background-color": "rgb(0, 0, 0)",
-          "border-bottom-left-radius": "0px",
-          "border-bottom-right-radius": "0px",
-          "border-bottom-width": "0px",
-          "border-left-width": "0px",
-          "border-right-width": "0px",
-          "border-top-left-radius": "0px",
-          "border-top-right-radius": "0px",
-          "border-top-width": "0px"
-        },
-        "box": {
-          "x": 59,
-          "y": 344,
-          "width": 288,
-          "height": 236
-        }
-      },
-      {
-        "path": "./section[1]/div[1]/h2[1]",
-        "tag": "H2",
-        "component": null,
-        "role": null,
-        "text": "Local decisions unavailable",
-        "state": {},
-        "style": {
-          "display": "block",
-          "font-size": "24px",
-          "font-weight": "700"
-        },
-        "box": {
-          "x": 59,
-          "y": 344,
-          "width": 288,
-          "height": 72
-        }
-      },
-      {
-        "path": "./section[1]/div[1]/p[1]",
-        "tag": "P",
-        "component": null,
-        "role": null,
-        "text": "Local decisions could not be updated. Retry, or review the server status.",
-        "state": {},
-        "style": {
-          "display": "block"
-        },
-        "box": {
-          "x": 59,
-          "y": 440,
-          "width": 288,
-          "height": 72
-        }
-      },
-      {
-        "path": "./section[1]/div[1]/div[1]",
-        "tag": "DIV",
-        "component": null,
-        "role": null,
-        "text": "",
-        "state": {},
-        "style": {},
-        "box": {
-          "x": 59,
-          "y": 536,
-          "width": 288,
-          "height": 44
-        }
-      },
-      {
-        "path": "./section[1]/div[1]/div[1]/button[2]",
-        "tag": "BUTTON",
-        "component": "button",
-        "role": null,
-        "text": "Reconnect events",
-        "state": {
-          "data-variant": "default"
-        },
-        "style": {
-          "background-color": "var(--wwc-color-surface)",
-          "border-bottom-color": "rgb(23, 23, 23)",
-          "border-bottom-left-radius": "2px",
-          "border-bottom-right-radius": "2px",
-          "border-bottom-width": "1px",
-          "border-left-color": "rgb(23, 23, 23)",
-          "border-left-width": "1px",
-          "border-right-color": "rgb(23, 23, 23)",
-          "border-right-width": "1px",
-          "border-top-color": "rgb(23, 23, 23)",
-          "border-top-left-radius": "2px",
-          "border-top-right-radius": "2px",
-          "border-top-width": "1px",
-          "color": "rgb(23, 23, 23)",
-          "cursor": "pointer",
-          "display": "block",
-          "font-weight": "600",
-          "outline-color": "rgb(23, 23, 23)"
-        },
-        "box": {
-          "x": 59,
-          "y": 536,
-          "width": 180,
-          "height": 44
-        }
-      },
-      {
-        "path": "./section[2]",
-        "tag": "SECTION",
-        "component": "panel",
-        "role": null,
-        "text": "",
-        "state": {},
-        "style": {
-          "background-color": "var(--wwc-color-surface)",
-          "border-bottom-left-radius": "3px",
-          "border-bottom-right-radius": "3px",
-          "border-bottom-width": "1px",
-          "border-left-width": "1px",
-          "border-right-width": "1px",
-          "border-top-left-radius": "3px",
-          "border-top-right-radius": "3px",
-          "border-top-width": "1px",
-          "display": "block"
-        },
-        "box": {
-          "x": 16,
-          "y": 621,
-          "width": 356,
-          "height": 350
-        }
-      },
-      {
-        "path": "./section[2]/header[1]",
-        "tag": "HEADER",
-        "component": null,
-        "role": null,
-        "text": "",
-        "state": {},
-        "style": {
-          "background-color": "rgb(0, 0, 0)",
-          "border-bottom-left-radius": "0px",
-          "border-bottom-right-radius": "0px",
-          "border-bottom-width": "0px",
-          "border-left-width": "0px",
-          "border-right-width": "0px",
-          "border-top-left-radius": "0px",
-          "border-top-right-radius": "0px",
-          "border-top-width": "0px",
-          "display": "grid"
-        },
-        "box": {
-          "x": 33,
-          "y": 638,
-          "width": 322,
-          "height": 142
-        }
-      },
-      {
-        "path": "./section[2]/header[1]/h3[1]",
-        "tag": "H3",
-        "component": null,
-        "role": null,
-        "text": "Pending inputs",
-        "state": {},
-        "style": {
-          "display": "block",
-          "font-size": "18.72px",
-          "font-weight": "700"
-        },
-        "box": {
-          "x": 33,
-          "y": 657,
-          "width": 322,
-          "height": 28
-        }
-      },
-      {
-        "path": "./section[2]/header[1]/p[1]",
-        "tag": "P",
-        "component": null,
-        "role": null,
-        "text": "Responses remain bound to the current ProductSession and execution identity.",
-        "state": {},
-        "style": {
-          "border-bottom-color": "var(--wwc-color-text-muted)",
-          "border-left-color": "var(--wwc-color-text-muted)",
-          "border-right-color": "var(--wwc-color-text-muted)",
-          "border-top-color": "var(--wwc-color-text-muted)",
-          "color": "var(--wwc-color-text-muted)",
-          "display": "block",
-          "outline-color": "var(--wwc-color-text-muted)"
-        },
-        "box": {
-          "x": 33,
-          "y": 708,
-          "width": 322,
-          "height": 72
-        }
-      },
-      {
-        "path": "./section[2]/div[1]",
-        "tag": "DIV",
-        "component": null,
-        "role": null,
-        "text": "",
-        "state": {},
-        "style": {
-          "background-color": "rgb(0, 0, 0)",
-          "border-bottom-left-radius": "0px",
-          "border-bottom-right-radius": "0px",
-          "border-bottom-width": "0px",
-          "border-left-width": "0px",
-          "border-right-width": "0px",
-          "border-top-left-radius": "0px",
-          "border-top-right-radius": "0px",
-          "border-top-width": "0px"
-        },
-        "box": {
-          "x": 33,
-          "y": 796,
-          "width": 322,
-          "height": 158
-        }
-      },
-      {
-        "path": "./section[2]/div[1]/section[1]",
-        "tag": "SECTION",
-        "component": "empty-state",
-        "role": "status",
-        "text": "",
-        "state": {},
-        "style": {
-          "background-color": "var(--wwc-color-surface)",
-          "border-bottom-left-radius": "3px",
-          "border-bottom-right-radius": "3px",
-          "border-bottom-width": "1px",
-          "border-left-width": "1px",
-          "border-right-width": "1px",
-          "border-top-left-radius": "3px",
-          "border-top-right-radius": "3px",
-          "border-top-width": "1px",
-          "display": "grid"
-        },
-        "box": {
-          "x": 33,
-          "y": 796,
-          "width": 322,
-          "height": 158
-        }
-      },
-      {
-        "path": "./section[2]/div[1]/section[1]/h3[1]",
-        "tag": "H3",
-        "component": null,
-        "role": null,
-        "text": "No pending inputs",
-        "state": {},
-        "style": {
-          "background-color": "rgb(0, 0, 0)",
-          "border-bottom-left-radius": "0px",
-          "border-bottom-right-radius": "0px",
-          "border-bottom-width": "0px",
-          "border-left-width": "0px",
-          "border-right-width": "0px",
-          "border-top-left-radius": "0px",
-          "border-top-right-radius": "0px",
-          "border-top-width": "0px",
-          "display": "block",
-          "font-size": "18.72px",
-          "font-weight": "700"
-        },
-        "box": {
-          "x": 58,
-          "y": 821,
-          "width": 192,
-          "height": 28
-        }
-      },
-      {
-        "path": "./section[2]/div[1]/section[1]/p[1]",
-        "tag": "P",
-        "component": null,
-        "role": null,
-        "text": "New input requests will appear here when a session needs a response.",
-        "state": {},
-        "style": {
-          "background-color": "rgb(0, 0, 0)",
-          "border-bottom-color": "var(--wwc-color-text-muted)",
-          "border-bottom-left-radius": "0px",
-          "border-bottom-right-radius": "0px",
-          "border-bottom-width": "0px",
-          "border-left-color": "var(--wwc-color-text-muted)",
-          "border-left-width": "0px",
-          "border-right-color": "var(--wwc-color-text-muted)",
-          "border-right-width": "0px",
-          "border-top-color": "var(--wwc-color-text-muted)",
-          "border-top-left-radius": "0px",
-          "border-top-right-radius": "0px",
-          "border-top-width": "0px",
-          "color": "var(--wwc-color-text-muted)",
-          "display": "block",
-          "outline-color": "var(--wwc-color-text-muted)"
-        },
-        "box": {
-          "x": 58,
-          "y": 857,
-          "width": 272,
-          "height": 72
-        }
-      },
-      {
-        "path": "./section[3]",
-        "tag": "SECTION",
-        "component": "panel",
-        "role": null,
-        "text": "",
-        "state": {},
-        "style": {
-          "background-color": "var(--wwc-color-surface)",
-          "border-bottom-left-radius": "3px",
-          "border-bottom-right-radius": "3px",
-          "border-bottom-width": "1px",
-          "border-left-width": "1px",
-          "border-right-width": "1px",
-          "border-top-left-radius": "3px",
-          "border-top-right-radius": "3px",
-          "border-top-width": "1px",
-          "display": "block"
-        },
-        "box": {
-          "x": 16,
-          "y": 987,
-          "width": 356,
-          "height": 354
-        }
-      },
-      {
-        "path": "./section[3]/header[1]",
-        "tag": "HEADER",
-        "component": null,
-        "role": null,
-        "text": "",
-        "state": {},
-        "style": {
-          "background-color": "rgb(0, 0, 0)",
-          "border-bottom-left-radius": "0px",
-          "border-bottom-right-radius": "0px",
-          "border-bottom-width": "0px",
-          "border-left-width": "0px",
-          "border-right-width": "0px",
-          "border-top-left-radius": "0px",
-          "border-top-right-radius": "0px",
-          "border-top-width": "0px",
-          "display": "grid"
-        },
-        "box": {
-          "x": 33,
-          "y": 1004,
-          "width": 322,
-          "height": 142
-        }
-      },
-      {
-        "path": "./section[3]/header[1]/h3[1]",
-        "tag": "H3",
-        "component": null,
-        "role": null,
-        "text": "Tool approvals",
-        "state": {},
-        "style": {
-          "display": "block",
-          "font-size": "18.72px",
-          "font-weight": "700"
-        },
-        "box": {
-          "x": 33,
-          "y": 1022,
-          "width": 322,
-          "height": 28
-        }
-      },
-      {
-        "path": "./section[3]/header[1]/p[1]",
-        "tag": "P",
-        "component": null,
-        "role": null,
-        "text": "Each decision is submitted with the current session identity and revision.",
-        "state": {},
-        "style": {
-          "border-bottom-color": "var(--wwc-color-text-muted)",
-          "border-left-color": "var(--wwc-color-text-muted)",
-          "border-right-color": "var(--wwc-color-text-muted)",
-          "border-top-color": "var(--wwc-color-text-muted)",
-          "color": "var(--wwc-color-text-muted)",
-          "display": "block",
-          "outline-color": "var(--wwc-color-text-muted)"
-        },
-        "box": {
-          "x": 33,
-          "y": 1073,
-          "width": 322,
-          "height": 72
-        }
-      },
-      {
-        "path": "./section[3]/div[1]",
-        "tag": "DIV",
-        "component": null,
-        "role": null,
-        "text": "",
-        "state": {},
-        "style": {
-          "background-color": "rgb(0, 0, 0)",
-          "border-bottom-left-radius": "0px",
-          "border-bottom-right-radius": "0px",
-          "border-bottom-width": "0px",
-          "border-left-width": "0px",
-          "border-right-width": "0px",
-          "border-top-left-radius": "0px",
-          "border-top-right-radius": "0px",
-          "border-top-width": "0px"
-        },
-        "box": {
-          "x": 33,
-          "y": 1161,
-          "width": 322,
-          "height": 162
-        }
-      },
-      {
-        "path": "./section[3]/div[1]/section[1]",
-        "tag": "SECTION",
-        "component": "empty-state",
-        "role": "status",
-        "text": "",
-        "state": {},
-        "style": {
-          "background-color": "var(--wwc-color-surface)",
-          "border-bottom-left-radius": "3px",
-          "border-bottom-right-radius": "3px",
-          "border-bottom-width": "1px",
-          "border-left-width": "1px",
-          "border-right-width": "1px",
-          "border-top-left-radius": "3px",
-          "border-top-right-radius": "3px",
-          "border-top-width": "1px",
-          "display": "grid"
-        },
-        "box": {
-          "x": 33,
-          "y": 1161,
-          "width": 322,
-          "height": 162
-        }
-      },
-      {
-        "path": "./section[3]/div[1]/section[1]/h3[1]",
-        "tag": "H3",
-        "component": null,
-        "role": null,
-        "text": "No pending tool approvals",
-        "state": {},
-        "style": {
-          "background-color": "rgb(0, 0, 0)",
-          "border-bottom-left-radius": "0px",
-          "border-bottom-right-radius": "0px",
-          "border-bottom-width": "0px",
-          "border-left-width": "0px",
-          "border-right-width": "0px",
-          "border-top-left-radius": "0px",
-          "border-top-right-radius": "0px",
-          "border-top-width": "0px",
-          "display": "block",
-          "font-size": "18.72px",
-          "font-weight": "700"
-        },
-        "box": {
-          "x": 58,
-          "y": 1186,
-          "width": 272,
-          "height": 56
-        }
-      },
-      {
-        "path": "./section[3]/div[1]/section[1]/p[1]",
-        "tag": "P",
-        "component": null,
-        "role": null,
-        "text": "Tool requests that require a decision will appear here.",
-        "state": {},
-        "style": {
-          "background-color": "rgb(0, 0, 0)",
-          "border-bottom-color": "var(--wwc-color-text-muted)",
-          "border-bottom-left-radius": "0px",
-          "border-bottom-right-radius": "0px",
-          "border-bottom-width": "0px",
-          "border-left-color": "var(--wwc-color-text-muted)",
-          "border-left-width": "0px",
-          "border-right-color": "var(--wwc-color-text-muted)",
-          "border-right-width": "0px",
-          "border-top-color": "var(--wwc-color-text-muted)",
-          "border-top-left-radius": "0px",
-          "border-top-right-radius": "0px",
-          "border-top-width": "0px",
-          "color": "var(--wwc-color-text-muted)",
-          "display": "block",
-          "outline-color": "var(--wwc-color-text-muted)"
-        },
-        "box": {
-          "x": 58,
-          "y": 1250,
-          "width": 272,
-          "height": 48
-        }
-      },
-      {
-        "path": "./section[4]",
-        "tag": "SECTION",
-        "component": "panel",
-        "role": null,
-        "text": "",
-        "state": {},
-        "style": {
-          "background-color": "var(--wwc-color-surface)",
-          "border-bottom-left-radius": "3px",
-          "border-bottom-right-radius": "3px",
-          "border-bottom-width": "1px",
-          "border-left-width": "1px",
-          "border-right-width": "1px",
-          "border-top-left-radius": "3px",
-          "border-top-right-radius": "3px",
-          "border-top-width": "1px",
-          "display": "block"
-        },
-        "box": {
-          "x": 16,
-          "y": 1356,
-          "width": 356,
-          "height": 378
-        }
-      },
-      {
-        "path": "./section[4]/header[1]",
-        "tag": "HEADER",
-        "component": null,
-        "role": null,
-        "text": "",
-        "state": {},
-        "style": {
-          "background-color": "rgb(0, 0, 0)",
-          "border-bottom-left-radius": "0px",
-          "border-bottom-right-radius": "0px",
-          "border-bottom-width": "0px",
-          "border-left-width": "0px",
-          "border-right-width": "0px",
-          "border-top-left-radius": "0px",
-          "border-top-right-radius": "0px",
-          "border-top-width": "0px",
-          "display": "grid"
-        },
-        "box": {
-          "x": 33,
-          "y": 1373,
-          "width": 322,
-          "height": 142
-        }
-      },
-      {
-        "path": "./section[4]/header[1]/h3[1]",
-        "tag": "H3",
-        "component": null,
-        "role": null,
-        "text": "Business Attention",
-        "state": {},
-        "style": {
-          "display": "block",
-          "font-size": "18.72px",
-          "font-weight": "700"
-        },
-        "box": {
-          "x": 33,
-          "y": 1392,
-          "width": 322,
-          "height": 28
-        }
-      },
-      {
-        "path": "./section[4]/header[1]/p[1]",
-        "tag": "P",
-        "component": null,
-        "role": null,
-        "text": "Resolve Delivery questions and blockers against the current Delivery revision.",
-        "state": {},
-        "style": {
-          "border-bottom-color": "var(--wwc-color-text-muted)",
-          "border-left-color": "var(--wwc-color-text-muted)",
-          "border-right-color": "var(--wwc-color-text-muted)",
-          "border-top-color": "var(--wwc-color-text-muted)",
-          "color": "var(--wwc-color-text-muted)",
-          "display": "block",
-          "outline-color": "var(--wwc-color-text-muted)"
-        },
-        "box": {
-          "x": 33,
-          "y": 1443,
-          "width": 322,
-          "height": 72
-        }
-      },
-      {
-        "path": "./section[4]/div[1]",
-        "tag": "DIV",
-        "component": null,
-        "role": null,
-        "text": "",
-        "state": {},
-        "style": {
-          "background-color": "rgb(0, 0, 0)",
-          "border-bottom-left-radius": "0px",
-          "border-bottom-right-radius": "0px",
-          "border-bottom-width": "0px",
-          "border-left-width": "0px",
-          "border-right-width": "0px",
-          "border-top-left-radius": "0px",
-          "border-top-right-radius": "0px",
-          "border-top-width": "0px"
-        },
-        "box": {
-          "x": 33,
-          "y": 1531,
-          "width": 322,
-          "height": 186
-        }
-      },
-      {
-        "path": "./section[4]/div[1]/section[1]",
-        "tag": "SECTION",
-        "component": "empty-state",
-        "role": "status",
-        "text": "",
-        "state": {},
-        "style": {
-          "background-color": "var(--wwc-color-surface)",
-          "border-bottom-left-radius": "3px",
-          "border-bottom-right-radius": "3px",
-          "border-bottom-width": "1px",
-          "border-left-width": "1px",
-          "border-right-width": "1px",
-          "border-top-left-radius": "3px",
-          "border-top-right-radius": "3px",
-          "border-top-width": "1px",
-          "display": "grid"
-        },
-        "box": {
-          "x": 33,
-          "y": 1531,
-          "width": 322,
-          "height": 186
-        }
-      },
-      {
-        "path": "./section[4]/div[1]/section[1]/h3[1]",
-        "tag": "H3",
-        "component": null,
-        "role": null,
-        "text": "No open business Attention",
-        "state": {},
-        "style": {
-          "background-color": "rgb(0, 0, 0)",
-          "border-bottom-left-radius": "0px",
-          "border-bottom-right-radius": "0px",
-          "border-bottom-width": "0px",
-          "border-left-width": "0px",
-          "border-right-width": "0px",
-          "border-top-left-radius": "0px",
-          "border-top-right-radius": "0px",
-          "border-top-width": "0px",
-          "display": "block",
-          "font-size": "18.72px",
-          "font-weight": "700"
-        },
-        "box": {
-          "x": 58,
-          "y": 1556,
-          "width": 272,
-          "height": 56
-        }
-      },
-      {
-        "path": "./section[4]/div[1]/section[1]/p[1]",
-        "tag": "P",
-        "component": null,
-        "role": null,
-        "text": "Delivery questions and blocking decisions will appear here.",
-        "state": {},
-        "style": {
-          "background-color": "rgb(0, 0, 0)",
-          "border-bottom-color": "var(--wwc-color-text-muted)",
-          "border-bottom-left-radius": "0px",
-          "border-bottom-right-radius": "0px",
-          "border-bottom-width": "0px",
-          "border-left-color": "var(--wwc-color-text-muted)",
-          "border-left-width": "0px",
-          "border-right-color": "var(--wwc-color-text-muted)",
-          "border-right-width": "0px",
-          "border-top-color": "var(--wwc-color-text-muted)",
-          "border-top-left-radius": "0px",
-          "border-top-right-radius": "0px",
-          "border-top-width": "0px",
-          "color": "var(--wwc-color-text-muted)",
-          "display": "block",
-          "outline-color": "var(--wwc-color-text-muted)"
-        },
-        "box": {
-          "x": 58,
-          "y": 1620,
-          "width": 272,
-          "height": 72
-        }
-      }
-    ]
-  },
-  {
-    "schemaVersion": 1,
-    "id": "page/operations@narrow",
-    "kind": "page",
-    "viewport": {
-      "width": 420,
-      "height": 900
-    },
-    "fontStack": "'wwc-visual-regression', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
-    "nodes": [
-      {
-        "path": ".",
-        "tag": "SECTION",
-        "component": null,
-        "role": null,
-        "text": "",
-        "state": {
-          "aria-busy": "false"
-        },
-        "style": {
-          "background-color": "rgb(0, 0, 0)",
-          "border-bottom-color": "rgb(23, 23, 23)",
-          "border-bottom-left-radius": "0px",
-          "border-bottom-right-radius": "0px",
-          "border-bottom-width": "0px",
-          "border-left-color": "rgb(23, 23, 23)",
-          "border-left-width": "0px",
-          "border-right-color": "rgb(23, 23, 23)",
-          "border-right-width": "0px",
-          "border-top-color": "rgb(23, 23, 23)",
-          "border-top-left-radius": "0px",
-          "border-top-right-radius": "0px",
-          "border-top-width": "0px",
-          "box-shadow": "none",
-          "color": "rgb(23, 23, 23)",
-          "cursor": "auto",
-          "display": "grid",
-          "font-size": "16px",
-          "font-weight": "400",
-          "opacity": "1",
-          "outline-color": "rgb(23, 23, 23)",
-          "outline-style": "none",
-          "outline-width": "3px",
-          "position": "static",
-          "text-decoration-line": "none",
-          "visibility": "visible",
-          "z-index": "auto"
-        },
-        "box": {
-          "x": 0,
-          "y": 0,
-          "width": 388,
-          "height": 2399
-        }
-      },
-      {
-        "path": "./header[1]",
-        "tag": "HEADER",
-        "component": "page-header",
-        "role": null,
-        "text": "",
-        "state": {},
-        "style": {},
-        "box": {
-          "x": 16,
-          "y": 16,
-          "width": 356,
-          "height": 158
-        }
-      },
-      {
-        "path": "./header[1]/p[1]",
-        "tag": "P",
-        "component": null,
-        "role": null,
-        "text": "Local diagnostics",
-        "state": {},
-        "style": {
-          "display": "block",
-          "font-size": "12px",
-          "font-weight": "700"
-        },
-        "box": {
-          "x": 16,
-          "y": 16,
-          "width": 356,
-          "height": 18
-        }
-      },
-      {
-        "path": "./header[1]/h2[1]",
-        "tag": "H2",
-        "component": null,
-        "role": null,
-        "text": "Repository and local Worker operations",
-        "state": {},
-        "style": {
-          "display": "block",
-          "font-size": "24px",
-          "font-weight": "700"
-        },
-        "box": {
-          "x": 16,
-          "y": 38,
-          "width": 356,
-          "height": 60
-        }
-      },
-      {
-        "path": "./header[1]/p[2]",
-        "tag": "P",
-        "component": null,
-        "role": null,
-        "text": "Inspect secret-safe repository signals, reported capacity, and local Worker state.",
-        "state": {},
-        "style": {
-          "border-bottom-color": "var(--wwc-color-text-muted)",
-          "border-left-color": "var(--wwc-color-text-muted)",
-          "border-right-color": "var(--wwc-color-text-muted)",
-          "border-top-color": "var(--wwc-color-text-muted)",
-          "color": "var(--wwc-color-text-muted)",
-          "display": "block",
-          "outline-color": "var(--wwc-color-text-muted)"
-        },
-        "box": {
-          "x": 16,
-          "y": 102,
-          "width": 356,
-          "height": 72
-        }
-      },
-      {
-        "path": "./button[1]",
-        "tag": "BUTTON",
-        "component": "button",
-        "role": null,
-        "text": "Open first-run readiness",
-        "state": {
-          "data-variant": "default"
-        },
-        "style": {
-          "background-color": "var(--wwc-color-surface)",
-          "border-bottom-left-radius": "2px",
-          "border-bottom-right-radius": "2px",
-          "border-bottom-width": "1px",
-          "border-left-width": "1px",
-          "border-right-width": "1px",
-          "border-top-left-radius": "2px",
-          "border-top-right-radius": "2px",
-          "border-top-width": "1px",
-          "cursor": "pointer",
-          "display": "block",
-          "font-weight": "600"
-        },
-        "box": {
-          "x": 16,
-          "y": 190,
-          "width": 356,
-          "height": 44
-        }
-      },
-      {
-        "path": "./span[1]",
-        "tag": "SPAN",
-        "component": "status-badge",
-        "role": "status",
-        "text": "",
-        "state": {
-          "data-tone": "danger"
-        },
-        "style": {
-          "background-color": "var(--wwc-color-danger-surface)",
-          "border-bottom-color": "rgb(179, 38, 30)",
-          "border-bottom-left-radius": "2px",
-          "border-bottom-right-radius": "2px",
-          "border-bottom-width": "1px",
-          "border-left-color": "rgb(179, 38, 30)",
-          "border-left-width": "1px",
-          "border-right-color": "rgb(179, 38, 30)",
-          "border-right-width": "1px",
-          "border-top-color": "rgb(179, 38, 30)",
-          "border-top-left-radius": "2px",
-          "border-top-right-radius": "2px",
-          "border-top-width": "1px",
-          "color": "rgb(179, 38, 30)",
-          "display": "flex",
-          "font-size": "14px",
-          "font-weight": "600",
-          "outline-color": "rgb(179, 38, 30)"
-        },
-        "box": {
-          "x": 16,
-          "y": 250,
-          "width": 140,
-          "height": 31
-        }
-      },
-      {
-        "path": "./span[1]/span[1]",
-        "tag": "SPAN",
-        "component": null,
-        "role": null,
-        "text": "×",
-        "state": {
-          "aria-hidden": "true"
-        },
-        "style": {
-          "background-color": "rgb(0, 0, 0)",
-          "border-bottom-left-radius": "0px",
-          "border-bottom-right-radius": "0px",
-          "border-bottom-width": "0px",
-          "border-left-width": "0px",
-          "border-right-width": "0px",
-          "border-top-left-radius": "0px",
-          "border-top-right-radius": "0px",
-          "border-top-width": "0px",
-          "display": "block"
-        },
-        "box": {
-          "x": 25,
-          "y": 255,
-          "width": 8,
-          "height": 21
-        }
-      },
-      {
-        "path": "./span[1]/span[2]",
-        "tag": "SPAN",
-        "component": null,
-        "role": null,
-        "text": "Reconnecting…",
-        "state": {},
-        "style": {
-          "background-color": "rgb(0, 0, 0)",
-          "border-bottom-left-radius": "0px",
-          "border-bottom-right-radius": "0px",
-          "border-bottom-width": "0px",
-          "border-left-width": "0px",
-          "border-right-width": "0px",
-          "border-top-left-radius": "0px",
-          "border-top-right-radius": "0px",
-          "border-top-width": "0px",
-          "display": "block"
-        },
-        "box": {
-          "x": 37,
-          "y": 255,
-          "width": 110,
-          "height": 21
-        }
-      },
-      {
-        "path": "./section[1]",
-        "tag": "SECTION",
-        "component": "error-state",
-        "role": "alert",
-        "text": "",
-        "state": {
-          "data-tone": "danger"
-        },
-        "style": {
-          "background-color": "var(--wwc-color-danger-surface)",
-          "border-bottom-color": "rgb(179, 38, 30)",
-          "border-bottom-left-radius": "3px",
-          "border-bottom-right-radius": "3px",
-          "border-bottom-width": "1px",
-          "border-left-color": "rgb(179, 38, 30)",
-          "border-left-width": "1px",
-          "border-right-color": "rgb(179, 38, 30)",
-          "border-right-width": "1px",
-          "border-top-color": "rgb(179, 38, 30)",
-          "border-top-left-radius": "3px",
-          "border-top-right-radius": "3px",
-          "border-top-width": "1px",
-          "color": "rgb(179, 38, 30)",
-          "outline-color": "rgb(179, 38, 30)"
-        },
-        "box": {
-          "x": 16,
-          "y": 297,
-          "width": 356,
-          "height": 286
-        }
-      },
-      {
-        "path": "./section[1]/span[1]",
-        "tag": "SPAN",
-        "component": null,
-        "role": null,
-        "text": "×",
-        "state": {
-          "aria-hidden": "true"
-        },
-        "style": {
-          "background-color": "rgb(0, 0, 0)",
-          "border-bottom-left-radius": "0px",
-          "border-bottom-right-radius": "0px",
-          "border-bottom-width": "0px",
-          "border-left-width": "0px",
-          "border-right-width": "0px",
-          "border-top-left-radius": "0px",
-          "border-top-right-radius": "0px",
-          "border-top-width": "0px",
-          "display": "block"
-        },
-        "box": {
-          "x": 41,
-          "y": 322,
-          "width": 10,
-          "height": 236
-        }
-      },
-      {
-        "path": "./section[1]/div[1]",
-        "tag": "DIV",
-        "component": null,
-        "role": null,
-        "text": "",
-        "state": {},
-        "style": {
-          "background-color": "rgb(0, 0, 0)",
-          "border-bottom-left-radius": "0px",
-          "border-bottom-right-radius": "0px",
-          "border-bottom-width": "0px",
-          "border-left-width": "0px",
-          "border-right-width": "0px",
-          "border-top-left-radius": "0px",
-          "border-top-right-radius": "0px",
-          "border-top-width": "0px"
-        },
-        "box": {
-          "x": 59,
-          "y": 322,
-          "width": 288,
-          "height": 236
-        }
-      },
-      {
-        "path": "./section[1]/div[1]/h2[1]",
-        "tag": "H2",
-        "component": null,
-        "role": null,
-        "text": "Local operations unavailable",
-        "state": {},
-        "style": {
-          "display": "block",
-          "font-size": "24px",
-          "font-weight": "700"
-        },
-        "box": {
-          "x": 59,
-          "y": 322,
-          "width": 288,
-          "height": 72
-        }
-      },
-      {
-        "path": "./section[1]/div[1]/p[1]",
-        "tag": "P",
-        "component": null,
-        "role": null,
-        "text": "Local operations could not be updated. Retry, or review the server status.",
-        "state": {},
-        "style": {
-          "display": "block"
-        },
-        "box": {
-          "x": 59,
-          "y": 418,
-          "width": 288,
-          "height": 72
-        }
-      },
-      {
-        "path": "./section[1]/div[1]/div[1]",
-        "tag": "DIV",
-        "component": null,
-        "role": null,
-        "text": "",
-        "state": {},
-        "style": {},
-        "box": {
-          "x": 59,
-          "y": 514,
-          "width": 288,
-          "height": 44
-        }
-      },
-      {
-        "path": "./section[1]/div[1]/div[1]/button[2]",
-        "tag": "BUTTON",
-        "component": "button",
-        "role": null,
-        "text": "Reconnect events",
-        "state": {
-          "data-variant": "default"
-        },
-        "style": {
-          "background-color": "var(--wwc-color-surface)",
-          "border-bottom-color": "rgb(23, 23, 23)",
-          "border-bottom-left-radius": "2px",
-          "border-bottom-right-radius": "2px",
-          "border-bottom-width": "1px",
-          "border-left-color": "rgb(23, 23, 23)",
-          "border-left-width": "1px",
-          "border-right-color": "rgb(23, 23, 23)",
-          "border-right-width": "1px",
-          "border-top-color": "rgb(23, 23, 23)",
-          "border-top-left-radius": "2px",
-          "border-top-right-radius": "2px",
-          "border-top-width": "1px",
-          "color": "rgb(23, 23, 23)",
-          "cursor": "pointer",
-          "display": "block",
-          "font-weight": "600",
-          "outline-color": "rgb(23, 23, 23)"
-        },
-        "box": {
-          "x": 59,
-          "y": 514,
-          "width": 180,
-          "height": 44
-        }
-      },
-      {
-        "path": "./section[2]",
-        "tag": "SECTION",
-        "component": "panel",
-        "role": null,
-        "text": "",
-        "state": {},
-        "style": {
-          "background-color": "var(--wwc-color-surface)",
-          "border-bottom-left-radius": "3px",
-          "border-bottom-right-radius": "3px",
-          "border-bottom-width": "1px",
-          "border-left-width": "1px",
-          "border-right-width": "1px",
-          "border-top-left-radius": "3px",
-          "border-top-right-radius": "3px",
-          "border-top-width": "1px",
-          "display": "block"
-        },
-        "box": {
-          "x": 16,
-          "y": 599,
-          "width": 356,
-          "height": 632
-        }
-      },
-      {
-        "path": "./section[2]/header[1]",
-        "tag": "HEADER",
-        "component": null,
-        "role": null,
-        "text": "",
-        "state": {},
-        "style": {
-          "background-color": "rgb(0, 0, 0)",
-          "border-bottom-left-radius": "0px",
-          "border-bottom-right-radius": "0px",
-          "border-bottom-width": "0px",
-          "border-left-width": "0px",
-          "border-right-width": "0px",
-          "border-top-left-radius": "0px",
-          "border-top-right-radius": "0px",
-          "border-top-width": "0px",
-          "display": "grid"
-        },
-        "box": {
-          "x": 33,
-          "y": 616,
-          "width": 322,
-          "height": 142
-        }
-      },
-      {
-        "path": "./section[2]/header[1]/h3[1]",
-        "tag": "H3",
-        "component": null,
-        "role": null,
-        "text": "Repository diagnostics",
-        "state": {},
-        "style": {
-          "display": "block",
-          "font-size": "18.72px",
-          "font-weight": "700"
-        },
-        "box": {
-          "x": 33,
-          "y": 635,
-          "width": 322,
-          "height": 28
-        }
-      },
-      {
-        "path": "./section[2]/header[1]/p[1]",
-        "tag": "P",
-        "component": null,
-        "role": null,
-        "text": "Repository paths stay hidden; only bounded identity and Git-risk signals are shown.",
-        "state": {},
-        "style": {
-          "border-bottom-color": "var(--wwc-color-text-muted)",
-          "border-left-color": "var(--wwc-color-text-muted)",
-          "border-right-color": "var(--wwc-color-text-muted)",
-          "border-top-color": "var(--wwc-color-text-muted)",
-          "color": "var(--wwc-color-text-muted)",
-          "display": "block",
-          "outline-color": "var(--wwc-color-text-muted)"
-        },
-        "box": {
-          "x": 33,
-          "y": 686,
-          "width": 322,
-          "height": 72
-        }
-      },
-      {
-        "path": "./section[2]/div[1]",
-        "tag": "DIV",
-        "component": null,
-        "role": null,
-        "text": "",
-        "state": {},
-        "style": {
-          "background-color": "rgb(0, 0, 0)",
-          "border-bottom-left-radius": "0px",
-          "border-bottom-right-radius": "0px",
-          "border-bottom-width": "0px",
-          "border-left-width": "0px",
-          "border-right-width": "0px",
-          "border-top-left-radius": "0px",
-          "border-top-right-radius": "0px",
-          "border-top-width": "0px"
-        },
-        "box": {
-          "x": 33,
-          "y": 774,
-          "width": 322,
-          "height": 440
-        }
-      },
-      {
-        "path": "./section[2]/div[1]/div[1]",
-        "tag": "DIV",
-        "component": null,
-        "role": null,
-        "text": "",
-        "state": {},
-        "style": {},
-        "box": {
-          "x": 33,
-          "y": 774,
-          "width": 322,
-          "height": 440
-        }
-      },
-      {
-        "path": "./section[2]/div[1]/div[1]/dl[1]",
-        "tag": "DL",
-        "component": null,
-        "role": null,
-        "text": "",
-        "state": {},
-        "style": {
-          "display": "grid"
-        },
-        "box": {
-          "x": 33,
-          "y": 774,
-          "width": 322,
-          "height": 440
-        }
-      },
-      {
-        "path": "./section[2]/div[1]/div[1]/dl[1]/dt[1]",
-        "tag": "DT",
-        "component": null,
-        "role": null,
-        "text": "Repository",
-        "state": {},
-        "style": {
-          "display": "block",
-          "font-weight": "600"
-        },
-        "box": {
-          "x": 33,
-          "y": 774,
-          "width": 322,
-          "height": 24
-        }
-      },
-      {
-        "path": "./section[2]/div[1]/div[1]/dl[1]/dd[1]",
-        "tag": "DD",
-        "component": null,
-        "role": null,
-        "text": "No repository projection",
-        "state": {},
-        "style": {
-          "display": "block"
-        },
-        "box": {
-          "x": 33,
-          "y": 806,
-          "width": 322,
-          "height": 24
-        }
-      },
-      {
-        "path": "./section[2]/div[1]/div[1]/dl[1]/dt[2]",
-        "tag": "DT",
-        "component": null,
-        "role": null,
-        "text": "Kind",
-        "state": {},
-        "style": {
-          "display": "block",
-          "font-weight": "600"
-        },
-        "box": {
-          "x": 33,
-          "y": 838,
-          "width": 322,
-          "height": 24
-        }
-      },
-      {
-        "path": "./section[2]/div[1]/div[1]/dl[1]/dd[2]",
-        "tag": "DD",
-        "component": null,
-        "role": null,
-        "text": "Not reported",
-        "state": {},
-        "style": {
-          "display": "block"
-        },
-        "box": {
-          "x": 33,
-          "y": 870,
-          "width": 322,
-          "height": 24
-        }
-      },
-      {
-        "path": "./section[2]/div[1]/div[1]/dl[1]/dt[3]",
-        "tag": "DT",
-        "component": null,
-        "role": null,
-        "text": "Latest Delivery baseline",
-        "state": {},
-        "style": {
-          "display": "block",
-          "font-weight": "600"
-        },
-        "box": {
-          "x": 33,
-          "y": 902,
-          "width": 322,
-          "height": 24
-        }
-      },
-      {
-        "path": "./section[2]/div[1]/div[1]/dl[1]/dd[3]",
-        "tag": "DD",
-        "component": null,
-        "role": null,
-        "text": "Not reported",
-        "state": {},
-        "style": {
-          "display": "block"
-        },
-        "box": {
-          "x": 33,
-          "y": 934,
-          "width": 322,
-          "height": 24
-        }
-      },
-      {
-        "path": "./section[2]/div[1]/div[1]/dl[1]/dt[4]",
-        "tag": "DT",
-        "component": null,
-        "role": null,
-        "text": "Candidate/worktree",
-        "state": {},
-        "style": {
-          "display": "block",
-          "font-weight": "600"
-        },
-        "box": {
-          "x": 33,
-          "y": 966,
-          "width": 322,
-          "height": 24
-        }
-      },
-      {
-        "path": "./section[2]/div[1]/div[1]/dl[1]/dd[4]",
-        "tag": "DD",
-        "component": null,
-        "role": null,
-        "text": "Not reported by Control Plane",
-        "state": {},
-        "style": {
-          "display": "block"
-        },
-        "box": {
-          "x": 33,
-          "y": 998,
-          "width": 322,
-          "height": 24
-        }
-      },
-      {
-        "path": "./section[2]/div[1]/div[1]/dl[1]/dt[5]",
-        "tag": "DT",
-        "component": null,
-        "role": null,
-        "text": "Latest Delivery Git risk",
-        "state": {},
-        "style": {
-          "display": "block",
-          "font-weight": "600"
-        },
-        "box": {
-          "x": 33,
-          "y": 1030,
-          "width": 322,
-          "height": 24
-        }
-      },
-      {
-        "path": "./section[2]/div[1]/div[1]/dl[1]/dd[5]",
-        "tag": "DD",
-        "component": null,
-        "role": null,
-        "text": "No current risk projection",
-        "state": {},
-        "style": {
-          "display": "block"
-        },
-        "box": {
-          "x": 33,
-          "y": 1062,
-          "width": 322,
-          "height": 24
-        }
-      },
-      {
-        "path": "./section[2]/div[1]/div[1]/dl[1]/dt[6]",
-        "tag": "DT",
-        "component": null,
-        "role": null,
-        "text": "Open Attention",
-        "state": {},
-        "style": {
-          "display": "block",
-          "font-weight": "600"
-        },
-        "box": {
-          "x": 33,
-          "y": 1094,
-          "width": 322,
-          "height": 24
-        }
-      },
-      {
-        "path": "./section[2]/div[1]/div[1]/dl[1]/dd[6]",
-        "tag": "DD",
-        "component": null,
-        "role": null,
-        "text": "0",
-        "state": {},
-        "style": {
-          "display": "block"
-        },
-        "box": {
-          "x": 33,
-          "y": 1126,
-          "width": 322,
-          "height": 24
-        }
-      },
-      {
-        "path": "./section[2]/div[1]/div[1]/dl[1]/dt[7]",
-        "tag": "DT",
-        "component": null,
-        "role": null,
-        "text": "Path policy",
-        "state": {},
-        "style": {
-          "display": "block",
-          "font-weight": "600"
-        },
-        "box": {
-          "x": 33,
-          "y": 1158,
-          "width": 322,
-          "height": 24
-        }
-      },
-      {
-        "path": "./section[2]/div[1]/div[1]/dl[1]/dd[7]",
-        "tag": "DD",
-        "component": null,
-        "role": null,
-        "text": "Repository paths hidden",
-        "state": {},
-        "style": {
-          "display": "block"
-        },
-        "box": {
-          "x": 33,
-          "y": 1190,
-          "width": 322,
-          "height": 24
-        }
-      },
-      {
-        "path": "./section[3]",
-        "tag": "SECTION",
-        "component": "panel",
-        "role": null,
-        "text": "",
-        "state": {},
-        "style": {
-          "background-color": "var(--wwc-color-surface)",
-          "border-bottom-left-radius": "3px",
-          "border-bottom-right-radius": "3px",
-          "border-bottom-width": "1px",
-          "border-left-width": "1px",
-          "border-right-width": "1px",
-          "border-top-left-radius": "3px",
-          "border-top-right-radius": "3px",
-          "border-top-width": "1px",
-          "display": "block"
-        },
-        "box": {
-          "x": 16,
-          "y": 1247,
-          "width": 356,
-          "height": 743
-        }
-      },
-      {
-        "path": "./section[3]/header[1]",
-        "tag": "HEADER",
-        "component": null,
-        "role": null,
-        "text": "",
-        "state": {},
-        "style": {
-          "background-color": "rgb(0, 0, 0)",
-          "border-bottom-left-radius": "0px",
-          "border-bottom-right-radius": "0px",
-          "border-bottom-width": "0px",
-          "border-left-width": "0px",
-          "border-right-width": "0px",
-          "border-top-left-radius": "0px",
-          "border-top-right-radius": "0px",
-          "border-top-width": "0px",
-          "display": "grid"
-        },
-        "box": {
-          "x": 33,
-          "y": 1264,
-          "width": 322,
-          "height": 142
-        }
-      },
-      {
-        "path": "./section[3]/header[1]/h3[1]",
-        "tag": "H3",
-        "component": null,
-        "role": null,
-        "text": "Local resources",
-        "state": {},
-        "style": {
-          "display": "block",
-          "font-size": "18.72px",
-          "font-weight": "700"
-        },
-        "box": {
-          "x": 33,
-          "y": 1282,
-          "width": 322,
-          "height": 28
-        }
-      },
-      {
-        "path": "./section[3]/header[1]/p[1]",
-        "tag": "P",
-        "component": null,
-        "role": null,
-        "text": "Reported capacity is kept separate from code and infrastructure failure signals.",
-        "state": {},
-        "style": {
-          "border-bottom-color": "var(--wwc-color-text-muted)",
-          "border-left-color": "var(--wwc-color-text-muted)",
-          "border-right-color": "var(--wwc-color-text-muted)",
-          "border-top-color": "var(--wwc-color-text-muted)",
-          "color": "var(--wwc-color-text-muted)",
-          "display": "block",
-          "outline-color": "var(--wwc-color-text-muted)"
-        },
-        "box": {
-          "x": 33,
-          "y": 1333,
-          "width": 322,
-          "height": 72
-        }
-      },
-      {
-        "path": "./section[3]/div[1]",
-        "tag": "DIV",
-        "component": null,
-        "role": null,
-        "text": "",
-        "state": {},
-        "style": {
-          "background-color": "rgb(0, 0, 0)",
-          "border-bottom-left-radius": "0px",
-          "border-bottom-right-radius": "0px",
-          "border-bottom-width": "0px",
-          "border-left-width": "0px",
-          "border-right-width": "0px",
-          "border-top-left-radius": "0px",
-          "border-top-right-radius": "0px",
-          "border-top-width": "0px"
-        },
-        "box": {
-          "x": 33,
-          "y": 1421,
-          "width": 322,
-          "height": 551
-        }
-      },
-      {
-        "path": "./section[3]/div[1]/span[1]",
-        "tag": "SPAN",
-        "component": "status-badge",
-        "role": "status",
-        "text": "",
-        "state": {
-          "data-tone": "danger"
-        },
-        "style": {
-          "background-color": "var(--wwc-color-danger-surface)",
-          "border-bottom-color": "rgb(179, 38, 30)",
-          "border-bottom-left-radius": "2px",
-          "border-bottom-right-radius": "2px",
-          "border-bottom-width": "1px",
-          "border-left-color": "rgb(179, 38, 30)",
-          "border-left-width": "1px",
-          "border-right-color": "rgb(179, 38, 30)",
-          "border-right-width": "1px",
-          "border-top-color": "rgb(179, 38, 30)",
-          "border-top-left-radius": "2px",
-          "border-top-right-radius": "2px",
-          "border-top-width": "1px",
-          "color": "rgb(179, 38, 30)",
-          "display": "inline-flex",
-          "font-size": "14px",
-          "font-weight": "600",
-          "outline-color": "rgb(179, 38, 30)"
-        },
-        "box": {
-          "x": 33,
-          "y": 1421,
-          "width": 309,
-          "height": 31
-        }
-      },
-      {
-        "path": "./section[3]/div[1]/span[1]/span[1]",
-        "tag": "SPAN",
-        "component": null,
-        "role": null,
-        "text": "×",
-        "state": {
-          "aria-hidden": "true"
-        },
-        "style": {
-          "background-color": "rgb(0, 0, 0)",
-          "border-bottom-left-radius": "0px",
-          "border-bottom-right-radius": "0px",
-          "border-bottom-width": "0px",
-          "border-left-width": "0px",
-          "border-right-width": "0px",
-          "border-top-left-radius": "0px",
-          "border-top-right-radius": "0px",
-          "border-top-width": "0px",
-          "display": "block"
-        },
-        "box": {
-          "x": 42,
-          "y": 1426,
-          "width": 8,
-          "height": 21
-        }
-      },
-      {
-        "path": "./section[3]/div[1]/span[1]/span[2]",
-        "tag": "SPAN",
-        "component": null,
-        "role": null,
-        "text": "No current failure classification",
-        "state": {},
-        "style": {
-          "background-color": "rgb(0, 0, 0)",
-          "border-bottom-left-radius": "0px",
-          "border-bottom-right-radius": "0px",
-          "border-bottom-width": "0px",
-          "border-left-width": "0px",
-          "border-right-width": "0px",
-          "border-top-left-radius": "0px",
-          "border-top-right-radius": "0px",
-          "border-top-width": "0px",
-          "display": "block"
-        },
-        "box": {
-          "x": 54,
-          "y": 1426,
-          "width": 278,
-          "height": 21
-        }
-      },
-      {
-        "path": "./section[3]/div[1]/div[1]",
-        "tag": "DIV",
-        "component": null,
-        "role": null,
-        "text": "",
-        "state": {},
-        "style": {},
-        "box": {
-          "x": 33,
-          "y": 1468,
-          "width": 322,
-          "height": 504
-        }
-      },
-      {
-        "path": "./section[3]/div[1]/div[1]/dl[1]",
-        "tag": "DL",
-        "component": null,
-        "role": null,
-        "text": "",
-        "state": {},
-        "style": {
-          "display": "grid"
-        },
-        "box": {
-          "x": 33,
-          "y": 1468,
-          "width": 322,
-          "height": 504
-        }
-      },
-      {
-        "path": "./section[3]/div[1]/div[1]/dl[1]/dt[1]",
-        "tag": "DT",
-        "component": null,
-        "role": null,
-        "text": "Failure classification",
-        "state": {},
-        "style": {
-          "display": "block",
-          "font-weight": "600"
-        },
-        "box": {
-          "x": 33,
-          "y": 1468,
-          "width": 322,
-          "height": 24
-        }
-      },
-      {
-        "path": "./section[3]/div[1]/div[1]/dl[1]/dd[1]",
-        "tag": "DD",
-        "component": null,
-        "role": null,
-        "text": "No current failure classification",
-        "state": {},
-        "style": {
-          "display": "block"
-        },
-        "box": {
-          "x": 33,
-          "y": 1500,
-          "width": 322,
-          "height": 24
-        }
-      },
-      {
-        "path": "./section[3]/div[1]/div[1]/dl[1]/dt[2]",
-        "tag": "DT",
-        "component": null,
-        "role": null,
-        "text": "Reported Workers",
-        "state": {},
-        "style": {
-          "display": "block",
-          "font-weight": "600"
-        },
-        "box": {
-          "x": 33,
-          "y": 1532,
-          "width": 322,
-          "height": 24
-        }
-      },
-      {
-        "path": "./section[3]/div[1]/div[1]/dl[1]/dd[2]",
-        "tag": "DD",
-        "component": null,
-        "role": null,
-        "text": "0",
-        "state": {},
-        "style": {
-          "display": "block"
-        },
-        "box": {
-          "x": 33,
-          "y": 1564,
-          "width": 322,
-          "height": 24
-        }
-      },
-      {
-        "path": "./section[3]/div[1]/div[1]/dl[1]/dt[3]",
-        "tag": "DT",
-        "component": null,
-        "role": null,
-        "text": "Enabled Workers",
-        "state": {},
-        "style": {
-          "display": "block",
-          "font-weight": "600"
-        },
-        "box": {
-          "x": 33,
-          "y": 1596,
-          "width": 322,
-          "height": 24
-        }
-      },
-      {
-        "path": "./section[3]/div[1]/div[1]/dl[1]/dd[3]",
-        "tag": "DD",
-        "component": null,
-        "role": null,
-        "text": "0",
-        "state": {},
-        "style": {
-          "display": "block"
-        },
-        "box": {
-          "x": 33,
-          "y": 1628,
-          "width": 322,
-          "height": 24
-        }
-      },
-      {
-        "path": "./section[3]/div[1]/div[1]/dl[1]/dt[4]",
-        "tag": "DT",
-        "component": null,
-        "role": null,
-        "text": "Reported capacity slots",
-        "state": {},
-        "style": {
-          "display": "block",
-          "font-weight": "600"
-        },
-        "box": {
-          "x": 33,
-          "y": 1660,
-          "width": 322,
-          "height": 24
-        }
-      },
-      {
-        "path": "./section[3]/div[1]/div[1]/dl[1]/dd[4]",
-        "tag": "DD",
-        "component": null,
-        "role": null,
-        "text": "0",
-        "state": {},
-        "style": {
-          "display": "block"
-        },
-        "box": {
-          "x": 33,
-          "y": 1692,
-          "width": 322,
-          "height": 24
-        }
-      },
-      {
-        "path": "./section[3]/div[1]/div[1]/dl[1]/dt[5]",
-        "tag": "DT",
-        "component": null,
-        "role": null,
-        "text": "CPU",
-        "state": {},
-        "style": {
-          "display": "block",
-          "font-weight": "600"
-        },
-        "box": {
-          "x": 33,
-          "y": 1724,
-          "width": 322,
-          "height": 24
-        }
-      },
-      {
-        "path": "./section[3]/div[1]/div[1]/dl[1]/dd[5]",
-        "tag": "DD",
-        "component": null,
-        "role": null,
-        "text": "Not reported by Control Plane",
-        "state": {},
-        "style": {
-          "display": "block"
-        },
-        "box": {
-          "x": 33,
-          "y": 1756,
-          "width": 322,
-          "height": 24
-        }
-      },
-      {
-        "path": "./section[3]/div[1]/div[1]/dl[1]/dt[6]",
-        "tag": "DT",
-        "component": null,
-        "role": null,
-        "text": "Memory",
-        "state": {},
-        "style": {
-          "display": "block",
-          "font-weight": "600"
-        },
-        "box": {
-          "x": 33,
-          "y": 1788,
-          "width": 322,
-          "height": 24
-        }
-      },
-      {
-        "path": "./section[3]/div[1]/div[1]/dl[1]/dd[6]",
-        "tag": "DD",
-        "component": null,
-        "role": null,
-        "text": "Not reported by Control Plane",
-        "state": {},
-        "style": {
-          "display": "block"
-        },
-        "box": {
-          "x": 33,
-          "y": 1820,
-          "width": 322,
-          "height": 24
-        }
-      },
-      {
-        "path": "./section[3]/div[1]/div[1]/dl[1]/dt[7]",
-        "tag": "DT",
-        "component": null,
-        "role": null,
-        "text": "Disk",
-        "state": {},
-        "style": {
-          "display": "block",
-          "font-weight": "600"
-        },
-        "box": {
-          "x": 33,
-          "y": 1852,
-          "width": 322,
-          "height": 24
-        }
-      },
-      {
-        "path": "./section[3]/div[1]/div[1]/dl[1]/dd[7]",
-        "tag": "DD",
-        "component": null,
-        "role": null,
-        "text": "Not reported by Control Plane",
-        "state": {},
-        "style": {
-          "display": "block"
-        },
-        "box": {
-          "x": 33,
-          "y": 1884,
-          "width": 322,
-          "height": 24
-        }
-      },
-      {
-        "path": "./section[3]/div[1]/div[1]/dl[1]/dt[8]",
-        "tag": "DT",
-        "component": null,
-        "role": null,
-        "text": "Cleanup",
-        "state": {},
-        "style": {
-          "display": "block",
-          "font-weight": "600"
-        },
-        "box": {
-          "x": 33,
-          "y": 1916,
-          "width": 322,
-          "height": 24
-        }
-      },
-      {
-        "path": "./section[3]/div[1]/div[1]/dl[1]/dd[8]",
-        "tag": "DD",
-        "component": null,
-        "role": null,
-        "text": "Not reported by Control Plane",
-        "state": {},
-        "style": {
-          "display": "block"
-        },
-        "box": {
-          "x": 33,
-          "y": 1948,
-          "width": 322,
-          "height": 24
-        }
-      },
-      {
-        "path": "./section[4]",
-        "tag": "SECTION",
-        "component": "panel",
-        "role": null,
-        "text": "",
-        "state": {},
-        "style": {
-          "background-color": "var(--wwc-color-surface)",
-          "border-bottom-left-radius": "3px",
-          "border-bottom-right-radius": "3px",
-          "border-bottom-width": "1px",
-          "border-left-width": "1px",
-          "border-right-width": "1px",
-          "border-top-left-radius": "3px",
-          "border-top-right-radius": "3px",
-          "border-top-width": "1px",
-          "display": "block"
-        },
-        "box": {
-          "x": 16,
-          "y": 2005,
-          "width": 356,
-          "height": 378
-        }
-      },
-      {
-        "path": "./section[4]/header[1]",
-        "tag": "HEADER",
-        "component": null,
-        "role": null,
-        "text": "",
-        "state": {},
-        "style": {
-          "background-color": "rgb(0, 0, 0)",
-          "border-bottom-left-radius": "0px",
-          "border-bottom-right-radius": "0px",
-          "border-bottom-width": "0px",
-          "border-left-width": "0px",
-          "border-right-width": "0px",
-          "border-top-left-radius": "0px",
-          "border-top-right-radius": "0px",
-          "border-top-width": "0px",
-          "display": "grid"
-        },
-        "box": {
-          "x": 33,
-          "y": 2022,
-          "width": 322,
-          "height": 142
-        }
-      },
-      {
-        "path": "./section[4]/header[1]/h3[1]",
-        "tag": "H3",
-        "component": null,
-        "role": null,
-        "text": "Local Workers",
-        "state": {},
-        "style": {
-          "display": "block",
-          "font-size": "18.72px",
-          "font-weight": "700"
-        },
-        "box": {
-          "x": 33,
-          "y": 2041,
-          "width": 322,
-          "height": 28
-        }
-      },
-      {
-        "path": "./section[4]/header[1]/p[1]",
-        "tag": "P",
-        "component": null,
-        "role": null,
-        "text": "Drain or enable a reported Worker without exposing host or repository paths.",
-        "state": {},
-        "style": {
-          "border-bottom-color": "var(--wwc-color-text-muted)",
-          "border-left-color": "var(--wwc-color-text-muted)",
-          "border-right-color": "var(--wwc-color-text-muted)",
-          "border-top-color": "var(--wwc-color-text-muted)",
-          "color": "var(--wwc-color-text-muted)",
-          "display": "block",
-          "outline-color": "var(--wwc-color-text-muted)"
-        },
-        "box": {
-          "x": 33,
-          "y": 2092,
-          "width": 322,
-          "height": 72
-        }
-      },
-      {
-        "path": "./section[4]/div[1]",
-        "tag": "DIV",
-        "component": null,
-        "role": null,
-        "text": "",
-        "state": {},
-        "style": {
-          "background-color": "rgb(0, 0, 0)",
-          "border-bottom-left-radius": "0px",
-          "border-bottom-right-radius": "0px",
-          "border-bottom-width": "0px",
-          "border-left-width": "0px",
-          "border-right-width": "0px",
-          "border-top-left-radius": "0px",
-          "border-top-right-radius": "0px",
-          "border-top-width": "0px"
-        },
-        "box": {
-          "x": 33,
-          "y": 2180,
-          "width": 322,
-          "height": 186
-        }
-      },
-      {
-        "path": "./section[4]/div[1]/section[1]",
-        "tag": "SECTION",
-        "component": "empty-state",
-        "role": "status",
-        "text": "",
-        "state": {},
-        "style": {
-          "background-color": "var(--wwc-color-surface)",
-          "border-bottom-left-radius": "3px",
-          "border-bottom-right-radius": "3px",
-          "border-bottom-width": "1px",
-          "border-left-width": "1px",
-          "border-right-width": "1px",
-          "border-top-left-radius": "3px",
-          "border-top-right-radius": "3px",
-          "border-top-width": "1px",
-          "display": "grid"
-        },
-        "box": {
-          "x": 33,
-          "y": 2180,
-          "width": 322,
-          "height": 186
-        }
-      },
-      {
-        "path": "./section[4]/div[1]/section[1]/h3[1]",
-        "tag": "H3",
-        "component": null,
-        "role": null,
-        "text": "No local Workers reported",
-        "state": {},
-        "style": {
-          "background-color": "rgb(0, 0, 0)",
-          "border-bottom-left-radius": "0px",
-          "border-bottom-right-radius": "0px",
-          "border-bottom-width": "0px",
-          "border-left-width": "0px",
-          "border-right-width": "0px",
-          "border-top-left-radius": "0px",
-          "border-top-right-radius": "0px",
-          "border-top-width": "0px",
-          "display": "block",
-          "font-size": "18.72px",
-          "font-weight": "700"
-        },
-        "box": {
-          "x": 58,
-          "y": 2205,
-          "width": 272,
-          "height": 56
-        }
-      },
-      {
-        "path": "./section[4]/div[1]/section[1]/p[1]",
-        "tag": "P",
-        "component": null,
-        "role": null,
-        "text": "A local Worker will appear here after the Control Plane reports it.",
-        "state": {},
-        "style": {
-          "background-color": "rgb(0, 0, 0)",
-          "border-bottom-color": "var(--wwc-color-text-muted)",
-          "border-bottom-left-radius": "0px",
-          "border-bottom-right-radius": "0px",
-          "border-bottom-width": "0px",
-          "border-left-color": "var(--wwc-color-text-muted)",
-          "border-left-width": "0px",
-          "border-right-color": "var(--wwc-color-text-muted)",
-          "border-right-width": "0px",
-          "border-top-color": "var(--wwc-color-text-muted)",
-          "border-top-left-radius": "0px",
-          "border-top-right-radius": "0px",
-          "border-top-width": "0px",
-          "color": "var(--wwc-color-text-muted)",
-          "display": "block",
-          "outline-color": "var(--wwc-color-text-muted)"
-        },
-        "box": {
-          "x": 58,
-          "y": 2269,
-          "width": 272,
-          "height": 72
         }
       }
     ]
@@ -16169,7 +10605,7 @@
         }
       },
       {
-        "path": "./section[1]/div[1]",
+        "path": "./section[1]/div[2]",
         "tag": "DIV",
         "component": null,
         "role": "alert",
@@ -16201,7 +10637,7 @@
         }
       },
       {
-        "path": "./section[1]/div[1]/span[1]",
+        "path": "./section[1]/div[2]/span[1]",
         "tag": "SPAN",
         "component": null,
         "role": null,
@@ -16231,7 +10667,7 @@
         }
       },
       {
-        "path": "./section[1]/div[1]/button[1]",
+        "path": "./section[1]/div[2]/button[1]",
         "tag": "BUTTON",
         "component": null,
         "role": null,
@@ -16264,7 +10700,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]",
+        "path": "./section[1]/div[3]",
         "tag": "DIV",
         "component": null,
         "role": null,
@@ -16281,7 +10717,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]/div[1]",
+        "path": "./section[1]/div[3]/div[1]",
         "tag": "DIV",
         "component": null,
         "role": "tablist",
@@ -16298,7 +10734,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]/div[1]/button[1]",
+        "path": "./section[1]/div[3]/div[1]/button[1]",
         "tag": "BUTTON",
         "component": null,
         "role": "tab",
@@ -16322,7 +10758,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]/div[1]/button[2]",
+        "path": "./section[1]/div[3]/div[1]/button[2]",
         "tag": "BUTTON",
         "component": null,
         "role": "tab",
@@ -16351,7 +10787,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]/div[2]",
+        "path": "./section[1]/div[3]/div[2]",
         "tag": "DIV",
         "component": null,
         "role": "tabpanel",
@@ -16366,7 +10802,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]/div[2]/div[1]",
+        "path": "./section[1]/div[3]/div[2]/div[1]",
         "tag": "DIV",
         "component": null,
         "role": null,
@@ -16383,7 +10819,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]/div[2]/div[1]/div[1]",
+        "path": "./section[1]/div[3]/div[2]/div[1]/div[1]",
         "tag": "DIV",
         "component": null,
         "role": null,
@@ -16409,7 +10845,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]/div[2]/div[1]/div[1]/div[1]",
+        "path": "./section[1]/div[3]/div[2]/div[1]/div[1]/div[1]",
         "tag": "DIV",
         "component": null,
         "role": null,
@@ -16436,7 +10872,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]/div[2]/div[1]/div[1]/span[1]",
+        "path": "./section[1]/div[3]/div[2]/div[1]/div[1]/span[1]",
         "tag": "SPAN",
         "component": null,
         "role": null,
@@ -16463,7 +10899,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]/div[2]/div[1]/div[2]",
+        "path": "./section[1]/div[3]/div[2]/div[1]/div[2]",
         "tag": "DIV",
         "component": null,
         "role": null,
@@ -16481,7 +10917,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]/div[2]/div[1]/div[3]",
+        "path": "./section[1]/div[3]/div[2]/div[1]/div[3]",
         "tag": "DIV",
         "component": null,
         "role": null,
@@ -16507,7 +10943,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]/div[2]/div[1]/div[3]/div[1]",
+        "path": "./section[1]/div[3]/div[2]/div[1]/div[3]/div[1]",
         "tag": "DIV",
         "component": null,
         "role": null,
@@ -16534,7 +10970,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]/div[2]/div[1]/div[3]/span[1]",
+        "path": "./section[1]/div[3]/div[2]/div[1]/div[3]/span[1]",
         "tag": "SPAN",
         "component": null,
         "role": null,
@@ -16561,7 +10997,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]/div[2]/div[1]/div[4]",
+        "path": "./section[1]/div[3]/div[2]/div[1]/div[4]",
         "tag": "DIV",
         "component": null,
         "role": null,
@@ -16579,7 +11015,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]/div[2]/div[1]/div[5]",
+        "path": "./section[1]/div[3]/div[2]/div[1]/div[5]",
         "tag": "DIV",
         "component": null,
         "role": null,
@@ -16605,7 +11041,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]/div[2]/div[1]/div[5]/div[1]",
+        "path": "./section[1]/div[3]/div[2]/div[1]/div[5]/div[1]",
         "tag": "DIV",
         "component": null,
         "role": null,
@@ -16632,7 +11068,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]/div[2]/div[1]/div[5]/span[1]",
+        "path": "./section[1]/div[3]/div[2]/div[1]/div[5]/span[1]",
         "tag": "SPAN",
         "component": null,
         "role": null,
@@ -16659,7 +11095,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]/div[2]/div[1]/div[6]",
+        "path": "./section[1]/div[3]/div[2]/div[1]/div[6]",
         "tag": "DIV",
         "component": null,
         "role": null,
@@ -16677,7 +11113,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]/div[2]/div[1]/div[7]",
+        "path": "./section[1]/div[3]/div[2]/div[1]/div[7]",
         "tag": "DIV",
         "component": null,
         "role": null,
@@ -16703,7 +11139,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]/div[2]/div[1]/div[7]/div[1]",
+        "path": "./section[1]/div[3]/div[2]/div[1]/div[7]/div[1]",
         "tag": "DIV",
         "component": null,
         "role": null,
@@ -16730,7 +11166,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]/div[2]/div[1]/div[7]/span[1]",
+        "path": "./section[1]/div[3]/div[2]/div[1]/div[7]/span[1]",
         "tag": "SPAN",
         "component": null,
         "role": null,
@@ -16757,7 +11193,7 @@
         }
       },
       {
-        "path": "./section[1]/div[2]/div[2]/p[1]",
+        "path": "./section[1]/div[3]/div[2]/p[1]",
         "tag": "P",
         "component": null,
         "role": null,
@@ -17027,7 +11463,7 @@
         },
         "box": {
           "x": -16,
-          "y": -1428,
+          "y": -1330,
           "width": 0,
           "height": 0
         }

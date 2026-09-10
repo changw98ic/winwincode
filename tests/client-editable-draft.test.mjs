@@ -12,7 +12,7 @@ const compiler = spawnSync(
     'exec',
     'tsc',
     '-p',
-    'apps/client/tsconfig.strongflow-page-tests.json',
+    'apps/client/tsconfig.settings-tests.json',
     '--pretty',
     'false',
     '--incremental',
@@ -28,7 +28,7 @@ assert.equal(
 
 const { createEditableDraft, settleDraftSubmission } = await import(`${pathToFileURL(resolve(
   root,
-  '.cache/strongflow-page-tests/editable-draft.js',
+  '.cache/settings-tests/editable-draft.js',
 )).href}`)
 
 const snapshot = (revision, values, scope = 'scope-a') => ({ scope, revision, values })

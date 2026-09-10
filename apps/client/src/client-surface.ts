@@ -6,10 +6,8 @@ export type ClientSurfaceId =
   | 'projects'
   | 'extensions'
   | 'device'
-  | 'strongflow'
   | 'settings'
   | 'attention'
-  | 'enterprise'
 
 export interface ClientSurface {
   readonly id: ClientSurfaceId
@@ -68,14 +66,6 @@ export const CLIENT_SURFACES: readonly ClientSurface[] = Object.freeze([
     nav: false,
   }),
   Object.freeze({
-    id: 'strongflow',
-    path: '/strongflow',
-    label: 'StrongFlow',
-    description: '高级交付工作台',
-    default: false,
-    nav: false,
-  }),
-  Object.freeze({
     id: 'attention',
     path: '/attention',
     label: '待我处理',
@@ -90,14 +80,6 @@ export const CLIENT_SURFACES: readonly ClientSurface[] = Object.freeze([
     description: '个人与工作区设置',
     default: false,
     nav: true,
-  }),
-  Object.freeze({
-    id: 'enterprise',
-    path: '/enterprise',
-    label: '企业管理',
-    description: '组织管理',
-    default: false,
-    nav: false,
   }),
 ])
 const DEFAULT_SURFACE = (CLIENT_SURFACES.find(surface => surface.default)
