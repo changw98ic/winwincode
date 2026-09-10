@@ -64,6 +64,7 @@ mod model_route_availability;
 pub mod model_settings;
 mod model_stream_flow_control;
 mod observer_decision_service;
+pub mod peer_collaboration;
 mod product_session_execution_application;
 mod product_session_service;
 mod provider_admission;
