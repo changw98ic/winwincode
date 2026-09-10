@@ -32,6 +32,7 @@ export interface HomeDashboardPresentation {
   readonly allProjectsLabel: string
   readonly currentScopeLabel: string
   readonly newTaskLabel: string
+  readonly attentionOnlyLabel: string
   readonly statusLabel: Readonly<Record<HomeDashboardStatus, string>>
   readonly partialNote: string
   readonly errorNote: string
@@ -69,6 +70,7 @@ const PRESENTATION_SPEC: HomeDashboardPresentation = {
   allProjectsLabel: '全部项目',
   currentScopeLabel: '当前仓库',
   newTaskLabel: '新建任务',
+  attentionOnlyLabel: '仅看待处理',
   statusLabel: Object.freeze({
     loading: '正在读取看板…',
     ready: '就绪',
@@ -295,8 +297,13 @@ export function mountHomeDashboardPage(
   const newTask = element(document, 'a', 'wwc-home-new-task')
   newTask.href = surfaceHash('/home/new-task', options.scopeSelection)
   newTask.textContent = presentation.newTaskLabel
+  // 设计评审 P0-1:取消独立待处理中心,看板用「仅看待处理」筛选开关。
+  const attentionOnly = element(document, 'button', 'wwc-home-attention-only')
+  attentionOnly.type = 'button'
+  attentionOnly.textContent = presentation.attentionOnlyLabel
+  attentionOnly.setAttribute('aria-pressed', 'false')
   const topActions = element(document, 'div', 'wwc-home-actions')
-  topActions.append(projectSelect, newTask)
+  topActions.append(projectSelect, attentionOnly, newTask)
   const topbar = element(document, 'div', 'wwc-home-topbar')
   topbar.append(pageHeader.root, topActions)
 
@@ -427,6 +434,7 @@ export function mountHomeDashboardPage(
   }
 
   interface SectionParts {
+    readonly root: HTMLElement
     readonly heading: HTMLElement
     readonly count: HTMLElement
     readonly empty: HTMLElement
@@ -479,6 +487,7 @@ export function mountHomeDashboardPage(
     root.append(headingRow, empty, cards)
     sectionsRoot.append(root)
     sections.set(id, {
+      root,
       heading,
       count,
       empty,
@@ -509,6 +518,31 @@ export function mountHomeDashboardPage(
   options.root.replaceChildren(layout)
 
   let closed = false
+  // 设计评审 P0-1:通知与旧 /attention 深链落到看板时自动打开该筛选。
+  let attentionOnlyEnabled = globalThis.location?.hash?.includes('filter=attention') === true
+
+  attentionOnly.setAttribute('aria-pressed', String(attentionOnlyEnabled))
+  attentionOnly.dataset.active = String(attentionOnlyEnabled)
+  layout.dataset.attentionOnly = String(attentionOnlyEnabled)
+
+  attentionOnly.addEventListener('click', () => {
+    attentionOnlyEnabled = !attentionOnlyEnabled
+    attentionOnly.setAttribute('aria-pressed', String(attentionOnlyEnabled))
+    attentionOnly.dataset.active = String(attentionOnlyEnabled)
+    layout.dataset.attentionOnly = String(attentionOnlyEnabled)
+    for (const id of ['active', 'failing', 'completed'] as const) {
+      const section = sections.get(id)
+      if (section === undefined) continue
+      section.root.hidden = attentionOnlyEnabled
+    }
+    const decisions = sections.get('decisions')
+    if (decisions !== undefined) {
+      decisions.root.hidden = false
+      const expanded = decisions.toggle === null
+        || decisions.toggle.getAttribute('aria-expanded') === 'true'
+      decisions.empty.hidden = expanded ? !renderedEmpty('decisions') : true
+    }
+  })
 
   function render(state: HomeDashboardState): void {
     if (closed) return
@@ -551,6 +585,11 @@ export function mountHomeDashboardPage(
               ? state.counts.completed
               : state.counts.completed
       section.count.textContent = presentation.countLabel(total)
+      if (attentionOnlyEnabled && id !== 'decisions') {
+        section.root.hidden = true
+        continue
+      }
+      section.root.hidden = false
       // A collapsed row keeps its empty note hidden with its cards; an open
       // column shows the honest empty state.
       const expanded = section.toggle === null

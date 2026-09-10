@@ -318,8 +318,8 @@ test('signals open the Attention Center, the one unified inbox for the user', ()
     ],
     nowMillis: now,
   })
-  const expectedHash = `#/attention`
-    + `?organizationId=${scope.organizationId}&workspaceId=${scope.workspaceId}`
+  const expectedHash = `#/home?filter=attention`
+    + `&organizationId=${scope.organizationId}&workspaceId=${scope.workspaceId}`
     + `&projectId=${scope.projectId}&repositoryId=${scope.repositoryId}`
   assert.equal(attentionSignalRouteHash(scopeSelection), expectedHash)
   assert.equal(attentionSignalRouteHash(scopeSelection), expectedHash)
@@ -685,8 +685,8 @@ test('desktop notifications stay off until the user grants them and never repeat
 
   desktop.clickHandlers[0]()
   assert.deepEqual(opened, [
-    `#/attention`
-      + `?organizationId=${scope.organizationId}&workspaceId=${scope.workspaceId}`
+    `#/home?filter=attention`
+      + `&organizationId=${scope.organizationId}&workspaceId=${scope.workspaceId}`
       + `&projectId=${scope.projectId}&repositoryId=${scope.repositoryId}`,
   ])
   monitor.close()
