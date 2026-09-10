@@ -213,7 +213,7 @@ function packageDependencies(manifest) {
       continue
     }
     if (section !== 'dependencies') continue
-    const dependency = /^\s*([A-Za-z0-9_-]+)\s*=/u.exec(line)
+    const dependency = /^\s*([A-Za-z0-9_-]+)(?:\.workspace)?\s*=/u.exec(line)
     if (dependency) names.push(dependency[1])
   }
   return names
