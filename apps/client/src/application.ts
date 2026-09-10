@@ -502,17 +502,29 @@ export function mountWinWinCodeClient(
     ).get('session')
     recentChatsList.replaceChildren(...entries.map(entry => {
       const row = element(document, 'li', 'wwc-sidebar-recent-item')
+      // 最近对话是可点链接:打开对应会话(带当前 Scope 参数)。
+      const link = element(document, 'a', 'wwc-sidebar-recent-item-link')
+      link.href = surfaceHash(
+        `/chat?session=${encodeURIComponent(entry.sessionKey)}`,
+        scopeSelectionFromHash(browser.location.hash),
+      )
       const icon = element(document, 'span', 'wwc-sidebar-recent-item-icon')
       icon.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" width="16" height="16"><path d="M4 5h16v11H8l-4 4z"/></svg>`
       const text = element(document, 'span', 'wwc-sidebar-recent-item-text')
       text.textContent = entry.title
-      row.append(icon, text)
+      link.append(icon, text)
       row.dataset.sessionKey = entry.sessionKey
+      row.append(link)
       // 设计稿 03b:当前打开的会话在侧栏高亮。
       const active = entry.sessionKey.length > 0 && entry.sessionKey === activeSession
       row.classList.toggle('wwc-sidebar-recent-item-active', active)
-      if (active) row.setAttribute('aria-current', 'page')
-      else row.removeAttribute('aria-current')
+      if (active) {
+        row.setAttribute('aria-current', 'page')
+        link.setAttribute('aria-current', 'page')
+      } else {
+        row.removeAttribute('aria-current')
+        link.removeAttribute('aria-current')
+      }
       return row
     }))
     recentChatsRoot.hidden = entries.length === 0

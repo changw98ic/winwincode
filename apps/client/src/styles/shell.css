@@ -431,10 +431,22 @@
 }
 
 .wwc-sidebar-recent-item {
+  padding: var(--wwc-space-0);
+}
+
+.wwc-sidebar-recent-item-link {
   display: flex;
   align-items: center;
   gap: var(--wwc-space-3);
+  width: 100%;
   padding: var(--wwc-space-2) var(--wwc-space-3);
+  color: var(--wwc-color-text);
+  text-decoration: none;
+  border: var(--wwc-border-width) solid transparent;
+}
+
+.wwc-sidebar-recent-item-link:hover {
+  background: var(--wwc-color-surface-subtle);
 }
 
 .wwc-sidebar-recent-item-icon {
