@@ -387,19 +387,124 @@
       "allowedInternalDependencies": []
     },
     {
-      "id": "winwincode-integration",
+      "id": "winwincode-integration-core",
       "kind": "rust-crate",
-      "path": "crates/winwincode-integration",
-      "packageName": "winwincode-integration",
+      "path": "crates/winwincode-integration-core",
+      "packageName": "winwincode-integration-core",
       "phase": "enterprise",
       "zone": "control-plane",
       "responsibilities": [
-        "own-tenant-scoped-connector-webhook-and-durable-external-delivery-authority"
+        "own-product-neutral-integration-authority-receipts-and-ports"
       ],
       "allowedInternalDependencies": [
-        "winwincode-audit",
+        "winwincode-domain"
+      ]
+    },
+    {
+      "id": "winwincode-connector-github",
+      "kind": "rust-crate",
+      "path": "crates/winwincode-connector-github",
+      "packageName": "winwincode-connector-github",
+      "phase": "enterprise",
+      "zone": "control-plane",
+      "responsibilities": [
+        "own-github-protocol-mapping-and-transport-ports"
+      ],
+      "allowedInternalDependencies": [
         "winwincode-domain",
+        "winwincode-integration-core",
         "winwincode-publication"
+      ]
+    },
+    {
+      "id": "winwincode-connector-jira",
+      "kind": "rust-crate",
+      "path": "crates/winwincode-connector-jira",
+      "packageName": "winwincode-connector-jira",
+      "phase": "enterprise",
+      "zone": "control-plane",
+      "responsibilities": [
+        "own-jira-protocol-mapping-and-transport-ports"
+      ],
+      "allowedInternalDependencies": [
+        "winwincode-domain",
+        "winwincode-integration-core"
+      ]
+    },
+    {
+      "id": "winwincode-connector-linear",
+      "kind": "rust-crate",
+      "path": "crates/winwincode-connector-linear",
+      "packageName": "winwincode-connector-linear",
+      "phase": "enterprise",
+      "zone": "control-plane",
+      "responsibilities": [
+        "own-linear-protocol-mapping-and-transport-ports"
+      ],
+      "allowedInternalDependencies": [
+        "winwincode-domain",
+        "winwincode-integration-core"
+      ]
+    },
+    {
+      "id": "winwincode-connector-slack",
+      "kind": "rust-crate",
+      "path": "crates/winwincode-connector-slack",
+      "packageName": "winwincode-connector-slack",
+      "phase": "enterprise",
+      "zone": "control-plane",
+      "responsibilities": [
+        "own-slack-protocol-mapping-and-transport-ports"
+      ],
+      "allowedInternalDependencies": [
+        "winwincode-domain",
+        "winwincode-integration-core"
+      ]
+    },
+    {
+      "id": "winwincode-connector-teams",
+      "kind": "rust-crate",
+      "path": "crates/winwincode-connector-teams",
+      "packageName": "winwincode-connector-teams",
+      "phase": "enterprise",
+      "zone": "control-plane",
+      "responsibilities": [
+        "own-teams-protocol-mapping-and-transport-ports"
+      ],
+      "allowedInternalDependencies": [
+        "winwincode-domain",
+        "winwincode-integration-core"
+      ]
+    },
+    {
+      "id": "winwincode-connector-webhook",
+      "kind": "rust-crate",
+      "path": "crates/winwincode-connector-webhook",
+      "packageName": "winwincode-connector-webhook",
+      "phase": "enterprise",
+      "zone": "control-plane",
+      "responsibilities": [
+        "own-webhook-protocol-mapping-and-transport-ports"
+      ],
+      "allowedInternalDependencies": [
+        "winwincode-domain",
+        "winwincode-integration-core"
+      ]
+    },
+    {
+      "id": "winwincode-integration-sqlite",
+      "kind": "rust-crate",
+      "path": "crates/winwincode-integration-sqlite",
+      "packageName": "winwincode-integration-sqlite",
+      "phase": "enterprise",
+      "zone": "control-plane",
+      "responsibilities": [
+        "own-community-integration-sqlite-storage-and-slack-rate-limit-ledger"
+      ],
+      "allowedInternalDependencies": [
+        "winwincode-connector-slack",
+        "winwincode-domain",
+        "winwincode-integration-core"
       ]
     },
     {
@@ -486,6 +591,7 @@
         "winwincode-client-port",
         "winwincode-codex",
         "winwincode-control-plane",
+        "winwincode-delivery",
         "winwincode-domain",
         "winwincode-execution-port",
         "winwincode-local",
@@ -659,6 +765,7 @@
       "winwincode-client-port",
       "winwincode-codex",
       "winwincode-control-plane",
+      "winwincode-delivery",
       "winwincode-domain",
       "winwincode-execution-port",
       "winwincode-local",
@@ -733,7 +840,7 @@
         "local-cli",
         "recovery-drill",
         "evidence-export",
-        "enterprise-integration",
+        "integration-infrastructure",
         "enterprise-object-store",
         "enterprise-postgres",
         "test-asset-analysis"

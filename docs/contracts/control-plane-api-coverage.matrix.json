@@ -514,14 +514,14 @@
       ]
     },
     {
-      "surfaceId": "enterprise-integration",
+      "surfaceId": "integration-infrastructure",
       "flowIds": [
         "action-policy-and-collaboration",
         "publication",
         "collaboration-presence"
       ],
       "observableContracts": [
-        "tenant-scoped connector webhook and durable outbound delivery facts"
+        "scope-bound connector webhook and durable outbound delivery facts"
       ]
     },
     {

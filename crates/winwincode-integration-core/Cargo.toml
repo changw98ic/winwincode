@@ -1,0 +1,18 @@
+[package]
+name = "winwincode-integration-core"
+description = "Storage-neutral integration authority, receipts, retry state, and ports"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+include = ["src/**", "tests/**", "Cargo.toml", "README.md"]
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+winwincode-domain.workspace = true
+
+[lints]
+workspace = true
