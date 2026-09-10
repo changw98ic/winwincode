@@ -3,6 +3,9 @@
 export type ClientSurfaceId =
   | 'home'
   | 'chat'
+  | 'projects'
+  | 'extensions'
+  | 'device'
   | 'strongflow'
   | 'settings'
   | 'attention'
@@ -14,6 +17,8 @@ export interface ClientSurface {
   readonly label: string
   readonly description: string
   readonly default: boolean
+  /** Design shell: only chat, board, projects, extensions render nav links. */
+  readonly nav: boolean
 }
 
 /**
@@ -25,47 +30,76 @@ export const CLIENT_SURFACES: readonly ClientSurface[] = Object.freeze([
   Object.freeze({
     id: 'home',
     path: '/home',
-    label: 'Home',
-    description: 'Attention-first dashboard for the current repository Scope',
+    label: '任务看板',
+    description: '当前仓库的任务看板与待办',
     default: true,
+    nav: true,
   }),
   Object.freeze({
     id: 'chat',
     path: '/chat',
-    label: 'Chat',
-    description: 'Conversation workspace',
+    label: '新对话',
+    description: '对话工作区',
     default: false,
+    nav: true,
+  }),
+  Object.freeze({
+    id: 'projects',
+    path: '/projects',
+    label: '项目',
+    description: '项目与仓库列表',
+    default: false,
+    nav: true,
+  }),
+  Object.freeze({
+    id: 'extensions',
+    path: '/extensions',
+    label: '扩展',
+    description: '插件、技能与指令、MCP 连接',
+    default: false,
+    nav: true,
+  }),
+  Object.freeze({
+    id: 'device',
+    path: '/device',
+    label: '执行设备',
+    description: '执行设备连接与可访问目录',
+    default: false,
+    nav: false,
   }),
   Object.freeze({
     id: 'strongflow',
     path: '/strongflow',
     label: 'StrongFlow',
-    description: 'Advanced delivery workspace',
+    description: '高级交付工作台',
     default: false,
-  }),
-  Object.freeze({
-    id: 'settings',
-    path: '/settings',
-    label: 'Settings',
-    description: 'Personal and workspace settings',
-    default: false,
+    nav: false,
   }),
   Object.freeze({
     id: 'attention',
     path: '/attention',
-    label: 'Attention',
-    description: 'Every pending decision across the repository',
+    label: '待我处理',
+    description: '需要人工审核与验收的事项',
     default: false,
+    nav: false,
+  }),
+  Object.freeze({
+    id: 'settings',
+    path: '/settings',
+    label: '设置',
+    description: '个人与工作区设置',
+    default: false,
+    nav: true,
   }),
   Object.freeze({
     id: 'enterprise',
     path: '/enterprise',
-    label: 'Enterprise',
-    description: 'Organization administration',
+    label: '企业管理',
+    description: '组织管理',
     default: false,
+    nav: false,
   }),
 ])
-
 const DEFAULT_SURFACE = CLIENT_SURFACES[0] as ClientSurface
 
 export function clientSurfaceFromHash(hash: string): ClientSurface {

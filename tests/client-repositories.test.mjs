@@ -610,7 +610,7 @@ test('repositories page renders the selection hint, the empty copy, and the unav
   const error = findOne(rootElement, 'wwc-repositories-error')
 
   assert.equal(hint.hidden, false)
-  assert.equal(hint.textContent, 'Select a Client above to see its repositories.')
+  assert.equal(hint.textContent, '先选择上方设备以查看它的仓库。')
   assert.equal(empty.hidden, true)
   assert.equal(error.hidden, true)
 
@@ -618,7 +618,7 @@ test('repositories page renders the selection hint, the empty copy, and the unav
   assert.equal(model.state.status, 'loaded')
   assert.equal(hint.hidden, true)
   assert.equal(empty.hidden, false)
-  assert.equal(empty.textContent, 'No repositories are authorized for this Client yet.')
+  assert.equal(empty.textContent, '该设备还没有被授权的仓库。')
   assert.equal(error.hidden, true)
   assert.deepEqual(client.listCalls, [{ clientId: '123456789012' }])
 

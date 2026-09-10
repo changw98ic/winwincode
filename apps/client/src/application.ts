@@ -29,6 +29,10 @@ import {
   type ConnectionMonitor,
   type ConnectionSnapshot,
 } from './core/connection-state.js'
+import {
+  loadRecentChats,
+  type RecentChatEntry,
+} from './recent-chats.js'
 import { createQueryCache } from '@winwincode/browser-core/query-cache'
 import {
   resolveScopeContext,
@@ -312,6 +316,8 @@ export function mountWinWinCodeClient(
   const main = element(document, 'main', 'wwc-main')
   const scopeRoot = element(document, 'div', 'wwc-scope-selector-root')
   const readinessRoot = element(document, 'div', 'wwc-readiness-root')
+  // Pages own their page headers (design); the shell title elements stay in
+  // the DOM for ARIA but render empty.
   const title = element(document, 'h1', 'wwc-surface-title')
   const description = element(document, 'p', 'wwc-surface-description')
   const readOnlyNotice = element(document, 'p', 'wwc-surface-read-only')
@@ -507,16 +513,19 @@ export function mountWinWinCodeClient(
   }
 
   brand.textContent = 'WinWinCode'
-  navigation.setAttribute('aria-label', 'Product areas')
+  const brandEdition = element(document, 'span', 'wwc-brand-edition')
+  brandEdition.textContent = '社区版'
+  brand.append(brandEdition)
+  navigation.setAttribute('aria-label', '产品导航')
   readOnlyNotice.setAttribute('role', 'status')
-  readOnlyNotice.textContent = 'This product area is read-only. Write actions are unavailable, and Server authorization still applies to every request.'
+  readOnlyNotice.textContent = '此区域为只读。写入操作不可用，服务端授权仍然生效。'
   readOnlyNotice.hidden = true
   // UI-604: the surface slot holds the whole mounted page.  Marking it as a live
   // region queued every realtime DOM change for announcement and nested inside
   // the page's own status regions, so the shell stays silent and each page keeps
   // exactly one polite channel for its own status line.
   skipLink.href = '#wwc-main'
-  skipLink.textContent = 'Skip to main content'
+  skipLink.textContent = '跳到主内容'
   skipLink.addEventListener('click', event => {
     event.preventDefault()
     main.focus()
@@ -524,10 +533,23 @@ export function mountWinWinCodeClient(
   main.tabIndex = -1
   main.id = 'wwc-main'
 
+  const NAV_ICONS: Partial<Record<ClientSurfaceId, string>> = {
+    chat: '<path d="M4 5h16v11H8l-4 4z"/>',
+    home: '<rect x="4" y="4" width="7" height="7"/><rect x="13" y="4" width="7" height="7"/><rect x="4" y="13" width="7" height="7"/><rect x="13" y="13" width="7" height="7"/>',
+    projects: '<path d="M3 6h6l2 2h10v11H3z"/>',
+    extensions: '<path d="M10 4h4v3a2 2 0 1 0 4 0h3v4h-3a2 2 0 1 0 0 4h3v4h-4v-3a2 2 0 1 0-4 0v3H6v-4H4v-4h3a2 2 0 1 0 0-4H4V4h6z"/>',
+    device: '<rect x="3" y="4" width="18" height="12"/><path d="M9 20h6M12 16v4"/>',
+    settings: '<circle cx="12" cy="12" r="3"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1"/>',
+  }
   for (const surface of CLIENT_SURFACES) {
+    if (!surface.nav) continue
     const link = element(document, 'a', 'wwc-navigation-link')
     link.href = `#${surface.path}`
-    link.textContent = surface.label
+    const icon = element(document, 'span', 'wwc-navigation-icon')
+    icon.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" width="18" height="18">${NAV_ICONS[surface.id] ?? ''}</svg>`
+    const text = element(document, 'span', 'wwc-navigation-text')
+    text.textContent = surface.label
+    link.append(icon, text)
     link.dataset.surface = surface.id
     link.hidden = true
     link.addEventListener('click', event => {
@@ -538,7 +560,30 @@ export function mountWinWinCodeClient(
     navigation.append(link)
   }
 
-  header.append(skipLink, brand, navigation, authRoot)
+  // Design sidebar 「最近对话」: browser-local session titles written by the
+  // Chat page; the shell only renders the titles.
+  const recentChatsLabel = element(document, 'p', 'wwc-sidebar-section-label')
+  recentChatsLabel.textContent = '最近对话'
+  const recentChatsList = element(document, 'ul', 'wwc-sidebar-recent')
+  const recentChatsRoot = element(document, 'div', 'wwc-recent-chats')
+  recentChatsRoot.append(recentChatsLabel, recentChatsList)
+  function renderRecentChats(): void {
+    const entries = loadRecentChats(browser.localStorage ?? null)
+    recentChatsList.replaceChildren(...entries.map(entry => {
+      const row = element(document, 'li', 'wwc-sidebar-recent-item')
+      row.textContent = entry.title
+      row.dataset.sessionKey = entry.sessionKey
+      return row
+    }))
+    recentChatsRoot.hidden = entries.length === 0
+  }
+  renderRecentChats()
+  if (typeof window !== 'undefined') {
+    window.addEventListener('wwc:recent-chats-changed', renderRecentChats)
+  }
+
+
+  header.append(skipLink, brand, navigation, recentChatsRoot, authRoot)
   main.append(
     scopeRoot,
     readinessRoot,
@@ -629,21 +674,21 @@ export function mountWinWinCodeClient(
       ? resolution.selection
       : scopeSelectionFromHash(browser.location.hash)
     if (item.id === 'model-route' || item.id === 'credential-reference') {
-      return { href: surfaceHash('/settings', selection), label: 'Open Settings' }
+      return { href: surfaceHash('/settings', selection), label: '打开设置' }
     }
     if (item.id === 'server-worker-health' || item.id === 'helper-availability') {
       return {
         href: surfaceHash('/settings/runtime', selection),
-        label: 'Open local diagnostics',
+        label: '打开本地运维诊断',
       }
     }
     if (item.id === 'first-chat-delivery') {
       return item.reason === 'no-delivery'
         ? {
             href: surfaceHash('/strongflow', selection),
-            label: 'Create your first Delivery',
+            label: '创建你的第一个交付',
           }
-        : { href: surfaceHash('/chat', selection), label: 'Start your first Chat' }
+        : { href: surfaceHash('/chat', selection), label: '开始你的第一次对话' }
     }
     return null
   }
@@ -673,19 +718,19 @@ export function mountWinWinCodeClient(
       link.dataset.capability = entry.capability
       link.hidden = entry.capability === 'hidden'
       link.textContent = entry.capability === 'read-only'
-        ? `${entry.surface.label} (read only)`
+        ? `${entry.surface.label}（只读）`
         : entry.capability === 'disabled'
-          ? `${entry.surface.label} (unavailable)`
+          ? `${entry.surface.label}（不可用）`
           : entry.surface.label
       if (entry.capability === 'disabled') {
         link.setAttribute('aria-disabled', 'true')
         link.tabIndex = -1
-        link.title = `${entry.surface.description}. Not available to the current identity.`
+        link.title = `${entry.surface.description}。当前身份不可用。`
       } else {
         link.removeAttribute('aria-disabled')
         link.tabIndex = 0
         link.title = entry.capability === 'read-only'
-          ? `${entry.surface.description}. Read-only access.`
+          ? `${entry.surface.description}。只读访问。`
           : entry.surface.description
       }
       if (!link.hidden) visible.push(link)
@@ -703,9 +748,9 @@ export function mountWinWinCodeClient(
     const safeEntry = element(document, 'a', 'wwc-surface-route-safe-entry')
     denied.setAttribute('role', 'alert')
     denied.dataset.capability = capability.capability
-    message.textContent = `${capability.surface.label} is not available to the current identity.`
+    message.textContent = `当前身份无法使用${capability.surface.label}。`
     safeEntry.href = surfaceHash('/chat', scopeSelectionFromHash(browser.location.hash))
-    safeEntry.textContent = 'Return to Chat'
+    safeEntry.textContent = '返回新对话'
     denied.append(message, safeEntry)
     slot.replaceChildren(denied)
   }
@@ -726,7 +771,7 @@ export function mountWinWinCodeClient(
     closeAttentionMonitor()
     const scopeRevoked = element(document, 'p', 'wwc-scope-selector-access')
     scopeRevoked.setAttribute('role', 'alert')
-    scopeRevoked.textContent = 'The current Scope authorization was revoked. Return to a safe entry and restore access.'
+    scopeRevoked.textContent = '此范围的授权已被撤销。请返回安全入口并恢复访问。'
     scopeRoot.replaceChildren(scopeRevoked)
     clearRouteFailure()
     const link = links.get(activeSurface.id)
@@ -813,14 +858,14 @@ export function mountWinWinCodeClient(
         resolution?.status === 'denied' ? 'alert' : 'status',
       )
       unavailable.textContent = authSession.state.status === 'restoring'
-        ? 'Restoring your signed-in workspace…'
+        ? '正在恢复登录状态…'
         : resolution?.status === 'denied'
-          ? 'The repository Scope in this URL is not authorized. Choose another Scope.'
+          ? 'URL 中的仓库范围未获授权，请选择其他范围。'
           : resolution?.status === 'selection-required'
-            ? 'Choose an authorized repository Scope to open this workspace.'
+            ? '选择一个已授权的仓库范围以打开工作区。'
             : authSession.state.status === 'signed-in' && session !== null
-              ? 'Your account does not have access to a repository workspace.'
-          : 'Sign in to open this workspace.'
+              ? '当前账号没有可用的仓库工作区。'
+          : '登录后打开工作区。'
       slot.replaceChildren(unavailable)
       return null
     }
@@ -850,7 +895,7 @@ export function mountWinWinCodeClient(
     if (context === null) return
     const controller = new AbortController()
     featureController = controller
-    routeLoading('Loading Chat…')
+    routeLoading('正在加载新对话…')
     try {
       const parameters = routeParameters(browser.location.hash)
       const productSessionId = parameters.get('session') as ProductSessionId | null
@@ -918,6 +963,76 @@ export function mountWinWinCodeClient(
     }
   }
 
+  /** Design page 07: 项目与仓库 list. Backed by the directory facades the shell
+   *  already owns; the page module owns DOM and presentation only. */
+  async function renderProjects(generation: number): Promise<void> {
+    const context = authenticatedRouteContext()
+    if (context === null) return
+    const controller = new AbortController()
+    featureController = controller
+    routeLoading('正在加载项目…')
+    try {
+      const [{ renderProjectsPage }] = await Promise.all([
+        import('./projects-page.js'),
+      ])
+      if (closed || generation !== renderGeneration || controller.signal.aborted) return
+      activeFeature = renderProjectsPage({
+        root: slot,
+        clientDirectory,
+        newChatHref: '#/chat',
+        deviceHref: '#/device',
+        requestOptions: () => undefined,
+      })
+    } catch (error) {
+      if (closed || generation !== renderGeneration || controller.signal.aborted) return
+      showRouteFailure(error, 'PROJECTS_ROUTE_FAILURE')
+    }
+  }
+
+  /** Design page 08: 执行设备. Reuses the shell-owned Clients model. */
+  async function renderDevice(generation: number): Promise<void> {
+    const context = authenticatedRouteContext()
+    if (context === null) return
+    const controller = new AbortController()
+    featureController = controller
+    routeLoading('正在加载执行设备…')
+    try {
+      const [{ renderDevicePage }] = await Promise.all([
+        import('./device-page.js'),
+      ])
+      if (closed || generation !== renderGeneration || controller.signal.aborted) return
+      activeFeature = renderDevicePage({
+        root: slot,
+        clientDirectory,
+        homeHref: '#/home',
+        projectsHref: '#/projects',
+        requestOptions: () => undefined,
+      })
+    } catch (error) {
+      if (closed || generation !== renderGeneration || controller.signal.aborted) return
+      showRouteFailure(error, 'DEVICE_ROUTE_FAILURE')
+    }
+  }
+
+  /** UI-EXT-100: the extensions hub is presentation-only until the control
+   *  plane exposes plugin, skill, and MCP inventories; no model is mounted. */
+  async function renderExtensions(generation: number): Promise<void> {
+    if (authenticatedRouteContext() === null) return
+    const controller = new AbortController()
+    featureController = controller
+    routeLoading('正在加载扩展…')
+    try {
+      const [{ mountExtensionsPage }] = await Promise.all([
+        import('./extensions-page.js'),
+      ])
+      if (closed || generation !== renderGeneration || controller.signal.aborted) return
+      activeFeature = mountExtensionsPage({ root: slot })
+    } catch (error) {
+      if (closed || generation !== renderGeneration || controller.signal.aborted) return
+      showRouteFailure(error, 'EXTENSIONS_ROUTE_FAILURE')
+    }
+  }
+
   async function renderSettings(generation: number): Promise<void> {
     const context = authenticatedRouteContext()
     if (context === null) return
@@ -926,7 +1041,7 @@ export function mountWinWinCodeClient(
     const operationsRoute = browser.location.hash
       .replace(/^#/u, '')
       .replace(/\?.*$/u, '') === '/settings/runtime'
-    routeLoading(operationsRoute ? 'Loading local operations…' : 'Loading Settings…')
+    routeLoading(operationsRoute ? '正在加载本地运维…' : '正在加载设置…')
     try {
       if (operationsRoute) {
         const [
@@ -1036,7 +1151,7 @@ export function mountWinWinCodeClient(
     if (context === null) return
     const controller = new AbortController()
     featureController = controller
-    routeLoading('Loading Home…')
+    routeLoading('正在加载任务看板…')
     try {
       const [{ createMyWorkViewModel }, { mountMyWorkPage }] = await Promise.all([
         import('./my-work-view-model.js'),
@@ -1109,7 +1224,7 @@ export function mountWinWinCodeClient(
     if (context === null) return
     const controller = new AbortController()
     featureController = controller
-    routeLoading('Loading the new task form…')
+    routeLoading('正在加载新任务表单…')
     try {
       const [{ createTaskEntryViewModel }, { mountTaskEntryPage }] = await Promise.all([
         import('./task-entry-view-model.js'),
@@ -1160,7 +1275,7 @@ export function mountWinWinCodeClient(
     }
     const controller = new AbortController()
     featureController = controller
-    routeLoading('Loading the running task…')
+    routeLoading('正在加载运行中任务…')
     try {
       const [{ createTaskRunViewModel }, { mountTaskRunPage }] = await Promise.all([
         import('./task-run-view-model.js'),
@@ -1201,7 +1316,7 @@ export function mountWinWinCodeClient(
     if (productSessionId !== null) {
       const controller = new AbortController()
       featureController = controller
-      routeLoading('Loading session decisions…')
+      routeLoading('正在加载会话决策…')
       try {
         const deliveryId = parameters.get('delivery') as DeliveryId | null
         const stageRunId = canonicalStageRunParameter(parameters)
@@ -1264,7 +1379,7 @@ export function mountWinWinCodeClient(
     }
     const controller = new AbortController()
     featureController = controller
-    routeLoading('Loading the Attention Center…')
+    routeLoading('正在加载待我处理…')
     try {
       const [{ createAttentionCenterViewModel }, { mountAttentionCenterPage }] = await Promise.all([
         import('./attention-center-view-model.js'),
@@ -1303,7 +1418,7 @@ export function mountWinWinCodeClient(
     const context = routeContext
     const controller = new AbortController()
     featureController = controller
-    routeLoading('Loading StrongFlow…')
+    routeLoading('正在加载 StrongFlow…')
     let deliveryList: Awaited<ReturnType<typeof createStrongFlowDeliveryList>> | null = null
     async function createStrongFlowDeliveryList() {
       const { createStrongFlowDeliveryListViewModel } = await import(
@@ -1620,6 +1735,10 @@ export function mountWinWinCodeClient(
     currentScopeResolution = null
     activeSurface = clientSurfaceFromHash(browser.location.hash)
     recordHomeVisit(browser.location.hash)
+    // Device onboarding belongs to the My Work task-start flow, not to every
+    // surface; chat, attention, and settings render without it.
+    clientsRoot.hidden = activeSurface.id !== 'home'
+    repositoriesRoot.hidden = activeSurface.id !== 'home'
     for (const link of links.values()) link.removeAttribute('data-route-access')
     delete slot.dataset.routeAccess
     clearRouteFailure()
@@ -1628,8 +1747,8 @@ export function mountWinWinCodeClient(
       entry.surface.id === activeSurface.id
     )) as SurfaceCapability
     activeRouteReadOnly = capability.capability === 'read-only'
-    title.textContent = activeSurface.label
-    description.textContent = activeSurface.description
+    title.textContent = ''
+    description.textContent = ''
     readOnlyNotice.hidden = !activeRouteReadOnly
     slot.dataset.winwincodeSurface = activeSurface.id
     slot.dataset.navigationCapability = capability.capability
@@ -1740,7 +1859,13 @@ export function mountWinWinCodeClient(
       }
     }
     else if (activeSurface.id === 'chat') launchRoute(renderChat(generation), generation, 'CHAT_ROUTE_FAILURE')
-    else if (activeSurface.id === 'strongflow') {
+    else if (activeSurface.id === 'extensions') {
+      launchRoute(renderExtensions(generation), generation, 'EXTENSIONS_ROUTE_FAILURE')
+    } else if (activeSurface.id === 'projects') {
+      launchRoute(renderProjects(generation), generation, 'PROJECTS_ROUTE_FAILURE')
+    } else if (activeSurface.id === 'device') {
+      launchRoute(renderDevice(generation), generation, 'DEVICE_ROUTE_FAILURE')
+    } else if (activeSurface.id === 'strongflow') {
       launchRoute(renderStrongFlow(generation), generation, 'STRONGFLOW_ROUTE_FAILURE')
     } else if (activeSurface.id === 'settings') {
       launchRoute(renderSettings(generation), generation, 'SETTINGS_ROUTE_FAILURE')
@@ -1812,6 +1937,9 @@ export function mountWinWinCodeClient(
       || state.status === 'error') && (
       activeSurface.id === 'home'
       || activeSurface.id === 'chat'
+      || activeSurface.id === 'projects'
+      || activeSurface.id === 'device'
+      || activeSurface.id === 'extensions'
       || activeSurface.id === 'strongflow'
       || activeSurface.id === 'settings'
       || activeSurface.id === 'attention'

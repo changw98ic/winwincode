@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import { formatInstant } from './format-instant.js'
 import { attentionCenterItemHash } from './attention-center-page.js'
 import type { AttentionCenterOrigin } from './attention-center-view-model.js'
 import {
@@ -8,10 +9,10 @@ import {
   mountStatusBadge,
   type StatusTone,
 } from '@winwincode/browser-ui'
-import { mountEmptyState } from './components/index.js'
 import { mountKeyedCollection, type KeyedCollectionView } from './components/keyed-collection.js'
 import { scopeHash, surfaceHash, type ScopeRouteSelection } from '@winwincode/browser-core/scope-context'
-import type { Instant, ProductSessionId } from './generated/contracts.js'
+import type { DeliveryStatus, Instant, ProductSessionId } from './generated/contracts.js'
+import { DeliveryStatus as DeliveryStatusVocabulary } from './generated/contracts.js'
 import type {
   HomeDashboardSource,
   HomeDashboardState,
@@ -21,7 +22,6 @@ import type {
   HomeDeliveryCard,
   HomeVisitedCard,
 } from './home-dashboard-view-model.js'
-import { mountUsageHealthSummary, type UsageHealthSummary } from './usage-health-page.js'
 import { strongFlowRouteHash, type StrongFlowRoute } from './strongflow-route.js'
 
 export type HomeSectionId = 'decisions' | 'active' | 'failing' | 'completed' | 'visited'
@@ -30,30 +30,35 @@ export type HomeSectionId = 'decisions' | 'active' | 'failing' | 'completed' | '
 export type HomeCard = HomeDecisionCard | HomeDeliveryCard | HomeVisitedCard
 
 export interface HomeDashboardPresentation {
-  readonly eyebrow: string
-  readonly description: string
+  readonly title: string
   readonly refreshLabel: string
+  readonly projectSelectLabel: string
+  readonly projectSelectTitle: string
+  readonly allProjectsLabel: string
+  readonly currentScopeLabel: string
+  readonly newTaskLabel: string
   readonly statusLabel: Readonly<Record<HomeDashboardStatus, string>>
   readonly partialNote: string
   readonly errorNote: string
   readonly unavailableLabel: string
   readonly sourceLabel: Readonly<Record<HomeDashboardSource, string>>
   readonly sectionHeading: Readonly<Record<HomeSectionId, string>>
-  readonly sectionDescription: Readonly<Record<HomeSectionId, string>>
   readonly sectionEmpty: Readonly<Record<HomeSectionId, string>>
-  readonly sectionLink: Readonly<
-    Partial<Record<HomeSectionId, { readonly label: string; readonly path: string }>>
-  >
-  readonly decisionLabel: Readonly<Record<HomeDecisionCard['kind'], string>>
-  readonly openDecisionLabel: string
+  /** The collapsed history rows of design page 04 (failing/completed/visited). */
+  readonly collapsibleSections: readonly HomeSectionId[]
+  readonly expandLabel: string
+  readonly collapseLabel: string
+  readonly strongFlowLabel: string
+  readonly deliveryStatusText: Readonly<Record<DeliveryStatus, string>>
+  readonly planReviewPendingLabel: string
+  readonly deliveryAcceptancePendingLabel: string
+  readonly decisionUrgencyText: Readonly<Record<'expired' | 'binding-invalid', string>>
+  readonly blockingDecisionLabel: string
+  readonly reviewPlanLabel: string
+  readonly acceptDeliveryLabel: string
+  readonly viewProgressLabel: string
   readonly openChatLabel: string
-  readonly openDeliveryLabel: string
   readonly disabledLabel: string
-  readonly unknownSessionLabel: string
-  readonly firstUseTitle: string
-  readonly firstUseDetail: string
-  readonly firstUseDeliveryLabel: string
-  readonly firstUseChatLabel: string
   readonly countLabel: (count: number) => string
   readonly updatedLabel: (at: Instant) => string
   readonly visitedLabel: (at: Instant) => string
@@ -64,73 +69,77 @@ export interface HomeDashboardPresentation {
 }
 
 const PRESENTATION_SPEC: HomeDashboardPresentation = {
-  eyebrow: 'Attention first',
-  description: 'What needs you now, and which executions are moving in this repository Scope.',
-  refreshLabel: 'Refresh now',
+  title: '任务看板',
+  refreshLabel: '立即刷新',
+  projectSelectLabel: '项目范围（展示）',
+  projectSelectTitle: '看板已限定当前仓库 Scope;项目筛选为展示控件。',
+  allProjectsLabel: '全部项目',
+  currentScopeLabel: '当前仓库',
+  newTaskLabel: '新建任务',
   statusLabel: Object.freeze({
-    loading: 'Reading the dashboard…',
-    ready: 'Ready',
-    partial: 'Ready with gaps',
-    error: 'The dashboard could not be read',
-    closed: 'Dashboard closed',
+    loading: '正在读取看板…',
+    ready: '就绪',
+    partial: '就绪（部分缺省）',
+    error: '看板读取失败',
+    closed: '看板已关闭',
   }),
-  partialNote: 'Some projections are unavailable in this Scope.',
-  errorNote: 'Retry the dashboard.',
-  unavailableLabel: 'is unavailable',
+  partialNote: '此范围内部分投影不可用。',
+  errorNote: '重试看板。',
+  unavailableLabel: '不可用',
   sourceLabel: Object.freeze({
-    delivery: 'The Delivery list',
-    attention: 'Attention',
-    usage: 'Usage and health',
+    delivery: '交付列表',
+    attention: '待办',
+    usage: '用量与健康',
   }),
   sectionHeading: Object.freeze({
-    decisions: 'Needs you now',
-    active: 'In progress',
-    failing: 'Failed or blocked',
-    completed: 'Recently completed',
-    visited: 'Recently opened',
-  }),
-  sectionDescription: Object.freeze({
-    decisions: 'Every pending decision across the current repository Scope.',
-    active: 'Deliveries whose work is moving or waiting on the next step.',
-    failing: 'Deliveries with failures, blocked tasks, or open business Attention.',
-    completed: 'Deliveries that reached their publication target.',
-    visited: 'Deliveries you opened recently, remembered in this browser only.',
+    decisions: '待我处理',
+    active: '正在运行',
+    failing: '失败或阻塞',
+    completed: '已完成',
+    visited: '最近打开',
   }),
   sectionEmpty: Object.freeze({
-    decisions: 'Nothing needs a decision right now.',
-    active: 'No Delivery is in progress.',
-    failing: 'Nothing is failing or blocked.',
-    completed: 'Nothing has been delivered yet.',
-    visited: 'You have not opened a Delivery from this browser yet.',
+    decisions: '现在没有需要决策的事项。',
+    active: '没有进行中的交付。',
+    failing: '没有失败或阻塞的交付。',
+    completed: '还没有已完成的交付。',
+    visited: '你还没有从这个浏览器打开过交付。',
   }),
-  sectionLink: Object.freeze({
-    decisions: Object.freeze({ label: 'Open the Attention Center', path: '/attention' }),
-    active: Object.freeze({ label: 'Open all Deliveries', path: '/strongflow' }),
+  collapsibleSections: Object.freeze(['failing', 'completed', 'visited']),
+  expandLabel: '展开',
+  collapseLabel: '收起',
+  strongFlowLabel: '强流程',
+  deliveryStatusText: Object.freeze({
+    [DeliveryStatusVocabulary.Draft]: '草稿',
+    [DeliveryStatusVocabulary.Clarifying]: '正在澄清',
+    [DeliveryStatusVocabulary.Ready]: '待启动',
+    [DeliveryStatusVocabulary.Planning]: '正在规划',
+    [DeliveryStatusVocabulary.PlanReview]: '等你审核方案',
+    [DeliveryStatusVocabulary.Executing]: '正在执行',
+    [DeliveryStatusVocabulary.Verifying]: '正在验证',
+    [DeliveryStatusVocabulary.Reworking]: '验证未通过，正在修复',
+    [DeliveryStatusVocabulary.NeedsAttention]: '阻塞 · 需要处理',
+    [DeliveryStatusVocabulary.ReadyToDeliver]: '待验收',
+    [DeliveryStatusVocabulary.Delivered]: '已交付',
   }),
-  decisionLabel: Object.freeze({
-    input: 'Input',
-    approval: 'Tool approval',
-    attention: 'Business Attention',
+  planReviewPendingLabel: '方案待审核',
+  deliveryAcceptancePendingLabel: '交付待验收',
+  decisionUrgencyText: Object.freeze({
+    expired: '已过期 · 操作禁用',
+    'binding-invalid': '绑定失效 · 操作禁用',
   }),
-  openDecisionLabel: 'Open decisions',
-  openChatLabel: 'Open chat',
-  openDeliveryLabel: 'Open delivery',
-  disabledLabel: 'This decision is closed. Refresh for the current state.',
-  unknownSessionLabel: 'Session · not reported',
-  firstUseTitle: 'Start your first Delivery',
-  firstUseDetail:
-    'This repository Scope has no Delivery and no pending decision yet. Create a Delivery to move a requirement through StrongFlow, or start a Chat to describe what you need.',
-  firstUseDeliveryLabel: 'Create your first Delivery',
-  firstUseChatLabel: 'Start your first Chat',
-  countLabel: count => (count === 1 ? '1 entry' : `${String(count)} entries`),
-  updatedLabel: at => `Updated ${at}`,
-  visitedLabel: at => `Opened ${at}`,
+  blockingDecisionLabel: '阻塞 · 需要立即决策',
+  reviewPlanLabel: '审核方案',
+  acceptDeliveryLabel: '验收交付',
+  viewProgressLabel: '查看进度',
+  openChatLabel: '打开对话',
+  disabledLabel: '该决策已关闭。请刷新查看当前状态。',
+  countLabel: count => String(count),
+  updatedLabel: at => `更新于 ${formatInstant(at)}`,
+  visitedLabel: at => `打开于 ${formatInstant(at)}`,
   taskLabel: card => [
-    `${String(card.activeTasks)} active`,
-    `${String(card.verifyingTasks)} verifying`,
-    `${String(card.completedTasks)} completed`,
-    card.failedTasks > 0 ? `${String(card.failedTasks)} failed` : null,
-    card.blockedTasks > 0 ? `${String(card.blockedTasks)} blocked` : null,
+    card.failedTasks > 0 ? `${String(card.failedTasks)} 个失败` : null,
+    card.blockedTasks > 0 ? `${String(card.blockedTasks)} 个阻塞` : null,
   ].filter((entry): entry is string => entry !== null).join(' · '),
 }
 
@@ -150,12 +159,10 @@ export function homeDashboardAnnouncement(state: HomeDashboardState): string {
   }
   const counts = state.counts
   const summary = [
-    counts.decisions === 1
-      ? '1 item needs a decision'
-      : `${String(counts.decisions)} items need a decision`,
-    `${String(counts.active)} in progress`,
-    `${String(counts.failing)} failed or blocked`,
-    `${String(counts.completed)} completed`,
+    `${String(counts.decisions)} 项待决策`,
+    `${String(counts.active)} 个运行中`,
+    `${String(counts.failing)} 个失败或阻塞`,
+    `${String(counts.completed)} 个已完成`,
   ].join(' · ')
   return state.status === 'partial'
     ? `${PRESENTATION.statusLabel.partial} · ${summary} · ${PRESENTATION.partialNote}`
@@ -205,6 +212,24 @@ export function homeDecisionHash(
     stageRunId: card.stageRunId,
     deliveryId: card.deliveryId,
   }, scopeSelection, origins)
+}
+
+/** The one status line of a pending-decision card, from its real kind/urgency. */
+export function homeDecisionStatusText(card: HomeDecisionCard): string {
+  if (card.actionDisabled) {
+    return PRESENTATION.decisionUrgencyText[card.urgency === 'expired' ? 'expired' : 'binding-invalid']
+  }
+  if (card.urgency === 'blocking') return PRESENTATION.blockingDecisionLabel
+  return card.kind === 'attention'
+    ? PRESENTATION.deliveryAcceptancePendingLabel
+    : PRESENTATION.planReviewPendingLabel
+}
+
+/** Decision-class entries open the plan review, Delivery-bound ones the hand-over. */
+export function homeDecisionActionLabel(card: HomeDecisionCard): string {
+  return card.kind === 'attention'
+    ? PRESENTATION.acceptDeliveryLabel
+    : PRESENTATION.reviewPlanLabel
 }
 
 export interface HomeDashboardPageOptions {
@@ -263,14 +288,14 @@ function updateContextList(list: HTMLUListElement, entries: readonly string[]): 
 
 interface CardParts {
   readonly node: HTMLLIElement
-  readonly kind: HTMLElement
   readonly title: HTMLElement
+  readonly status: HTMLElement
   readonly context: HTMLUListElement
   readonly chat: HTMLAnchorElement
   readonly action: HTMLAnchorElement
 }
 
-/** Mount the Attention-first Home dashboard: one bounded first screen per Scope. */
+/** Mount the design-04 task board: two live columns over collapsed history rows. */
 export function mountHomeDashboardPage(
   options: HomeDashboardPageOptions,
 ): HomeDashboardPage {
@@ -280,18 +305,35 @@ export function mountHomeDashboardPage(
 
   const layout = element(document, 'section', 'wwc-home')
   layout.dataset.wwcPage = 'home'
+
+  // Design page 04: the big title shares one row with the display-only Scope
+  // select and the new-task entry.
   const pageHeader = mountPageHeader({
     document,
     props: {
-      title: 'Home',
-      eyebrow: presentation.eyebrow,
-      description: presentation.description,
+      title: presentation.title,
       headingLevel: 2,
       className: 'wwc-home-heading',
     },
   })
-  // The dashboard keeps exactly one polite live region: the Usage summary it
-  // composes announces nothing, and the first-use state is a status region.
+  const projectSelect = element(document, 'select', 'wwc-home-project-select')
+  projectSelect.disabled = true
+  projectSelect.setAttribute('aria-label', presentation.projectSelectLabel)
+  projectSelect.title = presentation.projectSelectTitle
+  for (const label of [presentation.allProjectsLabel, presentation.currentScopeLabel]) {
+    const option = document.createElement('option')
+    option.textContent = label
+    projectSelect.append(option)
+  }
+  const newTask = element(document, 'a', 'wwc-home-new-task')
+  newTask.href = surfaceHash('/home/new-task', options.scopeSelection)
+  newTask.textContent = presentation.newTaskLabel
+  const topActions = element(document, 'div', 'wwc-home-actions')
+  topActions.append(projectSelect, newTask)
+  const topbar = element(document, 'div', 'wwc-home-topbar')
+  topbar.append(pageHeader.root, topActions)
+
+  // The dashboard keeps exactly one polite live region: the status row.
   const statusBadge = mountStatusBadge({
     document,
     props: {
@@ -314,34 +356,14 @@ export function mountHomeDashboardPage(
 
   const cardParts = new WeakMap<HTMLLIElement, CardParts>()
 
-  function decisionContextEntries(card: HomeDecisionCard): readonly string[] {
-    return Object.freeze([
-      card.urgency === 'blocking'
-        ? 'Blocking · needs a decision now'
-        : card.urgency === 'pending'
-          ? 'Needs a decision'
-          : card.urgency === 'expired'
-            ? 'Expired · action disabled'
-            : 'Binding invalid · action disabled',
-      card.sessionTitle === null
-        ? (card.productSessionId === null
-          ? presentation.unknownSessionLabel
-          : `Session · ${card.productSessionId}`)
-        : `Session · ${card.sessionTitle}`,
-      card.deliveryTitle === null ? 'No Delivery context' : `Delivery · ${card.deliveryTitle}`,
-      card.expiresAt === null ? 'No expiry deadline' : `Expires ${card.expiresAt}`,
-    ])
-  }
-
   function deliveryContextEntries(card: HomeDeliveryCard): readonly string[] {
     return Object.freeze([
-      `Status ${card.status} · r${String(card.revision)}`,
       presentation.taskLabel(card),
       card.openAttentionCount === 0
-        ? 'No open Attention'
-        : `${String(card.openAttentionCount)} open Attention`,
+        ? null
+        : `${String(card.openAttentionCount)} 个待处理`,
       presentation.updatedLabel(card.updatedAt),
-    ])
+    ].filter((entry): entry is string => entry !== null && entry !== ''))
   }
 
   function setAction(parts: CardParts, href: string, label: string): void {
@@ -364,8 +386,11 @@ export function mountHomeDashboardPage(
     parts.node.dataset.kind = 'decision'
     parts.node.dataset.urgency = card.urgency
     parts.node.dataset.disabled = String(card.actionDisabled)
-    parts.kind.textContent = presentation.decisionLabel[card.kind]
     parts.title.textContent = card.title
+    parts.status.textContent = homeDecisionStatusText(card)
+    // Design page 04: the pending card face carries the name and the status
+    // line only; the Chat session stays reachable through the quiet link.
+    updateContextList(parts.context, [])
     parts.chat.hidden = card.actionDisabled || card.productSessionId === null
     if (card.productSessionId !== null && !card.actionDisabled) {
       parts.chat.href = homeChatHash(card.productSessionId, options.scopeSelection)
@@ -374,15 +399,12 @@ export function mountHomeDashboardPage(
       parts.chat.removeAttribute('href')
       parts.chat.textContent = ''
     }
-    updateContextList(parts.context, decisionContextEntries(card))
-    if (card.actionDisabled) disableAction(parts, presentation.openDecisionLabel)
+    if (card.actionDisabled) disableAction(parts, homeDecisionActionLabel(card))
     else {
       setAction(
         parts,
         homeDecisionHash(card, options.scopeSelection, origins),
-        card.kind === 'attention'
-          ? presentation.openDeliveryLabel
-          : presentation.openDecisionLabel,
+        homeDecisionActionLabel(card),
       )
     }
   }
@@ -392,17 +414,14 @@ export function mountHomeDashboardPage(
     parts.node.dataset.status = card.status
     parts.node.dataset.urgency = ''
     delete parts.node.dataset.disabled
-    parts.kind.textContent = card.status
     parts.title.textContent = card.title
+    parts.status.textContent = `${presentation.strongFlowLabel} · ${
+      presentation.deliveryStatusText[card.status]}`
     parts.chat.hidden = true
     parts.chat.removeAttribute('href')
     parts.chat.textContent = ''
     updateContextList(parts.context, deliveryContextEntries(card))
-    setAction(
-      parts,
-      homeDeliveryHash(card, options.scopeSelection),
-      presentation.openDeliveryLabel,
-    )
+    setAction(parts, homeDeliveryHash(card, options.scopeSelection), presentation.viewProgressLabel)
   }
 
   function fillVisitedCard(parts: CardParts, card: HomeVisitedCard): void {
@@ -410,8 +429,9 @@ export function mountHomeDashboardPage(
     parts.node.dataset.status = card.status
     parts.node.dataset.urgency = ''
     delete parts.node.dataset.disabled
-    parts.kind.textContent = card.status
     parts.title.textContent = card.title
+    parts.status.textContent = `${presentation.strongFlowLabel} · ${
+      presentation.deliveryStatusText[card.status]}`
     parts.chat.hidden = true
     parts.chat.removeAttribute('href')
     parts.chat.textContent = ''
@@ -419,24 +439,22 @@ export function mountHomeDashboardPage(
       ...deliveryContextEntries(card),
       presentation.visitedLabel(card.visitedAt),
     ])
-    setAction(
-      parts,
-      homeDeliveryHash(card, options.scopeSelection),
-      presentation.openDeliveryLabel,
-    )
+    setAction(parts, homeDeliveryHash(card, options.scopeSelection), presentation.viewProgressLabel)
   }
 
   function createCard(): HTMLLIElement {
     const node = element(document, 'li', 'wwc-home-card')
-    const kind = element(document, 'span', 'wwc-home-card-kind')
+    const main = element(document, 'div', 'wwc-home-card-main')
     const title = element(document, 'h4', 'wwc-home-card-title')
+    const status = element(document, 'p', 'wwc-home-card-status')
     const context = element(document, 'ul', 'wwc-home-card-context')
-    for (let index = 0; index < 5; index += 1) context.append(document.createElement('li'))
+    for (let index = 0; index < 4; index += 1) context.append(document.createElement('li'))
     const chat = element(document, 'a', 'wwc-home-card-chat')
     chat.hidden = true
+    main.append(title, status, context, chat)
     const action = element(document, 'a', 'wwc-home-card-action')
-    node.append(kind, title, context, chat, action)
-    cardParts.set(node, { node, kind, title, context, chat, action })
+    node.append(main, action)
+    cardParts.set(node, { node, title, status, context, chat, action })
     return node
   }
 
@@ -449,8 +467,11 @@ export function mountHomeDashboardPage(
   }
 
   interface SectionParts {
+    readonly heading: HTMLElement
     readonly count: HTMLElement
     readonly empty: HTMLElement
+    readonly cards: HTMLUListElement
+    readonly toggle: HTMLButtonElement | null
     readonly collection: KeyedCollectionView<HomeCard, string, HTMLLIElement>
   }
   const sections = new Map<HomeSectionId, SectionParts>()
@@ -462,26 +483,47 @@ export function mountHomeDashboardPage(
     heading.textContent = presentation.sectionHeading[id]
     const count = element(document, 'span', 'wwc-home-section-count')
     headingRow.append(heading, count)
-    const description = element(document, 'p', 'wwc-home-section-description')
-    description.textContent = presentation.sectionDescription[id]
     const empty = element(document, 'p', 'wwc-home-section-empty')
     empty.hidden = true
     empty.textContent = presentation.sectionEmpty[id]
     const cards = element(document, 'ul', 'wwc-home-cards')
     const root = element(document, 'section', 'wwc-home-section')
     root.dataset.section = id
-    root.append(headingRow, description, empty, cards)
-    const link = presentation.sectionLink[id]
-    if (link !== undefined) {
-      const sectionLink = element(document, 'a', 'wwc-home-section-link')
-      sectionLink.href = surfaceHash(link.path, options.scopeSelection)
-      sectionLink.textContent = link.label
-      root.append(sectionLink)
+    // Design page 04: history groups render as collapsed single hairline rows.
+    const collapsible = presentation.collapsibleSections.includes(id)
+    let toggle: HTMLButtonElement | null = null
+    if (collapsible) {
+      const toggleButton = element(document, 'button', 'wwc-home-section-toggle')
+      toggleButton.type = 'button'
+      cards.id = `wwc-home-cards-${id}`
+      toggleButton.setAttribute('aria-controls', cards.id)
+      toggleButton.setAttribute('aria-expanded', 'false')
+      toggleButton.setAttribute(
+        'aria-label',
+        `${presentation.sectionHeading[id]} · ${presentation.expandLabel}`,
+      )
+      toggleButton.addEventListener('click', () => {
+        const expanded = toggleButton.getAttribute('aria-expanded') === 'true'
+        toggleButton.setAttribute('aria-expanded', expanded ? 'false' : 'true')
+        toggleButton.setAttribute(
+          'aria-label',
+          `${presentation.sectionHeading[id]} · ${expanded ? presentation.expandLabel : presentation.collapseLabel}`,
+        )
+        cards.hidden = expanded
+        empty.hidden = expanded ? true : !renderedEmpty(id)
+      })
+      headingRow.append(toggleButton)
+      cards.hidden = true
+      toggle = toggleButton
     }
+    root.append(headingRow, empty, cards)
     sectionsRoot.append(root)
     sections.set(id, {
+      heading,
       count,
       empty,
+      cards,
+      toggle,
       collection: mountKeyedCollection<HomeCard, string, HTMLLIElement>({
         parent: cards,
         key: cardKey,
@@ -491,44 +533,22 @@ export function mountHomeDashboardPage(
     })
   }
 
-  const usageRoot = element(document, 'div', 'wwc-home-usage-root')
-  layout.append(
-    pageHeader.root,
-    statusBadge.root,
-    refreshButton.root,
-    unavailable,
-    sectionsRoot,
-    usageRoot,
-  )
+  function renderedEmpty(id: HomeSectionId): boolean {
+    const state = options.model.state
+    const rendered = id === 'decisions'
+      ? state.decisions.length
+      : id === 'active'
+        ? state.active.length
+        : id === 'failing'
+          ? state.failing.length
+          : id === 'completed'
+            ? state.completed.length
+            : state.visited.length
+    return rendered === 0
+  }
+
+  layout.append(topbar, statusBadge.root, refreshButton.root, unavailable, sectionsRoot)
   options.root.replaceChildren(layout)
-
-  // The Usage, Provider and Worker health summary is the existing read-only
-  // projection panel; it owns this root and opens no second live region.
-  const usagePanel: UsageHealthSummary = mountUsageHealthSummary({
-    root: usageRoot,
-    model: options.model.usage,
-  })
-
-  const firstUseDelivery = element(document, 'a', 'wwc-home-first-use-delivery')
-  firstUseDelivery.href = surfaceHash('/strongflow', options.scopeSelection)
-  firstUseDelivery.textContent = presentation.firstUseDeliveryLabel
-  const firstUseChat = element(document, 'a', 'wwc-home-first-use-chat')
-  firstUseChat.href = surfaceHash('/chat', options.scopeSelection)
-  firstUseChat.textContent = presentation.firstUseChatLabel
-  const firstUseActions = element(document, 'div', 'wwc-home-first-use-actions')
-  firstUseActions.append(firstUseDelivery, firstUseChat)
-  const firstUse = mountEmptyState({
-    document,
-    props: {
-      title: presentation.firstUseTitle,
-      detail: presentation.firstUseDetail,
-      headingLevel: 3,
-      className: 'wwc-home-first-use',
-      action: firstUseActions,
-    },
-  })
-  firstUse.root.hidden = true
-  layout.append(firstUse.root)
 
   let closed = false
 
@@ -570,15 +590,6 @@ export function mountHomeDashboardPage(
     sections.get('completed')?.collection.update(state.completed)
     sections.get('visited')?.collection.update(state.visited)
     for (const [id, section] of sections) {
-      const rendered = id === 'decisions'
-        ? state.decisions.length
-        : id === 'active'
-          ? state.active.length
-          : id === 'failing'
-            ? state.failing.length
-            : id === 'completed'
-              ? state.completed.length
-              : state.visited.length
       const total = id === 'decisions'
         ? state.counts.decisions
         : id === 'active'
@@ -589,9 +600,12 @@ export function mountHomeDashboardPage(
               ? state.counts.completed
               : state.counts.visited
       section.count.textContent = presentation.countLabel(total)
-      section.empty.hidden = rendered > 0
+      // A collapsed row keeps its empty note hidden with its cards; an open
+      // column shows the honest empty state.
+      const expanded = section.toggle === null
+        || section.toggle.getAttribute('aria-expanded') === 'true'
+      section.empty.hidden = expanded ? !renderedEmpty(id) : true
     }
-    firstUse.root.hidden = !state.firstUse
   }
 
   const unsubscribe = options.model.subscribe(render)
@@ -603,8 +617,6 @@ export function mountHomeDashboardPage(
       closed = true
       unsubscribe()
       for (const section of sections.values()) section.collection.close()
-      firstUse.close()
-      usagePanel.close()
       refreshButton.close()
       statusBadge.close()
       pageHeader.close()

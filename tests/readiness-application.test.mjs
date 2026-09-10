@@ -380,7 +380,7 @@ test('the shell mounts the first-run checklist and reuses the shared query cache
   await waitFor(() => fixture.application.authSession.state.status === 'signed-in', 'session')
   await waitFor(() => readinessSection(fixture.rootElement) !== null, 'checklist section')
   await waitFor(
-    () => readinessSection(fixture.rootElement).textContent.includes('1 of 6 complete'),
+    () => readinessSection(fixture.rootElement).textContent.includes('通过 1/6'),
     'checked checklist',
   )
 
@@ -447,18 +447,20 @@ test('the shell mounts the first-run checklist and reuses the shared query cache
 test('recheck after completing the steps reports ready and issues fresh reads', async () => {
   const fixture = mount('#/settings')
   await waitFor(
-    () => readinessSection(fixture.rootElement)?.textContent.includes('1 of 6 complete') === true,
+    () => readinessSection(fixture.rootElement)?.textContent.includes('通过 1/6') === true,
     'initial checklist',
   )
-  assert.match(readinessSection(fixture.rootElement).textContent, /1 of 6 complete/u)
+  assert.match(readinessSection(fixture.rootElement).textContent, /通过 1\/6/u)
 
   fixture.client.completeAllSteps()
   const recheck = descendants(readinessSection(fixture.rootElement)).find(node => (
     node.className === 'wwc-readiness-recheck'
   ))
   recheck.dispatchEvent({ type: 'click' })
+  // Once every check passes, the shell hides the whole onboarding checklist.
   await waitFor(
-    () => readinessSection(fixture.rootElement).textContent.includes('6 of 6 complete'),
+    () => readinessSection(fixture.rootElement).textContent.includes('通过 6/6')
+      && readinessSection(fixture.rootElement).hidden === true,
     'complete checklist',
   )
   assert.equal(

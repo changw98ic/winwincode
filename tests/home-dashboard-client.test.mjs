@@ -108,8 +108,6 @@ const inputRequestId = 'inp_00000000000000000000000001'
 const attentionItemId = 'att_00000000000000000000000001'
 const subscriptionId = 'sub_00000000000000000000000001'
 const NOW = Date.parse('2026-09-03T09:00:00.000Z')
-const SCOPED_STRONGFLOW = '#/strongflow'
-const SCOPED_CHAT = '#/chat'
 
 function canonicalId(prefix, value) {
   return `${prefix}_${String(value).padStart(26, '0')}`
@@ -409,9 +407,12 @@ test('Home is the canonical default surface and every product entry stays reacha
   assert.deepEqual(CLIENT_SURFACES.map(surface => surface.id), [
     'home',
     'chat',
+    'projects',
+    'extensions',
+    'device',
     'strongflow',
-    'settings',
     'attention',
+    'settings',
     'enterprise',
   ])
   assert.equal(clientSurfaceFromHash('').id, 'home')
@@ -861,31 +862,31 @@ test('the dashboard announcement names every section count and its gaps', () => 
     attention: attentionState([]),
     usage: usageState(),
     visits: [],
-  })), /^Ready · 0 items need a decision · 0 in progress/u)
+  })), /^就绪 · 0 项待决策/u)
   assert.match(homeDashboardAnnouncement(homeDashboardState({
     deliveries: deliveryState([deliverySummary()]),
     attention: attentionState([decisionCard()]),
     usage: usageState(),
     visits: [],
-  })), /1 item needs a decision · 1 in progress · 0 failed or blocked · 0 completed/u)
+  })), /1 项待决策 · 1 个运行中 · 0 个失败或阻塞 · 0 个已完成/u)
   assert.match(homeDashboardAnnouncement(homeDashboardState({
     deliveries: deliveryState([]),
     attention: attentionState([], { status: 'error' }),
     usage: usageState({ status: 'error' }),
     visits: [],
-  })), /^Ready with gaps/u)
+  })), /^就绪（部分缺省）/u)
   assert.match(homeDashboardAnnouncement(homeDashboardState({
     deliveries: deliveryState([], { status: 'loading' }),
     attention: attentionState([], { status: 'loading' }),
     usage: usageState({ status: 'loading' }),
     visits: [],
-  })), /^Reading the dashboard/u)
+  })), /^正在读取看板/u)
   assert.match(homeDashboardAnnouncement(homeDashboardState({
     deliveries: deliveryState([], { status: 'error' }),
     attention: attentionState([], { status: 'error' }),
     usage: usageState({ status: 'error' }),
     visits: [],
-  })), /^The dashboard could not be read/u)
+  })), /^看板读取失败/u)
 })
 
 class FakeElement {
@@ -1047,7 +1048,7 @@ function fakeHomeModel(states) {
   return model
 }
 
-test('the Home page mounts one polite live region and exact deep links on every card', () => {
+test('the Home page mounts the task board chrome, one polite live region, and exact deep links', () => {
   const document = new FakeDocument()
   const rootElement = new FakeElement(document, 'div')
   const state = homeDashboardState({
@@ -1096,14 +1097,41 @@ test('the Home page mounts one polite live region and exact deep links on every 
 
   const page = byClass(rootElement, 'wwc-home')
   assert.equal(page.dataset.wwcPage, 'home')
+
+  // Design page 04: big title, display-only Scope select, and the new-task
+  // entry that deep links the §16.6 form.
+  assert.match(visibleText(byClass(rootElement, 'wwc-home-heading')), /任务看板/u)
+  const projectSelect = byClass(rootElement, 'wwc-home-project-select')
+  assert.equal(projectSelect.disabled, true)
+  assert.match(visibleText(projectSelect), /全部项目/u)
+  assert.match(visibleText(projectSelect), /当前仓库/u)
+  const newTask = byClass(rootElement, 'wwc-home-new-task')
+  assert.equal(newTask.textContent, '新建任务')
+  assert.equal(
+    newTask.href,
+    `#/home/new-task?organizationId=${scope.organizationId}`
+      + `&workspaceId=${scope.workspaceId}&projectId=${scope.projectId}`
+      + `&repositoryId=${scope.repositoryId}`,
+  )
+
   const liveRegions = descendants(page).filter(
     node => node.getAttribute('aria-live') === 'polite',
   )
   assert.equal(liveRegions.length, 1, 'the Home page keeps exactly one polite live region')
   assert.match(
     visibleText(liveRegions[0]),
-    /Ready · 3 items need a decision · 1 in progress · 0 failed or blocked · 1 completed/u,
+    /就绪 · 3 项待决策 · 1 个运行中 · 0 个失败或阻塞 · 1 个已完成/u,
   )
+
+  // The two live columns: Running left, Needs-you right, bold + gray count.
+  const activeSection = descendants(page).find(node => node.dataset?.section === 'active')
+  assert.notEqual(activeSection, undefined)
+  assert.equal(byClass(activeSection, 'wwc-home-section-heading').textContent, '正在运行')
+  assert.equal(byClass(activeSection, 'wwc-home-section-count').textContent, '1')
+  const decisionsSection = descendants(page).find(node => node.dataset?.section === 'decisions')
+  assert.notEqual(decisionsSection, undefined)
+  assert.equal(byClass(decisionsSection, 'wwc-home-section-heading').textContent, '待我处理')
+  assert.equal(byClass(decisionsSection, 'wwc-home-section-count').textContent, '3')
 
   const decisionCards = allByClass(rootElement, 'wwc-home-card')
     .filter(card => card.dataset.kind === 'decision')
@@ -1114,6 +1142,22 @@ test('the Home page mounts one polite live region and exact deep links on every 
   assert.equal(disabledAction.getAttribute('href'), null)
   assert.equal(disabledAction.getAttribute('aria-disabled'), 'true')
   assert.equal(disabledAction.tabIndex, -1)
+  assert.match(visibleText(disabled), /已过期 · 操作禁用/u)
+
+  // Pending cards: status line by kind, one accent action per decision class.
+  const inputCard = decisionCards.find(card => card.dataset.urgency === 'pending')
+  assert.equal(byClass(inputCard, 'wwc-home-card-status').textContent, '方案待审核')
+  assert.equal(byClass(inputCard, 'wwc-home-card-action').textContent, '审核方案')
+  const attentionCard = decisionCards.find(card => card.dataset.urgency === 'blocking')
+  assert.equal(byClass(attentionCard, 'wwc-home-card-status').textContent, '阻塞 · 需要立即决策')
+  assert.equal(byClass(attentionCard, 'wwc-home-card-action').textContent, '验收交付')
+
+  // Running cards: 强流程 + the mapped status text, with the white progress action.
+  const runningCard = allByClass(rootElement, 'wwc-home-card')
+    .find(card => card.dataset.kind === 'delivery')
+  assert.notEqual(runningCard, undefined)
+  assert.equal(byClass(runningCard, 'wwc-home-card-status').textContent, '强流程 · 正在执行')
+  assert.equal(byClass(runningCard, 'wwc-home-card-action').textContent, '查看进度')
 
   const actions = descendants(rootElement)
     .filter(node => node.className === 'wwc-home-card-action')
@@ -1155,12 +1199,30 @@ test('the Home page mounts one polite live region and exact deep links on every 
   )
   assert.deepEqual(chatLinks, [homeChatHash(productSessionId, scopeSelection)])
 
+  // Design page 04: the Usage panel and the first-use block are gone; the
+  // history groups render as collapsed hairline rows.
+  assert.equal(allByClass(rootElement, 'wwc-usage-health').length, 0)
+  assert.equal(allByClass(rootElement, 'wwc-home-first-use').length, 0)
+  for (const id of ['failing', 'completed', 'visited']) {
+    const section = descendants(page).find(node => node.dataset?.section === id)
+    assert.notEqual(section, undefined)
+    const toggle = byClass(section, 'wwc-home-section-toggle')
+    assert.equal(toggle.getAttribute('aria-expanded'), 'false')
+    const cards = byClass(section, 'wwc-home-cards')
+    assert.equal(cards.hidden, true, `${id} stays collapsed`)
+    assert.equal(allByClass(section, 'wwc-home-card').length > 0 || id === 'failing', true)
+    if (id === 'completed') {
+      assert.equal(byClass(section, 'wwc-home-section-heading').textContent, '已完成')
+      toggle.dispatch('click')
+      assert.equal(toggle.getAttribute('aria-expanded'), 'true')
+      assert.equal(cards.hidden, false, 'the completed row expands in place')
+      assert.equal(allByClass(section, 'wwc-home-card').length, 1)
+      toggle.dispatch('click')
+      assert.equal(toggle.getAttribute('aria-expanded'), 'false')
+      assert.equal(cards.hidden, true)
+    }
+  }
   assert.match(visibleText(byClass(rootElement, 'wwc-home-sections')), /Running delivery/u)
-  assert.match(
-    visibleText(byClass(rootElement, 'wwc-usage-health')),
-    /Usage, Provider and Worker health/u,
-  )
-  assert.equal(byClass(rootElement, 'wwc-home-first-use').hidden, true)
 
   mountedPage.close()
   assert.equal(rootElement.children.length, 0)
@@ -1190,8 +1252,8 @@ test('the Home page stays usable when one projection is unavailable and closes i
     ownsModel: false,
   })
   model.refresh()
-  assert.match(visibleText(byClass(rootElement, 'wwc-home')), /Attention is unavailable/u)
-  assert.match(visibleText(byClass(rootElement, 'wwc-home')), /Usage and health is unavailable/u)
+  assert.match(visibleText(byClass(rootElement, 'wwc-home')), /待办 不可用/u)
+  assert.match(visibleText(byClass(rootElement, 'wwc-home')), /用量与健康 不可用/u)
   assert.match(visibleText(byClass(rootElement, 'wwc-home')), /Running delivery/u)
 
   byClass(rootElement, 'wwc-home-refresh').dispatch('click')
@@ -1201,7 +1263,7 @@ test('the Home page stays usable when one projection is unavailable and closes i
   assert.equal(model.closed, false, 'a host that owns the model closes it itself')
 })
 
-test('the Home page shows the first-use entry instead of an empty dashboard', () => {
+test('an empty Scope stays honest without the first-use block or usage panel', () => {
   const document = new FakeDocument()
   const rootElement = new FakeElement(document, 'div')
   const empty = homeDashboardState({
@@ -1217,22 +1279,21 @@ test('the Home page shows the first-use entry instead of an empty dashboard', ()
     scopeSelection,
     ownsModel: false,
   })
-  const emptyState = byClass(rootElement, 'wwc-home-first-use')
-  assert.equal(emptyState.hidden, false)
-  const text = visibleText(emptyState)
-  assert.match(text, /Create your first Delivery/u)
-  assert.match(text, /Start your first Chat/u)
-  assert.deepEqual(
-    descendants(emptyState).filter(node => node.tagName === 'A').map(node => node.href),
-    [
-      `${SCOPED_STRONGFLOW}?organizationId=${scope.organizationId}`
-        + `&workspaceId=${scope.workspaceId}&projectId=${scope.projectId}`
-        + `&repositoryId=${scope.repositoryId}`,
-      `${SCOPED_CHAT}?organizationId=${scope.organizationId}`
-        + `&workspaceId=${scope.workspaceId}&projectId=${scope.projectId}`
-        + `&repositoryId=${scope.repositoryId}`,
-    ],
+  // Design page 04 removes the first-use block and the Usage panel; the empty
+  // columns keep their explicit notes and the new-task entry stays reachable.
+  assert.equal(allByClass(rootElement, 'wwc-home-first-use').length, 0)
+  assert.equal(allByClass(rootElement, 'wwc-usage-health').length, 0)
+  const decisionsSection = descendants(rootElement)
+    .find(node => node.dataset?.section === 'decisions')
+  assert.equal(byClass(decisionsSection, 'wwc-home-section-empty').hidden, false)
+  assert.match(
+    byClass(decisionsSection, 'wwc-home-section-empty').textContent,
+    /现在没有需要决策的事项/u,
   )
+  const activeSection = descendants(rootElement)
+    .find(node => node.dataset?.section === 'active')
+  assert.equal(byClass(activeSection, 'wwc-home-section-empty').hidden, false)
+  assert.equal(byClass(rootElement, 'wwc-home-new-task').textContent, '新建任务')
   mountedPage.close()
 })
 

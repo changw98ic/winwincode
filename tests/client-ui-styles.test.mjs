@@ -11,6 +11,7 @@ const sourceFiles = [
   'shell.css',
   'components.css',
   'features/chat.css',
+  'features/extensions.css',
   'features/strongflow.css',
   'features/settings.css',
   'features/local-operations.css',
@@ -20,6 +21,9 @@ const sourceFiles = [
   'features/enterprise.css',
   'features/usage-health.css',
   'features/contextual-decision.css',
+  'features/clients.css',
+  'features/repositories.css',
+  'features/users.css',
 ]
 
 function source(path) {

@@ -898,7 +898,10 @@ test('the Attention Center API exposes browsing only and can never fabricate dec
 test('presentation filters by kind, keeps fail-closed labels, and never hides state', () => {
   const state = centerState()
   const all = attentionCenterPresentation(state, { kind: 'all', sort: 'urgency' })
-  assert.equal(all.statusText, 'Ready · 2 need a decision · 1 blocking · 1 expired · 1 binding invalid')
+  assert.equal(
+    all.statusText,
+    '就绪 · 待决策 2 项 · 阻塞 1 项 · 已过期 1 项 · 绑定失效 1 项',
+  )
   assert.equal(all.errorText, null)
   assert.equal(all.busy, false)
   assert.equal(all.retryVisible, false)
@@ -933,7 +936,7 @@ test('presentation filters by kind, keeps fail-closed labels, and never hides st
   assert.equal(revoked.retryVisible, false)
   assert.equal(revoked.reconnectVisible, false)
   assert.notEqual(revoked.errorText, null)
-  assert.equal(revoked.statusText.includes('sign in'), true)
+  assert.equal(revoked.statusText.includes('重新登录'), true)
 
   const denied = attentionCenterPresentation(centerState({
     status: 'authorization-denied',
@@ -971,7 +974,7 @@ test('item entry links open the authoritative source context with the exact Scop
   assert.match(strongflowHash, /repositoryId=rep_00000000000000000000000001/u)
 })
 
-test('the mounted center shows safe cards, disables fail-closed actions, and keeps drafts and controls across reloads', () => {
+test('the mounted center shows safe rows, disables fail-closed actions, and keeps drafts and controls across reloads', () => {
   const document = new FakeDocument()
   const rootElement = new FakeElement(document, 'div')
   const state = centerState()
@@ -985,6 +988,19 @@ test('the mounted center shows safe cards, disables fail-closed actions, and kee
   })
   assert.equal(byClass(rootElement, 'wwc-attention-center').dataset.wwcPage, 'management')
   assert.equal(byClass(rootElement, 'wwc-attention-center-heading').dataset.wwcComponent, 'page-header')
+  // Design page 06: back link, counted title, one polite status badge, refresh.
+  const back = byClass(rootElement, 'wwc-attention-center-back')
+  assert.equal(
+    back.href,
+    `#/home?organizationId=${scope.organizationId}`
+      + `&workspaceId=${scope.workspaceId}&projectId=${scope.projectId}`
+      + `&repositoryId=${scope.repositoryId}`,
+  )
+  assert.equal(back.textContent, '返回任务看板')
+  assert.equal(
+    visibleText(byClass(rootElement, 'wwc-attention-center-heading')).includes('待我处理 5 项'),
+    true,
+  )
   assert.equal(byClass(rootElement, 'wwc-attention-center-status').dataset.wwcComponent, 'status-badge')
   assert.equal(byClass(rootElement, 'wwc-attention-center-refresh').dataset.wwcComponent, 'button')
   const kindSelect = byClass(rootElement, 'wwc-attention-center-kind')
@@ -997,22 +1013,46 @@ test('the mounted center shows safe cards, disables fail-closed actions, and kee
   assert.equal(text.includes('Review the proposed delivery scope'), true)
   assert.equal(text.includes('Describe the exact local change'), true)
   assert.equal(hiddenCandidateDigest.includes('not-enter-dom') && text.includes(hiddenCandidateDigest), false)
-  assert.equal(text.includes('Task ·'), true)
-  assert.equal(text.includes('Candidate ·'), true)
+  // Binding bookkeeping is internal: the row omits it entirely rather than
+  // rendering 'Task · Unavailable' style placeholder lines.
+  assert.equal(text.includes('Task ·'), false)
+  assert.equal(text.includes('Candidate ·'), false)
   for (const secret of [executionJobId, workerSessionId, codexThreadId, hiddenRepositoryLocator, hiddenToolPayload]) {
     assert.equal(text.includes(secret), false, secret)
   }
+
+  // Row status lines come from the real kind/urgency; actions per decision class.
   const blockingCard = cardNodes.find(node => node.dataset.urgency === 'blocking')
   assert.notEqual(blockingCard, undefined)
+  assert.equal(byClass(blockingCard, 'wwc-attention-card-status').textContent, '阻塞 · 需要立即决策')
+  assert.equal(byClass(blockingCard, 'wwc-attention-card-action').textContent, '验收交付')
+  const pendingCard = cardNodes.find(node => node.dataset.urgency === 'pending'
+    && node.dataset.kind !== 'attention')
+  assert.equal(byClass(pendingCard, 'wwc-attention-card-status').textContent, '待决策')
+  assert.equal(byClass(pendingCard, 'wwc-attention-card-action').textContent, '审核方案')
   const invalidCard = cardNodes.find(node => node.dataset.urgency === 'binding-invalid')
   assert.notEqual(invalidCard, undefined)
+  assert.equal(byClass(invalidCard, 'wwc-attention-card-status').textContent, '绑定失效 · 操作禁用')
   assert.equal(byClass(invalidCard, 'wwc-attention-card-action').getAttribute('aria-disabled'), 'true')
   assert.equal(byClass(invalidCard, 'wwc-attention-card-action').getAttribute('href'), null)
   const expiredCard = cardNodes.find(node => node.dataset.urgency === 'expired')
+  assert.equal(byClass(expiredCard, 'wwc-attention-card-status').textContent, '已过期 · 操作禁用')
   assert.equal(byClass(expiredCard, 'wwc-attention-card-action').getAttribute('aria-disabled'), 'true')
   assert.equal(byClass(expiredCard, 'wwc-attention-card-action').getAttribute('href'), null)
-  const actionableCard = cardNodes.find(node => node.dataset.urgency === 'pending')
-  assert.equal(byClass(actionableCard, 'wwc-attention-card-action').getAttribute('aria-disabled'), null)
+  assert.equal(byClass(pendingCard, 'wwc-attention-card-action').getAttribute('aria-disabled'), null)
+
+  // Design page 06: the handled archive collapses into one hairline row.
+  const handled = byClass(rootElement, 'wwc-attention-center-handled')
+  assert.equal(byClass(handled, 'wwc-attention-center-handled-label').textContent, '已处理')
+  assert.equal(byClass(handled, 'wwc-attention-center-handled-count').textContent, '0')
+  const handledDetail = byClass(rootElement, 'wwc-attention-center-handled-detail')
+  assert.equal(handledDetail.hidden, true)
+  handled.dispatch('click')
+  assert.equal(handled.getAttribute('aria-expanded'), 'true')
+  assert.equal(handledDetail.hidden, false)
+  handled.dispatch('click')
+  assert.equal(handled.getAttribute('aria-expanded'), 'false')
+  assert.equal(handledDetail.hidden, true)
 
   kindSelect.value = 'attention'
   kindSelect.dispatch('change')

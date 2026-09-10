@@ -58,13 +58,13 @@ export function mountClientErrorBoundary(
   const copy = mountButton({
     document: options.document,
     props: {
-      label: 'Copy diagnostic',
+      label: '复制诊断',
       className: 'wwc-client-error-copy',
       onActivate: () => {
-        feedback.textContent = 'Copying diagnostic summary…'
+        feedback.textContent = '正在复制诊断摘要…'
         void Promise.resolve(current.onCopy(current.diagnostic)).then(
-          () => { feedback.textContent = 'Diagnostic summary copied.' },
-          () => { feedback.textContent = 'Diagnostic copy is unavailable.' },
+          () => { feedback.textContent = '诊断摘要已复制。' },
+          () => { feedback.textContent = '无法复制诊断摘要。' },
         )
       },
     },
@@ -112,13 +112,13 @@ export function mountClientErrorBoundary(
       onActivate: () => { current.onSafeEntry() },
     })
     copy.update({
-      label: 'Copy diagnostic',
+      label: '复制诊断',
       className: 'wwc-client-error-copy',
       onActivate: () => {
-        feedback.textContent = 'Copying diagnostic summary…'
+        feedback.textContent = '正在复制诊断摘要…'
         void Promise.resolve(current.onCopy(current.diagnostic)).then(
-          () => { feedback.textContent = 'Diagnostic summary copied.' },
-          () => { feedback.textContent = 'Diagnostic copy is unavailable.' },
+          () => { feedback.textContent = '诊断摘要已复制。' },
+          () => { feedback.textContent = '无法复制诊断摘要。' },
         )
       },
     })

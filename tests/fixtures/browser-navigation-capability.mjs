@@ -178,10 +178,9 @@ globalThis.revokeEnterpriseSubscription = async () => {
   await waitFor(() => subscription.handle.closed, 'revoked subscription cleanup')
   await waitFor(() => document.querySelector('.wwc-surface-route-safe-entry') !== null,
     'shell safe entry')
-  const entry = document.querySelector('[data-surface="enterprise"]')
+  // Design shell: the enterprise area renders no navigation entry, so only
+  // the subscription and safe-entry facts are observable here.
   return {
-    capability: entry?.dataset.capability ?? null,
-    routeAccess: entry?.dataset.routeAccess ?? null,
     safeHref: document.querySelector('.wwc-surface-route-safe-entry')?.getAttribute('href') ?? null,
     subscriptionClosed: subscription.handle.closed,
   }

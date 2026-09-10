@@ -1,79 +1,47 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 
+/* Design pages 03a/03b: the chat page is a single column; the session list
+   lives in the shell sidebar, not on the page. */
 .wwc-chat {
-  display: grid;
-  grid-template-columns: minmax(12rem, 18rem) minmax(0, 1fr);
+  display: flex;
+  flex-direction: column;
   min-height: 30rem;
-}
-
-.wwc-chat-sessions {
-  padding: var(--wwc-space-4);
-  border-right: var(--wwc-border-width) solid var(--wwc-color-border);
-  background: var(--wwc-color-surface-subtle);
-}
-
-.wwc-chat-sessions-heading,
-.wwc-chat-heading {
-  margin: var(--wwc-space-0) var(--wwc-space-0) var(--wwc-space-3);
-}
-
-.wwc-chat-session-list,
-.wwc-chat-messages {
-  margin: var(--wwc-space-0);
-  padding: var(--wwc-space-0);
-  list-style: none;
-}
-
-.wwc-chat-session-list button {
-  width: 100%;
-  margin-bottom: var(--wwc-space-1);
-  padding: var(--wwc-space-3);
-  border: var(--wwc-space-0);
-  border-radius: var(--wwc-radius-md);
-  text-align: left;
-  background: transparent;
-}
-
-.wwc-chat-new-session {
-  width: 100%;
-  margin-bottom: var(--wwc-space-3);
-  padding: var(--wwc-space-2);
-  border: var(--wwc-border-width) solid var(--wwc-color-border-strong);
-  border-radius: var(--wwc-radius-md);
-  color: inherit;
-  background: var(--wwc-color-surface);
-}
-
-.wwc-chat-session-list button[aria-current='true'] {
-  background: var(--wwc-color-border-subtle);
-  font-weight: var(--wwc-font-weight-medium);
 }
 
 .wwc-chat-conversation {
   display: flex;
   flex-direction: column;
+  flex: 1;
   min-width: var(--wwc-space-0);
   padding: var(--wwc-space-4);
 }
 
-.wwc-chat-conversation-header {
-  display: grid;
-  grid-template-columns: 1fr auto;
-  align-items: start;
-  gap: var(--wwc-space-0) var(--wwc-space-4);
+.wwc-chat-page-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--wwc-space-4);
+}
+
+.wwc-chat-project {
+  padding: var(--wwc-space-2) var(--wwc-space-3);
+  border: var(--wwc-border-width-control) solid var(--wwc-color-border);
+  border-radius: var(--wwc-radius-md);
+  color: inherit;
+  background: var(--wwc-color-surface);
+  font-weight: var(--wwc-font-weight-medium);
+}
+
+.wwc-chat-heading {
+  margin: var(--wwc-space-4) var(--wwc-space-0) var(--wwc-space-2);
+  font-size: var(--wwc-font-size-display);
+  font-weight: var(--wwc-font-weight-display);
 }
 
 .wwc-chat-status {
   margin: var(--wwc-space-0);
-  color: var(--wwc-color-text-muted);
-}
-
-.wwc-chat-model-label {
-  display: grid;
-  grid-row: 1 / 3;
-  grid-column: 2;
-  gap: var(--wwc-space-1);
   font-size: var(--wwc-font-size-sm);
+  color: var(--wwc-color-text-muted);
 }
 
 .wwc-chat-model,
@@ -101,27 +69,228 @@
 .wwc-chat-load-earlier {
   align-self: center;
   margin: var(--wwc-space-4) var(--wwc-space-0);
+  padding: var(--wwc-space-2) var(--wwc-space-4);
+  border: var(--wwc-border-width-control) solid var(--wwc-color-border-strong);
+  border-radius: var(--wwc-radius-md);
+  color: inherit;
+  background: var(--wwc-color-surface);
+}
+
+/* Design page 03a: the empty canvas centers the architecture and flow
+   diagrams behind the「架构图 | 流程图」tabs. */
+.wwc-chat-diagram {
+  display: grid;
+  flex: 1;
+  align-content: center;
+  justify-items: center;
+  gap: var(--wwc-space-8);
+  padding: var(--wwc-space-8) var(--wwc-space-0);
+}
+
+.wwc-chat-diagram-tabs {
+  display: flex;
+  gap: var(--wwc-space-6);
+}
+
+.wwc-chat-diagram-tab {
+  padding: var(--wwc-space-1) var(--wwc-space-1) var(--wwc-space-2);
+  border: var(--wwc-space-0);
+  border-bottom: 3px solid transparent;
+  background: none;
+  color: var(--wwc-color-text-muted);
+  font-size: var(--wwc-font-size-lg);
+  font-weight: var(--wwc-font-weight-medium);
+}
+
+.wwc-chat-diagram-tab[aria-selected='true'] {
+  border-bottom-color: var(--wwc-color-accent-strong);
+  color: var(--wwc-color-text);
+  font-weight: var(--wwc-font-weight-strong);
+}
+
+.wwc-chat-diagram-view {
+  display: grid;
+  gap: var(--wwc-space-8);
+  justify-items: center;
+  max-width: 100%;
+}
+
+.wwc-chat-diagram-panel {
+  display: flex;
+  align-items: center;
+  gap: var(--wwc-space-4);
+  max-width: 100%;
+}
+
+.wwc-chat-diagram-node {
+  display: grid;
+  justify-items: center;
+  gap: var(--wwc-space-3);
+  min-width: 8rem;
+  padding: var(--wwc-space-6) var(--wwc-space-4);
+  border: var(--wwc-border-width) solid var(--wwc-color-border);
+  border-radius: var(--wwc-radius-lg);
+  background: var(--wwc-color-surface);
+}
+
+.wwc-chat-diagram-label {
+  font-weight: var(--wwc-font-weight-medium);
+}
+
+.wwc-chat-diagram-link {
+  flex: 1;
+  min-width: 2rem;
+  height: 2px;
+  background: var(--wwc-color-border);
+}
+
+.wwc-chat-diagram-link-arrow {
+  position: relative;
+}
+
+.wwc-chat-diagram-link-arrow::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  right: -1px;
+  transform: translateY(-50%);
+  border-left: 0.5rem solid var(--wwc-color-border);
+  border-top: 0.3rem solid transparent;
+  border-bottom: 0.3rem solid transparent;
+}
+
+.wwc-chat-diagram-step {
+  display: grid;
+  place-items: center;
+  min-width: 6rem;
+  padding: var(--wwc-space-4) var(--wwc-space-3);
+  border: var(--wwc-border-width) solid var(--wwc-color-border);
+  border-radius: var(--wwc-radius-lg);
+  background: var(--wwc-color-surface);
+  font-weight: var(--wwc-font-weight-medium);
+}
+
+.wwc-chat-diagram-caption {
+  margin: var(--wwc-space-0);
+  color: var(--wwc-color-text-muted);
+}
+
+/* Geometric monochrome glyphs drawn with boxes so no icon font or inline SVG
+   is needed inside the diagram nodes. */
+.wwc-chat-diagram-glyph {
+  position: relative;
+  width: 2.5rem;
+  height: 2.5rem;
+  color: var(--wwc-color-text);
+}
+
+.wwc-chat-diagram-glyph-web {
+  border: 2px solid currentcolor;
+  border-radius: 2px;
+}
+
+.wwc-chat-diagram-glyph-web::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 0;
+  height: 0.7rem;
+  border-bottom: 2px solid currentcolor;
+}
+
+.wwc-chat-diagram-glyph-web::after {
+  content: '';
+  position: absolute;
+  top: 0.22rem;
+  left: 0.22rem;
+  width: 0.26rem;
+  height: 0.26rem;
+  border-radius: 50%;
+  background: currentcolor;
+  box-shadow: 0.45rem 0 0 currentcolor, 0.9rem 0 0 currentcolor;
+}
+
+.wwc-chat-diagram-glyph-backend {
+  border: 2px solid currentcolor;
+  border-radius: 2px;
+}
+
+.wwc-chat-diagram-glyph-backend::before,
+.wwc-chat-diagram-glyph-backend::after {
+  content: '';
+  position: absolute;
+  right: 0;
+  left: 0;
+  height: 2px;
+  background: currentcolor;
+}
+
+.wwc-chat-diagram-glyph-backend::before {
+  top: 0.75rem;
+}
+
+.wwc-chat-diagram-glyph-backend::after {
+  bottom: 0.75rem;
+}
+
+.wwc-chat-diagram-glyph-client::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 0;
+  height: 1.8rem;
+  border: 2px solid currentcolor;
+  border-radius: 2px;
+}
+
+.wwc-chat-diagram-glyph-client::after {
+  content: '';
+  position: absolute;
+  bottom: 0.15rem;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 1.6rem;
+  height: 0.45rem;
+  background: currentcolor;
+}
+
+.wwc-chat-diagram-glyph-worker::before {
+  content: '';
+  position: absolute;
+  top: -0.25rem;
+  left: calc(50% - 0.25rem);
+  width: 0.5rem;
+  height: 0.5rem;
+  background: currentcolor;
+  box-shadow: 0 2.5rem 0 currentcolor, -1.25rem 1.25rem 0 currentcolor,
+    1.25rem 1.25rem 0 currentcolor;
+}
+
+.wwc-chat-diagram-glyph-worker::after {
+  content: '';
+  position: absolute;
+  inset: 0.55rem;
+  border: 0.3rem solid currentcolor;
+  border-radius: 50%;
 }
 
 .wwc-chat-messages {
   display: grid;
   flex: 1;
   align-content: end;
-  gap: var(--wwc-space-3);
+  gap: var(--wwc-space-6);
   min-height: 16rem;
+  margin: var(--wwc-space-0);
   padding: var(--wwc-space-4) var(--wwc-space-0);
+  list-style: none;
 }
 
+/* Design page 03b: messages render flat — a bold speaker name above the text,
+   no bubble frame. */
 .wwc-chat-messages article {
   max-width: 46rem;
-  padding: var(--wwc-space-4) var(--wwc-space-4);
-  border-radius: var(--wwc-radius-lg);
-  background: var(--wwc-color-message);
-}
-
-.wwc-chat-messages article[data-role='user'] {
-  margin-left: auto;
-  background: var(--wwc-color-selection);
 }
 
 .wwc-chat-messages h3,
@@ -130,9 +299,10 @@
 }
 
 .wwc-chat-messages h3 {
-  margin-bottom: var(--wwc-space-1);
-  font-size: var(--wwc-font-size-sm);
-  color: var(--wwc-color-text-secondary);
+  margin-bottom: var(--wwc-space-2);
+  font-size: var(--wwc-font-size-md);
+  font-weight: var(--wwc-font-weight-strong);
+  color: var(--wwc-color-text);
 }
 
 .wwc-chat-message-state {
@@ -143,56 +313,144 @@
 }
 
 .wwc-chat-empty {
-  margin: auto;
+  margin: var(--wwc-space-0);
+  padding: var(--wwc-space-4) var(--wwc-space-0);
   color: var(--wwc-color-text-muted);
+  text-align: center;
+}
+
+/* Design page 03b: a created Delivery surfaces as an in-flow receipt line
+   with an underlined link to the StrongFlow surface. */
+.wwc-chat-delegation-receipt {
+  display: flex;
+  align-items: baseline;
+  gap: var(--wwc-space-3);
+  margin: var(--wwc-space-0);
+  padding: var(--wwc-space-0) var(--wwc-space-0) var(--wwc-space-4);
+}
+
+.wwc-chat-delegation-receipt-link {
+  color: var(--wwc-color-text);
+  font-weight: var(--wwc-font-weight-medium);
+  text-decoration: underline;
+  text-underline-offset: 0.25em;
 }
 
 .wwc-chat-composer {
   display: grid;
   gap: var(--wwc-space-2);
-  padding-top: var(--wwc-space-4);
-  border-top: var(--wwc-border-width) solid var(--wwc-color-border-subtle);
+  margin-top: var(--wwc-space-4);
+  padding: var(--wwc-space-4);
+  border: var(--wwc-border-width-control) solid var(--wwc-color-border);
+  border-radius: var(--wwc-radius-lg);
+  background: var(--wwc-color-surface);
+  box-shadow: var(--wwc-shadow-hard);
 }
 
+/* The composer is announced by its label; the design shows only the
+   placeholder text. */
 .wwc-chat-composer-label {
-  font-weight: var(--wwc-font-weight-medium);
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: var(--wwc-space-0);
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: var(--wwc-space-0);
 }
 
 .wwc-chat-composer-input {
   width: 100%;
+  border: var(--wwc-space-0);
+  background: transparent;
   resize: vertical;
+}
+
+.wwc-chat-composer-input:focus-visible {
+  outline: var(--wwc-border-width-strong) solid var(--wwc-color-focus);
+  outline-offset: 2px;
 }
 
 .wwc-chat-composer-controls {
   display: flex;
-  justify-content: flex-end;
-  gap: var(--wwc-space-2);
+  align-items: center;
+  gap: var(--wwc-space-3);
 }
 
-.wwc-chat-cancel,
-.wwc-chat-send,
-.wwc-chat-retry,
-.wwc-chat-load-earlier {
+/* Design page 03b: attach entry on the left, model route beside it, actions
+   pushed to the right edge of the composer bar. */
+.wwc-chat-composer-attach {
+  width: 2.75rem;
+  min-height: 2.75rem;
+  padding: 0;
+  border: var(--wwc-border-width-control) solid var(--wwc-color-border);
+  border-radius: var(--wwc-radius-md);
+  background: var(--wwc-color-surface);
+  font-size: 1.35rem;
+  line-height: 1;
+}
+
+.wwc-chat-composer-controls .wwc-chat-model-label {
+  display: flex;
+  align-items: center;
+  gap: var(--wwc-space-2);
+  padding-left: var(--wwc-space-3);
+  border-left: 1px solid var(--wwc-color-border-subtle);
+  color: var(--wwc-color-text-muted);
+  font-size: var(--wwc-font-size-sm);
+}
+
+.wwc-chat-composer-controls .wwc-chat-model {
+  min-height: 2.6rem;
+  max-width: 20rem;
+}
+
+.wwc-chat-model-notice {
+  margin: var(--wwc-space-0);
+  font-size: var(--wwc-font-size-sm);
+  color: var(--wwc-color-warning-text);
+}
+
+.wwc-chat-model-settings {
+  justify-self: start;
+  color: var(--wwc-color-text);
+  font-size: var(--wwc-font-size-sm);
+}
+
+.wwc-chat-cancel {
+  margin-left: auto;
   padding: var(--wwc-space-2) var(--wwc-space-4);
-  border: var(--wwc-border-width) solid var(--wwc-color-border-strong);
+  border: var(--wwc-border-width-control) solid var(--wwc-color-border-strong);
   border-radius: var(--wwc-radius-md);
   color: inherit;
   background: var(--wwc-color-surface);
 }
 
+.wwc-chat-cancel[hidden] + .wwc-chat-send {
+  margin-left: auto;
+}
+
+/* Design page 03a: the composer sends through an accent square with the hard
+   offset shadow; the glyph carries an accessible action name. */
 .wwc-chat-send {
-  border-color: var(--wwc-color-action-strong);
-  color: var(--wwc-color-on-header);
-  background: var(--wwc-color-action);
+  min-width: 3rem;
+  min-height: 3rem;
+  padding: 0;
+  border: var(--wwc-border-width-control) solid var(--wwc-color-border);
+  border-radius: var(--wwc-radius-md);
+  color: var(--wwc-color-text);
+  background: var(--wwc-color-accent);
+  font-size: 1.35rem;
+  line-height: 1;
+  box-shadow: var(--wwc-shadow-hard-sm);
 }
 
 @media (max-width: 48rem) {
-  .wwc-chat {
-    grid-template-columns: 1fr;
-  }
-
-  .wwc-chat-sessions {
-    border-right: var(--wwc-space-0);
-    border-bottom: var(--wwc-border-width) solid var(--wwc-color-border);
+  .wwc-chat-diagram-panel {
+    flex-wrap: wrap;
+    justify-content: center;
   }
 }

@@ -159,12 +159,12 @@ test('every checklist item shows its status, reason, check time, and real fix en
 
   const section = descendants(rootElement).find(node => node.className === 'wwc-readiness')
   assert.notEqual(section, undefined)
-  assert.equal(section.getAttribute('aria-label'), 'First-run readiness')
+  assert.equal(section.getAttribute('aria-label'), '首次运行就绪检查')
 
   const summary = descendants(rootElement).find(node => (
     node.className === 'wwc-readiness-summary'
   ))
-  assert.match(summary.textContent, /1 of 6 complete/u)
+  assert.match(summary.textContent, /通过 1\/6/u)
 
   const items = descendants(rootElement).filter(node => (
     node.className === 'wwc-readiness-item'
@@ -183,7 +183,7 @@ test('every checklist item shows its status, reason, check time, and real fix en
   assert.match(byId['repository-scope'].textContent, /Complete/u)
   assert.equal(byId['model-route'].dataset.status, 'attention')
   assert.match(byId['model-route'].textContent, /provider is configured/u)
-  assert.match(byId['model-route'].textContent, /2026-09-03T08:30:00.000Z/u)
+  assert.match(byId['model-route'].textContent, /Checked 2026-09-03 16:30/u)
   assert.equal(byId['helper-availability'].dataset.status, 'attention')
   assert.match(byId['helper-availability'].textContent, /execution capacity/u)
 
@@ -249,8 +249,8 @@ test('recheck triggers a fresh model refresh and complete state is announced', a
   const summary = descendants(rootElement).find(node => (
     node.className === 'wwc-readiness-summary'
   ))
-  assert.match(summary.textContent, /6 of 6 complete/u)
-  assert.match(summary.textContent, /complete/iu)
+  assert.match(summary.textContent, /通过 6\/6/u)
+  assert.match(summary.textContent, /完成/u)
   page.close()
 })
 
@@ -273,10 +273,10 @@ test('blocked and unavailable items explain themselves without fake check times'
   ))
   const byId = Object.fromEntries(items.map(node => [node.dataset.itemId, node]))
   assert.match(byId['repository-scope'].textContent, /Choose an authorized repository Scope/u)
-  assert.match(byId['model-route'].textContent, /Waiting for the repository Scope/u)
+  assert.match(byId['model-route'].textContent, /等待仓库范围/u)
   assert.equal(byId['model-route'].textContent.includes(NOW), false)
-  assert.match(byId['server-worker-health'].textContent, /could not run/u)
-  assert.match(byId['server-worker-health'].textContent, /2026-09-03T08:30:00.000Z/u)
+  assert.match(byId['server-worker-health'].textContent, /无法执行/u)
+  assert.match(byId['server-worker-health'].textContent, /Checked 2026-09-03 16:30/u)
   const scopeFixes = descendants(rootElement).filter(node => (
     node.className === 'wwc-readiness-fix'
   ))

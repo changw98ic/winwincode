@@ -70,14 +70,16 @@
   display: grid;
   gap: var(--wwc-space-2);
   min-width: 0;
-  padding: var(--wwc-space-3);
-  border: var(--wwc-border-width) solid var(--wwc-color-border-subtle);
-  border-radius: var(--wwc-radius-md);
+  padding: var(--wwc-space-4);
+  border: var(--wwc-border-width-control) solid var(--wwc-color-border);
+  border-radius: var(--wwc-radius-lg);
+  background: var(--wwc-color-surface);
 }
 
 .wwc-usage-health-section-heading {
   margin: var(--wwc-space-0);
-  font-size: var(--wwc-font-size-md);
+  font-size: var(--wwc-font-size-lg);
+  font-weight: var(--wwc-font-weight-strong);
   line-height: var(--wwc-line-height-tight);
 }
 

@@ -109,9 +109,9 @@ test('a real browser keeps one page heading, one live-region channel per page, a
     assert.equal(audit.landmarks.main, 1, `${surface} needs exactly one main landmark`)
     assert.equal(audit.landmarks.banner, 1, `${surface} needs the banner header`)
     assert.equal(audit.landmarks.navigation, 1, `${surface} needs the product-area navigation`)
-    assert.equal(audit.landmarks.navigationLabel, 'Product areas')
+    assert.equal(audit.landmarks.navigationLabel, '产品导航')
     assert.equal(audit.skipLink.present, true, `${surface} needs a keyboard bypass`)
-    assert.equal(audit.skipLink.label, 'Skip to main content')
+    assert.equal(audit.skipLink.label, '跳到主内容')
     assert.equal(
       audit.skipLink.firstFocusable,
       true,
@@ -146,12 +146,18 @@ test('a real browser keeps one page heading, one live-region channel per page, a
   assert.deepEqual(
     settingsHeadings.map(heading => [heading.tag, heading.text]),
     [
-      ['H2', 'Local Provider settings'],
-      ['H2', 'Provider settings unavailable'],
-      ['H3', 'Default model route'],
-      ['H3', 'Add Credential reference'],
-      ['H3', 'Credential references'],
-      ['H3', 'No Credential references'],
+      ['H2', '通用与个人'],
+      ['H2', '模型设置不可用'],
+      ['H3', '新会话默认模型'],
+      ['H3', 'Provider 列表'],
+      ['H3', '添加凭据引用'],
+      ['H3', '凭据引用'],
+      ['H3', '暂无凭据引用'],
+      ['H3', '备份与恢复'],
+      ['H3', '用量按交付'],
+      ['H3', '用量按 StageRun'],
+      ['H3', 'Provider 路由'],
+      ['H3', 'Worker 容量'],
     ],
     'Settings must nest its page title above its panels without skipping a level',
   )

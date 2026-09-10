@@ -106,6 +106,13 @@ class BrowserSettingsModel {
 const model = new BrowserSettingsModel()
 const mounted = mountSettingsPage({ root, model })
 
+// The redesigned settings page (设置分类 dropdown) keeps the route/Credential
+// controls in the 模型与 Provider category; this scenario switches there
+// before driving them so focus and selection behave on visible controls.
+const categorySelect = document.querySelector('.wwc-settings-category-select')
+categorySelect.value = 'providers'
+categorySelect.dispatchEvent(new Event('change', { bubbles: true }))
+
 function input(selector, value) {
   const control = document.querySelector(selector)
   control.value = value

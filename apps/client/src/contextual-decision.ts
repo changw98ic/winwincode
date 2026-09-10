@@ -104,7 +104,7 @@ function updateDecisionContext(list: HTMLUListElement, entries: readonly string[
 }
 
 function noteLabel(kind: ContextualDecisionItem['kind']): string {
-  if (kind === 'approval') return 'Decision reason'
+  if (kind === 'approval') return '决策理由'
   if (kind === 'attention') return 'Decision note'
   return 'Response'
 }
@@ -354,14 +354,14 @@ export function mountContextualDecisionCard(
       })
       parts.submit.hidden = !inline || (item.kind === 'input' && item.mode !== 'text')
       parts.submit.textContent = item.kind === 'approval'
-        ? 'Approve'
+        ? '批准'
         : item.kind === 'attention'
           ? 'Resolve'
           : 'Submit response'
       parts.submit.disabled = capability.disabled
       parts.secondary.hidden = !inline || (item.kind === 'input' && item.mode !== 'text')
       parts.secondary.textContent = item.kind === 'approval'
-        ? 'Reject'
+        ? '拒绝'
         : item.kind === 'attention'
           ? 'Dismiss'
           : 'Cancel input'

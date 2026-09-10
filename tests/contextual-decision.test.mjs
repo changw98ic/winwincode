@@ -299,7 +299,7 @@ test('an approval is decided inline and keeps its reason until the server confir
   // The draft survives the submission: the row clears only when the server
   // stops listing this decision.
   assert.equal(reason.value, 'Reviewed the exact command.')
-  assert.equal(findByClass(row, 'wwc-contextual-decision-secondary').textContent, 'Reject')
+  assert.equal(findByClass(row, 'wwc-contextual-decision-secondary').textContent, '拒绝')
 
   findByClass(row, 'wwc-contextual-decision-secondary').click()
   assert.deepEqual(actions.at(-1), ['decideApproval', 'apr_00000000000000000000000001', 'reject', 'Reviewed the exact command.'])

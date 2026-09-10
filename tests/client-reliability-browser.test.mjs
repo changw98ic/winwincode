@@ -92,11 +92,11 @@ test('real browser preserves drafts and gives safe recovery diagnostics across c
   assert.match(result.copied, /connection=refresh-required/iu)
   assert.match(result.copied, /scope=repository:org …000001/iu)
   assert.doesNotMatch(result.copied, /SECRET_TOKEN|private\/repository|raw render payload/iu)
-  assert.equal(result.copyFeedback, 'Diagnostic summary copied.')
+  assert.equal(result.copyFeedback, '诊断摘要已复制。')
   assert.deepEqual(result.focus, {
     active: true,
     outlineStyle: 'solid',
-    outlineWidth: '3px',
+    outlineWidth: '2px',
   })
   assert.equal(result.safeHash, '#/chat')
 })

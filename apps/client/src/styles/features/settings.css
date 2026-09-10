@@ -1,15 +1,32 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 
+/* Settings (design pages 12-16 and 15): one page, a 设置分类 dropdown in the
+   top-right, row-style forms with hairline separators per category. */
+
 .wwc-settings {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  display: grid;
+  gap: var(--wwc-space-6);
+  min-width: 0;
 }
 
-.wwc-settings-heading,
-.wwc-settings-local-operations-link,
-.wwc-settings-status,
-.wwc-settings-error,
-.wwc-settings-credentials {
-  grid-column: 1 / -1;
+.wwc-settings-header {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--wwc-space-3) var(--wwc-space-6);
+  align-items: flex-start;
+  justify-content: space-between;
+}
+
+.wwc-settings-heading {
+  min-width: 0;
+}
+
+.wwc-settings-header-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--wwc-space-3);
+  align-items: center;
+  justify-content: flex-end;
 }
 
 .wwc-settings-local-operations-link {
@@ -18,18 +35,154 @@
   font-weight: var(--wwc-font-weight-medium);
 }
 
+.wwc-settings-category-select {
+  min-height: var(--wwc-control-min-height);
+  padding: var(--wwc-space-2) var(--wwc-space-3);
+  border: var(--wwc-border-width-control) solid var(--wwc-color-border-control);
+  border-radius: var(--wwc-radius-sm);
+  background: var(--wwc-color-surface);
+  font-weight: var(--wwc-font-weight-strong);
+}
+
+/* Category bodies: one visible section, one row after another. */
+.wwc-settings-category {
+  display: none;
+  max-width: var(--wwc-content-max);
+}
+
+.wwc-settings-category:not([hidden]) {
+  display: grid;
+  gap: var(--wwc-space-2);
+}
+
+/* Row-style forms: bold label left, control right, hairline between rows. */
+.wwc-settings-row {
+  display: grid;
+  grid-template-columns: minmax(8rem, 14rem) minmax(0, 1fr);
+  gap: var(--wwc-space-2) var(--wwc-space-6);
+  align-items: center;
+  padding: var(--wwc-space-3) var(--wwc-space-0);
+  border-bottom: var(--wwc-border-width) solid var(--wwc-color-border-subtle);
+}
+
+.wwc-settings-row > label,
+.wwc-settings-row > span[class$='-label'] {
+  font-weight: var(--wwc-font-weight-strong);
+}
+
+.wwc-settings-general .wwc-settings-field-label {
+  display: block;
+  margin: var(--wwc-space-0);
+  font-weight: var(--wwc-font-weight-regular);
+}
+
+.wwc-settings select,
+.wwc-settings input {
+  width: 100%;
+  max-width: 100%;
+}
+
+.wwc-settings-row select,
+.wwc-settings-row input {
+  width: min(28rem, 100%);
+  padding: var(--wwc-space-2) var(--wwc-space-3);
+  border: var(--wwc-border-width-control) solid var(--wwc-color-border-control);
+  border-radius: var(--wwc-radius-sm);
+  background: var(--wwc-color-surface);
+}
+
+.wwc-settings-row > p {
+  margin: var(--wwc-space-0);
+}
+
+/* Collapsed disclosure rows (其他偏好, 权限与高级选项, …). */
+.wwc-settings-collapsed {
+  margin-top: var(--wwc-space-2);
+  border-top: var(--wwc-border-width) solid var(--wwc-color-border-subtle);
+  border-bottom: var(--wwc-border-width) solid var(--wwc-color-border-subtle);
+}
+
+.wwc-settings-collapsed-button {
+  display: flex;
+  width: 100%;
+  gap: var(--wwc-space-3);
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--wwc-space-3) var(--wwc-space-0);
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.wwc-settings-collapsed-label {
+  font-size: var(--wwc-font-size-lg);
+  font-weight: var(--wwc-font-weight-strong);
+}
+
+.wwc-settings-collapsed-chevron {
+  font-size: var(--wwc-font-size-lg);
+  transition: rotate var(--wwc-transition-fast);
+}
+
+.wwc-settings-collapsed-button[aria-expanded='true'] .wwc-settings-collapsed-chevron {
+  rotate: 90deg;
+}
+
+.wwc-settings-general-more,
+.wwc-settings-execution-advanced,
+.wwc-settings-retention,
+.wwc-settings-diagnostics-records {
+  display: grid;
+  gap: var(--wwc-space-2);
+  padding: var(--wwc-space-0) var(--wwc-space-0) var(--wwc-space-3);
+}
+
+.wwc-settings-general-more-empty,
+.wwc-settings-execution-advanced-empty,
+.wwc-settings-retention-empty {
+  margin: var(--wwc-space-0);
+  color: var(--wwc-color-text-muted);
+}
+
+/* Local-draft save rows: accent 保存设置 plus the honest local feedback. */
+.wwc-settings-local-save {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--wwc-space-3);
+  align-items: center;
+  justify-self: start;
+  margin-top: var(--wwc-space-2);
+}
+
+.wwc-settings-general-save-feedback,
+.wwc-settings-execution-save-feedback {
+  margin: var(--wwc-space-0);
+  color: var(--wwc-color-success-text);
+  font-size: var(--wwc-font-size-sm);
+  min-height: 1em;
+}
+
+/* Route form and credential forms keep their bounded grids. */
 .wwc-settings-route-form,
 .wwc-settings-create-form,
 .wwc-settings-rotate-form {
   display: grid;
   gap: var(--wwc-space-3);
   min-width: 0;
+  margin-top: var(--wwc-space-3);
 }
 
-.wwc-settings input,
-.wwc-settings select {
-  width: 100%;
-  max-width: 100%;
+.wwc-settings-route-form {
+  border-top: var(--wwc-border-width) solid var(--wwc-color-border-subtle);
+  padding-top: var(--wwc-space-3);
+}
+
+.wwc-settings-default-model {
+  width: min(28rem, 100%);
+  padding: var(--wwc-space-2) var(--wwc-space-3);
+  border: var(--wwc-border-width-control) solid var(--wwc-color-border-control);
+  border-radius: var(--wwc-radius-sm);
+  background: var(--wwc-color-surface);
 }
 
 .wwc-settings-route-controls,
@@ -62,6 +215,84 @@
 .wwc-settings-rotate-conflict p {
   flex: 1 1 100%;
   margin: var(--wwc-space-0);
+}
+
+/* Provider 列表 rows: name, status dot, 管理/配置 action. */
+.wwc-settings-provider-rows {
+  display: grid;
+  gap: var(--wwc-space-0);
+  margin: var(--wwc-space-0);
+  padding: var(--wwc-space-0);
+  list-style: none;
+}
+
+.wwc-settings-provider-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--wwc-space-2) var(--wwc-space-6);
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--wwc-space-3) var(--wwc-space-0);
+  border-bottom: var(--wwc-border-width) solid var(--wwc-color-border-subtle);
+}
+
+.wwc-settings-provider-info {
+  display: grid;
+  gap: var(--wwc-space-1);
+  min-width: 0;
+  flex: 1 1 14rem;
+}
+
+.wwc-settings-provider-name {
+  margin: var(--wwc-space-0);
+  font-weight: var(--wwc-font-weight-strong);
+}
+
+.wwc-settings-provider-id {
+  margin: var(--wwc-space-0);
+  color: var(--wwc-color-text-muted);
+  font-size: var(--wwc-font-size-sm);
+  overflow-wrap: anywhere;
+}
+
+.wwc-settings-provider-state {
+  display: inline-flex;
+  gap: var(--wwc-space-2);
+  align-items: center;
+  margin: var(--wwc-space-0);
+}
+
+.wwc-settings-provider-dot {
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 999px;
+  background: var(--wwc-color-text-muted);
+}
+
+.wwc-settings-provider-state[data-tone='success'] .wwc-settings-provider-dot {
+  background: var(--wwc-color-success-text);
+}
+
+.wwc-settings-provider-state[data-tone='success'] {
+  color: var(--wwc-color-success-text);
+}
+
+.wwc-settings-provider-state[data-tone='danger'] {
+  color: var(--wwc-color-danger-text);
+}
+
+.wwc-settings-provider-state[data-tone='danger'] .wwc-settings-provider-dot {
+  background: var(--wwc-color-danger-text);
+}
+
+.wwc-settings-provider-list-empty {
+  margin: var(--wwc-space-0);
+  color: var(--wwc-color-text-muted);
+}
+
+.wwc-settings-add-provider {
+  justify-self: start;
+  margin-top: var(--wwc-space-3);
 }
 
 .wwc-settings-credential-list {
@@ -123,21 +354,189 @@
   justify-self: start;
 }
 
-@media (max-width: 64rem) {
-  .wwc-settings {
-    grid-template-columns: minmax(0, 1fr);
-  }
+/* 数据与存储: honest disabled backup/restore/export actions. */
+.wwc-settings-storage-last-backup {
+  margin: var(--wwc-space-0);
+  color: var(--wwc-color-text-muted);
+}
 
-  .wwc-settings-heading,
-  .wwc-settings-local-operations-link,
-  .wwc-settings-status,
-  .wwc-settings-error,
-  .wwc-settings-credentials {
-    grid-column: auto;
+.wwc-settings-storage-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--wwc-space-3);
+  align-items: center;
+  justify-self: start;
+  padding-bottom: var(--wwc-space-3);
+}
+
+.wwc-settings-export-row {
+  border-top: var(--wwc-border-width) solid var(--wwc-color-border-subtle);
+}
+
+.wwc-settings-export-row [data-wwc-component='button'] {
+  justify-self: start;
+  width: fit-content;
+}
+
+.wwc-settings-export-label {
+  font-weight: var(--wwc-font-weight-strong);
+}
+
+/* Static execution facts: value plus a muted or success annotation. */
+.wwc-settings-execution-review,
+.wwc-settings-execution-isolation {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--wwc-space-2) var(--wwc-space-4);
+  align-items: baseline;
+}
+
+.wwc-settings-execution-review-note {
+  color: var(--wwc-color-text-muted);
+  font-size: var(--wwc-font-size-sm);
+}
+
+.wwc-settings-execution-isolation-state {
+  color: var(--wwc-color-success-text);
+}
+
+/* 诊断与用量: run diagnostics summary plus title-level usage sections. */
+.wwc-settings [data-wwc-component='tabs'] [role='tab'][aria-selected='true'] {
+  border-bottom-color: var(--wwc-color-accent-strong);
+}
+
+.wwc-settings-diagnostics-run-panel,
+.wwc-settings-diagnostics-usage-panel {
+  display: none;
+  max-width: var(--wwc-content-max);
+}
+
+.wwc-settings-diagnostics-run-panel:not([hidden]),
+.wwc-settings-diagnostics-usage-panel:not([hidden]) {
+  display: grid;
+  gap: var(--wwc-space-2);
+}
+
+.wwc-settings-diagnostics-summary {
+  display: flex;
+  gap: var(--wwc-space-3);
+  align-items: center;
+  padding: var(--wwc-space-3) var(--wwc-space-0);
+}
+
+.wwc-settings-diagnostics-summary-icon {
+  display: inline-flex;
+  width: 2rem;
+  height: 2rem;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  color: var(--wwc-color-surface);
+  background: var(--wwc-color-success-text);
+  font-weight: var(--wwc-font-weight-strong);
+}
+
+.wwc-settings-diagnostics-summary[data-tone='warning'] .wwc-settings-diagnostics-summary-icon {
+  background: var(--wwc-color-warning-text);
+}
+
+.wwc-settings-diagnostics-summary-text {
+  margin: var(--wwc-space-0);
+  font-size: var(--wwc-font-size-xl);
+  font-weight: var(--wwc-font-weight-strong);
+}
+
+.wwc-settings-diagnostics-rows {
+  display: grid;
+  margin: var(--wwc-space-0);
+  padding: var(--wwc-space-0);
+  list-style: none;
+}
+
+.wwc-settings-diagnostics-row {
+  display: flex;
+  gap: var(--wwc-space-6);
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--wwc-space-3) var(--wwc-space-0);
+  border-bottom: var(--wwc-border-width) solid var(--wwc-color-border-subtle);
+}
+
+.wwc-settings-diagnostics-row-name {
+  font-weight: var(--wwc-font-weight-strong);
+}
+
+.wwc-settings-diagnostics-row[data-tone='success'] .wwc-settings-diagnostics-row-state {
+  color: var(--wwc-color-success-text);
+}
+
+.wwc-settings-diagnostics-row[data-tone='warning'] .wwc-settings-diagnostics-row-state {
+  color: var(--wwc-color-warning-text);
+}
+
+.wwc-settings-diagnostics-run-check {
+  justify-self: start;
+  margin-top: var(--wwc-space-2);
+}
+
+.wwc-settings-diagnostics-records-list {
+  display: grid;
+  gap: var(--wwc-space-1);
+  margin: var(--wwc-space-0);
+  padding: var(--wwc-space-0);
+  list-style: none;
+  color: var(--wwc-color-text-muted);
+  font-size: var(--wwc-font-size-sm);
+  overflow-wrap: anywhere;
+}
+
+.wwc-settings-usage-intro {
+  margin: var(--wwc-space-0);
+  color: var(--wwc-color-text-muted);
+}
+
+.wwc-settings-usage-link {
+  width: fit-content;
+  color: var(--wwc-color-action-strong);
+  font-weight: var(--wwc-font-weight-medium);
+}
+
+.wwc-settings-usage-sections {
+  display: grid;
+  gap: var(--wwc-space-3);
+  margin-top: var(--wwc-space-2);
+}
+
+.wwc-settings-usage-section {
+  display: grid;
+  gap: var(--wwc-space-1);
+  padding-bottom: var(--wwc-space-3);
+  border-bottom: var(--wwc-border-width) solid var(--wwc-color-border-subtle);
+}
+
+.wwc-settings-usage-heading {
+  margin: var(--wwc-space-0);
+  font-weight: var(--wwc-font-weight-strong);
+}
+
+.wwc-settings-usage-detail {
+  margin: var(--wwc-space-0);
+  color: var(--wwc-color-text-muted);
+  font-size: var(--wwc-font-size-sm);
+}
+
+@media (max-width: 64rem) {
+  .wwc-settings-row {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 
 @media (max-width: 48rem) {
+  .wwc-settings-header,
+  .wwc-settings-header-actions {
+    justify-content: flex-start;
+  }
+
   .wwc-settings-route-controls > * {
     flex: 1 1 100%;
   }
@@ -147,7 +546,9 @@
   }
 
   .wwc-settings-credential-item > [data-wwc-component='button'],
-  .wwc-settings-rotate-form [data-wwc-component='button'] {
+  .wwc-settings-rotate-form [data-wwc-component='button'],
+  .wwc-settings-storage-actions > [data-wwc-component='button'],
+  .wwc-settings-export-row [data-wwc-component='button'] {
     width: 100%;
   }
 }

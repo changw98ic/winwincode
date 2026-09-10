@@ -916,7 +916,7 @@ test('the Attention Center card exposes its execution context without leaking se
       + `&organizationId=${scope.organizationId}&workspaceId=${scope.workspaceId}`
       + `&projectId=${scope.projectId}&repositoryId=${scope.repositoryId}`,
   )
-  assert.equal(origin.textContent, 'Open execution context')
+  assert.equal(origin.textContent, '打开执行上下文')
   const approvalCard = cards.find(card => card.dataset.kind === 'approval')
   assert.equal(
     byClass(approvalCard, 'wwc-attention-card-origin').getAttribute('href'),
@@ -983,20 +983,20 @@ test('the Attention Center exposes the explicit desktop notification consent con
   })
   const status = byClass(rootElement, 'wwc-attention-center-desktop-status')
   const toggle = byClass(rootElement, 'wwc-attention-center-desktop-toggle')
-  assert.equal(status.textContent, 'Desktop notifications are off. Turn them on to hear about blocking entries.')
-  assert.equal(toggle.textContent, 'Turn on desktop notifications')
+  assert.equal(status.textContent, '桌面通知当前关闭。开启后，阻塞条目会通知你。')
+  assert.equal(toggle.textContent, '开启桌面通知')
   toggle.dispatch('click')
   assert.equal(requested, true)
 
   desktopState = { ...desktopState, enabled: true, permission: 'granted' }
   for (const listener of listeners) listener(control.state)
-  assert.equal(toggle.textContent, 'Turn off desktop notifications')
+  assert.equal(toggle.textContent, '关闭桌面通知')
   toggle.dispatch('click')
   assert.equal(requested, false)
 
   desktopState = { ...desktopState, enabled: false, blocked: true }
   for (const listener of listeners) listener(control.state)
-  assert.equal(byClass(rootElement, 'wwc-attention-center-desktop-status').textContent.includes('blocked'), true)
+  assert.equal(byClass(rootElement, 'wwc-attention-center-desktop-status').textContent.includes('阻止'), true)
   assert.equal(byClass(rootElement, 'wwc-attention-center-desktop-toggle').hidden, true)
   mounted.close()
 })

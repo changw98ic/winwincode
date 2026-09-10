@@ -325,7 +325,8 @@ function dashboard() {
       .filter(node => node.hidden !== true)
       .map(node => node.getAttribute('href')),
     firstUse: {
-      hidden: document.querySelector('.wwc-home-first-use')?.hidden ?? null,
+      // Design page 04 removed the first-use block; absent means hidden.
+      hidden: document.querySelector('.wwc-home-first-use')?.hidden ?? true,
       links: [...(document.querySelector('.wwc-home-first-use')?.querySelectorAll('a') ?? [])]
         .map(node => node.getAttribute('href')),
     },

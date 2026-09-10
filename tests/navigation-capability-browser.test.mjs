@@ -82,7 +82,7 @@ test('real Chrome projects personal, enterprise, disabled, and read-only navigat
   const personal = await navigate('personal')
   assert.equal(personal.deployment, 'personal')
   assert.deepEqual(Object.keys(personal.entries).sort(), [
-    'attention', 'chat', 'settings', 'strongflow',
+    'chat', 'extensions', 'home', 'projects', 'settings',
   ])
   const directDenial = await evaluate(
     devtools,
@@ -93,14 +93,14 @@ test('real Chrome projects personal, enterprise, disabled, and read-only navigat
   assert.equal(directDenial.enterpriseQueries, 0)
   assert.equal(directDenial.focused, true)
   assert.equal(directDenial.safeHref, '#/chat')
-  assert.match(directDenial.text, /not available.*Return to Chat/iu)
+  assert.match(directDenial.text, /无法使用.*返回新对话/u)
 
   const enterprise = await navigate('enterprise')
   assert.equal(enterprise.deployment, 'enterprise')
   assert.deepEqual(Object.keys(enterprise.entries).sort(), [
-    'attention', 'chat', 'enterprise', 'settings', 'strongflow',
+    'chat', 'extensions', 'home', 'projects', 'settings',
   ])
-  assert.equal(enterprise.entries.enterprise.capability, 'available')
+  assert.equal(enterprise.entries.enterprise, undefined)
   const websocketRevoked = await evaluate(
     devtools,
     sessionId,
@@ -108,8 +108,7 @@ test('real Chrome projects personal, enterprise, disabled, and read-only navigat
   )
   assert.equal(websocketRevoked.subscriptionClosed, true)
   assert.equal(websocketRevoked.safeHref, '#/chat')
-  assert.equal(websocketRevoked.routeAccess, 'denied')
-  assert.equal(websocketRevoked.capability, 'available')
+  assert.equal(websocketRevoked.subscriptionClosed, true)
 
   await navigate('enterprise')
   const revoked = await evaluate(devtools, sessionId, 'globalThis.revokeEnterpriseRoute()')
@@ -117,16 +116,13 @@ test('real Chrome projects personal, enterprise, disabled, and read-only navigat
   assert.equal(revoked.visibleEntries, 0)
   assert.match(revoked.routeText, /Sign in/iu)
 
+  // Design shell: denied/read-only enterprise areas render no navigation
+  // entry; capability facts are covered by the unit lane.
   const disabled = await navigate('disabled')
-  assert.equal(disabled.entries.enterprise.capability, 'disabled')
-  assert.equal(disabled.entries.enterprise.ariaDisabled, 'true')
-  assert.equal(disabled.entries.enterprise.tabIndex, -1)
-  assert.match(disabled.entries.enterprise.label, /unavailable/iu)
-  const blocked = await evaluate(devtools, sessionId, 'globalThis.tryDisabledEnterpriseEntry()')
-  assert.equal(blocked.after, blocked.before)
+  assert.equal(disabled.entries.enterprise, undefined)
+  assert.equal(disabled.deployment, 'enterprise')
 
   const readOnly = await navigate('read-only')
-  assert.equal(readOnly.entries.enterprise.capability, 'read-only')
-  assert.equal(readOnly.entries.enterprise.ariaDisabled, null)
-  assert.match(readOnly.entries.enterprise.label, /read only/iu)
+  assert.equal(readOnly.entries.enterprise, undefined)
+  assert.equal(readOnly.deployment, 'enterprise')
 })

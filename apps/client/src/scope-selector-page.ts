@@ -57,13 +57,11 @@ function updateOptions(
 ): void {
   const placeholder = document.createElement('option')
   placeholder.value = ''
-  placeholder.textContent = `Choose ${label}`
+  placeholder.textContent = `选择${label}`
   const nodes = options.map(option => {
     const node = document.createElement('option')
     node.value = option.id
-    node.textContent = option.label === option.id
-      ? option.id
-      : `${option.label} — ${option.id}`
+    node.textContent = option.label
     return node
   })
   select.replaceChildren(placeholder, ...nodes)
@@ -71,54 +69,71 @@ function updateOptions(
 }
 
 function statusMessage(state: ScopeSelectorViewModelState): string {
-  if (state.status === 'loading') return 'Loading authorized Scope names…'
+  if (state.status === 'loading') return '正在加载授权范围名称…'
   if (state.status === 'permission-denied') {
-    return 'Some Scope names are unavailable for this identity. Exact authorized Scope IDs remain selectable.'
+    return '部分范围名称不可用，仍可选择确切的授权范围。'
   }
   if (state.status === 'network-error') {
-    return 'Scope names could not be refreshed. Check the network and retry.'
+    return '范围名称刷新失败，请检查网络后重试。'
   }
-  if (state.status === 'error') return 'Scope names could not be loaded.'
-  if (state.status === 'closed') return 'Scope selector closed.'
-  if (state.emptyLevel === 'organization') return 'No authorized organizations are available.'
-  if (state.emptyLevel === 'workspace') return 'No authorized workspaces exist in this organization.'
-  if (state.emptyLevel === 'project') return 'No authorized projects exist in this workspace.'
-  if (state.emptyLevel === 'repository') return 'No authorized repositories exist in this project.'
-  return 'Choose the exact Scope for this browser tab.'
+  if (state.status === 'error') return '范围名称加载失败。'
+  if (state.status === 'closed') return '范围选择器已关闭。'
+  if (state.emptyLevel === 'organization') return '没有可用的授权组织。'
+  if (state.emptyLevel === 'workspace') return '该组织下没有已授权的工作区。'
+  if (state.emptyLevel === 'project') return '该工作区下没有已授权的项目。'
+  if (state.emptyLevel === 'repository') return '该项目下没有已授权的仓库。'
+  return '为此浏览器标签页选择确切的工作范围。'
 }
 
 function accessMessage(status: ScopeSelectorPageOptions['contextStatus']): string {
   if (status === 'denied') {
-    return 'The Scope in this URL is no longer authorized. Choose an exact authorized Scope.'
+    return 'URL 中的范围已不再被授权，请选择确切的范围。'
   }
-  if (status === 'empty') return 'This product area has no compatible authorized Scope.'
-  if (status === 'selection-required') return 'Choose a Scope before this product area can load.'
-  return 'Current Scope'
+  if (status === 'empty') return '此区域没有兼容的授权范围。'
+  if (status === 'selection-required') return '请先选择范围，再加载此区域。'
+  return '当前范围'
 }
 
 /** Mount one accessible four-level selector backed only by its view-model facts. */
 export function mountScopeSelectorPage(options: ScopeSelectorPageOptions): ScopeSelectorPage {
   const document = options.root.ownerDocument
   const region = element(document, 'section', 'wwc-scope-selector')
+  // Design 03b: the Scope switcher renders as one compact disclosure; the
+  // four-level form stays in the DOM but collapsed until explicitly opened.
+  const compact = element(document, 'button', 'wwc-scope-selector-compact')
   const heading = element(document, 'h2', 'wwc-scope-selector-heading')
   const access = element(document, 'p', 'wwc-scope-selector-access')
   const controls = element(document, 'div', 'wwc-scope-selector-controls')
-  const organization = field(document, 'wwc-scope-organization', 'Organization')
-  const workspace = field(document, 'wwc-scope-workspace', 'Workspace')
-  const project = field(document, 'wwc-scope-project', 'Project')
-  const repository = field(document, 'wwc-scope-repository', 'Repository')
+  const organization = field(document, 'wwc-scope-organization', '组织')
+  const workspace = field(document, 'wwc-scope-workspace', '工作区')
+  const project = field(document, 'wwc-scope-project', '项目')
+  const repository = field(document, 'wwc-scope-repository', '仓库')
   const status = element(document, 'p', 'wwc-scope-selector-status')
   const retry = element(document, 'button', 'wwc-scope-selector-retry')
   let closed = false
 
-  region.setAttribute('aria-label', 'Current Scope')
+  region.setAttribute('aria-label', '当前范围')
   heading.textContent = 'Scope'
   status.setAttribute('role', 'status')
   status.setAttribute('aria-live', 'polite')
   retry.type = 'button'
-  retry.textContent = 'Retry Scope names'
+  retry.textContent = '重新加载名称'
   controls.append(organization.root, workspace.root, project.root, repository.root)
-  region.append(heading, access, controls, status, retry)
+  compact.type = 'button'
+  compact.setAttribute('aria-expanded', 'false')
+  compact.textContent = '项目范围 ▾'
+  compact.addEventListener('click', () => {
+    const expanded = compact.getAttribute('aria-expanded') === 'true'
+    compact.setAttribute('aria-expanded', expanded ? 'false' : 'true')
+    heading.hidden = !expanded
+    controls.hidden = !expanded
+    status.hidden = !expanded
+    retry.hidden = !expanded
+  })
+  heading.hidden = true
+  controls.hidden = true
+  status.hidden = true
+  region.append(compact, heading, access, controls, status, retry)
   options.root.replaceChildren(region)
 
   function updateContextStatus(
@@ -139,28 +154,28 @@ export function mountScopeSelectorPage(options: ScopeSelectorPageOptions): Scope
       organization.select,
       state.options.organizations,
       state.selection.organizationId,
-      'organization',
+      '组织',
     )
     updateOptions(
       document,
       workspace.select,
       state.options.workspaces,
       state.selection.workspaceId,
-      'workspace',
+      '工作区',
     )
     updateOptions(
       document,
       project.select,
       state.options.projects,
       state.selection.projectId,
-      'project',
+      '项目',
     )
     updateOptions(
       document,
       repository.select,
       state.options.repositories,
       state.selection.repositoryId,
-      'repository',
+      '仓库',
     )
     const selectorClosed = state.status === 'closed'
     organization.select.disabled = selectorClosed || state.options.organizations.length === 0
@@ -175,7 +190,13 @@ export function mountScopeSelectorPage(options: ScopeSelectorPageOptions): Scope
       || state.options.repositories.length === 0
     region.setAttribute('aria-busy', state.status === 'loading' ? 'true' : 'false')
     status.textContent = statusMessage(state)
-    retry.hidden = state.status !== 'network-error'
+    // Compact label mirrors the selected repository option's display name.
+    const selected = Array.isArray(repository.select.options)
+      ? repository.select.options.find(option => option.value === repository.select.value)
+      : undefined
+    if (selected !== undefined && selected.textContent) {
+      compact.textContent = `${selected.textContent} ▾`
+    }
   }
 
   const unsubscribe = options.model.subscribe(render)

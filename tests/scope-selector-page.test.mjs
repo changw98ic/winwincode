@@ -147,7 +147,7 @@ test('scope selector uses labelled native controls and keeps unavailable descend
 
   const region = descendants(rootElement).find(node => node.className === 'wwc-scope-selector')
   const controls = descendants(rootElement).filter(node => node.tagName === 'SELECT')
-  assert.equal(region.getAttribute('aria-label'), 'Current Scope')
+  assert.equal(region.getAttribute('aria-label'), '当前范围')
   assert.equal(controls.length, 4)
   assert.equal(controls[0].disabled, false)
   assert.equal(controls[1].disabled, true)
@@ -155,7 +155,7 @@ test('scope selector uses labelled native controls and keeps unavailable descend
   assert.equal(controls[3].disabled, true)
   assert.deepEqual(
     descendants(rootElement).filter(node => node.tagName === 'LABEL').map(node => node.textContent),
-    ['Organization', 'Workspace', 'Project', 'Repository'],
+    ['组织', '工作区', '项目', '仓库'],
   )
   controls[0].value = 'org_00000000000000000000000002'
   controls[0].dispatchEvent({ type: 'change' })
@@ -177,7 +177,7 @@ test('revoked URL context is announced and network metadata failures offer retry
     node.className === 'wwc-scope-selector-access'
   ))
   assert.equal(access.getAttribute('role'), 'alert')
-  assert.match(access.textContent, /no longer authorized/iu)
+  assert.match(access.textContent, /已不再被授权/u)
 
   model.publish({ ...state('network-error'), error: { code: 'NETWORK_ERROR' } })
   const retry = descendants(rootElement).find(node => (
@@ -216,7 +216,7 @@ test('context access status updates in place without replacing Scope controls', 
 
   assert.equal(access.hidden, false)
   assert.equal(access.getAttribute('role'), 'alert')
-  assert.match(access.textContent, /no longer authorized/iu)
+  assert.match(access.textContent, /已不再被授权/u)
   assert.deepEqual(
     descendants(rootElement).filter(node => node.tagName === 'SELECT'),
     controls,

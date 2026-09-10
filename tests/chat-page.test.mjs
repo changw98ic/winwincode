@@ -429,21 +429,21 @@ test('presentation explains running, continuing, busy, access, and network state
       label: chatPagePresentation(state()).sendLabel,
       cancel: chatPagePresentation(state()).cancelVisible,
     },
-    { label: 'Steer', cancel: true },
+    { label: '引导', cancel: true },
   )
   assert.equal(chatPagePresentation(state({
     session: session(productSessionId, 'waiting_for_input'),
-  })).sendLabel, 'Continue')
+  })).sendLabel, '继续')
   assert.equal(chatPagePresentation(state({ realtime: 'reloading' })).messageListBusy, true)
   assert.equal(chatPagePresentation(state({
     status: 'authentication-required',
     error: controlPlaneError('authentication', 'TOKEN=do-not-render'),
-  })).errorText, 'Sign in again to continue this Chat.')
+  })).errorText, '请重新登录以继续该对话。')
 
   const networkText = chatPagePresentation(state({
     error: controlPlaneError('network', 'http://worker.internal:9000/TOKEN'),
   })).errorText
-  assert.match(networkText, /connection and retry/u)
+  assert.match(networkText, /检查网络后重试/u)
   assert.doesNotMatch(networkText, /worker|9000|TOKEN/iu)
   assert.equal(chatPagePresentation(state({ status: 'closed' })).composerDisabled, true)
 })
@@ -455,8 +455,8 @@ test('presentation explains first-Chat model setup and bounded creation failures
     session: null,
     messages: [],
   }))
-  assert.equal(firstChat.statusText, 'Ready for a new Chat')
-  assert.match(firstChat.emptyText, /first Chat/iu)
+  assert.equal(firstChat.statusText, '可以开始新对话')
+  assert.match(firstChat.emptyText, /第一个对话/iu)
 
   const noModel = chatPagePresentation(state({
     activeProductSessionId: null,
@@ -473,15 +473,15 @@ test('presentation explains first-Chat model setup and bounded creation failures
     }),
     selectedModelRoute: null,
   }))
-  assert.equal(noModel.statusText, 'Model setup required')
-  assert.match(noModel.emptyText, /No model route is configured/iu)
+  assert.equal(noModel.statusText, '需要先配置模型')
+  assert.match(noModel.emptyText, /模型路由/u)
 
   const errors = [
-    ['IDEMPOTENCY_CONFLICT', /earlier request/iu],
-    ['PERMISSION_DENIED', /do not have access/iu],
-    ['INVALID_REQUEST', /selected model/iu],
-    ['SERVICE_UNAVAILABLE', /temporarily unavailable/iu],
-    ['TRUSTED_FACTS_UNAVAILABLE', /Provider or model is unavailable/iu],
+    ['IDEMPOTENCY_CONFLICT', /冲突/u],
+    ['PERMISSION_DENIED', /没有这个对话的访问权限/u],
+    ['INVALID_REQUEST', /模型在该仓库不可用/u],
+    ['SERVICE_UNAVAILABLE', /暂时不可用/u],
+    ['TRUSTED_FACTS_UNAVAILABLE', /Provider 或模型不可用/u],
   ]
   for (const [code, pattern] of errors) {
     const errorText = chatPagePresentation(state({
@@ -497,6 +497,54 @@ test('presentation explains first-Chat model setup and bounded creation failures
     assert.match(errorText, pattern)
     assert.doesNotMatch(errorText, /private server diagnostic/iu)
   }
+})
+
+test('empty Chat centers the design diagrams and swaps the composer placeholder', () => {
+  const document = new FakeDocument()
+  const rootElement = document.createElement('main')
+  const model = new FakeChatViewModel(state({
+    activeProductSessionId: null,
+    sessions: [],
+    session: null,
+    messages: [],
+  }))
+  const mounted = mountChatPage({ root: rootElement, model })
+
+  const diagram = findByClass(rootElement, 'wwc-chat-diagram')
+  assert.equal(diagram.hidden, false)
+  assert.equal(findByClass(rootElement, 'wwc-chat-heading').hidden, true)
+  assert.equal(findByClass(rootElement, 'wwc-chat-delegation-chip').hidden, true)
+  assert.equal(findByClass(rootElement, 'wwc-chat-messages').hidden, true)
+  assert.equal(findByClass(rootElement, 'wwc-chat-composer-input').placeholder,
+    '描述你的想法，或输入 / 查看技能…')
+
+  const labels = findAllByClass(rootElement, 'wwc-chat-diagram-label')
+  assert.deepEqual(labels.map(label => label.textContent), [
+    'Web UI',
+    'Backend',
+    'Client',
+    'Worker',
+  ])
+  assert.match(findAllByClass(rootElement, 'wwc-chat-diagram-caption')[0].textContent,
+    /项目架构示意/u)
+
+  const [architectureTab, flowTab] = findAllByClass(rootElement, 'wwc-chat-diagram-tab')
+  assert.equal(architectureTab.getAttribute('aria-selected'), 'true')
+  assert.equal(flowTab.getAttribute('aria-selected'), 'false')
+  flowTab.emit('click')
+  assert.equal(flowTab.getAttribute('aria-selected'), 'true')
+  assert.equal(architectureTab.getAttribute('aria-selected'), 'false')
+  assert.match(findAllByClass(rootElement, 'wwc-chat-diagram-caption')[1].textContent,
+    /交付流程示意/u)
+  assert.deepEqual(findAllByClass(rootElement, 'wwc-chat-diagram-step').map(step => step.textContent), [
+    '需求',
+    '方案',
+    '执行',
+    '验收',
+  ])
+
+  mounted.close()
+  assert.deepEqual(model.calls.at(-1), ['close'])
 })
 
 test('Chat keeps the Session decisions on the first screen and retires the card when they close', () => {
@@ -601,19 +649,23 @@ test('mounted Chat page exposes accessible state and delegates every interaction
   const send = findByClass(rootElement, 'wwc-chat-send')
   const cancel = findByClass(rootElement, 'wwc-chat-cancel')
   const loadEarlier = findByClass(rootElement, 'wwc-chat-load-earlier')
-  const newSession = findByClass(rootElement, 'wwc-chat-new-session')
+  const chip = findByClass(rootElement, 'wwc-chat-delegation-chip')
   const modelSelect = findByClass(rootElement, 'wwc-chat-model')
-  const sessionList = findByClass(rootElement, 'wwc-chat-session-list')
 
+  assert.equal(findByClass(rootElement, 'wwc-chat-session-list'), null)
+  assert.equal(chip.hidden, false)
+  assert.match(chip.textContent, /委托任务 .* 待审核/u)
+  assert.equal(composer.placeholder, '继续当前对话…')
   assert.equal(status.getAttribute('role'), 'status')
   assert.equal(status.getAttribute('aria-live'), 'polite')
   assert.equal(alert.getAttribute('role'), 'alert')
   assert.equal(alert.getAttribute('aria-live'), 'assertive')
   assert.equal(messages.getAttribute('aria-live'), 'polite')
   assert.equal(messages.getAttribute('aria-busy'), 'false')
+  assert.equal(messages.children[0].children[0].children[0].textContent, 'WinWinCode')
   assert.equal(messages.children[0].children[0].children[1].textContent, '<script>not markup</script>')
-  assert.match(modelSelect.children[0].textContent, /Repository scope.*Primary Provider/iu)
-  assert.match(modelSelect.children[0].textContent, /Primary Model/iu)
+  assert.match(modelSelect.children[0].textContent, /仓库范围.*Primary Provider/u)
+  assert.match(modelSelect.children[0].textContent, /Primary Model/u)
   assert.doesNotMatch(modelSelect.children[0].textContent, /PRIVATE_REFERENCE/u)
 
   modelSelect.selectedIndex = 1
@@ -638,19 +690,11 @@ test('mounted Chat page exposes accessible state and delegates every interaction
 
   cancel.emit('click')
   loadEarlier.emit('click')
-  sessionList.children[1].children[0].emit('click')
-  newSession.emit('click')
   await new Promise(resolve => setImmediate(resolve))
-  assert.deepEqual(model.calls.slice(-4).map(([name]) => name), [
+  assert.deepEqual(model.calls.slice(-2).map(([name]) => name), [
     'cancelSession',
     'loadMoreMessages',
-    'selectSession',
-    'createSession',
   ])
-  assert.deepEqual(model.calls.at(-1)[1], {
-    productSessionId: 'psn_00000000000000000000000003',
-    title: 'New Chat',
-  })
 
   mounted.close()
   assert.deepEqual(model.calls.at(-1), ['close'])
@@ -665,23 +709,19 @@ test('read-only Chat keeps reads available and blocks every write action', async
     root: rootElement,
     model,
     readOnly: true,
-    nextProductSessionId: () => 'psn_00000000000000000000000003',
   })
   const composer = findByClass(rootElement, 'wwc-chat-composer-input')
   const send = findByClass(rootElement, 'wwc-chat-send')
   const cancel = findByClass(rootElement, 'wwc-chat-cancel')
-  const newSession = findByClass(rootElement, 'wwc-chat-new-session')
   assert.equal(composer.disabled, true)
   assert.equal(send.disabled, true)
   assert.equal(cancel.disabled, true)
-  assert.equal(newSession.disabled, true)
   composer.value = 'must stay local'
   findByClass(rootElement, 'wwc-chat-composer').emit('submit')
   cancel.emit('click')
-  newSession.emit('click')
   await Promise.resolve()
   assert.equal(model.calls.some(([name]) => (
-    name === 'submitMessage' || name === 'cancelSession' || name === 'createSession'
+    name === 'submitMessage' || name === 'cancelSession'
   )), false)
   assert.equal(findByClass(rootElement, 'wwc-chat-retry').disabled, false)
   mounted.close()
@@ -693,11 +733,9 @@ test('Chat keyed updates retain session, message, model, composer, focus, and sc
   const rootElement = document.createElement('main')
   const model = new FakeChatViewModel(state())
   const mounted = mountChatPage({ root: rootElement, model })
-  const sessions = findByClass(rootElement, 'wwc-chat-session-list')
   const messages = findByClass(rootElement, 'wwc-chat-messages')
   const modelSelect = findByClass(rootElement, 'wwc-chat-model')
   const composer = findByClass(rootElement, 'wwc-chat-composer-input')
-  const sessionRow = sessions.children[0]
   const messageRow = messages.children[0]
   const modelOption = modelSelect.children[0]
   composer.value = 'dirty composer'
@@ -713,7 +751,7 @@ test('Chat keyed updates retain session, message, model, composer, focus, and sc
     }))
   }
 
-  assert.equal(sessions.children[0], sessionRow)
+  assert.equal(findByClass(rootElement, 'wwc-chat-session-list'), null)
   assert.equal(messages.children[0], messageRow)
   assert.equal(modelSelect.children[0], modelOption)
   assert.equal(composer.value, 'dirty composer')
@@ -721,7 +759,6 @@ test('Chat keyed updates retain session, message, model, composer, focus, and sc
   assert.equal(composer.scrollTop, 31)
   assert.equal(document.activeElement, composer)
   assert.equal(messages.scrollTop, 72)
-  assert.equal(sessions.children.length, 2)
   assert.equal(messages.children.length, 1)
   mounted.close()
   assert.equal(model.listener, null)
@@ -746,7 +783,7 @@ test('Chat confirms one editable requirement draft before converting it to Stron
     scope,
   })
 
-  const open = findByClass(rootElement, 'wwc-chat-convert-delivery')
+  const open = findByClass(rootElement, 'wwc-chat-delegation-chip')
   assert.equal(open.disabled, false)
   assert.equal(open.getAttribute('aria-expanded'), 'false')
   assert.notEqual(open.getAttribute('aria-controls'), null)
@@ -810,6 +847,16 @@ test('Chat confirms one editable requirement draft before converting it to Stron
     ],
   }])
 
+  // A created Delivery surfaces as the in-flow receipt line of design 03b.
+  deliveryCreator.publish({ status: 'created', error: null })
+  const receipt = findByClass(rootElement, 'wwc-chat-delegation-receipt')
+  assert.equal(receipt.hidden, false)
+  assert.match(
+    findByClass(rootElement, 'wwc-chat-delegation-receipt-text').textContent,
+    /已委托 「Primary Chat」/u,
+  )
+  assert.equal(findByClass(rootElement, 'wwc-chat-delegation-receipt-link').href, '#/strongflow')
+
   deliveryCreator.publish({
     status: 'error',
     error: controlPlaneError('authorization', 'private permission detail', 'PERMISSION_DENIED'),
@@ -859,15 +906,15 @@ test('Chat page keeps an invalid route visible, blocks creation, and links to Se
   })
 
   const modelSelect = findByClass(rootElement, 'wwc-chat-model')
-  const newSession = findByClass(rootElement, 'wwc-chat-new-session')
+  const chip = findByClass(rootElement, 'wwc-chat-delegation-chip')
   const settings = findByClass(rootElement, 'wwc-chat-model-settings')
   const notice = findByClass(rootElement, 'wwc-chat-model-notice')
   assert.equal(modelSelect.children[0].disabled, true)
-  assert.match(modelSelect.children[0].textContent, /credential missing or revoked/iu)
-  assert.equal(newSession.disabled, true)
+  assert.match(modelSelect.children[0].textContent, /凭据缺失或已撤销/u)
+  assert.equal(chip.hidden, true)
   assert.equal(settings.href, '#/settings')
   assert.equal(settings.hidden, false)
-  assert.match(notice.textContent, /previously selected.*credential/iu)
+  assert.match(notice.textContent, /先前选择的模型路由.*凭据/u)
   assert.equal(notice.hidden, false)
   mounted.close()
 })

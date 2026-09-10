@@ -72,9 +72,9 @@ export function mountRepositoriesPage(options: RepositoriesPageOptions): Reposit
   const cards = new WeakMap<HTMLElement, RepositoryCardRefs>()
   let closed = false
 
-  region.setAttribute('aria-label', 'Repositories')
+  region.setAttribute('aria-label', '仓库')
   region.hidden = true
-  heading.textContent = 'Repositories'
+  heading.textContent = '仓库'
   heading.id = 'wwc-repositories-heading'
   region.setAttribute('aria-labelledby', heading.id)
   hint.hidden = true
@@ -115,7 +115,7 @@ export function mountRepositoriesPage(options: RepositoriesPageOptions): Reposit
       }
       const grantSubmit = element(document, 'button', 'wwc-repositories-card-grant-submit')
       grantSubmit.type = 'submit'
-      grantSubmit.textContent = 'Grant access'
+      grantSubmit.textContent = '授予访问'
       grantForm.append(grantUser, grantPermissions, grantSubmit, grantStatus)
       meta.append(branch, dirty, head, permissions)
       card.append(name, availability, meta, grantForm)
@@ -134,7 +134,7 @@ export function mountRepositoriesPage(options: RepositoriesPageOptions): Reposit
           permissions: grantPermissions.value as ControlPlaneRepositoryPermissions,
         }).then(() => {
           grantUser.value = ''
-          grantStatus.textContent = 'Repository access granted.'
+          grantStatus.textContent = '仓库访问已授予。'
         }).catch(error => {
           grantStatus.textContent = error instanceof Error
             ? error.message : 'Repository access could not be granted.'
@@ -173,7 +173,7 @@ export function mountRepositoriesPage(options: RepositoriesPageOptions): Reposit
   function render(snapshot: RepositoriesViewModelState): void {
     if (closed) return
     if (snapshot.clientId === null) {
-      hint.textContent = 'Select a Client above to see its repositories.'
+      hint.textContent = '先选择上方设备以查看它的仓库。'
       hint.hidden = false
     } else {
       hint.textContent = ''
@@ -184,7 +184,7 @@ export function mountRepositoriesPage(options: RepositoriesPageOptions): Reposit
     error.hidden = !unavailable
     cardCollection.update(snapshot.repositories)
     const loading = snapshot.status === 'loading' && snapshot.repositories.length === 0
-    empty.textContent = 'No repositories are authorized for this Client yet.'
+    empty.textContent = '该设备还没有被授权的仓库。'
     // An unavailable read explains itself through the alert channel and never
     // claims the empty state, mirroring the Clients area semantics.
     empty.hidden = snapshot.clientId === null

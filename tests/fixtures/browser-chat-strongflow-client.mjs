@@ -187,7 +187,7 @@ function chatMessages() {
 }
 
 function chatTurnIsTerminal() {
-  return ['Ready', 'Completed'].includes(visibleText('.wwc-chat-status'))
+  return ['就绪', '已完成'].includes(visibleText('.wwc-chat-status'))
     && chatMessages().some(message => (
       message.role === 'assistant'
       && message.state === 'completed'
@@ -486,7 +486,7 @@ globalThis.runChatStrongFlowSetup = async proof => {
   })
   await navigate(`#/chat?session=${productSessionId}`, '.wwc-chat')
   await waitFor(
-    () => !['Loading Chat…', 'Updating Chat…'].includes(visibleText('.wwc-chat-status')),
+    () => !['正在加载对话…', '正在更新对话…'].includes(visibleText('.wwc-chat-status')),
     'initial Chat snapshot',
   )
   await command('chat.submit', 1, {

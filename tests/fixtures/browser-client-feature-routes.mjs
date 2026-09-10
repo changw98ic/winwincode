@@ -378,7 +378,8 @@ globalThis.runFeatureNavigationScenario = async () => {
   const operations = await globalThis.inspectFeatureRoute('operations')
   const settingsSubscriptionClosed = calls.subscriptions[0]?.closed ?? false
 
-  document.querySelector('[data-surface="attention"]').click()
+  // Design shell: 待我处理 has no nav entry; it is reached by direct route.
+  location.hash = '#/attention'
   await waitFor(
     () => document.querySelector('.wwc-attention-center') !== null,
     'Attention Center route',

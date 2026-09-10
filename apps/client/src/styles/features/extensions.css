@@ -1,0 +1,271 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+
+/* Extensions hub (design pages 09-11): one surface, three category tabs, a
+   header action that follows the tab, and hairline-separated inventory rows. */
+
+.wwc-extensions {
+  display: grid;
+  gap: var(--wwc-space-6);
+  min-width: 0;
+}
+
+.wwc-extensions-header {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--wwc-space-3) var(--wwc-space-6);
+  align-items: flex-start;
+  justify-content: space-between;
+}
+
+.wwc-extensions-heading {
+  min-width: 0;
+}
+
+.wwc-extensions-primary-action {
+  flex: 0 0 auto;
+}
+
+/* Tabs: the selected tab carries the accent underline from the design. */
+.wwc-extensions [data-wwc-component='tabs'] {
+  border-bottom-width: var(--wwc-border-width);
+}
+
+.wwc-extensions [role='tab'] {
+  font-weight: var(--wwc-font-weight-medium);
+}
+
+.wwc-extensions [role='tab'][aria-selected='true'] {
+  border-bottom-color: var(--wwc-color-accent-strong);
+}
+
+.wwc-extensions .wwc-extensions-panel {
+  display: none;
+  max-width: var(--wwc-content-max);
+}
+
+.wwc-extensions .wwc-extensions-panel:not([hidden]) {
+  display: grid;
+  gap: var(--wwc-space-2);
+}
+
+/* Section head: bold label with a hairline underneath (已安装 · N). */
+.wwc-extensions-plugins-head {
+  padding-bottom: var(--wwc-space-2);
+  border-bottom: var(--wwc-border-width) solid var(--wwc-color-border);
+}
+
+.wwc-extensions-plugins-head-label,
+.wwc-extensions-collapsed-label {
+  margin: var(--wwc-space-0);
+  font-size: var(--wwc-font-size-lg);
+  font-weight: var(--wwc-font-weight-strong);
+}
+
+.wwc-extensions-plugin-list,
+.wwc-extensions-skill-list,
+.wwc-extensions-mcp-list,
+.wwc-extensions-instruction-list,
+.wwc-extensions-disabled-mcp-list {
+  margin: var(--wwc-space-0);
+  padding: var(--wwc-space-0);
+  list-style: none;
+}
+
+.wwc-extensions-plugin-row,
+.wwc-extensions-mcp-row,
+.wwc-extensions-instruction-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--wwc-space-2) var(--wwc-space-4);
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--wwc-space-3) var(--wwc-space-0);
+  border-bottom: var(--wwc-border-width) solid var(--wwc-color-border-subtle);
+}
+
+.wwc-extensions-plugin-row[data-connected='false'],
+.wwc-extensions-mcp-row[data-connected='false'] {
+  color: var(--wwc-color-text-muted);
+}
+
+.wwc-extensions-plugin-info,
+.wwc-extensions-mcp-info {
+  display: grid;
+  gap: var(--wwc-space-1);
+  min-width: 0;
+  flex: 1 1 18rem;
+}
+
+.wwc-extensions-plugin-name,
+.wwc-extensions-mcp-name,
+.wwc-extensions-skill-name,
+.wwc-extensions-instruction-name {
+  margin: var(--wwc-space-0);
+  font-weight: var(--wwc-font-weight-strong);
+}
+
+.wwc-extensions-plugin-description,
+.wwc-extensions-mcp-state,
+.wwc-extensions-skill-description,
+.wwc-extensions-instruction-description {
+  margin: var(--wwc-space-0);
+  color: var(--wwc-color-text-muted);
+}
+
+.wwc-extensions-plugin-actions,
+.wwc-extensions-skill-actions,
+.wwc-extensions-mcp-actions,
+.wwc-extensions-instruction-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: var(--wwc-space-3);
+  align-items: center;
+}
+
+/* Accent switch: a pill with a hard-edged knob, on by default. */
+.wwc-extensions-switch {
+  position: relative;
+  width: 3rem;
+  min-height: 1.5rem;
+  padding: 0;
+  border: var(--wwc-border-width) solid var(--wwc-color-border);
+  border-radius: 999px;
+  background: var(--wwc-color-accent);
+  cursor: pointer;
+}
+
+.wwc-extensions-switch-knob {
+  position: absolute;
+  top: 50%;
+  right: 1px;
+  width: 1.125rem;
+  height: 1.125rem;
+  border: var(--wwc-border-width) solid var(--wwc-color-border);
+  border-radius: 999px;
+  background: var(--wwc-color-surface);
+  transform: translateY(-50%);
+}
+
+.wwc-extensions-switch[aria-checked='false'] {
+  background: var(--wwc-color-surface-subtle);
+}
+
+.wwc-extensions-switch[aria-checked='false'] .wwc-extensions-switch-knob {
+  right: auto;
+  left: 1px;
+}
+
+/* 技能与指令: scope selector plus a four-column inventory table. */
+.wwc-extensions-scope-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--wwc-space-2) var(--wwc-space-4);
+  align-items: center;
+}
+
+.wwc-extensions-scope-label {
+  font-weight: var(--wwc-font-weight-strong);
+}
+
+.wwc-extensions-scope-select {
+  width: min(16rem, 100%);
+  padding: var(--wwc-space-2) var(--wwc-space-3);
+  border: var(--wwc-border-width-control) solid var(--wwc-color-border-control);
+  border-radius: var(--wwc-radius-sm);
+  background: var(--wwc-color-surface);
+  font-weight: var(--wwc-font-weight-medium);
+}
+
+.wwc-extensions-table-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr) minmax(0, 2fr) auto;
+  gap: var(--wwc-space-3);
+  padding: var(--wwc-space-2) var(--wwc-space-0);
+  border-bottom: var(--wwc-border-width) solid var(--wwc-color-border);
+  color: var(--wwc-color-text-muted);
+  font-size: var(--wwc-font-size-sm);
+}
+
+.wwc-extensions-skill-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr) minmax(0, 2fr) auto;
+  gap: var(--wwc-space-3);
+  align-items: center;
+  padding: var(--wwc-space-3) var(--wwc-space-0);
+  border-bottom: var(--wwc-border-width) solid var(--wwc-color-border-subtle);
+}
+
+.wwc-extensions-skill-command {
+  justify-self: start;
+  padding: var(--wwc-space-1) var(--wwc-space-2);
+  border-radius: var(--wwc-radius-sm);
+  background: var(--wwc-color-accent-soft);
+  font-family: var(--wwc-font-family-mono);
+  font-size: var(--wwc-font-size-sm);
+}
+
+/* Collapsed disclosure rows (项目指令 · AGENTS.md, 已停用 · N). */
+.wwc-extensions-collapsed {
+  margin-top: var(--wwc-space-2);
+  border-top: var(--wwc-border-width) solid var(--wwc-color-border-subtle);
+  border-bottom: var(--wwc-border-width) solid var(--wwc-color-border-subtle);
+}
+
+.wwc-extensions-collapsed-button {
+  display: flex;
+  width: 100%;
+  gap: var(--wwc-space-3);
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--wwc-space-3) var(--wwc-space-0);
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.wwc-extensions-collapsed-chevron {
+  font-size: var(--wwc-font-size-lg);
+  transition: rotate var(--wwc-transition-fast);
+}
+
+.wwc-extensions-collapsed-button[aria-expanded='true'] .wwc-extensions-collapsed-chevron {
+  rotate: 90deg;
+}
+
+.wwc-extensions-instructions,
+.wwc-extensions-disabled-mcp {
+  display: grid;
+  gap: var(--wwc-space-2);
+  padding: var(--wwc-space-0) var(--wwc-space-0) var(--wwc-space-3);
+}
+
+.wwc-extensions-instructions-empty,
+.wwc-extensions-disabled-mcp-empty {
+  margin: var(--wwc-space-0);
+  color: var(--wwc-color-text-muted);
+}
+
+@media (max-width: 48rem) {
+  .wwc-extensions-table-head {
+    display: none;
+  }
+
+  .wwc-extensions-skill-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .wwc-extensions-skill-name {
+    grid-column: 1;
+  }
+
+  .wwc-extensions-skill-command {
+    grid-column: 1;
+    grid-row: 2;
+  }
+
+  .wwc-extensions-skill-actions {
+    grid-column: 2;
+    grid-row: 1 / span 2;
+    justify-self: end;
+  }
+}

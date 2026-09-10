@@ -69,6 +69,13 @@ const model = createSettingsViewModel({
 })
 const mounted = mountSettingsPage({ root, model })
 
+// The redesigned settings page (设置分类 dropdown) keeps the route controls in
+// the 模型与 Provider category; this scenario switches there before driving
+// them so focus and selection behave on visible controls.
+const categorySelect = document.querySelector('.wwc-settings-category-select')
+categorySelect.value = 'providers'
+categorySelect.dispatchEvent(new Event('change', { bubbles: true }))
+
 async function waitFor(predicate, label) {
   const deadline = Date.now() + 5_000
   while (!predicate()) {

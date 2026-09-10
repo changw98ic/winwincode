@@ -613,7 +613,7 @@ test('the My Work page mounts the start entry, the reused work sections, and the
   )
 
   const start = byClass(rootElement, 'wwc-my-work-start')
-  assert.match(visibleText(start), /Start a new task/u)
+  assert.match(visibleText(start), /开始新任务/u)
   const chat = byClass(start, 'wwc-my-work-start-chat')
   assert.equal(
     chat.href,
@@ -739,6 +739,6 @@ test('the presentation copy stays fixed and names the Clients and Repositories h
   assert.equal(Object.isFrozen(presentation), true)
   assert.match(presentation.clientsHint, /Clients area/u)
   assert.match(presentation.clientsHint, /Repositories area/u)
-  assert.match(presentation.startChatLabel, /Chat/u)
+  assert.match(presentation.startChatLabel, /对话/u)
   assert.match(presentation.startDeliveryLabel, /StrongFlow/u)
 })

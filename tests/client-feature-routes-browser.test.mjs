@@ -98,7 +98,7 @@ test('real browser routes mount Settings, the Attention Center, session decision
     'globalThis.inspectManagementPresentation("settings")',
   )
   assert.equal(desktopSettings.page, 'management')
-  assert.equal(desktopSettings.panelCount, 3)
+  assert.equal(desktopSettings.panelCount, 5)
   assert.equal(desktopSettings.emptyCount, 1)
   assert.notEqual(desktopSettings.statusIcon, '')
   assert.equal(desktopSettings.statusIconHidden, 'true')

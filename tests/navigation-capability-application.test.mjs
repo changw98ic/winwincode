@@ -360,7 +360,7 @@ test('personal deployment hides the Enterprise entry and keeps product areas nav
   const links = navigationLinks(fixture.rootElement)
   assert.deepEqual(
     Object.keys(links).sort(),
-    ['attention', 'chat', 'home', 'settings', 'strongflow'],
+    ['chat', 'extensions', 'home', 'projects', 'settings'],
   )
   assert.equal(links.chat.getAttribute('aria-disabled'), null)
   fixture.application.close()
@@ -371,10 +371,12 @@ test('enterprise deployment shows every entry including Enterprise', async () =>
     '#/chat',
     facadeFake(sessionWith([organizationScope, repositoryScope])),
   )
-  await waitFor(() => Object.values(navigationLinks(fixture.rootElement)).length === 6, 'full navigation')
+  await waitFor(() => Object.values(navigationLinks(fixture.rootElement)).length === 5, 'full navigation')
 
   const links = navigationLinks(fixture.rootElement)
-  assert.equal(links.enterprise.getAttribute('aria-disabled'), null)
+  // Design shell: Enterprise never renders a navigation entry; organization
+  // administration stays reachable only through its direct route.
+  assert.equal(links.enterprise, undefined)
   fixture.application.close()
 })
 
@@ -470,19 +472,12 @@ test('disabled navigation entries stay visible and block navigation', async () =
     () => fixture.application.authSession.state.status === 'signed-in',
     'restored session',
   )
-  await waitFor(() => Object.values(navigationLinks(fixture.rootElement)).length === 6, 'full navigation')
+  await waitFor(() => Object.values(navigationLinks(fixture.rootElement)).length === 5, 'full navigation')
 
   const links = navigationLinks(fixture.rootElement)
-  assert.equal(links.enterprise.getAttribute('aria-disabled'), 'true')
-  assert.equal(links.enterprise.tabIndex, -1)
-  assert.match(links.enterprise.textContent, /unavailable/iu)
-  const event = {
-    type: 'click',
-    defaultPrevented: false,
-    preventDefault() { this.defaultPrevented = true },
-  }
-  links.enterprise.dispatchEvent(event)
-  assert.equal(event.defaultPrevented, true)
+  // Design shell: the denied area renders no navigation entry at all; denial
+  // is enforced when the route itself is opened directly.
+  assert.equal(links.enterprise, undefined)
   fixture.application.close()
 })
 
@@ -498,11 +493,10 @@ test('read-only navigation stays enterable and names its access level', async ()
     () => fixture.application.authSession.state.status === 'signed-in',
     'restored session',
   )
-  await waitFor(() => navigationLinks(fixture.rootElement).enterprise !== undefined, 'read-only entry')
-  const enterprise = navigationLinks(fixture.rootElement).enterprise
-  assert.equal(enterprise.dataset.capability, 'read-only')
-  assert.equal(enterprise.getAttribute('aria-disabled'), null)
-  assert.match(enterprise.textContent, /read only/iu)
+  // Design shell: no enterprise navigation entry; the read-only capability
+  // manifests on the route (readOnlyNotice) rather than in the sidebar.
+  await waitFor(() => Object.values(navigationLinks(fixture.rootElement)).length === 5, 'navigation')
+  assert.equal(navigationLinks(fixture.rootElement).enterprise, undefined)
   fixture.application.close()
 })
 
@@ -522,8 +516,8 @@ test('WebSocket authorization revocation closes the feature and shows the shell 
     'shell safe entry',
   )
   assert.equal(fixture.application.activeSurface.id, 'enterprise')
-  assert.equal(navigationLinks(fixture.rootElement).enterprise.dataset.capability, 'available')
-  assert.equal(navigationLinks(fixture.rootElement).enterprise.getAttribute('data-route-access'), 'denied')
+  // Design shell: the enterprise area renders no navigation entry.
+  assert.equal(navigationLinks(fixture.rootElement).enterprise, undefined)
   fixture.application.close()
 })
 
@@ -540,7 +534,7 @@ test('one denied enterprise area does not disable the whole surface', async () =
     'authorized sibling query',
   )
 
-  assert.equal(navigationLinks(fixture.rootElement).enterprise.dataset.capability, 'available')
+  assert.equal(navigationLinks(fixture.rootElement).enterprise, undefined)
   assert.equal(descendants(fixture.rootElement).some(node => (
     node.className === 'wwc-surface-route-denied'
   )), false)

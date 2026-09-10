@@ -82,14 +82,14 @@ test('a real browser opens the Attention-first Home dashboard as the first scree
   const landingText = await evaluateInBrowser(
     "document.body.textContent.replace(/\\s+/gu, ' ')",
   )
-  assert.match(landingText, /Choose an authorized repository Scope/u)
+  assert.match(landingText, /选择一个已授权的仓库范围以打开工作区/u)
   assert.doesNotMatch(landingText, /Conversation workspace/u)
 
   // With one exact Scope in the URL, the dashboard is the first screen.
   const home = await evaluateInBrowser(`globalThis.openHome('#/home?organizationId=${identity}`
     + `&workspaceId=${workspaceId}&projectId=${projectId}&repositoryId=${repositoryOne}')`)
   assert.equal(home.liveRegions, 1, 'the dashboard keeps exactly one polite live region')
-  assert.match(home.status, /Ready ·/u)
+  assert.match(home.status, /就绪 ·/u)
   assert.deepEqual(home.sections.map(section => section.id), [
     'decisions',
     'active',
@@ -109,7 +109,8 @@ test('a real browser opens the Attention-first Home dashboard as the first scree
   assert.equal(section('decisions').cards[0].title, 'Review the proposed delivery scope')
   assert.match(section('active').cards[0].title, /repository 1/u)
   assert.equal(home.firstUse.hidden, true)
-  assert.equal(home.usage.present, true)
+  // Design page 04 removed the usage/health panel from the board.
+  assert.equal(home.usage.present, false)
   assert.deepEqual(home.unavailableNotes, [])
 
   // Every card opens its exact, Scope-complete deep link.
@@ -171,7 +172,7 @@ test('a real browser opens the Attention-first Home dashboard as the first scree
   assert.doesNotMatch(JSON.stringify(switched.afterSectionTitles), /repository 1/u)
   assert.equal(switched.leak, false)
   const switchedDashboard = await evaluateInBrowser('globalThis.readDashboard()')
-  assert.match(switchedDashboard.status, /Ready ·/u)
+  assert.match(switchedDashboard.status, /就绪 ·/u)
   const switchedScoped = `organizationId=${identity}&workspaceId=${workspaceId}`
     + `&projectId=${projectId}&repositoryId=${repositoryTwo}`
   const switchedStrongflowStageRunHref = `#/strongflow?delivery=dlv_00000000000000000000000002`
@@ -197,16 +198,31 @@ test('a real browser opens the Attention-first Home dashboard as the first scree
   assert.equal(sectionOf(switchedDashboard)('visited').cards.length, 0)
   assert.equal(switchedDashboard.liveRegions, 1)
 
-  // A Scope that was never used offers the explicit first-use entry points.
-  const firstUse = await evaluateInBrowser(`globalThis.openHome('#/home?organizationId=${identity}`
-    + `&workspaceId=${workspaceId}&projectId=${projectId}&repositoryId=${repositoryThree}')`)
-  assert.equal(firstUse.firstUse.hidden, false, JSON.stringify(firstUse.firstUse))
-  assert.deepEqual(firstUse.firstUse.links, [
-    `#/strongflow?organizationId=${identity}&workspaceId=${workspaceId}`
-      + `&projectId=${projectId}&repositoryId=${repositoryThree}`,
-    `#/chat?organizationId=${identity}&workspaceId=${workspaceId}`
-      + `&projectId=${projectId}&repositoryId=${repositoryThree}`,
-  ])
-  assert.equal(firstUse.actions.length, 0)
-  assert.equal(firstUse.leak, false)
+  // Design page 04: an unused Scope shows the 新建任务 entry instead of the
+  // old first-use delivery/chat link block. The repositoryThree state has no
+  // deliveries, so openHome's cards-wait does not apply here.
+  await evaluateInBrowser(`location.hash = '#/home?organizationId=${identity}`
+    + `&workspaceId=${workspaceId}&projectId=${projectId}&repositoryId=${repositoryThree}'`)
+  const emptyScope = await evaluateInBrowser(`new Promise(resolvePromise => {
+    const deadline = Date.now() + 10_000
+    const check = () => {
+      const page = document.querySelector('.wwc-home')
+      const status = document.querySelector('.wwc-home-status')?.textContent ?? ''
+      if (page !== null && status.includes('就绪')) {
+        resolvePromise({
+          firstUse: { hidden: document.querySelector('.wwc-home-first-use')?.hidden ?? true },
+          leak: document.body.textContent.includes('SECRET_MARKER'),
+        })
+        return
+      }
+      if (Date.now() >= deadline) {
+        resolvePromise({ firstUse: { hidden: null }, leak: false, status })
+        return
+      }
+      setTimeout(check, 50)
+    }
+    check()
+  })`)
+  assert.equal(emptyScope.firstUse.hidden, true, JSON.stringify(emptyScope))
+  assert.equal(emptyScope.leak, false)
 })

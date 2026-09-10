@@ -1,33 +1,57 @@
 /* SPDX-License-Identifier: Apache-2.0 */
+/*
+ * Shell layout: a left sidebar (brand, vertical navigation, connection footer)
+ * beside the routed main area. The DOM keeps the historical classes — the grid
+ * places .wwc-header and .wwc-connection-bar into the sidebar column.
+ */
 
 .wwc-shell {
-  min-height: 100vh;
+  display: grid;
+  grid-template-columns: var(--wwc-sidebar-width) minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr) auto;
+  /* App-shell viewport: the sidebar and its footer stay pinned while the main
+     area scrolls internally. */
+  height: 100vh;
 }
 
 .wwc-header {
+  grid-column: 1;
+  grid-row: 1;
   display: flex;
-  align-items: center;
+  flex-direction: column;
   gap: var(--wwc-space-8);
-  min-height: var(--wwc-space-16);
-  padding: var(--wwc-space-0) var(--wwc-space-8);
+  padding: var(--wwc-space-6) var(--wwc-space-4);
+  border-right: var(--wwc-border-width-strong) solid var(--wwc-color-border);
   color: var(--wwc-color-on-header);
   background: var(--wwc-color-header);
 }
 
 .wwc-brand {
+  display: flex;
+  flex-direction: column;
+  gap: var(--wwc-space-1);
+  padding: var(--wwc-space-2) var(--wwc-space-2) var(--wwc-space-0);
   font-size: var(--wwc-font-size-lg);
+  font-weight: var(--wwc-font-weight-display);
+  letter-spacing: -0.01em;
 }
 
-/* UI-604: the skip link is the keyboard bypass for the header navigation.  It
+.wwc-brand-edition {
+  font-size: var(--wwc-font-size-xs);
+  font-weight: var(--wwc-font-weight-regular);
+  color: var(--wwc-color-text-muted);
+}
+
+/* UI-604: the skip link is the keyboard bypass for the sidebar navigation.  It
    stays visually hidden until focused so pointer users see no change. */
 .wwc-skip-link {
   position: absolute;
   left: var(--wwc-space-2);
   z-index: var(--wwc-layer-toast);
   padding: var(--wwc-space-2) var(--wwc-space-3);
-  border-radius: var(--wwc-radius-md);
-  color: var(--wwc-color-on-header);
-  background: var(--wwc-color-action-strong);
+  border: var(--wwc-border-width-control) solid var(--wwc-color-border);
+  color: var(--wwc-color-text);
+  background: var(--wwc-color-accent);
   clip-path: inset(50%);
   white-space: nowrap;
 }
@@ -38,19 +62,25 @@
 
 .wwc-navigation {
   display: flex;
-  flex-wrap: wrap;
+  flex: 1 1 auto;
+  flex-direction: column;
   gap: var(--wwc-space-1);
 }
 
 .wwc-navigation-link {
   padding: var(--wwc-space-2) var(--wwc-space-3);
-  border-radius: var(--wwc-radius-md);
-  color: var(--wwc-color-on-header-muted);
+  border: var(--wwc-border-width-control) solid transparent;
+  color: var(--wwc-color-text);
+  font-weight: var(--wwc-font-weight-medium);
   text-decoration: none;
 }
 
+.wwc-navigation-link:hover {
+  border-color: var(--wwc-color-border);
+}
+
 .wwc-navigation-link[aria-current='page'] {
-  color: var(--wwc-color-on-header);
+  border-color: var(--wwc-color-border);
   background: var(--wwc-color-header-active);
 }
 
@@ -59,32 +89,42 @@
   cursor: not-allowed;
 }
 
+/* The settings entry sits in the sidebar footer, as in the reference layout. */
+.wwc-navigation-link[data-surface='settings'] {
+  margin-top: auto;
+}
+
 /* UI-506: navigation badge for entries that need the user. */
 .wwc-navigation-badge {
   display: inline-block;
   min-width: var(--wwc-space-4);
   margin-left: var(--wwc-space-2);
   padding: var(--wwc-space-0) var(--wwc-space-1);
-  border: var(--wwc-border-width) solid var(--wwc-color-on-header);
-  border-radius: var(--wwc-radius-lg);
-  background: var(--wwc-color-header-active);
-  color: var(--wwc-color-on-header);
+  border: var(--wwc-border-width) solid var(--wwc-color-border);
+  color: var(--wwc-color-text);
+  background: var(--wwc-color-accent);
   font-size: var(--wwc-font-size-xs);
   font-weight: var(--wwc-font-weight-strong);
   line-height: var(--wwc-line-height-tight);
   text-align: center;
 }
 
-@media (max-width: 48rem) {
-  .wwc-navigation-badge {
-    margin-left: var(--wwc-space-1);
-  }
+/* The connection bar docks to the sidebar footer; its appearance lives in the
+   components layer, this only places it in the grid. */
+.wwc-connection-bar {
+  grid-column: 1;
+  grid-row: 2;
 }
 
 .wwc-main {
+  grid-column: 2;
+  grid-row: 1 / span 2;
   max-width: var(--wwc-content-max);
+  width: 100%;
+  height: 100%;
   margin: var(--wwc-space-0) auto;
-  padding: var(--wwc-space-8);
+  padding: var(--wwc-space-12) var(--wwc-space-16);
+  overflow-y: auto;
 }
 
 .wwc-scope-selector-root {
@@ -93,7 +133,7 @@
 
 .wwc-scope-selector {
   padding: var(--wwc-space-4);
-  border: var(--wwc-border-width) solid var(--wwc-color-border);
+  border: var(--wwc-border-width-control) solid var(--wwc-color-border);
   border-radius: var(--wwc-radius-lg);
   background: var(--wwc-color-surface);
 }
@@ -145,6 +185,9 @@
 
 .wwc-surface-title {
   margin: var(--wwc-space-0);
+  font-size: var(--wwc-font-size-display);
+  font-weight: var(--wwc-font-weight-display);
+  letter-spacing: -0.01em;
 }
 
 .wwc-surface-description {
@@ -169,33 +212,32 @@
   background: var(--wwc-color-danger-surface);
 }
 
+/* Pages render flat on the canvas; cards and panels carry the borders instead. */
 .wwc-surface-slot {
   min-height: 30rem;
-  border: var(--wwc-border-width) solid var(--wwc-color-border);
-  border-radius: var(--wwc-radius-lg);
-  background: var(--wwc-color-surface);
 }
 
 /* AUTH-100.2: the username + password sign-in page is the unauthenticated
-   shell region. It only reads tokens, like every other shell region. */
+   shell region. The reference layout centers the form on the paper canvas. */
 .wwc-login {
-  max-width: 24rem;
-  margin: var(--wwc-space-6) auto;
+  max-width: 26rem;
+  margin: var(--wwc-space-16) auto;
   padding: var(--wwc-space-4);
-  border: var(--wwc-border-width) solid var(--wwc-color-border);
-  border-radius: var(--wwc-radius-lg);
-  background: var(--wwc-color-surface);
+  border: var(--wwc-border-width) solid transparent;
+  background: transparent;
 }
 
 .wwc-login-heading {
-  margin: var(--wwc-space-0) var(--wwc-space-0) var(--wwc-space-3);
-  font-size: var(--wwc-font-size-lg);
-  font-weight: var(--wwc-font-weight-strong);
+  margin: var(--wwc-space-0) var(--wwc-space-0) var(--wwc-space-6);
+  font-size: var(--wwc-font-size-xl);
+  font-weight: var(--wwc-font-weight-display);
+  text-align: center;
 }
 
 .wwc-login-status {
   margin: var(--wwc-space-2) var(--wwc-space-0);
   color: var(--wwc-color-text-muted);
+  text-align: center;
 }
 
 .wwc-login-error {
@@ -211,7 +253,7 @@
   display: block;
   margin-bottom: var(--wwc-space-1);
   font-size: var(--wwc-font-size-sm);
-  font-weight: var(--wwc-font-weight-medium);
+  font-weight: var(--wwc-font-weight-strong);
 }
 
 .wwc-login-control {
@@ -219,14 +261,55 @@
   box-sizing: border-box;
 }
 
+/* Design page 01: the eye toggle sits inside the password field's right edge. */
+.wwc-login-password-wrap {
+  position: relative;
+}
+
+.wwc-login-password {
+  padding-right: 3rem;
+}
+
+.wwc-login-password-toggle {
+  position: absolute;
+  top: 50%;
+  right: 0.5rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.wwc-login-password-toggle svg {
+  display: block;
+}
+
+.wwc-login-password-toggle[aria-pressed='true'] {
+  opacity: 0.45;
+}
+
 .wwc-login-submit {
-  margin-top: var(--wwc-space-3);
+  width: 100%;
+  margin-top: var(--wwc-space-6);
+  border: var(--wwc-border-width-control) solid var(--wwc-color-border);
+  color: var(--wwc-color-text);
+  background: var(--wwc-color-accent);
+  font-weight: var(--wwc-font-weight-strong);
+  box-shadow: var(--wwc-shadow-hard);
+}
+
+.wwc-login-submit:hover:not(:disabled) {
+  background: var(--wwc-color-accent-strong);
 }
 
 .wwc-login-initialization {
-  margin-top: var(--wwc-space-4);
-  padding-top: var(--wwc-space-3);
-  border-top: var(--wwc-border-width) solid var(--wwc-color-border);
+  margin-top: var(--wwc-space-8);
+  padding-top: var(--wwc-space-6);
+  border-top: var(--wwc-border-width) solid var(--wwc-color-border-subtle);
 }
 
 .wwc-login-initialization-heading {
@@ -254,23 +337,127 @@
   background: var(--wwc-color-danger-surface);
 }
 
-@media (max-width: 48rem) {
-  .wwc-header {
-    flex-wrap: wrap;
-    gap: var(--wwc-space-3);
-    padding: var(--wwc-space-3) var(--wwc-space-4);
-  }
-
-  .wwc-navigation {
-    width: 100%;
-    overflow-x: auto;
+@media (max-width: 64rem) {
+  .wwc-shell {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto auto minmax(0, 1fr);
+    height: auto;
   }
 
   .wwc-main {
+    grid-column: 1;
+    grid-row: 3;
+    height: auto;
     padding: var(--wwc-space-4);
+    overflow-y: visible;
+  }
+
+  .wwc-header {
+    grid-column: 1;
+    grid-row: 1;
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--wwc-space-3);
+    padding: var(--wwc-space-3) var(--wwc-space-4);
+    border-right: none;
+    border-bottom: var(--wwc-border-width-strong) solid var(--wwc-color-border);
+  }
+
+  .wwc-navigation {
+    flex: 0 0 auto;
+    flex-direction: row;
+    flex-wrap: wrap;
+    overflow-x: auto;
+  }
+
+  .wwc-navigation-link[data-surface='settings'] {
+    margin-top: var(--wwc-space-0);
+  }
+
+  .wwc-connection-bar {
+    grid-column: 1;
+    grid-row: 2;
   }
 
   .wwc-scope-selector-controls {
     grid-template-columns: 1fr;
   }
+}
+
+/* Design shell: nav links are icon + label rows in the sidebar. */
+.wwc-navigation-link {
+  display: flex;
+  align-items: center;
+  gap: var(--wwc-space-3);
+}
+
+.wwc-navigation-icon {
+  display: inline-flex;
+  flex: 0 0 auto;
+}
+
+.wwc-navigation-text {
+  min-width: 0;
+}
+
+/* Connection footer: the design keeps a single "Client 已连接" line that links
+   to the device page; details stay available in the sidebar flow. */
+.wwc-connection-device-link {
+  color: inherit;
+  text-decoration: none;
+}
+
+.wwc-connection-bar .wwc-connection-detail,
+.wwc-connection-bar .wwc-connection-metadata,
+.wwc-connection-bar .wwc-connection-copy-feedback {
+  display: none;
+}
+
+/* Design sidebar 「最近对话」 section under the navigation. */
+.wwc-recent-chats {
+  margin-top: var(--wwc-space-8);
+  padding-top: var(--wwc-space-4);
+  border-top: var(--wwc-border-width) solid var(--wwc-color-border-subtle);
+}
+
+.wwc-sidebar-section-label {
+  margin: var(--wwc-space-0) var(--wwc-space-0) var(--wwc-space-2);
+  color: var(--wwc-color-text-muted);
+  font-size: var(--wwc-font-size-sm);
+}
+
+.wwc-sidebar-recent {
+  display: grid;
+  gap: var(--wwc-space-1);
+  margin: var(--wwc-space-0);
+  padding: var(--wwc-space-0);
+  list-style: none;
+}
+
+.wwc-sidebar-recent-item {
+  padding: var(--wwc-space-2) var(--wwc-space-3);
+  border: var(--wwc-border-width-control) solid transparent;
+  border-radius: var(--wwc-radius-md);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Compact Scope disclosure (design 03a 「winwincode ∨」). */
+.wwc-scope-selector-compact {
+  min-height: var(--wwc-control-min-height);
+  padding: var(--wwc-space-2) var(--wwc-space-4);
+  border: var(--wwc-border-width-control) solid var(--wwc-color-border);
+  border-radius: var(--wwc-radius-md);
+  color: var(--wwc-color-text);
+  background: var(--wwc-color-surface);
+  font-weight: var(--wwc-font-weight-medium);
+  cursor: pointer;
+}
+
+.wwc-login-subtitle {
+  margin: calc(-1 * var(--wwc-space-4)) var(--wwc-space-0) var(--wwc-space-8);
+  color: var(--wwc-color-text-muted);
+  text-align: center;
 }

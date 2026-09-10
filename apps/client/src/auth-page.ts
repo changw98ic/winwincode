@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import { formatInstant } from './format-instant.js'
+
 import type {
   AuthSessionViewModel,
   AuthSessionViewModelState,
@@ -26,23 +28,25 @@ function element<K extends keyof HTMLElementTagNameMap>(
 
 function statusText(state: AuthSessionViewModelState): string {
   switch (state.status) {
-    case 'signed-out': return 'Signed out'
-    case 'restoring': return 'Restoring browser session…'
-    case 'signed-in': return `Signed in until ${state.session?.expiresAt ?? 'the current session expires'}`
-    case 'signing-out': return 'Signing out…'
-    case 'authentication-required': return 'Sign in required'
-    case 'error': return 'Session unavailable'
-    case 'closed': return 'Session controls closed'
+    case 'signed-out': return '已退出登录'
+    case 'restoring': return '正在恢复浏览器会话…'
+    case 'signed-in': return state.session?.expiresAt === undefined
+      ? '已登录（本会话内有效）'
+      : `已登录，有效期至 ${formatInstant(state.session.expiresAt)}`
+    case 'signing-out': return '正在退出登录…'
+    case 'authentication-required': return '需要登录'
+    case 'error': return '会话不可用'
+    case 'closed': return '会话控件已关闭'
   }
 }
 
 function errorText(state: AuthSessionViewModelState): string {
   if (state.error === null) return ''
-  if (state.error.kind === 'authentication') return 'The bootstrap proof was rejected or expired.'
-  if (state.error.kind === 'network') return 'The authentication server could not be reached.'
-  if (state.error.kind === 'version') return 'The Client and Server versions differ.'
-  if (state.error.kind === 'cancelled') return 'The session request was cancelled.'
-  return 'The browser session could not be updated.'
+  if (state.error.kind === 'authentication') return '引导凭证被拒绝或已过期。'
+  if (state.error.kind === 'network') return '无法连接认证服务器。'
+  if (state.error.kind === 'version') return '客户端与服务器版本不一致。'
+  if (state.error.kind === 'cancelled') return '会话请求已取消。'
+  return '浏览器会话更新失败。'
 }
 
 /** Show browser-session status and sign-out; login belongs to the login page. */
@@ -59,7 +63,7 @@ export function mountAuthSessionPage(options: AuthSessionPageOptions): AuthSessi
   status.setAttribute('aria-live', 'polite')
   error.setAttribute('role', 'alert')
   signOut.type = 'button'
-  signOut.textContent = 'Sign out'
+  signOut.textContent = '退出登录'
   region.append(status, error, signOut)
   options.root.replaceChildren(region)
 

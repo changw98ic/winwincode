@@ -39,10 +39,10 @@ export interface MyWorkPresentation {
 }
 
 const PRESENTATION_SPEC: MyWorkPresentation = {
-  startLabel: 'Start a new task',
-  startTaskEntryLabel: 'Start a task on your Client',
-  startChatLabel: 'Start a Chat task',
-  startDeliveryLabel: 'Plan a StrongFlow Delivery',
+  startLabel: '开始新任务',
+  startTaskEntryLabel: '在你的设备上启动任务',
+  startChatLabel: '发起对话任务',
+  startDeliveryLabel: '规划 StrongFlow 交付',
   clientsHeading: 'Clients',
   clientsDescription: 'Connection and occupancy status of your coding devices.',
   clientsUnavailable: 'The Clients area is unreachable right now. The devices shown keep their last known status.',

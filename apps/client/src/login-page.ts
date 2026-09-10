@@ -74,6 +74,9 @@ export function mountLoginPage(options: LoginPageOptions): LoginPage {
   const username = element(document, 'input', 'wwc-login-control wwc-login-username')
   const passwordLabel = element(document, 'label', 'wwc-login-label')
   const password = element(document, 'input', 'wwc-login-control wwc-login-password')
+  // Design page 01: the password field carries a visibility toggle.
+  const passwordToggle = element(document, 'button', 'wwc-login-password-toggle')
+  const passwordWrap = element(document, 'div', 'wwc-login-password-wrap')
   const submit = element(document, 'button', 'wwc-login-submit')
   const initialization = element(document, 'div', 'wwc-login-initialization')
   const initializationHeading = element(document, 'p', 'wwc-login-initialization-heading')
@@ -96,9 +99,11 @@ export function mountLoginPage(options: LoginPageOptions): LoginPage {
   const initializationSubmit = element(document, 'button', 'wwc-login-initialization-submit')
   let closed = false
 
-  region.setAttribute('aria-label', 'Sign in')
+  region.setAttribute('aria-label', '登录')
   region.hidden = true
-  heading.textContent = 'Sign in'
+  heading.textContent = '登录 WinWinCode'
+  const subtitle = element(document, 'p', 'wwc-login-subtitle')
+  subtitle.textContent = '进入你的工作空间'
   heading.id = 'wwc-login-heading'
   region.setAttribute('aria-labelledby', heading.id)
   status.hidden = true
@@ -115,7 +120,7 @@ export function mountLoginPage(options: LoginPageOptions): LoginPage {
   username.maxLength = 128
   username.required = true
   usernameLabel.htmlFor = username.id
-  usernameLabel.textContent = 'Username'
+  usernameLabel.textContent = '账号'
 
   password.id = 'wwc-login-password'
   password.name = 'password'
@@ -124,15 +129,37 @@ export function mountLoginPage(options: LoginPageOptions): LoginPage {
   password.maxLength = 4096
   password.required = true
   passwordLabel.htmlFor = password.id
-  passwordLabel.textContent = 'Password'
+  passwordLabel.textContent = '密码'
+
+  passwordToggle.type = 'button'
+  passwordToggle.setAttribute('aria-label', '显示密码')
+  passwordToggle.setAttribute('aria-pressed', 'false')
+  // Inline SVG eye icon. Set through innerHTML on purpose: it is purely
+  // presentational, and a data:/http icon URL would surface as a network
+  // request, which the security audits correctly treat as a leak.
+  passwordToggle.innerHTML = [
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none"',
+    ' stroke="currentColor" stroke-width="2" stroke-linecap="round"',
+    ' stroke-linejoin="round" aria-hidden="true" width="20" height="20">',
+    '<path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6-10-6-10-6Z"/>',
+    '<circle cx="12" cy="12" r="3"/>',
+    '</svg>',
+  ].join('')
+  passwordToggle.addEventListener('click', () => {
+    const visible = password.type === 'text'
+    password.type = visible ? 'password' : 'text'
+    passwordToggle.setAttribute('aria-pressed', visible ? 'false' : 'true')
+    passwordToggle.setAttribute('aria-label', visible ? '显示密码' : '隐藏密码')
+  })
+  passwordWrap.append(password, passwordToggle)
 
   submit.type = 'submit'
-  submit.textContent = 'Sign in'
+  submit.textContent = '登录'
   form.setAttribute('aria-labelledby', heading.id)
-  form.append(usernameLabel, username, passwordLabel, password, submit)
+  form.append(usernameLabel, username, passwordLabel, passwordWrap, submit)
 
-  initializationHeading.textContent = 'First-time initialization'
-  initializationDetail.textContent = 'This server has no accounts yet. Enter the bootstrap proof from the server owner environment to create the first Owner.'
+  initializationHeading.textContent = '首次初始化'
+  initializationDetail.textContent = '服务器还没有账号。输入服务器所有者环境中的引导凭证，创建第一个 Owner。'
   initializationUsername.id = 'wwc-login-initialization-username'
   initializationUsername.name = 'username'
   initializationUsername.type = 'text'
@@ -142,7 +169,7 @@ export function mountLoginPage(options: LoginPageOptions): LoginPage {
   initializationUsername.maxLength = 128
   initializationUsername.required = true
   initializationUsernameLabel.htmlFor = initializationUsername.id
-  initializationUsernameLabel.textContent = 'Owner username'
+  initializationUsernameLabel.textContent = 'Owner 账号'
 
   initializationPassword.id = 'wwc-login-initialization-password'
   initializationPassword.name = 'password'
@@ -151,7 +178,7 @@ export function mountLoginPage(options: LoginPageOptions): LoginPage {
   initializationPassword.maxLength = 4096
   initializationPassword.required = true
   initializationPasswordLabel.htmlFor = initializationPassword.id
-  initializationPasswordLabel.textContent = 'Owner password'
+  initializationPasswordLabel.textContent = 'Owner 密码'
 
   proof.id = 'wwc-login-initialization-proof'
   proof.type = 'password'
@@ -160,9 +187,9 @@ export function mountLoginPage(options: LoginPageOptions): LoginPage {
   proof.setAttribute('autocapitalize', 'none')
   proof.required = true
   proofLabel.htmlFor = proof.id
-  proofLabel.textContent = 'Bootstrap proof'
+  proofLabel.textContent = '引导凭证'
   initializationSubmit.type = 'submit'
-  initializationSubmit.textContent = 'Initialize owner account'
+  initializationSubmit.textContent = '初始化 Owner 账号'
   initializationForm.append(
     initializationUsernameLabel,
     initializationUsername,
@@ -175,7 +202,7 @@ export function mountLoginPage(options: LoginPageOptions): LoginPage {
   initialization.append(initializationHeading, initializationDetail, initializationForm)
   initialization.hidden = true
 
-  region.append(heading, status, error, form, initialization)
+  region.append(heading, subtitle, status, error, form, initialization)
   options.root.replaceChildren(region)
 
   function setFieldError(control: HTMLInputElement, hasError: boolean): void {

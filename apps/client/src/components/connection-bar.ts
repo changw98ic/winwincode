@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import { formatInstant } from '../format-instant.js'
+
 import type {
   ConnectionSnapshot,
   GlobalConnectionStatus,
@@ -45,62 +47,72 @@ interface ConnectionPresentation {
 
 const PRESENTATION: Readonly<Record<GlobalConnectionStatus, ConnectionPresentation>> = Object.freeze({
   connected: Object.freeze({
-    label: 'Connected',
-    detail: 'Server requests and live updates are available.',
+    label: '已连接',
+    detail: '服务器请求与实时更新可用。',
     tone: 'success',
     live: 'polite',
-    recoveryLabel: 'Reconnect',
+    recoveryLabel: '重新连接',
     recoverVisible: false,
   }),
   reconnecting: Object.freeze({
-    label: 'Reconnecting',
-    detail: 'The current view and unsaved fields remain in place.',
+    label: '重新连接中',
+    detail: '当前视图与未保存内容保持不变。',
     tone: 'warning',
     live: 'polite',
     recoveryLabel: 'Reconnect now',
     recoverVisible: true,
   }),
   offline: Object.freeze({
-    label: 'Offline',
-    detail: 'The current view is preserved until the network returns.',
+    label: '离线',
+    detail: '网络恢复前保留当前视图。',
     tone: 'warning',
     live: 'assertive',
     recoveryLabel: 'Try reconnecting',
     recoverVisible: true,
   }),
   'refresh-required': Object.freeze({
-    label: 'Full refresh required',
-    detail: 'Live updates have a gap. Reload this route from the Server snapshot.',
+    label: '需要完整刷新',
+    detail: '实时更新出现缺口。请从服务器快照重新加载此路由。',
     tone: 'warning',
     live: 'assertive',
     recoveryLabel: 'Refresh route',
     recoverVisible: true,
   }),
   'authentication-required': Object.freeze({
-    label: 'Session expired',
-    detail: 'Sign in again. Unsaved fields remain in this browser view.',
+    label: '会话已过期',
+    detail: '请重新登录。此浏览器视图中未保存的内容保持不变。',
     tone: 'danger',
     live: 'assertive',
     recoveryLabel: 'Sign in again',
     recoverVisible: true,
   }),
   'permission-denied': Object.freeze({
-    label: 'Permission revoked',
-    detail: 'The current identity no longer has access to this area.',
+    label: '权限已撤销',
+    detail: '当前身份已无此区域的访问权限。',
     tone: 'danger',
     live: 'assertive',
     recoveryLabel: 'Return to Chat',
     recoverVisible: true,
   }),
   'version-mismatch': Object.freeze({
-    label: 'Version mismatch',
-    detail: 'The Client and Server contracts differ. Update the Client before retrying.',
+    label: '版本不匹配',
+    detail: '客户端与服务器契约不一致。请先更新客户端再重试。',
     tone: 'danger',
     live: 'assertive',
     recoveryLabel: 'Return to Chat',
     recoverVisible: true,
   }),
 })
+
+function element<K extends keyof HTMLElementTagNameMap>(
+  document: Document,
+  tag: K,
+  className: string,
+): HTMLElementTagNameMap[K] {
+  const node = document.createElement(tag)
+  node.className = className
+  return node
+}
 
 export function mountConnectionBar(options: ConnectionBarMountOptions): ConnectionBarView {
   const root = options.document.createElement('aside')
@@ -110,7 +122,7 @@ export function mountConnectionBar(options: ConnectionBarMountOptions): Connecti
   const feedback = options.document.createElement('p')
   const status = mountStatusBadge({
     document: options.document,
-    props: { label: 'Reconnecting', tone: 'warning', live: 'polite' },
+    props: { label: '重新连接中', tone: 'warning', live: 'polite' },
   })
   let current = options.props
   let open = true
@@ -118,7 +130,7 @@ export function mountConnectionBar(options: ConnectionBarMountOptions): Connecti
   const recover = mountButton({
     document: options.document,
     props: {
-      label: 'Reconnect now',
+      label: '立即重新连接',
       className: 'wwc-connection-recover',
       onActivate: () => { current.onRecover() },
     },
@@ -126,21 +138,24 @@ export function mountConnectionBar(options: ConnectionBarMountOptions): Connecti
   const copy = mountButton({
     document: options.document,
     props: {
-      label: 'Copy diagnostic',
+      label: '复制诊断',
       className: 'wwc-connection-copy',
       onActivate: () => {
-        feedback.textContent = 'Copying diagnostic summary…'
+        feedback.textContent = '正在复制诊断摘要…'
         void Promise.resolve(current.onCopy(current.diagnostic)).then(
-          () => { feedback.textContent = 'Diagnostic summary copied.' },
-          () => { feedback.textContent = 'Diagnostic copy is unavailable.' },
+          () => { feedback.textContent = '诊断摘要已复制。' },
+          () => { feedback.textContent = '无法复制诊断摘要。' },
         )
       },
     },
   })
 
   root.dataset.wwcComponent = 'connection-bar'
+  const deviceLink = element(options.document, 'a', 'wwc-connection-device-link')
+  deviceLink.href = '#/device'
+  deviceLink.setAttribute('aria-label', '执行设备')
   root.className = 'wwc-connection-bar'
-  root.setAttribute('aria-label', 'Server connection')
+  root.setAttribute('aria-label', '服务器连接')
   status.root.className = 'wwc-connection-status'
   detail.className = 'wwc-connection-detail'
   metadata.className = 'wwc-connection-metadata'
@@ -149,7 +164,8 @@ export function mountConnectionBar(options: ConnectionBarMountOptions): Connecti
   feedback.setAttribute('role', 'status')
   feedback.setAttribute('aria-live', 'polite')
   actions.append(recover.root, copy.root)
-  root.append(status.root, detail, metadata, actions, feedback)
+  deviceLink.append(status.root)
+  root.append(deviceLink, detail, metadata, actions, feedback)
 
   function update(props: Readonly<ConnectionBarProps>): void {
     assertMounted(open, 'ConnectionBar')
@@ -163,7 +179,7 @@ export function mountConnectionBar(options: ConnectionBarMountOptions): Connecti
       className: 'wwc-connection-status',
     })
     detail.textContent = presentation.detail
-    metadata.textContent = `Last successful update: ${props.state.lastSuccessfulAt ?? 'not yet available'}`
+    metadata.textContent = `最近成功更新：${formatInstant(props.state.lastSuccessfulAt ?? 'not yet available')}`
     recover.update({
       label: presentation.recoveryLabel,
       className: 'wwc-connection-recover',
@@ -171,13 +187,13 @@ export function mountConnectionBar(options: ConnectionBarMountOptions): Connecti
     })
     recover.root.hidden = !presentation.recoverVisible
     copy.update({
-      label: 'Copy diagnostic',
+      label: '复制诊断',
       className: 'wwc-connection-copy',
       onActivate: () => {
-        feedback.textContent = 'Copying diagnostic summary…'
+        feedback.textContent = '正在复制诊断摘要…'
         void Promise.resolve(current.onCopy(current.diagnostic)).then(
-          () => { feedback.textContent = 'Diagnostic summary copied.' },
-          () => { feedback.textContent = 'Diagnostic copy is unavailable.' },
+          () => { feedback.textContent = '诊断摘要已复制。' },
+          () => { feedback.textContent = '无法复制诊断摘要。' },
         )
       },
     })

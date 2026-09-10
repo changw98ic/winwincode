@@ -716,6 +716,42 @@ test('the run page renders the six §16.7 identity rows from served facts', asyn
   })
   await fixture.model.start()
 
+  // Design page 05: back link left, 流程与记录 display slot right.
+  const back = byClass(rootElement, 'wwc-task-run-back')
+  assert.equal(back.textContent, '返回看板')
+  assert.equal(
+    back.href,
+    '#/home?organizationId=org_00000000000000000000000001',
+  )
+  const topbarActions = byClass(rootElement, 'wwc-task-run-topbar-actions')
+  assert.match(visibleText(topbarActions), /流程与记录/u)
+  assert.match(visibleText(topbarActions), /更多/u)
+
+  assert.match(visibleText(byClass(rootElement, 'wwc-task-run-heading')), /运行中的任务/u)
+  assert.equal(
+    byClass(rootElement, 'wwc-task-run-status').textContent,
+    '强流程 · 运行中',
+  )
+  assert.match(visibleText(byClass(rootElement, 'wwc-task-run-description')), /Ship the occupancy gate/u)
+
+  // The StrongFlow-owned actions stay visible but disabled: no fake success.
+  const approve = byClass(rootElement, 'wwc-task-run-approve')
+  assert.equal(approve.textContent, '批准方案并执行')
+  assert.equal(approve.disabled, true)
+  assert.match(approve.title, /StrongFlow/u)
+  const requestChange = byClass(rootElement, 'wwc-task-run-request-change')
+  assert.equal(requestChange.textContent, '提出修改')
+  assert.equal(requestChange.disabled, true)
+
+  // The identity table stays collapsed behind the design-05 row.
+  const identityToggle = byClass(rootElement, 'wwc-task-run-identity-toggle')
+  assert.equal(identityToggle.textContent, '展开完整运行身份 · 6 行')
+  const rowsContainer = byClass(rootElement, 'wwc-task-run-rows')
+  assert.equal(rowsContainer.hidden, true)
+  identityToggle.dispatch('click')
+  assert.equal(identityToggle.textContent, '收起完整运行身份 · 6 行')
+  assert.equal(rowsContainer.hidden, false)
+
   const rows = allByClass(rootElement, 'wwc-task-run-row')
   assert.equal(rows.length, 6)
   assert.deepEqual(rows.map(row => row.dataset.taskRunRow), [
@@ -735,15 +771,11 @@ test('the run page renders the six §16.7 identity rows from served facts', asyn
   assert.match(visibleText(values.get('Candidate')), /cand_00000000000000000000000042/u)
   assert.match(visibleText(values.get('Candidate')), /Local branch created/u)
   assert.match(visibleText(values.get('Apply')), /Local branch created/u)
-  assert.match(visibleText(values.get('Apply')), /Target winwincode\/task\/tsk_/u)
+  assert.match(visibleText(values.get('Apply')), /目标分支 winwincode\/task\/tsk_/u)
   assert.equal(
     byClass(rootElement, 'wwc-task-run-identity-notice').hidden,
     true,
     'a served identity zone shows no gap notice',
-  )
-  assert.equal(
-    byClass(rootElement, 'wwc-task-run-back').href,
-    '#/home?organizationId=org_00000000000000000000000001',
   )
 
   fixture.model.close()
@@ -764,11 +796,15 @@ test('the run page keeps the identity rows honest when the zone is unreachable',
 
   const notice = byClass(rootElement, 'wwc-task-run-identity-notice')
   assert.equal(notice.hidden, false)
-  assert.match(notice.textContent, /unreachable right now/u)
+  assert.match(notice.textContent, /不可达/u)
   const rows = allByClass(rootElement, 'wwc-task-run-row')
   const values = new Map(rows.map(row => [row.dataset.taskRunRow, row]))
   assert.match(visibleText(values.get('Client')), /Wenjie MacBook Pro/u)
-  assert.match(visibleText(values.get('Worker sessions')), /loading/u)
+  assert.match(visibleText(values.get('Worker sessions')), /正在加载/u)
+  assert.equal(
+    byClass(rootElement, 'wwc-task-run-status').textContent,
+    '强流程 · 部分身份信息不可用',
+  )
 
   fixture.model.close()
   page.close()

@@ -600,7 +600,7 @@ test('real browser runs default Chat and StrongFlow through the production Clien
   authenticationEstablished = true
   assert.equal(setup.chatHash, '#/chat?session=psn_01J00000000000000000000001')
   assert.equal(setup.chatHeading, 'Browser production Chat')
-  assert.ok(['Running', 'Ready', 'Completed'].includes(setup.chatStatus), JSON.stringify(setup))
+  assert.ok(['运行中', '就绪', '已完成'].includes(setup.chatStatus), JSON.stringify(setup))
   assert.ok(setup.chatMessages.some(message => (
     message.content === 'Run the deterministic local browser workflow.'
     && message.role === 'user'
@@ -638,7 +638,7 @@ test('real browser runs default Chat and StrongFlow through the production Clien
     'globalThis.waitForTerminalChatBrowserFixture()',
   )
   assert.equal(chatTerminal.heading, 'Browser production Chat')
-  assert.ok(['Ready', 'Completed'].includes(chatTerminal.status))
+  assert.ok(['就绪', '已完成'].includes(chatTerminal.status))
   assert.equal(hasTerminalAssistant(chatTerminal.messages), true)
   assert.equal(chatTerminal.authSessionBytes, setup.authSessionBytes)
   assert.ok(chatTerminal.runtimeSessions.some(session => (
@@ -712,7 +712,7 @@ test('real browser runs default Chat and StrongFlow through the production Clien
   const chatAfterStrongFlowReload = await evaluateGate(
     'globalThis.openTerminalChatAfterStrongFlowReload()',
   )
-  assert.ok(['Ready', 'Completed'].includes(chatAfterStrongFlowReload.status))
+  assert.ok(['就绪', '已完成'].includes(chatAfterStrongFlowReload.status))
   assert.equal(hasTerminalAssistant(chatAfterStrongFlowReload.messages), true)
   assert.deepEqual(chatAfterStrongFlowReload.messages, chatTerminal.messages)
   assert.equal(chatAfterStrongFlowReload.authSessionBytes, setup.authSessionBytes)
@@ -724,7 +724,7 @@ test('real browser runs default Chat and StrongFlow through the production Clien
   const chatReload = await evaluateGate(
     'globalThis.inspectTerminalChatAfterReload()',
   )
-  assert.ok(['Ready', 'Completed'].includes(chatReload.status))
+  assert.ok(['就绪', '已完成'].includes(chatReload.status))
   assert.equal(hasTerminalAssistant(chatReload.messages), true)
   assert.deepEqual(chatReload.messages, chatTerminal.messages)
   assert.equal(chatReload.authSessionBytes, setup.authSessionBytes)

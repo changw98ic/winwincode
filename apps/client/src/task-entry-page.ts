@@ -77,9 +77,9 @@ export function mountTaskEntryPage(options: TaskEntryPageOptions): TaskEntryPage
 
   section.setAttribute('aria-label', 'New task')
   heading.id = 'wwc-task-entry-heading'
-  heading.textContent = 'New task'
+  heading.textContent = '新任务'
   section.setAttribute('aria-labelledby', heading.id)
-  intro.textContent = 'Start a task on a Client you occupy.'
+  intro.textContent = '在你占用的设备上启动任务。'
   occupiedNotice.setAttribute('role', 'status')
   occupiedNotice.hidden = true
   failure.setAttribute('role', 'alert')
@@ -110,17 +110,17 @@ export function mountTaskEntryPage(options: TaskEntryPageOptions): TaskEntryPage
   baseInput.autocomplete = 'off'
   baseInput.spellcheck = false
   baseLabel.htmlFor = baseInput.id
-  baseLabel.textContent = 'Base branch'
+  baseLabel.textContent = '基准分支'
 
   descriptionInput.id = 'wwc-task-entry-description'
   descriptionInput.name = 'description'
   descriptionInput.rows = 4
   descriptionInput.spellcheck = true
   descriptionLabel.htmlFor = descriptionInput.id
-  descriptionLabel.textContent = 'Task description'
+  descriptionLabel.textContent = '任务描述'
 
   submit.type = 'submit'
-  submit.textContent = 'Start task'
+  submit.textContent = '启动任务'
 
   form.append(
     clientLabel,

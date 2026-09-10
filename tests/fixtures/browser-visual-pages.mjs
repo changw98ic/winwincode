@@ -482,7 +482,7 @@ globalThis.captureVisualOffline = async () => {
   application.connection.offline()
   await waitFor(() => {
     const badge = document.querySelector('.wwc-connection-status .wwc-status-badge-label')
-    return badge !== null && badge.textContent === 'Offline'
+    return badge !== null && badge.textContent === '离线'
   }, 'the offline connection presentation')
   await new Promise(resolve_ => { setTimeout(resolve_, 60) })
   const connection = document.querySelector('.wwc-connection-bar')

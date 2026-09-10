@@ -1,40 +1,48 @@
 /* SPDX-License-Identifier: Apache-2.0 */
+/*
+ * Geometric hard-edge design tokens (docs/design/community-ui-geometric).
+ * Warm paper canvas, near-black ink, chartreuse accent; square corners and
+ * offset hard shadows instead of blur. Variable names are stable; values move.
+ */
 
 :root {
   color-scheme: light;
-  --wwc-color-canvas: #f5f7fb;
-  --wwc-color-surface: #fff;
-  --wwc-color-surface-subtle: #f8fafc;
-  --wwc-color-message: #f1f5f9;
-  --wwc-color-selection: #dbeafe;
-  --wwc-color-text: #172033;
-  --wwc-color-text-secondary: #475569;
-  --wwc-color-text-muted: #64748b;
-  --wwc-color-border: #dbe2ea;
-  --wwc-color-border-subtle: #e2e8f0;
-  --wwc-color-border-control: #cbd5e1;
-  --wwc-color-border-strong: #94a3b8;
-  --wwc-color-header: #111827;
-  --wwc-color-header-active: #334155;
-  --wwc-color-on-header: #fff;
-  --wwc-color-on-header-muted: #cbd5e1;
-  --wwc-color-action: #2563eb;
-  --wwc-color-action-strong: #1d4ed8;
-  --wwc-color-focus: #1d4ed8;
-  --wwc-color-info-text: #1e3a8a;
-  --wwc-color-info-surface: #eff6ff;
-  --wwc-color-info-border: #2563eb;
-  --wwc-color-success-text: #166534;
-  --wwc-color-success-surface: #f0fdf4;
-  --wwc-color-success-border: #16a34a;
-  --wwc-color-warning-text: #92400e;
-  --wwc-color-warning-surface: #fffbeb;
-  --wwc-color-warning-border: #d97706;
-  --wwc-color-danger-text: #991b1b;
-  --wwc-color-danger-surface: #fef2f2;
-  --wwc-color-danger-border: #dc2626;
-  --wwc-color-danger-border-subtle: #fca5a5;
-  --wwc-color-overlay: rgb(15 23 42 / 45%);
+  --wwc-color-canvas: #f7f7ef;
+  --wwc-color-surface: #fffdf4;
+  --wwc-color-surface-subtle: #f1f1e6;
+  --wwc-color-message: #f3f3e9;
+  --wwc-color-selection: #edf2a4;
+  --wwc-color-text: #171717;
+  --wwc-color-text-secondary: #45453d;
+  --wwc-color-text-muted: #73736a;
+  --wwc-color-border: #171717;
+  --wwc-color-border-subtle: #ddddd0;
+  --wwc-color-border-control: #171717;
+  --wwc-color-border-strong: #171717;
+  --wwc-color-header: #f7f7ef;
+  --wwc-color-header-active: #e8f15b;
+  --wwc-color-on-header: #171717;
+  --wwc-color-on-header-muted: #55554d;
+  --wwc-color-accent: #e8f15b;
+  --wwc-color-accent-strong: #dde64a;
+  --wwc-color-accent-soft: #f1f5a0;
+  --wwc-color-action: #171717;
+  --wwc-color-action-strong: #171717;
+  --wwc-color-focus: #171717;
+  --wwc-color-info-text: #171717;
+  --wwc-color-info-surface: #f1f1e6;
+  --wwc-color-info-border: #171717;
+  --wwc-color-success-text: #1f7a33;
+  --wwc-color-success-surface: #edf7e9;
+  --wwc-color-success-border: #1f7a33;
+  --wwc-color-warning-text: #8a5a00;
+  --wwc-color-warning-surface: #fbf3d8;
+  --wwc-color-warning-border: #c9a227;
+  --wwc-color-danger-text: #b3261e;
+  --wwc-color-danger-surface: #fbedec;
+  --wwc-color-danger-border: #b3261e;
+  --wwc-color-danger-border-subtle: #e4a49f;
+  --wwc-color-overlay: rgb(23 23 23 / 40%);
   --wwc-space-0: 0;
   --wwc-space-1: 0.25rem;
   --wwc-space-2: 0.5rem;
@@ -51,16 +59,21 @@
   --wwc-font-size-md: 1rem;
   --wwc-font-size-lg: 1.25rem;
   --wwc-font-size-xl: 1.5rem;
+  --wwc-font-size-display: 2rem;
   --wwc-font-weight-regular: 400;
   --wwc-font-weight-medium: 600;
   --wwc-font-weight-strong: 700;
+  --wwc-font-weight-display: 800;
   --wwc-line-height-tight: 1.25;
   --wwc-line-height-default: 1.5;
-  --wwc-radius-sm: 0.375rem;
-  --wwc-radius-md: 0.5rem;
-  --wwc-radius-lg: 0.75rem;
+  /* 直角或小圆角:卡片/控件最多留 3px 收边。 */
+  --wwc-radius-sm: 2px;
+  --wwc-radius-md: 2px;
+  --wwc-radius-lg: 3px;
   --wwc-border-width: 1px;
-  --wwc-focus-width: 3px;
+  --wwc-border-width-control: 1.5px;
+  --wwc-border-width-strong: 2px;
+  --wwc-focus-width: 2px;
   --wwc-focus-offset: 2px;
   --wwc-layer-base: 0;
   --wwc-layer-sticky: 10;
@@ -82,7 +95,11 @@
   --wwc-graph-overview-height: 6rem;
   /* Windowed lists: the scroll math in apps/client/src uses the same value. */
   --wwc-window-row-height: 60px;
-  --wwc-shadow-dialog: 0 1.5rem 4rem rgb(15 23 42 / 22%);
+  /* 主要操作使用少量硬阴影:实心近黑位移投影,无模糊。 */
+  --wwc-shadow-hard-sm: 2px 2px 0 0 #171717;
+  --wwc-shadow-hard: 4px 4px 0 0 #171717;
+  --wwc-shadow-dialog: 8px 8px 0 0 #171717;
+  --wwc-sidebar-width: 17rem;
   --wwc-transition-fast: 120ms ease;
   --wwc-opacity-disabled: 0.58;
 }

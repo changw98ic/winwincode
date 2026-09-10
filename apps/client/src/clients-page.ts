@@ -71,22 +71,22 @@ function element<K extends keyof HTMLElementTagNameMap>(
 
 function failureText(failure: ClientsAddFailure): string {
   switch (failure) {
-    case 'invalid-client-id': return 'Enter the 9-12 digit Client ID shown on the device.'
-    case 'invalid-connection-code': return 'Enter the 8-digit connection code shown on the device.'
-    case 'id-not-found': return 'No Client has this ID. Check the ID shown on the device.'
-    case 'client-offline': return 'That Client is offline right now. Connect when it is back online.'
-    case 'code-invalid': return 'The connection code is wrong. Check the code on the device and try again.'
-    case 'code-expired': return 'The connection code expired. Generate a new code on the device and try again.'
-    case 'new-connections-forbidden': return 'That Client no longer accepts new connections.'
-    case 'client-locked': return 'That Client is locked. Unlock it on the device first.'
-    case 'rate-limited': return 'Too many connection attempts. Wait a moment, then try again.'
-    case 'unavailable': return 'Adding a Client is unavailable right now. Check the connection and try again.'
+    case 'invalid-client-id': return '输入设备上显示的 9-12 位设备 ID。'
+    case 'invalid-connection-code': return '输入设备上显示的 8 位连接码。'
+    case 'id-not-found': return '没有设备使用这个 ID。请核对设备上显示的 ID。'
+    case 'client-offline': return '该设备当前离线，等它上线后再连接。'
+    case 'code-invalid': return '连接码不正确，请在设备上核对后重试。'
+    case 'code-expired': return '连接码已过期，请在设备上重新生成后重试。'
+    case 'new-connections-forbidden': return '该设备不再接受新的连接。'
+    case 'client-locked': return '该设备已锁定，请先在设备上解锁。'
+    case 'rate-limited': return '连接尝试过于频繁，请稍后再试。'
+    case 'unavailable': return '暂时无法添加设备，请检查连接后重试。'
   }
 }
 
 function statusText(state: ClientsViewModelState): string {
-  if (state.status === 'submitting') return 'Connecting to the Client…'
-  if (state.status === 'succeeded') return 'Client added.'
+  if (state.status === 'submitting') return '正在连接设备…'
+  if (state.status === 'succeeded') return '设备已接入。'
   return ''
 }
 
@@ -125,9 +125,9 @@ export function mountClientsPage(options: ClientsPageOptions): ClientsPage {
   // CLIENT-300.5: the snapshot the occupancy interaction re-renders against.
   let latestDevices: readonly ControlPlaneDeviceSummary[] = []
 
-  region.setAttribute('aria-label', 'Clients')
+  region.setAttribute('aria-label', '执行设备')
   region.hidden = true
-  heading.textContent = 'Clients'
+  heading.textContent = '执行设备'
   heading.id = 'wwc-clients-heading'
   region.setAttribute('aria-labelledby', heading.id)
   status.hidden = true
@@ -135,7 +135,7 @@ export function mountClientsPage(options: ClientsPageOptions): ClientsPage {
   error.hidden = true
   error.id = 'wwc-clients-error'
 
-  formHeading.textContent = 'Add a Client'
+  formHeading.textContent = '接入执行设备'
   formHeading.id = 'wwc-clients-add-heading'
   form.setAttribute('aria-labelledby', formHeading.id)
 
@@ -149,7 +149,7 @@ export function mountClientsPage(options: ClientsPageOptions): ClientsPage {
   idInput.maxLength = 14
   idInput.required = true
   idLabel.htmlFor = idInput.id
-  idLabel.textContent = 'Client ID'
+  idLabel.textContent = '设备 ID'
 
   codeInput.id = 'wwc-clients-code-input'
   codeInput.name = 'connectionCode'
@@ -161,13 +161,13 @@ export function mountClientsPage(options: ClientsPageOptions): ClientsPage {
   codeInput.maxLength = 8
   codeInput.required = true
   codeLabel.htmlFor = codeInput.id
-  codeLabel.textContent = 'Connection code'
+  codeLabel.textContent = '连接码'
 
   submit.type = 'submit'
-  submit.textContent = 'Connect'
+  submit.textContent = '连接'
   form.append(formHeading, idLabel, idInput, codeLabel, codeInput, submit)
 
-  empty.textContent = 'No Clients yet. Connect your first device above.'
+  empty.textContent = '还没有执行设备。先在上方连接你的设备。'
   empty.hidden = true
 
   region.append(heading, form, status, error, empty, list)
@@ -204,7 +204,7 @@ export function mountClientsPage(options: ClientsPageOptions): ClientsPage {
       // toggle so keyboard and screen-reader users get the same selection.
       const select = element(document, 'button', 'wwc-clients-card-select')
       select.type = 'button'
-      select.textContent = 'Repositories'
+      select.textContent = '仓库'
       select.setAttribute('aria-pressed', 'false')
       select.addEventListener('click', () => {
         selectedClientId = selectedClientId === device.clientId ? null : device.clientId

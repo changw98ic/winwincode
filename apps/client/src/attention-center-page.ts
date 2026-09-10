@@ -1,18 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type { ControlPlaneClientError } from './community-control-plane-client.js'
+import { formatInstant } from './format-instant.js'
 import {
   mountButton,
   mountErrorState,
   mountPageHeader,
-  mountPanel,
   mountStatusBadge,
   type StatusTone,
 } from '@winwincode/browser-ui'
 import { mountEmptyState, mountToolbar } from './components/index.js'
 import { mountKeyedCollection, type KeyedCollectionView } from './components/keyed-collection.js'
 import { boundApprovalText } from './approval-risk-detail.js'
-import { scopeHash, type ScopeRouteSelection } from '@winwincode/browser-core/scope-context'
+import { scopeHash, surfaceHash, type ScopeRouteSelection } from '@winwincode/browser-core/scope-context'
 import type { StageRunId } from './generated/contracts.js'
 import type {
   AttentionNotificationControl,
@@ -75,12 +75,12 @@ export interface AttentionCenterPresentation {
 function knownCenterError(error: ControlPlaneClientError): string | null {
   const labels: Readonly<Record<string, string>> = Object.freeze({
     ATTENTION_CENTER_PAGE_LIMIT_EXCEEDED:
-      'The pending list exceeded the bounded query limit. Resolve open decisions and refresh.',
-    ATTENTION_CENTER_QUERY_MISMATCH: 'The server returned an unexpected answer. Refresh and retry.',
-    ATTENTION_CENTER_PAGE_INVALID: 'The server returned an inconsistent page. Refresh and retry.',
-    ATTENTION_CENTER_CURSOR_INVALID: 'The server returned an invalid continuation. Refresh and retry.',
+      '待办列表超出有界查询上限。请先解决待决策事项，再刷新重试。',
+    ATTENTION_CENTER_QUERY_MISMATCH: '服务端返回了意外结果。请刷新后重试。',
+    ATTENTION_CENTER_PAGE_INVALID: '服务端返回了不一致的分页。请刷新后重试。',
+    ATTENTION_CENTER_CURSOR_INVALID: '服务端返回了无效的续读游标。请刷新后重试。',
     ATTENTION_CENTER_APPROVAL_BINDING_INVALID:
-      'The Approval list is inconsistent. Refresh before acting on an entry.',
+      '审批列表不一致。请在处理条目前先刷新。',
   })
   return labels[error.code] ?? null
 }
@@ -89,13 +89,13 @@ function errorLabel(error: ControlPlaneClientError | null): string | null {
   if (error === null) return null
   const known = knownCenterError(error)
   if (known !== null) return known
-  if (error.kind === 'authentication') return 'Sign in again to review the Attention Center.'
-  if (error.kind === 'authorization') return 'You do not have access to this Attention Center.'
-  if (error.kind === 'network') return 'The server could not be reached. Check the connection and retry.'
-  if (error.kind === 'version') return 'The Client and Server versions differ. Update the Client and retry.'
-  if (error.kind === 'cancelled') return 'The Attention Center update was cancelled.'
-  if (error.kind === 'configuration') return 'Check the server URL and Scope configuration, then retry.'
-  return 'The Attention Center could not be updated. Retry, or review the server status.'
+  if (error.kind === 'authentication') return '请重新登录后查看待我处理。'
+  if (error.kind === 'authorization') return '你没有访问此待我处理页面的权限。'
+  if (error.kind === 'network') return '无法连接服务端。请检查网络后重试。'
+  if (error.kind === 'version') return '客户端与服务端版本不一致。请更新客户端后重试。'
+  if (error.kind === 'cancelled') return '待我处理的更新已取消。'
+  if (error.kind === 'configuration') return '请检查服务端地址与 Scope 配置后重试。'
+  return '待我处理无法更新。请重试，或查看服务端状态。'
 }
 
 function centerCounts(items: readonly AttentionCenterItem[]): AttentionCenterPresentation['counts'] {
@@ -146,24 +146,24 @@ export function attentionCenterPresentation(
 ): AttentionCenterPresentation {
   const counts = centerCounts(state.items)
   const statusText = state.status === 'loading'
-    ? 'Loading the Attention Center…'
+    ? '正在加载待我处理…'
     : state.status === 'refreshing' || state.realtime === 'reloading'
-      ? 'Updating the Attention Center…'
+      ? '正在更新待我处理…'
       : state.realtime === 'reconnecting'
-        ? 'Reconnecting…'
+        ? '正在重新连接…'
         : state.status === 'authentication-required'
-          ? 'Access revoked · sign in to load the Attention Center'
+          ? '访问已撤销 · 请重新登录后加载待我处理'
           : state.status === 'authorization-denied'
-            ? 'Access denied'
+            ? '访问被拒绝'
             : state.status === 'cancelled'
-              ? 'Update cancelled'
+              ? '更新已取消'
               : state.status === 'error'
-                ? 'Attention Center unavailable'
+                ? '待我处理不可用'
                 : state.status === 'closed'
-                  ? 'Attention Center closed'
-                  : `Ready · ${String(counts.needDecision)} need a decision · ${
-                    String(counts.blocking)} blocking · ${String(counts.expired)} expired · ${
-                    String(counts.bindingInvalid)} binding invalid`
+                  ? '待我处理已关闭'
+                  : `就绪 · 待决策 ${String(counts.needDecision)} 项 · 阻塞 ${
+                    String(counts.blocking)} 项 · 已过期 ${String(counts.expired)} 项 · 绑定失效 ${
+                    String(counts.bindingInvalid)} 项`
   const busy = state.status === 'loading'
     || state.status === 'refreshing'
     || state.realtime === 'reloading'
@@ -185,16 +185,26 @@ export function attentionCenterPresentation(
 }
 
 const KIND_LABELS: Readonly<Record<AttentionCenterItemKind, string>> = Object.freeze({
-  input: 'Input',
-  approval: 'Tool approval',
-  attention: 'Business Attention',
+  input: '输入请求',
+  approval: '工具审批',
+  attention: '业务注意点',
 })
 
-function urgencyLabel(urgency: AttentionCenterItem['urgency']): string {
-  if (urgency === 'blocking') return 'Blocking · needs a decision now'
-  if (urgency === 'pending') return 'Needs a decision'
-  if (urgency === 'expired') return 'Expired · action disabled'
-  return 'Binding invalid · action disabled'
+/**
+ * The one status line of design page 06, from the item's real kind and
+ * urgency: Delivery-bound Attention entries await the hand-over, decisions
+ * await the user, and fail-closed states keep their explicit labels.
+ */
+function itemStatusText(item: AttentionCenterItem): string {
+  if (item.urgency === 'expired') return '已过期 · 操作禁用'
+  if (item.urgency === 'binding-invalid') return '绑定失效 · 操作禁用'
+  if (item.urgency === 'blocking') return '阻塞 · 需要立即决策'
+  return item.kind === 'attention' ? '交付待验收' : '待决策'
+}
+
+/** Decision-class entries open the review, Delivery-bound ones the hand-over. */
+function itemActionLabel(item: AttentionCenterItem): string {
+  return item.kind === 'attention' ? '验收交付' : '审核方案'
 }
 
 /**
@@ -305,25 +315,25 @@ function desktopPresentation(
 ): DesktopPresentation {
   if (!state.supported) {
     return {
-      statusText: 'Desktop notifications are not available in this browser.',
+      statusText: '此浏览器不支持桌面通知。',
       buttonLabel: null,
     }
   }
   if (state.blocked) {
     return {
-      statusText: 'Desktop notifications are blocked. Allow them in the browser to enable.',
+      statusText: '桌面通知被浏览器阻止。请先在浏览器中允许通知。',
       buttonLabel: null,
     }
   }
   if (state.enabled) {
     return {
-      statusText: 'Desktop notifications are on for entries that need you.',
-      buttonLabel: 'Turn off desktop notifications',
+      statusText: '桌面通知已开启，需要你处理的条目会通知你。',
+      buttonLabel: '关闭桌面通知',
     }
   }
   return {
-    statusText: 'Desktop notifications are off. Turn them on to hear about blocking entries.',
-    buttonLabel: 'Turn on desktop notifications',
+    statusText: '桌面通知当前关闭。开启后，阻塞条目会通知你。',
+    buttonLabel: '开启桌面通知',
   }
 }
 
@@ -332,12 +342,14 @@ export function mountAttentionCenterPage(options: AttentionCenterPageOptions): A
   const document = options.root.ownerDocument
   const layout = element(document, 'section', 'wwc-attention-center')
   layout.dataset.wwcPage = 'management'
+  // Design page 06: back to the task board, then the counted title.
+  const back = element(document, 'a', 'wwc-attention-center-back')
+  back.href = surfaceHash('/home', options.scopeSelection)
+  back.textContent = '返回任务看板'
   const pageHeader = mountPageHeader({
     document,
     props: {
-      title: 'Attention Center',
-      eyebrow: 'Every pending decision',
-      description: 'Inputs, tool approvals, and business Attention across the current repository Scope.',
+      title: '待我处理',
       headingLevel: 2,
       className: 'wwc-attention-center-heading',
     },
@@ -346,7 +358,7 @@ export function mountAttentionCenterPage(options: AttentionCenterPageOptions): A
   const statusBadge = mountStatusBadge({
     document,
     props: {
-      label: 'Loading the Attention Center…',
+      label: '正在加载待我处理…',
       tone: 'info',
       live: 'polite',
       className: 'wwc-attention-center-status',
@@ -356,7 +368,7 @@ export function mountAttentionCenterPage(options: AttentionCenterPageOptions): A
   const refreshButton = mountButton({
     document,
     props: {
-      label: 'Refresh now',
+      label: '立即刷新',
       className: 'wwc-attention-center-refresh',
       onActivate: () => { void options.model.refresh() },
     },
@@ -365,7 +377,7 @@ export function mountAttentionCenterPage(options: AttentionCenterPageOptions): A
   const retryButton = mountButton({
     document,
     props: {
-      label: 'Retry snapshot',
+      label: '重试快照',
       className: 'wwc-attention-center-retry',
       onActivate: () => { void options.model.refresh() },
     },
@@ -374,7 +386,7 @@ export function mountAttentionCenterPage(options: AttentionCenterPageOptions): A
   const reconnectButton = mountButton({
     document,
     props: {
-      label: 'Reconnect events',
+      label: '重新连接事件流',
       className: 'wwc-attention-center-reconnect',
       onActivate: () => { options.model.reconnect() },
     },
@@ -383,7 +395,7 @@ export function mountAttentionCenterPage(options: AttentionCenterPageOptions): A
   const errorState = mountErrorState({
     document,
     props: {
-      title: 'Attention Center unavailable',
+      title: '待我处理不可用',
       message: '',
       actions: [retry, reconnect],
       visible: false,
@@ -393,29 +405,21 @@ export function mountAttentionCenterPage(options: AttentionCenterPageOptions): A
   const error = errorState.root
   errorState.message.className = 'wwc-attention-center-error-text'
 
-  const controlsPanel = mountPanel({
-    document,
-    props: {
-      id: 'wwc-attention-center-controls',
-      headingLevel: 3,
-      title: 'Browse',
-      description: 'Filter by type and order by urgency, newest, or soonest expiry.',
-      className: 'wwc-attention-center-controls',
-    },
-  })
-  const controlsSection = controlsPanel.root
+  // Design page 06: the Browse panel collapses into one compact control row
+  // (type + sort) with the desktop-notification consent beside it.
+  const controlsSection = element(document, 'div', 'wwc-attention-center-controls')
   const kindLabel = element(document, 'label', 'wwc-attention-center-control-label')
   const kindSelect = element(document, 'select', 'wwc-attention-center-kind')
   const sortLabel = element(document, 'label', 'wwc-attention-center-control-label')
   const sortSelect = element(document, 'select', 'wwc-attention-center-sort')
   kindSelect.id = 'wwc-attention-center-kind'
   kindLabel.htmlFor = kindSelect.id
-  kindLabel.textContent = 'Type'
+  kindLabel.textContent = '类型'
   for (const [value, label] of [
-    ['all', 'All pending items'],
-    ['input', 'Inputs'],
-    ['approval', 'Tool approvals'],
-    ['attention', 'Business Attention'],
+    ['all', '全部待办'],
+    ['input', '输入请求'],
+    ['approval', '工具审批'],
+    ['attention', '业务注意点'],
   ] as const) {
     const option = document.createElement('option')
     option.value = value
@@ -424,11 +428,11 @@ export function mountAttentionCenterPage(options: AttentionCenterPageOptions): A
   }
   sortSelect.id = 'wwc-attention-center-sort'
   sortLabel.htmlFor = sortSelect.id
-  sortLabel.textContent = 'Order'
+  sortLabel.textContent = '排序'
   for (const [value, label] of [
-    ['urgency', 'Urgency'],
-    ['newest', 'Newest first'],
-    ['expiry', 'Soonest expiry'],
+    ['urgency', '按紧急度'],
+    ['newest', '最新优先'],
+    ['expiry', '最先到期'],
   ] as const) {
     const option = document.createElement('option')
     option.value = value
@@ -438,12 +442,12 @@ export function mountAttentionCenterPage(options: AttentionCenterPageOptions): A
   const toolbar = mountToolbar({
     document,
     props: {
-      label: 'Attention Center browsing controls',
+      label: '待我处理浏览控件',
       items: [kindLabel, kindSelect, sortLabel, sortSelect],
       className: 'wwc-attention-center-toolbar',
     },
   })
-  controlsPanel.content.append(toolbar.root)
+  controlsSection.append(toolbar.root)
 
   // UI-506: the browser notification permission is only ever requested from this
   // explicit control, and the state text stays a plain paragraph so the page
@@ -453,7 +457,7 @@ export function mountAttentionCenterPage(options: AttentionCenterPageOptions): A
   const desktopToggle = mountButton({
     document,
     props: {
-      label: 'Turn on desktop notifications',
+      label: '开启桌面通知',
       className: 'wwc-attention-center-desktop-toggle',
       variant: 'default',
       onActivate: () => {
@@ -465,7 +469,7 @@ export function mountAttentionCenterPage(options: AttentionCenterPageOptions): A
   })
   const desktopButton = desktopToggle.root
   desktopButton.hidden = true
-  controlsPanel.content.append(desktopStatus, desktopButton)
+  controlsSection.append(desktopStatus, desktopButton)
 
   function renderDesktopNotifications(): void {
     const control = options.notifications
@@ -479,7 +483,7 @@ export function mountAttentionCenterPage(options: AttentionCenterPageOptions): A
     desktopStatus.textContent = presentation.statusText
     desktopButton.hidden = presentation.buttonLabel === null
     desktopToggle.update({
-      label: presentation.buttonLabel ?? 'Turn on desktop notifications',
+      label: presentation.buttonLabel ?? '开启桌面通知',
       className: 'wwc-attention-center-desktop-toggle',
       variant: 'default',
       onActivate: () => {
@@ -490,30 +494,43 @@ export function mountAttentionCenterPage(options: AttentionCenterPageOptions): A
   renderDesktopNotifications()
   const unsubscribeDesktop = options.notifications?.subscribe(renderDesktopNotifications) ?? null
 
-  const listPanel = mountPanel({
-    document,
-    props: {
-      id: 'wwc-attention-center-items',
-      headingLevel: 3,
-      title: 'Pending items',
-      description: 'Each card opens its authoritative decision or Delivery context.',
-      className: 'wwc-attention-center-items',
-    },
-  })
-  const listSection = listPanel.root
+  const itemsRoot = element(document, 'div', 'wwc-attention-center-items')
   const cards = element(document, 'ul', 'wwc-attention-center-list')
   const empty = mountEmptyState({
     document,
     props: {
-      title: 'Nothing needs a decision',
-      detail: 'New inputs, tool approvals, and business Attention will appear here.',
+      title: '暂无待处理事项',
+      detail: '新的输入请求、工具审批与业务注意点会出现在这里。',
       className: 'wwc-attention-center-empty',
       headingLevel: 3,
     },
   })
-  listPanel.content.append(cards, empty.root)
+  itemsRoot.append(cards, empty.root)
 
-  layout.append(heading, status, refresh, error, controlsSection, listSection)
+  // Design page 06: the handled archive collapses into one hairline row.  The
+  // loaded snapshot carries only open and closed (expired/invalid) entries, so
+  // the count stays at the honest zero until the Server exposes the archive.
+  const handled = element(document, 'button', 'wwc-attention-center-handled')
+  handled.type = 'button'
+  handled.setAttribute('aria-expanded', 'false')
+  handled.setAttribute('aria-controls', 'wwc-attention-center-handled-detail')
+  const handledLabel = element(document, 'span', 'wwc-attention-center-handled-label')
+  handledLabel.textContent = '已处理'
+  const handledCount = element(document, 'span', 'wwc-attention-center-handled-count')
+  handledCount.textContent = '0'
+  handled.append(handledLabel, handledCount)
+  const handledDetail = element(document, 'p', 'wwc-attention-center-handled-detail')
+  handledDetail.id = 'wwc-attention-center-handled-detail'
+  handledDetail.hidden = true
+  handledDetail.textContent =
+    '已处理条目由服务端归档；当前待办快照只包含待处理与已关闭（过期/绑定失效）条目。'
+  handled.addEventListener('click', () => {
+    const expanded = handled.getAttribute('aria-expanded') === 'true'
+    handled.setAttribute('aria-expanded', expanded ? 'false' : 'true')
+    handledDetail.hidden = expanded
+  })
+
+  layout.append(back, heading, status, refresh, error, controlsSection, itemsRoot, handled, handledDetail)
   options.root.replaceChildren(layout)
 
   let closed = false
@@ -534,6 +551,7 @@ export function mountAttentionCenterPage(options: AttentionCenterPageOptions): A
   interface CardParts {
     readonly kind: HTMLElement
     readonly title: HTMLElement
+    readonly status: HTMLElement
     readonly context: HTMLUListElement
     readonly origin: HTMLAnchorElement
     readonly action: HTMLAnchorElement
@@ -547,12 +565,13 @@ export function mountAttentionCenterPage(options: AttentionCenterPageOptions): A
       const row = element(document, 'li', 'wwc-attention-card')
       const kind = element(document, 'span', 'wwc-attention-card-kind')
       const title = element(document, 'h4', 'wwc-attention-card-title')
-      const context = cardContext(document, ['', '', '', '', '', '', '', ''])
+      const status = element(document, 'p', 'wwc-attention-card-status')
+      const context = cardContext(document, ['', '', '', ''])
       const origin = element(document, 'a', 'wwc-attention-card-origin')
       origin.hidden = true
       const action = element(document, 'a', 'wwc-attention-card-action')
-      row.append(kind, title, context, origin, action)
-      cardParts.set(row, { kind, title, context, origin, action })
+      row.append(kind, title, status, context, origin, action)
+      cardParts.set(row, { kind, title, status, context, origin, action })
       return row
     },
     update(row, item) {
@@ -571,6 +590,7 @@ export function mountAttentionCenterPage(options: AttentionCenterPageOptions): A
       parts.kind.textContent = KIND_LABELS[item.kind]
       // Producer summaries are free-form, so the card never renders one raw.
       parts.title.textContent = boundApprovalText(item.title).text
+      parts.status.textContent = itemStatusText(item)
       parts.origin.hidden = item.kind === 'attention' || origin === undefined || disabled
       if (origin !== undefined && cardStageRunId !== null && item.kind !== 'attention' && !disabled) {
         parts.origin.href = attentionCenterOriginHash(
@@ -578,37 +598,26 @@ export function mountAttentionCenterPage(options: AttentionCenterPageOptions): A
           cardStageRunId,
           options.scopeSelection,
         )
-        parts.origin.textContent = 'Open execution context'
+        parts.origin.textContent = '打开执行上下文'
       } else {
         parts.origin.removeAttribute('href')
         parts.origin.textContent = ''
       }
+      // Absent facts and internal binding bookkeeping are omitted; the row
+      // shows the status line, human times, and its source context only.
       updateCardContext(parts.context, [
-        urgencyLabel(item.urgency),
-        item.createdAt === null ? 'Created · not reported' : `Created ${item.createdAt}`,
-        item.expiresAt === null ? 'No expiry deadline' : `Expires ${item.expiresAt}`,
+        item.createdAt === null ? null : `创建于 ${formatInstant(item.createdAt)}`,
+        item.expiresAt === null ? null : `过期于 ${formatInstant(item.expiresAt)}`,
         item.kind === 'attention'
-          ? `Delivery · ${item.deliveryTitle ?? 'unknown'}`
-          : `Session · ${item.sessionTitle ?? 'unknown'}`,
-        item.kind === 'attention'
-          ? (item.stageRunId === null ? 'Delivery-bound' : 'StageRun-bound')
-          : (item.stageRunId === null ? 'ProductSession-bound' : 'ProductSession and StageRun-bound'),
-        item.executionJobId === null ? 'No execution job' : 'Execution job-bound',
-        // The Attention snapshot carries no authoritative DeliveryTask mapping, so the
-        // Task field is explicitly unavailable; an ExecutionJob is never shown as a Task.
-        'Task · Unavailable',
-        item.kind === 'attention'
-          ? (item.candidateBound ? 'Candidate · bound' : 'Candidate · not bound')
-          : 'Candidate · not reported',
-      ])
-      parts.action.textContent = item.kind === 'attention'
-        ? 'Open delivery context'
-        : 'Open decisions'
+          ? (item.deliveryTitle === null ? null : `交付 · ${item.deliveryTitle}`)
+          : (item.sessionTitle === null ? null : `会话 · ${item.sessionTitle}`),
+      ].filter((entry): entry is string => entry !== null))
+      parts.action.textContent = itemActionLabel(item)
       if (disabled) {
         parts.action.removeAttribute('href')
         parts.action.setAttribute('aria-disabled', 'true')
         parts.action.tabIndex = -1
-        parts.action.title = 'This entry is disabled. Refresh for the current state.'
+        parts.action.title = '该条目已禁用。请刷新查看当前状态。'
       } else {
         parts.action.href = attentionCenterItemHash(item, options.scopeSelection, origins())
         parts.action.removeAttribute('aria-disabled')
@@ -638,6 +647,11 @@ export function mountAttentionCenterPage(options: AttentionCenterPageOptions): A
           : state.status === 'ready'
             ? 'success'
             : 'neutral'
+    pageHeader.update({
+      title: `待我处理 ${String(state.items.length)} 项`,
+      headingLevel: 2,
+      className: 'wwc-attention-center-heading',
+    })
     statusBadge.update({
       label: presentation.statusText,
       tone,
@@ -646,7 +660,7 @@ export function mountAttentionCenterPage(options: AttentionCenterPageOptions): A
     })
     layout.setAttribute('aria-busy', String(presentation.busy))
     errorState.update({
-      title: 'Attention Center unavailable',
+      title: '待我处理不可用',
       message: presentation.errorText ?? '',
       actions: [retry, reconnect],
       visible: presentation.errorText !== null,
@@ -655,7 +669,7 @@ export function mountAttentionCenterPage(options: AttentionCenterPageOptions): A
     retry.hidden = !presentation.retryVisible
     reconnect.hidden = !presentation.reconnectVisible
     refreshButton.update({
-      label: 'Refresh now',
+      label: '立即刷新',
       className: 'wwc-attention-center-refresh',
       onActivate: () => { void options.model.refresh() },
       disabled: presentation.actionsDisabled,
@@ -678,8 +692,6 @@ export function mountAttentionCenterPage(options: AttentionCenterPageOptions): A
       sortSelect.removeEventListener('change', onSortChange)
       cardCollection.close()
       empty.close()
-      listPanel.close()
-      controlsPanel.close()
       toolbar.close()
       errorState.close()
       refreshButton.close()

@@ -36,7 +36,7 @@
 [data-wwc-component='panel'] {
   min-width: 0;
   padding: var(--wwc-space-4);
-  border: var(--wwc-border-width) solid var(--wwc-color-border);
+  border: var(--wwc-border-width-control) solid var(--wwc-color-border);
   border-radius: var(--wwc-radius-lg);
   background: var(--wwc-color-surface);
 }
@@ -52,30 +52,42 @@
   margin: var(--wwc-space-0);
 }
 
+.wwc-panel-title {
+  font-weight: var(--wwc-font-weight-strong);
+}
+
 [data-wwc-component='button'] {
   min-height: var(--wwc-control-min-height);
   padding: var(--wwc-space-2) var(--wwc-space-3);
-  border: var(--wwc-border-width) solid var(--wwc-color-border-strong);
+  border: var(--wwc-border-width-control) solid var(--wwc-color-border-strong);
   border-radius: var(--wwc-radius-md);
   color: var(--wwc-color-text);
   background: var(--wwc-color-surface);
+  font-weight: var(--wwc-font-weight-medium);
   cursor: pointer;
   transition: background var(--wwc-transition-fast), border-color var(--wwc-transition-fast);
 }
 
 [data-wwc-component='button']:hover:not(:disabled) {
-  border-color: var(--wwc-color-action);
-  background: var(--wwc-color-info-surface);
+  background: var(--wwc-color-surface-subtle);
 }
 
+/* Primary actions carry the reference hard shadow; pressing settles the offset. */
 [data-wwc-component='button'][data-variant='primary'] {
-  border-color: var(--wwc-color-action-strong);
-  color: var(--wwc-color-on-header);
-  background: var(--wwc-color-action);
+  border-color: var(--wwc-color-border);
+  color: var(--wwc-color-text);
+  background: var(--wwc-color-accent);
+  font-weight: var(--wwc-font-weight-strong);
+  box-shadow: var(--wwc-shadow-hard);
 }
 
 [data-wwc-component='button'][data-variant='primary']:hover:not(:disabled) {
-  background: var(--wwc-color-action-strong);
+  background: var(--wwc-color-accent-strong);
+}
+
+[data-wwc-component='button'][data-variant='primary']:active:not(:disabled) {
+  box-shadow: var(--wwc-shadow-hard-sm);
+  translate: 2px 2px;
 }
 
 [data-wwc-component='button'][data-variant='destructive'] {
@@ -105,7 +117,7 @@
   width: fit-content;
   padding: var(--wwc-space-1) var(--wwc-space-2);
   border: var(--wwc-border-width) solid var(--wwc-color-border);
-  border-radius: var(--wwc-radius-lg);
+  border-radius: var(--wwc-radius-md);
   color: var(--wwc-color-text-secondary);
   background: var(--wwc-color-surface-subtle);
   font-size: var(--wwc-font-size-sm);
@@ -193,8 +205,8 @@
 }
 
 [data-wwc-component='tabs'] [role='tab'][aria-selected='true'] {
-  border-bottom-color: var(--wwc-color-action);
-  color: var(--wwc-color-action-strong);
+  border-bottom-color: var(--wwc-color-text);
+  color: var(--wwc-color-text);
   font-weight: var(--wwc-font-weight-strong);
 }
 
@@ -230,7 +242,7 @@
   padding: var(--wwc-space-6);
   border: var(--wwc-border-width) solid var(--wwc-color-border);
   border-radius: var(--wwc-radius-lg);
-  background: var(--wwc-color-surface-subtle);
+  background: var(--wwc-color-surface);
 }
 
 .wwc-empty-state-title,
@@ -266,7 +278,7 @@
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   width: min(100%, var(--wwc-drawer-width));
-  border-left: var(--wwc-border-width) solid var(--wwc-color-border);
+  border-left: var(--wwc-border-width-strong) solid var(--wwc-color-border);
   background: var(--wwc-color-surface);
   box-shadow: var(--wwc-shadow-dialog);
 }
@@ -309,31 +321,29 @@
   grid-template-columns: minmax(0, 1fr);
 }
 
+/* The connection bar is the sidebar footer: stacked, quiet, borderless edges
+   beyond the separators. Narrow screens restore a full-width status strip. */
 [data-wwc-component='connection-bar'] {
-  position: sticky;
-  z-index: var(--wwc-layer-sticky);
-  top: var(--wwc-space-0);
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto auto;
-  align-items: center;
-  gap: var(--wwc-space-2) var(--wwc-space-4);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--wwc-space-2);
   min-width: 0;
-  padding: var(--wwc-space-2) var(--wwc-space-8);
-  border-bottom: var(--wwc-border-width) solid var(--wwc-color-border);
-  background: var(--wwc-color-surface);
+  padding: var(--wwc-space-3) var(--wwc-space-4);
+  background: var(--wwc-color-header);
 }
 
 [data-wwc-component='connection-bar'][data-connection-status='reconnecting'],
 [data-wwc-component='connection-bar'][data-connection-status='offline'],
 [data-wwc-component='connection-bar'][data-connection-status='refresh-required'] {
-  border-bottom-color: var(--wwc-color-warning-border);
+  border-top: var(--wwc-border-width-control) solid var(--wwc-color-warning-border);
   background: var(--wwc-color-warning-surface);
 }
 
 [data-wwc-component='connection-bar'][data-connection-status='authentication-required'],
 [data-wwc-component='connection-bar'][data-connection-status='permission-denied'],
 [data-wwc-component='connection-bar'][data-connection-status='version-mismatch'] {
-  border-bottom-color: var(--wwc-color-danger-border);
+  border-top: var(--wwc-border-width-control) solid var(--wwc-color-danger-border);
   background: var(--wwc-color-danger-surface);
 }
 
@@ -565,8 +575,9 @@
 
 @media (max-width: 48rem) {
   [data-wwc-component='connection-bar'] {
-    position: static;
-    grid-template-columns: minmax(0, 1fr);
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
     padding: var(--wwc-space-3) var(--wwc-space-4);
   }
 
@@ -600,4 +611,34 @@
   [data-wwc-component='action-bar'] > * {
     flex: 1 1 100%;
   }
+}
+
+/* Design page 01: signed-out sign-in renders on the bare canvas — no sidebar,
+   no surface heading, no connection strip. Lives in the components layer so
+   these overrides win against the connection-bar and main rules above. */
+.wwc-shell:has(.wwc-login:not([hidden])) {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.wwc-shell:has(.wwc-login:not([hidden])) .wwc-navigation,
+.wwc-shell:has(.wwc-login:not([hidden])) .wwc-connection-bar,
+.wwc-shell:has(.wwc-login:not([hidden])) .wwc-surface-title,
+.wwc-shell:has(.wwc-login:not([hidden])) .wwc-surface-description,
+.wwc-shell:has(.wwc-login:not([hidden])) .wwc-auth-session-root,
+.wwc-shell:has(.wwc-login:not([hidden])) .wwc-authenticated-context-required {
+  display: none;
+}
+
+.wwc-shell:has(.wwc-login:not([hidden])) .wwc-main {
+  grid-column: 1;
+  grid-row: 1;
+  display: grid;
+  align-content: center;
+}
+
+/* The signed-out shell keeps only the brand in the header, as page 01 does. */
+.wwc-shell:has(.wwc-login:not([hidden])) .wwc-header {
+  border-right: none;
+  border-bottom: none;
+  background: transparent;
 }

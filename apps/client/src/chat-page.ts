@@ -82,6 +82,7 @@ export interface ChatPagePresentation {
   readonly emptyText: string
   readonly errorText: string | null
   readonly composerLabel: string
+  readonly composerPlaceholder: string
   readonly sendLabel: string
   readonly messageListBusy: boolean
   readonly composerDisabled: boolean
@@ -95,35 +96,35 @@ export function chatComposerKeyAction(key: ChatComposerKey): ChatComposerKeyActi
 }
 
 function stateLabel(state: ChatViewModelState): string {
-  if (state.status === 'loading') return 'Loading Chat…'
-  if (state.status === 'refreshing') return 'Updating Chat…'
-  if (state.status === 'authentication-required') return 'Sign in required'
-  if (state.status === 'authorization-denied') return 'Access denied'
-  if (state.status === 'cancelled') return 'Update cancelled'
-  if (state.status === 'error') return 'Chat unavailable'
-  if (state.status === 'closed') return 'Chat closed'
-  if (state.realtime === 'reconnecting') return 'Reconnecting…'
-  if (state.interaction.status === 'submitting') return 'Sending message…'
-  if (state.interaction.status === 'cancelling') return 'Stopping run…'
-  if (state.interaction.status === 'waiting') return 'Waiting for the server…'
+  if (state.status === 'loading') return '正在加载对话…'
+  if (state.status === 'refreshing') return '正在更新对话…'
+  if (state.status === 'authentication-required') return '需要登录'
+  if (state.status === 'authorization-denied') return '没有访问权限'
+  if (state.status === 'cancelled') return '更新已取消'
+  if (state.status === 'error') return '对话不可用'
+  if (state.status === 'closed') return '对话已关闭'
+  if (state.realtime === 'reconnecting') return '正在重新连接…'
+  if (state.interaction.status === 'submitting') return '正在发送消息…'
+  if (state.interaction.status === 'cancelling') return '正在停止运行…'
+  if (state.interaction.status === 'waiting') return '等待服务器…'
   if (
     state.session === null
     && !readyModelRoutes(state).length
   ) return state.modelRouteAvailability?.reason === ModelRouteAvailabilityReason.NoProvider
-    ? 'Model setup required'
-    : 'Model route unavailable'
+    ? '需要先配置模型'
+    : '模型路由不可用'
   if (state.session === null) return state.selectedModelRoute === null
-    ? 'Choose a model route'
-    : 'Ready for a new Chat'
+    ? '选择一个模型路由'
+    : '可以开始新对话'
   const sessionState = state.session?.state
-  if (sessionState === 'running') return 'Running'
-  if (sessionState === 'waiting_for_input') return 'Waiting for input'
-  if (sessionState === 'waiting_for_approval') return 'Waiting for approval'
-  if (sessionState === 'cancelled') return 'Cancelled'
-  if (sessionState === 'closed') return 'Completed'
-  if (sessionState === 'failed') return 'Failed'
-  if (sessionState === 'idle') return 'Ready'
-  return 'Select a session'
+  if (sessionState === 'running') return '运行中'
+  if (sessionState === 'waiting_for_input') return '等待输入'
+  if (sessionState === 'waiting_for_approval') return '等待批准'
+  if (sessionState === 'cancelled') return '已取消'
+  if (sessionState === 'closed') return '已完成'
+  if (sessionState === 'failed') return '失败'
+  if (sessionState === 'idle') return '就绪'
+  return '选择一个会话'
 }
 
 function modelRouteReady(candidate: ModelRouteAvailabilityProjection): boolean {
@@ -138,25 +139,25 @@ function readyModelRoutes(
 }
 
 function modelRouteReasonLabel(reason: ModelRouteAvailabilityReason): string {
-  if (reason === ModelRouteAvailabilityReason.Ready) return 'Ready'
-  if (reason === ModelRouteAvailabilityReason.NoProvider) return 'No Provider'
+  if (reason === ModelRouteAvailabilityReason.Ready) return '就绪'
+  if (reason === ModelRouteAvailabilityReason.NoProvider) return '没有可用的 Provider'
   if (reason === ModelRouteAvailabilityReason.CredentialMissingOrRevoked) {
-    return 'Credential missing or revoked'
+    return '凭据缺失或已撤销'
   }
   if (reason === ModelRouteAvailabilityReason.DefaultRouteInvalid) {
-    return 'Default route invalid'
+    return '默认模型路由无效'
   }
   if (reason === ModelRouteAvailabilityReason.ProviderOrModelDisabled) {
-    return 'Provider or model disabled'
+    return 'Provider 或模型已停用'
   }
-  return 'Request pool unavailable'
+  return '请求池不可用'
 }
 
 function modelRouteSourceLabel(scope: Scope): string {
-  if (scope.kind === 'organization') return 'Organization scope'
-  if (scope.kind === 'workspace') return 'Workspace scope'
-  if (scope.kind === 'project') return 'Project scope'
-  return 'Repository scope'
+  if (scope.kind === 'organization') return '组织范围'
+  if (scope.kind === 'workspace') return '工作区范围'
+  if (scope.kind === 'project') return '项目范围'
+  return '仓库范围'
 }
 
 function modelRouteIdentity(route: ModelRouteAvailabilityProjection['route']): string {
@@ -166,44 +167,44 @@ function modelRouteIdentity(route: ModelRouteAvailabilityProjection['route']): s
 function errorLabel(error: ControlPlaneClientError | null): string | null {
   if (error === null) return null
   if (error.code === 'IDEMPOTENCY_CONFLICT') {
-    return 'This New Chat request conflicts with an earlier request. Start a fresh New Chat.'
+    return '本次新对话请求与之前的请求冲突，请重新开一个新对话。'
   }
   if (error.code === 'INVALID_REQUEST') {
-    return 'The selected model is not available for this repository. Choose another model and retry.'
+    return '所选模型在该仓库不可用，请换一个模型后重试。'
   }
   if (error.code === 'WRONG_STATE') {
-    return 'This Chat identity is already in use. Start a fresh New Chat.'
+    return '该对话标识已被占用，请重新开一个新对话。'
   }
   if (error.code === 'SERVICE_UNAVAILABLE') {
-    return 'The model request pool or selected model is temporarily unavailable. Retry in a moment.'
+    return '模型请求池或所选模型暂时不可用，请稍后重试。'
   }
   if (error.code === 'TRUSTED_FACTS_UNAVAILABLE') {
-    return 'The configured Provider or model is unavailable. Review Settings before retrying.'
+    return '配置的 Provider 或模型不可用，请先检查设置再重试。'
   }
-  if (error.kind === 'authentication') return 'Sign in again to continue this Chat.'
-  if (error.kind === 'authorization') return 'You do not have access to this Chat.'
-  if (error.kind === 'network') return 'The Chat server could not be reached. Check the connection and retry.'
-  if (error.kind === 'version') return 'The Client and Server versions differ. Update the Client and retry.'
-  if (error.kind === 'cancelled') return 'The Chat update was cancelled.'
-  if (error.kind === 'configuration') return 'Chat needs a valid server configuration.'
-  return 'Chat could not be updated. Retry, or review the server status.'
+  if (error.kind === 'authentication') return '请重新登录以继续该对话。'
+  if (error.kind === 'authorization') return '你没有这个对话的访问权限。'
+  if (error.kind === 'network') return '无法连接对话服务器，请检查网络后重试。'
+  if (error.kind === 'version') return '客户端与服务器版本不一致，请更新客户端后重试。'
+  if (error.kind === 'cancelled') return '对话更新已取消。'
+  if (error.kind === 'configuration') return '对话需要有效的服务器配置。'
+  return '对话更新失败，请重试或检查服务器状态。'
 }
 
 function modelRouteEmptyText(state: ChatViewModelState): string {
   const reason = state.modelRouteAvailability?.reason
   if (reason === ModelRouteAvailabilityReason.CredentialMissingOrRevoked) {
-    return 'The configured model credential is missing or revoked. Review Settings.'
+    return '配置的模型凭据缺失或已被撤销。请检查设置。'
   }
   if (reason === ModelRouteAvailabilityReason.DefaultRouteInvalid) {
-    return 'The default model route is invalid. Review Settings.'
+    return '默认模型路由无效。请检查设置。'
   }
   if (reason === ModelRouteAvailabilityReason.ProviderOrModelDisabled) {
-    return 'The configured Provider or model is disabled. Review Settings.'
+    return '配置的 Provider 或模型已停用。请检查设置。'
   }
   if (reason === ModelRouteAvailabilityReason.RequestPoolUnavailable) {
-    return 'The selected model request pool is unavailable. Retry or review Settings.'
+    return '所选模型请求池不可用。请重试或检查设置。'
   }
-  return 'No model route is configured because no Provider is available. Open Settings before creating a Chat.'
+  return '没有可用的 Provider，因此未配置模型路由。请先打开设置再创建对话。'
 }
 
 export function chatPagePresentation(state: ChatViewModelState): ChatPagePresentation {
@@ -215,16 +216,19 @@ export function chatPagePresentation(state: ChatViewModelState): ChatPagePresent
     statusText: stateLabel(state),
     emptyText: state.session === null
       ? readyModelRoutes(state).length > 0
-        ? 'Create your first Chat to start a conversation.'
+        ? '先创建第一个对话，开始交流。'
         : modelRouteEmptyText(state)
-      : 'No messages yet. Send a message to begin.',
+      : '还没有消息。发送一条消息开始对话。',
     errorText: errorLabel(error),
     composerLabel: running
-      ? 'Steer the current run'
+      ? '引导当前运行'
       : continuing
-        ? 'Continue the conversation'
-        : 'Message WinWinCode',
-    sendLabel: running ? 'Steer' : continuing ? 'Continue' : 'Send',
+        ? '继续对话'
+        : '给 WinWinCode 发消息',
+    composerPlaceholder: state.session === null
+      ? '描述你的想法，或输入 / 查看技能…'
+      : '继续当前对话…',
+    sendLabel: running ? '引导' : continuing ? '继续' : '发送',
     messageListBusy: state.status === 'loading'
       || state.status === 'refreshing'
       || state.realtime === 'reloading',
@@ -248,9 +252,9 @@ function element<K extends keyof HTMLElementTagNameMap>(
 }
 
 function messageStateText(state: string): string | null {
-  if (state === 'streaming') return 'Streaming'
-  if (state === 'cancelled') return 'Cancelled'
-  if (state === 'failed') return 'Failed'
+  if (state === 'streaming') return '正在输出'
+  if (state === 'cancelled') return '已停止'
+  if (state === 'failed') return '失败'
   return null
 }
 
@@ -283,6 +287,48 @@ function deliveryConversionError(state: ChatDeliveryCreatorState): string | null
 }
 
 const CONVERSION_DIALOG_HEADING_ID = 'wwc-chat-convert-heading'
+const DIAGRAM_ARCHITECTURE_VIEW_ID = 'wwc-chat-diagram-architecture'
+const DIAGRAM_FLOW_VIEW_ID = 'wwc-chat-diagram-flow'
+
+type ChatDiagramTab = 'architecture' | 'flow'
+
+function diagramArchitectureNode(
+  document: Document,
+  glyphClass: string,
+  label: string,
+): HTMLElement {
+  const node = element(document, 'div', 'wwc-chat-diagram-node')
+  node.append(element(document, 'div', `wwc-chat-diagram-glyph ${glyphClass}`))
+  const name = element(document, 'span', 'wwc-chat-diagram-label')
+  name.textContent = label
+  node.append(name)
+  return node
+}
+
+function diagramFlowStep(document: Document, label: string): HTMLElement {
+  const step = element(document, 'div', 'wwc-chat-diagram-step')
+  step.textContent = label
+  return step
+}
+
+function diagramLink(document: Document, arrow: boolean): HTMLElement {
+  return element(document, 'div', arrow
+    ? 'wwc-chat-diagram-link wwc-chat-diagram-link-arrow'
+    : 'wwc-chat-diagram-link')
+}
+
+function diagramChain(
+  document: Document,
+  nodes: readonly HTMLElement[],
+  arrow: boolean,
+): HTMLElement {
+  const panel = element(document, 'div', 'wwc-chat-diagram-panel')
+  nodes.forEach((node, index) => {
+    if (index > 0) panel.append(diagramLink(document, arrow))
+    panel.append(node)
+  })
+  return panel
+}
 
 function focusableElement(value: Element | null | undefined): HTMLElement | null {
   if (value === null || typeof value !== 'object') return null
@@ -297,39 +343,55 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
   const nowMillis = options.nowMillis ?? Date.now
   const document = options.root.ownerDocument
   const layout = element(document, 'div', 'wwc-chat')
-  const sessionPanel = element(document, 'aside', 'wwc-chat-sessions')
-  const sessionHeading = element(document, 'h2', 'wwc-chat-sessions-heading')
-  const newSession = element(document, 'button', 'wwc-chat-new-session')
-  const sessionList = element(document, 'ul', 'wwc-chat-session-list')
   const conversation = element(document, 'section', 'wwc-chat-conversation')
-  const header = element(document, 'header', 'wwc-chat-conversation-header')
+  // Design pages 03a/03b: the page header carries only the project switcher
+  // (owned by the shell) and the delegation entry chip.
+  const header = element(document, 'header', 'wwc-chat-page-header')
+  const projectSwitcher = element(document, 'button', 'wwc-chat-project')
   const heading = element(document, 'h2', 'wwc-chat-heading')
   const status = element(document, 'p', 'wwc-chat-status')
-  const modelLabel = element(document, 'label', 'wwc-chat-model-label')
-  const modelSelect = element(document, 'select', 'wwc-chat-model')
-  const modelSettings = element(document, 'a', 'wwc-chat-model-settings')
-  const modelNotice = element(document, 'p', 'wwc-chat-model-notice')
-  const convertDelivery = mountButton({
+  // Design page 03b: the delegation entry is the accent chip on the top right.
+  const delegationChip = mountButton({
     document,
     props: {
-      className: 'wwc-chat-convert-delivery',
-      label: 'Convert to StrongFlow',
+      className: 'wwc-chat-delegation-chip',
+      label: '委托任务 0 · 待审核 ∨',
       type: 'button',
       variant: 'primary',
     },
   })
+  const modelLabel = element(document, 'label', 'wwc-chat-model-label')
+  const modelSelect = element(document, 'select', 'wwc-chat-model')
+  const modelSettings = element(document, 'a', 'wwc-chat-model-settings')
+  const modelNotice = element(document, 'p', 'wwc-chat-model-notice')
   const error = element(document, 'div', 'wwc-chat-error')
   const errorText = element(document, 'span', 'wwc-chat-error-text')
   const retry = element(document, 'button', 'wwc-chat-retry')
   const messages = element(document, 'ol', 'wwc-chat-messages')
   const empty = element(document, 'p', 'wwc-chat-empty')
   const loadEarlier = element(document, 'button', 'wwc-chat-load-earlier')
+  // Design page 03a: without a session the page centers the architecture and
+  // flow diagrams behind the「架构图 | 流程图」tabs.
+  const diagram = element(document, 'div', 'wwc-chat-diagram')
+  const diagramTabs = element(document, 'div', 'wwc-chat-diagram-tabs')
+  const architectureTab = element(document, 'button', 'wwc-chat-diagram-tab')
+  const flowTab = element(document, 'button', 'wwc-chat-diagram-tab')
+  const architectureView = element(document, 'div', 'wwc-chat-diagram-view')
+  const flowView = element(document, 'div', 'wwc-chat-diagram-view')
+  const architectureCaption = element(document, 'p', 'wwc-chat-diagram-caption')
+  const flowCaption = element(document, 'p', 'wwc-chat-diagram-caption')
   const form = element(document, 'form', 'wwc-chat-composer')
   const composerLabel = element(document, 'label', 'wwc-chat-composer-label')
   const composer = element(document, 'textarea', 'wwc-chat-composer-input')
   const controls = element(document, 'div', 'wwc-chat-composer-controls')
+  // Design page 03b: the composer bar carries an attach entry. No upload
+  // contract exists yet, so the control renders disabled with its reason.
+  const attach = element(document, 'button', 'wwc-chat-composer-attach')
   const cancel = element(document, 'button', 'wwc-chat-cancel')
   const send = element(document, 'button', 'wwc-chat-send')
+  const receipt = element(document, 'p', 'wwc-chat-delegation-receipt')
+  const receiptText = element(document, 'span', 'wwc-chat-delegation-receipt-text')
+  const receiptLink = element(document, 'a', 'wwc-chat-delegation-receipt-link')
   const conversion = element(document, 'section', 'wwc-chat-convert')
   const conversionHeading = element(document, 'h3', 'wwc-chat-convert-heading')
   const conversionDetail = element(document, 'p', 'wwc-chat-convert-detail')
@@ -402,17 +464,19 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
     },
   })
 
-  sessionHeading.textContent = 'Sessions'
-  newSession.type = 'button'
-  newSession.textContent = 'New Chat'
-  heading.textContent = 'Chat'
+  heading.textContent = '新对话'
   status.setAttribute('role', 'status')
   status.setAttribute('aria-live', 'polite')
-  modelLabel.textContent = 'Model route'
+  projectSwitcher.type = 'button'
+  projectSwitcher.disabled = true
+  projectSwitcher.textContent = 'winwincode ∨'
+  projectSwitcher.title = '项目切换即将在侧栏提供'
+  projectSwitcher.setAttribute('aria-label', '切换项目（暂未开放）')
+  modelLabel.textContent = '默认模型'
   modelLabel.htmlFor = 'wwc-chat-model'
   modelSelect.id = 'wwc-chat-model'
   modelSettings.href = options.settingsHref ?? '#/settings'
-  modelSettings.textContent = 'Review model routes in Settings'
+  modelSettings.textContent = '在设置中查看模型路由'
   modelNotice.setAttribute('role', 'status')
   modelNotice.setAttribute('aria-live', 'polite')
   modelNotice.hidden = true
@@ -420,25 +484,75 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
   error.setAttribute('aria-live', 'assertive')
   error.hidden = true
   retry.type = 'button'
-  retry.textContent = 'Retry'
-  messages.setAttribute('aria-label', 'Chat messages')
+  retry.textContent = '重试'
+  messages.setAttribute('aria-label', '对话消息')
   messages.setAttribute('aria-live', 'polite')
   messages.setAttribute('aria-relevant', 'additions text')
   loadEarlier.type = 'button'
-  loadEarlier.textContent = 'Load earlier messages'
+  loadEarlier.textContent = '加载更早的消息'
+  architectureTab.type = 'button'
+  architectureTab.textContent = '架构图'
+  architectureTab.setAttribute('role', 'tab')
+  architectureTab.setAttribute('aria-controls', DIAGRAM_ARCHITECTURE_VIEW_ID)
+  flowTab.type = 'button'
+  flowTab.textContent = '流程图'
+  flowTab.setAttribute('role', 'tab')
+  flowTab.setAttribute('aria-controls', DIAGRAM_FLOW_VIEW_ID)
+  diagramTabs.setAttribute('role', 'tablist')
+  architectureView.id = DIAGRAM_ARCHITECTURE_VIEW_ID
+  architectureView.setAttribute('role', 'tabpanel')
+  flowView.id = DIAGRAM_FLOW_VIEW_ID
+  flowView.setAttribute('role', 'tabpanel')
+  architectureCaption.textContent = '项目架构示意'
+  flowCaption.textContent = '交付流程示意'
+  architectureView.append(
+    diagramChain(document, [
+      diagramArchitectureNode(document, 'wwc-chat-diagram-glyph-web', 'Web UI'),
+      diagramArchitectureNode(document, 'wwc-chat-diagram-glyph-backend', 'Backend'),
+      diagramArchitectureNode(document, 'wwc-chat-diagram-glyph-client', 'Client'),
+      diagramArchitectureNode(document, 'wwc-chat-diagram-glyph-worker', 'Worker'),
+    ], false),
+    architectureCaption,
+  )
+  flowView.append(
+    diagramChain(document, [
+      diagramFlowStep(document, '需求'),
+      diagramFlowStep(document, '方案'),
+      diagramFlowStep(document, '执行'),
+      diagramFlowStep(document, '验收'),
+    ], true),
+    flowCaption,
+  )
+  diagramTabs.append(architectureTab, flowTab)
+  diagram.append(diagramTabs, architectureView, flowView)
+  diagram.hidden = true
   composerLabel.htmlFor = 'wwc-chat-composer'
   composer.id = 'wwc-chat-composer'
   composer.rows = 3
   composer.autocomplete = 'off'
+  composer.placeholder = '描述你的想法，或输入 / 查看技能…'
+  attach.type = 'button'
+  attach.disabled = true
+  attach.textContent = '+'
+  attach.setAttribute('aria-label', '附加上下文（暂不可用）')
+  attach.title = '附件暂不可用'
   cancel.type = 'button'
-  cancel.textContent = 'Stop'
+  cancel.textContent = '停止'
   send.type = 'submit'
+  // Design page 03a: the composer sends through an accent square carrying the
+  // paper-plane glyph; the spoken name stays the state-dependent action label.
+  send.textContent = '➤'
+  send.setAttribute('aria-label', '发送')
+  receipt.hidden = true
+  receiptLink.href = '#/strongflow'
+  receiptLink.textContent = '查看'
+  receipt.append(receiptText, receiptLink)
 
-  modelLabel.append(modelSelect)
   error.append(errorText, retry)
-  controls.append(cancel, send)
-  form.append(composerLabel, composer, controls)
-  sessionPanel.append(sessionHeading, newSession, sessionList)
+  modelLabel.append(modelSelect)
+  controls.append(attach, modelLabel, cancel, send)
+  form.append(composerLabel, composer, controls, modelNotice, modelSettings)
+  header.append(projectSwitcher, delegationChip.root)
   conversion.hidden = true
   // UI-604: the panel is a dialog in fact but was announced as plain page content,
   // opened without moving focus, and could only be dismissed with the pointer.
@@ -446,10 +560,10 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
   conversion.setAttribute('aria-modal', 'false')
   conversionHeading.id = CONVERSION_DIALOG_HEADING_ID
   conversion.setAttribute('aria-labelledby', CONVERSION_DIALOG_HEADING_ID)
-  convertDelivery.root.setAttribute('aria-controls', CONVERSION_DIALOG_HEADING_ID)
-  convertDelivery.root.setAttribute('aria-expanded', 'false')
-  conversionHeading.textContent = 'Confirm StrongFlow Delivery'
-  conversionDetail.textContent = 'Review the confirmed requirement and exact repository context before creating a Delivery.'
+  delegationChip.root.setAttribute('aria-controls', CONVERSION_DIALOG_HEADING_ID)
+  delegationChip.root.setAttribute('aria-expanded', 'false')
+  conversionHeading.textContent = '确认 StrongFlow 交付'
+  conversionDetail.textContent = '创建交付前，请核对已确认的需求与确切的仓库上下文。'
   conversionTitle.type = 'text'
   conversionTitle.required = true
   conversionGoal.required = true
@@ -464,7 +578,7 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
   conversionDeliveryScope.required = true
   conversionCriteria.required = true
   confirmation.type = 'checkbox'
-  confirmationText.textContent = 'I confirmed this target and Repository Scope.'
+  confirmationText.textContent = '我已确认该目标与仓库范围。'
   confirmationLabel.append(confirmation, confirmationText)
   conversionError.setAttribute('role', 'alert')
   conversionError.setAttribute('aria-live', 'assertive')
@@ -545,17 +659,30 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
     conversionCancel.root,
   )
   conversion.append(conversionHeading, conversionDetail, conversionForm)
-  header.append(
+  conversation.append(
+    header,
     heading,
     status,
-    modelLabel,
-    modelSettings,
-    modelNotice,
-    convertDelivery.root,
+    decisionCard.root,
+    conversion,
+    error,
+    loadEarlier,
+    diagram,
+    messages,
+    empty,
+    receipt,
+    form,
   )
-  conversation.append(header, decisionCard.root, conversion, error, loadEarlier, messages, empty, form)
-  layout.append(sessionPanel, conversation)
+  layout.append(conversation)
   options.root.replaceChildren(layout)
+
+  const setDiagramTab = (tab: ChatDiagramTab): void => {
+    architectureTab.setAttribute('aria-selected', String(tab === 'architecture'))
+    flowTab.setAttribute('aria-selected', String(tab === 'flow'))
+    architectureView.hidden = tab !== 'architecture'
+    flowView.hidden = tab !== 'flow'
+  }
+  setDiagramTab('architecture')
 
   type ModelOption =
     | { readonly key: 'empty' | 'placeholder'; readonly candidate: null }
@@ -568,56 +695,18 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
       option.value = item.key
       if (item.candidate === null) {
         option.textContent = item.key === 'empty'
-          ? 'No model route configured'
-          : 'Choose an available model route'
+          ? '未配置模型路由'
+          : '选择一个可用的模型路由'
         option.disabled = false
         return
       }
       const candidate = item.candidate
       const source = modelRouteSourceLabel(candidate.catalogSource)
-      const defaultLabel = candidate.isDefault ? ' · Default' : ''
+      const defaultLabel = candidate.isDefault ? ' · 默认' : ''
       option.textContent = `${source} · ${candidate.providerDisplayName} / `
         + `${candidate.modelDisplayName}${defaultLabel} · `
         + modelRouteReasonLabel(candidate.reason)
       option.disabled = !modelRouteReady(candidate)
-    },
-  })
-  const sessionRows = new WeakMap<HTMLLIElement, {
-    readonly button: HTMLButtonElement
-    readonly onClick: () => void
-  }>()
-  const sessionCollection = mountKeyedCollection({
-    parent: sessionList,
-    key: (session: ChatViewModelState['sessions'][number]) => session.id,
-    create(session: ChatViewModelState['sessions'][number]) {
-      const item = document.createElement('li')
-      const button = document.createElement('button')
-      const onClick = () => {
-        const productSessionId = button.dataset.sessionId as ProductSessionId | undefined
-        if (productSessionId !== undefined) void options.model.selectSession(productSessionId)
-      }
-      button.type = 'button'
-      button.addEventListener('click', onClick)
-      item.append(button)
-      sessionRows.set(item, { button, onClick })
-      return item
-    },
-    update(item, session: ChatViewModelState['sessions'][number]) {
-      const row = sessionRows.get(item)
-      if (row === undefined) return
-      row.button.textContent = session.title
-      row.button.dataset.sessionId = session.id
-      if (session.id === options.model.state.activeProductSessionId) {
-        row.button.setAttribute('aria-current', 'true')
-      } else {
-        row.button.removeAttribute('aria-current')
-      }
-    },
-    remove(item) {
-      const row = sessionRows.get(item)
-      if (row === undefined) return
-      row.button.removeEventListener('click', row.onClick)
-      sessionRows.delete(item)
     },
   })
   const messageRows = new WeakMap<HTMLLIElement, {
@@ -648,15 +737,19 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
       row.article.dataset.role = message.role
       row.article.dataset.state = message.state
       row.article.setAttribute('aria-busy', String(message.state === 'streaming'))
-      row.role.textContent = message.role === 'user' ? 'You' : 'WinWinCode'
+      row.role.textContent = message.role === 'user' ? '你' : 'WinWinCode'
       row.content.textContent = message.content.length === 0 && message.state === 'streaming'
-        ? 'Responding…'
+        ? '正在回复…'
         : message.content
       row.badge.hidden = stateText === null
       row.badge.textContent = stateText ?? ''
     },
     remove(item) { messageRows.delete(item) },
   })
+
+  function pendingDelegationCount(): number {
+    return options.deliveryCreator?.state.status === 'created' ? 1 : 0
+  }
 
   function render(state: ChatViewModelState): void {
     if (closed) return
@@ -674,15 +767,22 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
       confirmation.checked = false
     }
     status.textContent = presentation.statusText
-    heading.textContent = state.session?.title ?? 'Chat'
+    heading.hidden = state.session === null
+    heading.textContent = state.session?.title ?? '新对话'
+    diagram.hidden = state.session !== null
+    messages.hidden = state.session === null
     messages.setAttribute('aria-busy', String(presentation.messageListBusy))
     composerLabel.textContent = presentation.composerLabel
+    composer.placeholder = presentation.composerPlaceholder
     composer.disabled = readOnly || presentation.composerDisabled
     send.disabled = readOnly || presentation.composerDisabled || composer.value.trim().length === 0
-    send.textContent = presentation.sendLabel
+    send.setAttribute('aria-label', presentation.sendLabel)
     cancel.hidden = !presentation.cancelVisible
     cancel.disabled = readOnly || state.interaction.status === 'cancelling'
+    // Design page 03a keeps the empty canvas clean; setup guidance only
+    // appears when no ready model route exists to start from.
     empty.hidden = state.messages.length > 0
+      || (state.session === null && readyModelRoutes(state).length > 0)
     empty.textContent = presentation.emptyText
     loadEarlier.hidden = !state.messagePagination.hasMore
     loadEarlier.disabled = state.messagePagination.status === 'loading'
@@ -726,15 +826,12 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
     modelNotice.hidden = state.modelRouteSelectionIssue === null
     modelNotice.textContent = state.modelRouteSelectionIssue === null
       ? ''
-      : 'The previously selected model route is no longer ready: '
-        + `${modelRouteReasonLabel(state.modelRouteSelectionIssue)}. `
-        + 'Choose an enabled route.'
-    newSession.disabled = readOnly || options.nextProductSessionId === undefined
-      || state.selectedModelRoute === null
-      || pageUnavailable
-    convertDelivery.update({
-      className: 'wwc-chat-convert-delivery',
-      label: 'Convert to StrongFlow',
+      : '先前选择的模型路由已不可用：'
+        + `${modelRouteReasonLabel(state.modelRouteSelectionIssue)}。`
+        + '请选择一个已启用的路由。'
+    delegationChip.update({
+      className: 'wwc-chat-delegation-chip',
+      label: `委托任务 ${pendingDelegationCount()} · 待审核 ∨`,
       type: 'button',
       variant: 'primary',
       disabled: readOnly || options.deliveryCreator === undefined
@@ -764,7 +861,7 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
           ].join(' / ')
           const route = options.model.state.selectedModelRoute
           conversionModel.value = route === null
-            ? 'Model context unavailable'
+            ? '模型上下文不可用'
             : `${route.providerId} / ${route.modelId}`
           conversionBaseline.value = ''
           conversionDeliveryScope.value = requirement
@@ -777,9 +874,17 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
         renderConversion(options.deliveryCreator.state)
       },
     })
+    delegationChip.root.hidden = state.session === null
 
-    sessionCollection.update(state.sessions)
     messageCollection.update(state.messages)
+
+    // Design page 03b: a created Delivery surfaces as an in-flow receipt line
+    // pointing at the StrongFlow surface for review.
+    const deliveryCreated = options.deliveryCreator?.state.status === 'created'
+    receipt.hidden = !deliveryCreated || state.session === null
+    receiptText.textContent = deliveryCreated && state.session !== null
+      ? `已委托 「${state.session.title}」`
+      : ''
 
     const decisions = contextualDecisions({
       inputs: state.pendingInputs,
@@ -811,7 +916,7 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
     const busy = state.status === 'submitting' || state.status === 'waiting'
     const wasOpen = !conversion.hidden
     conversion.hidden = !conversionOpen
-    convertDelivery.root.setAttribute('aria-expanded', String(conversionOpen))
+    delegationChip.root.setAttribute('aria-expanded', String(conversionOpen))
     if (conversionOpen && !wasOpen) {
       // UI-604: a keyboard user activating the trigger has to land inside the
       // dialog, and the trigger has to be remembered so closing restores them.
@@ -913,15 +1018,8 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
     if (readOnly) return
     void options.model.cancelSession('Stopped from the Chat page.')
   }
-  const onNewSession = () => {
-    if (readOnly) return
-    if (options.model.state.selectedModelRoute === null
-      || options.nextProductSessionId === undefined) return
-    void options.model.createSession({
-      productSessionId: options.nextProductSessionId(),
-      title: 'New Chat',
-    })
-  }
+  const onArchitectureTab = () => { setDiagramTab('architecture') }
+  const onFlowTab = () => { setDiagramTab('flow') }
   const onRetry = () => { void options.model.refresh() }
   const onLoadEarlier = () => { void options.model.loadMoreMessages() }
 
@@ -931,13 +1029,17 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
   form.addEventListener('submit', onComposerSubmit)
   conversionForm.addEventListener('submit', onConversionSubmit)
   conversion.addEventListener('keydown', onConversionKeyDown)
+  architectureTab.addEventListener('click', onArchitectureTab)
+  flowTab.addEventListener('click', onFlowTab)
   cancel.addEventListener('click', onCancel)
-  newSession.addEventListener('click', onNewSession)
   retry.addEventListener('click', onRetry)
   loadEarlier.addEventListener('click', onLoadEarlier)
 
   const unsubscribe = options.model.subscribe(render)
-  const unsubscribeDeliveryCreator = options.deliveryCreator?.subscribe(renderConversion)
+  const unsubscribeDeliveryCreator = options.deliveryCreator?.subscribe(next => {
+    renderConversion(next)
+    render(options.model.state)
+  })
   void options.model.start()
 
   return {
@@ -952,18 +1054,18 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
       form.removeEventListener('submit', onComposerSubmit)
       conversionForm.removeEventListener('submit', onConversionSubmit)
       conversion.removeEventListener('keydown', onConversionKeyDown)
+      architectureTab.removeEventListener('click', onArchitectureTab)
+      flowTab.removeEventListener('click', onFlowTab)
       cancel.removeEventListener('click', onCancel)
-      newSession.removeEventListener('click', onNewSession)
       retry.removeEventListener('click', onRetry)
       loadEarlier.removeEventListener('click', onLoadEarlier)
       for (const field of conversionFields) field.close()
       decisionCard.close()
-      convertDelivery.close()
+      delegationChip.close()
       conversionSubmit.close()
       conversionCancel.close()
       options.deliveryCreator?.close()
       messageCollection.close()
-      sessionCollection.close()
       modelOptions.close()
       options.model.close()
       options.root.replaceChildren()

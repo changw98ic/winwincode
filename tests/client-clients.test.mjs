@@ -568,14 +568,14 @@ test('clients page groups the ID while typing and validates shapes without a req
   submitForm(rootElement)
   assert.equal(client.addCalls.length, 0, 'a malformed ID never reaches the facade')
   assert.equal(error.hidden, false)
-  assert.equal(error.textContent, 'Enter the 9-12 digit Client ID shown on the device.')
+  assert.equal(error.textContent, '输入设备上显示的 9-12 位设备 ID。')
   assert.equal(idInput.getAttribute('aria-invalid'), 'true')
   assert.equal(codeInput.getAttribute('aria-invalid'), null)
 
   idInput.value = '1234 5678 9012'
   codeInput.value = '9876543'
   submitForm(rootElement)
-  assert.equal(error.textContent, 'Enter the 8-digit connection code shown on the device.')
+  assert.equal(error.textContent, '输入设备上显示的 8 位连接码。')
   assert.equal(idInput.getAttribute('aria-invalid'), null)
   assert.equal(codeInput.getAttribute('aria-invalid'), 'true')
   assert.equal(client.addCalls.length, 0)
@@ -583,13 +583,13 @@ test('clients page groups the ID while typing and validates shapes without a req
 
 test('clients page renders the seven failure copies and keeps the ID draft', async () => {
   const failureCases = [
-    { code: 'CLIENT_NOT_FOUND', text: 'No Client has this ID. Check the ID shown on the device.' },
-    { code: 'CLIENT_OFFLINE', text: 'That Client is offline right now. Connect when it is back online.' },
-    { code: 'CONNECT_CODE_INVALID', text: 'The connection code is wrong. Check the code on the device and try again.' },
-    { code: 'CONNECT_CODE_EXPIRED', text: 'The connection code expired. Generate a new code on the device and try again.' },
-    { code: 'CLIENT_CONNECTIONS_FORBIDDEN', text: 'That Client no longer accepts new connections.' },
-    { code: 'CLIENT_LOCKED', text: 'That Client is locked. Unlock it on the device first.' },
-    { code: 'RATE_LIMITED', text: 'Too many connection attempts. Wait a moment, then try again.' },
+    { code: 'CLIENT_NOT_FOUND', text: '没有设备使用这个 ID。请核对设备上显示的 ID。' },
+    { code: 'CLIENT_OFFLINE', text: '该设备当前离线，等它上线后再连接。' },
+    { code: 'CONNECT_CODE_INVALID', text: '连接码不正确，请在设备上核对后重试。' },
+    { code: 'CONNECT_CODE_EXPIRED', text: '连接码已过期，请在设备上重新生成后重试。' },
+    { code: 'CLIENT_CONNECTIONS_FORBIDDEN', text: '该设备不再接受新的连接。' },
+    { code: 'CLIENT_LOCKED', text: '该设备已锁定，请先在设备上解锁。' },
+    { code: 'RATE_LIMITED', text: '连接尝试过于频繁，请稍后再试。' },
   ]
   for (const candidate of failureCases) {
     const { rootElement, model } = clientsFixture({ addError: candidate.code })
@@ -740,7 +740,7 @@ test('clients page disables the submit for the whole submission and clears draft
   assert.equal(client.addCalls.length, 1, 'a second submit during flight is ignored')
   release()
   await waitFor(() => model.state.status === 'succeeded', 'the submission settles')
-  assert.equal(findOne(rootElement, 'wwc-clients-status').textContent, 'Client added.')
+  assert.equal(findOne(rootElement, 'wwc-clients-status').textContent, '设备已接入。')
   assert.equal(submit.disabled, false)
   assert.equal(idInput.value, '', 'the ID draft is cleared after success')
   assert.equal(codeInput.value, '')
