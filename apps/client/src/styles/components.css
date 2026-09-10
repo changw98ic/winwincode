@@ -672,6 +672,11 @@
   display: block;
 }
 
+/* 设计稿 03a/03b:对话是宽幅工作面,内容列不参与 90rem 居中。 */
+.wwc-shell:has([data-winwincode-surface='chat']) .wwc-main {
+  max-width: none;
+}
+
 /* The signed-out shell keeps only the brand in the header, as page 01 does. */
 .wwc-shell:has(.wwc-login:not([hidden])) .wwc-header {
   border-right: none;

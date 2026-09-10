@@ -2,9 +2,11 @@
 
 /* Design pages 03a/03b: the chat page is a single column; the session list
    lives in the shell sidebar, not on the page. */
+/* 设计稿 03a/03b:对话页固定为视口内高度,composer 任何状态常驻贴底。 */
 .wwc-chat {
   display: flex;
   flex-direction: column;
+  height: calc(100vh - 14rem);
   min-height: 30rem;
 }
 
@@ -33,11 +35,14 @@
 
 /* Design pages 03a/03b: no status line under the title — the live region
    stays in the DOM for announcements only. */
-/* 设计稿 03a:空对话画布占满内容区,composer 贴近视口底边。 */
+/* 设计稿 03a/03b:对话区固定为视口内高度——消息列表内部滚动,composer
+   任何状态下都常驻贴在内容区底部,底部留白,不再随消息流滚出视口。 */
 .wwc-chat-conversation {
-  min-height: calc(100dvh - 2 * var(--wwc-space-12));
+  flex: 1 1 auto;
+  min-height: 0;
   display: flex;
   flex-direction: column;
+  padding-bottom: var(--wwc-space-8);
 }
 
 .wwc-chat-conversation > .wwc-chat-composer {
@@ -290,10 +295,11 @@
 
 .wwc-chat-messages {
   display: grid;
-  flex: 1;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
   align-content: end;
   gap: var(--wwc-space-6);
-  min-height: 16rem;
   margin: var(--wwc-space-0);
   padding: var(--wwc-space-4) var(--wwc-space-0);
   list-style: none;

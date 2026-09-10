@@ -112,11 +112,15 @@
 }
 
 /* The connection bar docks to the sidebar footer; its appearance lives in the
-   components layer, this only places it in the grid. */
+   components layer, this only places it in the grid. 它与侧栏同列同底色,
+   右侧描边与 header 贯通,读起来是侧栏的一部分而非独立浮块。 */
 .wwc-connection-bar {
   grid-column: 1;
   grid-row: 2;
   border-top: var(--wwc-border-width) solid var(--wwc-color-border-subtle);
+  border-right: var(--wwc-border-width-strong) solid var(--wwc-color-border);
+  background: var(--wwc-color-header);
+  color: var(--wwc-color-on-header);
 }
 
 .wwc-main {
