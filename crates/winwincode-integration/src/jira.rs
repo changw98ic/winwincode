@@ -12,7 +12,7 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use winwincode_audit::AuditScope;
-use winwincode_domain::{CredentialReferenceId, EnterpriseIntegrationId, Sha256Digest};
+use winwincode_domain::{CredentialReferenceId, IntegrationId, Sha256Digest};
 
 use crate::model::{MAX_SAFE_INTEGER, validate_integration_id};
 use crate::{
@@ -95,7 +95,7 @@ pub enum JiraTlsRoots {
 /// Credential-free Jira site/project connector configuration.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct JiraConnectorConfig {
-    integration_id: EnterpriseIntegrationId,
+    integration_id: IntegrationId,
     credential_reference_id: CredentialReferenceId,
     site_id: JiraSiteId,
     project_key: JiraProjectKey,
@@ -112,7 +112,7 @@ impl JiraConnectorConfig {
     ///
     /// Rejects invalid authority, URL, TLS roots, or project facts.
     pub fn try_new(
-        integration_id: EnterpriseIntegrationId,
+        integration_id: IntegrationId,
         credential_reference_id: CredentialReferenceId,
         site_id: JiraSiteId,
         project_key: JiraProjectKey,
@@ -136,7 +136,7 @@ impl JiraConnectorConfig {
     }
 
     #[must_use]
-    pub const fn integration_id(&self) -> &EnterpriseIntegrationId {
+    pub const fn integration_id(&self) -> &IntegrationId {
         &self.integration_id
     }
 

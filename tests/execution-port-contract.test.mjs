@@ -144,6 +144,15 @@ test('ExecutionPort publishes one closed transport-neutral message union', () =>
   assert.equal(schema.$schema, 'https://json-schema.org/draft/2020-12/schema')
   assert.equal(schema.$id, 'https://schemas.winwincode.dev/winwincode/v1/execution-port.schema.json')
   assert.equal(schema.$ref, '#/$defs/ExecutionPortMessage')
+  assert.equal(
+    schema.$defs.ActionPolicyKind.description,
+    'Action Policy family selected for one normalized Worker action.',
+  )
+  assert.doesNotMatch(JSON.stringify([
+    schema.$defs.ActionPolicyKind,
+    schema.$defs.ActionPolicyVersionReference,
+    schema.$defs.ActionPolicyMode,
+  ]), /enterprise/iu)
 
   const messages = messageDefinitions(schema)
   assert.deepEqual(messages.map(message => message.properties.kind.const).sort(), [...expectedKinds].sort())

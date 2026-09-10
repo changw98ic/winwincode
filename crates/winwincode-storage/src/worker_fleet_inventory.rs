@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Stable enterprise Fleet projections over the canonical Worker Registry.
+//! Stable Fleet projections over the canonical Worker Registry.
 //!
 //! This module owns only immutable read snapshots and their derived labels.
 //! Worker identity, heartbeat, capacity, leases, and pool attribution remain

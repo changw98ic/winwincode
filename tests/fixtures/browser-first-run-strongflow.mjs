@@ -596,54 +596,6 @@ const controlPlane = {
     if (!state.authenticated) {
       throw accessFailure(request, 'authentication', 'AUTH_SESSION_MISSING', false)
     }
-    if (request.query === 'enterprise.organization.list') {
-      return response(request, {
-        kind: 'enterprise_organization_page',
-        snapshotRevision: 1,
-        items: [{
-          id: chosenIdentity.organizationId,
-          displayName: chosenNames.organizationName,
-          slug: 'acme',
-          state: 'active',
-          revision: 1,
-          updatedAt: updated,
-        }, {
-          id: alternativeIdentity.organizationId,
-          displayName: alternativeNames.organizationName,
-          slug: 'beta',
-          state: 'active',
-          revision: 1,
-          updatedAt: updated,
-        }],
-      })
-    }
-    if (request.query === 'enterprise.project.list') {
-      const selected = request.scope.organizationId === alternativeIdentity.organizationId
-        ? { identity: alternativeIdentity, names: alternativeNames }
-        : { identity: chosenIdentity, names: chosenNames }
-      return response(request, {
-        kind: 'enterprise_project_repository_page',
-        snapshotRevision: 1,
-        items: [{
-          kind: 'project',
-          projectId: selected.identity.projectId,
-          displayName: selected.names.projectName,
-          repositoryCount: 1,
-          state: 'active',
-          revision: 1,
-          updatedAt: updated,
-        }, {
-          kind: 'repository',
-          projectId: selected.identity.projectId,
-          repositoryId: selected.identity.repositoryId,
-          displayName: selected.names.repositoryName,
-          defaultBranch: 'main',
-          state: 'active',
-          revision: 1,
-          updatedAt: updated,
-        }],
-      })
-    }
     if (request.query === 'settings.get') {
       return response(request, {
         revision: state.settings.revision,

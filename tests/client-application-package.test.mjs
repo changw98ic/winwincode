@@ -78,17 +78,6 @@ test('independent Client build produces one deterministic target-neutral applica
     assert.equal(asset.bytes, bytes.length, asset.path)
     assert.equal(asset.sha256, createHash('sha256').update(bytes).digest('hex'), asset.path)
   }
-  for (const routeChunk of [
-    'enterprise-application-',
-    'enterprise-resource-page-',
-    'enterprise-operations-page-',
-  ]) {
-    assert.equal(
-      assetManifest.assets.some(asset => asset.path.startsWith(`assets/${routeChunk}`)),
-      true,
-      `${routeChunk} route chunk`,
-    )
-  }
 })
 
 test('deployable Client files contain only browser assets and runtime serverUrl configuration', () => {
@@ -111,10 +100,6 @@ test('deployable Client files contain only browser assets and runtime serverUrl 
     'dist/module/strongflow-page.d.ts',
     'dist/module/strongflow-diagrams.js',
     'dist/module/strongflow-candidate.js',
-    'dist/module/enterprise-application.js',
-    'dist/module/enterprise-application.d.ts',
-    'dist/module/enterprise-resource-page.js',
-    'dist/module/enterprise-operations-page.js',
     'dist/public/index.html',
     'dist/public/runtime-config.js',
     'dist/public/version.json',
@@ -143,7 +128,7 @@ test('deployable Client files contain only browser assets and runtime serverUrl 
   assert.doesNotMatch(buildScript, /cargo|build-native|winwincode-server|winwincode-worker/u)
 })
 
-test('Client shell has one facade and the six canonical product entries with Home first', () => {
+test('Client shell has one facade and the five canonical product entries with Home first', () => {
   const application = readFileSync(join(clientRoot, 'src', 'application.ts'), 'utf8')
   const surfaces = readFileSync(join(clientRoot, 'src', 'client-surface.ts'), 'utf8')
   const index = readFileSync(join(clientRoot, 'src', 'index.ts'), 'utf8')
@@ -151,7 +136,7 @@ test('Client shell has one facade and the six canonical product entries with Hom
     join(clientRoot, 'src', 'community-control-plane-client.ts'),
     'utf8',
   )
-  for (const surface of ['home', 'chat', 'strongflow', 'settings', 'attention', 'enterprise']) {
+  for (const surface of ['home', 'chat', 'strongflow', 'settings', 'attention']) {
     assert.match(surfaces, new RegExp(`id: '${surface}'`, 'u'))
   }
   // UI-504: the Attention-first dashboard is the canonical first screen, so a

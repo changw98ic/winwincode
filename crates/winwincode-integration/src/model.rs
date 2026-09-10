@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use winwincode_audit::AuditScope;
-use winwincode_domain::{CredentialReferenceId, EnterpriseIntegrationId, Sha256Digest};
+use winwincode_domain::{CredentialReferenceId, IntegrationId, Sha256Digest};
 
 use crate::{IntegrationError, IntegrationErrorKind};
 
@@ -100,7 +100,7 @@ pub enum ConnectorState {
 /// Initial connector authority facts.
 #[derive(Clone, Debug)]
 pub struct ConnectorRegistration {
-    integration_id: EnterpriseIntegrationId,
+    integration_id: IntegrationId,
     scope: AuditScope,
     protocol: ConnectorProtocol,
     credential_reference_id: CredentialReferenceId,
@@ -114,7 +114,7 @@ impl ConnectorRegistration {
     ///
     /// Rejects invalid tenant, credential reference, or time facts.
     pub fn try_new(
-        integration_id: EnterpriseIntegrationId,
+        integration_id: IntegrationId,
         scope: AuditScope,
         protocol: ConnectorProtocol,
         credential_reference_id: CredentialReferenceId,
@@ -134,7 +134,7 @@ impl ConnectorRegistration {
     }
 
     #[must_use]
-    pub const fn integration_id(&self) -> &EnterpriseIntegrationId {
+    pub const fn integration_id(&self) -> &IntegrationId {
         &self.integration_id
     }
     #[must_use]
@@ -158,7 +158,7 @@ impl ConnectorRegistration {
 /// Exact active or revoked connector authority loaded from durable storage.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConnectorAuthority {
-    integration_id: EnterpriseIntegrationId,
+    integration_id: IntegrationId,
     scope: AuditScope,
     protocol: ConnectorProtocol,
     credential_reference_id: CredentialReferenceId,
@@ -169,7 +169,7 @@ pub struct ConnectorAuthority {
 
 impl ConnectorAuthority {
     pub(crate) fn from_stored(
-        integration_id: EnterpriseIntegrationId,
+        integration_id: IntegrationId,
         scope: AuditScope,
         protocol: ConnectorProtocol,
         credential_reference_id: CredentialReferenceId,
@@ -197,7 +197,7 @@ impl ConnectorAuthority {
     }
 
     #[must_use]
-    pub const fn integration_id(&self) -> &EnterpriseIntegrationId {
+    pub const fn integration_id(&self) -> &IntegrationId {
         &self.integration_id
     }
     #[must_use]
@@ -326,7 +326,7 @@ impl InboundWebhookMetadata {
 /// Raw inbound request that is never written to durable storage.
 #[derive(Clone, Debug)]
 pub struct InboundWebhookRequest {
-    integration_id: EnterpriseIntegrationId,
+    integration_id: IntegrationId,
     scope: AuditScope,
     metadata: InboundWebhookMetadata,
     signature: Vec<u8>,
@@ -340,7 +340,7 @@ impl InboundWebhookRequest {
     ///
     /// Rejects invalid scope, sequence, time, or oversized raw inputs.
     pub fn try_new(
-        integration_id: EnterpriseIntegrationId,
+        integration_id: IntegrationId,
         scope: AuditScope,
         metadata: InboundWebhookMetadata,
         signature: Vec<u8>,
@@ -365,7 +365,7 @@ impl InboundWebhookRequest {
     }
 
     #[must_use]
-    pub const fn integration_id(&self) -> &EnterpriseIntegrationId {
+    pub const fn integration_id(&self) -> &IntegrationId {
         &self.integration_id
     }
     #[must_use]
@@ -520,7 +520,7 @@ pub enum InboundStatus {
 /// Immutable inbound delivery receipt.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InboundReceipt {
-    integration_id: EnterpriseIntegrationId,
+    integration_id: IntegrationId,
     event_key: Sha256Digest,
     ordering_key_digest: Sha256Digest,
     payload_digest: Sha256Digest,
@@ -532,7 +532,7 @@ pub struct InboundReceipt {
 }
 
 pub(crate) struct StoredInboundReceipt {
-    pub integration_id: EnterpriseIntegrationId,
+    pub integration_id: IntegrationId,
     pub event_key: Sha256Digest,
     pub ordering_key_digest: Sha256Digest,
     pub payload_digest: Sha256Digest,
@@ -563,7 +563,7 @@ impl InboundReceipt {
     }
 
     #[must_use]
-    pub const fn integration_id(&self) -> &EnterpriseIntegrationId {
+    pub const fn integration_id(&self) -> &IntegrationId {
         &self.integration_id
     }
     #[must_use]
@@ -604,7 +604,7 @@ impl InboundReceipt {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InboundDispatch {
     sequence: u64,
-    integration_id: EnterpriseIntegrationId,
+    integration_id: IntegrationId,
     event_key: Sha256Digest,
     command_name: String,
     command_payload: Vec<u8>,
@@ -614,7 +614,7 @@ pub struct InboundDispatch {
 impl InboundDispatch {
     pub(crate) const fn from_stored(
         sequence: u64,
-        integration_id: EnterpriseIntegrationId,
+        integration_id: IntegrationId,
         event_key: Sha256Digest,
         command_name: String,
         command_payload: Vec<u8>,
@@ -635,7 +635,7 @@ impl InboundDispatch {
         self.sequence
     }
     #[must_use]
-    pub const fn integration_id(&self) -> &EnterpriseIntegrationId {
+    pub const fn integration_id(&self) -> &IntegrationId {
         &self.integration_id
     }
     #[must_use]
@@ -721,7 +721,7 @@ impl RetryPolicy {
 /// One durable outbound request. The payload must be canonical JSON.
 #[derive(Clone, Debug)]
 pub struct OutboundRequest {
-    integration_id: EnterpriseIntegrationId,
+    integration_id: IntegrationId,
     scope: AuditScope,
     operation_key: IntegrationOperationKey,
     operation_name: String,
@@ -738,7 +738,7 @@ impl OutboundRequest {
     ///
     /// Rejects invalid tenant, name, payload, or time facts.
     pub fn try_new(
-        integration_id: EnterpriseIntegrationId,
+        integration_id: IntegrationId,
         scope: AuditScope,
         operation_key: IntegrationOperationKey,
         operation_name: impl Into<String>,
@@ -766,7 +766,7 @@ impl OutboundRequest {
     }
 
     #[must_use]
-    pub const fn integration_id(&self) -> &EnterpriseIntegrationId {
+    pub const fn integration_id(&self) -> &IntegrationId {
         &self.integration_id
     }
     #[must_use]
@@ -812,7 +812,7 @@ pub enum OutboundOperationState {
 /// Current secret-free outbound operation projection.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OutboundOperation {
-    integration_id: EnterpriseIntegrationId,
+    integration_id: IntegrationId,
     operation_key: IntegrationOperationKey,
     request_digest: Sha256Digest,
     state: OutboundOperationState,
@@ -822,7 +822,7 @@ pub struct OutboundOperation {
 
 impl OutboundOperation {
     pub(crate) const fn from_stored(
-        integration_id: EnterpriseIntegrationId,
+        integration_id: IntegrationId,
         operation_key: IntegrationOperationKey,
         request_digest: Sha256Digest,
         state: OutboundOperationState,
@@ -840,7 +840,7 @@ impl OutboundOperation {
     }
 
     #[must_use]
-    pub const fn integration_id(&self) -> &EnterpriseIntegrationId {
+    pub const fn integration_id(&self) -> &IntegrationId {
         &self.integration_id
     }
     #[must_use]
@@ -1062,7 +1062,7 @@ pub enum IntegrationAuditKind {
 pub struct IntegrationAuditFact {
     sequence: u64,
     scope: AuditScope,
-    integration_id: EnterpriseIntegrationId,
+    integration_id: IntegrationId,
     kind: IntegrationAuditKind,
     request_digest: Sha256Digest,
     occurred_at_millis: u64,
@@ -1072,7 +1072,7 @@ impl IntegrationAuditFact {
     pub(crate) const fn from_stored(
         sequence: u64,
         scope: AuditScope,
-        integration_id: EnterpriseIntegrationId,
+        integration_id: IntegrationId,
         kind: IntegrationAuditKind,
         request_digest: Sha256Digest,
         occurred_at_millis: u64,
@@ -1095,7 +1095,7 @@ impl IntegrationAuditFact {
         &self.scope
     }
     #[must_use]
-    pub const fn integration_id(&self) -> &EnterpriseIntegrationId {
+    pub const fn integration_id(&self) -> &IntegrationId {
         &self.integration_id
     }
     #[must_use]
@@ -1144,7 +1144,7 @@ pub(crate) fn validate_scope(scope: &AuditScope) -> Result<(), IntegrationError>
 }
 
 pub(crate) fn validate_integration_id(
-    integration_id: &EnterpriseIntegrationId,
+    integration_id: &IntegrationId,
 ) -> Result<(), IntegrationError> {
     validate_id(&integration_id.0, "int")
 }

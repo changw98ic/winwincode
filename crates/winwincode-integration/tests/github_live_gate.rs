@@ -33,9 +33,9 @@ use winwincode_api::generated::{
 };
 use winwincode_audit::AuditScope;
 use winwincode_domain::{
-    AttentionItemId, CredentialReferenceId, DeliveryId, EnterpriseIntegrationId,
-    GitHubRepositorySlug, OrganizationId, ProjectId, PublicationId, RepositoryId, RequestId,
-    Revision, SchemaVersion, Sha256Digest, SystemActorId, UserId, WorkspaceId,
+    AttentionItemId, CredentialReferenceId, DeliveryId, GitHubRepositorySlug, IntegrationId,
+    OrganizationId, ProjectId, PublicationId, RepositoryId, RequestId, Revision, SchemaVersion,
+    Sha256Digest, SystemActorId, UserId, WorkspaceId,
 };
 use winwincode_domain::{RepositoryScope, RepositoryScopeKind};
 use winwincode_integration::{
@@ -325,7 +325,7 @@ impl LiveConfigFile {
         .map_err(|_| GateError::new(GateErrorCode::InvalidConfiguration))?;
         let api_base_url = canonical_api_base_url(&self.api_base_url)?;
         let connector = GitHubConnectorConfig::try_new(
-            EnterpriseIntegrationId(self.integration_id),
+            IntegrationId(self.integration_id),
             CredentialReferenceId(self.credential_reference_id),
             GitHubAppId::try_new(self.app_id)
                 .map_err(|_| GateError::new(GateErrorCode::InvalidConfiguration))?,

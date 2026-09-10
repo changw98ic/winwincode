@@ -21,8 +21,8 @@ use winwincode_domain::{
 };
 use winwincode_integration::{
     ConnectorCallError, ConnectorCallErrorKind, ConnectorPort, ConnectorProtocol,
-    ConnectorRegistration, ConnectorState, EnterpriseIntegrationId, InboundStatus,
-    IntegrationErrorKind, IntegrationFramework, IntegrationLeaseId, IntegrationOperationKey,
+    ConnectorRegistration, ConnectorState, InboundStatus, IntegrationErrorKind,
+    IntegrationFramework, IntegrationId, IntegrationLeaseId, IntegrationOperationKey,
     IntegrationStorage, LINEAR_CONNECTOR_PROTOCOL, LinearClock, LinearConnectorConfig,
     LinearConnectorScope, LinearCredentialError, LinearCredentialPort, LinearEnterpriseConnector,
     LinearEventAction, LinearEventKind, LinearEventMapperPort, LinearInboundEvent,
@@ -55,8 +55,8 @@ fn id(prefix: &str, tail: char) -> String {
     format!("{prefix}_{}", tail.to_string().repeat(26))
 }
 
-fn integration_id() -> EnterpriseIntegrationId {
-    EnterpriseIntegrationId(id("int", '1'))
+fn integration_id() -> IntegrationId {
+    IntegrationId(id("int", '1'))
 }
 
 fn credential_reference_id() -> CredentialReferenceId {

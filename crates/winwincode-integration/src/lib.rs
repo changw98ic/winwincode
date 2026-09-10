@@ -78,4 +78,4 @@ pub use webhook::{
     WebhookMappingField, WebhookMappingTemplate, WebhookOutboundAuthentication,
     WebhookRequestFactory, WebhookSignaturePort,
 };
-pub use winwincode_domain::EnterpriseIntegrationId;
+pub use winwincode_domain::IntegrationId;

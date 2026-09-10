@@ -894,10 +894,6 @@ async function publishChanged() {
 async function respond(request) {
     if (request.query === 'workrun.get') return response(request, workRunAggregate())
     if (request.query === 'worker.list') return response(request, { kind: 'worker_page', items: [] })
-    if (request.query === 'enterprise.organization.list') return response(request, {
-      kind: 'enterprise_organization_page', snapshotRevision: 1, items: [],
-    })
-
     if (request.query === 'delivery.list') {
       return response(request, { kind: 'delivery_page', items: [deliverySummary()] })
     }

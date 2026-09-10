@@ -2276,33 +2276,6 @@ test('HTTP rejects a response result that belongs to another request discriminat
     }),
     error => error instanceof ControlPlaneClientError && error.code === 'INVALID_CLIENT_REQUEST',
   )
-  await assert.rejects(
-    requestClient.submitCommand({
-      schemaVersion,
-      requestId: requestId(803),
-      actor,
-      scope,
-      command: 'enterprise.integration.update',
-      expectedRevision: 7,
-      payload: {
-        integrationId: canonicalId('int', 1),
-        kind: 'github',
-        displayName: 'GitHub Enterprise',
-        state: 'enabled',
-        configuration: {
-          endpointOrigin: 'https://github.example',
-          tenant: null,
-          repository: 'winwincode/core',
-          audience: null,
-          secretMaterial: 'must-not-cross-the-client-boundary',
-        },
-        configurationSha256:
-          'sha256:0000000000000000000000000000000000000000000000000000000000000000',
-        credentialReferenceId: canonicalId('crd', 1),
-      },
-    }),
-    error => error instanceof ControlPlaneClientError && error.code === 'INVALID_CLIENT_REQUEST',
-  )
   assert.equal(fetchCalls, 0)
 })
 

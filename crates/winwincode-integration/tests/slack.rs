@@ -19,14 +19,14 @@ use winwincode_domain::{
     CredentialReferenceId, OrganizationId, ProjectId, RepositoryId, WorkspaceId,
 };
 use winwincode_integration::{
-    ConnectorPort, ConnectorProtocol, ConnectorRegistration, EnterpriseIntegrationId,
-    InboundStatus, IntegrationErrorKind, IntegrationFramework, IntegrationLeaseId,
-    IntegrationOperationKey, IntegrationStorage, OutboundAttemptResult, OutboundOperationState,
-    OutboundRequest, RetryPolicy, SLACK_CONNECTOR_PROTOCOL, SlackAppId, SlackBotId,
-    SlackBotPermissions, SlackBotToken, SlackChannelId, SlackClock, SlackConnectorConfig,
-    SlackCredentialError, SlackCredentialPort, SlackEnterpriseConnector, SlackInstallationIdentity,
-    SlackRateLimitGate, SlackSigningSecret, SlackTlsRoots, SlackWebhookHeaders,
-    SlackWebhookRequestFactory, SlackWebhookVerifier, SlackWorkspaceId,
+    ConnectorPort, ConnectorProtocol, ConnectorRegistration, InboundStatus, IntegrationErrorKind,
+    IntegrationFramework, IntegrationId, IntegrationLeaseId, IntegrationOperationKey,
+    IntegrationStorage, OutboundAttemptResult, OutboundOperationState, OutboundRequest,
+    RetryPolicy, SLACK_CONNECTOR_PROTOCOL, SlackAppId, SlackBotId, SlackBotPermissions,
+    SlackBotToken, SlackChannelId, SlackClock, SlackConnectorConfig, SlackCredentialError,
+    SlackCredentialPort, SlackEnterpriseConnector, SlackInstallationIdentity, SlackRateLimitGate,
+    SlackSigningSecret, SlackTlsRoots, SlackWebhookHeaders, SlackWebhookRequestFactory,
+    SlackWebhookVerifier, SlackWorkspaceId,
 };
 
 const WORKSPACE_ID: &str = "T12345678";
@@ -53,8 +53,8 @@ fn id(prefix: &str, tail: char) -> String {
     format!("{prefix}_{}", tail.to_string().repeat(26))
 }
 
-fn integration_id() -> EnterpriseIntegrationId {
-    EnterpriseIntegrationId(id("int", '1'))
+fn integration_id() -> IntegrationId {
+    IntegrationId(id("int", '1'))
 }
 
 fn credential_reference_id() -> CredentialReferenceId {

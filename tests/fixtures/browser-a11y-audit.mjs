@@ -206,7 +206,6 @@ const LIVE_REGION_ALLOWLIST = Object.freeze([
   'wwc-scope-selector-status',
   'wwc-readiness-summary',
   'wwc-client-error-copy-feedback',
-  'wwc-enterprise-route-status',
   // chat
   'wwc-chat-status',
   'wwc-chat-model-notice',

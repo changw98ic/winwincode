@@ -18,8 +18,8 @@ use winwincode_domain::{
     CredentialReferenceId, OrganizationId, ProjectId, RepositoryId, WorkspaceId,
 };
 use winwincode_integration::{
-    ConnectorProtocol, ConnectorRegistration, EnterpriseIntegrationId, InboundStatus,
-    IntegrationAuditKind, IntegrationErrorKind, IntegrationFramework, IntegrationLeaseId,
+    ConnectorProtocol, ConnectorRegistration, InboundStatus, IntegrationAuditKind,
+    IntegrationErrorKind, IntegrationFramework, IntegrationId, IntegrationLeaseId,
     IntegrationOperationKey, IntegrationStorage, MICROSOFT_TEAMS_CONNECTOR_PROTOCOL,
     OutboundAttemptResult, OutboundOperationState, OutboundRequest, RetryPolicy, TeamsChannelId,
     TeamsConnectorConfig, TeamsCredentialError, TeamsCredentialPort, TeamsEnterpriseConnector,
@@ -51,8 +51,8 @@ fn id(prefix: &str, tail: char) -> String {
     format!("{prefix}_{}", tail.to_string().repeat(26))
 }
 
-fn integration_id() -> EnterpriseIntegrationId {
-    EnterpriseIntegrationId(id("int", '1'))
+fn integration_id() -> IntegrationId {
+    IntegrationId(id("int", '1'))
 }
 
 fn credential_reference_id() -> CredentialReferenceId {

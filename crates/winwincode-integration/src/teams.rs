@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use winwincode_audit::AuditScope;
-use winwincode_domain::{CredentialReferenceId, EnterpriseIntegrationId, Sha256Digest};
+use winwincode_domain::{CredentialReferenceId, IntegrationId, Sha256Digest};
 
 use crate::model::{MAX_SAFE_INTEGER, validate_integration_id};
 use crate::{
@@ -106,7 +106,7 @@ impl TeamsChannelId {
 /// Credential-free Teams connector authority configuration.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TeamsConnectorConfig {
-    integration: EnterpriseIntegrationId,
+    integration: IntegrationId,
     credential_reference: CredentialReferenceId,
     tenant: TeamsTenantId,
     team: TeamsTeamId,
@@ -120,7 +120,7 @@ impl TeamsConnectorConfig {
     ///
     /// Rejects invalid Integration Framework or credential identities.
     pub fn try_new(
-        integration_id: EnterpriseIntegrationId,
+        integration_id: IntegrationId,
         credential_reference_id: CredentialReferenceId,
         tenant_id: TeamsTenantId,
         team_id: TeamsTeamId,
@@ -138,7 +138,7 @@ impl TeamsConnectorConfig {
     }
 
     #[must_use]
-    pub const fn integration_id(&self) -> &EnterpriseIntegrationId {
+    pub const fn integration_id(&self) -> &IntegrationId {
         &self.integration
     }
 

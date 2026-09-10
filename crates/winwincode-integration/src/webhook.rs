@@ -11,7 +11,7 @@ use hmac::{Hmac, Mac};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use winwincode_audit::AuditScope;
-use winwincode_domain::{CredentialReferenceId, EnterpriseIntegrationId, Sha256Digest};
+use winwincode_domain::{CredentialReferenceId, IntegrationId, Sha256Digest};
 
 use crate::model::{MAX_SAFE_INTEGER, validate_integration_id};
 use crate::{
@@ -669,7 +669,7 @@ impl WebhookInboundProof {
 /// Builds bounded generic inbound requests without retaining authentication proof.
 #[derive(Clone, Debug)]
 pub struct WebhookRequestFactory {
-    integration_id: EnterpriseIntegrationId,
+    integration_id: IntegrationId,
     authentication: WebhookAuthenticationMode,
     maximum_body_bytes: usize,
 }
@@ -722,7 +722,7 @@ pub trait WebhookClock {
 
 /// Existing-framework verifier for HMAC and mTLS generic webhook proofs.
 pub struct GenericWebhookVerifier<Signature, Clock> {
-    integration_id: EnterpriseIntegrationId,
+    integration_id: IntegrationId,
     policy: WebhookInboundPolicy,
     signature: Signature,
     clock: Clock,
@@ -788,7 +788,7 @@ where
 /// Provider-neutral webhook configuration shared by inbound and outbound paths.
 #[derive(Clone, Debug)]
 pub struct WebhookConnectorConfig {
-    integration_id: EnterpriseIntegrationId,
+    integration_id: IntegrationId,
     endpoint: WebhookEndpoint,
     inbound_policy: WebhookInboundPolicy,
     mappings: BTreeMap<String, WebhookMappingTemplate>,
@@ -802,7 +802,7 @@ impl WebhookConnectorConfig {
     ///
     /// Rejects invalid identity, missing/duplicate mappings, or unsafe limits.
     pub fn try_new(
-        integration_id: EnterpriseIntegrationId,
+        integration_id: IntegrationId,
         endpoint: WebhookEndpoint,
         inbound_policy: WebhookInboundPolicy,
         templates: Vec<WebhookMappingTemplate>,
@@ -829,7 +829,7 @@ impl WebhookConnectorConfig {
     }
 
     #[must_use]
-    pub const fn integration_id(&self) -> &EnterpriseIntegrationId {
+    pub const fn integration_id(&self) -> &IntegrationId {
         &self.integration_id
     }
 
@@ -1271,7 +1271,7 @@ fn timestamp_in_window(now: u64, signed_at: u64, policy: WebhookInboundPolicy) -
 
 fn require_authority(
     authority: &ConnectorAuthority,
-    integration_id: &EnterpriseIntegrationId,
+    integration_id: &IntegrationId,
 ) -> Result<(), IntegrationError> {
     if authority.integration_id() == integration_id
         && authority.protocol().as_str() == WEBHOOK_CONNECTOR_PROTOCOL

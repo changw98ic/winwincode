@@ -10,9 +10,7 @@ use std::{
 };
 
 use winwincode_api::generated::{
-    Actor, CollaborationActivityCategory, CommandRequest, EnterpriseOrganizationUpdateCommand,
-    EnterpriseOrganizationUpdateCommandCommand, EnterpriseOrganizationUpdatePayload,
-    OrganizationScope, OrganizationScopeKind, QueryRequest, Scope,
+    Actor, CollaborationActivityCategory, CommandRequest, QueryRequest, Scope,
 };
 use winwincode_control_plane::{
     CollaborationActivityRecordRequest, CollaborationService, ControlPlane, ControlPlaneConfig,
@@ -20,8 +18,7 @@ use winwincode_control_plane::{
     ProductSessionExecutionConfig,
 };
 use winwincode_domain::{
-    Instant, OrganizationId, ProjectId, RepositoryId, RequestId, Revision, SchemaVersion,
-    Sha256Digest, UserId, WorkspaceId,
+    Instant, OrganizationId, ProjectId, RepositoryId, RequestId, Sha256Digest, UserId, WorkspaceId,
 };
 use winwincode_domain::{RepositoryScope, RepositoryScopeKind, UserActor, UserActorKind};
 use winwincode_server::{
@@ -161,45 +158,6 @@ fn composition_rejects_a_foreign_collaboration_database() {
     fs::remove_dir_all(foreign_root).expect("remove foreign root");
 }
 
-#[test]
-fn community_application_rejects_enterprise_management_operations() {
-    let fixture = Fixture::new("no-enterprise-management");
-    let collaboration = Arc::new(CollaborationService::new(
-        SqliteStorage::open(&fixture.root).expect("open Collaboration service"),
-    ));
-    let application = fixture.application(collaboration);
-    let principal = fixture.principal();
-
-    let command_error = application
-        .command(
-            &principal,
-            CommandFamily::Enterprise,
-            CommandRequest::EnterpriseOrganizationUpdateCommand(organization_command(&fixture)),
-        )
-        .expect_err("Community must not execute Enterprise management commands");
-    assert_eq!(command_error.status(), 404);
-    assert_eq!(command_error.code(), "RESOURCE_NOT_FOUND");
-
-    let query: QueryRequest = serde_json::from_value(serde_json::json!({
-        "schemaVersion": "winwincode/v1",
-        "requestId": request(20),
-        "query": "enterprise.organization.list",
-        "actor": fixture.actor(),
-        "scope": fixture.organization_scope(),
-        "parameters": {"states": []},
-        "page": {"cursor": null, "limit": 20}
-    }))
-    .expect("generated Enterprise query");
-    let query_error = application
-        .query(&principal, QueryFamily::Enterprise, query)
-        .expect_err("Community must not execute Enterprise management queries");
-    assert_eq!(query_error.status(), 404);
-    assert_eq!(query_error.code(), "RESOURCE_NOT_FOUND");
-
-    application.shutdown().expect("shutdown application");
-    fs::remove_dir_all(&fixture.root).expect("remove fixture root");
-}
-
 struct Fixture {
     root: PathBuf,
     organization_id: OrganizationId,
@@ -259,13 +217,6 @@ impl Fixture {
         .expect("execution config")
     }
 
-    fn organization_scope(&self) -> OrganizationScope {
-        OrganizationScope {
-            kind: OrganizationScopeKind::Organization,
-            organization_id: self.organization_id.clone(),
-        }
-    }
-
     fn principal(&self) -> AuthenticatedPrincipal {
         AuthenticatedPrincipal::new(self.actor(), vec![self.scope()]).expect("principal")
     }
@@ -297,23 +248,6 @@ impl Fixture {
             self.execution_config(),
         )
         .expect("compose application")
-    }
-}
-
-fn organization_command(fixture: &Fixture) -> EnterpriseOrganizationUpdateCommand {
-    EnterpriseOrganizationUpdateCommand {
-        actor: fixture.actor(),
-        command: EnterpriseOrganizationUpdateCommandCommand::EnterpriseOrganizationUpdate,
-        expected_revision: Revision(0),
-        payload: EnterpriseOrganizationUpdatePayload {
-            display_name: "Collaboration Organization".to_owned(),
-            organization_id: fixture.organization_id.clone(),
-            slug: "collaboration-organization".to_owned(),
-            state: "active".to_owned(),
-        },
-        request_id: request(1),
-        schema_version: SchemaVersion::WinwincodeV1,
-        scope: Scope::OrganizationScope(fixture.organization_scope()),
     }
 }
 

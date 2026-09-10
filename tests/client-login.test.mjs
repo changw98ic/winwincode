@@ -748,50 +748,6 @@ function settingsFacadeFake({ initialized = true } = {}) {
       if (request.query === 'delivery.list') {
         return { ...base, result: { kind: 'delivery_page', items: [] } }
       }
-      if (request.query === 'enterprise.organization.list') {
-        return {
-          ...base,
-          result: {
-            kind: 'enterprise_organization_page',
-            snapshotRevision: 1,
-            items: [{
-              id: repositoryScope.organizationId,
-              displayName: 'Acme',
-              slug: 'acme',
-              state: 'active',
-              revision: 1,
-              updatedAt: '2026-09-02T00:00:00.000Z',
-            }],
-          },
-        }
-      }
-      if (request.query === 'enterprise.project.list') {
-        return {
-          ...base,
-          result: {
-            kind: 'enterprise_project_repository_page',
-            snapshotRevision: 1,
-            items: [{
-              kind: 'project',
-              projectId: repositoryScope.projectId,
-              displayName: 'Acme project',
-              repositoryCount: 1,
-              state: 'active',
-              revision: 1,
-              updatedAt: '2026-09-02T00:00:00.000Z',
-            }, {
-              kind: 'repository',
-              projectId: repositoryScope.projectId,
-              repositoryId: repositoryScope.repositoryId,
-              displayName: 'Acme repository',
-              defaultBranch: 'main',
-              state: 'active',
-              revision: 1,
-              updatedAt: '2026-09-02T00:00:00.000Z',
-            }],
-          },
-        }
-      }
       throw new Error(`unexpected query ${request.query}`)
     },
     subscribe(options) {

@@ -412,7 +412,6 @@ test('Home is the canonical default surface and every product entry stays reacha
     'strongflow',
     'settings',
     'attention',
-    'enterprise',
   ])
   assert.equal(clientSurfaceFromHash('').id, 'home')
   assert.equal(clientSurfaceFromHash('#/home?x=1').id, 'home')

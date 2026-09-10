@@ -12,7 +12,7 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use winwincode_audit::AuditScope;
-use winwincode_domain::{CredentialReferenceId, EnterpriseIntegrationId, Sha256Digest};
+use winwincode_domain::{CredentialReferenceId, IntegrationId, Sha256Digest};
 
 use crate::model::{MAX_SAFE_INTEGER, validate_integration_id};
 use crate::{
@@ -108,7 +108,7 @@ pub enum LinearTlsRoots {
 /// Credential-free Linear connector configuration.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LinearConnectorConfig {
-    integration_id: EnterpriseIntegrationId,
+    integration_id: IntegrationId,
     credential_reference_id: CredentialReferenceId,
     scope: LinearConnectorScope,
     graphql_endpoint: String,
@@ -124,7 +124,7 @@ impl LinearConnectorConfig {
     ///
     /// Rejects invalid authority IDs, endpoints, or TLS roots.
     pub fn try_new(
-        integration_id: EnterpriseIntegrationId,
+        integration_id: IntegrationId,
         credential_reference_id: CredentialReferenceId,
         scope: LinearConnectorScope,
         graphql_endpoint: impl Into<String>,
@@ -146,7 +146,7 @@ impl LinearConnectorConfig {
     }
 
     #[must_use]
-    pub const fn integration_id(&self) -> &EnterpriseIntegrationId {
+    pub const fn integration_id(&self) -> &IntegrationId {
         &self.integration_id
     }
 

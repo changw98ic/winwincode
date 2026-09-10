@@ -120,40 +120,6 @@ function facadeFake() {
     async command() { throw new Error('not used') },
     async query(request) {
       queries.push(structuredClone(request))
-      if (request.query === 'enterprise.organization.list') return response(request, {
-        kind: 'enterprise_organization_page',
-        snapshotRevision: 1,
-        items: [{
-          id: repositoryScope.organizationId,
-          displayName: 'Acme',
-          slug: 'acme',
-          state: 'active',
-          revision: 1,
-          updatedAt: NOW,
-        }],
-      })
-      if (request.query === 'enterprise.project.list') return response(request, {
-        kind: 'enterprise_project_repository_page',
-        snapshotRevision: 1,
-        items: [{
-          kind: 'project',
-          projectId: repositoryScope.projectId,
-          displayName: 'Core',
-          repositoryCount: 1,
-          state: 'active',
-          revision: 1,
-          updatedAt: NOW,
-        }, {
-          kind: 'repository',
-          projectId: repositoryScope.projectId,
-          repositoryId: repositoryScope.repositoryId,
-          displayName: 'Server',
-          defaultBranch: 'main',
-          state: 'active',
-          revision: 1,
-          updatedAt: NOW,
-        }],
-      })
       if (request.query === 'settings.get') return response(request, {
         revision: 1,
         defaultModelRoute: null,

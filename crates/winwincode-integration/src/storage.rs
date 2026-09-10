@@ -14,9 +14,9 @@ use crate::model::{
 };
 use crate::{
     ConnectorAuthority, ConnectorCallError, ConnectorCallErrorKind, ConnectorProtocol,
-    ConnectorRegistration, ConnectorRegistrationReceipt, ConnectorState, EnterpriseIntegrationId,
-    InboundDispatch, InboundReceipt, InboundStatus, IntegrationAuditFact, IntegrationAuditKind,
-    IntegrationError, IntegrationErrorKind, IntegrationLeaseId, IntegrationOperationKey,
+    ConnectorRegistration, ConnectorRegistrationReceipt, ConnectorState, InboundDispatch,
+    InboundReceipt, InboundStatus, IntegrationAuditFact, IntegrationAuditKind, IntegrationError,
+    IntegrationErrorKind, IntegrationId, IntegrationLeaseId, IntegrationOperationKey,
     NormalizedInboundEvent, OutboundAttemptResult, OutboundCallReceipt, OutboundClaim,
     OutboundDeliveryReceipt, OutboundEnqueueReceipt, OutboundOperation, OutboundOperationState,
     OutboundRequest, RetryPolicy,
@@ -221,7 +221,7 @@ impl IntegrationStorage {
     pub fn authority(
         &self,
         scope: &AuditScope,
-        integration_id: &EnterpriseIntegrationId,
+        integration_id: &IntegrationId,
     ) -> Result<ConnectorAuthority, IntegrationError> {
         validate_scope(scope)?;
         let authority = load_authority_row(&self.connection, integration_id)?
@@ -239,7 +239,7 @@ impl IntegrationStorage {
     pub fn revoke_credential(
         &mut self,
         scope: &AuditScope,
-        integration_id: &EnterpriseIntegrationId,
+        integration_id: &IntegrationId,
         expected_revision: u64,
         occurred_at_millis: u64,
     ) -> Result<ConnectorAuthority, IntegrationError> {
@@ -414,7 +414,7 @@ impl IntegrationStorage {
     pub fn inbound_dispatches(
         &self,
         scope: &AuditScope,
-        integration_id: &EnterpriseIntegrationId,
+        integration_id: &IntegrationId,
         after_sequence: u64,
         limit: usize,
     ) -> Result<Vec<InboundDispatch>, IntegrationError> {
@@ -547,7 +547,7 @@ impl IntegrationStorage {
     pub fn claim_due(
         &mut self,
         scope: &AuditScope,
-        integration_id: &EnterpriseIntegrationId,
+        integration_id: &IntegrationId,
         now_millis: u64,
         lease_id: IntegrationLeaseId,
         lease_expires_at_millis: u64,
@@ -796,7 +796,7 @@ impl IntegrationStorage {
     pub fn outbound_operation(
         &self,
         scope: &AuditScope,
-        integration_id: &EnterpriseIntegrationId,
+        integration_id: &IntegrationId,
         operation_key: &IntegrationOperationKey,
     ) -> Result<OutboundOperation, IntegrationError> {
         self.authority(scope, integration_id)?;
@@ -812,7 +812,7 @@ impl IntegrationStorage {
     pub fn audit_facts(
         &self,
         scope: &AuditScope,
-        integration_id: &EnterpriseIntegrationId,
+        integration_id: &IntegrationId,
         after_sequence: u64,
         limit: usize,
     ) -> Result<Vec<IntegrationAuditFact>, IntegrationError> {
@@ -881,7 +881,7 @@ struct StoredOutbound {
 
 fn load_authority_row(
     connection: &Connection,
-    integration_id: &EnterpriseIntegrationId,
+    integration_id: &IntegrationId,
 ) -> Result<Option<(ConnectorAuthority, u64)>, IntegrationError> {
     validate_integration_id(integration_id)?;
     let row = connection
@@ -925,7 +925,7 @@ fn load_authority_row(
 
 fn load_inbound_receipt(
     connection: &Connection,
-    integration_id: &EnterpriseIntegrationId,
+    integration_id: &IntegrationId,
     event_key: &Sha256Digest,
     replay: bool,
 ) -> Result<Option<InboundReceipt>, IntegrationError> {
@@ -970,7 +970,7 @@ fn load_inbound_receipt(
 
 fn load_last_provider_sequence(
     connection: &Connection,
-    integration_id: &EnterpriseIntegrationId,
+    integration_id: &IntegrationId,
     ordering_key_digest: &Sha256Digest,
 ) -> Result<u64, IntegrationError> {
     let value = connection
@@ -987,7 +987,7 @@ fn load_last_provider_sequence(
 
 fn load_outbound_operation(
     connection: &Connection,
-    integration_id: &EnterpriseIntegrationId,
+    integration_id: &IntegrationId,
     operation_key: &IntegrationOperationKey,
 ) -> Result<Option<OutboundOperation>, IntegrationError> {
     let row = connection
@@ -1022,7 +1022,7 @@ fn load_outbound_operation(
 
 fn select_due_operation(
     connection: &Connection,
-    integration_id: &EnterpriseIntegrationId,
+    integration_id: &IntegrationId,
     now_millis: u64,
 ) -> Result<Option<StoredOutbound>, IntegrationError> {
     let row = connection
@@ -1391,7 +1391,7 @@ fn revoke_in_transaction(
 fn insert_audit(
     transaction: &Transaction<'_>,
     scope: &AuditScope,
-    integration_id: &EnterpriseIntegrationId,
+    integration_id: &IntegrationId,
     kind: IntegrationAuditKind,
     request_digest: &Sha256Digest,
     occurred_at: u64,

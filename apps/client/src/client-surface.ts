@@ -6,7 +6,6 @@ export type ClientSurfaceId =
   | 'strongflow'
   | 'settings'
   | 'attention'
-  | 'enterprise'
 
 export interface ClientSurface {
   readonly id: ClientSurfaceId
@@ -55,13 +54,6 @@ export const CLIENT_SURFACES: readonly ClientSurface[] = Object.freeze([
     path: '/attention',
     label: 'Attention',
     description: 'Every pending decision across the repository',
-    default: false,
-  }),
-  Object.freeze({
-    id: 'enterprise',
-    path: '/enterprise',
-    label: 'Enterprise',
-    description: 'Organization administration',
     default: false,
   }),
 ])

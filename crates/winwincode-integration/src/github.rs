@@ -13,9 +13,7 @@ use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use winwincode_audit::AuditScope;
-use winwincode_domain::{
-    CredentialReferenceId, EnterpriseIntegrationId, GitHubRepositorySlug, Sha256Digest,
-};
+use winwincode_domain::{CredentialReferenceId, GitHubRepositorySlug, IntegrationId, Sha256Digest};
 use winwincode_publication::{
     GitHubAdapterConfig, GitHubCredentialResolver, GitHubPublicationAdapter,
 };
@@ -134,7 +132,7 @@ pub enum GitHubTlsRoots {
 /// Closed GitHub App/installation/repository configuration.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GitHubConnectorConfig {
-    integration_id: EnterpriseIntegrationId,
+    integration_id: IntegrationId,
     credential_reference_id: CredentialReferenceId,
     app_id: GitHubAppId,
     installation_id: GitHubInstallationId,
@@ -152,7 +150,7 @@ impl GitHubConnectorConfig {
     ///
     /// Rejects invalid identities, repository scope, URL, TLS roots, or bounds.
     pub fn try_new(
-        integration_id: EnterpriseIntegrationId,
+        integration_id: IntegrationId,
         credential_reference_id: CredentialReferenceId,
         app_id: GitHubAppId,
         installation_id: GitHubInstallationId,
@@ -179,7 +177,7 @@ impl GitHubConnectorConfig {
     }
 
     #[must_use]
-    pub const fn integration_id(&self) -> &EnterpriseIntegrationId {
+    pub const fn integration_id(&self) -> &IntegrationId {
         &self.integration_id
     }
 

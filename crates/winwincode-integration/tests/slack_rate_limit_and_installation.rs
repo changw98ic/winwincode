@@ -24,12 +24,12 @@ use winwincode_domain::{
     CredentialReferenceId, OrganizationId, ProjectId, RepositoryId, WorkspaceId,
 };
 use winwincode_integration::{
-    ConnectorPort, ConnectorProtocol, ConnectorRegistration, EnterpriseIntegrationId,
-    IntegrationLeaseId, IntegrationOperationKey, IntegrationStorage, OutboundClaim,
-    OutboundRequest, RetryPolicy, SLACK_CONNECTOR_PROTOCOL, SlackAppId, SlackBotId,
-    SlackBotPermissions, SlackBotToken, SlackChannelId, SlackClock, SlackConnectorConfig,
-    SlackCredentialError, SlackCredentialPort, SlackEnterpriseConnector, SlackInstallationIdentity,
-    SlackRateLimitGate, SlackSigningSecret, SlackTlsRoots, SlackWebApiMethod, SlackWorkspaceId,
+    ConnectorPort, ConnectorProtocol, ConnectorRegistration, IntegrationId, IntegrationLeaseId,
+    IntegrationOperationKey, IntegrationStorage, OutboundClaim, OutboundRequest, RetryPolicy,
+    SLACK_CONNECTOR_PROTOCOL, SlackAppId, SlackBotId, SlackBotPermissions, SlackBotToken,
+    SlackChannelId, SlackClock, SlackConnectorConfig, SlackCredentialError, SlackCredentialPort,
+    SlackEnterpriseConnector, SlackInstallationIdentity, SlackRateLimitGate, SlackSigningSecret,
+    SlackTlsRoots, SlackWebApiMethod, SlackWorkspaceId,
 };
 
 const WORKSPACE_ID: &str = "T12345678";
@@ -52,8 +52,8 @@ fn temporary_directory(name: &str) -> PathBuf {
     ))
 }
 
-fn integration_id() -> EnterpriseIntegrationId {
-    EnterpriseIntegrationId(id("int", '1'))
+fn integration_id() -> IntegrationId {
+    IntegrationId(id("int", '1'))
 }
 
 fn credential_reference_id() -> CredentialReferenceId {

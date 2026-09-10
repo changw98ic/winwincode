@@ -22,7 +22,7 @@ import type { Scope } from './generated/contracts.js'
  */
 export type NavigationCapability = 'hidden' | 'disabled' | 'read-only' | 'available'
 
-export type NavigationDeployment = 'unknown' | 'personal' | 'enterprise'
+export type NavigationDeployment = 'unknown' | 'personal'
 
 export type NavigationSurfaceAccess = 'denied' | 'read-only' | 'write'
 
@@ -38,8 +38,6 @@ export interface NavigationCapabilityFacts {
 export type NavigationCapabilityReason =
   | 'no-session'
   | 'authorized-scope'
-  | 'enterprise-scope'
-  | 'no-enterprise-scope'
   | 'no-repository-scope'
   | 'capability-denied'
   | 'read-only-capability'
@@ -54,13 +52,6 @@ export interface SurfaceCapability {
 export interface NavigationCapabilityProjection {
   readonly deployment: NavigationDeployment
   readonly surfaces: readonly SurfaceCapability[]
-}
-
-/** Enterprise management queries require an organization-hierarchy Scope. */
-function isEnterpriseScope(scope: Scope): boolean {
-  return scope.kind === 'organization'
-    || scope.kind === 'workspace'
-    || scope.kind === 'project'
 }
 
 /**
@@ -85,11 +76,10 @@ export function projectionForSession(
     })
   }
   const scopes = session.authorizedScopes
-  const hasEnterpriseScope = scopes.some(isEnterpriseScope)
   const hasRepositoryScope = scopes.some(scope => scope.kind === 'repository')
-  const deployment: NavigationDeployment = facts.deployment ?? (hasEnterpriseScope
-    ? 'enterprise'
-    : (hasRepositoryScope ? 'personal' : 'unknown'))
+  const deployment: NavigationDeployment = facts.deployment ?? (hasRepositoryScope
+    ? 'personal'
+    : 'unknown')
   return Object.freeze({
     deployment,
     surfaces: Object.freeze(CLIENT_SURFACES.map(surface => Object.freeze({
@@ -97,14 +87,12 @@ export function projectionForSession(
       capability: capabilityForSurface(
         surface,
         deployment,
-        hasEnterpriseScope,
         hasRepositoryScope,
         facts.surfaceAccess?.[surface.id],
       ),
       reason: reasonForSurface(
         surface,
         deployment,
-        hasEnterpriseScope,
         hasRepositoryScope,
         facts.surfaceAccess?.[surface.id],
       ),
@@ -115,34 +103,25 @@ export function projectionForSession(
 function capabilityForSurface(
   surface: ClientSurface,
   deployment: NavigationDeployment,
-  hasEnterpriseScope: boolean,
   hasRepositoryScope: boolean,
   access: NavigationSurfaceAccess | undefined,
 ): NavigationCapability {
-  if (surface.id === 'enterprise' && deployment === 'personal') return 'hidden'
   if (access === 'denied') return 'disabled'
-  const scopeAllows = surface.id === 'enterprise' ? hasEnterpriseScope : hasRepositoryScope
-  if (!scopeAllows) return deployment === 'unknown' ? 'hidden' : 'disabled'
+  if (!hasRepositoryScope) return deployment === 'unknown' ? 'hidden' : 'disabled'
   return access === 'read-only' ? 'read-only' : 'available'
 }
 
 function reasonForSurface(
   surface: ClientSurface,
-  deployment: NavigationDeployment,
-  hasEnterpriseScope: boolean,
+  _deployment: NavigationDeployment,
   hasRepositoryScope: boolean,
   access: NavigationSurfaceAccess | undefined,
 ): NavigationCapabilityReason {
-  if (surface.id === 'enterprise' && deployment === 'personal') return 'no-enterprise-scope'
   if (access === 'denied') return 'capability-denied'
-  if (surface.id === 'enterprise') {
-    if (!hasEnterpriseScope) return 'no-enterprise-scope'
-  } else if (!hasRepositoryScope) {
-    return 'no-repository-scope'
-  }
+  if (!hasRepositoryScope) return 'no-repository-scope'
   if (access === 'read-only') return 'read-only-capability'
   if (access === 'write') return 'writable-capability'
-  return surface.id === 'enterprise' ? 'enterprise-scope' : 'authorized-scope'
+  return 'authorized-scope'
 }
 
 /** Resolve the surface a hash URL will enter and its capability together. */

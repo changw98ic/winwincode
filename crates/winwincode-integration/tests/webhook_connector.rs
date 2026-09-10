@@ -13,16 +13,15 @@ use winwincode_domain::{
 };
 use winwincode_integration::{
     ConnectorCallError, ConnectorCallErrorKind, ConnectorProtocol, ConnectorRegistration,
-    CredentialWebhookSignaturePort, EnterpriseIntegrationId, GenericWebhookConnector,
-    GenericWebhookVerifier, InboundStatus, InboundWebhookMetadata, IntegrationErrorKind,
-    IntegrationFramework, IntegrationLeaseId, IntegrationOperationKey, IntegrationStorage,
-    OutboundAttemptResult, OutboundOperationState, OutboundRequest, RetryPolicy,
-    WEBHOOK_CONNECTOR_PROTOCOL, WebhookAddressResolverPort, WebhookAuthenticationMode,
-    WebhookClock, WebhookConnectorConfig, WebhookCredentialError, WebhookCredentialPort,
-    WebhookEndpoint, WebhookHmacSecret, WebhookHttpPort, WebhookHttpRequest, WebhookHttpResponse,
-    WebhookInboundPolicy, WebhookInboundProof, WebhookLimits, WebhookMappingField,
-    WebhookMappingTemplate, WebhookOutboundAuthentication, WebhookRequestFactory,
-    WebhookSignaturePort,
+    CredentialWebhookSignaturePort, GenericWebhookConnector, GenericWebhookVerifier, InboundStatus,
+    InboundWebhookMetadata, IntegrationErrorKind, IntegrationFramework, IntegrationId,
+    IntegrationLeaseId, IntegrationOperationKey, IntegrationStorage, OutboundAttemptResult,
+    OutboundOperationState, OutboundRequest, RetryPolicy, WEBHOOK_CONNECTOR_PROTOCOL,
+    WebhookAddressResolverPort, WebhookAuthenticationMode, WebhookClock, WebhookConnectorConfig,
+    WebhookCredentialError, WebhookCredentialPort, WebhookEndpoint, WebhookHmacSecret,
+    WebhookHttpPort, WebhookHttpRequest, WebhookHttpResponse, WebhookInboundPolicy,
+    WebhookInboundProof, WebhookLimits, WebhookMappingField, WebhookMappingTemplate,
+    WebhookOutboundAuthentication, WebhookRequestFactory, WebhookSignaturePort,
 };
 
 const HMAC_SECRET: &[u8; 32] = b"generic-webhook-hmac-secret-0001";
@@ -41,8 +40,8 @@ fn id(prefix: &str, tail: char) -> String {
     format!("{prefix}_{}", tail.to_string().repeat(26))
 }
 
-fn integration_id() -> EnterpriseIntegrationId {
-    EnterpriseIntegrationId(id("int", 'A'))
+fn integration_id() -> IntegrationId {
+    IntegrationId(id("int", 'A'))
 }
 
 fn credential_reference_id() -> CredentialReferenceId {

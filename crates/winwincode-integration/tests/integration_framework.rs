@@ -12,9 +12,9 @@ use winwincode_domain::{
 };
 use winwincode_integration::{
     ConnectorAuthority, ConnectorCallError, ConnectorCallErrorKind, ConnectorPort,
-    ConnectorProtocol, ConnectorRegistration, ConnectorState, EnterpriseIntegrationId,
-    InboundNormalizationContext, InboundStatus, InboundWebhookMetadata, InboundWebhookRequest,
-    IntegrationAuditKind, IntegrationErrorKind, IntegrationFramework, IntegrationLeaseId,
+    ConnectorProtocol, ConnectorRegistration, ConnectorState, InboundNormalizationContext,
+    InboundStatus, InboundWebhookMetadata, InboundWebhookRequest, IntegrationAuditKind,
+    IntegrationErrorKind, IntegrationFramework, IntegrationId, IntegrationLeaseId,
     IntegrationOperationKey, IntegrationStorage, NormalizedInboundEvent, OutboundAttemptResult,
     OutboundCallReceipt, OutboundOperationState, OutboundRequest, RetryPolicy,
     SignatureVerificationError, WebhookSignatureVerifier,
@@ -48,12 +48,12 @@ fn scope(organization: char, repository: char) -> AuditScope {
     .expect("scope")
 }
 
-fn integration_id(tail: char) -> EnterpriseIntegrationId {
-    EnterpriseIntegrationId(id("int", tail))
+fn integration_id(tail: char) -> IntegrationId {
+    IntegrationId(id("int", tail))
 }
 
 fn registration(
-    integration_id: EnterpriseIntegrationId,
+    integration_id: IntegrationId,
     scope: AuditScope,
     credential: char,
 ) -> ConnectorRegistration {
@@ -68,7 +68,7 @@ fn registration(
 }
 
 fn inbound(
-    integration_id: EnterpriseIntegrationId,
+    integration_id: IntegrationId,
     scope: AuditScope,
     event_id: &str,
     sequence: u64,
@@ -94,7 +94,7 @@ fn inbound(
 }
 
 fn outbound(
-    integration_id: EnterpriseIntegrationId,
+    integration_id: IntegrationId,
     scope: AuditScope,
     operation_id: &str,
     retry_policy: RetryPolicy,
@@ -188,7 +188,7 @@ fn connector_error(kind: ConnectorCallErrorKind, code: &str) -> ConnectorCallErr
 fn assert_inbound_audit_is_secret_safe(
     framework: &IntegrationFramework,
     tenant: &AuditScope,
-    integration_id: &EnterpriseIntegrationId,
+    integration_id: &IntegrationId,
 ) {
     let audit = framework
         .storage()
@@ -219,7 +219,7 @@ fn assert_inbound_audit_is_secret_safe(
 fn assert_outbound_retry_audit(
     framework: &IntegrationFramework,
     tenant: &AuditScope,
-    integration_id: &EnterpriseIntegrationId,
+    integration_id: &IntegrationId,
 ) {
     let audit = framework
         .storage()
@@ -243,7 +243,7 @@ fn deliver_permanent_failure(
     framework: &mut IntegrationFramework,
     connector: &mut ConnectorFixture,
     tenant: &AuditScope,
-    integration_id: &EnterpriseIntegrationId,
+    integration_id: &IntegrationId,
 ) -> OutboundRequest {
     let request = outbound(
         integration_id.clone(),

@@ -4,8 +4,8 @@ use winwincode_audit::AuditScope;
 
 use crate::{
     ConnectorAuthority, ConnectorCallErrorKind, ConnectorPort, ConnectorRegistration,
-    ConnectorRegistrationReceipt, EnterpriseIntegrationId, InboundNormalizationContext,
-    InboundReceipt, InboundWebhookRequest, IntegrationError, IntegrationErrorKind,
+    ConnectorRegistrationReceipt, InboundNormalizationContext, InboundReceipt,
+    InboundWebhookRequest, IntegrationError, IntegrationErrorKind, IntegrationId,
     IntegrationLeaseId, IntegrationOperationKey, IntegrationStorage, OutboundAttemptResult,
     OutboundEnqueueReceipt, OutboundOperation, OutboundRequest, SignatureVerificationErrorKind,
     WebhookSignatureVerifier,
@@ -52,7 +52,7 @@ impl IntegrationFramework {
     pub fn revoke_credential(
         &mut self,
         scope: &AuditScope,
-        integration_id: &EnterpriseIntegrationId,
+        integration_id: &IntegrationId,
         expected_revision: u64,
         occurred_at_millis: u64,
     ) -> Result<ConnectorAuthority, IntegrationError> {
@@ -131,7 +131,7 @@ impl IntegrationFramework {
     pub fn deliver_next(
         &mut self,
         scope: &AuditScope,
-        integration_id: &EnterpriseIntegrationId,
+        integration_id: &IntegrationId,
         now_millis: u64,
         lease_id: IntegrationLeaseId,
         lease_expires_at_millis: u64,
@@ -167,7 +167,7 @@ impl IntegrationFramework {
     pub fn outbound_operation(
         &self,
         scope: &AuditScope,
-        integration_id: &EnterpriseIntegrationId,
+        integration_id: &IntegrationId,
         operation_key: &IntegrationOperationKey,
     ) -> Result<OutboundOperation, IntegrationError> {
         self.storage

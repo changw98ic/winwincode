@@ -26,7 +26,6 @@
         "apps/client/src/chat-page.ts",
         "apps/client/src/strongflow-page.ts",
         "apps/client/src/settings-page.ts",
-        "apps/client/src/enterprise-application.ts",
         "apps/client/src/local-decisions-page.ts",
         "apps/client/src/local-operations-page.ts",
         "packages/control-plane-client/src/index.ts",

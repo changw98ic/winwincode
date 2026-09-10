@@ -17,9 +17,11 @@ const sourceFiles = [
   'features/local-decisions.css',
   'features/attention-center.css',
   'features/home.css',
-  'features/enterprise.css',
   'features/usage-health.css',
   'features/contextual-decision.css',
+  'features/clients.css',
+  'features/repositories.css',
+  'features/users.css',
 ]
 
 function source(path) {
@@ -89,7 +91,6 @@ test('management pages share panels, bounded text, empty states, and compact lay
     'features/settings.css',
     'features/local-decisions.css',
     'features/local-operations.css',
-    'features/enterprise.css',
   ].map(source).join('\n')
   assert.match(componentCss, /\[data-wwc-page='management'\]/u)
   assert.match(componentCss, /overflow-wrap:\s*anywhere/u)

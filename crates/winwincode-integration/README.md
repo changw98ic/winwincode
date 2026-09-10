@@ -5,7 +5,7 @@ durable inbound command dispatches, outbound retry receipts, and a secret-safe
 audit outbox. Protocol adapters normalize or deliver provider payloads; they do
 not create Delivery state or make Control Plane decisions.
 
-Each connector uses the canonical `EnterpriseIntegrationId`, one tenant scope,
+Each connector uses the canonical `IntegrationId`, one tenant scope,
 and one `CredentialReferenceId`. Raw signatures, external event identifiers,
 payloads, credentials, and remote diagnostics are excluded from audit facts.
 Inbound command facts and outbound operations use durable digests so exact

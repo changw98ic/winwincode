@@ -21,8 +21,8 @@ use winwincode_domain::{
     CredentialReferenceId, OrganizationId, ProjectId, RepositoryId, WorkspaceId,
 };
 use winwincode_integration::{
-    ConnectorProtocol, ConnectorRegistration, EnterpriseIntegrationId, InboundStatus,
-    IntegrationErrorKind, IntegrationFramework, IntegrationLeaseId, IntegrationOperationKey,
+    ConnectorProtocol, ConnectorRegistration, InboundStatus, IntegrationErrorKind,
+    IntegrationFramework, IntegrationId, IntegrationLeaseId, IntegrationOperationKey,
     IntegrationStorage, OutboundAttemptResult, OutboundRequest, RetryPolicy,
     SLACK_CONNECTOR_PROTOCOL, SlackAppId, SlackBotId, SlackBotPermissions, SlackBotToken,
     SlackChannelId, SlackConnectorConfig, SlackCredentialError, SlackCredentialPort,
@@ -838,8 +838,8 @@ fn run_slack_live_gate(
     })
 }
 
-fn integration_id() -> EnterpriseIntegrationId {
-    EnterpriseIntegrationId(portable_id("int", '1'))
+fn integration_id() -> IntegrationId {
+    IntegrationId(portable_id("int", '1'))
 }
 
 fn credential_reference_id() -> CredentialReferenceId {
@@ -892,7 +892,7 @@ fn outbound_request(
 
 fn deliver_until_terminal(
     framework: &mut IntegrationFramework,
-    integration: &EnterpriseIntegrationId,
+    integration: &IntegrationId,
     connector: &mut SlackEnterpriseConnector<LiveCredentialPort, SystemSlackClock>,
 ) -> Result<(), GateFailure> {
     for attempt in 0..3_u8 {

@@ -269,36 +269,6 @@ function serve(request) {
       )
       return delivery === undefined ? null : deliveryDetail(delivery)
     }
-    if (request.query === 'enterprise.organization.list') {
-      return {
-        kind: 'organization_page',
-        items: [{
-          kind: 'organization',
-          id: identity.organizationId,
-          displayName: 'Visual Organization',
-          state: 'active',
-        }],
-        snapshotRevision: 1,
-      }
-    }
-    if (request.query === 'enterprise.project.list') {
-      return {
-        kind: 'project_page',
-        items: [
-          { kind: 'project', projectId: identity.projectId, displayName: 'Visual Project', state: 'active' },
-          {
-            kind: 'repository',
-            repositoryId: scope.repositoryId,
-            displayName: 'Visual Repository',
-            state: 'active',
-          },
-        ],
-        snapshotRevision: 1,
-      }
-    }
-    if (request.query.startsWith('enterprise.') && request.query.endsWith('.list')) {
-      return { kind: 'enterprise_projection_page', items: [], snapshotRevision: 1 }
-    }
     if (request.query === 'session.list') {
       return { kind: 'product_session_page', items: emptyChat ? [] : [chatSession()] }
     }

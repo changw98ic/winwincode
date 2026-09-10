@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use winwincode_audit::AuditScope;
-use winwincode_domain::{CredentialReferenceId, EnterpriseIntegrationId, Sha256Digest};
+use winwincode_domain::{CredentialReferenceId, IntegrationId, Sha256Digest};
 
 use crate::model::{MAX_SAFE_INTEGER, validate_integration_id};
 use crate::{
@@ -198,7 +198,7 @@ pub enum SlackTlsRoots {
 /// Credential-free connector authority for one workspace/channel.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SlackConnectorConfig {
-    integration: EnterpriseIntegrationId,
+    integration: IntegrationId,
     credential_reference: CredentialReferenceId,
     installation: SlackInstallationIdentity,
     channel: SlackChannelId,
@@ -216,7 +216,7 @@ impl SlackConnectorConfig {
     ///
     /// Rejects invalid identities, insecure URLs, or malformed TLS roots.
     pub fn try_new(
-        integration_id: EnterpriseIntegrationId,
+        integration_id: IntegrationId,
         credential_reference_id: CredentialReferenceId,
         installation: SlackInstallationIdentity,
         channel_id: SlackChannelId,
@@ -244,7 +244,7 @@ impl SlackConnectorConfig {
     }
 
     #[must_use]
-    pub const fn integration_id(&self) -> &EnterpriseIntegrationId {
+    pub const fn integration_id(&self) -> &IntegrationId {
         &self.integration
     }
 

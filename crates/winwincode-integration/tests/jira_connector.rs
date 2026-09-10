@@ -24,12 +24,12 @@ use winwincode_domain::{
 };
 use winwincode_integration::{
     ConnectorCallError, ConnectorCallErrorKind, ConnectorProtocol, ConnectorRegistration,
-    ConnectorState, EnterpriseIntegrationId, InboundStatus, IntegrationErrorKind,
-    IntegrationFramework, IntegrationLeaseId, IntegrationOperationKey, IntegrationStorage,
-    JIRA_CONNECTOR_PROTOCOL, JiraClock, JiraConnectorConfig, JiraCredentialError,
-    JiraCredentialErrorKind, JiraCredentialPort, JiraEnterpriseConnector, JiraEventMapperPort,
-    JiraInboundEvent, JiraOAuthAccessToken, JiraOAuthScope, JiraProjectKey, JiraResourceKind,
-    JiraSiteId, JiraTlsRoots, JiraWebhookHeaders, JiraWebhookRequestFactory, JiraWebhookSecret,
+    ConnectorState, InboundStatus, IntegrationErrorKind, IntegrationFramework, IntegrationId,
+    IntegrationLeaseId, IntegrationOperationKey, IntegrationStorage, JIRA_CONNECTOR_PROTOCOL,
+    JiraClock, JiraConnectorConfig, JiraCredentialError, JiraCredentialErrorKind,
+    JiraCredentialPort, JiraEnterpriseConnector, JiraEventMapperPort, JiraInboundEvent,
+    JiraOAuthAccessToken, JiraOAuthScope, JiraProjectKey, JiraResourceKind, JiraSiteId,
+    JiraTlsRoots, JiraWebhookHeaders, JiraWebhookRequestFactory, JiraWebhookSecret,
     JiraWebhookVerifier, NormalizedInboundEvent, OutboundAttemptResult, OutboundOperationState,
     OutboundRequest, RetryPolicy,
 };
@@ -50,8 +50,8 @@ fn id(prefix: &str, tail: char) -> String {
     format!("{prefix}_{}", tail.to_string().repeat(26))
 }
 
-fn integration_id() -> EnterpriseIntegrationId {
-    EnterpriseIntegrationId(id("int", '1'))
+fn integration_id() -> IntegrationId {
+    IntegrationId(id("int", '1'))
 }
 
 fn credential_reference_id() -> CredentialReferenceId {

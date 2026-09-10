@@ -1151,7 +1151,7 @@
       "phase": "6",
       "disposition": "retain",
       "observableContracts": [
-        "Chat StrongFlow settings approval and enterprise presentation through one serverUrl"
+        "Chat StrongFlow settings approval and local presentation through one serverUrl"
       ],
       "behaviorBaselineIds": [
         "success",

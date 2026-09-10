@@ -22,12 +22,12 @@ use winwincode_domain::{
 };
 use winwincode_integration::{
     ConnectorCallError, ConnectorCallErrorKind, ConnectorPort, ConnectorProtocol,
-    ConnectorRegistration, EnterpriseIntegrationId, GITHUB_CONNECTOR_PROTOCOL, GitHubAppId,
-    GitHubClock, GitHubConnectorConfig, GitHubCredentialError, GitHubCredentialPort,
-    GitHubEnterpriseConnector, GitHubEventMapperPort, GitHubInboundEvent, GitHubInstallationId,
-    GitHubInstallationPermissions, GitHubInstallationToken, GitHubPermission, GitHubTlsRoots,
-    GitHubWebhookHeaders, GitHubWebhookRequestFactory, GitHubWebhookSecret, GitHubWebhookVerifier,
-    InboundStatus, IntegrationErrorKind, IntegrationFramework, IntegrationLeaseId,
+    ConnectorRegistration, GITHUB_CONNECTOR_PROTOCOL, GitHubAppId, GitHubClock,
+    GitHubConnectorConfig, GitHubCredentialError, GitHubCredentialPort, GitHubEnterpriseConnector,
+    GitHubEventMapperPort, GitHubInboundEvent, GitHubInstallationId, GitHubInstallationPermissions,
+    GitHubInstallationToken, GitHubPermission, GitHubTlsRoots, GitHubWebhookHeaders,
+    GitHubWebhookRequestFactory, GitHubWebhookSecret, GitHubWebhookVerifier, InboundStatus,
+    IntegrationErrorKind, IntegrationFramework, IntegrationId, IntegrationLeaseId,
     IntegrationOperationKey, IntegrationStorage, NormalizedInboundEvent, OutboundAttemptResult,
     OutboundOperationState, OutboundRequest, RetryPolicy,
 };
@@ -51,8 +51,8 @@ fn id(prefix: &str, tail: char) -> String {
     format!("{prefix}_{}", tail.to_string().repeat(26))
 }
 
-fn integration_id() -> EnterpriseIntegrationId {
-    EnterpriseIntegrationId(id("int", '1'))
+fn integration_id() -> IntegrationId {
+    IntegrationId(id("int", '1'))
 }
 
 fn credential_reference_id() -> CredentialReferenceId {
