@@ -92,9 +92,9 @@ const canonicalTestFiles = Object.freeze([
   'tests/ui604-a11y-audit.test.mjs',
   'tests/ui604-shell-a11y-browser.test.mjs',
   'tests/ui605-large-list-virtualization.test.mjs',
-  'tests/ui608-component-state-visual-browser.test.mjs',
-  'tests/ui608-page-visual-browser.test.mjs',
-  'tests/ui608-visual-regression.test.mjs',
+  // 用户裁定(2026-09-10):界面与设计稿的差异一律以真实渲染 + 视觉评审判断,
+  // 不再做指纹基线式的自动化样式断言。ui608 三个泳道文件保留在仓库作参考,
+  // 不再进入默认测试清单(bd winwincode-oq7r 收口记录)。
   'tests/usage-health-browser.test.mjs',
   'tests/usage-health-client.test.mjs',
   'tests/workspace-smoke.test.mjs',
