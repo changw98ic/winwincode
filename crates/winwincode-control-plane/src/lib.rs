@@ -50,6 +50,7 @@ mod enterprise_scope_binding;
 mod enterprise_usage;
 pub mod execution_port_service;
 mod gate_interaction_service;
+pub mod knowledge;
 mod local_candidate;
 pub mod local_secret_store;
 mod model_admission;
