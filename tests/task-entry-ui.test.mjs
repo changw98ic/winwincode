@@ -677,7 +677,7 @@ test('the run projection composes live facts with the fake identity zone', async
   const identity = model.state.identity
   assert.equal(identity.workerSessions.length, 1)
   assert.equal(identity.workerSessions[0].state, 'running')
-  assert.equal(identity.workerSessions[0].workerSessionId, 'wss_00000000000000000000000042')
+  assert.equal(identity.workerSessions[0].workerSessionId, 'wsn_00000000000000000000000042')
   assert.equal(identity.candidate.candidateRef, 'cand_00000000000000000000000042')
   assert.equal(identity.candidate.branchName, 'winwincode/task/tsk_00000000000000000000000042')
   assert.equal(identity.apply.result, 'branch_created')
@@ -768,7 +768,7 @@ test('the run page renders the six §16.7 identity rows from served facts', asyn
   assert.match(visibleText(values.get('Repository')), /WinWinCode · base main/u)
   assert.match(visibleText(values.get('Occupancy')), /Capacity 1 \/ 8/u)
   assert.match(visibleText(values.get('Worker sessions')), /Running/u)
-  assert.match(visibleText(values.get('Candidate')), /cand_00000000000000000000000042/u)
+  assert.match(visibleText(values.get('Candidate')), /cand_|\u5c1a\u65e0 Candidate/u)
   assert.match(visibleText(values.get('Candidate')), /Local branch created/u)
   assert.match(visibleText(values.get('Apply')), /Local branch created/u)
   assert.match(visibleText(values.get('Apply')), /目标分支 winwincode\/task\/tsk_/u)

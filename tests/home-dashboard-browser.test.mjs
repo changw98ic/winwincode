@@ -96,6 +96,7 @@ test('a real browser opens 新对话 as the first screen and the board one click
     'active',
     'failing',
     'completed',
+    'visited',
   ])
   const sectionOf = dashboard => id => dashboard.sections.find(
     candidate => candidate.id === id,
