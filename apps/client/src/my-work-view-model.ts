@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import type { HomeRecentVisitStore } from './home-recent-visits.js'
 import type {
   ControlPlaneClient,
   ControlPlaneDeviceSummary,
@@ -181,6 +182,8 @@ export interface MyWorkViewModelOptions {
    * trigger one first read, but never closes or replaces it.
    */
   readonly clients: ClientsViewModel
+  /** 浏览器本地的最近访问交付存储(由 shell 持有并注入)。 */
+  readonly visits?: HomeRecentVisitStore
 }
 
 export interface MyWorkViewModel {
@@ -203,6 +206,7 @@ export function createMyWorkViewModel(
     scope: options.scope,
     subscriptionId: options.subscriptionId,
     nextRequestId: options.nextRequestId,
+    ...(options.visits === undefined ? {} : { visits: options.visits }),
   })
   const clients = options.clients
 

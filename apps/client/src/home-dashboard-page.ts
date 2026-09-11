@@ -18,12 +18,13 @@ import type {
   HomeDashboardViewModel,
   HomeDecisionCard,
   HomeDeliveryCard,
+  HomeVisitedCard,
 } from './home-dashboard-view-model.js'
 
-export type HomeSectionId = 'decisions' | 'active' | 'failing' | 'completed'
+export type HomeSectionId = 'decisions' | 'active' | 'failing' | 'completed' | 'visited'
 
 /** One card as the dashboard renders it: a decision or a Delivery. */
-export type HomeCard = HomeDecisionCard | HomeDeliveryCard
+export type HomeCard = HomeDecisionCard | HomeDeliveryCard | HomeVisitedCard
 
 export interface HomeDashboardPresentation {
   readonly title: string
@@ -61,6 +62,7 @@ export interface HomeDashboardPresentation {
     HomeDeliveryCard,
     'activeTasks' | 'verifyingTasks' | 'failedTasks' | 'blockedTasks' | 'completedTasks'
   >) => string
+  readonly visitedLabel: (at: string) => string
 }
 
 const PRESENTATION_SPEC: HomeDashboardPresentation = {
@@ -91,14 +93,16 @@ const PRESENTATION_SPEC: HomeDashboardPresentation = {
     active: '正在运行',
     failing: '失败或阻塞',
     completed: '已完成',
+    visited: '最近访问',
   }),
   sectionEmpty: Object.freeze({
     decisions: '现在没有需要决策的事项。',
     active: '没有进行中的交付。',
     failing: '没有失败或阻塞的交付。',
     completed: '还没有已完成的交付。',
+    visited: '此浏览器还没有打开过交付。',
   }),
-  collapsibleSections: Object.freeze(['failing', 'completed']),
+  collapsibleSections: Object.freeze(['failing', 'completed', 'visited']),
   expandLabel: '展开',
   collapseLabel: '收起',
   strongFlowLabel: '强流程',
@@ -129,6 +133,7 @@ const PRESENTATION_SPEC: HomeDashboardPresentation = {
   disabledLabel: '该决策已关闭。请刷新查看当前状态。',
   countLabel: count => String(count),
   updatedLabel: at => `更新于 ${formatInstant(at)}`,
+  visitedLabel: (at: string) => `访问于 ${at}`,
   taskLabel: card => [
     card.failedTasks > 0 ? `${String(card.failedTasks)} 个失败` : null,
     card.blockedTasks > 0 ? `${String(card.blockedTasks)} 个阻塞` : null,
@@ -240,9 +245,9 @@ function isDecision(card: HomeCard): card is HomeDecisionCard {
 }
 
 function cardKey(card: HomeCard): string {
-  return isDecision(card)
-    ? `decision:${card.kind}:${card.id}`
-    : `delivery:${card.deliveryId}`
+  if (isDecision(card)) return `decision:${card.kind}:${card.id}`
+  if ('visitedAt' in card) return `visited:${card.deliveryId}`
+  return `delivery:${card.deliveryId}`
 }
 
 function updateContextList(list: HTMLUListElement, entries: readonly string[]): void {
@@ -389,6 +394,14 @@ export function mountHomeDashboardPage(
     parts.action.textContent = ''
   }
 
+  function fillVisitedCard(parts: CardParts, card: HomeVisitedCard): void {
+    fillDeliveryCard(parts, card)
+    // 设计稿 04 之外:最近访问行的附加时间标注。
+    parts.context.querySelectorAll('li').forEach((li, idx, all) => {
+      if (idx === all.length - 1) li.textContent = `访问于 ${card.visitedAt}`
+    })
+  }
+
   function fillDeliveryCard(parts: CardParts, card: HomeDeliveryCard): void {
     parts.node.dataset.kind = 'delivery'
     parts.node.dataset.status = card.status
@@ -430,6 +443,7 @@ export function mountHomeDashboardPage(
     const parts = cardParts.get(node)
     if (parts === undefined) return
     if (isDecision(card)) fillDecisionCard(parts, card)
+    else if ('visitedAt' in card) fillVisitedCard(parts, card)
     else fillDeliveryCard(parts, card)
   }
 
@@ -445,7 +459,7 @@ export function mountHomeDashboardPage(
   const sections = new Map<HomeSectionId, SectionParts>()
   const sectionsRoot = element(document, 'div', 'wwc-home-sections')
 
-  for (const id of ['decisions', 'active', 'failing', 'completed'] as const) {
+  for (const id of ['decisions', 'active', 'failing', 'completed', 'visited'] as const) {
     const headingRow = element(document, 'header', 'wwc-home-section-header')
     const heading = element(document, 'h3', 'wwc-home-section-heading')
     heading.textContent = presentation.sectionHeading[id]
@@ -510,7 +524,7 @@ export function mountHomeDashboardPage(
         ? state.active.length
         : id === 'failing'
           ? state.failing.length
-          : state.completed.length
+          : state.visited.length
     return rendered === 0
   }
 
@@ -574,6 +588,7 @@ export function mountHomeDashboardPage(
     sections.get('active')?.collection.update(state.active)
     sections.get('failing')?.collection.update(state.failing)
     sections.get('completed')?.collection.update(state.completed)
+    sections.get('visited')?.collection.update(state.visited)
     for (const [id, section] of sections) {
       const total = id === 'decisions'
         ? state.counts.decisions

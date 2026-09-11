@@ -1,5 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import type { ScopeRouteSelection } from '@winwincode/browser-core/scope-context'
+import {
+  DEFAULT_HOME_VISIT_LIMIT,
+  browserHomeVisitStorage,
+  createHomeRecentVisitStore,
+  type HomeRecentVisitStore,
+  type HomeVisit,
+} from './home-recent-visits.js'
 import {
   createAttentionCenterViewModel,
   orderedAttentionCenterItems,
@@ -259,6 +267,12 @@ export interface HomeDashboardCounts {
   readonly active: number
   readonly failing: number
   readonly completed: number
+  readonly visited: number
+}
+
+/** 设计稿 04 折叠行之外的浏览器本地区块:最近打开过的交付。 */
+export interface HomeVisitedCard extends HomeDeliveryCard {
+  readonly visitedAt: Instant
 }
 
 export interface HomeDashboardState {
@@ -267,6 +281,7 @@ export interface HomeDashboardState {
   readonly active: readonly HomeDeliveryCard[]
   readonly failing: readonly HomeDeliveryCard[]
   readonly completed: readonly HomeDeliveryCard[]
+  readonly visited: readonly HomeVisitedCard[]
   readonly counts: HomeDashboardCounts
   readonly sources: Readonly<Record<HomeDashboardSource, HomeDashboardSourceState>>
   /** True only when every projection proves the Scope was never used. */
@@ -276,11 +291,13 @@ export interface HomeDashboardState {
 export interface HomeDashboardLimits {
   readonly decisions: number
   readonly deliveries: number
+  readonly visits: number
 }
 
 export const DEFAULT_HOME_DASHBOARD_LIMITS: HomeDashboardLimits = Object.freeze({
   decisions: 4,
   deliveries: 4,
+  visits: DEFAULT_HOME_VISIT_LIMIT,
 })
 
 export interface HomeDashboardViewModelOptions {
@@ -290,6 +307,7 @@ export interface HomeDashboardViewModelOptions {
   /** One scope event subscription, opened by the Attention projection. */
   readonly subscriptionId: ControlPlaneWebSocketSubscriptionId
   readonly nextRequestId: () => RequestId
+  readonly visits?: HomeRecentVisitStore
   readonly limits?: HomeDashboardLimits
   readonly nowMillis?: () => number
 }
@@ -423,18 +441,33 @@ function dashboardStatus(
  * Project the three read models into one dashboard snapshot.  Pure, so the
  * section order, bounds and the first-use claim stay testable without a browser.
  */
+function visitedCards(
+  cards: ReadonlyMap<DeliveryId, HomeDeliveryCard>,
+  visits: readonly HomeVisit[],
+): readonly HomeVisitedCard[] {
+  const visited: HomeVisitedCard[] = []
+  for (const visit of visits) {
+    const card = cards.get(visit.deliveryId)
+    if (card === undefined) continue
+    visited.push(Object.freeze({ ...card, visitedAt: visit.at }))
+  }
+  return Object.freeze(visited)
+}
+
 export function homeDashboardState(input: {
   readonly deliveries: HomeDeliveryListState
   readonly attention: AttentionCenterViewModelState
   readonly usage: UsageHealthViewModelState
+  readonly visits: readonly HomeVisit[]
   readonly limits?: HomeDashboardLimits
 }): HomeDashboardState {
   const limits = input.limits ?? DEFAULT_HOME_DASHBOARD_LIMITS
   const cards = homeDeliveryCards(input.deliveries.visible)
-  const byId = new Map(cards.map(card => [card.deliveryId, card]))
+  const byId = new Map(cards.map(card => [card.deliveryId, card] as const))
   const active = orderedHomeActiveCards(cards)
   const failing = orderedHomeFailingCards(cards)
   const completed = orderedHomeCompletedCards(cards)
+  const visited = visitedCards(byId, input.visits)
   const decisions = orderedAttentionCenterItems(input.attention.items)
   const sources: Readonly<Record<HomeDashboardSource, HomeDashboardSourceState>> = Object.freeze({
     delivery: deliverySourceState(input.deliveries),
@@ -460,11 +493,13 @@ export function homeDashboardState(input: {
     active: Object.freeze(active.slice(0, limits.deliveries)),
     failing: Object.freeze(failing.slice(0, limits.deliveries)),
     completed: Object.freeze(completed.slice(0, limits.deliveries)),
+    visited: Object.freeze(visited.slice(0, limits.visits)),
     counts: Object.freeze({
       decisions: decisions.length,
       active: active.length,
       failing: failing.length,
       completed: completed.length,
+      visited: visited.length,
     }),
     sources,
     // First use is a claim about this Scope, so every projection that could
@@ -483,11 +518,13 @@ function emptyState(): HomeDashboardState {
     active: Object.freeze([]),
     failing: Object.freeze([]),
     completed: Object.freeze([]),
+    visited: Object.freeze([]),
     counts: Object.freeze({
       decisions: 0,
       active: 0,
       failing: 0,
       completed: 0,
+      visited: 0,
     }),
     sources: Object.freeze({
       delivery: 'loading',
@@ -511,9 +548,22 @@ function closedState(): HomeDashboardState {
 }
 
 /** Compose the existing Attention, Delivery and Usage projections into one dashboard. */
+function scopeSelection(scope: RepositoryScope): ScopeRouteSelection {
+  return Object.freeze({
+    organizationId: scope.organizationId,
+    workspaceId: scope.workspaceId,
+    projectId: scope.projectId,
+    repositoryId: scope.repositoryId,
+  })
+}
+
 export function createHomeDashboardViewModel(
   options: HomeDashboardViewModelOptions,
 ): HomeDashboardViewModel {
+  const selection = scopeSelection(options.scope)
+  const visits = options.visits ?? createHomeRecentVisitStore({
+    storage: browserHomeVisitStorage(typeof window === "undefined" ? null : window),
+  })
   const limits = options.limits ?? DEFAULT_HOME_DASHBOARD_LIMITS
   const nowMillis = options.nowMillis ?? Date.now
   const attention = createAttentionCenterViewModel({
@@ -552,6 +602,7 @@ export function createHomeDashboardViewModel(
       deliveries: deliveries.state,
       attention: attention.state,
       usage: usage.state,
+      visits: visits.visits(selection, nowMillis()),
       limits,
     }))
   }

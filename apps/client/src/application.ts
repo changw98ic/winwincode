@@ -57,6 +57,7 @@ import {
   type ClientsViewModel,
 } from './clients-view-model.js'
 import { matchesCanonicalSchema } from './generated/control-plane-client.js'
+import { browserHomeVisitStorage, createHomeRecentVisitStore, homeDeliveryVisitFromHash, type HomeRecentVisitStore } from './home-recent-visits.js'
 import { mountClientsPage, type ClientsPage } from './clients-page.js'
 import { mountOnboardingPage, type OnboardingPage } from './onboarding-page.js'
 import {
@@ -237,7 +238,21 @@ export function mountWinWinCodeClient(
   // UI-100.2 (fake-first): the §16.6 task creation seam and the §16.7 run
   // identity zone run on the local fakes from the one facade block until the
   // FLOW scheduler and worker/candidate routing land and replace the ports.
-  const taskPort = createControlPlaneTaskFake({
+  // UI-504: 浏览器本地的最近打开交付历史,看板以「最近访问」折叠行渲染。
+  const homeVisits: HomeRecentVisitStore = createHomeRecentVisitStore({
+    storage: browserHomeVisitStorage(browser),
+  })
+
+  /** 记录一次交付访问;非交付深链路由不写入。 */
+  function recordHomeVisit(hash: string): void {
+    const path = hash.slice(0, hash.indexOf('?') < 0 ? hash.length : hash.indexOf('?'))
+    if (path !== '#/home/task-run') return
+    const deliveryId = routeParameters(hash).get('delivery') as import('./generated/contracts.js').DeliveryId
+    if (deliveryId === null) return
+    homeVisits.record(deliveryId, scopeSelectionFromHash(hash), Date.now())
+  }
+
+    const taskPort = createControlPlaneTaskFake({
     nextTaskId: () => contractId('wit', browser.crypto) as import('./generated/contracts.js').WorkItemId,
     ...(options.taskSeed === undefined ? {} : { seed: options.taskSeed }),
   })
@@ -1072,6 +1087,7 @@ export function mountWinWinCodeClient(
           browser.crypto,
         ) as ControlPlaneWebSocketSubscriptionId,
         nextRequestId: () => contractId('req', browser.crypto) as RequestId,
+        visits: homeVisits,
         // The Clients zone reuses the one shell-owned Clients area model, so
         // the first screen never grows a second device-list state.
         clients: clientsModel,
@@ -1314,6 +1330,7 @@ export function mountWinWinCodeClient(
               : { status: 'no-scope', reason: 'selection-required' }
       void readiness.updateContext(context)
     }
+    recordHomeVisit(browser.location.hash)
     const chatSessionActive = activeSurface.id === 'chat'
       && browser.location.hash.includes('session=')
     // 路由切换会改变「当前会话」的有效性,最近对话的高亮随之重算。

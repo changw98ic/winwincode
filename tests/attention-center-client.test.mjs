@@ -169,7 +169,7 @@ function attention(overrides = {}) {
 
 function deliverySummary(overrides = {}) {
   return {
-    activeStageRunId: stageRunId,
+    activeWorkRunId: stageRunId,
     deliveryId,
     openAttentionCount: 1,
     ownership: {
@@ -840,7 +840,7 @@ function centerState(overrides = {}) {
         deliveryId,
         deliveryTitle: 'Delivery under attention',
         deliveryRevision: 12,
-        activeStageRunId: stageRunId,
+        activeWorkRunId: stageRunId,
         needsAttention: true,
       },
     ],
