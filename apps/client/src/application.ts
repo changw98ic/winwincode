@@ -1282,11 +1282,8 @@ export function mountWinWinCodeClient(
       currentScopeResolution = resolution
       if (scopeSelectorPage === null) {
         const model = createScopeSelectorViewModel({
-          client: rawControlPlane,
-          actor: session.actor,
           authorizedScopes: session.authorizedScopes,
           selection: resolution.selection,
-          nextRequestId: () => contractId('req', browser.crypto) as RequestId,
           onSelectionChange(nextSelection) {
             if (closed || scopeSelectorPage === null) return
             if (selectionLeavesRevokedScope(nextSelection)) revokedScopeIdentity = null
