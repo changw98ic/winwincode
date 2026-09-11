@@ -106,7 +106,7 @@ function binding(overrides = {}) {
       productSessionId,
       workerSessionId,
       codexThreadId,
-      stageRunId,
+      workRunId: stageRunId,
     },
     ...overrides,
   }
@@ -159,7 +159,7 @@ function attention(overrides = {}) {
     resolutionSummary: null,
     resolvedAt: null,
     resolvedBy: null,
-    stageRunId,
+    workRunId: stageRunId,
     status: 'open',
     title: 'Review the proposed delivery scope',
     type: 'scope_change',

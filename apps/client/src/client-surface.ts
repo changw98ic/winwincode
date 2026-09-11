@@ -7,6 +7,7 @@ export type ClientSurfaceId =
   | 'extensions'
   | 'device'
   | 'settings'
+  | 'attention'
   | 'onboarding'
 
 export interface ClientSurface {
@@ -72,6 +73,14 @@ export const CLIENT_SURFACES: readonly ClientSurface[] = Object.freeze([
     description: '个人与工作区设置',
     default: false,
     nav: true,
+  }),
+  Object.freeze({
+    id: 'attention',
+    path: '/attention',
+    label: '待我处理',
+    description: '需要人工审核与验收的事项',
+    default: false,
+    nav: false,
   }),
   Object.freeze({
     id: 'onboarding',

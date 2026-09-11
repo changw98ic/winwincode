@@ -391,8 +391,8 @@ test('Chat is the canonical default surface and every product entry stays reacha
     'projects',
     'extensions',
     'device',
-    'attention',
     'settings',
+    'attention',
     'onboarding',
   ])
   assert.equal(clientSurfaceFromHash('').id, 'chat')
@@ -448,6 +448,7 @@ test('the dashboard groups Delivery projections into bounded, ordered sections',
     updatedAt: '2026-09-03T07:30:00.000Z',
   })
   const cards = homeDashboardState({
+    visits: [],
     deliveries: deliveryState([
       waiting,
       olderCompleted,
@@ -478,6 +479,7 @@ test('the dashboard groups Delivery projections into bounded, ordered sections',
     active: 3,
     failing: 1,
     completed: 2,
+    visited: 0,
   })
   assert.equal(cards.active[0]?.failedTasks, 0)
   assert.equal(cards.active[1]?.activeWorkRunId, stageRunId)
@@ -485,6 +487,7 @@ test('the dashboard groups Delivery projections into bounded, ordered sections',
 
   // Section limits stay bounded even when the Scope holds many Deliveries.
   const bounded = homeDashboardState({
+    visits: [],
     deliveries: deliveryState([
       waiting,
       olderCompleted,
@@ -555,6 +558,7 @@ test('failing Deliveries order by failures, then blocks, then recency', () => {
 
 test('an empty first-use Scope reports an explicit empty dashboard', () => {
   const state = homeDashboardState({
+    visits: [],
     deliveries: deliveryState([]),
     attention: attentionState([]),
     usage: usageState(),
@@ -566,11 +570,13 @@ test('an empty first-use Scope reports an explicit empty dashboard', () => {
     active: 0,
     failing: 0,
     completed: 0,
+      visited: 0,
   })
 
   // A failed Attention read hides the first-use claim: the dashboard cannot
   // prove nothing needs the user when one projection is unreadable.
   const uncertain = homeDashboardState({
+    visits: [],
     deliveries: deliveryState([]),
     attention: attentionState([], { status: 'error' }),
     usage: usageState(),
@@ -584,6 +590,7 @@ test('an empty first-use Scope reports an explicit empty dashboard', () => {
   })
 
   const failed = homeDashboardState({
+    visits: [],
     deliveries: deliveryState([], { status: 'error' }),
     attention: attentionState([], { status: 'error' }),
     usage: usageState({ status: 'error' }),
@@ -643,6 +650,7 @@ test('the composed view model reads every existing projection once and publishes
     active: 1,
     failing: 1,
     completed: 0,
+      visited: 0,
   })
   assert.deepEqual(model.state.decisions.map(card => card.kind), ['attention', 'approval'])
   assert.equal(model.state.decisions[0]?.title, 'Review the proposed delivery scope')
@@ -705,26 +713,31 @@ test('a decision card links to the exact decision surface and the exact Chat ses
 test('the dashboard announcement names every section count and its gaps', () => {
   assert.ok(homeDashboardPresentation().sectionHeading.decisions.length > 0)
   assert.match(homeDashboardAnnouncement(homeDashboardState({
+    visits: [],
     deliveries: deliveryState([]),
     attention: attentionState([]),
     usage: usageState(),
   })), /^就绪 · 0 项待决策/u)
   assert.match(homeDashboardAnnouncement(homeDashboardState({
+    visits: [],
     deliveries: deliveryState([deliverySummary()]),
     attention: attentionState([decisionCard()]),
     usage: usageState(),
   })), /1 项待决策 · 1 个运行中 · 0 个失败或阻塞 · 0 个已完成/u)
   assert.match(homeDashboardAnnouncement(homeDashboardState({
+    visits: [],
     deliveries: deliveryState([]),
     attention: attentionState([], { status: 'error' }),
     usage: usageState({ status: 'error' }),
   })), /^就绪（部分缺省）/u)
   assert.match(homeDashboardAnnouncement(homeDashboardState({
+    visits: [],
     deliveries: deliveryState([], { status: 'loading' }),
     attention: attentionState([], { status: 'loading' }),
     usage: usageState({ status: 'loading' }),
   })), /^正在读取看板/u)
   assert.match(homeDashboardAnnouncement(homeDashboardState({
+    visits: [],
     deliveries: deliveryState([], { status: 'error' }),
     attention: attentionState([], { status: 'error' }),
     usage: usageState({ status: 'error' }),
@@ -894,6 +907,7 @@ test('the Home page mounts the task board chrome, one polite live region, and ex
   const document = new FakeDocument()
   const rootElement = new FakeElement(document, 'div')
   const state = homeDashboardState({
+    visits: [],
     deliveries: deliveryState([
       deliverySummary({
         deliveryId: executingDeliveryId,
@@ -1062,11 +1076,13 @@ test('the Home page stays usable when one projection is unavailable and closes i
   const document = new FakeDocument()
   const rootElement = new FakeElement(document, 'div')
   const ready = homeDashboardState({
+    visits: [],
     deliveries: deliveryState([deliverySummary({ title: 'Running delivery' })]),
     attention: attentionState([]),
     usage: usageState(),
   })
   const partial = homeDashboardState({
+    visits: [],
     deliveries: deliveryState([deliverySummary({ title: 'Running delivery' })]),
     attention: attentionState([], { status: 'error' }),
     usage: usageState({ status: 'error' }),
@@ -1094,6 +1110,7 @@ test('an empty Scope stays honest without the first-use block or usage panel', (
   const document = new FakeDocument()
   const rootElement = new FakeElement(document, 'div')
   const empty = homeDashboardState({
+    visits: [],
     deliveries: deliveryState([]),
     attention: attentionState([]),
     usage: usageState(),

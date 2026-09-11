@@ -458,7 +458,7 @@ export function homeDashboardState(input: {
   readonly deliveries: HomeDeliveryListState
   readonly attention: AttentionCenterViewModelState
   readonly usage: UsageHealthViewModelState
-  readonly visits: readonly HomeVisit[]
+  readonly visits?: readonly HomeVisit[]
   readonly limits?: HomeDashboardLimits
 }): HomeDashboardState {
   const limits = input.limits ?? DEFAULT_HOME_DASHBOARD_LIMITS
@@ -467,7 +467,7 @@ export function homeDashboardState(input: {
   const active = orderedHomeActiveCards(cards)
   const failing = orderedHomeFailingCards(cards)
   const completed = orderedHomeCompletedCards(cards)
-  const visited = visitedCards(byId, input.visits)
+  const visited = visitedCards(byId, input.visits ?? [])
   const decisions = orderedAttentionCenterItems(input.attention.items)
   const sources: Readonly<Record<HomeDashboardSource, HomeDashboardSourceState>> = Object.freeze({
     delivery: deliverySourceState(input.deliveries),
