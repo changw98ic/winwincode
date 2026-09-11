@@ -77,7 +77,7 @@
   "currentCanonicalSources": [
     {
       "path": "schema/winwincode/v1/domain.schema.json",
-      "sha256": "978de9a3967aef8614f61c26d73c4670bc00c1782e65e231c071dc57f84d423d",
+      "sha256": "45dd8d071c9ac75011e7e0d5b9557f0ac602f1b1a2bc4d041481141705dfc7c7",
       "facts": [
         "WorkContract",
         "WorkItem",
@@ -92,7 +92,7 @@
     },
     {
       "path": "schema/winwincode/v1/control-plane-http.schema.json",
-      "sha256": "6cfc52d99f0ffa85fc89eb0940fe9a06179d36bf8fffdde46bd22fb5b7fc4b27",
+      "sha256": "01997d3cd466888f80dca763342e0d6fba148ed36afad92958897605ea67e0f4",
       "facts": [
         "HTTP command envelope",
         "candidate commands",
@@ -102,7 +102,7 @@
     },
     {
       "path": "schema/winwincode/v1/execution-port.schema.json",
-      "sha256": "4323273aad46e9539a0539f5599eeae48495a21384b715c88d618c86ad166cea",
+      "sha256": "eb37e9622c520bbc196304abe579d46fffba39bc0574f6749c586fa29c42a2bc",
       "facts": [
         "Worker execution transport and fenced identity"
       ]
@@ -135,7 +135,7 @@
     },
     {
       "path": "scripts/generate-contracts.mjs",
-      "sha256": "a6f11f8980f030b8d076c0399ef77d1947234b63f9fde610f0b439a5cc82d3da",
+      "sha256": "7cfe7b5b84010509ad6d7121d1cf1c10ffbbecd45382c39d1c02b638f30877a1",
       "facts": [
         "canonical schema to generated Rust/TypeScript/OpenAPI chain"
       ]

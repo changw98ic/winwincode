@@ -1273,7 +1273,7 @@ impl ArtifactStore {
     /// Loads the one immutable storage-finalization source for an Artifact.
     ///
     /// A completed Artifact must have exactly one source. An incomplete
-    /// Artifact has no source and therefore cannot be enterprise-settled.
+    /// Artifact has no source and therefore cannot be usage-settled.
     ///
     /// # Errors
     ///
@@ -1854,7 +1854,7 @@ impl ArtifactObjectStore for LocalArtifactObjectStore {
 }
 
 /// In-memory object adapter used to prove the same contract expected from an
-/// enterprise object-storage implementation.
+/// downstream object-storage implementation.
 #[derive(Clone, Default)]
 pub struct FakeArtifactObjectStore {
     state: Arc<Mutex<FakeObjectState>>,

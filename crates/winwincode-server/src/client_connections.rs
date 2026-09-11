@@ -27,7 +27,7 @@
 //!
 //! Authorization decisions (grant creation and revocation) are recorded in
 //! the durable `client_connect_audit` table. The connect flow carries no
-//! organization/workspace scope, so the enterprise-shaped `winwincode-audit`
+//! organization/workspace scope, so the scoped `winwincode-audit`
 //! event schema does not apply; the dedicated storage-level audit trail is
 //! the canonical record for this domain.
 

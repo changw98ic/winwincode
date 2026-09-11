@@ -20,6 +20,10 @@
       "type": "string",
       "pattern": "^rep_[0-9A-HJKMNP-TV-Z]{26}$"
     },
+    "IntegrationId": {
+      "type": "string",
+      "pattern": "^int_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
     "DeliveryId": {
       "type": "string",
       "pattern": "^dlv_[0-9A-HJKMNP-TV-Z]{26}$"
@@ -1221,15 +1225,6 @@
         "worker.enable",
         "publication.publish",
         "publication.cancel",
-        "enterprise.organization.update",
-        "enterprise.membership.update",
-        "enterprise.team.update",
-        "enterprise.role.update",
-        "enterprise.project_repository.update",
-        "enterprise.policy.update",
-        "enterprise.fleet.update",
-        "enterprise.integration.update",
-        "enterprise.identity.update",
         "collaboration.notification.ack",
         "collaboration.presence.update",
         "delivery.task_breakdown.create"

@@ -33,15 +33,6 @@
       "worker.enable",
       "publication.publish",
       "publication.cancel",
-      "enterprise.organization.update",
-      "enterprise.membership.update",
-      "enterprise.team.update",
-      "enterprise.role.update",
-      "enterprise.project_repository.update",
-      "enterprise.policy.update",
-      "enterprise.fleet.update",
-      "enterprise.integration.update",
-      "enterprise.identity.update",
       "collaboration.notification.ack",
       "collaboration.presence.update",
       "delivery.task_breakdown.create",
@@ -71,17 +62,6 @@
       "worker.get",
       "publication.list",
       "publication.get",
-      "enterprise.organization.list",
-      "enterprise.membership.list",
-      "enterprise.team.list",
-      "enterprise.role.list",
-      "enterprise.project.list",
-      "enterprise.policy.list",
-      "enterprise.fleet.list",
-      "enterprise.usage.list",
-      "enterprise.audit.list",
-      "enterprise.integration.list",
-      "enterprise.identity.list",
       "collaboration.activity.list",
       "collaboration.notification.list",
       "collaboration.presence.list",
@@ -99,16 +79,6 @@
       "presence.changed.v1",
       "worker-health.changed.v1",
       "activity.recorded.v1",
-      "enterprise-organization.invalidated.v1",
-      "enterprise-membership.invalidated.v1",
-      "enterprise-team.invalidated.v1",
-      "enterprise-role.invalidated.v1",
-      "enterprise-project.invalidated.v1",
-      "enterprise-policy.invalidated.v1",
-      "enterprise-fleet.invalidated.v1",
-      "enterprise-usage.invalidated.v1",
-      "enterprise-audit.invalidated.v1",
-      "enterprise-integration.invalidated.v1",
       "model-route-availability.invalidated.v1"
     ],
     "executionPortMessages": [
@@ -434,7 +404,7 @@
     {
       "surfaceId": "client-application",
       "observableContracts": [
-        "Chat StrongFlow settings approval and enterprise presentation through one serverUrl"
+        "Chat StrongFlow settings approval and local presentation through one serverUrl"
       ],
       "flowIds": [
         "client-transport",
@@ -506,7 +476,7 @@
     {
       "surfaceId": "enterprise-backup",
       "flowIds": [
-        "enterprise-management",
+        "action-policy-and-collaboration",
         "candidate-artifacts"
       ],
       "observableContracts": [
@@ -526,7 +496,7 @@
     {
       "surfaceId": "recovery-drill",
       "flowIds": [
-        "enterprise-management",
+        "action-policy-and-collaboration",
         "local-worker-startup"
       ],
       "observableContracts": [
@@ -544,35 +514,24 @@
       ]
     },
     {
-      "surfaceId": "enterprise-integration",
+      "surfaceId": "integration-infrastructure",
       "flowIds": [
-        "enterprise-management",
+        "action-policy-and-collaboration",
         "publication",
         "collaboration-presence"
       ],
       "observableContracts": [
-        "tenant-scoped connector webhook and durable outbound delivery facts"
+        "scope-bound connector webhook and durable outbound delivery facts"
       ]
     },
     {
-      "surfaceId": "enterprise-object-store",
+      "surfaceId": "s3-artifact-adapter",
       "flowIds": [
-        "enterprise-management",
+        "action-policy-and-collaboration",
         "candidate-artifacts"
       ],
       "observableContracts": [
-        "verified encrypted artifact object storage receipts"
-      ]
-    },
-    {
-      "surfaceId": "enterprise-postgres",
-      "flowIds": [
-        "enterprise-management",
-        "chat-session-lifecycle",
-        "publication"
-      ],
-      "observableContracts": [
-        "tenant-scoped migration transaction outbox and backup protocol facts"
+        "verified S3-compatible Artifact byte receipts"
       ]
     },
     {
@@ -636,7 +595,7 @@
         "canonical sorted export bytes digest domain counts and database-neutral source identities"
       ],
       "flowIds": [
-        "enterprise-management"
+        "action-policy-and-collaboration"
       ]
     }
   ],
@@ -945,53 +904,22 @@
       "targetObservableOperations": []
     },
     {
-      "id": "enterprise-management",
+      "id": "action-policy-and-collaboration",
       "currentObservableOperations": [
-        "list eight bounded enterprise management projections at one revision",
-        "change organization, membership, repository, policy, fleet, and integration state with optimistic revision checks",
-        "reload only the invalidated enterprise management projection"
+        "acknowledge collaboration notifications and publish scoped presence",
+        "read collaboration activity, notifications, and presence",
+        "enforce actions through one neutral policy boundary"
       ],
       "httpCommands": [
-        "enterprise.organization.update",
-        "enterprise.membership.update",
-        "enterprise.project_repository.update",
-        "enterprise.policy.update",
-        "enterprise.fleet.update",
-        "enterprise.integration.update",
-        "enterprise.team.update",
-        "enterprise.role.update",
-        "enterprise.identity.update",
         "collaboration.notification.ack",
         "collaboration.presence.update"
       ],
       "httpQueries": [
-        "enterprise.organization.list",
-        "enterprise.membership.list",
-        "enterprise.project.list",
-        "enterprise.policy.list",
-        "enterprise.fleet.list",
-        "enterprise.usage.list",
-        "enterprise.audit.list",
-        "enterprise.integration.list",
-        "enterprise.team.list",
-        "enterprise.role.list",
-        "enterprise.identity.list",
         "collaboration.activity.list",
         "collaboration.notification.list",
         "collaboration.presence.list"
       ],
-      "websocketEvents": [
-        "enterprise-organization.invalidated.v1",
-        "enterprise-membership.invalidated.v1",
-        "enterprise-project.invalidated.v1",
-        "enterprise-policy.invalidated.v1",
-        "enterprise-fleet.invalidated.v1",
-        "enterprise-usage.invalidated.v1",
-        "enterprise-audit.invalidated.v1",
-        "enterprise-integration.invalidated.v1",
-        "enterprise-team.invalidated.v1",
-        "enterprise-role.invalidated.v1"
-      ],
+      "websocketEvents": [],
       "executionPortMessages": [
         "action.enforcement_request",
         "action.enforcement_receipt"

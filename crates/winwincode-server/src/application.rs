@@ -854,7 +854,6 @@ impl TypedControlPlaneApiPort for StandaloneControlPlaneApplication {
             CommandFamily::Approval => self.interaction_command(request),
             CommandFamily::Worker => self.worker_command(request),
             CommandFamily::Publication => self.publication_command(request),
-            CommandFamily::Enterprise => Err(product_operation_not_found()),
             CommandFamily::Collaboration => self.collaboration_command(principal, request),
         }
     }
@@ -879,7 +878,6 @@ impl TypedControlPlaneApiPort for StandaloneControlPlaneApplication {
             QueryFamily::Settings => self.settings_query(request),
             QueryFamily::Approval => self.interaction_query(request),
             QueryFamily::Publication => self.publication_query(request),
-            QueryFamily::Enterprise => Err(product_operation_not_found()),
             QueryFamily::Collaboration => self.collaboration_query(principal, request),
         }
     }
@@ -1540,14 +1538,6 @@ fn application_variant_mismatch() -> ApiError {
         500,
         "APPLICATION_RESPONSE_INVALID",
         "generated application route does not match its request",
-    )
-}
-
-fn product_operation_not_found() -> ApiError {
-    ApiError::new(
-        404,
-        "RESOURCE_NOT_FOUND",
-        "requested operation is not part of this product",
     )
 }
 

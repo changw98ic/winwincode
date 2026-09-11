@@ -25,9 +25,15 @@
     "crates/winwincode-cli/src",
     "crates/winwincode-drill/src",
     "crates/winwincode-evidence-export/src",
-    "crates/winwincode-integration/src",
-    "crates/winwincode-object-store/src",
-    "crates/winwincode-postgres/src",
+    "crates/winwincode-connector-github/src",
+    "crates/winwincode-connector-jira/src",
+    "crates/winwincode-connector-linear/src",
+    "crates/winwincode-connector-slack/src",
+    "crates/winwincode-connector-teams/src",
+    "crates/winwincode-connector-webhook/src",
+    "crates/winwincode-integration-core/src",
+    "crates/winwincode-integration-sqlite/src",
+    "crates/winwincode-s3-artifact-adapter/src",
     "crates/winwincode-test-assets/src",
     "crates/winwincode-control-plane/src",
     "crates/winwincode-codex/src",
@@ -307,7 +313,6 @@
       "sourcePaths": [
         "crates/winwincode-data-export/src/lib.rs",
         "schema/winwincode-export/v1/canonical-json.js",
-        "schema/winwincode-export/v1/canonical-json.md",
         "schema/winwincode-export/v1/conformance-vectors.json",
         "schema/winwincode-export/v1/parse-bounded.js",
         "schema/winwincode-export/v1/validate.js",
@@ -413,6 +418,7 @@
         "crates/winwincode-execution-port/src/action_enforcement.rs",
         "crates/winwincode-execution-port/src/action_gateway.rs",
         "crates/winwincode-execution-port/src/action_normalizer.rs",
+        "crates/winwincode-execution-port/src/agent_config.rs",
         "crates/winwincode-execution-port/src/capability_adapter.rs",
         "crates/winwincode-execution-port/src/change_batch_identity.rs",
         "crates/winwincode-execution-port/src/change_batch_progress.rs",
@@ -428,6 +434,7 @@
         "crates/winwincode-execution-port/src/probe_result_normalizer.rs",
         "crates/winwincode-execution-port/src/repair_loop_context.rs",
         "crates/winwincode-execution-port/src/replay.rs",
+        "crates/winwincode-execution-port/src/repository_rule_pack.rs",
         "crates/winwincode-execution-port/src/runtime_replay.rs",
         "crates/winwincode-execution-port/src/runtime_trace_outbox.rs",
         "crates/winwincode-execution-port/src/transport.rs",
@@ -467,11 +474,6 @@
         "crates/winwincode-storage/src/control_plane_instances.rs",
         "crates/winwincode-storage/src/device_execution_binding.rs",
         "crates/winwincode-storage/src/device_scheduler.rs",
-        "crates/winwincode-storage/src/enterprise_policy.rs",
-        "crates/winwincode-storage/src/enterprise_policy_evaluation.rs",
-        "crates/winwincode-storage/src/enterprise_quota.rs",
-        "crates/winwincode-storage/src/enterprise_usage.rs",
-        "crates/winwincode-storage/src/enterprise_worker_placement.rs",
         "crates/winwincode-storage/src/execution_admission.rs",
         "crates/winwincode-storage/src/execution_queue.rs",
         "crates/winwincode-storage/src/execution_registry.rs",
@@ -552,6 +554,7 @@
         "crates/winwincode-delivery/src/application/task.rs",
         "crates/winwincode-delivery/src/application/task_breakdown.rs",
         "crates/winwincode-delivery/src/application/verdict.rs",
+        "crates/winwincode-delivery/src/application/workrun.rs",
         "crates/winwincode-delivery/src/domain/attention.rs",
         "crates/winwincode-delivery/src/domain/candidate.rs",
         "crates/winwincode-delivery/src/domain/candidate/verdict_authority.rs",
@@ -626,7 +629,6 @@
         "crates/winwincode-publication/src/facts.rs",
         "crates/winwincode-publication/src/github.rs",
         "crates/winwincode-publication/src/lib.rs",
-        "crates/winwincode-publication/src/metering.rs",
         "crates/winwincode-publication/src/operation.rs",
         "crates/winwincode-publication/src/policy.rs",
         "crates/winwincode-publication/src/test_support.rs"
@@ -686,9 +688,7 @@
         "crates/winwincode-session/src/binding.rs",
         "crates/winwincode-session/src/interaction_routing.rs",
         "crates/winwincode-session/src/lib.rs",
-        "crates/winwincode-session/src/migration.rs",
-        "crates/winwincode-session/src/product_session.rs",
-        "crates/winwincode-session/src/sqlite_migration.rs"
+        "crates/winwincode-session/src/product_session.rs"
       ],
       "entrySymbols": [
         "ProductSession"
@@ -761,6 +761,7 @@
         "crates/winwincode-worker/src/context_safety.rs",
         "crates/winwincode-worker/src/debug_experiment.rs",
         "crates/winwincode-worker/src/debug_probe_context.rs",
+        "crates/winwincode-worker/src/handoff_snapshot.rs",
         "crates/winwincode-worker/src/lib.rs",
         "crates/winwincode-worker/src/main.rs",
         "crates/winwincode-worker/src/managed_session.rs",
@@ -800,8 +801,8 @@
       "id": "control-plane-application",
       "sourcePaths": [
         "crates/winwincode-control-plane/src/action_policy_enforcement.rs",
-        "crates/winwincode-control-plane/src/artifact_enterprise_quota.rs",
         "crates/winwincode-control-plane/src/artifact_transaction.rs",
+        "crates/winwincode-control-plane/src/automation_recipe.rs",
         "crates/winwincode-control-plane/src/candidate_git_release.rs",
         "crates/winwincode-control-plane/src/candidate_source.rs",
         "crates/winwincode-control-plane/src/chat_interaction_application.rs",
@@ -825,25 +826,15 @@
         "crates/winwincode-control-plane/src/device_scheduler.rs",
         "crates/winwincode-control-plane/src/device_session_gate.rs",
         "crates/winwincode-control-plane/src/durable_execution_port.rs",
-        "crates/winwincode-control-plane/src/enterprise_hierarchy.rs",
-        "crates/winwincode-control-plane/src/enterprise_identity.rs",
-        "crates/winwincode-control-plane/src/enterprise_identity_lifecycle.rs",
-        "crates/winwincode-control-plane/src/enterprise_identity_protocols.rs",
-        "crates/winwincode-control-plane/src/enterprise_identity_verification.rs",
-        "crates/winwincode-control-plane/src/enterprise_policy.rs",
-        "crates/winwincode-control-plane/src/enterprise_policy_enforcement.rs",
-        "crates/winwincode-control-plane/src/enterprise_policy_evaluation.rs",
-        "crates/winwincode-control-plane/src/enterprise_quota.rs",
-        "crates/winwincode-control-plane/src/enterprise_rbac.rs",
-        "crates/winwincode-control-plane/src/enterprise_reporting.rs",
-        "crates/winwincode-control-plane/src/enterprise_scope_binding.rs",
-        "crates/winwincode-control-plane/src/enterprise_usage.rs",
         "crates/winwincode-control-plane/src/execution_port_service.rs",
         "crates/winwincode-control-plane/src/gate_interaction_service.rs",
+        "crates/winwincode-control-plane/src/knowledge.rs",
         "crates/winwincode-control-plane/src/lib.rs",
         "crates/winwincode-control-plane/src/local_candidate.rs",
         "crates/winwincode-control-plane/src/local_secret_store.rs",
+        "crates/winwincode-control-plane/src/model_cost.rs",
         "crates/winwincode-control-plane/src/observer_decision_service.rs",
+        "crates/winwincode-control-plane/src/peer_collaboration.rs",
         "crates/winwincode-control-plane/src/product_session_api.rs",
         "crates/winwincode-control-plane/src/product_session_chat.rs",
         "crates/winwincode-control-plane/src/product_session_execution_application.rs",
@@ -851,9 +842,7 @@
         "crates/winwincode-control-plane/src/product_session_execution_job.rs",
         "crates/winwincode-control-plane/src/product_session_service.rs",
         "crates/winwincode-control-plane/src/publication_application.rs",
-        "crates/winwincode-control-plane/src/publication_enterprise_quota.rs",
         "crates/winwincode-control-plane/src/publication_policy.rs",
-        "crates/winwincode-control-plane/src/publication_policy_enforcement.rs",
         "crates/winwincode-control-plane/src/publication_preparation.rs",
         "crates/winwincode-control-plane/src/publication_production.rs",
         "crates/winwincode-control-plane/src/quick_device_execution.rs",
@@ -862,7 +851,6 @@
         "crates/winwincode-control-plane/src/repository_binding.rs",
         "crates/winwincode-control-plane/src/repository_scheduler.rs",
         "crates/winwincode-control-plane/src/responsibility_assignment.rs",
-        "crates/winwincode-control-plane/src/responsibility_assignment_authority.rs",
         "crates/winwincode-control-plane/src/rework_transaction.rs",
         "crates/winwincode-control-plane/src/runtime_event_transaction.rs",
         "crates/winwincode-control-plane/src/session_binding_transaction.rs",
@@ -880,12 +868,10 @@
         "crates/winwincode-control-plane/src/temporary_root_lease.rs",
         "crates/winwincode-control-plane/src/terminal_outcome_transaction.rs",
         "crates/winwincode-control-plane/src/verdict_transaction.rs",
-        "crates/winwincode-control-plane/src/worker_enterprise_quota.rs",
         "crates/winwincode-control-plane/src/worker_execution_lifecycle.rs",
-        "crates/winwincode-control-plane/src/worker_fleet_projection.rs",
         "crates/winwincode-control-plane/src/worker_interaction_outbound.rs",
         "crates/winwincode-control-plane/src/worker_management.rs",
-        "crates/winwincode-control-plane/src/worker_policy.rs"
+        "crates/winwincode-control-plane/src/workrun_transaction.rs"
       ],
       "entrySymbols": [
         "ControlPlane"
@@ -930,7 +916,6 @@
         "crates/winwincode-control-plane/src/provider_anthropic_namespace_safety_tests.rs",
         "crates/winwincode-control-plane/src/provider_anthropic_namespace_tests.rs",
         "crates/winwincode-control-plane/src/provider_catalog.rs",
-        "crates/winwincode-control-plane/src/provider_enterprise_quota.rs",
         "crates/winwincode-control-plane/src/provider_gateway.rs",
         "crates/winwincode-control-plane/src/provider_https_sse.rs",
         "crates/winwincode-control-plane/src/provider_policy.rs",
@@ -1005,7 +990,6 @@
         "packages/strongflow/src/delivery-invoker.ts",
         "packages/strongflow/src/delivery-runtime-projection.ts",
         "packages/strongflow/src/delivery-service.ts",
-        "packages/strongflow/src/delivery-stage-coordinator.ts",
         "packages/strongflow/src/delivery-store.ts",
         "packages/strongflow/src/delivery-verdict.ts",
         "packages/strongflow/src/diagram-execution-projection.ts",
@@ -1077,10 +1061,6 @@
         "apps/client/src/contextual-decision.ts",
         "apps/client/src/core/connection-state.ts",
         "apps/client/src/editable-draft.ts",
-        "apps/client/src/enterprise-application.ts",
-        "apps/client/src/enterprise-management-view-model.ts",
-        "apps/client/src/enterprise-operations-page.ts",
-        "apps/client/src/enterprise-resource-page.ts",
         "apps/client/src/home-dashboard-page.ts",
         "apps/client/src/home-dashboard-view-model.ts",
         "apps/client/src/home-recent-visits.ts",
@@ -1151,7 +1131,7 @@
       "phase": "6",
       "disposition": "retain",
       "observableContracts": [
-        "Chat StrongFlow settings approval and enterprise presentation through one serverUrl"
+        "Chat StrongFlow settings approval and local presentation through one serverUrl"
       ],
       "behaviorBaselineIds": [
         "success",
@@ -1180,14 +1160,12 @@
         "crates/winwincode-server/src/config.rs",
         "crates/winwincode-server/src/dispatcher.rs",
         "crates/winwincode-server/src/durable_event_hub.rs",
-        "crates/winwincode-server/src/enterprise_identity_protocol.rs",
-        "crates/winwincode-server/src/enterprise_management.rs",
-        "crates/winwincode-server/src/identity_authenticator.rs",
         "crates/winwincode-server/src/lib.rs",
         "crates/winwincode-server/src/login_rate_limiter.rs",
         "crates/winwincode-server/src/main.rs",
         "crates/winwincode-server/src/model_authority.rs",
         "crates/winwincode-server/src/password_hash.rs",
+        "crates/winwincode-server/src/preview.rs",
         "crates/winwincode-server/src/provider_onboarding.rs",
         "crates/winwincode-server/src/remote_worker_transport.rs",
         "crates/winwincode-server/src/runtime.rs",
@@ -1390,20 +1368,21 @@
       ]
     },
     {
-      "id": "enterprise-integration",
+      "id": "integration-infrastructure",
       "sourcePaths": [
-        "crates/winwincode-integration/src/error.rs",
-        "crates/winwincode-integration/src/framework.rs",
-        "crates/winwincode-integration/src/github.rs",
-        "crates/winwincode-integration/src/jira.rs",
-        "crates/winwincode-integration/src/lib.rs",
-        "crates/winwincode-integration/src/linear.rs",
-        "crates/winwincode-integration/src/model.rs",
-        "crates/winwincode-integration/src/ports.rs",
-        "crates/winwincode-integration/src/slack.rs",
-        "crates/winwincode-integration/src/storage.rs",
-        "crates/winwincode-integration/src/teams.rs",
-        "crates/winwincode-integration/src/webhook.rs"
+        "crates/winwincode-connector-github/src/lib.rs",
+        "crates/winwincode-connector-jira/src/lib.rs",
+        "crates/winwincode-connector-linear/src/lib.rs",
+        "crates/winwincode-connector-slack/src/lib.rs",
+        "crates/winwincode-connector-teams/src/lib.rs",
+        "crates/winwincode-connector-webhook/src/lib.rs",
+        "crates/winwincode-integration-core/src/error.rs",
+        "crates/winwincode-integration-core/src/framework.rs",
+        "crates/winwincode-integration-core/src/lib.rs",
+        "crates/winwincode-integration-core/src/model.rs",
+        "crates/winwincode-integration-core/src/ports.rs",
+        "crates/winwincode-integration-sqlite/src/lib.rs",
+        "crates/winwincode-integration-sqlite/src/slack_rate_limit.rs"
       ],
       "entrySymbols": [
         "IntegrationFramework"
@@ -1412,12 +1391,19 @@
         "control-plane"
       ],
       "targetModules": [
-        "crates/winwincode-integration"
+        "crates/winwincode-connector-github",
+        "crates/winwincode-connector-jira",
+        "crates/winwincode-connector-linear",
+        "crates/winwincode-connector-slack",
+        "crates/winwincode-connector-teams",
+        "crates/winwincode-connector-webhook",
+        "crates/winwincode-integration-core",
+        "crates/winwincode-integration-sqlite"
       ],
       "phase": "enterprise",
       "disposition": "retain",
       "observableContracts": [
-        "tenant-scoped connector webhook and durable outbound delivery facts"
+        "scope-bound connector webhook and durable outbound delivery facts"
       ],
       "behaviorBaselineIds": [
         "success",
@@ -1426,57 +1412,27 @@
       ]
     },
     {
-      "id": "enterprise-object-store",
+      "id": "s3-artifact-adapter",
       "sourcePaths": [
-        "crates/winwincode-object-store/src/lib.rs"
+        "crates/winwincode-s3-artifact-adapter/src/lib.rs"
       ],
       "entrySymbols": [
-        "S3ArtifactObjectStore"
+        "S3ArtifactAdapter"
       ],
       "targetOwners": [
         "control-plane"
       ],
       "targetModules": [
-        "crates/winwincode-object-store"
+        "crates/winwincode-s3-artifact-adapter"
       ],
       "phase": "enterprise",
       "disposition": "retain",
       "observableContracts": [
-        "verified encrypted artifact object storage receipts"
+        "verified S3-compatible Artifact byte receipts"
       ],
       "behaviorBaselineIds": [
         "success",
         "failure"
-      ]
-    },
-    {
-      "id": "enterprise-postgres",
-      "sourcePaths": [
-        "crates/winwincode-postgres/src/backup.rs",
-        "crates/winwincode-postgres/src/error.rs",
-        "crates/winwincode-postgres/src/lib.rs",
-        "crates/winwincode-postgres/src/migration.rs",
-        "crates/winwincode-postgres/src/protocol.rs",
-        "crates/winwincode-postgres/src/storage.rs"
-      ],
-      "entrySymbols": [
-        "PostgresStorageProtocol"
-      ],
-      "targetOwners": [
-        "control-plane"
-      ],
-      "targetModules": [
-        "crates/winwincode-postgres"
-      ],
-      "phase": "enterprise",
-      "disposition": "retain",
-      "observableContracts": [
-        "tenant-scoped migration transaction outbox and backup protocol facts"
-      ],
-      "behaviorBaselineIds": [
-        "success",
-        "recovery",
-        "exact-replay"
       ]
     },
     {
@@ -1593,6 +1549,7 @@
         "crates/winwincode-client-port/src/exchange/sequence.rs",
         "crates/winwincode-client-port/src/lib.rs",
         "crates/winwincode-client-port/src/messages.rs",
+        "crates/winwincode-client-port/src/preview.rs",
         "crates/winwincode-client-port/src/wire.rs"
       ],
       "entrySymbols": [
@@ -1629,6 +1586,7 @@
         "crates/winwincode-device-client/src/identity.rs",
         "crates/winwincode-device-client/src/lib.rs",
         "crates/winwincode-device-client/src/path_confinement.rs",
+        "crates/winwincode-device-client/src/preview.rs",
         "crates/winwincode-device-client/src/repository.rs",
         "crates/winwincode-device-client/src/repository_exchange.rs",
         "crates/winwincode-device-client/src/repository_git.rs",

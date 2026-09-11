@@ -93,45 +93,6 @@ function facadeFake(initialSession) {
           }, { once: true })
         })
       }
-      if (request.query === 'enterprise.organization.list') return response(request, {
-        kind: 'enterprise_organization_page',
-        snapshotRevision: 1,
-        items: [repositoryOne, repositoryTwo].map((scope, index) => ({
-          id: scope.organizationId,
-          displayName: index === 0 ? 'Acme' : 'Beta',
-          slug: index === 0 ? 'acme' : 'beta',
-          state: 'active',
-          revision: 1,
-          updatedAt: '2026-09-02T00:00:00.000Z',
-        })),
-      })
-      if (request.query === 'enterprise.project.list') {
-        const scope = request.scope.organizationId === repositoryOne.organizationId
-          ? repositoryOne
-          : repositoryTwo
-        return response(request, {
-          kind: 'enterprise_project_repository_page',
-          snapshotRevision: 1,
-          items: [{
-            kind: 'project',
-            projectId: scope.projectId,
-            displayName: `${scope.projectId} name`,
-            repositoryCount: 1,
-            state: 'active',
-            revision: 1,
-            updatedAt: '2026-09-02T00:00:00.000Z',
-          }, {
-            kind: 'repository',
-            projectId: scope.projectId,
-            repositoryId: scope.repositoryId,
-            displayName: `${scope.repositoryId} name`,
-            defaultBranch: 'main',
-            state: 'active',
-            revision: 1,
-            updatedAt: '2026-09-02T00:00:00.000Z',
-          }],
-        })
-      }
       if (request.query === 'settings.get') return response(request, {
         revision: 1,
         defaultModelRoute: null,

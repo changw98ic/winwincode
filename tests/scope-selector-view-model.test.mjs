@@ -26,18 +26,11 @@ assert.equal(
   `Scope selector boundary did not compile:\n${compiler.stdout}${compiler.stderr}`,
 )
 
-const modelModule = await import(`${pathToFileURL(resolve(
+const { createScopeSelectorViewModel } = await import(`${pathToFileURL(resolve(
   root,
   '.cache/scope-selector-tests/scope-selector-view-model.js',
 )).href}`)
-const facadeModule = await import(`${pathToFileURL(resolve(
-  root,
-  '.cache/scope-selector-tests/community-control-plane-client.js',
-)).href}`)
-const { createScopeSelectorViewModel } = modelModule
-const { ControlPlaneClientError } = facadeModule
 
-const actor = { kind: 'user', id: 'usr_00000000000000000000000001' }
 const scopes = [
   {
     kind: 'repository',
@@ -55,218 +48,54 @@ const scopes = [
   },
 ]
 
-function response(request, result) {
-  return {
-    schemaVersion: 'winwincode/v1',
-    requestId: request.requestId,
-    query: request.query,
-    result,
-    page: { hasMore: false, nextCursor: null },
-  }
-}
-
-function clientFake(queryImplementation) {
-  const calls = []
-  return {
-    calls,
-    serverUrl: 'https://control.example/scope-selector',
-    async restore() { throw new Error('not used') },
-    async login() { throw new Error('not used') },
-    async logout() {},
-    async command() { throw new Error('not used') },
-    async query(request, options) {
-      calls.push({ request: structuredClone(request), signal: options?.signal })
-      return queryImplementation(request, options)
-    },
-    subscribe() { throw new Error('not used') },
-    close() {},
-  }
-}
-
-function modelOptions(client, selection = {
+function model(selection = {
   organizationId: scopes[0].organizationId,
   workspaceId: scopes[0].workspaceId,
   projectId: scopes[0].projectId,
   repositoryId: scopes[0].repositoryId,
-}) {
-  let request = 0
-  return {
-    client,
-    actor,
+}, onSelectionChange) {
+  return createScopeSelectorViewModel({
     authorizedScopes: scopes,
     selection,
-    nextRequestId() {
-      request += 1
-      return `req_0000000000000000000000000${request}`
-    },
-  }
+    onSelectionChange,
+  })
 }
 
-test('generated organization/project queries enrich only exact AuthSession hierarchy facts', async () => {
-  const client = clientFake(async request => {
-    if (request.query === 'enterprise.organization.list') return response(request, {
-      kind: 'enterprise_organization_page',
-      snapshotRevision: 4,
-      items: [{
-        id: scopes[0].organizationId,
-        displayName: 'Acme',
-        slug: 'acme',
-        state: 'active',
-        revision: 4,
-        updatedAt: '2026-09-02T00:00:00.000Z',
-      }, {
-        id: 'org_00000000000000000000000999',
-        displayName: 'Untrusted extra organization',
-        slug: 'extra',
-        state: 'active',
-        revision: 1,
-        updatedAt: '2026-09-02T00:00:00.000Z',
-      }],
-    })
-    return response(request, {
-      kind: 'enterprise_project_repository_page',
-      snapshotRevision: 7,
-      items: [{
-        kind: 'project',
-        projectId: scopes[0].projectId,
-        displayName: 'Workbench',
-        repositoryCount: 1,
-        state: 'active',
-        revision: 7,
-        updatedAt: '2026-09-02T00:00:00.000Z',
-      }, {
-        kind: 'repository',
-        projectId: scopes[0].projectId,
-        repositoryId: scopes[0].repositoryId,
-        displayName: 'Client',
-        defaultBranch: 'main',
-        state: 'active',
-        revision: 7,
-        updatedAt: '2026-09-02T00:00:00.000Z',
-      }, {
-        kind: 'repository',
-        projectId: scopes[0].projectId,
-        repositoryId: 'rep_00000000000000000000000999',
-        displayName: 'Untrusted extra repository',
-        defaultBranch: 'main',
-        state: 'active',
-        revision: 7,
-        updatedAt: '2026-09-02T00:00:00.000Z',
-      }],
-    })
-  })
-  const model = createScopeSelectorViewModel(modelOptions(client))
+test('AuthSession scopes are the selector option and label authority', async () => {
+  const selector = model()
+  await selector.start()
 
-  await model.start()
-
-  assert.equal(model.state.status, 'ready')
-  assert.deepEqual(model.state.options.organizations, [{
-    id: scopes[0].organizationId,
-    label: 'Acme',
-  }, {
-    id: scopes[1].organizationId,
-    label: scopes[1].organizationId,
-  }])
-  assert.deepEqual(model.state.options.projects, [{
+  assert.equal(selector.state.status, 'ready')
+  assert.deepEqual(selector.state.options.organizations, scopes.map(scope => ({
+    id: scope.organizationId,
+    label: scope.organizationId,
+  })))
+  assert.deepEqual(selector.state.options.projects, [{
     id: scopes[0].projectId,
-    label: 'Workbench',
+    label: scopes[0].projectId,
   }])
-  assert.deepEqual(model.state.options.repositories, [{
+  assert.deepEqual(selector.state.options.repositories, [{
     id: scopes[0].repositoryId,
-    label: 'Client',
+    label: scopes[0].repositoryId,
   }])
-  assert.deepEqual(client.calls.map(call => ({
-    query: call.request.query,
-    requestId: call.request.requestId,
-    scope: call.request.scope,
-  })), [{
-    query: 'enterprise.organization.list',
-    requestId: 'req_00000000000000000000000001',
-    scope: scopes[0],
-  }, {
-    query: 'enterprise.project.list',
-    requestId: 'req_00000000000000000000000002',
-    scope: scopes[0],
-  }])
-  model.close()
+  selector.close()
 })
 
-test('changing an ancestor aborts its stale cascade before publishing the new path', async () => {
-  const pending = []
-  const client = clientFake((request, options) => new Promise((resolvePromise, rejectPromise) => {
-    const signal = options.signal
-    signal.addEventListener('abort', () => {
-      rejectPromise(new DOMException('aborted', 'AbortError'))
-    }, { once: true })
-    pending.push({ request, resolve: resolvePromise, signal })
-  }))
+test('ancestor changes clear descendants and reject unauthorized values', async () => {
   const changes = []
-  const model = createScopeSelectorViewModel({
-    ...modelOptions(client, {
-      organizationId: scopes[0].organizationId,
-      workspaceId: null,
-      projectId: null,
-      repositoryId: null,
-    }),
-    onSelectionChange(selection) { changes.push(structuredClone(selection)) },
-  })
-  const first = model.start()
-  await new Promise(resolvePromise => setTimeout(resolvePromise, 0))
-  const second = model.selectOrganization(scopes[1].organizationId)
+  const selector = model(undefined, selection => changes.push(structuredClone(selection)))
+  await selector.selectOrganization(scopes[1].organizationId)
 
-  assert.equal(pending[0].signal.aborted, true)
-  assert.deepEqual(changes, [{
+  assert.deepEqual(selector.state.selection, {
     organizationId: scopes[1].organizationId,
     workspaceId: null,
     projectId: null,
     repositoryId: null,
-  }])
-  pending[1].resolve(response(pending[1].request, {
-    kind: 'enterprise_organization_page',
-    snapshotRevision: 2,
-    items: [],
-  }))
-  await Promise.all([first, second])
-  assert.equal(model.state.selection.organizationId, scopes[1].organizationId)
-  assert.deepEqual(model.state.options.workspaces, [
-    { id: scopes[1].workspaceId, label: scopes[1].workspaceId },
-  ])
-  model.close()
-})
-
-test('permission and network failures remain visible without expanding authorized options', async () => {
-  let failure = new ControlPlaneClientError({
-    kind: 'authorization',
-    code: 'PERMISSION_DENIED',
-    message: 'private details',
-    requestId: null,
-    retryable: false,
   })
-  const client = clientFake(async () => { throw failure })
-  const model = createScopeSelectorViewModel(modelOptions(client, {
-    organizationId: scopes[0].organizationId,
-    workspaceId: null,
-    projectId: null,
-    repositoryId: null,
-  }))
-
-  await model.start()
-  assert.equal(model.state.status, 'permission-denied')
-  assert.equal(model.state.error.code, 'PERMISSION_DENIED')
-  assert.deepEqual(model.state.options.organizations.map(option => option.id), [
-    scopes[0].organizationId,
-    scopes[1].organizationId,
-  ])
-
-  failure = new ControlPlaneClientError({
-    kind: 'network',
-    code: 'NETWORK_ERROR',
-    message: 'private network details',
-    requestId: null,
-    retryable: true,
-  })
-  await model.retry()
-  assert.equal(model.state.status, 'network-error')
-  assert.equal(model.state.error.code, 'NETWORK_ERROR')
-  model.close()
+  assert.deepEqual(changes, [selector.state.selection])
+  assert.throws(
+    () => selector.selectWorkspace(scopes[0].workspaceId),
+    error => error.code === 'SCOPE_SELECTION_NOT_AUTHORIZED',
+  )
+  selector.close()
 })

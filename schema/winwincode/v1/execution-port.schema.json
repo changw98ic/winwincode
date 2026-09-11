@@ -2761,7 +2761,7 @@
         "network"
       ],
       "title": "ActionPolicyKind",
-      "description": "Enterprise Policy family selected for one normalized Worker action."
+      "description": "Action Policy family selected for one normalized Worker action."
     },
     "ActionEnforcementDecision": {
       "type": "string",
@@ -2799,7 +2799,7 @@
         "effectiveDefinitionSha256"
       ],
       "title": "ActionPolicyVersionReference",
-      "description": "Exact immutable enterprise Policy version used for one action decision."
+      "description": "Exact immutable Action Policy version used for one action decision."
     },
     "ActionEnforcementRequestMessage": {
       "type": "object",
@@ -2985,7 +2985,7 @@
         "receiptSignature"
       ],
       "title": "action.enforcement_receipt",
-      "description": "Immutable Control Plane-issued action receipt bound to tenant, actor, Policy version, invocation, action digest, and current Worker authority.",
+      "description": "Immutable Control Plane-issued action receipt bound to repository scope, actor, Policy version, invocation, action digest, and current Worker authority.",
       "x-direction": "control-plane-to-worker",
       "x-authority": "control-command"
     },
@@ -2996,7 +2996,7 @@
         "audit"
       ],
       "title": "ActionPolicyMode",
-      "description": "Enterprise Policy enforcement mode captured by an action receipt."
+      "description": "Action Policy enforcement mode captured by an action receipt."
     },
     "RoleExecutionMode": {
       "type": "string",

@@ -80,7 +80,7 @@ pub struct ArtifactStorageSourceFact {
     pub attribution: ArtifactMeteringAttribution,
 }
 
-/// One immutable source row consumed by enterprise Usage reconciliation.
+/// One immutable source row consumed by usage reconciliation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ArtifactStorageSourceEntry {
     pub sequence: u64,

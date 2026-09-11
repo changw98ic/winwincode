@@ -343,7 +343,6 @@ test('application routes and browser failures use one secret-safe boundary', () 
   assert.match(application, /showRouteFailure\(error, 'STRONGFLOW_ROUTE_FAILURE'\)/u)
   // The /approvals surface became /attention (ATTENTION_ROUTE_FAILURE).
   assert.match(application, /showRouteFailure\(error, 'ATTENTION_ROUTE_FAILURE'\)/u)
-  assert.match(application, /showRouteFailure\(error, 'ENTERPRISE_ROUTE_FAILURE'\)/u)
   assert.match(application, /addEventListener\('offline'/u)
   assert.match(application, /addEventListener\('unhandledrejection'/u)
   assert.doesNotMatch(application, /console\.|innerHTML|localStorage|sessionStorage/u)

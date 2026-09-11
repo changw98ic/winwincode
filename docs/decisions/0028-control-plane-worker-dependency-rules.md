@@ -85,7 +85,7 @@ Provider Gateway 和 Credential 解析属于 `winwincode-control-plane` 内部�
 | `control-plane` | 产品状态、策略、仓库事实和外部治理 | `winwincode-control-plane`、`winwincode-delivery`、`winwincode-session`、`winwincode-publication`、`winwincode-audit`、`winwincode-repository-context` |
 | `execution-worker` | 工作区、执行协调、Kernel 和 Helper | `winwincode-worker`、`winwincode-codex`、`winwincode-kernel`、`winwincode-kernel-helper` |
 | `composition` | HTTP 边界、本机组装和运维入口 | `winwincode-server`、`winwincode-local`、`winwincode-cli`、`winwincode-drill` |
-| `control-plane` 的 product/support 节点 | Community SQLite、备份、证据、连接器和存储 adapter | `winwincode-observability-sqlite`、`winwincode-backup`、`winwincode-evidence-export`、`winwincode-integration`、`winwincode-object-store`、`winwincode-postgres`、`winwincode-test-assets` |
+| `control-plane` 的 product/support 节点 | Community SQLite、备份、证据、连接器和存储 adapter | `winwincode-observability-sqlite`、`winwincode-backup`、`winwincode-evidence-export`、`winwincode-integration-core`、六个 `winwincode-connector-*`、`winwincode-integration-sqlite`、`winwincode-s3-artifact-adapter`、`winwincode-test-assets` |
 
 `allowedInternalDependencies` 是精确集合。每个依赖都必须同时在目标图中出现；未知节点、未声明边和路径重复均使门禁失败。
 

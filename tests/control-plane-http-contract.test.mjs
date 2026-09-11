@@ -28,15 +28,6 @@ const COMMANDS = Object.freeze([
   'worker.enable',
   'publication.publish',
   'publication.cancel',
-  'enterprise.organization.update',
-  'enterprise.membership.update',
-  'enterprise.team.update',
-  'enterprise.role.update',
-  'enterprise.project_repository.update',
-  'enterprise.policy.update',
-  'enterprise.fleet.update',
-  'enterprise.integration.update',
-  'enterprise.identity.update',
   'collaboration.notification.ack',
   'collaboration.presence.update',
   'delivery.task_breakdown.create',
@@ -67,17 +58,6 @@ const QUERIES = Object.freeze([
   'worker.get',
   'publication.list',
   'publication.get',
-  'enterprise.organization.list',
-  'enterprise.membership.list',
-  'enterprise.team.list',
-  'enterprise.role.list',
-  'enterprise.project.list',
-  'enterprise.policy.list',
-  'enterprise.fleet.list',
-  'enterprise.usage.list',
-  'enterprise.audit.list',
-  'enterprise.integration.list',
-  'enterprise.identity.list',
   'collaboration.activity.list',
   'collaboration.notification.list',
   'collaboration.presence.list',
@@ -102,6 +82,17 @@ const ERROR_STATUS = Object.freeze({
 async function json(...parts) {
   return JSON.parse(await readFile(join(schemaRoot, ...parts), 'utf8'))
 }
+
+test('Community schema sources contain no Enterprise management contract', async () => {
+  for (const name of [
+    'domain.schema.json',
+    'control-plane-http.schema.json',
+    'control-plane-events.schema.json',
+    'execution-port.schema.json',
+  ]) {
+    assert.doesNotMatch(await readFile(join(schemaRoot, name), 'utf8'), /enterprise/iu, name)
+  }
+})
 
 function collectRefs(value, refs = []) {
   if (Array.isArray(value)) {
@@ -163,7 +154,11 @@ test('HTTP contract specializes every accepted command without copying domain pr
 
   const refs = collectRefs(schema)
   assert.ok(refs.includes('./domain.schema.json#/$defs/CommandEnvelope'))
-  for (const name of forbiddenCopies) {
+  for (const name of forbiddenCopies.filter(name => ![
+    'ApiTokenId',
+    'ExternalIdentityId',
+    'ServiceAccountId',
+  ].includes(name))) {
     assert.ok(
       refs.includes(`./domain.schema.json#/$defs/${name}`),
       `HTTP contract must reuse domain ${name}`,
@@ -235,17 +230,6 @@ test('HTTP query contract covers every current read surface with an opaque stabl
     'worker.get': '#/$defs/WorkerProjection',
     'publication.list': '#/$defs/PublicationPage',
     'publication.get': '#/$defs/PublicationDetailProjection',
-    'enterprise.organization.list': '#/$defs/EnterpriseOrganizationPage',
-    'enterprise.membership.list': '#/$defs/EnterpriseMembershipPage',
-    'enterprise.team.list': '#/$defs/EnterpriseTeamPage',
-    'enterprise.role.list': '#/$defs/EnterpriseRolePage',
-    'enterprise.project.list': '#/$defs/EnterpriseProjectRepositoryPage',
-    'enterprise.policy.list': '#/$defs/EnterprisePolicyPage',
-    'enterprise.fleet.list': '#/$defs/EnterpriseFleetPage',
-    'enterprise.usage.list': '#/$defs/EnterpriseUsagePage',
-    'enterprise.audit.list': '#/$defs/EnterpriseAuditPage',
-    'enterprise.integration.list': '#/$defs/EnterpriseIntegrationPage',
-    'enterprise.identity.list': '#/$defs/EnterpriseIdentityPage',
     'collaboration.activity.list': '#/$defs/CollaborationActivityPage',
     'collaboration.notification.list': '#/$defs/CollaborationNotificationPage',
     'collaboration.presence.list': '#/$defs/CollaborationPresencePage',
@@ -262,15 +246,6 @@ test('HTTP query contract covers every current read surface with an opaque stabl
       'ApprovalPage',
       'WorkerPage',
       'PublicationPage',
-      'EnterpriseOrganizationPage',
-      'EnterpriseMembershipPage',
-      'EnterpriseProjectRepositoryPage',
-      'EnterprisePolicyPage',
-      'EnterpriseFleetPage',
-      'EnterpriseUsagePage',
-      'EnterpriseAuditPage',
-      'EnterpriseIntegrationPage',
-      'EnterpriseIdentityPage',
       'CollaborationActivityPage',
       'CollaborationNotificationPage',
       'CollaborationPresencePage',
@@ -286,15 +261,6 @@ test('HTTP query contract covers every current read surface with an opaque stabl
       'approval_page',
       'worker_page',
       'publication_page',
-      'enterprise_organization_page',
-      'enterprise_membership_page',
-      'enterprise_project_repository_page',
-      'enterprise_policy_page',
-      'enterprise_fleet_page',
-      'enterprise_usage_page',
-      'enterprise_audit_page',
-      'enterprise_integration_page',
-      'enterprise_identity_page',
       'collaboration_activity_page',
       'collaboration_notification_page',
       'collaboration_presence_page',
@@ -523,37 +489,6 @@ test('Delivery Spec input carries editable scope and one explicit ProductSession
   })
 })
 
-test('enterprise identity contract returns metadata without API Token material', async () => {
-  const schema = await json('control-plane-http.schema.json')
-  const semantics = schema['x-winwincode-semantics'].enterpriseIdentity
-  const issue = schema.$defs.EnterpriseApiTokenIssuePayload
-  const projection = schema.$defs.EnterpriseApiTokenProjection
-
-  assert.deepEqual(semantics, {
-    authority: 'one_durable_identity_ledger',
-    externalIdentityActor: 'external_subject_maps_to_exact_user_actor',
-    tokenFormat:
-      'wwc_api_<26-character ApiTokenId suffix>.<43-character unpadded base64url encoding of exactly 32 random bytes>',
-    tokenPersistence: 'sha256_verifier_only',
-    secretSubmission:
-      'raw_token_generated_and_retained_by_caller; only verifier enters command',
-    replayIdentity: 'actor+organization_scope+requestId',
-    rotation: 'expectedRevision_and_exact_request_replay',
-    revocation: 'checked_on_every_HTTP_and_WebSocket_authentication',
-    crossTenant: 'every_authorized_scope_must_share_the_command_organization',
-    audit: 'identity_lifecycle_mutations_are_durable_and_secret_free',
-  })
-  assert.ok(issue.required.includes('tokenSha256'))
-  assert.equal(
-    issue.properties.tokenSha256.$ref,
-    './domain.schema.json#/$defs/Sha256Digest',
-  )
-  assert.equal(projection.properties.tokenSha256, undefined)
-  assert.equal(projection.properties.rawToken, undefined)
-  assert.equal(projection.properties.secret, undefined)
-  assert.equal(schema.$defs.EnterpriseIdentityPage.properties.items.maxItems, 100)
-})
-
 test('Chat interaction snapshots expose one complete secret-safe binding contract', async () => {
   const schema = await json('control-plane-http.schema.json')
   assert.deepEqual(schema.$defs.ChatInteractionBindingProjection.required, [
@@ -677,7 +612,7 @@ test('OpenAPI 3.1 exposes one browser-session route and the canonical business r
       type: 'http',
       scheme: 'bearer',
       bearerFormat: 'JWT',
-      description: 'Service-account and enterprise access token.',
+      description: 'Service-account access token.',
     },
     bootstrapProof: {
       type: 'http',

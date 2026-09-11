@@ -1,0 +1,24 @@
+[package]
+name = "winwincode-integration-sqlite"
+description = "Community SQLite persistence for WinWinCode integrations"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+include = ["src/**", "tests/**", "Cargo.toml", "README.md"]
+
+[dependencies]
+rusqlite.workspace = true
+serde_json.workspace = true
+winwincode-connector-slack.workspace = true
+winwincode-domain.workspace = true
+winwincode-integration-core.workspace = true
+
+[dev-dependencies]
+rcgen.workspace = true
+rustls.workspace = true
+
+[lints]
+workspace = true

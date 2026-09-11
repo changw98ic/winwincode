@@ -1,4 +1,4 @@
-# Control Plane 存储与生命周期门禁
+# Control Plane 存储与生命周期合同
 
 - 正式决定：[ADR-0028](../decisions/0028-control-plane-worker-migration.md)
 - 目标模块图：[0028-control-plane-worker-target-graph.json](../decisions/0028-control-plane-worker-target-graph.json)
@@ -6,14 +6,11 @@
 - 基础对应任务：`winwincode-9c4.16.2.1`
 - Delivery 原子扩展任务：`winwincode-9c4.16.2.3.1`
 
-## 这份门禁说明什么
+## 这份合同说明什么
 
-这是阶段 2.1 的目标门禁，不是实现完成声明。当前目标 crate 还没有出现在这个分支时，
-Node 测试只检查规则、ADR-0028 和目标模块图是否一致。只要
-`crates/winwincode-storage/Cargo.toml` 或
-`crates/winwincode-control-plane/Cargo.toml` 出现，门禁就要求两个 crate 同时进入 Rust
-workspace，检查依赖，并编译和执行约定的 Rust 集成测试。任务是否完成仍由实际 Rust
-测试和 Beads 状态决定。
+这份合同记录 Control Plane 和 Community SQLite 当前实际使用的启动、提交、恢复与关闭
+顺序。实现由 `winwincode-storage` 和 `winwincode-control-plane` 的 Rust 行为测试验证；
+公开持久化边界由 `tests/community-persistence-ports.test.mjs` 验证。
 
 ## 唯一写入方
 
@@ -146,12 +143,13 @@ flush 失败也不能提前跳出清理。未发布的 outbox 保持可恢复，
 event publisher、storage 并释放自有临时目录，最后返回 `ShutdownError`。这样调用方既
 知道本次发布没有完成，也不会得到仍占用数据库和目录的半关闭进程。
 
-## SQLite 与 PostgreSQL
+## Community SQLite 与下游产品数据库
 
-本地实现使用 `SqliteStorage`，企业实现预留 `PostgresStorage`，两者都位于
-`ProductStateStorage` 后面。PostgreSQL 是后续 adapter，不是阶段 2.1 已实现能力。
+Community 本地实现使用 `SqliteStorage`。Cloud 和 Enterprise 的 PostgreSQL 实现分别
+由各自仓库拥有，通过 `ProductStateStorage` 表达的中立行为接入；Community 不再保留
+PostgreSQL crate、产品 SQL 或预留实现。
 
-两个 adapter 必须保持相同的产品结果：
+各产品实现必须保持相同的产品结果：
 
 - 事务边界相同；
 - revision 冲突结果相同；

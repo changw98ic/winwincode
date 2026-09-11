@@ -99,7 +99,7 @@ pub struct WorkerFleetObservation {
 
 impl WorkerFleetObservation {
     /// Seals canonical observation bytes for a production adapter or fake
-    /// Registry used by the enterprise Fleet module.
+    /// Registry used by the Fleet module.
     ///
     /// # Errors
     ///

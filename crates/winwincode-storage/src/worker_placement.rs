@@ -109,7 +109,7 @@ pub enum WorkerPlacementFailure {
     },
     MissingPlugin(String),
     MissingRepositoryCapability(String),
-    EnterpriseConstraintAuthorityUnavailable,
+    ConstraintAuthorityUnavailable,
     NoAvailableCapacity,
 }
 

@@ -317,7 +317,7 @@ pub struct WorkerSettlementSourceFact {
     pub completed_at: Instant,
 }
 
-/// One immutable worker-settlement source for enterprise reconciliation.
+/// One immutable worker-settlement source for usage reconciliation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkerSettlementSourceEntry {
     pub sequence: u64,

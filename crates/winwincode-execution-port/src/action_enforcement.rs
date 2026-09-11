@@ -4,7 +4,7 @@
 //!
 //! The Worker derives Policy facts from the same normalized tool request it is
 //! about to execute. The Control Plane signs those facts after evaluating the
-//! canonical enterprise Policy ledger. A receipt is claimed durably before the
+//! canonical Action Policy ledger. A receipt is claimed durably before the
 //! tool executor is called, so an exact replay never repeats the side effect.
 
 use std::{
@@ -31,8 +31,8 @@ use crate::{
     },
 };
 
-const POLICY_SUBJECT_NAMESPACE: &[u8] = b"winwincode.enterprise-policy-enforcement-subject.v1";
-const POLICY_CONDITION_NAMESPACE: &[u8] = b"winwincode.enterprise-policy-enforcement-condition.v1";
+const POLICY_SUBJECT_NAMESPACE: &[u8] = b"winwincode.action-policy-enforcement-subject.v1";
+const POLICY_CONDITION_NAMESPACE: &[u8] = b"winwincode.action-policy-enforcement-condition.v1";
 const RECEIPT_SIGNATURE_NAMESPACE: &[u8] = b"winwincode.action-enforcement-receipt-signature.v1";
 const RECEIPT_USE_SCHEMA_VERSION: &str = "winwincode.action-enforcement-use.v1";
 
@@ -280,7 +280,7 @@ pub fn action_enforcement_facts(
     })
 }
 
-/// Computes the shared enterprise Policy condition digest.
+/// Computes the shared Action Policy condition digest.
 #[must_use]
 pub fn policy_condition_sha256(condition: &str) -> Sha256Digest {
     namespaced_digest(POLICY_CONDITION_NAMESPACE, condition.as_bytes())
