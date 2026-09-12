@@ -295,7 +295,7 @@ function assertReleaseApiReport(report) {
   }
   if (report.flow?.chat?.status !== 'Completed'
     || report.flow?.cancel?.state !== 'cancelled'
-    || report.flow?.strongflow?.status !== 'delivered'
+    || report.flow?.strongflow?.status !== 'done'
     || report.flow?.strongflow?.verdictStatus !== 'pass') {
     throw new Error('release API vertical did not complete Chat, cancel and StrongFlow')
   }

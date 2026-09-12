@@ -82,11 +82,11 @@ function assertRestartAndTerminalProjections(report, directory) {
   assert.equal(report.health.afterRestart, 'ready', `${directory}: restart Server health`)
   assert.equal(report.flow.chat.status, 'Completed', `${directory}: Chat terminal`)
   assert.equal(report.flow.cancel.state, 'cancelled', `${directory}: cancellation terminal`)
-  assert.equal(report.flow.strongflow.status, 'delivered', `${directory}: Delivery terminal`)
+  assert.equal(report.flow.strongflow.status, 'done', `${directory}: Delivery terminal`)
   assert.equal(report.flow.strongflow.verdictStatus, 'pass', `${directory}: verdict terminal`)
   assert.equal(report.restart.deliveryBytesStable, true, `${directory}: Delivery restart bytes`)
   assert.equal(report.restart.messageBytesStable, true, `${directory}: Chat restart bytes`)
-  assert.equal(report.restart.status, 'delivered', `${directory}: restart Delivery status`)
+  assert.equal(report.restart.status, 'done', `${directory}: restart Delivery status`)
   assert.equal(report.deterministic.contentEqual, true, `${directory}: repeated Chat content`)
 }
 

@@ -332,6 +332,7 @@ test('release runner leaves the complete workspace gate to mainline and runs one
   assert.match(runner, /'--worker-binary', paths\['winwincode-worker'\]/u)
   assert.match(runner, /const runtimeRoot = resolve\(buildRoot, 'api-production-runtime'\)/u)
   assert.match(runner, /report\.flow\?\.chat\?\.status !== 'Completed'/u)
+  assert.match(runner, /report\.flow\?\.strongflow\?\.status !== 'done'/u)
   assert.match(runner, /report\.flow\?\.strongflow\?\.verdictStatus !== 'pass'/u)
   assert.match(runner, /report\.remoteWorker\?\.terminalAfterWorkerRestart !== true/u)
   assert.match(runner, /report\.remoteWorker\?\.terminalAfterServerRestart !== true/u)

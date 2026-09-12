@@ -1498,7 +1498,9 @@ export async function driveDelivery(
       && detail.verdict === null
       && activeWorkRuns.length === 0
     ) {
-      const verificationProfile = ['reviewer', 'verifier'][workRuns.length - 1]
+      const verificationProfile = ['reviewer', 'verifier'][
+        actions.filter(action => action.command === 'workrun.start').length
+      ]
       if (verificationProfile !== undefined) {
         command = 'workrun.start'
         payload = { deliveryId: IDS.delivery, dispatchProfile: verificationProfile }

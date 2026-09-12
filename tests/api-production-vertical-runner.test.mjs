@@ -157,10 +157,10 @@ test('Delivery reaches its real terminal state after more transitions than the e
   assert.deepEqual(client.commands, [], 'active WorkRuns must be polled, not advanced')
 })
 
-test('candidate-ready WorkRun dispatches independent verification before verdict', async () => {
+test('candidate-ready dispatch sequence tolerates a lagging WorkRun projection', async () => {
   let revision = 7
-  let verificationRuns = 0
   let delivered = false
+  let instant = 0
   let requestSequence = 0
   const commands = []
   const client = {
@@ -169,12 +169,12 @@ test('candidate-ready WorkRun dispatches independent verification before verdict
         return {
           result: {
             items: [{ state: delivered ? 'done' : 'candidate_ready' }],
-            runs: Array.from({ length: verificationRuns + 1 }, (_, index) => ({
-              id: `wrn_${String(index + 1).padStart(26, '0')}`,
+            runs: [{
+              id: 'wrn_00000000000000000000000001',
               workItemId: 'wit_01J00000000000000000000001',
-              executionJobId: `job_${String(index + 1).padStart(26, '0')}`,
+              executionJobId: 'job_00000000000000000000000001',
               state: delivered ? 'settled' : 'candidate_ready',
-            })),
+            }],
           },
         }
       }
@@ -196,7 +196,6 @@ test('candidate-ready WorkRun dispatches independent verification before verdict
     },
     async command(command, previousRevision, payload) {
       commands.push({ command, profile: payload.dispatchProfile ?? null })
-      if (command === 'workrun.start') verificationRuns += 1
       if (command === 'delivery.submit_verdict') delivered = true
       revision = previousRevision + 1
       return { command, currentRevision: revision, outcome: 'completed', previousRevision }
@@ -207,7 +206,7 @@ test('candidate-ready WorkRun dispatches independent verification before verdict
     },
   }
 
-  await driveDelivery(client, 10_000)
+  await driveDelivery(client, 10, undefined, () => instant++)
   assert.deepEqual(commands, [
     { command: 'workrun.start', profile: 'reviewer' },
     { command: 'workrun.start', profile: 'verifier' },
