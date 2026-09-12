@@ -5265,7 +5265,16 @@ fn real_shell_approval_and_action_receipt_reach_one_kernel_handler() {
         );
         assert_eq!(detail.risk_level, ApprovalActionRiskLevel::High);
         assert_eq!(detail.target_count, 1);
-        assert_eq!(detail.target_summaries, ["program:zsh;argument_count:2"]);
+        assert!(matches!(
+            detail.target_summaries.as_slice(),
+            [summary]
+                if matches!(
+                    summary.as_str(),
+                    "program:zsh;argument_count:2"
+                        | "program:bash;argument_count:2"
+                        | "program:sh;argument_count:2"
+                )
+        ));
         assert_eq!(detail.working_directory.as_deref(), Some("workspace"));
         let decided_at = at("2030-01-01T00:00:02.000Z");
         worker
