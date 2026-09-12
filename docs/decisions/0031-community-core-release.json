@@ -45,7 +45,7 @@
     },
     "rustPackages": {
       "declaredVersion": "0.1.0-alpha.2",
-      "registryPublicationConfigured": false,
+      "registryPublicationConfigured": true,
       "intendedLinkableCore": [
         {
           "name": "winwincode-domain",
@@ -126,6 +126,7 @@
     },
     "npmPackages": {
       "declaredVersion": "0.1.0-alpha.2",
+      "registryPublicationConfigured": true,
       "registryPublicationProven": false,
       "packages": [
         {
@@ -190,6 +191,7 @@
       "publishedBundle": true
     },
     "currentSourcePaths": [
+      ".github/workflows/core-registry-publish.yml",
       ".github/workflows/native-release.yml",
       "Cargo.toml",
       "crates/winwincode-api/Cargo.toml",
@@ -237,6 +239,7 @@
       "scripts/release-artifact-contract.mjs",
       "scripts/run-release-artifact-gate.mjs",
       "scripts/stage-community-core-worker-runtime.mjs",
+      "scripts/verify-community-core-release.mjs",
       "scripts/verify-products.mjs",
       "scripts/verify-release-artifacts.mjs",
       "tests/community-core-finalize.test.mjs",

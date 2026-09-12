@@ -80,6 +80,14 @@ done
 
 ## 5. 发布与回滚
 
-阶段 6.7 的脚本只写证据，不自动发布。远端发布必须使用已经验证的原始 artifact，发布后保存 GitHub run、target、manifest SHA-256、报告 SHA-256 和同一 commit。
+`Product release matrix` 的最终 job 自动汇总并签名 Community Core 候选，但不自动公开版本。发布批准人独立验证候选的 24 个文件、`SHA256SUMS` 和 Ed25519 签名后，将原始文件作为 `core-v{version}` GitHub prerelease 附件发布；标签必须指向 manifest 中的 source commit。
+
+首次发布到 crates.io 和 npm 前，在仓库配置 `CARGO_REGISTRY_TOKEN` 与 `NPM_TOKEN` secret。GitHub prerelease 完成后运行唯一的 registry 发布入口：
+
+```bash
+gh workflow run core-registry-publish.yml -f tag=core-v0.1.0-alpha.2
+```
+
+该 workflow 重新下载并验签 GitHub Release，确认 checkout 与 manifest 的 source commit 相同，复现 9 个 Cargo 包并比对签名哈希，再按依赖顺序发布；5 个 npm 包直接从签名 `.tgz` 发布并生成 provenance。重复运行只接受 registry 中字节哈希完全相同的既有版本。
 
 候选发布前失败时，丢弃该 commit 的四平台 artifact，修复后用新 commit 和新 `SOURCE_DATE_EPOCH` 重跑。已经公开的版本保持字节不变；修复使用新的 SemVer，不覆盖旧 artifact。

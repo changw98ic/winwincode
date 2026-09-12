@@ -10,6 +10,8 @@ const workflowPath = resolve(root, '.github/workflows/native-release.yml')
 const workflow = readFileSync(workflowPath, 'utf8')
 const mainlineWorkflowPath = resolve(root, '.github/workflows/mainline.yml')
 const mainlineWorkflow = readFileSync(mainlineWorkflowPath, 'utf8')
+const registryWorkflowPath = resolve(root, '.github/workflows/core-registry-publish.yml')
+const registryWorkflow = readFileSync(registryWorkflowPath, 'utf8')
 
 test('ordinary CI runs one exact-SHA aggregate over five independent lanes', () => {
   assert.match(mainlineWorkflow, /^name: Mainline verification$/mu)
@@ -292,6 +294,19 @@ test('product release assembles one signed Community Core candidate after all ta
     'WINWINCODE_CORE_RELEASE_PRIVATE_KEY_PEM: ${{ secrets.WINWINCODE_CORE_RELEASE_PRIVATE_KEY_PEM }}',
   ))
   assert.ok(workflow.includes('name: community-core-release-${{ env.SOURCE_COMMIT }}'))
+})
+
+test('registry publication accepts only a signed release and publishes exact archives', () => {
+  assert.match(registryWorkflow, /^  workflow_dispatch:$/mu)
+  assert.ok(registryWorkflow.includes('CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}'))
+  assert.ok(registryWorkflow.includes('NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}'))
+  assert.ok(registryWorkflow.includes('node publisher/scripts/verify-community-core-release.mjs \\'))
+  assert.ok(registryWorkflow.includes('test "$(git -C source rev-parse HEAD)" = \\'))
+  assert.ok(registryWorkflow.includes('cargo publish --locked --no-verify -p "${crate}"'))
+  assert.ok(registryWorkflow.includes(
+    'npm publish "${CORE_INPUT}/${archive}" --access public --provenance --tag alpha',
+  ))
+  assert.ok(registryWorkflow.includes('sha256sum "${downloaded}"'))
 })
 
 test('release download instructions recreate the exact aggregate evidence roots', () => {

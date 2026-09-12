@@ -1,0 +1,157 @@
+name: Community Core registry publication
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Signed Community Core release tag
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      CORE_TAG: ${{ inputs.tag }}
+      NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+    steps:
+      - name: Check out publication tooling
+        uses: actions/checkout@v7
+        with:
+          path: publisher
+          persist-credentials: false
+
+      - name: Check out signed release source
+        uses: actions/checkout@v7
+        with:
+          path: source
+          persist-credentials: false
+          ref: ${{ env.CORE_TAG }}
+
+      - name: Install pinned Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version-file: publisher/.node-version
+          registry-url: https://registry.npmjs.org
+
+      - name: Install pinned Rust
+        shell: bash
+        run: |
+          rustup toolchain install 1.95.0 --profile minimal
+          rustup override set 1.95.0 --path source
+
+      - name: Download and verify signed release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "${CORE_TAG}" =~ ^core-v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]
+          test -n "${CARGO_REGISTRY_TOKEN}"
+          test -n "${NODE_AUTH_TOKEN}"
+          core_input="${RUNNER_TEMP}/community-core-release"
+          mkdir -p "${core_input}"
+          gh release download "${CORE_TAG}" --repo "${GITHUB_REPOSITORY}" --dir "${core_input}"
+          node publisher/scripts/verify-community-core-release.mjs \
+            --input "${core_input}" \
+            --root source \
+            --tag "${CORE_TAG}"
+          test "$(git -C source rev-parse HEAD)" = \
+            "$(jq -r '.sourceCommit' "${core_input}/community-core-release-manifest.json")"
+          printf 'CORE_INPUT=%s\n' "${core_input}" >> "${GITHUB_ENV}"
+          printf 'CARGO_TARGET_DIR=%s\n' "${RUNNER_TEMP}/community-core-cargo" >> "${GITHUB_ENV}"
+
+      - name: Reproduce signed Cargo packages
+        shell: bash
+        working-directory: source
+        run: |
+          set -euo pipefail
+          contract="docs/decisions/0031-community-core-release.json"
+          version="$(jq -r '.version' "${CORE_INPUT}/community-core-release-manifest.json")"
+          mapfile -t crates < <(jq -r '.targetState.consumableRustCrates[].name' "${contract}")
+          cargo_args=(package --locked --no-verify)
+          for crate in "${crates[@]}"; do cargo_args+=(-p "${crate}"); done
+          cargo "${cargo_args[@]}"
+          for crate in "${crates[@]}"; do
+            signed="${CORE_INPUT}/${crate}-${version}.crate"
+            reproduced="${CARGO_TARGET_DIR}/package/${crate}-${version}.crate"
+            test "$(sha256sum "${signed}" | cut -d ' ' -f 1)" = \
+              "$(sha256sum "${reproduced}" | cut -d ' ' -f 1)"
+          done
+
+      - name: Publish exact Cargo packages
+        shell: bash
+        working-directory: source
+        run: |
+          set -euo pipefail
+          manifest="${CORE_INPUT}/community-core-release-manifest.json"
+          version="$(jq -r '.version' "${manifest}")"
+          crates=(
+            winwincode-domain
+            winwincode-client-port
+            winwincode-observability-core
+            winwincode-repository-context
+            winwincode-api
+            winwincode-execution-port
+            winwincode-session
+            winwincode-delivery
+            winwincode-publication
+          )
+          for crate in "${crates[@]}"; do
+            uri="$(jq -r --arg name "${crate}" '.artifacts.cargo[] | select(.name == $name) | .uri' "${manifest}")"
+            expected="$(jq -r --arg name "${crate}" '.artifacts.cargo[] | select(.name == $name) | .sha256' "${manifest}")"
+            downloaded="${RUNNER_TEMP}/${crate}-${version}.crate"
+            if curl -fsSL "${uri}" -o "${downloaded}"; then
+              test "$(sha256sum "${downloaded}" | cut -d ' ' -f 1)" = "${expected}"
+            else
+              cargo publish --locked --no-verify -p "${crate}"
+              for _ in {1..60}; do
+                if curl -fsSL "${uri}" -o "${downloaded}"; then break; fi
+                sleep 5
+              done
+              test -s "${downloaded}"
+              test "$(sha256sum "${downloaded}" | cut -d ' ' -f 1)" = "${expected}"
+            fi
+            for _ in {1..60}; do
+              if cargo info "${crate}@${version}" >/dev/null 2>&1; then break; fi
+              sleep 5
+            done
+            cargo info "${crate}@${version}" >/dev/null
+          done
+
+      - name: Publish exact npm packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          manifest="${CORE_INPUT}/community-core-release-manifest.json"
+          version="$(jq -r '.version' "${manifest}")"
+          packages=(
+            @winwincode/contracts
+            @winwincode/browser-ui
+            @winwincode/strongflow
+            @winwincode/control-plane-client
+            @winwincode/browser-core
+          )
+          for package in "${packages[@]}"; do
+            uri="$(jq -r --arg name "${package}" '.artifacts.npm[] | select(.name == $name) | .uri' "${manifest}")"
+            expected="$(jq -r --arg name "${package}" '.artifacts.npm[] | select(.name == $name) | .sha256' "${manifest}")"
+            archive="$(jq -r --arg name "${package}" '.artifacts.npm[] | select(.name == $name) | .fileName' "${manifest}")"
+            downloaded="${RUNNER_TEMP}/${archive}"
+            if curl -fsSL "${uri}" -o "${downloaded}"; then
+              test "$(sha256sum "${downloaded}" | cut -d ' ' -f 1)" = "${expected}"
+            else
+              npm publish "${CORE_INPUT}/${archive}" --access public --provenance --tag alpha
+              for _ in {1..60}; do
+                if curl -fsSL "${uri}" -o "${downloaded}"; then break; fi
+                sleep 5
+              done
+              test -s "${downloaded}"
+              test "$(sha256sum "${downloaded}" | cut -d ' ' -f 1)" = "${expected}"
+            fi
+          done

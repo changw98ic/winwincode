@@ -16,6 +16,7 @@ import {
   CommunityCoreFinalizeError,
   finalizeCommunityCoreRelease,
 } from '../scripts/finalize-community-core-release.mjs'
+import { verifyCommunityCoreRelease } from '../scripts/verify-community-core-release.mjs'
 
 const repositoryRoot = resolve(import.meta.dirname, '..')
 const releaseContract = JSON.parse(readFileSync(
@@ -112,6 +113,23 @@ test('final Community Core release is exact, deterministic, and signed', t => {
   assert.equal(checksums.length, readdirSync(first).length - 1)
   assert.equal(checksums.some(line => line.endsWith('  community-core-release-manifest.json')), true)
   assert.equal(checksums.some(line => line.endsWith('  community-core-release-manifest.json.sig')), true)
+  assert.equal(verifyCommunityCoreRelease({
+    root: setup.root,
+    contractPath: setup.contractPath,
+    inputRoot: first,
+    expectedTag: `core-v${version}`,
+  }).artifactCount, 19)
+
+  writeFileSync(join(first, 'community-core-release-manifest.json.sig'), 'tampered\n')
+  assert.throws(
+    () => verifyCommunityCoreRelease({
+      root: setup.root,
+      contractPath: setup.contractPath,
+      inputRoot: first,
+      expectedTag: `core-v${version}`,
+    }),
+    /SHA-256 mismatch/u,
+  )
 })
 
 test('final Community Core release rejects any extra product file', t => {
