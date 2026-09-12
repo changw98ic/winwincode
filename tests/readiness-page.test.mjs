@@ -33,6 +33,9 @@ const pageModule = await import(`${pathToFileURL(resolve(
 const { mountReadinessPage } = pageModule
 
 const NOW = '2026-09-03T08:30:00.000Z'
+const moment = new Date(NOW)
+const pad = value => String(value).padStart(2, '0')
+const LOCAL_NOW = `${String(moment.getFullYear())}-${pad(moment.getMonth() + 1)}-${pad(moment.getDate())} ${pad(moment.getHours())}:${pad(moment.getMinutes())}`
 
 class FakeElement {
   constructor(ownerDocument, tagName) {
@@ -183,7 +186,7 @@ test('every checklist item shows its status, reason, check time, and real fix en
   assert.match(byId['repository-scope'].textContent, /通过/u)
   assert.equal(byId['model-route'].dataset.status, 'attention')
   assert.match(byId['model-route'].textContent, /尚未配置模型服务商/u)
-  assert.match(byId['model-route'].textContent, /检查于 2026-09-03 16:30/u)
+  assert.match(byId['model-route'].textContent, new RegExp(`检查于 ${LOCAL_NOW}`, 'u'))
   assert.equal(byId['helper-availability'].dataset.status, 'attention')
   assert.match(byId['helper-availability'].textContent, /执行容量/u)
 
@@ -276,7 +279,7 @@ test('blocked and unavailable items explain themselves without fake check times'
   assert.match(byId['model-route'].textContent, /等待仓库范围/u)
   assert.equal(byId['model-route'].textContent.includes(NOW), false)
   assert.match(byId['server-worker-health'].textContent, /无法执行/u)
-  assert.match(byId['server-worker-health'].textContent, /检查于 2026-09-03 16:30/u)
+  assert.match(byId['server-worker-health'].textContent, new RegExp(`检查于 ${LOCAL_NOW}`, 'u'))
   const scopeFixes = descendants(rootElement).filter(node => (
     node.className === 'wwc-readiness-fix'
   ))
