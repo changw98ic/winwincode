@@ -109,9 +109,8 @@ test('product release verifies one successful exact-commit mainline run before t
   assert.equal([...workflow.matchAll(/^          version: "v0\.17\.0"$/gmu)].length, 1)
   assert.equal([...workflow.matchAll(/^      RUSTC_WRAPPER: "sccache"$/gmu)].length, 1)
   assert.equal([...workflow.matchAll(/^      SCCACHE_GHA_ENABLED: "true"$/gmu)].length, 1)
-  assert.ok(workflow.includes(
-    `printf 'RUSTC_WRAPPER=%s\\n' "\${SCCACHE_PATH}" >> "\${GITHUB_ENV}"`,
-  ))
+  assert.equal([...workflow.matchAll(/^      SCCACHE_IDLE_TIMEOUT: "0"$/gmu)].length, 1)
+  assert.doesNotMatch(workflow, /Select installed Rust compiler cache/u)
   assert.doesNotMatch(workflow, /windows|win32|msvc/iu)
   const releaseRunner = readFileSync(resolve(root, 'scripts/run-release-artifact-gate.mjs'), 'utf8')
   assert.doesNotMatch(releaseRunner, /pnpm', 'verify|pnpm verify/u)
