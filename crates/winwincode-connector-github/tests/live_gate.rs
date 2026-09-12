@@ -57,12 +57,11 @@ use winwincode_publication::{
     PublicationCommandContext, PublicationFactBinding, PublicationLedger, PublicationPolicyAudit,
     PublicationPolicyAuditError, PublicationPolicyContext, PublicationPolicyDecision,
     PublicationPolicyEvidence, PublicationPolicyOrigin, PublicationPublishCommand,
-    PublicationRequester, PublicationResourceKind, PublicationSourceIssue, PublicationState,
-    PublicationTarget, RepositoryPolicyScope, RepositoryPublicationPolicy,
+    PublicationReceiptIdentity, PublicationRequester, PublicationResourceKind,
+    PublicationSourceIssue, PublicationState, PublicationTarget, RepositoryPolicyScope,
+    RepositoryPublicationPolicy,
 };
-use winwincode_storage::{
-    ProductStateStorage, ReceiptActorKey, ReceiptIdentity, ReceiptScopeKey, SqliteStorage,
-};
+use winwincode_storage::{ProductStateStorage, PublicationStorageAdapter, SqliteStorage};
 
 const LIVE_GATE_ENV: &str = "WINWINCODE_GITHUB_LIVE_GATE";
 const CONFIG_FILE_ENV: &str = "WINWINCODE_GITHUB_LIVE_CONFIG_FILE";
@@ -1238,17 +1237,11 @@ fn publication_command_context(
         )
     ));
     PublicationCommandContext::try_new(
-        ReceiptIdentity::new(
-            ReceiptActorKey::from_encoded(
-                serde_json::to_vec(&config.requester)
-                    .map_err(|_| GateError::new(GateErrorCode::CanonicalPath))?,
-            )
-            .map_err(|_| GateError::new(GateErrorCode::CanonicalPath))?,
-            ReceiptScopeKey::from_encoded(
-                serde_json::to_vec(&config.repository_scope)
-                    .map_err(|_| GateError::new(GateErrorCode::CanonicalPath))?,
-            )
-            .map_err(|_| GateError::new(GateErrorCode::CanonicalPath))?,
+        PublicationReceiptIdentity::try_new(
+            serde_json::to_vec(&config.requester)
+                .map_err(|_| GateError::new(GateErrorCode::CanonicalPath))?,
+            serde_json::to_vec(&config.repository_scope)
+                .map_err(|_| GateError::new(GateErrorCode::CanonicalPath))?,
             config.publication_request_id.clone(),
         )
         .map_err(|_| GateError::new(GateErrorCode::CanonicalPath))?,
@@ -1285,7 +1278,7 @@ fn publish_canonical_set(
     let mut adapter = GitHubPublicationAdapter::new(publication_config, broker);
     {
         let mut coordinator = winwincode_publication::PublicationCoordinator::new(
-            PublicationLedger::new(&mut storage),
+            PublicationLedger::new(PublicationStorageAdapter::new(&mut storage)),
             &mut adapter,
             Box::new(audit.clone()),
         );
@@ -1302,7 +1295,7 @@ fn publish_canonical_set(
     let resume_at = observed_at_millis.saturating_add(1);
     let resume_context = publication_policy_context(config, resume_at)?;
     let published = winwincode_publication::PublicationCoordinator::new(
-        PublicationLedger::new(&mut storage),
+        PublicationLedger::new(PublicationStorageAdapter::new(&mut storage)),
         &mut adapter,
         Box::new(audit),
     )

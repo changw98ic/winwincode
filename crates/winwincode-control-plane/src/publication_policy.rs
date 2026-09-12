@@ -20,6 +20,9 @@ use winwincode_publication::{
     PublicationPublishCommand, PublicationRequester, PublicationState, PublicationTarget,
     RepositoryPolicyScope, RepositoryPublicationPolicy,
 };
+use winwincode_storage::{
+    PublicationStorageAdapter, publication_error, publication_receipt_identity,
+};
 
 use crate::{
     ControlPlane, PublicationAuthorityError, PublicationAuthorityErrorKind,
@@ -178,6 +181,12 @@ impl From<PublicationError> for PublicationCommandError {
     }
 }
 
+impl From<StorageError> for PublicationCommandError {
+    fn from(error: StorageError) -> Self {
+        Self::Publication(publication_error(&error))
+    }
+}
+
 impl From<AuditError> for PublicationCommandError {
     fn from(error: AuditError) -> Self {
         Self::AuditUnavailable(error)
@@ -228,26 +237,26 @@ impl ControlPlane {
         let storage = match &mut self.storage {
             Some(storage) => storage.as_mut(),
             None => {
-                return Err(PublicationCommandError::Publication(
-                    PublicationError::from(StorageError::adapter(
-                        "Control Plane storage is closed",
-                    )),
-                ));
+                return Err(PublicationCommandError::Publication(publication_error(
+                    &StorageError::adapter("Control Plane storage is closed"),
+                )));
             }
         };
         let audit: Box<dyn PublicationPolicyAudit + '_> = self.audit_store.as_mut().map_or_else(
             || Box::new(UnavailablePolicyAudit) as Box<dyn PublicationPolicyAudit>,
             |store| Box::new(ControlPlanePolicyAudit { store }),
         );
-        let publication = PublicationCoordinator::new(PublicationLedger::new(storage), port, audit)
-            .publish(
-                &mapped.context,
-                &mapped.command,
-                authorization,
-                &policy_context,
-                policy,
-            )
-            .map_err(PublicationCommandError::from)?;
+        let publication_storage = PublicationStorageAdapter::new(storage);
+        let publication =
+            PublicationCoordinator::new(PublicationLedger::new(publication_storage), port, audit)
+                .publish(
+                    &mapped.context,
+                    &mapped.command,
+                    authorization,
+                    &policy_context,
+                    policy,
+                )
+                .map_err(PublicationCommandError::from)?;
         self.record_publication_result(&publication, &policy_context)?;
         Ok(publication)
     }
@@ -276,7 +285,8 @@ impl ControlPlane {
                     || Box::new(UnavailablePolicyAudit) as Box<dyn PublicationPolicyAudit>,
                     |store| Box::new(ControlPlanePolicyAudit { store }),
                 );
-            PublicationCoordinator::new(PublicationLedger::new(storage.as_mut()), port, audit)
+            let publication_storage = PublicationStorageAdapter::new(storage.as_mut());
+            PublicationCoordinator::new(PublicationLedger::new(publication_storage), port, audit)
                 .resume(
                     publication_id,
                     policy_context.evidence().observed_at_millis(),
@@ -291,9 +301,9 @@ impl ControlPlane {
         ) {
             self.finalize_candidate_git_for_terminal_delivery(publication.binding().delivery_id())
                 .map_err(|error| {
-                    PublicationCommandError::Publication(PublicationError::from(
-                        StorageError::adapter(error.to_string()),
-                    ))
+                    PublicationCommandError::Publication(publication_error(&StorageError::adapter(
+                        error.to_string(),
+                    )))
                 })?;
         }
         self.record_publication_result(&publication, policy_context)?;
@@ -336,7 +346,7 @@ impl ControlPlane {
 }
 
 fn publication_storage_error(error: StorageError) -> PublicationCommandError {
-    PublicationCommandError::Publication(PublicationError::from(error))
+    error.into()
 }
 
 struct MappedPublish {
@@ -385,7 +395,7 @@ fn mapped_publish(
     let (receipt_identity, command_digest) = command_receipt(&generic)
         .map_err(|error| PublicationCommandError::InvalidInput(error.to_string()))?;
     let context = PublicationCommandContext::try_new(
-        receipt_identity,
+        publication_receipt_identity(&receipt_identity).map_err(PublicationError::from)?,
         command_digest,
         0,
         occurred_at_millis,

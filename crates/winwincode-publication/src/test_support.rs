@@ -2,13 +2,6 @@
 
 //! Deterministic sealed publication fixtures for Rust integration tests.
 
-use winwincode_domain::{
-    AttentionItemId, DeliveryId, OrganizationId, ProjectId, PublicationId, RepositoryId, RequestId,
-    Sha256Digest, UserId, WorkspaceId,
-};
-use winwincode_storage::ProductStateStorage;
-use winwincode_storage::{ReceiptActorKey, ReceiptIdentity, ReceiptScopeKey};
-
 use crate::coordinator::{
     Publication, PublicationCancelCommand, PublicationCommandContext, PublicationCoordinator,
     PublicationError, PublicationLedger, PublicationPublishCommand,
@@ -24,6 +17,11 @@ use crate::policy::{
     PublicationPolicyContext, PublicationPolicyDecision, PublicationPolicyEvidence,
     PublicationPolicyOrigin, PublicationRequester, RepositoryPolicyScope,
     RepositoryPublicationPolicy,
+};
+use crate::storage::{PublicationReceiptIdentity, PublicationStorage};
+use winwincode_domain::{
+    AttentionItemId, DeliveryId, OrganizationId, ProjectId, PublicationId, RepositoryId, RequestId,
+    Sha256Digest, UserId, WorkspaceId,
 };
 
 pub struct CurrentPublicationFixture {
@@ -108,10 +106,9 @@ pub fn current_publication_fixture() -> CurrentPublicationFixture {
         target,
     )
     .expect("canonical publish command");
-    let receipt_identity = ReceiptIdentity::new(
-        ReceiptActorKey::from_encoded(b"fixture-publication-actor".to_vec()).expect("actor key"),
-        ReceiptScopeKey::from_encoded(b"fixture-publication-repository-scope".to_vec())
-            .expect("scope key"),
+    let receipt_identity = PublicationReceiptIdentity::try_new(
+        b"fixture-publication-actor".to_vec(),
+        b"fixture-publication-repository-scope".to_vec(),
         RequestId("req_00000000000000000000000001".to_owned()),
     )
     .expect("receipt identity");
@@ -222,7 +219,7 @@ impl CurrentPublicationCoordinator<'_, '_> {
 /// Constructs the only direct-test coordinator. Production callers use the
 /// Control Plane application seam and its immutable `AuditStore` adapter.
 pub fn current_policy_coordinator<'storage, 'port>(
-    storage: &'storage mut dyn ProductStateStorage,
+    storage: impl PublicationStorage + 'storage,
     port: &'port mut dyn PublicationPort,
 ) -> CurrentPublicationCoordinator<'storage, 'port> {
     CurrentPublicationCoordinator {

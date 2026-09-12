@@ -6,7 +6,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-publish = false
+include = ["src/**", "Cargo.toml"]
 
 [features]
 # Exposes deterministic sealed facts only to Rust integration tests.
@@ -18,10 +18,10 @@ serde_json.workspace = true
 sha2.workspace = true
 ureq = { version = "=3.1.4", default-features = false, features = ["rustls", "json"] }
 winwincode-domain.workspace = true
-winwincode-storage = { path = "../winwincode-storage" }
 
 [dev-dependencies]
 rusqlite.workspace = true
+winwincode-storage = { path = "../winwincode-storage" }
 
 [[test]]
 name = "publication_coordinator"

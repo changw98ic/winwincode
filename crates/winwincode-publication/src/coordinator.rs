@@ -2,15 +2,6 @@
 
 use std::{collections::VecDeque, fmt};
 
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
-use winwincode_domain::{DeliveryId, Instant, PublicationId, RequestId, Revision, Sha256Digest};
-use winwincode_storage::{
-    AggregateJournalKey, AggregateJournalPublication, AggregateJournalRecord, NewOutboxEvent,
-    ProductStateStorage, ReceiptActorKey, ReceiptIdentity, ReceiptScopeKey, StateCommit,
-    StorageError, StorageErrorKind,
-};
-
 use crate::facts::{
     MAX_SAFE_INTEGER, PublicationAuthorization, PublicationFactBinding, PublicationResourceFact,
     PublicationResourceKind, PublicationResultFact, PublicationSourceIssue, PublicationTarget,
@@ -24,6 +15,14 @@ use crate::policy::{
     PublicationPolicyAudit, PublicationPolicyContext, PublicationPolicyDecision,
     PublicationPolicyEffect, RepositoryPublicationPolicy,
 };
+use crate::storage::{
+    PublicationJournalMutation, PublicationJournalRecord, PublicationReceiptIdentity,
+    PublicationStorage, PublicationStorageCommit, PublicationStorageError,
+    PublicationStorageErrorKind, PublicationStorageEvent, PublicationStorageReceipt,
+};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use winwincode_domain::{DeliveryId, Instant, PublicationId, RequestId, Revision, Sha256Digest};
 const PUBLICATION_AGGREGATE_TYPE: &str = "publication";
 const PUBLICATION_EVENT_TOPIC: &str = "publication.state.v1";
 const INTERNAL_ACTOR_KEY: &[u8] = b"winwincode.publication.system.v1";
@@ -621,7 +620,7 @@ impl PublicationCancelCommand {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublicationCommandContext {
-    receipt_identity: ReceiptIdentity,
+    receipt_identity: PublicationReceiptIdentity,
     command_digest: Sha256Digest,
     expected_revision: u64,
     occurred_at_millis: u64,
@@ -634,7 +633,7 @@ impl PublicationCommandContext {
     ///
     /// Rejects a malformed command digest, revision, or timestamp.
     pub fn try_new(
-        receipt_identity: ReceiptIdentity,
+        receipt_identity: PublicationReceiptIdentity,
         command_digest: Sha256Digest,
         expected_revision: u64,
         occurred_at_millis: u64,
@@ -657,7 +656,7 @@ impl PublicationCommandContext {
     }
 
     #[must_use]
-    pub const fn receipt_identity(&self) -> &ReceiptIdentity {
+    pub const fn receipt_identity(&self) -> &PublicationReceiptIdentity {
         &self.receipt_identity
     }
 
@@ -755,20 +754,20 @@ impl fmt::Display for PublicationError {
 
 impl std::error::Error for PublicationError {}
 
-impl From<StorageError> for PublicationError {
-    fn from(error: StorageError) -> Self {
+impl From<PublicationStorageError> for PublicationError {
+    fn from(error: PublicationStorageError) -> Self {
         let kind = match error.kind() {
-            StorageErrorKind::InvalidInput => PublicationErrorKind::InvalidInput,
-            StorageErrorKind::RevisionConflict | StorageErrorKind::JournalConflict => {
+            PublicationStorageErrorKind::InvalidInput => PublicationErrorKind::InvalidInput,
+            PublicationStorageErrorKind::RevisionConflict
+            | PublicationStorageErrorKind::JournalConflict => {
                 PublicationErrorKind::RevisionConflict
             }
-            StorageErrorKind::RequestConflict => PublicationErrorKind::RequestConflict,
-            StorageErrorKind::JournalAlreadyExists => PublicationErrorKind::AlreadyExists,
-            StorageErrorKind::JournalNotFound => PublicationErrorKind::NotFound,
-            StorageErrorKind::RequestReplayMissing
-            | StorageErrorKind::EventCursorExpired
-            | StorageErrorKind::Adapter
-            | StorageErrorKind::Closed => PublicationErrorKind::Storage,
+            PublicationStorageErrorKind::RequestConflict => PublicationErrorKind::RequestConflict,
+            PublicationStorageErrorKind::AlreadyExists => PublicationErrorKind::AlreadyExists,
+            PublicationStorageErrorKind::NotFound => PublicationErrorKind::NotFound,
+            PublicationStorageErrorKind::RequestReplayMissing
+            | PublicationStorageErrorKind::Adapter
+            | PublicationStorageErrorKind::Closed => PublicationErrorKind::Storage,
         };
         Self::new(kind, error.to_string())
     }
@@ -778,7 +777,7 @@ impl From<StorageError> for PublicationError {
 ///
 /// The wrapper keeps generic state, journal, receipt, and outbox details inside this crate.
 pub struct PublicationLedger<'storage> {
-    storage: &'storage mut dyn ProductStateStorage,
+    storage: Box<dyn PublicationStorage + 'storage>,
 }
 
 /// Read-only view of the canonical Publication ledger.
@@ -787,13 +786,15 @@ pub struct PublicationLedger<'storage> {
 /// coordinator. Projection adapters therefore cannot decode a second copy of
 /// the Publication format or treat an unverified state row as authority.
 pub struct PublicationReadLedger<'storage> {
-    storage: &'storage dyn ProductStateStorage,
+    storage: Box<dyn PublicationStorage + 'storage>,
 }
 
 impl<'storage> PublicationReadLedger<'storage> {
     #[must_use]
-    pub const fn new(storage: &'storage dyn ProductStateStorage) -> Self {
-        Self { storage }
+    pub fn new(storage: impl PublicationStorage + 'storage) -> Self {
+        Self {
+            storage: Box::new(storage),
+        }
     }
 
     /// Reads one Publication after validating its complete durable journal.
@@ -803,7 +804,7 @@ impl<'storage> PublicationReadLedger<'storage> {
     /// Rejects a missing, malformed, or internally inconsistent Publication,
     /// or an unavailable canonical storage adapter.
     pub fn get(&self, publication_id: &PublicationId) -> Result<Publication, PublicationError> {
-        load_publication(self.storage, publication_id)
+        load_publication(self.storage.as_ref(), publication_id)
     }
 
     /// Reads one Publication and returns only the newest bounded history after
@@ -816,8 +817,11 @@ impl<'storage> PublicationReadLedger<'storage> {
         &self,
         publication_id: &PublicationId,
     ) -> Result<PublicationDetail, PublicationError> {
-        let (publication, verified_history, history_truncated) =
-            load_publication_history(self.storage, publication_id, MAX_PUBLICATION_DETAIL_HISTORY)?;
+        let (publication, verified_history, history_truncated) = load_publication_history(
+            self.storage.as_ref(),
+            publication_id,
+            MAX_PUBLICATION_DETAIL_HISTORY,
+        )?;
         let history = verified_history
             .into_iter()
             .map(|value| PublicationStatusHistory {
@@ -842,7 +846,7 @@ impl<'storage> PublicationReadLedger<'storage> {
     /// canonical storage. A missing receipt returns `None`.
     pub fn replay(
         &self,
-        identity: &ReceiptIdentity,
+        identity: &PublicationReceiptIdentity,
         digest: &Sha256Digest,
     ) -> Result<Option<Publication>, PublicationError> {
         self.storage
@@ -855,13 +859,15 @@ impl<'storage> PublicationReadLedger<'storage> {
 
 impl<'storage> PublicationLedger<'storage> {
     #[must_use]
-    pub fn new(storage: &'storage mut dyn ProductStateStorage) -> Self {
-        Self { storage }
+    pub fn new(storage: impl PublicationStorage + 'storage) -> Self {
+        Self {
+            storage: Box::new(storage),
+        }
     }
 
     fn replay(
         &self,
-        identity: &ReceiptIdentity,
+        identity: &PublicationReceiptIdentity,
         digest: &Sha256Digest,
     ) -> Result<Option<Publication>, PublicationError> {
         self.storage
@@ -872,12 +878,12 @@ impl<'storage> PublicationLedger<'storage> {
     }
 
     fn load(&self, publication_id: &PublicationId) -> Result<Publication, PublicationError> {
-        load_publication(self.storage, publication_id)
+        load_publication(self.storage.as_ref(), publication_id)
     }
 
     fn exists(&self, publication_id: &PublicationId) -> Result<bool, PublicationError> {
         self.storage
-            .load_state(&publication_stream_id(publication_id))
+            .load_state(publication_id)
             .map(|state| state.is_some())
             .map_err(PublicationError::from)
     }
@@ -895,30 +901,31 @@ impl<'storage> PublicationLedger<'storage> {
             intent_sha256: publication.intent_sha256.clone(),
         })
         .map_err(|_| PublicationError::corrupt("publication manifest cannot be encoded"))?;
-        let journal = AggregateJournalPublication::Create {
-            key: journal_key(&publication.id)?,
+        let journal = PublicationJournalMutation::Create {
             manifest,
-            first_record: AggregateJournalRecord::new(
+            first_record: PublicationJournalRecord::new(
                 1,
                 canonical_sha256_bytes(&state).0,
                 state.clone(),
             ),
         };
-        let commit = StateCommit::new(
+        let commit = PublicationStorageCommit::try_new(
             context.receipt_identity.clone(),
             context.command_digest.clone(),
-            publication_stream_id(&publication.id),
+            publication.id.clone(),
             0,
             state,
-            vec![event],
+            event,
+            journal,
         )
-        .with_journal_publication(journal);
+        .map_err(PublicationError::from)?;
         match self.storage.commit(&commit) {
             Ok(receipt) => publication_from_receipt(&receipt),
             Err(error)
                 if matches!(
                     error.kind(),
-                    StorageErrorKind::JournalAlreadyExists | StorageErrorKind::RevisionConflict
+                    PublicationStorageErrorKind::AlreadyExists
+                        | PublicationStorageErrorKind::RevisionConflict
                 ) =>
             {
                 self.replay(&context.receipt_identity, &context.command_digest)?
@@ -932,7 +939,7 @@ impl<'storage> PublicationLedger<'storage> {
         &mut self,
         current: &Publication,
         next: &Publication,
-        command_receipt: Option<(&ReceiptIdentity, &Sha256Digest)>,
+        command_receipt: Option<(&PublicationReceiptIdentity, &Sha256Digest)>,
     ) -> Result<Publication, PublicationError> {
         let state = encode_publication(next)?;
         let event = durable_event(next, &state);
@@ -950,7 +957,7 @@ impl<'storage> PublicationLedger<'storage> {
             }
             let journal = self
                 .storage
-                .load_journal(&journal_key(&next.id)?)
+                .load_journal(&next.id)
                 .map_err(PublicationError::from)?
                 .ok_or_else(|| PublicationError::corrupt("publication journal is missing"))?;
             let tail = journal
@@ -962,35 +969,37 @@ impl<'storage> PublicationLedger<'storage> {
                     "publication state and journal revision differ",
                 ));
             }
-            let commit = StateCommit::new(
+            let commit = PublicationStorageCommit::try_new(
                 receipt_identity.clone(),
                 command_digest.clone(),
-                publication_stream_id(&next.id),
+                next.id.clone(),
                 current.revision,
                 state.clone(),
-                vec![event.clone()],
+                event.clone(),
+                PublicationJournalMutation::Append {
+                    expected_tail_sequence: tail.sequence,
+                    expected_tail_digest: tail.digest.clone(),
+                    record: PublicationJournalRecord::new(
+                        next.revision,
+                        event_digest.0.clone(),
+                        state.clone(),
+                    ),
+                },
             )
-            .with_journal_publication(AggregateJournalPublication::Append {
-                key: journal_key(&next.id)?,
-                expected_tail_sequence: tail.sequence,
-                expected_tail_digest: tail.digest.clone(),
-                record: AggregateJournalRecord::new(
-                    next.revision,
-                    event_digest.0.clone(),
-                    state.clone(),
-                ),
-            });
+            .map_err(PublicationError::from)?;
             match self.storage.commit(&commit) {
                 Ok(receipt) => return publication_from_receipt(&receipt),
                 Err(error)
                     if matches!(
                         error.kind(),
-                        StorageErrorKind::RevisionConflict | StorageErrorKind::JournalConflict
+                        PublicationStorageErrorKind::RevisionConflict
+                            | PublicationStorageErrorKind::JournalConflict
                     ) => {}
                 Err(error) => return Err(PublicationError::from(error)),
             }
         }
-        Err(PublicationError::from(StorageError::adapter(
+        Err(PublicationError::from(PublicationStorageError::new(
+            PublicationStorageErrorKind::Adapter,
             "Publication transaction retry was exhausted",
         )))
     }
@@ -1290,7 +1299,7 @@ impl<'storage, 'port, 'audit> PublicationCoordinator<'storage, 'port, 'audit> {
         &mut self,
         current: &Publication,
         occurred_at_millis: u64,
-        command_receipt: Option<(&ReceiptIdentity, &Sha256Digest)>,
+        command_receipt: Option<(&PublicationReceiptIdentity, &Sha256Digest)>,
         change: impl FnOnce(&mut Publication) -> Result<(), PublicationError>,
     ) -> Result<Publication, PublicationError> {
         let mut next = current.clone();
@@ -1480,17 +1489,8 @@ fn validate_resource_target(
     Ok(())
 }
 
-fn publication_stream_id(publication_id: &PublicationId) -> String {
-    format!("publication:{}", publication_id.0)
-}
-
-fn journal_key(publication_id: &PublicationId) -> Result<AggregateJournalKey, PublicationError> {
-    AggregateJournalKey::new(PUBLICATION_AGGREGATE_TYPE, publication_id.0.clone())
-        .map_err(PublicationError::from)
-}
-
 fn load_publication(
-    storage: &dyn ProductStateStorage,
+    storage: &dyn PublicationStorage,
     publication_id: &PublicationId,
 ) -> Result<Publication, PublicationError> {
     load_publication_history(storage, publication_id, 0)
@@ -1498,7 +1498,7 @@ fn load_publication(
 }
 
 fn load_publication_history(
-    storage: &dyn ProductStateStorage,
+    storage: &dyn PublicationStorage,
     publication_id: &PublicationId,
     history_limit: usize,
 ) -> Result<(Publication, Vec<Publication>, bool), PublicationError> {
@@ -1506,22 +1506,19 @@ fn load_publication_history(
         return Err(PublicationError::invalid("publication identity is invalid"));
     }
     let stored = storage
-        .load_state(&publication_stream_id(publication_id))
+        .load_state(publication_id)
         .map_err(PublicationError::from)?
         .ok_or_else(|| {
             PublicationError::new(PublicationErrorKind::NotFound, "publication does not exist")
         })?;
     let publication = decode_publication(&stored.payload)?;
-    if publication.id != *publication_id
-        || stored.stream_id != publication_stream_id(publication_id)
-        || stored.revision != publication.revision
-    {
+    if publication.id != *publication_id || stored.revision != publication.revision {
         return Err(PublicationError::corrupt(
             "stored publication state identity differs from its key",
         ));
     }
     let journal = storage
-        .load_journal(&journal_key(publication_id)?)
+        .load_journal(publication_id)
         .map_err(PublicationError::from)?
         .ok_or_else(|| PublicationError::corrupt("publication journal is missing"))?;
     let manifest: PublicationManifest = serde_json::from_slice(&journal.manifest)
@@ -1724,20 +1721,20 @@ fn decode_publication(bytes: &[u8]) -> Result<Publication, PublicationError> {
     Ok(publication)
 }
 
-fn durable_event(publication: &Publication, state: &[u8]) -> NewOutboxEvent {
+fn durable_event(publication: &Publication, state: &[u8]) -> PublicationStorageEvent {
     let digest = canonical_sha256_bytes(state);
-    NewOutboxEvent::internal(
-        format!(
+    PublicationStorageEvent {
+        event_id: format!(
             "publication:event:{}:{}:{}",
             publication.id.0, publication.revision, digest.0
         ),
-        PUBLICATION_EVENT_TOPIC,
-        state.to_vec(),
-    )
+        topic: PUBLICATION_EVENT_TOPIC.to_owned(),
+        payload: state.to_vec(),
+    }
 }
 
 fn publication_from_receipt(
-    receipt: &winwincode_storage::CommitReceipt,
+    receipt: &PublicationStorageReceipt,
 ) -> Result<Publication, PublicationError> {
     let [event] = receipt.events.as_slice() else {
         return Err(PublicationError::corrupt(
@@ -1750,9 +1747,7 @@ fn publication_from_receipt(
         ));
     }
     let publication = decode_publication(&event.payload)?;
-    if receipt.stream_id != publication_stream_id(&publication.id)
-        || receipt.revision != publication.revision
-    {
+    if receipt.publication_id != publication.id || receipt.revision != publication.revision {
         return Err(PublicationError::corrupt(
             "publication receipt identity differs from its state",
         ));
@@ -1763,23 +1758,19 @@ fn publication_from_receipt(
 fn internal_receipt_identity(
     publication: &Publication,
     event_digest: &Sha256Digest,
-) -> Result<ReceiptIdentity, PublicationError> {
-    let actor = ReceiptActorKey::from_encoded(INTERNAL_ACTOR_KEY.to_vec())
-        .map_err(PublicationError::from)?;
-    let scope = ReceiptScopeKey::from_encoded(
-        format!(
-            "winwincode.publication.scope.v1:{}",
-            publication.repository_scope_sha256.0
-        )
-        .into_bytes(),
+) -> Result<PublicationReceiptIdentity, PublicationError> {
+    let scope = format!(
+        "winwincode.publication.scope.v1:{}",
+        publication.repository_scope_sha256.0
     )
-    .map_err(PublicationError::from)?;
+    .into_bytes();
     let request_id = RequestId(derived_request_id(&(
         &publication.id,
         publication.revision,
         event_digest,
     )));
-    ReceiptIdentity::new(actor, scope, request_id).map_err(PublicationError::from)
+    PublicationReceiptIdentity::try_new(INTERNAL_ACTOR_KEY.to_vec(), scope, request_id)
+        .map_err(PublicationError::from)
 }
 
 fn derived_request_id(value: &impl Serialize) -> String {

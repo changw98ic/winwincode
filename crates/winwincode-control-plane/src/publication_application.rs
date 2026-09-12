@@ -34,7 +34,10 @@ use winwincode_publication::{
     PublicationResourceFact, PublicationResourceKind, PublicationState, PublicationStepDetail,
     RepositoryPolicyScope,
 };
-use winwincode_storage::{ProductStateStorage, StorageError};
+use winwincode_storage::{
+    ProductStateStorage, PublicationReadStorageAdapter, PublicationStorageAdapter, StorageError,
+    publication_error, publication_receipt_identity,
+};
 
 use crate::{
     ControlPlane, CredentialLeakGate, CredentialOutputBoundary, PublicationCommandError,
@@ -145,11 +148,9 @@ impl ControlPlane {
         ) {
             self.finalize_candidate_git_for_terminal_delivery(publication.binding().delivery_id())
                 .map_err(|error| {
-                    PublicationCommandError::Publication(
-                        winwincode_publication::PublicationError::from(StorageError::adapter(
-                            error.to_string(),
-                        )),
-                    )
+                    PublicationCommandError::Publication(publication_error(&StorageError::adapter(
+                        error.to_string(),
+                    )))
                 })?;
         }
 
@@ -347,7 +348,8 @@ fn mapped_cancel(
         .map_err(|error| PublicationCommandError::InvalidInput(error.to_string()))?;
     Ok(MappedCancel {
         context: PublicationCommandContext::try_new(
-            receipt_identity,
+            publication_receipt_identity(&receipt_identity)
+                .map_err(winwincode_publication::PublicationError::from)?,
             command_digest,
             expected_revision,
             occurred_at_millis,
@@ -566,8 +568,9 @@ fn load_publication(
 ) -> Result<Publication, PublicationCommandError> {
     validate_publication_id(publication_id)?;
     let mut port = SideEffectBlockedPublicationPort;
+    let publication_storage = PublicationStorageAdapter::new(storage);
     let coordinator = PublicationCoordinator::new(
-        PublicationLedger::new(storage),
+        PublicationLedger::new(publication_storage),
         &mut port,
         Box::new(UnavailablePublicationAudit),
     );
@@ -581,7 +584,8 @@ fn load_publication_detail(
     publication_id: &PublicationId,
 ) -> Result<DomainPublicationDetail, PublicationCommandError> {
     validate_publication_id(publication_id)?;
-    PublicationReadLedger::new(storage)
+    let publication_storage = PublicationReadStorageAdapter::new(storage);
+    PublicationReadLedger::new(publication_storage)
         .detail(publication_id)
         .map_err(PublicationCommandError::from)
 }
@@ -592,8 +596,9 @@ fn cancel_publication(
     command: &DomainCancelCommand,
 ) -> Result<Publication, PublicationCommandError> {
     let mut port = SideEffectBlockedPublicationPort;
+    let publication_storage = PublicationStorageAdapter::new(storage);
     PublicationCoordinator::new(
-        PublicationLedger::new(storage),
+        PublicationLedger::new(publication_storage),
         &mut port,
         Box::new(UnavailablePublicationAudit),
     )
@@ -1004,5 +1009,5 @@ fn previous_revision(value: u64) -> Result<Revision, PublicationCommandError> {
 }
 
 fn publication_storage_error(error: StorageError) -> PublicationCommandError {
-    PublicationCommandError::from(winwincode_publication::PublicationError::from(error))
+    error.into()
 }

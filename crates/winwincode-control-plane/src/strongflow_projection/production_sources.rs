@@ -12,8 +12,8 @@ use winwincode_publication::{
     RepositoryPolicyScope,
 };
 use winwincode_storage::{
-    ArtifactStore, GitSourceResolver, ProductStateStorage, StorageError, StorageErrorKind,
-    StoredStateDirectoryEntry,
+    ArtifactStore, GitSourceResolver, ProductStateStorage, PublicationReadStorageAdapter,
+    StorageError, StorageErrorKind, StoredStateDirectoryEntry,
 };
 
 use super::{
@@ -164,7 +164,8 @@ fn load_publication_directory(
         )
         .map_err(|error| storage_error(&error))?;
     let directory_sha256 = publication_directory_sha256(&states)?;
-    let ledger = PublicationReadLedger::new(storage);
+    let publication_storage = PublicationReadStorageAdapter::new(storage);
+    let ledger = PublicationReadLedger::new(publication_storage);
     let mut selected = None;
     for state in &states {
         let publication_id = publication_id_from_stream(&state.stream_id)?;
@@ -333,6 +334,7 @@ mod tests {
     use winwincode_publication::{
         PublicationCommandContext, PublicationOperation, PublicationPort, PublicationPortError,
         PublicationPortMutation, PublicationPortObservation, PublicationPublishCommand,
+        PublicationReceiptIdentity,
         test_support::{current_policy_coordinator, current_publication_fixture},
     };
     use winwincode_publication::{PublicationFactBinding, PublicationResultFact};
@@ -343,7 +345,7 @@ mod tests {
     };
     #[cfg(feature = "test-support")]
     use winwincode_storage::{
-        ArtifactError, ArtifactObject, LocalArtifactObjectStore, ReceiptActorKey, ReceiptScopeKey,
+        ArtifactError, ArtifactObject, LocalArtifactObjectStore, PublicationStorageAdapter,
         SqliteStorage, ValidatedGitSourceArtifact,
     };
 
@@ -755,11 +757,9 @@ mod tests {
             Sha256::digest(format!("publication-{seed}").as_bytes())
         ));
         let context = PublicationCommandContext::try_new(
-            ReceiptIdentity::new(
-                ReceiptActorKey::from_encoded(b"fixture-publication-actor".to_vec())
-                    .expect("actor key"),
-                ReceiptScopeKey::from_encoded(b"fixture-publication-repository-scope".to_vec())
-                    .expect("scope key"),
+            PublicationReceiptIdentity::try_new(
+                b"fixture-publication-actor".to_vec(),
+                b"fixture-publication-repository-scope".to_vec(),
                 RequestId(format!("req_{seed:026}")),
             )
             .expect("Publication receipt identity"),
@@ -769,7 +769,8 @@ mod tests {
         )
         .expect("Publication command context");
         let mut provider = UnusedProvider;
-        current_policy_coordinator(storage, &mut provider)
+        let publication_storage = PublicationStorageAdapter::new(storage);
+        current_policy_coordinator(publication_storage, &mut provider)
             .publish(&context, &command, fixture.authorization())
             .expect("persist Publication intent");
     }

@@ -23,7 +23,9 @@ use winwincode_publication::{
     PublicationPolicyEvidence, PublicationPolicyOrigin, PublicationPort, PublicationReadLedger,
     PublicationRequester, RepositoryPolicyScope, RepositoryPublicationPolicy,
 };
-use winwincode_storage::SqliteStorage;
+use winwincode_storage::{
+    PublicationReadStorageAdapter, SqliteStorage, publication_error, publication_receipt_identity,
+};
 
 use crate::{
     ControlPlane, CredentialReferenceErrorKind, CredentialReferenceService,
@@ -697,11 +699,14 @@ impl ControlPlane {
     ) -> Result<PublicationPublishCompletedResponse, PublicationCommandError> {
         validate_publish_command(command)?;
         let (identity, digest) = publish_receipt(command)?;
-        if let Some(publication) = PublicationReadLedger::new(
-            self.storage_ref()
-                .map_err(|error| PublicationCommandError::Publication(error.into()))?,
-        )
-        .replay(&identity, &digest)?
+        let storage = self
+            .storage_ref()
+            .map_err(|error| PublicationCommandError::Publication(publication_error(&error)))?;
+        let publication_storage = PublicationReadStorageAdapter::new(storage);
+        let identity = publication_receipt_identity(&identity)
+            .map_err(winwincode_publication::PublicationError::from)?;
+        if let Some(publication) =
+            PublicationReadLedger::new(publication_storage).replay(&identity, &digest)?
         {
             return publish_response(command, &publication);
         }
@@ -805,7 +810,8 @@ fn publish_receipt(
         schema_version: command.schema_version.clone(),
         scope: Scope::RepositoryScope(command.scope.clone()),
     };
-    command_receipt(&envelope).map_err(|error| PublicationCommandError::Publication(error.into()))
+    command_receipt(&envelope)
+        .map_err(|error| PublicationCommandError::Publication(publication_error(&error)))
 }
 
 fn publish_response(

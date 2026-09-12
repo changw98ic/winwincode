@@ -16,14 +16,15 @@ use winwincode_publication::{
     PublicationCommandContext, PublicationErrorKind, PublicationFactBinding, PublicationOperation,
     PublicationOperationKind, PublicationOperationPayload, PublicationPort, PublicationPortError,
     PublicationPortMutation, PublicationPortObservation, PublicationPublishCommand,
-    PublicationReadLedger, PublicationResourceFact, PublicationResourceKind,
-    PublicationSourceIssue, PublicationState, PublicationTarget,
+    PublicationReadLedger, PublicationReceiptIdentity, PublicationResourceFact,
+    PublicationResourceKind, PublicationSourceIssue, PublicationState, PublicationTarget,
     test_support::{
         CurrentPublicationCoordinator, current_policy_coordinator, current_publication_fixture,
     },
 };
-use winwincode_storage::{ProductStateStorage, SqliteStorage};
-use winwincode_storage::{ReceiptActorKey, ReceiptIdentity, ReceiptScopeKey};
+use winwincode_storage::{
+    ProductStateStorage, PublicationReadStorageAdapter, PublicationStorageAdapter, SqliteStorage,
+};
 
 #[derive(Default)]
 struct RecordingPort {
@@ -109,7 +110,7 @@ fn coordinator<'storage, 'port>(
     storage: &'storage mut dyn ProductStateStorage,
     port: &'port mut dyn PublicationPort,
 ) -> CurrentPublicationCoordinator<'storage, 'port> {
-    current_policy_coordinator(storage, port)
+    current_policy_coordinator(PublicationStorageAdapter::new(storage), port)
 }
 
 #[test]
@@ -183,7 +184,7 @@ fn detail_verifies_every_revision_but_returns_only_the_newest_bounded_history() 
         );
     }
     let current = current.expect("at least one progress revision");
-    let detail = PublicationReadLedger::new(&storage)
+    let detail = PublicationReadLedger::new(PublicationReadStorageAdapter::new(&storage))
         .detail(fixture.publication_id())
         .expect("read bounded verified history");
 
@@ -388,11 +389,9 @@ fn cancel_after_partial_remote_progress_changes_only_the_publication_and_replays
     )
     .expect("canonical cancellation");
     let context = PublicationCommandContext::try_new(
-        ReceiptIdentity::new(
-            ReceiptActorKey::from_encoded(b"fixture-publication-actor".to_vec())
-                .expect("actor key"),
-            ReceiptScopeKey::from_encoded(b"fixture-publication-repository-scope".to_vec())
-                .expect("scope key"),
+        PublicationReceiptIdentity::try_new(
+            b"fixture-publication-actor".to_vec(),
+            b"fixture-publication-repository-scope".to_vec(),
             RequestId("req_00000000000000000000000002".to_owned()),
         )
         .expect("receipt identity"),
@@ -723,11 +722,9 @@ fn request_identity_conflict_and_duplicate_publication_are_distinct_and_write_no
     assert_eq!(conflict.kind(), PublicationErrorKind::RequestConflict,);
 
     let different_request = PublicationCommandContext::try_new(
-        ReceiptIdentity::new(
-            ReceiptActorKey::from_encoded(b"fixture-publication-actor".to_vec())
-                .expect("actor key"),
-            ReceiptScopeKey::from_encoded(b"fixture-publication-repository-scope".to_vec())
-                .expect("scope key"),
+        PublicationReceiptIdentity::try_new(
+            b"fixture-publication-actor".to_vec(),
+            b"fixture-publication-repository-scope".to_vec(),
             RequestId("req_00000000000000000000000003".to_owned()),
         )
         .expect("different request identity"),

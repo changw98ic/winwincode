@@ -25,6 +25,7 @@ mod git_candidate_retention;
 mod git_source;
 mod local_candidate;
 mod provider_exchange;
+mod publication;
 mod repository_binding;
 mod repository_scheduler;
 mod repository_scheduler_replacement;
@@ -138,6 +139,10 @@ pub use provider_exchange::{
     ProviderExchangeState, ProviderExchangeStore, ProviderExchangeStoreError,
     ProviderExchangeStoreErrorCode, ProviderExchangeTerminal, ProviderExchangeTerminalProgress,
     ProviderExchangeTerminalStage,
+};
+pub use publication::{
+    PublicationReadStorageAdapter, PublicationStorageAdapter, publication_error,
+    publication_receipt_identity,
 };
 pub use repository_binding::{
     RepositoryAccessGrantIssuance, RepositoryAccessGrantRecord, RepositoryAvailability,

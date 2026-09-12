@@ -7,6 +7,7 @@ mod facts;
 mod github;
 mod operation;
 mod policy;
+mod storage;
 
 pub use coordinator::{
     MAX_PUBLICATION_DETAIL_HISTORY, Publication, PublicationCancelCommand,
@@ -32,6 +33,12 @@ pub use policy::{
     PublicationPolicyContext, PublicationPolicyDecision, PublicationPolicyEffect,
     PublicationPolicyEvidence, PublicationPolicyOrigin, PublicationPolicyRule,
     PublicationRequester, RepositoryPolicyScope, RepositoryPublicationPolicy,
+};
+pub use storage::{
+    PublicationJournalMutation, PublicationJournalRecord, PublicationReceiptIdentity,
+    PublicationStorage, PublicationStorageCommit, PublicationStorageError,
+    PublicationStorageErrorKind, PublicationStorageEvent, PublicationStorageReceipt,
+    PublicationStoredJournal, PublicationStoredState,
 };
 
 #[cfg(feature = "test-support")]

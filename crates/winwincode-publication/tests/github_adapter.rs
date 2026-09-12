@@ -22,7 +22,7 @@ use winwincode_publication::{
     PublicationPortMutation, PublicationPortObservation, PublicationResourceFact,
     PublicationResourceKind, PublicationSourceIssue, PublicationState, PublicationTarget,
 };
-use winwincode_storage::{ProductStateStorage, SqliteStorage};
+use winwincode_storage::{ProductStateStorage, PublicationStorageAdapter, SqliteStorage};
 
 const TOKEN: &str = "fixture-github-token-value";
 
@@ -328,7 +328,7 @@ fn coordinator<'storage, 'port>(
     storage: &'storage mut dyn ProductStateStorage,
     port: &'port mut dyn PublicationPort,
 ) -> CurrentPublicationCoordinator<'storage, 'port> {
-    current_policy_coordinator(storage, port)
+    current_policy_coordinator(PublicationStorageAdapter::new(storage), port)
 }
 
 fn read_request(stream: &mut TcpStream) -> FixtureRequest {

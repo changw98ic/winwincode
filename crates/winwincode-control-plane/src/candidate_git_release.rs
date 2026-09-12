@@ -16,8 +16,9 @@ use winwincode_domain::{DeliveryId, PublicationId, RequestId, Sha256Digest};
 use winwincode_publication::{PublicationReadLedger, PublicationState};
 use winwincode_storage::{
     CandidateGitPinReceipt, CandidateGitReleaseAuthority, CandidateGitTerminalOutcome,
-    CommitReceipt, NewOutboxEvent, ProductStateStorage, ReceiptActorKey, ReceiptIdentity,
-    ReceiptScopeKey, StateCommit, StateRevisionGuard, StorageError,
+    CommitReceipt, NewOutboxEvent, ProductStateStorage, PublicationReadStorageAdapter,
+    ReceiptActorKey, ReceiptIdentity, ReceiptScopeKey, StateCommit, StateRevisionGuard,
+    StorageError,
 };
 
 use crate::candidate_source::CandidateResolutionError;
@@ -229,7 +230,8 @@ pub(crate) fn ensure_publication_readers_closed(
             MAX_PUBLICATION_DIRECTORY_PAYLOAD_BYTES,
         )
         .map_err(CandidateResolutionError::Storage)?;
-    let ledger = PublicationReadLedger::new(storage);
+    let publication_storage = PublicationReadStorageAdapter::new(storage);
+    let ledger = PublicationReadLedger::new(publication_storage);
     let mut guards = Vec::new();
     let mut matching_publications = 0_usize;
     for state in states {
