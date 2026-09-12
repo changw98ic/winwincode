@@ -4,6 +4,7 @@ import { resolve } from 'node:path'
 import test from 'node:test'
 
 const root = resolve(import.meta.dirname, '..')
+const workspaceVersion = manifest('package.json').version
 
 function manifest(path) {
   return JSON.parse(readFileSync(resolve(root, path), 'utf8'))
@@ -12,16 +13,16 @@ function manifest(path) {
 test('browser control packages are public canonical sources', () => {
   const control = manifest('packages/control-plane-client/package.json')
   assert.equal(control.name, '@winwincode/control-plane-client')
-  assert.equal(control.version, '0.1.0-alpha.1')
+  assert.equal(control.version, workspaceVersion)
   assert.equal(control.publishConfig.access, 'public')
   assert.deepEqual(Object.keys(control.exports).sort(), ['.', './package.json'])
 
   const browserCore = manifest('packages/browser-core/package.json')
   assert.equal(browserCore.name, '@winwincode/browser-core')
-  assert.equal(browserCore.version, '0.1.0-alpha.1')
+  assert.equal(browserCore.version, workspaceVersion)
   assert.equal(browserCore.publishConfig.access, 'public')
   assert.deepEqual(browserCore.dependencies, {
-    '@winwincode/contracts': '0.1.0-alpha.1',
+    '@winwincode/contracts': workspaceVersion,
   })
   assert.deepEqual(
     Object.keys(browserCore.exports).sort(),

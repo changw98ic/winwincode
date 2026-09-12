@@ -12582,7 +12582,7 @@ checksum = "d135d17ab770252ad95e9a872d365cf3090e3be864a34ab46f48555993efc904"
 
 [[package]]
 name = "winwincode-api"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -12591,7 +12591,7 @@ dependencies = [
 
 [[package]]
 name = "winwincode-audit"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "rusqlite",
  "serde",
@@ -12602,7 +12602,7 @@ dependencies = [
 
 [[package]]
 name = "winwincode-backup"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -12613,7 +12613,7 @@ dependencies = [
 
 [[package]]
 name = "winwincode-cli"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "getrandom 0.3.4",
  "rusqlite",
@@ -12633,7 +12633,7 @@ dependencies = [
 
 [[package]]
 name = "winwincode-client-port"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -12642,7 +12642,7 @@ dependencies = [
 
 [[package]]
 name = "winwincode-codex"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "base64 0.22.1",
  "codex-apply-patch",
@@ -12663,7 +12663,7 @@ dependencies = [
 
 [[package]]
 name = "winwincode-connector-github"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "hmac 0.12.1",
  "jsonwebtoken",
@@ -12684,7 +12684,7 @@ dependencies = [
 
 [[package]]
 name = "winwincode-connector-jira"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "hmac 0.12.1",
  "rcgen",
@@ -12700,7 +12700,7 @@ dependencies = [
 
 [[package]]
 name = "winwincode-connector-linear"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "hmac 0.12.1",
  "rcgen",
@@ -12716,7 +12716,7 @@ dependencies = [
 
 [[package]]
 name = "winwincode-connector-slack"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "hmac 0.12.1",
  "rcgen",
@@ -12732,7 +12732,7 @@ dependencies = [
 
 [[package]]
 name = "winwincode-connector-teams"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "rcgen",
  "rustls",
@@ -12747,7 +12747,7 @@ dependencies = [
 
 [[package]]
 name = "winwincode-connector-webhook"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "hmac 0.12.1",
  "serde_json",
@@ -12760,7 +12760,7 @@ dependencies = [
 
 [[package]]
 name = "winwincode-control-plane"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "aes-gcm",
  "base64 0.22.1",
@@ -12786,7 +12786,7 @@ dependencies = [
 
 [[package]]
 name = "winwincode-data-export"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -12795,7 +12795,7 @@ dependencies = [
 
 [[package]]
 name = "winwincode-delivery"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "base64 0.22.1",
  "serde",
@@ -12808,7 +12808,7 @@ dependencies = [
 
 [[package]]
 name = "winwincode-device-client"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "base64 0.22.1",
  "futures",
@@ -12828,14 +12828,14 @@ dependencies = [
 
 [[package]]
 name = "winwincode-domain"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "winwincode-drill"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -12848,7 +12848,7 @@ dependencies = [
 
 [[package]]
 name = "winwincode-evidence-export"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -12857,7 +12857,7 @@ dependencies = [
 
 [[package]]
 name = "winwincode-execution-port"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "quick-xml",
  "serde",
@@ -12869,7 +12869,7 @@ dependencies = [
 
 [[package]]
 name = "winwincode-integration-core"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -12879,7 +12879,7 @@ dependencies = [
 
 [[package]]
 name = "winwincode-integration-sqlite"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "rcgen",
  "rusqlite",
@@ -12892,7 +12892,7 @@ dependencies = [
 
 [[package]]
 name = "winwincode-kernel"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "codex-api",
  "codex-core-api",
@@ -12907,7 +12907,7 @@ dependencies = [
 
 [[package]]
 name = "winwincode-kernel-helper"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "codex-arg0",
  "sha2 0.10.9",
@@ -12915,7 +12915,7 @@ dependencies = [
 
 [[package]]
 name = "winwincode-local"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -12927,7 +12927,7 @@ dependencies = [
 
 [[package]]
 name = "winwincode-observability-core"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -12936,7 +12936,7 @@ dependencies = [
 
 [[package]]
 name = "winwincode-observability-sqlite"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "rusqlite",
  "serde_json",
@@ -12946,7 +12946,7 @@ dependencies = [
 
 [[package]]
 name = "winwincode-publication"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "rusqlite",
  "serde",
@@ -12959,7 +12959,7 @@ dependencies = [
 
 [[package]]
 name = "winwincode-repository-context"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -12967,7 +12967,7 @@ dependencies = [
 
 [[package]]
 name = "winwincode-s3-artifact-adapter"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "rcgen",
  "rustls",
@@ -12980,7 +12980,7 @@ dependencies = [
 
 [[package]]
 name = "winwincode-server"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "argon2",
  "axum",
@@ -13017,7 +13017,7 @@ dependencies = [
 
 [[package]]
 name = "winwincode-session"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -13026,7 +13026,7 @@ dependencies = [
 
 [[package]]
 name = "winwincode-storage"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "rusqlite",
  "serde",
@@ -13037,7 +13037,7 @@ dependencies = [
 
 [[package]]
 name = "winwincode-test-assets"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -13047,7 +13047,7 @@ dependencies = [
 
 [[package]]
 name = "winwincode-worker"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "base64 0.22.1",
  "codex-apply-patch",

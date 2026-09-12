@@ -48,6 +48,7 @@ import {
 import { capturedStandardOutput } from '../scripts/child-process-output.mjs'
 
 const root = resolve(import.meta.dirname, '..')
+const workspaceVersion = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).version
 const sourceCommit = '1234567890abcdef1234567890abcdef12345678'
 const sourceDateEpoch = 1_700_000_000
 const helperReleasePrivateKey = createPrivateKey({
@@ -127,7 +128,7 @@ function writeClientAssetManifest(artifactRoot) {
   writeFixtureFile(artifactRoot, 'client/asset-manifest.json', `${JSON.stringify({
     schemaVersion: 1,
     package: '@winwincode/client',
-    version: '0.1.0-alpha.1',
+    version: workspaceVersion,
     entry: 'index.html',
     runtimeConfig: {
       path: 'runtime-config.js',
@@ -159,7 +160,7 @@ function writeHelperReleaseManifest(artifactRoot) {
     schemaVersion: 1,
     protocol: 'winwincode-kernel-helper-release',
     version: 1,
-    packageVersion: '0.1.0-alpha.1',
+    packageVersion: workspaceVersion,
     sourceSha256: `sha256:${sha256(readFileSync(join(root, 'crates/helper/src/main.rs')))}`,
     binarySha256: `sha256:${sha256(readFileSync(helperPath))}`,
     binaryPath: 'winwincode-kernel-helper',
@@ -206,7 +207,7 @@ function createArtifactFixture(evidenceRoot, target) {
     schemaVersion: 1,
     product: 'WinWinCode',
     package: '@winwincode/client',
-    version: '0.1.0-alpha.1',
+    version: workspaceVersion,
     controlPlaneSchemaVersion: 'winwincode/v1',
   }, null, 2)}\n`)
   writeFixtureFile(artifactRoot, 'client/assets/client.js', 'console.log("fixture")\n')
@@ -470,7 +471,7 @@ test('per-target evidence binds source, protocols, legal files and reproducible 
     existsSync(join(artifactRoot, 'bin', 'bin', HELPER_RELEASE_MANIFEST_NAME)),
     false,
   )
-  assert.equal(manifest.source.version, '0.1.0-alpha.1')
+  assert.equal(manifest.source.version, workspaceVersion)
   assert.equal(manifest.source.license, 'Apache-2.0')
   assert.equal(manifest.protocols.controlPlane.schemaVersion, 'winwincode/v1')
   assert.equal(manifest.protocols.executionPort.title, 'WinWinCode ExecutionPort v1')

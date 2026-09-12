@@ -43,7 +43,7 @@ test('public contribution, security, conduct, release, and upstream guides are l
     'SECURITY.md',
     'CODE_OF_CONDUCT.md',
     'docs/releasing.md',
-    'docs/releases/0.1.0-alpha.1.md',
+    'docs/releases/0.1.0-alpha.2.md',
     'docs/upstream-updates.md',
     '.github/pull_request_template.md',
   ]
@@ -122,7 +122,7 @@ test('upstream guide has independent Codex and vendored-source checks with rollb
 test('release guide fixes one version, four target artifacts, and rollback', () => {
   const guide = read('docs/releasing.md')
   for (const marker of [
-    'corepack pnpm version:set 0.1.0-alpha.1',
+    'corepack pnpm version:set 0.1.0-alpha.2',
     'aarch64-apple-darwin',
     'x86_64-apple-darwin',
     'aarch64-unknown-linux-gnu',
@@ -316,11 +316,17 @@ test('product version command updates every manifest and rejects invalid version
         ...(index === 1
           ? { dependencies: { '@winwincode/contracts': '0.0.0-dev.0' } }
           : {}),
+        ...(index === 0
+          ? { devDependencies: { '@winwincode/browser-core': '0.0.0-dev.0' } }
+          : {}),
       }, null, 2)}\n`)
     }
     writeFileSync(join(fixture, 'Cargo.toml'), [
       '[workspace.package]',
       'version = "0.0.0-dev.0"',
+      '',
+      '[workspace.dependencies]',
+      'winwincode-domain = { version = "=0.0.0-dev.0", path = "crates/winwincode-domain" }',
       '',
     ].join('\n'))
     mkdirSync(join(fixture, 'crates/winwincode-delivery'), { recursive: true })
@@ -341,10 +347,19 @@ test('product version command updates every manifest and rejects invalid version
           assert.equal(dependencyVersion, '1.2.3-rc.1')
         }
       }
+      for (const [name, dependencyVersion] of Object.entries(manifest.devDependencies ?? {})) {
+        if (name.startsWith('@winwincode/')) {
+          assert.equal(dependencyVersion, '1.2.3-rc.1')
+        }
+      }
     }
     assert.match(
       readFileSync(join(fixture, 'Cargo.toml'), 'utf8'),
       /\[workspace\.package\]\nversion = "1\.2\.3-rc\.1"/u,
+    )
+    assert.match(
+      readFileSync(join(fixture, 'Cargo.toml'), 'utf8'),
+      /winwincode-domain = \{ version = "=1\.2\.3-rc\.1"/u,
     )
     assert.match(
       readFileSync(join(fixture, 'crates/winwincode-delivery/Cargo.toml'), 'utf8'),

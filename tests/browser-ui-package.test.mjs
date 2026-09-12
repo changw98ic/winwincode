@@ -14,6 +14,7 @@ import {
 } from '../packages/browser-ui/scripts/build-release.mjs'
 
 const root = resolve(import.meta.dirname, '..')
+const workspaceVersion = JSON.parse(await readFile(join(root, 'package.json'), 'utf8')).version
 const packageRoot = resolve(root, 'packages/browser-ui')
 const sourceRoot = resolve(packageRoot, 'src')
 const primitiveModules = Object.freeze([
@@ -96,7 +97,7 @@ test('the previous Client component paths and re-exports are removed', async () 
 
 test('Community callers consume the exact browser-ui package entry', async () => {
   const clientManifest = JSON.parse(await readFile(join(root, 'apps/client/package.json'), 'utf8'))
-  assert.equal(clientManifest.dependencies['@winwincode/browser-ui'], '0.1.0-alpha.1')
+  assert.equal(clientManifest.dependencies['@winwincode/browser-ui'], workspaceVersion)
   const sourcePaths = (await filesBelow(join(root, 'apps/client/src')))
     .filter(path => path.endsWith('.ts'))
   const sources = await Promise.all(sourcePaths.map(async path => ({
@@ -125,7 +126,7 @@ test('release build records the exact package version, bytes, and SHA-256', asyn
   assert.equal(written.state, 'package-built-not-published')
   assert.deepEqual(written.package, {
     name: '@winwincode/browser-ui',
-    version: '0.1.0-alpha.1',
+    version: workspaceVersion,
   })
   assert.equal(written.artifact.bytes, artifact.byteLength)
   assert.equal(written.artifact.sha256, sha256(artifact))

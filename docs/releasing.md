@@ -7,7 +7,7 @@
 根 `package.json` 是命令入口，Node 产品 manifest 与 Cargo workspace 必须使用同一个 SemVer：
 
 ```bash
-corepack pnpm version:set 0.1.0-alpha.1
+corepack pnpm version:set 0.1.0-alpha.2
 cargo metadata --format-version 1 >/dev/null
 corepack pnpm install --lockfile-only
 ```

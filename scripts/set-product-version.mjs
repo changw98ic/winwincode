@@ -25,7 +25,7 @@ function readManifest(path) {
 
 function withProductVersion(manifest, version) {
   const updated = { ...manifest, version }
-  for (const field of ['dependencies', 'optionalDependencies']) {
+  for (const field of ['dependencies', 'devDependencies', 'optionalDependencies']) {
     const dependencies = updated[field]
     if (typeof dependencies !== 'object' || dependencies === null || Array.isArray(dependencies)) {
       continue
@@ -63,9 +63,12 @@ export function setProductVersion(root, version) {
   if (!workspacePackageVersion.test(cargoManifest)) {
     throw new Error('Cargo.toml is missing [workspace.package].version')
   }
+  const internalWorkspaceDependencyVersion = /(winwincode-[\w-]+\s*=\s*\{[^\n]*\bversion\s*=\s*")[^"]+("[^\n]*\bpath\s*=)/gu
   updates.push(Object.freeze({
     path: cargoManifestPath,
-    text: cargoManifest.replace(workspacePackageVersion, `$1"${version}"`),
+    text: cargoManifest
+      .replace(workspacePackageVersion, `$1"${version}"`)
+      .replace(internalWorkspaceDependencyVersion, `$1=${version}$2`),
   }))
   const internalDependencyManifestPath = resolve(
     root,

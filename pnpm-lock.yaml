@@ -12,13 +12,13 @@ importers:
         specifier: 24.13.3
         version: 24.13.3
       '@winwincode/browser-core':
-        specifier: 0.1.0-alpha.1
+        specifier: 0.1.0-alpha.2
         version: link:packages/browser-core
       '@winwincode/browser-ui':
-        specifier: 0.1.0-alpha.1
+        specifier: 0.1.0-alpha.2
         version: link:packages/browser-ui
       '@winwincode/control-plane-client':
-        specifier: 0.1.0-alpha.1
+        specifier: 0.1.0-alpha.2
         version: link:packages/control-plane-client
       ajv:
         specifier: 8.20.0
@@ -36,19 +36,19 @@ importers:
   apps/client:
     dependencies:
       '@winwincode/browser-core':
-        specifier: 0.1.0-alpha.1
+        specifier: 0.1.0-alpha.2
         version: link:../../packages/browser-core
       '@winwincode/browser-ui':
-        specifier: 0.1.0-alpha.1
+        specifier: 0.1.0-alpha.2
         version: link:../../packages/browser-ui
       '@winwincode/control-plane-client':
-        specifier: 0.1.0-alpha.1
+        specifier: 0.1.0-alpha.2
         version: link:../../packages/control-plane-client
 
   packages/browser-core:
     dependencies:
       '@winwincode/contracts':
-        specifier: 0.1.0-alpha.1
+        specifier: 0.1.0-alpha.2
         version: link:../contracts
 
   packages/browser-ui: {}
@@ -58,13 +58,13 @@ importers:
   packages/control-plane-client:
     dependencies:
       '@winwincode/contracts':
-        specifier: 0.1.0-alpha.1
+        specifier: 0.1.0-alpha.2
         version: link:../contracts
 
   packages/strongflow:
     dependencies:
       '@winwincode/contracts':
-        specifier: 0.1.0-alpha.1
+        specifier: 0.1.0-alpha.2
         version: link:../contracts
 
 packages:

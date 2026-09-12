@@ -11,6 +11,7 @@ import test from 'node:test'
 import { pnpmPackDryRun } from '../scripts/pnpm-pack-report.mjs'
 
 const root = resolve(import.meta.dirname, '..')
+const workspaceVersion = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).version
 const clientRoot = join(root, 'apps', 'client')
 const publicRoot = join(clientRoot, 'dist', 'public')
 const targets = [
@@ -115,9 +116,9 @@ test('deployable Client files contain only browser assets and runtime serverUrl 
   assert.deepEqual(
     JSON.parse(readFileSync(join(clientRoot, 'package.json'), 'utf8')).dependencies,
     {
-      '@winwincode/browser-core': '0.1.0-alpha.1',
-      '@winwincode/browser-ui': '0.1.0-alpha.1',
-      '@winwincode/control-plane-client': '0.1.0-alpha.1',
+      '@winwincode/browser-core': workspaceVersion,
+      '@winwincode/browser-ui': workspaceVersion,
+      '@winwincode/control-plane-client': workspaceVersion,
     },
   )
 

@@ -6,7 +6,7 @@ WinWinCode 把"让 AI 写代码"变成一条有人工审核、有证据的交付
 
 它和"直接让 AI 改代码"的工具的区别在于:WinWinCode 不替你决定合入什么。它负责把需求变成方案、把方案变成候选、把候选变成带证据的交付,而每一个跨越都由人签字。
 
-当前仓库正在准备 `0.1.0-alpha.1` 首个公开预览版,支持 Apple Silicon / Intel macOS 和 arm64 / x64 GNU Linux。
+当前仓库正在准备 `0.1.0-alpha.2` 公开预览版,支持 Apple Silicon / Intel macOS 和 arm64 / x64 GNU Linux。
 
 ## 一个需求的旅程
 
@@ -89,7 +89,7 @@ corepack pnpm verify:api-production-vertical
 
 ## 当前状态与限制
 
-- 本仓库处于 `0.1.0-alpha.1` 公开预览准备阶段,发布说明见 [docs/releases/0.1.0-alpha.1.md](docs/releases/0.1.0-alpha.1.md);
+- 本仓库处于 `0.1.0-alpha.2` 公开预览准备阶段,发布说明见 [docs/releases/0.1.0-alpha.2.md](docs/releases/0.1.0-alpha.2.md);
 - Windows 暂不在首发平台;
 - Community 当前面向单一 Owner；代码机器使用本机 Worker 或独立 Device Client；
 - GitHub 等外部写入需要人工批准,默认先生成本地 receipt 和审核证据。

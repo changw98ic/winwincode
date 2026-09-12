@@ -1,6 +1,6 @@
 {
   "name": "@winwincode/client",
-  "version": "0.1.0-alpha.1",
+  "version": "0.1.0-alpha.2",
   "description": "Deployable browser client for WinWinCode Chat, tasks, settings, and approvals",
   "license": "Apache-2.0",
   "type": "module",
@@ -22,9 +22,9 @@
     "access": "public"
   },
   "dependencies": {
-    "@winwincode/browser-ui": "0.1.0-alpha.1",
-    "@winwincode/browser-core": "0.1.0-alpha.1",
-    "@winwincode/control-plane-client": "0.1.0-alpha.1"
+    "@winwincode/browser-ui": "0.1.0-alpha.2",
+    "@winwincode/browser-core": "0.1.0-alpha.2",
+    "@winwincode/control-plane-client": "0.1.0-alpha.2"
   },
   "scripts": {
     "build": "node scripts/build.mjs",

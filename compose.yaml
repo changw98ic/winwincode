@@ -5,7 +5,7 @@ services:
     build:
       context: .
       dockerfile: deploy/Dockerfile.server
-    image: winwincode-server:${WWC_VERSION:-0.1.0-alpha.1}
+    image: winwincode-server:${WWC_VERSION:-0.1.0-alpha.2}
     restart: unless-stopped
     init: true
     ports:
@@ -59,7 +59,7 @@ services:
     build:
       context: .
       dockerfile: deploy/Dockerfile.web
-    image: winwincode-client-web:${WWC_VERSION:-0.1.0-alpha.1}
+    image: winwincode-client-web:${WWC_VERSION:-0.1.0-alpha.2}
     restart: unless-stopped
     init: true
     ports:

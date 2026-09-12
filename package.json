@@ -1,6 +1,6 @@
 {
   "name": "@winwincode/workspace",
-  "version": "0.1.0-alpha.1",
+  "version": "0.1.0-alpha.2",
   "private": true,
   "description": "WinWinCode Client, Server, Worker, Local composition, and embedded Codex kernel",
   "repository": "https://github.com/changw98ic/winwincode",
@@ -46,8 +46,8 @@
     "ajv-formats": "3.0.1",
     "esbuild": "0.28.2",
     "typescript": "6.0.3",
-    "@winwincode/browser-ui": "0.1.0-alpha.1",
-    "@winwincode/browser-core": "0.1.0-alpha.1",
-    "@winwincode/control-plane-client": "0.1.0-alpha.1"
+    "@winwincode/browser-ui": "0.1.0-alpha.2",
+    "@winwincode/browser-core": "0.1.0-alpha.2",
+    "@winwincode/control-plane-client": "0.1.0-alpha.2"
   }
 }
