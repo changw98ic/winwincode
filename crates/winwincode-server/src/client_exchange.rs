@@ -288,6 +288,10 @@ pub trait ClientExchangePort: Send + Sync {
     /// Places one raw Worker credential into the in-memory delivery lane.
     /// It is returned only beside the exact matching launch frame and
     /// expires with the launch grant.
+    ///
+    /// # Errors
+    ///
+    /// Returns unavailable when the in-memory lane cannot be locked.
     fn publish_worker_credential(
         &self,
         delivery: WorkerCredentialDelivery,

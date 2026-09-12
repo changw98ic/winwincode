@@ -588,6 +588,7 @@ fn claim_locally(
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn a_device_anchored_work_run_is_dispatched_to_its_launched_worker_session() {
     let root = temporary_root("anchored-work-run-dispatch");
     std::fs::create_dir_all(root.join("repository")).expect("repository directory");

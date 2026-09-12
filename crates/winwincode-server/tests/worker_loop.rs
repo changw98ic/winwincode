@@ -907,22 +907,18 @@ async fn the_real_daemon_runs_the_full_worker_loop_over_http() {
     });
     let node_id = daemon.client_node_id().to_owned();
 
-    // The frozen-v1 exchange lands reported capacity through the
-    // instance-taking hello of the NEXT launch: relaunch once.
+    // Relaunch once to cover instance takeover before wiring the worker lane;
+    // the first hello already landed the capacity required by the claim gate.
     daemon
         .into_store()
         .close()
-        .expect("close before the capacity relaunch");
+        .expect("close before the instance takeover");
     let mut daemon = start_daemon(&endpoint, &device_root, "2026-09-04T00:30:00.000Z");
     let device_instance = daemon.client_instance_id().to_owned();
-    drive_until(
-        &mut daemon,
-        "the takeover hello to land the capacity",
-        |daemon| {
-            settled(daemon)
-                && node_snapshot(&data_directory, &node_id).max_concurrent_worker_sessions == 4
-        },
-    );
+    drive_until(&mut daemon, "the takeover hello to settle", |daemon| {
+        settled(daemon)
+            && node_snapshot(&data_directory, &node_id).max_concurrent_worker_sessions == 4
+    });
 
     // Wire the worker lane: the local supervisor over a second connection to
     // the same durable device store, every daemon hook attached.
@@ -1054,10 +1050,15 @@ async fn the_real_daemon_runs_the_full_worker_loop_over_http() {
     assert!(grant_one.consumed_at.is_some());
     assert_eq!(worker_session_one, grant_one.worker_session_id);
     assert_eq!(worker_instance_one, grant_one.worker_instance_id);
-    // The raw 32-byte credential material crosses this response exactly once
-    // and is digest-bound to the durable grant.
-    let material_one = body["workerCredential"].as_str().expect("credential");
+    // The browser response stays secret-free; credential material travels
+    // with the launch frame through the Device exchange sidecar and lands in
+    // the worker's private file.
+    assert!(body.get("workerCredential").is_none());
     let digest_one = body["credentialDigest"].as_str().expect("digest");
+    let worker_data_one = worker_root.join(&worker_session_one).join("data");
+    wait_for_ready_marker(&worker_root, &worker_session_one);
+    let material_one =
+        fs::read_to_string(worker_data_one.join("worker-credential")).expect("credential read");
     assert_eq!(material_one.len(), 64);
     let secret: Vec<u8> = (0..material_one.len())
         .step_by(2)
@@ -1069,14 +1070,6 @@ async fn the_real_daemon_runs_the_full_worker_loop_over_http() {
         "the response material binds the grant digest"
     );
     assert_eq!(digest_one, grant_one.credential_digest);
-
-    // The deferred delivery: the local bridge receives the launch-response
-    // material and hands it to the daemon, which writes it into the
-    // worker's private 0600 credential file.
-    let delivered = daemon
-        .receive_worker_credential(digest_one, material_one)
-        .expect("deferred delivery");
-    assert!(delivered, "the handled launch's digest is known");
     assert_eq!(
         audit_actions(&data_directory, &grant_one_id),
         vec!["issued".to_owned(), "consumed".to_owned()],
@@ -1107,11 +1100,8 @@ async fn the_real_daemon_runs_the_full_worker_loop_over_http() {
             .expect("running count"),
         1
     );
-    let worker_data_one = worker_root.join(&worker_session_one).join("data");
-    wait_for_ready_marker(&worker_root, &worker_session_one);
-
     // The private files are mode 0600 and the credential file carries
-    // exactly the launch-response material.
+    // exactly the Device exchange sidecar material.
     assert_eq!(
         file_mode(&worker_data_one.join("managed-session.json")),
         0o600
@@ -1245,19 +1235,29 @@ async fn the_real_daemon_runs_the_full_worker_loop_over_http() {
         .as_str()
         .expect("session id")
         .to_owned();
-    // The second launch's deferred material lands in its own private file.
-    let material_two = body["workerCredential"].as_str().expect("credential");
+    // The second launch also keeps the browser response secret-free and lands
+    // its sidecar material in an isolated private file.
+    assert!(body.get("workerCredential").is_none());
     let digest_two = body["credentialDigest"].as_str().expect("digest");
     assert_ne!(digest_two, grant_one.credential_digest);
-    let delivered = daemon
-        .receive_worker_credential(digest_two, material_two)
-        .expect("deferred delivery");
-    assert!(delivered);
     let worker_data_two = worker_root.join(&worker_session_two).join("data");
+    wait_for_ready_marker(&worker_root, &worker_session_two);
+    let material_two = fs::read_to_string(worker_data_two.join("worker-credential"))
+        .expect("second credential read");
     assert_eq!(
-        fs::read_to_string(worker_data_two.join("worker-credential"))
-            .expect("second credential read"),
-        material_two,
+        digest_two,
+        &format!(
+            "sha256:{:x}",
+            Sha256::digest(
+                (0..material_two.len())
+                    .step_by(2)
+                    .map(
+                        |index| u8::from_str_radix(&material_two[index..index + 2], 16)
+                            .expect("hex")
+                    )
+                    .collect::<Vec<_>>()
+            )
+        ),
     );
     assert_eq!(daemon.status().worker_launches_accepted, 2);
     let record_two = supervisor
@@ -1265,7 +1265,6 @@ async fn the_real_daemon_runs_the_full_worker_loop_over_http() {
         .expect("registry read")
         .expect("the second launch registered its worker session");
     assert_eq!(record_two.state, WORKER_STATE_RUNNING);
-    wait_for_ready_marker(&worker_root, &worker_session_two);
     drive_until(
         &mut daemon,
         "the heartbeat to report the second running worker",

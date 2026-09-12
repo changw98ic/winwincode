@@ -20,12 +20,6 @@
 //! The daemon's `occupancy_offers_rejected` counter stays at zero across the
 //! whole run.
 //!
-//! One frozen-v1 exchange fact shows itself in the setup: the enrollment
-//! registers the node with zeroed capacity, and the reported worker-session
-//! slots land through the instance-taking hello of the NEXT launch — so the
-//! vertical relaunches the daemon once (a real lifecycle event) before the
-//! first claim.
-//!
 //! Assertions land on both durable sides throughout: the server's occupancy
 //! ledger and registry projection, and the device store's occupancy mirror,
 //! release intents, and exchange cursors.
@@ -641,10 +635,8 @@ async fn the_real_device_daemon_runs_the_full_occupancy_loop_over_http() {
     );
     assert!(record.last_heartbeat_at.is_some());
     assert_eq!(
-        record.max_concurrent_worker_sessions, 0,
-        "the frozen v1 exchange lands reported capacity through the \
-         instance-taking hello, not the announcement hello of the \
-         enrollment instance itself"
+        record.max_concurrent_worker_sessions, 4,
+        "the enrollment instance hello lands its reported capacity"
     );
     // Device side: the profile persisted and the acceptance frame advanced
     // the downlink cursor.
@@ -668,28 +660,6 @@ async fn the_real_device_daemon_runs_the_full_occupancy_loop_over_http() {
     assert!(
         daemon.occupancy_mirror().is_none(),
         "a fresh device holds no occupancy mirror"
-    );
-
-    // ---- First relaunch: the instance-taking hello lands the capacity ------
-    // The claim gate needs the reported worker-session slots; every real
-    // relaunch presents them through the takeover hello of the new launch
-    // instance.
-    daemon
-        .into_store()
-        .close()
-        .expect("close before the relaunch");
-    let (mut daemon, config) = start_daemon(&endpoint, 0, &device_root, "2026-09-04T00:30:00.000Z");
-    drive_until(
-        &mut daemon,
-        "the takeover hello to land the capacity",
-        |daemon| {
-            settled(daemon)
-                && node_snapshot(&data_directory, &node_id).max_concurrent_worker_sessions == 4
-        },
-    );
-    assert_eq!(
-        node_snapshot(&data_directory, &node_id).presence_state,
-        winwincode_storage::ClientPresenceState::Online
     );
 
     consume_code_as(

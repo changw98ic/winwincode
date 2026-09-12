@@ -175,6 +175,10 @@ impl<'storage> ConnectCodeService<'storage> {
     }
 
     /// Returns the newest active code of one client node.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a non-canonical client identity, corrupt row, or storage failure.
     pub fn active_code_for_client(
         &mut self,
         client_node_id: &str,
@@ -536,6 +540,10 @@ impl<'storage> AccessGrantService<'storage> {
     }
 
     /// Returns every active grant on one client node.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a non-canonical client identity, corrupt row, or storage failure.
     pub fn active_grants_for_client(
         &mut self,
         client_node_id: &str,

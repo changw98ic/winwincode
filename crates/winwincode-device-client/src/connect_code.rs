@@ -283,11 +283,11 @@ pub fn publish_connect_code(
     let generation = store
         .connect_code_state()?
         .map_or(1, |stored| stored.generation + 1);
-    let stamp = rfc3339(now)?;
+    let stamp = rfc3339(now);
     let expires_at = rfc3339(
         now + time::Duration::try_from(ttl)
             .map_err(|error| ConnectCodeError::Protocol(format!("ttl out of range: {error}")))?,
-    )?;
+    );
     let record = ConnectCodeStateRecord {
         connect_code_id: generate_prefixed_id(CONNECT_CODE_ID_PREFIX)?,
         code_digest: connect_code_digest(&plaintext),
@@ -313,7 +313,7 @@ pub fn revoke_connect_code(
     store: &mut DeviceStore,
     now: OffsetDateTime,
 ) -> Result<Option<ConnectCodeStateRecord>, DeviceStoreError> {
-    let stamp = rfc3339(now)?;
+    let stamp = rfc3339(now);
     if store.revoke_connect_code_state(&stamp)? {
         Ok(store.connect_code_state()?)
     } else {
@@ -336,7 +336,7 @@ pub fn set_connection_policy(
     let record = ConnectionPolicyRecord {
         accepting_connections,
         lock_state,
-        updated_at: rfc3339(now)?,
+        updated_at: rfc3339(now),
     };
     store.put_connection_policy(&record)?;
     Ok(record)
@@ -451,7 +451,7 @@ pub fn enqueue_published_frame(
         client_node_id: client_node_id.to_owned(),
         client_instance_id: client_instance_id.to_owned(),
         sequence: expected,
-        occurred_at: rfc3339(now)?,
+        occurred_at: rfc3339(now),
         message: published_message(record),
     };
     let stored = FrameCodec::default()
@@ -481,8 +481,8 @@ fn map_outbox_error(
 }
 
 /// RFC 3339 UTC stamp of the caller's clock observation.
-fn rfc3339(time: OffsetDateTime) -> Result<String, DeviceStoreError> {
-    Ok(crate::canonical_rfc3339(time))
+fn rfc3339(time: OffsetDateTime) -> String {
+    crate::canonical_rfc3339(time)
 }
 
 /// Parses a stored or wire RFC 3339 stamp, fail-closing on corruption.

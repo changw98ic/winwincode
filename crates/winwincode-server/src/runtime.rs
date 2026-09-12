@@ -1013,6 +1013,10 @@ impl RepositoryRuntimeScheduler {
 
     /// Drives one authenticated remote process using its transport-bound
     /// worker and pool identities.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same durable scheduling failures as the local driver.
     pub fn drive_remote_for(
         &mut self,
         now: &Instant,
@@ -2192,35 +2196,36 @@ mod tests {
         let (record, _) = queued_job_record(&scope);
         let worker_pool_id =
             WorkerPoolId(winwincode_control_plane::STRONGFLOW_DEVICE_WORKER_POOL_ID.to_owned());
-        let mut admission = storage.execution_admission().expect("admission opens");
-        for boundary in admission_boundaries(&scope, &worker_pool_id) {
-            let limits = if matches!(boundary, ExecutionAdmissionBoundary::WorkerPool { .. }) {
-                ExecutionAdmissionLimits {
-                    max_concurrent: 4,
-                    ..LOCAL_ADMISSION_LIMITS
-                }
-            } else {
-                LOCAL_ADMISSION_LIMITS
-            };
+        {
+            let mut admission = storage.execution_admission().expect("admission opens");
+            for boundary in admission_boundaries(&scope, &worker_pool_id) {
+                let limits = if matches!(boundary, ExecutionAdmissionBoundary::WorkerPool { .. }) {
+                    ExecutionAdmissionLimits {
+                        max_concurrent: 4,
+                        ..LOCAL_ADMISSION_LIMITS
+                    }
+                } else {
+                    LOCAL_ADMISSION_LIMITS
+                };
+                admission
+                    .configure_policy(&ExecutionAdmissionPolicy { boundary, limits })
+                    .expect("device admission policy configures");
+            }
             admission
-                .configure_policy(&ExecutionAdmissionPolicy { boundary, limits })
-                .expect("device admission policy configures");
+                .reserve(&ExecutionReservationRequest {
+                    scope: scope.clone(),
+                    user_id: owner.clone(),
+                    worker_pool_id: worker_pool_id.clone(),
+                    job_id: record.job_id.clone(),
+                    request_id: RequestId(format!("req_{}", "D".repeat(26))),
+                    repository_access: ExecutionRepositoryAccess::ReadOnly,
+                    reserved_tokens: 1_000,
+                    reserved_cost_microunits: 1_000,
+                    runtime_limit_millis: 3_600_000,
+                    submitted_at: record.submitted_at.clone(),
+                })
+                .expect("device reservation is created");
         }
-        admission
-            .reserve(&ExecutionReservationRequest {
-                scope: scope.clone(),
-                user_id: owner.clone(),
-                worker_pool_id: worker_pool_id.clone(),
-                job_id: record.job_id.clone(),
-                request_id: RequestId(format!("req_{}", "D".repeat(26))),
-                repository_access: ExecutionRepositoryAccess::ReadOnly,
-                reserved_tokens: 1_000,
-                reserved_cost_microunits: 1_000,
-                runtime_limit_millis: 3_600_000,
-                submitted_at: record.submitted_at.clone(),
-            })
-            .expect("device reservation is created");
-        drop(admission);
 
         let mut scheduler = scheduler_with_user(owner, &directory);
         scheduler.worker_pool_id = worker_pool_id;

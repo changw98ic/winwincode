@@ -1064,7 +1064,9 @@ mod tests {
                     command: command.clone(),
                     connect_code_id: "code_01j2".to_owned(),
                     code_digest: "sha256:bb22".to_owned(),
+                    generation: 1,
                     expires_at: "2026-01-01T01:00:00.000Z".to_owned(),
+                    remaining_attempts: 5,
                 }),
             ),
             (

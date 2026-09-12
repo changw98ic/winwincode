@@ -1558,6 +1558,10 @@ impl<'storage> ClientConnectLedger<'storage> {
     }
 
     /// Returns the newest active connect code of one client node.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a non-canonical client identity, corrupt row, or storage failure.
     pub fn active_code_for_client(
         &self,
         client_node_id: &str,
@@ -1612,6 +1616,10 @@ impl<'storage> ClientConnectLedger<'storage> {
     }
 
     /// Returns every active grant on one client node.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a non-canonical client identity, corrupt row, or storage failure.
     pub fn active_grants_for_client(
         &self,
         client_node_id: &str,

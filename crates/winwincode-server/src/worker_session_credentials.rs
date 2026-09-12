@@ -36,6 +36,7 @@ use std::time::Duration;
 use sha2::Digest;
 use sha2::Sha256;
 use winwincode_domain::Instant;
+use winwincode_domain::is_canonical_prefixed_id;
 use winwincode_storage::CredentialAuditEntry;
 use winwincode_storage::CredentialIssuance;
 use winwincode_storage::CredentialRotation;
@@ -449,9 +450,9 @@ impl<'storage> WorkerSessionCredentialService<'storage> {
         now: &Instant,
     ) -> Result<WorkerSessionCredentialRecord, WorkerSessionCredentialError> {
         let record = self.lookup_verified(proof, now)?;
-        let identities_match = canonical_id(worker_session_id, 3)
-            && canonical_id(worker_id, 4)
-            && canonical_id(worker_instance_id, 6)
+        let identities_match = is_canonical_prefixed_id(worker_session_id, "ws_")
+            && is_canonical_prefixed_id(worker_id, "wrk_")
+            && is_canonical_prefixed_id(worker_instance_id, "wki_")
             && record.worker_session_id == worker_session_id
             && record.worker_id == worker_id
             && record.worker_instance_id == worker_instance_id;
@@ -554,17 +555,6 @@ fn canonical_instant(value: &str) -> bool {
         })
 }
 
-/// Prefix-length shape check for canonical identities (cheap, rejection
-/// only — it never produces a diagnostic).
-fn canonical_id(value: &str, prefix_len: usize) -> bool {
-    value.len() == prefix_len + 26
-        && value
-            .as_bytes()
-            .iter()
-            .skip(prefix_len)
-            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
-}
-
 /// Generates one canonical `wcred_` + 26 character Crockford identifier.
 fn generate_credential_id() -> Result<String, WorkerSessionCredentialError> {
     const IDENTITY_ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
@@ -637,7 +627,7 @@ mod tests {
             let id = generate_credential_id().expect("entropy");
             assert_eq!(id.len(), "wcred_".len() + 26);
             assert!(id.starts_with("wcred_"));
-            assert!(canonical_id(&id, "wcred_".len()));
+            assert!(is_canonical_prefixed_id(&id, "wcred_"));
         }
     }
 

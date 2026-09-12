@@ -760,7 +760,11 @@ async fn a_second_enroll_after_enrollment_is_refused() {
         2
     );
     let refused = node_snapshot(&data_directory, &node_id).expect("node");
-    assert_eq!(refused.revision, before.revision + 1, "only hello advanced");
+    assert_eq!(
+        refused.revision,
+        before.revision + 2,
+        "only the hello instance takeover and presence transition advanced"
+    );
     assert_eq!(refused.presence_state, ClientPresenceState::Online);
 
     running.shutdown().await.expect("shutdown");

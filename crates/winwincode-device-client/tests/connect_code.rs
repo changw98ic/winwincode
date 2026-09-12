@@ -895,8 +895,8 @@ fn challenge_ack_message_shape_is_stable() {
     let value = serde_json::to_value(&rejected).expect("message value");
     assert_eq!(value["payload"]["status"], "stale_generation");
 
-    // The published message shape: digest and expiry only, no plaintext
-    // field at all.
+    // The published message shape carries bounded verification metadata but
+    // no plaintext code field.
     let record = ConnectCodeStateRecord {
         connect_code_id: "cct_AAAAAAAAAAAAAAAAAAAAAAAAAA2".to_owned(),
         code_digest: "sha256:bb22".to_owned(),
@@ -911,11 +911,13 @@ fn challenge_ack_message_shape_is_stable() {
     let value = serde_json::to_value(&published).expect("message value");
     assert_eq!(value["kind"], "client.connect_code.published");
     assert_eq!(value["payload"]["codeDigest"], "sha256:bb22");
+    assert_eq!(value["payload"]["generation"], 3);
     assert_eq!(value["payload"]["expiresAt"], record.expires_at);
+    assert_eq!(value["payload"]["remainingAttempts"], 5);
     assert_eq!(
         value["payload"].as_object().expect("payload object").len(),
-        5,
-        "exactly the command context plus the three payload fields"
+        7,
+        "exactly the command context plus the five payload fields"
     );
     assert!(matches!(
         published,

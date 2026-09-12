@@ -288,7 +288,7 @@ pub fn register_repository(
 
     // Plan §13.2: the binding id is drawn only after every check passed.
     let binding_id = fresh_binding_id(store)?;
-    let stamp = rfc3339(now)?;
+    let stamp = rfc3339(now);
     let availability = scan_availability(scan.dirty_state);
     let fingerprint = repository_fingerprint(&scan.head_commit, &scan.branch);
     let mapping = PathMappingRecord {
@@ -441,7 +441,7 @@ pub fn revalidate_repository(
     let stored_path = PathBuf::from(&mapping.canonical_path);
     let scan = scan_repository(&stored_path, false, true);
 
-    let stamp = rfc3339(now)?;
+    let stamp = rfc3339(now);
     let (availability, head_commit, dirty_state, fingerprint, detail, git_common_directory) =
         match scan {
             Ok(scan) => {
@@ -816,7 +816,7 @@ pub(crate) fn enqueue_repository_frame(
         client_node_id: client_node_id.to_owned(),
         client_instance_id: client_instance_id.to_owned(),
         sequence: expected,
-        occurred_at: rfc3339(now)?,
+        occurred_at: rfc3339(now),
         message,
     };
     let stored = FrameCodec::default()
@@ -847,8 +847,8 @@ fn map_outbox_error(
 }
 
 /// RFC 3339 UTC stamp of the caller's clock observation.
-fn rfc3339(time: OffsetDateTime) -> Result<String, RepositoryRegistryError> {
-    Ok(crate::canonical_rfc3339(time))
+fn rfc3339(time: OffsetDateTime) -> String {
+    crate::canonical_rfc3339(time)
 }
 
 #[cfg(test)]

@@ -153,6 +153,7 @@ pub fn run_device_service(config: &DeviceServiceConfig) -> Result<(), DeviceServ
     run_device_service_until(config, || false)
 }
 
+#[allow(clippy::too_many_lines)]
 fn run_device_service_until(
     config: &DeviceServiceConfig,
     mut should_stop: impl FnMut() -> bool,

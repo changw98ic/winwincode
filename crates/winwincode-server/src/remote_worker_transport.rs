@@ -208,7 +208,7 @@ impl RemoteWorkerAuthenticator for WorkerSessionRemoteAuthenticator {
             .map_err(|_| RemoteWorkerAuthenticationError::unavailable())?;
         let record = WorkerSessionCredentialService::new(&mut storage)
             .verify_credential(credential.expose_for_verification(), now)
-            .map_err(session_authentication_error)?;
+            .map_err(|error| session_authentication_error(&error))?;
         RemoteWorkerPrincipal::new_bound(
             WorkerId(record.worker_id),
             WorkerInstanceId(record.worker_instance_id),
@@ -298,7 +298,7 @@ impl RemoteWorkerAuthenticator for CompositeRemoteWorkerAuthenticator {
 }
 
 fn session_authentication_error(
-    error: crate::WorkerSessionCredentialError,
+    error: &crate::WorkerSessionCredentialError,
 ) -> RemoteWorkerAuthenticationError {
     match error.kind() {
         WorkerSessionCredentialErrorKind::AuthenticationRejected

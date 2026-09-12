@@ -17,6 +17,7 @@ const excludedDirectories = new Set([
   'server-data',
   'source-repositories',
   'target',
+  'test-results',
   'third_party',
   'vendor',
 ])

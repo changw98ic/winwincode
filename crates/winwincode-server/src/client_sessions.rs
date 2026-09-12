@@ -219,6 +219,10 @@ impl ClientSessionsApplication {
     /// Composes the launch application with the exact Device exchange used
     /// by the running Server, so ephemeral Worker credentials travel on the
     /// same authenticated response as their launch frame.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the configuration violates its bounds.
     pub fn open_with_exchange(
         data_directory: impl Into<PathBuf>,
         config: &ClientSessionsConfig,

@@ -127,6 +127,7 @@ fn outcome(
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn upserts_are_idempotent_by_binding_id_and_cas_guarded() {
     let mut storage = SqliteStorage::open(temporary_directory("upsert")).expect("storage");
     let client = seed_client(&mut storage, 1);
