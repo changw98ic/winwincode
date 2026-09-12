@@ -268,7 +268,8 @@ test('product release workflow blocks uploads until target security verification
 
 test('product release emits a verified Worker-only input for Community Core', () => {
   assert.ok(existsSync(resolve(root, 'scripts/stage-community-core-worker-runtime.mjs')))
-  assert.ok(workflow.includes('corepack pnpm release:core-worker --'))
+  assert.ok(workflow.includes('corepack pnpm release:core-worker \\'))
+  assert.equal(workflow.includes('corepack pnpm release:core-worker --'), false)
   assert.ok(workflow.includes('--artifact-root "release-artifacts/${{ matrix.target }}"'))
   assert.ok(workflow.includes('--output "community-core-worker/${{ matrix.target }}"'))
   assert.ok(workflow.includes('name: community-core-worker-${{ matrix.target }}'))
@@ -283,7 +284,8 @@ test('product release assembles one signed Community Core candidate after all ta
   assert.ok(workflow.includes('npm pack "./$(dirname "${manifest}")"'))
   assert.ok(workflow.includes('git archive --format=tar HEAD -- "${contract_paths[@]}"'))
   assert.ok(workflow.includes('zstd --quiet -19 -T0'))
-  assert.ok(workflow.includes('corepack pnpm release:core-finalize --'))
+  assert.ok(workflow.includes('corepack pnpm release:core-finalize \\'))
+  assert.equal(workflow.includes('corepack pnpm release:core-finalize --'), false)
   assert.ok(workflow.includes(
     'WINWINCODE_CORE_RELEASE_PRIVATE_KEY_PEM: ${{ secrets.WINWINCODE_CORE_RELEASE_PRIVATE_KEY_PEM }}',
   ))

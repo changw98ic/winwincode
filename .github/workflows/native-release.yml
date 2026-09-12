@@ -178,7 +178,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          corepack pnpm release:core-worker -- \
+          corepack pnpm release:core-worker \
             --artifact-root "release-artifacts/${{ matrix.target }}" \
             --source-commit "${SOURCE_COMMIT}" \
             --source-date-epoch "$(git show -s --format=%ct "${SOURCE_COMMIT}")" \
@@ -325,7 +325,7 @@ jobs:
           WINWINCODE_CORE_RELEASE_PRIVATE_KEY_PEM: ${{ secrets.WINWINCODE_CORE_RELEASE_PRIVATE_KEY_PEM }}
         run: |
           set -euo pipefail
-          corepack pnpm release:core-finalize -- \
+          corepack pnpm release:core-finalize \
             --input "${{ steps.inputs.outputs.input_root }}" \
             --output "${RUNNER_TEMP}/community-core-release" \
             --source-commit "${SOURCE_COMMIT}" \
