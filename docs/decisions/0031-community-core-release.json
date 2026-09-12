@@ -8,7 +8,7 @@
     "winwincode-enterprise"
   ],
   "currentState": {
-    "observedSourceCommit": "1ded1d07b5c65dac5acfb83c61527205cb95982f",
+    "observedSourceCommit": "c79de9412e6522e7a3ed9922f3d8218d8117de2c",
     "observedWorkspaceVersion": "0.1.0-alpha.2",
     "inspectionMode": {
       "mode": "local-code-index",
@@ -96,12 +96,17 @@
         {
           "name": "winwincode-publication",
           "manifest": "crates/winwincode-publication/Cargo.toml",
-          "publish": false,
-          "boundaryReady": false,
-          "blocker": "The coordinator and metering modules directly import winwincode-storage types."
+          "publish": true,
+          "boundaryReady": true
         }
       ],
       "communityOnlyAdapters": [
+        {
+          "name": "winwincode-storage",
+          "manifest": "crates/winwincode-storage/Cargo.toml",
+          "publish": false,
+          "reason": "This SQLite product-state adapter, including the Publication persistence mapping, belongs to the Community product and is excluded from the cross-repository core release."
+        },
         {
           "name": "winwincode-observability-sqlite",
           "manifest": "crates/winwincode-observability-sqlite/Cargo.toml",
@@ -193,8 +198,10 @@
       "crates/winwincode-observability-core/Cargo.toml",
       "crates/winwincode-observability-sqlite/Cargo.toml",
       "crates/winwincode-publication/Cargo.toml",
+      "crates/winwincode-publication/src/storage.rs",
       "crates/winwincode-repository-context/Cargo.toml",
       "crates/winwincode-session/Cargo.toml",
+      "crates/winwincode-storage/src/publication.rs",
       "docs/decisions/0031-community-core-release.json",
       "packages/browser-ui/package.json",
       "packages/browser-core/package.json",
@@ -267,8 +274,7 @@
       },
       {
         "name": "winwincode-publication",
-        "role": "storage-neutral publication facts, policy, and external-effect port",
-        "requiredChangeBeforeFirstRelease": "Replace direct winwincode-storage imports with publication-owned facts and persistence ports."
+        "role": "storage-neutral publication facts, policy, persistence port, and external-effect port"
       }
     ],
     "consumableNpmPackages": [
@@ -531,7 +537,7 @@
     },
     {
       "id": "RUST-STORAGE",
-      "requirement": "winwincode-session, winwincode-delivery, and winwincode-publication compile and test without rusqlite, winwincode-storage, or winwincode-postgres dependencies."
+      "requirement": "The packaged library targets and normal dependency graphs for winwincode-session, winwincode-delivery, and winwincode-publication contain no rusqlite, winwincode-storage, or winwincode-postgres dependencies; Community storage adapters are tested outside those release packages."
     },
     {
       "id": "NPM-PACKAGE",
@@ -572,12 +578,12 @@
     {
       "id": "RUST-NOT-PUBLISHABLE",
       "impact": "The complete nine-crate Rust core set cannot yet be resolved from a registry.",
-      "evidence": "Seven target crates are publishable; winwincode-delivery and winwincode-publication remain publish = false while they depend on forbidden winwincode-storage."
+      "evidence": "Eight target crates are publishable; winwincode-delivery remains publish = false and directly depends on forbidden winwincode-storage."
     },
     {
       "id": "STORAGE-COUPLING",
-      "impact": "Two shared domain crates would pull Community product storage into PostgreSQL products.",
-      "evidence": "winwincode-delivery and winwincode-publication still import winwincode-storage types."
+      "impact": "One shared domain crate would still pull Community product storage into PostgreSQL products.",
+      "evidence": "winwincode-delivery still imports winwincode-storage types; winwincode-publication now owns its persistence port and keeps the SQLite mapping in winwincode-storage."
     },
     {
       "id": "CODEX-PATH-DEPS",
