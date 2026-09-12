@@ -100,6 +100,15 @@ test('product release verifies one successful exact-commit mainline run before t
   assert.ok(workflow.includes('node-version-file: .node-version'))
   assert.ok(workflow.includes('rustup toolchain install 1.95.0'))
   assert.ok(workflow.includes('rustup target add "${{ matrix.target }}" --toolchain 1.95.0'))
+  assert.equal(
+    [...workflow.matchAll(
+      /mozilla-actions\/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba/gmu,
+    )].length,
+    1,
+  )
+  assert.equal([...workflow.matchAll(/^          version: "v0\.17\.0"$/gmu)].length, 1)
+  assert.equal([...workflow.matchAll(/^      RUSTC_WRAPPER: "sccache"$/gmu)].length, 1)
+  assert.equal([...workflow.matchAll(/^      SCCACHE_GHA_ENABLED: "true"$/gmu)].length, 1)
   assert.doesNotMatch(workflow, /windows|win32|msvc/iu)
   const releaseRunner = readFileSync(resolve(root, 'scripts/run-release-artifact-gate.mjs'), 'utf8')
   assert.doesNotMatch(releaseRunner, /pnpm', 'verify|pnpm verify/u)
