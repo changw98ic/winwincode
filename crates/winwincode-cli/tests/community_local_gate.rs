@@ -723,8 +723,12 @@ fn freeze_local_candidate(
             ),
         ),
     );
-    let candidate = freeze_delivery_candidate_from_source(delivery, &source, &outcome)
-        .expect("freeze candidate from exact local source");
+    let candidate = freeze_delivery_candidate_from_source(
+        delivery,
+        &winwincode_storage::delivery_candidate_source(&source),
+        &outcome,
+    )
+    .expect("freeze candidate from exact local source");
     artifacts.close().expect("Artifact close");
     let runtime_log = root.join("verification.log");
     fs::write(
