@@ -127,6 +127,17 @@ test('Community core contract has one exact cross-repository package and protoco
     contract.currentState.rustPackages.communityOnlyAdapters.map(entry => entry.name),
     ['winwincode-storage', 'winwincode-observability-sqlite'],
   )
+  assert.deepEqual(
+    contract.currentState.rustPackages.intendedLinkableCore.find(entry => (
+      entry.name === 'winwincode-delivery'
+    )),
+    {
+      name: 'winwincode-delivery',
+      manifest: 'crates/winwincode-delivery/Cargo.toml',
+      publish: true,
+      boundaryReady: true,
+    },
+  )
   assert.ok(contract.targetState.forbiddenCoreContent.rustCrates.includes('winwincode-observability-sqlite'))
   assert.equal(contract.targetState.forbiddenCoreContent.rustCrates.includes('winwincode-observability-core'), false)
   assert.deepEqual(
