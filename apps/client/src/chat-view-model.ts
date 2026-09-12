@@ -250,7 +250,7 @@ function normalizedError(error: unknown, signal?: AbortSignal): ControlPlaneClie
     return new ControlPlaneClientError({
       kind: 'cancelled',
       code: 'REQUEST_CANCELLED',
-      message: 'The Chat view request was cancelled.',
+      message: '对话视图请求已取消。',
       requestId: null,
       retryable: false,
       cause: error,
@@ -258,7 +258,7 @@ function normalizedError(error: unknown, signal?: AbortSignal): ControlPlaneClie
   }
   return clientFailure(
     'CHAT_VIEW_MODEL_FAILURE',
-    'The Chat projection could not be updated.',
+    '无法更新对话投影。',
     error,
   )
 }
@@ -309,7 +309,7 @@ function expectCompletedCommand<Command extends keyof ChatCommandResponses>(
 ): ChatCommandResponses[Command] | null {
   if (response.command !== command) throw clientFailure(
     'CHAT_COMMAND_MISMATCH',
-    'The Control Plane returned another command result.',
+    '控制平面返回了其他命令结果。',
   )
   if (response.outcome === 'accepted') return null
   return response as ChatCommandResponses[Command]
@@ -364,13 +364,13 @@ function assertMessages(
     if (message.productSessionId !== productSessionId) {
       throw clientFailure(
         'CHAT_MESSAGE_SESSION_MISMATCH',
-        'A Chat message belongs to another ProductSession.',
+        '对话消息属于其他会话。',
       )
     }
     if (ids.has(message.id) || sequences.has(message.sequence)) {
       throw clientFailure(
         'CHAT_MESSAGE_ORDER_INVALID',
-        'The Chat message page contains duplicate identity or sequence values.',
+        '对话消息页面包含重复的标识或序号。',
       )
     }
     ids.add(message.id)
@@ -426,7 +426,7 @@ function assertRuntime(
   ) {
     throw clientFailure(
       'CHAT_RUNTIME_SESSION_MISMATCH',
-      'The runtime projection does not match the active Chat ProductSession.',
+      '运行时投影与当前对话会话不匹配。',
     )
   }
 }
@@ -441,7 +441,7 @@ function assertBinding(
     || binding.workerSessionId !== binding.sessionIdentity.workerSessionId
   ) throw clientFailure(
     'CHAT_INTERACTION_BINDING_MISMATCH',
-    'A pending interaction does not match the active ProductSession binding.',
+    '待处理交互与当前对话会话绑定不匹配。',
   )
 }
 
@@ -463,7 +463,7 @@ function assertPendingInputs(
     ) {
       throw clientFailure(
         'CHAT_INPUT_PROJECTION_INVALID',
-        'The pending input projection contains resolved or duplicate input.',
+        '待处理输入投影包含已解决或重复的输入。',
       )
     }
     ids.add(interaction.inputRequestId)
@@ -497,7 +497,7 @@ function assertPendingApprovals(
     if (approval.state !== 'pending' || ids.has(approval.id)) {
       throw clientFailure(
         'CHAT_APPROVAL_PROJECTION_INVALID',
-        'The pending approval projection contains resolved or duplicate approval.',
+        '待处理审批投影包含已解决或重复的审批。',
       )
     }
     ids.add(approval.id)
@@ -602,7 +602,7 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
     if (activeProductSessionId !== null) return activeProductSessionId
     throw clientFailure(
       'CHAT_SESSION_REQUIRED',
-      'Select or create a Chat session before continuing.',
+      '请先选择或创建对话。',
     )
   }
 
@@ -653,12 +653,12 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
       assertPage(response.page, response.query)
       if (!sameScope(response.result.scope, options.scope)) throw clientFailure(
         'CHAT_MODEL_ROUTE_SCOPE_MISMATCH',
-        'The model-route availability page belongs to another repository.',
+        '模型路由可用性页面属于其他仓库。',
       )
       if (!sameProject(response.result.requestPoolSource, options.scope)) {
         throw clientFailure(
           'CHAT_MODEL_ROUTE_REQUEST_POOL_SCOPE_MISMATCH',
-          'The model-route request-pool source belongs to another Project.',
+          '模型路由请求池来源属于其他项目。',
         )
       }
       if (firstPage === null) {
@@ -682,13 +682,13 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
         )
       ) throw clientFailure(
         'CHAT_MODEL_ROUTE_SNAPSHOT_MISMATCH',
-        'The paginated model-route availability response changed during one read.',
+        '模型路由可用性分页响应在读取期间发生了变化。',
       )
       for (const item of response.result.items) {
         const identity = modelRouteIdentity(item.route)
         if (identities.has(identity)) throw clientFailure(
           'CHAT_MODEL_ROUTE_DUPLICATE',
-          'The model-route availability page contains duplicate routes.',
+          '模型路由可用性页面包含重复路由。',
         )
         identities.add(identity)
         items.push(item)
@@ -700,14 +700,14 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
       const next: OpaqueCursor | null = response.page.nextCursor
       if (next === null || cursors.has(next)) throw clientFailure(
         'CHAT_MODEL_ROUTE_CURSOR_INVALID',
-        'The model-route availability query returned an invalid continuation cursor.',
+        '模型路由可用性查询返回了无效的续页游标。',
       )
       cursors.add(next)
       cursor = next
     }
     throw clientFailure(
       'CHAT_MODEL_ROUTE_PAGE_LIMIT',
-      'The model-route availability query exceeded the bounded page limit.',
+      '模型路由可用性查询超过了分页上限。',
     )
   }
 
@@ -815,7 +815,7 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
     ) {
       throw clientFailure(
         'CHAT_SESSION_SCOPE_MISMATCH',
-        'The ProductSession snapshot does not match the active repository.',
+        '对话会话快照与当前仓库不匹配。',
       )
     }
     for (const item of sessions.result.items) {
@@ -824,7 +824,7 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
         || item.repositoryId !== options.scope.repositoryId
       ) throw clientFailure(
         'CHAT_SESSION_LIST_SCOPE_MISMATCH',
-        'The session list contains a ProductSession from another repository.',
+        '会话列表包含来自其他仓库的对话会话。',
       )
     }
     const sessionById = new Map(sessions.result.items.map(item => [item.id, item]))
@@ -935,7 +935,7 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
   ): Promise<void> {
     if (event.event.type !== 'product-session.changed.v1') throw clientFailure(
       'CHAT_SESSION_EVENT_INVALID',
-      'The ProductSession reload requires a ProductSession change event.',
+      '重新加载对话会话需要对应的变更事件。',
     )
     const active = controller()
     try {
@@ -956,7 +956,7 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
         || response.result.revision < event.event.revision
       ) throw clientFailure(
         'CHAT_SESSION_EVENT_STALE',
-        'The ProductSession snapshot is older than its change event.',
+        '对话会话快照早于对应的变更事件。',
       )
       patch({
         status: 'ready',
@@ -999,7 +999,7 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
         && response.result.revision < event.event.projectionRevision
       ) throw clientFailure(
         'CHAT_RUNTIME_EVENT_STALE',
-        'The runtime snapshot is older than its invalidation event.',
+        '运行时快照早于对应的失效事件。',
       )
       patch({ status: 'ready', realtime: 'subscribed', runtime: response.result, error: null })
     } finally {
@@ -1079,7 +1079,7 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
         && availability.requestPoolRevision < minimumRequestPoolRevision
       ) throw clientFailure(
         'CHAT_MODEL_ROUTE_EVENT_STALE',
-        'The model-route availability snapshot is older than its request-pool event.',
+        '模型路由可用性快照早于对应的请求池事件。',
       )
       const selectedModelRoute = reconcileSelectedModelRoute(availability)
       patch({
@@ -1129,7 +1129,7 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
       || event.reloadQueries[0] !== QueryName.ModelRouteAvailabilityList
     ) throw clientFailure(
       'CHAT_MODEL_ROUTE_EVENT_INVALID',
-      'The model-route subscription received an invalid reload instruction.',
+      '模型路由订阅收到了无效的重新加载指令。',
     )
     if (event.source === 'request_pool') {
       const availability = currentState.modelRouteAvailability
@@ -1139,13 +1139,13 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
         || scopeIdentity(binding.scope) !== scopeIdentity(availability.requestPoolSource)
       ) throw clientFailure(
         'CHAT_MODEL_ROUTE_EVENT_SCOPE_MISMATCH',
-        'The request-pool invalidation came from another Project.',
+        '请求池失效事件来自其他项目。',
       )
       if (event.sourceRevision <= availability.requestPoolRevision) return
     } else if (!binding.authority) {
       throw clientFailure(
         'CHAT_MODEL_ROUTE_EVENT_SCOPE_MISMATCH',
-        'The model-route authority invalidation came from an unrelated Scope.',
+        '模型路由授权失效事件来自无关范围。',
       )
     }
     patch({ status: 'refreshing' })
@@ -1165,7 +1165,7 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
       if ('productSessionId' in event && event.productSessionId !== productSessionId) {
         throw clientFailure(
           'CHAT_EVENT_SESSION_MISMATCH',
-          'A Chat event belongs to another ProductSession.',
+          '对话事件属于其他会话。',
         )
       }
       if (event.type === 'product-session.changed.v1') {
@@ -1283,7 +1283,7 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
         async onResetRequired(frame) {
           if (frame === null) throw clientFailure(
             'CHAT_MODEL_ROUTE_RESET_INVALID',
-            'The model-route subscription reset did not include a replay cursor.',
+            '模型路由订阅重置未包含重放游标。',
           )
           const ownGeneration = generation
           patch({ status: 'refreshing' })
@@ -1294,7 +1294,7 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
           accessRevoked(new ControlPlaneClientError({
             kind: 'authentication',
             code: 'AUTHENTICATION_REQUIRED',
-            message: 'The model-route subscription authorization is no longer valid.',
+            message: '模型路由订阅授权已失效。',
             requestId: null,
             retryable: false,
           }))
@@ -1334,7 +1334,7 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
         const next = await completeSnapshot(ownGeneration, true)
         if (next === null) throw clientFailure(
           'CHAT_RESET_SUPERSEDED',
-          'The Chat reset was replaced by a newer operation.',
+          '对话重置已被更新的操作替代。',
         )
         return next
       },
@@ -1342,7 +1342,7 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
         accessRevoked(new ControlPlaneClientError({
           kind: 'authentication',
           code: 'AUTHENTICATION_REQUIRED',
-          message: 'The Chat subscription authorization is no longer valid.',
+          message: '对话订阅授权已失效。',
           requestId: null,
           retryable: false,
         }))
@@ -1370,7 +1370,7 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
       || session.repositoryId !== options.scope.repositoryId
     ) throw clientFailure(
       'CHAT_MUTATION_SESSION_MISMATCH',
-      'The Chat command returned another ProductSession.',
+      '对话命令返回了其他对话会话。',
     )
     patch({
       activeProductSessionId,
@@ -1408,12 +1408,12 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
   async function submitMessage(message: string): Promise<void> {
     const value = message.trim()
     if (value.length === 0) {
-      interactionFailure('CHAT_MESSAGE_REQUIRED', 'Enter a message before sending.')
+      interactionFailure('CHAT_MESSAGE_REQUIRED', '请输入消息后再发送。')
       return
     }
     const session = currentState.session
     if (session === null) {
-      interactionFailure('CHAT_SESSION_REQUIRED', 'Select a Chat session before sending.')
+      interactionFailure('CHAT_SESSION_REQUIRED', '发送前请选择对话。')
       return
     }
     const productSessionId = requireActiveSession()
@@ -1447,13 +1447,13 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
   async function createSession(input: ChatCreateSessionInput): Promise<void> {
     const title = input.title.trim()
     if (title.length === 0) {
-      interactionFailure('CHAT_SESSION_TITLE_REQUIRED', 'Enter a title for the new Chat.')
+      interactionFailure('CHAT_SESSION_TITLE_REQUIRED', '请输入新对话标题。')
       return
     }
     if (currentState.status !== 'ready') {
       interactionFailure(
         'CHAT_MODEL_ROUTE_REFRESH_REQUIRED',
-        'Wait for the current model-route refresh before creating a Chat.',
+        '请等待当前模型路由刷新完成后再创建对话。',
       )
       return
     }
@@ -1468,7 +1468,7 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
     ) {
       interactionFailure(
         'CHAT_MODEL_ROUTE_UNAVAILABLE',
-        'Select a currently available model route before creating a Chat.',
+        '创建对话前请选择当前可用的模型路由。',
       )
       return
     }
@@ -1497,7 +1497,7 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
       }
       if (completed.result.id !== input.productSessionId) throw clientFailure(
         'CHAT_CREATE_SESSION_MISMATCH',
-        'The new Chat response returned another ProductSession.',
+        '新对话响应返回了其他对话会话。',
       )
       activeProductSessionId = input.productSessionId
       applySessionMutation(completed.result)
@@ -1514,12 +1514,12 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
   async function cancelSession(reason: string): Promise<void> {
     const value = reason.trim()
     if (value.length === 0) {
-      interactionFailure('CHAT_CANCEL_REASON_REQUIRED', 'Explain why the run is being stopped.')
+      interactionFailure('CHAT_CANCEL_REASON_REQUIRED', '请说明停止运行的原因。')
       return
     }
     const session = currentState.session
     if (session === null) {
-      interactionFailure('CHAT_SESSION_REQUIRED', 'Select a Chat session before stopping it.')
+      interactionFailure('CHAT_SESSION_REQUIRED', '停止前请选择对话。')
       return
     }
     const productSessionId = requireActiveSession()
@@ -1556,11 +1556,11 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
   ): Promise<void> {
     const input = currentState.pendingInputs.find(item => item.inputRequestId === inputRequestId)
     if (input === undefined) {
-      interactionFailure('CHAT_INPUT_REQUIRED', 'Select one current pending input request.')
+      interactionFailure('CHAT_INPUT_REQUIRED', '请选择一项当前待处理的输入请求。')
       return
     }
     if (Date.parse(input.expiresAt) <= nowMillis()) {
-      interactionFailure('CHAT_INPUT_EXPIRED', 'The pending input request has expired.')
+      interactionFailure('CHAT_INPUT_EXPIRED', '待处理输入请求已过期。')
       return
     }
     assertBinding(input.binding, requireActiveSession())
@@ -1606,11 +1606,11 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
   ): Promise<void> {
     const approval = currentState.pendingApprovals.find(item => item.id === approvalId)
     if (approval === undefined) {
-      interactionFailure('CHAT_APPROVAL_REQUIRED', 'Select one current pending approval.')
+      interactionFailure('CHAT_APPROVAL_REQUIRED', '请选择一项当前待处理的审批。')
       return
     }
     if (Date.parse(approval.expiresAt) <= nowMillis()) {
-      interactionFailure('CHAT_APPROVAL_EXPIRED', 'The pending approval has expired.')
+      interactionFailure('CHAT_APPROVAL_EXPIRED', '待处理审批已过期。')
       return
     }
     assertBinding(approval.binding, requireActiveSession())
@@ -1650,7 +1650,7 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
   }
 
   async function load(replace: boolean): Promise<void> {
-    if (closed) throw clientFailure('CHAT_VIEW_MODEL_CLOSED', 'The Chat view-model is closed.')
+    if (closed) throw clientFailure('CHAT_VIEW_MODEL_CLOSED', '对话视图已关闭。')
     generation += 1
     const ownGeneration = generation
     abortRequests()
@@ -1707,17 +1707,17 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
       await load(false)
     },
     async selectSession(productSessionId) {
-      if (closed) throw clientFailure('CHAT_VIEW_MODEL_CLOSED', 'The Chat view-model is closed.')
+      if (closed) throw clientFailure('CHAT_VIEW_MODEL_CLOSED', '对话视图已关闭。')
       if (productSessionId === activeProductSessionId && currentState.status === 'ready') return
       activeProductSessionId = productSessionId
       await load(true)
     },
     selectModelRoute(modelRoute) {
-      if (closed) throw clientFailure('CHAT_VIEW_MODEL_CLOSED', 'The Chat view-model is closed.')
+      if (closed) throw clientFailure('CHAT_VIEW_MODEL_CLOSED', '对话视图已关闭。')
       if (currentState.status !== 'ready') {
         interactionFailure(
           'CHAT_MODEL_ROUTE_REFRESH_REQUIRED',
-          'Wait for the current model-route refresh before selecting a model.',
+          '请等待当前模型路由刷新完成后再选择模型。',
         )
         return
       }
@@ -1729,7 +1729,7 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
       if (selected === undefined) {
         interactionFailure(
           'CHAT_MODEL_ROUTE_UNAVAILABLE',
-          'Refresh Chat and select a currently available model route.',
+          '请刷新对话并选择当前可用的模型路由。',
         )
         return
       }
@@ -1758,7 +1758,7 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
       await decideApproval(approvalId, decision, reason)
     },
     async loadMoreMessages() {
-      if (closed) throw clientFailure('CHAT_VIEW_MODEL_CLOSED', 'The Chat view-model is closed.')
+      if (closed) throw clientFailure('CHAT_VIEW_MODEL_CLOSED', '对话视图已关闭。')
       const cursor = currentState.messagePagination.nextCursor
       if (!currentState.messagePagination.hasMore || cursor === null) return
       const ownGeneration = generation
@@ -1813,17 +1813,17 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
         error: new ControlPlaneClientError({
           kind: 'cancelled',
           code: 'REQUEST_CANCELLED',
-          message: 'The Chat view request was cancelled.',
+          message: '对话视图请求已取消。',
           requestId: null,
           retryable: false,
         }),
       })
     },
     reconnect() {
-      if (closed) throw clientFailure('CHAT_VIEW_MODEL_CLOSED', 'The Chat view-model is closed.')
+      if (closed) throw clientFailure('CHAT_VIEW_MODEL_CLOSED', '对话视图已关闭。')
       if (realtime === null && modelRouteRealtime.length === 0) throw clientFailure(
         'CHAT_SUBSCRIPTION_INACTIVE',
-        'The Chat subscription is not active.',
+        '对话订阅未启用。',
       )
       patch({ realtime: 'reconnecting', error: null })
       realtime?.reconnect()

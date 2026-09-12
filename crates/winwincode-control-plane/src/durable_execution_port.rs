@@ -10,7 +10,7 @@
 use std::fmt;
 
 use sha2::{Digest, Sha256};
-use winwincode_delivery::application::stage::{
+use winwincode_delivery::application::workrun_execution::{
     DeliveryTerminalOutcomeFacts, TerminalArtifactReference, TerminalOutcomeStatus,
     WorkerTerminalOutcomeReport, seal_dispatch_terminal_outcome, seal_session_binding_authority,
 };

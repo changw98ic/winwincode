@@ -219,7 +219,7 @@
       "path": "crates/winwincode-control-plane/tests/delivery_atomic_transaction.rs",
       "requiredTests": [
         "raw_borrowed_journal_can_publish_before_an_unrelated_outer_commit_fails",
-        "delivery_advance_commits_every_durable_fact_before_dispatch",
+        "workrun_start_commits_every_durable_fact_before_dispatch",
         "generic_control_plane_commit_rejects_every_delivery_command_bypass",
         "mismatched_delivery_command_payload_fails_before_storage_or_dispatch",
         "scoped_request_replay_returns_the_original_committed_job_without_redispatch",

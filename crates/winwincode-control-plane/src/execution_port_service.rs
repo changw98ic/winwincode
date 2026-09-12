@@ -9,7 +9,7 @@
 
 use std::fmt;
 
-use winwincode_delivery::application::stage::SessionBindingAuthority;
+use winwincode_delivery::application::workrun_execution::SessionBindingAuthority;
 use winwincode_delivery::domain::{Delivery, SessionBindingSourceKind};
 use winwincode_domain::RepositoryScope;
 use winwincode_domain::{
@@ -52,7 +52,7 @@ pub const DEFAULT_HEARTBEAT_INTERVAL_MS: i64 = 5_000;
 /// Control Plane-owned metadata for one Worker replay command.
 ///
 /// The caller identifies the durable Job and supplies only command-envelope
-/// values. Session, Worker, lease, and `StageRun` identity are loaded from the
+/// values. Session, Worker, lease, and `WorkRun` identity are loaded from the
 /// committed Delivery binding and execution registry below.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RuntimeReplayRequestCommand {

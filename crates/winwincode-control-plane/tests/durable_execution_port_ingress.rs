@@ -10,26 +10,26 @@ use std::sync::{
 
 use serde_json::{Value, from_value};
 use sha2::{Digest, Sha256};
-use winwincode_api::generated::{
-    Actor, CommandEnvelope, CommandName, DeliveryAdvanceCommand, Scope,
-};
+use winwincode_api::generated::{Actor, CommandEnvelope, CommandName, Scope, WorkRunStartCommand};
 use winwincode_control_plane::{
     ControlPlane, ControlPlaneConfig, DurableExecutionPortContext, DurableExecutionPortDelegate,
     DurableExecutionPortError, DurableExecutionPortIngress, DurableExecutionPortSupplement,
     EventPublishError, EventPublisher, OutboxEvent, RepositoryExecutionScheduler, StateChange,
 };
 use winwincode_delivery::{
-    domain::{DELIVERY_SCHEMA_VERSION, Delivery, DeliveryStatus, DeliveryTask, DeliveryTaskStatus},
+    domain::{Delivery, DeliveryStatus},
     store::{
         AtomicPublication, CreateDelivery, DeliveryCommand, DeliveryCommandPort,
         DeliveryJournalPort, DeliveryStore, JournalBackendError, LoadedDeliveryJournal,
     },
 };
 use winwincode_domain::{
-    CodexThreadId, DeliveryId, ExecutionEventId, ExecutionJobId, ExecutionMessageId,
-    ExecutionSequence, FencingToken, Instant, LeaseId, ProductSessionId, RequestId, Revision,
-    SchemaVersion, SessionBindingSourceIdentity, SessionBindingSourceIdentityKind, SessionIdentity,
-    Sha256Digest, UserId, WorkerInstanceId, WorkerSessionId,
+    AgentIdentityId, CodexThreadId, DeliveryId, ExecutionEventId, ExecutionJobId,
+    ExecutionMessageId, ExecutionSequence, FencingToken, Instant, LeaseId, ProductSessionId,
+    RequestId, Revision, RuntimeSessionAgentIdentity, RuntimeSessionContext,
+    RuntimeSessionWorkspace, SchemaVersion, SessionBindingSourceIdentity,
+    SessionBindingSourceIdentityKind, SessionIdentity, Sha256Digest, UserId, WorkerInstanceId,
+    WorkerSessionId, WorkspaceRevision,
 };
 use winwincode_domain::{
     OrganizationId, ProjectId, RepositoryId, RepositoryScope, RepositoryScopeKind, UserActor,
@@ -213,13 +213,7 @@ fn initial_workrun_delivery(seed: u64) -> Delivery {
     value["revision"] = 1.into();
     value["status"] = "draft".into();
     value["updatedAtMillis"] = value["createdAtMillis"].clone();
-    for field in [
-        "tasks",
-        "stageRuns",
-        "sessionBindings",
-        "attentionItems",
-        "evidence",
-    ] {
+    for field in ["sessionBindings", "attentionItems", "evidence"] {
         value[field] = serde_json::json!([]);
     }
     value["verdict"] = Value::Null;
@@ -293,18 +287,7 @@ fn public_delivery_before_advance(seed: u64, base_revision: String) -> Delivery 
     snapshot.spec.repository.locator = "project-one".into();
     snapshot.spec.base_revision = base_revision;
     snapshot.revision = 1;
-    snapshot.status = DeliveryStatus::Executing;
-    snapshot.tasks = vec![DeliveryTask {
-        schema_version: DELIVERY_SCHEMA_VERSION,
-        id: winwincode_domain::DeliveryTaskId(canonical_id("dtk", seed)),
-        delivery_id,
-        title: "Implement the approved task".into(),
-        goal: "Implement the approved candidate change.".into(),
-        acceptance_criterion_ids: vec![snapshot.spec.acceptance_criteria[0].id.clone()],
-        blocked_by_task_ids: Vec::new(),
-        owner: None,
-        status: DeliveryTaskStatus::Pending,
-    }];
+    snapshot.status = DeliveryStatus::Ready;
     snapshot.work_run_aggregate.contract.id = WorkContractId(canonical_id("wct", seed));
     snapshot.work_run_aggregate.contract.revision = Revision(1);
     snapshot.work_run_aggregate.items.truncate(1);
@@ -316,7 +299,6 @@ fn public_delivery_before_advance(seed: u64, base_revision: String) -> Delivery 
     item.state = WorkItemState::Ready;
     item.depends_on.clear();
     snapshot.work_run_aggregate.runs.clear();
-    snapshot.stage_runs.clear();
     snapshot.session_bindings.clear();
     snapshot.attention_items.clear();
     snapshot.evidence.clear();
@@ -576,7 +558,7 @@ fn public_advance_command(seed: u64) -> CommandEnvelope {
             id: UserId(canonical_id("usr", seed)),
             kind: winwincode_domain::UserActorKind::User,
         }),
-        command: CommandName::DeliveryAdvance,
+        command: CommandName::WorkRunStart,
         expected_revision: Revision(1),
         payload: serde_json::json!({"deliveryId": canonical_id("dlv", seed), "dispatchProfile": "executor"}),
         request_id: RequestId(canonical_id("req", seed)),
@@ -602,12 +584,12 @@ fn public_execution_fixture(
         winwincode_control_plane::LocalDeliveryAdapterConfig::new(&repository, scope.clone()),
     )
     .expect("public Delivery adapters");
-    let command: DeliveryAdvanceCommand =
+    let command: WorkRunStartCommand =
         from_value(serde_json::to_value(public_advance_command(seed)).expect("advance envelope"))
-            .expect("generated delivery.advance command");
+            .expect("generated workrun.start command");
     control_plane
-        .delivery_advance(&command)
-        .expect("public delivery.advance");
+        .workrun_start(&command)
+        .expect("public workrun.start");
     let advanced = control_plane
         .load_state(&format!("delivery:{}", delivery.id().0))
         .expect("advanced Delivery state")
@@ -1825,6 +1807,25 @@ fn workrun_binding(
         lease_id: lease.lease_id.clone(),
         message_id: ExecutionMessageId(canonical_id("xmsg", seed + 10)),
         product_session_id: scope.product_session_id.clone(),
+        runtime_context: RuntimeSessionContext {
+            agent_identity: RuntimeSessionAgentIdentity {
+                id: AgentIdentityId(canonical_id("agt", seed + 10)),
+                worker_id: lease.worker_id.clone(),
+                name: job.execution_profile.clone(),
+                role: job.execution_profile.clone(),
+            },
+            provider: "fixture-provider".to_owned(),
+            model: "fixture-model".to_owned(),
+            workspace: RuntimeSessionWorkspace {
+                repository_id: job.workspace.repository_id.clone(),
+                revision: WorkspaceRevision(format!("git-tree:{}", "a".repeat(64))),
+                write_mode: match job.workspace.write_mode {
+                    ExecutionWorkspaceWriteMode::ReadOnly => "read-only",
+                    ExecutionWorkspaceWriteMode::Candidate => "candidate",
+                }
+                .to_owned(),
+            },
+        },
         schema_version: SchemaVersion::WinwincodeV1,
         sent_at: Instant(binding_time.into()),
         session_identity: identity,

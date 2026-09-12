@@ -3,21 +3,20 @@
 use super::*;
 use std::process::Command;
 use winwincode_api::generated::{
-    AcceptanceCriterionInput, DeliveryAdvanceCommand, DeliveryAdvanceCommandCommand,
-    DeliveryAdvancePayload, DeliveryCreateCommand, DeliveryCreateCommandCommand,
+    AcceptanceCriterionInput, DeliveryCreateCommand, DeliveryCreateCommandCommand,
     DeliveryCreatePayload, DeliveryResolveAttentionCommand, DeliveryResolveAttentionCommandCommand,
     DeliveryResolveAttentionPayload, DeliverySpecInput, DeliverySubmitVerdictCommand,
-    DeliverySubmitVerdictCommandCommand, DeliverySubmitVerdictPayload,
-    DeliveryTaskBreakdownCreateCommand, DeliveryTaskBreakdownCreateCommandCommand,
-    DeliveryTaskBreakdownCreateItem, DeliveryTaskBreakdownCreatePayload, DeliveryUpdateSpecCommand,
-    DeliveryUpdateSpecCommandCommand, DeliveryUpdateSpecPayload,
+    DeliverySubmitVerdictCommandCommand, DeliverySubmitVerdictPayload, DeliveryUpdateSpecCommand,
+    DeliveryUpdateSpecCommandCommand, DeliveryUpdateSpecPayload, WorkItemsCreateCommand,
+    WorkItemsCreateCommandCommand, WorkItemsCreateItem, WorkItemsCreatePayload,
+    WorkRunStartCommand, WorkRunStartCommandCommand, WorkRunStartPayload,
 };
 use winwincode_control_plane::{
     ControlPlane, ControlPlaneConfig, EventPublishError, EventPublisher,
     LocalDeliveryAdapterConfig, ModelRetryUsageService, ModelUsageFilter, OutboxEvent,
 };
 use winwincode_delivery::{
-    application::stage::{
+    application::workrun_execution::{
         DurableTerminalOutcomeInput, TerminalArtifactReference, TerminalOutcomeStatus,
         reconcile_durable_terminal_outcome,
         test_support::{active_lease_identity, session_binding_authority},
@@ -25,8 +24,9 @@ use winwincode_delivery::{
     domain::{AttentionItemStatus, Delivery, DeliveryStatus},
 };
 use winwincode_domain::{
-    ArtifactId, ExecutionEventId, SessionBindingSourceIdentity, SessionBindingSourceIdentityKind,
-    WorkRunId,
+    AgentIdentityId, ArtifactId, ExecutionEventId, RuntimeSessionAgentIdentity,
+    RuntimeSessionContext, RuntimeSessionWorkspace, SessionBindingSourceIdentity,
+    SessionBindingSourceIdentityKind, WorkRunId, WorkspaceRevision,
 };
 use winwincode_execution_port::generated::{
     ArtifactChunkMessage, ArtifactChunkMessageKind, ArtifactDescriptor, ArtifactKind,
@@ -61,7 +61,7 @@ struct StageAuthority {
     job: ExecutionJob,
     queue_scope: ExecutionQueueScope,
     binding: SessionBindingMessage,
-    authority: winwincode_delivery::application::stage::SessionBindingAuthority,
+    authority: winwincode_delivery::application::workrun_execution::SessionBindingAuthority,
     model: ModelOpenMessage,
     lease_terminal_request_id: RequestId,
 }
@@ -144,7 +144,7 @@ impl LiveDeliveryRuntime {
             .expect("accept production Delivery Spec");
         let delivery = load_delivery(&delivery_cp, &delivery_id);
         delivery_cp
-            .delivery_task_breakdown_create(&create_work_item_command(&scope, &delivery, 13))
+            .work_items_create(&create_work_item_command(&scope, &delivery, 13))
             .expect("create canonical WorkItem graph");
         let live_secret = fs::read(live_secret_path()).expect("read live Provider secret file");
         let private_input = fs::read_to_string(private_input_path())
@@ -286,7 +286,7 @@ impl LiveDeliveryRuntime {
     fn advance(&mut self, seed: u64, profile: &str, expectation: &str) {
         let delivery = load_delivery(&self.delivery_cp, &self.delivery_id);
         self.delivery_cp
-            .delivery_advance(&advance_command(&self.scope, &delivery, seed, profile))
+            .workrun_start(&advance_command(&self.scope, &delivery, seed, profile))
             .unwrap_or_else(|error| panic!("{expectation}: {error}"));
     }
 
@@ -438,7 +438,6 @@ fn create_command(
                 repository_id: scope.repository_id.clone(),
                 title: "Real MIMO production Delivery".to_owned(),
             },
-            tasks: Vec::new(),
         },
         request_id: RequestId(id("req", 9_001)),
         schema_version: SchemaVersion::WinwincodeV1,
@@ -485,12 +484,12 @@ fn advance_command(
     delivery: &Delivery,
     seed: u64,
     profile: &str,
-) -> DeliveryAdvanceCommand {
-    DeliveryAdvanceCommand {
+) -> WorkRunStartCommand {
+    WorkRunStartCommand {
         actor: actor(),
-        command: DeliveryAdvanceCommandCommand::DeliveryAdvance,
+        command: WorkRunStartCommandCommand::WorkRunStart,
         expected_revision: Revision(i64::try_from(delivery.revision()).expect("Delivery revision")),
-        payload: DeliveryAdvancePayload {
+        payload: WorkRunStartPayload {
             rework: None,
             delivery_id: delivery.id().clone(),
             dispatch_profile: profile.into(),
@@ -515,17 +514,17 @@ fn create_work_item_command(
     scope: &RepositoryScope,
     delivery: &Delivery,
     seed: u64,
-) -> DeliveryTaskBreakdownCreateCommand {
+) -> WorkItemsCreateCommand {
     let contract = &delivery.snapshot().work_run_aggregate.contract;
-    DeliveryTaskBreakdownCreateCommand {
+    WorkItemsCreateCommand {
         actor: actor(),
-        command: DeliveryTaskBreakdownCreateCommandCommand::DeliveryTaskBreakdownCreate,
+        command: WorkItemsCreateCommandCommand::WorkitemsCreate,
         expected_revision: Revision(i64::try_from(delivery.revision()).expect("revision")),
-        payload: DeliveryTaskBreakdownCreatePayload {
+        payload: WorkItemsCreatePayload {
             delivery_id: delivery.id().clone(),
             expected_revision: Revision(i64::try_from(delivery.revision()).expect("revision")),
             contract_revision: contract.revision.clone(),
-            items: vec![DeliveryTaskBreakdownCreateItem {
+            items: vec![WorkItemsCreateItem {
                 id: winwincode_domain::WorkItemId(id("wit", seed)),
                 title: "Implement approved change".to_owned(),
                 goal: "Implement the approved requirement".to_owned(),
@@ -685,6 +684,7 @@ fn assert_stage_gateway_prerequisites(
         .expect("resolve Provider credential reference prerequisite");
 }
 
+#[allow(clippy::too_many_lines)]
 fn prepare_current_stage(
     root: &TestDirectory,
     control_plane: &mut ControlPlane,
@@ -761,6 +761,25 @@ fn prepare_current_stage(
         lease_id,
         message_id: ExecutionMessageId(id("xmsg", seed + 2)),
         product_session_id,
+        runtime_context: RuntimeSessionContext {
+            agent_identity: RuntimeSessionAgentIdentity {
+                id: AgentIdentityId(id("agt", seed + 2)),
+                worker_id: worker_id.clone(),
+                name: job.execution_profile.clone(),
+                role: job.execution_profile.clone(),
+            },
+            provider: "mimo".to_owned(),
+            model: UPSTREAM_MODEL.to_owned(),
+            workspace: RuntimeSessionWorkspace {
+                repository_id: job.workspace.repository_id.clone(),
+                revision: WorkspaceRevision(format!("git-tree:{}", "a".repeat(64))),
+                write_mode: match job.workspace.write_mode {
+                    ExecutionWorkspaceWriteMode::ReadOnly => "read-only",
+                    ExecutionWorkspaceWriteMode::Candidate => "candidate",
+                }
+                .to_owned(),
+            },
+        },
         schema_version: SchemaVersion::WinwincodeV1,
         sent_at: submitted_at,
         session_identity,
@@ -1256,7 +1275,7 @@ fn commit_stage_success(
     provider: &ProviderResult,
     artifacts: Vec<ArtifactReference>,
     last_event_sequence: i64,
-) -> winwincode_delivery::application::stage::DeliveryTerminalOutcomeFacts {
+) -> winwincode_delivery::application::workrun_execution::DeliveryTerminalOutcomeFacts {
     let message = JobOutcomeMessage {
         kind: JobOutcomeMessageKind::JobOutcome,
         lease: stage.binding.lease.clone(),
@@ -1301,7 +1320,7 @@ fn commit_stage_success(
             worker_session_id: stage.binding.worker_session_id.clone(),
             issued_at: stage.binding.lease.issued_at.clone(),
             expires_at: stage.binding.lease.expires_at.clone(),
-            work_run_id: stage.binding.work_run_id.clone().expect("StageRun"),
+            work_run_id: stage.binding.work_run_id.clone().expect("WorkRun"),
             status: TerminalOutcomeStatus::Succeeded,
             codex_thread_id: Some(stage.binding.codex_thread_id.clone()),
             finished_at_millis: instant_millis(&provider.terminal.settled_at),

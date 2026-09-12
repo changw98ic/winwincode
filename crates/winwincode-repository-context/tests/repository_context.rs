@@ -110,6 +110,62 @@ fn detects_repository_facts_from_the_exact_baseline() {
 }
 
 #[test]
+fn impact_scope_keeps_mandatory_tests_and_escalates_unknown_relations() {
+    let repository = FixtureRepository::new();
+    repository.write(
+        "package.json",
+        r#"{"scripts":{"test":"node --test","verify":"pnpm test"}}"#,
+    );
+    repository.write("pnpm-lock.yaml", "lockfileVersion: '9.0'\n");
+    repository.write(
+        "apps/web/package.json",
+        r#"{"scripts":{"test":"node --test"}}"#,
+    );
+    repository.write("apps/web/src/main.ts", "export const ready = true;\n");
+    repository.write("apps/web/tests/main.test.ts", "// web test\n");
+    repository.write(
+        "apps/other/package.json",
+        r#"{"scripts":{"test":"node --test"}}"#,
+    );
+    repository.write("apps/other/tests/other.test.ts", "// other test\n");
+    let baseline = repository.commit();
+    let context = RepositoryContextScanner::default()
+        .inspect(&RepositoryContextQuery::new(repository.path(), &baseline))
+        .expect("repository context");
+
+    let impact = context
+        .impact_of(&["apps/web/src/main.ts".to_owned()])
+        .expect("portable candidate paths");
+
+    assert_eq!(impact.baseline_sha, baseline);
+    assert_eq!(impact.direct[0].rule, "candidate-diff");
+    assert_eq!(
+        impact.regression.affected_tests,
+        ["apps/web/tests/main.test.ts"]
+    );
+    assert!(impact.transitive.iter().any(
+        |item| item.rule == "same-package-test" && item.evidence_path == "apps/web/src/main.ts"
+    ));
+    assert!(!impact.regression.mandatory_commands.is_empty());
+    assert!(impact.regression.full_suite_required);
+    assert!(
+        impact
+            .unknowns
+            .iter()
+            .any(|item| item.capability == IndexCapability::DependencyGraph)
+    );
+
+    for invalid in ["../outside.ts", "/absolute.ts", "apps\\outside.ts"] {
+        assert!(context.impact_of(&[invalid.to_owned()]).is_err());
+    }
+    assert!(
+        context
+            .impact_of(&["same.ts".to_owned(), "same.ts".to_owned()])
+            .is_err()
+    );
+}
+
+#[test]
 fn ignores_dirty_worktree_changes_after_the_baseline() {
     let repository = FixtureRepository::new();
     repository.write("package.json", r#"{"scripts":{"test":"node --test"}}"#);

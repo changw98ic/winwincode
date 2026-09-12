@@ -26,9 +26,8 @@ use winwincode_control_plane::{
     PreparedPublication,
 };
 use winwincode_delivery::domain::{
-    CandidatePathFact, CandidatePathState, Delivery, DeliveryStage, DeliveryStatus,
-    DeliveryTaskStatus, FrozenDeliveryCandidate, GitHubIssueSourceRef, GitHubPullRequestTargetRef,
-    RepositoryKind, RepositoryRef,
+    CandidatePathFact, CandidatePathState, Delivery, DeliveryStatus, FrozenDeliveryCandidate,
+    GitHubIssueSourceRef, GitHubPullRequestTargetRef, RepositoryKind, RepositoryRef,
     candidate::{
         CandidateHunkFact,
         test_support::{CandidateFixtureInput, freeze_candidate_fixture},
@@ -193,7 +192,7 @@ fn audit_access(scope: &RepositoryScope) -> winwincode_audit::AuditAccess {
     .into_access()
 }
 
-fn ready_delivery() -> (Delivery, FrozenDeliveryCandidate) {
+fn verified_candidate_delivery() -> (Delivery, FrozenDeliveryCandidate) {
     let mut snapshot = Delivery::decode_json(include_bytes!(
         "../../winwincode-delivery/tests/fixtures/delivery-main.json"
     ))
@@ -231,19 +230,16 @@ fn ready_delivery() -> (Delivery, FrozenDeliveryCandidate) {
         locator: "example/widget".into(),
     };
     snapshot.revision = 1;
-    snapshot.status = DeliveryStatus::ReadyToDeliver;
-    for task in &mut snapshot.tasks {
-        task.delivery_id = delivery_id.clone();
-        task.status = DeliveryTaskStatus::Completed;
-    }
-    for run in &mut snapshot.stage_runs {
-        run.delivery_id = delivery_id.clone();
-        run.stage = DeliveryStage::Executing;
-        run.role = "executor".into();
-    }
+    snapshot.status = DeliveryStatus::Ready;
     for binding in &mut snapshot.session_bindings {
         binding.delivery_id = delivery_id.clone();
         binding.execution_profile = Some("executor".into());
+        binding
+            .runtime_context
+            .as_mut()
+            .expect("fixture runtime context")
+            .agent_identity
+            .role = "executor".into();
     }
     let binding_work_run_id = winwincode_domain::WorkRunId(canonical_id("wrn", 303));
     snapshot.session_bindings[0].id =
@@ -301,7 +297,6 @@ fn ready_delivery() -> (Delivery, FrozenDeliveryCandidate) {
     for evidence in &mut snapshot.evidence {
         evidence.candidate_ref = candidate.candidate_ref().into();
     }
-    snapshot.stage_runs.clear();
     let delivery = Delivery::try_from_snapshot(snapshot).expect("exact candidate verdict");
     winwincode_delivery::projection::project_delivery_detail(
         winwincode_delivery::projection::ProjectionInput::new(&delivery).with_candidate(&candidate),
@@ -314,7 +309,7 @@ fn delivered_fixture() -> (Delivery, FrozenDeliveryCandidate) {
     use winwincode_delivery::application::attention::{
         AttentionDecision, ResolveAttentionInput, resolve_attention,
     };
-    let (ready, candidate) = ready_delivery();
+    let (ready, candidate) = verified_candidate_delivery();
     let approval =
         winwincode_delivery::application::verdict::test_support::delivery_approval_fixture(
             &ready,
@@ -502,7 +497,7 @@ fn delivered_github_candidate_prepares_one_exact_secret_safe_review_package_arti
 fn publication_preparation_rejects_an_unapproved_delivery_before_creating_an_artifact() {
     let root = temporary_root();
     let scope = repository_scope();
-    let (ready, candidate) = ready_delivery();
+    let (ready, candidate) = verified_candidate_delivery();
     seed_delivery(&root, &ready);
     let mut control_plane = ControlPlane::start_local(
         ControlPlaneConfig::local(&root),
@@ -513,7 +508,7 @@ fn publication_preparation_rejects_an_unapproved_delivery_before_creating_an_art
 
     let error = control_plane
         .prepare_publication(&scope, &candidate, &requester)
-        .expect_err("ReadyToDeliver is not a settled human publication approval");
+        .expect_err("an unapproved Delivery is not publishable");
     assert!(
         error.to_string().contains("no exact publishable approval"),
         "unexpected preparation error: {error}",
@@ -539,10 +534,6 @@ fn publication_rejects_ambiguous_or_foreign_approval_without_an_artifact() {
         let root = temporary_root();
         let scope = repository_scope();
         let (delivery, candidate) = delivered_fixture();
-        assert!(
-            delivery.snapshot().stage_runs.is_empty(),
-            "publication has no stage authority"
-        );
         let mut snapshot = delivery.into_snapshot();
         let approval = snapshot.attention_items.last_mut().expect("approval");
         if invalid == "ambiguous" {

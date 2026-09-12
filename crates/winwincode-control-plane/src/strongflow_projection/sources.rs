@@ -4,16 +4,29 @@
 
 use std::{error::Error, fmt};
 
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use winwincode_delivery::{
     domain::{Delivery, FrozenDeliveryCandidate},
-    projection::runtime::{RuntimeFoldSnapshot, RuntimeProjection, RuntimeSessionProjection},
+    projection::runtime::{
+        PersistedRuntimeEvent, PersistedRuntimeFact, RuntimeActivityOutcome,
+        RuntimeActivityProjection, RuntimeActivityStatus, RuntimeActivityType, RuntimeFoldSnapshot,
+        RuntimeProjection, RuntimeRecoveryProjection, RuntimeRecoveryState,
+        RuntimeSessionProjection, RuntimeUsageMetricProjection, RuntimeUsageProjection,
+    },
 };
 use winwincode_domain::RepositoryScope;
 use winwincode_domain::{
-    CodexThreadId, DeliveryId, ExecutionEventId, ExecutionJobId, FencingToken, Instant, LeaseId,
-    ProductSessionId, Revision, Sha256Digest, WorkerSessionId,
+    CodexThreadId, DeliveryId, ExecutionJobId, FencingToken, Instant, LeaseId, ProductSessionId,
+    Revision, Sha256Digest, WorkerSessionId,
+};
+use winwincode_execution_port::{
+    generated::{ExecutionEventCategory, ExecutionEventRecord},
+    runtime_trace_outbox::{
+        RuntimeTraceFact, RuntimeTracePayload, StageTraceState, ToolTraceOutcome, TraceGateOutcome,
+        WorkerRuntimeTraceState,
+    },
 };
 use winwincode_storage::{
     ArtifactStore, GitSourceResolver, ProductStateStorage, ProjectionEventCursor,
@@ -795,7 +808,7 @@ impl TrustedRuntimeProjectionReadCutReader for SqliteStorageRuntimeProjectionRea
             .map_err(|error| map_storage_read_error(&error))?;
         if ledger.product_session_id != *request.product_session_id()
             || ledger.delivery_id.is_some()
-            || ledger.delivery_task_id.is_some()
+            || ledger.work_item_id.is_some()
             || ledger.work_run_id.is_some()
         {
             return Err(TrustedProjectionReadError::Invalid);
@@ -868,7 +881,7 @@ fn delivery_runtime_read(
     let mut rebuilt_at = Instant("1970-01-01T00:00:00.000Z".to_owned());
     for binding in bindings {
         let loaded = load_delivery_runtime_state(delivery, binding, scope_key, cut)?;
-        let stage_run_settled = matches!(
+        let work_run_settled = matches!(
             delivery
                 .snapshot()
                 .work_run_aggregate
@@ -881,7 +894,7 @@ fn delivery_runtime_read(
                 | winwincode_domain::WorkRunState::Failed
                 | winwincode_domain::WorkRunState::Cancelled
         );
-        let settled_last_sequence = if stage_run_settled {
+        let settled_last_sequence = if work_run_settled {
             if loaded.accepted_sequence == 0 {
                 return Err(TrustedProjectionReadError::Invalid);
             }
@@ -889,7 +902,7 @@ fn delivery_runtime_read(
         } else {
             None
         };
-        let projection = RuntimeProjection::from_persisted_checkpoints(
+        let projection = RuntimeProjection::from_persisted_facts(
             delivery,
             &binding.id,
             binding
@@ -943,7 +956,7 @@ fn delivery_runtime_read(
 }
 
 struct LoadedDeliveryRuntimeState {
-    events: Vec<(u64, ExecutionEventId)>,
+    events: Vec<PersistedRuntimeEvent>,
     accepted_sequence: u64,
     rebuilt_at: Instant,
 }
@@ -1006,21 +1019,201 @@ fn load_delivery_runtime_state(
         .last()
         .map(|entry| entry.event.occurred_at.clone())
         .ok_or(TrustedProjectionReadError::Invalid)?;
-    let events = ledger
-        .events
-        .iter()
-        .map(|entry| {
-            Ok::<_, TrustedProjectionReadError>((
-                u64::try_from(entry.event.sequence.0)
-                    .map_err(|_| TrustedProjectionReadError::Invalid)?,
-                entry.event.event_id.clone(),
-            ))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+    let events = persisted_runtime_events(&ledger.events)?;
     Ok(LoadedDeliveryRuntimeState {
         events,
         accepted_sequence: ledger.highest_sequence,
         rebuilt_at,
+    })
+}
+
+fn persisted_runtime_events(
+    entries: &[crate::runtime_event_transaction::RuntimeLedgerEvent],
+) -> Result<Vec<PersistedRuntimeEvent>, TrustedProjectionReadError> {
+    let mut failures = 0_u64;
+    let mut recoveries = 0_u64;
+    let mut last_failure_source_ref = None;
+    let mut latest_recovery_source_ref = None;
+    entries
+        .iter()
+        .map(|entry| {
+            let sequence = u64::try_from(entry.event.sequence.0)
+                .map_err(|_| TrustedProjectionReadError::Invalid)?;
+            let source_ref = format!("runtime:{}", entry.event.event_id.0);
+            let fact = match decode_runtime_trace(&entry.event)? {
+                Some(RuntimeTraceFact::Runtime {
+                    state: WorkerRuntimeTraceState::Disconnected,
+                }) => {
+                    failures = failures
+                        .checked_add(1)
+                        .filter(|value| *value <= MAX_SAFE_INTEGER)
+                        .ok_or(TrustedProjectionReadError::Invalid)?;
+                    last_failure_source_ref = Some(source_ref.clone());
+                    PersistedRuntimeFact::Recovery(RuntimeRecoveryProjection {
+                        state: RuntimeRecoveryState::Required,
+                        failure_count: failures,
+                        recovery_count: recoveries,
+                        last_failure_source_ref: last_failure_source_ref.clone(),
+                        latest_recovery_source_ref: latest_recovery_source_ref.clone(),
+                    })
+                }
+                Some(RuntimeTraceFact::Runtime {
+                    state: WorkerRuntimeTraceState::Parked,
+                }) if failures > recoveries => {
+                    PersistedRuntimeFact::Recovery(RuntimeRecoveryProjection {
+                        state: RuntimeRecoveryState::InProgress,
+                        failure_count: failures,
+                        recovery_count: recoveries,
+                        last_failure_source_ref: last_failure_source_ref.clone(),
+                        latest_recovery_source_ref: latest_recovery_source_ref.clone(),
+                    })
+                }
+                Some(RuntimeTraceFact::Runtime {
+                    state: WorkerRuntimeTraceState::Reconnected,
+                }) if failures > recoveries => {
+                    recoveries = failures;
+                    latest_recovery_source_ref = Some(source_ref.clone());
+                    PersistedRuntimeFact::Recovery(RuntimeRecoveryProjection {
+                        state: RuntimeRecoveryState::Recovered,
+                        failure_count: failures,
+                        recovery_count: recoveries,
+                        last_failure_source_ref: last_failure_source_ref.clone(),
+                        latest_recovery_source_ref: latest_recovery_source_ref.clone(),
+                    })
+                }
+                Some(RuntimeTraceFact::PerformanceBaseline { report }) => {
+                    let values = [
+                        ("input_tokens", report.primary_model_input_tokens),
+                        ("output_tokens", report.primary_model_output_tokens),
+                        ("tool_calls", report.tool_call_count),
+                        ("runtime_ms", report.total_runtime_ms),
+                    ];
+                    let totals = values
+                        .into_iter()
+                        .map(|(name, value)| {
+                            u64::try_from(value)
+                                .map(|value| RuntimeUsageMetricProjection {
+                                    name: name.to_owned(),
+                                    value,
+                                })
+                                .map_err(|_| TrustedProjectionReadError::Invalid)
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    PersistedRuntimeFact::Usage(RuntimeUsageProjection { totals, source_ref })
+                }
+                Some(trace) => trace_activity(&trace, &entry.event, source_ref).map_or(
+                    PersistedRuntimeFact::Checkpoint,
+                    PersistedRuntimeFact::Activity,
+                ),
+                None if entry.event.category == ExecutionEventCategory::Activity => {
+                    PersistedRuntimeFact::Activity(RuntimeActivityProjection {
+                        call_id: entry.event.event_id.0.clone(),
+                        activity_type: RuntimeActivityType::Command,
+                        command: Some(entry.event.summary.clone()),
+                        status: RuntimeActivityStatus::Completed,
+                        outcome: RuntimeActivityOutcome::Observed,
+                        exit_code: None,
+                        source_ref,
+                    })
+                }
+                None => PersistedRuntimeFact::Checkpoint,
+            };
+            Ok(PersistedRuntimeEvent {
+                sequence,
+                event_id: entry.event.event_id.clone(),
+                fact,
+            })
+        })
+        .collect()
+}
+
+fn decode_runtime_trace(
+    event: &ExecutionEventRecord,
+) -> Result<Option<RuntimeTraceFact>, TrustedProjectionReadError> {
+    let Some(payload) = event.payload.as_ref() else {
+        return Ok(None);
+    };
+    if payload.content_type != "application/vnd.winwincode.runtime-trace+json" {
+        return Ok(None);
+    }
+    let bytes = STANDARD
+        .decode(&payload.data_base64)
+        .map_err(|_| TrustedProjectionReadError::Invalid)?;
+    if payload.payload_digest.0 != format!("sha256:{:x}", Sha256::digest(&bytes)) {
+        return Err(TrustedProjectionReadError::Invalid);
+    }
+    let payload: RuntimeTracePayload =
+        serde_json::from_slice(&bytes).map_err(|_| TrustedProjectionReadError::Invalid)?;
+    if payload.schema_version != "winwincode.runtime-trace.v1" {
+        return Err(TrustedProjectionReadError::Invalid);
+    }
+    Ok(Some(payload.fact))
+}
+
+fn trace_activity(
+    trace: &RuntimeTraceFact,
+    event: &ExecutionEventRecord,
+    source_ref: String,
+) -> Option<RuntimeActivityProjection> {
+    let (status, outcome) = match trace {
+        RuntimeTraceFact::Stage { state } => match state {
+            StageTraceState::Started | StageTraceState::Resumed => (
+                RuntimeActivityStatus::Running,
+                RuntimeActivityOutcome::Observed,
+            ),
+            StageTraceState::Paused => (
+                RuntimeActivityStatus::Declined,
+                RuntimeActivityOutcome::PolicyDenied,
+            ),
+            StageTraceState::Completed => (
+                RuntimeActivityStatus::Completed,
+                RuntimeActivityOutcome::Succeeded,
+            ),
+            StageTraceState::Failed => (
+                RuntimeActivityStatus::Failed,
+                RuntimeActivityOutcome::TaskFailed,
+            ),
+        },
+        RuntimeTraceFact::Action { .. } => (
+            RuntimeActivityStatus::Running,
+            RuntimeActivityOutcome::Observed,
+        ),
+        RuntimeTraceFact::Gate { decision, .. } => match decision {
+            TraceGateOutcome::DenyAction | TraceGateOutcome::PauseForHuman => (
+                RuntimeActivityStatus::Declined,
+                RuntimeActivityOutcome::PolicyDenied,
+            ),
+            _ => (
+                RuntimeActivityStatus::Completed,
+                RuntimeActivityOutcome::Observed,
+            ),
+        },
+        RuntimeTraceFact::Tool { outcome, .. } | RuntimeTraceFact::Hook { outcome, .. } => {
+            match outcome {
+                ToolTraceOutcome::Succeeded => (
+                    RuntimeActivityStatus::Completed,
+                    RuntimeActivityOutcome::Succeeded,
+                ),
+                ToolTraceOutcome::Failed => (
+                    RuntimeActivityStatus::Failed,
+                    RuntimeActivityOutcome::TaskFailed,
+                ),
+                ToolTraceOutcome::Cancelled => (
+                    RuntimeActivityStatus::Cancelled,
+                    RuntimeActivityOutcome::Cancelled,
+                ),
+            }
+        }
+        _ => return None,
+    };
+    Some(RuntimeActivityProjection {
+        call_id: event.event_id.0.clone(),
+        activity_type: RuntimeActivityType::Command,
+        command: Some(event.summary.clone()),
+        status,
+        outcome,
+        exit_code: None,
+        source_ref,
     })
 }
 
@@ -1317,13 +1510,13 @@ mod tests {
     use crate::runtime_event_transaction::{RuntimeLedgerEvent, RuntimeLedgerState};
     use winwincode_api::generated::{
         ControlPlaneWebSocketDeliveryGetReloadQuery,
-        ControlPlaneWebSocketDeliveryStageRuntimeProjectionInvalidatedEvent,
-        ControlPlaneWebSocketDeliveryStageRuntimeProjectionInvalidatedEventScopeKind,
-        ControlPlaneWebSocketDeliveryStageRuntimeProjectionInvalidatedEventTypeValue,
         ControlPlaneWebSocketProductSessionRuntimeProjectionInvalidatedEvent,
         ControlPlaneWebSocketProductSessionRuntimeProjectionInvalidatedEventScopeKind,
         ControlPlaneWebSocketProductSessionRuntimeProjectionInvalidatedEventTypeValue,
         ControlPlaneWebSocketRuntimeProjectionGetReloadQuery,
+        ControlPlaneWebSocketWorkRunRuntimeProjectionInvalidatedEvent,
+        ControlPlaneWebSocketWorkRunRuntimeProjectionInvalidatedEventScopeKind,
+        ControlPlaneWebSocketWorkRunRuntimeProjectionInvalidatedEventTypeValue,
     };
     use winwincode_delivery::{
         domain::{Delivery, SessionBindingId},
@@ -1340,7 +1533,7 @@ mod tests {
         WorkerInstanceId, WorkerSessionId,
     };
     use winwincode_execution_port::generated::{
-        ExecutionEventCategory, ExecutionEventRecord, ExecutionLeaseStamp,
+        EncodedPayload, ExecutionEventCategory, ExecutionEventRecord, ExecutionLeaseStamp,
     };
     use winwincode_storage::{
         NewOutboxEvent, ProductStateStorage, ProjectionEventStream, ProjectionEventStreamKey,
@@ -1386,6 +1579,34 @@ mod tests {
         (event, digest)
     }
 
+    fn source_runtime_trace_event(event_id: &str) -> (ExecutionEventRecord, Sha256Digest) {
+        let payload = RuntimeTracePayload {
+            schema_version: "winwincode.runtime-trace.v1".into(),
+            fact: RuntimeTraceFact::Stage {
+                state: StageTraceState::Started,
+            },
+            artifacts: Vec::new(),
+        };
+        let payload_json = serde_json::to_vec(&payload).expect("runtime trace JSON");
+        let event = ExecutionEventRecord {
+            category: ExecutionEventCategory::Activity,
+            event_id: ExecutionEventId(event_id.into()),
+            occurred_at: DomainInstant("2026-08-25T00:00:00Z".into()),
+            payload: Some(EncodedPayload {
+                content_type: "application/vnd.winwincode.runtime-trace+json".into(),
+                data_base64: STANDARD.encode(&payload_json),
+                payload_digest: Sha256Digest(format!("sha256:{:x}", Sha256::digest(&payload_json))),
+            }),
+            sequence: ExecutionSequence(1),
+            summary: "stage started".into(),
+        };
+        let digest = Sha256Digest(format!(
+            "sha256:{:x}",
+            Sha256::digest(serde_json::to_vec(&event).expect("event JSON")),
+        ));
+        (event, digest)
+    }
+
     struct RuntimeFixtureCommit<'fixture> {
         request_id: &'fixture str,
         command_digest: char,
@@ -1417,9 +1638,9 @@ mod tests {
                 .ledger
                 .work_run_id
                 .clone()
-                .expect("Delivery fixture StageRun");
+                .expect("Delivery fixture WorkRun");
             serde_json::to_vec(
-                &ControlPlaneWebSocketDeliveryStageRuntimeProjectionInvalidatedEvent {
+                &ControlPlaneWebSocketWorkRunRuntimeProjectionInvalidatedEvent {
                     delivery_id: delivery_id.clone(),
                     last_projection_sequence: accepted_sequence,
                     product_session_id: fixture.ledger.product_session_id.clone(),
@@ -1429,7 +1650,7 @@ mod tests {
                         ControlPlaneWebSocketRuntimeProjectionGetReloadQuery::RuntimeProjectionGet,
                     ),
                     scope_kind:
-                        ControlPlaneWebSocketDeliveryStageRuntimeProjectionInvalidatedEventScopeKind::DeliveryStage,
+                        ControlPlaneWebSocketWorkRunRuntimeProjectionInvalidatedEventScopeKind::WorkRun,
                     session_identity: SessionIdentity {
                         codex_thread_id: fixture.ledger.codex_thread_id.clone(),
                         product_session_id: fixture.ledger.product_session_id.clone(),
@@ -1438,7 +1659,7 @@ mod tests {
                     },
                     work_run_id,
                     type_value:
-                        ControlPlaneWebSocketDeliveryStageRuntimeProjectionInvalidatedEventTypeValue::RuntimeProjectionInvalidatedV1,
+                        ControlPlaneWebSocketWorkRunRuntimeProjectionInvalidatedEventTypeValue::RuntimeProjectionInvalidatedV1,
                 },
             )
             .expect("generated Delivery runtime invalidation")
@@ -1595,7 +1816,7 @@ mod tests {
         let ledger = RuntimeLedgerState {
             schema_version: 1,
             delivery_id: None,
-            delivery_task_id: None,
+            work_item_id: None,
             work_run_id: None,
             product_session_id: product_session_id.clone(),
             execution_job_id: lease.job_id.clone(),
@@ -1748,11 +1969,11 @@ mod tests {
             .expect("fixture Worker instance");
         let stream_id = runtime_stream_id_for_projection(&scope_key, &binding.execution_job_id);
         let (event, event_digest) =
-            source_runtime_event("xevt_delivery_01J00000000000000000000000");
+            source_runtime_trace_event("xevt_delivery_01J00000000000000000000000");
         let ledger = RuntimeLedgerState {
             schema_version: 1,
             delivery_id: Some(delivery.id().clone()),
-            delivery_task_id: None,
+            work_item_id: None,
             work_run_id: Some(binding.work_run_id.clone()),
             product_session_id: binding.product_session_id.clone(),
             execution_job_id: binding.execution_job_id.clone(),
@@ -1802,7 +2023,18 @@ mod tests {
         );
         assert!(read.runtime().snapshot().product_session_id.is_none());
         assert_eq!(read.runtime().snapshot().sessions.len(), 1);
-        assert_eq!(read.runtime().snapshot().sessions[0].as_of_sequence, 1);
+        let session = &read.runtime().snapshot().sessions[0];
+        assert_eq!(session.as_of_sequence, 1);
+        assert_eq!(session.activities.len(), 1);
+        assert_eq!(
+            session.activities[0].command.as_deref(),
+            Some("stage started")
+        );
+        assert_eq!(session.activities[0].status, RuntimeActivityStatus::Running);
+        assert_eq!(
+            session.runtime_context.provider.as_str(),
+            "fixture-provider"
+        );
         Box::new(storage).close().expect("SQLite close");
         std::fs::remove_dir_all(root).expect("temporary source directory");
     }

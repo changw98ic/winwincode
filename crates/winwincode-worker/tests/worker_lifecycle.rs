@@ -20,6 +20,7 @@ use winwincode_domain::{
     WorkContractId, WorkItem, WorkItemId, WorkItemState, WorkRunId, WorkerId, WorkerInstanceId,
     WorkerSessionId, WorkspaceRevision,
 };
+use winwincode_execution_port::agent_config::{AgentProfileSettings, resolve_agent_session_config};
 use winwincode_execution_port::change_batch_identity::derive_change_batch_id;
 use winwincode_execution_port::generated::{
     AppliedFileOperation, AppliedFileSummary, ArtifactAckMessage, ArtifactAckMessageKind,
@@ -46,11 +47,11 @@ use winwincode_execution_port::transport::{
 use winwincode_worker::validation_artifact::DurableValidationArtifactStore;
 use winwincode_worker::{
     CandidateArtifactAckOutcome, CandidateArtifactAuthority, CandidateArtifactUpload,
-    CodexCoreAdapter, CodexPoll, CodexRunKey, CodexThreadStart, CodexTurnCompletion,
-    DelegatedLoopStopFact, DelegatedObserverPreflight, DelegatedObserverPreflightOutcome,
-    DelegatedPollOutcome, DurableExecutionDelivery, RetainedCandidateArtifact, WorkerConfig,
-    WorkerErrorCode, WorkerExecutionPort, WorkerLifecycleState, WorkerMain,
-    secret_safe_runtime_summary,
+    CodexCoreAdapter, CodexPoll, CodexRunKey, CodexThreadSession, CodexThreadStart,
+    CodexTurnCompletion, DelegatedLoopStopFact, DelegatedObserverPreflight,
+    DelegatedObserverPreflightOutcome, DelegatedPollOutcome, DurableExecutionDelivery,
+    RetainedCandidateArtifact, WorkerConfig, WorkerErrorCode, WorkerExecutionPort,
+    WorkerLifecycleState, WorkerMain, secret_safe_runtime_summary,
     workspace_runtime::{
         ChangeBatchExecutionRequest, ChangeBatchExecutionResult, ChangeBatchExecutor,
         ChangeBatchExecutorFuture, JobWorkspaceRuntime, ObservationModelConfiguration,
@@ -393,7 +394,25 @@ impl CodexCoreAdapter for FakeCodex {
     fn ensure_thread(
         &mut self,
         start: CodexThreadStart<'_>,
-    ) -> impl Future<Output = Result<CodexThreadId, Self::Error>> {
+    ) -> impl Future<Output = Result<CodexThreadSession, Self::Error>> {
+        let agent_config = resolve_agent_session_config(
+            start.worker_id,
+            &worker_config(1).capabilities,
+            &start.job.execution_profile,
+            AgentProfileSettings {
+                provider: "fixture-provider".to_owned(),
+                model: "fixture-model".to_owned(),
+                reasoning: "provider_default".to_owned(),
+                tools: Vec::new(),
+                sandbox: match start.job.workspace.write_mode {
+                    ExecutionWorkspaceWriteMode::ReadOnly => "read-only",
+                    ExecutionWorkspaceWriteMode::Candidate => "candidate",
+                }
+                .to_owned(),
+                instructions: None,
+            },
+        )
+        .map_err(|_| ());
         let mut state = self.state.lock().expect("FakeCodex state");
         state.calls.push(format!(
             "ensure:{}:{}:{}",
@@ -411,7 +430,13 @@ impl CodexCoreAdapter for FakeCodex {
             Err(())
         } else {
             state.threads.pop_front().ok_or(())
-        };
+        }
+        .and_then(|thread_id| {
+            agent_config.map(|agent_config| CodexThreadSession {
+                thread_id,
+                agent_config,
+            })
+        });
         std::future::ready(result)
     }
 

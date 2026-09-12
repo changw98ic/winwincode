@@ -83,7 +83,7 @@ Delivery runtime projection reset 先成对读取 `delivery.get` 和 `runtime.pr
 两个响应及其 cursor 都属于同一 Scope、Delivery 和 revision 后才替换页面快照。任一读取
 失败就丢弃这次部分结果并保持空快照；不能先订阅，也不能把一半新结果和一半旧结果拼接。
 ProductSession runtime projection reset 只读取 `runtime.projection.get`，不附带 Delivery、
-StageRun 或其他页面身份。
+WorkRun 或其他页面身份。
 
 ## 页面和错误边界
 

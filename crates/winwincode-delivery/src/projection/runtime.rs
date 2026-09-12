@@ -25,7 +25,7 @@ use winwincode_domain::{
     WorkerSessionId,
 };
 
-use crate::domain::{Delivery, SessionBindingId};
+use crate::domain::{Delivery, SessionBindingId, SessionRuntimeContext};
 use crate::projection::redaction::{
     RuntimeDiffSummaryProjection, contains_credential_material, is_safe_source_ref,
 };
@@ -84,6 +84,7 @@ struct RuntimeIdentity {
     fencing_token: FencingToken,
     worker_id: WorkerId,
     worker_instance_id: WorkerInstanceId,
+    runtime_context: SessionRuntimeContext,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -115,6 +116,25 @@ enum AcceptedRuntimeFact {
     Usage(RuntimeUsageProjection),
     Recovery(RuntimeRecoveryProjection),
     LiveDiff(RuntimeDiffSummaryProjection),
+}
+
+/// One already-accepted ledger fact decoded by the Control Plane's trusted source seam.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PersistedRuntimeFact {
+    Checkpoint,
+    Plan(RuntimePlanProjection),
+    Agent(RuntimeAgentProjection),
+    Activity(RuntimeActivityProjection),
+    Usage(RuntimeUsageProjection),
+    Recovery(RuntimeRecoveryProjection),
+    LiveDiff(RuntimeDiffSummaryProjection),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PersistedRuntimeEvent {
+    pub sequence: u64,
+    pub event_id: ExecutionEventId,
+    pub fact: PersistedRuntimeFact,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -263,6 +283,7 @@ pub struct RuntimeSessionProjection {
     pub attempt: u64,
     pub fencing_token: FencingToken,
     pub as_of_sequence: u64,
+    pub runtime_context: SessionRuntimeContext,
     pub plan: Option<RuntimePlanProjection>,
     pub agents: Vec<RuntimeAgentProjection>,
     pub agent_edges: Vec<RuntimeAgentEdgeProjection>,
@@ -352,6 +373,7 @@ impl RuntimeProjection {
                 attempt: binding.identity.attempt,
                 fencing_token: binding.identity.fencing_token.clone(),
                 as_of_sequence: 0,
+                runtime_context: binding.identity.runtime_context.clone(),
                 plan: None,
                 agents: Vec::new(),
                 agent_edges: Vec::new(),
@@ -383,23 +405,15 @@ impl RuntimeProjection {
         &self.snapshot
     }
 
-    /// Rebuilds a Delivery-stage projection from the accepted runtime-ledger
-    /// positions retained by the Control Plane.
-    ///
-    /// The ledger deliberately stores the generated `ExecutionEventRecord`
-    /// separately from this Delivery-domain crate. The bridge therefore folds
-    /// each already-accepted position as a bounded checkpoint; it never
-    /// interprets Worker payload bytes or promotes an unaccepted event into a
-    /// projection fact. A future semantic fact adapter can replace the
-    /// checkpoint mapper while retaining this exact binding and sequence
-    /// boundary.
+    /// Rebuilds a Delivery-stage projection from accepted runtime-ledger facts
+    /// decoded and bounded by the Control Plane source seam.
     ///
     /// # Errors
     ///
-    /// Returns an error when the current Delivery binding, `StageRun`, scheduler
+    /// Returns an error when the current Delivery binding, `WorkRun`, scheduler
     /// authority, or accepted sequence positions are not exact.
     #[allow(clippy::too_many_arguments)]
-    pub fn from_persisted_checkpoints(
+    pub fn from_persisted_facts(
         delivery: &Delivery,
         session_binding_id: &SessionBindingId,
         lease_id: LeaseId,
@@ -407,7 +421,7 @@ impl RuntimeProjection {
         worker_id: WorkerId,
         worker_instance_id: WorkerInstanceId,
         settled_last_sequence: Option<u64>,
-        accepted_events: &[(u64, ExecutionEventId)],
+        accepted_events: &[PersistedRuntimeEvent],
     ) -> Result<Self, RuntimeProjectionError> {
         let binding = persisted_binding(
             delivery,
@@ -420,12 +434,32 @@ impl RuntimeProjection {
         )?;
         let events = accepted_events
             .iter()
-            .map(|(sequence, event_id)| {
+            .map(|event| {
                 let mut event = AcceptedRuntimeEvent {
                     identity: binding.identity.clone(),
-                    sequence: *sequence,
-                    event_id: event_id.clone(),
-                    fact: AcceptedRuntimeFact::Checkpoint,
+                    sequence: event.sequence,
+                    event_id: event.event_id.clone(),
+                    fact: match &event.fact {
+                        PersistedRuntimeFact::Checkpoint => AcceptedRuntimeFact::Checkpoint,
+                        PersistedRuntimeFact::Plan(value) => {
+                            AcceptedRuntimeFact::Plan(value.clone())
+                        }
+                        PersistedRuntimeFact::Agent(value) => {
+                            AcceptedRuntimeFact::Agent(value.clone())
+                        }
+                        PersistedRuntimeFact::Activity(value) => {
+                            AcceptedRuntimeFact::Activity(value.clone())
+                        }
+                        PersistedRuntimeFact::Usage(value) => {
+                            AcceptedRuntimeFact::Usage(value.clone())
+                        }
+                        PersistedRuntimeFact::Recovery(value) => {
+                            AcceptedRuntimeFact::Recovery(value.clone())
+                        }
+                        PersistedRuntimeFact::LiveDiff(value) => {
+                            AcceptedRuntimeFact::LiveDiff(value.clone())
+                        }
+                    },
                     seal: Sha256Digest(String::new()),
                 };
                 event.seal = seal_event(&event)?;
@@ -1011,7 +1045,7 @@ fn persisted_binding(
         .ok_or_else(|| {
             projection_error(
                 RuntimeProjectionErrorCode::InvalidBinding,
-                "persisted runtime StageRun is missing",
+                "persisted runtime WorkRun is missing",
             )
         })?;
     let accepted = binding.worker_session_id.clone().ok_or_else(|| {
@@ -1046,6 +1080,12 @@ fn persisted_binding(
             fencing_token,
             worker_id,
             worker_instance_id,
+            runtime_context: binding.runtime_context.clone().ok_or_else(|| {
+                projection_error(
+                    RuntimeProjectionErrorCode::InvalidBinding,
+                    "persisted runtime context is missing",
+                )
+            })?,
         },
         settled_last_sequence,
         seal: Sha256Digest(String::new()),
@@ -1112,6 +1152,7 @@ fn validate_binding(
                 && binding.execution_job_id == accepted.identity.execution_job_id
                 && binding.worker_session_id.as_ref() == Some(&accepted.identity.worker_session_id)
                 && binding.codex_thread_id.as_ref() == Some(&accepted.identity.codex_thread_id)
+                && binding.runtime_context.as_ref() == Some(&accepted.identity.runtime_context)
         });
     let binding = bindings.next();
     let mut runs = delivery
@@ -1142,7 +1183,7 @@ fn validate_binding(
     {
         return Err(projection_error(
             RuntimeProjectionErrorCode::InvalidBinding,
-            "accepted runtime binding does not match one current SessionBinding and StageRun",
+            "accepted runtime binding does not match one current SessionBinding and WorkRun",
         ));
     }
     Ok(())
@@ -1293,7 +1334,7 @@ pub mod test_support {
             .ok_or_else(|| {
                 projection_error(
                     RuntimeProjectionErrorCode::InvalidBinding,
-                    "fixture StageRun is missing",
+                    "fixture WorkRun is missing",
                 )
             })?;
         let mut accepted = AcceptedRuntimeBinding {
@@ -1326,6 +1367,12 @@ pub mod test_support {
                 fencing_token: authority.fencing_token,
                 worker_id: authority.worker_id,
                 worker_instance_id: authority.worker_instance_id,
+                runtime_context: binding.runtime_context.clone().ok_or_else(|| {
+                    projection_error(
+                        RuntimeProjectionErrorCode::InvalidBinding,
+                        "fixture runtime context is missing",
+                    )
+                })?,
             },
             settled_last_sequence,
             seal: Sha256Digest(String::new()),
@@ -1423,6 +1470,10 @@ mod tests {
             fencing_token: FencingToken("7".into()),
             worker_id: WorkerId("worker-runtime-projection".into()),
             worker_instance_id: WorkerInstanceId("worker-instance-runtime-projection".into()),
+            runtime_context: session
+                .runtime_context
+                .clone()
+                .expect("accepted runtime context"),
         };
         let mut binding = AcceptedRuntimeBinding {
             session_binding_id: session.id.clone(),
@@ -2360,6 +2411,21 @@ mod tests {
                 "attempt": 1,
                 "fencingToken": "7",
                 "asOfSequence": 6,
+                "runtimeContext": {
+                    "agentIdentity": {
+                        "id": "agt_01J00000000000000000000000",
+                        "workerId": "wrk_01J00000000000000000000000",
+                        "name": "Verifier",
+                        "role": "verifier"
+                    },
+                    "provider": "fixture-provider",
+                    "model": "fixture-model",
+                    "workspace": {
+                        "repositoryId": "rep_01J00000000000000000000000",
+                        "revision": "git-tree:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                        "writeMode": "read-only"
+                    }
+                },
                 "plan": {
                     "itemId": null,
                     "explanation": "Run the exact contract checks.",

@@ -3,14 +3,14 @@
 //! Safe public projection of one validated solution review.
 
 use serde::Serialize;
-use winwincode_domain::{AttentionItemId, DeliveryId, DeliveryTaskId, StageRunId, WorkRunId};
+use winwincode_domain::{AttentionItemId, DeliveryId, WorkItemId, WorkRunId};
 
 use crate::{
     application::solution_review::{
-        DeliveryTaskProposal, ValidatedDiagram, ValidatedDiagramEdge, ValidatedDiagramKind,
-        ValidatedDiagramNode, ValidatedDiagramNodeKind, ValidatedReviewDecision,
-        ValidatedReviewStatus, ValidatedSolutionComponent, ValidatedSolutionComponentKind,
-        ValidatedSolutionConnection, ValidatedSolutionReviewSet,
+        ValidatedDiagram, ValidatedDiagramEdge, ValidatedDiagramKind, ValidatedDiagramNode,
+        ValidatedDiagramNodeKind, ValidatedReviewDecision, ValidatedReviewStatus,
+        ValidatedSolutionComponent, ValidatedSolutionComponentKind, ValidatedSolutionConnection,
+        ValidatedSolutionReviewSet, WorkItemProposal,
     },
     domain::{AcceptanceCriterionId, DeliverySpecId, SessionBindingId},
 };
@@ -270,17 +270,17 @@ impl DiagramProjection {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct DeliveryTaskProposalProjection {
-    id: DeliveryTaskId,
+pub struct WorkItemProposalProjection {
+    id: WorkItemId,
     title: String,
     goal: String,
-    acceptance_criterion_ids: Vec<AcceptanceCriterionId>,
-    blocked_by_task_ids: Vec<DeliveryTaskId>,
+    criterion_ids: Vec<AcceptanceCriterionId>,
+    depends_on: Vec<WorkItemId>,
 }
 
-impl DeliveryTaskProposalProjection {
+impl WorkItemProposalProjection {
     #[must_use]
-    pub fn id(&self) -> &DeliveryTaskId {
+    pub fn id(&self) -> &WorkItemId {
         &self.id
     }
 
@@ -295,13 +295,13 @@ impl DeliveryTaskProposalProjection {
     }
 
     #[must_use]
-    pub fn acceptance_criterion_ids(&self) -> &[AcceptanceCriterionId] {
-        &self.acceptance_criterion_ids
+    pub fn criterion_ids(&self) -> &[AcceptanceCriterionId] {
+        &self.criterion_ids
     }
 
     #[must_use]
-    pub fn blocked_by_task_ids(&self) -> &[DeliveryTaskId] {
-        &self.blocked_by_task_ids
+    pub fn depends_on(&self) -> &[WorkItemId] {
+        &self.depends_on
     }
 }
 
@@ -314,7 +314,6 @@ pub struct SolutionReviewProjection {
     delivery_spec_revision: u64,
     planning_work_run_id: WorkRunId,
     planning_session_binding_id: SessionBindingId,
-    review_stage_run_id: StageRunId,
     attention_item_id: AttentionItemId,
     review_set_sha256: String,
     solution_id: String,
@@ -326,7 +325,7 @@ pub struct SolutionReviewProjection {
     process_diagram: DiagramProjection,
     risks: Vec<String>,
     unresolved_items: Vec<String>,
-    task_proposals: Vec<DeliveryTaskProposalProjection>,
+    work_item_proposals: Vec<WorkItemProposalProjection>,
     review_status: SolutionReviewStatusProjection,
     decision: Option<SolutionReviewDecisionProjection>,
     comments: Option<String>,
@@ -355,10 +354,6 @@ impl SolutionReviewProjection {
     #[must_use]
     pub fn planning_session_binding_id(&self) -> &SessionBindingId {
         &self.planning_session_binding_id
-    }
-    #[must_use]
-    pub fn review_stage_run_id(&self) -> &StageRunId {
-        &self.review_stage_run_id
     }
     #[must_use]
     pub fn attention_item_id(&self) -> &AttentionItemId {
@@ -405,8 +400,8 @@ impl SolutionReviewProjection {
         &self.unresolved_items
     }
     #[must_use]
-    pub fn task_proposals(&self) -> &[DeliveryTaskProposalProjection] {
-        &self.task_proposals
+    pub fn work_item_proposals(&self) -> &[WorkItemProposalProjection] {
+        &self.work_item_proposals
     }
     #[must_use]
     pub const fn review_status(&self) -> SolutionReviewStatusProjection {
@@ -444,7 +439,6 @@ pub(super) fn project_current_solution_review(
         delivery_spec_revision: view.delivery_spec_revision,
         planning_work_run_id: view.planning_work_run_id.clone(),
         planning_session_binding_id: view.planning_session_binding_id.clone(),
-        review_stage_run_id: view.review_stage_run_id.clone(),
         attention_item_id: view.attention_item_id.clone(),
         review_set_sha256: view.review_set_sha256.to_owned(),
         solution_id: view.solution_id.to_owned(),
@@ -456,10 +450,10 @@ pub(super) fn project_current_solution_review(
         process_diagram: project_diagram(view.process_diagram),
         risks: view.risks.to_vec(),
         unresolved_items: view.unresolved_items.to_vec(),
-        task_proposals: view
-            .task_proposals
+        work_item_proposals: view
+            .work_item_proposals
             .iter()
-            .map(project_task_proposal)
+            .map(project_work_item_proposal)
             .collect(),
         review_status: match view.review_status {
             ValidatedReviewStatus::Pending => SolutionReviewStatusProjection::Pending,
@@ -551,12 +545,12 @@ fn project_diagram_edge(edge: &ValidatedDiagramEdge) -> DiagramEdgeProjection {
     }
 }
 
-fn project_task_proposal(proposal: &DeliveryTaskProposal) -> DeliveryTaskProposalProjection {
-    DeliveryTaskProposalProjection {
+fn project_work_item_proposal(proposal: &WorkItemProposal) -> WorkItemProposalProjection {
+    WorkItemProposalProjection {
         id: proposal.id().clone(),
         title: proposal.title().to_owned(),
         goal: proposal.goal().to_owned(),
-        acceptance_criterion_ids: proposal.acceptance_criterion_ids().to_vec(),
-        blocked_by_task_ids: proposal.blocked_by_task_ids().to_vec(),
+        criterion_ids: proposal.criterion_ids().to_vec(),
+        depends_on: proposal.depends_on().to_vec(),
     }
 }

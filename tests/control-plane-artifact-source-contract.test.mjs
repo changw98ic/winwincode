@@ -170,7 +170,7 @@ test('generated Artifact messages remain bound to durable execution authority', 
   assert.deepEqual(authority.required, [
     'durableExecutionJob',
     'exactRepositoryScope',
-    'activeDeliveryStageRun',
+    'activeDeliveryWorkRun',
     'completeSessionBinding',
     'workerSession',
     'leaseId',

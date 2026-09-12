@@ -18,7 +18,7 @@ const ID_DEFINITIONS = Object.freeze({
   CodexThreadId: 'cdx_',
   CredentialReferenceId: 'crd_',
   DeliveryId: 'dlv_',
-  DeliveryTaskId: 'dtk_',
+  WorkItemId: 'wit_',
   EvidenceId: 'evd_',
   ExecutionJobId: 'job_',
   ExternalIdentityId: 'xid_',
@@ -32,7 +32,6 @@ const ID_DEFINITIONS = Object.freeze({
   RepositoryId: 'rep_',
   RequestId: 'req_',
   ServiceAccountId: 'svc_',
-  StageRunId: 'run_',
   SystemActorId: 'sys_',
   UserId: 'usr_',
   WorkerId: 'wrk_',
@@ -47,7 +46,7 @@ const COMMAND_NAMES = Object.freeze([
   'session.close',
   'delivery.create',
   'delivery.update_spec',
-  'delivery.advance',
+  'workrun.start',
   'workrun.cancel',
   'delivery.resolve_attention',
   'delivery.submit_verdict',
@@ -63,28 +62,20 @@ const COMMAND_NAMES = Object.freeze([
   'publication.cancel',
   'collaboration.notification.ack',
   'collaboration.presence.update',
-  'delivery.task_breakdown.create',
+  'workitems.create',
 ])
-const DELIVERY_STATUSES = Object.freeze([
-  'draft',
-  'clarifying',
+const WORK_ITEM_STATES = Object.freeze([
+  'backlog',
   'ready',
-  'planning',
-  'plan-review',
-  'executing',
-  'verifying',
-  'reworking',
-  'needs-attention',
-  'ready-to-deliver',
-  'delivered',
-])
-const DELIVERY_TASK_STATUSES = Object.freeze([
-  'pending',
-  'active',
-  'blocked',
-  'verifying',
-  'completed',
+  'in_progress',
+  'waiting_dependency',
+  'waiting_human',
+  'candidate_ready',
+  'validating',
+  'rework',
+  'done',
   'failed',
+  'cancelled',
 ])
 const ERROR_CODES = Object.freeze([
   'INVALID_REQUEST',
@@ -412,14 +403,14 @@ test('DeliveryProjection exposes a minimal page view with complete repository ow
       repositoryId: 'rep_01J00000000000000000000000',
     },
     title: 'Freeze the delivery contract',
-    status: 'executing',
-    taskCounts: {
+    status: 'in_progress',
+    workItemCounts: { ready: 0, waitingHuman: 0, candidateReady: 0, rework: 0, cancelled: 0,
       total: 4,
-      pending: 1,
-      active: 1,
-      blocked: 0,
-      verifying: 1,
-      completed: 1,
+      backlog: 1,
+      inProgress: 1,
+      waitingDependency: 0,
+      validating: 1,
+      done: 1,
       failed: 0,
     },
     activeWorkRunId: 'wrn_01J00000000000000000000000',
@@ -427,8 +418,9 @@ test('DeliveryProjection exposes a minimal page view with complete repository ow
     updatedAt: '2026-08-24T09:10:11.123Z',
   }
 
-  assert.deepEqual(schema.$defs.DeliveryStatus.enum, DELIVERY_STATUSES)
-  assert.deepEqual(schema.$defs.DeliveryTaskStatus.enum, DELIVERY_TASK_STATUSES)
+  assert.deepEqual(schema.$defs.WorkItemState.enum, WORK_ITEM_STATES)
+  assert.equal(schema.$defs.DeliveryStatus, undefined)
+  assert.equal(schema.$defs.DeliveryTaskStatus, undefined)
   assertValid(schema, 'DeliveryProjection', projection)
   assertValid(schema, 'DeliveryProjection', { ...projection, activeWorkRunId: null })
 
@@ -485,6 +477,7 @@ test('runtime projection scope is either Chat or one complete Delivery stage', a
       lastFailureSourceRef: null,
       latestRecoverySourceRef: null,
     },
+    runtimeContext: null,
     diffSummary: {
       changedFileCount: 1,
       additions: 2,
@@ -566,8 +559,27 @@ test('runtime projection scope is either Chat or one complete Delivery stage', a
     sessions: [{
       ...session,
       workRunId: 'wrn_01J00000000000000000000000',
+      runtimeContext: {
+        agentIdentity: {
+          id: 'agt_01J00000000000000000000000',
+          workerId: 'wrk_01J00000000000000000000000',
+          name: 'executor',
+          role: 'executor',
+        },
+        provider: 'openai',
+        model: 'gpt-5',
+        workspace: {
+          repositoryId: 'rep_01J00000000000000000000000',
+          revision: `git-tree:${'a'.repeat(40)}`,
+          writeMode: 'candidate',
+        },
+      },
     }],
   }), true, JSON.stringify(validateSnapshot.errors))
+  assert.equal(validateSession({
+    ...session,
+    workRunId: 'wrn_01J00000000000000000000000',
+  }), false)
   assert.equal(validateSnapshot({ ...snapshot, readCursor }), false)
   assert.equal(validateSnapshot({
     ...snapshot,

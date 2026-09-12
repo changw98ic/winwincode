@@ -9,7 +9,7 @@ fn delivery_without_candidate_facts() -> Delivery {
     let mut value: serde_json::Value =
         serde_json::from_slice(include_bytes!("fixtures/delivery-main.json"))
             .expect("Delivery fixture JSON");
-    value["status"] = serde_json::json!("verifying");
+    value["status"] = serde_json::json!("ready");
     value["evidence"] = serde_json::json!([]);
     value["verdict"] = serde_json::Value::Null;
     Delivery::decode_json(&serde_json::to_vec(&value).expect("Delivery JSON"))

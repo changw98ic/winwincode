@@ -499,8 +499,8 @@ test('login page keeps credentials out of the DOM and distinguishes failure stat
   assert.equal(initializationSection.hidden, true)
 
   const failureExpectations = [
-    { mode: 'AUTHENTICATION_REQUIRED', text: 'Incorrect username or password.' },
-    { mode: 'RATE_LIMITED', text: 'Too many sign-in attempts. Wait a moment, then try again.' },
+    { mode: 'AUTHENTICATION_REQUIRED', text: '用户名或密码不正确。' },
+    { mode: 'RATE_LIMITED', text: '登录尝试次数过多，请稍后再试。' },
   ]
   for (const candidate of failureExpectations) {
     mode = candidate.mode
@@ -531,7 +531,7 @@ test('login page keeps credentials out of the DOM and distinguishes failure stat
   await new Promise(resolvePromise => setImmediate(resolvePromise))
   assert.equal(model.state.status, 'succeeded')
   assert.equal(findOne(rootElement, 'wwc-login-status').textContent,
-    'Signed in. Returning to your workspace…')
+    '登录成功，正在返回工作区…')
   assert.equal(findOne(rootElement, 'wwc-login-submit').disabled, true)
   model.close()
 })
@@ -595,6 +595,13 @@ class ApplicationElement {
   listeners = new Map()
   dataset = {}
   className = ''
+  classList = {
+    toggle: (name, force) => {
+      const names = this.className.split(/\s+/u).filter(Boolean).filter(candidate => candidate !== name)
+      if (force) names.push(name)
+      this.className = names.join(' ')
+    },
+  }
   disabled = false
   hidden = false
   tabIndex = 0
@@ -819,7 +826,7 @@ test('expired sessions return to the original target after sign-in, and logout r
   })
   assert.equal(password.value, '')
   await waitFor(() => error.hidden === false, 'form-level failure')
-  assert.equal(error.textContent, 'Incorrect username or password.')
+  assert.equal(error.textContent, '用户名或密码不正确。')
   assert.equal(fixture.application.authSession.state.status, 'authentication-required')
   assert.equal(fixture.browser.location.hash, '#/settings')
 

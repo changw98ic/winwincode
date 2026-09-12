@@ -92,27 +92,24 @@ flowchart TB
 | `ProductSession` | `winwincode-control-plane` | 用户看到的产品会话和消息入口 |
 | `WorkerSession` | `winwincode-worker` | 一次可租约、取消和恢复的执行上下文 |
 | `CodexThread` | `winwincode-kernel` | Codex 上下文、Turn 和执行历史 |
-| `StageRun` | Delivery | 一个交付阶段的一次尝试 |
+| `WorkRun` | Delivery | 一个 WorkItem 的一次受租约约束的执行尝试 |
 
-`SessionBinding` 把四种身份与 Delivery、Task、Job、Lease 和 Fencing 事实关联起来。
+`SessionBinding` 把四种身份与 Delivery、WorkItem、Job、Lease 和 Fencing 事实关联起来。
 重启、重试、Worker 替换或重新验证时，每个身份按自己的生命周期推进；旧尝试的运行、结果和取消事实保持不变。
 
 ## 唯一的交付数据模型
 
-WinWinCode 的业务模型由十个对象组成：
+WinWinCode 的可执行交付模型由 [ADR-0033](decisions/0033-community-engineering-runtime.md) 固定为七个对象：
 
 | 对象 | 保存什么 |
 | --- | --- |
-| `Delivery` | 一次交付的根对象、当前 revision 和高层状态 |
-| `DeliverySpec` | 标题、目标、范围、约束、仓库、基线和返工上限 |
-| `AcceptanceCriterion` | 可单独判断的完成条件、验证方法和是否必需 |
-| `DeliveryTask` | 可独立验收的工作单元、依赖、责任人和验收条件 |
-| `StageRun` | 一次阶段尝试、执行者、角色、状态和次数 |
-| `SessionBinding` | 阶段与 ProductSession、Job、WorkerSession、CodexThread 的身份关系 |
-| `AttentionItem` | 需求问题、业务决定、验证阻塞、范围变化或交付批准 |
-| `EvidenceRef` | 测试、命令、Diff、文件、提交、PR、运行事件或评审发现的引用 |
-| `CriterionResult` | 当前候选对一项验收条件的 `pass`、`fail`、`inconclusive` 或 `infra_error` |
-| `DeliveryVerdict` | 当前候选的逐项结果、未解决发现和最终结论 |
+| `WorkContract` | 目标、范围、约束、验收条件和需要人工授权的边界 |
+| `WorkItem` | 可独立验收的工作单元、依赖、状态和合同 revision |
+| `WorkRun` | WorkItem 的一次 Job、Lease、Fencing、Worker 与 CodexThread 执行身份 |
+| `Candidate` | 当前 WorkRun 产出的不可变代码候选及其摘要 |
+| `VerificationPlan` | 绑定合同、WorkItem、Candidate 和验证角色的检查计划 |
+| `Evidence` | 绑定当前 WorkRun、Candidate 和持久化来源位置的证据 |
+| `Verdict` | 对当前候选按验收条件计算出的最终结论 |
 
 领域与 HTTP 类型从 [canonical schema](../schema/winwincode/v1/README.md) 生成；生成结果位于
 [`apps/client/src/generated`](../apps/client/src/generated/contracts.ts)、
@@ -120,28 +117,26 @@ WinWinCode 的业务模型由十个对象组成：
 [`winwincode-domain`](../crates/winwincode-domain/src/generated.rs) 和
 [`openapi.generated.json`](../schema/winwincode/v1/openapi.generated.json)。
 
-## Plan、阶段和证据
+## Plan、WorkItem 和证据
 
-Codex Plan 回答“当前一次执行要做哪些步骤”；`DeliveryTask` 回答“哪些工作可以独立验收、失败、返工和批准”。Plan 只由 Kernel 保存，Task 和 Delivery 只由 Control Plane 保存；页面显示两者的投影，不建立第三份任务状态。
+Codex Plan 回答“当前一次执行要做哪些步骤”；`WorkItem` 回答“哪些工作可以独立验收、失败、返工和批准”。Plan 只由 Kernel 保存，WorkItem 和 Delivery 只由 Control Plane 保存；页面显示两者的投影，不建立第三份任务状态。
 
-服务阶段为 `clarifying`、`planning`、`plan-review`、`executing`、`verifying`、`reworking` 和 `delivery-review`。同一 Delivery 同时最多有一个活动 `StageRun`；一个未解决的 `AttentionItem` 会阻止下一次阶段写入。
+WorkItem 使用 `backlog`、`ready`、`in_progress`、`waiting_dependency`、`waiting_human`、`candidate_ready`、`validating`、`rework`、`done`、`failed` 和 `cancelled`。每次执行只创建一个绑定具体 WorkItem revision 的 `WorkRun`；一个未解决的 `AttentionItem` 会把相关工作置为 `waiting_human`。
 
 ```mermaid
 flowchart TD
-  Draft[Draft] --> Clarifying[Clarifying]
-  Clarifying --> Ready[Ready] --> Planning[Planning]
-  Planning --> PlanReview[Needs Attention / Plan Review]
-  PlanReview -->|批准当前审核集合| Executing[Executing]
-  PlanReview -->|要求修改方案| Planning
-  PlanReview -->|需求需要重审| Clarifying
-  Executing --> Verifying[Verifying]
-  Verifying -->|全部必需条件通过| ReadyToDeliver[Ready To Deliver]
-  Verifying -->|失败、证据不足或环境故障| Attention[Needs Attention]
-  Attention -->|补证或重试| Verifying
-  Attention -->|批准有限返工| Reworking[Reworking] --> Verifying
-  ReadyToDeliver --> Review[Needs Attention / Delivery Review]
-  Review -->|批准当前候选| Delivered[Delivered]
-  Review -->|精确返工标注| Reworking
+  Backlog[Backlog] --> Ready[Ready]
+  Backlog --> WaitingDependency[Waiting Dependency]
+  Ready --> InProgress[In Progress]
+  InProgress --> CandidateReady[Candidate Ready]
+  CandidateReady --> Validating[Validating]
+  Validating -->|全部必需条件通过| Done[Done]
+  Validating -->|需要有限修正| Rework[Rework] --> InProgress
+  InProgress -->|需要人工决定| WaitingHuman[Waiting Human]
+  Validating -->|需要人工决定| WaitingHuman
+  WaitingHuman --> Ready
+  InProgress --> Failed[Failed]
+  Backlog --> Cancelled[Cancelled]
 ```
 
 最终结论由当前候选、冻结提交、运行结果和独立角色计算。`submitVerdict()` 不接受调用方直接制作的 Evidence 或 Verdict；Server 重新验证候选、事件身份、角色完整性和每项条件后才写入结论。Agent 的文本回复不是交付证据。最终结果使用 `winwincode.independent-verification-result.v1` 结构。
@@ -212,7 +207,7 @@ Server 启动先恢复持久 state、receipt、outbox、SessionBinding 和事件
 | `adversarial-verifier` | `candidate-read-only` | 检查边界、失败和拒绝路径 |
 | `remediator` | `candidate-write` | 只处理已批准的有限返工 |
 
-人工决定绑定当前 ProductSession、StageRun、Delivery revision、候选和审查集合摘要。过期页面、另一主体或另一角色的决定会在写入前被拒绝。公开响应只返回稳定错误码、请求 ID 和受限详情。
+人工决定绑定当前 ProductSession、WorkRun、Delivery revision、候选和审查集合摘要。过期页面、另一主体或另一角色的决定会在写入前被拒绝。公开响应只返回稳定错误码、请求 ID 和受限详情。
 
 ## 实现与检查索引
 
@@ -223,7 +218,7 @@ Server 启动先恢复持久 state、receipt、outbox、SessionBinding 和事件
 | Server 是唯一公开网络边界 | [`crates/winwincode-server/src/server.rs`](../crates/winwincode-server/src/server.rs) | [`tests/server-durable-event-hub-contract.test.mjs`](../tests/server-durable-event-hub-contract.test.mjs) |
 | Server 只接受生成合同 | [`crates/winwincode-server/src/dispatcher.rs`](../crates/winwincode-server/src/dispatcher.rs) | [`tests/control-plane-http-contract.test.mjs`](../tests/control-plane-http-contract.test.mjs) |
 | Control Plane 持有产品状态 | [`crates/winwincode-control-plane/src/lib.rs`](../crates/winwincode-control-plane/src/lib.rs) | [`crates/winwincode-control-plane/tests/lifecycle.rs`](../crates/winwincode-control-plane/tests/lifecycle.rs) |
-| Delivery 规则集中于 Rust | [`crates/winwincode-delivery/src/application/stage.rs`](../crates/winwincode-delivery/src/application/stage.rs) | [`crates/winwincode-delivery/tests/task_breakdown_promotion.rs`](../crates/winwincode-delivery/tests/task_breakdown_promotion.rs) |
+| WorkRun 规则集中于 Rust | [`crates/winwincode-delivery/src/application/workrun.rs`](../crates/winwincode-delivery/src/application/workrun.rs) | [`crates/winwincode-delivery/tests/workrun_replacement.rs`](../crates/winwincode-delivery/tests/workrun_replacement.rs) |
 | Repository Context 只读且绑定提交 | [`crates/winwincode-repository-context/src/lib.rs`](../crates/winwincode-repository-context/src/lib.rs) | [`crates/winwincode-repository-context/tests/repository_context.rs`](../crates/winwincode-repository-context/tests/repository_context.rs) |
 | Worker 持有 Job、Lease 和工作区 | [`crates/winwincode-worker/src/lib.rs`](../crates/winwincode-worker/src/lib.rs) | [`crates/winwincode-worker/tests/production_vertical.rs`](../crates/winwincode-worker/tests/production_vertical.rs) |
 | Worker 通过 ExecutionPort 与 Control Plane 通信 | [`crates/winwincode-execution-port/src/lib.rs`](../crates/winwincode-execution-port/src/lib.rs) | [`tests/execution-port-contract.test.mjs`](../tests/execution-port-contract.test.mjs) |
@@ -240,7 +235,7 @@ Server 启动先恢复持久 state、receipt、outbox、SessionBinding 和事件
 
 更多合同见 [`control-plane-web-client.md`](contracts/control-plane-web-client.md)、
 [`control-plane-storage-lifecycle.md`](contracts/control-plane-storage-lifecycle.md)、
-[`delivery-stage-coordination.md`](contracts/delivery-stage-coordination.md)、
+[`delivery-evidence-verdict-rework.md`](contracts/delivery-evidence-verdict-rework.md)、
 [`browser-chat-production.rules.json`](contracts/browser-chat-production.rules.json)、
 [`control-plane-api-coverage.matrix.json`](contracts/control-plane-api-coverage.matrix.json) 和
 [`ADR-0023`](decisions/0023-canonical-delivery-ownership.md)。

@@ -7,9 +7,9 @@ use std::{
 
 use rusqlite::Connection;
 use winwincode_api::generated::{
-    AcceptanceCriterionInput, Actor, DeliveryAdvanceCommand, DeliveryAdvanceCommandCommand,
-    DeliveryAdvancePayload, DeliveryCreateCommand, DeliveryCreateCommandCommand,
-    DeliveryCreatePayload, DeliverySpecInput, DeliveryTaskBreakdownCreateCommand,
+    AcceptanceCriterionInput, Actor, DeliveryCreateCommand, DeliveryCreateCommandCommand,
+    DeliveryCreatePayload, DeliverySpecInput, WorkItemsCreateCommand, WorkRunStartCommand,
+    WorkRunStartCommandCommand, WorkRunStartPayload,
 };
 use winwincode_control_plane::{
     ControlPlane, ControlPlaneConfig, EventPublishError, EventPublisher,
@@ -65,10 +65,10 @@ fn local_authority_dispatches_once_and_restart_replays_exact_command() {
     let mut foreign_items = task_breakdown_command(&scope, &delivery_id, 3, &data);
     foreign_items.scope.repository_id = RepositoryId(canonical_id("rep", 999));
     first
-        .delivery_task_breakdown_create(&foreign_items)
+        .work_items_create(&foreign_items)
         .expect_err("a different repository must not create this Delivery's WorkItems");
     first
-        .delivery_task_breakdown_create(&task_breakdown_command(&scope, &delivery_id, 3, &data))
+        .work_items_create(&task_breakdown_command(&scope, &delivery_id, 3, &data))
         .expect("create canonical WorkItem");
     {
         use winwincode_storage::{ProductStateStorage, SqliteStorage};
@@ -87,14 +87,14 @@ fn local_authority_dispatches_once_and_restart_replays_exact_command() {
     let mut planner = advance.clone();
     planner.payload.dispatch_profile = "planner".into();
     first
-        .delivery_advance(&planner)
+        .workrun_start(&planner)
         .expect_err("Planner is internal, not a top-level dispatch profile");
     assert_eq!(
         queued_jobs(&data),
         0,
         "rejected Planner must not queue work"
     );
-    let advanced = first.delivery_advance(&advance).expect("advance Delivery");
+    let advanced = first.workrun_start(&advance).expect("advance Delivery");
     assert_eq!(advanced.current_revision, Revision(3));
     first.shutdown().expect("shutdown first host");
 
@@ -107,7 +107,7 @@ fn local_authority_dispatches_once_and_restart_replays_exact_command() {
         start_with_execution_mode(&data, &repository, scope, ExecutionMode::DelegatedPatch);
     assert_eq!(
         restarted
-            .delivery_advance(&advance)
+            .workrun_start(&advance)
             .expect("receipt-first restart replay"),
         advanced
     );
@@ -143,7 +143,7 @@ fn local_authority_dispatches_each_released_execution_mode_without_write_widenin
             .delivery_create(&create)
             .expect("create Delivery");
         control_plane
-            .delivery_task_breakdown_create(&task_breakdown_command(
+            .work_items_create(&task_breakdown_command(
                 &repository_scope,
                 &delivery_id,
                 seed + 101,
@@ -151,7 +151,7 @@ fn local_authority_dispatches_each_released_execution_mode_without_write_widenin
             ))
             .expect("create canonical WorkItem");
         control_plane
-            .delivery_advance(&advance)
+            .workrun_start(&advance)
             .expect("advance Delivery");
         control_plane.shutdown().expect("shutdown host");
 
@@ -353,7 +353,6 @@ fn create_command(
                 repository_id: scope.repository_id.clone(),
                 title: "Production Delivery".to_owned(),
             },
-            tasks: Vec::new(),
         },
         request_id: RequestId(canonical_id("req", seed)),
         schema_version: SchemaVersion::WinwincodeV1,
@@ -366,7 +365,7 @@ fn task_breakdown_command(
     delivery_id: &DeliveryId,
     seed: u64,
     data: &Path,
-) -> DeliveryTaskBreakdownCreateCommand {
+) -> WorkItemsCreateCommand {
     use winwincode_storage::{ProductStateStorage, SqliteStorage};
     let storage = SqliteStorage::open(data).expect("read accepted WorkContract");
     let state = storage
@@ -389,7 +388,7 @@ fn task_breakdown_command(
         "requestId":canonical_id("req", seed),
         "actor":{"kind":"user", "id":canonical_id("usr", seed)},
         "scope":scope,
-        "command":"delivery.task_breakdown.create",
+        "command":"workitems.create",
         "expectedRevision":1,
         "payload":{
             "deliveryId":delivery_id,
@@ -405,12 +404,12 @@ fn advance_command(
     delivery_id: DeliveryId,
     revision: i64,
     seed: u64,
-) -> DeliveryAdvanceCommand {
-    DeliveryAdvanceCommand {
+) -> WorkRunStartCommand {
+    WorkRunStartCommand {
         actor: actor(seed),
-        command: DeliveryAdvanceCommandCommand::DeliveryAdvance,
+        command: WorkRunStartCommandCommand::WorkRunStart,
         expected_revision: Revision(revision),
-        payload: DeliveryAdvancePayload {
+        payload: WorkRunStartPayload {
             rework: None,
             delivery_id,
             dispatch_profile: "executor".to_owned(),

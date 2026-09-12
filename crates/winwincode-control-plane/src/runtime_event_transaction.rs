@@ -14,24 +14,26 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use winwincode_api::generated::{
     ControlPlaneWebSocketDeliveryGetReloadQuery,
-    ControlPlaneWebSocketDeliveryStageRuntimeProjectionInvalidatedEvent,
-    ControlPlaneWebSocketDeliveryStageRuntimeProjectionInvalidatedEventScopeKind,
-    ControlPlaneWebSocketDeliveryStageRuntimeProjectionInvalidatedEventTypeValue,
     ControlPlaneWebSocketProductSessionRuntimeProjectionInvalidatedEvent,
     ControlPlaneWebSocketProductSessionRuntimeProjectionInvalidatedEventScopeKind,
     ControlPlaneWebSocketProductSessionRuntimeProjectionInvalidatedEventTypeValue,
     ControlPlaneWebSocketRuntimeProjectionGetReloadQuery,
+    ControlPlaneWebSocketWorkRunRuntimeProjectionInvalidatedEvent,
+    ControlPlaneWebSocketWorkRunRuntimeProjectionInvalidatedEventScopeKind,
+    ControlPlaneWebSocketWorkRunRuntimeProjectionInvalidatedEventTypeValue,
 };
 use winwincode_audit::{
     AuditAction, AuditEvent, AuditEventId, AuditExecutionIdentity, AuditExecutionSubjectKind,
     AuditScope, AuditState, AuditSubject,
 };
-use winwincode_delivery::{application::stage::SessionBindingAuthority, domain::Delivery};
+use winwincode_delivery::{
+    application::workrun_execution::SessionBindingAuthority, domain::Delivery,
+};
 use winwincode_domain::RepositoryScope;
 use winwincode_domain::{
-    CodexThreadId, DeliveryId, DeliveryTaskId, ExecutionAckSequence, ExecutionJobId,
-    ExecutionMessageId, ExecutionSequence, FencingToken, Instant, LeaseId, ProductSessionId,
-    Revision, SchemaVersion, SessionIdentity, Sha256Digest, WorkRunId, WorkerId, WorkerInstanceId,
+    CodexThreadId, DeliveryId, ExecutionAckSequence, ExecutionJobId, ExecutionMessageId,
+    ExecutionSequence, FencingToken, Instant, LeaseId, ProductSessionId, Revision, SchemaVersion,
+    SessionIdentity, Sha256Digest, WorkItemId, WorkRunId, WorkerId, WorkerInstanceId,
     WorkerSessionId,
 };
 use winwincode_execution_port::generated::{
@@ -175,7 +177,7 @@ pub(crate) fn execute_at(
         Err(rejection) => return Ok(rejection_ack(message, 0, rejection)),
     };
 
-    let delivery_state_guard = if context.scope_kind == RuntimeScopeKind::DeliveryStage {
+    let delivery_state_guard = if context.scope_kind == RuntimeScopeKind::WorkRun {
         let delivery_id = context.delivery_id.as_ref().ok_or_else(|| {
             RuntimeMessageError::Storage(StorageError::invalid_input(
                 "Delivery runtime context has no Delivery identity",
@@ -251,7 +253,7 @@ pub(crate) fn execute_at(
     }
 
     let expected_revision = ledger.highest_sequence;
-    let before_ledger_digest = if context.scope_kind == RuntimeScopeKind::DeliveryStage {
+    let before_ledger_digest = if context.scope_kind == RuntimeScopeKind::WorkRun {
         Some(runtime_ledger_digest(&ledger)?)
     } else {
         None
@@ -345,7 +347,7 @@ pub(crate) fn execute_at(
         message,
         &message.event,
     )?;
-    if context.scope_kind == RuntimeScopeKind::DeliveryStage {
+    if context.scope_kind == RuntimeScopeKind::WorkRun {
         validate_runtime_audit_event(storage, &phase, &receipt, message, &context)?;
     }
     let status = if receipt.idempotent_replay {
@@ -535,7 +537,7 @@ impl RuntimePhase {
 pub(crate) struct RuntimeLedgerState {
     pub(crate) schema_version: u8,
     pub(crate) delivery_id: Option<DeliveryId>,
-    pub(crate) delivery_task_id: Option<DeliveryTaskId>,
+    pub(crate) work_item_id: Option<WorkItemId>,
     pub(crate) work_run_id: Option<WorkRunId>,
     pub(crate) product_session_id: ProductSessionId,
     pub(crate) execution_job_id: ExecutionJobId,
@@ -566,7 +568,7 @@ impl RuntimeLedgerState {
         Self {
             schema_version: RUNTIME_STATE_VERSION,
             delivery_id: context.delivery_id.clone(),
-            delivery_task_id: context.delivery_task_id.clone(),
+            work_item_id: context.work_item_id.clone(),
             work_run_id: context.work_run_id.clone(),
             product_session_id: context.product_session_id.clone(),
             execution_job_id: context.execution_job_id.clone(),
@@ -592,10 +594,10 @@ impl RuntimeLedgerState {
             Rejection::Conflict("runtime lease attempt is outside the accepted range")
         })?;
         if self.schema_version != RUNTIME_STATE_VERSION
-            || (context.scope_kind == RuntimeScopeKind::DeliveryStage) != self.delivery_id.is_some()
-            || (context.scope_kind == RuntimeScopeKind::DeliveryStage) != self.work_run_id.is_some()
+            || (context.scope_kind == RuntimeScopeKind::WorkRun) != self.delivery_id.is_some()
+            || (context.scope_kind == RuntimeScopeKind::WorkRun) != self.work_run_id.is_some()
             || self.delivery_id != context.delivery_id
-            || self.delivery_task_id != context.delivery_task_id
+            || self.work_item_id != context.work_item_id
             || self.work_run_id != context.work_run_id
             || self.product_session_id != context.product_session_id
             || self.execution_job_id != context.execution_job_id
@@ -730,14 +732,14 @@ impl Rejection {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RuntimeScopeKind {
-    DeliveryStage,
+    WorkRun,
     ProductSession,
 }
 
 struct RuntimeContext {
     scope_kind: RuntimeScopeKind,
     delivery_id: Option<DeliveryId>,
-    delivery_task_id: Option<DeliveryTaskId>,
+    work_item_id: Option<WorkItemId>,
     work_run_id: Option<WorkRunId>,
     product_session_id: ProductSessionId,
     execution_job_id: ExecutionJobId,
@@ -754,7 +756,7 @@ impl RuntimeContext {
         let (
             scope_kind,
             delivery_id,
-            delivery_task_id,
+            work_item_id,
             work_run_id,
             product_session_id,
             intent_stream_id,
@@ -776,7 +778,7 @@ impl RuntimeContext {
                         "runtime event WorkRun intent is not owned by a Delivery stream",
                     ))?;
                 (
-                    RuntimeScopeKind::DeliveryStage,
+                    RuntimeScopeKind::WorkRun,
                     Some(delivery_id),
                     None,
                     Some(job_scope.work_run_id.clone()),
@@ -819,7 +821,7 @@ impl RuntimeContext {
         Ok(Self {
             scope_kind,
             delivery_id,
-            delivery_task_id,
+            work_item_id,
             work_run_id,
             product_session_id,
             execution_job_id: job.job_id.clone(),
@@ -852,17 +854,17 @@ fn load_current_delivery(
     Ok(delivery)
 }
 
-/// `ProductSession` execution has no hidden Delivery or `StageRun` aggregate.
+/// `ProductSession` execution has no hidden Delivery or `WorkRun` aggregate.
 /// Its trusted join is the immutable ProductSession-scoped dispatch intent
 /// plus the scheduler lease; the generated message carries the canonical
-/// `ProductSession` identity and must omit the Delivery-only `StageRun` attachment.
+/// `ProductSession` identity and must omit the Delivery-only `WorkRun` attachment.
 fn validate_product_session_binding(
     context: &RuntimeContext,
     message: &RuntimeEventMessage,
 ) -> Result<(), Rejection> {
     if context.scope_kind != RuntimeScopeKind::ProductSession
         || context.delivery_id.is_some()
-        || context.delivery_task_id.is_some()
+        || context.work_item_id.is_some()
         || context.work_run_id.is_some()
         || message.session_identity.product_session_id != context.product_session_id
         || message.session_identity.work_run_id.is_some()
@@ -1207,7 +1209,7 @@ fn runtime_pending_audit_event(
         work_run_id,
         context.execution_job_id.clone(),
         delivery_id,
-        context.delivery_task_id.clone(),
+        context.work_item_id.clone(),
         message.lease.worker_id.clone(),
         message.lease.worker_instance_id.clone(),
         message.lease.lease_id.clone(),
@@ -1306,7 +1308,7 @@ fn validate_runtime_audit_event(
             != context.delivery_id.as_ref().ok_or_else(|| {
                 StorageError::invalid_input("runtime audit context has no Delivery identity")
             })?
-        || identity.delivery_task_id() != context.delivery_task_id.as_ref()
+        || identity.work_item_id() != context.work_item_id.as_ref()
         || identity.worker_id() != &message.lease.worker_id
         || identity.worker_instance_id() != &message.lease.worker_instance_id
         || identity.lease_id() != &message.lease.lease_id
@@ -1499,8 +1501,8 @@ fn validate_runtime_invalidation(
         ));
     }
     match context.scope_kind {
-        RuntimeScopeKind::DeliveryStage => {
-            let payload: ControlPlaneWebSocketDeliveryStageRuntimeProjectionInvalidatedEvent =
+        RuntimeScopeKind::WorkRun => {
+            let payload: ControlPlaneWebSocketWorkRunRuntimeProjectionInvalidatedEvent =
                 serde_json::from_slice(&event.payload).map_err(|_| {
                     StorageError::invalid_input(
                         "Delivery runtime projection invalidation is not canonical",
@@ -1510,7 +1512,7 @@ fn validate_runtime_invalidation(
                 StorageError::invalid_input("Delivery runtime context has no Delivery id")
             })?;
             let work_run_id = context.work_run_id.as_ref().ok_or_else(|| {
-                StorageError::invalid_input("Delivery runtime context has no StageRun id")
+                StorageError::invalid_input("Delivery runtime context has no WorkRun id")
             })?;
             let canonical = serde_json::to_vec(&payload).map_err(|error| {
                 StorageError::adapter(format!(
@@ -1530,9 +1532,9 @@ fn validate_runtime_invalidation(
                         ControlPlaneWebSocketRuntimeProjectionGetReloadQuery::RuntimeProjectionGet,
                     )
                 || payload.scope_kind
-                    != ControlPlaneWebSocketDeliveryStageRuntimeProjectionInvalidatedEventScopeKind::DeliveryStage
+                    != ControlPlaneWebSocketWorkRunRuntimeProjectionInvalidatedEventScopeKind::WorkRun
                 || payload.type_value
-                    != ControlPlaneWebSocketDeliveryStageRuntimeProjectionInvalidatedEventTypeValue::RuntimeProjectionInvalidatedV1
+                    != ControlPlaneWebSocketWorkRunRuntimeProjectionInvalidatedEventTypeValue::RuntimeProjectionInvalidatedV1
                 || cursor.key().stream()
                     != &ProjectionEventStream::Delivery(delivery_id.clone())
             {
@@ -1629,7 +1631,7 @@ fn validate_replay_invalidation(
         }
         return Ok(());
     }
-    let payload: ControlPlaneWebSocketDeliveryStageRuntimeProjectionInvalidatedEvent =
+    let payload: ControlPlaneWebSocketWorkRunRuntimeProjectionInvalidatedEvent =
         serde_json::from_slice(&event.payload).map_err(|_| {
             StorageError::invalid_input("runtime replay invalidation is not canonical")
         })?;
@@ -1644,9 +1646,9 @@ fn validate_replay_invalidation(
         || payload.projection_revision != Revision(expected_sequence)
         || payload.last_projection_sequence != expected_sequence
         || payload.scope_kind
-            != ControlPlaneWebSocketDeliveryStageRuntimeProjectionInvalidatedEventScopeKind::DeliveryStage
+            != ControlPlaneWebSocketWorkRunRuntimeProjectionInvalidatedEventScopeKind::WorkRun
         || payload.type_value
-            != ControlPlaneWebSocketDeliveryStageRuntimeProjectionInvalidatedEventTypeValue::RuntimeProjectionInvalidatedV1
+            != ControlPlaneWebSocketWorkRunRuntimeProjectionInvalidatedEventTypeValue::RuntimeProjectionInvalidatedV1
         || payload.reload_queries
             != (
                 ControlPlaneWebSocketDeliveryGetReloadQuery::DeliveryGet,
@@ -1730,14 +1732,14 @@ fn runtime_projection_invalidated_event(
     let accepted_sequence = i64::try_from(accepted_sequence)
         .map_err(|_| StorageError::invalid_input("runtime projection sequence is out of range"))?;
     let (payload, stream) = match context.scope_kind {
-        RuntimeScopeKind::DeliveryStage => {
+        RuntimeScopeKind::WorkRun => {
             let delivery_id = context.delivery_id.as_ref().ok_or_else(|| {
                 StorageError::invalid_input("Delivery runtime invalidation has no Delivery id")
             })?;
             let work_run_id = context.work_run_id.as_ref().ok_or_else(|| {
-                StorageError::invalid_input("Delivery runtime invalidation has no StageRun id")
+                StorageError::invalid_input("Delivery runtime invalidation has no WorkRun id")
             })?;
-            let payload = ControlPlaneWebSocketDeliveryStageRuntimeProjectionInvalidatedEvent {
+            let payload = ControlPlaneWebSocketWorkRunRuntimeProjectionInvalidatedEvent {
                 delivery_id: delivery_id.clone(),
                 last_projection_sequence: accepted_sequence,
                 product_session_id: context.product_session_id.clone(),
@@ -1747,11 +1749,11 @@ fn runtime_projection_invalidated_event(
                     ControlPlaneWebSocketRuntimeProjectionGetReloadQuery::RuntimeProjectionGet,
                 ),
                 scope_kind:
-                    ControlPlaneWebSocketDeliveryStageRuntimeProjectionInvalidatedEventScopeKind::DeliveryStage,
+                    ControlPlaneWebSocketWorkRunRuntimeProjectionInvalidatedEventScopeKind::WorkRun,
                 session_identity: message.session_identity.clone(),
                 work_run_id: work_run_id.clone(),
                 type_value:
-                    ControlPlaneWebSocketDeliveryStageRuntimeProjectionInvalidatedEventTypeValue::RuntimeProjectionInvalidatedV1,
+                    ControlPlaneWebSocketWorkRunRuntimeProjectionInvalidatedEventTypeValue::RuntimeProjectionInvalidatedV1,
             };
             (
                 serde_json::to_vec(&payload).map_err(|error| {

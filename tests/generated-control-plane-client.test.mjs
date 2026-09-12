@@ -187,7 +187,7 @@ function deliveryProjection(cursor) {
       projectId: scope.projectId,
       repositoryId: scope.repositoryId,
     },
-    status: 'executing',
+    status: 'in_progress',
     requirements: {
       deliverySpecId: 'spec:current',
       deliverySpecRevision: 1,
@@ -211,8 +211,6 @@ function deliveryProjection(cursor) {
     },
     solutionReview: null,
     diagramExecution: null,
-    stages: [],
-    tasks: [],
     attention: [],
     evidence: [],
     currentCandidate: null,
@@ -243,9 +241,9 @@ function solutionReviewProjection() {
     deliveryId,
     deliverySpecId: 'spec:current',
     deliverySpecRevision: 1,
-    planningStageRunId: 'run_00000000000000000000000001',
+    planningWorkRunId: 'wrn_00000000000000000000000001',
     planningSessionBindingId: 'binding:planner',
-    reviewStageRunId: 'run_00000000000000000000000002',
+    reviewWorkRunId: null,
     attentionItemId: canonicalId('att', 1),
     reviewSetSha256: `sha256:${'a'.repeat(64)}`,
     reviewStatus: 'approved',
@@ -263,12 +261,12 @@ function solutionReviewProjection() {
     processDiagram: diagram('diagram:process', 'process-flow'),
     risks: [],
     unresolvedItems: [],
-    taskProposals: [{
-      id: canonicalId('dtk', 1),
+    workItemProposals: [{
+      id: canonicalId('wit', 1),
       title: 'Project execution',
       goal: 'Keep browser facts on the generated contract.',
-      acceptanceCriterionIds: ['criterion:client'],
-      blockedByTaskIds: [],
+      criterionIds: [canonicalId('crt', 1)],
+      dependsOn: [],
     }],
   }
 }
@@ -474,7 +472,7 @@ function runtimeEvent(sequence, event, stream = { kind: 'delivery', deliveryId }
       component: 'test',
     },
     event: event.type === 'runtime-projection.invalidated.v1'
-      && event.scopeKind === 'delivery-stage'
+      && event.scopeKind === 'work-run'
       ? {
           ...event,
           sessionIdentity: {
@@ -1229,7 +1227,7 @@ test('WebSocket acknowledges only applied events, deduplicates, pongs, and resum
 
   const eventOne = runtimeEvent(1, {
     type: 'runtime-projection.invalidated.v1',
-    scopeKind: 'delivery-stage',
+    scopeKind: 'work-run',
     productSessionId,
     deliveryId,
     workRunId,
@@ -1363,7 +1361,7 @@ test('WebSocket handler failure sends no acknowledgement and 4403 stops reconnec
   factory.sockets[0].receive(acceptedFrame())
   factory.sockets[0].receive(runtimeEvent(1, {
     type: 'runtime-projection.invalidated.v1',
-    scopeKind: 'delivery-stage',
+    scopeKind: 'work-run',
     productSessionId,
     deliveryId,
     workRunId,
@@ -1401,7 +1399,7 @@ test('WebSocket retries a failed event from the last acknowledged cursor without
   }
   const retriedEvent = runtimeEvent(2, {
     type: 'runtime-projection.invalidated.v1',
-    scopeKind: 'delivery-stage',
+    scopeKind: 'work-run',
     productSessionId,
     deliveryId,
     workRunId,
@@ -1557,7 +1555,7 @@ test('StrongFlow reloads delivery then runtime at the exact returned read cursor
   acceptSubscription(sockets.sockets[0])
   sockets.sockets[0].receive(runtimeEvent(2, {
     type: 'runtime-projection.invalidated.v1',
-    scopeKind: 'delivery-stage',
+    scopeKind: 'work-run',
     productSessionId,
     deliveryId,
     workRunId,
@@ -1983,9 +1981,9 @@ test('WebSocket validates every event payload against its exact stream resource'
       name: 'delivery task',
       stream: { kind: 'delivery', deliveryId },
       event: {
-        type: 'delivery-task.changed.v1',
+        type: 'work-item.changed.v1',
         deliveryId: otherDeliveryId,
-        deliveryTaskId: canonicalId('dtk', 1),
+        workItemId: canonicalId('dtk', 1),
         revision: 1,
         changeKind: 'started',
       },
@@ -1995,7 +1993,7 @@ test('WebSocket validates every event payload against its exact stream resource'
       stream: { kind: 'delivery', deliveryId },
       event: {
         type: 'runtime-projection.invalidated.v1',
-        scopeKind: 'delivery-stage',
+        scopeKind: 'work-run',
         productSessionId,
         deliveryId: otherDeliveryId,
         workRunId,
@@ -2091,7 +2089,7 @@ test('WebSocket requires an accepted authorization epoch before applying events'
       factory.sockets[0].receive({
         ...runtimeEvent(1, {
           type: 'runtime-projection.invalidated.v1',
-          scopeKind: 'delivery-stage',
+          scopeKind: 'work-run',
           productSessionId,
           deliveryId,
           workRunId,
@@ -2125,7 +2123,7 @@ test('switching subscriptions prevents an old async handler from advancing the n
   factory.sockets[0].receive(acceptedFrame())
   factory.sockets[0].receive(runtimeEvent(1, {
     type: 'runtime-projection.invalidated.v1',
-    scopeKind: 'delivery-stage',
+    scopeKind: 'work-run',
     productSessionId,
     deliveryId,
     workRunId,
@@ -2373,7 +2371,7 @@ test('WebSocket binds acceptance to the HTTP cursor and authorization baseline',
     factory.sockets[0].receive({
       ...runtimeEvent(6, {
         type: 'runtime-projection.invalidated.v1',
-        scopeKind: 'delivery-stage',
+        scopeKind: 'work-run',
         productSessionId,
         deliveryId,
         workRunId,
@@ -2494,7 +2492,7 @@ test('close and authorization or reset boundaries cancel old event completions',
       factory.sockets[0].receive(acceptedFrame())
       factory.sockets[0].receive(runtimeEvent(1, {
         type: 'runtime-projection.invalidated.v1',
-        scopeKind: 'delivery-stage',
+        scopeKind: 'work-run',
         productSessionId,
         deliveryId,
         workRunId,
@@ -2566,7 +2564,7 @@ test('StrongFlow reset discards stale reloads and publishes only the new cursor'
   acceptSubscription(sockets.sockets[0])
   sockets.sockets[0].receive(runtimeEvent(2, {
     type: 'runtime-projection.invalidated.v1',
-    scopeKind: 'delivery-stage',
+    scopeKind: 'work-run',
     productSessionId,
     deliveryId,
     workRunId,

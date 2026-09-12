@@ -979,36 +979,25 @@ async fn full_launch_chain_issues_consumes_and_is_idempotent_under_replays() {
         body["workerId"]
             .as_str()
             .expect("worker id")
-            .starts_with("wkr_"),
+            .starts_with("wrk_"),
         "{body}"
     );
     assert!(
         body["workerInstanceId"]
             .as_str()
             .expect("worker instance id")
-            .starts_with("winst_"),
+            .starts_with("wki_"),
         "{body}"
     );
-    // The raw 32-byte credential material crosses this response exactly once;
-    // durable state stores only its digest.
-    let material = body["workerCredential"]
-        .as_str()
-        .expect("credential material");
-    assert_eq!(material.len(), 64, "{body}");
+    assert!(
+        body.get("workerCredential").is_none(),
+        "the browser response must stay secret-free"
+    );
     let digest = body["credentialDigest"]
         .as_str()
         .expect("credential digest");
     assert_eq!(digest.len(), 71);
     assert!(digest.starts_with("sha256:"));
-    let secret: Vec<u8> = (0..material.len())
-        .step_by(2)
-        .map(|index| u8::from_str_radix(&material[index..index + 2], 16).expect("hex"))
-        .collect();
-    assert_eq!(
-        digest,
-        format!("sha256:{:x}", Sha256::digest(&secret)),
-        "the stored digest binds the response material"
-    );
 
     // Durable facts: the grant is consumed exactly once with its audit pair,
     // and the acked launch frame is retained no longer.
@@ -1489,7 +1478,7 @@ fn the_worker_stop_frame_round_trips_through_the_wire_codec() {
             occupancy_fencing_token: 7,
         },
         "ws_AAAAAAAAAAAAAAAAAAAAAAAAA1",
-        "wkr_AAAAAAAAAAAAAAAAAAAAAAAAA1",
+        "wrk_AAAAAAAAAAAAAAAAAAAAAAAAA1",
         ClientWorkerStopReason::GrantRevoked,
     );
     let envelope = ServerToClientEnvelope {
@@ -1511,7 +1500,7 @@ fn the_worker_stop_frame_round_trips_through_the_wire_codec() {
     );
     assert_eq!(
         decoded["payload"]["workerId"],
-        json!("wkr_AAAAAAAAAAAAAAAAAAAAAAAAA1")
+        json!("wrk_AAAAAAAAAAAAAAAAAAAAAAAAA1")
     );
     assert_eq!(decoded["payload"]["reason"], json!("grant_revoked"));
     assert_eq!(

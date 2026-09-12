@@ -19,16 +19,16 @@ use winwincode_control_plane::{
 };
 use winwincode_delivery::{
     application::{
-        stage::test_support::{
-            active_lease_identity, delivery_terminal_outcome_facts, session_binding_authority,
-            terminal_outcome_metadata, terminal_worker_outcome,
-        },
         verdict::{
             SubmitVerdictFacts,
             test_support::{VerdictFixtureOutcome, verdict_facts_fixture, verdict_fixture},
         },
+        workrun_execution::test_support::{
+            active_lease_identity, delivery_terminal_outcome_facts, session_binding_authority,
+            terminal_outcome_metadata, terminal_worker_outcome,
+        },
     },
-    domain::{Delivery, DeliveryStatus, DeliveryTaskStatus},
+    domain::{Delivery, DeliveryStatus},
     store::{
         AtomicPublication, CreateDelivery, DeliveryCommand, DeliveryCommandPort,
         DeliveryJournalPort, DeliveryStore, JournalBackendError, LoadedDeliveryJournal,
@@ -163,6 +163,12 @@ fn running_final_verifier(
     binding.worker_session_id = Some(WorkerSessionId(canonical_id("wsn", seed)));
     binding.codex_thread_id = Some(CodexThreadId(canonical_id("cdx", seed)));
     binding.worker_id = Some(WorkerId(canonical_id("wrk", seed)));
+    binding
+        .runtime_context
+        .as_mut()
+        .expect("verifier runtime context")
+        .agent_identity
+        .worker_id = binding.worker_id.clone().expect("Worker");
     binding.worker_instance_id = Some(WorkerInstanceId(canonical_id("wki", seed)));
     binding.lease_id = Some(LeaseId(canonical_id("lse", seed)));
     binding.fencing_token = Some(FencingToken(seed.to_string()));
@@ -201,11 +207,10 @@ fn running_final_verifier(
 fn running_non_final_executor(seed: u64) -> Delivery {
     let (delivery, _candidate) = running_final_verifier(seed);
     let mut snapshot = delivery.into_snapshot();
-    snapshot.status = DeliveryStatus::Executing;
+    snapshot.status = DeliveryStatus::Ready;
     // A first writer has no previous candidate or independent checking sessions.
     // Keep only the running job; do not turn a completed verification scenario
     // into a writer while retaining its candidate-ready producer.
-    snapshot.stage_runs.clear();
     snapshot
         .work_run_aggregate
         .runs
@@ -213,15 +218,21 @@ fn running_non_final_executor(seed: u64) -> Delivery {
     snapshot
         .session_bindings
         .retain(|binding| binding.execution_job_id.0 == canonical_id("job", seed));
-    for task in &mut snapshot.tasks {
-        task.status = DeliveryTaskStatus::Active;
+    for item in &mut snapshot.work_run_aggregate.items {
+        item.state = winwincode_domain::WorkItemState::InProgress;
     }
-    snapshot
+    let executor_binding = snapshot
         .session_bindings
         .iter_mut()
         .find(|binding| binding.execution_job_id.0 == canonical_id("job", seed))
-        .expect("executor binding")
-        .execution_profile = Some("executor".into());
+        .expect("executor binding");
+    executor_binding.execution_profile = Some("executor".into());
+    executor_binding
+        .runtime_context
+        .as_mut()
+        .expect("executor runtime context")
+        .agent_identity
+        .role = "executor".into();
 
     let item_id = snapshot
         .work_run_aggregate
@@ -832,7 +843,7 @@ fn install_terminal_failure(root: &Path, member: &str) {
         }
         "outbox" => {
             "CREATE TRIGGER fail_terminal_member BEFORE INSERT ON outbox \
-                     WHEN NEW.topic = 'delivery.stage.terminal' \
+                     WHEN NEW.topic = 'delivery.work_run.terminal' \
                      BEGIN SELECT RAISE(ABORT, 'injected terminal outbox failure'); END;"
         }
         _ => panic!("unknown terminal atomic member"),
@@ -985,7 +996,7 @@ fn terminal_message(
 fn outcome_facts(
     delivery: &Delivery,
     message: &JobOutcomeMessage,
-) -> winwincode_delivery::application::stage::DeliveryTerminalOutcomeFacts {
+) -> winwincode_delivery::application::workrun_execution::DeliveryTerminalOutcomeFacts {
     let run = delivery
         .snapshot()
         .work_run_aggregate
@@ -1000,7 +1011,7 @@ fn outcome_facts_for_stage(
     _delivery: &Delivery,
     message: &JobOutcomeMessage,
     work_run_id: winwincode_domain::WorkRunId,
-) -> winwincode_delivery::application::stage::DeliveryTerminalOutcomeFacts {
+) -> winwincode_delivery::application::workrun_execution::DeliveryTerminalOutcomeFacts {
     let lease = active_lease_identity(
         message.lease.job_id.clone(),
         u64::try_from(message.lease.attempt).expect("attempt"),
@@ -1023,12 +1034,12 @@ fn outcome_facts_for_stage(
             .outcome
             .artifacts
             .iter()
-            .map(
-                |artifact| winwincode_delivery::application::stage::TerminalArtifactReference {
+            .map(|artifact| {
+                winwincode_delivery::application::workrun_execution::TerminalArtifactReference {
                     artifact_id: artifact.artifact_id.clone(),
                     digest: artifact.digest.clone(),
-                },
-            )
+                }
+            })
             .collect(),
     );
     let outcome = terminal_worker_outcome(
@@ -1042,16 +1053,16 @@ fn outcome_facts_for_stage(
         message.worker_session_id.clone(),
         match message.outcome.status {
             ExecutionOutcomeStatus::Succeeded => {
-                winwincode_delivery::application::stage::TerminalOutcomeStatus::Succeeded
+                winwincode_delivery::application::workrun_execution::TerminalOutcomeStatus::Succeeded
             }
             ExecutionOutcomeStatus::Failed => {
-                winwincode_delivery::application::stage::TerminalOutcomeStatus::Failed
+                winwincode_delivery::application::workrun_execution::TerminalOutcomeStatus::Failed
             }
             ExecutionOutcomeStatus::InfrastructureError => {
-                winwincode_delivery::application::stage::TerminalOutcomeStatus::InfrastructureError
+                winwincode_delivery::application::workrun_execution::TerminalOutcomeStatus::InfrastructureError
             }
             ExecutionOutcomeStatus::Cancelled => {
-                winwincode_delivery::application::stage::TerminalOutcomeStatus::Cancelled
+                winwincode_delivery::application::workrun_execution::TerminalOutcomeStatus::Cancelled
             }
         },
         metadata,
@@ -1497,7 +1508,7 @@ fn terminal_event_excludes_raw_worker_text_and_lease_authority() {
         .receipt()
         .events
         .iter()
-        .find(|event| event.topic == "delivery.stage.terminal")
+        .find(|event| event.topic == "delivery.work_run.terminal")
         .expect("terminal event");
     let durable_payload = String::from_utf8_lossy(&terminal_event.payload);
     for forbidden in [
@@ -1609,7 +1620,7 @@ fn same_message_identity_with_changed_body_is_a_request_conflict() {
 }
 
 #[test]
-fn a_new_message_cannot_resettle_an_already_terminal_stage_run() {
+fn a_new_message_cannot_resettle_an_already_terminal_work_run() {
     let seed = 5;
     let root = temporary_directory("stale-new-message");
     let scope = repository_scope(seed);
@@ -1631,7 +1642,7 @@ fn a_new_message_cannot_resettle_an_already_terminal_stage_run() {
 
     control_plane
         .commit_delivery_terminal_outcome(&scope, &stale, &facts, &stale.sent_at)
-        .expect_err("a new message cannot settle the same StageRun twice");
+        .expect_err("a new message cannot settle the same WorkRun twice");
     assert_eq!(durable_terminal_counts(&root, delivery.id()), (2, 2, 2, 4));
     control_plane.shutdown().expect("shutdown");
     fs::remove_dir_all(root).expect("database directory release");
@@ -1781,7 +1792,7 @@ fn assert_one_terminal_resource_transition(
         .runs
         .iter()
         .find(|run| run.id == job_scope.work_run_id)
-        .expect("terminal StageRun");
+        .expect("terminal WorkRun");
     let bindings = current
         .snapshot()
         .session_bindings
@@ -1851,7 +1862,7 @@ fn assert_concurrent_exact_terminal_round(seed: u64) {
         .expect("terminal receipt count");
     let terminal_events: i64 = connection
         .query_row(
-            "SELECT COUNT(*) FROM outbox WHERE topic IN ('delivery.stage.terminal', 'delivery.changed.v1', 'runtime-projection.invalidated.v1')",
+            "SELECT COUNT(*) FROM outbox WHERE topic IN ('delivery.work_run.terminal', 'delivery.changed.v1', 'runtime-projection.invalidated.v1')",
             [],
             |row| row.get(0),
         )
@@ -1930,10 +1941,6 @@ fn failed_infrastructure_and_cancelled_outcomes_settle_without_advancing_deliver
             .find(|run| run.execution_job_id == job.job_id)
             .expect("final verifier run");
         assert_eq!(run.state, expected_run);
-        assert_eq!(
-            settled.snapshot().stage_runs,
-            delivery.snapshot().stage_runs
-        );
         assert!(
             settled
                 .snapshot()
@@ -1942,14 +1949,7 @@ fn failed_infrastructure_and_cancelled_outcomes_settle_without_advancing_deliver
                 .iter()
                 .all(|item| item.state != winwincode_domain::WorkItemState::Done)
         );
-        assert_eq!(settled.snapshot().status, DeliveryStatus::Verifying);
-        assert!(
-            settled
-                .snapshot()
-                .tasks
-                .iter()
-                .all(|task| task.status == DeliveryTaskStatus::Verifying)
-        );
+        assert_eq!(settled.snapshot().status, DeliveryStatus::Ready);
         control_plane.shutdown().expect("shutdown");
         fs::remove_dir_all(root).expect("database directory release");
     }
@@ -2460,7 +2460,7 @@ fn generic_control_plane_commit_cannot_forge_terminal_delivery_state() {
                 b"forged-terminal-state".to_vec(),
                 vec![NewOutboxEvent::internal(
                     "forged-terminal-event",
-                    "delivery.stage.terminal",
+                    "delivery.work_run.terminal",
                     b"forged".to_vec(),
                 )],
             ),
@@ -2481,7 +2481,7 @@ fn generic_control_plane_commit_cannot_forge_terminal_delivery_state() {
                 b"unrelated-state".to_vec(),
                 vec![NewOutboxEvent::internal(
                     "forged-terminal-topic",
-                    "delivery.stage.terminal",
+                    "delivery.work_run.terminal",
                     b"forged".to_vec(),
                 )],
             ),
@@ -2546,7 +2546,7 @@ fn receipt_replay_rejects_changed_digest_event_membership_or_terminal_payload() 
                            receipt_actor_key = (SELECT actor_key FROM command_receipts WHERE stream_id = ?1 AND revision = 1), \
                            receipt_scope_key = (SELECT scope_key FROM command_receipts WHERE stream_id = ?1 AND revision = 1), \
                            request_id = (SELECT request_id FROM command_receipts WHERE stream_id = ?1 AND revision = 1) \
-                         WHERE topic = 'delivery.stage.terminal'",
+                         WHERE topic = 'delivery.work_run.terminal'",
                         [format!("delivery:{}", delivery.id().0)],
                     )
                     .expect("move terminal event to seed receipt");
@@ -2554,7 +2554,7 @@ fn receipt_replay_rejects_changed_digest_event_membership_or_terminal_payload() 
             "terminal-payload" => {
                 connection
                     .execute(
-                        "UPDATE outbox SET payload = X'7b7d' WHERE topic = 'delivery.stage.terminal'",
+                        "UPDATE outbox SET payload = X'7b7d' WHERE topic = 'delivery.work_run.terminal'",
                         [],
                     )
                     .expect("replace terminal event payload");

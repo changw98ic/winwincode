@@ -816,7 +816,7 @@ impl<'storage> RepositoryBindingLedger<'storage> {
         let connection = self.connection()?;
         let mut statement = connection
             .prepare(&format!(
-                "SELECT {BINDING_COLUMNS} FROM repository_bindings
+                "SELECT {BINDING_COLUMNS} FROM repository_bindings AS rb
                  WHERE client_node_id = ?1
                  ORDER BY created_at, repository_binding_id"
             ))

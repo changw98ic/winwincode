@@ -6,7 +6,7 @@
     "crate": "crates/winwincode-delivery",
     "markerModule": "domain/candidate.rs",
     "scanWhenMarkerPresent": true,
-    "note": "The rule and old-behavior audit always run. Named Rust modules and tests become mandatory once the phase 2.4 candidate module exists. Canonical Rust modules must use ProductSession, ExecutionJob, WorkerSession, and CodexThread identities and must not restore legacy DSH/Codex session fields.",
+    "note": "The rule audit always runs. Named Rust modules and tests become mandatory once the phase 2.4 candidate module exists. Canonical Rust modules must use ProductSession, ExecutionJob, WorkerSession, CodexThread, and WorkRun identities and must not restore the retired TypeScript domain or legacy session fields.",
     "prohibitedIdentityFields": [
       "dshSessionId",
       "codexSessionId",
@@ -15,7 +15,7 @@
     ]
   },
   "implementationBoundary": {
-    "phase24DomainPolicy": "Phase 2.4 is a fail-closed domain and application layer. It defines sealed validated fact types, checks their identity, ordering, candidate, role, outcome, and rework relationships, derives CandidateRef, EvidenceRef, CriterionResult, DeliveryVerdict, and Attention, and persists stage, Attention, and Verdict changes only through operation-specific sealed transitions. Public commands, API DTOs, raw snapshots, and raw Worker messages cannot construct a sealed fact or relabel a derived transition.",
+    "phase24DomainPolicy": "Phase 2.4 is a fail-closed Rust domain and application layer. It defines sealed validated fact types, checks their identity, ordering, candidate, role, outcome, and rework relationships, derives Candidate, Evidence, Verdict, and Attention, and persists WorkRun, Attention, and Verdict changes only through operation-specific sealed transitions. Public commands, API DTOs, raw snapshots, and raw Worker messages cannot construct a sealed fact or relabel a derived transition.",
     "productionEnablementPolicy": "A domain unit test may create sealed fixtures through crate-private test support. Production candidate freeze, evidence resolution, verification settlement, verdict computation, and replacement-candidate acceptance remain unavailable until the owning adapters below produce the required sealed facts and pass their integration gates; a domain test is not proof that Git, an Artifact, a checkout, or a runtime event was actually verified.",
     "adapterDependencies": [
       {
@@ -82,7 +82,7 @@
       "deliverySpecRevision",
       "repository",
       "baseRevision",
-      "producerDeliveryTaskId",
+      "producerWorkItemId",
       "producerWorkRunId",
       "producerAttempt",
       "producerSessionBindingId",
@@ -202,7 +202,7 @@
       "evidenceRefIds"
     ],
     "afterWriterStarts": "The previous candidate immediately stops being current. Historical evidence may remain append-only, but it cannot authorize a new pass, review, or publication.",
-    "resultPolicy": "The remediator replacement candidate must remain inside the approved DeliveryTask, file, and hunk boundaries. The GitSnapshotResolver/Artifact adapter seals the resulting snapshot; the phase 2.4 domain compares it with the authorization and rejects any added path or out-of-bound hunk. Prompt wording alone is not enforcement.",
+    "resultPolicy": "The remediator replacement candidate must remain inside the approved WorkItem, file, and hunk boundaries. The GitSnapshotResolver/Artifact adapter seals the resulting snapshot; the phase 2.4 domain compares it with the authorization and rejects any added path or out-of-bound hunk. Prompt wording alone is not enforcement.",
     "attemptSequenceSource": "distinct earlier failed candidates in the append-only current DeliverySpec verdict history"
   },
   "rules": [
@@ -214,26 +214,6 @@
         "docs/decisions/0025-live-delivery-evaluation.md",
         "docs/decisions/0028-control-plane-worker-migration.md"
       ],
-      "typescript": {
-        "publicSymbols": [
-          {
-            "path": "packages/contracts/src/delivery-candidate.ts",
-            "name": "FrozenDeliveryCandidate"
-          },
-          {
-            "path": "packages/strongflow/src/candidate-evidence.ts",
-            "name": "freezeDeliveryCandidate"
-          }
-        ],
-        "coverage": "partial",
-        "tests": [
-          {
-            "path": "tests/candidate-evidence.test.mjs",
-            "name": "freezes exact producer Git facts without creating another persisted domain object"
-          }
-        ],
-        "gap": "The old candidate identity hashes the producer WorkRun and SessionBinding IDs but not the writer task, stage, role, attempt, ProductSession, ExecutionJob, WorkerSession, or CodexThread values. Mutating a binding behind the same ID can therefore leave the old candidateRef unchanged; Rust must include the complete canonical writer identity."
-      },
       "rust": {
         "module": "domain/candidate.rs",
         "testName": "freezes_candidate_from_exact_writer_facts"
@@ -246,22 +226,6 @@
         "docs/decisions/0025-live-delivery-evaluation.md",
         "docs/decisions/0028-control-plane-worker-migration.md"
       ],
-      "typescript": {
-        "publicSymbols": [
-          {
-            "path": "packages/strongflow/src/candidate-evidence.ts",
-            "name": "freezeDeliveryCandidate"
-          }
-        ],
-        "coverage": "partial",
-        "tests": [
-          {
-            "path": "tests/candidate-evidence.test.mjs",
-            "name": "rejects malformed or internally inconsistent candidate facts"
-          }
-        ],
-        "gap": "The old function validates formats and relationships among supplied fields, but it does not ask Git to prove commit-to-tree, diff digest, changed-path, or object-ID consistency. The later GitSnapshotResolver/Artifact adapter must seal that proof; phase 2.4 must accept only the sealed value and cannot pretend a domain fixture proves the Git read."
-      },
       "rust": {
         "module": "domain/candidate.rs",
         "testName": "candidate_requires_sealed_validated_git_snapshot"
@@ -274,22 +238,6 @@
         "docs/decisions/0025-live-delivery-evaluation.md",
         "docs/decisions/0028-control-plane-worker-migration.md"
       ],
-      "typescript": {
-        "publicSymbols": [
-          {
-            "path": "packages/strongflow/src/candidate-evidence.ts",
-            "name": "freezeDeliveryCandidate"
-          }
-        ],
-        "coverage": "partial",
-        "tests": [
-          {
-            "path": "tests/candidate-evidence.test.mjs",
-            "name": "freezes exact producer Git facts without creating another persisted domain object"
-          }
-        ],
-        "gap": "The old freezer checks that the producer WorkRun says succeeded and that a DSH/Codex binding exists, but its API has no accepted Worker outcome or job-scoped artifact proof. The Worker/Artifact adapter must seal the outcome-bound snapshot; phase 2.4 must reject a missing or mismatched sealed proof."
-      },
       "rust": {
         "module": "domain/candidate.rs",
         "testName": "candidate_requires_sealed_matching_worker_job_snapshot"
@@ -302,22 +250,6 @@
         "docs/decisions/0023-canonical-delivery-ownership.md",
         "docs/decisions/0028-control-plane-worker-migration.md"
       ],
-      "typescript": {
-        "publicSymbols": [
-          {
-            "path": "packages/strongflow/src/candidate-evidence.ts",
-            "name": "assertFrozenDeliveryCandidateCurrent"
-          }
-        ],
-        "coverage": "covered",
-        "tests": [
-          {
-            "path": "tests/candidate-evidence.test.mjs",
-            "name": "invalidates prior acceptance and candidate identities after definition or writer changes"
-          }
-        ],
-        "gap": ""
-      },
       "rust": {
         "module": "domain/candidate.rs",
         "testName": "rejects_candidate_after_spec_or_writer_change"
@@ -330,22 +262,6 @@
         "docs/decisions/0023-canonical-delivery-ownership.md",
         "docs/decisions/0028-control-plane-worker-migration.md"
       ],
-      "typescript": {
-        "publicSymbols": [
-          {
-            "path": "packages/strongflow/src/independent-verification.ts",
-            "name": "projectIndependentVerification"
-          }
-        ],
-        "coverage": "covered",
-        "tests": [
-          {
-            "path": "tests/independent-verification.test.mjs",
-            "name": "rejects malformed finding payloads and caller attempts to omit required roles"
-          }
-        ],
-        "gap": ""
-      },
       "rust": {
         "module": "domain/verification.rs",
         "testName": "requires_reviewer_and_verifier"
@@ -358,22 +274,6 @@
         "docs/decisions/0023-canonical-delivery-ownership.md",
         "docs/decisions/0028-control-plane-worker-migration.md"
       ],
-      "typescript": {
-        "publicSymbols": [
-          {
-            "path": "packages/strongflow/src/independent-verification.ts",
-            "name": "createIndependentVerificationAssignment"
-          }
-        ],
-        "coverage": "partial",
-        "tests": [
-          {
-            "path": "tests/independent-verification.test.mjs",
-            "name": "binds exact approved inputs to separate existing reviewer and verifier sessions"
-          }
-        ],
-        "gap": "The old implementation rejects reuse of the producer SessionBinding and its DSH/Codex identities, but it neither directly rejects Reviewer/Verifier cross-role identity reuse nor fails on multiple current bindings for one role. Rust must require one unambiguous ProductSession/ExecutionJob/WorkerSession/CodexThread binding per current role."
-      },
       "rust": {
         "module": "domain/verification.rs",
         "testName": "requires_exactly_one_current_assignment_and_distinct_session_per_role"
@@ -386,26 +286,6 @@
         "docs/decisions/0023-canonical-delivery-ownership.md",
         "docs/decisions/0028-control-plane-worker-migration.md"
       ],
-      "typescript": {
-        "publicSymbols": [
-          {
-            "path": "packages/contracts/src/strongflow-role.ts",
-            "name": "strongFlowRoleWorkspaceMode"
-          },
-          {
-            "path": "packages/strongflow/src/candidate-evidence.ts",
-            "name": "assertVerificationSessionReadOnly"
-          }
-        ],
-        "coverage": "covered",
-        "tests": [
-          {
-            "path": "tests/candidate-evidence.test.mjs",
-            "name": "requires a read-only verification role and rejects any successful verifier write"
-          }
-        ],
-        "gap": ""
-      },
       "rust": {
         "module": "domain/verification.rs",
         "testName": "verification_roles_require_candidate_read_only_policy"
@@ -418,26 +298,6 @@
         "docs/decisions/0023-canonical-delivery-ownership.md",
         "docs/decisions/0028-control-plane-worker-migration.md"
       ],
-      "typescript": {
-        "publicSymbols": [
-          {
-            "path": "packages/strongflow/src/candidate-evidence.ts",
-            "name": "assertVerificationSessionReadOnly"
-          }
-        ],
-        "coverage": "partial",
-        "tests": [
-          {
-            "path": "tests/independent-verification.test.mjs",
-            "name": "rejects foreign result identities, role drift, and verifier writes"
-          },
-          {
-            "path": "tests/candidate-evidence.test.mjs",
-            "name": "requires a read-only verification role and rejects any successful verifier write"
-          }
-        ],
-        "gap": "The old implementation recognizes successful FileChange and patch_apply events, but a successful command or an unrecognized tool can mutate the candidate without matching those event shapes. The GitSnapshotResolver/Artifact adapter must seal pre/post snapshots; phase 2.4 must compare them and reject a difference."
-      },
       "rust": {
         "module": "domain/verification.rs",
         "testName": "rejects_verification_when_sealed_pre_and_post_candidate_snapshots_differ"
@@ -450,22 +310,6 @@
         "docs/decisions/0023-canonical-delivery-ownership.md",
         "docs/decisions/0028-control-plane-worker-migration.md"
       ],
-      "typescript": {
-        "publicSymbols": [
-          {
-            "path": "packages/strongflow/src/independent-verification.ts",
-            "name": "projectIndependentVerification"
-          }
-        ],
-        "coverage": "partial",
-        "tests": [
-          {
-            "path": "tests/independent-verification.test.mjs",
-            "name": "keeps missing, running, and optional adversarial settlements visible"
-          }
-        ],
-        "gap": "The old projector keeps a turn without a terminal event visible as running, but a turn.completed event can mark the session settled even while the canonical WorkRun status is still running. The phase 2.3 outcome adapter must seal the exact terminal fact; phase 2.4 must require that proof together with canonical stage success."
-      },
       "rust": {
         "module": "domain/verification.rs",
         "testName": "requires_terminal_work_run_and_sealed_matching_outcome"
@@ -478,26 +322,6 @@
         "docs/decisions/0023-canonical-delivery-ownership.md",
         "docs/decisions/0028-control-plane-worker-migration.md"
       ],
-      "typescript": {
-        "publicSymbols": [
-          {
-            "path": "packages/strongflow/src/candidate-evidence.ts",
-            "name": "resolveDeliveryEvidence"
-          }
-        ],
-        "coverage": "covered",
-        "tests": [
-          {
-            "path": "tests/candidate-evidence.test.mjs",
-            "name": "resolves runtime and Git facts to exact spec, candidate, stage, and session identities"
-          },
-          {
-            "path": "tests/candidate-evidence.test.mjs",
-            "name": "invalidates prior acceptance and candidate identities after definition or writer changes"
-          }
-        ],
-        "gap": ""
-      },
       "rust": {
         "module": "domain/evidence.rs",
         "testName": "evidence_matches_current_spec_revision"
@@ -510,30 +334,6 @@
         "docs/decisions/0023-canonical-delivery-ownership.md",
         "docs/decisions/0028-control-plane-worker-migration.md"
       ],
-      "typescript": {
-        "publicSymbols": [
-          {
-            "path": "packages/strongflow/src/candidate-evidence.ts",
-            "name": "resolveDeliveryEvidence"
-          },
-          {
-            "path": "packages/strongflow/src/candidate-evidence.ts",
-            "name": "assertFrozenDeliveryCandidateCurrent"
-          }
-        ],
-        "coverage": "covered",
-        "tests": [
-          {
-            "path": "tests/candidate-evidence.test.mjs",
-            "name": "rejects missing, foreign, type-mismatched, and candidate-mismatched source facts"
-          },
-          {
-            "path": "tests/delivery-verdict.test.mjs",
-            "name": "rejects stale acceptance, stale candidate, and foreign result identities"
-          }
-        ],
-        "gap": ""
-      },
       "rust": {
         "module": "domain/evidence.rs",
         "testName": "evidence_matches_current_candidate"
@@ -546,22 +346,6 @@
         "docs/decisions/0023-canonical-delivery-ownership.md",
         "docs/decisions/0028-control-plane-worker-migration.md"
       ],
-      "typescript": {
-        "publicSymbols": [
-          {
-            "path": "packages/strongflow/src/candidate-evidence.ts",
-            "name": "resolveDeliveryEvidence"
-          }
-        ],
-        "coverage": "covered",
-        "tests": [
-          {
-            "path": "tests/candidate-evidence.test.mjs",
-            "name": "resolves runtime and Git facts to exact spec, candidate, stage, and session identities"
-          }
-        ],
-        "gap": ""
-      },
       "rust": {
         "module": "domain/evidence.rs",
         "testName": "evidence_matches_current_work_run"
@@ -574,26 +358,6 @@
         "docs/decisions/0023-canonical-delivery-ownership.md",
         "docs/decisions/0028-control-plane-worker-migration.md"
       ],
-      "typescript": {
-        "publicSymbols": [
-          {
-            "path": "packages/strongflow/src/candidate-evidence.ts",
-            "name": "resolveDeliveryEvidence"
-          }
-        ],
-        "coverage": "covered",
-        "tests": [
-          {
-            "path": "tests/candidate-evidence.test.mjs",
-            "name": "resolves runtime and Git facts to exact spec, candidate, stage, and session identities"
-          },
-          {
-            "path": "tests/candidate-evidence.test.mjs",
-            "name": "rejects missing, foreign, type-mismatched, and candidate-mismatched source facts"
-          }
-        ],
-        "gap": ""
-      },
       "rust": {
         "module": "domain/evidence.rs",
         "testName": "evidence_matches_current_session_binding"
@@ -606,26 +370,6 @@
         "docs/decisions/0023-canonical-delivery-ownership.md",
         "docs/decisions/0028-control-plane-worker-migration.md"
       ],
-      "typescript": {
-        "publicSymbols": [
-          {
-            "path": "packages/strongflow/src/candidate-evidence.ts",
-            "name": "resolveDeliveryEvidence"
-          }
-        ],
-        "coverage": "partial",
-        "tests": [
-          {
-            "path": "tests/candidate-evidence.test.mjs",
-            "name": "rejects missing, foreign, type-mismatched, and candidate-mismatched source facts"
-          },
-          {
-            "path": "tests/independent-verification.test.mjs",
-            "name": "rejects foreign result identities, role drift, and verifier writes"
-          }
-        ],
-        "gap": "The old TypeScript source checks DSH Session and Codex Session identities and source order. It does not bind evidence to the canonical ProductSession, ExecutionJob, attempt, lease, fencing token, Worker instance, WorkerSession, and CodexThread identity set required by the Rust Control Plane."
-      },
       "rust": {
         "module": "domain/evidence.rs",
         "testName": "evidence_resolves_one_exact_runtime_source_identity"
@@ -638,22 +382,6 @@
         "docs/decisions/0023-canonical-delivery-ownership.md",
         "docs/decisions/0028-control-plane-worker-migration.md"
       ],
-      "typescript": {
-        "publicSymbols": [
-          {
-            "path": "packages/strongflow/src/candidate-evidence.ts",
-            "name": "resolveDeliveryEvidence"
-          }
-        ],
-        "coverage": "partial",
-        "tests": [
-          {
-            "path": "tests/candidate-evidence.test.mjs",
-            "name": "resolves runtime and Git facts to exact spec, candidate, stage, and session identities"
-          }
-        ],
-        "gap": "The old input accepts caller-created createdAtMillis, and independent verification raises an earlier event time with Math.max(stage start, binding time, event time). The ledger adapter must preserve the original occurrence time and sequence in a sealed fact; phase 2.4 must compare those values with the stage, binding, result, and terminal outcome."
-      },
       "rust": {
         "module": "domain/evidence.rs",
         "testName": "rejects_source_before_work_run_or_binding_and_after_terminal_sequence"
@@ -666,30 +394,6 @@
         "docs/decisions/0023-canonical-delivery-ownership.md",
         "docs/decisions/0028-control-plane-worker-migration.md"
       ],
-      "typescript": {
-        "publicSymbols": [
-          {
-            "path": "packages/strongflow/src/candidate-evidence.ts",
-            "name": "resolveDeliveryEvidence"
-          },
-          {
-            "path": "packages/strongflow/src/delivery-verdict.ts",
-            "name": "computeDeliveryVerdict"
-          }
-        ],
-        "coverage": "partial",
-        "tests": [
-          {
-            "path": "tests/candidate-evidence.test.mjs",
-            "name": "rejects missing, foreign, type-mismatched, and candidate-mismatched source facts"
-          },
-          {
-            "path": "tests/delivery-verdict.test.mjs",
-            "name": "rejects stale acceptance, stale candidate, and foreign result identities"
-          }
-        ],
-        "gap": "The old public functions accept caller-provided runtimeEvents and createdAtMillis values. They validate event order within that supplied array, but they do not prove that the source body or timestamp came from the canonical persisted runtime ledger. The later ledger adapter must load and seal the durable fact; phase 2.4 must reject raw or caller-built source values."
-      },
       "rust": {
         "module": "domain/evidence.rs",
         "testName": "evidence_requires_sealed_accepted_runtime_source_fact"
@@ -702,22 +406,6 @@
         "docs/decisions/0025-live-delivery-evaluation.md",
         "docs/decisions/0028-control-plane-worker-migration.md"
       ],
-      "typescript": {
-        "publicSymbols": [
-          {
-            "path": "packages/strongflow/src/candidate-evidence.ts",
-            "name": "resolveDeliveryEvidence"
-          }
-        ],
-        "coverage": "partial",
-        "tests": [
-          {
-            "path": "tests/candidate-evidence.test.mjs",
-            "name": "rejects missing, foreign, type-mismatched, and candidate-mismatched source facts"
-          }
-        ],
-        "gap": "The old resolver checks candidateRef only when most runtime events happen to include it; test and command evidence can omit candidateRef, and no ExecutionJob checkout attestation is compared with candidateCommitId/candidateTreeId. The Worker/Artifact adapter must seal the attestation; phase 2.4 must require its exact candidate match."
-      },
       "rust": {
         "module": "domain/evidence.rs",
         "testName": "runtime_evidence_requires_sealed_exact_candidate_checkout_attestation"
@@ -730,26 +418,6 @@
         "docs/decisions/0023-canonical-delivery-ownership.md",
         "docs/decisions/0028-control-plane-worker-migration.md"
       ],
-      "typescript": {
-        "publicSymbols": [
-          {
-            "path": "packages/contracts/src/delivery.ts",
-            "name": "parseCriterionResult"
-          },
-          {
-            "path": "packages/strongflow/src/delivery-verdict.ts",
-            "name": "computeDeliveryVerdict"
-          }
-        ],
-        "coverage": "partial",
-        "tests": [
-          {
-            "path": "tests/delivery-verdict.test.mjs",
-            "name": "fails closed for each non-passing verification condition"
-          }
-        ],
-        "gap": "The old higher-level computation test covers missing direct evidence, but there is no direct parser test for an evidence-free caller-created pass or fail result. Rust must test the invariant at its public domain constructor."
-      },
       "rust": {
         "module": "domain/verdict.rs",
         "testName": "pass_or_fail_criterion_requires_evidence"
@@ -762,22 +430,6 @@
         "docs/decisions/0023-canonical-delivery-ownership.md",
         "docs/decisions/0025-live-delivery-evaluation.md"
       ],
-      "typescript": {
-        "publicSymbols": [
-          {
-            "path": "packages/strongflow/src/delivery-verdict.ts",
-            "name": "computeDeliveryVerdict"
-          }
-        ],
-        "coverage": "partial",
-        "tests": [
-          {
-            "path": "tests/delivery-verdict.test.mjs",
-            "name": "fails closed for each non-passing verification condition"
-          }
-        ],
-        "gap": "The old computation rejects an empty evidence list and failed checks, but any non-empty generic runtime_event with outcome observed can support pass. Rust must exclude Agent/final-response and generic runtime events from direct pass evidence."
-      },
       "rust": {
         "module": "domain/verdict.rs",
         "testName": "agent_message_or_generic_runtime_event_cannot_produce_pass"
@@ -790,22 +442,6 @@
         "docs/decisions/0023-canonical-delivery-ownership.md",
         "docs/decisions/0025-live-delivery-evaluation.md"
       ],
-      "typescript": {
-        "publicSymbols": [
-          {
-            "path": "packages/strongflow/src/delivery-verdict.ts",
-            "name": "computeDeliveryVerdict"
-          }
-        ],
-        "coverage": "partial",
-        "tests": [
-          {
-            "path": "tests/delivery-verdict.test.mjs",
-            "name": "fails closed for each non-passing verification condition"
-          }
-        ],
-        "gap": "The old findingEvaluation trusts Agent infra_error/inconclusive before reading supporting outcomes and accepts fail with a succeeded check. Its public tests cover pass with failed evidence, but not the reverse relabeling paths. Rust must let direct outcomes control the classification."
-      },
       "rust": {
         "module": "domain/verdict.rs",
         "testName": "direct_evidence_outcome_cannot_be_reclassified_by_agent_claim"
@@ -818,30 +454,6 @@
         "docs/decisions/0023-canonical-delivery-ownership.md",
         "docs/decisions/0028-control-plane-worker-migration.md"
       ],
-      "typescript": {
-        "publicSymbols": [
-          {
-            "path": "packages/strongflow/src/acceptance-verification.ts",
-            "name": "freezeAcceptanceVerificationInput"
-          },
-          {
-            "path": "packages/strongflow/src/delivery-verdict.ts",
-            "name": "computeDeliveryVerdict"
-          }
-        ],
-        "coverage": "partial",
-        "tests": [
-          {
-            "path": "tests/acceptance-verification.test.mjs",
-            "name": "freezes the exact approved criteria and keeps missing checks explicit"
-          },
-          {
-            "path": "tests/delivery-verdict.test.mjs",
-            "name": "computes one deterministic passing verdict from current direct evidence"
-          }
-        ],
-        "gap": "The old acceptance freeze labels a missing method as attention-required, but computeDeliveryVerdict does not read that requirement and can pass the criterion when both roles cite other evidence. Rust must keep it inconclusive until a newly reviewed Spec supplies the method."
-      },
       "rust": {
         "module": "domain/verdict.rs",
         "testName": "missing_verification_method_is_inconclusive"
@@ -854,22 +466,6 @@
         "docs/decisions/0023-canonical-delivery-ownership.md",
         "docs/decisions/0028-control-plane-worker-migration.md"
       ],
-      "typescript": {
-        "publicSymbols": [
-          {
-            "path": "packages/strongflow/src/delivery-verdict.ts",
-            "name": "computeDeliveryVerdict"
-          }
-        ],
-        "coverage": "partial",
-        "tests": [
-          {
-            "path": "tests/delivery-verdict.test.mjs",
-            "name": "fails closed for each non-passing verification condition"
-          }
-        ],
-        "gap": "The old criterion fold gives fail precedence whenever any role evaluates fail, so one product-fail finding can override another required role that is missing, inconclusive, or infra_error. Rust must require all required roles to contribute direct evidence and agree before product fail."
-      },
       "rust": {
         "module": "domain/verdict.rs",
         "testName": "product_outcome_requires_all_required_roles_to_agree"
@@ -882,30 +478,6 @@
         "docs/decisions/0023-canonical-delivery-ownership.md",
         "docs/decisions/0028-control-plane-worker-migration.md"
       ],
-      "typescript": {
-        "publicSymbols": [
-          {
-            "path": "packages/contracts/src/strongflow-delivery-api.ts",
-            "name": "materializeStrongFlowDeliveryRequest"
-          },
-          {
-            "path": "packages/strongflow/src/delivery-verdict.ts",
-            "name": "computeDeliveryVerdict"
-          }
-        ],
-        "coverage": "covered",
-        "tests": [
-          {
-            "path": "tests/strongflow-delivery-api.test.mjs",
-            "name": "Delivery API rejects extra fields, empty bindings, and mismatched authentication"
-          },
-          {
-            "path": "tests/delivery-verdict.test.mjs",
-            "name": "computes one deterministic passing verdict from current direct evidence"
-          }
-        ],
-        "gap": ""
-      },
       "rust": {
         "module": "domain/verdict.rs",
         "testName": "rejects_caller_supplied_evidence_results_verdict_or_attention"
@@ -918,26 +490,6 @@
         "docs/decisions/0023-canonical-delivery-ownership.md",
         "docs/decisions/0028-control-plane-worker-migration.md"
       ],
-      "typescript": {
-        "publicSymbols": [
-          {
-            "path": "packages/contracts/src/delivery.ts",
-            "name": "parseDelivery"
-          },
-          {
-            "path": "packages/strongflow/src/delivery-verdict.ts",
-            "name": "computeDeliveryVerdict"
-          }
-        ],
-        "coverage": "partial",
-        "tests": [
-          {
-            "path": "tests/delivery-verdict.test.mjs",
-            "name": "computes one deterministic passing verdict from current direct evidence"
-          }
-        ],
-        "gap": "The old computation produces one result per criterion, but its public tests do not directly submit a verdict with one missing, duplicate, or foreign criterion. Rust must test all three cases."
-      },
       "rust": {
         "module": "domain/verdict.rs",
         "testName": "rejects_missing_duplicate_and_foreign_criterion_results"
@@ -950,30 +502,6 @@
         "docs/decisions/0023-canonical-delivery-ownership.md",
         "docs/decisions/0028-control-plane-worker-migration.md"
       ],
-      "typescript": {
-        "publicSymbols": [
-          {
-            "path": "packages/strongflow/src/delivery-verdict.ts",
-            "name": "computeDeliveryVerdict"
-          },
-          {
-            "path": "packages/strongflow/src/independent-verification.ts",
-            "name": "projectIndependentVerification"
-          }
-        ],
-        "coverage": "covered",
-        "tests": [
-          {
-            "path": "tests/independent-verification.test.mjs",
-            "name": "keeps missing, running, and optional adversarial settlements visible"
-          },
-          {
-            "path": "tests/delivery-verdict.test.mjs",
-            "name": "fails closed for each non-passing verification condition"
-          }
-        ],
-        "gap": ""
-      },
       "rust": {
         "module": "domain/verdict.rs",
         "testName": "missing_required_session_is_inconclusive"
@@ -986,22 +514,6 @@
         "docs/decisions/0023-canonical-delivery-ownership.md",
         "docs/decisions/0028-control-plane-worker-migration.md"
       ],
-      "typescript": {
-        "publicSymbols": [
-          {
-            "path": "packages/strongflow/src/delivery-verdict.ts",
-            "name": "computeDeliveryVerdict"
-          }
-        ],
-        "coverage": "covered",
-        "tests": [
-          {
-            "path": "tests/delivery-verdict.test.mjs",
-            "name": "fails closed for each non-passing verification condition"
-          }
-        ],
-        "gap": ""
-      },
       "rust": {
         "module": "domain/verdict.rs",
         "testName": "insufficient_direct_evidence_is_inconclusive"
@@ -1014,30 +526,6 @@
         "docs/decisions/0023-canonical-delivery-ownership.md",
         "docs/decisions/0028-control-plane-worker-migration.md"
       ],
-      "typescript": {
-        "publicSymbols": [
-          {
-            "path": "packages/strongflow/src/delivery-verdict.ts",
-            "name": "computeDeliveryVerdict"
-          },
-          {
-            "path": "packages/strongflow/src/independent-verification.ts",
-            "name": "projectIndependentVerification"
-          }
-        ],
-        "coverage": "covered",
-        "tests": [
-          {
-            "path": "tests/independent-verification.test.mjs",
-            "name": "projects independent settlements and preserves contradictory findings"
-          },
-          {
-            "path": "tests/delivery-verdict.test.mjs",
-            "name": "fails closed for each non-passing verification condition"
-          }
-        ],
-        "gap": ""
-      },
       "rust": {
         "module": "domain/verdict.rs",
         "testName": "reviewer_verifier_conflict_is_inconclusive"
@@ -1050,30 +538,6 @@
         "docs/decisions/0023-canonical-delivery-ownership.md",
         "docs/decisions/0028-control-plane-worker-migration.md"
       ],
-      "typescript": {
-        "publicSymbols": [
-          {
-            "path": "packages/strongflow/src/delivery-verdict.ts",
-            "name": "computeDeliveryVerdict"
-          },
-          {
-            "path": "packages/strongflow/src/candidate-evidence.ts",
-            "name": "resolveDeliveryEvidence"
-          }
-        ],
-        "coverage": "covered",
-        "tests": [
-          {
-            "path": "tests/candidate-evidence.test.mjs",
-            "name": "keeps timeout, policy denial, task failure, and infrastructure failure distinct"
-          },
-          {
-            "path": "tests/delivery-verdict.test.mjs",
-            "name": "fails closed for each non-passing verification condition"
-          }
-        ],
-        "gap": ""
-      },
       "rust": {
         "module": "domain/verdict.rs",
         "testName": "runtime_environment_failure_is_infra_error"
@@ -1086,22 +550,6 @@
         "docs/decisions/0023-canonical-delivery-ownership.md",
         "docs/decisions/0028-control-plane-worker-migration.md"
       ],
-      "typescript": {
-        "publicSymbols": [
-          {
-            "path": "packages/strongflow/src/delivery-verdict.ts",
-            "name": "computeDeliveryVerdict"
-          }
-        ],
-        "coverage": "covered",
-        "tests": [
-          {
-            "path": "tests/delivery-verdict.test.mjs",
-            "name": "fails closed for each non-passing verification condition"
-          }
-        ],
-        "gap": ""
-      },
       "rust": {
         "module": "domain/verdict.rs",
         "testName": "failed_test_or_command_cannot_produce_pass"
@@ -1114,26 +562,6 @@
         "docs/decisions/0023-canonical-delivery-ownership.md",
         "docs/decisions/0028-control-plane-worker-migration.md"
       ],
-      "typescript": {
-        "publicSymbols": [
-          {
-            "path": "packages/contracts/src/strongflow-delivery-api.ts",
-            "name": "parseStrongFlowDeliveryRemediation"
-          },
-          {
-            "path": "packages/strongflow/src/delivery-service.ts",
-            "name": "StrongFlowService"
-          }
-        ],
-        "coverage": "covered",
-        "tests": [
-          {
-            "path": "tests/delivery-service.test.mjs",
-            "name": "StrongFlowService can hand a failed verdict through rework into a new verification run"
-          }
-        ],
-        "gap": ""
-      },
       "rust": {
         "module": "domain/rework.rs",
         "testName": "rework_requires_precise_current_candidate_annotations"
@@ -1147,30 +575,6 @@
         "docs/decisions/0025-live-delivery-evaluation.md",
         "docs/decisions/0028-control-plane-worker-migration.md"
       ],
-      "typescript": {
-        "publicSymbols": [
-          {
-            "path": "packages/contracts/src/strongflow-delivery-api.ts",
-            "name": "parseStrongFlowDeliveryRemediation"
-          },
-          {
-            "path": "packages/strongflow/src/delivery-service.ts",
-            "name": "StrongFlowService"
-          }
-        ],
-        "coverage": "partial",
-        "tests": [
-          {
-            "path": "tests/strongflow-delivery-api.test.mjs",
-            "name": "Delivery API accepts only bounded candidate-bound diagram remediation"
-          },
-          {
-            "path": "tests/delivery-service.test.mjs",
-            "name": "StrongFlowService can hand a failed verdict through rework into a new verification run"
-          }
-        ],
-        "gap": "The old service validates the authorization and sends a hard-boundary prompt, but candidate freezing after the remediator does not compare the replacement diff with the authorized files and hunks. The GitSnapshotResolver/Artifact adapter must seal the result; phase 2.4 must compare it with the authorization and reject expansion."
-      },
       "rust": {
         "module": "domain/rework.rs",
         "testName": "replacement_candidate_requires_sealed_snapshot_within_approved_scope"
@@ -1183,22 +587,6 @@
         "docs/decisions/0023-canonical-delivery-ownership.md",
         "docs/decisions/0028-control-plane-worker-migration.md"
       ],
-      "typescript": {
-        "publicSymbols": [
-          {
-            "path": "packages/strongflow/src/delivery-attention.ts",
-            "name": "deliveryVerdictAttentionNextStatus"
-          }
-        ],
-        "coverage": "partial",
-        "tests": [
-          {
-            "path": "tests/delivery-attention.test.mjs",
-            "name": "multiple failures remain blocking and resolve to the strongest current action"
-          }
-        ],
-        "gap": "The old TypeScript helper recomputes all classified actions and covers fail plus infra_error, but it lacks scope-change combinations. The current Rust Attention application chooses from only the last resolved item; phase 2.4 must centralize the complete safest transition."
-      },
       "rust": {
         "module": "domain/rework.rs",
         "testName": "combined_attention_actions_use_safest_transition_independent_of_resolution_order"
@@ -1211,26 +599,6 @@
         "docs/decisions/0023-canonical-delivery-ownership.md",
         "docs/decisions/0028-control-plane-worker-migration.md"
       ],
-      "typescript": {
-        "publicSymbols": [
-          {
-            "path": "packages/strongflow/src/delivery-service.ts",
-            "name": "StrongFlowService"
-          }
-        ],
-        "coverage": "covered",
-        "tests": [
-          {
-            "path": "tests/delivery-contract.test.mjs",
-            "name": "Delivery accepts Delivery- or task-scoped Codex remediators within the approved limit"
-          },
-          {
-            "path": "tests/delivery-attention.test.mjs",
-            "name": "exhausted and repeated failures stop automatic code rework"
-          }
-        ],
-        "gap": ""
-      },
       "rust": {
         "module": "domain/rework.rs",
         "testName": "rework_is_bounded_and_remediator_owned"
@@ -1243,22 +611,6 @@
         "docs/decisions/0023-canonical-delivery-ownership.md",
         "docs/decisions/0028-control-plane-worker-migration.md"
       ],
-      "typescript": {
-        "publicSymbols": [
-          {
-            "path": "packages/strongflow/src/delivery-service.ts",
-            "name": "StrongFlowService"
-          }
-        ],
-        "coverage": "partial",
-        "tests": [
-          {
-            "path": "tests/delivery-service.test.mjs",
-            "name": "StrongFlowService can hand a failed verdict through rework into a new verification run"
-          }
-        ],
-        "gap": "The old service derives a Delivery-wide count, but the public test covers only one task. The current Rust stage coordinator counts matching stage/role/task runs, so cross-task rework can reuse attempt 1. Rust must use total current-Delivery rework history."
-      },
       "rust": {
         "module": "domain/rework.rs",
         "testName": "rework_attempt_uses_total_delivery_rework_history"
@@ -1271,30 +623,6 @@
         "docs/decisions/0023-canonical-delivery-ownership.md",
         "docs/decisions/0028-control-plane-worker-migration.md"
       ],
-      "typescript": {
-        "publicSymbols": [
-          {
-            "path": "packages/strongflow/src/candidate-evidence.ts",
-            "name": "assertFrozenDeliveryCandidateCurrent"
-          },
-          {
-            "path": "packages/strongflow/src/delivery-service.ts",
-            "name": "StrongFlowService"
-          }
-        ],
-        "coverage": "covered",
-        "tests": [
-          {
-            "path": "tests/candidate-evidence.test.mjs",
-            "name": "invalidates prior acceptance and candidate identities after definition or writer changes"
-          },
-          {
-            "path": "tests/strongflow-workflow-integration.test.mjs",
-            "name": "StrongFlow browser contract fake covers review, stale decisions, rework, final review, and cursor recovery"
-          }
-        ],
-        "gap": ""
-      },
       "rust": {
         "module": "domain/rework.rs",
         "testName": "old_candidate_evidence_and_verdict_cannot_authorize_after_writer_starts"
@@ -1307,22 +635,6 @@
         "docs/decisions/0023-canonical-delivery-ownership.md",
         "docs/decisions/0028-control-plane-worker-migration.md"
       ],
-      "typescript": {
-        "publicSymbols": [
-          {
-            "path": "packages/strongflow/src/delivery-attention.ts",
-            "name": "deriveDeliveryVerdictAttention"
-          }
-        ],
-        "coverage": "covered",
-        "tests": [
-          {
-            "path": "tests/delivery-attention.test.mjs",
-            "name": "exhausted and repeated failures stop automatic code rework"
-          }
-        ],
-        "gap": ""
-      },
       "rust": {
         "module": "domain/rework.rs",
         "testName": "repeated_or_exhausted_failure_requires_clarification"

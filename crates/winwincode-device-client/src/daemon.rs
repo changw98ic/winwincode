@@ -81,8 +81,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
-use time::format_description::well_known::Rfc3339;
 use winwincode_client_port::domain::{
     ClientArchitecture, ClientCapacityReport, ClientControlError, ClientControlErrorCode,
     ClientControlMessageKind, ClientLockState, ClientOccupancyReleaseMode, ClientPlatformTarget,
@@ -185,7 +185,11 @@ pub trait WorkerLaunchMaterialSource: Send + Sync {
     fn worker_credential(&self, credential_digest: &str) -> Option<String>;
     /// The local directories hosting the named worker session; `None` when
     /// the device holds no usable local root for it.
-    fn launch_directories(&self, worker_session_id: &str) -> Option<WorkerLaunchDirectories>;
+    fn launch_directories(
+        &self,
+        worker_session_id: &str,
+        repository_binding_id: &str,
+    ) -> Option<WorkerLaunchDirectories>;
 }
 
 /// Longest slice the run loop sleeps without re-reading the shutdown flag.
@@ -289,6 +293,33 @@ pub struct EnrollmentIssuance {
     pub downlink_from_sequence: u64,
 }
 
+/// One Worker Session Credential delivered beside its matching durable
+/// `client.worker.launch` frame. The Server keeps this material only in
+/// memory and repeats it only while that frame is awaiting acknowledgement.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkerCredentialIssuance {
+    #[serde(rename = "workerLaunchGrantId")]
+    pub worker_launch_grant_id: String,
+    #[serde(rename = "workerSessionId")]
+    pub worker_session_id: String,
+    #[serde(rename = "credentialDigest")]
+    pub credential_digest: String,
+    #[serde(rename = "workerCredential")]
+    pub worker_credential: String,
+}
+
+impl fmt::Debug for WorkerCredentialIssuance {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("WorkerCredentialIssuance")
+            .field("worker_launch_grant_id", &self.worker_launch_grant_id)
+            .field("worker_session_id", &self.worker_session_id)
+            .field("credential_digest", &self.credential_digest)
+            .field("worker_credential", &"[redacted]")
+            .finish()
+    }
+}
+
 /// Canonical exchange response body: the server's acknowledgement of the
 /// client batch (with the gap replay hint when present) plus a bounded
 /// server-to-client frame batch and — only on the exchange that accepted a
@@ -311,6 +342,10 @@ pub struct ExchangeResponse {
     /// The one-time enrollment issuance on the accepting exchange.
     #[serde(default)]
     pub enrollment: Option<EnrollmentIssuance>,
+    /// Ephemeral Worker credentials paired with launch frames in this exact
+    /// response. They are never part of the durable downlink frame.
+    #[serde(rename = "workerCredentials", default)]
+    pub worker_credentials: Vec<WorkerCredentialIssuance>,
 }
 
 /// Static configuration of one daemon session.
@@ -550,6 +585,9 @@ pub struct DeviceDaemon {
     /// handled, so the deferred launch-response material reaches the right
     /// worker's private file (`receive_worker_credential`).
     launch_credential_sessions: std::collections::HashMap<String, String>,
+    /// Credential material received beside the current launch frame batch.
+    /// Entries live only until the matching launch is handled.
+    pending_worker_credentials: std::collections::HashMap<String, String>,
     status: DaemonStatus,
 }
 
@@ -631,6 +669,7 @@ impl DeviceDaemon {
             worker_supervisor: None,
             worker_launch_material: None,
             launch_credential_sessions: std::collections::HashMap::new(),
+            pending_worker_credentials: std::collections::HashMap::new(),
             status: DaemonStatus {
                 enrolled,
                 ..DaemonStatus::default()
@@ -1167,18 +1206,21 @@ impl DeviceDaemon {
         self.status.exchanges_succeeded += 1;
         self.reset_backoff();
 
-        let downlink_frames =
-            match self.ingest_downlink(&response.frames, response.enrollment.as_ref()) {
-                Ok(count) => count,
-                Err(DownlinkFailure::Retriable(reason)) => {
-                    // The client acknowledgement was already persisted; the
-                    // offending downlink batch is simply refused and the server
-                    // replays it after our next ackSequence report.
-                    self.register_failure(now, reason);
-                    return Ok(self.retry_outcome());
-                }
-                Err(DownlinkFailure::Fatal(error)) => return Err(error),
-            };
+        let downlink_frames = match self.ingest_downlink(
+            &response.frames,
+            response.enrollment.as_ref(),
+            &response.worker_credentials,
+        ) {
+            Ok(count) => count,
+            Err(DownlinkFailure::Retriable(reason)) => {
+                // The client acknowledgement was already persisted; the
+                // offending downlink batch is simply refused and the server
+                // replays it after our next ackSequence report.
+                self.register_failure(now, reason);
+                return Ok(self.retry_outcome());
+            }
+            Err(DownlinkFailure::Fatal(error)) => return Err(error),
+        };
         Ok(TickOutcome::Exchanged {
             frames_sent: batch.frames.len(),
             acked_through: ack,
@@ -1213,14 +1255,15 @@ impl DeviceDaemon {
         self.status.replays += 1;
         self.status.exchanges_succeeded += 1;
         self.reset_backoff();
-        let downlink_frames = match self.ingest_downlink(&response.frames, None) {
-            Ok(count) => count,
-            Err(DownlinkFailure::Retriable(reason)) => {
-                self.register_failure(now, reason);
-                return Ok(self.retry_outcome());
-            }
-            Err(DownlinkFailure::Fatal(error)) => return Err(error),
-        };
+        let downlink_frames =
+            match self.ingest_downlink(&response.frames, None, &response.worker_credentials) {
+                Ok(count) => count,
+                Err(DownlinkFailure::Retriable(reason)) => {
+                    self.register_failure(now, reason);
+                    return Ok(self.retry_outcome());
+                }
+                Err(DownlinkFailure::Fatal(error)) => return Err(error),
+            };
         Ok(TickOutcome::Exchanged {
             frames_sent: 0,
             acked_through: response.ack_sequence,
@@ -1239,7 +1282,9 @@ impl DeviceDaemon {
         &mut self,
         frames: &[serde_json::Value],
         enrollment: Option<&EnrollmentIssuance>,
+        worker_credentials: &[WorkerCredentialIssuance],
     ) -> Result<usize, DownlinkFailure> {
+        self.ingest_worker_credentials(worker_credentials)?;
         let mut accepted = 0_usize;
         let mut acceptance: Option<ServerEnrollmentAcceptedPayload> = None;
         for value in frames {
@@ -1342,6 +1387,29 @@ impl DeviceDaemon {
         }
         self.status.downlink_accepted_through = self.downlink.ack_sequence();
         Ok(accepted)
+    }
+
+    fn ingest_worker_credentials(
+        &mut self,
+        issuances: &[WorkerCredentialIssuance],
+    ) -> Result<(), DownlinkFailure> {
+        for issuance in issuances {
+            let secret =
+                decode_worker_credential(&issuance.worker_credential).ok_or_else(|| {
+                    DownlinkFailure::Retriable("worker credential material is invalid".to_owned())
+                })?;
+            let digest = format!("sha256:{:x}", Sha256::digest(secret));
+            if digest != issuance.credential_digest {
+                return Err(DownlinkFailure::Retriable(
+                    "worker credential digest does not match its material".to_owned(),
+                ));
+            }
+            self.pending_worker_credentials.insert(
+                issuance.credential_digest.clone(),
+                issuance.worker_credential.clone(),
+            );
+        }
+        Ok(())
     }
 
     fn apply_repository_rescan(
@@ -1879,7 +1947,9 @@ impl DeviceDaemon {
                 false,
             );
         };
-        let Some(directories) = material.launch_directories(&grant.worker_session_id) else {
+        let Some(directories) =
+            material.launch_directories(&grant.worker_session_id, &grant.repository_binding_id)
+        else {
             return rejection(
                 self,
                 WorkerLaunchAckStatus::RejectedWrongState,
@@ -1894,8 +1964,10 @@ impl DeviceDaemon {
         // file and [`DeviceDaemon::receive_worker_credential`] fills it once
         // the material arrives; the worker transport re-reads it on every
         // exchange.
-        let credential = material
-            .worker_credential(&grant.credential_digest)
+        let credential = self
+            .pending_worker_credentials
+            .remove(&grant.credential_digest)
+            .or_else(|| material.worker_credential(&grant.credential_digest))
             .unwrap_or_default();
         let spawn_request = SpawnRequest {
             worker_session_id: &grant.worker_session_id,
@@ -2211,9 +2283,7 @@ fn validate_config(config: &DaemonConfig) -> Result<(), DaemonError> {
 
 /// RFC 3339 UTC stamp of the current wall clock (server-side style).
 fn now_rfc3339() -> String {
-    OffsetDateTime::now_utc()
-        .format(&Rfc3339)
-        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_owned())
+    crate::canonical_rfc3339(OffsetDateTime::now_utc())
 }
 
 /// Whether the mirror holds exactly the offered/fenced lease and token —
@@ -2347,4 +2417,15 @@ fn launch_spawn_rejection(
 /// string, `None` otherwise (the wire encodes absent scopes as empty).
 fn non_empty(value: &str) -> Option<&str> {
     (!value.is_empty()).then_some(value)
+}
+
+fn decode_worker_credential(material: &str) -> Option<[u8; 32]> {
+    if material.len() != 64 || !material.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    let mut secret = [0_u8; 32];
+    for (index, slot) in secret.iter_mut().enumerate() {
+        *slot = u8::from_str_radix(&material[index * 2..index * 2 + 2], 16).ok()?;
+    }
+    Some(secret)
 }

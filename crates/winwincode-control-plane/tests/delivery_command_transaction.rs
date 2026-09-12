@@ -94,8 +94,7 @@ fn create_command(seed: u64) -> CommandEnvelope {
                     "required": true
                 }],
                 "publicationTarget": null
-            },
-            "tasks": []
+            }
         }),
         request_id: RequestId(canonical_id("req", seed)),
         schema_version: SchemaVersion::WinwincodeV1,
@@ -224,16 +223,17 @@ impl DeliveryJournalPort for CapturingJournal {
     }
 }
 
-fn ready_to_deliver_fixture() -> Delivery {
+fn verified_candidate_fixture() -> Delivery {
     let mut snapshot = Delivery::decode_json(include_bytes!(
         "../../winwincode-delivery/tests/fixtures/delivery-main.json"
     ))
     .expect("canonical Delivery fixture")
     .into_snapshot();
     snapshot.revision = 1;
+    snapshot.status = DeliveryStatus::Ready;
     snapshot.work_run_aggregate.items[0].state = winwincode_domain::WorkItemState::CandidateReady;
     snapshot.work_run_aggregate.runs[0].state = winwincode_domain::WorkRunState::CandidateReady;
-    Delivery::try_from_snapshot(snapshot).expect("ReadyToDeliver seed")
+    Delivery::try_from_snapshot(snapshot).expect("verified candidate seed")
 }
 
 fn seed_delivery(root: &PathBuf, delivery: Delivery) -> Delivery {
@@ -297,7 +297,7 @@ fn seed_delivery(root: &PathBuf, delivery: Delivery) -> Delivery {
 }
 
 fn seed_ready_to_deliver_with_approval(root: &PathBuf) -> Delivery {
-    let source = ready_to_deliver_fixture();
+    let source = verified_candidate_fixture();
     let mut snapshot = source.snapshot().clone();
     let created_at = snapshot.updated_at_millis + 1;
     snapshot.status = DeliveryStatus::NeedsAttention;
@@ -395,8 +395,6 @@ fn create_commits_the_canonical_empty_delivery_and_public_event() {
     assert_eq!(delivery.id(), &delivery_id);
     assert_eq!(delivery.revision(), 1);
     assert_eq!(delivery.snapshot().status, DeliveryStatus::Draft);
-    assert!(delivery.snapshot().tasks.is_empty());
-    assert!(delivery.snapshot().stage_runs.is_empty());
     assert!(delivery.snapshot().session_bindings.is_empty());
     assert!(delivery.snapshot().attention_items.is_empty());
     assert!(delivery.snapshot().evidence.is_empty());
@@ -591,8 +589,6 @@ fn update_spec_replaces_only_the_canonical_spec_and_replays_the_exact_receipt() 
         ["Preserve the canonical Control Plane authority boundary."]
     );
     assert!(delivery.snapshot().spec.source_product_session_id.is_none());
-    assert!(delivery.snapshot().tasks.is_empty());
-    assert!(delivery.snapshot().stage_runs.is_empty());
     assert!(delivery.snapshot().session_bindings.is_empty());
     assert!(delivery.snapshot().attention_items.is_empty());
     assert!(delivery.snapshot().evidence.is_empty());
@@ -637,7 +633,7 @@ fn missing_delivery_is_a_public_resource_not_found_for_every_mutation() {
         .commit_delivery_command(&update, &facts(&update, 81))
         .expect_err("Spec replacement requires an existing Delivery");
 
-    let source = ready_to_deliver_fixture();
+    let source = verified_candidate_fixture();
     let mut snapshot = source.snapshot().clone();
     let created_at = snapshot.updated_at_millis + 1;
     snapshot.status = DeliveryStatus::NeedsAttention;

@@ -73,7 +73,7 @@ try {
           return result
         }
         const created = await api.command('delivery.create', 0, {
-          deliveryId, tasks: [], spec: {
+          deliveryId, spec: {
             title: 'GLM 页面优化与精确返工验证',
             goal: '完成现有 DSH Chat 页面的一项小型 UI 优化：会话列表按钮在手机上触控面积偏小。只编辑 apps/client/src/styles/features/chat.css，将现有 .wwc-chat-session-list button 基础规则中的 min-height 调整为 calc(var(--wwc-control-min-height) + var(--wwc-space-1))，即48px。不要重复添加声明，保留其他样式和所有交互，不创建 HTML、不安装依赖、不改 TypeScript。一次读取目标 CSS 及 tokens.css 确认变量后，用 Python 原地修改，运行 git --no-pager diff --check 和 git --no-pager diff 查看唯一变更，然后直接结束并汇报。环境没有 apply_patch 命令。不要启动开发服务器、浏览器或后台进程，页面验证由调用方完成。',
             scope: [targetPath], constraints: ['只修改现有 Chat CSS；保留会话、模型选择、发送取消、转交 StrongFlow 等功能和样式变量'], outOfScope: ['其他文件、依赖、业务逻辑'],
@@ -86,8 +86,8 @@ try {
         payload.items[0].title = '优化现有 DSH Chat 页面'
         payload.items[0].goal = (await aggregate()).contract.objective
         assert.ok(payload.items[0].goal.includes(targetPath), 'The accepted page goal must reach WorkContract')
-        await command('delivery.task_breakdown.create', payload)
-        await command('delivery.advance', { deliveryId, dispatchProfile: 'executor', rework: null })
+        await command('workitems.create', payload)
+        await command('workrun.start', { deliveryId, dispatchProfile: 'executor', rework: null })
         const deadline = Date.now() + 600_000
         let runs
         do {
@@ -108,7 +108,7 @@ try {
         assert.ok(runs.runs.some(run => ['candidate_ready', 'settled'].includes(run.state)), 'GLM writer timed out')
         for (const profile of ['reviewer', 'verifier']) {
           const previous = new Set(runs.runs.map(run => run.id))
-          await command('delivery.advance', { deliveryId, dispatchProfile: profile, rework: null })
+          await command('workrun.start', { deliveryId, dispatchProfile: profile, rework: null })
           const deadline = Date.now() + 600_000
           let consumer
           do {

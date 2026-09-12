@@ -65,7 +65,7 @@ test('a real browser renders the Usage, Provider and Worker health summary in th
 
   const summary = await evaluate(devtools, sessionId, 'globalThis.openDiagnosticsUsageHealth()')
   assert.equal(summary.present, true)
-  assert.match(summary.heading, /用量、Provider 与 Worker 健康/u)
+  assert.match(summary.heading, /用量、模型服务商与执行进程健康/u)
   assert.match(summary.updated, /更新于 \d{4}-\d{2}-\d{2}T/u)
   assert.match(summary.window, /\d{4}-\d{2}-\d{2}T/u)
   assert.match(summary.window, /1 个会话中的 1 个/u)
@@ -89,6 +89,16 @@ test('a real browser renders the Usage, Provider and Worker health summary in th
   assert.deepEqual(summary.providers.map(row => row.state).sort(), ['ready', 'unavailable'])
   assert.equal(summary.models, 2)
   assert.deepEqual(summary.unknownMarkers.every(value => value === 'true'), true)
+
+  assert.deepEqual(summary.sessionTeam.map(row => row.state), ['running', 'offline'])
+  assert.match(summary.sessionTeam[0].text, /AgentIdentity agt_/u)
+  assert.match(summary.sessionTeam[0].text, /Provider openai · Model gpt-5/u)
+  assert.match(summary.sessionTeam[0].text, /Workspace rep_.*git-tree:/u)
+  assert.match(summary.sessionTeam[0].text, /当前活动 执行发布门验证/u)
+  assert.match(summary.sessionTeam[1].text, /离线 · 恢复中/u)
+  assert.match(summary.sessionTeam[1].text, /连接中断，正在自动恢复/u)
+  assert.deepEqual(summary.sessionTeam.map(row => row.requiresHuman), ['false', 'false'])
+  assert.deepEqual(summary.sessionTeam.map(row => row.buttons), [0, 0])
 
   assert.deepEqual(summary.workers.map(row => row.state), [
     'online',

@@ -9,8 +9,7 @@ const expectedCardinality = {
   'WorkItem.workRuns': '0..*',
   'WorkRun.executionAttempt': 'exactly 1',
   'WorkRun.acceptedCandidate': '0..1',
-  'Candidate.workRun': 'exactly 1',
-  'StageRun.nullTask': 'historical-only; 0 executable WorkItem'
+  'Candidate.workRun': 'exactly 1'
 };
 for (const [key, value] of Object.entries(expectedCardinality)) {
   if (design.cardinality?.[key] !== value) throw new Error(`cardinality drift: ${key}`);
@@ -21,6 +20,7 @@ if (relationText.includes('Attempt may serve') || relationText.includes('ordered
 if (!design.decisionBoundary.verifier.includes('不能修改产品源代码或直接写权威 Verdict')) throw new Error('verifier authority rule missing');
 const raw = JSON.stringify(design);
 if (/(?:^|[" ])\/(?:Users|Volumes)\//.test(raw)) throw new Error('design contains an absolute local path');
+if (/StageRun|stageRun|stage_run/.test(raw)) throw new Error('design contains a retired execution model');
 for (const source of design.currentCanonicalSources) {
   const file = resolve(root, source.path);
   if (!existsSync(file)) throw new Error(`missing source: ${source.path}`);

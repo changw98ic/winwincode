@@ -21,8 +21,9 @@ use winwincode_api::generated::{
     CandidateHistoryListQuery, DeliveryGetQuery, DeliveryGetResultResponse,
     DeliveryGetResultResponseQuery, ErrorCode, EvidenceArtifactContentGetQuery, EvidenceGetQuery,
     PageInfo, QueryResultResponse, RuntimeProjectionGetParameters, RuntimeProjectionGetQuery,
-    RuntimeProjectionGetResultResponse, RuntimeProjectionGetResultResponseQuery, WorkRunGetQuery,
-    WorkRunGetResultResponse, WorkRunGetResultResponseQuery,
+    RuntimeProjectionGetResultResponse, RuntimeProjectionGetResultResponseQuery,
+    WorkRunDeviceBindingProjection, WorkRunGetQuery, WorkRunGetResultResponse,
+    WorkRunGetResultResponseQuery,
 };
 use winwincode_domain::{SchemaVersion, is_canonical_delivery_id};
 
@@ -135,7 +136,7 @@ pub trait StrongFlowProjectionQueryPort {
         query: &RuntimeProjectionGetQuery,
     ) -> Result<QueryResultResponse, StrongFlowProjectionError>;
 
-    /// Returns the exact `WorkRun` aggregate at one Delivery read cut.
+    /// Returns the exact `WorkRun` aggregate at one delivery read cut.
     ///
     /// # Errors
     ///
@@ -168,7 +169,7 @@ pub trait StrongFlowProjectionQueryPort {
         query: &CandidateDiffGetQuery,
     ) -> Result<QueryResultResponse, StrongFlowProjectionError>;
 
-    /// Returns a stable page of Candidates observed through one exact Delivery
+    /// Returns a stable page of Candidates observed through one exact delivery
     /// journal cut, with availability derived from durable Git retention.
     ///
     /// # Errors
@@ -195,7 +196,7 @@ pub trait StrongFlowProjectionQueryPort {
     ///
     /// # Errors
     ///
-    /// Fails closed on foreign or stale Delivery, Candidate, `StageRun`,
+    /// Fails closed on foreign or stale delivery, Candidate, `WorkRun`,
     /// `SessionBinding`, Evidence, or source facts.
     fn evidence_get(
         &self,
@@ -271,9 +272,7 @@ impl StrongFlowProjectionQueryPort for ControlPlane {
         application::validate_scope(scope)?;
         let limit = application::validate_limit(query.page.limit)?;
         let snapshot = match &query.parameters {
-            RuntimeProjectionGetParameters::DeliveryStageRuntimeProjectionGetParameters(
-                parameters,
-            ) => {
+            RuntimeProjectionGetParameters::WorkRunRuntimeProjectionGetParameters(parameters) => {
                 if !is_canonical_delivery_id(&parameters.delivery_id.0) {
                     return Err(StrongFlowProjectionError::invalid_request(
                         "delivery identity is not canonical",
@@ -360,7 +359,7 @@ impl StrongFlowProjectionQueryPort for ControlPlane {
             .is_some_and(|expected| expected != &read_cursor)
         {
             return Err(StrongFlowProjectionError::RevisionConflict(
-                "WorkRun read cursor does not match the requested Delivery cut".to_owned(),
+                "WorkRun read cursor does not match the requested delivery cut".to_owned(),
             ));
         }
         let aggregate = &read.workrun_aggregate;
@@ -368,7 +367,7 @@ impl StrongFlowProjectionQueryPort for ControlPlane {
             && !aggregate.items.iter().any(|item| &item.id == item_id)
         {
             return Err(StrongFlowProjectionError::ResourceNotFound(
-                "WorkItem is not in the Delivery WorkRun aggregate".to_owned(),
+                "WorkItem is not in the delivery WorkRun aggregate".to_owned(),
             ));
         }
         if let Some(run_id) = query.parameters.work_run_id.as_ref() {
@@ -378,7 +377,7 @@ impl StrongFlowProjectionQueryPort for ControlPlane {
                 .find(|run| &run.id == run_id)
                 .ok_or_else(|| {
                     StrongFlowProjectionError::ResourceNotFound(
-                        "WorkRun is not in the Delivery WorkRun aggregate".to_owned(),
+                        "WorkRun is not in the delivery WorkRun aggregate".to_owned(),
                     )
                 })?;
             if query
@@ -392,12 +391,13 @@ impl StrongFlowProjectionQueryPort for ControlPlane {
                 ));
             }
         }
+        let device_bindings = workrun_device_bindings(self, &aggregate.runs)?;
         Ok(QueryResultResponse::WorkRunGetResultResponse(
             WorkRunGetResultResponse {
                 schema_version: SchemaVersion::WinwincodeV1,
                 request_id: query.request_id.clone(),
                 query: WorkRunGetResultResponseQuery::WorkRunGet,
-                result: mapping::workrun_aggregate(aggregate, read_cursor),
+                result: mapping::workrun_aggregate(aggregate, device_bindings, read_cursor),
                 page: page(),
             },
         ))
@@ -444,6 +444,47 @@ impl StrongFlowProjectionQueryPort for ControlPlane {
     ) -> Result<QueryResultResponse, StrongFlowProjectionError> {
         evidence_detail::artifact_content_get(self, query)
     }
+}
+
+fn workrun_device_bindings(
+    control_plane: &ControlPlane,
+    runs: &[winwincode_domain::WorkRun],
+) -> Result<Vec<WorkRunDeviceBindingProjection>, StrongFlowProjectionError> {
+    let storage = control_plane.storage.as_deref().ok_or_else(|| {
+        StrongFlowProjectionError::TrustedFactsUnavailable(
+            "device execution facts are unavailable".to_owned(),
+        )
+    })?;
+    runs.iter()
+        .filter_map(|run| {
+            storage
+                .load_work_run_device_binding_facts(&run.execution_job_id)
+                .map(|facts| facts.map(|facts| (run, facts)))
+                .transpose()
+        })
+        .map(|result| {
+            let (run, facts) = result.map_err(|_| {
+                StrongFlowProjectionError::TrustedFactsUnavailable(
+                    "device execution facts are unavailable".to_owned(),
+                )
+            })?;
+            if facts.work_run_id.as_deref() != Some(run.id.0.as_str())
+                || facts.worker_id != run.worker_id.0
+                || facts.worker_instance_id != run.worker_instance_id.0
+            {
+                return Err(StrongFlowProjectionError::TrustedFactsUnavailable(
+                    "device execution facts do not match the WorkRun".to_owned(),
+                ));
+            }
+            Ok(WorkRunDeviceBindingProjection {
+                work_run_id: run.id.clone(),
+                client_id: winwincode_domain::PublicClientId(facts.public_client_id),
+                repository_binding_id: winwincode_domain::RepositoryBindingId(
+                    facts.repository_binding_id,
+                ),
+            })
+        })
+        .collect()
 }
 
 fn page() -> PageInfo {

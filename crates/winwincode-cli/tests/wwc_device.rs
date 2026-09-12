@@ -148,6 +148,12 @@ fn refresh_code_requires_an_adopted_enrollment() {
 fn refresh_code_reveals_the_plaintext_once_and_publishes_only_the_digest() {
     let fixture = Fixture::new();
     fixture.enroll();
+    let instance_before =
+        load_device_identity(&DeviceStore::open(&fixture.data_directory).expect("store opens"))
+            .expect("identity read")
+            .expect("identity")
+            .current_instance_id()
+            .to_owned();
 
     let outcome = refresh_device_connect_code(&fixture.data_directory).expect("refresh");
     let DeviceAdminOutcome::CodeRefreshed {
@@ -208,6 +214,16 @@ fn refresh_code_reveals_the_plaintext_once_and_publishes_only_the_digest() {
         panic!("expected CodeRefreshed: {second:?}");
     };
     assert_eq!(code.generation, 2);
+    let instance_after =
+        load_device_identity(&DeviceStore::open(&fixture.data_directory).expect("store opens"))
+            .expect("identity read")
+            .expect("identity")
+            .current_instance_id()
+            .to_owned();
+    assert_eq!(
+        instance_after, instance_before,
+        "admin CLI must not rotate the live daemon instance"
+    );
 }
 
 #[test]
@@ -294,4 +310,46 @@ fn help_names_the_device_commands() {
     let help = winwincode_cli::render_help();
     assert!(help.contains("wwc device status"));
     assert!(help.contains("refresh-code"));
+    assert!(help.contains("wwc device serve"));
+    assert!(help.contains("restart"));
+    assert!(help.contains("logs"));
+}
+
+#[test]
+fn status_restart_and_logs_control_the_live_service_files() {
+    let fixture = Fixture::new();
+    fixture.enroll();
+    fs::write(
+        fixture.data_directory.join("device-client.pid"),
+        format!("{}\n", std::process::id()),
+    )
+    .expect("pid file");
+    fs::write(
+        fixture.data_directory.join("device-client.log"),
+        "first\nsecond\n",
+    )
+    .expect("log file");
+
+    let status = fixture.cli(&["status", "--json"]);
+    assert_eq!(status.code, 0);
+    let value: serde_json::Value = serde_json::from_str(&status.stdout).expect("status json");
+    assert_eq!(value["device"]["service"]["running"], true);
+    assert_eq!(
+        value["device"]["service"]["pid"],
+        serde_json::Value::from(std::process::id())
+    );
+
+    let restart = fixture.cli(&["restart", "--json"]);
+    assert_eq!(restart.code, 0);
+    assert_eq!(restart.stdout, "{\"status\":\"restart-requested\"}\n");
+    assert!(
+        fixture
+            .data_directory
+            .join("device-client.restart")
+            .is_file()
+    );
+
+    let logs = fixture.cli(&["logs"]);
+    assert_eq!(logs.code, 0);
+    assert_eq!(logs.stdout, "first\nsecond\n");
 }

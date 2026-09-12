@@ -295,10 +295,11 @@ pub async fn start_server_with_remote_worker(
         None => None,
     };
     let client_sessions = match &client_exchange {
-        Some(_) => {
-            let application = ClientSessionsApplication::open(
+        Some(exchange) => {
+            let application = ClientSessionsApplication::open_with_exchange(
                 config.data_directory(),
                 &ClientSessionsConfig::default(),
+                Arc::clone(exchange),
             )
             .map_err(|error| ServerError::new(error.to_string()))?;
             Some(Arc::new(application))

@@ -12,19 +12,22 @@ use winwincode_delivery::application::session_binding::{
     DeliveryExecutionAttemptReplacement, SessionBindingAuthority, SessionBindingIdentity,
     accept_replacement_worker_session_with_authority,
 };
-use winwincode_delivery::application::stage::{
+use winwincode_delivery::application::workrun_execution::{
     CancelAcknowledgement, acknowledge_cancel, request_cancel,
 };
-use winwincode_delivery::domain::{Delivery, DeliveryValidationErrorCode};
+use winwincode_delivery::domain::{
+    Delivery, DeliveryValidationErrorCode, SessionAgentIdentity, SessionRuntimeContext,
+    SessionWorkspace,
+};
 use winwincode_delivery::store::{
     AcceptDeliveryWorkerSession, AppendDeliveryWorkRun, CreateDelivery, CreateDeliveryWorkItems,
     DeliveryCommand, DeliveryCommandPort, DeliveryStore, DeliveryStoreErrorCode,
     InMemoryDeliveryJournal, ReplaceDeliveryExecutionAttempt, ReportDeliveryCodexThread,
 };
 use winwincode_domain::{
-    CodexThreadId, ExecutionJobId, ExecutionMessageId, ExecutionSequence, Instant, LeaseId,
-    ProductSessionId, RequestId, Revision, Sha256Digest, WorkContractId, WorkItemId, WorkRunId,
-    WorkerId, WorkerInstanceId, WorkerSessionId,
+    AgentIdentityId, CodexThreadId, ExecutionJobId, ExecutionMessageId, ExecutionSequence, Instant,
+    LeaseId, ProductSessionId, RepositoryId, RequestId, Revision, Sha256Digest, WorkContractId,
+    WorkItemId, WorkRunId, WorkerId, WorkerInstanceId, WorkerSessionId, WorkspaceRevision,
 };
 use winwincode_storage::{
     DispatchResultRequest, DispatchResultStatus, EXECUTION_PROTOCOL_VERSION,
@@ -46,6 +49,24 @@ static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(1);
 fn id(prefix: &str, seed: u64) -> String {
     format!("{prefix}_{seed:026}")
 }
+
+fn runtime_context(worker_id: WorkerId, seed: u64) -> SessionRuntimeContext {
+    SessionRuntimeContext {
+        agent_identity: SessionAgentIdentity {
+            id: AgentIdentityId(id("agt", seed)),
+            worker_id,
+            name: "Executor".to_owned(),
+            role: "executor".to_owned(),
+        },
+        provider: "fixture-provider".to_owned(),
+        model: "fixture-model".to_owned(),
+        workspace: SessionWorkspace {
+            repository_id: RepositoryId(id("rep", 1)),
+            revision: WorkspaceRevision(format!("git-tree:{}", "a".repeat(64))),
+            write_mode: "candidate".to_owned(),
+        },
+    }
+}
 fn at(second: u64) -> Instant {
     Instant(format!("2027-10-01T10:00:{second:02}.000Z"))
 }
@@ -62,7 +83,7 @@ fn repository() -> RepositorySchedulerScope {
         organization_id: winwincode_domain::OrganizationId(id("org", 1)),
         workspace_id: winwincode_domain::WorkspaceId(id("wsp", 2)),
         project_id: winwincode_domain::ProjectId(id("prj", 3)),
-        repository_id: winwincode_domain::RepositoryId(id("rep", 4)),
+        repository_id: RepositoryId(id("rep", 4)),
     }
 }
 fn queue_scope() -> ExecutionQueueScope {
@@ -283,13 +304,7 @@ fn initial_delivery() -> Delivery {
     value["revision"] = 1.into();
     value["status"] = "draft".into();
     value["updatedAtMillis"] = value["createdAtMillis"].clone();
-    for field in [
-        "tasks",
-        "stageRuns",
-        "sessionBindings",
-        "attentionItems",
-        "evidence",
-    ] {
+    for field in ["sessionBindings", "attentionItems", "evidence"] {
         value[field] = serde_json::json!([]);
     }
     value["verdict"] = serde_json::Value::Null;
@@ -508,6 +523,7 @@ fn real_scheduler_replacement_rotates_delivery_workrun_and_rejects_old_authority
         identity: identity(),
         authority: report_authority.clone(),
         codex_thread_id: CodexThreadId(id("cdx", 113)),
+        runtime_context: runtime_context(original.lease.worker_id.clone(), 113),
         now_millis: bound.snapshot().updated_at_millis + 1,
     };
     let bound = store
@@ -540,9 +556,9 @@ fn real_scheduler_replacement_rotates_delivery_workrun_and_rejects_old_authority
     );
     assert_eq!(bound_binding.attempt, 1);
 
-    // Cancellation is addressed by the durable WorkRun identity, not by the
-    // historical StageRun projection.  The acknowledgement is intentionally
-    // non-terminal: Delivery remains byte-for-byte unchanged.
+    // Cancellation is addressed by the durable WorkRun identity. The
+    // acknowledgement is intentionally non-terminal: Delivery remains
+    // byte-for-byte unchanged.
     let cancel_intent = request_cancel(&bound, bound.revision(), &identity().work_run_id)
         .expect("accepted WorkRun can be cancelled");
     let after_cancel_ack = acknowledge_cancel(
@@ -631,6 +647,7 @@ fn real_scheduler_replacement_rotates_delivery_workrun_and_rejects_old_authority
         identity: identity(),
         authority: report_authority,
         codex_thread_id: CodexThreadId(id("cdx", 114)),
+        runtime_context: report.runtime_context.clone(),
         now_millis: bound.snapshot().updated_at_millis + 1,
     };
     assert_eq!(

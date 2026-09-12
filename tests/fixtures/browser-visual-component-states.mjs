@@ -431,13 +431,13 @@ const ENTRIES = Object.freeze([
 ])
 
 // ---------------------------------------------------------------------------
-// StrongFlow Delivery list.  The stages a Delivery moves through are pinned
+// StrongFlow Delivery list. Current Delivery states are pinned
 // through the real list and Kanban views, driven by a ready model state.
 // ---------------------------------------------------------------------------
 
-const STAGES = Object.freeze(['draft', 'clarifying', 'executing', 'reviewing', 'verifying', 'delivered', 'failed'])
+const DELIVERY_STATES = Object.freeze(['draft', 'clarifying', 'ready', 'reworking', 'needs-attention', 'ready-to-deliver', 'delivered'])
 
-const stageDeliveries = STAGES.map((status, index) => ({
+const stageDeliveries = DELIVERY_STATES.map((status, index) => ({
   deliveryId: `dlv_${String(index + 1).padStart(26, '0')}`,
   revision: 4,
   schemaVersion,
@@ -445,18 +445,18 @@ const stageDeliveries = STAGES.map((status, index) => ({
   title: `Delivery ${String(index + 1)}`,
   updatedAt: fixedTime,
   ownership: fixedScope,
-  activeStageRunId: status === 'draft' || status === 'delivered' || status === 'failed'
+  activeWorkRunId: status === 'draft' || status === 'clarifying' || status === 'delivered'
     ? null
-    : `str_${String(index + 1).padStart(26, '0')}`,
-  openAttentionCount: status === 'clarifying' || status === 'executing' ? 1 : 0,
-  taskCounts: {
+    : `wrn_${String(index + 1).padStart(26, '0')}`,
+  openAttentionCount: status === 'needs-attention' ? 1 : 0,
+  workItemCounts: { ready: 0, waitingHuman: 0, candidateReady: 0, rework: 0, cancelled: 0,
     total: 4,
-    pending: 1,
-    active: status === 'executing' ? 1 : 0,
-    blocked: 0,
-    verifying: status === 'verifying' ? 1 : 0,
-    completed: 1,
-    failed: status === 'failed' ? 2 : 0,
+    backlog: 1,
+    inProgress: status === 'ready' ? 1 : 0,
+    waitingDependency: 0,
+    validating: status === 'ready-to-deliver' ? 1 : 0,
+    done: 1,
+    failed: 0,
   },
 }))
 

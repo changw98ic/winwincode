@@ -34,27 +34,36 @@ const [
   viewModelModule,
   pageModule,
   surfaceModule,
+  contractsModule,
 ] = await Promise.all([
   load('community-control-plane-client.js'),
   load('home-dashboard-view-model.js'),
   load('home-dashboard-page.js'),
   load('client-surface.js'),
+  load('generated/contracts.js'),
 ])
+const { WorkItemState } = contractsModule
 
 const {
   DEFAULT_HOME_DASHBOARD_LIMITS,
   createHomeDashboardViewModel,
   homeDashboardState,
   homeDeliveryCards,
-  orderedHomeActiveCards,
+  homeDeliverySection,
+  orderedHomeBacklogCards,
+  orderedHomeRunningCards,
+  orderedHomeReadyCards,
+  orderedHomeWaitingCards,
+  orderedHomeValidatingCards,
   orderedHomeCompletedCards,
-  orderedHomeFailingCards,
+  orderedHomeFailedCards,
 } = viewModelModule
 const {
   homeChatHash,
   homeDashboardAnnouncement,
   homeDashboardPresentation,
   homeDecisionHash,
+  mobileWebCapabilityText,
   mountHomeDashboardPage,
 } = pageModule
 const { CLIENT_SURFACES, clientSurfaceFromHash } = surfaceModule
@@ -87,7 +96,7 @@ const otherScopeSelection = () => ({
   projectId: otherScope.projectId,
   repositoryId: otherScope.repositoryId,
 })
-const stageRunId = 'str_00000000000000000000000001'
+const workRunId = 'wrn_00000000000000000000000001'
 const deliveryId = 'dlv_00000000000000000000000001'
 const executingDeliveryId = 'dlv_00000000000000000000000002'
 const deliveredDeliveryId = 'dlv_00000000000000000000000003'
@@ -128,8 +137,8 @@ function deliverySummary(overrides = {}) {
     ownership: scopeIds(scope),
     revision: 3,
     schemaVersion,
-    status: 'executing',
-    taskCounts: { active: 1, blocked: 0, completed: 0, failed: 0, pending: 0, total: 1, verifying: 0 },
+    status: 'in_progress',
+    workItemCounts: { ready: 0, waitingHuman: 0, candidateReady: 0, rework: 0, cancelled: 0, inProgress: 1, waitingDependency: 0, done: 0, failed: 0, backlog: 0, total: 1, validating: 0 },
     title: 'Delivery',
     updatedAt: '2026-09-03T08:00:00.000Z',
     ...overrides,
@@ -165,7 +174,7 @@ function approval(overrides = {}) {
         productSessionId,
         workerSessionId: canonicalId('wss', 1),
         codexThreadId: canonicalId('thr', 1),
-        stageRunId,
+        workRunId,
       },
     },
     ...overrides,
@@ -342,7 +351,7 @@ function usageState(overrides = {}) {
     timeWindow: null,
     truncated: false,
     byDelivery: [],
-    byStageRun: [],
+    byWorkRun: [],
     byRole: [],
     byModel: [],
     byProvider: [],
@@ -392,13 +401,11 @@ test('Chat is the canonical default surface and every product entry stays reacha
     'extensions',
     'device',
     'settings',
-    'attention',
     'onboarding',
   ])
   assert.equal(clientSurfaceFromHash('').id, 'chat')
   assert.equal(clientSurfaceFromHash('#/home?x=1').id, 'home')
   assert.equal(clientSurfaceFromHash('#/chat').id, 'chat')
-  assert.equal(clientSurfaceFromHash('#/attention?session=psn_1').id, 'attention')
   for (const surface of CLIENT_SURFACES) {
     assert.equal(surface.default, surface.id === 'chat', surface.id)
   }
@@ -411,50 +418,57 @@ test('the dashboard groups Delivery projections into bounded, ordered sections',
   const running = deliverySummary({
     deliveryId: executingDeliveryId,
     title: 'Running delivery',
-    status: 'executing',
-    activeWorkRunId: stageRunId,
+    status: 'in_progress',
+    activeWorkRunId: workRunId,
     updatedAt: '2026-09-03T08:50:00.000Z',
   })
   const verifying = deliverySummary({
     deliveryId: canonicalId('dlv', 5),
     title: 'Verifying delivery',
-    status: 'verifying',
+    status: 'validating',
     updatedAt: '2026-09-03T08:55:00.000Z',
   })
-  const waiting = deliverySummary({
+  const planReview = deliverySummary({
     deliveryId: canonicalId('dlv', 6),
     title: 'Plan review delivery',
-    status: 'plan-review',
+    status: 'waiting_human',
     updatedAt: '2026-09-03T08:10:00.000Z',
+  })
+  const readyToStart = deliverySummary({
+    deliveryId: canonicalId('dlv', 8),
+    title: 'Ready delivery',
+    status: 'ready',
+    updatedAt: '2026-09-03T08:15:00.000Z',
   })
   const failed = deliverySummary({
     deliveryId: blockedDeliveryId,
     title: 'Blocked delivery',
-    status: 'needs-attention',
+    status: 'waiting_human',
     openAttentionCount: 2,
     updatedAt: '2026-09-03T08:20:00.000Z',
-    taskCounts: { active: 0, blocked: 1, completed: 1, failed: 3, pending: 0, total: 5, verifying: 0 },
+    workItemCounts: { ready: 0, waitingHuman: 0, candidateReady: 0, rework: 0, cancelled: 0, inProgress: 0, waitingDependency: 1, done: 1, failed: 3, backlog: 0, total: 5, validating: 0 },
   })
   const olderCompleted = deliverySummary({
     deliveryId: deliveredDeliveryId,
     title: 'Older delivered',
-    status: 'delivered',
+    status: 'done',
     updatedAt: '2026-09-03T06:00:00.000Z',
   })
   const newerCompleted = deliverySummary({
     deliveryId: canonicalId('dlv', 7),
     title: 'Newer delivered',
-    status: 'delivered',
+    status: 'done',
     updatedAt: '2026-09-03T07:30:00.000Z',
   })
   const cards = homeDashboardState({
     visits: [],
     deliveries: deliveryState([
-      waiting,
+      planReview,
       olderCompleted,
       failed,
       verifying,
       newerCompleted,
+      readyToStart,
       running,
     ]),
     attention: attentionState([]),
@@ -464,89 +478,176 @@ test('the dashboard groups Delivery projections into bounded, ordered sections',
   assert.equal(cards.status, 'ready')
   assert.equal(cards.firstUse, false)
   assert.deepEqual(cards.sources, { delivery: 'ok', attention: 'ok', usage: 'ok' })
-  assert.deepEqual(cards.active.map(card => card.deliveryId), [
-    canonicalId('dlv', 5),
+  assert.deepEqual(cards.running.map(card => card.deliveryId), [
     executingDeliveryId,
-    canonicalId('dlv', 6),
   ])
-  assert.deepEqual(cards.failing.map(card => card.deliveryId), [blockedDeliveryId])
+  assert.deepEqual(cards.validating.map(card => card.deliveryId), [canonicalId('dlv', 5)])
+  assert.deepEqual(cards.ready.map(card => card.deliveryId), [canonicalId('dlv', 8)])
+  assert.deepEqual(cards.waiting.map(card => card.deliveryId), [canonicalId('dlv', 6)])
+  assert.deepEqual(cards.failed.map(card => card.deliveryId), [blockedDeliveryId])
   assert.deepEqual(cards.completed.map(card => card.deliveryId), [
     canonicalId('dlv', 7),
     deliveredDeliveryId,
   ])
   assert.deepEqual(cards.counts, {
     decisions: 0,
-    active: 3,
-    failing: 1,
+    backlog: 0,
+    running: 1,
+    ready: 1,
+    waiting: 1,
+    validating: 1,
+    failed: 1,
     completed: 2,
     visited: 0,
   })
-  assert.equal(cards.active[0]?.failedTasks, 0)
-  assert.equal(cards.active[1]?.activeWorkRunId, stageRunId)
+  assert.equal(cards.running[0]?.failedTasks, 0)
+  assert.equal(cards.running[0]?.activeWorkRunId, workRunId)
   assert.equal(DEFAULT_HOME_DASHBOARD_LIMITS.deliveries, 4)
 
   // Section limits stay bounded even when the Scope holds many Deliveries.
   const bounded = homeDashboardState({
     visits: [],
     deliveries: deliveryState([
-      waiting,
+      planReview,
       olderCompleted,
       failed,
       verifying,
       newerCompleted,
+      readyToStart,
       running,
     ]),
     attention: attentionState([]),
     usage: usageState(),
     limits: { decisions: 1, deliveries: 1 },
   })
-  assert.equal(bounded.active.length, 1)
+  assert.equal(bounded.running.length, 1)
+  assert.equal(bounded.validating.length, 1)
+  assert.equal(bounded.ready.length, 1)
   assert.equal(bounded.completed.length, 1)
-  assert.equal(bounded.failing.length, 1)
-  assert.equal(bounded.counts.active, 3)
+  assert.equal(bounded.failed.length, 1)
+  assert.equal(bounded.counts.running, 1)
+  assert.equal(bounded.counts.validating, 1)
   assert.equal(bounded.counts.completed, 2)
 })
 
-test('failing Deliveries order by failures, then blocks, then recency', () => {
+test('every canonical WorkItem state lands in exactly one board section', () => {
+  const statuses = Object.values(WorkItemState)
+  assert.equal(statuses.length, 11, 'the Controller publishes exactly these statuses')
+  for (const status of statuses) {
+    const card = homeDeliveryCards([deliverySummary({ status })])[0]
+    const section = homeDeliverySection(card)
+    assert.equal(
+      ['backlog', 'ready', 'running', 'waiting', 'validating', 'failed', 'completed'].includes(section),
+      true,
+      `${status} must project into one canonical section (got ${section})`,
+    )
+  }
+  // The WWC-ER-1001 mapping, section by section, from the served status alone.
+  assert.equal(homeDeliverySection(homeDeliveryCards([deliverySummary({
+    status: 'in_progress',
+  })])[0]), 'running')
+  assert.equal(homeDeliverySection(homeDeliveryCards([deliverySummary({
+    status: 'rework',
+  })])[0]), 'running', '设计稿 04:验证未通过正在修复的交付在 正在运行 列')
+  assert.equal(homeDeliverySection(homeDeliveryCards([deliverySummary({
+    status: 'ready',
+  })])[0]), 'ready')
+  assert.equal(homeDeliverySection(homeDeliveryCards([deliverySummary({
+    status: 'candidate_ready',
+  })])[0]), 'validating')
+  assert.equal(homeDeliverySection(homeDeliveryCards([deliverySummary({
+    status: 'validating',
+  })])[0]), 'validating')
+  assert.equal(homeDeliverySection(homeDeliveryCards([deliverySummary({
+    status: 'backlog',
+  })])[0]), 'backlog')
+  assert.equal(homeDeliverySection(homeDeliveryCards([deliverySummary({
+    status: 'waiting_human',
+  })])[0]), 'waiting')
+  assert.equal(homeDeliverySection(homeDeliveryCards([deliverySummary({
+    status: 'done',
+  })])[0]), 'completed')
+  // Failure signals outrank motion: a partial failure surfaces as failed.
+  assert.equal(homeDeliverySection(homeDeliveryCards([deliverySummary({
+    status: 'in_progress',
+    workItemCounts: { ready: 0, waitingHuman: 0, candidateReady: 0, rework: 0, cancelled: 0, inProgress: 1, waitingDependency: 0, done: 0, failed: 2, backlog: 0, total: 3, validating: 0 },
+  })])[0]), 'failed')
+})
+
+test('failed Deliveries order by failures, then blocks, then recency; reworking runs', () => {
   const manyFailures = deliverySummary({
     deliveryId: canonicalId('dlv', 11),
     title: 'Three failures',
-    status: 'executing',
+    status: 'in_progress',
     updatedAt: '2026-09-03T05:00:00.000Z',
-    taskCounts: { active: 1, blocked: 0, completed: 0, failed: 3, pending: 0, total: 4, verifying: 0 },
+    workItemCounts: { ready: 0, waitingHuman: 0, candidateReady: 0, rework: 0, cancelled: 0, inProgress: 1, waitingDependency: 0, done: 0, failed: 3, backlog: 0, total: 4, validating: 0 },
   })
   const blocked = deliverySummary({
     deliveryId: canonicalId('dlv', 12),
     title: 'Two blocked',
-    status: 'verifying',
+    status: 'validating',
     updatedAt: '2026-09-03T08:00:00.000Z',
-    taskCounts: { active: 0, blocked: 2, completed: 0, failed: 0, pending: 0, total: 2, verifying: 0 },
+    workItemCounts: { ready: 0, waitingHuman: 0, candidateReady: 0, rework: 0, cancelled: 0, inProgress: 0, waitingDependency: 2, done: 0, failed: 0, backlog: 0, total: 2, validating: 0 },
   })
   const reworking = deliverySummary({
     deliveryId: canonicalId('dlv', 13),
     title: 'Reworking',
-    status: 'reworking',
+    status: 'rework',
     updatedAt: '2026-09-03T08:59:00.000Z',
   })
   const cards = homeDeliveryCards([reworking, blocked, manyFailures])
-  assert.deepEqual(orderedHomeFailingCards(cards).map(card => card.deliveryId), [
+  assert.deepEqual(orderedHomeFailedCards(cards).map(card => card.deliveryId), [
     canonicalId('dlv', 11),
     canonicalId('dlv', 12),
+  ])
+  assert.deepEqual(orderedHomeRunningCards(cards).map(card => card.deliveryId), [
     canonicalId('dlv', 13),
   ])
-  assert.deepEqual(
-    orderedHomeActiveCards([cards[1], cards[2]]).map(card => card.deliveryId),
-    [canonicalId('dlv', 12), canonicalId('dlv', 11)],
-  )
+  const readyCards = homeDeliveryCards([
+    deliverySummary({
+      deliveryId: canonicalId('dlv', 16),
+      status: 'candidate_ready',
+      updatedAt: '2026-09-03T04:00:00.000Z',
+    }),
+    deliverySummary({
+      deliveryId: canonicalId('dlv', 17),
+      status: 'ready',
+      updatedAt: '2026-09-03T07:30:00.000Z',
+    }),
+  ])
+  const waitingCards = homeDeliveryCards([
+    deliverySummary({
+      deliveryId: canonicalId('dlv', 18),
+      status: 'backlog',
+      updatedAt: '2026-09-03T03:00:00.000Z',
+    }),
+    deliverySummary({
+      deliveryId: canonicalId('dlv', 19),
+      status: 'waiting_human',
+      updatedAt: '2026-09-03T07:45:00.000Z',
+    }),
+  ])
+  assert.deepEqual(orderedHomeReadyCards(readyCards).map(card => card.deliveryId), [
+    canonicalId('dlv', 17),
+  ])
+  assert.deepEqual(orderedHomeValidatingCards(readyCards).map(card => card.deliveryId), [
+    canonicalId('dlv', 16),
+  ])
+  assert.deepEqual(orderedHomeWaitingCards(waitingCards).map(card => card.deliveryId), [
+    canonicalId('dlv', 19),
+  ])
+  assert.deepEqual(orderedHomeBacklogCards(waitingCards).map(card => card.deliveryId), [
+    canonicalId('dlv', 18),
+  ])
   const completedCards = homeDeliveryCards([
     deliverySummary({
       deliveryId: canonicalId('dlv', 14),
-      status: 'delivered',
+      status: 'done',
       updatedAt: '2026-09-03T04:00:00.000Z',
     }),
     deliverySummary({
       deliveryId: canonicalId('dlv', 15),
-      status: 'delivered',
+      status: 'done',
       updatedAt: '2026-09-03T07:00:00.000Z',
     }),
   ])
@@ -567,10 +668,14 @@ test('an empty first-use Scope reports an explicit empty dashboard', () => {
   assert.equal(state.status, 'ready')
   assert.deepEqual(state.counts, {
     decisions: 0,
-    active: 0,
-    failing: 0,
+    backlog: 0,
+    running: 0,
+    ready: 0,
+    waiting: 0,
+    validating: 0,
+    failed: 0,
     completed: 0,
-      visited: 0,
+    visited: 0,
   })
 
   // A failed Attention read hides the first-use claim: the dashboard cannot
@@ -605,12 +710,12 @@ test('the composed view model reads every existing projection once and publishes
       deliverySummary({
         deliveryId: executingDeliveryId,
         title: 'Running delivery',
-        status: 'executing',
-        activeWorkRunId: stageRunId,
+        status: 'in_progress',
+        activeWorkRunId: workRunId,
       }),
       deliverySummary({
         title: 'Delivery under attention',
-        status: 'needs-attention',
+        status: 'waiting_human',
         openAttentionCount: 1,
       }),
     ],
@@ -647,15 +752,19 @@ test('the composed view model reads every existing projection once and publishes
   assert.equal(model.state.status, 'ready')
   assert.deepEqual(model.state.counts, {
     decisions: 2,
-    active: 1,
-    failing: 1,
+    backlog: 0,
+    running: 1,
+    ready: 0,
+    waiting: 0,
+    validating: 0,
+    failed: 1,
     completed: 0,
-      visited: 0,
+    visited: 0,
   })
   assert.deepEqual(model.state.decisions.map(card => card.kind), ['attention', 'approval'])
   assert.equal(model.state.decisions[0]?.title, 'Review the proposed delivery scope')
-  assert.equal(model.state.active[0]?.title, 'Running delivery')
-  assert.equal(model.state.failing[0]?.openAttentionCount, 1)
+  assert.equal(model.state.running[0]?.title, 'Running delivery')
+  assert.equal(model.state.failed[0]?.openAttentionCount, 1)
   assert.equal(model.usage.state.workers.length, 1)
   assert.ok(publications > 1, 'the dashboard published while its projections loaded')
 
@@ -681,15 +790,15 @@ test('a decision card links to the exact decision surface and the exact Chat ses
     sessionTitle: null,
     deliveryId,
     deliveryTitle: 'Delivery under attention',
-    stageRunId,
+    workRunId,
   })
-  const inputCard = decisionCard({ stageRunId })
+  const inputCard = decisionCard({ workRunId })
   assert.equal(
     homeDecisionHash(attentionCard, scopeSelection),
-    `#/home/task-run?organizationId=${scope.organizationId}`
+    `#/home/review?delivery=${deliveryId}&organizationId=${scope.organizationId}`
       + `&workspaceId=${scope.workspaceId}&projectId=${scope.projectId}`
       + `&repositoryId=${scope.repositoryId}`,
-    'a Delivery-bound Attention opens the run page (设计稿 04/06 的「验收交付」)',
+    'a Delivery-bound Attention opens its exact StrongFlow review',
   )
   assert.equal(
     homeDecisionHash(inputCard, scopeSelection),
@@ -709,6 +818,20 @@ test('a decision card links to the exact decision surface and the exact Chat ses
   )
 })
 
+test('mobile capability text keeps the station inbox available under every browser capability', () => {
+  assert.match(mobileWebCapabilityText(null), /不支持 PWA.*系统通知不可用.*站内待处理/u)
+  assert.match(mobileWebCapabilityText({
+    navigator: { serviceWorker: {} },
+    matchMedia: () => ({ matches: false }),
+    Notification: { permission: 'default' },
+  }), /支持 PWA 基础能力.*尚未授权.*站内待处理/u)
+  assert.match(mobileWebCapabilityText({
+    navigator: { standalone: true },
+    matchMedia: () => ({ matches: false }),
+    Notification: { permission: 'denied' },
+  }), /独立 PWA.*已被阻止.*站内待处理/u)
+})
+
 
 test('the dashboard announcement names every section count and its gaps', () => {
   assert.ok(homeDashboardPresentation().sectionHeading.decisions.length > 0)
@@ -723,7 +846,7 @@ test('the dashboard announcement names every section count and its gaps', () => 
     deliveries: deliveryState([deliverySummary()]),
     attention: attentionState([decisionCard()]),
     usage: usageState(),
-  })), /1 项待决策 · 1 个运行中 · 0 个失败或阻塞 · 0 个已完成/u)
+  })), /1 项待决策 · 0 个待拆分 · 1 个运行中 · 0 个待启动 · 0 个等待中 · 0 个验证中 · 0 个失败或阻塞 · 0 个已完成/u)
   assert.match(homeDashboardAnnouncement(homeDashboardState({
     visits: [],
     deliveries: deliveryState([]),
@@ -912,13 +1035,13 @@ test('the Home page mounts the task board chrome, one polite live region, and ex
       deliverySummary({
         deliveryId: executingDeliveryId,
         title: 'Running delivery',
-        status: 'executing',
-        activeWorkRunId: stageRunId,
+        status: 'in_progress',
+        activeWorkRunId: workRunId,
       }),
       deliverySummary({
         deliveryId: deliveredDeliveryId,
         title: 'Delivered delivery',
-        status: 'delivered',
+        status: 'done',
         updatedAt: '2026-09-03T07:00:00.000Z',
       }),
     ]),
@@ -935,7 +1058,7 @@ test('the Home page mounts the task board chrome, one polite live region, and ex
         sessionTitle: null,
         deliveryId,
         deliveryTitle: 'Delivery under attention',
-        stageRunId,
+        workRunId,
       }),
       decisionCard({
         id: 'inp_00000000000000000000000009',
@@ -975,14 +1098,14 @@ test('the Home page mounts the task board chrome, one polite live region, and ex
   assert.equal(liveRegions.length, 1, 'the Home page keeps exactly one polite live region')
   assert.match(
     visibleText(liveRegions[0]),
-    /就绪 · 3 项待决策 · 1 个运行中 · 0 个失败或阻塞 · 1 个已完成/u,
+    /就绪 · 3 项待决策 · 0 个待拆分 · 1 个运行中 · 0 个待启动 · 0 个等待中 · 0 个验证中 · 0 个失败或阻塞 · 1 个已完成/u,
   )
 
   // The two live columns: Running left, Needs-you right, bold + gray count.
-  const activeSection = descendants(page).find(node => node.dataset?.section === 'active')
-  assert.notEqual(activeSection, undefined)
-  assert.equal(byClass(activeSection, 'wwc-home-section-heading').textContent, '正在运行')
-  assert.equal(byClass(activeSection, 'wwc-home-section-count').textContent, '1')
+  const runningSection = descendants(page).find(node => node.dataset?.section === 'running')
+  assert.notEqual(runningSection, undefined)
+  assert.equal(byClass(runningSection, 'wwc-home-section-heading').textContent, '运行中（Running）')
+  assert.equal(byClass(runningSection, 'wwc-home-section-count').textContent, '1')
   const decisionsSection = descendants(page).find(node => node.dataset?.section === 'decisions')
   assert.notEqual(decisionsSection, undefined)
   assert.equal(byClass(decisionsSection, 'wwc-home-section-heading').textContent, '待我处理')
@@ -1043,19 +1166,18 @@ test('the Home page mounts the task board chrome, one polite live region, and ex
   assert.deepEqual(chatLinks, [homeChatHash(productSessionId, scopeSelection)])
 
   // Design page 04: the Usage panel and the first-use block are gone; the
-  // history groups render as collapsed hairline rows.
+  // canonical history groups render as collapsed hairline rows.
   assert.equal(allByClass(rootElement, 'wwc-usage-health').length, 0)
   assert.equal(allByClass(rootElement, 'wwc-home-first-use').length, 0)
-  for (const id of ['failing', 'completed']) {
+  for (const id of ['backlog', 'ready', 'waiting', 'validating', 'failed', 'completed', 'visited']) {
     const section = descendants(page).find(node => node.dataset?.section === id)
     assert.notEqual(section, undefined)
     const toggle = byClass(section, 'wwc-home-section-toggle')
     assert.equal(toggle.getAttribute('aria-expanded'), 'false')
     const cards = byClass(section, 'wwc-home-cards')
     assert.equal(cards.hidden, true, `${id} stays collapsed`)
-    assert.equal(allByClass(section, 'wwc-home-card').length > 0 || id === 'failing', true)
     if (id === 'completed') {
-      assert.equal(byClass(section, 'wwc-home-section-heading').textContent, '已完成')
+      assert.equal(byClass(section, 'wwc-home-section-heading').textContent, '已完成（Done）')
       toggle.dispatch('click')
       assert.equal(toggle.getAttribute('aria-expanded'), 'true')
       assert.equal(cards.hidden, false, 'the completed row expands in place')
@@ -1066,6 +1188,12 @@ test('the Home page mounts the task board chrome, one polite live region, and ex
     }
   }
   assert.match(visibleText(byClass(rootElement, 'wwc-home-sections')), /Running delivery/u)
+
+  for (const card of allByClass(rootElement, 'wwc-home-card')) {
+    assert.equal(card.getAttribute('draggable'), null)
+    assert.equal(card.listeners.has('dragstart'), false)
+    assert.equal(card.listeners.has('drop'), false)
+  }
 
   mountedPage.close()
   assert.equal(rootElement.children.length, 0)
@@ -1133,14 +1261,14 @@ test('an empty Scope stays honest without the first-use block or usage panel', (
     byClass(decisionsSection, 'wwc-home-section-empty').textContent,
     /现在没有需要决策的事项/u,
   )
-  const activeSection = descendants(rootElement)
-    .find(node => node.dataset?.section === 'active')
-  assert.equal(byClass(activeSection, 'wwc-home-section-empty').hidden, false)
+  const runningSection = descendants(rootElement)
+    .find(node => node.dataset?.section === 'running')
+  assert.equal(byClass(runningSection, 'wwc-home-section-empty').hidden, false)
   assert.equal(byClass(rootElement, 'wwc-home-new-task').textContent, '新建任务')
   mountedPage.close()
 })
 
-test('the composed view model stays partial when the Attention Center is unreachable', async () => {
+test('the composed view model stays partial when pending-decision data is unavailable', async () => {
   const client = contractFake()
   client.query = async request => {
     if (request.query === 'delivery.list') {

@@ -189,8 +189,8 @@ async function waitFor(predicate, label) {
 
 const PAGE_SELECTOR = {
   chat: '.wwc-chat',
+  home: '.wwc-home',
   settings: '.wwc-settings',
-  attention: '.wwc-attention-center',
 }
 
 // UI-604: the audit keeps one explicit allow-list of live regions.  Anything
@@ -211,8 +211,8 @@ const LIVE_REGION_ALLOWLIST = Object.freeze([
   'wwc-chat-messages',
   'wwc-chat-convert-error',
   // management surfaces: exactly one polite status line per page
+  'wwc-home-status',
   'wwc-settings-status',
-  'wwc-attention-center-status',
 ])
 
 function classNameOf(node) {
@@ -259,8 +259,8 @@ function landmarks() {
 
 const STATUS_SELECTOR = {
   chat: '.wwc-chat-status',
+  home: '.wwc-home-status .wwc-status-badge-label',
   settings: '.wwc-settings-status .wwc-status-badge-label',
-  attention: '.wwc-attention-center-status .wwc-status-badge-label',
 }
 
 async function settled(name) {
@@ -297,8 +297,7 @@ globalThis.inspectAccessibility = async name => {
     )),
     surfaceSlotLive: document.querySelector('.wwc-surface-slot')?.getAttribute('aria-live') ?? null,
     collectionLiveRegions: [...document.querySelectorAll(
-      '[aria-live].wwc-attention-center-list,'
-      + ' [aria-live].wwc-settings-credential-list,'
+      '[aria-live].wwc-settings-credential-list,'
       + ' [aria-live].wwc-local-worker-list,'
       + ' [aria-live].wwc-local-input-list,'
       + ' [aria-live].wwc-local-approval-list,'

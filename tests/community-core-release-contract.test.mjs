@@ -152,6 +152,8 @@ test('every audited current source path exists in the repository', () => {
   for (const path of contract.currentState.currentSourcePaths) {
     assert.equal(existsSync(resolve(root, path)), true, `missing currentSourcePath: ${path}`)
   }
+  assert.equal(existsSync(resolve(root, 'scripts/build-community.mjs')), true)
+  assert.equal(existsSync(resolve(root, 'scripts/build-products.mjs')), false)
 })
 
 test('canonical schema accepts complete Cloud and Enterprise locks', () => {

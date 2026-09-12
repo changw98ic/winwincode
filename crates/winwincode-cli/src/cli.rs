@@ -15,6 +15,9 @@ use crate::{
     AttachRequest, BaselineChoice, DiagnosticCategory, DiagnosticReport, DiagnosticStatus,
     DoctorRequest, InitRequest, LauncherError, LocalLauncherPort, SetupOutcome,
 };
+use winwincode_device_client::{
+    DeviceServiceConfig, device_service_logs, request_device_service_restart, run_device_service,
+};
 
 const EXIT_SUCCESS: i32 = 0;
 const EXIT_DIAGNOSTIC_FAILED: i32 = 1;
@@ -63,7 +66,9 @@ pub fn render_help() -> String {
         "  wwc user disable <USERNAME> [--data-dir PATH] [--json]",
         "  wwc user enable <USERNAME> [--data-dir PATH] [--json]",
         "  wwc user reset-password <USERNAME> [--data-dir PATH] [--json]",
-        "  wwc device status|refresh-code|lock|unlock [--data-dir PATH] [--json]",
+        "  wwc device serve --data-dir PATH --server-url HTTPS-URL [--server-name NAME] [--device-name NAME]",
+        "  wwc device status|refresh-code|lock|unlock|restart [--data-dir PATH] [--json]",
+        "  wwc device logs [--data-dir PATH]",
     ];
     lines.extend_from_slice(&crate::backup::BACKUP_HELP_LINES);
     lines.extend([
@@ -445,16 +450,57 @@ fn render_initialization_guidance() -> String {
 fn run_device(arguments: &[String]) -> Result<WwcCliExit, UsageError> {
     let Some(action) = arguments.first().map(String::as_str) else {
         return Err(UsageError(
-            "device 后需要 status、refresh-code、lock 或 unlock。".into(),
+            "device 后需要 serve、status、refresh-code、lock、unlock、restart 或 logs。".into(),
         ));
     };
-    if !matches!(action, "status" | "refresh-code" | "lock" | "unlock") {
+    if !matches!(
+        action,
+        "serve" | "status" | "refresh-code" | "lock" | "unlock" | "restart" | "logs"
+    ) {
         return Err(UsageError(format!("未知 device 命令 {action}。")));
+    }
+    if action == "serve" {
+        return run_device_service_action(&arguments[1..]);
     }
     let parsed = parse(&arguments[1..], &["json"])?;
     reject_unknown(&parsed, &["data-dir"], &["json"])?;
     let data_directory = device_data_directory(&parsed)?;
     let json = parsed.switches.contains("json");
+    if action == "restart" {
+        return Ok(match request_device_service_restart(&data_directory) {
+            Ok(()) => WwcCliExit {
+                code: EXIT_SUCCESS,
+                stdout: if json {
+                    "{\"status\":\"restart-requested\"}\n".to_owned()
+                } else {
+                    "Device daemon 重启请求已提交。\n".to_owned()
+                },
+                stderr: String::new(),
+            },
+            Err(error) => WwcCliExit {
+                code: EXIT_ACTION_REQUIRED,
+                stdout: String::new(),
+                stderr: format!("Device service 未运行：{error}\n"),
+            },
+        });
+    }
+    if action == "logs" {
+        if json {
+            return Err(UsageError("device logs 不支持 --json。".into()));
+        }
+        return Ok(match device_service_logs(&data_directory, 200) {
+            Ok(logs) => WwcCliExit {
+                code: EXIT_SUCCESS,
+                stdout: logs,
+                stderr: String::new(),
+            },
+            Err(error) => WwcCliExit {
+                code: EXIT_SERVICE,
+                stdout: String::new(),
+                stderr: format!("Device logs 读取失败：{error}\n"),
+            },
+        });
+    }
     let result = match action {
         "status" => device_status(&data_directory),
         "refresh-code" => refresh_device_connect_code(&data_directory),
@@ -465,14 +511,68 @@ fn run_device(arguments: &[String]) -> Result<WwcCliExit, UsageError> {
     Ok(device_exit(result, json))
 }
 
+fn run_device_service_action(arguments: &[String]) -> Result<WwcCliExit, UsageError> {
+    let parsed = parse(arguments, &[])?;
+    reject_unknown(
+        &parsed,
+        &["data-dir", "server-url", "server-name", "device-name"],
+        &[],
+    )?;
+    let server_url = device_flag_or_environment(&parsed, "server-url", "WWC_DEVICE_SERVER_URL")?
+        .ok_or_else(|| UsageError("缺少 --server-url 或 WWC_DEVICE_SERVER_URL。".into()))?;
+    let result = run_device_service(&DeviceServiceConfig {
+        data_directory: device_data_directory(&parsed)?,
+        server_url,
+        server_display_name: device_flag(&parsed, "server-name")?
+            .unwrap_or_else(|| "WinWinCode Server".to_owned()),
+        device_display_name: device_flag(&parsed, "device-name")?
+            .unwrap_or_else(|| "WinWinCode Device".to_owned()),
+    });
+    Ok(match result {
+        Ok(()) => WwcCliExit {
+            code: EXIT_SUCCESS,
+            stdout: String::new(),
+            stderr: String::new(),
+        },
+        Err(error) => WwcCliExit {
+            code: EXIT_SERVICE,
+            stdout: String::new(),
+            stderr: format!("Device service 失败：{error}\n"),
+        },
+    })
+}
+
 fn device_data_directory(parsed: &ParsedArguments) -> Result<PathBuf, UsageError> {
     let values = parsed.flags.get("data-dir").map_or(&[][..], Vec::as_slice);
     if values.len() > 1 {
         return Err(UsageError("--data-dir 不能重复。".into()));
     }
-    values.first().map(PathBuf::from).ok_or_else(|| {
-        UsageError("缺少 --data-dir：device 命令需要 Device Client 的本地数据目录。".into())
-    })
+    values
+        .first()
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("WWC_DEVICE_DATA_DIRECTORY").map(PathBuf::from))
+        .ok_or_else(|| {
+            UsageError(
+                "缺少 --data-dir 或 WWC_DEVICE_DATA_DIRECTORY：device 命令需要 Device Client 的本地数据目录。"
+                    .into(),
+            )
+        })
+}
+
+fn device_flag(parsed: &ParsedArguments, name: &str) -> Result<Option<String>, UsageError> {
+    let values = parsed.flags.get(name).map_or(&[][..], Vec::as_slice);
+    if values.len() > 1 {
+        return Err(UsageError(format!("--{name} 不能重复。")));
+    }
+    Ok(values.first().cloned())
+}
+
+fn device_flag_or_environment(
+    parsed: &ParsedArguments,
+    name: &str,
+    environment: &str,
+) -> Result<Option<String>, UsageError> {
+    Ok(device_flag(parsed, name)?.or_else(|| std::env::var(environment).ok()))
 }
 
 fn device_exit(result: Result<DeviceAdminOutcome, DeviceAdminError>, json: bool) -> WwcCliExit {
@@ -516,6 +616,15 @@ fn render_device(outcome: &DeviceAdminOutcome) -> String {
     match outcome {
         DeviceAdminOutcome::Status { device } => {
             let mut output = format!("WinWinCode Device\n设备 ID：{}\n", device.device_id);
+            match device.service.pid {
+                Some(pid) => {
+                    let _ = writeln!(output, "服务状态：运行中（PID {pid}）");
+                }
+                None => output.push_str("服务状态：未运行\n"),
+            }
+            if device.service.restart_pending {
+                output.push_str("服务重启：等待处理\n");
+            }
             if device.enrolled {
                 let _ = write!(
                     output,

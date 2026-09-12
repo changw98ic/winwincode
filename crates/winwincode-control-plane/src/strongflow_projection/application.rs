@@ -1373,7 +1373,6 @@ mod tests {
             item.state = winwincode_domain::WorkItemState::Done;
         }
         snapshot.updated_at_millis = 1_800_000_000_040;
-        snapshot.stage_runs.clear();
         snapshot.attention_items.push(AttentionItem {
             schema_version: 3,
             id: AttentionItemId("attention-delivery-approval-1".into()),

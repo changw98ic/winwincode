@@ -1,7 +1,7 @@
 #![cfg(feature = "test-support")]
 
 use winwincode_delivery::{
-    application::stage::{
+    application::workrun_execution::{
         DurableTerminalOutcomeInput, TerminalArtifactReference, TerminalOutcomeStatus,
         reconcile_durable_terminal_outcome,
     },
@@ -19,7 +19,7 @@ fn fixture() -> Delivery {
 
 fn running_fixture() -> Delivery {
     let mut snapshot = fixture().into_snapshot();
-    snapshot.status = winwincode_delivery::domain::DeliveryStatus::Executing;
+    snapshot.status = winwincode_delivery::domain::DeliveryStatus::Ready;
     let run = snapshot
         .work_run_aggregate
         .runs

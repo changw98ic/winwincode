@@ -24,6 +24,9 @@ import {
   ModelRouteAvailabilityReason,
   ModelRouteAvailabilityStatus,
   QueryName,
+  RuntimeActivityOutcome,
+  RuntimeActivityStatus,
+  RuntimeRecoveryState,
 } from './generated/contracts.js'
 
 const SCHEMA_VERSION = 'winwincode/v1' as const
@@ -148,6 +151,33 @@ export interface WorkerHealthRow {
   readonly asOfKnown: boolean
 }
 
+export type SessionTeamState = 'running' | 'recovering' | 'offline' | 'idle' | 'unknown'
+
+export interface SessionTeamRow {
+  readonly key: string
+  readonly agentId: string | null
+  readonly agentName: string | null
+  readonly role: string | null
+  readonly workerId: string | null
+  readonly workerSessionId: string
+  readonly codexThreadId: string
+  readonly attempt: number
+  readonly productSessionId: string
+  readonly workRunId: string | null
+  readonly provider: string | null
+  readonly model: string | null
+  readonly repositoryId: string | null
+  readonly workspaceRevision: string | null
+  readonly writeMode: string | null
+  readonly currentActivity: string | null
+  readonly recoveryMessage: string
+  readonly recoveryRequiresHuman: boolean
+  readonly lastFailureSourceRef: string | null
+  readonly recoveryState: RuntimeSessionProjection['recovery']['state']
+  readonly workerState: WorkerHealthState | null
+  readonly state: SessionTeamState
+}
+
 export interface UsageCapacitySummary {
   readonly reportedCapacity: number
   readonly drainingCapacity: number
@@ -210,6 +240,7 @@ export interface UsageHealthViewModelState {
   readonly byRole: readonly UsageAggregate[]
   readonly byModel: readonly ModelUsageRow[]
   readonly byProvider: readonly ProviderHealthRow[]
+  readonly sessionTeam: readonly SessionTeamRow[]
   readonly workers: readonly WorkerHealthRow[]
   readonly capacity: UsageCapacitySummary | null
   readonly credentials: readonly CredentialHealthRow[]
@@ -245,6 +276,12 @@ interface SessionObservation {
   readonly deliveryId: string | null
   readonly workRunId: string | null
   readonly roles: readonly (string | null)[]
+  readonly workerSessionId: string
+  readonly codexThreadId: string
+  readonly attempt: number
+  readonly runtimeContext: RuntimeSessionProjection['runtimeContext']
+  readonly activities: RuntimeSessionProjection['activities']
+  readonly recoveryState: RuntimeSessionProjection['recovery']['state']
   readonly metrics: readonly UsageMetricValue[]
   readonly failureCount: number
   readonly sourceRef: string | null
@@ -263,6 +300,7 @@ function emptyState(): UsageHealthViewModelState {
     byRole: Object.freeze([]),
     byModel: Object.freeze([]),
     byProvider: Object.freeze([]),
+    sessionTeam: Object.freeze([]),
     workers: Object.freeze([]),
     capacity: null,
     credentials: Object.freeze([]),
@@ -308,12 +346,12 @@ function normalizedError(error: unknown, signal?: AbortSignal): ControlPlaneClie
   if (signal?.aborted === true) return new ControlPlaneClientError({
     kind: 'cancelled',
     code: 'REQUEST_CANCELLED',
-    message: 'The usage and health read was cancelled.',
+    message: '用量与健康状态读取已取消。',
     requestId: null,
     retryable: false,
     cause: error,
   })
-  return clientFailure('USAGE_HEALTH_FAILURE', 'The usage and health read failed.', error)
+  return clientFailure('USAGE_HEALTH_FAILURE', '用量与健康状态读取失败。', error)
 }
 
 function statusForError(error: ControlPlaneClientError): UsageHealthStatus {
@@ -329,7 +367,7 @@ function requireQuery<T extends QueryResultResponse>(
 ): T {
   if (response.query !== query) throw clientFailure(
     'USAGE_HEALTH_QUERY_MISMATCH',
-    'The Control Plane returned another usage and health query result.',
+    '控制平面返回了其他用量与健康状态查询结果。',
   )
   return response as T
 }
@@ -346,7 +384,7 @@ function cursorAfter(
   const next = response.page.nextCursor
   if (next === null || seen.has(next)) throw clientFailure(
     'USAGE_HEALTH_CURSOR_INVALID',
-    'The usage and health read returned an invalid continuation cursor.',
+    '用量与健康状态读取返回了无效的续页游标。',
   )
   seen.add(next)
   return next
@@ -540,7 +578,7 @@ function buildState(input: {
     observation => [[
       observation.deliveryId ?? 'delivery-unassigned',
       observation.deliveryId === null
-        ? 'Delivery not reported'
+        ? '未报告交付'
         : deliveryTitles.get(observation.deliveryId) ?? observation.deliveryId,
     ] as const],
     false,
@@ -549,7 +587,7 @@ function buildState(input: {
     'work-run',
     observation => [[
       observation.workRunId ?? `${observation.productSessionId}/unbound`,
-      observation.workRunId ?? 'WorkRun not reported',
+      observation.workRunId ?? '未报告工作运行',
     ] as const],
     false,
   )
@@ -557,7 +595,7 @@ function buildState(input: {
     'role',
     observation => observation.roles.map(role => [
       role ?? 'role-unknown',
-      role ?? 'Role not reported',
+      role ?? '未报告角色',
     ] as const),
     true,
   )
@@ -626,6 +664,74 @@ function buildState(input: {
         heartbeatKnown: heartbeat !== null,
         asOf: heartbeat,
         asOfKnown: heartbeat !== null,
+      })
+    })
+    .sort((left, right) => left.key.localeCompare(right.key)))
+
+  const workersById = new Map(workers.map(worker => [worker.key, worker]))
+  const sessionTeam = Object.freeze(input.sessions
+    .map(observation => {
+      const context = observation.runtimeContext
+      const worker = context === null
+        ? undefined
+        : workersById.get(context.agentIdentity.workerId)
+      const runningActivity = observation.activities.find(
+        activity => activity.status === RuntimeActivityStatus.Running,
+      )
+      const recovering = observation.recoveryState === RuntimeRecoveryState.Required
+        || observation.recoveryState === RuntimeRecoveryState.InProgress
+      const recoveryRequiresHuman = observation.activities.some(
+        activity => activity.outcome === RuntimeActivityOutcome.PolicyDenied,
+      )
+      const recoveryMessages: string[] = []
+      if (recoveryRequiresHuman) {
+        recoveryMessages.push('安全策略已暂停自动继续，需要人工检查')
+      } else {
+        if (observation.recoveryState === RuntimeRecoveryState.Required) {
+          recoveryMessages.push('连接中断，等待自动恢复')
+        } else if (observation.recoveryState === RuntimeRecoveryState.InProgress) {
+          recoveryMessages.push('连接中断，正在自动恢复')
+        } else if (observation.recoveryState === RuntimeRecoveryState.Recovered) {
+          recoveryMessages.push('连接中断后自动恢复成功')
+        }
+        if (observation.attempt > 1) {
+          recoveryMessages.push(`新 Session 已接手（attempt ${String(observation.attempt)}）`)
+        }
+        if (recoveryMessages.length === 0) recoveryMessages.push('无需恢复')
+      }
+      const state: SessionTeamState = worker?.state === 'offline'
+        || worker?.state === 'heartbeat-stale'
+        ? 'offline'
+        : recovering
+          ? 'recovering'
+          : runningActivity !== undefined
+            ? 'running'
+            : context === null
+              ? 'unknown'
+              : 'idle'
+      return Object.freeze({
+        key: observation.workerSessionId,
+        agentId: context?.agentIdentity.id ?? null,
+        agentName: context?.agentIdentity.name ?? null,
+        role: context?.agentIdentity.role ?? null,
+        workerId: context?.agentIdentity.workerId ?? null,
+        workerSessionId: observation.workerSessionId,
+        codexThreadId: observation.codexThreadId,
+        attempt: observation.attempt,
+        productSessionId: observation.productSessionId,
+        workRunId: observation.workRunId,
+        provider: context?.provider ?? null,
+        model: context?.model ?? null,
+        repositoryId: context?.workspace.repositoryId ?? null,
+        workspaceRevision: context?.workspace.revision ?? null,
+        writeMode: context?.workspace.writeMode ?? null,
+        currentActivity: runningActivity?.command ?? runningActivity?.activityType ?? null,
+        recoveryMessage: recoveryMessages.join(' · '),
+        recoveryRequiresHuman,
+        lastFailureSourceRef: observation.sourceRef,
+        recoveryState: observation.recoveryState,
+        workerState: worker?.state ?? null,
+        state,
       })
     })
     .sort((left, right) => left.key.localeCompare(right.key)))
@@ -712,6 +818,7 @@ function buildState(input: {
     byRole,
     byModel,
     byProvider,
+    sessionTeam,
     workers,
     capacity,
     credentials,
@@ -746,7 +853,7 @@ export function createUsageHealthViewModel(
   }
 
   function requireOpen(): void {
-    if (closed) throw clientFailure('USAGE_HEALTH_CLOSED', 'The usage and health summary is closed.')
+    if (closed) throw clientFailure('USAGE_HEALTH_CLOSED', '用量与健康状态摘要已关闭。')
   }
 
   function abortRequests(): void {
@@ -774,13 +881,13 @@ export function createUsageHealthViewModel(
       const response = await options.client.query(build(cursor), { signal })
       if (response.query !== query) throw clientFailure(
         'USAGE_HEALTH_QUERY_MISMATCH',
-        'The Control Plane returned another usage and health query result.',
+        '控制平面返回了其他用量与健康状态查询结果。',
       )
       const pageItems = (response as { readonly result?: { readonly items?: unknown } })
         .result?.items
       if (!Array.isArray(pageItems)) throw clientFailure(
         'USAGE_HEALTH_PROJECTION_INVALID',
-        'The usage and health read returned a page without list items.',
+        '用量与健康状态读取返回的页面没有列表项。',
       )
       items.push(...pageItems)
       const next = cursorAfter(response, seen)
@@ -789,7 +896,7 @@ export function createUsageHealthViewModel(
     }
     throw clientFailure(
       'USAGE_HEALTH_PAGE_LIMIT_EXCEEDED',
-      'The usage and health read exceeded the bounded page limit.',
+      '用量与健康状态读取超过了分页上限。',
     )
   }
 
@@ -848,18 +955,28 @@ export function createUsageHealthViewModel(
   }
 
   function observationsOf(snapshot: RuntimeProjectionSnapshot): readonly SessionObservation[] {
-    return Object.freeze(snapshot.sessions.map(session => Object.freeze({
-      productSessionId: snapshot.productSessionId,
-      deliveryId: snapshot.deliveryId,
-      workRunId: session.workRunId,
-      roles: Object.freeze(session.agents.map(agent => agent.role)),
-      metrics: metricsOf(session),
-      failureCount: session.recovery.failureCount,
-      sourceRef: session.recovery.lastFailureSourceRef,
-      recovered: session.recovery.state === 'recovered'
-        || session.recovery.state === 'in-progress',
-      asOf: instant(snapshot.rebuiltAt),
-    })))
+    return Object.freeze(snapshot.sessions.map(session => {
+      const roles = new Set(session.agents.map(agent => agent.role))
+      if (session.runtimeContext !== null) roles.add(session.runtimeContext.agentIdentity.role)
+      return Object.freeze({
+        productSessionId: snapshot.productSessionId,
+        deliveryId: snapshot.deliveryId,
+        workRunId: session.workRunId,
+        roles: Object.freeze([...roles]),
+        workerSessionId: session.workerSessionId,
+        codexThreadId: session.codexThreadId,
+        attempt: session.attempt,
+        runtimeContext: session.runtimeContext,
+        activities: session.activities,
+        recoveryState: session.recovery.state,
+        metrics: metricsOf(session),
+        failureCount: session.recovery.failureCount,
+        sourceRef: session.recovery.lastFailureSourceRef,
+        recovered: session.recovery.state === RuntimeRecoveryState.Recovered
+          || session.recovery.state === RuntimeRecoveryState.InProgress,
+        asOf: instant(snapshot.rebuiltAt),
+      })
+    }))
   }
 
   /**
@@ -949,7 +1066,7 @@ export function createUsageHealthViewModel(
         firstFailure === undefined ? 'USAGE_HEALTH_FAILURE' : (
           (firstFailure as SourceUnavailable).code
         ),
-        'Every usage and health projection is unavailable.',
+        '所有用量与健康状态投影均不可用。',
       )
     }
 
@@ -1069,7 +1186,7 @@ export function createUsageHealthViewModel(
         error: new ControlPlaneClientError({
           kind: 'cancelled',
           code: 'REQUEST_CANCELLED',
-          message: 'The usage and health read was cancelled.',
+          message: '用量与健康状态读取已取消。',
           requestId: null,
           retryable: false,
         }),

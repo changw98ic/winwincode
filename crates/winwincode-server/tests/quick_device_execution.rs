@@ -299,8 +299,8 @@ fn stage_anchor(
 ) -> AnchorLaunch {
     let worker_launch_grant_id = format!("wlg_{}", suffix(seed));
     let worker_session_id = format!("ws_{}", suffix(seed + 50));
-    let worker_id = format!("wkr_{}", suffix(seed + 51));
-    let worker_instance_id = format!("winst_{}", suffix(seed + 52));
+    let worker_id = format!("wrk_{}", suffix(seed + 51));
+    let worker_instance_id = format!("wki_{}", suffix(seed + 52));
     let issuance = LaunchGrantIssuance::try_new(
         worker_launch_grant_id.clone(),
         node,
@@ -538,8 +538,8 @@ fn a_device_anchored_turn_is_dispatched_to_the_launched_worker_session() {
             .expect("facts lookup")
             .expect("the job carries device facts");
         assert_eq!(facts.worker_session_id, format!("ws_{}", suffix(154)));
-        assert_eq!(facts.worker_id, format!("wkr_{}", suffix(155)));
-        assert_eq!(facts.worker_instance_id, format!("winst_{}", suffix(156)));
+        assert_eq!(facts.worker_id, format!("wrk_{}", suffix(155)));
+        assert_eq!(facts.worker_instance_id, format!("wki_{}", suffix(156)));
         assert_eq!(facts.holder_user_id, holder);
         assert_eq!(facts.repository_binding_id, format!("rbd_{}", suffix(102)));
         assert_eq!(facts.product_session_id, Some(id("psn", 1)));

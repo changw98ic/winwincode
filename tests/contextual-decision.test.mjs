@@ -44,7 +44,7 @@ const {
 
 const productSessionId = 'psn_00000000000000000000000001'
 const deliveryId = 'dlv_00000000000000000000000001'
-const stageRunId = 'run_00000000000000000000000001'
+const workRunId = 'wrn_00000000000000000000000001'
 const now = Date.parse('2026-09-04T12:00:00.000Z')
 
 class FakeElement {
@@ -162,7 +162,7 @@ function binding(overrides = {}) {
       productSessionId,
       workerSessionId: 'wsn_00000000000000000000000001',
       codexThreadId: 'cdx_00000000000000000000000001',
-      stageRunId,
+      workRunId,
     },
     ...overrides,
   }
@@ -174,7 +174,7 @@ function input(overrides = {}) {
     inputRequestId: 'inp_00000000000000000000000001',
     revision: 3,
     state: 'pending',
-    prompt: 'Select the next StageRun step.',
+    prompt: 'Select the next WorkRun step.',
     binding: binding(),
     mode: 'text',
     options: [],
@@ -205,7 +205,7 @@ function attention(overrides = {}) {
       status: 'open',
       blocking: true,
       createdAt: '2026-09-04T11:30:00.000Z',
-      stageRunId,
+      workRunId,
       type: 'verification_blocked',
       options: [],
       assignedTo: null,
@@ -283,8 +283,8 @@ test('one row per decision carries the kind label and the bound producer text', 
   )
   const context = findByClass(items[0], 'wwc-contextual-decision-context')
   assert.match(context.textContent, /工具审批/u)
-  assert.match(context.textContent, /绑定 ProductSession 与 StageRun/u)
-  assert.match(context.textContent, /Expires 2026-09-04T12:10:00\.000Z/u)
+  assert.match(context.textContent, /绑定 ProductSession 与 WorkRun/u)
+  assert.match(context.textContent, /过期时间 2026-09-04T12:10:00\.000Z/u)
   assert.equal(items[1].dataset.kind, 'input')
 })
 
@@ -351,7 +351,7 @@ test('a choice input renders its options and submits the chosen canonical value'
 test('a text input offers cancel instead of a destructive second decision', () => {
   const { root, actions } = mount({ view: view({ inputs: [input()] }) })
   const row = rows(root)[0]
-  assert.equal(findByClass(row, 'wwc-contextual-decision-secondary').textContent, 'Cancel input')
+  assert.equal(findByClass(row, 'wwc-contextual-decision-secondary').textContent, '取消输入')
   findByClass(row, 'wwc-contextual-decision-secondary').click()
   assert.deepEqual(actions, [['cancelInput', 'inp_00000000000000000000000001']])
 })
@@ -370,7 +370,7 @@ test('an expired decision submits nothing and keeps the typed input', () => {
   assert.deepEqual(actions, [])
   assert.equal(reason.value, 'Approved before the deadline passed.')
   assert.equal(findByClass(row, 'wwc-contextual-decision-rejected').textContent,
-    'This decision is no longer current. Refresh for the current state.')
+    '此决策已不是当前状态，请刷新后重试。')
 })
 
 test('a busy page disables every row control while it replaces its snapshot', () => {
@@ -404,8 +404,8 @@ test('a row that this page does not decide links to the owning decision surface'
     view: view({ attention: [attention()] }),
   }, {
     actions: {},
-    detailHref: item => `#/attention?session=${productSessionId}`
-      + `&delivery=${item.deliveryId}&stageRun=${item.stageRunId}`,
+    detailHref: item => `#/home?filter=attention&session=${productSessionId}`
+      + `&delivery=${item.deliveryId}&workRun=${item.workRunId}`,
   })
   const row = rows(root)[0]
   assert.equal(findByClass(row, 'wwc-contextual-decision-submit').hidden, true)
@@ -413,9 +413,9 @@ test('a row that this page does not decide links to the owning decision surface'
   assert.equal(findByClass(row, 'wwc-contextual-decision-options').hidden, true)
   const link = findByClass(row, 'wwc-contextual-decision-detail')
   assert.equal(link.hidden, false)
-  assert.match(link.href, new RegExp(`^#/attention\\?session=${productSessionId}`, 'u'))
+  assert.match(link.href, new RegExp(`^#/home\\?filter=attention&session=${productSessionId}`, 'u'))
   assert.match(link.href, /delivery=dlv_00000000000000000000000001/u)
-  assert.match(link.href, /stageRun=run_00000000000000000000000001/u)
+  assert.match(link.href, /workRun=wrn_00000000000000000000000001/u)
   assert.deepEqual(actions, [])
 })
 
@@ -426,7 +426,7 @@ test('an expired row loses its link even when an owning surface exists', () => {
     }),
   }, {
     actions: {},
-    detailHref: () => '#/attention',
+    detailHref: () => '#/home?filter=attention',
   })
   const link = findByClass(rows(root)[0], 'wwc-contextual-decision-detail')
   assert.equal(link.hidden, true)

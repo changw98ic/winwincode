@@ -9,7 +9,7 @@ use winwincode_api::generated::{
     DeliveryUpdateSpecPayload, Scope,
 };
 use winwincode_delivery::{
-    application::{attention::ResolvedAttentionTransition, task::validate_create_tasks_empty},
+    application::attention::ResolvedAttentionTransition,
     domain::{
         AcceptanceCriterion, AcceptanceCriterionId, AttentionItemStatus, DELIVERY_SCHEMA_VERSION,
         Delivery, DeliveryPublicationTarget, DeliverySnapshot, DeliverySourceRef, DeliverySpec,
@@ -292,10 +292,6 @@ fn create(
         )
         .into());
     }
-    if !payload.tasks.is_empty() {
-        return Err(StorageError::invalid_input("delivery.create.tasks must be empty").into());
-    }
-    validate_create_tasks_empty(&[]).map_err(storage_error)?;
     if let Some(receipt) = replay_if_create_target_exists(
         storage,
         command,
@@ -319,8 +315,6 @@ fn create(
         revision: 1,
         status: DeliveryStatus::Draft,
         spec,
-        tasks: Vec::new(),
-        stage_runs: Vec::new(),
         session_bindings: Vec::new(),
         attention_items: Vec::new(),
         evidence: Vec::new(),
@@ -494,8 +488,6 @@ fn update_spec(
         work_contract_from_spec(&snapshot.spec, &required_human_authority)?;
     snapshot.work_run_aggregate.items.clear();
     snapshot.work_run_aggregate.runs.clear();
-    snapshot.tasks.clear();
-    snapshot.stage_runs.clear();
     snapshot.session_bindings.clear();
     snapshot.attention_items.clear();
     snapshot.evidence.clear();

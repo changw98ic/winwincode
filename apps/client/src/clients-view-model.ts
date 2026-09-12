@@ -81,8 +81,8 @@ function addFailure(error: unknown): ClientsAddFailure {
  * Presence×Occupancy state copy.
  */
 export function devicePresenceText(device: ControlPlaneDeviceSummary): string {
-  if (device.presence === 'locked') return 'Locked'
-  return device.presence === 'online' ? 'Online' : 'Offline'
+  if (device.presence === 'locked') return '已锁定'
+  return device.presence === 'online' ? '在线' : '离线'
 }
 
 /**
@@ -91,18 +91,18 @@ export function devicePresenceText(device: ControlPlaneDeviceSummary): string {
  * the card never shows an empty state.
  */
 export function deviceStateText(device: ControlPlaneDeviceSummary): string {
-  if (device.presence === 'locked') return 'Client locked'
+  if (device.presence === 'locked') return '设备已锁定'
   if (device.occupancy === 'recovery-pending') {
-    return 'Connection interrupted, waiting to recover'
+    return '连接中断，正在等待恢复'
   }
   if (device.presence === 'offline') {
-    return device.occupancy === 'available' ? 'Offline' : 'Offline, waiting to recover'
+    return device.occupancy === 'available' ? '离线' : '离线，正在等待恢复'
   }
   switch (device.occupancy) {
-    case 'available': return 'Online, ready to connect'
-    case 'occupied-by-me': return 'Online, occupied by you'
-    case 'occupied-by-other': return 'Online, in use'
-    case 'draining': return 'Online, finishing current tasks'
+    case 'available': return '在线，可以连接'
+    case 'occupied-by-me': return '在线，已由你占用'
+    case 'occupied-by-other': return '在线，正在使用'
+    case 'draining': return '在线，正在完成当前任务'
   }
 }
 
@@ -121,18 +121,18 @@ export function deviceStateTone(
 
 export function relativeHeartbeatText(lastHeartbeatAt: string, nowMillis: number): string {
   const at = Date.parse(lastHeartbeatAt)
-  if (Number.isNaN(at)) return 'Last heartbeat unknown'
+  if (Number.isNaN(at)) return '上次心跳时间未知'
   const elapsed = Math.max(0, nowMillis - at)
   const minutes = Math.floor(elapsed / 60_000)
-  if (minutes < 1) return 'Last heartbeat just now'
-  if (minutes === 1) return 'Last heartbeat 1 minute ago'
-  if (minutes < 60) return `Last heartbeat ${minutes} minutes ago`
+  if (minutes < 1) return '刚刚收到心跳'
+  if (minutes === 1) return '1 分钟前收到心跳'
+  if (minutes < 60) return `${minutes} 分钟前收到心跳`
   const hours = Math.floor(minutes / 60)
-  if (hours === 1) return 'Last heartbeat 1 hour ago'
-  if (hours < 24) return `Last heartbeat ${hours} hours ago`
+  if (hours === 1) return '1 小时前收到心跳'
+  if (hours < 24) return `${hours} 小时前收到心跳`
   const days = Math.floor(hours / 24)
-  if (days === 1) return 'Last heartbeat yesterday'
-  return `Last heartbeat ${days} days ago`
+  if (days === 1) return '昨天收到心跳'
+  return `${days} 天前收到心跳`
 }
 
 /**

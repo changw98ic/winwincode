@@ -12821,6 +12821,7 @@ dependencies = [
  "time",
  "tokio",
  "tokio-tungstenite",
+ "ureq",
  "winwincode-client-port",
  "winwincode-worker",
 ]

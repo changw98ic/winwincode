@@ -8,8 +8,6 @@ import type {
   Actor,
   CommandAcceptedResponse,
   CommandCompletedResponse,
-  DeliveryAdvanceCommand,
-  DeliveryAdvanceCompletedResponse,
   DeliveryCreateCommand,
   DeliveryCreateCompletedResponse,
   DeliveryId,
@@ -41,7 +39,7 @@ export interface ChatDeliveryCreatorState {
 /**
  * Structural composition seam; Chat does not import a delivery workbench
  * model.  The creator turns one confirmed Chat draft into the first Delivery
- * through the canonical DeliveryCreate + DeliveryAdvance command pair.
+ * through the canonical DeliveryCreate command.
  */
 export interface ChatDeliveryCreator {
   readonly state: ChatDeliveryCreatorState
@@ -85,18 +83,15 @@ function createdDeliveryMatchesScope(
 
 function expectCompletedCommand(
   response: CommandAcceptedResponse | CommandCompletedResponse,
-  command: CommandName.DeliveryCreate | CommandName.DeliveryAdvance,
+  command: CommandName.DeliveryCreate,
   requestId: RequestId,
-): DeliveryCreateCompletedResponse | DeliveryAdvanceCompletedResponse | null {
+): DeliveryCreateCompletedResponse | null {
   if (response.requestId !== requestId || response.command !== command) throw clientFailure(
     'STRONGFLOW_CREATE_COMMAND_MISMATCH',
-    'The Control Plane returned another Delivery command result.',
+    '控制平面返回了其他交付命令的结果。',
   )
   if (response.outcome === 'accepted') return null
-  if (command === CommandName.DeliveryCreate) {
-    return response as DeliveryCreateCompletedResponse
-  }
-  return response as DeliveryAdvanceCompletedResponse
+  return response as DeliveryCreateCompletedResponse
 }
 
 function normalizedError(error: unknown, signal?: AbortSignal): ControlPlaneClientError {
@@ -104,14 +99,14 @@ function normalizedError(error: unknown, signal?: AbortSignal): ControlPlaneClie
   if (signal?.aborted === true) return new ControlPlaneClientError({
     kind: 'cancelled',
     code: 'REQUEST_CANCELLED',
-    message: 'The Delivery creation request was cancelled.',
+    message: '交付创建请求已取消。',
     requestId: null,
     retryable: false,
     cause: error,
   })
   return clientFailure(
     'STRONGFLOW_CREATE_FAILURE',
-    'The Delivery creation could not be completed.',
+    '无法完成交付创建。',
     error,
   )
 }
@@ -128,7 +123,6 @@ export function createChatDeliveryCreator(
     readonly inputKey: string
     readonly createRequest: DeliveryCreateCommand
     created: DeliveryProjection | null
-    advanceRequest: DeliveryAdvanceCommand | null
   } | null = null
 
   function publish(status: ChatDeliveryCreatorState['status'], error: ControlPlaneClientError | null): void {
@@ -142,7 +136,7 @@ export function createChatDeliveryCreator(
 
   function completedDelivery(
     response: CommandAcceptedResponse | CommandCompletedResponse,
-    command: CommandName.DeliveryCreate | CommandName.DeliveryAdvance,
+    command: CommandName.DeliveryCreate,
     requestId: RequestId,
     deliveryId: DeliveryId,
   ): DeliveryProjection | null {
@@ -153,7 +147,7 @@ export function createChatDeliveryCreator(
       || completed.result.revision !== completed.currentRevision
     ) throw clientFailure(
       'STRONGFLOW_CREATE_RESPONSE_MISMATCH',
-      'The Delivery command returned another repository revision.',
+      '交付命令返回了其他仓库修订版。',
     )
     return completed.result
   }
@@ -161,7 +155,7 @@ export function createChatDeliveryCreator(
   async function create(input: ChatDeliveryCreateInput): Promise<void> {
     if (closed) throw clientFailure(
       'STRONGFLOW_CREATE_VIEW_MODEL_CLOSED',
-      'The Delivery creation view-model is closed.',
+      '交付创建视图已关闭。',
     )
     if (currentState.status === 'submitting' || currentState.status === 'waiting') {
       return
@@ -176,25 +170,25 @@ export function createChatDeliveryCreator(
       .map(value => value.trim())
       .filter(value => value.length > 0)
     if (title.length === 0) {
-      invalid('STRONGFLOW_CREATE_TITLE_REQUIRED', 'Enter a title for the new Delivery.')
+      invalid('STRONGFLOW_CREATE_TITLE_REQUIRED', '请输入新交付的标题。')
       return
     }
     if (goal.length === 0) {
-      invalid('STRONGFLOW_CREATE_GOAL_REQUIRED', 'Enter the Delivery goal.')
+      invalid('STRONGFLOW_CREATE_GOAL_REQUIRED', '请输入交付目标。')
       return
     }
     if (baseRevision.length === 0) {
-      invalid('STRONGFLOW_CREATE_BASE_REVISION_REQUIRED', 'Enter the repository baseline revision.')
+      invalid('STRONGFLOW_CREATE_BASE_REVISION_REQUIRED', '请输入仓库基准修订版。')
       return
     }
     if (deliveryScope.length === 0) {
-      invalid('STRONGFLOW_CREATE_SCOPE_REQUIRED', 'Enter at least one in-scope result.')
+      invalid('STRONGFLOW_CREATE_SCOPE_REQUIRED', '请至少输入一项范围内结果。')
       return
     }
     if (acceptanceCriteria.length === 0) {
       invalid(
         'STRONGFLOW_CREATE_ACCEPTANCE_REQUIRED',
-        'Enter at least one initial acceptance criterion.',
+        '请至少输入一项初始验收标准。',
       )
       return
     }
@@ -211,7 +205,7 @@ export function createChatDeliveryCreator(
     if (attempt !== null && attempt.inputKey !== inputKey) {
       invalid(
         'STRONGFLOW_CREATE_DRAFT_CHANGED_AFTER_SUBMIT',
-        'Retry the submitted Delivery draft before starting another conversion.',
+        '请先重试已提交的交付草稿，再开始其他转换。',
       )
       return
     }
@@ -245,11 +239,9 @@ export function createChatDeliveryCreator(
               sourceProductSessionId: input.sourceProductSessionId,
               title,
             },
-            tasks: [],
           },
         },
         created: null,
-        advanceRequest: null,
       }
     }
     const currentAttempt = attempt
@@ -277,39 +269,6 @@ export function createChatDeliveryCreator(
         }
         currentAttempt.created = created
       }
-      currentAttempt.advanceRequest ??= {
-        schemaVersion: SCHEMA_VERSION,
-        requestId: options.nextRequestId(),
-        actor: options.actor,
-        scope: options.scope,
-        command: CommandName.DeliveryAdvance,
-        expectedRevision: currentAttempt.created.revision,
-        payload: {
-          deliveryId,
-          // 委托交付创建后先进入方案规划;调度画像由服务器策略约束。
-          dispatchProfile: 'planner',
-        },
-      }
-      const advanceRequest = currentAttempt.advanceRequest
-      const advanceResponse = await options.client.command(
-        advanceRequest,
-        { signal: controller.signal },
-      )
-      if (closed || active !== controller) return
-      const advanced = completedDelivery(
-        advanceResponse,
-        CommandName.DeliveryAdvance,
-        advanceRequest.requestId,
-        deliveryId,
-      )
-      if (advanced === null) {
-        publish('waiting', null)
-        return
-      }
-      if (advanced.activeWorkRunId === null) throw clientFailure(
-        'STRONGFLOW_CREATE_WORKRUN_REQUIRED',
-        'The new Delivery did not expose its executable work run.',
-      )
       publish('created', null)
       options.onCreated(deliveryId)
     } catch (error) {
@@ -338,7 +297,7 @@ export function createChatDeliveryCreator(
         if (currentState.status === 'waiting') publish('error', new ControlPlaneClientError({
           kind: 'cancelled',
           code: 'REQUEST_CANCELLED',
-          message: 'Delivery creation was cancelled locally.',
+          message: '交付创建已在本地取消。',
           requestId: null,
           retryable: false,
         }))
@@ -350,7 +309,7 @@ export function createChatDeliveryCreator(
       publish('error', new ControlPlaneClientError({
         kind: 'cancelled',
         code: 'REQUEST_CANCELLED',
-        message: 'Delivery creation was cancelled locally.',
+        message: '交付创建已在本地取消。',
         requestId: null,
         retryable: false,
       }))

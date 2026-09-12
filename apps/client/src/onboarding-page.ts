@@ -62,7 +62,7 @@ export function mountOnboardingPage(options: OnboardingPageOptions): OnboardingP
   })
 
   const subtitle = element(document, 'p', 'wwc-onboarding-subtitle')
-  subtitle.textContent = '在执行任务的电脑上启动 Client，输入它显示的配对码。'
+  subtitle.textContent = '在执行任务的电脑上启动执行设备客户端，输入它显示的配对码。'
 
   const form = element(document, 'form', 'wwc-onboarding-form')
   const codeLabel = element(document, 'label', 'wwc-onboarding-label')
@@ -82,7 +82,7 @@ export function mountOnboardingPage(options: OnboardingPageOptions): OnboardingP
 
   const helpContent = element(document, 'div', 'wwc-onboarding-help')
   const helpText = element(document, 'p', 'wwc-onboarding-help-text')
-  helpText.textContent = '在执行任务的电脑上安装并启动 WinWinCode Client；Client 启动后会显示 8 位配对码，把它填在这里即可连接。'
+  helpText.textContent = '在执行任务的电脑上安装并启动 WinWinCode 客户端；启动后会显示 8 位配对码，把它填在这里即可连接。'
   helpContent.append(helpText)
   const helpToggle = element(document, 'button', 'wwc-onboarding-help-toggle')
   helpToggle.type = 'button'
@@ -91,7 +91,7 @@ export function mountOnboardingPage(options: OnboardingPageOptions): OnboardingP
   helpContent.id = 'wwc-onboarding-help-content'
   helpContent.hidden = true
   const helpLabel = element(document, 'span', 'wwc-onboarding-help-label')
-  helpLabel.textContent = '如何启动 Client'
+  helpLabel.textContent = '如何启动执行设备客户端'
   helpToggle.append(helpLabel)
   helpToggle.addEventListener('click', () => {
     const expanded = helpToggle.getAttribute('aria-expanded') === 'true'
@@ -106,7 +106,7 @@ export function mountOnboardingPage(options: OnboardingPageOptions): OnboardingP
     event.preventDefault()
     const pairingCode = code.value.replace(/\D+/gu, '')
     if (!PAIRING_CODE_PATTERN.test(pairingCode)) {
-      feedback.textContent = '配对码是 Client 显示的 8 位数字。'
+      feedback.textContent = '配对码是执行设备客户端显示的 8 位数字。'
       return
     }
     submit.disabled = true
@@ -119,7 +119,7 @@ export function mountOnboardingPage(options: OnboardingPageOptions): OnboardingP
         submit.disabled = false
         feedback.textContent = error instanceof Error && error.message.length > 0
           ? error.message
-          : '连接失败。请确认 Client 已启动并重新输入配对码。'
+          : '连接失败。请确认客户端已启动并重新输入配对码。'
       })
   })
 

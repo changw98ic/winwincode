@@ -84,7 +84,7 @@ function selectionError(): ControlPlaneClientError {
   return new ControlPlaneClientError({
     kind: 'authorization',
     code: 'SCOPE_SELECTION_NOT_AUTHORIZED',
-    message: 'The selected Scope is not present in the current browser session.',
+    message: '当前浏览器会话中没有所选范围。',
     requestId: null,
     retryable: false,
   })
@@ -138,7 +138,7 @@ export function createScopeSelectorViewModel(
     throw new ControlPlaneClientError({
       kind: 'protocol',
       code: 'SCOPE_SELECTOR_CLOSED',
-      message: 'The Scope selector is closed.',
+      message: '范围选择器已关闭。',
       requestId: null,
       retryable: false,
     })

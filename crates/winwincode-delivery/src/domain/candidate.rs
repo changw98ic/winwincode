@@ -36,7 +36,7 @@ use std::collections::HashSet;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-use crate::application::stage::{
+use crate::application::workrun_execution::{
     DeliveryTerminalOutcomeFacts, TerminalOutcomeStatus, VerifiedTerminalOutcome,
 };
 
@@ -45,8 +45,8 @@ use super::{
     SessionBindingId, bounded_text, validation_error,
 };
 use winwincode_domain::{
-    CodexThreadId, DeliveryId, DeliveryTaskId, ExecutionJobId, FencingToken, LeaseId,
-    ProductSessionId, Sha256Digest, WorkRunId, WorkerId, WorkerInstanceId, WorkerSessionId,
+    CodexThreadId, DeliveryId, ExecutionJobId, FencingToken, LeaseId, ProductSessionId,
+    Sha256Digest, WorkItemId, WorkRunId, WorkerId, WorkerInstanceId, WorkerSessionId,
 };
 use winwincode_storage::{GitSourcePathState, ValidatedGitSourceArtifact};
 
@@ -261,7 +261,7 @@ pub struct FrozenDeliveryCandidate {
     delivery_spec_revision: u64,
     repository: RepositoryRef,
     base_revision: String,
-    producer_delivery_task_id: Option<DeliveryTaskId>,
+    producer_work_item_id: Option<WorkItemId>,
     producer_work_run_id: WorkRunId,
     producer_attempt: u64,
     producer_session_binding_id: SessionBindingId,
@@ -319,8 +319,8 @@ impl FrozenDeliveryCandidate {
     }
 
     #[must_use]
-    pub fn producer_delivery_task_id(&self) -> Option<&DeliveryTaskId> {
-        self.producer_delivery_task_id.as_ref()
+    pub fn producer_work_item_id(&self) -> Option<&WorkItemId> {
+        self.producer_work_item_id.as_ref()
     }
 
     #[must_use]
@@ -469,7 +469,7 @@ struct CandidateIdentity<'candidate> {
     delivery_spec_revision: u64,
     repository: &'candidate RepositoryRef,
     base_revision: &'candidate str,
-    producer_delivery_task_id: Option<&'candidate DeliveryTaskId>,
+    producer_work_item_id: Option<&'candidate WorkItemId>,
     producer_work_run_id: &'candidate WorkRunId,
     producer_attempt: u64,
     producer_session_binding_id: &'candidate SessionBindingId,
@@ -510,7 +510,7 @@ pub fn freeze_delivery_candidate(
     delivery: &Delivery,
     facts: &FreezeCandidateFacts,
 ) -> Result<FrozenDeliveryCandidate, DeliveryValidationError> {
-    freeze_candidate_for_stage(delivery, facts, "executor")
+    freeze_candidate_for_profile(delivery, facts, "executor")
 }
 
 /// Freezes a candidate only after the storage-owned source adapter rebuilt all
@@ -733,10 +733,10 @@ pub(crate) fn freeze_authorized_rework_candidate(
     delivery: &Delivery,
     facts: &FreezeCandidateFacts,
 ) -> Result<FrozenDeliveryCandidate, DeliveryValidationError> {
-    freeze_candidate_for_stage(delivery, facts, "remediator")
+    freeze_candidate_for_profile(delivery, facts, "remediator")
 }
 
-fn freeze_candidate_for_stage(
+fn freeze_candidate_for_profile(
     delivery: &Delivery,
     facts: &FreezeCandidateFacts,
     expected_profile: &str,
@@ -763,11 +763,7 @@ fn freeze_candidate_for_stage(
         delivery_spec_revision: delivery.snapshot().spec.revision,
         repository: delivery.snapshot().spec.repository.clone(),
         base_revision: delivery.snapshot().spec.base_revision.clone(),
-        // WorkRun is the authoritative producer identity.  A DeliveryTask is
-        // carried only when the Delivery has one unambiguous task; it is not
-        // inferred from stage labels or binding names.
-        producer_delivery_task_id: (delivery.snapshot().tasks.len() == 1)
-            .then(|| delivery.snapshot().tasks[0].id.clone()),
+        producer_work_item_id: Some(producer.work_item_id.clone()),
         producer_work_run_id: snapshot.work_run_id.clone(),
         producer_attempt: u64::try_from(producer.attempt)
             .map_err(|_| stale_candidate("candidate producer attempt is invalid"))?,
@@ -877,7 +873,7 @@ impl<'candidate> From<&'candidate FrozenDeliveryCandidate> for CandidateIdentity
             delivery_spec_revision: candidate.delivery_spec_revision,
             repository: &candidate.repository,
             base_revision: &candidate.base_revision,
-            producer_delivery_task_id: candidate.producer_delivery_task_id.as_ref(),
+            producer_work_item_id: candidate.producer_work_item_id.as_ref(),
             producer_work_run_id: &candidate.producer_work_run_id,
             producer_attempt: candidate.producer_attempt,
             producer_session_binding_id: &candidate.producer_session_binding_id,
@@ -1211,7 +1207,7 @@ pub mod test_support {
     #![allow(dead_code, clippy::wildcard_imports)]
 
     use super::*;
-    use crate::application::stage::{
+    use crate::application::workrun_execution::{
         TerminalArtifactReference, TerminalOutcomeStatus, fixture_verified_terminal_outcome,
         test_support::{active_lease_identity, terminal_outcome_metadata},
     };
@@ -1542,32 +1538,26 @@ mod tests {
         validated_git_snapshot,
     };
     use super::*;
-    use crate::domain::DeliveryStage;
-    use crate::domain::{
-        DeliveryStatus, StageRun, StageRunActorType, StageRunStatus, test_fixture,
-    };
-    use winwincode_domain::{
-        CodexThreadId, ExecutionJobId, ProductSessionId, StageRunId, WorkerSessionId,
-    };
+    use crate::domain::{DeliveryStatus, test_fixture};
+    use winwincode_domain::{CodexThreadId, ExecutionJobId, ProductSessionId, WorkerSessionId};
 
     fn writer_delivery() -> Delivery {
         let mut snapshot = test_fixture();
-        snapshot.status = DeliveryStatus::Verifying;
+        snapshot.status = DeliveryStatus::Ready;
         snapshot.evidence.clear();
         snapshot.verdict = None;
-        let run = &mut snapshot.stage_runs[0];
-        run.id = StageRunId("stage-executor-1".into());
-        run.stage = DeliveryStage::Executing;
-        run.role = "executor".into();
-        run.status = StageRunStatus::Succeeded;
-        run.started_at_millis = 1_800_000_000_010;
-        run.finished_at_millis = Some(1_800_000_000_020);
         let binding = &mut snapshot.session_bindings[0];
         binding.id = SessionBindingId("binding-executor-1".into());
         binding.work_run_id = binding.work_run_id.clone();
         binding.product_session_id = ProductSessionId("product-executor".into());
         binding.execution_job_id = ExecutionJobId("job-executor".into());
         binding.execution_profile = Some("executor".into());
+        binding
+            .runtime_context
+            .as_mut()
+            .expect("fixture runtime context")
+            .agent_identity
+            .role = "executor".into();
         binding.worker_session_id = Some(WorkerSessionId("worker-executor".into()));
         binding.codex_thread_id = Some(CodexThreadId("thread-executor".into()));
         binding.bound_at_millis = 1_800_000_000_011;
@@ -1617,8 +1607,7 @@ mod tests {
 
     #[test]
     fn freeze_candidate_fixture_binds_current_producer_and_seals_observable_input() {
-        let mut snapshot = writer_delivery().into_snapshot();
-        snapshot.stage_runs.clear();
+        let snapshot = writer_delivery().into_snapshot();
         let delivery =
             Delivery::try_from_snapshot(snapshot).expect("WorkRun-only candidate fixture");
         let producer = delivery.snapshot().session_bindings[0].work_run_id.clone();
@@ -1808,14 +1797,13 @@ mod tests {
                     "wct_01J00000000000000000000000".into(),
                 ),
                 work_contract_revision: winwincode_domain::Revision(1),
-                work_item_id: winwincode_domain::WorkItemId(
-                    "wit_01J00000000000000000000000".into(),
-                ),
+                work_item_id: WorkItemId("wit_01J00000000000000000000000".into()),
                 work_item_revision: winwincode_domain::Revision(1),
                 work_run_id: WorkRunId("wrn_01J00000000000000000000000".into()),
                 product_session_id: ProductSessionId("product-executor-duplicate".into()),
                 execution_job_id: ExecutionJobId("job-executor-duplicate".into()),
                 execution_profile: Some("executor".into()),
+                runtime_context: None,
                 worker_session_id: Some(WorkerSessionId("worker-executor-duplicate".into())),
                 codex_thread_id: Some(CodexThreadId("thread-executor-duplicate".into())),
                 bound_at_millis: 1_800_000_000_012,
@@ -1825,7 +1813,7 @@ mod tests {
                 lease_id: None,
                 fencing_token: None,
                 source_provenance:
-                    crate::domain::SessionBindingSourceProvenance::pending_delivery_advance(),
+                    crate::domain::SessionBindingSourceProvenance::pending_workrun_start(),
             }
             .with_test_authority("binding-executor-duplicate", 1),
         );
@@ -1833,34 +1821,15 @@ mod tests {
     }
 
     #[test]
-    fn candidate_rejects_taskless_executor_or_remediator_writer() {
-        for (stage, role) in [
-            (DeliveryStage::Executing, "executor"),
-            (DeliveryStage::Reworking, "remediator"),
-        ] {
-            let mut taskless = writer_delivery().into_snapshot();
-            taskless.stage_runs[0].stage = stage;
-            taskless.stage_runs[0].role = role.into();
-            taskless.stage_runs[0].delivery_task_id = None;
-            let taskless = Delivery::try_from_snapshot(taskless)
-                .expect("aggregate permits a Delivery-level run that cannot produce a candidate");
-            let facts = freeze_facts(&taskless, snapshot(&taskless));
-
-            if role == "executor" {
-                freeze_candidate_for_stage(&taskless, &facts, role)
-                    .expect("executor WorkRun identity and terminal proof");
-            } else {
-                assert!(freeze_candidate_for_stage(&taskless, &facts, role).is_err());
-            }
-        }
-    }
-
-    #[test]
     fn generic_candidate_freeze_uses_the_authoritative_work_run_for_a_remediator_writer() {
         let mut replacement = writer_delivery().into_snapshot();
-        replacement.stage_runs[0].stage = DeliveryStage::Reworking;
-        replacement.stage_runs[0].role = "remediator".into();
         replacement.session_bindings[0].execution_profile = Some("remediator".into());
+        replacement.session_bindings[0]
+            .runtime_context
+            .as_mut()
+            .expect("fixture runtime context")
+            .agent_identity
+            .role = "remediator".into();
         let replacement = Delivery::try_from_snapshot(replacement).expect("remediator output");
         let facts = freeze_facts(&replacement, snapshot(&replacement));
 
@@ -1872,23 +1841,6 @@ mod tests {
         let delivery = writer_delivery();
         let facts = freeze_facts(&delivery, snapshot(&delivery));
         let mut ambiguous = delivery.into_snapshot();
-        let task_id = ambiguous.stage_runs[0].delivery_task_id.clone();
-        ambiguous.stage_runs.insert(
-            0,
-            StageRun {
-                schema_version: super::super::DELIVERY_SCHEMA_VERSION,
-                id: StageRunId("stage-executor-concurrent".into()),
-                delivery_id: ambiguous.id.clone(),
-                delivery_task_id: task_id.clone(),
-                stage: DeliveryStage::Executing,
-                actor_type: StageRunActorType::Codex,
-                role: "executor".into(),
-                status: StageRunStatus::Succeeded,
-                attempt: 1,
-                started_at_millis: 1_800_000_000_010,
-                finished_at_millis: Some(1_800_000_000_020),
-            },
-        );
         ambiguous.session_bindings.push(
             SessionBinding {
                 schema_version: super::super::DELIVERY_SCHEMA_VERSION,
@@ -1898,14 +1850,13 @@ mod tests {
                     "wct_01J00000000000000000000000".into(),
                 ),
                 work_contract_revision: winwincode_domain::Revision(1),
-                work_item_id: winwincode_domain::WorkItemId(
-                    "wit_01J00000000000000000000000".into(),
-                ),
+                work_item_id: WorkItemId("wit_01J00000000000000000000000".into()),
                 work_item_revision: winwincode_domain::Revision(1),
                 work_run_id: WorkRunId("wrn_01J00000000000000000000000".into()),
                 product_session_id: ProductSessionId("product-executor-concurrent".into()),
                 execution_job_id: ExecutionJobId("job-executor-concurrent".into()),
                 execution_profile: Some("executor".into()),
+                runtime_context: None,
                 worker_session_id: Some(WorkerSessionId("worker-executor-concurrent".into())),
                 codex_thread_id: Some(CodexThreadId("thread-executor-concurrent".into())),
                 bound_at_millis: 1_800_000_000_011,
@@ -1915,7 +1866,7 @@ mod tests {
                 lease_id: None,
                 fencing_token: None,
                 source_provenance:
-                    crate::domain::SessionBindingSourceProvenance::pending_delivery_advance(),
+                    crate::domain::SessionBindingSourceProvenance::pending_workrun_start(),
             }
             .with_test_authority("binding-executor-concurrent", 1),
         );
@@ -1946,7 +1897,6 @@ mod tests {
             freeze_delivery_candidate(&delivery, &freeze_facts(&delivery, snapshot(&delivery)))
                 .expect("candidate");
         let mut later = delivery.into_snapshot();
-        later.stage_runs.clear();
         let mut run = later.work_run_aggregate.runs[0].clone();
         run.id = WorkRunId("wrn_01J00000000000000000000002".into());
         run.execution_job_id = ExecutionJobId("job_01J00000000000000000000002".into());
@@ -1992,19 +1942,6 @@ mod tests {
         assert!(assert_frozen_candidate_current(&changed_spec, &candidate).is_err());
 
         let mut later = delivery.into_snapshot();
-        later.stage_runs.push(StageRun {
-            schema_version: super::super::DELIVERY_SCHEMA_VERSION,
-            id: StageRunId("stage-remediator-1".into()),
-            delivery_id: later.id.clone(),
-            delivery_task_id: later.stage_runs[0].delivery_task_id.clone(),
-            stage: DeliveryStage::Reworking,
-            actor_type: StageRunActorType::Codex,
-            role: "remediator".into(),
-            status: StageRunStatus::Running,
-            attempt: 1,
-            started_at_millis: 1_800_000_000_030,
-            finished_at_millis: None,
-        });
         later.session_bindings.push(
             SessionBinding {
                 schema_version: super::super::DELIVERY_SCHEMA_VERSION,
@@ -2014,14 +1951,13 @@ mod tests {
                     "wct_01J00000000000000000000000".into(),
                 ),
                 work_contract_revision: winwincode_domain::Revision(1),
-                work_item_id: winwincode_domain::WorkItemId(
-                    "wit_01J00000000000000000000000".into(),
-                ),
+                work_item_id: WorkItemId("wit_01J00000000000000000000000".into()),
                 work_item_revision: winwincode_domain::Revision(1),
                 work_run_id: WorkRunId("wrn_01J00000000000000000000000".into()),
                 product_session_id: ProductSessionId("product-remediator".into()),
                 execution_job_id: ExecutionJobId("job-remediator".into()),
                 execution_profile: Some("remediator".into()),
+                runtime_context: None,
                 worker_session_id: Some(WorkerSessionId("worker-remediator".into())),
                 codex_thread_id: Some(CodexThreadId("thread-remediator".into())),
                 bound_at_millis: 1_800_000_000_031,
@@ -2031,7 +1967,7 @@ mod tests {
                 lease_id: None,
                 fencing_token: None,
                 source_provenance:
-                    crate::domain::SessionBindingSourceProvenance::pending_delivery_advance(),
+                    crate::domain::SessionBindingSourceProvenance::pending_workrun_start(),
             }
             .with_test_authority("binding-remediator-1", 1),
         );

@@ -1173,8 +1173,8 @@
         "productSessionId": {
           "$ref": "./domain.schema.json#/$defs/ProductSessionId"
         },
-        "stageRunId": {
-          "$ref": "./domain.schema.json#/$defs/StageRunId"
+        "workRunId": {
+          "$ref": "./domain.schema.json#/$defs/WorkRunId"
         },
         "workerSessionId": {
           "$ref": "./domain.schema.json#/$defs/WorkerSessionId"
@@ -1207,7 +1207,7 @@
         "occupancyFencingToken",
         "repositoryBindingId",
         "productSessionId",
-        "stageRunId",
+        "workRunId",
         "workerSessionId",
         "workerId",
         "workerInstanceId",

@@ -135,24 +135,17 @@ test('session-scoped ExecutionPort entries reuse the complete identity block', (
 })
 
 test('session-scoped HTTP and WebSocket entries reuse the complete identity block', () => {
-  for (const name of ['InputRespondPayload', 'DeliveryStageSessionBindingProjection']) {
+  for (const name of ['InputRespondPayload']) {
     const definition = http.$defs[name]
     if (name === 'InputRespondPayload') {
       assert.deepEqual(definition.properties.sessionIdentity, {
         $ref: './domain.schema.json#/$defs/SessionIdentity',
       }, name)
-    } else {
-      assert.deepEqual(definition.properties.sessionIdentity, {
-        oneOf: [
-          { $ref: './domain.schema.json#/$defs/SessionIdentity' },
-          { type: 'null' },
-        ],
-      }, name)
     }
     assert.ok(definition.required.includes('sessionIdentity'), name)
   }
 
-  const deliveryInvalidation = events.$defs.ControlPlaneWebSocketDeliveryStageRuntimeProjectionInvalidatedEvent
+  const deliveryInvalidation = events.$defs.ControlPlaneWebSocketWorkRunRuntimeProjectionInvalidatedEvent
   assert.deepEqual(deliveryInvalidation.properties.sessionIdentity, {
     $ref: './domain.schema.json#/$defs/SessionIdentity',
   })

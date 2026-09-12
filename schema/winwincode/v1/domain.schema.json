@@ -28,14 +28,6 @@
       "type": "string",
       "pattern": "^dlv_[0-9A-HJKMNP-TV-Z]{26}$"
     },
-    "DeliveryTaskId": {
-      "type": "string",
-      "pattern": "^dtk_[0-9A-HJKMNP-TV-Z]{26}$"
-    },
-    "StageRunId": {
-      "type": "string",
-      "pattern": "^run_[0-9A-HJKMNP-TV-Z]{26}$"
-    },
     "CandidateId": {
       "type": "string",
       "pattern": "^cnd_[0-9A-HJKMNP-TV-Z]{26}$"
@@ -611,6 +603,94 @@
       "type": "string",
       "pattern": "^git-tree:(?:[0-9a-f]{40}|[0-9a-f]{64})$",
       "description": "Exact Git tree object identity for a workspace snapshot. SHA-1 repositories use 40 lowercase hexadecimal digits and SHA-256 repositories use 64."
+    },
+    "AgentIdentityId": {
+      "type": "string",
+      "pattern": "^agt_[0-9A-HJKMNP-TV-Z]{26}$",
+      "description": "Stable Worker-and-role-derived Agent identity."
+    },
+    "RuntimeSessionAgentIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "workerId",
+        "name",
+        "role"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/AgentIdentityId"
+        },
+        "workerId": {
+          "$ref": "#/$defs/WorkerId"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "role": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        }
+      },
+      "description": "Secret-free stable Agent identity frozen when the embedded runtime opens a Session."
+    },
+    "RuntimeSessionWorkspace": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repositoryId",
+        "revision",
+        "writeMode"
+      ],
+      "properties": {
+        "repositoryId": {
+          "$ref": "#/$defs/RepositoryId"
+        },
+        "revision": {
+          "$ref": "#/$defs/WorkspaceRevision"
+        },
+        "writeMode": {
+          "type": "string",
+          "enum": [
+            "read-only",
+            "candidate"
+          ]
+        }
+      },
+      "description": "Exact detached repository workspace identity without a device-local path."
+    },
+    "RuntimeSessionContext": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "agentIdentity",
+        "provider",
+        "model",
+        "workspace"
+      ],
+      "properties": {
+        "agentIdentity": {
+          "$ref": "#/$defs/RuntimeSessionAgentIdentity"
+        },
+        "provider": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "workspace": {
+          "$ref": "#/$defs/RuntimeSessionWorkspace"
+        }
+      },
+      "description": "Secret-free immutable runtime facts reported by the Worker for one opened Session."
     },
     "InputRequestId": {
       "type": "string",
@@ -1211,7 +1291,7 @@
         "session.close",
         "delivery.create",
         "delivery.update_spec",
-        "delivery.advance",
+        "workrun.start",
         "workrun.cancel",
         "delivery.resolve_attention",
         "delivery.submit_verdict",
@@ -1227,7 +1307,7 @@
         "publication.cancel",
         "collaboration.notification.ack",
         "collaboration.presence.update",
-        "delivery.task_breakdown.create"
+        "workitems.create"
       ]
     },
     "CommandEnvelope": {
@@ -1267,33 +1347,6 @@
         }
       }
     },
-    "DeliveryStatus": {
-      "type": "string",
-      "enum": [
-        "draft",
-        "clarifying",
-        "ready",
-        "planning",
-        "plan-review",
-        "executing",
-        "verifying",
-        "reworking",
-        "needs-attention",
-        "ready-to-deliver",
-        "delivered"
-      ]
-    },
-    "DeliveryTaskStatus": {
-      "type": "string",
-      "enum": [
-        "pending",
-        "active",
-        "blocked",
-        "verifying",
-        "completed",
-        "failed"
-      ]
-    },
     "Count": {
       "type": "integer",
       "minimum": 0,
@@ -1323,38 +1376,58 @@
         }
       }
     },
-    "DeliveryTaskCountsProjection": {
+    "WorkItemCountsProjection": {
       "type": "object",
       "additionalProperties": false,
       "required": [
         "total",
-        "pending",
-        "active",
-        "blocked",
-        "verifying",
-        "completed",
-        "failed"
+        "backlog",
+        "ready",
+        "inProgress",
+        "waitingDependency",
+        "waitingHuman",
+        "candidateReady",
+        "validating",
+        "rework",
+        "done",
+        "failed",
+        "cancelled"
       ],
       "properties": {
         "total": {
           "$ref": "#/$defs/Count"
         },
-        "pending": {
+        "backlog": {
           "$ref": "#/$defs/Count"
         },
-        "active": {
+        "ready": {
           "$ref": "#/$defs/Count"
         },
-        "blocked": {
+        "inProgress": {
           "$ref": "#/$defs/Count"
         },
-        "verifying": {
+        "waitingDependency": {
           "$ref": "#/$defs/Count"
         },
-        "completed": {
+        "waitingHuman": {
+          "$ref": "#/$defs/Count"
+        },
+        "candidateReady": {
+          "$ref": "#/$defs/Count"
+        },
+        "validating": {
+          "$ref": "#/$defs/Count"
+        },
+        "rework": {
+          "$ref": "#/$defs/Count"
+        },
+        "done": {
           "$ref": "#/$defs/Count"
         },
         "failed": {
+          "$ref": "#/$defs/Count"
+        },
+        "cancelled": {
           "$ref": "#/$defs/Count"
         }
       }
@@ -1369,7 +1442,7 @@
         "ownership",
         "title",
         "status",
-        "taskCounts",
+        "workItemCounts",
         "openAttentionCount",
         "updatedAt"
       ],
@@ -1392,26 +1465,16 @@
           "maxLength": 500
         },
         "status": {
-          "$ref": "#/$defs/DeliveryStatus"
+          "$ref": "#/$defs/WorkItemState"
         },
-        "taskCounts": {
-          "$ref": "#/$defs/DeliveryTaskCountsProjection"
+        "workItemCounts": {
+          "$ref": "#/$defs/WorkItemCountsProjection"
         },
         "openAttentionCount": {
           "$ref": "#/$defs/Count"
         },
         "updatedAt": {
           "$ref": "#/$defs/Instant"
-        },
-        "workRunId": {
-          "oneOf": [
-            {
-              "$ref": "#/$defs/WorkRunId"
-            },
-            {
-              "type": "null"
-            }
-          ]
         },
         "activeWorkRunId": {
           "oneOf": [
@@ -2020,6 +2083,27 @@
     "RuntimeSessionProjection": {
       "type": "object",
       "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "workRunId"
+            ],
+            "properties": {
+              "workRunId": {
+                "$ref": "#/$defs/WorkRunId"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "runtimeContext": {
+                "$ref": "#/$defs/RuntimeSessionContext"
+              }
+            }
+          }
+        }
+      ],
       "required": [
         "sessionBindingId",
         "workRunId",
@@ -2032,6 +2116,7 @@
         "attempt",
         "fencingToken",
         "asOfSequence",
+        "runtimeContext",
         "plan",
         "agents",
         "agentEdges",
@@ -2095,6 +2180,17 @@
           "type": "integer",
           "minimum": 0,
           "maximum": 9007199254740991
+        },
+        "runtimeContext": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/RuntimeSessionContext"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Present for Delivery WorkRun sessions; standalone ProductSession runtime reads may not have the binding cut needed to expose it."
         },
         "plan": {
           "oneOf": [

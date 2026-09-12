@@ -71,7 +71,7 @@ export function mountDrawer(options: DrawerMountOptions): DrawerView {
     root.className = props.className ?? 'wwc-drawer'
     root.hidden = !props.open
     title.textContent = props.title
-    closeButton.setAttribute('aria-label', props.closeLabel ?? 'Close drawer')
+    closeButton.setAttribute('aria-label', props.closeLabel ?? '关闭抽屉')
     if (mountedContent !== props.content) {
       mountedContent = props.content
       content.replaceChildren(props.content)

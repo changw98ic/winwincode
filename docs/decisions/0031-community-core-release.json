@@ -212,7 +212,7 @@
       "schema/winwincode/v1/execution-port.schema.json",
       "schema/winwincode/v1/openapi.generated.json",
       "schema/winwincode/v1/schema-collection.generated.json",
-      "scripts/build-products.mjs",
+      "scripts/build-community.mjs",
       "scripts/generate-contracts.mjs",
       "scripts/product-build-contract.mjs",
       "scripts/release-artifact-contract.mjs",

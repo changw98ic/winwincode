@@ -13,12 +13,15 @@ const sourceFiles = [
   'features/chat.css',
   'features/extensions.css',
   'features/settings.css',
-  'features/attention-center.css',
   'features/home.css',
+  'features/projects.css',
+  'features/onboarding.css',
+  'features/device.css',
   'features/usage-health.css',
   'features/contextual-decision.css',
   'features/clients.css',
   'features/repositories.css',
+  'features/strongflow-review.css',
 ]
 
 function source(path) {

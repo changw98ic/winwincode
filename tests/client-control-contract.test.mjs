@@ -115,7 +115,7 @@ function workerLaunchGrant() {
     occupancyFencingToken: '3',
     repositoryBindingId: crockfordId('rbd'),
     productSessionId: crockfordId('psn'),
-    stageRunId: crockfordId('run'),
+    workRunId: crockfordId('wrn'),
     workerSessionId: crockfordId('wsn'),
     workerId: crockfordId('wrk'),
     workerInstanceId: crockfordId('wki'),
@@ -520,6 +520,7 @@ test('worker launch binds the grant to the command lease and token', () => {
   const parsed = parseServerToClientMessage(validMessage('client.worker.launch'))
   assert.equal(parsed.launchGrant.occupancyLeaseId, parsed.occupancyLeaseId)
   assert.equal(parsed.launchGrant.occupancyFencingToken, '3')
+  assert.equal(parsed.launchGrant.workRunId, crockfordId('wrn'))
   const mismatched = validMessage('client.worker.launch')
   mismatched.occupancyLeaseId = crockfordId('ocl', 7)
   assert.equal(
@@ -530,6 +531,21 @@ test('worker launch binds the grant to the command lease and token', () => {
   assert.equal(
     errorCodeOf(() => parseWorkerLaunchGrant(numericGrantToken)),
     'INVALID_IDENTIFIER',
+  )
+  assert.equal(
+    errorCodeOf(() => parseWorkerLaunchGrant({
+      ...workerLaunchGrant(),
+      workRunId: crockfordId('run'),
+    })),
+    'INVALID_IDENTIFIER',
+  )
+  const { workRunId: _workRunId, ...legacyGrant } = workerLaunchGrant()
+  assert.equal(
+    errorCodeOf(() => parseWorkerLaunchGrant({
+      ...legacyGrant,
+      stageRunId: crockfordId('run'),
+    })),
+    'INVALID_SHAPE',
   )
 })
 

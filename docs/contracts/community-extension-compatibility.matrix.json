@@ -1,0 +1,177 @@
+{
+  "schemaVersion": "winwincode.community-extension-compatibility.v1",
+  "recordedAt": "2026-09-11",
+  "issueId": "winwincode-72t.1",
+  "status": "verified-baseline",
+  "source": {
+    "repository": "https://github.com/openai/codex",
+    "tag": "rust-v0.149.0",
+    "version": "0.149.0",
+    "commit": "758ef40f50c1a458425c7cfbf1eb12cbc07af0b0",
+    "archiveSha256": "sha256:0413a0e7680bcc2b6c6e998a6ad358115707317ef5d0121dcb9275e88c36121a",
+    "licenseSpdx": "Apache-2.0",
+    "noticeFiles": [
+      "LICENSE",
+      "NOTICE",
+      "THIRD_PARTY_NOTICES.md",
+      "third_party/codex/LICENSE",
+      "third_party/codex/NOTICE"
+    ]
+  },
+  "policy": {
+    "discovery": "metadata-only-no-execution",
+    "validationIsSecurityCertification": false,
+    "installation": "not-enabled-until-source-digest-license-host-and-permission-preflight-exists",
+    "unknownPackage": "unverified-and-not-executable",
+    "mcpInvocation": "worker-capability-catalog-then-action-gateway",
+    "unmanagedCapability": "deny",
+    "fullCordisRuntime": "unsupported",
+    "arbitraryDomOrAuthorityAccess": "unsupported",
+    "frontend": "presentation-only-no-extension-code-is-loaded",
+    "serverAuthorizationDependsOnPluginUi": false
+  },
+  "classifications": [
+    "direct_import",
+    "adapt_then_support",
+    "reference_only",
+    "unsupported"
+  ],
+  "samples": [
+    {
+      "id": "imagegen",
+      "kind": "skill",
+      "sourceDirectory": "third_party/codex/codex-rs/skills/src/assets/samples/imagegen",
+      "treeSha256": "sha256:6a87a6788545d953bd75224d969f012ac415ddd9cab5d0ce4e3095090ffebad7",
+      "licenseSpdx": "Apache-2.0",
+      "licenseEvidence": "third_party/codex/codex-rs/skills/src/assets/samples/imagegen/LICENSE.txt",
+      "platform": "manifest-portable-host-dependent",
+      "hostDependencies": [
+        "python3",
+        "network",
+        "OpenAI Images API"
+      ],
+      "classification": "adapt_then_support",
+      "verification": "unverified",
+      "decision": "investigate"
+    },
+    {
+      "id": "openai-docs",
+      "kind": "skill",
+      "sourceDirectory": "third_party/codex/codex-rs/skills/src/assets/samples/openai-docs",
+      "treeSha256": "sha256:ebeaff5ef94d1360677964a425b5b0402ce3732d6c8530b83f49e13eead3b62d",
+      "licenseSpdx": "Apache-2.0",
+      "licenseEvidence": "third_party/codex/codex-rs/skills/src/assets/samples/openai-docs/LICENSE.txt",
+      "platform": "manifest-portable-host-dependent",
+      "hostDependencies": [
+        "node>=24",
+        "network",
+        "official OpenAI sources"
+      ],
+      "classification": "adapt_then_support",
+      "verification": "unverified",
+      "decision": "investigate"
+    },
+    {
+      "id": "plugin-creator",
+      "kind": "skill",
+      "sourceDirectory": "third_party/codex/codex-rs/skills/src/assets/samples/plugin-creator",
+      "treeSha256": "sha256:130ddb59a8be1d79919a621ef322ae8a34aff6fc5dd9fc8ac764e83e8692b3ac",
+      "licenseSpdx": "Apache-2.0",
+      "licenseEvidence": "third_party/codex/LICENSE",
+      "platform": "manifest-portable-host-dependent",
+      "hostDependencies": [
+        "python3",
+        "managed filesystem write"
+      ],
+      "classification": "adapt_then_support",
+      "verification": "unverified",
+      "decision": "investigate"
+    },
+    {
+      "id": "review-agent",
+      "kind": "skill",
+      "sourceDirectory": "third_party/codex/codex-rs/skills/src/assets/samples/review-agent",
+      "treeSha256": "sha256:7d3bde7aa65d44442ea6fe7b23467076f6711fafeb529a1c6452bb9f69ef1397",
+      "licenseSpdx": "Apache-2.0",
+      "licenseEvidence": "third_party/codex/LICENSE",
+      "platform": "manifest-portable",
+      "hostDependencies": [
+        "embedded Codex Core",
+        "restricted reviewer capability"
+      ],
+      "classification": "adapt_then_support",
+      "verification": "unverified",
+      "decision": "investigate"
+    },
+    {
+      "id": "skill-creator",
+      "kind": "skill",
+      "sourceDirectory": "third_party/codex/codex-rs/skills/src/assets/samples/skill-creator",
+      "treeSha256": "sha256:e7091a812f5883d394328f27cca055d927aa3111cbf60d78d504ac89639f8ee4",
+      "licenseSpdx": "Apache-2.0",
+      "licenseEvidence": "third_party/codex/codex-rs/skills/src/assets/samples/skill-creator/license.txt",
+      "platform": "manifest-portable-host-dependent",
+      "hostDependencies": [
+        "python3",
+        "managed filesystem write"
+      ],
+      "classification": "adapt_then_support",
+      "verification": "unverified",
+      "decision": "investigate"
+    },
+    {
+      "id": "skill-installer",
+      "kind": "skill",
+      "sourceDirectory": "third_party/codex/codex-rs/skills/src/assets/samples/skill-installer",
+      "treeSha256": "sha256:b8f1e83712d80b6daea442c551744ab90944731f2a372b1e94f39af3ca063029",
+      "licenseSpdx": "Apache-2.0",
+      "licenseEvidence": "third_party/codex/codex-rs/skills/src/assets/samples/skill-installer/LICENSE.txt",
+      "platform": "manifest-portable-host-dependent",
+      "hostDependencies": [
+        "python3",
+        "network",
+        "GitHub",
+        "managed filesystem write"
+      ],
+      "classification": "adapt_then_support",
+      "verification": "unverified",
+      "decision": "investigate"
+    }
+  ],
+  "representatives": [
+    {
+      "id": "embedded-codex-mcp-capability",
+      "kind": "mcp",
+      "classification": "adapt_then_support",
+      "verification": "verified",
+      "decision": "accept",
+      "implementation": "crates/winwincode-execution-port/src/capability_adapter.rs",
+      "evidence": "crates/winwincode-execution-port/tests/capability_adapter.rs"
+    },
+    {
+      "id": "dsh-cordis-backend",
+      "kind": "host-runtime",
+      "classification": "unsupported",
+      "verification": "verified-rejected",
+      "decision": "avoid",
+      "evidence": "scripts/source-boundary-lint.mjs"
+    },
+    {
+      "id": "dsh-interface-plugin",
+      "kind": "frontend-plugin",
+      "classification": "reference_only",
+      "verification": "unverified",
+      "decision": "avoid",
+      "evidence": "upstream/sources.lock.json"
+    },
+    {
+      "id": "community-card-viewer-registration",
+      "kind": "frontend-plugin",
+      "classification": "unsupported",
+      "verification": "verified-absent",
+      "decision": "investigate",
+      "implementation": "apps/client/src/extensions-page.ts",
+      "boundary": "The current page renders local presentation samples only; install, plugin code, DOM access, and authority ports are not exposed."
+    }
+  ]
+}

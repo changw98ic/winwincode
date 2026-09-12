@@ -33,12 +33,12 @@ const REQUIRED_SECTION_IDS = Object.freeze([
   'agent-graph',
   'attention',
   'command-test-activity',
-  'delivery-tasks',
+  'work-items',
   'evidence',
   'publication',
   'requirements',
   'solution',
-  'stages',
+  'work-runs',
   'usage',
   'verdict',
 ].sort())
@@ -79,24 +79,6 @@ function repositoryPath(relativePath) {
   assert.equal(relativePath.startsWith('/'), false, `${relativePath} must be repository-relative`)
   assert.equal(relativePath.split('/').includes('..'), false, `${relativePath} must stay in the repository`)
   return join(root, relativePath)
-}
-
-function assertPublicSymbol(mapping) {
-  const source = readFileSync(repositoryPath(mapping.path), 'utf8')
-  assert.match(
-    source,
-    new RegExp(`export\\s+(?:const|type|class|interface|function)\\s+${mapping.name}\\b`, 'u'),
-    `${mapping.path} does not export ${mapping.name}`,
-  )
-}
-
-function assertTestCase(mapping) {
-  const source = readFileSync(repositoryPath(mapping.path), 'utf8')
-  assert.equal(
-    source.includes(`test('${mapping.name}'`) || source.includes(`test("${mapping.name}"`),
-    true,
-    `${mapping.path} does not define test ${mapping.name}`,
-  )
 }
 
 function rustFiles(directory) {
@@ -141,6 +123,7 @@ test('StrongFlow projection matrix covers every required field group and named R
       'bound-runtime-events',
       'canonical-delivery',
       'canonical-publication',
+      'canonical-workrun',
       'validated-plan-review',
     ].includes(section.source.kind), `${section.id} has an unknown source`)
     assert.ok(section.source.refs.length > 0, `${section.id} needs source references`)
@@ -150,8 +133,7 @@ test('StrongFlow projection matrix covers every required field group and named R
     assert.ok(section.scope.length > 0, `${section.id} needs an exact scope rule`)
     assert.ok(section.transports.http.length > 0, `${section.id} needs a reload query`)
     assert.ok(section.transports.websocket.length > 0, `${section.id} needs an invalidation event`)
-    for (const mapping of section.baseline.publicSymbols) assertPublicSymbol(mapping)
-    for (const mapping of section.baseline.tests) assertTestCase(mapping)
+    assert.equal(section.baseline, undefined, `${section.id} must not restore a retired baseline`)
     assert.match(section.rust.path, /^crates\/winwincode-[a-z-]+\/src\/[a-z_/]+\.rs$/u)
     assert.match(section.rust.testName, /^[a-z][a-z0-9_]+$/u)
   }
@@ -165,7 +147,8 @@ test('StrongFlow projection rules freeze binding, replay, redaction, and Web aut
 
   assert.deepEqual(matrix.runtimeBinding.requiredIdentity, [
     'deliveryId',
-    'stageRunId',
+    'workRunId',
+    'workItemId',
     'productSessionId',
     'workerSessionId',
     'codexThreadId',
@@ -221,7 +204,7 @@ test('StrongFlow projection rules freeze binding, replay, redaction, and Web aut
   for (const rule of matrix.rules) {
     assert.ok(rule.statement.length > 0, `${rule.id} needs a statement`)
     for (const path of rule.refs) assert.equal(existsSync(repositoryPath(path)), true, path)
-    for (const mapping of rule.baseline.tests) assertTestCase(mapping)
+    assert.equal(rule.baseline, undefined, `${rule.id} must not restore a retired baseline`)
     assert.match(rule.rust.path, /^crates\/winwincode-[a-z-]+\/src\/[a-z_/]+\.rs$/u)
     assert.match(rule.rust.testName, /^[a-z][a-z0-9_]+$/u)
   }
@@ -257,14 +240,14 @@ test('canonical contracts close every StrongFlow transport finding', () => {
   for (const field of [
     'requirements',
     'solutionReview',
-    'stages',
-    'tasks',
     'attention',
     'evidence',
     'currentCandidate',
     'verdict',
     'publication',
   ]) assert.ok(detail[field], field)
+  assert.equal(detail.stages, undefined)
+  assert.equal(detail.tasks, undefined)
 
   const runtime = domain.$defs.RuntimeProjectionSnapshot.properties
   assert.ok(runtime.readCursor)

@@ -58,9 +58,8 @@ test('delivery.get has one closed StrongFlow detail while DeliveryPage stays com
     'ownership',
     'title',
     'status',
-    'taskCounts',
+    'workItemCounts',
     'activeWorkRunId',
-    'workRunId',
     'openAttentionCount',
     'updatedAt',
   ]))
@@ -85,8 +84,6 @@ test('delivery.get has one closed StrongFlow detail while DeliveryPage stays com
     'requirements',
     'solutionReview',
     'diagramExecution',
-    'stages',
-    'tasks',
     'attention',
     'evidence',
     'currentCandidate',
@@ -97,8 +94,6 @@ test('delivery.get has one closed StrongFlow detail while DeliveryPage stays com
     'DeliveryRequirementsProjection',
     'SolutionReviewProjection',
     'StrongFlowDiagramExecutionProjection',
-    'DeliveryStageProjection',
-    'DeliveryTaskDetailProjection',
     'DeliveryAttentionProjection',
     'DeliveryEvidenceProjection',
     'FrozenCandidateSummaryProjection',
@@ -135,160 +130,6 @@ test('delivery.get has one closed StrongFlow detail while DeliveryPage stays com
   assert.equal(details.properties.hunks, undefined)
   assert.equal(details.properties.diffContent, undefined)
 
-  const binding = http.$defs.DeliveryStageSessionBindingProjection
-  assert.ok(binding.required.includes('workerSessionId'))
-  assert.ok(binding.required.includes('codexThreadId'))
-  assert.deepEqual(binding.properties.workerSessionId.oneOf.at(-1), { type: 'null' })
-  assert.deepEqual(binding.properties.codexThreadId.oneOf.at(-1), { type: 'null' })
-  assert.deepEqual(binding.oneOf, [
-    {
-      properties: {
-        codexThreadId: { type: 'null' },
-        workerSessionId: { type: 'null' },
-        sessionIdentity: { type: 'null' },
-        workRunId: { type: 'null' },
-        workerId: { type: 'null' },
-        leaseId: { type: 'null' },
-        attempt: { type: 'null' },
-        fencingToken: { type: 'null' },
-        sourceIdentity: { type: 'null' },
-      },
-    },
-    {
-      properties: {
-        workerSessionId: {
-          $ref: './domain.schema.json#/$defs/WorkerSessionId',
-        },
-        codexThreadId: {
-          $ref: './domain.schema.json#/$defs/CodexThreadId',
-        },
-        sessionIdentity: {
-          $ref: './domain.schema.json#/$defs/SessionIdentity',
-        },
-        workRunId: {
-          $ref: './domain.schema.json#/$defs/WorkRunId',
-        },
-        workerId: {
-          $ref: './domain.schema.json#/$defs/WorkerId',
-        },
-        leaseId: {
-          $ref: './domain.schema.json#/$defs/LeaseId',
-        },
-        attempt: {
-          type: 'integer',
-          minimum: 1,
-          maximum: 1000,
-        },
-        fencingToken: {
-          type: 'string',
-          minLength: 1,
-          maxLength: 20,
-          pattern: '^[1-9][0-9]{0,19}$',
-        },
-        sourceIdentity: {
-          $ref: './domain.schema.json#/$defs/SessionBindingSourceIdentity',
-        },
-      },
-    },
-  ])
-  assert.deepEqual(http.$defs.DeliveryStageProjection.oneOf[0], {
-    properties: {
-      actorType: { const: 'human' },
-      sessionBinding: { type: 'null' },
-    },
-  })
-  assert.deepEqual(http.$defs.DeliveryStageProjection.oneOf[1], {
-    properties: {
-      actorType: { const: 'codex' },
-      sessionBinding: { $ref: '#/$defs/DeliveryStageSessionBindingProjection' },
-    },
-  })
-  assert.deepEqual(http['x-winwincode-semantics'].deliveryStageSessionBinding, {
-    partialBindingFields: [
-      'bindingId',
-      'productSessionId',
-      'executionJobId',
-      'boundAt',
-      'workerSessionId',
-      'codexThreadId',
-      'sessionIdentity',
-      'stageRunId',
-      'workerId',
-      'leaseId',
-      'attempt',
-      'fencingToken',
-      'sourceIdentity',
-    ],
-    completeIdentityBlock: 'sessionIdentity',
-    completeSourceIdentity: 'sourceIdentity',
-    codexThreadRequiresWorkerSession: true,
-    humanStageBinding: 'must_be_null',
-    runtimeSessionBinding: 'worker_and_codex_required',
-  })
-})
-
-test('DeliveryStageSessionBindingProjection decodes both pending and complete branches', () => {
-  const domain = json('domain.schema.json')
-  const http = json('control-plane-http.schema.json')
-  const ajv = new Ajv2020({ allErrors: true, strict: true })
-  addFormats(ajv)
-  for (const [keyword, schemaType] of [
-    ['x-winwincode-semantics', 'object'],
-    ['x-winwincode-openapi', 'object'],
-    ['x-winwincode-transports', 'object'],
-  ]) ajv.addKeyword({ keyword, schemaType, valid: true })
-  ajv.addSchema(domain)
-  ajv.addSchema(http)
-  const validate = ajv.getSchema(
-    `${http.$id}#/$defs/DeliveryStageSessionBindingProjection`,
-  )
-  assert.ok(validate)
-
-  const pending = {
-    bindingId: 'binding:runtime:pending',
-    productSessionId: 'psn_00000000000000000000000000',
-    executionJobId: 'job_00000000000000000000000000',
-    workerSessionId: null,
-    codexThreadId: null,
-    boundAt: '2026-08-24T10:00:00.000Z',
-    sessionIdentity: null,
-    workRunId: null,
-    workerId: null,
-    leaseId: null,
-    attempt: null,
-    fencingToken: null,
-    sourceIdentity: null,
-  }
-  assert.equal(validate(pending), true, JSON.stringify(validate.errors))
-
-  const complete = {
-    ...pending,
-    workerSessionId: 'wsn_00000000000000000000000000',
-    codexThreadId: 'cdx_00000000000000000000000000',
-    sessionIdentity: {
-      productSessionId: pending.productSessionId,
-      workerSessionId: 'wsn_00000000000000000000000000',
-      codexThreadId: 'cdx_00000000000000000000000000',
-    },
-    workRunId: 'wrn_00000000000000000000000000',
-    workerId: 'wrk_00000000000000000000000000',
-    leaseId: 'lse_00000000000000000000000000',
-    attempt: 1,
-    fencingToken: '1',
-    sourceIdentity: {
-      kind: 'execution-worker',
-      workerId: 'wrk_00000000000000000000000000',
-      workerSessionId: 'wsn_00000000000000000000000000',
-      leaseId: 'lse_00000000000000000000000000',
-      workerInstanceId: 'wki_00000000000000000000000000',
-    },
-  }
-  assert.equal(validate(complete), true, JSON.stringify(validate.errors))
-
-  const partial = { ...pending, workRunId: complete.workRunId }
-  assert.equal(validate(partial), false)
-  const unknown = { ...pending, legacySessionId: 'legacy' }
-  assert.equal(validate(unknown), false)
 })
 
 test('current solution review and publication expose exact authority joins', () => {
@@ -300,9 +141,9 @@ test('current solution review and publication expose exact authority joins', () 
     'deliveryId',
     'deliverySpecId',
     'deliverySpecRevision',
-    'planningStageRunId',
+    'planningWorkRunId',
     'planningSessionBindingId',
-    'reviewStageRunId',
+    'reviewWorkRunId',
     'attentionItemId',
     'reviewSetSha256',
     'reviewStatus',
@@ -320,7 +161,7 @@ test('current solution review and publication expose exact authority joins', () 
     'processDiagram',
     'risks',
     'unresolvedItems',
-    'taskProposals',
+    'workItemProposals',
   ])
   assert.equal(review.properties.reviewSessionBindingId, undefined)
   assert.equal(review.properties.reviewStatus.$ref, '#/$defs/SolutionReviewStatus')
@@ -339,23 +180,23 @@ test('current solution review and publication expose exact authority joins', () 
   ])
   assert.equal(review.properties.reviewSetSha256.$ref,
     './domain.schema.json#/$defs/Sha256Digest')
-  assert.equal(review.properties.taskProposals.minItems, 1)
-  assert.equal(review.properties.taskProposals.items.$ref,
-    '#/$defs/DeliveryTaskProposalProjection')
-  const taskProposal = http.$defs.DeliveryTaskProposalProjection
-  assert.equal(taskProposal.additionalProperties, false)
-  assert.deepEqual(taskProposal.required, [
+  assert.equal(review.properties.workItemProposals.minItems, 1)
+  assert.equal(review.properties.workItemProposals.items.$ref,
+    '#/$defs/WorkItemProposalProjection')
+  const workItemProposal = http.$defs.WorkItemProposalProjection
+  assert.equal(workItemProposal.additionalProperties, false)
+  assert.deepEqual(workItemProposal.required, [
     'id',
     'title',
     'goal',
-    'acceptanceCriterionIds',
-    'blockedByTaskIds',
+    'criterionIds',
+    'dependsOn',
   ])
-  assert.equal(taskProposal.properties.ownerActorId, undefined)
-  assert.equal(taskProposal.properties.title.maxLength, 256)
-  assert.equal(review.properties.taskProposals.maxItems, 200)
-  assert.equal(taskProposal.properties.acceptanceCriterionIds.maxItems, 200)
-  assert.equal(taskProposal.properties.blockedByTaskIds.maxItems, 200)
+  assert.equal(workItemProposal.properties.ownerActorId, undefined)
+  assert.equal(workItemProposal.properties.title.maxLength, 256)
+  assert.equal(review.properties.workItemProposals.maxItems, 200)
+  assert.equal(workItemProposal.properties.criterionIds.maxItems, 200)
+  assert.equal(workItemProposal.properties.dependsOn.maxItems, 200)
   assert.equal(review.oneOf.length, 4)
   assert.deepEqual(review.oneOf.map(branch => branch.properties.reviewStatus.const), [
     'pending',
@@ -511,7 +352,7 @@ test('delivery and runtime reads share one server-issued bounded read cursor', (
     './domain.schema.json#/$defs/StrongFlowReadCursor')
   assert.equal(deliveryGet.required.includes('atCursor'), false)
 
-  const deliveryRuntime = http.$defs.DeliveryStageRuntimeProjectionGetParameters
+  const deliveryRuntime = http.$defs.WorkRunRuntimeProjectionGetParameters
   assert.ok(deliveryRuntime.required.includes('atCursor'))
   assert.equal(deliveryRuntime.properties.atCursor.$ref,
     './domain.schema.json#/$defs/StrongFlowReadCursor')
@@ -546,7 +387,7 @@ test('delivery and runtime reads share one server-issued bounded read cursor', (
       'publicationRevision',
       'eventCursor',
     ],
-    deliveryStageRuntimeRequiresReturnedCursor: true,
+    workRunRuntimeRequiresReturnedCursor: true,
     cursorAuthority: 'server_issued_and_authenticated',
     requestMustMatchCursor: [
       'envelope.scope',
@@ -845,7 +686,7 @@ test('WebSocket uses invalidation and reset names both canonical reload queries'
       $ref: '#/$defs/ControlPlaneWebSocketProductSessionRuntimeProjectionInvalidatedEvent',
     },
     {
-      $ref: '#/$defs/ControlPlaneWebSocketDeliveryStageRuntimeProjectionInvalidatedEvent',
+      $ref: '#/$defs/ControlPlaneWebSocketWorkRunRuntimeProjectionInvalidatedEvent',
     },
   ])
   const productInvalidated =
@@ -868,7 +709,7 @@ test('WebSocket uses invalidation and reset names both canonical reload queries'
   assert.equal(productInvalidated.properties.reloadQueries.maxItems, 1)
 
   const deliveryInvalidated =
-    events.$defs.ControlPlaneWebSocketDeliveryStageRuntimeProjectionInvalidatedEvent
+    events.$defs.ControlPlaneWebSocketWorkRunRuntimeProjectionInvalidatedEvent
   assert.deepEqual(deliveryInvalidated.required, [
     'type',
     'scopeKind',
@@ -880,7 +721,7 @@ test('WebSocket uses invalidation and reset names both canonical reload queries'
     'reloadQueries',
     'sessionIdentity',
   ])
-  assert.equal(deliveryInvalidated.properties.scopeKind.const, 'delivery-stage')
+  assert.equal(deliveryInvalidated.properties.scopeKind.const, 'work-run')
   assert.deepEqual(deliveryInvalidated.properties.reloadQueries.prefixItems, [
     { $ref: '#/$defs/ControlPlaneWebSocketDeliveryGetReloadQuery' },
     { $ref: '#/$defs/ControlPlaneWebSocketRuntimeProjectionGetReloadQuery' },
@@ -1004,7 +845,7 @@ test('canonical schemas carry generated-client route and event metadata', () => 
     runtimeEvent: 'runtime-projection.invalidated.v1',
     invalidationReloadQueries: {
       'product-session': ['runtime.projection.get'],
-      'delivery-stage': ['delivery.get', 'runtime.projection.get'],
+      'work-run': ['delivery.get', 'runtime.projection.get'],
     },
     resetStrategy: 'discard_then_full_reload_by_original_subscription_stream',
     authentication: {

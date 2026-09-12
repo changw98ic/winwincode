@@ -85,28 +85,28 @@ function deliverySummary(index, overrides = {}) {
     deliveryId: canonicalId('dlv', index),
     revision: 4,
     schemaVersion,
-    status: 'executing',
+    status: 'in_progress',
     title: `Delivery ${String(index)}`,
     updatedAt: '2026-09-02T00:30:00.000Z',
     ownership: ownership(),
-    activeStageRunId: canonicalId('str', index),
+    activeWorkRunId: canonicalId('str', index),
     openAttentionCount: 1,
-    taskCounts: { total: 4, pending: 0, active: 1, blocked: 0, verifying: 0, completed: 1, failed: 2 },
+    workItemCounts: { ready: 0, waitingHuman: 0, candidateReady: 0, rework: 0, cancelled: 0, total: 4, backlog: 0, inProgress: 1, waitingDependency: 0, validating: 0, done: 1, failed: 2 },
     ...overrides,
   }
 }
 
 const deliveries = [
-  deliverySummary(1, { status: 'draft', activeStageRunId: null, openAttentionCount: 0 }),
-  deliverySummary(2, { status: 'clarifying' }),
-  deliverySummary(3, { status: 'executing' }),
-  deliverySummary(4, { status: 'reviewing', openAttentionCount: 0 }),
-  deliverySummary(5, { status: 'verifying', openAttentionCount: 0 }),
-  deliverySummary(6, { status: 'delivered', activeStageRunId: null, openAttentionCount: 0, taskCounts: {
-    total: 4, pending: 0, active: 0, blocked: 0, verifying: 0, completed: 4, failed: 0,
+  deliverySummary(1, { status: 'backlog', activeWorkRunId: null, openAttentionCount: 0 }),
+  deliverySummary(2, { status: 'waiting_human' }),
+  deliverySummary(3, { status: 'in_progress' }),
+  deliverySummary(4, { status: 'validating', openAttentionCount: 0 }),
+  deliverySummary(5, { status: 'validating', openAttentionCount: 0 }),
+  deliverySummary(6, { status: 'done', activeWorkRunId: null, openAttentionCount: 0, workItemCounts: { ready: 0, waitingHuman: 0, candidateReady: 0, rework: 0, cancelled: 0,
+    total: 4, backlog: 0, inProgress: 0, waitingDependency: 0, validating: 0, done: 4, failed: 0,
   } }),
-  deliverySummary(7, { status: 'failed', activeStageRunId: null, taskCounts: {
-    total: 4, pending: 0, active: 0, blocked: 0, verifying: 0, completed: 2, failed: 2,
+  deliverySummary(7, { status: 'failed', activeWorkRunId: null, workItemCounts: { ready: 0, waitingHuman: 0, candidateReady: 0, rework: 0, cancelled: 0,
+    total: 4, backlog: 0, inProgress: 0, waitingDependency: 0, validating: 0, done: 2, failed: 2,
   } }),
 ]
 
@@ -161,7 +161,7 @@ function approval(index) {
         productSessionId,
         workerSessionId: canonicalId('wss', index),
         codexThreadId: canonicalId('thr', index),
-        stageRunId: canonicalId('str', index),
+        workRunId: canonicalId('wrn', index),
       },
     },
   }
@@ -243,12 +243,31 @@ function chatRuntime() {
   }
 }
 
+function attentionItem(index, delivery) {
+  return {
+    assignedTo: null,
+    blocking: true,
+    createdAt: '2026-09-02T00:40:00.000Z',
+    deliverySpecId: `spec-${String(index)}`,
+    id: canonicalId('att', index),
+    options: [],
+    resolutionSummary: null,
+    resolvedAt: null,
+    resolvedBy: null,
+    workRunId: delivery.activeWorkRunId,
+    status: 'open',
+    title: `Review Delivery ${String(index)}`,
+    type: 'decision_required',
+  }
+}
+
 function deliveryDetail(delivery) {
+  const index = deliveries.indexOf(delivery) + 1
   return {
     deliveryId: delivery.deliveryId,
     deliveryRevision: delivery.revision,
     ownership: delivery.ownership,
-    attention: delivery.openAttentionCount > 0 ? [attentionItem(1)] : [],
+    attention: delivery.openAttentionCount > 0 ? [attentionItem(index, delivery)] : [],
     currentCandidate: null,
     requirements: {
       repository: { kind: 'local-git', locator: 'workspace://repository' },
@@ -304,6 +323,7 @@ function serve(request) {
 
 const controlPlane = {
   serverUrl: 'https://control.localhost/visual-pages',
+  async listClients() { return [] },
   async restore() {
     return {
       schemaVersion,
@@ -380,11 +400,6 @@ const PAGES = Object.freeze({
     route: '#/settings',
     selector: '.wwc-settings',
     status: '.wwc-settings-status .wwc-status-badge-label',
-  },
-  attention: {
-    route: '#/attention',
-    selector: '.wwc-attention-center',
-    status: '.wwc-attention-center-status .wwc-status-badge-label',
   },
 })
 

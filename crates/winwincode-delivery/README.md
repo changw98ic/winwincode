@@ -1,6 +1,6 @@
 # winwincode-delivery
 
-This internal crate owns the canonical ten-object Delivery aggregate and its
+This internal crate owns the canonical Delivery aggregate and its
 append-only record journal.
 
 The Control Plane calls two small interfaces:
@@ -22,16 +22,13 @@ module can use `DeliveryStore::new` with a shared adapter.
 `InMemoryDeliveryJournal` is deterministic test infrastructure. It is not the
 local or enterprise persistence choice.
 
-The `application` module owns the narrow stage-coordination commands. It picks
-the only legal next stage, permits one active `StageRun`, requires an exact
-lease-fenced terminal Worker outcome for handoff, approves the current reviewed
-task graph once, blocks on current Attention items, and returns immutable
-effects for the Control Plane to persist. It never dispatches an `ExecutionJob`
-or copies Codex plan, agent, tool, or scheduler state.
+The `application` module owns WorkItem scheduling and WorkRun coordination. It
+starts every dependency-ready WorkItem independently, requires an exact
+lease-fenced terminal Worker outcome, blocks on current Attention items, and
+returns immutable effects for the Control Plane to persist.
 
-`SessionBinding` has one canonical shape: Delivery/task/StageRun plus
+`SessionBinding` joins one Delivery, WorkItem, and WorkRun to its
 `ProductSessionId`, `ExecutionJobId`, optional `WorkerSessionId`, and optional
-`CodexThreadId`. The old DSH/Codex pair exists only in the frozen TypeScript
-oracle and is normalized once inside test migration support.
+`CodexThreadId`.
 
 Project-owned code is licensed under Apache-2.0.

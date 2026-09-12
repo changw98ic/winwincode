@@ -482,43 +482,37 @@ pub(crate) fn ensure_execution_queue_schema(connection: &Connection) -> Result<(
         .map_err(sql_error)?
         .is_some();
     if table_exists {
-        let (has_work_run_id, has_legacy_stage_run_id) = {
-            let mut statement = connection
-                .prepare("PRAGMA table_info(scheduler_execution_jobs)")
-                .map_err(sql_error)?;
-            let columns = statement
-                .query_map([], |row| row.get::<_, String>(1))
-                .map_err(sql_error)?;
-            let mut found_work = false;
-            let mut found_legacy = false;
-            for column in columns {
-                match column.map_err(sql_error)?.as_str() {
-                    "work_run_id" => found_work = true,
-                    "stage_run_id" => found_legacy = true,
-                    _ => {}
-                }
-            }
-            (found_work, found_legacy)
-        };
-        if !has_work_run_id {
-            connection
-                .execute(
-                    "ALTER TABLE scheduler_execution_jobs ADD COLUMN work_run_id TEXT",
-                    [],
-                )
-                .map_err(sql_error)?;
-        }
-        if has_legacy_stage_run_id
-            && connection
-                .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM scheduler_execution_jobs WHERE stage_run_id IS NOT NULL)",
-                    [],
-                    |row| row.get::<_, bool>(0),
-                )
-                .map_err(sql_error)?
+        let columns = connection
+            .prepare("PRAGMA table_info(scheduler_execution_jobs)")
+            .map_err(sql_error)?
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(sql_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(sql_error)?;
+        if columns
+            != [
+                "job_id",
+                "organization_id",
+                "workspace_id",
+                "project_id",
+                "repository_id",
+                "product_session_id",
+                "delivery_id",
+                "work_run_id",
+                "submission_request_id",
+                "payload_digest",
+                "dispatch_payload",
+                "state",
+                "attempt",
+                "revision",
+                "submitted_at",
+                "updated_at",
+                "cancellation_request_id",
+                "cancellation_requested_at",
+            ]
         {
             return Err(StorageError::adapter(
-                "legacy StageRun queue rows require an explicit WorkRun migration",
+                "scheduler execution queue requires the current WorkRun schema",
             ));
         }
     }
@@ -1465,41 +1459,13 @@ fn validate_instant(value: &Instant, field: &str) -> Result<(), StorageError> {
 }
 
 #[cfg(test)]
-mod migration_tests {
+mod schema_tests {
     use rusqlite::Connection;
 
     use super::ensure_execution_queue_schema;
 
     #[test]
-    fn empty_legacy_queue_gets_work_run_column_once() {
-        let connection = Connection::open_in_memory().expect("sqlite");
-        connection
-            .execute(
-                "CREATE TABLE scheduler_execution_jobs (
-                    job_id TEXT, organization_id TEXT, workspace_id TEXT,
-                    project_id TEXT, repository_id TEXT, product_session_id TEXT,
-                    delivery_id TEXT, stage_run_id TEXT, submission_request_id TEXT,
-                    payload_digest TEXT, dispatch_payload BLOB, state TEXT,
-                    attempt INTEGER, revision INTEGER, submitted_at TEXT,
-                    updated_at TEXT, cancellation_request_id TEXT,
-                    cancellation_requested_at TEXT
-                )",
-                [],
-            )
-            .expect("legacy table");
-        ensure_execution_queue_schema(&connection).expect("empty legacy queue upgrades");
-        let columns = connection
-            .prepare("PRAGMA table_info(scheduler_execution_jobs)")
-            .expect("pragma")
-            .query_map([], |row| row.get::<_, String>(1))
-            .expect("columns")
-            .collect::<Result<Vec<_>, _>>()
-            .expect("column rows");
-        assert!(columns.iter().any(|column| column == "work_run_id"));
-    }
-
-    #[test]
-    fn populated_legacy_queue_is_rejected_without_rewriting_rows() {
+    fn old_stage_run_queue_is_rejected_without_rewriting_rows() {
         let connection = Connection::open_in_memory().expect("sqlite");
         connection
             .execute(

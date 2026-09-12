@@ -1,14 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use winwincode_control_plane::delivery_execution::{
-    DeliveryExecutionConfig, prepare_workrun_advance,
+    DeliveryExecutionConfig, prepare_workrun_start,
 };
 use winwincode_delivery::{
-    application::stage::{NewStageIdentities, StageAdvanceEffect, StageAdvanceResult},
-    domain::{Delivery, SessionBindingId, rework::test_support::authorized_rework_dispatch},
+    application::workrun_execution::{
+        NewWorkRunIdentities, WorkRunStartEffect, WorkRunStartResult,
+    },
+    domain::{Delivery, rework::test_support::authorized_rework_dispatch},
 };
-use winwincode_domain::{AttentionItemId, ProductSessionId, RepositoryId, WorkItemId};
 use winwincode_domain::{Instant, RequestId, Sha256Digest};
+use winwincode_domain::{ProductSessionId, RepositoryId, WorkItemId};
 use winwincode_execution_port::generated::{ExecutionWorkspace, ExecutionWorkspaceWriteMode};
 
 fn canonical_id(prefix: &str, n: u64) -> String {
@@ -16,28 +18,25 @@ fn canonical_id(prefix: &str, n: u64) -> String {
 }
 
 fn identities(
-    intent: &winwincode_delivery::application::stage::ExecutionIntent,
-) -> NewStageIdentities {
-    NewStageIdentities {
-        stage_run_id: intent.stage_run_id.clone(),
+    intent: &winwincode_delivery::application::workrun_execution::ExecutionIntent,
+) -> NewWorkRunIdentities {
+    NewWorkRunIdentities {
         work_contract_id: intent.work_contract_id.clone(),
         work_contract_revision: intent.work_contract_revision.clone(),
         work_item_id: intent.work_item_id.clone(),
         work_item_revision: intent.work_item_revision.clone(),
         work_run_id: intent.work_run_id.clone(),
         execution_job_id: intent.execution_job_id.clone(),
-        session_binding_id: SessionBindingId(canonical_id("binding", 1)),
-        attention_item_id: AttentionItemId(canonical_id("att", 1)),
     }
 }
 
 fn intent_and_auth(
     fixture: &winwincode_delivery::domain::rework::test_support::ReworkDispatchFixture,
 ) -> (
-    &winwincode_delivery::application::stage::ExecutionIntent,
+    &winwincode_delivery::application::workrun_execution::ExecutionIntent,
     Box<winwincode_delivery::domain::rework::ReworkAuthorization>,
 ) {
-    let StageAdvanceEffect::Dispatch(intent) = &fixture.transition.effect else {
+    let WorkRunStartEffect::Dispatch(intent) = &fixture.transition.effect else {
         panic!("fixture must contain a dispatch effect");
     };
     (
@@ -53,11 +52,11 @@ fn intent_and_auth(
 
 fn dispatch(
     source: &Delivery,
-    intent: &winwincode_delivery::application::stage::ExecutionIntent,
+    intent: &winwincode_delivery::application::workrun_execution::ExecutionIntent,
     auth: Option<Box<winwincode_delivery::domain::rework::ReworkAuthorization>>,
     profile: &str,
-) -> Result<StageAdvanceResult, winwincode_delivery::application::CoordinationError> {
-    StageAdvanceResult::canonical_workrun_dispatch(
+) -> Result<WorkRunStartResult, winwincode_delivery::application::CoordinationError> {
+    WorkRunStartResult::canonical_workrun_dispatch(
         source,
         auth,
         identities(intent),
@@ -89,10 +88,6 @@ fn precise_rework_dispatch_authority_is_sealed_and_work_item_scoped() {
     assert!(accepted.is_canonical_workrun_dispatch());
     assert!(accepted.delivery.snapshot().evidence.is_empty());
     assert!(accepted.delivery.snapshot().verdict.is_none());
-    assert_eq!(
-        accepted.delivery.snapshot().stage_runs,
-        fixture.source_delivery.snapshot().stage_runs
-    );
     let before = &fixture.source_delivery.snapshot().work_run_aggregate;
     let after = &accepted.delivery.snapshot().work_run_aggregate;
     let mut expected = before.clone();
@@ -211,11 +206,11 @@ fn precise_rework_dispatch_authority_is_sealed_and_work_item_scoped() {
             max_runtime_seconds: 60,
         },
     };
-    let StageAdvanceEffect::Dispatch(accepted_intent) = &accepted.effect else {
+    let WorkRunStartEffect::Dispatch(accepted_intent) = &accepted.effect else {
         unreachable!()
     };
     let prepare = |config| {
-        prepare_workrun_advance(
+        prepare_workrun_start(
             &RequestId(canonical_id("req", 1)),
             &accepted.delivery.snapshot().work_run_aggregate,
             &accepted.delivery.snapshot().spec,
@@ -267,7 +262,7 @@ fn rework_dispatch_selects_its_source_item_instead_of_an_unrelated_ready_item() 
             auth.previous_candidate(),
         );
     let accepted = dispatch(&source, intent, Some(Box::new(auth)), "remediator").unwrap();
-    let StageAdvanceEffect::Dispatch(selected) = accepted.effect else {
+    let WorkRunStartEffect::Dispatch(selected) = accepted.effect else {
         unreachable!()
     };
     assert_eq!(selected.work_item_id, intent.work_item_id);

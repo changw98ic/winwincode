@@ -49,10 +49,10 @@ function deliveryDriverClient(terminalTransitionCount = null) {
   return {
     commands,
     async command(command, previousRevision, payload) {
-      if (command === 'delivery.advance') {
+      if (command === 'workrun.start') {
         assert.equal(payload.dispatchProfile, 'executor')
       }
-      if (command === 'delivery.task_breakdown.create') {
+      if (command === 'workitems.create') {
         assert.equal(payload.expectedRevision, previousRevision)
         assert.equal(payload.items.length, 1)
         assert.deepEqual(payload.items[0].criterionIds, contract.criteria.map(criterion => criterion.id))
@@ -90,8 +90,7 @@ function deliveryDriverClient(terminalTransitionCount = null) {
             : null,
           deliveryRevision: revision,
           evidence: terminal ? [{ id: 'evidence-terminal' }] : [],
-          status: terminal ? 'delivered' : 'executing',
-          tasks: terminal ? [{ status: 'completed' }] : [],
+          status: terminal ? 'done' : 'ready',
           verdict: terminal
             ? { criteria: [{ verdict: 'pass' }], status: 'pass' }
             : null,
@@ -117,8 +116,8 @@ test('WorkRun contract drives canonical WorkItem creation payload', async () => 
   assert.deepEqual(payload.items[0].criterionIds, [
     'crt_01J00000000000000000000001',
   ])
-  await client.command('delivery.task_breakdown.create', 1, payload)
-  await client.command('delivery.advance', 2, {
+  await client.command('workitems.create', 1, payload)
+  await client.command('workrun.start', 2, {
     deliveryId: payload.deliveryId,
     dispatchProfile: 'executor',
   })
@@ -128,18 +127,18 @@ test('Delivery transition evidence keeps the newest bounded window without limit
   const trace = { observations: [], totalTransitionCount: 0 }
   const transitionCount = DELIVERY_TRANSITION_DIAGNOSTIC_CAPACITY + 5
   for (let revision = 1; revision <= transitionCount; revision += 1) {
-    assert.equal(appendDeliveryTransition(trace, { revision, status: 'executing' }), true)
+    assert.equal(appendDeliveryTransition(trace, { revision, status: 'ready' }), true)
   }
   assert.equal(
-    appendDeliveryTransition(trace, { revision: transitionCount, status: 'executing' }),
+    appendDeliveryTransition(trace, { revision: transitionCount, status: 'ready' }),
     false,
   )
   assert.equal(trace.totalTransitionCount, transitionCount)
   assert.equal(trace.observations.length, DELIVERY_TRANSITION_DIAGNOSTIC_CAPACITY)
-  assert.deepEqual(trace.observations.at(0), { revision: 6, status: 'executing' })
+  assert.deepEqual(trace.observations.at(0), { revision: 6, status: 'ready' })
   assert.deepEqual(trace.observations.at(-1), {
     revision: transitionCount,
-    status: 'executing',
+    status: 'ready',
   })
 })
 
@@ -147,13 +146,13 @@ test('Delivery reaches its real terminal state after more transitions than the e
   const transitionCount = DELIVERY_TRANSITION_DIAGNOSTIC_CAPACITY + 5
   const client = deliveryDriverClient(transitionCount)
   const result = await driveDelivery(client, 10_000)
-  assert.equal(result.detail.status, 'delivered')
+  assert.equal(result.detail.status, 'done')
   assert.equal(result.totalTransitionCount, transitionCount)
   assert.equal(result.observations.length, DELIVERY_TRANSITION_DIAGNOSTIC_CAPACITY)
-  assert.deepEqual(result.observations.at(0), { revision: 6, status: 'executing' })
+  assert.deepEqual(result.observations.at(0), { revision: 6, status: 'ready' })
   assert.deepEqual(result.observations.at(-1), {
     revision: transitionCount,
-    status: 'delivered',
+    status: 'done',
   })
   assert.deepEqual(client.commands, [], 'active WorkRuns must be polled, not advanced')
 })
@@ -188,8 +187,7 @@ test('candidate-ready WorkRun dispatches independent verification before verdict
           deliveryRevision: revision,
           evidence: delivered ? [{ id: 'evidence-terminal' }] : [],
           readCursor: null,
-          status: delivered ? 'delivered' : 'draft',
-          tasks: delivered ? [{ status: 'completed' }] : [],
+          status: delivered ? 'done' : 'backlog',
           verdict: delivered
             ? { criteria: [{ verdict: 'pass' }], status: 'pass' }
             : null,
@@ -198,7 +196,7 @@ test('candidate-ready WorkRun dispatches independent verification before verdict
     },
     async command(command, previousRevision, payload) {
       commands.push({ command, profile: payload.dispatchProfile ?? null })
-      if (command === 'delivery.advance') verificationRuns += 1
+      if (command === 'workrun.start') verificationRuns += 1
       if (command === 'delivery.submit_verdict') delivered = true
       revision = previousRevision + 1
       return { command, currentRevision: revision, outcome: 'completed', previousRevision }
@@ -211,8 +209,8 @@ test('candidate-ready WorkRun dispatches independent verification before verdict
 
   await driveDelivery(client, 10_000)
   assert.deepEqual(commands, [
-    { command: 'delivery.advance', profile: 'reviewer' },
-    { command: 'delivery.advance', profile: 'verifier' },
+    { command: 'workrun.start', profile: 'reviewer' },
+    { command: 'workrun.start', profile: 'verifier' },
     { command: 'delivery.submit_verdict', profile: null },
   ])
 })
@@ -228,7 +226,7 @@ test('Delivery timeout reports the total count and only the newest transition wi
       () => instant++,
     ),
     error => {
-      const prefix = 'StrongFlow did not reach delivered: '
+      const prefix = 'StrongFlow did not reach done: '
       assert.equal(error.message.startsWith(prefix), true)
       const diagnostic = JSON.parse(error.message.slice(prefix.length))
       assert.equal(
@@ -239,10 +237,10 @@ test('Delivery timeout reports the total count and only the newest transition wi
         diagnostic.observations.length,
         DELIVERY_TRANSITION_DIAGNOSTIC_CAPACITY,
       )
-      assert.deepEqual(diagnostic.observations.at(0), { revision: 2, status: 'executing' })
+      assert.deepEqual(diagnostic.observations.at(0), { revision: 2, status: 'ready' })
       assert.deepEqual(diagnostic.observations.at(-1), {
         revision: DELIVERY_TRANSITION_DIAGNOSTIC_CAPACITY + 1,
-        status: 'executing',
+        status: 'ready',
       })
       return true
     },
@@ -259,8 +257,8 @@ test('API production vertical is a direct generated HTTP runner', async () => {
     'session.cancel',
     'chat.submit',
     'delivery.create',
-    'delivery.task_breakdown.create',
-    'delivery.advance',
+    'workitems.create',
+    'workrun.start',
     'delivery.resolve_attention',
     'delivery.submit_verdict',
     'delivery.get',
@@ -277,7 +275,7 @@ test('API production vertical is a direct generated HTTP runner', async () => {
   assert.match(source, /dispatchProfile/u)
   assert.match(source, /providerRoute/u)
   assert.match(source, /candidateArtifact/u)
-  assert.match(source, /delivery\.task_breakdown\.create/u)
+  assert.match(source, /workitems\.create/u)
   assert.match(source, /GIT_CONFIG_NOSYSTEM/u)
   assert.match(source, /API_SOURCE_SEAL_NAME/u)
   assert.match(source, /apiProductionSourceDigest/u)
@@ -291,7 +289,7 @@ test('API production vertical is a direct generated HTTP runner', async () => {
   assert.doesNotMatch(source, /controlUrl\.replace\('127\.0\.0\.1'/u)
   assert.match(source, /export async function runApiProductionVertical/u)
   assert.doesNotMatch(source, /approveSolutionResolution/u)
-  assert.match(source, /kind: 'delivery-stage'/u)
+  assert.match(source, /kind: 'work-run'/u)
   assert.doesNotMatch(source, /\b(?:chromium|devtools|document|window|WebSocket)\b/iu)
 })
 

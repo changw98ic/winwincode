@@ -26,6 +26,7 @@
 
 use std::fmt;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use serde_json::Value;
 use serde_json::json;
@@ -45,14 +46,19 @@ use winwincode_control_plane::ClientOccupancyService;
 use winwincode_control_plane::ClientRegistryService;
 use winwincode_control_plane::LaunchGrantState;
 use winwincode_control_plane::OccupancyLeaseState;
+use winwincode_control_plane::ProductStateStorage;
 use winwincode_control_plane::WorkerLaunchGrantService;
 use winwincode_control_plane::WorkerLaunchGrantServiceErrorKind;
-use winwincode_domain::Instant;
+use winwincode_control_plane::dispatch_work_run_to_device_worker;
+use winwincode_domain::{Instant, WorkRunId};
 use winwincode_storage::ClientDownlinkAppend;
 use winwincode_storage::ClientNodeRecord;
 use winwincode_storage::ClientPresenceState;
 use winwincode_storage::SqliteStorage;
 
+use crate::client_exchange::{
+    ClientExchangeApplication, ClientExchangeConfig, ClientExchangePort, WorkerCredentialDelivery,
+};
 use crate::client_occupancy::client_mirror_revision_view;
 use crate::client_occupancy::offset_instant;
 use crate::worker_session_credentials::WorkerSessionCredentialService;
@@ -140,7 +146,7 @@ impl ClientSessionsError {
     fn invalid_request() -> Self {
         Self::new(
             ClientSessionsErrorKind::InvalidRequest,
-            "launch request must carry a 9-12 digit clientId and a repositoryBindingId",
+            "launch request must carry a 9-12 digit clientId, a repositoryBindingId, and an optional workRunId",
         )
     }
 
@@ -166,9 +172,6 @@ struct PreparedLaunch {
     occupancy_lease_id: String,
     occupancy_fencing_token: u64,
     grant: winwincode_storage::WorkerLaunchGrantRecord,
-    /// Raw one-time worker credential material (lowercase hex); it crosses
-    /// the launch response once and never enters durable state.
-    worker_credential: String,
     product_session_id: String,
     work_run_id: Option<String>,
 }
@@ -188,10 +191,11 @@ enum PollOutcome {
 /// every operation opens and closes its own storage connection so concurrent
 /// flows never share state in memory and the bounded wait holds no database
 /// lock.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ClientSessionsApplication {
     data_directory: PathBuf,
     config: ClientSessionsConfig,
+    client_exchange: Arc<dyn ClientExchangePort>,
 }
 
 impl ClientSessionsApplication {
@@ -203,6 +207,22 @@ impl ClientSessionsApplication {
     pub fn open(
         data_directory: impl Into<PathBuf>,
         config: &ClientSessionsConfig,
+    ) -> Result<Self, ClientSessionsError> {
+        let data_directory = data_directory.into();
+        let client_exchange = Arc::new(
+            ClientExchangeApplication::open(&data_directory, &ClientExchangeConfig::default())
+                .map_err(|_| ClientSessionsError::unavailable())?,
+        );
+        Self::open_with_exchange(data_directory, config, client_exchange)
+    }
+
+    /// Composes the launch application with the exact Device exchange used
+    /// by the running Server, so ephemeral Worker credentials travel on the
+    /// same authenticated response as their launch frame.
+    pub fn open_with_exchange(
+        data_directory: impl Into<PathBuf>,
+        config: &ClientSessionsConfig,
+        client_exchange: Arc<dyn ClientExchangePort>,
     ) -> Result<Self, ClientSessionsError> {
         if config.launch_wait.is_zero()
             || config.poll_interval.is_zero()
@@ -216,6 +236,7 @@ impl ClientSessionsApplication {
         Ok(Self {
             data_directory: data_directory.into(),
             config: config.clone(),
+            client_exchange,
         })
     }
 
@@ -239,7 +260,10 @@ impl ClientSessionsApplication {
         loop {
             match self.poll(&grant_id)? {
                 PollOutcome::Pending => {}
-                PollOutcome::Consumed => return Ok(session_body(&prepared)),
+                PollOutcome::Consumed => {
+                    self.route_work_run(user_id, &prepared)?;
+                    return Ok(session_body(&prepared));
+                }
                 PollOutcome::Failed(error) => return Err(error),
             }
             if tokio::time::Instant::now() >= deadline {
@@ -263,7 +287,9 @@ impl ClientSessionsApplication {
         let Some(fields) = request.as_object() else {
             return Err(ClientSessionsError::invalid_request());
         };
-        if fields.len() != 3 {
+        if !matches!(fields.len(), 3 | 4)
+            || fields.get("schemaVersion").and_then(Value::as_str) != Some(SUPPORTED_SCHEMA_VERSION)
+        {
             return Err(ClientSessionsError::invalid_request());
         }
         let public_client_id = required_client_id(fields.get("clientId"))?;
@@ -310,18 +336,36 @@ impl ClientSessionsApplication {
         // Worker identities and the short-lived credential (32 random bytes
         // through the credential lifecycle service; only the digest is
         // persisted).
+        let work_run_id = fields
+            .get("workRunId")
+            .and_then(Value::as_str)
+            .map(|id| WorkRunId(id.to_owned()));
+        if fields.contains_key("workRunId") && work_run_id.is_none() {
+            return Err(ClientSessionsError::invalid_request());
+        }
+        let product_session_id = match &work_run_id {
+            Some(work_run_id) => {
+                storage
+                    .load_active_execution_job_record_for_work_run(work_run_id)
+                    .map_err(|_| ClientSessionsError::unavailable())?
+                    .ok_or_else(|| {
+                        ClientSessionsError::new(
+                            ClientSessionsErrorKind::InvalidRequest,
+                            "workRunId does not name an active execution job",
+                        )
+                    })?
+                    .scope
+                    .product_session_id
+                    .0
+            }
+            None => generate_prefixed_id("ps_")?,
+        };
         let worker_session_id = generate_prefixed_id("ws_")?;
-        let worker_id = generate_prefixed_id("wkr_")?;
-        let worker_instance_id = generate_prefixed_id("winst_")?;
-        let product_session_id = generate_prefixed_id("ps_")?;
-        // This endpoint starts a ProductSession Chat worker; no Delivery
-        // WorkRun exists here. A Delivery launch must enter through the CP
-        // scheduler with an already-created WorkRun identity.
-        let work_run_id = None;
+        let worker_id = generate_prefixed_id("wrk_")?;
+        let worker_instance_id = generate_prefixed_id("wki_")?;
         let worker_launch_grant_id = generate_prefixed_id("wlg_")?;
         let credential_material =
             issue_credential_material().map_err(|_| ClientSessionsError::unavailable())?;
-        let worker_credential = credential_material.material().to_owned();
         let expires_at = offset_instant(&now, duration_millis(self.config.grant_ttl))
             .ok_or_else(ClientSessionsError::unavailable)?;
         let issuance = winwincode_storage::LaunchGrantIssuance::try_new(
@@ -340,7 +384,7 @@ impl ClientSessionsApplication {
             credential_material.credential_digest().to_owned(),
             Some(product_session_id.clone()),
             work_run_id.clone(),
-            expires_at,
+            expires_at.clone(),
         )
         .map_err(|_| ClientSessionsError::unavailable())?;
         let grant = {
@@ -370,6 +414,17 @@ impl ClientSessionsApplication {
                 )
                 .map_err(|_| ClientSessionsError::unavailable())?;
         }
+
+        self.client_exchange
+            .publish_worker_credential(WorkerCredentialDelivery {
+                client_node_id: node.client_node_id.clone(),
+                worker_launch_grant_id: worker_launch_grant_id.clone(),
+                worker_session_id: worker_session_id.clone(),
+                credential_digest: credential_material.credential_digest().to_owned(),
+                worker_credential: credential_material.material().to_owned(),
+                expires_at: expires_at.clone(),
+            })
+            .map_err(|_| ClientSessionsError::unavailable())?;
 
         // The launch command is computed against the mirror revision the
         // device last confirmed: the device refuses any other stamp.
@@ -412,7 +467,6 @@ impl ClientSessionsApplication {
             occupancy_lease_id: lease.occupancy_lease_id,
             occupancy_fencing_token: lease.fencing_token,
             grant,
-            worker_credential,
             product_session_id,
             work_run_id: work_run_id.map(|id| id.0),
         })
@@ -458,6 +512,31 @@ impl ClientSessionsApplication {
                 "the launch grant expired before the device accepted",
             ))),
         }
+    }
+
+    fn route_work_run(
+        &self,
+        user_id: &str,
+        prepared: &PreparedLaunch,
+    ) -> Result<(), ClientSessionsError> {
+        let Some(work_run_id) = &prepared.work_run_id else {
+            return Ok(());
+        };
+        let mut storage = self.open_storage()?;
+        let dispatch = dispatch_work_run_to_device_worker(
+            &mut storage,
+            Some(user_id),
+            &WorkRunId(work_run_id.clone()),
+            &now_instant(),
+        )
+        .map_err(|_| ClientSessionsError::unavailable())?;
+        if dispatch.is_none() {
+            return Err(ClientSessionsError::new(
+                ClientSessionsErrorKind::LaunchRejected,
+                "the WorkRun cannot be routed to the launched device worker",
+            ));
+        }
+        Ok(())
     }
 
     fn lookup_node(
@@ -550,9 +629,8 @@ fn issue_gate_error(kind: WorkerLaunchGrantServiceErrorKind) -> ClientSessionsEr
     }
 }
 
-/// Builds the `201` session body. The raw worker credential material crosses
-/// exactly here and on the device chain; durable state keeps only its
-/// digest.
+/// Builds the secret-free `201` session body. Credential material travels
+/// only through the in-memory Device exchange sidecar.
 fn session_body(prepared: &PreparedLaunch) -> Value {
     json!({
         "schemaVersion": SUPPORTED_SCHEMA_VERSION,
@@ -567,7 +645,6 @@ fn session_body(prepared: &PreparedLaunch) -> Value {
         "productSessionId": prepared.product_session_id,
         "workRunId": prepared.work_run_id,
         "credentialDigest": prepared.grant.credential_digest,
-        "workerCredential": prepared.worker_credential,
         "expiresAt": prepared.grant.expires_at.0,
     })
 }
@@ -725,7 +802,7 @@ mod tests {
 
     #[test]
     fn generated_ids_carry_the_launch_prefixes() {
-        for prefix in ["wlg_", "ws_", "wkr_", "winst_", "ps_", "run_", "msg_"] {
+        for prefix in ["wlg_", "ws_", "wrk_", "wki_", "ps_", "run_", "msg_"] {
             let id = generate_prefixed_id(prefix).expect("entropy");
             assert_eq!(id.len(), prefix.len() + 26);
             assert!(id.starts_with(prefix));
@@ -749,14 +826,14 @@ mod tests {
         let message = worker_stop_message(
             occupancy_stamp(7, "ocl_A", 9, "idem_stop_wlg"),
             "ws_A",
-            "wkr_A",
+            "wrk_A",
             ClientWorkerStopReason::GrantRevoked,
         );
         let ServerToClientMessage::WorkerStop(payload) = &message else {
             panic!("worker stop message expected");
         };
         assert_eq!(payload.worker_session_id, "ws_A");
-        assert_eq!(payload.worker_id, "wkr_A");
+        assert_eq!(payload.worker_id, "wrk_A");
         assert_eq!(payload.reason, ClientWorkerStopReason::GrantRevoked);
         assert_eq!(payload.occupancy.occupancy_lease_id, "ocl_A");
         assert_eq!(payload.occupancy.occupancy_fencing_token, 9);

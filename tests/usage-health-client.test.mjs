@@ -104,6 +104,25 @@ function agent(role, index) {
   }
 }
 
+function runtimeContext(workerIndex, overrides = {}) {
+  return {
+    agentIdentity: {
+      id: canonicalId('agt', workerIndex),
+      name: `agent-${String(workerIndex)}`,
+      role: 'executor',
+      workerId: canonicalId('wrk', workerIndex),
+    },
+    provider: 'openai',
+    model: 'gpt-5',
+    workspace: {
+      repositoryId: scope.repositoryId,
+      revision: `git-tree:${String(workerIndex).padStart(64, '0')}`,
+      writeMode: 'candidate',
+    },
+    ...overrides,
+  }
+}
+
 function runtimeSession(workRunId, overrides = {}) {
   return {
     activities: [],
@@ -126,6 +145,7 @@ function runtimeSession(workRunId, overrides = {}) {
       recoveryCount: 0,
       state: 'none',
     },
+    runtimeContext: runtimeContext(1),
     sessionBindingId: 'binding-1',
     workRunId,
     usage: usage(['input_tokens', 100], ['cached_input_tokens', 20], ['output_tokens', 50], [
@@ -172,8 +192,8 @@ function delivery(overrides = {}) {
     },
     revision: 5,
     schemaVersion,
-    status: 'executing',
-    taskCounts: { active: 1, blocked: 0, completed: 0, failed: 0, pending: 0, total: 1, verifying: 0 },
+    status: 'in_progress',
+    workItemCounts: { ready: 0, waitingHuman: 0, candidateReady: 0, rework: 0, cancelled: 0, inProgress: 1, waitingDependency: 0, done: 0, failed: 0, backlog: 0, total: 1, validating: 0 },
     title: 'First Delivery',
     updatedAt: '2026-09-03T08:30:00.000Z',
     ...overrides,
@@ -275,18 +295,36 @@ function baselineFixtures() {
       if (id === productSessionOne) {
         return runtimeSnapshot(productSessionOne, deliveryOne, workRunOne, [
           runtimeSession(workRunOne, {
+            activities: [{
+              activityType: 'command',
+              callId: 'runtime-action-1',
+              command: '执行验证',
+              exitCode: null,
+              outcome: 'observed',
+              sourceRef: 'runtime:activity-1',
+              status: 'running',
+            }],
             agents: [agent('planner', 1), agent('implementer', 2)],
             recovery: {
               failureCount: 2,
               lastFailureSourceRef: 'runtime:failure-2',
               latestRecoverySourceRef: 'runtime:recovery-3',
-              recoveryCount: 1,
+              recoveryCount: 2,
               state: 'recovered',
             },
           }),
           runtimeSession(workRunTwo, {
             agents: [agent(null, 3)],
+            attempt: 2,
             executionJobId: canonicalId('job', 2),
+            recovery: {
+              failureCount: 1,
+              lastFailureSourceRef: 'runtime:failure-4',
+              latestRecoverySourceRef: null,
+              recoveryCount: 0,
+              state: 'in-progress',
+            },
+            runtimeContext: runtimeContext(2),
             usage: usage(['input_tokens', 10], ['output_tokens', 5], ['schema_version', 1]),
             workerSessionId: canonicalId('wss', 2),
           }),
@@ -295,9 +333,28 @@ function baselineFixtures() {
       if (id === productSessionTwo) {
         return runtimeSnapshot(productSessionTwo, deliveryTwo, workRunThree, [
           runtimeSession(workRunThree, {
+            activities: [{
+              activityType: 'command',
+              callId: 'runtime-policy-1',
+              command: '安全策略检查',
+              exitCode: null,
+              outcome: 'policy-denied',
+              sourceRef: 'runtime:policy-1',
+              status: 'declined',
+            }],
             agents: [agent('reviewer', 4)],
             executionJobId: canonicalId('job', 3),
             productSessionId: productSessionTwo,
+            runtimeContext: runtimeContext(4, {
+              agentIdentity: {
+                id: canonicalId('agt', 4),
+                name: 'agent-4',
+                role: 'reviewer',
+                workerId: canonicalId('wrk', 4),
+              },
+              provider: 'anthropic',
+              model: 'claude',
+            }),
             usage: null,
             workerSessionId: canonicalId('wss', 3),
           }),
@@ -313,7 +370,7 @@ function baselineFixtures() {
           activeWorkRunId: null,
           deliveryId: deliveryTwo,
           openAttentionCount: 3,
-          status: 'needs-attention',
+          status: 'waiting_human',
           title: 'Second Delivery',
           updatedAt: '2026-09-03T07:00:00.000Z',
         }),
@@ -595,7 +652,7 @@ test('usage per Role overlaps WorkRun usage and marks unlabelled agents as unkno
   assert.equal(planner.overlaps, true)
   assert.equal(planner.inputTokens, 100)
   const unlabelled = model.state.byRole.find(row => row.key === 'role-unknown')
-  assert.equal(unlabelled.label, 'Role not reported')
+  assert.equal(unlabelled.label, '未报告角色')
   assert.equal(unlabelled.inputTokens, 10)
   const reviewer = model.state.byRole.find(row => row.key === 'reviewer')
   assert.equal(reviewer.tokensKnown, false)
@@ -643,6 +700,41 @@ test('Worker offline, draining, capacity-short and healthy states stay distinct'
     rows(rootElement, 'wwc-usage-health-worker').map(node => node.dataset.workerState),
     states,
   )
+})
+
+test('Session and Agent team rows expose frozen runtime facts and live health', async () => {
+  const { model, rootElement } = await started()
+  assert.deepEqual(model.state.sessionTeam.map(row => row.state), [
+    'running',
+    'recovering',
+    'offline',
+  ])
+  const running = model.state.sessionTeam[0]
+  assert.equal(running.agentId, canonicalId('agt', 1))
+  assert.equal(running.provider, 'openai')
+  assert.equal(running.model, 'gpt-5')
+  assert.equal(running.repositoryId, scope.repositoryId)
+  assert.equal(running.currentActivity, '执行验证')
+  assert.equal(running.recoveryMessage, '连接中断后自动恢复成功')
+  assert.equal(running.recoveryRequiresHuman, false)
+  assert.match(model.state.sessionTeam[1].recoveryMessage, /新 Session 已接手/u)
+  assert.equal(model.state.sessionTeam[1].recoveryRequiresHuman, false)
+  assert.equal(model.state.sessionTeam[2].recoveryRequiresHuman, true)
+  const teamRows = rows(rootElement, 'wwc-usage-health-session-team')
+  assert.deepEqual(teamRows.map(row => row.dataset.sessionState), [
+    'running',
+    'recovering',
+    'offline',
+  ])
+  assert.match(teamRows[0].textContent, /AgentIdentity agt_/u)
+  assert.match(teamRows[0].textContent, /Provider openai · Model gpt-5/u)
+  assert.match(teamRows[0].textContent, /Workspace rep_.*git-tree:/u)
+  assert.match(teamRows[0].textContent, /当前活动 执行验证/u)
+  assert.match(teamRows[0].textContent, /自动恢复成功/u)
+  assert.match(teamRows[1].textContent, /新 Session 已接手/u)
+  assert.match(teamRows[2].textContent, /离线/u)
+  assert.match(teamRows[2].textContent, /安全策略.*需要人工检查/u)
+  assert.equal(descendants(teamRows[0]).filter(node => node.tagName === 'BUTTON').length, 0)
 })
 
 test('reported Worker capacity is compared with the configured concurrency limit', async () => {
@@ -753,15 +845,16 @@ test('recent execution errors and open Delivery attention are listed separately'
   const { model, rootElement } = await started()
   assert.deepEqual(model.state.errors.map(row => row.key), [
     `${deliveryOne}/${workRunOne}`,
+    `${deliveryOne}/${workRunTwo}`,
     deliveryTwo,
   ])
   const recovered = model.state.errors[0]
   assert.equal(recovered.failureCount, 2)
   assert.equal(recovered.recovered, true)
   assert.equal(recovered.sourceRef, 'runtime:failure-2')
-  assert.equal(model.state.errors[1].attentionCount, 3)
+  assert.equal(model.state.errors[2].attentionCount, 3)
   const listed = rows(rootElement, 'wwc-usage-health-error')
-  assert.equal(listed.length, 2)
+  assert.equal(listed.length, 3)
 })
 
 test('cost is never presented as an exact amount without a price source', async () => {
@@ -834,11 +927,13 @@ test('one unavailable projection marks only its own section', async () => {
   assert.equal(model.state.workers.length, 0)
   const workerSection = findByClass(rootElement, 'wwc-usage-health-sections')
   const notes = rows(rootElement, 'wwc-usage-health-unavailable')
-  assert.equal(notes.length, 7, 'one unavailable note per section')
+  assert.equal(notes.length, 8, 'one unavailable note per section')
   const visible = notes.filter(node => node.hidden === false)
-  assert.equal(visible.length, 1)
-  assert.match(visible[0].textContent, /CONTROL_PLANE_UNAVAILABLE/u)
-  assert.match(visible[0].textContent, /此分区不可用/u)
+  assert.equal(visible.length, 2)
+  for (const note of visible) {
+    assert.match(note.textContent, /CONTROL_PLANE_UNAVAILABLE/u)
+    assert.match(note.textContent, /此分区不可用/u)
+  }
   assert.equal(rows(rootElement, 'wwc-usage-health-delivery').length > 0, true)
   assert.equal(findByClass(rootElement, 'wwc-usage-health-capacity').dataset.capacityState, 'unknown')
 })
@@ -870,8 +965,8 @@ test('a runtime projection failure marks the usage sections without losing healt
     .filter(node => node.hidden === false)
   assert.equal(
     visible.length,
-    4,
-    'the three usage sections and the Recent errors section share the runtime failure',
+    5,
+    'usage, Session team and Recent errors sections share the runtime failure',
   )
   for (const note of visible) assert.match(note.textContent, /RUNTIME_PROJECTION_UNAVAILABLE/u)
   assert.equal(rows(rootElement, 'wwc-usage-health-worker').length, 6)

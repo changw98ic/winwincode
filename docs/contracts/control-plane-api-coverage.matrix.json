@@ -1,5 +1,7 @@
 {
   "schemaVersion": 1,
+  "repository": "winwincode",
+  "product": "community",
   "decision": "ADR-0028",
   "purpose": "Machine-checkable coverage from the single apps/client presentation and Rust Server/Control Plane/Worker/Local path to the public HTTP, WebSocket, and ExecutionPort branches.",
   "sources": {
@@ -20,7 +22,7 @@
       "session.close",
       "delivery.create",
       "delivery.update_spec",
-      "delivery.advance",
+      "workrun.start",
       "delivery.resolve_attention",
       "delivery.submit_verdict",
       "settings.update",
@@ -35,7 +37,7 @@
       "publication.cancel",
       "collaboration.notification.ack",
       "collaboration.presence.update",
-      "delivery.task_breakdown.create",
+      "workitems.create",
       "workrun.cancel"
     ],
     "httpQueries": [
@@ -75,7 +77,7 @@
       "chat-interactions.invalidated.v1",
       "attention.changed.v1",
       "delivery.changed.v1",
-      "delivery-task.changed.v1",
+      "work-item.changed.v1",
       "presence.changed.v1",
       "worker-health.changed.v1",
       "activity.recorded.v1",
@@ -132,8 +134,8 @@
       "callerId": "client-delivery-surface",
       "kind": "presentation",
       "sourcePaths": [
-        "apps/client/src/strongflow-page.ts",
-        "apps/client/src/strongflow-view-model.ts",
+        "apps/client/src/task-run-page.ts",
+        "apps/client/src/task-run-view-model.ts",
         "packages/control-plane-client/src/index.ts",
         "apps/client/src/community-control-plane-client.ts"
       ],
@@ -474,13 +476,14 @@
       ]
     },
     {
-      "surfaceId": "enterprise-backup",
+      "surfaceId": "community-backup",
+      "migrationSourceId": "enterprise-backup",
       "flowIds": [
         "action-policy-and-collaboration",
         "candidate-artifacts"
       ],
       "observableContracts": [
-        "tenant-scoped digest-bound backup restore and governed deletion facts"
+        "owner-scoped digest-bound local backup and restore facts"
       ]
     },
     {
@@ -774,10 +777,10 @@
       "httpCommands": [
         "delivery.create",
         "delivery.update_spec",
-        "delivery.advance",
+        "workrun.start",
         "delivery.resolve_attention",
         "delivery.submit_verdict",
-        "delivery.task_breakdown.create",
+        "workitems.create",
         "workrun.cancel"
       ],
       "httpQueries": [
@@ -788,7 +791,7 @@
       ],
       "websocketEvents": [
         "delivery.changed.v1",
-        "delivery-task.changed.v1",
+        "work-item.changed.v1",
         "attention.changed.v1",
         "runtime-projection.invalidated.v1",
         "activity.recorded.v1"
@@ -962,7 +965,7 @@
       "id": "default-chat-execution-scope",
       "status": "closed-by-contract",
       "finding": "The original ExecutionScope required DeliveryId and StageRunId, so default Chat could not dispatch without inventing a hidden Delivery.",
-      "resolution": "ExecutionScope is a strict union of product-session and delivery-stage scopes."
+      "resolution": "ExecutionScope is a strict union of product-session and work-run scopes."
     },
     {
       "id": "projection-recovery-read-path",

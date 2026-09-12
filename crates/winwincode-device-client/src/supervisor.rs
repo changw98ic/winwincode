@@ -70,7 +70,6 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use time::OffsetDateTime;
-use time::format_description::well_known::Rfc3339;
 
 use crate::daemon::{LeaseWorkerController, WorkerCapacitySnapshot, WorkerCapacitySource};
 use crate::fencing::{FencedCommandKind, FencingGuard, FencingRejection, FencingVerdict};
@@ -1279,9 +1278,7 @@ fn managed_session_config_json(
 
 /// RFC 3339 UTC stamp of the current wall clock (server-side style).
 fn now_rfc3339() -> String {
-    OffsetDateTime::now_utc()
-        .format(&Rfc3339)
-        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_owned())
+    crate::canonical_rfc3339(OffsetDateTime::now_utc())
 }
 
 /// The platform process-boot observation behind a pid (plan 8.2: 不能只存
@@ -1540,9 +1537,9 @@ mod tests {
     const ORIGIN: &str = "https://127.0.0.1:8443";
     const CREDENTIAL_TOKEN: &str = "wsc-supervisor-test-token";
     /// Server-minted identities a launch grant would carry.
-    const WORKER_ID: &str = "wkr_TESTWORKER00000000000001";
-    const WORKER_INSTANCE: &str = "winst_TESTINSTANCE0000000001";
-    const WORKER_INSTANCE_2: &str = "winst_TESTINSTANCE0000000002";
+    const WORKER_ID: &str = "wrk_TESTWORKER00000000000001";
+    const WORKER_INSTANCE: &str = "wki_TESTINSTANCE000000000001";
+    const WORKER_INSTANCE_2: &str = "wki_TESTINSTANCE000000000002";
 
     /// A long-lived worker test double: installs the terminate trap first,
     /// then signals readiness next to the config file (`$2`), then idles.

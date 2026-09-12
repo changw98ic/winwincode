@@ -24,10 +24,7 @@
       "currentFiles": [
         "apps/client/src/application.ts",
         "apps/client/src/chat-page.ts",
-        "apps/client/src/strongflow-page.ts",
         "apps/client/src/settings-page.ts",
-        "apps/client/src/local-decisions-page.ts",
-        "apps/client/src/local-operations-page.ts",
         "packages/control-plane-client/src/index.ts",
         "apps/client/src/community-control-plane-client.ts",
         "apps/client/src/generated/contracts.ts",

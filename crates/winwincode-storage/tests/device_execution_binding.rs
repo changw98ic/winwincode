@@ -17,9 +17,9 @@ use winwincode_storage::{
     ExecutionAdmissionBoundary, ExecutionAdmissionLimits, ExecutionAdmissionPolicy,
     ExecutionQueueScope, ExecutionRepositoryAccess, ExecutionReservationRequest, GrantPermissions,
     GrantSource, GrantTrustMode, LaunchAckSettlement, LaunchGrantIssuance, OccupancyClaim,
-    OccupancyLeaseState, RepositoryAccessGrantIssuance, RepositoryAvailability,
-    RepositoryBindingProjection, RepositoryDirtyState, RepositoryGrantPermissions, SqliteStorage,
-    WorkerLaunchGrantRecord, WorkerPoolId,
+    OccupancyLeaseState, ProductStateStorage, RepositoryAccessGrantIssuance,
+    RepositoryAvailability, RepositoryBindingProjection, RepositoryDirtyState,
+    RepositoryGrantPermissions, SqliteStorage, WorkerLaunchGrantRecord, WorkerPoolId,
 };
 
 static NEXT_TEMP_DIRECTORY: AtomicU64 = AtomicU64::new(1);
@@ -197,8 +197,8 @@ fn issue_launch_grant_for_session(
         fixture.fencing_token,
         &fixture.binding_id,
         worker_session_id,
-        id("wkr", seed + 9),
-        id("winst", seed + 10),
+        id("wrk", seed + 9),
+        id("wki", seed + 10),
         DIGEST,
         Some(id("ps", seed + 11)),
         Some(WorkRunId(id("wrn", seed + 12))),
@@ -640,53 +640,71 @@ fn release_follows_the_fixed_cas_and_replay_rules() {
 
 #[test]
 fn attach_copies_reservation_facts_from_the_launch_grant() {
-    let mut storage = SqliteStorage::open(temporary_directory("attach")).expect("storage");
+    let root = temporary_directory("attach");
+    let mut storage = SqliteStorage::open(&root).expect("storage");
     let (fixture, grant, job) = seed_bound_job(&mut storage, 6000);
-    let mut ledger = storage.device_execution_binding_ledger().expect("ledger");
-    let command = DeviceExecutionFactsAttachment::try_new(
-        id("req", 6100),
-        &job,
-        &grant.worker_launch_grant_id,
-    )
-    .expect("attachment");
-    let receipt = ledger.attach_facts(&command, &instant(T2)).expect("attach");
-    assert!(!receipt.replayed);
-    let facts = &receipt.facts;
-    assert_eq!(facts.job_id, job);
-    assert_eq!(facts.client_node_id, fixture.node);
-    assert_eq!(facts.client_instance_id, fixture.instance);
-    assert_eq!(facts.holder_user_id, fixture.holder);
-    assert_eq!(facts.repository_binding_id, fixture.binding_id);
-    assert_eq!(facts.occupancy_lease_id, fixture.lease_id);
-    assert_eq!(facts.occupancy_fencing_token, fixture.fencing_token);
-    assert_eq!(facts.worker_launch_grant_id, grant.worker_launch_grant_id);
-    assert_eq!(facts.worker_session_id, grant.worker_session_id);
-    assert_eq!(facts.worker_id, grant.worker_id);
-    assert_eq!(facts.worker_instance_id, grant.worker_instance_id);
-    assert_eq!(facts.product_session_id, grant.product_session_id);
-    assert_eq!(
-        facts.work_run_id,
-        grant.work_run_id.as_ref().map(|value| value.0.clone())
-    );
-    // The durable projection round-trips, and the replay is idempotent.
-    assert_eq!(ledger.facts(&job).expect("facts").expect("stored"), *facts);
-    let replay = ledger.attach_facts(&command, &instant(T3)).expect("replay");
-    assert!(replay.replayed);
-    assert_eq!(replay.facts, *facts);
-    // A second attachment under a fresh request identity is refused.
-    let repeat = DeviceExecutionFactsAttachment::try_new(
-        id("req", 6200),
-        &job,
-        &grant.worker_launch_grant_id,
-    )
-    .expect("repeat attachment");
-    let error = ledger
-        .attach_facts(&repeat, &instant(T3))
-        .expect_err("repeat");
-    assert_eq!(
-        error.kind(),
-        DeviceExecutionBindingStoreErrorKind::FactsAlreadyAttached
-    );
+    {
+        let mut ledger = storage.device_execution_binding_ledger().expect("ledger");
+        let command = DeviceExecutionFactsAttachment::try_new(
+            id("req", 6100),
+            &job,
+            &grant.worker_launch_grant_id,
+        )
+        .expect("attachment");
+        let receipt = ledger.attach_facts(&command, &instant(T2)).expect("attach");
+        assert!(!receipt.replayed);
+        let facts = &receipt.facts;
+        assert_eq!(facts.job_id, job);
+        assert_eq!(facts.client_node_id, fixture.node);
+        assert_eq!(facts.client_instance_id, fixture.instance);
+        assert_eq!(facts.holder_user_id, fixture.holder);
+        assert_eq!(facts.repository_binding_id, fixture.binding_id);
+        assert_eq!(facts.occupancy_lease_id, fixture.lease_id);
+        assert_eq!(facts.occupancy_fencing_token, fixture.fencing_token);
+        assert_eq!(facts.worker_launch_grant_id, grant.worker_launch_grant_id);
+        assert_eq!(facts.worker_session_id, grant.worker_session_id);
+        assert_eq!(facts.worker_id, grant.worker_id);
+        assert_eq!(facts.worker_instance_id, grant.worker_instance_id);
+        assert_eq!(facts.product_session_id, grant.product_session_id);
+        assert_eq!(
+            facts.work_run_id,
+            grant.work_run_id.as_ref().map(|value| value.0.clone())
+        );
+        // The durable projection round-trips, and the replay is idempotent.
+        assert_eq!(ledger.facts(&job).expect("facts").expect("stored"), *facts);
+        let replay = ledger.attach_facts(&command, &instant(T3)).expect("replay");
+        assert!(replay.replayed);
+        assert_eq!(replay.facts, *facts);
+        // A second attachment under a fresh request identity is refused.
+        let repeat = DeviceExecutionFactsAttachment::try_new(
+            id("req", 6200),
+            &job,
+            &grant.worker_launch_grant_id,
+        )
+        .expect("repeat attachment");
+        let error = ledger
+            .attach_facts(&repeat, &instant(T3))
+            .expect_err("repeat");
+        assert_eq!(
+            error.kind(),
+            DeviceExecutionBindingStoreErrorKind::FactsAlreadyAttached
+        );
+    }
+    let job_id = ExecutionJobId(job);
+    let projected = ProductStateStorage::load_work_run_device_binding_facts(&storage, &job_id)
+        .expect("projection read")
+        .expect("projected binding");
+    assert_eq!(projected.public_client_id, "0000006000");
+    assert_eq!(projected.repository_binding_id, fixture.binding_id);
+    assert_eq!(projected.worker_session_id, grant.worker_session_id);
+    drop(storage);
+    let restarted = SqliteStorage::open(&root).expect("restarted storage");
+    let replayed = ProductStateStorage::load_work_run_device_binding_facts(&restarted, &job_id)
+        .expect("restarted projection read")
+        .expect("restarted projected binding");
+    assert_eq!(replayed, projected);
+    drop(restarted);
+    std::fs::remove_dir_all(root).expect("temporary storage directory");
 }
 
 #[test]

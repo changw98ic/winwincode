@@ -6,7 +6,7 @@ import type {
   DeliveryId,
   DeliveryProjection,
   ProductSessionId,
-  StageRunId,
+  WorkRunId,
 } from './generated/contracts.js'
 import { matchesCanonicalSchema } from './generated/control-plane-client.js'
 
@@ -31,7 +31,7 @@ export interface AttentionSignal {
   readonly weight: number
   readonly revision: number
   readonly deliveryId: DeliveryId | null
-  readonly stageRunId: StageRunId | null
+  readonly workRunId: WorkRunId | null
   readonly productSessionId: ProductSessionId | null
 }
 
@@ -57,7 +57,7 @@ const SIGNAL_RANK: Readonly<Record<AttentionSignalKind, number>> = Object.freeze
 })
 
 function canonical<Identity extends string>(
-  schema: 'ApprovalId' | 'DeliveryId' | 'ProductSessionId' | 'StageRunId',
+  schema: 'ApprovalId' | 'DeliveryId' | 'ProductSessionId' | 'WorkRunId',
   value: Identity | null,
 ): Identity | null {
   return value !== null && matchesCanonicalSchema(schema, value) ? value : null
@@ -74,19 +74,19 @@ function approvalIsOpen(projection: ApprovalProjection, nowMillis: number): bool
 }
 
 function deliveryContext(title: string | null): string {
-  return title === null ? 'Delivery · unnamed delivery' : `Delivery · ${title}`
+  return title === null ? '交付 · 未命名交付' : `交付 · ${title}`
 }
 
 function originForApproval(
   projection: ApprovalProjection,
-  origins: ReadonlyMap<StageRunId, DeliveryProjection>,
+  origins: ReadonlyMap<WorkRunId, DeliveryProjection>,
 ): DeliveryProjection | null {
-  const boundStageRunId = canonical(
-    'StageRunId',
-    (projection.binding.sessionIdentity.workRunId ?? null) as StageRunId | null,
+  const boundWorkRunId = canonical(
+    'WorkRunId',
+    projection.binding.sessionIdentity.workRunId ?? null,
   )
-  if (boundStageRunId === null) return null
-  return origins.get(boundStageRunId) ?? null
+  if (boundWorkRunId === null) return null
+  return origins.get(boundWorkRunId) ?? null
 }
 
 /**
@@ -95,52 +95,52 @@ function originForApproval(
  * dropped, so a notification can never link into a fabricated context.
  */
 export function attentionSignals(input: AttentionSignalInput): readonly AttentionSignal[] {
-  const origins = new Map<StageRunId, DeliveryProjection>()
+  const origins = new Map<WorkRunId, DeliveryProjection>()
   const signals: AttentionSignal[] = []
   for (const delivery of input.deliveries) {
     const deliveryId = canonical('DeliveryId', delivery.deliveryId)
     if (deliveryId === null) continue
-    const activeStageRunId = canonical('StageRunId', (delivery.activeWorkRunId ?? null) as StageRunId | null)
-    if (activeStageRunId !== null) origins.set(activeStageRunId, delivery)
-    if (delivery.status === 'needs-attention' && delivery.openAttentionCount > 0) {
+    const activeWorkRunId = canonical('WorkRunId', delivery.activeWorkRunId ?? null)
+    if (activeWorkRunId !== null) origins.set(activeWorkRunId, delivery)
+    if (delivery.status === 'waiting_human' && delivery.openAttentionCount > 0) {
       signals.push(Object.freeze({
         kind: 'attention',
         id: deliveryId,
         identity: `attention:${deliveryId}:${String(delivery.openAttentionCount)}`,
-        title: 'Delivery needs attention',
+        title: '交付需要处理',
         context: deliveryContext(delivery.title),
         weight: delivery.openAttentionCount,
         revision: delivery.revision,
         deliveryId,
-        stageRunId: activeStageRunId,
+        workRunId: activeWorkRunId,
         productSessionId: null,
       }))
     }
-    if (delivery.taskCounts.failed > 0) {
+    if (delivery.workItemCounts.failed > 0) {
       signals.push(Object.freeze({
         kind: 'failure',
         id: deliveryId,
-        identity: `failure:${deliveryId}:${String(delivery.taskCounts.failed)}`,
-        title: delivery.taskCounts.failed === 1 ? 'Task failed' : 'Tasks failed',
+        identity: `failure:${deliveryId}:${String(delivery.workItemCounts.failed)}`,
+        title: delivery.workItemCounts.failed === 1 ? '任务失败' : '多项任务失败',
         context: deliveryContext(delivery.title),
-        weight: delivery.taskCounts.failed,
+        weight: delivery.workItemCounts.failed,
         revision: delivery.revision,
         deliveryId,
-        stageRunId: activeStageRunId,
+        workRunId: activeWorkRunId,
         productSessionId: null,
       }))
     }
-    if (delivery.status === 'delivered') {
+    if (delivery.status === 'done') {
       signals.push(Object.freeze({
         kind: 'completion',
         id: deliveryId,
-        identity: `completion:${deliveryId}:delivered`,
-        title: 'Delivery delivered',
+        identity: `completion:${deliveryId}:done`,
+        title: '交付已完成',
         context: deliveryContext(delivery.title),
         weight: 1,
         revision: delivery.revision,
         deliveryId,
-        stageRunId: activeStageRunId,
+        workRunId: activeWorkRunId,
         productSessionId: null,
       }))
     }
@@ -157,14 +157,14 @@ export function attentionSignals(input: AttentionSignalInput): readonly Attentio
       kind: 'approval',
       id: approvalId,
       identity: `approval:${approvalId}:pending`,
-      title: 'Tool approval requested',
-      context: origin === null ? 'Open the session decisions' : deliveryContext(origin.title),
+      title: '工具调用等待批准',
+      context: origin === null ? '打开会话决策' : deliveryContext(origin.title),
       weight: 1,
       revision: projection.revision,
       deliveryId: origin === null ? null : canonical('DeliveryId', origin.deliveryId),
-      stageRunId: canonical(
-        'StageRunId',
-        (projection.binding.sessionIdentity.workRunId ?? null) as StageRunId | null,
+      workRunId: canonical(
+        'WorkRunId',
+        projection.binding.sessionIdentity.workRunId ?? null,
       ),
       productSessionId,
     }))

@@ -8,11 +8,11 @@ use winwincode_api::generated::{
     ControlPlaneWebSocketDeliveryChangedEvent, ControlPlaneWebSocketDeliveryChangedEventTypeValue,
 };
 use winwincode_control_plane::{ControlPlane, ControlPlaneConfig, EventPublisher, OutboxEvent};
-use winwincode_delivery::domain::{Delivery, DeliveryStatus, StageRunStatus};
+use winwincode_delivery::domain::{Delivery, DeliveryStatus};
 use winwincode_domain::{
     ControlPlaneEventId, DeliveryId, ExecutionJobId, ExecutionMessageId, FencingToken, Instant,
     LeaseId, OrganizationId, ProductSessionId, ProjectId, RepositoryId, RequestId, Revision,
-    Sha256Digest, UserId, WorkerId, WorkerInstanceId, WorkerSessionId, WorkspaceId,
+    Sha256Digest, UserId, WorkRunState, WorkerId, WorkerInstanceId, WorkerSessionId, WorkspaceId,
 };
 use winwincode_storage::{
     ArtifactAccess, ArtifactChunk, ArtifactMeteringAttribution, ArtifactOpen, ArtifactProvenance,
@@ -268,14 +268,11 @@ fn delivered_with_reader(reader_open: bool, revision: u64) -> Delivery {
         item.state = winwincode_domain::WorkItemState::Done;
     }
     snapshot.updated_at_millis = 1_800_000_000_100 + revision;
-    let run = snapshot.stage_runs.first_mut().expect("reader StageRun");
-    if reader_open {
-        run.status = StageRunStatus::Waiting;
-        run.finished_at_millis = None;
+    snapshot.work_run_aggregate.runs[0].state = if reader_open {
+        WorkRunState::Running
     } else {
-        run.status = StageRunStatus::Succeeded;
-        run.finished_at_millis = Some(snapshot.updated_at_millis);
-    }
+        WorkRunState::Settled
+    };
     Delivery::try_from_snapshot(snapshot).expect("terminal Delivery fixture")
 }
 
@@ -418,7 +415,7 @@ fn delivery_terminal_reader_hold_then_reads_closed_releases_receipt_first_exactl
         .install_git_repository_root(&fixture.repositories)
         .expect("canonical Git retention root");
 
-    // Delivery is already terminal, but its reader StageRun remains active.
+    // Delivery is already terminal, but its reader WorkRun remains active.
     // The closure receipt cannot be minted and no release can be authorized.
     control_plane
         .commit_candidate_git_reads_closed(

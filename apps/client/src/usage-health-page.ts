@@ -5,6 +5,8 @@ import type {
   CredentialHealthRow,
   ProviderHealthRow,
   ProviderHealthState,
+  SessionTeamRow,
+  SessionTeamState,
   UsageAggregate,
   UsageCapacitySummary,
   UsageHealthDimension,
@@ -65,9 +67,9 @@ const PRESENTATION_SPEC: UsageHealthPresentation = {
   }),
   providerStateLabel: Object.freeze({
     ready: '路由就绪',
-    disabled: 'Provider 或模型已禁用',
-    unavailable: 'Provider 不可用',
-    unknown: 'Provider 状态未知',
+    disabled: '模型服务商或模型已禁用',
+    unavailable: '模型服务商不可用',
+    unknown: '模型服务商状态未知',
   }),
   credentialStateLabel: Object.freeze({
     available: '凭据可用',
@@ -76,28 +78,28 @@ const PRESENTATION_SPEC: UsageHealthPresentation = {
   }),
   dimensionHeading: Object.freeze({
     delivery: '按交付用量',
-    'work-run': '按 WorkRun 用量',
+    'work-run': '按工作运行用量',
     role: '按角色用量',
     model: '模型用量',
-    provider: 'Provider 路由',
+    provider: '模型服务商路由',
   }),
   unknownLabel: '未知',
-  unattributedLabel: 'Token 用量未归因',
-  durationNote: '运行时投影未发布每个 StageRun 或角色的耗时。',
-  overlapNote: '一个 StageRun 的总量会计入其中运行的每个角色，因此角色行之间存在重叠。',
-  unattributedNote: '运行时把 token 用量归因到 StageRun，因此 Provider 与模型行仅携带路由事实。',
+  unattributedLabel: '令牌用量未归因',
+  durationNote: '运行时投影未发布每个工作运行或角色的耗时。',
+  overlapNote: '一个工作运行的总量会计入其中运行的每个角色，因此角色行之间存在重叠。',
+  unattributedNote: '运行时把令牌用量归因到工作运行，因此模型服务商与模型行仅携带路由事实。',
   priceSourceNote: '不展示费用：已发布的投影不含价目表，因此此处不发布单价。',
   coverageLabel: window => `${String(window.availableSessions)} 个会话中的 ${
     String(window.observedSessions)} 个`,
   unavailableLabel: '此分区不可用',
   emptyLabel: '此范围暂无上报数据。',
   refreshLabel: '刷新',
-  headingLabel: '用量、Provider 与 Worker 健康',
+  headingLabel: '用量、模型服务商与执行进程健康',
   windowLabel: '观测数据窗口',
   updatedLabel: '更新于',
   capacityLabel: Object.freeze({
-    sufficient: 'Worker 容量满足配置的并发上限',
-    short: 'Worker 容量低于配置的并发上限',
+    sufficient: '执行容量满足配置的并发上限',
+    short: '执行容量低于配置的并发上限',
     unknown: '未配置并发上限',
   }),
 }
@@ -143,6 +145,30 @@ const PROVIDER_TONES: Readonly<Record<ProviderHealthState, string>> = Object.fre
   unknown: 'neutral',
 })
 
+const SESSION_TEAM_TONES: Readonly<Record<SessionTeamState, string>> = Object.freeze({
+  running: 'success',
+  recovering: 'warning',
+  offline: 'danger',
+  idle: 'neutral',
+  unknown: 'neutral',
+})
+
+const SESSION_TEAM_STATE_LABEL: Readonly<Record<SessionTeamState, string>> = Object.freeze({
+  running: '运行中',
+  recovering: '恢复中',
+  offline: '离线',
+  idle: '空闲',
+  unknown: '状态未知',
+})
+
+const RECOVERY_STATE_LABEL: Readonly<Record<SessionTeamRow['recoveryState'], string>> =
+  Object.freeze({
+    none: '无需恢复',
+    required: '等待恢复',
+    'in-progress': '恢复中',
+    recovered: '已恢复',
+  })
+
 const AGGREGATE_DIMENSIONS: readonly ('delivery' | 'work-run' | 'role')[] = Object.freeze([
   'delivery',
   'work-run',
@@ -151,7 +177,7 @@ const AGGREGATE_DIMENSIONS: readonly ('delivery' | 'work-run' | 'role')[] = Obje
 
 function rowClassName(dimension: UsageHealthDimension): string {
   if (dimension === 'delivery') return 'wwc-usage-health-delivery'
-  if (dimension === 'work-run') return 'wwc-usage-health-stage-run'
+  if (dimension === 'work-run') return 'wwc-usage-health-work-run'
   if (dimension === 'role') return 'wwc-usage-health-role'
   if (dimension === 'model') return 'wwc-usage-health-model'
   return 'wwc-usage-health-provider'
@@ -223,7 +249,7 @@ export function mountUsageHealthSummary(
       ? row.metrics.map(metric => `${metric.name} ${metric.value}`).join(' · ')
       : presentation.unknownLabel
     const detail = element(document, 'span', 'wwc-usage-health-row-detail')
-    detail.textContent = `${row.sessionCount} 个 StageRun 会话`
+    detail.textContent = `${row.sessionCount} 个 WorkRun 会话`
     const asOf = element(document, 'span', 'wwc-usage-health-row-asof')
     asOf.textContent = asOfText(row.asOf, row.asOfKnown)
     node.replaceChildren(...withMarkers([
@@ -289,6 +315,48 @@ export function mountUsageHealthSummary(
         heartbeat,
         unknownMarker(row.heartbeatKnown, presentation.unknownLabel),
       ]))
+    },
+  })
+
+  const sessionTeamRows = mountKeyedCollection<SessionTeamRow, string, HTMLLIElement>({
+    parent: element(document, 'ul', 'wwc-usage-health-session-team-list'),
+    key: row => row.key,
+    create: () => element(document, 'li', 'wwc-usage-health-session-team'),
+    update: (node, row) => {
+      const unknown = presentation.unknownLabel
+      node.dataset.key = row.key
+      node.dataset.sessionState = row.state
+      node.dataset.tone = SESSION_TEAM_TONES[row.state]
+      const label = element(document, 'span', 'wwc-usage-health-session-team-label')
+      label.textContent = row.agentName === null
+        ? `AgentIdentity ${unknown}`
+        : `${row.agentName} · ${row.role ?? unknown}`
+      const identity = element(document, 'span', 'wwc-usage-health-session-team-identity')
+      identity.textContent = `AgentIdentity ${row.agentId ?? unknown} · Worker ${
+        row.workerId ?? unknown
+      }`
+      const session = element(document, 'span', 'wwc-usage-health-session-team-session')
+      session.textContent = `Session ${row.workerSessionId} · ${row.codexThreadId} · attempt ${
+        String(row.attempt)
+      }`
+      const provider = element(document, 'span', 'wwc-usage-health-session-team-provider')
+      provider.textContent = `Provider ${row.provider ?? unknown} · Model ${row.model ?? unknown}`
+      const workspace = element(document, 'span', 'wwc-usage-health-session-team-workspace')
+      workspace.textContent = `Workspace ${row.repositoryId ?? unknown} · ${
+        row.workspaceRevision ?? unknown
+      } · ${row.writeMode ?? unknown}`
+      const activity = element(document, 'span', 'wwc-usage-health-session-team-activity')
+      activity.textContent = `当前活动 ${row.currentActivity ?? '无运行活动'}`
+      const state = element(document, 'span', 'wwc-usage-health-session-team-state')
+      state.textContent = `${SESSION_TEAM_STATE_LABEL[row.state]} · ${
+        RECOVERY_STATE_LABEL[row.recoveryState]
+      }`
+      const recovery = element(document, 'span', 'wwc-usage-health-session-team-recovery')
+      recovery.dataset.requiresHuman = row.recoveryRequiresHuman ? 'true' : 'false'
+      recovery.textContent = `${row.recoveryMessage}${
+        row.lastFailureSourceRef === null ? '' : ` · 异常来源 ${row.lastFailureSourceRef}`
+      }`
+      node.replaceChildren(label, identity, session, provider, workspace, activity, state, recovery)
     },
   })
 
@@ -381,7 +449,7 @@ export function mountUsageHealthSummary(
   })
 
   function subSection(
-    dimension: UsageHealthDimension | 'worker' | 'credential' | 'error',
+    dimension: UsageHealthDimension | 'session-team' | 'worker' | 'credential' | 'error',
     headingText: string,
     note: string,
     sources: readonly UsageHealthSource[],
@@ -405,6 +473,13 @@ export function mountUsageHealthSummary(
   sections.append(
     ...AGGREGATE_DIMENSIONS.map(dimension => aggregateSectionRoots.get(dimension)!),
     subSection(
+      'session-team',
+      '会话与 Agent 团队',
+      '展示会话打开时冻结的身份、模型服务商与工作区事实，以及当前运行和恢复状态。',
+      ['usage', 'worker'],
+      sessionTeamRows.root,
+    ),
+    subSection(
       'provider',
       presentation.dimensionHeading.provider,
       presentation.unattributedNote,
@@ -414,7 +489,7 @@ export function mountUsageHealthSummary(
     ),
     subSection(
       'worker',
-      'Worker 容量与可达性',
+      '执行容量与可达性',
       presentation.priceSourceNote,
       ['worker'],
       capacity,
@@ -483,6 +558,7 @@ export function mountUsageHealthSummary(
     aggregateCollections.get('role')?.update(state.byRole)
     providerRows.update(state.byProvider)
     modelRows.update(state.byModel)
+    sessionTeamRows.update(state.sessionTeam)
     workerRows.update(state.workers)
     credentialRows.update(state.credentials)
     errorRows.update(state.errors)
@@ -501,6 +577,7 @@ export function mountUsageHealthSummary(
       for (const collection of aggregateCollections.values()) collection.close()
       providerRows.close()
       modelRows.close()
+      sessionTeamRows.close()
       workerRows.close()
       credentialRows.close()
       errorRows.close()

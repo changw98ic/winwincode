@@ -12,22 +12,21 @@ use winwincode_api::generated::{
     ControlPlaneWebSocketActivityRecordedEventTypeValue, ControlPlaneWebSocketClientFrame,
     ControlPlaneWebSocketControlPlaneSource, ControlPlaneWebSocketControlPlaneSourceKind,
     ControlPlaneWebSocketDeliveryChangedEvent, ControlPlaneWebSocketDeliveryChangedEventTypeValue,
-    ControlPlaneWebSocketDeliveryTaskChangedEvent,
-    ControlPlaneWebSocketDeliveryTaskChangedEventTypeValue, ControlPlaneWebSocketEventFrame,
-    ControlPlaneWebSocketEventSource, ControlPlaneWebSocketEventType,
-    ControlPlaneWebSocketResumeFrame, ControlPlaneWebSocketResumeFrameTypeValue,
-    ControlPlaneWebSocketSubscribeFrame, ControlPlaneWebSocketSubscribeFrameTypeValue,
-    ControlPlaneWebSocketSubscribeOrigin, ControlPlaneWebSocketSubscribeStartAt,
-    ControlPlaneWebSocketSubscription, ControlPlaneWebSocketWorkerHealthChangedEvent,
+    ControlPlaneWebSocketEventFrame, ControlPlaneWebSocketEventSource,
+    ControlPlaneWebSocketEventType, ControlPlaneWebSocketResumeFrame,
+    ControlPlaneWebSocketResumeFrameTypeValue, ControlPlaneWebSocketSubscribeFrame,
+    ControlPlaneWebSocketSubscribeFrameTypeValue, ControlPlaneWebSocketSubscribeOrigin,
+    ControlPlaneWebSocketSubscribeStartAt, ControlPlaneWebSocketSubscription,
+    ControlPlaneWebSocketWorkItemChangedEvent, ControlPlaneWebSocketWorkItemChangedEventTypeValue,
+    ControlPlaneWebSocketWorkerHealthChangedEvent,
     ControlPlaneWebSocketWorkerHealthChangedEventTypeValue, DeliveryEventReadStream,
     DeliveryEventReadStreamKind, EventReadStream, LeaseEventReadStream, LeaseEventReadStreamKind,
     Scope, ScopeEventReadStream, ScopeEventReadStreamKind,
 };
 use winwincode_domain::{
     ControlPlaneEventId, ControlPlaneWebSocketAuthorizationEpoch,
-    ControlPlaneWebSocketSubscriptionId, DeliveryId, DeliveryTaskId, Instant, LeaseId,
-    OrganizationId, ProjectId, RepositoryId, RequestId, Revision, Sha256Digest, UserId, WorkerId,
-    WorkspaceId,
+    ControlPlaneWebSocketSubscriptionId, DeliveryId, Instant, LeaseId, OrganizationId, ProjectId,
+    RepositoryId, RequestId, Revision, Sha256Digest, UserId, WorkItemId, WorkerId, WorkspaceId,
 };
 use winwincode_domain::{RepositoryScope, RepositoryScopeKind, UserActor, UserActorKind};
 use winwincode_server::{
@@ -153,13 +152,13 @@ impl Fixture {
     fn publish_task_range(&mut self, first: u64, last: u64) -> usize {
         let payloads = (first..=last)
             .map(|sequence| {
-                let event = ControlPlaneWebSocketDeliveryTaskChangedEvent {
+                let event = ControlPlaneWebSocketWorkItemChangedEvent {
                     change_kind: "advanced".to_owned(),
                     delivery_id: self.delivery_id.clone(),
-                    delivery_task_id: DeliveryTaskId(format!("dtk_{sequence:026}")),
+                    work_item_id: WorkItemId(format!("wit_{sequence:026}")),
                     revision: Revision(i64::try_from(sequence).expect("fixture revision")),
                     type_value:
-                        ControlPlaneWebSocketDeliveryTaskChangedEventTypeValue::DeliveryTaskChangedV1,
+                        ControlPlaneWebSocketWorkItemChangedEventTypeValue::WorkItemChangedV1,
                 };
                 (
                     sequence,

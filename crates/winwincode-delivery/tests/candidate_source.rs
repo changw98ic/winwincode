@@ -6,14 +6,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use sha2::{Digest, Sha256};
 use winwincode_delivery::{
     application::{
-        stage::{
+        verdict::test_support::{VerdictFixtureOutcome, verdict_fixture},
+        workrun_execution::{
             TerminalArtifactReference, TerminalOutcomeStatus,
             test_support::{
                 active_lease_identity, delivery_terminal_outcome_facts, session_binding_authority,
                 terminal_outcome_metadata, terminal_worker_outcome,
             },
         },
-        verdict::test_support::{VerdictFixtureOutcome, verdict_fixture},
     },
     domain::{
         DELIVERY_SCHEMA_VERSION, Delivery, RepositoryKind, RepositoryRef,
@@ -122,7 +122,6 @@ fn delivery_freezes_only_the_rebuilt_source_named_by_the_successful_worker_outco
         VerdictFixtureOutcome::Pass,
     );
     let mut snapshot = fixture.delivery.into_snapshot();
-    snapshot.stage_runs.clear();
     snapshot.spec.repository = RepositoryRef {
         schema_version: DELIVERY_SCHEMA_VERSION,
         kind: RepositoryKind::LocalGit,
@@ -144,6 +143,15 @@ fn delivery_freezes_only_the_rebuilt_source_named_by_the_successful_worker_outco
     binding.fencing_token = Some(FencingToken("301".into()));
     binding.worker_id = Some(WorkerId("wrk_00000000000000000000000301".into()));
     binding.worker_instance_id = Some(WorkerInstanceId("wki_00000000000000000000000301".into()));
+    let context = binding
+        .runtime_context
+        .as_mut()
+        .expect("executor runtime context");
+    context.agent_identity.worker_id = binding.worker_id.clone().expect("worker");
+    context.agent_identity.role = binding
+        .execution_profile
+        .clone()
+        .expect("executor execution profile");
     let producer = snapshot
         .work_run_aggregate
         .runs

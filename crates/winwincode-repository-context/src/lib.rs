@@ -8,10 +8,11 @@ mod scanner;
 pub use command_index::CommandLocalCodeIndex;
 pub use git_snapshot::GitRepositorySnapshot;
 pub use model::{
-    CommandPurpose, IndexCapabilities, IndexCapability, LanguageSummary, LocalCodeIndexMode,
-    LocalCodeIndexProbe, LocalCodeIndexSnapshot, PackageManager, PackageManagerKind,
-    RepositoryCommand, RepositoryContext, RepositoryContextError, RepositoryContextQuery,
-    RepositoryFile, RepositoryPaths, TestContext,
+    CommandPurpose, ImpactPath, ImpactUnknown, IndexCapabilities, IndexCapability, LanguageSummary,
+    LocalCodeIndexMode, LocalCodeIndexProbe, LocalCodeIndexSnapshot, PackageManager,
+    PackageManagerKind, RegressionSelection, RepositoryCommand, RepositoryContext,
+    RepositoryContextError, RepositoryContextQuery, RepositoryFile, RepositoryImpact,
+    RepositoryPaths, TestContext,
 };
 pub use scanner::{
     FileInventoryLocalCodeIndex, LocalCodeIndexPort, RepositoryContextPort,

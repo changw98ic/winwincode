@@ -2,7 +2,7 @@
 
 //! The `FLOW-100.5` `StrongFlow` role-to-Device `WorkerSession` routing over the
 //! real composed Server application with its production-local Delivery
-//! authority: the `delivery.advance` that commits a Codex `WorkRun`'s
+//! authority: the `workrun.start` that commits a Codex `WorkRun`'s
 //! `ExecutionJob` routes that job to the `WorkRun`'s launched Device
 //! `WorkerSession` when a durable launch anchor exists (after the
 //! FLOW-100.3 permission gate approves the acting user), while a `WorkRun`
@@ -370,8 +370,8 @@ fn work_run_anchor(
     let mut storage = SqliteStorage::open(root).expect("open staging storage");
     let worker_launch_grant_id = ulid_id("wlg", seed);
     let worker_session_id = ulid_id("ws", seed + 1);
-    let worker_id = ulid_id("wkr", seed + 2);
-    let worker_instance_id = ulid_id("winst", seed + 3);
+    let worker_id = ulid_id("wrk", seed + 2);
+    let worker_instance_id = ulid_id("wki", seed + 3);
     let issuance = LaunchGrantIssuance::try_new(
         worker_launch_grant_id.clone(),
         node,
@@ -454,14 +454,13 @@ fn delivery_create_request(
                 "scope": ["src"],
                 "sourceProductSessionId": null,
                 "title": "StrongFlow Device Delivery"
-            },
-            "tasks": []
+            }
         }
     }))
     .expect("generated delivery.create command")
 }
 
-fn delivery_advance_request(
+fn workrun_start_request(
     request: u64,
     delivery: u64,
     user: &str,
@@ -470,7 +469,7 @@ fn delivery_advance_request(
     serde_json::from_value(serde_json::json!({
         "schemaVersion": "winwincode/v1",
         "requestId": canonical_id("req", request),
-        "command": "delivery.advance",
+        "command": "workrun.start",
         "actor": { "kind": "user", "id": user },
         "scope": repository_scope_json(),
         "expectedRevision": expected_revision,
@@ -479,14 +478,14 @@ fn delivery_advance_request(
             "dispatchProfile": "executor"
         }
     }))
-    .expect("generated delivery.advance command")
+    .expect("generated workrun.start command")
 }
 
 fn delivery_task_breakdown_request(request: u64, delivery: u64, user: &str) -> CommandRequest {
     let command = serde_json::from_value(serde_json::json!({
         "schemaVersion": "winwincode/v1",
         "requestId": canonical_id("req", request),
-        "command": "delivery.task_breakdown.create",
+        "command": "workitems.create",
         "actor": { "kind": "user", "id": user },
         "scope": repository_scope_json(),
         "expectedRevision": 1,
@@ -503,8 +502,8 @@ fn delivery_task_breakdown_request(request: u64, delivery: u64, user: &str) -> C
             }]
         }
     }))
-    .expect("generated delivery.task_breakdown.create command");
-    CommandRequest::DeliveryTaskBreakdownCreateCommand(command)
+    .expect("generated workitems.create command");
+    CommandRequest::WorkItemsCreateCommand(command)
 }
 
 fn completed(response: CommandDispatchResponse) -> serde_json::Value {
@@ -612,13 +611,15 @@ fn a_device_anchored_work_run_is_dispatched_to_its_launched_worker_session() {
             delivery_task_breakdown_request(12, 1, &holder),
         )
         .expect("create canonical WorkItem");
-    application
-        .command(
-            &principal(&holder),
-            CommandFamily::Delivery,
-            delivery_advance_request(11, 1, &holder, 2),
-        )
-        .expect("advance Delivery");
+    let started = completed(
+        application
+            .command(
+                &principal(&holder),
+                CommandFamily::Delivery,
+                workrun_start_request(11, 1, &holder, 2),
+            )
+            .expect("advance Delivery"),
+    );
     let (job_id, work_run_id, product_session_id) = {
         let mut storage = open_storage(&root);
         let job_id = queued_job_id(&mut storage);
@@ -629,6 +630,7 @@ fn a_device_anchored_work_run_is_dispatched_to_its_launched_worker_session() {
         let work_run_id = record.work_run_id.clone().expect("Delivery WorkRun");
         (job_id, work_run_id, record.scope.product_session_id.clone())
     };
+    assert_eq!(started["result"]["activeWorkRunId"], work_run_id.0);
     // The Client launches this role's WorkerSession for exactly this WorkRun
     // run, and the control plane settles the launch acknowledgement.
     let (node, instance, lease_id, fencing_token, binding) =
@@ -652,7 +654,7 @@ fn a_device_anchored_work_run_is_dispatched_to_its_launched_worker_session() {
         .command(
             &principal(&holder),
             CommandFamily::Delivery,
-            delivery_advance_request(11, 1, &holder, 2),
+            workrun_start_request(11, 1, &holder, 2),
         )
         .expect("receipt-first advance replay completes the dispatch");
     let facts = {
@@ -731,7 +733,7 @@ fn an_unanchored_work_run_keeps_the_local_execution_path() {
         .command(
             &principal(&user),
             CommandFamily::Delivery,
-            delivery_advance_request(61, 1, &user, 2),
+            workrun_start_request(61, 1, &user, 2),
         )
         .expect("advance Delivery");
     let mut storage = open_storage(&root);
@@ -779,7 +781,7 @@ fn a_gate_denial_dispatches_nothing() {
             delivery_task_breakdown_request(82, 1, &member),
         )
         .expect("create canonical WorkItem");
-    let advance = delivery_advance_request(81, 1, &member, 2);
+    let advance = workrun_start_request(81, 1, &member, 2);
     application
         .command(
             &principal(&member),
@@ -864,7 +866,7 @@ fn the_work_run_dispatch_replays_exactly_without_new_facts() {
             delivery_task_breakdown_request(52, 1, &holder),
         )
         .expect("create canonical WorkItem");
-    let advance = delivery_advance_request(51, 1, &holder, 2);
+    let advance = workrun_start_request(51, 1, &holder, 2);
     application
         .command(
             &principal(&holder),

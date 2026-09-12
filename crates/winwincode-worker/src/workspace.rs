@@ -1667,7 +1667,13 @@ fn controlled_repository(
     root: &Path,
     repository_id: &RepositoryId,
 ) -> Result<PathBuf, WorkspaceError> {
-    let repository = fs::canonicalize(root.join(&repository_id.0)).map_err(|error| {
+    let named_repository = root.join(&repository_id.0);
+    let repository = fs::canonicalize(if named_repository.exists() {
+        named_repository
+    } else {
+        root.to_path_buf()
+    })
+    .map_err(|error| {
         WorkspaceError::new(
             WorkspaceErrorCode::NotFound,
             format!("controlled source repository cannot be opened: {error}"),

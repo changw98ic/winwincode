@@ -18,12 +18,12 @@ const productSessionBindingFixturePath = join(
   'contracts',
   'session-binding.product-session.valid.json',
 )
-const deliveryStageBindingFixturePath = join(
+const workRunBindingFixturePath = join(
   root,
   'tests',
   'fixtures',
   'contracts',
-  'session-binding.delivery-stage.valid.json',
+  'session-binding.work-run.valid.json',
 )
 
 const expectedKinds = [
@@ -81,6 +81,7 @@ const domainDefinitions = [
   'RepositoryScope',
   'RequestId',
   'Revision',
+  'RuntimeSessionContext',
   'SchemaVersion',
   'SessionBindingSourceIdentity',
   'SessionIdentity',
@@ -461,9 +462,9 @@ test('DeliveryReworkTargetScope.evidenceRefIds uses the canonical domain Evidenc
   )
 
   const legacyScope = structuredClone(canonicalScope)
-  legacyScope.reworkAuthorization.targets[0].deliveryTaskId = `dtk_${'A'.repeat(26)}`
+  legacyScope.reworkAuthorization.targets[0].workItemId = `wit_${'A'.repeat(26)}`
   delete legacyScope.reworkAuthorization.targets[0].workItemId
-  assert.equal(validate(legacyScope), false, 'legacy deliveryTaskId must be rejected')
+  assert.equal(validate(legacyScope), false, 'legacy workItemId must be rejected')
 
   const legacyTargetScope = structuredClone(canonicalScope)
   legacyTargetScope.reworkAuthorization.targets[0].diagramId = 'legacy-diagram'
@@ -520,21 +521,21 @@ test('ProductSession runtime messages carry no fabricated WorkRun identity', () 
   )
 })
 
-test('SessionBinding carries WorkRun only for DeliveryStage jobs', () => {
+test('SessionBinding carries WorkRun only for WorkRun jobs', () => {
   const schema = json(schemaPath)
   const validate = validator(schema)
   const productSession = json(productSessionBindingFixturePath)
-  const deliveryStage = json(deliveryStageBindingFixturePath)
+  const workRun = json(workRunBindingFixturePath)
 
   assert.equal(schema.$defs.SessionBindingMessage.required.includes('workRunId'), false)
   assert.equal(validate(productSession), true, JSON.stringify(validate.errors))
   assert.equal(Object.hasOwn(productSession, 'workRunId'), false)
   assert.equal(Object.hasOwn(productSession.sessionIdentity, 'workRunId'), false)
 
-  assert.equal(validate(deliveryStage), true, JSON.stringify(validate.errors))
-  assert.equal(deliveryStage.workRunId, deliveryStage.sessionIdentity.workRunId)
-  assert.equal(validate({ ...deliveryStage, stageRunId: 'run_00000000000000000000000009' }), false)
-  assert.equal(validate({ ...deliveryStage, workRunId: 'run_00000000000000000000000009' }), false)
+  assert.equal(validate(workRun), true, JSON.stringify(validate.errors))
+  assert.equal(workRun.workRunId, workRun.sessionIdentity.workRunId)
+  assert.equal(validate({ ...workRun, stageRunId: 'run_00000000000000000000000009' }), false)
+  assert.equal(validate({ ...workRun, workRunId: 'run_00000000000000000000000009' }), false)
 })
 
 test('ExecutionPort input response maps provided and empty terminal values exactly', () => {
@@ -1734,7 +1735,7 @@ test('DebugProbe contracts are generated, closed, bounded, authority-bound, and 
 
 test('HTTP rework input names a bounded canonical WorkItem and exact candidate hunks', () => {
   const schema = json(join(root, 'schema/winwincode/v1/control-plane-http.schema.json'))
-  const validate = validator(schema, 'DeliveryAdvancePayload')
+  const validate = validator(schema, 'WorkRunStartPayload')
   const target = {
     workItemId: 'wit_01J00000000000000000000000',
     filePath: 'src/example.rs',
@@ -1750,7 +1751,7 @@ test('HTTP rework input names a bounded canonical WorkItem and exact candidate h
     },
   }
   assert.equal(validate(valid), true, JSON.stringify(validate.errors))
-  for (const old of ['deliveryTaskId', 'diagramId', 'nodeId']) {
+  for (const old of ['workItemId', 'diagramId', 'nodeId']) {
     const wrong = structuredClone(valid)
     wrong.rework.targets[0][old] = 'old-authority'
     assert.equal(validate(wrong), false, old)

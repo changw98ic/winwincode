@@ -1134,27 +1134,6 @@ mod tests {
     }
 
     fn artifact_open_fixture() -> ArtifactOpenMessage {
-        fn rename(v: &mut serde_json::Value) {
-            match v {
-                serde_json::Value::Object(map) => {
-                    if let Some(x) = map.remove("stageRunId") {
-                        map.insert("workRunId".into(), x);
-                    }
-                    if let Some(x) = map.remove("stageInput") {
-                        map.insert("workInput".into(), x);
-                    }
-                    for child in map.values_mut() {
-                        rename(child);
-                    }
-                }
-                serde_json::Value::Array(values) => {
-                    for child in values {
-                        rename(child);
-                    }
-                }
-                _ => {}
-            }
-        }
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
             "../../../tests/fixtures/contracts/execution-port.valid.json"
         ))
@@ -1166,7 +1145,6 @@ mod tests {
             .find(|message| message["kind"] == "artifact.open")
             .expect("artifact.open")
             .clone();
-        rename(&mut value);
         if let Some(scope) = value.pointer_mut("/scope") {
             *scope = serde_json::json!({
                 "kind":"work-run", "productSessionId":"psn_00000000000000000000000001",

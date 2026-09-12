@@ -52,7 +52,6 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use time::OffsetDateTime;
-use time::format_description::well_known::Rfc3339;
 use winwincode_client_port::domain::{
     RepositoryAvailability, RepositoryBindingProjection, RepositoryDirtyState, RepositoryKind,
 };
@@ -849,8 +848,7 @@ fn map_outbox_error(
 
 /// RFC 3339 UTC stamp of the caller's clock observation.
 fn rfc3339(time: OffsetDateTime) -> Result<String, RepositoryRegistryError> {
-    time.format(&Rfc3339)
-        .map_err(|error| RepositoryRegistryError::Protocol(format!("timestamp failed: {error}")))
+    Ok(crate::canonical_rfc3339(time))
 }
 
 #[cfg(test)]

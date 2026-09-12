@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! The canonical ten-object Delivery aggregate.
+//! The canonical Delivery aggregate over one `WorkItem`/`WorkRun` graph.
 //!
 //! The public structs in the child modules are draft/snapshot facts. A caller
 //! cannot persist one until [`Delivery::try_from_snapshot`] has validated the
@@ -13,8 +13,6 @@ pub mod evidence;
 pub mod rework;
 mod session_binding;
 mod spec;
-mod stage_run;
-mod task;
 pub mod verdict;
 pub mod verification;
 
@@ -37,22 +35,19 @@ pub use candidate::{
 };
 pub use evidence::{EvidenceRef, EvidenceRefType, VerifiedEvidenceOutcome};
 pub use session_binding::{
-    SessionBinding, SessionBindingSourceKind, SessionBindingSourceProvenance,
+    SessionAgentIdentity, SessionBinding, SessionBindingSourceKind, SessionBindingSourceProvenance,
+    SessionRuntimeContext, SessionWorkspace,
 };
 pub use spec::{
     AcceptanceCriterion, DeliveryPublicationTarget, DeliverySourceRef, DeliverySpec,
     GitHubIssueSourceRef, GitHubPullRequestTargetRef, RepositoryKind, RepositoryRef,
     delivery_id_for_github_issue_source,
 };
-pub use stage_run::{DeliveryStage, StageRun, StageRunActorType, StageRunStatus};
-pub use task::{DeliveryTask, DeliveryTaskStatus};
 pub use verdict::{
     ComputedDeliveryVerdict, CriterionResult, CriterionVerdict, DeliveryVerdict,
     DeliveryVerdictStatus, compute_delivery_verdict,
 };
-pub use winwincode_domain::{
-    AttentionItemId, DeliveryId, DeliveryTaskId, EvidenceId, StageRunId, WorkRunId,
-};
+pub use winwincode_domain::{AttentionItemId, DeliveryId, EvidenceId, WorkItemId, WorkRunId};
 
 pub const DELIVERY_SCHEMA_VERSION: u8 = 3;
 pub const MAX_DELIVERY_REWORK_ATTEMPTS: u64 = 100;
@@ -323,14 +318,6 @@ pub enum DeliveryStatus {
     Clarifying,
     #[serde(rename = "ready")]
     Ready,
-    #[serde(rename = "planning")]
-    Planning,
-    #[serde(rename = "plan-review")]
-    PlanReview,
-    #[serde(rename = "executing")]
-    Executing,
-    #[serde(rename = "verifying")]
-    Verifying,
     #[serde(rename = "reworking")]
     Reworking,
     #[serde(rename = "needs-attention")]
@@ -349,8 +336,6 @@ pub struct DeliverySnapshot {
     pub revision: u64,
     pub status: DeliveryStatus,
     pub spec: DeliverySpec,
-    pub tasks: Vec<DeliveryTask>,
-    pub stage_runs: Vec<StageRun>,
     pub session_bindings: Vec<SessionBinding>,
     pub attention_items: Vec<AttentionItem>,
     pub evidence: Vec<EvidenceRef>,
@@ -471,17 +456,9 @@ fn validate_delivery(snapshot: &mut DeliverySnapshot) -> Result<(), DeliveryVali
     }
 
     spec::validate(&mut snapshot.spec, "delivery.spec")?;
-    collection_length(snapshot.tasks.len(), "delivery.tasks")?;
-    collection_length(snapshot.stage_runs.len(), "delivery.stageRuns")?;
     collection_length(snapshot.session_bindings.len(), "delivery.sessionBindings")?;
     collection_length(snapshot.attention_items.len(), "delivery.attentionItems")?;
     collection_length(snapshot.evidence.len(), "delivery.evidence")?;
-    for (index, task) in snapshot.tasks.iter().enumerate() {
-        task::validate(task, &format!("delivery.tasks[{index}]"))?;
-    }
-    for (index, run) in snapshot.stage_runs.iter().enumerate() {
-        stage_run::validate(run, &format!("delivery.stageRuns[{index}]"))?;
-    }
     for (index, binding) in snapshot.session_bindings.iter().enumerate() {
         session_binding::validate(binding, &format!("delivery.sessionBindings[{index}]"))?;
     }
@@ -502,14 +479,6 @@ fn validate_delivery(snapshot: &mut DeliverySnapshot) -> Result<(), DeliveryVali
             "spec belongs to another delivery",
         ));
     }
-    duplicate_ids(
-        snapshot.tasks.iter().map(|task| task.id.0.as_str()),
-        "delivery.tasks",
-    )?;
-    duplicate_ids(
-        snapshot.stage_runs.iter().map(|run| run.id.0.as_str()),
-        "delivery.stageRuns",
-    )?;
     duplicate_ids(
         snapshot
             .session_bindings
@@ -582,11 +551,6 @@ fn validate_delivery(snapshot: &mut DeliverySnapshot) -> Result<(), DeliveryVali
         .iter()
         .map(|criterion| criterion.id.0.as_str())
         .collect();
-    let task_ids: HashSet<&str> = snapshot
-        .tasks
-        .iter()
-        .map(|task| task.id.0.as_str())
-        .collect();
     let work_runs_by_id: HashMap<&str, &winwincode_domain::WorkRun> = snapshot
         .work_run_aggregate
         .runs
@@ -604,54 +568,21 @@ fn validate_delivery(snapshot: &mut DeliverySnapshot) -> Result<(), DeliveryVali
         .map(|reference| (reference.id.0.as_str(), reference))
         .collect();
 
-    for (index, task) in snapshot.tasks.iter().enumerate() {
-        if task.delivery_id != snapshot.id
-            || task
-                .acceptance_criterion_ids
-                .iter()
-                .any(|criterion_id| !criterion_ids.contains(criterion_id.0.as_str()))
-        {
-            return Err(validation_error(
-                DeliveryValidationErrorCode::RelationshipMismatch,
-                format!("delivery.tasks[{index}]"),
-                "delivery task does not match the delivery or its acceptance criteria",
-            ));
-        }
-    }
-    task::validate_graph(&snapshot.tasks, "delivery.tasks")?;
-
-    for (index, run) in snapshot.stage_runs.iter().enumerate() {
-        if run.delivery_id != snapshot.id
-            || run
-                .delivery_task_id
-                .as_ref()
-                .is_some_and(|task_id| !task_ids.contains(task_id.0.as_str()))
-        {
-            return Err(validation_error(
-                DeliveryValidationErrorCode::RelationshipMismatch,
-                format!("delivery.stageRuns[{index}]"),
-                "stage run does not match the delivery or a delivery task",
-            ));
-        }
-        if run.stage == DeliveryStage::Reworking
-            && (run.actor_type != StageRunActorType::Codex || run.role != "remediator")
-        {
-            return Err(validation_error(
-                DeliveryValidationErrorCode::RelationshipMismatch,
-                format!("delivery.stageRuns[{index}]"),
-                "rework stage run must use a Codex remediator",
-            ));
-        }
-    }
     let rework_count = snapshot
-        .stage_runs
+        .work_run_aggregate
+        .runs
         .iter()
-        .filter(|run| run.stage == DeliveryStage::Reworking)
+        .filter(|run| {
+            snapshot.session_bindings.iter().any(|binding| {
+                binding.work_run_id == run.id
+                    && binding.execution_profile.as_deref() == Some("remediator")
+            })
+        })
         .count() as u64;
     if rework_count > snapshot.spec.max_rework_attempts {
         return Err(validation_error(
             DeliveryValidationErrorCode::RelationshipMismatch,
-            "delivery.stageRuns",
+            "delivery.workRunAggregate.runs",
             "delivery exceeds the approved rework attempt limit",
         ));
     }
@@ -746,20 +677,6 @@ fn validate_delivery(snapshot: &mut DeliverySnapshot) -> Result<(), DeliveryVali
             "ready-to-deliver and delivered require a passing delivery verdict",
         ));
     }
-    if matches!(
-        snapshot.status,
-        DeliveryStatus::ReadyToDeliver | DeliveryStatus::Delivered
-    ) && snapshot
-        .tasks
-        .iter()
-        .any(|task| task.status != DeliveryTaskStatus::Completed)
-    {
-        return Err(validation_error(
-            DeliveryValidationErrorCode::RelationshipMismatch,
-            "delivery.tasks",
-            "ready-to-deliver and delivered require every DeliveryTask to be completed",
-        ));
-    }
     if snapshot.status == DeliveryStatus::Delivered
         && snapshot
             .attention_items
@@ -772,17 +689,19 @@ fn validate_delivery(snapshot: &mut DeliverySnapshot) -> Result<(), DeliveryVali
             "delivered delivery cannot retain blocking attention",
         ));
     }
-    if snapshot.status == DeliveryStatus::Delivered
-        && snapshot
-            .work_run_aggregate
-            .items
-            .iter()
-            .any(|item| item.state != winwincode_domain::WorkItemState::Done)
+    if matches!(
+        snapshot.status,
+        DeliveryStatus::ReadyToDeliver | DeliveryStatus::Delivered
+    ) && snapshot
+        .work_run_aggregate
+        .items
+        .iter()
+        .any(|item| item.state != winwincode_domain::WorkItemState::Done)
     {
         return Err(validation_error(
             DeliveryValidationErrorCode::RelationshipMismatch,
             "delivery.workRunAggregate.items",
-            "delivered delivery requires every WorkItem to pass the completion gate",
+            "delivered requires every WorkItem to pass the completion gate",
         ));
     }
     Ok(())
@@ -902,7 +821,7 @@ pub(crate) fn test_fixture() -> DeliverySnapshot {
 /// Seals deterministic runtime authority and rebuilds test `WorkRun` records.
 ///
 /// The binding profile and attempt are explicit fixture input. This performs
-/// no role guessing, attempt promotion, or `StageRun` translation.
+/// no role guessing, attempt promotion, or legacy run translation.
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) fn rebuild_test_work_runs_from_bindings(snapshot: &mut DeliverySnapshot) {
     let Some(template) = snapshot.work_run_aggregate.runs.first().cloned() else {

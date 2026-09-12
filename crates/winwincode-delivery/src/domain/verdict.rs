@@ -7,7 +7,7 @@ use sha2::{Digest, Sha256};
 use winwincode_domain::{DeliveryId, EvidenceId};
 
 use super::evidence::{ResolvedDeliveryEvidence, VerifiedEvidenceOutcome};
-use super::rework::{VerdictAttentionAction, next_rework_attempt, safest_attention_transition};
+use super::rework::{VerdictAttentionAction, next_rework_attempt};
 use super::verification::{
     IndependentVerification, VerificationFindingConclusion, VerificationJobOutcomeStatus,
     VerificationRole, VerificationRoleSettlement, VerificationSessionState,
@@ -15,9 +15,9 @@ use super::verification::{
 };
 use super::{
     AcceptanceCriterion, AcceptanceCriterionId, AttentionItemStatus, AttentionItemType,
-    CriterionResultId, Delivery, DeliverySpecId, DeliveryStatus, DeliveryTaskStatus,
-    DeliveryValidationError, DeliveryValidationErrorCode, DeliveryVerdictId, EvidenceRef,
-    EvidenceRefType, FrozenDeliveryCandidate, MAX_REFERENCE_LENGTH, MAX_TEXT_LENGTH,
+    CriterionResultId, Delivery, DeliverySpecId, DeliveryStatus, DeliveryValidationError,
+    DeliveryValidationErrorCode, DeliveryVerdictId, EvidenceRef, EvidenceRefType,
+    FrozenDeliveryCandidate, MAX_REFERENCE_LENGTH, MAX_TEXT_LENGTH,
     assert_frozen_candidate_current, bounded_text, collection_length, duplicate_ids,
     portable_identifier, safe_non_negative, schema_version, unique_texts, validation_error,
 };
@@ -74,7 +74,6 @@ pub struct DeliveryVerdict {
 pub struct ComputedDeliveryVerdict {
     evidence: Vec<EvidenceRef>,
     verdict: DeliveryVerdict,
-    next_status: DeliveryStatus,
 }
 
 impl ComputedDeliveryVerdict {
@@ -88,13 +87,8 @@ impl ComputedDeliveryVerdict {
         &self.verdict
     }
 
-    #[must_use]
-    pub const fn next_status(&self) -> DeliveryStatus {
-        self.next_status
-    }
-
-    pub(crate) fn into_parts(self) -> (Vec<EvidenceRef>, DeliveryVerdict, DeliveryStatus) {
-        (self.evidence, self.verdict, self.next_status)
+    pub(crate) fn into_parts(self) -> (Vec<EvidenceRef>, DeliveryVerdict) {
+        (self.evidence, self.verdict)
     }
 }
 
@@ -306,22 +300,9 @@ pub fn compute_delivery_verdict(
     canonical_evidence.sort_by(|left, right| left.id.0.cmp(&right.id.0));
 
     validate_computed_facts(delivery, &canonical_evidence, &verdict, produced_at_millis)?;
-    let all_tasks_complete = delivery
-        .snapshot()
-        .tasks
-        .iter()
-        .all(|task| task.status == DeliveryTaskStatus::Completed);
-    let next_status = if status == DeliveryVerdictStatus::Pass && all_tasks_complete {
-        DeliveryStatus::ReadyToDeliver
-    } else if actions.is_empty() {
-        DeliveryStatus::Verifying
-    } else {
-        safest_attention_transition(&actions)
-    };
     Ok(ComputedDeliveryVerdict {
         evidence: canonical_evidence,
         verdict,
-        next_status,
     })
 }
 
@@ -986,7 +967,7 @@ fn validate_computed_facts(
     produced_at_millis: u64,
 ) -> Result<(), DeliveryValidationError> {
     let mut trial = delivery.snapshot().clone();
-    trial.status = DeliveryStatus::Verifying;
+    trial.status = DeliveryStatus::Ready;
     trial.evidence = evidence.to_vec();
     trial.verdict = Some(verdict.clone());
     trial.updated_at_millis = produced_at_millis;
@@ -1099,7 +1080,7 @@ fn validate_result(result: &CriterionResult, path: &str) -> Result<(), DeliveryV
 #[cfg(test)]
 mod tests {
     use winwincode_domain::{
-        CodexThreadId, ExecutionJobId, ProductSessionId, StageRunId, WorkerSessionId,
+        CodexThreadId, ExecutionJobId, ProductSessionId, WorkRunState, WorkerSessionId,
     };
 
     use super::compute_delivery_verdict;
@@ -1115,29 +1096,18 @@ mod tests {
         validate_independent_verification,
     };
     use crate::domain::{
-        CriterionVerdict, Delivery, DeliveryStage, DeliveryStatus, DeliveryTaskStatus,
-        FrozenDeliveryCandidate, SessionBinding, SessionBindingId, StageRun, StageRunActorType,
-        StageRunStatus, test_fixture,
+        CriterionVerdict, Delivery, DeliveryStatus, FrozenDeliveryCandidate, SessionBinding,
+        SessionBindingId, test_fixture,
     };
 
     const PRODUCED_AT_MILLIS: u64 = 1_800_000_000_100;
 
     fn verdict_delivery() -> Delivery {
         let mut snapshot = test_fixture();
-        snapshot.status = DeliveryStatus::Verifying;
+        snapshot.status = DeliveryStatus::Ready;
         snapshot.evidence.clear();
         snapshot.verdict = None;
 
-        let task_id = {
-            let writer = &mut snapshot.stage_runs[0];
-            writer.id = StageRunId("stage-executor-1".into());
-            writer.stage = DeliveryStage::Executing;
-            writer.role = "executor".into();
-            writer.status = StageRunStatus::Succeeded;
-            writer.started_at_millis = 1_800_000_000_010;
-            writer.finished_at_millis = Some(1_800_000_000_020);
-            writer.delivery_task_id.clone()
-        };
         let writer_binding = &mut snapshot.session_bindings[0];
         writer_binding.id = SessionBindingId("binding-executor-1".into());
         writer_binding.product_session_id = ProductSessionId("product-executor".into());
@@ -1149,20 +1119,6 @@ mod tests {
 
         for (index, role) in ["reviewer", "verifier"].into_iter().enumerate() {
             let offset = u64::try_from(index).expect("small fixture index") * 20;
-            let stage_run_id = StageRunId(format!("stage-{role}-1"));
-            snapshot.stage_runs.push(StageRun {
-                schema_version: super::super::DELIVERY_SCHEMA_VERSION,
-                id: stage_run_id.clone(),
-                delivery_id: snapshot.id.clone(),
-                delivery_task_id: task_id.clone(),
-                stage: DeliveryStage::Verifying,
-                actor_type: StageRunActorType::Codex,
-                role: role.into(),
-                status: StageRunStatus::Succeeded,
-                attempt: 1,
-                started_at_millis: 1_800_000_000_030 + offset,
-                finished_at_millis: Some(1_800_000_000_040 + offset),
-            });
             snapshot.session_bindings.push(
                 SessionBinding {
                     schema_version: super::super::DELIVERY_SCHEMA_VERSION,
@@ -1182,6 +1138,7 @@ mod tests {
                     product_session_id: ProductSessionId(format!("product-{role}")),
                     execution_job_id: ExecutionJobId(format!("job-{role}")),
                     execution_profile: Some(role.into()),
+                    runtime_context: None,
                     worker_session_id: Some(WorkerSessionId(format!("worker-{role}"))),
                     codex_thread_id: Some(CodexThreadId(format!("thread-{role}"))),
                     bound_at_millis: 1_800_000_000_031 + offset,
@@ -1191,7 +1148,7 @@ mod tests {
                     lease_id: None,
                     fencing_token: None,
                     source_provenance:
-                        crate::domain::SessionBindingSourceProvenance::pending_delivery_advance(),
+                        crate::domain::SessionBindingSourceProvenance::pending_workrun_start(),
                 }
                 .with_test_authority(&format!("verdict-{role}"), 1),
             );
@@ -1209,10 +1166,10 @@ mod tests {
         )
     }
 
-    fn with_role_stage_status(
+    fn with_role_run_state(
         delivery: &Delivery,
         role: VerificationRole,
-        status: StageRunStatus,
+        state: WorkRunState,
     ) -> Delivery {
         let mut snapshot = delivery.clone().into_snapshot();
         let role = match role {
@@ -1220,26 +1177,6 @@ mod tests {
             VerificationRole::Verifier => "verifier",
             VerificationRole::AdversarialVerifier => "adversarial-verifier",
         };
-        let current_attempt = snapshot
-            .stage_runs
-            .iter()
-            .filter(|run| run.stage == DeliveryStage::Verifying && run.role == role)
-            .map(|run| run.attempt)
-            .max()
-            .expect("fixture role StageRun");
-        let run = snapshot
-            .stage_runs
-            .iter_mut()
-            .find(|run| {
-                run.stage == DeliveryStage::Verifying
-                    && run.role == role
-                    && run.attempt == current_attempt
-            })
-            .expect("one current fixture role StageRun");
-        run.status = status;
-        if matches!(status, StageRunStatus::Running | StageRunStatus::Waiting) {
-            run.finished_at_millis = None;
-        }
         let role = role.to_owned();
         let binding = snapshot
             .session_bindings
@@ -1253,14 +1190,7 @@ mod tests {
             .iter_mut()
             .find(|run| run.id == binding.work_run_id)
             .expect("role WorkRun")
-            .state = match status {
-            StageRunStatus::Running | StageRunStatus::Waiting => {
-                winwincode_domain::WorkRunState::Running
-            }
-            StageRunStatus::Succeeded => winwincode_domain::WorkRunState::Settled,
-            StageRunStatus::Cancelled => winwincode_domain::WorkRunState::Cancelled,
-            StageRunStatus::Failed => winwincode_domain::WorkRunState::Failed,
-        };
+            .state = state;
         Delivery::try_from_snapshot(snapshot).expect("Delivery with current role status")
     }
 
@@ -1363,7 +1293,6 @@ mod tests {
             CriterionVerdict::Inconclusive
         );
         assert_eq!(first.evidence().len(), 2);
-        assert_eq!(first.next_status(), DeliveryStatus::ReadyToDeliver);
     }
 
     #[test]
@@ -1421,21 +1350,6 @@ mod tests {
         let candidate = candidate(&delivery);
         let (verification, evidence) = passing_inputs(&delivery, &candidate);
         let mut snapshot = delivery.into_snapshot();
-        let task_id = snapshot.stage_runs[0].delivery_task_id.clone();
-        let stage_run_id = StageRunId("stage-reviewer-2".into());
-        snapshot.stage_runs.push(StageRun {
-            schema_version: super::super::DELIVERY_SCHEMA_VERSION,
-            id: stage_run_id.clone(),
-            delivery_id: snapshot.id.clone(),
-            delivery_task_id: task_id.clone(),
-            stage: DeliveryStage::Verifying,
-            actor_type: StageRunActorType::Codex,
-            role: "reviewer".into(),
-            status: StageRunStatus::Succeeded,
-            attempt: 2,
-            started_at_millis: 1_800_000_000_070,
-            finished_at_millis: Some(1_800_000_000_080),
-        });
         snapshot.session_bindings.push(
             SessionBinding {
                 schema_version: super::super::DELIVERY_SCHEMA_VERSION,
@@ -1453,6 +1367,7 @@ mod tests {
                 product_session_id: ProductSessionId("product-reviewer-2".into()),
                 execution_job_id: ExecutionJobId("job-reviewer-2".into()),
                 execution_profile: Some("reviewer".into()),
+                runtime_context: None,
                 worker_session_id: Some(WorkerSessionId("worker-reviewer-2".into())),
                 codex_thread_id: Some(CodexThreadId("thread-reviewer-2".into())),
                 bound_at_millis: 1_800_000_000_071,
@@ -1462,7 +1377,7 @@ mod tests {
                 lease_id: None,
                 fencing_token: None,
                 source_provenance:
-                    crate::domain::SessionBindingSourceProvenance::pending_delivery_advance(),
+                    crate::domain::SessionBindingSourceProvenance::pending_workrun_start(),
             }
             .with_test_authority("binding-reviewer-2", 2),
         );
@@ -1495,11 +1410,8 @@ mod tests {
             VerificationFixtureState::Missing,
             VerificationFixtureState::SettledPass,
         );
-        let changed = with_role_stage_status(
-            &delivery,
-            VerificationRole::Reviewer,
-            StageRunStatus::Failed,
-        );
+        let changed =
+            with_role_run_state(&delivery, VerificationRole::Reviewer, WorkRunState::Failed);
 
         let error =
             compute_delivery_verdict(&changed, &candidate, &verification, &[], PRODUCED_AT_MILLIS)
@@ -1527,7 +1439,7 @@ mod tests {
                 .find(|run| run.id == binding.work_run_id)
                 .expect("reviewer WorkRun");
             match mutation {
-                "status" => reviewer.state = winwincode_domain::WorkRunState::Failed,
+                "status" => reviewer.state = WorkRunState::Failed,
                 "attempt" => {
                     reviewer.attempt += 1;
                     binding.attempt += 1;
@@ -1545,7 +1457,7 @@ mod tests {
                 &evidence,
                 PRODUCED_AT_MILLIS,
             )
-            .expect_err("mutated canonical terminal StageRun must stale the projection");
+            .expect_err("mutated canonical terminal WorkRun must stale the projection");
         }
     }
 
@@ -1695,13 +1607,9 @@ mod tests {
             computed.verdict().criteria[0].verdict,
             CriterionVerdict::Inconclusive
         );
-        assert!(
-            computed
-                .verdict()
-                .unresolved_findings
-                .contains(&"verification-blocked:criterion-required:missing-method".into())
-        );
-        assert_eq!(computed.next_status(), DeliveryStatus::Clarifying);
+        assert!(computed.verdict().unresolved_findings.contains(
+            &"verification-blocked:crt_01J00000000000000000000000:missing-method".into()
+        ));
     }
 
     #[test]
@@ -1737,11 +1645,8 @@ mod tests {
             assert_ne!(computed.verdict().status, CriterionVerdict::Pass);
         }
 
-        let running_delivery = with_role_stage_status(
-            &delivery,
-            VerificationRole::Reviewer,
-            StageRunStatus::Running,
-        );
+        let running_delivery =
+            with_role_run_state(&delivery, VerificationRole::Reviewer, WorkRunState::Running);
         let running = validate_independent_verification(
             &running_delivery,
             &candidate,
@@ -1852,7 +1757,8 @@ mod tests {
                 .unresolved_findings
                 .iter()
                 .any(|finding| {
-                    finding == "contradiction:criterion-required:reviewer=pass,verifier=fail"
+                    finding
+                        == "contradiction:crt_01J00000000000000000000000:reviewer=pass,verifier=fail"
                 })
         );
     }
@@ -1912,23 +1818,15 @@ mod tests {
         )
         .expect("all required roles confirm product failure");
         assert_eq!(computed.verdict().status, CriterionVerdict::Fail);
-        assert_eq!(computed.next_status(), DeliveryStatus::Reworking);
 
         let fail_and_infra = independent_verification(
-            &with_role_stage_status(
-                &delivery,
-                VerificationRole::Verifier,
-                StageRunStatus::Failed,
-            ),
+            &with_role_run_state(&delivery, VerificationRole::Verifier, WorkRunState::Failed),
             &candidate,
             VerificationFixtureState::SettledFail,
             VerificationFixtureState::InfrastructureFailed,
         );
-        let fail_and_infra_delivery = with_role_stage_status(
-            &delivery,
-            VerificationRole::Verifier,
-            StageRunStatus::Failed,
-        );
+        let fail_and_infra_delivery =
+            with_role_run_state(&delivery, VerificationRole::Verifier, WorkRunState::Failed);
         let computed = compute_delivery_verdict(
             &fail_and_infra_delivery,
             &candidate,
@@ -1977,15 +1875,15 @@ mod tests {
             VerificationFixtureState::Failed,
             VerificationFixtureState::Cancelled,
         ] {
-            let stage_status = match state {
-                VerificationFixtureState::Failed => StageRunStatus::Failed,
-                VerificationFixtureState::Cancelled => StageRunStatus::Cancelled,
+            let run_state = match state {
+                VerificationFixtureState::Failed => WorkRunState::Failed,
+                VerificationFixtureState::Cancelled => WorkRunState::Cancelled,
                 _ => unreachable!("loop only covers terminal environment failures"),
             };
-            let terminal_delivery = with_role_stage_status(
-                &with_role_stage_status(&delivery, VerificationRole::Reviewer, stage_status),
+            let terminal_delivery = with_role_run_state(
+                &with_role_run_state(&delivery, VerificationRole::Reviewer, run_state.clone()),
                 VerificationRole::Verifier,
-                stage_status,
+                run_state,
             );
             let verification =
                 independent_verification(&terminal_delivery, &candidate, state, state);
@@ -2055,9 +1953,9 @@ mod tests {
     }
 
     #[test]
-    fn ready_or_delivered_requires_completed_tasks() {
+    fn ready_or_delivered_requires_completed_work_items() {
         let mut fixture = test_fixture();
-        fixture.tasks[0].status = DeliveryTaskStatus::Active;
+        fixture.work_run_aggregate.items[0].state = winwincode_domain::WorkItemState::InProgress;
         assert!(Delivery::try_from_snapshot(fixture).is_err());
     }
 
@@ -2097,7 +1995,7 @@ mod tests {
     #[test]
     fn delivery_verdict_status_folds_required_results_and_findings() {
         let mut fixture = test_fixture();
-        fixture.status = DeliveryStatus::Verifying;
+        fixture.status = DeliveryStatus::Ready;
         let verdict = fixture.verdict.as_mut().expect("verdict");
         verdict
             .unresolved_findings

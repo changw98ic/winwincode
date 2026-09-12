@@ -64,10 +64,10 @@ export interface ContextualDecisionCard {
 
 const CONTEXT_ENTRIES = 5
 
-const STALE_TEXT = 'This decision is no longer current. Refresh for the current state.'
-const LOCKED_TEXT = 'Decisions are unavailable in this page state.'
-const NOTE_REQUIRED_TEXT = 'Explain this decision before submitting it.'
-const RESPONSE_REQUIRED_TEXT = 'Enter the response this input asks for.'
+const STALE_TEXT = '此决策已不是当前状态，请刷新后重试。'
+const LOCKED_TEXT = '当前页面状态下无法处理决策。'
+const NOTE_REQUIRED_TEXT = '提交前请说明决策原因。'
+const RESPONSE_REQUIRED_TEXT = '请输入此请求需要的回复。'
 
 /** Why one row cannot be decided right now: the row itself, or the page state. */
 function rejectionText(item: ContextualDecisionItem): string {
@@ -105,8 +105,8 @@ function updateDecisionContext(list: HTMLUListElement, entries: readonly string[
 
 function noteLabel(kind: ContextualDecisionItem['kind']): string {
   if (kind === 'approval') return '决策理由'
-  if (kind === 'attention') return 'Decision note'
-  return 'Response'
+  if (kind === 'attention') return '决策说明'
+  return '回复'
 }
 
 /**
@@ -142,7 +142,7 @@ interface DecisionRow {
 }
 
 /**
- * Mount the bounded decision card of one Session/StageRun context.  The card is
+ * Mount the bounded decision card of one Session/WorkRun context.  The card is
  * a projection with the page's own commands behind it: it is hidden when the
  * context has no decision, and it is never a live region, so the page keeps its
  * single polite announcement channel.
@@ -151,9 +151,9 @@ export function mountContextualDecisionCard(
   options: ContextualDecisionCardOptions,
 ): ContextualDecisionCard {
   const document = options.root.ownerDocument
-  const defaultTitle = options.title ?? 'Decisions in this context'
+  const defaultTitle = options.title ?? '当前上下文中的决策'
   const defaultDescription = options.description
-    ?? 'The inputs, approvals, and Attention this exact context is waiting on.'
+    ?? '此上下文正在等待处理的输入、审批和待办事项。'
   const className = options.className ?? 'wwc-contextual-decision'
   const panel = mountPanel({
     document,
@@ -333,9 +333,9 @@ export function mountContextualDecisionCard(
       updateDecisionContext(parts.context, [
         contextualDecisionKindLabel(item.kind),
         capability.stateLabel,
-        item.workRunId === null ? '绑定 ProductSession' : '绑定 ProductSession 与 StageRun',
+        item.workRunId === null ? '绑定 ProductSession' : '绑定 ProductSession 与 WorkRun',
         item.deliveryId === null ? '未绑定交付' : '已绑定交付',
-        item.expiresAt === null ? 'No expiry deadline' : `Expires ${item.expiresAt}`,
+        item.expiresAt === null ? '没有过期时间' : `过期时间 ${item.expiresAt}`,
       ])
       const inline = decidesInline(item, options.actions)
       const textMode = inline && (item.kind === 'input' ? item.mode === 'text' : item.requiresNote)
@@ -356,15 +356,15 @@ export function mountContextualDecisionCard(
       parts.submit.textContent = item.kind === 'approval'
         ? '批准'
         : item.kind === 'attention'
-          ? 'Resolve'
-          : 'Submit response'
+          ? '解决'
+          : '提交回复'
       parts.submit.disabled = capability.disabled
       parts.secondary.hidden = !inline || (item.kind === 'input' && item.mode !== 'text')
       parts.secondary.textContent = item.kind === 'approval'
         ? '拒绝'
         : item.kind === 'attention'
-          ? 'Dismiss'
-          : 'Cancel input'
+          ? '忽略'
+          : '取消输入'
       parts.secondary.disabled = capability.disabled
       // A stale row keeps whatever the user already typed: a rejected decision
       // never costs the user their input, and the text clears only when the
@@ -382,7 +382,7 @@ export function mountContextualDecisionCard(
         parts.detail.textContent = ''
       } else {
         parts.detail.href = href
-        parts.detail.textContent = 'Open the owning decision surface'
+        parts.detail.textContent = '打开所属决策页面'
       }
     },
     remove(row) {

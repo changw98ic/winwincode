@@ -10,15 +10,15 @@ HTTP、WebSocket 和 ExecutionPort 合同。`tests/control-plane-api-coverage.te
 
 | 边界 | 分支数 | 用途 |
 | --- | ---: | --- |
-| HTTP Command | 19 | 所有会改变产品状态的用户和管理操作 |
-| HTTP Query | 15 | 列表、详情、Chat 历史和可重建运行投影 |
-| WebSocket Event | 10 | 已保存的产品、消息、运行、审批、协作和 Worker 投影 |
-| ExecutionPort Message | 26 | Worker 注册、Job/Lease、运行、产物、模型、输入、审批、取消和结果 |
+| HTTP Command | 24 | Community 中会改变产品状态的用户操作 |
+| HTTP Query | 27 | 列表、详情、Chat 历史和可重建运行投影 |
+| WebSocket Event | 12 | 已保存的产品、消息、运行、审批、协作和 Worker 投影 |
+| ExecutionPort Message | 28 | Worker 注册、Job/Lease、运行、产物、模型、输入、审批、取消和结果 |
 
 ## 审计中纠正的四个缺口
 
 1. 默认 Chat 原先不能构造合法 `ExecutionScope`，因为它被强制要求提供 Delivery 和
-   StageRun。现在 Chat 使用 `product-session` 分支，StrongFlow 使用 `delivery-stage`
+   StageRun。现在 Chat 使用 `product-session` 分支，StrongFlow 使用 `work-run`
    分支。
 2. `session.get` 和 `delivery.get` 只返回元数据，WebSocket reset 后不能重建 Chat 与运行
    视图。现在使用 `session.messages.list` 和 `runtime.projection.get`。

@@ -3,7 +3,7 @@
 //! Durable collaboration responsibility assignments.
 //!
 //! This module owns only who is currently responsible for a `ProductSession`,
-//! Delivery, Delivery stage, or review. Identity/RBAC and target lifecycle
+//! Delivery, `WorkItem`, or review. Identity/RBAC and target lifecycle
 //! remain external authorities and contribute revision guards to every write.
 
 use std::{
@@ -20,8 +20,9 @@ use winwincode_audit::{
     AuditAction, AuditActor, AuditEvent, AuditEventId, AuditOrigin, AuditRetention, AuditScope,
     AuditState, AuditSubject,
 };
-use winwincode_delivery::domain::DeliveryStage;
-use winwincode_domain::{DeliveryId, ProductSessionId, RequestId, Sha256Digest, UserId};
+use winwincode_domain::{
+    DeliveryId, ProductSessionId, RequestId, Sha256Digest, UserId, WorkItemId,
+};
 use winwincode_domain::{RepositoryScope, UserActor};
 use winwincode_storage::{
     CommitReceipt, NewOutboxEvent, PendingAuditEvent, ProductStateStorage, PublicEventScope,
@@ -140,9 +141,9 @@ pub enum ResponsibilityTarget {
     Delivery {
         delivery_id: DeliveryId,
     },
-    DeliveryStage {
+    WorkItem {
         delivery_id: DeliveryId,
-        stage: DeliveryStage,
+        work_item_id: WorkItemId,
     },
     Review {
         delivery_id: DeliveryId,
@@ -1051,7 +1052,7 @@ fn duty_boundary(target: &ResponsibilityTarget) -> (&'static str, &str) {
             ("product-session", product_session_id.0.as_str())
         }
         ResponsibilityTarget::Delivery { delivery_id }
-        | ResponsibilityTarget::DeliveryStage { delivery_id, .. }
+        | ResponsibilityTarget::WorkItem { delivery_id, .. }
         | ResponsibilityTarget::Review { delivery_id, .. } => ("delivery", delivery_id.0.as_str()),
     }
 }
@@ -1199,8 +1200,14 @@ fn validate_target(target: &ResponsibilityTarget) -> Result<(), ResponsibilityAs
             validate_id(&product_session_id.0, "psn_")
         }
         ResponsibilityTarget::Delivery { delivery_id }
-        | ResponsibilityTarget::DeliveryStage { delivery_id, .. }
         | ResponsibilityTarget::Review { delivery_id, .. } => validate_id(&delivery_id.0, "dlv_"),
+        ResponsibilityTarget::WorkItem {
+            delivery_id,
+            work_item_id,
+        } => {
+            validate_id(&delivery_id.0, "dlv_")?;
+            validate_id(&work_item_id.0, "wit_")
+        }
     }
 }
 

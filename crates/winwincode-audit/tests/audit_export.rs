@@ -80,7 +80,7 @@ fn event(
         AuditActor::System(SystemActorId(id("sys", '4'))),
         repository_scope(repository_tail),
         RequestId(id("req", tail)),
-        AuditAction::command("delivery.advance").expect("canonical audit action"),
+        AuditAction::command("workrun.start").expect("canonical audit action"),
         AuditState::changed(Some(digest('0')), digest(tail.to_ascii_lowercase()))
             .expect("canonical audit state change"),
         AuditOrigin::local("control-plane").expect("canonical audit origin"),

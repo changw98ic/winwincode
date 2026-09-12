@@ -8,17 +8,14 @@ use winwincode_delivery::{
     application::workrun::WorkRunAggregate,
     domain::{
         AttentionItemStatus, AttentionItemType, CandidatePathFact, CandidatePathState,
-        CriterionVerdict, DeliveryStage, DeliveryStatus as DomainDeliveryStatus,
-        DeliveryTaskStatus as DomainTaskStatus, DeliveryVerdict, EvidenceRef, EvidenceRefType,
-        FrozenDeliveryCandidate, RepositoryKind, SessionBindingSourceKind, StageRunActorType,
-        StageRunStatus,
+        CriterionVerdict, DeliveryVerdict, EvidenceRef, EvidenceRefType, FrozenDeliveryCandidate,
+        RepositoryKind,
     },
     projection::{self as delivery_projection, runtime as runtime_projection},
 };
 use winwincode_domain::{
     Count, EvidenceId, GitHubRepositorySlug, Instant, RepositoryScope, Revision, SchemaVersion,
-    SessionBindingSourceIdentity, SessionBindingSourceIdentityKind, SessionIdentity, Sha256Digest,
-    WorkItemState,
+    Sha256Digest, WorkItemState,
 };
 
 use super::{
@@ -36,6 +33,7 @@ pub(super) fn cursor(
 
 pub(super) fn workrun_aggregate(
     aggregate: &WorkRunAggregate,
+    device_bindings: Vec<api::WorkRunDeviceBindingProjection>,
     read_cursor: api::StrongFlowReadCursor,
 ) -> api::WorkRunAggregateProjection {
     api::WorkRunAggregateProjection {
@@ -43,6 +41,7 @@ pub(super) fn workrun_aggregate(
         contract: aggregate.contract.clone(),
         items: aggregate.items.clone(),
         runs: aggregate.runs.clone(),
+        device_bindings,
         graph_items: aggregate
             .items
             .iter()
@@ -82,16 +81,15 @@ pub(super) fn delivery_detail(
         delivery_id: source.delivery_id().clone(),
         delivery_revision: revision(source.delivery_revision(), "delivery revision")?,
         ownership: ownership(&read.cursor.scope),
-        status: delivery_status(source.status()),
+        status: read.workrun_aggregate.summary_state(
+            source
+                .attention()
+                .iter()
+                .any(|item| item.status() == AttentionItemStatus::Open),
+        ),
         requirements: requirements(source.requirements())?,
         solution_review: source.solution_review().map(solution_review).transpose()?,
         diagram_execution: diagram_execution(read)?,
-        stages: source
-            .stages()
-            .iter()
-            .map(stage)
-            .collect::<Result<_, _>>()?,
-        tasks: source.tasks().iter().map(task).collect(),
         attention: source
             .attention()
             .iter()
@@ -231,9 +229,10 @@ fn diagram_execution(
     let Some(review) = delivery.solution_review() else {
         return Ok(None);
     };
+    let work_state = read.workrun_aggregate.summary_state(false);
     let reentering_execution = matches!(
-        delivery.status(),
-        DomainDeliveryStatus::Executing | DomainDeliveryStatus::Reworking
+        work_state,
+        WorkItemState::InProgress | WorkItemState::Rework
     );
     let candidate = read.publication.candidate();
     let finished_candidate = (!reentering_execution).then_some(candidate).flatten();
@@ -244,7 +243,7 @@ fn diagram_execution(
     } else {
         "before-execution"
     };
-    let process_node_id = if delivery.status() == DomainDeliveryStatus::Reworking {
+    let process_node_id = if work_state == WorkItemState::Rework {
         "process:reworking"
     } else {
         "process:executing"
@@ -375,164 +374,6 @@ fn requirements(
         base_revision: spec.base_revision().to_owned(),
         max_rework_attempts: integer(spec.max_rework_attempts(), "max rework attempts")?,
     })
-}
-
-fn stage(
-    source: &delivery_projection::StageProjection,
-) -> Result<api::DeliveryStageProjection, StrongFlowProjectionError> {
-    Ok(api::DeliveryStageProjection {
-        id: source.id().clone(),
-        delivery_task_id: source.delivery_task_id().cloned(),
-        stage: stage_name(source.stage()).to_owned(),
-        actor_type: match source.actor_type() {
-            StageRunActorType::Codex => "codex",
-            StageRunActorType::Human => "human",
-        }
-        .to_owned(),
-        role: source.role().to_owned(),
-        status: stage_status(source.status()).to_owned(),
-        attempt: integer(source.attempt(), "stage attempt")?,
-        started_at: millis_to_instant(source.started_at())?,
-        finished_at: source.finished_at().map(millis_to_instant).transpose()?,
-        session_binding: source
-            .session_binding()
-            .map(|binding| session_binding(binding, source.id(), source.attempt()))
-            .transpose()?,
-    })
-}
-
-fn session_binding(
-    source: &delivery_projection::SessionBindingProjection,
-    stage_run_id: &winwincode_domain::StageRunId,
-    stage_attempt: u64,
-) -> Result<api::DeliveryStageSessionBindingProjection, StrongFlowProjectionError> {
-    if source.attempt() != stage_attempt {
-        return Err(StrongFlowProjectionError::TrustedFactsUnavailable(
-            "SessionBinding attempt does not match its StageRun".to_owned(),
-        ));
-    }
-
-    let authority_presence = [
-        source.worker_id().is_some(),
-        source.worker_instance_id().is_some(),
-        source.lease_id().is_some(),
-        source.fencing_token().is_some(),
-    ];
-    if authority_presence.iter().any(|present| *present)
-        && !authority_presence.iter().all(|present| *present)
-    {
-        return Err(StrongFlowProjectionError::TrustedFactsUnavailable(
-            "SessionBinding has partial persisted Worker authority".to_owned(),
-        ));
-    }
-
-    let complete = authority_presence.iter().all(|present| *present)
-        && source.worker_session_id().is_some()
-        && source.codex_thread_id().is_some();
-    if !complete {
-        return Ok(api::DeliveryStageSessionBindingProjection {
-            attempt: None,
-            binding_id: source.binding_id().0.clone(),
-            bound_at: millis_to_instant(source.bound_at())?,
-            codex_thread_id: None,
-            execution_job_id: source.execution_job_id().clone(),
-            fencing_token: None,
-            lease_id: None,
-            product_session_id: source.product_session_id().clone(),
-            session_identity: None,
-            source_identity: None,
-            work_run_id: None,
-            worker_id: None,
-            worker_session_id: None,
-        });
-    }
-
-    let worker_id = source.worker_id().cloned().expect("complete authority");
-    let worker_instance_id = source
-        .worker_instance_id()
-        .cloned()
-        .expect("complete authority");
-    let lease_id = source.lease_id().cloned().expect("complete authority");
-    let fencing_token = source.fencing_token().cloned().expect("complete authority");
-    let worker_session_id = source
-        .worker_session_id()
-        .cloned()
-        .expect("complete identity");
-    let codex_thread_id = source
-        .codex_thread_id()
-        .cloned()
-        .expect("complete identity");
-    let attempt = integer(source.attempt(), "session binding attempt")?;
-    let source_identity = match source.source_provenance().kind() {
-        SessionBindingSourceKind::ExecutionPort => SessionBindingSourceIdentity {
-            kind: SessionBindingSourceIdentityKind::ExecutionWorker,
-            lease_id: lease_id.clone(),
-            worker_id: worker_id.clone(),
-            worker_instance_id,
-            worker_session_id: worker_session_id.clone(),
-        },
-        SessionBindingSourceKind::DeliveryAdvance
-        | SessionBindingSourceKind::WorkRunDispatch
-        | SessionBindingSourceKind::LegacyMigration => {
-            return Err(StrongFlowProjectionError::TrustedFactsUnavailable(
-                "SessionBinding source is not an accepted execution-worker authority".to_owned(),
-            ));
-        }
-    };
-    let session_identity = SessionIdentity {
-        codex_thread_id: codex_thread_id.clone(),
-        product_session_id: source.product_session_id().clone(),
-        work_run_id: Some(winwincode_domain::WorkRunId(stage_run_id.0.clone())),
-        worker_session_id: worker_session_id.clone(),
-    };
-    Ok(api::DeliveryStageSessionBindingProjection {
-        attempt: Some(attempt),
-        binding_id: source.binding_id().0.clone(),
-        bound_at: millis_to_instant(source.bound_at())?,
-        codex_thread_id: Some(codex_thread_id),
-        execution_job_id: source.execution_job_id().clone(),
-        fencing_token: Some(fencing_token.0),
-        lease_id: Some(lease_id),
-        product_session_id: source.product_session_id().clone(),
-        session_identity: Some(session_identity),
-        source_identity: Some(source_identity),
-        work_run_id: Some(winwincode_domain::WorkRunId(stage_run_id.0.clone())),
-        worker_id: Some(worker_id),
-        worker_session_id: Some(worker_session_id),
-    })
-}
-
-fn task(source: &delivery_projection::DeliveryTaskProjection) -> api::DeliveryTaskDetailProjection {
-    api::DeliveryTaskDetailProjection {
-        id: source.id().clone(),
-        title: source.title().to_owned(),
-        goal: source.goal().to_owned(),
-        acceptance_criterion_ids: source
-            .acceptance_criterion_ids()
-            .iter()
-            .map(|id| id.0.clone())
-            .collect(),
-        blocked_by_task_ids: source.blocked_by_task_ids().to_vec(),
-        owner: source.owner().map(str::to_owned),
-        status: match source.status() {
-            DomainTaskStatus::Pending => api::DeliveryTaskStatus::Pending,
-            DomainTaskStatus::Active => api::DeliveryTaskStatus::Active,
-            DomainTaskStatus::Blocked => api::DeliveryTaskStatus::Blocked,
-            DomainTaskStatus::Verifying => api::DeliveryTaskStatus::Verifying,
-            DomainTaskStatus::Completed => api::DeliveryTaskStatus::Completed,
-            DomainTaskStatus::Failed => api::DeliveryTaskStatus::Failed,
-        },
-        work_run_ids: source
-            .stage_run_ids()
-            .iter()
-            .map(|id| winwincode_domain::WorkRunId(id.0.clone()))
-            .collect(),
-        evidence_refs: source
-            .evidence_refs()
-            .iter()
-            .map(public_evidence_id)
-            .collect(),
-    }
 }
 
 fn attention(
@@ -789,15 +630,9 @@ fn solution_review(
             source.delivery_spec_revision(),
             "solution spec revision",
         )?,
-        planning_stage_run_id: winwincode_domain::StageRunId(
-            source.planning_work_run_id().0.clone(),
-        ),
-        planning_work_run_id: Some(source.planning_work_run_id().clone()),
+        planning_work_run_id: source.planning_work_run_id().clone(),
         planning_session_binding_id: source.planning_session_binding_id().0.clone(),
-        review_stage_run_id: source.review_stage_run_id().clone(),
-        review_work_run_id: Some(winwincode_domain::WorkRunId(
-            source.review_stage_run_id().0.clone(),
-        )),
+        review_work_run_id: None,
         attention_item_id: source.attention_item_id().clone(),
         review_set_sha256: digest(source.review_set_sha256())?,
         solution_id: source.solution_id().to_owned(),
@@ -835,19 +670,19 @@ fn solution_review(
         process_diagram: solution_diagram(source.process_diagram()),
         risks: source.risks().to_vec(),
         unresolved_items: source.unresolved_items().to_vec(),
-        task_proposals: source
-            .task_proposals()
+        work_item_proposals: source
+            .work_item_proposals()
             .iter()
-            .map(|task| api::DeliveryTaskProposalProjection {
+            .map(|task| api::WorkItemProposalProjection {
                 id: task.id().clone(),
                 title: task.title().to_owned(),
                 goal: task.goal().to_owned(),
-                acceptance_criterion_ids: task
-                    .acceptance_criterion_ids()
+                criterion_ids: task
+                    .criterion_ids()
                     .iter()
-                    .map(|id| id.0.clone())
+                    .map(|id| winwincode_domain::CriterionId(id.0.clone()))
                     .collect(),
-                blocked_by_task_ids: task.blocked_by_task_ids().to_vec(),
+                depends_on: task.depends_on().to_vec(),
             })
             .collect(),
         review_status: match source.review_status() {
@@ -1157,7 +992,7 @@ pub(super) fn runtime_snapshot_for_product_session(
 }
 
 /// Maps the standalone `ProductSession` identity to the generated runtime
-/// session contract. `ProductSession` execution has no Delivery `StageRun` or
+/// session contract. `ProductSession` execution has no Delivery `WorkRun` or
 /// domain `SessionBinding` id; the stable projection key is derived from the
 /// exact ProductSession/ExecutionJob identity retained by the runtime ledger.
 fn runtime_product_session(
@@ -1168,6 +1003,7 @@ fn runtime_product_session(
         agent_edges: Vec::new(),
         agents: Vec::new(),
         as_of_sequence: integer(source.as_of_sequence, "session sequence")?,
+        runtime_context: None,
         attempt: integer(source.attempt, "runtime attempt")?,
         codex_thread_id: source.codex_thread_id.clone(),
         diff_summary: None,
@@ -1207,6 +1043,7 @@ fn runtime_session(
         attempt: integer(source.attempt, "runtime attempt")?,
         fencing_token: source.fencing_token.0.clone(),
         as_of_sequence: integer(source.as_of_sequence, "session sequence")?,
+        runtime_context: Some(runtime_session_context(&source.runtime_context)),
         plan: source.plan.as_ref().map(|plan| api::RuntimePlanProjection {
             item_id: plan.item_id.clone(),
             explanation: plan.explanation.clone(),
@@ -1387,42 +1224,26 @@ fn runtime_session(
     })
 }
 
-fn delivery_status(value: DomainDeliveryStatus) -> api::DeliveryStatus {
-    match value {
-        DomainDeliveryStatus::Draft => api::DeliveryStatus::Draft,
-        DomainDeliveryStatus::Clarifying => api::DeliveryStatus::Clarifying,
-        DomainDeliveryStatus::Ready => api::DeliveryStatus::Ready,
-        DomainDeliveryStatus::Planning => api::DeliveryStatus::Planning,
-        DomainDeliveryStatus::PlanReview => api::DeliveryStatus::PlanReview,
-        DomainDeliveryStatus::Executing => api::DeliveryStatus::Executing,
-        DomainDeliveryStatus::Verifying => api::DeliveryStatus::Verifying,
-        DomainDeliveryStatus::Reworking => api::DeliveryStatus::Reworking,
-        DomainDeliveryStatus::NeedsAttention => api::DeliveryStatus::NeedsAttention,
-        DomainDeliveryStatus::ReadyToDeliver => api::DeliveryStatus::ReadyToDeliver,
-        DomainDeliveryStatus::Delivered => api::DeliveryStatus::Delivered,
+fn runtime_session_context(
+    source: &winwincode_delivery::domain::SessionRuntimeContext,
+) -> winwincode_domain::RuntimeSessionContext {
+    winwincode_domain::RuntimeSessionContext {
+        agent_identity: winwincode_domain::RuntimeSessionAgentIdentity {
+            id: source.agent_identity.id.clone(),
+            worker_id: source.agent_identity.worker_id.clone(),
+            name: source.agent_identity.name.clone(),
+            role: source.agent_identity.role.clone(),
+        },
+        provider: source.provider.clone(),
+        model: source.model.clone(),
+        workspace: winwincode_domain::RuntimeSessionWorkspace {
+            repository_id: source.workspace.repository_id.clone(),
+            revision: source.workspace.revision.clone(),
+            write_mode: source.workspace.write_mode.clone(),
+        },
     }
 }
 
-fn stage_name(value: DeliveryStage) -> &'static str {
-    match value {
-        DeliveryStage::Clarifying => "clarifying",
-        DeliveryStage::Planning => "planning",
-        DeliveryStage::PlanReview => "plan-review",
-        DeliveryStage::Executing => "executing",
-        DeliveryStage::Verifying => "verifying",
-        DeliveryStage::Reworking => "reworking",
-        DeliveryStage::DeliveryReview => "delivery-review",
-    }
-}
-fn stage_status(value: StageRunStatus) -> &'static str {
-    match value {
-        StageRunStatus::Running => "running",
-        StageRunStatus::Waiting => "waiting",
-        StageRunStatus::Succeeded => "succeeded",
-        StageRunStatus::Failed => "failed",
-        StageRunStatus::Cancelled => "cancelled",
-    }
-}
 fn criterion_verdict(value: CriterionVerdict) -> &'static str {
     match value {
         CriterionVerdict::Pass => "pass",
@@ -1544,42 +1365,6 @@ mod tests {
             publication_resource_ref(&resource, &pull_request_target()),
             Err(StrongFlowProjectionError::RevisionConflict(_))
         ));
-    }
-
-    #[test]
-    fn canonical_workrun_binding_is_not_inferred_onto_a_historical_stage() {
-        let parsed = winwincode_delivery::domain::Delivery::decode_json(include_bytes!(
-            "../../../winwincode-delivery/tests/fixtures/delivery-main.json"
-        ))
-        .expect("canonical Delivery fixture");
-        let mut snapshot = parsed.into_snapshot();
-        snapshot.status = DomainDeliveryStatus::Verifying;
-        snapshot.evidence.clear();
-        snapshot.verdict = None;
-        let binding = snapshot
-            .session_bindings
-            .first_mut()
-            .expect("fixture SessionBinding");
-        binding.worker_session_id = None;
-        binding.codex_thread_id = None;
-        binding.worker_id = None;
-        binding.worker_instance_id = None;
-        binding.lease_id = None;
-        binding.fencing_token = None;
-        binding.source_provenance =
-            winwincode_delivery::domain::SessionBindingSourceProvenance::delivery_advance(
-                "delivery.advance",
-            );
-        let delivery = winwincode_delivery::domain::Delivery::try_from_snapshot(snapshot)
-            .expect("pending SessionBinding");
-        let projected = winwincode_delivery::projection::project_delivery_detail(
-            winwincode_delivery::projection::ProjectionInput::new(&delivery),
-        )
-        .expect("Delivery projection");
-
-        let source = projected.stages().first().expect("fixture StageRun");
-        let mapped = stage(source).expect("generated stage projection");
-        assert!(mapped.session_binding.is_none());
     }
 
     #[test]

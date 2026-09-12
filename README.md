@@ -23,7 +23,7 @@ WinWinCode 把"让 AI 写代码"变成一条有人工审核、有证据的交付
 WinWinCode 由一个浏览器 Client 和一条 Rust 服务端路径组成:
 
 ```text
-浏览器 Client(apps/client:Chat / StrongFlow / 设置 / 企业管理)
+浏览器 Client(apps/client:Chat / StrongFlow / 设置 / Client 管理)
    │ HTTP + WebSocket
    ▼
 Server(winwincode-server)—— 唯一公开入口:认证、健康检查、API
@@ -40,7 +40,7 @@ Server(winwincode-server)—— 唯一公开入口:认证、健康检查、API
 - 所有执行事实只有 Worker 能上报;
 - 所有 Codex 执行事实只有 Kernel 是权威。
 
-部署形态有两种:本机模式把 Control Plane 和 Worker 组装在同一进程(`winwincode-local`);企业模式把 Server 与多个 Worker 分进程、分机器部署。两种形态使用同一套合同与状态语义。
+部署形态有两种:本机模式把 Control Plane 和 Worker 组装在同一进程(`winwincode-local`);远程模式由代码机器上的 Device Client 连接 Server。两种形态使用同一套合同与状态语义。
 
 组件职责、交付数据模型、身份绑定、Provider 与凭据、安全模型和实现索引见[产品架构文档](docs/architecture.md)。
 
@@ -91,7 +91,7 @@ corepack pnpm verify:api-production-vertical
 
 - 本仓库处于 `0.1.0-alpha.1` 公开预览准备阶段,发布说明见 [docs/releases/0.1.0-alpha.1.md](docs/releases/0.1.0-alpha.1.md);
 - Windows 暂不在首发平台;
-- 本机模式面向单用户;企业部署复用同一套合同,把 PostgreSQL、对象存储、集中审计等作为可替换端口(见架构文档);
+- Community 当前面向单一 Owner；代码机器使用本机 Worker 或独立 Device Client；
 - GitHub 等外部写入需要人工批准,默认先生成本地 receipt 和审核证据。
 
 ## 参与贡献
@@ -118,14 +118,14 @@ corepack pnpm verify
 | HTTP / WebSocket / ExecutionPort 合同 | [docs/contracts/](docs/contracts/) 与 [schema/winwincode/v1/](schema/winwincode/v1/) |
 | 架构决定(ADR) | [docs/decisions/](docs/decisions/) |
 | 发布门禁与发布流程 | [docs/release-gate.md](docs/release-gate.md)、[docs/releasing.md](docs/releasing.md) |
-| 真实模型与真实仓库评估 | [docs/live-evaluation.md](docs/live-evaluation.md) |
+| 安装、首次启动、恢复与排障 | [docs/community-operations.md](docs/community-operations.md) |
 | Server 配置 | [crates/winwincode-server/README.md](crates/winwincode-server/README.md) |
 | 上游 Codex 版本、补丁与更新流程 | [upstream/sources.lock.json](upstream/sources.lock.json)、[docs/upstream-updates.md](docs/upstream-updates.md) |
 
 ## 仓库结构
 
 ```text
-apps/client/   浏览器 Client(Chat、StrongFlow、设置、企业管理)
+apps/client/   浏览器 Client(Chat、StrongFlow、设置、Client 管理)
 crates/winwincode-server/         服务入口与网络接口
 crates/winwincode-control-plane/  产品状态、审批与任务调度
 crates/winwincode-worker/         任务执行与事实上报

@@ -46,8 +46,10 @@ import type {
   RepositoryScope,
   WorkItemId,
   DeliveryId,
-  DeliveryTaskBreakdownCreateCommand,
-  DeliveryTaskBreakdownCreateItem,
+  DeliveryDetailProjection,
+  WorkItemsCreateCommand,
+  WorkItemsCreateItem,
+  WorkRunStartCommand,
   WorkRunCancelCommand,
   WorkRunAggregateProjection,
   WorkRunId,
@@ -242,14 +244,14 @@ export interface WorkRunAggregateQueryInput {
   readonly page?: PageRequest
 }
 
-export interface TaskBreakdownCreateInput {
+export interface WorkItemsCreateInput {
   readonly actor: Actor
   readonly scope: RepositoryScope
   readonly requestId: RequestId
   readonly deliveryId: DeliveryId
   readonly expectedRevision: number
   readonly contractRevision: number
-  readonly items: readonly DeliveryTaskBreakdownCreateItem[]
+  readonly items: readonly WorkItemsCreateItem[]
 }
 
 /** Exact public input for cancelling one active WorkRun. */
@@ -280,13 +282,13 @@ export function workRunCancelCommand(
 }
 
 
-/** Builds the canonical task-breakdown command; the server owns graph checks. */
-export function taskBreakdownCreateCommand(
-  input: TaskBreakdownCreateInput,
-): DeliveryTaskBreakdownCreateCommand {
+/** Builds the canonical WorkItem command; the server owns graph checks. */
+export function workItemsCreateCommand(
+  input: WorkItemsCreateInput,
+): WorkItemsCreateCommand {
   return {
     schemaVersion: 'winwincode/v1',
-    command: 'delivery.task_breakdown.create',
+    command: 'workitems.create',
     actor: input.actor,
     scope: input.scope,
     requestId: input.requestId,
@@ -330,6 +332,10 @@ export async function queryWorkRunAggregate(
     || response.result.items.some(item => item.workContractId !== response.result.contract.id)
     || response.result.runs.some(run => run.workContractId !== response.result.contract.id
       || !response.result.items.some(item => item.id === run.workItemId))
+    || response.result.deviceBindings.some(binding =>
+      !response.result.runs.some(run => run.id === binding.workRunId))
+    || new Set(response.result.deviceBindings.map(binding => binding.workRunId)).size
+      !== response.result.deviceBindings.length
     || (input.workRunId !== undefined && input.workRunId !== null
       && !response.result.runs.some(run => run.id === input.workRunId && (input.workItemId === null || run.workItemId === input.workItemId)))
     || (input.atCursor !== undefined && input.atCursor !== null
@@ -346,6 +352,33 @@ export async function queryWorkRunAggregate(
       kind: 'protocol',
       code: 'INVALID_WORKRUN_PROJECTION',
       message: 'The Control Plane returned an invalid WorkRun projection.',
+      requestId: input.requestId,
+      retryable: false,
+    })
+  }
+  return response.result
+}
+
+async function queryDeliveryDetail(
+  client: ControlPlaneClient,
+  input: Pick<WorkRunAggregateQueryInput, 'actor' | 'scope' | 'requestId' | 'deliveryId'>,
+): Promise<DeliveryDetailProjection> {
+  const response = await client.query({
+    schemaVersion: 'winwincode/v1',
+    requestId: input.requestId,
+    actor: input.actor,
+    scope: input.scope,
+    query: 'delivery.get',
+    parameters: { deliveryId: input.deliveryId },
+    page: { limit: 100, cursor: null },
+  })
+  if (response.query !== 'delivery.get'
+    || !matchesCanonicalSchema('DeliveryDetailProjection', response.result)
+    || response.result.deliveryId !== input.deliveryId) {
+    throw new ControlPlaneClientError({
+      kind: 'protocol',
+      code: 'INVALID_DELIVERY_PROJECTION',
+      message: 'The Control Plane returned an invalid Delivery projection.',
       requestId: input.requestId,
       retryable: false,
     })
@@ -3288,18 +3321,18 @@ const TASK_MODEL_ROUTE_FAKE_OPTIONS: readonly ControlPlaneTaskModelRouteOption[]
   Object.freeze([
     Object.freeze({
       routeId: 'route_default',
-      label: 'Workspace default',
-      detail: 'The default model route configured in Settings.',
+      label: '工作区默认',
+      detail: '设置中配置的默认模型路由。',
     }),
     Object.freeze({
       routeId: 'route_long_context',
-      label: 'Long context',
-      detail: 'A wide-context route for large repositories.',
+      label: '长上下文',
+      detail: '适合大型仓库的宽上下文路由。',
     }),
     Object.freeze({
       routeId: 'route_fast',
-      label: 'Fast',
-      detail: 'A low-latency route for quick iterations.',
+      label: '快速',
+      detail: '适合快速迭代的低延迟路由。',
     }),
   ])
 
@@ -3344,6 +3377,97 @@ export interface ControlPlaneTaskPort {
   describe(taskId: string): ControlPlaneTaskAnchor | null
 }
 
+export interface ControlPlaneWorkerSessionLaunchInput {
+  readonly clientId: string
+  readonly repositoryBindingId: string
+  readonly workRunId: WorkRunId
+}
+
+export interface ControlPlaneWorkerSessionPort {
+  launch(input: ControlPlaneWorkerSessionLaunchInput): Promise<void>
+}
+
+/** Browser boundary for the signed-in Device Worker launch route. */
+export function createControlPlaneWorkerSessionPort(options: {
+  readonly client: ControlPlaneClient
+  readonly transport?: ControlPlaneClientTransport
+}): ControlPlaneWorkerSessionPort {
+  const location = parseControlPlaneServerUrl(options.client.serverUrl)
+  const transportFetch = options.transport?.fetch
+  return Object.freeze({
+    async launch(input: ControlPlaneWorkerSessionLaunchInput): Promise<void> {
+      if (transportFetch === undefined) throw new ControlPlaneClientError({
+        kind: 'protocol',
+        code: 'TRANSPORT_UNAVAILABLE',
+        message: 'The browser HTTP transport is unavailable.',
+        requestId: null,
+        retryable: false,
+      })
+      let response: ControlPlaneHttpResponse
+      try {
+        response = await transportFetch(`${location.serverUrl}/api/v1/sessions`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            schemaVersion: 'winwincode/v1',
+            clientId: input.clientId,
+            repositoryBindingId: input.repositoryBindingId,
+            workRunId: input.workRunId,
+          }),
+          redirect: 'error',
+          cache: 'no-store',
+          referrerPolicy: 'no-referrer',
+          credentials: 'include',
+        })
+      } catch (cause) {
+        throw new ControlPlaneClientError({
+          kind: 'network',
+          code: 'NETWORK_ERROR',
+          message: 'The Control Plane server could not be reached.',
+          requestId: null,
+          retryable: true,
+          cause,
+        })
+      }
+      const source = await response.text()
+      if (!response.ok || response.status !== 201) {
+        throw new ControlPlaneClientError({
+          kind: response.status === 401 ? 'authentication' : 'protocol',
+          code: 'WORKER_SESSION_LAUNCH_FAILED',
+          message: 'The Device Worker session could not be launched.',
+          requestId: null,
+          retryable: response.status >= 500,
+        })
+      }
+      let body: unknown
+      try {
+        body = JSON.parse(source)
+      } catch (cause) {
+        throw new ControlPlaneClientError({
+          kind: 'protocol',
+          code: 'INVALID_WORKER_SESSION_RESPONSE',
+          message: 'The Control Plane returned an invalid Worker session.',
+          requestId: null,
+          retryable: false,
+          cause,
+        })
+      }
+      if (typeof body !== 'object' || body === null
+        || Reflect.get(body, 'clientId') !== input.clientId
+        || Reflect.get(body, 'repositoryBindingId') !== input.repositoryBindingId
+        || Reflect.get(body, 'workRunId') !== input.workRunId) {
+        throw new ControlPlaneClientError({
+          kind: 'protocol',
+          code: 'INVALID_WORKER_SESSION_RESPONSE',
+          message: 'The Control Plane returned an invalid Worker session.',
+          requestId: null,
+          retryable: false,
+        })
+      }
+    },
+  })
+}
+
 /** Production task port: submits the canonical breakdown command and retains
  * only the returned WorkItem anchor for the current browser session. */
 export function createControlPlaneTaskPort(options: {
@@ -3352,6 +3476,7 @@ export function createControlPlaneTaskPort(options: {
   readonly scope: () => RepositoryScope | null
   readonly nextRequestId: () => RequestId
   readonly nextWorkItemId: () => import('./generated/contracts.js').WorkItemId
+  readonly workerSessions: ControlPlaneWorkerSessionPort
   readonly deliveryContext: () => Promise<{
     readonly deliveryId: DeliveryId
     readonly expectedRevision: number
@@ -3363,12 +3488,12 @@ export function createControlPlaneTaskPort(options: {
   return Object.freeze({
     async create(input: ControlPlaneTaskCreateInput): Promise<ControlPlaneTaskAnchor> {
       const context = await options.deliveryContext()
-      if (context === null) throw new Error('Select a Delivery before creating a WorkItem.')
+      if (context === null) throw new Error('创建任务项前请选择交付。')
       const actor = options.actor()
       const scope = options.scope()
-      if (actor === null || scope === null) throw new Error('Sign in and select a repository Scope before creating a WorkItem.')
+      if (actor === null || scope === null) throw new Error('创建任务项前请登录并选择仓库范围。')
       const taskId = options.nextWorkItemId()
-      const command = taskBreakdownCreateCommand({
+      const command = workItemsCreateCommand({
         actor,
         scope,
         requestId: options.nextRequestId(),
@@ -3385,11 +3510,49 @@ export function createControlPlaneTaskPort(options: {
       })
       const response = await options.client.command(command)
       if (!('result' in response) || response.outcome !== 'completed') {
-        throw new Error('The Control Plane did not complete WorkItem creation.')
+        throw new Error('控制平面未完成任务项创建。')
       }
-      if (!('items' in response.result)) throw new Error('The Control Plane returned an unexpected command result.')
+      if (!('items' in response.result)) throw new Error('控制平面返回了意外的命令结果。')
       const item = response.result.items.find(candidate => candidate.id === taskId)
-      if (item === undefined) throw new Error('The Control Plane returned no created WorkItem.')
+      if (item === undefined) throw new Error('控制平面未返回已创建的任务项。')
+      const startCommand: WorkRunStartCommand = {
+        schemaVersion: 'winwincode/v1',
+        command: 'workrun.start',
+        actor,
+        scope,
+        requestId: options.nextRequestId(),
+        expectedRevision: response.currentRevision,
+        payload: {
+          deliveryId: context.deliveryId,
+          dispatchProfile: 'executor',
+        },
+      }
+      const started = await options.client.command(startCommand)
+      if (!('result' in started) || started.outcome !== 'completed'
+        || started.command !== 'workrun.start') {
+        throw new Error('控制平面未完成工作运行创建。')
+      }
+      const workRunId = started.result.activeWorkRunId
+      if (workRunId === null || workRunId === undefined) {
+        throw new Error('控制平面未返回活动工作运行。')
+      }
+      await options.workerSessions.launch({
+        clientId: input.clientId,
+        repositoryBindingId: input.repositoryBindingId,
+        workRunId,
+      })
+      const aggregate = await queryWorkRunAggregate(options.client, {
+        actor,
+        scope,
+        requestId: options.nextRequestId(),
+        workItemId: taskId,
+        deliveryId: context.deliveryId,
+        workRunId,
+      })
+      if (!aggregate.runs.some(run => run.id === workRunId && run.workItemId === taskId)
+        || !aggregate.deviceBindings.some(binding => binding.workRunId === workRunId)) {
+        throw new Error('工作运行没有绑定到所选执行设备。')
+      }
       const anchor = Object.freeze({ ...input, taskId })
       anchors.set(taskId, anchor)
       return anchor
@@ -3453,13 +3616,31 @@ export type ControlPlaneRunWorkerSessionState =
 /**
  * The run-page identity projection beyond live Client, Repository, and
  * Occupancy facts. WorkRun is the sole executable runtime record; historical
- * StageRun records are not exposed as a writable or executable view.
+ * WorkRun is the only writable and executable run view.
  */
 export interface ControlPlaneRunIdentityProjection {
   readonly taskId: import('./generated/contracts.js').WorkItemId
-  /** The only executable run projection. Historical StageRun rows are never returned here. */
+  readonly clientId: string
+  readonly repositoryBindingId: string
+  /** The canonical WorkContract and WorkItem cut returned by `workrun.get`. */
+  readonly contract: import('./generated/contracts.js').WorkContract | null
+  readonly item: import('./generated/contracts.js').WorkItem | null
+  /** Derived dependency/blocker state; this does not create another state source. */
+  readonly graphItem: import('./generated/contracts.js').WorkGraphItemProjection | null
+  /** The only executable run projection. */
   readonly workRun: import('./generated/contracts.js').WorkRun
-  readonly candidate: import('./generated/contracts.js').Candidate | null
+  readonly candidate: ControlPlaneRunCandidateProjection | null
+  /** Delivery owner and Evidence filtered to this exact WorkRun. */
+  readonly owner: string | null
+  readonly evidence: readonly import('./generated/contracts.js').DeliveryEvidenceProjection[]
+}
+
+/** Current Candidate identity plus its optional device-local lifecycle facts. */
+export interface ControlPlaneRunCandidateProjection {
+  readonly candidateRef: string
+  readonly state: ControlPlaneCandidateState | 'produced'
+  readonly branchName: string | null
+  readonly history: readonly ControlPlaneCandidateApplyReceipt[]
 }
 
 /** The run-page identity seam; it reads the canonical WorkRun projection. */
@@ -3470,6 +3651,7 @@ export interface ControlPlaneRunIdentityPort {
 /** Production run identity reader backed by the canonical WorkRun aggregate. */
 export function createControlPlaneRunIdentityPort(options: {
   readonly client: ControlPlaneClient
+  readonly candidates: ControlPlaneClientCandidates
   readonly actor: () => Actor | null
   readonly scope: () => RepositoryScope | null
   readonly deliveryId: () => DeliveryId | null
@@ -3481,23 +3663,71 @@ export function createControlPlaneRunIdentityPort(options: {
       const scope = options.scope()
       const deliveryId = options.deliveryId()
       if (actor === null || scope === null || deliveryId === null) {
-        throw new Error('Sign in, select a repository Scope, and open a Delivery before reading a WorkRun.')
+        throw new Error('读取工作运行前请登录、选择仓库范围并打开交付。')
       }
+      const detail = await queryDeliveryDetail(options.client, {
+        actor,
+        scope,
+        requestId: options.nextRequestId(),
+        deliveryId,
+      })
       const aggregate = await queryWorkRunAggregate(options.client, {
         actor,
         scope,
         requestId: options.nextRequestId(),
         deliveryId,
         workItemId: anchor.taskId,
+        atCursor: detail.readCursor,
       })
       const workRun = aggregate.runs
         .filter(run => run.workItemId === anchor.taskId)
         .sort((left, right) => right.attempt - left.attempt || right.revision - left.revision)[0]
-      if (workRun === undefined) throw new Error('The Delivery has no WorkRun for this WorkItem.')
-      // The aggregate exposes the authoritative candidate digest on the run;
-      // full Candidate metadata is intentionally obtained by the candidate
-      // history query rather than fabricated in this identity response.
-      return Object.freeze({ taskId: anchor.taskId, workRun, candidate: null })
+      if (workRun === undefined) throw new Error('此交付没有该任务项的工作运行。')
+      const binding = aggregate.deviceBindings.find(candidate => candidate.workRunId === workRun.id)
+      if (binding === undefined) throw new Error('此工作运行尚未分配执行设备。')
+      const currentCandidate = detail.currentCandidate?.producerWorkRunId === workRun.id
+        ? detail.currentCandidate
+        : null
+      let candidate: ControlPlaneRunCandidateProjection | null = currentCandidate === null
+        ? null
+        : Object.freeze({
+            candidateRef: currentCandidate.candidateRef,
+            state: 'produced',
+            branchName: null,
+            history: Object.freeze([]),
+          })
+      if (currentCandidate !== null) {
+        const deviceCandidates = await options.candidates.listDeviceCandidates({
+          clientId: binding.clientId,
+        })
+        const deviceCandidate = deviceCandidates.find(
+          item => item.candidateRef === currentCandidate.candidateRef,
+        )
+        if (deviceCandidate !== undefined) {
+          if (deviceCandidate.repositoryBindingId !== binding.repositoryBindingId
+            || deviceCandidate.candidateCommit !== currentCandidate.candidateCommitId) {
+            throw new Error('设备候选与当前工作运行不匹配。')
+          }
+          candidate = Object.freeze({
+            candidateRef: currentCandidate.candidateRef,
+            state: deviceCandidate.state,
+            branchName: deviceCandidate.branchName,
+            history: deviceCandidate.history,
+          })
+        }
+      }
+      return Object.freeze({
+        taskId: anchor.taskId,
+        clientId: binding.clientId,
+        repositoryBindingId: binding.repositoryBindingId,
+        contract: aggregate.contract,
+        item: aggregate.items.find(item => item.id === anchor.taskId) ?? null,
+        graphItem: aggregate.graphItems.find(item => item.workItemId === anchor.taskId) ?? null,
+        workRun,
+        candidate,
+        owner: null,
+        evidence: Object.freeze(detail.evidence.filter(entry => entry.workRunId === workRun.id)),
+      })
     },
   })
 }
@@ -3532,8 +3762,15 @@ export function createControlPlaneRunIdentityFake(): ControlPlaneRunIdentityPort
       }) as import('./generated/contracts.js').WorkRun
       return Object.freeze({
         taskId: anchor.taskId,
+        clientId: anchor.clientId,
+        repositoryBindingId: anchor.repositoryBindingId,
+        contract: null,
+        item: null,
+        graphItem: null,
         workRun,
         candidate: null,
+        owner: null,
+        evidence: Object.freeze([]),
       })
     },
   })

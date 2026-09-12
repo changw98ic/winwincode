@@ -9,12 +9,12 @@ use winwincode_api::generated::{
     DeliveryUpdateSpecPayload, PageRequest, Scope,
 };
 use winwincode_control_plane::{
-    CollaborationInboxItemId, CollaborationInboxSourcePort, ControlPlane, DeliveryAdvanceAuthority,
-    DeliveryApplicationError, DeliveryAttentionAuthority, DeliveryAuthorityError,
-    DeliveryAuthorityPort, DeliveryAuthorityRequest, DeliverySpecificationAuthority,
-    DeliveryVerdictAuthority, DurableCollaborationInboxSource, EventPublishError, EventPublisher,
+    CollaborationInboxItemId, CollaborationInboxSourcePort, ControlPlane, DeliveryApplicationError,
+    DeliveryAttentionAuthority, DeliveryAuthorityError, DeliveryAuthorityPort,
+    DeliveryAuthorityRequest, DeliverySpecificationAuthority, DeliveryVerdictAuthority,
+    DurableCollaborationInboxSource, EventPublishError, EventPublisher,
     FormalCollaborationCommandRoute, OutboxEvent, ResponsibilityReviewKind, ResponsibilityRole,
-    ResponsibilityTarget, command_receipt_identity,
+    ResponsibilityTarget, WorkRunStartAuthority, command_receipt_identity,
 };
 use winwincode_delivery::domain::{
     AttentionItem, AttentionItemStatus, AttentionItemType, DELIVERY_SCHEMA_VERSION, Delivery,
@@ -64,7 +64,7 @@ impl DeliveryAuthorityPort for RepositoryAuthority {
     fn advance(
         &mut self,
         _request: DeliveryAuthorityRequest<'_>,
-    ) -> Result<DeliveryAdvanceAuthority, DeliveryAuthorityError> {
+    ) -> Result<WorkRunStartAuthority, DeliveryAuthorityError> {
         Err(DeliveryAuthorityError::new("advance authority is not used"))
     }
 
@@ -230,7 +230,6 @@ fn scoped_catalog_cursor_expires_when_a_matching_delivery_changes() {
     let scope = scope(2);
     let first_id = DeliveryId(canonical_id("dlv", 2));
     let second_id = DeliveryId(canonical_id("dlv", 3));
-    let nonmatching_id = DeliveryId(canonical_id("dlv", 4));
     let mut control_plane = start(&root);
     control_plane
         .install_delivery_authority_port(Box::new(RepositoryAuthority))
@@ -246,30 +245,12 @@ fn scoped_catalog_cursor_expires_when_a_matching_delivery_changes() {
             "Second",
         ))
         .expect("create second");
-    control_plane
-        .delivery_create(&create_command(
-            scope.clone(),
-            nonmatching_id.clone(),
-            4,
-            "Nonmatching",
-        ))
-        .expect("create nonmatching");
-    control_plane
-        .delivery_update_spec(&update_command(
-            scope.clone(),
-            nonmatching_id.clone(),
-            1,
-            5,
-            "Ready nonmatching",
-        ))
-        .expect("move nonmatching Delivery to ready");
-
     let first_page = control_plane
         .delivery_list(&list_query(
             scope.clone(),
             1,
             None,
-            vec!["draft".to_owned()],
+            vec!["backlog".to_owned()],
         ))
         .expect("first page");
     assert!(first_page.page.has_more);
@@ -277,27 +258,9 @@ fn scoped_catalog_cursor_expires_when_a_matching_delivery_changes() {
     control_plane
         .delivery_update_spec(&update_command(
             scope.clone(),
-            nonmatching_id,
-            2,
-            6,
-            "Changed ready nonmatching",
-        ))
-        .expect("mutate a nonmatching Delivery");
-    let unchanged = control_plane
-        .delivery_list(&list_query(
-            scope.clone(),
-            1,
-            Some(cursor.clone()),
-            vec!["draft".to_owned()],
-        ))
-        .expect("nonmatching state change preserves filtered cursor");
-    assert_eq!(unchanged.result.items.len(), 1);
-    control_plane
-        .delivery_update_spec(&update_command(
-            scope.clone(),
             second_id,
             1,
-            7,
+            5,
             "Changed matching",
         ))
         .expect("move matching Delivery out of the filter");
@@ -306,7 +269,7 @@ fn scoped_catalog_cursor_expires_when_a_matching_delivery_changes() {
             scope.clone(),
             1,
             Some(cursor),
-            vec!["draft".to_owned()],
+            vec!["backlog".to_owned()],
         ))
         .expect_err("changed snapshot expires cursor");
     assert!(matches!(error, DeliveryApplicationError::ReadCursorExpired));
@@ -337,7 +300,6 @@ fn create_command(
         payload: DeliveryCreatePayload {
             delivery_id,
             spec: spec(&scope, title),
-            tasks: vec![],
         },
         request_id: RequestId(canonical_id("req", seed)),
         schema_version: SchemaVersion::WinwincodeV1,

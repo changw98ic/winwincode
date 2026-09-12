@@ -1246,7 +1246,7 @@ mod runtime_router_fixture {
     use winwincode_control_plane::DurableExecutionPortIngress;
     use winwincode_control_plane::delivery_execution::{
         DeliveryExecutionConfig, DeliveryExecutionPortError, ExecutionJobDispatcher,
-        PendingDeliveryExecution, prepare_workrun_advance,
+        PendingDeliveryExecution, prepare_workrun_start,
     };
     use winwincode_control_plane::execution_port_service::{
         RuntimeEventPortRouter, RuntimeEventRoute, RuntimeEventRouteResolver,
@@ -1256,25 +1256,23 @@ mod runtime_router_fixture {
         ControlPlane, ControlPlaneConfig, EventPublishError, EventPublisher,
         ExecutionPortServiceError, OutboxEvent,
     };
-    use winwincode_delivery::application::stage::{
-        NewStageIdentities, SessionBindingAuthority, StageAdvanceEffect,
+    use winwincode_delivery::application::workrun_execution::{
+        NewWorkRunIdentities, SessionBindingAuthority, WorkRunStartEffect,
         test_support::{active_lease_identity, session_binding_authority},
     };
-    use winwincode_delivery::domain::{
-        DELIVERY_SCHEMA_VERSION, Delivery, DeliveryStatus, DeliveryTask, DeliveryTaskStatus,
-        SessionBindingId,
-    };
+    use winwincode_delivery::domain::{Delivery, DeliveryStatus};
     use winwincode_delivery::store::{
         AtomicPublication, CreateDelivery, DeliveryCommand, DeliveryCommandPort,
         DeliveryJournalPort, DeliveryStore, JournalBackendError, LoadedDeliveryJournal,
     };
     use winwincode_domain::{
-        AttentionItemId, CodexThreadId, DeliveryId, ExecutionAckSequence, ExecutionEventId,
+        AgentIdentityId, CodexThreadId, DeliveryId, ExecutionAckSequence, ExecutionEventId,
         ExecutionJobId, ExecutionMessageId, ExecutionSequence, FencingToken, Instant, LeaseId,
         OrganizationId, ProductSessionId, ProjectId, RepositoryId, RequestId, Revision,
-        SchemaVersion, SessionBindingSourceIdentity, SessionBindingSourceIdentityKind,
-        SessionIdentity, Sha256Digest, StageRunId, UserId, WorkItemId, WorkItemState, WorkRunId,
-        WorkerId, WorkerInstanceId, WorkerSessionId, WorkspaceId,
+        RuntimeSessionAgentIdentity, RuntimeSessionContext, RuntimeSessionWorkspace, SchemaVersion,
+        SessionBindingSourceIdentity, SessionBindingSourceIdentityKind, SessionIdentity,
+        Sha256Digest, UserId, WorkItemId, WorkItemState, WorkRunId, WorkerId, WorkerInstanceId,
+        WorkerSessionId, WorkspaceId, WorkspaceRevision,
     };
     use winwincode_domain::{RepositoryScope, UserActor};
     use winwincode_execution_port::action_enforcement::{
@@ -1325,19 +1323,7 @@ mod runtime_router_fixture {
         snapshot.id = delivery_id.clone();
         snapshot.spec.delivery_id = delivery_id.clone();
         snapshot.revision = 1;
-        snapshot.status = DeliveryStatus::Executing;
-        snapshot.tasks = vec![DeliveryTask {
-            schema_version: DELIVERY_SCHEMA_VERSION,
-            id: winwincode_domain::DeliveryTaskId(canonical_id("dtk", seed)),
-            delivery_id,
-            title: "Implement the approved task".into(),
-            goal: "Implement the approved candidate change.".into(),
-            acceptance_criterion_ids: vec![snapshot.spec.acceptance_criteria[0].id.clone()],
-            blocked_by_task_ids: Vec::new(),
-            owner: None,
-            status: DeliveryTaskStatus::Pending,
-        }];
-        snapshot.stage_runs.clear();
+        snapshot.status = DeliveryStatus::Ready;
         snapshot.work_run_aggregate.runs.clear();
         let item = snapshot
             .work_run_aggregate
@@ -1363,11 +1349,10 @@ mod runtime_router_fixture {
             .work_run_aggregate
             .start_next()
             .expect("ready WorkItem");
-        let result = winwincode_delivery::application::stage::StageAdvanceResult::canonical_workrun_dispatch(
+        let result = winwincode_delivery::application::workrun_execution::WorkRunStartResult::canonical_workrun_dispatch(
             &delivery,
             None,
-            NewStageIdentities {
-                    stage_run_id: StageRunId(canonical_id("run", seed)),
+            NewWorkRunIdentities {
                     work_contract_id: delivery.snapshot().work_run_aggregate.contract.id.clone(),
                     work_contract_revision: delivery
                         .snapshot()
@@ -1393,9 +1378,6 @@ mod runtime_router_fixture {
                         .clone(),
                     work_run_id: WorkRunId(canonical_id("wrn", seed)),
                     execution_job_id: ExecutionJobId(canonical_id("job", seed)),
-                    session_binding_id: SessionBindingId::new(format!("binding-{seed}"))
-                        .expect("binding id"),
-                    attention_item_id: AttentionItemId(canonical_id("att", seed)),
                 },
             ProductSessionId(canonical_id("psn", seed)),
             "executor".into(),
@@ -1404,10 +1386,12 @@ mod runtime_router_fixture {
             1_800_000_000_100,
         ).expect("WorkRun dispatch");
         let intent = match &result.effect {
-            StageAdvanceEffect::Dispatch(intent) => intent.clone(),
-            _ => panic!("fixture advance must create a dispatch intent"),
+            WorkRunStartEffect::Dispatch(intent) => intent.clone(),
+            WorkRunStartEffect::Clarify(_) => {
+                panic!("fixture advance must create a dispatch intent")
+            }
         };
-        let job = prepare_workrun_advance(
+        let job = prepare_workrun_start(
             &RequestId(canonical_id("req", seed)),
             &result.delivery.snapshot().work_run_aggregate,
             &result.delivery.snapshot().spec,
@@ -1431,13 +1415,13 @@ mod runtime_router_fixture {
         PendingDeliveryExecution::from_workrun(RequestId(canonical_id("req", seed)), result, job)
     }
 
-    fn delivery_advance_command(seed: u64) -> CommandEnvelope {
+    fn workrun_start_command(seed: u64) -> CommandEnvelope {
         CommandEnvelope {
             actor: Actor::UserActor(UserActor {
                 id: UserId(canonical_id("usr", seed)),
                 kind: winwincode_domain::UserActorKind::User,
             }),
-            command: CommandName::DeliveryAdvance,
+            command: CommandName::WorkRunStart,
             expected_revision: Revision(1),
             payload: serde_json::json!({"deliveryId": canonical_id("dlv", seed), "dispatchProfile": "executor"}),
             request_id: RequestId(canonical_id("req", seed)),
@@ -1503,6 +1487,25 @@ mod runtime_router_fixture {
             lease_id: lease_id.clone(),
             message_id: ExecutionMessageId(canonical_id("xmsg", seed)),
             product_session_id,
+            runtime_context: RuntimeSessionContext {
+                agent_identity: RuntimeSessionAgentIdentity {
+                    id: AgentIdentityId(canonical_id("agt", seed)),
+                    worker_id: worker_id.clone(),
+                    name: pending.job().execution_profile.clone(),
+                    role: pending.job().execution_profile.clone(),
+                },
+                provider: "fixture-provider".to_owned(),
+                model: "fixture-model".to_owned(),
+                workspace: RuntimeSessionWorkspace {
+                    repository_id: pending.job().workspace.repository_id.clone(),
+                    revision: WorkspaceRevision(format!("git-tree:{}", "a".repeat(64))),
+                    write_mode: match pending.job().workspace.write_mode {
+                        ExecutionWorkspaceWriteMode::ReadOnly => "read-only",
+                        ExecutionWorkspaceWriteMode::Candidate => "candidate",
+                    }
+                    .to_owned(),
+                },
+            },
             schema_version: SchemaVersion::WinwincodeV1,
             sent_at: Instant("2027-01-15T08:00:01.100Z".into()),
             session_identity,
@@ -1574,7 +1577,7 @@ mod runtime_router_fixture {
     }
 
     fn repository_scope(seed: u64) -> RepositoryScope {
-        match delivery_advance_command(seed).scope {
+        match workrun_start_command(seed).scope {
             Scope::RepositoryScope(scope) => scope,
             _ => panic!("runtime router fixture must use repository scope"),
         }
@@ -1804,7 +1807,7 @@ mod runtime_router_fixture {
         .expect("Control Plane start");
         control_plane
             .commit_delivery_execution(
-                &delivery_advance_command(seed),
+                &workrun_start_command(seed),
                 &pending,
                 &mut RecordingDispatcher,
             )
@@ -1855,7 +1858,7 @@ mod runtime_router_fixture {
         .expect("Control Plane start");
         control_plane
             .commit_delivery_execution(
-                &delivery_advance_command(seed),
+                &workrun_start_command(seed),
                 &pending,
                 &mut RecordingDispatcher,
             )
@@ -2700,7 +2703,7 @@ mod runtime_router_fixture {
         .expect("Control Plane start");
         control_plane
             .commit_delivery_execution(
-                &delivery_advance_command(seed),
+                &workrun_start_command(seed),
                 &pending,
                 &mut RecordingDispatcher,
             )

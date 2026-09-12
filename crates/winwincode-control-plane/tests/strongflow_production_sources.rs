@@ -8,10 +8,10 @@ use std::{
 
 use rusqlite::{Connection, params};
 use winwincode_api::generated::{
-    AcceptanceCriterionInput, Actor, DeliveryAdvanceCommand, DeliveryAdvanceCommandCommand,
-    DeliveryAdvancePayload, DeliveryCreateCommand, DeliveryCreateCommandCommand,
+    AcceptanceCriterionInput, Actor, DeliveryCreateCommand, DeliveryCreateCommandCommand,
     DeliveryCreatePayload, DeliveryGetParameters, DeliveryGetQuery, DeliveryGetQueryQuery,
-    DeliverySpecInput, DeliveryTaskBreakdownCreateCommand, PageRequest, QueryResultResponse,
+    DeliverySpecInput, PageRequest, QueryResultResponse, WorkItemsCreateCommand,
+    WorkRunStartCommand, WorkRunStartCommandCommand, WorkRunStartPayload,
 };
 use winwincode_control_plane::{
     ControlPlane, ControlPlaneConfig, EventPublishError, EventPublisher,
@@ -47,10 +47,10 @@ fn startup_installs_restart_stable_empty_publication_and_rejects_corrupt_facts()
     let mut first = start(&data, &repository, &scope);
     first.delivery_create(&create).expect("create Delivery");
     first
-        .delivery_task_breakdown_create(&task_breakdown_command(&first, &scope, &delivery_id))
+        .work_items_create(&task_breakdown_command(&first, &scope, &delivery_id))
         .expect("create canonical WorkItem");
     let advance = advance_command(&scope, &delivery_id);
-    first.delivery_advance(&advance).expect("advance Delivery");
+    first.workrun_start(&advance).expect("advance Delivery");
     let current_query = delivery_query(&scope, &delivery_id, None);
     let current = StrongFlowProjectionQueryPort::delivery_get(&first, &current_query)
         .expect("production StrongFlow read");
@@ -150,7 +150,6 @@ fn create_command(
                 repository_id: scope.repository_id.clone(),
                 title: "Production StrongFlow sources".to_owned(),
             },
-            tasks: Vec::new(),
         },
         request_id: RequestId(canonical_id("req", 41)),
         schema_version: SchemaVersion::WinwincodeV1,
@@ -158,15 +157,15 @@ fn create_command(
     }
 }
 
-fn advance_command(scope: &RepositoryScope, delivery_id: &DeliveryId) -> DeliveryAdvanceCommand {
-    DeliveryAdvanceCommand {
+fn advance_command(scope: &RepositoryScope, delivery_id: &DeliveryId) -> WorkRunStartCommand {
+    WorkRunStartCommand {
         actor: Actor::UserActor(UserActor {
             id: UserId(canonical_id("usr", 41)),
             kind: UserActorKind::User,
         }),
-        command: DeliveryAdvanceCommandCommand::DeliveryAdvance,
+        command: WorkRunStartCommandCommand::WorkRunStart,
         expected_revision: Revision(2),
-        payload: DeliveryAdvancePayload {
+        payload: WorkRunStartPayload {
             rework: None,
             delivery_id: delivery_id.clone(),
             dispatch_profile: "executor".to_owned(),
@@ -181,7 +180,7 @@ fn task_breakdown_command(
     control_plane: &ControlPlane,
     scope: &RepositoryScope,
     delivery_id: &DeliveryId,
-) -> DeliveryTaskBreakdownCreateCommand {
+) -> WorkItemsCreateCommand {
     let state = control_plane
         .load_state(&format!("delivery:{}", delivery_id.0))
         .expect("Delivery read")
@@ -198,7 +197,7 @@ fn task_breakdown_command(
         .collect::<Vec<_>>();
     serde_json::from_value(serde_json::json!({
         "actor": {"kind":"user", "id":canonical_id("usr", 41)},
-        "command":"delivery.task_breakdown.create",
+        "command":"workitems.create",
         "expectedRevision":1,
         "payload": {
             "contractRevision":1,

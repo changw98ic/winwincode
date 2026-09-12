@@ -79,11 +79,11 @@ fn session_id(seed: u64) -> String {
 }
 
 fn worker_id(seed: u64) -> String {
-    format!("wkr_{}", crockford(seed))
+    format!("wrk_{}", crockford(seed))
 }
 
 fn worker_instance_id(seed: u64) -> String {
-    format!("winst_{}", crockford(seed))
+    format!("wki_{}", crockford(seed))
 }
 
 fn launch_grant_id(seed: u64) -> String {

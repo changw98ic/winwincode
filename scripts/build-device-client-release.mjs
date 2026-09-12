@@ -28,7 +28,7 @@
 //!
 //! `--dry-run` prints the canonical build/package plan without building or
 //! writing anything. `CARGO_TARGET_DIR` selects the physical Cargo target
-//! directory, exactly like `scripts/build-products.mjs`.
+//! directory, exactly like `scripts/build-community.mjs`.
 
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
@@ -72,6 +72,10 @@ export const DEVICE_CLIENT_SBOM_FORMAT = 'winwincode.cargo-lock-sbom.v1'
 const EXECUTABLE_MODE = 0o755
 const TEXT_MODE = 0o644
 const LEGAL_FILES = Object.freeze(['LICENSE', 'NOTICE', 'THIRD_PARTY_NOTICES.md'])
+const SERVICE_FILES = Object.freeze({
+  macos: 'dev.winwincode.device-client.plist',
+  linux: 'winwincode-device-client.service',
+})
 const COMMIT_PATTERN = /^[0-9a-f]{40}$/u
 const SHA256_PATTERN = /^[0-9a-f]{64}$/u
 
@@ -274,6 +278,19 @@ function legalDescriptors(artifactRoot) {
   })
 }
 
+function serviceDescriptor(artifactRoot, target) {
+  const name = SERVICE_FILES[targetConfiguration(target).os]
+  const path = resolve(artifactRoot, 'service', name)
+  if (!existsSync(path) || !statSync(path).isFile()) {
+    fail('ARTIFACT_MISSING', `missing Device Client service definition ${name}`)
+  }
+  const mode = statSync(path).mode & 0o777
+  if (mode !== TEXT_MODE) {
+    fail('ARTIFACT_MODE_INVALID', `service/${name} must have mode 0644, found ${mode.toString(8)}`)
+  }
+  return Object.freeze({ path: `service/${name}`, ...descriptorForFile(artifactRoot, path), mode })
+}
+
 function helperReleaseManifestDescriptor(root, artifactRoot, source) {
   const path = resolve(artifactRoot, 'bin', HELPER_RELEASE_MANIFEST_NAME)
   if (!existsSync(path) || !statSync(path).isFile()) return null
@@ -309,6 +326,7 @@ function checksumLines(manifest) {
   const descriptors = [
     ...manifest.components,
     ...manifest.legal,
+    manifest.service,
     ...(manifest.helperReleaseManifest === null ? [] : [manifest.helperReleaseManifest]),
   ]
   return descriptors
@@ -331,6 +349,7 @@ export function createDeviceClientReleaseManifest({
   const source = sourceIdentity(root, sourceCommit, sourceDateEpoch)
   const components = DEVICE_CLIENT_COMPONENTS.map(component => componentDescriptor(artifactRoot, component))
   const legal = legalDescriptors(artifactRoot)
+  const service = serviceDescriptor(artifactRoot, target)
   const helperReleaseManifest = helperReleaseManifestDescriptor(root, artifactRoot, source)
   return Object.freeze({
     schemaVersion: DEVICE_CLIENT_RELEASE_SCHEMA_VERSION,
@@ -342,6 +361,7 @@ export function createDeviceClientReleaseManifest({
     helperReleaseManifest,
     sbom: deviceClientSbom(root),
     legal: Object.freeze(legal),
+    service,
     checks: DEVICE_CLIENT_RELEASE_CHECKS,
   })
 }
@@ -462,6 +482,18 @@ export function verifyDeviceClientReleaseDirectory({ root, artifactRoot, expecte
       fail('LEGAL_BOUNDARY_FAILED', `${descriptor.path} does not match the project legal file`)
     }
   }
+  assertDescriptor(artifactRoot, manifest.service, 'service definition')
+  assertExactIdentity(
+    manifest.service,
+    serviceDescriptor(artifactRoot, expectedTarget),
+    'MANIFEST_INVALID',
+    'service definition descriptor is invalid',
+  )
+  const serviceName = SERVICE_FILES[targetIdentity.os]
+  if (readFileSync(resolve(artifactRoot, manifest.service.path))
+    .compare(readFileSync(resolve(root, 'deploy', 'device-client', serviceName))) !== 0) {
+    fail('SERVICE_DEFINITION_MISMATCH', `${manifest.service.path} does not match the release service definition`)
+  }
   const checksumPath = resolve(artifactRoot, DEVICE_CLIENT_RELEASE_CHECKSUMS)
   if (!existsSync(checksumPath)
     || readFileSync(checksumPath, 'utf8') !== deviceClientChecksums(manifest)) {
@@ -472,6 +504,7 @@ export function verifyDeviceClientReleaseDirectory({ root, artifactRoot, expecte
     DEVICE_CLIENT_RELEASE_CHECKSUMS,
     ...manifest.components.map(entry => entry.path),
     ...manifest.legal.map(entry => entry.path),
+    manifest.service.path,
     ...(manifest.helperReleaseManifest === null ? [] : [manifest.helperReleaseManifest.path]),
   ].toSorted((left, right) => left.localeCompare(right))
   const actualPaths = packageFilesBelow(artifactRoot)
@@ -563,6 +596,10 @@ export function buildDeviceClientReleasePlan({
           mode: EXECUTABLE_MODE,
         })),
         ...LEGAL_FILES.map(name => ({ path: `legal/${name}`, mode: TEXT_MODE })),
+        {
+          path: `service/${SERVICE_FILES[targetIdentity.os]}`,
+          mode: TEXT_MODE,
+        },
       ]),
     }),
     components: DEVICE_CLIENT_COMPONENTS,
@@ -619,6 +656,7 @@ function stagePackage({ artifactRoot, targetDirectory, target, helperReleaseMani
   rmSync(artifactRoot, { recursive: true, force: true })
   mkdirSync(resolve(artifactRoot, 'bin'), { recursive: true })
   mkdirSync(resolve(artifactRoot, 'legal'), { recursive: true })
+  mkdirSync(resolve(artifactRoot, 'service'), { recursive: true })
   for (const component of DEVICE_CLIENT_COMPONENTS) {
     const source = resolve(targetDirectory, target, 'release', component.binaryName)
     if (!existsSync(source) || !statSync(source).isFile()) {
@@ -641,6 +679,10 @@ function stagePackage({ artifactRoot, targetDirectory, target, helperReleaseMani
     copyFileSync(resolve(root, name), destination)
     chmodSync(destination, TEXT_MODE)
   }
+  const serviceName = SERVICE_FILES[targetIdentity.os]
+  const serviceDestination = resolve(artifactRoot, 'service', serviceName)
+  copyFileSync(resolve(root, 'deploy', 'device-client', serviceName), serviceDestination)
+  chmodSync(serviceDestination, TEXT_MODE)
 }
 
 function cargoTargetDirectoryOverride(buildRoot) {

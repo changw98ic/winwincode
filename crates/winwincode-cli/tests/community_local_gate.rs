@@ -15,16 +15,16 @@ use winwincode_cli::{
 use winwincode_delivery::{
     application::{
         attention::{AttentionDecision, ResolveAttentionInput, resolve_attention},
-        stage::{
+        verdict::{
+            SubmitVerdictFacts, compute_verdict_transition,
+            test_support::{VerdictFixtureOutcome, verdict_facts_fixture, verdict_fixture},
+        },
+        workrun_execution::{
             TerminalArtifactReference, TerminalOutcomeStatus,
             test_support::{
                 active_lease_identity, delivery_terminal_outcome_facts, session_binding_authority,
                 terminal_outcome_metadata, terminal_worker_outcome,
             },
-        },
-        verdict::{
-            SubmitVerdictFacts, compute_verdict_transition,
-            test_support::{VerdictFixtureOutcome, verdict_facts_fixture, verdict_fixture},
         },
     },
     domain::{
@@ -559,7 +559,14 @@ fn prepare_delivery(
     binding.execution_job_id = ExecutionJobId("job_00000000000000000000000906".into());
     binding.worker_session_id = Some(WorkerSessionId("wsn_00000000000000000000000906".into()));
     binding.codex_thread_id = Some(CodexThreadId("cdx_00000000000000000000000906".into()));
-    binding.worker_id = Some(WorkerId("wrk_00000000000000000000000906".into()));
+    let worker_id = WorkerId("wrk_00000000000000000000000906".into());
+    binding.worker_id = Some(worker_id.clone());
+    binding
+        .runtime_context
+        .as_mut()
+        .expect("executor runtime context")
+        .agent_identity
+        .worker_id = worker_id;
     binding.worker_instance_id = Some(WorkerInstanceId("wki_00000000000000000000000906".into()));
     binding.lease_id = Some(LeaseId("lse_00000000000000000000000906".into()));
     binding.fencing_token = Some(FencingToken("906".into()));

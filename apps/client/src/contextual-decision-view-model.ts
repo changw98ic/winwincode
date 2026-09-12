@@ -15,7 +15,7 @@ import type {
  * UI-502 embeds the decisions of the current Session/WorkRun context where the
  * user already is.  This module is a pure projection of one server snapshot: it
  * never queries, never caches, and never owns business state, so the global
- * Attention Center, Chat, and StrongFlow keep exactly one shared server truth.
+ * the task board and Chat keep exactly one shared server truth.
  */
 export type ContextualDecisionKind = 'input' | 'approval' | 'attention'
 
@@ -117,7 +117,7 @@ const URGENCY_RANK: Readonly<Record<ContextualDecisionUrgency, number>> = Object
   'binding-invalid': 3,
 })
 
-/** Same fail-closed binding check as the Attention Center and local decisions. */
+/** Shared fail-closed binding check for every pending-decision projection. */
 function bindingIsComplete(binding: {
   readonly productSessionId: ProductSessionId
   readonly sessionIdentity: {
@@ -304,9 +304,9 @@ export function contextualDecisionPresentation(
 ): ContextualDecisionPresentation {
   const waiting = view.counts.blocking + view.counts.pending
   const statusText = options.loading === true
-    ? 'Loading decisions…'
+    ? '正在加载决策…'
     : waiting === 0
-      ? 'No decision is waiting on you in this context'
+      ? '当前上下文中没有等待你处理的决策'
       : view.omitted > 0
         ? `${String(waiting)} need a decision · ${String(view.omitted)} more not shown`
         : `${String(waiting)} need a decision`
@@ -330,10 +330,10 @@ export function contextualDecisionCapability(
   const stateLabel = item.urgency === 'blocking'
     ? '阻塞 · 需要立即决策'
     : item.urgency === 'pending'
-      ? 'Needs a decision'
+      ? '需要决策'
       : item.urgency === 'expired'
-        ? 'Expired · decision disabled'
-        : 'Binding invalid · decision disabled'
+        ? '已过期 · 决策已停用'
+        : '绑定无效 · 决策已停用'
   return Object.freeze({ disabled, stateLabel })
 }
 
@@ -341,5 +341,5 @@ export function contextualDecisionCapability(
 export function contextualDecisionKindLabel(kind: ContextualDecisionKind): string {
   if (kind === 'input') return '输入请求'
   if (kind === 'approval') return '工具审批'
-  return 'Business Attention'
+  return '业务待处理'
 }

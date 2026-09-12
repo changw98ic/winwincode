@@ -221,7 +221,7 @@
           "scope": {
             "productSessionId": "psn_00000000000000000000000006",
             "deliveryId": "dlv_00000000000000000000000007",
-            "deliveryTaskId": "dtk_00000000000000000000000008",
+            "workItemId": "wit_00000000000000000000000008",
             "stageRunId": "run_00000000000000000000000009"
           },
           "workspace": {

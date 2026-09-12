@@ -8,13 +8,17 @@
 //! periodic liveness work, and ordered shutdown.
 
 use std::fmt;
-use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
+#[cfg(feature = "local-worker")]
 use futures::FutureExt;
 use sha2::{Digest, Sha256};
+#[cfg(feature = "local-worker")]
+use std::sync::atomic::{AtomicU8, Ordering};
+#[cfg(feature = "local-worker")]
 use tokio::sync::{Mutex, watch};
+#[cfg(feature = "local-worker")]
 use tokio::task::JoinHandle;
 use winwincode_domain::{RepositoryScope, RepositoryScopeKind};
 
@@ -26,6 +30,10 @@ use winwincode_domain::{ExecutionJobId, Instant, RequestId, UserId, WorkerId, Wo
 use winwincode_execution_port::generated::{
     ExecutionJob, ExecutionPortMessage, ExecutionWorkspaceWriteMode, JobDispatchMessage,
 };
+use winwincode_execution_port::{
+    execution_identity::canonical_dispatch_session_identity, transport::ExecutionPortCore,
+};
+#[cfg(feature = "local-worker")]
 use winwincode_local::{
     LocalExecutionPortHandle, LocalLauncher, LocalLauncherConfig, SharedControlPlaneHandle,
 };
@@ -37,14 +45,17 @@ use winwincode_storage::{
     WorkerOutboundAuthority, WorkerPoolId, WorkerSlotAuthority, WorkerSlotOpenRequest,
     WorkerSlotResourceLimits, WorkerSlotResources,
 };
-use winwincode_worker::composition::ExecutionPortCore;
-use winwincode_worker::{CodexCoreAdapter, WorkerConfig, canonical_dispatch_session_identity};
+#[cfg(feature = "local-worker")]
+use winwincode_worker::{CodexCoreAdapter, WorkerConfig};
 
 use crate::StandaloneApplicationClock;
 use crate::application::{ApplicationState, StandaloneControlPlaneApplication};
 
+#[cfg(feature = "local-worker")]
 const HEALTHY: u8 = 0;
+#[cfg(feature = "local-worker")]
 const FAULTED: u8 = 1;
+#[cfg(feature = "local-worker")]
 const STOPPED: u8 = 2;
 const DEFAULT_RUNTIME_USER_ID: &str = "usr_00000000000000000000000001";
 const DEFAULT_RUNTIME_WORKER_POOL_ID: &str = "wpl_00000000000000000000000001";
@@ -190,6 +201,7 @@ impl std::error::Error for ServerExecutionPortError {}
 /// The hook only performs short durable work and enqueues typed messages on
 /// the supplied local port. It must not retain the port or start an async task;
 /// the supervisor remains the sole owner of the Worker lifecycle.
+#[cfg(feature = "local-worker")]
 pub trait LocalRuntimeScheduler: Send + 'static {
     /// Claims/replays pending work and enqueues exact CP-to-Worker messages.
     ///
@@ -227,6 +239,7 @@ pub trait RuntimeControlOutbound {
     fn enqueue_control(&self, message: ExecutionPortMessage) -> Result<(), RuntimeSupervisorError>;
 }
 
+#[cfg(feature = "local-worker")]
 impl RuntimeControlOutbound for LocalExecutionPortHandle {
     fn enqueue_control(&self, message: ExecutionPortMessage) -> Result<(), RuntimeSupervisorError> {
         LocalExecutionPortHandle::enqueue_control(self, message).map_err(|_| {
@@ -433,10 +446,6 @@ impl RepositoryRuntimeScheduler {
                 "repository runtime scheduler execution deadline overflowed",
             )
         })?;
-        let policy_limits = ExecutionAdmissionLimits {
-            max_runtime_millis: runtime_limit_millis.max(LOCAL_ADMISSION_LIMITS.max_runtime_millis),
-            ..LOCAL_ADMISSION_LIMITS
-        };
         // Never reserve under an identity that is not an active durable
         // account: an uninitialized Server still carries the stable default
         // subject, and a reservation created under it could never pass the
@@ -450,7 +459,6 @@ impl RepositoryRuntimeScheduler {
             debug_scheduler_error("open execution admission", &error);
             scheduler_failure()
         })?;
-        self.configure_admission_policies(&mut admission, &record.scope, policy_limits)?;
         let reservation = admission
             .load_reservation_by_job(&record.job_id)
             .map_err(|error| {
@@ -460,6 +468,12 @@ impl RepositoryRuntimeScheduler {
         let reservation = if let Some(reservation) = reservation {
             reservation
         } else {
+            let policy_limits = ExecutionAdmissionLimits {
+                max_runtime_millis: runtime_limit_millis
+                    .max(LOCAL_ADMISSION_LIMITS.max_runtime_millis),
+                ..LOCAL_ADMISSION_LIMITS
+            };
+            self.configure_admission_policies(&mut admission, &record.scope, policy_limits)?;
             let Some(reservation) =
                 self.reserve_admission(&mut admission, record, &job, runtime_limit_millis)?
             else {
@@ -799,6 +813,7 @@ impl RepositoryRuntimeScheduler {
         Ok(())
     }
 
+    #[cfg(feature = "local-worker")]
     fn acknowledge_interactions(
         &mut self,
         state: &mut ApplicationState,
@@ -836,15 +851,11 @@ impl RepositoryRuntimeScheduler {
                 debug_scheduler_error("list queued jobs", &error);
                 scheduler_failure()
             })?;
-        // FLOW-100.4: a job dispatched to a Device WorkerSession carries one
-        // durable device execution fact row. The local embedded worker never
-        // admits device-owned work — admitting it would fault this driver on
-        // the foreign admission identity and could lease device work locally.
-        // Skip to the first local job so device work cannot strand the queue
-        // head; the queue selection excludes such jobs from claims as well.
-        let mut local_head = None;
+        // Local/fleet Workers skip device jobs. A Device Worker selects only
+        // the job whose sealed launch facts name this exact process.
+        let mut matching_head = None;
         for record in &queued {
-            let device_dispatched = {
+            let device_facts = {
                 let ledger = state
                     .storage
                     .device_execution_binding_ledger()
@@ -852,20 +863,27 @@ impl RepositoryRuntimeScheduler {
                         debug_scheduler_error("open device execution binding ledger", &error);
                         scheduler_failure()
                     })?;
-                ledger
-                    .facts(record.job_id.0.as_str())
-                    .map_err(|error| {
-                        debug_scheduler_error("read device execution facts", &error);
-                        scheduler_failure()
-                    })?
-                    .is_some()
+                ledger.facts(record.job_id.0.as_str()).map_err(|error| {
+                    debug_scheduler_error("read device execution facts", &error);
+                    scheduler_failure()
+                })?
             };
-            if !device_dispatched {
-                local_head = Some(record);
+            let matches = match device_facts {
+                None => {
+                    self.worker_pool_id.0
+                        != winwincode_control_plane::STRONGFLOW_DEVICE_WORKER_POOL_ID
+                }
+                Some(facts) => {
+                    facts.worker_id == self.worker_id.0
+                        && facts.worker_instance_id == self.worker_instance_id.0
+                }
+            };
+            if matches {
+                matching_head = Some(record);
                 break;
             }
         }
-        let Some(record) = local_head else {
+        let Some(record) = matching_head else {
             return Ok(true);
         };
         let admission_ready = self
@@ -991,6 +1009,28 @@ impl RepositoryRuntimeScheduler {
         outbound: &dyn RuntimeControlOutbound,
     ) -> Result<(), RuntimeSupervisorError> {
         self.drive_outbound(now, outbound, true)
+    }
+
+    /// Drives one authenticated remote process using its transport-bound
+    /// worker and pool identities.
+    pub fn drive_remote_for(
+        &mut self,
+        now: &Instant,
+        outbound: &dyn RuntimeControlOutbound,
+        worker_id: WorkerId,
+        worker_instance_id: WorkerInstanceId,
+        worker_pool_id: WorkerPoolId,
+    ) -> Result<(), RuntimeSupervisorError> {
+        let previous = (
+            std::mem::replace(&mut self.worker_id, worker_id),
+            std::mem::replace(&mut self.worker_instance_id, worker_instance_id),
+            std::mem::replace(&mut self.worker_pool_id, worker_pool_id),
+        );
+        let result = self.drive_outbound(now, outbound, true);
+        self.worker_id = previous.0;
+        self.worker_instance_id = previous.1;
+        self.worker_pool_id = previous.2;
+        result
     }
 
     /// Commits only interaction receipts explicitly confirmed by the remote
@@ -1164,6 +1204,7 @@ fn admission_boundaries(
     boundaries
 }
 
+#[cfg(feature = "local-worker")]
 impl LocalRuntimeScheduler for RepositoryRuntimeScheduler {
     fn drive(
         &mut self,
@@ -1295,10 +1336,12 @@ where
 }
 
 #[derive(Clone)]
+#[cfg(feature = "local-worker")]
 struct RuntimeHealthState {
     status: Arc<AtomicU8>,
 }
 
+#[cfg(feature = "local-worker")]
 impl RuntimeHealthState {
     fn mark_faulted(&self) {
         let _ = self
@@ -1317,10 +1360,12 @@ impl RuntimeHealthState {
 
 /// Cloneable health handle for an application and its HTTP health endpoint.
 #[derive(Clone)]
+#[cfg(feature = "local-worker")]
 pub struct RuntimeHealthHandle {
     state: RuntimeHealthState,
 }
 
+#[cfg(feature = "local-worker")]
 impl RuntimeHealthHandle {
     #[must_use]
     pub fn is_healthy(&self) -> bool {
@@ -1328,6 +1373,7 @@ impl RuntimeHealthHandle {
     }
 }
 
+#[cfg(feature = "local-worker")]
 impl RuntimeHealthPort for RuntimeHealthHandle {
     fn is_healthy(&self) -> bool {
         self.state.is_healthy()
@@ -1335,6 +1381,7 @@ impl RuntimeHealthPort for RuntimeHealthHandle {
 }
 
 /// One running local Worker and its supervised liveness driver.
+#[cfg(feature = "local-worker")]
 pub struct LocalRuntimeSupervisor<Core, Codex>
 where
     Core: ExecutionPortCore<Output = Vec<ExecutionPortMessage>> + Send + 'static,
@@ -1348,6 +1395,7 @@ where
     tick: Duration,
 }
 
+#[cfg(feature = "local-worker")]
 impl<Core, Codex> LocalRuntimeSupervisor<Core, Codex>
 where
     Core: ExecutionPortCore<Output = Vec<ExecutionPortMessage>> + Send + 'static,
@@ -1609,6 +1657,7 @@ where
     }
 }
 
+#[cfg(feature = "local-worker")]
 async fn run_driver<Core, Codex>(
     launcher: Arc<Mutex<Option<LocalLauncher<Core, Codex>>>>,
     health: RuntimeHealthState,
@@ -1720,6 +1769,7 @@ async fn run_driver<Core, Codex>(
     }
 }
 
+#[cfg(feature = "local-worker")]
 fn stopped_error() -> RuntimeSupervisorError {
     RuntimeSupervisorError::new(
         RuntimeSupervisorErrorKind::Shutdown,
@@ -2129,6 +2179,60 @@ mod tests {
             .expect("reservation lookup succeeds")
             .expect("the reservation was created");
         assert_eq!(reservation.user_id, owner);
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
+    fn existing_device_reservation_keeps_its_worker_pool_policy() {
+        let directory = unique_directory("device-reservation");
+        std::fs::create_dir_all(&directory).expect("temp directory");
+        let mut storage = SqliteStorage::open(&directory).expect("storage opens");
+        let owner = create_active_owner(&mut storage);
+        let scope = test_scope();
+        let (record, _) = queued_job_record(&scope);
+        let worker_pool_id =
+            WorkerPoolId(winwincode_control_plane::STRONGFLOW_DEVICE_WORKER_POOL_ID.to_owned());
+        let mut admission = storage.execution_admission().expect("admission opens");
+        for boundary in admission_boundaries(&scope, &worker_pool_id) {
+            let limits = if matches!(boundary, ExecutionAdmissionBoundary::WorkerPool { .. }) {
+                ExecutionAdmissionLimits {
+                    max_concurrent: 4,
+                    ..LOCAL_ADMISSION_LIMITS
+                }
+            } else {
+                LOCAL_ADMISSION_LIMITS
+            };
+            admission
+                .configure_policy(&ExecutionAdmissionPolicy { boundary, limits })
+                .expect("device admission policy configures");
+        }
+        admission
+            .reserve(&ExecutionReservationRequest {
+                scope: scope.clone(),
+                user_id: owner.clone(),
+                worker_pool_id: worker_pool_id.clone(),
+                job_id: record.job_id.clone(),
+                request_id: RequestId(format!("req_{}", "D".repeat(26))),
+                repository_access: ExecutionRepositoryAccess::ReadOnly,
+                reserved_tokens: 1_000,
+                reserved_cost_microunits: 1_000,
+                runtime_limit_millis: 3_600_000,
+                submitted_at: record.submitted_at.clone(),
+            })
+            .expect("device reservation is created");
+        drop(admission);
+
+        let mut scheduler = scheduler_with_user(owner, &directory);
+        scheduler.worker_pool_id = worker_pool_id;
+        assert!(
+            scheduler
+                .ensure_admission(
+                    &mut storage,
+                    &record,
+                    &fixed_instant("2026-09-06T12:00:00.000Z"),
+                )
+                .expect("existing device reservation is admitted")
+        );
         std::fs::remove_dir_all(&directory).ok();
     }
 

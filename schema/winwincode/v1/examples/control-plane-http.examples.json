@@ -46,7 +46,7 @@
       },
       "parameters": {
         "states": [
-          "executing"
+          "ready"
         ]
       },
       "page": {
@@ -127,7 +127,7 @@
         "repositoryId": "rep_00000000000000000000000000"
       },
       "parameters": {
-        "kind": "delivery-stage",
+        "kind": "work-run",
         "productSessionId": "psn_00000000000000000000000000",
         "deliveryId": "dlv_00000000000000000000000000",
         "atCursor": {
@@ -548,6 +548,21 @@
               "lastFailureSourceRef": null,
               "latestRecoverySourceRef": null
             },
+            "runtimeContext": {
+              "agentIdentity": {
+                "id": "agt_00000000000000000000000000",
+                "workerId": "wrk_00000000000000000000000000",
+                "name": "executor",
+                "role": "executor"
+              },
+              "provider": "openai",
+              "model": "gpt-5",
+              "workspace": {
+                "repositoryId": "rep_00000000000000000000000000",
+                "revision": "git-tree:0000000000000000000000000000000000000000",
+                "writeMode": "candidate"
+              }
+            },
             "diffSummary": {
               "changedFileCount": 3,
               "additions": 40,
@@ -626,7 +641,7 @@
           "projectId": "prj_00000000000000000000000000",
           "repositoryId": "rep_00000000000000000000000000"
         },
-        "status": "plan-review",
+        "status": "ready",
         "requirements": {
           "deliverySpecId": "spec:current",
           "deliverySpecRevision": 3,
@@ -661,9 +676,9 @@
           "deliveryId": "dlv_00000000000000000000000000",
           "deliverySpecId": "spec:current",
           "deliverySpecRevision": 3,
-          "planningStageRunId": "run_00000000000000000000000000",
+          "planningWorkRunId": "wrn_00000000000000000000000000",
           "planningSessionBindingId": "binding:planning:1",
-          "reviewStageRunId": "run_00000000000000000000000001",
+          "reviewWorkRunId": "wrn_00000000000000000000000001",
           "attentionItemId": "att_00000000000000000000000000",
           "reviewSetSha256": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
           "reviewStatus": "pending",
@@ -715,71 +730,19 @@
             "A partial pair could mix revisions."
           ],
           "unresolvedItems": [],
-          "taskProposals": [
+          "workItemProposals": [
             {
-              "id": "dtk_00000000000000000000000000",
+              "id": "wit_00000000000000000000000000",
               "title": "Implement the paired read",
               "goal": "Return and reuse StrongFlowReadCursor.",
-              "acceptanceCriterionIds": [
+              "criterionIds": [
                 "criterion:cursor"
               ],
-              "blockedByTaskIds": []
+              "dependsOn": []
             }
           ]
         },
         "diagramExecution": null,
-        "stages": [
-          {
-            "id": "run_00000000000000000000000000",
-            "deliveryTaskId": null,
-            "stage": "planning",
-            "actorType": "codex",
-            "role": "planner",
-            "status": "succeeded",
-            "attempt": 1,
-            "startedAt": "2026-08-24T09:00:00.000Z",
-            "finishedAt": "2026-08-24T09:01:00.000Z",
-            "sessionBinding": {
-              "bindingId": "binding:planning:1",
-              "productSessionId": "psn_00000000000000000000000000",
-              "executionJobId": "job_00000000000000000000000000",
-              "workerSessionId": "wsn_00000000000000000000000000",
-              "codexThreadId": "cdx_00000000000000000000000000",
-              "boundAt": "2026-08-24T09:00:00.000Z",
-              "sessionIdentity": {
-                "productSessionId": "psn_00000000000000000000000000",
-                "workerSessionId": "wsn_00000000000000000000000000",
-                "codexThreadId": "cdx_00000000000000000000000000",
-                "workRunId": "wrn_00000000000000000000000000"
-              },
-              "workerId": "wrk_00000000000000000000000000",
-              "leaseId": "lse_00000000000000000000000000",
-              "attempt": 1,
-              "fencingToken": "1",
-              "sourceIdentity": {
-                "kind": "execution-worker",
-                "workerId": "wrk_00000000000000000000000000",
-                "workerSessionId": "wsn_00000000000000000000000000",
-                "leaseId": "lse_00000000000000000000000000",
-                "workerInstanceId": "wki_00000000000000000000000000"
-              },
-              "workRunId": "wrn_00000000000000000000000000"
-            }
-          },
-          {
-            "id": "run_00000000000000000000000001",
-            "deliveryTaskId": null,
-            "stage": "plan-review",
-            "actorType": "human",
-            "role": "reviewer",
-            "status": "waiting",
-            "attempt": 1,
-            "startedAt": "2026-08-24T09:01:00.000Z",
-            "finishedAt": null,
-            "sessionBinding": null
-          }
-        ],
-        "tasks": [],
         "attention": [
           {
             "id": "att_00000000000000000000000000",

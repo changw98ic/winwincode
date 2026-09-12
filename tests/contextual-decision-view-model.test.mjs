@@ -256,14 +256,14 @@ test('the card presentation stays a plain projection with one capability flag', 
   const ready = contextualDecisionPresentation(view)
   assert.equal(ready.statusText, '1 need a decision')
   assert.equal(ready.decisionsDisabled, false)
-  assert.equal(contextualDecisionPresentation(view, { loading: true }).statusText, 'Loading decisions…')
+  assert.equal(contextualDecisionPresentation(view, { loading: true }).statusText, '正在加载决策…')
   assert.equal(
     contextualDecisionPresentation(view, { loading: true }).decisionsDisabled,
     false,
     'loading alone must not disable a decision the page still owns',
   )
   const empty = contextualDecisionPresentation(contextualDecisions(source()))
-  assert.equal(empty.statusText, 'No decision is waiting on you in this context')
+  assert.equal(empty.statusText, '当前上下文中没有等待你处理的决策')
 })
 
 test('busy, unavailable, and read-only pages disable decisions', () => {
@@ -292,15 +292,15 @@ test('one row keeps its controls only while the decision is still decidable', ()
   assert.equal(contextualDecisionCapability(expired, presentation).disabled, true)
   assert.equal(
     contextualDecisionCapability(expired, presentation).stateLabel,
-    'Expired · decision disabled',
+    '已过期 · 决策已停用',
   )
   assert.equal(contextualDecisionCapability(live, presentation).disabled, false)
   assert.equal(
     contextualDecisionCapability(live, presentation).stateLabel,
-    'Needs a decision',
+    '需要决策',
   )
   assert.equal(
     contextualDecisionKindLabel('attention'),
-    'Business Attention',
+    '业务待处理',
   )
 })

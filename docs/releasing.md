@@ -37,7 +37,7 @@ feature 分支先通过普通 CI 和合并门；合并到默认分支后，默�
 
 四个原生 target job 只构建 Server、Worker、内部 helper 和同一份 Client 静态包，在同一物理 Cargo target 完整清空前后执行两次冷构建比较，并用 release 二进制运行一次 direct API 完整流程；它不运行 clean checkout、全 workspace Rust 测试或压力循环。详细层级、目录与命令见 [产品发布证据门禁](release-gate.md)。
 
-Rust 文件名固定为 `winwincode-server`、`winwincode-worker` 和 `winwincode-kernel-helper`；Local 组成使用 `winwincode-local` library。
+Rust 文件名固定为 `winwincode-server`、`winwincode-worker` 和 `winwincode-kernel-helper`；Local 组成使用 `winwincode-local` library。Device Client 包另由 `scripts/build-device-client-release.mjs` 生成，包含具备 `device serve/status/restart/logs` 的 `wwc`、Worker 与内部 helper；四个平台与同一 source commit/版本/签名规则保持一致。
 
 四个平台必须是：
 

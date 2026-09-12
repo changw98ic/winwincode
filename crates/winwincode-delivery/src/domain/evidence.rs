@@ -1166,13 +1166,12 @@ pub(crate) mod test_support {
 mod tests {
     use winwincode_domain::{
         CodexThreadId, ExecutionEventId, ExecutionJobId, FencingToken, LeaseId, ProductSessionId,
-        StageRunId, WorkRunId, WorkerId, WorkerInstanceId, WorkerSessionId,
+        WorkRunId, WorkerId, WorkerInstanceId, WorkerSessionId,
     };
 
     use super::*;
     use crate::domain::{
-        Delivery, DeliveryStage, DeliveryStatus, SessionBinding, SessionBindingId, StageRun,
-        StageRunActorType, StageRunStatus,
+        Delivery, DeliveryStatus, SessionBinding, SessionBindingId,
         candidate::test_support::{freeze_facts, frozen_candidate, validated_git_snapshot},
         freeze_delivery_candidate, test_fixture,
         verification::test_support::{VerificationFixtureState, independent_verification},
@@ -1181,20 +1180,9 @@ mod tests {
     #[allow(clippy::too_many_lines)]
     fn evidence_delivery() -> Delivery {
         let mut snapshot = test_fixture();
-        snapshot.status = DeliveryStatus::Verifying;
+        snapshot.status = DeliveryStatus::Ready;
         snapshot.evidence.clear();
         snapshot.verdict = None;
-
-        let producer_task_id = {
-            let producer = &mut snapshot.stage_runs[0];
-            producer.id = StageRunId("stage-executor-1".into());
-            producer.stage = DeliveryStage::Executing;
-            producer.role = "executor".into();
-            producer.status = StageRunStatus::Succeeded;
-            producer.started_at_millis = 1_800_000_000_010;
-            producer.finished_at_millis = Some(1_800_000_000_020);
-            producer.delivery_task_id.clone()
-        };
 
         let producer_binding = &mut snapshot.session_bindings[0];
         producer_binding.id = SessionBindingId("binding-executor-1".into());
@@ -1206,32 +1194,6 @@ mod tests {
         producer_binding.codex_thread_id = Some(CodexThreadId("thread-executor".into()));
         producer_binding.bound_at_millis = 1_800_000_000_011;
 
-        snapshot.stage_runs.push(StageRun {
-            schema_version: super::super::DELIVERY_SCHEMA_VERSION,
-            id: StageRunId("stage-verifier-1".into()),
-            delivery_id: snapshot.id.clone(),
-            delivery_task_id: producer_task_id.clone(),
-            stage: DeliveryStage::Verifying,
-            actor_type: StageRunActorType::Codex,
-            role: "verifier".into(),
-            status: StageRunStatus::Succeeded,
-            attempt: 1,
-            started_at_millis: 1_800_000_000_030,
-            finished_at_millis: Some(1_800_000_000_050),
-        });
-        snapshot.stage_runs.push(StageRun {
-            schema_version: super::super::DELIVERY_SCHEMA_VERSION,
-            id: StageRunId("stage-reviewer-1".into()),
-            delivery_id: snapshot.id.clone(),
-            delivery_task_id: producer_task_id.clone(),
-            stage: DeliveryStage::Verifying,
-            actor_type: StageRunActorType::Codex,
-            role: "reviewer".into(),
-            status: StageRunStatus::Succeeded,
-            attempt: 1,
-            started_at_millis: 1_800_000_000_030,
-            finished_at_millis: Some(1_800_000_000_050),
-        });
         snapshot.session_bindings.push(
             SessionBinding {
                 schema_version: super::super::DELIVERY_SCHEMA_VERSION,
@@ -1249,6 +1211,7 @@ mod tests {
                 product_session_id: ProductSessionId("product-verifier".into()),
                 execution_job_id: ExecutionJobId("job-verifier".into()),
                 execution_profile: Some("verifier".into()),
+                runtime_context: None,
                 worker_session_id: Some(WorkerSessionId("worker-verifier".into())),
                 codex_thread_id: Some(CodexThreadId("thread-verifier".into())),
                 bound_at_millis: 1_800_000_000_031,
@@ -1258,7 +1221,7 @@ mod tests {
                 lease_id: None,
                 fencing_token: None,
                 source_provenance:
-                    crate::domain::SessionBindingSourceProvenance::pending_delivery_advance(),
+                    crate::domain::SessionBindingSourceProvenance::pending_workrun_start(),
             }
             .with_test_authority("binding-verifier-1", 1),
         );
@@ -1279,6 +1242,7 @@ mod tests {
                 product_session_id: ProductSessionId("product-reviewer".into()),
                 execution_job_id: ExecutionJobId("job-reviewer".into()),
                 execution_profile: Some("reviewer".into()),
+                runtime_context: None,
                 worker_session_id: Some(WorkerSessionId("worker-reviewer".into())),
                 codex_thread_id: Some(CodexThreadId("thread-reviewer".into())),
                 bound_at_millis: 1_800_000_000_031,
@@ -1288,7 +1252,7 @@ mod tests {
                 lease_id: None,
                 fencing_token: None,
                 source_provenance:
-                    crate::domain::SessionBindingSourceProvenance::pending_delivery_advance(),
+                    crate::domain::SessionBindingSourceProvenance::pending_workrun_start(),
             }
             .with_test_authority("binding-reviewer-1", 1),
         );

@@ -16,8 +16,8 @@
 //! - Frames require an adopted enrollment, so a repository projection can
 //!   never be stranded on the placeholder stream the daemon could not
 //!   re-key.
-//! - One CLI run is one process launch: `repo add` / `repo remove` rotate
-//!   the `clientInstanceId` like every Device Client launch does.
+//! - The foreground Device service owns `clientInstanceId` rotation;
+//!   administrative CLI commands append to that active stream.
 
 use std::fmt;
 use std::path::Path;
@@ -27,10 +27,10 @@ use time::OffsetDateTime;
 use winwincode_device_client::repository::{self, RegistrationOptions, RepositoryRegistryError};
 use winwincode_device_client::{
     DeviceStore, RepositoryRegistration, availability_wire_name, dirty_state_wire_name,
-    ensure_device_identity, load_device_identity,
+    load_device_identity,
 };
 
-use crate::device_admin::{DeviceAdminError, now_rfc3339, open_store, rotation_seed};
+use crate::device_admin::{DeviceAdminError, open_store};
 
 /// Secret-free local view of one repository binding (`wwc repo list` row).
 ///
@@ -212,10 +212,9 @@ pub fn repo_remove(
     })
 }
 
-/// Loads the identity, requires the adopted enrollment, rotates the launch
-/// instance (one CLI run is one launch), and binds the durable outbox
-/// stream — the same preconditions `wwc device refresh-code` establishes
-/// before appending frames. Returns the bound `(clientNodeId,
+/// Loads the identity, requires the adopted enrollment, and binds the durable
+/// outbox stream without replacing the foreground service's launch identity.
+/// Returns the bound `(clientNodeId,
 /// clientInstanceId)` sender pair.
 fn prepare_bound_stream(store: &mut DeviceStore) -> Result<(String, String), RepoAdminError> {
     let Some(identity) = load_device_identity(store).map_err(|error| store_failure(&error))? else {
@@ -224,8 +223,6 @@ fn prepare_bound_stream(store: &mut DeviceStore) -> Result<(String, String), Rep
     if !identity.identity().is_enrolled() {
         return Err(RepoAdminError::NotEnrolled);
     }
-    let identity = ensure_device_identity(store, &rotation_seed(), &now_rfc3339())
-        .map_err(|error| store_failure(&error))?;
     let node = identity.identity().client_node_id().to_owned();
     let instance = identity.current_instance_id().to_owned();
     store

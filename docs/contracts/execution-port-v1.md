@@ -90,7 +90,10 @@ expiresAt
 
 Worker 接受 Job 并建立 CodexThread 后，先发送一条 `session.binding`。它把
 `ProductSessionId + WorkerSessionId + CodexThreadId` 绑定到当前
-`Job + attempt + Lease + fencingToken`。只有 Control Plane 已经接受并保存这条绑定后，
+`Job + attempt + Lease + fencingToken`，并携带会话打开时冻结的 secret-free
+`RuntimeSessionContext`：稳定 `AgentIdentity`、实际 Provider/Model，以及精确 repository、
+Git tree revision 和 write mode。该上下文必须与 Worker、Job execution profile 和 workspace
+一致，不能用默认模型路由或本地路径补写。只有 Control Plane 已经接受并保存这条绑定后，
 对应的 `runtime.event` 才能进入持久化和 StrongFlow 投影。相同身份重发是幂等的；同一
 Job/Lease 改成另一条 Session 或 CodexThread 是冲突。`runtime.event.codexThreadId` 也必须
 与已接受绑定相同，不能从摘要或编码 payload 中猜测。

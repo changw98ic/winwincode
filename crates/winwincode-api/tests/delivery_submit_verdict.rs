@@ -32,7 +32,7 @@ fn canonical_command() -> serde_json::Value {
 #[test]
 fn generated_submit_verdict_types_reject_wrong_discriminator_and_untrusted_fields() {
     let mut wrong_command = canonical_command();
-    wrong_command["command"] = json!("delivery.advance");
+    wrong_command["command"] = json!("workrun.start");
     assert!(serde_json::from_value::<DeliverySubmitVerdictCommand>(wrong_command).is_err());
 
     for forbidden in [

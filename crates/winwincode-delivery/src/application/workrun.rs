@@ -4,7 +4,7 @@
 //! Selection is deliberately independent of Delivery's former global stage. A
 //! Controller may start several ready items; each resulting run is settled by
 //! one durable terminal fact carrying its own attempt identity.
-use super::stage::{TerminalOutcomeStatus, VerifiedTerminalOutcome};
+use super::workrun_execution::{TerminalOutcomeStatus, VerifiedTerminalOutcome};
 use std::collections::HashSet;
 use winwincode_domain::is_canonical_prefixed_id;
 use winwincode_domain::{
@@ -133,6 +133,72 @@ pub struct WorkRunAggregate {
 impl Eq for WorkRunAggregate {}
 
 impl WorkRunAggregate {
+    /// Returns one current summary state without consulting a retired global stage.
+    #[must_use]
+    pub fn summary_state(&self, has_open_attention: bool) -> WorkItemState {
+        if has_open_attention
+            || self
+                .items
+                .iter()
+                .any(|item| item.state == WorkItemState::WaitingHuman)
+        {
+            return WorkItemState::WaitingHuman;
+        }
+        if self.items.is_empty() {
+            return WorkItemState::Backlog;
+        }
+        for state in [
+            WorkItemState::Failed,
+            WorkItemState::Rework,
+            WorkItemState::Validating,
+            WorkItemState::CandidateReady,
+            WorkItemState::InProgress,
+        ] {
+            if self.items.iter().any(|item| item.state == state) {
+                return state;
+            }
+        }
+        if self.runs.iter().any(|run| {
+            matches!(
+                run.state,
+                WorkRunState::Queued | WorkRunState::Leased | WorkRunState::Running
+            )
+        }) {
+            return WorkItemState::InProgress;
+        }
+        if self
+            .runs
+            .iter()
+            .any(|run| run.state == WorkRunState::CandidateReady)
+        {
+            return WorkItemState::CandidateReady;
+        }
+        if self
+            .items
+            .iter()
+            .all(|item| item.state == WorkItemState::Done)
+        {
+            return WorkItemState::Done;
+        }
+        if self
+            .items
+            .iter()
+            .all(|item| item.state == WorkItemState::Cancelled)
+        {
+            return WorkItemState::Cancelled;
+        }
+        for state in [
+            WorkItemState::Ready,
+            WorkItemState::WaitingDependency,
+            WorkItemState::Backlog,
+        ] {
+            if self.items.iter().any(|item| item.state == state) {
+                return state;
+            }
+        }
+        WorkItemState::Cancelled
+    }
+
     /// Checks stored relationships before scheduling or accepting an appended run.
     /// A generated Rust struct alone does not validate references or uniqueness.
     ///
@@ -912,6 +978,22 @@ mod aggregate_tests {
             "productSessionId":null
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn summary_state_is_derived_only_from_current_items_runs_and_attention() {
+        let mut value = aggregate();
+        assert_eq!(value.summary_state(false), WorkItemState::Ready);
+
+        value.items[0].state = WorkItemState::InProgress;
+        assert_eq!(value.summary_state(false), WorkItemState::InProgress);
+        assert_eq!(value.summary_state(true), WorkItemState::WaitingHuman);
+
+        value
+            .items
+            .iter_mut()
+            .for_each(|item| item.state = WorkItemState::Done);
+        assert_eq!(value.summary_state(false), WorkItemState::Done);
     }
 
     #[test]

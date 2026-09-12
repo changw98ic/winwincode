@@ -3,9 +3,14 @@
 import {
   ControlPlaneClientError,
   createControlPlaneClient,
+  createControlPlaneClientCandidates,
   createControlPlaneClientDirectory,
+  createControlPlaneTaskPort,
   createControlPlaneTaskFake,
+  createControlPlaneWorkerSessionPort,
+  createControlPlaneRunIdentityPort,
   createControlPlaneRunIdentityFake,
+  queryWorkRunAggregate,
   type ControlPlaneClient,
   type ControlPlaneClientTransport,
   type ControlPlaneTaskAnchor,
@@ -201,6 +206,10 @@ export function mountWinWinCodeClient(
   const queryCache = createQueryCache({ client: observedControlPlane.client })
   const controlPlane = queryCache.client
   const authSession = createAuthSessionViewModel(controlPlane)
+  const workerSessions = createControlPlaneWorkerSessionPort({
+    client: rawControlPlane,
+    transport: browserTransport,
+  })
   accessFailureSession = authSession
   // AUTH-100.2: the username + password login page talks to the one Control
   // Plane facade directly. Expected sign-in failures stay in the form instead
@@ -216,6 +225,10 @@ export function mountWinWinCodeClient(
   })
   const clientsModel: ClientsViewModel = createClientsViewModel({
     client: clientDirectory,
+  })
+  const clientCandidates = createControlPlaneClientCandidates({
+    client: rawControlPlane,
+    transport: browserTransport,
   })
   // CLIENT-300.5: the device card occupancy interactions run against the
   // frozen occupancy facade (claim / drain-aware release / cancel-and-release
@@ -235,9 +248,6 @@ export function mountWinWinCodeClient(
   const repositoriesModel: RepositoriesViewModel = createRepositoriesViewModel({
     client: clientDirectory,
   })
-  // UI-100.2 (fake-first): the §16.6 task creation seam and the §16.7 run
-  // identity zone run on the local fakes from the one facade block until the
-  // FLOW scheduler and worker/candidate routing land and replace the ports.
   // UI-504: 浏览器本地的最近打开交付历史,看板以「最近访问」折叠行渲染。
   const homeVisits: HomeRecentVisitStore = createHomeRecentVisitStore({
     storage: browserHomeVisitStorage(browser),
@@ -252,11 +262,43 @@ export function mountWinWinCodeClient(
     homeVisits.record(deliveryId, scopeSelectionFromHash(hash), Date.now())
   }
 
-    const taskPort = createControlPlaneTaskFake({
-    nextTaskId: () => contractId('wit', browser.crypto) as import('./generated/contracts.js').WorkItemId,
-    ...(options.taskSeed === undefined ? {} : { seed: options.taskSeed }),
-  })
-  const runIdentityPort = createControlPlaneRunIdentityFake()
+  const taskPort = options.taskSeed === undefined
+    ? createControlPlaneTaskPort({
+        client: controlPlane,
+        actor: () => authenticatedRouteContext()?.actor ?? null,
+        scope: () => authenticatedRouteContext()?.scope ?? null,
+        nextRequestId: () => contractId('req', browser.crypto) as RequestId,
+        nextWorkItemId: () => contractId('wit', browser.crypto) as WorkItemId,
+        workerSessions,
+        async deliveryContext() {
+          const context = authenticatedRouteContext()
+          const deliveryId = routeParameters(browser.location.hash).get('delivery') as DeliveryId | null
+          if (context === null || deliveryId === null) return null
+          const aggregate = await queryWorkRunAggregate(controlPlane, {
+            actor: context.actor,
+            scope: context.scope,
+            requestId: contractId('req', browser.crypto) as RequestId,
+            workItemId: null,
+            deliveryId,
+          })
+          const criterion = aggregate.contract.criteria.find(candidate => candidate.required)
+            ?? aggregate.contract.criteria[0]
+          if (criterion === undefined) return null
+          return {
+            deliveryId,
+            expectedRevision: aggregate.readCursor.deliveryRevision,
+            contractRevision: aggregate.contract.revision,
+            criterionId: criterion.id,
+          }
+        },
+      })
+    : createControlPlaneTaskFake({
+        nextTaskId: () => contractId('wit', browser.crypto) as WorkItemId,
+        seed: options.taskSeed,
+      })
+  const fixtureRunIdentity = options.taskSeed === undefined
+    ? null
+    : createControlPlaneRunIdentityFake()
   let lastKnownDiagnosticScope: unknown = null
   const shell = element(document, 'div', 'wwc-shell')
   const header = element(document, 'header', 'wwc-header')
@@ -340,7 +382,7 @@ export function mountWinWinCodeClient(
     if (options.copyText !== undefined) return options.copyText(value)
     const navigatorValue = Reflect.get(browser, 'navigator') as Navigator | undefined
     const clipboard = navigatorValue?.clipboard
-    if (clipboard === undefined) return Promise.reject(new Error('Clipboard is unavailable.'))
+    if (clipboard === undefined) return Promise.reject(new Error('剪贴板不可用。'))
     return clipboard.writeText(value)
   }
 
@@ -1023,7 +1065,7 @@ export function mountWinWinCodeClient(
         ) as ControlPlaneWebSocketSubscriptionId,
         nextRequestId: () => contractId('req', browser.crypto) as RequestId,
       })
-      activeFeature = mountSettingsPage({
+      const page = mountSettingsPage({
         root: slot,
         model,
         readOnly: activeRouteReadOnly,
@@ -1054,6 +1096,12 @@ export function mountWinWinCodeClient(
           }
         },
       })
+      activeFeature = {
+        close() {
+          page.close()
+          model.close()
+        },
+      }
     } catch (error) {
       if (closed || generation !== renderGeneration || controller.signal.aborted) return
       showRouteFailure(error, 'SETTINGS_ROUTE_FAILURE')
@@ -1107,32 +1155,35 @@ export function mountWinWinCodeClient(
   }
 
   /** The Home surface carries the §16.6/§16.7 sub-routes under its path. */
-  function homeSubRoute(): 'my-work' | 'task-entry' | 'task-run' {
+  function homeSubRoute(): 'my-work' | 'task-entry' | 'task-run' | 'review' {
     const path = browser.location.hash.replace(/^#/u, '').replace(/\?.*$/u, '')
     if (path === '/home/new-task') return 'task-entry'
     // `/home/run` is the canonical sub-route; `/home/task-run` is the same
     // task-detail page under its design-page name.
     if (path === '/home/run' || path === '/home/task-run') return 'task-run'
+    if (path === '/home/review') return 'review'
     return 'my-work'
   }
 
   /** The anchor facts a deep-linked run route must carry to be actionable. */
   function taskRunRouteAnchor(): {
     readonly taskId: WorkItemId
+    readonly deliveryId: DeliveryId
     readonly clientId: string
     readonly repositoryBindingId: string
   } | null {
     const parameters = routeParameters(browser.location.hash)
     const taskId = parameters.get('task')
-    const clientId = parameters.get('client')
-    const repositoryBindingId = parameters.get('repository')
+    const deliveryId = parameters.get('delivery')
+    const clientId = parameters.get('client') ?? ''
+    const repositoryBindingId = parameters.get('repository') ?? ''
     if (
-      taskId === null || !matchesCanonicalSchema('WorkItemId', taskId) || clientId === null || repositoryBindingId === null
-      || taskId.length === 0 || clientId.length === 0 || repositoryBindingId.length === 0
+      taskId === null || !matchesCanonicalSchema('WorkItemId', taskId)
+      || deliveryId === null || !matchesCanonicalSchema('DeliveryId', deliveryId)
     ) {
       return null
     }
-    return { taskId: taskId as WorkItemId, clientId, repositoryBindingId }
+    return { taskId: taskId as WorkItemId, deliveryId: deliveryId as DeliveryId, clientId, repositoryBindingId }
   }
 
   /**
@@ -1168,6 +1219,8 @@ export function mountWinWinCodeClient(
             client: anchor.clientId,
             repository: anchor.repositoryBindingId,
           })
+          const deliveryId = routeParameters(browser.location.hash).get('delivery')
+          if (deliveryId !== null) parameters.set('delivery', deliveryId)
           replaceHash(scopeHash(
             `#/home/run?${parameters.toString()}`,
             scopeSelectionFromHash(browser.location.hash),
@@ -1215,18 +1268,83 @@ export function mountWinWinCodeClient(
         taskDescription: knownAnchor?.description ?? null,
         clients: clientsModel,
         repositories: repositoriesModel,
-        identity: runIdentityPort,
+        identity: fixtureRunIdentity ?? createControlPlaneRunIdentityPort({
+          client: controlPlane,
+          candidates: clientCandidates,
+          actor: () => context.actor,
+          scope: () => context.scope,
+          deliveryId: () => anchorFacts.deliveryId,
+          nextRequestId: () => contractId('req', browser.crypto) as RequestId,
+        }),
       })
       activeFeature = mountTaskRunPage({
         root: slot,
         model,
         homeHref: surfaceHash('/home', scopeSelectionFromHash(browser.location.hash)),
+        reviewHref: scopeHash(
+          `#/home/review?delivery=${encodeURIComponent(anchorFacts.deliveryId)}`,
+          scopeSelectionFromHash(browser.location.hash),
+        ),
         ...(knownAnchor === null ? {} : { anchor: knownAnchor }),
       })
       await model.start()
     } catch (error) {
       if (closed || generation !== renderGeneration || controller.signal.aborted) return
       showRouteFailure(error, 'TASK_RUN_ROUTE_FAILURE')
+    }
+  }
+
+  /** Authorized artifacts plus the Controller-owned solution-review decision. */
+  async function renderReview(generation: number): Promise<void> {
+    const context = authenticatedRouteContext()
+    if (context === null) return
+    const deliveryId = routeParameters(browser.location.hash).get('delivery')
+    if (deliveryId === null || !matchesCanonicalSchema('DeliveryId', deliveryId)) {
+      routeUnavailable('审核链接缺少有效的交付标识。请从任务看板或对话中打开审核。')
+      return
+    }
+    const controller = new AbortController()
+    featureController = controller
+    routeLoading('正在加载审核面板…')
+    try {
+      const [{ createStrongFlowReviewViewModel }, { mountStrongFlowReviewDetail }, { createStrongFlowReviewAnnotations }] =
+        await Promise.all([
+          import('./strongflow-review-view-model.js'),
+          import('./strongflow-review-detail.js'),
+          import('./strongflow-review-annotations.js'),
+        ])
+      if (closed || generation !== renderGeneration || controller.signal.aborted) return
+      const annotations = createStrongFlowReviewAnnotations()
+      const model = createStrongFlowReviewViewModel({
+        client: controlPlane,
+        actor: context.actor,
+        scope: context.scope,
+        deliveryId,
+        nextRequestId: () => contractId('req', browser.crypto) as RequestId,
+      })
+      activeFeature = {
+        close() {
+          annotations.close()
+          model.close()
+        },
+      }
+      mountStrongFlowReviewDetail({
+        root: slot,
+        model,
+        annotations,
+        onDownload(fileName, bytes, mediaType) {
+          const url = URL.createObjectURL(new Blob([Uint8Array.from(bytes)], { type: mediaType }))
+          const anchor = element(document, 'a', 'wwc-review-download-anchor')
+          anchor.href = url
+          anchor.download = fileName
+          anchor.click()
+          URL.revokeObjectURL(url)
+        },
+      })
+      await model.start()
+    } catch (error) {
+      if (closed || generation !== renderGeneration || controller.signal.aborted) return
+      showRouteFailure(error, 'STRONGFLOW_REVIEW_ROUTE_FAILURE')
     }
   }
 
@@ -1303,7 +1421,7 @@ export function mountWinWinCodeClient(
       // Design pages 03a/03b: the 「winwincode ∨」 Scope dropdown lives at the
       // top-left of the Chat canvas only; other surfaces render without it
       // unless the scope itself needs attention.
-      scopeRoot.hidden = activeSurface.id !== 'chat' && resolution.status !== 'denied'
+      scopeRoot.hidden = activeSurface.id !== 'chat' && resolution.status === 'selected'
     } else {
       scopeSelectorPage?.close()
       scopeSelectorPage = null
@@ -1372,6 +1490,8 @@ export function mountWinWinCodeClient(
         launchRoute(renderTaskEntry(generation), generation, 'TASK_ENTRY_ROUTE_FAILURE')
       } else if (homeRoute === 'task-run') {
         launchRoute(renderTaskRun(generation), generation, 'TASK_RUN_ROUTE_FAILURE')
+      } else if (homeRoute === 'review') {
+        launchRoute(renderReview(generation), generation, 'STRONGFLOW_REVIEW_ROUTE_FAILURE')
       } else {
         launchRoute(renderHome(generation), generation, 'HOME_ROUTE_FAILURE')
       }
@@ -1404,7 +1524,7 @@ export function mountWinWinCodeClient(
           const clients = await clientDirectory.listClients()
           const target = clients[0]?.clientId
           if (target === undefined) {
-            throw new Error('尚未发现待连接的执行设备。请在 Client 窗口确认设备后重试。')
+            throw new Error('尚未发现待连接的执行设备。请在客户端窗口确认设备后重试。')
           }
           await clientDirectory.addClient({
             clientId: target,

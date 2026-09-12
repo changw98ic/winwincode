@@ -31,15 +31,15 @@ export interface ClientOccupancyControls {
 
 /** Why the destructive entry frees the device, and what confirming means. */
 const DANGER_COPY: Readonly<Record<ClientOccupancyDangerAction, string>> = Object.freeze({
-  release: 'Releasing now stops new tasks and lets the running tasks finish before the device frees.',
-  'cancel-and-release': 'Stopping now cancels the running tasks and frees the device immediately.',
-  'force-release': 'Force-releasing now ends the interrupted occupancy immediately so the device can be claimed again.',
+  release: '释放后将停止接收新任务，并在当前任务完成后解除占用。',
+  'cancel-and-release': '停止后将取消正在运行的任务，并立即释放设备。',
+  'force-release': '强制释放会立即结束中断的占用，使设备可以再次被占用。',
 })
 
 const CONFIRM_ACCEPT_TEXT: Readonly<Record<ClientOccupancyDangerAction, string>> = Object.freeze({
-  release: 'Release device',
-  'cancel-and-release': 'Cancel tasks and release',
-  'force-release': 'Force release',
+  release: '释放设备',
+  'cancel-and-release': '取消任务并释放',
+  'force-release': '强制释放',
 })
 
 /**
@@ -50,22 +50,22 @@ const CONFIRM_ACCEPT_TEXT: Readonly<Record<ClientOccupancyDangerAction, string>>
  */
 function failureText(failure: ClientOccupancyFailure): string {
   switch (failure) {
-    case 'occupied-by-other': return 'Another user claimed the device first.'
-    case 'not-holder': return 'You no longer hold this device.'
-    case 'device-gone': return 'The device no longer exists.'
-    case 'device-offline': return 'The device is offline right now.'
-    case 'device-locked': return 'The device is locked.'
-    case 'connections-forbidden': return 'The device no longer accepts new connections.'
-    case 'account-denied': return 'The signed-in account may not use this device.'
-    case 'capacity-exhausted': return 'The device has no free capacity left.'
-    case 'device-rejected': return 'The device rejected the connection request.'
-    case 'ack-timeout': return 'The device did not confirm the connection in time.'
-    case 'recovery-pending': return 'The device is waiting to recover. Try again after it recovers.'
-    case 'permission-denied': return 'Only the device Owner can force-release this device.'
-    case 'confirmation-required': return 'The release needs the explicit confirmation. Try again.'
-    case 'state-changed': return 'The occupancy changed before the request landed.'
-    case 'rate-limited': return 'Too many attempts. Wait a moment, then try again.'
-    case 'unavailable': return 'The request did not go through. Check the connection and try again.'
+    case 'occupied-by-other': return '其他用户已先占用该设备。'
+    case 'not-holder': return '你已不再占用该设备。'
+    case 'device-gone': return '该设备已不存在。'
+    case 'device-offline': return '该设备当前离线。'
+    case 'device-locked': return '该设备已锁定。'
+    case 'connections-forbidden': return '该设备不再接受新连接。'
+    case 'account-denied': return '当前账号无权使用该设备。'
+    case 'capacity-exhausted': return '该设备没有剩余容量。'
+    case 'device-rejected': return '该设备拒绝了连接请求。'
+    case 'ack-timeout': return '该设备未及时确认连接。'
+    case 'recovery-pending': return '该设备正在等待恢复，请恢复后重试。'
+    case 'permission-denied': return '只有设备所有者可以强制释放该设备。'
+    case 'confirmation-required': return '释放设备需要明确确认，请重试。'
+    case 'state-changed': return '请求生效前占用状态已发生变化。'
+    case 'rate-limited': return '尝试次数过多，请稍后再试。'
+    case 'unavailable': return '请求失败，请检查连接后重试。'
   }
 }
 
@@ -86,22 +86,22 @@ export function mountClientOccupancyControls(
   const connect = document.createElement('button')
   connect.className = 'wwc-clients-card-connect'
   connect.type = 'button'
-  connect.textContent = 'Connect'
+  connect.textContent = '连接'
 
   const release = document.createElement('button')
   release.className = 'wwc-clients-card-release wwc-clients-card-danger'
   release.type = 'button'
-  release.textContent = 'Release'
+  release.textContent = '释放'
 
   const cancel = document.createElement('button')
   cancel.className = 'wwc-clients-card-cancel-release wwc-clients-card-danger'
   cancel.type = 'button'
-  cancel.textContent = 'Cancel and release'
+  cancel.textContent = '取消任务并释放'
 
   const force = document.createElement('button')
   force.className = 'wwc-clients-card-force-release wwc-clients-card-danger'
   force.type = 'button'
-  force.textContent = 'Force release'
+  force.textContent = '强制释放'
 
   // UI-100.3: the §12.4 recovery window of an interrupted lease. A plain
   // paragraph keeps the card's one alert channel reserved for real failures.
@@ -123,7 +123,7 @@ export function mountClientOccupancyControls(
   const confirmKeep = document.createElement('button')
   confirmKeep.className = 'wwc-clients-card-confirm-keep'
   confirmKeep.type = 'button'
-  confirmKeep.textContent = 'Keep occupancy'
+  confirmKeep.textContent = '保持占用'
 
   const failure = document.createElement('p')
   failure.className = 'wwc-clients-card-error'
@@ -168,17 +168,17 @@ export function mountClientOccupancyControls(
       const busyAction = busy ? interaction.action : null
       options.actions.setAttribute('aria-busy', busy ? 'true' : 'false')
 
-      connect.textContent = busyAction === 'claim' ? 'Connecting…' : 'Connect'
+      connect.textContent = busyAction === 'claim' ? '正在连接…' : '连接'
       connect.disabled = busy || !deviceSupportsClaim(device)
 
       const releaseApplies = deviceSupportsRelease(device)
       release.hidden = !releaseApplies
-      release.textContent = busyAction === 'release' ? 'Releasing…' : 'Release'
+      release.textContent = busyAction === 'release' ? '正在释放…' : '释放'
       release.disabled = busy || !releaseApplies
 
       const cancelApplies = deviceSupportsCancelAndRelease(device)
       cancel.hidden = !cancelApplies
-      cancel.textContent = busyAction === 'cancel-and-release' ? 'Stopping…' : 'Cancel and release'
+      cancel.textContent = busyAction === 'cancel-and-release' ? '正在停止…' : '取消任务并释放'
       cancel.disabled = busy || !cancelApplies
 
       // UI-100.3: the Owner force-release entry exists only for an interrupted
@@ -188,7 +188,7 @@ export function mountClientOccupancyControls(
       const forceApplies = deviceSupportsForceRelease(device)
         && options.model.supportsForceRelease()
       force.hidden = !forceApplies
-      force.textContent = busyAction === 'force-release' ? 'Releasing…' : 'Force release'
+      force.textContent = busyAction === 'force-release' ? '正在释放…' : '强制释放'
       force.disabled = busy || !forceApplies
 
       if (device.occupancy === 'recovery-pending') {

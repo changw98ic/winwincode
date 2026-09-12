@@ -35,7 +35,7 @@ use winwincode_domain::{
     ProductSessionId, WorkRunId, WorkerId, WorkerInstanceId, WorkerSessionId,
 };
 
-use crate::application::stage::{
+use crate::application::workrun_execution::{
     TerminalArtifactReference, TerminalOutcomeStatus, VerifiedTerminalOutcome,
 };
 
@@ -1525,7 +1525,7 @@ pub(crate) mod test_support {
     #![allow(dead_code, clippy::wildcard_imports)]
 
     use super::*;
-    use crate::application::stage::{
+    use crate::application::workrun_execution::{
         TerminalArtifactReference, TerminalOutcomeStatus,
         test_support::{
             active_lease_identity, terminal_outcome_metadata, terminal_worker_outcome,
@@ -1811,8 +1811,8 @@ pub(crate) mod test_support {
             ),
         );
         let verified = if status == TerminalOutcomeStatus::Succeeded {
-            crate::application::stage::test_support::delivery_terminal_outcome_facts(
-                crate::application::stage::test_support::session_binding_authority(
+            crate::application::workrun_execution::test_support::delivery_terminal_outcome_facts(
+                crate::application::workrun_execution::test_support::session_binding_authority(
                     lease,
                     winwincode_domain::Instant("2026-08-25T00:00:00.000Z".into()),
                     winwincode_domain::Instant("2027-01-15T10:00:00.000Z".into()),
@@ -1992,7 +1992,7 @@ pub(crate) mod test_support {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::application::stage::{
+    use crate::application::workrun_execution::{
         TerminalArtifactReference,
         test_support::{
             active_lease_identity, terminal_outcome_metadata, terminal_worker_outcome,
@@ -2040,6 +2040,7 @@ mod tests {
                 }
                 .into(),
             ),
+            runtime_context: None,
             worker_session_id: Some(WorkerSessionId(format!("worker-{identity}"))),
             codex_thread_id: Some(CodexThreadId(format!("thread-{identity}"))),
             bound_at_millis,
@@ -2048,7 +2049,7 @@ mod tests {
             worker_instance_id: None,
             lease_id: None,
             fencing_token: None,
-            source_provenance: SessionBindingSourceProvenance::pending_delivery_advance(),
+            source_provenance: SessionBindingSourceProvenance::pending_workrun_start(),
         }
         .with_test_authority(identity, attempt)
     }
@@ -2057,10 +2058,9 @@ mod tests {
         include_adversarial: bool,
     ) -> (Delivery, FrozenDeliveryCandidate, VerificationFacts) {
         let mut snapshot = test_fixture();
-        snapshot.status = DeliveryStatus::Verifying;
+        snapshot.status = DeliveryStatus::Ready;
         snapshot.evidence.clear();
         snapshot.verdict = None;
-        snapshot.stage_runs.clear();
         snapshot.session_bindings = vec![
             binding(WRITER_BINDING_ID, "executor", 1_800_000_000_011, 1),
             binding(REVIEWER_BINDING_ID, "reviewer", 1_800_000_000_031, 1),
@@ -2155,7 +2155,7 @@ mod tests {
             mutation_records: vec![],
             findings: vec![VerificationFindingFact {
                 finding_ref: format!("finding-{}", role.as_str()),
-                criterion_id: AcceptanceCriterionId("criterion-required".into()),
+                criterion_id: AcceptanceCriterionId("crt_01J00000000000000000000000".into()),
                 conclusion: VerificationFindingConclusion::Pass,
                 result_sequence: ExecutionSequence(8),
                 source_refs: vec![format!("runtime-event:{}/3", role.as_str())],
@@ -2500,12 +2500,13 @@ mod tests {
         let mut incomplete_binding = delivery.clone().into_snapshot();
         incomplete_binding.session_bindings[1].worker_session_id = None;
         incomplete_binding.session_bindings[1].codex_thread_id = None;
+        incomplete_binding.session_bindings[1].runtime_context = None;
         incomplete_binding.session_bindings[1].worker_id = None;
         incomplete_binding.session_bindings[1].worker_instance_id = None;
         incomplete_binding.session_bindings[1].lease_id = None;
         incomplete_binding.session_bindings[1].fencing_token = None;
         incomplete_binding.session_bindings[1].source_provenance =
-            SessionBindingSourceProvenance::delivery_advance("delivery.advance");
+            SessionBindingSourceProvenance::workrun_start("workrun.start");
         let incomplete_binding = Delivery::try_from_snapshot(incomplete_binding)
             .expect("verification binding may await Worker and Codex identities");
         let mut incomplete_facts = facts;

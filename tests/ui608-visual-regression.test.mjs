@@ -546,7 +546,7 @@ test('an empty difference list renders as a clean report', () => {
   )
 })
 
-test('the visual lane is registered exactly once in the canonical TypeScript lane', () => {
+test('the visual reference lanes stay outside the canonical TypeScript lane', () => {
   const runner = readFileSync(resolve(root, 'scripts/run-ts-tests.mjs'), 'utf8')
   for (const path of [
     'tests/ui608-visual-regression.test.mjs',
@@ -555,8 +555,8 @@ test('the visual lane is registered exactly once in the canonical TypeScript lan
   ]) {
     assert.equal(
       runner.split(`'${path}'`).length - 1,
-      1,
-      `${path} must be registered exactly once in the canonical TypeScript lane`,
+      0,
+      `${path} must remain an explicitly invoked visual reference lane`,
     )
   }
 })

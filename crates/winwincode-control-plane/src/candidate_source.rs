@@ -5,7 +5,7 @@
 use std::fmt;
 
 use winwincode_delivery::{
-    application::stage::DeliveryTerminalOutcomeFacts,
+    application::workrun_execution::DeliveryTerminalOutcomeFacts,
     domain::{
         Delivery, DeliveryValidationError, FrozenDeliveryCandidate,
         candidate::freeze_delivery_candidate_from_source,
@@ -161,7 +161,7 @@ pub(crate) fn resolve_source(
 /// lease/session fields are already sealed by the Control Plane authority, so
 /// this helper does not copy any Worker-reported descriptor values.
 pub(crate) fn provenance_from_session_binding(
-    authority: &winwincode_delivery::application::stage::SessionBindingAuthority,
+    authority: &winwincode_delivery::application::workrun_execution::SessionBindingAuthority,
 ) -> Result<ArtifactProvenance, ArtifactError> {
     let active = authority.active_lease();
     ArtifactProvenance::execution_job(

@@ -198,8 +198,8 @@ fn scheduling_request(seed: u64, fixture: &Fixture) -> DeviceWorkerSchedulingReq
         public_client_id_for(fixture),
         fixture.binding.clone(),
         id("ws", seed + 8),
-        id("wkr", seed + 9),
-        id("winst", seed + 10),
+        id("wrk", seed + 9),
+        id("wki", seed + 10),
         DIGEST,
         Some(id("ps", seed + 11)),
         Some(id("wrn", seed + 12)),
@@ -219,8 +219,8 @@ fn scheduling_request_for(
         public_client_id_for(fixture),
         fixture.binding.clone(),
         id("ws", seed + 8),
-        id("wkr", seed + 9),
-        id("winst", seed + 10),
+        id("wrk", seed + 9),
+        id("wki", seed + 10),
         DIGEST,
         Some(id("ps", seed + 11)),
         Some(id("wrn", seed + 12)),
@@ -311,8 +311,8 @@ fn the_two_phase_schedule_reserves_a_slot_then_issues_the_worker_request() {
     assert_eq!(receipt.occupancy_fencing_token, fixture.fencing_token);
     assert_eq!(receipt.repository_binding_id, fixture.binding);
     assert_eq!(receipt.worker_session_id, id("ws", seed + 28));
-    assert_eq!(receipt.worker_id, id("wkr", seed + 29));
-    assert_eq!(receipt.worker_instance_id, id("winst", seed + 30));
+    assert_eq!(receipt.worker_id, id("wrk", seed + 29));
+    assert_eq!(receipt.worker_instance_id, id("wki", seed + 30));
     assert_eq!(receipt.product_session_id, Some(id("ps", seed + 31)));
     assert_eq!(receipt.work_run_id, Some(id("wrn", seed + 32)));
     assert!(!receipt.replayed);
@@ -424,8 +424,8 @@ fn a_non_holder_and_an_unreachable_client_are_refused() {
         "999999999",
         fixture.binding.clone(),
         id("ws", seed + 68),
-        id("wkr", seed + 69),
-        id("winst", seed + 70),
+        id("wrk", seed + 69),
+        id("wki", seed + 70),
         DIGEST,
         None,
         None,
@@ -455,8 +455,8 @@ fn foreign_unauthorized_and_unknown_bindings_are_refused_uniformly() {
         public_client_id_for(&fixture),
         other.binding.clone(),
         id("ws", seed + 28),
-        id("wkr", seed + 29),
-        id("winst", seed + 30),
+        id("wrk", seed + 29),
+        id("wki", seed + 30),
         DIGEST,
         None,
         None,
@@ -498,8 +498,8 @@ fn foreign_unauthorized_and_unknown_bindings_are_refused_uniformly() {
         public_client_id_for(&fixture),
         id("rbd", seed + 61),
         id("ws", seed + 68),
-        id("wkr", seed + 69),
-        id("winst", seed + 70),
+        id("wrk", seed + 69),
+        id("wki", seed + 70),
         DIGEST,
         None,
         None,
@@ -576,8 +576,8 @@ fn a_failed_phase_two_releases_the_reservation_immediately() {
         seed + 15,
         &fixture,
         &id("ws", seed + 28),
-        &id("wkr", seed + 79),
-        &id("winst", seed + 80),
+        &id("wrk", seed + 79),
+        &id("wki", seed + 80),
     );
     let request = scheduling_request(seed + 20, &fixture);
     let error = DeviceSchedulerService::new(&mut storage)
@@ -640,8 +640,8 @@ fn an_orphan_grant_of_a_crashed_attempt_is_adopted_idempotently() {
         seed + 15,
         &fixture,
         &id("ws", seed + 28),
-        &id("wkr", seed + 29),
-        &id("winst", seed + 30),
+        &id("wrk", seed + 29),
+        &id("wki", seed + 30),
     );
     let request = scheduling_request(seed + 20, &fixture);
     let receipt = DeviceSchedulerService::new(&mut storage)
@@ -683,8 +683,8 @@ fn replaying_one_request_identity_returns_the_original_receipt() {
         public_client_id_for(&fixture),
         fixture.binding.clone(),
         id("ws", seed + 48),
-        id("wkr", seed + 49),
-        id("winst", seed + 50),
+        id("wrk", seed + 49),
+        id("wki", seed + 50),
         DIGEST,
         None,
         None,
@@ -817,8 +817,8 @@ fn scheduling_request_rejects_a_historical_stage_as_workrun() {
         "123456789".to_owned(),
         id("rbd", 901),
         id("ws", 901),
-        id("wkr", 901),
-        id("winst", 901),
+        id("wrk", 901),
+        id("wki", 901),
         DIGEST,
         Some(id("ps", 901)),
         Some(id("run", 901)),

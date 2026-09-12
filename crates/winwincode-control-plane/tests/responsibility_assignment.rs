@@ -668,9 +668,9 @@ fn delivery(seed: u64) -> ResponsibilityTarget {
 }
 
 fn delivery_stage(seed: u64) -> ResponsibilityTarget {
-    ResponsibilityTarget::DeliveryStage {
+    ResponsibilityTarget::WorkItem {
         delivery_id: DeliveryId(canonical("dlv", seed)),
-        stage: winwincode_delivery::domain::DeliveryStage::DeliveryReview,
+        work_item_id: winwincode_domain::WorkItemId(canonical("wit", seed)),
     }
 }
 

@@ -3,25 +3,14 @@
 /**
  * UI-605 large-data fixtures and the recorded performance baseline.
  *
- * The fixtures are deterministic and use only canonical generated-schema
- * identities, so an enterprise-sized Delivery, Task, StageRun, Runtime
- * activity, changed-file, Diff, Evidence, and log corpus can be mounted
- * without a Control Plane.  The baseline records the DOM, interaction, and
- * scroll budgets the virtualized surfaces must meet; the UI-605 suites assert
- * against these numbers instead of restating them.
+ * The fixture records the DOM, interaction, and scroll budgets used by the
+ * shared windowed-list checks.
  */
 
 export const LARGE_DELIVERY_COUNT = 5000
 
 export const LARGE_DATA_CORPUS = Object.freeze({
   deliveries: LARGE_DELIVERY_COUNT,
-  deliveryTasks: 600,
-  stageRuns: 400,
-  runtimeActivities: 2400,
-  changedFiles: 1800,
-  diffLines: 24_000,
-  evidenceRows: 900,
-  logLines: 60_000,
 })
 
 /**
@@ -41,117 +30,6 @@ export const LARGE_DATA_PERFORMANCE_BASELINE = Object.freeze({
     scroll: 5_000,
   }),
 })
-
-/** One canonical Delivery identity: `dlv_` plus 22 lowercase digits. */
-export function deliveryIdFor(index) {
-  return `dlv_${String(index).padStart(22, '0')}`
-}
-
-const STATUSES = Object.freeze([
-  'draft',
-  'clarifying',
-  'ready',
-  'planning',
-  'plan-review',
-  'executing',
-  'verifying',
-  'reworking',
-  'ready-to-deliver',
-  'delivered',
-])
-
-/** Enterprise-sized Delivery projections with stable identities and titles. */
-export function largeDeliverySummaries(count = LARGE_DELIVERY_COUNT) {
-  return Array.from({ length: count }, (_, index) => ({
-    deliveryId: deliveryIdFor(index + 1),
-    revision: (index % 7) + 1,
-    status: STATUSES[index % STATUSES.length],
-    title: `Enterprise delivery ${String(index + 1)} — ${index % 3 === 0 ? 'kernel' : index % 3 === 1 ? 'control plane' : 'client'} workstream`,
-    openAttentionCount: index % 11 === 0 ? 1 : 0,
-  }))
-}
-
-/** Enterprise-sized Delivery tasks, StageRuns, and Runtime activity frames. */
-export function largeDeliveryTasks(count = LARGE_DATA_CORPUS.deliveryTasks) {
-  return Array.from({ length: count }, (_, index) => ({
-    id: `task:${String(index + 1).padStart(4, '0')}`,
-    title: `Enterprise task ${String(index + 1)}`,
-    status: index % 4 === 0 ? 'done' : index % 4 === 1 ? 'active' : 'pending',
-  }))
-}
-
-export function largeStageRuns(count = LARGE_DATA_CORPUS.stageRuns) {
-  return Array.from({ length: count }, (_, index) => ({
-    id: `run_${String(index + 1).padStart(22, '0')}`,
-    stage: STATUSES[(index + 5) % STATUSES.length],
-    role: index % 2 === 0 ? 'implementer' : 'reviewer',
-    status: index % 5 === 0 ? 'succeeded' : 'running',
-  }))
-}
-
-export function largeRuntimeActivities(count = LARGE_DATA_CORPUS.runtimeActivities) {
-  return Array.from({ length: count }, (_, index) => ({
-    id: `activity:${String(index + 1).padStart(6, '0')}`,
-    kind: index % 3 === 0 ? 'command' : index % 3 === 1 ? 'observation' : 'evidence',
-    label: `Runtime activity ${String(index + 1)}`,
-    sequence: index + 1,
-  }))
-}
-
-/** Enterprise-sized changed-file corpus for the Candidate file tree. */
-export function largeChangedFiles(count = LARGE_DATA_CORPUS.changedFiles) {
-  const statuses = ['added', 'modified', 'deleted', 'renamed', 'copied', 'type_changed']
-  return Array.from({ length: count }, (_, index) => ({
-    path: `apps/module-${String(index % 40)}/src/area-${String(index % 7)}/file-${String(index + 1)}.ts`,
-    previousPath: index % 9 === 0 ? `apps/legacy/file-${String(index + 1)}.ts` : null,
-    status: statuses[index % statuses.length],
-    additions: (index % 90) + 1,
-    deletions: index % 40,
-    binary: false,
-    encoding: 'utf-8',
-  }))
-}
-
-/** One large unified Git Diff with `lines` body lines across many hunks. */
-export function largeUnifiedDiff(lines = LARGE_DATA_CORPUS.diffLines) {
-  const parts = ['--- a/apps/client/src/large-sample.ts', '+++ b/apps/client/src/large-sample.ts']
-  let remaining = lines
-  let hunk = 0
-  while (remaining > 0) {
-    hunk += 1
-    const body = Math.min(remaining, 400)
-    parts.push(`@@ -${String(hunk * 400)},${String(body)} +${String(hunk * 400)},${String(body)} @@ export function range${String(hunk)}()`)
-    for (let index = 0; index < body; index += 1) {
-      if (index % 5 === 0) parts.push(`-const before${String(index)} = ${String(index)}`)
-      else if (index % 5 === 1) parts.push(`+const after${String(index)} = ${String(index)}`)
-      else parts.push(` const shared${String(index)} = ${String(index)}`)
-    }
-    remaining -= body
-  }
-  return `${parts.join('\n')}\n`
-}
-
-/** Enterprise-sized Evidence rows covering every generated Evidence type. */
-export function largeEvidenceRows(count = LARGE_DATA_CORPUS.evidenceRows) {
-  const types = ['test', 'command', 'runtime_event', 'diff']
-  const outcomes = ['succeeded', 'failed', 'infrastructure_failed', 'observed']
-  return Array.from({ length: count }, (_, index) => ({
-    id: `evd_${String(index + 1).padStart(22, '0')}`,
-    type: types[index % types.length],
-    title: `Enterprise evidence ${String(index + 1)}`,
-    sourceRef: `artifact://${String(index + 1)}`,
-    outcome: outcomes[index % outcomes.length],
-  }))
-}
-
-/** One large runtime log payload: `lines` lines of bounded-width text. */
-export function largeLogText(lines = LARGE_DATA_CORPUS.logLines) {
-  const parts = []
-  for (let index = 0; index < lines; index += 1) {
-    parts.push(`${String(index + 1).padStart(6, '0')} runtime frame ${String(index + 1)} status=ok worker=worker-1 stage=executing`)
-  }
-  return `${parts.join('\n')}\n`
-}
 
 /** DOM-counter element that records every allocated node and listener. */
 class Ui605Element {

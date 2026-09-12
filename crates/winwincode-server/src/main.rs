@@ -13,48 +13,62 @@ use winwincode_api::generated::{
     OrganizationScope, OrganizationScopeKind, ProjectScope, ProjectScopeKind, Scope,
     WorkspaceScope, WorkspaceScopeKind,
 };
+#[cfg(feature = "local-worker")]
 use winwincode_codex::{
     ExecutionMode, HelperReleaseManifest, ObserverMode, ProductionCodexAdapter,
     ProductionCodexConfig, ProductionCodexOptions,
 };
+#[cfg(feature = "local-worker")]
+use winwincode_control_plane::ControlPlaneInstanceRuntimeConfig;
 use winwincode_control_plane::{
-    CollaborationService, ControlPlane, ControlPlaneConfig, ControlPlaneInstanceRuntimeConfig,
-    DurableWorkerInteractionOutbound, LocalDeliveryAdapterConfig, LocalModelPolicyAuthority,
-    LocalModelPolicyAuthorityConfig, LocalPublicationAdapterConfig, ModelAdmissionLimits,
-    ModelAdmissionPolicyLayer, ModelRequestPoolConfig, ModelRoutePolicyDecision,
-    ProductSessionExecutionApplication, ProductSessionExecutionConfig,
-    ProviderAdmissionReservationConfig, StandaloneModelExecutionApplication,
+    CollaborationService, ControlPlane, ControlPlaneConfig, DurableWorkerInteractionOutbound,
+    LocalDeliveryAdapterConfig, LocalModelPolicyAuthority, LocalModelPolicyAuthorityConfig,
+    LocalPublicationAdapterConfig, ModelAdmissionLimits, ModelAdmissionPolicyLayer,
+    ModelRequestPoolConfig, ModelRoutePolicyDecision, ProductSessionExecutionApplication,
+    ProductSessionExecutionConfig, ProviderAdmissionReservationConfig,
+    STRONGFLOW_DEVICE_WORKER_POOL_ID, StandaloneModelExecutionApplication,
     StandaloneModelExecutionConfig, local_loopback_retry_policy,
 };
+#[cfg(feature = "local-worker")]
+use winwincode_domain::Sha256Digest;
 use winwincode_domain::{
     CredentialReferenceId, OrganizationId, ProjectId, RepositoryId, RepositoryScope,
-    RepositoryScopeKind, Sha256Digest, UserAccount, UserAccountRole, UserAccountState, UserId,
-    WorkerId, WorkerInstanceId, WorkspaceId,
+    RepositoryScopeKind, UserAccount, UserAccountRole, UserAccountState, UserId, WorkerId,
+    WorkerInstanceId, WorkspaceId,
 };
 use winwincode_execution_port::{
     action_enforcement::{ActionEnforcementIssuer, ActionEnforcementSigningKey},
-    action_gateway::ExecutionEnvelopeToken,
-    generated::{
-        ExecutionPortMessage, ModelGatewayRoute, WorkerCapabilityFeature, WorkerCapabilitySet,
-        WorkerCapabilitySetPlatform,
-    },
+    generated::ExecutionPortMessage,
     transport::ExecutionPortCore,
 };
+#[cfg(feature = "local-worker")]
+use winwincode_execution_port::{
+    action_gateway::ExecutionEnvelopeToken,
+    generated::{
+        ModelGatewayRoute, WorkerCapabilityFeature, WorkerCapabilitySet,
+        WorkerCapabilitySetPlatform,
+    },
+};
+#[cfg(feature = "local-worker")]
 use winwincode_local::LocalLauncherConfig;
 use winwincode_server::{
     AuthSessionBootstrap, AuthSessionConfig, ClientExchangeApplication, ClientExchangeConfig,
-    ClientExchangePort, DurableEventHub, DurableEventHubConfig, DurableEventPublisher,
-    FileRemoteWorkerAuthenticator, GeneratedContractDispatcher, LocalModelRoute,
-    LocalRuntimeSupervisor, OwnerInitializationHook, ProductionRemoteWorkerExchange,
+    ClientExchangePort, CompositeRemoteWorkerAuthenticator, DurableEventHub, DurableEventHubConfig,
+    DurableEventPublisher, FileRemoteWorkerAuthenticator, GeneratedContractDispatcher,
+    LocalModelRoute, OwnerInitializationHook, ProductionRemoteWorkerExchange,
     RemoteWorkerExchangePort, RepositoryRuntimeScheduler, RequestAuthenticator, ServerConfig,
     ServerExecutionPortCore, ServerTls, SqliteAuthSessionManager, StandaloneApplicationClock,
     StandaloneControlPlaneApplication, SystemStandaloneApplicationClock, UserAccountService,
-    configure_local_model_authority, start_server, start_server_with_remote_worker,
+    WorkerSessionRemoteAuthenticator, configure_local_model_authority,
+    start_server_with_remote_worker,
 };
+#[cfg(feature = "local-worker")]
+use winwincode_server::{LocalRuntimeSupervisor, start_server};
 use winwincode_storage::{
     ProductStateStorage, SqliteStorage, WorkerOutboundQueueConfig, WorkerPoolId,
     WorkerRegistryScope,
 };
+#[cfg(feature = "local-worker")]
 use winwincode_worker::{WorkerConfig, workspace_runtime::ObservationModelConfiguration};
 
 const SERVER_TOKIO_WORKER_STACK_BYTES: usize = 16 * 1024 * 1024;
@@ -72,9 +86,11 @@ fn main() {
     }
 }
 
+#[cfg(feature = "local-worker")]
 type ProductionExecutionPort = ServerExecutionPortCore<
     ProductSessionExecutionApplication<StandaloneModelExecutionApplication>,
 >;
+#[cfg(feature = "local-worker")]
 type ProductionSupervisor = LocalRuntimeSupervisor<ProductionExecutionPort, ProductionCodexAdapter>;
 
 struct ProductionStartup {
@@ -375,21 +391,6 @@ async fn run_composed_server(
     let worker_instance_id =
         WorkerInstanceId(runtime_identity("WWC_SERVER_WORKER_INSTANCE_ID", "wki_")?);
     let scheduler_generation = runtime_identity("WWC_SERVER_SCHEDULER_GENERATION", "gen_")?;
-    let capabilities = worker_capabilities()?;
-    let worker_config = WorkerConfig {
-        worker_id: worker_id.clone(),
-        worker_instance_id: worker_instance_id.clone(),
-        started_at: clock.now_instant(),
-        capabilities: capabilities.clone(),
-    };
-    let launcher_config = LocalLauncherConfig::try_new(
-        config.data_directory(),
-        source_root,
-        clock.now_millis(),
-        ControlPlaneInstanceRuntimeConfig::default(),
-        256,
-    )?;
-    let launcher_config = configured_local_launcher_observer(launcher_config)?;
     let worker_pool_id = WorkerPoolId(required_environment_or(
         "WWC_SERVER_WORKER_POOL_ID",
         "wpl_00000000000000000000000001",
@@ -398,7 +399,7 @@ async fn run_composed_server(
         &application,
         repository_scope.clone(),
         worker_id.clone(),
-        worker_instance_id,
+        worker_instance_id.clone(),
         scheduler_generation,
         optional_duration_seconds("WWC_SERVER_EXECUTION_LEASE_SECONDS", 30)?,
     )?
@@ -423,22 +424,46 @@ async fn run_composed_server(
         }))
         .await;
     }
-    Box::pin(run_local_composition(LocalRuntimeComposition {
-        config,
-        model_route,
-        auth_sessions,
-        application,
-        capabilities,
-        action_signing_key,
-        launcher_config,
-        worker_config,
-        execution_port,
-        scheduler,
-        clock,
-    }))
-    .await
+    #[cfg(feature = "local-worker")]
+    {
+        let capabilities = worker_capabilities()?;
+        let worker_config = WorkerConfig {
+            worker_id: worker_id.clone(),
+            worker_instance_id: worker_instance_id.clone(),
+            started_at: clock.now_instant(),
+            capabilities: capabilities.clone(),
+        };
+        let launcher_config = LocalLauncherConfig::try_new(
+            config.data_directory(),
+            source_root,
+            clock.now_millis(),
+            ControlPlaneInstanceRuntimeConfig::default(),
+            256,
+        )?;
+        let launcher_config = configured_local_launcher_observer(launcher_config)?;
+        Box::pin(run_local_composition(LocalRuntimeComposition {
+            config,
+            model_route,
+            auth_sessions,
+            application,
+            capabilities,
+            action_signing_key,
+            launcher_config,
+            worker_config,
+            execution_port,
+            scheduler,
+            clock,
+        }))
+        .await
+    }
+    #[cfg(not(feature = "local-worker"))]
+    {
+        let _ = source_root;
+        Err("this Server build supports WWC_SERVER_WORKER_MODE=remote only".into())
+    }
 }
 
+#[cfg(feature = "local-worker")]
 struct LocalRuntimeComposition {
     config: ServerConfig,
     model_route: LocalModelRoute,
@@ -453,6 +478,7 @@ struct LocalRuntimeComposition {
     clock: Arc<dyn StandaloneApplicationClock>,
 }
 
+#[cfg(feature = "local-worker")]
 async fn run_local_composition(
     composition: LocalRuntimeComposition,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -521,7 +547,7 @@ where
         project_id: repository_scope.project_id.clone(),
         repository_id: repository_scope.repository_id.clone(),
     };
-    let remote_authenticator = Arc::new(FileRemoteWorkerAuthenticator::open(
+    let fleet_authenticator = FileRemoteWorkerAuthenticator::open(
         PathBuf::from(required_environment(
             "WWC_SERVER_REMOTE_WORKER_CREDENTIAL_FILE",
         )?),
@@ -530,13 +556,22 @@ where
             "WWC_SERVER_WORKER_POOL_ID",
             "wpl_00000000000000000000000001",
         )?),
-        remote_worker_scope,
+        remote_worker_scope.clone(),
         required_environment_or("WWC_SERVER_REMOTE_WORKER_ISSUER", "winwincode-server")?,
         required_environment_or("WWC_SERVER_REMOTE_WORKER_SUBJECT", "remote-worker")?,
         required_environment_or("WWC_SERVER_REMOTE_WORKER_SECURITY_ZONE", "default")?,
         winwincode_domain::Instant(required_environment("WWC_SERVER_REMOTE_WORKER_EXPIRES_AT")?),
         &clock.now_instant(),
-    )?);
+    )?;
+    let session_authenticator = WorkerSessionRemoteAuthenticator::new(
+        config.data_directory().to_path_buf(),
+        WorkerPoolId(STRONGFLOW_DEVICE_WORKER_POOL_ID.to_owned()),
+        remote_worker_scope,
+    );
+    let remote_authenticator = Arc::new(CompositeRemoteWorkerAuthenticator::new(
+        fleet_authenticator,
+        session_authenticator,
+    ));
     let exchange: Arc<dyn RemoteWorkerExchangePort> =
         Arc::new(ProductionRemoteWorkerExchange::new(
             config.data_directory(),
@@ -583,6 +618,7 @@ async fn serve_remote_runtime(
     Ok(())
 }
 
+#[cfg(feature = "local-worker")]
 async fn serve_runtime(
     config: ServerConfig,
     auth_sessions: Arc<SqliteAuthSessionManager>,
@@ -659,6 +695,7 @@ const fn local_model_request_pool_config() -> ModelRequestPoolConfig {
     }
 }
 
+#[cfg(feature = "local-worker")]
 fn open_production_codex(
     config: &ServerConfig,
     model_route: &LocalModelRoute,
@@ -701,6 +738,7 @@ fn configured_action_signing_key() -> Result<ActionEnforcementSigningKey, Box<dy
     )?)?)
 }
 
+#[cfg(feature = "local-worker")]
 fn configured_server_execution_mode() -> Result<ExecutionMode, Box<dyn std::error::Error>> {
     let mode = ExecutionMode::from_config(&required_environment_or(
         "WWC_SERVER_EXECUTION_MODE",
@@ -711,6 +749,7 @@ fn configured_server_execution_mode() -> Result<ExecutionMode, Box<dyn std::erro
     Ok(mode)
 }
 
+#[cfg(feature = "local-worker")]
 fn released_server_execution_mode_required(mode: ExecutionMode) -> Result<(), &'static str> {
     match mode {
         ExecutionMode::React
@@ -722,6 +761,7 @@ fn released_server_execution_mode_required(mode: ExecutionMode) -> Result<(), &'
     }
 }
 
+#[cfg(feature = "local-worker")]
 fn configured_server_observer_mode() -> Result<ObserverMode, Box<dyn std::error::Error>> {
     let mode =
         ObserverMode::from_config(&required_environment_or("WWC_SERVER_OBSERVER_MODE", "off")?)
@@ -730,6 +770,7 @@ fn configured_server_observer_mode() -> Result<ObserverMode, Box<dyn std::error:
     Ok(mode)
 }
 
+#[cfg(feature = "local-worker")]
 fn released_server_observer_route_required(mode: ObserverMode) -> Result<bool, &'static str> {
     match mode {
         ObserverMode::Off => Ok(false),
@@ -740,6 +781,7 @@ fn released_server_observer_route_required(mode: ObserverMode) -> Result<bool, &
     }
 }
 
+#[cfg(feature = "local-worker")]
 fn configured_local_observation_model(
     observer_mode: ObserverMode,
 ) -> Result<Option<ObservationModelConfiguration>, Box<dyn std::error::Error>> {
@@ -756,6 +798,7 @@ fn configured_local_observation_model(
     )?))
 }
 
+#[cfg(feature = "local-worker")]
 fn configured_local_launcher_observer(
     launcher: LocalLauncherConfig,
 ) -> Result<LocalLauncherConfig, Box<dyn std::error::Error>> {
@@ -767,7 +810,7 @@ fn configured_local_launcher_observer(
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "local-worker"))]
 mod observer_tests {
     use super::{ObserverMode, released_server_observer_route_required};
 
@@ -788,6 +831,7 @@ mod observer_tests {
     }
 }
 
+#[cfg(feature = "local-worker")]
 fn worker_capabilities() -> Result<WorkerCapabilitySet, Box<dyn std::error::Error>> {
     let platform = match (env::consts::ARCH, env::consts::OS) {
         ("aarch64", "macos") => WorkerCapabilitySetPlatform::Aarch64AppleDarwin,
@@ -993,7 +1037,7 @@ fn optional_duration_seconds(
     Ok(Duration::from_secs(seconds))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "local-worker"))]
 mod tests {
     use super::{
         ExecutionMode, ObserverMode, released_server_execution_mode_required,

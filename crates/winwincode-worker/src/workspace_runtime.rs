@@ -1726,7 +1726,7 @@ impl JobWorkspaceRuntime {
         let mut parser_failed = false;
         let mut parsed_batches = Vec::new();
         for (ordinal, command) in commands.iter().enumerate() {
-            let run = run_validation_command(
+            let mut run = run_validation_command(
                 &checkout,
                 command,
                 ordinal,
@@ -1734,6 +1734,17 @@ impl JobWorkspaceRuntime {
                 self.validation_artifacts.as_mut(),
             )
             .await?;
+            if run.failed() && command.flaky_rerun_limit == Some(1) {
+                let retry = run_validation_command(
+                    &checkout,
+                    command,
+                    commands.len().saturating_add(ordinal),
+                    event,
+                    self.validation_artifacts.as_mut(),
+                )
+                .await?;
+                run.reconcile_bounded_rerun(retry);
+            }
             duration_millis = duration_millis.saturating_add(run.duration_millis);
             artifact_refs.extend(run.artifact_refs.iter().cloned());
             checks.push(run.check_summary());
@@ -2481,6 +2492,7 @@ struct ValidationOutcome {
 enum ValidationCommandOutcome {
     Passed,
     Failed,
+    Flaky,
     TimedOut,
     Overflowed,
 }
@@ -2503,7 +2515,18 @@ impl ValidationCommandRun {
     }
 
     fn failed(&self) -> bool {
-        self.outcome == ValidationCommandOutcome::Failed
+        matches!(
+            self.outcome,
+            ValidationCommandOutcome::Failed | ValidationCommandOutcome::Flaky
+        )
+    }
+
+    fn reconcile_bounded_rerun(&mut self, retry: Self) {
+        self.duration_millis = self.duration_millis.saturating_add(retry.duration_millis);
+        self.artifact_refs.extend(retry.artifact_refs);
+        if retry.outcome == ValidationCommandOutcome::Passed {
+            self.outcome = ValidationCommandOutcome::Flaky;
+        }
     }
 
     fn check_summary(&self) -> ValidationCheckSummary {
@@ -2522,6 +2545,10 @@ impl ValidationCommandRun {
             ValidationCommandOutcome::Failed => {
                 (ValidationCheckStatus::Failed, "command exited non-zero")
             }
+            ValidationCommandOutcome::Flaky => (
+                ValidationCheckStatus::Failed,
+                "known-flaky command failed before its bounded rerun passed",
+            ),
         };
         ValidationCheckSummary {
             diagnostic_digest: None,
@@ -3866,4 +3893,32 @@ fn retain_validation_diagnostic_evaluation(
         now,
     )?;
     Ok(disposition)
+}
+
+#[cfg(test)]
+mod validation_rerun_tests {
+    use super::{ValidationCommandOutcome, ValidationCommandRun};
+    use winwincode_execution_port::generated::ValidationCheckStatus;
+
+    #[test]
+    fn a_passing_bounded_rerun_cannot_hide_the_original_failure() {
+        let mut first = run(ValidationCommandOutcome::Failed, 5);
+        first.reconcile_bounded_rerun(run(ValidationCommandOutcome::Passed, 7));
+
+        assert_eq!(first.outcome, ValidationCommandOutcome::Flaky);
+        assert_eq!(first.duration_millis, 12);
+        let summary = first.check_summary();
+        assert_eq!(summary.status, ValidationCheckStatus::Failed);
+        assert!(summary.summary.contains("bounded rerun passed"));
+    }
+
+    fn run(outcome: ValidationCommandOutcome, duration_millis: i64) -> ValidationCommandRun {
+        ValidationCommandRun {
+            command_id: "known-flaky-check".to_owned(),
+            outcome,
+            duration_millis,
+            artifact_refs: Vec::new(),
+            output: Vec::new(),
+        }
+    }
 }

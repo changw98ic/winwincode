@@ -87,6 +87,7 @@
 .wwc-usage-health-worker-list,
 .wwc-usage-health-providers,
 .wwc-usage-health-models,
+.wwc-usage-health-session-team-list,
 .wwc-usage-health-credentials,
 .wwc-usage-health-errors {
   display: grid;
@@ -100,6 +101,7 @@
 .wwc-usage-health-worker,
 .wwc-usage-health-provider,
 .wwc-usage-health-model,
+.wwc-usage-health-session-team,
 .wwc-usage-health-credential,
 .wwc-usage-health-error {
   display: grid;
@@ -119,8 +121,18 @@
   background: var(--wwc-color-danger-surface);
 }
 
+.wwc-usage-health-session-team[data-tone='danger'] {
+  border-color: var(--wwc-color-danger-border);
+  background: var(--wwc-color-danger-surface);
+}
+
 .wwc-usage-health-worker[data-tone='warning'],
 .wwc-usage-health-provider[data-tone='warning'] {
+  border-color: var(--wwc-color-warning-border);
+  background: var(--wwc-color-warning-surface);
+}
+
+.wwc-usage-health-session-team[data-tone='warning'] {
   border-color: var(--wwc-color-warning-border);
   background: var(--wwc-color-warning-surface);
 }
@@ -130,10 +142,15 @@
   border-color: var(--wwc-color-success-border);
 }
 
+.wwc-usage-health-session-team[data-tone='success'] {
+  border-color: var(--wwc-color-success-border);
+}
+
 .wwc-usage-health-row-label,
 .wwc-usage-health-worker-label,
 .wwc-usage-health-provider-label,
 .wwc-usage-health-model-label,
+.wwc-usage-health-session-team-label,
 .wwc-usage-health-credential-label,
 .wwc-usage-health-error-label {
   font-weight: var(--wwc-font-weight-strong);

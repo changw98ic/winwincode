@@ -21,7 +21,7 @@ const VALID_FIXTURE: &str =
 const PRODUCT_SESSION_BINDING_FIXTURE: &str =
     include_str!("../../../tests/fixtures/contracts/session-binding.product-session.valid.json");
 const DELIVERY_STAGE_BINDING_FIXTURE: &str =
-    include_str!("../../../tests/fixtures/contracts/session-binding.delivery-stage.valid.json");
+    include_str!("../../../tests/fixtures/contracts/session-binding.work-run.valid.json");
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ScriptedOutcome {

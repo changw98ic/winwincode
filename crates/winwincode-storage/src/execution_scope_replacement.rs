@@ -43,36 +43,26 @@ fn ensure_execution_scope_replacement_schema(connection: &Connection) -> Result<
         .map_err(sql_error)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(sql_error)?;
-    if !columns.iter().any(|column| column == "work_run_id") {
-        connection
-            .execute(
-                "ALTER TABLE execution_scope_replacements ADD COLUMN work_run_id TEXT",
-                [],
-            )
-            .map_err(sql_error)?;
-    }
-    if !columns
-        .iter()
-        .any(|column| column == "predecessor_work_run_id")
-    {
-        connection
-            .execute(
-                "ALTER TABLE execution_scope_replacements ADD COLUMN predecessor_work_run_id TEXT",
-                [],
-            )
-            .map_err(sql_error)?;
-    }
-    if columns.iter().any(|column| column == "stage_run_id")
-        && connection
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM execution_scope_replacements WHERE stage_run_id IS NOT NULL)",
-                [],
-                |row| row.get::<_, bool>(0),
-            )
-            .map_err(sql_error)?
+    if columns
+        != [
+            "job_id",
+            "successor_attempt",
+            "receipt_id",
+            "receipt_digest",
+            "logical_job_digest",
+            "scope_json",
+            "work_run_id",
+            "predecessor_work_run_id",
+            "predecessor_lease_json",
+            "predecessor_worker_session_id",
+            "predecessor_slot_json",
+            "successor_lease_json",
+            "created_at",
+            "applied_at",
+        ]
     {
         return Err(StorageError::adapter(
-            "legacy StageRun replacement rows require an explicit WorkRun migration",
+            "execution replacement authority requires the current WorkRun schema",
         ));
     }
     Ok(())

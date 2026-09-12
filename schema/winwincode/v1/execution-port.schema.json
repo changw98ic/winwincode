@@ -2690,6 +2690,7 @@
         "boundAt",
         "sessionIdentity",
         "sourceIdentity",
+        "runtimeContext",
         "workerId",
         "leaseId",
         "attempt",
@@ -2729,6 +2730,9 @@
         "sourceIdentity": {
           "$ref": "./domain.schema.json#/$defs/SessionBindingSourceIdentity"
         },
+        "runtimeContext": {
+          "$ref": "./domain.schema.json#/$defs/RuntimeSessionContext"
+        },
         "workRunId": {
           "$ref": "./domain.schema.json#/$defs/WorkRunId",
           "description": "Exact WorkRun identity. ProductSession Chat bindings omit this field."
@@ -2748,7 +2752,7 @@
           "$ref": "#/$defs/FencingToken"
         }
       },
-      "description": "Authoritative WorkerSession-to-CodexThread binding for one exact active Job lease. Delivery WorkRun bindings carry the exact WorkRun; ProductSession Chat bindings omit it.",
+      "description": "Authoritative WorkerSession-to-CodexThread binding and secret-free immutable runtime context for one exact active Job lease. Delivery WorkRun bindings carry the exact WorkRun; ProductSession Chat bindings omit it.",
       "title": "session.binding",
       "x-direction": "worker-to-control-plane",
       "x-authority": "lease-write"
@@ -3877,6 +3881,12 @@
           "type": "integer",
           "minimum": 1,
           "maximum": 16777216
+        },
+        "flakyRerunLimit": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Optional bounded rerun policy for a repository-declared known-flaky validation command. Omitted or zero disables reruns; one records exactly one additional attempt without turning the original failure into a pass."
         },
         "allowedCompanionPaths": {
           "type": "array",

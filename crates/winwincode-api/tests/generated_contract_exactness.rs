@@ -3,9 +3,8 @@
 use serde_json::{Value, json};
 use winwincode_api::generated::{
     ApprovalProjection, CommandCompletedResponse, ControlPlaneWebSocketSubscribeFrame,
-    DeliveryStageProjection, DeliveryStageSessionBindingProjection, QueryRequest,
-    QueryResultResponse, RuntimeProjectionSnapshot, SettingsProjection, SolutionReviewProjection,
-    StrongFlowReadCursor,
+    QueryRequest, QueryResultResponse, RuntimeProjectionSnapshot, SettingsProjection,
+    SolutionReviewProjection, StrongFlowReadCursor,
 };
 
 fn http_examples() -> Value {
@@ -127,45 +126,6 @@ fn generated_rust_dtos_preserve_object_level_one_of_constraints() {
     review["reviewerId"] = json!("usr_00000000000000000000000000");
     review["reviewedAt"] = json!("2026-08-24T09:02:00.000Z");
     assert!(serde_json::from_value::<SolutionReviewProjection>(review).is_err());
-
-    let invalid_binding = json!({
-        "bindingId": "binding:runtime:1",
-        "productSessionId": "psn_00000000000000000000000000",
-        "executionJobId": "job_00000000000000000000000000",
-        "workerSessionId": null,
-        "codexThreadId": "cdx_00000000000000000000000000",
-        "boundAt": "2026-08-24T10:00:00.000Z"
-    });
-    assert!(
-        serde_json::from_value::<DeliveryStageSessionBindingProjection>(invalid_binding).is_err()
-    );
-
-    let pending_binding = json!({
-        "bindingId": "binding:runtime:pending",
-        "productSessionId": "psn_00000000000000000000000000",
-        "executionJobId": "job_00000000000000000000000000",
-        "workerSessionId": null,
-        "codexThreadId": null,
-        "boundAt": "2026-08-24T10:00:00.000Z",
-        "sessionIdentity": null,
-        "workRunId": null,
-        "workerId": null,
-        "leaseId": null,
-        "attempt": null,
-        "fencingToken": null,
-        "sourceIdentity": null
-    });
-    assert!(
-        serde_json::from_value::<DeliveryStageSessionBindingProjection>(pending_binding).is_ok(),
-        "pending DeliveryStageSessionBindingProjection must be decodable"
-    );
-
-    let stages = &examples["responses"]["deliveryDetailPendingReview"]["result"]["stages"];
-    assert!(serde_json::from_value::<DeliveryStageProjection>(stages[0].clone()).is_ok());
-    assert!(serde_json::from_value::<DeliveryStageProjection>(stages[1].clone()).is_ok());
-    let mut forged_human_stage = stages[1].clone();
-    forged_human_stage["sessionBinding"] = stages[0]["sessionBinding"].clone();
-    assert!(serde_json::from_value::<DeliveryStageProjection>(forged_human_stage).is_err());
 
     let mut runtime = examples["responses"]["runtimeProjection"]["result"].clone();
     runtime["workRunId"] = Value::Null;

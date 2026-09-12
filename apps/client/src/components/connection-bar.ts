@@ -47,7 +47,7 @@ interface ConnectionPresentation {
 
 const PRESENTATION: Readonly<Record<GlobalConnectionStatus, ConnectionPresentation>> = Object.freeze({
   connected: Object.freeze({
-    label: 'Client 已连接',
+    label: '客户端已连接',
     detail: '服务器请求与实时更新可用。',
     tone: 'success',
     live: 'polite',
@@ -83,7 +83,7 @@ const PRESENTATION: Readonly<Record<GlobalConnectionStatus, ConnectionPresentati
     detail: '请重新登录。此浏览器视图中未保存的内容保持不变。',
     tone: 'danger',
     live: 'assertive',
-    recoveryLabel: 'Sign in again',
+    recoveryLabel: '重新登录',
     recoverVisible: true,
   }),
   'permission-denied': Object.freeze({
@@ -91,7 +91,7 @@ const PRESENTATION: Readonly<Record<GlobalConnectionStatus, ConnectionPresentati
     detail: '当前身份已无此区域的访问权限。',
     tone: 'danger',
     live: 'assertive',
-    recoveryLabel: 'Return to Chat',
+    recoveryLabel: '返回对话',
     recoverVisible: true,
   }),
   'version-mismatch': Object.freeze({
@@ -99,7 +99,7 @@ const PRESENTATION: Readonly<Record<GlobalConnectionStatus, ConnectionPresentati
     detail: '客户端与服务器契约不一致。请先更新客户端再重试。',
     tone: 'danger',
     live: 'assertive',
-    recoveryLabel: 'Return to Chat',
+    recoveryLabel: '返回对话',
     recoverVisible: true,
   }),
 })

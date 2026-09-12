@@ -6,7 +6,7 @@ use std::{
     path::{Path, PathBuf},
     sync::Mutex,
 };
-use winwincode_api::generated::{CommandEnvelope, DeliveryTaskBreakdownCreateCommand};
+use winwincode_api::generated::{CommandEnvelope, WorkItemsCreateCommand};
 use winwincode_control_plane::{
     ControlPlane, ControlPlaneConfig, EventPublishError, EventPublisher, OutboxEvent, StateChange,
 };
@@ -173,8 +173,6 @@ fn workitem_creation_survives_sqlite_restart_and_replays_without_extra_writes() 
     snapshot.updated_at_millis = 1_700_000_000_000;
     snapshot.spec.created_at_millis = 1_700_000_000_000;
     snapshot.status = winwincode_delivery::domain::DeliveryStatus::Ready;
-    snapshot.tasks.clear();
-    snapshot.stage_runs.clear();
     snapshot.session_bindings.clear();
     snapshot.attention_items.clear();
     snapshot.evidence.clear();
@@ -192,11 +190,11 @@ fn workitem_creation_survives_sqlite_restart_and_replays_without_extra_writes() 
     };
     seed_catalog(&root, &scope, &delivery);
     let contract = &delivery.snapshot().work_run_aggregate.contract;
-    let command: DeliveryTaskBreakdownCreateCommand = serde_json::from_value(serde_json::json!({
+    let command: WorkItemsCreateCommand = serde_json::from_value(serde_json::json!({
         "schemaVersion":"winwincode/v1", "requestId":"req_00000000000000000000000001",
         "actor":{"kind":"system","id":"sys_00000000000000000000000001"},
         "scope":{"kind":"repository","organizationId":"org_00000000000000000000000001","workspaceId":"wsp_00000000000000000000000001","projectId":"prj_00000000000000000000000001","repositoryId":"rep_00000000000000000000000001"},
-        "command":"delivery.task_breakdown.create", "expectedRevision":1,
+        "command":"workitems.create", "expectedRevision":1,
         "payload":{"deliveryId":delivery.id(),"expectedRevision":1,"contractRevision":contract.revision,
           "items":[{"id":"wit_00000000000000000000000009","title":"Implement","goal":"Implement the approved requirement","criterionIds":[contract.criteria[0].id],"dependsOn":[]}]}
     })).expect("create command");
@@ -205,9 +203,7 @@ fn workitem_creation_survives_sqlite_restart_and_replays_without_extra_writes() 
         Box::new(RecordingPublisher),
     )
     .expect("start");
-    let created = plane
-        .delivery_task_breakdown_create(&command)
-        .expect("create WorkItem");
+    let created = plane.work_items_create(&command).expect("create WorkItem");
     assert_eq!(created.result.items.len(), 1);
     assert_eq!(
         created.result.items[0].id.0,
@@ -220,7 +216,7 @@ fn workitem_creation_survives_sqlite_restart_and_replays_without_extra_writes() 
     )
     .expect("restart");
     let replayed = restarted
-        .delivery_task_breakdown_create(&command)
+        .work_items_create(&command)
         .expect("replay original creation");
     assert_eq!(
         serde_json::to_value(&created).unwrap(),
@@ -229,11 +225,11 @@ fn workitem_creation_survives_sqlite_restart_and_replays_without_extra_writes() 
     let mut changed = command.clone();
     changed.payload.items[0].goal = "Different task under the original request".into();
     assert!(
-        restarted.delivery_task_breakdown_create(&changed).is_err(),
+        restarted.work_items_create(&changed).is_err(),
         "the original request must not accept changed task content"
     );
     let unchanged = restarted
-        .delivery_task_breakdown_create(&command)
+        .work_items_create(&command)
         .expect("conflict must preserve original receipt");
     assert_eq!(
         serde_json::to_value(&created).unwrap(),
@@ -274,7 +270,7 @@ fn setup(
     PathBuf,
     Delivery,
     winwincode_domain::RepositoryScope,
-    DeliveryTaskBreakdownCreateCommand,
+    WorkItemsCreateCommand,
     ControlPlane,
 ) {
     let root =
@@ -289,8 +285,6 @@ fn setup(
     snapshot.updated_at_millis = 1_700_000_000_000;
     snapshot.spec.created_at_millis = 1_700_000_000_000;
     snapshot.status = winwincode_delivery::domain::DeliveryStatus::Ready;
-    snapshot.tasks.clear();
-    snapshot.stage_runs.clear();
     snapshot.session_bindings.clear();
     snapshot.attention_items.clear();
     snapshot.evidence.clear();
@@ -308,7 +302,7 @@ fn setup(
     };
     seed_catalog(&root, &scope, &delivery);
     let contract = &delivery.snapshot().work_run_aggregate.contract;
-    let command: DeliveryTaskBreakdownCreateCommand = serde_json::from_value(serde_json::json!({"schemaVersion":"winwincode/v1","requestId":format!("req_{seed:026}"),"actor":{"kind":"system","id":"sys_00000000000000000000000001"},"scope":{"kind":"repository","organizationId":scope.organization_id,"workspaceId":scope.workspace_id,"projectId":scope.project_id,"repositoryId":scope.repository_id},"command":"delivery.task_breakdown.create","expectedRevision":1,"payload":{"deliveryId":delivery.id(),"expectedRevision":1,"contractRevision":contract.revision,"items":[{"id":format!("wit_{seed:026}"),"title":"Implement","goal":"Implement approved requirement","criterionIds":[contract.criteria[0].id],"dependsOn":[]}]}})).unwrap();
+    let command: WorkItemsCreateCommand = serde_json::from_value(serde_json::json!({"schemaVersion":"winwincode/v1","requestId":format!("req_{seed:026}"),"actor":{"kind":"system","id":"sys_00000000000000000000000001"},"scope":{"kind":"repository","organizationId":scope.organization_id,"workspaceId":scope.workspace_id,"projectId":scope.project_id,"repositoryId":scope.repository_id},"command":"workitems.create","expectedRevision":1,"payload":{"deliveryId":delivery.id(),"expectedRevision":1,"contractRevision":contract.revision,"items":[{"id":format!("wit_{seed:026}"),"title":"Implement","goal":"Implement approved requirement","criterionIds":[contract.criteria[0].id],"dependsOn":[]}]}})).unwrap();
     let plane = ControlPlane::start_local(
         ControlPlaneConfig::local(&root),
         Box::new(RecordingPublisher),
@@ -322,14 +316,14 @@ fn workitem_creation_rolls_back_each_atomic_member() {
     for (index, (name, trigger)) in [("state", "CREATE TRIGGER f BEFORE UPDATE ON product_state BEGIN SELECT RAISE(ABORT,'x'); END;"), ("journal", "CREATE TRIGGER f BEFORE INSERT ON aggregate_journal_records BEGIN SELECT RAISE(ABORT,'x'); END;"), ("receipt", "CREATE TRIGGER f BEFORE INSERT ON command_receipts BEGIN SELECT RAISE(ABORT,'x'); END;"), ("outbox", "CREATE TRIGGER f BEFORE INSERT ON outbox WHEN NEW.topic='delivery.changed.v1' BEGIN SELECT RAISE(ABORT,'x'); END;")].into_iter().enumerate() {
         let (root, delivery, _, command, mut plane) = setup(index as u64 + 10);
         rusqlite::Connection::open(root.join("control-plane.sqlite3")).unwrap().execute_batch(trigger).unwrap();
-        assert!(plane.delivery_task_breakdown_create(&command).is_err(), "{name}");
+        assert!(plane.work_items_create(&command).is_err(), "{name}");
         let state = plane.load_state(&format!("delivery:{}", delivery.id().0)).unwrap().unwrap();
         assert_eq!(state.revision, 1, "{name}");
         let db = rusqlite::Connection::open(root.join("control-plane.sqlite3")).unwrap();
         let counts: (i64, i64, i64) = db.query_row("SELECT (SELECT COUNT(*) FROM aggregate_journal_records WHERE aggregate_id = ?1), (SELECT COUNT(*) FROM command_receipts WHERE request_id = ?2), (SELECT COUNT(*) FROM outbox WHERE topic = 'delivery.changed.v1')", rusqlite::params![delivery.id().0, command.request_id.0], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).unwrap();
         assert_eq!(counts, (1, 0, 0), "{name}: no partial durable facts");
         db.execute_batch("DROP TRIGGER f").unwrap();
-        let committed = plane.delivery_task_breakdown_create(&command).expect("same command succeeds after removing failure injection");
+        let committed = plane.work_items_create(&command).expect("same command succeeds after removing failure injection");
         assert_eq!(committed.current_revision.0, 2);
         drop(db);
         plane.shutdown().unwrap(); fs::remove_dir_all(root).unwrap();
@@ -341,11 +335,11 @@ fn workitem_creation_rejects_foreign_scope_and_revision_race() {
     let (root, delivery, _scope, command, mut plane) = setup(31);
     let mut foreign = command.clone();
     foreign.scope = serde_json::from_value(serde_json::json!({"kind":"repository","organizationId":"org_00000000000000000000000031","workspaceId":"wsp_00000000000000000000000031","projectId":"prj_00000000000000000000000031","repositoryId":"rep_00000000000000000000000031"})).unwrap();
-    assert!(plane.delivery_task_breakdown_create(&foreign).is_err());
-    let first = plane.delivery_task_breakdown_create(&command).unwrap();
+    assert!(plane.work_items_create(&foreign).is_err());
+    let first = plane.work_items_create(&command).unwrap();
     let mut stale = command.clone();
     stale.payload.expected_revision = winwincode_domain::Revision(0);
-    assert!(plane.delivery_task_breakdown_create(&stale).is_err());
+    assert!(plane.work_items_create(&stale).is_err());
     assert_eq!(
         plane
             .load_state(&format!("delivery:{}", delivery.id().0))
@@ -361,22 +355,18 @@ fn workitem_creation_rejects_foreign_scope_and_revision_race() {
 #[test]
 fn workitem_creation_rejects_cross_actor_and_cross_delivery_reuse() {
     let (root, delivery, _scope, command, mut plane) = setup(41);
-    plane.delivery_task_breakdown_create(&command).unwrap();
+    plane.work_items_create(&command).unwrap();
     let mut actor = command.clone();
     actor.request_id = RequestId("req_00000000000000000000000041".into());
     actor.actor = serde_json::from_value(
         serde_json::json!({"kind":"user","id":"usr_00000000000000000000000041"}),
     )
     .unwrap();
-    assert!(plane.delivery_task_breakdown_create(&actor).is_err());
+    assert!(plane.work_items_create(&actor).is_err());
     let mut delivery_reuse = command.clone();
     delivery_reuse.request_id = RequestId("req_00000000000000000000000042".into());
     delivery_reuse.payload.delivery_id = DeliveryId("dlv_00000000000000000000000042".into());
-    assert!(
-        plane
-            .delivery_task_breakdown_create(&delivery_reuse)
-            .is_err()
-    );
+    assert!(plane.work_items_create(&delivery_reuse).is_err());
     assert_eq!(
         plane
             .load_state(&format!("delivery:{}", delivery.id().0))

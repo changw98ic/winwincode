@@ -34,8 +34,8 @@ use winwincode_client_port::messages::{
 use winwincode_device_client::{
     DaemonConfig, DeviceDaemon, DeviceIdentitySeed, DeviceStore, ExchangeRequest, ExchangeResponse,
     ExchangeTransport, ExchangeTransportError, IdentityRecord, IssuedEnrollment, SessionSupervisor,
-    SupervisorConfig, WORKER_STATE_RUNNING, WorkerLaunchDirectories, WorkerLaunchMaterialSource,
-    adopt_enrollment, ensure_device_identity, load_device_identity,
+    SupervisorConfig, WORKER_STATE_RUNNING, WorkerCredentialIssuance, WorkerLaunchDirectories,
+    WorkerLaunchMaterialSource, adopt_enrollment, ensure_device_identity, load_device_identity,
 };
 
 static NEXT_TEMP_DIRECTORY: AtomicU64 = AtomicU64::new(1);
@@ -72,8 +72,8 @@ const HOLDER: &str = "usr_HOLDER0000000000000000000";
 const ORIGIN: &str = "https://127.0.0.1:8443";
 const GRANT: &str = "wlg_TESTGRANT000000000000001";
 const WORKER_SESSION: &str = "ws_TESTSESSION00000000000001";
-const WORKER_ID: &str = "wkr_TESTWORKER0000000000001";
-const WORKER_INSTANCE: &str = "winst_TESTINSTANCE000000001";
+const WORKER_ID: &str = "wrk_TESTWORKER0000000000001";
+const WORKER_INSTANCE: &str = "wki_TESTINSTANCE00000000001";
 const WORKER_CREDENTIAL: &str = "wsc-launch-test-material";
 const BINDING: &str = "rbd_TESTBINDING00000000000001";
 const PRODUCT_SESSION: &str = "ps_TESTPRODUCT000000000000001";
@@ -140,7 +140,7 @@ struct ServerState {
 /// batch per exchange.
 struct ServerSim {
     state: Mutex<ServerState>,
-    downlink: Mutex<VecDeque<Vec<Value>>>,
+    downlink: Mutex<VecDeque<(Vec<Value>, Vec<WorkerCredentialIssuance>)>>,
     next_sequence: AtomicU64,
 }
 
@@ -154,6 +154,14 @@ impl ServerSim {
     }
 
     fn queue_downlink(&self, message: ServerToClientMessage) {
+        self.queue_downlink_with_credentials(message, Vec::new());
+    }
+
+    fn queue_downlink_with_credentials(
+        &self,
+        message: ServerToClientMessage,
+        credentials: Vec<WorkerCredentialIssuance>,
+    ) {
         let sequence = self.next_sequence.fetch_add(1, Ordering::Relaxed);
         let envelope = ServerToClientEnvelope {
             schema_version: CLIENT_CONTROL_PORT_SCHEMA_VERSION.to_owned(),
@@ -168,7 +176,7 @@ impl ServerSim {
         self.downlink
             .lock()
             .expect("downlink lock")
-            .push_back(vec![frame]);
+            .push_back((vec![frame], credentials));
     }
 
     fn frames_with_kind(&self, kind: &str) -> Vec<SimFrame> {
@@ -191,7 +199,7 @@ impl ExchangeTransport for ServerSim {
     ) -> Result<Vec<u8>, ExchangeTransportError> {
         let request: ExchangeRequest = serde_json::from_slice(request_bytes)
             .map_err(|error| ExchangeTransportError::new(format!("fake decode: {error}")))?;
-        let (ack, frames) = {
+        let (ack, frames, worker_credentials) = {
             let mut state = self.state.lock().expect("server sim lock");
             for frame in &request.frames {
                 let kind = frame
@@ -215,13 +223,13 @@ impl ExchangeTransport for ServerSim {
                 ack = next;
                 next += 1;
             }
-            let frames = self
+            let (frames, worker_credentials) = self
                 .downlink
                 .lock()
                 .expect("downlink lock")
                 .pop_front()
                 .unwrap_or_default();
-            (ack, frames)
+            (ack, frames, worker_credentials)
         };
         let response = ExchangeResponse {
             schema_version: CLIENT_CONTROL_PORT_SCHEMA_VERSION.to_owned(),
@@ -229,6 +237,7 @@ impl ExchangeTransport for ServerSim {
             replay_from_sequence: None,
             frames,
             enrollment: None,
+            worker_credentials,
         };
         serde_json::to_vec(&response)
             .map_err(|error| ExchangeTransportError::new(format!("fake encode: {error}")))
@@ -302,8 +311,12 @@ impl WorkerLaunchMaterialSource for FixedMaterial {
         self.credential.lock().expect("credential lock").clone()
     }
 
-    fn launch_directories(&self, worker_session_id: &str) -> Option<WorkerLaunchDirectories> {
-        if worker_session_id != WORKER_SESSION {
+    fn launch_directories(
+        &self,
+        worker_session_id: &str,
+        repository_binding_id: &str,
+    ) -> Option<WorkerLaunchDirectories> {
+        if worker_session_id != WORKER_SESSION || repository_binding_id != BINDING {
             return None;
         }
         self.directories.lock().expect("directories lock").clone()
@@ -621,7 +634,7 @@ fn a_stale_launch_stamp_is_refused_without_touching_the_device() {
 
 #[test]
 #[allow(clippy::too_many_lines)]
-fn a_launch_bound_to_another_instance_or_deferred_material() {
+fn a_launch_bound_to_another_instance_or_exchange_credential() {
     let root = temporary_directory("launch-binding");
     let sim = Arc::new(ServerSim::new());
     let (store, identity) = open_enrolled(&root);
@@ -630,9 +643,8 @@ fn a_launch_bound_to_another_instance_or_deferred_material() {
         .expect("daemon should start enrolled");
     let lane = WorkerLane::open(&root, &instance_id, "binding");
     daemon.set_worker_supervisor(lane.supervisor.clone());
-    // The credential has not crossed to the local bridge in this scenario:
-    // the launch still spawns (placeholder private file) because the launch
-    // acknowledgement must not wait for the post-consumption delivery.
+    // The material source only resolves directories. The raw credential must
+    // arrive beside the exact launch frame in the authenticated response.
     let material = Arc::new(FixedMaterial::without_credential(lane.directories()));
     daemon.set_worker_launch_material_source(material);
 
@@ -648,12 +660,19 @@ fn a_launch_bound_to_another_instance_or_deferred_material() {
         daemon.status().worker_launches_rejected == 1
     });
 
-    // The correct grant with deferred material spawns with a placeholder
-    // credential file and answers accepted.
-    sim.queue_downlink(launch(
-        occupancy_stamp(1, "srv-launch", LEASE, 7),
-        grant(&instance_id, LEASE, 7),
-    ));
+    // The matching launch response carries the one-time raw credential.
+    sim.queue_downlink_with_credentials(
+        launch(
+            occupancy_stamp(1, "srv-launch", LEASE, 7),
+            grant(&instance_id, LEASE, 7),
+        ),
+        vec![WorkerCredentialIssuance {
+            worker_launch_grant_id: GRANT.to_owned(),
+            worker_session_id: WORKER_SESSION.to_owned(),
+            credential_digest: worker_credential_digest(),
+            worker_credential: issued_credential_material(),
+        }],
+    );
     drive_until(&mut daemon, |daemon| {
         daemon.status().worker_launches_accepted == 1 && settled(daemon)
     });
@@ -672,20 +691,9 @@ fn a_launch_bound_to_another_instance_or_deferred_material() {
     wait_for_ready_marker(&directories.data_directory);
     let credential_path = directories.data_directory.join("worker-credential");
     assert_eq!(
-        fs::read_to_string(&credential_path).expect("placeholder credential read"),
-        "",
-        "the deferred delivery starts from an empty private file"
-    );
-
-    // The deferred delivery writes the material into the private file.
-    let delivered = daemon
-        .receive_worker_credential(&worker_credential_digest(), WORKER_CREDENTIAL)
-        .expect("deferred delivery");
-    assert!(delivered, "the handled launch's digest is known");
-    assert_eq!(
         fs::read_to_string(&credential_path).expect("credential read"),
-        WORKER_CREDENTIAL,
-        "the launch-response material lands in the 0600 credential file"
+        issued_credential_material(),
+        "the launch-response credential lands in the 0600 credential file"
     );
     assert_eq!(file_mode(&credential_path), 0o600);
     // An unknown digest is a no-op.

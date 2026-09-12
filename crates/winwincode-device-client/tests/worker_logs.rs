@@ -44,7 +44,7 @@ fn tight_config() -> WorkerLogConfig {
 }
 
 const SESSION: &str = "wks_TESTWORKERSESSION0000001";
-const INSTANCE: &str = "winst_TESTINSTANCE00000001";
+const INSTANCE: &str = "wki_TESTINSTANCE0000000001";
 const STAMP: &str = "2026-09-04T00:00:00.000Z";
 
 fn recorder(root: &Path, config: WorkerLogConfig) -> WorkerLogRecorder {
@@ -441,7 +441,7 @@ fn repeated_recovery_does_not_duplicate_the_terminal_fact() {
     );
 
     // A replacement boot of the same session records its own fresh fact.
-    let replacement = "winst_TESTINSTANCE00000002";
+    let replacement = "wki_TESTINSTANCE0000000002";
     append_line_with_instance(&logs, SESSION, replacement, "replacement boot");
     let second = logs
         .record_exit(

@@ -68,7 +68,7 @@ schema。生成文件带统一来源摘要，重复生成相同输入不会改�
 | 产品范围 | Command |
 | --- | --- |
 | Chat | `session.create`、`chat.submit`、`input.respond`、`session.cancel`、`session.close` |
-| Delivery / StrongFlow | `delivery.create`、`delivery.update_spec`、`delivery.task_breakdown.create`、`delivery.advance`、`delivery.resolve_attention`、`delivery.submit_verdict` |
+| Delivery / StrongFlow | `delivery.create`、`delivery.update_spec`、`workitems.create`、`workrun.start`、`delivery.resolve_attention`、`delivery.submit_verdict` |
 | 设置 | `settings.update` |
 | 凭据引用 | `credential.reference.create`、`credential.reference.rotate`、`credential.reference.revoke`、`credential.reference.delete` |
 | 审批 | `approval.decide` |
@@ -98,7 +98,7 @@ schema。生成文件带统一来源摘要，重复生成相同输入不会改�
 
 查询覆盖 ProductSession、Chat 消息、可重建运行投影、Delivery、设置、凭据引用、审批、
 Worker 和 Publication 的列表与详情。`session.messages.list` 返回只含用户/助手正文的
-安全消息投影；`runtime.projection.get` 按 ProductSession 或 Delivery + StageRun 返回重启
+安全消息投影；`runtime.projection.get` 按 ProductSession 或 Delivery + WorkRun 返回重启
 和 WebSocket reset 所需的完整有界投影。列表按稳定快照、`updatedAt`、ID 排序。cursor 是服务端生成的
 不透明字符串，并绑定当前 Scope、查询名、筛选条件和快照；换 Scope、换筛选条件、
 被篡改或已失效的 cursor 统一返回 `INVALID_REQUEST`，错误字段为 `page.cursor`。

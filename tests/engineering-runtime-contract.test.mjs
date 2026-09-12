@@ -87,11 +87,12 @@ test('execution binding schema retains the canonical WorkRun identity', () => {
 test('dispatch requires an explicit profile and rejects caller-selected execution identities', () => {
   const http = JSON.parse(readFileSync(new URL('../schema/winwincode/v1/control-plane-http.schema.json', import.meta.url)))
   ajv.addSchema(http)
-  const validate = ajv.getSchema(`${http.$id}#/$defs/DeliveryAdvancePayload`)
+  const validate = ajv.getSchema(`${http.$id}#/$defs/WorkRunStartPayload`)
   const payload = { deliveryId: id('dlv'), dispatchProfile: 'executor' }
-  for (const dispatchProfile of ['planner', 'executor', 'reviewer', 'verifier', 'adversarial-verifier', 'remediator']) {
+  for (const dispatchProfile of ['executor', 'reviewer', 'verifier', 'adversarial-verifier', 'remediator']) {
     assert.equal(validate({ ...payload, dispatchProfile }), true)
   }
+  assert.equal(validate({ ...payload, dispatchProfile: 'planner' }), false)
   assert.equal(validate({ deliveryId: id('dlv') }), false)
   assert.equal(validate({ ...payload, dispatchProfile: 'arbitrary' }), false)
   for (const key of ['workItemId', 'workRunId', 'attempt', 'leaseId', 'stageRunId']) {
@@ -129,7 +130,7 @@ test('diagram execution provenance binds one required WorkRun and WorkItem witho
     assert.equal(validate({ ...provenance, [key]: null }), false)
   }
   assert.equal(validate({ ...provenance, stageRunId: id('run') }), false)
-  assert.equal(validate({ ...provenance, deliveryTaskId: id('dtk') }), false)
+  assert.equal(validate({ ...provenance, workItemId: id('dtk') }), false)
 })
 
 
@@ -157,7 +158,7 @@ test('retired stage approval is rejected while canonical WorkItem creation remai
     schemaVersion: 'winwincode/v1', requestId: id('req'),
     actor: { kind: 'user', id: id('usr') },
     scope: { kind: 'repository', organizationId: id('org'), workspaceId: id('wsp'), projectId: id('prj'), repositoryId: id('rep') },
-    command: 'delivery.task_breakdown.create', expectedRevision: 1,
+    command: 'workitems.create', expectedRevision: 1,
     payload: { deliveryId: id('dlv'), expectedRevision: 1, contractRevision: 1,
       items: [{ id: id('wit'), title: 'Implement', goal: 'Implement requirement', criterionIds: [id('crt')], dependsOn: [] }] },
   }

@@ -60,18 +60,18 @@ export interface SettingsPagePresentation {
 
 function knownSettingsError(error: ControlPlaneClientError): string | null {
   const labels: Readonly<Record<string, string>> = Object.freeze({
-    SETTINGS_CONCURRENCY_INVALID: 'Worker concurrency must be between 1 and 10000.',
-    SETTINGS_PROVIDER_REQUIRED: 'Enter a Provider ID.',
-    SETTINGS_MODEL_REQUIRED: 'Enter a Model ID.',
-    SETTINGS_CREDENTIAL_ROUTE_INVALID: 'Choose an available credential reference for this Provider.',
-    SETTINGS_SNAPSHOT_REQUIRED: 'Refresh settings before saving a model route.',
-    SETTINGS_DECISION_IN_FLIGHT: 'Wait for the current settings change to finish.',
-    SETTINGS_REVISION_REQUIRED: 'Refresh settings before submitting this change.',
-    CREDENTIAL_DISPLAY_NAME_REQUIRED: 'Enter a credential display name.',
-    CREDENTIAL_PROVIDER_REQUIRED: 'Enter the credential Provider ID.',
-    CREDENTIAL_SECRET_REQUIRED: 'Choose a local secret before submitting the credential reference.',
-    CREDENTIAL_REFERENCE_STALE: 'Refresh settings and select a current credential reference.',
-    INVALID_CLIENT_REQUEST: 'Check the local user identity and workspace scope configuration, then retry.',
+    SETTINGS_CONCURRENCY_INVALID: '执行并发数必须在 1 到 10000 之间。',
+    SETTINGS_PROVIDER_REQUIRED: '请输入模型服务商 ID。',
+    SETTINGS_MODEL_REQUIRED: '请输入模型 ID。',
+    SETTINGS_CREDENTIAL_ROUTE_INVALID: '请选择该模型服务商的可用凭据引用。',
+    SETTINGS_SNAPSHOT_REQUIRED: '请刷新设置后再保存模型路由。',
+    SETTINGS_DECISION_IN_FLIGHT: '请等待当前设置更改完成。',
+    SETTINGS_REVISION_REQUIRED: '请刷新设置后再提交此更改。',
+    CREDENTIAL_DISPLAY_NAME_REQUIRED: '请输入凭据显示名称。',
+    CREDENTIAL_PROVIDER_REQUIRED: '请输入凭据的模型服务商 ID。',
+    CREDENTIAL_SECRET_REQUIRED: '提交凭据引用前，请选择本地密钥。',
+    CREDENTIAL_REFERENCE_STALE: '请刷新设置并选择当前凭据引用。',
+    INVALID_CLIENT_REQUEST: '请检查本地用户身份和工作区范围配置后重试。',
   })
   return labels[error.code] ?? null
 }
@@ -81,17 +81,17 @@ function errorLabel(error: ControlPlaneClientError | null): string | null {
   const known = knownSettingsError(error)
   if (known !== null) return known
   if (error.code === 'REVISION_CONFLICT') {
-    return 'These settings changed before the update was saved. Review the current snapshot and try again.'
+    return '保存前设置已发生变化，请检查当前快照后重试。'
   }
-  if (error.kind === 'authentication') return 'Sign in again to manage local Provider settings.'
-  if (error.kind === 'authorization') return 'You do not have access to these Provider settings.'
-  if (error.kind === 'network') return 'The settings server could not be reached. Check the connection and retry.'
-  if (error.kind === 'version') return 'The Client and Server versions differ. Update the Client and retry.'
+  if (error.kind === 'authentication') return '请重新登录以管理本地模型服务商设置。'
+  if (error.kind === 'authorization') return '你没有访问这些模型服务商设置的权限。'
+  if (error.kind === 'network') return '无法连接设置服务器，请检查连接后重试。'
+  if (error.kind === 'version') return '客户端与服务器版本不一致，请更新客户端后重试。'
   if (error.kind === 'cancelled') return '设置更新已取消。'
   if (error.kind === 'configuration') {
-    return 'Check the local server URL and workspace scope configuration, then retry.'
+    return '请检查本地服务器地址和工作区范围配置后重试。'
   }
-  return 'Provider settings could not be updated. Retry, or review the server status.'
+  return '模型服务商设置更新失败，请重试或检查服务器状态。'
 }
 
 export function settingsPagePresentation(
@@ -99,28 +99,28 @@ export function settingsPagePresentation(
 ): SettingsPagePresentation {
   const visibleError = state.interaction.error ?? state.error
   const statusText = state.interaction.status === 'submitting'
-    ? 'Saving Provider settings…'
+    ? '正在保存模型服务商设置…'
     : state.interaction.status === 'waiting'
-      ? 'Change accepted · waiting for the current snapshot…'
+      ? '已接受更改，正在等待当前快照…'
       : state.status === 'loading'
-        ? 'Loading Provider settings…'
+        ? '正在加载模型服务商设置…'
         : state.status === 'refreshing' || state.realtime === 'reloading'
-          ? 'Updating Provider settings…'
+          ? '正在更新模型服务商设置…'
           : state.realtime === 'reconnecting'
-            ? 'Reconnecting…'
+            ? '正在重新连接…'
             : state.status === 'authentication-required'
-              ? 'Sign in required'
+              ? '需要登录'
               : state.status === 'authorization-denied'
-                ? 'Access denied'
+                ? '访问被拒绝'
                 : state.status === 'cancelled'
-                  ? 'Update cancelled'
+                  ? '更新已取消'
                   : state.status === 'error'
-                    ? 'Provider settings unavailable'
+                    ? '模型服务商设置不可用'
                     : state.status === 'closed'
-                      ? 'Provider settings closed'
+                      ? '模型服务商设置已关闭'
                       : state.settings === null
-                        ? 'No settings snapshot'
-                        : `Ready · revision ${String(state.settings.revision)}`
+                        ? '没有设置快照'
+                        : `就绪 · 修订版 ${String(state.settings.revision)}`
   const busy = state.status === 'loading'
     || state.status === 'refreshing'
     || state.realtime === 'reloading'
@@ -169,9 +169,9 @@ function labelledInput(
 }
 
 function lifecycleLabel(reference: CredentialReferenceProjection): string {
-  if (reference.secretState === 'revoked') return 'Revoked'
-  if (reference.secretState === 'missing') return 'Secret missing'
-  return 'Available'
+  if (reference.secretState === 'revoked') return '已撤销'
+  if (reference.secretState === 'missing') return '密钥缺失'
+  return '可用'
 }
 
 /** ADR-0029 §5: every warning also carries a non-color icon beside its text. */
@@ -200,8 +200,8 @@ const SETTINGS_CATEGORIES: readonly {
   }),
   Object.freeze({
     id: 'providers',
-    label: '模型与 Provider',
-    title: '模型与 Provider',
+    label: '模型与服务商',
+    title: '模型与服务商',
     description: '选择默认模型路由，管理只写一次的凭据引用。',
   }),
   Object.freeze({
@@ -308,7 +308,7 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
   const statusBadge = mountStatusBadge({
     document,
     props: {
-      label: 'Loading Provider settings…',
+      label: '正在加载模型服务商设置…',
       tone: 'info',
       live: 'polite',
       className: 'wwc-settings-status',
@@ -497,7 +497,7 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
     generalSave.root,
   )
 
-  // --- 模型与 Provider(设计稿 13;现有控制面契约) ----------------------------
+  // --- 模型与服务商(设计稿 13;现有控制面契约) ------------------------------
 
   const providersSection = element(
     document,
@@ -527,14 +527,14 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
   const defaultModel = element(document, 'select', 'wwc-settings-default-model')
   defaultModel.id = 'wwc-settings-default-model'
   const routeForm = element(document, 'form', 'wwc-settings-route-form')
-  const provider = labelledInput(document, 'wwc-settings-provider', 'Provider ID', 'wwc-settings-provider')
+  const provider = labelledInput(document, 'wwc-settings-provider', '模型服务商 ID', 'wwc-settings-provider')
   const model = labelledInput(document, 'wwc-settings-model', '模型 ID', 'wwc-settings-model')
   const credentialLabel = element(document, 'label', 'wwc-settings-credential-label')
   const credential = element(document, 'select', 'wwc-settings-credential')
   const concurrency = labelledInput(
     document,
     'wwc-settings-concurrency',
-    'Worker 并发数',
+    '执行并发数',
     'wwc-settings-concurrency',
     'number',
   )
@@ -555,7 +555,7 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
     props: {
       id: 'wwc-settings-provider-list',
       headingLevel: 3,
-      title: 'Provider 列表',
+      title: '模型服务商列表',
       description: '',
       className: 'wwc-settings-provider-list',
     },
@@ -565,12 +565,12 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
   providerListHeading.className = 'wwc-settings-section-heading'
   const providerListRows = element(document, 'ul', 'wwc-settings-provider-rows')
   const providerListEmpty = element(document, 'p', 'wwc-settings-provider-list-empty')
-  providerListEmpty.textContent = '尚未配置 Provider 凭据。添加凭据引用后显示在这里。'
+  providerListEmpty.textContent = '尚未配置模型服务商凭据，添加凭据引用后会显示在这里。'
   const addProvider = element(document, 'button', 'wwc-settings-add-provider')
   addProvider.type = 'button'
   addProvider.dataset.wwcComponent = 'button'
   addProvider.dataset.variant = 'primary'
-  addProvider.textContent = '添加 Provider'
+  addProvider.textContent = '添加模型服务商'
   providerListPanel.content.append(providerListRows, providerListEmpty, addProvider)
 
   const createPanel = mountPanel({
@@ -588,18 +588,18 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
   createHeading.className = 'wwc-settings-section-heading'
   const createHelp = element(document, 'p', 'wwc-settings-secret-help')
   const createForm = element(document, 'form', 'wwc-settings-create-form')
-  const createId = labelledInput(document, 'wwc-settings-create-id', 'Reference ID', 'wwc-settings-create-id')
-  const createName = labelledInput(document, 'wwc-settings-create-name', 'Display name', 'wwc-settings-create-name')
+  const createId = labelledInput(document, 'wwc-settings-create-id', '引用 ID', 'wwc-settings-create-id')
+  const createName = labelledInput(document, 'wwc-settings-create-name', '显示名称', 'wwc-settings-create-name')
   const createProvider = labelledInput(
     document,
     'wwc-settings-create-provider',
-    'Provider ID',
+    '模型服务商 ID',
     'wwc-settings-create-provider',
   )
   const createSecret = labelledInput(
     document,
     'wwc-settings-create-secret',
-    'Local secret-store locator',
+    '本地密钥库定位符',
     'wwc-settings-create-secret',
     'password',
   )
@@ -611,7 +611,7 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
       id: 'wwc-settings-credentials',
       headingLevel: 3,
       title: '凭据引用',
-      description: 'Only secret-safe lifecycle metadata is displayed.',
+      description: '仅显示不含敏感信息的生命周期元数据。',
       className: 'wwc-settings-credentials',
     },
   })
@@ -624,7 +624,7 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
     document,
     props: {
       title: '暂无凭据引用',
-      detail: 'Add a write-only Credential reference before choosing a default model route.',
+      detail: '选择默认模型路由前，请先添加只写一次的凭据引用。',
       className: 'wwc-settings-credential-empty',
       headingLevel: 3,
     },
@@ -1060,10 +1060,10 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
   }
   const routeDraft = createEditableDraft<RouteDraftValues>()
   const routeFieldLabels: Readonly<Record<keyof RouteDraftValues, string>> = Object.freeze({
-    providerId: 'Provider ID',
+    providerId: '模型服务商 ID',
     modelId: '模型 ID',
-    credentialReferenceId: 'Credential reference',
-    workerConcurrencyLimit: 'Worker 并发数',
+    credentialReferenceId: '凭据引用',
+    workerConcurrencyLimit: '执行并发数',
   })
   const editProvider = () => { routeDraft.edit('providerId', provider.input.value) }
   const editModel = () => { routeDraft.edit('modelId', model.input.value) }
@@ -1088,7 +1088,7 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
     update(choice, item) {
       choice.value = item.key
       choice.textContent = item.reference === null
-        ? 'Choose an available reference'
+        ? '选择可用的凭据引用'
         : `${item.reference.displayName} · ${item.reference.providerId}`
     },
   })
@@ -1099,7 +1099,7 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
     update(choice, item) {
       choice.value = item.key
       choice.textContent = item.reference === null
-        ? '跟随 Provider 默认'
+        ? '跟随模型服务商默认设置'
         : `${item.reference.displayName} · ${item.reference.providerId}`
     },
   })
@@ -1187,7 +1187,7 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
       const rotateSecret = labelledInput(
         document,
         `wwc-settings-rotate-${reference.id}`,
-        `New local secret for ${reference.displayName}`,
+        `${reference.displayName} 的新本地密钥`,
         'wwc-settings-rotate-secret',
         'password',
       )
@@ -1206,13 +1206,13 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
         redactFields: ['secretState'],
       })
       const terms = [
-        'Reference ID',
-        'Provider ID',
-        'Secret state',
-        'Rotation version',
-        'Updated',
-        'Last rotated',
-        'Revoked',
+        '引用 ID',
+        '模型服务商 ID',
+        '密钥状态',
+        '轮换版本',
+        '更新时间',
+        '上次轮换时间',
+        '撤销时间',
       ] as const
       const descriptions = terms.map(term => {
         const dt = document.createElement('dt')
@@ -1345,8 +1345,8 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
         lifecycleLabel(reference),
         String(reference.rotationVersion),
         reference.updatedAt,
-        reference.lastRotatedAt ?? 'Never',
-        reference.revokedAt ?? 'No',
+        reference.lastRotatedAt ?? '从未轮换',
+        reference.revokedAt ?? '未撤销',
       ] as const
       values.forEach((value, index) => {
         const description = row.descriptions[index]
@@ -1363,9 +1363,9 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
       row.revoke.disabled = disabled || submissionPending
       row.conflict.hidden = !row.draft.state.revisionConflict
       row.conflictText.textContent = row.draft.state.revisionConflict
-        ? `This Credential reference changed from revision ${String(
+        ? `此凭据引用已从修订版 ${String(
             row.draft.state.baseRevision,
-          )} to revision ${String(row.draft.state.serverRevision)}.`
+          )} 更新为修订版 ${String(row.draft.state.serverRevision)}。`
         : ''
       row.keepDraft.disabled = disabled || submissionPending
       row.useServer.disabled = disabled || submissionPending
@@ -1432,7 +1432,7 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
     })
     recordsStatus.textContent = `状态:${presentation.statusText}`
     recordsRevision.textContent = `快照:${
-      state.settings === null ? '尚未取得' : `revision ${String(state.settings.revision)}`
+      state.settings === null ? '尚未取得' : `修订版 ${String(state.settings.revision)}`
     }`
     recordsError.textContent = `异常:${presentation.errorText ?? '未记录到异常'}`
   }
@@ -1578,9 +1578,9 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
     routeConflict.hidden = routeConflicts.length === 0
     routeConflictText.textContent = routeConflicts.length === 0
       ? ''
-      : `The server changed this draft. ${routeConflicts.map(conflict => (
-          `${routeFieldLabels[conflict.field as keyof RouteDraftValues]}: `
-          + `server “${conflict.serverValue}”; your draft “${conflict.draftValue}”.`
+      : `服务器已更改此草稿。${routeConflicts.map(conflict => (
+          `${routeFieldLabels[conflict.field as keyof RouteDraftValues]}：`
+          + `服务器值“${conflict.serverValue}”；你的草稿“${conflict.draftValue}”。`
         )).join(' ')}`
     const mutationsDisabled = options.readOnly === true || presentation.mutationsDisabled
     const routeSubmissionPending = routeDraft.state.submission !== null

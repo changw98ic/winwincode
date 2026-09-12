@@ -115,7 +115,7 @@ Draft → Clarifying → Ready → Planning → Plan Review
 
 `startStage()` 同时承担明确的阶段交接：如果当前有正在运行的 Codex 阶段，它必须已经绑定精确的 `ExecutionJob`、`WorkerSession` 与 `CodexThread`；服务在同一次原子变更中结束当前 `StageRun` 并开始下一项 `StageRun`，不会另建阶段调度器。计划审核和最终交付审核只能由 human `StageRun` 开始，并且必须同时创建与该 `StageRun` 绑定的开放阻塞 `AttentionItem`。审核完成前状态为 `Needs Attention`；人工身份和 `ProductSession` 都验证通过后，才可以进入 `Executing` 或 `Delivered`。
 
-被其他 `DeliveryTask` 阻塞的任务不能开始。任务级执行或返工进入验证时，验证阶段必须继续指向刚刚产出候选结果的同一个 `DeliveryTask`；没有独立交付子单元的单一 Delivery 则在这些阶段保持 `deliveryTaskId: null`，不会为了返工虚构一个任务。这些检查只约束交付阶段的流转，不接管 Codex 内部如何安排 Plan 或子 Agent。
+被其他 `DeliveryTask` 阻塞的任务不能开始。任务级执行或返工进入验证时，验证阶段必须继续指向刚刚产出候选结果的同一个 `DeliveryTask`；没有独立交付子单元的单一 Delivery 则在这些阶段保持 `workItemId: null`，不会为了返工虚构一个任务。这些检查只约束交付阶段的流转，不接管 Codex 内部如何安排 Plan 或子 Agent。
 
 返工只能使用 Codex `StageRun` 和 `remediator` 角色。它可以指向一个具有独立交付意义的 `DeliveryTask`，也可以在没有这种子单元时属于整个 Delivery。每次开始返工都会增加当前 `DeliverySpec` 的已用次数；角色不能伪装成普通 Executor，调用方也不能修改 StageRun 的 attempt。返工开始后，旧候选立即失效；新候选必须绑定新的 StageRun 和 Session，并重新经过 Reviewer、Verifier、逐项验收和最终 Verdict。返工期间 `DeliverySpec` 保持原样；确实需要改变目标、范围或验收条件时，必须进入 `Clarifying`，提交新的 Spec revision，再经过规划和人工审核。
 

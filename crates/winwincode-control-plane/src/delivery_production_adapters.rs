@@ -17,17 +17,16 @@ use std::{
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use winwincode_api::generated::{
-    Actor, CommandName, DeliveryAdvancePayload, DeliveryCreatePayload,
-    DeliveryResolveAttentionPayload, DeliveryUpdateSpecPayload, Scope,
+    Actor, CommandName, DeliveryCreatePayload, DeliveryResolveAttentionPayload,
+    DeliveryUpdateSpecPayload, Scope, WorkRunStartPayload,
 };
 use winwincode_delivery::{
     application::{
         attention::{AttentionDecision, ResolveAttentionInput, resolve_attention},
-        stage::{NewStageIdentities, StageAdvanceEffect, StageAdvanceResult},
+        workrun_execution::{NewWorkRunIdentities, WorkRunStartEffect, WorkRunStartResult},
     },
     domain::{
         AttentionItemStatus, DELIVERY_SCHEMA_VERSION, Delivery, RepositoryKind, RepositoryRef,
-        SessionBindingId,
         rework::{
             CurrentReworkScope, PreciseReworkAnnotation, ReworkDecision, decide_precise_rework,
         },
@@ -35,10 +34,7 @@ use winwincode_delivery::{
     store::{DeliveryReworkHistoryPort, DeliveryStore},
 };
 use winwincode_domain::RepositoryScope;
-use winwincode_domain::{
-    AttentionItemId, DeliveryId, ExecutionJobId, ProductSessionId, RequestId, Sha256Digest,
-    StageRunId,
-};
+use winwincode_domain::{DeliveryId, ExecutionJobId, ProductSessionId, RequestId, Sha256Digest};
 use winwincode_execution_port::generated::{
     ExecutionJob, ExecutionLimits, ExecutionScope, ExecutionWorkspace, ExecutionWorkspaceWriteMode,
 };
@@ -53,9 +49,9 @@ use winwincode_storage::{
 };
 
 use crate::{
-    ControlPlane, ControlPlaneConfig, DeliveryAdvanceAuthority, DeliveryAttentionAuthority,
-    DeliveryAuthorityError, DeliveryAuthorityPort, DeliveryAuthorityRequest,
-    DeliverySpecificationAuthority, DeliveryVerdictAuthority, EventPublisher, StartError,
+    ControlPlane, ControlPlaneConfig, DeliveryAttentionAuthority, DeliveryAuthorityError,
+    DeliveryAuthorityPort, DeliveryAuthorityRequest, DeliverySpecificationAuthority,
+    DeliveryVerdictAuthority, EventPublisher, StartError, WorkRunStartAuthority,
     delivery_execution::{
         DeliveryExecutionConfig, DeliveryExecutionPortError, ExecutionJobDispatcher,
     },
@@ -292,10 +288,10 @@ impl LocalDeliveryAuthority {
     fn execution_config(
         &self,
         delivery: &Delivery,
-        transition: &StageAdvanceResult,
+        transition: &WorkRunStartResult,
         now_millis: u64,
     ) -> Result<Option<DeliveryExecutionConfig>, DeliveryAuthorityError> {
-        let StageAdvanceEffect::Dispatch(intent) = &transition.effect else {
+        let WorkRunStartEffect::Dispatch(intent) = &transition.effect else {
             return Ok(None);
         };
         let deadline_millis = now_millis
@@ -316,7 +312,7 @@ impl LocalDeliveryAuthority {
         ))
         .map_err(|error| DeliveryAuthorityError::new(error.to_string()))?;
         let (candidate_ref, checkout_revision) = match &transition.effect {
-            StageAdvanceEffect::Dispatch(intent)
+            WorkRunStartEffect::Dispatch(intent)
                 if matches!(
                     intent.role.as_str(),
                     "reviewer" | "verifier" | "adversarial-verifier"
@@ -339,7 +335,7 @@ impl LocalDeliveryAuthority {
                     candidate.candidate_commit_id().to_owned(),
                 )
             }
-            StageAdvanceEffect::Dispatch(intent) if intent.role == "remediator" => {
+            WorkRunStartEffect::Dispatch(intent) if intent.role == "remediator" => {
                 let authorization = intent.rework_authorization().ok_or_else(|| {
                     DeliveryAuthorityError::new(
                         "remediator dispatch requires a sealed rework authorization",
@@ -454,14 +450,14 @@ impl DeliveryAuthorityPort for LocalDeliveryAuthority {
     fn advance(
         &mut self,
         request: DeliveryAuthorityRequest<'_>,
-    ) -> Result<DeliveryAdvanceAuthority, DeliveryAuthorityError> {
+    ) -> Result<WorkRunStartAuthority, DeliveryAuthorityError> {
         self.require_scope(&request)?;
-        if request.command().command != CommandName::DeliveryAdvance {
+        if request.command().command != CommandName::WorkRunStart {
             return Err(DeliveryAuthorityError::new(
                 "advance authority received another command",
             ));
         }
-        let payload: DeliveryAdvancePayload = decode_payload(request.command())?;
+        let payload: WorkRunStartPayload = decode_payload(request.command())?;
         let delivery = request
             .delivery()
             .ok_or_else(|| DeliveryAuthorityError::new("current Delivery is missing"))?;
@@ -569,8 +565,7 @@ impl DeliveryAuthorityPort for LocalDeliveryAuthority {
         let now_millis = Self::now_millis(Some(delivery))?;
         let seed = command_seed(request.command())?;
         let work_contract = &delivery.snapshot().work_run_aggregate.contract;
-        let identities = NewStageIdentities {
-            stage_run_id: StageRunId(deterministic_id("run", seed_with(&seed, b"stage"))),
+        let identities = NewWorkRunIdentities {
             work_contract_id: work_contract.id.clone(),
             work_contract_revision: work_contract.revision.clone(),
             work_item_id: start.work_item.id.clone(),
@@ -580,16 +575,8 @@ impl DeliveryAuthorityPort for LocalDeliveryAuthority {
                 seed_with(&seed, b"work-run"),
             )),
             execution_job_id: ExecutionJobId(deterministic_id("job", seed_with(&seed, b"job"))),
-            session_binding_id: SessionBindingId(deterministic_id(
-                "binding",
-                seed_with(&seed, b"binding"),
-            )),
-            attention_item_id: AttentionItemId(deterministic_id(
-                "att",
-                seed_with(&seed, b"attention"),
-            )),
         };
-        let transition = StageAdvanceResult::canonical_workrun_dispatch(
+        let transition = WorkRunStartResult::canonical_workrun_dispatch(
             delivery,
             rework_authorization,
             identities,
@@ -605,7 +592,7 @@ impl DeliveryAuthorityPort for LocalDeliveryAuthority {
         )
         .map_err(|error| DeliveryAuthorityError::new(error.to_string()))?;
         let execution = self.execution_config(delivery, &transition, now_millis)?;
-        Ok(DeliveryAdvanceAuthority {
+        Ok(WorkRunStartAuthority {
             repository: delivery.snapshot().spec.repository.clone(),
             source_ref: delivery.snapshot().spec.source_ref.clone(),
             transition,
@@ -758,7 +745,7 @@ impl ExecutionJobDispatcher for LocalExecutionJobDispatcher {
         ));
         // The WorkRun wire scope deliberately carries no Delivery transport
         // field. Recover the owning Delivery from the immutable outbox intent
-        // committed by `delivery.advance`; this keeps queue scope and public
+        // committed by `workrun.start`; this keeps queue scope and public
         // WorkRun cancellation tied to the exact Delivery rather than relying
         // on a caller-supplied or absent value.
         let (durable, _) =

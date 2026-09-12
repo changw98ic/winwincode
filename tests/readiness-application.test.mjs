@@ -215,6 +215,13 @@ class FakeElement {
   listeners = new Map()
   dataset = {}
   className = ''
+  classList = {
+    toggle: (name, force) => {
+      const names = this.className.split(/\s+/u).filter(Boolean).filter(candidate => candidate !== name)
+      if (force) names.push(name)
+      this.className = names.join(' ')
+    },
+  }
   disabled = false
   hidden = false
   tabIndex = 0
@@ -397,8 +404,6 @@ test('the shell mounts the first-run checklist and reuses the shared query cache
     'credential.reference.list',
     'model.route.availability.list',
     'worker.list',
-    'session.list',
-    'delivery.list',
   ]) {
     const reads = fixture.client.queries.filter(query => query.query === name).length
     assert.equal(
@@ -452,4 +457,3 @@ test('recheck after completing the steps reports ready and issues fresh reads', 
   )
   fixture.application.close()
 })
-

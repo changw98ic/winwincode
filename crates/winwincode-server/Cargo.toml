@@ -9,6 +9,14 @@ repository.workspace = true
 publish = false
 include = ["src/**", "tests/**", "Cargo.toml", "README.md"]
 
+[features]
+default = ["local-worker"]
+local-worker = [
+  "dep:winwincode-codex",
+  "dep:winwincode-local",
+  "dep:winwincode-worker",
+]
+
 [dependencies]
 argon2.workspace = true
 axum.workspace = true
@@ -23,19 +31,19 @@ rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-time.workspace = true
+time = { workspace = true, features = ["parsing"] }
 tokio = { workspace = true, features = ["macros", "net", "signal"] }
 ureq = { version = "=3.1.4", default-features = false, features = ["rustls"] }
 winwincode-api.workspace = true
 winwincode-client-port = { path = "../winwincode-client-port" }
 winwincode-control-plane = { path = "../winwincode-control-plane" }
 winwincode-delivery = { path = "../winwincode-delivery" }
-winwincode-codex = { path = "../winwincode-codex" }
+winwincode-codex = { path = "../winwincode-codex", optional = true }
 winwincode-domain.workspace = true
 winwincode-execution-port.workspace = true
-winwincode-local = { path = "../winwincode-local" }
+winwincode-local = { path = "../winwincode-local", optional = true }
 winwincode-storage.workspace = true
-winwincode-worker = { path = "../winwincode-worker" }
+winwincode-worker = { path = "../winwincode-worker", optional = true }
 
 [dev-dependencies]
 rcgen.workspace = true

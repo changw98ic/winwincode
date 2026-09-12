@@ -23,7 +23,7 @@
               "activity.recorded.v1",
               "attention.changed.v1",
               "delivery.changed.v1",
-              "delivery-task.changed.v1"
+              "work-item.changed.v1"
             ]
           },
           "startAt": "latest"
@@ -151,9 +151,9 @@
           },
           "authorizationEpoch": 1,
           "event": {
-            "type": "delivery-task.changed.v1",
+            "type": "work-item.changed.v1",
             "deliveryId": "dlv_01J00000000000000000000000",
-            "deliveryTaskId": "dtk_01J00000000000000000000000",
+            "workItemId": "wit_01J00000000000000000000000",
             "revision": 4,
             "changeKind": "started"
           }
@@ -461,7 +461,7 @@
               "delivery.get",
               "runtime.projection.get"
             ],
-            "scopeKind": "delivery-stage",
+            "scopeKind": "work-run",
             "sessionIdentity": {
               "productSessionId": "psn_01J00000000000000000000000",
               "workerSessionId": "wsn_01J00000000000000000000000",

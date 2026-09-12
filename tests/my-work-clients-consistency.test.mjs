@@ -86,14 +86,14 @@ function device(overrides = {}) {
 
 function deliverySummary(overrides = {}) {
   return {
-    activeStageRunId: null,
+    activeWorkRunId: null,
     deliveryId: 'dlv_00000000000000000000000001',
     openAttentionCount: 0,
     ownership: { ...scope },
     revision: 3,
     schemaVersion,
-    status: 'executing',
-    taskCounts: { active: 1, blocked: 0, completed: 0, failed: 0, pending: 0, total: 1, verifying: 0 },
+    status: 'in_progress',
+    workItemCounts: { ready: 0, waitingHuman: 0, candidateReady: 0, rework: 0, cancelled: 0, inProgress: 1, waitingDependency: 0, done: 0, failed: 0, backlog: 0, total: 1, validating: 0 },
     title: 'Delivery',
     updatedAt: '2026-09-03T08:00:00.000Z',
     ...overrides,
@@ -431,7 +431,7 @@ function assertSurfacesAgree(fixtureHandle, expectedDevices) {
   }
   assert.equal(
     byClass(zone, 'wwc-my-work-clients-count').textContent,
-    expectedDevices.length === 1 ? '1 device' : `${expectedDevices.length} devices`,
+    `${expectedDevices.length} 台设备`,
   )
   assert.equal(model.state.clients.summary.total, expectedDevices.length)
   assert.equal(
@@ -507,7 +507,7 @@ test('draining and recovery-pending states reach both surfaces; only the card sh
     .find(child => child.className === 'wwc-clients-card-recovery')
   assert.notEqual(recovery, undefined)
   assert.equal(recovery.hidden, false)
-  assert.equal(recovery.textContent, `Connection interrupted · recovers by ${futureDeadline}`)
+  assert.equal(recovery.textContent, `连接中断 · 预计在 ${futureDeadline} 前恢复`)
   assert.equal(
     stateText(rowFor(handle.myWorkRoot, 'Recovering Rig')),
     stateText(recoveringCard),

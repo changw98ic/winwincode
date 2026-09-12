@@ -34,11 +34,6 @@ const monitorModule = await import(`${pathToFileURL(resolve(
   root,
   '.cache/attention-notifications-tests/attention-notifications.js',
 )).href}`)
-const centerPageModule = await import(`${pathToFileURL(resolve(
-  root,
-  '.cache/attention-notifications-tests/attention-center-page.js',
-)).href}`)
-
 const {
   attentionSignalBadge,
   attentionSignalRouteHash,
@@ -49,11 +44,6 @@ const {
 const {
   createAttentionNotificationMonitor,
 } = monitorModule
-const {
-  attentionCenterItemHash,
-  mountAttentionCenterPage,
-} = centerPageModule
-
 const schemaVersion = 'winwincode/v1'
 const actor = { kind: 'user', id: 'usr_00000000000000000000000001' }
 const scope = {
@@ -72,8 +62,7 @@ const scopeSelection = {
 const deliveryId = 'dlv_00000000000000000000000001'
 const attentionDeliveryId = 'dlv_00000000000000000000000002'
 const deliveredDeliveryId = 'dlv_00000000000000000000000003'
-const stageRunId = 'run_00000000000000000000000001'
-const approvalStageRunId = 'run_00000000000000000000000002'
+const workRunId = 'wrn_00000000000000000000000001'
 const approvalSessionId = 'psn_00000000000000000000000002'
 const approvalId = 'apr_00000000000000000000000001'
 const workerSessionId = 'wss_00000000000000000000000001'
@@ -96,7 +85,7 @@ function requestId(value) {
 
 function deliverySummary(overrides = {}) {
   return {
-    activeStageRunId: stageRunId,
+    activeWorkRunId: workRunId,
     deliveryId,
     openAttentionCount: 0,
     ownership: {
@@ -107,8 +96,8 @@ function deliverySummary(overrides = {}) {
     },
     revision: 13,
     schemaVersion,
-    status: 'executing',
-    taskCounts: { active: 1, blocked: 0, completed: 2, failed: 0, pending: 1, total: 4, verifying: 0 },
+    status: 'in_progress',
+    workItemCounts: { ready: 0, waitingHuman: 0, candidateReady: 0, rework: 0, cancelled: 0, inProgress: 1, waitingDependency: 0, done: 2, failed: 0, backlog: 1, total: 4, validating: 0 },
     title: 'Delivery under execution',
     updatedAt: '2026-09-04T02:58:00.000Z',
     ...overrides,
@@ -131,7 +120,7 @@ function approval(overrides = {}) {
         productSessionId: approvalSessionId,
         workerSessionId,
         codexThreadId,
-        stageRunId: stageRunId,
+        workRunId: workRunId,
       },
     },
     ...overrides,
@@ -145,17 +134,17 @@ test('attention signals derive approval, attention, failure, and completion fact
       deliverySummary(),
       deliverySummary({
         deliveryId: attentionDeliveryId,
-        activeStageRunId: null,
+        activeWorkRunId: null,
         openAttentionCount: 3,
-        status: 'needs-attention',
+        status: 'waiting_human',
         title: 'Delivery waiting on a decision',
       }),
       deliverySummary({
         deliveryId: deliveredDeliveryId,
-        activeStageRunId: null,
-        status: 'delivered',
-        taskCounts: {
-          active: 0, blocked: 0, completed: 4, failed: 2, pending: 0, total: 6, verifying: 0,
+        activeWorkRunId: null,
+        status: 'done',
+        workItemCounts: { ready: 0, waitingHuman: 0, candidateReady: 0, rework: 0, cancelled: 0,
+          inProgress: 0, waitingDependency: 0, done: 4, failed: 2, backlog: 0, total: 6, validating: 0,
         },
         title: 'Delivery that finished',
       }),
@@ -173,24 +162,24 @@ test('attention signals derive approval, attention, failure, and completion fact
   assert.equal(attention.id, attentionDeliveryId)
   assert.equal(attention.identity, `attention:${attentionDeliveryId}:3`)
   assert.equal(attention.weight, 3)
-  assert.equal(attention.stageRunId, null)
-  assert.equal(attention.context, 'Delivery · Delivery waiting on a decision')
+  assert.equal(attention.workRunId, null)
+  assert.equal(attention.context, '交付 · Delivery waiting on a decision')
   const failure = signals[2]
   assert.equal(failure.identity, `failure:${deliveredDeliveryId}:2`)
   assert.equal(failure.weight, 2)
-  assert.equal(failure.title, 'Tasks failed')
-  assert.equal(failure.stageRunId, null)
+  assert.equal(failure.title, '多项任务失败')
+  assert.equal(failure.workRunId, null)
   const completion = signals[3]
   assert.equal(completion.id, deliveredDeliveryId)
-  assert.equal(completion.identity, `completion:${deliveredDeliveryId}:delivered`)
-  assert.equal(completion.stageRunId, null)
+  assert.equal(completion.identity, `completion:${deliveredDeliveryId}:done`)
+  assert.equal(completion.workRunId, null)
   assert.equal(completion.weight, 1)
   const approvalSignal = signals[1]
   assert.equal(approvalSignal.id, approvalId)
   assert.equal(approvalSignal.identity, `approval:${approvalId}:pending`)
   assert.equal(approvalSignal.productSessionId, approvalSessionId)
-  assert.equal(approvalSignal.stageRunId, stageRunId)
-  assert.equal(approvalSignal.context, 'Delivery · Delivery under execution')
+  assert.equal(approvalSignal.workRunId, workRunId)
+  assert.equal(approvalSignal.context, '交付 · Delivery under execution')
 
   const badge = attentionSignalBadge(signals)
   assert.deepEqual(badge, {
@@ -219,9 +208,9 @@ test('attention signals exclude expired approvals and silent deliveries', () => 
       }),
     ],
     deliveries: [
-      deliverySummary({ openAttentionCount: 2, status: 'executing' }),
-      deliverySummary({ deliveryId: attentionDeliveryId, taskCounts: {
-        active: 0, blocked: 0, completed: 0, failed: 0, pending: 3, total: 3, verifying: 0,
+      deliverySummary({ openAttentionCount: 2, status: 'in_progress' }),
+      deliverySummary({ deliveryId: attentionDeliveryId, workItemCounts: { ready: 0, waitingHuman: 0, candidateReady: 0, rework: 0, cancelled: 0,
+        inProgress: 0, waitingDependency: 0, done: 0, failed: 0, backlog: 3, total: 3, validating: 0,
       } }),
     ],
     nowMillis: now,
@@ -243,16 +232,16 @@ test('notification content stays secret-safe and drops non-canonical identities'
     deliveries: [
       deliverySummary({
         deliveryId: attentionDeliveryId,
-        activeStageRunId: null,
+        activeWorkRunId: null,
         openAttentionCount: 1,
-        status: 'needs-attention',
+        status: 'waiting_human',
         title: 'Delivery waiting on a decision',
       }),
       deliverySummary({
         deliveryId: 'dlv_not-canonical',
-        activeStageRunId: 'run_00000000000000000000000009',
+        activeWorkRunId: 'wrn_00000000000000000000000009',
         openAttentionCount: 4,
-        status: 'needs-attention',
+        status: 'waiting_human',
       }),
     ],
     nowMillis: now,
@@ -268,17 +257,17 @@ test('notification content stays secret-safe and drops non-canonical identities'
     'a malformed Delivery identity never becomes a notification',
   )
   const attention = signals.find(signal => signal.kind === 'attention')
-  assert.equal(attention.context, 'Delivery · Delivery waiting on a decision')
+  assert.equal(attention.context, '交付 · Delivery waiting on a decision')
   const approvalSignal = signals.find(signal => signal.kind === 'approval')
-  assert.equal(approvalSignal.title, 'Tool approval requested')
-  assert.equal(approvalSignal.context, 'Open the session decisions')
+  assert.equal(approvalSignal.title, '工具调用等待批准')
+  assert.equal(approvalSignal.context, '打开会话决策')
 })
 
 test('one event identity notifies once and a changed state notifies again', () => {
   const gate = createAttentionSignalGate()
   const first = attentionSignals({
     approvals: [approval()],
-    deliveries: [deliverySummary({ openAttentionCount: 1, status: 'needs-attention' })],
+    deliveries: [deliverySummary({ openAttentionCount: 1, status: 'waiting_human' })],
     nowMillis: now,
   })
   assert.deepEqual(gate.admit(first), first)
@@ -287,7 +276,7 @@ test('one event identity notifies once and a changed state notifies again', () =
 
   const progressed = attentionSignals({
     approvals: [approval()],
-    deliveries: [deliverySummary({ openAttentionCount: 2, status: 'needs-attention' })],
+    deliveries: [deliverySummary({ openAttentionCount: 2, status: 'waiting_human' })],
     nowMillis: now,
   })
   assert.deepEqual(
@@ -305,15 +294,15 @@ test('one event identity notifies once and a changed state notifies again', () =
   )
 })
 
-test('signals open the Attention Center, the one unified inbox for the user', () => {
+test('signals open the filtered task board', () => {
   const signals = attentionSignals({
     approvals: [approval()],
     deliveries: [
-      deliverySummary({ openAttentionCount: 1, status: 'needs-attention' }),
+      deliverySummary({ openAttentionCount: 1, status: 'waiting_human' }),
       deliverySummary({
         deliveryId: deliveredDeliveryId,
-        activeStageRunId: null,
-        status: 'delivered',
+        activeWorkRunId: null,
+        status: 'done',
       }),
     ],
     nowMillis: now,
@@ -322,27 +311,7 @@ test('signals open the Attention Center, the one unified inbox for the user', ()
     + `&organizationId=${scope.organizationId}&workspaceId=${scope.workspaceId}`
     + `&projectId=${scope.projectId}&repositoryId=${scope.repositoryId}`
   assert.equal(attentionSignalRouteHash(scopeSelection), expectedHash)
-  assert.equal(attentionSignalRouteHash(scopeSelection), expectedHash)
-  assert.equal(attentionSignalRouteHash(scopeSelection), expectedHash)
 })
-
-function descendants(node) {
-  return [node, ...node.children.flatMap(child => descendants(child))]
-}
-
-function allByClass(rootElement, className) {
-  return descendants(rootElement).filter(node => node.className === className)
-}
-
-function byClass(rootElement, className) {
-  const match = allByClass(rootElement, className)[0]
-  assert.notEqual(match, undefined, `missing .${className}`)
-  return match
-}
-
-function visibleText(node) {
-  return descendants(node).map(current => current.textContent).join(' ')
-}
 
 class FakeElement {
   constructor(ownerDocument, tagName) {
@@ -557,10 +526,10 @@ test('the monitor badges approval, attention, failure, and completion counts wit
   const client = monitoringClient()
   client.approvals = [approval()]
   client.deliveries = [
-    deliverySummary({ openAttentionCount: 2, status: 'needs-attention' }),
+    deliverySummary({ openAttentionCount: 2, status: 'waiting_human' }),
   ]
   const { monitor, ticker, badgeTarget, document } = monitorFor(client)
-  badgeTarget.textContent = 'Attention'
+  badgeTarget.textContent = '任务看板'
   await monitor.start()
 
   assert.deepEqual(client.queries.map(request => request.query), [
@@ -578,17 +547,17 @@ test('the monitor badges approval, attention, failure, and completion counts wit
     failure: 0,
   })
   assert.equal(badgeTarget.dataset.wwcBadge, '3')
-  assert.equal(badgeTarget.getAttribute('aria-label'), 'Attention · 3 entries need you')
+  assert.equal(badgeTarget.getAttribute('aria-label'), '任务看板 · 3 项待处理')
   assert.equal(badgeTarget.children.length, 1)
   assert.equal(badgeTarget.children[0].textContent, '3')
   assert.equal(document.title, '(3) WinWinCode')
-  assert.match(badgeTarget.textContent, /Attention/u, 'the entry keeps its own label')
+  assert.match(badgeTarget.textContent, /任务看板/u, 'the entry keeps its own label')
 
   // The shell rebuilds navigation labels; the badge must survive the rebuild.
-  badgeTarget.textContent = 'Attention'
+  badgeTarget.textContent = '任务看板'
   monitor.applyBadge()
   assert.equal(badgeTarget.children.length, 1)
-  assert.match(badgeTarget.textContent, /Attention/u)
+  assert.match(badgeTarget.textContent, /任务看板/u)
 
   client.deliveries = [deliverySummary()]
   client.approvals = []
@@ -600,7 +569,7 @@ test('the monitor badges approval, attention, failure, and completion counts wit
   assert.equal(badgeTarget.getAttribute('aria-label'), null)
   assert.equal(badgeTarget.dataset.wwcBadge, undefined)
   assert.equal(document.title, 'WinWinCode')
-  assert.match(badgeTarget.textContent, /Attention/u, 'clearing the badge keeps the label')
+  assert.match(badgeTarget.textContent, /任务看板/u, 'clearing the badge keeps the label')
   ticker.tick()
   await new Promise(resolve => { setImmediate(resolve) })
   assert.deepEqual(client.queries.map(request => request.query), [
@@ -636,7 +605,7 @@ test('resolved and expired entries leave the badge on the next bounded tick', as
 
 test('monitor failures clear the badge instead of presenting stale counts', async () => {
   const client = monitoringClient()
-  client.deliveries = [deliverySummary({ openAttentionCount: 1, status: 'needs-attention' })]
+  client.deliveries = [deliverySummary({ openAttentionCount: 1, status: 'waiting_human' })]
   const { monitor, badgeTarget, document } = monitorFor(client)
   await monitor.start()
   assert.equal(monitor.state.badge.total, 1)
@@ -655,8 +624,8 @@ test('monitor failures clear the badge instead of presenting stale counts', asyn
 test('desktop notifications stay off until the user grants them and never repeat one event', async () => {
   const client = monitoringClient()
   client.deliveries = [
-    deliverySummary({ openAttentionCount: 1, status: 'needs-attention' }),
-    deliverySummary({ deliveryId: attentionDeliveryId, status: 'delivered' }),
+    deliverySummary({ openAttentionCount: 1, status: 'waiting_human' }),
+    deliverySummary({ deliveryId: attentionDeliveryId, status: 'done' }),
   ]
   const desktop = desktopFake({ permission: 'default' })
   const { monitor, opened } = monitorFor(client, { desktop })
@@ -671,15 +640,15 @@ test('desktop notifications stay off until the user grants them and never repeat
   assert.deepEqual(desktop.shown, [], 'consent must not replay entries that already existed')
 
   client.deliveries = [
-    deliverySummary({ openAttentionCount: 2, status: 'needs-attention' }),
-    deliverySummary({ deliveryId: attentionDeliveryId, status: 'delivered' }),
+    deliverySummary({ openAttentionCount: 2, status: 'waiting_human' }),
+    deliverySummary({ deliveryId: attentionDeliveryId, status: 'done' }),
   ]
   await monitor.refresh()
   assert.deepEqual(desktop.shown.map(notification => notification.tag), [
     `attention:${deliveryId}:2`,
   ])
-  assert.equal(desktop.shown[0].title, 'Delivery needs attention')
-  assert.equal(desktop.shown[0].body, 'Delivery · Delivery under execution')
+  assert.equal(desktop.shown[0].title, '交付需要处理')
+  assert.equal(desktop.shown[0].body, '交付 · Delivery under execution')
   await monitor.refresh()
   assert.equal(desktop.shown.length, 1, 'one event identity never notifies twice')
 
@@ -694,7 +663,7 @@ test('desktop notifications stay off until the user grants them and never repeat
 
 test('denied desktop permission stays explicit and resolved entries close their notification', async () => {
   const client = monitoringClient()
-  client.deliveries = [deliverySummary({ openAttentionCount: 1, status: 'needs-attention' })]
+  client.deliveries = [deliverySummary({ openAttentionCount: 1, status: 'waiting_human' })]
   const desktop = desktopFake({ permission: 'default' })
   desktop.nextPermission = 'denied'
   const { monitor } = monitorFor(client, { desktop })
@@ -711,8 +680,8 @@ test('denied desktop permission stays explicit and resolved entries close their 
   assert.equal(desktop.shown.length, 0, 'enabling later never replays known entries')
 
   client.deliveries = [
-    deliverySummary({ openAttentionCount: 1, status: 'needs-attention' }),
-    deliverySummary({ deliveryId: attentionDeliveryId, openAttentionCount: 1, status: 'needs-attention' }),
+    deliverySummary({ openAttentionCount: 1, status: 'waiting_human' }),
+    deliverySummary({ deliveryId: attentionDeliveryId, openAttentionCount: 1, status: 'waiting_human' }),
   ]
   await monitor.refresh()
   assert.equal(desktop.shown.length, 1)
@@ -724,7 +693,7 @@ test('denied desktop permission stays explicit and resolved entries close their 
 
 test('closing the monitor stops the bounded tick and clears the badge', async () => {
   const client = monitoringClient()
-  client.deliveries = [deliverySummary({ openAttentionCount: 1, status: 'needs-attention' })]
+  client.deliveries = [deliverySummary({ openAttentionCount: 1, status: 'waiting_human' })]
   const { monitor, ticker, badgeTarget, document } = monitorFor(client)
   await monitor.start()
   monitor.close()
@@ -736,222 +705,3 @@ test('closing the monitor stops the bounded tick and clears the badge', async ()
   await monitor.refresh()
   assert.equal(client.queries.length, queriesBefore)
 })
-
-function centerItem(overrides = {}) {
-  return {
-    kind: 'approval',
-    id: approvalId,
-    title: approvalSubject,
-    blocking: false,
-    expired: false,
-    bindingValid: true,
-    urgency: 'pending',
-    createdAt: '2026-09-04T02:59:00.000Z',
-    expiresAt: '2026-09-04T05:00:00.000Z',
-    productSessionId: approvalSessionId,
-    sessionTitle: 'Session psn_00000000000000000000000002',
-    stageRunId: approvalStageRunId,
-    executionJobId,
-    deliveryId: null,
-    deliveryTitle: null,
-    candidateBound: false,
-    revision: 7,
-    ...overrides,
-  }
-}
-
-function centerState(overrides = {}) {
-  return {
-    status: 'ready',
-    realtime: 'subscribed',
-    items: [
-      centerItem(),
-      centerItem({
-        kind: 'input',
-        id: 'inp_00000000000000000000000001',
-        title: 'Describe the exact local change',
-        stageRunId,
-        productSessionId: 'psn_00000000000000000000000001',
-      }),
-    ],
-    origins: [
-      {
-        deliveryId,
-        deliveryTitle: 'Delivery under execution',
-        deliveryRevision: 13,
-        activeStageRunId: stageRunId,
-      },
-      {
-        deliveryId: attentionDeliveryId,
-        deliveryTitle: 'Delivery waiting on a decision',
-        deliveryRevision: 4,
-        activeStageRunId: approvalStageRunId,
-      },
-    ],
-    error: null,
-    ...overrides,
-  }
-}
-
-function fakeModel(initialStateValue) {
-  let state = initialStateValue
-  const listeners = new Set()
-  let closeCalls = 0
-  return {
-    get state() { return state },
-    get closeCalls() { return closeCalls },
-    subscribe(listener) {
-      listeners.add(listener)
-      listener(state)
-      return () => { listeners.delete(listener) }
-    },
-    publish(next) {
-      state = next
-      for (const listener of listeners) listener(state)
-    },
-    async start() {},
-    async refresh() {},
-    cancelPending() {},
-    reconnect() {},
-    close() { closeCalls += 1 },
-  }
-}
-
-test('Attention Center decision links open the Chat session that raised them', () => {
-  const state = centerState()
-  const input = state.items[1]
-
-  assert.equal(
-    attentionCenterItemHash(input, scopeSelection),
-    `#/chat?session=psn_00000000000000000000000001`
-      + `&organizationId=${scope.organizationId}&workspaceId=${scope.workspaceId}`
-      + `&projectId=${scope.projectId}&repositoryId=${scope.repositoryId}`,
-  )
-  const approvalItem = state.items[0]
-  assert.equal(
-    attentionCenterItemHash(approvalItem, scopeSelection),
-    `#/chat?session=${approvalSessionId}`
-      + `&organizationId=${scope.organizationId}&workspaceId=${scope.workspaceId}`
-      + `&projectId=${scope.projectId}&repositoryId=${scope.repositoryId}`,
-  )
-  const sessionless = centerItem({
-    id: 'apr_00000000000000000000000009',
-    stageRunId: 'run_00000000000000000000000009',
-    productSessionId: null,
-  })
-  assert.equal(
-    attentionCenterItemHash(sessionless, scopeSelection),
-    null,
-    'a decision without a Session id links nothing instead of fabricating one',
-  )
-})
-
-test('the Attention Center cards render no execution-context link and never leak secrets', () => {
-  const document = new FakeDocument()
-  const rootElement = new FakeElement(document, 'div')
-  const model = fakeModel(centerState())
-  const mounted = mountAttentionCenterPage({
-    root: rootElement,
-    model,
-    scopeSelection,
-    ownsModel: false,
-    readOnly: false,
-  })
-  const cards = [...byClass(rootElement, 'wwc-attention-center-list').children]
-  assert.equal(cards.length, 2)
-  for (const card of cards) {
-    assert.equal(
-      allByClass(card, 'wwc-attention-card-origin').length,
-      0,
-      'no execution-origin link exists without a delivery workbench surface',
-    )
-    const action = byClass(card, 'wwc-attention-card-action')
-    assert.match(action.getAttribute('href'), /^#\/chat\?/u)
-  }
-
-  const text = visibleText(rootElement)
-  for (const secret of [repositoryLocator, candidateDigest, executionJobId, workerSessionId, codexThreadId]) {
-    assert.equal(text.includes(secret), false, secret)
-  }
-  mounted.close()
-  assert.equal(model.closeCalls, 0, 'the shell owns the shared Attention Center model')
-})
-
-test('the Attention Center exposes the explicit desktop notification consent control', () => {
-  const document = new FakeDocument()
-  const rootElement = new FakeElement(document, 'div')
-  const model = fakeModel(centerState())
-  let requested = null
-  let desktopState = {
-    supported: true,
-    permission: 'default',
-    enabled: false,
-    blocked: false,
-  }
-  const listeners = new Set()
-  const control = {
-    get state() {
-      return {
-        status: 'ready',
-        signals: [],
-        badge: attentionSignalBadge([]),
-        titleText: 'WinWinCode',
-        desktop: desktopState,
-      }
-    },
-    subscribe(listener) {
-      listeners.add(listener)
-      listener(control.state)
-      return () => { listeners.delete(listener) }
-    },
-    async setDesktopEnabled(enabled) { requested = enabled },
-  }
-  const mounted = mountAttentionCenterPage({
-    root: rootElement,
-    model,
-    scopeSelection,
-    ownsModel: true,
-    notifications: control,
-    readOnly: false,
-  })
-  const status = byClass(rootElement, 'wwc-attention-center-desktop-status')
-  const toggle = byClass(rootElement, 'wwc-attention-center-desktop-toggle')
-  assert.equal(status.textContent, '桌面通知当前关闭。开启后，阻塞条目会通知你。')
-  assert.equal(toggle.textContent, '开启桌面通知')
-  toggle.dispatch('click')
-  assert.equal(requested, true)
-
-  desktopState = { ...desktopState, enabled: true, permission: 'granted' }
-  for (const listener of listeners) listener(control.state)
-  assert.equal(toggle.textContent, '关闭桌面通知')
-  toggle.dispatch('click')
-  assert.equal(requested, false)
-
-  desktopState = { ...desktopState, enabled: false, blocked: true }
-  for (const listener of listeners) listener(control.state)
-  assert.equal(byClass(rootElement, 'wwc-attention-center-desktop-status').textContent.includes('阻止'), true)
-  assert.equal(byClass(rootElement, 'wwc-attention-center-desktop-toggle').hidden, true)
-  mounted.close()
-})
-
-test('the desktop control stays hidden when the shell offers no notification control', () => {
-  const document = new FakeDocument()
-  const rootElement = new FakeElement(document, 'div')
-  const model = fakeModel(centerState())
-  const mounted = mountAttentionCenterPage({
-    root: rootElement,
-    model,
-    scopeSelection,
-    ownsModel: true,
-    readOnly: false,
-  })
-  const status = allByClass(rootElement, 'wwc-attention-center-desktop-status')
-  const toggle = allByClass(rootElement, 'wwc-attention-center-desktop-toggle')
-  assert.equal(status.length, 1)
-  assert.equal(toggle.length, 1)
-  assert.equal(status[0].hidden, true)
-  assert.equal(toggle[0].hidden, true)
-  mounted.close()
-})
-
-

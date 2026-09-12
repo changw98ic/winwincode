@@ -10,7 +10,8 @@
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
-use winwincode_delivery::domain::{Delivery, DeliveryStatus, StageRunStatus};
+use winwincode_delivery::domain::{Delivery, DeliveryStatus};
+use winwincode_domain::WorkRunState;
 use winwincode_domain::{DeliveryId, PublicationId, RequestId, Sha256Digest};
 use winwincode_publication::{PublicationReadLedger, PublicationState};
 use winwincode_storage::{
@@ -329,14 +330,20 @@ pub(crate) fn validate_release_authority(
         )
         .into());
     }
-    if delivery.snapshot().stage_runs.iter().any(|run| {
-        matches!(
-            run.status,
-            StageRunStatus::Running | StageRunStatus::Waiting
-        )
-    }) {
+    if delivery
+        .snapshot()
+        .work_run_aggregate
+        .runs
+        .iter()
+        .any(|run| {
+            !matches!(
+                run.state,
+                WorkRunState::Settled | WorkRunState::Failed | WorkRunState::Cancelled
+            )
+        })
+    {
         return Err(StorageError::invalid_input(
-            "candidate read-closure requires every Delivery StageRun to be terminal",
+            "candidate read-closure requires every Delivery WorkRun to be terminal",
         )
         .into());
     }
@@ -433,14 +440,20 @@ fn verify_terminal_receipt(
         )
         .into());
     }
-    if delivery.snapshot().stage_runs.iter().any(|run| {
-        matches!(
-            run.status,
-            StageRunStatus::Running | StageRunStatus::Waiting
-        )
-    }) {
+    if delivery
+        .snapshot()
+        .work_run_aggregate
+        .runs
+        .iter()
+        .any(|run| {
+            !matches!(
+                run.state,
+                WorkRunState::Settled | WorkRunState::Failed | WorkRunState::Cancelled
+            )
+        })
+    {
         return Err(StorageError::invalid_input(
-            "candidate read-closure requires every Delivery StageRun to be terminal",
+            "candidate read-closure requires every Delivery WorkRun to be terminal",
         )
         .into());
     }

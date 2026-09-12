@@ -22,7 +22,7 @@ import {
 
 const root = resolve(import.meta.dirname, '..')
 
-const SURFACES = ['chat', 'settings', 'attention']
+const SURFACES = ['chat', 'home', 'settings']
 
 test('a real browser keeps one page heading, one live-region channel per page, and a keyboard bypass on every surface', async t => {
   const chromePath = chromeBinary()
@@ -147,7 +147,7 @@ test('a real browser keeps one page heading, one live-region channel per page, a
       ['H2', '通用与个人'],
       ['H2', '模型设置不可用'],
       ['H3', '新会话默认模型'],
-      ['H3', 'Provider 列表'],
+      ['H3', '模型服务商列表'],
       ['H3', '添加凭据引用'],
       ['H3', '凭据引用'],
       ['H3', '暂无凭据引用'],

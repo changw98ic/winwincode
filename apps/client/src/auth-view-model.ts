@@ -46,14 +46,14 @@ function safeError(error: unknown, signal: AbortSignal): ControlPlaneClientError
   if (signal.aborted) return new ControlPlaneClientError({
     kind: 'cancelled',
     code: 'REQUEST_CANCELLED',
-    message: 'The browser session request was cancelled.',
+    message: '浏览器会话请求已取消。',
     requestId: null,
     retryable: false,
   })
   return new ControlPlaneClientError({
     kind: 'protocol',
     code: 'AUTH_SESSION_VIEW_MODEL_FAILURE',
-    message: 'The browser session could not be updated.',
+    message: '无法更新浏览器会话。',
     requestId: null,
     retryable: false,
   })
@@ -76,7 +76,7 @@ export function createAuthSessionViewModel(client: ControlPlaneClient): AuthSess
     throw new ControlPlaneClientError({
       kind: 'protocol',
       code: 'AUTH_SESSION_CLOSED',
-      message: 'The browser session view is closed.',
+      message: '浏览器会话视图已关闭。',
       requestId: null,
       retryable: false,
     })

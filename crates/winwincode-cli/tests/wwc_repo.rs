@@ -172,6 +172,12 @@ fn repo_add_list_remove_round_trip_reports_frames() {
     let fixture = Fixture::new();
     fixture.enroll();
     let repository = fixture.git_repository("round-trip-repo");
+    let instance =
+        load_device_identity(&DeviceStore::open(&fixture.data_directory).expect("store opens"))
+            .expect("identity read")
+            .expect("identity")
+            .current_instance_id()
+            .to_owned();
 
     // add: JSON outcome carries the binding view.
     let repository_text = repository.to_str().expect("UTF-8 repository path");
@@ -199,6 +205,13 @@ fn repo_add_list_remove_round_trip_reports_frames() {
         )
     );
     assert_eq!(added["gitInitialized"], false);
+    assert_eq!(
+        load_device_identity(&DeviceStore::open(&fixture.data_directory).expect("store opens"))
+            .expect("identity read")
+            .expect("identity")
+            .current_instance_id(),
+        instance
+    );
 
     // The upsert frame is durable and path-free.
     let kinds = fixture.pending_kinds();

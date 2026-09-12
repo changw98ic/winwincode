@@ -6,7 +6,8 @@ use winwincode_delivery::{
         report_codex_thread_with_authority,
     },
     domain::{
-        Delivery, DeliveryStatus, SessionBinding, SessionBindingId, SessionBindingSourceProvenance,
+        Delivery, DeliveryStatus, SessionAgentIdentity, SessionBinding, SessionBindingId,
+        SessionBindingSourceProvenance, SessionRuntimeContext, SessionWorkspace,
     },
     projection::runtime::{
         RuntimeProjection, RuntimeProjectionErrorCode,
@@ -16,9 +17,9 @@ use winwincode_delivery::{
     },
 };
 use winwincode_domain::{
-    CodexThreadId, ExecutionJobId, ExecutionMessageId, FencingToken, LeaseId, ProductSessionId,
-    Revision, SchemaVersion, WorkItemId, WorkItemState, WorkRun, WorkRunId, WorkRunState, WorkerId,
-    WorkerInstanceId, WorkerSessionId,
+    AgentIdentityId, CodexThreadId, ExecutionJobId, ExecutionMessageId, FencingToken, LeaseId,
+    ProductSessionId, RepositoryId, Revision, SchemaVersion, WorkItemId, WorkItemState, WorkRun,
+    WorkRunId, WorkRunState, WorkerId, WorkerInstanceId, WorkerSessionId, WorkspaceRevision,
 };
 
 // This tests concurrent independent writers. Candidate verification is covered by
@@ -27,8 +28,7 @@ fn scheduled_delivery_with_independent_writers() -> Delivery {
     let delivery = Delivery::decode_json(include_bytes!("fixtures/delivery-main.json"))
         .expect("canonical Delivery fixture");
     let mut snapshot = delivery.into_snapshot();
-    snapshot.status = DeliveryStatus::Executing;
-    snapshot.stage_runs.clear();
+    snapshot.status = DeliveryStatus::Ready;
     snapshot.evidence.clear();
     snapshot.verdict = None;
 
@@ -113,6 +113,7 @@ fn binding_for(
     binding.product_session_id = run.product_session_id.clone().expect("run session");
     binding.execution_job_id = run.execution_job_id.clone();
     binding.execution_profile = Some(role.to_owned());
+    binding.runtime_context = None;
     binding.worker_session_id = None;
     binding.codex_thread_id = None;
     binding.worker_id = None;
@@ -120,8 +121,7 @@ fn binding_for(
     binding.lease_id = None;
     binding.attempt = u64::try_from(run.attempt).expect("run attempt");
     binding.fencing_token = None;
-    binding.source_provenance =
-        SessionBindingSourceProvenance::delivery_advance("workrun.appended");
+    binding.source_provenance = SessionBindingSourceProvenance::workrun_start("workrun.appended");
     binding.bound_at_millis = snapshot.updated_at_millis;
     binding
 }
@@ -154,12 +154,34 @@ fn bind_run(delivery: &Delivery, run: &WorkRun, seed: u64) -> Delivery {
         delivery.snapshot().updated_at_millis + 1,
     )
     .expect("real WorkerSession binding");
+    let role = worker_bound
+        .snapshot()
+        .session_bindings
+        .iter()
+        .find(|binding| binding.work_run_id == identity.work_run_id)
+        .and_then(|binding| binding.execution_profile.clone())
+        .expect("execution profile");
     report_codex_thread_with_authority(
         &worker_bound,
         worker_bound.revision(),
         &identity,
         &authority,
         CodexThreadId(format!("cdx_01J0000000000000000000000{seed}")),
+        SessionRuntimeContext {
+            agent_identity: SessionAgentIdentity {
+                id: AgentIdentityId(format!("agt_01J0000000000000000000000{seed}")),
+                worker_id: run.worker_id.clone(),
+                name: role.clone(),
+                role,
+            },
+            provider: "fixture-provider".to_owned(),
+            model: "fixture-model".to_owned(),
+            workspace: SessionWorkspace {
+                repository_id: RepositoryId("rep_01J00000000000000000000000".to_owned()),
+                revision: WorkspaceRevision(format!("git-tree:{}", "a".repeat(64))),
+                write_mode: "candidate".to_owned(),
+            },
+        },
         worker_bound.snapshot().updated_at_millis + 1,
     )
     .expect("real CodexThread binding")

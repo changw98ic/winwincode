@@ -173,12 +173,12 @@ export function deviceRecoveryDeadlineText(
 ): string {
   const deadline = device.recoveryDeadlineAt ?? null
   if (deadline === null || Number.isNaN(Date.parse(deadline))) {
-    return 'Waiting to recover · no recovery deadline was reported'
+    return '正在等待恢复 · 未报告恢复期限'
   }
   if (Date.parse(deadline) <= nowMillis) {
-    return `Recovery deadline ${deadline} has passed · the device Owner can force-release`
+    return `恢复期限 ${deadline} 已过 · 设备所有者可以强制释放`
   }
-  return `Connection interrupted · recovers by ${deadline}`
+  return `连接中断 · 预计在 ${deadline} 前恢复`
 }
 
 export type ClientOccupancyViewModelListener = () => void

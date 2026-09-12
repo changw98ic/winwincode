@@ -41,17 +41,17 @@ const PRESENTATION_SPEC: MyWorkPresentation = {
   startLabel: '开始新任务',
   startTaskEntryLabel: '在你的设备上启动任务',
   startChatLabel: '发起对话任务',
-  clientsHeading: 'Clients',
+  clientsHeading: '执行设备',
   clientsDescription: '编码设备的连接与占用状态。',
   clientsUnavailable: '执行设备区暂时不可达。以下设备保持最后已知状态。',
-  clientsEmpty: 'No Client is connected yet. Add your first device in the Clients area below.',
+  clientsEmpty: '尚未连接执行设备，请先添加第一台设备。',
   clientsHint:
     '在执行设备区连接、占用和管理设备；仓库区列出各设备共享的仓库。',
-  clientsCountLabel: count => (count === 1 ? '1 device' : `${String(count)} devices`),
+  clientsCountLabel: count => `${String(count)} 台设备`,
   deviceDetailLabel: (device, heartbeat) => [
-    `Capacity ${String(device.capacityUsed)} / ${String(device.capacityTotal)}`,
+    `容量 ${String(device.capacityUsed)} / ${String(device.capacityTotal)}`,
     heartbeat,
-    `Version ${device.version}`,
+    `版本 ${device.version}`,
   ].join(' · '),
 }
 

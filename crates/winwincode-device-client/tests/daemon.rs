@@ -344,6 +344,7 @@ impl ServerSim {
             replay_from_sequence: gap_response.then_some(1),
             frames: downlink,
             enrollment: issuance,
+            worker_credentials: Vec::new(),
         };
         serde_json::to_vec(&response)
             .map_err(|error| ExchangeTransportError::new(format!("fake response encode: {error}")))

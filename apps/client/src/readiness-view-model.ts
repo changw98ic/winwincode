@@ -219,7 +219,7 @@ export function createReadinessViewModel(
   }
 
   function requireOpen(): void {
-    if (closed) throw clientFailure('READINESS_CLOSED', 'The readiness checklist is closed.')
+    if (closed) throw clientFailure('READINESS_CLOSED', '就绪检查清单已关闭。')
   }
 
   function controller(): AbortController {
@@ -262,12 +262,12 @@ export function createReadinessViewModel(
       }, { signal }) as ModelRouteAvailabilityListResultResponse
       if (response.query !== QueryName.ModelRouteAvailabilityList) throw clientFailure(
         'READINESS_QUERY_MISMATCH',
-        'The readiness checklist received another model-route response.',
+        '就绪检查清单收到了其他模型路由响应。',
       )
       assertPage(response.page, response.query)
       if (!sameScope(response.result.scope, scope)) throw clientFailure(
         'READINESS_SCOPE_MISMATCH',
-        'The model-route availability page belongs to another repository.',
+        '模型路由可用性页面属于其他仓库。',
       )
       if (firstPage === null) firstPage = response.result
       for (const candidate of response.result.items) {
@@ -282,14 +282,14 @@ export function createReadinessViewModel(
       const next = response.page.nextCursor
       if (next === null || cursors.has(next)) throw clientFailure(
         'READINESS_CURSOR_INVALID',
-        'The readiness checklist received an invalid continuation cursor.',
+        '就绪检查清单收到了无效的续页游标。',
       )
       cursors.add(next)
       cursor = next
     }
     throw clientFailure(
       'READINESS_PAGE_LIMIT_EXCEEDED',
-      'The model-route availability read exceeded the bounded page limit.',
+      '模型路由可用性读取超过了分页上限。',
     )
   }
 
@@ -308,28 +308,28 @@ export function createReadinessViewModel(
       )
       if (response.query !== expectedQuery) throw clientFailure(
         'READINESS_QUERY_MISMATCH',
-        'The readiness checklist received another query response.',
+        '就绪检查清单收到了其他查询响应。',
       )
       assertPage(response.page, expectedQuery)
       const result = (response as { readonly result?: { readonly items?: unknown } }).result
       const pageItems = (result as { readonly items?: unknown } | undefined)?.items
       if (!Array.isArray(pageItems)) throw clientFailure(
         'READINESS_PROJECTION_INVALID',
-        'The readiness checklist received a page without list items.',
+        '就绪检查清单收到的页面没有列表项。',
       )
       items.push(...pageItems)
       if (!response.page.hasMore) return Object.freeze(items)
       const next = response.page.nextCursor
       if (next === null || cursors.has(next)) throw clientFailure(
         'READINESS_CURSOR_INVALID',
-        'The readiness checklist received an invalid continuation cursor.',
+        '就绪检查清单收到了无效的续页游标。',
       )
       cursors.add(next)
       cursor = next
     }
     throw clientFailure(
       'READINESS_PAGE_LIMIT_EXCEEDED',
-      'The readiness checklist read exceeded the bounded page limit.',
+      '就绪检查清单读取超过了分页上限。',
     )
   }
 
@@ -367,7 +367,7 @@ export function createReadinessViewModel(
       page: { cursor, limit: SESSION_PAGE_SIZE },
     }), signal).catch(error => {
       if (error instanceof ControlPlaneClientError) throw error
-      throw clientFailure('READINESS_CHECK_FAILED', 'The session presence read failed.', error)
+      throw clientFailure('READINESS_CHECK_FAILED', '会话状态读取失败。', error)
     })
     const deliveriesRead = collectPages(cursor => ({
       ...requestBase(actor, scope),
@@ -377,7 +377,7 @@ export function createReadinessViewModel(
       page: { cursor, limit: DELIVERY_PAGE_SIZE },
     }), signal).catch(error => {
       if (error instanceof ControlPlaneClientError) throw error
-      throw clientFailure('READINESS_CHECK_FAILED', 'The delivery presence read failed.', error)
+      throw clientFailure('READINESS_CHECK_FAILED', '交付状态读取失败。', error)
     })
 
     const modelRoute = modelRouteRead

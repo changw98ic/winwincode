@@ -48,10 +48,11 @@ function sha256(bytes) {
   return createHash('sha256').update(bytes).digest('hex')
 }
 
-function makePackageFixture({ options = {} } = {}) {
+function makePackageFixture({ options = {}, target = 'aarch64-apple-darwin' } = {}) {
   const artifactRoot = mkdtempSync(join(tmpdir(), 'winwincode-device-client-package-'))
   mkdirSync(join(artifactRoot, 'bin'), { recursive: true })
   mkdirSync(join(artifactRoot, 'legal'), { recursive: true })
+  mkdirSync(join(artifactRoot, 'service'), { recursive: true })
   const binaryContents = new Map([
     ['wwc', Buffer.from('fixture wwc device-client cli\n')],
     ['winwincode-worker', Buffer.from('fixture winwincode-worker\n')],
@@ -67,6 +68,12 @@ function makePackageFixture({ options = {} } = {}) {
     copyFileSync(join(root, name), destination)
     chmodSync(destination, 0o644)
   }
+  const serviceName = target.endsWith('apple-darwin')
+    ? 'dev.winwincode.device-client.plist'
+    : 'winwincode-device-client.service'
+  const service = join(artifactRoot, 'service', serviceName)
+  copyFileSync(join(root, 'deploy', 'device-client', serviceName), service)
+  chmodSync(service, 0o644)
   return artifactRoot
 }
 
@@ -241,6 +248,8 @@ test('staged package manifest and checksums verify end to end', () => {
       assert.equal(descriptor.sha256, sha256(readFileSync(join(artifactRoot, descriptor.path))))
     }
     assert.equal(manifest.helperReleaseManifest, null)
+    assert.equal(manifest.service.path, 'service/dev.winwincode.device-client.plist')
+    assert.equal(manifest.service.mode, 0o644)
     assert.deepEqual(manifest.checks, DEVICE_CLIENT_RELEASE_CHECKS)
     assert.deepEqual(manifest.sbom, deviceClientSbom(root))
     const verified = verifyDeviceClientReleaseDirectory({
@@ -252,9 +261,9 @@ test('staged package manifest and checksums verify end to end', () => {
     const checksumLines = readFileSync(join(artifactRoot, DEVICE_CLIENT_RELEASE_CHECKSUMS), 'utf8')
       .trim()
       .split('\n')
-    assert.equal(checksumLines.length, manifest.components.length + manifest.legal.length)
+    assert.equal(checksumLines.length, manifest.components.length + manifest.legal.length + 1)
     for (const line of checksumLines) {
-      assert.match(line, /^[0-9a-f]{64}  (bin|legal)\//u)
+      assert.match(line, /^[0-9a-f]{64}  (bin|legal|service)\//u)
     }
   } finally {
     rmSync(artifactRoot, { recursive: true, force: true })
@@ -311,6 +320,25 @@ test('verification rejects development source files inside the package', () => {
         expectedTarget: 'aarch64-apple-darwin',
       }),
       'ARTIFACT_SET_MISMATCH',
+    )
+  } finally {
+    rmSync(artifactRoot, { recursive: true, force: true })
+  }
+})
+
+test('verification rejects a substituted service definition', () => {
+  const artifactRoot = makePackageFixture()
+  const service = join(artifactRoot, 'service', 'dev.winwincode.device-client.plist')
+  writeFileSync(service, readFileSync(service, 'utf8').replace('__WWC_BINARY__', '/tmp/wwc'))
+  writeManifestAndChecksums(artifactRoot)
+  try {
+    assertDeviceClientReleaseError(
+      () => verifyDeviceClientReleaseDirectory({
+        root,
+        artifactRoot,
+        expectedTarget: 'aarch64-apple-darwin',
+      }),
+      'SERVICE_DEFINITION_MISMATCH',
     )
   } finally {
     rmSync(artifactRoot, { recursive: true, force: true })
@@ -437,6 +465,13 @@ test('dry-run plans cover all four release targets without building', () => {
         mode: 0o755,
       })),
     )
+    const serviceFiles = plan.package.files.filter(entry => entry.path.startsWith('service/'))
+    assert.deepEqual(serviceFiles, [{
+      path: target.endsWith('apple-darwin')
+        ? 'service/dev.winwincode.device-client.plist'
+        : 'service/winwincode-device-client.service',
+      mode: 0o644,
+    }])
     assert.equal(plan.package.manifest, DEVICE_CLIENT_RELEASE_MANIFEST)
     assert.equal(plan.package.checksums, DEVICE_CLIENT_RELEASE_CHECKSUMS)
     assert.deepEqual(plan.checks, DEVICE_CLIENT_RELEASE_CHECKS)

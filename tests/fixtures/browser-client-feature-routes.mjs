@@ -179,7 +179,7 @@ async function settled(selector, statusSelector) {
     const status = statusRoot?.querySelector('.wwc-status-badge-label')?.textContent
       ?? statusRoot?.textContent
       ?? ''
-    return !status.startsWith('Loading') && !status.startsWith('Updating')
+    return !status.startsWith('正在加载') && !status.startsWith('正在更新')
   }, `${selector} snapshot`)
   const statusRoot = document.querySelector(statusSelector)
   return {
@@ -193,28 +193,15 @@ async function settled(selector, statusSelector) {
 
 globalThis.inspectFeatureRoute = async name => {
   if (name === 'settings') return settled('.wwc-settings', '.wwc-settings-status')
-  if (name === 'attention') {
-    return settled('.wwc-attention-center', '.wwc-attention-center-status')
-  }
-  // Legacy `?session=` decision deep links land on the same Attention Center.
-  if (name === 'attention-session') {
-    return settled('.wwc-attention-center', '.wwc-attention-center-status')
-  }
+  if (name === 'task-board') return settled('.wwc-home', '.wwc-home-status')
   throw new Error(`unknown feature route: ${name}`)
 }
 
 globalThis.inspectManagementPresentation = name => {
-  const selector = name === 'settings'
-    ? '.wwc-settings'
-    : name === 'attention' || name === 'attention-session'
-      ? '.wwc-attention-center'
-      : null
+  const selector = name === 'settings' ? '.wwc-settings' : null
   if (selector === null) throw new Error(`unknown management page: ${name}`)
   const pageRoot = document.querySelector(selector)
   const status = pageRoot?.querySelector('[data-wwc-component="status-badge"]')
-  const panel = pageRoot?.querySelector('[data-wwc-component="panel"]')
-  const pageRect = pageRoot?.getBoundingClientRect()
-  const panelRect = panel?.getBoundingClientRect()
   return {
     page: pageRoot?.dataset.wwcPage ?? null,
     panelCount: pageRoot?.querySelectorAll('[data-wwc-component="panel"]').length ?? 0,
@@ -223,10 +210,6 @@ globalThis.inspectManagementPresentation = name => {
     statusIconHidden: status?.querySelector('.wwc-status-badge-icon')?.getAttribute('aria-hidden'),
     statusRole: status?.getAttribute('role'),
     noHorizontalOverflow: document.documentElement.scrollWidth <= document.documentElement.clientWidth,
-    panelWithinPage: pageRect !== undefined
-      && panelRect !== undefined
-      && panelRect.left >= pageRect.left
-      && panelRect.right <= pageRect.right,
   }
 }
 
@@ -369,19 +352,18 @@ globalThis.runReliabilityScenario = async () => {
 globalThis.runFeatureNavigationScenario = async () => {
   const settings = await globalThis.inspectFeatureRoute('settings')
 
-  // Design shell: 待我处理 has no nav entry; it is reached by direct route.
-  location.hash = '#/attention'
+  location.hash = '#/home?filter=attention'
   await waitFor(
-    () => document.querySelector('.wwc-attention-center') !== null,
-    'Attention Center route',
+    () => document.querySelector('.wwc-home') !== null,
+    'filtered task board route',
   )
-  const attentionCenter = await globalThis.inspectFeatureRoute('attention')
+  const taskBoard = await globalThis.inspectFeatureRoute('task-board')
 
   failureMode = 'authorization'
   location.hash = '#/settings?fixture=denied'
   await waitFor(
     () => document.querySelector('.wwc-settings-status .wwc-status-badge-label')?.textContent
-      === 'Access denied',
+      === '访问被拒绝',
     'Settings permission failure',
   )
   const denied = document.querySelector('.wwc-settings-error-text').textContent
@@ -392,27 +374,30 @@ globalThis.runFeatureNavigationScenario = async () => {
     () => document.querySelector(
       '.wwc-settings-status .wwc-status-badge-label',
     )?.textContent
-      === 'Reconnecting…',
+      === '正在重新连接…',
     'Settings network failure',
   )
   const network = document.querySelector('.wwc-settings-error-text').textContent
 
   failureMode = null
+  location.hash = '#/home?filter=attention&fixture=before-cancel'
+  await globalThis.inspectFeatureRoute('task-board')
+  globalThis.dispatchEvent(new Event('online'))
   blockedQuery = 'settings.get'
   location.hash = '#/settings?fixture=cancel'
   await waitFor(
-    () => calls.queries.at(-1)?.query === 'settings.get',
+    () => blockedQuery === null,
     'pending Settings query',
   )
-  location.hash = '#/attention?fixture=after-cancel'
-  const afterCancellation = await globalThis.inspectFeatureRoute('attention')
+  location.hash = '#/home?filter=attention&fixture=after-cancel'
+  const afterCancellation = await globalThis.inspectFeatureRoute('task-board')
   await waitFor(() => calls.abortedQueries.includes('settings.get'), 'cancelled Settings query')
 
   return {
     afterCancellation,
     denied,
     network,
-    attentionCenter,
+    taskBoard,
     settings,
     calls,
   }

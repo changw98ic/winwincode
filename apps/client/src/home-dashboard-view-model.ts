@@ -30,17 +30,17 @@ import type {
   DeliveryId,
   DeliveryListResultResponse,
   DeliveryProjection,
-  DeliveryStatus,
   Instant,
   OpaqueCursor,
   RepositoryScope,
   RequestId,
+  WorkItemState,
   WorkRunId,
 } from './generated/contracts.js'
-import { DeliveryStatus as DeliveryStatusVocabulary, QueryName } from './generated/contracts.js'
+import { QueryName, WorkItemState as WorkItemStateVocabulary } from './generated/contracts.js'
 
 /**
- * UI-504 composes the projections that already exist - the Attention Center,
+ * UI-504 composes the projections that already exist - pending decisions,
  * the Delivery list, and the Usage/Worker health summary - into one bounded
  * first screen.  It adds no second business queue, no Portfolio and no new
  * background aggregate: every card is a projection of a server fact.
@@ -232,7 +232,7 @@ function deliveryListSourceState(status: string): HomeDashboardSourceState {
 export interface HomeDeliveryCard {
   readonly deliveryId: DeliveryId
   readonly title: string
-  readonly status: DeliveryStatus
+  readonly status: WorkItemState
   readonly revision: number
   readonly updatedAt: Instant
   readonly openAttentionCount: number
@@ -262,24 +262,32 @@ export interface HomeDecisionCard {
   readonly workRunId: AttentionCenterItem['workRunId']
 }
 
-export interface HomeDashboardCounts {
-  readonly decisions: number
-  readonly active: number
-  readonly failing: number
-  readonly completed: number
-  readonly visited: number
-}
-
 /** 设计稿 04 折叠行之外的浏览器本地区块:最近打开过的交付。 */
 export interface HomeVisitedCard extends HomeDeliveryCard {
   readonly visitedAt: Instant
 }
 
+export interface HomeDashboardCounts {
+  readonly decisions: number
+  readonly backlog: number
+  readonly running: number
+  readonly ready: number
+  readonly waiting: number
+  readonly validating: number
+  readonly failed: number
+  readonly completed: number
+  readonly visited: number
+}
+
 export interface HomeDashboardState {
   readonly status: HomeDashboardStatus
   readonly decisions: readonly HomeDecisionCard[]
-  readonly active: readonly HomeDeliveryCard[]
-  readonly failing: readonly HomeDeliveryCard[]
+  readonly backlog: readonly HomeDeliveryCard[]
+  readonly running: readonly HomeDeliveryCard[]
+  readonly ready: readonly HomeDeliveryCard[]
+  readonly waiting: readonly HomeDeliveryCard[]
+  readonly validating: readonly HomeDeliveryCard[]
+  readonly failed: readonly HomeDeliveryCard[]
   readonly completed: readonly HomeDeliveryCard[]
   readonly visited: readonly HomeVisitedCard[]
   readonly counts: HomeDashboardCounts
@@ -322,30 +330,77 @@ export interface HomeDashboardViewModel {
   close(): void
 }
 
-/** Deliveries whose work is in motion, including the states waiting on a user. */
-const ACTIVE_DELIVERY_STATUSES: readonly DeliveryStatus[] = Object.freeze([
-  DeliveryStatusVocabulary.Draft,
-  DeliveryStatusVocabulary.Clarifying,
-  DeliveryStatusVocabulary.Ready,
-  DeliveryStatusVocabulary.Planning,
-  DeliveryStatusVocabulary.PlanReview,
-  DeliveryStatusVocabulary.Executing,
-  DeliveryStatusVocabulary.Verifying,
+/**
+ * The one canonical Delivery partition the board renders (WWC-ER-1001).  Every
+ * Controller-derived `WorkItemState` lands in exactly one section, so the board can
+ * never park a served Delivery in no section and never needs a second state
+ * model: the section is a pure function of the served projection.
+ */
+export type HomeDeliverySection =
+  | 'backlog'
+  | 'ready'
+  | 'running'
+  | 'waiting'
+  | 'validating'
+  | 'failed'
+  | 'completed'
+
+/**
+ * Deliveries whose work is in motion, including the rework cycle the Worker
+ * runs by itself (design page 04 keeps 验证未通过，正在修复 in 正在运行).
+ */
+const RUNNING_DELIVERY_STATUSES: readonly WorkItemState[] = Object.freeze([
+  WorkItemStateVocabulary.InProgress,
+  WorkItemStateVocabulary.Rework,
 ])
 
-function isActive(delivery: HomeDeliveryCard): boolean {
-  return ACTIVE_DELIVERY_STATUSES.includes(delivery.status)
-}
+/** Idle Deliveries whose next move is the user's: start them or accept them. */
+const READY_DELIVERY_STATUSES: readonly WorkItemState[] = Object.freeze([
+  WorkItemStateVocabulary.Ready,
+])
 
-function isFailing(delivery: HomeDeliveryCard): boolean {
-  return delivery.status === DeliveryStatusVocabulary.NeedsAttention
-    || delivery.status === DeliveryStatusVocabulary.Reworking
+/** Deliveries waiting on the conversation: input, clarification, plan review. */
+const WAITING_DELIVERY_STATUSES: readonly WorkItemState[] = Object.freeze([
+  WorkItemStateVocabulary.WaitingDependency,
+  WorkItemStateVocabulary.WaitingHuman,
+])
+
+const VALIDATING_DELIVERY_STATUSES: readonly WorkItemState[] = Object.freeze([
+  WorkItemStateVocabulary.CandidateReady,
+  WorkItemStateVocabulary.Validating,
+])
+
+function isFailed(delivery: HomeDeliveryCard): boolean {
+  return delivery.status === WorkItemStateVocabulary.Failed
+    || delivery.status === WorkItemStateVocabulary.Cancelled
+    || delivery.status === WorkItemStateVocabulary.WaitingDependency
     || delivery.failedTasks > 0
     || delivery.blockedTasks > 0
+    || (delivery.status === WorkItemStateVocabulary.WaitingHuman
+      && delivery.openAttentionCount > 0)
 }
 
-function isCompleted(delivery: HomeDeliveryCard): boolean {
-  return delivery.status === DeliveryStatusVocabulary.Delivered
+function isRunning(delivery: HomeDeliveryCard): boolean {
+  return RUNNING_DELIVERY_STATUSES.includes(delivery.status)
+}
+
+function isReady(delivery: HomeDeliveryCard): boolean {
+  return READY_DELIVERY_STATUSES.includes(delivery.status)
+}
+
+function isWaiting(delivery: HomeDeliveryCard): boolean {
+  return WAITING_DELIVERY_STATUSES.includes(delivery.status)
+}
+
+/** The one section a served Delivery belongs to; total over every status. */
+export function homeDeliverySection(delivery: HomeDeliveryCard): HomeDeliverySection {
+  if (isFailed(delivery)) return 'failed'
+  if (delivery.status === WorkItemStateVocabulary.Backlog) return 'backlog'
+  if (isRunning(delivery)) return 'running'
+  if (isReady(delivery)) return 'ready'
+  if (isWaiting(delivery)) return 'waiting'
+  if (VALIDATING_DELIVERY_STATUSES.includes(delivery.status)) return 'validating'
+  return 'completed'
 }
 
 function recency(left: HomeDeliveryCard, right: HomeDeliveryCard): number {
@@ -353,28 +408,69 @@ function recency(left: HomeDeliveryCard, right: HomeDeliveryCard): number {
     || right.deliveryId.localeCompare(left.deliveryId)
 }
 
+/**
+ * The one bounded order of one canonical section.  The filter reads the same
+ * `homeDeliverySection` the board buckets with, so a test helper and the
+ * mounted dashboard can never disagree about where a Delivery belongs.
+ */
+function orderedSection(
+  section: HomeDeliverySection,
+  cards: readonly HomeDeliveryCard[],
+  compare: (left: HomeDeliveryCard, right: HomeDeliveryCard) => number,
+): readonly HomeDeliveryCard[] {
+  return Object.freeze(cards.filter(card => homeDeliverySection(card) === section).sort(compare))
+}
+
 /** In-progress Deliveries, most recently updated first. */
-export function orderedHomeActiveCards(
+export function orderedHomeRunningCards(
   cards: readonly HomeDeliveryCard[],
 ): readonly HomeDeliveryCard[] {
-  return Object.freeze(cards.filter(isActive).sort(recency))
+  return orderedSection('running', cards, recency)
+}
+
+/** Backlog Deliveries, most recently updated first. */
+export function orderedHomeBacklogCards(
+  cards: readonly HomeDeliveryCard[],
+): readonly HomeDeliveryCard[] {
+  return orderedSection('backlog', cards, recency)
 }
 
 /** Failed or blocked Deliveries: hardest failure first, then recency. */
-export function orderedHomeFailingCards(
+export function orderedHomeFailedCards(
   cards: readonly HomeDeliveryCard[],
 ): readonly HomeDeliveryCard[] {
-  return Object.freeze(cards.filter(isFailing).sort((left, right) =>
+  return orderedSection('failed', cards, (left, right) =>
     right.failedTasks - left.failedTasks
     || right.blockedTasks - left.blockedTasks
-    || recency(left, right)))
+    || recency(left, right))
+}
+
+/** Idle, user-advancable Deliveries, most recently updated first. */
+export function orderedHomeReadyCards(
+  cards: readonly HomeDeliveryCard[],
+): readonly HomeDeliveryCard[] {
+  return orderedSection('ready', cards, recency)
+}
+
+/** Deliveries waiting on the conversation, most recently updated first. */
+export function orderedHomeWaitingCards(
+  cards: readonly HomeDeliveryCard[],
+): readonly HomeDeliveryCard[] {
+  return orderedSection('waiting', cards, recency)
+}
+
+/** Candidate-ready and actively validating Deliveries, most recent first. */
+export function orderedHomeValidatingCards(
+  cards: readonly HomeDeliveryCard[],
+): readonly HomeDeliveryCard[] {
+  return orderedSection('validating', cards, recency)
 }
 
 /** Recently completed Deliveries, most recent first. */
 export function orderedHomeCompletedCards(
   cards: readonly HomeDeliveryCard[],
 ): readonly HomeDeliveryCard[] {
-  return Object.freeze(cards.filter(isCompleted).sort(recency))
+  return orderedSection('completed', cards, recency)
 }
 
 /** Project every loaded Delivery summary into the card shape the dashboard renders. */
@@ -389,12 +485,12 @@ export function homeDeliveryCards(
     updatedAt: delivery.updatedAt,
     openAttentionCount: delivery.openAttentionCount,
     activeWorkRunId: delivery.activeWorkRunId ?? null,
-    failedTasks: delivery.taskCounts.failed,
-    blockedTasks: delivery.taskCounts.blocked,
-    activeTasks: delivery.taskCounts.active,
-    verifyingTasks: delivery.taskCounts.verifying,
-    completedTasks: delivery.taskCounts.completed,
-    totalTasks: delivery.taskCounts.total,
+    failedTasks: delivery.workItemCounts.failed,
+    blockedTasks: delivery.workItemCounts.waitingDependency + delivery.workItemCounts.waitingHuman,
+    activeTasks: delivery.workItemCounts.inProgress,
+    verifyingTasks: delivery.workItemCounts.validating,
+    completedTasks: delivery.workItemCounts.done,
+    totalTasks: delivery.workItemCounts.total,
   })))
 }
 
@@ -464,9 +560,25 @@ export function homeDashboardState(input: {
   const limits = input.limits ?? DEFAULT_HOME_DASHBOARD_LIMITS
   const cards = homeDeliveryCards(input.deliveries.visible)
   const byId = new Map(cards.map(card => [card.deliveryId, card] as const))
-  const active = orderedHomeActiveCards(cards)
-  const failing = orderedHomeFailingCards(cards)
-  const completed = orderedHomeCompletedCards(cards)
+  // One canonical pass: every card lands in exactly the section its served
+  // status proves, then each section keeps its own bounded order.
+  const sections: Record<HomeDeliverySection, HomeDeliveryCard[]> = {
+    backlog: [],
+    running: [],
+    ready: [],
+    waiting: [],
+    validating: [],
+    failed: [],
+    completed: [],
+  }
+  for (const card of cards) sections[homeDeliverySection(card)].push(card)
+  const backlog = orderedHomeBacklogCards(sections.backlog)
+  const running = orderedHomeRunningCards(sections.running)
+  const ready = orderedHomeReadyCards(sections.ready)
+  const waiting = orderedHomeWaitingCards(sections.waiting)
+  const validating = orderedHomeValidatingCards(sections.validating)
+  const failed = orderedHomeFailedCards(sections.failed)
+  const completed = orderedHomeCompletedCards(sections.completed)
   const visited = visitedCards(byId, input.visits ?? [])
   const decisions = orderedAttentionCenterItems(input.attention.items)
   const sources: Readonly<Record<HomeDashboardSource, HomeDashboardSourceState>> = Object.freeze({
@@ -490,14 +602,22 @@ export function homeDashboardState(input: {
       deliveryTitle: item.deliveryTitle,
       workRunId: item.workRunId,
     }))),
-    active: Object.freeze(active.slice(0, limits.deliveries)),
-    failing: Object.freeze(failing.slice(0, limits.deliveries)),
+    backlog: Object.freeze(backlog.slice(0, limits.deliveries)),
+    running: Object.freeze(running.slice(0, limits.deliveries)),
+    ready: Object.freeze(ready.slice(0, limits.deliveries)),
+    waiting: Object.freeze(waiting.slice(0, limits.deliveries)),
+    validating: Object.freeze(validating.slice(0, limits.deliveries)),
+    failed: Object.freeze(failed.slice(0, limits.deliveries)),
     completed: Object.freeze(completed.slice(0, limits.deliveries)),
     visited: Object.freeze(visited.slice(0, limits.visits)),
     counts: Object.freeze({
       decisions: decisions.length,
-      active: active.length,
-      failing: failing.length,
+      backlog: backlog.length,
+      running: running.length,
+      ready: ready.length,
+      waiting: waiting.length,
+      validating: validating.length,
+      failed: failed.length,
       completed: completed.length,
       visited: visited.length,
     }),
@@ -515,14 +635,22 @@ function emptyState(): HomeDashboardState {
   return Object.freeze({
     status: 'loading',
     decisions: Object.freeze([]),
-    active: Object.freeze([]),
-    failing: Object.freeze([]),
+    backlog: Object.freeze([]),
+    running: Object.freeze([]),
+    ready: Object.freeze([]),
+    waiting: Object.freeze([]),
+    validating: Object.freeze([]),
+    failed: Object.freeze([]),
     completed: Object.freeze([]),
     visited: Object.freeze([]),
     counts: Object.freeze({
       decisions: 0,
-      active: 0,
-      failing: 0,
+      backlog: 0,
+      running: 0,
+      ready: 0,
+      waiting: 0,
+      validating: 0,
+      failed: 0,
       completed: 0,
       visited: 0,
     }),

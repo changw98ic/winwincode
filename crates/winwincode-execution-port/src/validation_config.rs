@@ -276,6 +276,9 @@ fn validate_commands(
             || command.network
             || !(1..=86_400_000).contains(&command.timeout_millis)
             || !(1..=16_777_216).contains(&command.output_limit_bytes)
+            || command.flaky_rerun_limit.is_some_and(|limit| limit > 1)
+            || (!matches!(command.phase, ValidationCommandPhase::Validation)
+                && command.flaky_rerun_limit.is_some())
             || command.environment.len() > 5
             || command.allowed_companion_paths.len() > 20
             || command

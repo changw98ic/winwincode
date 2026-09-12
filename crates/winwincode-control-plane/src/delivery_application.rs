@@ -8,42 +8,40 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use winwincode_api::generated::{
-    Actor, CommandEnvelope, CommandName, DeliveryAdvanceCommand, DeliveryAdvanceCompletedResponse,
-    DeliveryAdvanceCompletedResponseCommand, DeliveryAdvanceCompletedResponseOutcome,
-    DeliveryCreateCommand, DeliveryCreateCompletedResponse, DeliveryCreateCompletedResponseCommand,
-    DeliveryCreateCompletedResponseOutcome, DeliveryListQuery, DeliveryListResultResponse,
-    DeliveryListResultResponseQuery, DeliveryOwnershipProjection, DeliveryPage, DeliveryPageKind,
-    DeliveryProjection, DeliveryResolveAttentionCommand, DeliveryResolveAttentionCompletedResponse,
+    Actor, CommandEnvelope, CommandName, DeliveryCreateCommand, DeliveryCreateCompletedResponse,
+    DeliveryCreateCompletedResponseCommand, DeliveryCreateCompletedResponseOutcome,
+    DeliveryListQuery, DeliveryListResultResponse, DeliveryListResultResponseQuery,
+    DeliveryOwnershipProjection, DeliveryPage, DeliveryPageKind, DeliveryProjection,
+    DeliveryResolveAttentionCommand, DeliveryResolveAttentionCompletedResponse,
     DeliveryResolveAttentionCompletedResponseCommand,
     DeliveryResolveAttentionCompletedResponseOutcome, DeliverySpecInput,
-    DeliveryStatus as ApiDeliveryStatus, DeliverySubmitVerdictCommand,
-    DeliverySubmitVerdictCompletedResponse, DeliverySubmitVerdictCompletedResponseCommand,
-    DeliverySubmitVerdictCompletedResponseOutcome, DeliveryTaskBreakdownCreateCommand,
-    DeliveryTaskBreakdownCreateCompletedResponse,
-    DeliveryTaskBreakdownCreateCompletedResponseCommand,
-    DeliveryTaskBreakdownCreateCompletedResponseOutcome, DeliveryTaskBreakdownCreateResult,
-    DeliveryTaskCountsProjection, DeliveryUpdateSpecCommand, DeliveryUpdateSpecCompletedResponse,
+    DeliverySubmitVerdictCommand, DeliverySubmitVerdictCompletedResponse,
+    DeliverySubmitVerdictCompletedResponseCommand, DeliverySubmitVerdictCompletedResponseOutcome,
+    DeliveryUpdateSpecCommand, DeliveryUpdateSpecCompletedResponse,
     DeliveryUpdateSpecCompletedResponseCommand, DeliveryUpdateSpecCompletedResponseOutcome,
-    ErrorCode, PageInfo, Scope, WorkRunCancelCommand, WorkRunCancelCompletedResponse,
-    WorkRunCancelCompletedResponseCommand, WorkRunCancelCompletedResponseOutcome,
+    ErrorCode, PageInfo, Scope, WorkItemCountsProjection, WorkItemsCreateCommand,
+    WorkItemsCreateCompletedResponse, WorkItemsCreateCompletedResponseCommand,
+    WorkItemsCreateCompletedResponseOutcome, WorkItemsCreateResult, WorkRunCancelCommand,
+    WorkRunCancelCompletedResponse, WorkRunCancelCompletedResponseCommand,
+    WorkRunCancelCompletedResponseOutcome, WorkRunStartCommand, WorkRunStartCompletedResponse,
+    WorkRunStartCompletedResponseCommand, WorkRunStartCompletedResponseOutcome,
 };
 use winwincode_delivery::{
     application::{
         attention::ResolvedAttentionTransition,
-        stage::{StageAdvanceEffect, StageAdvanceResult},
         verdict::SubmitVerdictFacts,
+        workrun_execution::{WorkRunStartEffect, WorkRunStartResult},
     },
     domain::{
-        AttentionItemStatus, Delivery, DeliverySourceRef, DeliveryStatus, DeliveryTaskStatus,
-        FrozenDeliveryCandidate, RepositoryRef, evidence::ResolvedDeliveryEvidence,
-        verification::IndependentVerification,
+        AttentionItemStatus, Delivery, DeliverySourceRef, DeliveryStatus, FrozenDeliveryCandidate,
+        RepositoryRef, evidence::ResolvedDeliveryEvidence, verification::IndependentVerification,
     },
     store::{DeliveryQuery, DeliveryQueryPort, DeliveryStore},
 };
 use winwincode_domain::RepositoryScope;
 use winwincode_domain::{
     Count, DeliveryId, OpaqueCursor, ProductSessionId, RequestId, Revision, SchemaVersion,
-    Sha256Digest,
+    Sha256Digest, WorkItemState,
 };
 use winwincode_storage::{
     CandidateGitTerminalOutcome, CommitReceipt, ProductStateStorage, ProjectionEventStream,
@@ -57,7 +55,7 @@ use crate::{
     delivery_command_transaction::TrustedDeliverySpecFacts,
     delivery_execution::{
         DeliveryExecutionConfig, DeliveryExecutionError, ExecutionJobDispatcher,
-        PendingDeliveryExecution, prepare_workrun_advance,
+        PendingDeliveryExecution, prepare_workrun_start,
     },
     delivery_transaction::{StagedDeliveryJournal, delivery_journal_key, delivery_stream_id},
     load_product_session_authority_seal, public_event_actor, repository_scope_key,
@@ -177,10 +175,10 @@ pub struct DeliverySpecificationAuthority {
 /// Sealed stage transition plus the execution configuration required only by
 /// a newly selected Codex stage.
 #[derive(Clone, Debug, PartialEq)]
-pub struct DeliveryAdvanceAuthority {
+pub struct WorkRunStartAuthority {
     pub repository: RepositoryRef,
     pub source_ref: Option<DeliverySourceRef>,
-    pub transition: StageAdvanceResult,
+    pub transition: WorkRunStartResult,
     pub execution: Option<DeliveryExecutionConfig>,
 }
 
@@ -241,7 +239,7 @@ pub trait DeliveryAuthorityPort: Send {
     fn advance(
         &mut self,
         request: DeliveryAuthorityRequest<'_>,
-    ) -> Result<DeliveryAdvanceAuthority, DeliveryAuthorityError>;
+    ) -> Result<WorkRunStartAuthority, DeliveryAuthorityError>;
 
     /// Resolves the current Attention transition.
     ///
@@ -496,10 +494,10 @@ impl ControlPlane {
     ///
     /// # Errors
     /// Rejects invalid scope or revisions and reports storage or publication failures.
-    pub fn delivery_task_breakdown_create(
+    pub fn work_items_create(
         &mut self,
-        command: &DeliveryTaskBreakdownCreateCommand,
-    ) -> Result<DeliveryTaskBreakdownCreateCompletedResponse, DeliveryApplicationError> {
+        command: &WorkItemsCreateCommand,
+    ) -> Result<WorkItemsCreateCompletedResponse, DeliveryApplicationError> {
         let envelope: CommandEnvelope = serde_json::from_value(
             serde_json::to_value(command)
                 .map_err(|e| DeliveryApplicationError::InvalidRequest(e.to_string()))?,
@@ -510,9 +508,8 @@ impl ControlPlane {
             &command.scope,
             &command.payload.delivery_id,
         )?;
-        let receipt =
-            crate::task_breakdown_transaction::execute_create(self.storage_mut()?, &envelope)
-                .map_err(|error| DeliveryApplicationError::Commit(CommitError::Storage(error)))?;
+        let receipt = crate::work_items_transaction::execute_create(self.storage_mut()?, &envelope)
+            .map_err(|error| DeliveryApplicationError::Commit(CommitError::Storage(error)))?;
         self.flush_outbox().map_err(|source| {
             DeliveryApplicationError::Commit(CommitError::PublicationPending {
                 receipt: Box::new(receipt.clone()),
@@ -524,14 +521,13 @@ impl ControlPlane {
             &command.payload.delivery_id,
             receipt.revision,
         )?;
-        Ok(DeliveryTaskBreakdownCreateCompletedResponse {
-            command:
-                DeliveryTaskBreakdownCreateCompletedResponseCommand::DeliveryTaskBreakdownCreate,
+        Ok(WorkItemsCreateCompletedResponse {
+            command: WorkItemsCreateCompletedResponseCommand::WorkitemsCreate,
             current_revision: revision(receipt.revision)?,
-            outcome: DeliveryTaskBreakdownCreateCompletedResponseOutcome::Completed,
+            outcome: WorkItemsCreateCompletedResponseOutcome::Completed,
             previous_revision: command.payload.expected_revision.clone(),
             request_id: command.request_id.clone(),
-            result: DeliveryTaskBreakdownCreateResult {
+            result: WorkItemsCreateResult {
                 delivery_id: command.payload.delivery_id.clone(),
                 delivery_revision: revision(receipt.revision)?,
                 items: delivery.snapshot().work_run_aggregate.items.clone(),
@@ -540,20 +536,20 @@ impl ControlPlane {
         })
     }
 
-    /// Executes one generated `delivery.advance` from an authority-sealed
+    /// Executes one generated `workrun.start` from an authority-sealed
     /// stage transition. Human stages never reach the execution dispatcher.
     ///
     /// # Errors
     ///
     /// Returns a stable application error when validation, authority lookup,
     /// durable commit, execution dispatch, or projection publication fails.
-    pub fn delivery_advance(
+    pub fn workrun_start(
         &mut self,
-        command: &DeliveryAdvanceCommand,
-    ) -> Result<DeliveryAdvanceCompletedResponse, DeliveryApplicationError> {
+        command: &WorkRunStartCommand,
+    ) -> Result<WorkRunStartCompletedResponse, DeliveryApplicationError> {
         let mapped = map_command(
             &command.actor,
-            CommandName::DeliveryAdvance,
+            CommandName::WorkRunStart,
             command.expected_revision.clone(),
             &command.payload,
             &command.request_id,
@@ -586,9 +582,9 @@ impl ControlPlane {
     fn commit_advance_authority(
         &mut self,
         command: &CommandEnvelope,
-        authority: DeliveryAdvanceAuthority,
+        authority: WorkRunStartAuthority,
     ) -> Result<u64, DeliveryApplicationError> {
-        let DeliveryAdvanceAuthority {
+        let WorkRunStartAuthority {
             transition,
             execution,
             ..
@@ -599,16 +595,13 @@ impl ControlPlane {
             ));
         };
         match &transition.effect {
-            StageAdvanceEffect::Review(_) => Err(DeliveryApplicationError::InvalidRequest(
-                "human approval uses the Attention command, not execution dispatch".to_owned(),
-            )),
-            StageAdvanceEffect::Dispatch(intent) => {
+            WorkRunStartEffect::Dispatch(intent) => {
                 let config = execution.ok_or_else(|| {
                     DeliveryApplicationError::TrustedFactsUnavailable(
                         "Codex Delivery stage has no trusted execution configuration".to_owned(),
                     )
                 })?;
-                let workrun_job = prepare_workrun_advance(
+                let workrun_job = prepare_workrun_start(
                     &command.request_id,
                     &transition.delivery.snapshot().work_run_aggregate,
                     &transition.delivery.snapshot().spec,
@@ -633,7 +626,7 @@ impl ControlPlane {
                     .commit
                     .committed_revision)
             }
-            StageAdvanceEffect::Clarify(_) => {
+            WorkRunStartEffect::Clarify(_) => {
                 if execution.is_some() {
                     return Err(DeliveryApplicationError::TrustedFactsUnavailable(
                         "clarification transition unexpectedly carried execution configuration"
@@ -644,11 +637,6 @@ impl ControlPlane {
                     .commit_delivery_rework_clarification(command, &transition)
                     .map_err(DeliveryApplicationError::Commit)?
                     .revision)
-            }
-            StageAdvanceEffect::Resume(_) => {
-                Err(DeliveryApplicationError::TrustedFactsUnavailable(
-                    "delivery.advance cannot replace runtime recovery authority".to_owned(),
-                ))
             }
         }
     }
@@ -883,7 +871,7 @@ impl ControlPlane {
         &mut self,
         command: &CommandEnvelope,
         delivery: &Delivery,
-    ) -> Result<DeliveryAdvanceAuthority, DeliveryApplicationError> {
+    ) -> Result<WorkRunStartAuthority, DeliveryApplicationError> {
         let mut port = self.take_delivery_authority()?;
         let result = port.advance(DeliveryAuthorityRequest {
             command,
@@ -1157,14 +1145,14 @@ fn update_response(
 }
 
 fn advance_response(
-    command: &DeliveryAdvanceCommand,
+    command: &WorkRunStartCommand,
     committed_revision: u64,
     delivery: &Delivery,
-) -> Result<DeliveryAdvanceCompletedResponse, DeliveryApplicationError> {
-    Ok(DeliveryAdvanceCompletedResponse {
-        command: DeliveryAdvanceCompletedResponseCommand::DeliveryAdvance,
+) -> Result<WorkRunStartCompletedResponse, DeliveryApplicationError> {
+    Ok(WorkRunStartCompletedResponse {
+        command: WorkRunStartCompletedResponseCommand::WorkRunStart,
         current_revision: revision(committed_revision)?,
-        outcome: DeliveryAdvanceCompletedResponseOutcome::Completed,
+        outcome: WorkRunStartCompletedResponseOutcome::Completed,
         previous_revision: previous_revision(committed_revision)?,
         request_id: command.request_id.clone(),
         result: delivery_projection(delivery, &command.scope)?,
@@ -1262,25 +1250,16 @@ fn delivery_projection(
         .iter()
         .filter(|item| item.status == AttentionItemStatus::Open)
         .count();
-    let mut pending = 0_usize;
-    let mut active = 0_usize;
-    let mut blocked = 0_usize;
-    let mut completed = 0_usize;
-    let mut failed = 0_usize;
-    let mut verifying = 0_usize;
-    for task in &snapshot.tasks {
-        match task.status {
-            DeliveryTaskStatus::Pending => pending += 1,
-            DeliveryTaskStatus::Active => active += 1,
-            DeliveryTaskStatus::Verifying => verifying += 1,
-            DeliveryTaskStatus::Blocked => blocked += 1,
-            DeliveryTaskStatus::Completed => completed += 1,
-            DeliveryTaskStatus::Failed => failed += 1,
-        }
-    }
+    let item_count = |state| {
+        snapshot
+            .work_run_aggregate
+            .items
+            .iter()
+            .filter(|item| item.state == state)
+            .count()
+    };
     Ok(DeliveryProjection {
         active_work_run_id,
-        work_run_id: None,
         delivery_id: delivery.id().clone(),
         open_attention_count: count(open_attention)?,
         ownership: DeliveryOwnershipProjection {
@@ -1291,15 +1270,22 @@ fn delivery_projection(
         },
         revision: revision(delivery.revision())?,
         schema_version: SchemaVersion::WinwincodeV1,
-        status: api_delivery_status(snapshot.status),
-        task_counts: DeliveryTaskCountsProjection {
-            active: count(active)?,
-            blocked: count(blocked)?,
-            completed: count(completed)?,
-            failed: count(failed)?,
-            pending: count(pending)?,
-            total: count(snapshot.tasks.len())?,
-            verifying: count(verifying)?,
+        status: snapshot
+            .work_run_aggregate
+            .summary_state(open_attention > 0),
+        work_item_counts: WorkItemCountsProjection {
+            backlog: count(item_count(WorkItemState::Backlog))?,
+            ready: count(item_count(WorkItemState::Ready))?,
+            in_progress: count(item_count(WorkItemState::InProgress))?,
+            waiting_dependency: count(item_count(WorkItemState::WaitingDependency))?,
+            waiting_human: count(item_count(WorkItemState::WaitingHuman))?,
+            candidate_ready: count(item_count(WorkItemState::CandidateReady))?,
+            validating: count(item_count(WorkItemState::Validating))?,
+            rework: count(item_count(WorkItemState::Rework))?,
+            done: count(item_count(WorkItemState::Done))?,
+            failed: count(item_count(WorkItemState::Failed))?,
+            cancelled: count(item_count(WorkItemState::Cancelled))?,
+            total: count(snapshot.work_run_aggregate.items.len())?,
         },
         title: snapshot.spec.title.clone(),
         updated_at: crate::instant_from_millis(snapshot.updated_at_millis)?,
@@ -1312,22 +1298,6 @@ fn count(value: usize) -> Result<Count, DeliveryApplicationError> {
             "Delivery summary count exceeds the public range",
         ))
     })
-}
-
-const fn api_delivery_status(status: DeliveryStatus) -> ApiDeliveryStatus {
-    match status {
-        DeliveryStatus::Draft => ApiDeliveryStatus::Draft,
-        DeliveryStatus::Clarifying => ApiDeliveryStatus::Clarifying,
-        DeliveryStatus::Ready => ApiDeliveryStatus::Ready,
-        DeliveryStatus::Planning => ApiDeliveryStatus::Planning,
-        DeliveryStatus::PlanReview => ApiDeliveryStatus::PlanReview,
-        DeliveryStatus::Executing => ApiDeliveryStatus::Executing,
-        DeliveryStatus::Verifying => ApiDeliveryStatus::Verifying,
-        DeliveryStatus::Reworking => ApiDeliveryStatus::Reworking,
-        DeliveryStatus::NeedsAttention => ApiDeliveryStatus::NeedsAttention,
-        DeliveryStatus::ReadyToDeliver => ApiDeliveryStatus::ReadyToDeliver,
-        DeliveryStatus::Delivered => ApiDeliveryStatus::Delivered,
-    }
 }
 
 fn validate_list_query(query: &DeliveryListQuery) -> Result<(), DeliveryApplicationError> {
@@ -1349,17 +1319,17 @@ fn normalize_states(states: &[String]) -> Result<Vec<String>, DeliveryApplicatio
     if states.iter().any(|state| {
         !matches!(
             state.as_str(),
-            "draft"
-                | "clarifying"
+            "backlog"
                 | "ready"
-                | "planning"
-                | "plan-review"
-                | "executing"
-                | "verifying"
-                | "reworking"
-                | "needs-attention"
-                | "ready-to-deliver"
-                | "delivered"
+                | "in_progress"
+                | "waiting_dependency"
+                | "waiting_human"
+                | "candidate_ready"
+                | "validating"
+                | "rework"
+                | "done"
+                | "failed"
+                | "cancelled"
         )
     }) {
         return Err(DeliveryApplicationError::InvalidRequest(
@@ -1372,19 +1342,19 @@ fn normalize_states(states: &[String]) -> Result<Vec<String>, DeliveryApplicatio
     Ok(normalized)
 }
 
-fn delivery_status_name(status: DeliveryStatus) -> &'static str {
-    match status {
-        DeliveryStatus::Draft => "draft",
-        DeliveryStatus::Clarifying => "clarifying",
-        DeliveryStatus::Ready => "ready",
-        DeliveryStatus::Planning => "planning",
-        DeliveryStatus::PlanReview => "plan-review",
-        DeliveryStatus::Executing => "executing",
-        DeliveryStatus::Verifying => "verifying",
-        DeliveryStatus::Reworking => "reworking",
-        DeliveryStatus::NeedsAttention => "needs-attention",
-        DeliveryStatus::ReadyToDeliver => "ready-to-deliver",
-        DeliveryStatus::Delivered => "delivered",
+const fn work_item_state_name(state: &WorkItemState) -> &'static str {
+    match state {
+        WorkItemState::Backlog => "backlog",
+        WorkItemState::Ready => "ready",
+        WorkItemState::InProgress => "in_progress",
+        WorkItemState::WaitingDependency => "waiting_dependency",
+        WorkItemState::WaitingHuman => "waiting_human",
+        WorkItemState::CandidateReady => "candidate_ready",
+        WorkItemState::Validating => "validating",
+        WorkItemState::Rework => "rework",
+        WorkItemState::Done => "done",
+        WorkItemState::Failed => "failed",
+        WorkItemState::Cancelled => "cancelled",
     }
 }
 
@@ -1431,9 +1401,18 @@ fn load_delivery_page(
             }
             let delivery = load_current_delivery(storage, &entry.delivery_id)?;
             if !states.is_empty()
-                && !states
-                    .iter()
-                    .any(|state| state == delivery_status_name(delivery.snapshot().status))
+                && !states.iter().any(|state| {
+                    state
+                        == work_item_state_name(
+                            &delivery.snapshot().work_run_aggregate.summary_state(
+                                delivery
+                                    .snapshot()
+                                    .attention_items
+                                    .iter()
+                                    .any(|item| item.status == AttentionItemStatus::Open),
+                            ),
+                        )
+                })
             {
                 continue;
             }

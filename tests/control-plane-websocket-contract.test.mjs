@@ -38,7 +38,7 @@ const eventTypes = Object.freeze([
   'attention.changed.v1',
   'chat-interactions.invalidated.v1',
   'delivery.changed.v1',
-  'delivery-task.changed.v1',
+  'work-item.changed.v1',
   'model-route-availability.invalidated.v1',
   'presence.changed.v1',
   'product-session.message.appended.v1',
@@ -277,13 +277,13 @@ function validateFrameShape(frame) {
 function validateSessionIdentityJoin(frame) {
   if (
     frame.event.type !== 'runtime-projection.invalidated.v1'
-    || frame.event.scopeKind !== 'delivery-stage'
+    || frame.event.scopeKind !== 'work-run'
   ) return null
   const identity = frame.event.sessionIdentity
   if (identity === undefined) return 'session event is missing sessionIdentity'
   for (const field of [
     'productSessionId',
-    'stageRunId',
+    'workRunId',
   ]) {
     if (identity[field] !== frame.event[field]) {
       return `session identity does not join event ${field}`
@@ -382,7 +382,7 @@ test('event schema has one stable source and reuses canonical domain IDs', () =>
   )
   assert.equal(schema.$schema, 'https://json-schema.org/draft/2020-12/schema')
   assert.deepEqual(Object.keys(schema.$defs).filter(name => (
-    /^(?:Organization|Workspace|Project|Repository|Delivery|DeliveryTask|ProductSession|StageRun|Worker|WorkerSession|Lease|Approval|AttentionItem|User|CodexThread)Id$/u
+    /^(?:Organization|Workspace|Project|Repository|Delivery|WorkContract|WorkItem|WorkRun|ProductSession|StageRun|Worker|WorkerSession|Lease|Approval|AttentionItem|User|CodexThread)Id$/u
       .test(name)
   )), [])
 
@@ -549,7 +549,7 @@ test('resume, authorization recheck, and slow-client rules are machine visible',
     undefined,
   )
   assert.deepEqual(
-    schema.$defs.ControlPlaneWebSocketDeliveryStageRuntimeProjectionInvalidatedEvent
+    schema.$defs.ControlPlaneWebSocketWorkRunRuntimeProjectionInvalidatedEvent
       .properties.reloadQueries.prefixItems,
     [
       { $ref: '#/$defs/ControlPlaneWebSocketDeliveryGetReloadQuery' },
@@ -666,7 +666,7 @@ test('session-scoped frames reject unknown identity fields and source/payload jo
   const frame = transcript.frames.find(item => (
     item.type === 'event.v1'
       && item.event.type === 'runtime-projection.invalidated.v1'
-      && item.event.scopeKind === 'delivery-stage'
+      && item.event.scopeKind === 'work-run'
   ))
   assert.ok(frame)
   assert.deepEqual(validateSchemaNode(frame, schema), [])
@@ -676,8 +676,8 @@ test('session-scoped frames reject unknown identity fields and source/payload jo
   assert.notDeepEqual(validateSchemaNode(unknown, schema), [])
 
   const crossed = structuredClone(frame)
-  crossed.event.sessionIdentity.stageRunId = 'run_01J00000000000000000000001'
-  assert.equal(validateSessionIdentityJoin(crossed), 'session identity does not join event stageRunId')
+  crossed.event.sessionIdentity.workRunId = 'wrn_01J00000000000000000000001'
+  assert.equal(validateSessionIdentityJoin(crossed), 'session identity does not join event workRunId')
 
   const sourceCrossed = structuredClone(frame)
   sourceCrossed.source.sessionIdentity.productSessionId = 'psn_01J00000000000000000000001'

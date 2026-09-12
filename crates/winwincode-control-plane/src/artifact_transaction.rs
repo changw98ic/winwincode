@@ -5,7 +5,9 @@
 use std::fmt;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use winwincode_delivery::{application::stage::SessionBindingAuthority, domain::Delivery};
+use winwincode_delivery::{
+    application::workrun_execution::SessionBindingAuthority, domain::Delivery,
+};
 use winwincode_domain::RepositoryScope;
 use winwincode_domain::{
     DeliveryId, ExecutionAckSequence, ExecutionSequence, SchemaVersion, SessionIdentity,
@@ -601,14 +603,14 @@ fn validate_current_binding(
                     || matches!(run.state, winwincode_domain::WorkRunState::Running))
         });
     let run = runs.next().ok_or_else(|| {
-        StorageError::invalid_input("Artifact ExecutionJob StageRun is not active")
+        StorageError::invalid_input("Artifact ExecutionJob WorkRun is not active")
     })?;
     let attempt = u64::try_from(job.attempt).map_err(|_| {
         StorageError::invalid_input("Artifact ExecutionJob attempt is out of range")
     })?;
     if runs.next().is_some() || run.attempt != i64::try_from(attempt).unwrap_or(-1) {
         return Err(StorageError::invalid_input(
-            "Artifact ExecutionJob StageRun is ambiguous or stale",
+            "Artifact ExecutionJob WorkRun is ambiguous or stale",
         ));
     }
     let bindings = delivery
@@ -619,7 +621,7 @@ fn validate_current_binding(
         .collect::<Vec<_>>();
     let [binding] = bindings.as_slice() else {
         return Err(StorageError::invalid_input(
-            "Artifact StageRun must have one exact SessionBinding",
+            "Artifact WorkRun must have one exact SessionBinding",
         ));
     };
     if binding.execution_job_id != job.job_id
@@ -636,7 +638,7 @@ fn validate_current_binding(
         ));
     }
     let codex_thread_id = binding.codex_thread_id.clone().ok_or_else(|| {
-        StorageError::invalid_input("Artifact StageRun SessionBinding has no CodexThread")
+        StorageError::invalid_input("Artifact WorkRun SessionBinding has no CodexThread")
     })?;
     if require_authority
         && (binding.worker_id.as_ref() != Some(&lease.worker_id)

@@ -34,7 +34,7 @@
         "chat-interactions.invalidated.v1",
         "attention.changed.v1",
         "delivery.changed.v1",
-        "delivery-task.changed.v1",
+        "work-item.changed.v1",
         "presence.changed.v1",
         "product-session.changed.v1",
         "product-session.message.appended.v1",
@@ -350,8 +350,8 @@
         "deliveryId": {
           "$ref": "./domain.schema.json#/$defs/DeliveryId"
         },
-        "stageRunId": {
-          "$ref": "./domain.schema.json#/$defs/StageRunId"
+        "workRunId": {
+          "$ref": "./domain.schema.json#/$defs/WorkRunId"
         },
         "revision": {
           "$ref": "./domain.schema.json#/$defs/Revision"
@@ -423,25 +423,25 @@
         }
       }
     },
-    "ControlPlaneWebSocketDeliveryTaskChangedEvent": {
+    "ControlPlaneWebSocketWorkItemChangedEvent": {
       "type": "object",
       "additionalProperties": false,
       "required": [
         "type",
         "deliveryId",
-        "deliveryTaskId",
+        "workItemId",
         "revision",
         "changeKind"
       ],
       "properties": {
         "type": {
-          "const": "delivery-task.changed.v1"
+          "const": "work-item.changed.v1"
         },
         "deliveryId": {
           "$ref": "./domain.schema.json#/$defs/DeliveryId"
         },
-        "deliveryTaskId": {
-          "$ref": "./domain.schema.json#/$defs/DeliveryTaskId"
+        "workItemId": {
+          "$ref": "./domain.schema.json#/$defs/WorkItemId"
         },
         "revision": {
           "$ref": "./domain.schema.json#/$defs/Revision"
@@ -605,7 +605,7 @@
           "$ref": "#/$defs/ControlPlaneWebSocketDeliveryChangedEvent"
         },
         {
-          "$ref": "#/$defs/ControlPlaneWebSocketDeliveryTaskChangedEvent"
+          "$ref": "#/$defs/ControlPlaneWebSocketWorkItemChangedEvent"
         },
         {
           "$ref": "#/$defs/ControlPlaneWebSocketPresenceChangedEvent"
@@ -990,10 +990,10 @@
           "$ref": "#/$defs/ControlPlaneWebSocketProductSessionRuntimeProjectionInvalidatedEvent"
         },
         {
-          "$ref": "#/$defs/ControlPlaneWebSocketDeliveryStageRuntimeProjectionInvalidatedEvent"
+          "$ref": "#/$defs/ControlPlaneWebSocketWorkRunRuntimeProjectionInvalidatedEvent"
         }
       ],
-      "description": "Strictly discriminated runtime invalidation. Product-session Chat reloads runtime alone; a Delivery stage establishes one bounded StrongFlow read cut before runtime replay."
+      "description": "Strictly discriminated runtime invalidation. Product-session Chat reloads runtime alone; a WorkRun establishes one bounded StrongFlow read cut before runtime replay."
     },
     "ControlPlaneWebSocketDeliveryGetReloadQuery": {
       "const": "delivery.get"
@@ -1044,7 +1044,7 @@
       },
       "description": "Chat/product-session invalidation. It has no Delivery identity or StrongFlow read cursor and reloads only its product-session runtime projection."
     },
-    "ControlPlaneWebSocketDeliveryStageRuntimeProjectionInvalidatedEvent": {
+    "ControlPlaneWebSocketWorkRunRuntimeProjectionInvalidatedEvent": {
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -1063,7 +1063,7 @@
           "const": "runtime-projection.invalidated.v1"
         },
         "scopeKind": {
-          "const": "delivery-stage"
+          "const": "work-run"
         },
         "productSessionId": {
           "$ref": "./domain.schema.json#/$defs/ProductSessionId"
@@ -1220,7 +1220,7 @@
         "product-session": [
           "runtime.projection.get"
         ],
-        "delivery-stage": [
+        "work-run": [
           "delivery.get",
           "runtime.projection.get"
         ]
@@ -1288,14 +1288,14 @@
     },
     "sessionIdentity": {
       "sessionScopedPayloads": [
-        "runtime-projection.invalidated.v1:delivery-stage"
+        "runtime-projection.invalidated.v1:work-run"
       ],
       "identityBlock": "sessionIdentity",
       "sourcePayloadExactJoin": [
         "productSessionId",
         "workerSessionId",
         "codexThreadId",
-        "stageRunId"
+        "workRunId"
       ],
       "productSessionEvents": "do_not_require_execution_identity",
       "workerHealthEvents": "do_not_require_execution_identity"

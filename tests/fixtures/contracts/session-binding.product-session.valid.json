@@ -23,6 +23,21 @@
     "codexThreadId": "cdx_0000000000000000000000000G"
   },
   "workerId": "wrk_00000000000000000000000001",
+  "runtimeContext": {
+    "agentIdentity": {
+      "id": "agt_00000000000000000000000001",
+      "workerId": "wrk_00000000000000000000000001",
+      "name": "Fixture executor",
+      "role": "executor"
+    },
+    "provider": "fixture-provider",
+    "model": "fixture-model",
+    "workspace": {
+      "repositoryId": "rep_00000000000000000000000001",
+      "revision": "git-tree:0000000000000000000000000000000000000000",
+      "writeMode": "candidate"
+    }
+  },
   "sourceIdentity": {
     "kind": "execution-worker",
     "workerId": "wrk_00000000000000000000000001",

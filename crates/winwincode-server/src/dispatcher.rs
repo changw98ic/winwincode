@@ -35,8 +35,8 @@ impl CommandFamily {
             | CommandName::SessionClose => Self::Session,
             CommandName::DeliveryCreate
             | CommandName::DeliveryUpdateSpec
-            | CommandName::DeliveryTaskBreakdownCreate
-            | CommandName::DeliveryAdvance
+            | CommandName::WorkitemsCreate
+            | CommandName::WorkRunStart
             | CommandName::WorkRunCancel
             | CommandName::DeliveryResolveAttention
             | CommandName::DeliverySubmitVerdict => Self::Delivery,

@@ -113,6 +113,13 @@
   overflow-wrap: anywhere;
 }
 
+.wwc-home-mobile-capability {
+  display: none;
+  margin: 0;
+  color: var(--wwc-color-text-muted);
+  font-size: var(--wwc-font-size-sm);
+}
+
 /* Two live columns: Running left, Needs-you right. */
 .wwc-home-sections {
   display: grid;
@@ -121,7 +128,7 @@
   align-items: start;
 }
 
-.wwc-home-sections [data-section='active'] {
+.wwc-home-sections [data-section='running'] {
   grid-column: 1;
   grid-row: 1;
 }
@@ -131,14 +138,22 @@
   grid-row: 1;
 }
 
-.wwc-home-sections [data-section='failing'],
+.wwc-home-sections [data-section='backlog'],
+.wwc-home-sections [data-section='ready'],
+.wwc-home-sections [data-section='waiting'],
+.wwc-home-sections [data-section='validating'],
+.wwc-home-sections [data-section='failed'],
 .wwc-home-sections [data-section='completed'],
 .wwc-home-sections [data-section='visited'] {
   grid-column: 1 / -1;
 }
 
 /* Collapsed history rows: bold heading + gray count on one hairline row. */
-.wwc-home-sections [data-section='failing'],
+.wwc-home-sections [data-section='backlog'],
+.wwc-home-sections [data-section='ready'],
+.wwc-home-sections [data-section='waiting'],
+.wwc-home-sections [data-section='validating'],
+.wwc-home-sections [data-section='failed'],
 .wwc-home-sections [data-section='completed'],
 .wwc-home-sections [data-section='visited'] {
   padding: var(--wwc-space-3) var(--wwc-space-2);
@@ -148,7 +163,7 @@
   background: transparent;
 }
 
-.wwc-home-sections [data-section='failing'] {
+.wwc-home-sections [data-section='backlog'] {
   border-top: var(--wwc-border-width) solid var(--wwc-color-border-subtle);
 }
 
@@ -179,7 +194,11 @@
 }
 
 /* Collapsed history rows read 「已完成 · 18」 with the muted middle dot. */
-.wwc-home-sections [data-section='failing'] .wwc-home-section-count::before,
+.wwc-home-sections [data-section='backlog'] .wwc-home-section-count::before,
+.wwc-home-sections [data-section='ready'] .wwc-home-section-count::before,
+.wwc-home-sections [data-section='waiting'] .wwc-home-section-count::before,
+.wwc-home-sections [data-section='validating'] .wwc-home-section-count::before,
+.wwc-home-sections [data-section='failed'] .wwc-home-section-count::before,
 .wwc-home-sections [data-section='completed'] .wwc-home-section-count::before,
 .wwc-home-sections [data-section='visited'] .wwc-home-section-count::before {
   content: '·';
@@ -323,12 +342,16 @@
 }
 
 @media (max-width: 48rem) {
+  .wwc-home-mobile-capability {
+    display: block;
+  }
+
   .wwc-home-sections {
     grid-template-columns: minmax(0, 1fr);
     gap: var(--wwc-space-3);
   }
 
-  .wwc-home-sections [data-section='active'],
+  .wwc-home-sections [data-section='running'],
   .wwc-home-sections [data-section='decisions'] {
     grid-column: auto;
     grid-row: auto;

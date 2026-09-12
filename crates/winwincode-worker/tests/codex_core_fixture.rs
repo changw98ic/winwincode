@@ -34,9 +34,9 @@ use winwincode_kernel::{
 };
 use winwincode_worker::{
     ActiveJob, CandidateArtifactAckOutcome, CandidateArtifactAuthority, CandidateArtifactUpload,
-    CodexCoreAdapter, CodexPoll, CodexThreadStart, CodexTurnCompletion, DurableExecutionDelivery,
-    RetainedCandidateArtifact, WorkerConfig, WorkerErrorCode, WorkerExecutionPort,
-    WorkerLifecycleState, WorkerMain, secret_safe_runtime_summary,
+    CodexCoreAdapter, CodexPoll, CodexThreadSession, CodexThreadStart, CodexTurnCompletion,
+    DurableExecutionDelivery, RetainedCandidateArtifact, WorkerConfig, WorkerErrorCode,
+    WorkerExecutionPort, WorkerLifecycleState, WorkerMain, secret_safe_runtime_summary,
     workspace_runtime::JobWorkspaceRuntime,
 };
 
@@ -219,11 +219,8 @@ impl CodexCoreAdapter for RealKernelAdapter {
     async fn ensure_thread(
         &mut self,
         start: CodexThreadStart<'_>,
-    ) -> Result<CodexThreadId, Self::Error> {
+    ) -> Result<CodexThreadSession, Self::Error> {
         self.stats.ensure_calls += 1;
-        if let Some(thread_id) = self.runs.get(start.run_key) {
-            return Ok(thread_id.clone());
-        }
         let capabilities = worker_config().capabilities;
         let agent_config = resolve_agent_session_config(
             start.worker_id,
@@ -239,6 +236,12 @@ impl CodexCoreAdapter for RealKernelAdapter {
             },
         )
         .map_err(|error| error.to_string())?;
+        if let Some(thread_id) = self.runs.get(start.run_key) {
+            return Ok(CodexThreadSession {
+                thread_id: thread_id.clone(),
+                agent_config,
+            });
+        }
         let session = self
             .kernel
             .create_session(SessionOptions {
@@ -246,7 +249,7 @@ impl CodexCoreAdapter for RealKernelAdapter {
                 provider: "fixture-provider".to_owned(),
                 model: "fixture-coder".to_owned(),
                 role_policy: None,
-                agent_config,
+                agent_config: agent_config.clone(),
             })
             .await
             .map_err(|error| error.to_string())?;
@@ -255,7 +258,10 @@ impl CodexCoreAdapter for RealKernelAdapter {
             .insert(thread_id.0.clone(), session.session_id.clone());
         self.runs.insert(start.run_key.clone(), thread_id.clone());
         self.stats.created_sessions += 1;
-        Ok(thread_id)
+        Ok(CodexThreadSession {
+            thread_id,
+            agent_config,
+        })
     }
 
     async fn submit_turn(

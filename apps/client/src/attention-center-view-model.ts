@@ -89,8 +89,8 @@ export interface AttentionCenterItem {
 
 /**
  * UI-506 execution origin of one decision: the Delivery summary already loaded
- * for this Scope names the StageRun that is currently waiting or running, so a
- * decision can return to the exact Task/StageRun context that raised it.
+ * for this Scope names the WorkRun that is currently waiting or running, so a
+ * decision can return to the exact WorkItem/WorkRun context that raised it.
  */
 export interface AttentionCenterOrigin {
   readonly deliveryId: DeliveryId
@@ -154,14 +154,14 @@ function normalizedError(error: unknown, signal?: AbortSignal): ControlPlaneClie
   if (signal?.aborted === true) return new ControlPlaneClientError({
     kind: 'cancelled',
     code: 'REQUEST_CANCELLED',
-    message: 'The attention center request was cancelled.',
+    message: '待处理中心请求已取消。',
     requestId: null,
     retryable: false,
     cause: error,
   })
   return clientFailure(
     'ATTENTION_CENTER_FAILURE',
-    'The Attention Center could not be updated.',
+    '无法更新待处理决策。',
     error,
   )
 }
@@ -183,7 +183,7 @@ function expectQuery<Query extends QueryResultResponse['query']>(
 ): Extract<QueryResultResponse, { readonly query: Query }> {
   if (response.query !== query) throw clientFailure(
     'ATTENTION_CENTER_QUERY_MISMATCH',
-    'The Control Plane returned another Attention Center query result.',
+    '控制平面返回了其他待处理决策查询结果。',
   )
   return response as Extract<QueryResultResponse, { readonly query: Query }>
 }
@@ -196,14 +196,14 @@ function cursorAfter(response: PagedResponse, seen: Set<OpaqueCursor>): OpaqueCu
   if (!response.page.hasMore) {
     if (response.page.nextCursor !== null) throw clientFailure(
       'ATTENTION_CENTER_PAGE_INVALID',
-      'The final Attention Center page returned an unexpected cursor.',
+      '待处理决策末页返回了意外的游标。',
     )
     return null
   }
   const next = response.page.nextCursor
   if (next === null || seen.has(next)) throw clientFailure(
     'ATTENTION_CENTER_CURSOR_INVALID',
-    'The Attention Center list returned an invalid continuation cursor.',
+      '待处理决策列表返回了无效的续页游标。',
   )
   seen.add(next)
   return next
@@ -338,7 +338,7 @@ function bindingInvalidAttention(summary: DeliveryProjection): AttentionCenterIt
   const item: AttentionCenterItem = {
     kind: 'attention',
     id: `delivery ${summary.deliveryId}`,
-    title: 'Delivery outside the current repository Scope',
+    title: '交付不在当前仓库范围内',
     blocking: true,
     expired: false,
     bindingValid: false,
@@ -401,7 +401,7 @@ interface AttentionCenterSnapshot {
   readonly origins: readonly AttentionCenterOrigin[]
 }
 
-/** Build the global Attention Center from authoritative Control Plane projections only. */
+/** Build the task board's pending decisions from authoritative Control Plane projections only. */
 export function createAttentionCenterViewModel(
   options: AttentionCenterViewModelOptions,
 ): AttentionCenterViewModel {
@@ -468,7 +468,7 @@ export function createAttentionCenterViewModel(
     }
     throw clientFailure(
       'ATTENTION_CENTER_PAGE_LIMIT_EXCEEDED',
-      'The Approval list exceeded the bounded page limit.',
+    '审批列表超过了分页上限。',
     )
   }
 
@@ -490,7 +490,7 @@ export function createAttentionCenterViewModel(
     }
     throw clientFailure(
       'ATTENTION_CENTER_PAGE_LIMIT_EXCEEDED',
-      'The ProductSession list exceeded the bounded page limit.',
+    '对话会话列表超过了分页上限。',
     )
   }
 
@@ -512,7 +512,7 @@ export function createAttentionCenterViewModel(
     }
     throw clientFailure(
       'ATTENTION_CENTER_PAGE_LIMIT_EXCEEDED',
-      'The Delivery list exceeded the bounded page limit.',
+    '交付列表超过了分页上限。',
     )
   }
 
@@ -544,7 +544,7 @@ export function createAttentionCenterViewModel(
       }
       throw clientFailure(
         'ATTENTION_CENTER_PAGE_LIMIT_EXCEEDED',
-        'The input interaction list exceeded the bounded page limit.',
+    '输入交互列表超过了分页上限。',
       )
     }))
     return Object.freeze(pages.flat())
@@ -565,7 +565,7 @@ export function createAttentionCenterViewModel(
       }, { signal }), QueryName.DeliveryGet)
       if (response.page.hasMore || response.page.nextCursor !== null) throw clientFailure(
         'ATTENTION_CENTER_PAGE_INVALID',
-        'The Attention detail returned an unexpected page cursor.',
+    '待处理详情返回了意外的分页游标。',
       )
       return { summary, detail: response.result }
     }))
@@ -607,7 +607,7 @@ export function createAttentionCenterViewModel(
     for (const approval of approvalValues) {
       if (seenApprovals.has(approval.id)) throw clientFailure(
         'ATTENTION_CENTER_APPROVAL_BINDING_INVALID',
-        'The Approval list contains a duplicate decision identity.',
+      '审批列表包含重复的决策标识。',
       )
       seenApprovals.add(approval.id)
     }
@@ -626,7 +626,7 @@ export function createAttentionCenterViewModel(
   async function load(replace: boolean, realtimeStatus: AttentionCenterRealtimeStatus): Promise<void> {
     if (closed) throw clientFailure(
       'ATTENTION_CENTER_CLOSED',
-      'The Attention Center view is closed.',
+      '待处理决策视图已关闭。',
     )
     generation += 1
     const ownGeneration = generation
@@ -702,7 +702,7 @@ export function createAttentionCenterViewModel(
         revokeAccess(new ControlPlaneClientError({
           kind: 'authentication',
           code: 'AUTHENTICATION_REQUIRED',
-          message: 'Attention Center event authorization is no longer valid.',
+          message: '待处理决策事件授权已失效。',
           requestId: null,
           retryable: false,
         }))
@@ -748,7 +748,7 @@ export function createAttentionCenterViewModel(
       const error = new ControlPlaneClientError({
         kind: 'cancelled',
         code: 'REQUEST_CANCELLED',
-        message: 'The attention center request was cancelled.',
+        message: '待处理中心请求已取消。',
         requestId: null,
         retryable: false,
       })
@@ -761,11 +761,11 @@ export function createAttentionCenterViewModel(
     reconnect() {
       if (closed) throw clientFailure(
         'ATTENTION_CENTER_CLOSED',
-        'The Attention Center view is closed.',
+        '待处理决策视图已关闭。',
       )
       if (subscription === null) throw clientFailure(
         'ATTENTION_CENTER_SUBSCRIPTION_INACTIVE',
-        'Attention Center events are not active.',
+        '待处理决策事件未启用。',
       )
       patch({ realtime: 'reconnecting', error: null })
       subscription.reconnect()

@@ -14,7 +14,7 @@
     "workerLaunchGrantId": "wlg_000000000000000000000001",
     "repositoryBindingId": "rbd_000000000000000000000001",
     "productSessionId": "prs_000000000000000000000001",
-    "stageRunId": "stg_000000000000000000000001",
+    "workRunId": "wrn_000000000000000000000001",
     "workerSessionId": "wks_000000000000000000000001",
     "workerId": "wrk_000000000000000000000001",
     "workerInstanceId": "wki_000000000000000000000001",

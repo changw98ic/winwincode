@@ -20,7 +20,7 @@ use winwincode_delivery::{
             test_support::{VerdictFixture, VerdictFixtureOutcome, verdict_fixture},
         },
     },
-    domain::{Delivery, DeliveryStatus, DeliveryTaskStatus},
+    domain::{Delivery, DeliveryStatus},
     store::{
         AtomicPublication, CreateDelivery, DeliveryCommand, DeliveryCommandPort,
         DeliveryJournalPort, DeliveryQueryPort, DeliveryStore, JournalBackendError,
@@ -555,16 +555,13 @@ fn passing_verdict_enters_final_manual_delivery_review_state() {
         approval.work_run_id.is_none(),
         "human approval is not a Worker execution"
     );
-    assert_eq!(
-        delivery.snapshot().stage_runs,
-        fixture.delivery.snapshot().stage_runs
-    );
     assert!(
         delivery
             .snapshot()
-            .tasks
+            .work_run_aggregate
+            .items
             .iter()
-            .all(|task| task.status == DeliveryTaskStatus::Completed)
+            .all(|item| item.state == winwincode_domain::WorkItemState::CandidateReady)
     );
 
     control_plane.shutdown().expect("shutdown");

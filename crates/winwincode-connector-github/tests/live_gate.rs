@@ -434,7 +434,6 @@ impl LiveConfigFile {
                     repository_id: repository_scope.repository_id.clone(),
                     title: format!("GitHub Issue #{} Delivery", self.webhook.issue_number),
                 },
-                tasks: Vec::new(),
             },
             request_id: RequestId(self.delivery.request_id),
             schema_version: SchemaVersion::WinwincodeV1,

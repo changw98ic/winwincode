@@ -20,10 +20,11 @@ import type {
 
 /**
  * UX-100.1 converges the post-login first screen: the §16.2 My Work semantics
- * (needs attention, in progress, recently completed, plus the start-task entry
- * and the Clients status zone) are projected from the projections that already
- * exist.  This module owns no task state of its own: `work` is the one composed
- * Home dashboard snapshot, and the device list is the shell-owned Clients area
+ * (WWC-ER-1001's six canonical sections - needs attention, running, ready,
+ * waiting, recently completed, failed - plus the start-task entry and the
+ * Clients status zone) are projected from the projections that already exist.
+ * This module owns no task state of its own: `work` is the one composed Home
+ * dashboard snapshot, and the device list is the shell-owned Clients area
  * model, so a second queue or a second directory can never drift.
  */
 export type MyWorkSource = 'work' | 'clients'
@@ -54,6 +55,9 @@ export interface MyWorkClientsZone {
 export interface MyWorkCounts {
   readonly needsAttention: number
   readonly running: number
+  readonly ready: number
+  readonly waiting: number
+  readonly failed: number
   readonly completed: number
   readonly clients: number
 }
@@ -124,8 +128,11 @@ export function myWorkState(input: {
       summary: myWorkClientsSummary(input.devices),
     }),
     counts: Object.freeze({
-      needsAttention: input.work.counts.decisions + input.work.counts.failing,
-      running: input.work.counts.active,
+      needsAttention: input.work.counts.decisions,
+      running: input.work.counts.running + input.work.counts.validating,
+      ready: input.work.counts.ready,
+      waiting: input.work.counts.backlog + input.work.counts.waiting,
+      failed: input.work.counts.failed,
       completed: input.work.counts.completed,
       clients: input.devices.length,
     }),
@@ -139,14 +146,22 @@ function emptyWorkState(status: HomeDashboardState['status']): HomeDashboardStat
   return Object.freeze({
     status,
     decisions: Object.freeze([]),
-    active: Object.freeze([]),
-    failing: Object.freeze([]),
+    backlog: Object.freeze([]),
+    running: Object.freeze([]),
+    ready: Object.freeze([]),
+    waiting: Object.freeze([]),
+    validating: Object.freeze([]),
+    failed: Object.freeze([]),
     completed: Object.freeze([]),
     visited: Object.freeze([]),
     counts: Object.freeze({
       decisions: 0,
-      active: 0,
-      failing: 0,
+      backlog: 0,
+      running: 0,
+      ready: 0,
+      waiting: 0,
+      validating: 0,
+      failed: 0,
       completed: 0,
       visited: 0,
     }),

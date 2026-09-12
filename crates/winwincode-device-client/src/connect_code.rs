@@ -397,7 +397,9 @@ pub fn published_message(record: &ConnectCodeStateRecord) -> ClientToServerMessa
         },
         connect_code_id: record.connect_code_id.clone(),
         code_digest: record.code_digest.clone(),
+        generation: record.generation,
         expires_at: record.expires_at.clone(),
+        remaining_attempts: 5,
     })
 }
 
@@ -480,8 +482,7 @@ fn map_outbox_error(
 
 /// RFC 3339 UTC stamp of the caller's clock observation.
 fn rfc3339(time: OffsetDateTime) -> Result<String, DeviceStoreError> {
-    time.format(&Rfc3339)
-        .map_err(|error| DeviceStoreError::adapter(format!("timestamp formatting failed: {error}")))
+    Ok(crate::canonical_rfc3339(time))
 }
 
 /// Parses a stored or wire RFC 3339 stamp, fail-closing on corruption.

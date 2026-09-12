@@ -70,7 +70,6 @@ use std::process::Command;
 use rusqlite::params;
 use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
-use time::format_description::well_known::Rfc3339;
 use winwincode_client_port::domain::{
     ApplyResult, ApplyStrategy, LocalApplyReceipt, LocalCandidateState,
 };
@@ -1655,9 +1654,7 @@ fn strategy_name(strategy: ApplyStrategy) -> &'static str {
 }
 
 fn now_rfc3339() -> String {
-    OffsetDateTime::now_utc()
-        .format(&Rfc3339)
-        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_owned())
+    crate::canonical_rfc3339(OffsetDateTime::now_utc())
 }
 
 #[cfg(test)]

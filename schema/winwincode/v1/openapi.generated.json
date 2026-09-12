@@ -330,6 +330,11 @@
           }
         ]
       },
+      "AgentIdentityId": {
+        "description": "Stable Worker-and-role-derived Agent identity.",
+        "pattern": "^agt_[0-9A-HJKMNP-TV-Z]{26}$",
+        "type": "string"
+      },
       "ApiTokenId": {
         "pattern": "^tok_[0-9A-HJKMNP-TV-Z]{26}$",
         "type": "string"
@@ -6203,7 +6208,7 @@
             "$ref": "#/components/schemas/DeliveryUpdateSpecCompletedResponse"
           },
           {
-            "$ref": "#/components/schemas/DeliveryAdvanceCompletedResponse"
+            "$ref": "#/components/schemas/WorkRunStartCompletedResponse"
           },
           {
             "$ref": "#/components/schemas/WorkRunCancelCompletedResponse"
@@ -6251,7 +6256,7 @@
             "$ref": "#/components/schemas/CollaborationPresenceUpdateCompletedResponse"
           },
           {
-            "$ref": "#/components/schemas/DeliveryTaskBreakdownCreateCompletedResponse"
+            "$ref": "#/components/schemas/WorkItemsCreateCompletedResponse"
           }
         ]
       },
@@ -6301,7 +6306,7 @@
           "session.close",
           "delivery.create",
           "delivery.update_spec",
-          "delivery.advance",
+          "workrun.start",
           "workrun.cancel",
           "delivery.resolve_attention",
           "delivery.submit_verdict",
@@ -6317,7 +6322,7 @@
           "publication.cancel",
           "collaboration.notification.ack",
           "collaboration.presence.update",
-          "delivery.task_breakdown.create"
+          "workitems.create"
         ],
         "type": "string"
       },
@@ -6345,7 +6350,7 @@
             "$ref": "#/components/schemas/DeliveryUpdateSpecCommand"
           },
           {
-            "$ref": "#/components/schemas/DeliveryAdvanceCommand"
+            "$ref": "#/components/schemas/WorkRunStartCommand"
           },
           {
             "$ref": "#/components/schemas/WorkRunCancelCommand"
@@ -6393,7 +6398,7 @@
             "$ref": "#/components/schemas/CollaborationPresenceUpdateCommand"
           },
           {
-            "$ref": "#/components/schemas/DeliveryTaskBreakdownCreateCommand"
+            "$ref": "#/components/schemas/WorkItemsCreateCommand"
           }
         ]
       },
@@ -6579,9 +6584,6 @@
           "revision": {
             "$ref": "#/components/schemas/Revision"
           },
-          "stageRunId": {
-            "$ref": "#/components/schemas/StageRunId"
-          },
           "status": {
             "enum": [
               "blocking",
@@ -6597,6 +6599,9 @@
           },
           "type": {
             "const": "attention.changed.v1"
+          },
+          "workRunId": {
+            "$ref": "#/components/schemas/WorkRunId"
           }
         },
         "required": [
@@ -6784,100 +6789,6 @@
       "ControlPlaneWebSocketDeliveryGetReloadQuery": {
         "const": "delivery.get"
       },
-      "ControlPlaneWebSocketDeliveryStageRuntimeProjectionInvalidatedEvent": {
-        "additionalProperties": false,
-        "description": "WorkRun invalidation. The browser reloads Delivery first and replays runtime at the exact returned StrongFlowReadCursor.",
-        "properties": {
-          "deliveryId": {
-            "$ref": "#/components/schemas/DeliveryId"
-          },
-          "lastProjectionSequence": {
-            "maximum": 9007199254740991,
-            "minimum": 0,
-            "type": "integer"
-          },
-          "productSessionId": {
-            "$ref": "#/components/schemas/ProductSessionId"
-          },
-          "projectionRevision": {
-            "$ref": "#/components/schemas/Revision"
-          },
-          "reloadQueries": {
-            "items": false,
-            "maxItems": 2,
-            "minItems": 2,
-            "prefixItems": [
-              {
-                "$ref": "#/components/schemas/ControlPlaneWebSocketDeliveryGetReloadQuery"
-              },
-              {
-                "$ref": "#/components/schemas/ControlPlaneWebSocketRuntimeProjectionGetReloadQuery"
-              }
-            ],
-            "type": "array"
-          },
-          "scopeKind": {
-            "const": "delivery-stage"
-          },
-          "sessionIdentity": {
-            "$ref": "#/components/schemas/SessionIdentity"
-          },
-          "type": {
-            "const": "runtime-projection.invalidated.v1"
-          },
-          "workRunId": {
-            "$ref": "#/components/schemas/WorkRunId"
-          }
-        },
-        "required": [
-          "type",
-          "scopeKind",
-          "productSessionId",
-          "deliveryId",
-          "workRunId",
-          "projectionRevision",
-          "lastProjectionSequence",
-          "reloadQueries",
-          "sessionIdentity"
-        ],
-        "type": "object"
-      },
-      "ControlPlaneWebSocketDeliveryTaskChangedEvent": {
-        "additionalProperties": false,
-        "properties": {
-          "changeKind": {
-            "enum": [
-              "created",
-              "assigned",
-              "blocked",
-              "started",
-              "completed",
-              "cancelled"
-            ],
-            "type": "string"
-          },
-          "deliveryId": {
-            "$ref": "#/components/schemas/DeliveryId"
-          },
-          "deliveryTaskId": {
-            "$ref": "#/components/schemas/DeliveryTaskId"
-          },
-          "revision": {
-            "$ref": "#/components/schemas/Revision"
-          },
-          "type": {
-            "const": "delivery-task.changed.v1"
-          }
-        },
-        "required": [
-          "type",
-          "deliveryId",
-          "deliveryTaskId",
-          "revision",
-          "changeKind"
-        ],
-        "type": "object"
-      },
       "ControlPlaneWebSocketEventFrame": {
         "additionalProperties": false,
         "properties": {
@@ -6950,7 +6861,7 @@
             "$ref": "#/components/schemas/ControlPlaneWebSocketDeliveryChangedEvent"
           },
           {
-            "$ref": "#/components/schemas/ControlPlaneWebSocketDeliveryTaskChangedEvent"
+            "$ref": "#/components/schemas/ControlPlaneWebSocketWorkItemChangedEvent"
           },
           {
             "$ref": "#/components/schemas/ControlPlaneWebSocketPresenceChangedEvent"
@@ -6991,7 +6902,7 @@
           "chat-interactions.invalidated.v1",
           "attention.changed.v1",
           "delivery.changed.v1",
-          "delivery-task.changed.v1",
+          "work-item.changed.v1",
           "presence.changed.v1",
           "product-session.changed.v1",
           "product-session.message.appended.v1",
@@ -7354,13 +7265,13 @@
         "const": "runtime.projection.get"
       },
       "ControlPlaneWebSocketRuntimeProjectionInvalidatedEvent": {
-        "description": "Strictly discriminated runtime invalidation. Product-session Chat reloads runtime alone; a Delivery stage establishes one bounded StrongFlow read cut before runtime replay.",
+        "description": "Strictly discriminated runtime invalidation. Product-session Chat reloads runtime alone; a WorkRun establishes one bounded StrongFlow read cut before runtime replay.",
         "oneOf": [
           {
             "$ref": "#/components/schemas/ControlPlaneWebSocketProductSessionRuntimeProjectionInvalidatedEvent"
           },
           {
-            "$ref": "#/components/schemas/ControlPlaneWebSocketDeliveryStageRuntimeProjectionInvalidatedEvent"
+            "$ref": "#/components/schemas/ControlPlaneWebSocketWorkRunRuntimeProjectionInvalidatedEvent"
           }
         ]
       },
@@ -7596,6 +7507,100 @@
           "observedAt",
           "activeLeaseCount",
           "availableCapacity"
+        ],
+        "type": "object"
+      },
+      "ControlPlaneWebSocketWorkItemChangedEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "changeKind": {
+            "enum": [
+              "created",
+              "assigned",
+              "blocked",
+              "started",
+              "completed",
+              "cancelled"
+            ],
+            "type": "string"
+          },
+          "deliveryId": {
+            "$ref": "#/components/schemas/DeliveryId"
+          },
+          "revision": {
+            "$ref": "#/components/schemas/Revision"
+          },
+          "type": {
+            "const": "work-item.changed.v1"
+          },
+          "workItemId": {
+            "$ref": "#/components/schemas/WorkItemId"
+          }
+        },
+        "required": [
+          "type",
+          "deliveryId",
+          "workItemId",
+          "revision",
+          "changeKind"
+        ],
+        "type": "object"
+      },
+      "ControlPlaneWebSocketWorkRunRuntimeProjectionInvalidatedEvent": {
+        "additionalProperties": false,
+        "description": "WorkRun invalidation. The browser reloads Delivery first and replays runtime at the exact returned StrongFlowReadCursor.",
+        "properties": {
+          "deliveryId": {
+            "$ref": "#/components/schemas/DeliveryId"
+          },
+          "lastProjectionSequence": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "productSessionId": {
+            "$ref": "#/components/schemas/ProductSessionId"
+          },
+          "projectionRevision": {
+            "$ref": "#/components/schemas/Revision"
+          },
+          "reloadQueries": {
+            "items": false,
+            "maxItems": 2,
+            "minItems": 2,
+            "prefixItems": [
+              {
+                "$ref": "#/components/schemas/ControlPlaneWebSocketDeliveryGetReloadQuery"
+              },
+              {
+                "$ref": "#/components/schemas/ControlPlaneWebSocketRuntimeProjectionGetReloadQuery"
+              }
+            ],
+            "type": "array"
+          },
+          "scopeKind": {
+            "const": "work-run"
+          },
+          "sessionIdentity": {
+            "$ref": "#/components/schemas/SessionIdentity"
+          },
+          "type": {
+            "const": "runtime-projection.invalidated.v1"
+          },
+          "workRunId": {
+            "$ref": "#/components/schemas/WorkRunId"
+          }
+        },
+        "required": [
+          "type",
+          "scopeKind",
+          "productSessionId",
+          "deliveryId",
+          "workRunId",
+          "projectionRevision",
+          "lastProjectionSequence",
+          "reloadQueries",
+          "sessionIdentity"
         ],
         "type": "object"
       },
@@ -9904,74 +9909,6 @@
         ],
         "type": "object"
       },
-      "DeliveryAdvanceCommand": {
-        "allOf": [
-          {
-            "$ref": "#/components/schemas/CommandEnvelope"
-          },
-          {
-            "properties": {
-              "command": {
-                "const": "delivery.advance"
-              },
-              "payload": {
-                "$ref": "#/components/schemas/DeliveryAdvancePayload"
-              },
-              "scope": {
-                "$ref": "#/components/schemas/RepositoryScope"
-              }
-            },
-            "type": "object"
-          }
-        ]
-      },
-      "DeliveryAdvanceCompletedResponse": {
-        "allOf": [
-          {
-            "$ref": "#/components/schemas/CommandCompletedEnvelope"
-          },
-          {
-            "properties": {
-              "command": {
-                "const": "delivery.advance"
-              },
-              "result": {
-                "$ref": "#/components/schemas/DeliveryProjection"
-              }
-            },
-            "type": "object"
-          }
-        ]
-      },
-      "DeliveryAdvancePayload": {
-        "additionalProperties": false,
-        "properties": {
-          "deliveryId": {
-            "$ref": "#/components/schemas/DeliveryId"
-          },
-          "dispatchProfile": {
-            "description": "Requested execution profile, validated and frozen by the Controller before dispatch. WorkItem selection and execution identities are Controller-owned.",
-            "enum": [
-              "planner",
-              "executor",
-              "reviewer",
-              "verifier",
-              "adversarial-verifier",
-              "remediator"
-            ],
-            "type": "string"
-          },
-          "rework": {
-            "$ref": "#/components/schemas/DeliveryReworkInput",
-            "description": "Required only for remediator dispatch; rejected for every other profile."
-          }
-        },
-        "required": [
-          "deliveryId",
-          "dispatchProfile"
-        ],
-        "type": "object"
-      },
       "DeliveryAttentionOptionProjection": {
         "additionalProperties": false,
         "properties": {
@@ -10165,19 +10102,11 @@
           },
           "spec": {
             "$ref": "#/components/schemas/DeliverySpecInput"
-          },
-          "tasks": {
-            "items": {
-              "$ref": "#/components/schemas/DeliveryTaskInput"
-            },
-            "maxItems": 1000,
-            "type": "array"
           }
         },
         "required": [
           "deliveryId",
-          "spec",
-          "tasks"
+          "spec"
         ],
         "type": "object"
       },
@@ -10311,22 +10240,8 @@
               }
             ]
           },
-          "stages": {
-            "items": {
-              "$ref": "#/components/schemas/DeliveryStageProjection"
-            },
-            "maxItems": 1000,
-            "type": "array"
-          },
           "status": {
-            "$ref": "#/components/schemas/DeliveryStatus"
-          },
-          "tasks": {
-            "items": {
-              "$ref": "#/components/schemas/DeliveryTaskDetailProjection"
-            },
-            "maxItems": 1000,
-            "type": "array"
+            "$ref": "#/components/schemas/WorkItemState"
           },
           "verdict": {
             "oneOf": [
@@ -10350,8 +10265,6 @@
           "requirements",
           "solutionReview",
           "diagramExecution",
-          "stages",
-          "tasks",
           "attention",
           "evidence",
           "currentCandidate",
@@ -10685,10 +10598,7 @@
             "$ref": "#/components/schemas/SchemaVersion"
           },
           "status": {
-            "$ref": "#/components/schemas/DeliveryStatus"
-          },
-          "taskCounts": {
-            "$ref": "#/components/schemas/DeliveryTaskCountsProjection"
+            "$ref": "#/components/schemas/WorkItemState"
           },
           "title": {
             "maxLength": 500,
@@ -10698,15 +10608,8 @@
           "updatedAt": {
             "$ref": "#/components/schemas/Instant"
           },
-          "workRunId": {
-            "oneOf": [
-              {
-                "$ref": "#/components/schemas/WorkRunId"
-              },
-              {
-                "type": "null"
-              }
-            ]
+          "workItemCounts": {
+            "$ref": "#/components/schemas/WorkItemCountsProjection"
           }
         },
         "required": [
@@ -10716,7 +10619,7 @@
           "ownership",
           "title",
           "status",
-          "taskCounts",
+          "workItemCounts",
           "openAttentionCount",
           "updatedAt"
         ],
@@ -11208,367 +11111,6 @@
         ],
         "type": "object"
       },
-      "DeliveryStageProjection": {
-        "additionalProperties": false,
-        "description": "Human review stages never receive an ExecutionJob SessionBinding. Every Codex StageRun has its ProductSession/ExecutionJob binding; only WorkerSession/CodexThread attachment may remain pending.",
-        "oneOf": [
-          {
-            "properties": {
-              "actorType": {
-                "const": "human"
-              },
-              "sessionBinding": {
-                "type": "null"
-              }
-            }
-          },
-          {
-            "properties": {
-              "actorType": {
-                "const": "codex"
-              },
-              "sessionBinding": {
-                "$ref": "#/components/schemas/DeliveryStageSessionBindingProjection"
-              }
-            }
-          }
-        ],
-        "properties": {
-          "actorType": {
-            "enum": [
-              "codex",
-              "human"
-            ],
-            "type": "string"
-          },
-          "attempt": {
-            "maximum": 9007199254740991,
-            "minimum": 1,
-            "type": "integer"
-          },
-          "deliveryTaskId": {
-            "oneOf": [
-              {
-                "$ref": "#/components/schemas/DeliveryTaskId"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "finishedAt": {
-            "oneOf": [
-              {
-                "$ref": "#/components/schemas/Instant"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "id": {
-            "$ref": "#/components/schemas/StageRunId"
-          },
-          "role": {
-            "maxLength": 500,
-            "minLength": 1,
-            "type": "string"
-          },
-          "sessionBinding": {
-            "oneOf": [
-              {
-                "$ref": "#/components/schemas/DeliveryStageSessionBindingProjection"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "stage": {
-            "enum": [
-              "clarifying",
-              "planning",
-              "plan-review",
-              "executing",
-              "verifying",
-              "reworking",
-              "delivery-review"
-            ],
-            "type": "string"
-          },
-          "startedAt": {
-            "$ref": "#/components/schemas/Instant"
-          },
-          "status": {
-            "enum": [
-              "running",
-              "waiting",
-              "succeeded",
-              "failed",
-              "cancelled"
-            ],
-            "type": "string"
-          }
-        },
-        "required": [
-          "id",
-          "deliveryTaskId",
-          "stage",
-          "actorType",
-          "role",
-          "status",
-          "attempt",
-          "startedAt",
-          "finishedAt",
-          "sessionBinding"
-        ],
-        "type": "object"
-      },
-      "DeliveryStageRuntimeProjectionGetParameters": {
-        "additionalProperties": false,
-        "properties": {
-          "atCursor": {
-            "$ref": "#/components/schemas/StrongFlowReadCursor"
-          },
-          "deliveryId": {
-            "$ref": "#/components/schemas/DeliveryId"
-          },
-          "kind": {
-            "const": "delivery-stage"
-          },
-          "productSessionId": {
-            "$ref": "#/components/schemas/ProductSessionId"
-          },
-          "workRunId": {
-            "$ref": "#/components/schemas/WorkRunId"
-          }
-        },
-        "required": [
-          "kind",
-          "productSessionId",
-          "deliveryId",
-          "workRunId",
-          "atCursor"
-        ],
-        "type": "object"
-      },
-      "DeliveryStageSessionBindingProjection": {
-        "additionalProperties": false,
-        "description": "A ProductSession/ExecutionJob binding remains visible before Worker/Codex attachment; a CodexThread is never present without its WorkerSession.",
-        "oneOf": [
-          {
-            "properties": {
-              "attempt": {
-                "type": "null"
-              },
-              "codexThreadId": {
-                "type": "null"
-              },
-              "fencingToken": {
-                "type": "null"
-              },
-              "leaseId": {
-                "type": "null"
-              },
-              "sessionIdentity": {
-                "type": "null"
-              },
-              "sourceIdentity": {
-                "type": "null"
-              },
-              "workerId": {
-                "type": "null"
-              },
-              "workerSessionId": {
-                "type": "null"
-              },
-              "workRunId": {
-                "type": "null"
-              }
-            }
-          },
-          {
-            "properties": {
-              "attempt": {
-                "maximum": 1000,
-                "minimum": 1,
-                "type": "integer"
-              },
-              "codexThreadId": {
-                "$ref": "#/components/schemas/CodexThreadId"
-              },
-              "fencingToken": {
-                "maxLength": 20,
-                "minLength": 1,
-                "pattern": "^[1-9][0-9]{0,19}$",
-                "type": "string"
-              },
-              "leaseId": {
-                "$ref": "#/components/schemas/LeaseId"
-              },
-              "sessionIdentity": {
-                "$ref": "#/components/schemas/SessionIdentity"
-              },
-              "sourceIdentity": {
-                "$ref": "#/components/schemas/SessionBindingSourceIdentity"
-              },
-              "workerId": {
-                "$ref": "#/components/schemas/WorkerId"
-              },
-              "workerSessionId": {
-                "$ref": "#/components/schemas/WorkerSessionId"
-              },
-              "workRunId": {
-                "$ref": "#/components/schemas/WorkRunId"
-              }
-            }
-          }
-        ],
-        "properties": {
-          "attempt": {
-            "oneOf": [
-              {
-                "maximum": 1000,
-                "minimum": 1,
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "bindingId": {
-            "maxLength": 200,
-            "minLength": 1,
-            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$",
-            "type": "string"
-          },
-          "boundAt": {
-            "$ref": "#/components/schemas/Instant"
-          },
-          "codexThreadId": {
-            "oneOf": [
-              {
-                "$ref": "#/components/schemas/CodexThreadId"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "executionJobId": {
-            "$ref": "#/components/schemas/ExecutionJobId"
-          },
-          "fencingToken": {
-            "oneOf": [
-              {
-                "maxLength": 20,
-                "minLength": 1,
-                "pattern": "^[1-9][0-9]{0,19}$",
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "leaseId": {
-            "oneOf": [
-              {
-                "$ref": "#/components/schemas/LeaseId"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "productSessionId": {
-            "$ref": "#/components/schemas/ProductSessionId"
-          },
-          "sessionIdentity": {
-            "oneOf": [
-              {
-                "$ref": "#/components/schemas/SessionIdentity"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "sourceIdentity": {
-            "oneOf": [
-              {
-                "$ref": "#/components/schemas/SessionBindingSourceIdentity"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "workerId": {
-            "oneOf": [
-              {
-                "$ref": "#/components/schemas/WorkerId"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "workerSessionId": {
-            "oneOf": [
-              {
-                "$ref": "#/components/schemas/WorkerSessionId"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "workRunId": {
-            "oneOf": [
-              {
-                "$ref": "#/components/schemas/WorkRunId"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          }
-        },
-        "required": [
-          "bindingId",
-          "productSessionId",
-          "executionJobId",
-          "workerSessionId",
-          "codexThreadId",
-          "boundAt",
-          "sessionIdentity",
-          "workRunId",
-          "workerId",
-          "leaseId",
-          "attempt",
-          "fencingToken",
-          "sourceIdentity"
-        ],
-        "type": "object"
-      },
-      "DeliveryStatus": {
-        "enum": [
-          "draft",
-          "clarifying",
-          "ready",
-          "planning",
-          "plan-review",
-          "executing",
-          "verifying",
-          "reworking",
-          "needs-attention",
-          "ready-to-deliver",
-          "delivered"
-        ],
-        "type": "string"
-      },
       "DeliverySubmitVerdictCommand": {
         "allOf": [
           {
@@ -11626,377 +11168,6 @@
           "candidateDigest"
         ],
         "type": "object"
-      },
-      "DeliveryTaskBreakdownCreateCommand": {
-        "allOf": [
-          {
-            "$ref": "#/components/schemas/CommandEnvelope"
-          },
-          {
-            "properties": {
-              "command": {
-                "const": "delivery.task_breakdown.create"
-              },
-              "payload": {
-                "$ref": "#/components/schemas/DeliveryTaskBreakdownCreatePayload"
-              },
-              "scope": {
-                "$ref": "#/components/schemas/RepositoryScope"
-              }
-            },
-            "type": "object"
-          }
-        ]
-      },
-      "DeliveryTaskBreakdownCreateCompletedResponse": {
-        "allOf": [
-          {
-            "$ref": "#/components/schemas/CommandCompletedEnvelope"
-          },
-          {
-            "properties": {
-              "command": {
-                "const": "delivery.task_breakdown.create"
-              },
-              "result": {
-                "$ref": "#/components/schemas/DeliveryTaskBreakdownCreateResult"
-              }
-            },
-            "type": "object"
-          }
-        ]
-      },
-      "DeliveryTaskBreakdownCreateItem": {
-        "additionalProperties": false,
-        "properties": {
-          "criterionIds": {
-            "items": {
-              "$ref": "#/components/schemas/CriterionId"
-            },
-            "maxItems": 1000,
-            "minItems": 1,
-            "type": "array",
-            "uniqueItems": true
-          },
-          "dependsOn": {
-            "items": {
-              "$ref": "#/components/schemas/WorkItemId"
-            },
-            "maxItems": 1000,
-            "type": "array",
-            "uniqueItems": true
-          },
-          "goal": {
-            "maxLength": 65536,
-            "minLength": 1,
-            "type": "string"
-          },
-          "id": {
-            "$ref": "#/components/schemas/WorkItemId"
-          },
-          "title": {
-            "maxLength": 500,
-            "minLength": 1,
-            "type": "string"
-          }
-        },
-        "required": [
-          "id",
-          "title",
-          "goal",
-          "criterionIds",
-          "dependsOn"
-        ],
-        "type": "object"
-      },
-      "DeliveryTaskBreakdownCreatePayload": {
-        "additionalProperties": false,
-        "properties": {
-          "contractRevision": {
-            "$ref": "#/components/schemas/Revision"
-          },
-          "deliveryId": {
-            "$ref": "#/components/schemas/DeliveryId"
-          },
-          "expectedRevision": {
-            "$ref": "#/components/schemas/Revision"
-          },
-          "items": {
-            "items": {
-              "$ref": "#/components/schemas/DeliveryTaskBreakdownCreateItem"
-            },
-            "maxItems": 1000,
-            "minItems": 1,
-            "type": "array"
-          }
-        },
-        "required": [
-          "deliveryId",
-          "expectedRevision",
-          "contractRevision",
-          "items"
-        ],
-        "type": "object"
-      },
-      "DeliveryTaskBreakdownCreateResult": {
-        "additionalProperties": false,
-        "properties": {
-          "deliveryId": {
-            "$ref": "#/components/schemas/DeliveryId"
-          },
-          "deliveryRevision": {
-            "$ref": "#/components/schemas/Revision"
-          },
-          "items": {
-            "items": {
-              "$ref": "#/components/schemas/WorkItem"
-            },
-            "maxItems": 1000,
-            "minItems": 1,
-            "type": "array"
-          }
-        },
-        "required": [
-          "deliveryId",
-          "deliveryRevision",
-          "items"
-        ],
-        "type": "object"
-      },
-      "DeliveryTaskCountsProjection": {
-        "additionalProperties": false,
-        "properties": {
-          "active": {
-            "$ref": "#/components/schemas/Count"
-          },
-          "blocked": {
-            "$ref": "#/components/schemas/Count"
-          },
-          "completed": {
-            "$ref": "#/components/schemas/Count"
-          },
-          "failed": {
-            "$ref": "#/components/schemas/Count"
-          },
-          "pending": {
-            "$ref": "#/components/schemas/Count"
-          },
-          "total": {
-            "$ref": "#/components/schemas/Count"
-          },
-          "verifying": {
-            "$ref": "#/components/schemas/Count"
-          }
-        },
-        "required": [
-          "total",
-          "pending",
-          "active",
-          "blocked",
-          "verifying",
-          "completed",
-          "failed"
-        ],
-        "type": "object"
-      },
-      "DeliveryTaskDetailProjection": {
-        "additionalProperties": false,
-        "properties": {
-          "acceptanceCriterionIds": {
-            "items": {
-              "maxLength": 200,
-              "minLength": 1,
-              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$",
-              "type": "string"
-            },
-            "maxItems": 1000,
-            "minItems": 1,
-            "type": "array",
-            "uniqueItems": true
-          },
-          "blockedByTaskIds": {
-            "items": {
-              "$ref": "#/components/schemas/DeliveryTaskId"
-            },
-            "maxItems": 1000,
-            "type": "array",
-            "uniqueItems": true
-          },
-          "evidenceRefs": {
-            "items": {
-              "$ref": "#/components/schemas/EvidenceId"
-            },
-            "maxItems": 1000,
-            "type": "array",
-            "uniqueItems": true
-          },
-          "goal": {
-            "maxLength": 65536,
-            "minLength": 1,
-            "type": "string"
-          },
-          "id": {
-            "$ref": "#/components/schemas/DeliveryTaskId"
-          },
-          "owner": {
-            "oneOf": [
-              {
-                "maxLength": 500,
-                "minLength": 1,
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "status": {
-            "$ref": "#/components/schemas/DeliveryTaskStatus"
-          },
-          "title": {
-            "maxLength": 500,
-            "minLength": 1,
-            "type": "string"
-          },
-          "workRunIds": {
-            "items": {
-              "$ref": "#/components/schemas/WorkRunId"
-            },
-            "maxItems": 1000,
-            "type": "array",
-            "uniqueItems": true
-          }
-        },
-        "required": [
-          "id",
-          "title",
-          "goal",
-          "acceptanceCriterionIds",
-          "blockedByTaskIds",
-          "owner",
-          "status",
-          "workRunIds",
-          "evidenceRefs"
-        ],
-        "type": "object"
-      },
-      "DeliveryTaskId": {
-        "pattern": "^dtk_[0-9A-HJKMNP-TV-Z]{26}$",
-        "type": "string"
-      },
-      "DeliveryTaskInput": {
-        "additionalProperties": false,
-        "properties": {
-          "acceptanceCriterionIds": {
-            "items": {
-              "maxLength": 200,
-              "minLength": 1,
-              "type": "string"
-            },
-            "maxItems": 1000,
-            "minItems": 1,
-            "type": "array",
-            "uniqueItems": true
-          },
-          "blockedByTaskIds": {
-            "items": {
-              "$ref": "#/components/schemas/DeliveryTaskId"
-            },
-            "maxItems": 1000,
-            "type": "array",
-            "uniqueItems": true
-          },
-          "goal": {
-            "maxLength": 65536,
-            "minLength": 1,
-            "type": "string"
-          },
-          "id": {
-            "$ref": "#/components/schemas/DeliveryTaskId"
-          },
-          "ownerActorId": {
-            "oneOf": [
-              {
-                "$ref": "#/components/schemas/ActorId"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "title": {
-            "maxLength": 500,
-            "minLength": 1,
-            "type": "string"
-          }
-        },
-        "required": [
-          "id",
-          "title",
-          "goal",
-          "acceptanceCriterionIds",
-          "blockedByTaskIds",
-          "ownerActorId"
-        ],
-        "type": "object"
-      },
-      "DeliveryTaskProposalProjection": {
-        "additionalProperties": false,
-        "description": "One ordered planner task proposal sealed into reviewSetSha256. Approval promotes these exact fields with owner null and status pending; planner-supplied ownership and HTTP replacement task content are rejected.",
-        "properties": {
-          "acceptanceCriterionIds": {
-            "items": {
-              "maxLength": 200,
-              "minLength": 1,
-              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$",
-              "type": "string"
-            },
-            "maxItems": 200,
-            "minItems": 1,
-            "type": "array",
-            "uniqueItems": true
-          },
-          "blockedByTaskIds": {
-            "items": {
-              "$ref": "#/components/schemas/DeliveryTaskId"
-            },
-            "maxItems": 200,
-            "type": "array",
-            "uniqueItems": true
-          },
-          "goal": {
-            "maxLength": 65536,
-            "minLength": 1,
-            "type": "string"
-          },
-          "id": {
-            "$ref": "#/components/schemas/DeliveryTaskId"
-          },
-          "title": {
-            "maxLength": 256,
-            "minLength": 1,
-            "type": "string"
-          }
-        },
-        "required": [
-          "id",
-          "title",
-          "goal",
-          "acceptanceCriterionIds",
-          "blockedByTaskIds"
-        ],
-        "type": "object"
-      },
-      "DeliveryTaskStatus": {
-        "enum": [
-          "pending",
-          "active",
-          "blocked",
-          "verifying",
-          "completed",
-          "failed"
-        ],
-        "type": "string"
       },
       "DeliveryUpdateSpecCommand": {
         "allOf": [
@@ -19746,24 +18917,24 @@
           "candidateDigest": {
             "$ref": "#/components/schemas/Sha256Digest"
           },
-          "deliveryTaskId": {
+          "instructions": {
+            "maxLength": 65536,
+            "minLength": 1,
+            "type": "string"
+          },
+          "workItemId": {
             "oneOf": [
               {
-                "$ref": "#/components/schemas/DeliveryTaskId"
+                "$ref": "#/components/schemas/WorkItemId"
               },
               {
                 "type": "null"
               }
             ]
-          },
-          "instructions": {
-            "maxLength": 65536,
-            "minLength": 1,
-            "type": "string"
           }
         },
         "required": [
-          "deliveryTaskId",
+          "workItemId",
           "candidateDigest",
           "instructions"
         ],
@@ -20977,7 +20148,7 @@
             "$ref": "#/components/schemas/ProductSessionRuntimeProjectionGetParameters"
           },
           {
-            "$ref": "#/components/schemas/DeliveryStageRuntimeProjectionGetParameters"
+            "$ref": "#/components/schemas/WorkRunRuntimeProjectionGetParameters"
           }
         ]
       },
@@ -21240,8 +20411,87 @@
         "x-authority": "control-command",
         "x-direction": "control-plane-to-worker"
       },
+      "RuntimeSessionAgentIdentity": {
+        "additionalProperties": false,
+        "description": "Secret-free stable Agent identity frozen when the embedded runtime opens a Session.",
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/AgentIdentityId"
+          },
+          "name": {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          },
+          "role": {
+            "maxLength": 100,
+            "minLength": 1,
+            "type": "string"
+          },
+          "workerId": {
+            "$ref": "#/components/schemas/WorkerId"
+          }
+        },
+        "required": [
+          "id",
+          "workerId",
+          "name",
+          "role"
+        ],
+        "type": "object"
+      },
+      "RuntimeSessionContext": {
+        "additionalProperties": false,
+        "description": "Secret-free immutable runtime facts reported by the Worker for one opened Session.",
+        "properties": {
+          "agentIdentity": {
+            "$ref": "#/components/schemas/RuntimeSessionAgentIdentity"
+          },
+          "model": {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          },
+          "provider": {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          },
+          "workspace": {
+            "$ref": "#/components/schemas/RuntimeSessionWorkspace"
+          }
+        },
+        "required": [
+          "agentIdentity",
+          "provider",
+          "model",
+          "workspace"
+        ],
+        "type": "object"
+      },
       "RuntimeSessionProjection": {
         "additionalProperties": false,
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "workRunId": {
+                  "$ref": "#/components/schemas/WorkRunId"
+                }
+              },
+              "required": [
+                "workRunId"
+              ]
+            },
+            "then": {
+              "properties": {
+                "runtimeContext": {
+                  "$ref": "#/components/schemas/RuntimeSessionContext"
+                }
+              }
+            }
+          }
+        ],
         "description": "One deterministic StrongFlow session projection built only from an exact accepted runtime binding.",
         "properties": {
           "activities": {
@@ -21314,6 +20564,17 @@
           "recovery": {
             "$ref": "#/components/schemas/RuntimeRecoveryProjection"
           },
+          "runtimeContext": {
+            "description": "Present for Delivery WorkRun sessions; standalone ProductSession runtime reads may not have the binding cut needed to expose it.",
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/RuntimeSessionContext"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "sessionBindingId": {
             "maxLength": 200,
             "minLength": 1,
@@ -21366,6 +20627,7 @@
           "attempt",
           "fencingToken",
           "asOfSequence",
+          "runtimeContext",
           "plan",
           "agents",
           "agentEdges",
@@ -21373,6 +20635,31 @@
           "usage",
           "recovery",
           "diffSummary"
+        ],
+        "type": "object"
+      },
+      "RuntimeSessionWorkspace": {
+        "additionalProperties": false,
+        "description": "Exact detached repository workspace identity without a device-local path.",
+        "properties": {
+          "repositoryId": {
+            "$ref": "#/components/schemas/RepositoryId"
+          },
+          "revision": {
+            "$ref": "#/components/schemas/WorkspaceRevision"
+          },
+          "writeMode": {
+            "enum": [
+              "read-only",
+              "candidate"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "repositoryId",
+          "revision",
+          "writeMode"
         ],
         "type": "object"
       },
@@ -21553,7 +20840,7 @@
       },
       "SessionBindingMessage": {
         "additionalProperties": false,
-        "description": "Authoritative WorkerSession-to-CodexThread binding for one exact active Job lease. Delivery WorkRun bindings carry the exact WorkRun; ProductSession Chat bindings omit it.",
+        "description": "Authoritative WorkerSession-to-CodexThread binding and secret-free immutable runtime context for one exact active Job lease. Delivery WorkRun bindings carry the exact WorkRun; ProductSession Chat bindings omit it.",
         "properties": {
           "attempt": {
             "maximum": 1000,
@@ -21583,6 +20870,9 @@
           },
           "productSessionId": {
             "$ref": "#/components/schemas/ProductSessionId"
+          },
+          "runtimeContext": {
+            "$ref": "#/components/schemas/RuntimeSessionContext"
           },
           "schemaVersion": {
             "$ref": "#/components/schemas/SchemaVersion"
@@ -21619,6 +20909,7 @@
           "boundAt",
           "sessionIdentity",
           "sourceIdentity",
+          "runtimeContext",
           "workerId",
           "leaseId",
           "attempt",
@@ -22577,18 +21868,8 @@
             "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$",
             "type": "string"
           },
-          "planningStageRunId": {
-            "$ref": "#/components/schemas/StageRunId"
-          },
           "planningWorkRunId": {
-            "oneOf": [
-              {
-                "$ref": "#/components/schemas/WorkRunId"
-              },
-              {
-                "type": "null"
-              }
-            ]
+            "$ref": "#/components/schemas/WorkRunId"
           },
           "processDiagram": {
             "$ref": "#/components/schemas/SolutionReviewDiagramProjection"
@@ -22633,9 +21914,6 @@
           "reviewSetSha256": {
             "$ref": "#/components/schemas/Sha256Digest"
           },
-          "reviewStageRunId": {
-            "$ref": "#/components/schemas/StageRunId"
-          },
           "reviewStatus": {
             "$ref": "#/components/schemas/SolutionReviewStatus"
           },
@@ -22669,16 +21947,6 @@
             "minLength": 1,
             "type": "string"
           },
-          "taskProposals": {
-            "description": "Canonical order is part of reviewSetSha256 and is preserved during task promotion.",
-            "items": {
-              "$ref": "#/components/schemas/DeliveryTaskProposalProjection"
-            },
-            "maxItems": 200,
-            "minItems": 1,
-            "type": "array",
-            "uniqueItems": true
-          },
           "unresolvedItems": {
             "items": {
               "maxLength": 65536,
@@ -22687,15 +21955,25 @@
             },
             "maxItems": 200,
             "type": "array"
+          },
+          "workItemProposals": {
+            "description": "Canonical order is part of reviewSetSha256.",
+            "items": {
+              "$ref": "#/components/schemas/WorkItemProposalProjection"
+            },
+            "maxItems": 200,
+            "minItems": 1,
+            "type": "array",
+            "uniqueItems": true
           }
         },
         "required": [
           "deliveryId",
           "deliverySpecId",
           "deliverySpecRevision",
-          "planningStageRunId",
+          "planningWorkRunId",
           "planningSessionBindingId",
-          "reviewStageRunId",
+          "reviewWorkRunId",
           "attentionItemId",
           "reviewSetSha256",
           "reviewStatus",
@@ -22713,7 +21991,7 @@
           "processDiagram",
           "risks",
           "unresolvedItems",
-          "taskProposals"
+          "workItemProposals"
         ],
         "type": "object"
       },
@@ -22724,10 +22002,6 @@
           "changes_requested",
           "rejected"
         ],
-        "type": "string"
-      },
-      "StageRunId": {
-        "pattern": "^run_[0-9A-HJKMNP-TV-Z]{26}$",
         "type": "string"
       },
       "StrongFlowDiagramDiffFileProjection": {
@@ -23630,6 +22904,12 @@
             "maxItems": 5,
             "minItems": 0,
             "type": "array"
+          },
+          "flakyRerunLimit": {
+            "description": "Optional bounded rerun policy for a repository-declared known-flaky validation command. Omitted or zero disables reruns; one records exactly one additional attempt without turning the original failure into a pass.",
+            "maximum": 1,
+            "minimum": 0,
+            "type": "integer"
           },
           "id": {
             "maxLength": 100,
@@ -24881,9 +24161,6 @@
           "revision": {
             "$ref": "#/components/schemas/Revision"
           },
-          "stageRunId": {
-            "$ref": "#/components/schemas/StageRunId"
-          },
           "state": {
             "$ref": "#/components/schemas/WorkerLaunchGrantState"
           },
@@ -24898,6 +24175,9 @@
           },
           "workerSessionId": {
             "$ref": "#/components/schemas/WorkerSessionId"
+          },
+          "workRunId": {
+            "$ref": "#/components/schemas/WorkRunId"
           }
         },
         "required": [
@@ -24908,7 +24188,7 @@
           "occupancyFencingToken",
           "repositoryBindingId",
           "productSessionId",
-          "stageRunId",
+          "workRunId",
           "workerSessionId",
           "workerId",
           "workerInstanceId",
@@ -25296,9 +24576,249 @@
         ],
         "type": "object"
       },
+      "WorkItemCountsProjection": {
+        "additionalProperties": false,
+        "properties": {
+          "backlog": {
+            "$ref": "#/components/schemas/Count"
+          },
+          "cancelled": {
+            "$ref": "#/components/schemas/Count"
+          },
+          "candidateReady": {
+            "$ref": "#/components/schemas/Count"
+          },
+          "done": {
+            "$ref": "#/components/schemas/Count"
+          },
+          "failed": {
+            "$ref": "#/components/schemas/Count"
+          },
+          "inProgress": {
+            "$ref": "#/components/schemas/Count"
+          },
+          "ready": {
+            "$ref": "#/components/schemas/Count"
+          },
+          "rework": {
+            "$ref": "#/components/schemas/Count"
+          },
+          "total": {
+            "$ref": "#/components/schemas/Count"
+          },
+          "validating": {
+            "$ref": "#/components/schemas/Count"
+          },
+          "waitingDependency": {
+            "$ref": "#/components/schemas/Count"
+          },
+          "waitingHuman": {
+            "$ref": "#/components/schemas/Count"
+          }
+        },
+        "required": [
+          "total",
+          "backlog",
+          "ready",
+          "inProgress",
+          "waitingDependency",
+          "waitingHuman",
+          "candidateReady",
+          "validating",
+          "rework",
+          "done",
+          "failed",
+          "cancelled"
+        ],
+        "type": "object"
+      },
       "WorkItemId": {
         "pattern": "^wit_[0-9A-HJKMNP-TV-Z]{26}$",
         "type": "string"
+      },
+      "WorkItemProposalProjection": {
+        "additionalProperties": false,
+        "description": "One ordered WorkItem proposal sealed into reviewSetSha256.",
+        "properties": {
+          "criterionIds": {
+            "items": {
+              "$ref": "#/components/schemas/CriterionId",
+              "maxLength": 200,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$",
+              "type": "string"
+            },
+            "maxItems": 200,
+            "minItems": 1,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "dependsOn": {
+            "items": {
+              "$ref": "#/components/schemas/WorkItemId"
+            },
+            "maxItems": 200,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "goal": {
+            "maxLength": 65536,
+            "minLength": 1,
+            "type": "string"
+          },
+          "id": {
+            "$ref": "#/components/schemas/WorkItemId"
+          },
+          "title": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "goal",
+          "criterionIds",
+          "dependsOn"
+        ],
+        "type": "object"
+      },
+      "WorkItemsCreateCommand": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CommandEnvelope"
+          },
+          {
+            "properties": {
+              "command": {
+                "const": "workitems.create"
+              },
+              "payload": {
+                "$ref": "#/components/schemas/WorkItemsCreatePayload"
+              },
+              "scope": {
+                "$ref": "#/components/schemas/RepositoryScope"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "WorkItemsCreateCompletedResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CommandCompletedEnvelope"
+          },
+          {
+            "properties": {
+              "command": {
+                "const": "workitems.create"
+              },
+              "result": {
+                "$ref": "#/components/schemas/WorkItemsCreateResult"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "WorkItemsCreateItem": {
+        "additionalProperties": false,
+        "properties": {
+          "criterionIds": {
+            "items": {
+              "$ref": "#/components/schemas/CriterionId"
+            },
+            "maxItems": 1000,
+            "minItems": 1,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "dependsOn": {
+            "items": {
+              "$ref": "#/components/schemas/WorkItemId"
+            },
+            "maxItems": 1000,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "goal": {
+            "maxLength": 65536,
+            "minLength": 1,
+            "type": "string"
+          },
+          "id": {
+            "$ref": "#/components/schemas/WorkItemId"
+          },
+          "title": {
+            "maxLength": 500,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "goal",
+          "criterionIds",
+          "dependsOn"
+        ],
+        "type": "object"
+      },
+      "WorkItemsCreatePayload": {
+        "additionalProperties": false,
+        "properties": {
+          "contractRevision": {
+            "$ref": "#/components/schemas/Revision"
+          },
+          "deliveryId": {
+            "$ref": "#/components/schemas/DeliveryId"
+          },
+          "expectedRevision": {
+            "$ref": "#/components/schemas/Revision"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/WorkItemsCreateItem"
+            },
+            "maxItems": 1000,
+            "minItems": 1,
+            "type": "array"
+          }
+        },
+        "required": [
+          "deliveryId",
+          "expectedRevision",
+          "contractRevision",
+          "items"
+        ],
+        "type": "object"
+      },
+      "WorkItemsCreateResult": {
+        "additionalProperties": false,
+        "properties": {
+          "deliveryId": {
+            "$ref": "#/components/schemas/DeliveryId"
+          },
+          "deliveryRevision": {
+            "$ref": "#/components/schemas/Revision"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/WorkItem"
+            },
+            "maxItems": 1000,
+            "minItems": 1,
+            "type": "array"
+          }
+        },
+        "required": [
+          "deliveryId",
+          "deliveryRevision",
+          "items"
+        ],
+        "type": "object"
       },
       "WorkItemState": {
         "enum": [
@@ -25424,6 +24944,14 @@
           "contract": {
             "$ref": "#/components/schemas/WorkContract"
           },
+          "deviceBindings": {
+            "items": {
+              "$ref": "#/components/schemas/WorkRunDeviceBindingProjection"
+            },
+            "maxItems": 1000,
+            "type": "array",
+            "uniqueItems": true
+          },
           "graphItems": {
             "items": {
               "$ref": "#/components/schemas/WorkGraphItemProjection"
@@ -25457,6 +24985,7 @@
           "contract",
           "items",
           "runs",
+          "deviceBindings",
           "graphItems",
           "readCursor"
         ],
@@ -25514,6 +25043,27 @@
         "required": [
           "deliveryId",
           "workRunId"
+        ],
+        "type": "object"
+      },
+      "WorkRunDeviceBindingProjection": {
+        "additionalProperties": false,
+        "description": "Secret-free Client and repository binding copied from the scheduler-sealed device execution facts for one WorkRun.",
+        "properties": {
+          "clientId": {
+            "$ref": "#/components/schemas/PublicClientId"
+          },
+          "repositoryBindingId": {
+            "$ref": "#/components/schemas/RepositoryBindingId"
+          },
+          "workRunId": {
+            "$ref": "#/components/schemas/WorkRunId"
+          }
+        },
+        "required": [
+          "workRunId",
+          "clientId",
+          "repositoryBindingId"
         ],
         "type": "object"
       },
@@ -25681,6 +25231,101 @@
           "deliverySpecRevision",
           "workContract",
           "workItem"
+        ],
+        "type": "object"
+      },
+      "WorkRunRuntimeProjectionGetParameters": {
+        "additionalProperties": false,
+        "properties": {
+          "atCursor": {
+            "$ref": "#/components/schemas/StrongFlowReadCursor"
+          },
+          "deliveryId": {
+            "$ref": "#/components/schemas/DeliveryId"
+          },
+          "kind": {
+            "const": "work-run"
+          },
+          "productSessionId": {
+            "$ref": "#/components/schemas/ProductSessionId"
+          },
+          "workRunId": {
+            "$ref": "#/components/schemas/WorkRunId"
+          }
+        },
+        "required": [
+          "kind",
+          "productSessionId",
+          "deliveryId",
+          "workRunId",
+          "atCursor"
+        ],
+        "type": "object"
+      },
+      "WorkRunStartCommand": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CommandEnvelope"
+          },
+          {
+            "properties": {
+              "command": {
+                "const": "workrun.start"
+              },
+              "payload": {
+                "$ref": "#/components/schemas/WorkRunStartPayload"
+              },
+              "scope": {
+                "$ref": "#/components/schemas/RepositoryScope"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "WorkRunStartCompletedResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CommandCompletedEnvelope"
+          },
+          {
+            "properties": {
+              "command": {
+                "const": "workrun.start"
+              },
+              "result": {
+                "$ref": "#/components/schemas/DeliveryProjection"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "WorkRunStartPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "deliveryId": {
+            "$ref": "#/components/schemas/DeliveryId"
+          },
+          "dispatchProfile": {
+            "description": "Requested execution profile, validated and frozen by the Controller before dispatch. WorkItem selection and execution identities are Controller-owned.",
+            "enum": [
+              "executor",
+              "reviewer",
+              "verifier",
+              "adversarial-verifier",
+              "remediator"
+            ],
+            "type": "string"
+          },
+          "rework": {
+            "$ref": "#/components/schemas/DeliveryReworkInput",
+            "description": "Required only for remediator dispatch; rejected for every other profile."
+          }
+        },
+        "required": [
+          "deliveryId",
+          "dispatchProfile"
         ],
         "type": "object"
       },
@@ -26167,7 +25812,7 @@
     "https://schemas.winwincode.dev/winwincode/v1/domain.schema.json",
     "https://schemas.winwincode.dev/winwincode/v1/execution-port.schema.json"
   ],
-  "x-source-digest": "sha256:1f673034ec9d986fd08d7ce2f4154a27f9cb83f8a56884e4c51efa5a60598b41",
+  "x-source-digest": "sha256:d372fb2de1e63bf9029b0c1b96cf6909e09b169f2d4ad2a993991e5fd5b398b3",
   "x-winwincode-client-metadata": {
     "http": {
       "authentication": {
@@ -26241,11 +25886,11 @@
       },
       "endpoint": "/api/v1/events",
       "invalidationReloadQueries": {
-        "delivery-stage": [
-          "delivery.get",
+        "product-session": [
           "runtime.projection.get"
         ],
-        "product-session": [
+        "work-run": [
+          "delivery.get",
           "runtime.projection.get"
         ]
       },

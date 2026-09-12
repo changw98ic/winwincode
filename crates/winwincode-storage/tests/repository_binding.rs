@@ -153,6 +153,12 @@ fn upserts_are_idempotent_by_binding_id_and_cas_guarded() {
             Some("1111111111111111111111111111111111111111")
         );
         assert_eq!(first.record.last_scanned_at, Some(instant(T1)));
+        assert_eq!(
+            ledger
+                .bindings_for_client(&client)
+                .expect("bindings by client"),
+            vec![first.record.clone()]
+        );
 
         // A byte-identical re-report is an accepted idempotent replay that
         // leaves the revision untouched.

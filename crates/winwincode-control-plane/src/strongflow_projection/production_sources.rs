@@ -366,7 +366,7 @@ mod tests {
             _repository_locator: &str,
             _base_revision: &str,
         ) -> Result<ValidatedGitSourceArtifact, ArtifactError> {
-            panic!("a Delivery without writer StageRuns must not resolve a candidate")
+            panic!("a Delivery without a writer WorkRun must not resolve a candidate")
         }
     }
 
@@ -780,7 +780,6 @@ mod tests {
         let mut snapshot = fixture.delivery.into_snapshot();
         snapshot.revision = binding.delivery_revision();
         snapshot.status = DeliveryStatus::Draft;
-        snapshot.stage_runs.clear();
         snapshot.session_bindings.clear();
         snapshot.attention_items.clear();
         snapshot.evidence.clear();

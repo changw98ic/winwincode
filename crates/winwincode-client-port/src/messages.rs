@@ -193,9 +193,14 @@ pub struct ClientConnectCodePublishedPayload {
     /// Digest of the code; the code itself never reaches the server.
     #[serde(rename = "codeDigest")]
     pub code_digest: String,
+    /// Monotonic code generation; refresh increments it exactly once.
+    pub generation: u64,
     /// Expiry timestamp (RFC 3339).
     #[serde(rename = "expiresAt")]
     pub expires_at: String,
+    /// Failed verification attempts still permitted for this generation.
+    #[serde(rename = "remainingAttempts")]
+    pub remaining_attempts: u32,
 }
 
 /// Payload of `client.access.challenge_ack` (plan section 9.3, 11.4).

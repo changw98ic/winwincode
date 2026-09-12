@@ -108,7 +108,7 @@ product-session 页面只读取自己的 runtime snapshot，并用快照自己�
 `product-session.message.appended.v1` 只携带已经保存的 `ChatMessageProjection`：消息角色
 只允许用户或助手，正文有大小上限，不包含原始 Provider 请求/响应、工具负载、Credential
 或 Codex 内部对象。`runtime-projection.invalidated.v1` 不携带运行摘要或详情，并用
-`scopeKind` 严格区分两条路径：`delivery-stage` 必须带非空 `deliveryId + stageRunId`，按上述
+`scopeKind` 严格区分两条路径：`work-run` 必须带非空 `deliveryId + workRunId`，按上述
 同一读取截面依次读取 `delivery.get` 和 `runtime.projection.get`；`product-session` 不带这两个
 Delivery 字段，只重新读取 `runtime.projection.get`，也不要求 `StrongFlowReadCursor`，但该
 完整 runtime 快照仍必须带 product-session 流的 `eventCursor`。浏览器

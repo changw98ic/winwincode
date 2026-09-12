@@ -52,7 +52,7 @@ pub struct ActiveWorkerAuthority {
     pub lease: ExecutionLeaseStamp,
     /// Current `WorkerSession` identity.
     pub worker_session_id: WorkerSessionId,
-    /// Current `ProductSession`, `StageRun`, `WorkerSession`, and `CodexThread` binding.
+    /// Current `ProductSession`, `WorkRun`, `WorkerSession`, and `CodexThread` binding.
     pub session_identity: SessionIdentity,
 }
 

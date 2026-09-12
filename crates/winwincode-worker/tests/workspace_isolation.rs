@@ -72,6 +72,25 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn one_bound_repository_can_be_the_source_root() {
+    let fixture = Fixture::new();
+    let manager = WorkspaceManager::open(&fixture.workspaces, fixture.repository())
+        .expect("open single-repository workspace manager");
+    let active = active_job(&RepositoryId("rep_server_identity".to_owned()), "bound", 1);
+    let workspace = manager
+        .create(&active)
+        .expect("create workspace from the exact bound repository");
+
+    assert_eq!(
+        fs::read(workspace.layout().checkout().join("base.txt")).expect("read source file"),
+        b"base\n"
+    );
+    workspace
+        .close(WorkspaceCloseReason::Completed)
+        .expect("close workspace");
+}
+
+#[test]
 fn parallel_jobs_have_isolated_candidates_and_artifact_provenance() {
     let fixture = Fixture::new();
     let manager = fixture.manager();

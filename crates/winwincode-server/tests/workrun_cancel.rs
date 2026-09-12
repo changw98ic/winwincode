@@ -199,8 +199,7 @@ fn server_workrun_cancel_uses_public_envelope_and_real_queued_workrun() {
                 "publicationTarget": null,
                 "repositoryId": scope.repository_id,
                 "title": "Production Delivery"
-            },
-            "tasks": []
+            }
         }
     }))
     .expect("generated delivery.create command");
@@ -235,7 +234,7 @@ fn server_workrun_cancel_uses_public_envelope_and_real_queued_workrun() {
     let breakdown: CommandRequest = serde_json::from_value(serde_json::json!({
         "schemaVersion": "winwincode/v1",
         "requestId": id("req", 3),
-        "command": "delivery.task_breakdown.create",
+        "command": "workitems.create",
         "actor": { "kind": "user", "id": id("usr", 1) },
         "scope": scope,
         "expectedRevision": 1,
@@ -254,25 +253,25 @@ fn server_workrun_cancel_uses_public_envelope_and_real_queued_workrun() {
     }))
     .expect("generated task-breakdown command");
     control_plane
-        .delivery_task_breakdown_create(match &breakdown {
-            CommandRequest::DeliveryTaskBreakdownCreateCommand(command) => command,
-            _ => panic!("delivery.task_breakdown.create variant"),
+        .work_items_create(match &breakdown {
+            CommandRequest::WorkItemsCreateCommand(command) => command,
+            _ => panic!("workitems.create variant"),
         })
         .expect("public WorkItem creation");
     let advance: CommandRequest = serde_json::from_value(serde_json::json!({
         "schemaVersion": "winwincode/v1",
         "requestId": id("req", 2),
-        "command": "delivery.advance",
+        "command": "workrun.start",
         "actor": { "kind": "user", "id": id("usr", 1) },
         "scope": scope,
         "expectedRevision": 2,
         "payload": { "deliveryId": delivery_id, "dispatchProfile": "executor" }
     }))
-    .expect("generated delivery.advance command");
+    .expect("generated workrun.start command");
     control_plane
-        .delivery_advance(match &advance {
-            CommandRequest::DeliveryAdvanceCommand(command) => command,
-            _ => panic!("delivery.advance variant"),
+        .workrun_start(match &advance {
+            CommandRequest::WorkRunStartCommand(command) => command,
+            _ => panic!("workrun.start variant"),
         })
         .expect("public Delivery advance");
     let scheduler_scope = RepositorySchedulerScope {

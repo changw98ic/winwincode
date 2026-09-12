@@ -52,17 +52,21 @@ pub use winwincode_codex::candidate_artifact_outbox::{
     RetainedCandidateArtifact,
 };
 pub use winwincode_codex::{
-    ActionRequestTransport, CodexCoreAdapter, CodexPoll, CodexRunKey, CodexThreadStart,
-    CodexTurnCompletion, DelegatedLoopPhase, DelegatedLoopStopFact, DelegatedLoopTransition,
-    DelegatedLoopTransitionOutcome, DelegatedObserverPreflight, DelegatedObserverPreflightOutcome,
-    DelegatedObserverSettlement, DurableExecutionDelivery, ObserverMode, RoleExecutionMode,
-    WorkerExecutionPort, secret_safe_runtime_summary,
+    ActionRequestTransport, CodexCoreAdapter, CodexPoll, CodexRunKey, CodexThreadSession,
+    CodexThreadStart, CodexTurnCompletion, DelegatedLoopPhase, DelegatedLoopStopFact,
+    DelegatedLoopTransition, DelegatedLoopTransitionOutcome, DelegatedObserverPreflight,
+    DelegatedObserverPreflightOutcome, DelegatedObserverSettlement, DurableExecutionDelivery,
+    ObserverMode, RoleExecutionMode, WorkerExecutionPort, secret_safe_runtime_summary,
 };
 use winwincode_domain::{
-    ChangeBatchId, CodexThreadId, ExecutionAckSequence, ExecutionEventId, ExecutionJobId,
-    ExecutionMessageId, ExecutionSequence, Instant, ProductSessionId, RequestId, SchemaVersion,
+    AgentIdentityId, ChangeBatchId, CodexThreadId, ExecutionAckSequence, ExecutionEventId,
+    ExecutionJobId, ExecutionMessageId, ExecutionSequence, Instant, ProductSessionId, RequestId,
+    RuntimeSessionAgentIdentity, RuntimeSessionContext, RuntimeSessionWorkspace, SchemaVersion,
     SessionBindingSourceIdentity, SessionBindingSourceIdentityKind, SessionIdentity, WorkerId,
     WorkerInstanceId, WorkerSessionId,
+};
+pub use winwincode_execution_port::agent_config::{
+    AgentProfileSettings, resolve_agent_session_config,
 };
 use winwincode_execution_port::generated::{
     ActiveLeaseSummary, ApprovalDecisionMessage, ArtifactAckMessage, ArtifactKind,
@@ -87,6 +91,7 @@ use winwincode_execution_port::generated::{
 use winwincode_execution_port::{
     change_batch_identity::validate_change_batch_identity_derivation,
     change_batch_progress::ChangeBatchProgressLedger,
+    execution_identity::canonical_dispatch_session_identity,
     repair_loop_context::seal_repair_loop_context_pack,
 };
 
@@ -208,38 +213,6 @@ impl fmt::Display for WorkerError {
 }
 
 impl std::error::Error for WorkerError {}
-
-/// Derives the exact `WorkerSession` and `CodexThread` identities for one sealed
-/// dispatch.  The scheduler uses this before opening the durable Worker slot;
-/// keeping the derivation here means the scheduler and Worker cannot drift
-/// into two identity authorities.
-///
-/// # Errors
-///
-/// Returns the same bounded identity error used by the Worker dispatch path.
-pub fn canonical_dispatch_session_identity(
-    worker_id: &WorkerId,
-    worker_instance_id: &WorkerInstanceId,
-    dispatch: &JobDispatchMessage,
-) -> Result<(WorkerSessionId, CodexThreadId), WorkerError> {
-    let run_key = CodexRunKey::from_dispatch(dispatch);
-    let codex_thread_id = run_key
-        .canonical_thread_id()
-        .map_err(|_| workspace_error())?;
-    let canonical = serde_json::to_vec(&(
-        worker_id,
-        worker_instance_id,
-        &dispatch.lease,
-        &run_key.job_id,
-        run_key.attempt,
-        &run_key.fencing_token,
-        &run_key.payload_digest,
-    ))
-    .map_err(|_| workspace_error())?;
-    let digest = format!("{:x}", Sha256::digest(canonical));
-    let worker_session_id = WorkerSessionId(format!("wsn_{}", &digest[..26].to_ascii_uppercase()));
-    Ok((worker_session_id, codex_thread_id))
-}
 
 /// Deterministic graceful shutdown result.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2408,7 +2381,7 @@ where
                 return Ok(());
             }
         };
-        let thread_id = match self
+        let thread_session = match self
             .codex
             .ensure_thread(CodexThreadStart {
                 run_key: &run_key,
@@ -2421,7 +2394,7 @@ where
             })
             .await
         {
-            Ok(thread_id) => thread_id,
+            Ok(thread_session) => thread_session,
             Err(_error) => {
                 let _ = self.workspaces.prepare_close_job(
                     &dispatch.job.job_id,
@@ -2440,6 +2413,7 @@ where
                 return Ok(());
             }
         };
+        let thread_id = thread_session.thread_id;
         if self.dispatch_thread_conflicts(&thread_id, &prepared.active.codex_thread_id) {
             let _ = self.codex.close_thread(&thread_id).await;
             let _ = self.workspaces.prepare_close_job(
@@ -2460,8 +2434,19 @@ where
         }
         prepared.active.last_event_sequence =
             self.recovered_runtime_cursor(&prepared.active.session_identity)?;
-        self.install_dispatch_binding(dispatch, run_key, job_digest, prepared.active, now.clone())
-            .await?;
+        self.install_dispatch_binding(
+            dispatch,
+            run_key,
+            job_digest,
+            prepared.active,
+            runtime_session_context(
+                dispatch,
+                &prepared.workspace_revision,
+                &thread_session.agent_config,
+            ),
+            now.clone(),
+        )
+        .await?;
         // Synchronize the adapter's trusted clock after the binding is
         // installed but before replay or submission can cause a Provider
         // request.  This closes the gap where a lease expires between
@@ -2612,6 +2597,7 @@ where
         run_key: CodexRunKey,
         job_digest: winwincode_domain::Sha256Digest,
         active: ActiveJob,
+        runtime_context: RuntimeSessionContext,
         now: Instant,
     ) -> Result<(), WorkerError> {
         let worker_session_id = active.worker_session_id.clone();
@@ -2649,6 +2635,7 @@ where
             lease_id: dispatch.lease.lease_id.clone(),
             message_id: self.next_message_id(),
             product_session_id,
+            runtime_context,
             schema_version: SchemaVersion::WinwincodeV1,
             sent_at: now.clone(),
             session_identity,
@@ -3289,7 +3276,8 @@ where
             &self.config.worker_id,
             &self.config.worker_instance_id,
             dispatch,
-        )?;
+        )
+        .map_err(|_| workspace_error())?;
         // The run key is already validated by the dispatch path. Keep the
         // parameter in this private seam because callers use it to derive the
         // Codex thread immediately beside the WorkerSession identity.
@@ -4153,6 +4141,36 @@ fn scope_identity(
             scope.product_session_id.clone(),
             Some(scope.work_run_id.clone()),
         ),
+    }
+}
+
+fn runtime_session_context(
+    dispatch: &JobDispatchMessage,
+    workspace_revision: &winwincode_domain::WorkspaceRevision,
+    agent_config: &winwincode_execution_port::agent_config::AgentSessionConfigSnapshot,
+) -> RuntimeSessionContext {
+    RuntimeSessionContext {
+        agent_identity: RuntimeSessionAgentIdentity {
+            id: AgentIdentityId(agent_config.identity.id.clone()),
+            worker_id: agent_config.identity.worker_id.clone(),
+            name: agent_config.identity.name.clone(),
+            role: agent_config.identity.role.clone(),
+        },
+        provider: agent_config.profile.source.settings.provider.clone(),
+        model: agent_config.profile.source.settings.model.clone(),
+        workspace: RuntimeSessionWorkspace {
+            repository_id: dispatch.job.workspace.repository_id.clone(),
+            revision: workspace_revision.clone(),
+            write_mode: match dispatch.job.workspace.write_mode {
+                winwincode_execution_port::generated::ExecutionWorkspaceWriteMode::ReadOnly => {
+                    "read-only"
+                }
+                winwincode_execution_port::generated::ExecutionWorkspaceWriteMode::Candidate => {
+                    "candidate"
+                }
+            }
+            .to_owned(),
+        },
     }
 }
 

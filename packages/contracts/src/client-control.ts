@@ -90,7 +90,7 @@ const LOCAL_CANDIDATE_RECEIPT_ID_PATTERN = crockfordIdentifierPattern('lcr')
 const LOCAL_APPLY_RECEIPT_ID_PATTERN = crockfordIdentifierPattern('lar')
 const USER_ID_PATTERN = crockfordIdentifierPattern('usr')
 const PRODUCT_SESSION_ID_PATTERN = crockfordIdentifierPattern('psn')
-const STAGE_RUN_ID_PATTERN = crockfordIdentifierPattern('run')
+const WORK_RUN_ID_PATTERN = crockfordIdentifierPattern('wrn')
 const WORKER_SESSION_ID_PATTERN = crockfordIdentifierPattern('wsn')
 const WORKER_ID_PATTERN = crockfordIdentifierPattern('wrk')
 const WORKER_INSTANCE_ID_PATTERN = crockfordIdentifierPattern('wki')
@@ -131,12 +131,7 @@ export type LocalCandidateReceiptId = BrandedText<'LocalCandidateReceiptId'>
 export type LocalApplyReceiptId = BrandedText<'LocalApplyReceiptId'>
 export type UserId = BrandedText<'UserId'>
 export type ProductSessionId = BrandedText<'ProductSessionId'>
-/**
- * Local alias for the domain StageRunId scalar (^run_ + 26 Crockford chars).
- * The contracts barrel already exports the delivery-lane StageRunId, so this
- * projection keeps its schema-validated alias module-local.
- */
-type StageRunIdentifier = BrandedText<'StageRunId'>
+type WorkRunIdentifier = BrandedText<'WorkRunId'>
 export type WorkerSessionId = BrandedText<'WorkerSessionId'>
 export type WorkerId = BrandedText<'WorkerId'>
 export type WorkerInstanceId = BrandedText<'WorkerInstanceId'>
@@ -228,7 +223,7 @@ export const LOCAL_APPLY_RECEIPT_ID = crockfordId(
 )
 export const USER_ID = crockfordId('UserId', USER_ID_PATTERN)
 export const PRODUCT_SESSION_ID = crockfordId('ProductSessionId', PRODUCT_SESSION_ID_PATTERN)
-export const STAGE_RUN_ID = crockfordId('StageRunId', STAGE_RUN_ID_PATTERN)
+export const WORK_RUN_ID = crockfordId('WorkRunId', WORK_RUN_ID_PATTERN)
 export const WORKER_SESSION_ID = crockfordId('WorkerSessionId', WORKER_SESSION_ID_PATTERN)
 export const WORKER_ID = crockfordId('WorkerId', WORKER_ID_PATTERN)
 export const WORKER_INSTANCE_ID = crockfordId('WorkerInstanceId', WORKER_INSTANCE_ID_PATTERN)
@@ -880,7 +875,7 @@ export interface WorkerLaunchGrant {
   readonly occupancyFencingToken: OccupancyFencingToken
   readonly repositoryBindingId: RepositoryBindingId
   readonly productSessionId: ProductSessionId
-  readonly stageRunId: StageRunIdentifier
+  readonly workRunId: WorkRunIdentifier
   readonly workerSessionId: WorkerSessionId
   readonly workerId: WorkerId
   readonly workerInstanceId: WorkerInstanceId
@@ -1376,7 +1371,7 @@ export function parseWorkerLaunchGrant(value: unknown, path = 'workerLaunchGrant
     'occupancyFencingToken',
     'repositoryBindingId',
     'productSessionId',
-    'stageRunId',
+    'workRunId',
     'workerSessionId',
     'workerId',
     'workerInstanceId',
@@ -1408,7 +1403,7 @@ export function parseWorkerLaunchGrant(value: unknown, path = 'workerLaunchGrant
       `${path}.repositoryBindingId`,
     ),
     productSessionId: PRODUCT_SESSION_ID(input.productSessionId, `${path}.productSessionId`),
-    stageRunId: STAGE_RUN_ID(input.stageRunId, `${path}.stageRunId`),
+    workRunId: WORK_RUN_ID(input.workRunId, `${path}.workRunId`),
     workerSessionId: WORKER_SESSION_ID(input.workerSessionId, `${path}.workerSessionId`),
     workerId: WORKER_ID(input.workerId, `${path}.workerId`),
     workerInstanceId: WORKER_INSTANCE_ID(input.workerInstanceId, `${path}.workerInstanceId`),

@@ -12,7 +12,6 @@ use winwincode_delivery::{
     },
     domain::{
         AttentionItemStatus, CriterionVerdict, DELIVERY_SCHEMA_VERSION, Delivery, DeliveryStatus,
-        DeliveryTaskStatus,
     },
     store::{
         DeliveryCommand, DeliveryCommandPort, DeliveryQuery, DeliveryQueryPort, DeliveryStore,
@@ -350,27 +349,25 @@ fn validate_replayed_event(
         }
     }
 
-    let mut task_ids = HashSet::with_capacity(event.task_statuses.len());
+    let mut item_ids = HashSet::with_capacity(event.work_item_states.len());
     if event
-        .task_statuses
+        .work_item_states
         .iter()
-        .any(|task| !task_ids.insert(task.delivery_task_id.0.as_str()))
+        .any(|item| !item_ids.insert(item.work_item_id.0.as_str()))
         || !matches!(
             event.status,
-            DeliveryStatus::Verifying
-                | DeliveryStatus::NeedsAttention
-                | DeliveryStatus::ReadyToDeliver
+            DeliveryStatus::Ready | DeliveryStatus::NeedsAttention | DeliveryStatus::ReadyToDeliver
         )
         || (event.status == DeliveryStatus::NeedsAttention && event.attention_items.is_empty())
         || (event.status == DeliveryStatus::ReadyToDeliver
             && (verdict.status != CriterionVerdict::Pass
                 || event
-                    .task_statuses
+                    .work_item_states
                     .iter()
-                    .any(|task| task.status != DeliveryTaskStatus::Completed)))
+                    .any(|item| item.state != winwincode_domain::WorkItemState::Done)))
     {
         return Err(StorageError::invalid_input(
-            "durable verdict replay contains a non-canonical task or Delivery status",
+            "durable verdict replay contains a non-canonical WorkItem or Delivery status",
         ));
     }
     Ok(())
@@ -491,13 +488,14 @@ fn event_from_persisted_transition(
         evidence,
         verdict,
         attention_items: after.attention_items[before.attention_items.len()..].to_vec(),
-        task_statuses: after
-            .tasks
+        work_item_states: after
+            .work_run_aggregate
+            .items
             .iter()
             .map(
-                |task| winwincode_delivery::application::verdict::DeliveryTaskStatusFact {
-                    delivery_task_id: task.id.clone(),
-                    status: task.status,
+                |item| winwincode_delivery::application::verdict::WorkItemStateFact {
+                    work_item_id: item.id.clone(),
+                    state: item.state.clone(),
                 },
             )
             .collect(),
@@ -530,9 +528,9 @@ mod tests {
             SubmitVerdictFacts, compute_verdict_transition,
             test_support::{VerdictFixtureOutcome, verdict_fixture},
         },
-        domain::{Delivery, DeliveryTaskStatus},
+        domain::Delivery,
     };
-    use winwincode_domain::{DeliveryId, DeliveryTaskId};
+    use winwincode_domain::{DeliveryId, WorkItemId, WorkItemState};
 
     use super::event_matches_delivery;
 
@@ -586,22 +584,22 @@ mod tests {
     }
 
     #[test]
-    fn durable_event_rejects_repeated_task_entries_that_hide_another_task() {
+    fn durable_event_rejects_repeated_item_entries_that_hide_another_item() {
         let (mut event, source, delivery) = fail_transition();
         let mut source_snapshot = source.into_snapshot();
-        let mut source_second = source_snapshot.tasks[0].clone();
-        source_second.id = DeliveryTaskId("task-receipt-second".into());
-        source_second.status = DeliveryTaskStatus::Verifying;
-        source_snapshot.tasks.push(source_second);
-        let source = Delivery::try_from_snapshot(source_snapshot).expect("two-task source");
+        let mut source_second = source_snapshot.work_run_aggregate.items[0].clone();
+        source_second.id = WorkItemId("wit_5K2F6D4ZBGXG691EQ8HJXJACA2".into());
+        source_second.state = WorkItemState::Validating;
+        source_snapshot.work_run_aggregate.items.push(source_second);
+        let source = Delivery::try_from_snapshot(source_snapshot).expect("two-item source");
         let mut snapshot = delivery.into_snapshot();
-        let mut second = snapshot.tasks[0].clone();
-        second.id = DeliveryTaskId("task-receipt-second".into());
-        second.status = DeliveryTaskStatus::Failed;
-        snapshot.tasks.push(second);
-        let delivery = Delivery::try_from_snapshot(snapshot).expect("two-task Delivery");
+        let mut second = snapshot.work_run_aggregate.items[0].clone();
+        second.id = WorkItemId("wit_5K2F6D4ZBGXG691EQ8HJXJACA2".into());
+        second.state = WorkItemState::Failed;
+        snapshot.work_run_aggregate.items.push(second);
+        let delivery = Delivery::try_from_snapshot(snapshot).expect("two-item Delivery");
 
-        event.task_statuses = vec![event.task_statuses[0].clone(); 2];
+        event.work_item_states = vec![event.work_item_states[0].clone(); 2];
         assert!(!event_matches_delivery(&event, &source, &delivery));
     }
 }

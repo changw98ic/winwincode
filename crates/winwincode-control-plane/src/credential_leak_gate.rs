@@ -507,7 +507,7 @@ fn contains_provider_token(value: &str) -> bool {
         value.match_indices(prefix).any(|(index, _)| {
             // A provider token prefix must begin at a value boundary.  Without
             // this check, ordinary public identifiers such as
-            // `delivery-task-breakdown-transaction` contain the `sk-` suffix of
+            // WorkItem transaction fixtures contain the `sk-` suffix of
             // `task-` and are incorrectly rejected by the public WSS gate.
             // Keep scanning every string and preserve fail-closed rejection for
             // an actual token after a delimiter or at the start of a value.

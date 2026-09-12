@@ -131,7 +131,7 @@ function modelFake(initialState) {
 
 function fixTarget(single) {
   if (single.id === 'repository-scope') return null
-  if (single.id === 'model-route') return { href: '#/settings?repositoryId=rep_one', label: 'Open Settings' }
+  if (single.id === 'model-route') return { href: '#/settings?repositoryId=rep_one', label: '打开设置' }
   if (single.id === 'first-chat-delivery') {
     return { href: '#/chat?repositoryId=rep_one', label: 'Start your first Chat' }
   }
@@ -182,16 +182,16 @@ test('every checklist item shows its status, reason, check time, and real fix en
   assert.equal(byId['repository-scope'].dataset.status, 'ready')
   assert.match(byId['repository-scope'].textContent, /通过/u)
   assert.equal(byId['model-route'].dataset.status, 'attention')
-  assert.match(byId['model-route'].textContent, /provider is configured/u)
-  assert.match(byId['model-route'].textContent, /Checked 2026-09-03 16:30/u)
+  assert.match(byId['model-route'].textContent, /尚未配置模型服务商/u)
+  assert.match(byId['model-route'].textContent, /检查于 2026-09-03 16:30/u)
   assert.equal(byId['helper-availability'].dataset.status, 'attention')
-  assert.match(byId['helper-availability'].textContent, /execution capacity/u)
+  assert.match(byId['helper-availability'].textContent, /执行容量/u)
 
   const fixes = descendants(rootElement).filter(node => (
     node.className === 'wwc-readiness-fix'
   ))
   assert.equal(fixes.length, 5)
-  const modelFix = fixes.find(node => node.textContent === 'Open Settings')
+  const modelFix = fixes.find(node => node.textContent === '打开设置')
   assert.equal(modelFix.href, '#/settings?repositoryId=rep_one')
   const chatFix = fixes.find(node => node.textContent === 'Start your first Chat')
   assert.equal(chatFix.href, '#/chat?repositoryId=rep_one')
@@ -276,7 +276,7 @@ test('blocked and unavailable items explain themselves without fake check times'
   assert.match(byId['model-route'].textContent, /等待仓库范围/u)
   assert.equal(byId['model-route'].textContent.includes(NOW), false)
   assert.match(byId['server-worker-health'].textContent, /无法执行/u)
-  assert.match(byId['server-worker-health'].textContent, /Checked 2026-09-03 16:30/u)
+  assert.match(byId['server-worker-health'].textContent, /检查于 2026-09-03 16:30/u)
   const scopeFixes = descendants(rootElement).filter(node => (
     node.className === 'wwc-readiness-fix'
   ))

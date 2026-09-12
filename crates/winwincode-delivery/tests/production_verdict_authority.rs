@@ -9,14 +9,14 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use winwincode_delivery::{
     application::{
-        stage::{
+        verdict::test_support::{VerdictFixtureOutcome, verdict_fixture},
+        workrun_execution::{
             DeliveryTerminalOutcomeFacts, TerminalArtifactReference, TerminalOutcomeStatus,
             test_support::{
                 active_lease_identity, delivery_terminal_outcome_facts, session_binding_authority,
                 terminal_outcome_metadata, terminal_worker_outcome,
             },
         },
-        verdict::test_support::{VerdictFixtureOutcome, verdict_fixture},
     },
     domain::{
         DELIVERY_SCHEMA_VERSION, Delivery, RepositoryKind, RepositoryRef, SessionBinding,
@@ -59,7 +59,6 @@ fn durable_sources_resolve_one_replay_stable_production_verdict() {
         VerdictFixtureOutcome::Pass,
     );
     let mut snapshot = fixture.delivery.into_snapshot();
-    snapshot.stage_runs.clear();
     snapshot.spec.repository = RepositoryRef {
         schema_version: DELIVERY_SCHEMA_VERSION,
         kind: RepositoryKind::LocalGit,
@@ -79,6 +78,12 @@ fn durable_sources_resolve_one_replay_stable_production_verdict() {
         binding.worker_instance_id = Some(winwincode_domain::WorkerInstanceId(canonical_id(
             "wki", seed,
         )));
+        binding
+            .runtime_context
+            .as_mut()
+            .expect("runtime context")
+            .agent_identity
+            .worker_id = binding.worker_id.clone().expect("worker");
         binding.attempt = 1;
         let run = snapshot
             .work_run_aggregate

@@ -188,7 +188,7 @@ class PublishingChatModel {
   close() {}
 }
 
-test('100 Chat updates retain keyed identity, user state, bounded nodes, and dispose listeners', () => {
+test('100 Chat updates retain message and model identity, user state, bounded nodes, and dispose listeners', () => {
   const document = new TrackedDocument()
   const root = document.createElement('main')
   const model = new PublishingChatModel(pageState())
@@ -199,26 +199,20 @@ test('100 Chat updates retain keyed identity, user state, bounded nodes, and dis
     nextProductSessionId: () => 'psn_00000000000000000000000003',
   })
 
-  const sessionList = findByClass(root, 'wwc-chat-session-list')
   const messageList = findByClass(root, 'wwc-chat-messages')
   const modelSelect = findByClass(root, 'wwc-chat-model')
   const composer = findByClass(root, 'wwc-chat-composer-input')
-  assert.notEqual(sessionList, null)
   assert.notEqual(messageList, null)
   assert.notEqual(modelSelect, null)
   assert.notEqual(composer, null)
 
-  const firstSessionRow = sessionList.children[0]
-  const firstSessionButton = firstSessionRow.children[0]
   const firstMessageRow = messageList.children[0]
   const selectedModelOption = modelSelect.children[1]
-  firstSessionButton.setAttribute('aria-expanded', 'true')
   composer.value = 'unfinished local draft'
   composer.selectionStart = 3
   composer.selectionEnd = 12
   composer.scrollTop = 17
   document.activeElement = composer
-  sessionList.scrollTop = 41
   messageList.scrollTop = 79
   modelSelect.selectedIndex = 1
 
@@ -228,24 +222,19 @@ test('100 Chat updates retain keyed identity, user state, bounded nodes, and dis
 
   for (let update = 1; update <= 100; update += 1) model.publish(pageState(update))
 
-  assert.ok(sessionList.children[0] === firstSessionRow, 'session row identity changed')
   assert.ok(messageList.children[0] === firstMessageRow, 'message row identity changed')
   assert.ok(
     modelSelect.children[1] === selectedModelOption,
     'selected model option identity changed',
   )
-  assert.equal(firstSessionButton.getAttribute('aria-expanded'), 'true')
-  assert.equal(firstSessionButton.textContent, 'Updated Chat')
   assert.equal(firstMessageRow.children[0].children[1].textContent, 'Updated response')
   assert.equal(composer.value, 'unfinished local draft')
   assert.equal(composer.selectionStart, 3)
   assert.equal(composer.selectionEnd, 12)
   assert.equal(composer.scrollTop, 17)
   assert.ok(document.activeElement === composer, 'composer focus moved')
-  assert.equal(sessionList.scrollTop, 41)
   assert.equal(messageList.scrollTop, 79)
   assert.equal(modelSelect.selectedIndex, 1)
-  assert.equal(sessionList.children.length, 2)
   assert.equal(messageList.children.length, 1)
   assert.equal(modelSelect.children.length, 2)
   assert.ok(

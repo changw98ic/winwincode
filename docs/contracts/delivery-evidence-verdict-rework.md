@@ -217,7 +217,7 @@ Delivery，Worker 的 job outcome 也不是 DeliveryVerdict。
 业务返工次数，受 `maxReworkAttempts` 限制；实际执行 attempt 则取源 WorkItem 已持久保存的
 最大 attempt 加一，两者分别计算并封入授权。
 
-`delivery.advance` 在 `dispatchProfile: "remediator"` 时必须携带 `rework`：
+`workrun.start` 在 `dispatchProfile: "remediator"` 时必须携带 `rework`：
 
 ```json
 {

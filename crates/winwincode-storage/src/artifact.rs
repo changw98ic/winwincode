@@ -880,7 +880,7 @@ impl ArtifactStore {
     }
 
     /// Looks up one durable open acknowledgement without creating metadata.
-    /// Exact replays remain available after the originating `StageRun` settles;
+    /// Exact replays remain available after the originating `WorkRun` settles;
     /// a changed reuse still fails closed.
     ///
     /// # Errors

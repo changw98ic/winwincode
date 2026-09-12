@@ -254,7 +254,7 @@
       "statement": "A publication summary appears only for the exact current Delivery, Spec revision, frozen candidate, passing Verdict, resolved human publication approval, and target in the same read cut.",
       "refs": [
         "docs/decisions/0023-canonical-delivery-ownership.md",
-        "packages/strongflow/src/github-publication.ts",
+        "crates/winwincode-control-plane/src/publication_preparation.rs",
         "crates/winwincode-control-plane/src/publication_preparation.rs"
       ],
       "verification": {
@@ -412,7 +412,7 @@
       "closureEvidence": "PublicationFactBinding and the generated projection require the current Delivery, Spec, candidate, passing Verdict, human approval, target, and publication revision in one cut.",
       "refs": [
         "crates/winwincode-api/src/generated.rs",
-        "packages/strongflow/src/github-publication.ts",
+        "crates/winwincode-control-plane/src/publication_preparation.rs",
         "crates/winwincode-control-plane/src/publication_preparation.rs"
       ]
     },

@@ -9,9 +9,7 @@ const root = resolve(import.meta.dirname, '..')
 // The TypeScript lane exercises the current Client and generated-contract
 // boundaries.  Product-process checks (Rust build, Server API, and release
 // assets) have their own root scripts so this lane stays deterministic and
-// does not start a second process-boundary build.  The oracle gates at the
-// end are Node-authored; the trigger-aware differential executes the already
-// built integration target only when its trigger paths exist.
+// does not start a second process-boundary build.
 //
 // The real-browser suites each rebuild the client into the shared
 // `apps/client/dist` tree, and this lane runs files concurrently, so the
@@ -20,7 +18,6 @@ const root = resolve(import.meta.dirname, '..')
 const canonicalTestFiles = Object.freeze([
   'tests/api-production-vertical-runner.test.mjs',
   'tests/architecture-documentation.test.mjs',
-  'tests/attention-center-client.test.mjs',
   'tests/attention-notifications-client.test.mjs',
   'tests/auth-session-client.test.mjs',
   'tests/chat-control-plane-integration.test.mjs',
@@ -37,7 +34,6 @@ const canonicalTestFiles = Object.freeze([
   'tests/backup-restore.test.mjs',
   'tests/my-work-clients-consistency.test.mjs',
   'tests/client-occupancy-card-detail.test.mjs',
-  'tests/attention-deep-link.test.mjs',
   'tests/browser-control-packages.test.mjs',
   'tests/browser-ui-package.test.mjs',
   'tests/client-users-facade.test.mjs',
@@ -60,7 +56,6 @@ const canonicalTestFiles = Object.freeze([
   'tests/delivery-execution-job-schema.test.mjs',
   'tests/delivery-submit-verdict-http-contract.test.mjs',
   'tests/domain-schema.test.mjs',
-  'tests/enterprise-policy-contract.test.mjs',
   'tests/execution-port-contract.test.mjs',
   'tests/home-dashboard-browser.test.mjs',
   'tests/home-dashboard-client.test.mjs',
@@ -88,9 +83,10 @@ const canonicalTestFiles = Object.freeze([
   'tests/session-identity-contract.test.mjs',
   'tests/settings-control-plane-integration.test.mjs',
   'tests/strongflow-canonical-api-contract.test.mjs',
-  'tests/strongflow-delivery-advance-contract.test.mjs',
-  'tests/strongflow-delivery-api.test.mjs',
+  'tests/workrun-single-path-source-gate.test.mjs',
   'tests/strongflow-projection-contract.test.mjs',
+  'tests/strongflow-review-ui.test.mjs',
+  'tests/strongflow-review-browser.test.mjs',
   'tests/strongflow-role.test.mjs',
   'tests/ui601-keyed-rendering-validation.test.mjs',
   'tests/ui604-a11y-audit.test.mjs',

@@ -32,29 +32,29 @@ const ITEM_TITLES: Readonly<Record<ReadinessItemId, string>> = Object.freeze({
   'repository-scope': '仓库范围',
   'model-route': '模型路由',
   'credential-reference': '凭据引用',
-  'server-worker-health': '服务器与 Worker 健康',
-  'helper-availability': 'Helper 可用性',
+  'server-worker-health': '服务器与执行进程健康',
+  'helper-availability': '辅助程序可用性',
   'first-chat-delivery': '首次对话与交付',
 })
 
 const REASON_LABELS: Readonly<Record<string, string>> = Object.freeze({
-  'signed-out': 'Sign in to start first-run setup.',
+  'signed-out': '请登录以开始首次运行设置。',
   'scope-selection-required': '请使用范围选择器选择已授权的仓库范围。',
-  'scope-not-authorized': 'The Scope in this URL is not authorized. Choose another Scope.',
-  'scope-empty': 'This identity has no authorized repository Scope.',
-  'no-provider': 'No provider is configured for model routing yet.',
-  'credential-missing-or-revoked': 'The model route has no available credential.',
-  'default-route-invalid': 'The default model route is no longer valid.',
-  'provider-or-model-disabled': 'The provider or model is disabled.',
-  'request-pool-unavailable': 'The model request pool is unavailable.',
-  'no-ready-route': 'No model route is ready to run.',
-  'no-credential-reference': 'No credential reference exists yet.',
-  'credential-reference-unavailable': 'Every credential reference is missing or revoked.',
-  'server-unreachable': 'The Control Plane server is not reachable right now.',
-  'no-worker-reported': 'No local Worker is registered yet.',
-  'no-enabled-worker-capacity': 'No enabled Worker is offering execution capacity.',
-  'no-chat-session': 'No Chat session exists yet.',
-  'no-delivery': 'No Delivery exists yet.',
+  'scope-not-authorized': '此网址中的范围未获授权，请选择其他范围。',
+  'scope-empty': '当前身份没有已授权的仓库范围。',
+  'no-provider': '尚未配置模型服务商。',
+  'credential-missing-or-revoked': '模型路由没有可用凭据。',
+  'default-route-invalid': '默认模型路由已失效。',
+  'provider-or-model-disabled': '模型服务商或模型已停用。',
+  'request-pool-unavailable': '模型请求池不可用。',
+  'no-ready-route': '没有可运行的模型路由。',
+  'no-credential-reference': '尚未添加凭据引用。',
+  'credential-reference-unavailable': '所有凭据引用均缺失或已撤销。',
+  'server-unreachable': '目前无法连接控制平面服务器。',
+  'no-worker-reported': '尚未注册本地执行进程。',
+  'no-enabled-worker-capacity': '没有可用的执行容量。',
+  'no-chat-session': '尚未创建对话。',
+  'no-delivery': '尚未创建交付。',
 })
 
 function element<K extends keyof HTMLElementTagNameMap>(
@@ -89,7 +89,7 @@ function reasonText(item: ReadinessItemState): string {
 
 function checkedText(item: ReadinessItemState): string | null {
   if (item.checkedAt === null) return null
-  return `Checked ${formatInstant(item.checkedAt)}`
+  return `检查于 ${formatInstant(item.checkedAt)}`
 }
 
 /** Mount the first-run checklist panel against its read-only view-model facts. */

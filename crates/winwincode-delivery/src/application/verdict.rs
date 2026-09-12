@@ -4,12 +4,12 @@
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use winwincode_domain::{AttentionItemId, DeliveryTaskId, EvidenceId, WorkRunId};
+use winwincode_domain::{AttentionItemId, EvidenceId, WorkItemId, WorkItemState, WorkRunId};
 
 use crate::domain::{
     AttentionItem, AttentionItemStatus, AttentionItemType, AttentionOption, CriterionResult,
     CriterionVerdict, DELIVERY_SCHEMA_VERSION, Delivery, DeliverySnapshot, DeliveryStatus,
-    DeliveryTaskStatus, DeliveryVerdict, DeliveryVerdictId, EvidenceRef, FrozenDeliveryCandidate,
+    DeliveryVerdict, DeliveryVerdictId, EvidenceRef, FrozenDeliveryCandidate,
     evidence::ResolvedDeliveryEvidence,
     rework::VerdictAttentionAction,
     verification::{IndependentVerification, VerificationRole},
@@ -75,16 +75,16 @@ pub struct DeliveryVerdictSubmittedEvent {
     pub evidence: Vec<EvidenceRef>,
     pub verdict: DeliveryVerdict,
     pub attention_items: Vec<AttentionItem>,
-    pub task_statuses: Vec<DeliveryTaskStatusFact>,
+    pub work_item_states: Vec<WorkItemStateFact>,
     pub status: DeliveryStatus,
     pub produced_at_millis: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct DeliveryTaskStatusFact {
-    pub delivery_task_id: DeliveryTaskId,
-    pub status: DeliveryTaskStatus,
+pub struct WorkItemStateFact {
+    pub work_item_id: WorkItemId,
+    pub state: WorkItemState,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -178,14 +178,14 @@ pub fn compute_verdict_transition(
         facts.produced_at_millis,
     )
     .map_err(|error| CoordinationError::new(CoordinationErrorCode::Conflict, error.to_string()))?;
-    let (computed_evidence, verdict, _) = computed.into_parts();
+    let (computed_evidence, verdict) = computed.into_parts();
     let verification_work_run_id =
         attention_work_run_id(delivery, facts.candidate, facts.verification);
 
     let mut snapshot = delivery.snapshot().clone();
     append_new_evidence(&mut snapshot, &computed_evidence)?;
     snapshot.verdict = Some(verdict.clone());
-    update_task_statuses(&mut snapshot, &verdict);
+    update_work_item_states(&mut snapshot, &verdict);
     let new_attention = if verdict.status == CriterionVerdict::Pass {
         vec![delivery_approval(
             &snapshot,
@@ -264,11 +264,8 @@ fn append_new_evidence(
     Ok(())
 }
 
-fn update_task_statuses(snapshot: &mut DeliverySnapshot, verdict: &DeliveryVerdict) {
+fn update_work_item_states(snapshot: &mut DeliverySnapshot, verdict: &DeliveryVerdict) {
     if verdict.status == CriterionVerdict::Pass {
-        for task in &mut snapshot.tasks {
-            task.status = DeliveryTaskStatus::Completed;
-        }
         return;
     }
     let failed = verdict
@@ -277,13 +274,13 @@ fn update_task_statuses(snapshot: &mut DeliverySnapshot, verdict: &DeliveryVerdi
         .filter(|result| result.verdict == CriterionVerdict::Fail)
         .map(|result| &result.criterion_id)
         .collect::<Vec<_>>();
-    for task in &mut snapshot.tasks {
-        if task
-            .acceptance_criterion_ids
+    for item in &mut snapshot.work_run_aggregate.items {
+        if item
+            .criterion_ids
             .iter()
-            .any(|criterion_id| failed.contains(&criterion_id))
+            .any(|criterion_id| failed.iter().any(|failed| failed.0 == criterion_id.0))
         {
-            task.status = DeliveryTaskStatus::Failed;
+            item.state = WorkItemState::Failed;
         }
     }
 }
@@ -448,9 +445,9 @@ fn attention_action(
     match result.verdict {
         CriterionVerdict::Fail => {
             let attempts = snapshot
-                .stage_runs
+                .session_bindings
                 .iter()
-                .filter(|run| run.stage == crate::domain::DeliveryStage::Reworking)
+                .filter(|binding| binding.execution_profile.as_deref() == Some("remediator"))
                 .count() as u64;
             if attempts >= snapshot.spec.max_rework_attempts {
                 DerivedVerdictAttentionAction::ClarifyDefinition
@@ -700,13 +697,14 @@ fn event_from_transition(
         evidence,
         verdict,
         attention_items,
-        task_statuses: delivery
+        work_item_states: delivery
             .snapshot()
-            .tasks
+            .work_run_aggregate
+            .items
             .iter()
-            .map(|task| DeliveryTaskStatusFact {
-                delivery_task_id: task.id.clone(),
-                status: task.status,
+            .map(|item| WorkItemStateFact {
+                work_item_id: item.id.clone(),
+                state: item.state.clone(),
             })
             .collect(),
         status: delivery.snapshot().status,
@@ -724,7 +722,6 @@ fn validate_transition_delta(
         || after.id != before.id
         || after.revision != before.revision.saturating_add(1)
         || after.spec != before.spec
-        || after.stage_runs != before.stage_runs
         || after.session_bindings != before.session_bindings
         || after.created_at_millis != before.created_at_millis
         || !after.attention_items.starts_with(&before.attention_items)
@@ -756,32 +753,41 @@ fn validate_transition_delta(
         .cloned()
         .collect::<Vec<_>>();
     let appended_attention = &after.attention_items[before.attention_items.len()..];
-    let task_statuses = after
-        .tasks
+    let work_item_states = after
+        .work_run_aggregate
+        .items
         .iter()
-        .map(|task| DeliveryTaskStatusFact {
-            delivery_task_id: task.id.clone(),
-            status: task.status,
+        .map(|item| WorkItemStateFact {
+            work_item_id: item.id.clone(),
+            state: item.state.clone(),
         })
         .collect::<Vec<_>>();
     if appended_evidence != expected_appended
         || appended_attention != transition.event.attention_items
-        || task_statuses != transition.event.task_statuses
-        || after.tasks.len() != before.tasks.len()
-        || after.tasks.iter().zip(&before.tasks).any(|(next, prior)| {
-            next.schema_version != prior.schema_version
-                || next.id != prior.id
-                || next.delivery_id != prior.delivery_id
-                || next.title != prior.title
-                || next.goal != prior.goal
-                || next.acceptance_criterion_ids != prior.acceptance_criterion_ids
-                || next.blocked_by_task_ids != prior.blocked_by_task_ids
-                || next.owner != prior.owner
-        })
+        || work_item_states != transition.event.work_item_states
+        || after.work_run_aggregate.contract != before.work_run_aggregate.contract
+        || after.work_run_aggregate.runs != before.work_run_aggregate.runs
+        || after.work_run_aggregate.items.len() != before.work_run_aggregate.items.len()
+        || after
+            .work_run_aggregate
+            .items
+            .iter()
+            .zip(&before.work_run_aggregate.items)
+            .any(|(next, prior)| {
+                next.schema_version != prior.schema_version
+                    || next.id != prior.id
+                    || next.revision != prior.revision
+                    || next.title != prior.title
+                    || next.goal != prior.goal
+                    || next.criterion_ids != prior.criterion_ids
+                    || next.depends_on != prior.depends_on
+                    || next.work_contract_id != prior.work_contract_id
+                    || next.work_contract_revision != prior.work_contract_revision
+            })
     {
         return Err(CoordinationError::new(
             CoordinationErrorCode::Conflict,
-            "computed verdict transition does not contain its exact Evidence, Attention, or task delta",
+            "computed verdict transition does not contain its exact Evidence, Attention, or WorkItem delta",
         ));
     }
     Ok(())
@@ -803,13 +809,12 @@ fn delivery_digest(delivery: &Delivery) -> Result<String, CoordinationError> {
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support {
     use winwincode_domain::{
-        CodexThreadId, DeliveryId, DeliveryTaskId, ExecutionJobId, ProductSessionId,
-        WorkerSessionId,
+        CodexThreadId, DeliveryId, ExecutionJobId, ProductSessionId, WorkItemState, WorkerSessionId,
     };
 
     use crate::domain::{
-        Delivery, DeliveryStatus, DeliveryTaskStatus, EvidenceRefType, FrozenDeliveryCandidate,
-        SessionBinding, SessionBindingId,
+        Delivery, DeliveryStatus, EvidenceRefType, FrozenDeliveryCandidate, SessionBinding,
+        SessionBindingId,
         candidate::test_support::frozen_candidate,
         evidence::{
             ResolvedDeliveryEvidence, VerifiedEvidenceOutcome,
@@ -1033,18 +1038,12 @@ pub mod test_support {
         snapshot.spec.delivery_id = delivery_id.clone();
         snapshot.spec.max_rework_attempts = max_rework_attempts;
         snapshot.revision = 1;
-        snapshot.status = DeliveryStatus::Verifying;
+        snapshot.status = DeliveryStatus::Ready;
         snapshot.evidence.clear();
         snapshot.verdict = None;
         snapshot.attention_items.clear();
-        let canonical_task_id = DeliveryTaskId("dtk_01J00000000000000000000000".into());
-        for task in &mut snapshot.tasks {
-            task.delivery_id = delivery_id.clone();
-            task.id = canonical_task_id.clone();
-            task.status = DeliveryTaskStatus::Verifying;
-        }
+        snapshot.work_run_aggregate.items[0].state = WorkItemState::Validating;
 
-        snapshot.stage_runs.clear();
         let writer_binding = &mut snapshot.session_bindings[0];
         writer_binding.id = SessionBindingId("binding-executor-1".into());
         writer_binding.delivery_id = delivery_id.clone();
@@ -1078,6 +1077,7 @@ pub mod test_support {
                     product_session_id: ProductSessionId(format!("product-{role_id}")),
                     execution_job_id: ExecutionJobId(format!("job-{role_id}")),
                     execution_profile: Some(role_id.into()),
+                    runtime_context: None,
                     worker_session_id: Some(WorkerSessionId(format!("worker-{role_id}"))),
                     codex_thread_id: Some(CodexThreadId(format!("thread-{role_id}"))),
                     attempt: 1,
@@ -1087,7 +1087,7 @@ pub mod test_support {
                     lease_id: None,
                     fencing_token: None,
                     source_provenance:
-                        crate::domain::SessionBindingSourceProvenance::pending_delivery_advance(),
+                        crate::domain::SessionBindingSourceProvenance::pending_workrun_start(),
                 }
                 .with_test_authority(&format!("verdict-transition-{role:?}"), 1),
             );
@@ -1108,7 +1108,7 @@ pub mod test_support {
             .iter_mut()
             .find(|item| item.id == writer_item)
             .expect("writer item")
-            .state = winwincode_domain::WorkItemState::CandidateReady;
+            .state = WorkItemState::CandidateReady;
         for binding in &snapshot.session_bindings {
             if outcome == VerdictFixtureOutcome::InfraError
                 && infrastructure_failed_roles
@@ -1542,8 +1542,8 @@ mod tests {
         );
     }
     use crate::domain::{
-        AttentionItemStatus, Delivery, DeliveryStatus, DeliveryTaskStatus, EvidenceRefType,
-        FrozenDeliveryCandidate, SessionBinding, SessionBindingId,
+        AttentionItemStatus, Delivery, DeliveryStatus, EvidenceRefType, FrozenDeliveryCandidate,
+        SessionBinding, SessionBindingId,
         candidate::test_support::frozen_candidate,
         evidence::{VerifiedEvidenceOutcome, test_support::resolved_role_evidence},
         test_fixture,
@@ -1622,13 +1622,12 @@ mod tests {
     )]
     fn verifying_delivery() -> Delivery {
         let mut snapshot = test_fixture();
-        snapshot.status = DeliveryStatus::Verifying;
+        snapshot.status = DeliveryStatus::Ready;
         snapshot.evidence.clear();
         snapshot.verdict = None;
         snapshot.attention_items.clear();
-        snapshot.tasks[0].status = DeliveryTaskStatus::Verifying;
+        snapshot.work_run_aggregate.items[0].state = winwincode_domain::WorkItemState::Validating;
 
-        snapshot.stage_runs.clear();
         let writer_binding = &mut snapshot.session_bindings[0];
         writer_binding.id = SessionBindingId("binding-executor-1".into());
         writer_binding.product_session_id = ProductSessionId("product-executor".into());
@@ -1657,6 +1656,7 @@ mod tests {
                     product_session_id: ProductSessionId(format!("product-{role}")),
                     execution_job_id: ExecutionJobId(format!("job-{role}")),
                     execution_profile: Some(role.into()),
+                    runtime_context: None,
                     worker_session_id: Some(WorkerSessionId(format!("worker-{role}"))),
                     codex_thread_id: Some(CodexThreadId(format!("thread-{role}"))),
                     attempt: 1,
@@ -1666,7 +1666,7 @@ mod tests {
                     lease_id: None,
                     fencing_token: None,
                     source_provenance:
-                        crate::domain::SessionBindingSourceProvenance::pending_delivery_advance(),
+                        crate::domain::SessionBindingSourceProvenance::pending_workrun_start(),
                 }
                 .with_test_authority(&format!("verdict-facts-{role}"), 1),
             );
@@ -1732,6 +1732,9 @@ mod tests {
         assert_eq!(next.evidence.len(), 2);
         assert_eq!(next.attention_items.len(), 1);
         assert!(next.attention_items[0].blocking);
-        assert_eq!(next.tasks[0].status, DeliveryTaskStatus::Failed);
+        assert_eq!(
+            next.work_run_aggregate.items[0].state,
+            winwincode_domain::WorkItemState::Failed
+        );
     }
 }

@@ -139,7 +139,7 @@ function decisionBinding(sessionId = productSessionId) {
       productSessionId: sessionId,
       workerSessionId: 'wsn_00000000000000000000000001',
       codexThreadId: 'cdx_00000000000000000000000001',
-      stageRunId: 'run_00000000000000000000000001',
+      workRunId: 'wrn_00000000000000000000000001',
     },
   }
 }
@@ -477,11 +477,11 @@ test('presentation explains first-Chat model setup and bounded creation failures
   assert.match(noModel.emptyText, /模型路由/u)
 
   for (const [status, reason, pattern] of [
-    ['rate_limited', 'rate_limited', /rate limited/iu],
-    ['window_exhausted', 'window_exhausted', /window is exhausted/iu],
-    ['weekly_exhausted', 'weekly_exhausted', /weekly usage is exhausted/iu],
-    ['auth_error', 'authentication_error', /rejected its credential/iu],
-    ['unknown', 'runtime_status_unknown', /status is unknown/iu],
+    ['rate_limited', 'rate_limited', /速率限制/u],
+    ['window_exhausted', 'window_exhausted', /用量窗口已用尽/u],
+    ['weekly_exhausted', 'weekly_exhausted', /每周用量已用尽/u],
+    ['auth_error', 'authentication_error', /拒绝了凭据/u],
+    ['unknown', 'runtime_status_unknown', /状态未知/u],
   ]) {
     const unavailable = chatPagePresentation(state({
       activeProductSessionId: null,
@@ -499,7 +499,7 @@ test('presentation explains first-Chat model setup and bounded creation failures
     ['PERMISSION_DENIED', /没有这个对话的访问权限/u],
     ['INVALID_REQUEST', /模型在该仓库不可用/u],
     ['SERVICE_UNAVAILABLE', /暂时不可用/u],
-    ['TRUSTED_FACTS_UNAVAILABLE', /Provider 或模型不可用/u],
+    ['TRUSTED_FACTS_UNAVAILABLE', /模型服务商或模型不可用/u],
   ]
   for (const [code, pattern] of errors) {
     const errorText = chatPagePresentation(state({
@@ -538,10 +538,10 @@ test('empty Chat centers the design diagrams and swaps the composer placeholder'
 
   const labels = findAllByClass(rootElement, 'wwc-chat-diagram-label')
   assert.deepEqual(labels.map(label => label.textContent), [
-    'Web UI',
-    'Backend',
-    'Client',
-    'Worker',
+    '网页界面',
+    '后端',
+    '执行设备',
+    '执行进程',
   ])
   assert.match(findAllByClass(rootElement, 'wwc-chat-diagram-caption')[0].textContent,
     /项目架构示意/u)
@@ -881,7 +881,7 @@ test('Chat confirms one editable requirement draft before converting it to Stron
   })
   assert.equal(goal.value, 'Implement the requirement confirmed in this Chat.')
   assert.equal(baseline.value, '0123456789abcdef0123456789abcdef01234567')
-  assert.match(findByClass(rootElement, 'wwc-chat-convert-error').textContent, /permission/iu)
+  assert.match(findByClass(rootElement, 'wwc-chat-convert-error').textContent, /权限/u)
   assert.doesNotMatch(findByClass(rootElement, 'wwc-chat-convert-error').textContent, /private/iu)
 
   deliveryCreator.publish({ status: 'submitting', error: null })

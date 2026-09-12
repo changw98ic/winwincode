@@ -71,7 +71,7 @@ const CANDIDATE_IDENTITY_FIELDS = Object.freeze([
   'producerArtifactRef',
   'producerAttempt',
   'producerCodexThreadId',
-  'producerDeliveryTaskId',
+  'producerWorkItemId',
   'producerExecutionJobId',
   'producerFencingToken',
   'producerFinishedAtMillis',
@@ -163,24 +163,6 @@ function repositoryPath(relativePath) {
   return join(root, relativePath)
 }
 
-function assertPublicSymbol(mapping) {
-  const source = readFileSync(repositoryPath(mapping.path), 'utf8')
-  assert.match(
-    source,
-    new RegExp(`export\\s+(?:const|type|class|interface|function)\\s+${mapping.name}\\b`, 'u'),
-    `${mapping.path} does not export ${mapping.name}`,
-  )
-}
-
-function assertTestCase(mapping) {
-  const source = readFileSync(repositoryPath(mapping.path), 'utf8')
-  assert.equal(
-    source.includes(`test('${mapping.name}'`) || source.includes(`test("${mapping.name}"`),
-    true,
-    `${mapping.path} does not define test ${mapping.name}`,
-  )
-}
-
 test('phase 2.4 rules freeze candidate, evidence, verdict, and rework behavior', () => {
   const rules = json(rulesPath)
   assert.equal(rules.schemaVersion, 'winwincode.delivery-evidence-verdict-rework-rules.v1')
@@ -192,7 +174,7 @@ test('phase 2.4 rules freeze candidate, evidence, verdict, and rework behavior',
     [...rules.rustTarget.prohibitedIdentityFields].sort(),
     PROHIBITED_RUST_SESSION_FIELDS,
   )
-  assert.match(rules.implementationBoundary.phase24DomainPolicy, /fail-closed domain and application/u)
+  assert.match(rules.implementationBoundary.phase24DomainPolicy, /fail-closed Rust domain and application/u)
   assert.match(
     rules.implementationBoundary.phase24DomainPolicy,
     /cannot construct a sealed fact/u,
@@ -299,16 +281,7 @@ test('phase 2.4 rules freeze candidate, evidence, verdict, and rework behavior',
     assert.ok(rule.adrRefs.length > 0, `${rule.id} needs an accepted decision`)
     for (const path of rule.adrRefs) assert.equal(existsSync(repositoryPath(path)), true)
 
-    assert.ok(rule.typescript.publicSymbols.length > 0, `${rule.id} needs an old public seam`)
-    for (const mapping of rule.typescript.publicSymbols) assertPublicSymbol(mapping)
-    assert.ok(['covered', 'partial'].includes(rule.typescript.coverage))
-    assert.ok(rule.typescript.tests.length > 0, `${rule.id} needs an old behavior test`)
-    for (const mapping of rule.typescript.tests) assertTestCase(mapping)
-    if (rule.typescript.coverage === 'partial') {
-      assert.ok(rule.typescript.gap.length > 0, `${rule.id} must state the old behavior gap`)
-    } else {
-      assert.equal(rule.typescript.gap, '')
-    }
+    assert.equal(rule.typescript, undefined, `${rule.id} must not restore the retired TypeScript domain`)
 
     assert.match(rule.rust.module, /^domain\/(?:candidate|evidence|rework|verdict|verification)\.rs$/u)
     assert.match(rule.rust.testName, /^[a-z][a-z0-9_]+$/u)

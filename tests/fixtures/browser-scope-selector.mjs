@@ -155,6 +155,7 @@ globalThis.runScopeSelection = async () => {
   await waitFor(() => control('organization') !== null, 'Scope selector')
   const initial = selectorState()
   const initialProductReads = queries.filter(query => query.query === 'settings.get').length
+  document.querySelector('.wwc-scope-selector-compact').click()
   const focusTransitions = await chooseRepository(repositoryTwo)
   await waitFor(() => subscriptions.length > 0, 'settings subscription')
   const selected = selectorState()

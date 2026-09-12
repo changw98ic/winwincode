@@ -23,7 +23,7 @@ generated artifact.open / artifact.chunk
 
 Worker 只能在 `artifact.open` 里声明 Artifact 的内容摘要、长度、类型和文件显示名，再按
 sequence 发送 `artifact.chunk`。Control Plane 先核对持久化的 ExecutionJob、完整仓库
-scope、StageRun、SessionBinding、WorkerSession、Lease、fencing token 和 Worker 实例，
+scope、WorkRun、SessionBinding、WorkerSession、Lease、fencing token 和 Worker 实例，
 然后才把消息交给 ArtifactStore。ArtifactId、messageId 和 requestId 都是持久身份；同一
 身份的逐值重放返回 duplicate，改动消息内容则返回 conflict。过期 Lease、旧 fencing token
 和已替换 Worker 实例返回生成合同中的明确拒绝状态，不会预留 metadata 或写入 chunk。
@@ -69,7 +69,7 @@ resolver 从受控仓库重新计算并逐项封存：
 
 结果 `ValidatedGitSourceArtifact` 没有公开构造器，也不能 Deserialize。Delivery 只消费这份
 opaque fact，并再次要求 ArtifactId/digest 出现在同一个已结算成功 Worker outcome 中，且
-Job、attempt、Lease、fence、Worker、WorkerSession、CodexThread、StageRun、结束时间和最后
+Job、attempt、Lease、fence、Worker、WorkerSession、CodexThread、WorkRun、结束时间和最后
 sequence 全部一致。调用方自报 Git 字段、旧候选 Artifact、foreign repository 或另一个
 Worker 的产物都不能形成候选。
 

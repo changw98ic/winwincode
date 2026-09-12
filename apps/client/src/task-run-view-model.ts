@@ -4,12 +4,18 @@ import type {
   ControlPlaneCandidateApplyReceipt,
   ControlPlaneCandidateApplyResult,
   ControlPlaneCandidateApplyStrategy,
-  ControlPlaneCandidateSummary,
   ControlPlaneDeviceSummary,
   ControlPlaneRunIdentityPort,
+  ControlPlaneRunIdentityProjection,
+  ControlPlaneRunCandidateProjection,
   ControlPlaneRunWorkerSessionState,
   ControlPlaneTaskAnchor,
 } from './community-control-plane-client.js'
+import type {
+  DeliveryEvidenceProjection,
+  WorkContract,
+  WorkGraphItemState,
+} from './generated/contracts.js'
 import {
   deviceStateText,
   deviceStateTone,
@@ -22,6 +28,7 @@ type CandidateTone = 'info' | 'success' | 'warning' | 'danger' | 'neutral'
 
 /** The displayed candidate states the run page's Candidate row renders. */
 type CandidateDisplayState =
+  | 'produced'
   | 'retained'
   | 'branch_created'
   | 'applied'
@@ -35,7 +42,7 @@ type CandidateDisplayState =
  * lifecycle name.
  */
 function candidateDisplayState(
-  candidate: ControlPlaneCandidateSummary,
+  candidate: ControlPlaneRunCandidateProjection,
 ): CandidateDisplayState {
   if (candidate.state === 'applied') return 'applied'
   if (candidate.state === 'discarded') return 'discarded'
@@ -50,17 +57,19 @@ function candidateDisplayState(
 /** The one copy per displayed state; every badge also carries the tone. */
 function candidateDisplayStateText(state: CandidateDisplayState): string {
   switch (state) {
-    case 'retained': return 'Retained on the device'
-    case 'branch_created': return 'Local branch created'
-    case 'applied': return 'Applied to the target branch'
-    case 'conflict': return 'Apply conflict needs attention'
-    case 'discarded': return 'Discarded'
-    case 'failed': return 'Retention failed'
+    case 'produced': return '候选结果已生成'
+    case 'retained': return '已保留在设备上'
+    case 'branch_created': return '已创建本地分支'
+    case 'applied': return '已应用到目标分支'
+    case 'conflict': return '应用冲突，需要处理'
+    case 'discarded': return '已丢弃'
+    case 'failed': return '保留失败'
   }
 }
 
 function candidateDisplayStateTone(state: CandidateDisplayState): CandidateTone {
   switch (state) {
+    case 'produced': return 'info'
     case 'retained': return 'info'
     case 'branch_created': return 'info'
     case 'applied': return 'success'
@@ -73,16 +82,16 @@ function candidateDisplayStateTone(state: CandidateDisplayState): CandidateTone 
 /** The one copy per terminal apply result. */
 function candidateResultText(result: ControlPlaneCandidateApplyResult): string {
   switch (result) {
-    case 'retained': return 'Still retained locally.'
-    case 'branch_created': return 'Local branch created.'
-    case 'applied': return 'Applied to the target branch.'
-    case 'base_stale': return 'The target branch moved ahead. Refresh the expected HEAD and retry.'
-    case 'working_tree_dirty': return 'The target worktree has uncommitted changes. Settle them first.'
-    case 'merge_conflict': return 'Conflicts must be resolved before this apply can land.'
-    case 'candidate_missing': return 'The candidate ref is gone from the device.'
-    case 'permission_denied': return 'You lack permission for the target repository.'
-    case 'discarded': return 'The candidate was discarded.'
-    case 'failed': return 'The apply failed. Check the device and try again.'
+    case 'retained': return '仍保留在本地。'
+    case 'branch_created': return '已创建本地分支。'
+    case 'applied': return '已应用到目标分支。'
+    case 'base_stale': return '目标分支已有新提交，请刷新预期 HEAD 后重试。'
+    case 'working_tree_dirty': return '目标工作区有未提交改动，请先处理。'
+    case 'merge_conflict': return '必须先解决冲突才能应用。'
+    case 'candidate_missing': return '设备上的候选引用已不存在。'
+    case 'permission_denied': return '你没有目标仓库的权限。'
+    case 'discarded': return '候选结果已丢弃。'
+    case 'failed': return '应用失败，请检查设备后重试。'
   }
 }
 
@@ -154,9 +163,40 @@ export interface TaskRunApplyFacts {
   readonly recordedAt: string
 }
 
-/** The identity rows the run identity port projects (fake-first, UI-100.2). */
+/** The WorkContract row bound to this WorkItem. */
+export interface TaskRunContractFacts {
+  readonly contractId: string
+  readonly objective: string
+  readonly revision: number
+  readonly authorityText: string
+}
+
+/** One acceptance criterion selected by this WorkItem. */
+export interface TaskRunCriterionFacts {
+  readonly id: string
+  readonly description: string
+  readonly required: boolean
+  readonly verificationMethod: string | null
+}
+
+/** One Evidence record bound to this exact WorkRun. */
+export interface TaskRunEvidenceItemFacts {
+  readonly evidenceId: string
+  readonly typeText: string
+  readonly sourceRef: string
+}
+
+/** The identity rows projected from the canonical WorkRun and Delivery reads. */
 export interface TaskRunIdentityFacts {
   readonly workerSessions: readonly TaskRunWorkerSessionFacts[]
+  readonly contract: TaskRunContractFacts | null
+  readonly criteria: readonly TaskRunCriterionFacts[]
+  readonly owner: string | null
+  readonly dependencies: readonly string[]
+  readonly blockers: readonly string[]
+  readonly graphState: WorkGraphItemState | null
+  readonly graphStateText: string | null
+  readonly evidence: readonly TaskRunEvidenceItemFacts[]
   readonly candidate: TaskRunCandidateFacts | null
   readonly apply: TaskRunApplyFacts | null
 }
@@ -186,12 +226,12 @@ export type TaskRunListener = (state: TaskRunState) => void
 /** The one copy per WorkerSession state; every badge also carries the tone. */
 export function runWorkerSessionStateText(state: ControlPlaneRunWorkerSessionState): string {
   switch (state) {
-    case 'reserving': return 'Reserving capacity'
-    case 'launching': return 'Launching the worker'
-    case 'running': return 'Running'
-    case 'draining': return 'Finishing current work'
-    case 'stopped': return 'Stopped'
-    case 'failed': return 'Failed to start'
+    case 'reserving': return '正在预留容量'
+    case 'launching': return '正在启动执行进程'
+    case 'running': return '运行中'
+    case 'draining': return '正在完成当前工作'
+    case 'stopped': return '已停止'
+    case 'failed': return '启动失败'
   }
 }
 
@@ -206,6 +246,45 @@ export function runWorkerSessionStateTone(
     case 'draining': return 'warning'
     case 'stopped': return 'neutral'
     case 'failed': return 'danger'
+  }
+}
+
+const WORK_GRAPH_STATE_TEXT: Readonly<Record<WorkGraphItemState, string>> = Object.freeze({
+  ready: '可执行',
+  running: '运行中',
+  blocked: '已阻塞',
+  done: '已完成',
+})
+
+const WORK_GRAPH_STATE_TONE: Readonly<Record<WorkGraphItemState, CandidateTone>> = Object.freeze({
+  ready: 'info',
+  running: 'success',
+  blocked: 'warning',
+  done: 'neutral',
+})
+
+export function runWorkGraphStateTone(state: WorkGraphItemState): CandidateTone {
+  return WORK_GRAPH_STATE_TONE[state]
+}
+
+function contractAuthorityText(authority: WorkContract['requiredHumanAuthority']): string {
+  switch (authority) {
+    case 'none': return '无需人工授权'
+    case 'approval': return '需要人工批准'
+    case 'attention': return '需要人工关注'
+  }
+}
+
+function evidenceTypeText(type: DeliveryEvidenceProjection['type']): string {
+  switch (type) {
+    case 'test': return '测试'
+    case 'command': return '命令'
+    case 'diff': return '差异'
+    case 'file': return '文件'
+    case 'commit': return '提交'
+    case 'pull_request': return '拉取请求'
+    case 'runtime_event': return '运行事件'
+    case 'review_finding': return '审核发现'
   }
 }
 
@@ -225,7 +304,7 @@ function occupancyFacts(
   return Object.freeze({
     stateText: deviceStateText(device),
     tone: deviceStateTone(device),
-    capacityText: `Capacity ${String(device.capacityUsed)} / ${String(device.capacityTotal)}`,
+    capacityText: `容量 ${String(device.capacityUsed)} / ${String(device.capacityTotal)}`,
   })
 }
 
@@ -256,13 +335,13 @@ const WORK_RUN_STATE_TO_SESSION_STATE = Object.freeze({
   cancelled: 'stopped',
 })
 
-function identityFacts(projection: {
-  readonly workRun: import('./generated/contracts.js').WorkRun
-  readonly candidate: import('./generated/contracts.js').Candidate | null
-}): TaskRunIdentityFacts {
+function identityFacts(projection: ControlPlaneRunIdentityProjection): TaskRunIdentityFacts {
   const workRun = projection.workRun
   const candidate = projection.candidate
   const state = WORK_RUN_STATE_TO_SESSION_STATE[workRun.state] ?? ('stopped' as ControlPlaneRunWorkerSessionState)
+  const criteria = projection.contract !== null && projection.item !== null
+    ? projection.contract.criteria.filter(criterion => projection.item?.criterionIds.includes(criterion.id))
+    : []
   return Object.freeze({
     workerSessions: Object.freeze([Object.freeze({
       workerSessionId: workRun.workerSessionId,
@@ -271,15 +350,41 @@ function identityFacts(projection: {
       tone: runWorkerSessionStateTone(state),
       startedAt: null,
     })]),
+    contract: projection.contract === null
+      ? null
+      : Object.freeze({
+          contractId: projection.contract.id,
+          objective: projection.contract.objective,
+          revision: projection.contract.revision,
+          authorityText: contractAuthorityText(projection.contract.requiredHumanAuthority),
+        }),
+    criteria: Object.freeze(criteria.map(criterion => Object.freeze({
+      id: criterion.id,
+      description: criterion.description,
+      required: criterion.required,
+      verificationMethod: criterion.verificationMethod,
+    }))),
+    owner: projection.owner,
+    dependencies: projection.graphItem?.dependencies ?? projection.item?.dependsOn ?? Object.freeze([]),
+    blockers: projection.graphItem?.blockers ?? Object.freeze([]),
+    graphState: projection.graphItem?.state ?? null,
+    graphStateText: projection.graphItem === null
+      ? null
+      : WORK_GRAPH_STATE_TEXT[projection.graphItem.state],
+    evidence: Object.freeze(projection.evidence.map(entry => Object.freeze({
+      evidenceId: entry.id,
+      typeText: evidenceTypeText(entry.type),
+      sourceRef: entry.sourceRef,
+    }))),
     candidate: candidate === null
       ? null
       : Object.freeze({
           candidateRef: candidate.candidateRef,
-          stateText: runWorkerSessionStateText(state),
-          tone: runWorkerSessionStateTone(state),
-          branchName: null,
+          stateText: candidateDisplayStateText(candidateDisplayState(candidate)),
+          tone: candidateDisplayStateTone(candidateDisplayState(candidate)),
+          branchName: candidate.branchName,
         }),
-    apply: candidate === null ? null : applyFacts([]),
+    apply: candidate === null ? null : applyFacts(candidate.history),
   })
 }
 
@@ -305,6 +410,7 @@ export function createTaskRunViewModel(options: {
   const clients = options.clients
   const repositories = options.repositories
   let identity: TaskRunIdentityFacts | null = null
+  let runTarget: { readonly clientId: string; readonly repositoryBindingId: string } | null = null
   let identityStatus: TaskRunZoneStatus = 'loading'
   let closed = false
   let identityEpoch = 0
@@ -316,12 +422,13 @@ export function createTaskRunViewModel(options: {
     readonly occupancy: TaskRunOccupancyFacts | null
     readonly repository: TaskRunRepositoryFacts | null
   } {
+    const target = runTarget ?? options.anchor
     const device = clients.state.devices.find(
-      candidate => candidate.clientId === options.anchor.clientId,
+      candidate => candidate.clientId === target.clientId,
     )
-    const repository = repositories.state.clientId === options.anchor.clientId
+    const repository = repositories.state.clientId === target.clientId
       ? repositories.state.repositories.find(
-          candidate => candidate.repositoryBindingId === options.anchor.repositoryBindingId,
+          candidate => candidate.repositoryBindingId === target.repositoryBindingId,
         )
       : undefined
     return {
@@ -381,6 +488,14 @@ export function createTaskRunViewModel(options: {
     identityStatus = 'loading'
     try {
       const projection = await options.identity.read(options.anchor)
+      if (closed || epoch !== identityEpoch) return
+      runTarget = Object.freeze({
+        clientId: projection.clientId,
+        repositoryBindingId: projection.repositoryBindingId,
+      })
+      if (repositories.state.clientId !== projection.clientId) {
+        await repositories.showDevice(projection.clientId)
+      }
       if (closed || epoch !== identityEpoch) return
       identity = identityFacts(projection)
       identityStatus = 'ready'

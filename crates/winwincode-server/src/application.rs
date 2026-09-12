@@ -13,8 +13,8 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use winwincode_api::generated::{
     Actor, CommandCompletedResponse, CommandEnvelope, CommandRequest,
-    ControlPlaneWebSocketClientFrame, DeliveryAdvanceCommand, ErrorCode, QueryRequest,
-    QueryResultResponse, Scope, WorkRunCancelCommand,
+    ControlPlaneWebSocketClientFrame, ErrorCode, QueryRequest, QueryResultResponse, Scope,
+    WorkRunCancelCommand, WorkRunStartCommand,
 };
 use winwincode_control_plane::credential_reference::{
     CredentialReferenceError, CredentialReferenceErrorKind, CredentialReferenceService,
@@ -494,23 +494,23 @@ impl StandaloneControlPlaneApplication {
         request: CommandRequest,
     ) -> Result<CommandDispatchResponse, ApiError> {
         let dispatch_now = self.clock.now_instant();
-        // FLOW-100.5: the acting browser user of a `delivery.advance` is the
+        // FLOW-100.5: the acting browser user of a `workrun.start` is the
         // candidate device dispatcher; service and system actors never route
         // to a device.
         let advance_actor = match &request {
-            CommandRequest::DeliveryAdvanceCommand(command) => match &command.actor {
+            CommandRequest::WorkRunStartCommand(command) => match &command.actor {
                 Actor::UserActor(user) => Some(user.id.0.clone()),
                 _ => None,
             },
             _ => None,
         };
         let advance_command = match &request {
-            CommandRequest::DeliveryAdvanceCommand(command) => Some(command.clone()),
+            CommandRequest::WorkRunStartCommand(command) => Some(command.clone()),
             _ => None,
         };
         let mut guard = self.state()?;
         let state = guard.as_mut().ok_or_else(service_unavailable)?;
-        let response = match request {
+        let mut response = match request {
             CommandRequest::WorkRunCancelCommand(command) => {
                 cancel_workrun(&mut state.storage, &command, &dispatch_now)?
             }
@@ -523,14 +523,14 @@ impl StandaloneControlPlaneApplication {
                     .control_plane
                     .delivery_update_spec(&command)
                     .map(CommandCompletedResponse::DeliveryUpdateSpecCompletedResponse),
-                CommandRequest::DeliveryTaskBreakdownCreateCommand(command) => state
+                CommandRequest::WorkItemsCreateCommand(command) => state
                     .control_plane
-                    .delivery_task_breakdown_create(&command)
-                    .map(CommandCompletedResponse::DeliveryTaskBreakdownCreateCompletedResponse),
-                CommandRequest::DeliveryAdvanceCommand(command) => state
+                    .work_items_create(&command)
+                    .map(CommandCompletedResponse::WorkItemsCreateCompletedResponse),
+                CommandRequest::WorkRunStartCommand(command) => state
                     .control_plane
-                    .delivery_advance(&command)
-                    .map(CommandCompletedResponse::DeliveryAdvanceCompletedResponse),
+                    .workrun_start(&command)
+                    .map(CommandCompletedResponse::WorkRunStartCompletedResponse),
                 CommandRequest::DeliveryResolveAttentionCommand(command) => state
                     .control_plane
                     .delivery_resolve_attention(&command)
@@ -552,25 +552,26 @@ impl StandaloneControlPlaneApplication {
         // durable dispatch never blocks the committed Delivery receipt on a
         // transport action; ordinary admission backpressure keeps the WorkRun
         // job queued for the device worker.
-        if let Some(user_id) = advance_actor
-            && matches!(
-                response,
-                CommandCompletedResponse::DeliveryAdvanceCompletedResponse(_)
-            )
+        let advance_work_run_id = match advance_command.as_ref() {
+            Some(command) => resolve_advance_work_run(&mut state.storage, command)?,
+            None => None,
+        };
+        if let Some(work_run_id) = advance_work_run_id.as_ref()
+            && let CommandCompletedResponse::WorkRunStartCompletedResponse(completed) =
+                &mut response
         {
-            let command = advance_command.as_ref().ok_or_else(|| {
-                ApiError::new(500, "INTERNAL_ERROR", "advance command identity is missing")
-            })?;
-            let work_run_id = resolve_advance_work_run(&mut state.storage, command)?;
-            if let Some(work_run_id) = work_run_id.as_ref() {
-                dispatch_work_run_to_device_worker(
-                    &mut state.storage,
-                    Some(&user_id),
-                    work_run_id,
-                    &dispatch_now,
-                )
-                .map_err(|error| strongflow_device_dispatch_error(&error))?;
-            }
+            completed.result.active_work_run_id = Some(work_run_id.clone());
+        }
+        if let Some(user_id) = advance_actor
+            && let Some(work_run_id) = advance_work_run_id.as_ref()
+        {
+            dispatch_work_run_to_device_worker(
+                &mut state.storage,
+                Some(&user_id),
+                work_run_id,
+                &dispatch_now,
+            )
+            .map_err(|error| strongflow_device_dispatch_error(&error))?;
         }
         self.hub
             .publish_pending(&mut state.storage)
@@ -1404,7 +1405,7 @@ fn strongflow_error(error: &StrongFlowProjectionError) -> ApiError {
 
 fn resolve_advance_work_run(
     storage: &mut SqliteStorage,
-    command: &DeliveryAdvanceCommand,
+    command: &WorkRunStartCommand,
 ) -> Result<Option<WorkRunId>, ApiError> {
     let envelope: CommandEnvelope =
         serde_json::from_value(serde_json::to_value(command).map_err(|_| {

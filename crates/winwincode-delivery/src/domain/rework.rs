@@ -29,7 +29,7 @@ use winwincode_domain::{DeliveryId, EvidenceId, Sha256Digest, WorkItemId, WorkRu
 use super::{
     AcceptanceCriterionId, CriterionVerdict, Delivery, DeliverySnapshot, DeliveryStatus,
     DeliveryValidationError, DeliveryValidationErrorCode, DeliveryVerdictStatus,
-    FreezeCandidateFacts, FrozenDeliveryCandidate, StageRunActorType, ValidatedGitSnapshotFact,
+    FreezeCandidateFacts, FrozenDeliveryCandidate, ValidatedGitSnapshotFact,
     assert_frozen_candidate_current, bounded_text,
     candidate::{assert_validated_git_snapshot_fact, freeze_authorized_rework_candidate},
     portable_identifier, validation_error,
@@ -261,11 +261,6 @@ struct ReworkAuthorizationIdentity<'authorization> {
 
 impl ReworkAuthorization {
     #[must_use]
-    pub fn writer_actor(&self) -> StageRunActorType {
-        StageRunActorType::Codex
-    }
-
-    #[must_use]
     pub fn writer_role(&self) -> &'static str {
         "remediator"
     }
@@ -327,9 +322,12 @@ impl ReworkAuthorization {
     ) -> Result<crate::application::workrun::WorkRunAggregate, DeliveryValidationError> {
         self.validate_for_dispatch(delivery)?;
         let mut aggregate = delivery.snapshot().work_run_aggregate.clone();
-        aggregate
-            .start_verification(&self.work_item_id)
-            .map_err(|_| invalid_rework("rework requires an idle current candidate"))?;
+        if aggregate.runs.iter().any(|run| {
+            run.work_item_id == self.work_item_id
+                && matches!(run.state, WorkRunState::Leased | WorkRunState::Running)
+        }) {
+            return Err(invalid_rework("rework requires an idle current candidate"));
+        }
         let producer = aggregate
             .runs
             .iter_mut()
@@ -568,7 +566,7 @@ pub(crate) fn safest_attention_transition(actions: &[VerdictAttentionAction]) ->
     } else if actions.contains(&VerdictAttentionAction::StartRework) {
         DeliveryStatus::Reworking
     } else {
-        DeliveryStatus::Verifying
+        DeliveryStatus::Ready
     }
 }
 
@@ -1088,7 +1086,7 @@ fn invalid_rework(message: &str) -> DeliveryValidationError {
 
 /// Narrow sealed fixtures for cross-crate rework transaction tests. They are
 /// compiled only for tests and still pass through the production verdict,
-/// Attention, candidate, history, decision, and stage application services.
+/// Attention, candidate, history, decision, and `WorkRun` application services.
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support {
     use super::{
@@ -1101,10 +1099,12 @@ pub mod test_support {
     use crate::application::attention::ResolvedAttentionTransition;
     use crate::application::{
         attention::{AttentionDecision, ResolveAttentionInput, resolve_attention},
-        stage::{AdvanceStageInput, NewStageIdentities, StageAdvanceResult, advance_rework},
         verdict::{
             ComputedVerdictTransition, SubmitVerdictFacts, compute_verdict_transition,
             test_support::{VerdictFixtureOutcome, verdict_fixture_with_rework_limit},
+        },
+        workrun_execution::{
+            NewWorkRunIdentities, ReworkAdvanceInput, WorkRunStartResult, advance_rework,
         },
     };
     use crate::domain::{
@@ -1112,8 +1112,8 @@ pub mod test_support {
         candidate::test_support::{CandidateFixtureInput, rework_facts_and_delta_from_input},
     };
     use winwincode_domain::{
-        AttentionItemId, DeliveryId, ExecutionJobId, ProductSessionId, Revision, StageRunId,
-        WorkContractId, WorkItemId, WorkRunId,
+        DeliveryId, ExecutionJobId, ProductSessionId, Revision, WorkContractId, WorkItemId,
+        WorkRunId,
     };
 
     #[derive(Debug)]
@@ -1127,7 +1127,7 @@ pub mod test_support {
     pub struct ReworkDispatchFixture {
         pub journal: ReworkJournalFixture,
         pub source_delivery: Delivery,
-        pub transition: StageAdvanceResult,
+        pub transition: WorkRunStartResult,
         pub candidate_ref: String,
         pub source_candidate_commit_id: String,
         pub evidence_ref_ids: Vec<EvidenceId>,
@@ -1137,7 +1137,7 @@ pub mod test_support {
     pub struct ReworkClarificationFixture {
         pub journal: ReworkJournalFixture,
         pub source_delivery: Delivery,
-        pub transition: StageAdvanceResult,
+        pub transition: WorkRunStartResult,
         pub reason: ReworkClarificationReason,
     }
 
@@ -1279,7 +1279,7 @@ pub mod test_support {
         let mut identities = input.identities;
         identities.work_item_id = selected.work_item.id.clone();
         identities.work_item_revision = selected.work_item.revision.clone();
-        let transition = StageAdvanceResult::canonical_workrun_dispatch(
+        let transition = WorkRunStartResult::canonical_workrun_dispatch(
             &source_delivery,
             Some(authorization),
             identities,
@@ -1409,20 +1409,17 @@ pub mod test_support {
         )
     }
 
-    fn advance_input(delivery: &Delivery) -> AdvanceStageInput {
-        AdvanceStageInput {
+    fn advance_input(delivery: &Delivery) -> ReworkAdvanceInput {
+        ReworkAdvanceInput {
             expected_revision: delivery.revision(),
             product_session_id: ProductSessionId("psn_01J00000000000000000000099".into()),
-            identities: NewStageIdentities {
-                stage_run_id: StageRunId("run_01J00000000000000000000099".into()),
+            identities: NewWorkRunIdentities {
                 work_contract_id: WorkContractId("wct_01J00000000000000000000000".into()),
                 work_contract_revision: Revision(1),
                 work_item_id: WorkItemId("wit_01J00000000000000000000000".into()),
                 work_item_revision: Revision(1),
                 work_run_id: WorkRunId("wrn_01J00000000000000000000099".into()),
                 execution_job_id: ExecutionJobId("job_01J00000000000000000000099".into()),
-                session_binding_id: SessionBindingId("binding_01J00000000000000000000099".into()),
-                attention_item_id: AttentionItemId("att_01J00000000000000000000099".into()),
             },
             review: None,
             previous_outcome: None,
@@ -1442,7 +1439,9 @@ mod tests {
     use super::*;
     use crate::application::{
         CoordinationErrorCode,
-        stage::{AdvanceStageInput, NewStageIdentities, StageAdvanceEffect, advance_rework},
+        workrun_execution::{
+            NewWorkRunIdentities, ReworkAdvanceInput, WorkRunStartEffect, advance_rework,
+        },
     };
     use crate::domain::candidate::CandidateHunkFact;
     use crate::domain::candidate::test_support::{
@@ -1455,7 +1454,7 @@ mod tests {
     };
     use winwincode_domain::{
         AttentionItemId, CodexThreadId, DeliveryId, ExecutionJobId, ProductSessionId, Revision,
-        StageRunId, WorkContractId, WorkItemId, WorkRunId, WorkerSessionId,
+        WorkContractId, WorkItemId, WorkRunId, WorkerSessionId,
     };
 
     fn current_failure() -> (
@@ -1477,15 +1476,19 @@ mod tests {
         PreciseReworkAnnotation,
     ) {
         let mut snapshot = test_fixture();
-        snapshot.tasks.clear();
-        snapshot.stage_runs.clear();
-        snapshot.status = DeliveryStatus::Verifying;
+        snapshot.status = DeliveryStatus::Ready;
         snapshot.evidence.clear();
         snapshot.verdict = None;
         let binding = &mut snapshot.session_bindings[0];
         binding.attempt = attempt;
         binding.id = SessionBindingId("writer-binding".into());
         binding.execution_profile = Some("executor".into());
+        binding
+            .runtime_context
+            .as_mut()
+            .expect("fixture runtime context")
+            .agent_identity
+            .role = "executor".into();
         let run = &mut snapshot.work_run_aggregate.runs[0];
         run.attempt = i64::try_from(attempt).expect("bounded fixture attempt");
         run.state = WorkRunState::CandidateReady;
@@ -1609,7 +1612,6 @@ mod tests {
     #[test]
     fn production_scope_uses_canonical_item_and_failed_evidence_without_legacy_tasks() {
         let (delivery, candidate, _, annotation) = current_failure();
-        assert!(delivery.snapshot().tasks.is_empty());
         let scope = CurrentReworkScope::from_candidate(&delivery, &candidate).unwrap();
         let auth = authorization(&delivery, &candidate, &scope, annotation.clone());
         auth.validate_for_dispatch(&delivery).unwrap();
@@ -1774,20 +1776,17 @@ mod tests {
         (delivery, authorization)
     }
 
-    fn rework_advance_input(delivery: &Delivery) -> AdvanceStageInput {
-        AdvanceStageInput {
+    fn rework_advance_input(delivery: &Delivery) -> ReworkAdvanceInput {
+        ReworkAdvanceInput {
             expected_revision: delivery.revision(),
             product_session_id: ProductSessionId("product-remediator-dispatch".into()),
-            identities: NewStageIdentities {
-                stage_run_id: StageRunId("stage-remediator-dispatch".into()),
+            identities: NewWorkRunIdentities {
                 work_contract_id: WorkContractId("wct_01J00000000000000000000000".into()),
                 work_contract_revision: Revision(1),
                 work_item_id: WorkItemId("wit_01J00000000000000000000000".into()),
                 work_item_revision: Revision(1),
                 work_run_id: WorkRunId("wrn_01J00000000000000000000000".into()),
                 execution_job_id: ExecutionJobId("job-remediator-dispatch".into()),
-                session_binding_id: SessionBindingId("binding-remediator-dispatch".into()),
-                attention_item_id: AttentionItemId("attention-remediator-dispatch".into()),
             },
             review: None,
             previous_outcome: None,
@@ -1849,7 +1848,7 @@ mod tests {
         snapshot.status = if running {
             DeliveryStatus::Reworking
         } else {
-            DeliveryStatus::Verifying
+            DeliveryStatus::Ready
         };
         snapshot.updated_at_millis = finished_at_millis.unwrap_or(started_at_millis + 1);
         snapshot.revision += 1;
@@ -1983,7 +1982,6 @@ mod tests {
         else {
             panic!("start")
         };
-        assert_eq!(authorization.writer_actor(), StageRunActorType::Codex);
         assert_eq!(authorization.writer_role(), "remediator");
         assert_eq!(authorization.next_attempt(), 1);
     }
@@ -1998,16 +1996,9 @@ mod tests {
             &input,
             ReworkDecision::Start(Box::new(authorization)),
         )
-        .expect_err("legacy rework start must require canonical WorkRun dispatch");
+        .expect_err("rework start must require canonical WorkRun dispatch");
         assert_eq!(result.code(), CoordinationErrorCode::WrongState);
         assert_eq!(delivery, before);
-        assert!(
-            delivery
-                .snapshot()
-                .stage_runs
-                .iter()
-                .all(|run| run.role != "remediator")
-        );
     }
 
     #[test]
@@ -2462,7 +2453,7 @@ mod tests {
             ReworkDecision::Clarify(clarification)
                 if clarification.reason() == ReworkClarificationReason::AttemptLimitExhausted
         ));
-        let prior_run_count = delivery.snapshot().stage_runs.len();
+        let prior_run_count = delivery.snapshot().work_run_aggregate.runs.len();
         let prior_binding_count = delivery.snapshot().session_bindings.len();
         let clarified = advance_rework(&delivery, &rework_advance_input(&delivery), exhausted)
             .expect("exhausted rework enters clarification");
@@ -2471,7 +2462,7 @@ mod tests {
             DeliveryStatus::Clarifying
         );
         assert_eq!(
-            clarified.delivery.snapshot().stage_runs.len(),
+            clarified.delivery.snapshot().work_run_aggregate.runs.len(),
             prior_run_count
         );
         assert_eq!(
@@ -2480,7 +2471,7 @@ mod tests {
         );
         assert_eq!(
             clarified.effect,
-            StageAdvanceEffect::Clarify(ReworkClarificationReason::AttemptLimitExhausted)
+            WorkRunStartEffect::Clarify(ReworkClarificationReason::AttemptLimitExhausted)
         );
 
         let (prior_delivery, _, _, _) = current_failure();
@@ -2539,7 +2530,7 @@ mod tests {
         );
         assert!(matches!(
             repeated.effect,
-            StageAdvanceEffect::Clarify(ReworkClarificationReason::RepeatedCriterionFailure)
+            WorkRunStartEffect::Clarify(ReworkClarificationReason::RepeatedCriterionFailure)
         ));
     }
 }

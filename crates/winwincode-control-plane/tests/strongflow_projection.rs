@@ -5,11 +5,11 @@ use std::sync::{Arc, Mutex};
 use sha2::{Digest, Sha256};
 use winwincode_api::generated::{
     Actor, ControlPlaneWebSocketSubscribeStartAt, DeliveryGetParameters, DeliveryGetQuery,
-    DeliveryGetQueryQuery, DeliveryStageRuntimeProjectionGetParameters,
-    DeliveryStageRuntimeProjectionGetParametersKind, EventReadCursor, PageRequest,
+    DeliveryGetQueryQuery, EventReadCursor, PageRequest,
     ProductSessionRuntimeProjectionGetParameters, ProductSessionRuntimeProjectionGetParametersKind,
     QueryResultResponse, RuntimeProjectionEventCursor, RuntimeProjectionGetParameters,
     RuntimeProjectionGetQuery, RuntimeProjectionGetQueryQuery, StrongFlowReadCursor,
+    WorkRunRuntimeProjectionGetParameters, WorkRunRuntimeProjectionGetParametersKind,
 };
 use winwincode_control_plane::{
     AggregateJournalKey, AggregateJournalRecord, CommitReceipt, ControlPlane, EventPublishError,
@@ -29,8 +29,8 @@ use winwincode_delivery::{
     application::attention::{AttentionDecision, ResolveAttentionInput, resolve_attention},
     domain::{
         AcceptanceCriterionId, AttentionItem, AttentionItemStatus, AttentionItemType,
-        CandidatePathFact, CandidatePathState, Delivery, DeliveryStage, DeliveryStatus,
-        FrozenDeliveryCandidate, SessionBindingId, StageRun, StageRunActorType, StageRunStatus,
+        CandidatePathFact, CandidatePathState, Delivery, DeliveryStatus, FrozenDeliveryCandidate,
+        SessionBindingId,
         candidate::{
             CandidateHunkFact,
             test_support::{CandidateFixtureInput, freeze_candidate_fixture},
@@ -48,15 +48,16 @@ use winwincode_delivery::{
     },
 };
 use winwincode_domain::{
-    AttentionItemId, CodexThreadId, ControlPlaneEventId, DeliveryId, DeliveryTaskId,
+    AgentIdentityId, AttentionItemId, CodexThreadId, ControlPlaneEventId, DeliveryId,
     ExecutionEventId, ExecutionJobId, ExecutionSequence, Instant, OrganizationId, ProductSessionId,
-    ProjectId, RepositoryId, RequestId, Revision, SchemaVersion, Sha256Digest, StageRunId, UserId,
-    WorkRunId, WorkerSessionId, WorkspaceId,
+    ProjectId, RepositoryId, RequestId, Revision, SchemaVersion, Sha256Digest, UserId,
+    WorkItemState, WorkRunId, WorkerSessionId, WorkspaceId,
 };
 use winwincode_domain::{RepositoryScope, RepositoryScopeKind, UserActor, UserActorKind};
 use winwincode_execution_port::generated::{ExecutionEventCategory, ExecutionEventRecord};
 use winwincode_storage::{
     ProjectionReadCut, ReceiptIdentity, ReceiptScopeKey, SqliteStorage, StateCommit,
+    WorkRunDeviceBindingFacts,
 };
 
 // PublicationAuthorizationSnapshot is deliberately not constructible from HTTP input.
@@ -69,6 +70,7 @@ struct JournalStorage {
     journal: Arc<Mutex<LoadedAggregateJournal>>,
     runtime_read_count: Arc<Mutex<usize>>,
     advance_event_after_runtime_read: bool,
+    device_binding: Arc<Mutex<Option<(ExecutionJobId, WorkRunDeviceBindingFacts)>>>,
 }
 impl ProductStateStorage for JournalStorage {
     fn commit_adapter(&mut self, _commit: &StateCommit) -> Result<CommitReceipt, StorageError> {
@@ -83,6 +85,18 @@ impl ProductStateStorage for JournalStorage {
     }
     fn load_state(&self, _stream_id: &str) -> Result<Option<StoredState>, StorageError> {
         Ok(None)
+    }
+    fn load_work_run_device_binding_facts(
+        &self,
+        job_id: &ExecutionJobId,
+    ) -> Result<Option<WorkRunDeviceBindingFacts>, StorageError> {
+        Ok(self
+            .device_binding
+            .lock()
+            .expect("device binding")
+            .as_ref()
+            .filter(|(expected, _)| expected == job_id)
+            .map(|(_, facts)| facts.clone()))
     }
     fn load_projection_read_cut(
         &self,
@@ -368,6 +382,7 @@ struct Fixture {
     journal: Arc<Mutex<LoadedAggregateJournal>>,
     domain_journal: Arc<InMemoryDeliveryJournal>,
     runtime: Arc<Mutex<TrustedRuntimeProjectionRead>>,
+    device_binding: Arc<Mutex<Option<(ExecutionJobId, WorkRunDeviceBindingFacts)>>>,
 }
 
 #[derive(Clone, Copy)]
@@ -568,6 +583,26 @@ fn fixture_with_delivery_and_event_behavior(
     .expect("trusted publication");
     let journal = Arc::new(Mutex::new(aggregate));
     let runtime_read_count = Arc::new(Mutex::new(0));
+    let device_binding = Arc::new(Mutex::new(
+        delivery
+            .snapshot()
+            .work_run_aggregate
+            .runs
+            .first()
+            .map(|run| {
+                (
+                    run.execution_job_id.clone(),
+                    WorkRunDeviceBindingFacts {
+                        public_client_id: "123456789012".into(),
+                        repository_binding_id: "rbd_00000000000000000000000001".into(),
+                        worker_session_id: run.worker_session_id.0.clone(),
+                        worker_id: run.worker_id.0.clone(),
+                        worker_instance_id: run.worker_instance_id.0.clone(),
+                        work_run_id: Some(run.id.0.clone()),
+                    },
+                )
+            }),
+    ));
     let delivery_event_cursor = fixture_projection_cursor(
         &scope,
         ProjectionEventStream::Delivery(delivery.id().clone()),
@@ -589,6 +624,7 @@ fn fixture_with_delivery_and_event_behavior(
                 event_cursor_behavior,
                 EventCursorBehavior::AdvanceAfterRuntimeRead
             ),
+            device_binding: Arc::clone(&device_binding),
         }),
         Box::new(NoopPublisher),
     )
@@ -622,6 +658,7 @@ fn fixture_with_delivery_and_event_behavior(
         journal,
         domain_journal: memory,
         runtime,
+        device_binding,
     }
 }
 
@@ -635,15 +672,13 @@ fn delivery_fixture(draft: bool) -> Delivery {
     snapshot.status = if draft {
         DeliveryStatus::Draft
     } else {
-        DeliveryStatus::Verifying
+        DeliveryStatus::Ready
     };
     snapshot.evidence.clear();
     snapshot.verdict = None;
     if draft {
-        snapshot.tasks.clear();
         snapshot.work_run_aggregate.runs.clear();
         snapshot.work_run_aggregate.items.clear();
-        snapshot.stage_runs.clear();
         snapshot.session_bindings.clear();
         snapshot.attention_items.clear();
     }
@@ -668,43 +703,19 @@ fn approved_solution_review_fixture(status: DeliveryStatus) -> Delivery {
 }
 
 #[allow(clippy::too_many_lines)]
-fn approved_ready_to_deliver_fixture() -> (Delivery, FrozenDeliveryCandidate) {
-    let approved = approved_solution_review_fixture(DeliveryStatus::Executing).into_snapshot();
+fn approved_verified_candidate_fixture() -> (Delivery, FrozenDeliveryCandidate) {
+    let approved = approved_solution_review_fixture(DeliveryStatus::Ready).into_snapshot();
     let mut snapshot = Delivery::decode_json(include_bytes!(
         "../../winwincode-delivery/tests/fixtures/delivery-main.json"
     ))
     .expect("passing Delivery fixture")
     .into_snapshot();
 
-    let promoted_task = snapshot.tasks.first_mut().expect("promoted solution task");
-    promoted_task.id = DeliveryTaskId("task:invitation".into());
-    promoted_task.title = "Implement invitation flow".into();
-    promoted_task.goal = "Deliver every current acceptance criterion.".into();
-    promoted_task.acceptance_criterion_ids = vec![
-        AcceptanceCriterionId("criterion-required".into()),
-        AcceptanceCriterionId("criterion-optional".into()),
-    ];
-    promoted_task.blocked_by_task_ids.clear();
-    snapshot.stage_runs = approved.stage_runs;
     snapshot.session_bindings = approved.session_bindings;
     snapshot.attention_items = approved.attention_items;
     snapshot.work_run_aggregate = approved.work_run_aggregate;
+    snapshot.status = DeliveryStatus::Ready;
     snapshot.work_run_aggregate.runs[0].state = winwincode_domain::WorkRunState::Settled;
-
-    let executor_stage_run_id = StageRunId("stage:executor".into());
-    snapshot.stage_runs.push(StageRun {
-        schema_version: 3,
-        id: executor_stage_run_id.clone(),
-        delivery_id: snapshot.id.clone(),
-        delivery_task_id: Some(snapshot.tasks[0].id.clone()),
-        stage: DeliveryStage::Executing,
-        actor_type: StageRunActorType::Codex,
-        role: "executor".into(),
-        status: StageRunStatus::Succeeded,
-        attempt: 1,
-        started_at_millis: 1_800_000_000_040,
-        finished_at_millis: Some(1_800_000_000_050),
-    });
 
     let executor_binding_id = SessionBindingId("binding:executor".into());
     for (role, suffix, bound_at) in [
@@ -738,11 +749,19 @@ fn approved_ready_to_deliver_fixture() -> (Delivery, FrozenDeliveryCandidate) {
         binding.codex_thread_id.clone_from(&run.codex_thread_id);
         binding.lease_id = Some(run.lease_id.clone());
         binding.execution_profile = Some(role.into());
+        let runtime_context = binding
+            .runtime_context
+            .as_mut()
+            .expect("complete fixture runtime context");
+        runtime_context.agent_identity.id =
+            AgentIdentityId(format!("agt_01J000000000000000000000{suffix}"));
+        runtime_context.agent_identity.name = role.into();
+        runtime_context.agent_identity.role = role.into();
         binding.bound_at_millis = bound_at;
         snapshot.work_run_aggregate.runs.push(run);
         snapshot.session_bindings.push(binding);
     }
-    snapshot.work_run_aggregate.items[0].state = winwincode_domain::WorkItemState::CandidateReady;
+    snapshot.work_run_aggregate.items[0].state = WorkItemState::CandidateReady;
     snapshot.evidence[0].work_run_id = snapshot.work_run_aggregate.runs[2].id.clone();
     snapshot.evidence[0].session_binding_id = snapshot.session_bindings[2].id.clone();
     snapshot.evidence[0].created_at_millis = 1_800_000_000_069;
@@ -796,7 +815,8 @@ fn approved_ready_to_deliver_fixture() -> (Delivery, FrozenDeliveryCandidate) {
     for result in &mut verdict.criteria {
         result.candidate_ref = candidate.candidate_ref().into();
     }
-    let ready = Delivery::try_from_snapshot(snapshot).expect("ready-to-deliver lifecycle fixture");
+    let ready =
+        Delivery::try_from_snapshot(snapshot).expect("verified candidate lifecycle fixture");
     (ready, candidate)
 }
 
@@ -863,11 +883,11 @@ fn runtime_query(
             cursor: None,
             limit,
         },
-        parameters: RuntimeProjectionGetParameters::DeliveryStageRuntimeProjectionGetParameters(
-            DeliveryStageRuntimeProjectionGetParameters {
+        parameters: RuntimeProjectionGetParameters::WorkRunRuntimeProjectionGetParameters(
+            WorkRunRuntimeProjectionGetParameters {
                 at_cursor: cursor,
                 delivery_id: f.delivery.id().clone(),
-                kind: DeliveryStageRuntimeProjectionGetParametersKind::DeliveryStage,
+                kind: WorkRunRuntimeProjectionGetParametersKind::WorkRun,
                 product_session_id: binding.product_session_id.clone(),
                 work_run_id: binding.work_run_id.clone(),
             },
@@ -957,7 +977,7 @@ fn product_runtime_state(
     serde_json::to_vec(&serde_json::json!({
         "schemaVersion": 1,
         "deliveryId": null,
-        "deliveryTaskId": null,
+        "workItemId": null,
         "workRunId": null,
         "productSessionId": product_session_id,
         "executionJobId": format!("job_product_{label}"),
@@ -1236,12 +1256,12 @@ fn delivery_and_runtime_get_share_one_bounded_snapshot_cursor() {
 #[test]
 fn accepted_workrun_before_thread_attachment_exposes_an_empty_runtime_snapshot() {
     let mut snapshot = delivery_fixture(false).into_snapshot();
-    snapshot.stage_runs.clear();
     let binding = snapshot
         .session_bindings
         .first_mut()
         .expect("accepted SessionBinding");
     binding.codex_thread_id = None;
+    binding.runtime_context = None;
     binding.execution_profile = Some("executor".into());
     binding.source_provenance = serde_json::from_value(
         serde_json::json!({"kind": "work-run-dispatch", "reference": "workrun.appended"}),
@@ -1270,8 +1290,11 @@ fn accepted_workrun_before_thread_attachment_exposes_an_empty_runtime_snapshot()
 
     let (detail, cursor) = detail_and_cursor(&f);
     assert!(
-        detail.stages.is_empty(),
-        "no historical stage is needed to select a WorkRun"
+        serde_json::to_value(&detail)
+            .expect("serialize detail")
+            .get("stages")
+            .is_none(),
+        "the public projection has no historical stages"
     );
     let response = StrongFlowProjectionQueryPort::runtime_projection_get(
         &f.control_plane,
@@ -1462,10 +1485,9 @@ fn delivery_projection_is_owned_by_delivery_and_maps_to_generated_dto() {
 }
 
 #[test]
-fn workrun_aggregate_bootstrap_reads_without_a_work_item_or_stage_hint() {
+fn workrun_aggregate_bootstrap_reads_without_item_hint() {
     use winwincode_api::generated::{WorkRunGetParameters, WorkRunGetQuery, WorkRunGetQueryQuery};
-    let mut snapshot = delivery_fixture(false).into_snapshot();
-    snapshot.stage_runs.clear();
+    let snapshot = delivery_fixture(false).into_snapshot();
     let f = fixture_with_delivery(
         Delivery::try_from_snapshot(snapshot).expect("canonical Delivery without history"),
         false,
@@ -1501,6 +1523,47 @@ fn workrun_aggregate_bootstrap_reads_without_a_work_item_or_stage_hint() {
         response.result.runs,
         f.delivery.snapshot().work_run_aggregate.runs
     );
+    assert_eq!(response.result.device_bindings.len(), 1);
+    assert_eq!(
+        response.result.device_bindings[0].work_run_id,
+        response.result.runs[0].id
+    );
+    assert_eq!(
+        response.result.device_bindings[0].client_id.0,
+        "123456789012"
+    );
+    assert_eq!(
+        response.result.device_bindings[0].repository_binding_id.0,
+        "rbd_00000000000000000000000001"
+    );
+    {
+        let mut binding = f.device_binding.lock().expect("device binding");
+        binding.as_mut().expect("binding facts").1.worker_session_id =
+            "ws_00000000000000000000000099".into();
+    }
+    StrongFlowProjectionQueryPort::workrun_get(&f.control_plane, &query)
+        .expect("the launch session and execution session are distinct identities");
+    {
+        let mut binding = f.device_binding.lock().expect("device binding");
+        binding.as_mut().expect("binding facts").1.worker_id =
+            "wrk_00000000000000000000000099".into();
+    }
+    let error = StrongFlowProjectionQueryPort::workrun_get(&f.control_plane, &query)
+        .expect_err("a binding for another Worker is rejected");
+    assert_eq!(
+        error.code(),
+        winwincode_api::generated::ErrorCode::TrustedFactsUnavailable
+    );
+    f.device_binding
+        .lock()
+        .expect("device binding")
+        .as_mut()
+        .expect("binding facts")
+        .1
+        .worker_id
+        .clone_from(&response.result.runs[0].worker_id.0);
+    StrongFlowProjectionQueryPort::workrun_get(&f.control_plane, &query)
+        .expect("the same committed WorkRun replays after trusted facts recover");
     assert!(!response.result.items.is_empty());
     assert_eq!(
         response.result.graph_items.len(),
@@ -1527,8 +1590,7 @@ fn workrun_aggregate_bootstrap_reads_without_a_work_item_or_stage_hint() {
 
 #[test]
 fn canonical_runtime_reads_without_history_and_rejects_a_foreign_lease() {
-    let mut snapshot = delivery_fixture(false).into_snapshot();
-    snapshot.stage_runs.clear();
+    let snapshot = delivery_fixture(false).into_snapshot();
     let f = fixture_with_delivery(
         Delivery::try_from_snapshot(snapshot).expect("canonical fixture without historical stages"),
         false,
@@ -1537,7 +1599,12 @@ fn canonical_runtime_reads_without_history_and_rejects_a_foreign_lease() {
         None,
     );
     let (detail, cursor) = detail_and_cursor(&f);
-    assert!(detail.stages.is_empty());
+    assert!(
+        serde_json::to_value(&detail)
+            .expect("serialize detail")
+            .get("stages")
+            .is_none()
+    );
     let response = StrongFlowProjectionQueryPort::runtime_projection_get(
         &f.control_plane,
         &runtime_query(&f, cursor, 20),
@@ -1594,7 +1661,7 @@ fn canonical_runtime_reads_without_history_and_rejects_a_foreign_lease() {
 
 #[test]
 fn delivery_get_projects_current_diagram_execution_through_the_generated_contract() {
-    let (delivery, candidate) = approved_ready_to_deliver_fixture();
+    let (delivery, candidate) = approved_verified_candidate_fixture();
     let f = fixture_with_delivery_and_candidate(delivery, candidate.clone());
     let (detail, _) = detail_and_cursor(&f);
     let current_candidate = detail.current_candidate.expect("current Candidate summary");
@@ -1645,7 +1712,7 @@ fn delivery_get_projects_current_diagram_execution_through_the_generated_contrac
 #[test]
 fn approved_solution_review_remains_visible_in_execution_and_verification_successors() {
     let approved = fixture_with_delivery(
-        approved_solution_review_fixture(DeliveryStatus::Executing),
+        approved_solution_review_fixture(DeliveryStatus::Ready),
         false,
         false,
         false,
@@ -1655,7 +1722,7 @@ fn approved_solution_review_remains_visible_in_execution_and_verification_succes
         .0
         .solution_review
         .expect("approved solution review");
-    for status in [DeliveryStatus::Verifying, DeliveryStatus::Reworking] {
+    for status in [DeliveryStatus::Ready, DeliveryStatus::Reworking] {
         let successor = fixture_with_delivery(
             approved_solution_review_fixture(status),
             false,
@@ -1674,7 +1741,7 @@ fn approved_solution_review_remains_visible_in_execution_and_verification_succes
 #[test]
 fn approved_solution_review_survives_ready_delivery_review_and_delivery_settlement() {
     let baseline = fixture_with_delivery(
-        approved_solution_review_fixture(DeliveryStatus::Executing),
+        approved_solution_review_fixture(DeliveryStatus::Ready),
         false,
         false,
         false,
@@ -1684,16 +1751,13 @@ fn approved_solution_review_survives_ready_delivery_review_and_delivery_settleme
         .0
         .solution_review
         .expect("approved solution review");
-    let (ready, candidate) = approved_ready_to_deliver_fixture();
+    let (ready, candidate) = approved_verified_candidate_fixture();
     let ready_projection = detail_and_cursor(&fixture_with_delivery_and_candidate(
         ready.clone(),
         candidate.clone(),
     ))
     .0;
-    assert_eq!(
-        ready_projection.status,
-        winwincode_api::generated::DeliveryStatus::ReadyToDeliver
-    );
+    assert_eq!(ready_projection.status, WorkItemState::CandidateReady);
     assert_eq!(ready_projection.solution_review, Some(expected.clone()));
 
     let mut review_snapshot = ready.clone().into_snapshot();
@@ -1718,10 +1782,7 @@ fn approved_solution_review_survives_ready_delivery_review_and_delivery_settleme
         candidate.clone(),
     ))
     .0;
-    assert_eq!(
-        review_projection.status,
-        winwincode_api::generated::DeliveryStatus::NeedsAttention
-    );
+    assert_eq!(review_projection.status, WorkItemState::WaitingHuman);
     assert_eq!(review_projection.solution_review, Some(expected.clone()));
 
     let approval = delivery_review
@@ -1750,12 +1811,9 @@ fn approved_solution_review_survives_ready_delivery_review_and_delivery_settleme
     for (settled, expected_status) in [
         (
             resolve(AttentionDecision::Dismissed),
-            winwincode_api::generated::DeliveryStatus::Reworking,
+            WorkItemState::CandidateReady,
         ),
-        (
-            resolve(AttentionDecision::Resolved),
-            winwincode_api::generated::DeliveryStatus::Delivered,
-        ),
+        (resolve(AttentionDecision::Resolved), WorkItemState::Done),
     ] {
         let projection = detail_and_cursor(&fixture_with_delivery_and_candidate(
             normalize_projection_read_revision(&settled),
@@ -1769,13 +1827,7 @@ fn approved_solution_review_survives_ready_delivery_review_and_delivery_settleme
 
 #[test]
 fn approved_solution_review_rejects_states_outside_its_frozen_successor_set() {
-    for status in [
-        DeliveryStatus::Draft,
-        DeliveryStatus::Ready,
-        DeliveryStatus::Planning,
-        DeliveryStatus::PlanReview,
-        DeliveryStatus::Clarifying,
-    ] {
+    for status in [DeliveryStatus::Draft, DeliveryStatus::Clarifying] {
         let fixture = fixture_with_delivery(
             approved_solution_review_fixture(status),
             false,
@@ -1794,26 +1846,6 @@ fn approved_solution_review_rejects_states_outside_its_frozen_successor_set() {
             "{status:?}"
         );
     }
-}
-
-#[test]
-fn delivery_get_rejects_a_codex_stage_without_one_exact_session_binding() {
-    let mut snapshot = delivery_fixture(false).into_snapshot();
-    snapshot.session_bindings.clear();
-    let delivery = Delivery::try_from_snapshot(snapshot)
-        .expect("the canonical aggregate can represent a pre-dispatch Codex stage");
-    let f = fixture_with_delivery(delivery, false, false, false, None);
-
-    let error = StrongFlowProjectionQueryPort::delivery_get(
-        &f.control_plane,
-        &delivery_query(&f, None, 20),
-    )
-    .expect_err("the public detail cannot emit codex plus a null SessionBinding");
-
-    assert_eq!(
-        error.code(),
-        winwincode_api::generated::ErrorCode::TrustedFactsUnavailable
-    );
 }
 
 #[test]

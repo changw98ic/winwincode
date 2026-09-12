@@ -97,14 +97,14 @@ const SIX_DEVICE_STATES = [
 
 function deliverySummary(overrides = {}) {
   return {
-    activeStageRunId: null,
+    activeWorkRunId: null,
     deliveryId: 'dlv_00000000000000000000000001',
     openAttentionCount: 0,
     ownership: { ...scope },
     revision: 3,
     schemaVersion,
-    status: 'executing',
-    taskCounts: { active: 1, blocked: 0, completed: 0, failed: 0, pending: 0, total: 1, verifying: 0 },
+    status: 'in_progress',
+    workItemCounts: { ready: 0, waitingHuman: 0, candidateReady: 0, rework: 0, cancelled: 0, inProgress: 1, waitingDependency: 0, done: 0, failed: 0, backlog: 0, total: 1, validating: 0 },
     title: 'Delivery',
     updatedAt: '2026-09-03T08:00:00.000Z',
     ...overrides,
@@ -190,10 +190,13 @@ function contractFake(initialState = {}) {
     serverUrl: 'https://control.example/my-work',
     get deliveries() { return state.deliveries },
     set deliveries(value) { state.deliveries = value },
+    // One-shot: only the next query fails, so a refresh marks exactly the
+    // projection whose read broke and keeps every other served source.
     failNextQueries() { failQueries = true },
     async query(request) {
       queries.push(structuredClone(request))
       if (failQueries) {
+        failQueries = false
         throw new ControlPlaneClientError({
           kind: 'network',
           code: 'NETWORK_ERROR',
@@ -218,10 +221,12 @@ function clientsFake(devices, overrides = {}) {
     listCalls: 0,
     get devices() { return current },
     set devices(value) { current = value },
+    // One-shot, matching failNextQueries above.
     failNextList() { failList = true },
     async listClients() {
       this.listCalls += 1
       if (failList) {
+        failList = false
         throw new ControlPlaneClientError({
           kind: 'network',
           code: 'NETWORK_ERROR',
@@ -316,7 +321,7 @@ test('myWorkState groups the reused snapshots into the canonical My Work zones',
   const executing = deliverySummary()
   const delivered = deliverySummary({
     deliveryId: 'dlv_00000000000000000000000002',
-    status: 'delivered',
+    status: 'done',
     title: 'Delivered',
   })
   const work = workState('ready', 'ready', [executing, delivered], 'ready')
@@ -331,6 +336,9 @@ test('myWorkState groups the reused snapshots into the canonical My Work zones',
   assert.deepEqual(state.counts, {
     needsAttention: 0,
     running: 1,
+    ready: 0,
+    waiting: 0,
+    failed: 0,
     completed: 1,
     clients: 6,
   })
@@ -343,14 +351,14 @@ test('a failed read marks the sources unavailable and keeps every served list', 
   const running = deliverySummary()
   const completed = deliverySummary({
     deliveryId: 'dlv_00000000000000000000000002',
-    status: 'delivered',
+    status: 'done',
     title: 'Delivered',
   })
   const failed = deliverySummary({
     deliveryId: 'dlv_00000000000000000000000003',
-    status: 'needs_attention',
+    status: 'waiting_human',
     title: 'Failing',
-    taskCounts: { active: 0, blocked: 0, completed: 1, failed: 2, pending: 0, total: 3, verifying: 0 },
+    workItemCounts: { ready: 0, waitingHuman: 0, candidateReady: 0, rework: 0, cancelled: 0, inProgress: 0, waitingDependency: 0, done: 1, failed: 2, backlog: 0, total: 3, validating: 0 },
   })
   // Every owning projection reports its failed read, and every one of them
   // still carries the last served facts.
@@ -364,13 +372,16 @@ test('a failed read marks the sources unavailable and keeps every served list', 
   assert.deepEqual(state.sources, { work: 'unavailable', clients: 'unavailable' })
   assert.equal(state.status, 'error')
   assert.equal(
-    state.work.active.length + state.work.failing.length + state.work.completed.length,
+    state.work.running.length + state.work.failed.length + state.work.completed.length,
     3,
     'a failed read never clears the served work lists',
   )
   assert.deepEqual(state.counts, {
-    needsAttention: 1,
+    needsAttention: 0,
     running: 1,
+    ready: 0,
+    waiting: 0,
+    failed: 1,
     completed: 1,
     clients: 2,
   })
@@ -428,7 +439,7 @@ test('a failed refresh keeps the shown work sections and devices and marks the g
       deliverySummary(),
       deliverySummary({
         deliveryId: 'dlv_00000000000000000000000002',
-        status: 'delivered',
+        status: 'done',
         title: 'Delivered',
       }),
     ],
@@ -445,7 +456,7 @@ test('a failed refresh keeps the shown work sections and devices and marks the g
   assert.deepEqual(model.state.sources, { work: 'ok', clients: 'unavailable' })
   assert.equal(model.state.status, 'partial')
   assert.equal(
-    model.state.work.active.length + model.state.work.completed.length,
+    model.state.work.running.length + model.state.work.completed.length,
     2,
     'a failed refresh never clears the served work sections',
   )
@@ -629,31 +640,31 @@ test('the My Work page mounts the start entry, the reused work sections, and the
   )
   assert.equal(liveRegions.length, 1, 'the reused dashboard keeps the single polite live region')
   assert.equal(
-    allByClass(work, 'wwc-home-card').some(card => card.dataset.status === 'executing'),
+    allByClass(work, 'wwc-home-card').some(card => card.dataset.status === 'in_progress'),
     true,
     'the running Delivery section renders the reused projection',
   )
 
   const zone = byClass(rootElement, 'wwc-my-work-clients')
-  assert.equal(byClass(zone, 'wwc-my-work-clients-heading').textContent, 'Clients')
-  assert.equal(byClass(zone, 'wwc-my-work-clients-count').textContent, '6 devices')
+  assert.equal(byClass(zone, 'wwc-my-work-clients-heading').textContent, '执行设备')
+  assert.equal(byClass(zone, 'wwc-my-work-clients-count').textContent, '6 台设备')
   const rows = allByClass(zone, 'wwc-my-work-clients-device')
   assert.equal(rows.length, 6)
   assert.equal(byClass(rows[0], 'wwc-clients-card-name').textContent, 'MacBook Pro')
-  assert.equal(byClass(rows[0], 'wwc-clients-card-presence').textContent, 'Online')
-  assert.equal(byClass(rows[0], 'wwc-clients-card-state').textContent, 'Online, ready to connect')
+  assert.equal(byClass(rows[0], 'wwc-clients-card-presence').textContent, '在线')
+  assert.equal(byClass(rows[0], 'wwc-clients-card-state').textContent, '在线，可以连接')
   assert.match(
     byClass(rows[1], 'wwc-clients-card-state').textContent,
-    /occupied by you/u,
+    /已由你占用/u,
   )
   assert.match(
     visibleText(rows[4]),
-    /Connection interrupted, waiting to recover/u,
+    /连接中断，正在等待恢复/u,
     'an offline recovering device never pretends to be available',
   )
-  assert.match(visibleText(rows[0]), /Capacity 3 \/ 8/u)
-  assert.match(visibleText(rows[0]), /Last heartbeat 2 minutes ago/u)
-  assert.match(visibleText(rows[0]), /Version 1\.2\.3/u)
+  assert.match(visibleText(rows[0]), /容量 3 \/ 8/u)
+  assert.match(visibleText(rows[0]), /2 分钟前收到心跳/u)
+  assert.match(visibleText(rows[0]), /版本 1\.2\.3/u)
   model.close()
 })
 
@@ -705,7 +716,7 @@ test('the Clients zone reports an honest empty state after a successful empty re
   await model.start()
   const zone = byClass(rootElement, 'wwc-my-work-clients')
   assert.equal(byClass(zone, 'wwc-my-work-clients-empty').hidden, false)
-  assert.match(byClass(zone, 'wwc-my-work-clients-empty').textContent, /No Client is connected yet/u)
+  assert.match(byClass(zone, 'wwc-my-work-clients-empty').textContent, /尚未连接执行设备/u)
 
   directory.devices = [device()]
   await clients.refresh()

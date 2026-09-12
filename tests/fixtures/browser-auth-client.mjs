@@ -42,6 +42,7 @@ for (const method of ['debug', 'error', 'info', 'log', 'warn']) {
 const productSessionId = 'psn_01J00000000000000000000000'
 const credentialReferenceId = 'crd_01J00000000000000000000000'
 const deliveryId = 'dlv_01J00000000000000000000000'
+const workItemId = 'wit_01J00000000000000000000000'
 const publicationId = 'pub_01J00000000000000000000000'
 
 function id(prefix, value) {
@@ -81,7 +82,7 @@ function submitInitialization(proof, username, password) {
   usernameInput.value = username
   passwordInput.value = password
   form.requestSubmit()
-  return proofInput.value
+  return input.value
 }
 
 function submitLogin(username, password) {
@@ -168,11 +169,30 @@ async function runRealApplicationFlows() {
       repositoryId: scope.repositoryId,
       title: 'Cross-origin browser Delivery',
     },
-    tasks: [],
   })
-  const advancedDelivery = await command(17, 'delivery.advance', 1, { deliveryId })
-  const deliveriesAfterAdvance = await query(18, 'delivery.list', { states: [] })
-  const deliveryDetail = await query(19, 'delivery.get', { deliveryId })
+  const aggregate = await query(17, 'workrun.get', {
+    deliveryId,
+    workItemId: null,
+    atCursor: null,
+  })
+  await command(18, 'workitems.create', 1, {
+    deliveryId,
+    expectedRevision: 1,
+    contractRevision: aggregate.result.contract.revision,
+    items: [{
+      id: workItemId,
+      title: 'Exercise the browser production route',
+      goal: aggregate.result.contract.objective,
+      criterionIds: aggregate.result.contract.criteria.map(criterion => criterion.id),
+      dependsOn: [],
+    }],
+  })
+  const advancedDelivery = await command(19, 'workrun.start', 2, {
+    deliveryId,
+    dispatchProfile: 'executor',
+  })
+  const deliveriesAfterAdvance = await query(27, 'delivery.list', { states: [] })
+  const deliveryDetail = await query(28, 'delivery.get', { deliveryId })
   let publicationPublishCode = null
   try {
     await command(25, 'publication.publish', 0, {

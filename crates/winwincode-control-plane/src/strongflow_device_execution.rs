@@ -5,7 +5,7 @@
 //! Planner, Executor, Reviewer, and Verifier keep their independent roles
 //! and read/write permissions, yet every role's `WorkRun` execution follows the
 //! same Device scheduling base as Quick Chat: when the Delivery `WorkRun`
-//! that a `delivery.advance` just committed carries a durable launch anchor —
+//! that a `workrun.start` just committed carries a durable launch anchor —
 //! a `WorkerLaunchGrant` minted for exactly that `WorkRun` — the `WorkRun`'s
 //! queued `ExecutionJob` executes on the Device `WorkerSession` that grant
 //! launched instead of the supervised local worker. A `WorkRun` without an
@@ -33,7 +33,7 @@
 //!    queue exclusion (the repository scheduler and the local driver never
 //!    claim a job carrying device facts) applies unchanged.
 //!
-//! Every step is idempotent: replaying the same `delivery.advance` finds the
+//! Every step is idempotent: replaying the same `workrun.start` finds the
 //! durable receipts and changes nothing. The anchor stays a permission fact
 //! only: a revoked or expired grant refuses new dispatches instead of
 //! routing work to a dead worker session.

@@ -70,7 +70,7 @@ function extractSchemaKindEntries(schemaPath) {
 
 // Contract-doc message kinds appear as dotted backtick tokens such as
 // `worker.register` or `job.outcome`. Single-token scope kinds
-// (`product-session`, `delivery-stage`) carry no dot and are not message
+// (`product-session`, `work-run`) carry no dot and are not message
 // kinds, so they are not captured here.
 function extractDocKinds(markdown) {
   const kinds = new Set()

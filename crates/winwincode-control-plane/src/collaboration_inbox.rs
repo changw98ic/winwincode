@@ -1323,7 +1323,7 @@ fn route_matches_target(
             FormalCollaborationCommandRoute::ApprovalDecide { .. }
             | FormalCollaborationCommandRoute::GateAttentionRespond { .. },
             ResponsibilityTarget::Delivery { .. }
-            | ResponsibilityTarget::DeliveryStage { .. }
+            | ResponsibilityTarget::WorkItem { .. }
             | ResponsibilityTarget::Review { .. },
         ) => true,
         (
@@ -1331,7 +1331,7 @@ fn route_matches_target(
             ResponsibilityTarget::Delivery {
                 delivery_id: target_id,
             }
-            | ResponsibilityTarget::DeliveryStage {
+            | ResponsibilityTarget::WorkItem {
                 delivery_id: target_id,
                 ..
             }

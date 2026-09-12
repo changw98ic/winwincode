@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { formatInstant } from './format-instant.js'
-import { attentionCenterItemHash } from './attention-center-page.js'
 import {
   mountPageHeader,
   mountStatusBadge,
@@ -9,8 +8,8 @@ import {
 } from '@winwincode/browser-ui'
 import { mountKeyedCollection, type KeyedCollectionView } from './components/keyed-collection.js'
 import { scopeHash, surfaceHash, type ScopeRouteSelection } from '@winwincode/browser-core/scope-context'
-import type { DeliveryStatus, Instant, ProductSessionId } from './generated/contracts.js'
-import { DeliveryStatus as DeliveryStatusVocabulary } from './generated/contracts.js'
+import type { Instant, ProductSessionId, WorkItemState } from './generated/contracts.js'
+import { WorkItemState as WorkItemStateVocabulary } from './generated/contracts.js'
 import type {
   HomeDashboardSource,
   HomeDashboardState,
@@ -21,7 +20,16 @@ import type {
   HomeVisitedCard,
 } from './home-dashboard-view-model.js'
 
-export type HomeSectionId = 'decisions' | 'active' | 'failing' | 'completed' | 'visited'
+export type HomeSectionId =
+  | 'decisions'
+  | 'backlog'
+  | 'running'
+  | 'ready'
+  | 'waiting'
+  | 'validating'
+  | 'failed'
+  | 'completed'
+  | 'visited'
 
 /** One card as the dashboard renders it: a decision or a Delivery. */
 export type HomeCard = HomeDecisionCard | HomeDeliveryCard | HomeVisitedCard
@@ -46,7 +54,7 @@ export interface HomeDashboardPresentation {
   readonly expandLabel: string
   readonly collapseLabel: string
   readonly strongFlowLabel: string
-  readonly deliveryStatusText: Readonly<Record<DeliveryStatus, string>>
+  readonly deliveryStatusText: Readonly<Record<WorkItemState, string>>
   readonly planReviewPendingLabel: string
   readonly deliveryAcceptancePendingLabel: string
   readonly decisionUrgencyText: Readonly<Record<'expired' | 'binding-invalid', string>>
@@ -90,34 +98,51 @@ const PRESENTATION_SPEC: HomeDashboardPresentation = {
   }),
   sectionHeading: Object.freeze({
     decisions: '待我处理',
-    active: '正在运行',
-    failing: '失败或阻塞',
-    completed: '已完成',
+    backlog: '待拆分（Backlog）',
+    ready: '待启动（Ready）',
+    running: '运行中（Running）',
+    waiting: '等待中（Waiting）',
+    validating: '验证中（Validating）',
+    failed: '失败或阻塞',
+    completed: '已完成（Done）',
     visited: '最近访问',
   }),
   sectionEmpty: Object.freeze({
     decisions: '现在没有需要决策的事项。',
-    active: '没有进行中的交付。',
-    failing: '没有失败或阻塞的交付。',
+    backlog: '没有待拆分的交付。',
+    running: '没有进行中的交付。',
+    ready: '没有待启动的交付。',
+    waiting: '没有等待中的交付。',
+    validating: '没有待验证或验证中的交付。',
+    failed: '没有失败或阻塞的交付。',
     completed: '还没有已完成的交付。',
     visited: '此浏览器还没有打开过交付。',
   }),
-  collapsibleSections: Object.freeze(['failing', 'completed', 'visited']),
+  // 设计稿 04:两列实时卡(正在运行/待我处理),其余区块是折叠的单行历史。
+  collapsibleSections: Object.freeze([
+    'backlog',
+    'ready',
+    'waiting',
+    'validating',
+    'failed',
+    'completed',
+    'visited',
+  ]),
   expandLabel: '展开',
   collapseLabel: '收起',
   strongFlowLabel: '强流程',
   deliveryStatusText: Object.freeze({
-    [DeliveryStatusVocabulary.Draft]: '草稿',
-    [DeliveryStatusVocabulary.Clarifying]: '正在澄清',
-    [DeliveryStatusVocabulary.Ready]: '待启动',
-    [DeliveryStatusVocabulary.Planning]: '正在规划',
-    [DeliveryStatusVocabulary.PlanReview]: '等你审核方案',
-    [DeliveryStatusVocabulary.Executing]: '正在执行',
-    [DeliveryStatusVocabulary.Verifying]: '正在验证',
-    [DeliveryStatusVocabulary.Reworking]: '验证未通过，正在修复',
-    [DeliveryStatusVocabulary.NeedsAttention]: '阻塞 · 需要处理',
-    [DeliveryStatusVocabulary.ReadyToDeliver]: '待验收',
-    [DeliveryStatusVocabulary.Delivered]: '已交付',
+    [WorkItemStateVocabulary.Backlog]: '待拆分',
+    [WorkItemStateVocabulary.Ready]: '待启动',
+    [WorkItemStateVocabulary.InProgress]: '正在执行',
+    [WorkItemStateVocabulary.WaitingDependency]: '等待依赖',
+    [WorkItemStateVocabulary.WaitingHuman]: '等待处理',
+    [WorkItemStateVocabulary.CandidateReady]: '候选结果已就绪',
+    [WorkItemStateVocabulary.Validating]: '正在验证',
+    [WorkItemStateVocabulary.Rework]: '正在修复',
+    [WorkItemStateVocabulary.Done]: '已完成',
+    [WorkItemStateVocabulary.Failed]: '失败',
+    [WorkItemStateVocabulary.Cancelled]: '已取消',
   }),
   planReviewPendingLabel: '方案待审核',
   deliveryAcceptancePendingLabel: '交付待验收',
@@ -157,8 +182,12 @@ export function homeDashboardAnnouncement(state: HomeDashboardState): string {
   const counts = state.counts
   const summary = [
     `${String(counts.decisions)} 项待决策`,
-    `${String(counts.active)} 个运行中`,
-    `${String(counts.failing)} 个失败或阻塞`,
+    `${String(counts.backlog)} 个待拆分`,
+    `${String(counts.running)} 个运行中`,
+    `${String(counts.ready)} 个待启动`,
+    `${String(counts.waiting)} 个等待中`,
+    `${String(counts.validating)} 个验证中`,
+    `${String(counts.failed)} 个失败或阻塞`,
     `${String(counts.completed)} 个已完成`,
   ].join(' · ')
   return state.status === 'partial'
@@ -178,21 +207,42 @@ export function homeChatHash(
 
 /**
  * The authoritative target of one decision card: an input or approval opens
- * the Chat session that raised it.  A Delivery-bound Attention has no
- * standalone acceptance surface in the community client, so it renders no
- * action (`null`) instead of a dead end.
+ * its Chat session; Delivery Attention opens the existing StrongFlow review.
  */
 export function homeDecisionHash(
   card: HomeDecisionCard,
   scopeSelection: ScopeRouteSelection,
 ): string | null {
-  return attentionCenterItemHash({
-    kind: card.kind,
-    id: card.id,
-    productSessionId: card.productSessionId,
-    workRunId: card.workRunId,
-    deliveryId: card.deliveryId,
-  }, scopeSelection)
+  if (card.kind === 'attention') {
+    return card.deliveryId === null
+      ? null
+      : scopeHash(`#/home/review?delivery=${encodeURIComponent(card.deliveryId)}`, scopeSelection)
+  }
+  if (card.productSessionId === null) return null
+  return homeChatHash(card.productSessionId, scopeSelection)
+}
+
+/** Native capability notice; the station inbox remains usable without Push or PWA. */
+export function mobileWebCapabilityText(view: Window | null): string {
+  const navigator = view?.navigator as (Navigator & { readonly standalone?: boolean }) | undefined
+  const installed = navigator?.standalone === true
+    || view?.matchMedia?.('(display-mode: standalone)').matches === true
+  const pwa = installed
+    ? '已在独立 PWA 窗口中运行。'
+    : navigator !== undefined && 'serviceWorker' in navigator
+      ? '浏览器支持 PWA 基础能力；当前会话仍需联网。'
+      : '此浏览器不支持 PWA；仍可使用移动网页。'
+  const permission = (view as (Window & {
+    readonly Notification?: { readonly permission?: NotificationPermission }
+  }) | null)?.Notification?.permission
+  const notification = permission === 'granted'
+    ? '系统通知已启用，站内待处理入口仍是权威入口。'
+    : permission === 'denied'
+      ? '系统通知已被阻止；站内待处理入口仍可处理任务。'
+      : permission === 'default'
+        ? '系统通知尚未授权；站内待处理入口仍可处理任务。'
+        : '系统通知不可用；站内待处理入口仍可处理任务。'
+  return `${pwa} ${notification}`
 }
 
 /** The one status line of a pending-decision card, from its real kind/urgency. */
@@ -302,7 +352,7 @@ export function mountHomeDashboardPage(
   const newTask = element(document, 'a', 'wwc-home-new-task')
   newTask.href = surfaceHash('/home/new-task', options.scopeSelection)
   newTask.textContent = presentation.newTaskLabel
-  // 设计评审 P0-1:取消独立待处理中心,看板用「仅看待处理」筛选开关。
+  // 任务看板是待处理事项的统一入口，筛选开关只保留需要用户操作的卡片。
   const attentionOnly = element(document, 'button', 'wwc-home-attention-only')
   attentionOnly.type = 'button'
   attentionOnly.textContent = presentation.attentionOnlyLabel
@@ -325,6 +375,8 @@ export function mountHomeDashboardPage(
   })
   const unavailable = element(document, 'p', 'wwc-home-unavailable')
   unavailable.hidden = true
+  const mobileCapability = element(document, 'p', 'wwc-home-mobile-capability')
+  mobileCapability.textContent = mobileWebCapabilityText(document.defaultView)
 
   const cardParts = new WeakMap<HTMLLIElement, CardParts>()
 
@@ -374,8 +426,6 @@ export function mountHomeDashboardPage(
     if (card.actionDisabled) disableAction(parts, homeDecisionActionLabel(card))
     else {
       const hash = homeDecisionHash(card, options.scopeSelection)
-      // A Delivery-bound Attention has no standalone acceptance surface; the
-      // card keeps its status line instead of a dead-end action.
       if (hash === null) {
         disableAction(
           parts,
@@ -459,7 +509,21 @@ export function mountHomeDashboardPage(
   const sections = new Map<HomeSectionId, SectionParts>()
   const sectionsRoot = element(document, 'div', 'wwc-home-sections')
 
-  for (const id of ['decisions', 'active', 'failing', 'completed', 'visited'] as const) {
+  // The canonical WWC-ER-1001 board order: the two live columns first, then
+  // the collapsed history rows of design page 04.
+  const SECTION_ORDER: readonly HomeSectionId[] = Object.freeze([
+    'running',
+    'decisions',
+    'backlog',
+    'ready',
+    'waiting',
+    'validating',
+    'failed',
+    'completed',
+    'visited',
+  ])
+
+  for (const id of SECTION_ORDER) {
     const headingRow = element(document, 'header', 'wwc-home-section-header')
     const heading = element(document, 'h3', 'wwc-home-section-heading')
     heading.textContent = presentation.sectionHeading[id]
@@ -520,19 +584,22 @@ export function mountHomeDashboardPage(
     const state = options.model.state
     const rendered = id === 'decisions'
       ? state.decisions.length
-      : id === 'active'
-        ? state.active.length
-        : id === 'failing'
-          ? state.failing.length
-          : state.visited.length
+      : id === 'backlog' ? state.backlog.length
+        : id === 'running' ? state.running.length
+          : id === 'ready' ? state.ready.length
+            : id === 'waiting' ? state.waiting.length
+              : id === 'validating' ? state.validating.length
+                : id === 'failed' ? state.failed.length
+                  : id === 'completed' ? state.completed.length
+                    : state.visited.length
     return rendered === 0
   }
 
-  layout.append(topbar, statusBadge.root, unavailable, sectionsRoot)
+  layout.append(topbar, statusBadge.root, unavailable, mobileCapability, sectionsRoot)
   options.root.replaceChildren(layout)
 
   let closed = false
-  // 设计评审 P0-1:通知与旧 /attention 深链落到看板时自动打开该筛选。
+  // 通知打开看板时携带筛选参数，直接展示需要用户操作的卡片。
   let attentionOnlyEnabled = globalThis.location?.hash?.includes('filter=attention') === true
 
   attentionOnly.setAttribute('aria-pressed', String(attentionOnlyEnabled))
@@ -544,9 +611,8 @@ export function mountHomeDashboardPage(
     attentionOnly.setAttribute('aria-pressed', String(attentionOnlyEnabled))
     attentionOnly.dataset.active = String(attentionOnlyEnabled)
     layout.dataset.attentionOnly = String(attentionOnlyEnabled)
-    for (const id of ['active', 'failing', 'completed'] as const) {
-      const section = sections.get(id)
-      if (section === undefined) continue
+    for (const [id, section] of sections) {
+      if (id === 'decisions') continue
       section.root.hidden = attentionOnlyEnabled
     }
     const decisions = sections.get('decisions')
@@ -585,20 +651,25 @@ export function mountHomeDashboardPage(
       : missing.map(source => `${presentation.sourceLabel[source]} ${
         presentation.unavailableLabel}`).join(' · ')
     sections.get('decisions')?.collection.update(state.decisions)
-    sections.get('active')?.collection.update(state.active)
-    sections.get('failing')?.collection.update(state.failing)
+    sections.get('backlog')?.collection.update(state.backlog)
+    sections.get('running')?.collection.update(state.running)
+    sections.get('ready')?.collection.update(state.ready)
+    sections.get('waiting')?.collection.update(state.waiting)
+    sections.get('validating')?.collection.update(state.validating)
+    sections.get('failed')?.collection.update(state.failed)
     sections.get('completed')?.collection.update(state.completed)
     sections.get('visited')?.collection.update(state.visited)
     for (const [id, section] of sections) {
       const total = id === 'decisions'
         ? state.counts.decisions
-        : id === 'active'
-          ? state.counts.active
-          : id === 'failing'
-            ? state.counts.failing
-            : id === 'completed'
-              ? state.counts.completed
-              : state.counts.completed
+        : id === 'backlog' ? state.counts.backlog
+          : id === 'running' ? state.counts.running
+            : id === 'ready' ? state.counts.ready
+              : id === 'waiting' ? state.counts.waiting
+                : id === 'validating' ? state.counts.validating
+                  : id === 'failed' ? state.counts.failed
+                    : id === 'completed' ? state.counts.completed
+                      : state.counts.visited
       section.count.textContent = presentation.countLabel(total)
       if (attentionOnlyEnabled && id !== 'decisions') {
         section.root.hidden = true

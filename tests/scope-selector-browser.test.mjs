@@ -65,14 +65,14 @@ test('real Chrome cascades, switches, restores, and revokes one exact Scope', as
 
   const selected = await evaluate(devtools, sessionId, 'globalThis.runScopeSelection()')
   assert.equal(selected.initialProductReads, 0)
-  assert.deepEqual(selected.initial.labels, ['Organization', 'Workspace', 'Project', 'Repository'])
+  assert.deepEqual(selected.initial.labels, ['组织', '工作区', '项目', '仓库'])
   assert.deepEqual(selected.initial.disabled, {
     organization: false,
     workspace: true,
     project: true,
     repository: true,
   })
-  assert.match(selected.initial.accessText, /Choose a Scope/iu)
+  assert.match(selected.initial.accessText, /选择范围/u)
   assert.match(selected.hash, /^#\/settings\?organizationId=.*&workspaceId=.*&projectId=.*&repositoryId=/u)
   assert.equal(selected.selected.values.repository, 'rep_00000000000000000000000002')
   assert.equal(selected.selectedProductScopes.every(scope => (
@@ -99,5 +99,5 @@ test('real Chrome cascades, switches, restores, and revokes one exact Scope', as
   assert.equal(revoked.oldSubscriptionClosed, true)
   assert.equal(revoked.afterProductReads, revoked.beforeProductReads)
   assert.equal(revoked.state.accessRole, 'alert')
-  assert.match(revoked.state.accessText, /no longer authorized/iu)
+  assert.match(revoked.state.accessText, /不再被授权/u)
 })

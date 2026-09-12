@@ -6,18 +6,17 @@ use std::sync::{Arc, Mutex};
 use winwincode_api::generated::{Actor, CommandEnvelope, CommandName, Scope};
 use winwincode_control_plane::delivery_execution::{
     DeliveryExecutionConfig, DeliveryExecutionPortError, ExecutionJobDispatcher,
-    PendingDeliveryExecution, prepare_workrun_advance,
+    PendingDeliveryExecution, prepare_workrun_start,
 };
 use winwincode_control_plane::{
     CommitError, ControlPlane, ControlPlaneConfig, EventPublishError, EventPublisher, OutboxEvent,
     StateChange, StorageErrorKind,
 };
-use winwincode_delivery::application::stage::{
-    NewStageIdentities, StageAdvanceEffect, StageAdvanceResult,
+use winwincode_delivery::application::workrun_execution::{
+    NewWorkRunIdentities, WorkRunStartEffect, WorkRunStartResult,
 };
 use winwincode_delivery::domain::{
-    DELIVERY_SCHEMA_VERSION, Delivery, DeliveryStatus, DeliveryTask, DeliveryTaskStatus,
-    SessionBindingId,
+    Delivery, DeliveryStatus,
     rework::{
         ReworkClarificationReason,
         test_support::{
@@ -33,9 +32,8 @@ use winwincode_delivery::store::{
     StartDeliveryWorkRunDispatch, SubmitDeliveryVerdict,
 };
 use winwincode_domain::{
-    AttentionItemId, DeliveryId, DeliveryTaskId, ExecutionJobId, Instant, OrganizationId,
-    ProductSessionId, ProjectId, RepositoryId, RequestId, Revision, SchemaVersion, Sha256Digest,
-    StageRunId, UserId, WorkspaceId,
+    DeliveryId, ExecutionJobId, Instant, OrganizationId, ProductSessionId, ProjectId, RepositoryId,
+    RequestId, Revision, SchemaVersion, Sha256Digest, UserId, WorkspaceId,
 };
 use winwincode_domain::{RepositoryScope, UserActor};
 use winwincode_execution_port::generated::{
@@ -71,19 +69,7 @@ fn delivery_before_advance(seed: u64) -> Delivery {
     snapshot.id = delivery_id.clone();
     snapshot.spec.delivery_id = delivery_id.clone();
     snapshot.revision = 1;
-    snapshot.status = DeliveryStatus::Executing;
-    snapshot.tasks = vec![DeliveryTask {
-        schema_version: DELIVERY_SCHEMA_VERSION,
-        id: DeliveryTaskId(canonical_id("dtk", seed)),
-        delivery_id,
-        title: "Implement the approved task".into(),
-        goal: "Implement the approved candidate change.".into(),
-        acceptance_criterion_ids: vec![snapshot.spec.acceptance_criteria[0].id.clone()],
-        blocked_by_task_ids: Vec::new(),
-        owner: None,
-        status: DeliveryTaskStatus::Pending,
-    }];
-    snapshot.stage_runs.clear();
+    snapshot.status = DeliveryStatus::Ready;
     snapshot.work_run_aggregate.runs.clear();
     for item in &mut snapshot.work_run_aggregate.items {
         item.state = winwincode_domain::WorkItemState::Ready;
@@ -103,11 +89,10 @@ fn pending_execution(seed: u64, checkout_revision: &str) -> PendingDeliveryExecu
         .work_run_aggregate
         .start_next()
         .expect("ready WorkItem");
-    let result = StageAdvanceResult::canonical_workrun_dispatch(
+    let result = WorkRunStartResult::canonical_workrun_dispatch(
         &delivery,
         None,
-        NewStageIdentities {
-            stage_run_id: StageRunId(canonical_id("run", seed)),
+        NewWorkRunIdentities {
             work_contract_id: delivery.snapshot().work_run_aggregate.contract.id.clone(),
             work_contract_revision: delivery
                 .snapshot()
@@ -119,9 +104,6 @@ fn pending_execution(seed: u64, checkout_revision: &str) -> PendingDeliveryExecu
             work_item_revision: selected.work_item.revision.clone(),
             work_run_id: winwincode_domain::WorkRunId(canonical_id("wrn", seed)),
             execution_job_id: ExecutionJobId(canonical_id("job", seed)),
-            session_binding_id: SessionBindingId::new(format!("binding-{seed}"))
-                .expect("binding id"),
-            attention_item_id: AttentionItemId(canonical_id("att", seed)),
         },
         ProductSessionId(canonical_id("psn", seed)),
         "executor".into(),
@@ -131,12 +113,10 @@ fn pending_execution(seed: u64, checkout_revision: &str) -> PendingDeliveryExecu
     )
     .expect("canonical WorkRun dispatch");
     let request_id = RequestId(canonical_id("req", seed));
-    let (StageAdvanceEffect::Dispatch(intent) | StageAdvanceEffect::Resume(intent)) =
-        &result.effect
-    else {
+    let WorkRunStartEffect::Dispatch(intent) = &result.effect else {
         panic!("execution stage dispatch intent")
     };
-    let job = prepare_workrun_advance(
+    let job = prepare_workrun_start(
         &request_id,
         &result.delivery.snapshot().work_run_aggregate,
         &result.delivery.snapshot().spec,
@@ -161,13 +141,13 @@ fn pending_execution(seed: u64, checkout_revision: &str) -> PendingDeliveryExecu
     PendingDeliveryExecution::from_workrun(request_id, result, job)
 }
 
-fn delivery_advance_command(seed: u64) -> CommandEnvelope {
+fn workrun_start_command(seed: u64) -> CommandEnvelope {
     CommandEnvelope {
         actor: Actor::UserActor(UserActor {
             id: UserId(canonical_id("usr", seed)),
             kind: winwincode_domain::UserActorKind::User,
         }),
-        command: CommandName::DeliveryAdvance,
+        command: CommandName::WorkRunStart,
         expected_revision: Revision(1),
         payload: serde_json::json!({"deliveryId": canonical_id("dlv", seed), "dispatchProfile": "executor"}),
         request_id: RequestId(canonical_id("req", seed)),
@@ -184,9 +164,9 @@ fn delivery_advance_command(seed: u64) -> CommandEnvelope {
 
 fn rework_advance_command(seed: u64, fixture: &ReworkDispatchFixture) -> CommandEnvelope {
     let expected_revision = fixture.source_delivery.revision();
-    let mut command = delivery_advance_command(seed);
+    let mut command = workrun_start_command(seed);
     command.payload["dispatchProfile"] = serde_json::json!("remediator");
-    let StageAdvanceEffect::Dispatch(intent) = &fixture.transition.effect else {
+    let WorkRunStartEffect::Dispatch(intent) = &fixture.transition.effect else {
         unreachable!()
     };
     let auth = intent.rework_authorization().unwrap();
@@ -211,12 +191,10 @@ fn pending_rework(
 ) -> PendingDeliveryExecution {
     let request_id = RequestId(canonical_id("req", seed));
     let transition = fixture.transition.clone();
-    let (StageAdvanceEffect::Dispatch(intent) | StageAdvanceEffect::Resume(intent)) =
-        &transition.effect
-    else {
+    let WorkRunStartEffect::Dispatch(intent) = &transition.effect else {
         panic!("rework stage dispatch intent")
     };
-    let job = prepare_workrun_advance(
+    let job = prepare_workrun_start(
         &request_id,
         &transition.delivery.snapshot().work_run_aggregate,
         &transition.delivery.snapshot().spec,
@@ -518,7 +496,7 @@ impl ExecutionJobDispatcher for CommitInspectingDispatcher {
 }
 
 #[test]
-fn delivery_advance_commits_every_durable_fact_before_dispatch() {
+fn workrun_start_commits_every_durable_fact_before_dispatch() {
     let root = temporary_directory("commit-before-dispatch");
     let pending = pending_execution(1, "original-checkout");
     seed_delivery(&root, &delivery_before_advance(1));
@@ -533,7 +511,7 @@ fn delivery_advance_commits_every_durable_fact_before_dispatch() {
     };
 
     let receipt = control_plane
-        .commit_delivery_execution(&delivery_advance_command(1), &pending, &mut dispatcher)
+        .commit_delivery_execution(&workrun_start_command(1), &pending, &mut dispatcher)
         .expect("Delivery transaction should commit then dispatch");
 
     assert!(receipt.dispatched);
@@ -603,7 +581,7 @@ fn raw_borrowed_journal_can_publish_before_an_unrelated_outer_commit_fails() {
                 request_id: pending.request_id().clone(),
                 request_digest: "e".repeat(64),
                 expected_revision: 1,
-                transition: pending.stage_transition().clone(),
+                transition: pending.work_run_transition().clone(),
             },
         )))
         .expect("borrowed journal publishes before the outer commit");
@@ -629,12 +607,12 @@ fn generic_control_plane_commit_rejects_every_delivery_command_bypass() {
     for command_name in [
         CommandName::DeliveryCreate,
         CommandName::DeliveryUpdateSpec,
-        CommandName::DeliveryTaskBreakdownCreate,
-        CommandName::DeliveryAdvance,
+        CommandName::WorkitemsCreate,
+        CommandName::WorkRunStart,
         CommandName::DeliveryResolveAttention,
         CommandName::DeliverySubmitVerdict,
     ] {
-        let mut command = delivery_advance_command(5);
+        let mut command = workrun_start_command(5);
         command.command = command_name;
         let error = control_plane
             .commit(
@@ -677,7 +655,7 @@ fn mismatched_delivery_command_payload_fails_before_storage_or_dispatch() {
         Box::new(RecordingPublisher),
     )
     .expect("Control Plane should start");
-    let mut command = delivery_advance_command(8);
+    let mut command = workrun_start_command(8);
     command.payload["deliveryId"] = serde_json::json!(canonical_id("dlv", 9));
     let mut dispatcher = RecordingDispatcher::default();
 
@@ -721,7 +699,7 @@ fn scoped_request_replay_returns_the_original_committed_job_without_redispatch()
     )
     .expect("Control Plane should start");
     let mut dispatcher = RecordingDispatcher::default();
-    let command = delivery_advance_command(2);
+    let command = workrun_start_command(2);
 
     let first = control_plane
         .commit_delivery_execution(&command, &original, &mut dispatcher)
@@ -779,7 +757,7 @@ fn corrupted_durable_job_payload_is_rejected_without_recomputed_dispatch() {
     for (seed, corruption) in [(70, "unknown-field"), (71, "foreign-work-run-binding")] {
         let root = temporary_directory(corruption);
         let pending = pending_execution(seed, "durable-checkout");
-        let command = delivery_advance_command(seed);
+        let command = workrun_start_command(seed);
         seed_delivery(&root, &delivery_before_advance(seed));
         let mut first_control_plane = ControlPlane::start_local(
             ControlPlaneConfig::local(&root),
@@ -906,7 +884,7 @@ fn pre_commit_failure_at_each_atomic_member_rolls_back_every_fact_and_dispatch()
         let mut dispatcher = RecordingDispatcher::default();
 
         let error = control_plane
-            .commit_delivery_execution(&delivery_advance_command(seed), &pending, &mut dispatcher)
+            .commit_delivery_execution(&workrun_start_command(seed), &pending, &mut dispatcher)
             .expect_err("pre-commit failure must abort before dispatch");
 
         assert!(matches!(
@@ -970,11 +948,7 @@ fn dispatch_failure_keeps_the_committed_job_pending_for_restart_replay() {
     .expect("Control Plane should start");
 
     let error = control_plane
-        .commit_delivery_execution(
-            &delivery_advance_command(4),
-            &pending,
-            &mut FailingDispatcher,
-        )
+        .commit_delivery_execution(&workrun_start_command(4), &pending, &mut FailingDispatcher)
         .expect_err("dispatch failure must report committed pending publication");
     let committed = error
         .committed_receipt()
@@ -1047,7 +1021,7 @@ fn acknowledgement_failure_keeps_the_dispatched_job_pending_for_restart_replay()
     let mut dispatcher = RecordingDispatcher::default();
 
     let error = control_plane
-        .commit_delivery_execution(&delivery_advance_command(6), &pending, &mut dispatcher)
+        .commit_delivery_execution(&workrun_start_command(6), &pending, &mut dispatcher)
         .expect_err("ack failure must preserve the committed pending event");
     assert!(matches!(
         error,
@@ -1176,10 +1150,6 @@ fn authorized_rework_commits_exact_structured_scope_and_rejects_cross_delivery_r
     assert!(committed.snapshot().evidence.is_empty());
     assert!(committed.snapshot().verdict.is_none());
     assert_eq!(
-        committed.snapshot().stage_runs,
-        fixture.source_delivery.snapshot().stage_runs
-    );
-    assert_eq!(
         committed.snapshot().work_run_aggregate,
         fixture.transition.delivery.snapshot().work_run_aggregate
     );
@@ -1250,7 +1220,7 @@ fn repeated_rework_replay_returns_original_receipt_before_stale_facts_or_broken_
         ReworkClarificationReason::RepeatedCriterionFailure
     );
     seed_rework_history(&root, &fixture.journal);
-    let mut command = delivery_advance_command(seed);
+    let mut command = workrun_start_command(seed);
     command.expected_revision = Revision(
         i64::try_from(fixture.source_delivery.revision())
             .expect("fixture revision fits wire range"),
@@ -1280,10 +1250,6 @@ fn repeated_rework_replay_returns_original_receipt_before_stale_facts_or_broken_
         .expect("clarified state");
     let clarified = Delivery::decode_json(&state.payload).expect("clarified Delivery");
     assert_eq!(clarified.snapshot().status, DeliveryStatus::Clarifying);
-    assert_eq!(
-        clarified.snapshot().stage_runs.len(),
-        fixture.source_delivery.snapshot().stage_runs.len()
-    );
     assert_eq!(
         clarified.snapshot().session_bindings.len(),
         fixture.source_delivery.snapshot().session_bindings.len()
@@ -1382,7 +1348,7 @@ fn clarification_failure_at_each_atomic_member_rolls_back_every_fact() {
         let root = temporary_directory(&format!("clarification-{member}-rollback"));
         let fixture = repeated_rework_clarification(&DeliveryId(canonical_id("dlv", seed)));
         seed_rework_history(&root, &fixture.journal);
-        let mut command = delivery_advance_command(seed);
+        let mut command = workrun_start_command(seed);
         command.expected_revision = Revision(
             i64::try_from(fixture.source_delivery.revision())
                 .expect("fixture revision fits wire range"),
@@ -1543,7 +1509,7 @@ fn foreign_or_invalid_job_facts_are_rejected_before_any_dispatch_commit() {
         Box::new(RecordingPublisher),
     )
     .unwrap();
-    let command = delivery_advance_command(901);
+    let command = workrun_start_command(901);
     let mut dispatcher = RecordingDispatcher::default();
     for field in [
         "goal",
@@ -1571,7 +1537,7 @@ fn foreign_or_invalid_job_facts_are_rejected_before_any_dispatch_commit() {
         }
         let foreign = PendingDeliveryExecution::from_workrun(
             pending.request_id().clone(),
-            pending.stage_transition().clone(),
+            pending.work_run_transition().clone(),
             job,
         );
         control_plane
@@ -1596,7 +1562,7 @@ fn foreign_or_invalid_job_facts_are_rejected_before_any_dispatch_commit() {
 #[test]
 fn prepared_dispatch_rejects_reusing_an_accepted_run_or_job() {
     let pending = pending_execution(902, "checkout");
-    let StageAdvanceEffect::Dispatch(intent) = &pending.stage_transition().effect else {
+    let WorkRunStartEffect::Dispatch(intent) = &pending.work_run_transition().effect else {
         panic!("dispatch")
     };
     let fixture = Delivery::decode_json(include_bytes!(
@@ -1612,7 +1578,7 @@ fn prepared_dispatch_rejects_reusing_an_accepted_run_or_job() {
             accepted.execution_job_id = intent.execution_job_id.clone();
         }
         aggregate.runs.push(accepted);
-        let error = prepare_workrun_advance(
+        let error = prepare_workrun_start(
             pending.request_id(),
             &aggregate,
             &pending.delivery().snapshot().spec,

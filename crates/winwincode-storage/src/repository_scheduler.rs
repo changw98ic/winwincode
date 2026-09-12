@@ -323,7 +323,7 @@ impl<'storage> RepositoryScheduler<'storage> {
                 return Ok(None);
             }
             Some(active) => Some(active),
-            None => select_ready_job(&transaction, &request.scope)?.map(ActiveJobRecovery::Reoffer),
+            None => select_ready_job(&transaction, request)?.map(ActiveJobRecovery::Reoffer),
         };
         let Some(selected) = selected else {
             insert_drive_receipt(
@@ -1532,8 +1532,9 @@ fn retry_failed_receipt(
 
 fn select_ready_job(
     connection: &Connection,
-    scope: &RepositorySchedulerScope,
+    request: &RepositorySchedulerClaimRequest,
 ) -> Result<Option<ExecutionJobRecord>, StorageError> {
+    let scope = &request.scope;
     let scope_key = repository_scope_key(scope);
     let stored = connection
         .query_row(
@@ -1558,9 +1559,17 @@ fn select_ready_job(
                      AND (dependency.job_id IS NULL OR dependency.state != 'completed'
                           OR dependency.cancellation_request_id IS NOT NULL)
                )
-               AND NOT EXISTS (
-                   SELECT 1 FROM device_execution_reservation_facts device_dispatch
-                   WHERE device_dispatch.job_id = j.job_id
+               AND (
+                   NOT EXISTS (
+                       SELECT 1 FROM device_execution_reservation_facts device_dispatch
+                       WHERE device_dispatch.job_id = j.job_id
+                   )
+                   OR EXISTS (
+                       SELECT 1 FROM device_execution_reservation_facts device_dispatch
+                       WHERE device_dispatch.job_id = j.job_id
+                         AND device_dispatch.worker_id = ?6
+                         AND device_dispatch.worker_instance_id = ?7
+                   )
                )
              ORDER BY COALESCE(f.last_sequence, 0), j.submitted_at, j.job_id
              LIMIT 1",
@@ -1570,6 +1579,8 @@ fn select_ready_job(
                 scope.workspace_id.0,
                 scope.project_id.0,
                 scope.repository_id.0,
+                request.worker_id.0,
+                request.worker_instance_id.0,
             ],
             stored_job_from_row,
         )

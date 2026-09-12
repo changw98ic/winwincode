@@ -17,8 +17,8 @@ use crate::candidate_artifact_outbox::{
     CandidateArtifactUpload, RetainedCandidateArtifact,
 };
 use crate::{
-    ActionRequestTransport, CodexCoreAdapter, CodexPoll, CodexThreadStart, CodexTurnCompletion,
-    DelegatedLoopPhase, DelegatedLoopStopFact, DelegatedLoopTransition,
+    ActionRequestTransport, CodexCoreAdapter, CodexPoll, CodexThreadSession, CodexThreadStart,
+    CodexTurnCompletion, DelegatedLoopPhase, DelegatedLoopStopFact, DelegatedLoopTransition,
     DelegatedLoopTransitionOutcome, DelegatedObserverPreflight, DelegatedObserverPreflightOutcome,
     DelegatedObserverSettlement, DurableExecutionDelivery, delegated_loop_turn_id,
     model_port_client::{ModelChunkDisposition, ModelLeaseAuthority},
@@ -99,14 +99,14 @@ use crate::stage_product::{
     change_batch_proposal_json_schema, migrate_persisted_role_session_policy_v1,
     role_session_policy, stage_product_job_digest, stage_product_prompt,
 };
-use crate::stage_runtime_projection::{
-    StageCommandEnd, StageRuntimeContext, StageRuntimeProjector, StageRuntimeRetention,
-    StageTurnCompletion,
-};
 use crate::store::{
     AdapterStore, AdapterStoreError, StoredApprovalOperation, StoredApprovalOperationKind,
     StoredApprovalOperationState, StoredInputChoiceIdentity, StoredInputOperation,
     StoredInputOperationState,
+};
+use crate::workrun_runtime_projection::{
+    StageCommandEnd, StageTurnCompletion, WorkRunRuntimeContext, WorkRunRuntimeProjector,
+    WorkRunRuntimeRetention,
 };
 
 const FORMAT_REPAIR_PROMPT: &str = "Return only one corrected JSON object matching the active ChangeBatchProposal schema. Correct the preceding final answer's formatting or patch syntax. Do not call tools, modify files, broaden scope, or perform implementation work.";
@@ -382,7 +382,7 @@ pub struct ProductionCodexAdapter {
     store: AdapterStore,
     outbox: ExecutionOutbox,
     candidate_artifacts: CandidateArtifactOutbox,
-    stage_projector: StageRuntimeProjector,
+    workrun_projector: WorkRunRuntimeProjector,
     installation: ProductionCodexInstallation,
     runs: HashMap<String, ActiveRun>,
     thread_to_run: HashMap<String, String>,
@@ -467,7 +467,7 @@ impl ProductionCodexAdapter {
             store,
             outbox,
             candidate_artifacts,
-            stage_projector: StageRuntimeProjector::new(),
+            workrun_projector: WorkRunRuntimeProjector::new(),
             installation: ProductionCodexInstallation {
                 capability_catalog,
                 runtime_trace_outbox: WorkerRuntimeTraceOutbox::new(),
@@ -760,14 +760,14 @@ impl ProductionCodexAdapter {
         &mut self,
         run_key: &str,
         source: &str,
-        retention: Option<StageRuntimeRetention>,
+        retention: Option<WorkRunRuntimeRetention>,
     ) -> Result<Option<RuntimeEventMessage>, ProductionCodexError> {
         let Some(retention) = retention else {
             return Ok(None);
         };
         let (message, duplicate) = match retention {
-            StageRuntimeRetention::Ready { message, duplicate } => (*message, duplicate),
-            StageRuntimeRetention::Gap { .. } | StageRuntimeRetention::Conflict { .. } => {
+            WorkRunRuntimeRetention::Ready { message, duplicate } => (*message, duplicate),
+            WorkRunRuntimeRetention::Gap { .. } | WorkRunRuntimeRetention::Conflict { .. } => {
                 return Err(conflict());
             }
         };
@@ -813,8 +813,8 @@ impl ProductionCodexAdapter {
         run: &'context ActiveRun,
         occurred_at: &'context Instant,
         sent_at: &'context Instant,
-    ) -> StageRuntimeContext<'context> {
-        StageRuntimeContext {
+    ) -> WorkRunRuntimeContext<'context> {
+        WorkRunRuntimeContext {
             lease: &run.binding.authority.lease,
             worker_session_id: &run.binding.authority.worker_session_id,
             session_identity: &run.binding.authority.session_identity,
@@ -829,11 +829,11 @@ impl ProductionCodexAdapter {
         turn_id: &str,
         now: &Instant,
     ) -> Result<Option<RuntimeEventMessage>, ProductionCodexError> {
-        let source = crate::stage_runtime_projection::source_key("policy", turn_id, None);
+        let source = crate::workrun_runtime_projection::source_key("policy", turn_id, None);
         let run = self.runs.get(run_key).ok_or_else(unknown_thread)?;
         let authority = self.bridge.authority();
         let retention = self
-            .stage_projector
+            .workrun_projector
             .retain_turn_started(
                 &mut self.store,
                 &authority,
@@ -851,7 +851,7 @@ impl ProductionCodexAdapter {
         command_end: &codex_protocol::protocol::ExecCommandEndEvent,
         now: &Instant,
     ) -> Result<Option<RuntimeEventMessage>, ProductionCodexError> {
-        let source = crate::stage_runtime_projection::source_key(
+        let source = crate::workrun_runtime_projection::source_key(
             "evidence",
             &command_end.turn_id,
             Some(&command_end.call_id),
@@ -859,7 +859,7 @@ impl ProductionCodexAdapter {
         let run = self.runs.get(run_key).ok_or_else(unknown_thread)?;
         let authority = self.bridge.authority();
         let retention = self
-            .stage_projector
+            .workrun_projector
             .retain_exec_command_end(
                 &mut self.store,
                 &authority,
@@ -885,11 +885,11 @@ impl ProductionCodexAdapter {
         failed: bool,
         now: &Instant,
     ) -> Result<Option<RuntimeEventMessage>, ProductionCodexError> {
-        let source = crate::stage_runtime_projection::source_key("result", turn_id, None);
+        let source = crate::workrun_runtime_projection::source_key("result", turn_id, None);
         let run = self.runs.get(run_key).ok_or_else(unknown_thread)?;
         let authority = self.bridge.authority();
         let retention = self
-            .stage_projector
+            .workrun_projector
             .retain_turn_completed(
                 &mut self.store,
                 &authority,
@@ -2918,7 +2918,7 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
     async fn ensure_thread(
         &mut self,
         start: CodexThreadStart<'_>,
-    ) -> Result<CodexThreadId, Self::Error> {
+    ) -> Result<CodexThreadSession, Self::Error> {
         validate_start(start)?;
         let job_digest = stage_product_job_digest(start.job).map_err(|_| invalid_job())?;
         let role_policy = sealed_role_session_policy(start.job)?;
@@ -2943,7 +2943,10 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
                 && run.binding.authority.lease == *start.lease
                 && run.binding.authority.worker_session_id == *start.worker_session_id
             {
-                return Ok(run.binding.canonical_thread_id.clone());
+                return Ok(CodexThreadSession {
+                    thread_id: run.binding.canonical_thread_id.clone(),
+                    agent_config: run.record.agent_config.clone(),
+                });
             }
             return Err(conflict());
         }
@@ -3002,8 +3005,12 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
                 authority,
                 opened_at: record.last_activity_at.clone(),
             };
-            let result = self.install_active_run(&run_key, record, binding, kernel_live, true);
-            return result;
+            let thread_id =
+                self.install_active_run(&run_key, record, binding, kernel_live, true)?;
+            return Ok(CodexThreadSession {
+                thread_id,
+                agent_config,
+            });
         }
         let repository_rule_pack = load_repository_rule_pack(&workspace)?;
         let session = self
@@ -3024,7 +3031,7 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
             workspace,
             repository_rule_pack,
             role_policy,
-            agent_config,
+            agent_config: agent_config.clone(),
             kernel_session_id: session.session_id.clone(),
             rollout_path: session.rollout_path.map(PathBuf::from),
             submission_id: Uuid::now_v7().to_string(),
@@ -3056,7 +3063,11 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
             authority,
             opened_at: start.lease.issued_at.clone(),
         };
-        self.install_active_run(&run_key, record, binding, true, false)
+        let thread_id = self.install_active_run(&run_key, record, binding, true, false)?;
+        Ok(CodexThreadSession {
+            thread_id,
+            agent_config,
+        })
     }
 
     #[allow(clippy::too_many_lines)]

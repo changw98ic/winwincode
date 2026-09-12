@@ -33,3 +33,7 @@ pub use user_admin::{
     UserAccountAdmin, UserAccountView, UserAdminError, UserAdminOutcome,
     generate_temporary_password,
 };
+pub use winwincode_device_client::{
+    DeviceServiceConfig, DeviceServiceError, DeviceServiceStatus, device_service_logs,
+    device_service_status, request_device_service_restart, run_device_service,
+};

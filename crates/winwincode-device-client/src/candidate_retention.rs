@@ -1385,8 +1385,7 @@ fn parse_durable_stamp(
 }
 
 fn now_rfc3339(now: &OffsetDateTime) -> String {
-    now.format(&Rfc3339)
-        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_owned())
+    crate::canonical_rfc3339(*now)
 }
 
 #[cfg(test)]

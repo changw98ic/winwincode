@@ -1,7 +1,7 @@
 {
   "name": "@winwincode/strongflow",
   "version": "0.1.0-alpha.1",
-  "description": "StrongFlow delivery domain and projection contracts",
+  "description": "StrongFlow surface descriptor and credential boundary",
   "license": "Apache-2.0",
   "type": "module",
   "main": "./dist/index.js",

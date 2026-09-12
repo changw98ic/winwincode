@@ -44,7 +44,15 @@ function response(request, result) {
 
 function runtimeSession(workRunId, workerSessionId, overrides = {}) {
   return {
-    activities: [],
+    activities: [{
+      activityType: 'command',
+      callId: 'runtime-action-1',
+      command: '执行发布门验证',
+      exitCode: null,
+      outcome: 'observed',
+      sourceRef: 'runtime:activity-1',
+      status: 'running',
+    }],
     agentEdges: [],
     agents: [{
       nickname: 'planner',
@@ -71,6 +79,21 @@ function runtimeSession(workRunId, workerSessionId, overrides = {}) {
       latestRecoverySourceRef: null,
       recoveryCount: 0,
       state: 'none',
+    },
+    runtimeContext: {
+      agentIdentity: {
+        id: 'agt_00000000000000000000000001',
+        name: 'community-executor',
+        role: 'executor',
+        workerId: 'wrk_00000000000000000000000001',
+      },
+      provider: 'openai',
+      model: 'gpt-5',
+      workspace: {
+        repositoryId: repositoryScope.repositoryId,
+        revision: `git-tree:${'1'.padStart(64, '0')}`,
+        writeMode: 'candidate',
+      },
     },
     sessionBindingId: 'binding-1',
     workRunId,
@@ -134,6 +157,7 @@ function ok(request) {
               'wrn_00000000000000000000000002',
               'wss_00000000000000000000000002',
               {
+                activities: [],
                 agents: [{
                   nickname: null,
                   parentThreadId: null,
@@ -148,7 +172,22 @@ function ok(request) {
                   lastFailureSourceRef: 'runtime:failure-2',
                   latestRecoverySourceRef: 'runtime:recovery-3',
                   recoveryCount: 1,
-                  state: 'recovered',
+                  state: 'in-progress',
+                },
+                runtimeContext: {
+                  agentIdentity: {
+                    id: 'agt_00000000000000000000000002',
+                    name: 'community-verifier',
+                    role: 'verifier',
+                    workerId: 'wrk_00000000000000000000000003',
+                  },
+                  provider: 'mistral',
+                  model: 'mistral-large',
+                  workspace: {
+                    repositoryId: repositoryScope.repositoryId,
+                    revision: `git-tree:${'2'.padStart(64, '0')}`,
+                    writeMode: 'read-only',
+                  },
                 },
                 usage: null,
               },
@@ -172,15 +211,15 @@ function ok(request) {
           },
           revision: 5,
           schemaVersion,
-          status: 'executing',
-          taskCounts: {
-            active: 1,
-            blocked: 0,
-            completed: 0,
+          status: 'in_progress',
+          workItemCounts: { ready: 0, waitingHuman: 0, candidateReady: 0, rework: 0, cancelled: 0,
+            inProgress: 1,
+            waitingDependency: 0,
+            done: 0,
             failed: 0,
-            pending: 0,
+            backlog: 0,
             total: 1,
-            verifying: 0,
+            validating: 0,
           },
           title: 'First Delivery',
           updatedAt: UPDATED_AT,
@@ -351,6 +390,13 @@ function summary() {
       state: row.dataset.providerState,
     })),
     models: [...panel.querySelectorAll('.wwc-usage-health-model')].length,
+    sessionTeam: [...panel.querySelectorAll('.wwc-usage-health-session-team')].map(row => ({
+      requiresHuman: row.querySelector('.wwc-usage-health-session-team-recovery')
+        ?.dataset.requiresHuman,
+      state: row.dataset.sessionState,
+      text: row.textContent,
+      buttons: row.querySelectorAll('button').length,
+    })),
     workers: [...panel.querySelectorAll('.wwc-usage-health-worker')].map(row => ({
       state: row.dataset.workerState,
       tone: row.dataset.tone,

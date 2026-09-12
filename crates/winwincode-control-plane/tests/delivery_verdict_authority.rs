@@ -21,14 +21,14 @@ use winwincode_control_plane::{
 };
 use winwincode_delivery::{
     application::{
-        stage::{
+        verdict::test_support::{VerdictFixtureOutcome, verdict_fixture},
+        workrun_execution::{
             DeliveryTerminalOutcomeFacts, TerminalArtifactReference, TerminalOutcomeStatus,
             test_support::{
                 active_lease_identity, delivery_terminal_outcome_facts, session_binding_authority,
                 terminal_outcome_metadata, terminal_worker_outcome,
             },
         },
-        verdict::test_support::{VerdictFixtureOutcome, verdict_fixture},
     },
     domain::{
         DELIVERY_SCHEMA_VERSION, Delivery, RepositoryKind, RepositoryRef, SessionBinding,
@@ -140,7 +140,7 @@ enum SeedTerminalDisposition {
 struct SeedRuntimeLedger<'ledger> {
     schema_version: u8,
     delivery_id: Option<&'ledger DeliveryId>,
-    delivery_task_id: Option<&'ledger winwincode_domain::DeliveryTaskId>,
+    work_item_id: Option<&'ledger winwincode_domain::WorkItemId>,
     work_run_id: Option<&'ledger winwincode_domain::WorkRunId>,
     product_session_id: &'ledger ProductSessionId,
     execution_job_id: &'ledger winwincode_domain::ExecutionJobId,
@@ -302,9 +302,9 @@ fn production_rework_dispatch_uses_failed_candidate_and_replays_after_restart() 
     };
     assert_eq!(queued(), 0);
     let source = read(&host);
-    let command: winwincode_api::generated::DeliveryAdvanceCommand = serde_json::from_value(json!({
+    let command: winwincode_api::generated::WorkRunStartCommand = serde_json::from_value(json!({
         "schemaVersion":SchemaVersion::WinwincodeV1, "requestId":canonical_id("req", 960),
-        "command":"delivery.advance", "scope":seeded.scope, "actor":verdict.actor,
+        "command":"workrun.start", "scope":seeded.scope, "actor":verdict.actor,
         "expectedRevision":source.revision(), "payload":{
             "deliveryId":source.id(), "dispatchProfile":"remediator", "rework":{
                 "candidateRef":seeded.candidate["candidateRef"], "diffSha256":seeded.candidate["diffSha256"],
@@ -334,13 +334,13 @@ fn production_rework_dispatch_uses_failed_candidate_and_replays_after_restart() 
             }
             _ => unreachable!(),
         }
-        host.delivery_advance(&bad)
+        host.workrun_start(&bad)
             .expect_err("foreign rework scope must be rejected");
         assert_eq!(read(&host), source);
         assert_eq!(queued(), 0, "rejected scope must not enqueue work");
     }
     let accepted = host
-        .delivery_advance(&command)
+        .workrun_start(&command)
         .expect("actual production rework dispatch");
     assert_eq!(queued(), 1);
     let job_bytes = rusqlite::Connection::open(seeded.data.join("control-plane.sqlite3"))
@@ -372,16 +372,10 @@ fn production_rework_dispatch_uses_failed_candidate_and_replays_after_restart() 
     let committed = read(&host);
     assert!(committed.snapshot().evidence.is_empty());
     assert!(committed.snapshot().verdict.is_none());
-    assert_eq!(
-        committed.snapshot().stage_runs,
-        source.snapshot().stage_runs
-    );
     host.shutdown().unwrap();
     let mut restarted = start(&seeded);
     assert_eq!(
-        restarted
-            .delivery_advance(&command)
-            .expect("durable replay"),
+        restarted.workrun_start(&command).expect("durable replay"),
         accepted
     );
     assert_eq!(queued(), 1, "replay must not enqueue a second job");
@@ -476,6 +470,12 @@ fn fixture_delivery(
         binding.fencing_token = Some(winwincode_domain::FencingToken(
             (1_000 + index as u64).to_string(),
         ));
+        binding
+            .runtime_context
+            .as_mut()
+            .expect("runtime context")
+            .agent_identity
+            .worker_id = binding.worker_id.clone().expect("Worker");
         let run = snapshot
             .work_run_aggregate
             .runs
@@ -950,7 +950,7 @@ fn seed_runtime(
         let ledger = SeedRuntimeLedger {
             schema_version: 1,
             delivery_id: Some(delivery.id()),
-            delivery_task_id: None,
+            work_item_id: None,
             work_run_id: Some(&binding.work_run_id),
             product_session_id: &binding.product_session_id,
             execution_job_id: &binding.execution_job_id,

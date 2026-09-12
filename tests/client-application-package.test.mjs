@@ -131,7 +131,7 @@ test('deployable Client files contain only browser assets and runtime serverUrl 
   assert.doesNotMatch(buildScript, /cargo|build-native|winwincode-server|winwincode-worker/u)
 })
 
-test('Client shell has one facade and the six canonical product entries with Home first', () => {
+test('Client shell has one facade and the canonical community product surfaces', () => {
   const application = readFileSync(join(clientRoot, 'src', 'application.ts'), 'utf8')
   const surfaces = readFileSync(join(clientRoot, 'src', 'client-surface.ts'), 'utf8')
   const index = readFileSync(join(clientRoot, 'src', 'index.ts'), 'utf8')
@@ -139,13 +139,11 @@ test('Client shell has one facade and the six canonical product entries with Hom
     join(clientRoot, 'src', 'community-control-plane-client.ts'),
     'utf8',
   )
-  for (const surface of ['home', 'chat', 'projects', 'extensions', 'device', 'settings', 'attention']) {
+  for (const surface of ['home', 'chat', 'projects', 'extensions', 'device', 'settings']) {
     assert.match(surfaces, new RegExp(`id: '${surface}'`, 'u'))
   }
-  // UI-504: the Attention-first dashboard is the canonical first screen, so a
-  // start-up without a route never lands in an arbitrary Chat or Delivery.
-  assert.match(surfaces, /id: 'home'[\s\S]+default: true/u)
-  assert.match(surfaces, /id: 'home'[\s\S]+default: true[\s\S]+id: 'chat'/u)
+  assert.match(surfaces, /id: 'chat'[\s\S]+default: true/u)
+  assert.match(surfaces, /id: 'chat'[\s\S]+default: true[\s\S]+id: 'home'/u)
   assert.match(application, /activeSurface\.id === 'home'/u)
   // The shell imports and invokes the exact base factory once. Product-specific
   // directory extensions do not count as another transport composition root.

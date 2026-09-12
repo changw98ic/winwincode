@@ -43,6 +43,7 @@ use winwincode_domain::{
     SessionIdentity, Sha256Digest, UserId, WorkContract, WorkContractId, WorkItem, WorkItemId,
     WorkItemState, WorkRunId, WorkerId, WorkerInstanceId, WorkerSessionId, WorkspaceId,
 };
+use winwincode_execution_port::agent_config::{AgentProfileSettings, resolve_agent_session_config};
 use winwincode_execution_port::generated::{
     ArtifactAckMessage, ArtifactReference, EncodedPayload, ExecutionEventCategory,
     ExecutionEventRecord, ExecutionJob, ExecutionLeaseStamp, ExecutionLimits,
@@ -70,9 +71,9 @@ use winwincode_storage::{
 };
 use winwincode_worker::{
     CandidateArtifactAckOutcome, CandidateArtifactAuthority, CandidateArtifactUpload,
-    CodexCoreAdapter, CodexPoll, CodexThreadStart, CodexTurnCompletion, DurableExecutionDelivery,
-    RetainedCandidateArtifact, WorkerConfig, WorkerExecutionPort, WorkerMain,
-    secret_safe_runtime_summary, workspace_runtime::JobWorkspaceRuntime,
+    CodexCoreAdapter, CodexPoll, CodexThreadSession, CodexThreadStart, CodexTurnCompletion,
+    DurableExecutionDelivery, RetainedCandidateArtifact, WorkerConfig, WorkerExecutionPort,
+    WorkerMain, secret_safe_runtime_summary, workspace_runtime::JobWorkspaceRuntime,
 };
 
 static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(1);
@@ -493,12 +494,41 @@ impl CodexCoreAdapter for ScriptedStageProductAdapter {
     fn ensure_thread(
         &mut self,
         start: CodexThreadStart<'_>,
-    ) -> impl Future<Output = Result<CodexThreadId, Self::Error>> + Send {
+    ) -> impl Future<Output = Result<CodexThreadSession, Self::Error>> + Send {
+        let agent_config = resolve_agent_session_config(
+            start.worker_id,
+            &WorkerCapabilitySet {
+                capability_digest: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
+                features: vec![
+                    WorkerCapabilityFeature::ArtifactStream,
+                    WorkerCapabilityFeature::Mcp,
+                    WorkerCapabilityFeature::Sandbox,
+                    WorkerCapabilityFeature::Shell,
+                ],
+                max_concurrent_jobs: 1,
+                platform: WorkerCapabilitySetPlatform::Aarch64AppleDarwin,
+            },
+            &start.job.execution_profile,
+            AgentProfileSettings {
+                provider: "fixture-provider".to_owned(),
+                model: "fixture-model".to_owned(),
+                reasoning: "provider_default".to_owned(),
+                tools: Vec::new(),
+                sandbox: match start.job.workspace.write_mode {
+                    ExecutionWorkspaceWriteMode::ReadOnly => "read-only",
+                    ExecutionWorkspaceWriteMode::Candidate => "candidate",
+                }
+                .to_owned(),
+                instructions: None,
+            },
+        )
+        .map_err(|_| ());
         let result = start
             .run_key
             .canonical_thread_id()
             .map_err(|_| ())
-            .map(|thread_id| {
+            .and_then(|thread_id| {
+                let agent_config = agent_config?;
                 let mut state = self.state.lock().expect("adapter state");
                 state.runs.insert(
                     thread_id.0.clone(),
@@ -530,7 +560,10 @@ impl CodexCoreAdapter for ScriptedStageProductAdapter {
                         cancel_requested: false,
                     },
                 );
-                thread_id
+                Ok(CodexThreadSession {
+                    thread_id,
+                    agent_config,
+                })
             });
         std::future::ready(result)
     }

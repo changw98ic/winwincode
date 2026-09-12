@@ -208,8 +208,8 @@ impl DeviceWorkerSchedulingRequest {
             "repository binding id",
         )?;
         validate_prefixed(&request.worker_session_id, "ws_", "worker session id")?;
-        validate_prefixed(&request.worker_id, "wkr_", "worker id")?;
-        validate_prefixed(&request.worker_instance_id, "winst_", "worker instance id")?;
+        validate_prefixed(&request.worker_id, "wrk_", "worker id")?;
+        validate_prefixed(&request.worker_instance_id, "wki_", "worker instance id")?;
         validate_credential_digest(&request.credential_digest)?;
         if let Some(product) = &request.product_session_id {
             validate_prefixed(product, "ps_", "product session id")?;

@@ -4,7 +4,7 @@
 
 use winwincode_delivery::application::{
     session_binding::SessionBindingIdentity as DeliverySessionBindingIdentity,
-    stage::SessionBindingAuthority,
+    workrun_execution::SessionBindingAuthority,
 };
 use winwincode_domain::Instant;
 use winwincode_execution_port::generated::{SessionBindingMessage, WorkRunExecutionScope};
@@ -405,13 +405,15 @@ impl SessionBindingAcceptance<'_> {
 
 #[cfg(test)]
 mod tests {
-    use winwincode_delivery::application::stage::test_support::{
+    use winwincode_delivery::application::workrun_execution::test_support::{
         active_lease_identity, session_binding_authority,
     };
     use winwincode_domain::{
-        CodexThreadId, DeliveryId, ExecutionJobId, ExecutionMessageId, FencingToken, Instant,
-        LeaseId, ProductSessionId, Revision, WorkContractId, WorkItemId, WorkRunId, WorkerId,
-        WorkerInstanceId, WorkerSessionId,
+        AgentIdentityId, CodexThreadId, DeliveryId, ExecutionJobId, ExecutionMessageId,
+        FencingToken, Instant, LeaseId, ProductSessionId, RepositoryId, Revision,
+        RuntimeSessionAgentIdentity, RuntimeSessionContext, RuntimeSessionWorkspace,
+        WorkContractId, WorkItemId, WorkRunId, WorkerId, WorkerInstanceId, WorkerSessionId,
+        WorkspaceRevision,
     };
     use winwincode_domain::{
         SchemaVersion, SessionBindingSourceIdentity, SessionBindingSourceIdentityKind,
@@ -431,7 +433,7 @@ mod tests {
     fn fixture(
         seed: u64,
     ) -> (
-        winwincode_delivery::application::stage::SessionBindingAuthority,
+        winwincode_delivery::application::workrun_execution::SessionBindingAuthority,
         SessionBindingMessage,
         WorkRunExecutionScope,
     ) {
@@ -481,6 +483,21 @@ mod tests {
             lease_id: lease_id.clone(),
             message_id: ExecutionMessageId(id("xmsg", seed)),
             product_session_id: product_session_id.clone(),
+            runtime_context: RuntimeSessionContext {
+                agent_identity: RuntimeSessionAgentIdentity {
+                    id: AgentIdentityId(id("agt", seed)),
+                    worker_id: worker_id.clone(),
+                    name: "Executor".to_owned(),
+                    role: "executor".to_owned(),
+                },
+                provider: "fixture-provider".to_owned(),
+                model: "fixture-model".to_owned(),
+                workspace: RuntimeSessionWorkspace {
+                    repository_id: RepositoryId(id("rep", seed)),
+                    revision: WorkspaceRevision(format!("git-tree:{}", "a".repeat(64))),
+                    write_mode: "candidate".to_owned(),
+                },
+            },
             schema_version: SchemaVersion::WinwincodeV1,
             sent_at,
             session_identity: SessionIdentity {
@@ -586,7 +603,7 @@ mod tests {
     }
 
     #[test]
-    fn delivery_stage_binding_cannot_omit_its_stage_run() {
+    fn delivery_work_run_binding_cannot_omit_its_work_run() {
         let (authority, mut message, scope) = fixture(8);
         message.work_run_id = None;
         message.session_identity.work_run_id = None;

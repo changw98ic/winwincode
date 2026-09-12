@@ -22,14 +22,14 @@
     "acceptanceCriteria": [
       {
         "schemaVersion": 3,
-        "id": "criterion-required",
+        "id": "crt_01J00000000000000000000000",
         "description": "A valid invitation can be accepted exactly once.",
         "verificationMethod": "Run the invitation integration test.",
         "required": true
       },
       {
         "schemaVersion": 3,
-        "id": "criterion-optional",
+        "id": "crt_01J00000000000000000000001",
         "description": "The empty state remains readable at narrow widths.",
         "verificationMethod": null,
         "required": false
@@ -47,36 +47,6 @@
     "maxReworkAttempts": 2,
     "createdAtMillis": 1800000000000
   },
-  "tasks": [
-    {
-      "schemaVersion": 3,
-      "id": "delivery-task-api",
-      "deliveryId": "dlv_01J00000000000000000000000",
-      "title": "Invitation API",
-      "goal": "Deliver the independently verifiable invitation endpoint.",
-      "acceptanceCriterionIds": [
-        "criterion-required"
-      ],
-      "blockedByTaskIds": [],
-      "owner": "backend-owner",
-      "status": "completed"
-    }
-  ],
-  "stageRuns": [
-    {
-      "schemaVersion": 3,
-      "id": "stage-verification-1",
-      "deliveryId": "dlv_01J00000000000000000000000",
-      "deliveryTaskId": "delivery-task-api",
-      "stage": "verifying",
-      "actorType": "codex",
-      "role": "verifier",
-      "status": "succeeded",
-      "attempt": 1,
-      "startedAtMillis": 1800000000010,
-      "finishedAtMillis": 1800000000020
-    }
-  ],
   "sessionBindings": [
     {
       "schemaVersion": 3,
@@ -84,6 +54,22 @@
       "deliveryId": "dlv_01J00000000000000000000000",
       "productSessionId": "psn_01J00000000000000000000000",
       "executionJobId": "job_01J00000000000000000000000",
+      "executionProfile": "verifier",
+      "runtimeContext": {
+        "agentIdentity": {
+          "id": "agt_01J00000000000000000000000",
+          "workerId": "wrk_01J00000000000000000000000",
+          "name": "Verifier",
+          "role": "verifier"
+        },
+        "provider": "fixture-provider",
+        "model": "fixture-model",
+        "workspace": {
+          "repositoryId": "rep_01J00000000000000000000000",
+          "revision": "git-tree:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "writeMode": "read-only"
+        }
+      },
       "workerSessionId": "wsn_01J00000000000000000000000",
       "codexThreadId": "cdx_01J00000000000000000000000",
       "boundAtMillis": 1800000000011,
@@ -132,7 +118,7 @@
         "id": "criterion-result-required",
         "deliveryId": "dlv_01J00000000000000000000000",
         "deliverySpecId": "delivery-spec-v1",
-        "criterionId": "criterion-required",
+        "criterionId": "crt_01J00000000000000000000000",
         "candidateRef": "git-tree:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "verdict": "pass",
         "evidenceRefs": [
@@ -146,7 +132,7 @@
         "id": "criterion-result-optional",
         "deliveryId": "dlv_01J00000000000000000000000",
         "deliverySpecId": "delivery-spec-v1",
-        "criterionId": "criterion-optional",
+        "criterionId": "crt_01J00000000000000000000001",
         "candidateRef": "git-tree:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "verdict": "inconclusive",
         "evidenceRefs": [],
@@ -194,7 +180,7 @@
         "workContractId": "wct_01J00000000000000000000000",
         "workContractRevision": 1,
         "revision": 1,
-        "state": "ready",
+        "state": "done",
         "title": "Invitation API",
         "goal": "Deliver the independently verifiable invitation endpoint.",
         "criterionIds": [

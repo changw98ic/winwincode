@@ -166,7 +166,7 @@
         "publicationRevision",
         "eventCursor"
       ],
-      "deliveryStageRuntimeRequiresReturnedCursor": true,
+      "workRunRuntimeRequiresReturnedCursor": true,
       "cursorAuthority": "server_issued_and_authenticated",
       "requestMustMatchCursor": [
         "envelope.scope",
@@ -190,28 +190,6 @@
         "envelope.scope",
         "parameters.productSessionId"
       ]
-    },
-    "deliveryStageSessionBinding": {
-      "partialBindingFields": [
-        "bindingId",
-        "productSessionId",
-        "executionJobId",
-        "boundAt",
-        "workerSessionId",
-        "codexThreadId",
-        "sessionIdentity",
-        "stageRunId",
-        "workerId",
-        "leaseId",
-        "attempt",
-        "fencingToken",
-        "sourceIdentity"
-      ],
-      "codexThreadRequiresWorkerSession": true,
-      "humanStageBinding": "must_be_null",
-      "runtimeSessionBinding": "worker_and_codex_required",
-      "completeIdentityBlock": "sessionIdentity",
-      "completeSourceIdentity": "sourceIdentity"
     },
     "solutionReview": {
       "digestIncludesOrderedTaskProposals": true,
@@ -431,7 +409,7 @@
           "$ref": "#/$defs/DeliveryUpdateSpecCommand"
         },
         {
-          "$ref": "#/$defs/DeliveryAdvanceCommand"
+          "$ref": "#/$defs/WorkRunStartCommand"
         },
         {
           "$ref": "#/$defs/WorkRunCancelCommand"
@@ -479,7 +457,7 @@
           "$ref": "#/$defs/CollaborationPresenceUpdateCommand"
         },
         {
-          "$ref": "#/$defs/DeliveryTaskBreakdownCreateCommand"
+          "$ref": "#/$defs/WorkItemsCreateCommand"
         }
       ]
     },
@@ -717,7 +695,7 @@
           "$ref": "#/$defs/DeliveryUpdateSpecCompletedResponse"
         },
         {
-          "$ref": "#/$defs/DeliveryAdvanceCompletedResponse"
+          "$ref": "#/$defs/WorkRunStartCompletedResponse"
         },
         {
           "$ref": "#/$defs/WorkRunCancelCompletedResponse"
@@ -765,7 +743,7 @@
           "$ref": "#/$defs/CollaborationPresenceUpdateCompletedResponse"
         },
         {
-          "$ref": "#/$defs/DeliveryTaskBreakdownCreateCompletedResponse"
+          "$ref": "#/$defs/WorkItemsCreateCompletedResponse"
         }
       ],
       "description": "Exact command/result response union. Relabeling a result under another command is invalid."
@@ -1086,81 +1064,15 @@
         }
       }
     },
-    "DeliveryTaskInput": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "id",
-        "title",
-        "goal",
-        "acceptanceCriterionIds",
-        "blockedByTaskIds",
-        "ownerActorId"
-      ],
-      "properties": {
-        "id": {
-          "$ref": "./domain.schema.json#/$defs/DeliveryTaskId"
-        },
-        "title": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 500
-        },
-        "goal": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 65536
-        },
-        "acceptanceCriterionIds": {
-          "type": "array",
-          "items": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 200
-          },
-          "minItems": 1,
-          "maxItems": 1000,
-          "uniqueItems": true
-        },
-        "blockedByTaskIds": {
-          "type": "array",
-          "items": {
-            "$ref": "./domain.schema.json#/$defs/DeliveryTaskId"
-          },
-          "maxItems": 1000,
-          "uniqueItems": true
-        },
-        "ownerActorId": {
-          "oneOf": [
-            {
-              "$ref": "./domain.schema.json#/$defs/ActorId"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        }
-      }
-    },
     "RemediationInput": {
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "deliveryTaskId",
+        "workItemId",
         "candidateDigest",
         "instructions"
       ],
       "properties": {
-        "deliveryTaskId": {
-          "oneOf": [
-            {
-              "$ref": "./domain.schema.json#/$defs/DeliveryTaskId"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
         "candidateDigest": {
           "$ref": "./domain.schema.json#/$defs/Sha256Digest"
         },
@@ -1168,6 +1080,16 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 65536
+        },
+        "workItemId": {
+          "oneOf": [
+            {
+              "$ref": "./domain.schema.json#/$defs/WorkItemId"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       }
     },
@@ -1424,8 +1346,7 @@
       "additionalProperties": false,
       "required": [
         "deliveryId",
-        "spec",
-        "tasks"
+        "spec"
       ],
       "properties": {
         "deliveryId": {
@@ -1433,13 +1354,6 @@
         },
         "spec": {
           "$ref": "#/$defs/DeliverySpecInput"
-        },
-        "tasks": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/DeliveryTaskInput"
-          },
-          "maxItems": 1000
         }
       }
     },
@@ -1459,7 +1373,7 @@
         }
       }
     },
-    "DeliveryAdvancePayload": {
+    "WorkRunStartPayload": {
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -1473,7 +1387,6 @@
         "dispatchProfile": {
           "type": "string",
           "enum": [
-            "planner",
             "executor",
             "reviewer",
             "verifier",
@@ -1807,7 +1720,7 @@
         }
       }
     },
-    "DeliveryStageRuntimeProjectionGetParameters": {
+    "WorkRunRuntimeProjectionGetParameters": {
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -1819,7 +1732,7 @@
       ],
       "properties": {
         "kind": {
-          "const": "delivery-stage"
+          "const": "work-run"
         },
         "productSessionId": {
           "$ref": "./domain.schema.json#/$defs/ProductSessionId"
@@ -1841,7 +1754,7 @@
           "$ref": "#/$defs/ProductSessionRuntimeProjectionGetParameters"
         },
         {
-          "$ref": "#/$defs/DeliveryStageRuntimeProjectionGetParameters"
+          "$ref": "#/$defs/WorkRunRuntimeProjectionGetParameters"
         }
       ]
     },
@@ -2172,7 +2085,7 @@
         }
       ]
     },
-    "DeliveryAdvanceCommand": {
+    "WorkRunStartCommand": {
       "allOf": [
         {
           "$ref": "./domain.schema.json#/$defs/CommandEnvelope"
@@ -2181,10 +2094,10 @@
           "type": "object",
           "properties": {
             "command": {
-              "const": "delivery.advance"
+              "const": "workrun.start"
             },
             "payload": {
-              "$ref": "#/$defs/DeliveryAdvancePayload"
+              "$ref": "#/$defs/WorkRunStartPayload"
             },
             "scope": {
               "$ref": "./domain.schema.json#/$defs/RepositoryScope"
@@ -3668,19 +3581,19 @@
         "reject"
       ]
     },
-    "DeliveryTaskProposalProjection": {
+    "WorkItemProposalProjection": {
       "type": "object",
       "additionalProperties": false,
       "required": [
         "id",
         "title",
         "goal",
-        "acceptanceCriterionIds",
-        "blockedByTaskIds"
+        "criterionIds",
+        "dependsOn"
       ],
       "properties": {
         "id": {
-          "$ref": "./domain.schema.json#/$defs/DeliveryTaskId"
+          "$ref": "./domain.schema.json#/$defs/WorkItemId"
         },
         "title": {
           "type": "string",
@@ -3692,28 +3605,29 @@
           "minLength": 1,
           "maxLength": 65536
         },
-        "acceptanceCriterionIds": {
+        "criterionIds": {
           "type": "array",
           "items": {
             "type": "string",
             "minLength": 1,
             "maxLength": 200,
-            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$"
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$",
+            "$ref": "./domain.schema.json#/$defs/CriterionId"
           },
           "minItems": 1,
           "maxItems": 200,
           "uniqueItems": true
         },
-        "blockedByTaskIds": {
+        "dependsOn": {
           "type": "array",
           "items": {
-            "$ref": "./domain.schema.json#/$defs/DeliveryTaskId"
+            "$ref": "./domain.schema.json#/$defs/WorkItemId"
           },
           "maxItems": 200,
           "uniqueItems": true
         }
       },
-      "description": "One ordered planner task proposal sealed into reviewSetSha256. Approval promotes these exact fields with owner null and status pending; planner-supplied ownership and HTTP replacement task content are rejected."
+      "description": "One ordered WorkItem proposal sealed into reviewSetSha256."
     },
     "SolutionReviewProjection": {
       "type": "object",
@@ -3722,9 +3636,9 @@
         "deliveryId",
         "deliverySpecId",
         "deliverySpecRevision",
-        "planningStageRunId",
+        "planningWorkRunId",
         "planningSessionBindingId",
-        "reviewStageRunId",
+        "reviewWorkRunId",
         "attentionItemId",
         "reviewSetSha256",
         "reviewStatus",
@@ -3742,7 +3656,7 @@
         "processDiagram",
         "risks",
         "unresolvedItems",
-        "taskProposals"
+        "workItemProposals"
       ],
       "properties": {
         "deliveryId": {
@@ -3757,8 +3671,8 @@
         "deliverySpecRevision": {
           "$ref": "./domain.schema.json#/$defs/Revision"
         },
-        "planningStageRunId": {
-          "$ref": "./domain.schema.json#/$defs/StageRunId"
+        "planningWorkRunId": {
+          "$ref": "./domain.schema.json#/$defs/WorkRunId"
         },
         "planningSessionBindingId": {
           "type": "string",
@@ -3766,8 +3680,15 @@
           "maxLength": 200,
           "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$"
         },
-        "reviewStageRunId": {
-          "$ref": "./domain.schema.json#/$defs/StageRunId"
+        "reviewWorkRunId": {
+          "oneOf": [
+            {
+              "$ref": "./domain.schema.json#/$defs/WorkRunId"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "attentionItemId": {
           "$ref": "./domain.schema.json#/$defs/AttentionItemId"
@@ -3896,35 +3817,15 @@
           },
           "maxItems": 200
         },
-        "taskProposals": {
+        "workItemProposals": {
           "type": "array",
           "items": {
-            "$ref": "#/$defs/DeliveryTaskProposalProjection"
+            "$ref": "#/$defs/WorkItemProposalProjection"
           },
           "minItems": 1,
           "maxItems": 200,
           "uniqueItems": true,
-          "description": "Canonical order is part of reviewSetSha256 and is preserved during task promotion."
-        },
-        "planningWorkRunId": {
-          "oneOf": [
-            {
-              "$ref": "./domain.schema.json#/$defs/WorkRunId"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "reviewWorkRunId": {
-          "oneOf": [
-            {
-              "$ref": "./domain.schema.json#/$defs/WorkRunId"
-            },
-            {
-              "type": "null"
-            }
-          ]
+          "description": "Canonical order is part of reviewSetSha256."
         }
       },
       "oneOf": [
@@ -4016,404 +3917,6 @@
         }
       ],
       "description": "Current validated solution review, including pending review content and the ordered task proposals sealed into reviewSetSha256. Human review has no ExecutionJob SessionBinding."
-    },
-    "DeliveryStageSessionBindingProjection": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "bindingId",
-        "productSessionId",
-        "executionJobId",
-        "workerSessionId",
-        "codexThreadId",
-        "boundAt",
-        "sessionIdentity",
-        "workRunId",
-        "workerId",
-        "leaseId",
-        "attempt",
-        "fencingToken",
-        "sourceIdentity"
-      ],
-      "properties": {
-        "bindingId": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 200,
-          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$"
-        },
-        "productSessionId": {
-          "$ref": "./domain.schema.json#/$defs/ProductSessionId"
-        },
-        "executionJobId": {
-          "$ref": "./domain.schema.json#/$defs/ExecutionJobId"
-        },
-        "workerSessionId": {
-          "oneOf": [
-            {
-              "$ref": "./domain.schema.json#/$defs/WorkerSessionId"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "codexThreadId": {
-          "oneOf": [
-            {
-              "$ref": "./domain.schema.json#/$defs/CodexThreadId"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "boundAt": {
-          "$ref": "./domain.schema.json#/$defs/Instant"
-        },
-        "sessionIdentity": {
-          "oneOf": [
-            {
-              "$ref": "./domain.schema.json#/$defs/SessionIdentity"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "workerId": {
-          "oneOf": [
-            {
-              "$ref": "./domain.schema.json#/$defs/WorkerId"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "leaseId": {
-          "oneOf": [
-            {
-              "$ref": "./domain.schema.json#/$defs/LeaseId"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "attempt": {
-          "oneOf": [
-            {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 1000
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "fencingToken": {
-          "oneOf": [
-            {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 20,
-              "pattern": "^[1-9][0-9]{0,19}$"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "sourceIdentity": {
-          "oneOf": [
-            {
-              "$ref": "./domain.schema.json#/$defs/SessionBindingSourceIdentity"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "workRunId": {
-          "oneOf": [
-            {
-              "$ref": "./domain.schema.json#/$defs/WorkRunId"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        }
-      },
-      "oneOf": [
-        {
-          "properties": {
-            "codexThreadId": {
-              "type": "null"
-            },
-            "workerSessionId": {
-              "type": "null"
-            },
-            "sessionIdentity": {
-              "type": "null"
-            },
-            "workerId": {
-              "type": "null"
-            },
-            "leaseId": {
-              "type": "null"
-            },
-            "attempt": {
-              "type": "null"
-            },
-            "fencingToken": {
-              "type": "null"
-            },
-            "sourceIdentity": {
-              "type": "null"
-            },
-            "workRunId": {
-              "type": "null"
-            }
-          }
-        },
-        {
-          "properties": {
-            "workerSessionId": {
-              "$ref": "./domain.schema.json#/$defs/WorkerSessionId"
-            },
-            "codexThreadId": {
-              "$ref": "./domain.schema.json#/$defs/CodexThreadId"
-            },
-            "sessionIdentity": {
-              "$ref": "./domain.schema.json#/$defs/SessionIdentity"
-            },
-            "workerId": {
-              "$ref": "./domain.schema.json#/$defs/WorkerId"
-            },
-            "leaseId": {
-              "$ref": "./domain.schema.json#/$defs/LeaseId"
-            },
-            "attempt": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 1000
-            },
-            "fencingToken": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 20,
-              "pattern": "^[1-9][0-9]{0,19}$"
-            },
-            "sourceIdentity": {
-              "$ref": "./domain.schema.json#/$defs/SessionBindingSourceIdentity"
-            },
-            "workRunId": {
-              "$ref": "./domain.schema.json#/$defs/WorkRunId"
-            }
-          }
-        }
-      ],
-      "description": "A ProductSession/ExecutionJob binding remains visible before Worker/Codex attachment; a CodexThread is never present without its WorkerSession."
-    },
-    "DeliveryStageProjection": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "id",
-        "deliveryTaskId",
-        "stage",
-        "actorType",
-        "role",
-        "status",
-        "attempt",
-        "startedAt",
-        "finishedAt",
-        "sessionBinding"
-      ],
-      "properties": {
-        "id": {
-          "$ref": "./domain.schema.json#/$defs/StageRunId"
-        },
-        "deliveryTaskId": {
-          "oneOf": [
-            {
-              "$ref": "./domain.schema.json#/$defs/DeliveryTaskId"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "stage": {
-          "type": "string",
-          "enum": [
-            "clarifying",
-            "planning",
-            "plan-review",
-            "executing",
-            "verifying",
-            "reworking",
-            "delivery-review"
-          ]
-        },
-        "actorType": {
-          "type": "string",
-          "enum": [
-            "codex",
-            "human"
-          ]
-        },
-        "role": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 500
-        },
-        "status": {
-          "type": "string",
-          "enum": [
-            "running",
-            "waiting",
-            "succeeded",
-            "failed",
-            "cancelled"
-          ]
-        },
-        "attempt": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 9007199254740991
-        },
-        "startedAt": {
-          "$ref": "./domain.schema.json#/$defs/Instant"
-        },
-        "finishedAt": {
-          "oneOf": [
-            {
-              "$ref": "./domain.schema.json#/$defs/Instant"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "sessionBinding": {
-          "oneOf": [
-            {
-              "$ref": "#/$defs/DeliveryStageSessionBindingProjection"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        }
-      },
-      "oneOf": [
-        {
-          "properties": {
-            "actorType": {
-              "const": "human"
-            },
-            "sessionBinding": {
-              "type": "null"
-            }
-          }
-        },
-        {
-          "properties": {
-            "actorType": {
-              "const": "codex"
-            },
-            "sessionBinding": {
-              "$ref": "#/$defs/DeliveryStageSessionBindingProjection"
-            }
-          }
-        }
-      ],
-      "description": "Human review stages never receive an ExecutionJob SessionBinding. Every Codex StageRun has its ProductSession/ExecutionJob binding; only WorkerSession/CodexThread attachment may remain pending."
-    },
-    "DeliveryTaskDetailProjection": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "id",
-        "title",
-        "goal",
-        "acceptanceCriterionIds",
-        "blockedByTaskIds",
-        "owner",
-        "status",
-        "workRunIds",
-        "evidenceRefs"
-      ],
-      "properties": {
-        "id": {
-          "$ref": "./domain.schema.json#/$defs/DeliveryTaskId"
-        },
-        "title": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 500
-        },
-        "goal": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 65536
-        },
-        "acceptanceCriterionIds": {
-          "type": "array",
-          "items": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 200,
-            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$"
-          },
-          "maxItems": 1000,
-          "minItems": 1,
-          "uniqueItems": true
-        },
-        "blockedByTaskIds": {
-          "type": "array",
-          "items": {
-            "$ref": "./domain.schema.json#/$defs/DeliveryTaskId"
-          },
-          "maxItems": 1000,
-          "uniqueItems": true
-        },
-        "owner": {
-          "oneOf": [
-            {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 500
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "status": {
-          "$ref": "./domain.schema.json#/$defs/DeliveryTaskStatus"
-        },
-        "evidenceRefs": {
-          "type": "array",
-          "items": {
-            "$ref": "./domain.schema.json#/$defs/EvidenceId"
-          },
-          "maxItems": 1000,
-          "uniqueItems": true
-        },
-        "workRunIds": {
-          "type": "array",
-          "items": {
-            "$ref": "./domain.schema.json#/$defs/WorkRunId"
-          },
-          "maxItems": 1000,
-          "uniqueItems": true
-        }
-      }
     },
     "DeliveryAttentionOptionProjection": {
       "type": "object",
@@ -5050,8 +4553,6 @@
         "requirements",
         "solutionReview",
         "diagramExecution",
-        "stages",
-        "tasks",
         "attention",
         "evidence",
         "currentCandidate",
@@ -5078,7 +4579,7 @@
           "$ref": "./domain.schema.json#/$defs/DeliveryOwnershipProjection"
         },
         "status": {
-          "$ref": "./domain.schema.json#/$defs/DeliveryStatus"
+          "$ref": "./domain.schema.json#/$defs/WorkItemState"
         },
         "requirements": {
           "$ref": "#/$defs/DeliveryRequirementsProjection"
@@ -5102,20 +4603,6 @@
               "type": "null"
             }
           ]
-        },
-        "stages": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/DeliveryStageProjection"
-          },
-          "maxItems": 1000
-        },
-        "tasks": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/DeliveryTaskDetailProjection"
-          },
-          "maxItems": 1000
         },
         "attention": {
           "type": "array",
@@ -5325,7 +4812,7 @@
         }
       ]
     },
-    "DeliveryAdvanceCompletedResponse": {
+    "WorkRunStartCompletedResponse": {
       "allOf": [
         {
           "$ref": "#/$defs/CommandCompletedEnvelope"
@@ -5333,7 +4820,7 @@
         {
           "properties": {
             "command": {
-              "const": "delivery.advance"
+              "const": "workrun.start"
             },
             "result": {
               "$ref": "./domain.schema.json#/$defs/DeliveryProjection"
@@ -8539,6 +8026,27 @@
       },
       "description": "Derived Work graph row. State and blockers are computed from the canonical WorkItem graph and are never persisted separately."
     },
+    "WorkRunDeviceBindingProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "workRunId",
+        "clientId",
+        "repositoryBindingId"
+      ],
+      "properties": {
+        "workRunId": {
+          "$ref": "./domain.schema.json#/$defs/WorkRunId"
+        },
+        "clientId": {
+          "$ref": "./client-control.schema.json#/$defs/PublicClientId"
+        },
+        "repositoryBindingId": {
+          "$ref": "./client-control.schema.json#/$defs/RepositoryBindingId"
+        }
+      },
+      "description": "Secret-free Client and repository binding copied from the scheduler-sealed device execution facts for one WorkRun."
+    },
     "WorkRunAggregateProjection": {
       "type": "object",
       "additionalProperties": false,
@@ -8547,6 +8055,7 @@
         "contract",
         "items",
         "runs",
+        "deviceBindings",
         "graphItems",
         "readCursor"
       ],
@@ -8569,6 +8078,14 @@
           "maxItems": 1000,
           "items": {
             "$ref": "./domain.schema.json#/$defs/WorkRun"
+          }
+        },
+        "deviceBindings": {
+          "type": "array",
+          "maxItems": 1000,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/WorkRunDeviceBindingProjection"
           }
         },
         "graphItems": {
@@ -8667,7 +8184,7 @@
         }
       ]
     },
-    "DeliveryTaskBreakdownCreateItem": {
+    "WorkItemsCreateItem": {
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -8710,7 +8227,7 @@
         }
       }
     },
-    "DeliveryTaskBreakdownCreatePayload": {
+    "WorkItemsCreatePayload": {
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -8734,12 +8251,12 @@
           "minItems": 1,
           "maxItems": 1000,
           "items": {
-            "$ref": "#/$defs/DeliveryTaskBreakdownCreateItem"
+            "$ref": "#/$defs/WorkItemsCreateItem"
           }
         }
       }
     },
-    "DeliveryTaskBreakdownCreateCommand": {
+    "WorkItemsCreateCommand": {
       "allOf": [
         {
           "$ref": "./domain.schema.json#/$defs/CommandEnvelope"
@@ -8748,10 +8265,10 @@
           "type": "object",
           "properties": {
             "command": {
-              "const": "delivery.task_breakdown.create"
+              "const": "workitems.create"
             },
             "payload": {
-              "$ref": "#/$defs/DeliveryTaskBreakdownCreatePayload"
+              "$ref": "#/$defs/WorkItemsCreatePayload"
             },
             "scope": {
               "$ref": "./domain.schema.json#/$defs/RepositoryScope"
@@ -8760,7 +8277,7 @@
         }
       ]
     },
-    "DeliveryTaskBreakdownCreateResult": {
+    "WorkItemsCreateResult": {
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -8785,7 +8302,7 @@
         }
       }
     },
-    "DeliveryTaskBreakdownCreateCompletedResponse": {
+    "WorkItemsCreateCompletedResponse": {
       "allOf": [
         {
           "$ref": "#/$defs/CommandCompletedEnvelope"
@@ -8794,10 +8311,10 @@
           "type": "object",
           "properties": {
             "command": {
-              "const": "delivery.task_breakdown.create"
+              "const": "workitems.create"
             },
             "result": {
-              "$ref": "#/$defs/DeliveryTaskBreakdownCreateResult"
+              "$ref": "#/$defs/WorkItemsCreateResult"
             }
           }
         }

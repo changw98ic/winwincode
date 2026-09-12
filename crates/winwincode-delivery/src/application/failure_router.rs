@@ -159,6 +159,28 @@ pub enum FailureRoute {
     Abort,
 }
 
+/// The authority expected to resolve one deterministically classified failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BlockerOwnerType {
+    Agent,
+    System,
+    Human,
+}
+
+impl FailureRoute {
+    #[must_use]
+    pub const fn owner_type(self) -> BlockerOwnerType {
+        match self {
+            Self::Repair | Self::Replan | Self::ModelEscalation => BlockerOwnerType::Agent,
+            Self::InfraRetry | Self::Abort => BlockerOwnerType::System,
+            Self::Clarification | Self::AcceptanceReview | Self::HumanReview => {
+                BlockerOwnerType::Human
+            }
+        }
+    }
+}
+
 /// Exact contract identity retained in every failure packet.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -240,6 +262,7 @@ pub struct FailurePacket {
     schema_version: u8,
     id: String,
     route: FailureRoute,
+    owner_type: BlockerOwnerType,
     contract: FailureContractRef,
     candidate_ref: String,
     counterexample: FailureCounterexample,
@@ -264,6 +287,11 @@ impl FailurePacket {
     #[must_use]
     pub const fn route(&self) -> FailureRoute {
         self.route
+    }
+
+    #[must_use]
+    pub const fn owner_type(&self) -> BlockerOwnerType {
+        self.owner_type
     }
 
     #[must_use]
@@ -382,6 +410,7 @@ impl Error for FailureRoutingError {}
 struct FailurePacketIdentity<'packet> {
     schema_version: u8,
     route: FailureRoute,
+    owner_type: BlockerOwnerType,
     contract: &'packet FailureContractRef,
     candidate_ref: &'packet str,
     counterexample: &'packet FailureCounterexample,
@@ -438,6 +467,7 @@ pub fn route_failure(
     let identity = FailurePacketIdentity {
         schema_version: crate::domain::DELIVERY_SCHEMA_VERSION,
         route,
+        owner_type: route.owner_type(),
         contract: &contract,
         candidate_ref: candidate.candidate_ref(),
         counterexample: &input.counterexample,
@@ -458,6 +488,7 @@ pub fn route_failure(
         schema_version: crate::domain::DELIVERY_SCHEMA_VERSION,
         id,
         route,
+        owner_type: route.owner_type(),
         contract,
         candidate_ref: candidate.candidate_ref().into(),
         counterexample: input.counterexample,
@@ -773,35 +804,46 @@ mod tests {
             (
                 RuntimeFailure::CandidateCommandFailure,
                 FailureRoute::Repair,
+                BlockerOwnerType::Agent,
             ),
-            (RuntimeFailure::PlanInvariantFailed, FailureRoute::Replan),
+            (
+                RuntimeFailure::PlanInvariantFailed,
+                FailureRoute::Replan,
+                BlockerOwnerType::Agent,
+            ),
             (
                 RuntimeFailure::RequiredInputMissing,
                 FailureRoute::Clarification,
+                BlockerOwnerType::Human,
             ),
             (
                 RuntimeFailure::AcceptanceHarnessMismatch,
                 FailureRoute::AcceptanceReview,
+                BlockerOwnerType::Human,
             ),
             (
                 RuntimeFailure::LeaseOrResourceUnavailable,
                 FailureRoute::InfraRetry,
+                BlockerOwnerType::System,
             ),
             (
                 RuntimeFailure::ModelContextExhausted,
                 FailureRoute::ModelEscalation,
+                BlockerOwnerType::Agent,
             ),
             (
                 RuntimeFailure::PolicyDecisionRequired,
                 FailureRoute::HumanReview,
+                BlockerOwnerType::Human,
             ),
             (
                 RuntimeFailure::CancelledOrIntegrityLost,
                 FailureRoute::Abort,
+                BlockerOwnerType::System,
             ),
         ];
 
-        for (failure, expected) in cases {
+        for (failure, expected, owner) in cases {
             let fixture = fixture(VerdictFixtureOutcome::Fail);
             let decision = route_failure(
                 &fixture.delivery,
@@ -812,6 +854,7 @@ mod tests {
 
             assert_eq!(decision.next_action(), expected);
             assert_eq!(decision.packet().route(), expected);
+            assert_eq!(decision.packet().owner_type(), owner);
         }
     }
 
@@ -1026,6 +1069,7 @@ mod tests {
         let value = serde_json::to_value(decision.packet()).expect("packet JSON");
 
         assert_eq!(value["route"], "model_escalation");
+        assert_eq!(value["ownerType"], "agent");
         assert_eq!(value["source"]["signal"]["sourceKind"], "provider");
         assert_eq!(value["source"]["signal"]["failure"], "model_capability_gap");
         assert!(value["contract"]["deliverySpecId"].is_string());

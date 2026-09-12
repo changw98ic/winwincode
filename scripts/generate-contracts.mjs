@@ -713,7 +713,7 @@ import type {
   ControlPlaneWebSocketAcknowledgedCursor,
   ControlPlaneWebSocketAuthorizationRevokedFrame,
   ControlPlaneWebSocketClientFrame,
-  ControlPlaneWebSocketDeliveryStageRuntimeProjectionInvalidatedEvent,
+  ControlPlaneWebSocketWorkRunRuntimeProjectionInvalidatedEvent,
   ControlPlaneWebSocketEventFrame,
   ControlPlaneWebSocketEventType,
   ControlPlaneWebSocketResetRequiredFrame,
@@ -1332,10 +1332,10 @@ function eventMatchesStream(frame: ControlPlaneWebSocketEventFrame): boolean {
         && event.message.productSessionId === stream.productSessionId
     case 'attention.changed.v1':
     case 'delivery.changed.v1':
-    case 'delivery-task.changed.v1':
+    case 'work-item.changed.v1':
       return stream.kind === 'delivery' && event.deliveryId === stream.deliveryId
     case 'runtime-projection.invalidated.v1':
-      return event.scopeKind === 'delivery-stage'
+      return event.scopeKind === 'work-run'
         ? stream.kind === 'delivery' && event.deliveryId === stream.deliveryId
         : stream.kind === 'product-session' && event.productSessionId === stream.productSessionId
     case 'presence.changed.v1':
@@ -2108,7 +2108,7 @@ export function createStrongFlowProjectionSubscription(
           scope: options.scope,
           query: 'runtime.projection.get',
           parameters: {
-            kind: 'delivery-stage',
+            kind: 'work-run',
             productSessionId: options.productSessionId,
             deliveryId: options.deliveryId,
             workRunId: options.workRunId,
@@ -2188,7 +2188,7 @@ export function createStrongFlowProjectionSubscription(
     if (frame.event.type !== 'runtime-projection.invalidated.v1') return
     const event = frame.event
     if (
-      event.scopeKind !== 'delivery-stage'
+      event.scopeKind !== 'work-run'
       || event.productSessionId !== options.productSessionId
       || event.deliveryId !== options.deliveryId
       || event.workRunId !== options.workRunId

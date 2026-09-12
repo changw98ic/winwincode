@@ -215,7 +215,7 @@ fn state_change_survives_restart_with_one_verified_sequence() {
         AuditActor::System(SystemActorId(id("sys", '6'))),
         repository_scope(),
         RequestId(id("req", '7')),
-        AuditAction::command("delivery.advance").expect("canonical command action"),
+        AuditAction::command("workrun.start").expect("canonical command action"),
         AuditState::changed(Some(digest('a')), digest('b')).expect("changed state digests"),
         AuditOrigin::local("control-plane").expect("canonical local origin"),
         AuditSubject::new()
@@ -233,7 +233,7 @@ fn state_change_survives_restart_with_one_verified_sequence() {
         assert_eq!(record.sequence(), 1);
         assert_eq!(
             record.event_digest().0,
-            "sha256:e2fbc7e3d1a0aacf5980f19afa468e960f652e3e5a530ac0455df0883956ccdd"
+            "sha256:23cc6ee77f6a56d617ff7ef177493d52a7c491d2e39d45893279ef0fd346266c"
         );
         assert_eq!(record.event(), Some(&event));
         assert_eq!(record.previous_digest(), None);
@@ -800,7 +800,7 @@ fn closed_action_fixtures() -> Vec<(&'static str, AuditActionKind, AuditAction)>
         (
             "command",
             AuditActionKind::Command,
-            AuditAction::command("delivery.advance").expect("command action"),
+            AuditAction::command("workrun.start").expect("command action"),
         ),
         (
             "approval",

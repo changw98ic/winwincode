@@ -262,25 +262,25 @@ test('the recovery-pending card shows the recovery window and the Owner force-re
     device({ occupancy: 'recovery-pending', recoveryDeadlineAt: futureDeadline }),
     fixedNow,
   )
-  assert.equal(future, `Connection interrupted · recovers by ${futureDeadline}`)
+  assert.equal(future, `连接中断 · 预计在 ${futureDeadline} 前恢复`)
   const passed = deviceRecoveryDeadlineText(
     device({ occupancy: 'recovery-pending', recoveryDeadlineAt: pastDeadline }),
     fixedNow,
   )
   assert.equal(
     passed,
-    `Recovery deadline ${pastDeadline} has passed · the device Owner can force-release`,
+    `恢复期限 ${pastDeadline} 已过 · 设备所有者可以强制释放`,
   )
   const unreported = deviceRecoveryDeadlineText(
     device({ occupancy: 'recovery-pending', recoveryDeadlineAt: null }),
     fixedNow,
   )
-  assert.equal(unreported, 'Waiting to recover · no recovery deadline was reported')
+  assert.equal(unreported, '正在等待恢复 · 未报告恢复期限')
   const malformed = deviceRecoveryDeadlineText(
     device({ occupancy: 'recovery-pending', recoveryDeadlineAt: 'not-an-instant' }),
     fixedNow,
   )
-  assert.equal(malformed, 'Waiting to recover · no recovery deadline was reported')
+  assert.equal(malformed, '正在等待恢复 · 未报告恢复期限')
 })
 
 test('the recovery-pending card prints its deadline and only the Owner entry, no holder actions', async () => {
@@ -290,7 +290,7 @@ test('the recovery-pending card prints its deadline and only the Owner entry, no
   const card = cardAt(rootElement, 0)
   const recovery = findOne(card, 'wwc-clients-card-recovery')
   assert.equal(recovery.hidden, false)
-  assert.equal(recovery.textContent, `Connection interrupted · recovers by ${futureDeadline}`)
+  assert.equal(recovery.textContent, `连接中断 · 预计在 ${futureDeadline} 前恢复`)
 
   const force = findOne(card, 'wwc-clients-card-force-release')
   assert.equal(force.hidden, false, 'the Owner entry is visible on the interrupted card')
@@ -310,7 +310,7 @@ test('a passed recovery window names the Owner cleanup on the card', async () =>
   const recovery = findOne(cardAt(rootElement, 0), 'wwc-clients-card-recovery')
   assert.equal(
     recovery.textContent,
-    `Recovery deadline ${pastDeadline} has passed · the device Owner can force-release`,
+    `恢复期限 ${pastDeadline} 已过 · 设备所有者可以强制释放`,
   )
   page.close()
   occupancyModel.close()
@@ -327,9 +327,9 @@ test('force release always asks first, submits through the Owner seam, and re-re
   assert.equal(confirm.hidden, false)
   assert.equal(
     findOne(card, 'wwc-clients-card-confirm-text').textContent,
-    'Force-releasing now ends the interrupted occupancy immediately so the device can be claimed again.',
+    '强制释放会立即结束中断的占用，使设备可以再次被占用。',
   )
-  assert.equal(findOne(card, 'wwc-clients-card-confirm-accept').textContent, 'Force release')
+  assert.equal(findOne(card, 'wwc-clients-card-confirm-accept').textContent, '强制释放')
 
   // Keep drops the armed draft without submitting.
   findOne(card, 'wwc-clients-card-confirm-keep').emit('click')
@@ -364,7 +364,7 @@ test('a non-Owner denial keeps the armed draft with the honest Owner-only copy',
   assert.equal(occupancyModel.interaction('123456789012').failure, 'permission-denied')
   assert.equal(
     findOne(card, 'wwc-clients-card-error').textContent,
-    'Only the device Owner can force-release this device.',
+    '只有设备所有者可以强制释放该设备。',
   )
   assert.equal(
     findOne(card, 'wwc-clients-card-confirm').hidden,
@@ -416,7 +416,7 @@ test('the draining card keeps the explicit cancel-and-release confirmation on th
   const { rootElement, clientsModel, occupancyModel, port } = handle
   const card = cardAt(rootElement, 0)
   assert.equal(findOne(card, 'wwc-clients-card-state').textContent,
-    'Online, finishing current tasks')
+    '在线，正在完成当前任务')
   assert.equal(findOne(card, 'wwc-clients-card-release').hidden, true)
   const cancel = findOne(card, 'wwc-clients-card-cancel-release')
   assert.equal(cancel.hidden, false)
@@ -425,10 +425,10 @@ test('the draining card keeps the explicit cancel-and-release confirmation on th
   assert.deepEqual(port.calls, [], 'the destructive stop waits for the explicit accept')
   assert.equal(
     findOne(card, 'wwc-clients-card-confirm-text').textContent,
-    'Stopping now cancels the running tasks and frees the device immediately.',
+    '停止后将取消正在运行的任务，并立即释放设备。',
   )
   assert.equal(findOne(card, 'wwc-clients-card-confirm-accept').textContent,
-    'Cancel tasks and release')
+    '取消任务并释放')
 
   findOne(card, 'wwc-clients-card-confirm-accept').emit('click')
   assert.deepEqual(port.calls, [{ action: 'cancel-and-release', clientId: '123456789012' }])

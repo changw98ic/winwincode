@@ -180,7 +180,7 @@ impl AuditSubjectFilter {
     /// # Errors
     ///
     /// Rejects a non-canonical `WorkRun` identity.
-    pub fn stage_run(id: WorkRunId) -> Result<Self, AuditExportError> {
+    pub fn work_run(id: WorkRunId) -> Result<Self, AuditExportError> {
         Self::typed("run", SubjectIdentity::WorkRun(id))
     }
 

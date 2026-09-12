@@ -129,9 +129,9 @@ function modelRouteReasonLabel(reason: ModelRouteAvailabilityReason): string {
   if (reason === ModelRouteAvailabilityReason.RateLimited) return '速率受限'
   if (reason === ModelRouteAvailabilityReason.WindowExhausted) return '用量窗口已用尽'
   if (reason === ModelRouteAvailabilityReason.WeeklyExhausted) return '周用量已用尽'
-  if (reason === ModelRouteAvailabilityReason.AuthenticationError) return 'Provider 认证失败'
-  if (reason === ModelRouteAvailabilityReason.RuntimeStatusUnknown) return 'Provider 状态未知'
-  if (reason === ModelRouteAvailabilityReason.NoProvider) return '没有可用的 Provider'
+  if (reason === ModelRouteAvailabilityReason.AuthenticationError) return '模型服务商认证失败'
+  if (reason === ModelRouteAvailabilityReason.RuntimeStatusUnknown) return '模型服务商状态未知'
+  if (reason === ModelRouteAvailabilityReason.NoProvider) return '没有可用的模型服务商'
   if (reason === ModelRouteAvailabilityReason.CredentialMissingOrRevoked) {
     return '凭据缺失或已撤销'
   }
@@ -139,7 +139,7 @@ function modelRouteReasonLabel(reason: ModelRouteAvailabilityReason): string {
     return '默认模型路由无效'
   }
   if (reason === ModelRouteAvailabilityReason.ProviderOrModelDisabled) {
-    return 'Provider 或模型已停用'
+    return '模型服务商或模型已停用'
   }
   return '请求池不可用'
 }
@@ -170,7 +170,7 @@ function errorLabel(error: ControlPlaneClientError | null): string | null {
     return '模型请求池或所选模型暂时不可用，请稍后重试。'
   }
   if (error.code === 'TRUSTED_FACTS_UNAVAILABLE') {
-    return '配置的 Provider 或模型不可用，请先检查设置再重试。'
+    return '配置的模型服务商或模型不可用，请先检查设置再重试。'
   }
   if (error.kind === 'authentication') return '请重新登录以继续该对话。'
   if (error.kind === 'authorization') return '你没有这个对话的访问权限。'
@@ -184,19 +184,19 @@ function errorLabel(error: ControlPlaneClientError | null): string | null {
 function modelRouteEmptyText(state: ChatViewModelState): string {
   const reason = state.modelRouteAvailability?.reason
   if (reason === ModelRouteAvailabilityReason.RateLimited) {
-    return 'The selected Provider is rate limited. Retry later or choose another model.'
+    return '所选模型服务商受到速率限制，请稍后重试或选择其他模型。'
   }
   if (reason === ModelRouteAvailabilityReason.WindowExhausted) {
-    return 'The selected Provider usage window is exhausted. Retry after the window resets.'
+    return '所选模型服务商的用量窗口已用尽，请在窗口重置后重试。'
   }
   if (reason === ModelRouteAvailabilityReason.WeeklyExhausted) {
-    return 'The selected Provider weekly usage is exhausted. Retry after the weekly reset.'
+    return '所选模型服务商的每周用量已用尽，请在下周重置后重试。'
   }
   if (reason === ModelRouteAvailabilityReason.AuthenticationError) {
-    return 'The selected Provider rejected its credential. Rotate or replace it in Settings.'
+    return '所选模型服务商拒绝了凭据，请在设置中轮换或替换凭据。'
   }
   if (reason === ModelRouteAvailabilityReason.RuntimeStatusUnknown) {
-    return 'The selected Provider status is unknown. Retry, or explicitly choose another route.'
+    return '所选模型服务商状态未知，请重试或选择其他路由。'
   }
   if (reason === ModelRouteAvailabilityReason.CredentialMissingOrRevoked) {
     return '配置的模型凭据缺失或已被撤销。请检查设置。'
@@ -205,12 +205,12 @@ function modelRouteEmptyText(state: ChatViewModelState): string {
     return '默认模型路由无效。请检查设置。'
   }
   if (reason === ModelRouteAvailabilityReason.ProviderOrModelDisabled) {
-    return '配置的 Provider 或模型已停用。请检查设置。'
+    return '配置的模型服务商或模型已停用，请检查设置。'
   }
   if (reason === ModelRouteAvailabilityReason.RequestPoolUnavailable) {
     return '所选模型请求池不可用。请重试或检查设置。'
   }
-  return '没有可用的 Provider，因此未配置模型路由。请先打开设置再创建对话。'
+  return '没有可用的模型服务商，因此未配置模型路由。请先打开设置再创建对话。'
 }
 
 export function chatPagePresentation(state: ChatViewModelState): ChatPagePresentation {
@@ -275,20 +275,20 @@ function deliveryConversionError(state: ChatDeliveryCreatorState): string | null
   const error = state.error
   if (error === null) return null
   if (error.code.startsWith('STRONGFLOW_CREATE_')) return error.message
-  if (error.kind === 'authentication') return 'Sign in again before creating this Delivery.'
+  if (error.kind === 'authentication') return '创建此交付前请重新登录。'
   if (error.kind === 'authorization') {
-    return 'You do not have permission to create a Delivery in this repository.'
+    return '你没有在此仓库中创建交付的权限。'
   }
   if (error.kind === 'network') {
-    return 'The StrongFlow server could not be reached. The confirmed Chat draft is still here.'
+    return '无法连接强流程服务器，已确认的对话草稿仍保留在此处。'
   }
   if (error.kind === 'cancelled') {
-    return 'Delivery creation was cancelled. The confirmed Chat draft is still here.'
+    return '交付创建已取消，已确认的对话草稿仍保留在此处。'
   }
   if (error.code === 'REVISION_CONFLICT') {
-    return 'The Delivery changed before StrongFlow could start. Retry the same confirmed draft.'
+    return '强流程启动前交付已发生变化，请重试同一份已确认草稿。'
   }
-  return 'The Delivery could not be created. The confirmed Chat draft is still here; retry it.'
+  return '无法创建交付，已确认的对话草稿仍保留在此处，请重试。'
 }
 
 const CONVERSION_DIALOG_HEADING_ID = 'wwc-chat-convert-heading'
@@ -429,7 +429,7 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
     document,
     props: {
       className: 'wwc-chat-convert-submit',
-      label: 'Confirm and create Delivery',
+      label: '确认并创建交付',
       type: 'submit',
       variant: 'primary',
     },
@@ -438,7 +438,7 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
     document,
     props: {
       className: 'wwc-chat-convert-cancel',
-      label: 'Cancel conversion',
+      label: '取消转换',
       type: 'button',
     },
   })
@@ -448,8 +448,8 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
   let conversionFocusReturn: HTMLElement | null = null
 
   // UI-502: the Session's own pending inputs and approvals, decided in place
-  // through this page's view-model commands instead of a detour to the global
-  // Attention Center.  The card is a projection of this page's snapshot, so it
+  // through this page's view-model commands. The card is a projection of this
+  // page's snapshot, so it
   // cannot drift from the state the rest of the page renders.
   // The card mounts into this detached root, so a hidden card adds no node to
   // the conversation and the page layout stays byte-identical when idle.
@@ -515,10 +515,10 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
   flowCaption.textContent = '交付流程示意'
   architectureView.append(
     diagramChain(document, [
-      diagramArchitectureNode(document, 'wwc-chat-diagram-glyph-web', 'Web UI'),
-      diagramArchitectureNode(document, 'wwc-chat-diagram-glyph-backend', 'Backend'),
-      diagramArchitectureNode(document, 'wwc-chat-diagram-glyph-client', 'Client'),
-      diagramArchitectureNode(document, 'wwc-chat-diagram-glyph-worker', 'Worker'),
+      diagramArchitectureNode(document, 'wwc-chat-diagram-glyph-web', '网页界面'),
+      diagramArchitectureNode(document, 'wwc-chat-diagram-glyph-backend', '后端'),
+      diagramArchitectureNode(document, 'wwc-chat-diagram-glyph-client', '执行设备'),
+      diagramArchitectureNode(document, 'wwc-chat-diagram-glyph-worker', '执行进程'),
     ], false),
     architectureCaption,
   )
@@ -611,29 +611,29 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
   const conversionFields = [
     mountFormField({
       document,
-      props: { id: 'chat-convert-title', label: 'Delivery title', control: conversionTitle, required: true },
+      props: { id: 'chat-convert-title', label: '交付标题', control: conversionTitle, required: true },
     }),
     mountFormField({
       document,
-      props: { id: 'chat-convert-goal', label: 'Confirmed goal', control: conversionGoal, required: true },
+      props: { id: 'chat-convert-goal', label: '已确认目标', control: conversionGoal, required: true },
     }),
     mountFormField({
       document,
-      props: { id: 'chat-convert-session', label: 'Source Chat', control: conversionSourceSession },
+      props: { id: 'chat-convert-session', label: '来源对话', control: conversionSourceSession },
     }),
     mountFormField({
       document,
-      props: { id: 'chat-convert-scope', label: 'Repository Scope', control: conversionScope },
+      props: { id: 'chat-convert-scope', label: '仓库范围', control: conversionScope },
     }),
     mountFormField({
       document,
-      props: { id: 'chat-convert-model', label: 'Model context', control: conversionModel },
+      props: { id: 'chat-convert-model', label: '模型上下文', control: conversionModel },
     }),
     mountFormField({
       document,
       props: {
         id: 'chat-convert-baseline',
-        label: 'Baseline revision',
+        label: '基准修订版',
         control: conversionBaseline,
         required: true,
       },
@@ -642,8 +642,8 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
       document,
       props: {
         id: 'chat-convert-delivery-scope',
-        label: 'In scope',
-        help: 'Enter one confirmed result per line.',
+        label: '范围内',
+        help: '每行输入一项已确认结果。',
         control: conversionDeliveryScope,
         required: true,
       },
@@ -652,8 +652,8 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
       document,
       props: {
         id: 'chat-convert-out-of-scope',
-        label: 'Out of scope',
-        help: 'Enter one explicit exclusion per line.',
+        label: '范围外',
+        help: '每行输入一项明确排除内容。',
         control: conversionOutOfScope,
       },
     }),
@@ -661,8 +661,8 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
       document,
       props: {
         id: 'chat-convert-constraints',
-        label: 'Constraints',
-        help: 'Enter one confirmed constraint per line.',
+        label: '约束',
+        help: '每行输入一项已确认约束。',
         control: conversionConstraints,
       },
     }),
@@ -670,8 +670,8 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
       document,
       props: {
         id: 'chat-convert-criteria',
-        label: 'Initial acceptance criteria',
-        help: 'Enter one required result per line.',
+        label: '初始验收标准',
+        help: '每行输入一项必需结果。',
         control: conversionCriteria,
         required: true,
       },
@@ -971,16 +971,16 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
     conversionError.textContent = visibleError ?? ''
     conversionSubmit.update({
       className: 'wwc-chat-convert-submit',
-      label: 'Confirm and create Delivery',
+      label: '确认并创建交付',
       busy,
-      busyLabel: state.status === 'waiting' ? 'Waiting for Delivery…' : 'Creating Delivery…',
+      busyLabel: state.status === 'waiting' ? '正在等待交付…' : '正在创建交付…',
       disabled: readOnly || !conversionOpen || state.status === 'created' || state.status === 'closed',
       type: 'submit',
       variant: 'primary',
     })
     conversionCancel.update({
       className: 'wwc-chat-convert-cancel',
-      label: busy ? 'Cancel pending creation' : 'Cancel conversion',
+      label: busy ? '取消待处理的创建请求' : '取消转换',
       type: 'button',
       onActivate() {
         if (options.deliveryCreator === undefined) return
@@ -1068,7 +1068,7 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
   }
   const onCancel = () => {
     if (readOnly) return
-    void options.model.cancelSession('Stopped from the Chat page.')
+    void options.model.cancelSession('从对话页面停止。')
   }
   const onArchitectureTab = () => { setDiagramTab('architecture') }
   const onFlowTab = () => { setDiagramTab('flow') }

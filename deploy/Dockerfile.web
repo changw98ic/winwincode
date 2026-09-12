@@ -1,0 +1,18 @@
+# syntax=docker/dockerfile:1.7
+FROM node:24-bookworm-slim AS build
+
+WORKDIR /src
+COPY . .
+RUN corepack pnpm install --frozen-lockfile \
+    && corepack pnpm --filter @winwincode/client build
+
+FROM node:24-bookworm-slim
+ENV HOST=0.0.0.0 PORT=8080
+WORKDIR /app
+COPY --from=build /src/apps/client/dist/public ./public
+COPY deploy/serve-client.mjs ./serve-client.mjs
+RUN chown -R node:node /app
+
+USER node
+EXPOSE 8080
+ENTRYPOINT ["node", "/app/serve-client.mjs"]

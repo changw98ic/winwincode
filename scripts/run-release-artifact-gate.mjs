@@ -188,7 +188,7 @@ function rustBuild(target, targetDirectory, sourceDateEpoch, buildPaths) {
   const env = releaseEnvironment(target, targetDirectory, sourceDateEpoch, buildPaths)
   const targetIdentity = targetConfiguration(target)
   run(process.execPath, [
-    'scripts/build-products.mjs',
+    'scripts/build-community.mjs',
     '--release',
     '--target',
     target,

@@ -41,7 +41,7 @@ export function mountClientErrorBoundary(
   const retry = mountButton({
     document: options.document,
     props: {
-      label: 'Retry route',
+      label: '重试当前页面',
       variant: 'primary',
       className: 'wwc-client-error-retry',
       onActivate: () => { current.onRetry() },
@@ -50,7 +50,7 @@ export function mountClientErrorBoundary(
   const safeEntry = mountButton({
     document: options.document,
     props: {
-      label: 'Return to Chat',
+      label: '返回对话',
       className: 'wwc-client-error-safe-entry',
       onActivate: () => { current.onSafeEntry() },
     },
@@ -72,8 +72,8 @@ export function mountClientErrorBoundary(
   const errorState = mountErrorState({
     document: options.document,
     props: {
-      title: 'This area stopped unexpectedly',
-      message: 'Retry this route or return to Chat.',
+      title: '此区域意外停止',
+      message: '请重试当前页面或返回对话。',
       actions: [retry.root, safeEntry.root, copy.root],
       visible: false,
       className: 'wwc-client-error-boundary',
@@ -91,23 +91,23 @@ export function mountClientErrorBoundary(
     current = props
     const failure = props.failure
     errorState.update({
-      title: failure?.title ?? 'This area stopped unexpectedly',
-      message: failure?.message ?? 'Retry this route or return to Chat.',
+      title: failure?.title ?? '此区域意外停止',
+      message: failure?.message ?? '请重试当前页面或返回对话。',
       ...(failure === null
         ? {}
-        : { detail: `Error code: ${failure.code} · Request ID: ${failure.requestId ?? 'not available'}` }),
+        : { detail: `错误代码：${failure.code} · 请求 ID：${failure.requestId ?? '不可用'}` }),
       actions: [retry.root, safeEntry.root, copy.root],
       visible: failure !== null,
       className: 'wwc-client-error-boundary',
     })
     retry.update({
-      label: failure?.recoveryLabel ?? 'Retry route',
+      label: failure?.recoveryLabel ?? '重试当前页面',
       variant: 'primary',
       className: 'wwc-client-error-retry',
       onActivate: () => { current.onRetry() },
     })
     safeEntry.update({
-      label: 'Return to Chat',
+      label: '返回对话',
       className: 'wwc-client-error-safe-entry',
       onActivate: () => { current.onSafeEntry() },
     })

@@ -6,7 +6,7 @@ use std::sync::Mutex;
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use winwincode_api::generated::{CommandEnvelope, CommandName, DeliveryAdvancePayload};
+use winwincode_api::generated::{CommandEnvelope, CommandName, WorkRunStartPayload};
 use winwincode_delivery::domain::Delivery;
 use winwincode_delivery::store::{
     AtomicPublication, DeliveryCommand, DeliveryCommandPort, DeliveryJournalPort, DeliveryStore,
@@ -104,7 +104,7 @@ impl DeliveryExecutionTransaction for AtomicDeliveryExecutionTransaction<'_, '_>
                 request_id: pending.request_id().clone(),
                 request_digest,
                 expected_revision,
-                transition: pending.stage_transition().clone(),
+                transition: pending.work_run_transition().clone(),
             }));
         let mutation = DeliveryStore::borrowed(&journal)
             .execute(command)
@@ -148,9 +148,9 @@ fn validate_command(
     command: &CommandEnvelope,
     pending: &PendingDeliveryExecution,
 ) -> Result<(), DeliveryExecutionPortError> {
-    if command.command != CommandName::DeliveryAdvance {
+    if command.command != CommandName::WorkRunStart {
         return Err(DeliveryExecutionPortError::new(
-            "Delivery execution transaction requires delivery.advance",
+            "Delivery execution transaction requires workrun.start",
         ));
     }
     if command.request_id != *pending.request_id() {
@@ -158,25 +158,25 @@ fn validate_command(
             "command requestId does not match the pending Delivery execution",
         ));
     }
-    let payload: DeliveryAdvancePayload =
+    let payload: WorkRunStartPayload =
         serde_json::from_value(command.payload.clone()).map_err(|error| {
             DeliveryExecutionPortError::new(format!(
-                "delivery.advance payload is not canonical: {error}"
+                "workrun.start payload is not canonical: {error}"
             ))
         })?;
     if serde_json::to_value(&payload).map_err(port_error)? != command.payload
         || payload.delivery_id != *pending.delivery().id()
     {
         return Err(DeliveryExecutionPortError::new(
-            "delivery.advance payload does not identify the pending Delivery exactly",
+            "workrun.start payload does not identify the pending Delivery exactly",
         ));
     }
     pending
-        .stage_transition()
+        .work_run_transition()
         .validate_projection()
         .map_err(port_error)?;
-    let winwincode_delivery::application::stage::StageAdvanceEffect::Dispatch(intent) =
-        &pending.stage_transition().effect
+    let winwincode_delivery::application::workrun_execution::WorkRunStartEffect::Dispatch(intent) =
+        &pending.work_run_transition().effect
     else {
         return Err(DeliveryExecutionPortError::new(
             "new execution requires a sealed dispatch intent",
@@ -213,7 +213,7 @@ fn validate_command(
             "requested rework scope differs from the sealed dispatch authorization",
         ));
     }
-    let expected_job = crate::delivery_execution::prepare_workrun_advance(
+    let expected_job = crate::delivery_execution::prepare_workrun_start(
         pending.request_id(),
         &pending.delivery().snapshot().work_run_aggregate,
         &pending.delivery().snapshot().spec,
@@ -365,7 +365,7 @@ pub(crate) fn strict_execution_job(
             .map_err(|_| DeliveryExecutionPortError::new(NON_CANONICAL_EXECUTION_JOB))?;
     if scope.kind != winwincode_execution_port::generated::WorkRunExecutionScopeKind::WorkRun {
         return Err(DeliveryExecutionPortError::new(
-            "durable execution job scope kind is not delivery-stage",
+            "durable execution job scope kind is not work-run",
         ));
     }
     job.scope = ExecutionScope::WorkRunExecutionScope(scope);

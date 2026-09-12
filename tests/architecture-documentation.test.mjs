@@ -4,26 +4,20 @@ import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 
-import {
-  DELIVERY_STAGES,
-  STRONGFLOW_ROLE_IDS,
-} from '../packages/contracts/dist/index.js'
+import { STRONGFLOW_ROLE_IDS } from '../packages/contracts/dist/index.js'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const documentPath = resolve(root, 'docs/architecture.md')
 const documentText = readFileSync(documentPath, 'utf8')
 
 const canonicalObjects = Object.freeze([
-  'Delivery',
-  'DeliverySpec',
-  'AcceptanceCriterion',
-  'DeliveryTask',
-  'StageRun',
-  'SessionBinding',
-  'AttentionItem',
-  'EvidenceRef',
-  'CriterionResult',
-  'DeliveryVerdict',
+  'WorkContract',
+  'WorkItem',
+  'WorkRun',
+  'Candidate',
+  'VerificationPlan',
+  'Evidence',
+  'Verdict',
 ])
 
 function relativeMarkdownLinks(text) {
@@ -33,7 +27,7 @@ function relativeMarkdownLinks(text) {
     .map(target => decodeURIComponent(target.split('#', 1)[0]))
 }
 
-test('architecture guide names the canonical owners, objects, roles and stages', () => {
+test('architecture guide names the canonical owners, objects and roles', () => {
   for (const owner of [
     'Codex Core',
     'WinWinCode',
@@ -47,13 +41,12 @@ test('architecture guide names the canonical owners, objects, roles and stages',
   for (const objectName of canonicalObjects) {
     assert.equal(documentText.includes(`| \`${objectName}\` |`), true, objectName)
   }
-  assert.equal(canonicalObjects.length, 10)
+  assert.equal(canonicalObjects.length, 7)
   for (const role of STRONGFLOW_ROLE_IDS) {
     assert.equal(documentText.includes(`| \`${role}\` |`), true, role)
   }
-  for (const stage of DELIVERY_STAGES) {
-    assert.equal(documentText.includes(`\`${stage}\``), true, stage)
-  }
+  assert.equal(documentText.includes('`StageRun` |'), false)
+  assert.equal(documentText.includes('`DeliveryTask` |'), false)
 })
 
 test('architecture guide keeps diagrams, approval boundaries and evidence sources explicit', () => {
@@ -88,7 +81,7 @@ test('architecture guide fixes the accepted Client, Server, Control Plane and Wo
     'ProductSession',
     'WorkerSession',
     'CodexThread',
-    'StageRun',
+    'WorkRun',
   ]) assert.equal(documentText.includes(sessionKind), true, sessionKind)
 
   for (const rule of [

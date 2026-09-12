@@ -1,12 +1,12 @@
 {
   "schemaVersion": "winwincode.strongflow-projection-rules.v1",
   "issueId": "winwincode-9c4.16.2.5",
-  "purpose": "Freeze the StrongFlow read model, source ownership, exact runtime binding, replay, redaction, and generated-Web boundaries before the Rust projection becomes canonical.",
+  "purpose": "Freeze the current StrongFlow read model, WorkItem/WorkRun source ownership, exact runtime binding, replay, redaction, and generated-Web boundaries.",
   "rustTarget": {
     "deliveryCrate": "crates/winwincode-delivery",
     "controlPlaneCrate": "crates/winwincode-control-plane",
     "controlPlaneTrigger": "crates/winwincode-control-plane/src/strongflow_projection.rs",
-    "scanRule": "A missing concrete implementation file means that projection slice has not started. Once delivery.rs, solution.rs, runtime.rs, redaction.rs, or the Control Plane trigger exists, only rules assigned to that concrete trigger require their named module and Rust test.",
+    "scanRule": "Every named projection source and runnable check is mandatory; retired TypeScript domain modules are not accepted as baselines.",
     "deliveryTriggers": [
       "crates/winwincode-delivery/src/projection/delivery.rs",
       "crates/winwincode-delivery/src/projection/solution.rs",
@@ -62,8 +62,8 @@
       "source": {
         "kind": "canonical-delivery",
         "refs": [
-          "packages/contracts/src/delivery.ts",
-          "docs/decisions/0023-canonical-delivery-ownership.md"
+          "schema/winwincode/v1/domain.schema.json",
+          "crates/winwincode-delivery/src/projection/delivery.rs"
         ]
       },
       "scope": "The current Delivery and its current DeliverySpec revision only; an older Spec is never merged into the view.",
@@ -75,24 +75,10 @@
           "delivery.changed.v1"
         ]
       },
-      "baseline": {
-        "publicSymbols": [
-          {
-            "path": "packages/contracts/src/delivery.ts",
-            "name": "parseDelivery"
-          }
-        ],
-        "tests": [
-          {
-            "path": "tests/strongflow-workbench.test.mjs",
-            "name": "StrongFlow projection renders Delivery facts and links activity to its DSH Session"
-          }
-        ]
-      },
       "rust": {
-        "trigger": "crates/winwincode-delivery/src/projection/delivery.rs",
-        "path": "crates/winwincode-delivery/src/projection/delivery.rs",
-        "testName": "requirements_projection_uses_current_delivery_spec"
+        "trigger": "crates/winwincode-control-plane/src/strongflow_projection.rs",
+        "path": "crates/winwincode-control-plane/src/strongflow_projection.rs",
+        "testName": "delivery_projection_is_owned_by_delivery_and_maps_to_generated_dto"
       }
     },
     {
@@ -101,9 +87,9 @@
         "solutionReview.deliveryId",
         "solutionReview.deliverySpecId",
         "solutionReview.deliverySpecRevision",
-        "solutionReview.planningStageRunId",
+        "solutionReview.planningWorkRunId",
         "solutionReview.planningSessionBindingId",
-        "solutionReview.reviewStageRunId",
+        "solutionReview.reviewWorkRunId",
         "solutionReview.attentionItemId",
         "solutionReview.reviewSetSha256",
         "solutionReview.reviewStatus",
@@ -121,18 +107,16 @@
         "solutionReview.processDiagram",
         "solutionReview.risks",
         "solutionReview.unresolvedItems",
-        "solutionReview.taskProposals"
+        "solutionReview.workItemProposals"
       ],
       "source": {
         "kind": "validated-plan-review",
         "refs": [
-          "packages/contracts/src/strongflow-plan-review.ts",
-          "packages/strongflow/src/plan-review.ts",
-          "docs/decisions/0023-canonical-delivery-ownership.md",
-          "docs/contracts/delivery-solution-review-authority.md"
+          "schema/winwincode/v1/control-plane-http.schema.json",
+          "crates/winwincode-delivery/src/projection/solution.rs"
         ]
       },
-      "scope": "One sealed current plan-review set whose Delivery, Spec ID/revision, planning StageRun and execution SessionBinding, human review StageRun, AttentionItem, ordered task proposals, and digest match the current Delivery. Pending review has null decision/comments/requestedChanges/reviewer/time; every settled review binds its authenticated reviewer and review time, changes_requested alone requires non-empty requestedChanges, and comments remain a nullable bounded typed decision field. Planner task proposals cannot assign an owner. A human review StageRun never receives a fabricated ExecutionJob SessionBinding.",
+      "scope": "One sealed current review set whose Delivery, contract revision, planning WorkRun, review WorkRun, AttentionItem, ordered proposals, and digest match the same read cut. Pending fields remain null and settled review binds the authenticated reviewer and time.",
       "transports": {
         "http": [
           "delivery.get"
@@ -142,52 +126,37 @@
           "delivery.changed.v1"
         ]
       },
-      "baseline": {
-        "publicSymbols": [
-          {
-            "path": "packages/contracts/src/strongflow-plan-review.ts",
-            "name": "parseStrongFlowPlanReviewContext"
-          },
-          {
-            "path": "packages/strongflow/src/plan-review.ts",
-            "name": "assertStrongFlowPlanReviewCurrent"
-          }
-        ],
-        "tests": [
-          {
-            "path": "tests/strongflow-workbench.test.mjs",
-            "name": "StrongFlow renders the exact DeliverySpec before a separate solution review set"
-          }
-        ]
-      },
       "rust": {
-        "trigger": "crates/winwincode-delivery/src/projection/solution.rs",
-        "path": "crates/winwincode-delivery/src/projection/solution.rs",
-        "testName": "pending_solution_review_projects_safe_solution_and_non_empty_ordered_task_proposals"
+        "trigger": "crates/winwincode-delivery/src/application/solution_review.rs",
+        "path": "crates/winwincode-delivery/src/application/solution_review.rs",
+        "testName": "current_workrun_solution_review_fixture_resolves"
       }
     },
     {
-      "id": "stages",
+      "id": "work-runs",
       "fields": [
-        "stages.id",
-        "stages.deliveryTaskId",
-        "stages.stage",
-        "stages.actorType",
-        "stages.role",
-        "stages.status",
-        "stages.attempt",
-        "stages.startedAt",
-        "stages.finishedAt",
-        "stages.sessionBinding"
+        "runs.id",
+        "runs.workItemId",
+        "runs.state",
+        "runs.attempt",
+        "runs.executionJobId",
+        "runs.leaseId",
+        "runs.fencingToken",
+        "runs.workerId",
+        "runs.workerInstanceId",
+        "runs.workerSessionId",
+        "runs.productSessionId",
+        "runs.codexThreadId",
+        "runs.candidateDigest"
       ],
       "source": {
-        "kind": "canonical-delivery",
+        "kind": "canonical-workrun",
         "refs": [
-          "packages/contracts/src/delivery.ts",
-          "packages/strongflow/src/delivery-runtime-projection.ts"
+          "schema/winwincode/v1/domain.schema.json",
+          "crates/winwincode-control-plane/src/strongflow_projection.rs"
         ]
       },
-      "scope": "Every StageRun belongs to the current Delivery. Every Codex StageRun has exactly one ProductSession/ExecutionJob binding while WorkerSession/CodexThread may still be pending; CodexThread requires WorkerSession. Human review sessionBinding is null. Each visible runtime session uses a complete exact SessionBinding, never a generic session ID.",
+      "scope": "Only WorkRuns from the exact WorkContract and requested Delivery read cut are shown; every run retains its WorkItem revision and complete execution authority.",
       "transports": {
         "http": [
           "delivery.get",
@@ -198,77 +167,47 @@
           "runtime-projection.invalidated.v1"
         ]
       },
-      "baseline": {
-        "publicSymbols": [
-          {
-            "path": "packages/strongflow/src/delivery-runtime-projection.ts",
-            "name": "projectDeliveryRuntime"
-          }
-        ],
-        "tests": [
-          {
-            "path": "tests/delivery-runtime-projection.test.mjs",
-            "name": "live and reopened ledgers rebuild the same read-only Delivery runtime view"
-          }
-        ]
-      },
       "rust": {
-        "trigger": "crates/winwincode-delivery/src/projection/delivery.rs",
-        "path": "crates/winwincode-delivery/src/projection/delivery.rs",
-        "testName": "stage_projection_keeps_stage_and_session_identities_distinct"
+        "trigger": "crates/winwincode-control-plane/src/strongflow_projection.rs",
+        "path": "crates/winwincode-control-plane/src/strongflow_projection.rs",
+        "testName": "runtime_projection_selects_the_exact_complete_workrun_binding"
       }
     },
     {
-      "id": "delivery-tasks",
+      "id": "work-items",
       "fields": [
-        "tasks.id",
-        "tasks.title",
-        "tasks.goal",
-        "tasks.acceptanceCriterionIds",
-        "tasks.blockedByTaskIds",
-        "tasks.owner",
-        "tasks.status",
-        "tasks.stageRunIds",
-        "tasks.evidenceRefs"
+        "items.id",
+        "items.revision",
+        "items.title",
+        "items.goal",
+        "items.state",
+        "items.criterionIds",
+        "items.dependsOn",
+        "items.workContractId",
+        "items.workContractRevision",
+        "graphItems.dependencies",
+        "graphItems.blockers"
       ],
       "source": {
-        "kind": "canonical-delivery",
+        "kind": "canonical-workrun",
         "refs": [
-          "packages/contracts/src/delivery.ts",
-          "packages/strongflow/src/delivery-runtime-projection.ts"
+          "schema/winwincode/v1/domain.schema.json",
+          "crates/winwincode-control-plane/src/strongflow_projection.rs"
         ]
       },
-      "scope": "Only canonical DeliveryTasks are shown; StageRun and Evidence rollups use matching DeliveryTaskId values and do not promote Codex Plan steps into DeliveryTasks.",
+      "scope": "Only WorkItems from the current WorkContract are shown; dependency state and blockers are derived from that one graph and no plan step becomes another task record.",
       "transports": {
         "http": [
           "delivery.get"
         ],
         "websocket": [
-          "delivery-task.changed.v1"
-        ]
-      },
-      "baseline": {
-        "publicSymbols": [
-          {
-            "path": "packages/contracts/src/delivery.ts",
-            "name": "parseDeliveryTask"
-          },
-          {
-            "path": "packages/strongflow/src/delivery-runtime-projection.ts",
-            "name": "projectDeliveryRuntime"
-          }
-        ],
-        "tests": [
-          {
-            "path": "tests/strongflow-workbench.test.mjs",
-            "name": "StrongFlow create form produces one canonical DeliverySpec without promoting plan steps"
-          }
+          "work-item.changed.v1"
         ]
       },
       "rust": {
-        "trigger": "crates/winwincode-delivery/src/projection/delivery.rs",
-        "path": "crates/winwincode-delivery/src/projection/delivery.rs",
-        "testName": "task_projection_rolls_up_only_owned_stage_runs"
+        "trigger": "crates/winwincode-control-plane/src/strongflow_projection.rs",
+        "path": "crates/winwincode-control-plane/src/strongflow_projection.rs",
+        "testName": "workrun_aggregate_bootstrap_reads_without_item_hint"
       }
     },
     {
@@ -288,32 +227,17 @@
       "source": {
         "kind": "bound-runtime-events",
         "refs": [
-          "packages/strongflow/src/delivery-runtime-projection.ts",
-          "packages/strongflow/src/runtime-execution-projection.ts",
-          "schema/winwincode/v1/execution-port.schema.json"
+          "schema/winwincode/v1/execution-port.schema.json",
+          "crates/winwincode-delivery/src/projection/runtime.rs"
         ]
       },
-      "scope": "Events from the exact ProductSession, WorkerSession, CodexThread, Job, Lease, attempt, StageRun, and Delivery binding only.",
+      "scope": "Events from the exact ProductSession, WorkerSession, CodexThread, Job, Lease, attempt, WorkRun, and Delivery binding only.",
       "transports": {
         "http": [
           "runtime.projection.get"
         ],
         "websocket": [
           "runtime-projection.invalidated.v1"
-        ]
-      },
-      "baseline": {
-        "publicSymbols": [
-          {
-            "path": "packages/strongflow/src/runtime-execution-projection.ts",
-            "name": "projectStrongFlowRuntimeExecution"
-          }
-        ],
-        "tests": [
-          {
-            "path": "tests/delivery-runtime-projection.test.mjs",
-            "name": "live and reopened ledgers rebuild the same read-only Delivery runtime view"
-          }
         ]
       },
       "rust": {
@@ -336,8 +260,8 @@
       "source": {
         "kind": "bound-runtime-events",
         "refs": [
-          "packages/strongflow/src/delivery-runtime-projection.ts",
-          "packages/strongflow/src/runtime-execution-projection.ts"
+          "schema/winwincode/v1/execution-port.schema.json",
+          "crates/winwincode-delivery/src/projection/runtime.rs"
         ]
       },
       "scope": "Command and test lifecycle facts from one exact bound runtime session; output bytes and full tool payloads are excluded.",
@@ -347,20 +271,6 @@
         ],
         "websocket": [
           "runtime-projection.invalidated.v1"
-        ]
-      },
-      "baseline": {
-        "publicSymbols": [
-          {
-            "path": "packages/strongflow/src/delivery-runtime-projection.ts",
-            "name": "DeliveryRuntimeProjection"
-          }
-        ],
-        "tests": [
-          {
-            "path": "tests/delivery-runtime-projection.test.mjs",
-            "name": "live and reopened ledgers rebuild the same read-only Delivery runtime view"
-          }
         ]
       },
       "rust": {
@@ -378,8 +288,8 @@
       "source": {
         "kind": "bound-runtime-events",
         "refs": [
-          "packages/strongflow/src/delivery-runtime-projection.ts",
-          "packages/strongflow/src/runtime-execution-projection.ts"
+          "schema/winwincode/v1/execution-port.schema.json",
+          "crates/winwincode-delivery/src/projection/runtime.rs"
         ]
       },
       "scope": "Non-negative metrics from the latest accepted usage event in each exact SessionBinding, with deterministic metric-name ordering.",
@@ -389,20 +299,6 @@
         ],
         "websocket": [
           "runtime-projection.invalidated.v1"
-        ]
-      },
-      "baseline": {
-        "publicSymbols": [
-          {
-            "path": "packages/strongflow/src/runtime-execution-projection.ts",
-            "name": "projectStrongFlowRuntimeExecution"
-          }
-        ],
-        "tests": [
-          {
-            "path": "tests/delivery-runtime-projection.test.mjs",
-            "name": "live and reopened ledgers rebuild the same read-only Delivery runtime view"
-          }
         ]
       },
       "rust": {
@@ -415,7 +311,7 @@
       "id": "attention",
       "fields": [
         "attention.id",
-        "attention.stageRunId",
+        "attention.workRunId",
         "attention.type",
         "attention.title",
         "attention.options",
@@ -430,8 +326,8 @@
       "source": {
         "kind": "canonical-delivery",
         "refs": [
-          "packages/contracts/src/delivery.ts",
-          "packages/strongflow/src/delivery-attention.ts"
+          "schema/winwincode/v1/domain.schema.json",
+          "crates/winwincode-delivery/src/projection/delivery.rs"
         ]
       },
       "scope": "Canonical AttentionItems for the current Delivery and current Spec; protocol context is parsed into safe fields instead of returned as opaque raw JSON.",
@@ -443,24 +339,10 @@
           "attention.changed.v1"
         ]
       },
-      "baseline": {
-        "publicSymbols": [
-          {
-            "path": "packages/contracts/src/delivery.ts",
-            "name": "parseAttentionItem"
-          }
-        ],
-        "tests": [
-          {
-            "path": "tests/delivery-service.test.mjs",
-            "name": "StrongFlowService resolves only current business Attention and settles its human StageRun"
-          }
-        ]
-      },
       "rust": {
-        "trigger": "crates/winwincode-delivery/src/projection/delivery.rs",
-        "path": "crates/winwincode-delivery/src/projection/delivery.rs",
-        "testName": "attention_projection_uses_current_canonical_items"
+        "trigger": "crates/winwincode-control-plane/src/strongflow_projection.rs",
+        "path": "crates/winwincode-control-plane/src/strongflow_projection.rs",
+        "testName": "public_attention_projection_excludes_raw_context_and_resolution"
       }
     },
     {
@@ -468,7 +350,7 @@
       "fields": [
         "evidence.id",
         "evidence.deliverySpecRevision",
-        "evidence.stageRunId",
+        "evidence.workRunId",
         "evidence.sessionBindingId",
         "evidence.candidateRef",
         "evidence.type",
@@ -478,8 +360,8 @@
       "source": {
         "kind": "canonical-delivery",
         "refs": [
-          "packages/contracts/src/delivery.ts",
-          "packages/strongflow/src/candidate-evidence.ts"
+          "schema/winwincode/v1/domain.schema.json",
+          "crates/winwincode-delivery/src/projection/delivery.rs"
         ]
       },
       "scope": "EvidenceRefs for the current Spec revision and current frozen candidate only; each source stays a reference and never becomes copied command output or a copied runtime log.",
@@ -491,24 +373,10 @@
           "delivery.changed.v1"
         ]
       },
-      "baseline": {
-        "publicSymbols": [
-          {
-            "path": "packages/strongflow/src/candidate-evidence.ts",
-            "name": "resolveDeliveryEvidence"
-          }
-        ],
-        "tests": [
-          {
-            "path": "tests/delivery-service.test.mjs",
-            "name": "StrongFlowService binds current evidence and computes the next state from DeliveryVerdict"
-          }
-        ]
-      },
       "rust": {
-        "trigger": "crates/winwincode-delivery/src/projection/delivery.rs",
-        "path": "crates/winwincode-delivery/src/projection/delivery.rs",
-        "testName": "evidence_projection_keeps_references_without_log_copies"
+        "trigger": "crates/winwincode-control-plane/src/strongflow_projection.rs",
+        "path": "crates/winwincode-control-plane/src/strongflow_projection.rs",
+        "testName": "public_projection_excludes_logs_credentials_payloads_and_live_diff_details"
       }
     },
     {
@@ -527,8 +395,8 @@
       "source": {
         "kind": "canonical-delivery",
         "refs": [
-          "packages/contracts/src/delivery.ts",
-          "packages/strongflow/src/delivery-verdict.ts"
+          "schema/winwincode/v1/domain.schema.json",
+          "crates/winwincode-delivery/src/projection/delivery.rs"
         ]
       },
       "scope": "The one current DeliveryVerdict bound to the current Spec and candidate, including exactly one result for every current acceptance criterion.",
@@ -540,24 +408,10 @@
           "delivery.changed.v1"
         ]
       },
-      "baseline": {
-        "publicSymbols": [
-          {
-            "path": "packages/strongflow/src/delivery-verdict.ts",
-            "name": "computeDeliveryVerdict"
-          }
-        ],
-        "tests": [
-          {
-            "path": "tests/delivery-service.test.mjs",
-            "name": "StrongFlowService binds current evidence and computes the next state from DeliveryVerdict"
-          }
-        ]
-      },
       "rust": {
-        "trigger": "crates/winwincode-delivery/src/projection/delivery.rs",
-        "path": "crates/winwincode-delivery/src/projection/delivery.rs",
-        "testName": "verdict_projection_covers_current_acceptance_criteria"
+        "trigger": "crates/winwincode-control-plane/src/strongflow_projection.rs",
+        "path": "crates/winwincode-control-plane/src/strongflow_projection.rs",
+        "testName": "current_publication_requires_delivery_candidate_verdict_approval_and_target"
       }
     },
     {
@@ -583,7 +437,6 @@
       "source": {
         "kind": "canonical-publication",
         "refs": [
-          "packages/contracts/src/strongflow-github-publication.ts",
           "crates/winwincode-control-plane/src/publication_preparation.rs",
           "schema/winwincode/v1/control-plane-http.schema.json"
         ]
@@ -599,15 +452,6 @@
           "delivery.changed.v1"
         ]
       },
-      "baseline": {
-        "publicSymbols": [
-          {
-            "path": "packages/strongflow/src/github-publication.ts",
-            "name": "assertStrongFlowGitHubPublicationCurrent"
-          }
-        ],
-        "tests": []
-      },
       "rust": {
         "trigger": "crates/winwincode-control-plane/src/strongflow_projection.rs",
         "path": "crates/winwincode-control-plane/src/strongflow_projection.rs",
@@ -618,7 +462,8 @@
   "runtimeBinding": {
     "requiredIdentity": [
       "deliveryId",
-      "stageRunId",
+      "workRunId",
+      "workItemId",
       "productSessionId",
       "workerSessionId",
       "codexThreadId",
@@ -653,7 +498,7 @@
     "frozenDiff": {
       "visibility": "separate-authorized-frozen-candidate-detail-projection",
       "preconditions": [
-        "stage-run-is-settled",
+        "work-run-is-settled",
         "candidate-is-frozen",
         "candidate-matches-current-spec-revision",
         "candidate-diff-digest-is-verified",
@@ -680,38 +525,22 @@
       "refs": [
         "docs/decisions/0023-canonical-delivery-ownership.md",
         "docs/decisions/0028-control-plane-worker-migration.md",
-        "packages/strongflow/src/delivery-runtime-projection.ts"
+        "crates/winwincode-delivery/src/projection/runtime.rs"
       ],
-      "baseline": {
-        "tests": [
-          {
-            "path": "tests/delivery-runtime-projection.test.mjs",
-            "name": "live and reopened ledgers rebuild the same read-only Delivery runtime view"
-          }
-        ]
-      },
       "rust": {
         "trigger": "crates/winwincode-delivery/src/projection/delivery.rs",
         "path": "crates/winwincode-delivery/src/projection/delivery.rs",
-        "testName": "projection_is_read_only_over_authoritative_sources"
+        "testName": "public_projection_seam_returns_values_instead_of_the_delivery_entity"
       }
     },
     {
       "id": "runtime.exact_session_binding",
-      "statement": "A runtime event is projected only after all Delivery, StageRun, ProductSession, WorkerSession, CodexThread, Job, Lease, attempt, and fencing identities resolve to one current SessionBinding.",
+      "statement": "A runtime event is projected only after all Delivery, WorkRun, ProductSession, WorkerSession, CodexThread, Job, Lease, attempt, and fencing identities resolve to one current SessionBinding.",
       "refs": [
         "docs/decisions/0028-control-plane-worker-migration.md",
-        "packages/strongflow/src/delivery-runtime-projection.ts",
+        "crates/winwincode-delivery/src/projection/runtime.rs",
         "schema/winwincode/v1/execution-port.schema.json"
       ],
-      "baseline": {
-        "tests": [
-          {
-            "path": "tests/delivery-runtime-projection.test.mjs",
-            "name": "Delivery runtime projection requires the complete DSH and Codex session binding"
-          }
-        ]
-      },
       "rust": {
         "trigger": "crates/winwincode-delivery/src/projection/runtime.rs",
         "path": "crates/winwincode-delivery/src/projection/runtime.rs",
@@ -722,17 +551,8 @@
       "id": "runtime.reject_unbound_or_ambiguous_event",
       "statement": "An event matching no SessionBinding or more than one SessionBinding fails before any projection item is emitted.",
       "refs": [
-        "packages/strongflow/src/delivery-runtime-projection.ts",
-        "tests/delivery-runtime-projection.test.mjs"
+        "crates/winwincode-delivery/src/projection/runtime.rs"
       ],
-      "baseline": {
-        "tests": [
-          {
-            "path": "tests/delivery-runtime-projection.test.mjs",
-            "name": "Delivery runtime projection rejects events outside its SessionBindings"
-          }
-        ]
-      },
       "rust": {
         "trigger": "crates/winwincode-delivery/src/projection/runtime.rs",
         "path": "crates/winwincode-delivery/src/projection/runtime.rs",
@@ -746,9 +566,6 @@
         "schema/winwincode/v1/execution-port.schema.json",
         "docs/contracts/execution-port-v1.md"
       ],
-      "baseline": {
-        "tests": []
-      },
       "rust": {
         "trigger": "crates/winwincode-delivery/src/projection/runtime.rs",
         "path": "crates/winwincode-delivery/src/projection/runtime.rs",
@@ -759,17 +576,9 @@
       "id": "runtime.contiguous_session_sequence",
       "statement": "Each bound runtime session advances by one sequence at a time; exact duplicates are harmless, gaps request replay, and changed or old events fail.",
       "refs": [
-        "packages/strongflow/src/delivery-runtime-projection.ts",
+        "crates/winwincode-delivery/src/projection/runtime.rs",
         "schema/winwincode/v1/execution-port.schema.json"
       ],
-      "baseline": {
-        "tests": [
-          {
-            "path": "tests/runtime-projection.test.mjs",
-            "name": "missing, conflicting, and old kernel events fail with stable codes"
-          }
-        ]
-      },
       "rust": {
         "trigger": "crates/winwincode-delivery/src/projection/runtime.rs",
         "path": "crates/winwincode-delivery/src/projection/runtime.rs",
@@ -780,21 +589,12 @@
       "id": "ordering.deterministic_projection",
       "statement": "The same canonical records and accepted runtime events produce byte-equivalent ordered projection fields regardless of process restart or adapter delivery batching.",
       "refs": [
-        "packages/strongflow/src/delivery-runtime-projection.ts",
-        "packages/strongflow/src/runtime-execution-projection.ts"
+        "crates/winwincode-delivery/src/projection/runtime.rs"
       ],
-      "baseline": {
-        "tests": [
-          {
-            "path": "tests/delivery-runtime-projection.test.mjs",
-            "name": "live and reopened ledgers rebuild the same read-only Delivery runtime view"
-          }
-        ]
-      },
       "rust": {
-        "trigger": "crates/winwincode-delivery/src/projection/delivery.rs",
-        "path": "crates/winwincode-delivery/src/projection/delivery.rs",
-        "testName": "projection_order_is_deterministic"
+        "trigger": "crates/winwincode-control-plane/src/strongflow_projection.rs",
+        "path": "crates/winwincode-control-plane/src/strongflow_projection.rs",
+        "testName": "bounded_projection_replay_is_deterministic"
       }
     },
     {
@@ -802,16 +602,8 @@
       "statement": "A live fold and a complete ordered replay from persisted facts return the same Delivery and runtime projection.",
       "refs": [
         "docs/decisions/0023-canonical-delivery-ownership.md",
-        "tests/delivery-runtime-projection.test.mjs"
+        "crates/winwincode-delivery/src/projection/runtime.rs"
       ],
-      "baseline": {
-        "tests": [
-          {
-            "path": "tests/delivery-runtime-projection.test.mjs",
-            "name": "live and reopened ledgers rebuild the same read-only Delivery runtime view"
-          }
-        ]
-      },
       "rust": {
         "trigger": "crates/winwincode-delivery/src/projection/runtime.rs",
         "path": "crates/winwincode-delivery/src/projection/runtime.rs",
@@ -820,19 +612,11 @@
     },
     {
       "id": "recovery.websocket_reset_reloads_snapshot",
-      "statement": "After a delivery-stage invalidation or unusable StrongFlow cursor, the Web client establishes a server-issued bounded cut with delivery.get, passes that exact readCursor as runtime.projection.get atCursor, discards a partial or mismatched pair, and subscribes from the signed readCursor.eventCursor only after both results agree. READ_CURSOR_EXPIRED discards the complete partial StrongFlow snapshot and restarts delivery.get without atCursor. A product-session invalidation reloads runtime.projection.get alone, keeps readCursor null, and subscribes from its returned eventCursor. subscription-accepted establishes the sequence and authorizationEpoch baseline; the first event is baseline + 1, while retention loss uses reset-required/4409.",
+      "statement": "After a work-run invalidation or unusable StrongFlow cursor, the Web client establishes a server-issued bounded cut with delivery.get, passes that exact readCursor as runtime.projection.get atCursor, discards a partial or mismatched pair, and subscribes from the signed readCursor.eventCursor only after both results agree. READ_CURSOR_EXPIRED discards the complete partial StrongFlow snapshot and restarts delivery.get without atCursor. A product-session invalidation reloads runtime.projection.get alone, keeps readCursor null, and subscribes from its returned eventCursor. subscription-accepted establishes the sequence and authorizationEpoch baseline; the first event is baseline + 1, while retention loss uses reset-required/4409.",
       "refs": [
         "docs/contracts/control-plane-websocket.md",
         "schema/winwincode/v1/control-plane-http.schema.json"
       ],
-      "baseline": {
-        "tests": [
-          {
-            "path": "tests/control-plane-websocket-contract.test.mjs",
-            "name": "resume, authorization recheck, and slow-client rules are machine visible"
-          }
-        ]
-      },
       "rust": {
         "trigger": "crates/winwincode-control-plane/src/strongflow_projection.rs",
         "path": "crates/winwincode-control-plane/src/strongflow_projection.rs",
@@ -843,17 +627,9 @@
       "id": "security.live_diff_is_summary_only",
       "statement": "While execution is active, StrongFlow exposes only changed-file count, addition count, deletion count, detailsVisible=false, and a safe source reference.",
       "refs": [
-        "packages/strongflow/src/runtime-execution-projection.ts",
+        "crates/winwincode-delivery/src/projection/runtime.rs",
         "docs/decisions/0023-canonical-delivery-ownership.md"
       ],
-      "baseline": {
-        "tests": [
-          {
-            "path": "tests/strongflow-workbench.test.mjs",
-            "name": "StrongFlow overlays live changes without exposing concrete diff details"
-          }
-        ]
-      },
       "rust": {
         "trigger": "crates/winwincode-delivery/src/projection/redaction.rs",
         "path": "crates/winwincode-delivery/src/projection/redaction.rs",
@@ -862,19 +638,11 @@
     },
     {
       "id": "security.frozen_diff_requires_finished_candidate",
-      "statement": "Paths and hunks become visible only in a separate authorized detail projection after the exact candidate and Diff digest are frozen and the producing StageRun is settled.",
+      "statement": "Paths and hunks become visible only in a separate authorized detail projection after the exact candidate and Diff digest are frozen and the producing WorkRun is settled.",
       "refs": [
-        "packages/strongflow/src/diagram-execution-projection.ts",
+        "crates/winwincode-control-plane/src/strongflow_projection/mapping.rs",
         "docs/decisions/0023-canonical-delivery-ownership.md"
       ],
-      "baseline": {
-        "tests": [
-          {
-            "path": "tests/diagram-execution-projection.test.mjs",
-            "name": "a changed candidate diff fails before any finished detail is exposed"
-          }
-        ]
-      },
       "rust": {
         "trigger": "crates/winwincode-delivery/src/projection/redaction.rs",
         "path": "crates/winwincode-delivery/src/projection/redaction.rs",
@@ -885,18 +653,10 @@
       "id": "security.no_logs_tool_payloads_or_credentials",
       "statement": "Public projections contain bounded safe text and source references, not raw session logs, stdout, stderr, full tool payloads, provider traffic, or credential material.",
       "refs": [
-        "packages/strongflow/src/runtime-execution-projection.ts",
+        "crates/winwincode-delivery/src/projection/runtime.rs",
         "packages/strongflow/src/credential-boundary.ts",
         "schema/winwincode/v1/domain.schema.json"
       ],
-      "baseline": {
-        "tests": [
-          {
-            "path": "tests/delivery-service.test.mjs",
-            "name": "StrongFlowService fails before storage on malformed or credential-bearing input"
-          }
-        ]
-      },
       "rust": {
         "trigger": "crates/winwincode-delivery/src/projection/redaction.rs",
         "path": "crates/winwincode-delivery/src/projection/redaction.rs",
@@ -907,17 +667,8 @@
       "id": "publication.current_delivery_candidate_verdict",
       "statement": "A publication status is shown only when its Delivery, target, current Spec revision, frozen candidate, passing Verdict, and human approval still match. Any resourceRef is a closed GitHub issue or pull-request identity on the exact target repository, never an arbitrary URL.",
       "refs": [
-        "packages/strongflow/src/github-publication.ts",
         "crates/winwincode-control-plane/src/publication_preparation.rs"
       ],
-      "baseline": {
-        "tests": [
-          {
-            "path": "tests/github-publication.test.mjs",
-            "name": "publication guard rejects stale candidate, verdict, destination, and approval"
-          }
-        ]
-      },
       "rust": {
         "trigger": "crates/winwincode-control-plane/src/strongflow_projection.rs",
         "path": "crates/winwincode-control-plane/src/strongflow_projection.rs",
@@ -931,14 +682,6 @@
         "docs/contracts/control-plane-websocket.md",
         "schema/winwincode/v1/control-plane-http.schema.json"
       ],
-      "baseline": {
-        "tests": [
-          {
-            "path": "tests/control-plane-websocket-contract.test.mjs",
-            "name": "client frames only subscribe, resume, acknowledge, or answer a heartbeat"
-          }
-        ]
-      },
       "rust": {
         "trigger": "crates/winwincode-control-plane/src/strongflow_projection.rs",
         "path": "crates/winwincode-control-plane/src/strongflow_projection.rs",
@@ -952,14 +695,6 @@
         "apps/client/src/generated/contracts.ts",
         "docs/decisions/0028-control-plane-worker-target-graph.json"
       ],
-      "baseline": {
-        "tests": [
-          {
-            "path": "tests/contract-codegen.test.mjs",
-            "name": "one canonical schema generation is deterministic and TypeScript output compiles"
-          }
-        ]
-      },
       "rust": {
         "trigger": "crates/winwincode-control-plane/src/strongflow_projection.rs",
         "path": "crates/winwincode-control-plane/src/strongflow_projection.rs",
@@ -973,14 +708,6 @@
         "docs/decisions/0028-control-plane-worker-target-graph.json",
         "docs/decisions/0028-control-plane-worker-migration.md"
       ],
-      "baseline": {
-        "tests": [
-          {
-            "path": "tests/control-plane-api-coverage.test.mjs",
-            "name": "coverage matrix freezes authority and secret-safe boundaries"
-          }
-        ]
-      },
       "rust": {
         "trigger": "crates/winwincode-control-plane/src/strongflow_projection.rs",
         "path": "crates/winwincode-control-plane/src/strongflow_projection.rs",
@@ -1004,31 +731,30 @@
     {
       "id": "http.solution_projection_missing",
       "status": "closed",
-      "current": "SolutionReviewProjection carries the current sealed review-set digest, planning identity, pending or settled review state, structured solution, diagrams, risks, and non-empty ordered task proposals; no raw Attention context or resolution is public.",
+      "current": "SolutionReviewProjection carries the current sealed review-set digest, planning identity, pending or settled review state, structured solution, diagrams, risks, and non-empty ordered WorkItem proposals; no raw Attention context or resolution is public.",
       "target": "A safe typed solution review validates the current review-set digest and exposes pending review content or settled decision facts without returning raw protocol JSON.",
-      "action": "Project only a current validated review set; task promotion is allowed only from its approved state and uses the ordered task proposals already covered by reviewSetSha256.",
+      "action": "Project only a current validated review set; task promotion is allowed only from its approved state and uses the ordered WorkItem proposals already covered by reviewSetSha256.",
       "refs": [
-        "packages/contracts/src/strongflow-plan-review.ts",
+        "schema/winwincode/v1/control-plane-http.schema.json",
         "schema/winwincode/v1/domain.schema.json"
       ],
-      "resolution": "SolutionReviewProjection is the only wire shape for pending and settled review content; it binds ordered task proposals into reviewSetSha256 and exposes no raw Attention protocol data."
+      "resolution": "SolutionReviewProjection is the only wire shape for pending and settled review content; it binds ordered WorkItem proposals into reviewSetSha256 and exposes no raw Attention protocol data."
     },
     {
       "id": "http.structured_runtime_projection_missing",
       "status": "closed",
-      "current": "RuntimeProjectionSnapshot now contains bounded RuntimeSessionProjection values with typed plan, agent graph, activity, usage, recovery, and live Diff summary sections.",
+      "current": "RuntimeProjectionSnapshot now contains bounded RuntimeSessionProjection values with frozen AgentIdentity, actual Provider/Model, exact Workspace, and typed plan, agent graph, activity, usage, recovery, and live Diff summary sections.",
       "target": "runtime.projection.get returns a bounded discriminated per-kind detail union that can rebuild all visible StrongFlow runtime sections without raw logs or raw live Diff.",
       "action": "Fold only exact accepted runtime bindings into the generated typed session DTOs.",
       "refs": [
-        "schema/winwincode/v1/domain.schema.json",
-        "packages/contracts/src/strongflow-runtime-execution.ts"
+        "schema/winwincode/v1/domain.schema.json"
       ],
-      "resolution": "RuntimeProjectionSnapshot now contains bounded RuntimeSessionProjection values with typed plan, agent graph, activity, usage, recovery, and live Diff summary sections."
+      "resolution": "RuntimeProjectionSnapshot contains bounded RuntimeSessionProjection values with a required RuntimeSessionContext for Delivery WorkRuns and an explicit nullable context for standalone ProductSessions; restart replay decodes persisted typed runtime facts instead of reducing every event to a checkpoint."
     },
     {
       "id": "websocket.structured_runtime_delta_missing",
       "status": "closed",
-      "current": "runtime-projection.invalidated.v1 is notification-only and strictly discriminates delivery-stage from product-session. Delivery stages require the paired delivery.get then runtime.projection.get reload at one returned StrongFlowReadCursor whose signed eventCursor becomes subscribe.startAt; product sessions reload runtime only and subscribe from their own runtime eventCursor.",
+      "current": "runtime-projection.invalidated.v1 is notification-only and strictly discriminates work-run from product-session. Delivery stages require the paired delivery.get then runtime.projection.get reload at one returned StrongFlowReadCursor whose signed eventCursor becomes subscribe.startAt; product sessions reload runtime only and subscribe from their own runtime eventCursor.",
       "target": "The event either carries the same typed safe runtime detail branch as the snapshot or is explicitly an invalidation that makes the client reload the snapshot; it never makes the browser infer a second runtime model from prose.",
       "action": "Keep WebSocket as invalidation. Rebuild a Delivery-stage page only after both canonical HTTP reads return one compatible StrongFlowReadCursor, then subscribe from its eventCursor; rebuild an ordinary product-session runtime from its single canonical query and subscribe from that eventCursor.",
       "refs": [
@@ -1052,14 +778,14 @@
     {
       "id": "execution_port.codex_binding_not_guaranteed",
       "status": "closed",
-      "current": "ExecutionPort now has a required lease-bound session.binding fact; runtime.event also requires CodexThreadId and mismatches are rejected before persist/projection.",
+      "current": "ExecutionPort now has a required lease-bound session.binding fact with the frozen AgentIdentity, actual Provider/Model, and exact Workspace; runtime.event also requires CodexThreadId and mismatches are rejected before persist/projection.",
       "target": "Before projecting a runtime event, the Control Plane can prove one current WorkerSession-to-CodexThread SessionBinding for the active Job and Lease; it never guesses a thread identity from summary or opaque payload bytes.",
       "action": "Persist one accepted binding for the exact Job/attempt/lease/fence before accepting runtime events.",
       "refs": [
         "schema/winwincode/v1/execution-port.schema.json",
         "docs/decisions/0028-control-plane-worker-migration.md"
       ],
-      "resolution": "ExecutionPort now has a required lease-bound session.binding fact; runtime.event also requires CodexThreadId and mismatches are rejected before persist/projection."
+      "resolution": "ExecutionPort session.binding carries one validated secret-free RuntimeSessionContext tied to the durable Worker and Job; runtime.event also requires CodexThreadId and mismatches are rejected before persist/projection."
     },
     {
       "id": "codegen.generated_runtime_client_missing",

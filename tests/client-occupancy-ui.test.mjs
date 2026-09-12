@@ -339,7 +339,7 @@ test('connect submits one deduplicated claim and re-reads the Server snapshot', 
   assert.deepEqual(port.calls, [{ action: 'claim', clientId: '123456789012' }])
   const busyConnect = findOne(card, 'wwc-clients-card-connect')
   assert.equal(busyConnect.disabled, true, 'the in-flight claim disables the entry')
-  assert.equal(busyConnect.textContent, 'Connecting…')
+  assert.equal(busyConnect.textContent, '正在连接…')
   assert.equal(findOne(card, 'wwc-clients-card-actions').getAttribute('aria-busy'), 'true')
   connect.emit('click')
   connect.emit('click')
@@ -350,7 +350,7 @@ test('connect submits one deduplicated claim and re-reads the Server snapshot', 
   client.devices = [device({ occupancy: 'occupied-by-me' })]
   port.pending[0].resolve()
   await waitFor(
-    () => findOne(card, 'wwc-clients-card-state').textContent === 'Online, occupied by you',
+    () => findOne(card, 'wwc-clients-card-state').textContent === '在线，已由你占用',
     'the refreshed snapshot reaches the card',
   )
   assert.ok(client.listCalls.length >= 2, 'the landed claim re-read the device list')
@@ -370,9 +370,9 @@ test('a busy release is the confirmed drain path and keeps the failed draft', as
   assert.equal(confirm.hidden, false)
   assert.equal(
     findOne(card, 'wwc-clients-card-confirm-text').textContent,
-    'Releasing now stops new tasks and lets the running tasks finish before the device frees.',
+    '释放后将停止接收新任务，并在当前任务完成后解除占用。',
   )
-  assert.equal(findOne(card, 'wwc-clients-card-confirm-accept').textContent, 'Release device')
+  assert.equal(findOne(card, 'wwc-clients-card-confirm-accept').textContent, '释放设备')
 
   findOne(card, 'wwc-clients-card-confirm-accept').emit('click')
   assert.deepEqual(
@@ -388,7 +388,7 @@ test('a busy release is the confirmed drain path and keeps the failed draft', as
   )
   assert.equal(
     findOne(card, 'wwc-clients-card-error').textContent,
-    'You no longer hold this device.',
+    '你已不再占用该设备。',
   )
   assert.equal(findOne(card, 'wwc-clients-card-error').hidden, false)
   assert.equal(
@@ -432,11 +432,11 @@ test('cancel and release always asks first, and Keep drops the armed draft', asy
   assert.equal(findOne(card, 'wwc-clients-card-confirm').hidden, false)
   assert.equal(
     findOne(card, 'wwc-clients-card-confirm-text').textContent,
-    'Stopping now cancels the running tasks and frees the device immediately.',
+    '停止后将取消正在运行的任务，并立即释放设备。',
   )
   assert.equal(
     findOne(card, 'wwc-clients-card-confirm-accept').textContent,
-    'Cancel tasks and release',
+    '取消任务并释放',
   )
 
   findOne(card, 'wwc-clients-card-confirm-keep').emit('click')
@@ -464,9 +464,9 @@ test('force release always asks first, and Keep drops the armed draft', async ()
   assert.equal(findOne(card, 'wwc-clients-card-confirm').hidden, false)
   assert.equal(
     findOne(card, 'wwc-clients-card-confirm-text').textContent,
-    'Force-releasing now ends the interrupted occupancy immediately so the device can be claimed again.',
+    '强制释放会立即结束中断的占用，使设备可以再次被占用。',
   )
-  assert.equal(findOne(card, 'wwc-clients-card-confirm-accept').textContent, 'Force release')
+  assert.equal(findOne(card, 'wwc-clients-card-confirm-accept').textContent, '强制释放')
 
   findOne(card, 'wwc-clients-card-confirm-keep').emit('click')
   assert.equal(findOne(card, 'wwc-clients-card-confirm').hidden, true)
@@ -497,7 +497,7 @@ test('a denied force release names the Owner rule and keeps the armed draft', as
   )
   assert.equal(
     findOne(card, 'wwc-clients-card-error').textContent,
-    'Only the device Owner can force-release this device.',
+    '只有设备所有者可以强制释放该设备。',
   )
   assert.equal(
     findOne(card, 'wwc-clients-card-confirm').hidden,
@@ -549,7 +549,7 @@ test('a claim rejection renders the facade category copy through the default cla
   )
   assert.equal(
     findOne(card, 'wwc-clients-card-error').textContent,
-    'The device has no free capacity left.',
+    '该设备没有剩余容量。',
     'the stable category lands on its own card copy without an injected classify',
   )
   occupancyModel.close()
@@ -570,7 +570,7 @@ test('a failed claim shows the classified copy and the entry retries', async () 
   )
   assert.equal(
     findOne(card, 'wwc-clients-card-error').textContent,
-    'Too many attempts. Wait a moment, then try again.',
+    '尝试次数过多，请稍后再试。',
   )
   assert.equal(
     findOne(card, 'wwc-clients-card-connect').disabled,
@@ -586,22 +586,22 @@ test('a failed claim shows the classified copy and the entry retries', async () 
 
 test('every taxonomy failure carries its own honest copy', async () => {
   const failures = [
-    ['occupied-by-other', 'Another user claimed the device first.'],
-    ['not-holder', 'You no longer hold this device.'],
-    ['device-gone', 'The device no longer exists.'],
-    ['device-offline', 'The device is offline right now.'],
-    ['device-locked', 'The device is locked.'],
-    ['connections-forbidden', 'The device no longer accepts new connections.'],
-    ['account-denied', 'The signed-in account may not use this device.'],
-    ['capacity-exhausted', 'The device has no free capacity left.'],
-    ['device-rejected', 'The device rejected the connection request.'],
-    ['ack-timeout', 'The device did not confirm the connection in time.'],
-    ['recovery-pending', 'The device is waiting to recover. Try again after it recovers.'],
-    ['permission-denied', 'Only the device Owner can force-release this device.'],
-    ['confirmation-required', 'The release needs the explicit confirmation. Try again.'],
-    ['state-changed', 'The occupancy changed before the request landed.'],
-    ['rate-limited', 'Too many attempts. Wait a moment, then try again.'],
-    ['unavailable', 'The request did not go through. Check the connection and try again.'],
+    ['occupied-by-other', '其他用户已先占用该设备。'],
+    ['not-holder', '你已不再占用该设备。'],
+    ['device-gone', '该设备已不存在。'],
+    ['device-offline', '该设备当前离线。'],
+    ['device-locked', '该设备已锁定。'],
+    ['connections-forbidden', '该设备不再接受新连接。'],
+    ['account-denied', '当前账号无权使用该设备。'],
+    ['capacity-exhausted', '该设备没有剩余容量。'],
+    ['device-rejected', '该设备拒绝了连接请求。'],
+    ['ack-timeout', '该设备未及时确认连接。'],
+    ['recovery-pending', '该设备正在等待恢复，请恢复后重试。'],
+    ['permission-denied', '只有设备所有者可以强制释放该设备。'],
+    ['confirmation-required', '释放设备需要明确确认，请重试。'],
+    ['state-changed', '请求生效前占用状态已发生变化。'],
+    ['rate-limited', '尝试次数过多，请稍后再试。'],
+    ['unavailable', '请求失败，请检查连接后重试。'],
   ]
   for (const [failure, copy] of failures) {
     const { rootElement, occupancyModel, port } = await occupancyFixture({
@@ -731,7 +731,7 @@ test('a port-less composition reports the honest unavailable failure', async () 
   assert.equal(occupancyModel.interaction('123456789012').kind, 'failed')
   assert.equal(
     findOne(card, 'wwc-clients-card-error').textContent,
-    'The request did not go through. Check the connection and try again.',
+    '请求失败，请检查连接后重试。',
   )
   page.close()
   occupancyModel.close()

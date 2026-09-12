@@ -74,7 +74,7 @@ export function renderDevicePage(options: DevicePageOptions): DevicePage {
       body.replaceChildren()
       if (clients.length === 0) {
         const hint = element(document, 'p', 'wwc-device-empty')
-        hint.textContent = '还没有连接执行设备。在执行任务的电脑上启动 Client,使用配对码连接。'
+        hint.textContent = '还没有连接执行设备。在执行任务的电脑上启动客户端，使用配对码连接。'
         const connect = element(document, 'a', 'wwc-device-empty-connect')
         connect.href = options.homeHref
         connect.textContent = '连接设备'

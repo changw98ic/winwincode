@@ -20,14 +20,6 @@ export interface WorkspaceComponentDescriptor {
   readonly kind: 'host' | 'surface' | 'native-interface' | 'contract'
 }
 
-export * from './delivery.js'
-export * from './delivery-candidate.js'
 export * from './runtime-events.js'
-export * from './strongflow-delivery-api.js'
-export * from './strongflow-delivery-advance.js'
-export * from './strongflow-plan-review.js'
-export * from './strongflow-diagram-execution.js'
-export * from './strongflow-runtime-execution.js'
 export * from './strongflow-role.js'
-export * from './strongflow-github-publication.js'
 export * from './client-control.js'

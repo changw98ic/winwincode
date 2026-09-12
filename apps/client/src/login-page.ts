@@ -34,25 +34,25 @@ function failureText(
 ): string {
   if (source === 'initialization') {
     switch (failure) {
-      case 'invalid-credentials': return 'The bootstrap proof was rejected.'
-      case 'rate-limited': return 'Too many attempts. Wait a moment, then try the bootstrap proof again.'
-      case 'unavailable': return 'Initialization is unavailable right now. Try again shortly.'
+      case 'invalid-credentials': return '引导凭证被拒绝。'
+      case 'rate-limited': return '尝试次数过多，请稍后再试。'
+      case 'unavailable': return '暂时无法初始化，请稍后再试。'
     }
   }
   switch (failure) {
-    case 'invalid-credentials': return 'Incorrect username or password.'
-    case 'rate-limited': return 'Too many sign-in attempts. Wait a moment, then try again.'
-    case 'unavailable': return 'Sign-in is unavailable right now. Check the connection and try again.'
+    case 'invalid-credentials': return '用户名或密码不正确。'
+    case 'rate-limited': return '登录尝试次数过多，请稍后再试。'
+    case 'unavailable': return '暂时无法登录，请检查连接后重试。'
   }
 }
 
 function statusText(state: LoginViewModelState): string {
   if (state.status === 'submitting') {
     return state.source === 'initialization'
-      ? 'Initializing the server owner account…'
-      : 'Signing in…'
+      ? '正在初始化服务器所有者账号…'
+      : '正在登录…'
   }
-  if (state.status === 'succeeded') return 'Signed in. Returning to your workspace…'
+  if (state.status === 'succeeded') return '登录成功，正在返回工作区…'
   return ''
 }
 
@@ -159,7 +159,7 @@ export function mountLoginPage(options: LoginPageOptions): LoginPage {
   form.append(usernameLabel, username, passwordLabel, passwordWrap, submit)
 
   initializationHeading.textContent = '首次初始化'
-  initializationDetail.textContent = '服务器还没有账号。输入服务器所有者环境中的引导凭证，创建第一个 Owner。'
+  initializationDetail.textContent = '服务器还没有账号。输入服务器所有者环境中的引导凭证，创建第一个所有者账号。'
   initializationUsername.id = 'wwc-login-initialization-username'
   initializationUsername.name = 'username'
   initializationUsername.type = 'text'
@@ -169,7 +169,7 @@ export function mountLoginPage(options: LoginPageOptions): LoginPage {
   initializationUsername.maxLength = 128
   initializationUsername.required = true
   initializationUsernameLabel.htmlFor = initializationUsername.id
-  initializationUsernameLabel.textContent = 'Owner 账号'
+  initializationUsernameLabel.textContent = '所有者账号'
 
   initializationPassword.id = 'wwc-login-initialization-password'
   initializationPassword.name = 'password'
@@ -178,7 +178,7 @@ export function mountLoginPage(options: LoginPageOptions): LoginPage {
   initializationPassword.maxLength = 4096
   initializationPassword.required = true
   initializationPasswordLabel.htmlFor = initializationPassword.id
-  initializationPasswordLabel.textContent = 'Owner 密码'
+  initializationPasswordLabel.textContent = '所有者密码'
 
   proof.id = 'wwc-login-initialization-proof'
   proof.type = 'password'
@@ -189,7 +189,7 @@ export function mountLoginPage(options: LoginPageOptions): LoginPage {
   proofLabel.htmlFor = proof.id
   proofLabel.textContent = '引导凭证'
   initializationSubmit.type = 'submit'
-  initializationSubmit.textContent = '初始化 Owner 账号'
+  initializationSubmit.textContent = '初始化所有者账号'
   initializationForm.append(
     initializationUsernameLabel,
     initializationUsername,

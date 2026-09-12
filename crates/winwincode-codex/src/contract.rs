@@ -10,6 +10,8 @@ use winwincode_domain::{
     WorkspaceRevision,
 };
 use winwincode_execution_port::{
+    agent_config::AgentSessionConfigSnapshot,
+    execution_identity::{canonical_codex_thread_id, canonical_execution_run_digest},
     generated::{
         ActionEnforcementReceiptMessage, ApprovalDecisionMessage, ArtifactAckMessage,
         ArtifactReference, ChangeBatchProgressEvent, ChangeBatchProposalEvent, ExecutionJob,
@@ -54,11 +56,13 @@ impl CodexRunKey {
     /// Returns an opaque contract error when the canonical identity facts
     /// cannot be encoded.
     pub fn canonical_thread_id(&self) -> Result<CodexThreadId, CodexRunKeyError> {
-        let digest = format!("{:x}", Sha256::digest(self.canonical_bytes()?));
-        Ok(CodexThreadId(format!(
-            "cdx_{}",
-            &digest[..26].to_ascii_uppercase()
-        )))
+        canonical_codex_thread_id(
+            &self.job_id,
+            self.attempt,
+            &self.fencing_token,
+            &self.payload_digest,
+        )
+        .map_err(|_| CodexRunKeyError)
     }
 
     /// Returns the sole canonical digest used to persist and compare this run.
@@ -68,19 +72,12 @@ impl CodexRunKey {
     /// Returns an opaque contract error when the run identity cannot be
     /// canonically encoded.
     pub fn canonical_digest(&self) -> Result<Sha256Digest, CodexRunKeyError> {
-        Ok(Sha256Digest(format!(
-            "sha256:{:x}",
-            Sha256::digest(self.canonical_bytes()?)
-        )))
-    }
-
-    pub(crate) fn canonical_bytes(&self) -> Result<Vec<u8>, CodexRunKeyError> {
-        serde_json::to_vec(&(
+        canonical_execution_run_digest(
             &self.job_id,
             self.attempt,
             &self.fencing_token,
             &self.payload_digest,
-        ))
+        )
         .map_err(|_| CodexRunKeyError)
     }
 }
@@ -141,6 +138,13 @@ pub struct CodexThreadStart<'job> {
     pub workspace: &'job Path,
     /// Exact source tree sealed by the Worker, never a branch or commit expression.
     pub workspace_revision: &'job WorkspaceRevision,
+}
+
+/// Exact embedded Session facts returned after create-or-resume succeeds.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CodexThreadSession {
+    pub thread_id: CodexThreadId,
+    pub agent_config: AgentSessionConfigSnapshot,
 }
 
 /// Secret-safe terminal result emitted by Codex Core.
@@ -298,7 +302,7 @@ pub trait CodexCoreAdapter {
     fn ensure_thread(
         &mut self,
         start: CodexThreadStart<'_>,
-    ) -> impl Future<Output = Result<CodexThreadId, Self::Error>> + Send;
+    ) -> impl Future<Output = Result<CodexThreadSession, Self::Error>> + Send;
 
     /// Advances adapter-owned trusted time immediately before a turn is
     /// submitted.  Production adapters use this hook to make the lease and

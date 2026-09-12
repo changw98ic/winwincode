@@ -54,7 +54,7 @@ function element<K extends keyof HTMLElementTagNameMap>(
 
 /** §16.5: the unavailable read keeps the shown cards and explains itself. */
 const UNAVAILABLE_TEXT
-  = 'Listing repositories is unavailable right now. Check the connection and try again.'
+  = '暂时无法列出仓库，请检查连接后重试。'
 
 /**
  * Mount the signed-in repository area for the selected Client device. The
@@ -102,12 +102,12 @@ export function mountRepositoriesPage(options: RepositoriesPageOptions): Reposit
       const grantPermissions = element(document, 'select', 'wwc-repositories-card-grant-permissions') as HTMLSelectElement
       const grantStatus = element(document, 'p', 'wwc-repositories-card-grant-status')
       grantUser.type = 'text'
-      grantUser.placeholder = 'User ID'
+      grantUser.placeholder = '用户 ID'
       grantUser.autocomplete = 'off'
-      grantUser.setAttribute('aria-label', 'User ID')
-      grantPermissions.setAttribute('aria-label', 'Repository permission')
+      grantUser.setAttribute('aria-label', '用户 ID')
+      grantPermissions.setAttribute('aria-label', '仓库权限')
       grantStatus.setAttribute('aria-live', 'polite')
-      for (const [value, label] of [['use', 'Use'], ['use+manage', 'Use + manage']] as const) {
+      for (const [value, label] of [['use', '使用'], ['use+manage', '使用和管理']] as const) {
         const option = element(document, 'option', '')
         option.setAttribute('value', value)
         option.textContent = label
@@ -137,7 +137,7 @@ export function mountRepositoriesPage(options: RepositoriesPageOptions): Reposit
           grantStatus.textContent = '仓库访问已授予。'
         }).catch(error => {
           grantStatus.textContent = error instanceof Error
-            ? error.message : 'Repository access could not be granted.'
+            ? error.message : '无法授予仓库访问权限。'
         }).finally(() => {
           grantSubmit.disabled = false
         })
@@ -166,7 +166,7 @@ export function mountRepositoriesPage(options: RepositoriesPageOptions): Reposit
     refs.dirty.dataset.tone = repositoryDirtyTone(repository)
     refs.head.textContent = repositoryHeadShortText(repository)
     refs.permissions.textContent = repository.permissions === 'use+manage'
-      ? 'Permission: use + manage' : 'Permission: use'
+      ? '权限：使用和管理' : '权限：使用'
     refs.grantForm.hidden = !repository.canGrantAccess
   }
 

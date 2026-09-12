@@ -42,13 +42,7 @@ fn fixture() -> Delivery {
             .expect("delivery fixture");
     delivery["revision"] = 1.into();
     delivery["status"] = "draft".into();
-    for field in [
-        "tasks",
-        "stageRuns",
-        "sessionBindings",
-        "evidence",
-        "attentionItems",
-    ] {
+    for field in ["sessionBindings", "evidence", "attentionItems"] {
         delivery[field] = serde_json::json!([]);
     }
     delivery["verdict"] = serde_json::Value::Null;
@@ -319,7 +313,6 @@ fn queue_proof_appends_work_run_and_replays() {
         bindings[0].fencing_token.as_ref().map(|fence| &fence.0),
         Some(&run.fencing_token)
     );
-    assert!(first.snapshot.snapshot().stage_runs.is_empty());
     assert_eq!(
         bindings[0].source_provenance.reference(),
         "workrun.appended"

@@ -51,6 +51,7 @@
 use std::fmt;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use serde::Deserialize;
 use serde::Serialize;
@@ -85,12 +86,14 @@ use winwincode_client_port::messages::ClientToServerMessage;
 use winwincode_client_port::messages::ServerEnrollmentAcceptedPayload;
 use winwincode_client_port::messages::ServerToClientEnvelope;
 use winwincode_client_port::messages::ServerToClientMessage;
+use winwincode_control_plane::AccessGrantService;
 use winwincode_control_plane::ClientOccupancyService;
 use winwincode_control_plane::ClientRegistryService;
 use winwincode_control_plane::ClientRegistryServiceErrorKind;
 use winwincode_control_plane::ConnectCodeService;
 use winwincode_control_plane::LocalCandidateService;
 use winwincode_control_plane::OccupancyLeaseState;
+use winwincode_control_plane::RepositoryAccessGrantService;
 use winwincode_control_plane::RepositoryAvailability;
 use winwincode_control_plane::RepositoryBindingService;
 use winwincode_control_plane::RepositoryDirtyState;
@@ -102,6 +105,8 @@ use winwincode_storage::ClientNodeRecord;
 use winwincode_storage::ClientNodeRegistration;
 use winwincode_storage::ClientPresenceState;
 use winwincode_storage::ConnectChallengeVerdict;
+use winwincode_storage::ConnectCodePublication;
+use winwincode_storage::ConnectCodeRevocation;
 use winwincode_storage::LaunchAckSettlement;
 use winwincode_storage::LocalApplyResult;
 use winwincode_storage::LocalApplySettlement;
@@ -109,7 +114,9 @@ use winwincode_storage::LocalApplyStrategy;
 use winwincode_storage::LocalCandidateRetained;
 use winwincode_storage::OccupancyReleaseReason;
 use winwincode_storage::ProductStateStorage;
+use winwincode_storage::RepositoryAccessGrantIssuance;
 use winwincode_storage::RepositoryBindingProjection;
+use winwincode_storage::RepositoryGrantPermissions;
 use winwincode_storage::RepositoryScanOutcome;
 use winwincode_storage::SqliteStorage;
 
@@ -122,6 +129,33 @@ pub struct ClientExchangeConfig {
     pub max_frames_per_exchange: usize,
     /// Heartbeat interval the server profile asks device clients to use.
     pub heartbeat_interval_ms: u32,
+}
+
+/// Ephemeral Worker credential material waiting to travel beside one
+/// durable `client.worker.launch` frame. The raw value is never written to
+/// the Control Plane database or included in diagnostics.
+#[derive(Clone, PartialEq, Eq)]
+pub struct WorkerCredentialDelivery {
+    pub client_node_id: String,
+    pub worker_launch_grant_id: String,
+    pub worker_session_id: String,
+    pub credential_digest: String,
+    pub worker_credential: String,
+    pub expires_at: Instant,
+}
+
+impl fmt::Debug for WorkerCredentialDelivery {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("WorkerCredentialDelivery")
+            .field("client_node_id", &self.client_node_id)
+            .field("worker_launch_grant_id", &self.worker_launch_grant_id)
+            .field("worker_session_id", &self.worker_session_id)
+            .field("credential_digest", &self.credential_digest)
+            .field("worker_credential", &"[redacted]")
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
 }
 
 impl Default for ClientExchangeConfig {
@@ -250,6 +284,14 @@ pub trait ClientExchangePort: Send + Sync {
         credential: &[u8],
         client_node_id: &str,
     ) -> Result<(), ClientExchangeError>;
+
+    /// Places one raw Worker credential into the in-memory delivery lane.
+    /// It is returned only beside the exact matching launch frame and
+    /// expires with the launch grant.
+    fn publish_worker_credential(
+        &self,
+        delivery: WorkerCredentialDelivery,
+    ) -> Result<(), ClientExchangeError>;
 }
 
 /// Production exchange over the Server's one product-state database
@@ -260,6 +302,7 @@ pub trait ClientExchangePort: Send + Sync {
 pub struct ClientExchangeApplication {
     data_directory: PathBuf,
     config: ClientExchangeConfig,
+    worker_credentials: Arc<Mutex<Vec<WorkerCredentialDelivery>>>,
 }
 
 impl ClientExchangeApplication {
@@ -280,6 +323,7 @@ impl ClientExchangeApplication {
         Ok(Self {
             data_directory: data_directory.into(),
             config,
+            worker_credentials: Arc::new(Mutex::new(Vec::new())),
         })
     }
 
@@ -560,6 +604,7 @@ impl ClientExchangeApplication {
                 server_time: now.0.clone(),
                 downlink_from_sequence: acceptance_sequence,
             }),
+            worker_credentials: Vec::new(),
         })
     }
 
@@ -679,6 +724,7 @@ impl ClientExchangeApplication {
             .map(|frame| serde_json::from_str(&frame.frame))
             .collect::<Result<Vec<Value>, _>>()
             .map_err(|_| ClientExchangeError::unavailable())?;
+        let worker_credentials = self.worker_credentials_for_frames(node_id, &frames, now)?;
         downlink
             .retain_through(node_id, cursors.server_to_client_ack_sequence)
             .map_err(|_| ClientExchangeError::unavailable())?;
@@ -689,7 +735,52 @@ impl ClientExchangeApplication {
             replay_from_sequence: replay_hint,
             frames,
             enrollment: None,
+            worker_credentials,
         })
+    }
+
+    fn worker_credentials_for_frames(
+        &self,
+        node_id: &str,
+        frames: &[Value],
+        now: &Instant,
+    ) -> Result<Vec<WorkerCredentialResponse>, ClientExchangeError> {
+        let launches = frames
+            .iter()
+            .filter(|frame| {
+                frame.get("kind").and_then(Value::as_str) == Some("client.worker.launch")
+            })
+            .filter_map(|frame| frame.get("payload")?.get("launchGrant"))
+            .filter_map(|grant| {
+                Some((
+                    grant.get("workerLaunchGrantId")?.as_str()?,
+                    grant.get("workerSessionId")?.as_str()?,
+                    grant.get("credentialDigest")?.as_str()?,
+                ))
+            })
+            .collect::<Vec<_>>();
+        let mut pending = self
+            .worker_credentials
+            .lock()
+            .map_err(|_| ClientExchangeError::unavailable())?;
+        pending.retain(|entry| entry.expires_at.0 >= now.0);
+        Ok(pending
+            .iter()
+            .filter(|entry| entry.client_node_id == node_id)
+            .filter(|entry| {
+                launches.iter().any(|(grant_id, session_id, digest)| {
+                    *grant_id == entry.worker_launch_grant_id
+                        && *session_id == entry.worker_session_id
+                        && *digest == entry.credential_digest
+                })
+            })
+            .map(|entry| WorkerCredentialResponse {
+                worker_launch_grant_id: entry.worker_launch_grant_id.clone(),
+                worker_session_id: entry.worker_session_id.clone(),
+                credential_digest: entry.credential_digest.clone(),
+                worker_credential: entry.worker_credential.clone(),
+            })
+            .collect())
     }
 }
 
@@ -859,6 +950,24 @@ impl ClientExchangePort for ClientExchangeApplication {
             Err(ClientExchangeError::authentication())
         }
     }
+
+    fn publish_worker_credential(
+        &self,
+        delivery: WorkerCredentialDelivery,
+    ) -> Result<(), ClientExchangeError> {
+        let secret = decode_credential_secret(&delivery.worker_credential)
+            .ok_or_else(ClientExchangeError::invalid_request)?;
+        if !credential_digest_matches(&secret, &delivery.credential_digest) {
+            return Err(ClientExchangeError::invalid_request());
+        }
+        let mut pending = self
+            .worker_credentials
+            .lock()
+            .map_err(|_| ClientExchangeError::unavailable())?;
+        pending.retain(|entry| entry.worker_launch_grant_id != delivery.worker_launch_grant_id);
+        pending.push(delivery);
+        Ok(())
+    }
 }
 
 /// Decoded exchange request: the bounded frame batch plus the client's
@@ -885,6 +994,32 @@ struct ExchangeResponseBody {
     frames: Vec<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     enrollment: Option<EnrollmentIssuance>,
+    #[serde(rename = "workerCredentials", skip_serializing_if = "Vec::is_empty")]
+    worker_credentials: Vec<WorkerCredentialResponse>,
+}
+
+#[derive(Serialize)]
+struct WorkerCredentialResponse {
+    #[serde(rename = "workerLaunchGrantId")]
+    worker_launch_grant_id: String,
+    #[serde(rename = "workerSessionId")]
+    worker_session_id: String,
+    #[serde(rename = "credentialDigest")]
+    credential_digest: String,
+    #[serde(rename = "workerCredential")]
+    worker_credential: String,
+}
+
+impl fmt::Debug for WorkerCredentialResponse {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("WorkerCredentialResponse")
+            .field("worker_launch_grant_id", &self.worker_launch_grant_id)
+            .field("worker_session_id", &self.worker_session_id)
+            .field("credential_digest", &self.credential_digest)
+            .field("worker_credential", &"[REDACTED]")
+            .finish()
+    }
 }
 
 /// One-time enrollment issuance carried only by the enrollment exchange
@@ -1016,6 +1151,12 @@ fn apply_effect(
 ) -> Result<(), ClientExchangeError> {
     match &envelope.message {
         ClientToServerMessage::Hello(payload) => {
+            let record = ClientRegistryService::new(storage)
+                .snapshot(node_id)
+                .map_err(|_| ClientExchangeError::unavailable())?;
+            if let Some(record) = record {
+                supersede_instance(storage, &record, envelope, now);
+            }
             let mut registry = ClientRegistryService::new(storage);
             if let Some(target) = presence_target(payload.presence_state)
                 && let Some(record) = registry
@@ -1055,6 +1196,41 @@ fn apply_effect(
             }
             Ok(())
         }
+        ClientToServerMessage::ConnectCodePublished(payload) => {
+            let Ok(publication) = ConnectCodePublication::try_new(
+                payload.connect_code_id.clone(),
+                payload.code_digest.clone(),
+                node_id,
+                &envelope.client_instance_id,
+                payload.generation,
+                Instant(payload.expires_at.clone()),
+                payload.remaining_attempts,
+            ) else {
+                return Ok(());
+            };
+            let mut connect = ConnectCodeService::new(storage);
+            match connect
+                .active_code_for_client(node_id)
+                .map_err(|_| ClientExchangeError::unavailable())?
+            {
+                None if payload.generation == 1 => {
+                    connect
+                        .publish(&publication, now)
+                        .map_err(|_| ClientExchangeError::unavailable())?;
+                }
+                Some(current) if current.connect_code_id == payload.connect_code_id => {}
+                Some(current) if payload.generation == current.generation + 1 => {
+                    let revocation =
+                        ConnectCodeRevocation::try_new(current.connect_code_id, current.revision)
+                            .map_err(|_| ClientExchangeError::unavailable())?;
+                    connect
+                        .refresh_code(&revocation, &publication, now)
+                        .map_err(|_| ClientExchangeError::unavailable())?;
+                }
+                None | Some(_) => return Ok(()),
+            }
+            Ok(())
+        }
         ClientToServerMessage::AccessChallengeAck(payload) => {
             // The device verdict settles the durable challenge the connect
             // flow is waiting on. A verdict the device no longer holds a
@@ -1088,13 +1264,49 @@ fn apply_effect(
             ) else {
                 return Ok(());
             };
-            let mut bindings = RepositoryBindingService::new(storage);
-            let _ = bindings.upsert(
-                &projection,
-                Some(&Instant(repository.last_scanned_at.clone())),
-                payload.command.expected_revision,
-                now,
-            );
+            let binding_id = repository.repository_binding_id.clone();
+            let binding_exists = {
+                let mut bindings = RepositoryBindingService::new(storage);
+                let _ = bindings.upsert(
+                    &projection,
+                    Some(&Instant(repository.last_scanned_at.clone())),
+                    payload.command.expected_revision,
+                    now,
+                );
+                bindings
+                    .snapshot(&binding_id)
+                    .map_err(|_| ClientExchangeError::unavailable())?
+                    .is_some_and(|binding| binding.client_node_id == node_id)
+            };
+            if !binding_exists {
+                return Ok(());
+            }
+            let managers = AccessGrantService::new(storage)
+                .active_grants_for_client(node_id)
+                .map_err(|_| ClientExchangeError::unavailable())?;
+            for manager in managers
+                .into_iter()
+                .filter(|grant| grant.permissions.can_manage())
+            {
+                let already_granted = RepositoryAccessGrantService::new(storage)
+                    .active_grants_for_binding(&binding_id)
+                    .map_err(|_| ClientExchangeError::unavailable())?
+                    .into_iter()
+                    .any(|grant| grant.user_id == manager.user_id);
+                if already_granted {
+                    continue;
+                }
+                let issuance = RepositoryAccessGrantIssuance::try_new(
+                    generate_prefixed_id("rag_")?,
+                    &binding_id,
+                    &manager.user_id,
+                    &manager.user_id,
+                )
+                .map_err(|_| ClientExchangeError::unavailable())?;
+                RepositoryAccessGrantService::new(storage)
+                    .create_grant(&issuance, RepositoryGrantPermissions::UseManage, now)
+                    .map_err(|_| ClientExchangeError::unavailable())?;
+            }
             Ok(())
         }
         ClientToServerMessage::RepositoryRemoved(payload) => {
@@ -1441,6 +1653,12 @@ fn supersede_instance(
     let Some(current) = current else {
         return;
     };
+    if current.client_version == payload.client_version
+        && current.current_instance_id.as_deref() == Some(envelope.client_instance_id.as_str())
+        && current.max_concurrent_worker_sessions == payload.capacity.max_concurrent_worker_sessions
+    {
+        return;
+    }
     let Ok(registration) = ClientNodeRegistration::try_new(
         current.client_node_id.clone(),
         current.public_client_id.clone(),
@@ -1640,6 +1858,53 @@ mod tests {
     }
 
     #[test]
+    fn worker_credential_is_delivered_only_with_its_launch_frame() {
+        let application =
+            ClientExchangeApplication::open("unused", &ClientExchangeConfig::default())
+                .expect("valid application");
+        let secret = [0x42_u8; 32];
+        let material = hex_encode(&secret);
+        let digest = credential_digest(&secret);
+        application
+            .publish_worker_credential(WorkerCredentialDelivery {
+                client_node_id: "cnd_AAAAAAAAAAAAAAAAAAAAAAAAAA".to_owned(),
+                worker_launch_grant_id: "wlg_AAAAAAAAAAAAAAAAAAAAAAAAAA".to_owned(),
+                worker_session_id: "ws_AAAAAAAAAAAAAAAAAAAAAAAAAA".to_owned(),
+                credential_digest: digest.clone(),
+                worker_credential: material.clone(),
+                expires_at: Instant("2100-01-01T00:00:00.000Z".to_owned()),
+            })
+            .expect("publish credential");
+        let launch = serde_json::json!({
+            "kind": "client.worker.launch",
+            "payload": {"launchGrant": {
+                "workerLaunchGrantId": "wlg_AAAAAAAAAAAAAAAAAAAAAAAAAA",
+                "workerSessionId": "ws_AAAAAAAAAAAAAAAAAAAAAAAAAA",
+                "credentialDigest": digest,
+            }}
+        });
+        assert!(
+            application
+                .worker_credentials_for_frames(
+                    "cnd_AAAAAAAAAAAAAAAAAAAAAAAAAA",
+                    &[],
+                    &Instant("2026-09-12T00:00:00.000Z".to_owned()),
+                )
+                .expect("unrelated response")
+                .is_empty()
+        );
+        let delivered = application
+            .worker_credentials_for_frames(
+                "cnd_AAAAAAAAAAAAAAAAAAAAAAAAAA",
+                &[launch],
+                &Instant("2026-09-12T00:00:00.000Z".to_owned()),
+            )
+            .expect("matching response");
+        assert_eq!(delivered.len(), 1);
+        assert_eq!(delivered[0].worker_credential, material);
+    }
+
+    #[test]
     fn generated_ids_are_canonical_crockford_or_digits() {
         let node_id = generate_prefixed_id("cnd_").expect("entropy");
         assert_eq!(node_id.len(), 30);
@@ -1679,7 +1944,9 @@ mod tests {
                     command: command.clone(),
                     connect_code_id: "code_1".to_owned(),
                     code_digest: "sha256:aa".to_owned(),
+                    generation: 1,
                     expires_at: "2026-01-02T12:00:00.000Z".to_owned(),
+                    remaining_attempts: 5,
                 },
             ),
             ClientToServerMessage::AccessChallengeAck(Box::new(
@@ -1731,7 +1998,7 @@ mod tests {
                     worker_launch_grant_id: "wlg_1".to_owned(),
                     worker_session_id: "ws_1".to_owned(),
                     worker_id: "worker_1".to_owned(),
-                    worker_instance_id: "winst_1".to_owned(),
+                    worker_instance_id: "wki_1".to_owned(),
                     status: WorkerLaunchAckStatus::Accepted,
                     error: None,
                 },
@@ -1814,7 +2081,7 @@ mod tests {
                 winwincode_client_port::messages::ClientWorkerStatePayload {
                     occupancy_lease_id: None,
                     worker_session_id: "ws_1".to_owned(),
-                    worker_instance_id: "winst_1".to_owned(),
+                    worker_instance_id: "wki_1".to_owned(),
                     state: winwincode_client_port::domain::ClientWorkerRunState::Running,
                     exit_code: None,
                     observed_at: "2026-01-02T12:00:00.000Z".to_owned(),
@@ -1862,6 +2129,64 @@ mod tests {
         );
         assert_eq!(presence_target(PresenceState::PendingEnrollment), None);
         assert_eq!(presence_target(PresenceState::Revoked), None);
+    }
+
+    #[test]
+    fn hello_projects_capacity_for_the_enrolled_instance() {
+        let root = std::env::temp_dir().join(format!(
+            "winwincode-client-exchange-hello-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let mut storage = SqliteStorage::open(&root).expect("storage opens");
+        let node = "cnd_00000000000000000000000001";
+        let instance = "cix_00000000000000000000000001";
+        let now = Instant("2026-09-12T00:00:00.000Z".to_owned());
+        let registration = ClientNodeRegistration::try_new(
+            node,
+            "0000000001",
+            "Fixture Device",
+            "aarch64-apple-darwin",
+            "aarch64",
+            "0.1.0",
+            None,
+            Some(instance.to_owned()),
+            0,
+        )
+        .expect("registration");
+        ClientRegistryService::new(&mut storage)
+            .register(&registration, 0, &now)
+            .expect("register client");
+        let hello = ClientToServerEnvelope {
+            schema_version: CLIENT_CONTROL_PORT_SCHEMA_VERSION.to_owned(),
+            message_id: "msg_00000000000000000000000001".to_owned(),
+            client_node_id: node.to_owned(),
+            client_instance_id: instance.to_owned(),
+            sequence: 1,
+            occurred_at: now.0.clone(),
+            message: ClientToServerMessage::Hello(ClientHelloPayload {
+                client_version: "0.1.0".to_owned(),
+                capacity: winwincode_client_port::domain::ClientCapacityReport {
+                    max_concurrent_worker_sessions: 1,
+                    running_worker_sessions: 0,
+                    reserved_worker_sessions: 0,
+                    draining_worker_sessions: 0,
+                },
+                accepting_connections: true,
+                lock_state: winwincode_client_port::domain::ClientLockState::Unlocked,
+                presence_state: PresenceState::Online,
+            }),
+        };
+
+        apply_effect(&mut storage, &root, node, &hello, &now).expect("hello effect");
+
+        let record = ClientRegistryService::new(&mut storage)
+            .snapshot(node)
+            .expect("snapshot")
+            .expect("client");
+        assert_eq!(record.max_concurrent_worker_sessions, 1);
+        assert_eq!(record.presence_state, ClientPresenceState::Online);
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -1962,6 +2287,24 @@ mod tests {
         ClientRegistryService::new(&mut storage)
             .register(&registration, 0, &first)
             .expect("register client");
+        let user_id = "usr_00000000000000000000000001";
+        let client_grant = winwincode_storage::AccessGrantIssuance::try_new(
+            "cag_00000000000000000000000001",
+            node,
+            user_id,
+            user_id,
+            winwincode_storage::GrantTrustMode::Trusted,
+            None,
+        )
+        .expect("client grant issuance");
+        AccessGrantService::new(&mut storage)
+            .create_grant(
+                &client_grant,
+                winwincode_storage::GrantSource::Administrator,
+                winwincode_storage::GrantPermissions::USE_MANAGE_SHARE,
+                &first,
+            )
+            .expect("client manager grant");
 
         let envelope = |sender: &str, message_id: &str, message| ClientToServerEnvelope {
             schema_version: CLIENT_CONTROL_PORT_SCHEMA_VERSION.to_owned(),
@@ -2002,6 +2345,12 @@ mod tests {
             .expect("snapshot")
             .expect("binding exists");
         assert_eq!(binding.revision, 1);
+        let grants = RepositoryAccessGrantService::new(&mut storage)
+            .active_grants_for_binding(binding_id)
+            .expect("repository grants");
+        assert_eq!(grants.len(), 1, "upsert replay keeps one bootstrap grant");
+        assert_eq!(grants[0].user_id, user_id);
+        assert_eq!(grants[0].permissions, RepositoryGrantPermissions::UseManage);
 
         let status = envelope(
             node,

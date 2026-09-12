@@ -1557,6 +1557,31 @@ impl<'storage> ClientConnectLedger<'storage> {
         load_active_grant(self.connection()?, client_node_id, user_id)
     }
 
+    /// Returns the newest active connect code of one client node.
+    pub fn active_code_for_client(
+        &self,
+        client_node_id: &str,
+    ) -> Result<Option<ConnectCodeRecord>, ClientConnectStoreError> {
+        validate_client_node_id(client_node_id)?;
+        let connection = self.connection()?;
+        let mut statement = connection
+            .prepare(
+                "SELECT connect_code_id, code_digest, client_node_id, issued_by_instance_id,
+                        generation, expires_at, remaining_attempts, state, created_at, revision
+                 FROM client_connect_codes
+                 WHERE client_node_id = ?1 AND state = 'active'
+                 ORDER BY generation DESC, created_at DESC
+                 LIMIT 1",
+            )
+            .map_err(|sql| sql_error(&sql))?;
+        statement
+            .query_row([client_node_id], read_code_row)
+            .optional()
+            .map_err(|sql| sql_error(&sql))?
+            .map(connect_code_from_row)
+            .transpose()
+    }
+
     /// Returns every active grant of one user across all clients.
     ///
     /// # Errors
@@ -1580,6 +1605,31 @@ impl<'storage> ClientConnectLedger<'storage> {
             .map_err(|sql| sql_error(&sql))?;
         let grants = statement
             .query_map([user_id], read_grant_row)
+            .map_err(|sql| sql_error(&sql))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|sql| sql_error(&sql))?;
+        grants.into_iter().map(access_grant_from_row).collect()
+    }
+
+    /// Returns every active grant on one client node.
+    pub fn active_grants_for_client(
+        &self,
+        client_node_id: &str,
+    ) -> Result<Vec<AccessGrantRecord>, ClientConnectStoreError> {
+        validate_client_node_id(client_node_id)?;
+        let connection = self.connection()?;
+        let mut statement = connection
+            .prepare(
+                "SELECT client_access_grant_id, client_node_id, user_id, permissions,
+                        trust_mode, state, grant_source, granted_by_user_id, expires_at,
+                        created_at, revision
+                 FROM client_access_grants
+                 WHERE client_node_id = ?1 AND state = 'active'
+                 ORDER BY created_at, client_access_grant_id",
+            )
+            .map_err(|sql| sql_error(&sql))?;
+        let grants = statement
+            .query_map([client_node_id], read_grant_row)
             .map_err(|sql| sql_error(&sql))?
             .collect::<Result<Vec<_>, _>>()
             .map_err(|sql| sql_error(&sql))?;

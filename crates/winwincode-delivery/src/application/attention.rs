@@ -8,7 +8,7 @@ use winwincode_domain::{AttentionItemId, WorkRunId};
 
 use crate::domain::{
     AttentionItem, AttentionItemStatus, AttentionItemType, Delivery, DeliverySnapshot,
-    DeliveryStage, DeliveryStatus, StageRun, StageRunActorType, StageRunStatus,
+    DeliveryStatus,
     rework::{resolved_verdict_attention_action, safest_attention_transition},
 };
 
@@ -90,7 +90,7 @@ impl Deref for ResolvedAttentionTransition {
 ///
 /// # Errors
 ///
-/// Fails closed on stale revision, actor, item, `WorkRun` or historical `StageRun`, `Spec`, frozen context,
+/// Fails closed on stale revision, actor, item, `WorkRun`, `Spec`, frozen context,
 /// time, or decision state. No snapshot is returned on error.
 ///
 /// # Panics
@@ -173,8 +173,7 @@ pub fn resolve_attention(
             ));
         }
     }
-    let (run_index, solution_review_settlement) =
-        resolve_typed_review_context(delivery, item, &input)?;
+    let solution_review_settlement = resolve_typed_review_context(delivery, item, &input)?;
     let verdict_actions = current_verdict_attention_actions(delivery, item)?;
     if verdict_actions.is_some() && input.decision != AttentionDecision::Resolved {
         return Err(CoordinationError::new(
@@ -186,7 +185,6 @@ pub fn resolve_attention(
         delivery.clone().into_snapshot(),
         input,
         item_index,
-        run_index,
         verdict_actions,
         solution_review_settlement,
     )?;
@@ -200,17 +198,14 @@ fn resolve_typed_review_context(
     delivery: &Delivery,
     item: &AttentionItem,
     input: &ResolveAttentionInput,
-) -> Result<(Option<usize>, Option<ValidatedSolutionReviewSettlement>), CoordinationError> {
-    // PlanReview is produced by a planner WorkRun but settled by the human
-    // review StageRun sealed in its validated context. Never accept a caller
-    // supplied historical execution identifier for this lookup.
+) -> Result<Option<ValidatedSolutionReviewSettlement>, CoordinationError> {
     let review = if item.item_type == AttentionItemType::DecisionRequired {
         resolve_current_solution_review(delivery).map_err(|error| solution_review_error(&error))?
     } else {
         None
     };
     let Some(review) = review else {
-        return Ok((None, None));
+        return Ok(None);
     };
     let view = review.projection_view();
     if view.attention_item_id != &item.id
@@ -221,50 +216,20 @@ fn resolve_typed_review_context(
             "DecisionRequired Attention is not the current typed solution review",
         ));
     }
-    let run_index = delivery
-        .snapshot()
-        .stage_runs
-        .iter()
-        .position(|run| run.id == *view.review_stage_run_id)
-        .ok_or_else(|| {
-            CoordinationError::new(
-                CoordinationErrorCode::StaleAttention,
-                "typed solution review StageRun is no longer current",
-            )
-        })?;
-    let run = &delivery.snapshot().stage_runs[run_index];
-    if run.actor_type == StageRunActorType::Human
-        && (!matches!(
-            run.status,
-            StageRunStatus::Waiting | StageRunStatus::Running
-        ) || input.now_millis < run.started_at_millis)
-    {
-        return Err(CoordinationError::new(
-            CoordinationErrorCode::StaleAttention,
-            "human review StageRun is no longer waiting for this Attention decision",
-        ));
-    }
-    let settlement =
-        typed_solution_review_settlement(delivery, item, run, view.review_stage_run_id, input)?;
-    Ok((Some(run_index), settlement))
+    typed_solution_review_settlement(delivery, item, input)
 }
 
 fn typed_solution_review_settlement(
     delivery: &Delivery,
     item: &AttentionItem,
-    run: &StageRun,
-    review_stage_run_id: &winwincode_domain::StageRunId,
     input: &ResolveAttentionInput,
 ) -> Result<Option<ValidatedSolutionReviewSettlement>, CoordinationError> {
-    if item.item_type != AttentionItemType::DecisionRequired
-        || run.stage != DeliveryStage::PlanReview
-    {
+    if item.item_type != AttentionItemType::DecisionRequired {
         return Ok(None);
     }
     let settlement = validate_solution_review_settlement(
         delivery,
         &input.attention_item_id,
-        review_stage_run_id,
         &input.actor,
         &input.resolution,
         input.now_millis,
@@ -306,12 +271,10 @@ fn apply_resolution(
     mut snapshot: DeliverySnapshot,
     input: ResolveAttentionInput,
     item_index: usize,
-    run_index: Option<usize>,
     verdict_actions: Option<Vec<crate::domain::rework::VerdictAttentionAction>>,
     solution_review_settlement: Option<ValidatedSolutionReviewSettlement>,
 ) -> Result<Delivery, CoordinationError> {
     let item_type = snapshot.attention_items[item_index].item_type;
-    let run_actor_type = run_index.map(|index| snapshot.stage_runs[index].actor_type);
     let target_work_run_id = snapshot.attention_items[item_index].work_run_id.clone();
     let stored_item = &mut snapshot.attention_items[item_index];
     stored_item.status = solution_review_settlement.map_or_else(
@@ -339,39 +302,7 @@ fn apply_resolution(
             })?;
     }
 
-    let linked_review_still_open = snapshot.attention_items.iter().any(|item| {
-        target_work_run_id.is_some()
-            && item.work_run_id == target_work_run_id
-            && item.blocking
-            && item.status == AttentionItemStatus::Open
-    });
-    let review_decision = if let Some(settlement) = solution_review_settlement {
-        let stored_run =
-            &mut snapshot.stage_runs[run_index.expect("solution review has a StageRun")];
-        stored_run.status = settlement.stage_status();
-        stored_run.finished_at_millis = Some(input.now_millis);
-        input.decision
-    } else if run_actor_type == Some(StageRunActorType::Human) && !linked_review_still_open {
-        let decision = if snapshot.attention_items.iter().any(|item| {
-            target_work_run_id.is_some()
-                && item.work_run_id == target_work_run_id
-                && item.status == AttentionItemStatus::Dismissed
-        }) {
-            AttentionDecision::Dismissed
-        } else {
-            AttentionDecision::Resolved
-        };
-        let stored_run =
-            &mut snapshot.stage_runs[run_index.expect("human Attention has a StageRun")];
-        stored_run.status = match decision {
-            AttentionDecision::Resolved => StageRunStatus::Succeeded,
-            AttentionDecision::Dismissed => StageRunStatus::Failed,
-        };
-        stored_run.finished_at_millis = Some(input.now_millis);
-        decision
-    } else {
-        input.decision
-    };
+    let review_decision = input.decision;
     snapshot.status = if snapshot
         .attention_items
         .iter()
@@ -415,14 +346,12 @@ fn next_delivery_status(
         (AttentionItemType::DeliveryApproval, AttentionDecision::Resolved) => {
             DeliveryStatus::Delivered
         }
-        (AttentionItemType::RequirementQuestion, AttentionDecision::Resolved) => {
-            DeliveryStatus::Ready
-        }
+        (
+            AttentionItemType::RequirementQuestion | AttentionItemType::VerificationBlocked,
+            AttentionDecision::Resolved,
+        ) => DeliveryStatus::Ready,
         (AttentionItemType::RequirementQuestion, AttentionDecision::Dismissed)
         | (AttentionItemType::ScopeChange, _) => DeliveryStatus::Clarifying,
-        (AttentionItemType::VerificationBlocked, AttentionDecision::Resolved) => {
-            DeliveryStatus::Verifying
-        }
         (
             AttentionItemType::DeliveryApproval | AttentionItemType::VerificationBlocked,
             AttentionDecision::Dismissed,
@@ -430,7 +359,7 @@ fn next_delivery_status(
         _ => {
             return Err(CoordinationError::new(
                 CoordinationErrorCode::WrongState,
-                "Attention type is not actionable for its linked StageRun",
+                "Attention type is not actionable for its linked WorkRun",
             ));
         }
     };

@@ -48,6 +48,8 @@ use winwincode_control_plane::AccessGrantService;
 use winwincode_control_plane::ClientConnectServiceErrorKind;
 use winwincode_control_plane::ClientRegistryService;
 use winwincode_control_plane::ConnectCodeService;
+use winwincode_control_plane::RepositoryAccessGrantService;
+use winwincode_control_plane::RepositoryBindingService;
 use winwincode_domain::Instant;
 use winwincode_storage::AccessChallengeCreation;
 use winwincode_storage::AccessGrantIssuance;
@@ -63,6 +65,8 @@ use winwincode_storage::ConnectCodeConsume;
 use winwincode_storage::ConnectCodeRecord;
 use winwincode_storage::ConnectCodeState;
 use winwincode_storage::GrantTrustMode;
+use winwincode_storage::RepositoryAccessGrantIssuance;
+use winwincode_storage::RepositoryGrantPermissions;
 use winwincode_storage::SqliteStorage;
 use winwincode_storage::connect_attempt_window_anchor;
 
@@ -469,6 +473,7 @@ impl ClientConnectionsApplication {
                 .map_err(|_| ClientConnectionsError::unavailable())?
                 .is_some()
             {
+                ensure_repository_grants(&mut storage, &node.client_node_id, user_id)?;
                 return directory_json(&mut storage, user_id).map(Prepared::Completed);
             }
         }
@@ -636,6 +641,7 @@ impl ClientConnectionsApplication {
                         "subsequent user; use"
                     }),
                 )?;
+                ensure_repository_grants(&mut storage, &node.client_node_id, user_id)?;
                 directory_json(&mut storage, user_id)
             }
             Err(error) => match error.kind() {
@@ -650,6 +656,7 @@ impl ClientConnectionsApplication {
                         .map_err(|_| ClientConnectionsError::unavailable())?
                         .is_some()
                     {
+                        ensure_repository_grants(&mut storage, &node.client_node_id, user_id)?;
                         directory_json(&mut storage, user_id)
                     } else {
                         Err(ClientConnectionsError::new(
@@ -706,6 +713,48 @@ impl ClientConnectionsApplication {
         }
         Ok(())
     }
+}
+
+fn ensure_repository_grants(
+    storage: &mut SqliteStorage,
+    client_node_id: &str,
+    user_id: &str,
+) -> Result<(), ClientConnectionsError> {
+    let can_manage = AccessGrantService::new(storage)
+        .active_grant(client_node_id, user_id)
+        .map_err(|_| ClientConnectionsError::unavailable())?
+        .is_some_and(|grant| grant.permissions.can_manage());
+    if !can_manage {
+        return Ok(());
+    }
+    let bindings = RepositoryBindingService::new(storage)
+        .bindings_for_client(client_node_id)
+        .map_err(|_| ClientConnectionsError::unavailable())?;
+    for binding in bindings {
+        let already_granted = RepositoryAccessGrantService::new(storage)
+            .active_grants_for_binding(&binding.repository_binding_id)
+            .map_err(|_| ClientConnectionsError::unavailable())?
+            .into_iter()
+            .any(|grant| grant.user_id == user_id);
+        if already_granted {
+            continue;
+        }
+        let issuance = RepositoryAccessGrantIssuance::try_new(
+            generate_prefixed_id("rag_")?,
+            &binding.repository_binding_id,
+            user_id,
+            user_id,
+        )
+        .map_err(|_| ClientConnectionsError::unavailable())?;
+        RepositoryAccessGrantService::new(storage)
+            .create_grant(
+                &issuance,
+                RepositoryGrantPermissions::UseManage,
+                &now_instant(),
+            )
+            .map_err(|_| ClientConnectionsError::unavailable())?;
+    }
+    Ok(())
 }
 
 fn client_not_found() -> ClientConnectionsError {

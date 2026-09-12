@@ -1008,35 +1008,6 @@ impl<'storage> WorkerLaunchGrantLedger<'storage> {
 fn ensure_worker_launch_grant_schema(
     connection: &rusqlite::Connection,
 ) -> Result<(), WorkerLaunchGrantStoreError> {
-    let columns = connection
-        .prepare("PRAGMA table_info(worker_launch_grants)")
-        .map_err(|sql| sql_error(&sql))?
-        .query_map([], |row| row.get::<_, String>(1))
-        .map_err(|sql| sql_error(&sql))?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|sql| sql_error(&sql))?;
-    if !columns.is_empty() && !columns.iter().any(|column| column == "work_run_id") {
-        connection
-            .execute(
-                "ALTER TABLE worker_launch_grants ADD COLUMN work_run_id TEXT",
-                [],
-            )
-            .map_err(|sql| sql_error(&sql))?;
-    }
-    if columns.iter().any(|column| column == "stage_run_id")
-        && connection
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM worker_launch_grants WHERE stage_run_id IS NOT NULL)",
-                [],
-                |row| row.get::<_, bool>(0),
-            )
-            .map_err(|sql| sql_error(&sql))?
-    {
-        return Err(error(
-            WorkerLaunchGrantStoreErrorKind::Storage,
-            "legacy StageRun grants require an explicit WorkRun migration",
-        ));
-    }
     connection
         .execute_batch(WORKER_LAUNCH_GRANT_SCHEMA)
         .map_err(|sql| sql_error(&sql))?;
@@ -1651,11 +1622,11 @@ fn validate_worker_session_id(value: &str) -> Result<(), WorkerLaunchGrantStoreE
 }
 
 fn validate_worker_id(value: &str) -> Result<(), WorkerLaunchGrantStoreError> {
-    validate_crockford_id(value, "wkr_", "worker id")
+    validate_crockford_id(value, "wrk_", "worker id")
 }
 
 fn validate_worker_instance_id(value: &str) -> Result<(), WorkerLaunchGrantStoreError> {
-    validate_crockford_id(value, "winst_", "worker instance id")
+    validate_crockford_id(value, "wki_", "worker instance id")
 }
 
 fn validate_product_session_id(value: &str) -> Result<(), WorkerLaunchGrantStoreError> {
@@ -2090,8 +2061,8 @@ mod tests {
             token,
             binding,
             session_id(session_seed),
-            format!("wkr_{}", crockford(session_seed + 1)),
-            format!("winst_{}", crockford(session_seed + 2)),
+            format!("wrk_{}", crockford(session_seed + 1)),
+            format!("wki_{}", crockford(session_seed + 2)),
             DIGEST,
             Some(format!("ps_{}", crockford(session_seed + 3))),
             Some(WorkRunId(format!("wrn_{}", crockford(session_seed + 4)))),
@@ -2113,8 +2084,8 @@ mod tests {
             lease_id,
             token,
             session_id(session_seed),
-            format!("wkr_{}", crockford(session_seed + 1)),
-            format!("winst_{}", crockford(session_seed + 2)),
+            format!("wrk_{}", crockford(session_seed + 1)),
+            format!("wki_{}", crockford(session_seed + 2)),
             accepted,
             reason,
         )
@@ -2152,8 +2123,8 @@ mod tests {
             fencing_token,
             format!("rbd_{}", crockford(5)),
             session_id(6),
-            format!("wkr_{}", crockford(7)),
-            format!("winst_{}", crockford(8)),
+            format!("wrk_{}", crockford(7)),
+            format!("wki_{}", crockford(8)),
             credential_digest,
             None,
             None,
@@ -2170,8 +2141,8 @@ mod tests {
             format!("ocl_{}", crockford(4)),
             1,
             session_id(6),
-            format!("wkr_{}", crockford(7)),
-            format!("winst_{}", crockford(8)),
+            format!("wrk_{}", crockford(7)),
+            format!("wki_{}", crockford(8)),
             accepted,
             rejection_reason,
         )
@@ -2535,8 +2506,8 @@ mod tests {
             token,
             binding.clone(),
             first.worker_session_id.clone(),
-            format!("wkr_{}", crockford(99)),
-            format!("winst_{}", crockford(98)),
+            format!("wrk_{}", crockford(99)),
+            format!("wki_{}", crockford(98)),
             DIGEST,
             None,
             None,
@@ -2704,8 +2675,8 @@ mod tests {
             lease_id.clone(),
             token,
             session_id(20),
-            format!("wkr_{}", crockford(21)),
-            format!("winst_{}", crockford(99)),
+            format!("wrk_{}", crockford(21)),
+            format!("wki_{}", crockford(99)),
             true,
             None,
         )
@@ -2901,29 +2872,6 @@ mod tests {
     }
 
     #[test]
-    fn existing_empty_grant_table_adds_work_run_column() {
-        let connection = rusqlite::Connection::open_in_memory().expect("sqlite");
-        connection
-            .execute_batch(WORKER_LAUNCH_GRANT_SCHEMA)
-            .expect("schema");
-        connection
-            .execute(
-                "ALTER TABLE worker_launch_grants RENAME COLUMN work_run_id TO stage_run_id",
-                [],
-            )
-            .expect("legacy column");
-        ensure_worker_launch_grant_schema(&connection).expect("upgrade empty table");
-        let columns = connection
-            .prepare("PRAGMA table_info(worker_launch_grants)")
-            .expect("pragma")
-            .query_map([], |row| row.get::<_, String>(1))
-            .expect("columns")
-            .collect::<Result<Vec<_>, _>>()
-            .expect("rows");
-        assert!(columns.iter().any(|column| column == "work_run_id"));
-    }
-
-    #[test]
     fn existing_stage_run_grant_is_rejected_without_rewriting_data() {
         let connection = rusqlite::Connection::open_in_memory().expect("sqlite");
         connection
@@ -2955,7 +2903,8 @@ mod tests {
                 [],
             )
             .expect("legacy grant");
-        assert!(ensure_worker_launch_grant_schema(&connection).is_err());
+        ensure_worker_launch_grant_schema(&connection).expect("create statements are idempotent");
+        validate_schema(&connection).expect_err("old schema rejection");
         let value: String = connection
             .query_row("SELECT stage_run_id FROM worker_launch_grants", [], |row| {
                 row.get(0)

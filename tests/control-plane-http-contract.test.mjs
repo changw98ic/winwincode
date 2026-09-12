@@ -14,7 +14,7 @@ const COMMANDS = Object.freeze([
   'session.close',
   'delivery.create',
   'delivery.update_spec',
-  'delivery.advance',
+  'workrun.start',
   'workrun.cancel',
   'delivery.resolve_attention',
   'delivery.submit_verdict',
@@ -30,7 +30,7 @@ const COMMANDS = Object.freeze([
   'publication.cancel',
   'collaboration.notification.ack',
   'collaboration.presence.update',
-  'delivery.task_breakdown.create',
+  'workitems.create',
 ])
 
 const QUERIES = Object.freeze([
@@ -168,6 +168,7 @@ test('HTTP contract specializes every accepted command without copying domain pr
     refs.some(ref => typeof ref !== 'string'
       || (!ref.startsWith('#/$defs/')
         && !ref.startsWith('./domain.schema.json#/$defs/')
+        && !ref.startsWith('./client-control.schema.json#/$defs/')
         && !ref.startsWith('./control-plane-http.schema.json#/$defs/'))),
     false,
   )
@@ -779,7 +780,7 @@ test('positive and negative samples pin retries, conflicts, cursors, and secret-
     'pending',
   )
   assert.equal(
-    examples.responses.deliveryDetailPendingReview.result.solutionReview.taskProposals.length,
+    examples.responses.deliveryDetailPendingReview.result.solutionReview.workItemProposals.length,
     1,
   )
   assert.equal(examples.responses.runtimeProjection.result.kind, 'runtime_projection')

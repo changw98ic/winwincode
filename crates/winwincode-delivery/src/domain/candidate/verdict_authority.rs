@@ -10,7 +10,7 @@ use serde_json::Value;
 use winwincode_domain::{ExecutionEventId, ExecutionSequence};
 use winwincode_storage::ValidatedGitSourceArtifact;
 
-use crate::application::stage::DeliveryTerminalOutcomeFacts;
+use crate::application::workrun_execution::DeliveryTerminalOutcomeFacts;
 
 use super::{
     FrozenDeliveryCandidate, freeze_delivery_candidate_from_source,

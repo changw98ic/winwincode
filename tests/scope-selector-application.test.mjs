@@ -134,6 +134,13 @@ class FakeElement {
   listeners = new Map()
   dataset = {}
   className = ''
+  classList = {
+    toggle: (name, force) => {
+      const names = this.className.split(/\s+/u).filter(Boolean).filter(candidate => candidate !== name)
+      if (force) names.push(name)
+      this.className = names.join(' ')
+    },
+  }
   disabled = false
   hidden = false
   tabIndex = 0
@@ -389,7 +396,7 @@ test('refresh restores an exact URL Scope and later AuthSession revocation fails
     node.className === 'wwc-scope-selector-access'
   ))
   assert.equal(access.getAttribute('role'), 'alert')
-  assert.match(access.textContent, /no longer authorized/iu)
+  assert.match(access.textContent, /未获授权|不再被授权/u)
   assert.equal(
     fixture.client.queries.filter(call => call.request.query === 'settings.get').length,
     1,

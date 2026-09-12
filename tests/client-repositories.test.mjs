@@ -551,17 +551,17 @@ test('repositories page renders every card field and never renders a path', asyn
 
   assert.equal(findOne(cards[0], 'wwc-repositories-card-name').textContent, 'WinWinCode')
   assert.equal(findOne(cards[0], 'wwc-repositories-card-branch').textContent, 'main')
-  assert.equal(findOne(cards[0], 'wwc-repositories-card-dirty').textContent, 'Clean')
+  assert.equal(findOne(cards[0], 'wwc-repositories-card-dirty').textContent, '干净')
   assert.equal(findOne(cards[0], 'wwc-repositories-card-dirty').dataset.tone, 'success')
   assert.equal(findOne(cards[0], 'wwc-repositories-card-head').textContent, 'HEAD abc1234')
   assert.equal(findOne(cards[0], 'wwc-repositories-card-availability').hidden, true)
-  assert.equal(findOne(cards[0], 'wwc-repositories-card-grant-user').getAttribute('aria-label'), 'User ID')
-  assert.equal(findOne(cards[0], 'wwc-repositories-card-grant-permissions').getAttribute('aria-label'), 'Repository permission')
+  assert.equal(findOne(cards[0], 'wwc-repositories-card-grant-user').getAttribute('aria-label'), '用户 ID')
+  assert.equal(findOne(cards[0], 'wwc-repositories-card-grant-permissions').getAttribute('aria-label'), '仓库权限')
   assert.equal(findOne(cards[0], 'wwc-repositories-card-grant-status').getAttribute('aria-live'), 'polite')
 
   assert.equal(findOne(cards[1], 'wwc-repositories-card-name').textContent, 'n0vel')
   assert.equal(findOne(cards[1], 'wwc-repositories-card-branch').textContent, 'develop')
-  assert.equal(findOne(cards[1], 'wwc-repositories-card-dirty').textContent, 'Dirty')
+  assert.equal(findOne(cards[1], 'wwc-repositories-card-dirty').textContent, '有改动')
   assert.equal(findOne(cards[1], 'wwc-repositories-card-dirty').dataset.tone, 'warning')
   assert.equal(findOne(cards[1], 'wwc-repositories-card-head').textContent, 'HEAD def4567')
   assert.equal(findOne(cards[1], 'wwc-repositories-card-availability').hidden, true)
@@ -574,12 +574,12 @@ test('repositories page renders every card field and never renders a path', asyn
 
 test('repositories page shows the availability reason badge for every non-available state', async () => {
   const cases = [
-    { availability: 'dirty', text: 'Not usable: the working tree is dirty', tone: 'warning' },
-    { availability: 'unavailable', text: 'Repository unavailable', tone: 'danger' },
-    { availability: 'moved', text: 'Repository moved on the device', tone: 'warning' },
-    { availability: 'invalid_git', text: 'Not a valid Git repository', tone: 'danger' },
-    { availability: 'permission_denied', text: 'Access denied on the device', tone: 'danger' },
-    { availability: 'scan_failed', text: 'The last repository scan failed', tone: 'warning' },
+    { availability: 'dirty', text: '不可用：工作区有未提交改动', tone: 'warning' },
+    { availability: 'unavailable', text: '仓库不可用', tone: 'danger' },
+    { availability: 'moved', text: '仓库已在设备上移动', tone: 'warning' },
+    { availability: 'invalid_git', text: '不是有效的 Git 仓库', tone: 'danger' },
+    { availability: 'permission_denied', text: '设备拒绝访问', tone: 'danger' },
+    { availability: 'scan_failed', text: '上次仓库扫描失败', tone: 'warning' },
   ]
   for (const candidate of cases) {
     const { rootElement, model } = repositoriesFixture({
@@ -628,7 +628,7 @@ test('repositories page renders the selection hint, the empty copy, and the unav
   assert.equal(error.hidden, false)
   assert.equal(
     error.textContent,
-    'Listing repositories is unavailable right now. Check the connection and try again.',
+    '暂时无法列出仓库，请检查连接后重试。',
   )
   assert.equal(empty.hidden, true, 'an unavailable read never claims the empty state')
   assert.equal(findAll(rootElement, 'wwc-repositories-card').length, 0)
@@ -907,7 +907,7 @@ test('the signed-in repository area follows the selected device card and hides o
   assert.equal(applicationNode(fixture.rootElement, 'wwc-repositories-card-branch').textContent,
     'main')
   assert.equal(applicationNode(fixture.rootElement, 'wwc-repositories-card-dirty').textContent,
-    'Clean')
+    '干净')
   assert.equal(applicationNode(fixture.rootElement, 'wwc-repositories-card-head').textContent,
     'HEAD abc1234')
   assert.equal(

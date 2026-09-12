@@ -806,6 +806,14 @@ class ApiClient {
     assert.equal(response.json?.schemaVersion, SCHEMA_VERSION, `${query} schema`)
     return response.json
   }
+
+  async request(path, options = {}) {
+    return requestJson(`${this.baseUrl}${path}`, {
+      ...options,
+      origin: this.origin,
+      cookie: this.cookie,
+    })
+  }
 }
 
 function assertCompleted(response, command, previousRevision = undefined) {
@@ -826,19 +834,6 @@ function assertRuntimeSession(session, { productSessionId, workRunId = undefined
   assert.equal(session.productSessionId, productSessionId)
   assert.ok(Number.isInteger(session.asOfSequence) && session.asOfSequence > 0)
   if (workRunId !== undefined) assert.equal(session.workRunId, workRunId)
-}
-
-function stageBindingReady(stage) {
-  const binding = stage.sessionBinding
-  if (stage.actorType !== 'codex' || binding === null || typeof binding !== 'object') return false
-  return typeof binding.executionJobId === 'string'
-    && typeof binding.workerId === 'string'
-    && typeof binding.workerSessionId === 'string'
-    && typeof binding.codexThreadId === 'string'
-    && binding.sessionIdentity?.productSessionId === binding.productSessionId
-    && binding.sessionIdentity?.workerSessionId === binding.workerSessionId
-    && binding.sessionIdentity?.codexThreadId === binding.codexThreadId
-    && binding.sessionIdentity?.stageRunId === stage.id
 }
 
 async function waitFor(predicate, label, timeoutMillis) {
@@ -1398,24 +1393,11 @@ function candidateArtifactSummary(candidate) {
   }
 }
 
-function stageRunSummary(stage, modelRoute) {
-  return {
-    id: stage.id,
-    role: stage.role,
-    status: stage.status,
-    attempt: stage.attempt,
-    executionJobId: stage.sessionBinding?.executionJobId ?? null,
-    providerRoute: modelRoute,
-  }
-}
-
 function deliveryFailureSummary(detail, modelRoute = configuredModelRoute()) {
   return {
     deliveryRevision: detail?.deliveryRevision ?? null,
     status: detail?.status ?? null,
-    stages: Array.isArray(detail?.stages)
-      ? detail.stages.map(stage => stageRunSummary(stage, modelRoute))
-      : [],
+    providerRoute: modelRoute,
     currentCandidate: detail?.currentCandidate === null
       ? null
       : detail?.currentCandidate === undefined
@@ -1426,9 +1408,6 @@ function deliveryFailureSummary(detail, modelRoute = configuredModelRoute()) {
         },
     candidateArtifact: candidateArtifactSummary(detail?.currentCandidate),
     verdictStatus: detail?.verdict?.status ?? null,
-    taskStatuses: Array.isArray(detail?.tasks)
-      ? detail.tasks.map(task => task.status)
-      : [],
     openAttentionIds: Array.isArray(detail?.attention)
       ? detail.attention
         .filter(item => item.status === 'open')
@@ -1502,9 +1481,9 @@ export async function driveDelivery(
       .filter(run => ['queued', 'leased', 'running'].includes(run.state))
     const observation = { revision: detail.deliveryRevision, status: detail.status }
     appendDeliveryTransition(transitionTrace, observation)
-    if (detail.status === 'delivered') break
+    if (detail.status === 'done') break
     if (now() >= deadline) {
-      fail(`StrongFlow did not reach delivered: ${JSON.stringify({
+      fail(`StrongFlow did not reach done: ${JSON.stringify({
         observations: transitionTrace.observations,
         totalTransitionCount: transitionTrace.totalTransitionCount,
         failure: deliveryFailureSummary(detail, modelRoute),
@@ -1521,7 +1500,7 @@ export async function driveDelivery(
     ) {
       const verificationProfile = ['reviewer', 'verifier'][workRuns.length - 1]
       if (verificationProfile !== undefined) {
-        command = 'delivery.advance'
+        command = 'workrun.start'
         payload = { deliveryId: IDS.delivery, dispatchProfile: verificationProfile }
       } else {
         command = 'delivery.submit_verdict'
@@ -1613,11 +1592,11 @@ export async function driveDelivery(
   }
 
   const terminal = detail
-  assert.equal(terminal.status, 'delivered')
-  assert.notEqual(terminal.currentCandidate, null, 'Delivered projection must contain a frozen candidate')
-  assert.equal(terminal.verdict?.status, 'pass', 'Delivered projection must contain a passing verdict')
+  assert.equal(terminal.status, 'done')
+  assert.notEqual(terminal.currentCandidate, null, 'Done projection must contain a frozen candidate')
+  assert.equal(terminal.verdict?.status, 'pass', 'Done projection must contain a passing verdict')
   assert.equal(terminal.attention.filter(item => item.status === 'open').length, 0)
-  assert.ok(terminal.evidence.length > 0, 'Delivered projection must expose canonical evidence')
+  assert.ok(terminal.evidence.length > 0, 'Done projection must expose canonical evidence')
   const terminalWorkRunAggregate = (await client.query('workrun.get', {
     deliveryId: IDS.delivery,
     workItemId: null,
@@ -1625,12 +1604,12 @@ export async function driveDelivery(
   })).result
   assert.ok(Array.isArray(terminalWorkRunAggregate.items)
     && terminalWorkRunAggregate.items.length > 0,
-  'Delivered projection must contain canonical WorkItems')
+  'Done projection must contain canonical WorkItems')
   assert.ok(terminalWorkRunAggregate.items.every(item => item.state === 'done'),
-    'Delivered requires every canonical WorkItem to be done')
+    'Done requires every canonical WorkItem to be done')
   assert.ok(Array.isArray(terminalWorkRunAggregate.runs)
     && terminalWorkRunAggregate.runs.length > 0,
-  'Delivered projection must contain canonical WorkRuns')
+  'Done projection must contain canonical WorkRuns')
   for (const run of terminalWorkRunAggregate.runs) {
     assert.equal(typeof run.id, 'string')
     assert.equal(typeof run.workItemId, 'string')
@@ -1644,6 +1623,7 @@ export async function driveDelivery(
     observations: transitionTrace.observations,
     terminalCommand,
     totalTransitionCount: transitionTrace.totalTransitionCount,
+    workRunAggregate: terminalWorkRunAggregate,
   }
 }
 
@@ -1673,7 +1653,7 @@ async function runtimeWorkRunEvidence(client, detail) {
     assert.equal(typeof run.id, 'string')
     assert.equal(typeof run.productSessionId, 'string')
     const response = await client.query('runtime.projection.get', {
-      kind: 'delivery-stage',
+      kind: 'work-run',
       deliveryId: IDS.delivery,
       productSessionId: run.productSessionId,
       workRunId: run.id,
@@ -1952,7 +1932,6 @@ export async function runApiProductionVertical({
       const deliveryCreated = await commandEventually(api, 'delivery.create', 0, {
         deliveryId: IDS.delivery,
         spec: deliverySpec(baseline),
-        tasks: [],
       }, timeoutMillis)
       assertCompleted(deliveryCreated, 'delivery.create', 0)
       const workRunBeforeDispatch = await api.query('workrun.get', {
@@ -1967,14 +1946,14 @@ export async function runApiProductionVertical({
       if (workItemPayload !== null) {
         const workItemsCreated = await commandEventually(
           api,
-          'delivery.task_breakdown.create',
+          'workitems.create',
           deliveryCreated.currentRevision,
           workItemPayload,
           timeoutMillis,
         )
         assertCompleted(
           workItemsCreated,
-          'delivery.task_breakdown.create',
+          'workitems.create',
           deliveryCreated.currentRevision,
         )
         assert.equal(workItemsCreated.result.items.length, 1)
@@ -1989,7 +1968,7 @@ export async function runApiProductionVertical({
       })
       const deliveryAdvanced = await commandEventually(
         api,
-        'delivery.advance',
+        'workrun.start',
         deliveryBeforeDispatch.result.deliveryRevision,
         {
           deliveryId: IDS.delivery,
@@ -1999,7 +1978,7 @@ export async function runApiProductionVertical({
       )
       assertCompleted(
         deliveryAdvanced,
-        'delivery.advance',
+        'workrun.start',
         deliveryBeforeDispatch.result.deliveryRevision,
       )
       assert.equal(deliveryAdvanced.result.deliveryId, IDS.delivery)
@@ -2013,8 +1992,7 @@ export async function runApiProductionVertical({
         candidateArtifact: candidateArtifactSummary(delivery.detail.currentCandidate),
         observations: delivery.observations,
         totalTransitionCount: delivery.totalTransitionCount,
-        stageRuns: delivery.detail.stages.map(stage => stageRunSummary(stage, modelRoute)),
-        stageRoles: delivery.detail.stages.map(stage => stage.role.toLowerCase()).toSorted(),
+        workRunStates: delivery.workRunAggregate.runs.map(run => run.state),
         workRunRuntime: workRunRuntime.map(item => ({
           workRunId: item.workRunId,
           asOfSequence: item.session.asOfSequence,
@@ -2023,7 +2001,7 @@ export async function runApiProductionVertical({
           codexThreadId: item.session.codexThreadId,
         })),
         status: delivery.detail.status,
-        taskStatuses: delivery.detail.tasks.map(task => task.status),
+        workItemStates: delivery.workRunAggregate.items.map(item => item.state),
         verdictStatus: delivery.detail.verdict.status,
       }
     }

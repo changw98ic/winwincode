@@ -83,7 +83,7 @@ pub use device_execution_binding::{
     DeviceExecutionBindingRecord, DeviceExecutionBindingRelease, DeviceExecutionBindingState,
     DeviceExecutionBindingStoreError, DeviceExecutionBindingStoreErrorKind,
     DeviceExecutionCapacitySnapshot, DeviceExecutionFactsAttachment,
-    DeviceExecutionReservationFacts, DeviceFactsReceipt,
+    DeviceExecutionReservationFacts, DeviceFactsReceipt, WorkRunDeviceBindingFacts,
 };
 pub use device_scheduler::{
     DeviceSchedulerLedger, DeviceSchedulerReleaseReason, DeviceSchedulerReservationGrant,
@@ -2104,6 +2104,19 @@ pub trait ProductStateStorage: Send {
         Ok(None)
     }
 
+    /// Loads the scheduler-sealed Client and repository identity for one
+    /// execution Job. Non-device adapters return no binding.
+    ///
+    /// # Errors
+    ///
+    /// Returns storage corruption or adapter failures.
+    fn load_work_run_device_binding_facts(
+        &self,
+        _job_id: &ExecutionJobId,
+    ) -> Result<Option<WorkRunDeviceBindingFacts>, StorageError> {
+        Ok(None)
+    }
+
     /// Loads the one active scheduler row of a Delivery stage run (`FLOW-100.5`).
     ///
     /// Local production storage overrides this seam so the `StrongFlow` device
@@ -2621,6 +2634,13 @@ impl ProductStateStorage for SqliteStorage {
         job_id: &ExecutionJobId,
     ) -> Result<Option<ExecutionJobRecord>, StorageError> {
         repository_scheduler::load_execution_job_by_id(self.connection()?, job_id)
+    }
+
+    fn load_work_run_device_binding_facts(
+        &self,
+        job_id: &ExecutionJobId,
+    ) -> Result<Option<WorkRunDeviceBindingFacts>, StorageError> {
+        device_execution_binding::load_work_run_device_binding_facts(self.connection()?, &job_id.0)
     }
 
     fn load_active_execution_job_record_for_work_run(

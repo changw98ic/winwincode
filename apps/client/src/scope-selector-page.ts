@@ -113,7 +113,7 @@ export function mountScopeSelectorPage(options: ScopeSelectorPageOptions): Scope
   let closed = false
 
   region.setAttribute('aria-label', '当前范围')
-  heading.textContent = 'Scope'
+  heading.textContent = '范围'
   status.setAttribute('role', 'status')
   status.setAttribute('aria-live', 'polite')
   retry.type = 'button'

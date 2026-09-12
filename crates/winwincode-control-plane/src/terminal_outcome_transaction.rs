@@ -11,7 +11,7 @@ use winwincode_audit::{
     AuditSubject,
 };
 use winwincode_delivery::{
-    application::stage::{
+    application::workrun_execution::{
         DeliveryTerminalOutcomeFacts, DurableTerminalOutcomeInput, TerminalArtifactReference,
         TerminalOutcomeStatus, reconcile_durable_settled_terminal_outcome,
         reconcile_durable_terminal_outcome,
@@ -21,9 +21,9 @@ use winwincode_delivery::{
 };
 use winwincode_domain::RepositoryScope;
 use winwincode_domain::{
-    CodexThreadId, ControlPlaneEventId, DeliveryId, DeliveryTaskId, ExecutionAckSequence,
-    ExecutionJobId, ExecutionMessageId, Instant, ProductSessionId, RequestId, SchemaVersion,
-    SessionIdentity, Sha256Digest, WorkRunId,
+    CodexThreadId, ControlPlaneEventId, DeliveryId, ExecutionAckSequence, ExecutionJobId,
+    ExecutionMessageId, Instant, ProductSessionId, RequestId, SchemaVersion, SessionIdentity,
+    Sha256Digest, WorkItemId, WorkRunId,
 };
 use winwincode_execution_port::generated::{
     ArtifactReference, ExecutionJob, ExecutionOutcomeStatus, ExecutionScope, JobOutcomeMessage,
@@ -39,9 +39,9 @@ use crate::delivery_transaction::{
 };
 
 use crate::session_binding_transaction::{
-    DeliveryStageRuntimeInvalidation, delivery_stage_runtime_invalidated_event,
-    execution_message_actor_key, execution_message_request_id, instant_millis, projection_event_id,
-    require_id, validate_delivery_stage_runtime_invalidation,
+    WorkRunRuntimeInvalidation, execution_message_actor_key, execution_message_request_id,
+    instant_millis, projection_event_id, require_id, validate_work_run_runtime_invalidation,
+    work_run_runtime_invalidated_event,
 };
 use crate::{
     DeliveryChangeKind, OutboxError, WorkerExecutionLifecycleError,
@@ -50,10 +50,9 @@ use crate::{
 };
 
 const TERMINAL_PHASE: &str = "terminal-outcome";
-const TERMINAL_TOPIC: &str = "delivery.stage.terminal";
-const TERMINAL_EVENT_NAMESPACE: &[u8] = b"winwincode.delivery-stage-terminal.v1";
-const TERMINAL_RUNTIME_NAMESPACE: &[u8] =
-    b"winwincode.delivery-stage-terminal-runtime-invalidation.v1";
+const TERMINAL_TOPIC: &str = "delivery.work_run.terminal";
+const TERMINAL_EVENT_NAMESPACE: &[u8] = b"winwincode.work-run-terminal.v1";
+const TERMINAL_RUNTIME_NAMESPACE: &[u8] = b"winwincode.work-run-terminal-runtime-invalidation.v1";
 const TERMINAL_AUTHORITY_STREAM_PREFIX: &str = "delivery-terminal-authority:";
 
 /// Durable receipt for one accepted Worker terminal outcome.
@@ -215,7 +214,7 @@ struct TerminalContext {
     scope_key: ReceiptScopeKey,
     repository_scope: RepositoryScope,
     delivery_id: DeliveryId,
-    delivery_task_id: Option<DeliveryTaskId>,
+    work_item_id: Option<WorkItemId>,
     work_run_id: WorkRunId,
     product_session_id: ProductSessionId,
     job_event: DurableExecutionJobRef,
@@ -254,7 +253,7 @@ impl TerminalContext {
                     .unwrap_or(durable.stream_id())
                     .to_owned(),
             ),
-            delivery_task_id: None,
+            work_item_id: None,
             work_run_id: job_scope.work_run_id.clone(),
             product_session_id: job_scope.product_session_id.clone(),
             job_event,
@@ -625,7 +624,7 @@ fn terminal_pending_audit_event(
         facts.metadata().finished_at_millis(),
         phase.receipt_identity.request_id().clone(),
         &context.repository_scope,
-        AuditAction::delivery_state("stage.terminal.accepted")
+        AuditAction::delivery_state("workrun.terminal.accepted")
             .map_err(|error| StorageError::invalid_input(error.to_string()))?,
         before,
         after,
@@ -657,7 +656,7 @@ fn terminal_audit_subject(
         context.work_run_id.clone(),
         active.execution_job_id().clone(),
         context.delivery_id.clone(),
-        context.delivery_task_id.clone(),
+        context.work_item_id.clone(),
         active.worker_id().clone(),
         active.worker_instance_id().clone(),
         active.lease_id().clone(),
@@ -710,7 +709,7 @@ fn commit_terminal(
         .into_publication()
         .map_err(|error| StorageError::adapter(error.to_string()))?
         .ok_or_else(|| {
-            StorageError::invalid_input("stage.terminal did not stage a journal publication")
+            StorageError::invalid_input("workrun.terminal did not stage a journal publication")
         })?;
     let revision = mutation.snapshot.revision();
     let accepted = terminal_accepted_event(message, phase, context, revision)?;
@@ -730,19 +729,18 @@ fn commit_terminal(
         message.sent_at.clone(),
         public_source.clone(),
     )?;
-    let invalidated =
-        delivery_stage_runtime_invalidated_event(&DeliveryStageRuntimeInvalidation {
-            scope_key: &context.scope_key,
-            delivery_id: &context.delivery_id,
-            work_run_id: &context.work_run_id,
-            product_session_id: &context.product_session_id,
-            session_identity,
-            revision,
-            event_namespace: TERMINAL_RUNTIME_NAMESPACE,
-            scope: public_scope,
-            occurred_at: message.sent_at.clone(),
-            source: public_source,
-        })?;
+    let invalidated = work_run_runtime_invalidated_event(&WorkRunRuntimeInvalidation {
+        scope_key: &context.scope_key,
+        delivery_id: &context.delivery_id,
+        work_run_id: &context.work_run_id,
+        product_session_id: &context.product_session_id,
+        session_identity,
+        revision,
+        event_namespace: TERMINAL_RUNTIME_NAMESPACE,
+        scope: public_scope,
+        occurred_at: message.sent_at.clone(),
+        source: public_source,
+    })?;
     let pending_audit_event = terminal_pending_audit_event(
         facts,
         phase,
@@ -1093,7 +1091,7 @@ fn validate_receipt(
             DeliveryChangeKind::Advanced,
         )?;
     }
-    validate_delivery_stage_runtime_invalidation(
+    validate_work_run_runtime_invalidation(
         receipt,
         &payload.delivery_id,
         &payload.work_run_id,

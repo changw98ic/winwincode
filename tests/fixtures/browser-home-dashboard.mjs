@@ -69,8 +69,8 @@ function deliveryFor(repository, overrides = {}) {
     },
     revision: 4,
     schemaVersion,
-    status: 'executing',
-    taskCounts: { active: 1, blocked: 0, completed: 1, failed: 2, pending: 0, total: 4, verifying: 0 },
+    status: 'in_progress',
+    workItemCounts: { ready: 0, waitingHuman: 0, candidateReady: 0, rework: 0, cancelled: 0, inProgress: 1, waitingDependency: 0, done: 1, failed: 2, backlog: 0, total: 4, validating: 0 },
     title: `Delivery of repository ${String(index)}`,
     updatedAt: '2026-09-03T08:00:00.000Z',
     ...overrides,
@@ -83,8 +83,8 @@ function deliveredFor(repository) {
     activeWorkRunId: null,
     deliveryId: canonicalId('dlv', index + 10),
     openAttentionCount: 0,
-    status: 'delivered',
-    taskCounts: { active: 0, blocked: 0, completed: 4, failed: 0, pending: 0, total: 4, verifying: 0 },
+    status: 'done',
+    workItemCounts: { ready: 0, waitingHuman: 0, candidateReady: 0, rework: 0, cancelled: 0, inProgress: 0, waitingDependency: 0, done: 4, failed: 0, backlog: 0, total: 4, validating: 0 },
     title: `Delivered of repository ${String(index)}`,
   })
 }
@@ -165,7 +165,7 @@ const workspace = new Map([
   }],
   [repositoryTwo.repositoryId, {
     repository: repositoryTwo,
-    deliveries: [deliveryFor(repositoryTwo, { status: 'verifying', openAttentionCount: 0 })],
+    deliveries: [deliveryFor(repositoryTwo, { status: 'validating', openAttentionCount: 0 })],
     sessions: [],
     approvals: [],
   }],

@@ -453,7 +453,7 @@ test('Provider settings use one facade, submit secrets once, and reload revoked 
   assert.equal(model.state.interaction.error.code, 'REVISION_CONFLICT')
   assert.equal(
     settingsPagePresentation(model.state).errorText,
-    'These settings changed before the update was saved. Review the current snapshot and try again.',
+    '保存前设置已发生变化，请检查当前快照后重试。',
   )
 
   const mutationRequests = fake.requests.filter(({ request }) => 'command' in request)
@@ -699,7 +699,7 @@ test('settings keeps write-only inputs only in mounted controls until success or
     })],
   })
   listener(state)
-  assert.equal(visibleText(rootElement).includes('Revoked'), true)
+  assert.equal(visibleText(rootElement).includes('已撤销'), true)
   assert.equal(byClass(rootElement, 'wwc-settings-rotate').disabled, true)
   assert.equal(byClass(rootElement, 'wwc-settings-revoke').disabled, true)
 
@@ -1382,7 +1382,7 @@ test('settings merges clean fields, exposes revision conflicts, and submits one 
   assert.equal(modelId.value, 'server-model-b')
   assert.equal(concurrency.value, '3')
   assert.equal(conflict.hidden, false)
-  assert.match(visibleText(conflict), /Provider ID.*server-provider-b.*browser-provider/u)
+  assert.match(visibleText(conflict), /模型服务商 ID.*server-provider-b.*browser-provider/u)
   assert.equal(byClass(rootElement, 'wwc-settings-save-route').disabled, true)
 
   byClass(rootElement, 'wwc-settings-route-keep-draft').dispatch('click')
@@ -1462,7 +1462,7 @@ test('invalid settings scope fails before transport and produces a clear page pr
   assert.equal(model.state.error.code, 'INVALID_CLIENT_REQUEST')
   assert.equal(
     settingsPagePresentation(model.state).errorText,
-    'Check the local user identity and workspace scope configuration, then retry.',
+    '请检查本地用户身份和工作区范围配置后重试。',
   )
   model.close()
   client.close()
@@ -1497,7 +1497,7 @@ test('settings page keeps its network boundary in the view-model and renders onl
   })
   assert.equal(
     settingsPagePresentation(configuration).errorText,
-    'Check the local server URL and workspace scope configuration, then retry.',
+    '请检查本地服务器地址和工作区范围配置后重试。',
   )
   const serverError = pageState({
     status: 'error',
@@ -1511,6 +1511,6 @@ test('settings page keeps its network boundary in the view-model and renders onl
   })
   assert.equal(
     settingsPagePresentation(serverError).errorText,
-    'Provider settings could not be updated. Retry, or review the server status.',
+    '模型服务商设置更新失败，请重试或检查服务器状态。',
   )
 })

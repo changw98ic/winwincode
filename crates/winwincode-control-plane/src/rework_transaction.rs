@@ -3,9 +3,11 @@
 //! Specialized atomic transaction for a bounded rework clarification.
 
 use serde_json::Value;
-use winwincode_api::generated::{CommandEnvelope, CommandName, DeliveryAdvancePayload};
+use winwincode_api::generated::{CommandEnvelope, CommandName, WorkRunStartPayload};
 use winwincode_delivery::{
-    application::stage::{DeliveryReworkClarifiedEvent, StageAdvanceEffect, StageAdvanceResult},
+    application::workrun_execution::{
+        DeliveryReworkClarifiedEvent, WorkRunStartEffect, WorkRunStartResult,
+    },
     store::{ClarifyDeliveryRework, DeliveryCommand, DeliveryCommandPort, DeliveryStore},
 };
 use winwincode_storage::{
@@ -23,7 +25,7 @@ const REWORK_CLARIFIED_TOPIC: &str = "delivery.rework.clarified";
 pub(crate) fn execute(
     storage: &mut dyn ProductStateStorage,
     command: &CommandEnvelope,
-    transition: &StageAdvanceResult,
+    transition: &WorkRunStartResult,
 ) -> Result<CommitReceipt, StorageError> {
     let (payload, expected_revision) = validate_command_envelope(command)?;
     let (receipt_identity, command_digest) = command_receipt(command)?;
@@ -180,9 +182,9 @@ fn strict_clarification_event(
 }
 
 fn clarification_event(
-    transition: &StageAdvanceResult,
+    transition: &WorkRunStartResult,
 ) -> Result<DeliveryReworkClarifiedEvent, StorageError> {
-    let StageAdvanceEffect::Clarify(reason) = transition.effect else {
+    let WorkRunStartEffect::Clarify(reason) = transition.effect else {
         return Err(StorageError::invalid_input(
             "rework clarification transition has no clarification effect",
         ));
@@ -205,40 +207,38 @@ fn clarification_event_id(event: &DeliveryReworkClarifiedEvent) -> String {
 
 fn validate_command_envelope(
     command: &CommandEnvelope,
-) -> Result<(DeliveryAdvancePayload, u64), StorageError> {
-    if command.command != CommandName::DeliveryAdvance {
+) -> Result<(WorkRunStartPayload, u64), StorageError> {
+    if command.command != CommandName::WorkRunStart {
         return Err(StorageError::invalid_input(
-            "rework clarification transaction requires delivery.advance",
+            "rework clarification transaction requires workrun.start",
         ));
     }
-    let payload: DeliveryAdvancePayload =
+    let payload: WorkRunStartPayload =
         serde_json::from_value(command.payload.clone()).map_err(|error| {
-            StorageError::invalid_input(format!(
-                "delivery.advance payload is not canonical: {error}"
-            ))
+            StorageError::invalid_input(format!("workrun.start payload is not canonical: {error}"))
         })?;
     let expected_revision = u64::try_from(command.expected_revision.0).map_err(|_| {
         StorageError::invalid_input("Delivery expectedRevision must not be negative")
     })?;
     if serde_json::to_value(&payload).map_err(storage_error)? != command.payload {
         return Err(StorageError::invalid_input(
-            "delivery.advance payload is not canonical",
+            "workrun.start payload is not canonical",
         ));
     }
     Ok((payload, expected_revision))
 }
 
 fn validate_transition(
-    payload: &DeliveryAdvancePayload,
+    payload: &WorkRunStartPayload,
     expected_revision: u64,
-    transition: &StageAdvanceResult,
+    transition: &WorkRunStartResult,
 ) -> Result<(), StorageError> {
     if payload.delivery_id != *transition.delivery.id()
         || transition.delivery.revision() != expected_revision.saturating_add(1)
-        || !matches!(transition.effect, StageAdvanceEffect::Clarify(_))
+        || !matches!(transition.effect, WorkRunStartEffect::Clarify(_))
     {
         return Err(StorageError::invalid_input(
-            "delivery.advance does not match the sealed rework clarification",
+            "workrun.start does not match the sealed rework clarification",
         ));
     }
     Ok(())

@@ -306,11 +306,8 @@ fn assert_command_families() {
         (CommandName::SessionClose, CommandFamily::Session),
         (CommandName::DeliveryCreate, CommandFamily::Delivery),
         (CommandName::DeliveryUpdateSpec, CommandFamily::Delivery),
-        (
-            CommandName::DeliveryTaskBreakdownCreate,
-            CommandFamily::Delivery,
-        ),
-        (CommandName::DeliveryAdvance, CommandFamily::Delivery),
+        (CommandName::WorkitemsCreate, CommandFamily::Delivery),
+        (CommandName::WorkRunStart, CommandFamily::Delivery),
         (
             CommandName::DeliveryResolveAttention,
             CommandFamily::Delivery,
@@ -412,7 +409,7 @@ fn representative_generated_commands_reach_each_application_family() {
             &json!({ "productSessionId": "psn_00000000000000000000000001" }),
         ),
         command_fixture(
-            "delivery.advance",
+            "workrun.start",
             &repository_scope(),
             &json!({
                 "deliveryId": "dlv_00000000000000000000000001",

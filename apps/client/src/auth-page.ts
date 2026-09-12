@@ -58,7 +58,7 @@ export function mountAuthSessionPage(options: AuthSessionPageOptions): AuthSessi
   const signOut = element(document, 'button', 'wwc-auth-session-sign-out')
   let closed = false
 
-  region.setAttribute('aria-label', 'Browser session')
+  region.setAttribute('aria-label', '浏览器会话')
   status.setAttribute('role', 'status')
   status.setAttribute('aria-live', 'polite')
   error.setAttribute('role', 'alert')

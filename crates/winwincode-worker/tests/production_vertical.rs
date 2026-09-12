@@ -24,7 +24,7 @@ use winwincode_api::generated::{
 use winwincode_codex::CodexCoreAdapter as _;
 use winwincode_control_plane::delivery_execution::{
     DeliveryExecutionConfig, DeliveryExecutionPortError, ExecutionJobDispatcher,
-    PendingDeliveryExecution, prepare_workrun_advance,
+    PendingDeliveryExecution, prepare_workrun_start,
 };
 use winwincode_control_plane::{
     ControlPlane, ControlPlaneConfig, CreateProductSessionCommand, CredentialReferenceService,
@@ -43,8 +43,10 @@ use winwincode_control_plane::{
     product_session_command_context,
 };
 use winwincode_delivery::{
-    application::stage::{NewStageIdentities, StageAdvanceEffect, StageAdvanceResult},
-    domain::{Delivery, DeliveryStatus, SessionBindingId},
+    application::workrun_execution::{
+        NewWorkRunIdentities, WorkRunStartEffect, WorkRunStartResult,
+    },
+    domain::{Delivery, DeliveryStatus},
     store::{
         AtomicPublication, CreateDelivery, DeliveryCommand, DeliveryCommandPort,
         DeliveryJournalPort, DeliveryStore, JournalBackendError, LoadedDeliveryJournal,
@@ -54,8 +56,8 @@ use winwincode_domain::{
     ControlPlaneEventId, CredentialReferenceId, DeliveryId, ExecutionJobId, ExecutionMessageId,
     ExecutionSequence, FencingToken, Instant, InteractiveInputMode, InteractiveInputValue, LeaseId,
     OrganizationId, ProductSessionId, ProjectId, RepositoryId, RequestId, Revision, SchemaVersion,
-    Sha256Digest, StageRunId, UserId, WorkItemState, WorkRunId, WorkRunState, WorkerId,
-    WorkerInstanceId, WorkspaceId,
+    Sha256Digest, UserId, WorkItemState, WorkRunId, WorkRunState, WorkerId, WorkerInstanceId,
+    WorkspaceId,
 };
 use winwincode_domain::{RepositoryScope, RepositoryScopeKind, UserActor, UserActorKind};
 use winwincode_execution_port::{
@@ -537,7 +539,7 @@ fn seed_pending_delivery_job(
         .commit_delivery_execution(
             &CommandEnvelope {
                 actor: actor(),
-                command: CommandName::DeliveryAdvance,
+                command: CommandName::WorkRunStart,
                 expected_revision: Revision(
                     i64::try_from(source.revision()).expect("Delivery revision fits API"),
                 ),
@@ -674,8 +676,7 @@ fn delivery_before_execution(read_only: bool) -> Delivery {
     snapshot.id = delivery_id.clone();
     snapshot.spec.delivery_id = delivery_id.clone();
     snapshot.revision = 1;
-    snapshot.status = DeliveryStatus::Executing;
-    snapshot.tasks.clear();
+    snapshot.status = DeliveryStatus::Ready;
     snapshot.work_run_aggregate.items.truncate(1);
     let item = &mut snapshot.work_run_aggregate.items[0];
     item.state = if read_only {
@@ -690,7 +691,6 @@ fn delivery_before_execution(read_only: bool) -> Delivery {
     } else {
         snapshot.work_run_aggregate.runs.clear();
     }
-    snapshot.stage_runs.clear();
     snapshot.session_bindings.clear();
     snapshot.attention_items.clear();
     snapshot.evidence.clear();
@@ -719,20 +719,16 @@ fn pending_workrun_execution(
         "executor" => 1,
         _ => panic!("unsupported fixture profile"),
     };
-    let transition = StageAdvanceResult::canonical_workrun_dispatch(
+    let transition = WorkRunStartResult::canonical_workrun_dispatch(
         &delivery,
         None,
-        NewStageIdentities {
-            stage_run_id: StageRunId(id("run", seed)),
+        NewWorkRunIdentities {
             work_contract_id: aggregate.contract.id.clone(),
             work_contract_revision: aggregate.contract.revision.clone(),
             work_item_id: selected.work_item.id.clone(),
             work_item_revision: selected.work_item.revision.clone(),
             work_run_id: WorkRunId(id("wrn", seed)),
             execution_job_id: ExecutionJobId(id("job", seed)),
-            session_binding_id: SessionBindingId::new(format!("binding-production-{profile}"))
-                .expect("binding identity"),
-            attention_item_id: winwincode_domain::AttentionItemId(id("att", seed)),
         },
         ProductSessionId(id("psn", seed)),
         profile.to_owned(),
@@ -741,11 +737,11 @@ fn pending_workrun_execution(
         1_893_455_999_400,
     )
     .expect("canonical WorkRun dispatch");
-    let StageAdvanceEffect::Dispatch(intent) = &transition.effect else {
+    let WorkRunStartEffect::Dispatch(intent) = &transition.effect else {
         panic!("expected dispatch")
     };
     let request_id = RequestId(id("req", if seed == 1 { 13 } else { seed }));
-    let job = prepare_workrun_advance(
+    let job = prepare_workrun_start(
         &request_id,
         aggregate,
         &transition.delivery.snapshot().spec,
@@ -1878,7 +1874,7 @@ fn delegated_proposal_restart_replays_one_intent_without_second_composer() {
             adapter_config_with_mode(&root, winwincode_codex::ExecutionMode::DelegatedPatch),
         )
         .expect("reopen delegated proposal adapter");
-        let replayed_thread = replay_adapter
+        let replayed_session = replay_adapter
             .ensure_thread(CodexThreadStart {
                 run_key: &run_key,
                 worker_id: &dispatch.lease.worker_id,
@@ -1890,7 +1886,8 @@ fn delegated_proposal_restart_replays_one_intent_without_second_composer() {
             })
             .await
             .expect("recover delegated proposal thread");
-        assert_eq!(replayed_thread, active.codex_thread_id);
+        assert_eq!(&replayed_session.thread_id, &active.codex_thread_id);
+        let replayed_thread = replayed_session.thread_id;
         replay_adapter
             .observe_now(&at("2030-01-01T00:00:03.000Z"))
             .expect("observe delegated proposal replay time");

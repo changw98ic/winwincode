@@ -65,8 +65,8 @@ fn production_main_uses_the_real_application_registry() {
     for delivery_operation in [
         ".delivery_create(&command)",
         ".delivery_update_spec(&command)",
-        ".delivery_task_breakdown_create(&command)",
-        ".delivery_advance(&command)",
+        ".work_items_create(&command)",
+        ".workrun_start(&command)",
         ".delivery_resolve_attention(&command)",
         ".delivery_submit_verdict(&command)",
     ] {

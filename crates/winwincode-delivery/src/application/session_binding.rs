@@ -12,7 +12,9 @@ use winwincode_storage::{
     WorkerSlotAuthority,
 };
 
-use crate::domain::{Delivery, SessionBindingSourceKind, SessionBindingSourceProvenance};
+use crate::domain::{
+    Delivery, SessionBindingSourceKind, SessionBindingSourceProvenance, SessionRuntimeContext,
+};
 
 use super::{CoordinationError, CoordinationErrorCode, require_mutation_time};
 
@@ -281,6 +283,7 @@ fn successor_binding(
     binding.work_run_id = successor_id.clone();
     binding.work_item_revision = item_revision;
     binding.worker_session_id = Some(authority.worker_session_id.clone());
+    binding.runtime_context = None;
     binding.codex_thread_id = None;
     binding.worker_id = Some(authority.worker_id.clone());
     binding.worker_instance_id = Some(authority.worker_instance_id.clone());
@@ -412,7 +415,7 @@ pub fn accept_worker_session_with_authority(
     {
         return Err(CoordinationError::new(
             CoordinationErrorCode::BindingConflict,
-            "WorkerSession is already assigned to another StageRun",
+            "WorkerSession is already assigned to another WorkRun",
         ));
     }
     if current.worker_session_id.is_some()
@@ -432,6 +435,7 @@ pub fn accept_worker_session_with_authority(
     let mut snapshot = delivery.clone().into_snapshot();
     let binding = &mut snapshot.session_bindings[index];
     binding.worker_session_id = Some(authority.worker_session_id.clone());
+    binding.runtime_context = None;
     binding.worker_id = Some(authority.worker_id.clone());
     binding.worker_instance_id = Some(authority.worker_instance_id.clone());
     binding.lease_id = Some(authority.lease_id.clone());
@@ -458,6 +462,7 @@ pub fn report_codex_thread_with_authority(
     identity: &SessionBindingIdentity,
     authority: &SessionBindingAuthority,
     codex_thread_id: CodexThreadId,
+    runtime_context: SessionRuntimeContext,
     now_millis: u64,
 ) -> Result<Delivery, CoordinationError> {
     require_revision(delivery, expected_revision)?;
@@ -490,7 +495,7 @@ pub fn report_codex_thread_with_authority(
     {
         return Err(CoordinationError::new(
             CoordinationErrorCode::BindingConflict,
-            "CodexThread is already assigned to another StageRun",
+            "CodexThread is already assigned to another WorkRun",
         ));
     }
     if current.codex_thread_id.as_ref() == Some(&codex_thread_id)
@@ -516,6 +521,7 @@ pub fn report_codex_thread_with_authority(
     binding.fencing_token = Some(authority.fencing_token.clone());
     binding.source_provenance = authority.source_provenance.clone();
     binding.codex_thread_id = Some(codex_thread_id.clone());
+    binding.runtime_context = Some(runtime_context);
     let stored_run = snapshot
         .work_run_aggregate
         .runs
@@ -707,7 +713,7 @@ mod tests {
 
     fn active_delivery() -> Delivery {
         let mut snapshot = test_fixture();
-        snapshot.status = DeliveryStatus::Verifying;
+        snapshot.status = DeliveryStatus::Ready;
         let accepted = authority("wsn_01J00000000000000000000000");
         let run = &mut snapshot.work_run_aggregate.runs[0];
         run.state = winwincode_domain::WorkRunState::Leased;
@@ -722,6 +728,7 @@ mod tests {
         let binding = &mut snapshot.session_bindings[0];
         binding.worker_session_id = Some(accepted.worker_session_id);
         binding.codex_thread_id = None;
+        binding.runtime_context = None;
         binding.worker_id = Some(accepted.worker_id);
         binding.worker_instance_id = Some(accepted.worker_instance_id);
         binding.lease_id = Some(accepted.lease_id);
@@ -775,12 +782,19 @@ mod tests {
             1_800_000_000_110,
         )
         .expect("worker binding");
+        let mut runtime_context = test_fixture().session_bindings[0]
+            .runtime_context
+            .clone()
+            .expect("fixture runtime context");
+        runtime_context.agent_identity.worker_id = authority.worker_id.clone();
+        runtime_context.agent_identity.role = "executor".into();
         report_codex_thread_with_authority(
             &worker_bound,
             worker_bound.revision(),
             &identity,
             &authority,
             CodexThreadId("cdx_01J00000000000000000000000".into()),
+            runtime_context,
             1_800_000_000_111,
         )
         .expect("Codex thread binding")
@@ -882,6 +896,12 @@ mod tests {
     fn verification_replacement_keeps_candidate_and_input_unchanged() {
         let mut snapshot = running_bound_delivery().into_snapshot();
         snapshot.session_bindings[0].execution_profile = Some("verifier".into());
+        snapshot.session_bindings[0]
+            .runtime_context
+            .as_mut()
+            .expect("verifier runtime context")
+            .agent_identity
+            .role = "verifier".into();
         snapshot.work_run_aggregate.items[0].state =
             winwincode_domain::WorkItemState::CandidateReady;
         let mut producer = snapshot.work_run_aggregate.runs[0].clone();
@@ -899,6 +919,12 @@ mod tests {
         producer_binding.work_run_id = producer.id.clone();
         producer_binding.execution_job_id = producer.execution_job_id.clone();
         producer_binding.execution_profile = Some("executor".into());
+        producer_binding
+            .runtime_context
+            .as_mut()
+            .expect("producer runtime context")
+            .agent_identity
+            .role = "executor".into();
         producer_binding.worker_session_id = Some(producer.worker_session_id.clone());
         producer_binding.product_session_id = producer.product_session_id.clone().unwrap();
         producer_binding.codex_thread_id = producer.codex_thread_id.clone();

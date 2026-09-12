@@ -62,6 +62,8 @@ test('coverage matrix covers every migration caller and observable contract', as
   ])
 
   assert.equal(matrix.schemaVersion, 1)
+  assert.equal(matrix.repository, 'winwincode')
+  assert.equal(matrix.product, 'community')
   assert.equal(matrix.decision, 'ADR-0028')
   assert.equal(matrix.finalSharedDefinitionNames.executionPortModelRoute, 'ModelGatewayRoute')
   assert.deepEqual(
@@ -74,23 +76,38 @@ test('coverage matrix covers every migration caller and observable contract', as
     for (const flowId of caller.flowIds) assert.ok(flowIds.has(flowId), flowId)
   }
   assert.deepEqual(
-    sorted(matrix.surfaceCoverage.map(entry => entry.surfaceId)),
+    sorted(matrix.surfaceCoverage.map(entry => entry.migrationSourceId ?? entry.surfaceId)),
     sorted(inventory.surfaces.map(entry => entry.id)),
   )
 
   const surfaceCoverage = new Map(
-    matrix.surfaceCoverage.map(entry => [entry.surfaceId, entry]),
+    matrix.surfaceCoverage.map(entry => [entry.migrationSourceId ?? entry.surfaceId, entry]),
   )
   for (const surface of inventory.surfaces) {
     const coverage = surfaceCoverage.get(surface.id)
     assert.ok(coverage, surface.id)
-    assert.deepEqual(
-      sorted(coverage.observableContracts),
-      sorted(surface.observableContracts),
-      surface.id,
-    )
+    if (coverage.migrationSourceId === undefined) {
+      assert.deepEqual(
+        sorted(coverage.observableContracts),
+        sorted(surface.observableContracts),
+        surface.id,
+      )
+    } else {
+      assert.ok(coverage.observableContracts.length > 0, `${surface.id} has no Community contract`)
+    }
     assert.ok(coverage.flowIds.length > 0, `${surface.id} has no flow`)
   }
+})
+
+test('Community coverage contains no Cloud or Enterprise product API', async () => {
+  const matrix = await json(matrixPath)
+  const text = JSON.stringify(matrix)
+  assert.doesNotMatch(text, /(?:cloud|hosted|tenant|billing)[-_ ]/iu)
+  assert.equal(matrix.surfaceCoverage.some(entry => entry.surfaceId === 'enterprise-backup'), false)
+  assert.equal(
+    matrix.surfaceCoverage.some(entry => entry.surfaceId === 'community-backup'),
+    true,
+  )
 })
 
 test('coverage matrix exactly matches all public transport unions', async () => {

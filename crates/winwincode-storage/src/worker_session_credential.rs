@@ -1130,11 +1130,11 @@ fn validate_worker_session_id(value: &str) -> Result<(), WorkerSessionCredential
 }
 
 fn validate_worker_id(value: &str) -> Result<(), WorkerSessionCredentialStoreError> {
-    validate_crockford_id(value, "wkr_", "worker id")
+    validate_crockford_id(value, "wrk_", "worker id")
 }
 
 fn validate_worker_instance_id(value: &str) -> Result<(), WorkerSessionCredentialStoreError> {
-    validate_crockford_id(value, "winst_", "worker instance id")
+    validate_crockford_id(value, "wki_", "worker instance id")
 }
 
 fn validate_worker_launch_grant_id(value: &str) -> Result<(), WorkerSessionCredentialStoreError> {

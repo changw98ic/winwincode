@@ -1,0 +1,94 @@
+name: winwincode-community
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.server
+    image: winwincode-server:${WWC_VERSION:-0.1.0-alpha.1}
+    restart: unless-stopped
+    init: true
+    ports:
+      - "${WWC_SERVER_PORT:-8443}:8443"
+    environment:
+      WWC_SERVER_BIND: 0.0.0.0:8443
+      WWC_SERVER_PUBLIC_URL: ${WWC_SERVER_PUBLIC_URL:?set WWC_SERVER_PUBLIC_URL to the HTTPS Server origin}
+      WWC_SERVER_ALLOWED_ORIGINS: ${WWC_SERVER_ALLOWED_ORIGINS:-http://localhost:8080}
+      WWC_SERVER_DATA_DIRECTORY: /var/lib/winwincode
+      WWC_SERVER_REPOSITORY_ROOT: /workspace/repository
+      WWC_SERVER_SOURCE_ROOT: /workspace
+      WWC_SERVER_CHECKOUT_REVISION: ${WWC_SERVER_CHECKOUT_REVISION:?set the exact repository checkout revision}
+      WWC_SERVER_BOOTSTRAP_PROOF: ${WWC_SERVER_BOOTSTRAP_PROOF:?set a one-time Owner bootstrap proof}
+      WWC_SERVER_ORGANIZATION_ID: ${WWC_SERVER_ORGANIZATION_ID:?set the canonical OrganizationId}
+      WWC_SERVER_WORKSPACE_ID: ${WWC_SERVER_WORKSPACE_ID:?set the canonical WorkspaceId}
+      WWC_SERVER_PROJECT_ID: ${WWC_SERVER_PROJECT_ID:?set the canonical ProjectId}
+      WWC_SERVER_REPOSITORY_ID: ${WWC_SERVER_REPOSITORY_ID:?set the canonical RepositoryId}
+      WWC_SERVER_WORKER_MODE: remote
+      WWC_SERVER_REMOTE_WORKER_CREDENTIAL_FILE: /run/secrets/remote-worker.credential
+      WWC_SERVER_REMOTE_WORKER_EXPIRES_AT: ${WWC_SERVER_REMOTE_WORKER_EXPIRES_AT:?set the RFC3339 credential expiry}
+      WWC_SERVER_TLS_CERTIFICATE: /run/secrets/server.crt
+      WWC_SERVER_TLS_PRIVATE_KEY: /run/secrets/server.key
+      SECRET_DIRECTORY: /var/lib/winwincode-secrets
+      GITHUB_REPOSITORY: ${GITHUB_REPOSITORY:?set owner/repository}
+      GITHUB_CREDENTIAL_REFERENCE_ID: ${GITHUB_CREDENTIAL_REFERENCE_ID:?set the credential reference ID}
+      GITHUB_API_BASE_URL: ${GITHUB_API_BASE_URL:-https://api.github.com}
+      PUBLICATION_REQUESTERS: ${PUBLICATION_REQUESTERS:?set comma-separated requester IDs}
+      PUBLICATION_APPROVERS: ${PUBLICATION_APPROVERS:?set comma-separated approver IDs}
+      PUBLICATION_APPROVAL_MAX_AGE_MILLIS: ${PUBLICATION_APPROVAL_MAX_AGE_MILLIS:-3600000}
+    volumes:
+      - backend-data:/var/lib/winwincode
+      - model-secrets:/var/lib/winwincode-secrets
+      - repository-data:/workspace/repository
+    secrets:
+      - source: server_certificate
+        target: server.crt
+      - source: server_private_key
+        target: server.key
+      - source: remote_worker_credential
+        target: remote-worker.credential
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--show-error", "--cacert", "/run/secrets/server.crt", "https://localhost:8443/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    security_opt:
+      - no-new-privileges:true
+
+  web:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.web
+    image: winwincode-client-web:${WWC_VERSION:-0.1.0-alpha.1}
+    restart: unless-stopped
+    init: true
+    ports:
+      - "${WWC_WEB_PORT:-8080}:8080"
+    environment:
+      WWC_SERVER_URL: ${WWC_SERVER_PUBLIC_URL:?set WWC_SERVER_PUBLIC_URL to the HTTPS Server origin}
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  backend-data:
+  model-secrets:
+  repository-data:
+
+secrets:
+  server_certificate:
+    file: ${WWC_SERVER_CERTIFICATE_FILE:-./.local/secrets/server.crt}
+  server_private_key:
+    file: ${WWC_SERVER_PRIVATE_KEY_FILE:-./.local/secrets/server.key}
+  remote_worker_credential:
+    file: ${WWC_REMOTE_WORKER_CREDENTIAL_FILE:-./.local/secrets/remote-worker.credential}

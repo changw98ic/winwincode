@@ -39,7 +39,7 @@
       "writeAuthority": "Controller"
     },
     "WorkRun": {
-      "purpose": "一次派发和执行尝试；替代旧 StageRun 顶层 planning/executing/verifying 语义。",
+      "purpose": "一次派发和执行尝试；调度只依据 WorkItem 图和 WorkRun 状态。",
       "identity": "workRunId + workItemId + runRevision",
       "executionBinding": "exactly one execution_registry Attempt per WorkRun: executionJobId, attempt, workerId, workerInstanceId, workerSessionId, leaseId, fencingToken; productSessionId/codexThreadId when attached",
       "writeAuthority": "Controller creates/binds; Worker reports facts; Controller settles",
@@ -71,13 +71,12 @@
     "VerificationPlan must name the exact WorkContract revision, WorkItem revision, Candidate digest and required verifier roles.",
     "Evidence is accepted only when its producer identity, lease/fencing token, WorkRun, Candidate digest and source sequence match the current plan.",
     "Verdict references the exact accepted Evidence set and Candidate digest; a later Candidate or contract revision invalidates the old completion claim.",
-    "No object may use planningStageRunId/reviewStageRunId as a new write identity; any old StageRun is read as migration input only.",
-    "A historical StageRun with a null task reference is non-executable history only; it cannot create a null WorkItem or be dispatched as a WorkRun."
+    "Every execution identity and relation uses the canonical WorkItem and WorkRun model; no alternate read, write, or migration path exists."
   ],
   "currentCanonicalSources": [
     {
       "path": "schema/winwincode/v1/domain.schema.json",
-      "sha256": "45dd8d071c9ac75011e7e0d5b9557f0ac602f1b1a2bc4d041481141705dfc7c7",
+      "sha256": "6d5df0eb4a0cdf72ce51102a17b37a7478541bb163e7e0c06f0acd9099cdf728",
       "facts": [
         "WorkContract",
         "WorkItem",
@@ -86,30 +85,29 @@
         "VerificationPlan",
         "Evidence",
         "Verdict",
-        "SessionIdentity",
-        "StageRunId (historical only)"
+        "SessionIdentity"
       ]
     },
     {
       "path": "schema/winwincode/v1/control-plane-http.schema.json",
-      "sha256": "01997d3cd466888f80dca763342e0d6fba148ed36afad92958897605ea67e0f4",
+      "sha256": "bc6fe98bce529e2963b42d5d3f4330ebdb6c1c810781aaa16a1ba6d882460a46",
       "facts": [
         "HTTP command envelope",
+        "WorkItem and WorkRun commands, queries, and projections",
         "candidate commands",
-        "planningStageRunId/reviewStageRunId legacy fields",
         "error responses"
       ]
     },
     {
       "path": "schema/winwincode/v1/execution-port.schema.json",
-      "sha256": "eb37e9622c520bbc196304abe579d46fffba39bc0574f6749c586fa29c42a2bc",
+      "sha256": "e6ebbaaff57a81371ef62b1ca971714b48d1ac6b4b6de6c8bffa548b72a70d05",
       "facts": [
         "Worker execution transport and fenced identity"
       ]
     },
     {
       "path": "crates/winwincode-delivery/src/domain/verification.rs",
-      "sha256": "c1ec2f80d998385a0647787c185d1fee610891c15c86ffdeeb70b4d07c92daf3",
+      "sha256": "83cadb7245d6f6a49470b9cd72ae46ae93fa4e8051cbe80a8cdb3273c48beb01",
       "facts": [
         "sealed verification facts",
         "fenced execution identity",
@@ -118,7 +116,7 @@
     },
     {
       "path": "crates/winwincode-delivery/src/domain/evidence.rs",
-      "sha256": "41df73d3369cce2d61a78382340ac87676f5ff223d11dc048abcdf74c738cfad",
+      "sha256": "a16f3bfda174cfad340bc744d2d0846218d202626405d54de7b3f96a2c70d652",
       "facts": [
         "EvidenceRef",
         "accepted runtime source facts",
@@ -127,7 +125,7 @@
     },
     {
       "path": "crates/winwincode-delivery/src/domain/candidate.rs",
-      "sha256": "df55ad1e490fe253a4e14678fe7fecd77f0806384f8d03db65881cdbcfe9a315",
+      "sha256": "81d3d714fbb9d5e85675a5f05218c8fa15d56731d667aaf1ac6e723d3f8bb0d5",
       "facts": [
         "FrozenDeliveryCandidate",
         "validated Git snapshot"
@@ -135,7 +133,7 @@
     },
     {
       "path": "scripts/generate-contracts.mjs",
-      "sha256": "7cfe7b5b84010509ad6d7121d1cf1c10ffbbecd45382c39d1c02b638f30877a1",
+      "sha256": "88d29aa06e466ae42a02e318944248839aaa0d1b2235e0114b6a43686afbcb01",
       "facts": [
         "canonical schema to generated Rust/TypeScript/OpenAPI chain"
       ]
@@ -159,7 +157,6 @@
     "VerificationPlan.workItemRevision": "exactly 1",
     "Evidence.candidateDigest": "exactly 1",
     "Verdict.acceptedEvidence": "0..* (inconclusive may have none)",
-    "StageRun.nullTask": "historical-only; 0 executable WorkItem",
     "Evidence.criterion": "exactly 1",
     "WorkRun.productSession": "0..1",
     "WorkRun.contractRevision": "exactly 1"
@@ -187,5 +184,5 @@
     "corepack pnpm typecheck",
     "cargo check -p winwincode-domain -p winwincode-api -p winwincode-execution-port --locked"
   ],
-  "implementationBoundary": "E00 defines and generates the shared object relationships; later E01–E13 tasks implement production scheduling and authority validation. The offline migration does not start a second runtime."
+  "implementationBoundary": "E00 defines and generates the shared object relationships; production scheduling and authority validation consume this one current model. The first alpha starts from the current database format and has no prior-format migration path."
 }

@@ -20,11 +20,9 @@ fn fixtures() -> (Delivery, winwincode_domain::WorkItem) {
     value["workRunAggregate"]["items"] = serde_json::json!([]);
     value["workRunAggregate"]["runs"] = serde_json::json!([]);
     value["sessionBindings"] = serde_json::json!([]);
-    value["stageRuns"] = serde_json::json!([]);
     value["attentionItems"] = serde_json::json!([]);
     value["evidence"] = serde_json::json!([]);
     value["verdict"] = serde_json::Value::Null;
-    value["tasks"] = serde_json::json!([]);
     value["status"] = serde_json::json!("draft");
     value["revision"] = serde_json::json!(1);
     let delivery = Delivery::decode_json(&serde_json::to_vec(&value).unwrap()).unwrap();

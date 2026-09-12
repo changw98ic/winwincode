@@ -1309,7 +1309,7 @@ mod tests {
         "\"risks\":[\"The exact check may expose a regression.\"],",
         "\"unresolvedItems\":[],",
         "\"taskProposals\":[{",
-        "\"id\":\"dtk_00000000000000000000000001\",",
+        "\"id\":\"wit_00000000000000000000000001\",",
         "\"title\":\"Implement fixture\",",
         "\"goal\":\"Apply the accepted source change\",",
         "\"acceptanceCriterionIds\":[\"crt_00000000000000000000000001\"],",

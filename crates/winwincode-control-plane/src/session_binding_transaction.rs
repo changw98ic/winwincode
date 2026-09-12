@@ -7,10 +7,10 @@ use std::fmt;
 use sha2::{Digest, Sha256};
 use winwincode_api::generated::{
     ControlPlaneWebSocketDeliveryGetReloadQuery,
-    ControlPlaneWebSocketDeliveryStageRuntimeProjectionInvalidatedEvent,
-    ControlPlaneWebSocketDeliveryStageRuntimeProjectionInvalidatedEventScopeKind,
-    ControlPlaneWebSocketDeliveryStageRuntimeProjectionInvalidatedEventTypeValue,
     ControlPlaneWebSocketRuntimeProjectionGetReloadQuery,
+    ControlPlaneWebSocketWorkRunRuntimeProjectionInvalidatedEvent,
+    ControlPlaneWebSocketWorkRunRuntimeProjectionInvalidatedEventScopeKind,
+    ControlPlaneWebSocketWorkRunRuntimeProjectionInvalidatedEventTypeValue,
 };
 use winwincode_audit::{
     AuditAction, AuditBindingPhase, AuditBindingSource, AuditEvent, AuditEventId,
@@ -22,9 +22,9 @@ use winwincode_delivery::{
             DeliveryExecutionAttemptReplacement,
             SessionBindingAuthority as DeliverySessionBindingAuthority, SessionBindingIdentity,
         },
-        stage::SessionBindingAuthority as SchedulerSessionBindingAuthority,
+        workrun_execution::SessionBindingAuthority as SchedulerSessionBindingAuthority,
     },
-    domain::Delivery,
+    domain::{Delivery, SessionAgentIdentity, SessionRuntimeContext, SessionWorkspace},
     store::{
         AcceptDeliveryWorkerSession, DeliveryCommand, DeliveryCommandPort, DeliveryStore,
         ReplaceDeliveryExecutionAttempt, ReportDeliveryCodexThread,
@@ -35,8 +35,8 @@ use winwincode_domain::{
     SchemaVersion, SessionIdentity, Sha256Digest,
 };
 use winwincode_execution_port::generated::{
-    ExecutionJob, ExecutionScope, SessionBindingMessage, SessionBindingMessageKind,
-    WorkRunExecutionScope,
+    ExecutionJob, ExecutionScope, ExecutionWorkspaceWriteMode, SessionBindingMessage,
+    SessionBindingMessageKind, WorkRunExecutionScope,
 };
 use winwincode_storage::{
     CommitReceipt, DurableOutboxEvent, ExecutionScopeReplacementAuthority, NewOutboxEvent,
@@ -823,6 +823,7 @@ fn commit_phase(
                 identity: context.identity.clone(),
                 authority: authority.clone(),
                 codex_thread_id: codex_thread_id.clone(),
+                runtime_context: delivery_runtime_context(&message.runtime_context),
                 now_millis: context.bound_at_millis,
             })),
         ),
@@ -878,6 +879,26 @@ fn commit_phase(
         session_identity,
     )?;
     Ok(receipt)
+}
+
+fn delivery_runtime_context(
+    source: &winwincode_domain::RuntimeSessionContext,
+) -> SessionRuntimeContext {
+    SessionRuntimeContext {
+        agent_identity: SessionAgentIdentity {
+            id: source.agent_identity.id.clone(),
+            worker_id: source.agent_identity.worker_id.clone(),
+            name: source.agent_identity.name.clone(),
+            role: source.agent_identity.role.clone(),
+        },
+        provider: source.provider.clone(),
+        model: source.model.clone(),
+        workspace: SessionWorkspace {
+            repository_id: source.workspace.repository_id.clone(),
+            revision: source.workspace.revision.clone(),
+            write_mode: source.workspace.write_mode.clone(),
+        },
+    }
 }
 
 fn validate_binding_pending_audit_event(
@@ -1073,6 +1094,22 @@ fn validate_message_shape(message: &SessionBindingMessage) -> Result<u64, Storag
     require_id(&message.product_session_id.0, "psn_", "productSessionId")?;
     require_id(&message.worker_session_id.0, "wsn_", "workerSessionId")?;
     require_id(&message.codex_thread_id.0, "cdx_", "codexThreadId")?;
+    require_id(
+        &message.runtime_context.agent_identity.id.0,
+        "agt_",
+        "runtimeContext.agentIdentity.id",
+    )?;
+    if message.runtime_context.agent_identity.worker_id != message.worker_id
+        || !valid_runtime_text(&message.runtime_context.agent_identity.name, 200)
+        || !valid_runtime_text(&message.runtime_context.agent_identity.role, 100)
+        || !valid_runtime_text(&message.runtime_context.provider, 200)
+        || !valid_runtime_text(&message.runtime_context.model, 200)
+        || !valid_workspace_revision(&message.runtime_context.workspace.revision.0)
+    {
+        return Err(StorageError::invalid_input(
+            "SessionBinding runtime context is invalid or belongs to another Worker",
+        ));
+    }
     if message.lease.attempt <= 0
         || message.lease.fencing_token.0.is_empty()
         || message.lease.fencing_token.0.len() > 20
@@ -1150,7 +1187,32 @@ fn validate_durable_job(
             "SessionBinding message does not match the durable ExecutionJob",
         ));
     }
+    let write_mode = match job.workspace.write_mode {
+        ExecutionWorkspaceWriteMode::ReadOnly => "read-only",
+        ExecutionWorkspaceWriteMode::Candidate => "candidate",
+    };
+    if message.runtime_context.agent_identity.role != job.execution_profile
+        || message.runtime_context.workspace.repository_id != job.workspace.repository_id
+        || message.runtime_context.workspace.write_mode != write_mode
+    {
+        return Err(StorageError::invalid_input(
+            "SessionBinding runtime context does not match the durable ExecutionJob",
+        ));
+    }
     Ok(())
+}
+
+fn valid_runtime_text(value: &str, max: usize) -> bool {
+    !value.trim().is_empty() && value.chars().count() <= max && !value.chars().any(char::is_control)
+}
+
+fn valid_workspace_revision(value: &str) -> bool {
+    value.strip_prefix("git-tree:").is_some_and(|digest| {
+        matches!(digest.len(), 40 | 64)
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    })
 }
 
 fn validate_complete_replay(
@@ -1234,7 +1296,7 @@ fn runtime_invalidated_event(
     occurred_at: Instant,
     source: PublicEventSource,
 ) -> Result<NewOutboxEvent, StorageError> {
-    delivery_stage_runtime_invalidated_event(&DeliveryStageRuntimeInvalidation {
+    work_run_runtime_invalidated_event(&WorkRunRuntimeInvalidation {
         scope_key: &context.scope_key,
         delivery_id: &context.delivery_id,
         work_run_id: &context.identity.work_run_id,
@@ -1248,7 +1310,7 @@ fn runtime_invalidated_event(
     })
 }
 
-pub(crate) struct DeliveryStageRuntimeInvalidation<'facts> {
+pub(crate) struct WorkRunRuntimeInvalidation<'facts> {
     pub scope_key: &'facts ReceiptScopeKey,
     pub delivery_id: &'facts DeliveryId,
     pub work_run_id: &'facts winwincode_domain::WorkRunId,
@@ -1261,13 +1323,13 @@ pub(crate) struct DeliveryStageRuntimeInvalidation<'facts> {
     pub source: PublicEventSource,
 }
 
-pub(crate) fn delivery_stage_runtime_invalidated_event(
-    facts: &DeliveryStageRuntimeInvalidation<'_>,
+pub(crate) fn work_run_runtime_invalidated_event(
+    facts: &WorkRunRuntimeInvalidation<'_>,
 ) -> Result<NewOutboxEvent, StorageError> {
     let revision = i64::try_from(facts.revision)
         .map(Revision)
         .map_err(|_| StorageError::invalid_input("Delivery revision exceeds public range"))?;
-    let payload = ControlPlaneWebSocketDeliveryStageRuntimeProjectionInvalidatedEvent {
+    let payload = ControlPlaneWebSocketWorkRunRuntimeProjectionInvalidatedEvent {
         delivery_id: facts.delivery_id.clone(),
         last_projection_sequence: 0,
         product_session_id: facts.product_session_id.clone(),
@@ -1277,11 +1339,11 @@ pub(crate) fn delivery_stage_runtime_invalidated_event(
             ControlPlaneWebSocketRuntimeProjectionGetReloadQuery::RuntimeProjectionGet,
         ),
         scope_kind:
-            ControlPlaneWebSocketDeliveryStageRuntimeProjectionInvalidatedEventScopeKind::DeliveryStage,
+            ControlPlaneWebSocketWorkRunRuntimeProjectionInvalidatedEventScopeKind::WorkRun,
         session_identity: facts.session_identity.clone(),
         work_run_id: facts.work_run_id.clone(),
         type_value:
-            ControlPlaneWebSocketDeliveryStageRuntimeProjectionInvalidatedEventTypeValue::RuntimeProjectionInvalidatedV1,
+            ControlPlaneWebSocketWorkRunRuntimeProjectionInvalidatedEventTypeValue::RuntimeProjectionInvalidatedV1,
     };
     let payload = serde_json::to_vec(&payload).map_err(|error| {
         StorageError::adapter(format!("failed to encode runtime invalidation: {error}"))
@@ -1323,7 +1385,7 @@ fn validate_phase_receipt(
         expected_revision,
         DeliveryChangeKind::Advanced,
     )?;
-    validate_delivery_stage_runtime_invalidation(
+    validate_work_run_runtime_invalidation(
         receipt,
         &context.delivery_id,
         &context.identity.work_run_id,
@@ -1334,7 +1396,7 @@ fn validate_phase_receipt(
     )
 }
 
-pub(crate) fn validate_delivery_stage_runtime_invalidation(
+pub(crate) fn validate_work_run_runtime_invalidation(
     receipt: &CommitReceipt,
     delivery_id: &DeliveryId,
     work_run_id: &winwincode_domain::WorkRunId,
@@ -1353,7 +1415,7 @@ pub(crate) fn validate_delivery_stage_runtime_invalidation(
             "receipt must contain one runtime projection invalidation",
         ));
     };
-    let payload: ControlPlaneWebSocketDeliveryStageRuntimeProjectionInvalidatedEvent =
+    let payload: ControlPlaneWebSocketWorkRunRuntimeProjectionInvalidatedEvent =
         serde_json::from_slice(&event.payload).map_err(|_| {
             StorageError::invalid_input("runtime projection invalidation is not canonical")
         })?;
@@ -1380,9 +1442,9 @@ pub(crate) fn validate_delivery_stage_runtime_invalidation(
                 ControlPlaneWebSocketRuntimeProjectionGetReloadQuery::RuntimeProjectionGet,
             )
         || payload.scope_kind
-            != ControlPlaneWebSocketDeliveryStageRuntimeProjectionInvalidatedEventScopeKind::DeliveryStage
+            != ControlPlaneWebSocketWorkRunRuntimeProjectionInvalidatedEventScopeKind::WorkRun
         || payload.type_value
-            != ControlPlaneWebSocketDeliveryStageRuntimeProjectionInvalidatedEventTypeValue::RuntimeProjectionInvalidatedV1
+            != ControlPlaneWebSocketWorkRunRuntimeProjectionInvalidatedEventTypeValue::RuntimeProjectionInvalidatedV1
         || cursor.sequence() == 0
         || cursor.event_id().map(|id| id.0.as_str()) != Some(event.event_id.as_str())
         || cursor.key().scope_key() != receipt.receipt_identity.scope_key()

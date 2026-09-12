@@ -568,7 +568,7 @@ test('real browser runs default Chat through the production Client and Server', 
   assert.equal(hasTerminalAssistant(chatTerminal.messages), true)
   assert.equal(chatTerminal.authSessionBytes, setup.authSessionBytes)
   assert.ok(chatTerminal.runtimeSessions.some(session => (
-    session.stageRunId === null
+    session.workRunId === null
     && session.asOfSequence > 0
     && typeof session.workerSessionId === 'string'
     && typeof session.codexThreadId === 'string'

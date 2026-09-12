@@ -6,7 +6,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde_json::from_slice;
 use sha2::{Digest, Sha256};
 use winwincode_delivery::{
-    application::stage::DeliveryTerminalOutcomeFacts,
+    application::workrun_execution::DeliveryTerminalOutcomeFacts,
     domain::{
         Delivery, SessionBinding,
         candidate::{
@@ -378,7 +378,7 @@ fn validate_runtime_identity(
     let terminal_sequence = u64::try_from(terminal.metadata().last_event_sequence().0)
         .map_err(|_| DeliveryAuthorityError::new("terminal runtime sequence is invalid"))?;
     let exact = ledger.delivery_id.as_ref() == Some(delivery.id())
-        && ledger.delivery_task_id.is_none()
+        && ledger.work_item_id.is_none()
         && ledger
             .work_run_id
             .as_ref()

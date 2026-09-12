@@ -497,8 +497,7 @@ pub mod test_support {
 mod tests {
     use super::*;
     use crate::domain::{
-        Delivery, DeliveryStage, DeliveryStatus, SessionBindingId, StageRun, StageRunActorType,
-        StageRunId, StageRunStatus,
+        Delivery, DeliveryStatus, SessionBindingId,
         candidate::{CandidateHunkFact, test_support::frozen_candidate},
         test_fixture,
     };
@@ -513,16 +512,9 @@ mod tests {
 
     fn writer_delivery() -> Delivery {
         let mut snapshot = test_fixture();
-        snapshot.status = DeliveryStatus::Verifying;
+        snapshot.status = DeliveryStatus::Ready;
         snapshot.evidence.clear();
         snapshot.verdict = None;
-        let run = &mut snapshot.stage_runs[0];
-        run.id = StageRunId("stage-executor-details".into());
-        run.stage = DeliveryStage::Executing;
-        run.role = "executor".into();
-        run.status = StageRunStatus::Succeeded;
-        run.started_at_millis = 1_800_000_000_010;
-        run.finished_at_millis = Some(1_800_000_000_020);
         let binding = &mut snapshot.session_bindings[0];
         binding.id = SessionBindingId("binding-executor-details".into());
         binding.work_run_id = binding.work_run_id.clone();
@@ -611,19 +603,6 @@ mod tests {
         );
 
         let mut later = delivery.into_snapshot();
-        later.stage_runs.push(StageRun {
-            schema_version: crate::domain::DELIVERY_SCHEMA_VERSION,
-            id: StageRunId("stage-later-writer".into()),
-            delivery_id: later.id.clone(),
-            delivery_task_id: later.stage_runs[0].delivery_task_id.clone(),
-            stage: DeliveryStage::Executing,
-            actor_type: StageRunActorType::Human,
-            role: "executor".into(),
-            status: StageRunStatus::Running,
-            attempt: 2,
-            started_at_millis: 1_800_000_000_030,
-            finished_at_millis: None,
-        });
         let mut later_binding = later.session_bindings[0].clone();
         later_binding.id = SessionBindingId("binding-later-writer".into());
         later_binding.work_run_id =

@@ -1,0 +1,11 @@
+.cache
+.git
+.idea
+.vscode
+apps/client/dist
+node_modules
+target
+upstream/source-snapshots
+**/node_modules
+**/target
+*.log

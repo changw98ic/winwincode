@@ -3,8 +3,8 @@
 //! Durable `DeviceExecutionBinding` facts and the per-node execution
 //! reservation capacity ledger.
 //!
-//! The task-execution authority chain is: one `ProductSession` owns stage
-//! runs, the scheduler reserves one execution Job per work run, and the
+//! The execution authority chain is: one `ProductSession` owns `WorkRuns`,
+//! the scheduler reserves one execution Job per `WorkRun`, and the
 //! worker that executes the Job is bound — durably, before any dispatch — to
 //! one `WorkerLaunchGrant` with its client node, occupancy lease, fencing
 //! token, and repository binding (plan 7.8, 14, 17.2). This ledger is the
@@ -402,6 +402,18 @@ pub struct DeviceExecutionReservationFacts {
     pub role: Option<String>,
 }
 
+/// Secret-free device identity joined from the scheduler-sealed reservation
+/// facts and the authoritative Client registry for one execution Job.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkRunDeviceBindingFacts {
+    pub public_client_id: String,
+    pub repository_binding_id: String,
+    pub worker_session_id: String,
+    pub worker_id: String,
+    pub worker_instance_id: String,
+    pub work_run_id: Option<String>,
+}
+
 /// Replay-safe response for the bind and release transitions.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DeviceBindingReceipt {
@@ -523,11 +535,10 @@ impl<'storage> DeviceExecutionBindingLedger<'storage> {
         let connection = storage
             .connection()
             .map_err(|storage| storage_error(&storage))?;
-        migrate_legacy_work_run_columns(connection)?;
         connection
             .execute_batch(&binding_schema())
             .map_err(|sql| sql_error(&sql))?;
-        ensure_facts_role_column(connection)?;
+        migrate_reservation_facts_role(connection)?;
         validate_schema(connection)?;
         Ok(Self { storage })
     }
@@ -1366,6 +1377,34 @@ fn load_facts(
         .transpose()
 }
 
+pub(crate) fn load_work_run_device_binding_facts(
+    connection: &Connection,
+    job_id: &str,
+) -> Result<Option<WorkRunDeviceBindingFacts>, StorageError> {
+    let Some(facts) =
+        load_facts(connection, job_id).map_err(|error| StorageError::adapter(error.to_string()))?
+    else {
+        return Ok(None);
+    };
+    let public_client_id = connection
+        .query_row(
+            "SELECT public_client_id FROM client_nodes WHERE client_node_id = ?1",
+            [&facts.client_node_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| StorageError::adapter(error.to_string()))?
+        .ok_or_else(|| StorageError::adapter("device execution Client is missing"))?;
+    Ok(Some(WorkRunDeviceBindingFacts {
+        public_client_id,
+        repository_binding_id: facts.repository_binding_id,
+        worker_session_id: facts.worker_session_id,
+        worker_id: facts.worker_id,
+        worker_instance_id: facts.worker_instance_id,
+        work_run_id: facts.work_run_id,
+    }))
+}
+
 /// Replays a stored receipt when the request identity and body digest match;
 /// a reused identity with a different body is a fixed conflict.
 fn stored_receipt(
@@ -1442,95 +1481,6 @@ fn command_digest(command: &impl Serialize) -> Result<String, DeviceExecutionBin
     Ok(format!("sha256:{:x}", Sha256::digest(&encoded)))
 }
 
-/// Migrates empty pre-WorkRun binding tables in place. Populated legacy
-/// rows are rejected so a `StageRun` value is never relabeled as a `WorkRun`.
-/// The caller must perform the explicit historical conversion before retrying.
-fn migrate_legacy_work_run_columns(
-    connection: &Connection,
-) -> Result<(), DeviceExecutionBindingStoreError> {
-    connection
-        .execute_batch("BEGIN IMMEDIATE")
-        .map_err(|sql| sql_error(&sql))?;
-    let result = migrate_legacy_work_run_columns_in_transaction(connection);
-    match result {
-        Ok(()) => match connection.execute_batch("COMMIT") {
-            Ok(()) => Ok(()),
-            Err(sql) => {
-                let _ = connection.execute_batch("ROLLBACK");
-                Err(sql_error(&sql))
-            }
-        },
-        Err(error) => {
-            let _ = connection.execute_batch("ROLLBACK");
-            Err(error)
-        }
-    }
-}
-
-fn migrate_legacy_work_run_columns_in_transaction(
-    connection: &Connection,
-) -> Result<(), DeviceExecutionBindingStoreError> {
-    let mut legacy_tables = Vec::new();
-    for table in [
-        "device_execution_bindings",
-        "device_execution_reservation_facts",
-    ] {
-        let exists = connection
-            .query_row(
-                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1",
-                [table],
-                |_| Ok(()),
-            )
-            .optional()
-            .map_err(|sql| sql_error(&sql))?
-            .is_some();
-        if !exists {
-            continue;
-        }
-        let columns = connection
-            .prepare(&format!("PRAGMA table_info({table})"))
-            .map_err(|sql| sql_error(&sql))?
-            .query_map([], |row| row.get::<_, String>(1))
-            .map_err(|sql| sql_error(&sql))?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|sql| sql_error(&sql))?;
-        if !columns.iter().any(|column| column == "stage_run_id") {
-            continue;
-        }
-        if columns.iter().any(|column| column == "work_run_id") {
-            return Err(error(
-                DeviceExecutionBindingStoreErrorKind::CorruptState,
-                format!("{table} has both legacy StageRun and WorkRun columns"),
-            ));
-        }
-        let populated = connection
-            .query_row(
-                &format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE stage_run_id IS NOT NULL)"),
-                [],
-                |row| row.get::<_, bool>(0),
-            )
-            .map_err(|sql| sql_error(&sql))?;
-        if populated {
-            return Err(error(
-                DeviceExecutionBindingStoreErrorKind::Storage,
-                format!("legacy StageRun rows in {table} require an explicit WorkRun migration"),
-            ));
-        }
-        legacy_tables.push(table);
-    }
-    // All legacy tables are preflighted before any DDL, so a mixed database
-    // cannot be left half-renamed when one table contains historical rows.
-    for table in legacy_tables {
-        connection
-            .execute(
-                &format!("ALTER TABLE {table} RENAME COLUMN stage_run_id TO work_run_id"),
-                [],
-            )
-            .map_err(|sql| sql_error(&sql))?;
-    }
-    Ok(())
-}
-
 fn validate_schema(connection: &Connection) -> Result<(), DeviceExecutionBindingStoreError> {
     validate_columns(
         connection,
@@ -1582,43 +1532,36 @@ fn validate_schema(connection: &Connection) -> Result<(), DeviceExecutionBinding
     )
 }
 
-/// `FLOW-100.5`: adds the nullable `StrongFlow` `role` column to reservation
-/// facts stored by an earlier schema. `ALTER TABLE` appends the column last,
-/// exactly where the create-table schema declares it, so fresh and migrated
-/// databases share one column order. Quick Chat facts keep `role` NULL.
-fn ensure_facts_role_column(
+fn migrate_reservation_facts_role(
     connection: &Connection,
 ) -> Result<(), DeviceExecutionBindingStoreError> {
-    let table_exists = connection
-        .query_row(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table'
-             AND name = 'device_execution_reservation_facts'",
-            [],
-            |row| row.get::<_, i64>(0),
-        )
-        .optional()
+    let mut statement = connection
+        .prepare("PRAGMA table_info(device_execution_reservation_facts)")
+        .map_err(|sql| sql_error(&sql))?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))
         .map_err(|sql| sql_error(&sql))?
-        .is_some();
-    if !table_exists {
-        return Ok(());
-    }
-    let has_role = {
-        let mut statement = connection
-            .prepare("PRAGMA table_info(device_execution_reservation_facts)")
-            .map_err(|sql| sql_error(&sql))?;
-        let columns = statement
-            .query_map([], |row| row.get::<_, String>(1))
-            .map_err(|sql| sql_error(&sql))?;
-        let mut found = false;
-        for column in columns {
-            if column.map_err(|sql| sql_error(&sql))? == "role" {
-                found = true;
-                break;
-            }
-        }
-        found
-    };
-    if !has_role {
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|sql| sql_error(&sql))?;
+    if columns
+        == [
+            "job_id",
+            "client_node_id",
+            "client_instance_id",
+            "holder_user_id",
+            "repository_binding_id",
+            "occupancy_lease_id",
+            "occupancy_fencing_token",
+            "worker_launch_grant_id",
+            "worker_session_id",
+            "worker_id",
+            "worker_instance_id",
+            "product_session_id",
+            "work_run_id",
+            "attached_at",
+            "revision",
+        ]
+    {
         connection
             .execute(
                 "ALTER TABLE device_execution_reservation_facts ADD COLUMN role TEXT",
@@ -1937,70 +1880,27 @@ fn cas_lost(action: &str) -> DeviceExecutionBindingStoreError {
 }
 
 #[cfg(test)]
-mod migration_tests {
-    use std::time::{SystemTime, UNIX_EPOCH};
-
+mod schema_tests {
     use rusqlite::Connection;
 
-    use super::migrate_legacy_work_run_columns;
-
-    fn database_path(label: &str) -> std::path::PathBuf {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock")
-            .as_nanos();
-        std::env::temp_dir().join(format!(
-            "winwincode-device-binding-migration-{label}-{}-{nonce}.sqlite",
-            std::process::id()
-        ))
-    }
+    use super::binding_schema;
 
     #[test]
-    fn empty_legacy_binding_tables_upgrade_and_survive_reopen() {
-        let path = database_path("empty");
-        {
-            let connection = Connection::open(&path).expect("sqlite");
-            connection
-                .execute_batch(
-                    "CREATE TABLE device_execution_bindings (stage_run_id TEXT);
-                     CREATE TABLE device_execution_reservation_facts (stage_run_id TEXT);",
-                )
-                .expect("legacy schema");
-            migrate_legacy_work_run_columns(&connection).expect("empty legacy upgrade");
-        }
-        {
-            let connection = Connection::open(&path).expect("reopen sqlite");
-            for table in [
-                "device_execution_bindings",
-                "device_execution_reservation_facts",
-            ] {
-                let column: String = connection
-                    .query_row(&format!("PRAGMA table_info({table})"), [], |row| row.get(1))
-                    .expect("renamed column");
-                assert_eq!(column, "work_run_id");
-            }
-        }
-        std::fs::remove_file(path).expect("remove test database");
-    }
-
-    #[test]
-    fn populated_legacy_binding_table_is_rejected_without_rewriting_rows() {
+    fn old_stage_run_schema_is_rejected_without_rewriting_it() {
         let connection = Connection::open_in_memory().expect("sqlite");
         connection
-            .execute_batch(
-                "CREATE TABLE device_execution_bindings (stage_run_id TEXT);
-                 INSERT INTO device_execution_bindings VALUES ('run_legacy_unchanged');",
-            )
-            .expect("legacy row");
-        let error = migrate_legacy_work_run_columns(&connection).expect_err("legacy rejection");
-        assert!(error.to_string().contains("explicit WorkRun migration"));
-        let value: String = connection
-            .query_row(
-                "SELECT stage_run_id FROM device_execution_bindings",
-                [],
-                |row| row.get(0),
-            )
-            .expect("legacy value");
-        assert_eq!(value, "run_legacy_unchanged");
+            .execute_batch("CREATE TABLE device_execution_bindings (stage_run_id TEXT);")
+            .expect("old schema");
+        connection
+            .execute_batch(&binding_schema())
+            .expect_err("old schema rejection");
+        let columns = connection
+            .prepare("PRAGMA table_info(device_execution_bindings)")
+            .expect("pragma")
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("columns")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("rows");
+        assert_eq!(columns, ["stage_run_id"]);
     }
 }

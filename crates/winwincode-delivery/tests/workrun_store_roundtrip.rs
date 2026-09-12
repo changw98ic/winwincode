@@ -15,13 +15,7 @@ use winwincode_domain::RequestId;
 fn workrun_aggregate_survives_persistent_record_reopen() {
     let mut value: serde_json::Value =
         serde_json::from_str(include_str!("fixtures/delivery-main.json")).unwrap();
-    for name in [
-        "sessionBindings",
-        "stageRuns",
-        "attentionItems",
-        "evidence",
-        "tasks",
-    ] {
+    for name in ["sessionBindings", "attentionItems", "evidence"] {
         value[name] = serde_json::json!([]);
     }
     value["verdict"] = serde_json::Value::Null;

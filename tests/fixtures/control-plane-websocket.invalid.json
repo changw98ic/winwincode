@@ -595,7 +595,7 @@
           "authorizationEpoch": 1,
           "event": {
             "type": "runtime-projection.invalidated.v1",
-            "scopeKind": "delivery-stage",
+            "scopeKind": "work-run",
             "productSessionId": "psn_01J00000000000000000000009",
             "deliveryId": "dlv_01J00000000000000000000000",
             "projectionRevision": 3,

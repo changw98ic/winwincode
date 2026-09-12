@@ -79,12 +79,12 @@ mod session_binding_transaction;
 pub mod session_identity;
 mod strongflow_device_execution;
 pub mod strongflow_projection;
-mod task_breakdown_transaction;
 mod temporary_root_lease;
 mod terminal_outcome_transaction;
 mod vault_kms_network;
 mod vault_secret_store;
 mod verdict_transaction;
+mod work_items_transaction;
 mod worker_execution_lifecycle;
 mod worker_interaction_outbound;
 pub mod worker_management;
@@ -152,10 +152,10 @@ pub use credential_reference::{
     SecretStoreErrorKind, SecretStorePort,
 };
 pub use delivery_application::{
-    DeliveryAdvanceAuthority, DeliveryApplicationError, DeliveryAttentionAuthority,
-    DeliveryAuthorityError, DeliveryAuthorityPort, DeliveryAuthorityRequest, DeliveryAuthoritySeal,
-    DeliverySpecificationAuthority, DeliveryVerdictAuthority, load_delivery_authority_seal,
-    workrun_cancel_response,
+    DeliveryApplicationError, DeliveryAttentionAuthority, DeliveryAuthorityError,
+    DeliveryAuthorityPort, DeliveryAuthorityRequest, DeliveryAuthoritySeal,
+    DeliverySpecificationAuthority, DeliveryVerdictAuthority, WorkRunStartAuthority,
+    load_delivery_authority_seal, workrun_cancel_response,
 };
 pub use delivery_command_transaction::{DeliveryCommandFacts, DeliverySpecFacts};
 pub use delivery_production_adapters::{
@@ -495,7 +495,7 @@ pub mod test_support {
         storage: &mut dyn winwincode_storage::ProductStateStorage,
         scope: &RepositoryScope,
         message: &winwincode_execution_port::generated::JobOutcomeMessage,
-        facts: &winwincode_delivery::application::stage::DeliveryTerminalOutcomeFacts,
+        facts: &winwincode_delivery::application::workrun_execution::DeliveryTerminalOutcomeFacts,
         server_time: &winwincode_domain::Instant,
     ) -> Result<
         super::DeliveryTerminalOutcomeCommitReceipt,
@@ -1400,7 +1400,7 @@ impl ControlPlane {
         Ok(receipt)
     }
 
-    /// Atomically commits one `delivery.advance` journal record, canonical
+    /// Atomically commits one `workrun.start` journal record, canonical
     /// snapshot, scoped command receipt, and execution-job outbox intent before
     /// offering the exact committed job to the `ExecutionPort` dispatcher.
     ///
@@ -1477,7 +1477,7 @@ impl ControlPlane {
     pub fn commit_delivery_session_binding(
         &mut self,
         message: &execution_port::SessionBindingMessage,
-        authority: &winwincode_delivery::application::stage::SessionBindingAuthority,
+        authority: &winwincode_delivery::application::workrun_execution::SessionBindingAuthority,
         server_time: &Instant,
     ) -> Result<DeliverySessionBindingCommitReceipt, DeliverySessionBindingCommitError> {
         let commit = {
@@ -1511,7 +1511,7 @@ impl ControlPlane {
         &mut self,
         scope: &RepositoryScope,
         message: &execution_port::RuntimeEventMessage,
-        authority: &winwincode_delivery::application::stage::SessionBindingAuthority,
+        authority: &winwincode_delivery::application::workrun_execution::SessionBindingAuthority,
         server_time: &Instant,
     ) -> Result<execution_port::RuntimeAckMessage, RuntimeMessageError> {
         let ack = {
@@ -1544,7 +1544,7 @@ impl ControlPlane {
         &mut self,
         scope: &RepositoryScope,
         message: &execution_port::ArtifactOpenMessage,
-        authority: &winwincode_delivery::application::stage::SessionBindingAuthority,
+        authority: &winwincode_delivery::application::workrun_execution::SessionBindingAuthority,
     ) -> Result<execution_port::ArtifactAckMessage, ArtifactMessageError> {
         let storage = self.storage.as_deref().ok_or_else(|| {
             ArtifactMessageError::Storage(StorageError::adapter("Control Plane storage is closed"))
@@ -1568,7 +1568,7 @@ impl ControlPlane {
         &mut self,
         scope: &RepositoryScope,
         message: &execution_port::ArtifactChunkMessage,
-        authority: &winwincode_delivery::application::stage::SessionBindingAuthority,
+        authority: &winwincode_delivery::application::workrun_execution::SessionBindingAuthority,
     ) -> Result<execution_port::ArtifactAckMessage, ArtifactMessageError> {
         let ack = {
             let storage = self.storage.as_deref().ok_or_else(|| {
@@ -1617,7 +1617,7 @@ impl ControlPlane {
         delivery_id: &DeliveryId,
         artifact_id: &winwincode_domain::ArtifactId,
         artifact_digest: &Sha256Digest,
-        terminal_facts: &winwincode_delivery::application::stage::DeliveryTerminalOutcomeFacts,
+        terminal_facts: &winwincode_delivery::application::workrun_execution::DeliveryTerminalOutcomeFacts,
     ) -> Result<winwincode_delivery::domain::FrozenDeliveryCandidate, CandidateResolutionError>
     {
         let storage = self.storage.as_deref().ok_or_else(|| {
@@ -1670,7 +1670,7 @@ impl ControlPlane {
         scope: &RepositoryScope,
         chunk: &execution_port::ArtifactChunkMessage,
         acknowledgement: &execution_port::ArtifactAckMessage,
-        authority: &winwincode_delivery::application::stage::SessionBindingAuthority,
+        authority: &winwincode_delivery::application::workrun_execution::SessionBindingAuthority,
     ) -> Result<Option<CandidateGitPinReceipt>, CandidateResolutionError> {
         if !chunk.is_final
             || chunk.artifact_id != acknowledgement.artifact_id
@@ -2067,7 +2067,7 @@ impl ControlPlane {
         &mut self,
         scope: &RepositoryScope,
         message: &execution_port::JobOutcomeMessage,
-        facts: &winwincode_delivery::application::stage::DeliveryTerminalOutcomeFacts,
+        facts: &winwincode_delivery::application::workrun_execution::DeliveryTerminalOutcomeFacts,
         server_time: &Instant,
     ) -> Result<DeliveryTerminalOutcomeCommitReceipt, DeliveryTerminalOutcomeCommitError> {
         let commit = {
@@ -2079,12 +2079,12 @@ impl ControlPlane {
         if let Some(data_directory) = self.local_database_path.as_deref().and_then(Path::parent) {
             let worker_terminal = DurableWorkerExecutionLifecycle::open(data_directory).and_then(
                 |mut lifecycle| match facts.status() {
-                    winwincode_delivery::application::stage::TerminalOutcomeStatus::Succeeded => {
+                    winwincode_delivery::application::workrun_execution::TerminalOutcomeStatus::Succeeded => {
                         lifecycle.settle_terminal_outcome(message).map(|_| ())
                     }
-                    winwincode_delivery::application::stage::TerminalOutcomeStatus::Failed
-                    | winwincode_delivery::application::stage::TerminalOutcomeStatus::Cancelled
-                    | winwincode_delivery::application::stage::TerminalOutcomeStatus::InfrastructureError => {
+                    winwincode_delivery::application::workrun_execution::TerminalOutcomeStatus::Failed
+                    | winwincode_delivery::application::workrun_execution::TerminalOutcomeStatus::Cancelled
+                    | winwincode_delivery::application::workrun_execution::TerminalOutcomeStatus::InfrastructureError => {
                         lifecycle.release_terminal_outcome(message).map(|_| ())
                     }
                 },
@@ -2115,7 +2115,7 @@ impl ControlPlane {
     pub fn commit_delivery_rework_clarification(
         &mut self,
         command: &CommandEnvelope,
-        transition: &winwincode_delivery::application::stage::StageAdvanceResult,
+        transition: &winwincode_delivery::application::workrun_execution::WorkRunStartResult,
     ) -> Result<CommitReceipt, CommitError> {
         let receipt = {
             let storage = self.storage_mut().map_err(CommitError::Storage)?;
@@ -2319,7 +2319,7 @@ fn reserved_delivery_transaction_topic(topic: &str) -> bool {
 }
 
 fn authority_lease(
-    authority: &winwincode_delivery::application::stage::SessionBindingAuthority,
+    authority: &winwincode_delivery::application::workrun_execution::SessionBindingAuthority,
 ) -> execution_port::ExecutionLeaseStamp {
     let active = authority.active_lease();
     execution_port::ExecutionLeaseStamp {
@@ -2753,8 +2753,8 @@ fn delivery_command(command: &CommandName) -> bool {
         command,
         CommandName::DeliveryCreate
             | CommandName::DeliveryUpdateSpec
-            | CommandName::DeliveryTaskBreakdownCreate
-            | CommandName::DeliveryAdvance
+            | CommandName::WorkitemsCreate
+            | CommandName::WorkRunStart
             | CommandName::DeliveryResolveAttention
             | CommandName::DeliverySubmitVerdict
             | CommandName::WorkRunCancel

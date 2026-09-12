@@ -42,7 +42,7 @@ export function repositoryHeadShortText(repository: ControlPlaneRepositorySummar
 
 /** §16.5 dirty badge copy; the badge text carries the meaning, not color. */
 export function repositoryDirtyText(repository: ControlPlaneRepositorySummary): string {
-  return repository.dirtyState === 'dirty' ? 'Dirty' : 'Clean'
+  return repository.dirtyState === 'dirty' ? '有改动' : '干净'
 }
 
 /** Non-color tone of the dirty badge. */
@@ -61,12 +61,12 @@ export function repositoryAvailabilityText(
 ): string | null {
   switch (repository.availability) {
     case 'available': return null
-    case 'dirty': return 'Not usable: the working tree is dirty'
-    case 'unavailable': return 'Repository unavailable'
-    case 'moved': return 'Repository moved on the device'
-    case 'invalid_git': return 'Not a valid Git repository'
-    case 'permission_denied': return 'Access denied on the device'
-    case 'scan_failed': return 'The last repository scan failed'
+    case 'dirty': return '不可用：工作区有未提交改动'
+    case 'unavailable': return '仓库不可用'
+    case 'moved': return '仓库已在设备上移动'
+    case 'invalid_git': return '不是有效的 Git 仓库'
+    case 'permission_denied': return '设备拒绝访问'
+    case 'scan_failed': return '上次仓库扫描失败'
   }
 }
 
@@ -149,7 +149,7 @@ export function createRepositoriesViewModel(options: {
       throw new ControlPlaneClientError({
         kind: 'authorization',
         code: 'REPOSITORY_GRANT_NOT_ALLOWED',
-        message: 'You do not have permission to share this repository.',
+        message: '你没有共享此仓库的权限。',
         requestId: null,
         retryable: false,
       })

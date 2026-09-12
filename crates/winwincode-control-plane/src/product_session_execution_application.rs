@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use winwincode_domain::{RepositoryScope, RepositoryScopeKind};
 
-use winwincode_delivery::application::stage::seal_session_binding_authority;
+use winwincode_delivery::application::workrun_execution::seal_session_binding_authority;
 use winwincode_domain::{
     ControlPlaneEventId, ExecutionJobId, ExecutionMessageId, Instant, ModelExchangeId,
     ProductSessionId, RequestId, Sha256Digest, SystemActorId,

@@ -75,13 +75,13 @@ function deliverySummary(index, overrides = {}) {
     deliveryId: canonicalId('dlv', index),
     revision: 4,
     schemaVersion,
-    status: 'executing',
+    status: 'in_progress',
     title: `演示交付 ${String(index)}`,
     updatedAt: '2026-09-02T00:30:00.000Z',
     ownership: ownership(),
-    activeStageRunId: canonicalId('str', index),
+    activeWorkRunId: canonicalId('str', index),
     openAttentionCount: 0,
-    taskCounts: { total: 4, pending: 0, active: 1, blocked: 0, verifying: 0, completed: 1, failed: 2 },
+    workItemCounts: { ready: 0, waitingHuman: 0, candidateReady: 0, rework: 0, cancelled: 0, total: 4, backlog: 0, inProgress: 1, waitingDependency: 0, validating: 0, done: 1, failed: 2 },
     ...overrides,
   }
 }
@@ -91,33 +91,33 @@ const deliveries = [
   // 设计稿 04:待我处理两卡的来源(审批 + 交付注意点)。
   deliverySummary(1, {
     title: '修复登录回跳',
-    status: 'reviewing',
-    activeStageRunId: canonicalId('str', 1),
-    taskCounts: { total: 3, pending: 1, active: 1, blocked: 0, verifying: 0, completed: 1, failed: 0 },
+    status: 'validating',
+    activeWorkRunId: canonicalId('str', 1),
+    workItemCounts: { ready: 0, waitingHuman: 0, candidateReady: 0, rework: 0, cancelled: 0, total: 3, backlog: 1, inProgress: 1, waitingDependency: 0, validating: 0, done: 1, failed: 0 },
   }),
   deliverySummary(2, {
     title: '导出筛选结果',
-    status: 'ready-to-deliver',
+    status: 'candidate_ready',
     openAttentionCount: 1,
-    taskCounts: { total: 3, pending: 0, active: 0, blocked: 0, verifying: 1, completed: 2, failed: 0 },
+    workItemCounts: { ready: 0, waitingHuman: 0, candidateReady: 0, rework: 0, cancelled: 0, total: 3, backlog: 0, inProgress: 0, waitingDependency: 0, validating: 1, done: 2, failed: 0 },
   }),
   // 设计稿 04:正在运行两卡。
   deliverySummary(3, {
     title: '配置迁移',
-    status: 'verifying',
-    taskCounts: { total: 4, pending: 0, active: 1, blocked: 0, verifying: 2, completed: 1, failed: 0 },
+    status: 'validating',
+    workItemCounts: { ready: 0, waitingHuman: 0, candidateReady: 0, rework: 0, cancelled: 0, total: 4, backlog: 0, inProgress: 1, waitingDependency: 0, validating: 2, done: 1, failed: 0 },
   }),
   deliverySummary(4, {
     title: '修复缓存失效',
-    status: 'executing',
-    taskCounts: { total: 4, pending: 0, active: 2, blocked: 0, verifying: 0, completed: 1, failed: 0 },
+    status: 'in_progress',
+    workItemCounts: { ready: 0, waitingHuman: 0, candidateReady: 0, rework: 0, cancelled: 0, total: 4, backlog: 0, inProgress: 2, waitingDependency: 0, validating: 0, done: 1, failed: 0 },
   }),
   ...Array.from({ length: 18 }, (_, index) => deliverySummary(100 + index, {
     title: `存档任务 ${String(index + 1)}`,
-    status: 'delivered',
-    activeStageRunId: null,
+    status: 'done',
+    activeWorkRunId: null,
     updatedAt: '2026-09-01T00:30:00.000Z',
-    taskCounts: { total: 4, pending: 0, active: 0, blocked: 0, verifying: 0, completed: 4, failed: 0 },
+    workItemCounts: { ready: 0, waitingHuman: 0, candidateReady: 0, rework: 0, cancelled: 0, total: 4, backlog: 0, inProgress: 0, waitingDependency: 0, validating: 0, done: 4, failed: 0 },
   })),
 ]
 
@@ -138,7 +138,7 @@ function approval(index) {
         productSessionId,
         workerSessionId: canonicalId('wss', index),
         codexThreadId: canonicalId('thr', index),
-        stageRunId: canonicalId('str', index),
+        workRunId: canonicalId('wrn', index),
       },
     },
   }
@@ -147,7 +147,7 @@ function approval(index) {
 function attentionItem(index, title) {
   return {
     id: canonicalId('att', index),
-    stageRunId: canonicalId('str', index),
+    workRunId: canonicalId('wrn', index),
     status: 'open',
     blocking: false,
     title,
@@ -258,7 +258,7 @@ function chatRuntime() {
     kind: 'runtime_projection',
     productSessionId: activeDemoSession.id,
     deliveryId: null,
-    stageRunId: null,
+    workRunId: null,
     readCursor: null,
     eventCursor: {
       eventId: null,

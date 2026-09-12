@@ -110,6 +110,7 @@ impl std::error::Error for RemoteWorkerAuthenticationError {}
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RemoteWorkerPrincipal {
     worker_id: WorkerId,
+    worker_instance_id: Option<WorkerInstanceId>,
     worker_pool_id: WorkerPoolId,
     scope: WorkerRegistryScope,
     issuer: String,
@@ -133,8 +134,60 @@ impl RemoteWorkerPrincipal {
         credential_fingerprint: Sha256Digest,
         security_zone: String,
     ) -> Result<Self, RemoteWorkerAuthenticationError> {
+        Self::new_inner(
+            worker_id,
+            None,
+            worker_pool_id,
+            scope,
+            issuer,
+            subject,
+            credential_fingerprint,
+            security_zone,
+        )
+    }
+
+    /// Constructs a principal bound to one exact Worker process boot.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed IDs, scope, fingerprint, or bounded transport text.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_bound(
+        worker_id: WorkerId,
+        worker_instance_id: WorkerInstanceId,
+        worker_pool_id: WorkerPoolId,
+        scope: WorkerRegistryScope,
+        issuer: String,
+        subject: String,
+        credential_fingerprint: Sha256Digest,
+        security_zone: String,
+    ) -> Result<Self, RemoteWorkerAuthenticationError> {
+        Self::new_inner(
+            worker_id,
+            Some(worker_instance_id),
+            worker_pool_id,
+            scope,
+            issuer,
+            subject,
+            credential_fingerprint,
+            security_zone,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_inner(
+        worker_id: WorkerId,
+        worker_instance_id: Option<WorkerInstanceId>,
+        worker_pool_id: WorkerPoolId,
+        scope: WorkerRegistryScope,
+        issuer: String,
+        subject: String,
+        credential_fingerprint: Sha256Digest,
+        security_zone: String,
+    ) -> Result<Self, RemoteWorkerAuthenticationError> {
         let principal = Self {
             worker_id,
+            worker_instance_id,
             worker_pool_id,
             scope,
             issuer,
@@ -152,6 +205,11 @@ impl RemoteWorkerPrincipal {
     }
 
     #[must_use]
+    pub const fn worker_instance_id(&self) -> Option<&WorkerInstanceId> {
+        self.worker_instance_id.as_ref()
+    }
+
+    #[must_use]
     pub const fn worker_pool_id(&self) -> &WorkerPoolId {
         &self.worker_pool_id
     }
@@ -159,6 +217,11 @@ impl RemoteWorkerPrincipal {
     #[must_use]
     pub const fn scope(&self) -> &WorkerRegistryScope {
         &self.scope
+    }
+
+    #[must_use]
+    pub const fn credential_fingerprint(&self) -> &Sha256Digest {
+        &self.credential_fingerprint
     }
 
     fn authentication_identity(&self) -> WorkerAuthenticationIdentity {
@@ -361,7 +424,11 @@ impl<'storage, 'authenticator> RemoteWorkerPoolAdapter<'storage, 'authenticator>
             .authenticator
             .authenticate(credential, now)
             .map_err(authentication_error)?;
-        if principal.worker_id() != worker_id {
+        if principal.worker_id() != worker_id
+            || principal
+                .worker_instance_id()
+                .is_some_and(|bound| bound != worker_instance_id)
+        {
             return Err(RemoteWorkerPoolError::new(
                 RemoteWorkerPoolErrorKind::InvalidConnection,
             ));
@@ -488,7 +555,12 @@ impl<'storage, 'authenticator> RemoteWorkerPoolAdapter<'storage, 'authenticator>
         message: &WorkerRegisterMessage,
         now: &Instant,
     ) -> Result<WorkerRegistrationResultMessage, RemoteWorkerPoolError> {
-        if message.worker_id != *connection.principal.worker_id() {
+        if message.worker_id != *connection.principal.worker_id()
+            || connection
+                .principal
+                .worker_instance_id()
+                .is_some_and(|bound| bound != &message.worker_instance_id)
+        {
             return Err(RemoteWorkerPoolError::new(
                 RemoteWorkerPoolErrorKind::InvalidConnection,
             ));
@@ -651,6 +723,9 @@ fn validate_principal(
     principal: &RemoteWorkerPrincipal,
 ) -> Result<(), RemoteWorkerAuthenticationError> {
     canonical_id(&principal.worker_id.0, "wrk_")?;
+    if let Some(worker_instance_id) = &principal.worker_instance_id {
+        canonical_id(&worker_instance_id.0, "wki_")?;
+    }
     canonical_id(&principal.worker_pool_id.0, "wpl_")?;
     validate_scope(&principal.scope)?;
     for value in [

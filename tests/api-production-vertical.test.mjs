@@ -10,13 +10,12 @@ test('standalone Server API drives Chat and StrongFlow through the production ve
   assert.equal(report.flow.chat.assistant.role, 'assistant')
   assert.equal(report.flow.chat.assistant.state, 'completed')
   assert.ok(report.flow.chat.assistant.content.trim().length > 0)
-  assert.equal(report.flow.strongflow.status, 'delivered')
+  assert.equal(report.flow.strongflow.status, 'done')
   assert.equal(report.flow.strongflow.verdictStatus, 'pass')
-  assert.ok(report.flow.strongflow.taskStatuses.length > 0)
-  assert.equal(report.flow.strongflow.taskStatuses.every(status => status === 'completed'), true)
-  for (const role of ['planner', 'executor', 'reviewer', 'verifier']) {
-    assert.ok(report.flow.strongflow.stageRoles.includes(role), `missing ${role} stage`)
-  }
+  assert.ok(report.flow.strongflow.workItemStates.length > 0)
+  assert.equal(report.flow.strongflow.workItemStates.every(state => state === 'done'), true)
+  assert.ok(report.flow.strongflow.workRunStates.length > 0)
+  assert.equal(report.flow.strongflow.workRunStates.every(state => state === 'settled'), true)
   assert.deepEqual(report.deterministic, {
     contentEqual: true,
     firstSessionId: 'psn_01J00000000000000000000001',
@@ -25,6 +24,6 @@ test('standalone Server API drives Chat and StrongFlow through the production ve
   assert.deepEqual(report.restart, {
     deliveryBytesStable: true,
     messageBytesStable: true,
-    status: 'delivered',
+    status: 'done',
   })
 })

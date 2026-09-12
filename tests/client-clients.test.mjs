@@ -621,14 +621,14 @@ test('clients page renders the device cards with the six Presence×Occupancy sta
     { clientId: '100000000006', displayName: 'Locked Rig', presence: 'locked', occupancy: 'available' },
   ]
   const stateTexts = [
-    'Online, ready to connect',
-    'Online, occupied by you',
-    'Online, in use',
-    'Online, finishing current tasks',
-    'Connection interrupted, waiting to recover',
-    'Client locked',
+    '在线，可以连接',
+    '在线，已由你占用',
+    '在线，正在使用',
+    '在线，正在完成当前任务',
+    '连接中断，正在等待恢复',
+    '设备已锁定',
   ]
-  const presenceTexts = ['Online', 'Online', 'Online', 'Online', 'Offline', 'Locked']
+  const presenceTexts = ['在线', '在线', '在线', '在线', '离线', '已锁定']
   const { rootElement, model } = clientsFixture({ devices: sixStates.map(device) })
   await model.refresh()
   const cards = findAll(rootElement, 'wwc-clients-card')
@@ -643,12 +643,12 @@ test('clients page renders the device cards with the six Presence×Occupancy sta
       presenceTexts[index],
     )
     assert.equal(findOne(card, 'wwc-clients-card-state').textContent, stateTexts[index])
-    assert.equal(findOne(card, 'wwc-clients-card-capacity').textContent, 'Capacity 3 / 8')
+    assert.equal(findOne(card, 'wwc-clients-card-capacity').textContent, '容量 3 / 8')
     assert.equal(
       findOne(card, 'wwc-clients-card-heartbeat').textContent,
-      'Last heartbeat 2 minutes ago',
+      '2 分钟前收到心跳',
     )
-    assert.equal(findOne(card, 'wwc-clients-card-version').textContent, 'Version 1.2.3')
+    assert.equal(findOne(card, 'wwc-clients-card-version').textContent, '版本 1.2.3')
   }
   model.close()
 })
@@ -986,7 +986,7 @@ test('the signed-in Clients area lists devices, adds one, and hides on sign-out'
   )
   const card = applicationNode(fixture.rootElement, 'wwc-clients-card')
   assert.equal(applicationNode(fixture.rootElement, 'wwc-clients-card-state').textContent,
-    'Online, ready to connect')
+    '在线，可以连接')
   assert.equal(
     applicationNode(fixture.rootElement, 'wwc-clients-card-connect').disabled,
     false,

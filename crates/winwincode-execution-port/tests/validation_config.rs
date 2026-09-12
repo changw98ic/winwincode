@@ -192,6 +192,37 @@ fn parser_rejects_unknown_version_network_shell_and_incomplete_language_set() {
 }
 
 #[test]
+fn known_flaky_rerun_is_explicit_bounded_and_validation_only() {
+    let configured = CONFIGURATION.replacen(
+        "id = \"typescript-check\"",
+        "id = \"typescript-check\"\nflakyRerunLimit = 1",
+        1,
+    );
+    let parsed = parse_validation_configuration(&configured).expect("bounded flaky policy");
+    assert_eq!(
+        parsed
+            .configuration()
+            .commands
+            .iter()
+            .find(|command| command.id == "typescript-check")
+            .expect("known-flaky command")
+            .flaky_rerun_limit,
+        Some(1)
+    );
+
+    for invalid in [
+        configured.replace("flakyRerunLimit = 1", "flakyRerunLimit = 2"),
+        CONFIGURATION.replacen(
+            "id = \"rust-format\"",
+            "id = \"rust-format\"\nflakyRerunLimit = 1",
+            1,
+        ),
+    ] {
+        assert!(parse_validation_configuration(&invalid).is_err());
+    }
+}
+
+#[test]
 fn parser_rejects_duplicate_profiles_commands_environment_and_dangling_references() {
     let duplicate_profile = CONFIGURATION.replacen("name = \"fast\"", "name = \"changed\"", 1);
     let duplicate_command =

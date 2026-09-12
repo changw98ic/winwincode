@@ -9,14 +9,15 @@ use sha2::{Digest, Sha256};
 use winwincode_delivery::{
     domain::{CandidatePathFact, Delivery, FrozenDeliveryCandidate},
     projection::{
-        AttentionItemProjection, DeliveryProjection, DeliveryTaskProjection, EvidenceProjection,
-        ProjectionInput, RequirementsProjection, SolutionReviewProjection, VerdictProjection,
+        AttentionItemProjection, DeliveryProjection, EvidenceProjection, ProjectionInput,
+        RequirementsProjection, SolutionReviewProjection, VerdictProjection,
         project_delivery_detail,
     },
 };
 use winwincode_domain::RepositoryScope;
 use winwincode_domain::{
-    ArtifactId, AttentionItemId, ExecutionMessageId, RequestId, Sha256Digest, UserId, WorkRunId,
+    ArtifactId, AttentionItemId, ExecutionMessageId, RequestId, Sha256Digest, UserId, WorkItem,
+    WorkItemState, WorkRunId,
 };
 use winwincode_publication::{
     PublicationAuthorization, PublicationFactBinding, PublicationSourceIssue, PublicationTarget,
@@ -126,17 +127,16 @@ struct ReviewPackage<'facts> {
     approval: ReviewPackageApproval<'facts>,
 }
 
-/// Publication-safe Delivery facts. Runtime stages and their worker/session
-/// bindings deliberately remain outside the GitHub review package.
+/// Publication-safe Delivery facts. Runtime sessions remain outside the GitHub review package.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ReviewPackageDelivery<'facts> {
     delivery_id: &'facts winwincode_domain::DeliveryId,
     delivery_revision: u64,
-    status: winwincode_delivery::domain::DeliveryStatus,
+    status: &'facts WorkItemState,
     requirements: &'facts RequirementsProjection,
     solution_review: Option<&'facts SolutionReviewProjection>,
-    tasks: &'facts [DeliveryTaskProjection],
+    work_items: &'facts [WorkItem],
     attention: &'facts [AttentionItemProjection],
     evidence: &'facts [EvidenceProjection],
     verdict: Option<&'facts VerdictProjection>,
@@ -150,7 +150,7 @@ impl<'facts> From<&'facts DeliveryProjection> for ReviewPackageDelivery<'facts> 
             status: delivery.status(),
             requirements: delivery.requirements(),
             solution_review: delivery.solution_review(),
-            tasks: delivery.tasks(),
+            work_items: delivery.work_items(),
             attention: delivery.attention(),
             evidence: delivery.evidence(),
             verdict: delivery.verdict(),

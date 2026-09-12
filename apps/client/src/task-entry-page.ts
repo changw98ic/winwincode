@@ -31,12 +31,12 @@ function element<K extends keyof HTMLElementTagNameMap>(
 /** The one copy per form-level failure; the alert role reaches screen readers. */
 function failureText(failure: TaskEntryFailure): string {
   switch (failure) {
-    case 'no-occupied-client': return 'Occupy a Client first — only an occupied Client can start a task.'
-    case 'no-repository': return 'Choose a repository for the task.'
-    case 'missing-base-branch': return 'Enter the base branch the task starts from.'
-    case 'missing-description': return 'Describe the task for the worker.'
-    case 'missing-model-route': return 'Choose a model route.'
-    case 'unavailable': return 'Starting the task did not go through. Check the connection and try again.'
+    case 'no-occupied-client': return '请先占用执行设备，只有已占用的设备才能启动任务。'
+    case 'no-repository': return '请选择任务仓库。'
+    case 'missing-base-branch': return '请输入任务的基准分支。'
+    case 'missing-description': return '请填写任务描述。'
+    case 'missing-model-route': return '请选择模型路由。'
+    case 'unavailable': return '任务启动失败，请检查连接后重试。'
   }
 }
 
@@ -75,7 +75,7 @@ export function mountTaskEntryPage(options: TaskEntryPageOptions): TaskEntryPage
   let closed = false
   let reportedAnchor: ControlPlaneTaskAnchor | null = null
 
-  section.setAttribute('aria-label', 'New task')
+  section.setAttribute('aria-label', '新任务')
   heading.id = 'wwc-task-entry-heading'
   heading.textContent = '新任务'
   section.setAttribute('aria-labelledby', heading.id)
@@ -100,9 +100,9 @@ export function mountTaskEntryPage(options: TaskEntryPageOptions): TaskEntryPage
     label.textContent = text
   }
 
-  wireSelect(clientLabel, clientSelect, 'client', 'Client')
-  wireSelect(repositoryLabel, repositorySelect, 'repository', 'Repository')
-  wireSelect(routeLabel, routeSelect, 'modelRoute', 'Model route')
+  wireSelect(clientLabel, clientSelect, 'client', '执行设备')
+  wireSelect(repositoryLabel, repositorySelect, 'repository', '仓库')
+  wireSelect(routeLabel, routeSelect, 'modelRoute', '模型路由')
 
   baseInput.id = 'wwc-task-entry-base'
   baseInput.name = 'baseBranch'
@@ -183,23 +183,23 @@ export function mountTaskEntryPage(options: TaskEntryPageOptions): TaskEntryPage
     occupiedNotice.hidden = occupied.length !== 0
     if (occupied.length === 0) {
       occupiedNotice.textContent = snapshot.devicesStatus === 'loading'
-        ? 'Checking the Clients you occupy…'
-        : 'No Client is occupied by you right now. Connect a device in the Clients area and occupy it to start a task.'
+        ? '正在检查你占用的执行设备…'
+        : '你当前没有占用执行设备。请先连接并占用一台设备。'
     }
 
     fillSelect(
       clientSelect,
-      'Choose an occupied Client',
+      '选择已占用的执行设备',
       occupied.map(device => ({ value: device.clientId, label: device.displayName })),
       snapshot.selection.clientId,
     )
     fillSelect(
       repositorySelect,
       snapshot.selection.clientId === null
-        ? 'Choose a Client first'
+        ? '请先选择执行设备'
         : snapshot.repositoriesStatus === 'loading' && snapshot.repositories.length === 0
-          ? 'Loading repositories…'
-          : 'Choose a repository',
+          ? '正在加载仓库…'
+          : '选择仓库',
       snapshot.repositories.map(repository => ({
         value: repository.repositoryBindingId,
         label: repository.displayName,
@@ -215,7 +215,7 @@ export function mountTaskEntryPage(options: TaskEntryPageOptions): TaskEntryPage
     }
     fillSelect(
       routeSelect,
-      'Choose a model route',
+      '选择模型路由',
       snapshot.modelRouteOptions.map(option => ({
         value: option.routeId,
         label: option.detail === '' ? option.label : `${option.label} — ${option.detail}`,
@@ -223,7 +223,7 @@ export function mountTaskEntryPage(options: TaskEntryPageOptions): TaskEntryPage
       snapshot.selection.modelRouteId,
     )
 
-    submit.textContent = busy ? 'Starting…' : 'Start task'
+    submit.textContent = busy ? '正在启动…' : '启动任务'
     submit.disabled = busy || occupied.length === 0
     form.setAttribute('aria-busy', busy ? 'true' : 'false')
 
@@ -239,7 +239,7 @@ export function mountTaskEntryPage(options: TaskEntryPageOptions): TaskEntryPage
     setFieldError(descriptionInput, failureKind === 'missing-description')
     setFieldError(routeSelect, failureKind === 'missing-model-route')
 
-    const statusLine = busy ? 'Starting the task…' : ''
+    const statusLine = busy ? '正在启动任务…' : ''
     status.textContent = statusLine
     status.hidden = statusLine.length === 0
 

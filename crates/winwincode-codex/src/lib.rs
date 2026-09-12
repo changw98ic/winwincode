@@ -18,8 +18,8 @@ mod outbox;
 mod performance;
 pub mod performance_evidence;
 pub mod stage_product;
-pub mod stage_runtime_projection;
 mod store;
+pub mod workrun_runtime_projection;
 
 pub use adapter::{
     ProductionCodexAdapter, ProductionCodexConfig, ProductionCodexError, ProductionCodexErrorKind,
@@ -32,10 +32,11 @@ pub use adapter::{
 };
 pub use contract::{
     ActionRequestTransport, CodexCoreAdapter, CodexPoll, CodexRunKey, CodexRunKeyError,
-    CodexThreadStart, CodexTurnCompletion, DelegatedLoopPhase, DelegatedLoopStopFact,
-    DelegatedLoopTransition, DelegatedLoopTransitionOutcome, DelegatedObserverPreflight,
-    DelegatedObserverPreflightOutcome, DelegatedObserverSettlement, DurableExecutionDelivery,
-    WorkerExecutionPort, delegated_loop_turn_id, secret_safe_runtime_summary,
+    CodexThreadSession, CodexThreadStart, CodexTurnCompletion, DelegatedLoopPhase,
+    DelegatedLoopStopFact, DelegatedLoopTransition, DelegatedLoopTransitionOutcome,
+    DelegatedObserverPreflight, DelegatedObserverPreflightOutcome, DelegatedObserverSettlement,
+    DurableExecutionDelivery, WorkerExecutionPort, delegated_loop_turn_id,
+    secret_safe_runtime_summary,
 };
 pub use helper_release::{HelperReleaseManifest, HelperReleaseManifestError};
 pub use winwincode_execution_port::runtime_trace_outbox::{ExecutionMode, ObserverMode};

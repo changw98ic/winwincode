@@ -99,6 +99,22 @@
 
 #![allow(clippy::doc_markdown)]
 
+use time::{OffsetDateTime, UtcOffset};
+
+pub(crate) fn canonical_rfc3339(time: OffsetDateTime) -> String {
+    let time = time.to_offset(UtcOffset::UTC);
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
+        time.year(),
+        u8::from(time.month()),
+        time.day(),
+        time.hour(),
+        time.minute(),
+        time.second(),
+        time.nanosecond() / 1_000_000,
+    )
+}
+
 pub mod apply_engine;
 pub mod candidate_branch;
 pub mod candidate_registry;
@@ -113,6 +129,7 @@ pub mod preview;
 pub mod repository;
 pub mod repository_exchange;
 pub mod repository_git;
+pub mod service;
 pub mod store;
 pub mod supervisor;
 pub mod worker_logs;
@@ -151,8 +168,8 @@ pub use connect_code::{
 pub use daemon::{
     DaemonConfig, DaemonError, DaemonStatus, DeviceDaemon, EnrollmentIssuance, ExchangeRequest,
     ExchangeResponse, ExchangeTransport, ExchangeTransportError, LeaseWorkerController,
-    TickOutcome, WorkerCapacitySnapshot, WorkerCapacitySource, WorkerLaunchDirectories,
-    WorkerLaunchMaterialSource,
+    TickOutcome, WorkerCapacitySnapshot, WorkerCapacitySource, WorkerCredentialIssuance,
+    WorkerLaunchDirectories, WorkerLaunchMaterialSource,
 };
 pub use fencing::{
     FencedCommandKind, FencingGuard, FencingRejection, FencingTicket, FencingVerdict,
@@ -172,6 +189,10 @@ pub use repository::{
 pub use repository_exchange::{RepositoryRescanApplication, apply_repository_rescan};
 pub use repository_git::{
     DETACHED_BRANCH, GitHeadState, GitInspectError, GitInspectOptions, GitInspector, GitScan,
+};
+pub use service::{
+    DeviceServiceConfig, DeviceServiceError, DeviceServiceStatus, device_service_logs,
+    device_service_status, request_device_service_restart, run_device_service,
 };
 pub use store::{
     CLIENT_STORE_SCHEMA_VERSION, ClientInboxCursor, ClientInboxCursorUpdate, ClientOutboxEntry,
@@ -197,3 +218,19 @@ pub use worker_logs::{
 // APIs speak the domain vocabulary, and embedders (the `wwc` CLI) should not
 // need a direct `winwincode-client-port` dependency to name it.
 pub use winwincode_client_port::domain::{ClientLockState, ConnectCodeState};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wire_timestamps_are_utc_with_millisecond_precision() {
+        let time = OffsetDateTime::parse(
+            "2026-09-12T11:09:20.050338+08:00",
+            &time::format_description::well_known::Rfc3339,
+        )
+        .expect("fixture timestamp parses");
+
+        assert_eq!(canonical_rfc3339(time), "2026-09-12T03:09:20.050Z");
+    }
+}

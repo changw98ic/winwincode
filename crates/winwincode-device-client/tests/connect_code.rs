@@ -200,6 +200,7 @@ impl ExchangeTransport for ServerSim {
             replay_from_sequence: None,
             frames,
             enrollment: None,
+            worker_credentials: Vec::new(),
         };
         serde_json::to_vec(&response)
             .map_err(|error| ExchangeTransportError::new(format!("fake encode: {error}")))

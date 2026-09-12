@@ -238,9 +238,9 @@ export function mountClientsPage(options: ClientsPageOptions): ClientsPage {
     refs.presence.textContent = devicePresenceText(device)
     refs.presence.dataset.tone = deviceStateTone(device)
     refs.stateText.textContent = deviceStateText(device)
-    refs.capacity.textContent = `Capacity ${device.capacityUsed} / ${device.capacityTotal}`
+    refs.capacity.textContent = `容量 ${device.capacityUsed} / ${device.capacityTotal}`
     refs.heartbeat.textContent = relativeHeartbeatText(device.lastHeartbeatAt, now())
-    refs.version.textContent = `Version ${device.version}`
+    refs.version.textContent = `版本 ${device.version}`
     refs.occupancy?.update(device)
   }
 

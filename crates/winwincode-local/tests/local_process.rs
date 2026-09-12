@@ -31,9 +31,10 @@ use winwincode_worker::composition::{
     EndpointSide, ExecutionPortCore, FrameDirection, RemoteTransportAdapter, TypedFrame,
 };
 use winwincode_worker::{
-    CandidateArtifactAckOutcome, CandidateArtifactAuthority, CandidateArtifactUpload,
-    CodexCoreAdapter, CodexPoll, CodexThreadStart, CodexTurnCompletion, DurableExecutionDelivery,
-    RetainedCandidateArtifact, WorkerConfig, WorkerExecutionPort, WorkerLifecycleState, WorkerMain,
+    AgentProfileSettings, CandidateArtifactAckOutcome, CandidateArtifactAuthority,
+    CandidateArtifactUpload, CodexCoreAdapter, CodexPoll, CodexThreadSession, CodexThreadStart,
+    CodexTurnCompletion, DurableExecutionDelivery, RetainedCandidateArtifact, WorkerConfig,
+    WorkerExecutionPort, WorkerLifecycleState, WorkerMain, resolve_agent_session_config,
     secret_safe_runtime_summary, workspace_runtime::JobWorkspaceRuntime,
 };
 
@@ -436,7 +437,7 @@ impl CodexCoreAdapter for FixtureCodex {
     fn ensure_thread(
         &mut self,
         start: CodexThreadStart<'_>,
-    ) -> impl Future<Output = Result<CodexThreadId, Self::Error>> {
+    ) -> impl Future<Output = Result<CodexThreadSession, Self::Error>> {
         let thread_id = start
             .run_key
             .canonical_thread_id()
@@ -465,7 +466,28 @@ impl CodexCoreAdapter for FixtureCodex {
             worker_session_id: start.worker_session_id.clone(),
             codex_thread_id: thread_id.clone(),
         });
-        std::future::ready(Ok(thread_id))
+        let agent_config = resolve_agent_session_config(
+            start.worker_id,
+            &worker_config().capabilities,
+            &start.job.execution_profile,
+            AgentProfileSettings {
+                provider: "fixture-provider".into(),
+                model: "fixture-model".into(),
+                reasoning: "provider_default".into(),
+                tools: Vec::new(),
+                sandbox: match start.job.workspace.write_mode {
+                    ExecutionWorkspaceWriteMode::ReadOnly => "read-only",
+                    ExecutionWorkspaceWriteMode::Candidate => "candidate",
+                }
+                .into(),
+                instructions: None,
+            },
+        )
+        .map_err(|_| ());
+        std::future::ready(agent_config.map(|agent_config| CodexThreadSession {
+            thread_id,
+            agent_config,
+        }))
     }
 
     fn submit_turn(

@@ -6,9 +6,9 @@ use winwincode_audit::{
     AuditSubject, AuditSubjectKind,
 };
 use winwincode_domain::{
-    CodexThreadId, DeliveryId, DeliveryTaskId, ExecutionAckSequence, ExecutionJobId,
-    ExecutionMessageId, FencingToken, LeaseId, ProductSessionId, WorkRunId, WorkerId,
-    WorkerInstanceId, WorkerSessionId,
+    CodexThreadId, DeliveryId, ExecutionAckSequence, ExecutionJobId, ExecutionMessageId,
+    FencingToken, LeaseId, ProductSessionId, WorkItemId, WorkRunId, WorkerId, WorkerInstanceId,
+    WorkerSessionId,
 };
 
 fn id(prefix: &str, tail: char) -> String {
@@ -23,7 +23,7 @@ fn execution_identity() -> AuditExecutionIdentity {
         WorkRunId(id("wrn", '4')),
         ExecutionJobId(id("job", '5')),
         DeliveryId(id("dlv", '6')),
-        Some(DeliveryTaskId(id("dtk", '7'))),
+        Some(WorkItemId(id("wit", '7'))),
         WorkerId(id("wrk", '8')),
         WorkerInstanceId(id("wki", '9')),
         LeaseId(id("lse", 'A')),
@@ -42,7 +42,7 @@ fn accepted_binding_identity() -> AuditExecutionIdentity {
         WorkRunId(id("wrn", '4')),
         ExecutionJobId(id("job", '5')),
         DeliveryId(id("dlv", '6')),
-        Some(DeliveryTaskId(id("dtk", '7'))),
+        Some(WorkItemId(id("wit", '7'))),
         WorkerId(id("wrk", '8')),
         WorkerInstanceId(id("wki", '9')),
         LeaseId(id("lse", 'A')),
@@ -91,8 +91,8 @@ fn execution_subject_variants_are_closed_and_locate_every_identity() {
         assert_eq!(execution.execution_job_id().0, id("job", '5'));
         assert_eq!(execution.delivery_id().0, id("dlv", '6'));
         assert_eq!(
-            execution.delivery_task_id().map(|id| &id.0),
-            Some(&id("dtk", '7'))
+            execution.work_item_id().map(|id| &id.0),
+            Some(&id("wit", '7'))
         );
         assert_eq!(execution.worker_id().0, id("wrk", '8'));
         assert_eq!(execution.worker_instance_id().0, id("wki", '9'));
@@ -115,7 +115,7 @@ fn execution_subject_variants_are_closed_and_locate_every_identity() {
         assert_eq!(encoded["work_run_id"], id("wrn", '4'));
         assert_eq!(encoded["execution_job_id"], id("job", '5'));
         assert_eq!(encoded["delivery_id"], id("dlv", '6'));
-        assert_eq!(encoded["delivery_task_id"], id("dtk", '7'));
+        assert_eq!(encoded["work_item_id"], id("wit", '7'));
         assert_eq!(encoded["worker_id"], id("wrk", '8'));
         assert_eq!(encoded["worker_instance_id"], id("wki", '9'));
         assert_eq!(encoded["lease_id"], id("lse", 'A'));

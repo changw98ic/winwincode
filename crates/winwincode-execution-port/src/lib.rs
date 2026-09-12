@@ -18,6 +18,7 @@ pub mod debug_hypothesis_ledger;
 pub mod debug_probe_contract;
 pub mod debug_probe_delta_context;
 pub mod diagnostic_parser;
+pub mod execution_identity;
 pub mod generated;
 pub mod observation_contract;
 pub mod performance_comparison;

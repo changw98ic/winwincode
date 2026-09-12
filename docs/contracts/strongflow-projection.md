@@ -9,7 +9,7 @@ StrongFlow 页面可以读取什么、每项内容来自哪里，以及刷新、
 
 StrongFlow 的完整页面由四类已经存在的事实组合而成：
 
-1. Rust Delivery 模块保存的当前 Delivery、DeliverySpec、DeliveryTask、StageRun、
+1. Rust Delivery 模块保存的当前 Delivery、WorkContract、WorkItem、WorkRun、
    SessionBinding、Attention、Evidence 和 Verdict；
 2. 当前方案审核 Attention 中已经校验过的方案、两张图、审核摘要和人工决定；
 3. Control Plane 已经接收并保存的 Worker/Codex 运行事件；
@@ -22,19 +22,20 @@ StrongFlow 的完整页面由四类已经存在的事实组合而成：
 
 | 页面内容 | 唯一来源 | 必须绑定的范围 |
 | --- | --- | --- |
-| 需求与验收条件 | 当前 canonical DeliverySpec | 当前 Delivery 和 Spec revision |
-| 当前方案审核与两张图 | 当前 plan-review Attention | pending 或 settled review 都绑定 Spec、规划执行 SessionBinding、人工审核 StageRun、Attention 和 review digest；settled 还绑定认证审核人和审核时间；人工审核不伪造执行 SessionBinding |
-| 阶段 | canonical StageRun 与 SessionBinding | 当前 Delivery；运行内容必须再匹配实际 SessionBinding |
-| DeliveryTask | canonical DeliveryTask | 当前 Delivery；只按 DeliveryTaskId 汇总阶段和证据 |
+| 需求与验收条件 | 当前 WorkContract | 当前 Delivery 和 WorkContract revision |
+| 当前方案审核与两张图 | 当前 review Attention | pending 或 settled review 都绑定 WorkContract、规划 WorkRun、审核 WorkRun、Attention 和 review digest；settled 还绑定认证审核人和审核时间 |
+| WorkRun | canonical WorkRun 与 SessionBinding | 当前 WorkItem revision；运行内容必须再匹配实际 SessionBinding |
+| Session / Agent 团队 | SessionBinding 冻结的 RuntimeSessionContext 与 Worker health | 稳定 AgentIdentity、实际 Provider/Model、精确 repository tree 和 write mode；不公开设备本地路径 |
+| WorkItem | canonical WorkItem graph | 当前 WorkContract；依赖和阻塞只从同一 WorkItem graph 推导 |
 | Plan 与 Agent Graph | 已接受的 Worker/Codex 事件 | 精确 SessionBinding 和当前 Job/Lease/attempt/fence |
 | Command / Test | 已接受的 Worker/Codex 事件 | 精确 SessionBinding；不包含完整输出 |
 | Usage | 已接受的 Worker/Codex 事件 | 精确 SessionBinding；只接受非负数字指标 |
-| Attention | canonical AttentionItem | 当前 Delivery 和当前 Spec |
-| Evidence | canonical EvidenceRef | 当前 Spec revision 和当前冻结候选 |
-| Verdict | canonical DeliveryVerdict | 当前 Spec、候选和全部当前验收条件 |
+| Attention | canonical AttentionItem | 当前 Delivery 和当前 WorkContract |
+| Evidence | canonical Evidence | 当前 WorkContract revision 和当前冻结候选 |
+| Verdict | canonical Verdict | 当前 WorkContract、候选和全部当前验收条件 |
 | Publication | canonical Publication | 当前 Delivery、目标、候选、Verdict 和人工批准 |
 
-Codex Plan 只显示为运行内容，不自动变成 DeliveryTask。Agent Graph 也只是 Codex 实际
+Codex Plan 只显示为运行内容，不自动变成 WorkItem。Agent Graph 也只是 Codex 实际
 Agent 关系的只读显示，不是 Control Plane 创建的第二张 Agent 图。
 
 ## 运行事件怎样进入页面
@@ -42,7 +43,7 @@ Agent 关系的只读显示，不是 Control Plane 创建的第二张 Agent 图�
 一条事件至少要经过下面的检查：
 
 ```text
-DeliveryId + StageRunId + ProductSessionId
+DeliveryId + WorkItemId + WorkRunId + ProductSessionId
           + WorkerSessionId + CodexThreadId
           + ExecutionJobId + LeaseId + attempt + fencingToken
                               ↓
@@ -59,10 +60,10 @@ DeliveryId + StageRunId + ProductSessionId
 attempt、旧 Worker 实例或旧 fencing token 在保存运行事实之前就结束处理，因此不会先
 显示到页面再撤回。
 
-每个 Codex StageRun 在阶段列表中都必须保留 ProductSession 与 ExecutionJob 绑定，即使
-WorkerSession 或 CodexThread 还没接入；这两个字段用显式 `null` 表示尚未绑定。CodexThread 一旦存在，
-WorkerSession 也必须存在。人工审核阶段的 `sessionBinding` 必须是 `null`。完整 runtime
-Session 投影则只接受已经同时绑定 WorkerSession 和 CodexThread 的运行事实。
+每个 WorkRun 都保留 WorkItem revision、ProductSession 与 ExecutionJob 绑定。CodexThread
+一旦存在，WorkerSession 也必须存在；完整 runtime Session 投影只接受已经同时绑定
+WorkerSession 和 CodexThread 的运行事实。Delivery WorkRun Session 必须同时带完整
+`RuntimeSessionContext`；无 Delivery binding cut 的独立 ProductSession 可以显式为 `null`。
 
 每个运行 Session 的序号必须连续。完全相同的重复事件只确认一次；出现缺口时请求从缺失
 序号重放；同一身份或序号后来变成另一份内容时直接报告冲突。
@@ -83,7 +84,7 @@ cursor 格式损坏返回 `INVALID_REQUEST`，跨 scope 使用返回 `PERMISSION
 暂不可用返回 `TRUSTED_FACTS_UNAVAILABLE`；这些错误不会泄露其他 scope 是否存在。
 
 WebSocket 只发送 `runtime-projection.invalidated.v1` 等失效通知；它不附带另一份运行详情。
-Delivery-stage 失效分支带 `scopeKind=delivery-stage` 和非空 Delivery/StageRun 身份。收到该分支
+work-run 失效分支带 `scopeKind=work-run` 和非空 Delivery/WorkRun 身份。收到该分支
 后，页面重新执行上述两步：先用
 `delivery.get` 建立新读取截面，再让 `runtime.projection.get` 使用该截面。任何一步失败，
 或者两个结果的 cursor 不一致，页面丢弃整对结果并重新读取，不能显示一半新、一半旧的内容。
@@ -92,7 +93,7 @@ Delivery-stage 失效分支带 `scopeKind=delivery-stage` 和非空 Delivery/Sta
 必须是基线加一。页面不把 `startAt` 改成 latest，也不拿旧内存状态猜测缺失内容。
 
 普通 Chat 的 product-session 失效分支带 `scopeKind=product-session`，不带 DeliveryId 或
-StageRunId，只重新读取 `runtime.projection.get`，其快照 `readCursor=null`。它不会为了复用
+WorkRunId，只重新读取 `runtime.projection.get`，其快照 `readCursor=null`。它不会为了复用
 StrongFlow 刷新路径而制造隐藏 Delivery。它仍返回 product-session 流的 `eventCursor`，页面
 从这个位置建立订阅，所以 HTTP 响应与 WebSocket 连接之间发生的失效通知不会漏掉。
 
@@ -112,7 +113,7 @@ hunk 内容或 unified Diff。
 
 路径和 hunk 只能通过单独的、需要权限的冻结候选详情读取，并且同时满足：
 
-- 生产 StageRun 已结束；
+- 生产 WorkRun 已结束；
 - 候选已经冻结；
 - 候选仍属于当前 Spec revision；
 - Diff digest 已重新核对；
@@ -136,19 +137,20 @@ Web 只使用生成的 HTTP 和 WebSocket 客户端。页面代码可以负责�
 
 - `DeliveryPage` 继续返回紧凑的 `DeliveryProjection`；`delivery.get` 返回有
   `kind=delivery_detail` 判别字段的 `DeliveryDetailProjection`。
-- `SolutionReviewProjection` 来自当前已验证 review set。PlanReview 中的 pending 内容也可安全
+- `SolutionReviewProjection` 来自当前已验证 review set。pending 内容也可安全
   显示；pending 的决定、意见、修改要求、审核人和时间均为 `null`。settled 状态公开审核人、
   时间、决定和有界意见，其中只有 `changes_requested` 必须提供非空 `requestedChanges`。
   这些字段来自已校验的 typed decision，不公开原始 Attention context 或 resolution。
-- `taskProposals` 是非空有序列表，并纳入 `reviewSetSha256`。只有 `reviewStatus=approved` 时，
+- `workItemProposals` 是非空有序列表，并纳入 `reviewSetSha256`。只有 `reviewStatus=approved` 时，
   canonical WorkItem create/dispatch 根据已验证的 WorkContract 与 acceptance criterion 建立任务；
   调用方不能伪造任务身份或替换 reviewed contract。Planner proposal 不直接成为执行任务，
   后续责任变更只能通过已认证的 assignment command 修改。
-- `runtime.projection.get` 返回按 SessionBinding 组织的 Plan、Agent Graph、Activity、Usage、
-  Recovery 和 Diff 数量摘要。
-- `runtime-projection.invalidated.v1` 只通知页面重新读取 HTTP 快照。delivery-stage 分支执行
+- `runtime.projection.get` 返回按 SessionBinding 组织的 AgentIdentity、Provider/Model、Workspace、
+  Plan、Agent Graph、Activity、Usage、Recovery 和 Diff 数量摘要。生产读取从持久化 typed
+  runtime trace 还原 Activity、Usage 和恢复状态，不把事件统一降级成 checkpoint。
+- `runtime-projection.invalidated.v1` 只通知页面重新读取 HTTP 快照。work-run 分支执行
   paired read，product-session 分支只重载 runtime；旧的文字摘要追加事件已删除。
-- `DeliveryDetailProjection` 和 delivery-stage `RuntimeProjectionSnapshot` 都携带同一个
+- `DeliveryDetailProjection` 和 work-run `RuntimeProjectionSnapshot` 都携带同一个
   `StrongFlowReadCursor`。该 cursor 还签名覆盖 Delivery 流的 `eventCursor`；
   `delivery.get` 建立截面，`runtime.projection.get` 只重放该截面，Web 随后从该 eventCursor
   订阅，不拼接两个独立的 latest 结果。

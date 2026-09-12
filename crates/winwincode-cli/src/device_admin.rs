@@ -16,8 +16,8 @@
 //! - Publishing requires an adopted enrollment, so a pending publication
 //!   frame can never be stranded on the placeholder stream the daemon could
 //!   not re-key.
-//! - One CLI run is one process launch: `refresh-code` rotates the
-//!   `clientInstanceId` like every Device Client launch does.
+//! - The foreground Device service owns `clientInstanceId` rotation;
+//!   administrative CLI commands never impersonate a new daemon launch.
 
 use std::fmt;
 use std::path::Path;
@@ -28,7 +28,8 @@ use time::format_description::well_known::Rfc3339;
 use winwincode_device_client::ClientLockState;
 use winwincode_device_client::connect_code;
 use winwincode_device_client::{
-    ConnectCodeStateRecord, DeviceStore, ensure_device_identity, load_device_identity,
+    ConnectCodeStateRecord, DeviceServiceStatus, DeviceStore, device_service_status,
+    load_device_identity,
 };
 
 /// Secret-free view of the published connect code (plan 11.1 display row).
@@ -101,6 +102,8 @@ pub struct DeviceStatusView {
     pub running_worker_sessions: u64,
     /// The published connect code, if any.
     pub connect_code: Option<ConnectCodeView>,
+    /// Foreground service process and restart state.
+    pub service: DeviceServiceStatus,
 }
 
 /// Human- and JSON-readable result of one `wwc device` command.
@@ -190,6 +193,7 @@ pub fn device_status(data_directory: &Path) -> Result<DeviceAdminOutcome, Device
     let running_worker_sessions = store
         .count_worker_processes_in_state(winwincode_device_client::WORKER_STATE_RUNNING)
         .map_err(|error| store_failed(&error))?;
+    let service = device_service_status(data_directory);
     Ok(DeviceAdminOutcome::Status {
         device: DeviceStatusView {
             device_id: identity.identity().device_id().to_owned(),
@@ -200,6 +204,7 @@ pub fn device_status(data_directory: &Path) -> Result<DeviceAdminOutcome, Device
             lock_state: lock_state_label(policy.lock_state).to_owned(),
             running_worker_sessions,
             connect_code: code,
+            service,
         },
     })
 }
@@ -226,9 +231,6 @@ pub fn refresh_device_connect_code(
     if !identity.identity().is_enrolled() {
         return Err(DeviceAdminError::NotEnrolled);
     }
-    // One CLI run is one process launch: rotate the launch instance id.
-    let identity = ensure_device_identity(&mut store, &rotation_seed(), &now_rfc3339())
-        .map_err(|error| store_failed(&error))?;
     let client_node_id = identity.identity().client_node_id().to_owned();
     let client_instance_id = identity.current_instance_id().to_owned();
     store
@@ -324,26 +326,4 @@ fn connect_code_failed(error: &connect_code::ConnectCodeError) -> DeviceAdminErr
         code,
         message: error.to_string(),
     }
-}
-
-/// The identity seed for the launch-instance rotation.
-///
-/// The rotation path of `ensure_device_identity` only validates the seed and
-/// rewrites the `clientInstanceId` — the stored device description of an
-/// existing identity is never overwritten, so these placeholder values exist
-/// purely to pass that validation. Commands that refuse to run before an
-/// identity exists never reach the fresh-boot write path.
-pub(crate) fn rotation_seed() -> winwincode_device_client::DeviceIdentitySeed {
-    winwincode_device_client::DeviceIdentitySeed {
-        display_name: "wwc device refresh-code".to_owned(),
-        platform: "cli".to_owned(),
-        architecture: "cli".to_owned(),
-        client_version: env!("CARGO_PKG_VERSION").to_owned(),
-    }
-}
-
-pub(crate) fn now_rfc3339() -> String {
-    OffsetDateTime::now_utc()
-        .format(&Rfc3339)
-        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_owned())
 }

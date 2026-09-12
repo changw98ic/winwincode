@@ -69,7 +69,7 @@ const VERIFICATION_BEHAVIOR_MARKER: &str =
 enum LoopbackResponseProfile {
     PlainText,
     Planner {
-        acceptance_criterion_ids: Vec<String>,
+        criterion_ids: Vec<String>,
     },
     Executor {
         completed: bool,
@@ -85,7 +85,7 @@ enum LoopbackResponseProfile {
         delivery_spec_id: String,
         delivery_spec_revision: u64,
         candidate_ref: String,
-        acceptance_criterion_ids: Vec<String>,
+        criterion_ids: Vec<String>,
     },
 }
 
@@ -101,7 +101,7 @@ struct LoopbackWorkInput {
     delivery_spec_id: String,
     delivery_spec_revision: u64,
     candidate_ref: Option<String>,
-    acceptance_criterion_ids: Vec<String>,
+    criterion_ids: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -139,7 +139,7 @@ struct LoopbackPlannerSolutionV1 {
     process_diagram: LoopbackPlannerDiagram,
     risks: Vec<String>,
     unresolved_items: Vec<String>,
-    task_proposals: Vec<LoopbackPlannerTaskProposal>,
+    work_item_proposals: Vec<LoopbackPlannerWorkItemProposal>,
 }
 
 #[derive(Serialize)]
@@ -216,12 +216,12 @@ enum LoopbackPlannerNodeKind {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct LoopbackPlannerTaskProposal {
+struct LoopbackPlannerWorkItemProposal {
     id: &'static str,
     title: &'static str,
     goal: &'static str,
-    acceptance_criterion_ids: Vec<String>,
-    blocked_by_task_ids: Vec<String>,
+    criterion_ids: Vec<String>,
+    depends_on: Vec<String>,
 }
 
 fn loopback_profile(message: &ModelOpenMessage) -> LoopbackResponseProfile {
@@ -259,7 +259,7 @@ fn loopback_profile_from_request(request: &serde_json::Value) -> LoopbackRespons
             delivery_spec_id: work_input.delivery_spec_id,
             delivery_spec_revision: work_input.delivery_spec_revision,
             candidate_ref,
-            acceptance_criterion_ids: work_input.acceptance_criterion_ids,
+            criterion_ids: work_input.criterion_ids,
         };
     }
 
@@ -269,11 +269,11 @@ fn loopback_profile_from_request(request: &serde_json::Value) -> LoopbackRespons
     let Some(work_input) = work_input_from_request(request) else {
         return LoopbackResponseProfile::PlainText;
     };
-    if work_input.acceptance_criterion_ids.is_empty() {
+    if work_input.criterion_ids.is_empty() {
         LoopbackResponseProfile::PlainText
     } else {
         LoopbackResponseProfile::Planner {
-            acceptance_criterion_ids: work_input.acceptance_criterion_ids,
+            criterion_ids: work_input.criterion_ids,
         }
     }
 }
@@ -377,7 +377,7 @@ fn work_input_from_request(request: &serde_json::Value) -> Option<LoopbackWorkIn
         .candidate_ref
         .clone()
         .filter(|value| !value.trim().is_empty());
-    let mut acceptance_criterion_ids = Vec::with_capacity(work_input.work_item.criterion_ids.len());
+    let mut criterion_ids = Vec::with_capacity(work_input.work_item.criterion_ids.len());
     for criterion_id in &work_input.work_item.criterion_ids {
         let id = criterion_id.0.clone();
         if !work_input
@@ -388,16 +388,16 @@ fn work_input_from_request(request: &serde_json::Value) -> Option<LoopbackWorkIn
         {
             return None;
         }
-        if acceptance_criterion_ids.contains(&id) {
+        if criterion_ids.contains(&id) {
             return None;
         }
-        acceptance_criterion_ids.push(id);
+        criterion_ids.push(id);
     }
     Some(LoopbackWorkInput {
         delivery_spec_id,
         delivery_spec_revision,
         candidate_ref,
-        acceptance_criterion_ids,
+        criterion_ids,
     })
 }
 
@@ -435,9 +435,7 @@ fn contains_value_with_type(value: &serde_json::Value, expected: &str) -> bool {
 fn loopback_response_for_profile(profile: &LoopbackResponseProfile) -> String {
     match profile {
         LoopbackResponseProfile::PlainText => LOOPBACK_RESPONSE.to_owned(),
-        LoopbackResponseProfile::Planner {
-            acceptance_criterion_ids,
-        } => {
+        LoopbackResponseProfile::Planner { criterion_ids } => {
             let product = LoopbackPlannerSolutionV1 {
                 schema_version: 1,
                 protocol: PLANNER_PROTOCOL,
@@ -491,12 +489,12 @@ fn loopback_response_for_profile(profile: &LoopbackResponseProfile) -> String {
                 },
                 risks: vec!["The exact check may expose a regression.".to_owned()],
                 unresolved_items: Vec::new(),
-                task_proposals: vec![LoopbackPlannerTaskProposal {
-                    id: "dtk_00000000000000000000000001",
+                work_item_proposals: vec![LoopbackPlannerWorkItemProposal {
+                    id: "wit_00000000000000000000000001",
                     title: "Apply approved Delivery plan",
                     goal: "Apply the approved source change and run its checks.",
-                    acceptance_criterion_ids: acceptance_criterion_ids.clone(),
-                    blocked_by_task_ids: Vec::new(),
+                    criterion_ids: criterion_ids.clone(),
+                    depends_on: Vec::new(),
                 }],
             };
             serde_json::to_string(&product).expect("serialize deterministic Planner response")
@@ -546,7 +544,7 @@ fn loopback_verification_response(profile: &LoopbackResponseProfile) -> Option<S
         delivery_spec_id,
         delivery_spec_revision,
         candidate_ref,
-        acceptance_criterion_ids,
+        criterion_ids,
         ..
     } = profile
     else {
@@ -570,7 +568,7 @@ fn loopback_verification_response(profile: &LoopbackResponseProfile) -> Option<S
             "The verification command produced no directly observed exit code.",
         ),
     };
-    let findings = acceptance_criterion_ids
+    let findings = criterion_ids
         .iter()
         .map(|criterion_id| LoopbackVerificationFinding {
             finding_id: format!("finding:deterministic:{criterion_id}"),
@@ -1586,7 +1584,7 @@ mod verification_tests {
             delivery_spec_id,
             delivery_spec_revision,
             candidate_ref,
-            acceptance_criterion_ids,
+            criterion_ids,
             ..
         } = profile
         else {
@@ -1598,10 +1596,7 @@ mod verification_tests {
             candidate_ref,
             "git-candidate:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         );
-        assert_eq!(
-            acceptance_criterion_ids,
-            vec!["crt_01J00000000000000000000001"]
-        );
+        assert_eq!(criterion_ids, vec!["crt_01J00000000000000000000001"]);
     }
 
     #[test]
@@ -1625,7 +1620,7 @@ mod verification_tests {
             delivery_spec_id: "spec-test".to_owned(),
             delivery_spec_revision: 1,
             candidate_ref: "git-candidate:sha256:test".to_owned(),
-            acceptance_criterion_ids: vec!["criterion-test".to_owned()],
+            criterion_ids: vec!["criterion-test".to_owned()],
         })
         .expect("verification response");
         let response: Value = serde_json::from_str(&response).expect("JSON response");

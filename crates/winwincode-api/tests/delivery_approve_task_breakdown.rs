@@ -2,14 +2,13 @@
 
 use serde_json::{Value, json};
 use winwincode_api::generated::{
-    CommandRequest, DeliveryTaskBreakdownCreateCommand, DeliveryTaskBreakdownCreatePayload,
-    ErrorCode, TerminalErrorCode,
+    CommandRequest, ErrorCode, TerminalErrorCode, WorkItemsCreateCommand, WorkItemsCreatePayload,
 };
 
 fn canonical_work_item_command() -> Value {
     json!({
         "schemaVersion": "winwincode/v1",
-        "command": "delivery.task_breakdown.create",
+        "command": "workitems.create",
         "actor": {
             "kind": "user",
             "id": "usr_01J00000000000000000000000"
@@ -52,20 +51,20 @@ fn removed_approval_command() -> Value {
 fn removed_task_breakdown_approval_command_is_rejected() {
     let command = removed_approval_command();
     assert!(serde_json::from_value::<CommandRequest>(command.clone()).is_err());
-    assert!(serde_json::from_value::<DeliveryTaskBreakdownCreateCommand>(command).is_err());
+    assert!(serde_json::from_value::<WorkItemsCreateCommand>(command).is_err());
 }
 
 #[test]
 fn generated_work_item_create_accepts_canonical_payload() {
     let value = canonical_work_item_command();
-    let payload: DeliveryTaskBreakdownCreatePayload =
+    let payload: WorkItemsCreatePayload =
         serde_json::from_value(value["payload"].clone()).expect("canonical WorkItem payload");
     assert_eq!(
         serde_json::to_value(payload).expect("canonical payload JSON"),
         value["payload"]
     );
 
-    let command: DeliveryTaskBreakdownCreateCommand =
+    let command: WorkItemsCreateCommand =
         serde_json::from_value(value.clone()).expect("canonical WorkItem command");
     assert_eq!(
         serde_json::to_value(command).expect("canonical command JSON"),
@@ -96,14 +95,14 @@ fn generated_work_item_create_rejects_missing_or_unknown_payload_fields() {
             .expect("payload object")
             .remove(missing);
         assert!(
-            serde_json::from_value::<DeliveryTaskBreakdownCreatePayload>(payload).is_err(),
+            serde_json::from_value::<WorkItemsCreatePayload>(payload).is_err(),
             "payload accepted missing field {missing}"
         );
     }
 
     let mut payload = value["payload"].clone();
     payload["reviewSetSha256"] = json!(format!("sha256:{}", "a".repeat(64)));
-    assert!(serde_json::from_value::<DeliveryTaskBreakdownCreatePayload>(payload).is_err());
+    assert!(serde_json::from_value::<WorkItemsCreatePayload>(payload).is_err());
 }
 
 #[test]
@@ -115,7 +114,7 @@ fn generated_work_item_create_requires_repository_scope() {
         "workspaceId": "wsp_01J00000000000000000000000"
     });
 
-    assert!(serde_json::from_value::<DeliveryTaskBreakdownCreateCommand>(command.clone()).is_err());
+    assert!(serde_json::from_value::<WorkItemsCreateCommand>(command.clone()).is_err());
     assert!(serde_json::from_value::<CommandRequest>(command).is_err());
 }
 

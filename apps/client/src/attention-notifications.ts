@@ -186,7 +186,7 @@ function expectQuery<Query extends QueryResultResponse['query']>(
   query: Query,
 ): Extract<QueryResultResponse, { readonly query: Query }> {
   if (response.query !== query) throw clientFailure(
-    'The notification monitor received another query result.',
+    '通知监视器收到了其他查询结果。',
   )
   return response as Extract<QueryResultResponse, { readonly query: Query }>
 }
@@ -195,7 +195,7 @@ function cursorAfter(response: PagedResponse, seen: Set<OpaqueCursor>): OpaqueCu
   if (!response.page.hasMore) return null
   const next = response.page.nextCursor
   if (next === null || seen.has(next)) throw clientFailure(
-    'The notification monitor received an invalid continuation cursor.',
+    '通知监视器收到了无效的续页游标。',
   )
   seen.add(next)
   return next
@@ -204,7 +204,7 @@ function cursorAfter(response: PagedResponse, seen: Set<OpaqueCursor>): OpaqueCu
 function itemsOf<T>(response: { readonly result: unknown }, kind: string): readonly T[] {
   const result = response.result
   if (typeof result !== 'object' || result === null) throw clientFailure(
-    'The notification monitor received an unexpected result.',
+    '通知监视器收到了意外结果。',
   )
   const items = (result as { readonly items?: unknown }).items
   if (!Array.isArray(items)) throw clientFailure(`The ${kind} result carried no item list.`)
@@ -306,7 +306,7 @@ export function createAttentionNotificationMonitor(
     target.dataset.wwcBadge = String(total)
     target.setAttribute(
       'aria-label',
-      `Attention · ${String(total)} ${total === 1 ? 'entry' : 'entries'} need you`,
+      `任务看板 · ${String(total)} 项待处理`,
     )
     if (badgeNode === null) {
       badgeNode = target.ownerDocument.createElement('span')
@@ -347,7 +347,7 @@ export function createAttentionNotificationMonitor(
   }
 
   async function load(loadingStatus: 'loading' | 'refreshing'): Promise<void> {
-    if (closed) throw clientFailure('The notification monitor is closed.')
+    if (closed) throw clientFailure('通知监视器已关闭。')
     patch({ status: loadingStatus })
     const approvals: ApprovalProjection[] = []
     const deliveries: DeliveryProjection[] = []
@@ -365,11 +365,11 @@ export function createAttentionNotificationMonitor(
           parameters: { states: ['pending'] },
           page: { cursor, limit: PAGE_SIZE },
         }), QueryName.ApprovalList) as ApprovalListResultResponse
-        approvals.push(...itemsOf<ApprovalProjection>(response, 'Approval list'))
+        approvals.push(...itemsOf<ApprovalProjection>(response, '审批列表'))
         cursor = cursorAfter(response, approvalCursors)
         if (cursor === null) break
       }
-      if (cursor !== null) throw clientFailure('The Approval list exceeded the bounded page limit.')
+      if (cursor !== null) throw clientFailure('审批列表超过了分页上限。')
       let deliveryCursor: OpaqueCursor | null = null
       const deliveryCursors = new Set<OpaqueCursor>()
       for (let index = 0; index < MAX_PAGES; index += 1) {
@@ -382,12 +382,12 @@ export function createAttentionNotificationMonitor(
           parameters: { states: [] },
           page: { cursor: deliveryCursor, limit: PAGE_SIZE },
         }), QueryName.DeliveryList) as DeliveryListResultResponse
-        deliveries.push(...itemsOf<DeliveryProjection>(response, 'Delivery list'))
+        deliveries.push(...itemsOf<DeliveryProjection>(response, '交付列表'))
         deliveryCursor = cursorAfter(response, deliveryCursors)
         if (deliveryCursor === null) break
       }
       if (deliveryCursor !== null) {
-        throw clientFailure('The Delivery list exceeded the bounded page limit.')
+        throw clientFailure('交付列表超过了分页上限。')
       }
     } catch {
       // A failed revalidation never presents stale counts and never notifies.

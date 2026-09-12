@@ -13,7 +13,7 @@ const compiler = spawnSync(
     'exec',
     'tsc',
     '-p',
-    'apps/client/tsconfig.navigation-capability-tests.json',
+    'apps/client/tsconfig.home-dashboard-tests.json',
     '--pretty',
     'false',
     '--incremental',
@@ -27,7 +27,7 @@ assert.equal(
   `Navigation capability module did not compile:\n${compiler.stdout}${compiler.stderr}`,
 )
 
-const cacheRoot = resolve(root, '.cache/navigation-capability-tests')
+const cacheRoot = resolve(root, '.cache/home-dashboard-tests')
 const navigationModule = await import(`${pathToFileURL(resolve(
   cacheRoot,
   'navigation-capability.js',
@@ -103,7 +103,7 @@ test('signed-out and restoring sessions hide every navigation entry', () => {
 
 test('a personal repository-only session keeps every product area available', () => {
   const capabilities = capabilityMap('signed-in', sessionWith([repositoryScope]))
-  for (const surface of ['home', 'chat', 'projects', 'extensions', 'device', 'settings', 'attention']) {
+  for (const surface of ['home', 'chat', 'projects', 'extensions', 'device', 'settings']) {
     assert.equal(capabilities[surface].capability, 'available', surface)
     assert.equal(capabilities[surface].reason, 'authorized-scope', surface)
   }
@@ -120,7 +120,7 @@ test('an enterprise-hierarchy scope projects the enterprise deployment fact', ()
 })
 
 test('known enterprise deployment keeps missing permissions visible as disabled', () => {
-  const capabilities = capabilityMap('signed-in', sessionWith([repositoryScope]), {
+  const capabilities = capabilityMap('signed-in', sessionWith([repositoryScope]), null, {
     deployment: 'enterprise',
     surfaceAccess: { home: 'denied' },
   })
@@ -160,7 +160,7 @@ test('deployment projection distinguishes personal from enterprise sessions', ()
 
 test('a session without any scope hides product areas without crashing', () => {
   const capabilities = capabilityMap('signed-in', sessionWith([]))
-  for (const surface of ['home', 'chat', 'projects', 'extensions', 'device', 'settings', 'attention']) {
+  for (const surface of ['home', 'chat', 'projects', 'extensions', 'device', 'settings']) {
     assert.equal(capabilities[surface].capability, 'hidden', surface)
   }
 })
@@ -186,23 +186,18 @@ test('surfaceCapabilityForHash resolves the exact surface a URL will enter', () 
     session: sessionWith([repositoryScope]),
     error: null,
   }).surface.id, 'chat')
-  // UI-504: an address without a product path, an unknown path, and the retired
-  // /attention route all enter the canonical Home dashboard.
+  // An address without a product path and an unknown path both enter the
+  // canonical Chat surface.
   assert.equal(surfaceCapabilityForHash('', {
     status: 'signed-in',
     session: sessionWith([repositoryScope]),
     error: null,
-  }).surface.id, 'home')
+  }).surface.id, 'chat')
   assert.equal(surfaceCapabilityForHash('#/unknown-route', {
     status: 'signed-in',
     session: sessionWith([repositoryScope]),
     error: null,
-  }).surface.id, 'home')
-  assert.equal(surfaceCapabilityForHash('#/attention', {
-    status: 'signed-in',
-    session: sessionWith([organizationScope, repositoryScope]),
-    error: null,
-  }).surface.id, 'home')
+  }).surface.id, 'chat')
 })
 
 test('projection is a read-only view that never mutates the session', () => {

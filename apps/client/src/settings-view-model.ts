@@ -174,14 +174,14 @@ function normalizedError(error: unknown, signal?: AbortSignal): ControlPlaneClie
   if (signal?.aborted === true) return new ControlPlaneClientError({
     kind: 'cancelled',
     code: 'REQUEST_CANCELLED',
-    message: 'The settings request was cancelled.',
+    message: '设置请求已取消。',
     requestId: null,
     retryable: false,
     cause: error,
   })
   return clientFailure(
     'SETTINGS_VIEW_MODEL_FAILURE',
-    'Settings could not be updated.',
+    '无法更新设置。',
     error,
   )
 }
@@ -199,7 +199,7 @@ function expectQuery<Query extends keyof SettingsQueryResponses>(
 ): SettingsQueryResponses[Query] {
   if (response.query !== query) throw clientFailure(
     'SETTINGS_QUERY_MISMATCH',
-    'The Control Plane returned another settings query result.',
+    '控制平面返回了其他设置查询结果。',
   )
   return response as SettingsQueryResponses[Query]
 }
@@ -211,7 +211,7 @@ function expectCompletedCommand<Command extends keyof SettingsCommandResponses>(
 ): SettingsCommandResponses[Command] | null {
   if (response.requestId !== requestId || response.command !== command) throw clientFailure(
     'SETTINGS_COMMAND_MISMATCH',
-    'The Control Plane returned another settings command result.',
+    '控制平面返回了其他设置命令结果。',
   )
   if (response.outcome === 'accepted') return null
   return response as SettingsCommandResponses[Command]
@@ -234,7 +234,7 @@ function checkedText(value: string, code: string, message: string): string {
 function checkedSecret(value: string): string {
   if (value.length === 0) throw clientFailure(
     'CREDENTIAL_SECRET_REQUIRED',
-    'Choose a local secret before submitting the credential reference.',
+    '提交凭据引用前，请选择本地密钥。',
   )
   return value
 }
@@ -302,21 +302,21 @@ export function createSettingsViewModel(options: SettingsViewModelOptions): Sett
       if (!response.page.hasMore) {
         if (response.page.nextCursor !== null) throw clientFailure(
           'CREDENTIAL_PAGE_INVALID',
-          'The final credential page returned an unexpected cursor.',
+          '凭据列表末页返回了意外的游标。',
         )
         return orderCredentials(items)
       }
       const next: OpaqueCursor | null = response.page.nextCursor
       if (next === null || seenCursors.has(next)) throw clientFailure(
         'CREDENTIAL_CURSOR_INVALID',
-        'The credential list returned an invalid continuation cursor.',
+        '凭据列表返回了无效的续页游标。',
       )
       seenCursors.add(next)
       cursor = next
     }
     throw clientFailure(
       'CREDENTIAL_PAGE_LIMIT_EXCEEDED',
-      'The credential list exceeded the bounded page limit.',
+      '凭据列表超过了分页上限。',
     )
   }
 
@@ -333,7 +333,7 @@ export function createSettingsViewModel(options: SettingsViewModelOptions): Sett
     }, { signal }), QueryName.SettingsGet)
     if (settings.page.hasMore || settings.page.nextCursor !== null) throw clientFailure(
       'SETTINGS_PAGE_INVALID',
-      'The settings query returned an unexpected page cursor.',
+      '设置查询返回了意外的分页游标。',
     )
     return Object.freeze({
       settings: settings.result,
@@ -342,7 +342,7 @@ export function createSettingsViewModel(options: SettingsViewModelOptions): Sett
   }
 
   async function load(replace: boolean, realtimeStatus: SettingsRealtimeStatus): Promise<void> {
-    if (closed) throw clientFailure('SETTINGS_VIEW_MODEL_CLOSED', 'The settings view is closed.')
+    if (closed) throw clientFailure('SETTINGS_VIEW_MODEL_CLOSED', '设置视图已关闭。')
     generation += 1
     const ownGeneration = generation
     abortRequests()
@@ -413,7 +413,7 @@ export function createSettingsViewModel(options: SettingsViewModelOptions): Sett
         accessRevoked(new ControlPlaneClientError({
           kind: 'authentication',
           code: 'AUTHENTICATION_REQUIRED',
-          message: 'Settings event authorization is no longer valid.',
+          message: '设置事件授权已失效。',
           requestId: null,
           retryable: false,
         }))
@@ -440,14 +440,14 @@ export function createSettingsViewModel(options: SettingsViewModelOptions): Sett
     request: (requestId: RequestId) => Parameters<ControlPlaneClient['command']>[0],
     apply: (response: SettingsCommandResponses[Command]) => void,
   ): Promise<void> {
-    if (closed) throw clientFailure('SETTINGS_VIEW_MODEL_CLOSED', 'The settings view is closed.')
+    if (closed) throw clientFailure('SETTINGS_VIEW_MODEL_CLOSED', '设置视图已关闭。')
     if (
       currentState.interaction.status === 'submitting'
       || currentState.interaction.status === 'waiting'
     ) {
       interactionFailure(
         'SETTINGS_DECISION_IN_FLIGHT',
-        'Wait for the current settings change to finish.',
+        '请等待当前设置更改完成。',
         command,
       )
       return
@@ -455,7 +455,7 @@ export function createSettingsViewModel(options: SettingsViewModelOptions): Sett
     if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) {
       interactionFailure(
         'SETTINGS_REVISION_REQUIRED',
-        'Refresh settings before submitting this change.',
+        '请刷新设置后再提交此更改。',
         command,
       )
       return
@@ -474,7 +474,7 @@ export function createSettingsViewModel(options: SettingsViewModelOptions): Sett
       }
       if (completed.previousRevision !== expectedRevision) throw clientFailure(
         'SETTINGS_COMMAND_REVISION_MISMATCH',
-        'The Control Plane returned a result for another settings revision.',
+        '控制平面返回了其他设置修订版的结果。',
       )
       apply(completed)
       patch({ interaction: frozenInteraction('idle'), error: null })
@@ -517,7 +517,7 @@ export function createSettingsViewModel(options: SettingsViewModelOptions): Sett
       if (settings === null) {
         interactionFailure(
           'SETTINGS_SNAPSHOT_REQUIRED',
-          'Refresh settings before saving a model route.',
+          '请刷新设置后再保存模型路由。',
           CommandName.SettingsUpdate,
         )
         return
@@ -529,7 +529,7 @@ export function createSettingsViewModel(options: SettingsViewModelOptions): Sett
       ) {
         interactionFailure(
           'SETTINGS_CONCURRENCY_INVALID',
-          'Worker concurrency must be between 1 and 10000.',
+          '执行并发数必须在 1 到 10000 之间。',
           CommandName.SettingsUpdate,
         )
         return
@@ -542,12 +542,12 @@ export function createSettingsViewModel(options: SettingsViewModelOptions): Sett
           providerId = checkedText(
             input.defaultModelRoute.providerId,
             'SETTINGS_PROVIDER_REQUIRED',
-            'Enter a Provider ID.',
+            '请输入模型服务商 ID。',
           )
           modelId = checkedText(
             input.defaultModelRoute.modelId,
             'SETTINGS_MODEL_REQUIRED',
-            'Enter a Model ID.',
+            '请输入模型 ID。',
           )
         } catch (error) {
           patch({
@@ -569,7 +569,7 @@ export function createSettingsViewModel(options: SettingsViewModelOptions): Sett
         ) {
           interactionFailure(
             'SETTINGS_CREDENTIAL_ROUTE_INVALID',
-            'Choose an available credential reference for this Provider.',
+            '请选择该模型服务商的可用凭据引用。',
             CommandName.SettingsUpdate,
           )
           return
@@ -606,12 +606,12 @@ export function createSettingsViewModel(options: SettingsViewModelOptions): Sett
         displayName = checkedText(
           input.displayName,
           'CREDENTIAL_DISPLAY_NAME_REQUIRED',
-          'Enter a credential display name.',
+          '请输入凭据显示名称。',
         )
         providerId = checkedText(
           input.providerId,
           'CREDENTIAL_PROVIDER_REQUIRED',
-          'Enter the credential Provider ID.',
+          '请输入凭据的模型服务商 ID。',
         )
         vaultLocator = checkedSecret(input.vaultLocator)
       } catch (error) {
@@ -642,7 +642,7 @@ export function createSettingsViewModel(options: SettingsViewModelOptions): Sett
         response => {
           if (response.result.id !== input.credentialReferenceId) throw clientFailure(
             'CREDENTIAL_CREATE_MISMATCH',
-            'The Control Plane returned another credential reference.',
+            '控制平面返回了其他凭据引用。',
           )
           mergeCredential(response.result)
         },
@@ -653,7 +653,7 @@ export function createSettingsViewModel(options: SettingsViewModelOptions): Sett
       if (reference === undefined) {
         interactionFailure(
           'CREDENTIAL_REFERENCE_STALE',
-          'Refresh settings and select a current credential reference.',
+          '请刷新设置并选择当前凭据引用。',
           CommandName.CredentialReferenceRotate,
         )
         return
@@ -689,7 +689,7 @@ export function createSettingsViewModel(options: SettingsViewModelOptions): Sett
       if (reference === undefined) {
         interactionFailure(
           'CREDENTIAL_REFERENCE_STALE',
-          'Refresh settings and select a current credential reference.',
+          '请刷新设置并选择当前凭据引用。',
           CommandName.CredentialReferenceRevoke,
         )
         return
@@ -716,7 +716,7 @@ export function createSettingsViewModel(options: SettingsViewModelOptions): Sett
       const error = new ControlPlaneClientError({
         kind: 'cancelled',
         code: 'REQUEST_CANCELLED',
-        message: 'The settings request was cancelled.',
+        message: '设置请求已取消。',
         requestId: null,
         retryable: false,
       })
@@ -729,10 +729,10 @@ export function createSettingsViewModel(options: SettingsViewModelOptions): Sett
       })
     },
     reconnect() {
-      if (closed) throw clientFailure('SETTINGS_VIEW_MODEL_CLOSED', 'The settings view is closed.')
+      if (closed) throw clientFailure('SETTINGS_VIEW_MODEL_CLOSED', '设置视图已关闭。')
       if (realtime === null) throw clientFailure(
         'SETTINGS_SUBSCRIPTION_INACTIVE',
-        'Settings events are not active.',
+        '设置事件未启用。',
       )
       patch({ realtime: 'reconnecting', error: null })
       realtime.reconnect()

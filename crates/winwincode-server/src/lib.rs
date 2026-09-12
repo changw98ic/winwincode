@@ -42,7 +42,7 @@ pub use client_connections::{
 };
 pub use client_exchange::{
     ClientExchangeApplication, ClientExchangeConfig, ClientExchangeError, ClientExchangeErrorKind,
-    ClientExchangePort,
+    ClientExchangePort, WorkerCredentialDelivery,
 };
 pub use client_occupancy::{
     ClientOccupancyApplication, ClientOccupancyConfig, ClientOccupancyError,
@@ -77,15 +77,17 @@ pub use provider_onboarding::{
     RotateCredentialRequest, TestConnectionRequest,
 };
 pub use remote_worker_transport::{
-    FileRemoteWorkerAuthenticator, ProductionRemoteWorkerExchange, RemoteWorkerExchangePort,
-    RemoteWorkerTransportError,
+    CompositeRemoteWorkerAuthenticator, FileRemoteWorkerAuthenticator,
+    ProductionRemoteWorkerExchange, RemoteWorkerExchangePort, RemoteWorkerTransportError,
+    WorkerSessionRemoteAuthenticator,
 };
 pub use runtime::{
-    HealthyRuntimeHealth, LocalRuntimeScheduler, LocalRuntimeSupervisor,
-    RepositoryRuntimeScheduler, RuntimeControlOutbound, RuntimeHealthHandle, RuntimeHealthPort,
+    HealthyRuntimeHealth, RepositoryRuntimeScheduler, RuntimeControlOutbound, RuntimeHealthPort,
     RuntimeSupervisorError, RuntimeSupervisorErrorKind, ServerExecutionPortCore,
     ServerExecutionPortError, ServerExecutionPortErrorKind,
 };
+#[cfg(feature = "local-worker")]
+pub use runtime::{LocalRuntimeScheduler, LocalRuntimeSupervisor, RuntimeHealthHandle};
 pub use server::{RunningServer, ServerError, start_server, start_server_with_remote_worker};
 pub use transport::{
     ApiError, AuthError, AuthenticatedPrincipal, ControlPlaneApiPort, EventSubscription,

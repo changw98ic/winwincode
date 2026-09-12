@@ -22,7 +22,7 @@
     "lint": "pnpm lint:source && pnpm typecheck && pnpm lint:rust",
     "typecheck": "pnpm contracts:check && tsc -p tsconfig.check.json --pretty false",
     "build:ts": "pnpm contracts:check && tsc -b tsconfig.json --pretty false && pnpm --filter @winwincode/client build",
-    "build:rust": "node scripts/build-products.mjs",
+    "build:rust": "node scripts/build-community.mjs",
     "build": "pnpm build:ts && pnpm build:rust",
     "start": "cargo run -p winwincode-server --bin winwincode-server --locked",
     "version:set": "node scripts/set-product-version.mjs",

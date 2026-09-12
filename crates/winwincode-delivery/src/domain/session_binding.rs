@@ -4,9 +4,9 @@ use serde::{Deserialize, Serialize};
 #[cfg(any(test, feature = "test-support"))]
 use sha2::{Digest, Sha256};
 use winwincode_domain::{
-    CodexThreadId, DeliveryId, ExecutionJobId, ExecutionMessageId, FencingToken, LeaseId,
-    ProductSessionId, Revision, WorkContractId, WorkItemId, WorkRunId, WorkerId, WorkerInstanceId,
-    WorkerSessionId,
+    AgentIdentityId, CodexThreadId, DeliveryId, ExecutionJobId, ExecutionMessageId, FencingToken,
+    LeaseId, ProductSessionId, RepositoryId, Revision, WorkContractId, WorkItemId, WorkRunId,
+    WorkerId, WorkerInstanceId, WorkerSessionId, WorkspaceRevision,
 };
 
 use super::{
@@ -23,14 +23,38 @@ use super::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SessionBindingSourceKind {
-    /// The Control Plane created the pending binding with delivery.advance.
-    DeliveryAdvance,
+    /// The Control Plane created the pending binding with workrun.start.
+    WorkRunStart,
     /// The Controller appended a `WorkRun` using a verified dispatch proof.
     WorkRunDispatch,
     /// A Worker reported the binding through the typed `ExecutionPort`.
     ExecutionPort,
-    /// A one-time migration converted a legacy Delivery snapshot.
-    LegacyMigration,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SessionAgentIdentity {
+    pub id: AgentIdentityId,
+    pub worker_id: WorkerId,
+    pub name: String,
+    pub role: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SessionWorkspace {
+    pub repository_id: RepositoryId,
+    pub revision: WorkspaceRevision,
+    pub write_mode: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SessionRuntimeContext {
+    pub agent_identity: SessionAgentIdentity,
+    pub provider: String,
+    pub model: String,
+    pub workspace: SessionWorkspace,
 }
 
 /// Immutable provenance for the source that established the binding facts.
@@ -58,10 +82,10 @@ impl SessionBindingSourceProvenance {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn pending_delivery_advance() -> Self {
+    pub(crate) fn pending_workrun_start() -> Self {
         Self {
-            kind: SessionBindingSourceKind::DeliveryAdvance,
-            reference: String::from("delivery.advance"),
+            kind: SessionBindingSourceKind::WorkRunStart,
+            reference: String::from("workrun.start"),
         }
     }
 
@@ -81,9 +105,9 @@ impl SessionBindingSourceProvenance {
 
     #[cfg(any(test, feature = "test-support"))]
     #[must_use]
-    pub fn delivery_advance(reference: impl Into<String>) -> Self {
+    pub fn workrun_start(reference: impl Into<String>) -> Self {
         Self {
-            kind: SessionBindingSourceKind::DeliveryAdvance,
+            kind: SessionBindingSourceKind::WorkRunStart,
             reference: reference.into(),
         }
     }
@@ -92,15 +116,6 @@ impl SessionBindingSourceProvenance {
     #[must_use]
     pub fn execution_port(message_id: ExecutionMessageId) -> Self {
         Self::from_execution_port(message_id)
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    #[must_use]
-    pub fn legacy_migration(reference: impl Into<String>) -> Self {
-        Self {
-            kind: SessionBindingSourceKind::LegacyMigration,
-            reference: reference.into(),
-        }
     }
 
     fn validate(&self, path: &str) -> Result<(), DeliveryValidationError> {
@@ -127,6 +142,9 @@ pub struct SessionBinding {
     /// verified `WorkRun` dispatch is appended.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_profile: Option<String>,
+    /// Secret-free immutable Agent, Provider, and detached Workspace facts.
+    /// Pending bindings receive this only with the accepted `CodexThread`.
+    pub runtime_context: Option<SessionRuntimeContext>,
     pub worker_session_id: Option<WorkerSessionId>,
     #[serde(deserialize_with = "super::deserialize_required_option")]
     pub codex_thread_id: Option<CodexThreadId>,
@@ -176,7 +194,8 @@ impl SessionBinding {
         self.work_run_id = WorkRunId(canonical_id("wrn_"));
         self.worker_session_id = Some(WorkerSessionId(canonical_id("wsn_")));
         self.codex_thread_id = Some(CodexThreadId(canonical_id("cdx_")));
-        self.worker_id = Some(WorkerId(canonical_id("wrk_")));
+        let worker_id = WorkerId(canonical_id("wrk_"));
+        self.worker_id = Some(worker_id.clone());
         self.worker_instance_id = Some(WorkerInstanceId(canonical_id("wki_")));
         self.lease_id = Some(LeaseId(canonical_id("lse_")));
         self.attempt = attempt;
@@ -184,6 +203,25 @@ impl SessionBinding {
         self.source_provenance = SessionBindingSourceProvenance::from_execution_port(
             ExecutionMessageId(canonical_id("msg_")),
         );
+        let role = self
+            .execution_profile
+            .get_or_insert_with(|| "executor".to_owned())
+            .clone();
+        self.runtime_context = Some(SessionRuntimeContext {
+            agent_identity: SessionAgentIdentity {
+                id: AgentIdentityId(canonical_id("agt_")),
+                worker_id,
+                name: role.clone(),
+                role,
+            },
+            provider: "fixture-provider".to_owned(),
+            model: "fixture-model".to_owned(),
+            workspace: SessionWorkspace {
+                repository_id: RepositoryId(canonical_id("rep_")),
+                revision: WorkspaceRevision(format!("git-tree:{digest:x}")),
+                write_mode: "candidate".to_owned(),
+            },
+        });
         self
     }
 }
@@ -244,9 +282,72 @@ pub(crate) fn validate(
                 "CodexThread requires an accepted WorkerSession",
             ));
         }
+        let context = binding.runtime_context.as_ref().ok_or_else(|| {
+            validation_error(
+                DeliveryValidationErrorCode::RelationshipMismatch,
+                format!("{path}.runtimeContext"),
+                "CodexThread requires its immutable runtime context",
+            )
+        })?;
+        validate_runtime_context(binding, context, path)?;
+    } else if binding.runtime_context.is_some() {
+        return Err(validation_error(
+            DeliveryValidationErrorCode::RelationshipMismatch,
+            format!("{path}.runtimeContext"),
+            "runtime context requires an accepted CodexThread",
+        ));
     }
     validate_execution_authority(binding, path)?;
     safe_non_negative(binding.bound_at_millis, &format!("{path}.boundAtMillis"))
+}
+
+fn validate_runtime_context(
+    binding: &SessionBinding,
+    context: &SessionRuntimeContext,
+    path: &str,
+) -> Result<(), DeliveryValidationError> {
+    portable_identifier(
+        &context.agent_identity.id.0,
+        &format!("{path}.runtimeContext.agentIdentity.id"),
+    )?;
+    if !context.agent_identity.id.0.starts_with("agt_")
+        || binding.worker_id.as_ref() != Some(&context.agent_identity.worker_id)
+        || binding.execution_profile.as_deref() != Some(context.agent_identity.role.as_str())
+    {
+        return Err(validation_error(
+            DeliveryValidationErrorCode::RelationshipMismatch,
+            format!("{path}.runtimeContext.agentIdentity"),
+            "Agent identity must match the accepted Worker and execution profile",
+        ));
+    }
+    bounded_text(
+        &context.agent_identity.name,
+        &format!("{path}.runtimeContext.agentIdentity.name"),
+        200,
+    )?;
+    bounded_text(
+        &context.provider,
+        &format!("{path}.runtimeContext.provider"),
+        200,
+    )?;
+    bounded_text(&context.model, &format!("{path}.runtimeContext.model"), 200)?;
+    portable_identifier(
+        &context.workspace.repository_id.0,
+        &format!("{path}.runtimeContext.workspace.repositoryId"),
+    )?;
+    if !context.workspace.revision.0.starts_with("git-tree:")
+        || !matches!(
+            context.workspace.write_mode.as_str(),
+            "read-only" | "candidate"
+        )
+    {
+        return Err(validation_error(
+            DeliveryValidationErrorCode::InvalidValue,
+            format!("{path}.runtimeContext.workspace"),
+            "Workspace revision or write mode is invalid",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_execution_authority(
@@ -314,9 +415,7 @@ fn validate_execution_authority(
         (true, SessionBindingSourceKind::WorkRunDispatch) if binding.codex_thread_id.is_none() => {}
         (
             false,
-            SessionBindingSourceKind::DeliveryAdvance
-            | SessionBindingSourceKind::WorkRunDispatch
-            | SessionBindingSourceKind::LegacyMigration,
+            SessionBindingSourceKind::WorkRunStart | SessionBindingSourceKind::WorkRunDispatch,
         )
         | (true, SessionBindingSourceKind::ExecutionPort) => {}
         (false, SessionBindingSourceKind::ExecutionPort) => {
@@ -328,9 +427,7 @@ fn validate_execution_authority(
         }
         (
             true,
-            SessionBindingSourceKind::DeliveryAdvance
-            | SessionBindingSourceKind::WorkRunDispatch
-            | SessionBindingSourceKind::LegacyMigration,
+            SessionBindingSourceKind::WorkRunStart | SessionBindingSourceKind::WorkRunDispatch,
         ) => {
             return Err(validation_error(
                 DeliveryValidationErrorCode::RelationshipMismatch,
@@ -449,7 +546,7 @@ mod tests {
     }
 
     #[test]
-    fn session_binding_matches_delivery_stage_run_and_task() {
+    fn session_binding_matches_delivery_workrun_and_item() {
         let mut fixture = test_fixture();
         fixture.session_bindings[0].work_item_id = WorkItemId("foreign-item".into());
         assert!(Delivery::try_from_snapshot(fixture).is_err());
@@ -501,10 +598,10 @@ mod tests {
     }
 
     #[test]
-    fn complete_binding_cannot_claim_delivery_advance_provenance() {
+    fn complete_binding_cannot_claim_workrun_start_provenance() {
         let mut fixture = test_fixture();
         fixture.session_bindings[0].source_provenance =
-            SessionBindingSourceProvenance::delivery_advance("delivery.advance");
+            SessionBindingSourceProvenance::workrun_start("workrun.start");
 
         let error = Delivery::try_from_snapshot(fixture)
             .expect_err("complete binding must use typed execution provenance");
@@ -515,12 +612,12 @@ mod tests {
     }
 
     #[test]
-    fn binding_attempt_must_match_its_stage_run() {
+    fn binding_attempt_must_match_its_workrun() {
         let mut fixture = test_fixture();
         fixture.session_bindings[0].attempt = 2;
 
         let error = Delivery::try_from_snapshot(fixture)
-            .expect_err("a binding from another StageRun attempt must be rejected");
+            .expect_err("a binding from another WorkRun attempt must be rejected");
 
         assert_eq!(
             error.code(),
@@ -531,9 +628,6 @@ mod tests {
     #[test]
     fn fenced_authority_must_be_unique_across_bindings() {
         let mut fixture = test_fixture();
-        let mut run = fixture.stage_runs[0].clone();
-        run.id = crate::domain::StageRunId("stage-verification-2".into());
-        fixture.stage_runs.push(run.clone());
         let mut binding = fixture.session_bindings[0].clone();
         binding.id = crate::domain::SessionBindingId("binding-verifier-2".into());
         binding.work_run_id = fixture.session_bindings[0].work_run_id.clone();

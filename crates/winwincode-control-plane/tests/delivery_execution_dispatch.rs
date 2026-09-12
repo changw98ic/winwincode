@@ -4,22 +4,19 @@ use serde_json::Value;
 use winwincode_control_plane::delivery_execution::{
     DeliveryExecutionCommitReceipt, DeliveryExecutionConfig, DeliveryExecutionPortError,
     DeliveryExecutionTransaction, ExecutionJobDispatcher, PendingDeliveryExecution,
-    acknowledge_job_cancel, commit_and_dispatch, prepare_workrun_advance,
+    acknowledge_job_cancel, commit_and_dispatch, prepare_workrun_start,
 };
 use winwincode_delivery::{
-    application::stage::{
-        ExecutionIntent, NewStageIdentities, StageAdvanceEffect, StageAdvanceResult,
+    application::workrun_execution::{
+        ExecutionIntent, NewWorkRunIdentities, WorkRunStartEffect, WorkRunStartResult,
         request_cancel, test_support::active_lease_identity,
     },
-    domain::{
-        DELIVERY_SCHEMA_VERSION, Delivery, DeliveryStatus, DeliveryTask, DeliveryTaskStatus,
-        SessionBindingId,
-    },
+    domain::{Delivery, DeliveryStatus},
 };
 use winwincode_domain::{
-    AttentionItemId, DeliveryId, DeliveryTaskId, ExecutionJobId, ExecutionMessageId, Instant,
-    ProductSessionId, RepositoryId, RequestId, Revision, SchemaVersion, SessionIdentity,
-    Sha256Digest, StageRunId, WorkContractId, WorkItemId, WorkRunId,
+    DeliveryId, ExecutionJobId, ExecutionMessageId, Instant, ProductSessionId, RepositoryId,
+    RequestId, Revision, SchemaVersion, SessionIdentity, Sha256Digest, WorkContractId, WorkItemId,
+    WorkRunId,
 };
 use winwincode_execution_port::generated::{
     ExecutionLeaseStamp, ExecutionLimits, ExecutionScope, ExecutionWorkspace, JobCancelAckMessage,
@@ -30,7 +27,7 @@ fn canonical_id(prefix: &str, value: u64) -> String {
     format!("{prefix}_{value:026}")
 }
 
-fn workrun_dispatch(seed: u64, with_task: bool) -> StageAdvanceResult {
+fn workrun_dispatch(seed: u64) -> WorkRunStartResult {
     let mut snapshot = Delivery::decode_json(include_bytes!(
         "../../winwincode-delivery/tests/fixtures/delivery-main.json"
     ))
@@ -51,26 +48,7 @@ fn workrun_dispatch(seed: u64, with_task: bool) -> StageAdvanceResult {
     snapshot.id = delivery_id.clone();
     snapshot.spec.delivery_id = delivery_id.clone();
     snapshot.revision = 1;
-    snapshot.status = if with_task {
-        DeliveryStatus::Executing
-    } else {
-        DeliveryStatus::Draft
-    };
-    snapshot.tasks.clear();
-    if with_task {
-        snapshot.tasks.push(DeliveryTask {
-            schema_version: DELIVERY_SCHEMA_VERSION,
-            id: DeliveryTaskId(canonical_id("dtk", seed)),
-            delivery_id,
-            title: "Implement the approved task".into(),
-            goal: "Implement the approved candidate change.".into(),
-            acceptance_criterion_ids: vec![snapshot.spec.acceptance_criteria[0].id.clone()],
-            blocked_by_task_ids: Vec::new(),
-            owner: None,
-            status: DeliveryTaskStatus::Pending,
-        });
-    }
-    snapshot.stage_runs.clear();
+    snapshot.status = DeliveryStatus::Ready;
     snapshot.session_bindings.clear();
     snapshot.attention_items.clear();
     snapshot.evidence.clear();
@@ -82,20 +60,16 @@ fn workrun_dispatch(seed: u64, with_task: bool) -> StageAdvanceResult {
         .work_run_aggregate
         .start_next()
         .expect("ready WorkItem");
-    StageAdvanceResult::canonical_workrun_dispatch(
+    WorkRunStartResult::canonical_workrun_dispatch(
         &delivery,
         None,
-        NewStageIdentities {
-            stage_run_id: StageRunId(canonical_id("run", seed)),
+        NewWorkRunIdentities {
             work_contract_id,
             work_contract_revision: Revision(1),
             work_item_id: selected.work_item.id.clone(),
             work_item_revision: selected.work_item.revision.clone(),
             work_run_id: WorkRunId(canonical_id("wrn", seed)),
             execution_job_id: ExecutionJobId(canonical_id("job", seed)),
-            session_binding_id: SessionBindingId::new(format!("binding-{seed}"))
-                .expect("binding id"),
-            attention_item_id: AttentionItemId(canonical_id("att", seed)),
         },
         ProductSessionId(canonical_id("psn", seed)),
         "executor".into(),
@@ -124,14 +98,14 @@ fn execution_config(seed: u64) -> DeliveryExecutionConfig {
     }
 }
 
-fn pending_execution(seed: u64, with_task: bool) -> PendingDeliveryExecution {
+fn pending_execution(seed: u64) -> PendingDeliveryExecution {
     let config = execution_config(seed);
     let request_id = RequestId(canonical_id("req", seed));
-    let transition = workrun_dispatch(seed, with_task);
-    let StageAdvanceEffect::Dispatch(intent) = &transition.effect else {
+    let transition = workrun_dispatch(seed);
+    let WorkRunStartEffect::Dispatch(intent) = &transition.effect else {
         panic!("stage advance must create a dispatch intent");
     };
-    let job = prepare_workrun_advance(
+    let job = prepare_workrun_start(
         &request_id,
         &transition.delivery.snapshot().work_run_aggregate,
         &transition.delivery.snapshot().spec,
@@ -151,8 +125,8 @@ fn pending_execution(seed: u64, with_task: bool) -> PendingDeliveryExecution {
     PendingDeliveryExecution::from_workrun(request_id, transition, job)
 }
 
-fn dispatch_intent_mut(result: &mut StageAdvanceResult) -> &mut ExecutionIntent {
-    let StageAdvanceEffect::Dispatch(intent) = &mut result.effect else {
+fn dispatch_intent_mut(result: &mut WorkRunStartResult) -> &mut ExecutionIntent {
+    let WorkRunStartEffect::Dispatch(intent) = &mut result.effect else {
         panic!("test advance must create a dispatch intent");
     };
     intent
@@ -161,15 +135,13 @@ fn dispatch_intent_mut(result: &mut StageAdvanceResult) -> &mut ExecutionIntent 
 fn assert_prepare_rejected(
     name: &str,
     request_id: &RequestId,
-    result: &StageAdvanceResult,
+    result: &WorkRunStartResult,
     config: DeliveryExecutionConfig,
 ) {
-    let (StageAdvanceEffect::Dispatch(intent) | StageAdvanceEffect::Resume(intent)) =
-        &result.effect
-    else {
+    let WorkRunStartEffect::Dispatch(intent) = &result.effect else {
         panic!("malformed fixture must carry execution intent");
     };
-    let error = prepare_workrun_advance(
+    let error = prepare_workrun_start(
         request_id,
         &result.delivery.snapshot().work_run_aggregate,
         &result.delivery.snapshot().spec,
@@ -244,8 +216,8 @@ impl ExecutionJobDispatcher for RecordingDispatcher {
 }
 
 #[test]
-fn delivery_advance_dispatches_one_execution_job_after_commit() {
-    let pending = pending_execution(1, false);
+fn workrun_start_dispatches_one_execution_job_after_commit() {
+    let pending = pending_execution(1);
     let trace = Arc::new(Mutex::new(Vec::new()));
     let mut transaction = RecordingTransaction {
         trace: Arc::clone(&trace),
@@ -272,7 +244,7 @@ fn delivery_advance_dispatches_one_execution_job_after_commit() {
 
 #[test]
 fn failed_outbox_ack_keeps_the_dispatched_job_durably_pending() {
-    let pending = pending_execution(12, false);
+    let pending = pending_execution(12);
     let trace = Arc::new(Mutex::new(Vec::new()));
     let mut transaction = RecordingTransaction {
         trace: Arc::clone(&trace),
@@ -304,8 +276,8 @@ fn failed_outbox_ack_keeps_the_dispatched_job_durably_pending() {
 }
 
 #[test]
-fn replayed_delivery_advance_does_not_dispatch_a_second_execution_job() {
-    let pending = pending_execution(2, false);
+fn replayed_workrun_start_does_not_dispatch_a_second_execution_job() {
+    let pending = pending_execution(2);
     let trace = Arc::new(Mutex::new(Vec::new()));
     let mut transaction = RecordingTransaction {
         trace: Arc::clone(&trace),
@@ -355,8 +327,8 @@ impl DeliveryExecutionTransaction for DurableReceiptTransaction {
 
 #[test]
 fn new_commit_rejects_a_foreign_durable_job_without_dispatch() {
-    let pending = pending_execution(8, false);
-    let durable_job = pending_execution(9, false).job().clone();
+    let pending = pending_execution(8);
+    let durable_job = pending_execution(9).job().clone();
     let trace = Arc::new(Mutex::new(Vec::new()));
     let mut transaction = DurableReceiptTransaction {
         receipt: Some(DeliveryExecutionCommitReceipt {
@@ -385,7 +357,7 @@ fn new_commit_rejects_a_foreign_durable_job_without_dispatch() {
 
 #[test]
 fn corrupted_durable_receipt_job_stays_committed_and_is_not_dispatched() {
-    let pending = pending_execution(10, false);
+    let pending = pending_execution(10);
     let mut corrupted_job = pending.job().clone();
     corrupted_job.workspace.checkout_revision.clear();
     let trace = Arc::new(Mutex::new(Vec::new()));
@@ -416,7 +388,7 @@ fn corrupted_durable_receipt_job_stays_committed_and_is_not_dispatched() {
 
 #[test]
 fn workrun_scope_carries_exact_contract_item_and_run_identity() {
-    let pending = pending_execution(3, true);
+    let pending = pending_execution(3);
     let ExecutionScope::WorkRunExecutionScope(WorkRunExecutionScope {
         kind,
         attempt,
@@ -454,10 +426,9 @@ fn job_cancel_ack_does_not_settle_workrun_before_terminal_outcome() {
     ))
     .expect("accepted execution fixture")
     .into_snapshot();
-    snapshot.stage_runs.clear();
     snapshot.evidence.clear();
     snapshot.verdict = None;
-    snapshot.status = DeliveryStatus::Executing;
+    snapshot.status = DeliveryStatus::Ready;
     snapshot.work_run_aggregate.runs[0].state = winwincode_domain::WorkRunState::Running;
     snapshot.work_run_aggregate.items[0].state = winwincode_domain::WorkItemState::InProgress;
     let run_id = snapshot.work_run_aggregate.runs[0].id.clone();
@@ -535,12 +506,11 @@ fn job_cancel_ack_does_not_settle_workrun_before_terminal_outcome() {
         after_ack.snapshot().work_run_aggregate.items[0].state,
         winwincode_domain::WorkItemState::InProgress
     );
-    assert!(after_ack.snapshot().stage_runs.is_empty());
 }
 
 #[test]
 fn delivery_dispatch_does_not_persist_codex_plan_agent_or_tool_state() {
-    let pending = pending_execution(5, true);
+    let pending = pending_execution(5);
     let serialized = serde_json::to_value(pending.job()).expect("serialize generated job");
     let object = serialized.as_object().expect("ExecutionJob object");
 
@@ -586,7 +556,7 @@ fn delivery_dispatch_does_not_persist_codex_plan_agent_or_tool_state() {
 
 #[test]
 fn prepared_execution_job_serializes_as_schema_valid_fixture() {
-    let pending = pending_execution(6, true);
+    let pending = pending_execution(6);
     let actual = serde_json::to_value(pending.job()).expect("serialize generated job");
     let expected: Value = serde_json::from_slice(include_bytes!(
         "fixtures/prepared-delivery-execution-job.json"
@@ -607,7 +577,7 @@ fn malformed_execution_job_config_fails_before_pending_publication() {
     assert_prepare_rejected(
         "requestId",
         &RequestId("request-legacy".into()),
-        &workrun_dispatch(seed, false),
+        &workrun_dispatch(seed),
         execution_config(seed),
     );
     let mut config = execution_config(seed);
@@ -615,7 +585,7 @@ fn malformed_execution_job_config_fails_before_pending_publication() {
     assert_prepare_rejected(
         "payloadDigest",
         &request_id,
-        &workrun_dispatch(seed, false),
+        &workrun_dispatch(seed),
         config,
     );
     assert_invalid_config_values(seed, &request_id);
@@ -643,7 +613,7 @@ fn assert_invalid_config_values(seed: u64, request_id: &RequestId) {
     for (name, mutate) in config_mutations {
         let mut config = execution_config(seed);
         mutate(&mut config);
-        assert_prepare_rejected(name, request_id, &workrun_dispatch(seed, false), config);
+        assert_prepare_rejected(name, request_id, &workrun_dispatch(seed), config);
     }
 
     let mut long_checkout = execution_config(seed);
@@ -651,7 +621,7 @@ fn assert_invalid_config_values(seed: u64, request_id: &RequestId) {
     assert_prepare_rejected(
         "checkoutRevision maxLength",
         request_id,
-        &workrun_dispatch(seed, false),
+        &workrun_dispatch(seed),
         long_checkout,
     );
     let mut zero_limits = execution_config(seed);
@@ -660,7 +630,7 @@ fn assert_invalid_config_values(seed: u64, request_id: &RequestId) {
     assert_prepare_rejected(
         "limit minima",
         request_id,
-        &workrun_dispatch(seed, false),
+        &workrun_dispatch(seed),
         zero_limits,
     );
 }
@@ -684,18 +654,18 @@ fn assert_invalid_intent_values(seed: u64, request_id: &RequestId) {
         ("goal", |intent| intent.goal.clear()),
     ];
     for (name, mutate) in intent_mutations {
-        let mut result = workrun_dispatch(seed, false);
+        let mut result = workrun_dispatch(seed);
         mutate(dispatch_intent_mut(&mut result));
         assert_prepare_rejected(name, request_id, &result, execution_config(seed));
     }
 
-    let mut task_result = workrun_dispatch(seed, true);
+    let mut task_result = workrun_dispatch(seed);
     dispatch_intent_mut(&mut task_result).work_item_id = WorkItemId("task-legacy".into());
     let mut writer_config = execution_config(seed);
     writer_config.workspace.write_mode =
         winwincode_execution_port::generated::ExecutionWorkspaceWriteMode::Candidate;
-    assert_prepare_rejected("deliveryTaskId", request_id, &task_result, writer_config);
-    let mut long_profile = workrun_dispatch(seed, false);
+    assert_prepare_rejected("workItemId", request_id, &task_result, writer_config);
+    let mut long_profile = workrun_dispatch(seed);
     dispatch_intent_mut(&mut long_profile).role = "r".repeat(101);
     assert_prepare_rejected(
         "executionProfile maxLength",
@@ -703,7 +673,7 @@ fn assert_invalid_intent_values(seed: u64, request_id: &RequestId) {
         &long_profile,
         execution_config(seed),
     );
-    let mut long_goal = workrun_dispatch(seed, false);
+    let mut long_goal = workrun_dispatch(seed);
     dispatch_intent_mut(&mut long_goal).goal = "g".repeat(20_001);
     assert_prepare_rejected(
         "goal maxLength",

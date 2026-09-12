@@ -25,7 +25,7 @@ test('accepted E00 designs retain exact source evidence and implementation bound
 test('alpha cutover keeps one WorkRun path without a legacy migration subsystem', () => {
   assert.equal(contract.cardinality['WorkRun.executionAttempt'], 'exactly 1')
   assert.equal(contract.cardinality['WorkRun.acceptedCandidate'], '0..1')
-  assert.equal(contract.cardinality['StageRun.nullTask'], 'historical-only; 0 executable WorkItem')
+  assert.doesNotMatch(JSON.stringify(contract), /StageRun|stageRun|stage_run/)
   assert.match(adr, /不发布旧 `StageRun` 到 `WorkRun` 的转换程序/)
   for (const file of [
     'crates/winwincode-delivery/src/workrun_migration.rs',

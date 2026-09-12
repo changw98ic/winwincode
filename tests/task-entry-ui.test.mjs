@@ -43,7 +43,10 @@ const taskRunPageModule = await cachedModule('task-run-page.js')
 const {
   controlPlaneTaskModelRouteOptions,
   createControlPlaneRunIdentityFake,
+  createControlPlaneRunIdentityPort,
   createControlPlaneTaskFake,
+  createControlPlaneTaskPort,
+  createControlPlaneWorkerSessionPort,
 } = facade
 const { createClientsViewModel } = clientsViewModelModule
 const { createRepositoriesViewModel } = repositoriesViewModelModule
@@ -55,6 +58,7 @@ const {
 const { mountTaskEntryPage } = taskEntryPageModule
 const {
   createTaskRunViewModel,
+  runWorkGraphStateTone,
   runWorkerSessionStateText,
   taskRunCommitText,
 } = taskRunViewModelModule
@@ -541,10 +545,10 @@ test('the form page renders the occupied-Client gate and disables the submit', a
   await model.start()
 
   const section = byClass(rootElement, 'wwc-task-entry')
-  assert.equal(section.getAttribute('aria-label'), 'New task')
+  assert.equal(section.getAttribute('aria-label'), '新任务')
   const notice = byClass(rootElement, 'wwc-task-entry-occupied-notice')
   assert.equal(notice.hidden, false)
-  assert.match(notice.textContent, /No Client is occupied by you/u)
+  assert.match(notice.textContent, /没有占用执行设备/u)
   assert.equal(byClass(rootElement, 'wwc-task-entry-submit').disabled, true)
 
   model.close()
@@ -617,7 +621,7 @@ test('a form failure reaches the alert line and marks its field', async () => {
 
   const failure = byClass(rootElement, 'wwc-task-entry-error')
   assert.equal(failure.getAttribute('role'), 'alert')
-  assert.match(failure.textContent, /base branch/u)
+  assert.match(failure.textContent, /基准分支/u)
   const baseInput = byClass(rootElement, 'wwc-task-entry-base')
   assert.equal(baseInput.getAttribute('aria-invalid'), 'true')
 
@@ -628,6 +632,325 @@ test('a form failure reaches the alert line and marks its field', async () => {
 function identityFake() {
   return createControlPlaneRunIdentityFake({ now: FIXED_NOW })
 }
+
+function detailedIdentity() {
+  const base = identityFake()
+  return {
+    async read(anchor) {
+      const projection = await base.read(anchor)
+      const contractId = 'wct_00000000000000000000000042'
+      const criterionId = 'crt_00000000000000000000000042'
+      const dependencyId = 'wit_00000000000000000000000041'
+      return {
+        ...projection,
+        contract: {
+          schemaVersion: 'winwincode/v1',
+          id: contractId,
+          revision: 2,
+          scope: ['登录回跳'],
+          objective: '修复登录后的回跳逻辑。',
+          constraints: [],
+          protectedScope: [],
+          requiredHumanAuthority: 'approval',
+          criteria: [{
+            id: criterionId,
+            description: '成功登录返回原页面。',
+            required: true,
+            requiredEvidenceClass: 'machine',
+            verificationMethod: 'node --test',
+          }],
+          createdAt: FIXED_NOW(),
+        },
+        item: {
+          schemaVersion: 'winwincode/v1',
+          id: anchor.taskId,
+          revision: 1,
+          title: '修复登录回跳',
+          goal: '登录成功后返回原页面。',
+          state: 'running',
+          criterionIds: [criterionId],
+          dependsOn: [dependencyId],
+          workContractId: contractId,
+          workContractRevision: 2,
+        },
+        graphItem: {
+          workItemId: anchor.taskId,
+          state: 'blocked',
+          dependencies: [dependencyId],
+          blockers: [dependencyId],
+        },
+        owner: 'chengwen',
+        evidence: [{
+          id: 'evd_00000000000000000000000042',
+          deliverySpecId: 'spec-login',
+          deliverySpecRevision: 1,
+          workRunId: projection.workRun.id,
+          sessionBindingId: 'binding-1',
+          candidateRef: `git-candidate:sha256:${'c'.repeat(64)}`,
+          type: 'command',
+          sourceRef: 'cmd:node --test',
+          createdAt: FIXED_NOW(),
+        }],
+      }
+    },
+  }
+}
+
+test('the production run identity port joins the canonical WorkItem detail cut', async () => {
+  const deliveryId = 'dlv_00000000000000000000000042'
+  const taskId = 'wit_00000000000000000000000042'
+  const contractId = 'wct_00000000000000000000000042'
+  const runId = 'wrn_00000000000000000000000042'
+  const scope = {
+    kind: 'repository',
+    organizationId: 'org_00000000000000000000000001',
+    workspaceId: 'wsp_00000000000000000000000001',
+    projectId: 'prj_00000000000000000000000001',
+    repositoryId: 'rep_00000000000000000000000001',
+  }
+  const readCursor = {
+    token: `sfread_${'1'.padStart(32, '0')}`,
+    scope,
+    deliveryId,
+    deliveryRevision: 1,
+    runtimeLedgerRevision: 1,
+    runtimeAcceptedSequence: 1,
+    publicationRevision: 0,
+    eventCursor: {
+      scope,
+      stream: { kind: 'delivery', deliveryId },
+      sequence: 0,
+      eventId: null,
+    },
+  }
+  const contract = {
+    schemaVersion: 'winwincode/v1',
+    id: contractId,
+    revision: 1,
+    scope: ['登录回跳'],
+    objective: '修复登录后的回跳逻辑。',
+    constraints: [],
+    protectedScope: [],
+    requiredHumanAuthority: 'approval',
+    criteria: [{
+      id: 'crt_00000000000000000000000042',
+      description: '成功登录返回原页面。',
+      required: true,
+      requiredEvidenceClass: 'machine',
+      verificationMethod: 'node --test',
+    }],
+    createdAt: FIXED_NOW(),
+  }
+  const item = {
+    schemaVersion: 'winwincode/v1',
+    id: taskId,
+    revision: 1,
+    title: '修复登录回跳',
+    goal: '登录成功后返回原页面。',
+    state: 'in_progress',
+    criterionIds: ['crt_00000000000000000000000042'],
+    dependsOn: [],
+    workContractId: contractId,
+    workContractRevision: 1,
+  }
+  const workRun = {
+    schemaVersion: 'winwincode/v1',
+    id: runId,
+    workContractId: contractId,
+    contractRevision: 1,
+    workItemId: taskId,
+    workItemRevision: 1,
+    revision: 1,
+    state: 'running',
+    executionJobId: 'job_00000000000000000000000042',
+    attempt: 1,
+    workerId: 'wrk_00000000000000000000000042',
+    workerInstanceId: 'wki_00000000000000000000000042',
+    workerSessionId: 'wsn_00000000000000000000000042',
+    leaseId: 'lse_00000000000000000000000042',
+    fencingToken: '1',
+    productSessionId: 'psn_00000000000000000000000042',
+    codexThreadId: null,
+    candidateDigest: null,
+  }
+  const evidence = {
+    id: 'evd_00000000000000000000000042',
+    deliverySpecId: 'spec-login',
+    deliverySpecRevision: 1,
+    workRunId: runId,
+    sessionBindingId: 'binding-1',
+    candidateRef: `git-candidate:sha256:${'c'.repeat(64)}`,
+    type: 'command',
+    sourceRef: 'cmd:node --test',
+    createdAt: FIXED_NOW(),
+  }
+  const calls = []
+  const client = {
+    async query(request) {
+      calls.push(request.query)
+      if (request.query === 'workrun.get') {
+        if (request.parameters.atCursor !== null) {
+          assert.equal(request.parameters.atCursor.token, readCursor.token)
+        }
+        return {
+          query: 'workrun.get',
+          result: {
+            schemaVersion: 'winwincode/v1',
+            readCursor,
+            contract,
+            items: [item],
+            graphItems: [{ workItemId: taskId, state: 'running', dependencies: [], blockers: [] }],
+            runs: [workRun],
+            deviceBindings: [{
+              workRunId: runId,
+              clientId: '123456789012',
+              repositoryBindingId: 'rbd_00000000000000000000000042',
+            }],
+          },
+        }
+      }
+      return {
+        query: 'delivery.get',
+        result: {
+          schemaVersion: 'winwincode/v1',
+          kind: 'delivery_detail',
+          deliveryId,
+          deliveryRevision: 1,
+          readCursor,
+          ownership: {
+            organizationId: scope.organizationId,
+            workspaceId: scope.workspaceId,
+            projectId: scope.projectId,
+            repositoryId: scope.repositoryId,
+          },
+          status: 'in_progress',
+          requirements: {
+            deliverySpecId: 'spec-login',
+            deliverySpecRevision: 1,
+            title: '修复登录回跳',
+            goal: '登录成功后返回原页面。',
+            scope: ['登录回跳'],
+            outOfScope: [],
+            constraints: [],
+            acceptanceCriteria: [{
+              id: 'AC-1',
+              description: '成功登录返回原页面。',
+              verificationMethod: 'node --test',
+              required: true,
+            }],
+            sourceProductSessionId: null,
+            sourceRef: null,
+            publicationTarget: null,
+            repository: { kind: 'local-git', locator: 'workspace://repository' },
+            baseRevision: '0123456789abcdef0123456789abcdef01234567',
+            maxReworkAttempts: 2,
+          },
+          solutionReview: null,
+          diagramExecution: null,
+          attention: [],
+          evidence: [evidence],
+          currentCandidate: null,
+          verdict: null,
+          publication: null,
+        },
+      }
+    },
+  }
+  const port = createControlPlaneRunIdentityPort({
+    client,
+    candidates: { async listDeviceCandidates() { throw new Error('unexpected read') } },
+    actor: () => ({ kind: 'human', id: 'hum_00000000000000000000000001' }),
+    scope: () => scope,
+    deliveryId: () => deliveryId,
+    nextRequestId: () => 'req_00000000000000000000000042',
+  })
+
+  const projection = await port.read({
+    taskId,
+    clientId: '000000000000',
+    repositoryBindingId: 'rbd_00000000000000000000000000',
+    baseBranch: 'main',
+    description: 'stale route values',
+    modelRouteId: 'route_default',
+  })
+
+  assert.deepEqual(calls, ['delivery.get', 'workrun.get'])
+  assert.equal(projection.clientId, '123456789012')
+  assert.equal(projection.contract.id, contractId)
+  assert.equal(projection.item.id, taskId)
+  assert.equal(projection.graphItem.state, 'running')
+  assert.deepEqual(projection.evidence.map(entry => entry.id), [evidence.id])
+
+  const chain = []
+  const taskClient = {
+    serverUrl: 'https://control.example',
+    async command(request) {
+      chain.push(request.command)
+      if (request.command === 'workitems.create') {
+        return {
+          command: request.command,
+          outcome: 'completed',
+          currentRevision: 2,
+          result: { items: [item] },
+        }
+      }
+      return {
+        command: request.command,
+        outcome: 'completed',
+        currentRevision: 3,
+        result: { activeWorkRunId: runId },
+      }
+    },
+    async query(request) {
+      chain.push(request.query)
+      return client.query(request)
+    },
+  }
+  const workerSessions = createControlPlaneWorkerSessionPort({
+    client: taskClient,
+    transport: {
+      async fetch(_url, init) {
+        chain.push('client.worker.launch')
+        const body = JSON.parse(init.body)
+        assert.equal(body.workRunId, runId)
+        return {
+          ok: true,
+          status: 201,
+          async text() {
+            return JSON.stringify(body)
+          },
+        }
+      },
+    },
+  })
+  const tasks = createControlPlaneTaskPort({
+    client: taskClient,
+    actor: () => ({ kind: 'human', id: 'hum_00000000000000000000000001' }),
+    scope: () => scope,
+    nextRequestId: () => 'req_00000000000000000000000042',
+    nextWorkItemId: () => taskId,
+    workerSessions,
+    deliveryContext: async () => ({
+      deliveryId,
+      expectedRevision: 1,
+      contractRevision: 1,
+      criterionId: contract.criteria[0].id,
+    }),
+  })
+  await tasks.create({
+    clientId: '123456789012',
+    repositoryBindingId: 'rbd_00000000000000000000000042',
+    baseBranch: 'main',
+    description: '修复登录回跳',
+    modelRouteId: 'route_default',
+  })
+  assert.deepEqual(chain, [
+    'workitems.create',
+    'workrun.start',
+    'client.worker.launch',
+    'workrun.get',
+  ])
+})
 
 function runFixture({
   devices = [device({ ...OCCUPIED })],
@@ -667,8 +990,8 @@ test('the run projection composes live facts with the fake identity zone', async
   assert.equal(model.state.status, 'ready')
   assert.equal(model.state.taskDescription, 'Ship the occupancy gate')
   assert.equal(model.state.client.displayName, 'Wenjie MacBook Pro')
-  assert.match(model.state.client.stateText, /occupied by you/u)
-  assert.equal(model.state.occupancy.capacityText, 'Capacity 1 / 8')
+  assert.match(model.state.client.stateText, /已由你占用/u)
+  assert.equal(model.state.occupancy.capacityText, '容量 1 / 8')
   assert.equal(model.state.repository.displayName, 'WinWinCode')
   assert.equal(model.state.repository.defaultBranch, 'main')
   assert.equal(model.state.identityStatus, 'ready')
@@ -678,10 +1001,90 @@ test('the run projection composes live facts with the fake identity zone', async
   assert.equal(identity.workerSessions.length, 1)
   assert.equal(identity.workerSessions[0].state, 'running')
   assert.equal(identity.workerSessions[0].workerSessionId, 'wsn_00000000000000000000000042')
-  assert.equal(identity.candidate.candidateRef, 'cand_00000000000000000000000042')
-  assert.equal(identity.candidate.branchName, 'winwincode/task/tsk_00000000000000000000000042')
-  assert.equal(identity.apply.result, 'branch_created')
-  assert.equal(identity.apply.targetBranch, 'winwincode/task/tsk_00000000000000000000000042')
+  assert.equal(identity.candidate, null)
+  assert.equal(identity.apply, null)
+  model.close()
+})
+
+test('closing the run page only detaches the view and never stops its Worker', async () => {
+  const operations = []
+  const base = identityFake()
+  const identity = {
+    async read(anchor) {
+      operations.push('read')
+      return base.read(anchor)
+    },
+    async cancel() {
+      operations.push('cancel')
+    },
+  }
+  const document = new FakeDocument()
+  const rootElement = new FakeElement(document, 'div')
+  const { model } = runFixture({ identity })
+  const page = mountTaskRunPage({ root: rootElement, model })
+  await model.start()
+  assert.equal(model.state.identity.workerSessions[0].state, 'running')
+
+  page.close()
+
+  assert.deepEqual(operations, ['read'])
+  assert.equal(model.state.identity.workerSessions[0].state, 'running')
+  model.close()
+})
+
+test('the run projection follows the served device binding and Candidate apply history', async () => {
+  const servedClientId = '987654321012'
+  const servedBindingId = 'rbd_20000000000000000000000001'
+  const fake = identityFake()
+  const identity = {
+    async read(anchor) {
+      const projection = await fake.read(anchor)
+      return {
+        ...projection,
+        clientId: servedClientId,
+        repositoryBindingId: servedBindingId,
+        candidate: {
+          candidateRef: `git-candidate:sha256:${'a'.repeat(64)}`,
+          state: 'branch_created',
+          branchName: 'winwincode/task/candidate',
+          history: [{
+            localApplyReceiptId: 'lap_00000000000000000000000001',
+            candidateRef: `git-candidate:sha256:${'a'.repeat(64)}`,
+            repositoryBindingId: servedBindingId,
+            targetBranch: 'winwincode/task/candidate',
+            expectedHead: 'abc1234',
+            strategy: 'create_branch',
+            result: 'branch_created',
+            resultingCommit: 'abc1234567890',
+            conflictArtifactRef: null,
+            createdAt: FIXED_NOW(),
+            revision: 1,
+          }],
+        },
+      }
+    },
+  }
+  const { model } = runFixture({
+    devices: [
+      device({ ...OCCUPIED }),
+      device({ ...OCCUPIED, clientId: servedClientId, displayName: '执行设备 B' }),
+    ],
+    byDevice: {
+      [servedClientId]: [repository({
+        repositoryBindingId: servedBindingId,
+        displayName: '绑定仓库 B',
+      })],
+    },
+    identity,
+  })
+
+  await model.start()
+
+  assert.equal(model.state.client.displayName, '执行设备 B')
+  assert.equal(model.state.repository.displayName, '绑定仓库 B')
+  assert.equal(model.state.identity.candidate.branchName, 'winwincode/task/candidate')
+  assert.equal(model.state.identity.apply.result, 'branch_created')
+  assert.equal(model.state.identity.apply.resultingCommit, 'abc1234567890')
   model.close()
 })
 
@@ -705,10 +1108,10 @@ test('an unavailable identity read keeps the live rows and names the gap', async
   model.close()
 })
 
-test('the run page renders the six §16.7 identity rows from served facts', async () => {
+test('the run page renders the twelve identity rows and seven WorkItem facts', async () => {
   const document = new FakeDocument()
   const rootElement = new FakeElement(document, 'div')
-  const fixture = runFixture()
+  const fixture = runFixture({ identity: detailedIdentity() })
   const page = mountTaskRunPage({
     root: rootElement,
     model: fixture.model,
@@ -745,33 +1148,43 @@ test('the run page renders the six §16.7 identity rows from served facts', asyn
 
   // The identity table stays collapsed behind the design-05 row.
   const identityToggle = byClass(rootElement, 'wwc-task-run-identity-toggle')
-  assert.equal(identityToggle.textContent, '展开完整运行身份 · 6 行')
+  assert.equal(identityToggle.textContent, '展开完整运行身份 · 12 行')
   const rowsContainer = byClass(rootElement, 'wwc-task-run-rows')
   assert.equal(rowsContainer.hidden, true)
   identityToggle.dispatch('click')
-  assert.equal(identityToggle.textContent, '收起完整运行身份 · 6 行')
+  assert.equal(identityToggle.textContent, '收起完整运行身份 · 12 行')
   assert.equal(rowsContainer.hidden, false)
 
   const rows = allByClass(rootElement, 'wwc-task-run-row')
-  assert.equal(rows.length, 6)
+  assert.equal(rows.length, 12)
   assert.deepEqual(rows.map(row => row.dataset.taskRunRow), [
-    'Client',
-    'Repository',
-    'Occupancy',
-    'Worker sessions',
-    'Candidate',
-    'Apply',
+    '执行设备',
+    '仓库',
+    '占用状态',
+    '工作契约',
+    '验收条件',
+    '负责人',
+    '依赖项',
+    '阻塞项',
+    '证据',
+    '执行会话',
+    '候选结果',
+    '应用结果',
   ])
   const values = new Map(rows.map(row => [row.dataset.taskRunRow, row]))
-  assert.match(visibleText(values.get('Client')), /Wenjie MacBook Pro/u)
-  assert.match(visibleText(values.get('Client')), /occupied by you/u)
-  assert.match(visibleText(values.get('Repository')), /WinWinCode · base main/u)
-  assert.match(visibleText(values.get('Occupancy')), /Capacity 1 \/ 8/u)
-  assert.match(visibleText(values.get('Worker sessions')), /Running/u)
-  assert.match(visibleText(values.get('Candidate')), /cand_|\u5c1a\u65e0 Candidate/u)
-  assert.match(visibleText(values.get('Candidate')), /Local branch created/u)
-  assert.match(visibleText(values.get('Apply')), /Local branch created/u)
-  assert.match(visibleText(values.get('Apply')), /目标分支 winwincode\/task\/tsk_/u)
+  assert.match(visibleText(values.get('执行设备')), /Wenjie MacBook Pro/u)
+  assert.match(visibleText(values.get('执行设备')), /已由你占用/u)
+  assert.match(visibleText(values.get('仓库')), /WinWinCode · 基准分支 main/u)
+  assert.match(visibleText(values.get('占用状态')), /容量 1 \/ 8/u)
+  assert.match(visibleText(values.get('工作契约')), /修复登录后的回跳逻辑/u)
+  assert.match(visibleText(values.get('验收条件')), /成功登录返回原页面/u)
+  assert.match(visibleText(values.get('负责人')), /chengwen/u)
+  assert.match(visibleText(values.get('依赖项')), /wit_00000000000000000000000041/u)
+  assert.match(visibleText(values.get('阻塞项')), /wit_00000000000000000000000041/u)
+  assert.match(visibleText(values.get('证据')), /cmd:node --test/u)
+  assert.match(visibleText(values.get('执行会话')), /运行中/u)
+  assert.match(visibleText(values.get('候选结果')), /尚无候选结果/u)
+  assert.match(visibleText(values.get('应用结果')), /尚无应用记录/u)
   assert.equal(
     byClass(rootElement, 'wwc-task-run-identity-notice').hidden,
     true,
@@ -799,8 +1212,8 @@ test('the run page keeps the identity rows honest when the zone is unreachable',
   assert.match(notice.textContent, /不可达/u)
   const rows = allByClass(rootElement, 'wwc-task-run-row')
   const values = new Map(rows.map(row => [row.dataset.taskRunRow, row]))
-  assert.match(visibleText(values.get('Client')), /Wenjie MacBook Pro/u)
-  assert.match(visibleText(values.get('Worker sessions')), /正在加载/u)
+  assert.match(visibleText(values.get('执行设备')), /Wenjie MacBook Pro/u)
+  assert.match(visibleText(values.get('执行会话')), /正在加载/u)
   assert.equal(
     byClass(rootElement, 'wwc-task-run-status').textContent,
     '强流程 · 部分身份信息不可用',
@@ -833,15 +1246,15 @@ test('the fake task port issues stable ids and answers describe', async () => {
   const identity = createControlPlaneRunIdentityFake({ now: FIXED_NOW })
   const projection = await identity.read(first)
   assert.equal(projection.taskId, first.taskId)
-  assert.equal(projection.workerSessions.length, 1)
-  assert.equal(projection.candidate.state, 'branch_created')
-  assert.equal(projection.candidate.history.length, 1)
-  assert.equal(projection.candidate.history[0].result, 'branch_created')
+  assert.equal(projection.workRun.workItemId, first.taskId)
+  assert.equal(projection.workRun.state, 'running')
+  assert.equal(projection.candidate, null)
 })
 
 test('the run presentation helpers keep one tone and commit vocabulary', () => {
-  assert.equal(runWorkerSessionStateText('running'), 'Running')
-  assert.equal(runWorkerSessionStateText('draining'), 'Finishing current work')
+  assert.equal(runWorkerSessionStateText('running'), '运行中')
+  assert.equal(runWorkerSessionStateText('draining'), '正在完成当前工作')
+  assert.equal(runWorkGraphStateTone('blocked'), 'warning')
   assert.equal(taskRunCommitText('abc1234567890'), 'abc1234')
   assert.equal(taskRunCommitText(null), null)
 })

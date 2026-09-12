@@ -174,6 +174,17 @@ impl<'storage> ConnectCodeService<'storage> {
             .publish(publication, now)?)
     }
 
+    /// Returns the newest active code of one client node.
+    pub fn active_code_for_client(
+        &mut self,
+        client_node_id: &str,
+    ) -> Result<Option<ConnectCodeRecord>, ClientConnectServiceError> {
+        Ok(self
+            .storage
+            .client_connect_ledger()?
+            .active_code_for_client(client_node_id)?)
+    }
+
     /// Refreshes one connect code: revokes the old `active` code and
     /// publishes the replacement in one transaction (plan 11.1 code refresh).
     ///
@@ -522,6 +533,17 @@ impl<'storage> AccessGrantService<'storage> {
             .storage
             .client_connect_ledger()?
             .active_grants_for_user(user_id)?)
+    }
+
+    /// Returns every active grant on one client node.
+    pub fn active_grants_for_client(
+        &mut self,
+        client_node_id: &str,
+    ) -> Result<Vec<AccessGrantRecord>, ClientConnectServiceError> {
+        Ok(self
+            .storage
+            .client_connect_ledger()?
+            .active_grants_for_client(client_node_id)?)
     }
 
     /// Returns one durable access grant projection.

@@ -13,11 +13,9 @@ pub mod attention;
 pub mod failure_router;
 pub mod session_binding;
 pub mod solution_review;
-pub mod stage;
-pub mod task;
-pub mod task_breakdown;
 pub mod verdict;
 pub mod workrun;
+pub mod workrun_execution;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CoordinationErrorCode {

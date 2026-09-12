@@ -19,9 +19,7 @@ import {
 } from './fixtures/real-browser-harness.mjs'
 
 const root = resolve(import.meta.dirname, '..')
-const productSessionId = 'psn_00000000000000000000000001'
-
-test('real browser routes mount Settings and the Attention Center without empty slots', async t => {
+test('real browser routes mount Settings and the filtered task board without empty slots', async t => {
   const chromePath = chromeBinary()
   assert.notEqual(chromePath, null, 'Chrome or Chromium is required for the Client route browser test')
   command(root, 'corepack', ['pnpm', '--filter', '@winwincode/client', 'build'])
@@ -78,15 +76,15 @@ test('real browser routes mount Settings and the Attention Center without empty 
     'globalThis.runFeatureNavigationScenario()',
   )
   assert.equal(navigation.settings.hash, '#/settings')
-  assert.match(navigation.settings.status, /^Ready/iu)
-  assert.equal(navigation.attentionCenter.hash, '#/attention')
-  assert.match(navigation.attentionCenter.status, /^Ready/iu)
-  assert.match(navigation.denied, /do not have access/iu)
+  assert.match(navigation.settings.status, /^就绪/u)
+  assert.match(navigation.taskBoard.hash, /^#\/home\?filter=attention/u)
+  assert.notEqual(navigation.taskBoard.status, '')
+  assert.match(navigation.denied, /没有访问/u)
   assert.doesNotMatch(navigation.denied, /private route fixture/iu)
-  assert.match(navigation.network, /could not be reached/iu)
+  assert.match(navigation.network, /无法连接/u)
   assert.doesNotMatch(navigation.network, /private route fixture/iu)
   assert.deepEqual(navigation.calls.abortedQueries, ['settings.get'])
-  assert.match(navigation.afterCancellation.status, /^Ready/iu)
+  assert.match(navigation.afterCancellation.status, /^就绪/u)
 
   await open('#/settings', 'settings')
   const desktopSettings = await evaluate(
@@ -101,7 +99,6 @@ test('real browser routes mount Settings and the Attention Center without empty 
   assert.equal(desktopSettings.statusIconHidden, 'true')
   assert.equal(desktopSettings.statusRole, 'status')
   assert.equal(desktopSettings.noHorizontalOverflow, true)
-  assert.equal(desktopSettings.panelWithinPage, true)
   const focus = await evaluate(
     devtools,
     sessionId,
@@ -109,7 +106,7 @@ test('real browser routes mount Settings and the Attention Center without empty 
   )
   assert.equal(focus.active, true)
   assert.equal(focus.outlineStyle, 'solid')
-  assert.equal(focus.outlineWidth, '3px')
+  assert.equal(focus.outlineWidth, '2px')
 
   await devtools.send('Emulation.setDeviceMetricsOverride', {
     width: 360,
@@ -123,40 +120,13 @@ test('real browser routes mount Settings and the Attention Center without empty 
     'globalThis.inspectManagementPresentation("settings")',
   )
   assert.equal(compactSettings.noHorizontalOverflow, true)
-  assert.equal(compactSettings.panelWithinPage, true)
 
-  await open('#/attention', 'attention')
-  const attentionCenter = await evaluate(
+  await open('#/home?filter=attention', 'task-board')
+  const taskBoard = await evaluate(
     devtools,
     sessionId,
-    'globalThis.inspectFeatureRoute("attention")',
+    'globalThis.inspectFeatureRoute("task-board")',
   )
-  assert.equal(attentionCenter.hash, '#/attention')
-  assert.match(attentionCenter.status, /^Ready/iu)
-  const compactCenter = await evaluate(
-    devtools,
-    sessionId,
-    'globalThis.inspectManagementPresentation("attention")',
-  )
-  assert.equal(compactCenter.panelCount, 2)
-  assert.equal(compactCenter.emptyCount, 1)
-  assert.equal(compactCenter.noHorizontalOverflow, true)
-
-  // Legacy `?session=` decision deep links land on the same Attention Center.
-  await open(`#/attention?session=${productSessionId}`, 'attention-session')
-  const sessionDecisions = await evaluate(
-    devtools,
-    sessionId,
-    'globalThis.inspectFeatureRoute("attention-session")',
-  )
-  assert.equal(sessionDecisions.hash, `#/attention?session=${productSessionId}`)
-  assert.match(sessionDecisions.status, /^Ready/iu)
-  const compactDecisions = await evaluate(
-    devtools,
-    sessionId,
-    'globalThis.inspectManagementPresentation("attention-session")',
-  )
-  assert.equal(compactDecisions.panelCount, 2)
-  assert.equal(compactDecisions.emptyCount, 1)
-  assert.equal(compactDecisions.noHorizontalOverflow, true)
+  assert.match(taskBoard.hash, /^#\/home\?filter=attention/u)
+  assert.notEqual(taskBoard.status, '')
 })

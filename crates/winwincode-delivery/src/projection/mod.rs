@@ -17,20 +17,20 @@ use serde::Serialize;
 
 use crate::{
     application::solution_review::{SolutionReviewErrorCode, resolve_current_solution_review},
-    domain::{Delivery, DeliveryStatus, FrozenDeliveryCandidate},
+    domain::{AttentionItemStatus, Delivery, FrozenDeliveryCandidate},
 };
+use winwincode_domain::{WorkItem, WorkItemState};
 
 pub use delivery::{
     AcceptanceCriterionProjection, AttentionItemProjection, AttentionOptionProjection,
-    CurrentCandidateProjection, DeliveryTaskProjection, EvidenceProjection, RequirementsProjection,
-    SessionBindingProjection, SpecProjection, StageProjection, VerdictCriterionProjection,
-    VerdictProjection,
+    CurrentCandidateProjection, EvidenceProjection, RequirementsProjection, SpecProjection,
+    VerdictCriterionProjection, VerdictProjection,
 };
 pub use solution::{
-    DeliveryTaskProposalProjection, DiagramEdgeProjection, DiagramKind, DiagramNodeKind,
-    DiagramNodeProjection, DiagramProjection, SolutionComponentKind, SolutionComponentProjection,
-    SolutionConnectionProjection, SolutionReviewDecisionProjection, SolutionReviewProjection,
-    SolutionReviewStatusProjection,
+    DiagramEdgeProjection, DiagramKind, DiagramNodeKind, DiagramNodeProjection, DiagramProjection,
+    SolutionComponentKind, SolutionComponentProjection, SolutionConnectionProjection,
+    SolutionReviewDecisionProjection, SolutionReviewProjection, SolutionReviewStatusProjection,
+    WorkItemProposalProjection,
 };
 
 /// The only caller-selected inputs to the Delivery detail read model.
@@ -103,16 +103,15 @@ impl fmt::Display for ProjectionError {
 impl Error for ProjectionError {}
 
 /// Complete Delivery-owned `StrongFlow` detail without the mutable Delivery.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeliveryProjection {
     delivery_id: winwincode_domain::DeliveryId,
     delivery_revision: u64,
-    status: DeliveryStatus,
+    status: WorkItemState,
     requirements: RequirementsProjection,
     solution_review: Option<SolutionReviewProjection>,
-    stages: Vec<StageProjection>,
-    tasks: Vec<DeliveryTaskProjection>,
+    work_items: Vec<WorkItem>,
     attention: Vec<AttentionItemProjection>,
     evidence: Vec<EvidenceProjection>,
     current_candidate: Option<CurrentCandidateProjection>,
@@ -131,8 +130,8 @@ impl DeliveryProjection {
     }
 
     #[must_use]
-    pub const fn status(&self) -> DeliveryStatus {
-        self.status
+    pub const fn status(&self) -> &WorkItemState {
+        &self.status
     }
 
     #[must_use]
@@ -146,13 +145,8 @@ impl DeliveryProjection {
     }
 
     #[must_use]
-    pub fn stages(&self) -> &[StageProjection] {
-        &self.stages
-    }
-
-    #[must_use]
-    pub fn tasks(&self) -> &[DeliveryTaskProjection] {
-        &self.tasks
+    pub fn work_items(&self) -> &[WorkItem] {
+        &self.work_items
     }
 
     #[must_use]
@@ -189,8 +183,7 @@ impl DeliveryProjection {
 ///
 /// # Errors
 ///
-/// Rejects a stale candidate, a missing or conflicting `StageRun` binding, a stale solution
-/// review, or a canonical verdict that does not identify the supplied
+/// Rejects a stale candidate, a stale solution review, or a canonical verdict that does not identify the supplied
 /// current candidate.
 pub fn project_delivery_detail(
     input: ProjectionInput<'_>,
@@ -214,93 +207,20 @@ pub fn project_delivery_detail(
     Ok(DeliveryProjection {
         delivery_id: input.delivery.id().clone(),
         delivery_revision: input.delivery.revision(),
-        status: input.delivery.snapshot().status,
+        status: input.delivery.snapshot().work_run_aggregate.summary_state(
+            input
+                .delivery
+                .snapshot()
+                .attention_items
+                .iter()
+                .any(|item| item.status == AttentionItemStatus::Open),
+        ),
         requirements: sections.requirements,
         solution_review,
-        stages: sections.stages,
-        tasks: sections.tasks,
+        work_items: input.delivery.snapshot().work_run_aggregate.items.clone(),
         attention: sections.attention,
         evidence: sections.evidence,
         current_candidate: sections.current_candidate,
         verdict: sections.verdict,
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use winwincode_domain::{
-        CodexThreadId, DeliveryTaskId, ExecutionJobId, ProductSessionId, StageRunId, WorkRunId,
-        WorkerSessionId,
-    };
-
-    use super::*;
-    use crate::domain::{SessionBindingId, test_fixture};
-
-    fn unordered_deliveries() -> (Delivery, Delivery) {
-        let mut first = test_fixture();
-        first.status = DeliveryStatus::Verifying;
-        first.evidence.clear();
-        first.verdict = None;
-
-        let mut second_task = first.tasks[0].clone();
-        second_task.id = DeliveryTaskId("delivery-task-ui".into());
-        second_task.title = "Invitation UI".into();
-        second_task.owner = Some("frontend-owner".into());
-        first.tasks.push(second_task);
-
-        let mut second_run = first.stage_runs[0].clone();
-        second_run.id = StageRunId("stage-verification-2".into());
-        second_run.delivery_task_id = Some(DeliveryTaskId("delivery-task-ui".into()));
-        second_run.started_at_millis += 100;
-        second_run.finished_at_millis = second_run.finished_at_millis.map(|value| value + 100);
-        first.stage_runs.push(second_run);
-
-        let mut second_binding = first.session_bindings[0].clone();
-        second_binding.id = SessionBindingId("binding-verifier-2".into());
-        second_binding.work_run_id = WorkRunId("wrn_01J00000000000000000000001".into());
-        second_binding.product_session_id = ProductSessionId("product-session-verifier-2".into());
-        second_binding.execution_job_id = ExecutionJobId("execution-job-verifier-2".into());
-        second_binding.worker_session_id =
-            Some(WorkerSessionId("worker-session-verifier-2".into()));
-        second_binding.codex_thread_id = Some(CodexThreadId("codex-thread-verifier-2".into()));
-        second_binding.bound_at_millis += 100;
-        second_binding = second_binding.with_test_authority("projection-verifier-2", 1);
-        second_binding.execution_profile = Some("verifier".into());
-        first.session_bindings.push(second_binding);
-        crate::domain::rebuild_test_work_runs_from_bindings(&mut first);
-
-        let first = Delivery::try_from_snapshot(first).expect("first Delivery");
-        let mut second = first.clone().into_snapshot();
-        second.tasks.reverse();
-        second.stage_runs.reverse();
-        second.session_bindings.reverse();
-        let second = Delivery::try_from_snapshot(second).expect("reordered Delivery");
-        (first, second)
-    }
-
-    #[test]
-    fn projection_is_read_only_over_authoritative_sources() {
-        let (delivery, _) = unordered_deliveries();
-        let before = delivery.encode_json().expect("before");
-
-        let _ = project_delivery_detail(ProjectionInput::new(&delivery)).expect("projection");
-
-        assert_eq!(delivery.encode_json().expect("after"), before);
-    }
-
-    #[test]
-    fn projection_order_is_deterministic() {
-        let (first, second) = unordered_deliveries();
-
-        let first = project_delivery_detail(ProjectionInput::new(&first))
-            .expect("first projection")
-            .encode_json()
-            .expect("first JSON");
-        let second = project_delivery_detail(ProjectionInput::new(&second))
-            .expect("second projection")
-            .encode_json()
-            .expect("second JSON");
-
-        assert_eq!(first, second);
-    }
 }

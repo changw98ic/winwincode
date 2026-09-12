@@ -15,9 +15,9 @@ use sha2::{Digest, Sha256};
 use winwincode_delivery::{
     application::{
         CoordinationError,
-        stage::{
+        workrun_execution::{
             ActiveLeaseIdentity, CancelAcknowledgement, CancelIntent, ExecutionIntent,
-            StageAdvanceResult, acknowledge_cancel,
+            WorkRunStartResult, acknowledge_cancel,
         },
     },
     domain::Delivery,
@@ -33,7 +33,7 @@ use winwincode_execution_port::generated::{
 ///
 /// # Errors
 /// Rejects stale identities, invalid role/workspace bindings or malformed request/job fields.
-pub fn prepare_workrun_advance(
+pub fn prepare_workrun_start(
     request_id: &RequestId,
     aggregate: &winwincode_delivery::application::workrun::WorkRunAggregate,
     spec: &winwincode_delivery::domain::DeliverySpec,
@@ -288,19 +288,19 @@ pub struct DeliveryExecutionConfig {
 #[derive(Debug, Clone, PartialEq)]
 pub struct PendingDeliveryExecution {
     request_id: RequestId,
-    stage_transition: StageAdvanceResult,
+    work_run_transition: WorkRunStartResult,
     job: ExecutionJob,
 }
 
 impl PendingDeliveryExecution {
     pub fn from_workrun(
         request_id: RequestId,
-        stage_transition: StageAdvanceResult,
+        work_run_transition: WorkRunStartResult,
         job: ExecutionJob,
     ) -> Self {
         Self {
             request_id,
-            stage_transition,
+            work_run_transition,
             job,
         }
     }
@@ -312,12 +312,12 @@ impl PendingDeliveryExecution {
 
     #[must_use]
     pub fn delivery(&self) -> &Delivery {
-        &self.stage_transition.delivery
+        &self.work_run_transition.delivery
     }
 
     #[must_use]
-    pub fn stage_transition(&self) -> &StageAdvanceResult {
-        &self.stage_transition
+    pub fn work_run_transition(&self) -> &WorkRunStartResult {
+        &self.work_run_transition
     }
 
     #[must_use]

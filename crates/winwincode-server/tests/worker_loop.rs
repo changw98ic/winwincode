@@ -571,7 +571,11 @@ impl WorkerLaunchMaterialSource for LaunchResponseMaterial {
             .cloned()
     }
 
-    fn launch_directories(&self, worker_session_id: &str) -> Option<WorkerLaunchDirectories> {
+    fn launch_directories(
+        &self,
+        worker_session_id: &str,
+        _repository_binding_id: &str,
+    ) -> Option<WorkerLaunchDirectories> {
         let root = self.worker_root.join(worker_session_id);
         Some(WorkerLaunchDirectories {
             source_directory: root.join("source"),
