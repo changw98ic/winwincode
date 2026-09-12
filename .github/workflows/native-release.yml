@@ -118,6 +118,12 @@ jobs:
         with:
           version: "v0.17.0"
 
+      - name: Select installed Rust compiler cache
+        shell: bash
+        run: |
+          test -x "${SCCACHE_PATH}"
+          printf 'RUSTC_WRAPPER=%s\n' "${SCCACHE_PATH}" >> "${GITHUB_ENV}"
+
       - name: Install JavaScript dependencies
         shell: bash
         run: |
