@@ -275,6 +275,21 @@ test('product release emits a verified Worker-only input for Community Core', ()
   assert.ok(workflow.includes('path: community-core-worker/${{ matrix.target }}/'))
 })
 
+test('product release assembles one signed Community Core candidate after all targets pass', () => {
+  assert.match(workflow, /^  community-core-candidate:$/mu)
+  assert.ok(workflow.includes('      - product-release'))
+  assert.ok(workflow.includes('cargo_args=(package --locked --no-verify)'))
+  assert.ok(workflow.includes('CARGO_TARGET_DIR="${cargo_root}" cargo "${cargo_args[@]}"'))
+  assert.ok(workflow.includes('npm pack "./$(dirname "${manifest}")"'))
+  assert.ok(workflow.includes('git archive --format=tar HEAD -- "${contract_paths[@]}"'))
+  assert.ok(workflow.includes('zstd --quiet -19 -T0'))
+  assert.ok(workflow.includes('corepack pnpm release:core-finalize --'))
+  assert.ok(workflow.includes(
+    'WINWINCODE_CORE_RELEASE_PRIVATE_KEY_PEM: ${{ secrets.WINWINCODE_CORE_RELEASE_PRIVATE_KEY_PEM }}',
+  ))
+  assert.ok(workflow.includes('name: community-core-release-${{ env.SOURCE_COMMIT }}'))
+})
+
 test('release download instructions recreate the exact aggregate evidence roots', () => {
   const releasing = readFileSync(resolve(root, 'docs/releasing.md'), 'utf8')
   assert.ok(releasing.includes('gh run download "$RUN_ID" --name "$TARGET" --dir "release-artifacts/$TARGET"'))

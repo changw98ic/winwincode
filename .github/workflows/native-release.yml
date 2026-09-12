@@ -201,3 +201,141 @@ jobs:
         run: |
           set -euo pipefail
           test "${SECURITY_OUTCOME}" = "success"
+
+  community-core-candidate:
+    name: Assemble signed Community Core candidate
+    needs:
+      - verify-source
+      - product-release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      CI: "1"
+      COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+      CORE_WORKER_ROOT: ${{ runner.temp }}/community-core-workers
+      SOURCE_COMMIT: ${{ needs.verify-source.outputs.source_commit }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          ref: ${{ env.SOURCE_COMMIT }}
+
+      - name: Install pinned Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+
+      - name: Install pinned Rust
+        shell: bash
+        run: |
+          rustup toolchain install 1.95.0 --profile minimal
+          rustup override set 1.95.0
+
+      - name: Install package tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends zstd
+          corepack enable
+          corepack pnpm install --frozen-lockfile
+
+      - name: Download verified Worker inputs
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p "${CORE_WORKER_ROOT}"
+          for target in \
+            aarch64-apple-darwin \
+            x86_64-apple-darwin \
+            aarch64-unknown-linux-gnu \
+            x86_64-unknown-linux-gnu
+          do
+            gh run download "${{ github.run_id }}" \
+              --name "community-core-worker-${target}" \
+              --dir "${CORE_WORKER_ROOT}/${target}"
+            chmod 0755 \
+              "${CORE_WORKER_ROOT}/${target}/bin/winwincode-worker" \
+              "${CORE_WORKER_ROOT}/${target}/bin/winwincode-kernel-helper"
+          done
+
+      - name: Build exact Community Core release inputs
+        id: inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          input_root="${RUNNER_TEMP}/community-core-inputs"
+          cargo_root="${RUNNER_TEMP}/community-core-cargo"
+          mkdir -p "${input_root}" "${cargo_root}"
+          version="$(node -p "require('./package.json').version")"
+          source_date_epoch="$(git show -s --format=%ct "${SOURCE_COMMIT}")"
+          contract="docs/decisions/0031-community-core-release.json"
+
+          mapfile -t crates < <(jq -r '.currentState.rustPackages.intendedLinkableCore[].name' "${contract}")
+          cargo_args=(package --locked --no-verify)
+          for crate in "${crates[@]}"; do
+            cargo_args+=(-p "${crate}")
+          done
+          CARGO_TARGET_DIR="${cargo_root}" cargo "${cargo_args[@]}"
+          for crate in "${crates[@]}"; do
+            cp -f "${cargo_root}/package/${crate}-${version}.crate" "${input_root}/"
+          done
+
+          corepack pnpm build:ts
+          jq -r '.currentState.npmPackages.packages[].manifest' "${contract}" |
+            while IFS= read -r manifest; do
+              npm pack "./$(dirname "${manifest}")" --pack-destination "${input_root}" --ignore-scripts
+            done
+
+          mapfile -t contract_paths < <(jq -r '
+            .targetState.contractBundle |
+            .canonicalSchemas[], .generatedContracts[], .protocolSamples[]
+          ' "${contract}")
+          git archive --format=tar HEAD -- "${contract_paths[@]}" |
+            zstd --quiet -19 -T0 -o "${input_root}/winwincode-contracts-${version}.tar.zst"
+
+          for target in \
+            aarch64-apple-darwin \
+            x86_64-apple-darwin \
+            aarch64-unknown-linux-gnu \
+            x86_64-unknown-linux-gnu
+          do
+            tar \
+              --sort=name \
+              --format=ustar \
+              --mtime="@${source_date_epoch}" \
+              --owner=0 \
+              --group=0 \
+              --numeric-owner \
+              -C "${CORE_WORKER_ROOT}/${target}" \
+              -cf - \
+              LICENSE NOTICE THIRD_PARTY_NOTICES.md bin |
+              zstd --quiet -19 -T0 \
+                -o "${input_root}/winwincode-worker-${version}-${target}.tar.zst"
+          done
+
+          printf 'input_root=%s\n' "${input_root}" >> "${GITHUB_OUTPUT}"
+          printf 'source_date_epoch=%s\n' "${source_date_epoch}" >> "${GITHUB_OUTPUT}"
+
+      - name: Finalize and sign Community Core release
+        shell: bash
+        env:
+          WINWINCODE_CORE_RELEASE_PRIVATE_KEY_PEM: ${{ secrets.WINWINCODE_CORE_RELEASE_PRIVATE_KEY_PEM }}
+        run: |
+          set -euo pipefail
+          corepack pnpm release:core-finalize -- \
+            --input "${{ steps.inputs.outputs.input_root }}" \
+            --output "${RUNNER_TEMP}/community-core-release" \
+            --source-commit "${SOURCE_COMMIT}" \
+            --source-date-epoch "${{ steps.inputs.outputs.source_date_epoch }}"
+
+      - name: Upload signed Community Core candidate
+        uses: actions/upload-artifact@v7
+        with:
+          name: community-core-release-${{ env.SOURCE_COMMIT }}
+          path: ${{ runner.temp }}/community-core-release/
+          if-no-files-found: error
+          compression-level: 0
