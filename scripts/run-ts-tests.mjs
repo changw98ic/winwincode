@@ -118,6 +118,6 @@ function runTests(arguments_) {
   if (result.status !== 0) process.exit(result.status ?? 1)
 }
 
-runTests(['--test', '--test-concurrency=4', ...canonicalTestFiles])
+runTests(['--test', '--test-concurrency=1', ...canonicalTestFiles])
 
 process.stdout.write(`canonical TypeScript tests passed: ${canonicalTestFiles.length}\n`)
