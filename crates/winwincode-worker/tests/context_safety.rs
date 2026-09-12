@@ -156,7 +156,7 @@ fn safe_text_validation_is_table_driven() {
     );
     assert_eq!(
         scanner.profile().scanner_policy_digest.0,
-        "sha256:dfbc3143225724f616565c1acc313d781b732e0ca34e55bf6293726eb71fb66a"
+        "sha256:38cf50679f8427e1265ced2c44500d3e5100dbd4a2346f165316340985f4eaf7"
     );
 
     let cases = boundary_cases().into_iter().chain(material_cases());

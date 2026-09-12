@@ -24,7 +24,7 @@ const SECRET_SCAN_RULES: [&str; 7] = [
     "basic:Basic [A-Za-z0-9+/]{12,}={0,2}",
     "jwt:eyJ<base64url>.<base64url>.<base64url>",
     "provider:sk|github|aws|google|slack|npm token families",
-    "url-userinfo:http|https|ws|wss://user:secret@host",
+    "url-userinfo:recognized scheme with authority credentials",
     "assignment:credential key [=:] secret value length >= 8",
 ];
 
