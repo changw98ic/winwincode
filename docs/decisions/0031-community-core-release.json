@@ -8,8 +8,8 @@
     "winwincode-enterprise"
   ],
   "currentState": {
-    "observedSourceCommit": "a5b3b96df35e11a04931299823eec76799dea31f",
-    "observedWorkspaceVersion": "0.1.0-alpha.1",
+    "observedSourceCommit": "1ded1d07b5c65dac5acfb83c61527205cb95982f",
+    "observedWorkspaceVersion": "0.1.0-alpha.2",
     "inspectionMode": {
       "mode": "git-file-inventory",
       "symbolAndCallGraphCoverage": false,
@@ -41,37 +41,37 @@
       ]
     },
     "rustPackages": {
-      "declaredVersion": "0.1.0-alpha.1",
+      "declaredVersion": "0.1.0-alpha.2",
       "registryPublicationConfigured": false,
       "intendedLinkableCore": [
         {
           "name": "winwincode-domain",
           "manifest": "crates/winwincode-domain/Cargo.toml",
-          "publish": false,
+          "publish": true,
           "boundaryReady": true
         },
         {
           "name": "winwincode-api",
           "manifest": "crates/winwincode-api/Cargo.toml",
-          "publish": false,
+          "publish": true,
           "boundaryReady": true
         },
         {
           "name": "winwincode-client-port",
           "manifest": "crates/winwincode-client-port/Cargo.toml",
-          "publish": false,
+          "publish": true,
           "boundaryReady": true
         },
         {
           "name": "winwincode-execution-port",
           "manifest": "crates/winwincode-execution-port/Cargo.toml",
-          "publish": false,
+          "publish": true,
           "boundaryReady": true
         },
         {
           "name": "winwincode-repository-context",
           "manifest": "crates/winwincode-repository-context/Cargo.toml",
-          "publish": false,
+          "publish": true,
           "boundaryReady": true
         },
         {
@@ -83,7 +83,7 @@
         {
           "name": "winwincode-session",
           "manifest": "crates/winwincode-session/Cargo.toml",
-          "publish": false,
+          "publish": true,
           "boundaryReady": true
         },
         {
@@ -118,7 +118,7 @@
       "runtimeOnlyReason": "The embedded Codex dependencies are repository path dependencies. Cloud and Enterprise consume the verified Worker runtime bundle over ExecutionPort instead of linking the kernel implementation into their Server products."
     },
     "npmPackages": {
-      "declaredVersion": "0.1.0-alpha.1",
+      "declaredVersion": "0.1.0-alpha.2",
       "registryPublicationProven": false,
       "packages": [
         {
@@ -474,7 +474,7 @@
       "path": "core.lock.json",
       "canonicalEncoding": "UTF-8 JSON with recursively sorted object keys, two-space indentation, and one trailing newline",
       "validationRulesBeyondSchema": [
-        "The Cargo package names are exactly the eight consumableRustCrates names, without duplicates.",
+        "The Cargo package names are exactly the nine consumableRustCrates names, without duplicates.",
         "The npm package names are exactly @winwincode/contracts, @winwincode/strongflow, @winwincode/browser-ui, @winwincode/control-plane-client, and @winwincode/browser-core, without duplicates.",
         "Every artifact version equals core.version.",
         "sourceTag equals core-v followed by core.version.",
