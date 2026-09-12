@@ -11,9 +11,9 @@
     "observedSourceCommit": "1ded1d07b5c65dac5acfb83c61527205cb95982f",
     "observedWorkspaceVersion": "0.1.0-alpha.2",
     "inspectionMode": {
-      "mode": "git-file-inventory",
+      "mode": "local-code-index",
       "symbolAndCallGraphCoverage": false,
-      "reason": "dist/scripts/code-index.js is absent, and this repository has no build:node script with which to create the required local index"
+      "reason": "The external local index is fresh and exact for this snapshot, but reports file-inventory-only coverage."
     },
     "releasePipeline": {
       "workflow": ".github/workflows/native-release.yml",
@@ -527,7 +527,7 @@
     },
     {
       "id": "RUST-PACKAGE",
-      "requirement": "All eight linkable crates package from a clean checkout, use registry-resolvable exact inter-core dependencies, and contain no path dependency outside their own package."
+      "requirement": "All nine linkable crates package from a clean checkout, use registry-resolvable exact inter-core dependencies, and contain no path dependency outside their own package."
     },
     {
       "id": "RUST-STORAGE",
@@ -535,7 +535,7 @@
     },
     {
       "id": "NPM-PACKAGE",
-      "requirement": "All three npm tarballs are built once, carry the exact core version, use exact inter-core dependencies, and pass package boundary and schema-to-package exactness tests."
+      "requirement": "All five npm tarballs are built once, carry the exact core version, use exact inter-core dependencies, and pass package boundary and schema-to-package exactness tests."
     },
     {
       "id": "CONTRACTS",
@@ -560,9 +560,9 @@
   ],
   "knownBlockers": [
     {
-      "id": "INDEX-MISSING",
+      "id": "INDEX-PARTIAL",
       "impact": "This inspection proves file-level coverage only; it does not prove a complete symbol or call graph.",
-      "evidence": "node dist/scripts/code-index.js status failed because the file is absent, and package.json has no build:node script."
+      "evidence": "The external local index is fresh and exact for the observed snapshot, with no failed or oversized files, but its effective coverage is file-inventory-only."
     },
     {
       "id": "NO-CORE-PUBLISHER",
@@ -571,8 +571,8 @@
     },
     {
       "id": "RUST-NOT-PUBLISHABLE",
-      "impact": "The intended linkable Rust crates cannot yet be resolved from a registry.",
-      "evidence": "All eight target crate manifests currently set publish = false; several inter-core dependencies still use workspace or path resolution."
+      "impact": "The complete nine-crate Rust core set cannot yet be resolved from a registry.",
+      "evidence": "Seven target crates are publishable; winwincode-delivery and winwincode-publication remain publish = false while they depend on forbidden winwincode-storage."
     },
     {
       "id": "STORAGE-COUPLING",
@@ -586,8 +586,8 @@
     },
     {
       "id": "NPM-NOT-PUBLISHED",
-      "impact": "Cloud and Enterprise have no proven immutable npm source for the two public packages.",
-      "evidence": "Package manifests declare public access, but no npm publication workflow or publication evidence exists."
+      "impact": "Cloud and Enterprise have no proven immutable npm source for the five public packages.",
+      "evidence": "All five package manifests declare public access and pass npm pack --dry-run, but no npm publication workflow or publication evidence exists."
     },
     {
       "id": "CONTRACT-PACKAGE-DRIFT-RISK",
@@ -595,14 +595,9 @@
       "evidence": "scripts/generate-contracts.mjs writes TypeScript outputs under apps/client; @winwincode/contracts is a separate package source tree."
     },
     {
-      "id": "NO-SBOM-OR-LICENSE-MANIFEST",
+      "id": "NO-RELEASE-SBOM-OR-LICENSE-MANIFEST",
       "impact": "A consumer cannot verify component-level dependency and license coverage from current artifacts.",
-      "evidence": "The current artifact gate includes three legal text files but produces neither an SBOM nor a machine-readable license manifest."
-    },
-    {
-      "id": "DIRTY-CHECKOUT",
-      "impact": "The current release artifact gate would reject this shared working tree until all concurrent work is committed or moved to clean worktrees.",
-      "evidence": "git status reported tracked modifications and untracked files during this inspection; run-release-artifact-gate.mjs requires an empty porcelain status."
+      "evidence": "Deterministic source-only CycloneDX and license metadata now exist, but no immutable release manifest covers published registry tarballs and Worker bundles."
     }
   ]
 }
