@@ -1542,20 +1542,16 @@ fn main() {
         }
         Some("tree") => {
             let marker = &args[2];
-            let child = Command::new(std::env::current_exe().unwrap())
+            Command::new(std::env::current_exe().unwrap())
                 .args(["leaf", marker])
                 .spawn()
                 .unwrap();
-            std::fs::write(marker, child.id().to_string()).unwrap();
             loop { std::thread::sleep(Duration::from_secs(1)); }
         }
         Some("leaf") => {
             let marker = &args[2];
             let child = Command::new("/bin/sleep").arg("30").spawn().unwrap();
-            let mut prior = std::fs::read_to_string(marker).unwrap_or_default();
-            prior.push(' ');
-            prior.push_str(&child.id().to_string());
-            std::fs::write(marker, prior).unwrap();
+            std::fs::write(marker, format!("{} {}", std::process::id(), child.id())).unwrap();
             loop { std::thread::sleep(Duration::from_secs(1)); }
         }
         _ => {}
