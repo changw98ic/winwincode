@@ -8,7 +8,7 @@
     "winwincode-enterprise"
   ],
   "currentState": {
-    "observedSourceCommit": "0e81db2057557e1e7bbcd69ccb6dafd09f0d10ae",
+    "observedSourceCommit": "bd4e3ba1b9e97bb141dbb8f98d05e12dab1a0880",
     "observedWorkspaceVersion": "0.1.0-alpha.2",
     "inspectionMode": {
       "mode": "local-code-index",
@@ -17,27 +17,30 @@
     },
     "releasePipeline": {
       "workflow": ".github/workflows/native-release.yml",
-      "distribution": "github-actions-artifact",
-      "immutableCoreRelease": false,
-      "publishedCoreManifest": false,
+      "distribution": "github-release",
+      "releaseUrl": "https://github.com/changw98ic/winwincode/releases/tag/core-v0.1.0-alpha.2",
+      "workflowRunId": 34712714536,
+      "immutableCoreRelease": true,
+      "publishedCoreManifest": true,
       "publishedCoreLockSchema": false,
-      "publishedSbom": false,
-      "publishedLicenseManifest": false,
+      "publishedSbom": true,
+      "publishedLicenseManifest": true,
+      "publishedAssetCount": 24,
+      "manifestSigningKeySha256": "a5ae437f13870666259a443e50cb771f0fb12dbf0b911c842f56cac704ddca62",
       "artifacts": [
-        "winwincode-server",
-        "winwincode-worker",
-        "winwincode-kernel-helper",
-        "@winwincode/client static files",
-        "LICENSE",
-        "NOTICE",
-        "THIRD_PARTY_NOTICES.md",
-        "release-artifact-manifest.json",
+        "9 Cargo .crate packages",
+        "5 npm .tgz packages",
+        "winwincode-contracts-0.1.0-alpha.2.tar.zst",
+        "4 Worker runtime bundles",
+        "community-core-0.1.0-alpha.2.cdx.json",
+        "community-core-0.1.0-alpha.2.licenses.json",
+        "community-core-release-manifest.json",
+        "community-core-release-manifest.json.sig",
         "SHA256SUMS"
       ],
       "limitations": [
-        "The workflow uploads product artifacts to one workflow run; it does not create an immutable Community core release.",
-        "The artifact set mixes the Server and Client product with the Worker runtime and does not publish linkable Rust or npm core packages.",
-        "The legal files are copied, but there is no machine-readable artifact-to-license manifest or SBOM."
+        "The nine Cargo and five npm packages are signed release attachments, but their canonical registry URIs remain unavailable until crates.io and npm authentication is configured.",
+        "The core lock schema remains source-controlled and is not a separate release attachment."
       ]
     },
     "rustPackages": {
@@ -158,7 +161,7 @@
       ],
       "excludedProductPackage": "@winwincode/client",
       "limitations": [
-        "No npm publish job or immutable npm provenance is present in the current release workflow.",
+        "The five signed npm tarballs are attached to the GitHub release, but their npm registry versions are not published because registry authentication is unavailable.",
         "scripts/generate-contracts.mjs writes generated TypeScript into apps/client rather than the public @winwincode/contracts package; schema-to-package exactness needs one release gate."
       ]
     },
@@ -184,7 +187,7 @@
         "schema/winwincode/v1/domain.samples.json",
         "schema/winwincode/v1/examples/control-plane-http.examples.json"
       ],
-      "publishedBundle": false
+      "publishedBundle": true
     },
     "currentSourcePaths": [
       ".github/workflows/native-release.yml",
@@ -226,13 +229,20 @@
       "schema/winwincode/v1/openapi.generated.json",
       "schema/winwincode/v1/schema-collection.generated.json",
       "scripts/build-community.mjs",
+      "scripts/build-community-core-metadata.mjs",
+      "scripts/build-community-core-release.mjs",
+      "scripts/finalize-community-core-release.mjs",
       "scripts/generate-contracts.mjs",
       "scripts/product-build-contract.mjs",
       "scripts/release-artifact-contract.mjs",
       "scripts/run-release-artifact-gate.mjs",
+      "scripts/stage-community-core-worker-runtime.mjs",
       "scripts/verify-products.mjs",
       "scripts/verify-release-artifacts.mjs",
-      "tests/community-core-release-contract.test.mjs"
+      "tests/community-core-finalize.test.mjs",
+      "tests/community-core-metadata.test.mjs",
+      "tests/community-core-release-contract.test.mjs",
+      "tests/community-core-release.test.mjs"
     ]
   },
   "targetState": {
@@ -579,29 +589,19 @@
       "evidence": "The external local index is fresh and exact for the observed snapshot, with no failed or oversized files, but its effective coverage is file-inventory-only."
     },
     {
-      "id": "NO-CORE-PUBLISHER",
-      "impact": "No Community core release exists for Cloud or Enterprise to consume.",
-      "evidence": "The native release workflow uploads only per-run product artifacts and has read-only contents permission."
-    },
-    {
-      "id": "CODEX-PATH-DEPS",
-      "impact": "Kernel, Codex adapter, and Worker cannot be offered as ordinary downstream Cargo dependencies without also exporting repository-local Codex sources.",
-      "evidence": "The workspace maps codex-core-api, codex-api, codex-arg0, codex-protocol, and codex-model-provider-info to third_party/codex paths."
+      "id": "CARGO-NOT-PUBLISHED",
+      "impact": "Cloud and Enterprise cannot resolve the nine linkable Rust packages from crates.io.",
+      "evidence": "All nine .crate files are covered by the signed GitHub release manifest, but no Cargo registry token or repository secret is configured and the registry versions do not exist."
     },
     {
       "id": "NPM-NOT-PUBLISHED",
       "impact": "Cloud and Enterprise have no proven immutable npm source for the five public packages.",
-      "evidence": "All five package manifests declare public access and pass npm pack --dry-run, but no npm publication workflow or publication evidence exists."
+      "evidence": "All five .tgz files are covered by the signed GitHub release manifest, but npm authentication is unavailable and the registry versions do not exist."
     },
     {
       "id": "CONTRACT-PACKAGE-DRIFT-RISK",
       "impact": "A schema change can update generated Client files without proving that @winwincode/contracts carries the same definitions.",
       "evidence": "scripts/generate-contracts.mjs writes TypeScript outputs under apps/client; @winwincode/contracts is a separate package source tree."
-    },
-    {
-      "id": "NO-RELEASE-SBOM-OR-LICENSE-MANIFEST",
-      "impact": "A consumer cannot verify component-level dependency and license coverage from current artifacts.",
-      "evidence": "Deterministic source-only CycloneDX and license metadata now exist, but no immutable release manifest covers published registry tarballs and Worker bundles."
     }
   ]
 }
