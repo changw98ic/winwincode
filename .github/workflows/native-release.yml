@@ -212,7 +212,6 @@ jobs:
     env:
       CI: "1"
       COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
-      CORE_WORKER_ROOT: ${{ runner.temp }}/community-core-workers
       SOURCE_COMMIT: ${{ needs.verify-source.outputs.source_commit }}
     steps:
       - name: Check out source
@@ -247,7 +246,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          mkdir -p "${CORE_WORKER_ROOT}"
+          mkdir -p "${RUNNER_TEMP}/community-core-workers"
           for target in \
             aarch64-apple-darwin \
             x86_64-apple-darwin \
@@ -256,10 +255,10 @@ jobs:
           do
             gh run download "${{ github.run_id }}" \
               --name "community-core-worker-${target}" \
-              --dir "${CORE_WORKER_ROOT}/${target}"
+              --dir "${RUNNER_TEMP}/community-core-workers/${target}"
             chmod 0755 \
-              "${CORE_WORKER_ROOT}/${target}/bin/winwincode-worker" \
-              "${CORE_WORKER_ROOT}/${target}/bin/winwincode-kernel-helper"
+              "${RUNNER_TEMP}/community-core-workers/${target}/bin/winwincode-worker" \
+              "${RUNNER_TEMP}/community-core-workers/${target}/bin/winwincode-kernel-helper"
           done
 
       - name: Build exact Community Core release inputs
@@ -310,7 +309,7 @@ jobs:
               --owner=0 \
               --group=0 \
               --numeric-owner \
-              -C "${CORE_WORKER_ROOT}/${target}" \
+              -C "${RUNNER_TEMP}/community-core-workers/${target}" \
               -cf - \
               LICENSE NOTICE THIRD_PARTY_NOTICES.md bin |
               zstd --quiet -19 -T0 \
