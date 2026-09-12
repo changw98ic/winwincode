@@ -25,6 +25,8 @@ test('ordinary CI runs one exact-SHA aggregate over three independent lanes', ()
   assert.equal([...mainlineWorkflow.matchAll(/corepack pnpm verify:rust$/gmu)].length, 1)
   assert.doesNotMatch(mainlineWorkflow, /corepack pnpm verify$/mu)
   assert.ok(mainlineWorkflow.includes('github.event.pull_request.number || github.ref'))
+  assert.match(mainlineWorkflow, /^      CARGO_PROFILE_DEV_DEBUG: "0"$/mu)
+  assert.match(mainlineWorkflow, /^      CARGO_PROFILE_TEST_DEBUG: "0"$/mu)
   assert.match(mainlineWorkflow, /^    name: Canonical workspace verification$/mu)
   for (const lane of ['source', 'typescript', 'rust']) {
     assert.match(mainlineWorkflow, new RegExp(`^      - ${lane}$`, 'mu'))
