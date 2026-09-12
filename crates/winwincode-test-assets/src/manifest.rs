@@ -692,7 +692,7 @@ fn sorted_unique_texts(values: &[String], path: &str) -> Result<(), TestAssetMan
     let mut previous: Option<&str> = None;
     for (index, value) in values.iter().enumerate() {
         bounded_text(value, &format!("{path}[{index}]"))?;
-        if previous.is_some_and(|previous| previous >= value) {
+        if previous.is_some_and(|previous| previous >= value.as_str()) {
             return Err(manifest_error(
                 TestAssetManifestErrorCode::InvalidValue,
                 path,

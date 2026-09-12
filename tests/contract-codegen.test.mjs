@@ -225,7 +225,7 @@ test('checked-in contract artifacts carry Apache-2.0 release metadata and one ca
     'utf8',
   )
   assert.match(cargoManifest, /license\.workspace = true/u)
-  assert.match(cargoManifest, /publish = false/u)
+  assert.doesNotMatch(cargoManifest, /publish = false/u)
   assert.match(cargoManifest, /include = \["src\/\*\*", "Cargo\.toml", "README\.md"\]/u)
   assert.equal(existsAtProductPath('packages/api-client'), false)
   assert.equal(existsAtProductPath('packages/contracts/src/generated'), false)
