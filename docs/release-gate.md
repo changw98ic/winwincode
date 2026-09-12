@@ -13,7 +13,7 @@ GitHub Actions 的 `Product release matrix` 分别在以下原生 runner 上运�
 | `aarch64-unknown-linux-gnu` | `ubuntu-24.04-arm` | 同上 |
 | `x86_64-unknown-linux-gnu` | `ubuntu-24.04` | 同上 |
 
-普通 pull request 和默认分支 push 由独立的 `Mainline verification` workflow 验证。workflow 将源码格式与边界、TypeScript 构建与测试、Rust 构建与运行检查拆成三个并行 job，再由 `Canonical workspace verification` 汇总。feature 分支不再同时响应 push 和 pull request；默认分支只响应 push，因此一个源提交只有一条等价全量路径。TypeScript 只构建一次，Rust 产品只构建一次，测试和 direct API 复用各自 job 内已经生成的产物。每个 job 都通过 `actions/checkout` 取得相同的干净 commit。
+普通 pull request 和默认分支 push 由独立的 `Mainline verification` workflow 验证。workflow 将源码格式与边界、TypeScript 构建与测试，以及由 matrix 展开的 `rust-lint`、`rust-test`、`rust-runtime` 拆成五个并行 job，再由 `Canonical workspace verification` 汇总。三个 Rust job 使用固定版本的 `sccache` 和 GitHub Actions 持久缓存，共享可复用的编译结果，但不上传完整 `target` 目录。feature 分支不再同时响应 push 和 pull request；默认分支只响应 push，因此一个源提交只有一条等价全量路径。每个 job 都通过 `actions/checkout` 取得相同的干净 commit。
 
 `Product release matrix` 不运行 `pnpm verify`。feature 分支的成功 CI 只作为合并门；合并到默认分支后，从默认分支手动启动 release 并输入完整的 `source_commit`。轻量 `verify-source` job 使用只读 GitHub Actions API，要求该 SHA 精确匹配当前仓库默认分支一次且仅一次成功的 `Mainline verification` push run。pull request、feature 分支、fork、失败 run、另一个 SHA 或重复成功记录都会在签名 secret 进入四平台 job 前失败。后续 checkout、source commit、`SOURCE_DATE_EPOCH` 和安全报告全部绑定这个已验证 SHA，不读取已变化的分支 HEAD。
 

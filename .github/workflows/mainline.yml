@@ -73,15 +73,24 @@ jobs:
         run: corepack pnpm verify:typescript
 
   rust:
-    name: Rust build, tests, and product runtime
+    name: rust-${{ matrix.lane }}
     runs-on: ubuntu-24.04
     timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        lane:
+          - lint
+          - test
+          - runtime
     env:
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
       CI: "1"
       COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+      RUSTC_WRAPPER: "sccache"
+      SCCACHE_GHA_ENABLED: "true"
     steps:
       - name: Check out source
         uses: actions/checkout@v7
@@ -112,11 +121,37 @@ jobs:
           rustc -Vv
           cargo -V
 
-      - name: Verify Rust and the production runtime once
+      - name: Install persistent Rust compiler cache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: "v0.17.0"
+
+      - name: Lint Rust workspace
+        if: ${{ matrix.lane == 'lint' }}
         shell: bash
         run: |
           corepack enable
-          corepack pnpm verify:rust
+          corepack pnpm lint:rust
+
+      - name: Test Rust workspace
+        if: ${{ matrix.lane == 'test' }}
+        shell: bash
+        run: |
+          corepack enable
+          corepack pnpm test:rust
+
+      - name: Build and verify Rust products
+        if: ${{ matrix.lane == 'runtime' }}
+        shell: bash
+        run: |
+          corepack enable
+          corepack pnpm build:rust
+          node scripts/verify-products.mjs --scope rust
+
+      - name: Verify API production vertical
+        if: ${{ matrix.lane == 'runtime' }}
+        shell: bash
+        run: corepack pnpm verify:api-production-vertical
 
   verify:
     name: Canonical workspace verification

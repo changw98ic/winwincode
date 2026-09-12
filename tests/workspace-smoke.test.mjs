@@ -11,7 +11,7 @@ const workflow = readFileSync(workflowPath, 'utf8')
 const mainlineWorkflowPath = resolve(root, '.github/workflows/mainline.yml')
 const mainlineWorkflow = readFileSync(mainlineWorkflowPath, 'utf8')
 
-test('ordinary CI runs one exact-SHA aggregate over three independent lanes', () => {
+test('ordinary CI runs one exact-SHA aggregate over five independent lanes', () => {
   assert.match(mainlineWorkflow, /^name: Mainline verification$/mu)
   assert.match(mainlineWorkflow, /^  push:$/mu)
   assert.match(mainlineWorkflow, /^    branches:\n      - main$/mu)
@@ -19,10 +19,30 @@ test('ordinary CI runs one exact-SHA aggregate over three independent lanes', ()
   assert.match(mainlineWorkflow, /^  source:$/mu)
   assert.match(mainlineWorkflow, /^  typescript:$/mu)
   assert.match(mainlineWorkflow, /^  rust:$/mu)
+  assert.match(mainlineWorkflow, /^    name: rust-\$\{\{ matrix\.lane \}\}$/mu)
+  for (const lane of ['lint', 'test', 'runtime']) {
+    assert.match(mainlineWorkflow, new RegExp(`^          - ${lane}$`, 'mu'))
+  }
   assert.match(mainlineWorkflow, /^  verify:$/mu)
   assert.equal([...mainlineWorkflow.matchAll(/corepack pnpm verify:source$/gmu)].length, 1)
   assert.equal([...mainlineWorkflow.matchAll(/corepack pnpm verify:typescript$/gmu)].length, 1)
-  assert.equal([...mainlineWorkflow.matchAll(/corepack pnpm verify:rust$/gmu)].length, 1)
+  assert.doesNotMatch(mainlineWorkflow, /corepack pnpm verify:rust$/mu)
+  assert.equal([...mainlineWorkflow.matchAll(/corepack pnpm lint:rust$/gmu)].length, 1)
+  assert.equal([...mainlineWorkflow.matchAll(/corepack pnpm test:rust$/gmu)].length, 1)
+  assert.equal([...mainlineWorkflow.matchAll(/corepack pnpm build:rust$/gmu)].length, 1)
+  assert.equal(
+    [...mainlineWorkflow.matchAll(/corepack pnpm verify:api-production-vertical$/gmu)].length,
+    1,
+  )
+  assert.equal(
+    [...mainlineWorkflow.matchAll(
+      /mozilla-actions\/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba/gmu,
+    )].length,
+    1,
+  )
+  assert.equal([...mainlineWorkflow.matchAll(/^          version: "v0\.17\.0"$/gmu)].length, 1)
+  assert.equal([...mainlineWorkflow.matchAll(/^      RUSTC_WRAPPER: "sccache"$/gmu)].length, 1)
+  assert.equal([...mainlineWorkflow.matchAll(/^      SCCACHE_GHA_ENABLED: "true"$/gmu)].length, 1)
   assert.doesNotMatch(mainlineWorkflow, /corepack pnpm verify$/mu)
   assert.ok(mainlineWorkflow.includes('github.event.pull_request.number || github.ref'))
   assert.match(mainlineWorkflow, /^      CARGO_PROFILE_DEV_DEBUG: "0"$/mu)
