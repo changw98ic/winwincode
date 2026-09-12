@@ -125,7 +125,7 @@
     },
     {
       "path": "crates/winwincode-delivery/src/domain/candidate.rs",
-      "sha256": "81d3d714fbb9d5e85675a5f05218c8fa15d56731d667aaf1ac6e723d3f8bb0d5",
+      "sha256": "fcb0cae7e5f992f1f85afa42322e7e63366c363106f4bc6f04ef1a292c2d905d",
       "facts": [
         "FrozenDeliveryCandidate",
         "validated Git snapshot"
