@@ -27,6 +27,7 @@
     "start": "cargo run -p winwincode-server --bin winwincode-server --locked",
     "version:set": "node scripts/set-product-version.mjs",
     "release:artifact": "node scripts/run-release-artifact-gate.mjs",
+    "release:core-worker": "node scripts/stage-community-core-worker-runtime.mjs",
     "verify:release-artifacts": "node scripts/verify-release-artifacts.mjs",
     "verify:release-artifact-security": "node scripts/verify-release-artifact-security.mjs",
     "verify:api-production-vertical": "node scripts/run-api-production-vertical.mjs",

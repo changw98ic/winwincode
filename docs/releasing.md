@@ -46,13 +46,13 @@ Rust 文件名固定为 `winwincode-server`、`winwincode-worker` 和 `winwincod
 - `aarch64-unknown-linux-gnu`
 - `x86_64-unknown-linux-gnu`
 
-只下载四个产品 artifact，并把每份内容直接放入同名 target 目录：
+下载四个产品 artifact、各自的安全报告，以及从已验证产品产物中裁出的 Worker-only Community Core 输入：
 
 ```bash
 set -euo pipefail
 RUN_ID=RUN_ID
-rm -rf release-artifacts release-security-reports
-mkdir -p release-artifacts release-security-reports
+rm -rf release-artifacts release-security-reports community-core-worker
+mkdir -p release-artifacts release-security-reports community-core-worker
 for TARGET in \
   aarch64-apple-darwin \
   x86_64-apple-darwin \
@@ -61,10 +61,11 @@ for TARGET in \
 do
   gh run download "$RUN_ID" --name "$TARGET" --dir "release-artifacts/$TARGET"
   gh run download "$RUN_ID" --name "release-security-$TARGET" --dir "release-security-reports/$TARGET"
+  gh run download "$RUN_ID" --name "community-core-worker-$TARGET" --dir "community-core-worker/$TARGET"
 done
 ```
 
-`release-artifacts/` 的一级目录因此精确为四个 Rust target，可直接交给汇总命令。`release-security-reports/` 与产品 evidence root 分离，不会向待封存的产品目录加入额外文件。
+`release-artifacts/` 的一级目录因此精确为四个 Rust target，可直接交给汇总命令。`release-security-reports/` 与产品 evidence root 分离，不会向待封存的产品目录加入额外文件。`community-core-worker/` 每个平台只含 Worker、内部 helper、helper 签名清单和三份法律文件，不含 Server 或 Client。
 
 ## 4. 汇总与运行证据
 

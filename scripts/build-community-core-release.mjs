@@ -72,6 +72,16 @@ export function validateCommunityCoreReleaseContract(contract) {
     if (!isRecord(target.coreLockManifest) || typeof target.coreLockManifest.schemaPath !== 'string') {
       errors.push('targetState.coreLockManifest.schemaPath must name a file')
     }
+    const signature = target.releaseManifest?.signature
+    if (!isRecord(signature) || signature.algorithm !== 'Ed25519') {
+      errors.push('targetState.releaseManifest.signature.algorithm must be Ed25519')
+    }
+    if (!isRecord(signature) || !safeRepositoryPath(signature.publicKeyFile)) {
+      errors.push('targetState.releaseManifest.signature.publicKeyFile must be repository-relative')
+    }
+    if (!isRecord(signature) || !/^[0-9a-f]{64}$/u.test(signature.publicKeySha256 ?? '')) {
+      errors.push('targetState.releaseManifest.signature.publicKeySha256 must be SHA-256')
+    }
   }
   if (isRecord(current) && isRecord(target) && namedEntries(current.rustPackages?.communityOnlyAdapters)) {
     const released = new Set((target.consumableRustCrates ?? []).map(entry => entry?.name))
@@ -275,6 +285,7 @@ function selectCommunityCoreSource(root, contract, trackedPaths) {
   }
   addSelection(selection, contract.currentState.contracts.generator, 'contract-generator', inventory)
   addSelection(selection, contract.targetState.coreLockManifest.schemaPath, 'core-lock-schema', inventory)
+  addSelection(selection, contract.targetState.releaseManifest.signature.publicKeyFile, 'release-key', inventory)
   for (const path of LEGAL_FILES) addSelection(selection, path, 'legal', inventory)
   return selection
 }

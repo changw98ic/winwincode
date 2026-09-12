@@ -173,6 +173,26 @@ jobs:
           path: release-artifacts/${{ matrix.target }}/
           if-no-files-found: error
 
+      - name: Stage Community Core Worker runtime
+        if: ${{ steps.security.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          corepack pnpm release:core-worker -- \
+            --artifact-root "release-artifacts/${{ matrix.target }}" \
+            --source-commit "${SOURCE_COMMIT}" \
+            --source-date-epoch "$(git show -s --format=%ct "${SOURCE_COMMIT}")" \
+            --target "${{ matrix.target }}" \
+            --output "community-core-worker/${{ matrix.target }}"
+
+      - name: Upload Community Core Worker runtime
+        if: ${{ steps.security.outcome == 'success' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: community-core-worker-${{ matrix.target }}
+          path: community-core-worker/${{ matrix.target }}/
+          if-no-files-found: error
+
       - name: Enforce release artifact security
         if: ${{ always() && steps.security.outcome != 'skipped' }}
         shell: bash

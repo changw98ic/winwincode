@@ -54,6 +54,13 @@ function contract(overrides = {}) {
       coreLockManifest: {
         schemaPath: 'schema/core-lock.schema.json',
       },
+      releaseManifest: {
+        signature: {
+          algorithm: 'Ed25519',
+          publicKeyFile: 'release-key.pem',
+          publicKeySha256: 'a'.repeat(64),
+        },
+      },
       forbiddenCoreContent: {
         rustCrates: ['winwincode-server', 'winwincode-enterprise', 'winwincode-observability-sqlite'],
         npmPackages: ['@winwincode/client'],
@@ -79,6 +86,7 @@ async function createFixture(t) {
   await write(root, 'schema/v1/openapi.generated.json', '{}\n')
   await write(root, 'schema/v1/domain.samples.json', '[]\n')
   await write(root, 'schema/core-lock.schema.json', '{}\n')
+  await write(root, 'release-key.pem', 'fixture public key\n')
   await write(root, 'scripts/generate-contracts.mjs', 'export {}\n')
   await write(root, 'LICENSE', 'Apache-2.0\n')
   await write(root, 'NOTICE', 'fixture\n')

@@ -214,6 +214,7 @@
       "packages/contracts/package.json",
       "packages/strongflow/package.json",
       "pnpm-workspace.yaml",
+      "release-keys/community-core-ed25519-public.pem",
       "schema/winwincode/core-lock.schema.json",
       "schema/winwincode/v1/client-control.schema.json",
       "schema/winwincode/v1/control-plane-events.schema.json",
@@ -444,6 +445,9 @@
       "signature": {
         "fileName": "community-core-release-manifest.json.sig",
         "algorithm": "Ed25519",
+        "publicKeyFile": "release-keys/community-core-ed25519-public.pem",
+        "publicKeySha256": "a5ae437f13870666259a443e50cb771f0fb12dbf0b911c842f56cac704ddca62",
+        "privateKeySecret": "WINWINCODE_CORE_RELEASE_PRIVATE_KEY_PEM",
         "trustAnchor": "The consumer repository pins the approved public-key SHA-256 fingerprint outside the downloaded release."
       }
     },

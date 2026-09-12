@@ -38,6 +38,7 @@ import {
   helperReleaseVerificationBaseEnvironment,
   machoUuidForFile,
   releaseChecksums,
+  stageCommunityCoreWorkerRuntime,
   targetConfiguration,
   verifyReleaseArtifactDirectory,
 } from '../scripts/release-artifact-contract.mjs'
@@ -561,6 +562,43 @@ test('per-target evidence binds source, protocols, legal files and reproducible 
       expectedSourceDateEpoch: sourceDateEpoch,
     }),
     error => error instanceof ReleaseArtifactError && error.code === 'ARTIFACT_MISMATCH',
+  )
+})
+
+test('Community Core worker runtime excludes Server and Client product files', t => {
+  const evidenceRoot = mkdtempSync(join(tmpdir(), 'winwincode-core-worker-'))
+  t.after(() => rmSync(evidenceRoot, { recursive: true, force: true }))
+  const { artifactRoot } = createArtifactFixture(evidenceRoot, 'x86_64-unknown-linux-gnu')
+  const outputRoot = join(evidenceRoot, 'core-worker-runtime')
+  const result = stageCommunityCoreWorkerRuntime({
+    root,
+    artifactRoot,
+    expectedCommit: sourceCommit,
+    expectedTarget: 'x86_64-unknown-linux-gnu',
+    expectedSourceDateEpoch: sourceDateEpoch,
+    outputRoot,
+  })
+  assert.equal(result.version, workspaceVersion)
+  assert.deepEqual(result.files.map(entry => entry.path), [
+    'bin/winwincode-worker',
+    'bin/winwincode-kernel-helper',
+    `bin/${HELPER_RELEASE_MANIFEST_NAME}`,
+    'LICENSE',
+    'NOTICE',
+    'THIRD_PARTY_NOTICES.md',
+  ])
+  assert.equal(existsSync(join(outputRoot, 'bin/winwincode-server')), false)
+  assert.equal(existsSync(join(outputRoot, 'client')), false)
+  assert.throws(
+    () => stageCommunityCoreWorkerRuntime({
+      root,
+      artifactRoot,
+      expectedCommit: sourceCommit,
+      expectedTarget: 'x86_64-unknown-linux-gnu',
+      expectedSourceDateEpoch: sourceDateEpoch,
+      outputRoot,
+    }),
+    error => error instanceof ReleaseArtifactError && error.code === 'OUTPUT_EXISTS',
   )
 })
 

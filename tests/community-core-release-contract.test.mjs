@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { createHash, createPublicKey } from 'node:crypto'
 import { existsSync, readFileSync } from 'node:fs'
 import test from 'node:test'
 import { resolve } from 'node:path'
@@ -152,6 +153,18 @@ test('Community core contract has one exact cross-repository package and protoco
   assert.equal(contract.targetState.workerRuntimeBundles.clientStaticFilesIncluded, false)
   assert.equal(contract.targetState.coreLockManifest.schema, undefined)
   assert.equal(contract.targetState.coreLockManifest.schemaId, schema.$id)
+})
+
+test('Community core release pins its Ed25519 trust anchor', () => {
+  const signature = contract.targetState.releaseManifest.signature
+  const publicKeyBytes = readFileSync(resolve(root, signature.publicKeyFile))
+  const publicKey = createPublicKey(publicKeyBytes)
+  assert.equal(publicKey.asymmetricKeyType, 'ed25519')
+  assert.equal(
+    createHash('sha256').update(publicKey.export({ type: 'spki', format: 'der' })).digest('hex'),
+    signature.publicKeySha256,
+  )
+  assert.equal(signature.privateKeySecret, 'WINWINCODE_CORE_RELEASE_PRIVATE_KEY_PEM')
 })
 
 test('every audited current source path exists in the repository', () => {

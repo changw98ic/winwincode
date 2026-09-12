@@ -1,6 +1,9 @@
 import { createHash, createPublicKey, verify } from 'node:crypto'
 import {
+  chmodSync,
+  copyFileSync,
   existsSync,
+  mkdirSync,
   readFileSync,
   readdirSync,
   statSync,
@@ -835,6 +838,45 @@ export function verifyReleaseArtifactDirectory({
     'artifact directory contains an unlisted or duplicate file',
   )
   return manifest
+}
+
+export function stageCommunityCoreWorkerRuntime({
+  root,
+  artifactRoot,
+  expectedCommit,
+  expectedTarget,
+  expectedSourceDateEpoch,
+  outputRoot,
+}) {
+  const manifest = verifyReleaseArtifactDirectory({
+    root,
+    artifactRoot,
+    expectedCommit,
+    expectedTarget,
+    expectedSourceDateEpoch,
+  })
+  const destinationRoot = resolve(outputRoot)
+  if (existsSync(destinationRoot)) {
+    fail('OUTPUT_EXISTS', `worker runtime output already exists: ${destinationRoot}`)
+  }
+  mkdirSync(resolve(destinationRoot, 'bin'), { recursive: true })
+  const files = [
+    ['bin/winwincode-worker', 'bin/winwincode-worker', 0o755],
+    ['bin/winwincode-kernel-helper', 'bin/winwincode-kernel-helper', 0o755],
+    [`bin/${HELPER_RELEASE_MANIFEST_NAME}`, `bin/${HELPER_RELEASE_MANIFEST_NAME}`, 0o644],
+    ...LEGAL_FILES.map(name => [`legal/${name}`, name, 0o644]),
+  ]
+  for (const [source, destination, mode] of files) {
+    const path = resolve(destinationRoot, destination)
+    copyFileSync(resolve(artifactRoot, source), path)
+    chmodSync(path, mode)
+  }
+  return Object.freeze({
+    target: expectedTarget,
+    version: manifest.source.version,
+    sourceCommit: manifest.source.commit,
+    files: Object.freeze(files.map(([, path]) => descriptorForFile(destinationRoot, resolve(destinationRoot, path)))),
+  })
 }
 
 export function createReleaseReport({ root, evidenceRoot, expectedCommit, sourceDateEpoch }) {
