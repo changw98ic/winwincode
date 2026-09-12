@@ -36,8 +36,8 @@
 //!    children (`waitpid`-style) and moves rows to their terminal states
 //!    (`exited` with the exit code, or `crashed` for a nonzero/signal
 //!    death); [`SessionSupervisor::stop`] sends the graceful signal first
-//!    (SIGTERM via the platform shell — this crate denies `unsafe`, so
-//!    there is no direct `libc` call) and escalates to a hard kill after
+//!    (SIGTERM via `/bin/kill` — this crate denies `unsafe`, so there is no
+//!    direct `libc` call) and escalates to a hard kill after
 //!    [`SupervisorConfig::stop_grace_period`].
 //! 5. **Recovery**: after a Device Client restart the children map is
 //!    empty, so [`SessionSupervisor::reconcile`] probes every registry row
@@ -1428,7 +1428,7 @@ enum StopOutcome {
 
 /// Stops a worker this supervisor process does not own (post-restart row):
 /// the pid is re-confirmed against its boot identity, then the terminate
-/// (or kill) signal goes out via the platform shell — this crate denies
+/// (or kill) signal goes out via the platform executable — this crate denies
 /// `unsafe`, so there is no direct `kill(2)` call. A signal to a reused pid
 /// is prevented by the identity probe immediately before it; the residual
 /// milliseconds-wide window is the platform's own race, not a registry one.
@@ -1475,14 +1475,14 @@ fn stop_registered_process(
     }
 }
 
-/// Sends one signal through `/bin/sh`'s `kill` builtin (portable across the
-/// supported darwin/linux targets without `unsafe`). `false` means the
+/// Sends one signal through `/bin/kill` (present on every supported
+/// Darwin/Linux target without `unsafe`). `false` means the
 /// signal could not be delivered — usually a process that is already gone.
 #[cfg(unix)]
 fn signal_process(pid: u32, signal: &str) -> bool {
-    Command::new("/bin/sh")
-        .arg("-c")
-        .arg(format!("kill -{signal} -- {pid}"))
+    Command::new("/bin/kill")
+        .arg(format!("-{signal}"))
+        .arg(pid.to_string())
         .status()
         .is_ok_and(|status| status.success())
 }
